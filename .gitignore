@@ -1,0 +1,8 @@
+node_modules/
+package.json
+dist/
+tmp/
+_build.json
+_build_entry.tsx
+*.AppImage
+.vscode/

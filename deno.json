@@ -1,0 +1,24 @@
+{
+  "title": "AIO Counter",
+  "unstable": ["kv"],
+  "compilerOptions": {
+    "jsx": "react-jsx",
+    "jsxImportSource": "react",
+    "jsxImportSourceTypes": "@types/react"
+  },
+  "imports": {
+    "@types/react": "npm:@types/react@^18",
+    "react": "npm:react@^18",
+    "react-dom": "npm:react-dom@^18",
+    "aio": "./dep/aio/mod.ts",
+    "esbuild": "npm:esbuild@^0.24",
+    "immer": "npm:immer@^10",
+    "@std/path": "jsr:@std/path@^1"
+  },
+  "tasks": {
+    "test": "deno test -A --unstable-kv dep/aio/tests/",
+    "dev": "deno run -A src/app.ts --debug",
+    "compile": "deno run -A dep/aio/src/build.ts --compile",
+    "compile:electron": "deno run -A dep/aio/src/build.ts --compile --electron"
+  }
+}
