@@ -4,9 +4,9 @@ import type { AppState } from './state.ts'
 import type { Action } from './actions.ts'
 import type { AioApp } from 'aio'
 
-export function execute(effect: Effect, _app: AioApp<AppState, Action>): void {
+export function execute(_app: AioApp<AppState, Action>, effect: Effect): void {
   switch (effect.type) {
-    case E.LOG:
+    case E.Log:
       console.log(`[effect] ${effect.payload.message}`)
       break
   }

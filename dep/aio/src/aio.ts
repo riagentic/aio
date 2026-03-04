@@ -1,8 +1,21 @@
 // Core runtime — boots KV, server, electron, wires everything together
 import { skv, type SkvInstance } from './skv.ts'
 import { createServer, type ServerHandle } from './server.ts'
-import { launchElectron } from './electron.ts'
+import { launchElectron, launchElectronClient, type AioMeta } from './electron.ts'
 import { join, resolve } from '@std/path'
+import { deepMerge } from './deep-merge.ts'
+import { createDispatch, type AioError } from './dispatch.ts'
+import { createTT, record, undo, redo, travelTo, pause, resume, stateAt, toBroadcast, type TTState } from './time-travel.ts'
+import { isScheduleEffect, createScheduleManager, type ScheduleEffect, type ScheduleDef } from './schedule.ts'
+import { openDb, loadTables, syncTables, type TableDef, type AioDB } from './sql.ts'
+
+/** Framework version — printed by --version, checked in tests */
+export const VERSION = '0.2.0'
+
+/** User identity — resolved from static token map */
+export type AioUser = { id: string; role: string }
+export type { AioError } from './dispatch.ts'
+
 
 // Electron + browser window options
 export type UiConfig = {
@@ -11,30 +24,54 @@ export type UiConfig = {
   title?: string       // default: 'AIO App'
   width?: number       // default: 800
   height?: number      // default: 600
+  showStatus?: boolean // default: true — show reconnection indicator
 }
 
 // Everything aio.run() needs to wire your app
 export type AioConfig<S, A, E> = {
-  reduce: (state: S, action: A) => { state: S; effects: E[] }
-  execute: (effect: E, app: AioApp<S, A>) => void
+  reduce: (state: S, action: A) => { state: S; effects: (E | ScheduleEffect)[] }
+  execute: (app: AioApp<S, A>, effect: E) => void
   persist?: boolean              // default: true — auto-opens Deno.Kv
-  getDBState?: (state: S) => unknown   // filter what gets persisted (default: full state)
-  getUIState?: (state: S) => unknown   // filter what gets sent to UI (default: full state)
+  getDBState?: (state: S) => Partial<S>   // filter what gets persisted (default: full state)
+  getUIState?: (state: S, user?: AioUser) => unknown   // filter what gets sent to UI (default: full state)
+  deltaThreshold?: number          // 0-1: ratio of changed keys that triggers full state broadcast (default: 0.5)
+  maxConnections?: number          // max concurrent WebSocket clients (default: 100)
+  beforeReduce?: (action: A, state: S) => A | null  // intercept actions before reduce — return null to drop
   persistKey?: string            // KV key (default: "state")
+  persistDebounce?: number       // ms between KV writes (default: 100)
+  users?: Record<string, AioUser>  // static token map — token is key, user is value
   ui?: UiConfig
   port?: number                  // default: 8000
   baseDir?: string               // default: ./src
+  headless?: boolean             // default: false — skip browser/electron, server-only (for CLI apps)
+  schedules?: ScheduleDef[]      // static scheduled effects — started on boot
+  db?: Record<string, TableDef>  // SQLite table definitions — arrays auto-sync
+  onRestore?:    (state: S) => S       // transform state after restore, before server starts
+  // Lifecycle hooks — observe-only, all optional, error-guarded
+  onAction?:     (action: A, state: S, user?: AioUser) => void
+  onEffect?:     (effect: E, user?: AioUser) => void
+  onConnect?:    (user?: AioUser) => void
+  onDisconnect?: (user?: AioUser) => void
+  onStart?:      (app: AioApp<S, A>) => void
+  onStop?:       () => void
+  onError?:      (error: AioError) => void
 }
 
 // Handle returned by aio.run() — dispatch actions, read state, or shut down
-export type AioApp<S, A> = {
+export type AioApp<S = unknown, A = unknown> = {
   dispatch: (action: A) => void
   getState: () => S
+  snapshot?: () => string          // server-only (undefined in standalone)
+  loadSnapshot?: (json: string) => void  // server-only (undefined in standalone)
+  db?: AioDB     // SQLite — Level 2 ORM + Level 3 raw SQL (undefined in standalone)
   close: () => Promise<void>
+  mode?: string  // 'standalone' in Android WebView builds — branch effects accordingly
+  port?: number  // server port — available after aio.run(), useful for connectCli()
 }
 
 // ── Logger ──────────────────────────────────────────────────────────
 
+/** Formats current time as HH:MM:SS for log prefix */
 function ts(): string {
   const d = new Date()
   return `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}:${String(d.getSeconds()).padStart(2,'0')}`
@@ -51,8 +88,8 @@ const log = {
 
 export type Lint = { ok: string[]; warn: string[]; hint: string[]; fail: string[] }
 
-// Checks state, config, App.tsx existence, and common mistakes
-export async function lint(state: unknown, config: Record<string, unknown>, baseDir: string, prod = false): Promise<Lint> {
+/** Checks state, config, App.tsx existence, and common mistakes */
+export async function lint(state: unknown, config: { reduce?: unknown; execute?: unknown }, baseDir: string, prod = false, headless = false): Promise<Lint> {
   const r: Lint = { ok: [], warn: [], hint: [], fail: [] }
 
   if (state == null) r.fail.push('initial state is null/undefined')
@@ -61,17 +98,27 @@ export async function lint(state: unknown, config: Record<string, unknown>, base
     const keys = Object.keys(state as Record<string, unknown>)
     r.ok.push(`state (${keys.length} keys)`)
     const reserved = keys.filter(k => k === '$p' || k === '$d')
-    if (reserved.length) r.warn.push(`state has reserved key(s): ${reserved.join(', ')} — these are used internally for delta patches and will cause data corruption`)
+    if (reserved.length) r.warn.push(`state has reserved key(s): ${reserved.join(', ')} — rename them (e.g. $p → _patch, $d → _delete). These are used internally for delta patches and will cause data corruption.`)
+    // Check JSON-serializability — Date, Map, Set, functions etc. break persistence/broadcast
+    try {
+      const json = JSON.stringify(state)
+      const after = JSON.stringify(JSON.parse(json))
+      if (json !== after) r.warn.push('state loses data on JSON round-trip — use primitives + plain objects/arrays only (no Date, Map, Set, functions, BigInt)')
+    } catch (e) {
+      r.warn.push(`state is not JSON-serializable: ${e}`)
+    }
   }
 
   if (typeof config.reduce !== 'function') r.fail.push('config.reduce must be a function: (state, action) => { state, effects }')
   else r.ok.push('reduce')
 
-  if (typeof config.execute !== 'function') r.fail.push('config.execute must be a function: (effect, app) => void')
+  if (typeof config.execute !== 'function') r.fail.push('config.execute must be a function: (app, effect) => void')
   else r.ok.push('execute')
 
-  // Prod mode: App.tsx not needed (pre-built into dist/app.js)
-  if (prod) {
+  // Prod mode or headless: App.tsx not needed
+  if (headless) {
+    r.ok.push('headless (no App.tsx)')
+  } else if (prod) {
     r.ok.push('prod')
   } else {
     const appFile = join(baseDir, 'App.tsx')
@@ -89,10 +136,14 @@ export async function lint(state: unknown, config: Record<string, unknown>, base
         r.hint.push('App.tsx has `import React` — not needed, JSX transforms are automatic')
       }
     } catch {
-      r.fail.push('App.tsx not found in ' + baseDir)
+      r.fail.push(`App.tsx not found at ${appFile}`)
       r.hint.push('  create it: export default function App() { return <div>Hello</div> }')
     }
   }
+
+  // Specifiers available in the browser import map — everything else silently fails
+  // Keep in sync with IMPORT_MAP in server.ts
+  const BROWSER_IMPORTS = new Set(['react', 'react-dom/client', 'react/jsx-runtime', 'aio'])
 
   try {
     for await (const entry of Deno.readDir(baseDir)) {
@@ -102,15 +153,42 @@ export async function lint(state: unknown, config: Record<string, unknown>, base
       if (content.includes("from '../dep/aio/") || content.includes("from \"../dep/aio/")) {
         r.hint.push(`${entry.name}: import from 'aio' instead of '../dep/aio/...'`)
       }
-      // Check execute.ts for swapped params — first param named 'app' suggests (app, effect) instead of (effect, app)
+      // Check execute.ts for swapped params — first param named 'effect' suggests old (effect, app) order
       if (entry.name === 'execute.ts') {
         const match = content.match(/function\s+execute\s*\(\s*(\w+)/)
-        if (match && /^app$/i.test(match[1])) {
-          r.hint.push(`execute.ts: first param is "${match[1]}" — signature is execute(effect, app), reads as "execute this effect on this app"`)
+        if (match && /^effect$/i.test(match[1])) {
+          r.hint.push(`execute.ts: first param is "${match[1]}" — signature is execute(app, effect), matching reduce(state, action)`)
+        }
+      }
+      // Check .tsx files for imports that won't resolve in the browser
+      // Dev mode transpiles but doesn't bundle — only import-mapped specifiers work
+      if (!prod && entry.name.endsWith('.tsx')) {
+        // Bare side-effect imports: import 'foo'
+        for (const m of content.matchAll(/(?:^|\n)\s*import\s+['"]([^'"]+)['"]/g)) {
+          const spec = m[1]
+          if (spec.startsWith('.') || spec.startsWith('/') || BROWSER_IMPORTS.has(spec)) continue
+          r.warn.push(`${entry.name}: import "${spec}" won't work in browser — dev mode transpiles but doesn't bundle. Move this import to a server-side .ts file, or use the npm package via an effect.`)
+        }
+        // Named/default imports and re-exports: import { x } from 'foo', export { x } from 'foo'
+        for (const m of content.matchAll(/(?:import|export)\s+.*?\s+from\s+['"]([^'"]+)['"]/g)) {
+          const spec = m[1]
+          if (spec.startsWith('.') || spec.startsWith('/') || BROWSER_IMPORTS.has(spec)) continue
+          // import type is erased by TS — never reaches the browser
+          if (m[0].startsWith('import type ') || m[0].startsWith('import type{')) continue
+          r.warn.push(`${entry.name}: import "${spec}" won't work in browser — dev mode transpiles but doesn't bundle. Move this import to a server-side .ts file, or use the npm package via an effect.`)
         }
       }
     }
   } catch { /* baseDir doesn't exist — already caught above */ }
+
+  // Check esbuild — needed for dev mode TSX transpilation
+  if (!prod) {
+    try {
+      await Deno.stat(join(Deno.cwd(), 'node_modules', 'esbuild'))
+    } catch {
+      r.warn.push('esbuild not installed — dev mode needs it for TSX transpilation')
+    }
+  }
 
   // Check electron install scripts — Deno requires manual approval
   if (!prod) {
@@ -129,7 +207,7 @@ export async function lint(state: unknown, config: Record<string, unknown>, base
   return r
 }
 
-// Formats lint results — compact when clean, detailed when issues found
+/** Formats lint results — compact when clean, detailed when issues found */
 function printLint(r: Lint): void {
   const hasIssues = r.warn.length + r.hint.length + r.fail.length > 0
   if (!hasIssues) {
@@ -148,10 +226,13 @@ function printLint(r: Lint): void {
 
 // ── CLI ─────────────────────────────────────────────────────────────
 
-// Reads CLI flags — overrides config values. Accepts args for testing.
-export function parseCli(args: readonly string[] = Deno.args): { port?: number; persist?: boolean; electron?: boolean; keepAlive?: boolean; title?: string; debug: boolean; prod?: boolean } {
-  const r: { port?: number; persist?: boolean; electron?: boolean; keepAlive?: boolean; title?: string; debug: boolean; prod?: boolean } = { debug: false }
-  const known = ['--port=', '--no-persist', '--no-electron', '--keep-alive', '--title=', '--debug', '--prod']
+/** CLI flags — overrides config values. Accepts args for testing. */
+export type CliFlags = { port?: number; persist?: boolean; electron?: boolean; keepAlive?: boolean; title?: string; verbose: boolean; prod?: boolean; version?: boolean; expose?: boolean; help?: boolean; url?: string; width?: number; height?: number; headless?: boolean }
+
+/** Parses CLI flags from Deno.args (or custom array for testing) */
+export function parseCli(args: readonly string[] = Deno.args): CliFlags {
+  const r: CliFlags = { verbose: false }
+  const known = ['--port=', '--no-persist', '--no-electron', '--keep-alive', '--title=', '--verbose', '--prod', '--version', '--expose', '--help', '--url', '--width=', '--height=', '--headless']
   for (const arg of args) {
     if (arg.startsWith('--port=')) {
       const n = Number(arg.slice(7))
@@ -162,38 +243,50 @@ export function parseCli(args: readonly string[] = Deno.args): { port?: number; 
     else if (arg === '--no-electron') r.electron = false
     else if (arg === '--keep-alive') r.keepAlive = true
     else if (arg.startsWith('--title=')) r.title = arg.slice(8)
-    else if (arg === '--debug') r.debug = true
+    else if (arg === '--verbose') r.verbose = true
     else if (arg === '--prod') r.prod = true
-    else if (arg.startsWith('--') && !known.some(k => arg.startsWith(k) || arg === k)) {
-      log.warn(`unknown flag: ${arg}`)
+    else if (arg === '--version') r.version = true
+    else if (arg === '--expose') r.expose = true
+    else if (arg === '--help') r.help = true
+    else if (arg === '--url') r.url = ''
+    else if (arg.startsWith('--url=')) r.url = arg.slice(6)
+    else if (arg === '--headless') r.headless = true
+    else if (arg.startsWith('--width=')) {
+      const n = Number(arg.slice(8))
+      if (Number.isInteger(n) && n > 0) r.width = n
+    }
+    else if (arg.startsWith('--height=')) {
+      const n = Number(arg.slice(9))
+      if (Number.isInteger(n) && n > 0) r.height = n
+    }
+    else if (arg.startsWith('--') && !known.some(k => k.endsWith('=') ? arg.startsWith(k) : arg === k)) {
+      log.warn(`unknown flag ignored: ${arg} — run with --help for usage`)
     }
   }
   return r
 }
 
-// ── Deep merge — restores persisted state while preserving new schema fields ──
+/** Prints CLI usage and exits */
+function printHelp(): void {
+  console.log(`aio ${VERSION} — all-in-one framework
 
-// Uses `initial` as the structural template: any key in initial is guaranteed to exist
-// in the result. Persisted values override leaf values but can't remove keys or change
-// object→primitive. Arrays are replaced wholesale (not merged element-by-element).
-export function deepMerge(initial: Record<string, unknown>, persisted: Record<string, unknown>): Record<string, unknown> {
-  const result: Record<string, unknown> = { ...initial }
-  for (const key of Object.keys(persisted)) {
-    if (!(key in initial)) continue  // drop keys removed from schema
-    const iv = initial[key]
-    const pv = persisted[key]
-    if (isPlainObject(iv) && isPlainObject(pv)) {
-      result[key] = deepMerge(iv as Record<string, unknown>, pv as Record<string, unknown>)
-    } else if (typeof iv === typeof pv) {
-      result[key] = pv  // same type → use persisted
-    }
-    // type mismatch → keep initial (schema wins)
-  }
-  return result
-}
+Usage: deno run -A src/app.ts [flags]
 
-function isPlainObject(v: unknown): boolean {
-  return v !== null && typeof v === 'object' && !Array.isArray(v)
+Flags:
+  --port=N         Server port (default: 8000)
+  --no-persist     Disable Deno.Kv persistence
+  --no-electron    Skip Electron, open browser
+  --keep-alive     Server survives Electron close
+  --title=X        Override window/page title
+  --verbose        Verbose logging (actions, state, effects, WS, HTTP)
+  --prod           Serve pre-built dist/app.js
+  --expose         Bind 0.0.0.0 + generate auth token for LAN access
+  --headless       Server-only — no browser or Electron (for CLI apps)
+  --url[=URL]      Connect to remote aio server (Electron thin client)
+  --width=N        Initial window width (default: 800)
+  --height=N       Initial window height (default: 600)
+  --version        Print version and exit
+  --help           Show this help`)
 }
 
 // ── KV path resolution ──────────────────────────────────────────────
@@ -201,39 +294,80 @@ function isPlainObject(v: unknown): boolean {
 // When inside an AppImage (or any compiled binary without a writable origin),
 // Deno.openKv() default path lives in the read-only squashfs mount → fails.
 // Use an explicit path in XDG_DATA_HOME / ~/.local/share/<app>/data.kv instead.
-function resolveKvPath(title: string): string | undefined {
-  const appImage = Deno.env.get('APPIMAGE')
-  // Also detect compiled binaries: import.meta.main + no readable origin
-  const compiled = !import.meta.url.startsWith('file:///')
-  if (!appImage && !compiled) return undefined  // dev mode — let Deno pick
+/** True when running inside a compiled binary (AppImage, deno compile) */
+function isCompiled(): boolean {
+  return !!Deno.env.get('APPIMAGE') || !import.meta.url.startsWith('file:///')
+}
 
+/** Resolves persistent data dir for compiled binaries — ~/.local/share/<slug>/ */
+function resolveDataDir(title: string): string {
   const slug = title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'aio-app'
   const dataHome = Deno.env.get('XDG_DATA_HOME') ?? join(homedir(), '.local', 'share')
   const dir = join(dataHome, slug)
   Deno.mkdirSync(dir, { recursive: true })
-  return join(dir, 'data.kv')
+  return dir
 }
 
+/** Resolves KV path for compiled binaries (AppImage, deno compile) */
+function resolveKvPath(title: string): string | undefined {
+  if (!isCompiled()) return undefined  // dev mode — let Deno pick
+  return join(resolveDataDir(title), 'data.kv')
+}
+
+/** Resolves SQLite path — parallel to KV. Compiled: ~/.local/share/<slug>/data.db, dev: ./data.db */
+function resolveDbPath(title: string): string {
+  if (!isCompiled()) return join(Deno.cwd(), 'data.db')
+  return join(resolveDataDir(title), 'data.db')
+}
+
+/** Returns user home directory — $HOME, $USERPROFILE, or /tmp fallback */
 function homedir(): string {
   return Deno.env.get('HOME') ?? Deno.env.get('USERPROFILE') ?? '/tmp'
 }
 
 // ── Runtime ─────────────────────────────────────────────────────────
 
-// Single entry point — call once, runs forever. CLI args override config.
+let _running = false
+let _dispatchUser: AioUser | undefined = undefined
+let _electronProc: Deno.ChildProcess | null = null
+
+/** Single entry point — boots KV, server, electron, wires everything. CLI args override config. */
 async function run<S, A, E>(initialState: S, config: AioConfig<S, A, E>): Promise<AioApp<S, A>> {
+  if (_running) throw new Error('aio.run() already called — one instance per process')
+  _running = true
+  try { return await _run(initialState, config) } catch (e) { _running = false; throw e }
+}
+
+async function _run<S, A, E>(initialState: S, config: AioConfig<S, A, E>): Promise<AioApp<S, A>> {
   const cli = parseCli()
+  if (cli.help) { printHelp(); Deno.exit(0) }
+  if (cli.version) { console.log(`aio ${VERSION}`); Deno.exit(0) }
+
+  // --url: thin client mode — launches connect-page electron that fetches meta from remote
+  if (cli.url !== undefined) {
+    if (cli.url) log.info(`connecting to ${cli.url}`)
+    else log.info('launching connect page')
+    const proc = await launchElectronClient(log, cli.url || undefined)
+    if (proc) {
+      const status = await proc.status
+      log.info(`electron closed (code ${status.code ?? 0})`)
+    }
+    _running = false
+    Deno.exit(0)
+  }
+
   const baseDir = resolve(config.baseDir ?? join(Deno.cwd(), 'src'))
 
-  // --debug: enable verbose logging
-  if (cli.debug) log.debug = (msg: string) => console.log(`[${ts()}][DEBUG] ${msg}`)
+  // --verbose: enable verbose logging
+  const VERBOSE = cli.verbose
+  if (VERBOSE) log.debug = (msg: string) => console.log(`[${ts()}][DEBUG] ${msg}`)
 
-  // Prod mode: explicit --prod flag or auto-detect dist/app.js
-  // Check cwd first (normal run), then module root (compiled binary — embedded files live there)
+  // Prod mode: explicit --prod flag or auto-detect in compiled binaries only
+  // Running from source with dist/ lying around should NOT trigger prod
   const moduleRoot = import.meta.dirname ? resolve(import.meta.dirname, '..', '..', '..') : null
   let distDir = resolve(join(Deno.cwd(), 'dist'))
   let prod = cli.prod ?? false
-  if (!prod) {
+  if (!prod && isCompiled()) {
     const candidates = [distDir, ...(moduleRoot ? [resolve(join(moduleRoot, 'dist'))] : [])]
     for (const dir of candidates) {
       try {
@@ -246,12 +380,13 @@ async function run<S, A, E>(initialState: S, config: AioConfig<S, A, E>): Promis
     }
   }
 
-  const result = await lint(initialState, config as unknown as Record<string, unknown>, baseDir, prod)
+  const headless = cli.headless ?? config.headless ?? false
+  const result = await lint(initialState, config, baseDir, prod, headless)
   printLint(result)
 
-  const { reduce, execute } = config
+  const { reduce, execute, onAction, onEffect, onStart, onStop, onError } = config
   const shouldPersist = (cli.persist ?? config.persist) !== false
-  const getUIState = config.getUIState ?? ((s: S) => s)
+  const getUIState = config.getUIState ?? ((s: S, _user?: AioUser) => s)
   const getDBState = config.getDBState ?? ((s: S) => s)
   const persistKey = config.persistKey ?? 'state'
   const ui = config.ui ?? {}
@@ -259,19 +394,49 @@ async function run<S, A, E>(initialState: S, config: AioConfig<S, A, E>): Promis
 
   // Title: CLI > config > deno.json "title" > fallback
   let denoJsonTitle: string | undefined
-  try { denoJsonTitle = JSON.parse(await Deno.readTextFile(join(Deno.cwd(), 'deno.json'))).title } catch { /* */ }
+  try { denoJsonTitle = JSON.parse(await Deno.readTextFile(join(Deno.cwd(), 'deno.json'))).title } catch { /* no deno.json or no title field */ }
   const title = cli.title ?? ui.title ?? denoJsonTitle ?? 'AIO App'
 
   log.debug(`config: port=${port} persist=${shouldPersist} electron=${(cli.electron ?? ui.electron) !== false} title="${title}" baseDir=${baseDir}`)
 
-  let db: SkvInstance | null = null
+  let kvDb: SkvInstance | null = null
   let state = initialState
+
+  // SQLite setup — opens DB, creates tables (data loaded after KV merge below)
+  const dbSchema = config.db
+  const dbKeys = dbSchema ? Object.keys(dbSchema) : []
+  let sqlDb: ReturnType<typeof openDb> | null = null
+  if (dbSchema && Object.keys(dbSchema).length) {
+    try {
+      const dbPath = resolveDbPath(title)
+      sqlDb = openDb(dbPath, dbSchema)
+      log.info(`sqlite: ${dbKeys.length} table(s) at ${dbPath}`)
+    } catch (e) {
+      log.warn(`sqlite: unavailable — ${e}`)
+      sqlDb = null
+    }
+  }
+
+  // KV: strip db-managed keys so arrays aren't double-stored
+  const origGetDBState = getDBState
+  const kvGetDBState = dbKeys.length
+    ? (s: S) => {
+        const full = origGetDBState(s)
+        if (!full || typeof full !== 'object' || Array.isArray(full)) return full
+        const filtered: Record<string, unknown> = {}
+        for (const k of Object.keys(full as Record<string, unknown>)) {
+          if (!dbKeys.includes(k)) filtered[k] = (full as Record<string, unknown>)[k]
+        }
+        return filtered
+      }
+    : origGetDBState
+
   if (shouldPersist) {
     try {
       const kvPath = resolveKvPath(title)
-      db = skv(await Deno.openKv(kvPath))
+      kvDb = skv(await Deno.openKv(kvPath))
       if (kvPath) log.debug(`persist: KV at ${kvPath}`)
-      const persisted = await db.get<Partial<S>>(persistKey)
+      const persisted = await kvDb.get<Partial<S>>(persistKey)
       if (persisted) {
         state = deepMerge(initialState as Record<string, unknown>, persisted as Record<string, unknown>) as S
         log.debug(`persist: loaded from KV key="${persistKey}"`)
@@ -280,152 +445,327 @@ async function run<S, A, E>(initialState: S, config: AioConfig<S, A, E>): Promis
       }
     } catch (e) {
       log.warn(`persist: KV unavailable, running without persistence — ${e}`)
-      db = null
+      kvDb = null
     }
+  }
+
+  // onRestore — let user transform/validate restored state before server starts
+  if (config.onRestore) {
+    try { state = config.onRestore(state) }
+    catch (e) { log.error(`hook onRestore: ${e}`) }
+  }
+
+  // Load SQLite data into state (once, after KV merge — SQLite wins for db-managed keys)
+  if (sqlDb && dbSchema) {
+    const loaded = loadTables(sqlDb.raw, dbSchema)
+    state = { ...(state as Record<string, unknown>), ...loaded } as S
   }
 
   log.debug(`state: ${Object.keys(state as Record<string, unknown>).length} keys`)
 
-  // Safely extract type/payload for debug logging
-  function tag(v: unknown): string {
-    const o = v as Record<string, unknown>
-    return `${o?.type ?? '?'} ${JSON.stringify(o?.payload ?? {})}`
-  }
+  // Track previous state for SQLite ref-equality diff
+  let prevDbState: Record<string, unknown> = { ...(state as Record<string, unknown>) }
 
-  // Debounced KV persistence — writes at most once per 100ms
+  /** Debounced persistence — KV for UI state, SQLite for db arrays */
+  const persistMs = config.persistDebounce ?? 100
   let persistTimer: ReturnType<typeof setTimeout> | null = null
+  let shuttingDown = false
   function schedulePersist(): void {
-    if (!db || persistTimer) return
+    if ((!kvDb && !sqlDb) || persistTimer || shuttingDown) return
     persistTimer = setTimeout(() => {
       persistTimer = null
-      db!.set(persistKey, getDBState(state))
-        .then(() => log.debug(`persist: saved`))
-        .catch(e => log.error(`persist: failed to save — ${e}`))
-    }, 100)
-  }
-
-  // Immediate flush — cancel debounce and write now (used on shutdown)
-  async function flushPersist(): Promise<void> {
-    if (!db) return
-    if (persistTimer) { clearTimeout(persistTimer); persistTimer = null }
-    try {
-      await db.set(persistKey, getDBState(state))
-      log.debug('persist: flushed')
-    } catch (e) {
-      log.error(`persist: flush failed — ${e}`)
-    }
-  }
-
-  // Re-entrant-safe dispatch queue — effects calling app.dispatch() are queued
-  let dispatching = false
-  const dispatchQueue: A[] = []
-
-  // The core loop: action → reduce → persist → broadcast → effects
-  function dispatch(action: A): void {
-    dispatchQueue.push(action)
-    if (dispatching) return  // queued — will be processed by the outer loop
-    dispatching = true
-
-    while (dispatchQueue.length > 0) {
-      const current = dispatchQueue.shift()!
-      log.debug(`action → reduce: ${tag(current)}`)
-
-      let reduced: { state: S; effects: E[] }
-      try {
-        reduced = reduce(state, current)
-      } catch (e) {
-        log.error(`reduce error on ${tag(current)}: ${e}`)
-        continue
+      // SQLite sync — reference equality check per table
+      if (sqlDb && dbSchema) {
+        try {
+          syncTables(sqlDb.raw, dbSchema, state as Record<string, unknown>, prevDbState)
+          log.debug('persist: sqlite synced')
+        } catch (e) { log.error(`persist: sqlite sync failed — ${e}`) }
+        prevDbState = { ...(state as Record<string, unknown>) }
       }
-
-      // Validate reducer output shape
-      if (!reduced || typeof reduced !== 'object' || !('state' in reduced) || !Array.isArray(reduced.effects)) {
-        log.error(`reduce() must return { state, effects[] } — got ${JSON.stringify(reduced)} for action ${tag(current)}`)
-        continue
-      }
-
-      const prev = state
-      state = reduced.state
-      if (prev !== state && typeof state === 'object' && state && typeof prev === 'object' && prev) {
-        const changed = Object.keys(state as Record<string, unknown>).filter(k =>
-          (state as Record<string, unknown>)[k] !== (prev as Record<string, unknown>)[k]
-        )
-        if (changed.length) log.debug(`state: changed [${changed.join(', ')}]`)
-      }
-
-      for (const effect of reduced.effects) {
-        if (!effect || typeof (effect as Record<string, unknown>).type !== 'string') {
-          log.warn(`reducer returned invalid effect (missing .type string) — skipping. Action was: ${tag(current)}`)
-          continue
+      // KV sync — UI state (db keys stripped)
+      if (kvDb) {
+        try {
+          const dbState = kvGetDBState(state)
+          const serialized = JSON.stringify(dbState)
+          const bytes = new TextEncoder().encode(serialized).byteLength
+          if (bytes > 63_000) {
+            log.error(`persist: state is ${(bytes / 1024).toFixed(1)}KB — exceeds Deno KV 65KB limit. Use getDBState to filter, or db: {} (SQLite) for large data`)
+            return
+          }
+          if (bytes > 50_000) {
+            log.warn(`persist: state is ${(bytes / 1024).toFixed(1)}KB — approaching 65KB KV limit. Consider getDBState filter or SQLite`)
+          }
+          kvDb.set(persistKey, dbState)
+            .then(() => log.debug(`persist: saved (${(bytes / 1024).toFixed(1)}KB)`))
+            .catch(e => {
+              log.error(`persist: failed to save — ${e}`)
+            })
+        } catch (e) {
+          log.error(`persist: getDBState threw — ${e}`)
         }
-        log.debug(`effect → execute: ${tag(effect)}`)
-        try { execute(effect, app) } catch (e) { log.error(`effect error: ${e}`) }
+      }
+    }, persistMs)
+  }
+
+  /** Immediate flush — cancel debounce and write now (used on shutdown) */
+  async function flushPersist(): Promise<void> {
+    if (persistTimer) { clearTimeout(persistTimer); persistTimer = null }
+    // Flush SQLite
+    if (sqlDb && dbSchema) {
+      try {
+        syncTables(sqlDb.raw, dbSchema, state as Record<string, unknown>, prevDbState)
+        prevDbState = { ...(state as Record<string, unknown>) }
+      } catch (e) { log.error(`persist: sqlite flush failed — ${e}`) }
+    }
+    // Flush KV
+    if (kvDb) {
+      try {
+        await kvDb.set(persistKey, kvGetDBState(state))
+        log.debug('persist: flushed')
+      } catch (e) {
+        const msg = String(e)
+        if (msg.includes('too large') || msg.includes('65536') || msg.includes('value too')) {
+          log.warn(`persist: state exceeds Deno KV 65KB limit — use getDBState to filter persisted state, or use db: {} (SQLite) for large arrays`)
+        }
+        log.error(`persist: flush failed — ${e}`)
       }
     }
-
-    dispatching = false
-    schedulePersist()
-    server.broadcast()  // one broadcast after all queued dispatches drain
   }
+
+  // Hook-wrapped reduce/execute — observe-only, error-guarded
+  const { beforeReduce } = config
+  const hookedReduce: typeof reduce = (s, a) => {
+    if (beforeReduce) {
+      try { a = beforeReduce(a, s) as A } catch (e) { log.error(`beforeReduce threw: ${e}`); return { state: s, effects: [] as E[] } }
+      if (a === null) return { state: s, effects: [] as E[] }
+    }
+    if (onAction) try { onAction(a, s, _dispatchUser) } catch (e) { log.error(`hook onAction: ${e}`) }
+    return reduce(s, a)
+  }
+  const hookedExecute: typeof execute = onEffect
+    ? (app, e) => { try { onEffect(e, _dispatchUser) } catch (err) { log.error(`hook onEffect: ${err}`) }; execute(app, e) }
+    : execute
+
+  // Time-travel — active in dev mode, zero cost in prod
+  let tt: TTState<S, { type: string }> | null = null
+  if (!prod) {
+    tt = createTT<S, { type: string }>()
+    tt = record(tt, { type: '__init' }, state)
+    log.debug('time-travel: initialized')
+  }
+
+  // Schedule manager — handles __schedule effects from reducer + config-level schedules
+  const scheduleManager = createScheduleManager(
+    (action) => dispatch(action as A), log
+  )
+
+  // Shared dispatch loop — re-entrant-safe, overflow-guarded
+  const dispatch = createDispatch<S, A, E>({
+    reduce: tt
+      ? (s, a) => {
+          if (tt!.paused) {
+            log.debug(`time-travel: paused, dropping action ${(a as { type?: string }).type ?? '?'}`)
+            return { state: s, effects: [] as E[] }
+          }
+          const result = hookedReduce(s, a)
+          tt = record(tt!, a as unknown as { type: string }, result.state)
+          server.broadcastTT()
+          return result
+        }
+      : hookedReduce,
+    execute: (effect) => {
+      if (isScheduleEffect(effect)) { scheduleManager.handle(effect as ScheduleEffect); return }
+      hookedExecute(app, effect)
+    },
+    getState: () => state,
+    setState: (s) => { state = s },
+    onDone: () => { _dispatchUser = undefined; if (!tt?.paused) { schedulePersist(); } server.broadcast() },
+    log, debug: VERBOSE,
+    onError,
+  })
 
   const app: AioApp<S, A> = {
     dispatch,
     getState: () => state,
-    close: async () => {
-      await flushPersist()
-      db?.close()
-      await server.shutdown()
+    port,
+    db: sqlDb?.aioDB,
+    snapshot: () => JSON.stringify(state),
+    loadSnapshot: (json: string) => {
+      const parsed = JSON.parse(json)
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('snapshot must be a JSON object')
+      // Validate keys — reject unknown keys not in initial state
+      const initKeys = new Set(Object.keys(initialState as Record<string, unknown>))
+      const snapKeys = Object.keys(parsed as Record<string, unknown>)
+      const unknown = snapKeys.filter(k => !initKeys.has(k))
+      if (unknown.length) log.warn(`snapshot: ignoring unknown keys: ${unknown.join(', ')}`)
+      state = parsed as S
+      prevDbState = { ...(state as Record<string, unknown>) }
+      if (tt) {
+        tt = record(tt, { type: '__snapshot' }, state)
+        server.broadcastTT()
+      }
+      schedulePersist()
+      server.broadcast()
+      log.info('snapshot: loaded')
     },
+    close: async () => { await shutdown() },
+  }
+
+  // Shared shutdown — idempotent, used by both close() and signal handler
+  let shutdownPromise: Promise<void> | null = null
+  function shutdown(): Promise<void> {
+    if (shutdownPromise) return shutdownPromise
+    shuttingDown = true
+    shutdownPromise = _doShutdown()
+    return shutdownPromise
+  }
+  async function _doShutdown(): Promise<void> {
+    if (onStop) try { onStop() } catch (e) { log.error(`hook onStop: ${e}`) }
+    scheduleManager.cancelAll()
+    dispatch.close()
+    if (_electronProc) {
+      try { _electronProc.kill(); _electronProc = null } catch (e) { log.error(`shutdown: electron — ${e}`) }
+    }
+    try { await server.shutdown() } catch (e) { log.error(`shutdown: server — ${e}`) }
+    try { await flushPersist() } catch (e) { log.error(`shutdown: persist — ${e}`) }
+    try { sqlDb?.aioDB.close() } catch (e) { log.error(`shutdown: sqlite — ${e}`) }
+    try { kvDb?.close() } catch (e) { log.error(`shutdown: kv — ${e}`) }
+    _running = false
+  }
+
+  // --expose: bind 0.0.0.0, generate access token
+  const expose = cli.expose ?? false
+  const users = config.users
+  // --expose without users: auto-gen single token (backwards compatible)
+  const token = (expose && !users) ? crypto.randomUUID() : undefined
+
+  // TT command handler — undo/redo/goto restore state, pause/resume toggle
+  function handleTTCommand(cmd: string, arg?: number): void {
+    if (!tt) return
+    const prev = tt
+    switch (cmd) {
+      case 'undo':   tt = undo(tt); break
+      case 'redo':   tt = redo(tt); break
+      case 'goto':   if (arg !== undefined) tt = travelTo(tt, arg); break
+      case 'pause':  tt = pause(tt); break
+      case 'resume': tt = resume(tt); break
+      default: log.debug(`time-travel: unknown command '${cmd}'`); return
+    }
+    if (tt === prev) return  // no-op (e.g. undo at start)
+    // Restore state at current index
+    const restored = stateAt(tt)
+    if (restored !== null) state = restored
+    log.debug(`time-travel: ${cmd}${arg !== undefined ? ':' + arg : ''} → index ${tt.index}/${tt.entries.length - 1} paused=${tt.paused}`)
+    server.broadcastTT()
+    server.broadcast()
   }
 
   const server: ServerHandle = createServer({
     port,
     title,
-    getUIState: () => getUIState(state),
-    dispatch: (action) => dispatch(action as A),
+    width: ui.width,
+    height: ui.height,
+    getUIState: (user?: AioUser) => getUIState(state, user),
+    dispatch: (action, user?) => { _dispatchUser = user; dispatch(action as A) },
+    getSnapshot: () => app.snapshot!(),
+    loadSnapshot: (json: string) => app.loadSnapshot!(json),
     baseDir,
     debug: (msg: string) => log.debug(msg),
     prod,
     distDir: prod ? distDir : undefined,
+    expose,
+    token,
+    users,
+    showStatus: ui.showStatus,
+    deltaThreshold: config.deltaThreshold,
+    maxConnections: config.maxConnections,
+    onConnect: config.onConnect,
+    onDisconnect: config.onDisconnect,
+    ...(tt ? {
+      onTTCommand: handleTTCommand,
+      getTTBroadcast: () => toBroadcast(tt!),
+    } : {}),
+    trojan: {
+      getState: () => state,
+      getSchedules: () => scheduleManager.active(),
+      ...(tt ? { getTTHistory: () => toBroadcast(tt!) } : {}),
+      ...(shouldPersist ? { forcePersist: () => schedulePersist() } : {}),
+      ...(sqlDb ? { sqlQuery: (sql: string) => sqlDb!.aioDB.query(sql) } : {}),
+      shutdown: () => shutdown().then(() => Deno.exit(0)),
+      startedAt: Date.now(),
+    },
   })
 
-  // Graceful shutdown — flush pending state before exit
   for (const sig of ['SIGINT', 'SIGTERM'] as const) {
     try {
-      Deno.addSignalListener(sig, () => {
-        flushPersist().then(() => { db?.close(); Deno.exit(0) })
-      })
+      Deno.addSignalListener(sig, () => { shutdown().then(() => Deno.exit(0)).catch(() => Deno.exit(1)) })
     } catch { /* signal not supported on this platform */ }
   }
 
-  const useElectron = (cli.electron ?? ui.electron) !== false
-  const url = `http://localhost:${port}`
+  if (onStart) try { onStart(app) } catch (e) { log.error(`hook onStart: ${e}`) }
+
+  if (config.schedules?.length) {
+    scheduleManager.start(config.schedules)
+    log.info(`schedules: ${config.schedules.length} started`)
+  }
+
+  const useElectron = !headless && (cli.electron ?? ui.electron) !== false
+  const url = expose ? `http://0.0.0.0:${port}` : `http://localhost:${port}`
 
   const cliFlags = Deno.args.filter(a => a.startsWith('--'))
   if (cliFlags.length) log.info(`cli: ${cliFlags.join(' ')}`)
+  else log.debug('run with --help to see available flags')
   const mode = prod ? 'prod' : 'dev'
-  log.info(`running at ${url} (${mode}, ${useElectron ? 'electron' : 'browser'})`)
+  const shell = headless ? 'headless' : useElectron ? 'electron' : 'browser'
+  log.info(`running at ${url} (${mode}, ${shell})`)
 
-  if (useElectron) {
+  if (expose && users) {
+    log.warn(`--expose: bound to 0.0.0.0 — per-user token auth, origin checks disabled`)
+    for (const [t, u] of Object.entries(users)) {
+      log.info(`share (${u.id}/${u.role}): ${url}?token=${t}`)
+    }
+  } else if (expose && token) {
+    log.warn(`--expose: bound to 0.0.0.0 — token auth only, origin checks disabled, token changes on restart`)
+    log.info(`share: ${url}?token=${token}`)
+  } else if (users) {
+    log.info(`auth: ${Object.keys(users).length} user(s) configured`)
+  }
+
+  if (headless) {
+    // Headless — server-only, no UI launch (CLI apps use connectCli() to connect)
+  } else if (useElectron) {
     const keepAlive = cli.keepAlive ?? ui.keepAlive ?? false
-    launchElectron(port, log, ui.width, ui.height)
+    const meta: AioMeta = { title, width: cli.width ?? ui.width, height: cli.height ?? ui.height }
+    const electronUrl = token ? `${url}?token=${token}` : url
+    launchElectron(electronUrl, log, meta)
       .then(proc => {
         if (!proc) return
-        proc.status.then(s => {
-          if (keepAlive) {
-            log.info(`electron closed (code ${s.code ?? 0}) — server still running at ${url}`)
-          } else {
-            flushPersist().then(() => { db?.close(); Deno.exit(s.code ?? 0) })
-          }
-        })
+        _electronProc = proc
+        proc.status
+          .then(s => {
+            _electronProc = null
+            if (keepAlive) {
+              log.info(`electron closed (code ${s.code ?? 0}) — server still running at ${url}`)
+            } else {
+              shutdown().then(() => Deno.exit(0))
+            }
+          })
+          .catch(e => log.error(`electron status: ${e}`))
       })
       .catch(e => log.error(`electron: ${e}`))
   } else {
-    const cmd = Deno.build.os === 'darwin' ? 'open'
-      : Deno.build.os === 'windows' ? 'start'
-      : 'xdg-open'
-    try { new Deno.Command(cmd, { args: [url], stdout: 'null', stderr: 'null' }).spawn() }
-    catch { log.info(`open ${url} in your browser`) }
+    // Wait briefly for existing browser tabs to reconnect via WS
+    setTimeout(() => {
+      if (server.clientCount() > 0) {
+        log.debug('browser: existing client connected — skipping open')
+        return
+      }
+      const cmd = Deno.build.os === 'darwin' ? 'open'
+        : Deno.build.os === 'windows' ? 'start'
+        : 'xdg-open'
+      try { new Deno.Command(cmd, { args: [url], stdout: 'null', stderr: 'null' }).spawn() }
+      catch { log.info(`open ${url} in your browser`) }
+    }, 1500)
   }
 
   return app

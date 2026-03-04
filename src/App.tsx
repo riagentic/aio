@@ -20,9 +20,9 @@ export default function App() {
         {state.counter}
       </div>
       <div style={{ display: 'flex', gap: '0.5rem', justifyContent: 'center' }}>
-        <button type="button" onClick={() => send(A.Decrement())} style={btn}>-</button>
-        <button type="button" onClick={() => send(A.Reset())} style={btn}>Reset</button>
-        <button type="button" onClick={() => send(A.Increment())} style={btn}>+</button>
+        <button type="button" onClick={() => send(A.decrement())} style={btn}>-</button>
+        <button type="button" onClick={() => send(A.reset())} style={btn}>Reset</button>
+        <button type="button" onClick={() => send(A.increment())} style={btn}>+</button>
       </div>
     </div>
   )

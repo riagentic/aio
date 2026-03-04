@@ -7,15 +7,15 @@ import { draft } from 'aio'
 export function reduce(state: AppState, action: Action): { state: AppState; effects: Effect[] } {
   return draft(state, d => {
     switch (action.type) {
-      case A.INCREMENT:
+      case A.Increment:
         d.counter += action.payload.by
-        return [E.Log(`incremented by ${action.payload.by} to ${state.counter + action.payload.by}`)]
-      case A.DECREMENT:
+        return [E.log(`incremented by ${action.payload.by} to ${state.counter + action.payload.by}`)]
+      case A.Decrement:
         d.counter -= action.payload.by
-        return [E.Log(`decremented by ${action.payload.by} to ${state.counter - action.payload.by}`)]
-      case A.RESET:
+        return [E.log(`decremented by ${action.payload.by} to ${state.counter - action.payload.by}`)]
+      case A.Reset:
         d.counter = 0
-        return [E.Log("counter reset")]
+        return [E.log("counter reset")]
       default:
         console.warn(`[aio] unknown action: ${(action as { type: string }).type}`)
         return []

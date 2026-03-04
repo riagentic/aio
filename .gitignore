@@ -5,4 +5,7 @@ tmp/
 _build.json
 _build_entry.tsx
 *.AppImage
+*.apk
+*.service
+aio-counter
 .vscode/

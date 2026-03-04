@@ -1,5 +1,6 @@
 {
   "title": "AIO Counter",
+  "version": "0.2.0",
   "unstable": ["kv"],
   "compilerOptions": {
     "jsx": "react-jsx",
@@ -17,8 +18,18 @@
   },
   "tasks": {
     "test": "deno test -A --unstable-kv dep/aio/tests/",
-    "dev": "deno run -A src/app.ts --debug",
+    "dev": "deno run -A src/app.ts",
     "compile": "deno run -A dep/aio/src/build.ts --compile",
-    "compile:electron": "deno run -A dep/aio/src/build.ts --compile --electron"
+    "compile:browser": "deno run -A dep/aio/src/build.ts --compile",
+    "compile:browser:remote": "deno run -A dep/aio/src/build.ts --compile --service --remote",
+    "compile:electron": "deno run -A dep/aio/src/build.ts --compile --electron",
+    "compile:electron:remote": "deno run -A dep/aio/src/build.ts --client",
+    "compile:cli": "deno run -A dep/aio/src/build.ts --cli",
+    "compile:cli:remote": "deno run -A dep/aio/src/build.ts --cli --remote",
+    "compile:android": "deno run -A dep/aio/src/build.ts --android",
+    "compile:android:remote": "deno run -A dep/aio/src/build.ts --android --remote",
+    "compile:service": "deno run -A dep/aio/src/build.ts --compile --service --headless",
+    "compile:service:remote": "deno run -A dep/aio/src/build.ts --compile --service --headless --remote",
+    "am": "deno run -A dep/aio/src/am.ts"
   }
 }
