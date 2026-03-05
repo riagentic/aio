@@ -9,7 +9,7 @@ aio ("eye-oh") is a full-stack TypeScript framework on Deno 2.6+ for building st
 ## Commands
 
 ```sh
-deno task test                    # run all tests (413, requires -A --unstable-kv)
+deno task test                    # run all tests (457, requires -A --unstable-kv)
 deno task dev                     # dev mode: hot reload, time-travel, trojan API, error overlay
 deno task am <cmd>                # app manager: start/stop/status/state/dispatch/tt/...
 deno check dep/aio/mod.ts        # type-check framework

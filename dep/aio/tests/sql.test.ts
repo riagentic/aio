@@ -576,3 +576,136 @@ Deno.test('sql: reloadTable returns current rows', () => {
   raw.close()
   Deno.removeSync(path)
 })
+
+// ── syncTables incremental (PK-based) ────────────────────────────────
+
+Deno.test('sql: syncTables incremental INSERT only', () => {
+  const path = tmpDb()
+  const schema = { items: table({ id: pk(), name: text() }) }
+  const { raw } = openDb(path, schema)
+  raw.prepare('INSERT INTO items (id, name) VALUES (?, ?)').run(1, 'a')
+
+  const prev = { items: [{ id: 1, name: 'a' }] }
+  const state = { items: [{ id: 1, name: 'a' }, { id: 2, name: 'b' }, { id: 3, name: 'c' }] }
+  syncTables(raw, schema, state, prev)
+
+  const rows = raw.prepare('SELECT * FROM items ORDER BY id').all() as { id: number; name: string }[]
+  assertEquals(rows.length, 3)
+  assertEquals(rows[1].name, 'b')
+  assertEquals(rows[2].name, 'c')
+  raw.close()
+  Deno.removeSync(path)
+})
+
+Deno.test('sql: syncTables incremental UPDATE only', () => {
+  const path = tmpDb()
+  const schema = { items: table({ id: pk(), name: text() }) }
+  const { raw } = openDb(path, schema)
+  raw.prepare('INSERT INTO items (id, name) VALUES (?, ?)').run(1, 'a')
+  raw.prepare('INSERT INTO items (id, name) VALUES (?, ?)').run(2, 'b')
+
+  const prev = { items: [{ id: 1, name: 'a' }, { id: 2, name: 'b' }] }
+  const state = { items: [{ id: 1, name: 'changed' }, { id: 2, name: 'b' }] }
+  syncTables(raw, schema, state, prev)
+
+  const rows = raw.prepare('SELECT * FROM items ORDER BY id').all() as { id: number; name: string }[]
+  assertEquals(rows.length, 2)
+  assertEquals(rows[0].name, 'changed')
+  assertEquals(rows[1].name, 'b')
+  raw.close()
+  Deno.removeSync(path)
+})
+
+Deno.test('sql: syncTables incremental DELETE only', () => {
+  const path = tmpDb()
+  const schema = { items: table({ id: pk(), name: text() }) }
+  const { raw } = openDb(path, schema)
+  raw.prepare('INSERT INTO items (id, name) VALUES (?, ?)').run(1, 'a')
+  raw.prepare('INSERT INTO items (id, name) VALUES (?, ?)').run(2, 'b')
+  raw.prepare('INSERT INTO items (id, name) VALUES (?, ?)').run(3, 'c')
+
+  const prev = { items: [{ id: 1, name: 'a' }, { id: 2, name: 'b' }, { id: 3, name: 'c' }] }
+  const state = { items: [{ id: 1, name: 'a' }, { id: 3, name: 'c' }] }
+  syncTables(raw, schema, state, prev)
+
+  const rows = raw.prepare('SELECT * FROM items ORDER BY id').all() as { id: number; name: string }[]
+  assertEquals(rows.length, 2)
+  assertEquals(rows[0].id, 1)
+  assertEquals(rows[1].id, 3)
+  raw.close()
+  Deno.removeSync(path)
+})
+
+Deno.test('sql: syncTables incremental mixed INSERT/UPDATE/DELETE', () => {
+  const path = tmpDb()
+  const schema = { items: table({ id: pk(), name: text(), val: integer() }) }
+  const { raw } = openDb(path, schema)
+  raw.prepare('INSERT INTO items (id, name, val) VALUES (?, ?, ?)').run(1, 'a', 10)
+  raw.prepare('INSERT INTO items (id, name, val) VALUES (?, ?, ?)').run(2, 'b', 20)
+  raw.prepare('INSERT INTO items (id, name, val) VALUES (?, ?, ?)').run(3, 'c', 30)
+
+  const prev = { items: [{ id: 1, name: 'a', val: 10 }, { id: 2, name: 'b', val: 20 }, { id: 3, name: 'c', val: 30 }] }
+  const state = { items: [{ id: 1, name: 'a', val: 99 }, { id: 3, name: 'c', val: 30 }, { id: 4, name: 'd', val: 40 }] }
+  syncTables(raw, schema, state, prev)
+
+  const rows = raw.prepare('SELECT * FROM items ORDER BY id').all() as { id: number; name: string; val: number }[]
+  assertEquals(rows.length, 3)
+  assertEquals(rows[0].id, 1)
+  assertEquals(rows[0].val, 99)  // updated
+  assertEquals(rows[1].id, 3)    // unchanged
+  assertEquals(rows[2].id, 4)    // inserted
+  assertEquals(rows[2].name, 'd')
+  raw.close()
+  Deno.removeSync(path)
+})
+
+Deno.test('sql: syncTables unchanged row skips UPDATE', () => {
+  const path = tmpDb()
+  const schema = { items: table({ id: pk(), name: text() }) }
+  const { raw } = openDb(path, schema)
+  raw.prepare('INSERT INTO items (id, name) VALUES (?, ?)').run(1, 'same')
+
+  const prev = { items: [{ id: 1, name: 'same' }] }
+  const state = { items: [{ id: 1, name: 'same' }] }
+  syncTables(raw, schema, state, prev)
+
+  const rows = raw.prepare('SELECT * FROM items').all() as { id: number; name: string }[]
+  assertEquals(rows.length, 1)
+  assertEquals(rows[0].name, 'same')
+  raw.close()
+  Deno.removeSync(path)
+})
+
+Deno.test('sql: syncTables fallback to full sync without PK', () => {
+  const path = tmpDb()
+  const schema = { logs: table({ ts: integer(), msg: text() }) }  // no PK
+  const { raw } = openDb(path, schema)
+  raw.prepare('INSERT INTO logs (ts, msg) VALUES (?, ?)').run(1, 'old')
+
+  const prev = { logs: [{ ts: 1, msg: 'old' }] }
+  const state = { logs: [{ ts: 2, msg: 'new' }, { ts: 3, msg: 'another' }] }
+  syncTables(raw, schema, state, prev)
+
+  const rows = raw.prepare('SELECT * FROM logs ORDER BY ts').all() as { ts: number; msg: string }[]
+  assertEquals(rows.length, 2)
+  assertEquals(rows[0].ts, 2)
+  assertEquals(rows[1].ts, 3)
+  raw.close()
+  Deno.removeSync(path)
+})
+
+Deno.test('sql: syncTables empty state with PK triggers DELETE', () => {
+  const path = tmpDb()
+  const schema = { items: table({ id: pk(), name: text() }) }
+  const { raw } = openDb(path, schema)
+  raw.prepare('INSERT INTO items (id, name) VALUES (?, ?)').run(1, 'a')
+  raw.prepare('INSERT INTO items (id, name) VALUES (?, ?)').run(2, 'b')
+
+  const prev = { items: [{ id: 1, name: 'a' }, { id: 2, name: 'b' }] }
+  const state = { items: [] as unknown[] }
+  syncTables(raw, schema, state, prev)
+
+  assertEquals(raw.prepare('SELECT COUNT(*) as c FROM items').get()!.c, 0)
+  raw.close()
+  Deno.removeSync(path)
+})

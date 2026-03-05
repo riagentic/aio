@@ -13,6 +13,25 @@ type FactoryResult<T extends Creators> = {
   readonly [K in keyof T as LowerFirst<K & string>]: (...args: Parameters<T[K]>) => { type: K; payload: ReturnType<T[K]> }
 }
 
+/**
+ * Discriminated union from action/effect catalog.
+ * Takes all creators and produces a union of { type, payload } shapes.
+ * 
+ * @example
+ * ```ts
+ * const A = actions({
+ *   Increment: (by: number) => ({ by }),
+ *   Reset: () => ({}),
+ * })
+ * type Action = UnionOfAction<typeof A>
+ * // => { type: 'Increment'; payload: { by: number } } | { type: 'Reset'; payload: {} }
+ * ```
+ */
+// deno-lint-ignore no-explicit-any
+export type UnionOfAction<T extends Creators> = {
+  [K in keyof T]: { type: K; payload: ReturnType<T[K]> }
+}[keyof T]
+
 /** Lowercase first character at runtime */
 function lowerFirst(s: string): string {
   return s.charAt(0).toLowerCase() + s.slice(1)

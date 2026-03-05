@@ -302,7 +302,23 @@ export function loadTables(db: DatabaseSync, schema: Record<string, TableDef>): 
   return result
 }
 
-/** Sync changed state arrays to SQLite — called after reduce (debounced) */
+/** Find primary key column name for a table, if any */
+function findPrimaryKey(def: TableDef): string | null {
+  for (const [name, col] of Object.entries(def.columns)) {
+    if (col.pk) return name
+  }
+  return null
+}
+
+/** Shallow compare two row objects */
+function rowsEqual(a: Record<string, unknown>, b: Record<string, unknown>, cols: string[]): boolean {
+  for (const col of cols) {
+    if (a[col] !== b[col]) return false
+  }
+  return true
+}
+
+/** Sync changed state arrays to SQLite — incremental for tables with PK, full sync otherwise */
 export function syncTables(
   db: DatabaseSync, schema: Record<string, TableDef>,
   state: Record<string, unknown>, prev: Record<string, unknown>,
@@ -318,12 +334,52 @@ export function syncTables(
     for (const name of changed) {
       const rows = state[name] as Record<string, unknown>[]
       const cols = Object.keys(schema[name].columns)
-      db.exec(`DELETE FROM ${name}`)
-      if (rows.length) {
-        const placeholders = cols.map(() => '?').join(', ')
-        const stmt = db.prepare(`INSERT INTO ${name} (${cols.join(', ')}) VALUES (${placeholders})`)
+      const pk = findPrimaryKey(schema[name])
+
+      if (pk && rows.length > 0) {
+        const dbRows = db.prepare(`SELECT * FROM ${name}`).all() as Record<string, unknown>[]
+
+        const toDelete: unknown[] = []
+        const toUpdate: Record<string, unknown>[] = []
+        const toInsert: Record<string, unknown>[] = []
+
+        const dbMap = new Map(dbRows.map(r => [r[pk], r]))
         for (const row of rows) {
-          stmt.run(..._p(cols.map(c => row[c])))
+          const id = row[pk]
+          if (!dbMap.has(id)) {
+            toInsert.push(row)
+          } else if (!rowsEqual(row, dbMap.get(id)!, cols)) {
+            toUpdate.push(row)
+          }
+        }
+        const stateIds = new Set(rows.map(r => r[pk]))
+        for (const dbRow of dbRows) {
+          if (!stateIds.has(dbRow[pk])) toDelete.push(dbRow[pk])
+        }
+
+        if (toDelete.length) {
+          const placeholders = toDelete.map(() => '?').join(', ')
+          db.prepare(`DELETE FROM ${name} WHERE ${pk} IN (${placeholders})`).run(..._p(toDelete))
+        }
+        if (toInsert.length) {
+          const placeholders = cols.map(() => '?').join(', ')
+          const stmt = db.prepare(`INSERT INTO ${name} (${cols.join(', ')}) VALUES (${placeholders})`)
+          for (const row of toInsert) stmt.run(..._p(cols.map(c => row[c])))
+        }
+        if (toUpdate.length) {
+          const setClause = cols.filter(c => c !== pk).map(c => `${c} = ?`).join(', ')
+          const stmt = db.prepare(`UPDATE ${name} SET ${setClause} WHERE ${pk} = ?`)
+          for (const row of toUpdate) {
+            const vals = cols.filter(c => c !== pk).map(c => row[c])
+            stmt.run(..._p([...vals, row[pk]]))
+          }
+        }
+      } else {
+        db.exec(`DELETE FROM ${name}`)
+        if (rows.length) {
+          const placeholders = cols.map(() => '?').join(', ')
+          const stmt = db.prepare(`INSERT INTO ${name} (${cols.join(', ')}) VALUES (${placeholders})`)
+          for (const row of rows) stmt.run(..._p(cols.map(c => row[c])))
         }
       }
     }

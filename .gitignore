@@ -9,3 +9,5 @@ _build_entry.tsx
 *.service
 aio-counter
 .vscode/
+.gradle/
+build/

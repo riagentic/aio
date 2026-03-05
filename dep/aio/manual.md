@@ -47,7 +47,7 @@ Same `src/` code runs in both modes. The `'aio'` import resolves to `browser.ts`
 5. After all queued actions drain: state persisted to Deno.Kv (debounced) and broadcast to all UIs
 6. UI receives new state → React re-renders
 
-**Error handling:** If `reduce()` throws, the error is logged and that action is skipped — the server continues running. Effects that throw are also caught and logged individually.
+**Error handling:** If `reduce()` throws, the error is logged and that action is skipped — the server continues running. **Important:** state remains unchanged when a reducer throws. The failed action has no effect on state, and subsequent actions process normally. Effects that throw are also caught and logged individually.
 
 ### What AIO handles automatically
 
@@ -273,6 +273,66 @@ case E.SAVE_FILE:
 | `beforeReduce` | `(action, state) => action \| null` | — | Intercept actions before reduce — return modified action or `null` to drop |
 | `deltaThreshold` | `number` | `0.5` | Ratio (0–1) of changed keys that triggers full broadcast instead of delta patch |
 | `maxConnections` | `number` | `100` | Maximum concurrent WebSocket clients (503 beyond this) |
+| `perfMode` | `'strict' \| 'soft'` | `'strict'` | How to report performance violations — strict calls `onError`, soft only warns |
+| `perfBudget` | `{ reduce?, effect? }` | `{ reduce: 100, effect: 5 }` | Performance budgets in milliseconds |
+| `effectTimeout` | `number` | `30000` | Warning timeout for async effects (ms) — logs if effect takes longer |
+| `freezeState` | `boolean` | `true` (dev), `false` (prod) | Deep freeze state after reduce to catch mutations |
+
+## `composeMiddleware(...fns)`
+
+Compose multiple `beforeReduce` functions into one. Functions run in order; return `null` to drop an action.
+
+```ts
+import { composeMiddleware } from 'aio'
+
+const validate = (action, state) => {
+  if (action.type === 'DeleteUser' && !state.isAdmin) return null
+  return action
+}
+
+const enrich = (action, state) => ({
+  ...action,
+  payload: { ...action.payload, timestamp: Date.now() }
+})
+
+await aio.run(initialState, {
+  reduce,
+  execute,
+  beforeReduce: composeMiddleware(validate, enrich),
+})
+```
+
+## `createSelector(...inputSelectors, resultFunc)`
+
+Memoized selector for expensive state derivations. Caches results until input selectors return new values.
+
+```ts
+import { createSelector } from 'aio'
+
+const selectVisibleTodos = createSelector(
+  (s: AppState) => s.todos,
+  (s: AppState) => s.filter,
+  (todos, filter) => todos.filter(t => t.status === filter)
+)
+
+// In getUIState — only recomputes if todos or filter changed
+getUIState: (state) => ({
+  visibleTodos: selectVisibleTodos(state),
+})
+```
+
+Multiple input selectors supported (up to 5). Result function only runs when inputs change.
+
+## `deepFreeze(state)`
+
+Deep freezes an object for dev-mode immutability checking. Called automatically when `freezeState: true`.
+
+```ts
+import { deepFreeze } from 'aio'
+
+const frozen = deepFreeze({ a: 1, b: { c: 2 } })
+frozen.a = 2  // TypeError in dev mode
+```
 
 ## `actions()` / `effects()`
 
@@ -671,11 +731,85 @@ Raw methods:
 
 - **Startup**: Opens SQLite at `./data.db` (dev) or `~/.local/share/<app>/data.db` (compiled). Creates tables with `IF NOT EXISTS`. Loads rows into state arrays
 - **After reduce**: Changed arrays sync to SQLite (debounced, same timer as KV). Unchanged arrays (same ref) are skipped
+- **Incremental sync**: Tables with primary keys use row-level INSERT/UPDATE/DELETE for efficiency. Tables without PK fall back to full table replacement
 - **KV stripping**: Arrays managed by `db:` are auto-excluded from KV persistence — no double-storing
 - **Shutdown**: Pending sync flushed, SQLite closed, then KV closed
 - **WAL mode + foreign keys**: Enabled by default for performance and referential integrity
 - **No migrations**: `CREATE TABLE IF NOT EXISTS` handles setup. Use `app.db!.exec('ALTER TABLE ...')` in `onStart` for schema changes
 - **Standalone/Android**: `app.db` is `undefined` — SQLite is server-only
+
+### Incremental sync
+
+For tables with a primary key (`pk()`), SQLite sync uses row-level diffs instead of full table replacement. This is significantly faster for large datasets.
+
+```ts
+// With PK — incremental updates
+db: {
+  users: table({
+    id: pk(),      // ← Primary key enables incremental sync
+    name: text(),
+  }),
+}
+
+// Without PK — full table replacement (slower for large tables)
+db: {
+  logs: table({
+    ts: integer(),
+    message: text(),
+  }),
+}
+```
+
+When you have a PK:
+- **INSERT**: New rows (not in DB) are inserted
+- **UPDATE**: Changed rows (same PK, different data) are updated
+- **DELETE**: Removed rows (in DB, not in state) are deleted
+- **UNCHANGED**: Skipped entirely
+
+## Offline queue
+
+When the WebSocket disconnects (network issues, server restart), actions are persisted to IndexedDB and replayed on reconnect.
+
+**How it works:**
+1. First connect: Actions queue in memory (max 100) until WS ready
+2. After first connect: All subsequent disconnections persist actions to IndexedDB
+3. On reconnect: Queued actions replay in order
+4. Actions older than 24 hours are discarded before replay
+
+**No configuration needed** — works automatically. The 24-hour `maxAge` prevents stale actions from accumulating indefinitely.
+
+If you need custom behavior, handle it in your reducer (idempotency, conflict resolution).
+
+## Redux DevTools integration
+
+Connect to the Redux DevTools browser extension for state inspection and action history.
+
+```tsx
+// In App.tsx
+import { useAio, connectDevTools } from 'aio'
+
+export default function App() {
+  const { state, send } = useAio<AppState>()
+
+  // Connect to DevTools in development
+  useEffect(() => {
+    if (import.meta.env.DEV) {
+      connectDevTools()
+    }
+  }, [])
+
+  // ... rest of component
+}
+```
+
+**What you see:**
+- State tree in DevTools inspector
+- Action history with type and payload
+- State diffs on each action
+
+**Limitations:**
+- Time-travel via DevTools is not supported (use `Ctrl+.` panel instead)
+- DevTools must be installed and enabled in browser
 
 ## UI state filtering
 
@@ -899,8 +1033,17 @@ When `aio.run()` starts, it checks your app and reports issues:
 
 **What it checks:**
 - `✗` **Errors** (prevents startup): state is null/not object, reduce/execute missing, App.tsx missing
-- `⚠` **Warnings** (app starts but may not work): App.tsx has no default export, esbuild not installed
+- `⚠` **Warnings** (app starts but may not work): App.tsx has no default export, esbuild not installed, sync I/O in execute.ts
 - `·` **Hints** (suggestions): leftover `createRoot`, `import React`, old `'../dep/aio/'` imports, electron missing `deno approve-scripts`
+
+**Sync I/O warnings:**
+The linter detects blocking operations in `execute.ts`:
+- `Deno.readTextFileSync`, `Deno.writeTextFileSync`, `Deno.readDirSync`, `Deno.statSync` → warn to use async versions
+- These operations block the dispatch loop and make the UI unresponsive
+
+```
+[WARNING] execute.ts: sync I/O (readTextFileSync) blocks the dispatch loop — use async versions (readTextFile) instead
+```
 
 ## Live reload
 
@@ -1136,6 +1279,7 @@ case A.StopTimer:
 - `schedule.after` auto-removes after firing
 - `schedule.at` with a past timestamp fires immediately
 - All schedules are cancelled on `app.close()`
+- **Far-future scheduling:** For delays exceeding JavaScript's `setTimeout` limit (~24.8 days), the framework re-checks every 24 hours until the target time. This handles long-running processes like annual maintenance tasks.
 
 ## Error overlay
 
@@ -1499,12 +1643,40 @@ await aio.run(state, {
 | `onDisconnect` | WS client disconnects | `(user?)` |
 | `onStart` | After server boots | `(app)` — same `AioApp` as `run()` return value |
 | `onStop` | Before shutdown | *(none)* |
+| `onError` | When reduce or effect throws | `(error: AioError)` — see error handling below |
 
 All hooks are:
 - **Optional** — omit any you don't need
 - **Observe-only** — void return, no transform/drop (except `onRestore` which returns new state)
 - **Error-guarded** — a throwing hook is logged but doesn't crash the app
 - **Sync** — hooks run synchronously in the lifecycle; async work should dispatch actions
+
+### Error handling with `onError`
+
+When `reduce()` throws or an effect throws, the error is caught and the app continues running. Use `onError` to observe these errors:
+
+```ts
+await aio.run(state, {
+  reduce, execute,
+  onError: (err) => {
+    // err.source: 'reduce' | 'effect'
+    // err.error: the thrown value
+    // err.actionType?: string  — action that caused reduce error
+    // err.effectType?: string — effect type that threw
+    if (err.source === 'reduce') {
+      console.error(`Reducer threw on ${err.actionType}:`, err.error)
+    } else {
+      console.error(`Effect ${err.effectType} threw:`, err.error)
+    }
+  },
+})
+```
+
+**Key behaviors:**
+- **Reduce errors:** Action is dropped, state unchanged, next action processes normally
+- **Sync effect errors:** Logged, remaining effects continue
+- **Async effect errors:** Caught via `.catch()`, logged, app continues
+- Without `onError`, errors are only logged to console
 
 > **Tip:** If you have arrays of objects with evolving schemas (e.g. adding new required fields), consider using [SQLite persistence](#sqlite-persistence) for those arrays — it handles schema via `CREATE TABLE IF NOT EXISTS` + `ALTER TABLE`. For simpler cases, `onRestore` lets you patch missing fields after KV restore.
 
@@ -1522,6 +1694,93 @@ await aio.run(state, {
 })
 ```
 `beforeReduce` runs before `onAction` and `reduce`. Return the action (optionally modified) to continue, or `null` to drop it silently. Errors in `beforeReduce` are logged and the action is dropped.
+
+## Performance budgets
+
+aio tracks how long your reducer and effects take, warning when operations exceed budget. This catches blocking work that makes the UI unresponsive.
+
+### How it works
+
+Every action is timed:
+- **reduce budget** (default: 100ms) — if `reduce()` takes longer, it's flagged
+- **effect budget** (default: 5ms) — if sync portion of `execute()` takes longer, it's flagged
+
+Async effects (promises) return immediately — only the sync part is measured. If your effect does `fetch().then(...)`, the `fetch()` call takes microseconds, so it passes.
+
+```ts
+// ✅ GOOD — async, returns in < 1ms
+case E.Fetch:
+  fetch(url).then(r => app.dispatch(A.loaded(r)))
+  break
+
+// ❌ BAD — sync work blocks
+case E.Process:
+  const data = heavyComputation()  // 500ms sync
+  return [E.done(data)]
+```
+
+### Modes
+
+| Mode | Behavior |
+|------|----------|
+| `'strict'` (default) | Calls `onError({ source: 'performance', ... })` + logs error |
+| `'soft'` | Only `console.warn()` — no callback |
+
+### Custom budgets
+
+```ts
+await aio.run(state, {
+  reduce, execute,
+  perfMode: 'strict',           // or 'soft'
+  perfBudget: {
+    reduce: 50,   // warn if reduce > 50ms
+    effect: 10,   // warn if sync effect > 10ms
+  },
+})
+```
+
+### Getting performance errors
+
+Both modes apply the action — state changes normally. This keeps your app functional while surfacing issues.
+
+```ts
+await aio.run(state, {
+  reduce, execute,
+  onError: (err) => {
+    if (err.source === 'performance') {
+      console.error(`Slow ${err.actionType ?? err.effectType}: ${err.duration}ms > ${err.budget}ms`)
+      // Show warning in UI, send to monitoring, etc.
+    }
+  },
+})
+```
+
+### Best practices
+
+1. **Keep reduce fast** — state updates should be instant. Move heavy computation to effects
+2. **Effects should return immediately** — kick off async work, don't block
+3. **Use `perfMode: 'soft'` in dev** — see warnings in console during development
+4. **Use `perfMode: 'strict'` in prod** — log to monitoring via `onError`
+
+### Example: Moving slow work out of reduce
+
+```ts
+// BAD — reduce takes 200ms
+case A.Analyze:
+  d.results = analyzeEverything(d.data)  // blocks 200ms!
+  return []
+
+// GOOD — reduce returns fast, effect does the work
+case A.Analyze:
+  d.analyzing = true
+  return [E.runAnalysis(d.data)]
+
+// In execute.ts
+case E.RunAnalysis:
+  const results = analyzeEverything(effect.payload.data)  // still 200ms
+  app.dispatch(A.analysisDone(results))  // but doesn't block UI
+  break
+```
 
 ## Trojan — Control API
 
@@ -1913,13 +2172,23 @@ Values in `key=value` pairs are auto-parsed: numbers, booleans, `null` via `JSON
 
 ### Time-travel
 
-```sh
-deno task am tt undo              # step back one action
-deno task am tt redo              # step forward
-deno task am tt goto 5            # jump to entry #5
-deno task am tt pause             # freeze state
-deno task am tt resume            # unfreeze (truncates forward)
+**In browser (dev mode only):**
+- Press `Ctrl+.` (period) to toggle the time-travel panel
+- Shows action history with timestamps
+- **Performance metrics**: each action shows `reduce:ms effects:ms`
+  - Times turn red when budget exceeded
+  - Helps identify slow reducers or blocking effects
+
 ```
+┌─ Time-travel ──────────────────────┐
+│ ▸ Increment    2ms  0ms             │
+│   LoadUsers    5ms  1ms             │
+│   SaveFile     3ms  (async)         │
+│ ◾ SetPage     12ms 150ms ⚠         │ ← slow!
+└─────────────────────────────────────┘
+```
+
+**Via `am` CLI:**
 
 ### Persistence & snapshots
 

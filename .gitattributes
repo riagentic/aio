@@ -1,0 +1,53 @@
+# Auto-detect text files
+* text=auto
+
+# TypeScript/JavaScript - enforce LF
+*.ts text eol=lf
+*.tsx text eol=lf
+*.js text eol=lf
+*.jsx text eol=lf
+*.mjs text eol=lf
+
+# JSON/YAML - enforce LF
+*.json text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf
+
+# Markdown - enforce LF
+*.md text eol=lf
+
+# CSS - enforce LF
+*.css text eol=lf
+
+# HTML - enforce LF
+*.html text eol=lf
+
+# Shell scripts - enforce LF
+*.sh text eol=lf
+
+# Deno config
+deno.json text eol=lf
+import_map.json text eol=lf
+
+# Binary files - don't touch
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.pdf binary
+*.zip binary
+*.gz binary
+*.tar binary
+
+# Android binary files
+*.apk binary
+*.aab binary
+*.so binary
+*.dex binary
+
+# Electron binary files
+*.AppImage binary
+
+# Lock files - preserve as-is
+package-lock.json text

@@ -4,6 +4,73 @@
 import { useState, useEffect, createElement, type ComponentType } from 'react'
 
 const WS_MAX_QUEUE = 100
+const OFFLINE_MAX_AGE = 24 * 60 * 60 * 1000  // 24 hours
+
+// ── Offline queue persistence (IndexedDB) ─────────────────────────────
+
+const _offlineDB = '__aio_offline'
+const _offlineStore = 'queue'
+const _offlineVersion = 1
+interface _QueuedAction { id?: number; action: { type: string; payload?: unknown }; ts: number }
+let _idb: IDBDatabase | null = null
+let _idbPromise: Promise<IDBDatabase | null> | null = null
+
+function _openIDB(): Promise<IDBDatabase | null> {
+  if (_idb) return Promise.resolve(_idb)
+  if (_idbPromise) return _idbPromise
+  _idbPromise = new Promise<IDBDatabase | null>(resolve => {
+    try {
+      const req = indexedDB.open(_offlineDB, _offlineVersion)
+      req.onerror = () => { _idbPromise = null; resolve(null) }
+      req.onsuccess = () => { _idb = req.result; resolve(req.result) }
+      req.onupgradeneeded = () => {
+        const db = req.result
+        if (!db.objectStoreNames.contains(_offlineStore)) {
+          db.createObjectStore(_offlineStore, { keyPath: 'id', autoIncrement: true })
+        }
+      }
+    } catch { _idbPromise = null; resolve(null) }
+  })
+  return _idbPromise
+}
+
+async function _loadOfflineQueue(): Promise<_QueuedAction[]> {
+  const db = await _openIDB()
+  if (!db) return []
+  return new Promise(resolve => {
+    try {
+      const tx = db.transaction(_offlineStore, 'readonly')
+      const store = tx.objectStore(_offlineStore)
+      const req = store.getAll()
+      req.onerror = () => resolve([])
+      req.onsuccess = () => {
+        const actions = req.result as _QueuedAction[]
+        const cutoff = Date.now() - OFFLINE_MAX_AGE
+        resolve(actions.filter(a => a.ts >= cutoff))
+      }
+    } catch { resolve([]) }
+  })
+}
+
+async function _saveOfflineAction(action: { type: string; payload?: unknown }): Promise<void> {
+  const db = await _openIDB()
+  if (!db) return
+  try {
+    const tx = db.transaction(_offlineStore, 'readwrite')
+    const store = tx.objectStore(_offlineStore)
+    store.add({ action, ts: Date.now() })
+  } catch { /* best-effort */ }
+}
+
+async function _clearOfflineQueue(): Promise<void> {
+  const db = await _openIDB()
+  if (!db) return
+  try {
+    const tx = db.transaction(_offlineStore, 'readwrite')
+    const store = tx.objectStore(_offlineStore)
+    store.clear()
+  } catch { /* best-effort */ }
+}
 
 // Singleton WebSocket — shared across all useAio() calls (one connection per page)
 type StateListener = (state: unknown) => void
@@ -13,9 +80,17 @@ let _queue: Array<{ type: string; payload?: unknown }> = []
 const _listeners = new Set<StateListener>()
 let _retry = 0
 let _closed = false
+let _wasConnected = false  // false during initial connect, true after first open
+let _offlineReady = false  // true when offline queue loaded from IndexedDB
+let _offlineQueue: Array<{ type: string; payload?: unknown }> = []  // persisted actions
+let _lastAction: { type: string; payload?: unknown } | null = null  // for DevTools correlation
 
 // Time-travel state — populated when server sends __tt: messages (dev mode)
-type TTMeta = { entries: { id: number; type: string; ts: number }[]; index: number; paused: boolean }
+type TTMeta = { 
+  entries: { id: number; type: string; ts: number; perf?: { reduce: number; effects: number; budget: { reduce: number; effect: number } } }[]
+  index: number
+  paused: boolean 
+}
 type TTListener = (tt: TTMeta) => void
 let _ttState: TTMeta | null = null
 const _ttListeners = new Set<TTListener>()
@@ -30,7 +105,6 @@ let _ttKeyBound = false
 // ── Connection status indicator (pure DOM) ──────────────────────────
 let _statusEl: HTMLElement | null = null
 let _statusTimer: ReturnType<typeof setTimeout> | null = null
-let _wasConnected = false  // no indicator on initial connect
 let _statusStyleInjected = false
 
 function _injectStatusStyle(): void {
@@ -163,14 +237,23 @@ function _renderTTPanel(): void {
 
     const name = document.createElement('span')
     name.textContent = (isCurrent ? '▸ ' : '  ') + e.type
-    name.style.cssText = 'overflow:hidden;text-overflow:ellipsis;white-space:nowrap;'
+    name.style.cssText = 'overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;'
     row.appendChild(name)
 
-    const time = document.createElement('span')
-    const d = new Date(e.ts)
-    time.textContent = `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}:${String(d.getSeconds()).padStart(2,'0')}`
-    time.style.cssText = 'color:#aaa;flex-shrink:0;margin-left:8px;'
-    row.appendChild(time)
+    // Performance timing (dev mode)
+    const right = document.createElement('span')
+    right.style.cssText = 'color:#aaa;flex-shrink:0;margin-left:8px;font-size:10px;display:flex;gap:6px;'
+    
+    if (e.perf) {
+      const reduceColor = e.perf.reduce > e.perf.budget.reduce ? '#e25' : '#666'
+      const effectColor = e.perf.effects > e.perf.budget.effect ? '#e25' : '#666'
+      right.innerHTML = `<span style="color:${reduceColor}">${Math.round(e.perf.reduce)}ms</span>`
+        + `<span style="color:${effectColor}">${Math.round(e.perf.effects)}ms</span>`
+    } else {
+      const d = new Date(e.ts)
+      right.textContent = `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}:${String(d.getSeconds()).padStart(2,'0')}`
+    }
+    row.appendChild(right)
 
     list.appendChild(row)
   }
@@ -211,12 +294,27 @@ function _connect() {
   const tokenParam = new URLSearchParams(location.search).get('token')
   const wsUrl = proto + '//' + location.host + '/ws' + (tokenParam ? '?token=' + tokenParam : '')
   const ws = new WebSocket(wsUrl)
-  ws.onopen = () => {
+  ws.onopen = async () => {
     _retry = 0
     if (_wasConnected) _showStatus('Connected', '#2a2', 2000)
     _wasConnected = true
+    
+    // Flush memory queue (initial connect race)
     const q = _queue; _queue = []
     for (const a of q) ws.send(JSON.stringify(a))
+    
+    // Load and replay offline queue (persisted during disconnect)
+    if (!_offlineReady) {
+      const persisted = await _loadOfflineQueue()
+      _offlineQueue = persisted.map(p => p.action)
+      _offlineReady = true
+    }
+    if (_offlineQueue.length) {
+      console.log(`[aio] replaying ${_offlineQueue.length} offline actions`)
+      for (const a of _offlineQueue) ws.send(JSON.stringify(a))
+      _offlineQueue = []
+      _clearOfflineQueue().catch(() => {})
+    }
   }
   ws.onmessage = (e) => {
     if (e.data === '__reload') { _closed = true; ws.close(); return location.reload() }
@@ -259,6 +357,11 @@ function _connect() {
         _state = data
       }
       _notify()
+      // Notify Redux DevTools if connected
+      if (_devtoolsConnected && _lastAction) {
+        _sendDevTools(_lastAction, _state)
+        _lastAction = null
+      }
     } catch (err) { console.warn('[aio] bad state message:', err) }
   }
   ws.onerror = () => { console.warn('[aio] connection error') }
@@ -275,14 +378,93 @@ function _connect() {
   _ws = ws
 }
 
-/** Sends action via WS — queues only during initial connect, drops when disconnected */
+/** Sends action via WS — queues to memory during initial connect, persists to IndexedDB when disconnected */
 function _send(action: { type: string; payload?: unknown }) {
+  _lastAction = action  // track for DevTools
   if (_ws && _ws.readyState === WebSocket.OPEN) {
     _ws.send(JSON.stringify(action))
   } else if (!_wasConnected && _queue.length < WS_MAX_QUEUE) {
-    _queue.push(action)  // initial connect race — WS not ready yet
+    // Initial connect race — WS not ready yet
+    _queue.push(action)
+  } else if (_wasConnected) {
+    // Disconnected after initial connection started — persist offline
+    _offlineQueue.push(action)
+    _saveOfflineAction(action).catch(() => {})  // best-effort
   }
-  // else: disconnected — drop silently, "Reconnecting…" pill visible
+  // else: never connected yet and queue full — drop (WS_MAX_QUEUE safety)
+}
+
+// ── Redux DevTools Integration ─────────────────────────────────────
+
+interface DevToolsConnection {
+  init: (state: unknown) => void
+  send: (action: { type: string; payload?: unknown }, state: unknown) => void
+  subscribe: (listener: (message: { type: string; payload?: unknown; state?: string }) => void) => () => void
+  disconnect: () => void
+}
+
+let _devtools: DevToolsConnection | null = null
+let _devtoolsConnected = false
+
+function _initDevTools(): void {
+  if (_devtoolsConnected) return
+  const ext = (window as unknown as Record<string, unknown>).__REDUX_DEVTOOLS_EXTENSION__
+  if (!ext) return
+  
+  try {
+    _devtools = (ext as { connect: () => DevToolsConnection }).connect()
+    if (_devtools) {
+      _devtoolsConnected = true
+      _devtools.subscribe((msg) => {
+        if (msg.type === 'DISPATCH') {
+          const payload = msg.payload as { type?: string } | undefined
+          if (payload?.type === 'JUMP_TO_STATE' || payload?.type === 'JUMP_TO_ACTION') {
+            // DevTools time-travel request — we don't have the state history on client
+            // The server handles time-travel via TT commands
+            console.log('[aio] DevTools time-travel: use Ctrl+. panel for client-side state navigation')
+          }
+        }
+      })
+      // Send initial state
+      if (_state !== null) {
+        _devtools.init(_state)
+      }
+    }
+  } catch {
+    // DevTools not available or failed to connect
+  }
+}
+
+function _sendDevTools(action: { type: string; payload?: unknown }, state: unknown): void {
+  if (_devtools && _devtoolsConnected) {
+    try {
+      _devtools.send(action, state)
+    } catch {
+      // DevTools disconnected
+      _devtoolsConnected = false
+    }
+  }
+}
+
+/** Connect to Redux DevTools extension (call after useAio in dev mode) */
+export function connectDevTools(): void {
+  _initDevTools()
+  if (_devtools && _state !== null) {
+    try {
+      _devtools.init(_state)
+    } catch { /* ignore */ }
+  }
+}
+
+/** Disconnect from Redux DevTools */
+export function disconnectDevTools(): void {
+  if (_devtools) {
+    try {
+      _devtools.disconnect()
+    } catch { /* ignore */ }
+    _devtools = null
+    _devtoolsConnected = false
+  }
 }
 
 /** React hook — connects to server via WS, syncs state, auto-reconnects. Singleton: safe to call from any component. */

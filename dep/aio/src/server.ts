@@ -558,10 +558,6 @@ export function createServer(config: ServerConfig): ServerHandle {
             prod: prod,
           })
         }
-        if (route === 'stream') {
-          // SSE — push action/effect/state events (future: wire into hooks)
-          return err('SSE stream not yet implemented', 501)
-        }
       }
 
       // POST endpoints — control

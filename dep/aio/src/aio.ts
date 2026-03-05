@@ -4,17 +4,34 @@ import { createServer, type ServerHandle } from './server.ts'
 import { launchElectron, launchElectronClient, type AioMeta } from './electron.ts'
 import { join, resolve } from '@std/path'
 import { deepMerge } from './deep-merge.ts'
-import { createDispatch, type AioError } from './dispatch.ts'
-import { createTT, record, undo, redo, travelTo, pause, resume, stateAt, toBroadcast, type TTState } from './time-travel.ts'
+import { createDispatch, type AioError, type PerfMode, type PerfBudget } from './dispatch.ts'
+import { createTT, record, undo, redo, travelTo, pause, resume, stateAt, toBroadcast, type TTState, type PerfMetric } from './time-travel.ts'
 import { isScheduleEffect, createScheduleManager, type ScheduleEffect, type ScheduleDef } from './schedule.ts'
 import { openDb, loadTables, syncTables, type TableDef, type AioDB } from './sql.ts'
 
 /** Framework version — printed by --version, checked in tests */
-export const VERSION = '0.2.0'
+export const VERSION = '0.3.0'
+
+/** Validates that framework version matches deno.json version at build time */
+function validateVersion(): void {
+  try {
+    // This check runs at build time for compile targets
+    // At runtime in dev mode, deno.json may not be accessible
+    const denoJson = new URL('../../deno.json', import.meta.url)
+    const content = Deno.readTextFileSync(denoJson)
+    const parsed = JSON.parse(content) as { version?: string }
+    if (parsed.version && parsed.version !== VERSION) {
+      console.warn(`[aio] version mismatch: aio.ts=${VERSION}, deno.json=${parsed.version}`)
+    }
+  } catch { /* deno.json not accessible at runtime — skip */ }
+}
+
+// Run validation on first import
+validateVersion()
 
 /** User identity — resolved from static token map */
 export type AioUser = { id: string; role: string }
-export type { AioError } from './dispatch.ts'
+export type { AioError, PerfMode, PerfBudget } from './dispatch.ts'
 
 
 // Electron + browser window options
@@ -46,6 +63,10 @@ export type AioConfig<S, A, E> = {
   headless?: boolean             // default: false — skip browser/electron, server-only (for CLI apps)
   schedules?: ScheduleDef[]      // static scheduled effects — started on boot
   db?: Record<string, TableDef>  // SQLite table definitions — arrays auto-sync
+  perfMode?: PerfMode           // 'strict' (default) or 'soft' — how to report performance violations
+  perfBudget?: PerfBudget       // override default budgets (reduce: 100, effect: 5)
+  effectTimeout?: number        // ms to wait for async effects before warning (default: 30000 = 30s)
+  freezeState?: boolean         // default: false in prod, true in dev — deep freeze state after reduce to catch mutations
   onRestore?:    (state: S) => S       // transform state after restore, before server starts
   // Lifecycle hooks — observe-only, all optional, error-guarded
   onAction?:     (action: A, state: S, user?: AioUser) => void
@@ -67,6 +88,20 @@ export type AioApp<S = unknown, A = unknown> = {
   close: () => Promise<void>
   mode?: string  // 'standalone' in Android WebView builds — branch effects accordingly
   port?: number  // server port — available after aio.run(), useful for connectCli()
+}
+
+/** Composes multiple beforeReduce functions into one. */
+export function composeMiddleware<S, A>(
+  ...fns: NonNullable<AioConfig<S, A, unknown>['beforeReduce']>[]
+): (action: A, state: S) => A | null {
+  return (action: A, state: S): A | null => {
+    let result: A | null = action
+    for (const fn of fns) {
+      if (result === null) return null
+      result = fn(result, state)
+    }
+    return result
+  }
 }
 
 // ── Logger ──────────────────────────────────────────────────────────
@@ -158,6 +193,19 @@ export async function lint(state: unknown, config: { reduce?: unknown; execute?:
         const match = content.match(/function\s+execute\s*\(\s*(\w+)/)
         if (match && /^effect$/i.test(match[1])) {
           r.hint.push(`execute.ts: first param is "${match[1]}" — signature is execute(app, effect), matching reduce(state, action)`)
+        }
+        // Check for sync I/O anti-patterns
+        if (content.includes('Deno.readTextFileSync') || content.includes('Deno.readDirSync') || content.includes('Deno.statSync')) {
+          r.warn.push('execute.ts: sync I/O (readTextFileSync, readDirSync, statSync) blocks the dispatch loop — use async versions (readTextFile, readDir, stat) instead')
+        }
+        if (content.includes('Deno.writeTextFileSync')) {
+          r.warn.push('execute.ts: sync file write (writeTextFileSync) blocks — use async writeTextFile instead')
+        }
+      }
+      // Check reduce.ts for heavy patterns
+      if (entry.name === 'reduce.ts') {
+        if (/for\s*\([^)]+\)\s*\{[^}]{500}/.test(content)) {
+          r.hint.push('reduce.ts: large loop detected — consider moving heavy computation to an effect')
         }
       }
       // Check .tsx files for imports that won't resolve in the browser
@@ -559,6 +607,14 @@ async function _run<S, A, E>(initialState: S, config: AioConfig<S, A, E>): Promi
     (action) => dispatch(action as A), log
   )
 
+  // Track per-action performance for dev-mode time-travel panel
+  let lastPerf: PerfMetric | undefined
+  const onPerf = tt
+    ? (timing: { actionType: string; reduce: number; effects: number; budget: { reduce: number; effect: number } }) => {
+        lastPerf = { reduce: timing.reduce, effects: timing.effects, budget: timing.budget }
+      }
+    : undefined
+
   // Shared dispatch loop — re-entrant-safe, overflow-guarded
   const dispatch = createDispatch<S, A, E>({
     reduce: tt
@@ -568,7 +624,8 @@ async function _run<S, A, E>(initialState: S, config: AioConfig<S, A, E>): Promi
             return { state: s, effects: [] as E[] }
           }
           const result = hookedReduce(s, a)
-          tt = record(tt!, a as unknown as { type: string }, result.state)
+          tt = record(tt!, a as unknown as { type: string }, result.state, lastPerf)
+          lastPerf = undefined
           server.broadcastTT()
           return result
         }
@@ -582,6 +639,10 @@ async function _run<S, A, E>(initialState: S, config: AioConfig<S, A, E>): Promi
     onDone: () => { _dispatchUser = undefined; if (!tt?.paused) { schedulePersist(); } server.broadcast() },
     log, debug: VERBOSE,
     onError,
+    perfMode: config.perfMode,
+    perfBudget: config.perfBudget,
+    freezeState: config.freezeState ?? !prod,  // default: true in dev, false in prod
+    onPerf,
   })
 
   const app: AioApp<S, A> = {

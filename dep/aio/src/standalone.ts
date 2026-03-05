@@ -6,7 +6,7 @@ import { produce, type Draft } from 'immer'
 import { msg } from './msg.ts'
 import { actions, effects } from './factory.ts'
 import { deepMerge } from './deep-merge.ts'
-import { createDispatch } from './dispatch.ts'
+import { createDispatch, type PerfMode, type PerfBudget } from './dispatch.ts'
 import type { AioApp } from './aio.ts'
 import { isScheduleEffect, type ScheduleEffect } from './schedule.ts'
 
@@ -47,6 +47,9 @@ type StandaloneConfig<S, A, E> = {
   getUIState?: (state: S) => unknown
   persistKey?: string
   persistDebounce?: number       // ms between localStorage writes (default: 100)
+  perfMode?: PerfMode           // 'strict' or 'soft' — performance violation handling
+  perfBudget?: PerfBudget       // override default budgets
+  freezeState?: boolean         // deep freeze state after reduce to catch mutations (default: true)
   onRestore?: (state: S) => S    // transform state after restore, before UI renders
 }
 
@@ -110,11 +113,20 @@ export function initStandalone<S, A, E>(initialState: S, config: StandaloneConfi
 
   const dispatch = createDispatch<S, A, E>({
     reduce,
-    execute: (effect) => { if (isScheduleEffect(effect)) return; execute(app, effect as E) },
+    execute: (effect) => {
+      if (isScheduleEffect(effect)) {
+        console.warn('[aio] scheduled effects are not supported in standalone mode — ignoring', effect)
+        return
+      }
+      execute(app, effect as E)
+    },
     getState: () => state,
     setState: (s) => { state = s },
     onDone: () => { _state = getUIState(state); _notify(); schedulePersist() },
     log: standaloneLog, debug: false,
+    perfMode: config.perfMode,
+    perfBudget: config.perfBudget,
+    freezeState: config.freezeState ?? true,  // default: true for standalone
   })
 
   const app: AioApp<S, A> = {

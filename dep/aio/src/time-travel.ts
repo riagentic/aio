@@ -1,12 +1,20 @@
 // Time-travel debugger — pure functions, no side effects
 // Active in dev mode, zero cost in prod
 
+/** Performance timing for a single action (dev mode only) */
+export type PerfMetric = {
+  reduce: number    // ms
+  effects: number   // ms (sync portion only)
+  budget: { reduce: number; effect: number }
+}
+
 /** Single history entry — full state snapshot per action */
 export type HistoryEntry<S, A> = {
   id: number
   action: A
   state: S
   ts: number
+  perf?: PerfMetric  // only populated in dev mode
 }
 
 /** Server-side time-travel state */
@@ -19,7 +27,7 @@ export type TTState<S, A> = {
 
 /** Wire format — no state snapshots, action type only */
 export type TTBroadcast = {
-  entries: { id: number; type: string; ts: number }[]
+  entries: { id: number; type: string; ts: number; perf?: PerfMetric }[]
   index: number
   paused: boolean
 }
@@ -40,10 +48,10 @@ export function createTT<S, A>(): TTState<S, A> {
 }
 
 /** Appends entry, caps at MAX_ENTRIES (evicts oldest), truncates forward if resumed mid-history */
-export function record<S, A>(tt: TTState<S, A>, action: A, state: S): TTState<S, A> {
+export function record<S, A>(tt: TTState<S, A>, action: A, state: S, perf?: PerfMetric): TTState<S, A> {
   // Truncate forward entries (standard undo/redo: branch, not tree)
   const entries = tt.entries.slice(0, tt.index + 1)
-  const entry: HistoryEntry<S, A> = { id: tt.nextId, action, state: structuredClone(state), ts: Date.now() }
+  const entry: HistoryEntry<S, A> = { id: tt.nextId, action, state: structuredClone(state), ts: Date.now(), perf }
   entries.push(entry)
 
   // Cap at MAX_ENTRIES — evict oldest
@@ -103,6 +111,7 @@ export function toBroadcast<S, A>(tt: TTState<S, A>): TTBroadcast {
       id: e.id,
       type: (e.action as { type?: string })?.type ?? '?',
       ts: e.ts,
+      perf: e.perf,
     })),
     index: tt.index,
     paused: tt.paused,

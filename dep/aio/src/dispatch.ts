@@ -2,12 +2,48 @@
 // Re-entrant-safe: effects can call dispatch(), actions are queued and drained in order
 import type { ScheduleEffect } from './schedule.ts'
 
+/** Performance mode — strict reports errors, soft only warns */
+export type PerfMode = 'strict' | 'soft'
+
+/** Performance budgets in milliseconds */
+export type PerfBudget = {
+  reduce?: number    // default: 100 — "feels instant" threshold
+  effect?: number    // default: 5 — sync portion only, async by definition doesn't block
+}
+
+/** Per-action performance timing */
+export type PerfTiming = {
+  actionType: string
+  reduce: number
+  effects: number
+  budget: { reduce: number; effect: number }
+}
+
+/** Default budgets */
+const DEFAULT_REDUCE_BUDGET = 100
+const DEFAULT_EFFECT_BUDGET = 5
+
+/** Deep freeze for dev mode immutability checking */
+export function deepFreeze<T>(obj: T): T {
+  if (obj === null || typeof obj !== 'object') return obj
+  if (Object.isFrozen(obj)) return obj
+  Object.freeze(obj)
+  for (const key of Object.keys(obj as Record<string, unknown>)) {
+    const val = (obj as Record<string, unknown>)[key]
+    if (val !== null && typeof val === 'object') deepFreeze(val)
+  }
+  return obj
+}
+
 /** Error info passed to onError hook */
 export type AioError = {
-  source: 'reduce' | 'effect'
-  error: unknown
-  actionType?: string   // action that caused the reduce error
-  effectType?: string   // effect type that threw
+  source: 'reduce' | 'effect' | 'performance'
+  error?: unknown
+  actionType?: string   // action that caused the reduce/perf error
+  effectType?: string   // effect type that threw or was slow
+  duration?: number     // actual duration in ms (performance errors)
+  budget?: number       // budget violated in ms (performance errors)
+  message?: string      // human-readable message
 }
 
 /** Safety limit — prevents infinite effect→dispatch loops */
@@ -27,6 +63,10 @@ export type DispatchDeps<S, A, E> = {
   }
   debug: boolean
   onError?: (err: AioError) => void
+  onPerf?: (timing: PerfTiming) => void  // called after each action with timing
+  perfMode?: PerfMode
+  perfBudget?: PerfBudget
+  freezeState?: boolean  // deep freeze state after reduce in dev mode
 }
 
 /** Dispatch function with close() to reject further actions */
@@ -34,7 +74,10 @@ type DispatchFn<A> = ((action: A) => void) & { close: () => void; errorCount: ()
 
 /** Creates a re-entrant-safe dispatch loop that drains queued actions in order */
 export function createDispatch<S, A, E>(deps: DispatchDeps<S, A, E>): DispatchFn<A> {
-  const { reduce, execute, getState, setState, onDone, log, onError } = deps
+  const { reduce, execute, getState, setState, onDone, log, onError, onPerf, perfMode, perfBudget, freezeState } = deps
+  const strictPerf = perfMode !== 'soft'  // default: strict
+  const reduceBudget = perfBudget?.reduce ?? DEFAULT_REDUCE_BUDGET
+  const effectBudget = perfBudget?.effect ?? DEFAULT_EFFECT_BUDGET
   let dispatching = false
   let closed = false
   let errors = 0
@@ -48,6 +91,18 @@ export function createDispatch<S, A, E>(deps: DispatchDeps<S, A, E>): DispatchFn
   function reportError(err: AioError): void {
     errors++
     if (onError) try { onError(err) } catch (e) { log.error(`onError hook threw: ${e}`) }
+  }
+
+  function reportPerf(source: 'reduce' | 'effect', duration: number, budget: number, type?: string): void {
+    const typeLabel = type ? ` (${type})` : ''
+    const msg = `${source} exceeded budget: ${duration}ms > ${budget}ms${typeLabel}`
+    
+    if (strictPerf) {
+      log.error(msg)
+      reportError({ source: 'performance', duration, budget, actionType: source === 'reduce' ? type : undefined, effectType: source === 'effect' ? type : undefined, message: msg })
+    } else {
+      log.warn(msg)
+    }
   }
 
   function dispatch(action: A): void {
@@ -69,12 +124,25 @@ export function createDispatch<S, A, E>(deps: DispatchDeps<S, A, E>): DispatchFn
       if (deps.debug) log.debug(`action → reduce: ${tag(current)}`)
 
       let reduced: { state: S; effects: (E | ScheduleEffect)[] }
+      const actionType = (current as Record<string, unknown>)?.type as string | undefined
+      
+      // Measure reduce time
+      const reduceStart = performance.now()
       try {
         reduced = reduce(getState(), current)
       } catch (e) {
         log.error(`reduce error on ${tag(current)}: ${e}`)
-        reportError({ source: 'reduce', error: e, actionType: (current as Record<string, unknown>)?.type as string })
+        reportError({ source: 'reduce', error: e, actionType })
         continue
+      }
+      const reduceDuration = performance.now() - reduceStart
+      
+      // Track total effect time for this action
+      let totalEffectDuration = 0
+      
+      // Check reduce performance budget
+      if (reduceDuration > reduceBudget) {
+        reportPerf('reduce', reduceDuration, reduceBudget, actionType)
       }
 
       if (!reduced || typeof reduced !== 'object' || !('state' in reduced) || !Array.isArray(reduced.effects)) {
@@ -91,7 +159,8 @@ export function createDispatch<S, A, E>(deps: DispatchDeps<S, A, E>): DispatchFn
       }
 
       const prev = getState()
-      setState(reduced.state)
+      const nextState = freezeState ? deepFreeze(reduced.state) : reduced.state
+      setState(nextState)
       if (deps.debug && prev !== reduced.state && typeof reduced.state === 'object' && reduced.state && typeof prev === 'object' && prev) {
         const changed = Object.keys(reduced.state as Record<string, unknown>).filter(k =>
           (reduced.state as Record<string, unknown>)[k] !== (prev as Record<string, unknown>)[k]
@@ -105,19 +174,42 @@ export function createDispatch<S, A, E>(deps: DispatchDeps<S, A, E>): DispatchFn
           continue
         }
         if (deps.debug) log.debug(`effect → execute: ${tag(effect)}`)
+        
+        const effectType = (effect as Record<string, unknown>)?.type as string | undefined
+        const effectStart = performance.now()
+        
         try {
           const r = execute(effect)
+          const effectDuration = performance.now() - effectStart
+          totalEffectDuration += effectDuration
+          
+          // Check effect performance budget (sync portion only)
+          // Async effects return promises immediately — we measure sync time
+          if (effectDuration > effectBudget) {
+            reportPerf('effect', effectDuration, effectBudget, effectType)
+          }
+          
           // catch rejected promises from async effects
           if (r && typeof (r as Promise<void>).catch === 'function') {
             (r as Promise<void>).catch(e => {
               log.error(`async effect error on ${tag(effect)}: ${e}`)
-              reportError({ source: 'effect', error: e, effectType: (effect as Record<string, unknown>)?.type as string })
+              reportError({ source: 'effect', error: e, effectType })
             })
           }
         } catch (e) {
           log.error(`effect error on ${tag(effect)}: ${e}`)
-          reportError({ source: 'effect', error: e, effectType: (effect as Record<string, unknown>)?.type as string })
+          reportError({ source: 'effect', error: e, effectType })
         }
+      }
+      
+      // Report per-action performance timing
+      if (onPerf && actionType) {
+        onPerf({
+          actionType,
+          reduce: reduceDuration,
+          effects: totalEffectDuration,
+          budget: { reduce: reduceBudget, effect: effectBudget },
+        })
       }
     }
 
