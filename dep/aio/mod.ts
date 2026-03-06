@@ -58,7 +58,7 @@ export type { ScheduleEffect, ScheduleDef } from './src/schedule.ts'
  * @see {@link https://aio.dev/manual#sqlite-persistence}
  */
 export { table, pk, text, integer, real, ref } from './src/sql.ts'
-export type { AioDB, AioTable, ColumnDef, ColumnOpts, TableDef, WhereClause, WhereOp } from './src/sql.ts'
+export type { AioDB, AioTable, ColumnDef, ColumnOpts, QueryOpts, TableDef, WhereClause, WhereOp } from './src/sql.ts'
 
 /**
  * Memoized selectors for expensive state derivations.

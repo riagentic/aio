@@ -4,6 +4,7 @@
 import { useState, useEffect, createElement, type ComponentType } from 'react'
 
 const WS_MAX_QUEUE = 100
+const OFFLINE_MAX_QUEUE = 100             // max actions queued while disconnected (post-connect)
 const OFFLINE_MAX_AGE = 24 * 60 * 60 * 1000  // 24 hours
 
 // ── Offline queue persistence (IndexedDB) ─────────────────────────────
@@ -387,9 +388,12 @@ function _send(action: { type: string; payload?: unknown }) {
     // Initial connect race — WS not ready yet
     _queue.push(action)
   } else if (_wasConnected) {
-    // Disconnected after initial connection started — persist offline
-    _offlineQueue.push(action)
-    _saveOfflineAction(action).catch(() => {})  // best-effort
+    // Disconnected after initial connection started — persist offline (capped to prevent OOM)
+    if (_offlineQueue.length < OFFLINE_MAX_QUEUE) {
+      _offlineQueue.push(action)
+      _saveOfflineAction(action).catch(() => {})  // best-effort
+    }
+    // else: offline queue full — drop (same behaviour as initial-connect WS_MAX_QUEUE)
   }
   // else: never connected yet and queue full — drop (WS_MAX_QUEUE safety)
 }

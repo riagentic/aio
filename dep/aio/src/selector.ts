@@ -56,18 +56,27 @@ export function createSelector<S, R1, R2, R3, R4, R5, Result>(
   selector5: Selector<S, R5>,
   resultFunc: (r1: R1, r2: R2, r3: R3, r4: R4, r5: R5) => Result,
 ): Selector<S, Result>
+export function createSelector<S, R1, R2, R3, R4, R5, R6, Result>(
+  selector1: Selector<S, R1>,
+  selector2: Selector<S, R2>,
+  selector3: Selector<S, R3>,
+  selector4: Selector<S, R4>,
+  selector5: Selector<S, R5>,
+  selector6: Selector<S, R6>,
+  resultFunc: (r1: R1, r2: R2, r3: R3, r4: R4, r5: R5, r6: R6) => Result,
+): Selector<S, Result>
 export function createSelector<S, Result>(
   ...args: [...Selector<S, unknown>[], (...inputs: unknown[]) => Result]
 ): Selector<S, Result> {
   const selectors = args.slice(0, -1) as Selector<S, unknown>[]
   const combiner = args[args.length - 1] as (...inputs: unknown[]) => Result
   
-  let lastInputs: unknown[] | null = null
+  let lastInputs: unknown[] | null = null  // null on first call → always recomputes
   let lastResult: Result | undefined
-  
+
   return (state: S): Result => {
     const inputs = selectors.map(fn => fn(state))
-    
+
     if (lastInputs && inputs.length === lastInputs.length) {
       let changed = false
       for (let i = 0; i < inputs.length; i++) {

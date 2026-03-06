@@ -59,3 +59,36 @@ export async function writePlaceholderIcon(path: string, label: string): Promise
 </svg>`
   await Deno.writeTextFile(path, svg)
 }
+
+/** Format bytes as MB string with one decimal place */
+export function formatMb(bytes: number): string {
+  return (bytes / 1024 / 1024).toFixed(1)
+}
+
+/** Download + cache appimagetool for the given arch. Returns the cached binary path. */
+export async function ensureAppimagetool(arch: string, cacheDir: string): Promise<string> {
+  await Deno.mkdir(cacheDir, { recursive: true })
+  const toolPath = join(cacheDir, 'appimagetool')
+  try {
+    await Deno.stat(toolPath)
+    return toolPath
+  } catch { /* not cached — download */ }
+
+  console.log('[appimage] downloading appimagetool...')
+  const url = `https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-${arch}.AppImage`
+  const resp = await fetch(url)
+  if (!resp.ok) {
+    console.error(`[appimage] \u2717 failed to download appimagetool: ${resp.status}`)
+    Deno.exit(1)
+  }
+  const bytes = new Uint8Array(await resp.arrayBuffer())
+  // Sanity check — verify downloaded file is a valid ELF binary
+  if (bytes.length < 4 || bytes[0] !== 0x7f || bytes[1] !== 0x45 || bytes[2] !== 0x4c || bytes[3] !== 0x46) {
+    console.error('[appimage] \u2717 downloaded file is not a valid ELF binary')
+    Deno.exit(1)
+  }
+  await Deno.writeFile(toolPath, bytes)
+  await Deno.chmod(toolPath, 0o755)
+  console.log('[appimage] \u2713 appimagetool cached')
+  return toolPath
+}

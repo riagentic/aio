@@ -61,7 +61,7 @@ Same `src/` code runs in both modes. The `'aio'` import resolves to `browser.ts`
 - Error overlay — transpile errors shown on page instead of blank screen
 - State persistence to Deno.Kv with deep merge on restart
 - Electron window launch (with configurable lifecycle)
-- Startup validation (including `deno approve-scripts` detection)
+- Startup validation (Electron install check, missing configs, etc.)
 - CLI argument parsing
 
 ## Project layouts
@@ -248,8 +248,9 @@ case E.SAVE_FILE:
 | `reduce` | `(state, action) => { state, effects }` | **required** | Pure state machine — takes state + action, returns new state + effects |
 | `execute` | `(app, effect) => void` | **required** | Side effect handler — API calls, timers, logging |
 | `persist` | `boolean` | `true` | Auto-persist state to Deno.Kv |
-| `persistKey` | `string` | `"state"` | Key used in Deno.Kv |
+| `persistKey` | `string` | `"state"` | KV key prefix |
 | `persistDebounce` | `number` | `100` | Milliseconds between KV writes |
+| `persistMode` | `'single' \| 'multi'` | `'single'` | `'multi'` stores each top-level state key separately — no 65KB/key limit |
 | `getDBState` | `(state) => any` | identity | Filter state before persisting (strip transient data) |
 | `getUIState` | `(state, user?: AioUser) => unknown` | identity | Filter state before sending to UI (strip secrets, per-user filtering) |
 | `port` | `number` | `8000` | HTTP/WS server port |
@@ -321,7 +322,7 @@ getUIState: (state) => ({
 })
 ```
 
-Multiple input selectors supported (up to 5). Result function only runs when inputs change.
+Multiple input selectors supported (up to 6). Result function only runs when inputs change.
 
 ## `deepFreeze(state)`
 
@@ -602,6 +603,20 @@ await aio.run(initialState, {
 })
 ```
 
+### Large state — multi-key mode
+
+The default `'single'` mode stores all state in one Deno.Kv entry (65KB limit). For larger state, use `persistMode: 'multi'` — each top-level state key is stored separately, so the limit applies per-key rather than to the whole state object:
+
+```ts
+await aio.run(initialState, {
+  reduce,
+  execute,
+  persistMode: 'multi',  // stores state.todos, state.users, etc. as separate KV keys
+})
+```
+
+`'multi'` mode is backward-compatible — restoring from an empty store falls back gracefully. Not compatible with an existing `'single'` store for the same `persistKey` — use a different `persistKey` or clear the KV store when switching.
+
 ### Disabling persistence
 
 ```ts
@@ -691,16 +706,36 @@ Methods:
 
 | Method | Returns | Description |
 |--------|---------|-------------|
-| `.all()` | `T[]` | All rows |
+| `.all(opts?)` | `T[]` | All rows |
 | `.find(id)` | `T \| undefined` | By primary key |
-| `.where(filter)` | `T[]` | Filtered rows |
+| `.where(filter, opts?)` | `T[]` | AND-filtered rows |
+| `.whereOr(filters)` | `T[]` | OR-filtered rows — array of clauses |
 | `.insert(row)` | `{ lastInsertRowId }` | Insert one |
 | `.insertMany(rows)` | `void` | Insert many (transaction) |
+| `.upsert(row)` | `{ lastInsertRowId, changes }` | Insert or replace (by PK) |
 | `.update(where, set)` | `{ changes }` | Update matching |
 | `.delete(where)` | `{ changes }` | Delete matching |
 | `.count(where?)` | `number` | Count rows |
 
 Where filter supports equality (`{ field: value }`) and operators: `{ field: { gt, gte, lt, lte, ne, like, in } }`.
+
+> **Note:** The operator form is detected by key shape — a value object whose keys are only `gt/gte/lt/lte/ne/like/in` will be treated as an operator, not a plain value. Avoid using those words as column names in your schema.
+
+`all()` and `where()` accept an optional `QueryOpts` second argument: `{ orderBy: 'field' | ['field', 'asc'|'desc'], limit: number, offset: number }`.
+
+```ts
+// Paginated query, sorted descending
+const page1 = app.db!.orders.where(
+  { status: 'open' },
+  { orderBy: ['total', 'desc'], limit: 20, offset: 0 }
+)
+
+// OR filter — match either clause
+const results = app.db!.items.whereOr([{ status: 'active' }, { priority: 'high' }])
+
+// Upsert — insert if new, replace if PK already exists
+app.db!.settings.upsert({ id: 1, theme: 'dark' })
+```
 
 **Note**: Level 2 methods write directly to SQLite, bypassing the reducer. Use for effects like batch imports or external data loading — not for normal user-driven state changes.
 
@@ -919,18 +954,17 @@ export function Header({ title }: { title: string }) {
 ## Electron
 
 Electron is on by default. AIO looks for (in order):
-1. `$ELECTRON_PATH` env var — custom path (used by AppImage)
-2. `dist/linux-unpacked/aio-ui-electron` — packaged binary (electron-builder)
-3. `node_modules/.bin/electron` — dev binary
+1. `$ELECTRON_PATH` env var — set by packaged launchers (`AppRun` / `run.sh` / `run.bat`)
+2. `node_modules/.bin/electron` — dev binary
 
 Install for dev:
 ```sh
-deno install npm:electron
-deno approve-scripts    # required — Deno needs permission for electron's postinstall
-deno install            # re-run to complete electron setup
+deno add npm:electron && deno approve-scripts npm:electron
 ```
 
-The startup linter will warn you if electron is installed but `dist/` is missing (scripts not approved).
+> **Note:** Do not use `npm install electron` — it removes Deno-managed package symlinks (esbuild, etc.) from `node_modules/`.
+
+The startup linter will warn you if electron is not installed.
 
 Disable Electron (browser-only mode):
 
@@ -977,7 +1011,9 @@ deno task dev --port=3000 --no-electron --no-persist --title="My App"
 | `--prod` | Force prod mode — serve pre-built `dist/app.js` (auto-detected in compiled binaries) |
 | `--width=N` | Override Electron window width (default: 800) |
 | `--height=N` | Override Electron window height (default: 600) |
-| `--expose` | Bind `0.0.0.0` with auth token — share app with other devices on LAN |
+| `--expose` | Bind `0.0.0.0` + auto-HTTPS + auth token — share app with other devices on LAN |
+| `--cert=PATH` | TLS certificate file (PEM) — used with `--expose` (auto-generated if omitted) |
+| `--key=PATH` | TLS private key file (PEM) — used with `--expose` (auto-generated if omitted) |
 | `--headless` | Server-only — no browser or Electron (for CLI apps using `connectCli()`) |
 | `--url=URL` | Thin client mode — launch Electron connecting to remote aio server (no local server) |
 | `--version` | Print aio version and exit |
@@ -1034,7 +1070,7 @@ When `aio.run()` starts, it checks your app and reports issues:
 **What it checks:**
 - `✗` **Errors** (prevents startup): state is null/not object, reduce/execute missing, App.tsx missing
 - `⚠` **Warnings** (app starts but may not work): App.tsx has no default export, esbuild not installed, sync I/O in execute.ts
-- `·` **Hints** (suggestions): leftover `createRoot`, `import React`, old `'../dep/aio/'` imports, electron missing `deno approve-scripts`
+- `·` **Hints** (suggestions): leftover `createRoot`, `import React`, old `'../dep/aio/'` imports, electron not installed
 
 **Sync I/O warnings:**
 The linter detects blocking operations in `execute.ts`:
@@ -1091,20 +1127,37 @@ deno task dev --expose
 
 **What happens:**
 1. Server binds to `0.0.0.0` (all network interfaces)
-2. A random access token is generated and printed to the console
-3. All HTTP and WebSocket requests require the token
+2. A self-signed TLS cert is auto-generated (cached in `.aio-tls/`, regenerated if deleted)
+3. Main server listens on HTTPS — `wss://` WebSocket included
+4. A random access token is generated and printed to the console
+5. All HTTP and WebSocket requests require the token
 
 ```
-[12:00:00][WARNING] --expose: server bound to 0.0.0.0 — accessible from network
-[12:00:00][INFO] share: http://localhost:8000?token=a1b2c3d4-...
+[12:00:00][INFO] tls: self-signed cert at .aio-tls/tls-cert.pem
+[12:00:00][WARNING] tls: self-signed — remote browsers will show a security warning. Trust the cert, or use --cert=/path.pem --key=/path.pem for a CA-signed cert
+[12:00:00][INFO] running at https://0.0.0.0:8000 (dev, browser)
+[12:00:00][INFO] share: https://0.0.0.0:8000?token=a1b2c3d4-...
 ```
 
-Share the URL with the token. The token is passed via `?token=` query parameter or `Authorization: Bearer` header. WebSocket connections also pass the token via query param — the browser client handles this automatically.
+Replace `0.0.0.0` with your machine's LAN IP when sharing. The token is passed via `?token=` query parameter or `Authorization: Bearer` header.
+
+**Browser trust flow (self-signed cert):**
+1. Open the share URL in the remote browser
+2. Browser shows a security warning ("Your connection is not private")
+3. Click "Advanced" → "Proceed to [IP] (unsafe)" (one-time per cert)
+4. The cert is cached by the browser — no warning on subsequent visits
+
+**Bring your own cert (CA-signed, no browser warning):**
+```sh
+deno task dev --expose --cert=/etc/ssl/myapp.pem --key=/etc/ssl/myapp.key
+```
 
 **Security notes:**
-- Token auth is not production-grade — it's for local network sharing (demos, testing on phones, etc.)
+- Token auth is intended for trusted local networks (LAN demos, testing on phones, team tools) — not internet exposure
 - Origin validation is skipped when exposed (the token replaces it)
 - The token is a `crypto.randomUUID()` — regenerated on each restart
+- **Token-in-URL risk**: `?token=...` appears in server logs, browser history, and HTTPS `Referer` headers. For sensitive deployments use `Authorization: Bearer <token>` header instead
+- Electron windows on the same machine accept the self-signed cert automatically (no warning)
 
 ## Multi-user auth
 
@@ -1152,6 +1205,53 @@ await aio.run(initialState, {
 ```ts
 type AioUser = { id: string; role: string }
 ```
+
+## Security model
+
+A summary of aio's security posture and known limitations:
+
+### What aio protects
+
+| Threat | Protection |
+|--------|-----------|
+| Unauthorized WebSocket/HTTP access | Token auth (`--expose` or `users:`) — timing-safe comparison |
+| Cross-origin browser requests (localhost) | `Origin` header validation — only same-origin allowed when not exposed |
+| State leakage per user | `getUIState(state, user?)` — server-side filtering per client |
+| Trojan API abuse from web | `/__trojan/*` bound to `127.0.0.1` HTTP-only — unreachable from browser even with TLS |
+| Reducer/effect crashes taking down server | All errors caught and logged, dispatch loop continues |
+| XSS in error overlay | `escHtml()` sanitizes filenames, paths, and error text |
+
+### Known limitations
+
+| Limitation | Mitigation |
+|-----------|-----------|
+| Self-signed cert warning in browsers | One-time "trust" click; or use `--cert`/`--key` with a CA-signed cert |
+| Token appears in URL (`?token=`) | Use `Authorization: Bearer <token>` header instead; avoid sharing URLs in logs |
+| Token regenerates on restart | Compile targets pin the token via env or config; `am` tooling doesn't capture it |
+| `users:` tokens are static secrets in source | Use environment variables: `'alice-token': Deno.env.get('ALICE_TOKEN')!` |
+| `--expose` skips Origin check | Token replaces origin as the auth signal — acceptable for LAN, not internet |
+
+### Intended deployment model
+
+aio is designed for **trusted environments**: localhost tools, LAN dashboards, small teams, desktop apps. The security model is appropriate for:
+
+- Personal tools running on your own machine
+- Internal dashboards on a trusted LAN
+- Demos and prototypes shared with colleagues
+
+For internet-facing deployments, always put a TLS-terminating reverse proxy in front:
+
+```nginx
+# nginx example
+location / {
+  proxy_pass http://127.0.0.1:8000;
+  proxy_http_version 1.1;
+  proxy_set_header Upgrade $http_upgrade;
+  proxy_set_header Connection "upgrade";
+}
+```
+
+Caddy is simpler — `reverse_proxy localhost:8000` with automatic HTTPS.
 
 ## Thin client (`--url`)
 
@@ -1274,6 +1374,8 @@ case A.StopTimer:
 - `0,30 * * * *` — every 30 minutes
 - `0 0 1 * *` — midnight on the 1st of each month
 
+> **Timezone:** Cron patterns run in **UTC**. `0 9 * * *` fires at 09:00 UTC — convert to UTC when writing patterns. e.g. 9 AM London BST = `0 8 * * *`, 9 AM PST = `0 17 * * *`.
+
 **Behavior:**
 - Re-scheduling the same `id` replaces the previous schedule
 - `schedule.after` auto-removes after firing
@@ -1324,7 +1426,7 @@ Build targets follow `compile:<shell>:<topology>` — two axes: **shell** (what 
 │            │ binary + system browser │ exposed server + systemd │
 ├────────────┼─────────────────────────┼──────────────────────────┤
 │ electron   │ compile:electron        │ compile:electron:remote  │
-│            │ AppImage, server inside │ client AppImage, no Deno │
+│            │ AppImage/zip, server    │ client AppImage (Linux)  │
 ├────────────┼─────────────────────────┼──────────────────────────┤
 │ cli        │ compile:cli             │ compile:cli:remote       │
 │            │ binary + WS client API  │ client binary, no server │
@@ -1339,7 +1441,7 @@ Build targets follow `compile:<shell>:<topology>` — two axes: **shell** (what 
 Aliases: compile = compile:browser
 ```
 
-**v0.2:** all 10 targets implemented
+**v0.2:** all 10 targets implemented · **v0.3:** perf budgets, Redux DevTools, incremental SQLite, selectors · **v0.4:** auto-HTTPS, `am watch`, ORM extensions, `persistMode:'multi'`
 
 ### Dev mode
 
@@ -1371,8 +1473,8 @@ deno run -A dep/aio/src/build.ts --compile --force          # skip cache, rebuil
 | Flag | Effect |
 |------|--------|
 | `--compile` | Compile standalone Deno binary |
-| `--electron` | Build AppImage (implies `--compile`) |
-| `--client` | Build client-only AppImage — no Deno runtime (`compile:electron:remote`) |
+| `--electron` | Build Electron package: AppImage (Linux), zip (macOS/Windows) — implies `--compile` |
+| `--client` | Build client-only AppImage — no Deno runtime, Linux only (`compile:electron:remote`) |
 | `--cli` | Build CLI binary — no browser bundle, headless server (`compile:cli`) |
 | `--cli --remote` | Build client-only CLI binary — no server (`compile:cli:remote`) |
 | `--android` | Build APK via Gradle |
@@ -1385,26 +1487,40 @@ deno run -A dep/aio/src/build.ts --compile --force          # skip cache, rebuil
 | `--force` | Skip bundle cache — always rebuild `dist/app.js` |
 | `--release` | Android release build (default: debug) |
 
-### compile:electron (desktop AppImage)
+### compile:electron (desktop app)
 
 ```sh
 deno task compile:electron
 ```
 
-Does everything `compile` does, plus packages the binary with Electron into a portable `.AppImage`:
+Does everything `compile` does, plus packages the binary with Electron. Output varies by platform:
 
+| Platform | Output | Launcher |
+|----------|--------|----------|
+| Linux | `<name>-x86_64.AppImage` or `<name>-aarch64.AppImage` | self-contained, double-click |
+| macOS | `<name>-mac-x64.zip` or `<name>-mac-arm64.zip` | extract, run `./run.sh` |
+| Windows | `<name>-win-x64.zip` | extract, run `run.bat` or `<name>.exe` |
+
+Build steps:
 1. Bundles `dist/app.js` (self-contained, React included)
-2. Compiles deno binary → `dist/AppDir/<name>`
+2. Compiles deno binary → `dist/AppDir/<name>[.exe]`
 3. Copies `node_modules/electron/dist/` → `dist/AppDir/electron/`
-4. Generates `AppRun`, `.desktop` file, icon (`src/icon.png` if present, otherwise SVG placeholder)
-5. Downloads `appimagetool` (cached in `node_modules/.cache/`)
-6. Produces `<name>-x86_64.AppImage` (~137MB)
+4. Generates platform launcher + icon (`src/icon.png` if present, otherwise SVG placeholder)
+5. Linux: downloads `appimagetool` (cached in `node_modules/.cache/`), produces AppImage
+6. Windows/macOS: zips `dist/AppDir/` into a portable archive
 
+All launchers set `$ELECTRON_PATH` pointing to the bundled Electron before starting the Deno binary. State is persisted to the OS user data directory — not inside the read-only package.
+
+**Prerequisite:**
 ```sh
-./my-app-x86_64.AppImage      # runs with Electron window, fully offline
+deno add npm:electron && deno approve-scripts npm:electron   # required before compile:electron
 ```
 
-The AppImage sets `$ELECTRON_PATH` internally, so the deno binary finds the bundled Electron automatically. State is persisted to `~/.local/share/<app-name>/data.kv` (XDG spec) — not inside the read-only AppImage.
+**Cross-platform builds via CI** (`.github/workflows/release.yml`):
+```sh
+git tag v1.0.0 && git push origin v1.0.0   # triggers build on all 3 platforms
+```
+Produces AppImage (Linux x64 + arm64), `.zip` (macOS x64 + arm64, Windows x64) as GitHub Release artifacts.
 
 ### compile:electron:remote (thin client AppImage)
 
@@ -1412,7 +1528,7 @@ The AppImage sets `$ELECTRON_PATH` internally, so the deno binary finds the bund
 deno task compile:electron:remote
 ```
 
-Builds a standalone Electron app with a connect page — no Deno runtime, no app code bundled. Users type a server address and connect to any running aio server.
+Builds a standalone Electron app with a connect page — no Deno runtime, no app code bundled. Users type a server address and connect to any running aio server. Linux only.
 
 The output is `aio-client-x86_64.AppImage` (~80MB, Electron only). Supports `--url=` argument for direct connection without the connect page.
 
@@ -2087,8 +2203,8 @@ All endpoints inherit auth (token/user checks run before routing). In `--expose`
 | State resets on restart | `persist: true` (default) + `"unstable": ["kv"]` in deno.json |
 | `import from '../dep/aio/'` error | Always use `import from 'aio'` — never relative paths |
 | Port in use | Kill old process or use `--port=N` |
-| Electron not found | `deno install npm:electron` then `deno approve-scripts` then `deno install` again. Or use `--no-electron` |
-| Electron installed but no window | Run `deno approve-scripts` — electron's postinstall needs manual approval in Deno |
+| Electron not found | `deno add npm:electron && deno approve-scripts npm:electron`. Or use `--no-electron` to open browser instead |
+| Electron installed but no window | Check that `node_modules/electron/dist/` exists — run `deno approve-scripts npm:electron` then `deno install` |
 | Server dies when Electron closes | Use `--keep-alive` flag or `ui: { keepAlive: true }` in config |
 | Build Error: could not find 'npm:esbuild' | Add `"esbuild": "npm:esbuild@^0.24"` to deno.json imports, then `deno install` |
 | `am status` says "stopped" | No running process. Stale `.aio.pid` auto-cleaned. Check `.aio.log` for errors |
@@ -2137,7 +2253,7 @@ deno task am restart              # stop (waits internally) + start (returns imm
 deno task am status               # stopped|starting|started|stopping
 ```
 
-`start` and `stop` return immediately by default — use `--wait[=N]` to block until the action completes. `restart` always waits for stop internally (port must be free), then spawns and returns immediately. `status` cross-validates PID file against process liveness and port response. Exit code: `started` → 0, everything else → 1.
+`start` and `stop` return immediately by default — use `--wait[=N]` to block until the action completes. `restart` always waits for stop internally (port must be free), then spawns and returns immediately. `status` cross-validates PID file against process liveness and port response. Exit codes: `started` → 0, `stopped` → 1, `starting`/`stopping` (transitional) → 2.
 
 `start` writes `.aio.pid` with `status: starting`, logs to `.aio.log`. `stop` tries graceful shutdown via trojan API, falls back to SIGTERM, escalates to SIGKILL after timeout. Kill sequence is always graceful-first: SIGTERM → wait 2s → SIGKILL.
 
@@ -2209,6 +2325,9 @@ deno task am schedules            # active timers/cron
 deno task am log                  # tail last 50 lines of .aio.log
 deno task am log --filter=ERROR   # filter log lines
 deno task am log --lines=100      # show more lines
+deno task am log --follow         # stream new lines in real-time (like tail -f), also: -f
+deno task am watch                # hot-restart on .ts/.tsx change in src/
+deno task am watch lib            # watch a different directory
 deno task am errors               # last transpile error (dev mode)
 deno task am metrics              # uptime, connections, schedule count
 deno task am health               # health check (exit 0 = ok)

@@ -100,4 +100,127 @@ send(A.increment(5))
 
 ---
 
+## v0.2 → v0.3
+
+### New features
+
+- **Performance budgets** — dispatch loop timing with configurable thresholds. `perfMode: 'strict' | 'soft'` and `perfBudget: { reduce?, effect? }` in config. Violations call `onError({ source: 'performance', ... })` or warn (soft). Per-action perf metrics recorded in time-travel history. See [manual.md — Performance budgets](manual.md#performance-budgets)
+- **Redux DevTools** — connect to the Redux DevTools browser extension for state inspection and action history. `connectDevTools()` / `disconnectDevTools()` from `'aio'`. See [manual.md — Redux DevTools](manual.md#redux-devtools-integration)
+- **Incremental SQLite sync** — tables with a `pk()` column now use row-level INSERT/UPDATE/DELETE diffs instead of full table replacement. Significantly faster for large datasets. No migration needed — PK detection is automatic
+- **Memoized selectors** — `createSelector(...inputFns, resultFn)` and `createSliceSelector`. Caches derived values until inputs change, preventing redundant recalculations. See [manual.md — Selectors](manual.md#selectors)
+- **`matchEffect(effect, handlers, fallback?)`** — typed alternative to switch/case in `execute()`. Scales better for large effect catalogs. See [manual.md — matchEffect](manual.md#matcheffect)
+- **`composeMiddleware(...fns)`** — compose multiple `beforeReduce` functions into a single pipeline. Return `null` from any function to drop the action. See [manual.md — composeMiddleware](manual.md#composemiddleware)
+- **Android schedule warning** — unsupported schedule effects on Android now log `console.warn` instead of silently dropping
+
+### Breaking changes
+
+None. All v0.2 code runs unchanged on v0.3.
+
+### Upgrade steps
+
+1. Replace `dep/aio/` with the v0.3 folder
+2. Run `deno install`
+3. Run `deno task dev` — no linter warnings expected for v0.2 code
+
+### Optional improvements
+
+Take advantage of new features at your own pace:
+
+```ts
+// Performance budgets (catch slow reducers in CI)
+await aio.run(state, {
+  reduce, execute,
+  perfMode: 'strict',
+  perfBudget: { reduce: 50, effect: 3000 },
+  onError: ({ source, error }) => console.error(`[${source}]`, error),
+})
+```
+
+```tsx
+// Redux DevTools (add to App.tsx in dev)
+import { useAio, connectDevTools } from 'aio'
+export default function App() {
+  const { state, send } = useAio<AppState>()
+  useEffect(() => { connectDevTools() }, [])
+  // ...
+}
+```
+
+```ts
+// Memoized selectors (avoid recomputing expensive derivations)
+import { createSelector } from 'aio'
+const selectFiltered = createSelector(
+  (s: AppState) => s.items,
+  (s: AppState) => s.filter,
+  (items, filter) => items.filter(i => i.status === filter),
+)
+```
+
+---
+
+## v0.3 → v0.4
+
+### New features
+
+- **Zero-config HTTPS** — `--expose` now auto-generates a self-signed ECDSA P-256 cert (cached in `.aio-tls/`). Traffic is encrypted by default. Use `--cert=path.pem --key=path.pem` to bring your own CA-signed cert. Electron windows accept self-signed localhost certs automatically
+- **`am watch [dir]`** — hot-restart on `.ts`/`.tsx` changes in `src/` (or custom dir). 300ms debounce, same as `am restart`. Usage: `deno task am watch` or `deno task am watch src/`
+- **`am logs --follow` / `-f`** — stream log output live (like `tail -f`). Usage: `deno task am logs -f` or `deno task am logs --follow [filter]`
+- **`am status` exit codes** — now explicit: `0`=started, `1`=stopped, `2`=transitional (starting/stopping). Useful for scripts and CI
+- **`persistMode:'multi'`** — store each top-level state key as a separate Deno.Kv entry, bypassing the 65KB/key limit. Set `persistMode: 'multi'` in config
+- **ORM additions** — `table.whereOr(filters[])` for OR-joined WHERE, `table.upsert(row)` for INSERT OR REPLACE, `QueryOpts` with `orderBy`, `limit`, `offset` on `all(opts?)` and `where(filter, opts?)`
+
+### Bug fixes
+
+- **`_computeDelta` threshold** — fixed denominator to `Math.max(newKeys, oldKeys)` — previously undercounted when state keys were removed, causing unnecessary full-state broadcasts
+- **`scheduleReload` symlink** — resolves real path via `Deno.realPathSync` before cache lookup — fixes hot-reload on macOS (`/var` → `/private/var` symlink)
+- **`syncTables` full scan** — eliminated `SELECT * FROM table` on every sync cycle; now diffs state vs previous in memory. Zero DB reads per sync
+
+### Breaking changes
+
+None. All v0.3 code runs unchanged on v0.4.
+
+### Upgrade steps
+
+1. Replace `dep/aio/` with the v0.4 folder
+2. Run `deno install`
+3. Run `deno task dev` — no changes required
+
+### Optional improvements
+
+```sh
+# Hot-restart on file changes
+deno task am watch
+
+# Stream logs live
+deno task am logs -f
+
+# Check if app is running (exit code 0=yes, 1=no, 2=transitional)
+deno task am status; echo $?
+```
+
+```ts
+// Bypass 65KB KV limit for large state
+await aio.run(state, {
+  reduce, execute,
+  persistMode: 'multi',
+})
+```
+
+```ts
+// ORM: OR queries, upsert, pagination
+const adults = table.whereOr([{ role: 'admin' }, { role: 'mod' }])
+table.upsert({ id: 1, name: 'alice' })
+const page = table.all({ orderBy: 'name', limit: 20, offset: 40 })
+```
+
+```sh
+# Expose with auto-HTTPS (zero config)
+deno task dev --expose
+
+# Expose with your own cert
+deno task dev --expose --cert=/etc/ssl/myapp.pem --key=/etc/ssl/myapp.key
+```
+
+---
+
 *Future versions will be documented here as they are released.*

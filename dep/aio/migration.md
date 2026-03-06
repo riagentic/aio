@@ -151,7 +151,7 @@ await aio.run(state, {
 - [ ] `dep/aio/` linked or copied into project
 - [ ] `deno.json` updated with imports, compilerOptions, unstable
 - [ ] `deno install` ran successfully
-- [ ] `deno approve-scripts` + `deno install` again (if using Electron)
+- [ ] `deno add npm:electron && deno approve-scripts npm:electron && deno install` (if using Electron)
 - [ ] `src/state.ts` — state type + initial values
 - [ ] `src/actions.ts` — action creators with `actions()` + `UnionOf`
 - [ ] `src/effects.ts` — effect creators with `effects()` + `UnionOf`

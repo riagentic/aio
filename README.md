@@ -5,24 +5,24 @@
  /|    
 ```
 
-**Full-stack Deno framework — one state, propagated everywhere.**
+**Full-stack Deno framework — one state, propagated everywhere.** · `v0.4.0`
 
 The state you define is the single source of truth. It persists. It syncs to all connected clients. It drives the UI. You don't move data — you declare it once, and the framework ensures every layer sees the same state: reducer, storage, WebSocket, React, every browser tab, every Electron window. No glue code, no serialization handlers, no sync logic to maintain. Write your business logic. The data plumbing is solved.
 
-🟢 **One call boots everything** — server, WebSocket, React, persistence
-🟢 **State syncs everywhere** — real-time delta patches, offline queue, replay on reconnect
-🟢 **Ship anywhere** — binary, Electron, Android, service — same code
-🟢 **Dev experience** — hot reload, time-travel, Redux DevTools, performance budgets
-🟢 **Production ready** — SQLite auto-sync, auth tokens, state freeze, error overlay
+- 🟢 **One call boots everything** — server, WebSocket, React, persistence
+- 🟢 **State syncs everywhere** — real-time delta patches, offline queue, replay on reconnect
+- 🟢 **Ship anywhere** — binary, Electron, Android, service — same code
+- 🟢 **Dev experience** — hot reload, time-travel, Redux DevTools, performance budgets
+- 🟢 **Production ready** — SQLite auto-sync, auth tokens, state freeze, error overlay
 
-🎯 **Use for:** desktop apps, mobile apps (Android), CLI tools, backend services, internal tools, prototypes  
-⚠️ **Not for:** public websites (SSR), large teams, battle-tested ecosystem
+- 🎯 **Use for:** desktop apps, mobile apps (Android), CLI tools, backend services, internal tools, prototypes
+- ⚠️ **Not for:** public websites (SSR), large teams, battle-tested ecosystem
 
-📖 [Quickstart](dep/aio/quickstart.md) — start from scratch in 5 minutes  
-📖 [Manual](dep/aio/manual.md) — full API reference  
-📖 [Migration](dep/aio/migration.md) — adopt into existing app  
-📖 [Upgrade](dep/aio/upgrade.md) — version upgrades  
-📖 [A4](dep/aio/a4.md) — architecture overview  
+- 📖 [Quickstart](dep/aio/quickstart.md) — start from scratch in 5 minutes
+- 📖 [Manual](dep/aio/manual.md) — full API reference
+- 📖 [Migration](dep/aio/migration.md) — adopt into existing app
+- 📖 [Upgrade](dep/aio/upgrade.md) — version upgrades
+- 📖 [A4](dep/aio/a4.md) — architecture overview
 
 ## Build targets
 

@@ -1,5 +1,6 @@
 // Core runtime — boots KV, server, electron, wires everything together
 import { skv, type SkvInstance } from './skv.ts'
+import { loadOrCreateCert, type TlsCert } from './tls.ts'
 import { createServer, type ServerHandle } from './server.ts'
 import { launchElectron, launchElectronClient, type AioMeta } from './electron.ts'
 import { join, resolve } from '@std/path'
@@ -10,7 +11,7 @@ import { isScheduleEffect, createScheduleManager, type ScheduleEffect, type Sche
 import { openDb, loadTables, syncTables, type TableDef, type AioDB } from './sql.ts'
 
 /** Framework version — printed by --version, checked in tests */
-export const VERSION = '0.3.0'
+export const VERSION = '0.4.0'
 
 /** Validates that framework version matches deno.json version at build time */
 function validateVersion(): void {
@@ -54,8 +55,9 @@ export type AioConfig<S, A, E> = {
   deltaThreshold?: number          // 0-1: ratio of changed keys that triggers full state broadcast (default: 0.5)
   maxConnections?: number          // max concurrent WebSocket clients (default: 100)
   beforeReduce?: (action: A, state: S) => A | null  // intercept actions before reduce — return null to drop
-  persistKey?: string            // KV key (default: "state")
+  persistKey?: string            // KV key prefix (default: "state")
   persistDebounce?: number       // ms between KV writes (default: 100)
+  persistMode?: 'single' | 'multi'  // 'single' (default): one blob ≤65KB. 'multi': one KV key per top-level state key — no 65KB limit
   users?: Record<string, AioUser>  // static token map — token is key, user is value
   ui?: UiConfig
   port?: number                  // default: 8000
@@ -231,11 +233,12 @@ export async function lint(state: unknown, config: { reduce?: unknown; execute?:
 
   // Check esbuild — needed for dev mode TSX transpilation
   if (!prod) {
-    try {
-      await Deno.stat(join(Deno.cwd(), 'node_modules', 'esbuild'))
-    } catch {
-      r.warn.push('esbuild not installed — dev mode needs it for TSX transpilation')
-    }
+    const esbuildDir = join(Deno.cwd(), 'node_modules', 'esbuild')
+    const esbuildBin = join(Deno.cwd(), 'node_modules', '.bin', 'esbuild')
+    let esbuildFound = false
+    try { await Deno.stat(esbuildDir); esbuildFound = true } catch { /* try bin */ }
+    if (!esbuildFound) try { await Deno.stat(esbuildBin); esbuildFound = true } catch { /* not found */ }
+    if (!esbuildFound) r.warn.push('esbuild not installed — dev mode needs it for TSX transpilation')
   }
 
   // Check electron install scripts — Deno requires manual approval
@@ -275,12 +278,12 @@ function printLint(r: Lint): void {
 // ── CLI ─────────────────────────────────────────────────────────────
 
 /** CLI flags — overrides config values. Accepts args for testing. */
-export type CliFlags = { port?: number; persist?: boolean; electron?: boolean; keepAlive?: boolean; title?: string; verbose: boolean; prod?: boolean; version?: boolean; expose?: boolean; help?: boolean; url?: string; width?: number; height?: number; headless?: boolean }
+export type CliFlags = { port?: number; persist?: boolean; electron?: boolean; keepAlive?: boolean; title?: string; verbose: boolean; prod?: boolean; version?: boolean; expose?: boolean; help?: boolean; url?: string; width?: number; height?: number; headless?: boolean; cert?: string; key?: string }
 
 /** Parses CLI flags from Deno.args (or custom array for testing) */
 export function parseCli(args: readonly string[] = Deno.args): CliFlags {
   const r: CliFlags = { verbose: false }
-  const known = ['--port=', '--no-persist', '--no-electron', '--keep-alive', '--title=', '--verbose', '--prod', '--version', '--expose', '--help', '--url', '--width=', '--height=', '--headless']
+  const known = ['--port=', '--no-persist', '--no-electron', '--keep-alive', '--title=', '--verbose', '--prod', '--version', '--expose', '--help', '--url', '--width=', '--height=', '--headless', '--cert=', '--key=']
   for (const arg of args) {
     if (arg.startsWith('--port=')) {
       const n = Number(arg.slice(7))
@@ -299,6 +302,8 @@ export function parseCli(args: readonly string[] = Deno.args): CliFlags {
     else if (arg === '--url') r.url = ''
     else if (arg.startsWith('--url=')) r.url = arg.slice(6)
     else if (arg === '--headless') r.headless = true
+    else if (arg.startsWith('--cert=')) r.cert = arg.slice(7)
+    else if (arg.startsWith('--key=')) r.key = arg.slice(6)
     else if (arg.startsWith('--width=')) {
       const n = Number(arg.slice(8))
       if (Number.isInteger(n) && n > 0) r.width = n
@@ -328,7 +333,9 @@ Flags:
   --title=X        Override window/page title
   --verbose        Verbose logging (actions, state, effects, WS, HTTP)
   --prod           Serve pre-built dist/app.js
-  --expose         Bind 0.0.0.0 + generate auth token for LAN access
+  --expose         Bind 0.0.0.0 + HTTPS + generate auth token for LAN access
+  --cert=PATH      TLS certificate file (PEM) — used with --expose (auto-generated if omitted)
+  --key=PATH       TLS private key file (PEM) — used with --expose (auto-generated if omitted)
   --headless       Server-only — no browser or Electron (for CLI apps)
   --url[=URL]      Connect to remote aio server (Electron thin client)
   --width=N        Initial window width (default: 800)
@@ -437,6 +444,7 @@ async function _run<S, A, E>(initialState: S, config: AioConfig<S, A, E>): Promi
   const getUIState = config.getUIState ?? ((s: S, _user?: AioUser) => s)
   const getDBState = config.getDBState ?? ((s: S) => s)
   const persistKey = config.persistKey ?? 'state'
+  const persistMode = config.persistMode ?? 'single'
   const ui = config.ui ?? {}
   const port = cli.port ?? config.port ?? 8000
 
@@ -483,11 +491,13 @@ async function _run<S, A, E>(initialState: S, config: AioConfig<S, A, E>): Promi
     try {
       const kvPath = resolveKvPath(title)
       kvDb = skv(await Deno.openKv(kvPath))
-      if (kvPath) log.debug(`persist: KV at ${kvPath}`)
-      const persisted = await kvDb.get<Partial<S>>(persistKey)
+      if (kvPath) log.debug(`persist: KV at ${kvPath} mode=${persistMode}`)
+      const persisted = persistMode === 'multi'
+        ? await kvDb.getMulti<Partial<S>>(persistKey)
+        : await kvDb.get<Partial<S>>(persistKey)
       if (persisted) {
         state = deepMerge(initialState as Record<string, unknown>, persisted as Record<string, unknown>) as S
-        log.debug(`persist: loaded from KV key="${persistKey}"`)
+        log.debug(`persist: loaded from KV key="${persistKey}" (${persistMode})`)
       } else {
         log.debug(`persist: no saved state, using initialState`)
       }
@@ -518,6 +528,7 @@ async function _run<S, A, E>(initialState: S, config: AioConfig<S, A, E>): Promi
   const persistMs = config.persistDebounce ?? 100
   let persistTimer: ReturnType<typeof setTimeout> | null = null
   let shuttingDown = false
+  let prevPersistedKeys: string[] = []  // track multi-key keys for deletion when state keys removed
   function schedulePersist(): void {
     if ((!kvDb && !sqlDb) || persistTimer || shuttingDown) return
     persistTimer = setTimeout(() => {
@@ -534,20 +545,26 @@ async function _run<S, A, E>(initialState: S, config: AioConfig<S, A, E>): Promi
       if (kvDb) {
         try {
           const dbState = kvGetDBState(state)
-          const serialized = JSON.stringify(dbState)
-          const bytes = new TextEncoder().encode(serialized).byteLength
-          if (bytes > 63_000) {
-            log.error(`persist: state is ${(bytes / 1024).toFixed(1)}KB — exceeds Deno KV 65KB limit. Use getDBState to filter, or db: {} (SQLite) for large data`)
-            return
+          if (persistMode === 'multi') {
+            const obj = dbState as Record<string, unknown>
+            const keys = Object.keys(obj)
+            kvDb.setMulti(persistKey, obj, prevPersistedKeys)
+              .then(() => { prevPersistedKeys = keys; log.debug(`persist: saved multi (${keys.length} keys)`) })
+              .catch(e => { log.error(`persist: failed to save — ${e}`) })
+          } else {
+            const serialized = JSON.stringify(dbState)
+            const bytes = new TextEncoder().encode(serialized).byteLength
+            if (bytes > 63_000) {
+              log.error(`persist: state is ${(bytes / 1024).toFixed(1)}KB — exceeds Deno KV 65KB limit. Use persistMode:'multi', getDBState filter, or db:{} (SQLite)`)
+              return
+            }
+            if (bytes > 50_000) {
+              log.warn(`persist: state is ${(bytes / 1024).toFixed(1)}KB — approaching 65KB KV limit. Consider persistMode:'multi', getDBState, or SQLite`)
+            }
+            kvDb.set(persistKey, dbState)
+              .then(() => log.debug(`persist: saved (${(bytes / 1024).toFixed(1)}KB)`))
+              .catch(e => { log.error(`persist: failed to save — ${e}`) })
           }
-          if (bytes > 50_000) {
-            log.warn(`persist: state is ${(bytes / 1024).toFixed(1)}KB — approaching 65KB KV limit. Consider getDBState filter or SQLite`)
-          }
-          kvDb.set(persistKey, dbState)
-            .then(() => log.debug(`persist: saved (${(bytes / 1024).toFixed(1)}KB)`))
-            .catch(e => {
-              log.error(`persist: failed to save — ${e}`)
-            })
         } catch (e) {
           log.error(`persist: getDBState threw — ${e}`)
         }
@@ -568,12 +585,20 @@ async function _run<S, A, E>(initialState: S, config: AioConfig<S, A, E>): Promi
     // Flush KV
     if (kvDb) {
       try {
-        await kvDb.set(persistKey, kvGetDBState(state))
+        const dbState = kvGetDBState(state)
+        if (persistMode === 'multi') {
+          const obj = dbState as Record<string, unknown>
+          const keys = Object.keys(obj)
+          await kvDb.setMulti(persistKey, obj, prevPersistedKeys)
+          prevPersistedKeys = keys
+        } else {
+          await kvDb.set(persistKey, dbState)
+        }
         log.debug('persist: flushed')
       } catch (e) {
         const msg = String(e)
         if (msg.includes('too large') || msg.includes('65536') || msg.includes('value too')) {
-          log.warn(`persist: state exceeds Deno KV 65KB limit — use getDBState to filter persisted state, or use db: {} (SQLite) for large arrays`)
+          log.warn(`persist: state exceeds Deno KV 65KB limit — set persistMode:'multi' or use getDBState / db:{} (SQLite)`)
         }
         log.error(`persist: flush failed — ${e}`)
       }
@@ -582,11 +607,14 @@ async function _run<S, A, E>(initialState: S, config: AioConfig<S, A, E>): Promi
 
   // Hook-wrapped reduce/execute — observe-only, error-guarded
   const { beforeReduce } = config
+  // Tracks whether any action in the current drain cycle actually ran reduce() — drops skip persist+broadcast
+  let _anyProcessed = false
   const hookedReduce: typeof reduce = (s, a) => {
     if (beforeReduce) {
       try { a = beforeReduce(a, s) as A } catch (e) { log.error(`beforeReduce threw: ${e}`); return { state: s, effects: [] as E[] } }
-      if (a === null) return { state: s, effects: [] as E[] }
+      if (a === null) return { state: s, effects: [] as E[] }  // dropped — _anyProcessed stays false
     }
+    _anyProcessed = true
     if (onAction) try { onAction(a, s, _dispatchUser) } catch (e) { log.error(`hook onAction: ${e}`) }
     return reduce(s, a)
   }
@@ -636,12 +664,18 @@ async function _run<S, A, E>(initialState: S, config: AioConfig<S, A, E>): Promi
     },
     getState: () => state,
     setState: (s) => { state = s },
-    onDone: () => { _dispatchUser = undefined; if (!tt?.paused) { schedulePersist(); } server.broadcast() },
+    onDone: () => {
+      const processed = _anyProcessed; _anyProcessed = false; _dispatchUser = undefined
+      if (!processed) return  // all actions dropped by beforeReduce — skip persist + broadcast
+      if (!tt?.paused) { schedulePersist() }
+      server.broadcast()
+    },
     log, debug: VERBOSE,
     onError,
     perfMode: config.perfMode,
     perfBudget: config.perfBudget,
     freezeState: config.freezeState ?? !prod,  // default: true in dev, false in prod
+    effectTimeout: config.effectTimeout,
     onPerf,
   })
 
@@ -694,11 +728,28 @@ async function _run<S, A, E>(initialState: S, config: AioConfig<S, A, E>): Promi
     _running = false
   }
 
-  // --expose: bind 0.0.0.0, generate access token
+  // --expose: bind 0.0.0.0, generate access token, auto-TLS
   const expose = cli.expose ?? false
   const users = config.users
   // --expose without users: auto-gen single token (backwards compatible)
   const token = (expose && !users) ? crypto.randomUUID() : undefined
+
+  // TLS: auto-generate self-signed cert when --expose (or use user-provided --cert/--key)
+  let tlsCert: TlsCert | null = null
+  if (expose) {
+    const certDir = isCompiled() ? resolveDataDir(title) : join(Deno.cwd(), '.aio-tls')
+    try {
+      tlsCert = await loadOrCreateCert(certDir, cli.cert, cli.key)
+      if (tlsCert.selfSigned) {
+        log.info(`tls: self-signed cert at ${tlsCert.certPath}`)
+        log.warn(`tls: self-signed — remote browsers will show a security warning. Trust the cert, or use --cert=/path.pem --key=/path.pem for a CA-signed cert`)
+      } else {
+        log.info(`tls: using cert ${tlsCert.certPath}`)
+      }
+    } catch (e) {
+      log.warn(`tls: cert generation failed (${e}) — falling back to plain HTTP`)
+    }
+  }
 
   // TT command handler — undo/redo/goto restore state, pause/resume toggle
   function handleTTCommand(cmd: string, arg?: number): void {
@@ -737,6 +788,8 @@ async function _run<S, A, E>(initialState: S, config: AioConfig<S, A, E>): Promi
     expose,
     token,
     users,
+    cert: tlsCert?.cert,
+    key: tlsCert?.key,
     showStatus: ui.showStatus,
     deltaThreshold: config.deltaThreshold,
     maxConnections: config.maxConnections,
@@ -771,9 +824,25 @@ async function _run<S, A, E>(initialState: S, config: AioConfig<S, A, E>): Promi
   }
 
   const useElectron = !headless && (cli.electron ?? ui.electron) !== false
-  const url = expose ? `http://0.0.0.0:${port}` : `http://localhost:${port}`
+  const useHttps = expose && !!tlsCert
+  // shareUrl: shown in logs / share links (0.0.0.0 when exposing — users replace with their LAN IP)
+  const shareUrl = useHttps ? `https://0.0.0.0:${port}` : expose ? `http://0.0.0.0:${port}` : `http://localhost:${port}`
+  // localUrl: used to open local browser/electron window
+  const localUrl = useHttps ? `https://localhost:${port}` : `http://localhost:${port}`
+  const url = shareUrl  // kept for compatibility with log messages below
 
-  const cliFlags = Deno.args.filter(a => a.startsWith('--'))
+  // Update PID file with trojanPort (aio HTTP control port) when TLS is active
+  if (useHttps && server.trojanPort) {
+    try {
+      const raw = Deno.readTextFileSync('.aio.pid')
+      const pf = JSON.parse(raw) as Record<string, unknown>
+      pf.trojanPort = server.trojanPort
+      pf.status = 'started'
+      Deno.writeTextFileSync('.aio.pid', JSON.stringify(pf))
+    } catch { /* not running under am — fine */ }
+  }
+
+  const cliFlags = Deno.args.filter(a => a.startsWith('--') && a.length > 2)
   if (cliFlags.length) log.info(`cli: ${cliFlags.join(' ')}`)
   else log.debug('run with --help to see available flags')
   const mode = prod ? 'prod' : 'dev'
@@ -797,7 +866,7 @@ async function _run<S, A, E>(initialState: S, config: AioConfig<S, A, E>): Promi
   } else if (useElectron) {
     const keepAlive = cli.keepAlive ?? ui.keepAlive ?? false
     const meta: AioMeta = { title, width: cli.width ?? ui.width, height: cli.height ?? ui.height }
-    const electronUrl = token ? `${url}?token=${token}` : url
+    const electronUrl = token ? `${localUrl}?token=${token}` : localUrl
     launchElectron(electronUrl, log, meta)
       .then(proc => {
         if (!proc) return
@@ -824,8 +893,8 @@ async function _run<S, A, E>(initialState: S, config: AioConfig<S, A, E>): Promi
       const cmd = Deno.build.os === 'darwin' ? 'open'
         : Deno.build.os === 'windows' ? 'start'
         : 'xdg-open'
-      try { new Deno.Command(cmd, { args: [url], stdout: 'null', stderr: 'null' }).spawn() }
-      catch { log.info(`open ${url} in your browser`) }
+      try { new Deno.Command(cmd, { args: [localUrl], stdout: 'null', stderr: 'null' }).spawn() }
+      catch { log.info(`open ${localUrl} in your browser`) }
     }, 1500)
   }
 

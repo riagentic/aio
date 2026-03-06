@@ -224,6 +224,15 @@ Deno.test('electronMainScript: Menu.setApplicationMenu(null) present', () => {
   assertEquals(script.includes('Menu.setApplicationMenu(null)'), true)
 })
 
+Deno.test('electronMainScript: certificate-error handler accepts localhost self-signed certs', () => {
+  const script = electronMainScript('https://localhost:8000')
+  assertEquals(script.includes('certificate-error'), true)
+  assertEquals(script.includes('localhost'), true)
+  assertEquals(script.includes('127.0.0.1'), true)
+  // Remote hosts must NOT be auto-trusted
+  assertEquals(script.includes('cb(false)'), true)
+})
+
 // ── electronClientScript: edge cases ──────────────────────────────
 
 Deno.test('electronClientScript: redirect limit handling', () => {

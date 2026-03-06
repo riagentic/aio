@@ -15,7 +15,12 @@ Installs Deno if missing, then shows an interactive menu with 4 templates: empty
 ### Prerequisites
 
 - [Deno 2.6+](https://deno.land)
-- `npm:electron` (optional — for desktop window)
+- Electron (optional — for desktop window): `deno add npm:electron && deno approve-scripts npm:electron`
+
+After creating `deno.json` and writing files, install dependencies:
+```sh
+deno install
+```
 
 ### File structure
 
@@ -37,6 +42,7 @@ src/
 ```json
 {
   "title": "My App",
+  "nodeModulesDir": "auto",
   "unstable": ["kv"],
   "compilerOptions": {
     "jsx": "react-jsx",
@@ -184,6 +190,8 @@ deno task dev
 ```
 
 That's it. Electron window opens, state persists across restarts, multiple browser tabs stay in sync.
+
+> **No Electron?** Add `--no-electron` to open in your browser instead: `deno task dev --no-electron`
 
 ### Window size
 

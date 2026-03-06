@@ -709,3 +709,120 @@ Deno.test('sql: syncTables empty state with PK triggers DELETE', () => {
   raw.close()
   Deno.removeSync(path)
 })
+
+// ── insertMany column consistency (B7 audit fix) ─────────────────────
+
+Deno.test('sql: insertMany throws when rows have different column sets', () => {
+  const path = tmpDb()
+  const schema = { items: table({ id: pk(), name: text(), qty: integer({ nullable: true }) }) }
+  const { aioDB } = openDb(path, schema)
+  const items = tbl(aioDB, 'items')
+  assertThrows(
+    () => items.insertMany([
+      { id: 1, name: 'apple', qty: 3 },
+      { id: 2, name: 'banana' },         // missing qty
+    ]),
+    Error,
+    'different columns',
+  )
+  assertEquals(items.count(), 0)  // transaction rolled back
+  aioDB.close()
+  Deno.removeSync(path)
+})
+
+Deno.test('sql: insertMany succeeds when all rows have identical columns', () => {
+  const path = tmpDb()
+  const schema = { items: table({ id: pk(), name: text() }) }
+  const { aioDB } = openDb(path, schema)
+  const items = tbl(aioDB, 'items')
+  items.insertMany([
+    { id: 1, name: 'a' },
+    { id: 2, name: 'b' },
+    { id: 3, name: 'c' },
+  ])
+  assertEquals(items.count(), 3)
+  aioDB.close()
+  Deno.removeSync(path)
+})
+
+Deno.test('sql: whereOr returns rows matching any clause', () => {
+  const path = tmpDb()
+  const schema = { items: table({ id: pk(), name: text(), score: integer() }) }
+  const { aioDB } = openDb(path, schema)
+  const items = tbl(aioDB, 'items')
+  items.insert({ id: 1, name: 'alice', score: 10 })
+  items.insert({ id: 2, name: 'bob', score: 20 })
+  items.insert({ id: 3, name: 'carol', score: 30 })
+  const result = items.whereOr([{ name: 'alice' }, { name: 'carol' }])
+  assertEquals(result.length, 2)
+  assertEquals(result.map((r: { name: string }) => r.name).sort(), ['alice', 'carol'])
+  aioDB.close()
+  Deno.removeSync(path)
+})
+
+Deno.test('sql: whereOr with empty array returns all rows', () => {
+  const path = tmpDb()
+  const schema = { items: table({ id: pk(), name: text() }) }
+  const { aioDB } = openDb(path, schema)
+  const items = tbl(aioDB, 'items')
+  items.insert({ id: 1, name: 'a' })
+  items.insert({ id: 2, name: 'b' })
+  assertEquals(items.whereOr([]).length, 2)
+  aioDB.close()
+  Deno.removeSync(path)
+})
+
+Deno.test('sql: all() with orderBy and limit', () => {
+  const path = tmpDb()
+  const schema = { items: table({ id: pk(), score: integer() }) }
+  const { aioDB } = openDb(path, schema)
+  const items = tbl(aioDB, 'items')
+  items.insert({ id: 1, score: 30 })
+  items.insert({ id: 2, score: 10 })
+  items.insert({ id: 3, score: 20 })
+  const result = items.all({ orderBy: ['score', 'asc'], limit: 2 })
+  assertEquals(result.length, 2)
+  assertEquals((result[0] as { score: number }).score, 10)
+  assertEquals((result[1] as { score: number }).score, 20)
+  aioDB.close()
+  Deno.removeSync(path)
+})
+
+Deno.test('sql: where() with offset', () => {
+  const path = tmpDb()
+  const schema = { items: table({ id: pk(), score: integer() }) }
+  const { aioDB } = openDb(path, schema)
+  const items = tbl(aioDB, 'items')
+  for (let i = 1; i <= 5; i++) items.insert({ id: i, score: i * 10 })
+  const result = items.where({ score: { gte: 10 } }, { orderBy: ['score', 'asc'], limit: 2, offset: 2 })
+  assertEquals(result.length, 2)
+  assertEquals((result[0] as { score: number }).score, 30)
+  aioDB.close()
+  Deno.removeSync(path)
+})
+
+Deno.test('sql: upsert inserts new row', () => {
+  const path = tmpDb()
+  const schema = { items: table({ id: pk(), name: text() }) }
+  const { aioDB } = openDb(path, schema)
+  const items = tbl(aioDB, 'items')
+  const r = items.upsert({ id: 1, name: 'original' })
+  assertEquals(r.lastInsertRowId, 1)
+  assertEquals(items.count(), 1)
+  aioDB.close()
+  Deno.removeSync(path)
+})
+
+Deno.test('sql: upsert replaces existing row', () => {
+  const path = tmpDb()
+  const schema = { items: table({ id: pk(), name: text() }) }
+  const { aioDB } = openDb(path, schema)
+  const items = tbl(aioDB, 'items')
+  items.insert({ id: 1, name: 'original' })
+  items.upsert({ id: 1, name: 'updated' })
+  const row = items.find(1) as { name: string }
+  assertEquals(row.name, 'updated')
+  assertEquals(items.count(), 1)
+  aioDB.close()
+  Deno.removeSync(path)
+})

@@ -21,6 +21,8 @@ export interface ServerConfig {
   distDir?: string         // absolute path to dist/ (required when prod=true)
   expose?: boolean         // bind 0.0.0.0 instead of 127.0.0.1
   token?: string           // access token required when expose=true (no users)
+  cert?: string            // PEM cert string — enables HTTPS when set (auto-generated when --expose)
+  key?: string             // PEM key string — required when cert is set
   users?: Record<string, AioUser>  // per-user token map (overrides token)
   showStatus?: boolean     // show reconnection indicator (default: true)
   deltaThreshold?: number  // 0-1: ratio of changed keys for delta vs full broadcast (default: 0.5)
@@ -75,6 +77,7 @@ export interface ServerHandle {
   broadcastTT: () => void
   shutdown: () => Promise<void>
   clientCount: () => number
+  trojanPort?: number  // set when TLS is active — HTTP-only trojan endpoint on 127.0.0.1
 }
 
 function fileExists(path: string): boolean {
@@ -116,9 +119,9 @@ const TEXT_EXTENSIONS = new Set(['.html', '.js', '.mjs', '.css', '.json', '.svg'
 // browser.ts path — single source of truth for useAio + msg (transpiled on demand in dev)
 const BROWSER_TS = resolve(join(import.meta.dirname ?? '.', 'browser.ts'))
 
-// Escape HTML entities to prevent XSS
+// Escape HTML entities to prevent XSS (includes ' for completeness even though current use is double-quote-delimited)
 function escHtml(s: string): string {
-  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#x27;')
 }
 
 const IMPORT_MAP = `{
@@ -298,8 +301,10 @@ export function _computeDelta(
 
   if (changedCount === 0) return { msg: '', newKeyJsons, kind: 'skip' }
 
-  // Patch when changed ratio is below threshold (default 50% — small patches are cheaper than full state)
-  if (changedCount < keys.length * threshold) {
+  // Patch when changed ratio is below threshold (default 50% — small patches are cheaper than full state).
+  // Use max(new, old) key count so removals don't shrink the denominator and bias toward full state.
+  const totalKeys = Math.max(keys.length, Object.keys(lastKeyJsons).length)
+  if (changedCount < totalKeys * threshold) {
     const patch: Record<string, unknown> = { $p: changed }
     if (removed.length) patch.$d = removed
     return { msg: JSON.stringify(patch), newKeyJsons, kind: 'delta' }
@@ -500,8 +505,9 @@ export function createServer(config: ServerConfig): ServerHandle {
         return new Response('Missing X-AIO header', { status: 403 })
       }
       if (req.method === 'POST') {
-        const contentLength = Number(req.headers.get('content-length') ?? 0)
-        if (contentLength > SNAPSHOT_MAX_SIZE) {
+        // Fast reject when content-length header is present and already too large
+        const clHeader = req.headers.get('content-length')
+        if (clHeader !== null && Number(clHeader) > SNAPSHOT_MAX_SIZE) {
           return new Response(`Snapshot too large (max ${SNAPSHOT_MAX_SIZE} bytes)`, { status: 413 })
         }
         try {
@@ -694,7 +700,8 @@ export function createServer(config: ServerConfig): ServerHandle {
     const ext = dot >= 0 ? path.slice(dot) : ''
     if (!RELOAD_EXT.has(ext)) return
     debug(`watch: changed ${path}`)
-    // Normalize to match cache keys (resolve-based, same as serveStatic)
+    // Normalize to match cache keys — use realPathSync to resolve symlinks (e.g. /var → /private/var on macOS)
+    try { path = Deno.realPathSync(path) } catch { /* file deleted — resolve() fallback is fine */ }
     transpileCache.delete(resolve(path))
     if (!path.endsWith('.css')) reloadIsFull = true
     if (reloadTimer) clearTimeout(reloadTimer)
@@ -730,9 +737,10 @@ export function createServer(config: ServerConfig): ServerHandle {
   }
 
   const hostname = config.expose ? '0.0.0.0' : '127.0.0.1'
-  let httpServer: Deno.HttpServer
-  try {
-    httpServer = Deno.serve({ port, hostname, onListen: () => {} }, async (req) => {
+  const tlsOpts = config.cert && config.key ? { cert: config.cert, key: config.key } : {}
+
+  // Extracted handler — reused by both main server and trojan-only HTTP server (when TLS active)
+  const handleRequest = async (req: Request): Promise<Response> => {
     const url = new URL(req.url)
     const { pathname } = url
 
@@ -764,12 +772,36 @@ export function createServer(config: ServerConfig): ServerHandle {
     const resp = await serveStatic(pathname, req)
     resp.headers.set('X-Content-Type-Options', 'nosniff')
     return resp
-  })
+  }
+
+  let httpServer: Deno.HttpServer
+  try {
+    httpServer = Deno.serve({ port, hostname, onListen: () => {}, ...tlsOpts }, handleRequest)
   } catch (e) {
     if (e instanceof Deno.errors.AddrInUse) {
       throw new Error(`port ${port} already in use — pick another with --port=N`)
     }
     throw e
+  }
+
+  // When TLS is active: spin up a plain-HTTP server on 127.0.0.1 (OS-assigned port) for am tooling.
+  // am always communicates over HTTP — avoids needing cert trust in CLI tools.
+  let trojanServer: Deno.HttpServer | null = null
+  let trojanPort: number | undefined
+  if (config.cert) {
+    trojanServer = Deno.serve(
+      { port: 0, hostname: '127.0.0.1', onListen: (addr) => { trojanPort = addr.port } },
+      (req) => {
+        const { pathname } = new URL(req.url)
+        // Only expose control endpoints — not static files or WebSocket
+        if (pathname.startsWith('/__trojan/') || pathname.startsWith('/__snapshot') || pathname.startsWith('/__aio/')) {
+          return handleRequest(req)
+        }
+        // Health probe for `am status`
+        if (pathname === '/') return new Response('ok', { status: 200 })
+        return new Response('Not Found', { status: 404 })
+      },
+    )
   }
 
   // Sends TT metadata to all connected clients
@@ -789,6 +821,7 @@ export function createServer(config: ServerConfig): ServerHandle {
     broadcast,
     broadcastTT,
     clientCount: () => connections.size,
+    trojanPort,
     shutdown: async () => {
       if (reloadTimer) clearTimeout(reloadTimer)
       fsWatcher?.close()
@@ -796,7 +829,10 @@ export function createServer(config: ServerConfig): ServerHandle {
         try { ws.close(1001, 'server shutting down') } catch { /* already closing */ }
       }
       connections.clear()
-      await httpServer.shutdown()
+      await Promise.all([
+        httpServer.shutdown(),
+        trojanServer?.shutdown(),
+      ])
     },
   }
 }

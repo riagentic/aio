@@ -240,6 +240,27 @@ Deno.test('onRestore not called when persist is false', async () => {
   await app.close()
 })
 
+Deno.test('localStorage quota exceeded — persist degrades gracefully', async () => {
+  setup()
+  let threw = false
+  const origSetItem = localStorage.setItem.bind(localStorage)
+  localStorage.setItem = (_k: string, _v: string) => {
+    threw = true
+    throw new Error('QuotaExceededError')
+  }
+  try {
+    const app = initStandalone({ count: 0 }, { reduce: makeReduce(), execute: () => {} })
+    app.dispatch({ type: 'INC' })
+    await new Promise(r => setTimeout(r, 150))  // wait for debounced persist
+    // Must not crash — state is correct despite storage failure
+    assertEquals(app.getState(), { count: 1 })
+    assertEquals(threw, true)
+    await app.close()
+  } finally {
+    localStorage.setItem = origSetItem
+  }
+})
+
 // ── ScheduleEffect filtering ────────────────────────────
 
 Deno.test('ScheduleEffect from reduce is not passed to execute', async () => {

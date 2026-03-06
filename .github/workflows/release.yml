@@ -1,0 +1,96 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: 'v2.x'
+      - name: Run tests
+        run: deno task test
+
+  build-electron:
+    name: Electron — ${{ matrix.label }}
+    needs: test
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - id: linux-x64
+            runner: ubuntu-latest
+            artifact: '*.AppImage'
+          - id: linux-arm64
+            runner: ubuntu-24.04-arm
+            artifact: '*.AppImage'
+          - id: windows-x64
+            runner: windows-latest
+            artifact: '*-win-*.zip'
+          - id: macos-x64
+            runner: macos-13
+            artifact: '*-mac-*.zip'
+          - id: macos-arm64
+            runner: macos-latest
+            artifact: '*-mac-*.zip'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: 'v2.x'
+
+      # Cache Electron binary (~120 MB download) keyed per OS + pinned version
+      - name: Cache Electron
+        uses: actions/cache@v4
+        id: electron-cache
+        with:
+          path: node_modules/electron
+          key: electron-${{ matrix.id }}-v28
+
+      # npm handles Electron's postinstall binary download reliably
+      - name: Install Electron
+        if: steps.electron-cache.outputs.cache-hit != 'true'
+        run: npm install electron@28 --no-save
+
+      - name: Build Electron app
+        run: deno task compile:electron
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: electron-${{ matrix.id }}
+          path: ${{ matrix.artifact }}
+          if-no-files-found: error
+
+  release:
+    name: Create Release
+    needs: build-electron
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+          path: artifacts/
+
+      - name: List artifacts
+        run: ls -lh artifacts/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/**
+          generate_release_notes: true
+          fail_on_unmatched_files: true

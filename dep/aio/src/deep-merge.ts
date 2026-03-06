@@ -26,6 +26,8 @@ export function deepMerge(initial: Record<string, unknown>, persisted: Record<st
       result[key] = deepMerge(iv, pv, depth + 1)
     } else if (pv === null && isPlainObject(iv)) {
       // persisted null can't wipe schema object → keep initial
+    } else if (isPlainObject(iv) && Array.isArray(pv)) {
+      // persisted array can't replace schema object → keep initial
     } else if (typeof iv === typeof pv || iv === null || pv === null) {
       result[key] = pv  // same type → use persisted
     }

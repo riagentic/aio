@@ -11,3 +11,11 @@ aio-counter
 .vscode/
 .gradle/
 build/
+
+# Runtime-generated — never commit
+.aio.pid
+.aio.log
+.aio-tls/
+data.kv
+data.db
+window-state.json

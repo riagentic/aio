@@ -192,6 +192,7 @@ async function writeFile(dir: string, path: string, content: string): Promise<vo
 function denoJson(title: string, appType: AppType): string {
   // Always include full imports — mod.ts needs react types for deno compile,
   // and remote-electron/android builds bundle a React connect page via build.ts
+  const isElectronApp = appType.id === 'electron' || appType.id === 'remote-electron'
   const imports: Record<string, string> = {
     '@types/react': 'npm:@types/react@^18',
     'react': 'npm:react@^18',
@@ -201,9 +202,13 @@ function denoJson(title: string, appType: AppType): string {
     'immer': 'npm:immer@^10',
     '@std/path': 'jsr:@std/path@^1',
   }
+  // Electron apps include the electron package so `deno approve-scripts npm:electron` works
+  if (isElectronApp) imports['electron'] = 'npm:electron'
 
+  // browser/remote-browser: --no-electron so dev mode opens a browser tab (not Electron)
+  // electron/android: default — tries Electron if installed, server always runs
   const devCmd = appType.hasServer
-    ? `deno run -A src/app.ts${!appType.hasUI ? ' --headless' : ''}`
+    ? `deno run -A src/app.ts${!appType.hasUI ? ' --headless' : (appType.id === 'browser' || appType.id === 'remote-browser') ? ' --no-electron' : ''}`
     : appType.id === 'remote-cli'
       ? 'deno run -A src/client.ts'
       : appType.id === 'remote-electron'
@@ -942,6 +947,15 @@ function applyAppType(files: Record<string, string>, appType: AppType, title: st
     )
   }
 
+  // Inject electron: false for browser types — opens browser tab, not Electron window.
+  // This means deno task dev AND am start both behave consistently (no Electron attempt).
+  if ((appType.id === 'browser' || appType.id === 'remote-browser') && result['src/app.ts']) {
+    result['src/app.ts'] = result['src/app.ts'].replace(
+      /ui:\s*\{\s*title:\s*'[^']*'\s*\}/,
+      (m) => m.replace(/\}$/, `, electron: false }`),
+    )
+  }
+
   // Auth hint for remote server types — inside config object
   if (appType.isRemote && appType.hasServer && result['src/app.ts']) {
     result['src/app.ts'] = result['src/app.ts'].replace(
@@ -1415,6 +1429,19 @@ dist/
 
   // Install deps
   console.log(`\n${c.cyan}▸${c.reset} Installing dependencies...`)
+
+  const isElectronType = appType.id === 'electron' || appType.id === 'remote-electron'
+  if (isElectronType) {
+    // Approve electron build scripts first so deno install runs postinstall
+    const approve = new Deno.Command('deno', {
+      args: ['approve-scripts', 'npm:electron'],
+      cwd: projectDir,
+      stdout: 'inherit',
+      stderr: 'inherit',
+    })
+    await approve.output()
+  }
+
   const install = new Deno.Command('deno', {
     args: ['install'],
     cwd: projectDir,
@@ -1435,9 +1462,11 @@ dist/
       ? `  ${c.dim}deno task dev${c.reset}                  ${c.dim}Open connect page${c.reset}\n  ${c.dim}deno task dev -- --url=http://server:8000${c.reset}  ${c.dim}Connect directly${c.reset}`
       : appType.id === 'remote-android'
         ? `  ${c.dim}deno task dev${c.reset}\n\n${c.dim}Then open ${c.cyan}http://localhost:8000${c.dim} — connect page for testing.${c.reset}`
-        : appType.hasUI
-          ? `  ${c.dim}deno task dev${c.reset}\n\n${c.dim}Then open ${c.cyan}http://localhost:8000${c.dim} in your browser.${c.reset}`
-          : `  ${c.dim}deno task dev${c.reset}`
+        : appType.id === 'electron'
+          ? `  ${c.dim}deno task dev${c.reset}\n\n${c.dim}Electron window opens automatically. Skip it with ${c.reset}--no-electron${c.dim} (browser tab instead).${c.reset}`
+          : appType.hasUI
+            ? `  ${c.dim}deno task dev${c.reset}\n\n${c.dim}Then open ${c.cyan}http://localhost:8000${c.dim} in your browser.${c.reset}`
+            : `  ${c.dim}deno task dev${c.reset}`
 
   console.log(`
 ${c.green}${c.bold}Done!${c.reset} Your aio app is ready.

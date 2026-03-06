@@ -189,6 +189,61 @@ Deno.test('dispatch: effect throw is caught, other effects still run', () => {
   assertEquals(errMsg.includes('effect error'), true)
 })
 
+Deno.test('dispatch: effectTimeout warns if async effect takes too long', async () => {
+  let warnMsg = ''
+  let state = { n: 0 }
+  const dispatch = createDispatch<typeof state, { type: string }, { type: string }>({
+    reduce: (s) => ({ state: { n: s.n + 1 }, effects: [{ type: 'SLOW' }] }),
+    execute: (e) => { if (e.type === 'SLOW') return new Promise(r => setTimeout(r, 200)) },
+    getState: () => state,
+    setState: (s) => { state = s },
+    onDone: () => {},
+    log: { debug: () => {}, warn: (m) => { warnMsg = m }, error: () => {} },
+    debug: false,
+    effectTimeout: 50,
+  })
+  dispatch({ type: 'A' })
+  await new Promise(r => setTimeout(r, 300))
+  assertEquals(warnMsg.includes('async effect timeout'), true)
+  assertEquals(warnMsg.includes('SLOW'), true)
+})
+
+Deno.test('dispatch: effectTimeout cleared when async effect completes quickly', async () => {
+  let warnMsg = ''
+  let state = { n: 0 }
+  const dispatch = createDispatch<typeof state, { type: string }, { type: string }>({
+    reduce: (s) => ({ state: { n: s.n + 1 }, effects: [{ type: 'FAST' }] }),
+    execute: (e) => { if (e.type === 'FAST') return new Promise(r => setTimeout(r, 10)) },
+    getState: () => state,
+    setState: (s) => { state = s },
+    onDone: () => {},
+    log: { debug: () => {}, warn: (m) => { warnMsg = m }, error: () => {} },
+    debug: false,
+    effectTimeout: 200,
+  })
+  dispatch({ type: 'A' })
+  await new Promise(r => setTimeout(r, 300))
+  assertEquals(warnMsg, '') // no warning — effect completed before timeout
+})
+
+Deno.test('dispatch: effectTimeout=0 disables timeout', async () => {
+  let warnMsg = ''
+  let state = { n: 0 }
+  const dispatch = createDispatch<typeof state, { type: string }, { type: string }>({
+    reduce: (s) => ({ state: { n: s.n + 1 }, effects: [{ type: 'SLOW' }] }),
+    execute: (e) => { if (e.type === 'SLOW') return new Promise(r => setTimeout(r, 100)) },
+    getState: () => state,
+    setState: (s) => { state = s },
+    onDone: () => {},
+    log: { debug: () => {}, warn: (m) => { warnMsg = m }, error: () => {} },
+    debug: false,
+    effectTimeout: 0,
+  })
+  dispatch({ type: 'A' })
+  await new Promise(r => setTimeout(r, 200))
+  assertEquals(warnMsg, '') // disabled — no warning
+})
+
 Deno.test('dispatch: onDone called once after queue fully drains', () => {
   let state = { n: 0 }
   let doneCalls = 0

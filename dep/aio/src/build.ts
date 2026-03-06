@@ -1,7 +1,7 @@
 // Build script — bundles App.tsx into dist/app.js (self-contained, React included)
 // Flags: --compile (binary), --electron (AppImage), --android (APK), --client (aio-client AppImage), --force (skip cache)
 import { resolve, join, dirname } from '@std/path'
-import { slugify, copyDir, findGradle, writePlaceholderIcon } from './build-helpers.ts'
+import { slugify, copyDir, findGradle, writePlaceholderIcon, ensureAppimagetool, formatMb } from './build-helpers.ts'
 const root = Deno.cwd()
 const dist = resolve(join(root, 'dist'))
 const out = join(dist, 'app.js')
@@ -86,6 +86,9 @@ const appTitle = mainConfig.title as string | undefined
 const defaultName = appTitle ? slugify(appTitle) : (root.split('/').pop() || 'myapp')
 const rawName = Deno.args.find(a => a.startsWith('--name='))?.slice(7)
 const binaryName = rawName ? slugify(rawName) : defaultName
+const os = Deno.build.os
+const arch = Deno.build.arch === 'aarch64' ? 'aarch64' : 'x86_64'
+const archStr = arch === 'aarch64' ? 'arm64' : 'x64'  // macOS/Windows naming convention
 
 // ── Step 1: Bundle dist/app.js (React + useAio + user code, fully self-contained) ──
 // Skip for targets that don't need browser bundles (CLI, headless, android:remote, electron:remote)
@@ -229,7 +232,10 @@ if (!doCompile && !doAndroid && !doClient && !doCli) Deno.exit(0)
 // ── aio-client: standalone Electron connect-page AppImage (no Deno, no server) ──
 
 if (doClient) {
-  const arch = Deno.build.arch === 'aarch64' ? 'aarch64' : 'x86_64'
+  if (os !== 'linux') {
+    console.error(`[client] \u2717 compile:electron:remote only supported on Linux — use CI for other platforms`)
+    Deno.exit(1)
+  }
   const appDir = join(dist, 'AppDir')
 
   // Clean and create AppDir
@@ -247,7 +253,7 @@ if (doClient) {
   try {
     await Deno.stat(electronSrc)
   } catch {
-    console.error('[client] ✗ node_modules/electron/dist/ not found — install: deno install npm:electron')
+    console.error('[client] \u2717 node_modules/electron/dist/ not found — run: npm install electron --no-save')
     Deno.exit(1)
   }
 
@@ -285,48 +291,24 @@ Categories=Utility;
   await Deno.writeTextFile(join(appDir, 'aio-client.desktop'), desktop)
 
   // Download appimagetool if needed
-  const cacheDir = join(root, 'node_modules', '.cache')
-  await Deno.mkdir(cacheDir, { recursive: true })
-  const toolPath = join(cacheDir, 'appimagetool')
-
-  try {
-    await Deno.stat(toolPath)
-  } catch {
-    console.log('[appimage] downloading appimagetool...')
-    const url = `https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-${arch}.AppImage`
-    const resp = await fetch(url)
-    if (!resp.ok || !resp.body) {
-      console.error(`[appimage] ✗ failed to download appimagetool: ${resp.status}`)
-      Deno.exit(1)
-    }
-    const bytes = new Uint8Array(await resp.arrayBuffer())
-    if (bytes.length < 4 || bytes[0] !== 0x7f || bytes[1] !== 0x45 || bytes[2] !== 0x4c || bytes[3] !== 0x46) {
-      console.error('[appimage] ✗ downloaded file is not a valid ELF binary')
-      Deno.exit(1)
-    }
-    await Deno.writeFile(toolPath, bytes)
-    await Deno.chmod(toolPath, 0o755)
-    console.log('[appimage] ✓ appimagetool cached')
-  }
+  const toolPath = await ensureAppimagetool(arch, join(root, 'node_modules', '.cache'))
 
   // Build AppImage
   const appImageOut = join(root, `aio-client-${arch}.AppImage`)
   console.log('[appimage] packaging aio-client...')
-  const appimage = new Deno.Command(toolPath, {
+  const appimageResult = await new Deno.Command(toolPath, {
     args: [appDir, appImageOut],
     stdout: 'inherit',
     stderr: 'inherit',
     env: { ...Deno.env.toObject(), ARCH: arch },
-  })
-  const appimageResult = await appimage.output()
+  }).output()
   if (appimageResult.code !== 0) {
-    console.error('[appimage] ✗ appimagetool failed')
+    console.error('[appimage] \u2717 appimagetool failed')
     Deno.exit(1)
   }
 
   const appImageStat = await Deno.stat(appImageOut)
-  const mb = (appImageStat.size / 1024 / 1024).toFixed(1)
-  console.log(`[appimage] ✓ aio-client-${arch}.AppImage (${mb} MB)`)
+  console.log(`[appimage] \u2713 aio-client-${arch}.AppImage (${formatMb(appImageStat.size)} MB)`)
   Deno.exit(0)
 }
 
@@ -624,9 +606,8 @@ WantedBy=multi-user.target
 
 if (!doElectron) Deno.exit(0)
 
-// ── Step 3: Build AppImage with bundled Electron ──
+// ── Step 3: Package with bundled Electron (platform-aware) ──
 
-const arch = Deno.build.arch === 'aarch64' ? 'aarch64' : 'x86_64'
 const appDir = join(dist, 'AppDir')
 const electronSrc = join(root, 'node_modules', 'electron', 'dist')
 const electronDst = join(appDir, 'electron')
@@ -635,23 +616,14 @@ const electronDst = join(appDir, 'electron')
 try {
   await Deno.stat(electronSrc)
 } catch {
-  console.error('[electron] \u2717 node_modules/electron/dist/ not found — install: deno install npm:electron')
+  console.error('[electron] \u2717 node_modules/electron/dist/ not found — run: npm install electron --no-save')
   Deno.exit(1)
 }
 
-// Copy electron dist into AppDir
+// Copy electron dist into AppDir/electron/
 console.log('[electron] copying Electron runtime...')
 await copyDir(electronSrc, electronDst)
 console.log('[electron] \u2713 electron/ copied')
-
-// Generate AppRun
-const appRun = `#!/bin/bash
-HERE="$(dirname "$(readlink -f "$0")")"
-export ELECTRON_PATH="$HERE/electron/electron"
-exec "$HERE/${binaryName}" "$@"
-`
-await Deno.writeTextFile(join(appDir, 'AppRun'), appRun)
-await Deno.chmod(join(appDir, 'AppRun'), 0o755)
 
 // Icon: use src/icon.png if available, otherwise generate a placeholder SVG
 const userIcon = join(root, 'src', 'icon.png')
@@ -664,62 +636,114 @@ try {
   console.log('[electron] \u2713 generated placeholder icon')
 }
 
-// Generate .desktop file
 const displayName = (appTitle ?? binaryName).replace(/[\x00-\x1f\x7f\r\n]/g, '')
-const desktop = `[Desktop Entry]
+
+if (os === 'linux') {
+  // ── Linux: AppImage ──
+
+  const appRun = `#!/bin/bash
+HERE="$(dirname "$(readlink -f "$0")")"
+export ELECTRON_PATH="$HERE/electron/electron"
+exec "$HERE/${binaryName}" "$@"
+`
+  await Deno.writeTextFile(join(appDir, 'AppRun'), appRun)
+  await Deno.chmod(join(appDir, 'AppRun'), 0o755)
+
+  // .desktop file required by AppImage spec
+  const desktop = `[Desktop Entry]
 Type=Application
 Name=${displayName}
 Exec=${binaryName}
 Icon=${binaryName}
 Categories=Utility;
 `
-await Deno.writeTextFile(join(appDir, `${binaryName}.desktop`), desktop)
+  await Deno.writeTextFile(join(appDir, `${binaryName}.desktop`), desktop)
 
-// Download appimagetool if needed
-const cacheDir = join(root, 'node_modules', '.cache')
-await Deno.mkdir(cacheDir, { recursive: true })
-const toolPath = join(cacheDir, 'appimagetool')
+  // Download appimagetool if needed
+  const toolPath = await ensureAppimagetool(arch, join(root, 'node_modules', '.cache'))
 
-try {
-  await Deno.stat(toolPath)
-} catch {
-  console.log('[appimage] downloading appimagetool...')
-  const url = `https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-${arch}.AppImage`
-  const resp = await fetch(url)
-  if (!resp.ok || !resp.body) {
-    console.error(`[appimage] \u2717 failed to download appimagetool: ${resp.status}`)
+  const appImageOut = join(root, `${binaryName}-${arch}.AppImage`)
+  console.log('[appimage] packaging...')
+  const appimageResult = await new Deno.Command(toolPath, {
+    args: [appDir, appImageOut],
+    stdout: 'inherit',
+    stderr: 'inherit',
+    env: { ...Deno.env.toObject(), ARCH: arch },
+  }).output()
+
+  if (appimageResult.code !== 0) {
+    console.error('[appimage] \u2717 appimagetool failed')
     Deno.exit(1)
   }
-  const bytes = new Uint8Array(await resp.arrayBuffer())
-  // Sanity check — verify downloaded file is a valid ELF binary
-  if (bytes.length < 4 || bytes[0] !== 0x7f || bytes[1] !== 0x45 || bytes[2] !== 0x4c || bytes[3] !== 0x46) {
-    console.error('[appimage] \u2717 downloaded file is not a valid ELF binary')
+
+  const appImageStat = await Deno.stat(appImageOut)
+  console.log(`[appimage] \u2713 ${binaryName}-${arch}.AppImage (${formatMb(appImageStat.size)} MB)`)
+
+} else if (os === 'windows') {
+  // ── Windows: zip with run.bat launcher ──
+  // Deno compile adds .exe automatically on Windows
+  const launcher = `@echo off
+SET HERE=%~dp0
+SET ELECTRON_PATH=%HERE%electron\\electron.exe
+"%HERE%${binaryName}.exe" %*
+`
+  await Promise.all([
+    Deno.writeTextFile(join(appDir, 'run.bat'), launcher),
+    Deno.writeTextFile(join(appDir, 'README.txt'),
+      `${displayName}\n\nRun: double-click run.bat or ${binaryName}.exe\n`),
+  ])
+  console.log('[electron] \u2713 run.bat launcher')
+
+  const zipOut = join(root, `${binaryName}-win-${archStr}.zip`)
+  console.log('[electron] zipping Windows package...')
+  const zipResult = await new Deno.Command('powershell', {
+    args: ['-NoProfile', '-Command',
+      `Compress-Archive -Path "${appDir}\\*" -DestinationPath "${zipOut}" -Force`],
+    stdout: 'inherit',
+    stderr: 'inherit',
+  }).output()
+
+  if (zipResult.code !== 0) {
+    console.error('[electron] \u2717 Compress-Archive failed')
     Deno.exit(1)
   }
-  await Deno.writeFile(toolPath, bytes)
-  await Deno.chmod(toolPath, 0o755)
-  console.log('[appimage] \u2713 appimagetool cached')
-}
 
-// Build the AppImage
-const appImageOut = join(root, `${binaryName}-${arch}.AppImage`)
+  const zipStat = await Deno.stat(zipOut)
+  console.log(`[electron] \u2713 ${binaryName}-win-${archStr}.zip (${formatMb(zipStat.size)} MB)`)
 
-console.log('[appimage] packaging...')
-const appimage = new Deno.Command(toolPath, {
-  args: [appDir, appImageOut],
-  stdout: 'inherit',
-  stderr: 'inherit',
-  env: { ...Deno.env.toObject(), ARCH: arch },
-})
+} else if (os === 'darwin') {
+  // ── macOS: zip with run.sh launcher ──
+  // Electron on macOS ships as Electron.app/ inside dist/
+  const launcher = `#!/bin/bash
+HERE="$(cd "$(dirname "$0")" && pwd)"
+export ELECTRON_PATH="$HERE/electron/Electron.app/Contents/MacOS/Electron"
+exec "$HERE/${binaryName}" "$@"
+`
+  const launcherPath = join(appDir, 'run.sh')
+  await Deno.writeTextFile(launcherPath, launcher)
+  await Deno.chmod(launcherPath, 0o755)
+  console.log('[electron] \u2713 run.sh launcher')
 
-const appimageResult = await appimage.output()
-if (appimageResult.code !== 0) {
-  console.error('[appimage] \u2717 appimagetool failed')
+  const zipOut = join(root, `${binaryName}-mac-${archStr}.zip`)
+  console.log('[electron] zipping macOS package...')
+  const zipResult = await new Deno.Command('zip', {
+    args: ['-r', zipOut, '.'],
+    cwd: appDir,
+    stdout: 'inherit',
+    stderr: 'inherit',
+  }).output()
+
+  if (zipResult.code !== 0) {
+    console.error('[electron] \u2717 zip failed')
+    Deno.exit(1)
+  }
+
+  const zipStat = await Deno.stat(zipOut)
+  console.log(`[electron] \u2713 ${binaryName}-mac-${archStr}.zip (${formatMb(zipStat.size)} MB)`)
+
+} else {
+  console.error(`[electron] \u2717 unsupported platform: ${os}`)
   Deno.exit(1)
 }
-
-const appImageStat = await Deno.stat(appImageOut)
-const mb = (appImageStat.size / 1024 / 1024).toFixed(1)
-console.log(`[appimage] \u2713 ${binaryName}-${arch}.AppImage (${mb} MB)`)
 
 // Helpers (copyDir, findGradle, writePlaceholderIcon, slugify) imported from build-helpers.ts

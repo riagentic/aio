@@ -29,13 +29,21 @@ export type WhereOp = {
 
 export type WhereClause<T> = Partial<{ [K in keyof T]: T[K] | WhereOp }>
 
+export type QueryOpts<T> = {
+  orderBy?: keyof T | [keyof T, 'asc' | 'desc']
+  limit?: number
+  offset?: number
+}
+
 // deno-lint-ignore no-explicit-any
 export type AioTable<T = any> = {
-  all(): T[]
+  all(opts?: QueryOpts<T>): T[]
   find(id: number | string): T | undefined
-  where(filter: WhereClause<T>): T[]
+  where(filter: WhereClause<T>, opts?: QueryOpts<T>): T[]
+  whereOr(filters: WhereClause<T>[]): T[]
   insert(row: T): { lastInsertRowId: number }
   insertMany(rows: T[]): void
+  upsert(row: T): { lastInsertRowId: number; changes: number }
   update(where: WhereClause<T>, set: Partial<T>): { changes: number }
   delete(where: WhereClause<T>): { changes: number }
   count(where?: WhereClause<T>): number
@@ -157,20 +165,50 @@ function buildWhere(filter: Record<string, unknown>): { sql: string; params: unk
   return { sql: clauses.length ? ` WHERE ${clauses.join(' AND ')}` : '', params }
 }
 
+function buildWhereOr(filters: Record<string, unknown>[]): { sql: string; params: unknown[] } {
+  const groups: string[] = []
+  const params: unknown[] = []
+  for (const filter of filters) {
+    const { sql, params: p } = buildWhere(filter)
+    if (sql) { groups.push(`(${sql.slice(7)})`) ; params.push(...p) }  // slice 7 = strip " WHERE "
+  }
+  return { sql: groups.length ? ` WHERE ${groups.join(' OR ')}` : '', params }
+}
+
+function buildQuerySuffix<T>(opts?: QueryOpts<T>): string {
+  if (!opts) return ''
+  let s = ''
+  if (opts.orderBy) {
+    const [col, dir] = Array.isArray(opts.orderBy)
+      ? [opts.orderBy[0] as string, opts.orderBy[1]]
+      : [opts.orderBy as string, 'asc' as const]
+    assertIdent(col, 'orderBy column')
+    s += ` ORDER BY ${col} ${dir.toUpperCase()}`
+  }
+  if (opts.limit !== undefined) s += ` LIMIT ${Math.max(0, Math.floor(opts.limit))}`
+  if (opts.offset !== undefined) s += ` OFFSET ${Math.max(0, Math.floor(opts.offset))}`
+  return s
+}
+
 // ── ORM table wrapper ───────────────────────────────────────────────
 
 function createTableAccessor<T>(db: DatabaseSync, name: string): AioTable<T> {
   return {
-    all(): T[] {
-      return db.prepare(`SELECT * FROM ${name}`).all() as T[]
+    all(opts?: QueryOpts<T>): T[] {
+      return db.prepare(`SELECT * FROM ${name}${buildQuerySuffix(opts)}`).all() as T[]
     },
 
     find(id: number | string): T | undefined {
       return db.prepare(`SELECT * FROM ${name} WHERE id = ?`).get(id) as T | undefined
     },
 
-    where(filter: WhereClause<T>): T[] {
+    where(filter: WhereClause<T>, opts?: QueryOpts<T>): T[] {
       const { sql, params } = buildWhere(filter as Record<string, unknown>)
+      return db.prepare(`SELECT * FROM ${name}${sql}${buildQuerySuffix(opts)}`).all(..._p(params)) as T[]
+    },
+
+    whereOr(filters: WhereClause<T>[]): T[] {
+      const { sql, params } = buildWhereOr(filters as Record<string, unknown>[])
       return db.prepare(`SELECT * FROM ${name}${sql}`).all(..._p(params)) as T[]
     },
 
@@ -188,6 +226,18 @@ function createTableAccessor<T>(db: DatabaseSync, name: string): AioTable<T> {
       if (!rows.length) return
       const keys = Object.keys(rows[0] as Record<string, unknown>)
       for (const k of keys) assertIdent(k, 'insert column')
+      // Validate all rows share the same column set as row[0] — catches mismatched partial objects
+      for (let i = 1; i < rows.length; i++) {
+        const rowKeys = Object.keys(rows[i] as Record<string, unknown>)
+        if (rowKeys.length !== keys.length || !keys.every(k => (rows[i] as Record<string, unknown>)[k] !== undefined || k in (rows[i] as Record<string, unknown>))) {
+          const missing = keys.filter(k => !(k in (rows[i] as Record<string, unknown>)))
+          const extra   = rowKeys.filter(k => !keys.includes(k))
+          const parts: string[] = []
+          if (missing.length) parts.push(`missing: [${missing.join(', ')}]`)
+          if (extra.length)   parts.push(`extra: [${extra.join(', ')}]`)
+          throw new Error(`${name}.insertMany: row ${i} has different columns than row 0 — ${parts.join(', ')}`)
+        }
+      }
       const placeholders = keys.map(() => '?').join(', ')
       const stmt = db.prepare(`INSERT INTO ${name} (${keys.join(', ')}) VALUES (${placeholders})`)
       db.exec('BEGIN')
@@ -201,6 +251,16 @@ function createTableAccessor<T>(db: DatabaseSync, name: string): AioTable<T> {
         db.exec('ROLLBACK')
         throw e
       }
+    },
+
+    upsert(row: T): { lastInsertRowId: number; changes: number } {
+      const obj = row as Record<string, unknown>
+      const keys = Object.keys(obj)
+      for (const k of keys) assertIdent(k, 'upsert column')
+      const placeholders = keys.map(() => '?').join(', ')
+      const result = db.prepare(`INSERT OR REPLACE INTO ${name} (${keys.join(', ')}) VALUES (${placeholders})`)
+        .run(..._p(keys.map(k => obj[k])))
+      return { lastInsertRowId: Number(result.lastInsertRowid), changes: Number(result.changes) }
     },
 
     update(where: WhereClause<T>, set: Partial<T>): { changes: number } {
@@ -318,7 +378,8 @@ function rowsEqual(a: Record<string, unknown>, b: Record<string, unknown>, cols:
   return true
 }
 
-/** Sync changed state arrays to SQLite — incremental for tables with PK, full sync otherwise */
+/** Sync changed state arrays to SQLite — incremental diff against prev (no full table scan).
+ *  prev must reflect the last state written to SQLite (maintained by aio.ts prevDbState). */
 export function syncTables(
   db: DatabaseSync, schema: Record<string, TableDef>,
   state: Record<string, unknown>, prev: Record<string, unknown>,
@@ -337,24 +398,25 @@ export function syncTables(
       const pk = findPrimaryKey(schema[name])
 
       if (pk && rows.length > 0) {
-        const dbRows = db.prepare(`SELECT * FROM ${name}`).all() as Record<string, unknown>[]
+        // Use prev rows as proxy for current DB state — no SELECT needed
+        const prevRows = (prev[name] as Record<string, unknown>[]) ?? []
 
         const toDelete: unknown[] = []
         const toUpdate: Record<string, unknown>[] = []
         const toInsert: Record<string, unknown>[] = []
 
-        const dbMap = new Map(dbRows.map(r => [r[pk], r]))
+        const prevMap = new Map(prevRows.map(r => [r[pk], r]))
         for (const row of rows) {
           const id = row[pk]
-          if (!dbMap.has(id)) {
+          if (!prevMap.has(id)) {
             toInsert.push(row)
-          } else if (!rowsEqual(row, dbMap.get(id)!, cols)) {
+          } else if (!rowsEqual(row, prevMap.get(id)!, cols)) {
             toUpdate.push(row)
           }
         }
         const stateIds = new Set(rows.map(r => r[pk]))
-        for (const dbRow of dbRows) {
-          if (!stateIds.has(dbRow[pk])) toDelete.push(dbRow[pk])
+        for (const prevRow of prevRows) {
+          if (!stateIds.has(prevRow[pk])) toDelete.push(prevRow[pk])
         }
 
         if (toDelete.length) {

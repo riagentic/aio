@@ -4,7 +4,7 @@
 
 import { create } from './create.ts'
 
-const VERSION = '0.2.0'
+const VERSION = '0.4.0'
 
 const c = {
   bold: '\x1b[1m', dim: '\x1b[2m', cyan: '\x1b[36m', green: '\x1b[32m',

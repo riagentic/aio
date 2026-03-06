@@ -1,8 +1,9 @@
 {
   "title": "AIO Counter",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "unstable": ["kv"],
   "compilerOptions": {
+    "strict": true,
     "jsx": "react-jsx",
     "jsxImportSource": "react",
     "jsxImportSourceTypes": "@types/react"

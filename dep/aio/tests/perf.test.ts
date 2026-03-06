@@ -282,3 +282,66 @@ Deno.test('perf: default budgets are 100ms reduce, 5ms effect', () => {
   assertEquals(errors[0].budget, 100)  // reduce default
   assertEquals(errors[1].budget, 5)     // effect default
 })
+
+// ── effectTimeout ────────────────────────────────────────────────────
+
+Deno.test('perf: effectTimeout warns when async effect exceeds limit', async () => {
+  const warnings: string[] = []
+  const errors: AioError[] = []
+
+  const deps = createTestDeps({
+    reduce: () => ({ state: { count: 1 }, effects: [{ type: 'Log', payload: { msg: 'slow' } }] }),
+    execute: () => new Promise<void>(r => setTimeout(r, 80)), // takes 80ms
+    onError: (err) => { errors.push(err) },
+    effectTimeout: 30,  // 30ms limit — should fire
+  })
+
+  const dispatch = createDispatch({ ...deps, log: { debug: () => {}, warn: (m) => warnings.push(m), error: () => {} } })
+  dispatch({ type: 'Inc' })
+
+  // Wait for the timeout to fire
+  await new Promise(r => setTimeout(r, 120))
+
+  assertEquals(warnings.some(w => w.includes('timeout')), true)
+  assertEquals(errors.length, 1)
+  assertEquals(errors[0].source, 'effect')
+  assertEquals(errors[0].effectType, 'Log')
+  assertEquals(errors[0].message?.includes('timeout'), true)
+})
+
+Deno.test('perf: effectTimeout=0 disables timeout', async () => {
+  const warnings: string[] = []
+  const errors: AioError[] = []
+
+  const deps = createTestDeps({
+    reduce: () => ({ state: { count: 1 }, effects: [{ type: 'Log', payload: { msg: 'ok' } }] }),
+    execute: () => new Promise<void>(r => setTimeout(r, 50)),
+    onError: (err) => { errors.push(err) },
+    effectTimeout: 0,  // disabled
+  })
+
+  const dispatch = createDispatch({ ...deps, log: { debug: () => {}, warn: (m) => warnings.push(m), error: () => {} } })
+  dispatch({ type: 'Inc' })
+
+  await new Promise(r => setTimeout(r, 80))
+
+  assertEquals(warnings.filter(w => w.includes('timeout')).length, 0)
+  assertEquals(errors.length, 0)
+})
+
+Deno.test('perf: effectTimeout does not fire when effect completes in time', async () => {
+  const warnings: string[] = []
+
+  const deps = createTestDeps({
+    reduce: () => ({ state: { count: 1 }, effects: [{ type: 'Log', payload: { msg: 'fast' } }] }),
+    execute: () => new Promise<void>(r => setTimeout(r, 10)),
+    effectTimeout: 200,  // generous limit
+  })
+
+  const dispatch = createDispatch({ ...deps, log: { debug: () => {}, warn: (m) => warnings.push(m), error: () => {} } })
+  dispatch({ type: 'Inc' })
+
+  await new Promise(r => setTimeout(r, 250))
+
+  assertEquals(warnings.filter(w => w.includes('timeout')).length, 0)
+})

@@ -1,5 +1,5 @@
 import { assertEquals } from 'https://deno.land/std@0.224.0/assert/mod.ts'
-import { formatUptime, parsePayload, resolvePort, parseGlobalFlags, readPid, writePid, removePid, isProcessAlive, resolvePath } from '../src/am.ts'
+import { formatUptime, parsePayload, resolvePort, parseGlobalFlags, readPid, writePid, removePid, isProcessAlive, resolvePath, resolveControlPort } from '../src/am.ts'
 import type { PidFile } from '../src/am.ts'
 import { createServer } from '../src/server.ts'
 import { VERSION } from '../src/aio.ts'
@@ -241,6 +241,36 @@ Deno.test('am: PidFile status transitions', () => {
     writePid({ pid: 10, port: 8000, startedAt: 0, status: 'stopping' })
     assertEquals(readPid()!.status, 'stopping')
   } finally { removePid() }
+})
+
+Deno.test('am: PidFile with trojanPort round-trip', () => {
+  const pf: PidFile = { pid: 1234, port: 8000, startedAt: Date.now(), status: 'started', trojanPort: 9001 }
+  try {
+    writePid(pf)
+    const loaded = readPid()!
+    assertEquals(loaded.trojanPort, 9001)
+    assertEquals(loaded.port, 8000)
+  } finally { removePid() }
+})
+
+Deno.test('am: resolveControlPort returns trojanPort when TLS active', () => {
+  try {
+    writePid({ pid: 1234, port: 8000, startedAt: Date.now(), status: 'started', trojanPort: 9001 })
+    assertEquals(resolveControlPort(8000), 9001)
+    assertEquals(resolveControlPort(9999), 9999) // different main port — no match
+  } finally { removePid() }
+})
+
+Deno.test('am: resolveControlPort falls back to main port without trojanPort', () => {
+  try {
+    writePid({ pid: 1234, port: 8000, startedAt: Date.now(), status: 'started' })
+    assertEquals(resolveControlPort(8000), 8000)
+  } finally { removePid() }
+})
+
+Deno.test('am: resolveControlPort falls back when no PID file', () => {
+  removePid()
+  assertEquals(resolveControlPort(8000), 8000)
 })
 
 // ── Unit: --wait flag parsing ──────────────────────────────────

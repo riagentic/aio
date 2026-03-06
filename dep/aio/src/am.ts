@@ -6,7 +6,7 @@ import { VERSION } from './aio.ts'
 
 // ── 1. Types & constants ─────────────────────────────────────
 
-export type PidFile = { pid: number; port: number; startedAt: number; status: 'starting' | 'started' | 'stopping' }
+export type PidFile = { pid: number; port: number; startedAt: number; status: 'starting' | 'started' | 'stopping'; trojanPort?: number }
 export type OutputMode = 'pretty' | 'json' | 'quiet'
 export type Result<T = unknown> = { ok: true; data: T } | { ok: false; error: string }
 
@@ -170,20 +170,28 @@ function fetchError(e: unknown, port: number): Result {
   return { ok: false, error: String(e) }
 }
 
+/** Returns the plain-HTTP control port: trojanPort (when TLS active) or main port */
+export function resolveControlPort(mainPort: number): number {
+  const pf = readPid()
+  return (pf?.port === mainPort && pf.trojanPort) ? pf.trojanPort : mainPort
+}
+
 async function trojanGet(port: number, route: string): Promise<Result> {
+  const ctrl = resolveControlPort(port)
   try {
-    const resp = await fetch(`http://127.0.0.1:${port}/__trojan/${route}`, { signal: AbortSignal.timeout(FETCH_TIMEOUT) })
+    const resp = await fetch(`http://127.0.0.1:${ctrl}/__trojan/${route}`, { signal: AbortSignal.timeout(FETCH_TIMEOUT) })
     if (!resp.ok) {
       const body = await resp.text()
       try { return { ok: false, error: JSON.parse(body).error ?? body } } catch { return { ok: false, error: body } }
     }
     return { ok: true, data: await resp.json() }
-  } catch (e) { return fetchError(e, port) }
+  } catch (e) { return fetchError(e, ctrl) }
 }
 
 async function trojanPost(port: number, route: string, body?: unknown): Promise<Result> {
+  const ctrl = resolveControlPort(port)
   try {
-    const resp = await fetch(`http://127.0.0.1:${port}/__trojan/${route}`, {
+    const resp = await fetch(`http://127.0.0.1:${ctrl}/__trojan/${route}`, {
       method: 'POST',
       headers: body !== undefined ? { 'Content-Type': 'application/json' } : {},
       body: body !== undefined ? JSON.stringify(body) : undefined,
@@ -194,15 +202,16 @@ async function trojanPost(port: number, route: string, body?: unknown): Promise<
       try { return { ok: false, error: JSON.parse(text).error ?? text } } catch { return { ok: false, error: text } }
     }
     return { ok: true, data: await resp.json() }
-  } catch (e) { return fetchError(e, port) }
+  } catch (e) { return fetchError(e, ctrl) }
 }
 
 async function httpGet(port: number, path: string): Promise<Result<string>> {
+  const ctrl = resolveControlPort(port)
   try {
-    const resp = await fetch(`http://127.0.0.1:${port}${path}`, { signal: AbortSignal.timeout(FETCH_TIMEOUT) })
+    const resp = await fetch(`http://127.0.0.1:${ctrl}${path}`, { signal: AbortSignal.timeout(FETCH_TIMEOUT) })
     if (!resp.ok) return { ok: false, error: `${resp.status} ${await resp.text()}` }
     return { ok: true, data: await resp.text() }
-  } catch (e) { return fetchError(e, port) as Result<string> }
+  } catch (e) { return fetchError(e, ctrl) as Result<string> }
 }
 
 // ── 4. Command handlers ──────────────────────────────────────
@@ -250,7 +259,7 @@ async function ensureSingleton(mode: OutputMode): Promise<void> {
     // Check if it's actually responding (auto-heal to 'started')
     let responds = false
     try {
-      const r = await fetch(`http://127.0.0.1:${pf.port}/`, { signal: AbortSignal.timeout(HEALTH_TIMEOUT_MS) })
+      const r = await fetch(`http://127.0.0.1:${pf.trojanPort ?? pf.port}/`, { signal: AbortSignal.timeout(HEALTH_TIMEOUT_MS) })
       await r.body?.cancel()
       responds = r.ok
     } catch { /* not yet */ }
@@ -267,7 +276,7 @@ async function ensureSingleton(mode: OutputMode): Promise<void> {
   // status='started' — verify it's actually responding
   let responds = false
   try {
-    const r = await fetch(`http://127.0.0.1:${pf.port}/`, { signal: AbortSignal.timeout(HEALTH_TIMEOUT_MS) })
+    const r = await fetch(`http://127.0.0.1:${pf.trojanPort ?? pf.port}/`, { signal: AbortSignal.timeout(HEALTH_TIMEOUT_MS) })
     await r.body?.cancel()
     responds = r.ok
   } catch { /* not responding */ }
@@ -360,7 +369,8 @@ async function cmdStart(args: string[], flags: GlobalFlags): Promise<void> {
     await new Promise(r => setTimeout(r, POLL_INTERVAL_MS))
     if (!isProcessAlive(pid)) break // died early
     try {
-      const resp = await fetch(`http://127.0.0.1:${port}/`, { signal: AbortSignal.timeout(HEALTH_TIMEOUT_MS) })
+      const ctrlPort = resolveControlPort(port) // re-read PID each poll — picks up trojanPort when TLS ready
+      const resp = await fetch(`http://127.0.0.1:${ctrlPort}/`, { signal: AbortSignal.timeout(HEALTH_TIMEOUT_MS) })
       await resp.body?.cancel()
       if (resp.ok) { healthy = true; break }
     } catch { /* not ready yet */ }
@@ -427,7 +437,8 @@ async function cmdStop(_args: string[], flags: GlobalFlags): Promise<void> {
   while (Date.now() < deadline) {
     if (pf && !isProcessAlive(pf.pid)) break
     try {
-      const resp = await fetch(`http://127.0.0.1:${port}/`, { signal: AbortSignal.timeout(QUICK_TIMEOUT_MS) })
+      const ctrlPort = resolveControlPort(port)
+      const resp = await fetch(`http://127.0.0.1:${ctrlPort}/`, { signal: AbortSignal.timeout(QUICK_TIMEOUT_MS) })
       await resp.body?.cancel()
     } catch { break } // connection refused = dead
     await new Promise(r => setTimeout(r, POLL_INTERVAL_MS))
@@ -453,13 +464,44 @@ async function cmdRestart(args: string[], flags: GlobalFlags): Promise<void> {
     const deadline = Date.now() + SINGLETON_WAIT_MS
     while (Date.now() < deadline) {
       try {
-        const r = await fetch(`http://127.0.0.1:${port}/`, { signal: AbortSignal.timeout(STOP_CHECK_TIMEOUT_MS) })
+        const ctrlPort = resolveControlPort(port)
+        const r = await fetch(`http://127.0.0.1:${ctrlPort}/`, { signal: AbortSignal.timeout(STOP_CHECK_TIMEOUT_MS) })
         await r.body?.cancel()
         await new Promise(r => setTimeout(r, KILL_POLL_MS))
       } catch { break } // connection refused = port free
     }
   }
   await cmdStart(args, flags)
+}
+
+async function cmdWatch(args: string[], flags: GlobalFlags): Promise<void> {
+  const mode = detectMode(flags)
+  const watchDir = args[0] ?? 'src'
+  out(mode === 'pretty' ? `watching ${watchDir}/ for changes…` : { watching: watchDir }, mode)
+
+  // Start initially if not already running
+  if (!readPid()) await cmdStart([], flags)
+
+  const DEBOUNCE_MS = 300
+  let timer: ReturnType<typeof setTimeout> | null = null
+  let restarting = false
+
+  const watcher = Deno.watchFs(watchDir, { recursive: true })
+  for await (const event of watcher) {
+    if (!['modify', 'create', 'remove'].includes(event.kind)) continue
+    const changed = event.paths.find(p => p.endsWith('.ts') || p.endsWith('.tsx'))
+    if (!changed) continue
+
+    if (timer) clearTimeout(timer)
+    timer = setTimeout(async () => {
+      if (restarting) return
+      restarting = true
+      out(mode === 'pretty' ? `change detected — restarting…` : { event: 'restart', trigger: changed }, mode)
+      await cmdRestart([], { ...flags, quiet: true })
+      out(mode === 'pretty' ? 'restarted' : { event: 'restarted' }, mode)
+      restarting = false
+    }, DEBOUNCE_MS)
+  }
 }
 
 async function cmdStatus(_args: string[], flags: GlobalFlags): Promise<void> {
@@ -481,17 +523,18 @@ async function cmdStatus(_args: string[], flags: GlobalFlags): Promise<void> {
     Deno.exit(1)
   }
 
-  // Process alive + stopping → report stopping
+  // Process alive + stopping → report stopping (exit 2 = transitional, not error)
   if (pf.status === 'stopping') {
     out(mode === 'pretty' ? `stopping (pid ${pf.pid}, port ${pf.port})` : { status: 'stopping', pid: pf.pid, port: pf.port }, mode)
-    Deno.exit(1)
+    Deno.exit(2)
   }
 
-  // Process alive — probe port to distinguish starting vs started
+  // Process alive — probe control port to distinguish starting vs started
   const port = pf.port
+  const ctrlPort = pf.trojanPort ?? pf.port
   let portResponds = false
   try {
-    const resp = await fetch(`http://127.0.0.1:${port}/`, { signal: AbortSignal.timeout(HEALTH_TIMEOUT_MS) })
+    const resp = await fetch(`http://127.0.0.1:${ctrlPort}/`, { signal: AbortSignal.timeout(HEALTH_TIMEOUT_MS) })
     await resp.body?.cancel()
     portResponds = resp.ok
   } catch { /* not responding */ }
@@ -499,7 +542,7 @@ async function cmdStatus(_args: string[], flags: GlobalFlags): Promise<void> {
   if (portResponds) {
     // Port responds → started (auto-fix PID file if stuck at 'starting')
     if (pf.status !== 'started') writePid({ ...pf, status: 'started' })
-    const metrics = await trojanGet(port, 'metrics')
+    const metrics = await trojanGet(port, 'metrics')  // trojanGet resolves ctrlPort internally
     if (metrics.ok) {
       const m = metrics.data as { uptime: number; connections: number; schedules: number }
       if (mode === 'pretty') {
@@ -511,9 +554,9 @@ async function cmdStatus(_args: string[], flags: GlobalFlags): Promise<void> {
       out(mode === 'pretty' ? `started (pid ${pf.pid}, port ${port})` : { status: 'started', pid: pf.pid, port }, mode)
     }
   } else {
-    // Port not responding but process alive → starting
+    // Port not responding but process alive → starting (exit 2 = transitional, not error)
     out(mode === 'pretty' ? `starting (pid ${pf.pid}, port ${port})` : { status: 'starting', pid: pf.pid, port }, mode)
-    Deno.exit(1)
+    Deno.exit(2)
   }
 }
 
@@ -714,6 +757,10 @@ async function cmdLog(args: string[], flags: GlobalFlags): Promise<void> {
   const mode = detectMode(flags)
   const filter = args[0] ?? flags.filter
   const n = flags.lines ?? 50
+  const follow = flags.follow ?? false
+
+  // Print current tail
+  let offset = 0
   try {
     const content = Deno.readTextFileSync(LOG_FILE)
     let lines = content.split('\n')
@@ -726,8 +773,40 @@ async function cmdLog(args: string[], flags: GlobalFlags): Promise<void> {
       const clean = tail.map(l => l.replace(/\x1b\[[0-9;]*m/g, ''))
       out({ total: lines.length, shown: clean.length, filter: filter ?? null, lines: clean }, mode)
     } else console.log(tail.join('\n'))
+    offset = Deno.statSync(LOG_FILE).size
   } catch {
-    outError('no log file found', mode)
+    if (!follow) { outError('no log file found', mode); return }
+  }
+
+  if (!follow) return
+
+  // --follow / -f: stream new bytes as they arrive (like tail -f)
+  const enc = new TextEncoder()
+  const watcher = Deno.watchFs(LOG_FILE)
+  let buf = ''
+  for await (const event of watcher) {
+    if (event.kind !== 'modify' && event.kind !== 'create') continue
+    try {
+      const file = await Deno.open(LOG_FILE, { read: true })
+      await file.seek(offset, Deno.SeekMode.Start)
+      const chunk = new Uint8Array(65536)
+      let bytesRead: number | null
+      while ((bytesRead = await file.read(chunk)) !== null) {
+        const text = new TextDecoder().decode(chunk.subarray(0, bytesRead))
+        offset += bytesRead
+        buf += text
+        // Output complete lines; buffer partial last line
+        const newline = buf.lastIndexOf('\n')
+        if (newline === -1) continue
+        const toWrite = buf.slice(0, newline + 1)
+        buf = buf.slice(newline + 1)
+        const filtered = filter
+          ? toWrite.split('\n').filter(l => l.toLowerCase().includes(filter.toLowerCase())).join('\n') + '\n'
+          : toWrite
+        if (filtered.trim()) await Deno.stdout.write(enc.encode(filtered))
+      }
+      file.close()
+    } catch { /* file rotated or removed */ }
   }
 }
 
@@ -760,8 +839,9 @@ async function cmdMetrics(_args: string[], flags: GlobalFlags): Promise<void> {
 async function cmdHealth(_args: string[], flags: GlobalFlags): Promise<void> {
   const mode = detectMode(flags)
   const port = resolvePort(flags.port)
+  const ctrlPort = resolveControlPort(port)
   try {
-    const resp = await fetch(`http://127.0.0.1:${port}/`, { signal: AbortSignal.timeout(FETCH_TIMEOUT) })
+    const resp = await fetch(`http://127.0.0.1:${ctrlPort}/`, { signal: AbortSignal.timeout(FETCH_TIMEOUT) })
     await resp.body?.cancel()
     out(mode === 'pretty' ? `healthy (${resp.status})` : { healthy: true, status: resp.status }, mode)
   } catch {
@@ -791,7 +871,8 @@ Process (singleton — one instance per project):
   start                   Start app (kills zombies, refuses if already running)
   stop                    Graceful shutdown (SIGTERM → SIGKILL)
   restart                 Stop + start
-  status                  stopped|starting|started|stopping
+  watch [dir]             Hot-restart on .ts/.tsx change in dir (default: src/)
+  status                  stopped|starting|started|stopping (exit 0=started, 1=stopped, 2=transitional)
 
 State:
   state [path] [--wait=N] State query (dot-path, [*] wildcard, {pick})
@@ -815,7 +896,7 @@ Inspect:
   sql <query>             Execute read-only SQL
   tables                  List SQLite tables
   schedules               Active scheduled effects
-  log [filter]            Tail app log (--filter=X --lines=N)
+  log [filter]            Tail app log (--filter=X --lines=N --follow/-f)
   errors                  Last build error
   metrics                 Uptime, connections, schedules
   health                  HTTP health check
@@ -825,18 +906,18 @@ Other:
   version                 Print version
   help                    This message
 
-Flags: --port=N  --wait[=N]  --json  --quiet  --body='{...}'  --filter=X  --lines=N
+Flags: --port=N  --wait[=N]  --json  --quiet  --body='{...}'  --filter=X  --lines=N  --follow/-f
 
 --wait: start/stop block until complete (default 10s/5s). state polls every Ns.`)
 }
 
 // ── 5. Main entry & router ───────────────────────────────────
 
-type GlobalFlags = { port?: number; json?: boolean; quiet?: boolean; jsonBody?: string; filter?: string; lines?: number; wait?: number }
+type GlobalFlags = { port?: number; json?: boolean; quiet?: boolean; jsonBody?: string; filter?: string; lines?: number; wait?: number; follow?: boolean }
 type CmdHandler = (args: string[], flags: GlobalFlags) => void | Promise<void>
 
 const COMMANDS: Record<string, CmdHandler> = {
-  start: cmdStart, stop: cmdStop, restart: cmdRestart, status: cmdStatus,
+  start: cmdStart, stop: cmdStop, restart: cmdRestart, status: cmdStatus, watch: cmdWatch,
   state: cmdState, ui: cmdUi, dispatch: cmdDispatch, actions: cmdActions,
   tt: cmdTT,
   persist: cmdPersist, snapshot: cmdSnapshot,
@@ -858,6 +939,7 @@ export function parseGlobalFlags(raw: string[]): { command: string; args: string
     else if (a.startsWith('--lines=')) { const v = Number(a.slice(8)); flags.lines = isNaN(v) ? undefined : v }
     else if (a.startsWith('--wait=')) { const v = Number(a.slice(7)); flags.wait = isNaN(v) ? undefined : v }
     else if (a === '--wait') flags.wait = 0 // bare --wait = use default
+    else if (a === '--follow' || a === '-f') flags.follow = true
     else rest.push(a)
   }
 

@@ -88,6 +88,9 @@ export function parseCron(pattern: string): CronFields {
   }
 }
 
+// NOTE: cron fields are matched against UTC time (getUTCHours, getUTCDay, etc.).
+// A pattern like "0 9 * * 1-5" fires at 09:00 UTC, not local time.
+// If local-time cron is needed, offset the hour field by your UTC offset.
 export function nextCronTime(fields: CronFields, after: Date): Date {
   const d = new Date(after.getTime())
   d.setUTCSeconds(0, 0)

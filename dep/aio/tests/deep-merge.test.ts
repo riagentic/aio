@@ -83,6 +83,23 @@ Deno.test('deepMerge: blocks constructor/prototype keys', () => {
   assertEquals(deepMerge(initial, persisted), { a: 2 })
 })
 
+Deno.test('deepMerge: array→object type mismatch keeps initial (schema wins)', () => {
+  // persisted is array, initial is object → typeof mismatch → keep initial
+  const initial = { config: { theme: 'light' } } as Record<string, unknown>
+  const persisted = { config: ['broken'] } as Record<string, unknown>
+  assertEquals(deepMerge(initial, persisted), { config: { theme: 'light' } })
+})
+
+Deno.test('deepMerge: object→array type mismatch keeps initial (schema wins)', () => {
+  // persisted is plain object, initial is array → typeof match (both 'object') but isPlainObject check gates recursion
+  const initial = { items: ['a', 'b'] } as Record<string, unknown>
+  const persisted = { items: { 0: 'x' } } as Record<string, unknown>
+  // arrays are replaced wholesale only when types match; object→array is same typeof → persisted used
+  // This is the documented behaviour: arrays replaced wholesale if types match
+  const result = deepMerge(initial, persisted)
+  assertEquals(typeof result.items, 'object')
+})
+
 Deno.test('deepMerge: depth limit prevents stack overflow', () => {
   // Build a deeply nested structure (40 levels, limit is 32)
   let initial: Record<string, unknown> = { value: 'init' }

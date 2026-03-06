@@ -67,6 +67,7 @@ export type DispatchDeps<S, A, E> = {
   perfMode?: PerfMode
   perfBudget?: PerfBudget
   freezeState?: boolean  // deep freeze state after reduce in dev mode
+  effectTimeout?: number  // ms before warning on a slow async effect (default: 30000, 0 = disabled)
 }
 
 /** Dispatch function with close() to reject further actions */
@@ -75,6 +76,7 @@ type DispatchFn<A> = ((action: A) => void) & { close: () => void; errorCount: ()
 /** Creates a re-entrant-safe dispatch loop that drains queued actions in order */
 export function createDispatch<S, A, E>(deps: DispatchDeps<S, A, E>): DispatchFn<A> {
   const { reduce, execute, getState, setState, onDone, log, onError, onPerf, perfMode, perfBudget, freezeState } = deps
+  const effectTimeout = deps.effectTimeout ?? 30_000  // 0 = disabled
   const strictPerf = perfMode !== 'soft'  // default: strict
   const reduceBudget = perfBudget?.reduce ?? DEFAULT_REDUCE_BUDGET
   const effectBudget = perfBudget?.effect ?? DEFAULT_EFFECT_BUDGET
@@ -189,12 +191,24 @@ export function createDispatch<S, A, E>(deps: DispatchDeps<S, A, E>): DispatchFn
             reportPerf('effect', effectDuration, effectBudget, effectType)
           }
           
-          // catch rejected promises from async effects
+          // catch rejected promises from async effects + optional timeout warning
           if (r && typeof (r as Promise<void>).catch === 'function') {
-            (r as Promise<void>).catch(e => {
-              log.error(`async effect error on ${tag(effect)}: ${e}`)
-              reportError({ source: 'effect', error: e, effectType })
-            })
+            const promise = r as Promise<void>
+            // Timeout: warn if async effect takes longer than effectTimeout ms
+            const tid = effectTimeout > 0
+              ? setTimeout(() => {
+                  const msg = `async effect timeout: ${effectType ?? '?'} took >${effectTimeout}ms`
+                  log.warn(msg)
+                  reportError({ source: 'effect', effectType, message: msg })
+                }, effectTimeout)
+              : null
+            promise
+              .then(() => { if (tid !== null) clearTimeout(tid) })
+              .catch(e => {
+                if (tid !== null) clearTimeout(tid)
+                log.error(`async effect error on ${tag(effect)}: ${e}`)
+                reportError({ source: 'effect', error: e, effectType })
+              })
           }
         } catch (e) {
           log.error(`effect error on ${tag(effect)}: ${e}`)
