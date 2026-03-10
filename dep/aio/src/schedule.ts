@@ -124,6 +124,7 @@ export function createScheduleManager(
   handle: (effect: ScheduleEffect) => void
   start: (defs: ScheduleDef[]) => void
   cancelAll: () => void
+  cancelByPrefix: (prefix: string) => void
   active: () => string[]
 } {
   const timers = new Map<string, TimerEntry>()
@@ -237,9 +238,16 @@ export function createScheduleManager(
     timers.clear()
   }
 
+  /** Cancel all timers whose ID starts with prefix (e.g. feature name) */
+  function cancelByPrefix(prefix: string): void {
+    for (const [id] of timers) {
+      if (id.startsWith(prefix)) cancelTimer(id)
+    }
+  }
+
   function active(): string[] {
     return [...timers.keys()]
   }
 
-  return { handle, start, cancelAll, active }
+  return { handle, start, cancelAll, cancelByPrefix, active }
 }

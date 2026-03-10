@@ -48,6 +48,8 @@ export type AioError = {
 
 /** Safety limit — prevents infinite effect→dispatch loops */
 const DISPATCH_MAX = 1000
+/** Queue depth limit — prevents unbounded memory growth from burst dispatches */
+const QUEUE_MAX = 10_000
 
 /** Dependencies injected into the dispatch loop by the host runtime */
 export type DispatchDeps<S, A, E> = {
@@ -83,6 +85,7 @@ export function createDispatch<S, A, E>(deps: DispatchDeps<S, A, E>): DispatchFn
   let dispatching = false
   let closed = false
   let errors = 0
+  let depth = 0  // global re-entrant depth counter (survives across dispatch calls)
   const queue: A[] = []
 
   function tag(v: unknown): string {
@@ -109,17 +112,23 @@ export function createDispatch<S, A, E>(deps: DispatchDeps<S, A, E>): DispatchFn
 
   function dispatch(action: A): void {
     if (closed) { log.warn('dispatch after close() — ignored'); return }
+    if (queue.length >= QUEUE_MAX) {
+      log.error(`dispatch queue depth exceeded (${QUEUE_MAX}) — dropping action ${tag(action)}`)
+      reportError({ source: 'reduce', actionType: (action as Record<string, unknown>)?.type as string, message: `queue depth exceeded ${QUEUE_MAX}` })
+      return
+    }
     queue.push(action)
     if (dispatching) return
     dispatching = true
 
     let iterations = 0
-    let overflowed = false
+    depth++
+    // deno-lint-ignore no-constant-condition
+    for (;;) { // outer loop: drain queue → onDone → re-drain if onDone queued more
     while (queue.length > 0) {
       if (++iterations > DISPATCH_MAX) {
-        log.error(`dispatch queue overflow (${DISPATCH_MAX} iterations) — possible infinite loop (next: ${tag(queue[0])}), flushing queue`)
+        log.error(`dispatch queue overflow (${DISPATCH_MAX} iterations, depth ${depth}) — possible infinite loop (next: ${tag(queue[0])}), flushing queue`)
         queue.length = 0
-        overflowed = true
         break
       }
       const current = queue.shift()!
@@ -157,7 +166,7 @@ export function createDispatch<S, A, E>(deps: DispatchDeps<S, A, E>): DispatchFn
       // that crash on JSON.stringify or property access after produce() finalizes.
       if (reduced.effects.length) {
         try { reduced = { ...reduced, effects: structuredClone(reduced.effects) } }
-        catch { /* effects not cloneable — use originals */ }
+        catch { log.warn(`effects not cloneable for ${tag(current)} — may hold draft refs`) }
       }
 
       const prev = getState()
@@ -227,8 +236,16 @@ export function createDispatch<S, A, E>(deps: DispatchDeps<S, A, E>): DispatchFn
       }
     }
 
+    // onDone (persist + broadcast) runs while dispatching=true so re-entrant dispatches queue
+    try { onDone() } catch (e) {
+      log.error(`onDone threw: ${e}`)
+      reportError({ source: 'effect', error: e, message: `onDone callback threw: ${e}` })
+    }
+    // If onDone queued new actions, loop back to drain them
+    if (queue.length === 0) break
+    } // end outer loop
+    depth--
     dispatching = false
-    if (!overflowed) onDone()
   }
 
   dispatch.close = () => { closed = true }

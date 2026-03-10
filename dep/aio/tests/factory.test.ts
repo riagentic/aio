@@ -78,3 +78,47 @@ Deno.test('labels have literal types', () => {
   assertEquals(_fu, 'FetchUser')
   assertEquals(_r, 'Reset')
 })
+
+// ── Domain prefix ──
+
+const C = actions('Counter', {
+  Increment: (by = 1) => ({ by }),
+  Reset: () => ({}),
+})
+
+Deno.test('domain prefix: labels are Domain:Action', () => {
+  assertEquals(C.Increment, 'Counter:Increment')
+  assertEquals(C.Reset, 'Counter:Reset')
+})
+
+Deno.test('domain prefix: creators produce prefixed type', () => {
+  assertEquals(C.increment(3), { type: 'Counter:Increment', payload: { by: 3 } })
+  assertEquals(C.reset(), { type: 'Counter:Reset', payload: {} })
+})
+
+Deno.test('domain prefix: labels have literal types', () => {
+  const _inc: 'Counter:Increment' = C.Increment
+  const _r: 'Counter:Reset' = C.Reset
+  assertEquals(_inc, 'Counter:Increment')
+  assertEquals(_r, 'Counter:Reset')
+})
+
+Deno.test('domain prefix: switch narrowing works', () => {
+  type CAction = UnionOf<typeof C>
+  function handle(a: CAction): string {
+    switch (a.type) {
+      case C.Increment: return `inc ${a.payload.by}`
+      case C.Reset: return 'reset'
+    }
+  }
+  assertEquals(handle(C.increment(5)), 'inc 5')
+  assertEquals(handle(C.reset()), 'reset')
+})
+
+Deno.test('domain prefix: effects() also supports domain', () => {
+  const E = effects('IO', {
+    Log: (msg: string) => ({ msg }),
+  })
+  assertEquals(E.Log, 'IO:Log')
+  assertEquals(E.log('hi'), { type: 'IO:Log', payload: { msg: 'hi' } })
+})

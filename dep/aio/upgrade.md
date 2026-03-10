@@ -223,4 +223,416 @@ deno task dev --expose --cert=/etc/ssl/myapp.pem --key=/etc/ssl/myapp.key
 
 ---
 
+## v0.4 → v0.5
+
+### New features — feature-based architecture
+
+v0.5 introduces `feature()` — one function defines state, actions, effects, state machine, reducer, executor, and selectors. The old v0.4 API (`aio.run(initialState, config)`) still works unchanged for existing apps.
+
+- **`feature(name, config)`** — one function replaces 7 files. Auto-prefixes action/effect types (`increment` → `'Counter:Increment'`). Wraps reducer in Immer `produce()` automatically
+- **State machines** — required for every feature. Declares explicit states and transitions. Invalid transitions are dropped. Typos in machine keys cause startup errors. `_status` field auto-managed by framework
+- **`A` and `E` dual-role objects** — labels for `switch/case` + creators for `dispatch/return`. `A.Increment` is the string, `A.increment(5)` creates the action
+- **`aio.run({ features: [...] })`** — new overload. Auto-composes initial state, reducer, executor. Validates dependency graph. Topological sort for init
+- **`useFeature(counter)`** — scoped React hook: `{ state, send, status }`. State = feature's slice only. Send = typed action senders. Status = current machine state
+- **`bridge()`** — cross-feature request/response coordination with timeouts, retries, correlation IDs, metrics
+- **`testFeature()`** — test harness with `send`, `expect.state()`, `expect.status()`, `expect.effects()`, `randomActions()`
+- **Cross-feature communication** — selectors (read), listening (foreign actions in machine), bridge (request/response)
+- **Scoped executor dispatch** — executor can only dispatch own feature's actions; foreign dispatch blocked at runtime
+- **Single-instance lock** — `singleton: true` (default) prevents multiple instances on same port
+- **Middleware system** — `aio.middleware.logger()`, `.validate()`, `.metrics()`, `.freeze()`, `.perfBudget()`, `.create(fn)`. Chain multiple middlewares via `middleware: [...]` in config
+- **Lifecycle init/destroy** — `init(app)` and `destroy(app)` hooks per feature (`app` is a `ScopedApp` with `.dispatch()` and `.getState()`). Auto-generated `Counter:Init` / `Counter:Destroy` actions. Dependency-ordered init, reverse-ordered destroy
+- **Source auto-tagging** — actions tagged with `_source: 'UI' | 'Effect' | 'System' | 'Test'` at dispatch points. `tagSource(action, source)` helper exported
+- **Dead-end detection** — machine states with no outgoing transitions emit a console warning at definition time (not a hard error)
+- **Circuit breaker runtime** — bridge circuit breaker tracks failures, opens after threshold, auto-resets after timeout. Half-open state allows one probe request. `isCircuitOpen` selector on bridge
+- **Retry logic** — bridge channels support `retries: N` with automatic re-dispatch on timeout. Tracks `retryCount` per pending request
+- **`testBridge()` harness** — test bridge channels with `request`, `respond`, `timeout`, `expect.pending()`, `expect.circuitOpen()` helpers
+- **State versioning & migrations** — `version: N` + `migrations: [(s) => newS]` in config. Sequential migration on restore, falls back to initial state on error
+- **`--isolate` flag** — `--isolate=counter,dc` or `isolate: ['counter']` in config. Filters active features in dev mode
+- **Health endpoint** — `GET /__health` returns `{ status, uptime, features: { name: { status, errors } } }`
+- **`app.features` API** — `.enable(name)`, `.disable(name)`, `.status(name)`, `.health()`, `.list()` on the returned `AioApp`
+- **Feature registry** — tracks enabled/disabled state, error counts, last action per feature. Powers health endpoint and `app.features`
+
+### Breaking changes when adopting features
+
+The legacy API still works, so updating `dep/aio/` alone is non-breaking. But **if you migrate to `feature()`**, these things change:
+
+#### 1. State shape — feature-namespaced
+
+**v0.4:** State is flat or manually namespaced:
+```ts
+const initialState = { count: 0, items: [] }
+```
+
+**v0.5:** Each feature's state lives under `state.featureName`:
+```ts
+// Framework auto-generates:
+// { counter: { count: 0, _status: 'idle' }, items: { list: [], _status: 'idle' } }
+```
+
+**Impact: existing Deno.Kv persistence is incompatible.** The first run after migration will start from the new initial state. Your old persisted state will be ignored (different key structure). If you need to keep old data, export a snapshot before migrating, transform the JSON to the new shape, and import it.
+
+#### 2. Action naming — camelCase keys, auto-prefixed
+
+**v0.4:** You define PascalCase keys with optional domain prefix:
+```ts
+const A = actions('Counter', { Increment: (by: number) => ({ by }) })
+// A.Increment = 'Counter:Increment'
+// A.increment(5) = { type: 'Counter:Increment', payload: { by: 5 } }
+```
+
+**v0.5:** You define camelCase keys, prefix is auto-derived from feature name:
+```ts
+const counter = feature('counter', {
+  actions: { increment: (by: number) => ({ by }) }
+})
+// counter.A.Increment = 'Counter:Increment'   — same string!
+// counter.A.increment(5) = same { type, payload }
+```
+
+The dispatched type strings are the same (`'Counter:Increment'`). But the *definition* syntax changes: `Increment:` key → `increment:` key.
+
+#### 3. Reducer — no more `draft()`, state is the draft
+
+**v0.4:**
+```ts
+import { draft } from 'aio'
+
+function reduce(state: AppState, action: Action) {
+  return draft(state, d => {
+    switch (action.type) {
+      case A.Increment:
+        d.count += action.payload.by
+        return [E.log('inc')]
+      default:
+        return []
+    }
+  })
+}
+```
+
+**v0.5:**
+```ts
+reduce(state, action, { A, E }) {
+  switch (action.type) {
+    case A.Increment:
+      state.count += action.payload.by    // state IS the draft — mutate directly
+      return [E.log('inc')]               // return effects or nothing
+    case A.Reset:
+      state.count = 0
+      break                               // break = no effects
+  }
+  // no default needed — unhandled actions are a no-op
+}
+```
+
+Key changes:
+- No `draft()` import or wrapper — framework handles Immer automatically
+- `state` parameter IS the Immer draft — mutate directly
+- Return effects array to produce effects, or `break`/return nothing for no effects
+- No need for `default: return []` — unhandled cases are ignored
+- Receives `{ A, E }` context — no need to import action/effect catalogs
+- Reducer only sees its feature's state slice, not the full app state
+
+#### 4. Executor — receives scoped app + context
+
+**v0.4:**
+```ts
+function execute(app: AioApp<AppState, Action>, effect: Effect) {
+  switch (effect.type) {
+    case E.Persist:
+      Deno.writeTextFile('./data.json', String(effect.payload.value))
+        .then(() => app.dispatch(A.saved()))
+      break
+  }
+}
+```
+
+**v0.5:**
+```ts
+execute(app, effect, { E, A }) {
+  switch (effect.type) {
+    case E.Persist:
+      Deno.writeTextFile('./data.json', String(effect.payload.value))
+        .then(() => app.dispatch(A.saved()))
+      break
+  }
+}
+```
+
+Key changes:
+- Receives `{ E, A }` context — no need to import
+- `app.dispatch()` only accepts this feature's actions — dispatching another feature's action throws an error
+- `app.getState()` returns the full app state (for reading via selectors)
+
+#### 5. UI hooks — `useFeature()` instead of `useAio()`
+
+**v0.4:**
+```tsx
+import { useAio } from 'aio'
+import { A } from './actions.ts'
+import type { AppState } from './state.ts'
+
+function App() {
+  const { state, send } = useAio<AppState>()
+  if (!state) return <div>Loading...</div>
+  return <button onClick={() => send(A.increment(5))}>+5</button>
+}
+```
+
+**v0.5:**
+```tsx
+import { useFeature } from 'aio'
+import { counter } from '../features/counter/index.ts'
+
+function CounterPage() {
+  const { state, send, status } = useFeature(counter)
+  if (!state) return <div>Loading...</div>
+  return (
+    <div>
+      <button onClick={() => send.increment(5)}>+5</button>
+      <p>Status: {status}</p>
+    </div>
+  )
+}
+```
+
+Key changes:
+- `useFeature(counter)` replaces `useAio<AppState>()`
+- `state` is scoped to this feature's slice — `state.count` not `state.counter.count`
+- `send.increment(5)` replaces `send(A.increment(5))` — typed action senders directly on send
+- `status` gives current machine state — `'idle'` | `'saving'` | etc.
+- `useAio()` still works for cross-feature dashboards or layout components
+
+#### 6. State machines — new required field
+
+Every feature needs a `machine:` declaration:
+
+```ts
+machine: {
+  initial: 'idle',
+  states: {
+    idle:   { on: { increment: 'idle', save: 'saving' } },
+    saving: { on: { saved: 'idle', saveFailed: 'error' } },
+    error:  { on: { retry: 'saving', dismiss: 'idle' } },
+  },
+}
+```
+
+- Every action must appear in at least one state's `on:` transitions
+- Action keys in `on:` must match declared action names exactly (typo → startup error)
+- Every state must be reachable from `initial`
+- `_status` is managed by the framework — never set it manually in reduce
+- For trivial features with no lifecycle: `machine: 'simple'` (all actions valid in all states, no `_status`)
+
+#### 7. Selectors — feature-scoped
+
+**v0.4:**
+```ts
+import { createSelector } from 'aio'
+const getCount = (state: AppState) => state.count
+```
+
+**v0.5:**
+```ts
+const counter = feature('counter', {
+  // ...
+  selectors: {
+    getCount: (state: unknown) => (state as Record<string, any>).counter.count,
+  },
+})
+// Usage from other features:
+const count = counter.selectors.getCount(app.getState())
+```
+
+Selectors read from the full app state (not the feature slice) because they're the public read API for cross-feature data access.
+
+#### 8. Boot — `aio.run()` config changes
+
+**v0.4:**
+```ts
+await aio.run(initialState, { reduce, execute, persist: true, port: 8000 })
+```
+
+**v0.5:**
+```ts
+await aio.run({
+  features: [counter, dc, { feature: te, dependsOn: ['dc'] }],
+  persist: true,
+  port: 8000,
+})
+```
+
+- No `initialState` — auto-composed from feature states
+- No `reduce` / `execute` — auto-composed from features
+- `features:` array with optional dependency declarations
+- `beforeReduce` still works (passed through to the composed reducer)
+- All other config options unchanged: `persist`, `port`, `ui`, `db`, `users`, `schedules`, `perfMode`, lifecycle hooks, etc.
+
+#### 9. Testing — `testFeature()` harness
+
+**v0.4:** Manual Deno.test setup:
+```ts
+Deno.test('increment', () => {
+  const { state } = reduce(initialState, A.increment(5))
+  assertEquals(state.count, 5)
+})
+```
+
+**v0.5:** Built-in test harness:
+```ts
+import { testFeature } from 'aio'
+import { counter } from './features/counter/index.ts'
+
+testFeature(counter, 'increment from idle', (t) => {
+  t.init()
+  t.send.increment(5)
+  t.expect.state(s => s.count === 5)
+  t.expect.effects(['Log'])
+  t.expect.status('idle')
+})
+
+testFeature(counter, 'machine blocks invalid save', (t) => {
+  t.init()
+  t.send.save()                // → saving
+  t.send.save()                // blocked by machine
+  t.expect.status('saving')    // still saving, not double-saved
+  t.expect.effectCount(0)      // second save produced no effects
+})
+
+testFeature(counter, 'invariant: count is always a number', (t) => {
+  t.init()
+  t.randomActions(1000)
+  t.expect.invariant(s => typeof s.count === 'number')
+})
+```
+
+### Upgrade steps (keeping v0.4 code)
+
+1. Replace `dep/aio/` with the v0.5 folder
+2. Update `deno.json` version to `"0.5.0"`
+3. Run `deno install`
+4. Run `deno task dev` — existing code works unchanged
+
+### Migration steps (converting to features)
+
+Convert one feature at a time. Both patterns can coexist during migration.
+
+**1. Create feature directory** (see [structure.md](structure.md) for the full file organization guide):
+```
+mkdir -p src/features/counter
+```
+
+**2. Create feature definition** (`src/features/counter/index.ts`):
+```typescript
+import { feature } from 'aio'
+
+export const counter = feature('counter', {
+  // Move state shape here (just the slice this feature owns)
+  state: { count: 0 },
+
+  // Move action creators here — change PascalCase keys to camelCase
+  actions: {
+    increment: (by = 1) => ({ by }),
+    reset:     () => ({}),
+  },
+
+  // Move effect creators here — same key change
+  effects: {
+    persist: (value: number) => ({ value }),
+  },
+
+  // NEW: declare valid state transitions
+  machine: {
+    initial: 'idle',
+    states: {
+      idle: { on: { increment: 'idle', reset: 'idle' } },
+    },
+  },
+
+  // Move reducer here — remove draft() wrapper, mutate state directly
+  reduce(state, action, { A, E }) {
+    switch (action.type) {
+      case A.Increment:
+        state.count += action.payload.by
+        return [E.persist(state.count)]
+      case A.Reset:
+        state.count = 0
+        break
+    }
+  },
+
+  // Move executor here — A/E come from context
+  execute(app, effect, { E, A }) {
+    switch (effect.type) {
+      case E.Persist:
+        console.log('persisting:', effect.payload.value)
+        break
+    }
+  },
+})
+```
+
+**3. Update entry point** (`src/app.ts`):
+```typescript
+import { aio } from 'aio'
+import { counter } from './features/counter/index.ts'
+
+await aio.run({ features: [counter] })
+```
+
+**4. Update UI** (`src/App.tsx`):
+```tsx
+import { useFeature } from 'aio'
+import { counter } from './features/counter/index.ts'
+
+export default function App() {
+  const { state, send, status } = useFeature(counter)
+  if (!state) return <div>Connecting...</div>
+  return <button onClick={() => send.increment(5)}>+5</button>
+}
+```
+
+**5. Platform APIs in execute:**
+
+If your executor uses Deno globals (`Deno.readTextFile`, `Deno.Command`, etc.), they work as-is — execute only runs server-side. If you need to **import** server-only modules, split into `def.ts` (browser-safe) + `index.ts` (adds execute with server imports). App.tsx imports `def.ts`, app.ts imports `index.ts`. This affects Electron, browser, and Android builds. CLI and service targets are unaffected. See [migration.md — Platform APIs](migration.md#common-patterns) for the full pattern.
+
+**6. Delete old files** (once all features are migrated):
+```
+rm src/state.ts src/actions.ts src/effects.ts src/reduce.ts src/execute.ts
+```
+
+**7. Clear persistence** (state shape changed):
+```sh
+# Delete old Deno.Kv data (state keys are now feature-namespaced)
+rm -f *.sqlite3  # or wherever your KV lives
+```
+
+**8. Run tests:**
+```sh
+deno task dev    # verify app works
+deno task test   # verify framework tests pass
+```
+
+### Key differences summary
+
+| Aspect | v0.4 | v0.5 features |
+|---|---|---|
+| **Definition** | 7 files: state/actions/effects/reduce/execute/App.tsx/app.ts | 1 file: `feature('name', { ... })` |
+| **Action keys** | PascalCase: `{ Increment: ... }` | camelCase: `{ increment: ... }` |
+| **Action types** | `'Counter:Increment'` | Same: `'Counter:Increment'` |
+| **Reducer wrapper** | `draft(state, d => { ... })` | Auto-Immer: `state` IS the draft |
+| **Reducer scope** | Full app state | Feature's state slice only |
+| **Reducer context** | Import A/E manually | `{ A, E }` injected as 3rd param |
+| **Executor scope** | Can dispatch any action | Scoped: own actions only |
+| **State machine** | None | Required (or `'simple'` escape hatch) |
+| **State shape** | Flat: `{ count: 0 }` | Namespaced: `{ counter: { count: 0, _status: 'idle' } }` |
+| **UI hook** | `useAio<AppState>()` → `{ state, send }` | `useFeature(counter)` → `{ state, send, status }` |
+| **UI dispatch** | `send(A.increment(5))` | `send.increment(5)` |
+| **Boot** | `aio.run(state, { reduce, execute })` | `aio.run({ features: [...] })` |
+| **Testing** | Manual `Deno.test` | `testFeature(counter, name, fn)` |
+| **Feature isolation** | By convention | Enforced: prefix routing, scoped dispatch |
+| **Cross-feature** | Manual imports | Selectors, foreign action listening, bridge |
+
+---
+
 *Future versions will be documented here as they are released.*

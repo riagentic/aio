@@ -525,6 +525,116 @@ function _factory<T extends _Creators>(creators: T): _FactoryResult<T> {
 }
 export { _factory as actions, _factory as effects }
 
+// ── schedule stubs (browser-compatible — pure effect creators, no timers) ──
+
+// deno-lint-ignore no-explicit-any
+const _schedEffect = (kind: string, id: string, extra: Record<string, any> = {}) =>
+  ({ type: '__schedule', kind, id, ...extra })
+
+export const schedule = {
+  after: (id: string, ms: number, action: { type: string; payload?: unknown }) =>
+    _schedEffect('after', id, { ms, action }),
+  every: (id: string, ms: number, action: { type: string; payload?: unknown }) =>
+    _schedEffect('every', id, { ms, action }),
+  at: (id: string, time: string, action: { type: string; payload?: unknown }) =>
+    _schedEffect('at', id, { time, action }),
+  cron: (id: string, pattern: string, action: { type: string; payload?: unknown }) =>
+    _schedEffect('cron', id, { pattern, action }),
+  cancel: (id: string) =>
+    _schedEffect('cancel', id),
+}
+
+// ── v0.5 feature system (browser-compatible stubs) ──────────────────
+// Browser version: builds A/E catalogs for useFeature(). No Immer, no machine validation.
+
+function _capitalize(s: string): string {
+  return s.charAt(0).toUpperCase() + s.slice(1)
+}
+
+/** Browser-compatible feature() — builds catalogs for useFeature. Full version in feature.ts (server). */
+// deno-lint-ignore no-explicit-any
+export function feature(name: string, config: { state?: any; actions: _Creators; effects?: _Creators; machine?: any; reduce?: any; execute?: any; selectors?: any }) {
+  const prefix = _capitalize(name)
+  // deno-lint-ignore no-explicit-any
+  const buildCat = (creators: _Creators): Record<string, any> => {
+    const cat: Record<string, unknown> = {}
+    for (const key of Object.keys(creators)) {
+      const label = `${prefix}:${_capitalize(key)}`
+      cat[_capitalize(key)] = label
+      cat[key] = (...args: unknown[]) => ({ type: label, payload: creators[key](...args) ?? {} })
+    }
+    return cat
+  }
+  return {
+    name,
+    A: buildCat(config.actions ?? {}),
+    E: buildCat(config.effects ?? {}),
+    selectors: config.selectors ?? {},
+    _config: {
+      state: config.state ?? {},
+      machine: config.machine ?? 'simple',
+      actionKeys: Object.keys(config.actions ?? {}),
+      effectKeys: Object.keys(config.effects ?? {}),
+      prefix,
+    },
+  }
+}
+
+/** Browser-compatible bridge() stub — delegates to feature() */
+// deno-lint-ignore no-explicit-any
+export function bridge(name: string, config: any) {
+  const channels = Object.keys(config.channels ?? {})
+  // deno-lint-ignore no-explicit-any
+  const actions: Record<string, (...args: any[]) => Record<string, unknown>> = {}
+  for (const ch of channels) {
+    actions[`${ch}Request`] = (...args: unknown[]) => ({ ...(config.channels[ch]?.request?.(...args) ?? {}), _channel: ch })
+    actions[`${ch}Response`] = (...args: unknown[]) => ({ ...(config.channels[ch]?.response?.(...args) ?? {}), _channel: ch })
+    actions[`${ch}Timeout`] = () => ({ _channel: ch })
+  }
+  return feature(name, { actions, machine: 'simple', reduce: () => {} })
+}
+
+/** Cache for useFeature send objects (one per feature ref) */
+// deno-lint-ignore no-explicit-any
+const _featureSendCache = new WeakMap<Record<string, any>, Record<string, (...args: unknown[]) => void>>()
+
+/** v0.5 hook — connects UI to a specific feature with scoped state, typed send, and machine status */
+// deno-lint-ignore no-explicit-any
+export function useFeature<S = unknown>(ref: { name: string; A: Record<string, any>; _config: { actionKeys: string[] } }): {
+  state: S | null
+  send: Record<string, (...args: unknown[]) => void>
+  status: string | undefined
+} {
+  const { state: fullState, send: rawSend } = useAio()
+
+  // Extract feature slice
+  const featureState = fullState
+    ? (fullState as Record<string, unknown>)[ref.name] as S | null
+    : null
+
+  const status = featureState
+    ? (featureState as Record<string, unknown>)._status as string | undefined
+    : undefined
+
+  // Build send object (cached per feature ref) — auto-tags actions with _source: 'UI'
+  let sendObj = _featureSendCache.get(ref)
+  if (!sendObj) {
+    sendObj = {}
+    for (const key of ref._config.actionKeys) {
+      const creator = ref.A[key]
+      if (typeof creator === 'function') {
+        sendObj[key] = (...args: unknown[]) => {
+          const action = creator(...args)
+          rawSend({ ...action, _source: 'UI' })
+        }
+      }
+    }
+    _featureSendCache.set(ref, sendObj)
+  }
+
+  return { state: featureState, send: sendObj, status }
+}
+
 /** Client-only state — not synced to server, not persisted. For UI-local concerns (editing flags, form inputs, etc.) */
 export function useLocal<T>(initial: T): { local: T; set: (next: T | ((prev: T) => T)) => void } {
   const [local, setLocal] = useState<T>(initial)

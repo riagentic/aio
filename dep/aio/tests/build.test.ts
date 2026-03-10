@@ -1,6 +1,6 @@
 import { assertEquals } from 'https://deno.land/std@0.224.0/assert/mod.ts'
 import { join } from '@std/path'
-import { slugify, copyDir, writePlaceholderIcon } from '../src/build-helpers.ts'
+import { slugify, copyDir, writePlaceholderIcon, formatMb } from '../src/build-helpers.ts'
 
 const buildScript = join(import.meta.dirname ?? '.', '..', 'src', 'build.ts')
 
@@ -134,6 +134,30 @@ Deno.test('copyDir: preserves executable bit', async () => {
     await Deno.remove(src, { recursive: true })
     await Deno.remove(dst, { recursive: true })
   }
+})
+
+// ── formatMb ─────────────────────────────────────────────
+
+Deno.test('formatMb: zero bytes', () => {
+  assertEquals(formatMb(0), '0.0')
+})
+
+Deno.test('formatMb: 1 MB exactly', () => {
+  assertEquals(formatMb(1024 * 1024), '1.0')
+})
+
+Deno.test('formatMb: 1.5 MB', () => {
+  assertEquals(formatMb(1.5 * 1024 * 1024), '1.5')
+})
+
+Deno.test('formatMb: large binary ~134 MB', () => {
+  const mb = formatMb(134 * 1024 * 1024)
+  assertEquals(mb, '134.0')
+})
+
+Deno.test('formatMb: sub-MB rounds to one decimal', () => {
+  // 512 KB = 0.5 MB
+  assertEquals(formatMb(512 * 1024), '0.5')
 })
 
 // ── Conflicting flags ────────────────────────────────────

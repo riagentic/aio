@@ -3,6 +3,7 @@
 // Usage: deno task am <command> [args] [--json] [--quiet] [--port=N]
 
 import { VERSION } from './aio.ts'
+import { AppLock } from './single-instance-lock.ts'
 
 // ── 1. Types & constants ─────────────────────────────────────
 
@@ -58,6 +59,22 @@ export function formatUptime(seconds: number): string {
   const h = Math.floor(seconds / 3600)
   const m = Math.floor((seconds % 3600) / 60)
   return `${h}h ${m}m`
+}
+
+/** Resolve entry point: --entry flag > deno.json "entry" > src/app.ts > src/main.ts */
+function resolveEntry(flagEntry?: string): string | null {
+  if (flagEntry) {
+    try { Deno.statSync(flagEntry); return flagEntry } catch { return null }
+  }
+  try {
+    const cfg = JSON.parse(Deno.readTextFileSync('deno.json')) as { entry?: string }
+    if (cfg.entry) {
+      try { Deno.statSync(cfg.entry); return cfg.entry } catch { return null }
+    }
+  } catch { /* no deno.json */ }
+  try { Deno.statSync('src/app.ts'); return 'src/app.ts' } catch {
+    try { Deno.statSync('src/main.ts'); return 'src/main.ts' } catch { return null }
+  }
 }
 
 function detectMode(flags: GlobalFlags): OutputMode {
@@ -298,10 +315,25 @@ async function ensureSingleton(mode: OutputMode): Promise<void> {
 
 async function cmdStart(args: string[], flags: GlobalFlags): Promise<void> {
   const mode = detectMode(flags)
-  await ensureSingleton(mode)
+
+  // Single-instance enforcement via AppLock (shared with quant.ts)
+  const lock = new AppLock()
+  const port = flags.port ?? DEFAULT_PORT
+  const acquired = await lock.acquire(port)
+  if (!acquired) {
+    outError(`another instance is running on port ${port}`, mode)
+    Deno.exit(1)
+  }
+  console.log(`[LOCK] Acquired single-instance lock (PID ${Deno.pid})`)
+
+  try {
+    await ensureSingleton(mode)
+  } catch (e) {
+    lock.release()
+    throw e
+  }
 
   // Pre-check: is the target port already taken?
-  const port = flags.port ?? DEFAULT_PORT
   try {
     const resp = await fetch(`http://127.0.0.1:${port}/`, { signal: AbortSignal.timeout(QUICK_TIMEOUT_MS) })
     await resp.body?.cancel()
@@ -320,13 +352,11 @@ async function cmdStart(args: string[], flags: GlobalFlags): Promise<void> {
     Deno.exit(1)
   } catch { /* port free — good */ }
 
-  // Resolve entry point — check src/app.ts then src/main.ts
-  let entry = 'src/app.ts'
-  try { Deno.statSync(entry) } catch {
-    try { Deno.statSync('src/main.ts'); entry = 'src/main.ts' } catch {
-      outError('no src/app.ts or src/main.ts found', mode)
-      Deno.exit(1)
-    }
+  // Resolve entry point — --entry flag > deno.json "entry" > src/app.ts > src/main.ts
+  const entry = resolveEntry(flags.entry)
+  if (!entry) {
+    outError(flags.entry ? `entry not found: ${flags.entry}` : 'no entry point found — set "entry" in deno.json or use --entry=<path>', mode)
+    Deno.exit(1)
   }
 
   // Pass through any extra args (--port, --verbose, etc.)
@@ -352,12 +382,12 @@ async function cmdStart(args: string[], flags: GlobalFlags): Promise<void> {
   const output = await proc.output()
   const childPid = parseInt(new TextDecoder().decode(output.stdout).trim(), 10)
   const pid = Number.isFinite(childPid) ? childPid : proc.pid
-  const pidData: PidFile = { pid, port, startedAt: Date.now(), status: 'starting' }
+  const pidData: PidFile = { pid, port: port, startedAt: Date.now(), status: 'starting' }
   writePid(pidData)
 
   // Without --wait: return immediately, user checks with `am status`
   if (flags.wait === undefined) {
-    out(mode === 'pretty' ? `starting (pid ${pid}, port ${port})` : { pid, port, status: 'starting' }, mode)
+    out(mode === 'pretty' ? `starting (pid ${pid}, port ${port})` : { pid, port: port, status: 'starting' }, mode)
     return
   }
 
@@ -378,7 +408,7 @@ async function cmdStart(args: string[], flags: GlobalFlags): Promise<void> {
 
   if (healthy) {
     writePid({ ...pidData, status: 'started' })
-    out(mode === 'pretty' ? `started (pid ${pid}, port ${port})` : { pid, port, status: 'started' }, mode)
+    out(mode === 'pretty' ? `started (pid ${pid}, port ${port})` : { pid, port: port, status: 'started' }, mode)
   } else if (!isProcessAlive(pid)) {
     removePid()
     let reason = ''
@@ -449,6 +479,10 @@ async function cmdStop(_args: string[], flags: GlobalFlags): Promise<void> {
     await killProcess(pf.pid, 0) // already waited gracefully
   }
   removePid()
+  try {
+    const lock = new AppLock()
+    lock.release()
+  } catch {}
   out(mode === 'pretty' ? 'stopped' : { status: 'stopped' }, mode)
 }
 
@@ -906,14 +940,15 @@ Other:
   version                 Print version
   help                    This message
 
-Flags: --port=N  --wait[=N]  --json  --quiet  --body='{...}'  --filter=X  --lines=N  --follow/-f
+Flags: --port=N  --entry=<path>  --wait[=N]  --json  --quiet  --body='{...}'  --filter=X  --lines=N  --follow/-f
 
+--entry: override entry point (default: deno.json "entry" > src/app.ts > src/main.ts)
 --wait: start/stop block until complete (default 10s/5s). state polls every Ns.`)
 }
 
 // ── 5. Main entry & router ───────────────────────────────────
 
-type GlobalFlags = { port?: number; json?: boolean; quiet?: boolean; jsonBody?: string; filter?: string; lines?: number; wait?: number; follow?: boolean }
+type GlobalFlags = { port?: number; json?: boolean; quiet?: boolean; jsonBody?: string; filter?: string; lines?: number; wait?: number; follow?: boolean; entry?: string }
 type CmdHandler = (args: string[], flags: GlobalFlags) => void | Promise<void>
 
 const COMMANDS: Record<string, CmdHandler> = {
@@ -940,6 +975,7 @@ export function parseGlobalFlags(raw: string[]): { command: string; args: string
     else if (a.startsWith('--wait=')) { const v = Number(a.slice(7)); flags.wait = isNaN(v) ? undefined : v }
     else if (a === '--wait') flags.wait = 0 // bare --wait = use default
     else if (a === '--follow' || a === '-f') flags.follow = true
+    else if (a.startsWith('--entry=')) flags.entry = a.slice(8)
     else rest.push(a)
   }
 

@@ -22,21 +22,6 @@ After creating `deno.json` and writing files, install dependencies:
 deno install
 ```
 
-### File structure
-
-```
-deno.json
-src/
-  app.ts          ← entry point
-  state.ts        ← state shape + initial values
-  actions.ts      ← messages from UI → server
-  effects.ts      ← side effects returned by reducer
-  reduce.ts       ← (state, action) → new state + effects
-  execute.ts      ← runs effects (API calls, logging, etc.)
-  App.tsx          ← React UI component
-  style.css       ← (optional) auto-injected into HTML
-```
-
 ### deno.json
 
 ```json
@@ -73,14 +58,176 @@ src/
 - `"title"` — app name, used as default window title and binary name (lowercased slug) when compiling. Optional, falls back to `"AIO App"`.
 - `"esbuild"` — required for dev mode transpilation. Excluded from compiled binary automatically.
 
-## state.ts
+### File structure
+
+```
+deno.json
+src/
+  app.ts                       ← aio.run({ features }) — boot only
+  App.tsx                      ← root UI — layout + routing only
+  features/counter/index.ts    ← feature() — state, actions, machine, reduce, execute
+  style.css                    ← (optional)
+```
+
+Features start as a single `index.ts`. As they grow, extract `types.ts`, `helpers.ts`, `reduce.ts`, `execute.ts`, `ui/`. See [structure.md](structure.md) for the full guide.
+
+### features/counter/index.ts
+
+```ts
+import { feature } from 'aio'
+
+export const counter = feature('counter', {
+  state: { count: 0 },
+
+  actions: {
+    increment: (by = 1) => ({ by }),
+    decrement: (by = 1) => ({ by }),
+    reset:     () => ({}),
+  },
+
+  effects: {
+    log: (message: string) => ({ message }),
+  },
+
+  machine: {
+    initial: 'idle',
+    states: {
+      idle: { on: { increment: 'idle', decrement: 'idle', reset: 'idle' } },
+    },
+  },
+
+  reduce(state, action, { A, E }) {
+    switch (action.type) {
+      case A.Increment:
+        state.count += action.payload.by
+        return [E.log(`count is now ${state.count}`)]
+      case A.Decrement:
+        state.count -= action.payload.by
+        return [E.log(`count is now ${state.count}`)]
+      case A.Reset:
+        state.count = 0
+        break
+    }
+  },
+
+  execute(_app, effect, { E }) {
+    switch (effect.type) {
+      case E.Log:
+        console.log(effect.payload.message)
+        break
+    }
+  },
+})
+```
+
+### App.tsx
+
+```tsx
+import { useFeature } from 'aio'
+import { counter } from './features/counter/index.ts'
+
+export default function App() {
+  const { state, send, status } = useFeature(counter)
+  if (!state) return <div>Connecting...</div>
+
+  return (
+    <div>
+      <h1>{state.count}</h1>
+      <p>Status: {status}</p>
+      <button onClick={() => send.decrement()}>-</button>
+      <button onClick={() => send.reset()}>Reset</button>
+      <button onClick={() => send.increment()}>+</button>
+    </div>
+  )
+}
+```
+
+### app.ts
+
+```ts
+import { aio } from 'aio'
+import { counter } from './features/counter/index.ts'
+
+await aio.run({ features: [counter] })
+```
+
+### Run
+
+```sh
+deno task dev
+```
+
+That's it. Electron window opens, state persists across restarts, multiple browser tabs stay in sync.
+
+> **No Electron?** Add `--no-electron` to open in your browser instead: `deno task dev --no-electron`
+
+### Window size
+
+Set default Electron window dimensions in your `aio.run()` config:
+
+```ts
+await aio.run({
+  features: [counter],
+  ui: { title: 'My App', width: 1200, height: 800 },
+})
+```
+
+Or via CLI: `deno task dev --width=1200 --height=800`. Window bounds persist across runs automatically.
+
+### Adding middleware & versioning
+
+```ts
+await aio.run({
+  features: [counter],
+  middleware: [aio.middleware.logger(), aio.middleware.validate()],
+  version: 1,
+  migrations: [],  // add migration functions as schema evolves
+})
+```
+
+### Testing
+
+```ts
+import { testFeature } from 'aio'
+import { counter } from './features/counter/index.ts'
+
+testFeature(counter, 'increment from idle', (t) => {
+  t.init()
+  t.send.increment(5)
+  t.expect.state(s => s.count === 5)
+  t.expect.status('idle')
+})
+```
+
+---
+
+## Classic quickstart (v0.4)
+
+The classic 7-file approach still works. Use this if you prefer explicit files over the all-in-one `feature()` API.
+
+### File structure
+
+```
+deno.json
+src/
+  app.ts          ← entry point
+  state.ts        ← state shape + initial values
+  actions.ts      ← messages from UI → server
+  effects.ts      ← side effects returned by reducer
+  reduce.ts       ← (state, action) → new state + effects
+  execute.ts      ← runs effects (API calls, logging, etc.)
+  App.tsx          ← React UI component
+  style.css       ← (optional) auto-injected into HTML
+```
+
+### state.ts
 
 ```ts
 export type AppState = { counter: number }
 export const initialState: AppState = { counter: 0 }
 ```
 
-## actions.ts
+### actions.ts
 
 ```ts
 import { actions, type UnionOf } from 'aio'
@@ -94,7 +241,7 @@ export const A = actions({
 export type Action = UnionOf<typeof A>
 ```
 
-## effects.ts
+### effects.ts
 
 ```ts
 import { effects, type UnionOf } from 'aio'
@@ -106,7 +253,7 @@ export const E = effects({
 export type Effect = UnionOf<typeof E>
 ```
 
-## reduce.ts
+### reduce.ts
 
 ```ts
 import type { AppState } from './state.ts'
@@ -133,7 +280,7 @@ export function reduce(state: AppState, action: Action): { state: AppState; effe
 }
 ```
 
-## execute.ts
+### execute.ts
 
 ```ts
 import { E, type Effect } from './effects.ts'
@@ -150,7 +297,7 @@ export function execute(_app: AioApp<AppState, Action>, effect: Effect): void {
 }
 ```
 
-## App.tsx
+### App.tsx
 
 ```tsx
 import { useAio } from 'aio'
@@ -172,7 +319,7 @@ export default function App() {
 }
 ```
 
-## app.ts
+### app.ts
 
 ```ts
 import { aio } from 'aio'
@@ -189,24 +336,9 @@ await aio.run(initialState, { reduce, execute })
 deno task dev
 ```
 
-That's it. Electron window opens, state persists across restarts, multiple browser tabs stay in sync.
-
-> **No Electron?** Add `--no-electron` to open in your browser instead: `deno task dev --no-electron`
-
-### Window size
-
-Set default Electron window dimensions in your `aio.run()` config:
-
-```ts
-await aio.run(initialState, {
-  reduce, execute,
-  ui: { title: 'My App', width: 1200, height: 800 },
-})
-```
-
-Or via CLI: `deno task dev --width=1200 --height=800`. Window bounds persist across runs automatically.
-
 ## Next steps
 
+- [structure.md](structure.md) — file & directory organization guide
 - [migration.md](migration.md) — adopting aio into an existing app
 - [manual.md](manual.md) — full API reference
+- [upgrade.md](upgrade.md) — version upgrade guide

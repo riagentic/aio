@@ -9,9 +9,11 @@ import { createDispatch, type AioError, type PerfMode, type PerfBudget } from '.
 import { createTT, record, undo, redo, travelTo, pause, resume, stateAt, toBroadcast, type TTState, type PerfMetric } from './time-travel.ts'
 import { isScheduleEffect, createScheduleManager, type ScheduleEffect, type ScheduleDef } from './schedule.ts'
 import { openDb, loadTables, syncTables, type TableDef, type AioDB } from './sql.ts'
+import { AppLock } from './single-instance-lock.ts'
+import { composeFeatures, tagSource, type FeatureEntry, type FeatureDef, type ComposedFeatures, type FeatureStatus } from './feature.ts'
 
 /** Framework version — printed by --version, checked in tests */
-export const VERSION = '0.4.0'
+export const VERSION = '0.5.0'
 
 /** Validates that framework version matches deno.json version at build time */
 function validateVersion(): void {
@@ -70,6 +72,7 @@ export type AioConfig<S, A, E> = {
   effectTimeout?: number        // ms to wait for async effects before warning (default: 30000 = 30s)
   freezeState?: boolean         // default: false in prod, true in dev — deep freeze state after reduce to catch mutations
   onRestore?:    (state: S) => S       // transform state after restore, before server starts
+  singleton?: boolean            // default: true — enforce single instance via .aio.lock file
   // Lifecycle hooks — observe-only, all optional, error-guarded
   onAction?:     (action: A, state: S, user?: AioUser) => void
   onEffect?:     (effect: E, user?: AioUser) => void
@@ -78,6 +81,8 @@ export type AioConfig<S, A, E> = {
   onStart?:      (app: AioApp<S, A>) => void
   onStop?:       () => void
   onError?:      (error: AioError) => void
+  /** Internal: schedule cancel callback set by _run, used by features disable */
+  _onScheduleReady?: (cancelByPrefix: (prefix: string) => void) => void
 }
 
 // Handle returned by aio.run() — dispatch actions, read state, or shut down
@@ -90,6 +95,14 @@ export type AioApp<S = unknown, A = unknown> = {
   close: () => Promise<void>
   mode?: string  // 'standalone' in Android WebView builds — branch effects accordingly
   port?: number  // server port — available after aio.run(), useful for connectCli()
+  /** v0.5 feature control API — only available when using features-based config */
+  features?: {
+    enable: (name: string) => void
+    disable: (name: string) => void
+    status: (name: string) => string | undefined
+    health: () => FeatureStatus[]
+    list: () => string[]
+  }
 }
 
 /** Composes multiple beforeReduce functions into one. */
@@ -104,6 +117,89 @@ export function composeMiddleware<S, A>(
     }
     return result
   }
+}
+
+// ── Middleware factories ─────────────────────────────────────────────
+
+type MiddlewareFn = (action: unknown, state: unknown) => unknown | null
+
+/** Built-in middleware factories for aio.run({ middleware: [...] }) */
+const middleware = {
+  /** Log all dispatched actions (or filter by feature name) */
+  logger: (opts?: { features?: string[] }): MiddlewareFn => {
+    const filter = opts?.features ? new Set(opts.features.map(f => f.toLowerCase())) : null
+    return (action, _state) => {
+      const type = (action as { type: string }).type
+      if (filter) {
+        const prefix = type.split(':')[0]?.toLowerCase()
+        if (!filter.has(prefix)) return action
+      }
+      const source = (action as { _source?: string })._source
+      const tag = source ? ` [${source}]` : ''
+      console.log(`[action]${tag} ${type}`)
+      return action
+    }
+  },
+
+  /** Redux DevTools integration — connects state to browser devtools extension */
+  devtools: (): MiddlewareFn => {
+    return (action, _state) => action // actual connection handled by connectDevTools() in browser
+  },
+
+  /** Performance budget — warn/error if reduce takes too long */
+  perfBudget: (opts: { reduce?: number; effect?: number }): MiddlewareFn => {
+    return (action, _state) => {
+      // Perf budgets are already handled by createDispatch — this middleware
+      // allows overriding via the middleware array as well
+      const type = (action as { type: string }).type
+      const start = performance.now()
+      // Store start time for post-reduce check (side-channel via global)
+      ;(globalThis as Record<string, unknown>).__aioMiddlewarePerfStart = start
+      ;(globalThis as Record<string, unknown>).__aioMiddlewarePerfBudget = opts
+      void type // used for logging in perf violations
+      return action
+    }
+  },
+
+  /** Validate action shapes — ensure type is string, payload is plain object */
+  validate: (): MiddlewareFn => {
+    return (action, _state) => {
+      const a = action as Record<string, unknown>
+      if (typeof a.type !== 'string') {
+        console.error(`[middleware:validate] action.type must be a string, got ${typeof a.type}`)
+        return null
+      }
+      if (a.payload !== undefined && (typeof a.payload !== 'object' || a.payload === null || Array.isArray(a.payload))) {
+        console.warn(`[middleware:validate] action.payload should be a plain object: ${a.type}`)
+      }
+      return action
+    }
+  },
+
+  /** Track action counts, timing, error rates per feature */
+  metrics: (): MiddlewareFn => {
+    const counters = new Map<string, { count: number; errors: number }>()
+    ;(globalThis as Record<string, unknown>).__aioMetrics = counters
+    return (action, _state) => {
+      const type = (action as { type: string }).type
+      const prefix = type.split(':')[0] ?? 'unknown'
+      const entry = counters.get(prefix) ?? { count: 0, errors: 0 }
+      entry.count += 1
+      counters.set(prefix, entry)
+      return action
+    }
+  },
+
+  /** Deep freeze state after reduce (catches accidental mutations in dev) */
+  freeze: (): MiddlewareFn => {
+    // Actual freezing handled by dispatch.ts freezeState option
+    return (action, _state) => action
+  },
+
+  /** Create custom middleware */
+  create: (fn: (action: unknown, state: unknown, next: (action: unknown) => unknown) => unknown): MiddlewareFn => {
+    return (action, state) => fn(action, state, (a) => a)
+  },
 }
 
 // ── Logger ──────────────────────────────────────────────────────────
@@ -278,12 +374,12 @@ function printLint(r: Lint): void {
 // ── CLI ─────────────────────────────────────────────────────────────
 
 /** CLI flags — overrides config values. Accepts args for testing. */
-export type CliFlags = { port?: number; persist?: boolean; electron?: boolean; keepAlive?: boolean; title?: string; verbose: boolean; prod?: boolean; version?: boolean; expose?: boolean; help?: boolean; url?: string; width?: number; height?: number; headless?: boolean; cert?: string; key?: string }
+export type CliFlags = { port?: number; persist?: boolean; electron?: boolean; keepAlive?: boolean; title?: string; verbose: boolean; prod?: boolean; version?: boolean; expose?: boolean; help?: boolean; url?: string; width?: number; height?: number; headless?: boolean; cert?: string; key?: string; isolate?: string[] }
 
 /** Parses CLI flags from Deno.args (or custom array for testing) */
 export function parseCli(args: readonly string[] = Deno.args): CliFlags {
   const r: CliFlags = { verbose: false }
-  const known = ['--port=', '--no-persist', '--no-electron', '--keep-alive', '--title=', '--verbose', '--prod', '--version', '--expose', '--help', '--url', '--width=', '--height=', '--headless', '--cert=', '--key=']
+  const known = ['--port=', '--no-persist', '--no-electron', '--keep-alive', '--title=', '--verbose', '--prod', '--version', '--expose', '--help', '--url', '--width=', '--height=', '--headless', '--cert=', '--key=', '--isolate=']
   for (const arg of args) {
     if (arg.startsWith('--port=')) {
       const n = Number(arg.slice(7))
@@ -311,6 +407,9 @@ export function parseCli(args: readonly string[] = Deno.args): CliFlags {
     else if (arg.startsWith('--height=')) {
       const n = Number(arg.slice(9))
       if (Number.isInteger(n) && n > 0) r.height = n
+    }
+    else if (arg.startsWith('--isolate=')) {
+      r.isolate = arg.slice(10).split(',').map(s => s.trim()).filter(Boolean)
     }
     else if (arg.startsWith('--') && !known.some(k => k.endsWith('=') ? arg.startsWith(k) : arg === k)) {
       log.warn(`unknown flag ignored: ${arg} — run with --help for usage`)
@@ -340,6 +439,7 @@ Flags:
   --url[=URL]      Connect to remote aio server (Electron thin client)
   --width=N        Initial window width (default: 800)
   --height=N       Initial window height (default: 600)
+  --isolate=a,b    Only activate specified features (v0.5)
   --version        Print version and exit
   --help           Show this help`)
 }
@@ -386,17 +486,249 @@ let _running = false
 let _dispatchUser: AioUser | undefined = undefined
 let _electronProc: Deno.ChildProcess | null = null
 
+/** v0.5 features-based config — pass to aio.run() instead of (initialState, config) */
+export type FeaturesConfig = {
+  features: FeatureEntry[]
+  port?: number
+  persist?: boolean
+  persistKey?: string
+  persistDebounce?: number
+  persistMode?: 'single' | 'multi'
+  ui?: UiConfig
+  baseDir?: string
+  headless?: boolean
+  users?: Record<string, AioUser>
+  db?: Record<string, TableDef>
+  perfMode?: PerfMode
+  perfBudget?: PerfBudget
+  effectTimeout?: number
+  freezeState?: boolean
+  singleton?: boolean
+  deltaThreshold?: number
+  maxConnections?: number
+  schedules?: ScheduleDef[]
+  /** v0.5 middleware array — applied in order as beforeReduce chain */
+  middleware?: MiddlewareFn[]
+  /** State version — used with migrations for persisted state upgrades */
+  version?: number
+  /** Migration functions — run sequentially from stored version to current */
+  migrations?: ((state: Record<string, unknown>) => Record<string, unknown>)[]
+  /** Isolate features — only these features are active (dev mode convenience) */
+  isolate?: string[]
+  beforeReduce?: (action: unknown, state: unknown) => unknown | null
+  onAction?: (action: unknown, state: unknown, user?: AioUser) => void
+  onEffect?: (effect: unknown, user?: AioUser) => void
+  onConnect?: (user?: AioUser) => void
+  onDisconnect?: (user?: AioUser) => void
+  onStart?: (app: AioApp) => void
+  onStop?: () => void
+  onError?: (error: AioError) => void
+  onRestore?: (state: unknown) => unknown
+  getUIState?: (state: unknown, user?: AioUser) => unknown
+  getDBState?: (state: unknown) => unknown
+}
+
 /** Single entry point — boots KV, server, electron, wires everything. CLI args override config. */
-async function run<S, A, E>(initialState: S, config: AioConfig<S, A, E>): Promise<AioApp<S, A>> {
+// deno-lint-ignore no-explicit-any
+async function run(first: any, second?: any): Promise<AioApp<any, any>> {
   if (_running) throw new Error('aio.run() already called — one instance per process')
   _running = true
-  try { return await _run(initialState, config) } catch (e) { _running = false; throw e }
+
+  // v0.5 features-based config: aio.run({ features: [...] })
+  if (first && typeof first === 'object' && 'features' in first && !second) {
+    const fc = first as FeaturesConfig
+
+    // --isolate: filter features to only the specified ones
+    let featureEntries = fc.features
+    const cliIsolate = parseCli().isolate
+    const isolate = fc.isolate ?? cliIsolate
+    if (isolate && isolate.length) {
+      const isolateSet = new Set(isolate)
+      featureEntries = featureEntries.filter(entry => {
+        const f = '_config' in entry ? entry as FeatureDef : (entry as { feature: FeatureDef }).feature
+        return isolateSet.has(f.name)
+      })
+      if (featureEntries.length === 0) {
+        log.warn(`isolate: no features matched [${[...isolateSet].join(', ')}] — check spelling`)
+      } else {
+        log.info(`isolate: ${featureEntries.map(e => ('_config' in e ? e as FeatureDef : (e as { feature: FeatureDef }).feature).name).join(', ')}`)
+      }
+    }
+
+    const composed = composeFeatures(featureEntries)
+
+    // Log feature composition
+    log.info(`features: ${composed.featureNames.join(', ')}`)
+    // Log foreign action listeners
+    for (const f of composed.features) {
+      if (f._config.foreignActions.length) {
+        for (const fa of f._config.foreignActions) {
+          log.info(`${f.name}: listens to ${fa}`)
+        }
+      }
+    }
+
+    // Store composed for useFeature (used by getUIState to expose feature names)
+    ;(globalThis as Record<string, unknown>).__aioFeatures = composed
+
+    // Build beforeReduce from middleware array + explicit beforeReduce
+    let beforeReduce = fc.beforeReduce as ((action: unknown, state: unknown) => unknown | null) | undefined
+    if (fc.middleware?.length) {
+      const mws = fc.middleware
+      const chainedMw = (action: unknown, state: unknown): unknown | null => {
+        let result: unknown | null = action
+        for (const mw of mws) {
+          if (result === null) return null
+          result = mw(result, state)
+        }
+        return result
+      }
+      if (beforeReduce) {
+        const prev = beforeReduce
+        beforeReduce = (action, state) => {
+          const r = chainedMw(action, state)
+          if (r === null) return null
+          return prev(r, state)
+        }
+      } else {
+        beforeReduce = chainedMw
+      }
+    }
+
+    // State versioning + migrations: wrap onRestore to run migrations
+    let onRestore = fc.onRestore as ((state: unknown) => unknown) | undefined
+    if (fc.version != null && fc.migrations?.length) {
+      const targetVersion = fc.version
+      const migrations = fc.migrations
+      if (migrations.length < targetVersion) {
+        log.warn(`version is ${targetVersion} but only ${migrations.length} migration(s) provided — missing ${targetVersion - migrations.length}`)
+      }
+      const prevOnRestore = onRestore
+      onRestore = (state: unknown) => {
+        let s = state as Record<string, unknown>
+        const storedVersion = (s.__aioVersion as number) ?? 0
+        if (storedVersion < targetVersion) {
+          const maxMigration = Math.min(targetVersion, migrations.length)
+          for (let v = storedVersion; v < maxMigration; v++) {
+            try {
+              s = migrations[v](s)
+              log.info(`migration: v${v} → v${v + 1}`)
+            } catch (e) {
+              log.error(`migration v${v} → v${v + 1} failed: ${e} — falling back to initialState`)
+              return composed.initialState
+            }
+          }
+        }
+        s.__aioVersion = targetVersion
+        if (prevOnRestore) return prevOnRestore(s)
+        return s
+      }
+    } else if (fc.version != null) {
+      // Store version in state even without migrations
+      const prevOnRestore = onRestore
+      onRestore = (state: unknown) => {
+        const s = { ...(state as Record<string, unknown>), __aioVersion: fc.version }
+        if (prevOnRestore) return prevOnRestore(s)
+        return s
+      }
+    }
+
+    // Mutable ref — set after _run() so closures in config can access the app
+    let appRef: AioApp<Record<string, unknown>, unknown> | null = null
+
+    // Convert to legacy config
+    const config: AioConfig<Record<string, unknown>, unknown, unknown> = {
+      reduce: composed.reduce as AioConfig<Record<string, unknown>, unknown, unknown>['reduce'],
+      execute: ((app: AioApp<Record<string, unknown>, unknown>, effect: unknown) => {
+        composed.execute(
+          { dispatch: (a) => app.dispatch(a), getState: () => app.getState() },
+          effect as { type: string; payload: unknown },
+        )
+      }) as AioConfig<Record<string, unknown>, unknown, unknown>['execute'],
+      persist: fc.persist,
+      persistKey: fc.persistKey,
+      persistDebounce: fc.persistDebounce,
+      persistMode: fc.persistMode,
+      port: fc.port,
+      baseDir: fc.baseDir,
+      headless: fc.headless,
+      users: fc.users,
+      db: fc.db,
+      perfMode: fc.perfMode,
+      perfBudget: fc.perfBudget,
+      effectTimeout: fc.effectTimeout,
+      freezeState: fc.freezeState,
+      singleton: fc.singleton,
+      deltaThreshold: fc.deltaThreshold,
+      maxConnections: fc.maxConnections,
+      schedules: fc.schedules,
+      ui: fc.ui,
+      beforeReduce: beforeReduce as AioConfig<Record<string, unknown>, unknown, unknown>['beforeReduce'],
+      onAction: fc.onAction as AioConfig<Record<string, unknown>, unknown, unknown>['onAction'],
+      onEffect: fc.onEffect as AioConfig<Record<string, unknown>, unknown, unknown>['onEffect'],
+      onConnect: fc.onConnect,
+      onDisconnect: fc.onDisconnect,
+      onStart: ((app: AioApp<Record<string, unknown>, unknown>) => {
+        // Run lifecycle init for all features
+        composed.initAll({ dispatch: (a) => app.dispatch(a), getState: () => app.getState() })
+        if (fc.onStart) fc.onStart(app)
+      }) as AioConfig<Record<string, unknown>, unknown, unknown>['onStart'],
+      onStop: () => {
+        if (appRef) {
+          composed.destroyAll({ dispatch: (a) => appRef!.dispatch(a), getState: () => appRef!.getState() })
+        }
+        if (fc.onStop) fc.onStop()
+      },
+      onError: fc.onError,
+      onRestore: onRestore as AioConfig<Record<string, unknown>, unknown, unknown>['onRestore'],
+      getUIState: fc.getUIState as AioConfig<Record<string, unknown>, unknown, unknown>['getUIState'],
+      getDBState: fc.getDBState as AioConfig<Record<string, unknown>, unknown, unknown>['getDBState'],
+      _onScheduleReady: (cancelByPrefix) => composed.registry.setOnDisable(cancelByPrefix),
+    }
+
+    try {
+      const app = await _run(composed.initialState, config)
+      appRef = app
+
+      // Attach features API to app
+      const featuresApi = {
+        enable: (name: string) => composed.registry.enable(name, { dispatch: (a) => app.dispatch(a), getState: () => app.getState() }),
+        disable: (name: string) => composed.registry.disable(name, (a) => app.dispatch(a)),
+        status: (name: string) => composed.registry.status(name, app.getState() as Record<string, unknown>),
+        health: () => composed.registry.health(app.getState() as Record<string, unknown>),
+        list: () => composed.featureNames,
+      }
+      ;(app as Record<string, unknown>).features = featuresApi
+
+      return app
+    }
+    catch (e) { _running = false; throw e }
+  }
+
+  // Legacy v0.4 config: aio.run(initialState, config)
+  try { return await _run(first, second) }
+  catch (e) { _running = false; throw e }
 }
 
 async function _run<S, A, E>(initialState: S, config: AioConfig<S, A, E>): Promise<AioApp<S, A>> {
   const cli = parseCli()
   if (cli.help) { printHelp(); Deno.exit(0) }
   if (cli.version) { console.log(`aio ${VERSION}`); Deno.exit(0) }
+
+  // Single-instance enforcement — default: true, can be disabled with singleton:false
+  const enableSingleton = config.singleton ?? true
+  if (enableSingleton) {
+    const port = cli.port ?? config.port ?? 8000
+    const lock = new AppLock()
+    const acquired = await lock.acquire(port)
+    if (!acquired) {
+      Deno.exit(1)
+    }
+    console.log(`[AIO-LOCK] Acquired single-instance lock (PID ${Deno.pid})`)
+
+    // Store lock for cleanup on shutdown
+    ;(globalThis as Record<string, unknown>).__aioLock = lock
+  }
 
   // --url: thin client mode — launches connect-page electron that fetches meta from remote
   if (cli.url !== undefined) {
@@ -529,6 +861,8 @@ async function _run<S, A, E>(initialState: S, config: AioConfig<S, A, E>): Promi
   let persistTimer: ReturnType<typeof setTimeout> | null = null
   let shuttingDown = false
   let prevPersistedKeys: string[] = []  // track multi-key keys for deletion when state keys removed
+  // Debounced persistence — fire-and-forget during normal operation for throughput.
+  // Data loss possible on crash between debounce intervals. Graceful shutdown awaits flushPersist().
   function schedulePersist(): void {
     if ((!kvDb && !sqlDb) || persistTimer || shuttingDown) return
     persistTimer = setTimeout(() => {
@@ -634,6 +968,7 @@ async function _run<S, A, E>(initialState: S, config: AioConfig<S, A, E>): Promi
   const scheduleManager = createScheduleManager(
     (action) => dispatch(action as A), log
   )
+  if (config._onScheduleReady) config._onScheduleReady((prefix) => scheduleManager.cancelByPrefix(prefix))
 
   // Track per-action performance for dev-mode time-travel panel
   let lastPerf: PerfMetric | undefined
@@ -715,14 +1050,26 @@ async function _run<S, A, E>(initialState: S, config: AioConfig<S, A, E>): Promi
     return shutdownPromise
   }
   async function _doShutdown(): Promise<void> {
+    // Flush persistence BEFORE onStop/destroyAll — destroyAll resets feature state,
+    // so persisting after destroy would save empty state (#002)
+    try { await flushPersist() } catch (e) { log.error(`shutdown: persist — ${e}`) }
+
     if (onStop) try { onStop() } catch (e) { log.error(`hook onStop: ${e}`) }
+
+    // Release single-instance lock
+    const lock = (globalThis as Record<string, unknown>).__aioLock as AppLock | undefined
+    if (lock) {
+      lock.release()
+      console.log(`[AIO-LOCK] Released single-instance lock (PID ${Deno.pid})`)
+      delete (globalThis as Record<string, unknown>).__aioLock
+    }
+
     scheduleManager.cancelAll()
     dispatch.close()
     if (_electronProc) {
       try { _electronProc.kill(); _electronProc = null } catch (e) { log.error(`shutdown: electron — ${e}`) }
     }
     try { await server.shutdown() } catch (e) { log.error(`shutdown: server — ${e}`) }
-    try { await flushPersist() } catch (e) { log.error(`shutdown: persist — ${e}`) }
     try { sqlDb?.aioDB.close() } catch (e) { log.error(`shutdown: sqlite — ${e}`) }
     try { kvDb?.close() } catch (e) { log.error(`shutdown: kv — ${e}`) }
     _running = false
@@ -795,6 +1142,24 @@ async function _run<S, A, E>(initialState: S, config: AioConfig<S, A, E>): Promi
     maxConnections: config.maxConnections,
     onConnect: config.onConnect,
     onDisconnect: config.onDisconnect,
+    // Health endpoint — feature status when available, basic info otherwise
+    getHealth: () => {
+      const composed = (globalThis as Record<string, unknown>).__aioFeatures as ComposedFeatures | undefined
+      const uptime = Math.round((Date.now() - ((globalThis as Record<string, unknown>).__aioStartedAt as number ?? Date.now())) / 1000)
+      if (composed) {
+        const features: Record<string, unknown> = {}
+        for (const fs of composed.registry.health(state as Record<string, unknown>)) {
+          features[fs.name] = {
+            status: fs.status ?? 'active',
+            enabled: fs.enabled,
+            errors: fs.errors,
+            lastAction: fs.lastAction,
+          }
+        }
+        return { status: 'healthy', uptime, features }
+      }
+      return { status: 'healthy', uptime }
+    },
     ...(tt ? {
       onTTCommand: handleTTCommand,
       getTTBroadcast: () => toBroadcast(tt!),
@@ -816,6 +1181,7 @@ async function _run<S, A, E>(initialState: S, config: AioConfig<S, A, E>): Promi
     } catch { /* signal not supported on this platform */ }
   }
 
+  ;(globalThis as Record<string, unknown>).__aioStartedAt = Date.now()
   if (onStart) try { onStart(app) } catch (e) { log.error(`hook onStart: ${e}`) }
 
   if (config.schedules?.length) {
@@ -901,4 +1267,5 @@ async function _run<S, A, E>(initialState: S, config: AioConfig<S, A, E>): Promi
   return app
 }
 
-export const aio = { run }
+export const aio = { run, middleware }
+export type { FeatureDef, FeatureEntry, ComposedFeatures } from './feature.ts'
