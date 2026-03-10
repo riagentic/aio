@@ -863,3 +863,157 @@ Deno.test('server: WS binary message dropped without crash', async () => {
     ws.close()
   })
 })
+
+// ── maxConnections — 503 when limit exceeded ─────────────────
+
+const MAX_CONN_PORT = 19810
+
+Deno.test('server: maxConnections — 503 when limit exceeded', async () => {
+  const dir = await Deno.makeTempDir()
+  await Deno.mkdir(join(dir, 'dist'), { recursive: true })
+  await Deno.writeTextFile(join(dir, 'dist', 'app.js'), 'export function mount(){}')
+  const server = createServer({
+    port: MAX_CONN_PORT,
+    title: 'MaxConn',
+    getUIState: () => ({}),
+    dispatch: () => {},
+    baseDir: dir,
+    debug: () => {},
+    prod: true,
+    distDir: join(dir, 'dist'),
+    maxConnections: 1,
+  })
+  await new Promise(r => setTimeout(r, 50))
+  const ws1 = new WebSocket(`ws://127.0.0.1:${MAX_CONN_PORT}/ws`)
+  try {
+    await new Promise<void>((resolve, reject) => {
+      ws1.onopen = () => resolve()
+      ws1.onerror = () => reject(new Error('WS1 failed'))
+    })
+    await new Promise(r => setTimeout(r, 50))
+    assertEquals(server.clientCount(), 1)
+
+    // Second connection should get 503
+    const resp = await fetch(`http://127.0.0.1:${MAX_CONN_PORT}/ws`, {
+      headers: {
+        'Upgrade': 'websocket',
+        'Connection': 'Upgrade',
+        'Origin': 'http://localhost',
+        'Sec-WebSocket-Key': btoa('test2'),
+        'Sec-WebSocket-Version': '13',
+      },
+    })
+    assertEquals(resp.status, 503)
+    await resp.body?.cancel()
+  } finally {
+    ws1.close()
+    await server.shutdown()
+    await Deno.remove(dir, { recursive: true })
+  }
+})
+
+// ── clientCount reflects live connections ────────────────────
+
+Deno.test('server: clientCount is 0 before any connection', async () => {
+  const dir = await Deno.makeTempDir()
+  await Deno.mkdir(join(dir, 'dist'), { recursive: true })
+  await Deno.writeTextFile(join(dir, 'dist', 'app.js'), 'export function mount(){}')
+  const server = createServer({
+    port: MAX_CONN_PORT + 1,
+    title: 'CountTest',
+    getUIState: () => ({}),
+    dispatch: () => {},
+    baseDir: dir,
+    debug: () => {},
+    prod: true,
+    distDir: join(dir, 'dist'),
+  })
+  await new Promise(r => setTimeout(r, 50))
+  try {
+    assertEquals(server.clientCount(), 0)
+    const ws = new WebSocket(`ws://127.0.0.1:${MAX_CONN_PORT + 1}/ws`)
+    await new Promise<void>(r => { ws.onopen = () => r() })
+    await new Promise(r => setTimeout(r, 50))
+    assertEquals(server.clientCount(), 1)
+    ws.close()
+    await new Promise(r => setTimeout(r, 100))
+    assertEquals(server.clientCount(), 0)
+  } finally {
+    await server.shutdown()
+    await Deno.remove(dir, { recursive: true })
+  }
+})
+
+// ── Security headers ─────────────────────────────────────────
+
+Deno.test('server: HTML response has X-Content-Type-Options: nosniff', async () => {
+  await withServer(async (url) => {
+    const resp = await fetch(url)
+    assertEquals(resp.headers.get('x-content-type-options'), 'nosniff')
+    await resp.body?.cancel()
+  })
+})
+
+Deno.test('server: static file has X-Content-Type-Options: nosniff', async () => {
+  await withServer(async (url) => {
+    const resp = await fetch(`${url}/hello.txt`)
+    assertEquals(resp.headers.get('x-content-type-options'), 'nosniff')
+    await resp.body?.cancel()
+  })
+})
+
+Deno.test('server: text file served with correct Content-Type', async () => {
+  await withServer(async (url) => {
+    const resp = await fetch(`${url}/hello.txt`)
+    assertEquals(resp.status, 200)
+    const ct = resp.headers.get('content-type') ?? ''
+    assertEquals(ct.includes('text/plain') || ct.includes('application/octet-stream'), true)
+    await resp.body?.cancel()
+  })
+})
+
+// ── WS invalid message handling ──────────────────────────────
+
+Deno.test('server: WS invalid JSON dropped — dispatch not called', async () => {
+  let dispatched = false
+  const dir = await Deno.makeTempDir()
+  await Deno.mkdir(join(dir, 'dist'), { recursive: true })
+  await Deno.writeTextFile(join(dir, 'dist', 'app.js'), 'export function mount(){}')
+  const server = createServer({
+    port: MAX_CONN_PORT + 2,
+    title: 'InvalidJSON',
+    getUIState: () => ({}),
+    dispatch: () => { dispatched = true },
+    baseDir: dir,
+    debug: () => {},
+    prod: true,
+    distDir: join(dir, 'dist'),
+  })
+  await new Promise(r => setTimeout(r, 50))
+  try {
+    const ws = new WebSocket(`ws://127.0.0.1:${MAX_CONN_PORT + 2}/ws`)
+    await new Promise<void>(r => { ws.onopen = () => r() })
+    await new Promise(r => setTimeout(r, 50))
+    dispatched = false
+
+    // Send invalid JSON
+    ws.send('not-json-at-all{{{')
+    await new Promise(r => setTimeout(r, 100))
+    assertEquals(dispatched, false, 'invalid JSON should not dispatch')
+
+    // Send JSON without type field
+    ws.send(JSON.stringify({ payload: { by: 1 } }))
+    await new Promise(r => setTimeout(r, 100))
+    assertEquals(dispatched, false, 'missing type should not dispatch')
+
+    // Send valid action — should dispatch
+    ws.send(JSON.stringify({ type: 'Ping' }))
+    await new Promise(r => setTimeout(r, 100))
+    assertEquals(dispatched, true, 'valid action should dispatch')
+
+    ws.close()
+  } finally {
+    await server.shutdown()
+    await Deno.remove(dir, { recursive: true })
+  }
+})

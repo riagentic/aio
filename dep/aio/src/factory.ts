@@ -1,5 +1,6 @@
 // factory.ts — actions() / effects() convenience factory
 // PascalCase definitions → { PascalCase: 'type', camelCase(...) → { type, payload } }
+// Optional domain prefix: actions('Counter', { ... }) → 'Counter:Increment'
 
 /** Lowercase first character: 'Increment' → 'increment' */
 type LowerFirst<S extends string> = S extends `${infer C}${infer Rest}` ? `${Lowercase<C>}${Rest}` : S
@@ -7,29 +8,31 @@ type LowerFirst<S extends string> = S extends `${infer C}${infer Rest}` ? `${Low
 // deno-lint-ignore no-explicit-any
 type Creators = Record<string, (...args: any[]) => any>
 
-type FactoryResult<T extends Creators> = {
-  readonly [K in keyof T]: K
+/** Prefix key with domain when provided */
+type Prefixed<D extends string, K> = D extends '' ? K : `${D}:${K & string}`
+
+type FactoryResult<T extends Creators, D extends string = ''> = {
+  readonly [K in keyof T]: Prefixed<D, K>
 } & {
-  readonly [K in keyof T as LowerFirst<K & string>]: (...args: Parameters<T[K]>) => { type: K; payload: ReturnType<T[K]> }
+  readonly [K in keyof T as LowerFirst<K & string>]: (...args: Parameters<T[K]>) => { type: Prefixed<D, K>; payload: ReturnType<T[K]> }
 }
 
 /**
  * Discriminated union from action/effect catalog.
- * Takes all creators and produces a union of { type, payload } shapes.
- * 
+ *
  * @example
  * ```ts
- * const A = actions({
+ * const A = actions('Counter', {
  *   Increment: (by: number) => ({ by }),
  *   Reset: () => ({}),
  * })
  * type Action = UnionOfAction<typeof A>
- * // => { type: 'Increment'; payload: { by: number } } | { type: 'Reset'; payload: {} }
+ * // => { type: 'Counter:Increment'; payload: { by: number } } | { type: 'Counter:Reset'; payload: {} }
  * ```
  */
 // deno-lint-ignore no-explicit-any
-export type UnionOfAction<T extends Creators> = {
-  [K in keyof T]: { type: K; payload: ReturnType<T[K]> }
+export type UnionOfAction<T extends Record<string, (...args: any[]) => any>> = {
+  [K in keyof T]: T[K] extends (...args: infer _A) => infer R ? { type: K; payload: R } : never
 }[keyof T]
 
 /** Lowercase first character at runtime */
@@ -38,13 +41,18 @@ function lowerFirst(s: string): string {
 }
 
 /** Creates a typed action/effect catalog — PascalCase labels + camelCase creators */
-function factory<T extends Creators>(creators: T): FactoryResult<T> {
+function factory<T extends Creators>(creators: T): FactoryResult<T, ''>
+function factory<D extends string, T extends Creators>(domain: D, creators: T): FactoryResult<T, D>
+function factory(first: unknown, second?: unknown): unknown {
+  const domain = typeof first === 'string' ? first : ''
+  const creators = (typeof first === 'string' ? second : first) as Creators
+  const prefix = domain ? `${domain}:` : ''
   const result: Record<string, unknown> = {}
   for (const key of Object.keys(creators)) {
-    result[key] = key
-    result[lowerFirst(key)] = (...args: unknown[]) => ({ type: key, payload: creators[key](...args) ?? {} })
+    result[key] = `${prefix}${key}`
+    result[lowerFirst(key)] = (...args: unknown[]) => ({ type: `${prefix}${key}`, payload: creators[key](...args) ?? {} })
   }
-  return result as FactoryResult<T>
+  return result
 }
 
 export { factory as actions, factory as effects }

@@ -19,3 +19,6 @@ build/
 data.kv
 data.db
 window-state.json
+
+# Planning / scratch notes
+untracked/

@@ -6,12 +6,20 @@ import type { PerfMode, PerfBudget } from './src/dispatch.ts'
 export { aio, VERSION, parseCli, lint } from './src/aio.ts'
 import type { AioApp } from './src/aio.ts'
 export type { AioApp }
-export type { AioConfig, UiConfig, Lint, CliFlags, AioUser, AioError, PerfMode, PerfBudget } from './src/aio.ts'
+export type { AioConfig, UiConfig, Lint, CliFlags, AioUser, AioError, PerfMode, PerfBudget, FeaturesConfig } from './src/aio.ts'
 export type { AioMeta } from './src/electron.ts'
+
+/**
+ * v0.5 feature-based architecture.
+ * feature() — define a feature (state, actions, effects, machine, reduce, execute, selectors)
+ * bridge()  — define a cross-feature bridge (request/response, timeouts, retries)
+ */
+export { feature, bridge, composeFeatures, testFeature, testBridge, tagSource } from './src/feature.ts'
+export type { FeatureDef, FeatureEntry, MachineConfig, Catalog, TestContext, BridgeTestContext, FeatureStatus, ActionSource, ScopedApp } from './src/feature.ts'
 
 /** 
  * Connect to a remote aio server from a CLI app.
- * Returns a CliApp with state, send, and dispatch methods.
+ * Returns a CliApp with state, send, subscribe, close, connected, and ready.
  * @param url - WebSocket URL of the aio server (e.g., 'ws://localhost:8000/ws')
  * @param opts - Optional { token?: string } for auth
  */
@@ -114,6 +122,13 @@ export function draft<S, E>(state: S, fn: (d: Draft<S>) => E[]): { state: S; eff
   })
   // Clone effects to detach from revoked Immer draft references.
   // Effects built inside produce() may hold draft refs that crash after finalization.
+  // Guard against undefined in case the reducer forgot a return statement.
+  if (!effects) {
+    if (typeof globalThis !== 'undefined' && (globalThis as Record<string, unknown>).__aioDev) {
+      console.warn('draft(): reducer callback did not return an effects array — defaulting to []. Add "return []" to your reducer.')
+    }
+    effects = []
+  }
   if (effects.length) effects = structuredClone(effects)
   return { state: next, effects }
 }
@@ -137,22 +152,21 @@ export function draft<S, E>(state: S, fn: (d: Draft<S>) => E[]): { state: S; eff
 // deno-lint-ignore no-explicit-any
 export function matchEffect<E extends { type: string; payload?: any }>(
   effect: E,
-  // deno-lint-ignore no-explicit-any
-  handlers: Partial<{ [K in E['type']]: (payload: any) => void }>,
+  handlers: Partial<{ [K in E['type']]: (payload: Extract<E, { type: K }> extends { payload: infer P } ? P : undefined) => void }>,
   fallback?: (effect: E) => void,
 ): void {
   const handler = handlers[effect.type as E['type']]
-  if (handler) handler((effect as { payload?: unknown }).payload)
+  if (handler) handler((effect as { payload?: unknown }).payload as never)
   else if (fallback) fallback(effect)
 }
 
 /**
  * React hook for connecting to the aio server via WebSocket.
  * Returns current state and send function for dispatching actions.
- * 
+ *
  * @typeParam S - Your AppState type
  * @returns { state: S | null, send: (action) => void }
- * 
+ *
  * @example
  * ```tsx
  * const { state, send } = useAio<AppState>()
@@ -163,6 +177,30 @@ export function matchEffect<E extends { type: string; payload?: any }>(
 export declare function useAio<S = unknown>(): {
   state: S | null
   send: (action: { type: string; payload?: unknown }) => void
+}
+
+/**
+ * v0.5 React hook — connects UI to a specific feature.
+ * Returns scoped state, typed send, and machine status.
+ *
+ * @param ref - Feature definition from feature()
+ * @returns { state, send, status }
+ *
+ * @example
+ * ```tsx
+ * const { state, send, status } = useFeature(counter)
+ * return <button onClick={() => send.increment(5)}>+5</button>
+ * ```
+ */
+export declare function useFeature<S = unknown>(ref: {
+  name: string
+  // deno-lint-ignore no-explicit-any
+  A: Record<string, any>
+  _config: { actionKeys: string[] }
+}): {
+  state: S | null
+  send: Record<string, (...args: unknown[]) => void>
+  status: string | undefined
 }
 
 /**

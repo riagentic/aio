@@ -2,8 +2,8 @@ import { assertEquals } from 'https://deno.land/std@0.224.0/assert/mod.ts'
 import { formatUptime, parsePayload, resolvePort, parseGlobalFlags, readPid, writePid, removePid, isProcessAlive, resolvePath, resolveControlPort } from '../src/am.ts'
 import type { PidFile } from '../src/am.ts'
 import { createServer } from '../src/server.ts'
-import { VERSION } from '../src/aio.ts'
 import { join } from '@std/path'
+import { VERSION } from '../src/aio.ts'
 
 // ── Unit: formatUptime ───────────────────────────────────────
 
@@ -576,4 +576,216 @@ Deno.test('am-cli: log — filter works', async () => {
   } finally {
     await Deno.remove('.aio.log').catch(() => {})
   }
+})
+
+// ── am status — no server running ────────────────────────────
+
+Deno.test('am-cli: status — exit code 1 when no server', async () => {
+  removePid()
+  const result = await new Deno.Command('deno', {
+    args: ['run', '-A', '--unstable-kv', amScript, '--json', '--port=19899', 'status'],
+    stdout: 'piped',
+    stderr: 'piped',
+  }).output()
+  // Exit 1 = stopped
+  assertEquals(result.code, 1)
+  const stdout = new TextDecoder().decode(result.stdout).trim()
+  const data = JSON.parse(stdout)
+  assertEquals(data.status, 'stopped')
+})
+
+// ── am ui — filtered UI state ─────────────────────────────────
+
+Deno.test('am-cli: ui — returns filtered getUIState result', async () => {
+  await withTrojanServer(async () => {
+    const r = await runAm(['ui'])
+    assertEquals(r.code, 0)
+    // getUIState in withTrojanServer returns { count: appState.count }
+    const data = r.json as { count: number }
+    assertEquals(data.count, 10)
+    // items not exposed via getUIState
+    assertEquals((data as Record<string, unknown>).items, undefined)
+  })
+})
+
+// ── am actions — history ─────────────────────────────────────
+
+Deno.test('am-cli: actions — returns TT history', async () => {
+  await withTrojanServer(async () => {
+    const r = await runAm(['actions'])
+    assertEquals(r.code, 0)
+    // history endpoint returns { entries, index, paused }
+    const data = r.json as { entries: unknown[] }
+    assertEquals(typeof data, 'object')
+  })
+})
+
+// ── am errors — no errors ─────────────────────────────────────
+
+Deno.test('am-cli: errors — empty when no transpile errors', async () => {
+  await withTrojanServer(async () => {
+    const r = await runAm(['errors'])
+    assertEquals(r.code, 0)
+    const data = r.json as { errors: unknown[] }
+    assertEquals(Array.isArray(data.errors), true)
+    assertEquals(data.errors.length, 0)
+  })
+})
+
+// ── am sql / tables — no SQLite ──────────────────────────────
+
+Deno.test('am-cli: sql — error when no sqlQuery configured', async () => {
+  // withTrojanServer does not configure sqlQuery → trojan returns 404
+  await withTrojanServer(async () => {
+    const r = await runAm(['sql', 'SELECT 1'])
+    assertEquals(r.code, 1)
+  })
+})
+
+Deno.test('am-cli: tables — error when no sqlQuery configured', async () => {
+  await withTrojanServer(async () => {
+    const r = await runAm(['tables'])
+    assertEquals(r.code, 1)
+  })
+})
+
+// ── am snapshot ───────────────────────────────────────────────
+
+Deno.test('am-cli: snapshot — dumps state as JSON', async () => {
+  await withTrojanServer(async () => {
+    const r = await runAm(['snapshot'])
+    assertEquals(r.code, 0)
+    // Snapshot dumps raw JSON to stdout (not wrapped in json mode)
+    const text = r.stdout
+    const parsed = JSON.parse(text)
+    assertEquals(parsed.count, 10)
+  })
+})
+
+Deno.test('am-cli: snapshot save — writes file', async () => {
+  const tmp = await Deno.makeTempFile({ suffix: '.json' })
+  try {
+    await withTrojanServer(async () => {
+      const r = await runAm(['snapshot', 'save', tmp])
+      assertEquals(r.code, 0)
+      const saved = JSON.parse(await Deno.readTextFile(tmp))
+      assertEquals(saved.count, 10)
+    })
+  } finally {
+    await Deno.remove(tmp).catch(() => {})
+  }
+})
+
+Deno.test('am-cli: snapshot load — restores state from file', async () => {
+  const tmp = await Deno.makeTempFile({ suffix: '.json' })
+  try {
+    await Deno.writeTextFile(tmp, JSON.stringify({ count: 99, items: [] }))
+    await withTrojanServer(async () => {
+      const r = await runAm(['snapshot', 'load', tmp])
+      assertEquals(r.code, 0)
+      const data = r.json as { file: string; status: string }
+      assertEquals(data.status, 'loaded')
+    })
+  } finally {
+    await Deno.remove(tmp).catch(() => {})
+  }
+})
+
+Deno.test('am-cli: snapshot load — error on missing file', async () => {
+  await withTrojanServer(async () => {
+    const r = await runAm(['snapshot', 'load', '/tmp/nonexistent_aio_test_file.json'])
+    assertEquals(r.code, 1)
+  })
+})
+
+// ── am tt — time-travel commands ─────────────────────────────
+
+const AM_TT_PORT = 19861
+
+async function withTTServer(fn: (url: string) => Promise<void>): Promise<void> {
+  const dir = await Deno.makeTempDir()
+  await Deno.writeTextFile(join(dir, 'App.tsx'), 'export default () => null')
+  const ttCmds: { cmd: string; arg?: number }[] = []
+  const server = createServer({
+    port: AM_TT_PORT,
+    title: 'TTServer',
+    getUIState: () => ({}),
+    dispatch: () => {},
+    baseDir: dir,
+    debug: () => {},
+    prod: false,
+    onTTCommand: (cmd, arg) => { ttCmds.push({ cmd, arg }) },
+    trojan: {
+      getState: () => ({ step: 0 }),
+      getSchedules: () => [],
+      startedAt: Date.now(),
+    },
+  })
+  await new Promise(r => setTimeout(r, 50))
+  try {
+    await fn(`http://127.0.0.1:${AM_TT_PORT}`)
+  } finally {
+    await server.shutdown()
+    await Deno.remove(dir, { recursive: true })
+  }
+}
+
+function runAmOnPort(port: number, args: string[]) {
+  return new Deno.Command('deno', {
+    args: ['run', '-A', '--unstable-kv', amScript, '--json', `--port=${port}`, ...args],
+    stdout: 'piped',
+    stderr: 'piped',
+  }).output().then(r => {
+    const dec = new TextDecoder()
+    const stdout = dec.decode(r.stdout).trim()
+    let json: unknown
+    try { json = JSON.parse(stdout) } catch { /* not JSON */ }
+    return { code: r.code, stdout, stderr: dec.decode(r.stderr).trim(), json }
+  })
+}
+
+Deno.test('am-cli: tt undo — sends command to server', async () => {
+  await withTTServer(async () => {
+    const r = await runAmOnPort(AM_TT_PORT, ['tt', 'undo'])
+    assertEquals(r.code, 0)
+  })
+})
+
+Deno.test('am-cli: tt goto N — sends goto with index', async () => {
+  await withTTServer(async () => {
+    const r = await runAmOnPort(AM_TT_PORT, ['tt', 'goto', '2'])
+    assertEquals(r.code, 0)
+  })
+})
+
+Deno.test('am-cli: tt pause/resume — sends toggle', async () => {
+  await withTTServer(async () => {
+    const r1 = await runAmOnPort(AM_TT_PORT, ['tt', 'pause'])
+    assertEquals(r1.code, 0)
+    const r2 = await runAmOnPort(AM_TT_PORT, ['tt', 'resume'])
+    assertEquals(r2.code, 0)
+  })
+})
+
+Deno.test('am-cli: tt — no subcommand exits with error', async () => {
+  await withTTServer(async () => {
+    const r = await runAmOnPort(AM_TT_PORT, ['tt'])
+    assertEquals(r.code, 1)
+  })
+})
+
+Deno.test('am-cli: tt goto — missing N exits with error', async () => {
+  await withTTServer(async () => {
+    const r = await runAmOnPort(AM_TT_PORT, ['tt', 'goto'])
+    assertEquals(r.code, 1)
+  })
+})
+
+// ── am dispatch — input validation ───────────────────────────
+
+Deno.test('am-cli: dispatch — no args exits with error', async () => {
+  await withTrojanServer(async () => {
+    const r = await runAm(['dispatch'])
+    assertEquals(r.code, 1)
+  })
 })

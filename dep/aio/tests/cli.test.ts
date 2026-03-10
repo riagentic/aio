@@ -247,3 +247,20 @@ Deno.test('electronClientScript: nodeIntegration disabled', () => {
   assertEquals(script.includes('nodeIntegration: false'), true)
   assertEquals(script.includes('contextIsolation: true'), true)
 })
+
+// ── --isolate flag ──────────────────────────────────────────────
+
+Deno.test('parseCli: --isolate=counter,dc', () => {
+  const r = parseCli(['--isolate=counter,dc'])
+  assertEquals(r.isolate, ['counter', 'dc'])
+})
+
+Deno.test('parseCli: --isolate=single', () => {
+  const r = parseCli(['--isolate=counter'])
+  assertEquals(r.isolate, ['counter'])
+})
+
+Deno.test('parseCli: no --isolate returns undefined', () => {
+  const r = parseCli([])
+  assertEquals(r.isolate, undefined)
+})

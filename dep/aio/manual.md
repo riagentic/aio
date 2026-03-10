@@ -1,25 +1,39 @@
 # aio Reference Manual
 
-Full API reference for the aio framework. For getting started, see [quickstart.md](quickstart.md). For adopting aio into an existing app, see [migration.md](migration.md). For upgrading between versions, see [upgrade.md](upgrade.md).
+Full API reference for the aio framework (v0.5). For getting started, see [quickstart.md](quickstart.md). For adopting aio into an existing app, see [migration.md](migration.md). For upgrading between versions, see [upgrade.md](upgrade.md). For file structure, see [structure.md](structure.md).
 
 ## Architecture
+
+aio v0.5 is **feature-first**: each feature is a self-contained unit with its own state, actions, effects, state machine, reducer, and executor. The framework composes features into a single dispatch loop.
 
 **Desktop (Deno + Electron/browser):**
 ```
 ┌─────────────────────────────────────────────────────┐
 │ Browser / Electron                                  │
-│  App.tsx → useAio() ──WebSocket──→ server            │
-│           state ←────────────────── broadcast        │
-│           send(action) ──────────→ dispatch          │
+│  App.tsx → useFeature(counter)                      │
+│           state ←──────────── feature slice          │
+│           send.increment() ──→ WebSocket → server    │
 └─────────────────────────────────────────────────────┘
                                         │
 ┌─────────────────────────────────────────────────────┐
-│ Deno Server (aio.run)                               │
-│  dispatch(action)                                   │
-│    → reduce(state, action) → { state, effects }     │
-│    → persist to Deno.Kv                             │
-│    → broadcast new state to all UIs                 │
-│    → execute each effect                            │
+│ Deno Server  ─  aio.run({ features: [...] })        │
+│                                                     │
+│  composeFeatures() builds root reducer + executor   │
+│  ┌───────────┐  ┌───────────┐  ┌───────────┐       │
+│  │ counter   │  │ wallet    │  │ bridge    │       │
+│  │ ─state    │  │ ─state    │  │ ─pending  │       │
+│  │ ─machine  │  │ ─machine  │  │ ─metrics  │       │
+│  │ ─reduce   │  │ ─reduce   │  │ ─circuit  │       │
+│  │ ─execute  │  │ ─execute  │  │ ─timeout  │       │
+│  └───────────┘  └───────────┘  └───────────┘       │
+│                                                     │
+│  dispatch(Counter:Increment)                        │
+│    → route to counter feature (by prefix)           │
+│    → machine guard (is this transition allowed?)    │
+│    → reduce with Immer → new state + effects        │
+│    → foreign listeners (other features react)       │
+│    → persist to Deno.Kv · broadcast to UIs          │
+│    → execute effects (scoped dispatch)              │
 └─────────────────────────────────────────────────────┘
 ```
 
@@ -27,12 +41,8 @@ Full API reference for the aio framework. For getting started, see [quickstart.m
 ```
 ┌─────────────────────────────────────────────────────┐
 │ Android WebView (standalone.ts)                     │
-│  App.tsx → useAio() ──direct──→ dispatch loop        │
-│  dispatch(action)                                   │
-│    → reduce(state, action) → { state, effects }     │
-│    → persist to localStorage                        │
-│    → notify React listeners                         │
-│    → execute each effect                            │
+│  Same feature definitions, same reduce/execute      │
+│  dispatch loop runs in-browser (localStorage)       │
 └─────────────────────────────────────────────────────┘
 ```
 
@@ -40,17 +50,22 @@ Same `src/` code runs in both modes. The `'aio'` import resolves to `browser.ts`
 
 ### Data flow
 
-1. User clicks button → `send(A.increment())` → WebSocket → server
-2. Action is validated (must have `type: string`) and queued
-3. Server calls `reduce(state, action)` → returns new state + effects array
-4. Effects execute — may dispatch follow-up actions (queued, not re-entrant)
-5. After all queued actions drain: state persisted to Deno.Kv (debounced) and broadcast to all UIs
-6. UI receives new state → React re-renders
+1. User clicks button → `send.increment(5)` → WebSocket → server
+2. Action `Counter:Increment` routed to counter feature by prefix
+3. Machine guard checks: is `increment` allowed in current status?
+4. `reduce(state, action, { A, E })` runs with Immer (mutate draft, return effects)
+5. Foreign listeners react (other features whose machines declare this action)
+6. Effects execute via scoped `app.dispatch` (can only dispatch own + allowed cross-feature actions)
+7. State persisted to Deno.Kv (debounced) and broadcast to all UIs
+8. UI receives new feature slice → React re-renders
 
 **Error handling:** If `reduce()` throws, the error is logged and that action is skipped — the server continues running. **Important:** state remains unchanged when a reducer throws. The failed action has no effect on state, and subsequent actions process normally. Effects that throw are also caught and logged individually.
 
 ### What AIO handles automatically
 
+- **Feature composition** — route actions by prefix, enforce machine guards, manage lifecycle
+- **Scoped dispatch** — executors can only dispatch own + explicitly allowed cross-feature actions
+- **Immer integration** — mutate state drafts in reduce, get immutable results
 - HTML generation with React (CDN in dev, bundled in prod)
 - CSS injection — auto-detects `src/style.css` and adds `<link>` tag
 - JSX compilation (no `import React` needed)
@@ -64,109 +79,39 @@ Same `src/` code runs in both modes. The `'aio'` import resolves to `browser.ts`
 - Startup validation (Electron install check, missing configs, etc.)
 - CLI argument parsing
 
-## Project layouts
+## Project layout
 
-aio ships 4 project templates (`sh init.sh my-app`). Pick the one that matches your app's complexity. **AI coding agents: use these layouts as-is — don't invent custom folder structures.**
-
-### Empty — 2 files
-
-Everything inline. For throwaway experiments and one-screen tools.
+**v0.5 is feature-first.** See [structure.md](structure.md) for the complete guide.
 
 ```
 src/
-  app.ts            ← entry + inline state/reduce/execute
-  App.tsx           ← React UI
-```
-
-### Minimal — 7 files
-
-Standard aio structure. Counter app. **This is the default for most apps.**
-
-```
-src/
-  app.ts            ← entry point, wires state/reduce/execute
-  state.ts          ← AppState type + initialState
-  actions.ts        ← action catalog (A.Increment, A.Decrement, ...)
-  effects.ts        ← effect catalog (E.Log, ...)
-  reduce.ts         ← (state, action) → { state, effects }
-  execute.ts        ← runs effects
-  App.tsx           ← React UI
-```
-
-### Medium — feature folders + UI components
-
-When you have 2+ features and reusable UI. Feature reducers get their own folder, UI components get `ui/`.
-
-```
-src/
-  app.ts
-  state.ts          ← imports feature types
-  actions.ts
-  effects.ts
-  reduce.ts         ← router: delegates to feature reducers
-  execute.ts
-  App.tsx
+  app.ts                       ← aio.run({ features }) — boot only
+  App.tsx                      ← root UI — layout + routing only
   features/
-    todo/
-      todo-types.ts     ← TodoItem, TodoState
-      todo-reduce.ts    ← feature reducer
-  ui/
-    TodoList.tsx
-    AddTodo.tsx
+    counter/
+      index.ts                 ← feature() — state, actions, machine, reduce, execute
+    wallet/
+      index.ts
+      types.ts                 ← extracted when feature grows
+      helpers.ts
+      ui/
+        WalletPage.tsx
+  shared/                      ← code used by 2+ features
+    types/
+    utils/
+    ui/
 ```
 
-### Large — models + features + UI hierarchy
-
-Full architecture. Models hold pure types + functions. Features hold reducers. UI is grouped by domain.
-
-```
-src/
-  app.ts
-  state.ts          ← imports from model/ types
-  actions.ts
-  effects.ts
-  reduce.ts         ← thin router → feature reducers
-  execute.ts        ← thin router → feature effects
-  App.tsx
-  model/
-    todo/
-      todo-types.ts     ← types only (TodoItem, TodoState)
-      todo-fn.ts        ← pure functions (createTodo, countRemaining)
-    user/
-      user-types.ts     ← types only (UserState)
-  features/
-    todo/
-      todo-reduce.ts    ← feature reducer, imports model types + fns
-    user/
-      user-reduce.ts
-  ui/
-    layout/
-      Header.tsx
-    todo/
-      TodoList.tsx
-      AddTodo.tsx
-    user/
-      Settings.tsx
-```
-
-### When to use which
-
-| Template | Files | Use when |
-|----------|-------|----------|
-| Empty | 2 | Quick experiment, single-screen tool |
-| Minimal | 7 | Most apps — up to ~10 actions |
-| Medium | 10+ | Multiple features, shared UI components |
-| Large | 19+ | Complex domains, pure model logic, team conventions |
-
-Start with **Minimal**. Move to **Medium** when your `reduce.ts` switch has 10+ cases. Move to **Large** when you have multiple domains with shared logic.
+Features start as a single `index.ts`. As they grow, extract `types.ts`, `helpers.ts`, `reduce.ts`, `execute.ts`, `ui/`. See [structure.md](structure.md) for when to split.
 
 ### Naming conventions
 
-- Feature types: `<feature>-types.ts` (types only, no logic)
-- Feature pure functions: `<feature>-fn.ts` (no imports from framework)
-- Feature reducers: `<feature>-reduce.ts`
-- Feature effects: `<feature>-effect.ts` (if split from main execute.ts)
-- Top-level `reduce.ts` and `execute.ts` are thin routers — delegate to features
+- Feature entry: `features/<name>/index.ts` — the `feature()` call
+- Feature types: `features/<name>/types.ts` (framework-agnostic, no aio imports)
+- Feature helpers: `features/<name>/helpers.ts` (pure functions)
+- Feature UI: `features/<name>/ui/<Component>.tsx`
+- Shared types: `shared/types/<name>.ts`
+- Shared UI: `shared/ui/<Component>.tsx` (pure props, no `useFeature`)
 
 ## The `'aio'` import
 
@@ -185,17 +130,587 @@ To update aio, replace the `dep/aio/` folder with the new version and check the 
 
 ```ts
 // Server-side (Deno) — full API
-import { aio, VERSION, actions, effects, draft, type UnionOf, type AioApp, type AioConfig } from 'aio'
+import { aio, feature, bridge, testFeature, schedule, type FeatureDef } from 'aio'
 
 // Browser-side (App.tsx) — hooks + helpers
-import { useAio, useLocal, page, msg } from 'aio'
+import { useFeature, useAio, useLocal, page } from 'aio'
+
+// Classic (v0.4 style — still works)
+import { aio, actions, effects, draft, type UnionOf, type AioApp } from 'aio'
 ```
 
 Never import from `'../dep/aio/...'` directly — always use `'aio'`. The startup linter will warn you if you forget.
 
-## `aio.run(initialState, config)`
+## `feature(name, config)` — the core building block
 
-The single entry point. Boots everything, runs forever.
+A feature is a self-contained state machine with its own state slice, typed actions, typed effects, state machine definition, reducer, and executor. One `feature()` call defines everything.
+
+```ts
+import { feature } from 'aio'
+
+export const counter = feature('counter', {
+  // ── State — this feature's slice of the global state tree
+  state: { count: 0, lastUpdatedAt: 0, error: null as string | null },
+
+  // ── Actions — messages from UI or effects → state changes
+  actions: {
+    increment: (by = 1) => ({ by }),
+    decrement: (by = 1) => ({ by }),
+    reset:     () => ({}),
+    save:      () => ({}),
+    saved:     () => ({}),
+    saveFailed: (error: string) => ({ error }),
+    retry:     () => ({}),
+    dismiss:   () => ({}),
+  },
+
+  // ── Effects — async side effects returned by reducer
+  effects: {
+    persist: (value: number) => ({ value }),
+    log:     (message: string) => ({ message }),
+  },
+
+  // ── Machine — which actions are allowed in which status
+  machine: {
+    initial: 'idle',
+    states: {
+      idle:   { on: { increment: 'idle', decrement: 'idle', reset: 'idle', save: 'saving' } },
+      saving: { on: { saved: 'idle', saveFailed: 'error' } },
+      error:  { on: { retry: 'saving', dismiss: 'idle' } },
+    },
+  },
+
+  // ── Reduce — pure state changes (Immer draft — mutate directly)
+  reduce(state, action, { A, E }) {
+    switch (action.type) {
+      case A.Increment:
+        state.count += action.payload.by
+        state.lastUpdatedAt = Date.now()
+        return [E.log(`incremented to ${state.count}`)]
+      case A.Decrement:
+        state.count -= action.payload.by
+        state.lastUpdatedAt = Date.now()
+        break
+      case A.Reset:
+        state.count = 0
+        break
+      case A.Save:
+        return [E.persist(state.count)]
+      case A.SaveFailed:
+        state.error = action.payload.error
+        break
+    }
+  },
+
+  // ── Execute — async side effects (scoped dispatch)
+  execute(app, effect, { E, A }) {
+    switch (effect.type) {
+      case E.Persist:
+        fetch('/api/save', {
+          method: 'POST',
+          body: JSON.stringify({ value: effect.payload.value }),
+        })
+          .then(() => app.dispatch(A.saved()))
+          .catch(e => app.dispatch(A.saveFailed(e.message)))
+        break
+      case E.Log:
+        console.log(effect.payload.message)
+        break
+    }
+  },
+})
+```
+
+### What `feature()` generates
+
+From the name `'counter'` and action `increment`, you get:
+
+| Generated | Value | Use |
+|-----------|-------|-----|
+| `counter.A.Increment` | `'Counter:Increment'` | String label for `switch/case` in reduce |
+| `counter.A.increment(5)` | `{ type: 'Counter:Increment', payload: { by: 5 } }` | Creator for dispatch/send |
+| `counter.E.Log` | `'Counter:Log'` | String label for `switch/case` in execute |
+| `counter.E.log('hi')` | `{ type: 'Counter:Log', payload: { message: 'hi' } }` | Effect creator returned from reduce |
+
+**Prefix convention:** feature name is capitalized → `Counter:ActionName`. Actions are routed by prefix — the framework knows `Counter:Increment` belongs to the `counter` feature.
+
+### `machine` — state machine guards
+
+The machine definition controls which actions are allowed in which status. Actions that aren't listed for the current status are **silently dropped** — no error, no state change.
+
+```ts
+machine: {
+  initial: 'idle',
+  states: {
+    idle:   { on: { increment: 'idle', decrement: 'idle', save: 'saving' } },
+    saving: { on: { saved: 'idle', saveFailed: 'error' } },
+    error:  { on: { retry: 'saving', dismiss: 'idle' } },
+  },
+},
+```
+
+The current status is stored as `_status` in the feature's state slice. Use `useFeature(counter).status` in the UI to read it.
+
+**Validation at definition time:**
+- Initial state must exist in declared states
+- All transition targets must be declared states
+- All referenced action keys must be declared (own or foreign)
+- Unreachable states are flagged
+- Dead-end states (no outgoing transitions) get a console warning
+
+Use `machine: 'simple'` for features that don't need state machine guards — all actions are always allowed, no `_status` field.
+
+### Foreign actions — cross-feature reactions
+
+A feature's machine can declare actions from other features. This lets one feature react to another's state changes:
+
+```ts
+const analytics = feature('analytics', {
+  state: { events: [] as string[] },
+  actions: {
+    trackEvent: (name: string) => ({ name }),
+  },
+  machine: {
+    initial: 'active',
+    states: {
+      active: { on: {
+        trackEvent: 'active',
+        'Counter:Increment': 'active',   // ← react to counter's increment
+        'Wallet:Transfer': 'active',     // ← react to wallet's transfer
+      } },
+    },
+  },
+  reduce(state, action, { A }) {
+    switch (action.type) {
+      case A.TrackEvent:
+      case 'Counter:Increment':
+      case 'Wallet:Transfer':
+        (state.events as string[]).push(action.type)
+        break
+    }
+  },
+})
+```
+
+Foreign actions are identified by containing `:` and not matching the feature's own prefix. The framework routes the action to both the owning feature and all listeners.
+
+### `reduce` — pure state changes with Immer
+
+The reducer receives an Immer `Draft<S>` — mutate it directly. Return an effects array (or `void` for no effects):
+
+```ts
+reduce(state, action, { A, E }) {
+  switch (action.type) {
+    case A.Increment:
+      state.count += action.payload.by           // mutate the draft
+      return [E.log(`count: ${state.count}`)]    // return effects
+    case A.Reset:
+      state.count = 0                            // no effects needed
+      break
+  }
+}
+```
+
+Effects returned from reduce are detached from the Immer draft via `structuredClone`.
+
+### `execute` — async side effects with scoped dispatch
+
+The executor receives a `ScopedApp` with `dispatch` and `getState`:
+
+```ts
+execute(app, effect, { E, A }) {
+  switch (effect.type) {
+    case E.FetchData:
+      fetch(effect.payload.url)
+        .then(r => r.json())
+        .then(data => app.dispatch(A.dataLoaded(data)))
+        .catch(e => app.dispatch(A.fetchFailed(e.message)))
+      break
+  }
+}
+```
+
+**Scoped dispatch rules:**
+- `app.dispatch(A.ownAction())` — always allowed
+- `app.dispatch(otherFeature.A.action())` — **blocked** unless declared in `crossDispatch`
+- `app.getState()` — returns this feature's slice only (not the full state)
+
+### `crossDispatch` — allow dispatching to other features
+
+```ts
+const te = feature('te', {
+  // ...
+  crossDispatch: ['wallet', 'fleet'],  // lowercase feature names
+  execute(app, effect, { E }) {
+    switch (effect.type) {
+      case E.TransferComplete:
+        app.dispatch(wallet.A.credit(effect.payload.amount))  // allowed
+        break
+    }
+  },
+})
+```
+
+Blocked dispatches log: `[te] dispatch('Wallet:Credit') blocked — add 'wallet' to crossDispatch`
+
+### `selectors` — derived state
+
+```ts
+const counter = feature('counter', {
+  // ...
+  selectors: {
+    isPositive: (state: unknown) => {
+      const s = (state as Record<string, { count: number }>).counter
+      return s.count > 0
+    },
+  },
+})
+```
+
+### Lifecycle hooks — `init` / `destroy`
+
+```ts
+const ws = feature('ws', {
+  // ...
+  init(app) {
+    // called after feature is composed — start WebSocket, timers, etc.
+    connectWebSocket(app)
+  },
+  destroy(app) {
+    // called on shutdown or feature disable — cleanup
+    closeWebSocket()
+  },
+})
+```
+
+Init runs in dependency order (dependsOn). Destroy runs in reverse order.
+
+### Deferred `implement` — server-only executors
+
+When execute needs server-only imports, use `implement()` to attach it separately:
+
+```ts
+// features/backup/index.ts — shared (browser + server)
+export const backup = feature('backup', {
+  state: { lastBackup: null as string | null },
+  actions: { run: () => ({}), done: (at: string) => ({ at }) },
+  effects: { doBackup: () => ({}) },
+  machine: 'simple',
+  reduce(state, action, { A, E }) {
+    switch (action.type) {
+      case A.Run: return [E.doBackup()]
+      case A.Done: state.lastBackup = action.payload.at; break
+    }
+  },
+  // no execute here — browser doesn't have Deno APIs
+})
+
+// features/backup/execute.ts — server only
+import { backup } from './index.ts'
+backup.implement((app, effect, { E, A }) => {
+  switch (effect.type) {
+    case E.DoBackup:
+      Deno.writeTextFile('./backup.json', JSON.stringify(app.getState()))
+        .then(() => app.dispatch(A.done(new Date().toISOString())))
+      break
+  }
+})
+```
+
+## `aio.run({ features })` — the v0.5 entry point
+
+Pass an array of features. The framework composes them into a single dispatch loop:
+
+```ts
+import { aio } from 'aio'
+import { counter } from './features/counter/index.ts'
+import { wallet } from './features/wallet/index.ts'
+import { analytics } from './features/analytics/index.ts'
+
+await aio.run({
+  features: [counter, wallet, analytics],
+  ui: { title: 'My App', width: 1200, height: 800 },
+})
+```
+
+### Feature dependencies
+
+Declare dependencies for ordered initialization:
+
+```ts
+await aio.run({
+  features: [
+    counter,
+    { feature: wallet, dependsOn: ['counter'] },   // wallet inits after counter
+    { feature: analytics, dependsOn: ['counter', 'wallet'] },
+  ],
+})
+```
+
+Dependencies are validated: missing names throw, cycles throw, topological sort determines init order.
+
+### Feature isolation (dev convenience)
+
+Test a single feature in isolation:
+
+```ts
+await aio.run({
+  features: [counter, wallet, analytics],
+  isolate: ['counter'],  // only counter is active
+})
+```
+
+Or via CLI: `deno task dev --isolate=counter`
+
+### Middleware
+
+```ts
+await aio.run({
+  features: [counter],
+  middleware: [
+    aio.middleware.logger(),              // log all actions
+    aio.middleware.logger({ features: ['counter'] }),  // log only counter
+    aio.middleware.validate(),            // reject malformed actions
+    aio.middleware.metrics(),             // track action counts per feature
+  ],
+})
+```
+
+Built-in middleware: `logger`, `validate`, `metrics`, `perfBudget`, `freeze`, `devtools`, `create` (custom).
+
+### State versioning + migrations
+
+```ts
+await aio.run({
+  features: [counter, wallet],
+  version: 2,
+  migrations: [
+    // v0 → v1: add wallet feature
+    (state) => ({ ...state, wallet: { balance: 0 } }),
+    // v1 → v2: rename field
+    (state) => {
+      const w = state.wallet as Record<string, unknown>
+      w.totalBalance = w.balance
+      delete w.balance
+      return state
+    },
+  ],
+})
+```
+
+### Return value — `app.features`
+
+```ts
+const app = await aio.run({ features: [counter, wallet] })
+
+// Feature control API
+app.features!.list()              // ['counter', 'wallet']
+app.features!.status('counter')   // 'idle' | 'saving' | 'error' | ...
+app.features!.health()            // [{ name, status, enabled, errors, lastAction, lastActionAt }]
+app.features!.disable('wallet')   // disable at runtime (stops routing, dispatches Destroy)
+app.features!.enable('wallet')    // re-enable (dispatches Init, resets state)
+```
+
+### FeaturesConfig options
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `features` | `FeatureEntry[]` | **required** | Array of features (or `{ feature, dependsOn }` objects) |
+| `middleware` | `MiddlewareFn[]` | — | Middleware chain applied before reduce |
+| `version` | `number` | — | State version — triggers migrations on restore |
+| `migrations` | `fn[]` | — | Migration functions: `(state) => state` |
+| `isolate` | `string[]` | — | Only activate these features (dev convenience) |
+| `beforeReduce` | `fn` | — | Intercept actions before reduce — return null to drop |
+| All options from classic `aio.run` | — | — | `port`, `persist`, `persistKey`, `persistMode`, `persistDebounce`, `ui`, `baseDir`, `headless`, `users`, `db`, `schedules`, `perfMode`, `perfBudget`, `effectTimeout`, `freezeState`, `singleton`, `deltaThreshold`, `maxConnections`, `getUIState`, `getDBState`, `onRestore`, `onAction`, `onEffect`, `onConnect`, `onDisconnect`, `onStart`, `onStop`, `onError` |
+
+## `bridge(name, config)` — cross-feature coordination
+
+Bridges handle request/response patterns between features with timeout, retry, and circuit breaker support:
+
+```ts
+import { bridge } from 'aio'
+
+const priceBridge = bridge('priceBridge', {
+  from: 'engine',
+  to: 'dataCollector',
+  channels: {
+    price: {
+      request: (symbol: string) => ({ symbol }),
+      response: (price: number) => ({ price }),
+      timeout: 5000,    // ms before timeout
+      retries: 2,       // retry on timeout
+      backoff: 'exponential',
+    },
+  },
+  circuitBreaker: {
+    failureThreshold: 5,   // open circuit after 5 failures
+    resetTimeout: 30_000,  // try half-open after 30s
+  },
+})
+```
+
+Bridge state includes `pending` (in-flight requests), `metrics` (counts, latency), and optional `circuit` (breaker state).
+
+### Using a bridge
+
+```ts
+// In the requesting feature's executor:
+const engine = feature('engine', {
+  crossDispatch: ['priceBridge'],
+  execute(app, effect, { E }) {
+    case E.NeedPrice:
+      app.dispatch(priceBridge.request!.price('BTC'))  // sends PriceBridge:PriceRequest
+      break
+  },
+})
+
+// In the responding feature's machine, listen for the request:
+const dc = feature('dc', {
+  machine: {
+    initial: 'ready',
+    states: {
+      ready: { on: { fetch: 'ready', 'PriceBridge:PriceRequest': 'ready' } },
+    },
+  },
+  // ...
+})
+```
+
+### Bridge selectors
+
+```ts
+priceBridge.selectors.getPendingCount(state)    // number of in-flight requests
+priceBridge.selectors.getAverageLatency(state)  // ms
+priceBridge.selectors.isCircuitOpen(state)       // boolean
+```
+
+## `useFeature(ref)` — React hook for features
+
+Connects a component to a specific feature with typed send and machine status:
+
+```tsx
+import { useFeature } from 'aio'
+import { counter } from './features/counter/index.ts'
+
+export default function App() {
+  const { state, send, status } = useFeature(counter)
+  if (!state) return <div>Connecting...</div>
+
+  return (
+    <div>
+      <h1>{state.count}</h1>
+      <p>Status: {status}</p>
+      <button onClick={() => send.decrement()}>-</button>
+      <button onClick={() => send.reset()}>Reset</button>
+      <button onClick={() => send.increment(5)}>+5</button>
+      {status === 'error' && (
+        <>
+          <p>Error: {state.error}</p>
+          <button onClick={() => send.retry()}>Retry</button>
+          <button onClick={() => send.dismiss()}>Dismiss</button>
+        </>
+      )}
+    </div>
+  )
+}
+```
+
+**What you get:**
+- `state: S | null` — the feature's state slice (null until connected)
+- `send.<action>(...args)` — typed action dispatchers (camelCase, auto-tagged with `_source: 'UI'`)
+- `status: string | undefined` — current machine status (`'idle'`, `'saving'`, etc.)
+
+**vs `useAio()`:** `useFeature` gives you the feature slice directly (no `state.counter.count`), typed `send.increment()` instead of `send(A.increment())`, and the machine `status`. Use `useAio()` when you need the full state or multiple features in one component.
+
+## `testFeature(feature, name, fn)` — isolated feature testing
+
+Test harness that wraps `Deno.test` with typed helpers:
+
+```ts
+import { testFeature } from 'aio'
+import { counter } from './features/counter/index.ts'
+
+testFeature(counter, 'increment from idle', (t) => {
+  t.init()
+  t.send.increment(5)
+  t.expect.state(s => s.count === 5)
+  t.expect.status('idle')
+  t.expect.effects(['Log'])
+})
+
+testFeature(counter, 'machine guards block invalid transitions', (t) => {
+  t.init()
+  t.send.save()                         // idle → saving
+  t.expect.status('saving')
+  t.send.increment(1)                   // blocked! increment not in saving.on
+  t.expect.state(s => s.count === 0)    // unchanged
+})
+
+testFeature(counter, 'save flow: idle → saving → error → idle', (t) => {
+  t.init()
+  t.send.save()
+  t.expect.status('saving')
+  t.send.saveFailed('network error')
+  t.expect.status('error')
+  t.expect.state(s => s.error === 'network error')
+  t.send.dismiss()
+  t.expect.status('idle')
+})
+
+testFeature(counter, 'random action fuzzing', (t) => {
+  t.init()
+  t.randomActions(100)                  // dispatch 100 random valid actions
+  t.expect.invariant(s => typeof s.count === 'number')
+})
+```
+
+### TestContext API
+
+| Method | Description |
+|--------|-------------|
+| `t.init()` | Reset to initial state |
+| `t.destroy()` | Reset + set status to 'uninitialized' |
+| `t.send.<action>(...args)` | Dispatch an action |
+| `t.expect.state(fn)` | Assert on feature state slice |
+| `t.expect.status(str)` | Assert current machine status |
+| `t.expect.effects(['Name'])` | Assert effect types from last action (short names, e.g. `'Persist'` not `'Counter:Persist'`) |
+| `t.expect.effectCount(n)` | Assert number of effects from last action |
+| `t.expect.invariant(fn)` | Assert a predicate holds |
+| `t.getState()` | Get full feature state including `_status` |
+| `t.getEffects()` | Get effects from last dispatched action |
+| `t.randomActions(n)` | Dispatch N random valid actions (property-based testing) |
+
+## `testBridge(bridge, name, fn)` — bridge testing
+
+```ts
+import { testBridge } from 'aio'
+import { priceBridge } from './features/bridge/index.ts'
+
+testBridge(priceBridge, 'request-response flow', (t) => {
+  t.request.price('BTC')
+  t.expect.pending(1)
+  t.respond.price(42000)
+  t.expect.pending(0)
+})
+
+testBridge(priceBridge, 'timeout triggers retry', (t) => {
+  t.request.price('ETH')
+  t.timeout()
+  t.expect.retryCount(1)   // auto-retried
+})
+
+testBridge(priceBridge, 'circuit breaker opens after failures', (t) => {
+  for (let i = 0; i < 5; i++) {
+    t.request.price('X')
+    t.timeout()
+  }
+  t.expect.circuitOpen(true)
+})
+```
+
+## `aio.run(initialState, config)` — classic entry point
+
+The v0.4 two-argument form still works. Use this for simple apps or migration:
 
 ```ts
 await aio.run(initialState, {
@@ -215,7 +730,7 @@ await aio.run(initialState, {
 })
 ```
 
-### Return value
+### Return value (both modes)
 
 ```ts
 const app = await aio.run(state, config)
@@ -224,6 +739,7 @@ app.getState()          // read current state
 app.snapshot()          // export state as JSON string
 app.loadSnapshot(json)  // import state from JSON, broadcast to all clients
 app.mode                // undefined (desktop) or 'standalone' (Android)
+app.features            // v0.5: feature control API (enable/disable/status/health)
 await app.close()       // graceful shutdown — flush KV, close KV handle, stop HTTP server
 ```
 
@@ -231,7 +747,7 @@ await app.close()       // graceful shutdown — flush KV, close KV handle, stop
 
 Use `app.mode` to branch effects that use Deno-specific APIs:
 ```ts
-// execute.ts
+// in execute
 case E.SAVE_FILE:
   if (app.mode === 'standalone') {
     console.log('file save not available on Android')
@@ -241,7 +757,7 @@ case E.SAVE_FILE:
   break
 ```
 
-### Config options
+### Config options (classic mode)
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
@@ -335,7 +851,9 @@ const frozen = deepFreeze({ a: 1, b: { c: 2 } })
 frozen.a = 2  // TypeError in dev mode
 ```
 
-## `actions()` / `effects()`
+## `actions()` / `effects()` — classic catalog factories
+
+> **v0.5 note:** In features mode, action/effect catalogs are built automatically by `feature()`. These factories are for classic (v0.4) apps or standalone use.
 
 Factory functions that create typed catalogs. You write payload functions, the framework generates PascalCase labels and camelCase `{ type, payload }` creators.
 
@@ -377,7 +895,7 @@ msg("INCREMENT")                    // { type: "INCREMENT", payload: {} }
 msg("INCREMENT", { by: 5 })        // { type: "INCREMENT", payload: { by: 5 } }
 ```
 
-## Actions pattern
+## Actions pattern (classic)
 
 Actions are sync messages from the UI that trigger state changes:
 
@@ -397,7 +915,7 @@ export type Action = UnionOf<typeof A>
 - `A.doThing(5)` — camelCase creator: `{ type: "DoThing", payload: { x: 5 } }` for dispatching
 - One definition, both uses — no separate enum + creator files
 
-## Effects pattern
+## Effects pattern (classic)
 
 Effects are async side effects the reducer wants to happen. Same factory pattern as actions, different purpose:
 
@@ -469,7 +987,9 @@ matchEffect(effect, { Log: (p) => console.log(p.message) }, (e) => {
 
 For small apps (< 10 effect types), `switch/case` is fine. Use `matchEffect` when your effect catalog grows.
 
-## `draft(state, fn)`
+## `draft(state, fn)` — classic Immer wrapper
+
+> **v0.5 note:** In features mode, Immer is built into `reduce()` automatically — you mutate the draft directly. `draft()` is for classic (v0.4) reducers.
 
 Immer-powered immutable update. Mutate the draft, return effects.
 
@@ -486,7 +1006,9 @@ return draft(state, d => {
 
 The callback **must** return an `E[]` array. Return `[]` for no effects.
 
-## `useAio<S>()`
+## `useAio<S>()` — full state hook
+
+> **v0.5 note:** Prefer `useFeature(ref)` for feature-scoped state. Use `useAio()` when you need the full state tree or multiple features in one component.
 
 React hook — connects to the server via WebSocket, syncs state, provides `send`.
 
@@ -1811,6 +2333,17 @@ await aio.run(state, {
 ```
 `beforeReduce` runs before `onAction` and `reduce`. Return the action (optionally modified) to continue, or `null` to drop it silently. Errors in `beforeReduce` are logged and the action is dropped.
 
+## Cross-feature communication (summary)
+
+Two mechanisms for features to interact — choose based on whether you need side effects:
+
+| Mechanism | Where | Use when |
+|-----------|-------|----------|
+| **Foreign actions** (machine `on`) | Reducer | React to another feature's action with a state change — no side effects needed |
+| **`crossDispatch`** | Executor | An effect must trigger another feature's action (API calls, orchestration) |
+
+See [feature() docs above](#foreign-actions--cross-feature-reactions) for foreign actions and [crossDispatch](#crossdispatch--allow-dispatching-to-other-features) for executor dispatch.
+
 ## Performance budgets
 
 aio tracks how long your reducer and effects take, warning when operations exceed budget. This catches blocking work that makes the UI unresponsive.
@@ -1913,6 +2446,7 @@ curl localhost:8000/__trojan/history      # time-travel entries
 curl localhost:8000/__trojan/schedules    # active timer/cron IDs
 curl localhost:8000/__trojan/metrics      # uptime, connections, schedule count
 curl localhost:8000/__trojan/config       # port, title, expose, authMode, prod
+curl localhost:8000/__trojan/health       # feature health (v0.5): status, enabled, errors per feature
 ```
 
 ### Control (POST)
@@ -2360,11 +2894,12 @@ deno task am state portfolio.positions
 |------|---------|
 | `dep/aio/mod.ts` | Public API — all `'aio'` imports resolve here (Deno-side), type declarations for browser-only functions |
 | `dep/aio/src/aio.ts` | Core runtime — `aio.run()`, dispatch loop, CLI parser, KV path resolution, startup linter |
-| `dep/aio/src/browser.ts` | Browser-side module — `useAio`, `useLocal`, `msg`, `page` (transpiled for dev, bundled for prod) |
+| `dep/aio/src/browser.ts` | Browser-side module — `useFeature`, `useAio`, `useLocal`, `feature` (browser stub), `page` |
 | `dep/aio/src/server.ts` | HTTP + WebSocket server, TSX transpilation (dev), static serving (prod), delta broadcasting |
 | `dep/aio/src/build.ts` | Build script — bundles App.tsx + React, compiles binary, AppImage packaging |
 | `dep/aio/src/msg.ts` | Shared `msg()` constructor — used by mod.ts (server) and browser.ts (client) |
-| `dep/aio/src/factory.ts` | `actions()` / `effects()` catalog factory — generates PascalCase labels + camelCase creators |
+| `dep/aio/src/feature.ts` | v0.5 feature system — `feature()`, `bridge()`, `composeFeatures()`, `testFeature()`, `testBridge()` |
+| `dep/aio/src/factory.ts` | `actions()` / `effects()` catalog factory — classic mode, generates PascalCase labels + camelCase creators |
 | `dep/aio/src/time-travel.ts` | Time-travel debugger — pure functions for undo/redo/goto, active in dev mode |
 | `dep/aio/src/dispatch.ts` | Shared dispatch loop — re-entrant queue with overflow guard, used by both aio.ts and standalone.ts |
 | `dep/aio/src/deep-merge.ts` | Deep merge utility — restores persisted state while preserving schema structure |
@@ -2375,16 +2910,30 @@ deno task am state portfolio.positions
 | `dep/aio/src/electron.ts` | Electron launcher + aio-client connect page. Window state persistence, AioMeta extraction |
 | `dep/aio/android-template/` | Kotlin/Gradle template for Android APK builds (placeholder tokens replaced at build time) |
 
-### App (`src/`)
+### App (`src/`) — v0.5 feature-first
 
 | File | Purpose |
 |------|---------|
-| `src/app.ts` | Your entry point — import state/logic, call `aio.run()` |
+| `src/app.ts` | Entry point — `aio.run({ features: [...] })`, nothing else |
+| `src/App.tsx` | Root UI — layout + routing, uses `useFeature()` or `useAio()` |
+| `src/features/<name>/index.ts` | Feature definition — `feature()` call with state, actions, machine, reduce, execute |
+| `src/features/<name>/types.ts` | (optional) Domain types extracted from feature |
+| `src/features/<name>/helpers.ts` | (optional) Pure functions extracted from feature |
+| `src/features/<name>/ui/*.tsx` | (optional) Feature-specific UI components |
+| `src/shared/types/` | (optional) Types shared across 2+ features |
+| `src/shared/ui/` | (optional) Pure reusable UI components |
+| `src/style.css` | (optional) Auto-injected into HTML if present |
+| `src/icon.png` | (optional) App icon used in AppImage builds |
+
+### App (`src/`) — classic (v0.4)
+
+| File | Purpose |
+|------|---------|
+| `src/app.ts` | Entry point — `aio.run(initialState, { reduce, execute })` |
 | `src/state.ts` | State type + initial values |
 | `src/actions.ts` | Action type constants + creators (`A`) |
 | `src/effects.ts` | Effect type constants + creators (`E`) |
 | `src/reduce.ts` | Reducer — `(state, action) → { state, effects }` |
 | `src/execute.ts` | Effect executor — runs side effects |
-| `src/App.tsx` | React component — default export, uses `useAio()` |
+| `src/App.tsx` | React component — uses `useAio()` |
 | `src/style.css` | (optional) Auto-injected into HTML if present |
-| `src/icon.png` | (optional) App icon used in AppImage builds |

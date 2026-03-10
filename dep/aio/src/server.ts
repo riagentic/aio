@@ -33,6 +33,8 @@ export interface ServerConfig {
   // Time-travel (dev mode)
   onTTCommand?: (cmd: string, arg?: number) => void
   getTTBroadcast?: () => unknown
+  // Health endpoint — GET /__health
+  getHealth?: () => unknown
   // Trojan — control API (localhost-only, auth-gated when exposed)
   trojan?: {
     getState: () => unknown                  // raw unfiltered state
@@ -173,7 +175,7 @@ function generateHTML(title: string, prod: boolean, hasCSS: boolean, showStatus?
   <script type="module">
     import { createElement } from 'react'
     import { createRoot } from 'react-dom/client'
-    const esc = s => s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')
+    const esc = s => s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;')
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:'
     try {
       const { default: App } = await import('/App.tsx?v=' + Date.now())
@@ -322,7 +324,8 @@ export function createServer(config: ServerConfig): ServerHandle {
   const hasCSS = fileExists(join(absBaseDir, 'style.css')) || (absDistDir ? fileExists(join(absDistDir, 'style.css')) : false)
   if (hasCSS) debug('style.css detected — injecting <link>')
   const WS_RATE_LIMIT = 100  // max messages per second per client
-  type ClientMeta = { id: string; user?: AioUser; lastState: unknown; lastKeyJsons: Record<string, string>; msgCount: number; msgResetTimer?: ReturnType<typeof setTimeout> }
+  const WS_BYTES_PER_SEC = 5_000_000  // 5MB/s per client — prevents bandwidth DoS
+  type ClientMeta = { id: string; user?: AioUser; lastState: unknown; lastKeyJsons: Record<string, string>; msgCount: number; bytesThisSec: number; msgResetTimer?: ReturnType<typeof setTimeout> }
   const connections = new Map<WebSocket, ClientMeta>()
   let broadcastQueued = false
   let lastError = ''  // last transpile error — served at /__aio/error
@@ -386,7 +389,7 @@ export function createServer(config: ServerConfig): ServerHandle {
     }
     const { socket, response } = Deno.upgradeWebSocket(req)
     const clientId = crypto.randomUUID()
-    const meta: ClientMeta = { id: clientId, user, lastState: null, lastKeyJsons: {}, msgCount: 0 }
+    const meta: ClientMeta = { id: clientId, user, lastState: null, lastKeyJsons: {}, msgCount: 0, bytesThisSec: 0 }
     socket.onerror = (e) => {
       debug(`ws: error ${clientId.slice(0, 8)} — ${e instanceof ErrorEvent ? e.message : e}`)
       connections.delete(socket)
@@ -420,10 +423,10 @@ export function createServer(config: ServerConfig): ServerHandle {
     }
     socket.onmessage = (e) => {
       try {
-        // Rate limiting — reset counter every second
+        // Rate limiting — reset counters every second
         meta.msgCount++
         if (!meta.msgResetTimer) {
-          meta.msgResetTimer = setTimeout(() => { meta.msgCount = 0; meta.msgResetTimer = undefined }, 1000)
+          meta.msgResetTimer = setTimeout(() => { meta.msgCount = 0; meta.bytesThisSec = 0; meta.msgResetTimer = undefined }, 1000)
         }
         if (meta.msgCount > WS_RATE_LIMIT) {
           debug(`ws: rate limit exceeded for ${meta.id.slice(0, 8)} (${meta.msgCount}/s)`)
@@ -435,6 +438,11 @@ export function createServer(config: ServerConfig): ServerHandle {
         }
         if (e.data.length > WS_MAX_MESSAGE) {
           debug(`ws: message too large (${e.data.length} bytes), dropped`)
+          return
+        }
+        meta.bytesThisSec += e.data.length
+        if (meta.bytesThisSec > WS_BYTES_PER_SEC) {
+          debug(`ws: byte rate exceeded for ${meta.id.slice(0, 8)} (${(meta.bytesThisSec / 1_000_000).toFixed(1)}MB/s)`)
           return
         }
         // Time-travel commands: __tt:undo, __tt:redo, __tt:goto:5, etc.
@@ -525,6 +533,21 @@ export function createServer(config: ServerConfig): ServerHandle {
       return new Response('Method Not Allowed', { status: 405 })
     }
 
+    // ── Health endpoint ──
+    if (pathname === '/__health' && config.getHealth) {
+      try {
+        const health = config.getHealth()
+        return new Response(JSON.stringify(health, null, 2), {
+          headers: { 'Content-Type': 'application/json' },
+        })
+      } catch (e) {
+        return new Response(JSON.stringify({ status: 'error', error: String(e) }), {
+          status: 503,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      }
+    }
+
     // ── Trojan: debug/control REST API (localhost-only, auth-gated when exposed) ──
     if (config.trojan && pathname.startsWith('/__trojan/')) {
       const route = pathname.slice('/__trojan/'.length)
@@ -573,8 +596,9 @@ export function createServer(config: ServerConfig): ServerHandle {
             const body = await req.text()
             const action = JSON.parse(body)
             if (!action || typeof action.type !== 'string') return err('missing type field')
-            const user = action.user as AioUser | undefined
-            dispatch(action, user)
+            // Strip user field — trojan dispatch should not allow user impersonation
+            delete action.user
+            dispatch(action, undefined)
             return json({ ok: true })
           } catch { return err('invalid JSON') }
         }

@@ -83,6 +83,7 @@ async function withDevExcluded(tag: string, fn: (excludes: string[]) => Promise<
 // App name: --name= flag > deno.json "title" field > directory name
 const mainConfig = JSON.parse(await Deno.readTextFile(join(root, 'deno.json')))
 const appTitle = mainConfig.title as string | undefined
+const configEntry = (mainConfig.entry as string | undefined) ?? 'src/app.ts'
 const defaultName = appTitle ? slugify(appTitle) : (root.split('/').pop() || 'myapp')
 const rawName = Deno.args.find(a => a.startsWith('--name='))?.slice(7)
 const binaryName = rawName ? slugify(rawName) : defaultName
@@ -186,6 +187,17 @@ export function mount(el) { createRoot(el).render(createElement(App)) }
   let bundleOk = false
   try {
     const esbuild = await import('npm:esbuild')
+    // Pin React to project root's copy — prevents duplicate instances when
+    // dep/aio is symlinked (esbuild follows realpath → finds a different node_modules)
+    const reactAlias: Record<string, string> = {}
+    for (const pkg of ['react', 'react-dom', 'react/jsx-runtime']) {
+      try {
+        const p = join(root, 'node_modules', ...pkg.split('/'))
+        await Deno.stat(p)
+        reactAlias[pkg] = p
+      } catch { /* not installed — skip */ }
+    }
+
     const result = await esbuild.build({
       entryPoints: [buildEntryPath],
       bundle: true,
@@ -195,7 +207,7 @@ export function mount(el) { createRoot(el).render(createElement(App)) }
       outfile: out,
       jsx: 'automatic',
       jsxImportSource: 'react',
-      alias: esbuildAlias,
+      alias: { ...esbuildAlias, ...reactAlias },
       logLevel: 'warning',
     })
     bundleOk = (result.errors?.length ?? 0) === 0
@@ -315,7 +327,7 @@ Categories=Utility;
 // ── CLI: skip esbuild, compile directly (no browser bundle needed) ──
 if (doCli) {
   // CLI apps don't use App.tsx/React — just compile the Deno entry point
-  const cliEntry = doRemote ? 'src/client.ts' : 'src/app.ts'
+  const cliEntry = doRemote ? 'src/client.ts' : configEntry
   try {
     await Deno.stat(join(root, cliEntry))
   } catch {
@@ -554,7 +566,7 @@ const compileOk = await withDevExcluded('compile', async (excludes) => {
       'compile', '-A',
       ...(hasDist ? ['--include', 'dist/'] : []),
       ...excludes.flatMap(e => ['--exclude', e]),
-      '-o', compileTarget, 'src/app.ts',
+      '-o', compileTarget, configEntry,
     ],
     stdout: 'inherit', stderr: 'inherit',
   }).output()
