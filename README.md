@@ -5,7 +5,7 @@
  /|
 ```
 
-**Full-stack Deno framework — one state, propagated everywhere.** · `v0.5.0` · beta
+**Full-stack Deno framework — one state, propagated everywhere.** · `v0.6.0` · beta
 
 > Define state once. It persists, syncs to all clients, drives the UI.
 > No glue code, no serialization, no sync logic. Write business logic — data plumbing is solved.
@@ -61,6 +61,7 @@ await aio.run({ features: [counter] })
 | Concept | What | Where |
 |---|---|---|
 | `feature()` | State, actions, effects, machine, reduce, execute, selectors | Server |
+| `flow()` | Sequential async workflows — generators with observable steps | Server |
 | `A` / `E` | Action & effect labels (switch) + creators (dispatch) | Reduce & Execute |
 | `aio.run()` | Boot the app — server, WebSocket, persistence, everything | Server |
 | `useFeature()` | Scoped state, typed send, machine status | Browser |
@@ -100,6 +101,34 @@ const b = bridge('pricing', {
   circuitBreaker: { failureThreshold: 5, resetTimeout: 30000 },
 })
 ```
+
+## Flows — sequential async workflows
+
+Write multi-step async logic top-to-bottom. Each `yield*` is an observable checkpoint — dispatches an action, appears in time-travel, other features can react.
+
+```typescript
+import { feature, flow } from 'aio'
+
+const checkout = feature('checkout', {
+  state: { orderId: null as string | null },
+  actions: { start: (item: string) => ({ item }) },
+  flows: {
+    checkout: flow('start', function* (ctx, action) {
+      const { item } = action.payload as { item: string }
+      const { price } = yield* ctx.call('fetchPrice', () =>
+        fetch(`/api/price?item=${item}`).then(r => r.json())
+      )
+      if (price > 1000) { yield* ctx.fail('too expensive'); return }
+      const { orderId } = yield* ctx.call('placeOrder', () =>
+        fetch('/api/order', { method: 'POST', body: JSON.stringify({ price }) }).then(r => r.json())
+      )
+      yield* ctx.done(s => { s.orderId = orderId })
+    }),
+  },
+})
+```
+
+No reducer, no effect catalog, no executor, no machine wiring — the sequence is the code. Mix with `reduce` for reactive logic.
 
 ## UI
 
@@ -198,6 +227,7 @@ Features start as a single `index.ts` and split only when they grow. See [Projec
 
 - [Quickstart](dep/aio/quickstart.md) — from scratch in 5 minutes
 - [Manual](dep/aio/manual.md) — full API reference
+- [Generators](dep/aio/generators.md) — sequential async workflows with `flow()`
 - [Project Structure](dep/aio/structure.md) — file organization
 - [Migration](dep/aio/migration.md) — adopt into existing app
 - [Upgrade](dep/aio/upgrade.md) — version upgrades
@@ -205,6 +235,6 @@ Features start as a single `index.ts` and split only when they grow. See [Projec
 
 ## Status
 
-**v0.5.0** — feature-based architecture, stable and tested (635+ tests). Beta — things may break.
+**v0.6.0** — generator-based flows, feature architecture, 649+ tests. Beta — things may break.
 
 MIT

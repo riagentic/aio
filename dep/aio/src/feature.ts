@@ -7,6 +7,8 @@
 
 import { produce, type Draft } from 'immer'
 import type { ScheduleEffect } from './schedule.ts'
+import type { FlowDef } from './flow.ts'
+import { createFlowReducer, cancelFeatureFlows, runFlow } from './flow.ts'
 
 // ── Helpers ────────────────────────────────────────────────────────
 
@@ -79,6 +81,10 @@ export type FeatureInternals = {
   onInit?: (app: ScopedApp<unknown>) => void
   /** Custom destroy handler (optional override) */
   onDestroy?: (app: ScopedApp<unknown>) => void
+  /** Generator-based flows (optional) */
+  flows?: Record<string, FlowDef>
+  /** Map: trigger action key → flow name */
+  flowTriggers?: Map<string, string>
 }
 
 /** Feature definition returned by feature() */
@@ -201,8 +207,8 @@ export function feature<
   state: S
   actions: A
   effects?: E
-  machine: MachineConfig | 'simple'
-  reduce: (
+  machine?: MachineConfig | 'simple'
+  reduce?: (
     state: Draft<S>,
     action: Msg,
     ctx: { A: Catalog<Capitalize<N>, A>; E: Catalog<Capitalize<N>, E> }
@@ -213,6 +219,8 @@ export function feature<
     ctx: { E: Catalog<Capitalize<N>, E>; A: Catalog<Capitalize<N>, A> }
   ) => void
   selectors?: Record<string, (state: unknown) => unknown>
+  /** Generator-based sequential workflows */
+  flows?: Record<string, FlowDef>
   /** Allowlist of feature prefixes this executor may dispatch to (e.g. ['wallet', 'fleet']) */
   crossDispatch?: string[]
   /** Custom init handler — called after feature is composed (optional) */
@@ -223,20 +231,21 @@ export function feature<
   const prefix = capitalize(name)
   const actionKeySet = new Set(Object.keys(config.actions))
   const effectKeyList = Object.keys(config.effects ?? {})
+  const machine = config.machine ?? 'simple'
 
   // Build catalogs
   const { catalog: aCatalog, typeToKey: actionTypeToKey } = buildCatalog(prefix, config.actions)
   const { catalog: eCatalog } = buildCatalog(prefix, config.effects ?? {})
 
   // Validate machine
-  if (config.machine !== 'simple') {
-    validateMachine(name, config.machine, actionKeySet)
+  if (machine !== 'simple') {
+    validateMachine(name, machine, actionKeySet)
   }
 
   // Detect foreign actions from machine (types containing ':' from other features)
   const foreignSet = new Set<string>()
-  if (config.machine !== 'simple') {
-    for (const sc of Object.values(config.machine.states)) {
+  if (machine !== 'simple') {
+    for (const sc of Object.values(machine.states)) {
       for (const key of Object.keys(sc.on)) {
         if (key.includes(':') && !key.startsWith(prefix + ':')) {
           foreignSet.add(key)
@@ -246,10 +255,24 @@ export function feature<
   }
   const foreignActions = [...foreignSet]
 
+  // Build flow trigger map: action key → flow name
+  const flowTriggers = new Map<string, string>()
+  if (config.flows) {
+    for (const [flowName, flowDef] of Object.entries(config.flows)) {
+      if (!actionKeySet.has(flowDef.trigger)) {
+        throw new Error(`[feature:${name}] flow '${flowName}' trigger '${flowDef.trigger}' not in actions`)
+      }
+      flowTriggers.set(flowDef.trigger, flowName)
+    }
+  }
+
+  // Default noop reducer when only flows are used
+  const noopReduce: FeatureReduceFn = () => undefined
+
   const internals: FeatureInternals = {
     state: config.state,
-    machine: config.machine,
-    reduce: config.reduce as FeatureReduceFn,
+    machine,
+    reduce: (config.reduce as FeatureReduceFn) ?? noopReduce,
     execute: config.execute as FeatureExecuteFn | undefined,
     actionKeys: [...actionKeySet],
     effectKeys: effectKeyList,
@@ -261,6 +284,8 @@ export function feature<
     crossDispatchPrefixes: new Set((config.crossDispatch ?? []).map(capitalize)),
     onInit: config.init as ((app: ScopedApp) => void) | undefined,
     onDestroy: config.destroy as ((app: ScopedApp) => void) | undefined,
+    flows: config.flows,
+    flowTriggers,
   }
 
   return {
@@ -404,9 +429,13 @@ export function composeFeatures(entries: FeatureEntry[]): ComposedFeatures {
     fullState: Record<string, unknown>,
     action: Msg,
   ): ReduceResult {
-    const { machine, reduce, actionTypeToKey } = f._config
+    const { machine, reduce, actionTypeToKey, flowTriggers } = f._config
     const featureName = f.name
     const featureState = fullState[featureName] as Record<string, unknown>
+
+    // Check if this action triggers a flow
+    const ownKey = actionTypeToKey.get(action.type)
+    const flowName = ownKey && flowTriggers ? flowTriggers.get(ownKey) : undefined
 
     // Machine guard
     if (machine !== 'simple') {
@@ -415,7 +444,6 @@ export function composeFeatures(entries: FeatureEntry[]): ComposedFeatures {
       if (!stateConfig) return { state: fullState, effects: [] }
 
       // Lookup: own action → camelCase key; foreign → full type string
-      const ownKey = actionTypeToKey.get(action.type)
       const lookupKey = ownKey ?? action.type
 
       if (!(lookupKey in stateConfig.on)) {
@@ -432,6 +460,14 @@ export function composeFeatures(entries: FeatureEntry[]): ComposedFeatures {
       // Clone effects to detach from Immer draft
       if (effects.length) {
         try { effects = structuredClone(effects) } catch { console.warn(`[feature] effects not cloneable — may hold draft refs`) }
+      }
+
+      // Inject flow trigger effect if this action starts a flow
+      if (flowName) {
+        effects.push({
+          type: `${f._config.prefix}:__flow`,
+          payload: { _flowName: flowName, _triggerAction: action },
+        })
       }
 
       // Update _status to target state
@@ -454,6 +490,14 @@ export function composeFeatures(entries: FeatureEntry[]): ComposedFeatures {
       try { effects = structuredClone(effects) } catch { console.warn(`[feature] effects not cloneable — may hold draft refs`) }
     }
 
+    // Inject flow trigger effect if this action starts a flow
+    if (flowName) {
+      effects.push({
+        type: `${f._config.prefix}:__flow`,
+        payload: { _flowName: flowName, _triggerAction: action },
+      })
+    }
+
     return { state: { ...fullState, [featureName]: nextSlice }, effects }
   }
 
@@ -462,10 +506,30 @@ export function composeFeatures(entries: FeatureEntry[]): ComposedFeatures {
   const featureErrors = new Map<string, number>()
   const featureLastAction = new Map<string, { type: string; at: number }>()
 
+  // ── Flow reducers (handle __FlowState actions) ──
+  const flowReducers = new Map<string, ReturnType<typeof createFlowReducer>>()
+  for (const f of features) {
+    if (f._config.flows && Object.keys(f._config.flows).length > 0) {
+      flowReducers.set(f._config.prefix, createFlowReducer(f.name))
+    }
+  }
+
   // ── Root reducer ──
   const rootReduce = (state: Record<string, unknown>, action: Msg): ReduceResult => {
     let currentState = state
     const allEffects: (Msg | ScheduleEffect)[] = []
+
+    // Handle flow state updates (__FlowState) — direct state replacement from flow runner
+    if (typeof action.type === 'string' && action.type.endsWith(':__FlowState')) {
+      const colonIdx = action.type.indexOf(':')
+      const prefix = action.type.slice(0, colonIdx)
+      const flowReducer = flowReducers.get(prefix)
+      if (flowReducer) {
+        const result = flowReducer(currentState, action)
+        if (result) return { state: result, effects: [] }
+      }
+      return { state: currentState, effects: [] }
+    }
 
     // Handle lifecycle actions (Init/Destroy) — apply state change, then continue routing
     // so foreign action listeners can react to lifecycle events
@@ -529,6 +593,19 @@ export function composeFeatures(entries: FeatureEntry[]): ComposedFeatures {
     return { state: currentState, effects: allEffects }
   }
 
+  // ── Flow executors ──
+  // Flows are triggered by actions via internal __flow effects from the reducer
+  const flowsByPrefix = new Map<string, { featureName: string; flows: Record<string, FlowDef>; triggers: Map<string, string> }>()
+  for (const f of features) {
+    if (f._config.flows && f._config.flowTriggers && Object.keys(f._config.flows).length > 0) {
+      flowsByPrefix.set(f._config.prefix, {
+        featureName: f.name,
+        flows: f._config.flows,
+        triggers: f._config.flowTriggers,
+      })
+    }
+  }
+
   // ── Root executor ──
   const executorByPrefix = new Map<string, FeatureDef>()
   for (const f of features) {
@@ -545,6 +622,28 @@ export function composeFeatures(entries: FeatureEntry[]): ComposedFeatures {
     if (colonIdx === -1) return
 
     const prefix = (effect.type as string).slice(0, colonIdx)
+
+    // Handle __flow effects — start a generator flow
+    if ((effect.type as string).endsWith(':__flow')) {
+      const flowInfo = flowsByPrefix.get(prefix)
+      if (!flowInfo) return
+      const payload = effect.payload as { _flowName: string; _triggerAction: Msg }
+      const flowDef = flowInfo.flows[payload._flowName]
+      if (!flowDef) return
+
+      const flowApp = {
+        dispatch: (a: Msg) => app.dispatch(a),
+        getState: () => app.getState() as Record<string, unknown>,
+      }
+
+      runFlow(flowDef, payload._flowName, flowInfo.featureName, payload._triggerAction, flowApp)
+        .catch(e => console.error(`[${flowInfo.featureName}] flow '${payload._flowName}' error: ${e}`))
+      return
+    }
+
+    // Skip internal flow state actions — handled by reducer
+    if ((effect.type as string).endsWith(':__FlowState')) return
+
     const f = executorByPrefix.get(prefix)
     if (!f || !f._config.execute) return
     if (disabledFeatures.has(f.name)) return
@@ -598,6 +697,8 @@ export function composeFeatures(entries: FeatureEntry[]): ComposedFeatures {
   const destroyAll = (app: { dispatch: (a: Msg) => void; getState: () => unknown }): void => {
     for (let i = features.length - 1; i >= 0; i--) {
       const f = features[i]
+      // Cancel any running flows for this feature
+      cancelFeatureFlows(f.name)
       if (f._config.onDestroy) {
         const scopedApp: ScopedApp = {
           dispatch: (a: Msg) => app.dispatch(tagSource(a, 'System')),
@@ -625,6 +726,7 @@ export function composeFeatures(entries: FeatureEntry[]): ComposedFeatures {
       const f = features.find(f => f.name === name)
       const doDispatch = typeof dispatch === 'function' ? dispatch : dispatch.dispatch
       if (f) {
+        cancelFeatureFlows(f.name)
         doDispatch(tagSource({ type: f._config.destroyType, payload: {} }, 'System'))
         // Notify host to cancel schedules for this feature
         if (onFeatureDisable) onFeatureDisable(f._config.prefix)

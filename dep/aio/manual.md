@@ -1,10 +1,10 @@
 # aio Reference Manual
 
-Full API reference for the aio framework (v0.5). For getting started, see [quickstart.md](quickstart.md). For adopting aio into an existing app, see [migration.md](migration.md). For upgrading between versions, see [upgrade.md](upgrade.md). For file structure, see [structure.md](structure.md).
+Full API reference for the aio framework (v0.6). For getting started, see [quickstart.md](quickstart.md). For generator-based workflows, see [generators.md](generators.md). For adopting aio into an existing app, see [migration.md](migration.md). For upgrading between versions, see [upgrade.md](upgrade.md). For file structure, see [structure.md](structure.md).
 
 ## Architecture
 
-aio v0.5 is **feature-first**: each feature is a self-contained unit with its own state, actions, effects, state machine, reducer, and executor. The framework composes features into a single dispatch loop.
+aio is **feature-first**: each feature is a self-contained unit with its own state, actions, effects, state machine, reducer, and executor. The framework composes features into a single dispatch loop.
 
 **Desktop (Deno + Electron/browser):**
 ```
@@ -417,7 +417,153 @@ backup.implement((app, effect, { E, A }) => {
 })
 ```
 
-## `aio.run({ features })` — the v0.5 entry point
+## `flow()` — generator-based sequential workflows
+
+When a feature has a multi-step async workflow (fetch → validate → save → notify), the standard reduce/execute pattern scatters the logic across actions, reducer cases, and effects. `flow()` lets you write it top-to-bottom:
+
+```ts
+import { feature, flow } from 'aio'
+
+const checkout = feature('checkout', {
+  state: { price: 0, orderId: null as string | null, error: null as string | null },
+  actions: {
+    start: (item: string) => ({ item }),
+  },
+  machine: {
+    initial: 'idle',
+    states: {
+      idle: { on: { start: 'busy' } },
+      busy: { on: {} },
+    },
+  },
+  flows: {
+    checkout: flow('start', function* (ctx, action) {
+      const { item } = action.payload as { item: string }
+
+      // Step 1 — async call (dispatches Checkout:Flow:FetchPrice)
+      const { price } = yield* ctx.call('fetchPrice', () =>
+        fetch(`/api/price?item=${item}`).then(r => r.json())
+      )
+
+      // Step 2 — validation + state update (dispatches Checkout:Flow:SetPrice)
+      if (price > 1000) {
+        yield* ctx.fail('too expensive')
+        return
+      }
+      yield* ctx.step('setPrice', s => { s.price = price })
+
+      // Step 3 — another async call (dispatches Checkout:Flow:PlaceOrder)
+      const { orderId } = yield* ctx.call('placeOrder', () =>
+        fetch('/api/order', { method: 'POST', body: JSON.stringify({ price }) })
+          .then(r => r.json())
+      )
+
+      // Step 4 — done (dispatches Checkout:Flow:Done)
+      yield* ctx.done(s => { s.orderId = orderId })
+    }),
+  },
+})
+```
+
+Each `yield*` is a checkpoint — the framework dispatches an action, other features can react, and the step appears in time-travel history.
+
+### What the framework generates
+
+From the flow above, the framework auto-generates:
+
+- **Actions**: `Checkout:Flow:FetchPrice`, `Checkout:Flow:SetPrice`, `Checkout:Flow:PlaceOrder`, `Checkout:Flow:Done`, `Checkout:Flow:Failed`
+- **Machine transitions**: each step moves through corresponding flow states
+- **Error handling**: if any `ctx.call` throws, `Checkout:Flow:Error` is dispatched
+
+You don't define these manually — the flow is the source of truth.
+
+### `FlowCtx` API
+
+| Method | What it does |
+|---|---|
+| `yield* ctx.call(name, fn)` | Execute async work. Dispatches action, runs `fn`, returns result. |
+| `yield* ctx.step(name, mutate)` | Update state via Immer draft. Dispatches action. |
+| `yield* ctx.done(mutate?)` | Terminal success. Optional final state update. |
+| `yield* ctx.fail(reason)` | Terminal failure. Stops the flow. |
+| `yield* ctx.put(action)` | Dispatch a regular action (other features react to it). |
+| `yield* ctx.all(gen1, gen2, ...)` | Run multiple calls in parallel, wait for all. |
+| `yield* ctx.race({ a: gen1, b: gen2 })` | Race — first to resolve wins. |
+| `yield* ctx.sleep(name, ms)` | Pause for N ms. Dispatches action for visibility. |
+
+### Mixing flows with reduce/execute
+
+Flows are fully optional and composable with the traditional pattern:
+
+```ts
+const wallet = feature('wallet', {
+  state: { balance: 0, syncing: false },
+  actions: {
+    deposit:  (amount: number) => ({ amount }),
+    withdraw: (amount: number) => ({ amount }),
+    sync:     () => ({}),
+  },
+  machine: {
+    initial: 'idle',
+    states: {
+      idle: { on: { deposit: 'idle', withdraw: 'idle', sync: 'syncing' } },
+      syncing: { on: {} },
+    },
+  },
+  // Reactive: instant state updates
+  reduce(state, action, { A }) {
+    switch (action.type) {
+      case A.Deposit:  state.balance += (action.payload as { amount: number }).amount; break
+      case A.Withdraw: state.balance -= (action.payload as { amount: number }).amount; break
+    }
+  },
+  // Sequential: the sync workflow
+  flows: {
+    sync: flow('sync', function* (ctx) {
+      yield* ctx.step('start', s => { s.syncing = true })
+      const remote = yield* ctx.call('fetch', () => fetchRemoteBalance())
+      yield* ctx.done(s => { s.balance = remote as number; s.syncing = false })
+    }),
+  },
+})
+```
+
+Reactive logic (deposit/withdraw) stays in `reduce`. Sequential workflows (sync) go in `flows`. Both work on the same state.
+
+### Flow-only features
+
+If your feature is entirely sequential, you can skip `reduce` and `machine`:
+
+```ts
+const importer = feature('importer', {
+  state: { records: 0, status: 'idle' },
+  actions: {
+    start: (file: string) => ({ file }),
+  },
+  flows: {
+    import: flow('start', function* (ctx, action) {
+      const { file } = action.payload as { file: string }
+      const data = yield* ctx.call('read', () => Deno.readTextFile(file))
+      const parsed = yield* ctx.call('parse', () => JSON.parse(data as string))
+      yield* ctx.done(s => { s.records = (parsed as unknown[]).length; s.status = 'done' })
+    }),
+  },
+})
+```
+
+### Cancellation
+
+When a flow is triggered while a previous instance is still running, the old one is automatically cancelled. Flows are also cancelled when a feature is disabled or destroyed.
+
+### When to use flows vs reduce/execute
+
+| Use case | Pattern |
+|---|---|
+| Instant state update (increment, toggle) | `reduce` |
+| React to other features' actions | `reduce` with foreign listeners |
+| Multi-step async workflow (fetch → process → save) | `flow()` |
+| Request/response with timeouts and retries | `bridge()` |
+
+## `aio.run({ features })` — the entry point
 
 Pass an array of features. The framework composes them into a single dispatch loop:
 
@@ -2898,7 +3044,8 @@ deno task am state portfolio.positions
 | `dep/aio/src/server.ts` | HTTP + WebSocket server, TSX transpilation (dev), static serving (prod), delta broadcasting |
 | `dep/aio/src/build.ts` | Build script — bundles App.tsx + React, compiles binary, AppImage packaging |
 | `dep/aio/src/msg.ts` | Shared `msg()` constructor — used by mod.ts (server) and browser.ts (client) |
-| `dep/aio/src/feature.ts` | v0.5 feature system — `feature()`, `bridge()`, `composeFeatures()`, `testFeature()`, `testBridge()` |
+| `dep/aio/src/feature.ts` | Feature system — `feature()`, `bridge()`, `composeFeatures()`, `testFeature()`, `testBridge()` |
+| `dep/aio/src/flow.ts` | Generator-based flows — `flow()`, `FlowCtx`, flow runner, cancellation |
 | `dep/aio/src/factory.ts` | `actions()` / `effects()` catalog factory — classic mode, generates PascalCase labels + camelCase creators |
 | `dep/aio/src/time-travel.ts` | Time-travel debugger — pure functions for undo/redo/goto, active in dev mode |
 | `dep/aio/src/dispatch.ts` | Shared dispatch loop — re-entrant queue with overflow guard, used by both aio.ts and standalone.ts |
