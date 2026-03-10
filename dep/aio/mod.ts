@@ -17,6 +17,14 @@ export type { AioMeta } from './src/electron.ts'
 export { feature, bridge, composeFeatures, testFeature, testBridge, tagSource } from './src/feature.ts'
 export type { FeatureDef, FeatureEntry, MachineConfig, Catalog, TestContext, BridgeTestContext, FeatureStatus, ActionSource, ScopedApp } from './src/feature.ts'
 
+/**
+ * Generator-based sequential workflows.
+ * flow() — define a sequential workflow triggered by an action.
+ * Write top-to-bottom async code; each yield point is observable.
+ */
+export { flow } from './src/flow.ts'
+export type { FlowDef, FlowCtx, Gen } from './src/flow.ts'
+
 /** 
  * Connect to a remote aio server from a CLI app.
  * Returns a CliApp with state, send, subscribe, close, connected, and ready.

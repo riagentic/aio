@@ -1,4 +1,4 @@
-# AIO v0.5 — File & Directory Structure
+# AIO — File & Directory Structure
 
 > **One structure that scales from 1 feature to 100. No reorganization needed.**
 

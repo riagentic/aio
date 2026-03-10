@@ -199,6 +199,30 @@ testFeature(counter, 'increment from idle', (t) => {
 })
 ```
 
+### Adding flows (sequential async)
+
+For multi-step async workflows, use `flow()` instead of reduce/execute:
+
+```ts
+import { feature, flow } from 'aio'
+
+export const backup = feature('backup', {
+  state: { lastBackup: null as string | null },
+  actions: { run: () => ({}) },
+  flows: {
+    backup: flow('run', function* (ctx) {
+      const data = yield* ctx.call('snapshot', () => Deno.readTextFile('./data.json'))
+      yield* ctx.call('upload', () =>
+        fetch('/api/backup', { method: 'POST', body: data as string })
+      )
+      yield* ctx.done(s => { s.lastBackup = new Date().toISOString() })
+    }),
+  },
+})
+```
+
+Each `yield*` dispatches an action visible in time-travel. No reducer, no effect catalog needed. See [manual.md](manual.md#flow--generator-based-sequential-workflows) for full API.
+
 ---
 
 ## Classic quickstart (v0.4)
