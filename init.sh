@@ -1,6 +1,11 @@
 #!/bin/sh
 # aio — one-liner project scaffolder
 # Usage: sh -c "$(curl -fsSL https://raw.githubusercontent.com/riagentic/aio/main/init.sh)" -- my-app
+# Flags: --type=<app-type>       skip app type menu (e.g. --type=electron, --type=remote-cli)
+#        --template=<template>   skip template menu (e.g. --template=minimal, --template=medium)
+#        --mirror                use local framework copy instead of downloading
+# Example (fully non-interactive):
+#   sh -c "$(curl -fsSL ...)" -- my-app --type=electron --template=minimal
 set -e
 
 REPO="riagentic/aio"
