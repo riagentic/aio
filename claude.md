@@ -9,27 +9,18 @@ aio ("eye-oh") is a full-stack TypeScript framework on Deno 2.6+ for building st
 ## Commands
 
 ```sh
-deno task test                    # run all tests (457, requires -A --unstable-kv)
-deno task dev                     # dev mode: hot reload, time-travel, trojan API, error overlay
+deno task test                    # run all tests (794, requires -A --unstable-kv)
+deno task example                 # run example counter app (hot reload, time-travel)
 deno task am <cmd>                # app manager: start/stop/status/state/dispatch/tt/...
-deno check dep/aio/mod.ts        # type-check framework
-deno task compile                 # compile:browser — standalone binary
-deno task compile:browser:remote  # exposed server + systemd (0.0.0.0 + auth)
-deno task compile:electron        # desktop AppImage
-deno task compile:electron:remote # thin client AppImage (no Deno)
-deno task compile:cli             # headless server + CLI binary
-deno task compile:cli:remote      # client-only CLI binary (no server)
-deno task compile:android         # standalone APK with WebView
-deno task compile:android:remote  # client APK — connect page, no local dispatch
-deno task compile:service         # headless binary + systemd (127.0.0.1)
-deno task compile:service:remote  # headless exposed server + systemd (0.0.0.0 + auth)
+deno check mod.ts                 # type-check framework
+deno task lint                    # lint framework source
 ```
 
-Single test file: `deno test -A --unstable-kv dep/aio/tests/server.test.ts`
+Single test file: `deno test -A --unstable-kv tests/server.test.ts`
 
 ### am — app manager CLI
 
-Use `deno task am` (or `deno run -A dep/aio/src/am.ts`) for all process management and app control. Prefer `am` over raw `curl`, `ps`, `kill`.
+Use `deno task am` (or `deno run -A src/am.ts`) for all process management and app control. Prefer `am` over raw `curl`, `ps`, `kill`.
 
 ```sh
 deno task am start [--port=N]     # start app (singleton — kills zombies, refuses if running)
@@ -46,7 +37,7 @@ Output auto-detects: terminal → pretty, piped → JSON. Override with `--json`
 
 ## Architecture
 
-Framework lives in `dep/aio/`, user app in `src/`. Public API surface is `dep/aio/mod.ts`.
+Framework source lives at repo root (`src/`, `mod.ts`). Example app in `examples/counter/`. User projects get `dep/aio/` via scaffolder. Public API surface is `mod.ts`.
 
 ### Core flow
 1. `aio.run(initialState, config)` boots KV, restores state via `deepMerge`, starts HTTP+WS server
@@ -76,7 +67,7 @@ Per-client `ClientMeta = { id, user?, lastState, lastKeyJsons }`. Changes <50% o
 ## Conventions
 
 - `factory` and `msg()` are inlined in browser.ts — must stay in sync (sync.test.ts enforces)
-- Tests colocated in `dep/aio/tests/` (not next to source — framework is a single dep)
+- Tests colocated in `tests/` (not next to source — framework is a single dep)
 - Lifecycle hooks are observe-only and error-guarded (never break dispatch)
 - `_dispatchUser` module-level variable carries user context through effect chains
 - Server binds 127.0.0.1 by default; `--expose` required for 0.0.0.0

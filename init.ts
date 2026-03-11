@@ -1,8 +1,8 @@
 #!/usr/bin/env -S deno run -A
-// Legacy wrapper — delegates to aio CLI create command
-// Prefer: deno run -A dep/aio/utils/cli.ts create <path>
+// Wrapper — delegates to aio CLI create command
+// Prefer: deno run -A utils/cli.ts create <path>
 
-import { create } from './dep/aio/utils/create.ts'
+import { create } from './utils/create.ts'
 
 const c = { bold: '\x1b[1m', dim: '\x1b[2m', cyan: '\x1b[36m', reset: '\x1b[0m' }
 

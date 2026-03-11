@@ -5,236 +5,117 @@
  /|
 ```
 
-**Full-stack Deno framework — one state, propagated everywhere.** · `v0.6.0` · beta
+- ✅ **Full-stack Deno framework — one state, propagated everywhere.**
+- ✅ **Write reactive, use generators or atomic actions when needed.**
+- ✅ **Pick your target, compile and ship!**
+
+`v0.7.0` · beta
 
 > Define state once. It persists, syncs to all clients, drives the UI.
-> No glue code, no serialization, no sync logic. Write business logic — data plumbing is solved.
 
-## Features
+## Get started
 
-Everything is a **feature**. One `feature()` call replaces 7 files:
+```sh
+sh -c "$(curl -fsSL https://raw.githubusercontent.com/riagentic/aio/main/init.sh)" -- my-app
+cd my-app && deno task dev
+```
+
+Or: `deno add @riagentic/aio` (library only, no build tooling)
+
+## Example
 
 ```typescript
-import { feature, aio } from 'aio'
+import { reactive, aio } from 'aio'
 
-const counter = feature('counter', {
+const counter = reactive('counter', {
   state: { count: 0 },
-  actions: {
-    increment: (by = 1) => ({ by }),
-    save:      () => ({}),
-    saved:     () => ({}),
-  },
-  effects: {
-    persist: (value: number) => ({ value }),
-  },
-  machine: {
-    initial: 'idle',
-    states: {
-      idle:   { on: { increment: 'idle', save: 'saving' } },
-      saving: { on: { saved: 'idle' } },
+  methods: {
+    increment(s, by = 1) { s.count += by },
+    async save(s) {
+      await Deno.writeTextFile('./data.json', String(s.count))
+      s.saved = true   // auto-dispatched, persisted, synced to all clients
     },
-  },
-  reduce(state, action, { A, E }) {
-    switch (action.type) {
-      case A.Increment:
-        state.count += action.payload.by
-        break
-      case A.Save:
-        return [E.persist(state.count)]
-    }
-  },
-  execute(app, effect, { E, A }) {
-    switch (effect.type) {
-      case E.Persist:
-        Deno.writeTextFile('./data.json', String(effect.payload.value))
-          .then(() => app.dispatch(A.saved()))
-        break
-    }
   },
 })
 
 await aio.run({ features: [counter] })
+counter.increment(5)  // typed, direct call after boot
 ```
 
-## Core concepts
+## Three tiers
 
-| Concept | What | Where |
+| Tier | API | Best for |
 |---|---|---|
-| `feature()` | State, actions, effects, machine, reduce, execute, selectors | Server |
-| `flow()` | Sequential async workflows — generators with observable steps | Server |
-| `A` / `E` | Action & effect labels (switch) + creators (dispatch) | Reduce & Execute |
-| `aio.run()` | Boot the app — server, WebSocket, persistence, everything | Server |
-| `useFeature()` | Scoped state, typed send, machine status | Browser |
+| **Reactive** | `reactive()` — plain methods | Most features. CRUD, forms, async |
+| **Flows** | `flow()` — generators | Multi-step workflows, retry, cancel |
+| **Event-driven** | `feature()` — reduce/execute | Complex reactive, cross-feature |
 
-## State machines
+All compose together. Start reactive, upgrade individual features when needed.
 
-Built-in, validated at startup. Invalid transitions drop silently. Typos crash on boot (not in production).
+## How it compares
 
-```typescript
-machine: {
-  initial: 'idle',
-  states: {
-    idle:   { on: { save: 'saving' } },
-    saving: { on: { saved: 'idle', failed: 'error' } },
-    error:  { on: { retry: 'saving', dismiss: 'idle' } },
-  },
-}
-// _status is auto-managed — never set manually
-```
+| | **aio** | **Convex** | **Zero** | **ElectricSQL** | **Fresh** | **Next.js** | **Tauri** |
+|---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
+| **State & data** | | | | | | | |
+| State management | ✅ | ✅ | ✅ | 🔧 | 🔧 | 🔧 | 🔧 |
+| Reactive proxy | ✅ | ❌ | ❌ | ❌ | 🔧 | ❌ | ❌ |
+| State machines | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| Auto-persistence | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | 🔧 |
+| Embedded DB (SQLite) | ✅ | ❌ | ❌ | ✅ | ❌ | ❌ | 🔧 |
+| Built-in ORM | ✅ | ✅ | ✅ | 🔧 | ❌ | ❌ | ❌ |
+| Schema migrations | ✅ | ✅ | 🔧 | ✅ | ❌ | 🔧 | ❌ |
+| **Sync & networking** | | | | | | | |
+| Real-time sync | ✅ | ✅ | ✅ | ✅ | ❌ | 🔧 | ❌ |
+| Offline-first | ✅ | 🔧 | ✅ | ✅ | ❌ | ❌ | ❌ |
+| Delta patches | ✅ | 🔧 | ✅ | ✅ | ❌ | ❌ | ❌ |
+| Built-in server | ✅ | ✅ | ❌ | ❌ | ✅ | ✅ | ❌ |
+| Auto-TLS | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| Multi-user auth | ✅ | ✅ | ✅ | 🔧 | 🔧 | 🔧 | ❌ |
+| **Architecture** | | | | | | | |
+| Generator flows | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| Cross-feature bridges | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| Feature lifecycle | ✅ | 🔧 | ❌ | ❌ | ❌ | ❌ | ❌ |
+| Cron / scheduled tasks | ✅ | ✅ | ❌ | ❌ | ❌ | 🔧 | ❌ |
+| Middleware | ✅ | ✅ | ❌ | ❌ | ✅ | ✅ | ❌ |
+| **Developer experience** | | | | | | | |
+| Time-travel debug | ✅ | ❌ | ❌ | ❌ | ❌ | 🔧 | ❌ |
+| Hot reload | ✅ | ✅ | ❌ | ❌ | ✅ | ✅ | 🔧 |
+| Test harness | ✅ | 🔧 | 🔧 | 🔧 | 🔧 | 🔧 | 🔧 |
+| Process manager | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| Zero-config start | ✅ | 🔧 | ❌ | ❌ | 🔧 | ❌ | ❌ |
+| **Deployment** | | | | | | | |
+| Desktop app | ✅ | 🔧 | 🔧 | 🔧 | ❌ | 🔧 | ✅ |
+| Android APK | ✅ | 🔧 | 🔧 | 🔧 | ❌ | ❌ | 🔧 |
+| CLI client | ✅ | 🔧 | 🔧 | 🔧 | ❌ | ❌ | ❌ |
+| Single binary | ✅ | ❌ | ❌ | ❌ | ✅ | ❌ | ✅ |
+| systemd service | ✅ | ❌ | ❌ | ❌ | 🔧 | 🔧 | ❌ |
+| Self-hosted | ✅ | 🔧 | ✅ | ✅ | ✅ | ✅ | ✅ |
+| **UI & rendering** | | | | | | | |
+| React UI | ✅ | ✅ | ✅ | ✅ | ⚛️ | ✅ | ✅ |
+| SSR / SSG | ❌ | ❌ | ❌ | ❌ | ✅ | ✅ | ❌ |
+| One codebase | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 🔧 |
 
-## Cross-feature communication
+✅ built-in · 🔧 manual setup · ⚛️ Preact · ❌ not included
+*Comparison is approximate — check each project for current capabilities.*
 
-```typescript
-// Selectors — read another feature's state
-const price = dc.selectors.getPrice(app.getState())
+**aio's sweet spot:** apps where state is the product — dashboards, trading tools, control panels, internal tools, desktop utilities. One state, many clients, zero plumbing.
 
-// Foreign listeners — react to another feature's actions
-case dc.A.PriceUpdated:
-  state.lastPrice = action.payload.price
+**Not ideal for:** static sites, content-heavy pages, SEO-first apps (use Fresh/Next), apps that need native UI (use Tauri).
 
-// Bridge — request/response with timeouts, retries, circuit breaker
-const b = bridge('pricing', {
-  from: 'te', to: 'dc',
-  channels: {
-    price: { request: (s) => ({ s }), response: (p) => ({ p }), timeout: 5000, retries: 3 },
-  },
-  circuitBreaker: { failureThreshold: 5, resetTimeout: 30000 },
-})
-```
-
-## Flows — sequential async workflows
-
-Write multi-step async logic top-to-bottom. Each `yield*` is an observable checkpoint — dispatches an action, appears in time-travel, other features can react.
-
-```typescript
-import { feature, flow } from 'aio'
-
-const checkout = feature('checkout', {
-  state: { orderId: null as string | null },
-  actions: { start: (item: string) => ({ item }) },
-  flows: {
-    checkout: flow('start', function* (ctx, action) {
-      const { item } = action.payload as { item: string }
-      const { price } = yield* ctx.call('fetchPrice', () =>
-        fetch(`/api/price?item=${item}`).then(r => r.json())
-      )
-      if (price > 1000) { yield* ctx.fail('too expensive'); return }
-      const { orderId } = yield* ctx.call('placeOrder', () =>
-        fetch('/api/order', { method: 'POST', body: JSON.stringify({ price }) }).then(r => r.json())
-      )
-      yield* ctx.done(s => { s.orderId = orderId })
-    }),
-  },
-})
-```
-
-No reducer, no effect catalog, no executor, no machine wiring — the sequence is the code. Mix with `reduce` for reactive logic.
-
-## UI
-
-```tsx
-import { useFeature } from 'aio'
-import { counter } from '../features/counter'
-
-function CounterPage() {
-  const { state, send, status } = useFeature(counter)
-  return (
-    <div>
-      <p>Count: {state.count} ({status})</p>
-      <button onClick={() => send.increment(5)}>+5</button>
-    </div>
-  )
-}
-```
-
-## Testing
-
-```typescript
-import { testFeature, testBridge } from 'aio'
-
-testFeature(counter, 'increment from idle', (t) => {
-  t.init()
-  t.send.increment(5)
-  t.expect.state(s => s.count === 5)
-  t.expect.status('idle')
-})
-
-testBridge(myBridge, 'happy path', (t) => {
-  t.request.price('BTC')
-  t.expect.pending(1)
-  t.respond.price(45000)
-  t.expect.pending(0)
-})
-```
-
-## Runtime control
-
-```typescript
-const app = await aio.run({
-  features: [counter, dc, te],
-  middleware: [aio.middleware.logger(), aio.middleware.validate()],
-  version: 2,
-  migrations: [(s) => ({ ...s, counter: { ...s.counter, newField: 0 } })],
-})
-
-app.features.disable('counter')  // stop processing, reset state
-app.features.enable('counter')   // re-init
-app.features.health()            // status, errors, last action per feature
-// GET /__health — built-in health endpoint
-```
-
-## Platform
-
-One state, synced everywhere. Real-time delta patches, offline queue, time-travel debugging.
+## Platform targets
 
 | | **local** | **remote** |
 |---|:---:|:---:|
-| **browser** | standalone binary | exposed server + systemd |
-| **Electron** | AppImage | thin client AppImage |
-| **CLI** | headless server + client | client-only binary |
+| **Browser** | standalone binary | exposed server + systemd |
+| **Electron** | AppImage | thin client |
+| **CLI** | headless + client | client-only binary |
 | **Android** | APK with server | client APK |
-| **service** | 127.0.0.1 + systemd | 0.0.0.0 + auth + systemd |
-
-```sh
-deno task dev              # development (hot reload)
-deno task compile          # standalone binary
-deno task compile:electron # desktop AppImage
-deno task compile:android  # APK
-```
-
-## Project structure
-
-```
-src/
-  app.ts              ← aio.run({ features }) — boot
-  App.tsx             ← root UI — layout + routing
-  features/
-    counter/
-      index.ts        ← feature() — everything in one file
-    orders/
-      index.ts        ← feature() assembler
-      types.ts        ← domain types
-      reduce.ts       ← extracted reducer (when it grows)
-      execute.ts      ← extracted executor
-      ui/
-        OrderPage.tsx ← useFeature(orders)
-  shared/             ← code used by 2+ features
-```
-
-Features start as a single `index.ts` and split only when they grow. See [Project Structure](dep/aio/structure.md).
+| **Service** | 127.0.0.1 + systemd | 0.0.0.0 + auth |
 
 ## Docs
 
-- [Quickstart](dep/aio/quickstart.md) — from scratch in 5 minutes
-- [Manual](dep/aio/manual.md) — full API reference
-- [Generators](dep/aio/generators.md) — sequential async workflows with `flow()`
-- [Project Structure](dep/aio/structure.md) — file organization
-- [Migration](dep/aio/migration.md) — adopt into existing app
-- [Upgrade](dep/aio/upgrade.md) — version upgrades
-- [Architecture](dep/aio/a4.md) — design overview
+[Quickstart](docs/quickstart.md) · [Core API](docs/core.md) · [Reactivity](docs/reactivity.md) · [Flows](docs/generators.md) · [UI](docs/ui.md) · [Testing](docs/testing.md) · [Builds](docs/builds.md) · [Electron](docs/electron.md) · [Auth](docs/auth.md) · [Persistence](docs/persistence.md) · [CLI](docs/cli.md) · [Structure](docs/structure.md) · [Migration](docs/migration.md) · [Upgrade](docs/upgrade.md) · [Changelog](docs/changelog.md)
 
 ## Status
 
-**v0.6.0** — generator-based flows, feature architecture, 649+ tests. Beta — things may break.
-
-MIT
+**v0.7.0** · 794 tests · beta · [JSR](https://jsr.io/@riagentic/aio) · MIT
