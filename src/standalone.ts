@@ -1,5 +1,5 @@
-/// <reference lib="dom" />
 // Standalone runtime — full client-side dispatch loop for Android WebView builds
+// Note: consumers must include "dom" in their tsconfig lib or use /// <reference lib="dom" />
 // Replaces browser.ts when building with --android. Same API, no server.
 import { useState, useEffect, createElement, type ComponentType } from 'react'
 import { produce, type Draft } from 'immer'
