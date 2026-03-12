@@ -210,9 +210,8 @@ type TransformResult = { code: string; warnings: EsbuildMessage[] }
 let transformFn: ((input: string, opts: Record<string, unknown>) => Promise<TransformResult>) | null = null
 async function getTransform() {
   if (!transformFn) {
-    const specifier = 'npm:esbuild'
-    const mod = await import(specifier)
-    transformFn = mod.transform
+    const mod = await import('npm:esbuild')
+    transformFn = mod.transform as (input: string, opts: Record<string, unknown>) => Promise<TransformResult>
   }
   return transformFn!
 }
