@@ -9,7 +9,7 @@
 - ✅ **Write reactive, use generators or atomic actions when needed.**
 - ✅ **Pick your target, compile and ship!**
 
-`v0.8.0` · beta
+`v0.8.1` · beta
 
 > Define state once. It persists, syncs to all clients, drives the UI.
 
@@ -130,4 +130,4 @@ All compose together. Start reactive, add generators or explicit reducers per fe
 
 ## Status
 
-**v0.8.0** · 774 tests · beta · [JSR](https://jsr.io/@riagentic/aio) · MIT
+**v0.8.1** · 774 tests · beta · [JSR](https://jsr.io/@riagentic/aio) · MIT
