@@ -59,14 +59,14 @@ Then run `deno install`.
 
 ## Step 3: Create features
 
-Each domain concept is a **feature**. Start with `reactive()` (simplest), upgrade to `flow()` or `feature()` when needed.
+Each domain concept is a **feature**. Start with `feature({ methods })` (simplest), add `generators` when you need step-level workflows, or use `feature({ actions, reduce })` for explicit control.
 
 ### Feature file: `src/features/counter/index.ts`
 
 ```ts
-import { reactive } from 'aio'
+import { feature } from 'aio'
 
-export const counter = reactive('counter', {
+export const counter = feature('counter', {
   state: { count: 0 },
   methods: {
     increment(s, by = 1) { s.count += by },
@@ -96,28 +96,24 @@ export const counter = feature('counter', {
   machine: {
     initial: 'idle',
     states: {
-      idle: { on: { increment: 'idle', decrement: 'idle', reset: 'idle' } },
+      idle: { increment: 'idle', decrement: 'idle', reset: 'idle' },
     },
   },
-  reduce(state, action, { A, E }) {
-    switch (action.type) {
-      case A.Increment:
-        state.count += action.payload.by
-        return [E.log(`count is now ${state.count}`)]
-      case A.Decrement:
-        state.count -= action.payload.by
-        return [E.log(`count is now ${state.count}`)]
-      case A.Reset:
-        state.count = 0
-        break
-    }
+  reduce: {
+    increment(state, payload) {
+      state.count += payload.by
+    },
+    decrement(state, payload) {
+      state.count -= payload.by
+    },
+    reset(state) {
+      state.count = 0
+    },
   },
-  execute(_app, effect, { E }) {
-    switch (effect.type) {
-      case E.Log:
-        console.log(effect.payload.message)
-        break
-    }
+  execute: {
+    log(_app, payload) {
+      console.log(payload.message)
+    },
   },
 })
 ```
@@ -158,7 +154,7 @@ await aio.run({ features: [counter] })
 | You have | AIO equivalent |
 |----------|---------------|
 | REST API endpoints | Actions (UI sends via WebSocket, no HTTP needed) |
-| Database reads/writes | `getDBState`/`getUIState` filters + auto Deno.Kv |
+| Database reads/writes | `stateForDB`/`stateForUI` filters + auto Deno.Kv |
 | SQLite / shelling out to `sqlite3` | Built-in `app.db` — [3-tier SQLite](persistence.md#sqlite-persistence) |
 | `setInterval` / `setTimeout` | Declarative `schedule.every` / `schedule.after` — [Scheduled effects](core.md#scheduled-effects) |
 | cron jobs / external scheduler | `schedule.cron` — runs inside the process, no external deps |
@@ -204,18 +200,28 @@ AFTER:  Component → useFeature(f) → send.action() → server reduces → sta
 
 ## Key concepts
 
-### A and E — dual-role objects
+### Reduce and execute — named handler objects
 
-Every feature gets `A` (actions) and `E` (effects) with two roles:
+Every feature with explicit actions gets `reduce` and `execute` as plain objects — one named method per action/effect key:
 
 ```ts
-// PascalCase = switch label (string constant)
-case A.Increment:    // 'Counter:Increment'
-case E.Log:          // 'Counter:Log'
+// Named handlers — payload is typed from the action creator
+reduce: {
+  increment(state, payload) {
+    state.count += payload.by  // payload.by typed from actions.increment creator
+  },
+},
+execute: {
+  log(_app, payload) {
+    console.log(payload.message)  // payload.message typed from effects.log creator
+  },
+},
+```
 
-// camelCase = creator (function that builds { type, payload })
-A.increment(5)       // { type: 'Counter:Increment', payload: { by: 5 } }
-E.log('hello')       // { type: 'Counter:Log', payload: { message: 'hello' } }
+Action type strings use `featureName:actionKey` format (all lowercase):
+```ts
+counter.increment.type   // → 'counter:increment'
+counter.reset.type       // → 'counter:reset'
 ```
 
 ### State machines — enforced, not optional
@@ -226,9 +232,9 @@ Every feature requires a `machine:` config. Invalid transitions are silently dro
 machine: {
   initial: 'idle',
   states: {
-    idle:   { on: { save: 'saving' } },          // only 'save' action allowed in 'idle'
-    saving: { on: { saved: 'idle', failed: 'error' } },
-    error:  { on: { retry: 'saving', dismiss: 'idle' } },
+    idle:   { save: 'saving' },          // only 'save' action allowed in 'idle'
+    saving: { saved: 'idle', failed: 'error' },
+    error:  { retry: 'saving', dismiss: 'idle' },
   },
 }
 ```
@@ -247,33 +253,43 @@ Features can interact in three ways:
 selectors: {
   getTotal: (state) => state.items.reduce((sum, i) => sum + i.price, 0),
 }
-// Other features: const total = cart.selectors.getTotal(app.getState())
+// Other features: const total = cart.getTotal()
 ```
 
-**2. Listening** — react to another feature's actions in your reducer:
+**2. Listening** — react to another feature's actions:
 ```ts
-// In your machine, declare foreign actions with 'FeatureName:' prefix:
-machine: {
-  states: {
-    idle: { on: { update: 'idle', 'dc:PriceUpdated': 'idle' } },
-  },
-}
-// Then handle in reduce():
-case dc.A.PriceUpdated:
-  state.lastPrice = action.payload.price
-```
+import { dc } from '../dc'
 
-**3. Bridge** — request/response with timeouts and metrics:
-```ts
-import { bridge } from 'aio'
-
-const b = bridge('bridge-dc-te', {
-  from: 'te', to: 'dc',
-  channels: {
-    price: { request: (s) => ({ s }), response: (p) => ({ p }), timeout: 5000 },
+// Option A: listensTo (methods-style — simplest)
+const te = feature('te', {
+  state: { lastPrice: 0 },
+  listensTo: [dc.priceUpdated],
+  methods: {
+    priceUpdated(s, price: number) { s.lastPrice = price },
   },
 })
-// Generates a complete feature with request/response/timeout actions
+
+// Option B: computed key in object-form reduce (explicit style)
+const te = feature('te', {
+  // ...
+  machine: {
+    initial: 'idle',
+    states: { idle: { update: 'idle', [dc.priceUpdated.type]: 'idle' } },
+  },
+  reduce: {
+    update(state, payload) { /* ... */ },
+    [dc.priceUpdated.type](state, payload) { state.lastPrice = payload.price },
+  },
+})
+```
+
+**3. Coordinate** — call another feature's async method directly:
+```ts
+import { call } from 'aio'
+import { dc } from '../dc'
+
+// In an async method or execute handler:
+const price = await call({ timeout: 5000 }, () => dc.getPrice('BTC'))
 ```
 
 ## Common patterns
@@ -292,30 +308,26 @@ const users = feature('users', {
   machine: {
     initial: 'idle',
     states: {
-      idle:    { on: { load: 'loading' } },
-      loading: { on: { loaded: 'ready' } },
-      ready:   { on: { load: 'loading' } },
+      idle:    { load: 'loading' },
+      loading: { loaded: 'ready' },
+      ready:   { load: 'loading' },
     },
   },
-  reduce(state, action, { A, E }) {
-    switch (action.type) {
-      case A.Load:
-        state.loading = true
-        return [E.fetch()]
-      case A.Loaded:
-        state.loading = false
-        state.list = action.payload.users
-        break
-    }
+  reduce: {
+    load(state) {
+      state.loading = true
+    },
+    loaded(state, payload) {
+      state.loading = false
+      state.list = payload.users
+    },
   },
-  execute(app, effect, { E, A }) {
-    switch (effect.type) {
-      case E.Fetch:
-        fetch('/api/users')
-          .then(r => r.json())
-          .then(users => app.dispatch(A.loaded(users)))
-        break
-    }
+  execute: {
+    fetch(app) {
+      fetch('/api/users')
+        .then(r => r.json())
+        .then(data => app.dispatch(users.A.loaded(data)))
+    },
   },
 })
 ```
@@ -332,22 +344,18 @@ const files = feature('files', {
   effects: {
     readFile: (path: string) => ({ path }),
   },
-  machine: 'simple',
-  reduce(state, action, { A, E }) {
-    switch (action.type) {
-      case A.Open: return [E.readFile(action.payload.path)]
-      case A.Loaded: state.content = action.payload.content; break
-    }
+  machine: false,
+  reduce: {
+    open() {},   // no state change — effect triggered via execute.readFile
+    loaded(state, payload) { state.content = payload.content },
   },
 
   // Deno globals — safe, browser never calls execute
-  execute(app, effect, { E, A }) {
-    switch (effect.type) {
-      case E.ReadFile:
-        Deno.readTextFile(effect.payload.path)
-          .then(content => app.dispatch(A.loaded(content)))
-        break
-    }
+  execute: {
+    readFile(app, payload) {
+      Deno.readTextFile(payload.path)
+        .then(content => app.dispatch(files.A.loaded(content)))
+    },
   },
 })
 ```
@@ -360,12 +368,10 @@ export const files = feature('files', {
   state: { content: '' },
   actions: { open: (path: string) => ({ path }), loaded: (content: string) => ({ content }) },
   effects: { readFile: (path: string) => ({ path }) },
-  machine: 'simple',
-  reduce(state, action, { A, E }) {
-    switch (action.type) {
-      case A.Open: return [E.readFile(action.payload.path)]
-      case A.Loaded: state.content = action.payload.content; break
-    }
+  machine: false,
+  reduce: {
+    open() {},   // triggers readFile effect via execute
+    loaded(state, payload) { state.content = payload.content },
   },
 })
 ```
@@ -376,12 +382,10 @@ import { files } from './def.ts'
 import { openAndRead } from './helpers.ts'  // server-only import — safe here
 export { files }
 
-files.implement((app, effect, ctx) => {
-  switch (effect.type) {
-    case ctx.E.ReadFile:
-      openAndRead(effect.payload.path)
-        .then(content => app.dispatch(ctx.A.loaded(content)))
-      break
+files.implement((app, effect) => {
+  if (effect.type === 'files:readFile') {
+    openAndRead(effect.payload.path)
+      .then(content => app.dispatch(files.A.loaded(content)))
   }
 })
 ```
@@ -397,11 +401,17 @@ files.implement((app, effect, ctx) => {
 
 **Timers / polling** — use scheduled effects instead of manual `setInterval`:
 ```ts
-// reduce — return a schedule effect, framework manages the timer
-case A.StartPolling:
-  return [schedule.every('poll', 5000, A.refresh())]
-case A.StopPolling:
-  return [schedule.cancel('poll')]
+// methods style — return schedule effect from sync method
+methods: {
+  startPolling(s) {
+    s.polling = true
+    return { _schedule: true, key: 'poll', type: 'myFeature:refresh', intervalMs: 5000 }
+  },
+  stopPolling(s) {
+    s.polling = false
+    return { _schedule: true, key: 'poll', cancel: true }
+  },
+},
 ```
 
 **Structured data** — use built-in SQLite:
@@ -420,7 +430,7 @@ await aio.run({
 ```ts
 await aio.run({
   features: [myFeature],
-  getUIState: (s) => ({ items: s.items, count: s.count }),  // s.apiKey stays server-only
+  stateForUI: (s) => ({ items: s.items, count: s.count }),  // s.apiKey stays server-only
 })
 ```
 
@@ -448,18 +458,18 @@ await aio.run({
 })
 ```
 
-### Lifecycle — init & destroy
+### Lifecycle — onInit & onDestroy
 
-Features can declare `init` and `destroy` hooks. Called in dependency order (init) and reverse order (destroy):
+Features can declare `onInit` and `onDestroy` hooks. Called in dependency order (onInit) and reverse order (onDestroy):
 
 ```ts
 const db = feature('db', {
   // ...
-  init(app) {
+  onInit(app) {
     // runs on startup — app.dispatch() + app.getState()
     app.dispatch(A.connect())
   },
-  destroy(app) {
+  onDestroy(app) {
     // runs on shutdown — close connections, flush buffers
     app.dispatch(A.disconnect())
   },
@@ -516,16 +526,6 @@ await aio.run({ features: [counter, dc, te], isolate: ['counter'] })
 // or: deno task dev --isolate=counter,dc
 ```
 
-## v0.4 classic API (still supported)
-
-If you prefer the v0.4 7-file approach, it still works:
-
-```ts
-await aio.run(initialState, { reduce, execute })
-```
-
-See the [v0.4 section of quickstart.md](quickstart.md) for the classic file structure. You can mix: use `aio.run(initialState, config)` for classic, or `aio.run({ features })` for v0.5.
-
 ## Checklist — v0.5 feature-based
 
 - [ ] Framework added (`dep/aio/` via scaffolder, or `deno add @riagentic/aio`)
@@ -538,17 +538,3 @@ See the [v0.4 section of quickstart.md](quickstart.md) for the classic file stru
 - [ ] `src/style.css` — (optional) auto-injected into HTML
 - [ ] `deno task dev` runs and shows startup checks passing
 
-## Checklist — v0.4 classic
-
-- [ ] Framework added (`dep/aio/` via scaffolder, or `deno add @riagentic/aio`)
-- [ ] `deno.json` updated with imports, compilerOptions, unstable
-- [ ] `deno install` ran successfully
-- [ ] `src/state.ts` — state type + initial values
-- [ ] `src/actions.ts` — action creators with `actions()` + `UnionOf`
-- [ ] `src/effects.ts` — effect creators with `effects()` + `UnionOf`
-- [ ] `src/reduce.ts` — reducer using `draft()`, returns `{ state, effects }`
-- [ ] `src/execute.ts` — effect executor with `app.dispatch()` for async results
-- [ ] `src/App.tsx` — `export default` component using `useAio()`
-- [ ] `src/app.ts` — entry point calling `aio.run()`
-- [ ] `src/style.css` — (optional) auto-injected into HTML
-- [ ] `deno task dev` runs and shows startup checks passing

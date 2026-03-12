@@ -13,14 +13,14 @@ When something goes wrong, the first step is identifying *which layer* produced 
 | `[featureName]` | Feature system | feature definition, machine config |
 | `Reduce took Xms > budget` | Performance | reducer — move heavy work to effects |
 | `Effect took Xms > budget` | Performance | executor — make it async |
-| `dispatch('X:Y') blocked` | Scoped dispatch | add feature name to `crossDispatch` |
+| `dispatch('X:Y') blocked` | Scoped dispatch | add feature name to `dispatchTo` |
 | `machine guard: dropped X in state Y` | State machine | check machine transitions |
 | `WebSocket` / `WS` | Transport | network, server restart, auth |
 | `Build Error` (browser overlay) | Transpilation | syntax error in .tsx/.ts file |
 
 ### Action type prefix tells you the feature
 
-All v0.5+ actions are prefixed: `Counter:Increment`, `Wallet:Transfer`, `PriceBridge:PriceRequest`. The prefix (before `:`) is the capitalized feature name. Use this to find the relevant feature code.
+All v0.5+ actions are prefixed: `counter:increment`, `wallet:transfer`, `priceBridge:priceRequest`. The format is `featureName:actionKey` (all lowercase). The prefix (before `:`) is the feature name. Use this to find the relevant feature code.
 
 ### Machine-dropped actions
 
@@ -59,8 +59,8 @@ const app = await aio.run({ features: [counter, wallet] })
 // Check all features
 app.features!.health()
 // → [
-//   { name: 'counter', status: 'idle', enabled: true, errors: 0, lastAction: 'Counter:Increment', lastActionAt: 1234567890 },
-//   { name: 'wallet', status: 'saving', enabled: true, errors: 0, lastAction: 'Wallet:Save', lastActionAt: 1234567891 },
+//   { name: 'counter', status: 'idle', enabled: true, errors: 0, lastAction: 'counter:increment', lastActionAt: 1234567890 },
+//   { name: 'wallet', status: 'saving', enabled: true, errors: 0, lastAction: 'wallet:save', lastActionAt: 1234567891 },
 // ]
 
 // Check specific feature
@@ -96,14 +96,16 @@ You passed the same feature instance to `aio.run()` twice, or called `aio.run()`
 ### "dispatch blocked"
 
 ```
-[engine] dispatch('Wallet:Credit') blocked — add 'wallet' to crossDispatch
+[engine] dispatch('wallet:credit') blocked — add 'wallet' to dispatchTo
 ```
 
-An executor tried to dispatch to another feature's actions. Add the target feature name to `crossDispatch`:
+An executor tried to dispatch to another feature's actions. Add the target feature name to `dispatchTo`:
 
 ```ts
+import { wallet } from '../wallet'
+
 const engine = feature('engine', {
-  crossDispatch: ['wallet'],
+  dispatchTo: [wallet],
   // ...
 })
 ```
@@ -139,44 +141,59 @@ For offline support, actions sent after the first connection are persisted to In
 ### Slow reducer
 
 ```
-Reduce took 250ms > 100ms budget for Counter:Analyze
+Reduce took 250ms > 100ms budget for counter:analyze
 ```
 
 The reducer is synchronous and blocks the dispatch loop. Move heavy computation to an effect:
 
 ```ts
 // Bad — blocks for 250ms
-case A.Analyze:
-  state.results = heavyComputation(state.data)
-  break
+reduce: {
+  analyze(state) {
+    state.results = heavyComputation(state.data)  // slow!
+  },
+}
 
-// Good — reducer returns fast, effect does the work
-case A.Analyze:
-  state.analyzing = true
-  return [E.runAnalysis(state.data)]
+// Good — reducer sets flag, execute does the work asynchronously
+reduce: {
+  analyze(state) {
+    state.analyzing = true
+    // effect triggered via execute.runAnalysis
+  },
+},
+execute: {
+  async runAnalysis(app, payload) {
+    const results = await heavyComputation(payload.data)
+    app.dispatch(myFeature.A.analysisDone(results))
+  },
+},
 ```
 
 ### Slow effect (sync portion)
 
 ```
-Effect took 15ms > 5ms budget for Counter:RunAnalysis
+Effect took 15ms > 5ms budget for counter:runAnalysis
 ```
 
 The *synchronous* part of your effect is too slow. Make sure you return immediately and do work asynchronously:
 
 ```ts
 // Bad — blocking
-case E.RunAnalysis:
-  const data = JSON.parse(fs.readFileSync('big.json', 'utf8'))  // sync!
-  app.dispatch(A.done(data))
-  break
+execute: {
+  runAnalysis(app) {
+    const data = JSON.parse(Deno.readTextFileSync('big.json'))  // sync!
+    app.dispatch(myFeature.A.done(data))
+  },
+},
 
 // Good — async
-case E.RunAnalysis:
-  Deno.readTextFile('big.json')
-    .then(text => JSON.parse(text))
-    .then(data => app.dispatch(A.done(data)))
-  break
+execute: {
+  runAnalysis(app) {
+    Deno.readTextFile('big.json')
+      .then(text => JSON.parse(text))
+      .then(data => app.dispatch(myFeature.A.done(data)))
+  },
+},
 ```
 
 ### Configure budgets

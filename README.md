@@ -9,7 +9,7 @@
 - ✅ **Write reactive, use generators or atomic actions when needed.**
 - ✅ **Pick your target, compile and ship!**
 
-`v0.7.0` · beta
+`v0.8.0` · beta
 
 > Define state once. It persists, syncs to all clients, drives the UI.
 
@@ -25,32 +25,45 @@ Or: `deno add @riagentic/aio` (library only, no build tooling)
 ## Example
 
 ```typescript
-import { reactive, aio } from 'aio'
+import { feature, call, aio } from 'aio'
 
-const counter = reactive('counter', {
+// Reactive style — default
+const counter = feature('counter', {
   state: { count: 0 },
   methods: {
     increment(s, by = 1) { s.count += by },
     async save(s) {
-      await Deno.writeTextFile('./data.json', String(s.count))
+      await call({ timeout: 3000 }, () => Deno.writeTextFile('./data.json', String(s.count)))
       s.saved = true   // auto-dispatched, persisted, synced to all clients
     },
   },
 })
 
-await aio.run({ features: [counter] })
-counter.increment(5)  // typed, direct call after boot
+// Sequential workflow — generator with typed state
+const checkout = feature('checkout', {
+  state: { orderId: null as string | null },
+  generators: {
+    *place(ctx, item: string) {
+      const id = yield* ctx.call('submit', () => submitOrder(item))
+      yield* ctx.done(s => { s.orderId = id })  // s is typed — no cast needed
+    },
+  },
+})
+
+await aio.run({ features: [counter, checkout] })
+counter.increment(5)       // typed direct call
+checkout.place('widget')   // starts generator
 ```
 
-## Three tiers
+## Three styles
 
-| Tier | API | Best for |
+| Style | API | Best for |
 |---|---|---|
-| **Reactive** | `reactive()` — plain methods | Most features. CRUD, forms, async |
-| **Flows** | `flow()` — generators | Multi-step workflows, retry, cancel |
-| **Event-driven** | `feature()` — reduce/execute | Complex reactive, cross-feature |
+| **Reactive** | `feature({ methods })` | Most features — CRUD, forms, async |
+| **Sequential** | `feature({ generators })` | Multi-step workflows, retry, cancel |
+| **Explicit** | `feature({ actions, reduce })` | Full control, complex cross-feature logic |
 
-All compose together. Start reactive, upgrade individual features when needed.
+All compose together. Start reactive, add generators or explicit reducers per feature when needed.
 
 ## How it compares
 
@@ -73,7 +86,6 @@ All compose together. Start reactive, upgrade individual features when needed.
 | Multi-user auth | ✅ | ✅ | ✅ | 🔧 | 🔧 | 🔧 | ❌ |
 | **Architecture** | | | | | | | |
 | Generator flows | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
-| Cross-feature bridges | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
 | Feature lifecycle | ✅ | 🔧 | ❌ | ❌ | ❌ | ❌ | ❌ |
 | Cron / scheduled tasks | ✅ | ✅ | ❌ | ❌ | ❌ | 🔧 | ❌ |
 | Middleware | ✅ | ✅ | ❌ | ❌ | ✅ | ✅ | ❌ |
@@ -114,8 +126,8 @@ All compose together. Start reactive, upgrade individual features when needed.
 
 ## Docs
 
-[Quickstart](docs/quickstart.md) · [Core API](docs/core.md) · [Reactivity](docs/reactivity.md) · [Flows](docs/generators.md) · [UI](docs/ui.md) · [Testing](docs/testing.md) · [Builds](docs/builds.md) · [Electron](docs/electron.md) · [Auth](docs/auth.md) · [Persistence](docs/persistence.md) · [CLI](docs/cli.md) · [Structure](docs/structure.md) · [Migration](docs/migration.md) · [Upgrade](docs/upgrade.md) · [Changelog](docs/changelog.md)
+[Quickstart](docs/quickstart.md) · [Core API](docs/core.md) · [Reactivity](docs/reactivity.md) · [Generators](docs/generators.md) · [UI](docs/ui.md) · [Testing](docs/testing.md) · [Builds](docs/builds.md) · [Electron](docs/electron.md) · [Auth](docs/auth.md) · [Persistence](docs/persistence.md) · [CLI](docs/cli.md) · [Structure](docs/structure.md) · [Migration](docs/migration.md) · [Upgrade](docs/upgrade.md) · [Changelog](docs/changelog.md)
 
 ## Status
 
-**v0.7.0** · 794 tests · beta · [JSR](https://jsr.io/@riagentic/aio) · MIT
+**v0.8.0** · 774 tests · beta · [JSR](https://jsr.io/@riagentic/aio) · MIT

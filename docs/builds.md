@@ -132,14 +132,11 @@ Compiles a headless server + CLI client into a standalone binary. No browser bun
 
 ```ts
 import { aio, connectCli } from 'aio'
-import { initialState } from './state.ts'
-import { reduce } from './reduce.ts'
-import { execute } from './execute.ts'
+import { myFeature } from './features/myFeature/index.ts'
 import type { AppState } from './state.ts'
-import { A } from './actions.ts'
 
 // Start server headless — no browser/electron
-const app = await aio.run(initialState, { reduce, execute, headless: true })
+const app = await aio.run({ features: [myFeature], headless: true })
 
 // Connect CLI client to local server
 const cli = connectCli<AppState>(`http://localhost:${app.port}`)
@@ -180,8 +177,6 @@ Compiles `src/client.ts` into a standalone binary with no server — just a WS c
 ```ts
 import { connectCli } from 'aio'
 import type { AppState } from './state.ts'
-import { A } from './actions.ts'
-
 const url = Deno.args[0] ?? 'http://localhost:8000'
 const cli = connectCli<AppState>(url)
 await cli.ready
@@ -202,8 +197,8 @@ const app = initStandalone(initialState, {
   persist: true,             // default: true — uses localStorage
   persistKey: 'aio_state',   // default: 'aio_state'
   persistDebounce: 100,      // ms between localStorage writes (default: 100)
-  getDBState: (s) => s,      // which part of state to persist
-  getUIState: (s) => s,      // which part of state to show in UI
+  stateForDB: (s) => s,      // which part of state to persist
+  stateForUI: (s) => s,      // which part of state to show in UI
   onRestore: (s) => s,       // transform state after loading from localStorage
 })
 ```
@@ -245,17 +240,15 @@ deno run -A dep/aio/src/build.ts --android --release  # release APK (needs signi
 **Same src/ code for both platforms.** Your `state.ts`, `actions.ts`, `reduce.ts`, `execute.ts`, and `App.tsx` work identically on desktop and Android. The only difference: effects using Deno APIs (file system, network server, etc.) will fail in standalone mode. Use `app.mode === 'standalone'` to branch:
 
 ```ts
-export function execute(app: AioApp<AppState, Action>, effect: Effect): void {
-  switch (effect.type) {
-    case E.Log:
-      console.log(effect.payload.message)  // works everywhere
-      break
-    case E.READ_FILE:
-      if (app.mode === 'standalone') return  // skip on Android
-      // Deno API — desktop only
-      break
-  }
-}
+execute: {
+  log(_app, payload) {
+    console.log(payload.message)  // works everywhere
+  },
+  readFile(app, _payload) {
+    if (app.mode === 'standalone') return  // skip on Android
+    // Deno API — desktop only
+  },
+},
 ```
 
 **Android WebView uses Chromium** (same engine as Electron), so your app renders identically on desktop and mobile.

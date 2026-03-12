@@ -31,7 +31,7 @@ features/
     index.ts              ← feature() definition — everything starts here
 ```
 
-`index.ts` contains the feature definition — either `reactive()` (plain methods) or `feature()` (full reduce/execute). No other files needed initially.
+`index.ts` contains the feature definition — `feature({ methods })` for method style, `feature({ reduce })` for explicit control. No other files needed initially.
 
 ### Growing feature (~200+ lines) — extract types and helpers
 
@@ -304,7 +304,7 @@ Everything comes from a single import. In **deno.json**, `"aio"` maps to `./dep/
 
 To update, replace the `dep/aio/` folder with the new version and check the [upgrade guide](upgrade.md). Your edits (if any) show up as a clean git diff.
 
-**JSR dependency** — `deno add @riagentic/aio` — standard package import. Gives you the library API (reactive, feature, flow, hooks, types) without the build toolchain.
+**JSR dependency** — `deno add @riagentic/aio` — standard package import. Gives you the library API (feature, flow, call, hooks, types) without the build toolchain.
 
 ```ts
 // Server-side (Deno) — full API
@@ -313,8 +313,6 @@ import { aio, feature, bridge, testFeature, schedule, type FeatureDef } from 'ai
 // Browser-side (App.tsx) — hooks + helpers
 import { useFeature, useAio, useLocal, page } from 'aio'
 
-// Classic (v0.4 style — still works)
-import { aio, actions, effects, draft, type UnionOf, type AioApp } from 'aio'
 ```
 
 Never import from `'../dep/aio/...'` directly — always use `'aio'`. The startup linter will warn you if you forget.
@@ -333,9 +331,8 @@ Never import from `'../dep/aio/...'` directly — always use `'aio'`. The startu
 | `dep/aio/src/server.ts` | HTTP + WebSocket server, TSX transpilation (dev), static serving (prod), delta broadcasting |
 | `dep/aio/src/build.ts` | Build script — bundles App.tsx + React, compiles binary, AppImage packaging |
 | `dep/aio/src/msg.ts` | Shared `msg()` constructor — used by mod.ts (server) and browser.ts (client) |
-| `dep/aio/src/feature.ts` | Feature system — `feature()`, `bridge()`, `composeFeatures()`, `testFeature()`, `testBridge()` |
-| `dep/aio/src/flow.ts` | Generator-based flows — `flow()`, `FlowCtx`, flow runner, cancellation |
-| `dep/aio/src/reactive.ts` | Reactive features — `reactive()`, live Proxy for async, auto-generated actions |
+| `dep/aio/src/feature.ts` | Feature system — `feature()`, `composeFeatures()`, `testFeature()` |
+| `dep/aio/src/flow.ts` | Generator runtime — `cancelOn()`, `GenCtx`, flow runner, cancellation |
 | `dep/aio/src/factory.ts` | `actions()` / `effects()` catalog factory — classic mode, generates PascalCase labels + camelCase creators |
 | `dep/aio/src/time-travel.ts` | Time-travel debugger — pure functions for undo/redo/goto, active in dev mode |
 | `dep/aio/src/dispatch.ts` | Shared dispatch loop — re-entrant queue with overflow guard, used by both aio.ts and standalone.ts |
@@ -362,15 +359,3 @@ Never import from `'../dep/aio/...'` directly — always use `'aio'`. The startu
 | `src/style.css` | (optional) Auto-injected into HTML if present |
 | `src/icon.png` | (optional) App icon used in AppImage builds |
 
-### App (`src/`) — classic (v0.4)
-
-| File | Purpose |
-|------|---------|
-| `src/app.ts` | Entry point — `aio.run(initialState, { reduce, execute })` |
-| `src/state.ts` | State type + initial values |
-| `src/actions.ts` | Action type constants + creators (`A`) |
-| `src/effects.ts` | Effect type constants + creators (`E`) |
-| `src/reduce.ts` | Reducer — `(state, action) → { state, effects }` |
-| `src/execute.ts` | Effect executor — runs side effects |
-| `src/App.tsx` | React component — uses `useAio()` |
-| `src/style.css` | (optional) Auto-injected into HTML if present |

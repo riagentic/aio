@@ -286,34 +286,36 @@ function compileFlags(appType: AppType): string {
 
 function templateEmpty(title: string): Record<string, string> {
   return {
-    'src/app.ts': `import { aio, draft } from 'aio'
+    'src/app.ts': `import { aio, feature } from 'aio'
 
-type State = { count: number }
-type Action = { type: 'Inc' } | { type: 'Dec' }
+export const counter = feature('counter', {
+  state: { count: 0 },
+  methods: {
+    inc(s) { s.count++ },
+    dec(s) { s.count-- },
+  },
+})
 
-await aio.run({ count: 0 }, {
-  reduce: (state: State, action: Action) => draft(state, d => {
-    if (action.type === 'Inc') d.count++
-    if (action.type === 'Dec') d.count--
-    return []
-  }),
-  execute: () => {},
+await aio.run({
+  features: [counter],
   ui: { title: '${title}' },
 })
 `,
     'src/App.tsx': `import { useAio, msg } from 'aio'
 
+type State = { counter: { count: number } }
+
 export default function App() {
-  const { state, send } = useAio<{ count: number }>()
+  const { state, send } = useAio<State>()
   if (!state) return <div>Loading...</div>
 
   return (
     <div style={{ padding: '3rem', fontFamily: 'system-ui', textAlign: 'center' }}>
       <h1>${title}</h1>
-      <div style={{ fontSize: '4rem', margin: '1rem 0' }}>{state.count}</div>
-      <button onClick={() => send(msg('Dec'))}>-</button>
+      <div style={{ fontSize: '4rem', margin: '1rem 0' }}>{state.counter.count}</div>
+      <button onClick={() => send(msg('counter:dec'))}>-</button>
       {' '}
-      <button onClick={() => send(msg('Inc'))}>+</button>
+      <button onClick={() => send(msg('counter:inc'))}>+</button>
     </div>
   )
 }
@@ -324,96 +326,41 @@ export default function App() {
 function templateMinimal(title: string): Record<string, string> {
   return {
     'src/app.ts': `import { aio } from 'aio'
-import { initialState } from './state.ts'
-import { reduce } from './reduce.ts'
-import { execute } from './execute.ts'
+import { counter } from './counter.ts'
 
-await aio.run(initialState, {
-  reduce,
-  execute,
+await aio.run({
+  features: [counter],
   ui: { title: '${title}' },
 })
 `,
-    'src/state.ts': `export type AppState = { counter: number }
-export const initialState: AppState = { counter: 0 }
+    'src/counter.ts': `import { feature } from 'aio'
+
+export const counter = feature('counter', {
+  state: { count: 0 },
+  methods: {
+    increment(s, by = 1) { s.count += by },
+    decrement(s, by = 1) { s.count -= by },
+    reset(s) { s.count = 0 },
+  },
+})
 `,
-    'src/actions.ts': `import { msg } from 'aio'
-
-// Action creators
-export const A = {
-  increment: (by = 1) => msg('Increment', { by }),
-  decrement: (by = 1) => msg('Decrement', { by }),
-  reset: () => msg('Reset'),
-}
-
-// Action union — used in reduce()
-export type Action =
-  | { type: 'Increment'; payload: { by: number } }
-  | { type: 'Decrement'; payload: { by: number } }
-  | { type: 'Reset'; payload: Record<string, never> }
-`,
-    'src/effects.ts': `import { msg } from 'aio'
-
-export const E = {
-  log: (message: string) => msg('Log', { message }),
-}
-
-export type Effect = { type: 'Log'; payload: { message: string } }
-`,
-    'src/reduce.ts': `import type { AppState } from './state.ts'
-import type { Action } from './actions.ts'
-import type { Effect } from './effects.ts'
-import { draft } from 'aio'
-
-export function reduce(state: AppState, action: Action): { state: AppState; effects: Effect[] } {
-  return draft(state, d => {
-    switch (action.type) {
-      case 'Increment':
-        d.counter += action.payload.by
-        return [{ type: 'Log', payload: { message: \`incremented to \${state.counter + action.payload.by}\` } }]
-      case 'Decrement':
-        d.counter -= action.payload.by
-        return [{ type: 'Log', payload: { message: \`decremented to \${state.counter - action.payload.by}\` } }]
-      case 'Reset':
-        d.counter = 0
-        return [{ type: 'Log', payload: { message: 'counter reset' } }]
-      default:
-        return []
-    }
-  })
-}
-`,
-    'src/execute.ts': `import type { Effect } from './effects.ts'
-import type { AppState } from './state.ts'
-import type { Action } from './actions.ts'
-import type { AioApp } from 'aio'
-
-export function execute(_app: AioApp<AppState, Action>, effect: Effect): void {
-  switch (effect.type) {
-    case 'Log':
-      console.log(\`[effect] \${effect.payload.message}\`)
-      break
-  }
-}
-`,
-    'src/App.tsx': `import { useAio } from 'aio'
-import { A } from './actions.ts'
-import type { AppState } from './state.ts'
+    'src/App.tsx': `import { useFeature } from 'aio'
+import { counter } from './counter.ts'
 
 export default function App() {
-  const { state, send } = useAio<AppState>()
+  const { state, send } = useFeature(counter)
   if (!state) return <div>Connecting...</div>
 
   return (
     <div style={{ padding: '3rem', fontFamily: 'system-ui, sans-serif', textAlign: 'center' }}>
       <h1>${title}</h1>
       <div style={{ fontSize: '4rem', margin: '1rem 0', color: '#00a6cc' }}>
-        {state.counter}
+        {state.count}
       </div>
       <div style={{ display: 'flex', gap: '0.5rem', justifyContent: 'center' }}>
-        <button onClick={() => send(A.decrement())}>-</button>
-        <button onClick={() => send(A.reset())}>Reset</button>
-        <button onClick={() => send(A.increment())}>+</button>
+        <button onClick={() => send.decrement()}>-</button>
+        <button onClick={() => send.reset()}>Reset</button>
+        <button onClick={() => send.increment()}>+</button>
       </div>
     </div>
   )
@@ -425,139 +372,54 @@ export default function App() {
 function templateMedium(title: string): Record<string, string> {
   return {
     'src/app.ts': `import { aio } from 'aio'
-import { initialState } from './state.ts'
-import { reduce } from './reduce.ts'
-import { execute } from './execute.ts'
+import { todo } from './features/todo.ts'
 
-await aio.run(initialState, {
-  reduce,
-  execute,
+await aio.run({
+  features: [todo],
   ui: { title: '${title}' },
 })
 `,
-    'src/state.ts': `import type { TodoState } from './features/todo/todo-types.ts'
+    'src/features/todo.ts': `import { feature } from 'aio'
 
-export type AppState = {
-  todo: TodoState
-}
+export type TodoItem = { id: number; text: string; done: boolean }
 
-export const initialState: AppState = {
-  todo: { items: [], nextId: 1 },
-}
+export const todo = feature('todo', {
+  state: { items: [] as TodoItem[], nextId: 1 },
+  methods: {
+    addTodo(s, text: string) {
+      s.items.push({ id: s.nextId++, text, done: false })
+    },
+    toggleTodo(s, id: number) {
+      const item = s.items.find(i => i.id === id)
+      if (item) item.done = !item.done
+    },
+    removeTodo(s, id: number) {
+      s.items = s.items.filter(i => i.id !== id)
+    },
+  },
+})
 `,
-    'src/actions.ts': `import { msg } from 'aio'
-
-// Action creators
-export const A = {
-  addTodo: (text: string) => msg('AddTodo', { text }),
-  toggleTodo: (id: number) => msg('ToggleTodo', { id }),
-  removeTodo: (id: number) => msg('RemoveTodo', { id }),
-}
-
-// Action union — used in reduce()
-export type Action =
-  | { type: 'AddTodo'; payload: { text: string } }
-  | { type: 'ToggleTodo'; payload: { id: number } }
-  | { type: 'RemoveTodo'; payload: { id: number } }
-`,
-    'src/effects.ts': `import { msg } from 'aio'
-
-export const E = {
-  log: (message: string) => msg('Log', { message }),
-}
-
-export type Effect = { type: 'Log'; payload: { message: string } }
-`,
-    'src/reduce.ts': `import type { AppState } from './state.ts'
-import type { Action } from './actions.ts'
-import type { Effect } from './effects.ts'
-import { reduceTodo } from './features/todo/todo-reduce.ts'
-
-export function reduce(state: AppState, action: Action): { state: AppState; effects: Effect[] } {
-  switch (action.type) {
-    case 'AddTodo':
-    case 'ToggleTodo':
-    case 'RemoveTodo':
-      return reduceTodo(state, action)
-    default:
-      return { state, effects: [] }
-  }
-}
-`,
-    'src/execute.ts': `import type { Effect } from './effects.ts'
-import type { AppState } from './state.ts'
-import type { Action } from './actions.ts'
-import type { AioApp } from 'aio'
-
-export function execute(_app: AioApp<AppState, Action>, effect: Effect): void {
-  switch (effect.type) {
-    case 'Log':
-      console.log(\`[effect] \${effect.payload.message}\`)
-      break
-  }
-}
-`,
-    'src/features/todo/todo-types.ts': `export type TodoItem = {
-  id: number
-  text: string
-  done: boolean
-}
-
-export type TodoState = {
-  items: TodoItem[]
-  nextId: number
-}
-`,
-    'src/features/todo/todo-reduce.ts': `import type { AppState } from '../../state.ts'
-import type { Effect } from '../../effects.ts'
-import type { Action } from '../../actions.ts'
-import { E } from '../../effects.ts'
-import { draft } from 'aio'
-
-export function reduceTodo(state: AppState, action: Action): { state: AppState; effects: Effect[] } {
-  return draft(state, d => {
-    switch (action.type) {
-      case 'AddTodo': {
-        const id = d.todo.nextId++
-        d.todo.items.push({ id, text: action.payload.text, done: false })
-        return [E.log(\`added todo #\${id}: \${action.payload.text}\`)]
-      }
-      case 'ToggleTodo': {
-        const item = d.todo.items.find(i => i.id === action.payload.id)
-        if (item) item.done = !item.done
-        return []
-      }
-      case 'RemoveTodo':
-        d.todo.items = d.todo.items.filter(i => i.id !== action.payload.id)
-        return [E.log(\`removed todo #\${action.payload.id}\`)]
-      default:
-        return []
-    }
-  })
-}
-`,
-    'src/ui/TodoList.tsx': `import { useAio } from 'aio'
-import { A } from '../actions.ts'
-import type { AppState } from '../state.ts'
+    'src/ui/TodoList.tsx': `import { useFeature } from 'aio'
+import { todo } from '../features/todo.ts'
 
 export function TodoList() {
-  const { state, send } = useAio<AppState>()
+  const { state, send } = useFeature(todo)
   if (!state) return null
 
   return (
     <div>
       <ul style={{ listStyle: 'none', padding: 0 }}>
-        {state.todo.items.map(item => (
+        {state.items.map(item => (
           <li key={item.id} style={{ display: 'flex', gap: '0.5rem', alignItems: 'center', margin: '0.3rem 0' }}>
             <input
               type="checkbox"
               checked={item.done}
-              onChange={() => send(A.toggleTodo(item.id))}
+              onChange={() => send.toggleTodo(item.id)}
             />
             <span style={{ textDecoration: item.done ? 'line-through' : 'none', flex: 1 }}>
               {item.text}
             </span>
-            <button onClick={() => send(A.removeTodo(item.id))}>x</button>
+            <button onClick={() => send.removeTodo(item.id)}>×</button>
           </li>
         ))}
       </ul>
@@ -566,17 +428,17 @@ export function TodoList() {
 }
 `,
     'src/ui/AddTodo.tsx': `import { useState } from 'react'
-import { useAio } from 'aio'
-import { A } from '../actions.ts'
+import { useFeature } from 'aio'
+import { todo } from '../features/todo.ts'
 
 export function AddTodo() {
-  const { send } = useAio()
+  const { send } = useFeature(todo)
   const [text, setText] = useState('')
 
   const add = () => {
     const trimmed = text.trim()
     if (!trimmed) return
-    send(A.addTodo(trimmed))
+    send.addTodo(trimmed)
     setText('')
   }
 
@@ -593,13 +455,13 @@ export function AddTodo() {
   )
 }
 `,
-    'src/App.tsx': `import { useAio } from 'aio'
-import type { AppState } from './state.ts'
+    'src/App.tsx': `import { useFeature } from 'aio'
+import { todo } from './features/todo.ts'
 import { TodoList } from './ui/TodoList.tsx'
 import { AddTodo } from './ui/AddTodo.tsx'
 
 export default function App() {
-  const { state } = useAio<AppState>()
+  const { state } = useFeature(todo)
   if (!state) return <div>Loading...</div>
 
   return (
@@ -608,7 +470,7 @@ export default function App() {
       <AddTodo />
       <TodoList />
       <p style={{ color: '#888', fontSize: '0.85rem', marginTop: '1rem' }}>
-        {state.todo.items.filter(i => !i.done).length} remaining
+        {state.items.filter(i => !i.done).length} remaining
       </p>
     </div>
   )
@@ -620,185 +482,52 @@ export default function App() {
 function templateLarge(title: string): Record<string, string> {
   return {
     'src/app.ts': `import { aio } from 'aio'
-import { initialState } from './state.ts'
-import { reduce } from './reduce.ts'
-import { execute } from './execute.ts'
+import { todo } from './features/todo/todo.ts'
+import { user } from './features/user/user.ts'
 
-await aio.run(initialState, {
-  reduce,
-  execute,
+await aio.run({
+  features: [todo, user],
   ui: { title: '${title}' },
 })
 `,
-    'src/state.ts': `import type { TodoState } from './model/todo/todo-types.ts'
-import type { UserState } from './model/user/user-types.ts'
+    'src/features/todo/todo.ts': `import { feature } from 'aio'
 
-export type AppState = {
-  todo: TodoState
-  user: UserState
-}
+export type TodoItem = { id: number; text: string; done: boolean }
 
-export const initialState: AppState = {
-  todo: { items: [], nextId: 1 },
-  user: { name: 'Anonymous', theme: 'light' },
-}
+export const todo = feature('todo', {
+  state: { items: [] as TodoItem[], nextId: 1 },
+  methods: {
+    addTodo(s, text: string) {
+      s.items.push({ id: s.nextId++, text, done: false })
+    },
+    toggleTodo(s, id: number) {
+      const item = s.items.find(i => i.id === id)
+      if (item) item.done = !item.done
+    },
+    removeTodo(s, id: number) {
+      s.items = s.items.filter(i => i.id !== id)
+    },
+    clearDone(s) {
+      s.items = s.items.filter(i => !i.done)
+    },
+  },
+})
 `,
-    'src/actions.ts': `import { msg } from 'aio'
+    'src/features/user/user.ts': `import { feature } from 'aio'
 
-// Action creators
-export const A = {
-  addTodo: (text: string) => msg('AddTodo', { text }),
-  toggleTodo: (id: number) => msg('ToggleTodo', { id }),
-  removeTodo: (id: number) => msg('RemoveTodo', { id }),
-  clearDone: () => msg('ClearDone'),
-  setName: (name: string) => msg('SetName', { name }),
-  toggleTheme: () => msg('ToggleTheme'),
-}
-
-// Action union — used in reduce()
-export type Action =
-  | { type: 'AddTodo'; payload: { text: string } }
-  | { type: 'ToggleTodo'; payload: { id: number } }
-  | { type: 'RemoveTodo'; payload: { id: number } }
-  | { type: 'ClearDone'; payload: Record<string, never> }
-  | { type: 'SetName'; payload: { name: string } }
-  | { type: 'ToggleTheme'; payload: Record<string, never> }
+export const user = feature('user', {
+  state: { name: 'Anonymous', theme: 'light' as 'light' | 'dark' },
+  methods: {
+    setName(s, name: string) { s.name = name },
+    toggleTheme(s) { s.theme = s.theme === 'light' ? 'dark' : 'light' },
+  },
+})
 `,
-    'src/effects.ts': `import { msg } from 'aio'
-
-export const E = {
-  log: (message: string) => msg('Log', { message }),
-  notify: (text: string) => msg('Notify', { text }),
-}
-
-export type Effect =
-  | { type: 'Log'; payload: { message: string } }
-  | { type: 'Notify'; payload: { text: string } }
-`,
-    'src/reduce.ts': `import type { AppState } from './state.ts'
-import type { Action } from './actions.ts'
-import type { Effect } from './effects.ts'
-import { reduceTodo } from './features/todo/todo-reduce.ts'
-import { reduceUser } from './features/user/user-reduce.ts'
-
-export function reduce(state: AppState, action: Action): { state: AppState; effects: Effect[] } {
-  switch (action.type) {
-    case 'AddTodo':
-    case 'ToggleTodo':
-    case 'RemoveTodo':
-    case 'ClearDone':
-      return reduceTodo(state, action)
-    case 'SetName':
-    case 'ToggleTheme':
-      return reduceUser(state, action)
-    default:
-      return { state, effects: [] }
-  }
-}
-`,
-    'src/execute.ts': `import type { Effect } from './effects.ts'
-import type { AppState } from './state.ts'
-import type { Action } from './actions.ts'
-import type { AioApp } from 'aio'
-
-export function execute(_app: AioApp<AppState, Action>, effect: Effect): void {
-  switch (effect.type) {
-    case 'Log':
-      console.log(\`[effect] \${effect.payload.message}\`)
-      break
-    case 'Notify':
-      console.log(\`[notify] \${effect.payload.text}\`)
-      break
-  }
-}
-`,
-    'src/model/todo/todo-types.ts': `export type TodoItem = {
-  id: number
-  text: string
-  done: boolean
-}
-
-export type TodoState = {
-  items: TodoItem[]
-  nextId: number
-}
-`,
-    'src/model/todo/todo-fn.ts': `import type { TodoItem } from './todo-types.ts'
-
-export function createTodo(id: number, text: string): TodoItem {
-  return { id, text, done: false }
-}
-
-export function countRemaining(items: TodoItem[]): number {
-  return items.filter(i => !i.done).length
-}
-`,
-    'src/model/user/user-types.ts': `export type UserState = {
-  name: string
-  theme: 'light' | 'dark'
-}
-`,
-    'src/features/todo/todo-reduce.ts': `import type { AppState } from '../../state.ts'
-import type { Effect } from '../../effects.ts'
-import type { Action } from '../../actions.ts'
-import { E } from '../../effects.ts'
-import { draft } from 'aio'
-import { createTodo } from '../../model/todo/todo-fn.ts'
-
-export function reduceTodo(state: AppState, action: Action): { state: AppState; effects: Effect[] } {
-  return draft<AppState, Effect>(state, d => {
-    switch (action.type) {
-      case 'AddTodo': {
-        const id = d.todo.nextId++
-        d.todo.items.push(createTodo(id, action.payload.text))
-        return [E.log(\`added todo #\${id}\`)]
-      }
-      case 'ToggleTodo': {
-        const item = d.todo.items.find(i => i.id === action.payload.id)
-        if (item) item.done = !item.done
-        return []
-      }
-      case 'RemoveTodo':
-        d.todo.items = d.todo.items.filter(i => i.id !== action.payload.id)
-        return []
-      case 'ClearDone': {
-        const count = d.todo.items.filter(i => i.done).length
-        d.todo.items = d.todo.items.filter(i => !i.done)
-        return [E.notify(\`cleared \${count} done items\`)]
-      }
-      default:
-        return []
-    }
-  })
-}
-`,
-    'src/features/user/user-reduce.ts': `import type { AppState } from '../../state.ts'
-import type { Effect } from '../../effects.ts'
-import type { Action } from '../../actions.ts'
-import { E } from '../../effects.ts'
-import { draft } from 'aio'
-
-export function reduceUser(state: AppState, action: Action): { state: AppState; effects: Effect[] } {
-  return draft(state, d => {
-    switch (action.type) {
-      case 'SetName':
-        d.user.name = action.payload.name
-        return [E.log(\`name set to \${action.payload.name}\`)]
-      case 'ToggleTheme':
-        d.user.theme = d.user.theme === 'light' ? 'dark' : 'light'
-        return []
-      default:
-        return []
-    }
-  })
-}
-`,
-    'src/ui/layout/Header.tsx': `import { useAio } from 'aio'
-import { A } from '../../actions.ts'
-import type { AppState } from '../../state.ts'
+    'src/ui/layout/Header.tsx': `import { useFeature } from 'aio'
+import { user } from '../../features/user/user.ts'
 
 export function Header() {
-  const { state, send } = useAio<AppState>()
+  const { state, send } = useFeature(user)
   if (!state) return null
 
   return (
@@ -806,43 +535,38 @@ export function Header() {
       display: 'flex', justifyContent: 'space-between', alignItems: 'center',
       padding: '0.75rem 1rem', borderBottom: '1px solid #eee',
     }}>
-      <h1 style={{ margin: 0, fontSize: '1.3rem' }}>${title}</h1>
-      <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
-        <span style={{ fontSize: '0.85rem', color: '#888' }}>{state.user.name}</span>
-        <button onClick={() => send(A.toggleTheme())}>
-          {state.user.theme === 'light' ? '🌙' : '☀️'}
-        </button>
-      </div>
+      <span style={{ fontSize: '0.85rem', color: '#888' }}>{state.name}</span>
+      <button onClick={() => send.toggleTheme()}>
+        {state.theme === 'light' ? '🌙' : '☀️'}
+      </button>
     </header>
   )
 }
 `,
-    'src/ui/todo/TodoList.tsx': `import { useAio } from 'aio'
-import { A } from '../../actions.ts'
-import type { AppState } from '../../state.ts'
-import { countRemaining } from '../../model/todo/todo-fn.ts'
+    'src/ui/todo/TodoList.tsx': `import { useFeature } from 'aio'
+import { todo } from '../../features/todo/todo.ts'
 
 export function TodoList() {
-  const { state, send } = useAio<AppState>()
+  const { state, send } = useFeature(todo)
   if (!state) return null
 
   return (
     <div>
       <ul style={{ listStyle: 'none', padding: 0 }}>
-        {state.todo.items.map(item => (
+        {state.items.map(item => (
           <li key={item.id} style={{ display: 'flex', gap: '0.5rem', alignItems: 'center', margin: '0.3rem 0' }}>
-            <input type="checkbox" checked={item.done} onChange={() => send(A.toggleTodo(item.id))} />
+            <input type="checkbox" checked={item.done} onChange={() => send.toggleTodo(item.id)} />
             <span style={{ textDecoration: item.done ? 'line-through' : 'none', flex: 1, color: item.done ? '#aaa' : 'inherit' }}>
               {item.text}
             </span>
-            <button onClick={() => send(A.removeTodo(item.id))} style={{ fontSize: '0.8rem' }}>x</button>
+            <button onClick={() => send.removeTodo(item.id)} style={{ fontSize: '0.8rem' }}>×</button>
           </li>
         ))}
       </ul>
       <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.85rem', color: '#888', marginTop: '0.5rem' }}>
-        <span>{countRemaining(state.todo.items)} remaining</span>
-        {state.todo.items.some(i => i.done) && (
-          <button onClick={() => send(A.clearDone())} style={{ fontSize: '0.8rem' }}>Clear done</button>
+        <span>{state.items.filter(i => !i.done).length} remaining</span>
+        {state.items.some(i => i.done) && (
+          <button onClick={() => send.clearDone()} style={{ fontSize: '0.8rem' }}>Clear done</button>
         )}
       </div>
     </div>
@@ -850,17 +574,17 @@ export function TodoList() {
 }
 `,
     'src/ui/todo/AddTodo.tsx': `import { useState } from 'react'
-import { useAio } from 'aio'
-import { A } from '../../actions.ts'
+import { useFeature } from 'aio'
+import { todo } from '../../features/todo/todo.ts'
 
 export function AddTodo() {
-  const { send } = useAio()
+  const { send } = useFeature(todo)
   const [text, setText] = useState('')
 
   const add = () => {
     const trimmed = text.trim()
     if (!trimmed) return
-    send(A.addTodo(trimmed))
+    send.addTodo(trimmed)
     setText('')
   }
 
@@ -878,19 +602,18 @@ export function AddTodo() {
 }
 `,
     'src/ui/user/Settings.tsx': `import { useState } from 'react'
-import { useAio } from 'aio'
-import { A } from '../../actions.ts'
-import type { AppState } from '../../state.ts'
+import { useFeature } from 'aio'
+import { user } from '../../features/user/user.ts'
 
 export function Settings() {
-  const { state, send } = useAio<AppState>()
+  const { state, send } = useFeature(user)
   const [editing, setEditing] = useState(false)
   const [name, setName] = useState('')
   if (!state) return null
 
   const save = () => {
     const trimmed = name.trim()
-    if (trimmed) send(A.setName(trimmed))
+    if (trimmed) send.setName(trimmed)
     setEditing(false)
   }
 
@@ -903,25 +626,25 @@ export function Settings() {
           <button type="submit">Save</button>
         </form>
       ) : (
-        <button onClick={() => { setName(state.user.name); setEditing(true) }}>Change name</button>
+        <button onClick={() => { setName(state.name); setEditing(true) }}>Change name</button>
       )}
     </div>
   )
 }
 `,
-    'src/App.tsx': `import { useAio } from 'aio'
-import type { AppState } from './state.ts'
+    'src/App.tsx': `import { useFeature } from 'aio'
+import { user } from './features/user/user.ts'
 import { Header } from './ui/layout/Header.tsx'
 import { TodoList } from './ui/todo/TodoList.tsx'
 import { AddTodo } from './ui/todo/AddTodo.tsx'
 import { Settings } from './ui/user/Settings.tsx'
 
 export default function App() {
-  const { state } = useAio<AppState>()
+  const { state } = useFeature(user)
   if (!state) return <div style={{ padding: '2rem' }}>Loading...</div>
 
-  const bg = state.user.theme === 'dark' ? '#1a1a2e' : '#fff'
-  const fg = state.user.theme === 'dark' ? '#e0e0e0' : '#222'
+  const bg = state.theme === 'dark' ? '#1a1a2e' : '#fff'
+  const fg = state.theme === 'dark' ? '#e0e0e0' : '#222'
 
   return (
     <div style={{ minHeight: '100vh', background: bg, color: fg }}>
@@ -981,35 +704,29 @@ function applyAppType(files: Record<string, string>, appType: AppType, title: st
 function clientOnlyFiles(appType: AppType, title: string): Record<string, string> {
   if (appType.id === 'remote-electron') {
     return {
-      'src/app.ts': `import { aio } from 'aio'
+      'src/app.ts': `import { aio, feature } from 'aio'
 
 // ${title} — Electron remote client
 // Dev:     deno task dev           (opens connect page)
 // Direct:  deno task dev --url=http://server:8000
 // Build:   deno task compile       (AppImage)
 
-await aio.run({}, {
-  reduce: (s) => ({ state: s, effects: [] }),
-  execute: () => {},
-  ui: { title: '${title}' },
-})
+const _stub = feature('app', { state: {}, methods: {} })
+await aio.run({ features: [_stub], ui: { title: '${title}' } })
 `,
     }
   }
 
   // remote-android: connect page HTML served locally for dev, APK for compile
   return {
-    'src/app.ts': `import { aio } from 'aio'
+    'src/app.ts': `import { aio, feature } from 'aio'
 
 // ${title} — Android remote client
 // Dev:   deno task dev        (serves connect page at http://localhost:8000)
 // Build: deno task compile    (APK)
 
-await aio.run({}, {
-  reduce: (s) => ({ state: s, effects: [] }),
-  execute: () => {},
-  ui: { title: '${title}' },
-})
+const _stub = feature('app', { state: {}, methods: {} })
+await aio.run({ features: [_stub], ui: { title: '${title}' } })
 `,
     'src/App.tsx': `import { useState } from 'react'
 
@@ -1075,16 +792,17 @@ await new Promise(() => {})
 
 function cliTemplateMinimal(_title: string): Record<string, string> {
   return {
-    'src/state.ts': `export type AppState = { counter: number }
+    'src/state.ts': `// Mirror of server state — feature 'counter' namespaces its state
+export type AppState = { counter: { count: number } }
 `,
     'src/commands.ts': `import { msg } from 'aio'
 
 export function parseCommand(args: string[]): { type: string; payload?: unknown } | null {
   const [cmd, ...rest] = args
   switch (cmd) {
-    case 'inc': return msg('Increment', { by: Number(rest[0]) || 1 })
-    case 'dec': return msg('Decrement', { by: Number(rest[0]) || 1 })
-    case 'reset': return msg('Reset')
+    case 'inc': return msg('counter:increment', { args: [Number(rest[0]) || 1] })
+    case 'dec': return msg('counter:decrement', { args: [Number(rest[0]) || 1] })
+    case 'reset': return msg('counter:reset', { args: [] })
     default: return null
   }
 }
@@ -1102,10 +820,10 @@ console.log('Connecting to', url, '...')
 
 const app = connectCli<AppState>(url)
 await app.ready
-console.log('Connected! Counter:', app.state?.counter)
+console.log('Connected! Counter:', app.state?.counter.count)
 
 app.subscribe(state => {
-  console.log('Counter:', state.counter)
+  console.log('Counter:', state.counter.count)
 })
 
 const decoder = new TextDecoder()
@@ -1350,10 +1068,10 @@ type Template = { label: string; desc: string; fn: (title: string) => Record<str
 function getTemplates(appType: AppType): Template[] {
   const ui = appType.hasUI
   return [
-    { label: 'Empty',   desc: ui ? '2 files — app.ts + App.tsx, everything inline. Fastest start.' : '1 file — app.ts, everything inline. Fastest start.', fn: templateEmpty },
-    { label: 'Minimal', desc: ui ? '7 files — standard aio structure with actions/effects/reducer. Counter app.' : '6 files — actions/effects/reducer. Counter app, no UI.', fn: templateMinimal },
-    { label: 'Medium',  desc: ui ? 'Feature folders + UI components. Todo app with organized structure.' : 'Feature folders. Todo app with organized structure, no UI.', fn: templateMedium },
-    { label: 'Large',   desc: ui ? 'Models + features + UI hierarchy. Todo + user settings, full architecture.' : 'Models + features. Todo + user settings, full architecture, no UI.', fn: templateLarge },
+    { label: 'Empty',   desc: ui ? '2 files — inline feature + App.tsx. Fastest start.' : '1 file — inline feature. Fastest start.', fn: templateEmpty },
+    { label: 'Minimal', desc: ui ? '3 files — counter feature + app entry + UI. Methods style.' : '2 files — counter feature + app entry. Methods style.', fn: templateMinimal },
+    { label: 'Medium',  desc: ui ? '5 files — todo feature + UI components. Feature API.' : '2 files — todo feature + app entry. Feature API.', fn: templateMedium },
+    { label: 'Large',   desc: ui ? '9 files — todo + user features + UI hierarchy. Full architecture.' : '3 files — todo + user features + app entry. Full architecture.', fn: templateLarge },
   ]
 }
 

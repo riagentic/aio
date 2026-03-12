@@ -4,6 +4,275 @@ How to upgrade between aio versions. Each section lists what changed, what break
 
 ---
 
+## v0.7 → v0.8
+
+### Breaking changes
+
+**`reduce` and `execute` are now objects (named handlers)**
+
+The function form with `{ A }` / `{ E }` context is removed from the default path.
+
+```ts
+// BEFORE (v0.7)
+reduce(state, action, { A, E }) {
+  switch (action.type) {
+    case A.Increment:
+      state.count += action.payload.by
+      return [E.log(`count: ${state.count}`)]
+    case A.Reset:
+      state.count = 0
+      break
+  }
+},
+execute(app, effect, { E, A }) {
+  switch (effect.type) {
+    case E.Log:
+      console.log(effect.payload.message)
+      break
+    case E.Persist:
+      db.save(effect.payload.value).then(() => app.dispatch(A.saved()))
+      break
+  }
+},
+
+// AFTER (v0.8)
+reduce: {
+  increment(state, payload) {
+    state.count += payload.by
+    // effects wired via execute — no return needed
+  },
+  reset(state) {
+    state.count = 0
+  },
+},
+execute: {
+  log(_app, payload) {
+    console.log(payload.message)
+  },
+  async persist(app, payload) {
+    await db.save(payload.value)
+    app.dispatch(myFeature.A.saved())
+  },
+},
+```
+
+**Migration:**
+1. Convert `reduce(state, action, { A, E }) { switch ... }` → `reduce: { handlerName(state, payload) {} }`
+2. Convert `execute(app, effect, { E, A }) { switch ... }` → `execute: { handlerName(app, payload) {} }`
+3. Remove all `{ A }` and `{ E }` destructuring from reduce/execute signatures
+
+**For foreign action handling** — use the function form with `{ on }`:
+
+```ts
+// When your reducer needs to react to another feature's actions
+reduce(state, action, { on }) {
+  on(counter.increment, (payload) => {
+    state.watchedCount = payload.by
+  })
+  // own actions still handled normally
+},
+```
+
+---
+
+**Lowercase action type strings**
+
+Action types changed from `'Feature:Action'` to `'feature:action'` format.
+
+```ts
+// BEFORE (v0.7)
+if (action.type === 'Counter:Increment') { ... }
+listensTo: ['Counter:Increment', 'Wallet:Transfer']
+cancelOn(['Counter:Stop'], fn)
+ctx.waitFor('Payment:Complete')
+machine: { states: { active: { 'Counter:Increment': 'active' } } }
+
+// AFTER (v0.8) — use .type or pass function directly
+if (action.type === counter.increment.type) { ... }
+listensTo: [counter.increment, wallet.transfer]
+cancelOn([counter.stop], fn)
+ctx.waitFor(payment.complete)
+machine: { states: { active: { [counter.increment.type]: 'active' } } }
+```
+
+**Migration:** Find all raw action type strings (pattern: `'Foo:Bar'`) and replace with bound method `.type` references or function references.
+
+---
+
+**`feature.A` scope — internal only**
+
+`feature.A` is now considered internal. Application code should not use it. Remove all:
+
+```ts
+// REMOVE from application code:
+send(counter.A.increment(5))     // → send.increment(5)
+dispatch(counter.A.increment(5)) // → counter.increment(5) or use in ctx.dispatch only
+
+// KEEP in generator ctx.dispatch (A catalog still needed here):
+yield* ctx.dispatch(wallet.A.credit(100))  // fine — ctx.dispatch needs an action object
+
+// KEEP in testFeature (A catalog used internally):
+// testFeature handles this automatically
+```
+
+---
+
+### Migration steps
+
+1. **Convert reduce** — find all `reduce(state, action, { A` patterns, convert to object form
+2. **Convert execute** — find all `execute(app, effect, { E` patterns, convert to object form
+3. **Fix action type strings** — find all `'PascalCase:PascalCase'` strings, replace with `.type` references
+4. **Fix listensTo** — replace string arrays with bound method arrays
+5. **Fix cancelOn** — replace string triggers with bound method triggers
+6. **Fix ctx.waitFor** — replace string form with bound method form
+7. **Fix machine on keys** — replace raw string keys with computed `[feature.method.type]`
+8. **Remove `send(feature.A.method(args))`** — replace with `send.method(args)`
+9. Replace `dep/aio/` with the v0.8 folder
+10. Run `deno install && deno task dev` — linter will flag remaining issues
+
+### What doesn't break
+
+- `feature({ methods })` — unchanged
+- `feature({ generators })` — unchanged
+- `useFeature` / `send.method()` — unchanged
+- `call()` / direct cross-feature calling — unchanged
+- All tests using `testFeature` — unchanged (send proxy unchanged)
+- The function form `reduce(state, action, fn)` — available as escape hatch with `{ on }` / `{ emit }`
+- `feature.A` still exists (internal) — `ctx.dispatch(feature.A.action())` still works
+
+---
+
+**`dispatchTo` accepts feature objects — string form removed** *(breaking)*
+
+```ts
+// BEFORE (v0.7)
+dispatchTo: ['wallet', 'fleet']
+
+// AFTER (v0.8)
+import { wallet } from '../wallet'
+import { fleet } from '../fleet'
+dispatchTo: [wallet, fleet]
+```
+
+**Async method signature — `ctx` parameter removed**
+
+Old async methods had `ctx` injected as the second parameter:
+```ts
+// v0.7 — ctx injected
+async save(s, ctx, url: string) { ... }
+async notify(s, ctx) { await ctx.call('notifications', 'send', 'done') }
+```
+
+In v0.8, async methods use the same `(s, ...args)` signature as sync methods:
+```ts
+// v0.8 — no ctx, direct import
+async save(s, url: string) { ... }
+async notify(s) { await notifications.send('done') }
+```
+
+**Migration:** remove `ctx` from all async method signatures. If you used `ctx.call('feature', 'method', ...)`, replace with a direct import and call: `import { notifications } from '../notifications'; await notifications.send('done')`.
+
+**`machine: 'simple'` removed — use `machine: false`**
+
+```ts
+// before
+feature('counter', { machine: 'simple', ... })
+
+// after
+feature('counter', { machine: false, ... })
+```
+
+**`flows:` key removed from `feature()` config — use `generators:` key instead**
+
+```ts
+// before (v0.7)
+import { feature, flow } from 'aio'
+feature('myFeature', {
+  flows: {
+    main: flow('start', function* (ctx) { ... }),
+  },
+})
+
+// after (v0.8)
+feature('myFeature', {
+  generators: {
+    start: function* (ctx) { ... },  // key matches action key
+  },
+})
+```
+
+**`flow()` export removed — use `generators` key directly**
+
+`flow()` is no longer exported from `'aio'`. Wrap the generator function with `cancelOn(triggers, fn)` if you need declarative cancellation:
+
+```ts
+import { feature, cancelOn } from 'aio'
+
+feature('healthCheck', {
+  generators: {
+    start: cancelOn([counter.stop], function* (ctx) { ... }),
+  },
+})
+```
+
+**`ctx.put` renamed to `ctx.dispatch` in generator context**
+
+```ts
+// before (v0.7)
+yield* ctx.put(someFeature.A.doThing())
+
+// after (v0.8)
+yield* ctx.dispatch(someFeature.A.doThing())
+```
+
+**`t.expect.effects()` requires full type strings** *(breaking)*
+
+```ts
+// BEFORE (v0.7)
+t.expect.effects(['log', 'persist'])
+
+// AFTER (v0.8)
+t.expect.effects(['counter:log', 'counter:persist'])
+```
+
+**Machine `on` is optional for terminal states**
+
+```ts
+// BEFORE — was required even when empty
+states: { saving: {}, error: {} }
+
+// AFTER — omit on entirely
+states: { saving: {}, error: {} }
+```
+
+### What's NOT breaking
+
+- `feature({ methods })` — unchanged
+- `feature({ generators })` — unchanged
+- `useFeature` / `send.method()` — unchanged
+- `call()` / direct cross-feature calling — unchanged
+- All tests using `testFeature` — unchanged (send proxy unchanged)
+- The function form `reduce(state, action, fn)` — available as escape hatch with `{ on }` / `{ emit }`
+- `feature.A` still exists (internal) — `ctx.dispatch(feature.A.action())` still works
+
+### Migration steps
+
+1. **Convert reduce** — find all `reduce(state, action, { A` patterns, convert to object form
+2. **Convert execute** — find all `execute(app, effect, { E` patterns, convert to object form
+3. **Fix action type strings** — find all `'PascalCase:PascalCase'` strings, replace with `.type` references
+4. **Fix listensTo** — replace string arrays with bound method arrays
+5. **Fix cancelOn** — replace string triggers with bound method triggers
+6. **Fix ctx.waitFor** — replace string form with bound method form
+7. **Fix machine on keys** — replace raw string keys with computed `[feature.method.type]`
+8. **Remove `send(feature.A.method(args))`** — replace with `send.method(args)`
+9. **Fix `dispatchTo`** — replace string arrays with imported feature refs
+10. **Fix `t.expect.effects()`** — prefix all effect keys with `featureName:`
+11. **Fix async method signatures** — remove `ctx` parameter
+12. Replace `dep/aio/` with the v0.8 folder
+13. Run `deno install && deno task dev` — linter will flag remaining issues
+
+---
+
 ## v0.1 → v0.2
 
 ### New features
@@ -16,7 +285,7 @@ How to upgrade between aio versions. Each section lists what changed, what break
 - **Window config** — `ui: { width, height }` sets default Electron window size. Embedded as `<meta>` tags for thin client discovery
 - **Window state persistence** — Electron remembers window bounds across runs via `window-state.json`
 - **Configurable `persistDebounce`** — control KV write frequency (default: 100ms)
-- **Per-user `getUIState(state, user?)`** — server-controlled per-user state filtering
+- **Per-user `stateForUI(state, user?)`** — server-controlled per-user state filtering
 - **Multi-user auth** — `users: Record<string, AioUser>` token map with per-user identity. See [auth.md — Multi-user auth](auth.md#multi-user-auth)
 - **camelCase factory creators** — `A.increment()` alongside `A.Increment` label
 - **Startup linter** — validates state, config, App.tsx, esbuild, electron on boot
@@ -50,7 +319,7 @@ The startup linter warns if your first parameter is named `effect`.
 
 #### 2. `subscribe()` removed
 
-`subscribe(keys)` was a client-side bandwidth filter. It's been replaced by `getUIState(state, user?)` — a server-controlled per-user filter that's more secure and doesn't leak the full state shape.
+`subscribe(keys)` was a client-side bandwidth filter. It's been replaced by `stateForUI(state, user?)` — a server-controlled per-user filter that's more secure and doesn't leak the full state shape.
 
 **If you used `subscribe()`:**
 
@@ -67,11 +336,11 @@ The startup linter warns if your first parameter is named `effect`.
 ```
 
 ```diff
-  // app.ts — ADD getUIState with per-user filtering
+  // app.ts — ADD stateForUI with per-user filtering
   await aio.run(initialState, {
     reduce, execute,
--   getUIState: (s) => s,
-+   getUIState: (s, _user?) => ({ stats: s.stats }),  // server controls what clients see
+-   stateForUI: (s) => s,
++   stateForUI: (s, _user?) => ({ stats: s.stats }),  // server controls what clients see
   })
 ```
 
@@ -93,7 +362,7 @@ send(A.increment(5))
 ### Upgrade steps
 
 1. **Swap execute params:** Find `execute(effect, app)` → change to `execute(app, effect)`
-2. **Remove subscribe:** Delete any `subscribe()` calls from App.tsx. If you need per-user filtering, add `getUIState: (s, user?) => ...` to your `aio.run()` config
+2. **Remove subscribe:** Delete any `subscribe()` calls from App.tsx. If you need per-user filtering, add `stateForUI: (s, user?) => ...` to your `aio.run()` config
 3. **Update dep/aio/:** Copy the new `dep/aio/` folder over the old one
 4. **Run `deno install`**
 5. **Run `deno task dev`** — the startup linter will catch remaining issues
@@ -107,9 +376,9 @@ send(A.increment(5))
 - **Performance budgets** — dispatch loop timing with configurable thresholds. `perfMode: 'strict' | 'soft'` and `perfBudget: { reduce?, effect? }` in config. Violations call `onError({ source: 'performance', ... })` or warn (soft). Per-action perf metrics recorded in time-travel history. See [scaling.md — Performance budgets](scaling.md#performance-budgets)
 - **Redux DevTools** — connect to the Redux DevTools browser extension for state inspection and action history. `connectDevTools()` / `disconnectDevTools()` from `'aio'`. See [ui.md — Redux DevTools](ui.md#redux-devtools-integration)
 - **Incremental SQLite sync** — tables with a `pk()` column now use row-level INSERT/UPDATE/DELETE diffs instead of full table replacement. Significantly faster for large datasets. No migration needed — PK detection is automatic
-- **Memoized selectors** — `createSelector(...inputFns, resultFn)` and `createSliceSelector`. Caches derived values until inputs change, preventing redundant recalculations. See [classic.md — createSelector](classic.md#createselectorinputselectors-resultfunc)
-- **`matchEffect(effect, handlers, fallback?)`** — typed alternative to switch/case in `execute()`. Scales better for large effect catalogs. See [classic.md — matchEffect](classic.md#matcheffecteffect-handlers-fallback)
-- **`composeMiddleware(...fns)`** — compose multiple `beforeReduce` functions into a single pipeline. Return `null` from any function to drop the action. See [classic.md — composeMiddleware](classic.md#composemiddlewarefns)
+- **Memoized selectors** — `createSelector(...inputFns, resultFn)` and `createSliceSelector`. Caches derived values until inputs change, preventing redundant recalculations.
+- **`matchEffect(effect, handlers, fallback?)`** — typed alternative to switch/case in `execute()`. Scales better for large effect catalogs.
+- **`composeMiddleware(...fns)`** — compose multiple `beforeReduce` functions into a single pipeline. Return `null` from any function to drop the action.
 - **Android schedule warning** — unsupported schedule effects on Android now log `console.warn` instead of silently dropping
 
 ### Breaking changes
@@ -229,29 +498,29 @@ deno task dev --expose --cert=/etc/ssl/myapp.pem --key=/etc/ssl/myapp.key
 
 v0.7 adds `reactive()`, improves `flow()`, and overhauls DX. No breaking changes. All v0.6 code works unchanged.
 
-**reactive() — plain methods instead of reduce/execute**
+**reactive() — plain methods instead of reduce/execute** *(removed in v0.8 — use `feature({ methods })` instead)*
 - Sync methods mutate state via Immer draft, can return schedule effects
 - Async methods get live Proxy — reads always fresh, writes auto-dispatch
 - Machine-gated async writes via method-tagged `__setMethod` actions
 - Microtask batching — consecutive Proxy writes grouped into one action per sync frame
 - `listensTo: string[]` — foreign action listeners without a full machine
-- Selectors, crossDispatch, init/destroy hooks all work
+- Selectors, dispatchTo, onInit/onDestroy hooks all work
 
 **flow() improvements**
 - `ctx.waitFor(actionType, timeout?)` — pause until external action dispatched
 - `ctx.getState()` — read current feature state inside a flow
 - `cancelOn: string[]` — declarative flow cancellation on arbitrary actions
-- `ctx.put()` accepts `{ type, payload? }` — payload optional
+- `ctx.dispatch()` accepts `{ type, payload? }` — payload optional
 - Flow errors fed back into generator for try/catch support
 
 **DX**
 - Direct calling — `counter.increment(5)` after `aio.run()`, no `.A.` namespace (all three tiers)
 - TypeScript inference — typed autocomplete for methods and selectors
 - Pre-bind console.warn when methods called before `aio.run()`
-- `machine: false` accepted as alias for `'simple'`
+- `machine: false` — no state machine guards, all actions always allowed
 - FeatureDef phantom State type for testFeature inference
 - `useSyncExternalStore` in useAio/useFeature for selective re-renders
-- `useAio` deprecated in favor of `useFeature`
+- `useFeature(ref)` added — scoped state, typed send, machine status, selective re-renders
 - Startup linter validates empty features, `_status` reserved key, empty actionKeys
 - `--type` and `--template` CLI flags for non-interactive scaffolding
 - Async `testFeature()` — `t.runEffects()` + `t.settle(ms?)`
@@ -313,14 +582,15 @@ healthCheck: flow('start', { cancelOn: ['stop'] }, function* (ctx) {
 })
 
 // ctx.waitFor — pause until external action
-purchase: flow('start', function* (ctx, action) {
-  yield* ctx.put(payment.A.charge(action.payload.amount))
+// actions-style: payload destructured directly (no action wrapper)
+purchase: flow('start', function* (ctx, { amount }: { amount: number }) {
+  yield* ctx.dispatch(payment.A.charge(amount))
   const result = yield* ctx.waitFor('Payment:Complete', 10_000)
   yield* ctx.done(s => { s.paid = true })
 })
 
 // ctx.getState — read fresh state
-yield* ctx.step('inc', s => { s.count++ })
+yield* ctx.mutate('inc', s => { s.count++ })
 const s = ctx.getState()
 if (s.count >= 10) { yield* ctx.done(); return }
 ```
@@ -333,10 +603,10 @@ See [reactivity.md](reactivity.md) and [generators.md](generators.md) for full g
 
 ### New features — generator-based flows
 
-v0.6 adds `flow()` — sequential async workflows using generators. No breaking changes. All v0.5 code works unchanged.
+v0.6 adds `flow()` — sequential async workflows using generators. *(The `flows:` key and `flow()` function were removed in v0.8 — use the `generators` key instead.)* No breaking changes from v0.5. All v0.5 code works unchanged on v0.6.
 
 - **`flow(trigger, generatorFn)`** — define a sequential workflow triggered by an action. Write top-to-bottom async code; each yield point dispatches an action visible in time-travel
-- **`FlowCtx` API** — `ctx.call()` (async work), `ctx.step()` (state mutation), `ctx.done()` / `ctx.fail()` (terminal), `ctx.put()` (dispatch), `ctx.all()` (parallel), `ctx.race()` (first wins), `ctx.sleep()` (pause)
+- **`GenCtx` API** — `ctx.call()` (async work), `ctx.step()` (state mutation), `ctx.done()` / `ctx.fail()` (terminal), `ctx.dispatch()` (dispatch), `ctx.all()` (parallel), `ctx.race()` (first wins), `ctx.sleep()` (pause)
 - **`reduce` and `machine` now optional** — flow-only features don't need a reducer or machine definition
 - **Auto-generated actions** — each yield point dispatches `{Feature}:Flow:{StepName}` automatically. No manual action/effect catalog needed for flows
 - **Auto-cancellation** — re-triggering a flow cancels the previous instance. Feature disable/destroy cancels all running flows
@@ -379,7 +649,7 @@ See [generators.md](generators.md) for the full guide.
 
 ### New features — feature-based architecture
 
-v0.5 introduces `feature()` — one function defines state, actions, effects, state machine, reducer, executor, and selectors. The old v0.4 API (`aio.run(initialState, config)`) still works unchanged for existing apps.
+v0.5 introduces `feature()` — one function defines state, actions, effects, state machine, reducer, executor, and selectors. The classic v0.4 API (`aio.run(initialState, config)`) has been removed as of v0.8 — migrate to `aio.run({ features })` using the steps below.
 
 - **`feature(name, config)`** — one function replaces 7 files. Auto-prefixes action/effect types (`increment` → `'Counter:Increment'`). Wraps reducer in Immer `produce()` automatically
 - **State machines** — required for every feature. Declares explicit states and transitions. Invalid transitions are dropped. Typos in machine keys cause startup errors. `_status` field auto-managed by framework
@@ -392,7 +662,7 @@ v0.5 introduces `feature()` — one function defines state, actions, effects, st
 - **Scoped executor dispatch** — executor can only dispatch own feature's actions; foreign dispatch blocked at runtime
 - **Single-instance lock** — `singleton: true` (default) prevents multiple instances on same port
 - **Middleware system** — `aio.middleware.logger()`, `.validate()`, `.metrics()`, `.freeze()`, `.perfBudget()`, `.create(fn)`. Chain multiple middlewares via `middleware: [...]` in config
-- **Lifecycle init/destroy** — `init(app)` and `destroy(app)` hooks per feature (`app` is a `ScopedApp` with `.dispatch()` and `.getState()`). Auto-generated `Counter:Init` / `Counter:Destroy` actions. Dependency-ordered init, reverse-ordered destroy
+- **Lifecycle onInit/onDestroy** — `onInit(app)` and `onDestroy(app)` hooks per feature (`app` is a `ScopedApp` with `.dispatch()` and `.getState()`). Auto-generated `Counter:Init` / `Counter:Destroy` actions. Dependency-ordered onInit, reverse-ordered onDestroy
 - **Source auto-tagging** — actions tagged with `_source: 'UI' | 'Effect' | 'System' | 'Test'` at dispatch points. `tagSource(action, source)` helper exported
 - **Dead-end detection** — machine states with no outgoing transitions emit a console warning at definition time (not a hard error)
 - **Circuit breaker runtime** — bridge circuit breaker tracks failures, opens after threshold, auto-resets after timeout. Half-open state allows one probe request. `isCircuitOpen` selector on bridge
@@ -406,7 +676,7 @@ v0.5 introduces `feature()` — one function defines state, actions, effects, st
 
 ### Breaking changes when adopting features
 
-The legacy API still works, so updating `dep/aio/` alone is non-breaking. But **if you migrate to `feature()`**, these things change:
+**If you migrate to `feature()`**, these things change:
 
 #### 1. State shape — feature-namespaced
 
@@ -516,7 +786,7 @@ Key changes:
 - `app.dispatch()` only accepts this feature's actions — dispatching another feature's action throws an error
 - `app.getState()` returns the full app state (for reading via selectors)
 
-#### 5. UI hooks — `useFeature()` instead of `useAio()`
+#### 5. UI hooks — `useFeature()` for feature components, `useAio()` for layout
 
 **v0.4:**
 ```tsx
@@ -553,7 +823,7 @@ Key changes:
 - `state` is scoped to this feature's slice — `state.count` not `state.counter.count`
 - `send.increment(5)` replaces `send(A.increment(5))` — typed action senders directly on send
 - `status` gives current machine state — `'idle'` | `'saving'` | etc.
-- `useAio()` still works for cross-feature dashboards or layout components
+- `useAio()` is the right choice for root layout, routing, and cross-feature views
 
 #### 6. State machines — new required field
 
@@ -563,9 +833,9 @@ Every feature needs a `machine:` declaration:
 machine: {
   initial: 'idle',
   states: {
-    idle:   { on: { increment: 'idle', save: 'saving' } },
-    saving: { on: { saved: 'idle', saveFailed: 'error' } },
-    error:  { on: { retry: 'saving', dismiss: 'idle' } },
+    idle:   { increment: 'idle', save: 'saving' },
+    saving: { saved: 'idle', saveFailed: 'error' },
+    error:  { retry: 'saving', dismiss: 'idle' },
   },
 }
 ```
@@ -574,7 +844,7 @@ machine: {
 - Action keys in `on:` must match declared action names exactly (typo → startup error)
 - Every state must be reachable from `initial`
 - `_status` is managed by the framework — never set it manually in reduce
-- For trivial features with no lifecycle: `machine: 'simple'` (all actions valid in all states, no `_status`)
+- For trivial features with no lifecycle: `machine: false` (all actions valid in all states, no `_status`)
 
 #### 7. Selectors — feature-scoped
 
@@ -589,14 +859,14 @@ const getCount = (state: AppState) => state.count
 const counter = feature('counter', {
   // ...
   selectors: {
-    getCount: (state: unknown) => (state as Record<string, any>).counter.count,
+    getCount: (s) => s.count,  // receives feature's own state slice
   },
 })
-// Usage from other features:
-const count = counter.selectors.getCount(app.getState())
+// Usage (after bindFeature / aio.run — no state arg needed):
+const count = counter.getCount()
 ```
 
-Selectors read from the full app state (not the feature slice) because they're the public read API for cross-feature data access.
+Selectors receive the feature's own state slice (auto-scoped by the framework). After `aio.run()`, call them directly — no state argument.
 
 #### 8. Boot — `aio.run()` config changes
 
@@ -639,7 +909,7 @@ testFeature(counter, 'increment from idle', (t) => {
   t.init()
   t.send.increment(5)
   t.expect.state(s => s.count === 5)
-  t.expect.effects(['Log'])
+  t.expect.effects(['counter:log'])
   t.expect.status('idle')
 })
 
@@ -658,16 +928,9 @@ testFeature(counter, 'invariant: count is always a number', (t) => {
 })
 ```
 
-### Upgrade steps (keeping v0.4 code)
-
-1. Replace `dep/aio/` with the v0.5 folder
-2. Update `deno.json` version to `"0.5.0"`
-3. Run `deno install`
-4. Run `deno task dev` — existing code works unchanged
-
 ### Migration steps (converting to features)
 
-Convert one feature at a time. Both patterns can coexist during migration.
+Convert one feature at a time.
 
 **1. Create feature directory** (see [structure.md](structure.md) for the full file organization guide):
 ```
@@ -697,7 +960,7 @@ export const counter = feature('counter', {
   machine: {
     initial: 'idle',
     states: {
-      idle: { on: { increment: 'idle', reset: 'idle' } },
+      idle: { increment: 'idle', reset: 'idle' },
     },
   },
 
@@ -776,7 +1039,7 @@ deno task test   # verify framework tests pass
 | **Reducer scope** | Full app state | Feature's state slice only |
 | **Reducer context** | Import A/E manually | `{ A, E }` injected as 3rd param |
 | **Executor scope** | Can dispatch any action | Scoped: own actions only |
-| **State machine** | None | Required (or `'simple'` escape hatch) |
+| **State machine** | None | Required (or `false` to disable guards) |
 | **State shape** | Flat: `{ count: 0 }` | Namespaced: `{ counter: { count: 0, _status: 'idle' } }` |
 | **UI hook** | `useAio<AppState>()` → `{ state, send }` | `useFeature(counter)` → `{ state, send, status }` |
 | **UI dispatch** | `send(A.increment(5))` | `send.increment(5)` |

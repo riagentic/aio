@@ -2,7 +2,7 @@
 
 How features work, how they work together, and how to keep it all under control.
 
-For the docs index, see [manual.md](manual.md). For the API reference (`feature()`, `reactive()`, `flow()`), see [core.md](core.md). For testing, see [testing.md](testing.md). For debugging, see [debugging.md](debugging.md).
+For the docs index, see [manual.md](manual.md). For the API reference (`feature()`, `call()`), see [core.md](core.md). For testing, see [testing.md](testing.md). For debugging, see [debugging.md](debugging.md).
 
 ## What is a feature?
 
@@ -19,31 +19,35 @@ A feature is a self-contained unit: its own state slice, actions, effects, machi
 │  increment  │     │  deposit    │     │  track      │
 │  reset      │     │  withdraw   │     │             │
 │             │     │             │     │ listens to: │
-│ machine:    │     │ machine:    │     │  Counter:*  │
-│  idle→saving│     │  idle→busy  │     │  Wallet:*   │
+│ machine:    │     │ machine:    │     │  counter:*  │
+│  idle→saving│     │  idle→busy  │     │  wallet:*   │
 └─────────────┘     └─────────────┘     └─────────────┘
         │                   │                   ▲
         └───────────────────┴───────────────────┘
                     dispatch loop
 ```
 
-Every feature produces a `FeatureDef` regardless of which tier you use (`reactive()`, `flow()`, `feature()`). They all compose the same way.
+Every feature produces a `FeatureDef` regardless of which style you use (`feature({ methods })`, `feature({ actions, reduce })`, or generators). They all compose the same way.
 
-## The five ways features interact
+## Three ways features interact
 
-| Pattern | Direction | What it does | When to use |
-|---------|-----------|-------------|-------------|
-| [Foreign listeners](#1-foreign-action-listeners) | A reacts to B | B's action triggers A's reducer | Observing, analytics, syncing derived state |
-| [crossDispatch](#2-crossdispatch) | A dispatches to B | A's executor sends actions to B | Effects that need to trigger another feature |
-| [bridge()](#3-bridges) | A ↔ B (request/response) | Managed request, response, timeout, retry | Async coordination between features |
-| [Selectors](#4-selectors) | A reads from B | A calls B's selector to derive values | Computed state, UI display |
-| [Flows + put](#5-flows--ctxput) | A dispatches globally | Flow step dispatches to any feature | Multi-step workflows crossing feature boundaries |
+| Pattern | What | When |
+|---------|------|------|
+| [Observe](#1-observe--react-to-actions) | React when another feature dispatches | Sync state sync, analytics, side-effects |
+| [Read](#2-read--selectors) | Read another feature's derived state | UI display, computed values |
+| [Coordinate](#3-coordinate--trigger-another-feature) | Actively trigger or call another feature | Effects, async workflows, orchestration |
 
-There is no sixth way. If you find yourself passing data between features outside these patterns, something is wrong.
+**Observe** and **Read** are passive — your feature reacts to or reads other features.
+**Coordinate** is active — your feature makes something happen in another feature.
+
+Within Coordinate, choose the right tool:
+- **dispatchTo / ctx.dispatch** — fire-and-forget action (sync, no result)
+- **call()** — async method call, awaits completion and return value
+- **call({ timeout, retries })** — resilient request/response (replaces bridge())
 
 ---
 
-## 1. Foreign action listeners
+## 1. Observe — react to actions
 
 A feature's machine declares that it cares about another feature's actions. The framework routes that action to both the owner and all listeners.
 
@@ -58,31 +62,54 @@ const analytics = feature('analytics', {
   machine: {
     initial: 'active',
     states: {
-      active: { on: {
+      active: {
         trackEvent: 'active',
-        [counter.A.Increment]: 'active',   // listen to counter
-        [counter.A.Reset]: 'active',       // listen to counter
-      } },
+        [counter.increment.type]: 'active',   // listen to counter — use .type
+        [counter.reset.type]: 'active',       // listen to counter — use .type
+      },
     },
   },
-  reduce(state, action, { A }) {
-    switch (action.type) {
-      case A.TrackEvent:
-        (state.events as string[]).push(action.payload.name)
-        break
-      case counter.A.Increment:
-      case counter.A.Reset:
-        (state.events as string[]).push(action.type)
-        break
-    }
+  reduce: {
+    trackEvent(state, payload) {
+      (state.events as string[]).push(payload.name)
+    },
   },
 })
 ```
 
+**Object-form reduce supports computed keys for foreign actions** — no raw strings or function form required:
+
+```ts
+import { counter } from '../counter'
+
+reduce: {
+  // Own actions — by name
+  track(state, payload) { state.events.push(payload.event) },
+
+  // Foreign actions — by computed .type key
+  [counter.increment.type](state, payload) {
+    state.events.push(`counter incremented by ${payload.by}`)
+  },
+},
+```
+
+For foreign action handling using the function form with `{ on }`:
+
+```ts
+  reduce(state, action, { on }) {
+    on(counter.increment, () => {
+      (state.events as string[]).push('counter:increment')
+    })
+    on(counter.reset, () => {
+      (state.events as string[]).push('counter:reset')
+    })
+  },
+```
+
 **How it works:**
-1. `counter.A.Increment` evaluates to `'Counter:Increment'` — a string constant
-2. The framework detects the `:` and sees it doesn't start with `Analytics:` — it's foreign
-3. When `Counter:Increment` is dispatched, the framework reduces it in `counter` first (the owner), then in `analytics` (the listener)
+1. `counter.increment.type` evaluates to `'counter:increment'` — a string constant
+2. The framework detects the `:` and sees it doesn't start with `analytics:` — it's foreign
+3. When `counter:increment` is dispatched, the framework reduces it in `counter` first (the owner), then in `analytics` (the listener)
 4. Both features see the same action; the listener runs after the owner
 
 **Rules:**
@@ -91,36 +118,37 @@ const analytics = feature('analytics', {
 - If the listener is disabled, it's skipped
 - Order: owner reduces first, then listeners (in compose order)
 
-**Use `feature.A.ActionName` instead of string literals** — you get autocomplete, refactor safety, and no typo risk.
+**Use `.type` on bound methods instead of raw strings** — you get autocomplete, refactor safety, and no typo risk.
 
 ### Reactive features as listeners
 
 Reactive features can listen too. The simplest way is `listensTo`:
 
 ```ts
-const logger = reactive('logger', {
+const logger = feature('logger', {
   state: { log: [] as string[] },
-  listensTo: [counter.A.Increment, counter.A.Reset],
+  // Pass bound methods directly — refactor-safe, no raw strings
+  listensTo: [counter.increment, counter.reset],
   methods: {
     clear(s) { s.log = [] },
   },
 })
 ```
 
-`listensTo` auto-generates a minimal machine with self-loop transitions — no need to write `machine: { initial: 'on', states: { on: { on: { ... } } } }` by hand.
+`listensTo` auto-generates a minimal machine with self-loop transitions — no need to write `machine: { initial: 'on', states: { on: { action: 'on' } } }` by hand.
 
 For features that also need real machine states, declare foreign actions in the machine directly:
 
 ```ts
-const logger = reactive('logger', {
+const logger = feature('logger', {
   state: { log: [] as string[] },
   machine: {
     initial: 'on',
     states: {
-      on: { on: {
+      on: {
         clear: 'on',
-        [counter.A.Increment]: 'on',
-      } },
+        [counter.increment.type]: 'on',   // use .type
+      },
     },
   },
   methods: {
@@ -131,159 +159,7 @@ const logger = reactive('logger', {
 
 ---
 
-## 2. crossDispatch
-
-When an executor needs to tell another feature to do something, declare it in `crossDispatch`:
-
-```ts
-const checkout = feature('checkout', {
-  // ...
-  crossDispatch: ['wallet', 'inventory'],
-  execute(app, effect, { E }) {
-    switch (effect.type) {
-      case E.PaymentComplete:
-        app.dispatch(wallet.A.credit(effect.payload.amount))       // allowed
-        app.dispatch(inventory.A.reserve(effect.payload.itemId))   // allowed
-        app.dispatch(shipping.A.schedule(effect.payload.orderId))  // BLOCKED
-        break
-    }
-  },
-})
-```
-
-**What happens when blocked:**
-```
-[checkout] dispatch('Shipping:Schedule') blocked — add 'shipping' to crossDispatch
-```
-
-The action is dropped, an error is counted in the feature's health, and a console error is logged.
-
-**Rules:**
-- Without `crossDispatch`, an executor can only dispatch its own actions
-- `crossDispatch` takes lowercase feature names: `['wallet']` not `['Wallet']`
-- The dispatched action goes through the normal dispatch loop — the target's machine guards still apply
-- `app.getState()` in an executor returns only this feature's slice, not the full state
-
-### Why the restriction?
-
-Without it, any feature could dispatch to any other feature. Debugging becomes "who changed my state?" with no trail. `crossDispatch` makes inter-feature data flow **explicit and grep-able** — you can trace every cross-feature dispatch by searching for `crossDispatch:`.
-
----
-
-## 3. Bridges
-
-When one feature needs to **request** something from another and **wait for the response**, use a bridge. Bridges handle the ceremony: pending tracking, timeouts, retries, circuit breaking, and metrics.
-
-```ts
-import { bridge } from 'aio'
-
-const priceBridge = bridge('priceBridge', {
-  from: 'engine',
-  to: 'dataCollector',
-  channels: {
-    price: {
-      request: (symbol: string) => ({ symbol }),
-      response: (price: number) => ({ price }),
-      timeout: 5000,
-      retries: 2,
-    },
-  },
-  circuitBreaker: {
-    failureThreshold: 5,
-    resetTimeout: 30_000,
-  },
-})
-```
-
-A bridge is itself a feature with auto-generated state, actions, and machine. Per channel it generates:
-
-| Generated action | When |
-|-----------------|------|
-| `PriceBridge:PriceRequest` | Requesting feature dispatches |
-| `PriceBridge:PriceResponse` | Responding feature dispatches |
-| `PriceBridge:PriceTimeout` | Framework dispatches on timeout |
-
-### Wiring
-
-**Requester** — dispatches the request from its executor:
-
-```ts
-const engine = feature('engine', {
-  crossDispatch: ['priceBridge'],
-  execute(app, effect, { E }) {
-    switch (effect.type) {
-      case E.NeedPrice:
-        app.dispatch(priceBridge.request!.price(effect.payload.symbol))
-        break
-    }
-  },
-})
-```
-
-**Responder** — listens for the request via foreign action:
-
-```ts
-const dataCollector = feature('dataCollector', {
-  machine: {
-    initial: 'ready',
-    states: {
-      ready: { on: {
-        [priceBridge.A.PriceRequest]: 'ready',
-      } },
-    },
-  },
-  crossDispatch: ['priceBridge'],
-  execute(app, effect, { E }) {
-    switch (effect.type) {
-      case E.FetchPrice:
-        fetch(`/api/price?symbol=${effect.payload.symbol}`)
-          .then(r => r.json())
-          .then(data => app.dispatch(priceBridge.A.priceResponse(data.price)))
-        break
-    }
-  },
-})
-```
-
-### Bridge state and selectors
-
-```ts
-// Bridge auto-manages this state slice:
-{
-  priceBridge: {
-    pending: { /* correlation ID → { channel, requestedAt, retryCount } */ },
-    metrics: { totalRequests: 42, totalResponses: 40, totalTimeouts: 2, totalLatencyMs: 5040 },
-    circuit: { state: 'closed', failures: 0, lastFailureAt: 0 },
-  }
-}
-
-// Query with selectors:
-priceBridge.selectors.getPendingCount(state)
-priceBridge.selectors.getAverageLatency(state)
-priceBridge.selectors.isCircuitOpen(state)
-```
-
-### Circuit breaker
-
-| State | Behavior |
-|-------|----------|
-| **closed** | Requests flow normally |
-| **open** | Requests rejected immediately (no dispatch) |
-| **half-open** | One test request allowed — success closes, failure re-opens |
-
-Opens after `failureThreshold` consecutive timeouts. Tries recovery after `resetTimeout` ms.
-
-### When to use bridges vs simpler patterns
-
-If you just need "fire and forget" — use foreign listeners or crossDispatch. Bridges add value when you need:
-- Timeout detection (did the other feature respond in time?)
-- Automatic retries
-- Circuit breaking (stop hammering a failing feature)
-- Latency metrics
-
----
-
-## 4. Selectors
+## 2. Read — selectors
 
 Selectors expose derived state that any component can read. They don't create feature coupling — they're read-only views.
 
@@ -291,28 +167,12 @@ Selectors expose derived state that any component can read. They don't create fe
 const counter = feature('counter', {
   state: { count: 0, limit: 100 },
   selectors: {
-    remaining: (fullState: unknown) => {
-      const s = (fullState as Record<string, { count: number; limit: number }>).counter
-      return s.limit - s.count
-    },
+    remaining: (s: { count: number; limit: number }) => s.limit - s.count,
   },
-  // ...
 })
 
 // After aio.run(), callable directly:
 counter.remaining()  // → 100
-```
-
-**Reactive selectors** receive scoped state (just the feature's slice):
-
-```ts
-const counter = reactive('counter', {
-  state: { count: 0, limit: 100 },
-  selectors: {
-    remaining: (s) => s.limit - s.count,
-  },
-  // ...
-})
 ```
 
 **Cross-feature selector use** — one component reads from multiple features:
@@ -336,57 +196,210 @@ Selectors are memoized per render cycle. They don't push updates — React re-ev
 
 ---
 
-## 5. Flows + `ctx.put`
+## 3. Coordinate — trigger another feature
 
-Flows can dispatch actions to any feature via `ctx.put()`:
+### dispatchTo — fire and forget
+
+When an executor needs to tell another feature to do something, declare it in `dispatchTo`:
+
+```ts
+import { wallet } from '../wallet'
+import { inventory } from '../inventory'
+
+const checkout = feature('checkout', {
+  // ...
+  dispatchTo: [wallet, inventory],
+  execute: {
+    paymentComplete(app, payload) {
+      app.dispatch(wallet.A.credit(payload.amount))       // allowed
+      app.dispatch(inventory.A.reserve(payload.itemId))   // allowed
+      app.dispatch(shipping.A.schedule(payload.orderId))  // BLOCKED
+    },
+  },
+})
+```
+
+**What happens when blocked:**
+```
+[checkout] dispatch('shipping:schedule') blocked — add shipping to dispatchTo
+```
+
+The action is dropped, an error is counted in the feature's health, and a console error is logged.
+
+**Rules:**
+- Without `dispatchTo`, an executor can only dispatch its own actions
+- `dispatchTo` takes imported feature objects: `[wallet, inventory]` not `['wallet', 'inventory']`
+- The dispatched action goes through the normal dispatch loop — the target's machine guards still apply
+- `app.getState()` in an executor returns only this feature's slice, not the full state
+
+### Why the restriction?
+
+Without it, any feature could dispatch to any other feature. Debugging becomes "who changed my state?" with no trail. `dispatchTo` makes inter-feature data flow **explicit and grep-able** — you can trace every cross-feature dispatch by searching for `dispatchTo:`.
+
+---
+
+### Direct cross-feature calling
+
+Import any feature and call its async methods directly — fully typed, awaitable, store-observable:
+
+```ts
+import { inventory } from '../inventory'
+import { pricing } from '../pricing'
+
+export const orders = feature('orders', {
+  state: { orderId: null as string | null, total: 0 },
+  methods: {
+    async placeOrder(s, items: Item[]) {
+      const reserved = await inventory.reserve(items)  // typed Promise<ReserveResult>
+      const price = await pricing.calculate(reserved)  // typed Promise<PriceResult>
+      s.orderId = reserved.orderId
+      s.total = price.total
+    },
+  },
+})
+```
+
+Each `await feature.method()` dispatches a real action through the store (`inventory:reserve`), appears in time-travel, and resolves with the method's return value. No strings, no `call()` import needed.
+
+> **Self-imports are safe.** Importing your own feature file (`import { orders } from './index'`)
+> looks circular but works correctly in Deno and Node — the module is fully initialized before
+> any method is called. This is the intended pattern for calling your own feature's methods.
+
+### call() with timeout and retries
+
+When you need timeout/retry on top of direct calling, use `call()` callback form:
+
+```ts
+import { call } from 'aio'
+
+async placeOrder(s, items: Item[]) {
+  // Callback form — direct call wrapped with resilience
+  const reserved = await call({ timeout: 5000, retries: 2 }, () => inventory.reserve(items))
+  s.step = 'done'
+}
+```
+
+- **`timeout`** — rejects after N ms, cleans up the pending entry
+- **`retries`** — retries on any failure up to N times
+
+For circuit breaking, implement it as a regular feature — it's observable, testable, and appears in time-travel like any other state.
+
+---
+
+### ctx.dispatch in generators
+
+Generators can dispatch actions to any feature via `ctx.dispatch()`:
 
 ```ts
 const order = feature('order', {
   // ...
-  flows: {
-    checkout: flow('start', function* (ctx, action) {
+  actions: {
+    start: (amount: number, itemId: string) => ({ amount, itemId }),
+  },
+  generators: {
+    // actions-style: payload object passed directly — destructure it
+    start: function* (ctx, { amount, itemId }: { amount: number; itemId: string }) {
       const payment = yield* ctx.call('pay', () =>
-        processPayment(action.payload.amount)
+        processPayment(amount)
       )
 
-      // Dispatch to another feature
-      yield* ctx.put(inventory.A.reserve(action.payload.itemId))
-      yield* ctx.put(analytics.A.trackEvent('checkout_complete'))
+      // Dispatch to another feature — use A catalog for action objects in ctx.dispatch
+      yield* ctx.dispatch(inventory.A.reserve(itemId))
+      yield* ctx.dispatch(analytics.A.trackEvent('checkout_complete'))
 
       yield* ctx.done(s => { s.orderId = payment.id })
-    }),
+    },
   },
 })
 ```
 
-**`ctx.put()` bypasses `crossDispatch`** — it dispatches directly to the global dispatch loop. The action is tagged with `_source: 'Effect'` and appears in time-travel history.
+**`ctx.dispatch()` bypasses `dispatchTo`** — it dispatches directly to the global dispatch loop. The action is tagged with `_source: 'Effect'` and appears in time-travel history.
 
 ### `ctx.waitFor` — pause until external action
 
-Flows can also wait for actions from other features:
+Generators can also wait for actions from other features:
 
 ```ts
 const checkout = feature('checkout', {
   // ...
-  flows: {
-    purchase: flow('start', function* (ctx, action) {
-      yield* ctx.put(payment.A.charge(action.payload.amount))
+  actions: {
+    start: (amount: number) => ({ amount }),
+  },
+  generators: {
+    start: function* (ctx, { amount }: { amount: number }) {
+      yield* ctx.dispatch(payment.A.charge(amount))
 
       // Pause until payment completes or times out
+      // Pass the bound function directly — no strings
       try {
-        const result = yield* ctx.waitFor('Payment:Complete', 10_000)
+        const result = yield* ctx.waitFor(payment.complete)  // bound fn — preferred
         yield* ctx.done(s => { s.paid = true })
       } catch {
         yield* ctx.fail('payment timed out')
       }
-    }),
+    },
   },
 })
 ```
 
-`ctx.waitFor(actionType, timeout?)` registers a one-shot listener on the dispatch loop. When the matching action fires, the flow resumes with the full action object. Optional timeout throws on expiry (catchable via try/catch).
+`ctx.waitFor(actionType, timeout?)` registers a one-shot listener on the dispatch loop. When the matching action fires, the generator resumes with the full action object. Optional timeout throws on expiry (catchable via try/catch).
 
-Use this for orchestration flows that need to coordinate multiple features in sequence.
+Use this for orchestration generators that need to coordinate multiple features in sequence.
+
+---
+
+### Cross-feature calling — the complete picture
+
+**Default: direct import + call (80% of cases)**
+
+```ts
+import { inventory } from '../inventory'
+import { notifications } from '../notifications'
+
+const checkout = feature('checkout', {
+  state: { step: 'idle' as string },
+  methods: {
+    async placeOrder(s, items: Item[]) {
+      const reserved = await inventory.reserve(items)   // Promise<ReserveResult> — typed
+      await notifications.send('Order confirmed')       // dispatches through the store
+      s.step = 'done'
+    },
+  },
+})
+```
+
+**How it works:**
+1. Calling `inventory.reserve(items)` dispatches a real action (`inventory:reserve`) through the store
+2. Fully observable — appears in time-travel, interceptable by middleware
+3. Returns a `Promise<ReturnType>` — properly typed, no cast needed
+4. Rejects if blocked by machine guard, feature disabled, or method not async
+
+Every bound method also has a `.type` property — use it anywhere you need the action type string:
+
+```ts
+// No raw strings anywhere:
+if (action.type === inventory.reserve.type) { ... }    // 'inventory:reserve'
+listensTo: [inventory.reserve, orders.place]           // pass functions directly
+cancelOn: { start: [orders.cancel] }                   // config key, pass function not string
+yield* ctx.waitFor(gateway.connected)                  // bound fn — preferred
+```
+
+**With timeout/retry:**
+```ts
+import { call } from 'aio'
+
+const reserved = await call({ timeout: 5000, retries: 2 }, () => inventory.reserve(items))
+```
+
+| Option | Type | Effect |
+|--------|------|--------|
+| `timeout` | `number` (ms) | Rejects if method doesn't complete in time |
+| `retries` | `number` | Retries on failure up to N times |
+
+**Rules:**
+- Usable anywhere after `aio.run()` — async methods, execute functions, app code
+- Target method must be async
+- TypeScript infers return type automatically from direct calling
 
 ---
 
@@ -420,16 +433,16 @@ await aio.run({
 - Missing deps throw: `[wallet] depends on unknown feature 'missing'`
 - Duplicates throw: `duplicate feature name: 'counter'`
 
-### Init and destroy hooks
+### onInit and onDestroy hooks
 
 ```ts
 const ws = feature('ws', {
-  init(app) {
+  onInit(app) {
     // Called after all dependencies are initialized
     // app.dispatch and app.getState are scoped to this feature
     startWebSocket(app)
   },
-  destroy(app) {
+  onDestroy(app) {
     // Called before feature state is reset
     closeWebSocket()
   },
@@ -475,15 +488,15 @@ app.features!.enable('analytics')   // re-enables, dispatches Init, resets state
 const health = app.features!.health()
 // [
 //   { name: 'counter', status: 'idle', enabled: true, errors: 0,
-//     lastAction: 'Counter:Increment', lastActionAt: 1710000000000 },
+//     lastAction: 'counter:increment', lastActionAt: 1710000000000 },
 //   { name: 'wallet', status: 'saving', enabled: true, errors: 1,
-//     lastAction: 'Wallet:Save', lastActionAt: 1710000001000 },
+//     lastAction: 'wallet:save', lastActionAt: 1710000001000 },
 // ]
 ```
 
 Also available over HTTP: `GET /__health` returns the same data as JSON.
 
-**Error tracking:** Every blocked `crossDispatch`, init/destroy failure, or executor crash increments the feature's error count. Check `errors` in health output to spot features that are misbehaving.
+**Error tracking:** Every blocked `dispatchTo`, onInit/onDestroy failure, or executor crash increments the feature's error count. Check `errors` in health output to spot features that are misbehaving.
 
 ---
 
@@ -525,12 +538,12 @@ Middleware sees actions across all features — it's the right place for cross-c
 
 ## State filtering for clients
 
-`getUIState` controls what each browser client receives:
+`stateForUI` controls what each browser client receives:
 
 ```ts
 await aio.run({
   features: [shop, auth, admin],
-  getUIState: (state, user?) => ({
+  stateForUI: (state, user?) => ({
     auth: state.auth,
     shop: state.shop,
     admin: user?.role === 'admin' ? state.admin : undefined,
@@ -541,7 +554,7 @@ await aio.run({
 - Called per client on every state broadcast
 - Each client has its own delta cache — filtered features cost zero bandwidth
 - `user` is `undefined` in public mode (no `users` config)
-- If `getUIState` throws, that client is skipped
+- If `stateForUI` throws, that client is skipped
 
 ---
 
@@ -550,15 +563,15 @@ await aio.run({
 ### How should my features talk to each other?
 
 ```
-Feature A needs to...          → Use this pattern
-──────────────────────────────────────────────────────
-Know when B did something      → Foreign listener
-Tell B to do something         → crossDispatch
-Ask B for something + wait     → bridge()
-Read B's derived state         → Selector
-Orchestrate A, B, C in order   → flow() + ctx.put
-Filter what clients see        → getUIState
-Intercept all actions globally → Middleware
+Feature A needs to...                  → Use this pattern
+─────────────────────────────────────────────────────────────
+React when B dispatches                → Observe: foreign listeners
+Read B's derived state                 → Read: selectors
+Tell B to do something (no result)     → Coordinate: dispatchTo or ctx.dispatch
+Call B's async method, get result      → Coordinate: await b.method() — direct import
+Request with retries/timeout           → Coordinate: call({ timeout, retries }, () => b.method())
+Filter what clients see                → stateForUI
+Intercept all actions globally         → Middleware
 ```
 
 ### Keep features independent
@@ -566,16 +579,16 @@ Intercept all actions globally → Middleware
 The best feature is one that doesn't know other features exist. The second-best feature is one that knows about others through a single, explicit pattern.
 
 **Signs of healthy architecture:**
-- Most features have no `crossDispatch` and no foreign listeners
-- Bridges are rare (1-2 per app, not per feature)
-- `getUIState` is a flat mapping, not complex logic
+- Most features have no `dispatchTo` and no foreign listeners
+- `call()` with options is used sparingly (1-2 per app, not per feature)
+- `stateForUI` is a flat mapping, not complex logic
 - You can `testFeature()` each feature in isolation without mocking others
 
 **Signs of trouble:**
-- A feature has `crossDispatch: ['a', 'b', 'c', 'd']` — it's doing too much
+- A feature has `dispatchTo: [a, b, c, d]` with 4+ targets — it's doing too much
 - Multiple features listen to each other's actions in a circle — untangle the dependency
 - A bridge exists between features that could just use a foreign listener — bridges are for async coordination, not observation
-- `getUIState` is 50 lines of conditional logic — split features differently
+- `stateForUI` is 50 lines of conditional logic — split features differently
 
 ### Tracking data flow
 
@@ -585,9 +598,9 @@ Every interaction is visible:
 2. **`app.features.health()`** — error counts, last action per feature
 3. **`GET /__health`** — same health data over HTTP
 4. **`aio.middleware.logger()`** — logs every action with feature prefix
-5. **`crossDispatch` errors** — blocked dispatches are logged with the exact fix needed
+5. **`dispatchTo` errors** — blocked dispatches are logged with the exact fix needed
 
-The action type prefix (`Counter:Increment`, `Wallet:Transfer`) tells you which feature owns the action. The `_source` field tells you who dispatched it (`UI`, `Effect`, `System`, `Test`). Together they answer "what happened and why" for every state change.
+The action type prefix (`counter:increment`, `wallet:transfer`) tells you which feature owns the action. The `_source` field tells you who dispatched it (`UI`, `Effect`, `System`, `Test`). Together they answer "what happened and why" for every state change.
 
 ---
 

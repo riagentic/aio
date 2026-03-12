@@ -4,6 +4,115 @@ Sequential async workflows for aio features. Write top-to-bottom code — each s
 
 For the core feature API, see [core.md](core.md). For reactive features (simpler), see [reactivity.md](reactivity.md). For getting started, see [quickstart.md](quickstart.md).
 
+## Two ways to write generators
+
+### Inline — `generators` key (recommended)
+
+The simplest path. Add a `generators` key to any `feature({ methods })`:
+
+```ts
+import { feature } from 'aio'
+
+const order = feature('order', {
+  state: { status: 'idle' as string, orderId: null as string | null },
+  methods: {
+    reset(s) { s.status = 'idle'; s.orderId = null },
+  },
+  generators: {
+    *place(ctx) {
+      yield* ctx.mutate('processing', s => { s.status = 'processing' })
+      const id = yield* ctx.call('submit', () => submitOrder())
+      yield* ctx.done(s => { s.orderId = id as string; s.status = 'done' })
+    },
+  },
+})
+
+await aio.run({ features: [order] })
+
+order.place()   // dispatches Order:Place, starts the generator
+order.reset()   // plain method — still works
+```
+
+No `flow()` import. No trigger string. The action name is inferred from the generator name (`place` → `Order:Place`).
+
+#### Cancellation with `cancelOn` config key
+
+Declare which actions abort a generator using the `cancelOn` config key:
+
+```ts
+import { feature } from 'aio'
+
+const gateway = feature('gateway', {
+  state: { status: 'idle' },
+  methods: { stop(s) { s.status = 'idle' } },
+  generators: {
+    // No cancellation — just a function
+    fetch: function*(ctx) { ... },
+
+    // Cancellable — declare in cancelOn config, pass bound method or string
+    startup: function*(ctx) {
+      yield* ctx.mutate('init', s => { s.status = 'starting' })
+      yield* ctx.call('connect', () => openConnection())
+      yield* ctx.done(s => { s.status = 'ready' })
+    },
+  },
+  cancelOn: {
+    startup: [gateway.stop],  // bound method (.type) or plain string
+  },
+})
+```
+
+`cancelOn` triggers accept:
+- Bound methods directly (`gateway.stop`) — preferred, refactor-safe
+- Bound methods with `.type` (`gateway.stop.type`) — also works
+- Lowercase type strings (`'gateway:stop'`) — last resort
+
+### With `feature({ actions })` — generators key matches action keys
+
+Generators work in both feature styles. In actions-based features, the generator key must match an action key and receives the **payload object directly** — no casts, no positional indexing:
+
+```ts
+import { feature } from 'aio'
+
+const checkout = feature('checkout', {
+  state: { status: 'idle', orderId: null as string | null },
+  actions: { start: (item: string) => ({ item }), cancel: () => ({}) },
+  generators: {
+    // action: start: (item: string) => ({ item })
+    // generator receives the payload object: { item: string }
+    start: function*(ctx, { item }: { item: string }) {
+      const id = yield* ctx.call('submit', () => submitOrder(item))
+      yield* ctx.done(s => { s.orderId = id as string })
+    },
+  },
+  cancelOn: {
+    start: [checkout.cancel],
+  },
+})
+```
+
+Methods-style generators (`feature({ methods })`) receive **spread args** matching the method signature — same parameter names and types, without the leading `s`:
+
+```ts
+// method: async place(s, item: string, qty: number)
+generators: {
+  place: function*(ctx, item: string, qty: number) {
+    const price = yield* ctx.call('fetchPrice', () => getPrice(item))
+    yield* ctx.done(s => { s.total = (price as number) * qty })
+  },
+}
+```
+
+> **Type annotations required.** TypeScript can't infer arg types from the method signature automatically — annotate them explicitly, same as you would on any function. Without annotations args are `unknown`. This is consistent with how methods work and serves as inline documentation.
+
+> **Quick reference — generator arg styles:**
+> - `feature({ methods })` → generators receive **spread args**: `*place(ctx, item: string, qty: number)`
+> - `feature({ actions })` → generators receive **payload object**: `*place(ctx, { item, qty }: { item: string; qty: number })`
+>
+> Same `generators:` key, different arg shape. The style is determined by which of `methods` or `actions` the feature uses.
+
+---
+
 ## Why generators
 
 The standard reduce/execute pattern is **reactive** — great for "when X happens, do Y." But multi-step workflows get scattered:
@@ -17,7 +126,7 @@ The actual sequence is invisible. You reconstruct it by tracing across files.
 Generators let you write the **same logic sequentially**:
 
 ```ts
-function* checkout(ctx, action) {
+function* checkout(ctx, { item }: { item: string }) {
   const price = yield* ctx.call('fetchPrice', () => fetchPrice(item))
   if (price > 1000) { yield* ctx.fail('too expensive'); return }
   const order = yield* ctx.call('placeOrder', () => placeOrder(price))
@@ -35,7 +144,7 @@ Read top-to-bottom. The framework handles actions, state transitions, and time-t
 | Effect catalog (`fetchPrice`, `placeOrder`) | 0 | inline in `ctx.call()` |
 | Machine states (`fetching`, `confirming`, `done`) | 0 | auto-generated from yield names |
 | Machine transitions | 0 | implied by sequential order |
-| Reducer switch cases | 0 | `ctx.step()` mutates directly |
+| Reducer switch cases | 0 | `ctx.mutate()` mutates directly |
 | Executor switch cases | 0 | `ctx.call()` runs inline |
 
 ### What the framework does at each yield
@@ -43,7 +152,7 @@ Read top-to-bottom. The framework handles actions, state transitions, and time-t
 ```
 yield* ctx.call('fetchPrice', fn)
          │
-         ├─ 1. dispatch({ type: 'Checkout:Flow:FetchPrice' })    ← time-travel visible
+         ├─ 1. dispatch({ type: 'checkout:flow:fetchPrice' })    ← time-travel visible
          ├─ 2. execute fn()                                      ← actual async work
          └─ 3. return result to generator                        ← sequential code continues
 ```
@@ -73,12 +182,14 @@ const price = yield ctx.call(...)   // Generator{} — wrong
 const price = yield* ctx.call(...)  // 42 — correct
 ```
 
+> ⚠️ **Common mistake:** `yield ctx.call(...)` (without `*`) returns the generator object, not the value. Always use `yield*` with all ctx methods. There's no compile-time guard — this fails silently at runtime.
+
 This is standard JavaScript (ES2015+). Works everywhere — Deno, Node, browsers.
 
 ## Complete example
 
 ```ts
-import { feature, flow } from 'aio'
+import { feature } from 'aio'
 
 const checkout = feature('checkout', {
   state: {
@@ -86,23 +197,10 @@ const checkout = feature('checkout', {
     orderId: null as string | null,
     error: null as string | null,
   },
-
-  actions: {
-    start: (item: string) => ({ item }),
-  },
-
-  machine: {
-    initial: 'idle',
-    states: {
-      idle: { on: { start: 'busy' } },
-      busy: { on: {} },
-    },
-  },
-
-  flows: {
-    checkout: flow('start', function* (ctx, action) {
-      const { item } = action.payload as { item: string }
-
+  methods: {},
+  generators: {
+    // methods-style: spread args (no payload wrapper)
+    *place(ctx, item: string) {
       // Step 1 — fetch price
       const res = yield* ctx.call('fetchPrice', () =>
         fetch(`/api/price?item=${item}`).then(r => r.json())
@@ -116,7 +214,7 @@ const checkout = feature('checkout', {
       }
 
       // Step 3 — update state
-      yield* ctx.step('setPrice', s => { s.price = price })
+      yield* ctx.mutate('setPrice', s => { s.price = price })
 
       // Step 4 — place order
       const order = yield* ctx.call('placeOrder', () =>
@@ -130,7 +228,7 @@ const checkout = feature('checkout', {
       yield* ctx.done(s => {
         s.orderId = (order as { id: string }).id
       })
-    }),
+    },
   },
 })
 ```
@@ -138,15 +236,15 @@ const checkout = feature('checkout', {
 **Auto-generated from this flow:**
 
 Actions dispatched (visible in time-travel):
-- `Checkout:Start` (trigger — from your action)
-- `Checkout:Flow:FetchPrice`
-- `Checkout:Flow:SetPrice`
-- `Checkout:Flow:PlaceOrder`
-- `Checkout:Flow:Done` or `Checkout:Flow:Failed`
+- `checkout:place` (trigger — from the generator name)
+- `checkout:flow:fetchPrice`
+- `checkout:flow:setPrice`
+- `checkout:flow:placeOrder`
+- `checkout:flow:done` or `checkout:flow:failed`
 
 You never define these. The flow is the source of truth.
 
-## FlowCtx API
+## GenCtx API
 
 ### `ctx.call(name, fn)` — async work
 
@@ -174,22 +272,41 @@ const { price, currency } = yield* ctx.call('getPrice', () =>
 
 If `fn` throws, the flow catches it and dispatches `{Feature}:Flow:Error`.
 
-### `ctx.step(name, mutate)` — state mutation
+### `ctx.mutate(name, mutate)` — state mutation
 
 Updates the feature's state slice via Immer draft. Dispatches a named action.
 
 ```ts
-yield* ctx.step('updateBalance', s => {
+yield* ctx.mutate('updateBalance', s => {
   s.balance += amount
   s.lastUpdated = Date.now()
 })
 
-yield* ctx.step('addItem', s => {
+yield* ctx.mutate('addItem', s => {
   (s.items as string[]).push(newItem)
 })
 ```
 
-The mutation is applied immediately. Subsequent `ctx.call` or `ctx.step` calls see the updated state.
+The mutation is applied immediately. Subsequent `ctx.call` or `ctx.mutate` calls see the updated state.
+
+`ctx.step` is a deprecated alias for `ctx.mutate` — same behavior.
+
+---
+
+**State is typed automatically.** The `s` parameter in `ctx.mutate`, `ctx.done`, and `ctx.getState()` is typed as your feature's state — no casts needed when generators are defined inside `feature()`.
+
+```ts
+const counter = feature('counter', {
+  state: { count: 0 },
+  generators: {
+    *tick(ctx) {
+      yield* ctx.mutate('inc', s => { s.count += 1 })  // s.count is number ✓
+    },
+  },
+})
+```
+
+For standalone reusable generators, annotate `ctx: GenCtx<{ count: number }>` explicitly. Default is `GenCtx<Record<string, unknown>>`.
 
 ### `ctx.done(mutate?)` — terminal success
 
@@ -219,47 +336,70 @@ if (!valid) {
 }
 
 // This code never executes after ctx.fail
-yield* ctx.step('unreachable', s => { s.x = 1 })
+yield* ctx.mutate('unreachable', s => { s.x = 1 })
 ```
 
 The `return` after `ctx.fail()` is for TypeScript — the flow runtime stops the generator regardless.
 
-### `ctx.put(action)` — dispatch action
+### `ctx.dispatch(action)` — dispatch action
 
 Dispatches a regular action into the system. Other features' reducers and foreign listeners react to it normally.
 
 ```ts
-// Dispatch to own feature
-yield* ctx.put({ type: 'Checkout:Reset', payload: {} })
+// Dispatch to own feature — use A catalog in ctx.dispatch
+yield* ctx.dispatch(checkout.A.reset())
 
 // Dispatch to another feature (cross-feature)
-yield* ctx.put(wallet.A.credit(100))
+yield* ctx.dispatch(wallet.A.credit(100))
 
 // Use the feature's own action creators
-yield* ctx.put(checkout.A.start('widget'))
+yield* ctx.dispatch(checkout.A.start('widget'))
 ```
 
-`ctx.put` doesn't wait for the action to be processed. It dispatches and continues.
+`ctx.dispatch` doesn't wait for the action to be processed. It dispatches and continues.
+
+### `ctx.send(creatorOrType, payload?)` — shorthand dispatch
+
+Shorthand for dispatching to another feature. Accepts a bound method (with `.type`) or a plain type string:
+
+```ts
+// Bound method — no raw strings, refactor-safe
+yield* ctx.send(analytics.log, { msg: 'order placed' })
+
+// Type string — when you only have the string
+yield* ctx.send('analytics:log', { msg: 'order placed' })
+```
+
+Equivalent to `ctx.dispatch({ type: ..., payload: ... })` but shorter. `ctx.dispatch` is still available for full action objects (e.g. when you need to pass `payload` as a nested structure).
 
 ### `ctx.all(...generators)` — parallel execution
 
 Runs multiple calls in parallel, waits for all to complete. Returns results as an array.
 
 ```ts
+// Spread form — destructure by position
 const [user, orders, prefs] = yield* ctx.all(
   ctx.call('loadUser', () => fetchUser(id)),
   ctx.call('loadOrders', () => fetchOrders(id)),
   ctx.call('loadPrefs', () => fetchPrefs(id)),
 )
 
+// Named form — destructure by name (cleaner for 2+ calls)
+const { user, orders } = yield* ctx.all({
+  user:   ctx.call('loadUser', () => fetchUser(id)),
+  orders: ctx.call('loadOrders', () => fetchOrders(id)),
+})
+
 // All three fetches run concurrently
 // Each dispatches its own action for time-travel visibility
-yield* ctx.step('loaded', s => {
+yield* ctx.mutate('loaded', s => {
   s.user = user
   s.orders = orders
   s.prefs = prefs
 })
 ```
+
+Both forms run all calls in parallel. Named form is more readable when you have 2+ calls and want to avoid positional confusion.
 
 If any call throws, the flow errors.
 
@@ -301,36 +441,50 @@ One action in time-travel instead of two. Use `ctx.all` when you want each call 
 
 ### `ctx.getState()` — read current feature state
 
-Returns the current state of the flow's feature. Always fresh — reads the latest committed state after any preceding `ctx.step` or external dispatch.
+Returns the current state of the flow's feature. Always fresh — reads the latest committed state after any preceding `ctx.mutate` or external dispatch.
 
 ```ts
-yield* ctx.step('increment', s => { s.count++ })
-const s = ctx.getState()   // fresh state after the step
-if ((s as { count: number }).count >= 10) {
+yield* ctx.mutate('increment', s => { s.count++ })
+const s = ctx.getState()   // fresh state after the step — typed as feature state
+if (s.count >= 10) {
   yield* ctx.done()
   return
 }
 ```
 
-Not a generator — call it directly (no `yield*`). Use it when you need to read state for control flow decisions without another `ctx.step`.
+Not a generator — call it directly (no `yield*`). Use it when you need to read state for control flow decisions without another `ctx.mutate`.
 
 ### `ctx.waitFor(actionType, timeout?)` — wait for external action
 
 Pauses the flow until a matching action is dispatched anywhere in the system. Returns the full action object.
 
 ```ts
-// Wait for user confirmation
-const confirm = yield* ctx.waitFor('Checkout:Confirm')
-const { approved } = confirm.payload as { approved: boolean }
-if (!approved) { yield* ctx.fail('user cancelled'); return }
+// Preferred: bound method — works directly, .type is used, payload untyped
+const msg = yield* ctx.waitFor(payment.complete)
+const { orderId } = msg.payload as { orderId: string }
 
-// Wait with timeout (throws if expired — catch it with try/catch)
+// With timeout
 try {
-  const response = yield* ctx.waitFor('Payment:Complete', 30_000)
-  yield* ctx.done(s => { s.paid = true })
+  const msg = yield* ctx.waitFor(payment.complete, 30_000)
+  yield* ctx.done(s => { s.orderId = (msg.payload as { orderId: string }).orderId })
 } catch {
   yield* ctx.fail('payment timeout')
 }
+
+// A catalog creator — if you need typed payload inference
+const msg = yield* ctx.waitFor(payment.A.complete)
+const { orderId } = msg.payload  // typed — no cast needed
+```
+
+Note: bound methods dispatch (return void), so they don't carry payload type info — cast needed. A catalog creators return the action object, so TypeScript infers the payload type.
+
+**String form** — use when you only have the type string:
+
+```ts
+// Untyped — payload is unknown, cast manually (use only when you have no bound function)
+const confirm = yield* ctx.waitFor('checkout:confirm')
+const { approved } = confirm.payload as { approved: boolean }
+if (!approved) { yield* ctx.fail('user cancelled'); return }
 ```
 
 **What happens internally:**
@@ -382,27 +536,25 @@ const wallet = feature('wallet', {
   machine: {
     initial: 'idle',
     states: {
-      idle: { on: { deposit: 'idle', withdraw: 'idle', sync: 'syncing' } },
-      syncing: { on: {} },
+      idle: { deposit: 'idle', withdraw: 'idle', sync: 'syncing' },
+      syncing: {},
     },
   },
 
   // Reactive — instant state updates, no async
-  reduce(state, action, { A }) {
-    switch (action.type) {
-      case A.Deposit:
-        state.balance += (action.payload as { amount: number }).amount
-        break
-      case A.Withdraw:
-        state.balance -= (action.payload as { amount: number }).amount
-        break
-    }
+  reduce: {
+    deposit(state, payload) {
+      state.balance += (payload as { amount: number }).amount
+    },
+    withdraw(state, payload) {
+      state.balance -= (payload as { amount: number }).amount
+    },
   },
 
   // Sequential — the sync workflow
-  flows: {
-    sync: flow('sync', function* (ctx) {
-      yield* ctx.step('start', s => { s.syncing = true })
+  generators: {
+    sync: function*(ctx) {
+      yield* ctx.mutate('start', s => { s.syncing = true })
 
       const remote = yield* ctx.call('fetchRemote', () =>
         fetch('/api/balance').then(r => r.json())
@@ -413,7 +565,7 @@ const wallet = feature('wallet', {
         s.syncing = false
         s.lastSync = new Date().toISOString()
       })
-    }),
+    },
   },
 })
 ```
@@ -422,10 +574,10 @@ const wallet = feature('wallet', {
 |---|---|
 | Instant state update (deposit, withdraw, toggle) | `reduce` |
 | React to other features' actions | `reduce` + foreign listeners |
-| Multi-step async sequence | `flow()` |
-| Request/response with retries | `bridge()` |
+| Multi-step async sequence | `generators` |
+| Request/response with retries | `call({ timeout, retries }, ...)` |
 
-## Flow-only features
+## Generator-only features
 
 If your feature is entirely sequential, skip `reduce`, `effects`, and `machine`:
 
@@ -435,11 +587,10 @@ const importer = feature('importer', {
   actions: {
     start: (file: string) => ({ file }),
   },
-  flows: {
-    import: flow('start', function* (ctx, action) {
-      const { file } = action.payload as { file: string }
-
-      yield* ctx.step('begin', s => { s.status = 'running' })
+  generators: {
+    // actions-style: payload object passed directly — destructure it
+    start: function*(ctx, { file }: { file: string }) {
+      yield* ctx.mutate('begin', s => { s.status = 'running' })
 
       const raw = yield* ctx.call('readFile', () => Deno.readTextFile(file))
       const rows = yield* ctx.call('parse', () => JSON.parse(raw as string))
@@ -452,26 +603,51 @@ const importer = feature('importer', {
         s.records = (rows as unknown[]).length
         s.status = 'done'
       })
-    }),
+    },
   },
 })
 ```
 
-No reducer. No effect catalog. No executor. The flow handles everything.
+No reducer. No effect catalog. No executor. The generator handles everything.
 
 ## Patterns
+
+### Self-dispatch from async methods
+
+After `aio.run()`, feature methods are bound to the store. Async methods can call other methods on the same feature via closure — the call dispatches through the store, machine guards apply, and the action appears in time-travel:
+
+```ts
+export const gateway = feature('gateway', {
+  state: { status: 'idle' as string, fails: 0 },
+  methods: {
+    async checkHealth(s) {
+      const ok = await probe(s.url)
+      if (!ok) s.fails++
+      if (s.fails >= 3) gateway.restart()  // dispatches Gateway:Restart through the store
+    },
+    async restart(s) {
+      s.status = 'restarting'
+      // ...
+    },
+  },
+})
+```
+
+This works because by the time `checkHealth` is called, `aio.run()` has already bound `gateway.restart`. No additional API needed.
+
+For cross-feature calls, import the target feature and call directly — it dispatches through the store, respects machine guards, and returns a typed Promise. Use `call({ timeout, retries }, () => feature.method())` when you need resilience.
 
 ### Error handling
 
 Errors in `ctx.call` automatically stop the flow and dispatch `{Feature}:Flow:Error`. For custom error handling, use try/catch:
 
 ```ts
-function* syncFlow(ctx: FlowCtx) {
+function* syncFlow(ctx: GenCtx) {
   try {
     const data = yield* ctx.call('fetch', () => fetchData())
     yield* ctx.done(s => { s.data = data })
   } catch {
-    yield* ctx.step('setError', s => { s.error = 'sync failed' })
+    yield* ctx.mutate('setError', s => { s.error = 'sync failed' })
     yield* ctx.fail('sync failed')
   }
 }
@@ -480,7 +656,7 @@ function* syncFlow(ctx: FlowCtx) {
 ### Retry with backoff
 
 ```ts
-function* resilientFetch(ctx: FlowCtx, url: string, maxRetries = 3) {
+function* resilientFetch(ctx: GenCtx, url: string, maxRetries = 3) {
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     try {
       const result = yield* ctx.call(`fetch-${attempt}`, () =>
@@ -504,12 +680,11 @@ function* resilientFetch(ctx: FlowCtx, url: string, maxRetries = 3) {
 const fetcher = feature('fetcher', {
   state: { data: null, error: null as string | null },
   actions: { start: (url: string) => ({ url }) },
-  flows: {
-    fetch: flow('start', function* (ctx, action) {
-      const { url } = action.payload as { url: string }
+  generators: {
+    start: function*(ctx, { url }: { url: string }) {
       const data = yield* resilientFetch(ctx, url)
       if (data) yield* ctx.done(s => { s.data = data })
-    }),
+    },
   },
 })
 ```
@@ -519,35 +694,35 @@ Reusable generator functions work as composable building blocks. Extract common 
 ### Polling
 
 ```ts
-flows: {
-  monitor: flow('startMonitor', function* (ctx) {
+generators: {
+  startMonitor: function*(ctx) {
     while (true) {
       const status = yield* ctx.call('check', () =>
         fetch('/api/health').then(r => r.json())
       ) as { healthy: boolean }
 
-      yield* ctx.step('update', s => {
+      yield* ctx.mutate('update', s => {
         s.lastCheck = Date.now()
         s.healthy = status.healthy
       })
 
       if (!status.healthy) {
-        yield* ctx.put(alerts.A.trigger('System unhealthy'))
+        yield* ctx.dispatch(alerts.A.trigger('System unhealthy'))  // A catalog used in ctx.dispatch
       }
 
       yield* ctx.sleep('interval', 30_000) // check every 30s
     }
-    // This flow runs indefinitely until cancelled
+    // Runs indefinitely until cancelled
     // (by feature disable, new trigger, or app shutdown)
-  }),
+  },
 }
 ```
 
 ### Pagination
 
 ```ts
-flows: {
-  loadAll: flow('start', function* (ctx) {
+generators: {
+  start: function*(ctx) {
     let page = 1
     let hasMore = true
     const allItems: unknown[] = []
@@ -561,25 +736,22 @@ flows: {
       hasMore = result.hasMore
       page++
 
-      // Update state progressively
-      yield* ctx.step(`loaded-${page}`, s => {
+      yield* ctx.mutate(`loaded-${page}`, s => {
         s.items = allItems
         s.loadedPages = page - 1
       })
     }
 
     yield* ctx.done(s => { s.loading = false })
-  }),
+  },
 }
 ```
 
 ### Conditional branching
 
 ```ts
-flows: {
-  onboard: flow('start', function* (ctx, action) {
-    const { userId } = action.payload as { userId: string }
-
+generators: {
+  start: function*(ctx, { userId }: { userId: string }) {
     const user = yield* ctx.call('loadUser', () => fetchUser(userId))
     const plan = (user as { plan: string }).plan
 
@@ -593,7 +765,7 @@ flows: {
 
     yield* ctx.call('logOnboard', () => analytics.track('onboard', { plan }))
     yield* ctx.done(s => { s.onboarded = true })
-  }),
+  },
 }
 ```
 
@@ -607,13 +779,12 @@ const orderFlow = feature('orderFlow', {
   actions: {
     placeOrder: (item: string, qty: number) => ({ item, qty }),
   },
-  crossDispatch: ['inventory', 'billing', 'notifications'],
-  flows: {
-    place: flow('placeOrder', function* (ctx, action) {
-      const { item, qty } = action.payload as { item: string; qty: number }
+  dispatchTo: [inventory, billing, notifications],
+  generators: {
+    placeOrder: function*(ctx, { item, qty }: { item: string; qty: number }) {
 
       // Reserve stock (dispatch to inventory feature)
-      yield* ctx.put(inventory.A.reserve(item, qty))
+      yield* ctx.dispatch(inventory.A.reserve(item, qty))  // A catalog in ctx.dispatch
 
       // Charge payment
       const charge = yield* ctx.call('charge', () =>
@@ -626,38 +797,51 @@ const orderFlow = feature('orderFlow', {
       )
 
       // Notify user
-      yield* ctx.put(notifications.A.send('Order confirmed!'))
+      yield* ctx.dispatch(notifications.A.send('Order confirmed!'))  // A catalog in ctx.dispatch
 
       yield* ctx.done(s => {
         s.orderId = (order as { id: string }).id
       })
-    }),
+    },
   },
 })
 ```
 
-`ctx.put` dispatches to other features. Declare them in `crossDispatch` for the scoped dispatch guard.
+`ctx.dispatch` dispatches to other features. Declare them in `dispatchTo` for the scoped dispatch guard.
 
 ## Cancellation
 
-### Declarative cancellation with `cancelOn`
+### Declarative cancellation with `cancelOn` config key
 
-Flows can declare action keys that cancel them:
+Declare which actions abort a generator using the `cancelOn` config key:
 
 ```ts
-flows: {
-  healthCheck: flow('start', { cancelOn: ['stop'] }, function* (ctx) {
-    while (true) {
-      yield* ctx.call('check', () => fetch('/health'))
-      yield* ctx.sleep('wait', 30_000)
-    }
-  }),
-}
+import { feature } from 'aio'
 
-// Dispatching gateway.A.stop() cancels the health check flow
+feature('monitor', {
+  // ...
+  generators: {
+    healthCheck: function*(ctx) {
+      while (true) {
+        yield* ctx.call('check', () => fetch('/health'))
+        yield* ctx.sleep('wait', 30_000)
+      }
+    },
+  },
+  cancelOn: {
+    healthCheck: [monitor.stop],  // bound method — preferred, refactor-safe
+  },
+})
+
+// Dispatching monitor.stop() cancels the healthCheck generator
 ```
 
-`cancelOn` accepts action keys (camelCase — resolved to `Prefix:Key`) or full action types (with `:`). The flow is cancelled immediately when any matching action is dispatched.
+`cancelOn` accepts:
+- Bound methods directly (`monitor.stop`) — preferred, refactor-safe
+- Bound methods with `.type` (`monitor.stop.type`) — also works
+- Lowercase type strings (`'monitor:stop'`) — last resort
+
+The generator is cancelled immediately when any matching action is dispatched.
 
 ### Automatic re-trigger cancellation
 
@@ -665,9 +849,9 @@ If a flow is triggered while a previous instance is still running, the old one i
 
 ```ts
 // User clicks "sync" rapidly
-dispatch(sync.A.start())  // flow starts
-dispatch(sync.A.start())  // old flow cancelled, new one starts
-dispatch(sync.A.start())  // old flow cancelled, new one starts
+sync.start()  // flow starts
+sync.start()  // old flow cancelled, new one starts
+sync.start()  // old flow cancelled, new one starts
 ```
 
 Only the latest instance runs. No duplicate work, no race conditions.
@@ -686,7 +870,7 @@ For a flow with these yield points:
 
 ```ts
 yield* ctx.call('fetchPrice', fn)
-yield* ctx.step('validate', fn)
+yield* ctx.mutate('validate', fn)
 yield* ctx.call('placeOrder', fn)
 yield* ctx.done(fn)
 ```
@@ -695,15 +879,15 @@ The framework dispatches these actions (visible in time-travel and devtools):
 
 | Action dispatched | When |
 |---|---|
-| `Checkout:Start` | Trigger action (you defined this) |
-| `Checkout:Flow:FetchPrice` | Before executing the fetch |
-| `Checkout:Flow:Validate` | Before applying state mutation |
-| `Checkout:Flow:PlaceOrder` | Before executing the order |
-| `Checkout:Flow:Done` | Flow completed successfully |
+| `checkout:start` | Trigger action (you defined this) |
+| `checkout:flow:fetchPrice` | Before executing the fetch |
+| `checkout:flow:validate` | Before applying the mutate |
+| `checkout:flow:placeOrder` | Before executing the order |
+| `checkout:flow:done` | Flow completed successfully |
 
 On failure:
-| `Checkout:Flow:Failed` | `ctx.fail()` called |
-| `Checkout:Flow:Error` | Unhandled exception in flow |
+| `checkout:flow:failed` | `ctx.fail()` called |
+| `checkout:flow:error` | Unhandled exception in flow |
 
 All actions have `_source: 'Effect'` and include `_flow` and `_step` metadata in the payload.
 
@@ -717,26 +901,47 @@ const analytics = feature('analytics', {
   machine: {
     initial: 'ready',
     states: {
-      ready: { on: {
-        'Checkout:Flow:Done': 'ready',        // listen to flow completion
-        'Checkout:Flow:Failed': 'ready',      // listen to flow failure
-      }},
+      ready: {
+        'checkout:flow:done': 'ready',        // listen to flow completion
+        'checkout:flow:failed': 'ready',      // listen to flow failure
+      },
     },
   },
-  reduce(state, action, { A }) {
-    if (action.type === 'Checkout:Flow:Done') {
+  // Function-form reduce for flow action matching
+  reduce(state, action) {
+    if (action.type === 'checkout:flow:done') {
       state.checkouts += 1
     }
   },
 })
 ```
 
-## Testing flows
+### Foreign actions in object-form `reduce`
 
-Flows run in the same compose/dispatch system. Test them like any feature:
+Computed keys let you react to foreign actions directly in the object-form reducer — no raw strings needed:
 
 ```ts
-import { feature, flow, composeFeatures } from 'aio'
+import { inventory } from '../inventory'
+
+reduce: {
+  // Own actions — by name
+  increment(state, payload) { state.count += payload.n },
+
+  // Foreign actions — by computed .type key
+  [inventory.reserve.type](state, payload) {
+    state.reserved = payload.items
+  },
+},
+```
+
+Note: `listensTo` declares what foreign actions the machine allows through; the `reduce` object handles them. Both work together — `listensTo` for the guard, computed keys for the handler.
+
+## Testing generators
+
+Generators run in the same compose/dispatch system. Test them like any feature:
+
+```ts
+import { feature, composeFeatures } from 'aio'
 
 // Create a test harness
 function testApp(features) {
@@ -762,7 +967,7 @@ function testApp(features) {
 
 Deno.test('checkout flow: happy path', async () => {
   const app = testApp([checkout])
-  app.dispatch(checkout.A.start('widget'))
+  app.dispatch(checkout.A.start('widget'))   // A catalog used in direct dispatch
   await app.flush()
 
   const s = app.getState().checkout
@@ -771,8 +976,8 @@ Deno.test('checkout flow: happy path', async () => {
 
   // Verify steps were dispatched
   const types = app.dispatched.map(d => d.type)
-  assert(types.includes('Checkout:Flow:FetchPrice'))
-  assert(types.includes('Checkout:Flow:Done'))
+  assert(types.includes('checkout:flow:fetchPrice'))
+  assert(types.includes('checkout:flow:done'))
 })
 
 Deno.test('checkout flow: too expensive', async () => {
@@ -782,7 +987,7 @@ Deno.test('checkout flow: too expensive', async () => {
   await app.flush()
 
   const types = app.dispatched.map(d => d.type)
-  assert(types.includes('Checkout:Flow:Failed'))
+  assert(types.includes('checkout:flow:failed'))
 
   const failAction = app.dispatched.find(d => d.type.includes('Failed'))
   assertEquals(failAction.payload.reason, 'too expensive')
@@ -797,17 +1002,18 @@ For fine-grained testing, directly instantiate the generator:
 Deno.test('checkout flow: step by step', () => {
   const ctx = {
     call: function* (name, fn) { return yield { kind: 'call', name, fn } },
-    step: function* (name, mutate) { yield { kind: 'step', name, mutate } },
+    mutate: function* (name, mutate) { yield { kind: 'mutate', name, mutate } },
+    step: function* (name, mutate) { yield { kind: 'mutate', name, mutate } },  // deprecated alias
     done: function* (mutate) { yield { kind: 'done', mutate } },
     fail: function* (reason) { yield { kind: 'fail', reason }; throw new Error(reason) },
-    put: function* (action) { yield { kind: 'put', action } },
+    dispatch: function* (action) { yield { kind: 'dispatch', action } },
     all: function* (...gens) { return yield { kind: 'all', entries: [] } },
     race: function* (entries) { return yield { kind: 'race', entries: {} } },
     sleep: function* (name, ms) { yield { kind: 'sleep', name, ms } },
   }
 
-  const action = { type: 'Checkout:Start', payload: { item: 'widget' } }
-  const gen = checkoutFlow.generator(ctx, action)
+  // actions-style: pass payload directly (no action wrapper)
+  const gen = checkoutFlow.generator(ctx, { item: 'widget' })
 
   // Step 1: should yield a call to fetchPrice
   const step1 = gen.next()
@@ -845,31 +1051,31 @@ const checkout = feature('checkout', {
   machine: {
     initial: 'idle',
     states: {
-      idle:       { on: { start: 'fetching' } },
-      fetching:   { on: { priceLoaded: 'confirming', failed: 'idle' } },
-      confirming: { on: { confirmed: 'done', failed: 'idle' } },
-      done:       { on: { retry: 'idle' } },
+      idle:       { start: 'fetching' },
+      fetching:   { priceLoaded: 'confirming', failed: 'idle' },
+      confirming: { confirmed: 'done', failed: 'idle' },
+      done:       { retry: 'idle' },
     },
   },
-  reduce(state, action, { A, E }) { /* 5 switch cases */ },
-  execute(app, effect, { E, A }) { /* 2 switch cases */ },
+  reduce: { /* named handlers */ },
+  execute: { /* named handlers */ },
 })
 ```
 
-### Flow (generator)
+### Generator
 
 ```ts
 // 1 action, 0 effects, sequence is the code
 const checkout = feature('checkout', {
   actions: { start: (item: string) => ({ item }) },
-  flows: {
-    checkout: flow('start', function* (ctx, action) {
+  generators: {
+    start: function*(ctx, { item }: { item: string }) {
       const price = yield* ctx.call('fetchPrice', () => fetchPrice(item))
       if (price > 1000) { yield* ctx.fail('too expensive'); return }
-      yield* ctx.step('setPrice', s => { s.price = price })
+      yield* ctx.mutate('setPrice', s => { s.price = price })
       const order = yield* ctx.call('placeOrder', () => placeOrder(price))
       yield* ctx.done(s => { s.orderId = order.id })
-    }),
+    },
   },
 })
 ```
@@ -894,11 +1100,12 @@ Flows can do everything, but for some problems reduce/execute is the simpler too
 
 ```ts
 // Natural as a reducer — reacts to any source
-reduce(state, action, { A }) {
-  case dc.A.PriceUpdated:
-    state.total = recalc(state)     // reacts to price changes from anywhere
-  case A.TaxRateChanged:
-    state.tax = state.total * rate  // reacts to tax rate changes from anywhere
+reduce: {
+  taxRateChanged(state) {
+    state.tax = state.total * rate   // reacts to tax rate changes from anywhere
+  },
+  // For foreign actions, use function-form with { on }:
+  // reduce(state, action, { on }) { on(dc.priceUpdated, () => { state.total = recalc(state) }) }
 }
 
 // Awkward as a flow — what triggers it? It's not a sequence.
@@ -913,9 +1120,9 @@ A flow lives in memory. If the server restarts mid-flow, it's gone. For a 3-seco
 machine: {
   initial: 'awaitingVerification',
   states: {
-    awaitingVerification: { on: { emailVerified: 'awaitingLogin' } },
-    awaitingLogin:        { on: { firstLogin: 'active' } },
-    active:               { on: { dayThree: 'nudgeSent' } },
+    awaitingVerification: { emailVerified: 'awaitingLogin' },
+    awaitingLogin:        { firstLogin: 'active' },
+    active:               { dayThree: 'nudgeSent' },
     nudgeSent:            {},
   },
 }
@@ -927,24 +1134,25 @@ A flow has one trigger. If the same state can be reached from 5 different action
 
 ```ts
 // One reducer handles all entry points
-reduce(state, action, { A }) {
-  case A.UserClicked:
-  case A.WsMessage:
-  case A.TimerFired:
-  case otherFeature.A.Completed:
-    state.ready = true   // same logic, any source
+// Object form for own actions:
+reduce: {
+  userClicked(state) { state.ready = true },
+  wsMessage(state) { state.ready = true },
+  timerFired(state) { state.ready = true },
 }
+// Foreign actions use function form with { on }:
+// reduce(state, action, { on }) { on(otherFeature.completed, () => { state.ready = true }) }
 ```
 
 ### Summary
 
 | Problem shape | Best tool |
 |---|---|
-| Sequential: do A, then B, then C | `flow()` |
+| Sequential: do A, then B, then C | `generators` |
 | Reactive: when X happens, do Y | `reduce` |
 | Long-lived: survives server restarts | `machine` + persistence |
 | Multi-entry: same state from many sources | `reduce` |
-| Mix of both | `reduce` + `flow()` in same feature |
+| Mix of both | `reduce` + `generators` in same feature |
 
 Flows handle ~95% of async workflows. The remaining cases aren't limitations — they're just problems shaped differently, where reduce/execute is already the simpler answer.
 
@@ -952,35 +1160,35 @@ Flows handle ~95% of async workflows. The remaining cases aren't limitations —
 
 ### How it works
 
-1. `flow('start', fn)` creates a `FlowDef` — a trigger action key + generator function
-2. `feature()` validates the trigger exists in `actions` and stores the flow definition
+1. Each `generators` entry creates a `FlowDef` internally — trigger key + generator function
+2. `feature()` validates generator keys match declared actions (or auto-creates them in methods features)
 3. `composeFeatures()` wires flow triggers into the reducer — when a trigger action is dispatched, the reducer emits an internal `__flow` effect
 4. The root executor catches `__flow` effects and calls `runFlow()` asynchronously
-5. `runFlow()` creates a `FlowCtx`, instantiates the generator, and advances it step by step
+5. `runFlow()` creates a `GenCtx`, instantiates the generator, and advances it step by step
 6. At each yield, the runner dispatches actions and executes work
 7. State mutations use `produce()` (Immer) and dispatch internal `__FlowState` actions
 8. The root reducer handles `__FlowState` by replacing the feature's state slice
 
 ### Action naming convention
 
-Flow actions follow the pattern: `{Prefix}:Flow:{StepName}`
+Flow actions follow the pattern: `{featureName}:flow:{stepName}`
 
-- `Prefix` — PascalCase feature name (`Checkout`, `Wallet`)
-- `Flow:` — fixed namespace separator
-- `StepName` — PascalCase version of the name you pass to `ctx.call/step/sleep`
-- `Done` / `Failed` / `Error` — terminal action names
+- `featureName` — lowercase feature name (`checkout`, `wallet`)
+- `flow:` — fixed namespace separator
+- `stepName` — camelCase version of the name you pass to `ctx.call/mutate/sleep`
+- `done` / `failed` / `error` — terminal action names
 
 ### Internal actions
 
 | Action | Purpose | Visible in time-travel? |
 |---|---|---|
-| `{Prefix}:Flow:{Name}` | Step marker | Yes |
-| `{Prefix}:Flow:Done` | Flow completed | Yes |
-| `{Prefix}:Flow:Failed` | `ctx.fail()` called | Yes |
-| `{Prefix}:Flow:Error` | Unhandled exception | Yes |
-| `{Prefix}:Flow:WaitFor` | Waiting for external action | Yes |
-| `{Prefix}:__FlowState` | State mutation delivery | No (internal) |
-| `{Prefix}:__flow` | Flow trigger effect | No (internal) |
+| `{feature}:flow:{name}` | Step marker | Yes |
+| `{feature}:flow:done` | Flow completed | Yes |
+| `{feature}:flow:failed` | `ctx.fail()` called | Yes |
+| `{feature}:flow:error` | Unhandled exception | Yes |
+| `{feature}:flow:waitFor` | Waiting for external action | Yes |
+| `{feature}:__flowState` | State mutation delivery | No (hidden — internal only, never appears in time-travel) |
+| `{feature}:__flow` | Flow trigger effect | No (hidden — internal only, never appears in time-travel) |
 
 ### Cancellation internals
 
@@ -996,36 +1204,50 @@ Re-triggering the same flow cancels the previous instance before starting a new 
 ## Types
 
 ```ts
-import type { FlowCtx, FlowDef, Gen } from 'aio'
+import type { GenCtx, Gen, TypedCreator } from 'aio'
 
-// FlowCtx — the context object passed to your generator
-type FlowCtx = {
+// GenCtx<S> — the context object passed to your generator
+// S is the feature's state shape, inferred automatically inside feature()
+type GenCtx<S = Record<string, unknown>> = {
   call: <T>(name: string, fn: () => T | Promise<T>) => Gen<Awaited<T>>
-  step: (name: string, mutate: (draft: Record<string, unknown>) => void) => Gen<void>
-  done: (mutate?: (draft: Record<string, unknown>) => void) => Gen<void>
+  mutate: (name: string, mutate: (draft: S) => void) => Gen<void>
+  step: (name: string, mutate: (draft: S) => void) => Gen<void>  // deprecated alias for mutate
+  done: (mutate?: (draft: S) => void) => Gen<void>
   fail: (reason: string) => Gen<never>
-  put: (action: { type: string; payload: unknown }) => Gen<void>
-  all: <T extends readonly Gen<unknown>[]>(...gens: T) => Gen<{ [K in keyof T]: T[K] extends Gen<infer R> ? R : never }>
+  dispatch: (action: { type: string; payload?: unknown }) => Gen<void>
+  send: (creatorOrType: { type: string } | string, payload?: unknown) => Gen<void>
+  all: {
+    <T extends readonly Gen<unknown>[]>(...gens: T): Gen<{ [K in keyof T]: T[K] extends Gen<infer R> ? R : never }>
+    <T extends Record<string, Gen<unknown>>>(entries: T): Gen<{ [K in keyof T]: T[K] extends Gen<infer R> ? R : never }>
+  }
   race: <T extends Record<string, Gen<unknown>>>(entries: T) => Gen<{ [K in keyof T]?: T[K] extends Gen<infer R> ? R : never }>
   sleep: (name: string, ms: number) => Gen<void>
-  waitFor: (actionType: string, timeout?: number) => Gen<Msg>
-  getState: () => Record<string, unknown>
+  waitFor: {
+    <P>(creator: TypedCreator<P>, timeout?: number): Gen<{ type: string; payload: P }>
+    (creatorOrType: { type: string } | string, timeout?: number): Gen<Msg>
+  }
+  getState: () => S
 }
 
 // Gen<T> — return type for generator functions
 type Gen<T = void> = Generator<FlowStep, T, unknown>
-
-// FlowDef — returned by flow(), consumed by feature()
-type FlowDef = {
-  trigger: string
-  generator: (ctx: FlowCtx, action: Msg) => Gen<unknown>
-}
 ```
 
 Use `Gen<T>` as the return type when writing reusable generator functions:
 
 ```ts
-function* fetchWithRetry(ctx: FlowCtx, url: string): Gen<unknown> {
-  // ...reusable generator logic
+// Standalone reusable generator — annotate state type explicitly
+function* fetchWithRetry(ctx: GenCtx<{ result: unknown }>, url: string): Gen<unknown> {
+  // ...
 }
+
+// Inside feature() — S is inferred from state:, no annotation needed
+const fetcher = feature('fetcher', {
+  state: { result: null },
+  generators: {
+    *start(ctx) {
+      // ctx is GenCtx<{ result: null }> — typed automatically
+    },
+  },
+})
 ```

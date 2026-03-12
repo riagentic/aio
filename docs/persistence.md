@@ -22,24 +22,40 @@ Example: if `initialState` has `{ user: { name: "", age: 0 } }` and persisted ha
 
 ### Filtering persisted state
 
-Use `getDBState` to exclude transient data:
+**Per-feature exclusion (recommended)** — declare excluded fields directly in the feature:
 
 ```ts
-await aio.run(initialState, {
-  reduce,
-  execute,
-  getDBState: (s) => ({ counter: s.counter }),  // only persist counter, not UI state
+const editor = feature('editor', {
+  state: {
+    content: '',
+    htmlCache: '',   // derived — no need to persist
+    thumbnail: '',   // generated — rebuild on load
+  },
+  methods: { ... },
+  persist: { exclude: ['htmlCache', 'thumbnail'] },
 })
 ```
+
+Each feature owns its own persistence config. Fields in `exclude` are stripped from the KV snapshot automatically. Multiple features can each declare excludes — they compose without any manual merging.
+
+**App-level exclusion** — use `stateForDB` when you need full control or want to filter entire features:
+
+```ts
+await aio.run({
+  features: [myFeature],
+  stateForDB: (s) => ({ counter: s.counter }),  // only persist counter, not UI state
+})
+```
+
+`stateForDB` at `aio.run()` level takes precedence over per-feature `persist.exclude` — only one runs.
 
 ### Large state — multi-key mode
 
 The default `'single'` mode stores all state in one Deno.Kv entry (65KB limit). For larger state, use `persistMode: 'multi'` — each top-level state key is stored separately, so the limit applies per-key rather than to the whole state object:
 
 ```ts
-await aio.run(initialState, {
-  reduce,
-  execute,
+await aio.run({
+  features: [myFeature],
   persistMode: 'multi',  // stores state.todos, state.users, etc. as separate KV keys
 })
 ```
@@ -49,9 +65,8 @@ await aio.run(initialState, {
 ### Disabling persistence
 
 ```ts
-await aio.run(initialState, {
-  reduce,
-  execute,
+await aio.run({
+  features: [myFeature],
   persist: false,  // state resets on every restart
 })
 ```
@@ -77,8 +92,8 @@ type AppState = {
   orders: Order[]       // → SQLite
 }
 
-await aio.run(initialState, {
-  reduce, execute,
+await aio.run({
+  features: [myFeature],
   db: {
     users: table({
       id:    pk(),
@@ -110,12 +125,14 @@ Column helpers:
 Reducer mutates arrays as normal. Framework syncs to SQLite automatically:
 
 ```ts
-case A.AddOrder:
-  d.orders.push({ id: d.nextId++, customer: action.payload.customer, total: 0, userId: action.payload.userId })
-  return []
-case A.RemoveOrder:
-  d.orders = d.orders.filter(o => o.id !== action.payload.id)
-  return []
+reduce: {
+  addOrder(state, payload) {
+    state.orders.push({ id: state.nextId++, customer: payload.customer, total: 0, userId: payload.userId })
+  },
+  removeOrder(state, payload) {
+    state.orders = state.orders.filter(o => o.id !== payload.id)
+  },
+},
 ```
 
 On startup, SQLite data populates state arrays. After each reduce, changed arrays sync back. Reference equality (`!==`) determines which tables need writing — Immer guarantees new refs on mutation.
@@ -125,10 +142,12 @@ On startup, SQLite data populates state arrays. After each reduce, changed array
 For effects that need direct data access. Available on `app.db!.<tableName>`:
 
 ```ts
-case E.LoadExpensiveOrders:
-  const expensive = app.db!.orders.where({ total: { gt: 1000 } })
-  app.dispatch(A.ordersFiltered(expensive))
-  break
+execute: {
+  loadExpensiveOrders(app) {
+    const expensive = app.db!.orders.where({ total: { gt: 1000 } })
+    app.dispatch(myFeature.A.ordersFiltered(expensive))
+  },
+},
 ```
 
 Methods:
@@ -173,12 +192,14 @@ app.db!.settings.upsert({ id: 1, theme: 'dark' })
 For aggregation, joins, complex queries:
 
 ```ts
-case E.RevenueReport:
-  const stats = app.db!.query<{ customer: string; revenue: number }>(
-    'SELECT customer, SUM(total) as revenue FROM orders GROUP BY customer'
-  )
-  app.dispatch(A.reportLoaded(stats))
-  break
+execute: {
+  revenueReport(app) {
+    const stats = app.db!.query<{ customer: string; revenue: number }>(
+      'SELECT customer, SUM(total) as revenue FROM orders GROUP BY customer'
+    )
+    app.dispatch(myFeature.A.reportLoaded(stats))
+  },
+},
 ```
 
 Raw methods:
@@ -249,7 +270,7 @@ If you need custom behavior, handle it in your reducer (idempotency, conflict re
 Export and import state for debugging, backup, or state transfer. **Server-only** — `snapshot()` and `loadSnapshot()` are `undefined` in standalone/Android mode.
 
 ```ts
-const app = await aio.run(initialState, { reduce, execute })
+const app = await aio.run({ features: [myFeature] })
 
 // Export current state
 const json = app.snapshot!()           // returns JSON string

@@ -6,7 +6,7 @@ For the docs index, see [manual.md](manual.md). For the core API (`feature`, `re
 
 ## `useAio<S>()` — full state hook
 
-> **v0.5+ apps:** Prefer [`useFeature(ref)`](core.md#usefeatureref--react-hook-for-features) — it gives you scoped state, typed `send`, machine `status`, and only re-renders when your feature's slice changes. Use `useAio()` when you need the full state tree or multiple features in one component.
+React hook for **root layout, routing, and cross-feature views** — full app state + untyped `send`. For feature components, use [`useFeature(ref)`](core.md#usefeatureref--react-hook-for-features) — scoped state, typed `send`, machine `status`, and selective re-renders.
 
 React hook — connects to the server via WebSocket, syncs state, provides `send`.
 
@@ -126,13 +126,12 @@ export default function App() {
 
 ## UI state filtering
 
-Use `getUIState` to control what the browser sees. Useful for stripping server-only data:
+Use `stateForUI` to control what the browser sees. Useful for stripping server-only data:
 
 ```ts
-await aio.run(initialState, {
-  reduce,
-  execute,
-  getUIState: (s) => ({
+await aio.run({
+  features: [myFeature],
+  stateForUI: (s) => ({
     counter: s.counter,
     username: s.username,
     // s.apiKey is NOT sent to the browser
@@ -140,20 +139,20 @@ await aio.run(initialState, {
 })
 ```
 
-When `getUIState` is set, `useAio<T>()` should use the filtered shape as its generic, not the full `AppState`.
+When `stateForUI` is set, `useAio<T>()` should use the filtered shape as its generic, not the full `AppState`.
 
-### Per-user getUIState
+### Per-user stateForUI
 
-`getUIState` accepts an optional `user` — an `AioUser` object resolved from the client's auth token. Useful for role-based state filtering:
+`stateForUI` accepts an optional `user` — an `AioUser` object resolved from the client's auth token. Useful for role-based state filtering:
 
 ```ts
-await aio.run(initialState, {
-  reduce, execute,
+await aio.run({
+  features: [myFeature],
   users: {
     'alice-token': { id: 'alice', role: 'admin' },
     'bob-token':   { id: 'bob',   role: 'viewer' },
   },
-  getUIState: (state, user?) => {
+  stateForUI: (state, user?) => {
     if (user?.role === 'admin') return state  // admins see everything
     return { items: state.items.filter(i => i.ownerId === user?.id) }
   },
@@ -162,11 +161,11 @@ await aio.run(initialState, {
 
 **How it works:**
 1. Each WebSocket connection resolves an `AioUser` from its auth token
-2. On every broadcast, `getUIState(state, user?)` is called per client
+2. On every broadcast, `stateForUI(state, user?)` is called per client
 3. Delta patches are computed per client — each client has its own delta cache. For v0.5 namespaced state, patches are granular to sub-keys within feature slices (e.g. only `scrollY` is sent, not the entire feature)
 4. `user` is `undefined` in public mode (no `users` config)
 
-**Backwards compatible:** If your `getUIState` doesn't use `user`, all clients get the same state.
+**Backwards compatible:** If your `stateForUI` doesn't use `user`, all clients get the same state.
 
 ## Styling
 

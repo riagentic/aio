@@ -62,10 +62,10 @@ const users: Record<string, AioUser> = {
   'bob-secret-456':   { id: 'bob',   role: 'viewer' },
 }
 
-await aio.run(initialState, {
-  reduce, execute,
+await aio.run({
+  features: [myFeature],
   users,
-  getUIState: (state, user?) => {
+  stateForUI: (state, user?) => {
     if (user?.role === 'admin') return state
     return { publicData: state.publicData }
   },
@@ -105,8 +105,8 @@ aio.middleware.create((action, state, next, user) => {
 Or via `beforeReduce`:
 
 ```ts
-await aio.run(state, {
-  reduce, execute,
+await aio.run({
+  features: [myFeature],
   beforeReduce: (action, state, user?) => {
     if (action.type === 'Admin' && user?.role !== 'admin') return null
     return action
@@ -126,7 +126,7 @@ A summary of aio's security posture and known limitations:
 |--------|-----------|
 | Unauthorized WebSocket/HTTP access | Token auth (`--expose` or `users:`) — timing-safe comparison |
 | Cross-origin browser requests (localhost) | `Origin` header validation — only same-origin allowed when not exposed |
-| State leakage per user | `getUIState(state, user?)` — server-side filtering per client |
+| State leakage per user | `stateForUI(state, user?)` — server-side filtering per client |
 | Trojan API abuse from web | `/__trojan/*` bound to `127.0.0.1` HTTP-only — unreachable from browser even with TLS |
 | Reducer/effect crashes taking down server | All errors caught and logged, dispatch loop continues |
 | XSS in error overlay | `escHtml()` sanitizes filenames, paths, and error text |

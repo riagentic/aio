@@ -1,6 +1,5 @@
-// integration-reactive.test.ts — reactive() integration with compose pipeline
+// integration-reactive.test.ts — feature({ methods }) integration with compose pipeline
 import { assertEquals } from 'https://deno.land/std@0.208.0/assert/mod.ts'
-import { reactive } from '../src/reactive.ts'
 import { feature, composeFeatures } from '../src/feature.ts'
 
 function delay(ms: number): Promise<void> {
@@ -29,8 +28,8 @@ function createApp(composed: ReturnType<typeof composeFeatures>) {
 
 // ── Multi-feature reactive composition ──────────────────────────────
 
-Deno.test('integration: two reactive features compose independently', () => {
-  const counter = reactive('counter', {
+Deno.test('integration: two feature(methods) features compose independently', () => {
+  const counter = feature('counter', {
     state: { count: 0 },
     methods: {
       increment(s) { s.count++ },
@@ -38,7 +37,7 @@ Deno.test('integration: two reactive features compose independently', () => {
     },
   })
 
-  const todo = reactive('todo', {
+  const todo = feature('todo', {
     state: { items: [] as string[] },
     methods: {
       add(s, item: string) { s.items.push(item) },
@@ -59,8 +58,8 @@ Deno.test('integration: two reactive features compose independently', () => {
 
 // ── Reactive + event-driven cross-feature ───────────────────────────
 
-Deno.test('integration: event-driven feature reacts to reactive feature actions', () => {
-  const cart = reactive('cart', {
+Deno.test('integration: event-driven feature reacts to feature(methods) feature actions', () => {
+  const cart = feature('cart', {
     state: { items: [] as string[] },
     methods: {
       addItem(s, item: string) { s.items.push(item) },
@@ -74,12 +73,12 @@ Deno.test('integration: event-driven feature reacts to reactive feature actions'
     machine: {
       initial: 'active',
       states: {
-        active: { on: { noop: 'active', 'Cart:AddItem': 'active', 'Cart:Clear': 'active' } },
+        active: { noop: 'active', 'cart:addItem': 'active', 'cart:clear': 'active' },
       },
     },
-    reduce(state, action) {
-      if (action.type === 'Cart:AddItem') state.addCount++
-      if (action.type === 'Cart:Clear') state.clearCount++
+    reduce: {
+      ['cart:addItem'](state) { state.addCount++ },
+      ['cart:clear'](state) { state.clearCount++ },
     },
   })
 
@@ -98,14 +97,14 @@ Deno.test('integration: event-driven feature reacts to reactive feature actions'
 
 // ── Async reactive + sync reactive interaction ──────────────────────
 
-Deno.test('integration: async reactive method with machine + sync methods', async () => {
-  const workflow = reactive('workflow', {
+Deno.test('integration: async feature(methods) method with machine + sync methods', async () => {
+  const workflow = feature('workflow', {
     state: { step: 'none', data: null as string | null },
     machine: {
       initial: 'idle',
       states: {
-        idle:       { on: { start: 'running' } },
-        running:    { on: { complete: 'idle' } },
+        idle:       { start: 'running' },
+        running:    { complete: 'idle' },
       },
     },
     methods: {
@@ -136,21 +135,21 @@ Deno.test('integration: async reactive method with machine + sync methods', asyn
 
 // ── Lifecycle hooks with multiple reactive features ─────────────────
 
-Deno.test('integration: init and destroy across multiple reactive features', () => {
+Deno.test('integration: init and destroy across multiple feature(methods) features', () => {
   const log: string[] = []
 
-  const a = reactive('alpha', {
+  const a = feature('alpha', {
     state: { ready: false },
     methods: { activate(s) { s.ready = true } },
-    init: () => { log.push('alpha:init') },
-    destroy: () => { log.push('alpha:destroy') },
+    onInit: () => { log.push('alpha:init') },
+    onDestroy: () => { log.push('alpha:destroy') },
   })
 
-  const b = reactive('beta', {
+  const b = feature('beta', {
     state: { ready: false },
     methods: { activate(s) { s.ready = true } },
-    init: () => { log.push('beta:init') },
-    destroy: () => { log.push('beta:destroy') },
+    onInit: () => { log.push('beta:init') },
+    onDestroy: () => { log.push('beta:destroy') },
   })
 
   const composed = composeFeatures([a, b])
@@ -166,8 +165,8 @@ Deno.test('integration: init and destroy across multiple reactive features', () 
 
 // ── Selectors across composed features ──────────────────────────────
 
-Deno.test('integration: selectors work across composed reactive features', () => {
-  const prices = reactive('prices', {
+Deno.test('integration: selectors work across composed feature(methods) features', () => {
+  const prices = feature('prices', {
     state: { items: [{ name: 'A', price: 10 }, { name: 'B', price: 20 }] },
     methods: {
       addItem(s, name: string, price: number) { s.items.push({ name, price }) },
@@ -192,7 +191,7 @@ Deno.test('integration: selectors work across composed reactive features', () =>
 // ── Batching across await boundaries ────────────────────────────────
 
 Deno.test('integration: batching produces correct action count across awaits', async () => {
-  const store = reactive('store', {
+  const store = feature('store', {
     state: { a: 0, b: 0, c: 0, d: 0 },
     methods: {
       async multiStep(s) {

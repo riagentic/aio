@@ -19,7 +19,7 @@ App types: `browser`, `electron`, `android`, `cli`, `service`, `remote-browser`,
 
 ## Option B: JSR dependency (library only)
 
-If you want just the library (types, reactive, feature, flow, hooks) without the build toolchain:
+If you want just the library (types, feature, flow, hooks) without the build toolchain:
 
 ```sh
 deno add @riagentic/aio
@@ -27,7 +27,7 @@ deno add @riagentic/aio
 
 Then import:
 ```ts
-import { reactive, aio, feature, flow } from '@riagentic/aio'
+import { feature, aio, flow } from '@riagentic/aio'
 ```
 
 > **Note:** JSR gives you the library API. The full development experience (dev server with hot reload, `deno task compile`, app manager, Electron/Android packaging) requires the scaffolder from Option A.
@@ -87,18 +87,19 @@ deno.json
 src/
   app.ts                       ← aio.run({ features }) — boot only
   App.tsx                      ← root UI — layout + routing only
-  features/counter/index.ts    ← feature() — state, actions, machine, reduce, execute
+  features/counter/index.ts    ← feature() — state, methods, machine
   style.css                    ← (optional)
 ```
 
-Features start as a single `index.ts`. As they grow, extract `types.ts`, `helpers.ts`, `reduce.ts`, `execute.ts`, `ui/`. See [structure.md](structure.md) for the full guide.
-
 ### features/counter/index.ts
 
-```ts
-import { reactive } from 'aio'
+> **Start here.** 95% of features only need `methods`. The `actions + reduce` style
+> exists for complex reactive logic — don't reach for it until you feel the pain.
 
-export const counter = reactive('counter', {
+```ts
+import { feature } from 'aio'
+
+export const counter = feature('counter', {
   state: { count: 0 },
   methods: {
     increment(s, by = 1) { s.count += by },
@@ -189,7 +190,7 @@ testFeature(counter, 'increment from idle', (t) => {
   t.expect.status('idle')
 })
 
-// Async tests — for reactive async methods
+// Async tests
 testFeature(backup, 'runs backup', async (t) => {
   t.init()
   t.send.run()
@@ -199,175 +200,68 @@ testFeature(backup, 'runs backup', async (t) => {
 })
 ```
 
-### Adding async methods
+### Async methods and call()
 
-Async methods get a live Proxy — reads are always fresh, writes auto-dispatch:
+Async methods have the same `(state, ...args)` signature as sync methods — a live Proxy replaces the state draft:
 
 ```ts
-import { reactive } from 'aio'
+import { feature, call } from 'aio'
 
-export const backup = reactive('backup', {
-  state: { lastBackup: null as string | null, status: 'idle' },
+export const api = feature('api', {
+  state: { data: null as string | null },
   methods: {
-    async run(s) {
-      s.status = 'running'
-      const data = await Deno.readTextFile('./data.json')
-      await fetch('/api/backup', { method: 'POST', body: data })
-      s.lastBackup = new Date().toISOString()
-      s.status = 'idle'
+    // Sync and async — same signature
+    clear(s) { s.data = null },
+
+    async fetch(s, url: string) {
+      const res = await fetch(url)
+      s.data = await res.text()
+    },
+
+    // Direct cross-feature calling — import and call directly (typed)
+    async saveAndNotify(s) {
+      await notifications.send('Data saved!')  // or: await call({ timeout: 3000 }, () => notifications.send('Data saved!'))
+      s.lastNotified = Date.now()
     },
   },
 })
 ```
 
-Each property assignment dispatches a real action — persisted, synced, visible in time-travel. See [reactivity.md](reactivity.md) for the full guide.
+### Advanced / explicit control — actions + reduce
 
-### Upgrading to flows or feature()
+> **Don't start here.** Use `methods` first. Reach for `actions + reduce` only when you need
+> complex reactive logic, multiple entry points to the same state change, or strict machine gating
+> that methods can't express.
 
-When you need step-level observability, auto-cancellation, or complex reactive logic, upgrade individual features to `flow()` or `feature()`. See [generators.md](generators.md) and [core.md](core.md#feature) for details.
+When you need fine-grained control over state transitions:
+
+```ts
+import { feature } from 'aio'
+
+export const checkout = feature('checkout', {
+  state: { step: 'idle' as 'idle' | 'processing' | 'done' },
+  actions: {
+    start: () => ({}),
+    complete: () => ({}),
+  },
+  reduce: {
+    start(state) {
+      state.step = 'processing'
+    },
+    complete(state) {
+      state.step = 'done'
+    },
+  },
+})
+```
 
 ---
 
-## Classic quickstart (v0.4)
-
-The classic 7-file approach still works. Use this if you prefer explicit files over the all-in-one `feature()` API.
-
-### File structure
-
-```
-deno.json
-src/
-  app.ts          ← entry point
-  state.ts        ← state shape + initial values
-  actions.ts      ← messages from UI → server
-  effects.ts      ← side effects returned by reducer
-  reduce.ts       ← (state, action) → new state + effects
-  execute.ts      ← runs effects (API calls, logging, etc.)
-  App.tsx          ← React UI component
-  style.css       ← (optional) auto-injected into HTML
-```
-
-### state.ts
-
-```ts
-export type AppState = { counter: number }
-export const initialState: AppState = { counter: 0 }
-```
-
-### actions.ts
-
-```ts
-import { actions, type UnionOf } from 'aio'
-
-export const A = actions({
-  Increment: (by = 1) => ({ by }),
-  Decrement: (by = 1) => ({ by }),
-  Reset: () => ({}),
-})
-
-export type Action = UnionOf<typeof A>
-```
-
-### effects.ts
-
-```ts
-import { effects, type UnionOf } from 'aio'
-
-export const E = effects({
-  Log: (message: string) => ({ message }),
-})
-
-export type Effect = UnionOf<typeof E>
-```
-
-### reduce.ts
-
-```ts
-import type { AppState } from './state.ts'
-import { A, type Action } from './actions.ts'
-import { E, type Effect } from './effects.ts'
-import { draft } from 'aio'
-
-export function reduce(state: AppState, action: Action): { state: AppState; effects: Effect[] } {
-  return draft(state, d => {
-    switch (action.type) {
-      case A.Increment:
-        d.counter += action.payload.by
-        return [E.log(`incremented to ${d.counter}`)]
-      case A.Decrement:
-        d.counter -= action.payload.by
-        return [E.log(`decremented to ${d.counter}`)]
-      case A.Reset:
-        d.counter = 0
-        return []
-      default:
-        return []
-    }
-  })
-}
-```
-
-### execute.ts
-
-```ts
-import { E, type Effect } from './effects.ts'
-import type { AppState } from './state.ts'
-import type { Action } from './actions.ts'
-import type { AioApp } from 'aio'
-
-export function execute(_app: AioApp<AppState, Action>, effect: Effect): void {
-  switch (effect.type) {
-    case E.Log:
-      console.log(effect.payload.message)
-      break
-  }
-}
-```
-
-### App.tsx
-
-```tsx
-import { useAio } from 'aio'
-import { A } from './actions.ts'
-import type { AppState } from './state.ts'
-
-export default function App() {
-  const { state, send } = useAio<AppState>()
-  if (!state) return <div>Connecting...</div>
-
-  return (
-    <div>
-      <h1>{state.counter}</h1>
-      <button onClick={() => send(A.decrement())}>-</button>
-      <button onClick={() => send(A.reset())}>Reset</button>
-      <button onClick={() => send(A.increment())}>+</button>
-    </div>
-  )
-}
-```
-
-### app.ts
-
-```ts
-import { aio } from 'aio'
-import { initialState } from './state.ts'
-import { reduce } from './reduce.ts'
-import { execute } from './execute.ts'
-
-await aio.run(initialState, { reduce, execute })
-```
-
-### Run
-
-```sh
-deno task dev
-```
-
 ## Next steps
 
-- [reactivity.md](reactivity.md) — reactive features with `reactive()`
-- [generators.md](generators.md) — sequential async workflows with `flow()`
+- [core.md](core.md) — feature API reference, actions/reduce, flows
+- [features.md](features.md) — inter-feature communication patterns
+- [generators.md](generators.md) — sequential async workflows with generators
 - [structure.md](structure.md) — file & directory organization guide
 - [migration.md](migration.md) — adopting aio into an existing app
-- [manual.md](manual.md) — docs index
 - [upgrade.md](upgrade.md) — version upgrade guide

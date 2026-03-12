@@ -1,4 +1,41 @@
-// Public API — everything users import from 'aio'
+/**
+ * @module
+ * Full-stack Deno framework — one state, propagated everywhere.
+ *
+ * v0.8: unified feature API, typed generators, no raw strings anywhere.
+ * Use `feature({ methods })` for reactive style (default),
+ * `feature({ generators })` for sequential workflows,
+ * `feature({ actions, reduce })` for explicit control (advanced).
+ *
+ * ```ts
+ * import { feature, call, aio } from 'aio'
+ *
+ * // Reactive style — default
+ * const counter = feature('counter', {
+ *   state: { count: 0 },
+ *   methods: {
+ *     increment(s, by = 1) { s.count += by },
+ *     async save(s) { await call({ timeout: 3000 }, () => persist(s.count)) },
+ *   },
+ * })
+ *
+ * // Sequential workflow — generator with typed state
+ * const checkout = feature('checkout', {
+ *   state: { orderId: null as string | null },
+ *   methods: { reset(s) { s.orderId = null } },
+ *   generators: {
+ *     *place(ctx, item: string) {        // ctx is GenCtx<{ orderId: string | null }>
+ *       const id = yield* ctx.call('submit', () => submitOrder(item))
+ *       yield* ctx.done(s => { s.orderId = id })  // s typed — no cast needed
+ *     },
+ *   },
+ * })
+ *
+ * await aio.run({ features: [counter, checkout] })
+ * counter.increment(5)       // direct call — dispatches through store
+ * checkout.place('widget')   // starts generator
+ * ```
+ */
 import { produce, type Draft } from 'immer'
 import type { PerfMode, PerfBudget } from './src/dispatch.ts'
 
@@ -6,34 +43,47 @@ import type { PerfMode, PerfBudget } from './src/dispatch.ts'
 export { aio, VERSION, parseCli, lint } from './src/aio.ts'
 import type { AioApp } from './src/aio.ts'
 export type { AioApp }
-export type { AioConfig, UiConfig, Lint, CliFlags, AioUser, AioError, PerfMode, PerfBudget, FeaturesConfig } from './src/aio.ts'
+export type { FeaturesConfig, UiConfig, Lint, CliFlags, AioUser, AioError, PerfMode, PerfBudget } from './src/aio.ts'
+export type { LogConfig } from './src/logger.ts'
 export type { AioMeta } from './src/electron.ts'
 export type { LockData, InstanceInfo, SingletonMode } from './src/single-instance-lock.ts'
 export { instances, resolveAppId, slugify } from './src/single-instance-lock.ts'
 
 /**
- * v0.5 feature-based architecture.
- * feature() — define a feature (state, actions, effects, machine, reduce, execute, selectors)
- * bridge()  — define a cross-feature bridge (request/response, timeouts, retries)
+ * v0.8 unified feature API.
+ * feature({ methods })           — default reactive style (sync/async, Immer proxy, direct calling)
+ * feature({ methods, generators }) — reactive + sequential workflows in one feature
+ * feature({ actions, reduce })   — explicit style for full control (advanced)
  */
-export { feature, bridge, composeFeatures, testFeature, testBridge, tagSource, bindFeature } from './src/feature.ts'
-export type { FeatureDef, FeatureEntry, MachineConfig, Catalog, TestContext, BridgeTestContext, FeatureStatus, ActionSource, ScopedApp } from './src/feature.ts'
+export { feature, composeFeatures, testFeature, tagSource, bindFeature } from './src/feature.ts'
+export type { FeatureDef, FeatureEntry, MachineConfig, Catalog, ActionUnion, TestContext, FeatureStatus, ActionSource, ScopedApp, DirectCalling } from './src/feature.ts'
+
+/**
+ * Inter-feature coordination — async methods return Promises with the correct type.
+ * Everything goes through the store (observable, time-travelable).
+ *
+ * Simple — preferred for most cases:
+ * ```ts
+ * import { inventory } from '../inventory'
+ * const reserved = await inventory.reserve(items)  // ← typed Promise<ReserveResult>
+ * ```
+ *
+ * With timeout/retry:
+ * ```ts
+ * const result = await call({ timeout: 5000, retries: 2 }, () => inventory.reserve(items))
+ * ```
+ *
+ * `markAsync` — rare: explicitly mark a method as async when minification strips constructor names.
+ */
+export { call, markAsync } from './src/feature-impl.ts'
+export type { CallOptions } from './src/feature-impl.ts'
 
 /**
  * Generator-based sequential workflows.
- * flow() — define a sequential workflow triggered by an action.
  * Write top-to-bottom async code; each yield point is observable.
+ * Use cancelOn config key in feature() to declare cancellation triggers.
  */
-export { flow } from './src/flow.ts'
-export type { FlowDef, FlowCtx, Gen } from './src/flow.ts'
-
-/**
- * Reactive features — plain methods instead of reduce/execute.
- * reactive() — define a feature with sync/async methods that mutate state directly.
- * Compiles to a standard feature — same dispatch loop, persistence, sync, time-travel.
- */
-export { reactive } from './src/reactive.ts'
-export type { ReactiveConfig } from './src/reactive.ts'
+export type { GenCtx, Gen, TypedCreator } from './src/flow.ts'
 
 /** 
  * Connect to a remote aio server from a CLI app.
@@ -45,20 +95,6 @@ export { connectCli, connectCliUDS } from './src/cli-client.ts'
 export type { CliApp } from './src/cli-client.ts'
 
 /**
- * Extracts return types of all function members into a union type.
- * Used to derive Action and Effect types from action/effect catalogs.
- * 
- * @example
- * ```ts
- * const A = actions({ Increment: (by: number) => ({ by }) })
- * type Action = UnionOf<typeof A>
- * // => { type: 'Increment'; payload: { by: number } }
- * ```
- */
-// deno-lint-ignore no-explicit-any
-export type UnionOf<T> = { [K in keyof T]: T[K] extends (...args: any[]) => infer R ? R : never }[keyof T]
-
-/** 
  * Low-level message constructor. Use action creators (A.increment()) instead.
  * @param type - Action/effect type string
  * @param payload - Optional payload object
@@ -66,8 +102,12 @@ export type UnionOf<T> = { [K in keyof T]: T[K] extends (...args: any[]) => infe
 export { msg } from './src/msg.ts'
 
 /**
- * Factory for creating typed action catalogs.
- * @returns Object with PascalCase labels (A.Increment) and camelCase creators (A.increment(5))
+ * Action/effect catalog factory — creates typed creators from a descriptor object.
+ * @example
+ * ```ts
+ * const A = actions({ increment: (by = 1) => ({ by }), reset: () => ({}) })
+ * A.increment(5) // → { type: 'increment', payload: { by: 5 } }
+ * ```
  */
 export { actions, effects } from './src/factory.ts'
 
@@ -197,9 +237,16 @@ export declare function useAio<S = unknown>(): {
   send: (action: { type: string; payload?: unknown }) => void
 }
 
+/** Proxy type for send — each action key becomes a dispatch method with typed args */
+// deno-lint-ignore no-explicit-any
+export type SendProxy<A extends Record<string, any>> = {
+  // deno-lint-ignore no-explicit-any
+  [K in keyof A]: A[K] extends (...args: infer P) => any ? (...args: P) => void : never
+}
+
 /**
  * v0.5 React hook — connects UI to a specific feature.
- * Returns scoped state, typed send, and machine status.
+ * Returns scoped state, typed send proxy, and machine status.
  *
  * @param ref - Feature definition from feature()
  * @returns { state, send, status }
@@ -207,17 +254,18 @@ export declare function useAio<S = unknown>(): {
  * @example
  * ```tsx
  * const { state, send, status } = useFeature(counter)
- * return <button onClick={() => send.increment(5)}>+5</button>
+ * send.increment(5)   // dispatches { type: 'counter:increment', payload: { n: 5 } }
+ * send.reset()
  * ```
  */
-export declare function useFeature<S = unknown>(ref: {
+// deno-lint-ignore no-explicit-any
+export declare function useFeature<S = unknown, A extends Record<string, any> = Record<string, (...args: unknown[]) => void>>(ref: {
   name: string
-  // deno-lint-ignore no-explicit-any
-  A: Record<string, any>
+  A: A
   _config: { actionKeys: string[] }
 }): {
   state: S | null
-  send: Record<string, (...args: unknown[]) => void>
+  send: SendProxy<A>
   status: string | undefined
 }
 
@@ -286,6 +334,12 @@ export declare function connectDevTools(): void
 export declare function disconnectDevTools(): void
 
 /**
+ * Utility type: extracts the union of all payload types from an actions/effects catalog.
+ * Useful for discriminated union switch/case in reducers.
+ */
+export type { UnionOf } from './src/standalone.ts'
+
+/**
  * Standalone runtime for Android WebView (no Deno required).
  * Real implementation in standalone.ts, interface declared here for editor support.
  * 
@@ -298,8 +352,8 @@ export declare function initStandalone<S, A, E>(initialState: S, config: {
   reduce: (state: S, action: A) => { state: S; effects: (E | ScheduleEffect)[] }
   execute: (app: AioApp<S, A>, effect: E) => void
   persist?: boolean
-  getDBState?: (state: S) => Partial<S>
-  getUIState?: (state: S) => unknown
+  stateForDB?: (state: S) => Partial<S>
+  stateForUI?: (state: S) => unknown
   persistKey?: string
   persistDebounce?: number
   perfMode?: PerfMode

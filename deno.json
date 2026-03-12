@@ -1,6 +1,6 @@
 {
   "name": "@riagentic/aio",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "exports": "./mod.ts",
   "publish": {
     "exclude": ["tests/", "examples/", "docs/", "scripts/", "utils/", "android-template/", "*.md", "init.*"]
@@ -23,6 +23,7 @@
   },
   "tasks": {
     "test": "deno test -A --unstable-kv tests/",
+    "test:core": "deno test -A --unstable-kv --ignore=tests/am.test.ts,tests/build.test.ts,tests/server.test.ts,tests/tls.test.ts,tests/single-instance-lock.test.ts,tests/cli.test.ts,tests/cli-client.test.ts tests/",
     "check": "deno check mod.ts",
     "lint": "deno lint src/",
     "example": "deno run -A examples/counter/app.ts",
