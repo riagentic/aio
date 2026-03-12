@@ -9,8 +9,10 @@ const _p = (v: unknown[]): any[] => v
 
 // ── Types ───────────────────────────────────────────────────────────
 
+/** Column options — nullable, unique, and default value */
 export type ColumnOpts = { nullable?: boolean; unique?: boolean; default?: unknown }
 
+/** Internal column definition produced by column helpers (pk, text, integer, real, ref) */
 export type ColumnDef = {
   sqlType: string
   pk?: boolean
@@ -20,21 +22,26 @@ export type ColumnDef = {
   default?: unknown
 }
 
+/** Table schema produced by table() — passed to aio.run({ db: { schema } }) */
 export type TableDef = { columns: Record<string, ColumnDef> }
 
+/** Comparison operators for where() queries */
 export type WhereOp = {
   gt?: unknown; gte?: unknown; lt?: unknown; lte?: unknown
   ne?: unknown; like?: string; in?: unknown[]
 }
 
+/** Filter argument for where() — each field is an exact value or a WhereOp */
 export type WhereClause<T> = Partial<{ [K in keyof T]: T[K] | WhereOp }>
 
+/** Query options — ordering, pagination */
 export type QueryOpts<T> = {
   orderBy?: keyof T | [keyof T, 'asc' | 'desc']
   limit?: number
   offset?: number
 }
 
+/** Typed table handle — CRUD, filtering, pagination, and upsert for a single SQLite table */
 // deno-lint-ignore no-explicit-any
 export type AioTable<T = any> = {
   all(opts?: QueryOpts<T>): T[]
@@ -49,6 +56,7 @@ export type AioTable<T = any> = {
   count(where?: WhereClause<T>): number
 }
 
+/** Database handle passed to execute() — includes typed table accessors and raw SQL methods */
 export type AioDB = {
   query<T = Record<string, unknown>>(sql: string, params?: unknown[]): T[]
   get<T = Record<string, unknown>>(sql: string, params?: unknown[]): T | undefined
@@ -71,26 +79,32 @@ function assertIdent(name: string, context: string): void {
 
 // ── Column helpers ──────────────────────────────────────────────────
 
+/** Primary key column — INTEGER PRIMARY KEY (auto-increment) */
 export function pk(): ColumnDef {
   return { sqlType: 'INTEGER', pk: true }
 }
 
+/** TEXT column */
 export function text(opts?: ColumnOpts): ColumnDef {
   return { sqlType: 'TEXT', ...opts }
 }
 
+/** INTEGER column */
 export function integer(opts?: ColumnOpts): ColumnDef {
   return { sqlType: 'INTEGER', ...opts }
 }
 
+/** REAL (float) column */
 export function real(opts?: ColumnOpts): ColumnDef {
   return { sqlType: 'REAL', ...opts }
 }
 
+/** Foreign key reference — INTEGER column pointing to another table's pk */
 export function ref(refTable: string, opts?: ColumnOpts): ColumnDef {
   return { sqlType: 'INTEGER', ref: refTable, ...opts }
 }
 
+/** Define a table schema — pass to aio.run({ db: { schema: { users: table({...}) } } }) */
 export function table(columns: Record<string, ColumnDef>): TableDef {
   return { columns }
 }
