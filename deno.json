@@ -1,6 +1,6 @@
 {
   "name": "@riagentic/aio",
-  "version": "0.8.3",
+  "version": "0.8.4",
   "exports": "./mod.ts",
   "publish": {
     "exclude": ["tests/", "examples/", "docs/", "scripts/", "utils/", "android-template/", "CHANGELOG.md", "init.*"]
