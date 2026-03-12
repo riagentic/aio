@@ -9,8 +9,10 @@
 // Only state changes, flow completions, and errors surface here.
 // High-frequency internal actions never appear.
 
+/** Log severity levels */
 export type LogLevel = 'trace' | 'debug' | 'info' | 'warn' | 'error'
 
+/** Logger configuration — passed to aio.run({ log: {...} }) */
 export type LogConfig = {
   /** Minimum level written to debug.log (default: 'debug') */
   level?: LogLevel

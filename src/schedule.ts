@@ -3,6 +3,7 @@
 
 // ── Types ────────────────────────────────────────────────────────────
 
+/** Effect union for scheduled actions — returned from reducers, handled by the runtime */
 export type ScheduleEffect =
   | { type: '__schedule'; kind: 'after'; id: string; ms: number; action: { type: string; payload?: unknown } }
   | { type: '__schedule'; kind: 'every'; id: string; ms: number; action: { type: string; payload?: unknown } }
@@ -10,6 +11,7 @@ export type ScheduleEffect =
   | { type: '__schedule'; kind: 'cron'; id: string; pattern: string; action: { type: string; payload?: unknown } }
   | { type: '__schedule'; kind: 'cancel'; id: string }
 
+/** Config-level schedule definition — passed to aio.run({ schedules: [...] }) */
 export type ScheduleDef = { id: string; action: { type: string; payload?: unknown } } & (
   | { every: number }
   | { after: number }
@@ -19,6 +21,13 @@ export type ScheduleDef = { id: string; action: { type: string; payload?: unknow
 
 // ── Effect creators (pure) ──────────────────────────────────────────
 
+/** Effect creators for declarative scheduling — use in reducers to schedule/cancel timers.
+ * @example
+ * ```ts
+ * return [schedule.after('save-timeout', 3000, A.save())]
+ * return [schedule.cron('daily-report', '0 8 * * *', A.report())]
+ * return [schedule.cancel('save-timeout')]
+ * ``` */
 export const schedule = {
   after: (id: string, ms: number, action: { type: string; payload?: unknown }): ScheduleEffect =>
     ({ type: '__schedule', kind: 'after', id, ms, action }),

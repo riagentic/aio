@@ -14,7 +14,7 @@ import { composeFeatures, bindFeature, type FeatureEntry, type FeatureDef, type 
 import { AioLogger, type LogConfig } from './logger.ts'
 
 /** Framework version — printed by --version, checked in tests */
-export const VERSION = '0.8.0'
+export const VERSION = '0.8.3'
 
 /** Validates that framework version matches deno.json version at build time */
 function validateVersion(): void {
@@ -1507,5 +1507,6 @@ async function _run<S, A, E>(initialState: S, config: AioConfig<S, A, E>): Promi
   return app
 }
 
+/** Main aio namespace — `aio.run(config)` starts the server, `aio.middleware` has built-in middleware factories */
 export const aio = { run, middleware }
 export type { FeatureDef, FeatureEntry, ComposedFeatures } from './feature.ts'

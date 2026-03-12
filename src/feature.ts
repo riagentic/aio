@@ -35,6 +35,7 @@ type Creators = Record<string, (...args: any[]) => Record<string, unknown>>
 /** Catalog type: string labels + camelCase action/effect creators.
  *  Labels are `featureName:actionKey` (all lowercase/camelCase).
  *  Creators have a `.type` property for use with typed `waitFor` and `cancelOn`. */
+/** Typed action catalog — maps method names to prefixed type strings and creator functions */
 export type Catalog<Prefix extends string, T extends Creators> = {
   readonly [K in keyof T & string]: `${Prefix}:${K}`
 } & {
@@ -60,6 +61,7 @@ export type ActionSource = 'UI' | 'Effect' | 'System' | 'Test'
 
 type Msg<P = unknown> = { type: string; payload: P; _source?: ActionSource }
 
+/** Scoped app handle passed to execute() — dispatch actions or read state from within a feature */
 export type ScopedApp<S = unknown> = {
   dispatch: (action: Msg) => void
   /** Returns this feature's own state slice */
@@ -438,6 +440,25 @@ type ActionsFeatureConfig<
   onDestroy?: (app: ScopedApp<S>) => void
 }
 
+/**
+ * Define a feature — the primary building block of an aio app.
+ *
+ * Three styles:
+ * - `{ methods }` — reactive (default): Immer proxy mutation, direct typed calling
+ * - `{ generators }` — sequential workflows: yield-based async steps, cancelable
+ * - `{ actions, reduce }` — explicit: full control over action/effect pipeline
+ *
+ * @example
+ * ```ts
+ * const counter = feature('counter', {
+ *   state: { count: 0 },
+ *   methods: {
+ *     increment(s, by = 1) { s.count += by },
+ *   },
+ * })
+ * counter.increment(5) // typed direct call
+ * ```
+ */
 // Overloads for TypeScript inference
 export function feature<
   N extends string,

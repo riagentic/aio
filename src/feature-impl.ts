@@ -8,6 +8,7 @@
 // - Inter-feature call() — callback form only (typed, no raw strings)
 
 
+/** Raw action/effect message — prefer typed action creators (feature.A.xxx) over constructing directly */
 export type Msg = { type: string; payload: unknown; _source?: 'UI' | 'Effect' | 'System' | 'Test' }
 export type ScheduleEffect = import('./schedule.ts').ScheduleEffect
 
