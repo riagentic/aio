@@ -1,14 +1,25 @@
-// feature.ts — v0.5 feature-based architecture
+// feature.ts — v0.5+ unified feature API
 //
-// feature()          — define a feature (state, actions, effects, machine, reduce, execute, selectors)
-// bridge()           — define a cross-feature bridge (request/response, timeouts, retries)
+// feature()          — define a feature with methods OR actions/reduce (unified API)
 // composeFeatures()  — compose features into {initialState, reduce, execute} for aio.run()
 // testFeature()      — test harness for isolated feature testing
 
 import { produce, type Draft } from 'immer'
 import type { ScheduleEffect } from './schedule.ts'
-import type { FlowDef } from './flow.ts'
-import { createFlowReducer, cancelFeatureFlows, runFlow, notifyFlowListeners } from './flow.ts'
+import type { FlowDef, GenCtx, Gen } from './flow.ts'
+import { createFlowReducer, cancelFeatureFlows, runFlow, notifyFlowListeners, resetFlows } from './flow.ts'
+import {
+  capitalize as capitalizeImpl,
+  setKey,
+  classifyMethods,
+  createBatcher,
+  createLiveProxy,
+  applyMutations,
+  resolveCall,
+  registerCall,
+  resetPending,
+} from './feature-impl.ts'
+import type { Mutation, FeatureMethods, SyncMethod, AsyncMethod, Method } from './feature-impl.ts'
 
 // ── Helpers ────────────────────────────────────────────────────────
 
@@ -21,22 +32,27 @@ function capitalize(s: string): string {
 // deno-lint-ignore no-explicit-any
 type Creators = Record<string, (...args: any[]) => Record<string, unknown>>
 
-type UpperFirst<S extends string> = S extends `${infer C}${infer Rest}` ? `${Uppercase<C>}${Rest}` : S
-
-/** Catalog type: PascalCase string labels + camelCase action/effect creators */
+/** Catalog type: string labels + camelCase action/effect creators.
+ *  Labels are `featureName:actionKey` (all lowercase/camelCase).
+ *  Creators have a `.type` property for use with typed `waitFor` and `cancelOn`. */
 export type Catalog<Prefix extends string, T extends Creators> = {
-  readonly [K in keyof T & string as UpperFirst<K>]: `${Prefix}:${UpperFirst<K>}`
+  readonly [K in keyof T & string]: `${Prefix}:${K}`
 } & {
-  readonly [K in keyof T & string]: (...args: Parameters<T[K]>) => {
-    type: `${Prefix}:${UpperFirst<K>}`
-    payload: ReturnType<T[K]>
+  readonly [K in keyof T & string]: {
+    (...args: Parameters<T[K]>): { type: `${Prefix}:${K}`; payload: ReturnType<T[K]> }
+    readonly type: `${Prefix}:${K}`
   }
 }
+
+/** Discriminated union of all actions — enables auto-narrowing in reduce switch/case.
+ *  Foreign/internal actions (init, destroy, cross-feature): cast to Msg for raw access. */
+export type ActionUnion<Prefix extends string, A extends Creators> =
+  { [K in keyof A & string]: { type: `${Prefix}:${K}`; payload: ReturnType<A[K]>; _source?: ActionSource } }[keyof A & string]
 
 /** State machine definition */
 export type MachineConfig = {
   initial: string
-  states: Record<string, { on: Record<string, string> }>
+  states: Record<string, Record<string, string>>
 }
 
 /** Action source — auto-tagged at dispatch time for logging/debugging */
@@ -46,7 +62,11 @@ type Msg<P = unknown> = { type: string; payload: P; _source?: ActionSource }
 
 export type ScopedApp<S = unknown> = {
   dispatch: (action: Msg) => void
+  /** Returns this feature's own state slice */
   getState: () => S
+  /** Returns the full app state — use when init() needs to read another feature's state.
+   *  Always available when called from init/destroy/execute in a running app. */
+  getFullState?: () => Record<string, unknown>
 }
 
 /** Tag a message with a source — non-destructive, returns new object */
@@ -55,13 +75,15 @@ export function tagSource<P = unknown>(msg: Msg<P>, source: ActionSource): Msg<P
 }
 
 // Internal function signatures stored in FeatureDef
-type FeatureReduceFn = (state: unknown, action: Msg, ctx: { A: unknown; E: unknown }) => (Msg | ScheduleEffect)[] | void
-type FeatureExecuteFn = (app: ScopedApp, effect: Msg, ctx: { E: unknown; A: unknown }) => void
+// deno-lint-ignore no-explicit-any
+type FeatureReduceFn = (state: unknown, action: Msg, ctx?: any) => (Msg | ScheduleEffect)[] | void
+// deno-lint-ignore no-explicit-any
+type FeatureExecuteFn = (app: ScopedApp, effect: Msg, ctx?: any) => void
 
 /** Internal config stored in feature definition */
 export type FeatureInternals = {
   state: Record<string, unknown>
-  machine: MachineConfig | 'simple'
+  machine: MachineConfig | false
   reduce: FeatureReduceFn
   execute?: FeatureExecuteFn
   actionKeys: string[]
@@ -85,6 +107,12 @@ export type FeatureInternals = {
   flows?: Record<string, FlowDef>
   /** Map: trigger action key → flow name */
   flowTriggers?: Map<string, string>
+  /** Method-based mode (v0.8): sync/async methods instead of actions+reduce */
+  methods?: FeatureMethods<Record<string, unknown>>
+  syncMethods?: Set<string>
+  asyncMethods?: Set<string>
+  /** State keys to exclude from KV persistence for this feature */
+  persistExclude?: string[]
 }
 
 /** Reserved property names on FeatureDef — action/selector names must not collide */
@@ -100,8 +128,8 @@ export type FeatureDef<
   State extends Record<string, unknown> = Record<string, unknown>,
 > = {
   readonly name: Name
-  readonly A: Catalog<Capitalize<Name>, Actions>
-  readonly E: Catalog<Capitalize<Name>, Effects>
+  readonly A: Catalog<Name, Actions>
+  readonly E: Catalog<Name, Effects>
   readonly selectors: Record<string, (state: unknown) => unknown>
   readonly _config: FeatureInternals
   /** Attach execute separately — for features with server-only imports */
@@ -112,9 +140,24 @@ export type FeatureDef<
   readonly _stateType?: State
 }
 
-/** Flattened action senders — method names callable directly on the feature */
+/** Flattened action senders — method names callable directly on the feature.
+ *  Each has a `.type` property for use in waitFor/cancelOn/listensTo without raw strings. */
 type FlatActions<A extends Creators> = {
-  [K in keyof A & string]: (...args: Parameters<A[K]>) => void
+  [K in keyof A & string]: ((...args: Parameters<A[K]>) => void) & { readonly type: string }
+}
+
+/** Direct calling type — maps method signatures to dispatch functions.
+ *  Async methods return Promise<R>, sync methods return void.
+ *  Each has a `.type` property (e.g. `counter.increment.type === 'Counter:Increment'`). */
+// deno-lint-ignore no-explicit-any
+export type DirectCalling<M> = {
+  // deno-lint-ignore no-explicit-any
+  [K in keyof M]: M[K] extends (s: any, ...args: infer P) => Promise<infer R>
+    ? ((...args: P) => Promise<R>) & { readonly type: string }
+    // deno-lint-ignore no-explicit-any
+    : M[K] extends (s: any, ...args: infer P) => any
+    ? ((...args: P) => void) & { readonly type: string }
+    : never
 }
 
 /** Feature entry in aio.run() features array */
@@ -131,12 +174,12 @@ function buildCatalog(
   const typeToKey = new Map<string, string>()
 
   for (const key of Object.keys(creators)) {
-    const label = `${prefix}:${capitalize(key)}`
-    catalog[capitalize(key)] = label                   // A.Increment = 'Counter:Increment'
-    catalog[key] = (...args: unknown[]) => ({           // A.increment(5) = { type, payload }
-      type: label,
-      payload: creators[key](...args) ?? {},
-    })
+    const label = `${prefix}:${key}`
+    const fn = Object.assign(                          // A.increment(5) = { type, payload }
+      (...args: unknown[]) => ({ type: label, payload: creators[key](...args) ?? {} }),
+      { type: label },                                 // A.increment.type = 'counter:increment'
+    )
+    catalog[key] = fn
     typeToKey.set(label, key)
   }
 
@@ -156,13 +199,15 @@ function flattenOnto(
     if (RESERVED_KEYS.has(key)) continue // skip PascalCase collisions (e.g. 'A')
     if (selectorKeys.has(key))
       throw new Error(`[${featureName}] action '${key}' collides with selector of same name`)
-    // Wrap function entries with pre-bind dev warning
+    // Wrap function entries with pre-bind dev warning; preserve .type for use in waitFor/cancelOn/listensTo
     if (typeof value === 'function') {
-      const original = value as (...args: unknown[]) => unknown
-      target[key] = (...args: unknown[]) => {
+      const original = value as ((...args: unknown[]) => unknown) & { type?: string }
+      const stub = (...args: unknown[]) => {
         if (!target._bound) console.warn(`[${featureName}] ${key}() called before aio.run() — returns action object, not dispatching`)
         return original(...args)
       }
+      if (original.type) (stub as unknown as Record<string, unknown>).type = original.type
+      target[key] = stub
     } else {
       target[key] = value
     }
@@ -170,7 +215,8 @@ function flattenOnto(
 }
 
 /** Bind a feature to a live app — replaces action creators with dispatch wrappers,
- *  selectors with bound state readers. Called by aio.run() after compose. */
+ *  selectors with bound state readers. Called by aio.run() after compose.
+ *  Async methods return a Promise that resolves with the method's return value. */
 export function bindFeature(
   f: FeatureDef,
   dispatch: (action: Msg) => void,
@@ -181,10 +227,27 @@ export function bindFeature(
   // Bind action creators: wrap with dispatch
   for (const key of f._config.actionKeys) {
     const creator = (f.A as Record<string, unknown>)[key]
-    if (typeof creator === 'function') {
-      ;(f as Record<string, unknown>)[key] = (...args: unknown[]) => {
+    if (typeof creator !== 'function') continue
+
+    const isAsync = f._config.asyncMethods?.has(key)
+    if (isAsync) {
+      // Async methods: dispatch with _callId, return Promise that resolves with the method's return value
+      const fn = (...args: unknown[]) => {
+        const callId = crypto.randomUUID()
+        const promise = registerCall(callId)
+        const action = (creator as (...a: unknown[]) => Msg)(...args)
+        dispatch({ ...action, payload: { args, _callId: callId }, _source: 'Effect' as const })
+        return promise
+      }
+      ;(fn as unknown as Record<string, unknown>).type = (creator as unknown as { type: string }).type
+      ;(f as Record<string, unknown>)[key] = fn
+    } else {
+      // Sync methods: dispatch and return void
+      const fn = (...args: unknown[]) => {
         dispatch((creator as (...a: unknown[]) => Msg)(...args))
       }
+      ;(fn as unknown as Record<string, unknown>).type = (creator as unknown as { type: string }).type
+      ;(f as Record<string, unknown>)[key] = fn
     }
   }
 
@@ -211,45 +274,37 @@ export function validateMachine(
     errors.push(`machine.initial '${machine.initial}' not in declared states`)
   }
 
-  // Validate transitions
+  // Validate transitions + dead-end detection in one pass
+  const warnings: string[] = []
   for (const [stateName, stateConfig] of Object.entries(machine.states)) {
-    for (const [key, target] of Object.entries(stateConfig.on)) {
-      // Target state must exist
+    const transitions = stateConfig
+    if (Object.keys(transitions).length === 0) {
+      warnings.push(`state '${stateName}' is a dead-end (no outgoing transitions)`)
+    }
+    for (const [key, target] of Object.entries(transitions)) {
       if (!stateNames.has(target)) {
         errors.push(`state '${stateName}' → unknown target '${target}' on '${key}'`)
       }
-      // Own action key must be declared (foreign actions contain ':')
       if (!key.includes(':') && !actionKeys.has(key)) {
         errors.push(`state '${stateName}' references unknown action '${key}'`)
       }
     }
   }
 
-  // Reachability: every state must be reachable from initial
+  // Reachability: BFS from initial, then flag unreachable states
   const reachable = new Set<string>([machine.initial])
   let changed = true
   while (changed) {
     changed = false
     for (const [sn, sc] of Object.entries(machine.states)) {
       if (!reachable.has(sn)) continue
-      for (const t of Object.values(sc.on)) {
+      for (const t of Object.values(sc)) {
         if (!reachable.has(t)) { reachable.add(t); changed = true }
       }
     }
   }
   for (const sn of stateNames) {
-    if (!reachable.has(sn)) {
-      errors.push(`state '${sn}' unreachable from '${machine.initial}'`)
-    }
-  }
-
-  // Dead-end detection: states with no outgoing transitions (can enter but never leave)
-  const warnings: string[] = []
-  for (const [sn, sc] of Object.entries(machine.states)) {
-    const outgoing = Object.keys(sc.on)
-    if (outgoing.length === 0) {
-      warnings.push(`state '${sn}' is a dead-end (no outgoing transitions)`)
-    }
+    if (!reachable.has(sn)) errors.push(`state '${sn}' unreachable from '${machine.initial}'`)
   }
 
   if (errors.length) {
@@ -262,58 +317,485 @@ export function validateMachine(
 
 // ── feature() ──────────────────────────────────────────────────────
 
-/** Define a feature — the single API for state, actions, effects, machine, reduce, execute, selectors */
+/** Define a feature — unified API supporting methods OR actions/reduce styles.
+ *
+ * Style 1 (methods): Simple reactive-style mutations
+ *   feature('counter', {
+ *     state: { count: 0 },
+ *     methods: {
+ *       increment(s, by = 1) { s.count += by },
+ *       async save(s) { await api.save(s.count) },
+ *     },
+ *   })
+ *
+ * Style 2 (actions + reduce): Full control over actions and effects
+ *   feature('counter', {
+ *     state: { count: 0 },
+ *     actions: { increment: (by) => ({ by }) },
+ *     reduce(state, action, { A }) { ... },
+ *   })
+ *
+ * Both styles can be mixed in the same feature:
+ *   - Use `methods` for simple sync/async operations
+ *   - Use `actions` + `reduce` for fine-grained control
+ *   - Use `flows` for sequential async workflows
+ */
+
+/** Generator function — pass through cancel() to attach cancelOn triggers.
+ *  Uses `any` for rest args so typed signatures (e.g. `{ n: number }`) are assignable. */
+// deno-lint-ignore no-explicit-any
+type GeneratorEntry = ((ctx: GenCtx<any>, ...args: any[]) => Gen<unknown>) & { cancelOn?: string[] }
+
+/** Methods-based config (reactive style) */
+type MethodsFeatureConfig<
+  N extends string,
+  S extends Record<string, unknown>,
+  M extends Record<string, Method<S>> = Record<string, Method<S>>,
+> = {
+  state: S
+  methods: M
+  /** Generator functions — sequential async workflows, auto-triggered by dispatching their action. */
+  // deno-lint-ignore no-explicit-any
+  generators?: Record<string, (ctx: GenCtx<S>, ...args: any[]) => Gen<unknown>>
+  /** Cancellation triggers per generator — { generatorKey: [actionsOrTypes] }.
+   *  Accepts bound action creators (.type) or plain strings. */
+  cancelOn?: Record<string, (string | { type: string })[]>
+  selectors?: Record<string, (s: S) => unknown>
+  machine?: MachineConfig | false
+  /** Listen to foreign actions — auto-generates machine transitions.
+   *  Accept strings or bound methods/actions with .type (e.g. `inventory.reserve.type`). */
+  listensTo?: (string | { type: string })[]
+  effects?: Record<string, (...args: unknown[]) => Record<string, unknown>>
+  /** Object form (default): named handlers per effect key.
+   *  Function form (advanced): receives full effect + { emit } map of type strings. */
+  execute?: ExecuteHandlers<S, Record<string, never>> | ((app: ScopedApp<S>, effect: Msg, ctx: { emit: Record<string, unknown> }) => void)
+  /** Features this feature's execute() is allowed to dispatch to.
+   *  Acts as an explicit dependency declaration — prevents accidental
+   *  cross-feature dispatch and makes dependencies visible at a glance.
+   *  @example dispatchTo: [wallet, notifications] */
+  dispatchTo?: (string | { name: string })[]
+  /** State keys to exclude from KV persistence — e.g. { exclude: ['htmlCache', 'largeBlob'] } */
+  persist?: { exclude?: string[] }
+  onInit?: (app: ScopedApp<S>) => void
+  onDestroy?: (app: ScopedApp<S>) => void
+}
+
+/** Object-form reduce handlers — each key matches an action key, receives typed payload.
+ *  Own-feature keys infer payload from action creator; foreign/computed keys get any (no cast needed). */
+// deno-lint-ignore no-explicit-any
+type ReduceHandlers<S, A extends Creators> = Partial<{
+  [K in keyof A]: (state: Draft<S>, payload: ReturnType<A[K]>) => void
+// deno-lint-ignore no-explicit-any
+}> & Record<string, (state: Draft<S>, payload: any) => void>
+
+/** Object-form execute handlers — each key matches an effect key, receives typed payload. */
+// deno-lint-ignore no-explicit-any
+type ExecuteHandlers<S, E extends Creators> = Partial<{
+  [K in keyof E]: (app: ScopedApp<S>, payload: ReturnType<E[K]>) => void | Promise<void>
+// deno-lint-ignore no-explicit-any
+}> & Record<string, (app: ScopedApp<S>, payload: any) => void | Promise<void>>
+
+/** Actions-based config (explicit style) */
+type ActionsFeatureConfig<
+  N extends string,
+  S extends Record<string, unknown>,
+  A extends Creators,
+  E extends Creators,
+> = {
+  state: S
+  actions: A
+  effects?: E
+  machine?: MachineConfig | false
+  /** Object form (default): named handlers per action key — receives typed payload.
+   *  Function form (advanced escape hatch): receives full action + { on } map of type strings. */
+  reduce?: ReduceHandlers<S, A> | ((
+    state: Draft<S>,
+    action: ActionUnion<N, A>,
+    ctx: { on: Record<string, string> }
+  ) => (Msg | ScheduleEffect)[] | void)
+  /** Object form (default): named handlers per effect key — receives typed payload.
+   *  Function form (advanced escape hatch): receives full effect + { emit } map of type strings. */
+  execute?: ExecuteHandlers<S, E> | ((
+    app: ScopedApp<S>,
+    effect: Msg,
+    ctx: { emit: Record<string, string> }
+  ) => void)
+  selectors?: Record<string, (s: S) => unknown>
+  /** Generator functions keyed by their trigger action — action key must be in `actions`. */
+  // deno-lint-ignore no-explicit-any
+  generators?: Record<string, (ctx: GenCtx<S>, ...args: any[]) => Gen<unknown>>
+  /** Cancellation triggers per generator — { generatorKey: [actionsOrTypes] }.
+   *  Accepts bound action creators (.type) or plain strings. */
+  cancelOn?: Record<string, (string | { type: string })[]>
+  /** Features this feature's execute() is allowed to dispatch to.
+   *  Acts as an explicit dependency declaration — prevents accidental
+   *  cross-feature dispatch and makes dependencies visible at a glance.
+   *  @example dispatchTo: [wallet, notifications] */
+  dispatchTo?: (string | { name: string })[]
+  /** State keys to exclude from KV persistence — e.g. { exclude: ['htmlCache', 'largeBlob'] } */
+  persist?: { exclude?: string[] }
+  onInit?: (app: ScopedApp<S>) => void
+  onDestroy?: (app: ScopedApp<S>) => void
+}
+
+// Overloads for TypeScript inference
+export function feature<
+  N extends string,
+  S extends Record<string, unknown>,
+  M extends Record<string, Method<S>>,
+>(
+  name: N,
+  config: MethodsFeatureConfig<N, S, M>
+// deno-lint-ignore no-explicit-any
+): FeatureDef<N, any, any, S> & DirectCalling<M>
 export function feature<
   N extends string,
   S extends Record<string, unknown>,
   A extends Creators,
   E extends Creators = Record<string, never>,
->(name: N, config: {
-  state: S
-  actions: A
-  effects?: E
-  machine?: MachineConfig | 'simple' | false
-  reduce?: (
-    state: Draft<S>,
-    // deno-lint-ignore no-explicit-any
-    action: Msg<Record<string, any>>,
-    ctx: { A: Catalog<Capitalize<N>, A>; E: Catalog<Capitalize<N>, E> }
-  ) => (Msg | ScheduleEffect)[] | void
-  execute?: (
-    app: ScopedApp<S>,
-    // deno-lint-ignore no-explicit-any
-    effect: Msg<Record<string, any>>,
-    ctx: { E: Catalog<Capitalize<N>, E>; A: Catalog<Capitalize<N>, A> }
-  ) => void
-  selectors?: Record<string, (state: unknown) => unknown>
-  /** Generator-based sequential workflows */
-  flows?: Record<string, FlowDef>
-  /** Allowlist of feature prefixes this executor may dispatch to (e.g. ['wallet', 'fleet']) */
-  crossDispatch?: string[]
-  /** Custom init handler — called after feature is composed (optional) */
-  init?: (app: ScopedApp<S>) => void
-  /** Custom destroy handler — called on shutdown (optional) */
-  destroy?: (app: ScopedApp<S>) => void
-}): FeatureDef<N, A, E, S> & FlatActions<A> {
-  const prefix = capitalize(name)
+>(
+  name: N,
+  config: ActionsFeatureConfig<N, S, A, E>
+): FeatureDef<N, A, E, S> & FlatActions<A>
+// deno-lint-ignore no-explicit-any
+export function feature(name: string, config: any): any {
+  const hasMethods = config.methods && Object.keys(config.methods as Record<string, unknown>).length > 0
+  const hasGenerators = config.generators && Object.keys(config.generators as Record<string, unknown>).length > 0
+  const hasActions = config.actions && Object.keys(config.actions as Record<string, () => unknown>).length > 0
+
+  if (hasMethods && hasActions) {
+    throw new Error(`[${name}] feature cannot have both 'methods' and 'actions' — use one or the other`)
+  }
+
+  // methods style: methods (+ optional generators) — auto-creates actions from method/generator names
+  // actions style: actions (+ optional generators) — generator key must match an action key
+  if (hasMethods || (hasGenerators && !hasActions)) {
+    return createFeatureFromMethods(name, config as MethodsFeatureConfig<string, Record<string, unknown>>)
+  }
+
+  return createFeatureFromActions(name, config as ActionsFeatureConfig<string, Record<string, unknown>, Creators, Creators>)
+}
+
+// ── Methods-based feature (reactive style) ───────────────────────────
+
+// deno-lint-ignore no-explicit-any
+function createFeatureFromMethods<N extends string, S extends Record<string, unknown>, M extends Record<string, Method<S>> = Record<string, Method<S>>>(
+  name: N,
+  config: MethodsFeatureConfig<N, S, M>
+// deno-lint-ignore no-explicit-any
+): FeatureDef<N, Record<string, never>, Record<string, never>, S> & DirectCalling<M> {
+  const prefix = name
+  const methods = config.methods as Record<string, Method<S>>
+  const methodNames = Object.keys(methods)
+  const rawGenerators = (config.generators ?? {}) as Record<string, GeneratorEntry>
+  const generatorNames = Object.keys(rawGenerators)
+
+  // Classify methods as sync or async (uses isAsyncFunction — symbol-based, minification-safe)
+  const { syncMethods, asyncMethods } = classifyMethods(methods as FeatureMethods<Record<string, unknown>>)
+
+  // Build action creators from methods + generators
+  // deno-lint-ignore no-explicit-any
+  const actionCreators: Record<string, (...args: any[]) => Record<string, unknown>> = {}
+  for (const key of methodNames) {
+    actionCreators[key] = (...args: unknown[]) => ({ args })
+  }
+  // Generator actions — same payload shape as methods (args array)
+  for (const key of generatorNames) {
+    actionCreators[key] = (...args: unknown[]) => ({ args })
+  }
+  // Add __setMethod actions for async mutations
+  for (const key of asyncMethods) {
+    actionCreators[setKey(key)] = (mutations: Mutation[], _origin: string) => ({ mutations, _origin })
+  }
+  // Add __error action for async failures
+  if (asyncMethods.size > 0) {
+    actionCreators['__error'] = (_method: string, error: string) => ({ _method, error })
+  }
+
+  const { catalog: aCatalog, typeToKey: actionTypeToKey } = buildCatalog(prefix, actionCreators)
+
+  // Build effect creators
+  // deno-lint-ignore no-explicit-any
+  const effectCreators: Record<string, (...args: any[]) => Record<string, unknown>> = {}
+  const effectKeys = Object.keys(config.effects ?? {})
+  for (const key of effectKeys) {
+    effectCreators[key] = (config.effects as Record<string, (...args: unknown[]) => Record<string, unknown>>)[key]
+  }
+  const { catalog: eCatalog } = buildCatalog(prefix, effectCreators)
+
+  // Build machine
+  let machine: MachineConfig | false
+  if (!config.machine) {
+    machine = false
+  } else {
+    machine = config.machine as MachineConfig
+  }
+
+  // Auto-generate machine from listensTo
+  if (config.listensTo?.length && machine === false) {
+    const on: Record<string, string> = {}
+    for (const key of methodNames) on[key] = 'active'
+    for (const key of asyncMethods) on[setKey(key)] = 'active'
+    if (asyncMethods.size > 0) on['__error'] = 'active'
+    for (const entry of config.listensTo) {
+      const actionType = typeof entry === 'string' ? entry : entry.type
+      on[actionType] = 'active'
+    }
+    machine = { initial: 'active', states: { active: on } }
+  }
+
+  // Inject __setMethod and __error transitions for async methods.
+  // Clone first — never mutate the user-provided config object.
+  if (machine !== false) {
+    const cloned: MachineConfig = {
+      ...machine,
+      states: Object.fromEntries(
+        Object.entries(machine.states).map(([k, v]) => [k, { ...v }])
+      ),
+    }
+    for (const stateConfig of Object.values(cloned.states)) {
+      for (const [key, target] of Object.entries(stateConfig)) {
+        if (!key.includes(':') && asyncMethods.has(key) && cloned.states[target]) {
+          cloned.states[target][setKey(key)] = target
+        }
+      }
+    }
+    if (asyncMethods.size > 0) {
+      for (const [stateName, stateConfig] of Object.entries(cloned.states)) {
+        stateConfig['__error'] = stateName
+      }
+    }
+    machine = cloned
+    // Dev mode: print generated machine so auto-injected transitions are visible
+    if (typeof (globalThis as Record<string, unknown>).__aioDev !== 'undefined') {
+      console.debug(`[aio:${name}] machine:`, JSON.stringify(machine, null, 2))
+    }
+  }
+
+  // Detect foreign actions
+  const foreignSet = new Set<string>()
+  if (machine !== false) {
+    for (const sc of Object.values(machine.states)) {
+      for (const key of Object.keys(sc)) {
+        if (key.includes(':') && !key.startsWith(prefix + ':')) {
+          foreignSet.add(key)
+        }
+      }
+    }
+  }
+
+  const allActionKeys = [...methodNames, ...generatorNames, ...[...asyncMethods].map(k => setKey(k))]
+  if (asyncMethods.size > 0) allActionKeys.push('__error')
+
+  // Validate machine if provided
+  if (machine !== false) {
+    validateMachine(name, machine, new Set(allActionKeys))
+  }
+
+  // Build reducer
+  const reduce: FeatureReduceFn = (state: unknown, action: Msg): (Msg | ScheduleEffect)[] | void => {
+    const s = state as Record<string, unknown>
+    const ownKey = actionTypeToKey.get(action.type)
+    if (!ownKey) return
+
+    // Handle batched mutations from async methods
+    if (ownKey.startsWith('__set')) {
+      const payload = action.payload as { mutations: Mutation[] }
+      applyMutations(s, payload.mutations)
+      return
+    }
+
+    // Error action — no state change
+    if (ownKey === '__error') return
+
+    const method = methods[ownKey]
+    if (!method) return
+
+    if (syncMethods.has(ownKey)) {
+      const { args } = action.payload as { args: unknown[] }
+      const result = (method as SyncMethod<S>)(s as S, ...args)
+      return result ? (Array.isArray(result) ? result : [result]) : undefined
+    }
+
+    if (asyncMethods.has(ownKey)) {
+      const { args, _callId } = action.payload as { args: unknown[]; _callId?: string }
+      return [{
+        type: `${prefix}:__exec`,
+        payload: { _method: ownKey, _args: args, _callId },
+      }]
+    }
+  }
+
+  // Build executor for async methods
+  const execute: FeatureExecuteFn | undefined = asyncMethods.size > 0 || config.effects
+    ? (app: ScopedApp, effect: Msg): void => {
+        // Handle async method execution
+        if (effect.type === `${prefix}:__exec`) {
+          const { _method, _args, _callId } = effect.payload as { _method: string; _args: unknown[]; _callId?: string }
+          const method = methods[_method]
+          if (!method || !asyncMethods.has(_method)) return
+
+          const batcher = createBatcher(prefix, (a) => app.dispatch(a))
+          const proxy = createLiveProxy(name, prefix, _method, () => app.getState() as Record<string, unknown>, batcher)
+
+          ;(method as AsyncMethod<S>)(proxy as S, ..._args)
+            .then((value) => resolveCall(_callId, value))
+            .catch((e: Error) => {
+              resolveCall(_callId, undefined, e)
+              console.error(`[${name}] ${_method}() threw: ${e}`)
+              app.dispatch({
+                type: `${prefix}:__error`,
+                payload: { _method, error: String(e) },
+                _source: 'Effect',
+              } as Msg)
+            })
+          return
+        }
+
+        // Handle explicit effects
+        if (config.execute) {
+          if (typeof config.execute === 'object') {
+            const handlers = config.execute as Record<string, (app: ScopedApp, payload: unknown) => void | Promise<void>>
+            const effectTypeToKey = new Map<string, string>()
+            for (const k of effectKeys) effectTypeToKey.set(`${prefix}:${k}`, k)
+            const key = effectTypeToKey.get(effect.type) ?? effect.type
+            const h = handlers[key]
+            if (h) { void h(app as ScopedApp<S>, (effect as { payload: unknown }).payload) }
+          } else {
+            const emitMap: Record<string, string> = {}
+            for (const k of effectKeys) emitMap[k] = `${prefix}:${k}`
+            ;(config.execute as (app: ScopedApp<S>, effect: Msg, ctx: { emit: Record<string, unknown> }) => void)(
+              app as ScopedApp<S>, effect, { emit: emitMap }
+            )
+          }
+        }
+      }
+    : undefined
+
+  // Build flows from generators
+  const flows: Record<string, FlowDef> = {}
+  const flowTriggers = new Map<string, string>()
+  for (const [key, fn] of Object.entries(rawGenerators)) {
+    const triggers = config.cancelOn?.[key] ?? fn.cancelOn
+    const cancelOnStrings = triggers?.map((t: string | { type: string }) =>
+      typeof t === 'string' ? t : t.type
+    )
+    flows[key] = { trigger: key, generator: fn, _stepNames: [], cancelOn: cancelOnStrings, argsStyle: 'spread' }
+    flowTriggers.set(key, key)
+  }
+
+  // Assemble internals
+  const internals: FeatureInternals = {
+    state: config.state as Record<string, unknown>,
+    machine,
+    reduce,
+    execute,
+    actionKeys: allActionKeys,
+    effectKeys,
+    prefix,
+    actionTypeToKey,
+    foreignActions: [...foreignSet],
+    initType: `${prefix}:init`,
+    destroyType: `${prefix}:destroy`,
+    crossDispatchPrefixes: new Set((config.dispatchTo ?? []).map(f => typeof f === 'string' ? f : f.name)),
+    onInit: config.onInit as ((app: ScopedApp) => void) | undefined,
+    onDestroy: config.onDestroy as ((app: ScopedApp) => void) | undefined,
+    methods: methods as FeatureMethods<Record<string, unknown>>,
+    syncMethods,
+    asyncMethods,
+    flows: Object.keys(flows).length > 0 ? flows : undefined,
+    flowTriggers: flowTriggers.size > 0 ? flowTriggers : undefined,
+    persistExclude: config.persist?.exclude,
+  }
+
+  // Build selectors
+  const selectors: Record<string, (state: unknown) => unknown> = {}
+  if (config.selectors) {
+    for (const [key, fn] of Object.entries(config.selectors)) {
+      selectors[key] = (fullState: unknown) =>
+        fn((fullState as Record<string, unknown>)[name] as S)
+    }
+  }
+
+  // Build public catalog
+  const publicCatalog: Record<string, unknown> = {}
+  for (const key of [...methodNames, ...generatorNames]) {
+    const label = `${prefix}:${key}`
+    publicCatalog[key] = Object.assign(
+      (...args: unknown[]) => ({ type: label, payload: { args } }),
+      { type: label },
+    )
+  }
+
+  const def: Record<string, unknown> = {
+    name,
+    A: publicCatalog,
+    E: eCatalog,
+    selectors,
+    _config: internals,
+    implement(fn: FeatureExecuteFn) { internals.execute = fn },
+  }
+
+  // Flatten onto feature def
+  const selectorKeys = new Set(Object.keys(config.selectors ?? {}))
+  for (const key of selectorKeys) {
+    if (RESERVED_KEYS.has(key)) {
+      throw new Error(`[${name}] selector '${key}' collides with reserved property`)
+    }
+  }
+  for (const [key, value] of Object.entries(publicCatalog)) {
+    if (RESERVED_KEYS.has(key)) continue
+    if (selectorKeys.has(key)) {
+      throw new Error(`[${name}] method '${key}' collides with selector of same name`)
+    }
+    if (typeof value === 'function') {
+      const original = value as ((...args: unknown[]) => unknown) & { type?: string }
+      const stub = (...args: unknown[]) => {
+        if (!def._bound) {
+          console.warn(`[${name}] ${key}() called before aio.run() — returns action object, not dispatching`)
+        }
+        return original(...args)
+      }
+      if (original.type) (stub as unknown as Record<string, unknown>).type = original.type
+      def[key] = stub
+    } else {
+      def[key] = value
+    }
+  }
+
+  // deno-lint-ignore no-explicit-any
+  return def as unknown as FeatureDef<N, Record<string, never>, Record<string, never>, S> & DirectCalling<M>
+}
+
+// ── Actions-based feature (classic style) ─────────────────────────────
+
+function createFeatureFromActions<
+  N extends string,
+  S extends Record<string, unknown>,
+  A extends Creators,
+  E extends Creators,
+>(name: N, config: ActionsFeatureConfig<N, S, A, E>): FeatureDef<N, A, E, S> & FlatActions<A> {
+  const prefix = name
   const actionKeySet = new Set(Object.keys(config.actions))
   const effectKeyList = Object.keys(config.effects ?? {})
-  const machine = (config.machine === false ? 'simple' : config.machine) ?? 'simple'
+  const machine = (config.machine === false || config.machine == null)
+    ? false
+    : config.machine as MachineConfig
 
   // Build catalogs
   const { catalog: aCatalog, typeToKey: actionTypeToKey } = buildCatalog(prefix, config.actions)
   const { catalog: eCatalog } = buildCatalog(prefix, config.effects ?? {})
 
   // Validate machine
-  if (machine !== 'simple') {
+  if (machine !== false) {
     validateMachine(name, machine, actionKeySet)
   }
 
   // Detect foreign actions from machine (types containing ':' from other features)
   const foreignSet = new Set<string>()
-  if (machine !== 'simple') {
+  if (machine !== false) {
     for (const sc of Object.values(machine.states)) {
-      for (const key of Object.keys(sc.on)) {
+      for (const key of Object.keys(sc)) {
         if (key.includes(':') && !key.startsWith(prefix + ':')) {
           foreignSet.add(key)
         }
@@ -322,37 +804,93 @@ export function feature<
   }
   const foreignActions = [...foreignSet]
 
-  // Build flow trigger map: action key → flow name
+  // Build flows from generators (keyed by trigger action key)
+  const rawGenerators = (config.generators ?? {}) as Record<string, GeneratorEntry>
+  const flows: Record<string, FlowDef> = {}
   const flowTriggers = new Map<string, string>()
-  if (config.flows) {
-    for (const [flowName, flowDef] of Object.entries(config.flows)) {
-      if (!actionKeySet.has(flowDef.trigger)) {
-        throw new Error(`[feature:${name}] flow '${flowName}' trigger '${flowDef.trigger}' not in actions`)
-      }
-      flowTriggers.set(flowDef.trigger, flowName)
+  for (const [key, fn] of Object.entries(rawGenerators)) {
+    if (!actionKeySet.has(key)) {
+      throw new Error(`[feature:${name}] generator '${key}' must match an action key`)
     }
+    const triggers = config.cancelOn?.[key] ?? fn.cancelOn
+    const cancelOnStrings = triggers?.map((t: string | { type: string }) =>
+      typeof t === 'string' ? t : t.type
+    )
+    flows[key] = { trigger: key, generator: fn, _stepNames: [], cancelOn: cancelOnStrings, argsStyle: 'payload' }
+    flowTriggers.set(key, key)
   }
 
-  // Default noop reducer when only flows are used
+  // Default noop reducer when only generators are used
   const noopReduce: FeatureReduceFn = () => undefined
+
+  // Build { on } map: camelCase key → full type string (for function-form reduce/execute)
+  const onMap: Record<string, string> = {}
+  for (const key of actionKeySet) onMap[key] = `${prefix}:${key}`
+  const emitMap: Record<string, string> = {}
+  for (const key of effectKeyList) emitMap[key] = `${prefix}:${key}`
+
+  // Normalize reduce: object form → FeatureReduceFn, function form → wrap with { on }
+  let reduceFn: FeatureReduceFn
+  if (!config.reduce) {
+    reduceFn = noopReduce
+  } else if (typeof config.reduce === 'object') {
+    const handlers = config.reduce as Record<string, (state: unknown, payload: unknown) => void>
+    reduceFn = (state: unknown, action: Msg): (Msg | ScheduleEffect)[] | void => {
+      const key = actionTypeToKey.get(action.type)
+      if (!key) {
+        // Foreign action key — use full type string
+        const h = handlers[action.type]
+        if (h) return h(state, (action as { payload: unknown }).payload) as (Msg | ScheduleEffect)[] | void
+        return
+      }
+      const h = handlers[key]
+      if (h) return h(state, (action as { payload: unknown }).payload) as (Msg | ScheduleEffect)[] | void
+    }
+  } else {
+    // Function form: wrap to inject { on } instead of { A, E }
+    const userReduceFn = config.reduce as (state: unknown, action: Msg, ctx: { on: Record<string, string> }) => (Msg | ScheduleEffect)[] | void
+    reduceFn = (state: unknown, action: Msg): (Msg | ScheduleEffect)[] | void =>
+      userReduceFn(state, action, { on: onMap })
+  }
+
+  // Normalize execute: object form → FeatureExecuteFn, function form → wrap with { emit }
+  let executeFn: FeatureExecuteFn | undefined
+  if (!config.execute) {
+    executeFn = undefined
+  } else if (typeof config.execute === 'object') {
+    const handlers = config.execute as Record<string, (app: ScopedApp, payload: unknown) => void | Promise<void>>
+    const effectTypeToKey = new Map<string, string>()
+    for (const key of effectKeyList) effectTypeToKey.set(`${prefix}:${key}`, key)
+    executeFn = (app: ScopedApp, effect: Msg): void => {
+      const key = effectTypeToKey.get(effect.type) ?? effect.type
+      const h = handlers[key]
+      if (h) { void h(app, (effect as { payload: unknown }).payload) }
+    }
+  } else {
+    // Function form: wrap to inject { emit } instead of { E, A }
+    const userExecuteFn = config.execute as (app: ScopedApp, effect: Msg, ctx: { emit: Record<string, string> }) => void
+    executeFn = (app: ScopedApp, effect: Msg): void =>
+      userExecuteFn(app, effect, { emit: emitMap })
+  }
 
   const internals: FeatureInternals = {
     state: config.state,
     machine,
-    reduce: (config.reduce as FeatureReduceFn) ?? noopReduce,
-    execute: config.execute as FeatureExecuteFn | undefined,
+    reduce: reduceFn,
+    execute: executeFn,
     actionKeys: [...actionKeySet],
     effectKeys: effectKeyList,
     prefix,
     actionTypeToKey,
     foreignActions,
-    initType: `${prefix}:Init`,
-    destroyType: `${prefix}:Destroy`,
-    crossDispatchPrefixes: new Set((config.crossDispatch ?? []).map(capitalize)),
-    onInit: config.init as ((app: ScopedApp) => void) | undefined,
-    onDestroy: config.destroy as ((app: ScopedApp) => void) | undefined,
-    flows: config.flows,
-    flowTriggers,
+    initType: `${prefix}:init`,
+    destroyType: `${prefix}:destroy`,
+    crossDispatchPrefixes: new Set((config.dispatchTo ?? []).map(f => typeof f === 'string' ? f : f.name)),
+    onInit: config.onInit as ((app: ScopedApp) => void) | undefined,
+    onDestroy: config.onDestroy as ((app: ScopedApp) => void) | undefined,
+    flows: Object.keys(flows).length > 0 ? flows : undefined,
+    flowTriggers: flowTriggers.size > 0 ? flowTriggers : undefined,
+    persistExclude: config.persist?.exclude,
   }
 
   // Validate selector names don't collide with reserved keys
@@ -362,11 +900,18 @@ export function feature<
       throw new Error(`[${name}] selector '${key}' collides with reserved property`)
   }
 
+  // Auto-scope selectors: user writes (s: S) => ..., we wrap to extract state[name]
+  const scopedSelectors: Record<string, (state: unknown) => unknown> = {}
+  for (const [key, fn] of Object.entries(config.selectors ?? {})) {
+    scopedSelectors[key] = (fullState: unknown) =>
+      fn((fullState as Record<string, unknown>)[name] as S)
+  }
+
   const def: Record<string, unknown> = {
     name,
-    A: aCatalog as Catalog<Capitalize<N>, A>,
-    E: eCatalog as Catalog<Capitalize<N>, E>,
-    selectors: (config.selectors ?? {}) as Record<string, (state: unknown) => unknown>,
+    A: aCatalog as Catalog<N, A>,
+    E: eCatalog as Catalog<N, E>,
+    selectors: scopedSelectors,
     _config: internals,
     implement(fn: FeatureExecuteFn) { internals.execute = fn },
   }
@@ -494,7 +1039,7 @@ export function composeFeatures(entries: FeatureEntry[]): ComposedFeatures {
   const initialState: Record<string, unknown> = {}
   for (const f of features) {
     const machine = f._config.machine
-    const status = machine === 'simple' ? undefined : machine.initial
+    const status = machine === false ? undefined : machine.initial
     initialState[f.name] = status != null
       ? { ...f._config.state, _status: status }
       : { ...f._config.state }
@@ -531,15 +1076,17 @@ export function composeFeatures(entries: FeatureEntry[]): ComposedFeatures {
     const flowName = ownKey && flowTriggers ? flowTriggers.get(ownKey) : undefined
 
     // Machine guard
-    if (machine !== 'simple') {
+    if (machine !== false) {
       const currentStatus = (featureState._status ?? machine.initial) as string
       const stateConfig = machine.states[currentStatus]
       if (!stateConfig) return { state: fullState, effects: [] }
 
       // Lookup: own action → camelCase key; foreign → full type string
       const lookupKey = ownKey ?? action.type
+      const transitions = stateConfig
 
-      if (!(lookupKey in stateConfig.on)) {
+      if (!(lookupKey in transitions)) {
+        console.debug(`[aio:${featureName}] blocked: '${action.type}' not allowed in state '${currentStatus}'`)
         return { state: fullState, effects: [] } // invalid transition → drop
       }
 
@@ -564,7 +1111,7 @@ export function composeFeatures(entries: FeatureEntry[]): ComposedFeatures {
       }
 
       // Update _status to target state
-      const target = stateConfig.on[lookupKey]
+      const target = transitions[lookupKey]
       const withStatus = nextSlice._status !== target
         ? { ...nextSlice, _status: target }
         : nextSlice
@@ -630,7 +1177,7 @@ export function composeFeatures(entries: FeatureEntry[]): ComposedFeatures {
     for (const f of features) {
       if (action.type === f._config.initType) {
         const machine = f._config.machine
-        const status = machine === 'simple' ? undefined : machine.initial
+        const status = machine === false ? undefined : machine.initial
         // Merge: initial defaults ← existing (KV-restored) data ← _status
         const existing = currentState[f.name] as Record<string, unknown> | undefined
         const base = { ...f._config.state, ...existing }
@@ -647,7 +1194,7 @@ export function composeFeatures(entries: FeatureEntry[]): ComposedFeatures {
         const machine = f._config.machine
         currentState = {
           ...currentState,
-          [f.name]: machine === 'simple'
+          [f.name]: machine === false
             ? { ...f._config.state }
             : { ...f._config.state, _status: machine.initial },
         }
@@ -685,6 +1232,17 @@ export function composeFeatures(entries: FeatureEntry[]): ComposedFeatures {
 
     // Notify waiting flows (ctx.waitFor) about dispatched actions
     notifyFlowListeners(action)
+
+    // Reject pending call() if the action was blocked (machine dropped it, feature disabled, etc.)
+    const callId = (action.payload as Record<string, unknown>)?._callId as string | undefined
+    if (callId) {
+      const forwarded = allEffects.some(e =>
+        typeof e === 'object' && 'payload' in e &&
+        (e as Msg).type.endsWith(':__exec') &&
+        ((e as Msg).payload as Record<string, unknown>)?._callId === callId
+      )
+      if (!forwarded) resolveCall(callId, undefined, new Error(`call('${action.type}'): blocked — machine guard, feature disabled, or not found`))
+    }
 
     return { state: currentState, effects: allEffects }
   }
@@ -744,18 +1302,18 @@ export function composeFeatures(entries: FeatureEntry[]): ComposedFeatures {
     if (!f || !f._config.execute) return
     if (disabledFeatures.has(f.name)) return
 
-    // Scoped dispatch — runtime guard: own actions + crossDispatch allowlist
+    // Scoped dispatch — runtime guard: own actions + dispatchTo allowlist
     const ownPrefix = f._config.prefix + ':'
     const crossPrefixes = f._config.crossDispatchPrefixes
     const scopedApp: ScopedApp = {
       dispatch: (a: Msg) => {
         if (typeof a?.type !== 'string') return
         if (!a.type.startsWith(ownPrefix)) {
-          // Check crossDispatch allowlist
+          // Check dispatchTo allowlist
           const colonIdx = a.type.indexOf(':')
           const targetPrefix = colonIdx !== -1 ? a.type.slice(0, colonIdx) : ''
           if (!crossPrefixes.has(targetPrefix)) {
-            console.error(`[${f.name}] dispatch('${a.type}') blocked — add '${targetPrefix.toLowerCase()}' to crossDispatch`)
+            console.error(`[${f.name}] execute() blocked — tried to dispatch to '${targetPrefix}', add it to dispatchTo: [${targetPrefix}] in your feature config`)
             featureErrors.set(f.name, (featureErrors.get(f.name) ?? 0) + 1)
             return
           }
@@ -763,6 +1321,7 @@ export function composeFeatures(entries: FeatureEntry[]): ComposedFeatures {
         app.dispatch(tagSource(a, 'Effect'))
       },
       getState: () => (app.getState() as Record<string, unknown>)[f.name] as unknown,
+      getFullState: () => app.getState() as Record<string, unknown>,
     }
 
     try {
@@ -781,6 +1340,7 @@ export function composeFeatures(entries: FeatureEntry[]): ComposedFeatures {
         const scopedApp: ScopedApp = {
           dispatch: (a: Msg) => app.dispatch(tagSource(a, 'System')),
           getState: () => (app.getState() as Record<string, unknown>)[f.name] as unknown,
+          getFullState: () => app.getState() as Record<string, unknown>,
         }
         try { f._config.onInit(scopedApp) } catch (e) {
           console.error(`[${f.name}] init: ${e}`)
@@ -799,6 +1359,7 @@ export function composeFeatures(entries: FeatureEntry[]): ComposedFeatures {
         const scopedApp: ScopedApp = {
           dispatch: (a: Msg) => app.dispatch(tagSource(a, 'System')),
           getState: () => (app.getState() as Record<string, unknown>)[f.name] as unknown,
+          getFullState: () => app.getState() as Record<string, unknown>,
         }
         try { f._config.onDestroy(scopedApp) } catch (e) {
           console.error(`[${f.name}] destroy: ${e}`)
@@ -862,248 +1423,19 @@ export function composeFeatures(entries: FeatureEntry[]): ComposedFeatures {
   }
 }
 
-// ── bridge() ───────────────────────────────────────────────────────
-
-type BridgeChannelConfig = {
-  // deno-lint-ignore no-explicit-any
-  request: (...args: any[]) => Record<string, unknown>
-  // deno-lint-ignore no-explicit-any
-  response: (...args: any[]) => Record<string, unknown>
-  timeout?: number   // ms before timeout (default: 5000)
-  retries?: number   // max retries (default: 0)
-  backoff?: 'linear' | 'exponential'
-}
-
-export type BridgeConfig = {
-  from: string
-  to: string
-  channels: Record<string, BridgeChannelConfig>
-  circuitBreaker?: {
-    failureThreshold: number
-    resetTimeout: number
-  }
-}
-
-/** Creates a bridge feature that handles request/response coordination between features */
-export function bridge(name: string, config: BridgeConfig): FeatureDef {
-  const channels = Object.keys(config.channels)
-  for (const ch of channels) {
-    if (!ch) throw new Error(`[bridge:${name}] empty channel name`)
-  }
-
-  // Generate action creators
-  // deno-lint-ignore no-explicit-any
-  const actionCreators: Record<string, (...args: any[]) => Record<string, unknown>> = {}
-
-  // Generate effect creators
-  // deno-lint-ignore no-explicit-any
-  const effectCreators: Record<string, (...args: any[]) => Record<string, unknown>> = {}
-
-  // Request helpers (exposed on the returned feature as .request)
-  const requestCreators: Record<string, (...args: unknown[]) => Msg> = {}
-
-  const prefix = capitalize(name)
-
-  for (const ch of channels) {
-    const chConfig = config.channels[ch]
-
-    // Actions
-    actionCreators[`${ch}Request`] = (...args: unknown[]) => ({
-      ...chConfig.request(...args),
-      _correlationId: crypto.randomUUID(),
-      _channel: ch,
-    })
-    actionCreators[`${ch}Response`] = (...args: unknown[]) => ({
-      ...chConfig.response(...args),
-      _correlationId: '' as string,
-      _channel: ch,
-    })
-    actionCreators[`${ch}Timeout`] = (correlationId: string) => ({
-      _correlationId: correlationId,
-      _channel: ch,
-    })
-
-    // Effects
-    effectCreators[`${ch}StartTimer`] = (correlationId: string, timeout: number) => ({
-      _correlationId: correlationId,
-      _channel: ch,
-      timeout,
-    })
-  }
-
-  // Timer tracking — allows cancellation on feature disable/destroy
-  const activeTimers = new Map<string, ReturnType<typeof setTimeout>>()
-
-  // State
-  const state: Record<string, unknown> = {
-    pending: {} as Record<string, { channel: string; requestedAt: number; retryCount: number }>,
-    metrics: { totalRequests: 0, totalResponses: 0, totalTimeouts: 0, totalLatencyMs: 0 },
-  }
-  if (config.circuitBreaker) {
-    state.circuit = { state: 'closed', failures: 0, lastFailureAt: 0 }
-  }
-
-  const featureDef = feature(name, {
-    state,
-    actions: actionCreators,
-    effects: effectCreators,
-    machine: 'simple',
-    destroy() {
-      // Cancel all pending timers on bridge destroy/disable
-      for (const [id, tid] of activeTimers) {
-        clearTimeout(tid)
-        activeTimers.delete(id)
-      }
-    },
-    reduce(st, action, { A: _A, E: _E }) {
-      const payload = action.payload as Record<string, unknown>
-      const channel = payload._channel as string | undefined
-      if (!channel) return
-
-      const actionSuffix = action.type.slice(action.type.lastIndexOf(':') + 1)
-      const pending = st.pending as Record<string, Record<string, unknown>>
-      const metrics = st.metrics as Record<string, number>
-      const circuit = st.circuit as { state: string; failures: number; lastFailureAt: number } | undefined
-      const cb = config.circuitBreaker
-
-      if (actionSuffix.endsWith('Request')) {
-        // Circuit breaker: reject if circuit is open
-        if (cb && circuit && circuit.state === 'open') {
-          // Check if enough time passed to try half-open
-          if (Date.now() - circuit.lastFailureAt >= cb.resetTimeout) {
-            circuit.state = 'half-open'
-          } else {
-            return // rejected by circuit breaker
-          }
-        }
-
-        const id = payload._correlationId as string
-        pending[id] = { channel, requestedAt: Date.now(), retryCount: 0 }
-        metrics.totalRequests = (metrics.totalRequests ?? 0) + 1
-        const chConfig = config.channels[channel]
-        if (chConfig?.timeout) {
-          return [{ type: `${prefix}:${capitalize(channel)}StartTimer`, payload: { _correlationId: id, _channel: channel, timeout: chConfig.timeout } }]
-        }
-      }
-
-      if (actionSuffix.endsWith('Response')) {
-        const id = payload._correlationId as string
-        if (pending[id]) {
-          const req = pending[id]
-          const latency = Date.now() - (req.requestedAt as number)
-          metrics.totalResponses = (metrics.totalResponses ?? 0) + 1
-          metrics.totalLatencyMs = (metrics.totalLatencyMs ?? 0) + latency
-          delete pending[id]
-          // Circuit breaker: successful response resets circuit
-          if (cb && circuit && (circuit.state === 'half-open' || circuit.state === 'open')) {
-            circuit.state = 'closed'
-            circuit.failures = 0
-          }
-        }
-      }
-
-      if (actionSuffix.endsWith('Timeout')) {
-        const id = payload._correlationId as string
-        if (pending[id]) {
-          const req = pending[id]
-          const retryCount = (req.retryCount as number) ?? 0
-          const chConfig = config.channels[channel]
-          const maxRetries = chConfig?.retries ?? 0
-
-          metrics.totalTimeouts = (metrics.totalTimeouts ?? 0) + 1
-
-          // Circuit breaker: count failure
-          if (cb && circuit) {
-            circuit.failures += 1
-            circuit.lastFailureAt = Date.now()
-            if (circuit.failures >= cb.failureThreshold) {
-              circuit.state = 'open'
-            }
-          }
-
-          // Retry logic
-          if (retryCount < maxRetries) {
-            req.retryCount = retryCount + 1
-            req.requestedAt = Date.now()
-            if (chConfig?.timeout) {
-              return [{ type: `${prefix}:${capitalize(channel)}StartTimer`, payload: { _correlationId: id, _channel: channel, timeout: chConfig.timeout } }]
-            }
-          } else {
-            delete pending[id]
-          }
-        }
-      }
-    },
-    execute(app, effect) {
-      const payload = effect.payload as Record<string, unknown>
-      const effectSuffix = effect.type.slice(effect.type.lastIndexOf(':') + 1)
-
-      if (effectSuffix.endsWith('StartTimer')) {
-        const id = payload._correlationId as string
-        const timeout = payload.timeout as number
-        const channel = payload._channel as string
-
-        // Cancel existing timer for this correlation ID (retry case)
-        const prev = activeTimers.get(id)
-        if (prev) clearTimeout(prev)
-
-        const tid = setTimeout(() => {
-          activeTimers.delete(id)
-          // Only dispatch timeout if request is still pending (response may have cleared it)
-          const bs = app.getState() as Record<string, Record<string, unknown>>
-          const pending = bs.pending
-          if (!pending?.[id]) return
-          const timeoutType = `${prefix}:${capitalize(channel)}Timeout`
-          app.dispatch({ type: timeoutType, payload: { _correlationId: id, _channel: channel } })
-        }, timeout)
-        activeTimers.set(id, tid)
-      }
-
-      if (effectSuffix.endsWith('CancelTimer')) {
-        const id = payload._correlationId as string
-        const tid = activeTimers.get(id)
-        if (tid) { clearTimeout(tid); activeTimers.delete(id) }
-      }
-    },
-    selectors: {
-      getPendingCount: (s: unknown) =>
-        Object.keys(((s as Record<string, Record<string, unknown>>)[name]?.pending ?? {})).length,
-      getAverageLatency: (s: unknown) => {
-        const m = (s as Record<string, Record<string, Record<string, number>>>)[name]?.metrics
-        return m?.totalResponses ? m.totalLatencyMs / m.totalResponses : 0
-      },
-      isCircuitOpen: (s: unknown) => {
-        const c = (s as Record<string, Record<string, { state: string }>>)[name]?.circuit
-        return c?.state === 'open'
-      },
-    },
-  })
-
-  // Build request helpers: bridge.request.price('BTC') → effect
-  for (const ch of channels) {
-    const chConfig = config.channels[ch]
-    requestCreators[ch] = (...args: unknown[]) => ({
-      type: `${prefix}:${capitalize(ch)}Request`,
-      payload: {
-        ...chConfig.request(...args),
-        _correlationId: crypto.randomUUID(),
-        _channel: ch,
-      },
-    })
-  }
-
-  return Object.assign(featureDef, { request: requestCreators })
-}
-
 // ── Test harness ───────────────────────────────────────────────────
 
-export type TestContext<S = Record<string, unknown>> = {
+export type TestContext<
+  S = Record<string, unknown>,
+  // deno-lint-ignore no-explicit-any
+  A = Record<string, (...args: any[]) => any>,
+> = {
   /** Initialize/reset feature to initial state */
   init: () => void
   /** Destroy feature (reset to initial + 'uninitialized' status) */
   destroy: () => void
-  /** Typed action senders — one per declared action */
-  send: Record<string, (...args: unknown[]) => void>
+  /** Typed action senders — one per declared action, arguments inferred from action creators */
+  send: { [K in keyof A & string]: A[K] extends (...args: infer P) => unknown ? (...args: P) => void : never }
   /** Assertions */
   expect: {
     /** Assert on feature state slice */
@@ -1111,33 +1443,44 @@ export type TestContext<S = Record<string, unknown>> = {
     state: (fn: (s: any, ...args: any[]) => boolean) => void
     /** Assert current machine status */
     status: (expected: string) => void
-    /** Assert effect types returned by last action (short names, e.g. 'Persist') */
+    /** Assert effect types returned by last action (full type strings, e.g. 'counter:persist') */
     effects: (types: string[]) => void
     /** Assert number of effects returned by last action */
     effectCount: (n: number) => void
     /** Assert a predicate holds for current state */
     invariant: (fn: (s: S) => boolean) => void
   }
-  /** Get full feature state including _status */
-  getState: () => S & { _status?: string }
+  /** Get current feature state */
+  getState: () => S
   /** Get effects from last dispatched action */
   getEffects: () => (Msg | ScheduleEffect)[]
   /** Dispatch N random valid actions (for property-based testing) */
   randomActions: (n: number) => void
-  /** Run pending effects (executor). Required for async reactive methods. */
+  /** Run pending effects (executor). Deprecated — `settle()` now auto-runs effects. */
   runEffects: () => void
-  /** Wait for async operations to settle (microtasks + timers). Use with async test functions. */
+  /** Run effects + wait for async to complete. Replaces `runEffects() + settle()`.
+   *  No arg: drain microtasks (fast, for in-memory async). With ms: timer-based wait. */
   settle: (ms?: number) => Promise<void>
 }
 
 /** Test harness for isolated feature testing — wraps Deno.test with typed helpers */
-export function testFeature<S extends Record<string, unknown> = Record<string, unknown>>(
+export function testFeature<
+  S extends Record<string, unknown> = Record<string, unknown>,
+  N extends string = string,
   // deno-lint-ignore no-explicit-any
-  f: FeatureDef<string, any, any, S>,
+  A extends Creators = any,
+  // deno-lint-ignore no-explicit-any
+  E extends Creators = any,
+>(
+  f: FeatureDef<N, A, E, S>,
   testName: string,
-  fn: (t: TestContext<S>) => void | Promise<void>,
+  fn: (t: TestContext<S, Catalog<N, A>>) => void | Promise<void>,
 ): void {
   Deno.test(`[${f.name}] ${testName}`, async () => {
+    // Reset shared runtime state for test isolation — prevents bleed from prior runs
+    resetFlows()
+    resetPending()
+
     // Compose a single-feature system
     const composed = composeFeatures([f])
     const machine = f._config.machine
@@ -1156,22 +1499,24 @@ export function testFeature<S extends Record<string, unknown> = Record<string, u
       lastEffects = result.effects
     }
 
-    // Build send proxy from action creators
-    const send: Record<string, (...args: unknown[]) => void> = {}
+    // Build send proxy from action creators (cast to typed form — runtime matches compile-time shape)
+    // deno-lint-ignore no-explicit-any
+    const send = {} as TestContext<S, Catalog<N, A>>['send']
     for (const key of f._config.actionKeys) {
       const creator = (f.A as Record<string, unknown>)[key]
       if (typeof creator === 'function') {
-        send[key] = (...args: unknown[]) => dispatch((creator as (...a: unknown[]) => Msg)(...args))
+        // deno-lint-ignore no-explicit-any
+        ;(send as Record<string, (...args: any[]) => void>)[key] = (...args: unknown[]) => dispatch((creator as (...a: unknown[]) => Msg)(...args))
       }
     }
 
-    const ctx: TestContext<S> = {
+    const ctx: TestContext<S, Catalog<N, A>> = {
       init: () => {
         state = { ...composed.initialState }
         lastEffects = []
       },
       destroy: () => {
-        const base = machine === 'simple'
+        const base = machine === false
           ? { ...f._config.state }
           : { ...f._config.state, _status: 'uninitialized' }
         state = { [f.name]: base }
@@ -1193,11 +1538,7 @@ export function testFeature<S extends Record<string, unknown> = Record<string, u
           }
         },
         effects: (types) => {
-          const prefix = f._config.prefix + ':'
-          const actual = lastEffects.map(e => {
-            const t = e.type as string
-            return t.startsWith(prefix) ? t.slice(prefix.length) : t
-          }).sort()
+          const actual = lastEffects.map(e => e.type as string).sort()
           const expected = [...types].sort()
           if (JSON.stringify(expected) !== JSON.stringify(actual)) {
             throw new Error(`expected effects [${expected}], got [${actual}]`)
@@ -1215,7 +1556,7 @@ export function testFeature<S extends Record<string, unknown> = Record<string, u
           }
         },
       },
-      getState: () => state[f.name] as S & { _status?: string },
+      getState: () => state[f.name] as S,
       getEffects: () => lastEffects,
       randomActions: (n) => {
         const keys = f._config.actionKeys
@@ -1229,118 +1570,25 @@ export function testFeature<S extends Record<string, unknown> = Record<string, u
           composed.execute(app, eff as { type: string; payload: unknown })
         }
       },
-      settle: (ms = 50) => new Promise(resolve => setTimeout(resolve, ms)),
+      settle: async (ms?: number): Promise<void> => {
+        // Auto-run pending effects first (eliminates need to call runEffects separately)
+        for (const eff of lastEffects) {
+          composed.execute(app, eff as { type: string; payload: unknown })
+        }
+        // Wait for async to complete — timer if ms given, otherwise drain microtasks
+        if (ms !== undefined) {
+          await new Promise(resolve => setTimeout(resolve, ms))
+        } else {
+          for (let i = 0; i < 10; i++) await Promise.resolve()
+        }
+      },
     }
 
     await fn(ctx)
   })
 }
 
-// ── Bridge test harness ──────────────────────────────────────────────
-
-export type BridgeTestContext = {
-  /** Send a request on a channel */
-  request: Record<string, (...args: unknown[]) => void>
-  /** Send a response on a channel */
-  respond: Record<string, (...args: unknown[]) => void>
-  /** Simulate a timeout on a channel */
-  timeout: (channel?: string) => void
-  /** Assertions */
-  expect: {
-    pending: (n: number) => void
-    circuitOpen: (expected: boolean) => void
-    retryCount: (expected: number) => void
-  }
-  /** Get bridge state */
-  getState: () => Record<string, unknown>
-  /** Get effects from last action */
-  getEffects: () => (Msg | ScheduleEffect)[]
-}
-
-/** Test harness for bridge features — wraps Deno.test with bridge-specific helpers */
-export function testBridge(
-  b: FeatureDef,
-  testName: string,
-  fn: (t: BridgeTestContext) => void,
-): void {
-  Deno.test(`[${b.name}] ${testName}`, () => {
-    const composed = composeFeatures([b])
-    let state = { ...composed.initialState }
-    let lastEffects: (Msg | ScheduleEffect)[] = []
-    // Track correlation IDs for timeout simulation
-    let lastCorrelationId: string | undefined
-    let lastChannel: string | undefined
-
-    function dispatch(action: Msg): void {
-      const result = composed.reduce(state, action)
-      state = { ...result.state }
-      lastEffects = result.effects
-    }
-
-    const prefix = b._config.prefix
-    const channels = b._config.actionKeys
-      .filter(k => k.endsWith('Request'))
-      .map(k => k.replace(/Request$/, ''))
-
-    // Build request helpers
-    const request: Record<string, (...args: unknown[]) => void> = {}
-    for (const ch of channels) {
-      request[ch] = (...args: unknown[]) => {
-        const action = b.request![ch](...args)
-        lastCorrelationId = (action.payload as Record<string, string>)._correlationId
-        lastChannel = ch
-        dispatch(action)
-      }
-    }
-
-    // Build respond helpers
-    const respond: Record<string, (...args: unknown[]) => void> = {}
-    for (const ch of channels) {
-      const creator = (b.A as Record<string, unknown>)[`${ch}Response`]
-      if (typeof creator === 'function') {
-        respond[ch] = (...args: unknown[]) => {
-          const action = (creator as (...a: unknown[]) => Msg)(...args)
-          // Inject correlation ID from last request
-          if (lastCorrelationId) {
-            ;(action.payload as Record<string, unknown>)._correlationId = lastCorrelationId
-          }
-          dispatch(action)
-        }
-      }
-    }
-
-    const ctx: BridgeTestContext = {
-      request,
-      respond,
-      timeout: (channel?: string) => {
-        const ch = channel ?? lastChannel
-        if (!ch || !lastCorrelationId) throw new Error('no pending request to timeout')
-        const timeoutType = `${prefix}:${capitalize(ch)}Timeout`
-        dispatch({ type: timeoutType, payload: { _correlationId: lastCorrelationId, _channel: ch } })
-      },
-      expect: {
-        pending: (n: number) => {
-          const bs = state[b.name] as Record<string, Record<string, unknown>>
-          const count = Object.keys(bs.pending ?? {}).length
-          if (count !== n) throw new Error(`expected ${n} pending, got ${count}`)
-        },
-        circuitOpen: (expected: boolean) => {
-          const bs = state[b.name] as Record<string, { state: string }>
-          const isOpen = bs.circuit?.state === 'open'
-          if (isOpen !== expected) throw new Error(`expected circuit ${expected ? 'open' : 'closed'}, got ${isOpen ? 'open' : bs.circuit?.state ?? 'closed'}`)
-        },
-        retryCount: (expected: number) => {
-          const bs = state[b.name] as Record<string, Record<string, Record<string, unknown>>>
-          const pending = bs.pending ?? {}
-          const entries = Object.values(pending)
-          const total = entries.reduce((sum, e) => sum + ((e.retryCount as number) ?? 0), 0)
-          if (total !== expected) throw new Error(`expected retryCount ${expected}, got ${total}`)
-        },
-      },
-      getState: () => state[b.name] as Record<string, unknown>,
-      getEffects: () => lastEffects,
-    }
-
-    fn(ctx)
-  })
+/** @deprecated bridge() removed in v0.8 — use call({ timeout, retries }, ...) instead */
+export function testBridge(_b: FeatureDef, _testName: string, _fn: (t: never) => void): void {
+  throw new Error('testBridge() removed in v0.8 — use call({ timeout, retries }) and testFeature() instead')
 }

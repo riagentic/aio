@@ -11,9 +11,10 @@ import { isScheduleEffect, createScheduleManager, type ScheduleEffect, type Sche
 import { openDb, loadTables, syncTables, type TableDef, type AioDB } from './sql.ts'
 import { AppLock, resolveAppId, type SingletonMode } from './single-instance-lock.ts'
 import { composeFeatures, bindFeature, type FeatureEntry, type FeatureDef, type ComposedFeatures, type FeatureStatus } from './feature.ts'
+import { AioLogger, type LogConfig } from './logger.ts'
 
 /** Framework version — printed by --version, checked in tests */
-export const VERSION = '0.7.0'
+export const VERSION = '0.8.0'
 
 /** Validates that framework version matches deno.json version at build time */
 function validateVersion(): void {
@@ -53,8 +54,8 @@ export type AioConfig<S, A, E> = {
   reduce: (state: S, action: A) => { state: S; effects: (E | ScheduleEffect)[] }
   execute: (app: AioApp<S, A>, effect: E) => void
   persist?: boolean              // default: true — auto-opens Deno.Kv
-  getDBState?: (state: S) => Partial<S>   // filter what gets persisted (default: full state)
-  getUIState?: (state: S, user?: AioUser) => unknown   // filter what gets sent to UI (default: full state)
+  stateForDB?: (state: S) => Partial<S>   // filter what gets persisted (default: full state)
+  stateForUI?: (state: S, user?: AioUser) => unknown   // filter what gets sent to UI (default: full state)
   deltaThreshold?: number          // 0-1: ratio of changed keys that triggers full state broadcast (default: 0.5)
   maxConnections?: number          // max concurrent WebSocket clients (default: 100)
   beforeReduce?: (action: A, state: S, user?: AioUser) => A | null  // intercept actions before reduce — return null to drop
@@ -652,19 +653,30 @@ export type FeaturesConfig = {
   onStop?: () => void
   onError?: (error: AioError) => void
   onRestore?: (state: unknown) => unknown
-  getUIState?: (state: unknown, user?: AioUser) => unknown
-  getDBState?: (state: unknown) => unknown
+  stateForUI?: (state: unknown, user?: AioUser) => unknown
+  stateForDB?: (state: unknown) => unknown
+  /** Structured logging — app.log (narrative), debug.log (all), errors.log (warn/error).
+   *  `true` enables with all defaults. Omit to disable. */
+  logging?: boolean | LogConfig
 }
 
 /** Single entry point — boots KV, server, electron, wires everything. CLI args override config. */
+async function run<S, A, E>(initialState: S, config: AioConfig<S, A, E>): Promise<AioApp<S, A>>
+async function run(fc: FeaturesConfig): Promise<AioApp<any, any>>
 // deno-lint-ignore no-explicit-any
-async function run(first: any, second?: any): Promise<AioApp<any, any>> {
+async function run(a: any, b?: any): Promise<AioApp<any, any>> {
+  // Legacy API: aio.run(initialState, config) — kept for backward compat
+  if (b !== undefined) {
+    if (_running) throw new Error('aio.run() already called — one instance per process')
+    _running = true
+    try { return await _run(a, b) }
+    catch (e) { _running = false; throw e }
+  }
+  const fc = a as FeaturesConfig
   if (_running) throw new Error('aio.run() already called — one instance per process')
   _running = true
 
-  // v0.5 features-based config: aio.run({ features: [...] })
-  if (first && typeof first === 'object' && 'features' in first && !second) {
-    const fc = first as FeaturesConfig
+  {
 
     // --isolate: filter features to only the specified ones
     let featureEntries = fc.features
@@ -685,6 +697,28 @@ async function run(first: any, second?: any): Promise<AioApp<any, any>> {
 
     const composed = composeFeatures(featureEntries)
 
+    // Build auto-stateForDB from per-feature persist excludes (if user didn't supply one)
+    let autoGetDBState = fc.stateForDB
+    if (!fc.stateForDB) {
+      const featureExcludes = new Map<string, string[]>()
+      for (const f of composed.features) {
+        if (f._config.persistExclude?.length) featureExcludes.set(f.name, f._config.persistExclude)
+      }
+      if (featureExcludes.size > 0) {
+        autoGetDBState = (s: unknown) => {
+          const result = { ...(s as Record<string, unknown>) }
+          for (const [featureName, excludeKeys] of featureExcludes) {
+            if (result[featureName] && typeof result[featureName] === 'object') {
+              const filtered = { ...(result[featureName] as Record<string, unknown>) }
+              for (const key of excludeKeys) delete filtered[key]
+              result[featureName] = filtered
+            }
+          }
+          return result
+        }
+      }
+    }
+
     // Log feature composition
     log.info(`features: ${composed.featureNames.join(', ')}`)
     // Log foreign action listeners
@@ -695,6 +729,12 @@ async function run(first: any, second?: any): Promise<AioApp<any, any>> {
         }
       }
     }
+
+    // Create structured logger if configured
+    const appId = fc.appId ?? 'app'
+    const logCfg = fc.logging === true ? {} : fc.logging
+    const logger = logCfg ? new AioLogger({ ...logCfg, appName: appId }) : null
+    if (logger) await logger.init()
 
     // Store composed for useFeature (used by getUIState to expose feature names)
     ;(globalThis as Record<string, unknown>).__aioFeatures = composed
@@ -793,16 +833,23 @@ async function run(first: any, second?: any): Promise<AioApp<any, any>> {
       schedules: fc.schedules,
       ui: fc.ui,
       beforeReduce: beforeReduce as AioConfig<Record<string, unknown>, unknown, unknown>['beforeReduce'],
-      onAction: fc.onAction as AioConfig<Record<string, unknown>, unknown, unknown>['onAction'],
+      onAction: logger
+        ? ((action, state, user) => {
+            logger.observe(action as { type: string; payload?: unknown }, state as Record<string, unknown>)
+            if (fc.onAction) fc.onAction(action, state, user)
+          }) as AioConfig<Record<string, unknown>, unknown, unknown>['onAction']
+        : fc.onAction as AioConfig<Record<string, unknown>, unknown, unknown>['onAction'],
       onEffect: fc.onEffect as AioConfig<Record<string, unknown>, unknown, unknown>['onEffect'],
       onConnect: fc.onConnect,
       onDisconnect: fc.onDisconnect,
       onStart: ((app: AioApp<Record<string, unknown>, unknown>) => {
         // Run lifecycle init for all features
         composed.initAll({ dispatch: (a) => app.dispatch(a), getState: () => app.getState() })
+        logger?.onStart(composed.featureNames, app.port)
         if (fc.onStart) fc.onStart(app)
       }) as AioConfig<Record<string, unknown>, unknown, unknown>['onStart'],
       onStop: () => {
+        logger?.onStop()
         if (appRef) {
           composed.destroyAll({ dispatch: (a) => appRef!.dispatch(a), getState: () => appRef!.getState() })
         }
@@ -810,8 +857,8 @@ async function run(first: any, second?: any): Promise<AioApp<any, any>> {
       },
       onError: fc.onError,
       onRestore: onRestore as AioConfig<Record<string, unknown>, unknown, unknown>['onRestore'],
-      getUIState: fc.getUIState as AioConfig<Record<string, unknown>, unknown, unknown>['getUIState'],
-      getDBState: fc.getDBState as AioConfig<Record<string, unknown>, unknown, unknown>['getDBState'],
+      stateForUI: fc.stateForUI as AioConfig<Record<string, unknown>, unknown, unknown>['stateForUI'],
+      stateForDB: autoGetDBState as AioConfig<Record<string, unknown>, unknown, unknown>['stateForDB'],
       _onScheduleReady: (cancelByPrefix) => composed.registry.setOnDisable(cancelByPrefix),
     }
 
@@ -838,10 +885,6 @@ async function run(first: any, second?: any): Promise<AioApp<any, any>> {
     }
     catch (e) { _running = false; throw e }
   }
-
-  // Legacy v0.4 config: aio.run(initialState, config)
-  try { return await _run(first, second) }
-  catch (e) { _running = false; throw e }
 }
 
 async function _run<S, A, E>(initialState: S, config: AioConfig<S, A, E>): Promise<AioApp<S, A>> {
@@ -911,8 +954,8 @@ async function _run<S, A, E>(initialState: S, config: AioConfig<S, A, E>): Promi
 
   const { reduce, execute, onAction, onEffect, onStart, onStop, onError } = config
   const shouldPersist = (cli.persist ?? config.persist) !== false
-  const getUIState = config.getUIState ?? ((s: S, _user?: AioUser) => s)
-  const getDBState = config.getDBState ?? ((s: S) => s)
+  const getUIState = config.stateForUI ?? ((s: S, _user?: AioUser) => s)
+  const getDBState = config.stateForDB ?? ((s: S) => s)
   const persistKey = config.persistKey ?? 'state'
   const persistMode = config.persistMode ?? 'single'
   const ui = config.ui ?? {}
@@ -1027,18 +1070,18 @@ async function _run<S, A, E>(initialState: S, config: AioConfig<S, A, E>): Promi
             const serialized = JSON.stringify(dbState)
             const bytes = new TextEncoder().encode(serialized).byteLength
             if (bytes > 63_000) {
-              log.error(`persist: state is ${(bytes / 1024).toFixed(1)}KB — exceeds Deno KV 65KB limit. Use persistMode:'multi', getDBState filter, or db:{} (SQLite)`)
+              log.error(`persist: state is ${(bytes / 1024).toFixed(1)}KB — exceeds Deno KV 65KB limit. Use persistMode:'multi', stateForDB filter, or db:{} (SQLite)`)
               return
             }
             if (bytes > 50_000) {
-              log.warn(`persist: state is ${(bytes / 1024).toFixed(1)}KB — approaching 65KB KV limit. Consider persistMode:'multi', getDBState, or SQLite`)
+              log.warn(`persist: state is ${(bytes / 1024).toFixed(1)}KB — approaching 65KB KV limit. Consider persistMode:'multi', stateForDB, or SQLite`)
             }
             kvDb.set(persistKey, dbState)
               .then(() => log.debug(`persist: saved (${(bytes / 1024).toFixed(1)}KB)`))
               .catch(e => { log.error(`persist: failed to save — ${e}`) })
           }
         } catch (e) {
-          log.error(`persist: getDBState threw — ${e}`)
+          log.error(`persist: stateForDB threw — ${e}`)
         }
       }
     }, persistMs)
@@ -1070,7 +1113,7 @@ async function _run<S, A, E>(initialState: S, config: AioConfig<S, A, E>): Promi
       } catch (e) {
         const msg = String(e)
         if (msg.includes('too large') || msg.includes('65536') || msg.includes('value too')) {
-          log.warn(`persist: state exceeds Deno KV 65KB limit — set persistMode:'multi' or use getDBState / db:{} (SQLite)`)
+          log.warn(`persist: state exceeds Deno KV 65KB limit — set persistMode:'multi' or use stateForDB / db:{} (SQLite)`)
         }
         log.error(`persist: flush failed — ${e}`)
       }
@@ -1122,6 +1165,15 @@ async function _run<S, A, E>(initialState: S, config: AioConfig<S, A, E>): Promi
       }
     : undefined
 
+  // Internal action types to hide from time-travel history (framework noise)
+  const TT_SKIP_SUFFIXES = [':__exec', ':__FlowState', ':__flow']
+  const TT_SKIP_CONTAINS = [':__set', ':__error']
+  function isInternalAction(type: string): boolean {
+    if (TT_SKIP_SUFFIXES.some(s => type.endsWith(s))) return true
+    if (TT_SKIP_CONTAINS.some(s => type.includes(s))) return true
+    return false
+  }
+
   // Shared dispatch loop — re-entrant-safe, overflow-guarded
   const dispatch = createDispatch<S, A, E>({
     reduce: tt
@@ -1131,9 +1183,12 @@ async function _run<S, A, E>(initialState: S, config: AioConfig<S, A, E>): Promi
             return { state: s, effects: [] as E[] }
           }
           const result = hookedReduce(s, a)
-          tt = record(tt!, a as unknown as { type: string }, result.state, lastPerf)
-          lastPerf = undefined
-          server.broadcastTT()
+          const actionType = (a as { type?: string }).type ?? ''
+          if (!isInternalAction(actionType)) {
+            tt = record(tt!, a as unknown as { type: string }, result.state, lastPerf)
+            lastPerf = undefined
+            server.broadcastTT()
+          }
           return result
         }
       : hookedReduce,

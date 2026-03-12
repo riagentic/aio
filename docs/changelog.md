@@ -1,5 +1,126 @@
 # Changelog
 
+## v0.8.0
+
+**Unified API — `feature({ methods })` is the default**
+- `reactive()` removed — `feature({ methods })` is the one API for method-style features (migration: rename only)
+- `feature({ methods })` is the default; `feature({ actions, reduce })` is the explicit/advanced style
+- `bridge()` removed — `call({ timeout, retries }, ...)` covers all request/response patterns
+
+**Object-form `reduce` and `execute` — named handlers replace switch/case**
+- `reduce: { increment(state, payload) { ... } }` — one method per action key, payload typed from action creator
+- `execute: { persist(app, payload) { ... } }` — one method per effect key, payload typed from effect creator
+- No more `switch(action.type)`, no more `{ A }` / `{ E }` context parameters in the default path
+- Function form (`reduce(state, action, { on, emit }) {}`) remains as escape hatch for foreign action handling
+
+**Generators — unified sequential workflow API**
+- Works in both styles: `feature({ methods, generators })` and `feature({ actions, generators })`
+- Methods style: each generator auto-creates an action `${featureName}:${name}` — no trigger string needed
+- Actions style: generator key must match an action key — becomes the trigger
+- `flows:` key removed from both feature styles — `generators` is the only path now
+- `flow()` export removed; `cancelOn()` exported instead
+
+**`GenCtx<S>` — typed generator state**
+- `GenCtx<S>` is generic — `S` is inferred from the `state:` config automatically
+- `ctx.mutate('label', s => { s.count += 1 })` — `s` is typed as your feature state, no casts needed
+- `ctx.done(s => { s.orderId = id })` — same, final mutation is fully typed
+- `ctx.getState()` returns `S` — read state after a step without casting
+- `ctx.mutate` is the primary name — `ctx.step` kept as a deprecated alias
+- Standalone reusable generators: annotate `ctx: GenCtx<{ count: number }>` explicitly
+
+**Typed generator arguments — no more payload casts**
+- Actions-style generators receive the payload object directly: `function*(ctx, { item, qty }: { item: string; qty: number })`
+- Methods-style generators receive spread args: `function*(ctx, item: string, qty: number)`
+- `action.payload as { ... }` casts in generators are gone — types flow from the action creator or method signature
+
+**`ctx.send(creatorOrType, payload?)` — dispatch shorthand**
+- `yield* ctx.send(analytics.log, { msg: 'done' })` — shorter than `ctx.dispatch({ type: ..., payload: ... })`
+- Accepts bound method (`.type` used) or plain type string; `ctx.dispatch` still available for full action objects
+
+**`ctx.all` — named form alongside spread**
+- `const { user, orders } = yield* ctx.all({ user: ctx.call(...), orders: ctx.call(...) })`
+- Spread form still works: `const [a, b] = yield* ctx.all(gen1, gen2)`
+
+**`ctx.waitFor` — accepts bound methods and typed creators**
+- `yield* ctx.waitFor(gateway.running)` — any object with `.type` works, not just A catalog creators
+- `yield* ctx.waitFor(feature.A.actionName)` — payload type fully inferred from A catalog creators
+- `TypedCreator<P>` type exported for advanced use
+
+**`cancelOn()` — functional cancelOn for generators**
+- `cancelOn(['stop'], function*(ctx) {...})` — attach cancelOn to a generator function
+- Works in both `feature({ methods, generators })` and `feature({ actions, generators })`
+
+**Lowercase action type strings — `featureName:actionKey` format**
+- All action types are now lowercase: `'counter:increment'` not `'Counter:Increment'`
+- Applies to all generated types: methods, generators, flow steps, errors, init/destroy
+
+**No raw strings anywhere**
+- `listensTo`: pass bound methods directly — `[counter.increment]` not `['counter:increment']`
+- `cancelOn()`: pass bound methods or `.type` strings
+- `ctx.waitFor()`: pass bound function — `ctx.waitFor(payment.complete)`
+- Machine `on` keys for foreign actions: use `[counter.increment.type]` not `'Counter:Increment'`
+- `dispatchTo: [wallet, fleet]` — pass feature refs directly, string form removed
+
+**`call()` — extended inter-feature coordination**
+- `import { call } from 'aio'` — standalone function, usable anywhere after `aio.run()`
+- Dispatches a real action through the store (observable, interceptable, time-travelable)
+- **Returns async method's return value** — no bridge() needed for request/response
+- **`call({ timeout?, retries? }, () => feature.method(args))`** — timeout rejects after N ms, retries on failure
+- `CallOptions` type exported for `{ timeout?: number; retries?: number }`
+
+**Structured logging — `logging` config in `aio.run()`**
+- Three outputs: `logs/app.log` (narrative), `logs/debug.log` (all actions), `logs/errors.log` (warn/error)
+- `app.log` is smart: machine state transitions, flow completions, feature lifecycle, deduped errors — no firehose
+- Error deduplication: first occurrence logged, repeats suppressed with count, summary on recovery
+- `debug.log`: every non-internal action, full payload, JSONL — for when something breaks
+- `suppressTypes`: exclude known high-frequency action types from all logs
+- `LogConfig` type exported
+
+**`ScopedApp.getFullState()` — cross-feature reads in `init`**
+- `init(app)` now has `app.getFullState()` alongside `app.getState()` (own slice)
+- `app.getState()` still returns the feature's own slice — fast path for self-reads
+
+**`useFeature(f, { fallback })` — skip the null guard**
+- `useFeature(counter, { fallback: initialState })` returns `state: S` (never null)
+- TypeScript overload: `{ fallback: S }` narrows the return type to `state: S`
+
+**`feature({ persist: { exclude } })` — per-feature persistence exclusion**
+- `persist: { exclude: ['htmlCache', 'largeBlob'] }` — omit fields from KV persistence without `stateForDB`
+- Auto-composes with other features' excludes — each feature owns its own persistence config
+
+**Machine `on` is optional for terminal states**
+- States with no outgoing transitions no longer need `on: {}`
+- `saving: {}` and `error: {}` are valid — omit `on` entirely for dead-end states
+
+**Type system improvements**
+- `_status` hidden from user-facing types — access via `useFeature().status` or `t.expect.status()`
+- Selectors auto-scoped — receive feature's own state slice in both `feature()` styles
+- Typed action union in `reduce` — `action.payload` auto-narrows in switch/case, no casts needed
+- `ActionUnion<Prefix, A>` exported for advanced use
+- Foreign actions in object-form `reduce` via computed keys: `[inventory.reserve.type](state, payload) { ... }`
+- `t.expect.effects()` uses full `featureName:effectKey` type strings: `['counter:log', 'counter:persist']`
+- Internal actions hidden from time-travel (`__set*`, `__exec`, `__error`, `__FlowState`)
+- `GenCtx` type exported (renamed from `FlowCtx` in pre-release drafts)
+
+**DX improvements**
+- `settle()` auto-runs effects — `t.runEffects()` no longer needed, just `await t.settle()`
+- `ctx.put` renamed to `ctx.dispatch` in generators — consistent with framework dispatch semantics
+- Inter-feature patterns reduced from 6 to 3: Observe / Read / Coordinate
+
+**Cleanup**
+- `reactive()` removed (was a 15-line shim) — `feature({ methods })` is identical
+- `bridge()` / `testBridge()` / `BridgeTestContext` removed — use `call({ timeout, retries })`
+- `machine: 'simple'` removed — use `machine: false` (breaking: rename in your config)
+- Classic `aio.run(state, config)` API removed — use `aio.run({ features })`
+- `flow()` removed — use `generators` key with `cancelOn()` for cancellation
+- `FlowDef` removed from public API — internal type only
+- `flows:` key removed from `feature()` config (both methods and actions styles)
+- `{ A }` / `{ E }` context objects removed from reduce/execute (use named handlers or `{ on }` / `{ emit }`)
+- Removed `FeatureContext` type from public API
+- Removed `_setFullApp` / `_callHandler` internal wiring
+
+---
+
 ## v0.7.0
 
 **reactive() — plain methods instead of reduce/execute**
@@ -9,7 +130,7 @@
 - Machine-gated async writes — method-tagged `__setMethod` actions with auto-injected transitions
 - Microtask batching — consecutive Proxy writes grouped into one action per sync frame
 - `listensTo: string[]` — foreign action listeners without a full machine
-- Selectors, crossDispatch, init/destroy hooks
+- Selectors, dispatchTo, onInit/onDestroy hooks
 - Direct calling — `counter.increment(5)` after `aio.run()`, no `.A.` namespace
 - Async error action — `{Prefix}:__error` with machine self-loop in all states
 - Async `testFeature()` — `t.runEffects()` + `t.settle()`
@@ -18,17 +139,17 @@
 - `ctx.waitFor(actionType, timeout?)` — pause until external action dispatched
 - `ctx.getState()` — read current feature state inside a flow
 - `cancelOn: string[]` — declarative flow cancellation on arbitrary actions
-- `ctx.put()` accepts `{ type, payload? }` — payload optional
+- `ctx.dispatch()` accepts `{ type, payload? }` — payload optional
 - Flow errors fed back into generator via `gen.throw()` for try/catch support
 
 **DX & infrastructure**
 - `aio.run()` binds dispatch + selectors to all features (reactive, feature, flow)
 - TypeScript inference — typed intersections with autocomplete for direct calling
 - Pre-bind console.warn when methods called before `aio.run()`
-- `machine: false` accepted as alias for `'simple'`
+- `machine: false` — no state machine guards (replaces `machine: 'simple'`)
 - FeatureDef carries phantom State type for testFeature inference
 - `useSyncExternalStore` in useAio/useFeature for selective re-renders
-- `useAio` deprecated in favor of `useFeature`
+- `useFeature(ref)` added — feature-scoped state, typed send, machine status, selective re-renders; `useAio()` remains the right hook for root layout and cross-feature views
 - Startup linter validates empty features, `_status` reserved key, empty actionKeys
 - `--type` and `--template` CLI flags for non-interactive project scaffolding
 
@@ -44,12 +165,11 @@
 - 15 topic files split from monolithic manual.md
 - features.md — all 5 inter-feature interaction patterns
 - debugging.md — error interpretation, time-travel forensics
-- classic.md — v0.4 API reference
 
 ## v0.6.0
 
 - `flow()` — generator-based sequential workflows triggered by actions
-- `FlowCtx` — call, step, done, fail, put, all, race, sleep
+- `GenCtx` — call, step, done, fail, put, all, race, sleep
 - `reduce` and `machine` now optional in `feature()` — flow-only features
 - Auto-generated flow actions visible in time-travel
 - Auto-cancellation on re-trigger, feature disable, and destroy
@@ -64,7 +184,7 @@
 - `bridge()` — cross-feature request/response with timeouts, retries, circuit breaker
 - `testFeature()` / `testBridge()` — isolated test harnesses
 - Foreign action listeners — react to other features' actions via machine
-- Scoped dispatch — executors limited to own actions + `crossDispatch` allowlist
+- Scoped dispatch — executors limited to own actions + `dispatchTo` allowlist
 - `implement()` — deferred executor attachment for server-only imports
 - Feature lifecycle — `init` / `destroy` hooks, dependency-ordered
 - Feature registry — `enable` / `disable` / `health` at runtime

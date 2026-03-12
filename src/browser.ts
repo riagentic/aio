@@ -604,9 +604,9 @@ export function disconnectDevTools(): void {
   }
 }
 
-/** React hook — connects to server via WS, syncs state, auto-reconnects. Singleton: safe to call from any component.
- *  @deprecated For v0.5+ features, prefer `useFeature(ref)` — it gives you scoped state, typed send, and selective re-renders.
- *  Use `useAio()` only when you need the full state tree or multiple features in one component. */
+/** React hook — full app state + untyped send. For root layout, routing, and anything that genuinely
+ *  needs cross-feature state. Re-renders on every state change — use `useFeature(f)` in feature components
+ *  for scoped state, typed send, and selective re-renders. */
 export function useAio<S = unknown>(): { state: S | null; send: (action: { type: string; payload?: unknown }) => void } {
   const state = useSyncExternalStore(_subscribe, _getSnapshot, _getServerSnapshot) as S | null
   return { state, send: _send }
@@ -673,17 +673,37 @@ function _capitalize(s: string): string {
 
 /** Browser-compatible feature() — builds catalogs for useFeature. Full version in feature.ts (server). */
 // deno-lint-ignore no-explicit-any
-export function feature(name: string, config: { state?: any; actions: _Creators; effects?: _Creators; machine?: any; reduce?: any; execute?: any; selectors?: any }) {
-  const prefix = _capitalize(name)
+export function feature(name: string, config: { state?: any; actions?: _Creators; methods?: Record<string, unknown>; generators?: Record<string, unknown>; effects?: _Creators; machine?: any; reduce?: any; execute?: any; selectors?: any }) {
+  const prefix = name
   // deno-lint-ignore no-explicit-any
   const buildCat = (creators: _Creators): Record<string, any> => {
     const cat: Record<string, unknown> = {}
     for (const key of Object.keys(creators)) {
-      const label = `${prefix}:${_capitalize(key)}`
-      cat[_capitalize(key)] = label
-      cat[key] = (...args: unknown[]) => ({ type: label, payload: creators[key](...args) ?? {} })
+      const label = `${prefix}:${key}`
+      cat[key] = Object.assign(
+        (...args: unknown[]) => ({ type: label, payload: creators[key](...args) ?? {} }),
+        { type: label },
+      )
     }
     return cat
+  }
+  // methods-based feature (v0.8 reactive style) — payload shape is { args: [...] }
+  if (config.methods) {
+    const allKeys = [...Object.keys(config.methods), ...Object.keys(config.generators ?? {})]
+    const cat: Record<string, unknown> = {}
+    for (const key of allKeys) {
+      const label = `${prefix}:${key}`
+      cat[key] = Object.assign(
+        (...args: unknown[]) => ({ type: label, payload: { args } }),
+        { type: label },
+      )
+    }
+    // deno-lint-ignore no-explicit-any
+    const eCat = buildCat((config.effects ?? {}) as any)
+    return {
+      name, A: cat, E: eCat, selectors: config.selectors ?? {},
+      _config: { state: config.state ?? {}, machine: config.machine ?? false, actionKeys: allKeys, effectKeys: Object.keys(config.effects ?? {}), prefix },
+    }
   }
   return {
     name,
@@ -692,7 +712,7 @@ export function feature(name: string, config: { state?: any; actions: _Creators;
     selectors: config.selectors ?? {},
     _config: {
       state: config.state ?? {},
-      machine: config.machine ?? 'simple',
+      machine: config.machine ?? false,
       actionKeys: Object.keys(config.actions ?? {}),
       effectKeys: Object.keys(config.effects ?? {}),
       prefix,
@@ -711,7 +731,7 @@ export function bridge(name: string, config: any) {
     actions[`${ch}Response`] = (...args: unknown[]) => ({ ...(config.channels[ch]?.response?.(...args) ?? {}), _channel: ch })
     actions[`${ch}Timeout`] = () => ({ _channel: ch })
   }
-  return feature(name, { actions, machine: 'simple', reduce: () => {} })
+  return feature(name, { actions, machine: false, reduce: () => {} })
 }
 
 /** Cache for useFeature send objects (one per feature ref) */
@@ -719,9 +739,24 @@ export function bridge(name: string, config: any) {
 const _featureSendCache = new WeakMap<Record<string, any>, Record<string, (...args: unknown[]) => void>>()
 
 /** v0.5 hook — connects UI to a specific feature with scoped state, typed send, and machine status.
- *  Uses selector-based subscription: only re-renders when this feature's slice changes (not on every WS message). */
+ *  Uses selector-based subscription: only re-renders when this feature's slice changes (not on every WS message).
+ *
+ *  Pass `fallback` to skip the `state: S | null` guard — useful for Electron/local apps where
+ *  connection is near-instant and you want components to render immediately with initial state:
+ *
+ *  ```tsx
+ *  const { state, send } = useFeature(counter, { fallback: counter._config.state as CounterState })
+ *  // state is CounterState, never null
+ *  ```
+ */
 // deno-lint-ignore no-explicit-any
-export function useFeature<S = unknown>(ref: { name: string; A: Record<string, any>; _config: { actionKeys: string[] } }): {
+type FeatureRef = { name: string; A: Record<string, any>; _config: { actionKeys: string[] } }
+// deno-lint-ignore no-explicit-any
+export function useFeature<S>(ref: FeatureRef, options: { fallback: S }): { state: S; send: Record<string, (...args: unknown[]) => void>; status: string | undefined }
+// deno-lint-ignore no-explicit-any
+export function useFeature<S = unknown>(ref: FeatureRef, options?: { fallback?: never }): { state: S | null; send: Record<string, (...args: unknown[]) => void>; status: string | undefined }
+// deno-lint-ignore no-explicit-any
+export function useFeature<S = unknown>(ref: FeatureRef, options?: { fallback?: S }): {
   state: S | null
   send: Record<string, (...args: unknown[]) => void>
   status: string | undefined
@@ -736,8 +771,10 @@ export function useFeature<S = unknown>(ref: { name: string; A: Record<string, a
 
   const featureState = useSyncExternalStore(_subscribe, getSliceSnapshot, _getServerSnapshot as () => S | null)
 
-  const status = featureState
-    ? (featureState as Record<string, unknown>)._status as string | undefined
+  const resolved = featureState ?? (options?.fallback !== undefined ? options.fallback : null)
+
+  const status = resolved
+    ? (resolved as Record<string, unknown>)._status as string | undefined
     : undefined
 
   // Build send object (cached per feature ref) — auto-tags actions with _source: 'UI'
@@ -756,7 +793,7 @@ export function useFeature<S = unknown>(ref: { name: string; A: Record<string, a
     _featureSendCache.set(ref, sendObj)
   }
 
-  return { state: featureState, send: sendObj, status }
+  return { state: resolved, send: sendObj, status }
 }
 
 /** Client-only state — not synced to server, not persisted. For UI-local concerns (editing flags, form inputs, etc.) */

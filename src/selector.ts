@@ -19,8 +19,8 @@ type Selector<S, R> = (state: S) => R
  *   (todos, filter) => todos.filter(t => t.status === filter)
  * )
  * 
- * // In getUIState:
- * getUIState: (state) => ({
+ * // In stateForUI:
+ * stateForUI: (state) => ({
  *   visibleTodos: selectVisibleTodos(state),
  *   user: state.user
  * })

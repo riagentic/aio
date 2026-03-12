@@ -24,9 +24,8 @@ The startup linter will warn you if electron is not installed.
 Disable Electron (browser-only mode):
 
 ```ts
-await aio.run(initialState, {
-  reduce,
-  execute,
+await aio.run({
+  features: [myFeature],
   ui: { electron: false },  // auto-opens browser instead
 })
 ```
@@ -34,9 +33,8 @@ await aio.run(initialState, {
 Keep server running after Electron closes:
 
 ```ts
-await aio.run(initialState, {
-  reduce,
-  execute,
+await aio.run({
+  features: [myFeature],
   ui: { keepAlive: true },  // server survives electron window close
 })
 ```
@@ -50,8 +48,8 @@ The HTTP server always runs regardless of Electron — you can access the app at
 By default (`transport: 'auto'`), Electron apps on Linux/macOS use Unix domain sockets instead of WebSocket/HTTP. This eliminates open TCP ports — more secure, slightly faster.
 
 ```ts
-await aio.run(initialState, {
-  reduce, execute,
+await aio.run({
+  features: [myFeature],
   ui: { transport: 'uds' },  // force UDS (or 'ws' to force WebSocket)
 })
 ```

@@ -1,8 +1,10 @@
-// reactive.test.ts — tests for reactive() API
+// reactive.test.ts — tests for feature({ methods }) reactive style
+// (formerly reactive() — removed in v0.8, feature({ methods }) is identical)
 import { assertEquals, assertThrows } from 'https://deno.land/std@0.208.0/assert/mod.ts'
-import { reactive } from '../src/reactive.ts'
 import { composeFeatures, testFeature, feature, bindFeature } from '../src/feature.ts'
 import { schedule } from '../src/schedule.ts'
+import { call } from '../src/feature-impl.ts'
+import type { GenCtx } from '../src/flow.ts'
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
@@ -32,8 +34,8 @@ function createApp(composed: ReturnType<typeof composeFeatures>) {
 
 // ── Sync method tests ───────────────────────────────────────────────
 
-Deno.test('reactive: sync method mutates state', () => {
-  const counter = reactive('counter', {
+Deno.test('feature(methods): sync method mutates state', () => {
+  const counter = feature('counter', {
     state: { count: 0 },
     methods: {
       increment(s, by = 1) { s.count += by },
@@ -42,7 +44,7 @@ Deno.test('reactive: sync method mutates state', () => {
   })
 
   assertEquals(counter.name, 'counter')
-  assertEquals(counter.A.Increment, 'Counter:Increment')
+  assertEquals(counter.A.increment.type, 'counter:increment')
 
   const composed = composeFeatures([counter])
   let state = composed.initialState
@@ -50,8 +52,8 @@ Deno.test('reactive: sync method mutates state', () => {
   assertEquals((state.counter as { count: number }).count, 5)
 })
 
-Deno.test('reactive: multiple sync mutations in sequence', () => {
-  const counter = reactive('counter', {
+Deno.test('feature(methods): multiple sync mutations in sequence', () => {
+  const counter = feature('counter', {
     state: { count: 0 },
     methods: {
       increment(s, by = 1) { s.count += by },
@@ -68,8 +70,8 @@ Deno.test('reactive: multiple sync mutations in sequence', () => {
   assertEquals((state.counter as { count: number }).count, 0)
 })
 
-Deno.test('reactive: generates correct action types', () => {
-  const cart = reactive('cart', {
+Deno.test('feature(methods): generates correct action types', () => {
+  const cart = feature('cart', {
     state: { items: [] as string[] },
     methods: {
       addItem(s, item: string) { s.items.push(item) },
@@ -77,16 +79,16 @@ Deno.test('reactive: generates correct action types', () => {
     },
   })
 
-  assertEquals(cart.A.AddItem, 'Cart:AddItem')
-  assertEquals(cart.A.Clear, 'Cart:Clear')
+  assertEquals(cart.A.addItem.type, 'cart:addItem')
+  assertEquals(cart.A.clear.type, 'cart:clear')
 
   const action = cart.A.addItem('book')
-  assertEquals(action.type, 'Cart:AddItem')
+  assertEquals(action.type, 'cart:addItem')
   assertEquals(action.payload, { args: ['book'] })
 })
 
-Deno.test('reactive: nested object mutation', () => {
-  const app = reactive('app', {
+Deno.test('feature(methods): nested object mutation', () => {
+  const app = feature('app', {
     state: { user: { name: 'Alice', settings: { theme: 'light' } } },
     methods: {
       setTheme(s, theme: string) { s.user.settings.theme = theme },
@@ -100,8 +102,8 @@ Deno.test('reactive: nested object mutation', () => {
   assertEquals((state.app as any).user.settings.theme, 'dark')
 })
 
-Deno.test('reactive: array mutations via sync methods', () => {
-  const list = reactive('list', {
+Deno.test('feature(methods): array mutations via sync methods', () => {
+  const list = feature('list', {
     state: { items: [] as string[] },
     methods: {
       add(s, item: string) { s.items.push(item) },
@@ -124,8 +126,8 @@ Deno.test('reactive: array mutations via sync methods', () => {
 
 // ── Async method tests ──────────────────────────────────────────────
 
-Deno.test('reactive: async method emits __exec effect', () => {
-  const loader = reactive('loader', {
+Deno.test('feature(methods): async method emits __exec effect', () => {
+  const loader = feature('loader', {
     state: { data: null as string | null },
     methods: {
       async load(s) {
@@ -138,11 +140,11 @@ Deno.test('reactive: async method emits __exec effect', () => {
   const composed = composeFeatures([loader])
   const result = composed.reduce(composed.initialState, loader.A.load())
   assertEquals(result.effects.length, 1)
-  assertEquals((result.effects[0] as any).type, 'Loader:__exec')
+  assertEquals((result.effects[0] as any).type, 'loader:__exec')
 })
 
-Deno.test('reactive: async method with live Proxy writes state', async () => {
-  const loader = reactive('loader', {
+Deno.test('feature(methods): async method with live Proxy writes state', async () => {
+  const loader = feature('loader', {
     state: { data: null as string | null, loading: false },
     methods: {
       setLoading(s, value: boolean) { s.loading = value },
@@ -165,8 +167,8 @@ Deno.test('reactive: async method with live Proxy writes state', async () => {
   assertEquals((app.state.loader as any).loading, false)
 })
 
-Deno.test('reactive: async method reads fresh state', async () => {
-  const store = reactive('store', {
+Deno.test('feature(methods): async method reads fresh state', async () => {
+  const store = feature('store', {
     state: { value: 0, doubled: 0 },
     methods: {
       setValue(s, v: number) { s.value = v },
@@ -189,8 +191,8 @@ Deno.test('reactive: async method reads fresh state', async () => {
   assertEquals((app.state.store as any).doubled, 84)
 })
 
-Deno.test('reactive: async array mutation via Proxy', async () => {
-  const list = reactive('list', {
+Deno.test('feature(methods): async array mutation via Proxy', async () => {
+  const list = feature('list', {
     state: { items: ['a'] as string[] },
     methods: {
       async addAsync(s, item: string) {
@@ -211,8 +213,8 @@ Deno.test('reactive: async array mutation via Proxy', async () => {
 
 // ── Microtask batching tests ────────────────────────────────────────
 
-Deno.test('reactive: async consecutive writes are batched into one action', async () => {
-  const counter = reactive('counter', {
+Deno.test('feature(methods): async consecutive writes are batched into one action', async () => {
+  const counter = feature('counter', {
     state: { a: 0, b: 0, c: 0 },
     methods: {
       async setAll(s) {
@@ -234,13 +236,13 @@ Deno.test('reactive: async consecutive writes are batched into one action', asyn
   assertEquals((app.state.counter as any).b, 2)
   assertEquals((app.state.counter as any).c, 3)
 
-  // Should have: 1 trigger (Counter:SetAll) + 1 batched __set (not 3 individual __sets)
+  // Should have: 1 trigger (counter:setAll) + 1 batched __set (not 3 individual __sets)
   const setActions = app.actions.filter(a => a.type.includes('__set'))
   assertEquals(setActions.length, 1)
 })
 
-Deno.test('reactive: writes separated by await produce separate batches', async () => {
-  const counter = reactive('counter', {
+Deno.test('feature(methods): writes separated by await produce separate batches', async () => {
+  const counter = feature('counter', {
     state: { a: 0, b: 0 },
     methods: {
       async staggered(s) {
@@ -267,14 +269,14 @@ Deno.test('reactive: writes separated by await produce separate batches', async 
 
 // ── Machine guard tests ─────────────────────────────────────────────
 
-Deno.test('reactive: machine guards on sync methods', () => {
-  const door = reactive('door', {
+Deno.test('feature(methods): machine guards on sync methods', () => {
+  const door = feature('door', {
     state: { opened: false },
     machine: {
       initial: 'closed',
       states: {
-        closed: { on: { open: 'open' } },
-        open: { on: { close: 'closed' } },
+        closed: { open: 'open' },
+        open: { close: 'closed' },
       },
     },
     methods: {
@@ -300,14 +302,14 @@ Deno.test('reactive: machine guards on sync methods', () => {
   assertEquals((state.door as any)._status, 'closed')
 })
 
-Deno.test('reactive: async Proxy writes gated by machine', async () => {
-  const fetcher = reactive('fetcher', {
+Deno.test('feature(methods): async Proxy writes gated by machine', async () => {
+  const fetcher = feature('fetcher', {
     state: { data: null as string | null, loading: false },
     machine: {
       initial: 'idle',
       states: {
-        idle:    { on: { load: 'loading' } },
-        loading: { on: { done: 'idle' } },
+        idle:    { load: 'loading' },
+        loading: { done: 'idle' },
       },
     },
     methods: {
@@ -332,14 +334,14 @@ Deno.test('reactive: async Proxy writes gated by machine', async () => {
   assertEquals((app.state.fetcher as any).loading, false)
 })
 
-Deno.test('reactive: async writes blocked when method not in current machine state', async () => {
-  const gate = reactive('gate', {
+Deno.test('feature(methods): async writes blocked when method not in current machine state', async () => {
+  const gate = feature('gate', {
     state: { value: 'initial' },
     machine: {
       initial: 'locked',
       states: {
-        locked:   { on: { unlock: 'unlocked' } },
-        unlocked: { on: { write: 'unlocked', lock: 'locked' } },
+        locked:   { unlock: 'unlocked' },
+        unlocked: { write: 'unlocked', lock: 'locked' },
       },
     },
     methods: {
@@ -366,22 +368,22 @@ Deno.test('reactive: async writes blocked when method not in current machine sta
   assertEquals((app.state.gate as any).value, 'written')
 })
 
-Deno.test('reactive: machine validation rejects bad config', () => {
+Deno.test('feature(methods): machine validation rejects bad config', () => {
   assertThrows(
-    () => reactive('bad', {
+    () => feature('bad', {
       state: {},
-      machine: { initial: 'nonexistent', states: { idle: { on: {} } } },
-      methods: {},
+      machine: { initial: 'nonexistent', states: { idle: {} } },
+      methods: { noop() {} },
     }),
     Error,
-    'machine validation failed',
+    'not in declared states',
   )
 })
 
 // ── Integration tests ───────────────────────────────────────────────
 
-Deno.test('reactive: coexists with feature() in composeFeatures', () => {
-  const counter = reactive('counter', {
+Deno.test('feature(methods): coexists with feature(actions) in composeFeatures', () => {
+  const counter = feature('counter', {
     state: { count: 0 },
     methods: { increment(s) { s.count++ } },
   })
@@ -389,12 +391,8 @@ Deno.test('reactive: coexists with feature() in composeFeatures', () => {
   const logger = feature('logger', {
     state: { logs: [] as string[] },
     actions: { log: (msg: string) => ({ msg }) },
-    reduce(state, action, { A }) {
-      switch (action.type) {
-        case A.Log:
-          state.logs.push((action.payload as { msg: string }).msg)
-          break
-      }
+    reduce: {
+      log(state, payload) { state.logs.push(payload.msg) },
     },
   })
 
@@ -407,8 +405,8 @@ Deno.test('reactive: coexists with feature() in composeFeatures', () => {
   assertEquals((state.logger as any).logs, ['hello'])
 })
 
-Deno.test('reactive: foreign action listeners', () => {
-  const counter = reactive('counter', {
+Deno.test('feature(methods): foreign action listeners', () => {
+  const counter = feature('counter', {
     state: { count: 0 },
     methods: { increment(s) { s.count++ } },
   })
@@ -418,10 +416,10 @@ Deno.test('reactive: foreign action listeners', () => {
     actions: { noop: () => ({}) },
     machine: {
       initial: 'watching',
-      states: { watching: { on: { noop: 'watching', 'Counter:Increment': 'watching' } } },
+      states: { watching: { noop: 'watching', 'counter:increment': 'watching' } },
     },
-    reduce(state, action) {
-      if (action.type === 'Counter:Increment') state.lastSeen = 'increment'
+    reduce: {
+      ['counter:increment'](state) { state.lastSeen = 'increment' },
     },
   })
 
@@ -431,8 +429,8 @@ Deno.test('reactive: foreign action listeners', () => {
   assertEquals((state.watcher as any).lastSeen, 'increment')
 })
 
-Deno.test('reactive: selectors scoped to feature', () => {
-  const cart = reactive('cart', {
+Deno.test('feature(methods): selectors scoped to feature', () => {
+  const cart = feature('cart', {
     state: { items: [{ price: 10 }, { price: 20 }] },
     methods: {
       addItem(s, price: number) { s.items.push({ price }) },
@@ -446,25 +444,25 @@ Deno.test('reactive: selectors scoped to feature', () => {
   assertEquals(cart.selectors.total(composed.initialState), 30)
 })
 
-Deno.test('reactive: crossDispatch config', () => {
-  const source = reactive('source', {
+Deno.test('feature(methods): dispatchTo config', () => {
+  const source = feature('source', {
     state: { value: 0 },
-    crossDispatch: ['target'],
+    dispatchTo: ['target'],
     methods: { set(s, v: number) { s.value = v } },
   })
 
-  assertEquals(source._config.crossDispatchPrefixes.has('Target'), true)
+  assertEquals(source._config.crossDispatchPrefixes.has('target'), true)
 })
 
-Deno.test('reactive: init and destroy hooks', () => {
+Deno.test('feature(methods): onInit and onDestroy hooks', () => {
   const inits: string[] = []
   const destroys: string[] = []
 
-  const f = reactive('hooks', {
+  const f = feature('hooks', {
     state: { ready: false },
     methods: { activate(s) { s.ready = true } },
-    init: () => { inits.push('init') },
-    destroy: () => { destroys.push('destroy') },
+    onInit: () => { inits.push('init') },
+    onDestroy: () => { destroys.push('destroy') },
   })
 
   const composed = composeFeatures([f])
@@ -477,8 +475,8 @@ Deno.test('reactive: init and destroy hooks', () => {
 
 // ── Flattened API tests ──────────────────────────────────────────────
 
-Deno.test('reactive: action creators flattened onto feature def', () => {
-  const counter = reactive('counter', {
+Deno.test('feature(methods): action creators flattened onto feature def', () => {
+  const counter = feature('counter', {
     state: { count: 0 },
     methods: {
       increment(s, by = 1) { s.count += by },
@@ -488,20 +486,16 @@ Deno.test('reactive: action creators flattened onto feature def', () => {
 
   // Flattened creators
   const action = (counter as any).increment(5)
-  assertEquals(action.type, 'Counter:Increment')
+  assertEquals(action.type, 'counter:increment')
   assertEquals(action.payload, { args: [5] })
 
-  // Flattened string constants
-  assertEquals((counter as any).Increment, 'Counter:Increment')
-  assertEquals((counter as any).Reset, 'Counter:Reset')
-
-  // A catalog still works (backward compat)
-  assertEquals(counter.A.Increment, 'Counter:Increment')
-  assertEquals(counter.A.increment(3).type, 'Counter:Increment')
+  // A catalog works (creators only, no PascalCase labels)
+  assertEquals(counter.A.increment.type, 'counter:increment')
+  assertEquals(counter.A.increment(3).type, 'counter:increment')
 })
 
-Deno.test('reactive: bindFeature enables direct dispatch and selectors', () => {
-  const counter = reactive('counter', {
+Deno.test('feature(methods): bindFeature enables direct dispatch and selectors', () => {
+  const counter = feature('counter', {
     state: { count: 0 },
     methods: {
       increment(s, by = 1) { s.count += by },
@@ -516,7 +510,7 @@ Deno.test('reactive: bindFeature enables direct dispatch and selectors', () => {
 
   // Before binding, flattened creator returns action object
   const action = (counter as any).increment(5)
-  assertEquals(action.type, 'Counter:Increment')
+  assertEquals(action.type, 'counter:increment')
 
   // Bind to app
   bindFeature(counter, (a) => app.dispatch(a as any), () => app.state as Record<string, unknown>)
@@ -531,32 +525,32 @@ Deno.test('reactive: bindFeature enables direct dispatch and selectors', () => {
   assertEquals((counter as any).doubled(), 20)
 })
 
-Deno.test('reactive: selector/method name collision throws', () => {
+Deno.test('feature(methods): selector/method name collision throws', () => {
   assertThrows(
-    () => reactive('bad', {
+    () => feature('bad', {
       state: { count: 0 },
       methods: { total(s) { s.count++ } },
       selectors: { total: (s) => s.count },
     }),
     Error,
-    'collides with method',
+    "collides with selector",
   )
 })
 
 // testFeature calls Deno.test internally — must be top-level
-const _counterForTest = reactive('counterTest', {
+const _counterForTest = feature('counterTest', {
   state: { count: 0 },
   methods: { increment(s: { count: number }, by = 1) { s.count += by } },
 })
 
-testFeature(_counterForTest, 'reactive: testFeature harness works', (t) => {
+testFeature(_counterForTest, 'feature(methods): testFeature harness works', (t) => {
   t.init()
   t.send.increment(5)
   t.expect.state((s: { count: number }) => s.count === 5)
 })
 
-// Async testFeature with runEffects + settle
-const _asyncLoader = reactive('asyncLoader', {
+// Async testFeature with settle
+const _asyncLoader = feature('asyncLoader', {
   state: { data: null as string | null, loading: false },
   methods: {
     async load(s: { data: string | null; loading: boolean }) {
@@ -568,17 +562,16 @@ const _asyncLoader = reactive('asyncLoader', {
   },
 })
 
-testFeature(_asyncLoader, 'reactive: async testFeature with runEffects + settle', async (t) => {
+testFeature(_asyncLoader, 'feature(methods): async testFeature with settle', async (t) => {
   t.init()
   t.send.load()
-  t.runEffects()       // runs the executor (starts async method)
-  await t.settle()     // wait for async to complete
+  await t.settle()     // auto-runs effects + drains microtasks
   t.expect.state((s: { data: string | null }) => s.data === 'loaded-data')
   t.expect.state((s: { loading: boolean }) => s.loading === false)
 })
 
 // Async error dispatches __error action (visible in time-travel, middleware)
-const _errorFeature = reactive('errorTest', {
+const _errorFeature = feature('errorTest', {
   state: { status: 'idle' },
   methods: {
     async failingMethod(_s: { status: string }) {
@@ -587,26 +580,22 @@ const _errorFeature = reactive('errorTest', {
   },
 })
 
-testFeature(_errorFeature, 'reactive: async error dispatches __error action', async (t) => {
+testFeature(_errorFeature, 'feature(methods): async error dispatches __error action', async (t) => {
   t.init()
   t.send.failingMethod()
-  t.runEffects()
   await t.settle()
   // Verify __error action was dispatched (visible in time-travel)
-  t.expect.state((_s: unknown, ctx: { getEffects: () => { type: string }[] }) => {
-    // The __error action flows through dispatch, so we can check it arrived
-    return true  // no crash = error was handled, not thrown
-  })
+  t.expect.state(() => true)  // no crash = error was handled, not thrown
 })
 
 // Async error with machine — __error self-loop keeps machine in current state
-const _errorWithMachine = reactive('errorMachine', {
+const _errorWithMachine = feature('errorMachine', {
   state: { data: null as string | null },
   machine: {
     initial: 'idle',
     states: {
-      idle: { on: { load: 'loading' } },
-      loading: { on: { done: 'idle' } },
+      idle: { load: 'loading' },
+      loading: { done: 'idle' },
     },
   },
   methods: {
@@ -617,12 +606,11 @@ const _errorWithMachine = reactive('errorMachine', {
   },
 })
 
-testFeature(_errorWithMachine, 'reactive: __error self-loop preserves machine state', async (t) => {
+testFeature(_errorWithMachine, 'feature(methods): __error self-loop preserves machine state', async (t) => {
   t.init()
   t.expect.status('idle')
   t.send.load()
   t.expect.status('loading')
-  t.runEffects()
   await t.settle()
   // __error dispatched as self-loop in 'loading' — machine stays in loading
   t.expect.status('loading')
@@ -630,8 +618,8 @@ testFeature(_errorWithMachine, 'reactive: __error self-loop preserves machine st
 
 // ── Sync methods returning schedule effects ──────────────────────────
 
-Deno.test('reactive: sync method returns schedule effect', () => {
-  const timer = reactive('timer', {
+Deno.test('feature(methods): sync method returns schedule effect', () => {
+  const timer = feature('timer', {
     state: { count: 0 },
     methods: {
       start(s) {
@@ -653,8 +641,8 @@ Deno.test('reactive: sync method returns schedule effect', () => {
   assertEquals((result.effects[0] as any).id, 'tick')
 })
 
-Deno.test('reactive: sync method returns array of schedule effects', () => {
-  const multi = reactive('multi', {
+Deno.test('feature(methods): sync method returns array of schedule effects', () => {
+  const multi = feature('multi', {
     state: { v: 0 },
     methods: {
       setup(s) {
@@ -674,23 +662,23 @@ Deno.test('reactive: sync method returns array of schedule effects', () => {
 
 // ── listensTo without full machine ──────────────────────────────────
 
-Deno.test('reactive: listensTo auto-generates machine for foreign listeners', () => {
-  const counter = reactive('counter', {
+Deno.test('feature(methods): listensTo auto-generates machine for foreign listeners', () => {
+  const counter = feature('counter', {
     state: { count: 0 },
     methods: { increment(s) { s.count++ } },
   })
 
-  const watcher = reactive('watcher', {
+  const watcher = feature('watcher', {
     state: { seen: 0 },
-    listensTo: ['Counter:Increment'],
+    listensTo: ['counter:increment'],
     methods: {
       onIncrement(s) { s.seen++ },
     },
   })
 
   // Verify machine was auto-generated
-  assertEquals(watcher._config.machine !== 'simple', true)
-  assertEquals(watcher._config.foreignActions.includes('Counter:Increment'), true)
+  assertEquals(watcher._config.machine !== false, true)
+  assertEquals(watcher._config.foreignActions.includes('counter:increment'), true)
 
   // Integration: watcher receives counter's actions
   const composed = composeFeatures([counter, watcher])
@@ -700,17 +688,396 @@ Deno.test('reactive: listensTo auto-generates machine for foreign listeners', ()
   assertEquals((state.watcher as any).seen, 0) // foreign actions don't auto-call methods — they're machine transitions
 })
 
-Deno.test('reactive: listensTo ignored when explicit machine provided', () => {
-  const f = reactive('test', {
+Deno.test('feature(methods): listensTo ignored when explicit machine provided', () => {
+  const f = feature('test', {
     state: { v: 0 },
     machine: {
       initial: 'active',
-      states: { active: { on: { bump: 'active' } } },
+      states: { active: { bump: 'active' } },
     },
-    listensTo: ['Other:Action'], // should be ignored since machine is explicit
+    listensTo: ['other:action'], // should be ignored since machine is explicit
     methods: { bump(s) { s.v++ } },
   })
 
-  // The explicit machine shouldn't include 'Other:Action' (it wasn't in states.active.on)
-  assertEquals(f._config.foreignActions.includes('Other:Action'), false)
+  // The explicit machine shouldn't include 'other:action' (it wasn't in states.active.on)
+  assertEquals(f._config.foreignActions.includes('other:action'), false)
+})
+
+// ── call() inter-feature coordination ────────────────────────────────
+
+Deno.test('call: dispatches observable action through store', async () => {
+  const target = feature('target', {
+    state: { value: 0 },
+    methods: {
+      async setValue(s, n: number) { s.value = n },
+    },
+  })
+
+  const composed = composeFeatures([target])
+  const app = createApp(composed)
+  bindFeature(target, app.dispatch, app.getState)
+
+  await target.setValue(42)
+  await delay(10)
+
+  // Action should be in the log — observable
+  const found = app.actions.some((a: { type: string }) => a.type === 'target:setValue')
+  assertEquals(found, true)
+  assertEquals((app.state.target as { value: number }).value, 42)
+})
+
+Deno.test('call: async method can call another feature', async () => {
+  const callee = feature('callee', {
+    state: { name: '' as string },
+    methods: {
+      async setName(s, name: string) {
+        s.name = name
+      },
+    },
+    machine: false,
+  })
+
+  const caller = feature('caller', {
+    state: { called: false },
+    methods: {
+      async callOther(s) {
+        await callee.setName('from-caller')  // direct calling — typed, observable
+        s.called = true
+      },
+    },
+    machine: false,
+  })
+
+  const composed = composeFeatures([caller, callee])
+  const app = createApp(composed)
+  bindFeature(callee, app.dispatch, app.getState)
+  bindFeature(caller, app.dispatch, app.getState)
+
+  app.dispatch(caller.A.callOther())
+  await delay(50)
+
+  assertEquals((app.state.callee as { name: string }).name, 'from-caller', 'callee should have been called')
+  assertEquals((app.state.caller as { called: boolean }).called, true, 'caller should have completed')
+})
+
+Deno.test('call: rejects immediately when machine blocks the target action', async () => {
+  const locked = feature('locked', {
+    state: { value: 0 },
+    machine: {
+      initial: 'idle',
+      states: {
+        idle: {},  // no transitions — everything blocked
+      },
+    },
+    methods: {
+      async setValue(s, n: number) { s.value = n },
+    },
+  })
+
+  const composed = composeFeatures([locked])
+  const app = createApp(composed)
+  bindFeature(locked, app.dispatch, app.getState)
+
+  let rejected = false
+  try {
+    await locked.setValue(42)
+  } catch {
+    rejected = true
+  }
+
+  assertEquals(rejected, true, 'call() should reject when machine blocks the action')
+})
+
+Deno.test('call: async method return value is resolved', async () => {
+  const inventory = feature('inventory', {
+    state: { stock: 10 },
+    methods: {
+      async checkStock(s, item: string) {
+        return item === 'widget' ? s.stock : 0  // returns number
+      },
+    },
+  })
+
+  const composed = composeFeatures([inventory])
+  const app = createApp(composed)
+  bindFeature(inventory, app.dispatch, app.getState)
+
+  const count = await inventory.checkStock('widget')
+  assertEquals(count, 10, 'call() should resolve with the return value')
+})
+
+Deno.test('call: timeout option rejects after specified ms', async () => {
+  const slow = feature('slow', {
+    state: { done: false },
+    methods: {
+      async slowOp(s) {
+        await delay(100)  // slower than the timeout
+        s.done = true
+      },
+    },
+    machine: false,
+  })
+
+  const composed = composeFeatures([slow])
+  const app = createApp(composed)
+  bindFeature(slow, app.dispatch, app.getState)
+
+  let timedOut = false
+  try {
+    await call({ timeout: 20 }, () => slow.slowOp())
+  } catch (e) {
+    timedOut = (e as Error).message.includes('timeout')
+  }
+
+  assertEquals(timedOut, true, 'call() should timeout after 20ms')
+  await delay(120)  // wait for method to complete, avoiding timer leak
+})
+
+Deno.test('call: retries option retries on failure', async () => {
+  let attempts = 0
+  const flaky = feature('flaky', {
+    state: { result: '' },
+    methods: {
+      async tryOp(s) {
+        attempts++
+        if (attempts < 3) throw new Error('not yet')
+        s.result = 'ok'
+      },
+    },
+    machine: false,
+  })
+
+  const composed = composeFeatures([flaky])
+  const app = createApp(composed)
+  bindFeature(flaky, app.dispatch, app.getState)
+
+  await call({ retries: 3 }, () => flaky.tryOp())
+  assertEquals(attempts, 3, 'should have retried until success')
+})
+
+// ── generators ─────────────────────────────────────────────────────
+
+Deno.test('feature(generators): generator runs when action dispatched', async () => {
+  let ran = false
+  const wf = feature('wf', {
+    state: { result: '' as string },
+    methods: {},
+    generators: {
+      *doWork(ctx: GenCtx) {
+        yield* ctx.call('fetch', async () => {
+          await delay(10)
+          ran = true
+          return 'done'
+        })
+        yield* ctx.done()
+      },
+    },
+  })
+
+  const composed = composeFeatures([wf])
+  const app = createApp(composed)
+
+  app.dispatch({ type: 'wf:doWork', payload: { args: [] } })
+  await delay(50)
+  assertEquals(ran, true)
+})
+
+Deno.test('feature(generators): generator mutates state via ctx.mutate', async () => {
+  const order = feature('order', {
+    state: { status: 'idle' as string },
+    methods: {},
+    generators: {
+      *place(ctx: GenCtx) {
+        yield* ctx.mutate('set-processing', (draft) => { draft.status = 'processing' })
+        yield* ctx.call('process', async () => { await delay(10) })
+        yield* ctx.done((draft) => { draft.status = 'done' })
+      },
+    },
+  })
+
+  const composed = composeFeatures([order])
+  const app = createApp(composed)
+
+  app.dispatch({ type: 'order:place', payload: { args: [] } })
+  await delay(5)
+  assertEquals((app.getState().order as Record<string, unknown>).status, 'processing')
+  await delay(50)
+  assertEquals((app.getState().order as Record<string, unknown>).status, 'done')
+})
+
+Deno.test('feature(generators): generator coexists with methods', async () => {
+  let genRan = false
+  const shop = feature('shop', {
+    state: { count: 0, submitted: false },
+    methods: {
+      increment(s: { count: number; submitted: boolean }) { s.count++ },
+    },
+    generators: {
+      *submit(ctx: GenCtx) {
+        yield* ctx.call('send', async () => {
+          await delay(10)
+          genRan = true
+        })
+        yield* ctx.done((draft: Record<string, unknown>) => { draft.submitted = true })
+      },
+    },
+  })
+
+  const composed = composeFeatures([shop])
+  const app = createApp(composed)
+
+  // method works
+  app.dispatch({ type: 'shop:increment', payload: { args: [] } })
+  assertEquals((app.getState().shop as Record<string, unknown>).count, 1)
+
+  // generator works
+  app.dispatch({ type: 'shop:submit', payload: { args: [] } })
+  await delay(50)
+  assertEquals(genRan, true)
+  assertEquals((app.getState().shop as Record<string, unknown>).submitted, true)
+})
+
+Deno.test('feature(generators): A catalog includes generator action keys', () => {
+  const proc = feature('proc', {
+    state: {},
+    methods: { reset(s: Record<string, unknown>) { s.x = 0 } },
+    generators: {
+      *run(_ctx: GenCtx) { yield* _ctx.done() },
+    },
+  })
+
+  // camelCase creator with .type property
+  assertEquals(typeof (proc.A as Record<string, unknown>).run, 'function')
+  assertEquals((proc.A.run as unknown as { type: string }).type, 'proc:run')
+})
+
+Deno.test('feature(generators): generators-only (no methods) works', async () => {
+  let called = false
+  const bg = feature('bg', {
+    state: { done: false },
+    methods: {},
+    generators: {
+      *tick(ctx: GenCtx) {
+        yield* ctx.call('work', async () => { await delay(10); called = true })
+        yield* ctx.done((draft: Record<string, unknown>) => { draft.done = true })
+      },
+    },
+  })
+
+  const composed = composeFeatures([bg])
+  const app = createApp(composed)
+  app.dispatch({ type: 'bg:tick', payload: { args: [] } })
+  await delay(50)
+  assertEquals(called, true)
+  assertEquals((app.getState().bg as Record<string, unknown>).done, true)
+})
+
+// ── direct calling — feature.method() returns Promise ────────────────
+
+Deno.test('direct calling: async method returns Promise that resolves with return value', async () => {
+  const inventory = feature('inv', {
+    state: { stock: 10 },
+    methods: {
+      async checkStock(_s, item: string): Promise<{ item: string; count: number }> {
+        return { item, count: 10 }
+      },
+    },
+  })
+
+  const composed = composeFeatures([inventory])
+  const app = createApp(composed)
+  bindFeature(inventory, app.dispatch, () => app.state.inv as Record<string, unknown>)
+
+  const result = await inventory.checkStock('widget') as { item: string; count: number }
+  assertEquals(result.item, 'widget')
+  assertEquals(result.count, 10)
+})
+
+Deno.test('direct calling: cross-feature — one feature calls another directly', async () => {
+  const pricing = feature('pricing', {
+    state: { lastPrice: 0 },
+    methods: {
+      async calculate(_s, amount: number): Promise<{ total: number }> {
+        return { total: amount + 10 }
+      },
+    },
+  })
+
+  const orders = feature('orders2', {
+    state: { total: 0 },
+    methods: {
+      async placeOrder(s, amount: number) {
+        const price = await pricing.calculate(amount) as { total: number }
+        s.total = price.total
+      },
+    },
+  })
+
+  const composed = composeFeatures([pricing, orders])
+  const app = createApp(composed)
+  bindFeature(pricing, app.dispatch, () => app.state.pricing as Record<string, unknown>)
+  bindFeature(orders, app.dispatch, () => app.state.orders2 as Record<string, unknown>)
+
+  await orders.placeOrder(100)
+  await delay(30)
+
+  assertEquals((app.state.orders2 as { total: number }).total, 110)
+})
+
+Deno.test('direct calling: sync methods still return void (not Promise)', () => {
+  const counter = feature('ctr2', {
+    state: { count: 0 },
+    methods: {
+      increment(s, by = 1) { s.count += by },
+    },
+  })
+
+  const composed = composeFeatures([counter])
+  const app = createApp(composed)
+  bindFeature(counter, app.dispatch, () => app.state.ctr2 as Record<string, unknown>)
+
+  const result = counter.increment(5)
+  assertEquals(result, undefined)
+  assertEquals((app.state.ctr2 as { count: number }).count, 5)
+})
+
+Deno.test('direct calling: call(opts, fn) callback form with timeout', { sanitizeOps: false, sanitizeResources: false }, async () => {
+  const slow = feature('slowf', {
+    state: { done: false },
+    methods: {
+      async slowOp(_s) {
+        await delay(500)
+      },
+    },
+  })
+
+  const composed = composeFeatures([slow])
+  const app = createApp(composed)
+  bindFeature(slow, app.dispatch, () => app.state.slowf as Record<string, unknown>)
+
+  let timedOut = false
+  try {
+    await call({ timeout: 20 }, () => slow.slowOp() as Promise<unknown>)
+  } catch (e) {
+    if (e instanceof Error && e.message.includes('timeout')) timedOut = true
+  }
+  assertEquals(timedOut, true)
+})
+
+Deno.test('direct calling: call(fn) callback form — passthrough to feature method', async () => {
+  const svc = feature('svc', {
+    state: { result: '' as string },
+    methods: {
+      async compute(_s, x: number): Promise<string> {
+        return `result-${x}`
+      },
+    },
+  })
+
+  const composed = composeFeatures([svc])
+  const app = createApp(composed)
+  bindFeature(svc, app.dispatch, () => app.state.svc as Record<string, unknown>)
+
+  const out = await call(() => svc.compute(42)) as string
+  assertEquals(out, 'result-42')
 })

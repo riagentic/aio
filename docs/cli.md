@@ -234,7 +234,7 @@ deno task am state fleet[*].stats.pnl       # wildcard: nested traversal
 deno task am state {counter,page}           # pick from root
 deno task am state fleet[0].stats --wait=5  # poll every 5s, print each result
 deno task am state fleet[*].pnl --wait     # poll every 2s (default)
-deno task am ui                             # UI state (getUIState result)
+deno task am ui                             # UI state (stateForUI result)
 deno task am ui alice                       # UI state for specific user
 ```
 

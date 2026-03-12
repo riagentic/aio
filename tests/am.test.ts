@@ -606,14 +606,14 @@ Deno.test('am-cli: status — exit code 1 when no server', async () => {
 
 // ── am ui — filtered UI state ─────────────────────────────────
 
-Deno.test('am-cli: ui — returns filtered getUIState result', async () => {
+Deno.test('am-cli: ui — returns filtered stateForUI result', async () => {
   await withTrojanServer(async () => {
     const r = await runAm(['ui'])
     assertEquals(r.code, 0)
-    // getUIState in withTrojanServer returns { count: appState.count }
+    // stateForUI in withTrojanServer returns { count: appState.count }
     const data = r.json as { count: number }
     assertEquals(data.count, 10)
-    // items not exposed via getUIState
+    // items not exposed via stateForUI
     assertEquals((data as Record<string, unknown>).items, undefined)
   })
 })

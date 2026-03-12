@@ -1,17 +1,15 @@
-# Reactive Features
+# Method-Based Features (`feature({ methods })`)
 
-> Write methods. Framework handles actions, dispatch, persistence, sync, time-travel.
-
-`reactive()` is the simplest way to build aio features. No action catalogs, no effect catalogs, no switch/case, no executors. Just methods that mutate state.
+The default way to build aio features. No action catalogs, no effect catalogs, no switch/case, no executors. Just methods that mutate state.
 
 ---
 
 ## Quick example
 
 ```typescript
-import { reactive, aio } from 'aio'
+import { feature, aio } from 'aio'
 
-const todo = reactive('todo', {
+const todo = feature('todo', {
   state: {
     items: [] as { text: string; done: boolean }[],
     filter: 'all' as 'all' | 'active' | 'done',
@@ -73,7 +71,7 @@ methods: {
 }
 ```
 
-**All mutations within one method call = one atomic action.** The method name becomes the action type: `increment` → `Counter:Increment`. One entry in time-travel, one persistence write, one sync broadcast.
+**All mutations within one method call = one atomic action.** The method name becomes the action type: `increment` → `counter:increment`. One entry in time-travel, one persistence write, one sync broadcast.
 
 ### What you can do in sync methods
 
@@ -91,7 +89,7 @@ Sync methods can return schedule effects to set up timers, intervals, or other s
 methods: {
   startPolling(s) {
     s.polling = true
-    return { _schedule: true, key: 'poll', type: 'Prices:Refresh', intervalMs: 30_000 }
+    return { _schedule: true, key: 'poll', type: 'prices:refresh', intervalMs: 30_000 }
   },
   stopPolling(s) {
     s.polling = false
@@ -109,12 +107,49 @@ Return a single `ScheduleEffect` or an array of them. The framework routes them 
 
 ---
 
+## Scheduling from methods
+
+Returning a `ScheduleEffect` from a sync method is the only way to set up timers from within a feature. Async methods run as effects — return the schedule from the sync method that triggers them.
+
+```typescript
+import { feature, schedule } from 'aio'
+
+const poller = feature('poller', {
+  state: { data: null as unknown },
+  methods: {
+    // Sync method can return a schedule effect
+    startPolling(s) {
+      s.active = true
+      return schedule.every('poll', 30_000, poller.refresh)  // ← return to schedule
+    },
+    stopPolling(s) {
+      s.active = false
+      return schedule.cancel('poll')
+    },
+    async refresh(s) {
+      const data = await fetch('/api/data').then(r => r.json())
+      s.data = data
+    },
+  },
+})
+```
+
+`schedule.every(key, intervalMs, action)` returns a `ScheduleEffect` — the framework routes it through the same pipeline as effects returned from `execute`. `schedule.cancel(key)` cancels a running interval.
+
+---
+
 ## How async methods work
 
-Async methods receive a **live Proxy** instead of an Immer draft. This is the key difference:
+Async methods receive a **live Proxy** and a **context object**. This is the key difference:
 
 ```typescript
 methods: {
+  // Sync: (state, ...args)
+  add(s, text: string) {
+    s.items.push({ text, done: false })
+  },
+
+  // Async: (state, ...args) — same signature, live Proxy
   async checkout(s) {
     s.status = 'loading'                       // ① dispatches action immediately
     const order = await placeOrder(s.items)    // ② s.items reads CURRENT state
@@ -126,10 +161,10 @@ methods: {
 
 | Step | What happens | Action dispatched |
 |---|---|---|
-| Trigger | `send.checkout()` dispatched | `Checkout:Checkout` |
-| ①②③④ | Proxy set traps fire, batched via microtask | `Checkout:__SetCheckout` `{mutations:[...]}` |
+| Trigger | `send.checkout()` dispatched | `checkout:checkout` |
+| ①②③④ | Proxy set traps fire, batched via microtask | `checkout:__setCheckout` `{mutations:[...]}` |
 | await | New microtask frame — previous batch flushed | |
-| after | Proxy writes in new sync frame | `Checkout:__SetCheckout` (second batch) |
+| after | Proxy writes in new sync frame | `checkout:__setCheckout` (second batch) |
 
 **Writes are batched** — consecutive property assignments in the same sync frame produce one action. Each `await` boundary starts a new batch. Persisted, synced, time-traveled.
 
@@ -176,7 +211,7 @@ async riskyOp(s) {
 // Result: status is 'processing', error logged to console
 ```
 
-When an async method throws, the framework dispatches a `{Prefix}:__error` action with `{ _method, error }` payload. This action is visible in time-travel, catchable by middleware, and observable by foreign listeners. For machine features, `__error` is auto-injected as a self-loop in all states (error doesn't change machine state).
+When an async method throws, the framework dispatches a `{Prefix}:__error` action with `{ _method, error }` payload. This action is catchable by middleware and observable by foreign listeners, but is **hidden from time-travel history** (internal bookkeeping action). For machine features, `__error` is auto-injected as a self-loop in all states (error doesn't change machine state).
 
 If you need cleanup on failure, use try/catch:
 
@@ -200,7 +235,7 @@ async riskyOp(s) {
 Derived values from feature state:
 
 ```typescript
-const cart = reactive('cart', {
+const cart = feature('cart', {
   state: { items: [] as { price: number; qty: number }[] },
   methods: { ... },
   selectors: {
@@ -227,7 +262,7 @@ Selectors are scoped to the feature's state slice automatically. After `aio.run(
 After `aio.run()`, methods and selectors are callable directly on the feature object:
 
 ```typescript
-const counter = reactive('counter', {
+const counter = feature('counter', {
   state: { count: 0 },
   methods: {
     increment(s, by = 1) { s.count += by },
@@ -247,13 +282,17 @@ counter.reset()
 // Selectors read current state automatically
 counter.doubled()    // → 0
 
-// Raw dispatch still works (backward compat)
-app.dispatch(counter.A.increment(5))
+// Every bound method has .type — use it instead of raw strings
+counter.increment.type   // → 'counter:increment'
+counter.reset.type       // → 'counter:reset'
+
+// A catalog is internal — only use in testFeature or ctx.dispatch
+counter.A.increment(5)   // returns action object without dispatching
 ```
 
-Before boot, calling a method returns an action object without dispatching (same as `counter.A.increment()`). After boot, it dispatches automatically. The `A` catalog always returns action objects — useful for cross-feature wiring and tests.
+Before boot, calling a method returns an action object without dispatching (same as `counter.A.increment()`). Before or after boot, `.type` is always available. The `A` catalog always returns action objects — useful for cross-feature wiring and tests.
 
-This works for all three tiers — `reactive()`, `feature()`, and `flow()`.
+This works for all three tiers — `feature({ methods })`, `feature({ reduce })`, and `feature({ generators })`.
 
 ---
 
@@ -262,14 +301,14 @@ This works for all three tiers — `reactive()`, `feature()`, and `flow()`.
 Reactive features support machines. Methods are gated by transitions — if a method call isn't allowed in the current state, it's silently dropped:
 
 ```typescript
-const upload = reactive('upload', {
+const upload = feature('upload', {
   state: { progress: 0, error: null as string | null },
   machine: {
     initial: 'idle',
     states: {
-      idle:      { on: { start: 'uploading' } },
-      uploading: { on: { complete: 'idle', fail: 'error' } },
-      error:     { on: { retry: 'uploading', dismiss: 'idle' } },
+      idle:      { start: 'uploading' },
+      uploading: { complete: 'idle', fail: 'error' },
+      error:     { retry: 'uploading', dismiss: 'idle' },
     },
   },
   methods: {
@@ -289,7 +328,7 @@ const upload = reactive('upload', {
 
 **Machine-gated writes**: Async Proxy writes dispatch method-tagged `__setMethodName` actions (e.g., `__setStart`). The framework auto-injects self-loop transitions in the target state — so if `start` transitions `idle→uploading`, then `__setStart` writes are allowed in the `uploading` state. If the method can't be triggered in the current state, neither can its writes.
 
-For complex async workflows with strict per-step state machine control, use `flow()` instead — it was designed for exactly this case.
+For complex async workflows with strict per-step state machine control, use the `generators` key instead — each `yield*` checkpoint is a named action visible in time-travel.
 
 ---
 
@@ -319,7 +358,7 @@ function TodoPage() {
 }
 ```
 
-`useFeature()` works identically for `reactive()` and `feature()` features.
+`useFeature()` works for all feature styles.
 
 ---
 
@@ -354,23 +393,84 @@ testFeature(loader, 'fetch data', async (t) => {
 
 ## Cross-feature communication
 
+### Direct cross-feature calling
+
+After `aio.run()`, async methods return typed Promises. Import any feature and `await` its methods directly — no strings, no special syntax:
+
+```typescript
+// features/orders/index.ts
+import { inventory } from '../inventory'
+import { pricing } from '../pricing'
+
+export const orders = feature('orders', {
+  state: { orderId: null as string | null, total: 0 },
+  methods: {
+    async placeOrder(s, items: Item[]) {
+      const reserved = await inventory.reserve(items)  // Promise<ReserveResult> — typed
+      const price = await pricing.calculate(reserved)  // Promise<PriceResult> — typed
+      s.orderId = reserved.orderId
+      s.total = price.total
+    },
+  },
+})
+```
+
+Each call dispatches a real action through the store (`Inventory:Reserve`) — fully observable in time-travel, interceptable by middleware. TypeScript infers the return type from the method signature — no cast needed.
+
+**Calling own methods** works the same way via self-import (after `aio.run()` it's bound):
+
+```typescript
+import { orders } from './index'  // self-import
+
+// Inside another method:
+async checkout(s, cart: Cart) {
+  await orders.validateCart(cart)   // dispatches Orders:ValidateCart through the store
+  s.status = 'confirmed'
+}
+```
+
+> **Self-imports are safe.** Importing your own feature file (`import { orders } from './index'`)
+> looks circular but works correctly in Deno and Node — the module is fully initialized before
+> any method is called. This is the intended pattern for calling your own feature's methods.
+
+**With timeout/retry** — use the `call()` callback form when needed:
+
+```typescript
+import { call } from 'aio'
+
+async placeOrder(s, items: Item[]) {
+  const reserved = await call({ timeout: 5000, retries: 2 }, () => inventory.reserve(items))
+  s.orderId = reserved.orderId
+}
+```
+
+For timeout/retry, wrap the direct call:
+```typescript
+const reserved = await call({ timeout: 5000 }, () => inventory.reserve(items))
+```
+
 ### `listensTo` — foreign listeners without a machine
 
 The simplest way to listen to other features' actions:
 
 ```typescript
-const analytics = reactive('analytics', {
+import { cart } from '../cart'
+
+const analytics = feature('analytics', {
   state: { events: [] as string[] },
-  listensTo: ['Cart:AddItem', 'Cart:Clear'],
+  // Pass bound methods directly — refactor-safe, no raw strings
+  listensTo: [cart.addItem, cart.clear],
   methods: {
     track(s, event: string) { s.events.push(event) },
   },
 })
 ```
 
+`listensTo` accepts bound methods only — pass the function reference directly for autocomplete and refactor safety.
+
 `listensTo` auto-generates a minimal machine with self-loop transitions. The framework routes those actions to your reducer — combine with foreign action handling in your reduce logic or use it to gate method calls.
 
-This is equivalent to writing a full machine with `{ active: { on: { 'Cart:AddItem': 'active', ... } } }` but without the boilerplate.
+This is equivalent to writing a full machine with `{ active: { [cart.addItem.type]: 'active', ... } }` but without the boilerplate.
 
 **Note:** `listensTo` is ignored if you provide an explicit `machine` — use the machine's `on` transitions instead.
 
@@ -379,8 +479,7 @@ This is equivalent to writing a full machine with `{ active: { on: { 'Cart:AddIt
 For features that need machine states alongside foreign listeners:
 
 ```typescript
-// reactive feature
-const cart = reactive('cart', {
+const cart = feature('cart', {
   state: { items: [] as string[] },
   methods: {
     addItem(s, item: string) { s.items.push(item) },
@@ -395,15 +494,21 @@ const analytics = feature('analytics', {
   machine: {
     initial: 'active',
     states: {
-      active: { on: { noop: 'active', 'Cart:AddItem': 'active', 'Cart:Clear': 'active' } },
+      active: { noop: 'active', [cart.addItem.type]: 'active', [cart.clear.type]: 'active' },
     },
   },
-  reduce(state, action) {
-    if (action.type === 'Cart:AddItem') state.events.push('item_added')
-    if (action.type === 'Cart:Clear') state.events.push('cart_cleared')
+  // Object-form reduce — computed keys for foreign actions, no raw strings needed
+  reduce: {
+    noop() {},
+    [cart.addItem.type](state) { state.events.push('item_added') },
+    [cart.clear.type](state) { state.events.push('cart_cleared') },
   },
 })
 ```
+
+**Foreign actions in object-form `reduce`:** use a computed key `[feature.action.type]` — it evaluates to the full `'featureName:actionKey'` string at definition time. No raw strings, full refactor safety.
+
+`listensTo` declares which foreign actions the machine allows through. The `reduce` object handles them. Both work together — `listensTo` for the guard, computed keys for the handler.
 
 Selectors and bridges work the same way as with `feature()`.
 
@@ -411,13 +516,13 @@ Selectors and bridges work the same way as with `feature()`.
 
 ## Composing all three tiers
 
-Reactive, flow, and event-driven features compose freely:
+All feature styles compose freely — methods, generators, and event-driven features in the same `aio.run()`:
 
 ```typescript
 import { aio } from 'aio'
-import { settings } from './features/settings'    // reactive()
-import { checkout } from './features/checkout'    // flow()
-import { analytics } from './features/analytics'  // feature()
+import { settings } from './features/settings'    // feature({ methods })
+import { checkout } from './features/checkout'    // feature({ methods, generators })
+import { analytics } from './features/analytics'  // feature({ actions, reduce })
 
 await aio.run({
   features: [settings, checkout, analytics],
@@ -428,32 +533,63 @@ await aio.run({
 
 | Start with | Upgrade to | When |
 |---|---|---|
-| `reactive()` | — | Most features never need more |
-| `reactive()` | `flow()` | Multi-step workflows, retries, auto-cancellation, step observability |
-| `reactive()` | `feature()` | Complex reactive logic, multiple entry points, strict machine control |
+| `feature({ methods })` | — | Most features never need more |
+| `feature({ methods })` | + `generators` | Multi-step workflows, auto-cancellation, step observability |
+| `feature({ methods })` | → `feature({ reduce })` | Complex reactive logic, multiple entry points, strict machine control |
 
-**Rule: start reactive. Upgrade when you feel the pain, not before.**
+**Rule: start with methods. Add generators when you feel the pain, not before.**
 
 ---
 
-## What reactive generates
+## Inter-feature coordination
 
-Under the hood, `reactive()` creates a standard `FeatureDef` with auto-generated:
+Async methods call other features by direct import — no strings needed:
 
-- **Actions**: one per method (`Cart:AddItem`, `Cart:Clear`) + method-tagged `Cart:__SetAddItem` for async writes
+```typescript
+import { api } from '../api'
+
+const app = feature('app', {
+  state: { lastSync: null as number | null },
+  methods: {
+    async sync(s) {
+      await api.fetch('/api/data')    // typed, store-observable
+      s.lastSync = Date.now()
+    },
+  },
+})
+```
+
+Direct calling:
+- Dispatches a real action through the store — observable, interceptable, time-travelable
+- Returns a typed Promise — no cast needed
+- **Rejects immediately** if blocked by machine guard, feature disabled, or method not async
+
+For timeout/retry on top of direct calling:
+```ts
+import { call } from 'aio'
+const count = await call({ timeout: 5000 }, () => inventory.checkStock(item))
+```
+
+---
+
+## What feature() generates
+
+Under the hood, `feature({ methods })` creates a standard `FeatureDef` with auto-generated:
+
+- **Actions**: one per method (`cart:addItem`, `cart:clear`) + method-tagged `cart:__setAddItem` for async writes
 - **Reducer**: routes actions to method bodies (sync methods run in Immer, async mutations applied via `__setMethod`)
 - **Executor**: runs async methods with live Proxy + microtask batcher
 
-The dispatch loop, persistence, sync, time-travel, middleware — all unchanged. `reactive()` is a compiler, not a runtime change.
+The dispatch loop, persistence, sync, time-travel, middleware — all unchanged. `feature({ methods })` is a compiler, not a runtime change.
 
 ### Action naming
 
 | Method | Action type |
 |---|---|
-| `addItem(s, item)` | `Cart:AddItem` |
-| `clear(s)` | `Cart:Clear` |
-| (async `save` writes) | `Cart:__setSave` (batched per sync frame) |
-| (async method error) | `Cart:__error` `{ _method, error }` |
+| `addItem(s, item)` | `cart:addItem` |
+| `clear(s)` | `cart:clear` |
+| (async `save` writes) | `cart:__setSave` (batched per sync frame) |
+| (async method error) | `cart:__error` `{ _method, error }` |
 
 ### Microtask batching
 
@@ -463,7 +599,7 @@ Consecutive Proxy writes in the same sync frame are grouped into one action via 
 
 For sync methods: one action per method call with the method name.
 
-For async methods: the trigger action (`Cart:Save`) plus one batched `Cart:__SetSave` per sync frame. Writes before an `await` are one batch, writes after are another.
+For async methods: only the trigger action (`cart:save`) appears in time-travel. The internal `cart:__setSave` batched write actions are hidden from time-travel history (they are bookkeeping internals, not user-visible events).
 
 ---
 
@@ -472,7 +608,7 @@ For async methods: the trigger action (`Cart:Save`) plus one batched `Cart:__Set
 ### Form state
 
 ```typescript
-const form = reactive('form', {
+const form = feature('form', {
   state: {
     name: '',
     email: '',
@@ -504,7 +640,7 @@ const form = reactive('form', {
 ### Polling
 
 ```typescript
-const prices = reactive('prices', {
+const prices = feature('prices', {
   state: { btc: 0, eth: 0, updatedAt: '' },
   methods: {
     async refresh(s) {
@@ -521,7 +657,7 @@ const prices = reactive('prices', {
 ### CRUD
 
 ```typescript
-const users = reactive('users', {
+const users = feature('users', {
   state: {
     list: [] as User[],
     loading: false,
@@ -561,11 +697,45 @@ const users = reactive('users', {
 
 ---
 
+## Adding sequential workflows — `generators`
+
+When a method needs step-level observability, cancellation, or structured concurrency, add it as a generator instead. The `generators` key lives alongside `methods` in the same feature:
+
+```typescript
+const order = feature('order', {
+  state: { status: 'idle' as string, orderId: null as string | null },
+  methods: {
+    cancel(s) { s.status = 'cancelled' },
+  },
+  generators: {
+    *place(ctx) {
+      yield* ctx.mutate('processing', s => { s.status = 'processing' })
+      const id = yield* ctx.call('submit', () => submitOrder())
+      yield* ctx.done(s => { s.orderId = id as string; s.status = 'done' })
+    },
+  },
+})
+
+order.place()   // dispatches Order:Place, runs the generator
+order.cancel()  // plain method — still works alongside generators
+```
+
+Generators get the full `GenCtx` API: `ctx.call`, `ctx.mutate`, `ctx.done`, `ctx.fail`, `ctx.sleep`, `ctx.waitFor`, `ctx.all`, `ctx.race`. Each yield is a named checkpoint — visible in time-travel, cancellable, step-by-step observable.
+
+**When to upgrade a method to a generator:**
+- The async operation has multiple meaningful steps
+- You need auto-cancellation on re-trigger (re-calling `order.place()` cancels the running workflow)
+- You want structured observability beyond property-level writes
+
+See [generators.md](generators.md) for the full generator API.
+
+---
+
 ## Limitations
 
 ### Async Proxy writes are machine-gated by method
 
-Async writes dispatch method-tagged `__setMethodName` actions. When a machine is configured, `reactive()` auto-injects `__setMethod` self-loop transitions in the **target** state of each async method's transition. This means writes are allowed as long as the method's transition was valid — but they don't trigger state machine transitions themselves. For strict per-write machine gating, use `feature()` with explicit actions or `flow()`.
+Async writes dispatch method-tagged `__setMethodName` actions. When a machine is configured, `feature({ methods })` auto-injects `__setMethod` self-loop transitions in the **target** state of each async method's transition. This means writes are allowed as long as the method's transition was valid — but they don't trigger state machine transitions themselves. For strict per-write machine gating, use `feature()` with explicit actions or a generator.
 
 ### No structured concurrency
 
@@ -575,17 +745,17 @@ Reactive async methods are fire-and-forget. If you call `send.checkout()` twice,
 machine: {
   initial: 'idle',
   states: {
-    idle: { on: { checkout: 'busy' } },
-    busy: { on: { done: 'idle' } },  // checkout blocked while busy
+    idle: { checkout: 'busy' },
+    busy: { done: 'idle' },  // checkout blocked while busy
   },
 }
 ```
 
-For auto-cancellation on re-trigger, use `flow()`.
+For auto-cancellation on re-trigger, use a generator in the `generators` key.
 
 ### No step-level observability
 
-In `flow()`, each `yield*` is a named checkpoint visible in time-travel. In `reactive()`, async methods show individual property assignments — useful but less structured. For workflow-level observability, use `flow()`.
+Async methods show individual property assignments in time-travel — useful but less structured. Use the `generators` key for named checkpoints per `yield*`.
 
 ### Not for long-lived processes
 
@@ -595,37 +765,37 @@ Async methods should complete or fail. They don't survive server restarts. For p
 
 ## Comparison
 
-| | `reactive()` | `flow()` | `feature()` |
+| | `feature({ methods })` | `feature({ generators })` | `feature({ reduce })` |
 |---|---|---|---|
-| Boilerplate | Minimal | Low | Medium |
+| Boilerplate | Minimal | Minimal | Medium |
 | Actions | Auto-generated | Auto-generated | Manual catalog |
 | Effects | None needed | None needed | Manual catalog |
-| Reducer | None needed | Optional | Required |
+| Reducer | None needed | None needed | Required |
 | Executor | None needed | None needed | Required (if effects) |
 | State machine | Optional | Optional | Optional |
 | Async model | Live Proxy | Generators (`yield*`) | Effects + dispatch |
 | Cancellation | Manual | Automatic | Manual |
 | Step observability | Per-property | Per-yield | Per-action |
-| Best for | 80% of features | Workflows | Complex reactive logic |
+| Best for | 80% of features | Multi-step workflows | Complex reactive logic |
 
 ---
 
 ## API reference
 
-### `reactive(name, config)`
+### `feature(name, config)`
 
-Creates a `FeatureDef` from plain methods.
+Creates a `FeatureDef` from methods and/or generators.
 
 **Parameters:**
 
 - `name: string` — feature name (lowercase, becomes PascalCase prefix for actions)
-- `config: ReactiveConfig` — state, methods, optional selectors/machine/listensTo/crossDispatch/init/destroy
+- `config` — state, methods, generators, optional selectors/machine/listensTo/dispatchTo/onInit/onDestroy
 
-**Returns:** `FeatureDef & FlatMethods<M> & FlatSelectors<Sel>` — standard feature definition with typed method senders and selectors, composable with `feature()` and `flow()` features. TypeScript provides autocomplete for all methods (with state parameter `s` stripped) and selectors (callable with no args after `aio.run()` binding)
+**Returns:** `FeatureDef` — standard feature definition with typed method/generator dispatchers and selectors, composable with other `feature()` instances.
 
 **Exports from `'aio'`:**
 
 ```typescript
-import { reactive } from 'aio'
-import type { ReactiveConfig } from 'aio'
+import { feature } from 'aio'
+import type { FeatureDef, GenCtx } from 'aio'
 ```

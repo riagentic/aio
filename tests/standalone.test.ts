@@ -143,12 +143,12 @@ Deno.test('custom persistKey', async () => {
   assertEquals(JSON.parse(storage.get('custom_key')!), { count: 7 })
 })
 
-Deno.test('getDBState filters persisted state', async () => {
+Deno.test('stateForDB filters persisted state', async () => {
   setup()
   const app = initStandalone({ count: 0 }, {
     reduce: makeReduce(),
     execute: () => {},
-    getDBState: (s) => ({ count: s.count }),
+    stateForDB: (s) => ({ count: s.count }),
   })
   app.dispatch({ type: 'INC', payload: { by: 3 } })
   await new Promise(r => setTimeout(r, 150))

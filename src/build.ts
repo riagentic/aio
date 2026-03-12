@@ -159,8 +159,11 @@ if (bundleFresh) {
 
   // Generate temp entry that exports mount() for prod HTML
   const buildEntryPath = join(root, '_build_entry.tsx')
+  // Android: legacy templates have state.ts/reduce.ts/execute.ts (initStandalone);
+  // feature-API templates just use App.tsx (server-connected WebView).
+  const hasLegacyState = await Deno.stat(join(root, 'src/state.ts')).then(() => true, () => false)
   const entryCode = doAndroid
-    ? `\
+    ? hasLegacyState ? `\
 import { createElement } from 'react'
 import { createRoot } from 'react-dom/client'
 import { initStandalone } from 'aio'
@@ -170,6 +173,11 @@ import { execute } from './src/execute.ts'
 import App from './src/App.tsx'
 initStandalone(initialState, { reduce, execute })
 createRoot(document.getElementById('root')).render(createElement(App))
+` : `\
+import { createElement } from 'react'
+import { createRoot } from 'react-dom/client'
+import App from './src/App.tsx'
+export function mount(el) { createRoot(el).render(createElement(App)) }
 `
     : `\
 import { createElement } from 'react'

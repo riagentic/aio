@@ -13,14 +13,14 @@ Deno.test('getTemplates: UI types show correct file counts', () => {
   const ui = APP_TYPES.find(t => t.id === 'browser')!
   const tpls = getTemplates(ui)
   assert(tpls[0].desc.includes('2 files'))
-  assert(tpls[1].desc.includes('7 files'))
+  assert(tpls[1].desc.includes('3 files'))
 })
 
 Deno.test('getTemplates: headless types show correct file counts', () => {
   const hl = APP_TYPES.find(t => t.id === 'cli')!
   const tpls = getTemplates(hl)
   assert(tpls[0].desc.includes('1 file'))
-  assert(tpls[1].desc.includes('6 files'))
+  assert(tpls[1].desc.includes('2 files'))
 })
 
 // ── CLI templates ──
@@ -41,8 +41,8 @@ Deno.test('CLI templates: state types match server templates', () => {
   const tpls = getCliTemplates()
   // Empty: { count: number }
   assert(tpls[0].fn('T')['src/client.ts'].includes('count: number'))
-  // Minimal: { counter: number }
-  assert(tpls[1].fn('T')['src/state.ts'].includes('counter: number'))
+  // Minimal: counter feature slice
+  assert(tpls[1].fn('T')['src/state.ts'].includes('counter:'))
   // Medium: todo + TodoItem
   const medState = tpls[2].fn('T')['src/state.ts']
   assert(medState.includes('todo:') && medState.includes('TodoItem'))

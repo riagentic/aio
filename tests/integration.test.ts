@@ -193,9 +193,9 @@ Deno.test('integration: multiple clients receive broadcasts', async () => {
   }
 })
 
-// ── Per-user getUIState test ──────────────────────────────────
+// ── Per-user stateForUI test ──────────────────────────────────
 
-Deno.test('integration: per-user getUIState returns different state per user', async () => {
+Deno.test('integration: per-user stateForUI returns different state per user', async () => {
   const dir = await Deno.makeTempDir()
   await Deno.mkdir(join(dir, 'dist'), { recursive: true })
   await Deno.writeTextFile(join(dir, 'dist', 'app.js'), 'export function mount(){}')

@@ -43,8 +43,8 @@ type StandaloneConfig<S, A, E> = {
   reduce: (state: S, action: A) => { state: S; effects: (E | ScheduleEffect)[] }
   execute: (app: AioApp<S, A>, effect: E) => void
   persist?: boolean
-  getDBState?: (state: S) => unknown
-  getUIState?: (state: S) => unknown
+  stateForDB?: (state: S) => unknown
+  stateForUI?: (state: S) => unknown
   persistKey?: string
   persistDebounce?: number       // ms between localStorage writes (default: 100)
   perfMode?: PerfMode           // 'strict' or 'soft' — performance violation handling
@@ -59,8 +59,8 @@ const STORAGE_KEY = 'aio_state'
 export function initStandalone<S, A, E>(initialState: S, config: StandaloneConfig<S, A, E>): AioApp<S, A> {
   const { reduce, execute } = config
   const shouldPersist = config.persist !== false
-  const getDBState = config.getDBState ?? ((s: S) => s)
-  const getUIState = config.getUIState ?? ((s: S) => s)
+  const getDBState = config.stateForDB ?? ((s: S) => s)
+  const getUIState = config.stateForUI ?? ((s: S) => s)
   const persistKey = config.persistKey ?? STORAGE_KEY
 
   // Restore from localStorage

@@ -1,7 +1,5 @@
 import { assertEquals, assertExists } from 'https://deno.land/std@0.224.0/assert/mod.ts'
 import { feature, composeFeatures } from '../src/feature.ts'
-import { flow } from '../src/flow.ts'
-import type { Gen, FlowCtx } from '../src/flow.ts'
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
@@ -16,7 +14,6 @@ function createTestApp(entries: Parameters<typeof composeFeatures>[0]) {
       dispatched.push(action)
       const result = composed.reduce(state, action)
       state = { ...result.state }
-      // Execute effects (cast to Msg — schedule effects are not used in flow tests)
       for (const effect of result.effects) {
         composed.execute(app, effect as { type: string; payload: unknown })
       }
@@ -40,23 +37,17 @@ const basic = feature('basic', {
   machine: {
     initial: 'idle',
     states: {
-      idle: { on: { start: 'busy' } },
-      busy: { on: {} },
+      idle: { start: 'busy' },
+      busy: {},
     },
   },
-  flows: {
-    main: flow('start', function* (ctx, action) {
-      const n = (action.payload as { n: number }).n
-
-      // Async call
+  generators: {
+    // ctx is GenCtx<{ value: number; done: boolean }> — inferred, no annotation needed
+    start: function* (ctx, { n }: { n: number }) {
       const doubled = yield* ctx.call('double', () => Promise.resolve(n * 2))
-
-      // State mutation
-      yield* ctx.step('setValue', (s) => { s.value = doubled as number })
-
-      // Done
-      yield* ctx.done((s) => { s.done = true })
-    }),
+      yield* ctx.mutate('setValue', s => { s.value = doubled })  // s.value typed as number
+      yield* ctx.done(s => { s.done = true })                    // s.done typed as boolean
+    },
   },
 })
 
@@ -66,9 +57,9 @@ Deno.test('flow: basic flow dispatches step actions', async () => {
   await app.flush()
 
   const types = app.dispatched.map(d => d.type)
-  assertEquals(types.includes('Basic:Flow:Double'), true)
-  assertEquals(types.includes('Basic:Flow:SetValue'), true)
-  assertEquals(types.includes('Basic:Flow:Done'), true)
+  assertEquals(types.includes('basic:flow:double'), true)
+  assertEquals(types.includes('basic:flow:setValue'), true)
+  assertEquals(types.includes('basic:flow:done'), true)
 })
 
 Deno.test('flow: basic flow updates state', async () => {
@@ -88,16 +79,15 @@ const flowOnly = feature('flowOnly', {
   actions: {
     go: (input: string) => ({ input }),
   },
-  flows: {
-    main: flow('go', function* (ctx, action) {
-      const input = (action.payload as { input: string }).input
+  generators: {
+    go: function* (ctx, { input }: { input: string }) {
       const upper = yield* ctx.call('transform', () => Promise.resolve(input.toUpperCase()))
-      yield* ctx.done((s) => { s.result = upper as string })
-    }),
+      yield* ctx.done(s => { s.result = upper })  // s.result typed as string, upper is string
+    },
   },
 })
 
-Deno.test('flow: feature with only flows (no reduce)', async () => {
+Deno.test('flow: feature with only generators (no reduce)', async () => {
   const app = createTestApp([flowOnly])
   app.dispatch(flowOnly.A.go('hello'))
   await app.flush()
@@ -106,7 +96,7 @@ Deno.test('flow: feature with only flows (no reduce)', async () => {
   assertEquals(s.result, 'HELLO')
 })
 
-// ── Mixed feature (reduce + flow) ────────────────────────────────────
+// ── Mixed feature (reduce + generators) ──────────────────────────────
 
 const mixed = feature('mixed', {
   state: { count: 0, synced: false },
@@ -117,20 +107,18 @@ const mixed = feature('mixed', {
   machine: {
     initial: 'idle',
     states: {
-      idle: { on: { increment: 'idle', sync: 'syncing' } },
-      syncing: { on: {} },
+      idle: { increment: 'idle', sync: 'syncing' },
+      syncing: {},
     },
   },
-  reduce(state, action, { A }) {
-    if (action.type === A.Increment) {
-      state.count += (action.payload as { by: number }).by
-    }
+  reduce: {
+    increment(state, payload) { state.count += (payload as { by: number }).by },
   },
-  flows: {
-    sync: flow('sync', function* (ctx) {
+  generators: {
+    sync: function* (ctx) {
       yield* ctx.call('doSync', () => Promise.resolve())
-      yield* ctx.done((s) => { s.synced = true })
-    }),
+      yield* ctx.done(s => { s.synced = true })  // s.synced typed as boolean
+    },
   },
 })
 
@@ -141,7 +129,7 @@ Deno.test('flow: mixed feature — reduce works independently', () => {
   assertEquals(s.count, 5)
 })
 
-Deno.test('flow: mixed feature — flow works alongside reduce', async () => {
+Deno.test('flow: mixed feature — generator works alongside reduce', async () => {
   const app = createTestApp([mixed])
   app.dispatch(mixed.A.increment(3))
   app.dispatch(mixed.A.sync())
@@ -152,7 +140,7 @@ Deno.test('flow: mixed feature — flow works alongside reduce', async () => {
   assertEquals(s.synced, true)
 })
 
-// ── Flow with ctx.put ────────────────────────────────────────────────
+// ── Generator with ctx.dispatch ───────────────────────────────────────
 
 const putter = feature('putter', {
   state: { step: '' },
@@ -163,23 +151,21 @@ const putter = feature('putter', {
   machine: {
     initial: 'idle',
     states: {
-      idle: { on: { start: 'busy', update: 'idle' } },
-      busy: { on: { update: 'idle' } },
+      idle: { start: 'busy', update: 'idle' },
+      busy: { update: 'idle' },
     },
   },
-  reduce(state, action, { A }) {
-    if (action.type === A.Update) {
-      state.step = (action.payload as { step: string }).step
-    }
+  reduce: {
+    update(state, payload) { state.step = (payload as { step: string }).step },
   },
-  flows: {
-    main: flow('start', function* (ctx) {
-      yield* ctx.put({ type: 'Putter:Update', payload: { step: 'from-flow' } })
-    }),
+  generators: {
+    start: function* (ctx) {
+      yield* ctx.dispatch({ type: 'putter:update', payload: { step: 'from-flow' } })
+    },
   },
 })
 
-Deno.test('flow: ctx.put dispatches regular action', async () => {
+Deno.test('flow: ctx.dispatch dispatches regular action', async () => {
   const app = createTestApp([putter])
   app.dispatch(putter.A.start())
   await app.flush()
@@ -188,7 +174,42 @@ Deno.test('flow: ctx.put dispatches regular action', async () => {
   assertEquals(s.step, 'from-flow')
 })
 
-// ── Flow with ctx.fail ───────────────────────────────────────────────
+// ── ctx.send shorthand ────────────────────────────────────────────────
+
+const sender = feature('sender', {
+  state: { step: '' },
+  actions: {
+    start: () => ({}),
+    update: (step: string) => ({ step }),
+  },
+  machine: {
+    initial: 'idle',
+    states: {
+      idle: { start: 'busy', update: 'idle' },
+      busy: { update: 'idle' },
+    },
+  },
+  reduce: {
+    update(state, payload) { state.step = (payload as { step: string }).step },
+  },
+  generators: {
+    start: function* (ctx) {
+      // ctx.send — shorthand for ctx.dispatch; string form used here to avoid circular ref
+      yield* ctx.send('sender:update', { step: 'via-send' })
+    },
+  },
+})
+
+Deno.test('flow: ctx.send dispatches via bound creator', async () => {
+  const app = createTestApp([sender])
+  app.dispatch(sender.A.start())
+  await app.flush()
+
+  const s = app.getState().sender as { step: string }
+  assertEquals(s.step, 'via-send')
+})
+
+// ── Generator with ctx.fail ───────────────────────────────────────────
 
 const failer = feature('failer', {
   state: { value: 0 },
@@ -198,17 +219,16 @@ const failer = feature('failer', {
   machine: {
     initial: 'idle',
     states: {
-      idle: { on: { start: 'busy' } },
-      busy: { on: {} },
+      idle: { start: 'busy' },
+      busy: {},
     },
   },
-  flows: {
-    main: flow('start', function* (ctx) {
+  generators: {
+    start: function* (ctx) {
       yield* ctx.call('check', () => Promise.resolve())
       yield* ctx.fail('something went wrong')
-      // This should never execute
-      yield* ctx.step('unreachable', (s) => { s.value = 999 })
-    }),
+      yield* ctx.mutate('unreachable', s => { s.value = 999 })
+    },
   },
 })
 
@@ -218,24 +238,24 @@ Deno.test('flow: ctx.fail stops execution and dispatches failed action', async (
   await app.flush()
 
   const types = app.dispatched.map(d => d.type)
-  assertEquals(types.includes('Failer:Flow:Failed'), true)
+  assertEquals(types.includes('failer:flow:failed'), true)
 
   const s = app.getState().failer as { value: number }
   assertEquals(s.value, 0) // unreachable step didn't execute
 })
 
-// ── Flow with ctx.sleep ──────────────────────────────────────────────
+// ── Generator with ctx.sleep ──────────────────────────────────────────
 
 const sleeper = feature('sleeper', {
   state: { woke: false },
   actions: {
     start: () => ({}),
   },
-  flows: {
-    main: flow('start', function* (ctx) {
+  generators: {
+    start: function* (ctx) {
       yield* ctx.sleep('nap', 10) // 10ms
-      yield* ctx.done((s) => { s.woke = true })
-    }),
+      yield* ctx.done(s => { s.woke = true })  // s.woke typed as boolean
+    },
   },
 })
 
@@ -243,39 +263,37 @@ Deno.test('flow: ctx.sleep pauses then continues', async () => {
   const app = createTestApp([sleeper])
   app.dispatch(sleeper.A.start())
 
-  // Before sleep completes
   const before = app.getState().sleeper as { woke: boolean }
   assertEquals(before.woke, false)
 
-  // After sleep completes
   await new Promise(r => setTimeout(r, 80))
 
   const after = app.getState().sleeper as { woke: boolean }
   assertEquals(after.woke, true)
 })
 
-// ── Flow with ctx.all (parallel) ─────────────────────────────────────
+// ── Generator with ctx.all (spread form) ─────────────────────────────
 
 const parallel = feature('parallel', {
   state: { a: 0, b: 0 },
   actions: {
     start: () => ({}),
   },
-  flows: {
-    main: flow('start', function* (ctx) {
+  generators: {
+    start: function* (ctx) {
       const [a, b] = yield* ctx.all(
         ctx.call('fetchA', () => Promise.resolve(10)),
         ctx.call('fetchB', () => Promise.resolve(20)),
       )
-      yield* ctx.done((s) => {
-        s.a = a as number
-        s.b = b as number
+      yield* ctx.done(s => {
+        s.a = a  // a typed as number
+        s.b = b  // b typed as number
       })
-    }),
+    },
   },
 })
 
-Deno.test('flow: ctx.all runs calls in parallel', async () => {
+Deno.test('flow: ctx.all (spread) runs calls in parallel', async () => {
   const app = createTestApp([parallel])
   app.dispatch(parallel.A.start())
   await app.flush()
@@ -285,22 +303,53 @@ Deno.test('flow: ctx.all runs calls in parallel', async () => {
   assertEquals(s.b, 20)
 })
 
-// ── Flow with ctx.race ───────────────────────────────────────────────
+// ── Generator with ctx.all (named form) ──────────────────────────────
+
+const namedParallel = feature('namedParallel', {
+  state: { x: 0, y: 0 },
+  actions: {
+    start: () => ({}),
+  },
+  generators: {
+    start: function* (ctx) {
+      const { x, y } = yield* ctx.all({
+        x: ctx.call('fetchX', () => Promise.resolve(100)),
+        y: ctx.call('fetchY', () => Promise.resolve(200)),
+      })
+      yield* ctx.done(s => {
+        s.x = x as number
+        s.y = y as number
+      })
+    },
+  },
+})
+
+Deno.test('flow: ctx.all (named) runs calls in parallel and returns by name', async () => {
+  const app = createTestApp([namedParallel])
+  app.dispatch(namedParallel.A.start())
+  await app.flush()
+
+  const s = app.getState().namedParallel as { x: number; y: number }
+  assertEquals(s.x, 100)
+  assertEquals(s.y, 200)
+})
+
+// ── Generator with ctx.race ───────────────────────────────────────────
 
 const racer = feature('racer', {
   state: { winner: '' },
   actions: {
     start: () => ({}),
   },
-  flows: {
-    main: flow('start', function* (ctx) {
+  generators: {
+    start: function* (ctx) {
       const result = yield* ctx.race({
         fast: ctx.call('fast', () => Promise.resolve('fast-wins')),
-        slow: ctx.call('slow', () => new Promise(r => setTimeout(() => r('slow-wins'), 500))),
+        slow: ctx.call('slow', () => new Promise<string>(r => setTimeout(() => r('slow-wins'), 500))),
       })
-      const winner = (result as Record<string, string>).fast ? 'fast' : 'slow'
-      yield* ctx.done((s) => { s.winner = winner })
-    }),
+      const winner = result.fast !== undefined ? 'fast' : 'slow'
+      yield* ctx.done(s => { s.winner = winner })  // s.winner typed as string
+    },
   },
 })
 
@@ -313,16 +362,16 @@ Deno.test({ name: 'flow: ctx.race picks first to resolve', sanitizeOps: false, s
   assertEquals(s.winner, 'fast')
 })
 
-// ── Flow trigger validation ──────────────────────────────────────────
+// ── Generator key validation ──────────────────────────────────────────
 
-Deno.test('flow: throws if trigger action not in actions', () => {
+Deno.test('flow: throws if generator key not in actions', () => {
   let error: Error | null = null
   try {
     feature('bad', {
       state: {},
       actions: { go: () => ({}) },
-      flows: {
-        main: flow('nonexistent', function* () {}),
+      generators: {
+        nonexistent: function* () {},
       },
     })
   } catch (e) {
@@ -330,22 +379,21 @@ Deno.test('flow: throws if trigger action not in actions', () => {
   }
   assertExists(error)
   assertEquals(error!.message.includes('nonexistent'), true)
-  assertEquals(error!.message.includes('not in actions'), true)
+  assertEquals(error!.message.includes('must match an action key'), true)
 })
 
-// ── Sync call in flow ────────────────────────────────────────────────
+// ── Sync call in generator ────────────────────────────────────────────
 
 const syncFlow = feature('syncFlow', {
   state: { value: 0 },
   actions: {
     start: () => ({}),
   },
-  flows: {
-    main: flow('start', function* (ctx) {
-      // Sync function (not async)
+  generators: {
+    start: function* (ctx) {
       const val = yield* ctx.call('compute', () => 42)
-      yield* ctx.done((s) => { s.value = val as number })
-    }),
+      yield* ctx.done(s => { s.value = val })  // val typed as number
+    },
   },
 })
 
@@ -358,24 +406,24 @@ Deno.test('flow: ctx.call works with sync functions', async () => {
   assertEquals(s.value, 42)
 })
 
-// ── Multiple steps ───────────────────────────────────────────────────
+// ── Multiple steps ────────────────────────────────────────────────────
 
 const multiStep = feature('multiStep', {
   state: { steps: [] as string[] },
   actions: {
     start: () => ({}),
   },
-  flows: {
-    pipeline: flow('start', function* (ctx) {
-      yield* ctx.step('step1', (s) => { (s.steps as string[]).push('one') })
-      yield* ctx.step('step2', (s) => { (s.steps as string[]).push('two') })
-      yield* ctx.step('step3', (s) => { (s.steps as string[]).push('three') })
+  generators: {
+    start: function* (ctx) {
+      yield* ctx.mutate('step1', s => { s.steps.push('one') })    // s.steps typed as string[]
+      yield* ctx.mutate('step2', s => { s.steps.push('two') })
+      yield* ctx.mutate('step3', s => { s.steps.push('three') })
       yield* ctx.done()
-    }),
+    },
   },
 })
 
-Deno.test('flow: multiple ctx.step calls execute in order', async () => {
+Deno.test('flow: multiple ctx.mutate calls execute in order', async () => {
   const app = createTestApp([multiStep])
   app.dispatch(multiStep.A.start())
   await app.flush()
@@ -384,18 +432,18 @@ Deno.test('flow: multiple ctx.step calls execute in order', async () => {
   assertEquals(s.steps, ['one', 'two', 'three'])
 })
 
-// ── Error handling in flow ───────────────────────────────────────────
+// ── Error handling in generator ───────────────────────────────────────
 
 const errorFlow = feature('errorFlow', {
   state: { value: 0 },
   actions: {
     start: () => ({}),
   },
-  flows: {
-    main: flow('start', function* (ctx) {
+  generators: {
+    start: function* (ctx) {
       yield* ctx.call('boom', () => { throw new Error('test error') })
-      yield* ctx.done((s) => { s.value = 999 })
-    }),
+      yield* ctx.done(s => { s.value = 999 })
+    },
   },
 })
 
@@ -405,14 +453,13 @@ Deno.test('flow: error in ctx.call dispatches error action', async () => {
   await app.flush()
 
   const types = app.dispatched.map(d => d.type)
-  assertEquals(types.includes('ErrorFlow:Flow:Error'), true)
+  assertEquals(types.includes('errorFlow:flow:error'), true)
 
-  // Done step should not have executed
   const s = app.getState().errorFlow as { value: number }
   assertEquals(s.value, 0)
 })
 
-// ── ctx.waitFor ──────────────────────────────────────────────────────
+// ── ctx.waitFor ───────────────────────────────────────────────────────
 
 const waiter = feature('waiter', {
   state: { received: '' },
@@ -420,24 +467,23 @@ const waiter = feature('waiter', {
     start: () => ({}),
     signal: (msg: string) => ({ msg }),
   },
-  flows: {
-    main: flow('start', function* (ctx) {
-      const action = yield* ctx.waitFor('Waiter:Signal')
-      const msg = (action as { payload: { msg: string } }).payload.msg
-      yield* ctx.done((s) => { s.received = msg })
-    }),
+  generators: {
+    // String form used here — typed form (waiter.A.signal) would be circular reference
+    start: function* (ctx) {
+      const action = yield* ctx.waitFor('waiter:signal')
+      const msg = (action.payload as { msg: string }).msg  // payload cast needed with string form
+      yield* ctx.done(s => { s.received = msg })
+    },
   },
 })
 
 Deno.test('flow: ctx.waitFor pauses until matching action dispatched', async () => {
   const app = createTestApp([waiter])
   app.dispatch(waiter.A.start())
-  await new Promise(r => setTimeout(r, 20)) // let flow start and reach waitFor
+  await new Promise(r => setTimeout(r, 20))
 
-  // Flow should be waiting — state unchanged
   assertEquals((app.getState().waiter as any).received, '')
 
-  // Dispatch the signal
   app.dispatch(waiter.A.signal('hello'))
   await new Promise(r => setTimeout(r, 50))
 
@@ -449,16 +495,16 @@ const timeoutWaiter = feature('timeoutWaiter', {
   actions: {
     start: () => ({}),
   },
-  flows: {
-    main: flow('start', function* (ctx) {
+  generators: {
+    start: function* (ctx) {
       try {
         yield* ctx.waitFor('NeverHappens:Action', 50)
         yield* ctx.done()
       } catch {
-        yield* ctx.step('timeout', (s) => { s.timedOut = true })
+        yield* ctx.mutate('timeout', s => { s.timedOut = true })  // s.timedOut typed as boolean
         yield* ctx.done()
       }
-    }),
+    },
   },
 })
 
@@ -470,20 +516,20 @@ Deno.test('flow: ctx.waitFor with timeout throws on expiry', async () => {
   assertEquals((app.getState().timeoutWaiter as any).timedOut, true)
 })
 
-// ── ctx.getState ─────────────────────────────────────────────────────
+// ── ctx.getState ──────────────────────────────────────────────────────
 
 const stateReader = feature('stateReader', {
   state: { count: 0, doubled: 0 },
   actions: {
     start: () => ({}),
   },
-  flows: {
-    main: flow('start', function* (ctx) {
-      yield* ctx.step('inc', s => { s.count = 5 })
-      const s = ctx.getState()
-      yield* ctx.step('double', d => { d.doubled = (s as { count: number }).count * 2 })
+  generators: {
+    start: function* (ctx) {
+      yield* ctx.mutate('inc', s => { s.count = 5 })
+      const current = ctx.getState()           // typed as { count: number; doubled: number }
+      yield* ctx.mutate('double', s => { s.doubled = current.count * 2 })  // no cast needed
       yield* ctx.done()
-    }),
+    },
   },
 })
 
@@ -497,7 +543,7 @@ Deno.test({ name: 'flow: ctx.getState reads fresh state after step', sanitizeOps
   assertEquals(s.doubled, 10)
 })
 
-// ── cancelOn ─────────────────────────────────────────────────────────
+// ── cancelOn ──────────────────────────────────────────────────────────
 
 const cancellable = feature('cancellable', {
   state: { running: false, finished: false },
@@ -505,32 +551,35 @@ const cancellable = feature('cancellable', {
     start: () => ({}),
     stop: () => ({}),
   },
-  flows: {
-    main: flow('start', { cancelOn: ['stop'] }, function* (ctx) {
-      yield* ctx.step('begin', s => { s.running = true })
+  generators: {
+    start: function* (ctx) {
+      yield* ctx.mutate('begin', s => { s.running = true })
       yield* ctx.sleep('work', 500)
-      yield* ctx.done(s => { s.running = false; s.finished = true })
-    }),
+      yield* ctx.done(s => {
+        s.running = false
+        s.finished = true
+      })
+    },
+  },
+  cancelOn: {
+    start: ['stop'],
   },
 })
 
-Deno.test({ name: 'flow: cancelOn stops flow when matching action dispatched', sanitizeOps: false, sanitizeResources: false }, async () => {
+Deno.test({ name: 'flow: cancelOn stops generator when matching action dispatched', sanitizeOps: false, sanitizeResources: false }, async () => {
   const app = createTestApp([cancellable])
   app.dispatch(cancellable.A.start())
   await new Promise(r => setTimeout(r, 50))
 
-  // Flow should be running
   assertEquals((app.getState().cancellable as any).running, true)
 
-  // Dispatch stop — should cancel the flow
   app.dispatch(cancellable.A.stop())
   await new Promise(r => setTimeout(r, 100))
 
-  // Flow was cancelled — finished should still be false
   assertEquals((app.getState().cancellable as any).finished, false)
 })
 
-// ── ctx.put with payload-optional actions ─────────────────────────────
+// ── ctx.dispatch with payload-optional actions ────────────────────────
 
 const putCompat = feature('putCompat', {
   state: { sent: false },
@@ -538,21 +587,20 @@ const putCompat = feature('putCompat', {
     start: () => ({}),
     signal: () => ({}),
   },
-  flows: {
-    main: flow('start', function* (ctx) {
-      // payload-less action — should work without { payload: undefined }
-      yield* ctx.put({ type: 'PutCompat:Signal' })
+  generators: {
+    start: function* (ctx) {
+      yield* ctx.dispatch({ type: 'putCompat:signal' })
       yield* ctx.done(s => { s.sent = true })
-    }),
+    },
   },
 })
 
-Deno.test('flow: ctx.put accepts action without payload', async () => {
+Deno.test('flow: ctx.dispatch accepts action without payload', async () => {
   const app = createTestApp([putCompat])
   app.dispatch(putCompat.A.start())
   await app.flush()
 
   assertEquals((app.getState().putCompat as any).sent, true)
-  const signalAction = app.dispatched.find(d => d.type === 'PutCompat:Signal')
+  const signalAction = app.dispatched.find(d => d.type === 'putCompat:signal')
   assertExists(signalAction)
 })

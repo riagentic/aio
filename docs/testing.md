@@ -4,7 +4,7 @@ For the docs index, see [manual.md](manual.md). For reactive features, see [reac
 
 ## `testFeature(feature, name, fn)` — isolated feature testing
 
-Test harness that wraps `Deno.test` with typed helpers:
+Test harness that wraps `Deno.test` with typed helpers. Automatically resets all flows and pending async calls before each test — no teardown needed.
 
 ```ts
 import { testFeature } from 'aio'
@@ -15,7 +15,7 @@ testFeature(counter, 'increment from idle', (t) => {
   t.send.increment(5)
   t.expect.state(s => s.count === 5)
   t.expect.status('idle')
-  t.expect.effects(['Log'])
+  t.expect.effects(['counter:log'])
 })
 
 testFeature(counter, 'machine guards block invalid transitions', (t) => {
@@ -44,18 +44,19 @@ testFeature(counter, 'random action fuzzing', (t) => {
 })
 ```
 
-Async test functions are supported — use `t.runEffects()` + `t.settle()` for async reactive methods:
+Async test functions are supported — `await t.settle()` runs effects + waits for async to complete:
 
 ```ts
 testFeature(loader, 'loads data', async (t) => {
   t.init()
   t.send.load()          // triggers reducer, queues effect
-  t.runEffects()         // executes pending effects (starts async method)
-  await t.settle()       // waits for microtasks + timers (default 50ms)
+  await t.settle()       // auto-runs effects + drains microtasks (fast, no timer)
   t.expect.state(s => s.data === 'loaded')
   t.expect.state(s => s.loading === false)
 })
 ```
+
+For complex async with real timers: `await t.settle(100)` — timer-based settle.
 
 ## TestContext API
 
@@ -66,39 +67,44 @@ testFeature(loader, 'loads data', async (t) => {
 | `t.send.<action>(...args)` | Dispatch an action |
 | `t.expect.state(fn)` | Assert on feature state slice |
 | `t.expect.status(str)` | Assert current machine status |
-| `t.expect.effects(['Name'])` | Assert effect types from last action (short names, e.g. `'Persist'` not `'Counter:Persist'`) |
+| `t.expect.effects(['name'])` | Assert effect types from last action — use full `'featureName:effectKey'` format, e.g. `'counter:persist'` |
 | `t.expect.effectCount(n)` | Assert number of effects from last action |
 | `t.expect.invariant(fn)` | Assert a predicate holds |
-| `t.getState()` | Get full feature state including `_status` |
+| `t.getState()` | Get feature state slice (use `t.expect.status()` for machine status) |
 | `t.getEffects()` | Get effects from last dispatched action |
 | `t.randomActions(n)` | Dispatch N random valid actions (property-based testing) |
-| `t.runEffects()` | Execute pending effects (required for async reactive methods) |
-| `t.settle(ms?)` | Wait for async operations to complete (default 50ms) |
+| `t.runEffects()` | Execute pending effects manually (deprecated — `settle()` now auto-runs effects) |
+| `t.settle(ms?)` | Run effects + wait for async. No arg: drain microtasks (fast). With ms: timer wait. |
 
-## `testBridge(bridge, name, fn)` — bridge testing
+## Testing inter-feature coordination
+
+The preferred pattern is direct import + call — test it like any feature method:
 
 ```ts
-import { testBridge } from 'aio'
-import { priceBridge } from './features/bridge/index.ts'
-
-testBridge(priceBridge, 'request-response flow', (t) => {
-  t.request.price('BTC')
-  t.expect.pending(1)
-  t.respond.price(42000)
-  t.expect.pending(0)
-})
-
-testBridge(priceBridge, 'timeout triggers retry', (t) => {
-  t.request.price('ETH')
-  t.timeout()
-  t.expect.retryCount(1)   // auto-retried
-})
-
-testBridge(priceBridge, 'circuit breaker opens after failures', (t) => {
-  for (let i = 0; i < 5; i++) {
-    t.request.price('X')
-    t.timeout()
-  }
-  t.expect.circuitOpen(true)
+testFeature(inventory, 'reserve: updates reserved list', async (t) => {
+  t.init()
+  t.send.reserve(['widget'])         // dispatches as normal action
+  await t.settle()
+  t.expect.state(s => s.reserved.includes('widget'))
 })
 ```
+
+For testing `call()` with timeout/retry in isolation — call it in a Deno.test after binding the app:
+
+```ts
+import { call } from 'aio'
+
+Deno.test('call resolves with return value', async () => {
+  await aio.run({ features: [inventory] })
+
+  // Direct call — typed, no strings
+  const stock = await inventory.checkStock('widget')
+  assertEquals(stock, 10)
+
+  // With timeout/retry
+  const result = await call({ timeout: 1000, retries: 2 }, () => inventory.checkStock('widget'))
+  assertEquals(result, 10)
+})
+```
+
+The string form `call('feature', 'method', ...)` was removed in v0.8 — use direct import and calling for type safety.
