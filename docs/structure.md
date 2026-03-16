@@ -291,28 +291,29 @@ Feature-specific scripts live in the feature: `features/dc/scripts/import-histor
 
 ## The `'aio'` import
 
-Everything comes from a single import. In **deno.json**, `"aio"` maps to `./dep/aio/mod.ts` (scaffolded projects) or `@riagentic/aio` (JSR). In the **browser**, it maps to `/__aio/ui.js` (a virtual route). Same import, different runtimes.
+Everything comes from a single import. In **deno.json**, `"aio"` maps to `jsr:@riagentic/aio` (standard) or `./dep/aio/mod.ts` (vendored via scaffolder). In the **browser**, it maps to `/__aio/ui.js` (a virtual route). Same import, different runtimes.
 
 ### Two ways to consume aio
 
-**Vendored (scaffolded projects)** — aio lives inside your project at `dep/aio/`. This is the default when using the scaffolder:
+**JSR (standard)** — `deno add jsr:@riagentic/aio` — recommended for new projects:
 
-- **Readable** — the entire framework is right there in your project. Open any file, read the source
-- **Hackable** — edit the framework source directly. No forking, no waiting for upstream
-- **Portable** — `deno compile` bundles everything. No fetching packages at build time
-- **Full toolchain** — dev server, build system, app manager, all compile targets
+- **Always up to date** — `deno add jsr:@riagentic/aio@^0.9` pins the minor, patches auto
+- **Full toolchain** — dev server, build system, app manager, all compile targets via `jsr:@riagentic/aio/src/am` and `jsr:@riagentic/aio/src/build`
+- **Standard Deno workflow** — no framework files in your repo
 
-To update, replace the `dep/aio/` folder with the new version and check the [upgrade guide](upgrade.md). Your edits (if any) show up as a clean git diff.
+**Vendored (scaffolded projects)** — aio lives inside your project at `dep/aio/`. Available via the scaffolder's one-liner:
 
-**JSR dependency** — `deno add @riagentic/aio` — standard package import. Gives you the library API (feature, flow, call, hooks, types) without the build toolchain.
+- **Hackable** — edit the framework source directly, edits show up as a clean git diff
+- **Air-gapped** — `deno compile` bundles everything with no network access at build time
+
+To update vendored projects, replace the `dep/aio/` folder with the new version and check the [upgrade guide](upgrade.md).
 
 ```ts
 // Server-side (Deno) — full API
-import { aio, feature, bridge, testFeature, schedule, type FeatureDef } from 'aio'
+import { aio, feature, call, testFeature, schedule, type FeatureDef } from 'aio'
 
 // Browser-side (App.tsx) — hooks + helpers
 import { useFeature, useAio, useLocal, page } from 'aio'
-
 ```
 
 Never import from `'../dep/aio/...'` directly — always use `'aio'`. The startup linter will warn you if you forget.
@@ -321,28 +322,28 @@ Never import from `'../dep/aio/...'` directly — always use `'aio'`. The startu
 
 ## File reference
 
-### Framework (`dep/aio/`)
+### Framework (`jsr:@riagentic/aio` / `dep/aio/` when vendored)
 
 | File | Purpose |
 |------|---------|
-| `dep/aio/mod.ts` | Public API — all `'aio'` imports resolve here (Deno-side), type declarations for browser-only functions |
-| `dep/aio/src/aio.ts` | Core runtime — `aio.run()`, dispatch loop, CLI parser, KV path resolution, startup linter |
-| `dep/aio/src/browser.ts` | Browser-side module — `useFeature`, `useAio`, `useLocal`, `feature` (browser stub), `page` |
-| `dep/aio/src/server.ts` | HTTP + WebSocket server, TSX transpilation (dev), static serving (prod), delta broadcasting |
-| `dep/aio/src/build.ts` | Build script — bundles App.tsx + React, compiles binary, AppImage packaging |
-| `dep/aio/src/msg.ts` | Shared `msg()` constructor — used by mod.ts (server) and browser.ts (client) |
-| `dep/aio/src/feature.ts` | Feature system — `feature()`, `composeFeatures()`, `testFeature()` |
-| `dep/aio/src/flow.ts` | Generator runtime — `cancelOn()`, `GenCtx`, flow runner, cancellation |
-| `dep/aio/src/factory.ts` | `actions()` / `effects()` catalog factory — classic mode, generates PascalCase labels + camelCase creators |
-| `dep/aio/src/time-travel.ts` | Time-travel debugger — pure functions for undo/redo/goto, active in dev mode |
-| `dep/aio/src/dispatch.ts` | Shared dispatch loop — re-entrant queue with overflow guard, used by both aio.ts and standalone.ts |
-| `dep/aio/src/deep-merge.ts` | Deep merge utility — restores persisted state while preserving schema structure |
-| `dep/aio/src/skv.ts` | Thin Deno.Kv wrapper — `set`/`get`/`del`/`close` with string keys |
-| `dep/aio/src/standalone.ts` | Standalone runtime — full client-side dispatch loop for Android WebView (replaces browser.ts) |
-| `dep/aio/src/schedule.ts` | Scheduled effects — `schedule.after/every/at/cron/cancel`, cron parser, schedule manager |
-| `dep/aio/src/am.ts` | `am` — app manager CLI. Process lifecycle, state inspection, dispatch, time-travel, log tailing |
-| `dep/aio/src/electron.ts` | Electron launcher + aio-client connect page. Window state persistence, AioMeta extraction |
-| `dep/aio/android-template/` | Kotlin/Gradle template for Android APK builds (placeholder tokens replaced at build time) |
+| `mod.ts` | Public API — all `'aio'` imports resolve here (Deno-side), type declarations for browser-only functions |
+| `src/aio.ts` | Core runtime — `aio.run()`, dispatch loop, CLI parser, KV path resolution, startup linter |
+| `src/browser.ts` | Browser-side module — `useFeature`, `useAio`, `useLocal`, `feature` (browser stub), `page` |
+| `src/server.ts` | HTTP + WebSocket server, TSX transpilation (dev), static serving (prod), delta broadcasting |
+| `src/build.ts` | Build script — bundles App.tsx + React, compiles binary, AppImage packaging |
+| `src/msg.ts` | Shared `msg()` constructor — used by mod.ts (server) and browser.ts (client) |
+| `src/feature.ts` | Feature system — `feature()`, `composeFeatures()`, `testFeature()` |
+| `src/flow.ts` | Generator runtime — `cancelOn()`, `GenCtx`, flow runner, cancellation |
+| `src/factory.ts` | `actions()` / `effects()` catalog factory — classic mode, generates PascalCase labels + camelCase creators |
+| `src/time-travel.ts` | Time-travel debugger — pure functions for undo/redo/goto, active in dev mode |
+| `src/dispatch.ts` | Shared dispatch loop — re-entrant queue with overflow guard, used by both aio.ts and standalone.ts |
+| `src/deep-merge.ts` | Deep merge utility — restores persisted state while preserving schema structure |
+| `src/skv.ts` | Thin Deno.Kv wrapper — `set`/`get`/`del`/`close` with string keys |
+| `src/standalone.ts` | Standalone runtime — full client-side dispatch loop for Android WebView (replaces browser.ts) |
+| `src/schedule.ts` | Scheduled effects — `schedule.after/every/at/cron/cancel`, cron parser, schedule manager |
+| `src/am.ts` | `am` — app manager CLI. Process lifecycle, state inspection, dispatch, time-travel, log tailing |
+| `src/electron.ts` | Electron launcher + aio-client connect page. Window state persistence, AioMeta extraction |
+| `android-template/` | Kotlin/Gradle template for Android APK builds (placeholder tokens replaced at build time) |
 
 ### App (`src/`) — v0.5 feature-first
 

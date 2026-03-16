@@ -32,7 +32,7 @@ function factory(first: unknown, second?: unknown): unknown {
   const result: Record<string, unknown> = {}
   for (const key of Object.keys(creators)) {
     result[key] = `${prefix}${key}`
-    result[lowerFirst(key)] = (...args: unknown[]) => ({ type: `${prefix}${key}`, payload: creators[key](...args) ?? {} })
+    result[lowerFirst(key)] = (...args: unknown[]) => ({ type: `${prefix}${key}`, payload: creators[key]!(...args) ?? {} })
   }
   return result
 }

@@ -24,8 +24,11 @@ export type LogConfig = {
   heartbeat?: number
   /** Action types to suppress entirely — even from debug.log */
   suppressTypes?: string[]
-  /** Log rotation */
-  rotate?: { maxMb?: number; keep?: number }
+  /**
+   * Log rotation on (re)start: existing logs renamed to debug.log.1, debug.log.2, etc.
+   * `keep` controls how many archived logs are retained (default: 7, 0 = unlimited).
+   */
+  rotate?: { keep?: number }
 }
 
 type LogEntry = {
@@ -33,6 +36,7 @@ type LogEntry = {
   lvl: LogLevel
   cat: string
   msg: string
+  src?: string
   data?: Record<string, unknown>
   dur?: number
 }
@@ -45,6 +49,30 @@ const SKIP_CONTAINS = [':__set']
 
 // Flow steps — debug.log only (not app.log)
 const FLOW_STEP_RE = /:Flow:(?!Done|Failed|Error)/
+
+// ── Public singleton ──────────────────────────────────────────────────
+
+let _active: AioLogger | null = null
+
+/** Wire the framework logger instance into the public singleton */
+export function setLogger(l: AioLogger | null): void { _active = l }
+
+/** Public log API — no-ops when logging is not configured in aio.run() */
+export interface Log {
+  trace(cat: string, msg: string, data?: Record<string, unknown>): void
+  debug(cat: string, msg: string, data?: Record<string, unknown>): void
+  info (cat: string, msg: string, data?: Record<string, unknown>): void
+  warn (cat: string, msg: string, data?: Record<string, unknown>): void
+  error(cat: string, msg: string, data?: Record<string, unknown>): void
+}
+
+export const log: Log = {
+  trace(cat: string, msg: string, data?: Record<string, unknown>): void { _active?.pub('trace', cat, msg, data) },
+  debug(cat: string, msg: string, data?: Record<string, unknown>): void { _active?.pub('debug', cat, msg, data) },
+  info (cat: string, msg: string, data?: Record<string, unknown>): void { _active?.pub('info',  cat, msg, data) },
+  warn (cat: string, msg: string, data?: Record<string, unknown>): void { _active?.pub('warn',  cat, msg, data) },
+  error(cat: string, msg: string, data?: Record<string, unknown>): void { _active?.pub('error', cat, msg, data) },
+}
 
 export class AioLogger {
   private cfg: Required<LogConfig>
@@ -69,7 +97,7 @@ export class AioLogger {
       console:   config.console   ?? isDevMode(),
       heartbeat: config.heartbeat ?? 3600,
       suppressTypes: config.suppressTypes ?? [],
-      rotate:    { maxMb: config.rotate?.maxMb ?? 50, keep: config.rotate?.keep ?? 7 },
+      rotate:    { keep: config.rotate?.keep ?? 7 },
     }
     this.dir      = this.cfg.dir
     this.appName  = config.appName ?? 'app'
@@ -78,12 +106,36 @@ export class AioLogger {
   async init(): Promise<void> {
     try {
       await Deno.mkdir(this.dir, { recursive: true })
+      await this.rotateOnStart()
       this.ready = true
       if (this.cfg.heartbeat > 0) {
         this.heartbeatTimer = setInterval(() => this.heartbeat(), this.cfg.heartbeat * 1000)
       }
     } catch (e) {
       console.error(`[logger] cannot create ${this.dir}: ${e}`)
+    }
+  }
+
+  private async rotateOnStart(): Promise<void> {
+    const keep = this.cfg.rotate.keep ?? 7
+    for (const kind of ['app', 'debug', 'errors'] as const) {
+      const base = this.path(kind)
+      try { await Deno.stat(base) } catch { continue }  // file absent — nothing to rotate
+
+      // find next available suffix (.1, .2, ...)
+      let n = 1
+      while (true) {
+        try { await Deno.stat(`${base}.${n}`); n++ } catch { break }
+      }
+
+      try { await Deno.rename(base, `${base}.${n}`) } catch { /* best-effort */ }
+
+      // prune archives older than `keep` (0 = unlimited)
+      if (keep > 0) {
+        for (let i = n - keep; i >= 1; i--) {
+          try { await Deno.remove(`${base}.${i}`) } catch { /* already gone */ }
+        }
+      }
     }
   }
 
@@ -179,6 +231,14 @@ export class AioLogger {
     this.checkTransitions(state)
   }
 
+  // ── Public write API ──────────────────────────────────────────────
+
+  pub(lvl: LogLevel, cat: string, msg: string, data?: Record<string, unknown>): void {
+    const src = callerFile()
+    if (lvl === 'trace' || lvl === 'debug') this.dbg(cat, msg, data ?? null, src)
+    else this.app(lvl, cat, msg, data ?? null, undefined, src)
+  }
+
   // ── Private ───────────────────────────────────────────────────────
 
   private checkTransitions(state: Record<string, unknown>): void {
@@ -234,16 +294,17 @@ export class AioLogger {
 
   // ── Write helpers ─────────────────────────────────────────────────
 
-  private app(lvl: LogLevel, cat: string, msg: string, data?: Record<string, unknown> | null, dur?: number): void {
-    const e: LogEntry = { ts: now(), lvl, cat, msg, ...(data ? { data } : {}), ...(dur !== undefined ? { dur } : {}) }
-    this.write(this.path('app'), e)
-    if (lvl === 'error' || lvl === 'warn') this.write(this.path('errors'), e)
-    if (this.cfg.console) printConsole(e)
+  private app(lvl: LogLevel, cat: string, msg: string, data?: Record<string, unknown> | null, dur?: number, src?: string): void {
+    const e: LogEntry = { ts: now(), lvl, cat, msg, ...(src ? { src } : {}), ...(data ? { data } : {}), ...(dur !== undefined ? { dur } : {}) }
+    if (lvl === 'info' || lvl === 'error') this.write(this.path('app'), e)
+    if (lvl === 'error')                   this.write(this.path('errors'), e)
+    if (lvl === 'warn')                    this.write(this.path('debug'), e)
+    if (this.cfg.console && (lvl === 'info' || lvl === 'error')) printConsole(e)
   }
 
-  private dbg(cat: string, msg: string, data?: Record<string, unknown> | null): void {
+  private dbg(cat: string, msg: string, data?: Record<string, unknown> | null, src?: string): void {
     if (LEVELS[this.cfg.level] > LEVELS.debug) return
-    this.write(this.path('debug'), { ts: now(), lvl: 'debug', cat, msg, ...(data ? { data } : {}) })
+    this.write(this.path('debug'), { ts: now(), lvl: 'debug', cat, msg, ...(src ? { src } : {}), ...(data ? { data } : {}) })
   }
 
   private err(cat: string, msg: string, data?: Record<string, unknown> | null): void {
@@ -268,6 +329,15 @@ type ErrorEntry = { count: number; first: number; last: number; suppressed: bool
 
 // ── Helpers ───────────────────────────────────────────────────────────
 
+function callerFile(): string | undefined {
+  const frames = new Error().stack?.split('\n') ?? []
+  for (const f of frames) {
+    if (f.includes('logger.ts')) continue
+    const m = f.match(/[/\\]([\w.-]+\.ts):(\d+):\d+/)
+    if (m) return `${m[1]}:${m[2]}`
+  }
+}
+
 function now(): string {
   return new Date().toISOString().replace('T', ' ').slice(0, 23)
 }
@@ -284,7 +354,7 @@ function fmtUptime(ms: number): string {
 
 function stripFlowPrefix(type: string): string {
   const m = type.match(/:Flow:(.+)$/)
-  return m ? m[1] : type
+  return m ? m[1] ?? type : type
 }
 
 function filterInternal(p: Record<string, unknown>): Record<string, unknown> | null {

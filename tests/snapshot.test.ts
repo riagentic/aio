@@ -218,7 +218,7 @@ Deno.test('snapshot HTTP: clients receive broadcast after POST', async () => {
     await resp.body?.cancel()
 
     await waitFor(() => msgs.length >= 2)
-    const update = JSON.parse(msgs[msgs.length - 1])
+    const update = JSON.parse(msgs[msgs.length - 1]!)
     // Could be full or delta depending on change ratio
     const count = update.$p ? update.$p.count : update.count
     assertEquals(count, 77)

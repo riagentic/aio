@@ -76,6 +76,7 @@ All exports are one import: `import { feature, call, aio } from 'aio'`
 | `ScheduleEffect` | `{ _schedule: true, key, type, ... }` returned from sync methods |
 | `TestContext` | Test harness — `{ dispatch, getState, expect, settle }` |
 | `LogConfig` | `{ level?, dir?, console?, heartbeat?, suppressTypes?, rotate? }` |
+| `LogLevel` | `'trace' \| 'debug' \| 'info' \| 'warn' \| 'error'` |
 
 ---
 
@@ -119,12 +120,27 @@ All exports are one import: `import { feature, call, aio } from 'aio'`
 
 | API | Description |
 |-----|-------------|
-| `table(name, columns)` | Define a SQLite table — `table('users', { id: pk(), name: text() })` |
+| `createDB(path, opts?)` | Create async Worker-based DB — `opts: { readonly?, pragmas?, readers? }` |
+| `DEFAULT_PRAGMAS` | Default pragma set applied by `createDB` |
+| `table(columns)` | Define a SQLite table — `table({ id: pk(), name: text() })` |
 | `pk()` | Primary key column — `id: pk()` |
 | `text()` | Text column — `name: text()` |
 | `integer()` | Integer column — `age: integer()` |
 | `real()` | Float column — `price: real()` |
 | `ref(table)` | Foreign key reference — `userId: ref('users')` |
+
+### `DB` interface
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `query<T>(sql, params?)` | `Promise<QueryResult<T>>` | SELECT — rows in `.rows` |
+| `execute(sql, params?)` | `Promise<QueryResult>` | INSERT/UPDATE/DELETE — changes in `.changes` |
+| `transaction(stmts[])` | `Promise<QueryResult[]>` | Atomic multi-statement batch |
+| `close()` | `Promise<void>` | Close all worker connections |
+
+`QueryResult<T>` = `{ rows: T[], changes: number, lastInsertRowId: bigint }`
+
+`app.db` is `DB | undefined` — `undefined` in standalone/Android mode.
 
 ---
 
@@ -145,6 +161,20 @@ All exports are one import: `import { feature, call, aio } from 'aio'`
 | `persist: { exclude: [...] }` | Per-feature persistence exclusion |
 | `stateForDB: (state) => partial` | Transform state before persist (app-level) |
 | `stateForUI: (state, user?) => partial` | Transform state before sending to UI (per-client filtering) |
+
+---
+
+## UI Config (`aio.run({ ui })`)
+
+| Config | Description |
+|--------|-------------|
+| `ui.syncRate` | Throttle UI updates: max 1 push per N ms — default `10` (100fps). `0` = microtask-only coalescing (unbounded). Leading edge fires immediately; trailing flush ensures last state always arrives within N ms. |
+| `ui.electron` | Open Electron window (default: `true`) |
+| `ui.keepAlive` | Keep server running after Electron closes (default: `false`) |
+| `ui.title` | Window title (default: `'AIO App'`) |
+| `ui.width` / `ui.height` | Window dimensions (default: `800` / `600`) |
+| `ui.showStatus` | Show reconnection indicator (default: `true`) |
+| `ui.transport` | `'uds' \| 'ws' \| 'auto'` — IPC transport (default: `'auto'`) |
 
 ---
 
@@ -185,15 +215,64 @@ All exports are one import: `import { feature, call, aio } from 'aio'`
 
 ## Logging
 
+### Configuration — `aio.run({ logging })`
+
 | Config | Description |
 |--------|-------------|
 | `logging: true` | Enable structured logging with defaults |
-| `logging.level` | Minimum level: 'trace' \| 'debug' \| 'info' \| 'warn' \| 'error' |
-| `logging.dir` | Log directory (default: './logs') |
-| `logging.console` | Pretty console output in dev |
-| `logging.heartbeat` | Heartbeat interval in seconds (default: 3600) |
+| `logging.level` | Minimum level written to `debug.log` (default: `'debug'`) |
+| `logging.dir` | Log directory (default: `'./logs'`) |
+| `logging.console` | Pretty console output in dev (default: auto-detected) |
+| `logging.heartbeat` | Heartbeat interval in seconds — 0 to disable (default: 3600) |
 | `logging.suppressTypes` | Action types to exclude from all logs |
-| `logging.rotate` | `{ maxMb?: number, keep?: number }` rotation settings |
+| `logging.rotate` | `{ keep?: number }` — archived logs to keep per file (default: 7, 0 = unlimited) |
+
+### Public singleton — `log`
+
+```ts
+import { log } from 'aio'
+
+log.info('payments', 'charge processed', { amount: 99 })
+log.warn('auth', 'token expiring', { userId: 'u_123' })
+log.error('db', 'connection lost', { error: 'ECONNREFUSED' })
+log.debug('cache', 'miss', { key: 'user:42' })
+log.trace('store', 'action dispatched')
+```
+
+All methods: `log.trace(cat, msg, data?)` / `log.debug` / `log.info` / `log.warn` / `log.error`.
+No-ops silently when `logging` is not configured in `aio.run()`.
+
+### Log outputs
+
+| File | Content |
+|------|---------|
+| `logs/app.log` | Narrative: feature lifecycle, flow completions, state transitions, errors |
+| `logs/debug.log` | All dispatched actions + `trace`/`debug` from `log.*` calls |
+| `logs/errors.log` | Warn and error entries only — for ops/alerting |
+
+### JSON entry format
+
+```json
+{
+  "ts":   "2026-03-15 14:23:01.456",
+  "lvl":  "info",
+  "cat":  "payments",
+  "msg":  "charge processed",
+  "src":  "payments-effect.ts:42",
+  "data": { "amount": 99 },
+  "dur":  145
+}
+```
+
+| Field | Description |
+|-------|-------------|
+| `ts` | Timestamp — `YYYY-MM-DD HH:mm:ss.SSS` |
+| `lvl` | Severity level |
+| `cat` | Category — feature name, flow name, or any string |
+| `msg` | Human-readable message |
+| `src` | Source file and line — auto-detected from call stack (e.g. `payments-effect.ts:42`) |
+| `data` | Optional payload — omitted if empty |
+| `dur` | Optional duration in ms — present on flow completions |
 
 ---
 

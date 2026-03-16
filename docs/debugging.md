@@ -17,6 +17,7 @@ When something goes wrong, the first step is identifying *which layer* produced 
 | `machine guard: dropped X in state Y` | State machine | check machine transitions |
 | `WebSocket` / `WS` | Transport | network, server restart, auth |
 | `Build Error` (browser overlay) | Transpilation | syntax error in .tsx/.ts file |
+| `Runtime Error` (browser overlay) | JS runtime | bad import, null access, top-level throw |
 
 ### Action type prefix tells you the feature
 
@@ -120,15 +121,36 @@ The `initial` value in your machine config doesn't match any key in `states`. Ch
 
 ### Build errors in browser
 
-The error overlay shows the exact file and line:
+A **Build Error** is a TypeScript/transpile failure caught by esbuild before the code runs. The overlay shows the exact file, line, column, and the offending source line with a `^` caret:
 
 ```
-Build Error
-App.tsx: Error: Transform failed with 1 error
-<stdin>:5:0: ERROR: Unexpected "}"
+⚠ Build Error
+
+App.tsx:15:8
+Unexpected token ")"
+
+ 15 |   return (<div onClick={handleClick)}>
+                                         ^
 ```
 
-Fix the syntax error in your editor, save — live reload picks it up automatically.
+Fix the syntax error in your editor and save — live reload picks it up automatically.
+
+### Runtime errors in browser
+
+A **Runtime Error** is a JavaScript crash that occurs after successful transpilation — wrong import name, `null.x`, a top-level `throw`, or a React render exception. Previously these showed a blank page; now the overlay displays the full stack trace:
+
+```
+⚠ Runtime Error
+
+TypeError: Cannot read properties of null (reading 'map')
+  at App (App.tsx:23:18)
+  at renderWithHooks (react-dom.development.js:...)
+  ...
+```
+
+The error is also POSTed to `/__aio/client-error` and written to `debug.log` (visible via `am errors`), which is especially useful in Electron where DevTools isn't open by default.
+
+**Both error types** also log to the DevTools console via `console.error` so the full trace is always available with F12.
 
 ### Actions dropped while disconnected
 

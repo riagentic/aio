@@ -1,13 +1,14 @@
 {
   "name": "@riagentic/aio",
-  "version": "0.8.4",
+  "version": "0.9.0",
   "exports": "./mod.ts",
   "publish": {
-    "exclude": ["tests/", "examples/", "docs/", "scripts/", "utils/", "android-template/", "CHANGELOG.md", "init.*"]
+    "exclude": ["tests/", "examples/", "docs/", "scripts/", "utils/", "CHANGELOG.md", "init.*", ".claude/", "*.md", "!README.md"]
   },
   "unstable": ["kv"],
   "compilerOptions": {
     "strict": true,
+    "noUncheckedIndexedAccess": true,
     "jsx": "react-jsx",
     "jsxImportSource": "react",
     "jsxImportSourceTypes": "@types/react"

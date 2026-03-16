@@ -1,5 +1,69 @@
 # Changelog
 
+## v0.9.1
+
+**Rich error overlay — Build Error and Runtime Error**
+- **Build Error** now shows file path, line:col, the source line, and a `^` caret at the exact column (structured esbuild data via `/__aio/error` JSON endpoint)
+- **Runtime Error** — new category for JS crashes after transpilation (wrong import, `null.x`, top-level throw, React render throw); previously showed a blank "Build Error" with no info
+- Both error types always `console.error` to DevTools so the full trace appears in F12 even when the overlay is visible
+- Runtime errors POST to `/__aio/client-error` → written to `debug.log` and surfaced by `am errors`; critical for Electron where DevTools isn't open by default
+
+**Live reload — always-active dev WebSocket**
+- Dev HTML page now establishes a `_devWs` connection before the app boots, independent of `useAio`
+- Previously, live reload only worked when the app used `useAio`/`useFeature`; plain React apps or apps that crashed before first render got no reload
+- `_devWs` handles `__reload`, `__css` (hot-swap stylesheet), and `__boot:` (reload on server restart)
+- Apps using `useAio` have two WS connections in dev mode — the page-level reload WS and the state-sync WS; both are lightweight and dev-only
+
+---
+
+## v0.9.0
+
+**UI sync rate throttling**
+- `ui.syncRate?: number` — cap UI push rate to 1 update per N ms (default: `10` = 100fps)
+- Leading edge fires immediately (via microtask coalesce); trailing flush guarantees last state arrives within N ms
+- Prevents React re-render floods from high-frequency dispatch (timers, generators, reactive chains)
+- Applies to both WebSocket and UDS (Electron IPC) transports
+- `syncRate: 0` = microtask-only coalescing (old behavior, unbounded)
+
+**Async Worker-based SQLite — replaces sync ORM**
+- `AioDB` / `AioTable<T>` removed — replaced by `DB` interface with fully async methods
+- `openDb()` / `loadTables()` / `syncTables()` / `reloadTable()` removed from public API (now private internals)
+- `createDB(path, opts?)` — new factory for standalone DB access; `opts: { readonly?, pragmas?, readers? }`
+- `DEFAULT_PRAGMAS` exported — the default pragma set applied by `createDB`
+- `DB.query<T>(sql, params?)` → `Promise<QueryResult<T>>` — SELECT, rows in `.rows`
+- `DB.execute(sql, params?)` → `Promise<QueryResult>` — INSERT/UPDATE/DELETE, changes in `.changes`
+- `DB.transaction(stmts[])` → `Promise<QueryResult[]>` — atomic multi-statement batch
+- `DB.close()` → `Promise<void>`
+- `QueryResult<T>` = `{ rows: T[], changes: number, lastInsertRowId: bigint }` (`lastInsertRowId` is now `bigint`, was `number`)
+- `readers?: number` on `createDB` opts — N readonly Workers for parallel reads; `query()` round-robins, `execute()`/`transaction()` go to writer
+- `app.db` type changed from `AioDB | undefined` to `DB | undefined` — all `app.db` calls now need `await`
+- Permissions: `--allow-read --allow-write` only — `--allow-ffi` no longer required
+- All SQLite docs consolidated in [sqldb.md](./sqldb.md)
+
+**Log rotation on (re)start**
+- Each app start renames existing logs: `debug.log` → `debug.log.1`, `debug.log.1` → `debug.log.2`, etc.
+- `rotate.keep` controls how many archives to retain per file (default: 7, 0 = unlimited)
+- `rotate.maxMb` removed — startup rotation replaces size-based rotation
+- Fresh log files created automatically after rotation
+
+**`log` — public logging singleton**
+- `import { log } from 'aio'` — usable from any feature or effect file
+- `log.info / warn / error` → `app.log` (+ `errors.log` for warn/error); `log.debug / trace` → `debug.log`
+- Each entry includes `src: "filename.ts:line"` — auto-detected from call stack, no manual tagging needed
+- Silent no-op when `logging` is not configured in `aio.run()` — safe to use unconditionally
+- Browser-side `log` is a no-op stub (server-only writes)
+- `LogLevel` type exported from public API
+
+**Scaffolder**
+- Generated projects use `jsr:@riagentic/aio` — no longer downloads framework source
+- `init.sh` passes `--reload` to bust stale Deno caches on fresh install
+- `test` task added to generated `deno.json`
+
+**Type system**
+- `noUncheckedIndexedAccess` enabled — indexed access now returns `T | undefined` throughout
+
+---
+
 ## v0.8.0
 
 **Unified API — `feature({ methods })` is the default**

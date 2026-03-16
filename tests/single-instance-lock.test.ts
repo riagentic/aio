@@ -160,9 +160,9 @@ Deno.test('instances: finds running app', async () => {
     lock.update({ status: 'started' })
     const all = instances(TEST_APP)
     assertEquals(all.length, 1)
-    assertEquals(all[0].appId, TEST_APP)
-    assertEquals(all[0].pid, Deno.pid)
-    assertEquals(all[0].alive, true)
+    assertEquals(all[0]!.appId, TEST_APP)
+    assertEquals(all[0]!.pid, Deno.pid)
+    assertEquals(all[0]!.alive, true)
   } finally {
     lock.release()
     await cleanup()

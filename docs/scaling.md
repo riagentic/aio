@@ -39,12 +39,12 @@ type State = { page: string; currentOrders: Order[]; filters: Filters }
 
 // In an execute handler: query only what's needed
 execute: {
-  loadOrders(app, payload) {
-    const orders = app.db!.orders.where({
-      status: 'active',
-      total: { gt: payload.minTotal },
-    })
-    app.dispatch(myFeature.A.ordersLoaded(orders))  // small, filtered result
+  async loadOrders(app, payload) {
+    const { rows } = await app.db!.query<Order>(
+      'SELECT * FROM orders WHERE status = ? AND total > ? ORDER BY created_at DESC LIMIT 100',
+      ['active', payload.minTotal]
+    )
+    app.dispatch(myFeature.A.ordersLoaded(rows))  // small, filtered result
   },
 },
 ```
@@ -64,25 +64,29 @@ stateForUI: (state, user?) => {
 }
 ```
 
-**3. Use Level 2/3 for heavy lifting**
+**3. Use direct async SQL for heavy lifting**
 
-Don't route large data operations through the reducer. Use ORM methods or raw SQL in effects — they write directly to SQLite without touching state or broadcast.
+Don't route large data operations through the reducer. Use `app.db` methods in effects — they write directly to SQLite without touching state or broadcast.
 
 ```ts
 execute: {
   // Batch import: 10k rows directly to SQLite, no state churn
-  importCSV(app, payload) {
-    app.db!.orders.insertMany(payload.parsedRows)
+  async importCSV(app, payload) {
+    for (const batch of chunks(payload.parsedRows, 500)) {
+      const params = batch.flatMap(r => [r.id, r.customer, r.total])
+      const placeholders = batch.map(() => '(?,?,?)').join(',')
+      await app.db!.execute(`INSERT INTO orders(id,customer,total) VALUES ${placeholders}`, params)
+    }
     app.dispatch(myFeature.A.importDone(payload.parsedRows.length))
   },
 
   // Aggregation: compute on SQLite, send result to state
-  dashboardStats(app) {
-    const stats = app.db!.query<{ total: number; count: number }>(
+  async dashboardStats(app) {
+    const { rows } = await app.db!.query<{ total: number; count: number }>(
       'SELECT SUM(total) as total, COUNT(*) as count FROM orders WHERE status = ?',
       ['active']
     )
-    app.dispatch(myFeature.A.statsLoaded(stats[0]))
+    app.dispatch(myFeature.A.statsLoaded(rows[0]))
   },
 },
 ```
@@ -94,9 +98,11 @@ If your app processes rapid events (sensors, live data), batch them before dispa
 ```ts
 execute: {
   // In execute handler: accumulate, then dispatch once
-  sensorBatch(app, payload) {
+  async sensorBatch(app, payload) {
     const readings = collectReadings(payload.buffer)
-    app.db!.readings.insertMany(readings)  // bulk write to SQLite
+    const params = readings.flatMap(r => [r.ts, r.value])
+    const placeholders = readings.map(() => '(?,?)').join(',')
+    await app.db!.execute(`INSERT INTO readings(ts,value) VALUES ${placeholders}`, params)
     app.dispatch(sensors.A.readingsUpdated(readings.length))  // one broadcast
   },
 },

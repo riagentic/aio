@@ -23,8 +23,8 @@ async function main(): Promise<void> {
     const content = await Deno.readTextFile(path)
     const lines = content.split('\n')
     for (let i = 0; i < lines.length; i++) {
-      for (const match of lines[i].matchAll(VERSION_RE)) {
-        const v = match[1]
+      for (const match of lines[i]!.matchAll(VERSION_RE)) {
+        const v = match[1]!
         const loc = `${label}:${i + 1}`
         if (!seen.has(v)) seen.set(v, [])
         seen.get(v)!.push(loc)

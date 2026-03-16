@@ -29,7 +29,7 @@ Build targets follow `compile:<shell>:<topology>` — two axes: **shell** (what 
 Aliases: compile = compile:browser
 ```
 
-**v0.2:** all 10 targets implemented · **v0.3:** perf budgets, Redux DevTools, incremental SQLite, selectors · **v0.4:** auto-HTTPS, `am watch`, ORM extensions, `persistMode:'multi'`
+All 10 targets ship in a single binary. See [changelog.md](changelog.md) for version history.
 
 ## Dev mode
 
@@ -37,7 +37,7 @@ Aliases: compile = compile:browser
 deno task dev
 ```
 
-Live-transpiles `.ts`/`.tsx` via esbuild on each request. React loaded from CDN via import map. File watcher auto-reloads the browser on save. Error overlay shows transpile errors. Opens Electron or browser.
+Live-transpiles `.ts`/`.tsx` via esbuild on each request. React loaded from CDN via import map. File watcher auto-reloads the browser on save (works even without `useAio`). Error overlay shows **Build Error** (transpile, with file/line/col + caret) or **Runtime Error** (JS crash, with stack trace). Opens Electron or browser.
 
 ## compile:browser (standalone binary)
 
@@ -52,8 +52,8 @@ The binary name comes from deno.json `"title"` (lowercased, spaces→hyphens). O
 ```sh
 ./my-app                       # binary name derived from title "My App"
 ./my-app --port=3000           # custom port
-deno run -A dep/aio/src/build.ts --compile --name=custom   # override
-deno run -A dep/aio/src/build.ts --compile --force          # skip cache, rebuild from scratch
+deno run -A jsr:@riagentic/aio@^0.9/src/build --compile --name=custom   # override
+deno run -A jsr:@riagentic/aio@^0.9/src/build --compile --force          # skip cache, rebuild from scratch
 ```
 
 **Build flags:**
@@ -234,7 +234,7 @@ Bundles your app into a standalone Android APK that runs entirely in a WebView �
 
 ```sh
 deno task compile:android                  # debug APK
-deno run -A dep/aio/src/build.ts --android --release  # release APK (needs signing config)
+deno run -A jsr:@riagentic/aio@^0.9/src/build --android --release  # release APK (needs signing config)
 ```
 
 **Same src/ code for both platforms.** Your `state.ts`, `actions.ts`, `reduce.ts`, `execute.ts`, and `App.tsx` work identically on desktop and Android. The only difference: effects using Deno APIs (file system, network server, etc.) will fail in standalone mode. Use `app.mode === 'standalone'` to branch:

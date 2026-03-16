@@ -164,10 +164,10 @@ function* sendGen(creatorOrType: { type: string } | string, payload?: unknown): 
 
 function* namedAllGen<T extends Record<string, Gen<unknown>>>(entries: T): Gen<{ [K in keyof T]: T[K] extends Gen<infer R> ? R : never }> {
   const keys = Object.keys(entries)
-  const gens = keys.map(k => entries[k])
+  const gens = keys.map(k => entries[k]!)
   const results = (yield* (allGen as (...g: Gen<unknown>[]) => Gen<unknown[]>)(...gens)) as unknown[]
   const out: Record<string, unknown> = {}
-  for (let i = 0; i < keys.length; i++) out[keys[i]] = results[i]
+  for (let i = 0; i < keys.length; i++) out[keys[i]!] = results[i]
   return out as { [K in keyof T]: T[K] extends Gen<infer R> ? R : never }
 }
 

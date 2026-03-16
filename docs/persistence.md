@@ -73,7 +73,9 @@ await aio.run({
 
 ## SQLite persistence
 
-For structured data (orders, products, users), aio supports SQLite alongside Deno.Kv. KV handles scalar UI state (page, flags, counters). SQLite handles arrays of records — queryable, indexed, relational. Three levels of access:
+For structured data (orders, products, users), aio supports SQLite alongside Deno.Kv. KV handles scalar UI state (page, flags, counters). SQLite handles arrays of records — queryable, indexed, relational.
+
+For the full SQLite reference, see [sqldb.md](./sqldb.md).
 
 ### Table definition
 
@@ -137,90 +139,52 @@ reduce: {
 
 On startup, SQLite data populates state arrays. After each reduce, changed arrays sync back. Reference equality (`!==`) determines which tables need writing — Immer guarantees new refs on mutation.
 
-### Level 2 — ORM methods (typed CRUD)
+### Level 2 — Direct async SQL
 
-For effects that need direct data access. Available on `app.db!.<tableName>`:
-
-```ts
-execute: {
-  loadExpensiveOrders(app) {
-    const expensive = app.db!.orders.where({ total: { gt: 1000 } })
-    app.dispatch(myFeature.A.ordersFiltered(expensive))
-  },
-},
-```
-
-Methods:
-
-| Method | Returns | Description |
-|--------|---------|-------------|
-| `.all(opts?)` | `T[]` | All rows |
-| `.find(id)` | `T \| undefined` | By primary key |
-| `.where(filter, opts?)` | `T[]` | AND-filtered rows |
-| `.whereOr(filters)` | `T[]` | OR-filtered rows — array of clauses |
-| `.insert(row)` | `{ lastInsertRowId }` | Insert one |
-| `.insertMany(rows)` | `void` | Insert many (transaction) |
-| `.upsert(row)` | `{ lastInsertRowId, changes }` | Insert or replace (by PK) |
-| `.update(where, set)` | `{ changes }` | Update matching |
-| `.delete(where)` | `{ changes }` | Delete matching |
-| `.count(where?)` | `number` | Count rows |
-
-Where filter supports equality (`{ field: value }`) and operators: `{ field: { gt, gte, lt, lte, ne, like, in } }`.
-
-> **Note:** The operator form is detected by key shape — a value object whose keys are only `gt/gte/lt/lte/ne/like/in` will be treated as an operator, not a plain value. Avoid using those words as column names in your schema.
-
-`all()` and `where()` accept an optional `QueryOpts` second argument: `{ orderBy: 'field' | ['field', 'asc'|'desc'], limit: number, offset: number }`.
-
-```ts
-// Paginated query, sorted descending
-const page1 = app.db!.orders.where(
-  { status: 'open' },
-  { orderBy: ['total', 'desc'], limit: 20, offset: 0 }
-)
-
-// OR filter — match either clause
-const results = app.db!.items.whereOr([{ status: 'active' }, { priority: 'high' }])
-
-// Upsert — insert if new, replace if PK already exists
-app.db!.settings.upsert({ id: 1, theme: 'dark' })
-```
-
-**Note**: Level 2 methods write directly to SQLite, bypassing the reducer. Use for effects like batch imports or external data loading — not for normal user-driven state changes.
-
-### Level 3 — Raw SQL
-
-For aggregation, joins, complex queries:
+For effects that need queries beyond what state arrays provide — aggregations, joins, filtered reads, writes that bypass the reducer:
 
 ```ts
 execute: {
-  revenueReport(app) {
-    const stats = app.db!.query<{ customer: string; revenue: number }>(
-      'SELECT customer, SUM(total) as revenue FROM orders GROUP BY customer'
+  async revenueReport(app) {
+    const { rows } = await app.db!.query<{ customer: string; revenue: number }>(
+      'SELECT customer, SUM(total) as revenue FROM orders GROUP BY customer ORDER BY revenue DESC'
     )
-    app.dispatch(myFeature.A.reportLoaded(stats))
+    app.dispatch(myFeature.A.reportLoaded(rows))
+  },
+
+  async archiveOld(app) {
+    await app.db!.execute(
+      'DELETE FROM orders WHERE status = ? AND created_at < ?',
+      ['closed', Date.now() - 30 * 86400_000]
+    )
+  },
+
+  async transferFunds(app, payload: { from: number; to: number; amount: number }) {
+    await app.db!.transaction([
+      { sql: 'UPDATE accounts SET balance = balance - ? WHERE id = ?', params: [payload.amount, payload.from] },
+      { sql: 'UPDATE accounts SET balance = balance + ? WHERE id = ?', params: [payload.amount, payload.to] },
+    ])
   },
 },
 ```
 
-Raw methods:
-
 | Method | Returns | Description |
 |--------|---------|-------------|
-| `.query<T>(sql, params?)` | `T[]` | SELECT rows |
-| `.get<T>(sql, params?)` | `T \| undefined` | Single row |
-| `.run(sql, params?)` | `{ changes, lastInsertRowId }` | INSERT/UPDATE/DELETE |
-| `.exec(sql)` | `void` | DDL statements |
-| `.transaction(fn)` | `R` | Wraps `fn(db)` in BEGIN/COMMIT (ROLLBACK on error) |
+| `query<T>(sql, params?)` | `Promise<QueryResult<T>>` | SELECT — rows in `.rows` |
+| `execute(sql, params?)` | `Promise<QueryResult>` | INSERT/UPDATE/DELETE — changes in `.changes` |
+| `transaction(stmts)` | `Promise<QueryResult[]>` | Atomic multi-statement batch |
+
+`app.db` is `undefined` in standalone/Android mode — guard with `app.db!` or check `app.db != null`.
 
 ### How it works
 
-- **Startup**: Opens SQLite at `./data.db` (dev) or `~/.local/share/<app>/data.db` (compiled). Creates tables with `IF NOT EXISTS`. Loads rows into state arrays
+- **Startup**: Opens SQLite at `./data/<appId>.db` (dev) or `~/.local/share/<appId>/data.db` (compiled). Creates tables with `IF NOT EXISTS`. Loads rows into state arrays
 - **After reduce**: Changed arrays sync to SQLite (debounced, same timer as KV). Unchanged arrays (same ref) are skipped
 - **Incremental sync**: Tables with primary keys use row-level INSERT/UPDATE/DELETE for efficiency. Tables without PK fall back to full table replacement
 - **KV stripping**: Arrays managed by `db:` are auto-excluded from KV persistence — no double-storing
 - **Shutdown**: Pending sync flushed, SQLite closed, then KV closed
 - **WAL mode + foreign keys**: Enabled by default for performance and referential integrity
-- **No migrations**: `CREATE TABLE IF NOT EXISTS` handles setup. Use `app.db!.exec('ALTER TABLE ...')` in `onStart` for schema changes
+- **No migrations**: `CREATE TABLE IF NOT EXISTS` handles setup. Use `app.db!.execute('ALTER TABLE ...')` in `onStart` for schema changes
 - **Standalone/Android**: `app.db` is `undefined` — SQLite is server-only
 
 ### Incremental sync

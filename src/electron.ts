@@ -553,7 +553,7 @@ export async function findElectronBin(log: Log): Promise<string | null> {
     ? 'node_modules\\.bin\\electron.cmd'
     : 'node_modules/.bin/electron'
   try { await Deno.stat(electronBin); return electronBin }
-  catch { log.error('Electron not found — install: deno add npm:electron && deno approve-scripts npm:electron') }
+  catch { log.error('Electron not found — run: deno task install:electron') }
 
   return null
 }

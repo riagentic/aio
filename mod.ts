@@ -2,6 +2,7 @@
  * @module
  * Full-stack Deno framework — one state, propagated everywhere.
  *
+ * v0.9: async Worker-based SQLite, `log` public singleton, scaffolder via JSR.
  * v0.8: unified feature API, typed generators, no raw strings anywhere.
  * Use `feature({ methods })` for reactive style (default),
  * `feature({ generators })` for sequential workflows,
@@ -44,7 +45,8 @@ export { aio, VERSION, parseCli, lint } from './src/aio.ts'
 import type { AioApp } from './src/aio.ts'
 export type { AioApp }
 export type { FeaturesConfig, UiConfig, Lint, CliFlags, AioUser, AioError, PerfMode, PerfBudget } from './src/aio.ts'
-export type { LogConfig } from './src/logger.ts'
+export { log } from './src/logger.ts'
+export type { Log, LogConfig, LogLevel } from './src/logger.ts'
 export type { AioMeta } from './src/electron.ts'
 export type { LockData, InstanceInfo, SingletonMode } from './src/single-instance-lock.ts'
 export { instances, resolveAppId, slugify } from './src/single-instance-lock.ts'
@@ -120,11 +122,18 @@ import type { ScheduleEffect } from './src/schedule.ts'
 export type { ScheduleEffect, ScheduleDef } from './src/schedule.ts'
 
 /**
- * SQLite column helpers for defining tables.
+ * SQLite column helpers for defining table schemas.
  * @see {@link https://aio.dev/manual#sqlite-persistence}
  */
 export { table, pk, text, integer, real, ref } from './src/sql.ts'
-export type { AioDB, AioTable, ColumnDef, ColumnOpts, QueryOpts, TableDef, WhereClause, WhereOp } from './src/sql.ts'
+export type { ColumnDef, ColumnOpts, QueryOpts, TableDef, WhereClause, WhereOp } from './src/sql.ts'
+
+/**
+ * Async SQLite — Worker-backed, non-blocking.
+ * `createDB` is for direct use; `app.db` is the instance managed by the framework.
+ */
+export { createDB, DEFAULT_PRAGMAS } from './src/db/mod.ts'
+export type { DB, QueryResult, DBOpts } from './src/db/mod.ts'
 
 /**
  * Memoized selectors for expensive state derivations.
@@ -259,11 +268,18 @@ export type SendProxy<A extends Record<string, any>> = {
  * ```
  */
 // deno-lint-ignore no-explicit-any
+export declare function useFeature<S, A extends Record<string, any> = Record<string, (...args: unknown[]) => void>>(ref: any, options: { fallback: S }): {
+  state: S
+  // deno-lint-ignore no-explicit-any
+  send: Record<string, (...args: any[]) => void>
+  status: string | undefined
+}
+// deno-lint-ignore no-explicit-any
 export declare function useFeature<S = unknown, A extends Record<string, any> = Record<string, (...args: unknown[]) => void>>(ref: {
   name: string
   A: A
   _config: { actionKeys: string[] }
-}): {
+}, options?: { fallback?: never }): {
   state: S | null
   send: SendProxy<A>
   status: string | undefined

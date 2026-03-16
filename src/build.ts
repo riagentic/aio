@@ -4,6 +4,8 @@ import { resolve, join, dirname } from '@std/path'
 import { slugify, copyDir, findGradle, writePlaceholderIcon, ensureAppimagetool, formatMb } from './build-helpers.ts'
 const root = Deno.cwd()
 const dist = resolve(join(root, 'dist'))
+// Framework src dir — resolves correctly for both JSR cache and vendored (dep/aio/) installs
+const frameworkSrcDir = resolve(import.meta.dirname ?? '.')
 const out = join(dist, 'app.js')
 const doElectron = Deno.args.includes('--electron')
 const doAndroid = Deno.args.includes('--android')
@@ -118,8 +120,8 @@ async function isBundleFresh(): Promise<boolean> {
   try {
     const outMtime = (await Deno.stat(out)).mtime!.getTime()
     // Check deno.json + framework source files
-    const aioModule = doAndroid ? 'dep/aio/src/standalone.ts' : 'dep/aio/src/browser.ts'
-    for (const f of [join(root, 'deno.json'), join(root, aioModule), join(root, 'dep/aio/src/msg.ts'), join(root, 'dep/aio/src/factory.ts'), join(root, 'dep/aio/src/deep-merge.ts'), join(root, 'dep/aio/src/dispatch.ts')]) {
+    const aioModule = doAndroid ? join(frameworkSrcDir, 'standalone.ts') : join(frameworkSrcDir, 'browser.ts')
+    for (const f of [join(root, 'deno.json'), aioModule, join(frameworkSrcDir, 'msg.ts'), join(frameworkSrcDir, 'factory.ts'), join(frameworkSrcDir, 'deep-merge.ts'), join(frameworkSrcDir, 'dispatch.ts')]) {
       const s = await Deno.stat(f)
       if (s.mtime && s.mtime.getTime() > outMtime) return false
     }
@@ -142,7 +144,7 @@ if (bundleFresh) {
   await Deno.mkdir(dist, { recursive: true })
 
   // Generate temp build config — overrides 'aio' to browser/standalone, adds React
-  const aioEntry = doAndroid ? './dep/aio/src/standalone.ts' : './dep/aio/src/browser.ts'
+  const aioEntry = doAndroid ? join(frameworkSrcDir, 'standalone.ts') : join(frameworkSrcDir, 'browser.ts')
   const buildConfig = {
     compilerOptions: mainConfig.compilerOptions,
     imports: {
@@ -219,6 +221,9 @@ export function mount(el) { createRoot(el).render(createElement(App)) }
       jsx: 'automatic',
       jsxImportSource: 'react',
       alias: { ...esbuildAlias, ...reactAlias },
+      // Ensure node_modules in user's project root is searched — required when
+      // framework files are resolved from JSR cache (outside the project tree)
+      nodePaths: [join(root, 'node_modules')],
       logLevel: 'warning',
     })
     bundleOk = (result.errors?.length ?? 0) === 0
@@ -378,8 +383,7 @@ if (doAndroid) {
     Deno.exit(1)
   }
 
-  const frameworkDir = resolve(import.meta.dirname ?? '.')
-  const templateDir = resolve(join(frameworkDir, '..', 'android-template'))
+  const templateDir = resolve(join(frameworkSrcDir, '..', 'android-template'))
   const androidDir = join(dist, 'android')
 
   // Clean previous android build

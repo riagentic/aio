@@ -190,7 +190,7 @@ Deno.test('hooks: onConnect error does not break WS', async () => {
 
     // Should still receive initial state despite hook error
     await waitFor(() => msgs.length >= 1)
-    assertEquals(JSON.parse(msgs[0]).ok, true)
+    assertEquals(JSON.parse(msgs[0]!).ok, true)
 
     ws.close()
   } finally {

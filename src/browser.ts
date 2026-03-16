@@ -272,7 +272,7 @@ function _renderTTPanel(): void {
   const list = document.createElement('div')
   list.style.cssText = 'overflow-y:auto;max-height:300px;padding:4px 0;'
   for (let i = tt.entries.length - 1; i >= 0; i--) {
-    const e = tt.entries[i]
+    const e = tt.entries[i]!
     const row = document.createElement('div')
     const isCurrent = i === tt.index
     row.style.cssText = 'padding:3px 10px;cursor:pointer;display:flex;justify-content:space-between;'
@@ -639,7 +639,7 @@ function _factory<T extends _Creators>(creators: T): _FactoryResult<T> {
   const result: Record<string, unknown> = {}
   for (const key of Object.keys(creators)) {
     result[key] = key
-    result[_lowerFirst(key)] = (...args: unknown[]) => ({ type: key, payload: creators[key](...args) ?? {} })
+    result[_lowerFirst(key)] = (...args: unknown[]) => ({ type: key, payload: creators[key]!(...args) ?? {} })
   }
   return result as _FactoryResult<T>
 }
@@ -681,7 +681,7 @@ export function feature(name: string, config: { state?: any; actions?: _Creators
     for (const key of Object.keys(creators)) {
       const label = `${prefix}:${key}`
       cat[key] = Object.assign(
-        (...args: unknown[]) => ({ type: label, payload: creators[key](...args) ?? {} }),
+        (...args: unknown[]) => ({ type: label, payload: creators[key]!(...args) ?? {} }),
         { type: label },
       )
     }
@@ -844,6 +844,15 @@ export function useTimeTravel(): {
     pause:  () => sendTT('__tt:pause'),
     resume: () => sendTT('__tt:resume'),
   }
+}
+
+/** Log stub for browser — no-op (logging writes to server-side files) */
+export const log = {
+  trace(_cat: string, _msg: string, _data?: Record<string, unknown>): void {},
+  debug(_cat: string, _msg: string, _data?: Record<string, unknown>): void {},
+  info (_cat: string, _msg: string, _data?: Record<string, unknown>): void {},
+  warn (_cat: string, _msg: string, _data?: Record<string, unknown>): void {},
+  error(_cat: string, _msg: string, _data?: Record<string, unknown>): void {},
 }
 
 /** Resets module state — for testing only */

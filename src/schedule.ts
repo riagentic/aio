@@ -68,7 +68,7 @@ function parseField(field: string, min: number, max: number): number[] {
     } else if (trimmed.includes('-')) {
       // Range: "1-5" or "1-5/2"
       const [rangePart, stepPart] = trimmed.split('/')
-      const [startStr, endStr] = rangePart.split('-')
+      const [startStr, endStr] = (rangePart ?? '').split('-')
       if (!startStr || !endStr) throw new Error(`invalid cron range: ${trimmed} (${min}-${max})`)
       const start = Number(startStr), end = Number(endStr)
       const step = stepPart ? Number(stepPart) : 1
@@ -89,11 +89,11 @@ export function parseCron(pattern: string): CronFields {
   const parts = pattern.trim().split(/\s+/)
   if (parts.length !== 5) throw new Error(`cron pattern must have 5 fields, got ${parts.length}: "${pattern}"`)
   return {
-    minute: parseField(parts[0], 0, 59),
-    hour: parseField(parts[1], 0, 23),
-    dom: parseField(parts[2], 1, 31),
-    month: parseField(parts[3], 1, 12),
-    dow: parseField(parts[4], 0, 6),
+    minute: parseField(parts[0]!, 0, 59),
+    hour: parseField(parts[1]!, 0, 23),
+    dom: parseField(parts[2]!, 1, 31),
+    month: parseField(parts[3]!, 1, 12),
+    dow: parseField(parts[4]!, 0, 6),
   }
 }
 
