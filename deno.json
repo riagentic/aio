@@ -1,6 +1,6 @@
 {
   "name": "@riagentic/aio",
-  "version": "0.9.0",
+  "version": "0.9.1",
   "exports": "./mod.ts",
   "publish": {
     "exclude": ["tests/", "examples/", "docs/", "scripts/", "utils/", "CHANGELOG.md", "init.*", ".claude/", "*.md", "!README.md"]
