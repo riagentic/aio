@@ -15,7 +15,7 @@ import { composeFeatures, bindFeature, type FeatureEntry, type FeatureDef, type 
 import { AioLogger, setLogger, type LogConfig } from './logger.ts'
 
 /** Framework version — printed by --version, checked in tests */
-export const VERSION = '0.9.1'
+export const VERSION = '0.9.2'
 
 /** Validates that framework version matches deno.json version at build time */
 function validateVersion(): void {
