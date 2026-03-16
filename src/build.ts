@@ -4,8 +4,10 @@ import { resolve, join, dirname } from '@std/path'
 import { slugify, copyDir, findGradle, writePlaceholderIcon, ensureAppimagetool, formatMb } from './build-helpers.ts'
 const root = Deno.cwd()
 const dist = resolve(join(root, 'dist'))
-// Framework src dir — resolves correctly for both JSR cache and vendored (dep/aio/) installs
-const frameworkSrcDir = resolve(import.meta.dirname ?? '.')
+// Framework base URL — works for both local (file://) and JSR/remote (https://)
+const _FRAMEWORK_BASE = new URL('.', import.meta.url)
+const _IS_REMOTE = _FRAMEWORK_BASE.protocol !== 'file:'
+const frameworkSrcDir = _IS_REMOTE ? '' : (import.meta.dirname ?? '.')
 const out = join(dist, 'app.js')
 const doElectron = Deno.args.includes('--electron')
 const doAndroid = Deno.args.includes('--android')
@@ -23,6 +25,56 @@ const shellFlags = [doElectron && '--electron', doAndroid && '--android', doCli 
 if (shellFlags.length > 1) {
   console.error(`[build] \u2717 conflicting flags: ${shellFlags.join(' + ')} — pick one shell target`)
   Deno.exit(1)
+}
+
+// ── Remote (JSR) helpers — fetch framework source files to temp dir for esbuild ──
+
+let _tmpFwDir: string | null = null
+/** Returns a local directory containing the framework src files needed by esbuild.
+ *  Local installs: returns `frameworkSrcDir` directly.
+ *  Remote (JSR): fetches only the files esbuild needs, writes to a temp dir. */
+async function getFwDir(): Promise<string> {
+  if (!_IS_REMOTE) return frameworkSrcDir
+  if (_tmpFwDir) return _tmpFwDir
+  _tmpFwDir = await Deno.makeTempDir({ prefix: 'aio-fw-' })
+  // browser.ts has no local imports; standalone.ts needs its dep chain
+  const files = doAndroid
+    ? ['standalone.ts', 'msg.ts', 'factory.ts', 'deep-merge.ts', 'dispatch.ts', 'schedule.ts']
+    : ['browser.ts']
+  await Promise.all(files.map(async f => {
+    const text = await fetch(new URL(f, _FRAMEWORK_BASE)).then(r => {
+      if (!r.ok) throw new Error(`[build] fetch framework/${f} → ${r.status}`)
+      return r.text()
+    })
+    await Deno.writeTextFile(join(_tmpFwDir!, f), text)
+  }))
+  return _tmpFwDir
+}
+
+/** Returns a local path to the android-template directory.
+ *  Remote (JSR): fetches the 6 template source files to a temp dir. */
+async function getAndroidTemplateDir(): Promise<string> {
+  if (!_IS_REMOTE) return resolve(join(frameworkSrcDir, '..', 'android-template'))
+  const tmpDir = await Deno.makeTempDir({ prefix: 'aio-android-tmpl-' })
+  const base = new URL('../android-template/', _FRAMEWORK_BASE)
+  const files = [
+    'app/build.gradle.kts',
+    'app/src/main/AndroidManifest.xml',
+    'app/src/main/java/aio/app/MainActivity.kt',
+    'build.gradle.kts',
+    'gradle.properties',
+    'settings.gradle.kts',
+  ]
+  await Promise.all(files.map(async f => {
+    const text = await fetch(new URL(f, base)).then(r => {
+      if (!r.ok) throw new Error(`[build] fetch android-template/${f} → ${r.status}`)
+      return r.text()
+    })
+    const dest = join(tmpDir, f)
+    await Deno.mkdir(dirname(dest), { recursive: true })
+    await Deno.writeTextFile(dest, text)
+  }))
+  return tmpDir
 }
 
 // Dev-only packages excluded from all compile targets
@@ -119,10 +171,15 @@ async function isBundleFresh(): Promise<boolean> {
   if (doForce) return false
   try {
     const outMtime = (await Deno.stat(out)).mtime!.getTime()
-    // Check deno.json + framework source files
-    const aioModule = doAndroid ? join(frameworkSrcDir, 'standalone.ts') : join(frameworkSrcDir, 'browser.ts')
-    for (const f of [join(root, 'deno.json'), aioModule, join(frameworkSrcDir, 'msg.ts'), join(frameworkSrcDir, 'factory.ts'), join(frameworkSrcDir, 'deep-merge.ts'), join(frameworkSrcDir, 'dispatch.ts')]) {
-      const s = await Deno.stat(f)
+    // Check deno.json + framework source files (skip for remote — JSR version is pinned)
+    if (!_IS_REMOTE) {
+      const aioModule = doAndroid ? join(frameworkSrcDir, 'standalone.ts') : join(frameworkSrcDir, 'browser.ts')
+      for (const f of [join(root, 'deno.json'), aioModule, join(frameworkSrcDir, 'msg.ts'), join(frameworkSrcDir, 'factory.ts'), join(frameworkSrcDir, 'deep-merge.ts'), join(frameworkSrcDir, 'dispatch.ts')]) {
+        const s = await Deno.stat(f)
+        if (s.mtime && s.mtime.getTime() > outMtime) return false
+      }
+    } else {
+      const s = await Deno.stat(join(root, 'deno.json'))
       if (s.mtime && s.mtime.getTime() > outMtime) return false
     }
     // Check all src/ files recursively
@@ -144,7 +201,8 @@ if (bundleFresh) {
   await Deno.mkdir(dist, { recursive: true })
 
   // Generate temp build config — overrides 'aio' to browser/standalone, adds React
-  const aioEntry = doAndroid ? join(frameworkSrcDir, 'standalone.ts') : join(frameworkSrcDir, 'browser.ts')
+  const fwDir = await getFwDir()
+  const aioEntry = doAndroid ? join(fwDir, 'standalone.ts') : join(fwDir, 'browser.ts')
   const buildConfig = {
     compilerOptions: mainConfig.compilerOptions,
     imports: {
@@ -383,7 +441,7 @@ if (doAndroid) {
     Deno.exit(1)
   }
 
-  const templateDir = resolve(join(frameworkSrcDir, '..', 'android-template'))
+  const templateDir = await getAndroidTemplateDir()
   const androidDir = join(dist, 'android')
 
   // Clean previous android build
