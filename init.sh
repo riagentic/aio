@@ -36,4 +36,4 @@ else
 fi
 
 # ── Run scaffolder ──
-exec deno run -A "$INIT_URL" "$@"
+exec deno run -A --reload "$INIT_URL" "$@"

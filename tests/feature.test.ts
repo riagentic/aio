@@ -93,8 +93,8 @@ Deno.test('feature: name and prefix', () => {
 Deno.test('feature: selectors', () => {
   // selectors receive feature's own slice — auto-scoped
   const state = { counter: { count: 42, _status: 'idle' } }
-  assertEquals(counter.selectors.getCount(state), 42)
-  assertEquals(counter.selectors.isIdle(state), true)
+  assertEquals(counter.selectors.getCount!(state), 42)
+  assertEquals(counter.selectors.isIdle!(state), true)
 })
 
 // ── Machine validation ──
@@ -196,8 +196,8 @@ Deno.test('feature: foreign actions in machine allowed', () => {
 Deno.test('compose: initialState includes _status', () => {
   const composed = composeFeatures([counter])
   const state = composed.initialState as Record<string, Record<string, unknown>>
-  assertEquals(state.counter._status, 'idle')
-  assertEquals(state.counter.count, 0)
+  assertEquals(state.counter!._status, 'idle')
+  assertEquals(state.counter!.count, 0)
 })
 
 Deno.test('compose: simple machine has no _status', () => {
@@ -218,7 +218,7 @@ Deno.test('compose: reduce routes action to correct feature', () => {
   assertEquals(s.count, 5)
   assertEquals(s._status, 'idle')
   assertEquals(result.effects.length, 1)
-  assertEquals(result.effects[0].type, 'counter:log')
+  assertEquals(result.effects[0]!.type, 'counter:log')
 })
 
 Deno.test('compose: machine guard blocks invalid transitions', () => {
@@ -401,7 +401,7 @@ testFeature<{ count: number; lastUpdatedAt: number; error: string | null }>(
   'increment from idle',
   (t) => {
     t.init()
-    t.send.increment(5)
+    t.send.increment!(5)
     t.expect.state(s => s.count === 5)
     t.expect.effects(['counter:log'])
     t.expect.status('idle')
@@ -413,7 +413,7 @@ testFeature<{ count: number; lastUpdatedAt: number; error: string | null }>(
   'save triggers persist effect',
   (t) => {
     t.init()
-    t.send.save()
+    t.send.save!()
     t.expect.status('saving')
     t.expect.effects(['counter:persist'])
     t.expect.effectCount(1)
@@ -426,9 +426,9 @@ testFeature<{ count: number; lastUpdatedAt: number; error: string | null }>(
   (t) => {
     t.init()
     // Can't save twice — first save goes to 'saving', second is blocked
-    t.send.save()
+    t.send.save!()
     t.expect.status('saving')
-    t.send.save() // blocked by machine
+    t.send.save!() // blocked by machine
     t.expect.effectCount(0) // no new effects
     t.expect.status('saving') // still saving
   },
@@ -450,7 +450,7 @@ testFeature<{ count: number; lastUpdatedAt: number; error: string | null }>(
   'full lifecycle',
   (t) => {
     t.init()
-    t.send.increment(10)
+    t.send.increment!(10)
     t.expect.state(s => s.count === 10)
     t.expect.status('idle')
 
@@ -581,8 +581,8 @@ Deno.test('reduce: accepts ScheduleEffect in effects array', () => {
   const composed = composeFeatures([f])
   const result = composed.reduce(composed.initialState, f.A.tick())
   assertEquals(result.effects.length, 2)
-  assertEquals(result.effects[0].type, 'sched:log')
-  assertEquals(result.effects[1].type, '__schedule')
+  assertEquals(result.effects[0]!.type, 'sched:log')
+  assertEquals(result.effects[1]!.type, '__schedule')
 })
 
 // ── Fix C: dispatchTo allowlist ──

@@ -2,7 +2,7 @@
 
 React hooks, components, styling, DevTools, and browser-side concerns.
 
-For the docs index, see [manual.md](manual.md). For the core API (`feature`, `reactive`, `useFeature`), see [core.md](core.md). For Electron & thin client, see [electron.md](electron.md).
+For the docs index, see [manual.md](manual.md). For the core API (`feature`, `useFeature`), see [core.md](core.md). For Electron & thin client, see [electron.md](electron.md).
 
 ## `useAio<S>()` — full state hook
 

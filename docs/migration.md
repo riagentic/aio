@@ -14,11 +14,9 @@ Data flow: **UI → action → machine guard → reduce → new state + effects 
 
 ## Step 1: Add the framework
 
-**Option A: Full toolchain** — scaffold with the one-liner, or download the `dep/aio/` folder from the [aio repo](https://github.com/riagentic/aio) into your project root.
+**Option A: JSR (recommended)** — `deno add jsr:@riagentic/aio` — full library + build toolchain via `jsr:@riagentic/aio/src/am` and `jsr:@riagentic/aio/src/build`.
 
-**Option B: Library only** — `deno add @riagentic/aio` for the API without build tooling.
-
-For the full experience (dev server, compile targets, app manager), use Option A.
+**Option B: Scaffolder** — the one-liner creates a project with interactive type/template selection. See [quickstart.md](quickstart.md).
 
 ## Step 2: Update deno.json
 
@@ -35,22 +33,22 @@ Merge these into your existing `deno.json`:
   },
   "imports": {
     // ADD these — keep your existing imports
+    "aio":          "jsr:@riagentic/aio@^0.9",
     "@types/react": "npm:@types/react@^18",
-    "react": "npm:react@^18",
-    "react-dom": "npm:react-dom@^18",
-    "aio": "./dep/aio/mod.ts",
-    "esbuild": "npm:esbuild@^0.24",
-    "immer": "npm:immer@^10",
-    "@std/path": "jsr:@std/path@^1"
+    "react":        "npm:react@^18",
+    "react-dom":    "npm:react-dom@^18",
+    "esbuild":      "npm:esbuild@^0.24",
+    "immer":        "npm:immer@^10",
+    "@std/path":    "jsr:@std/path@^1"
   },
   "tasks": {
-    "dev": "deno run -A src/app.ts",
-    "am": "deno run -A dep/aio/src/am.ts",
-    "test": "deno test -A --unstable-kv dep/aio/tests/",
-    "compile": "deno run -A dep/aio/src/build.ts --compile",
-    "compile:electron": "deno run -A dep/aio/src/build.ts --compile --electron",
-    "compile:electron:remote": "deno run -A dep/aio/src/build.ts --compile --electron --remote",
-    "compile:android": "deno run -A dep/aio/src/build.ts --android"
+    "dev":                    "deno run -A src/app.ts",
+    "am":                     "deno run -A jsr:@riagentic/aio@^0.9/src/am",
+    "test":                   "deno test -A --unstable-kv tests/",
+    "compile:browser":        "deno run -A jsr:@riagentic/aio@^0.9/src/build --compile",
+    "compile:electron":       "deno run -A jsr:@riagentic/aio@^0.9/src/build --compile --electron",
+    "compile:electron:remote":"deno run -A jsr:@riagentic/aio@^0.9/src/build --client",
+    "compile:android":        "deno run -A jsr:@riagentic/aio@^0.9/src/build --android"
   }
 }
 ```
@@ -526,9 +524,98 @@ await aio.run({ features: [counter, dc, te], isolate: ['counter'] })
 // or: deno task dev --isolate=counter,dc
 ```
 
+---
+
+## Breaking change: `AioDB` → `DB` (v0.9.0)
+
+The sync ORM layer was replaced with an async Worker-based `DB` interface. All `app.db` calls are now async.
+
+### What was removed
+
+| Removed | Was |
+|---------|-----|
+| `AioDB` type | Sync ORM handle |
+| `AioTable<T>` type | Sync table accessor |
+| `openDb()` | Public factory |
+| `loadTables()` / `syncTables()` / `reloadTable()` | Public sync helpers (now private async internals) |
+| Level 2 ORM pattern | `app.db!.orders.where(...)`, `.find()`, `.all()`, `.insert()`, `.insertMany()`, `.upsert()`, `.update()`, `.delete()`, `.count()` |
+| Level 3 sync SQL | `app.db!.query(sql)` returning `T[]` synchronously |
+
+### What replaced them
+
+```ts
+// Before (sync, AioTable)
+const orders = app.db!.orders.where({ status: 'active' })
+app.db!.orders.insertMany(rows)
+
+// After (async, DB interface)
+const { rows: orders } = await app.db!.query<Order>(
+  'SELECT * FROM orders WHERE status = ?', ['active']
+)
+await app.db!.execute(
+  'INSERT INTO orders(id,customer,total) VALUES (?,?,?)', [id, customer, total]
+)
+```
+
+```ts
+// Before (sync raw SQL)
+const stats = app.db!.query<{ total: number }>('SELECT SUM(total) as total FROM orders')
+
+// After (async)
+const { rows: stats } = await app.db!.query<{ total: number }>(
+  'SELECT SUM(total) as total FROM orders'
+)
+```
+
+```ts
+// Before (sync transaction)
+app.db!.transaction(() => {
+  app.db!.query('UPDATE accounts SET balance = balance - ? WHERE id = ?', [amount, from])
+  app.db!.query('UPDATE accounts SET balance = balance + ? WHERE id = ?', [amount, to])
+})
+
+// After (async, statement array)
+await app.db!.transaction([
+  { sql: 'UPDATE accounts SET balance = balance - ? WHERE id = ?', params: [amount, from] },
+  { sql: 'UPDATE accounts SET balance = balance + ? WHERE id = ?', params: [amount, to] },
+])
+```
+
+### `lastInsertRowId` type changed
+
+`QueryResult.lastInsertRowId` is now `bigint` (was `number`). Use `Number(result.lastInsertRowId)` if you need a number.
+
+### Permissions change
+
+Remove `--allow-ffi` from your run/compile commands — it is no longer needed. Add `--allow-read` and `--allow-write` if not already present.
+
+### Execute handlers need `async`
+
+Any `execute` handler that calls `app.db` must be `async`:
+
+```ts
+// Before
+execute: {
+  loadStats(app) {
+    const rows = app.db!.query('SELECT ...')
+    app.dispatch(myFeature.A.loaded(rows))
+  },
+},
+
+// After
+execute: {
+  async loadStats(app) {
+    const { rows } = await app.db!.query('SELECT ...')
+    app.dispatch(myFeature.A.loaded(rows))
+  },
+},
+```
+
+---
+
 ## Checklist — v0.5 feature-based
 
-- [ ] Framework added (`dep/aio/` via scaffolder, or `deno add @riagentic/aio`)
+- [ ] Framework added (`deno add jsr:@riagentic/aio`, or via scaffolder)
 - [ ] `deno.json` updated with imports, compilerOptions, unstable
 - [ ] `deno install` ran successfully
 - [ ] `deno add npm:electron && deno approve-scripts npm:electron && deno install` (if using Electron)

@@ -45,12 +45,12 @@ Deno.test('perf: strict mode - slow reduce calls onError', async () => {
   dispatch({ type: 'Inc' })
   
   assertEquals(errors.length, 1)
-  assertEquals(errors[0].source, 'performance')
-  assertEquals(errors[0].actionType, 'Inc')
-  assertEquals(typeof errors[0].duration, 'number')
-  assertEquals(errors[0].duration! > 100, true)
-  assertEquals(errors[0].budget, 100)
-  assertEquals(errors[0].message?.includes('exceeded budget'), true)
+  assertEquals(errors[0]!.source, 'performance')
+  assertEquals(errors[0]!.actionType, 'Inc')
+  assertEquals(typeof errors[0]!.duration, 'number')
+  assertEquals(errors[0]!.duration! > 100, true)
+  assertEquals(errors[0]!.budget, 100)
+  assertEquals(errors[0]!.message?.includes('exceeded budget'), true)
 })
 
 Deno.test('perf: strict mode - slow effect calls onError', () => {
@@ -71,10 +71,10 @@ Deno.test('perf: strict mode - slow effect calls onError', () => {
   dispatch({ type: 'Inc' })
   
   assertEquals(errors.length, 1)
-  assertEquals(errors[0].source, 'performance')
-  assertEquals(errors[0].effectType, 'Log')
-  assertEquals(errors[0].duration! > 5, true)
-  assertEquals(errors[0].budget, 5)
+  assertEquals(errors[0]!.source, 'performance')
+  assertEquals(errors[0]!.effectType, 'Log')
+  assertEquals(errors[0]!.duration! > 5, true)
+  assertEquals(errors[0]!.budget, 5)
 })
 
 Deno.test('perf: strict mode - fast reduce does not call onError', () => {
@@ -135,7 +135,7 @@ Deno.test('perf: soft mode - slow reduce only warns', () => {
   
   assertEquals(errors.length, 0)
   assertEquals(warns.length, 1)
-  assertEquals(warns[0].includes('exceeded budget'), true)
+  assertEquals(warns[0]!.includes('exceeded budget'), true)
 })
 
 Deno.test('perf: soft mode - slow effect only warns', () => {
@@ -181,8 +181,8 @@ Deno.test('perf: custom reduce budget', () => {
   dispatch({ type: 'Inc' })
   
   assertEquals(errors.length, 1)
-  assertEquals(errors[0].budget, 10)
-  assertEquals(errors[0].duration! > 10, true)
+  assertEquals(errors[0]!.budget, 10)
+  assertEquals(errors[0]!.duration! > 10, true)
 })
 
 Deno.test('perf: custom effect budget', () => {
@@ -203,7 +203,7 @@ Deno.test('perf: custom effect budget', () => {
   dispatch({ type: 'Inc' })
   
   assertEquals(errors.length, 1)
-  assertEquals(errors[0].budget, 10)
+  assertEquals(errors[0]!.budget, 10)
 })
 
 Deno.test('perf: relaxed budget allows more time', () => {
@@ -249,10 +249,10 @@ Deno.test('perf: reports both reduce and effect violations', () => {
   dispatch({ type: 'Inc' })
   
   assertEquals(errors.length, 2)
-  assertEquals(errors[0].source, 'performance')
-  assertEquals(errors[0].actionType, 'Inc')
-  assertEquals(errors[1].source, 'performance')
-  assertEquals(errors[1].effectType, 'Log')
+  assertEquals(errors[0]!.source, 'performance')
+  assertEquals(errors[0]!.actionType, 'Inc')
+  assertEquals(errors[1]!.source, 'performance')
+  assertEquals(errors[1]!.effectType, 'Log')
 })
 
 // ── Default budgets when not specified ────────────────────────────────
@@ -279,8 +279,8 @@ Deno.test('perf: default budgets are 100ms reduce, 5ms effect', () => {
   dispatch({ type: 'Inc' })
   
   assertEquals(errors.length, 2)
-  assertEquals(errors[0].budget, 100)  // reduce default
-  assertEquals(errors[1].budget, 5)     // effect default
+  assertEquals(errors[0]!.budget, 100)  // reduce default
+  assertEquals(errors[1]!.budget, 5)     // effect default
 })
 
 // ── effectTimeout ────────────────────────────────────────────────────
@@ -304,9 +304,9 @@ Deno.test('perf: effectTimeout warns when async effect exceeds limit', async () 
 
   assertEquals(warnings.some(w => w.includes('timeout')), true)
   assertEquals(errors.length, 1)
-  assertEquals(errors[0].source, 'effect')
-  assertEquals(errors[0].effectType, 'Log')
-  assertEquals(errors[0].message?.includes('timeout'), true)
+  assertEquals(errors[0]!.source, 'effect')
+  assertEquals(errors[0]!.effectType, 'Log')
+  assertEquals(errors[0]!.message?.includes('timeout'), true)
 })
 
 Deno.test('perf: effectTimeout=0 disables timeout', async () => {

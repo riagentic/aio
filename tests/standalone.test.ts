@@ -62,7 +62,7 @@ Deno.test('dispatch executes effects', async () => {
   const app = initStandalone({ count: 0 }, { reduce: makeReduce(), execute: (_app, e) => { executed.push(e) } })
   app.dispatch({ type: 'INC' })
   assertEquals(executed.length, 1)
-  assertEquals(executed[0].type, 'LOG')
+  assertEquals(executed[0]!.type, 'LOG')
   await app.close()
 })
 
@@ -183,7 +183,7 @@ Deno.test('invalid effects are skipped', async () => {
   const app = initStandalone({ count: 0 }, { reduce, execute: (_app, e) => { executed.push(e) } })
   app.dispatch({ type: 'INC' })
   assertEquals(executed.length, 1)
-  assertEquals(executed[0].type, 'GOOD')
+  assertEquals(executed[0]!.type, 'GOOD')
   await app.close()
 })
 
@@ -285,7 +285,7 @@ Deno.test('ScheduleEffect from reduce is not passed to execute', async () => {
   app.dispatch({ type: 'SCHED' })
   // Only the regular effect should reach execute, not the ScheduleEffect
   assertEquals(executed.length, 1)
-  assertEquals(executed[0].type, 'LOG')
+  assertEquals(executed[0]!.type, 'LOG')
   assertEquals(app.getState(), { count: 1 })
   await app.close()
 })

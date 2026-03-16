@@ -178,7 +178,7 @@ function buildCatalog(
   for (const key of Object.keys(creators)) {
     const label = `${prefix}:${key}`
     const fn = Object.assign(                          // A.increment(5) = { type, payload }
-      (...args: unknown[]) => ({ type: label, payload: creators[key](...args) ?? {} }),
+      (...args: unknown[]) => ({ type: label, payload: creators[key]!(...args) ?? {} }),
       { type: label },                                 // A.increment.type = 'counter:increment'
     )
     catalog[key] = fn
@@ -540,7 +540,7 @@ function createFeatureFromMethods<N extends string, S extends Record<string, unk
   const effectCreators: Record<string, (...args: any[]) => Record<string, unknown>> = {}
   const effectKeys = Object.keys(config.effects ?? {})
   for (const key of effectKeys) {
-    effectCreators[key] = (config.effects as Record<string, (...args: unknown[]) => Record<string, unknown>>)[key]
+    effectCreators[key] = (config.effects as Record<string, (...args: unknown[]) => Record<string, unknown>>)[key]!
   }
   const { catalog: eCatalog } = buildCatalog(prefix, effectCreators)
 
@@ -1373,7 +1373,7 @@ export function composeFeatures(entries: FeatureEntry[]): ComposedFeatures {
 
   const destroyAll = (app: { dispatch: (a: Msg) => void; getState: () => unknown }): void => {
     for (let i = features.length - 1; i >= 0; i--) {
-      const f = features[i]
+      const f = features[i]!
       // Cancel any running flows for this feature
       cancelFeatureFlows(f.name)
       if (f._config.onDestroy) {
@@ -1583,7 +1583,7 @@ export function testFeature<
         const keys = f._config.actionKeys
         for (let i = 0; i < n; i++) {
           const key = keys[Math.floor(Math.random() * keys.length)]
-          try { send[key]() } catch { /* invalid transitions are expected */ }
+          if (key) try { send[key]!() } catch { /* invalid transitions are expected */ }
         }
       },
       runEffects: () => {

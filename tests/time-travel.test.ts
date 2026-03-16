@@ -30,15 +30,15 @@ Deno.test('tt: record appends entry and increments id', () => {
   let tt = createTT<S, A>()
   tt = record(tt, { type: 'A' }, { count: 1 })
   assertEquals(tt.entries.length, 1)
-  assertEquals(tt.entries[0].id, 0)
-  assertEquals(tt.entries[0].action, { type: 'A' })
-  assertEquals(tt.entries[0].state, { count: 1 })
+  assertEquals(tt.entries[0]!.id, 0)
+  assertEquals(tt.entries[0]!.action, { type: 'A' })
+  assertEquals(tt.entries[0]!.state, { count: 1 })
   assertEquals(tt.index, 0)
   assertEquals(tt.nextId, 1)
 
   tt = record(tt, { type: 'B' }, { count: 2 })
   assertEquals(tt.entries.length, 2)
-  assertEquals(tt.entries[1].id, 1)
+  assertEquals(tt.entries[1]!.id, 1)
   assertEquals(tt.index, 1)
   assertEquals(tt.nextId, 2)
 })
@@ -50,8 +50,8 @@ Deno.test('tt: record caps at 200, evicts oldest', () => {
   }
   assertEquals(tt.entries.length, 200)
   // First entry should be id 10 (0-9 evicted)
-  assertEquals(tt.entries[0].id, 10)
-  assertEquals(tt.entries[tt.entries.length - 1].id, 209)
+  assertEquals(tt.entries[0]!.id, 10)
+  assertEquals(tt.entries[tt.entries.length - 1]!.id, 209)
   assertEquals(tt.index, 199)
 })
 
@@ -64,7 +64,7 @@ Deno.test('tt: record after undo truncates forward entries', () => {
   tt = undo(tt) // index 1
   tt = record(tt, { type: 'C' }, { count: 10 })
   assertEquals(tt.entries.length, 3)  // __init, A, C (B truncated)
-  assertEquals(tt.entries[2].action, { type: 'C' })
+  assertEquals(tt.entries[2]!.action, { type: 'C' })
   assertEquals(tt.index, 2)
 })
 
@@ -164,9 +164,9 @@ Deno.test('tt: toBroadcast omits state, includes action type', () => {
   assertEquals(b.index, 2)
   assertEquals(b.paused, false)
   assertEquals(b.entries.length, 3)
-  assertEquals(b.entries[0].type, '__init')
-  assertEquals(b.entries[1].type, 'Inc')
-  assertEquals(b.entries[2].type, 'Dec')
+  assertEquals(b.entries[0]!.type, '__init')
+  assertEquals(b.entries[1]!.type, 'Inc')
+  assertEquals(b.entries[2]!.type, 'Dec')
   // No state in broadcast
   for (const e of b.entries) {
     assertEquals((e as Record<string, unknown>).state, undefined)
@@ -321,5 +321,5 @@ Deno.test('tt integration: resume then record branches correctly', () => {
   tt = record(tt, { type: 'D' }, { count: 10 })
   assertEquals(tt.entries.length, 3) // [__init, A, D]
   assertEquals(stateAt(tt), { count: 10 })
-  assertEquals(tt.entries[2].action, { type: 'D' })
+  assertEquals(tt.entries[2]!.action, { type: 'D' })
 })

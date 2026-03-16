@@ -1,6 +1,6 @@
 # aio Reference Manual
 
-Documentation index for the aio framework (v0.8).
+Documentation index for the aio framework (v0.9).
 
 ## New to AIO?
 
@@ -20,7 +20,7 @@ Documentation index for the aio framework (v0.8).
 | [builds.md](builds.md) | All compile targets, build flags, Android/Electron packaging, systemd, `connectCli()` |
 | [testing.md](testing.md) | `testFeature()`, `TestContext` API, async testing, `settle()` |
 | [auth.md](auth.md) | Remote access (`--expose`), multi-user tokens, per-user authorization, security model |
-| [persistence.md](persistence.md) | Deno.Kv auto-persist, SQLite 3-tier (auto-sync, ORM, raw SQL), offline queue, incremental sync |
+| [persistence.md](persistence.md) | Deno.Kv auto-persist, SQLite (auto-sync, async direct SQL), offline queue, incremental sync |
 | [scaling.md](scaling.md) | Architecture at scale, bottlenecks, best practices, capacity, design boundaries |
 | [reactivity.md](reactivity.md) | `feature({ methods })` — sync/async methods, Immer proxy, machine guards, batching |
 | [generators.md](generators.md) | Sequential async workflows — `generators` key, `cancelOn()`, `GenCtx` API |

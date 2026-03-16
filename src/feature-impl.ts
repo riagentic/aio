@@ -138,9 +138,9 @@ function setNestedValue(obj: Record<string, unknown>, path: string[], value: unk
   if (path.length === 0) return
   let current: unknown = obj
   for (let i = 0; i < path.length - 1; i++) {
-    current = (current as Record<string, unknown>)[path[i]]
+    current = (current as Record<string, unknown>)[path[i]!]
   }
-  ;(current as Record<string, unknown>)[path[path.length - 1]] = value
+  ;(current as Record<string, unknown>)[path[path.length - 1]!] = value
 }
 
 function applyArrayOp(obj: Record<string, unknown>, path: string[], op: string, args: unknown[]): void {
@@ -259,7 +259,7 @@ export function classifyMethods<S extends Record<string, unknown>>(methods: Feat
   const syncMethods = new Set<string>()
   const asyncMethods = new Set<string>()
   for (const key of Object.keys(methods)) {
-    if (isAsyncFunction(methods[key])) asyncMethods.add(key)
+    if (isAsyncFunction(methods[key]!)) asyncMethods.add(key)
     else syncMethods.add(key)
   }
   return { syncMethods, asyncMethods }

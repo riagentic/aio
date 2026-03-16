@@ -60,13 +60,13 @@ Deno.test('integration: WS connect → initial state → action → delta broadc
 
     // 1. Initial full state
     await waitFor(() => received.length >= 1)
-    assertEquals(JSON.parse(received[0]), { counter: 0, name: 'test', flag: true })
+    assertEquals(JSON.parse(received[0]!), { counter: 0, name: 'test', flag: true })
 
     // 2. First action → delta patch (per-client cache initialized on connect)
     ws.send(JSON.stringify({ type: 'INCREMENT', payload: { by: 5 } }))
     await waitFor(() => received.length >= 2)
 
-    const delta1 = JSON.parse(received[1])
+    const delta1 = JSON.parse(received[1]!)
     assertEquals(delta1.$p, { counter: 5 })        // only changed key
     assertEquals(delta1.$d, undefined)              // no deleted keys
 
@@ -74,7 +74,7 @@ Deno.test('integration: WS connect → initial state → action → delta broadc
     ws.send(JSON.stringify({ type: 'INCREMENT', payload: { by: 3 } }))
     await waitFor(() => received.length >= 3)
 
-    const delta2 = JSON.parse(received[2])
+    const delta2 = JSON.parse(received[2]!)
     assertEquals(delta2.$p, { counter: 8 })         // only changed key
     assertEquals(delta2.$d, undefined)               // no deleted keys
 
@@ -178,8 +178,8 @@ Deno.test('integration: multiple clients receive broadcasts', async () => {
     ws1.send(JSON.stringify({ type: 'BUMP' }))
     await waitFor(() => msgs1.length >= 2 && msgs2.length >= 2)
 
-    const u1 = JSON.parse(msgs1[1])
-    const u2 = JSON.parse(msgs2[1])
+    const u1 = JSON.parse(msgs1[1]!)
+    const u2 = JSON.parse(msgs2[1]!)
     const v1 = u1.$p ? u1.$p.v : u1.v
     const v2 = u2.$p ? u2.$p.v : u2.v
     assertEquals(v1, 1)
@@ -249,12 +249,12 @@ Deno.test('integration: per-user stateForUI returns different state per user', a
     await waitFor(() => msgs2.length >= 1)
 
     // Admin gets full state (including secret)
-    const init1 = JSON.parse(msgs1[0])
+    const init1 = JSON.parse(msgs1[0]!)
     assertEquals(init1.counter, 0)
     assertEquals(init1.secret, 'admin-only')
 
     // Viewer gets filtered state (no secret)
-    const init2 = JSON.parse(msgs2[0])
+    const init2 = JSON.parse(msgs2[0]!)
     assertEquals(init2.counter, 0)
     assertEquals(init2.secret, undefined)
 
@@ -262,11 +262,11 @@ Deno.test('integration: per-user stateForUI returns different state per user', a
     ws1.send(JSON.stringify({ type: 'INC' }))
     await waitFor(() => msgs1.length >= 2 && msgs2.length >= 2)
 
-    const u1 = JSON.parse(msgs1[msgs1.length - 1])
+    const u1 = JSON.parse(msgs1[msgs1.length - 1]!)
     const c1 = u1.$p ? u1.$p.counter : u1.counter
     assertEquals(c1, 1)
 
-    const u2 = JSON.parse(msgs2[msgs2.length - 1])
+    const u2 = JSON.parse(msgs2[msgs2.length - 1]!)
     const c2 = u2.$p ? u2.$p.counter : u2.counter
     assertEquals(c2, 1)
     // Viewer should still not have secret in broadcast
@@ -458,7 +458,7 @@ Deno.test('guardrail: reducer bad shape → server survives, valid actions still
       ws.send(JSON.stringify({ type: 'INC' }))
       await waitFor(() => received.length >= 2)
 
-      const last = JSON.parse(received[received.length - 1])
+      const last = JSON.parse(received[received.length - 1]!)
       const counter = last.$p ? last.$p.counter : last.counter
       assertEquals(counter, 1)
     },
@@ -480,7 +480,7 @@ Deno.test('guardrail: effect missing .type → skipped, state still updates', as
       ws.send(JSON.stringify({ type: 'WITH_BAD_EFFECT' }))
       await waitFor(() => received.length >= 2)
 
-      const last = JSON.parse(received[received.length - 1])
+      const last = JSON.parse(received[received.length - 1]!)
       const counter = last.$p ? last.$p.counter : last.counter
       assertEquals(counter, 1) // state updated despite bad effects
     },
@@ -502,7 +502,7 @@ Deno.test('guardrail: reducer throw → recovery, subsequent actions still work'
       ws.send(JSON.stringify({ type: 'INC' }))
       await waitFor(() => received.length >= 2)
 
-      const last = JSON.parse(received[received.length - 1])
+      const last = JSON.parse(received[received.length - 1]!)
       const counter = last.$p ? last.$p.counter : last.counter
       assertEquals(counter, 1)
     },
@@ -598,9 +598,10 @@ Deno.test('integration: schedule.after effect from reducer fires once', async ()
 
 // ── SQLite persistence integration ──────────────────────────────────
 
-import { openDb, loadTables, syncTables, table, pk, text, integer } from '../src/sql.ts'
+import { createDB, initSchema, loadTables, syncTables } from '../src/db/mod.ts'
+import { table, pk, text, integer } from '../src/sql.ts'
 
-Deno.test('integration: db arrays persist to SQLite and restore on restart', () => {
+Deno.test('integration: db arrays persist to SQLite and restore on restart', async () => {
   const path = Deno.makeTempFileSync({ suffix: '.db' })
   const schema = {
     items: table({ id: pk(), name: text(), qty: integer() }),
@@ -608,7 +609,8 @@ Deno.test('integration: db arrays persist to SQLite and restore on restart', () 
 
   // First "session" — write data
   {
-    const { aioDB, raw } = openDb(path, schema)
+    const db = createDB(path)
+    await initSchema(db, schema)
     const prev = { items: [] as unknown[] }
     const state = {
       items: [
@@ -616,19 +618,20 @@ Deno.test('integration: db arrays persist to SQLite and restore on restart', () 
         { id: 2, name: 'banana', qty: 7 },
       ],
     }
-    syncTables(raw, schema, state, prev)
-    aioDB.close()
+    await syncTables(db, schema, state, prev)
+    await db.close()
   }
 
   // Second "session" — reopen, load, verify
   {
-    const { aioDB, raw } = openDb(path, schema)
-    const loaded = loadTables(raw, schema)
-    assertEquals(loaded.items.length, 2)
+    const db = createDB(path)
+    await initSchema(db, schema)
+    const loaded = await loadTables(db, schema)
+    assertEquals(loaded.items!.length, 2)
     const items = loaded.items as { id: number; name: string; qty: number }[]
-    assertEquals(items[0].name, 'apple')
-    assertEquals(items[1].qty, 7)
-    aioDB.close()
+    assertEquals(items[0]!.name, 'apple')
+    assertEquals(items[1]!.qty, 7)
+    await db.close()
   }
 
   Deno.removeSync(path)

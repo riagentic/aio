@@ -12,15 +12,15 @@ const {
 Deno.test('getTemplates: UI types show correct file counts', () => {
   const ui = APP_TYPES.find(t => t.id === 'browser')!
   const tpls = getTemplates(ui)
-  assert(tpls[0].desc.includes('2 files'))
-  assert(tpls[1].desc.includes('3 files'))
+  assert(tpls[0]!.desc.includes('2 files'))
+  assert(tpls[1]!.desc.includes('3 files'))
 })
 
 Deno.test('getTemplates: headless types show correct file counts', () => {
   const hl = APP_TYPES.find(t => t.id === 'cli')!
   const tpls = getTemplates(hl)
-  assert(tpls[0].desc.includes('1 file'))
-  assert(tpls[1].desc.includes('2 files'))
+  assert(tpls[0]!.desc.includes('1 file'))
+  assert(tpls[1]!.desc.includes('2 files'))
 })
 
 // ── CLI templates ──
@@ -40,14 +40,14 @@ Deno.test('CLI templates: all have src/client.ts', () => {
 Deno.test('CLI templates: state types match server templates', () => {
   const tpls = getCliTemplates()
   // Empty: { count: number }
-  assert(tpls[0].fn('T')['src/client.ts'].includes('count: number'))
+  assert(tpls[0]!.fn('T')['src/client.ts']!.includes('count: number'))
   // Minimal: counter feature slice
-  assert(tpls[1].fn('T')['src/state.ts'].includes('counter:'))
+  assert(tpls[1]!.fn('T')['src/state.ts']!.includes('counter:'))
   // Medium: todo + TodoItem
-  const medState = tpls[2].fn('T')['src/state.ts']
+  const medState = tpls[2]!.fn('T')['src/state.ts']!
   assert(medState.includes('todo:') && medState.includes('TodoItem'))
   // Large: TodoState + UserState
-  const lgState = tpls[3].fn('T')['src/state.ts']
+  const lgState = tpls[3]!.fn('T')['src/state.ts']!
   assert(lgState.includes('TodoState') && lgState.includes('UserState'))
 })
 
@@ -66,7 +66,7 @@ Deno.test('applyAppType: injects headless: true for cli/service/remote-service',
   for (const id of ['cli', 'service', 'remote-service']) {
     const t = APP_TYPES.find(a => a.id === id)!
     const files = applyAppType(templateEmpty('T'), t, 'T')
-    assert(files['src/app.ts'].includes('headless: true'), `${id} missing headless: true`)
+    assert(files['src/app.ts']!.includes('headless: true'), `${id} missing headless: true`)
   }
 })
 
@@ -74,7 +74,7 @@ Deno.test('applyAppType: remote server types have auth hint', () => {
   for (const id of ['remote-browser', 'remote-service']) {
     const t = APP_TYPES.find(a => a.id === id)!
     const files = applyAppType(templateEmpty('T'), t, 'T')
-    assert(files['src/app.ts'].includes('users:'), `${id} missing auth hint`)
+    assert(files['src/app.ts']!.includes('users:'), `${id} missing auth hint`)
   }
 })
 

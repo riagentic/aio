@@ -17,27 +17,27 @@ sh -c "$(curl -fsSL ...)" -- my-app --type=electron --template=minimal
 
 App types: `browser`, `electron`, `android`, `cli`, `service`, `remote-browser`, `remote-service`, `remote-electron`, `remote-cli`, `remote-android`. Templates: `empty`, `minimal`, `medium`, `large`.
 
-## Option B: JSR dependency (library only)
-
-If you want just the library (types, feature, flow, hooks) without the build toolchain:
+## Option B: JSR (recommended for new projects)
 
 ```sh
-deno add @riagentic/aio
+deno add jsr:@riagentic/aio
 ```
 
 Then import:
 ```ts
-import { feature, aio, flow } from '@riagentic/aio'
+import { feature, aio } from 'aio'
 ```
 
-> **Note:** JSR gives you the library API. The full development experience (dev server with hot reload, `deno task compile`, app manager, Electron/Android packaging) requires the scaffolder from Option A.
+Use the `deno.json` from the [README](../README.md#get-started) — it includes all imports, compiler options, and compile tasks for every target.
+
+> **Note:** JSR gives you the full library + build toolchain via `jsr:@riagentic/aio/src/am` and `jsr:@riagentic/aio/src/build`. The scaffolder (Option A) additionally provides interactive project creation and template selection.
 
 ## Manual setup
 
 ### Prerequisites
 
 - [Deno 2.6+](https://deno.land)
-- Electron (optional — for desktop window): `deno add npm:electron && deno approve-scripts npm:electron`
+- Electron (optional — for desktop window): `deno task install:electron`
 
 After creating `deno.json` and writing files, install dependencies:
 ```sh
@@ -57,28 +57,29 @@ deno install
     "jsxImportSourceTypes": "@types/react"
   },
   "imports": {
+    "aio":          "jsr:@riagentic/aio@^0.9",
     "@types/react": "npm:@types/react@^18",
-    "react": "npm:react@^18",
-    "react-dom": "npm:react-dom@^18",
-    "aio": "./dep/aio/mod.ts",
-    "esbuild": "npm:esbuild@^0.24",
-    "immer": "npm:immer@^10",
-    "@std/path": "jsr:@std/path@^1"
+    "react":        "npm:react@^18",
+    "react-dom":    "npm:react-dom@^18",
+    "esbuild":      "npm:esbuild@^0.24"
   },
   "tasks": {
-    "dev": "deno run -A src/app.ts",
-    "am": "deno run -A dep/aio/src/am.ts",
-    "test": "deno test -A --unstable-kv dep/aio/tests/",
-    "compile": "deno run -A dep/aio/src/build.ts --compile",
-    "compile:electron": "deno run -A dep/aio/src/build.ts --compile --electron",
-    "compile:electron:remote": "deno run -A dep/aio/src/build.ts --compile --electron --remote",
-    "compile:android": "deno run -A dep/aio/src/build.ts --android"
+    "dev":                    "deno run -A src/app.ts",
+    "am":                     "deno run -A jsr:@riagentic/aio@^0.9/src/am",
+    "test":                   "deno test -A --unstable-kv tests/",
+    "compile:browser":        "deno run -A jsr:@riagentic/aio@^0.9/src/build --compile",
+    "compile:electron":       "deno run -A jsr:@riagentic/aio@^0.9/src/build --compile --electron",
+    "compile:electron:remote":"deno run -A jsr:@riagentic/aio@^0.9/src/build --client",
+    "compile:cli":            "deno run -A jsr:@riagentic/aio@^0.9/src/build --compile --cli",
+    "compile:service":        "deno run -A jsr:@riagentic/aio@^0.9/src/build --compile --service --headless",
+    "compile:android":        "deno run -A jsr:@riagentic/aio@^0.9/src/build --android"
   }
 }
 ```
 
 - `"title"` — app name, used as default window title and binary name (lowercased slug) when compiling. Optional, falls back to `"AIO App"`.
-- `"esbuild"` — required for dev mode transpilation. Excluded from compiled binary automatically.
+- `"esbuild"` — required for dev mode transpilation and bundle step. Excluded from compiled binary automatically.
+- `immer`, `@std/path` — internal framework deps, resolved automatically via JSR. Do **not** add them to your import map.
 
 ### File structure
 

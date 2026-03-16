@@ -135,7 +135,7 @@ export function resolvePath(obj: unknown, path: string): { found: true; value: u
   const braceMatch = path.match(/^(.*?)\.?\{([^}]+)\}$/)
   if (braceMatch) {
     const prefix = braceMatch[1]
-    const picks = braceMatch[2].split(',').map(s => s.trim())
+    const picks = braceMatch[2]!.split(',').map(s => s.trim())
     // Resolve prefix (or use root if empty)
     const parent = prefix ? resolvePath(obj, prefix) : { found: true as const, value: obj }
     if (!parent.found) return parent

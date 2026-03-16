@@ -8,13 +8,14 @@ import { deepMerge } from './deep-merge.ts'
 import { createDispatch, type AioError, type PerfMode, type PerfBudget } from './dispatch.ts'
 import { createTT, record, undo, redo, travelTo, pause, resume, stateAt, toBroadcast, type TTState, type PerfMetric } from './time-travel.ts'
 import { isScheduleEffect, createScheduleManager, type ScheduleEffect, type ScheduleDef } from './schedule.ts'
-import { openDb, loadTables, syncTables, type TableDef, type AioDB } from './sql.ts'
+import { createDB, initSchema, loadTables, syncTables, type DB } from './db/mod.ts'
+import { type TableDef } from './sql.ts'
 import { AppLock, resolveAppId, type SingletonMode } from './single-instance-lock.ts'
 import { composeFeatures, bindFeature, type FeatureEntry, type FeatureDef, type ComposedFeatures, type FeatureStatus } from './feature.ts'
-import { AioLogger, type LogConfig } from './logger.ts'
+import { AioLogger, setLogger, type LogConfig } from './logger.ts'
 
 /** Framework version — printed by --version, checked in tests */
-export const VERSION = '0.8.4'
+export const VERSION = '0.9.0'
 
 /** Validates that framework version matches deno.json version at build time */
 function validateVersion(): void {
@@ -47,6 +48,7 @@ export type UiConfig = {
   height?: number      // default: 600
   showStatus?: boolean // default: true — show reconnection indicator
   transport?: 'uds' | 'ws' | 'auto'  // default: 'auto' — UDS on linux/mac+electron, WS otherwise
+  syncRate?: number                   // throttle UI updates: max 1 push per N ms — default: 10 (100fps), 0 = microtask-only coalescing
 }
 
 // Everything aio.run() needs to wire your app
@@ -94,7 +96,7 @@ export type AioApp<S = unknown, A = unknown> = {
   getState: () => S
   snapshot?: () => string          // server-only (undefined in standalone)
   loadSnapshot?: (json: string) => void  // server-only (undefined in standalone)
-  db?: AioDB     // SQLite — Level 2 ORM + Level 3 raw SQL (undefined in standalone)
+  db?: DB        // async SQLite — query/execute/transaction (undefined in standalone)
   close: () => Promise<void>
   mode?: string  // 'standalone' in Android WebView builds — branch effects accordingly
   port?: number  // server port — available after aio.run(), useful for connectCli()
@@ -134,7 +136,7 @@ const middleware = {
     return (action, _state) => {
       const type = (action as { type: string }).type
       if (filter) {
-        const prefix = type.split(':')[0]?.toLowerCase()
+        const prefix = type.split(':')[0]?.toLowerCase() ?? ''
         if (!filter.has(prefix)) return action
       }
       const source = (action as { _source?: string })._source
@@ -227,7 +229,7 @@ const log = {
 export type Lint = { ok: string[]; warn: string[]; hint: string[]; fail: string[] }
 
 /** Checks state, config, App.tsx existence, and common mistakes */
-export async function lint(state: unknown, config: { reduce?: unknown; execute?: unknown }, baseDir: string, prod = false, headless = false): Promise<Lint> {
+export async function lint(state: unknown, config: { reduce?: unknown; execute?: unknown }, baseDir: string, prod = false, headless = false, useElectron = true): Promise<Lint> {
   const r: Lint = { ok: [], warn: [], hint: [], fail: [] }
 
   if (state == null) r.fail.push('initial state is null/undefined')
@@ -294,7 +296,7 @@ export async function lint(state: unknown, config: { reduce?: unknown; execute?:
       // Check execute.ts for swapped params — first param named 'effect' suggests old (effect, app) order
       if (entry.name === 'execute.ts') {
         const match = content.match(/function\s+execute\s*\(\s*(\w+)/)
-        if (match && /^effect$/i.test(match[1])) {
+        if (match && /^effect$/i.test(match[1] ?? '')) {
           r.hint.push(`execute.ts: first param is "${match[1]}" — signature is execute(app, effect), matching reduce(state, action)`)
         }
         // Check for sync I/O anti-patterns
@@ -317,13 +319,13 @@ export async function lint(state: unknown, config: { reduce?: unknown; execute?:
         // Bare side-effect imports: import 'foo'
         for (const m of content.matchAll(/(?:^|\n)\s*import\s+['"]([^'"]+)['"]/g)) {
           const spec = m[1]
-          if (spec.startsWith('.') || spec.startsWith('/') || BROWSER_IMPORTS.has(spec)) continue
+          if (!spec || spec.startsWith('.') || spec.startsWith('/') || BROWSER_IMPORTS.has(spec)) continue
           r.warn.push(`${entry.name}: import "${spec}" won't work in browser — dev mode transpiles but doesn't bundle. Move this import to a server-side .ts file, or use the npm package via an effect.`)
         }
         // Named/default imports and re-exports: import { x } from 'foo', export { x } from 'foo'
         for (const m of content.matchAll(/(?:import|export)\s+.*?\s+from\s+['"]([^'"]+)['"]/g)) {
           const spec = m[1]
-          if (spec.startsWith('.') || spec.startsWith('/') || BROWSER_IMPORTS.has(spec)) continue
+          if (!spec || spec.startsWith('.') || spec.startsWith('/') || BROWSER_IMPORTS.has(spec)) continue
           // import type is erased by TS — never reaches the browser
           if (m[0].startsWith('import type ') || m[0].startsWith('import type{')) continue
           r.warn.push(`${entry.name}: import "${spec}" won't work in browser — dev mode transpiles but doesn't bundle. Move this import to a server-side .ts file, or use the npm package via an effect.`)
@@ -342,8 +344,8 @@ export async function lint(state: unknown, config: { reduce?: unknown; execute?:
     if (!esbuildFound) r.warn.push('esbuild not installed — dev mode needs it for TSX transpilation')
   }
 
-  // Check electron install scripts — Deno requires manual approval
-  if (!prod) {
+  // Check electron install scripts — only relevant when actually running in Electron mode
+  if (!prod && useElectron) {
     try {
       const electronDir = join(Deno.cwd(), 'node_modules', 'electron', 'dist')
       await Deno.stat(electronDir)
@@ -351,7 +353,7 @@ export async function lint(state: unknown, config: { reduce?: unknown; execute?:
       try {
         // electron package exists but dist/ missing → scripts not approved
         await Deno.stat(join(Deno.cwd(), 'node_modules', 'electron'))
-        r.hint.push('electron installed but dist/ missing — run `deno approve-scripts` then `deno install`')
+        r.hint.push('electron installed but dist/ missing — run `deno task install:electron`')
       } catch { /* electron not installed at all — handled by electron.ts */ }
     }
   }
@@ -735,6 +737,7 @@ async function run(a: any, b?: any): Promise<AioApp<any, any>> {
     const logCfg = fc.logging === true ? {} : fc.logging
     const logger = logCfg ? new AioLogger({ ...logCfg, appName: appId }) : null
     if (logger) await logger.init()
+    setLogger(logger)
 
     // Store composed for useFeature (used by getUIState to expose feature names)
     ;(globalThis as Record<string, unknown>).__aioFeatures = composed
@@ -779,7 +782,7 @@ async function run(a: any, b?: any): Promise<AioApp<any, any>> {
           const maxMigration = Math.min(targetVersion, migrations.length)
           for (let v = storedVersion; v < maxMigration; v++) {
             try {
-              s = migrations[v](s)
+              s = migrations[v]!(s)
               log.info(`migration: v${v} → v${v + 1}`)
             } catch (e) {
               log.error(`migration v${v} → v${v + 1} failed: ${e} — falling back to initialState`)
@@ -850,6 +853,7 @@ async function run(a: any, b?: any): Promise<AioApp<any, any>> {
       }) as AioConfig<Record<string, unknown>, unknown, unknown>['onStart'],
       onStop: () => {
         logger?.onStop()
+        setLogger(null)
         if (appRef) {
           composed.destroyAll({ dispatch: (a) => appRef!.dispatch(a), getState: () => appRef!.getState() })
         }
@@ -949,9 +953,6 @@ async function _run<S, A, E>(initialState: S, config: AioConfig<S, A, E>): Promi
   }
 
   const headless = cli.headless ?? config.headless ?? false
-  const result = await lint(initialState, config, baseDir, prod, headless)
-  printLint(result)
-
   const { reduce, execute, onAction, onEffect, onStart, onStop, onError } = config
   const shouldPersist = (cli.persist ?? config.persist) !== false
   const getUIState = config.stateForUI ?? ((s: S, _user?: AioUser) => s)
@@ -959,6 +960,9 @@ async function _run<S, A, E>(initialState: S, config: AioConfig<S, A, E>): Promi
   const persistKey = config.persistKey ?? 'state'
   const persistMode = config.persistMode ?? 'single'
   const ui = config.ui ?? {}
+  const useElectronEarly = !headless && (cli.electron ?? ui.electron) !== false
+  const result = await lint(initialState, config, baseDir, prod, headless, useElectronEarly)
+  printLint(result)
   const port = cli.port ?? config.port ?? 8000
 
   // Title: CLI > config > deno.json "title" > fallback
@@ -971,18 +975,19 @@ async function _run<S, A, E>(initialState: S, config: AioConfig<S, A, E>): Promi
   let kvDb: SkvInstance | null = null
   let state = initialState
 
-  // SQLite setup — opens DB, creates tables (data loaded after KV merge below)
+  // SQLite setup — spawns worker, creates tables (data loaded after KV merge below)
   const dbSchema = config.db
   const dbKeys = dbSchema ? Object.keys(dbSchema) : []
-  let sqlDb: ReturnType<typeof openDb> | null = null
+  let asyncDb: DB | null = null
   if (dbSchema && Object.keys(dbSchema).length) {
     try {
       const dbPath = resolveDbPath(appId)
-      sqlDb = openDb(dbPath, dbSchema)
+      asyncDb = createDB(dbPath)
+      await initSchema(asyncDb, dbSchema)
       log.info(`sqlite: ${dbKeys.length} table(s) at ${dbPath}`)
     } catch (e) {
       log.warn(`sqlite: unavailable — ${e}`)
-      sqlDb = null
+      if (asyncDb) { await asyncDb.close().catch(() => {}); asyncDb = null }
     }
   }
 
@@ -1027,8 +1032,8 @@ async function _run<S, A, E>(initialState: S, config: AioConfig<S, A, E>): Promi
   }
 
   // Load SQLite data into state (once, after KV merge — SQLite wins for db-managed keys)
-  if (sqlDb && dbSchema) {
-    const loaded = loadTables(sqlDb.raw, dbSchema)
+  if (asyncDb && dbSchema) {
+    const loaded = await loadTables(asyncDb, dbSchema)
     state = { ...(state as Record<string, unknown>), ...loaded } as S
   }
 
@@ -1045,13 +1050,13 @@ async function _run<S, A, E>(initialState: S, config: AioConfig<S, A, E>): Promi
   // Debounced persistence — fire-and-forget during normal operation for throughput.
   // Data loss possible on crash between debounce intervals. Graceful shutdown awaits flushPersist().
   function schedulePersist(): void {
-    if ((!kvDb && !sqlDb) || persistTimer || shuttingDown) return
-    persistTimer = setTimeout(() => {
+    if ((!kvDb && !asyncDb) || persistTimer || shuttingDown) return
+    persistTimer = setTimeout(async () => {
       persistTimer = null
       // SQLite sync — reference equality check per table
-      if (sqlDb && dbSchema) {
+      if (asyncDb && dbSchema) {
         try {
-          syncTables(sqlDb.raw, dbSchema, state as Record<string, unknown>, prevDbState)
+          await syncTables(asyncDb, dbSchema, state as Record<string, unknown>, prevDbState)
           log.debug('persist: sqlite synced')
         } catch (e) { log.error(`persist: sqlite sync failed — ${e}`) }
         prevDbState = { ...(state as Record<string, unknown>) }
@@ -1091,9 +1096,9 @@ async function _run<S, A, E>(initialState: S, config: AioConfig<S, A, E>): Promi
   async function flushPersist(): Promise<void> {
     if (persistTimer) { clearTimeout(persistTimer); persistTimer = null }
     // Flush SQLite
-    if (sqlDb && dbSchema) {
+    if (asyncDb && dbSchema) {
       try {
-        syncTables(sqlDb.raw, dbSchema, state as Record<string, unknown>, prevDbState)
+        await syncTables(asyncDb, dbSchema, state as Record<string, unknown>, prevDbState)
         prevDbState = { ...(state as Record<string, unknown>) }
       } catch (e) { log.error(`persist: sqlite flush failed — ${e}`) }
     }
@@ -1156,6 +1161,10 @@ async function _run<S, A, E>(initialState: S, config: AioConfig<S, A, E>): Promi
 
   // UDS handle — created after dispatch for electron+UDS transport
   let udsHandle: UDSHandle | null = null
+  const udsSyncRate = ui.syncRate ?? 10
+  let udsQueued = false
+  let udsDirty = false
+  let udsThrottle: ReturnType<typeof setTimeout> | null = null
 
   // Track per-action performance for dev-mode time-travel panel
   let lastPerf: PerfMetric | undefined
@@ -1203,10 +1212,22 @@ async function _run<S, A, E>(initialState: S, config: AioConfig<S, A, E>): Promi
       if (!processed) return  // all actions dropped by beforeReduce — skip persist + broadcast
       if (!tt?.paused) { schedulePersist() }
       server.broadcast()
-      // Also broadcast to UDS clients (Electron IPC bridge)
+      // Also broadcast to UDS clients (Electron IPC bridge) — throttled same as WS
       if (udsHandle) {
-        const uiState = getUIState(state)
-        udsHandle.broadcast(JSON.stringify(uiState))
+        udsDirty = true
+        if (!udsQueued && !(udsSyncRate > 0 && udsThrottle)) {
+          udsQueued = true
+          queueMicrotask(() => {
+            udsQueued = false; udsDirty = false
+            udsHandle!.broadcast(JSON.stringify(getUIState(state)))
+            if (udsSyncRate > 0) {
+              udsThrottle = setTimeout(() => {
+                udsThrottle = null
+                if (udsDirty) { udsDirty = true; udsHandle!.broadcast(JSON.stringify(getUIState(state))) }
+              }, udsSyncRate)
+            }
+          })
+        }
       }
     },
     log, debug: VERBOSE,
@@ -1222,7 +1243,7 @@ async function _run<S, A, E>(initialState: S, config: AioConfig<S, A, E>): Promi
     dispatch,
     getState: () => state,
     port,
-    db: sqlDb?.aioDB,
+    db: asyncDb ?? undefined,
     snapshot: () => JSON.stringify(state),
     loadSnapshot: (json: string) => {
       const parsed = JSON.parse(json)
@@ -1274,7 +1295,7 @@ async function _run<S, A, E>(initialState: S, config: AioConfig<S, A, E>): Promi
     }
     if (udsHandle) { try { udsHandle.shutdown() } catch (e) { log.error(`shutdown: uds — ${e}`) } }
     try { await server.shutdown() } catch (e) { log.error(`shutdown: server — ${e}`) }
-    try { sqlDb?.aioDB.close() } catch (e) { log.error(`shutdown: sqlite — ${e}`) }
+    try { await asyncDb?.close() } catch (e) { log.error(`shutdown: sqlite — ${e}`) }
     try { kvDb?.close() } catch (e) { log.error(`shutdown: kv — ${e}`) }
     _running = false
   }
@@ -1357,6 +1378,7 @@ async function _run<S, A, E>(initialState: S, config: AioConfig<S, A, E>): Promi
     showStatus: ui.showStatus,
     deltaThreshold: config.deltaThreshold,
     maxConnections: config.maxConnections,
+    syncRate: ui.syncRate,
     onConnect: config.onConnect,
     onDisconnect: config.onDisconnect,
     // Health endpoint — feature status when available, basic info otherwise
@@ -1386,7 +1408,7 @@ async function _run<S, A, E>(initialState: S, config: AioConfig<S, A, E>): Promi
       getSchedules: () => scheduleManager.active(),
       ...(tt ? { getTTHistory: () => toBroadcast(tt!) } : {}),
       ...(shouldPersist ? { forcePersist: () => schedulePersist() } : {}),
-      ...(sqlDb ? { sqlQuery: (sql: string) => sqlDb!.aioDB.query(sql) } : {}),
+      ...(asyncDb ? { sqlQuery: async (sql: string) => (await asyncDb!.query(sql)).rows } : {}),
       shutdown: () => shutdown().then(() => Deno.exit(0)),
       startedAt: Date.now(),
     },
@@ -1475,7 +1497,7 @@ async function _run<S, A, E>(initialState: S, config: AioConfig<S, A, E>): Promi
     const udsConfig = udsHandle ? { socketPath: udsHandle.socketPath, baseDir: udsBaseDir, title, hasCSS: udsHasCSS } : undefined
     launchElectron(electronUrl, log, meta, udsConfig)
       .then(proc => {
-        if (!proc) return
+        if (!proc) { log.warn(`Electron did not launch — open ${url} in a browser`); return }
         _electronProc = proc
         proc.status
           .then(s => {

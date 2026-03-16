@@ -689,7 +689,7 @@ Deno.test('trojan: POST /tt routes undo command to onTTCommand', async () => {
     const data = await resp.json()
     assertEquals(data.ok, true)
     assertEquals(ttCmds.length, 1)
-    assertEquals(ttCmds[0].cmd, 'undo')
+    assertEquals(ttCmds[0]!.cmd, 'undo')
 
     // Test goto with arg
     const resp2 = await fetch(`http://127.0.0.1:${TT_PORT}/__trojan/tt`, {
@@ -700,8 +700,8 @@ Deno.test('trojan: POST /tt routes undo command to onTTCommand', async () => {
     assertEquals(resp2.status, 200)
     await resp2.body?.cancel()
     assertEquals(ttCmds.length, 2)
-    assertEquals(ttCmds[1].cmd, 'goto')
-    assertEquals(ttCmds[1].arg, 3)
+    assertEquals(ttCmds[1]!.cmd, 'goto')
+    assertEquals(ttCmds[1]!.arg, 3)
   } finally {
     await server.shutdown()
     await Deno.remove(dir, { recursive: true })
@@ -736,7 +736,7 @@ Deno.test('trojan: POST /sql blocks INSERT', async () => {
     trojan: {
       getState: () => ({}),
       getSchedules: () => [],
-      sqlQuery: () => [],
+      sqlQuery: async () => [],
       startedAt: Date.now(),
     },
   })

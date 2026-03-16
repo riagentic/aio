@@ -28,6 +28,7 @@ export interface ServerConfig {
   showStatus?: boolean     // show reconnection indicator (default: true)
   deltaThreshold?: number  // 0-1: ratio of changed keys for delta vs full broadcast (default: 0.5)
   maxConnections?: number  // max concurrent WebSocket clients (default: 100)
+  syncRate?: number        // throttle UI updates: max 1 push per N ms (default: 10 = 100fps)
   allowedOrigins?: string[]  // extra allowed origins beyond localhost (e.g. Docker, reverse proxy)
   onConnect?: (user?: AioUser) => void
   onDisconnect?: (user?: AioUser) => void
@@ -42,7 +43,7 @@ export interface ServerConfig {
     getSchedules: () => string[]             // active schedule IDs
     getTTHistory?: () => unknown             // time-travel entries (wire format)
     forcePersist?: () => void                // trigger immediate persist
-    sqlQuery?: (sql: string) => unknown[]    // read-only SQL query
+    sqlQuery?: (sql: string) => Promise<unknown[]>  // read-only SQL query (async)
     shutdown?: () => Promise<void>           // graceful shutdown
     startedAt: number                        // Date.now() at boot
   }
@@ -179,24 +180,72 @@ function generateHTML(title: string, prod: boolean, hasCSS: boolean, showStatus?
     import { createRoot } from 'react-dom/client'
     const esc = s => s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;')
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:'
+    // Dev reload WS — always active so live reload works even without useAio
+    const _tk = new URLSearchParams(location.search).get('token')
+    const _wsUrl = proto + '//' + location.host + '/ws' + (_tk ? '?token=' + encodeURIComponent(_tk) : '')
+    let _bootId = null
+    function _devWs() {
+      const ws = new WebSocket(_wsUrl)
+      ws.onmessage = ev => {
+        if (ev.data === '__reload') { ws.close(); location.reload() }
+        else if (ev.data === '__css') {
+          const link = document.querySelector('link[rel="stylesheet"][href*="style.css"]')
+          if (link) link.href = '/style.css?t=' + Date.now()
+        } else if (typeof ev.data === 'string' && ev.data.startsWith('__boot:')) {
+          const id = ev.data.slice(7)
+          if (_bootId && _bootId !== id) { ws.close(); location.reload() }
+          _bootId = id
+        }
+      }
+      ws.onclose = () => setTimeout(_devWs, 2000)
+    }
+    _devWs()
     try {
       const { default: App } = await import('/App.tsx?v=' + Date.now())
       createRoot(document.getElementById('root')).render(createElement(App))
     } catch (e) {
+      console.error('[aio] App load failed:', e)
       const r = await fetch('/__aio/error')
-      const msg = r.ok ? await r.text() : e.message
-      document.getElementById('root').innerHTML =
-        '<pre style="margin:2rem;padding:1.5rem;background:#1e1e1e;color:#f44;border-radius:8px;font:14px/1.6 monospace;white-space:pre-wrap;overflow:auto">'
-        + '<b style="color:#ff6b6b">Build Error</b>\\n\\n'
-        + '<span style="color:#ccc">' + esc(msg) + '</span></pre>'
-      const _tk = new URLSearchParams(location.search).get('token')
-      const _wsUrl = proto + '//' + location.host + '/ws' + (_tk ? '?token=' + encodeURIComponent(_tk) : '')
-      function _errWs() {
-        const ws = new WebSocket(_wsUrl)
-        ws.onmessage = (ev) => { if (ev.data === '__reload') { ws.close(); location.reload() } }
-        ws.onclose = () => setTimeout(_errWs, 2000)
+      const errData = r.ok ? await r.json().catch(() => null) : null
+      const hasServerErr = errData && errData.errors && errData.errors.length
+      const label = hasServerErr ? 'Build Error' : 'Runtime Error'
+      fetch('/__aio/client-error', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message: e?.message, stack: e?.stack })
+      }).catch(() => {})
+      function mkBuildErrors(errors) {
+        return errors.map(function(err) {
+          const prefix = err.line != null ? String(err.line) + ' | ' : ''
+          const caretDiv = (err.col != null && prefix)
+            ? '<div style="padding-left:calc(' + (err.col + prefix.length) + '*1ch);color:#ff6b6b;line-height:1">^</div>'
+            : ''
+          return '<div style="margin-bottom:1.5rem">'
+            + (err.file ? '<div style="color:#569cd6;margin-bottom:.35rem">' + esc(err.file) + (err.line != null ? ':' + err.line : '') + (err.col != null ? ':' + err.col : '') + '</div>' : '')
+            + '<div style="color:#f1fa8c;margin-bottom:.5rem">' + esc(err.text) + '</div>'
+            + (err.lineText ? '<div style="background:#0d1117;padding:.5rem .85rem;border-radius:4px;border-left:3px solid #ff6b6b"><span style="color:#555">' + esc(prefix) + '</span><span style="color:#ddd">' + esc(err.lineText) + '</span>' + caretDiv + '</div>' : '')
+            + '</div>'
+        }).join('')
       }
-      _errWs()
+      function mkStack(stack) {
+        if (!stack) return '<div style="color:#555">(no stack trace)</div>'
+        const lines = stack.split('\\n')
+        const frames = lines.slice(1).map(function(f) {
+          const t = f.trim()
+          const dim = !t || t.includes('node_modules') || (t.includes('deno:') && !t.includes(location.host))
+          return '<div style="padding:.05rem 0;color:' + (dim ? '#444' : '#bbb') + '">' + esc(t) + '</div>'
+        })
+        return '<div style="color:#f1fa8c;margin-bottom:.75rem">' + esc(lines[0]) + '</div>'
+          + '<div style="background:#0d1117;padding:.6rem .9rem;border-radius:4px">' + frames.join('') + '</div>'
+      }
+      const body = hasServerErr ? mkBuildErrors(errData.errors) : mkStack(e?.stack)
+      document.getElementById('root').innerHTML =
+        '<div style="margin:0;padding:1.75rem 2rem;min-height:100vh;background:#141414;font:13px/1.7 monospace;box-sizing:border-box">'
+        + '<div style="max-width:920px">'
+        + '<div style="color:#ff6b6b;font-size:1.1rem;font-weight:700;margin-bottom:1.25rem;padding-bottom:.75rem;border-bottom:1px solid #2a2a2a">&#9888; ' + label + '</div>'
+        + body
+        + '<div style="margin-top:1.5rem;padding-top:.75rem;border-top:1px solid #2a2a2a;color:#444;font-size:11px">F12 DevTools &nbsp;&#183;&nbsp; am errors &nbsp;&#183;&nbsp; ' + new Date().toLocaleTimeString() + '</div>'
+        + '</div></div>'
     }
   </script>
 </body>
@@ -373,18 +422,28 @@ export function createServer(config: ServerConfig): ServerHandle {
   const WS_BYTES_PER_SEC = 5_000_000  // 5MB/s per client — prevents bandwidth DoS
   type ClientMeta = { id: string; user?: AioUser; lastState: unknown; lastKeyJsons: Record<string, string>; msgCount: number; bytesThisSec: number; msgResetTimer?: ReturnType<typeof setTimeout> }
   const connections = new Map<WebSocket, ClientMeta>()
+  const syncRate = config.syncRate ?? 10
   let broadcastQueued = false
+  let broadcastDirty = false
+  let broadcastThrottle: ReturnType<typeof setTimeout> | null = null
   let lastError = ''  // last transpile error — served at /__aio/error
+  let lastErrorData: { errors: Array<{ text: string; file?: string; line?: number; col?: number; lineText?: string }> } | null = null
   const bootId = crypto.randomUUID().slice(0, 8)  // unique per server start — triggers browser reload on reconnect
   const noCache = prod ? {} : { 'Cache-Control': 'no-store' } as Record<string, string>  // prevent Electron/browser caching in dev
 
-  // Coalesced broadcast — batches multiple state changes into one push
+  // Coalesced + throttled broadcast — batches synchronous bursts via microtask; optionally throttles async streams
+  // Leading edge fires immediately (after microtask coalesce); trailing flush ensures last state always arrives
   // Per-client delta: each client tracks its own lastState/lastKeyJsons (supports getUIState per client)
   function broadcast(): void {
-    if (broadcastQueued) return
+    broadcastDirty = true
+
+    if (broadcastQueued) return        // microtask already pending this tick
+    if (syncRate > 0 && broadcastThrottle) return  // inside throttle window — trailing flush will catch it
+
     broadcastQueued = true
     queueMicrotask(() => {
       broadcastQueued = false
+      broadcastDirty = false
       try {
         for (const [ws, meta] of connections) {
           if (ws.readyState !== WebSocket.OPEN) continue
@@ -404,6 +463,13 @@ export function createServer(config: ServerConfig): ServerHandle {
           try { ws.send(delta.msg) } catch { /* client disconnecting */ }
         }
       } catch (e) { debug(`broadcast error: ${e}`) }
+
+      if (syncRate > 0) {
+        broadcastThrottle = setTimeout(() => {
+          broadcastThrottle = null
+          if (broadcastDirty) broadcast()  // trailing flush — last state always reaches UI
+        }, syncRate)
+      }
     })
   }
 
@@ -546,7 +612,15 @@ export function createServer(config: ServerConfig): ServerHandle {
     }
 
     if (!prod && pathname === '/__aio/error') {
-      return new Response(lastError, { headers: { 'Content-Type': 'text/plain' } })
+      return new Response(JSON.stringify(lastErrorData), { headers: { 'Content-Type': 'application/json' } })
+    }
+
+    if (!prod && pathname === '/__aio/client-error' && req?.method === 'POST') {
+      try {
+        const body = await req.json() as { message?: string; stack?: string }
+        debug(`client error: ${body.stack ?? body.message ?? '(no details)'}`)
+      } catch { /* ignore malformed body */ }
+      return new Response(null, { status: 204 })
     }
 
     if (pathname === '/__snapshot' && config.getSnapshot && config.loadSnapshot) {
@@ -684,7 +758,7 @@ export function createServer(config: ServerConfig): ServerHandle {
             if (/^(INSERT|UPDATE|DELETE|DROP|ALTER|CREATE|ATTACH|DETACH|REINDEX|REPLACE|PRAGMA|WITH)\b/.test(first)) {
               return err('trojan SQL is read-only — use dispatch for mutations', 403)
             }
-            return json(trojan.sqlQuery(query))
+            return json(await trojan.sqlQuery(query))
           } catch (e) { return err(String(e instanceof Error ? e.message : e)) }
         }
         if (route === 'persist') {
@@ -750,10 +824,17 @@ export function createServer(config: ServerConfig): ServerHandle {
         body = await transpile(body, filepath, debug)
         contentType = 'application/javascript'
         lastError = ''
+        lastErrorData = null
       } catch (err) {
         const formatted = fmtEsbuildError(err, filename)
         debug(`transpile error: ${formatted}`)
         lastError = formatted
+        const rawMsgs = (err as { errors?: EsbuildMessage[] }).errors ?? []
+        lastErrorData = {
+          errors: rawMsgs.length
+            ? rawMsgs.map(m => ({ text: m.text, file: m.location?.file ?? filename, line: m.location?.line, col: m.location?.column, lineText: m.location?.lineText }))
+            : [{ text: formatted }],
+        }
         return new Response(
           `throw new Error(${JSON.stringify(lastError)})`,
           { status: 200, headers: { 'Content-Type': 'application/javascript', ...noCache } },

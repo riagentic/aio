@@ -59,7 +59,7 @@ async function _readLine(): Promise<string | null> {
   if (lines.length > 0 && lines[lines.length - 1] === '') lines.pop()
   if (lines.length === 0) return null
   _stdinBuf.push(...lines.slice(1))
-  return lines[0]
+  return lines[0] ?? null
 }
 
 async function prompt(question: string, fallback?: string): Promise<string> {
@@ -77,8 +77,8 @@ async function prompt(question: string, fallback?: string): Promise<string> {
 async function menu(title: string, options: { label: string; desc: string }[]): Promise<number> {
   console.log(`\n${c.bold}${title}${c.reset}\n`)
   for (let i = 0; i < options.length; i++) {
-    console.log(`  ${c.cyan}${i + 1}${c.reset}  ${c.bold}${options[i].label}${c.reset}`)
-    console.log(`     ${c.dim}${options[i].desc}${c.reset}`)
+    console.log(`  ${c.cyan}${i + 1}${c.reset}  ${c.bold}${options[i]!.label}${c.reset}`)
+    console.log(`     ${c.dim}${options[i]!.desc}${c.reset}`)
   }
   console.log()
   while (true) {
@@ -93,19 +93,19 @@ async function groupedMenu(): Promise<AppType> {
   const pad = (n: number) => String(n).padStart(2)
   console.log(`  ${c.magenta}Local${c.reset} ${c.dim}— self-contained, runs on the device${c.reset}`)
   for (let i = 0; i < 5; i++) {
-    const t = APP_TYPES[i]
+    const t = APP_TYPES[i]!
     console.log(`   ${c.cyan}${pad(i + 1)}${c.reset}  ${c.bold}${t.label}${c.reset}  ${c.dim}${t.desc}${c.reset}`)
   }
   console.log(`\n  ${c.magenta}Remote${c.reset} ${c.dim}— exposed server or thin client${c.reset}`)
   for (let i = 5; i < APP_TYPES.length; i++) {
-    const t = APP_TYPES[i]
+    const t = APP_TYPES[i]!
     console.log(`   ${c.cyan}${pad(i + 1)}${c.reset}  ${c.bold}${t.label}${c.reset}  ${c.dim}${t.desc}${c.reset}`)
   }
   console.log()
   while (true) {
     const answer = await prompt(`Choose (1-${APP_TYPES.length})`)
     const n = parseInt(answer)
-    if (n >= 1 && n <= APP_TYPES.length) return APP_TYPES[n - 1]
+    if (n >= 1 && n <= APP_TYPES.length) return APP_TYPES[n - 1]!
   }
 }
 
@@ -148,12 +148,11 @@ async function downloadFramework(projectDir: string): Promise<void> {
   const extractedDir = entries[0]
   if (!extractedDir) throw new Error('Could not find extracted directory')
 
-  // Copy framework dirs from repo root into user's dep/aio/
   const repoDir = `${tmpDir}/${extractedDir}`
   const destAio = `${projectDir}/dep/aio`
   await Deno.mkdir(destAio, { recursive: true })
   for (const dir of ['src', 'tests', 'docs', 'utils', 'scripts', 'android-template']) {
-    try { await copyDir(`${repoDir}/${dir}`, `${destAio}/${dir}`) } catch { /* optional dir */ }
+    try { await copyDir(`${repoDir}/${dir}`, `${destAio}/${dir}`) } catch { /* optional */ }
   }
   await Deno.copyFile(`${repoDir}/mod.ts`, `${destAio}/mod.ts`)
   await Deno.remove(tmpDir, { recursive: true })
@@ -174,11 +173,9 @@ async function mirrorFramework(projectDir: string): Promise<void> {
   try {
     await Deno.stat(`${REPO_ROOT}/mod.ts`)
   } catch {
-    console.error(`${c.red}✗${c.reset} Framework not found at ${REPO_ROOT}`)
-    console.error(`  --mirror requires running from the aio repo`)
+    console.error(`${c.red}✗${c.reset} Framework not found at ${REPO_ROOT} — --mirror requires running from the aio repo`)
     Deno.exit(1)
   }
-  // Symlink individual framework dirs into dep/aio/ (avoids pulling in binaries, .git, examples)
   const aioDir = `${projectDir}/dep/aio`
   await Deno.mkdir(aioDir, { recursive: true })
   const items = ['src', 'tests', 'docs', 'utils', 'scripts', 'android-template', 'mod.ts']
@@ -201,8 +198,6 @@ async function writeFile(dir: string, path: string, content: string): Promise<vo
 // ── deno.json ──
 
 function denoJson(title: string, appType: AppType): string {
-  // Always include full imports — mod.ts needs react types for deno compile,
-  // and remote-electron/android builds bundle a React connect page via build.ts
   const isElectronApp = appType.id === 'electron' || appType.id === 'remote-electron'
   const imports: Record<string, string> = {
     '@types/react': 'npm:@types/react@^18',
@@ -213,11 +208,8 @@ function denoJson(title: string, appType: AppType): string {
     'immer': 'npm:immer@^10',
     '@std/path': 'jsr:@std/path@^1',
   }
-  // Electron apps include the electron package so `deno approve-scripts npm:electron` works
   if (isElectronApp) imports['electron'] = 'npm:electron'
 
-  // browser/remote-browser: --no-electron so dev mode opens a browser tab (not Electron)
-  // electron/android: default — tries Electron if installed, server always runs
   const devCmd = appType.hasServer
     ? `deno run -A src/app.ts${!appType.hasUI ? ' --headless' : (appType.id === 'browser' || appType.id === 'remote-browser') ? ' --no-electron' : ''}`
     : appType.id === 'remote-cli'
@@ -231,10 +223,8 @@ function denoJson(title: string, appType: AppType): string {
   const tasks: Record<string, string> = {}
   if (devCmd) tasks.dev = devCmd
   if (appType.hasServer) tasks.am = 'deno run -A dep/aio/src/am.ts'
-  tasks.test = 'deno test -A --unstable-kv dep/aio/tests/'
-  // Default compile for this app type
+  tasks.test = 'deno test -A --unstable-kv tests/'
   tasks.compile = `deno run -A dep/aio/src/build.ts ${compileFlags(appType)}`
-  // All compile targets for flexibility
   tasks['compile:browser'] = 'deno run -A dep/aio/src/build.ts --compile'
   tasks['compile:browser:remote'] = 'deno run -A dep/aio/src/build.ts --compile --service --remote'
   tasks['compile:electron'] = 'deno run -A dep/aio/src/build.ts --compile --electron'
@@ -279,7 +269,7 @@ function compileFlags(appType: AppType): string {
     'remote-cli':      '--compile --cli --remote',
     'remote-android':  '--android --remote',
   }
-  return m[appType.id]
+  return m[appType.id]!
 }
 
 // ── Templates ──
@@ -681,14 +671,8 @@ function applyAppType(files: Record<string, string>, appType: AppType, title: st
     )
   }
 
-  // Inject electron: false for browser types — opens browser tab, not Electron window.
-  // This means deno task dev AND am start both behave consistently (no Electron attempt).
-  if ((appType.id === 'browser' || appType.id === 'remote-browser') && result['src/app.ts']) {
-    result['src/app.ts'] = result['src/app.ts'].replace(
-      /ui:\s*\{\s*title:\s*'[^']*'\s*\}/,
-      (m) => m.replace(/\}$/, `, electron: false }`),
-    )
-  }
+  // Browser types: dev task already uses --no-electron; no need to bake electron:false into app.ts
+  // (keeps config clean and lets users switch to Electron by just removing --no-electron)
 
   // Auth hint for remote server types — inside config object
   if (appType.isRemote && appType.hasServer && result['src/app.ts']) {
@@ -1139,12 +1123,12 @@ export async function create(args: string[]): Promise<void> {
         console.error(`  Valid templates: ${templates.map(t => t.label.toLowerCase()).join(', ')}`)
         Deno.exit(1)
       }
-      templateLabel = templates[idx].label
-      files = applyAppType(templates[idx].fn(title), appType, title)
+      templateLabel = templates[idx]!.label
+      files = applyAppType(templates[idx]!.fn(title), appType, title)
     } else {
       const choice = await menu('Choose a template:', templates)
-      templateLabel = templates[choice].label
-      files = applyAppType(templates[choice].fn(title), appType, title)
+      templateLabel = templates[choice]!.label
+      files = applyAppType(templates[choice]!.fn(title), appType, title)
     }
   } else if (appType.id === 'remote-cli') {
     const templates = getCliTemplates()
@@ -1155,12 +1139,12 @@ export async function create(args: string[]): Promise<void> {
         console.error(`  Valid templates: ${templates.map(t => t.label.toLowerCase()).join(', ')}`)
         Deno.exit(1)
       }
-      templateLabel = templates[idx].label
-      files = templates[idx].fn(title)
+      templateLabel = templates[idx]!.label
+      files = templates[idx]!.fn(title)
     } else {
       const choice = await menu('Choose a template:', templates)
-      templateLabel = templates[choice].label
-      files = templates[choice].fn(title)
+      templateLabel = templates[choice]!.label
+      files = templates[choice]!.fn(title)
     }
   } else {
     templateLabel = 'client'
@@ -1170,14 +1154,12 @@ export async function create(args: string[]): Promise<void> {
   await Deno.mkdir(projectDir, { recursive: true })
   console.log(`\n${c.cyan}▸${c.reset} Creating ${c.bold}${name}/${c.reset} — ${c.cyan}${appType.label}${c.reset} (${templateLabel})`)
 
-  // Get framework into project
   if (mirror) {
     await mirrorFramework(projectDir)
   } else {
     await downloadFramework(projectDir)
   }
 
-  // Write deno.json + template + .gitignore
   await writeFile(projectDir, 'deno.json', denoJson(title, appType))
 
   for (const [path, content] of Object.entries(files)) {
