@@ -2,6 +2,7 @@
 // Flags: --compile (binary), --electron (AppImage), --android (APK), --client (aio-client AppImage), --force (skip cache)
 import { resolve, join, dirname } from '@std/path'
 import { slugify, copyDir, findGradle, writePlaceholderIcon, ensureAppimagetool, formatMb } from './build-helpers.ts'
+import { ANDROID_TEMPLATE } from './android-template.ts'
 const root = Deno.cwd()
 const dist = resolve(join(root, 'dist'))
 // Framework base URL — works for both local (file://) and JSR/remote (https://)
@@ -27,54 +28,33 @@ if (shellFlags.length > 1) {
   Deno.exit(1)
 }
 
-// ── Remote (JSR) helpers — fetch framework source files to temp dir for esbuild ──
-
-let _tmpFwDir: string | null = null
-/** Returns a local directory containing the framework src files needed by esbuild.
- *  Local installs: returns `frameworkSrcDir` directly.
- *  Remote (JSR): fetches only the files esbuild needs, writes to a temp dir. */
-async function getFwDir(): Promise<string> {
-  if (!_IS_REMOTE) return frameworkSrcDir
-  if (_tmpFwDir) return _tmpFwDir
-  _tmpFwDir = await Deno.makeTempDir({ prefix: 'aio-fw-' })
-  // browser.ts has no local imports; standalone.ts needs its dep chain
-  const files = doAndroid
-    ? ['standalone.ts', 'msg.ts', 'factory.ts', 'deep-merge.ts', 'dispatch.ts', 'schedule.ts']
-    : ['browser.ts']
-  await Promise.all(files.map(async f => {
-    const text = await fetch(new URL(f, _FRAMEWORK_BASE)).then(r => {
-      if (!r.ok) throw new Error(`[build] fetch framework/${f} → ${r.status}`)
-      return r.text()
+// ── esbuild HTTP plugin — loads https:// modules (needed when running from JSR) ──
+// Intercepts 'aio' import → framework URL, then resolves relative imports within it.
+// deno-lint-ignore no-explicit-any
+const _httpPlugin: any = {
+  name: 'aio-http',
+  // deno-lint-ignore no-explicit-any
+  setup(build: any) {
+    const base = _FRAMEWORK_BASE.href
+    const entry = doAndroid ? 'standalone.ts' : 'browser.ts'
+    const entryUrl = new URL(entry, base).href
+    // 'aio' → framework entry URL
+    build.onResolve({ filter: /^aio$/ }, () =>
+      ({ path: entryUrl, namespace: 'http-url', pluginData: { url: entryUrl } }))
+    // relative imports inside http-url files (e.g. standalone.ts → ./msg.ts)
+    // deno-lint-ignore no-explicit-any
+    build.onResolve({ filter: /^\./, namespace: 'http-url' }, (args: any) => {
+      const url = new URL(args.path, args.pluginData?.url ?? base).href
+      return { path: url, namespace: 'http-url', pluginData: { url } }
     })
-    await Deno.writeTextFile(join(_tmpFwDir!, f), text)
-  }))
-  return _tmpFwDir
-}
-
-/** Returns a local path to the android-template directory.
- *  Remote (JSR): fetches the 6 template source files to a temp dir. */
-async function getAndroidTemplateDir(): Promise<string> {
-  if (!_IS_REMOTE) return resolve(join(frameworkSrcDir, '..', 'android-template'))
-  const tmpDir = await Deno.makeTempDir({ prefix: 'aio-android-tmpl-' })
-  const base = new URL('../android-template/', _FRAMEWORK_BASE)
-  const files = [
-    'app/build.gradle.kts',
-    'app/src/main/AndroidManifest.xml',
-    'app/src/main/java/aio/app/MainActivity.kt',
-    'build.gradle.kts',
-    'gradle.properties',
-    'settings.gradle.kts',
-  ]
-  await Promise.all(files.map(async f => {
-    const text = await fetch(new URL(f, base)).then(r => {
-      if (!r.ok) throw new Error(`[build] fetch android-template/${f} → ${r.status}`)
-      return r.text()
+    // fetch and load any http-url file
+    // deno-lint-ignore no-explicit-any
+    build.onLoad({ filter: /.*/, namespace: 'http-url' }, async (args: any) => {
+      const r = await fetch(args.path)
+      if (!r.ok) throw new Error(`[build] fetch ${args.path} → ${r.status}`)
+      return { contents: await r.text(), loader: 'ts', pluginData: { url: args.path } }
     })
-    const dest = join(tmpDir, f)
-    await Deno.mkdir(dirname(dest), { recursive: true })
-    await Deno.writeTextFile(dest, text)
-  }))
-  return tmpDir
+  },
 }
 
 // Dev-only packages excluded from all compile targets
@@ -201,13 +181,14 @@ if (bundleFresh) {
   await Deno.mkdir(dist, { recursive: true })
 
   // Generate temp build config — overrides 'aio' to browser/standalone, adds React
-  const fwDir = await getFwDir()
-  const aioEntry = doAndroid ? join(fwDir, 'standalone.ts') : join(fwDir, 'browser.ts')
+  // Remote (JSR): 'aio' handled by HTTP plugin; local: mapped to framework file path
+  const fwEntry = doAndroid ? 'standalone.ts' : 'browser.ts'
+  const aioEntry = _IS_REMOTE ? null : join(frameworkSrcDir, fwEntry)
   const buildConfig = {
     compilerOptions: mainConfig.compilerOptions,
     imports: {
       ...mainConfig.imports,
-      'aio': aioEntry,
+      ...(aioEntry ? { 'aio': aioEntry } : {}),
       'react': 'npm:react@^18',
       'react-dom': 'npm:react-dom@^18',
       'react-dom/client': 'npm:react-dom@^18/client',
@@ -279,6 +260,7 @@ export function mount(el) { createRoot(el).render(createElement(App)) }
       jsx: 'automatic',
       jsxImportSource: 'react',
       alias: { ...esbuildAlias, ...reactAlias },
+      plugins: _IS_REMOTE ? [_httpPlugin] : [],
       // Ensure node_modules in user's project root is searched — required when
       // framework files are resolved from JSR cache (outside the project tree)
       nodePaths: [join(root, 'node_modules')],
@@ -441,14 +423,17 @@ if (doAndroid) {
     Deno.exit(1)
   }
 
-  const templateDir = await getAndroidTemplateDir()
   const androidDir = join(dist, 'android')
 
   // Clean previous android build
   try { await Deno.remove(androidDir, { recursive: true }) } catch { /* no previous build — skip */ }
 
-  // Copy template
-  await copyDir(templateDir, androidDir)
+  // Write template files (from embedded TypeScript constants — works local and JSR)
+  for (const [relPath, content] of Object.entries(ANDROID_TEMPLATE)) {
+    const dest = join(androidDir, relPath)
+    await Deno.mkdir(dirname(dest), { recursive: true })
+    await Deno.writeTextFile(dest, content)
+  }
 
   // Derive application ID from binary name
   const sanitizedId = binaryName.replace(/[^a-z0-9]/g, '')
