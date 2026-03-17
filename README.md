@@ -9,7 +9,7 @@
 - ✅ **Write reactive, use generators or atomic actions when needed.**
 - ✅ **Pick your target, compile and ship!**
 
-`v0.9.0` · beta
+`v0.9.3` · beta
 
 > Define state once. It persists, syncs to all clients, drives the UI.
 
@@ -53,12 +53,11 @@ mkdir my-app && cd my-app
     "react":        "npm:react@^18",
     "react-dom":    "npm:react-dom@^18",
     "@types/react": "npm:@types/react@^18",
-    "esbuild":      "npm:esbuild@^0.24",
-    "electron":     "npm:electron"
+    "esbuild":      "npm:esbuild@^0.24"
   },
   "tasks": {
     "dev":                    "deno run -A src/app.ts",
-    "install:electron":       "deno install --allow-scripts=npm:electron",
+    "install:electron":       "deno add npm:electron && deno install --allow-scripts=npm:electron",
     "am":                     "deno run -A jsr:@riagentic/aio@^0.9/src/am",
     "test":                   "deno test -A --unstable-kv tests/",
     "compile:browser":        "deno run -A jsr:@riagentic/aio@^0.9/src/build --compile",
@@ -79,7 +78,7 @@ mkdir my-app && cd my-app
 
 ```sh
 deno install                    # browser / CLI / service
-deno task install:electron      # Electron — also downloads the ~150MB runtime (one-time)
+deno task install:electron      # Electron only — adds npm:electron + downloads ~150MB runtime
 ```
 
 **4. Create source files**
@@ -246,4 +245,4 @@ Start reactive. Add generators for sequential flows. Switch to explicit only whe
 
 ## Status
 
-**v0.9.0** · beta · [JSR](https://jsr.io/@riagentic/aio) · MIT
+**v0.9.3** · beta · [JSR](https://jsr.io/@riagentic/aio) · MIT

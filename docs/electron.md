@@ -12,7 +12,7 @@ Electron is on by default. AIO looks for (in order):
 
 Install for dev:
 ```sh
-deno add npm:electron && deno approve-scripts npm:electron
+deno task install:electron
 ```
 
 > **Note:** Do not use `npm install electron` — it removes Deno-managed package symlinks (esbuild, etc.) from `node_modules/`.

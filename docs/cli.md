@@ -392,8 +392,8 @@ All endpoints inherit auth (token/user checks run before routing). In `--expose`
 | State resets on restart | `persist: true` (default) + `"unstable": ["kv"]` in deno.json |
 | `import from '../dep/aio/'` error | Always use `import from 'aio'` — never relative paths |
 | Port in use | Kill old process or use `--port=N` |
-| Electron not found | `deno add npm:electron && deno approve-scripts npm:electron`. Or use `--no-electron` to open browser instead |
-| Electron installed but no window | Check that `node_modules/electron/dist/` exists — run `deno approve-scripts npm:electron` then `deno install` |
+| Electron not found | `deno task install:electron`. Or use `--no-electron` to open browser instead |
+| Electron installed but no window | Check that `node_modules/electron/dist/` exists — run `deno task install:electron` |
 | Server dies when Electron closes | Use `--keep-alive` flag or `ui: { keepAlive: true }` in config |
 | Build Error: could not find 'npm:esbuild' | Add `"esbuild": "npm:esbuild@^0.24"` to deno.json imports, then `deno install` |
 | `am status` says "stopped" | No running process. Stale lock file auto-cleaned. Check `.aio.log` for errors |

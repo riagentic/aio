@@ -121,8 +121,8 @@ const MIME: Record<string, string> = {
 // Extensions that should be read as text (readTextFile) — everything else is binary (readFile)
 const TEXT_EXTENSIONS = new Set(['.html', '.js', '.mjs', '.css', '.json', '.svg', '.txt', '.md', '.xml', '.ts', '.tsx'])
 
-// browser.ts path — single source of truth for useAio + msg (transpiled on demand in dev)
-const BROWSER_TS = resolve(join(import.meta.dirname ?? '.', 'browser.ts'))
+// browser.ts URL — works for both local (file://) and JSR/HTTP installs (import.meta.dirname is null for remote modules)
+const BROWSER_TS_URL = new URL('browser.ts', import.meta.url)
 
 // Escape HTML entities to prevent XSS (includes ' for completeness even though current use is double-quote-delimited)
 function escHtml(s: string): string {
@@ -600,8 +600,8 @@ export function createServer(config: ServerConfig): ServerHandle {
 
     if (pathname === '/__aio/ui.js') {
       try {
-        const source = await Deno.readTextFile(BROWSER_TS)
-        const code = await transpile(source, BROWSER_TS, debug)
+        const source = await fetch(BROWSER_TS_URL).then(r => r.text())
+        const code = await transpile(source, BROWSER_TS_URL.href, debug)
         return new Response(code, { headers: { 'Content-Type': 'application/javascript', ...noCache } })
       } catch (err) {
         debug(`transpile browser.ts error: ${fmtEsbuildError(err, 'browser.ts')}`)

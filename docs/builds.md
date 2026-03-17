@@ -101,7 +101,7 @@ All launchers set `$ELECTRON_PATH` pointing to the bundled Electron before start
 
 **Prerequisite:**
 ```sh
-deno add npm:electron && deno approve-scripts npm:electron   # required before compile:electron
+deno task install:electron   # required before compile:electron
 ```
 
 **Cross-platform builds via CI** (`.github/workflows/release.yml`):

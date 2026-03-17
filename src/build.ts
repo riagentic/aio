@@ -2,10 +2,13 @@
 // Flags: --compile (binary), --electron (AppImage), --android (APK), --client (aio-client AppImage), --force (skip cache)
 import { resolve, join, dirname } from '@std/path'
 import { slugify, copyDir, findGradle, writePlaceholderIcon, ensureAppimagetool, formatMb } from './build-helpers.ts'
+import { ANDROID_TEMPLATE } from './android-template.ts'
 const root = Deno.cwd()
 const dist = resolve(join(root, 'dist'))
-// Framework src dir — resolves correctly for both JSR cache and vendored (dep/aio/) installs
-const frameworkSrcDir = resolve(import.meta.dirname ?? '.')
+// Framework base URL — works for both local (file://) and JSR/remote (https://)
+const _FRAMEWORK_BASE = new URL('.', import.meta.url)
+const _IS_REMOTE = _FRAMEWORK_BASE.protocol !== 'file:'
+const frameworkSrcDir = _IS_REMOTE ? '' : (import.meta.dirname ?? '.')
 const out = join(dist, 'app.js')
 const doElectron = Deno.args.includes('--electron')
 const doAndroid = Deno.args.includes('--android')
@@ -23,6 +26,35 @@ const shellFlags = [doElectron && '--electron', doAndroid && '--android', doCli 
 if (shellFlags.length > 1) {
   console.error(`[build] \u2717 conflicting flags: ${shellFlags.join(' + ')} — pick one shell target`)
   Deno.exit(1)
+}
+
+// ── esbuild HTTP plugin — loads https:// modules (needed when running from JSR) ──
+// Intercepts 'aio' import → framework URL, then resolves relative imports within it.
+// deno-lint-ignore no-explicit-any
+const _httpPlugin: any = {
+  name: 'aio-http',
+  // deno-lint-ignore no-explicit-any
+  setup(build: any) {
+    const base = _FRAMEWORK_BASE.href
+    const entry = doAndroid ? 'standalone.ts' : 'browser.ts'
+    const entryUrl = new URL(entry, base).href
+    // 'aio' → framework entry URL
+    build.onResolve({ filter: /^aio$/ }, () =>
+      ({ path: entryUrl, namespace: 'http-url', pluginData: { url: entryUrl } }))
+    // relative imports inside http-url files (e.g. standalone.ts → ./msg.ts)
+    // deno-lint-ignore no-explicit-any
+    build.onResolve({ filter: /^\./, namespace: 'http-url' }, (args: any) => {
+      const url = new URL(args.path, args.pluginData?.url ?? base).href
+      return { path: url, namespace: 'http-url', pluginData: { url } }
+    })
+    // fetch and load any http-url file
+    // deno-lint-ignore no-explicit-any
+    build.onLoad({ filter: /.*/, namespace: 'http-url' }, async (args: any) => {
+      const r = await fetch(args.path)
+      if (!r.ok) throw new Error(`[build] fetch ${args.path} → ${r.status}`)
+      return { contents: await r.text(), loader: 'ts', pluginData: { url: args.path } }
+    })
+  },
 }
 
 // Dev-only packages excluded from all compile targets
@@ -119,10 +151,15 @@ async function isBundleFresh(): Promise<boolean> {
   if (doForce) return false
   try {
     const outMtime = (await Deno.stat(out)).mtime!.getTime()
-    // Check deno.json + framework source files
-    const aioModule = doAndroid ? join(frameworkSrcDir, 'standalone.ts') : join(frameworkSrcDir, 'browser.ts')
-    for (const f of [join(root, 'deno.json'), aioModule, join(frameworkSrcDir, 'msg.ts'), join(frameworkSrcDir, 'factory.ts'), join(frameworkSrcDir, 'deep-merge.ts'), join(frameworkSrcDir, 'dispatch.ts')]) {
-      const s = await Deno.stat(f)
+    // Check deno.json + framework source files (skip for remote — JSR version is pinned)
+    if (!_IS_REMOTE) {
+      const aioModule = doAndroid ? join(frameworkSrcDir, 'standalone.ts') : join(frameworkSrcDir, 'browser.ts')
+      for (const f of [join(root, 'deno.json'), aioModule, join(frameworkSrcDir, 'msg.ts'), join(frameworkSrcDir, 'factory.ts'), join(frameworkSrcDir, 'deep-merge.ts'), join(frameworkSrcDir, 'dispatch.ts')]) {
+        const s = await Deno.stat(f)
+        if (s.mtime && s.mtime.getTime() > outMtime) return false
+      }
+    } else {
+      const s = await Deno.stat(join(root, 'deno.json'))
       if (s.mtime && s.mtime.getTime() > outMtime) return false
     }
     // Check all src/ files recursively
@@ -144,12 +181,14 @@ if (bundleFresh) {
   await Deno.mkdir(dist, { recursive: true })
 
   // Generate temp build config — overrides 'aio' to browser/standalone, adds React
-  const aioEntry = doAndroid ? join(frameworkSrcDir, 'standalone.ts') : join(frameworkSrcDir, 'browser.ts')
+  // Remote (JSR): 'aio' handled by HTTP plugin; local: mapped to framework file path
+  const fwEntry = doAndroid ? 'standalone.ts' : 'browser.ts'
+  const aioEntry = _IS_REMOTE ? null : join(frameworkSrcDir, fwEntry)
   const buildConfig = {
     compilerOptions: mainConfig.compilerOptions,
     imports: {
       ...mainConfig.imports,
-      'aio': aioEntry,
+      ...(aioEntry ? { 'aio': aioEntry } : {}),
       'react': 'npm:react@^18',
       'react-dom': 'npm:react-dom@^18',
       'react-dom/client': 'npm:react-dom@^18/client',
@@ -221,6 +260,7 @@ export function mount(el) { createRoot(el).render(createElement(App)) }
       jsx: 'automatic',
       jsxImportSource: 'react',
       alias: { ...esbuildAlias, ...reactAlias },
+      plugins: _IS_REMOTE ? [_httpPlugin] : [],
       // Ensure node_modules in user's project root is searched — required when
       // framework files are resolved from JSR cache (outside the project tree)
       nodePaths: [join(root, 'node_modules')],
@@ -289,7 +329,7 @@ if (doClient) {
   try {
     await Deno.stat(electronSrc)
   } catch {
-    console.error('[client] \u2717 node_modules/electron/dist/ not found — run: npm install electron --no-save')
+    console.error('[client] \u2717 node_modules/electron/dist/ not found — run: deno task install:electron')
     Deno.exit(1)
   }
 
@@ -383,14 +423,17 @@ if (doAndroid) {
     Deno.exit(1)
   }
 
-  const templateDir = resolve(join(frameworkSrcDir, '..', 'android-template'))
   const androidDir = join(dist, 'android')
 
   // Clean previous android build
   try { await Deno.remove(androidDir, { recursive: true }) } catch { /* no previous build — skip */ }
 
-  // Copy template
-  await copyDir(templateDir, androidDir)
+  // Write template files (from embedded TypeScript constants — works local and JSR)
+  for (const [relPath, content] of Object.entries(ANDROID_TEMPLATE)) {
+    const dest = join(androidDir, relPath)
+    await Deno.mkdir(dirname(dest), { recursive: true })
+    await Deno.writeTextFile(dest, content)
+  }
 
   // Derive application ID from binary name
   const sanitizedId = binaryName.replace(/[^a-z0-9]/g, '')
@@ -652,7 +695,7 @@ const electronDst = join(appDir, 'electron')
 try {
   await Deno.stat(electronSrc)
 } catch {
-  console.error('[electron] \u2717 node_modules/electron/dist/ not found — run: npm install electron --no-save')
+  console.error('[electron] \u2717 node_modules/electron/dist/ not found — run: deno task install:electron')
   Deno.exit(1)
 }
 
