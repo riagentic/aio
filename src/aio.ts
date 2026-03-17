@@ -10,12 +10,12 @@ import { createTT, record, undo, redo, travelTo, pause, resume, stateAt, toBroad
 import { isScheduleEffect, createScheduleManager, type ScheduleEffect, type ScheduleDef } from './schedule.ts'
 import { createDB, initSchema, loadTables, syncTables, type DB } from './db/mod.ts'
 import { type TableDef } from './sql.ts'
-import { AppLock, resolveAppId, type SingletonMode } from './single-instance-lock.ts'
+import { AppLock, resolveAppId, lockDir, type SingletonMode } from './single-instance-lock.ts'
 import { composeFeatures, bindFeature, type FeatureEntry, type FeatureDef, type ComposedFeatures, type FeatureStatus } from './feature.ts'
 import { AioLogger, setLogger, type LogConfig } from './logger.ts'
 
 /** Framework version — printed by --version, checked in tests */
-export const VERSION = '0.9.3'
+export const VERSION = '0.9.4'
 
 /** Validates that framework version matches deno.json version at build time */
 function validateVersion(): void {
@@ -503,17 +503,29 @@ function resolveTransport(transport: 'uds' | 'ws' | 'auto' | undefined, useElect
   return 'ws'
 }
 
-/** Resolves UDS socket path — $XDG_RUNTIME_DIR/aio-{appId}.sock or /tmp/aio-{appId}.sock */
+/** Resolves UDS socket path — /tmp/aio/{appId}.sock (same dir as lock files) */
 function resolveSocketPath(appId: string): string {
-  const runtimeDir = Deno.env.get('XDG_RUNTIME_DIR')
-  const dir = runtimeDir ?? '/tmp'
-  const sockPath = join(dir, `aio-${appId}.sock`)
+  const dir = lockDir()
+  const sockPath = join(dir, `${appId}.sock`)
   // Linux UDS path limit is 108 chars
   if (sockPath.length > 100) {
-    log.warn(`UDS path is ${sockPath.length} chars (limit ~108) — using /tmp fallback`)
-    return join('/tmp', `aio-${appId}.sock`)
+    log.warn(`UDS path is ${sockPath.length} chars (limit ~108) — using /tmp/aio fallback`)
+    return join('/tmp/aio', `${appId}.sock`)
   }
   return sockPath
+}
+
+/** Find a free port in the private/ephemeral range 49152–65535 by attempting to bind */
+async function findFreePort(): Promise<number> {
+  for (let i = 0; i < 50; i++) {
+    const port = 49152 + Math.floor(Math.random() * 16384)  // 49152–65535
+    try {
+      const l = Deno.listen({ port, hostname: '127.0.0.1' })
+      l.close()
+      return port
+    } catch { /* taken — try another */ }
+  }
+  throw new Error('no free port found in 49152–65535 after 50 attempts')
 }
 
 type UDSHandle = {
@@ -900,19 +912,22 @@ async function _run<S, A, E>(initialState: S, config: AioConfig<S, A, E>): Promi
   const appId = resolveAppId({ appId: config.appId, title: cli.title ?? config.ui?.title })
   log.debug(`app-id: ${appId}`)
 
-  // Single-instance enforcement — identity-based lock in /tmp/aio-{appId}.lock
+  // Port — explicit wins, otherwise pick a random free port in 49152–65535
+  const port = cli.port ?? config.port ?? await findFreePort()
+
+  // Single-instance enforcement — identity-based lock in /tmp/aio/{appId}.lock
   const singletonMode: SingletonMode = config.singleton ?? true
   let appLock: AppLock | null = null
   if (singletonMode !== false) {
-    const port = cli.port ?? config.port ?? 8000
     appLock = new AppLock(appId)
     const result = await appLock.acquire(port, singletonMode)
     if (!result.ok) {
       const ex = result.existing
-      console.error(`[AIO] ${singletonMode === 'takeover' ? 'Failed to take over' : 'Already running'}: ${ex.appId} (pid ${ex.pid}, port ${ex.port})`)
+      const exUrl = `http://localhost:${ex.port}`
+      console.error(`[AIO] ${singletonMode === 'takeover' ? 'Failed to take over' : 'Already running'}: ${ex.appId} at ${exUrl} (pid ${ex.pid})`)
       Deno.exit(1)
     }
-    log.debug(`lock: acquired /tmp/aio-${appId}.lock (PID ${Deno.pid})`)
+    log.debug(`lock: acquired ${lockDir()}/${appId}.lock (PID ${Deno.pid})`)
   }
 
   // --url: thin client mode — launches connect-page electron that fetches meta from remote
@@ -963,7 +978,6 @@ async function _run<S, A, E>(initialState: S, config: AioConfig<S, A, E>): Promi
   const useElectronEarly = !headless && (cli.electron ?? ui.electron) !== false
   const result = await lint(initialState, config, baseDir, prod, headless, useElectronEarly)
   printLint(result)
-  const port = cli.port ?? config.port ?? 8000
 
   // Title: CLI > config > deno.json "title" > fallback
   let denoJsonTitle: string | undefined
@@ -1467,12 +1481,32 @@ async function _run<S, A, E>(initialState: S, config: AioConfig<S, A, E>): Promi
   const mode = prod ? 'prod' : 'dev'
   const shell = headless ? 'headless' : useElectron ? 'electron' : 'browser'
   const transportLabel = transport === 'uds' ? ', uds' : ''
+
+  // Startup info — open resources + all app settings (always shown, even defaults)
+  const p = (key: string) => `  ${key.padEnd(10)}`
   if (skipHttp) {
     log.info(`running (${mode}, ${shell}, uds — no TCP port)`)
   } else {
-    log.info(`running at ${url} (${mode}, ${shell}${transportLabel})`)
+    log.info(`running (${mode}, ${shell}${transportLabel})`)
+    const wsProto = useHttps ? 'wss' : 'ws'
+    const wsHost = expose ? `0.0.0.0:${port}` : `localhost:${port}`
+    log.info(`${p('web')}${url}`)
+    log.info(`${p('ws')}${wsProto}://${wsHost}/ws`)
   }
+  if (udsHandle)         log.info(`${p('uds')}${udsHandle.socketPath}`)
+  if (server.trojanPort) log.info(`${p('trojan')}http://localhost:${server.trojanPort}`)
+  log.info(`${p('id')}${appId}`)
+  log.info(`${p('title')}${title}`)
+  log.info(`${p('singleton')}${String(singletonMode)}`)
+  log.info(`${p('persist')}${shouldPersist ? persistMode : 'false'}`)
+  if (asyncDb) log.info(`${p('sqlite')}${dbKeys.length} table${dbKeys.length !== 1 ? 's' : ''}`)
+  log.info(`${p('expose')}${expose}`)
+  const authLabel = users ? `${Object.keys(users).length} user(s)` : token ? 'token' : 'none'
+  log.info(`${p('auth')}${authLabel}`)
+  if (config.schedules?.length) log.info(`${p('schedules')}${config.schedules.length}`)
+  if (config.maxConnections !== undefined) log.info(`${p('maxconn')}${config.maxConnections}`)
 
+  // Share URLs — shown separately so they're easy to copy
   if (expose && users) {
     log.warn(`--expose: bound to 0.0.0.0 — per-user token auth, origin checks disabled`)
     for (const [t, u] of Object.entries(users)) {
@@ -1481,8 +1515,6 @@ async function _run<S, A, E>(initialState: S, config: AioConfig<S, A, E>): Promi
   } else if (expose && token) {
     log.warn(`--expose: bound to 0.0.0.0 — token auth only, origin checks disabled, token changes on restart`)
     log.info(`share: ${url}?token=${token}`)
-  } else if (users) {
-    log.info(`auth: ${Object.keys(users).length} user(s) configured`)
   }
 
   if (headless) {

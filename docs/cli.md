@@ -38,7 +38,9 @@ Active flags are logged on startup:
 ```
 [12:00:00][INFO] ✓ state (1 keys) · reduce · execute · App.tsx
 [12:00:00][INFO] cli: --port=3000 --no-electron
-[12:00:00][INFO] running at http://localhost:3000 (dev, browser)
+[12:00:00][INFO] running (dev, browser)
+[12:00:00][INFO]   web       http://localhost:3000
+[12:00:00][INFO]   ws        ws://localhost:3000/ws
 ```
 
 ### Verbose mode
@@ -46,7 +48,7 @@ Active flags are logged on startup:
 `--verbose` logs the entire pipeline in real time:
 
 ```
-[12:00:00][DEBUG] config: port=8000 persist=true electron=false title="My App" baseDir=./src
+[12:00:00][DEBUG] config: port=52341 persist=true electron=false title="My App" baseDir=./src
 [12:00:00][DEBUG] persist: loaded from KV key="state"
 [12:00:00][DEBUG] state: 1 keys
 [12:00:01][DEBUG] http: GET /
@@ -70,7 +72,7 @@ Active flags are logged on startup:
 
 **How it works:** Deno ↔ UDS/NDJSON ↔ Electron main (Node.js `net.connect`) ↔ IPC ↔ renderer (`window.__aioIPC`). Static files are served via Electron's `protocol.handle('aio', ...)` — no HTTP server needed.
 
-Socket path: `/tmp/aio-{slug}.sock` (or `$XDG_RUNTIME_DIR/aio-{slug}.sock` if set).
+Socket path: `/tmp/aio/{slug}.sock` (or `$XDG_RUNTIME_DIR/aio/{slug}.sock` if set).
 
 **Exceptions:** `--expose` always uses WS (needs real HTTP for remote access). Browser mode always uses WS. Windows always uses WS (no UDS support).
 
@@ -83,7 +85,15 @@ When `aio.run()` starts, it checks your app and reports issues:
 **Clean startup:**
 ```
 [12:00:00][INFO] ✓ state (1 keys) · reduce · execute · App.tsx
-[12:00:00][INFO] running at http://localhost:8000
+[12:00:00][INFO] running (dev, electron)
+[12:00:00][INFO]   web       http://localhost:52341
+[12:00:00][INFO]   ws        ws://localhost:52341/ws
+[12:00:00][INFO]   id        my-app
+[12:00:00][INFO]   title     My App
+[12:00:00][INFO]   singleton true
+[12:00:00][INFO]   persist   single
+[12:00:00][INFO]   expose    false
+[12:00:00][INFO]   auth      none
 ```
 
 **Issues found:**
