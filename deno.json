@@ -1,6 +1,6 @@
 {
   "name": "@riagentic/aio",
-  "version": "0.9.4",
+  "version": "0.9.5",
   "exports": {
     ".": "./mod.ts",
     "./src/build": "./src/build.ts",

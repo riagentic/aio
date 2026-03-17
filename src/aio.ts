@@ -15,7 +15,7 @@ import { composeFeatures, bindFeature, type FeatureEntry, type FeatureDef, type 
 import { AioLogger, setLogger, type LogConfig } from './logger.ts'
 
 /** Framework version — printed by --version, checked in tests */
-export const VERSION = '0.9.4'
+export const VERSION = '0.9.5'
 
 /** Validates that framework version matches deno.json version at build time */
 function validateVersion(): void {
@@ -536,7 +536,7 @@ type UDSHandle = {
 
 /** Creates a raw NDJSON listener on a Unix domain socket for Electron IPC bridge.
  *  Same messages as WS (state JSON, __reload, __css, __tt:, __boot:), just newline-delimited. */
-function createUDSListener(
+export function createUDSListener(
   socketPath: string,
   getUIState: () => unknown,
   onAction: (action: { type: string; payload?: unknown }) => void,

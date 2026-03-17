@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.9.5
+
+**Fix: Electron dev mode stuck on "Loading..."**
+- `did-finish-load` fires when HTML is parsed, but `await import('/App.tsx')` loads modules asynchronously. The previous 50ms timeout expired before `browser.ts` registered its IPC listeners, so the buffered state message was dropped silently.
+- Replaced timeout guessing with a `__aio:ready` handshake: `_connectIPC()` sends `__aio:ready` after registering all listeners; Electron main replies with `__aio:open` + last buffered state — guaranteed to arrive after listeners exist.
+
+---
+
 ## v0.9.4
 
 **Fix: UI fails to load from JSR (npm: specifier bug)**

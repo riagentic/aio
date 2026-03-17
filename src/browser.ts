@@ -112,6 +112,7 @@ async function _clearOfflineQueue(): Promise<void> {
 // by the preload script. State sync goes: Deno UDS ↔ Electron main ↔ IPC ↔ renderer
 type AioIPC = {
   send: (json: string) => void
+  ready: () => void  // signal to main that IPC listeners are registered
   onMessage: (fn: (line: string) => void) => void
   onOpen: (fn: () => void) => void
   onClose: (fn: () => void) => void
@@ -411,6 +412,9 @@ function _connectIPC() {
     if (_closed || _listeners.size === 0) return
     if (_wasConnected) _showStatus('Reconnecting\u2026', '#e25')
   })
+
+  // Signal to Electron main that listeners are ready — triggers replay of buffered state
+  _ipc.ready()
 }
 
 /** Opens connection to server — UDS+IPC when available, WebSocket otherwise */
