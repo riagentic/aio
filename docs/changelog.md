@@ -1,5 +1,37 @@
 # Changelog
 
+## v0.9.4
+
+**Fix: UI fails to load from JSR (npm: specifier bug)**
+- esbuild, when running inside Deno, rewrites bare imports to Deno specifiers (e.g. `'react'` → `'npm:react@^18'`). Browsers can't fetch `npm:` URLs, causing `Failed to fetch dynamically imported module` for any app using JSR-published aio.
+- `transpile()` in server.ts now strips the `npm:` prefix and version suffix after transform, so browsers resolve via the HTML import map as intended.
+
+**Fix: compile:electron and am tasks failed from JSR**
+- `deno.json` only exported `.` — added `./src/build` and `./src/am` exports so `jsr:@riagentic/aio@0.9.4/src/build` and `/src/am` resolve correctly.
+- README now pins exact version (`0.9.4`) instead of `^0.9` range — prevents users from silently picking up a broken earlier version.
+
+**Ports: random ephemeral, no more conflicts between apps**
+- Server port now defaults to a random free port in the private range 49152–65535 (bind-tested, not just checked). Explicit `port:` config or `--port` flag still override.
+- Lock and socket files moved from `/tmp/` into `/tmp/aio/` (or `$XDG_RUNTIME_DIR/aio/`) — one directory to `rm -rf` when needed. Filenames simplified: `counter.lock`, `counter.sock` (no redundant `aio-` prefix inside the `aio/` dir).
+- `am` already reads port and trojanPort from the lock file — no changes needed there.
+
+**Startup log: full resource + config listing**
+- Every open resource is listed on startup: `web`, `ws`, `uds`, `trojan` (only when TLS active).
+- All app settings shown (even defaults): `id`, `title`, `singleton`, `persist`, `expose`, `auth`, `sqlite` (when configured), `schedules` (when configured), `maxconn` (when configured).
+- `ws:` uses `wss://` when TLS is active; `web:` uses `https://` when TLS is active.
+
+**Tests**
+- Dev-mode server test suite: verifies `/__aio/ui.js` has no `npm:` specifiers, import map uses CDN URLs, `/__aio/error` and `/__aio/client-error` endpoints work correctly. Would have caught the v0.9.3 UI breakage.
+- Config test: verifies `deno.json` exports `./src/build` and `./src/am` — catches missing export regressions.
+
+---
+
+## v0.9.3
+
+JSR-native builds + Electron install simplification (see v0.9.2 below — same release train).
+
+---
+
 ## v0.9.2
 
 **JSR-native builds — all compile targets work from JSR**

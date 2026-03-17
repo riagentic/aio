@@ -1040,3 +1040,162 @@ Deno.test('_timingSafeEqual: unicode strings', () => {
   assertEquals(_timingSafeEqual('héllo', 'héllo'), true)
   assertEquals(_timingSafeEqual('héllo', 'hello'), false)
 })
+
+// ── Dev-mode UI endpoint tests ────────────────────────────────
+// These catch the class of bugs where /__aio/ui.js breaks browser module loading.
+// The most common failure: esbuild rewrites bare imports to Deno specifiers
+// (e.g. 'react' → 'npm:react@^18') which browsers cannot fetch as URLs.
+
+const DEV_UI_PORT = 19815
+
+async function withDevServer(fn: (url: string) => Promise<void>): Promise<void> {
+  const dir = await Deno.makeTempDir()
+  await Deno.writeTextFile(join(dir, 'App.tsx'), 'export default function App() { return null }')
+  const server = createServer({
+    port: DEV_UI_PORT,
+    title: 'DevUITest',
+    getUIState: () => ({}),
+    dispatch: () => {},
+    baseDir: dir,
+    debug: () => {},
+    prod: false,
+  })
+  // Allow server + esbuild to initialize
+  await new Promise(r => setTimeout(r, 200))
+  try {
+    await fn(`http://127.0.0.1:${DEV_UI_PORT}`)
+  } finally {
+    await server.shutdown()
+    await Deno.remove(dir, { recursive: true })
+  }
+}
+
+// Dev UI tests run in a single server instance to avoid port conflicts and esbuild
+// child-process leaks (esbuild persists for the lifetime of the Deno process).
+// sanitizeResources/Ops disabled because esbuild and the FS watcher outlive each test.
+Deno.test({
+  name: 'dev: UI endpoints — ui.js, import map, App.tsx, error, client-error',
+  sanitizeResources: false,
+  sanitizeOps: false,
+  fn: async () => {
+    const dir = await Deno.makeTempDir()
+    // App that imports react — common case where npm: specifier could leak
+    await Deno.writeTextFile(join(dir, 'App.tsx'),
+      `import { useState } from 'react'\nexport default function App() { return null }`
+    )
+    const server = createServer({
+      port: DEV_UI_PORT,
+      title: 'DevUITest',
+      getUIState: () => ({}),
+      dispatch: () => {},
+      baseDir: dir,
+      debug: () => {},
+      prod: false,
+    })
+    await new Promise(r => setTimeout(r, 200))
+    const url = `http://127.0.0.1:${DEV_UI_PORT}`
+    try {
+      // ── /__aio/ui.js: basic response ──
+      {
+        const resp = await fetch(`${url}/__aio/ui.js`)
+        assertEquals(resp.status, 200, '/__aio/ui.js must return 200')
+        const ct = resp.headers.get('content-type') ?? ''
+        assertEquals(ct.includes('application/javascript'), true,
+          '/__aio/ui.js must have application/javascript content-type')
+        await resp.body?.cancel()
+      }
+
+      // ── /__aio/ui.js: no npm: specifiers (regression: v0.9.3 breakage) ──
+      // esbuild running in Deno rewrites 'react' → 'npm:react@^18'.
+      // Browsers cannot fetch npm: URLs — the import map maps 'react' → esm.sh.
+      {
+        const resp = await fetch(`${url}/__aio/ui.js`)
+        assertEquals(resp.status, 200)
+        const body = await resp.text()
+        const npmImports = [...body.matchAll(/from "npm:[^"]+"/g)].map(m => m[0])
+        assertEquals(
+          npmImports.length, 0,
+          `/__aio/ui.js has npm: specifiers that browsers can't fetch:\n  ${npmImports.join('\n  ')}\n\n` +
+          `Fix: strip npm: prefix in transpile() so the HTML import map takes over.`
+        )
+      }
+
+      // ── HTML import map: no npm: URLs ──
+      {
+        const resp = await fetch(url)
+        assertEquals(resp.status, 200)
+        const body = await resp.text()
+        const match = body.match(/<script type="importmap">([\s\S]*?)<\/script>/)
+        assertEquals(match !== null, true, 'HTML must contain an importmap script')
+        const map = JSON.parse(match![1]!) as { imports: Record<string, string> }
+        for (const [key, val] of Object.entries(map.imports)) {
+          assertEquals(
+            val.startsWith('npm:'), false,
+            `import map "${key}":"${val}" — npm: URLs don't work in browsers`
+          )
+        }
+      }
+
+      // ── /App.tsx: transpile has no npm: specifiers ──
+      {
+        const resp = await fetch(`${url}/App.tsx`)
+        assertEquals(resp.status, 200)
+        const body = await resp.text()
+        const npmImports = [...body.matchAll(/from "npm:[^"]+"/g)].map(m => m[0])
+        assertEquals(
+          npmImports.length, 0,
+          `/App.tsx has npm: specifiers: ${npmImports.join(', ')}`
+        )
+      }
+
+      // ── /__aio/error: returns JSON ──
+      {
+        const resp = await fetch(`${url}/__aio/error`)
+        assertEquals(resp.status, 200)
+        const ct = resp.headers.get('content-type') ?? ''
+        assertEquals(ct.includes('application/json'), true)
+        const data = await resp.json()
+        assertEquals(data === null || typeof data === 'object', true)
+      }
+
+      // ── /__aio/client-error: POST returns 204 ──
+      {
+        const resp = await fetch(`${url}/__aio/client-error`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ message: 'test error', stack: 'Error: test\n  at App.tsx:1:1' }),
+        })
+        assertEquals(resp.status, 204)
+        await resp.body?.cancel()
+      }
+
+      // ── /__aio/client-error: malformed body → still 204 ──
+      {
+        const resp = await fetch(`${url}/__aio/client-error`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: 'not-json{{{',
+        })
+        assertEquals(resp.status, 204)
+        await resp.body?.cancel()
+      }
+    } finally {
+      await server.shutdown()
+      await Deno.remove(dir, { recursive: true })
+    }
+  },
+})
+
+// ── Package exports / config correctness ─────────────────────────────────────
+
+Deno.test('config: deno.json exports ./src/build and ./src/am', async () => {
+  const denoJsonPath = join(import.meta.dirname ?? '.', '..', 'deno.json')
+  const denoJson = JSON.parse(await Deno.readTextFile(denoJsonPath))
+  const exports = denoJson.exports as Record<string, string> | string
+  // exports must be an object with the two sub-entries (not a bare string)
+  assertEquals(typeof exports, 'object', 'deno.json exports must be an object to expose multiple entrypoints')
+  assertEquals('./src/build' in (exports as Record<string, string>), true,
+    'deno.json must export ./src/build — required by compile:* tasks (jsr:@riagentic/aio/src/build)')
+  assertEquals('./src/am' in (exports as Record<string, string>), true,
+    'deno.json must export ./src/am — required by am task (jsr:@riagentic/aio/src/am)')
+})

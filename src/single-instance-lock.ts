@@ -55,17 +55,21 @@ export function resolveAppId(opts: { appId?: string; title?: string }): string {
 
 // ── Lock File Paths ──────────────────────────────────────────
 
-/** Directory for lock files — $XDG_RUNTIME_DIR (Linux), /tmp (fallback), %TEMP% (Windows) */
+/** Directory for lock + socket files — /tmp/aio/ (or $XDG_RUNTIME_DIR/aio/ on Linux) */
+let _lockDir: string | null = null
 export function lockDir(): string {
-  if (Deno.build.os === 'windows') {
-    return Deno.env.get('TEMP') ?? Deno.env.get('TMP') ?? 'C:\\Temp'
-  }
-  return Deno.env.get('XDG_RUNTIME_DIR') ?? '/tmp'
+  if (_lockDir) return _lockDir
+  const base = Deno.build.os === 'windows'
+    ? (Deno.env.get('TEMP') ?? Deno.env.get('TMP') ?? 'C:\\Temp')
+    : (Deno.env.get('XDG_RUNTIME_DIR') ?? '/tmp')
+  _lockDir = join(base, 'aio')
+  try { Deno.mkdirSync(_lockDir, { recursive: true }) } catch { /* already exists */ }
+  return _lockDir
 }
 
 /** Full path to the lock file for a given appId */
 export function lockPath(appId: string): string {
-  return join(lockDir(), `aio-${appId}.lock`)
+  return join(lockDir(), `${appId}.lock`)
 }
 
 // ── Process Liveness ─────────────────────────────────────────
@@ -228,8 +232,8 @@ export function instances(appId?: string): InstanceInfo[] {
 
   try {
     for (const entry of Deno.readDirSync(dir)) {
-      if (!entry.isFile || !entry.name.startsWith('aio-') || !entry.name.endsWith('.lock')) continue
-      const id = entry.name.slice(4, -5)  // strip "aio-" prefix and ".lock" suffix
+      if (!entry.isFile || !entry.name.endsWith('.lock')) continue
+      const id = entry.name.slice(0, -5)  // strip ".lock" suffix
       if (appId && id !== appId) continue
 
       const lock = readLock(id)

@@ -40,9 +40,10 @@ Deno.test('resolveAppId: empty fallback', () => {
 
 // ── lockPath ──
 
-Deno.test('lockPath: contains appId', () => {
+Deno.test('lockPath: contains appId under aio/ subdir', () => {
   const p = lockPath('my-app')
-  assertEquals(p.includes('aio-my-app.lock'), true)
+  assertEquals(p.includes('my-app.lock'), true)
+  assertEquals(p.includes('aio'), true)  // lives under .../aio/ directory
 })
 
 // ── acquire / release basics ──

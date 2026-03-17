@@ -237,8 +237,8 @@ export function mount(el) { createRoot(el).render(createElement(App)) }
 
   let bundleOk = false
   try {
-    // deno-lint-ignore no-import-prefix no-unversioned-import
-    const esbuild = await import('npm:esbuild')
+    // deno-lint-ignore no-import-prefix
+    const esbuild = await import('npm:esbuild@^0.24')
     // Pin React to project root's copy — prevents duplicate instances when
     // dep/aio is symlinked (esbuild follows realpath → finds a different node_modules)
     const reactAlias: Record<string, string> = {}

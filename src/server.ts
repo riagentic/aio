@@ -294,13 +294,16 @@ async function transpile(source: string, filepath: string, log?: (msg: string) =
   if (result.warnings?.length && log) {
     for (const w of result.warnings) log(`esbuild warning: ${fmtEsbuildMsg(w, filepath)}`)
   }
+  // esbuild (running in Deno) rewrites bare imports to Deno specifiers, e.g. "react" → "npm:react@^18"
+  // Browsers can't fetch npm: URLs — strip prefix+version so the HTML import map takes over
+  const code = result.code.replace(/from "npm:(@?[^"@/]+(?:\/[^"@]+)?)@[^"]+"/g, 'from "$1"')
   if (transpileCache.size >= TRANSPILE_CACHE_MAX) {
     // Evict oldest entry (first inserted key)
     const oldest = transpileCache.keys().next().value
     if (oldest) transpileCache.delete(oldest)
   }
-  transpileCache.set(filepath, { source, code: result.code })
-  return result.code
+  transpileCache.set(filepath, { source, code })
+  return code
 }
 
 /** Safety limits — prevent resource exhaustion */
