@@ -373,10 +373,11 @@ function saveBounds(win) {
 const preloadCode = \`
 const { contextBridge, ipcRenderer } = require('electron');
 contextBridge.exposeInMainWorld('__aioIPC', {
-  send: (json) => ipcRenderer.send('__aio:send', json),
-  onMessage: (fn) => ipcRenderer.on('__aio:msg', (_e, line) => fn(line)),
-  onOpen: (fn) => ipcRenderer.on('__aio:open', () => fn()),
-  onClose: (fn) => ipcRenderer.on('__aio:close', () => fn()),
+  send:      (json) => ipcRenderer.send('__aio:send', json),
+  ready:     ()     => ipcRenderer.send('__aio:ready'),
+  onMessage: (fn)   => ipcRenderer.on('__aio:msg',   (_e, line) => fn(line)),
+  onOpen:    (fn)   => ipcRenderer.on('__aio:open',  () => fn()),
+  onClose:   (fn)   => ipcRenderer.on('__aio:close', () => fn()),
 });
 \`;
 const preloadFile = path.join(app.getPath('temp'), '__aio_preload_' + process.pid + '.cjs');
@@ -444,14 +445,14 @@ app.on('ready', () => {
   let closing = false;
   win.on('close', () => { closing = true; });
 
-  // Replay buffered state once renderer has registered IPC listeners
-  win.webContents.on('did-finish-load', () => {
-    setTimeout(() => {
-      pageReady = true;
-      if (closing) return;
-      if (sock) win.webContents.send('__aio:open');
-      if (lastState) win.webContents.send('__aio:msg', lastState);
-    }, 50);
+  // Track page readiness (data events need this to decide whether to forward or buffer)
+  win.webContents.on('did-finish-load', () => { pageReady = true; });
+
+  // Renderer signals it has registered IPC listeners — replay buffered state now
+  ipcMain.on('__aio:ready', () => {
+    if (closing) return;
+    if (sock) win.webContents.send('__aio:open');
+    if (lastState) win.webContents.send('__aio:msg', lastState);
   });
 
   function connectUDS() {

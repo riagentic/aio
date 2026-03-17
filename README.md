@@ -9,7 +9,7 @@
 - ✅ **Write reactive, use generators or atomic actions when needed.**
 - ✅ **Pick your target, compile and ship!**
 
-`v0.9.4` · beta
+`v0.9.5` · beta
 
 > Define state once. It persists, syncs to all clients, drives the UI.
 
@@ -49,7 +49,7 @@ mkdir my-app && cd my-app
     "jsxImportSourceTypes": "@types/react"
   },
   "imports": {
-    "aio":          "jsr:@riagentic/aio@0.9.4",
+    "aio":          "jsr:@riagentic/aio@0.9.5",
     "react":        "npm:react@^18",
     "react-dom":    "npm:react-dom@^18",
     "@types/react": "npm:@types/react@^18",
@@ -58,18 +58,18 @@ mkdir my-app && cd my-app
   "tasks": {
     "dev":                    "deno run -A src/app.ts",
     "install:electron":       "deno add npm:electron && deno install --allow-scripts=npm:electron",
-    "am":                     "deno run -A jsr:@riagentic/aio@0.9.4/src/am",
+    "am":                     "deno run -A jsr:@riagentic/aio@0.9.5/src/am",
     "test":                   "deno test -A --unstable-kv tests/",
-    "compile:browser":        "deno run -A jsr:@riagentic/aio@0.9.4/src/build --compile",
-    "compile:browser:remote": "deno run -A jsr:@riagentic/aio@0.9.4/src/build --compile --service --remote",
-    "compile:electron":       "deno run -A jsr:@riagentic/aio@0.9.4/src/build --electron",
-    "compile:electron:remote":"deno run -A jsr:@riagentic/aio@0.9.4/src/build --client",
-    "compile:cli":            "deno run -A jsr:@riagentic/aio@0.9.4/src/build --compile --cli",
-    "compile:cli:remote":     "deno run -A jsr:@riagentic/aio@0.9.4/src/build --compile --cli --remote",
-    "compile:service":        "deno run -A jsr:@riagentic/aio@0.9.4/src/build --compile --service --headless",
-    "compile:service:remote": "deno run -A jsr:@riagentic/aio@0.9.4/src/build --compile --service --headless --remote",
-    "compile:android":        "deno run -A jsr:@riagentic/aio@0.9.4/src/build --android",
-    "compile:android:remote": "deno run -A jsr:@riagentic/aio@0.9.4/src/build --android --remote"
+    "compile:browser":        "deno run -A jsr:@riagentic/aio@0.9.5/src/build --compile",
+    "compile:browser:remote": "deno run -A jsr:@riagentic/aio@0.9.5/src/build --compile --service --remote",
+    "compile:electron":       "deno run -A jsr:@riagentic/aio@0.9.5/src/build --electron",
+    "compile:electron:remote":"deno run -A jsr:@riagentic/aio@0.9.5/src/build --client",
+    "compile:cli":            "deno run -A jsr:@riagentic/aio@0.9.5/src/build --compile --cli",
+    "compile:cli:remote":     "deno run -A jsr:@riagentic/aio@0.9.5/src/build --compile --cli --remote",
+    "compile:service":        "deno run -A jsr:@riagentic/aio@0.9.5/src/build --compile --service --headless",
+    "compile:service:remote": "deno run -A jsr:@riagentic/aio@0.9.5/src/build --compile --service --headless --remote",
+    "compile:android":        "deno run -A jsr:@riagentic/aio@0.9.5/src/build --android",
+    "compile:android:remote": "deno run -A jsr:@riagentic/aio@0.9.5/src/build --android --remote"
   }
 }
 ```
@@ -245,4 +245,4 @@ Start reactive. Add generators for sequential flows. Switch to explicit only whe
 
 ## Status
 
-**v0.9.4** · beta · [JSR](https://jsr.io/@riagentic/aio) · MIT
+**v0.9.5** · beta · [JSR](https://jsr.io/@riagentic/aio) · MIT
