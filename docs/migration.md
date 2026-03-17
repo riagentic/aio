@@ -618,7 +618,7 @@ execute: {
 - [ ] Framework added (`deno add jsr:@riagentic/aio`, or via scaffolder)
 - [ ] `deno.json` updated with imports, compilerOptions, unstable
 - [ ] `deno install` ran successfully
-- [ ] `deno add npm:electron && deno approve-scripts npm:electron && deno install` (if using Electron)
+- [ ] `deno task install:electron` (if using Electron)
 - [ ] `src/features/<name>/index.ts` — feature with state, actions, effects, machine, reduce, execute
 - [ ] `src/App.tsx` — `export default` component using `useFeature()`
 - [ ] `src/app.ts` — entry point calling `aio.run({ features: [...] })`
