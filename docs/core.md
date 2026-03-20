@@ -4,6 +4,52 @@ Everything is a feature. This page covers all config options for `feature()`.
 
 For the docs index, see [manual.md](manual.md). For generator workflows, see [generators.md](generators.md). For testing, see [testing.md](testing.md).
 
+## Architecture — Data Flow
+
+```
+  UI (React / Svelte / Vue)          Server (Deno)
+  ─────────────────────────          ──────────────────────────────────
+
+  user clicks button
+       │
+       ▼
+  send(action) ──── WebSocket ────▶  dispatch(action)
+                                          │
+                                          ▼
+                                     beforeReduce(action, state)
+                                          │  (null → drop)
+                                          ▼
+                                     ┌─────────────┐
+                                     │  Machine     │  state guard:
+                                     │  (optional)  │  is this action
+                                     │              │  allowed in the
+                                     └──────┬───────┘  current state?
+                                            │
+                                            ▼
+                                     reduce(state, action)
+                                       │         │
+                                       │         ▼
+                                       │    returns effects[]
+                                       ▼         │
+                                     new state    ▼
+                                       │    execute(app, effect)
+                                       │         │
+                                       │         ▼
+                                       │    side effects:
+                                       │    fetch, DB, dispatch
+                                       │
+                                       ▼
+                                     broadcast delta ── WebSocket ──▶  UI re-renders
+                                       │
+                                       ▼
+                                     persist to KV
+                                     sync to SQLite
+```
+
+**One-sentence summary:** UI sends actions → server reduces state → effects run → deltas broadcast back.
+
+---
+
 ## Advanced / explicit control — `feature(name, { actions, reduce, execute })`
 
 > **Not the starting point.** Use `feature({ methods })` for most features. This style gives
@@ -74,8 +120,8 @@ export const counter = feature('counter', {
         method: 'POST',
         body: JSON.stringify({ value: payload.value }),
       })
-        .then(() => app.dispatch(counter.A.saved()))
-        .catch(e => app.dispatch(counter.A.saveFailed(e.message)))
+        .then(() => app.dispatch(counter.saved()))
+        .catch(e => app.dispatch(counter.saveFailed(e.message)))
     },
     log(_app, payload) {
       console.log(payload.message)
@@ -84,7 +130,7 @@ export const counter = feature('counter', {
 })
 ```
 
-> **Note on `reduce`/`execute` form:** The object form (named handlers) is the default and covers 95% of use cases. For advanced cases — foreign action handlers, multiple entry points to the same state change — the function form is available as an escape hatch using `{ on }` / `{ emit }` instead of `{ A }` / `{ E }`. See [Advanced: function-form reduce/execute](#advanced-function-form-reduceexecute) below.
+> **Note on `reduce`/`execute` form:** The object form (named handlers) is the default and covers 95% of use cases. For advanced cases — foreign action handlers, multiple entry points to the same state change — the function form is available as an escape hatch using `{ on }` / `{ emit }`. See [Advanced: function-form reduce/execute](#advanced-function-form-reduceexecute) below.
 
 ### What `feature()` generates
 
@@ -92,10 +138,8 @@ From the name `'counter'` and action `increment`, you get:
 
 | Generated | Value | Use |
 |-----------|-------|-----|
-| `counter.A.increment(5)` | `{ type: 'counter:increment', payload: { by: 5 } }` | Action creator (internal / test use) |
 | `counter.increment(5)` | dispatches `counter:increment` after `aio.run()` | Direct calling from app code |
 | `counter.increment.type` | `'counter:increment'` | Type string for matching, no raw strings |
-| `counter.E.log('hi')` | `{ type: 'counter:log', payload: { message: 'hi' } }` | Effect creator returned from reduce |
 
 **Action type format:** `featureName:actionKey` — all lowercase. `counter:increment`, `wallet:transfer`, `checkout:start`.
 
@@ -103,10 +147,7 @@ From the name `'counter'` and action `increment`, you get:
 
 ```ts
 counter.increment(5)        // dispatches counter:increment
-counter.A.increment(5)      // returns action object (internal / test wiring only)
 ```
-
-`feature.A` is **internal** — not used in application code. It's available in `testFeature` contexts where `aio.run()` hasn't been called.
 
 `feature()` returns `FeatureDef & FlatActions<A>` — TypeScript infers correct parameter types for all flattened action creators.
 
@@ -220,7 +261,7 @@ Effects are returned from the `execute` object's handlers. The reduce object can
 
 ### Advanced: function-form reduce/execute
 
-For edge cases — foreign action handling, dynamic routing, multiple actions triggering the same logic — the function form is available. It uses `{ on }` / `{ emit }` instead of the old `{ A }` / `{ E }`:
+For edge cases — foreign action handling, dynamic routing, multiple actions triggering the same logic — the function form is available. It uses `{ on }` / `{ emit }`:
 
 ```ts
 reduce(state, action, { on, emit }) {
@@ -235,7 +276,7 @@ reduce(state, action, { on, emit }) {
 },
 ```
 
-`{ A }` and `{ E }` no longer appear in user code. Use `{ on }` / `{ emit }` in function-form reduce/execute.
+Use `{ on }` / `{ emit }` in function-form reduce/execute.
 
 ### `execute` — named handlers (default form)
 
@@ -248,8 +289,8 @@ execute: {
       method: 'POST',
       body: JSON.stringify({ value: payload.value }),
     })
-      .then(() => app.dispatch(counter.A.saved()))
-      .catch(e => app.dispatch(counter.A.saveFailed(e.message)))
+      .then(() => app.dispatch(counter.saved()))
+      .catch(e => app.dispatch(counter.saveFailed(e.message)))
   },
   log(_app, payload) {
     console.log(payload.message)
@@ -258,8 +299,8 @@ execute: {
 ```
 
 **Scoped dispatch rules:**
-- `app.dispatch(counter.A.ownAction())` — always allowed
-- `app.dispatch(otherFeature.A.action())` — **blocked** unless declared in `dispatchTo`
+- `app.dispatch(counter.ownAction())` — always allowed
+- `app.dispatch(otherFeature.action())` — **blocked** unless declared in `dispatchTo`
 - `app.getState()` — returns this feature's slice only (not the full state)
 - `app.getFullState?.()` — returns the entire app state (available in `init`, `destroy`, and `execute`)
 
@@ -274,7 +315,7 @@ const te = feature('te', {
   dispatchTo: [wallet, fleet],  // pass feature objects, not strings
   execute: {
     transferComplete(app, payload) {
-      app.dispatch(wallet.A.credit(payload.amount))  // allowed
+      app.dispatch(wallet.credit(payload.amount))  // allowed
     },
   },
 })
@@ -325,33 +366,24 @@ Init runs in dependency order (dependsOn). Destroy runs in reverse order.
 | Available in | `init`, `destroy`, `execute` | `init`, `destroy`, `execute` |
 | Use when | Reading your own state | Coordinating with another feature at startup |
 
-### Deferred `implement` — server-only executors
+### Server-only executors
 
-When execute needs server-only imports, use `implement()` to attach it separately:
+When execute needs server-only imports, use an async method with dynamic `import()`:
 
 ```ts
-// features/backup/index.ts — shared (browser + server)
 export const backup = feature('backup', {
   state: { lastBackup: null as string | null },
-  actions: { run: () => ({}), done: (at: string) => ({ at }) },
-  effects: { doBackup: () => ({}) },
-  machine: false,
-  reduce: {
-    run() {},           // no state change — triggers doBackup effect
-    done(state, payload) { state.lastBackup = payload.at },
-  },
-  // no execute here — browser doesn't have Deno APIs
-})
-
-// features/backup/execute.ts — server only
-import { backup } from './index.ts'
-backup.implement({
-  doBackup(app) {
-    Deno.writeTextFile('./backup.json', JSON.stringify(app.getState()))
-      .then(() => app.dispatch(backup.A.done(new Date().toISOString())))
+  methods: {
+    async run(s) {
+      const data = JSON.stringify(s)
+      await Deno.writeTextFile('./backup.json', data)
+      s.lastBackup = new Date().toISOString()
+    },
   },
 })
 ```
+
+The browser never runs async method bodies — it dispatches via WebSocket. Server-only code stays on the server naturally.
 
 ## `generators` — sequential async workflows
 
@@ -376,25 +408,25 @@ const checkout = feature('checkout', {
     // key must match an action key when using actions style
     // actions-style: generator receives the payload object directly
     start: function* (ctx, { item }: { item: string }) {
-      // Step 1 — async call (dispatches checkout:flow:fetchPrice)
+      // Step 1 — async call (dispatches checkout:__flow:fetchPrice)
       const { price } = yield* ctx.call('fetchPrice', () =>
         fetch(`/api/price?item=${item}`).then(r => r.json())
       )
 
-      // Step 2 — validation + state update (dispatches checkout:flow:setPrice)
+      // Step 2 — validation + state update (dispatches checkout:__flow:setPrice)
       if (price > 1000) {
         yield* ctx.fail('too expensive')
         return
       }
       yield* ctx.mutate('setPrice', s => { s.price = price })
 
-      // Step 3 — another async call (dispatches checkout:flow:placeOrder)
+      // Step 3 — another async call (dispatches checkout:__flow:placeOrder)
       const { orderId } = yield* ctx.call('placeOrder', () =>
         fetch('/api/order', { method: 'POST', body: JSON.stringify({ price }) })
           .then(r => r.json())
       )
 
-      // Step 4 — done (dispatches checkout:flow:done)
+      // Step 4 — done (dispatches checkout:__flow:done)
       yield* ctx.done(s => { s.orderId = orderId })
     },
   },
@@ -407,9 +439,9 @@ Each `yield*` is a checkpoint — the framework dispatches an action, other feat
 
 From the generator above, the framework auto-generates:
 
-- **Actions**: `checkout:flow:fetchPrice`, `checkout:flow:setPrice`, `checkout:flow:placeOrder`, `checkout:flow:done`, `checkout:flow:failed`
+- **Actions**: `checkout:__flow:fetchPrice`, `checkout:__flow:setPrice`, `checkout:__flow:placeOrder`, `checkout:__flow:done`, `checkout:__flow:failed`
 - **Machine transitions**: each step moves through corresponding flow states
-- **Error handling**: if any `ctx.call` throws, `checkout:flow:error` is dispatched
+- **Error handling**: if any `ctx.call` throws, `checkout:__flow:error` is dispatched
 
 You don't define these manually — the generator is the source of truth.
 
@@ -586,7 +618,7 @@ async checkout(s) {
 | `init` | `(app) => void` | No | Called when feature initializes (after dependencies) |
 | `destroy` | `(app) => void` | No | Called when feature destroys (before dependencies) |
 
-\* `methods` OR `actions` required (or `generators` alone). Using `methods`/`generators` with `actions` throws.
+\* `methods` or `actions` required (or `generators` alone). Methods, generators, and actions/effects can coexist in one feature — all callable names must be unique within the feature (validated at creation time).
 
 ### Which style to use?
 
@@ -598,7 +630,7 @@ async checkout(s) {
 | Complex reactive cross-feature logic | `feature({ actions, reduce, execute })` | Explicit control over action flow |
 | Need machine guards on async | `feature({ methods, machine })` | State machine gates async transitions |
 
-**Progression:** Start with `feature({ methods })`. Add `generators` when a method becomes multi-step and you want visibility or cancellation. Use `actions/reduce/execute` when you need fine-grained control over action flow.
+**Progression:** Start with `feature({ methods })`. Add `generators` when a method becomes multi-step and you want visibility or cancellation. Add `actions/reduce/execute` when you need fine-grained control over action flow. All three styles can be mixed in a single feature — all callable names must be unique (validated at creation time).
 
 ### Generated actions
 
@@ -611,7 +643,7 @@ async checkout(s) {
 | (async write) | `counter:__setSave` | `{ mutations: [...] }` (batched per sync frame) | Hidden (internal) |
 | (async error) | `counter:__error` | `{ _method, error }` | Hidden (internal) |
 | `*place(ctx)` generator | `counter:place` (trigger) | `{ args: [...] }` | Yes |
-| (flow step) | `counter:flow:stepName` | internal | Yes |
+| (flow step) | `counter:__flow:stepName` | internal | Yes |
 
 Named actions (`counter:increment`, `counter:save`, flow steps) appear in time-travel. Internal bookkeeping actions (`__set*`, `__error`, `__exec`, `__FlowState`) are hidden from time-travel history.
 
@@ -630,8 +662,8 @@ counter.isPositive()        // reads state → true
 counter.increment.type      // → 'counter:increment'
 counter.reset.type          // → 'counter:reset'
 
-// A catalog is internal — only use in testFeature or cross-feature wiring
-counter.A.increment(5)      // returns action object without dispatching
+// Before aio.run(), calling a method returns an action object without dispatching
+// After aio.run(), calling a method dispatches automatically
 ```
 
 This works for all three styles — `feature({ methods })`, `feature({ actions, reduce })`, and `feature({ generators })`.
@@ -677,7 +709,7 @@ Other features can listen to reactive feature actions via foreign listeners, rea
 | Multi-step workflow with visibility/cancellation | `feature({ generators })` |
 | Complex reactive cross-feature logic | `feature({ reduce, execute })` |
 
-Start with `feature({ methods })`. Add `generators` inline when a workflow becomes multi-step. Switch to `feature({ actions, generators })` when you need explicit action control.
+Start with `feature({ methods })`. Add `generators` inline when a workflow becomes multi-step. Add `actions/reduce/execute` when you need explicit action control. All three styles can be mixed in a single feature.
 
 **TypeScript inference:** `feature({ methods })` returns `FeatureDef & FlatMethods<M> & FlatSelectors<Sel>` — methods and selectors are properly typed with autocomplete. The state parameter `s` is stripped from method signatures, so `increment(s, by: number)` becomes `counter.increment(by: number)`. Generator names are added to the same callable surface.
 
@@ -752,23 +784,12 @@ aio.middleware.create((action, state, next, user) => {
 
 Built-in middleware: `logger`, `validate`, `metrics`, `perfBudget`, `freeze`, `devtools`, `create` (custom).
 
-### State versioning + migrations
+### App version
 
 ```ts
 await aio.run({
   features: [counter, wallet],
-  version: 2,
-  migrations: [
-    // v0 → v1: add wallet feature
-    (state) => ({ ...state, wallet: { balance: 0 } }),
-    // v1 → v2: rename field
-    (state) => {
-      const w = state.wallet as Record<string, unknown>
-      w.totalBalance = w.balance
-      delete w.balance
-      return state
-    },
-  ],
+  appVersion: '1.2.0',
 })
 ```
 
@@ -791,11 +812,10 @@ app.features!.enable('wallet')    // re-enable (dispatches Init, resets state)
 |--------|------|---------|-------------|
 | `features` | `FeatureEntry[]` | **required** | Array of features (or `{ feature, dependsOn }` objects) |
 | `middleware` | `MiddlewareFn[]` | — | Middleware chain applied before reduce |
-| `version` | `number` | — | State version — triggers migrations on restore |
-| `migrations` | `fn[]` | — | Migration functions: `(state) => state` |
+| `appVersion` | `string` | `'0.1.0 (default)'` | App version string — logged on startup, stored in `__aio.appVersion`. Not persisted. |
 | `isolate` | `string[]` | — | Only activate these features (dev convenience) |
 | `beforeReduce` | `fn` | — | Intercept actions before reduce — return null to drop |
-| `appId` | `string` | — | Canonical app identity — slugified, used for lock file, UDS socket, KV path, SQLite path, TLS cert dir. Resolution: `appId` > `deno.json "name"` > `ui.title` > `'aio-app'` |
+| `appId` | — | — | **Set in `deno.json`, not here.** Mandatory. Used for lock file, UDS socket, KV/SQLite paths, TLS cert dir. See [am.md](am.md#app-identity). |
 | `singleton` | `boolean \| 'takeover'` | `true` | `true`: refuse if another instance running. `'takeover'`: kill existing, start new. `false`: allow multiple instances |
 | Additional options | — | — | `port`, `persist`, `persistKey`, `persistMode`, `persistDebounce`, `ui`, `baseDir`, `headless`, `users`, `db`, `schedules`, `perfMode`, `perfBudget`, `effectTimeout`, `freezeState`, `deltaThreshold`, `maxConnections`, `stateForUI`, `stateForDB`, `onRestore`, `onAction`, `onEffect`, `onConnect`, `onDisconnect`, `onStart`, `onStop`, `onError` |
 
@@ -942,7 +962,7 @@ import { counter, type CounterState } from './features/counter/index.ts'
 export default function App() {
   // state is CounterState, never null
   const { state, send } = useFeature(counter, {
-    fallback: counter._config.state as CounterState,
+    fallback: counter.__aio.state as CounterState,
   })
 
   return <h1>{state.count}</h1>

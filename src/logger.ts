@@ -1,9 +1,11 @@
 // logger.ts — Structured logging for aio
 //
-// Three outputs:
-//   app.log    — human narrative: machine transitions, flow events, lifecycle, deduped errors
-//   debug.log  — all dispatched actions (diagnostic, rotated aggressively)
-//   errors.log — errors + warnings only (ops/alerting)
+// Five outputs:
+//   app.log     — human narrative: machine transitions, flow events, lifecycle, deduped errors
+//   debug.log   — all dispatched actions (diagnostic, rotated aggressively)
+//   error.log   — errors only (ops/alerting)
+//   warning.log — warnings only (non-critical issues, deduped)
+//   perf.log    — performance violations: slow reducers, slow effects, deduped (once per type)
 //
 // app.log is "smart": it reads like an architectural narrative, not a firehose.
 // Only state changes, flow completions, and errors surface here.
@@ -16,7 +18,7 @@ export type LogLevel = 'trace' | 'debug' | 'info' | 'warn' | 'error'
 export type LogConfig = {
   /** Minimum level written to debug.log (default: 'debug') */
   level?: LogLevel
-  /** Log directory (default: './logs') */
+  /** Log directory (default: './log') */
   dir?: string
   /** Pretty console output in dev (default: auto-detected) */
   console?: boolean
@@ -48,7 +50,7 @@ const SKIP_SUFFIXES = [':__FlowState', ':__exec', ':__flow']
 const SKIP_CONTAINS = [':__set']
 
 // Flow steps — debug.log only (not app.log)
-const FLOW_STEP_RE = /:Flow:(?!Done|Failed|Error)/
+const FLOW_STEP_RE = /:__flow:(?!done|failed|error)/
 
 // ── Public singleton ──────────────────────────────────────────────────
 
@@ -57,15 +59,24 @@ let _active: AioLogger | null = null
 /** Wire the framework logger instance into the public singleton */
 export function setLogger(l: AioLogger | null): void { _active = l }
 
+/** Get the active logger instance (null if not configured) */
+export function getLogger(): AioLogger | null { return _active }
+
 /** Public log API — no-ops when logging is not configured in aio.run() */
 export interface Log {
+  /** Log at trace level */
   trace(cat: string, msg: string, data?: Record<string, unknown>): void
+  /** Log at debug level */
   debug(cat: string, msg: string, data?: Record<string, unknown>): void
+  /** Log at info level */
   info (cat: string, msg: string, data?: Record<string, unknown>): void
+  /** Log at warn level */
   warn (cat: string, msg: string, data?: Record<string, unknown>): void
+  /** Log at error level */
   error(cat: string, msg: string, data?: Record<string, unknown>): void
 }
 
+/** Public log singleton — no-ops when logging is not configured */
 export const log: Log = {
   trace(cat: string, msg: string, data?: Record<string, unknown>): void { _active?.pub('trace', cat, msg, data) },
   debug(cat: string, msg: string, data?: Record<string, unknown>): void { _active?.pub('debug', cat, msg, data) },
@@ -83,6 +94,7 @@ export class AioLogger {
   private lastStatus = new Map<string, string>()
   private flowStarts  = new Map<string, number>()        // "feature:flowName" → startMs
   private errorKeys   = new Map<string, ErrorEntry>()
+  private perfSeen    = new Map<string, { count: number; worst: number; last: number }>()
 
   // Aggregation counters (reset each heartbeat window)
   private stats = { dispatched: 0, errors: 0, start: Date.now() }
@@ -93,7 +105,7 @@ export class AioLogger {
   constructor(config: LogConfig & { appName?: string }) {
     this.cfg = {
       level:     config.level     ?? 'debug',
-      dir:       config.dir       ?? './logs',
+      dir:       config.dir       ?? './log',
       console:   config.console   ?? isDevMode(),
       heartbeat: config.heartbeat ?? 3600,
       suppressTypes: config.suppressTypes ?? [],
@@ -118,7 +130,7 @@ export class AioLogger {
 
   private async rotateOnStart(): Promise<void> {
     const keep = this.cfg.rotate.keep ?? 7
-    for (const kind of ['app', 'debug', 'errors'] as const) {
+    for (const kind of ['app', 'debug', 'error', 'warning', 'perf'] as const) {
       const base = this.path(kind)
       try { await Deno.stat(base) } catch { continue }  // file absent — nothing to rotate
 
@@ -171,11 +183,11 @@ export class AioLogger {
     const prefix = type.split(':')[0]?.toLowerCase() ?? 'unknown'
 
     // ── Feature lifecycle ─────────────────────────────────────────
-    if (type.endsWith(':Init')) {
+    if (type.endsWith(':__init')) {
       this.app('info', `feature:${prefix}`, 'ready')
       return
     }
-    if (type.endsWith(':Destroy')) {
+    if (type.endsWith(':__destroy')) {
       this.app('info', `feature:${prefix}`, 'stopped')
       return
     }
@@ -191,7 +203,7 @@ export class AioLogger {
       return
     }
 
-    if (type.endsWith(':Flow:Done')) {
+    if (type.endsWith(':__flow:done')) {
       const flowName = payload._flow as string ?? '?'
       const key      = `${prefix}:${flowName}`
       const dur      = elapsed(this.flowStarts.get(key))
@@ -201,7 +213,7 @@ export class AioLogger {
       return
     }
 
-    if (type.endsWith(':Flow:Failed')) {
+    if (type.endsWith(':__flow:failed')) {
       const flowName = payload._flow as string ?? '?'
       this.flowStarts.delete(`${prefix}:${flowName}`)
       this.stats.errors++
@@ -209,7 +221,7 @@ export class AioLogger {
       return
     }
 
-    if (type.endsWith(':Flow:Error')) {
+    if (type.endsWith(':__flow:error')) {
       this.stats.errors++
       this.dedup(`flow:${prefix}`, `${payload.flow ?? '?'} error`, { error: String(payload.error ?? '?') })
       return
@@ -237,6 +249,26 @@ export class AioLogger {
     const src = callerFile()
     if (lvl === 'trace' || lvl === 'debug') this.dbg(cat, msg, data ?? null, src)
     else this.app(lvl, cat, msg, data ?? null, undefined, src)
+  }
+
+  /** Log a performance violation — deduped by type (only first occurrence + summary on heartbeat) */
+  perf(source: 'reduce' | 'effect', type: string, duration: number, budget: number): void {
+    const key = `${source}:${type}`
+    const existing = this.perfSeen.get(key)
+    if (existing) {
+      existing.count++
+      if (duration > existing.worst) existing.worst = duration
+      existing.last = Date.now()
+      return  // already logged once — skip until heartbeat summary
+    }
+    this.perfSeen.set(key, { count: 1, worst: duration, last: Date.now() })
+    const entry: LogEntry = {
+      ts: now(), lvl: 'warn', cat: `perf:${source}`,
+      msg: `${type} exceeded budget: ${Math.round(duration)}ms > ${budget}ms`,
+      data: { type, duration: Math.round(duration), budget },
+    }
+    this.write(this.path('perf'), entry)
+    if (this.cfg.console) printConsole(entry)
   }
 
   // ── Private ───────────────────────────────────────────────────────
@@ -270,7 +302,7 @@ export class AioLogger {
       existing.suppressed = true
       this.app('error', cat, `${msg} (×${existing.count}, suppressing repeats)`)
     }
-    // Always write to errors.log regardless of dedup
+    // Always write to error.log regardless of dedup
     this.err(cat, msg, data)
   }
 
@@ -290,6 +322,19 @@ export class AioLogger {
     this.app('info', 'app', 'heartbeat', {
       uptime, dispatched: this.stats.dispatched, errors: this.stats.errors,
     })
+    // Flush accumulated perf violations as summary
+    for (const [key, p] of this.perfSeen) {
+      if (p.count > 1) {
+        const [source, ...rest] = key.split(':')
+        const type = rest.join(':')
+        this.write(this.path('perf'), {
+          ts: now(), lvl: 'warn', cat: `perf:${source}`,
+          msg: `${type} — ${p.count} violations, worst: ${Math.round(p.worst)}ms`,
+          data: { type, count: p.count, worst: Math.round(p.worst) },
+        })
+      }
+    }
+    this.perfSeen.clear()
   }
 
   // ── Write helpers ─────────────────────────────────────────────────
@@ -297,8 +342,8 @@ export class AioLogger {
   private app(lvl: LogLevel, cat: string, msg: string, data?: Record<string, unknown> | null, dur?: number, src?: string): void {
     const e: LogEntry = { ts: now(), lvl, cat, msg, ...(src ? { src } : {}), ...(data ? { data } : {}), ...(dur !== undefined ? { dur } : {}) }
     if (lvl === 'info' || lvl === 'error') this.write(this.path('app'), e)
-    if (lvl === 'error')                   this.write(this.path('errors'), e)
-    if (lvl === 'warn')                    this.write(this.path('debug'), e)
+    if (lvl === 'error')                   this.write(this.path('error'), e)
+    if (lvl === 'warn')                    { this.write(this.path('warning'), e); this.write(this.path('debug'), e) }
     if (this.cfg.console && (lvl === 'info' || lvl === 'error')) printConsole(e)
   }
 
@@ -308,13 +353,15 @@ export class AioLogger {
   }
 
   private err(cat: string, msg: string, data?: Record<string, unknown> | null): void {
-    this.write(this.path('errors'), { ts: now(), lvl: 'error', cat, msg, ...(data ? { data } : {}) })
+    this.write(this.path('error'), { ts: now(), lvl: 'error', cat, msg, ...(data ? { data } : {}) })
   }
 
-  private path(kind: 'app' | 'debug' | 'errors'): string {
-    if (kind === 'app')    return `${this.dir}/app.log`
-    if (kind === 'debug')  return `${this.dir}/debug.log`
-    return `${this.dir}/errors.log`
+  private path(kind: 'app' | 'debug' | 'error' | 'warning' | 'perf'): string {
+    if (kind === 'app')     return `${this.dir}/app.log`
+    if (kind === 'debug')   return `${this.dir}/debug.log`
+    if (kind === 'warning') return `${this.dir}/warning.log`
+    if (kind === 'perf')    return `${this.dir}/perf.log`
+    return `${this.dir}/error.log`
   }
 
   private write(path: string, entry: LogEntry): void {
@@ -353,7 +400,7 @@ function fmtUptime(ms: number): string {
 }
 
 function stripFlowPrefix(type: string): string {
-  const m = type.match(/:Flow:(.+)$/)
+  const m = type.match(/:__flow:(.+)$/)
   return m ? m[1] ?? type : type
 }
 

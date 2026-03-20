@@ -1,4 +1,4 @@
-import { assertEquals, assertThrows } from 'https://deno.land/std@0.224.0/assert/mod.ts'
+import { assertEquals, assertThrows } from '@std/assert'
 import { createDispatch } from '../src/dispatch.ts'
 import { createServer } from '../src/server.ts'
 import { join } from '@std/path'
@@ -68,7 +68,7 @@ async function waitFor(fn: () => boolean, ms = 2000): Promise<void> {
   }
 }
 
-Deno.test('snapshot HTTP: GET /__snapshot returns state JSON', async () => {
+Deno.test('snapshot HTTP: GET /__aio/snapshot returns state JSON', async () => {
   const dir = await Deno.makeTempDir()
   await Deno.mkdir(join(dir, 'dist'), { recursive: true })
   await Deno.writeTextFile(join(dir, 'dist', 'app.js'), 'export function mount(){}')
@@ -91,7 +91,7 @@ Deno.test('snapshot HTTP: GET /__snapshot returns state JSON', async () => {
   await new Promise(r => setTimeout(r, 50))
 
   try {
-    const resp = await fetch(`http://127.0.0.1:${PORT}/__snapshot`)
+    const resp = await fetch(`http://127.0.0.1:${PORT}/__aio/snapshot`)
     assertEquals(resp.status, 200)
     assertEquals(resp.headers.get('content-type'), 'application/json')
     assertEquals(resp.headers.get('content-disposition'), 'attachment; filename="snapshot.json"')
@@ -103,7 +103,7 @@ Deno.test('snapshot HTTP: GET /__snapshot returns state JSON', async () => {
   }
 })
 
-Deno.test('snapshot HTTP: POST /__snapshot loads state', async () => {
+Deno.test('snapshot HTTP: POST /__aio/snapshot loads state', async () => {
   const dir = await Deno.makeTempDir()
   await Deno.mkdir(join(dir, 'dist'), { recursive: true })
   await Deno.writeTextFile(join(dir, 'dist', 'app.js'), 'export function mount(){}')
@@ -127,7 +127,7 @@ Deno.test('snapshot HTTP: POST /__snapshot loads state', async () => {
 
   try {
     const snapshot = JSON.stringify({ count: 99, restored: true })
-    const resp = await fetch(`http://127.0.0.1:${PORT}/__snapshot`, {
+    const resp = await fetch(`http://127.0.0.1:${PORT}/__aio/snapshot`, {
       method: 'POST',
       body: snapshot,
       headers: { 'Content-Type': 'application/json', 'X-AIO': '1' },
@@ -141,7 +141,7 @@ Deno.test('snapshot HTTP: POST /__snapshot loads state', async () => {
   }
 })
 
-Deno.test('snapshot HTTP: POST /__snapshot rejects invalid JSON', async () => {
+Deno.test('snapshot HTTP: POST /__aio/snapshot rejects invalid JSON', async () => {
   const dir = await Deno.makeTempDir()
   await Deno.mkdir(join(dir, 'dist'), { recursive: true })
   await Deno.writeTextFile(join(dir, 'dist', 'app.js'), 'export function mount(){}')
@@ -162,7 +162,7 @@ Deno.test('snapshot HTTP: POST /__snapshot rejects invalid JSON', async () => {
   await new Promise(r => setTimeout(r, 50))
 
   try {
-    const resp = await fetch(`http://127.0.0.1:${PORT}/__snapshot`, {
+    const resp = await fetch(`http://127.0.0.1:${PORT}/__aio/snapshot`, {
       method: 'POST',
       body: 'not json{{{',
       headers: { 'X-AIO': '1' },
@@ -209,7 +209,7 @@ Deno.test('snapshot HTTP: clients receive broadcast after POST', async () => {
     await waitFor(() => msgs.length >= 1) // initial state
 
     // POST snapshot → client should receive broadcast
-    const resp = await fetch(`http://127.0.0.1:${PORT}/__snapshot`, {
+    const resp = await fetch(`http://127.0.0.1:${PORT}/__aio/snapshot`, {
       method: 'POST',
       body: JSON.stringify({ count: 77, pad: 'restored' }),
       headers: { 'X-AIO': '1' },

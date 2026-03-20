@@ -141,7 +141,7 @@ execute: {
     const { rows } = await app.db!.query<{ customer: string; revenue: number }>(
       'SELECT customer, SUM(total) as revenue FROM orders GROUP BY customer ORDER BY revenue DESC'
     )
-    app.dispatch(myFeature.A.reportLoaded(rows))
+    app.dispatch(myFeature.reportLoaded(rows))
   },
 
   async archiveOld(app) {
@@ -161,21 +161,56 @@ Both accept SQL and optional params. The distinction is semantic and affects not
 
 ## Transactions
 
-Group multiple statements into a single atomic operation with `db.transaction()`. All statements either commit together or all roll back:
+Two forms — both wrap statements in `BEGIN`/`COMMIT` and roll back automatically on any error.
+
+### Callback form (recommended)
+
+Pass an async function. Inside it, use `tx.query` and `tx.execute` — they run on the same writer connection and **see your own uncommitted writes** (read-your-writes guaranteed). The callback's return value is the transaction's return value.
 
 ```ts
 execute: {
-  async transferFunds(app, payload: { fromId: number; toId: number; amount: number }) {
-    await app.db!.transaction([
-      { sql: 'UPDATE accounts SET balance = balance - ? WHERE id = ?', params: [payload.amount, payload.fromId] },
-      { sql: 'UPDATE accounts SET balance = balance + ? WHERE id = ?', params: [payload.amount, payload.toId] },
-      { sql: 'INSERT INTO audit_log (action, amount) VALUES (?, ?)', params: ['transfer', payload.amount] },
-    ])
+  async transferFunds(app, { fromId, toId, amount }: { fromId: number; toId: number; amount: number }) {
+    await app.db!.transaction(async (tx) => {
+      const { rows } = await tx.query<{ balance: number }>(
+        'SELECT balance FROM accounts WHERE id = ?', [fromId]
+      )
+      if (rows[0]!.balance < amount) throw new Error('insufficient funds')
+      await tx.execute('UPDATE accounts SET balance = balance - ? WHERE id = ?', [amount, fromId])
+      await tx.execute('UPDATE accounts SET balance = balance + ? WHERE id = ?', [amount, toId])
+      await tx.execute('INSERT INTO audit_log (action, amount) VALUES (?, ?)', ['transfer', amount])
+    })
   },
 },
 ```
 
-Returns `QueryResult[]` — one result per statement. Throws on any failure (the entire transaction is rolled back).
+The callback receives a `Tx` handle — a `query` + `execute` pair scoped to the transaction. Never call `db.execute()` directly inside a transaction callback; use `tx.execute()` instead.
+
+**Write lock:** while the callback runs, all concurrent `db.execute()` calls queue behind it. No external write can interleave between your `BEGIN` and `COMMIT`.
+
+**Nested transactions** throw immediately instead of deadlocking — use SQLite savepoints if you need them.
+
+### Batch form
+
+Pass an array of `{ sql, params }` statements — sent as one atomic message to the worker. Simpler when the statements are fully known upfront and no branching is needed:
+
+```ts
+await app.db!.transaction([
+  { sql: 'UPDATE accounts SET balance = balance - ? WHERE id = ?', params: [amount, fromId] },
+  { sql: 'UPDATE accounts SET balance = balance + ? WHERE id = ?', params: [amount, toId] },
+])
+```
+
+Returns `QueryResult[]` — one result per statement. Cannot read intermediate results or branch.
+
+### Which to use
+
+| | Callback | Batch |
+|---|---|---|
+| Read within transaction | ✓ (read-your-writes) | ✗ |
+| Branch on query result | ✓ | ✗ |
+| Return a value | ✓ | ✗ |
+| Statements known upfront | either | required |
+| Syntax | slightly more verbose | terse |
 
 ## State sync mechanics
 
@@ -251,7 +286,7 @@ execute: {
   async loadData(app) {
     if (!app.db) return  // standalone — skip or use a different strategy
     const { rows } = await app.db.query('SELECT * FROM products')
-    app.dispatch(myFeature.A.loaded(rows))
+    app.dispatch(myFeature.loaded(rows))
   },
 },
 ```
@@ -316,3 +351,53 @@ await db.close()
 ```
 
 `createDB` returns the same `DB` interface used by `app.db`. The Worker spawns on first call and persists until `close()`.
+
+## Backup & restore
+
+aio's SQLite runs in WAL mode on a Worker thread. **Never `cp` the `.db` file while the app is running** — WAL files (`.db-wal`, `.db-shm`) may be out of sync, producing a corrupt copy.
+
+### Safe hot backup
+
+Use `VACUUM INTO` via `app.db` — creates a consistent snapshot while the app is live:
+
+```ts
+// In an execute handler or onInit:
+await app.db!.execute("VACUUM INTO '/backups/myapp-2026-03-17.db'")
+```
+
+This creates a standalone `.db` file (no WAL) that's safe to copy, upload, or archive. The source database is unaffected.
+
+### Scheduled backup
+
+Combine with `schedule.cron` for automatic daily backups:
+
+```ts
+methods: {
+  backup(s) {
+    const ts = new Date().toISOString().slice(0, 10)
+    return schedule.cron('daily-backup', '0 3 * * *', {
+      type: 'myFeature:runBackup', payload: { ts }
+    })
+  },
+},
+// in execute:
+execute: {
+  async runBackup(app, { ts }) {
+    await app.db!.execute(`VACUUM INTO '/backups/myapp-${ts}.db'`)
+  },
+},
+```
+
+### WAL checkpoint
+
+SQLite checkpoints automatically, but long-running apps with heavy writes may want to force a checkpoint during maintenance windows:
+
+```ts
+await app.db!.execute('PRAGMA wal_checkpoint(TRUNCATE)')
+```
+
+`TRUNCATE` mode resets the WAL file to zero bytes — useful before backup or when WAL grows large.
+
+### Restore
+
+Stop the app, replace the `.db` file (and delete any `.db-wal`/`.db-shm` files), restart. On startup, `aio.run()` loads the restored data normally. KV-persisted state (non-SQL) restores from Deno.Kv separately.

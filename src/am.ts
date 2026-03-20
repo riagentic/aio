@@ -26,10 +26,10 @@ const STOP_CHECK_TIMEOUT_MS = 500
 
 // ── 2. Pure utilities ────────────────────────────────────────
 
-/** Resolve the appId for am commands — --app flag > deno.json name > 'aio-app' */
+/** Resolve the appId for am commands — --app flag > deno.json appId (mandatory) */
 function resolveAmAppId(flag?: string): string {
   if (flag) return flag
-  return resolveAppId({})
+  return resolveAppId()
 }
 
 /** Read lock data for current app — replaces old readPid() */
@@ -52,12 +52,12 @@ export function removePid(appId?: string): void {
   removeLock(appId ?? resolveAmAppId())
 }
 
-/** --port flag > lock file > 8000 */
+/** --port flag > lock file > default 8000. */
 export function resolvePort(flag?: number, appId?: string): number {
   if (flag !== undefined) return flag
   const pf = readPid(appId)
   if (pf) return pf.port
-  return DEFAULT_PORT
+  return 8000
 }
 
 export { isProcessAlive }
@@ -202,10 +202,10 @@ export function resolveControlPort(mainPort: number, appId?: string): number {
   return (pf?.port === mainPort && pf.trojanPort) ? pf.trojanPort : mainPort
 }
 
-async function trojanGet(port: number, route: string, appId?: string): Promise<Result> {
+async function trojanGet(port: number, route: string, appId?: string, timeout = FETCH_TIMEOUT): Promise<Result> {
   const ctrl = resolveControlPort(port, appId)
   try {
-    const resp = await fetch(`http://127.0.0.1:${ctrl}/__trojan/${route}`, { signal: AbortSignal.timeout(FETCH_TIMEOUT) })
+    const resp = await fetch(`http://127.0.0.1:${ctrl}/__aio/trojan/${route}`, { signal: AbortSignal.timeout(timeout) })
     if (!resp.ok) {
       const body = await resp.text()
       try { return { ok: false, error: JSON.parse(body).error ?? body } } catch { return { ok: false, error: body } }
@@ -217,9 +217,9 @@ async function trojanGet(port: number, route: string, appId?: string): Promise<R
 async function trojanPost(port: number, route: string, body?: unknown, appId?: string): Promise<Result> {
   const ctrl = resolveControlPort(port, appId)
   try {
-    const resp = await fetch(`http://127.0.0.1:${ctrl}/__trojan/${route}`, {
+    const resp = await fetch(`http://127.0.0.1:${ctrl}/__aio/trojan/${route}`, {
       method: 'POST',
-      headers: body !== undefined ? { 'Content-Type': 'application/json' } : {},
+      headers: { ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}), 'X-AIO': '1' },
       body: body !== undefined ? JSON.stringify(body) : undefined,
       signal: AbortSignal.timeout(FETCH_TIMEOUT),
     })
@@ -350,7 +350,7 @@ async function cmdStart(args: string[], flags: GlobalFlags): Promise<void> {
     // Something is listening — check if it's an aio app
     let trojan: Result
     try {
-      const r = await fetch(`http://127.0.0.1:${port}/__trojan/config`, { signal: AbortSignal.timeout(QUICK_TIMEOUT_MS) })
+      const r = await fetch(`http://127.0.0.1:${port}/__aio/trojan/config`, { signal: AbortSignal.timeout(QUICK_TIMEOUT_MS) })
       trojan = r.ok ? { ok: true, data: await r.json() } : { ok: false, error: '' }
     } catch { trojan = { ok: false, error: '' } }
     if (trojan.ok) {
@@ -727,8 +727,21 @@ async function cmdDispatch(args: string[], flags: GlobalFlags): Promise<void> {
     Deno.exit(1)
   } else {
     const type = args[0]
-    const payload = args.length > 1 ? parsePayload(args.slice(1)) : undefined
-    action = payload ? { type, payload } : { type }
+    if (args.length <= 1) {
+      action = { type }
+    } else {
+      const rest = args.slice(1)
+      // If any arg has '=' → action-style named payload: { key: val }
+      // Otherwise → method-style positional args: { args: [...] }
+      const hasNamedArgs = rest.some(a => a.includes('='))
+      if (hasNamedArgs) {
+        action = { type, payload: parsePayload(rest) }
+      } else {
+        // Parse each positional arg as JSON if possible, else string
+        const parsed = rest.map(a => { try { return JSON.parse(a) } catch { return a } })
+        action = { type, payload: { args: parsed } }
+      }
+    }
   }
 
   const result = await trojanPost(port, 'dispatch', action, appId)
@@ -779,7 +792,7 @@ async function cmdSnapshot(args: string[], flags: GlobalFlags): Promise<void> {
 
   if (!sub) {
     // GET snapshot to stdout
-    const result = await httpGet(port, '/__snapshot', appId)
+    const result = await httpGet(port, '/__aio/snapshot', appId)
     if (!result.ok) { outError(result.error, mode); Deno.exit(1) }
     console.log(result.data)
     return
@@ -787,7 +800,7 @@ async function cmdSnapshot(args: string[], flags: GlobalFlags): Promise<void> {
 
   if (sub === 'save') {
     const file = args[1] ?? 'snapshot.json'
-    const result = await httpGet(port, '/__snapshot', appId)
+    const result = await httpGet(port, '/__aio/snapshot', appId)
     if (!result.ok) { outError(result.error, mode); Deno.exit(1) }
     Deno.writeTextFileSync(file, result.data as string)
     out(mode === 'pretty' ? `saved to ${file}` : { file, status: 'saved' }, mode)
@@ -816,6 +829,41 @@ async function cmdClients(_args: string[], flags: GlobalFlags): Promise<void> {
   const appId = resolveAmAppId(flags.app)
   const port = resolvePort(flags.port, appId)
   const result = await trojanGet(port, 'clients', appId)
+  if (!result.ok) { outError(result.error, mode); Deno.exit(1) }
+  out(result.data, mode)
+}
+
+async function cmdClient(args: string[], flags: GlobalFlags): Promise<void> {
+  const mode = detectMode(flags)
+  const appId = resolveAmAppId(flags.app)
+  const port = resolvePort(flags.port, appId)
+  const idx = args[0]
+  if (idx === undefined) { outError('usage: am client <index> — request client-side state (dev mode)', mode); Deno.exit(1) }
+  const result = await trojanGet(port, `client/${idx}`, appId, 10_000)
+  if (!result.ok) { outError(result.error, mode); Deno.exit(1) }
+  out(result.data, mode)
+}
+
+async function cmdClick(args: string[], flags: GlobalFlags): Promise<void> {
+  const mode = detectMode(flags)
+  const appId = resolveAmAppId(flags.app)
+  const port = resolvePort(flags.port, appId)
+  const clientIdx = args[0]
+  const componentName = args[1]
+  const targetArg = args[2] // index (e.g. "0") or prop:value (e.g. 'title:Settings')
+
+  if (!clientIdx || !componentName) {
+    outError('usage: am click <clientIndex> <Component> [index | prop:value]', mode)
+    Deno.exit(1)
+  }
+
+  // Build target string: "ComponentName:index" or "ComponentName:prop:value"
+  let target = componentName
+  if (targetArg !== undefined) {
+    target += ':' + targetArg
+  }
+
+  const result = await trojanGet(port, `click/${clientIdx}/${encodeURIComponent(target)}`, appId, 10_000)
   if (!result.ok) { outError(result.error, mode); Deno.exit(1) }
   out(result.data, mode)
 }
@@ -920,10 +968,20 @@ async function cmdErrors(_args: string[], flags: GlobalFlags): Promise<void> {
   const result = await httpGet(port, '/__aio/error', appId)
   if (!result.ok) { outError(result.error, mode); Deno.exit(1) }
   const text = (result.data as string).trim()
-  if (!text) {
+  // Server returns JSON { errors: [...] } or null/empty when no errors
+  let errors: string[] = []
+  try {
+    const parsed = JSON.parse(text)
+    if (parsed && Array.isArray(parsed.errors)) errors = parsed.errors
+    else if (parsed === null) errors = []
+    else errors = [text]  // legacy: plain text error
+  } catch {
+    if (text) errors = [text]  // plain text fallback
+  }
+  if (errors.length === 0) {
     out(mode === 'pretty' ? 'no errors' : { errors: [] }, mode)
   } else {
-    out(mode === 'pretty' ? text : { errors: [text] }, mode)
+    out(mode === 'pretty' ? errors.join('\n') : { errors }, mode)
   }
 }
 
@@ -970,6 +1028,57 @@ function cmdVersion(_args: string[], flags: GlobalFlags): void {
   out(mode === 'pretty' ? `am ${VERSION}` : { version: VERSION }, mode)
 }
 
+async function cmdNew(args: string[], flags: GlobalFlags): Promise<void> {
+  const kind = args[0]
+  const name = args[1]
+  const mode = detectMode(flags)
+
+  if (!kind || !name) {
+    outError('usage: am new <feature|page> <name>', mode)
+    return
+  }
+
+  if (kind === 'feature') {
+    const dir = `src/features/${name}`
+    const file = `${dir}/index.ts`
+    try { await Deno.stat(file); outError(`${file} already exists`, mode); return } catch { /* ok */ }
+    await Deno.mkdir(dir, { recursive: true })
+    const content = `import { feature } from 'aio'
+
+export const ${name} = feature('${name}', {
+  state: {},
+  methods: {
+  },
+})
+`
+    await Deno.writeTextFile(file, content)
+    out(flags.json ? { created: file } : `created ${file}`, mode)
+  } else if (kind === 'page') {
+    const pascal = name.charAt(0).toUpperCase() + name.slice(1)
+    const dir = 'src/pages'
+    const file = `${dir}/${pascal}.tsx`
+    try { await Deno.stat(file); outError(`${file} already exists`, mode); return } catch { /* ok */ }
+    await Deno.mkdir(dir, { recursive: true })
+    const content = `import { useAio } from 'aio'
+
+export function ${pascal}() {
+  const { state } = useAio()
+  if (!state) return <div>Loading\u2026</div>
+
+  return (
+    <div>
+      <h1>${pascal}</h1>
+    </div>
+  )
+}
+`
+    await Deno.writeTextFile(file, content)
+    out(flags.json ? { created: file } : `created ${file}`, mode)
+  } else {
+    outError(`unknown scaffold type: '${kind}' — use 'feature' or 'page'`, mode)
+  }
+}
+
 function cmdHelp(_args: string[], flags: GlobalFlags): void {
   if (flags.json) { out({ commands: Object.keys(COMMANDS) }, 'json'); return }
   console.log(`am ${VERSION} — aio manager
@@ -1000,7 +1109,9 @@ Persistence:
   snapshot load <file>    Load snapshot from file
 
 Inspect:
-  clients                 Connected WebSocket clients
+  clients                 Connected WebSocket clients (with index)
+  client <index>          Request React component tree from client (dev mode)
+  click <idx> <Comp> [n]  Click component — by index or prop:value (dev mode)
   sql <query>             Execute read-only SQL
   tables                  List SQLite tables
   schedules               Active scheduled effects
@@ -1009,6 +1120,10 @@ Inspect:
   metrics                 Uptime, connections, schedules
   health                  HTTP health check
   config                  Server configuration
+
+Scaffold:
+  new feature <name>      Generate src/features/<name>/index.ts
+  new page <name>         Generate src/pages/<Name>.tsx
 
 Other:
   version                 Print version
@@ -1032,8 +1147,9 @@ const COMMANDS: Record<string, CmdHandler> = {
   state: cmdState, ui: cmdUi, dispatch: cmdDispatch, actions: cmdActions,
   tt: cmdTT,
   persist: cmdPersist, snapshot: cmdSnapshot,
-  clients: cmdClients, sql: cmdSql, tables: cmdTables, schedules: cmdSchedules,
+  clients: cmdClients, client: cmdClient, click: cmdClick, sql: cmdSql, tables: cmdTables, schedules: cmdSchedules,
   log: cmdLog, logs: cmdLog, errors: cmdErrors, metrics: cmdMetrics, health: cmdHealth,
+  new: cmdNew,
   config: cmdConfig, version: cmdVersion, help: cmdHelp,
 }
 

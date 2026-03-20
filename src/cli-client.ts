@@ -27,6 +27,7 @@ export function connectCli<S>(url: string, opts?: { token?: string }): CliApp<S>
   let closed = false
   let retry = 0
   let wasConnected = false
+  let reconnectTimer: ReturnType<typeof setTimeout> | undefined
   const queue: Array<{ type: string; payload?: unknown }> = []
   const listeners = new Set<(state: S) => void>()
 
@@ -97,7 +98,7 @@ export function connectCli<S>(url: string, opts?: { token?: string }): CliApp<S>
       // Exponential backoff: 1s → 2s → 4s → 8s max, ±20% jitter
       const base = Math.min(1000 * Math.pow(2, retry), 8000)
       retry++
-      setTimeout(connect, base * (0.8 + Math.random() * 0.4))
+      reconnectTimer = setTimeout(connect, base * (0.8 + Math.random() * 0.4))
     }
 
     ws = socket
@@ -126,6 +127,7 @@ export function connectCli<S>(url: string, opts?: { token?: string }): CliApp<S>
 
     close(): void {
       closed = true
+      if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = undefined }
       ws?.close()
       ws = null
       listeners.clear()
@@ -141,6 +143,7 @@ export function connectCliUDS<S>(socketPath: string): CliApp<S> {
   let writer: WritableStreamDefaultWriter<Uint8Array> | null = null
   let closed = false
   let retry = 0
+  let reconnectTimer: ReturnType<typeof setTimeout> | undefined
   const queue: Array<{ type: string; payload?: unknown }> = []
   const listeners = new Set<(state: S) => void>()
   const encoder = new TextEncoder()
@@ -193,7 +196,7 @@ export function connectCliUDS<S>(socketPath: string): CliApp<S> {
           if (!closed) {
             const base = Math.min(1000 * Math.pow(2, retry), 8000)
             retry++
-            setTimeout(connect, base * (0.8 + Math.random() * 0.4))
+            reconnectTimer = setTimeout(connect, base * (0.8 + Math.random() * 0.4))
           }
         })()
       })
@@ -201,7 +204,7 @@ export function connectCliUDS<S>(socketPath: string): CliApp<S> {
         if (!closed) {
           const base = Math.min(1000 * Math.pow(2, retry), 8000)
           retry++
-          setTimeout(connect, base * (0.8 + Math.random() * 0.4))
+          reconnectTimer = setTimeout(connect, base * (0.8 + Math.random() * 0.4))
         }
       })
   }
@@ -229,6 +232,7 @@ export function connectCliUDS<S>(socketPath: string): CliApp<S> {
 
     close(): void {
       closed = true
+      if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = undefined }
       try { conn?.close() } catch { /* already closed */ }
       conn = null
       writer = null

@@ -35,22 +35,17 @@ export function slugify(s: string): string {
   return s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'aio-app'
 }
 
-/** Resolve canonical app ID. Priority: explicit > deno.json name > title > CWD basename */
-export function resolveAppId(opts: { appId?: string; title?: string }): string {
-  if (opts.appId) return slugify(opts.appId)
+/** Resolve app ID from deno.json "appId" field. Mandatory — throws if missing. */
+export function resolveAppId(_opts?: { appId?: string; title?: string }): string {
+  // Explicit override (legacy compat — prefer deno.json)
+  if (_opts?.appId) return slugify(_opts.appId)
 
-  // Try deno.json "name" field
   try {
-    const cfg = JSON.parse(Deno.readTextFileSync(join(Deno.cwd(), 'deno.json'))) as { name?: string }
-    if (cfg.name) return slugify(cfg.name)
-  } catch { /* no deno.json or no name */ }
+    const cfg = JSON.parse(Deno.readTextFileSync(join(Deno.cwd(), 'deno.json'))) as { appId?: string }
+    if (cfg.appId) return slugify(cfg.appId)
+  } catch { /* no deno.json */ }
 
-  if (opts.title) return slugify(opts.title)
-
-  // Fallback: CWD basename — unique per project directory
-  const cwd = Deno.cwd()
-  const base = cwd.split('/').pop() ?? cwd.split('\\').pop() ?? 'aio-app'
-  return slugify(base)
+  throw new Error('[aio] missing "appId" in deno.json — add "appId": "my-app" to your deno.json')
 }
 
 // ── Lock File Paths ──────────────────────────────────────────

@@ -24,13 +24,16 @@ const DEFAULT_REDUCE_BUDGET = 100
 const DEFAULT_EFFECT_BUDGET = 5
 
 /** Deep freeze for dev mode immutability checking */
-export function deepFreeze<T>(obj: T): T {
+export function deepFreeze<T>(obj: T, _seen?: WeakSet<object>): T {
   if (obj === null || typeof obj !== 'object') return obj
   if (Object.isFrozen(obj)) return obj
+  const seen = _seen ?? new WeakSet()
+  if (seen.has(obj as object)) return obj  // cycle guard
+  seen.add(obj as object)
   Object.freeze(obj)
   for (const key of Object.keys(obj as Record<string, unknown>)) {
     const val = (obj as Record<string, unknown>)[key]
-    if (val !== null && typeof val === 'object') deepFreeze(val)
+    if (val !== null && typeof val === 'object') deepFreeze(val, seen)
   }
   return obj
 }
@@ -66,6 +69,8 @@ export type DispatchDeps<S, A, E> = {
   debug: boolean
   onError?: (err: AioError) => void
   onPerf?: (timing: PerfTiming) => void  // called after each action with timing
+  /** Write to perf.log — deduped by action type, once per violation */
+  perfLog?: (source: 'reduce' | 'effect', type: string, duration: number, budget: number) => void
   perfMode?: PerfMode
   perfBudget?: PerfBudget
   freezeState?: boolean  // deep freeze state after reduce in dev mode
@@ -77,7 +82,7 @@ type DispatchFn<A> = ((action: A) => void) & { close: () => void; errorCount: ()
 
 /** Creates a re-entrant-safe dispatch loop that drains queued actions in order */
 export function createDispatch<S, A, E>(deps: DispatchDeps<S, A, E>): DispatchFn<A> {
-  const { reduce, execute, getState, setState, onDone, log, onError, onPerf, perfMode, perfBudget, freezeState } = deps
+  const { reduce, execute, getState, setState, onDone, log, onError, onPerf, perfLog, perfMode, perfBudget, freezeState } = deps
   const effectTimeout = deps.effectTimeout ?? 30_000  // 0 = disabled
   const strictPerf = perfMode !== 'soft'  // default: strict
   const reduceBudget = perfBudget?.reduce ?? DEFAULT_REDUCE_BUDGET
@@ -101,13 +106,14 @@ export function createDispatch<S, A, E>(deps: DispatchDeps<S, A, E>): DispatchFn
   function reportPerf(source: 'reduce' | 'effect', duration: number, budget: number, type?: string): void {
     const typeLabel = type ? ` (${type})` : ''
     const msg = `${source} exceeded budget: ${duration}ms > ${budget}ms${typeLabel}`
-    
+
     if (strictPerf) {
       log.error(msg)
       reportError({ source: 'performance', duration, budget, actionType: source === 'reduce' ? type : undefined, effectType: source === 'effect' ? type : undefined, message: msg })
     } else {
       log.warn(msg)
     }
+    if (perfLog && type) perfLog(source, type, duration, budget)
   }
 
   function dispatch(action: A): void {

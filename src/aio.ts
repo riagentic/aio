@@ -9,13 +9,13 @@ import { createDispatch, type AioError, type PerfMode, type PerfBudget } from '.
 import { createTT, record, undo, redo, travelTo, pause, resume, stateAt, toBroadcast, type TTState, type PerfMetric } from './time-travel.ts'
 import { isScheduleEffect, createScheduleManager, type ScheduleEffect, type ScheduleDef } from './schedule.ts'
 import { createDB, initSchema, loadTables, syncTables, type DB } from './db/mod.ts'
-import { type TableDef } from './sql.ts'
+import type { TableDef } from './sql.ts'
 import { AppLock, resolveAppId, lockDir, type SingletonMode } from './single-instance-lock.ts'
 import { composeFeatures, bindFeature, type FeatureEntry, type FeatureDef, type ComposedFeatures, type FeatureStatus } from './feature.ts'
-import { AioLogger, setLogger, type LogConfig } from './logger.ts'
+import { AioLogger, setLogger, getLogger, type LogConfig } from './logger.ts'
 
 /** Framework version — printed by --version, checked in tests */
-export const VERSION = '0.9.5'
+export const VERSION = '1.0.0-alpha1'
 
 /** Validates that framework version matches deno.json version at build time */
 function validateVersion(): void {
@@ -39,7 +39,7 @@ export type AioUser = { id: string; role: string }
 export type { AioError, PerfMode, PerfBudget } from './dispatch.ts'
 
 
-// Electron + browser window options
+/** Electron + browser window options */
 export type UiConfig = {
   electron?: boolean   // default: true — opens electron window
   keepAlive?: boolean  // default: false — keep server running after electron closes
@@ -51,7 +51,7 @@ export type UiConfig = {
   syncRate?: number                   // throttle UI updates: max 1 push per N ms — default: 10 (100fps), 0 = microtask-only coalescing
 }
 
-// Everything aio.run() needs to wire your app
+/** Everything aio.run() needs to wire your app */
 export type AioConfig<S, A, E> = {
   reduce: (state: S, action: A) => { state: S; effects: (E | ScheduleEffect)[] }
   execute: (app: AioApp<S, A>, effect: E) => void
@@ -69,6 +69,7 @@ export type AioConfig<S, A, E> = {
   port?: number                  // default: 8000
   baseDir?: string               // default: ./src
   headless?: boolean             // default: false — skip browser/electron, server-only (for CLI apps)
+  appVersion?: string            // app version string — logged on startup, available at __aio.appVersion
   schedules?: ScheduleDef[]      // static scheduled effects — started on boot
   db?: Record<string, TableDef>  // SQLite table definitions — arrays auto-sync
   perfMode?: PerfMode           // 'strict' (default) or 'soft' — how to report performance violations
@@ -76,7 +77,6 @@ export type AioConfig<S, A, E> = {
   effectTimeout?: number        // ms before logging a warning for slow async effects — warning only, does not cancel (default: 30000 = 30s)
   freezeState?: boolean         // default: false in prod, true in dev — deep freeze state after reduce to catch mutations
   onRestore?:    (state: S) => S       // transform state after restore, before server starts
-  appId?: string                 // explicit unique app identity (default: resolved from deno.json name > title > 'aio-app')
   singleton?: SingletonMode      // true (default)=refuse if running, 'takeover'=kill+replace, false=allow multi
   // Lifecycle hooks — observe-only, all optional, error-guarded
   onAction?:     (action: A, state: S, user?: AioUser) => void
@@ -90,7 +90,7 @@ export type AioConfig<S, A, E> = {
   _onScheduleReady?: (cancelByPrefix: (prefix: string) => void) => void
 }
 
-// Handle returned by aio.run() — dispatch actions, read state, or shut down
+/** Handle returned by aio.run() — dispatch actions, read state, or shut down */
 export type AioApp<S = unknown, A = unknown> = {
   dispatch: (action: A) => void
   getState: () => S
@@ -126,7 +126,8 @@ export function composeMiddleware<S, A>(
 
 // ── Middleware factories ─────────────────────────────────────────────
 
-type MiddlewareFn = (action: unknown, state: unknown, user?: AioUser) => unknown | null
+/** Middleware function — intercepts actions before reduce */
+export type MiddlewareFn = (action: unknown, state: unknown, user?: AioUser) => unknown | null
 
 /** Built-in middleware factories for aio.run({ middleware: [...] }) */
 const middleware = {
@@ -226,6 +227,7 @@ const log = {
 
 // ── Startup linter — validates config and src/ before running ───────
 
+/** Startup lint result — ok/warn/hint/fail arrays */
 export type Lint = { ok: string[]; warn: string[]; hint: string[]; fail: string[] }
 
 /** Checks state, config, App.tsx existence, and common mistakes */
@@ -516,7 +518,7 @@ function resolveSocketPath(appId: string): string {
 }
 
 /** Find a free port in the private/ephemeral range 49152–65535 by attempting to bind */
-async function findFreePort(): Promise<number> {
+function findFreePort(): number {
   for (let i = 0; i < 50; i++) {
     const port = 49152 + Math.floor(Math.random() * 16384)  // 49152–65535
     try {
@@ -528,10 +530,15 @@ async function findFreePort(): Promise<number> {
   throw new Error('no free port found in 49152–65535 after 50 attempts')
 }
 
+type UDSClient = { conn: Deno.Conn; index: number; id: string }
 type UDSHandle = {
   broadcast: (msg: string) => void
   shutdown: () => void
   socketPath: string
+  /** List connected UDS clients */
+  clients: () => UDSClient[]
+  /** Send a message to a specific UDS client by index, wait for __clientState: response */
+  requestClientState: (index: number, msg?: string) => Promise<unknown>
 }
 
 /** Creates a raw NDJSON listener on a Unix domain socket for Electron IPC bridge.
@@ -541,18 +548,26 @@ export function createUDSListener(
   getUIState: () => unknown,
   onAction: (action: { type: string; payload?: unknown }) => void,
   debug: (msg: string) => void,
+  clientCounter?: { value: number },
 ): UDSHandle {
   // Clean up stale socket
   try { Deno.removeSync(socketPath) } catch { /* doesn't exist */ }
 
   const listener = Deno.listen({ transport: 'unix', path: socketPath })
-  const connections = new Set<Deno.Conn>()
+  const connSet = new Set<Deno.Conn>()
+  const clientMap = new Map<Deno.Conn, UDSClient>()
+  const counter = clientCounter ?? { value: 0 }
+
+  // Pending client state requests
+  const pendingState = new Map<string, { resolve: (v: unknown) => void; timer: ReturnType<typeof setTimeout> }>()
 
   // Accept connections
   ;(async () => {
     for await (const conn of listener) {
-      connections.add(conn)
-      debug(`uds: client connected (${connections.size} total)`)
+      connSet.add(conn)
+      const client: UDSClient = { conn, index: counter.value++, id: crypto.randomUUID() }
+      clientMap.set(conn, client)
+      debug(`uds: client connected #${client.index} (${connSet.size} total)`)
 
       // Send initial state
       const initial = JSON.stringify(getUIState()) + '\n'
@@ -560,29 +575,51 @@ export function createUDSListener(
       writer.write(new TextEncoder().encode(initial)).catch(() => {})
       writer.releaseLock()
 
-      // Read incoming messages (actions from Electron)
-      handleUDSConn(conn, connections, onAction, debug)
+      // Read incoming messages (actions + __clientState: responses)
+      handleUDSConn(conn, connSet, clientMap, pendingState, onAction, debug)
     }
   })().catch(() => { /* listener closed */ })
+
+  function sendTo(conn: Deno.Conn, msg: string): void {
+    try {
+      const writer = conn.writable.getWriter()
+      writer.write(new TextEncoder().encode(msg + '\n')).catch(() => connSet.delete(conn))
+      writer.releaseLock()
+    } catch { connSet.delete(conn) }
+  }
 
   return {
     socketPath,
     broadcast: (msg: string) => {
       const data = new TextEncoder().encode(msg + '\n')
-      for (const conn of connections) {
+      for (const conn of connSet) {
         try {
           const writer = conn.writable.getWriter()
-          writer.write(data).catch(() => connections.delete(conn))
+          writer.write(data).catch(() => connSet.delete(conn))
           writer.releaseLock()
-        } catch { connections.delete(conn) }
+        } catch { connSet.delete(conn) }
       }
+    },
+    clients: () => [...clientMap.values()],
+    requestClientState: (index: number, msg = '__getState'): Promise<unknown> => {
+      const client = [...clientMap.values()].find(c => c.index === index)
+      if (!client) return Promise.resolve({ error: `client ${index} not connected` })
+      return new Promise<unknown>((resolve) => {
+        const timer = setTimeout(() => {
+          pendingState.delete(client.id)
+          resolve({ error: 'client did not respond within 5s' })
+        }, 5000)
+        pendingState.set(client.id, { resolve, timer })
+        sendTo(client.conn, msg)
+      })
     },
     shutdown: () => {
       listener.close()
-      for (const conn of connections) {
+      for (const conn of connSet) {
         try { conn.close() } catch { /* already closed */ }
       }
-      connections.clear()
+      connSet.clear()
+      clientMap.clear()
       try { Deno.removeSync(socketPath) } catch { /* already removed */ }
     },
   }
@@ -592,6 +629,8 @@ export function createUDSListener(
 function handleUDSConn(
   conn: Deno.Conn,
   connections: Set<Deno.Conn>,
+  clientMap: Map<Deno.Conn, UDSClient>,
+  pendingState: Map<string, { resolve: (v: unknown) => void; timer: ReturnType<typeof setTimeout> }>,
   onAction: (action: { type: string; payload?: unknown }) => void,
   debug: (msg: string) => void,
 ): void {
@@ -608,6 +647,20 @@ function handleUDSConn(
         buf = lines.pop()!
         for (const line of lines) {
           if (!line) continue
+          // Client state response
+          if (line.startsWith('__clientState:')) {
+            const client = clientMap.get(conn)
+            if (client) {
+              const pending = pendingState.get(client.id)
+              if (pending) {
+                pendingState.delete(client.id)
+                clearTimeout(pending.timer)
+                try { pending.resolve(JSON.parse(line.slice(14))) }
+                catch { pending.resolve(null) }
+              }
+            }
+            continue
+          }
           try {
             const action = JSON.parse(line)
             if (action && typeof action.type === 'string') {
@@ -618,6 +671,7 @@ function handleUDSConn(
       }
     } catch { /* connection closed */ }
     connections.delete(conn)
+    clientMap.delete(conn)
     debug(`uds: client disconnected (${connections.size} total)`)
   })()
 }
@@ -645,17 +699,14 @@ export type FeaturesConfig = {
   perfBudget?: PerfBudget
   effectTimeout?: number
   freezeState?: boolean
-  appId?: string
   singleton?: SingletonMode
   deltaThreshold?: number
   maxConnections?: number
   schedules?: ScheduleDef[]
   /** v0.5 middleware array — applied in order as beforeReduce chain */
   middleware?: MiddlewareFn[]
-  /** State version — used with migrations for persisted state upgrades */
-  version?: number
-  /** Migration functions — run sequentially from stored version to current */
-  migrations?: ((state: Record<string, unknown>) => Record<string, unknown>)[]
+  /** Application version string — logged on startup, available at __aio.appVersion */
+  appVersion?: string
   /** Isolate features — only these features are active (dev mode convenience) */
   isolate?: string[]
   beforeReduce?: (action: unknown, state: unknown, user?: AioUser) => unknown | null
@@ -669,13 +720,14 @@ export type FeaturesConfig = {
   onRestore?: (state: unknown) => unknown
   stateForUI?: (state: unknown, user?: AioUser) => unknown
   stateForDB?: (state: unknown) => unknown
-  /** Structured logging — app.log (narrative), debug.log (all), errors.log (warn/error).
+  /** Structured logging — app.log (narrative), debug.log (all), error.log (warn/error), perf.log (violations).
    *  `true` enables with all defaults. Omit to disable. */
   logging?: boolean | LogConfig
 }
 
 /** Single entry point — boots KV, server, electron, wires everything. CLI args override config. */
 async function run<S, A, E>(initialState: S, config: AioConfig<S, A, E>): Promise<AioApp<S, A>>
+// deno-lint-ignore no-explicit-any
 async function run(fc: FeaturesConfig): Promise<AioApp<any, any>>
 // deno-lint-ignore no-explicit-any
 async function run(a: any, b?: any): Promise<AioApp<any, any>> {
@@ -699,13 +751,13 @@ async function run(a: any, b?: any): Promise<AioApp<any, any>> {
     if (isolate && isolate.length) {
       const isolateSet = new Set(isolate)
       featureEntries = featureEntries.filter(entry => {
-        const f = '_config' in entry ? entry as FeatureDef : (entry as { feature: FeatureDef }).feature
-        return isolateSet.has(f.name)
+        const f = '__aio' in entry ? entry as FeatureDef : (entry as { feature: FeatureDef }).feature
+        return isolateSet.has(f.__aio.id)
       })
       if (featureEntries.length === 0) {
         log.warn(`isolate: no features matched [${[...isolateSet].join(', ')}] — check spelling`)
       } else {
-        log.info(`isolate: ${featureEntries.map(e => ('_config' in e ? e as FeatureDef : (e as { feature: FeatureDef }).feature).name).join(', ')}`)
+        log.info(`isolate: ${featureEntries.map(e => ('__aio' in e ? e as FeatureDef : (e as { feature: FeatureDef }).feature).__aio.id).join(', ')}`)
       }
     }
 
@@ -716,7 +768,7 @@ async function run(a: any, b?: any): Promise<AioApp<any, any>> {
     if (!fc.stateForDB) {
       const featureExcludes = new Map<string, string[]>()
       for (const f of composed.features) {
-        if (f._config.persistExclude?.length) featureExcludes.set(f.name, f._config.persistExclude)
+        if (f.__aio.persistExclude?.length) featureExcludes.set(f.__aio.id, f.__aio.persistExclude)
       }
       if (featureExcludes.size > 0) {
         autoGetDBState = (s: unknown) => {
@@ -737,15 +789,15 @@ async function run(a: any, b?: any): Promise<AioApp<any, any>> {
     log.info(`features: ${composed.featureNames.join(', ')}`)
     // Log foreign action listeners
     for (const f of composed.features) {
-      if (f._config.foreignActions.length) {
-        for (const fa of f._config.foreignActions) {
-          log.info(`${f.name}: listens to ${fa}`)
+      if (f.__aio.foreignActions.length) {
+        for (const fa of f.__aio.foreignActions) {
+          log.info(`${f.__aio.id}: listens to ${fa}`)
         }
       }
     }
 
     // Create structured logger if configured
-    const appId = fc.appId ?? 'app'
+    const appId = resolveAppId()
     const logCfg = fc.logging === true ? {} : fc.logging
     const logger = logCfg ? new AioLogger({ ...logCfg, appName: appId }) : null
     if (logger) await logger.init()
@@ -778,43 +830,7 @@ async function run(a: any, b?: any): Promise<AioApp<any, any>> {
       }
     }
 
-    // State versioning + migrations: wrap onRestore to run migrations
-    let onRestore = fc.onRestore as ((state: unknown) => unknown) | undefined
-    if (fc.version != null && fc.migrations?.length) {
-      const targetVersion = fc.version
-      const migrations = fc.migrations
-      if (migrations.length < targetVersion) {
-        log.warn(`version is ${targetVersion} but only ${migrations.length} migration(s) provided — missing ${targetVersion - migrations.length}`)
-      }
-      const prevOnRestore = onRestore
-      onRestore = (state: unknown) => {
-        let s = state as Record<string, unknown>
-        const storedVersion = (s.__aioVersion as number) ?? 0
-        if (storedVersion < targetVersion) {
-          const maxMigration = Math.min(targetVersion, migrations.length)
-          for (let v = storedVersion; v < maxMigration; v++) {
-            try {
-              s = migrations[v]!(s)
-              log.info(`migration: v${v} → v${v + 1}`)
-            } catch (e) {
-              log.error(`migration v${v} → v${v + 1} failed: ${e} — falling back to initialState`)
-              return composed.initialState
-            }
-          }
-        }
-        s.__aioVersion = targetVersion
-        if (prevOnRestore) return prevOnRestore(s)
-        return s
-      }
-    } else if (fc.version != null) {
-      // Store version in state even without migrations
-      const prevOnRestore = onRestore
-      onRestore = (state: unknown) => {
-        const s = { ...(state as Record<string, unknown>), __aioVersion: fc.version }
-        if (prevOnRestore) return prevOnRestore(s)
-        return s
-      }
-    }
+    const onRestore = fc.onRestore as ((state: unknown) => unknown) | undefined
 
     // Mutable ref — set after _run() so closures in config can access the app
     let appRef: AioApp<Record<string, unknown>, unknown> | null = null
@@ -841,11 +857,11 @@ async function run(a: any, b?: any): Promise<AioApp<any, any>> {
       perfBudget: fc.perfBudget,
       effectTimeout: fc.effectTimeout,
       freezeState: fc.freezeState,
-      appId: fc.appId,
       singleton: fc.singleton,
       deltaThreshold: fc.deltaThreshold,
       maxConnections: fc.maxConnections,
       schedules: fc.schedules,
+      appVersion: fc.appVersion,
       ui: fc.ui,
       beforeReduce: beforeReduce as AioConfig<Record<string, unknown>, unknown, unknown>['beforeReduce'],
       onAction: logger
@@ -909,7 +925,7 @@ async function _run<S, A, E>(initialState: S, config: AioConfig<S, A, E>): Promi
   if (cli.version) { console.log(`aio ${VERSION}`); Deno.exit(0) }
 
   // App identity — resolved once, used for lock, UDS socket, KV/SQLite paths
-  const appId = resolveAppId({ appId: config.appId, title: cli.title ?? config.ui?.title })
+  const appId = resolveAppId()
   log.debug(`app-id: ${appId}`)
 
   // Port — explicit wins, otherwise pick a random free port in 49152–65535
@@ -1248,6 +1264,7 @@ async function _run<S, A, E>(initialState: S, config: AioConfig<S, A, E>): Promi
     onError,
     perfMode: config.perfMode,
     perfBudget: config.perfBudget,
+    perfLog: (source, type, duration, budget) => getLogger()?.perf(source, type, duration, budget),
     freezeState: config.freezeState ?? !prod,  // default: true in dev, false in prod
     effectTimeout: config.effectTimeout,
     onPerf,
@@ -1363,12 +1380,16 @@ async function _run<S, A, E>(initialState: S, config: AioConfig<S, A, E>): Promi
   const useElectron = !headless && (cli.electron ?? ui.electron) !== false
   const transport = resolveTransport(cli.transport ?? ui.transport, useElectron, expose)
 
+  // Shared client index counter — WS and UDS clients get globally unique indices
+  const clientCounter = { value: 0 }
+
   // Prod + UDS + electron: skip HTTP server entirely (zero TCP ports — all via UDS+IPC)
   const skipHttp = prod && transport === 'uds' && useElectron && !expose
   const server: ServerHandle = skipHttp
     ? { broadcast: () => {}, broadcastTT: () => {}, shutdown: async () => {}, clientCount: () => 0 }
     : createServer({
     port,
+    clientCounter,
     title,
     width: ui.width,
     height: ui.height,
@@ -1425,6 +1446,8 @@ async function _run<S, A, E>(initialState: S, config: AioConfig<S, A, E>): Promi
       ...(asyncDb ? { sqlQuery: async (sql: string) => (await asyncDb!.query(sql)).rows } : {}),
       shutdown: () => shutdown().then(() => Deno.exit(0)),
       startedAt: Date.now(),
+      udsClients: () => udsHandle ? udsHandle.clients().map(c => ({ index: c.index, id: c.id })) : [],
+      requestUdsClientState: (index: number, msg?: string) => udsHandle ? udsHandle.requestClientState(index, msg) : Promise.resolve({ error: 'UDS not active' }),
     },
   })
 
@@ -1436,7 +1459,11 @@ async function _run<S, A, E>(initialState: S, config: AioConfig<S, A, E>): Promi
     } catch { /* signal not supported on this platform */ }
   }
 
+  const appVersion = config.appVersion ?? '0.1.0 (default)'
   ;(globalThis as Record<string, unknown>).__aioStartedAt = Date.now()
+  const __aio = ((globalThis as Record<string, unknown>).__aio ??= {}) as Record<string, unknown>
+  __aio.appVersion = appVersion
+  __aio.aioVersion = VERSION
   if (onStart) try { onStart(app) } catch (e) { log.error(`hook onStart: ${e}`) }
 
   if (config.schedules?.length) {
@@ -1455,6 +1482,7 @@ async function _run<S, A, E>(initialState: S, config: AioConfig<S, A, E>): Promi
         dispatch(action as A)
       },
       (msg: string) => log.debug(msg),
+      clientCounter,
     )
     log.info(`transport: UDS at ${socketPath}`)
   }
@@ -1496,6 +1524,8 @@ async function _run<S, A, E>(initialState: S, config: AioConfig<S, A, E>): Promi
   if (udsHandle)         log.info(`${p('uds')}${udsHandle.socketPath}`)
   if (server.trojanPort) log.info(`${p('trojan')}http://localhost:${server.trojanPort}`)
   log.info(`${p('id')}${appId}`)
+  log.info(`${p('version')}${appVersion}`)
+  log.info(`${p('aio')}${VERSION}`)
   log.info(`${p('title')}${title}`)
   log.info(`${p('singleton')}${String(singletonMode)}`)
   log.info(`${p('persist')}${shouldPersist ? persistMode : 'false'}`)
@@ -1529,7 +1559,12 @@ async function _run<S, A, E>(initialState: S, config: AioConfig<S, A, E>): Promi
     const udsConfig = udsHandle ? { socketPath: udsHandle.socketPath, baseDir: udsBaseDir, title, hasCSS: udsHasCSS } : undefined
     launchElectron(electronUrl, log, meta, udsConfig)
       .then(proc => {
-        if (!proc) { log.warn(`Electron did not launch — open ${url} in a browser`); return }
+        if (!proc) {
+          console.log('\n  \x1b[33m⚠ Electron not available\x1b[0m — falling back to browser')
+          console.log(`  \x1b[2mInstall:\x1b[0m  deno task install:electron`)
+          console.log(`  \x1b[2mOr open:\x1b[0m  ${url}\n`)
+          return
+        }
         _electronProc = proc
         proc.status
           .then(s => {

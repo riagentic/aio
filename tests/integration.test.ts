@@ -1,4 +1,4 @@
-import { assertEquals, assertNotEquals } from 'https://deno.land/std@0.224.0/assert/mod.ts'
+import { assertEquals, assertNotEquals } from '@std/assert'
 import { createServer } from '../src/server.ts'
 import { createDispatch } from '../src/dispatch.ts'
 import { createScheduleManager, isScheduleEffect, schedule, type ScheduleEffect } from '../src/schedule.ts'

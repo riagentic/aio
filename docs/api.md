@@ -20,8 +20,7 @@ All exports are one import: `import { feature, call, aio } from 'aio'`
 | `aio.run(config)` | Start the app — see Config section for options |
 | `aio.middleware.logger()` | Log all actions to console (dev mode) |
 | `aio.middleware.validate(defs)` | Validate action shapes before reduce |
-| `call(fn)` | Call a function — pass-through, for symmetry with options form |
-| `call(opts, fn)` | Call callback with `{ timeout?, retries? }`, returns Promise |
+| `call(opts, fn)` | Call with `{ timeout?, retries? }` — wraps inter-feature calls |
 | `markAsync(fn)` | Explicitly mark a method as async — for minified bundles where constructor names are stripped |
 
 ---
@@ -36,15 +35,57 @@ All exports are one import: `import { feature, call, aio } from 'aio'`
 | `matchEffect(effect, handlers, fallback?)` | Typed effect dispatch — alternative to switch/case in execute |
 | `deepFreeze(obj)` | Deep freeze for dev-mode immutability checks |
 
+### `composeMiddleware(...fns)`
+
+Chains multiple `beforeReduce` middleware functions into one. Functions run left-to-right — each receives the (potentially modified) action from the previous one. Return `null` from any function to drop the action entirely (short-circuits, remaining functions are skipped).
+
+```ts
+import { composeMiddleware, aio } from 'aio'
+
+const rateLimit = (action, state) =>
+  state.requestCount > 100 ? null : action
+
+const enrich = (action, state) =>
+  ({ ...action, _ts: Date.now() })
+
+const authorize = (action, state, user) =>
+  user?.role === 'admin' || action.type !== 'admin:delete' ? action : null
+
+aio.run({
+  features: [myFeature],
+  beforeReduce: composeMiddleware(rateLimit, enrich, authorize),
+})
+```
+
+### `matchEffect(effect, handlers, fallback?)`
+
+Typed alternative to switch/case for dispatching effects in `execute()`. Matches on `effect.type` and passes `effect.payload` to the handler. Unmatched effects go to the optional `fallback`, or are silently ignored.
+
+```ts
+import { matchEffect } from 'aio'
+
+// In actions-style execute:
+execute: (app, effect) => {
+  matchEffect(effect, {
+    SendEmail: (p) => sendEmail(p.to, p.subject, p.body),
+    Persist:   (p) => saveToFile(p.path, p.data),
+    Notify:    (p) => pushNotification(p.userId, p.message),
+  }, (unhandled) => {
+    console.warn(`unhandled effect: ${unhandled.type}`)
+  })
+}
+```
+
+Payload typing: handlers receive the raw `.payload` field. For full type safety with discriminated unions, define typed effect creators and use `ActionUnion`-style narrowing.
+
 ---
 
 ## Generators (GenCtx)
 
 | API | Description |
 |-----|-------------|
-| `yield* ctx.call(name, fn)` | Async call — dispatches action, executes fn, returns result |
+| `yield* ctx.call(name, fn, opts?)` | Async call — dispatches action, executes fn, returns result. opts: `{ timeout?, retries? }` |
 | `yield* ctx.mutate(name, fn)` | State mutation — dispatches action, applies Immer draft update |
-| `yield* ctx.step(name, fn)` | Deprecated alias for `ctx.mutate()` |
 | `yield* ctx.done(fn?)` | Terminal success — dispatches done action, optional final mutation |
 | `yield* ctx.fail(reason)` | Terminal failure — dispatches fail action with reason |
 | `yield* ctx.dispatch(action)` | Dispatch arbitrary action to any feature |
@@ -62,10 +103,10 @@ All exports are one import: `import { feature, call, aio } from 'aio'`
 
 | Type | Description |
 |------|-------------|
-| `FeatureDef` | Return type of `feature()` — contains name, A, E, selectors, _config |
+| `FeatureDef` | Return type of `feature()` — public: callable methods/generators/actions at top level; internals under `__aio` (including `id`, `selectors`) |
 | `FeatureEntry` | Feature or `{ feature, dependsOn? }` for dependency ordering |
 | `MachineConfig` | `{ initial, states: { state: { action: target } } }` |
-| `Catalog<Prefix, Creators>` | Action/effect catalog — labels + typed creators with `.type` |
+| `Catalog<Prefix, Creators>` | Action/effect catalog — typed creators with `.type` (internal) |
 | `ActionUnion<Prefix, Actions>` | Discriminated union of all actions for switch/case narrowing |
 | `ScopedApp<S>` | App context for init/destroy/execute — `{ dispatch, getState, getFullState? }` |
 | `DirectCalling<M>` | Flattened method signatures for direct calling after `aio.run()` |
@@ -90,7 +131,7 @@ All exports are one import: `import { feature, call, aio } from 'aio'`
 | `cancelOn` | Cancellation triggers per generator — `{ genKey: [actions] }` |
 | `selectors` | Derived state — `{ getName: s => s.name }` (auto-scoped) |
 | `machine` | State machine guards — `{ initial, states }` or `false` |
-| `listensTo` | Foreign action listeners — `[otherFeature.A.action]` |
+| `listensTo` | Foreign action listeners — `[otherFeature.action]` |
 | `actions` | Action creators (explicit style) — `{ increment: (n) => ({ n }) }` |
 | `effects` | Effect creators (explicit style) — `{ persist: (data) => ({ data }) }` |
 | `reduce` | Reducer handlers (explicit style) — `{ increment(state, { n }) { ... } }` |
@@ -116,6 +157,45 @@ All exports are one import: `import { feature, call, aio } from 'aio'`
 
 ---
 
+## Framework-agnostic Client
+
+For non-React frameworks (Svelte, Vue, Solid, etc). Same singleton connection as `useAio`/`useFeature`.
+
+| API | Description |
+|-----|-------------|
+| `client.subscribe(fn)` | Subscribe to state changes — `fn(state)`, returns unsubscribe |
+| `client.getState()` | Current state snapshot (null before first message) |
+| `client.getFeatureState(name)` | Single feature's state slice by name |
+| `client.send(action)` | Send action to server — same queuing/offline behavior as hooks |
+| `client.route.subscribe(fn)` | Subscribe to URL changes, returns unsubscribe |
+| `client.route.getPath()` | Current pathname |
+| `client.route.getSearch()` | Current `URLSearchParams` |
+| `client.route.navigate(to, opts?)` | Navigate — string path or history delta |
+
+See [ui.md](ui.md#bring-your-own-framework) for examples.
+
+---
+
+## URL Routing
+
+History API router — no page reloads, deep links work via SPA fallback.
+
+| API | Description |
+|-----|-------------|
+| `useRoute(pattern?)` | Subscribe to URL — `{ path, params, search, matched }` |
+| `useNavigate()` | Returns `navigate` function (hook form for components) |
+| `navigate(to, opts?)` | Programmatic navigation — string path or history delta |
+| `<Route>` | Renders `element` when `path` matches; supports nested children + `<Outlet>` |
+| `<Outlet>` | Renders the matched child route inside a layout component |
+| `<Link to>` | SPA anchor — active class support, modifier key passthrough |
+| `<NavLink to>` | Link with automatic `active` class (prefix match) |
+| `<Redirect to>` | Navigate on mount — for auth guards |
+| `matchPath(pat, path, exact?)` | Pattern matching utility — returns params or `null` |
+
+See [ui.md](ui.md#url-based-routing) for full reference with examples.
+
+---
+
 ## SQLite
 
 | API | Description |
@@ -135,10 +215,13 @@ All exports are one import: `import { feature, call, aio } from 'aio'`
 |--------|---------|-------------|
 | `query<T>(sql, params?)` | `Promise<QueryResult<T>>` | SELECT — rows in `.rows` |
 | `execute(sql, params?)` | `Promise<QueryResult>` | INSERT/UPDATE/DELETE — changes in `.changes` |
-| `transaction(stmts[])` | `Promise<QueryResult[]>` | Atomic multi-statement batch |
+| `transaction(fn: (tx: Tx) => Promise<T>)` | `Promise<T>` | Callback form — BEGIN/COMMIT, rollback on throw, read-your-writes |
+| `transaction(stmts[])` | `Promise<QueryResult[]>` | Batch form — atomic multi-statement, no branching |
 | `close()` | `Promise<void>` | Close all worker connections |
 
 `QueryResult<T>` = `{ rows: T[], changes: number, lastInsertRowId: bigint }`
+
+`Tx` = `{ query<T>(sql, params?): Promise<QueryResult<T>>, execute(sql, params?): Promise<QueryResult> }` — transaction-scoped handle; always routes to the writer.
 
 `app.db` is `DB | undefined` — `undefined` in standalone/Android mode.
 
@@ -221,7 +304,7 @@ All exports are one import: `import { feature, call, aio } from 'aio'`
 |--------|-------------|
 | `logging: true` | Enable structured logging with defaults |
 | `logging.level` | Minimum level written to `debug.log` (default: `'debug'`) |
-| `logging.dir` | Log directory (default: `'./logs'`) |
+| `logging.dir` | Log directory (default: `'./log'`) |
 | `logging.console` | Pretty console output in dev (default: auto-detected) |
 | `logging.heartbeat` | Heartbeat interval in seconds — 0 to disable (default: 3600) |
 | `logging.suppressTypes` | Action types to exclude from all logs |
@@ -246,9 +329,11 @@ No-ops silently when `logging` is not configured in `aio.run()`.
 
 | File | Content |
 |------|---------|
-| `logs/app.log` | Narrative: feature lifecycle, flow completions, state transitions, errors |
-| `logs/debug.log` | All dispatched actions + `trace`/`debug` from `log.*` calls |
-| `logs/errors.log` | Warn and error entries only — for ops/alerting |
+| `log/app.log` | Narrative: feature lifecycle, flow completions, state transitions, errors |
+| `log/debug.log` | All dispatched actions + `trace`/`debug` from `log.*` calls |
+| `log/error.log` | Errors only — for ops/alerting |
+| `log/warning.log` | Warnings — non-fatal issues requiring attention |
+| `log/perf.log` | Performance violations — slow reducers/effects, deduped per action type |
 
 ### JSON entry format
 

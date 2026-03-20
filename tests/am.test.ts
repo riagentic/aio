@@ -1,4 +1,4 @@
-import { assertEquals } from 'https://deno.land/std@0.224.0/assert/mod.ts'
+import { assertEquals } from '@std/assert'
 import { formatUptime, parsePayload, resolvePort, parseGlobalFlags, readPid, writePid, removePid, isProcessAlive, resolvePath, resolveControlPort } from '../src/am.ts'
 import type { PidFile } from '../src/am.ts'
 import { lockPath } from '../src/single-instance-lock.ts'
@@ -350,7 +350,7 @@ async function withTrojanServer(fn: (url: string) => Promise<void>): Promise<voi
 
 Deno.test('am-integration: trojanGet state', async () => {
   await withTrojanServer(async (url) => {
-    const resp = await fetch(`${url}/__trojan/state`)
+    const resp = await fetch(`${url}/__aio/trojan/state`)
     assertEquals(resp.status, 200)
     const data = await resp.json()
     assertEquals(data.count, 10)
@@ -360,7 +360,7 @@ Deno.test('am-integration: trojanGet state', async () => {
 
 Deno.test('am-integration: trojanGet config', async () => {
   await withTrojanServer(async (url) => {
-    const resp = await fetch(`${url}/__trojan/config`)
+    const resp = await fetch(`${url}/__aio/trojan/config`)
     assertEquals(resp.status, 200)
     const data = await resp.json()
     assertEquals(data.port, AM_TEST_PORT)
@@ -373,7 +373,7 @@ Deno.test('am-integration: trojanGet config', async () => {
 
 Deno.test('am-integration: trojanGet metrics', async () => {
   await withTrojanServer(async (url) => {
-    const resp = await fetch(`${url}/__trojan/metrics`)
+    const resp = await fetch(`${url}/__aio/trojan/metrics`)
     assertEquals(resp.status, 200)
     const data = await resp.json()
     assertEquals(typeof data.uptime, 'number')
@@ -385,9 +385,9 @@ Deno.test('am-integration: trojanGet metrics', async () => {
 
 Deno.test('am-integration: trojanPost dispatch', async () => {
   await withTrojanServer(async (url) => {
-    const resp = await fetch(`${url}/__trojan/dispatch`, {
+    const resp = await fetch(`${url}/__aio/trojan/dispatch`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'X-AIO': '1' },
       body: JSON.stringify({ type: 'Increment', payload: { by: 1 } }),
     })
     assertEquals(resp.status, 200)
@@ -398,7 +398,7 @@ Deno.test('am-integration: trojanPost dispatch', async () => {
 
 Deno.test('am-integration: trojanGet schedules', async () => {
   await withTrojanServer(async (url) => {
-    const resp = await fetch(`${url}/__trojan/schedules`)
+    const resp = await fetch(`${url}/__aio/trojan/schedules`)
     assertEquals(resp.status, 200)
     const data = await resp.json()
     assertEquals(data, ['tick'])

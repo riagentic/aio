@@ -3,15 +3,17 @@
 // Optional domain prefix: actions('Counter', { ... }) → 'Counter:Increment'
 
 /** Lowercase first character: 'Increment' → 'increment' */
-type LowerFirst<S extends string> = S extends `${infer C}${infer Rest}` ? `${Lowercase<C>}${Rest}` : S
+export type LowerFirst<S extends string> = S extends `${infer C}${infer Rest}` ? `${Lowercase<C>}${Rest}` : S
 
+/** Map of named creator functions */
 // deno-lint-ignore no-explicit-any
-type Creators = Record<string, (...args: any[]) => any>
+export type Creators = Record<string, (...args: any[]) => any>
 
 /** Prefix key with domain when provided */
-type Prefixed<D extends string, K> = D extends '' ? K : `${D}:${K & string}`
+export type Prefixed<D extends string, K> = D extends '' ? K : `${D}:${K & string}`
 
-type FactoryResult<T extends Creators, D extends string = ''> = {
+/** Result type from factory — PascalCase labels + camelCase creators */
+export type FactoryResult<T extends Creators, D extends string = ''> = {
   readonly [K in keyof T]: Prefixed<D, K>
 } & {
   readonly [K in keyof T as LowerFirst<K & string>]: (...args: Parameters<T[K]>) => { type: Prefixed<D, K>; payload: ReturnType<T[K]> }
@@ -24,6 +26,7 @@ function lowerFirst(s: string): string {
 
 /** Creates a typed action/effect catalog — PascalCase labels + camelCase creators */
 function factory<T extends Creators>(creators: T): FactoryResult<T, ''>
+/** Creates a typed action/effect catalog with domain prefix */
 function factory<D extends string, T extends Creators>(domain: D, creators: T): FactoryResult<T, D>
 function factory(first: unknown, second?: unknown): unknown {
   const domain = typeof first === 'string' ? first : ''

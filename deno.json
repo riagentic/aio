@@ -1,10 +1,12 @@
 {
   "name": "@riagentic/aio",
-  "version": "0.9.5",
+  "version": "1.0.0-alpha1",
+  "appId": "aio",
   "exports": {
     ".": "./mod.ts",
     "./src/build": "./src/build.ts",
-    "./src/am": "./src/am.ts"
+    "./src/am": "./src/am.ts",
+    "./aiol": "./aiol/mod.ts"
   },
   "publish": {
     "exclude": ["tests/", "examples/", "docs/", "scripts/", "utils/", "android-template/", "CHANGELOG.md", "init.*", ".claude/", "*.md", "!README.md"]
@@ -13,6 +15,7 @@
   "compilerOptions": {
     "strict": true,
     "noUncheckedIndexedAccess": true,
+    "lib": ["deno.ns", "deno.unstable", "dom", "dom.iterable"],
     "jsx": "react-jsx",
     "jsxImportSource": "react",
     "jsxImportSourceTypes": "@types/react"
@@ -24,14 +27,20 @@
     "aio": "./mod.ts",
     "esbuild": "npm:esbuild@^0.24",
     "immer": "npm:immer@^10",
-    "@std/path": "jsr:@std/path@^1"
+    "@std/path": "jsr:@std/path@^1",
+    "@std/assert": "jsr:@std/assert@^1"
+  },
+  "lint": {
+    "exclude": ["node_modules/", "tests/", "scripts/", "utils/"]
   },
   "tasks": {
     "test": "deno test -A --unstable-kv tests/",
-    "test:core": "deno test -A --unstable-kv --ignore=tests/am.test.ts,tests/build.test.ts,tests/server.test.ts,tests/tls.test.ts,tests/single-instance-lock.test.ts,tests/cli.test.ts,tests/cli-client.test.ts tests/",
+    "test:core": "deno test -A --unstable-kv --ignore=tests/am.test.ts,tests/build.test.ts,tests/server.test.ts,tests/tls.test.ts,tests/single-instance-lock.test.ts,tests/cli.test.ts,tests/cli-client.test.ts,tests/electron-ipc.test.ts,tests/app-modes.test.ts tests/",
     "check": "deno check mod.ts",
     "lint": "deno lint src/",
+    "lint:aio": "deno run -A aiol/mod.ts",
     "example": "deno run -A examples/counter/app.ts",
-    "am": "deno run -A src/am.ts"
+    "am": "deno run -A src/am.ts",
+    "docs": "deno doc --html --name=aio --output=docs/api-ref mod.ts"
   }
 }

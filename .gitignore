@@ -22,3 +22,6 @@ window-state.json
 
 # Planning / scratch notes
 untracked/
+
+# Claude
+.claude/

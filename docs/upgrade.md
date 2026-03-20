@@ -112,7 +112,7 @@ execute: {
   },
   async persist(app, payload) {
     await db.save(payload.value)
-    app.dispatch(myFeature.A.saved())
+    app.dispatch(myFeature.saved())
   },
 },
 ```
@@ -160,20 +160,19 @@ machine: { states: { active: { [counter.increment.type]: 'active' } } }
 
 ---
 
-**`feature.A` scope — internal only**
+**Direct calling replaces all dispatch patterns**
 
-`feature.A` is now considered internal. Application code should not use it. Remove all:
+Application code should call methods directly on the feature object:
 
 ```ts
 // REMOVE from application code:
-send(counter.A.increment(5))     // → send.increment(5)
-dispatch(counter.A.increment(5)) // → counter.increment(5) or use in ctx.dispatch only
+send(counter.increment(5))     // → send.increment(5)
 
-// KEEP in generator ctx.dispatch (A catalog still needed here):
-yield* ctx.dispatch(wallet.A.credit(100))  // fine — ctx.dispatch needs an action object
+// Direct calling after aio.run():
+counter.increment(5)
 
-// KEEP in testFeature (A catalog used internally):
-// testFeature handles this automatically
+// In generators — call directly:
+yield* ctx.dispatch(wallet.credit(100))
 ```
 
 ---
@@ -187,7 +186,7 @@ yield* ctx.dispatch(wallet.A.credit(100))  // fine — ctx.dispatch needs an act
 5. **Fix cancelOn** — replace string triggers with bound method triggers
 6. **Fix ctx.waitFor** — replace string form with bound method form
 7. **Fix machine on keys** — replace raw string keys with computed `[feature.method.type]`
-8. **Remove `send(feature.A.method(args))`** — replace with `send.method(args)`
+8. **Remove `send(feature.method(args))`** — replace with `send.method(args)`
 9. Replace `dep/aio/` with the v0.8 folder
 10. Run `deno install && deno task dev` — linter will flag remaining issues
 
@@ -199,7 +198,6 @@ yield* ctx.dispatch(wallet.A.credit(100))  // fine — ctx.dispatch needs an act
 - `call()` / direct cross-feature calling — unchanged
 - All tests using `testFeature` — unchanged (send proxy unchanged)
 - The function form `reduce(state, action, fn)` — available as escape hatch with `{ on }` / `{ emit }`
-- `feature.A` still exists (internal) — `ctx.dispatch(feature.A.action())` still works
 
 ---
 
@@ -280,10 +278,10 @@ feature('healthCheck', {
 
 ```ts
 // before (v0.7)
-yield* ctx.put(someFeature.A.doThing())
+yield* ctx.put(someFeature.doThing())
 
 // after (v0.8)
-yield* ctx.dispatch(someFeature.A.doThing())
+yield* ctx.dispatch(someFeature.doThing())
 ```
 
 **`t.expect.effects()` requires full type strings** *(breaking)*
@@ -314,8 +312,6 @@ states: { saving: {}, error: {} }
 - `call()` / direct cross-feature calling — unchanged
 - All tests using `testFeature` — unchanged (send proxy unchanged)
 - The function form `reduce(state, action, fn)` — available as escape hatch with `{ on }` / `{ emit }`
-- `feature.A` still exists (internal) — `ctx.dispatch(feature.A.action())` still works
-
 ### Migration steps
 
 1. **Convert reduce** — find all `reduce(state, action, { A` patterns, convert to object form
@@ -325,7 +321,7 @@ states: { saving: {}, error: {} }
 5. **Fix cancelOn** — replace string triggers with bound method triggers
 6. **Fix ctx.waitFor** — replace string form with bound method form
 7. **Fix machine on keys** — replace raw string keys with computed `[feature.method.type]`
-8. **Remove `send(feature.A.method(args))`** — replace with `send.method(args)`
+8. **Remove `send(feature.method(args))`** — replace with `send.method(args)`
 9. **Fix `dispatchTo`** — replace string arrays with imported feature refs
 10. **Fix `t.expect.effects()`** — prefix all effect keys with `featureName:`
 11. **Fix async method signatures** — remove `ctx` parameter
@@ -356,7 +352,7 @@ states: { saving: {}, error: {} }
 - **Time-travel** — dev mode records action history with undo/redo/goto. Press Ctrl+. for browser panel, or use `am tt undo`. `useTimeTravel()` hook for programmatic control. 200-entry cap, zero cost in prod. See [ui.md — Time-Travel](ui.md#time-travel)
 - **am — app manager** — CLI for process lifecycle, state inspection, dispatch, time-travel, log tailing. `deno task am help`. Output: pretty for terminals, JSON for scripts/agents. See [cli.md — am](cli.md#am--app-manager)
 - **Connection status indicator** — shows "Reconnecting..." pill on disconnect and "Connected" briefly on reconnect. Pure DOM, no user code. Disable with `ui: { showStatus: false }`
-- **State snapshots** — `app.snapshot()` / `app.loadSnapshot(json)` + HTTP `GET/POST /__snapshot`. See [persistence.md — State snapshots](persistence.md#state-snapshots)
+- **State snapshots** — `app.snapshot()` / `app.loadSnapshot(json)` + HTTP `GET/POST /__aio/snapshot`. See [persistence.md — State snapshots](persistence.md#state-snapshots)
 - **Scheduled effects** — `schedule.after/every/at/cron/cancel` — declarative timers, intervals, cron jobs as effects. See [core.md — Scheduled effects](core.md#scheduled-effects)
 - **aio-client** — standalone Electron connect-page app (`compile:electron:remote`). Connects to any aio server without Deno
 - **One-liner init** — `sh -c "$(curl -fsSL .../init.sh)" -- my-app` scaffolds a new project with interactive template menu
@@ -575,7 +571,7 @@ v0.7 adds `reactive()`, improves `flow()`, and overhauls DX. No breaking changes
 - Flow errors fed back into generator for try/catch support
 
 **DX**
-- Direct calling — `counter.increment(5)` after `aio.run()`, no `.A.` namespace (all three tiers)
+- Direct calling — `counter.increment(5)` after `aio.run()` (all three tiers)
 - TypeScript inference — typed autocomplete for methods and selectors
 - Pre-bind console.warn when methods called before `aio.run()`
 - `machine: false` — no state machine guards, all actions always allowed
@@ -628,7 +624,7 @@ const counter = reactive('counter', {
 })
 
 await aio.run({ features: [counter] })
-counter.increment(5)   // dispatches directly — no .A. needed
+counter.increment(5)   // dispatches directly
 ```
 
 ### Flow improvements (optional)
@@ -645,7 +641,7 @@ healthCheck: flow('start', { cancelOn: ['stop'] }, function* (ctx) {
 // ctx.waitFor — pause until external action
 // actions-style: payload destructured directly (no action wrapper)
 purchase: flow('start', function* (ctx, { amount }: { amount: number }) {
-  yield* ctx.dispatch(payment.A.charge(amount))
+  yield* ctx.dispatch(payment.charge(amount))
   const result = yield* ctx.waitFor('Payment:Complete', 10_000)
   yield* ctx.done(s => { s.paid = true })
 })
@@ -731,7 +727,7 @@ v0.5 introduces `feature()` — one function defines state, actions, effects, st
 - **`testBridge()` harness** — test bridge channels with `request`, `respond`, `timeout`, `expect.pending()`, `expect.circuitOpen()` helpers
 - **State versioning & migrations** — `version: N` + `migrations: [(s) => newS]` in config. Sequential migration on restore, falls back to initial state on error
 - **`--isolate` flag** — `--isolate=counter,dc` or `isolate: ['counter']` in config. Filters active features in dev mode
-- **Health endpoint** — `GET /__health` returns `{ status, uptime, features: { name: { status, errors } } }`
+- **Health endpoint** — `GET /__aio/health` returns `{ status, uptime, features: { name: { status, errors } } }`
 - **`app.features` API** — `.enable(name)`, `.disable(name)`, `.status(name)`, `.health()`, `.list()` on the returned `AioApp`
 - **Feature registry** — tracks enabled/disabled state, error counts, last action per feature. Powers health endpoint and `app.features`
 
@@ -768,8 +764,8 @@ const A = actions('Counter', { Increment: (by: number) => ({ by }) })
 const counter = feature('counter', {
   actions: { increment: (by: number) => ({ by }) }
 })
-// counter.A.Increment = 'Counter:Increment'   — same string!
-// counter.A.increment(5) = same { type, payload }
+// counter.increment.type = 'Counter:Increment'   — same string!
+// counter.increment(5) = dispatches { type, payload }
 ```
 
 The dispatched type strings are the same (`'Counter:Increment'`). But the *definition* syntax changes: `Increment:` key → `increment:` key.

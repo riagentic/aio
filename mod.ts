@@ -2,8 +2,8 @@
  * @module
  * Full-stack Deno framework — one state, propagated everywhere.
  *
+ * v1.0: clean API, framework-agnostic client, feature.ts split, perf.log, am client inspection.
  * v0.9: async Worker-based SQLite, `log` public singleton, scaffolder via JSR.
- * v0.8: unified feature API, typed generators, no raw strings anywhere.
  * Use `feature({ methods })` for reactive style (default),
  * `feature({ generators })` for sequential workflows,
  * `feature({ actions, reduce })` for explicit control (advanced).
@@ -44,12 +44,13 @@ import type { PerfMode, PerfBudget } from './src/dispatch.ts'
 export { aio, VERSION, parseCli, lint } from './src/aio.ts'
 import type { AioApp } from './src/aio.ts'
 export type { AioApp }
-export type { FeaturesConfig, UiConfig, Lint, CliFlags, AioUser, AioError, PerfMode, PerfBudget } from './src/aio.ts'
+export type { FeaturesConfig, UiConfig, Lint, CliFlags, AioUser, AioError, PerfMode, PerfBudget, AioConfig, MiddlewareFn } from './src/aio.ts'
 export { log } from './src/logger.ts'
 export type { Log, LogConfig, LogLevel } from './src/logger.ts'
 export type { AioMeta } from './src/electron.ts'
 export type { LockData, InstanceInfo, SingletonMode } from './src/single-instance-lock.ts'
-export { instances, resolveAppId, slugify } from './src/single-instance-lock.ts'
+export { instances, resolveAppId } from './src/single-instance-lock.ts'
+// slugify — internal (used by build.ts, not app code)
 
 /**
  * v0.8 unified feature API.
@@ -57,8 +58,9 @@ export { instances, resolveAppId, slugify } from './src/single-instance-lock.ts'
  * feature({ methods, generators }) — reactive + sequential workflows in one feature
  * feature({ actions, reduce })   — explicit style for full control (advanced)
  */
-export { feature, composeFeatures, testFeature, tagSource, bindFeature } from './src/feature.ts'
-export type { FeatureDef, FeatureEntry, MachineConfig, Catalog, ActionUnion, TestContext, FeatureStatus, ActionSource, ScopedApp, DirectCalling } from './src/feature.ts'
+export { feature, composeFeatures, testFeature, bindFeature } from './src/feature.ts'
+// tagSource — internal (framework auto-tags action sources)
+export type { FeatureDef, FeatureEntry, MachineConfig, ActionUnion, TestContext, FeatureStatus, ScopedApp, DirectCalling, Creators, Catalog, Msg, FeatureAio, FeatureExecuteFn, FeatureReduceFn, FlatActions, ActionSource, MethodsFeatureConfig, ActionsFeatureConfig, ComposedFeatures, ReduceHandlers, ExecuteHandlers } from './src/feature.ts'
 
 /**
  * Inter-feature coordination — async methods return Promises with the correct type.
@@ -66,8 +68,7 @@ export type { FeatureDef, FeatureEntry, MachineConfig, Catalog, ActionUnion, Tes
  *
  * Simple — preferred for most cases:
  * ```ts
- * import { inventory } from '../inventory'
- * const reserved = await inventory.reserve(items)  // ← typed Promise<ReserveResult>
+ * const reserved = await inventory.reserve(items)  // direct calling
  * ```
  *
  * With timeout/retry:
@@ -78,14 +79,14 @@ export type { FeatureDef, FeatureEntry, MachineConfig, Catalog, ActionUnion, Tes
  * `markAsync` — rare: explicitly mark a method as async when minification strips constructor names.
  */
 export { call, markAsync } from './src/feature-impl.ts'
-export type { CallOptions } from './src/feature-impl.ts'
+export type { CallOptions, Method, SyncMethod, AsyncMethod, FeatureMethods } from './src/feature-impl.ts'
 
 /**
  * Generator-based sequential workflows.
  * Write top-to-bottom async code; each yield point is observable.
  * Use cancelOn config key in feature() to declare cancellation triggers.
  */
-export type { GenCtx, Gen, TypedCreator } from './src/flow.ts'
+export type { GenCtx, Gen, TypedCreator, FlowStep, FlowDef } from './src/flow.ts'
 
 /** 
  * Connect to a remote aio server from a CLI app.
@@ -97,21 +98,11 @@ export { connectCli, connectCliUDS } from './src/cli-client.ts'
 export type { CliApp } from './src/cli-client.ts'
 
 /**
- * Low-level message constructor. Use action creators (A.increment()) instead.
- * @param type - Action/effect type string
- * @param payload - Optional payload object
- */
-export { msg } from './src/msg.ts'
-
-/**
- * Action/effect catalog factory — creates typed creators from a descriptor object.
- * @example
- * ```ts
- * const A = actions({ increment: (by = 1) => ({ by }), reset: () => ({}) })
- * A.increment(5) // → { type: 'increment', payload: { by: 5 } }
- * ```
+ * Action/effect catalog factory — creates typed creators for explicit-style features.
+ * Used inside `feature({ actions, effects })` config or for standalone catalogs.
  */
 export { actions, effects } from './src/factory.ts'
+export type { FactoryResult, LowerFirst, Prefixed, Creators as FactoryCreators } from './src/factory.ts'
 
 /**
  * Declarative schedules — timers, intervals, cron jobs as effects.
@@ -133,13 +124,14 @@ export type { ColumnDef, ColumnOpts, QueryOpts, TableDef, WhereClause, WhereOp }
  * `createDB` is for direct use; `app.db` is the instance managed by the framework.
  */
 export { createDB, DEFAULT_PRAGMAS } from './src/db/mod.ts'
-export type { DB, QueryResult, DBOpts } from './src/db/mod.ts'
+export type { DB, Tx, QueryResult, DBOpts } from './src/db/mod.ts'
 
 /**
  * Memoized selectors for expensive state derivations.
  * Caches results until input selectors return new values.
  */
 export { createSelector, createSliceSelector } from './src/selector.ts'
+export type { Selector } from './src/selector.ts'
 
 /**
  * Composes multiple beforeReduce functions into one.
@@ -178,7 +170,7 @@ export { deepFreeze } from './src/dispatch.ts'
  * ```ts
  * return draft(state, d => {
  *   d.counter += 1
- *   return [E.log('incremented')]
+ *   return [{ type: 'counter:log', payload: { message: 'incremented' } }]
  * })
  * ```
  */
@@ -235,10 +227,12 @@ export function matchEffect<E extends { type: string; payload?: any }>(
  * @returns { state: S | null, send: (action) => void }
  *
  * @example
+ * **Prefer `useFeature(ref)` for feature components** — scoped state, typed send, selective re-renders.
+ * `useAio` re-renders on every state change. Use it only for root layout or cross-feature views.
+ *
  * ```tsx
  * const { state, send } = useAio<AppState>()
  * if (!state) return <div>Connecting...</div>
- * return <button onClick={() => send(A.increment())}>+</button>
  * ```
  */
 export declare function useAio<S = unknown>(): {
@@ -246,15 +240,8 @@ export declare function useAio<S = unknown>(): {
   send: (action: { type: string; payload?: unknown }) => void
 }
 
-/** Proxy type for send — each action key becomes a dispatch method with typed args */
-// deno-lint-ignore no-explicit-any
-export type SendProxy<A extends Record<string, any>> = {
-  // deno-lint-ignore no-explicit-any
-  [K in keyof A]: A[K] extends (...args: infer P) => any ? (...args: P) => void : never
-}
-
 /**
- * v0.5 React hook — connects UI to a specific feature.
+ * React hook — connects UI to a specific feature.
  * Returns scoped state, typed send proxy, and machine status.
  *
  * @param ref - Feature definition from feature()
@@ -267,21 +254,27 @@ export type SendProxy<A extends Record<string, any>> = {
  * send.reset()
  * ```
  */
+/** Keys built into FeatureDef — excluded from send proxy */
+export type _FeatureBuiltins = '__aio'
+/** Extract state type from feature def's phantom _stateType, fallback to unknown */
 // deno-lint-ignore no-explicit-any
-export declare function useFeature<S, A extends Record<string, any> = Record<string, (...args: unknown[]) => void>>(ref: any, options: { fallback: S }): {
-  state: S
-  // deno-lint-ignore no-explicit-any
-  send: Record<string, (...args: any[]) => void>
+export type _InferState<F> = F extends { __aio: { stateType?: infer S } } ? S extends Record<string, any> ? S : Record<string, unknown> : Record<string, unknown>
+/** Extract send proxy type from feature's callable methods */
+// deno-lint-ignore no-explicit-any
+export type _InferSend<F> = { [K in Exclude<keyof F, _FeatureBuiltins>]: F[K] extends (...args: infer P) => any ? (...args: P) => void : never }
+
+/** useFeature with fallback — state is never null */
+// deno-lint-ignore no-explicit-any
+export declare function useFeature<F extends Record<string, any>>(ref: F, options: { fallback: _InferState<F> }): {
+  state: _InferState<F>
+  send: _InferSend<F>
   status: string | undefined
 }
+/** useFeature without fallback — state may be null before connection */
 // deno-lint-ignore no-explicit-any
-export declare function useFeature<S = unknown, A extends Record<string, any> = Record<string, (...args: unknown[]) => void>>(ref: {
-  name: string
-  A: A
-  _config: { actionKeys: string[] }
-}, options?: { fallback?: never }): {
-  state: S | null
-  send: SendProxy<A>
+export declare function useFeature<F extends Record<string, any>>(ref: F, options?: { fallback?: never }): {
+  state: _InferState<F> | null
+  send: _InferSend<F>
   status: string | undefined
 }
 
@@ -312,7 +305,173 @@ export declare function useLocal<T>(initial: T): {
  * ```
  */
 import type { ComponentType, ReactElement } from 'react'
+/** State-based page router — renders the component matching the current page key */
 export declare function page<K extends string>(current: K, routes: Record<K, ComponentType>): ReactElement | null
+
+// ── URL-based routing ────────────────────────────────────────────────────────
+
+/**
+ * Current route state. Subscribe to URL changes.
+ * With a pattern, extracts named params and signals whether the current path matched.
+ *
+ * @example
+ * ```tsx
+ * // No pattern — just track current path
+ * const { path, search } = useRoute()
+ *
+ * // With pattern — extract params
+ * const { params, matched } = useRoute('/users/:id')
+ * if (!matched) return <NotFound />
+ * return <User id={params.id} />
+ * ```
+ */
+export declare function useRoute(pattern?: string): {
+  path: string
+  params: Record<string, string>
+  search: URLSearchParams
+  matched: boolean
+}
+
+/**
+ * Returns the `navigate` function. Prefer `<Link>` for user-initiated navigation;
+ * use `useNavigate` for programmatic navigation (e.g. after form submit).
+ *
+ * @example
+ * ```tsx
+ * const nav = useNavigate()
+ * async function onSubmit() {
+ *   await save()
+ *   nav('/dashboard')
+ * }
+ * ```
+ */
+export declare function useNavigate(): (to: string | number, opts?: { replace?: boolean }) => void
+
+/**
+ * Navigate programmatically. Pass a string path or a history delta (number).
+ * Uses `history.pushState` by default; pass `{ replace: true }` for `replaceState`.
+ * Relative paths resolve against `location.href`.
+ *
+ * @example
+ * ```ts
+ * navigate('/users/42')
+ * navigate(-1)          // browser back
+ * navigate('/login', { replace: true })
+ * ```
+ */
+export declare function navigate(to: string | number, opts?: { replace?: boolean }): void
+
+/**
+ * Renders `element` when the current URL matches `path`.
+ * Nesting Routes creates a layout tree — the parent renders a layout component
+ * that contains an `<Outlet />` where matched children appear.
+ *
+ * `index` renders the element when the parent path matches exactly (the default child).
+ *
+ * @example
+ * ```tsx
+ * // Flat routes
+ * <Route path="/users" element={<UserList />} />
+ * <Route path="/users/:id" element={<UserDetail />} />
+ *
+ * // Nested layout
+ * <Route path="/dashboard" element={<DashboardLayout />}>
+ *   <Route index element={<Overview />} />
+ *   <Route path="settings" element={<Settings />} />
+ * </Route>
+ * ```
+ */
+export declare function Route(props: {
+  path?: string
+  index?: boolean
+  element?: unknown
+  children?: unknown
+}): unknown
+
+/**
+ * Renders the matched child route inside a parent `<Route>` layout.
+ * Place inside the layout component returned by the parent Route's `element`.
+ *
+ * @example
+ * ```tsx
+ * function DashboardLayout() {
+ *   return <div><Sidebar /><main><Outlet /></main></div>
+ * }
+ * ```
+ */
+export declare function Outlet(): unknown
+
+/**
+ * Anchor that navigates without page reload. Adds `activeClass` when the path matches.
+ * Exact match for `/` and when `exact={true}`; prefix match otherwise.
+ *
+ * @example
+ * ```tsx
+ * <Link to="/users">Users</Link>
+ * <Link to="/users" exact activeClass="active" activeStyle={{ fontWeight: 'bold' }}>
+ *   Users
+ * </Link>
+ * ```
+ */
+export declare function Link(props: {
+  to: string
+  replace?: boolean
+  exact?: boolean
+  activeClass?: string
+  activeStyle?: Record<string, unknown>
+  children?: unknown
+  className?: string
+  style?: Record<string, unknown>
+  [k: string]: unknown
+}): unknown
+
+/**
+ * Like `<Link>` but applies `activeClass` (default: `'active'`) automatically.
+ * Drop-in for navigation menus.
+ *
+ * @example
+ * ```tsx
+ * <NavLink to="/dashboard">Dashboard</NavLink>
+ * <NavLink to="/settings" activeClass="selected">Settings</NavLink>
+ * ```
+ */
+export declare function NavLink(props: {
+  to: string
+  activeClass?: string
+  [k: string]: unknown
+}): unknown
+
+/**
+ * Navigates to `to` on mount. `replace` defaults to `true` (no history entry).
+ * Use for auth guards and conditional redirects.
+ *
+ * @example
+ * ```tsx
+ * function ProtectedRoute({ children }) {
+ *   const { state } = useAio()
+ *   if (!state?.user) return <Redirect to="/login" />
+ *   return children
+ * }
+ * ```
+ */
+export declare function Redirect(props: { to: string; replace?: boolean }): null
+
+/**
+ * Match a path pattern against a URL path. Returns extracted params or null.
+ * Supports `:param` segments, `*` wildcard, and prefix matching.
+ * Exported for custom routing logic.
+ *
+ * @example
+ * ```ts
+ * matchPath('/users/:id', '/users/42')          // { id: '42' }
+ * matchPath('/users/:id', '/users/')            // null
+ * matchPath('/dashboard', '/dashboard/x', false) // {} (prefix)
+ * matchPath('*', '/any/path')                   // { '*': '/any/path' }
+ * ```
+ */
+export declare function matchPath(pattern: string, path: string, exact?: boolean): Record<string, string> | null
+
+export type { RouteState, RouteProps, LinkProps } from './src/browser.ts'
 
 /**
  * React hook for time-travel debugging in dev mode.
@@ -330,6 +489,49 @@ export declare function useTimeTravel(): {
   pause: () => void
   resume: () => void
 } | null
+
+// ── Framework-agnostic client ─────────────────────────────────────────────
+
+/**
+ * Framework-agnostic client for wiring aio into non-React frameworks.
+ * Exposes the same singleton connection used by `useAio`/`useFeature`.
+ * Subscribe to state, send actions, and access routing — no React required.
+ *
+ * @example
+ * ```ts
+ * import { client } from 'aio'
+ *
+ * // Subscribe to state changes
+ * const unsub = client.subscribe((state) => {
+ *   console.log('new state:', state)
+ * })
+ *
+ * // Send actions
+ * client.send({ type: 'counter:increment', payload: { by: 1 } })
+ *
+ * // Get current state
+ * const state = client.getState()
+ *
+ * // Feature slice
+ * const counterState = client.getFeatureState('counter')
+ *
+ * // Routing
+ * client.route.subscribe(() => console.log('path:', client.route.getPath()))
+ * client.route.navigate('/users/42')
+ * ```
+ */
+export declare const client: {
+  subscribe(fn: (state: unknown) => void): () => void
+  getState(): unknown
+  getFeatureState(name: string): unknown
+  send(action: { type: string; payload?: unknown }): void
+  route: {
+    subscribe(fn: () => void): () => void
+    getPath(): string
+    getSearch(): URLSearchParams
+    navigate(to: string | number, opts?: { replace?: boolean }): void
+  }
+}
 
 /**
  * Connect to Redux DevTools browser extension for state inspection.

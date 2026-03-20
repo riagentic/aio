@@ -8,18 +8,22 @@
 // - Inter-feature call() — callback form only (typed, no raw strings)
 
 
-/** Raw action/effect message — prefer typed action creators (feature.A.xxx) over constructing directly */
+/** Raw action/effect message — prefer typed action creators (feature.action()) over constructing directly */
 export type Msg = { type: string; payload: unknown; _source?: 'UI' | 'Effect' | 'System' | 'Test' }
-export type ScheduleEffect = import('./schedule.ts').ScheduleEffect
+import type { ScheduleEffect } from './schedule.ts'
 
 // Internal method types — `any` at spread args/return is unavoidable when
 // mapping over heterogeneous method signatures at the type-system boundary.
+/** Synchronous feature method — mutates state, optionally returns effects */
 // deno-lint-ignore no-explicit-any
 export type SyncMethod<S> = (s: S, ...args: any[]) => void | ScheduleEffect | ScheduleEffect[]
+/** Async feature method — runs in executor, mutations batched via proxy */
 // deno-lint-ignore no-explicit-any
 export type AsyncMethod<S> = (s: S, ...args: any[]) => Promise<any>
+/** Feature method — sync or async */
 export type Method<S> = SyncMethod<S> | AsyncMethod<S>
 
+/** Map of feature methods keyed by name */
 export type FeatureMethods<S extends Record<string, unknown>> = Record<string, Method<S>>
 
 // ── Pending async call registry ────────────────────────────────────
@@ -43,22 +47,23 @@ export type CallOptions = { timeout?: number; retries?: number }
  * // With timeout/retry
  * const reserved = await call({ timeout: 5000, retries: 2 }, () => inventory.reserve(items))
  */
-export function call<T>(fn: () => Promise<T>): Promise<T>
 export function call<T>(opts: CallOptions, fn: () => Promise<T>): Promise<T>
 export function call(
-  fnOrOpts: CallOptions | (() => Promise<unknown>),
-  fn?: () => Promise<unknown>,
+  opts: CallOptions,
+  fn: () => Promise<unknown>,
 ): Promise<unknown> {
-  if (typeof fnOrOpts === 'function') return fnOrOpts()
-  return _callWithCallback(fn!, fnOrOpts)
+  return callWithOpts(fn, opts)
 }
 
-function _callWithCallback(fn: () => Promise<unknown>, opts: CallOptions): Promise<unknown> {
+/** Wraps a fn with timeout and/or retries — shared by call() and ctx.call() */
+export function callWithOpts(fn: () => unknown | Promise<unknown>, opts: CallOptions): Promise<unknown> {
   const attempt = (): Promise<unknown> => {
-    if (!opts.timeout) return fn()
+    let p: Promise<unknown>
+    try { p = Promise.resolve(fn()) } catch (e) { p = Promise.reject(e) }
+    if (!opts.timeout) return p
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => reject(new Error(`call(): timeout after ${opts.timeout}ms`)), opts.timeout)
-      fn().then((v) => { clearTimeout(timer); resolve(v) }, (e) => { clearTimeout(timer); reject(e) })
+      p.then(v => { clearTimeout(timer); resolve(v) }, e => { clearTimeout(timer); reject(e) })
     })
   }
   if (!opts.retries) return attempt()
@@ -70,10 +75,23 @@ function _callWithCallback(fn: () => Promise<unknown>, opts: CallOptions): Promi
   return retry()
 }
 
-/** Register a pending call — returns Promise that resolves when resolveCall() is called */
+/** Default timeout for await feature.method() — prevents silent hangs if executor never resolves */
+const CALL_TIMEOUT = 30_000
+
+/** Register a pending call — returns Promise that resolves when resolveCall() is called.
+ *  Times out after 30s by default to prevent silent deadlocks. */
 export function registerCall(callId: string): Promise<unknown> {
   return new Promise((resolve, reject) => {
-    _pending.set(callId, { resolve, reject })
+    const timer = setTimeout(() => {
+      if (_pending.has(callId)) {
+        _pending.delete(callId)
+        reject(new Error(`await feature.method() timed out after ${CALL_TIMEOUT / 1000}s — the effect executor may have crashed or never resolved this call`))
+      }
+    }, CALL_TIMEOUT)
+    _pending.set(callId, {
+      resolve: (v) => { clearTimeout(timer); resolve(v) },
+      reject: (e) => { clearTimeout(timer); reject(e) },
+    })
   })
 }
 

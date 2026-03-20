@@ -425,7 +425,7 @@ const checkout = feature('checkout', {
 
   execute: {
     paymentComplete(app, payload) {
-      app.dispatch(wallet.A.credit(payload.amount))   // allowed via dispatchTo
+      app.dispatch(wallet.credit(payload.amount))   // allowed via dispatchTo
     },
   },
 })
@@ -477,8 +477,7 @@ actions: {
 
 // This generates:
 // counter.increment.type → 'counter:increment' (use this for matching, not raw strings)
-// counter.A.increment(5) → { type: 'counter:increment', payload: { by: 5 } }
-// counter.A is internal — not for application code
+// counter.increment.type → 'counter:increment' (use this for matching, not raw strings)
 
 reduce: {
   increment(state, payload) {
@@ -855,7 +854,7 @@ feature('name', {
   // Required
   state: { ... },                    // Initial state object
 
-  // One of these styles:
+  // Styles (can be mixed — all callable names must be unique):
   methods: { ... },                  // Simple: sync/async functions
   actions: { ... } + reduce: { ... }, // Explicit: action creators + handlers
 
@@ -949,25 +948,43 @@ methods: {
 }
 ```
 
-### Pattern: Form state
+### Pattern: Form state with validation
+
+Validation belongs in methods — check input, set errors, bail early. No special `validate` hook needed.
 
 ```ts
 const form = feature('form', {
-  state: { email: '', password: '', errors: {} },
-  
+  state: {
+    email: '',
+    password: '',
+    errors: {} as Record<string, string>,
+    submitting: false,
+  },
+
   methods: {
-    setEmail(s, email) { s.email = email },
-    setPassword(s, password) { s.password = password },
+    setEmail(s, email: string) { s.email = email; delete s.errors.email },
+    setPassword(s, password: string) { s.password = password; delete s.errors.password },
+
     async submit(s) {
+      // Validate before doing anything — errors go into state, UI reacts
+      const errors: Record<string, string> = {}
+      if (!s.email) errors.email = 'required'
+      if (!s.email.includes('@')) errors.email = 'invalid email'
+      if (s.password.length < 8) errors.password = 'min 8 characters'
+      if (Object.keys(errors).length) { s.errors = errors; return }
+
+      // Validation passed — proceed
       s.errors = {}
-      const result = await validateAndSubmit(s.email, s.password)
-      if (result.error) {
-        s.errors = result.errors
-      }
+      s.submitting = true
+      const result = await submitForm(s.email, s.password)
+      s.submitting = false
+      if (result.error) s.errors = { submit: result.error }
     }
   }
 })
 ```
+
+Validation is state mutation — the errors need to be in state so the UI can render them. Methods are the natural place for "check input, update state, maybe proceed."
 
 ### Pattern: Persistence
 

@@ -1,4 +1,4 @@
-import { assertEquals } from 'https://deno.land/std@0.224.0/assert/mod.ts'
+import { assertEquals } from '@std/assert'
 import { parseCli, VERSION } from '../src/aio.ts'
 import { electronMainScript, electronMainScriptUDS, electronClientScript } from '../src/electron.ts'
 
@@ -190,7 +190,7 @@ Deno.test('electronClientScript: handles --url= from argv', () => {
 
 Deno.test('VERSION is a semver string', () => {
   assertEquals(typeof VERSION, 'string')
-  assertEquals(/^\d+\.\d+\.\d+$/.test(VERSION), true)
+  assertEquals(/^\d+\.\d+\.\d+(-[\w.]+)?$/.test(VERSION), true)
 })
 
 // ── electronMainScript: edge cases ──────────────────────────────

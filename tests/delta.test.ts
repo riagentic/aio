@@ -1,4 +1,4 @@
-import { assertEquals, assertNotEquals } from 'https://deno.land/std@0.224.0/assert/mod.ts'
+import { assertEquals, assertNotEquals } from '@std/assert'
 import { _computeDelta } from '../src/server.ts'
 
 // ── Flat state (v0.4 compatible) ────────────────────────────────

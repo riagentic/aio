@@ -1,7 +1,8 @@
 // Main thread — promise bridge, lazy init, ready gate, optional read replicas
 
-import type { DB, QueryResult, WorkerMsg, WorkerResponse } from './types.ts'
+import type { DB, Tx, QueryResult, WorkerMsg, WorkerResponse } from './types.ts'
 
+/** Default SQLite PRAGMA statements for WAL mode, cache, and foreign keys */
 export const DEFAULT_PRAGMAS = [
   'PRAGMA journal_mode = WAL',
   'PRAGMA synchronous = NORMAL',
@@ -10,6 +11,7 @@ export const DEFAULT_PRAGMAS = [
   'PRAGMA foreign_keys = ON',
 ]
 
+/** Options for createDB — readonly mode, custom pragmas, read replicas */
 export type DBOpts = {
   readonly?: boolean
   pragmas?: string[]
@@ -103,24 +105,68 @@ export function createDB(path: string, opts: DBOpts = {}): DB {
     return sendTo<T>(w, msg)
   }
 
+  // Serial write lock — all writes (execute + transaction) queue through this so
+  // standalone execute() calls can never interleave into an open transaction.
+  let _writerLock: Promise<void> = Promise.resolve()
+  let _inTransaction = false
+  function withWriterLock<T>(fn: () => Promise<T>): Promise<T> {
+    const result: Promise<T> = _writerLock.then(fn)
+    _writerLock = result.then(() => {}, () => {}) // advance chain regardless of outcome
+    return result
+  }
+
   return {
     // Reads route to replica pool (or writer if no replicas configured)
     query<T = Record<string, unknown>>(sql: string, params?: unknown[]): Promise<QueryResult<T>> {
       return gate<QueryResult<T>>({ type: 'query', sql, params }, false)
     },
-    // Writes always go to the single writer
+    // Writes serialize through the lock so they can't sneak into an open transaction
     execute(sql: string, params?: unknown[]): Promise<QueryResult> {
-      return gate<QueryResult>({ type: 'execute', sql, params })
+      return withWriterLock(() => gate<QueryResult>({ type: 'execute', sql, params }))
     },
-    transaction(stmts: { sql: string; params?: unknown[] }[]): Promise<QueryResult[]> {
-      return gate<QueryResult[]>({ type: 'transaction', stmts })
+    // deno-lint-ignore no-explicit-any
+    transaction(stmts_or_fn: { sql: string; params?: unknown[] }[] | ((tx: Tx) => Promise<any>)): Promise<any> {
+      if (_inTransaction) throw new Error('nested db.transaction() would deadlock — use savepoints if needed')
+
+      // Batch form: goes through write lock for consistency (no execute() can interleave)
+      if (Array.isArray(stmts_or_fn)) {
+        return withWriterLock(() => gate<QueryResult[]>({ type: 'transaction', stmts: stmts_or_fn }))
+      }
+
+      // Callback form: acquire write lock, BEGIN/COMMIT wrapping the async callback
+      return withWriterLock(async () => {
+        _inTransaction = true
+        await gate<QueryResult>({ type: 'execute', sql: 'BEGIN' })
+        const tx: Tx = {
+          // tx.query goes to writer — must see current transaction's own writes
+          query: <T>(sql: string, params?: unknown[]) => gate<QueryResult<T>>({ type: 'query', sql, params }, true),
+          execute: (sql: string, params?: unknown[]) => gate<QueryResult>({ type: 'execute', sql, params }),
+        }
+        try {
+          const result = await stmts_or_fn(tx)
+          await gate<QueryResult>({ type: 'execute', sql: 'COMMIT' })
+          return result
+        } catch (e) {
+          await gate<QueryResult>({ type: 'execute', sql: 'ROLLBACK' })
+          throw e
+        } finally {
+          _inTransaction = false
+        }
+      })
     },
     async close(): Promise<void> {
       if (!ready) return
       await ensureWorkers()
-      // Close all workers in parallel, then terminate
+      // Close all workers with 5s timeout — terminate regardless
       await Promise.all([writerWorker!, ...readerWorkers].map(async (w) => {
-        await sendTo<QueryResult>(w, { type: 'close' })
+        let timer: ReturnType<typeof setTimeout> | undefined
+        try {
+          await Promise.race([
+            sendTo<QueryResult>(w, { type: 'close' }),
+            new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('close timeout')), 5000) }),
+          ])
+        } catch { /* timeout or worker error — terminate anyway */ }
+        if (timer) clearTimeout(timer)
         w.terminate()
       }))
       writerWorker = null

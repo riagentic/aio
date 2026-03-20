@@ -10,7 +10,7 @@
 //
 // Requires: Electron installed at node_modules/.bin/electron + a display (DISPLAY or WAYLAND_DISPLAY)
 
-import { assertEquals } from 'https://deno.land/std@0.224.0/assert/mod.ts'
+import { assertEquals } from '@std/assert'
 import { join } from '@std/path'
 import { createServer } from '../src/server.ts'
 import { electronMainScriptUDS } from '../src/electron.ts'

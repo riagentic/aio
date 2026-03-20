@@ -1,7 +1,8 @@
-/// <reference lib="dom" />
+// deno-lint-ignore-file
 // Browser-side aio module — bundled into dist/app.js for prod builds
+// DOM types provided via compilerOptions.lib in deno.json
 // Dev mode uses the AIO_UI_JS string in server.ts instead (served at /__aio/ui.js)
-import { useState, useEffect, useSyncExternalStore, useCallback, createElement, type ComponentType } from 'react'
+import { useState, useEffect, useLayoutEffect, useSyncExternalStore, useCallback, createElement, createContext, useContext, type ComponentType, type ReactNode } from 'react'
 
 const WS_MAX_QUEUE = 100
 const OFFLINE_MAX_QUEUE = 100             // max actions queued while disconnected (post-connect)
@@ -16,10 +17,13 @@ function _applyPatch(prev: Record<string, unknown> | null, data: { $p: Record<st
   for (const [k, v] of Object.entries(data.$p)) {
     if (_SAFE_KEYS.has(k)) continue
     if (v && typeof v === 'object' && !Array.isArray(v) && next[k] && typeof next[k] === 'object' && !Array.isArray(next[k])) {
-      // Nested feature patch — shallow merge sub-keys
+      // Nested feature patch — shallow merge sub-keys (filter unsafe keys)
       const sub = v as Record<string, unknown>
       const prev_slice = next[k] as Record<string, unknown>
-      const merged = { ...prev_slice, ...sub }
+      const merged = { ...prev_slice }
+      for (const [sk, sv] of Object.entries(sub)) {
+        if (!_SAFE_KEYS.has(sk) && sk !== '$d') merged[sk] = sv
+      }
       // Handle nested deletions ($d within the sub-patch)
       if (Array.isArray(sub.$d)) {
         for (const sk of sub.$d) {
@@ -29,7 +33,16 @@ function _applyPatch(prev: Record<string, unknown> | null, data: { $p: Record<st
       }
       next[k] = merged
     } else {
-      next[k] = v
+      // Sanitize new objects — filter unsafe keys even for new top-level entries
+      if (v && typeof v === 'object' && !Array.isArray(v)) {
+        const safe: Record<string, unknown> = {}
+        for (const [sk, sv] of Object.entries(v as Record<string, unknown>)) {
+          if (!_SAFE_KEYS.has(sk)) safe[sk] = sv
+        }
+        next[k] = safe
+      } else {
+        next[k] = v
+      }
     }
   }
   // Top-level deletions
@@ -377,6 +390,16 @@ function _connectIPC() {
       if (link) link.href = '/style.css?t=' + Date.now()
       return
     }
+    if (line === '__getState') {
+      try { _ipc!.send('__clientState:' + JSON.stringify(_walkReactTree())) }
+      catch (err) { _ipc!.send('__clientState:{"error":"' + String(err) + '"}') }
+      return
+    }
+    if (line.startsWith('__click:')) {
+      const result = _handleClick(line.slice(8))
+      _ipc!.send('__clientState:' + JSON.stringify(result))
+      return
+    }
     if (line.startsWith('__tt:')) {
       try {
         _ttState = JSON.parse(line.slice(5))
@@ -434,6 +457,7 @@ function _connect() {
   const ws = new WebSocket(wsUrl)
   ws.onopen = async () => {
     _retry = 0
+    ws.send('__type:' + (typeof navigator !== 'undefined' && /electron/i.test(navigator.userAgent) ? 'electron' : 'browser'))
     if (_wasConnected) _showStatus('Connected', '#2a2', 2000)
     _wasConnected = true
     
@@ -459,6 +483,18 @@ function _connect() {
     if (e.data === '__css') {
       const link = document.querySelector('link[rel="stylesheet"][href*="style.css"]') as HTMLLinkElement | null
       if (link) link.href = '/style.css?t=' + Date.now()
+      return
+    }
+    // Client UI request (dev mode) — respond with React component tree
+    if (e.data === '__getState') {
+      try { ws.send('__clientState:' + JSON.stringify(_walkReactTree())) }
+      catch (err) { ws.send('__clientState:{"error":"' + String(err) + '"}') }
+      return
+    }
+    // Client click command (dev mode) — click a component's DOM node
+    if (typeof e.data === 'string' && e.data.startsWith('__click:')) {
+      const result = _handleClick(e.data.slice(8))
+      ws.send('__clientState:' + JSON.stringify(result))
       return
     }
     // Time-travel metadata from server
@@ -704,24 +740,34 @@ export function feature(name: string, config: { state?: any; actions?: _Creators
     }
     // deno-lint-ignore no-explicit-any
     const eCat = buildCat((config.effects ?? {}) as any)
-    return {
-      name, A: cat, E: eCat, selectors: config.selectors ?? {},
-      _config: { state: config.state ?? {}, machine: config.machine ?? false, actionKeys: allKeys, effectKeys: Object.keys(config.effects ?? {}), prefix },
+    const def: Record<string, unknown> = {
+      __aio: { state: config.state ?? {}, machine: config.machine ?? false, selectors: config.selectors ?? {}, actionKeys: allKeys, effectKeys: Object.keys(config.effects ?? {}), id: prefix, actions: cat, effects: eCat, bound: false },
     }
+    // Flatten methods onto feature object — parity with server-side feature()
+    for (const [key, value] of Object.entries(cat)) {
+      def[key] = value
+    }
+    return def
   }
-  return {
-    name,
-    A: buildCat(config.actions ?? {}),
-    E: buildCat(config.effects ?? {}),
-    selectors: config.selectors ?? {},
-    _config: {
+  const aCat = buildCat(config.actions ?? {})
+  const def: Record<string, unknown> = {
+    __aio: {
       state: config.state ?? {},
       machine: config.machine ?? false,
+      selectors: config.selectors ?? {},
       actionKeys: Object.keys(config.actions ?? {}),
       effectKeys: Object.keys(config.effects ?? {}),
-      prefix,
+      id: prefix,
+      actions: aCat,
+      effects: buildCat(config.effects ?? {}),
+      bound: false,
     },
   }
+  // Flatten actions onto feature object — parity with server-side feature()
+  for (const [key, value] of Object.entries(aCat)) {
+    def[key] = value
+  }
+  return def
 }
 
 /** Browser-compatible bridge() stub — delegates to feature() */
@@ -749,23 +795,22 @@ const _featureSendCache = new WeakMap<Record<string, any>, Record<string, (...ar
  *  connection is near-instant and you want components to render immediately with initial state:
  *
  *  ```tsx
- *  const { state, send } = useFeature(counter, { fallback: counter._config.state as CounterState })
+ *  const { state, send } = useFeature(counter, { fallback: counter.__aio.state as CounterState })
  *  // state is CounterState, never null
  *  ```
  */
 // deno-lint-ignore no-explicit-any
-type FeatureRef = { name: string; A: Record<string, any>; _config: { actionKeys: string[] } }
 // deno-lint-ignore no-explicit-any
+// deno-lint-ignore no-explicit-any
+type FeatureRef = { __aio: { id: string; actions: Record<string, any>; actionKeys: string[] } }
 export function useFeature<S>(ref: FeatureRef, options: { fallback: S }): { state: S; send: Record<string, (...args: unknown[]) => void>; status: string | undefined }
-// deno-lint-ignore no-explicit-any
 export function useFeature<S = unknown>(ref: FeatureRef, options?: { fallback?: never }): { state: S | null; send: Record<string, (...args: unknown[]) => void>; status: string | undefined }
-// deno-lint-ignore no-explicit-any
 export function useFeature<S = unknown>(ref: FeatureRef, options?: { fallback?: S }): {
   state: S | null
   send: Record<string, (...args: unknown[]) => void>
   status: string | undefined
 } {
-  const name = ref.name
+  const name = ref.__aio.id
 
   // Selector: extract just this feature's slice from global state
   const getSliceSnapshot = useCallback((): S | null => {
@@ -785,8 +830,8 @@ export function useFeature<S = unknown>(ref: FeatureRef, options?: { fallback?: 
   let sendObj = _featureSendCache.get(ref)
   if (!sendObj) {
     sendObj = {}
-    for (const key of ref._config.actionKeys) {
-      const creator = ref.A[key]
+    for (const key of ref.__aio.actionKeys) {
+      const creator = ref.__aio.actions[key]
       if (typeof creator === 'function') {
         sendObj[key] = (...args: unknown[]) => {
           const action = creator(...args)
@@ -859,6 +904,169 @@ export const log = {
   error(_cat: string, _msg: string, _data?: Record<string, unknown>): void {},
 }
 
+// ── React fiber tree walker (dev mode) ──────────────────────────────
+// Walks the React fiber tree from the root and extracts component names,
+// useState hooks state, and props for each mounted component.
+
+type _ComponentInfo = { component: string; state?: unknown; props?: Record<string, unknown>; children?: _ComponentInfo[] }
+
+/** Find React fiber root from the DOM */
+function _findFiberRoot(): Record<string, unknown> | null {
+  const root = document.getElementById('root') ?? document.getElementById('app')
+  if (!root) return null
+  const fiberKey = Object.getOwnPropertyNames(root).find(k =>
+    k.startsWith('__reactFiber$') || k.startsWith('__reactContainer$') || k.startsWith('__reactInternalInstance$'))
+  if (!fiberKey) return null
+  let fiber = (root as unknown as Record<string, unknown>)[fiberKey] as Record<string, unknown> | null
+  if (!fiber) return null
+  if (fiberKey.startsWith('__reactContainer$') && fiber.current) {
+    fiber = fiber.current as Record<string, unknown>
+  }
+  return fiber
+}
+
+/** Walk React fiber tree and return component info list */
+function _walkReactTree(): _ComponentInfo[] {
+  const fiber = _findFiberRoot()
+  if (!fiber) return []
+  const result: _ComponentInfo[] = []
+  _walkFiber(fiber, result)
+  return result
+}
+
+/** Find a component's fiber by name + index or name + prop match */
+function _findComponentFiber(
+  fiber: Record<string, unknown>,
+  name: string,
+  match: { index: number } | { prop: string; value: string },
+  counter = { n: 0 },
+): Record<string, unknown> | null {
+  const tag = fiber.tag as number
+  const type = fiber.type as unknown
+  if (type && (tag === 0 || tag === 1 || tag === 11 || tag === 15)) {
+    const cName = typeof type === 'function'
+      ? (type as { displayName?: string; name?: string }).displayName ?? (type as { name?: string }).name
+      : null
+    if (cName === name) {
+      if ('index' in match) {
+        if (counter.n === match.index) return fiber
+        counter.n++
+      } else {
+        const props = fiber.memoizedProps as Record<string, unknown> | null
+        if (props && String(props[match.prop]) === match.value) return fiber
+      }
+    }
+  }
+  let child = fiber.child as Record<string, unknown> | null
+  while (child) {
+    const found = _findComponentFiber(child, name, match, counter)
+    if (found) return found
+    child = child.sibling as Record<string, unknown> | null
+  }
+  return null
+}
+
+/** Find the nearest DOM node from a fiber (walk down to first HostComponent) */
+function _fiberToDOM(fiber: Record<string, unknown>): HTMLElement | null {
+  // stateNode on HostComponent (tag 5) is the DOM node
+  if (fiber.tag === 5 && fiber.stateNode instanceof HTMLElement) return fiber.stateNode
+  // For function components, walk down to first child HostComponent
+  let child = fiber.child as Record<string, unknown> | null
+  while (child) {
+    if (child.tag === 5 && child.stateNode instanceof HTMLElement) return child.stateNode as HTMLElement
+    const found = _fiberToDOM(child)
+    if (found) return found
+    child = child.sibling as Record<string, unknown> | null
+  }
+  return null
+}
+
+/** Handle __click: command — find component and click its DOM node */
+function _handleClick(cmd: string): { ok: boolean; error?: string; clicked?: string } {
+  const root = _findFiberRoot()
+  if (!root) return { ok: false, error: 'no React root found' }
+
+  // Parse: "ComponentName:index" or "ComponentName:prop:value"
+  const parts = cmd.split(':')
+  const name = parts[0]
+  if (!name) return { ok: false, error: 'no component name' }
+
+  let match: { index: number } | { prop: string; value: string }
+  if (parts.length === 2 && /^\d+$/.test(parts[1]!)) {
+    match = { index: Number(parts[1]) }
+  } else if (parts.length === 3) {
+    match = { prop: parts[1]!, value: parts[2]! }
+  } else {
+    match = { index: 0 } // default: first instance
+  }
+
+  const fiber = _findComponentFiber(root, name, match)
+  if (!fiber) return { ok: false, error: `component '${name}' not found` }
+
+  const el = _fiberToDOM(fiber)
+  if (!el) return { ok: false, error: `component '${name}' has no DOM node` }
+
+  el.click()
+  return { ok: true, clicked: `${name} → <${el.tagName.toLowerCase()}>` }
+}
+
+function _walkFiber(fiber: Record<string, unknown>, out: _ComponentInfo[]): void {
+  // tag 0 = FunctionComponent, 1 = ClassComponent, 11 = ForwardRef, 15 = SimpleMemoComponent
+  const tag = fiber.tag as number
+  const type = fiber.type as ((...args: unknown[]) => unknown) | { displayName?: string; name?: string } | null
+
+  if (type && (tag === 0 || tag === 1 || tag === 11 || tag === 15)) {
+    const name = typeof type === 'function'
+      ? (type as { displayName?: string; name?: string }).displayName ?? (type as { name?: string }).name ?? 'Anonymous'
+      : (type as { displayName?: string }).displayName ?? 'Unknown'
+
+    // Skip React internals
+    if (name && !name.startsWith('__') && name !== 'Fragment') {
+      const info: _ComponentInfo = { component: name }
+
+      // Extract useState hook state from memoizedState chain
+      const hookState = _extractHookState(fiber.memoizedState as Record<string, unknown> | null)
+      if (hookState.length) info.state = hookState.length === 1 ? hookState[0] : hookState
+
+      // Extract props (skip children and internal keys)
+      const props = fiber.memoizedProps as Record<string, unknown> | null
+      if (props) {
+        const cleaned: Record<string, unknown> = {}
+        for (const [k, v] of Object.entries(props)) {
+          if (k === 'children' || typeof v === 'function') continue
+          try { JSON.stringify(v); cleaned[k] = v } catch { /* non-serializable, skip */ }
+        }
+        if (Object.keys(cleaned).length) info.props = cleaned
+      }
+
+      out.push(info)
+    }
+  }
+
+  // Walk children
+  let child = fiber.child as Record<string, unknown> | null
+  while (child) {
+    _walkFiber(child, out)
+    child = child.sibling as Record<string, unknown> | null
+  }
+}
+
+function _extractHookState(memoizedState: Record<string, unknown> | null): unknown[] {
+  const states: unknown[] = []
+  let hook = memoizedState
+  while (hook) {
+    // useState hooks have a queue with a lastRenderedState
+    const queue = hook.queue as Record<string, unknown> | null
+    if (queue && 'lastRenderedState' in queue) {
+      const val = queue.lastRenderedState
+      // Only include serializable values
+      try { JSON.stringify(val); states.push(val) } catch { /* skip */ }
+    }
+    hook = hook.next as Record<string, unknown> | null
+  }
+  return states
+}
+
 /** Resets module state — for testing only */
 export function _reset(): void {
   _closed = true
@@ -889,4 +1097,193 @@ export function _reset(): void {
   _ttKeyBound = false
   _ipcConnected = false
   _stateVersion = 0
+}
+
+// ── Framework-agnostic client ─────────────────────────────────────────────
+// Public API for non-React frameworks. Same singleton — shared with useAio/useFeature.
+
+/** Framework-agnostic client — subscribe to state, send actions, access routing.
+ *  Use this to wire aio into Svelte, Vue, Solid, or any other framework. */
+export const client = {
+  /** Subscribe to state changes. Calls `fn(state)` on every update. Returns unsubscribe. Manages WS lifecycle (connects on first, disconnects on last). */
+  subscribe(fn: (state: unknown) => void): () => void {
+    // Wrap into the same _subscribe lifecycle (connect on first, disconnect on last)
+    const unsub = _subscribe(() => fn(_state))
+    return unsub
+  },
+
+  /** Current full state snapshot (null before first message). */
+  getState(): unknown { return _state },
+
+  /** Get a single feature's state slice by name. */
+  getFeatureState(name: string): unknown {
+    return _state ? (_state as Record<string, unknown>)[name] ?? null : null
+  },
+
+  /** Send an action to the server. Queued during initial connect, persisted offline after disconnect. */
+  send: _send,
+
+  /** Routing — subscribe to URL changes, navigate, match paths. */
+  route: {
+    /** Subscribe to URL changes. Returns unsubscribe. */
+    subscribe(fn: () => void): () => void {
+      _rListeners.add(fn)
+      return () => { _rListeners.delete(fn) }
+    },
+    /** Current pathname. */
+    getPath(): string { return _rPath },
+    /** Current search params. */
+    getSearch(): URLSearchParams { return _rSearch },
+    /** Navigate to path or history delta. */
+    navigate,
+  },
+}
+
+// ── Router ────────────────────────────────────────────────────────────────
+// Client-side routing — history API, nested routes, URL params, search params
+
+let _rPath = typeof location !== 'undefined' ? location.pathname : '/'
+let _rSearch = typeof location !== 'undefined' ? new URLSearchParams(location.search) : new URLSearchParams()
+const _rListeners = new Set<() => void>()
+
+function _rSync(): void {
+  _rPath = location.pathname
+  _rSearch = new URLSearchParams(location.search)
+  for (const fn of _rListeners) fn()
+}
+
+if (typeof window !== 'undefined') {
+  addEventListener('popstate', _rSync)
+}
+
+function _rSubscribe(fn: () => void): () => void {
+  _rListeners.add(fn)
+  return () => { _rListeners.delete(fn) }
+}
+
+function _rSnapshot(): string {
+  return typeof location !== 'undefined' ? location.pathname + location.search : '/'
+}
+
+/** Match a path pattern against a path string. Returns params or null. */
+export function matchPath(pattern: string, path: string, exact = true): Record<string, string> | null {
+  const keys: string[] = []
+  const segments = pattern.replace(/\/+$/, '').split('/')
+  const regParts = segments.map(seg => {
+    if (seg.startsWith(':')) { keys.push(seg.slice(1)); return '([^/]+)' }
+    if (seg === '*') { keys.push('*'); return '(.*)' }
+    return seg.replace(/[.+?^${}()|[\]\\]/g, '\\$&')
+  })
+  const suffix = exact ? '\\/?$' : '(\\/|$)'
+  const re = new RegExp('^' + regParts.join('\\/') + suffix)
+  const m = re.exec(path)
+  if (!m) return null
+  const params: Record<string, string> = {}
+  keys.forEach((k, i) => {
+    let v = decodeURIComponent(m[i + 1] ?? '')
+    if (k === '*') v = v.replace(/\/$/, '') // strip trailing slash (root path '/' → '')
+    params[k] = v
+  })
+  return params
+}
+
+/** Navigate to path or step through history. */
+export function navigate(to: string | number, opts?: { replace?: boolean }): void {
+  if (typeof to === 'number') { history.go(to); return }
+  const url = new URL(to, location.href) // use href (not origin) so relative paths resolve correctly
+  if (opts?.replace) history.replaceState(null, '', url)
+  else history.pushState(null, '', url)
+  _rSync()
+}
+
+/** Current route state — path, params, search, and match status */
+export type RouteState = { path: string; params: Record<string, string>; search: URLSearchParams; matched: boolean }
+
+/** Current route. With pattern ('/users/:id') extracts params. */
+export function useRoute(pattern?: string): RouteState {
+  useSyncExternalStore(_rSubscribe, _rSnapshot, () => '/')
+  const path = _rPath
+  const search = _rSearch
+  if (!pattern) return { path, params: {}, search, matched: true }
+  const params = matchPath(pattern, path)
+  return { path, params: params ?? {}, search, matched: params !== null }
+}
+
+/** Returns the navigate function. */
+export function useNavigate(): (to: string | number, opts?: { replace?: boolean }) => void {
+  return navigate
+}
+
+// ── Route context (nested routes + Outlet) ───────────────────────────────
+
+type _RouteCtxType = { basePath: string; params: Record<string, string>; outlet: unknown }
+const _RouteCtx = createContext<_RouteCtxType>({ basePath: '', params: {}, outlet: null })
+
+/** Props for the Route component */
+export type RouteProps = { path?: string; index?: boolean; element?: unknown; children?: unknown }
+
+/** Renders element when path matches. Nest inside other Routes for layouts with Outlet. */
+export function Route({ path, index, element, children }: RouteProps): unknown {
+  useSyncExternalStore(_rSubscribe, _rSnapshot, () => '/') // re-render on URL changes
+  const { basePath, params: parentParams } = useContext(_RouteCtx)
+  const currentPath = _rPath
+
+  if (index) {
+    const base = basePath || '/'
+    const match = currentPath === base || currentPath === base.replace(/\/$/, '') || base === '/' && currentPath === '/'
+    if (!match) return null
+    return element ?? null
+  }
+
+  if (!path) return null
+  const full = (basePath + '/' + path.replace(/^\//, '')).replace(/\/+/g, '/').replace(/(.)\/$/, '$1') || '/'
+  const hasChildren = !!children
+  const params = matchPath(full, currentPath, !hasChildren)
+  if (!params) return null
+
+  const allParams = { ...parentParams, ...params }
+  return createElement(_RouteCtx.Provider as ComponentType<{ value: _RouteCtxType }>,
+    { value: { basePath: full, params: allParams, outlet: hasChildren ? children : null } },
+    (hasChildren ? (element ?? createElement(Outlet as () => null)) : element ?? null) as ReactNode,
+  )
+}
+
+/** Renders the matching child route inside a parent Route's element. */
+export function Outlet(): unknown {
+  const { outlet } = useContext(_RouteCtx)
+  return outlet ?? null
+}
+
+/** Props for the Link component */
+export type LinkProps = {
+  to: string; replace?: boolean; exact?: boolean
+  activeClass?: string; activeStyle?: Record<string, unknown>
+  children?: unknown; className?: string; style?: Record<string, unknown>
+  [k: string]: unknown
+}
+
+/** Anchor that navigates without page reload. Adds activeClass when path matches. */
+export function Link({ to, replace: rep, exact, activeClass, activeStyle, children, ...rest }: LinkProps): unknown {
+  useSyncExternalStore(_rSubscribe, _rSnapshot, () => '/')
+  const path = _rPath
+  const isActive = (exact || to === '/') ? path === to : path === to || path.startsWith(to + '/')
+  function handleClick(e: MouseEvent) {
+    if ((e as MouseEvent & { button: number }).button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return
+    e.preventDefault()
+    navigate(to, { replace: rep })
+  }
+  const cls = isActive && activeClass ? [rest.className, activeClass].filter(Boolean).join(' ') : rest.className
+  const sty = isActive && activeStyle ? { ...rest.style, ...activeStyle } : rest.style
+  return createElement('a', { ...rest, href: to, onClick: handleClick, className: cls, style: sty }, children as ReactNode)
+}
+
+/** Link with automatic 'active' class. Prefix match by default, exact for '/' and when exact=true. */
+export function NavLink({ activeClass = 'active', ...rest }: Omit<LinkProps, 'activeClass'> & { activeClass?: string }): unknown {
+  return createElement(Link as ComponentType<LinkProps>, { activeClass, ...rest } as LinkProps)
+}
+
+/** Navigates to `to` on mount — use for auth redirects. Replace=true by default (no history entry). */
+export function Redirect({ to, replace: rep = true }: { to: string; replace?: boolean }): null {
+  useLayoutEffect(() => { navigate(to, { replace: rep }) }, [to])
+  return null
 }

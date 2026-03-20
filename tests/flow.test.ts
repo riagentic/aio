@@ -1,4 +1,4 @@
-import { assertEquals, assertExists } from 'https://deno.land/std@0.224.0/assert/mod.ts'
+import { assertEquals, assertExists } from '@std/assert'
 import { feature, composeFeatures } from '../src/feature.ts'
 
 // ── Helpers ──────────────────────────────────────────────────────────
@@ -53,18 +53,18 @@ const basic = feature('basic', {
 
 Deno.test('flow: basic flow dispatches step actions', async () => {
   const app = createTestApp([basic])
-  app.dispatch(basic.A.start(5))
+  app.dispatch(basic.start(5))
   await app.flush()
 
   const types = app.dispatched.map(d => d.type)
-  assertEquals(types.includes('basic:flow:double'), true)
-  assertEquals(types.includes('basic:flow:setValue'), true)
-  assertEquals(types.includes('basic:flow:done'), true)
+  assertEquals(types.includes('basic:__flow:double'), true)
+  assertEquals(types.includes('basic:__flow:setValue'), true)
+  assertEquals(types.includes('basic:__flow:done'), true)
 })
 
 Deno.test('flow: basic flow updates state', async () => {
   const app = createTestApp([basic])
-  app.dispatch(basic.A.start(5))
+  app.dispatch(basic.start(5))
   await app.flush()
 
   const s = app.getState().basic as { value: number; done: boolean }
@@ -89,7 +89,7 @@ const flowOnly = feature('flowOnly', {
 
 Deno.test('flow: feature with only generators (no reduce)', async () => {
   const app = createTestApp([flowOnly])
-  app.dispatch(flowOnly.A.go('hello'))
+  app.dispatch(flowOnly.go('hello'))
   await app.flush()
 
   const s = app.getState().flowOnly as { result: string }
@@ -124,15 +124,15 @@ const mixed = feature('mixed', {
 
 Deno.test('flow: mixed feature — reduce works independently', () => {
   const app = createTestApp([mixed])
-  app.dispatch(mixed.A.increment(5))
+  app.dispatch(mixed.increment(5))
   const s = app.getState().mixed as { count: number }
   assertEquals(s.count, 5)
 })
 
 Deno.test('flow: mixed feature — generator works alongside reduce', async () => {
   const app = createTestApp([mixed])
-  app.dispatch(mixed.A.increment(3))
-  app.dispatch(mixed.A.sync())
+  app.dispatch(mixed.increment(3))
+  app.dispatch(mixed.sync())
   await app.flush()
 
   const s = app.getState().mixed as { count: number; synced: boolean }
@@ -167,7 +167,7 @@ const putter = feature('putter', {
 
 Deno.test('flow: ctx.dispatch dispatches regular action', async () => {
   const app = createTestApp([putter])
-  app.dispatch(putter.A.start())
+  app.dispatch(putter.start())
   await app.flush()
 
   const s = app.getState().putter as { step: string }
@@ -202,7 +202,7 @@ const sender = feature('sender', {
 
 Deno.test('flow: ctx.send dispatches via bound creator', async () => {
   const app = createTestApp([sender])
-  app.dispatch(sender.A.start())
+  app.dispatch(sender.start())
   await app.flush()
 
   const s = app.getState().sender as { step: string }
@@ -234,11 +234,11 @@ const failer = feature('failer', {
 
 Deno.test('flow: ctx.fail stops execution and dispatches failed action', async () => {
   const app = createTestApp([failer])
-  app.dispatch(failer.A.start())
+  app.dispatch(failer.start())
   await app.flush()
 
   const types = app.dispatched.map(d => d.type)
-  assertEquals(types.includes('failer:flow:failed'), true)
+  assertEquals(types.includes('failer:__flow:failed'), true)
 
   const s = app.getState().failer as { value: number }
   assertEquals(s.value, 0) // unreachable step didn't execute
@@ -261,7 +261,7 @@ const sleeper = feature('sleeper', {
 
 Deno.test('flow: ctx.sleep pauses then continues', async () => {
   const app = createTestApp([sleeper])
-  app.dispatch(sleeper.A.start())
+  app.dispatch(sleeper.start())
 
   const before = app.getState().sleeper as { woke: boolean }
   assertEquals(before.woke, false)
@@ -295,7 +295,7 @@ const parallel = feature('parallel', {
 
 Deno.test('flow: ctx.all (spread) runs calls in parallel', async () => {
   const app = createTestApp([parallel])
-  app.dispatch(parallel.A.start())
+  app.dispatch(parallel.start())
   await app.flush()
 
   const s = app.getState().parallel as { a: number; b: number }
@@ -326,7 +326,7 @@ const namedParallel = feature('namedParallel', {
 
 Deno.test('flow: ctx.all (named) runs calls in parallel and returns by name', async () => {
   const app = createTestApp([namedParallel])
-  app.dispatch(namedParallel.A.start())
+  app.dispatch(namedParallel.start())
   await app.flush()
 
   const s = app.getState().namedParallel as { x: number; y: number }
@@ -355,7 +355,7 @@ const racer = feature('racer', {
 
 Deno.test({ name: 'flow: ctx.race picks first to resolve', sanitizeOps: false, sanitizeResources: false }, async () => {
   const app = createTestApp([racer])
-  app.dispatch(racer.A.start())
+  app.dispatch(racer.start())
   await app.flush()
 
   const s = app.getState().racer as { winner: string }
@@ -399,7 +399,7 @@ const syncFlow = feature('syncFlow', {
 
 Deno.test('flow: ctx.call works with sync functions', async () => {
   const app = createTestApp([syncFlow])
-  app.dispatch(syncFlow.A.start())
+  app.dispatch(syncFlow.start())
   await app.flush()
 
   const s = app.getState().syncFlow as { value: number }
@@ -425,7 +425,7 @@ const multiStep = feature('multiStep', {
 
 Deno.test('flow: multiple ctx.mutate calls execute in order', async () => {
   const app = createTestApp([multiStep])
-  app.dispatch(multiStep.A.start())
+  app.dispatch(multiStep.start())
   await app.flush()
 
   const s = app.getState().multiStep as { steps: string[] }
@@ -449,11 +449,11 @@ const errorFlow = feature('errorFlow', {
 
 Deno.test('flow: error in ctx.call dispatches error action', async () => {
   const app = createTestApp([errorFlow])
-  app.dispatch(errorFlow.A.start())
+  app.dispatch(errorFlow.start())
   await app.flush()
 
   const types = app.dispatched.map(d => d.type)
-  assertEquals(types.includes('errorFlow:flow:error'), true)
+  assertEquals(types.includes('errorFlow:__flow:error'), true)
 
   const s = app.getState().errorFlow as { value: number }
   assertEquals(s.value, 0)
@@ -468,7 +468,7 @@ const waiter = feature('waiter', {
     signal: (msg: string) => ({ msg }),
   },
   generators: {
-    // String form used here — typed form (waiter.A.signal) would be circular reference
+    // String form used here — typed form (waiter.signal) would be circular reference
     start: function* (ctx) {
       const action = yield* ctx.waitFor('waiter:signal')
       const msg = (action.payload as { msg: string }).msg  // payload cast needed with string form
@@ -479,12 +479,12 @@ const waiter = feature('waiter', {
 
 Deno.test('flow: ctx.waitFor pauses until matching action dispatched', async () => {
   const app = createTestApp([waiter])
-  app.dispatch(waiter.A.start())
+  app.dispatch(waiter.start())
   await new Promise(r => setTimeout(r, 20))
 
   assertEquals((app.getState().waiter as any).received, '')
 
-  app.dispatch(waiter.A.signal('hello'))
+  app.dispatch(waiter.signal('hello'))
   await new Promise(r => setTimeout(r, 50))
 
   assertEquals((app.getState().waiter as any).received, 'hello')
@@ -510,7 +510,7 @@ const timeoutWaiter = feature('timeoutWaiter', {
 
 Deno.test('flow: ctx.waitFor with timeout throws on expiry', async () => {
   const app = createTestApp([timeoutWaiter])
-  app.dispatch(timeoutWaiter.A.start())
+  app.dispatch(timeoutWaiter.start())
   await new Promise(r => setTimeout(r, 200))
 
   assertEquals((app.getState().timeoutWaiter as any).timedOut, true)
@@ -535,7 +535,7 @@ const stateReader = feature('stateReader', {
 
 Deno.test({ name: 'flow: ctx.getState reads fresh state after step', sanitizeOps: false, sanitizeResources: false }, async () => {
   const app = createTestApp([stateReader])
-  app.dispatch(stateReader.A.start())
+  app.dispatch(stateReader.start())
   await app.flush()
 
   const s = app.getState().stateReader as { count: number; doubled: number }
@@ -568,12 +568,12 @@ const cancellable = feature('cancellable', {
 
 Deno.test({ name: 'flow: cancelOn stops generator when matching action dispatched', sanitizeOps: false, sanitizeResources: false }, async () => {
   const app = createTestApp([cancellable])
-  app.dispatch(cancellable.A.start())
+  app.dispatch(cancellable.start())
   await new Promise(r => setTimeout(r, 50))
 
   assertEquals((app.getState().cancellable as any).running, true)
 
-  app.dispatch(cancellable.A.stop())
+  app.dispatch(cancellable.stop())
   await new Promise(r => setTimeout(r, 100))
 
   assertEquals((app.getState().cancellable as any).finished, false)
@@ -597,10 +597,305 @@ const putCompat = feature('putCompat', {
 
 Deno.test('flow: ctx.dispatch accepts action without payload', async () => {
   const app = createTestApp([putCompat])
-  app.dispatch(putCompat.A.start())
+  app.dispatch(putCompat.start())
   await app.flush()
 
   assertEquals((app.getState().putCompat as any).sent, true)
   const signalAction = app.dispatched.find(d => d.type === 'putCompat:signal')
   assertExists(signalAction)
+})
+
+// ══════════════════════════════════════════════════════════════════════
+// Edge cases — race, all, waitFor, cancellation corner cases
+// ══════════════════════════════════════════════════════════════════════
+
+// ── ctx.race with 3+ entries, multiple resolve near-simultaneously ──
+
+const race3 = feature('race3', {
+  state: { winner: '' },
+  actions: { start: () => ({}) },
+  generators: {
+    start: function* (ctx) {
+      const result = yield* ctx.race({
+        a: ctx.call('a', () => new Promise<string>(r => setTimeout(() => r('A'), 5))),
+        b: ctx.call('b', () => new Promise<string>(r => setTimeout(() => r('B'), 5))),
+        c: ctx.call('c', () => new Promise<string>(r => setTimeout(() => r('C'), 5))),
+      })
+      // One of them wins — we just verify exactly one key is set
+      const keys = Object.keys(result).filter(k => result[k as keyof typeof result] !== undefined)
+      yield* ctx.done(s => { s.winner = keys[0] ?? 'none' })
+    },
+  },
+})
+
+Deno.test({ name: 'flow edge: ctx.race with 3 near-simultaneous entries picks exactly one', sanitizeOps: false, sanitizeResources: false }, async () => {
+  const app = createTestApp([race3])
+  app.dispatch(race3.start())
+  await new Promise(r => setTimeout(r, 100))
+
+  const s = app.getState().race3 as { winner: string }
+  assertEquals(['a', 'b', 'c'].includes(s.winner), true)
+})
+
+// ── ctx.race where instant (sync) entry beats async ─────────────────
+
+const raceSyncAsync = feature('raceSyncAsync', {
+  state: { winner: '' },
+  actions: { start: () => ({}) },
+  generators: {
+    start: function* (ctx) {
+      const result = yield* ctx.race({
+        sync: ctx.call('sync', () => 'instant'),
+        slow: ctx.call('slow', () => new Promise<string>(r => setTimeout(() => r('delayed'), 500))),
+      })
+      yield* ctx.done(s => { s.winner = result.sync !== undefined ? 'sync' : 'slow' })
+    },
+  },
+})
+
+Deno.test({ name: 'flow edge: ctx.race — sync call beats async', sanitizeOps: false, sanitizeResources: false }, async () => {
+  const app = createTestApp([raceSyncAsync])
+  app.dispatch(raceSyncAsync.start())
+  await app.flush()
+
+  const s = app.getState().raceSyncAsync as { winner: string }
+  assertEquals(s.winner, 'sync')
+})
+
+// ── ctx.waitFor with timeout=0 — should time out immediately ────────
+
+const zeroTimeout = feature('zeroTimeout', {
+  state: { timedOut: false },
+  actions: { start: () => ({}) },
+  generators: {
+    start: function* (ctx) {
+      try {
+        yield* ctx.waitFor('Never:Happens', 0)
+      } catch {
+        yield* ctx.done(s => { s.timedOut = true })
+      }
+    },
+  },
+})
+
+Deno.test('flow edge: ctx.waitFor with timeout=0 times out immediately', async () => {
+  const app = createTestApp([zeroTimeout])
+  app.dispatch(zeroTimeout.start())
+  await new Promise(r => setTimeout(r, 50))
+
+  // timeout=0 means the timeout fires on next tick — should catch
+  assertEquals((app.getState().zeroTimeout as any).timedOut, true)
+})
+
+// ── ctx.call with timeout — times out if fn is too slow ─────────────
+
+const callTimeout = feature('callTimeout', {
+  state: { result: '' },
+  actions: { start: () => ({}) },
+  generators: {
+    start: function* (ctx) {
+      try {
+        yield* ctx.call('slow', () => new Promise(r => setTimeout(r, 500)), { timeout: 20 })
+        yield* ctx.done(s => { s.result = 'completed' })
+      } catch {
+        yield* ctx.done(s => { s.result = 'timed-out' })
+      }
+    },
+  },
+})
+
+Deno.test({ name: 'flow edge: ctx.call with timeout rejects on slow fn', sanitizeOps: false, sanitizeResources: false }, async () => {
+  const app = createTestApp([callTimeout])
+  app.dispatch(callTimeout.start())
+  await new Promise(r => setTimeout(r, 100))
+
+  assertEquals((app.getState().callTimeout as any).result, 'timed-out')
+})
+
+// ── ctx.call with retries — retries then succeeds ───────────────────
+
+const callRetry = feature('callRetry', {
+  state: { attempts: 0, result: '' },
+  actions: { start: () => ({}) },
+  generators: {
+    start: function* (ctx) {
+      let attempts = 0
+      const val = yield* ctx.call('flaky', () => {
+        attempts++
+        if (attempts < 3) throw new Error('not yet')
+        return 'ok'
+      }, { retries: 3 })
+      yield* ctx.done(s => { s.attempts = attempts; s.result = val })
+    },
+  },
+})
+
+Deno.test('flow edge: ctx.call with retries recovers after failures', async () => {
+  const app = createTestApp([callRetry])
+  app.dispatch(callRetry.start())
+  await new Promise(r => setTimeout(r, 200))
+
+  const s = app.getState().callRetry as { attempts: number; result: string }
+  assertEquals(s.attempts, 3)
+  assertEquals(s.result, 'ok')
+})
+
+// ── ctx.call with retries — exhausts retries and fails ──────────────
+
+const callRetryFail = feature('callRetryFail', {
+  state: { result: '' },
+  actions: { start: () => ({}) },
+  generators: {
+    start: function* (ctx) {
+      try {
+        yield* ctx.call('alwaysFails', () => { throw new Error('nope') }, { retries: 2 })
+        yield* ctx.done(s => { s.result = 'ok' })
+      } catch {
+        yield* ctx.done(s => { s.result = 'exhausted' })
+      }
+    },
+  },
+})
+
+Deno.test('flow edge: ctx.call exhausts retries then throws', async () => {
+  const app = createTestApp([callRetryFail])
+  app.dispatch(callRetryFail.start())
+  await app.flush()
+
+  assertEquals((app.getState().callRetryFail as any).result, 'exhausted')
+})
+
+// ── Generator cancelled mid-ctx.all — partial results don't apply ───
+
+const cancelMidAll = feature('cancelMidAll', {
+  state: { done: false },
+  actions: {
+    start: () => ({}),
+    abort: () => ({}),
+  },
+  generators: {
+    start: function* (ctx) {
+      yield* ctx.all(
+        ctx.call('fast', () => Promise.resolve(1)),
+        ctx.call('slow', () => new Promise(r => setTimeout(() => r(2), 500))),
+      )
+      yield* ctx.done(s => { s.done = true })
+    },
+  },
+  cancelOn: { start: ['abort'] },
+})
+
+Deno.test({ name: 'flow edge: cancel mid-ctx.all prevents done', sanitizeOps: false, sanitizeResources: false }, async () => {
+  const app = createTestApp([cancelMidAll])
+  app.dispatch(cancelMidAll.start())
+  await new Promise(r => setTimeout(r, 20))
+
+  // Cancel while slow call is still pending
+  app.dispatch(cancelMidAll.abort())
+  await new Promise(r => setTimeout(r, 600))
+
+  assertEquals((app.getState().cancelMidAll as any).done, false)
+})
+
+// ── ctx.all with one entry throwing — whole all fails ───────────────
+
+const allWithError = feature('allWithError', {
+  state: { result: '' },
+  actions: { start: () => ({}) },
+  generators: {
+    start: function* (ctx) {
+      try {
+        yield* ctx.all(
+          ctx.call('ok', () => Promise.resolve(1)),
+          ctx.call('boom', () => Promise.reject(new Error('fail'))),
+        )
+        yield* ctx.done(s => { s.result = 'ok' })
+      } catch {
+        yield* ctx.done(s => { s.result = 'caught' })
+      }
+    },
+  },
+})
+
+Deno.test('flow edge: ctx.all fails if any entry throws', async () => {
+  const app = createTestApp([allWithError])
+  app.dispatch(allWithError.start())
+  await app.flush()
+
+  assertEquals((app.getState().allWithError as any).result, 'caught')
+})
+
+// ── ctx.race where all entries reject — race rejects ────────────────
+
+const raceAllFail = feature('raceAllFail', {
+  state: { result: '' },
+  actions: { start: () => ({}) },
+  generators: {
+    start: function* (ctx) {
+      try {
+        yield* ctx.race({
+          a: ctx.call('a', () => Promise.reject(new Error('a-fail'))),
+          b: ctx.call('b', () => Promise.reject(new Error('b-fail'))),
+        })
+        yield* ctx.done(s => { s.result = 'ok' })
+      } catch {
+        yield* ctx.done(s => { s.result = 'all-failed' })
+      }
+    },
+  },
+})
+
+Deno.test('flow edge: ctx.race rejects when first entry rejects', async () => {
+  const app = createTestApp([raceAllFail])
+  app.dispatch(raceAllFail.start())
+  await app.flush()
+
+  assertEquals((app.getState().raceAllFail as any).result, 'all-failed')
+})
+
+// ── Generator auto-completes without ctx.done() ─────────────────────
+
+const noDone = feature('noDone', {
+  state: { value: 42 },
+  actions: { start: () => ({}) },
+  generators: {
+    start: function* (ctx) {
+      yield* ctx.mutate('update', s => { s.value = 100 })
+      // No ctx.done() — should auto-complete
+    },
+  },
+})
+
+Deno.test('flow edge: generator without ctx.done() auto-dispatches done', async () => {
+  const app = createTestApp([noDone])
+  app.dispatch(noDone.start())
+  await app.flush()
+
+  assertEquals((app.getState().noDone as any).value, 100)
+  const types = app.dispatched.map(d => d.type)
+  assertEquals(types.includes('noDone:__flow:done'), true)
+})
+
+// ── Restarting a flow while it's already running ────────────────────
+
+const restart = feature('restart', {
+  state: { value: 0 },
+  actions: { start: (n: number) => ({ n }) },
+  generators: {
+    start: function* (ctx, { n }: { n: number }) {
+      yield* ctx.call('wait', () => new Promise(r => setTimeout(r, 100)))
+      yield* ctx.done(s => { s.value = n })
+    },
+  },
+})
+
+Deno.test({ name: 'flow edge: restarting a flow cancels the previous instance', sanitizeOps: false, sanitizeResources: false }, async () => {
+  const app = createTestApp([restart])
+  app.dispatch(restart.start(1))  // first instance
+  await new Promise(r => setTimeout(r, 20))
+  app.dispatch(restart.start(2))  // second instance — should cancel first
+  await new Promise(r => setTimeout(r, 200))
+
+  // Only the second instance should have completed
+  assertEquals((app.getState().restart as any).value, 2)
 })

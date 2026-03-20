@@ -152,7 +152,7 @@ Read top-to-bottom. The framework handles actions, state transitions, and time-t
 ```
 yield* ctx.call('fetchPrice', fn)
          │
-         ├─ 1. dispatch({ type: 'checkout:flow:fetchPrice' })    ← time-travel visible
+         ├─ 1. dispatch({ type: 'checkout:__flow:fetchPrice' })    ← time-travel visible
          ├─ 2. execute fn()                                      ← actual async work
          └─ 3. return result to generator                        ← sequential code continues
 ```
@@ -237,18 +237,18 @@ const checkout = feature('checkout', {
 
 Actions dispatched (visible in time-travel):
 - `checkout:place` (trigger — from the generator name)
-- `checkout:flow:fetchPrice`
-- `checkout:flow:setPrice`
-- `checkout:flow:placeOrder`
-- `checkout:flow:done` or `checkout:flow:failed`
+- `checkout:__flow:fetchPrice`
+- `checkout:__flow:setPrice`
+- `checkout:__flow:placeOrder`
+- `checkout:__flow:done` or `checkout:__flow:failed`
 
 You never define these. The flow is the source of truth.
 
 ## GenCtx API
 
-### `ctx.call(name, fn)` — async work
+### `ctx.call(name, fn, opts?)` — async work
 
-Executes `fn`, dispatches a named action, returns the result.
+Executes `fn`, dispatches a named action, returns the result. Optional `opts` for timeout and retries.
 
 ```ts
 // Async
@@ -259,18 +259,22 @@ const user = yield* ctx.call('loadUser', () =>
 // Sync (works too)
 const hash = yield* ctx.call('computeHash', () => md5(data))
 
-// Destructure the result
-const { price, currency } = yield* ctx.call('getPrice', () =>
-  fetchPrice(item)
-) as { price: number; currency: string }
+// With timeout (throws if fn doesn't resolve in time)
+const data = yield* ctx.call('fetch', () => fetchData(), { timeout: 5000 })
+
+// With retries (retries on throw, then gives up)
+const result = yield* ctx.call('submit', () => submitOrder(), { retries: 3 })
+
+// Both — 3 attempts, each with a 5s timeout
+const res = yield* ctx.call('upload', () => upload(file), { timeout: 5000, retries: 2 })
 ```
 
 **What happens internally:**
 1. Dispatches `{Feature}:Flow:{Name}` action (time-travel, foreign listeners)
-2. Calls `fn()` and awaits the result
+2. Calls `fn()` and awaits the result (with timeout/retry if opts given)
 3. Returns result to the generator
 
-If `fn` throws, the flow catches it and dispatches `{Feature}:Flow:Error`.
+If `fn` throws (or times out after all retries), the flow catches it and dispatches `{feature}:__flow:error`.
 
 ### `ctx.mutate(name, mutate)` — state mutation
 
@@ -289,7 +293,7 @@ yield* ctx.mutate('addItem', s => {
 
 The mutation is applied immediately. Subsequent `ctx.call` or `ctx.mutate` calls see the updated state.
 
-`ctx.step` is a deprecated alias for `ctx.mutate` — same behavior.
+`ctx.mutate` dispatches a named action and applies the state update via Immer draft.
 
 ---
 
@@ -310,7 +314,7 @@ For standalone reusable generators, annotate `ctx: GenCtx<{ count: number }>` ex
 
 ### `ctx.done(mutate?)` — terminal success
 
-Marks the flow as complete. Dispatches `{Feature}:Flow:Done`. Optional final state mutation.
+Marks the flow as complete. Dispatches `{feature}:__flow:done`. Optional final state mutation.
 
 ```ts
 // With final mutation
@@ -327,7 +331,7 @@ After `ctx.done()`, the generator returns normally. No more steps execute.
 
 ### `ctx.fail(reason)` — terminal failure
 
-Marks the flow as failed. Dispatches `{Feature}:Flow:Failed` with the reason. Stops the generator.
+Marks the flow as failed. Dispatches `{feature}:__flow:failed` with the reason. Stops the generator.
 
 ```ts
 if (!valid) {
@@ -346,14 +350,14 @@ The `return` after `ctx.fail()` is for TypeScript — the flow runtime stops the
 Dispatches a regular action into the system. Other features' reducers and foreign listeners react to it normally.
 
 ```ts
-// Dispatch to own feature — use A catalog in ctx.dispatch
-yield* ctx.dispatch(checkout.A.reset())
+// Dispatch to own feature
+yield* ctx.dispatch(checkout.reset())
 
 // Dispatch to another feature (cross-feature)
-yield* ctx.dispatch(wallet.A.credit(100))
+yield* ctx.dispatch(wallet.credit(100))
 
 // Use the feature's own action creators
-yield* ctx.dispatch(checkout.A.start('widget'))
+yield* ctx.dispatch(checkout.start('widget'))
 ```
 
 `ctx.dispatch` doesn't wait for the action to be processed. It dispatches and continues.
@@ -471,12 +475,12 @@ try {
   yield* ctx.fail('payment timeout')
 }
 
-// A catalog creator — if you need typed payload inference
-const msg = yield* ctx.waitFor(payment.A.complete)
-const { orderId } = msg.payload  // typed — no cast needed
+// With typed creator — payload inference works
+const msg = yield* ctx.waitFor(payment.complete)
+const { orderId } = msg.payload as { orderId: string }
 ```
 
-Note: bound methods dispatch (return void), so they don't carry payload type info — cast needed. A catalog creators return the action object, so TypeScript infers the payload type.
+Bound methods have `.type` as a static property. Pass them directly to `waitFor` for refactor-safe matching.
 
 **String form** — use when you only have the type string:
 
@@ -639,7 +643,7 @@ For cross-feature calls, import the target feature and call directly — it disp
 
 ### Error handling
 
-Errors in `ctx.call` automatically stop the flow and dispatch `{Feature}:Flow:Error`. For custom error handling, use try/catch:
+Errors in `ctx.call` automatically stop the flow and dispatch `{feature}:__flow:error`. For custom error handling, use try/catch:
 
 ```ts
 function* syncFlow(ctx: GenCtx) {
@@ -707,7 +711,7 @@ generators: {
       })
 
       if (!status.healthy) {
-        yield* ctx.dispatch(alerts.A.trigger('System unhealthy'))  // A catalog used in ctx.dispatch
+        yield* ctx.dispatch(alerts.trigger('System unhealthy'))
       }
 
       yield* ctx.sleep('interval', 30_000) // check every 30s
@@ -784,7 +788,7 @@ const orderFlow = feature('orderFlow', {
     placeOrder: function*(ctx, { item, qty }: { item: string; qty: number }) {
 
       // Reserve stock (dispatch to inventory feature)
-      yield* ctx.dispatch(inventory.A.reserve(item, qty))  // A catalog in ctx.dispatch
+      yield* ctx.dispatch(inventory.reserve(item, qty))
 
       // Charge payment
       const charge = yield* ctx.call('charge', () =>
@@ -797,7 +801,7 @@ const orderFlow = feature('orderFlow', {
       )
 
       // Notify user
-      yield* ctx.dispatch(notifications.A.send('Order confirmed!'))  // A catalog in ctx.dispatch
+      yield* ctx.dispatch(notifications.send('Order confirmed!'))
 
       yield* ctx.done(s => {
         s.orderId = (order as { id: string }).id
@@ -880,14 +884,14 @@ The framework dispatches these actions (visible in time-travel and devtools):
 | Action dispatched | When |
 |---|---|
 | `checkout:start` | Trigger action (you defined this) |
-| `checkout:flow:fetchPrice` | Before executing the fetch |
-| `checkout:flow:validate` | Before applying the mutate |
-| `checkout:flow:placeOrder` | Before executing the order |
-| `checkout:flow:done` | Flow completed successfully |
+| `checkout:__flow:fetchPrice` | Before executing the fetch |
+| `checkout:__flow:validate` | Before applying the mutate |
+| `checkout:__flow:placeOrder` | Before executing the order |
+| `checkout:__flow:done` | Flow completed successfully |
 
 On failure:
-| `checkout:flow:failed` | `ctx.fail()` called |
-| `checkout:flow:error` | Unhandled exception in flow |
+| `checkout:__flow:failed` | `ctx.fail()` called |
+| `checkout:__flow:error` | Unhandled exception in flow |
 
 All actions have `_source: 'Effect'` and include `_flow` and `_step` metadata in the payload.
 
@@ -902,14 +906,14 @@ const analytics = feature('analytics', {
     initial: 'ready',
     states: {
       ready: {
-        'checkout:flow:done': 'ready',        // listen to flow completion
-        'checkout:flow:failed': 'ready',      // listen to flow failure
+        'checkout:__flow:done': 'ready',        // listen to flow completion
+        'checkout:__flow:failed': 'ready',      // listen to flow failure
       },
     },
   },
   // Function-form reduce for flow action matching
   reduce(state, action) {
-    if (action.type === 'checkout:flow:done') {
+    if (action.type === 'checkout:__flow:done') {
       state.checkouts += 1
     }
   },
@@ -967,7 +971,7 @@ function testApp(features) {
 
 Deno.test('checkout flow: happy path', async () => {
   const app = testApp([checkout])
-  app.dispatch(checkout.A.start('widget'))   // A catalog used in direct dispatch
+  app.dispatch(checkout.start('widget'))
   await app.flush()
 
   const s = app.getState().checkout
@@ -976,18 +980,18 @@ Deno.test('checkout flow: happy path', async () => {
 
   // Verify steps were dispatched
   const types = app.dispatched.map(d => d.type)
-  assert(types.includes('checkout:flow:fetchPrice'))
-  assert(types.includes('checkout:flow:done'))
+  assert(types.includes('checkout:__flow:fetchPrice'))
+  assert(types.includes('checkout:__flow:done'))
 })
 
 Deno.test('checkout flow: too expensive', async () => {
   // Mock the fetch to return high price
   const app = testApp([checkout])
-  app.dispatch(checkout.A.start('expensive-item'))
+  app.dispatch(checkout.start('expensive-item'))
   await app.flush()
 
   const types = app.dispatched.map(d => d.type)
-  assert(types.includes('checkout:flow:failed'))
+  assert(types.includes('checkout:__flow:failed'))
 
   const failAction = app.dispatched.find(d => d.type.includes('Failed'))
   assertEquals(failAction.payload.reason, 'too expensive')
@@ -1171,7 +1175,7 @@ Flows handle ~95% of async workflows. The remaining cases aren't limitations —
 
 ### Action naming convention
 
-Flow actions follow the pattern: `{featureName}:flow:{stepName}`
+Flow actions follow the pattern: `{featureName}:__flow:{stepName}`
 
 - `featureName` — lowercase feature name (`checkout`, `wallet`)
 - `flow:` — fixed namespace separator
@@ -1182,11 +1186,11 @@ Flow actions follow the pattern: `{featureName}:flow:{stepName}`
 
 | Action | Purpose | Visible in time-travel? |
 |---|---|---|
-| `{feature}:flow:{name}` | Step marker | Yes |
-| `{feature}:flow:done` | Flow completed | Yes |
-| `{feature}:flow:failed` | `ctx.fail()` called | Yes |
-| `{feature}:flow:error` | Unhandled exception | Yes |
-| `{feature}:flow:waitFor` | Waiting for external action | Yes |
+| `{feature}:__flow:{name}` | Step marker | Yes |
+| `{feature}:__flow:done` | Flow completed | Yes |
+| `{feature}:__flow:failed` | `ctx.fail()` called | Yes |
+| `{feature}:__flow:error` | Unhandled exception | Yes |
+| `{feature}:__flow:waitFor` | Waiting for external action | Yes |
 | `{feature}:__flowState` | State mutation delivery | No (hidden — internal only, never appears in time-travel) |
 | `{feature}:__flow` | Flow trigger effect | No (hidden — internal only, never appears in time-travel) |
 

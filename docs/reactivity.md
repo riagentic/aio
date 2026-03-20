@@ -51,7 +51,7 @@ const count = todo.remaining()   // → 0
 
 That's a complete feature. State persists across restarts, syncs to all connected clients in real-time, every mutation appears in time-travel.
 
-After `aio.run()`, call methods and selectors directly on the feature — no `.A.` namespace, no `dispatch()`, no passing state. The framework binds everything automatically.
+After `aio.run()`, call methods and selectors directly on the feature — no `dispatch()`, no passing state. The framework binds everything automatically.
 
 ---
 
@@ -250,7 +250,7 @@ const total = cart.total()
 const empty = cart.isEmpty()
 
 // Before boot or from other features — pass state explicitly:
-const total = cart.selectors.total(app.getState())
+const total = cart.__aio.selectors.total(app.getState())
 ```
 
 Selectors are scoped to the feature's state slice automatically. After `aio.run()` binds the feature, selectors read current state implicitly.
@@ -286,11 +286,11 @@ counter.doubled()    // → 0
 counter.increment.type   // → 'counter:increment'
 counter.reset.type       // → 'counter:reset'
 
-// A catalog is internal — only use in testFeature or ctx.dispatch
-counter.A.increment(5)   // returns action object without dispatching
+// Before boot, calling a method returns an action object without dispatching
+// After boot, calling a method dispatches automatically
 ```
 
-Before boot, calling a method returns an action object without dispatching (same as `counter.A.increment()`). Before or after boot, `.type` is always available. The `A` catalog always returns action objects — useful for cross-feature wiring and tests.
+Before boot, calling a method returns an action object without dispatching. After boot, calling a method dispatches automatically. `.type` is always available on bound methods.
 
 This works for all three tiers — `feature({ methods })`, `feature({ reduce })`, and `feature({ generators })`.
 
@@ -514,15 +514,15 @@ Selectors and bridges work the same way as with `feature()`.
 
 ---
 
-## Composing all three tiers
+## Composing and mixing styles
 
-All feature styles compose freely — methods, generators, and event-driven features in the same `aio.run()`:
+All feature styles compose freely — both across features in `aio.run()` and within a single feature. Methods, generators, and actions/effects can coexist in one feature. All callable names must be unique within the feature (validated at creation time).
 
 ```typescript
 import { aio } from 'aio'
 import { settings } from './features/settings'    // feature({ methods })
 import { checkout } from './features/checkout'    // feature({ methods, generators })
-import { analytics } from './features/analytics'  // feature({ actions, reduce })
+import { analytics } from './features/analytics'  // feature({ methods, actions, reduce })
 
 await aio.run({
   features: [settings, checkout, analytics],
@@ -535,9 +535,9 @@ await aio.run({
 |---|---|---|
 | `feature({ methods })` | — | Most features never need more |
 | `feature({ methods })` | + `generators` | Multi-step workflows, auto-cancellation, step observability |
-| `feature({ methods })` | → `feature({ reduce })` | Complex reactive logic, multiple entry points, strict machine control |
+| `feature({ methods })` | + `actions/reduce` | Complex reactive logic, multiple entry points, strict machine control |
 
-**Rule: start with methods. Add generators when you feel the pain, not before.**
+**Rule: start with methods. Add generators or actions when you feel the pain, not before.**
 
 ---
 
@@ -776,6 +776,7 @@ Async methods should complete or fail. They don't survive server restarts. For p
 | Async model | Live Proxy | Generators (`yield*`) | Effects + dispatch |
 | Cancellation | Manual | Automatic | Manual |
 | Step observability | Per-property | Per-yield | Per-action |
+| Mixable | Yes — all styles can coexist in one feature | Yes | Yes |
 | Best for | 80% of features | Multi-step workflows | Complex reactive logic |
 
 ---

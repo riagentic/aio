@@ -1,5 +1,5 @@
 // integration-reactive.test.ts — feature({ methods }) integration with compose pipeline
-import { assertEquals } from 'https://deno.land/std@0.208.0/assert/mod.ts'
+import { assertEquals } from '@std/assert'
 import { feature, composeFeatures } from '../src/feature.ts'
 
 function delay(ms: number): Promise<void> {
@@ -47,10 +47,10 @@ Deno.test('integration: two feature(methods) features compose independently', ()
   const composed = composeFeatures([counter, todo])
   const app = createApp(composed)
 
-  app.dispatch(counter.A.increment!())
-  app.dispatch(counter.A.increment!())
-  app.dispatch(todo.A.add!('buy milk'))
-  app.dispatch(counter.A.decrement!())
+  app.dispatch(counter.increment!())
+  app.dispatch(counter.increment!())
+  app.dispatch(todo.add!('buy milk'))
+  app.dispatch(counter.decrement!())
 
   assertEquals((app.state.counter as any).count, 1)
   assertEquals((app.state.todo as any).items, ['buy milk'])
@@ -85,10 +85,10 @@ Deno.test('integration: event-driven feature reacts to feature(methods) feature 
   const composed = composeFeatures([cart, stats])
   const app = createApp(composed)
 
-  app.dispatch(cart.A.addItem!('a'))
-  app.dispatch(cart.A.addItem!('b'))
-  app.dispatch(cart.A.clear!())
-  app.dispatch(cart.A.addItem!('c'))
+  app.dispatch(cart.addItem!('a'))
+  app.dispatch(cart.addItem!('b'))
+  app.dispatch(cart.clear!())
+  app.dispatch(cart.addItem!('c'))
 
   assertEquals((app.state.cart as any).items, ['c'])
   assertEquals((app.state.stats as any).addCount, 3)
@@ -121,7 +121,7 @@ Deno.test('integration: async feature(methods) method with machine + sync method
   const composed = composeFeatures([workflow])
   const app = createApp(composed)
 
-  app.dispatch(workflow.A.start!())
+  app.dispatch(workflow.start!() as any)
   await delay(50)
 
   assertEquals((app.state.workflow as any).data, 'fetched-data')
@@ -129,7 +129,7 @@ Deno.test('integration: async feature(methods) method with machine + sync method
   assertEquals((app.state.workflow as any)._status, 'running')
 
   // Transition back to idle
-  app.dispatch(workflow.A.complete!())
+  app.dispatch(workflow.complete!())
   assertEquals((app.state.workflow as any)._status, 'idle')
 })
 
@@ -180,12 +180,12 @@ Deno.test('integration: selectors work across composed feature(methods) features
   const composed = composeFeatures([prices])
   let state = composed.initialState
 
-  assertEquals(prices.selectors.total!(state), 30)
-  assertEquals(prices.selectors.count!(state), 2)
+  assertEquals(prices.__aio.selectors.total!(state), 30)
+  assertEquals(prices.__aio.selectors.count!(state), 2)
 
-  state = composed.reduce(state, prices.A.addItem!('C', 15)).state
-  assertEquals(prices.selectors.total!(state), 45)
-  assertEquals(prices.selectors.count!(state), 3)
+  state = composed.reduce(state, prices.addItem!('C', 15)).state
+  assertEquals(prices.__aio.selectors.total!(state), 45)
+  assertEquals(prices.__aio.selectors.count!(state), 3)
 })
 
 // ── Batching across await boundaries ────────────────────────────────
@@ -209,7 +209,7 @@ Deno.test('integration: batching produces correct action count across awaits', a
   const composed = composeFeatures([store])
   const app = createApp(composed)
 
-  app.dispatch(store.A.multiStep!())
+  app.dispatch(store.multiStep!() as any)
   await delay(50)
 
   assertEquals((app.state.store as any).a, 1)
