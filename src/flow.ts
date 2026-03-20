@@ -7,10 +7,10 @@
 // runFlow() — internal: advances generator, dispatches actions, mutates state
 
 import { produce } from 'immer'
+import { callWithOpts } from './feature-impl.ts'
+import type { Msg } from './feature-types.ts'
 
 // ── Types ────────────────────────────────────────────────────────────
-
-type Msg = { type: string; payload: unknown; _source?: 'UI' | 'Effect' | 'System' | 'Test' }
 
 type FlowApp = {
   dispatch: (action: Msg) => void
@@ -19,7 +19,7 @@ type FlowApp = {
 
 /** Yielded descriptor — internal protocol between generator and runner */
 export type FlowStep =
-  | { kind: 'call'; name: string; fn: () => unknown | Promise<unknown> }
+  | { kind: 'call'; name: string; fn: () => unknown | Promise<unknown>; opts?: { timeout?: number; retries?: number } }
   | { kind: 'step'; name: string; mutate: (draft: Record<string, unknown>) => void }
   | { kind: 'done'; mutate?: (draft: Record<string, unknown>) => void }
   | { kind: 'fail'; reason: string }
@@ -32,8 +32,8 @@ export type FlowStep =
 /** Generator return type for flows */
 export type Gen<T = void> = Generator<FlowStep, T, unknown>
 
-/** Action creator with attached .type — as returned by feature.A.camelCaseKey.
- *  Pass to waitFor() for typed payload inference: `yield* ctx.waitFor(gateway.A.running)` */
+/** Action creator with attached .type — as returned by feature.actionKey.
+ *  Pass to waitFor() for typed payload inference: `yield* ctx.waitFor(gateway.running)` */
 export type TypedCreator<P = unknown> = {
   readonly type: string
   (...args: unknown[]): { type: string; payload: P }
@@ -42,12 +42,11 @@ export type TypedCreator<P = unknown> = {
 /** Context object passed to flow generators.
  *  S is the feature's state shape — inferred from the `state:` config. */
 export type GenCtx<S = Record<string, unknown>> = {
-  /** Async call — dispatches action, executes fn, returns result */
-  call: <T>(name: string, fn: () => T | Promise<T>) => Gen<Awaited<T>>
+  /** Async call — dispatches action, executes fn, returns result.
+   *  Optional opts for timeout (ms) and retries (count). */
+  call: <T>(name: string, fn: () => T | Promise<T>, opts?: { timeout?: number; retries?: number }) => Gen<Awaited<T>>
   /** State mutation — dispatches action, applies Immer draft update */
   mutate: (name: string, mutate: (draft: S) => void) => Gen<void>
-  /** @deprecated Use ctx.mutate() instead */
-  step: (name: string, mutate: (draft: S) => void) => Gen<void>
   /** Terminal success — dispatches done action, optional final state update */
   done: (mutate?: (draft: S) => void) => Gen<void>
   /** Terminal failure — dispatches fail action with reason */
@@ -71,7 +70,7 @@ export type GenCtx<S = Record<string, unknown>> = {
   /** Wait for an action to be dispatched — pauses flow until matching action arrives.
    *  Pass a bound method (.type) or action creator for typed payload inference.
    *  @example yield* ctx.waitFor(gateway.running)       // bound method — untyped payload
-   *  @example yield* ctx.waitFor(gateway.A.running)     // catalog creator — typed payload */
+   *  @example yield* ctx.waitFor(gateway.running)     // bound method — typed payload */
   waitFor: {
     <P>(creator: TypedCreator<P>, timeout?: number): Gen<{ type: string; payload: P }>
     (creatorOrType: { type: string } | string, timeout?: number): Gen<Msg>
@@ -102,8 +101,8 @@ export type FlowDef = {
 
 // ── ctx generators (yield descriptors) ───────────────────────────────
 
-function* callGen<T>(name: string, fn: () => T | Promise<T>): Gen<Awaited<T>> {
-  return (yield { kind: 'call', name, fn } as FlowStep) as Awaited<T>
+function* callGen<T>(name: string, fn: () => T | Promise<T>, opts?: { timeout?: number; retries?: number }): Gen<Awaited<T>> {
+  return (yield { kind: 'call', name, fn, opts } as FlowStep) as Awaited<T>
 }
 
 function* mutateGen(name: string, mutate: (draft: Record<string, unknown>) => void): Gen<void> {
@@ -189,7 +188,6 @@ function buildCtx(featureName: string, getFullState: () => Record<string, unknow
   return {
     call: callGen,
     mutate: mutateGen as GenCtx['mutate'],
-    step: mutateGen as GenCtx['step'],
     done: doneGen as GenCtx['done'],
     fail: failGen,
     dispatch: dispatchGen,
@@ -202,11 +200,6 @@ function buildCtx(featureName: string, getFullState: () => Record<string, unknow
   }
 }
 
-// ── capitalize helper ────────────────────────────────────────────────
-
-function capitalize(s: string): string {
-  return s.charAt(0).toUpperCase() + s.slice(1)
-}
 
 // ── Flow runner ──────────────────────────────────────────────────────
 
@@ -342,7 +335,7 @@ export async function runFlow(
     // Auto-complete if generator returned without ctx.done()
     if (!doneSeen && !instance.aborted) {
       app.dispatch({
-        type: `${prefix}:flow:done`,
+        type: `${prefix}:__flow:done`,
         payload: {},
         _source: 'Effect',
       } as Msg)
@@ -350,7 +343,7 @@ export async function runFlow(
   } catch (e) {
     if (!instance.aborted) {
       // Dispatch error action
-      const errorType = `${prefix}:flow:error`
+      const errorType = `${prefix}:__flow:error`
       app.dispatch({
         type: errorType,
         payload: { flow: flowName, error: String(e) },
@@ -371,7 +364,7 @@ async function executeStep(
   app: FlowApp,
 ): Promise<unknown> {
   const { prefix, featureName } = instance
-  const flowPrefix = `${prefix}:flow:`
+  const flowPrefix = `${prefix}:__flow:`
 
   switch (step.kind) {
     case 'call': {
@@ -382,8 +375,8 @@ async function executeStep(
         _source: 'Effect',
       })
 
-      // Execute the actual async work
-      const result = await step.fn()
+      // Execute with optional timeout/retry
+      const result = step.opts ? await callWithOpts(step.fn, step.opts) : await step.fn()
       return result
     }
 
@@ -500,8 +493,10 @@ async function executeStep(
       const controller = new AbortController()
       instance.abortController = controller
 
+      // Hoist listener ref so timeout can delete the exact instance (not first match)
+      let listener: ActionListener
       const actionPromise = new Promise<Msg>((resolve) => {
-        const listener: ActionListener = { actionType: step.actionType, resolve }
+        listener = { actionType: step.actionType, resolve }
         _actionListeners.add(listener)
 
         // Resolve immediately on flow cancellation — no 50ms poll needed
@@ -511,7 +506,7 @@ async function executeStep(
         }, { once: true })
       })
 
-      if (step.timeout) {
+      if (step.timeout !== undefined) {
         const timeoutSentinel = Symbol('timeout')
         const result = await Promise.race([
           actionPromise,
@@ -519,15 +514,22 @@ async function executeStep(
         ])
         instance.abortController = undefined
         if (result === timeoutSentinel) {
-          for (const l of _actionListeners) {
-            if (l.actionType === step.actionType) { _actionListeners.delete(l); break }
-          }
+          _actionListeners.delete(listener!)  // delete exact instance, not first match
           throw new Error(`waitFor('${step.actionType}') timed out after ${step.timeout}ms`)
         }
         return result
       }
 
+      // Dev mode: warn if waitFor has no timeout and has been waiting 30s
+      let warnTimer: ReturnType<typeof setTimeout> | undefined
+      if ((globalThis as Record<string, unknown>).__aioDev) {
+        warnTimer = setTimeout(() => {
+          console.warn(`[aio:${instance.featureName}] waitFor('${step.actionType}') has been waiting 30s with no timeout — did you mean to add one?`)
+        }, 30_000)
+      }
+
       const result = await actionPromise
+      if (warnTimer) clearTimeout(warnTimer)
       instance.abortController = undefined
       return result
     }

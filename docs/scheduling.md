@@ -16,7 +16,7 @@ const notifications = feature('notifications', {
   methods: {
     queue(s) {
       s.pending += 1
-      return schedule.after('flush', 2000, notifications.A.flush())
+      return schedule.after('flush', 2000, notifications.flush())
     },
     flush(s) {
       s.pending = 0
@@ -35,8 +35,8 @@ Pass schedules to `aio.run()` for timers that always run regardless of app state
 await aio.run({
   features: [reports],
   schedules: [
-    { id: 'daily-report', cron: '0 8 * * 1-5', action: reports.A.generate() },
-    { id: 'hourly-ping',  every: 60_000,        action: health.A.ping() },
+    { id: 'daily-report', cron: '0 8 * * 1-5', action: reports.generate() },
+    { id: 'hourly-ping',  every: 60_000,        action: health.ping() },
   ],
 })
 ```
@@ -54,7 +54,7 @@ Fires `action` once after `ms` milliseconds. Cancels any previous timer with the
 methods: {
   type(s, text: string) {
     s.draft = text
-    return schedule.after('autosave', 3000, draft.A.save())
+    return schedule.after('autosave', 3000, draft.save())
   },
 }
 ```
@@ -65,7 +65,7 @@ Fires `action` every `ms` milliseconds until cancelled.
 
 ```ts
 // Poll every 30 seconds
-return schedule.every('sync', 30_000, data.A.sync())
+return schedule.every('sync', 30_000, data.sync())
 ```
 
 ### `schedule.at(id, isoTime, action)` — one-shot at absolute time
@@ -73,7 +73,7 @@ return schedule.every('sync', 30_000, data.A.sync())
 Fires once at a specific UTC datetime. `isoTime` is any string parseable by `new Date()`.
 
 ```ts
-return schedule.at('promo-end', '2025-12-31T23:59:00Z', promo.A.expire())
+return schedule.at('promo-end', '2025-12-31T23:59:00Z', promo.expire())
 ```
 
 ### `schedule.cron(id, pattern, action)` — cron expression
@@ -81,7 +81,7 @@ return schedule.at('promo-end', '2025-12-31T23:59:00Z', promo.A.expire())
 Fires on a standard 5-field cron schedule (UTC).
 
 ```ts
-return schedule.cron('daily-report', '0 8 * * 1-5', reports.A.generate())
+return schedule.cron('daily-report', '0 8 * * 1-5', reports.generate())
 //                                    ^ ^ ^ ^ ^
 //                                    | | | | └── day of week (Mon-Fri)
 //                                    | | | └──── month (*)
@@ -109,7 +109,7 @@ return schedule.cron('daily-report', '0 8 * * 1-5', reports.A.generate())
 methods: {
   startSync(s) {
     s.syncing = true
-    return schedule.every('sync', 5000, data.A.sync())
+    return schedule.every('sync', 5000, data.sync())
   },
   stopSync(s) {
     s.syncing = false
@@ -127,8 +127,8 @@ Schedule IDs must match `/^[\w\-:.]+$/` — alphanumeric, hyphens, underscores, 
 Good convention: `featureName.timerPurpose` or `featureName:action`.
 
 ```ts
-schedule.every('orders.poll', 10_000, orders.A.refresh())
-schedule.cron('reports:daily', '0 8 * * *', reports.A.generate())
+schedule.every('orders.poll', 10_000, orders.refresh())
+schedule.cron('reports:daily', '0 8 * * *', reports.generate())
 ```
 
 Returning a schedule effect with an existing ID **replaces** the previous timer — useful for debouncing.
@@ -143,7 +143,7 @@ Returning a schedule effect with an existing ID **replaces** the previous timer 
 methods: {
   search(s, query: string) {
     s.query = query
-    return schedule.after('search.debounce', 300, search.A.execute())
+    return schedule.after('search.debounce', 300, search.execute())
   },
 }
 ```
@@ -157,7 +157,7 @@ methods: {
       s.data = await call(() => api.getData())
     } catch {
       s.retries += 1
-      return schedule.after('fetch.retry', s.retries * 2000, data.A.fetchData())
+      return schedule.after('fetch.retry', s.retries * 2000, data.fetchData())
     }
   },
 }
@@ -169,7 +169,7 @@ methods: {
 methods: {
   enablePolling(s) {
     s.polling = true
-    return schedule.every('prices.poll', 5000, prices.A.refresh())
+    return schedule.every('prices.poll', 5000, prices.refresh())
   },
   disablePolling(s) {
     s.polling = false
@@ -184,7 +184,7 @@ methods: {
 methods: {
   activity(s) {
     s.lastActive = Date.now()
-    return schedule.after('session.timeout', 30 * 60_000, auth.A.logout())
+    return schedule.after('session.timeout', 30 * 60_000, auth.logout())
   },
 }
 ```
@@ -198,7 +198,7 @@ Schedules work inside generators too — yield them like any other effect:
 ```ts
 generators: {
   *processOrder(ctx, orderId: string) {
-    yield* ctx.dispatch(schedule.after('order.timeout', 60_000, orders.A.timeout(orderId)))
+    yield* ctx.dispatch(schedule.after('order.timeout', 60_000, orders.timeout(orderId)))
     const result = yield* ctx.call('submit', () => submitOrder(orderId))
     yield* ctx.dispatch(schedule.cancel('order.timeout'))
     yield* ctx.done(s => { s.status = 'submitted' })
@@ -214,7 +214,7 @@ generators: {
 
 ```ts
 testFeature(notifications, 'queues autosave', t => {
-  t.dispatch(notifications.A.queue())
+  t.dispatch(notifications.queue())
   const effects = t.runEffects()
   // check a schedule effect was returned
   const sched = effects.find(e => e.type === '__schedule')

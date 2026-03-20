@@ -1,4 +1,4 @@
-import { assertEquals } from 'https://deno.land/std@0.224.0/assert/mod.ts'
+import { assertEquals } from '@std/assert'
 import { createServer } from '../src/server.ts'
 import { connectCli } from '../src/cli-client.ts'
 import { join } from '@std/path'

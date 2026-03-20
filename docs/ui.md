@@ -93,6 +93,237 @@ export default function App() {
 
 Returns `null` if no route matches. Page components call `useAio()` internally if they need state — since it's a singleton, each page component gets the same shared connection.
 
+## URL-based routing
+
+For real web apps with browser URLs, deep links, and back/forward navigation. Uses the History API — no page reloads.
+
+**When to use `page()` vs URL routing:**
+- `page()` — Electron, kiosk, or single-tab apps where URL doesn't matter
+- URL routing — public websites, apps that need shareable links, native browser navigation
+
+### SPA fallback
+
+The dev server automatically serves the app shell for any extensionless path that doesn't exist as a file (`/users`, `/users/42`, `/dashboard/settings`). Deep links just work without server configuration.
+
+### `useRoute(pattern?)`
+
+Subscribe to the current URL. Re-renders the component on navigation.
+
+```tsx
+import { useRoute } from 'aio'
+
+// No pattern — track path and search params
+function Layout() {
+  const { path, search } = useRoute()
+  return <div>Current: {path} {search.get('tab')}</div>
+}
+
+// With pattern — extract named params, check if matched
+function UserPage() {
+  const { params, matched } = useRoute('/users/:id')
+  if (!matched) return <NotFound />
+  return <div>User {params.id}</div>
+}
+```
+
+`RouteState` fields:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `path` | `string` | Current `location.pathname` |
+| `params` | `Record<string, string>` | Named params from pattern (decoded) |
+| `search` | `URLSearchParams` | Current query string |
+| `matched` | `boolean` | Whether the pattern matched |
+
+### `navigate(to, opts?)` / `useNavigate()`
+
+Programmatic navigation. Use `<Link>` for user-initiated navigation; use `navigate`/`useNavigate` for code-driven navigation (after form submit, auth redirect, etc).
+
+```tsx
+import { navigate, useNavigate } from 'aio'
+
+// Direct call (outside components)
+navigate('/dashboard')
+navigate(-1)                        // browser back
+navigate('/login', { replace: true }) // no history entry
+
+// Inside a component
+function SaveButton() {
+  const nav = useNavigate()
+  async function handleSave() {
+    await save()
+    nav('/dashboard')
+  }
+  return <button onClick={handleSave}>Save</button>
+}
+```
+
+Relative paths resolve against `location.href` — so `navigate('./edit')` from `/users/42` goes to `/users/edit`.
+
+### `<Route>` and `<Outlet>`
+
+Declarative route matching. Routes can be flat or nested into layout trees.
+
+**Flat routes:**
+
+```tsx
+import { useAio, Route } from 'aio'
+import { UserList } from './pages/UserList.tsx'
+import { UserDetail } from './pages/UserDetail.tsx'
+import { Settings } from './pages/Settings.tsx'
+import { NotFound } from './pages/NotFound.tsx'
+
+export default function App() {
+  const { state } = useAio<AppState>()
+  if (!state) return <div>Connecting...</div>
+
+  return (
+    <div>
+      <Nav />
+      <Route path="/users" element={<UserList />} />
+      <Route path="/users/:id" element={<UserDetail />} />
+      <Route path="/settings" element={<Settings />} />
+      <Route path="*" element={<NotFound />} />
+    </div>
+  )
+}
+```
+
+**Nested layout routes:**
+
+```tsx
+import { Route, Outlet } from 'aio'
+import { DashboardLayout } from './layouts/DashboardLayout.tsx'
+
+// DashboardLayout.tsx
+export function DashboardLayout() {
+  return (
+    <div className="dashboard">
+      <Sidebar />
+      <main>
+        <Outlet />   {/* matched child renders here */}
+      </main>
+    </div>
+  )
+}
+
+// In App.tsx
+<Route path="/dashboard" element={<DashboardLayout />}>
+  <Route index element={<Overview />} />         {/* /dashboard */}
+  <Route path="users" element={<UserList />} />  {/* /dashboard/users */}
+  <Route path="settings" element={<Settings />} />{/* /dashboard/settings */}
+</Route>
+```
+
+`index` marks the default child — renders when the parent path matches exactly.
+
+**`RouteProps`:**
+
+| Prop | Type | Description |
+|------|------|-------------|
+| `path` | `string` | Pattern — supports `:param` and `*` |
+| `index` | `boolean` | Default child (matches parent path exactly) |
+| `element` | `ReactNode` | What to render on match |
+| `children` | `ReactNode` | Nested `<Route>` elements (enables `<Outlet>`) |
+
+### `<Link>` and `<NavLink>`
+
+Client-side navigation anchors. Both prevent full page reload and use the History API.
+
+```tsx
+import { Link, NavLink } from 'aio'
+
+// Link — basic navigation
+<Link to="/users">All users</Link>
+<Link to="/users/42">User 42</Link>
+<Link to="/users" replace>Replace history entry</Link>
+
+// Active styling
+<Link to="/settings" activeClass="active">Settings</Link>
+<Link to="/" exact activeClass="selected">Home</Link>
+
+// NavLink — automatic 'active' class (prefix match by default, exact for '/')
+<NavLink to="/dashboard">Dashboard</NavLink>
+<NavLink to="/settings" activeClass="current-page">Settings</NavLink>
+```
+
+**Active matching rules:**
+- `exact={true}` or `to="/"` → exact match only
+- Default → prefix match: `/users` is active on `/users` and `/users/42`
+
+**`LinkProps`:**
+
+| Prop | Type | Default | Description |
+|------|------|---------|-------------|
+| `to` | `string` | required | Target path |
+| `replace` | `boolean` | `false` | Use `replaceState` instead of `pushState` |
+| `exact` | `boolean` | `false` | Exact match for active detection |
+| `activeClass` | `string` | — | CSS class added when active |
+| `activeStyle` | `object` | — | Inline styles merged when active |
+| `children` | `ReactNode` | — | Link content |
+
+All other props (`className`, `style`, `aria-*`, etc.) pass through to the `<a>` element.
+
+### `<Redirect>`
+
+Navigate on mount — useful for auth guards and conditional redirects. Does not render anything.
+
+```tsx
+import { useAio, Redirect } from 'aio'
+
+function ProtectedPage() {
+  const { state } = useAio<AppState>()
+  if (!state) return null
+  if (!state.user) return <Redirect to="/login" />
+  return <Dashboard />
+}
+```
+
+`replace` defaults to `true` — the redirect does not add a history entry.
+
+### Path pattern syntax
+
+Used by `<Route path>`, `useRoute(pattern)`, and `matchPath()`:
+
+| Pattern | Matches | Params |
+|---------|---------|--------|
+| `/users` | `/users` or `/users/` exactly | `{}` |
+| `/users/:id` | `/users/42` | `{ id: '42' }` |
+| `/a/:x/b/:y` | `/a/foo/b/bar` | `{ x: 'foo', y: 'bar' }` |
+| `*` | any path | `{ '*': '/the/path' }` |
+| `/dashboard` (prefix) | `/dashboard`, `/dashboard/settings` | `{}` |
+
+Params are URL-decoded automatically. Routes with children use prefix matching; leaf routes use exact matching.
+
+### Full example
+
+```tsx
+import { useAio, Route, Link, NavLink, Redirect } from 'aio'
+
+export default function App() {
+  const { state } = useAio<AppState>()
+  if (!state) return <div>Connecting...</div>
+
+  return (
+    <div>
+      <nav>
+        <NavLink to="/">Home</NavLink>
+        <NavLink to="/users">Users</NavLink>
+        <NavLink to="/settings">Settings</NavLink>
+      </nav>
+
+      <Route path="/" element={<Home />} />
+      <Route path="/users" element={<UserList users={state.users} />} />
+      <Route path="/users/:id" element={<UserDetail users={state.users} />} />
+      <Route path="/settings" element={<Settings />} />
+
+      {/* Auth guard */}
+      {!state.user && <Redirect to="/login" />}
+    </div>
+  )
+}
+```
+
 ## Redux DevTools integration
 
 Connect to the Redux DevTools browser extension for state inspection and action history.
@@ -123,6 +354,69 @@ export default function App() {
 **Limitations:**
 - Time-travel via DevTools is not supported (use `Ctrl+.` panel instead)
 - DevTools must be installed and enabled in browser
+
+## Bring Your Own Framework
+
+The React hooks (`useAio`, `useFeature`, `useLocal`) are thin wrappers over a framework-agnostic core. If you use Svelte, Vue, Solid, or anything else, use `client` directly — it exposes the same singleton WebSocket connection, state, and routing.
+
+```ts
+import { client } from 'aio'
+
+// Subscribe to state changes — returns unsubscribe
+const unsub = client.subscribe((state) => {
+  // state is the full app state object (same shape as useAio's state)
+  console.log('counter:', state.counter)
+})
+
+// Send actions
+client.send({ type: 'counter:increment', payload: { by: 1 } })
+
+// Read current state synchronously
+client.getState()              // full state
+client.getFeatureState('counter')  // single feature slice
+
+// Routing
+client.route.subscribe(() => { /* URL changed */ })
+client.route.getPath()         // current pathname
+client.route.getSearch()       // URLSearchParams
+client.route.navigate('/users/42')
+client.route.navigate(-1)     // browser back
+```
+
+**Lifecycle:** The WebSocket connects on the first `client.subscribe()` call and disconnects when the last subscriber unsubscribes — same behavior as `useAio`. React hooks and `client` share the same connection.
+
+### Svelte 5 example (runes)
+
+```svelte
+<script>
+  import { client } from 'aio'
+
+  let state = $state(client.getState())
+  $effect(() => {
+    return client.subscribe(s => { state = s })
+  })
+</script>
+
+<button onclick={() => client.send({ type: 'counter:increment', payload: {} })}>
+  Count: {state?.counter?.count ?? '...'}
+</button>
+```
+
+### Vue 3 example (composable)
+
+```ts
+import { ref, onUnmounted } from 'vue'
+import { client } from 'aio'
+
+export function useAio() {
+  const state = ref(client.getState())
+  const unsub = client.subscribe(s => { state.value = s })
+  onUnmounted(unsub)
+  return { state, send: client.send }
+}
+```
+
+> **Note:** Non-React adapters are community-maintained. The `client` API is stable and supported — adapters built on it are your responsibility.
 
 ## UI state filtering
 

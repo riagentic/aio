@@ -1,4 +1,4 @@
-import { assertEquals } from 'https://deno.land/std@0.224.0/assert/mod.ts'
+import { assertEquals } from '@std/assert'
 import { AppLock, readLock, removeLock, lockPath, resolveAppId, slugify, instances, isProcessAlive } from '../src/single-instance-lock.ts'
 
 const TEST_APP = 'aio-test-lock-' + Deno.pid  // unique per test run to avoid collisions

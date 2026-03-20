@@ -1,5 +1,5 @@
 // create-matrix.test.ts — verify template matrix: descriptions, file counts, types, stripping
-import { assertEquals, assert } from 'https://deno.land/std@0.224.0/assert/mod.ts'
+import { assertEquals, assert } from '@std/assert'
 import { _test } from '../utils/create.ts'
 
 const {

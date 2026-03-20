@@ -1,5 +1,5 @@
 // Tests for async SQLite module (src/db/) and schema helpers (src/sql.ts)
-import { assertEquals, assertRejects, assertThrows } from 'https://deno.land/std@0.224.0/assert/mod.ts'
+import { assertEquals, assertRejects, assertThrows } from '@std/assert'
 import {
   pk, text, integer, real, ref, table,
   columnToSQL, createTableSQL, buildWhere, assertIdent,
@@ -340,6 +340,91 @@ Deno.test('db: transaction', async (t) => {
   }
 })
 
+// ── transaction (callback form) ──────────────────────────────────────
+
+Deno.test('db: transaction callback', async (t) => {
+  const path = tmpDb()
+  const db = createDB(path)
+  try {
+    await initSchema(db, { accounts: table({ id: pk(), name: text(), balance: integer() }) })
+    await db.execute("INSERT INTO accounts (id, name, balance) VALUES (1, 'Alice', 100)")
+    await db.execute("INSERT INTO accounts (id, name, balance) VALUES (2, 'Bob', 50)")
+
+    await t.step('commits on success — both changes visible', async () => {
+      await db.transaction(async (tx) => {
+        await tx.execute('UPDATE accounts SET balance = balance - 30 WHERE id = 1')
+        await tx.execute('UPDATE accounts SET balance = balance + 30 WHERE id = 2')
+      })
+      const { rows } = await db.query<{ id: number; balance: number }>('SELECT id, balance FROM accounts ORDER BY id')
+      assertEquals(rows[0]!.balance, 70)
+      assertEquals(rows[1]!.balance, 80)
+    })
+
+    await t.step('rolls back on throw — no partial changes', async () => {
+      await assertRejects(() =>
+        db.transaction(async (tx) => {
+          await tx.execute('UPDATE accounts SET balance = 0 WHERE id = 1')
+          throw new Error('abort!')
+        })
+      )
+      const { rows } = await db.query<{ balance: number }>('SELECT balance FROM accounts WHERE id = 1')
+      assertEquals(rows[0]!.balance, 70) // unchanged from previous step
+    })
+
+    await t.step('can read within transaction and branch on result', async () => {
+      const transferred = await db.transaction(async (tx) => {
+        const { rows } = await tx.query<{ balance: number }>('SELECT balance FROM accounts WHERE id = 2')
+        const bal = rows[0]!.balance
+        if (bal < 10) throw new Error('insufficient funds')
+        await tx.execute('UPDATE accounts SET balance = balance - 10 WHERE id = 2')
+        return bal - 10
+      })
+      assertEquals(transferred, 70) // Bob had 80, now 70
+    })
+
+    await t.step('concurrent execute() queues behind open transaction', async () => {
+      // Fire a standalone execute() concurrently with a transaction.
+      // The execute must not execute between BEGIN and COMMIT.
+      let outsideFiredDuring = false
+      const txDone = db.transaction(async (tx) => {
+        await tx.execute('UPDATE accounts SET balance = 999 WHERE id = 1')
+        // Check if the outside execute has snuck in (it shouldn't)
+        const { rows } = await tx.query<{ balance: number }>('SELECT balance FROM accounts WHERE id = 1')
+        outsideFiredDuring = rows[0]!.balance !== 999
+      })
+      // This execute starts while txDone is pending — must queue after COMMIT
+      const outsideDone = db.execute('UPDATE accounts SET balance = 1 WHERE id = 1')
+      await Promise.all([txDone, outsideDone])
+      assertEquals(outsideFiredDuring, false, 'execute() must not interleave inside transaction')
+      // After both settle, outside execute should have run last (balance = 1)
+      const { rows } = await db.query<{ balance: number }>('SELECT balance FROM accounts WHERE id = 1')
+      assertEquals(rows[0]!.balance, 1)
+    })
+
+    await t.step('tx.query sees own writes (read-your-writes)', async () => {
+      await db.execute("UPDATE accounts SET balance = 50 WHERE id = 2")
+      await db.transaction(async (tx) => {
+        await tx.execute('UPDATE accounts SET balance = 777 WHERE id = 2')
+        const { rows } = await tx.query<{ balance: number }>('SELECT balance FROM accounts WHERE id = 2')
+        assertEquals(rows[0]!.balance, 777, 'tx.query must see uncommitted writes from same transaction')
+      })
+    })
+
+    await t.step('nested transaction() throws instead of deadlocking', async () => {
+      await assertRejects(
+        () => db.transaction(async (_tx) => {
+          await db.transaction(async () => {}) // nested — must throw
+        }),
+        Error,
+        'nested db.transaction()',
+      )
+    })
+  } finally {
+    await db.close()
+    Deno.removeSync(path)
+  }
+})
+
 // ── loadTables ───────────────────────────────────────────────────────
 
 Deno.test('db: loadTables', async (t) => {
@@ -638,10 +723,99 @@ Deno.test('db: read replicas — queries work alongside writer', async (t) => {
   }
 })
 
-Deno.test('db: read replicas — close terminates all workers', async () => {
-  const path = tmpDb()
-  const db = createDB(path, { readers: 3 })
+Deno.test({ name: 'db: read replicas — close terminates all workers', sanitizeOps: false, sanitizeResources: false, fn: async () => {
+  // Dedicated temp dir avoids WAL journal contention with parallel tests
+  const dir = Deno.makeTempDirSync()
+  const path = `${dir}/replica-close.db`
+  const db = createDB(path, { readers: 1 })
   await initSchema(db, usersSchema)
-  await db.close()  // must terminate writer + 3 readers cleanly
-  Deno.removeSync(path)
+  await db.query('SELECT 1')
+  await db.close()
+  Deno.removeSync(dir, { recursive: true })
+}})
+
+// ── Transaction rollback edge cases ─────────────────────────────────
+
+Deno.test('db: transaction rollback — worker recovers for subsequent ops', async (t) => {
+  const path = tmpDb()
+  const db = createDB(path)
+  try {
+    await initSchema(db, { accounts: table({ id: pk(), name: text({ unique: true }), balance: integer() }) })
+    await db.execute("INSERT INTO accounts (id, name, balance) VALUES (1, 'Alice', 100)")
+    await db.execute("INSERT INTO accounts (id, name, balance) VALUES (2, 'Bob', 200)")
+
+    await t.step('batch rollback: middle statement fails, all rolled back', async () => {
+      await assertRejects(() => db.transaction([
+        { sql: 'INSERT INTO accounts (id, name, balance) VALUES (?, ?, ?)', params: [3, 'Carol', 300] },
+        { sql: 'INSERT INTO accounts (id, name, balance) VALUES (?, ?, ?)', params: [4, 'Alice', 400] }, // duplicate name
+        { sql: 'INSERT INTO accounts (id, name, balance) VALUES (?, ?, ?)', params: [5, 'Dave', 500] },
+      ]), Error)
+
+      // Carol (id=3) should NOT exist — rolled back
+      const { rows } = await db.query<{ id: number }>('SELECT id FROM accounts ORDER BY id')
+      assertEquals(rows.length, 2) // only Alice and Bob
+      assertEquals(rows[0]!.id, 1)
+      assertEquals(rows[1]!.id, 2)
+    })
+
+    await t.step('db is usable after batch rollback', async () => {
+      await db.execute("INSERT INTO accounts (id, name, balance) VALUES (3, 'Carol', 300)")
+      const { rows } = await db.query<{ name: string }>('SELECT name FROM accounts WHERE id = 3')
+      assertEquals(rows[0]!.name, 'Carol')
+    })
+
+    await t.step('callback rollback: throw mid-transaction, no partial changes', async () => {
+      await assertRejects(() => db.transaction(async (tx) => {
+        await tx.execute('UPDATE accounts SET balance = 0 WHERE id = 1')
+        await tx.execute('UPDATE accounts SET balance = 0 WHERE id = 2')
+        throw new Error('abort mid-transaction')
+      }))
+
+      // Both accounts should be unchanged
+      const { rows } = await db.query<{ id: number; balance: number }>('SELECT id, balance FROM accounts ORDER BY id')
+      assertEquals(rows[0]!.balance, 100) // Alice unchanged
+      assertEquals(rows[1]!.balance, 200) // Bob unchanged
+    })
+
+    await t.step('db is usable after callback rollback', async () => {
+      await db.execute('UPDATE accounts SET balance = 150 WHERE id = 1')
+      const { rows } = await db.query<{ balance: number }>('SELECT balance FROM accounts WHERE id = 1')
+      assertEquals(rows[0]!.balance, 150)
+    })
+
+    await t.step('write lock released after rollback — concurrent ops proceed', async () => {
+      // Fail a transaction
+      await assertRejects(() => db.transaction(async () => {
+        throw new Error('intentional')
+      }))
+
+      // Immediately start a new transaction — should not deadlock
+      await db.transaction(async (tx) => {
+        await tx.execute('UPDATE accounts SET balance = 999 WHERE id = 2')
+      })
+      const { rows } = await db.query<{ balance: number }>('SELECT balance FROM accounts WHERE id = 2')
+      assertEquals(rows[0]!.balance, 999)
+    })
+
+    await t.step('rapid rollback + success alternation stays consistent', async () => {
+      let successCount = 0
+      for (let i = 0; i < 20; i++) {
+        try {
+          await db.transaction(async (tx) => {
+            await tx.execute('UPDATE accounts SET balance = balance + 1 WHERE id = 1')
+            if (i % 2 === 0) throw new Error('every other fails')
+          })
+          successCount++
+        } catch { /* expected */ }
+      }
+      // Only odd iterations succeed (i=1,3,5,...,19 = 10 successes)
+      assertEquals(successCount, 10)
+      const { rows } = await db.query<{ balance: number }>('SELECT balance FROM accounts WHERE id = 1')
+      // Started at 150, +1 for each of 10 successful transactions
+      assertEquals(rows[0]!.balance, 160)
+    })
+  } finally {
+    await db.close()
+    Deno.removeSync(path)
+  }
 })

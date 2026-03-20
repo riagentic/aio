@@ -1,4 +1,4 @@
-import { assertEquals } from 'https://deno.land/std@0.224.0/assert/mod.ts'
+import { assertEquals } from '@std/assert'
 import { createServer, _timingSafeEqual } from '../src/server.ts'
 import { join } from '@std/path'
 
@@ -73,13 +73,14 @@ Deno.test('server: 404 for missing files', async () => {
   })
 })
 
-Deno.test('server: path traversal normalized by URL parser gives 404', async () => {
+Deno.test('server: path traversal normalized by URL parser returns app shell', async () => {
   await withServer(async (url) => {
     // URL parser normalizes /../ to / — so /../../etc/passwd becomes /etc/passwd
-    // The file doesn't exist in baseDir, so 404 (not serving actual /etc/passwd)
+    // SPA fallback: extensionless missing file → serve app shell (not actual /etc/passwd)
     const resp = await fetch(`${url}/../../../etc/passwd`)
-    assertEquals(resp.status, 404)
-    await resp.body?.cancel()
+    assertEquals(resp.status, 200)
+    const body = await resp.text()
+    assertEquals(body.includes('<!DOCTYPE html>'), true, 'should serve app HTML, not system file')
   })
 })
 
@@ -407,7 +408,7 @@ Deno.test('timingSafeEqual: different lengths return false', () => {
 
 const CSRF_PORT = 19805
 
-Deno.test('server: POST /__snapshot without X-AIO header returns 403', async () => {
+Deno.test('server: POST /__aio/snapshot without X-AIO header returns 403', async () => {
   const dir = await Deno.makeTempDir()
   await Deno.mkdir(join(dir, 'dist'), { recursive: true })
   await Deno.writeTextFile(join(dir, 'dist', 'app.js'), 'export function mount(){}')
@@ -426,7 +427,7 @@ Deno.test('server: POST /__snapshot without X-AIO header returns 403', async () 
   await new Promise(r => setTimeout(r, 50))
   try {
     // POST without X-AIO header → 403
-    const resp = await fetch(`http://127.0.0.1:${CSRF_PORT}/__snapshot`, {
+    const resp = await fetch(`http://127.0.0.1:${CSRF_PORT}/__aio/snapshot`, {
       method: 'POST',
       body: '{"count":1}',
       headers: { 'Content-Type': 'application/json' },
@@ -436,7 +437,7 @@ Deno.test('server: POST /__snapshot without X-AIO header returns 403', async () 
     assertEquals(text, 'Missing X-AIO header')
 
     // POST with X-AIO header → 200
-    const resp2 = await fetch(`http://127.0.0.1:${CSRF_PORT}/__snapshot`, {
+    const resp2 = await fetch(`http://127.0.0.1:${CSRF_PORT}/__aio/snapshot`, {
       method: 'POST',
       body: '{"count":1}',
       headers: { 'Content-Type': 'application/json', 'X-AIO': '1' },
@@ -532,7 +533,7 @@ async function withTrojanServer(fn: (url: string) => Promise<void>): Promise<voi
 
 Deno.test('trojan: GET /state returns raw state', async () => {
   await withTrojanServer(async (url) => {
-    const resp = await fetch(`${url}/__trojan/state`)
+    const resp = await fetch(`${url}/__aio/trojan/state`)
     assertEquals(resp.status, 200)
     const data = await resp.json()
     assertEquals(data.count, 42)
@@ -542,7 +543,7 @@ Deno.test('trojan: GET /state returns raw state', async () => {
 
 Deno.test('trojan: GET /ui returns filtered UI state', async () => {
   await withTrojanServer(async (url) => {
-    const resp = await fetch(`${url}/__trojan/ui`)
+    const resp = await fetch(`${url}/__aio/trojan/ui`)
     assertEquals(resp.status, 200)
     const data = await resp.json()
     assertEquals(data.count, 42)
@@ -552,7 +553,7 @@ Deno.test('trojan: GET /ui returns filtered UI state', async () => {
 
 Deno.test('trojan: GET /clients returns connection list', async () => {
   await withTrojanServer(async (url) => {
-    const resp = await fetch(`${url}/__trojan/clients`)
+    const resp = await fetch(`${url}/__aio/trojan/clients`)
     assertEquals(resp.status, 200)
     const data = await resp.json()
     assertEquals(Array.isArray(data), true)
@@ -562,7 +563,7 @@ Deno.test('trojan: GET /clients returns connection list', async () => {
 
 Deno.test('trojan: GET /history returns TT state', async () => {
   await withTrojanServer(async (url) => {
-    const resp = await fetch(`${url}/__trojan/history`)
+    const resp = await fetch(`${url}/__aio/trojan/history`)
     assertEquals(resp.status, 200)
     const data = await resp.json()
     assertEquals(data.entries.length, 1)
@@ -572,7 +573,7 @@ Deno.test('trojan: GET /history returns TT state', async () => {
 
 Deno.test('trojan: GET /schedules returns active IDs', async () => {
   await withTrojanServer(async (url) => {
-    const resp = await fetch(`${url}/__trojan/schedules`)
+    const resp = await fetch(`${url}/__aio/trojan/schedules`)
     assertEquals(resp.status, 200)
     const data = await resp.json()
     assertEquals(data, ['heartbeat', 'cleanup'])
@@ -581,7 +582,7 @@ Deno.test('trojan: GET /schedules returns active IDs', async () => {
 
 Deno.test('trojan: GET /metrics returns uptime and counts', async () => {
   await withTrojanServer(async (url) => {
-    const resp = await fetch(`${url}/__trojan/metrics`)
+    const resp = await fetch(`${url}/__aio/trojan/metrics`)
     assertEquals(resp.status, 200)
     const data = await resp.json()
     assertEquals(typeof data.uptime, 'number')
@@ -593,9 +594,9 @@ Deno.test('trojan: GET /metrics returns uptime and counts', async () => {
 
 Deno.test('trojan: POST /dispatch dispatches action', async () => {
   await withTrojanServer(async (url) => {
-    const resp = await fetch(`${url}/__trojan/dispatch`, {
+    const resp = await fetch(`${url}/__aio/trojan/dispatch`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'X-AIO': '1' },
       body: JSON.stringify({ type: 'INCREMENT', payload: { by: 1 } }),
     })
     assertEquals(resp.status, 200)
@@ -606,9 +607,9 @@ Deno.test('trojan: POST /dispatch dispatches action', async () => {
 
 Deno.test('trojan: POST /dispatch rejects missing type', async () => {
   await withTrojanServer(async (url) => {
-    const resp = await fetch(`${url}/__trojan/dispatch`, {
+    const resp = await fetch(`${url}/__aio/trojan/dispatch`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'X-AIO': '1' },
       body: JSON.stringify({ payload: 'no type' }),
     })
     assertEquals(resp.status, 400)
@@ -618,9 +619,9 @@ Deno.test('trojan: POST /dispatch rejects missing type', async () => {
 
 Deno.test('trojan: POST /snapshot replaces state', async () => {
   await withTrojanServer(async (url) => {
-    const resp = await fetch(`${url}/__trojan/snapshot`, {
+    const resp = await fetch(`${url}/__aio/trojan/snapshot`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'X-AIO': '1' },
       body: JSON.stringify({ count: 99 }),
     })
     assertEquals(resp.status, 200)
@@ -631,7 +632,7 @@ Deno.test('trojan: POST /snapshot replaces state', async () => {
 
 Deno.test('trojan: POST /persist triggers persistence', async () => {
   await withTrojanServer(async (url) => {
-    const resp = await fetch(`${url}/__trojan/persist`, { method: 'POST' })
+    const resp = await fetch(`${url}/__aio/trojan/persist`, { method: 'POST', headers: { 'X-AIO': '1' } })
     assertEquals(resp.status, 200)
     const data = await resp.json()
     assertEquals(data.ok, true)
@@ -640,7 +641,7 @@ Deno.test('trojan: POST /persist triggers persistence', async () => {
 
 Deno.test('trojan: GET /unknown returns 404', async () => {
   await withTrojanServer(async (url) => {
-    const resp = await fetch(`${url}/__trojan/nope`)
+    const resp = await fetch(`${url}/__aio/trojan/nope`)
     assertEquals(resp.status, 404)
     await resp.body?.cancel()
   })
@@ -649,9 +650,24 @@ Deno.test('trojan: GET /unknown returns 404', async () => {
 Deno.test('trojan: not available when trojan config absent', async () => {
   // withServer creates a prod server without trojan config → 404
   await withServer(async (url) => {
-    const resp = await fetch(`${url}/__trojan/state`)
+    const resp = await fetch(`${url}/__aio/trojan/state`)
     assertEquals(resp.status, 404)
     await resp.body?.cancel()
+  })
+})
+
+// ── CSRF: POST without X-AIO header → 403 ─────────────────────
+
+Deno.test('trojan: POST without X-AIO header returns 403', async () => {
+  await withTrojanServer(async (url) => {
+    const resp = await fetch(`${url}/__aio/trojan/dispatch`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ type: 'TEST', payload: {} }),
+    })
+    assertEquals(resp.status, 403)
+    const data = await resp.json()
+    assertEquals(data.error, 'Missing X-AIO header')
   })
 })
 
@@ -680,9 +696,9 @@ Deno.test('trojan: POST /tt routes undo command to onTTCommand', async () => {
   })
   await new Promise(r => setTimeout(r, 50))
   try {
-    const resp = await fetch(`http://127.0.0.1:${TT_PORT}/__trojan/tt`, {
+    const resp = await fetch(`http://127.0.0.1:${TT_PORT}/__aio/trojan/tt`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'X-AIO': '1' },
       body: JSON.stringify({ cmd: 'undo' }),
     })
     assertEquals(resp.status, 200)
@@ -692,9 +708,9 @@ Deno.test('trojan: POST /tt routes undo command to onTTCommand', async () => {
     assertEquals(ttCmds[0]!.cmd, 'undo')
 
     // Test goto with arg
-    const resp2 = await fetch(`http://127.0.0.1:${TT_PORT}/__trojan/tt`, {
+    const resp2 = await fetch(`http://127.0.0.1:${TT_PORT}/__aio/trojan/tt`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'X-AIO': '1' },
       body: JSON.stringify({ cmd: 'goto', arg: 3 }),
     })
     assertEquals(resp2.status, 200)
@@ -710,9 +726,9 @@ Deno.test('trojan: POST /tt routes undo command to onTTCommand', async () => {
 
 Deno.test('trojan: POST /tt without onTTCommand returns 501', async () => {
   await withTrojanServer(async (url) => {
-    const resp = await fetch(`${url}/__trojan/tt`, {
+    const resp = await fetch(`${url}/__aio/trojan/tt`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'X-AIO': '1' },
       body: JSON.stringify({ cmd: 'undo' }),
     })
     assertEquals(resp.status, 501)
@@ -743,9 +759,9 @@ Deno.test('trojan: POST /sql blocks INSERT', async () => {
   await new Promise(r => setTimeout(r, 50))
   try {
     // INSERT should be blocked
-    const resp = await fetch(`http://127.0.0.1:${TT_PORT + 1}/__trojan/sql`, {
+    const resp = await fetch(`http://127.0.0.1:${TT_PORT + 1}/__aio/trojan/sql`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'X-AIO': '1' },
       body: JSON.stringify({ query: 'INSERT INTO users VALUES (1)' }),
     })
     assertEquals(resp.status, 403)
@@ -753,22 +769,40 @@ Deno.test('trojan: POST /sql blocks INSERT', async () => {
     assertEquals(data.error.includes('read-only'), true)
 
     // DELETE should be blocked
-    const resp2 = await fetch(`http://127.0.0.1:${TT_PORT + 1}/__trojan/sql`, {
+    const resp2 = await fetch(`http://127.0.0.1:${TT_PORT + 1}/__aio/trojan/sql`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'X-AIO': '1' },
       body: JSON.stringify({ query: 'DELETE FROM users' }),
     })
     assertEquals(resp2.status, 403)
     await resp2.body?.cancel()
 
-    // SELECT should pass
-    const resp3 = await fetch(`http://127.0.0.1:${TT_PORT + 1}/__trojan/sql`, {
+    // PRAGMA should be blocked (allow-list: SELECT only)
+    const resp3 = await fetch(`http://127.0.0.1:${TT_PORT + 1}/__aio/trojan/sql`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'X-AIO': '1' },
+      body: JSON.stringify({ query: 'PRAGMA table_info(users)' }),
+    })
+    assertEquals(resp3.status, 403)
+    await resp3.body?.cancel()
+
+    // WITH (CTE) should be blocked
+    const resp4 = await fetch(`http://127.0.0.1:${TT_PORT + 1}/__aio/trojan/sql`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-AIO': '1' },
+      body: JSON.stringify({ query: 'WITH x AS (SELECT 1) SELECT * FROM x' }),
+    })
+    assertEquals(resp4.status, 403)
+    await resp4.body?.cancel()
+
+    // SELECT should pass
+    const resp5 = await fetch(`http://127.0.0.1:${TT_PORT + 1}/__aio/trojan/sql`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-AIO': '1' },
       body: JSON.stringify({ query: 'SELECT * FROM users' }),
     })
-    assertEquals(resp3.status, 200)
-    await resp3.body?.cancel()
+    assertEquals(resp5.status, 200)
+    await resp5.body?.cancel()
   } finally {
     await server.shutdown()
     await Deno.remove(dir, { recursive: true })
@@ -798,7 +832,7 @@ Deno.test('trojan: POST /shutdown returns ok and triggers callback', async () =>
   })
   await new Promise(r => setTimeout(r, 50))
   try {
-    const resp = await fetch(`http://127.0.0.1:${TT_PORT + 2}/__trojan/shutdown`, { method: 'POST' })
+    const resp = await fetch(`http://127.0.0.1:${TT_PORT + 2}/__aio/trojan/shutdown`, { method: 'POST', headers: { 'X-AIO': '1' } })
     assertEquals(resp.status, 200)
     const data = await resp.json()
     assertEquals(data.ok, true)

@@ -30,14 +30,15 @@ export interface ServerConfig {
   maxConnections?: number  // max concurrent WebSocket clients (default: 100)
   syncRate?: number        // throttle UI updates: max 1 push per N ms (default: 10 = 100fps)
   allowedOrigins?: string[]  // extra allowed origins beyond localhost (e.g. Docker, reverse proxy)
+  clientCounter?: { value: number }  // shared index counter — WS and UDS get unique indices
   onConnect?: (user?: AioUser) => void
   onDisconnect?: (user?: AioUser) => void
   // Time-travel (dev mode)
   onTTCommand?: (cmd: string, arg?: number) => void
   getTTBroadcast?: () => unknown
-  // Health endpoint — GET /__health
+  // Health endpoint — GET /__aio/health
   getHealth?: () => unknown
-  // Trojan — control API (localhost-only, auth-gated when exposed)
+  // Trojan — control API at /__aio/trojan/* (localhost-only, CSRF-protected, rate-limited)
   trojan?: {
     getState: () => unknown                  // raw unfiltered state
     getSchedules: () => string[]             // active schedule IDs
@@ -46,6 +47,10 @@ export interface ServerConfig {
     sqlQuery?: (sql: string) => Promise<unknown[]>  // read-only SQL query (async)
     shutdown?: () => Promise<void>           // graceful shutdown
     startedAt: number                        // Date.now() at boot
+    /** UDS clients (Electron IPC) — for am client command */
+    udsClients?: () => { index: number; id: string }[]
+    /** Send a message to a UDS client and wait for __clientState: response */
+    requestUdsClientState?: (index: number, msg?: string) => Promise<unknown>
   }
 }
 
@@ -259,6 +264,7 @@ type TransformResult = { code: string; warnings: EsbuildMessage[] }
 let transformFn: ((input: string, opts: Record<string, unknown>) => Promise<TransformResult>) | null = null
 async function getTransform() {
   if (!transformFn) {
+    // deno-lint-ignore no-import-prefix
     const mod = await import('npm:esbuild@^0.24')
     transformFn = mod.transform as (input: string, opts: Record<string, unknown>) => Promise<TransformResult>
   }
@@ -423,8 +429,14 @@ export function createServer(config: ServerConfig): ServerHandle {
   if (hasCSS) debug('style.css detected — injecting <link>')
   const WS_RATE_LIMIT = 100  // max messages per second per client
   const WS_BYTES_PER_SEC = 5_000_000  // 5MB/s per client — prevents bandwidth DoS
-  type ClientMeta = { id: string; user?: AioUser; lastState: unknown; lastKeyJsons: Record<string, string>; msgCount: number; bytesThisSec: number; msgResetTimer?: ReturnType<typeof setTimeout> }
+  type ClientType = 'electron' | 'browser' | 'electron-reload' | 'browser-reload' | 'unknown'
+  type ClientMeta = { id: string; index: number; clientType: ClientType; isElectron: boolean; user?: AioUser; lastState: unknown; lastKeyJsons: Record<string, string>; msgCount: number; bytesThisSec: number; msgResetTimer?: ReturnType<typeof setTimeout>; typeDetectTimer?: ReturnType<typeof setTimeout> }
   const connections = new Map<WebSocket, ClientMeta>()
+  // Shared counter — if config provides one, WS and UDS indices are globally unique
+  const clientCounter = config.clientCounter ?? { value: 0 }
+  const nextIndex = () => clientCounter.value++
+  // Pending client state requests (dev mode) — resolve when client responds
+  const pendingClientState = new Map<string, { resolve: (v: unknown) => void; timer: ReturnType<typeof setTimeout> }>()
   const syncRate = config.syncRate ?? 10
   let broadcastQueued = false
   let broadcastDirty = false
@@ -433,6 +445,10 @@ export function createServer(config: ServerConfig): ServerHandle {
   let lastErrorData: { errors: Array<{ text: string; file?: string; line?: number; col?: number; lineText?: string }> } | null = null
   const bootId = crypto.randomUUID().slice(0, 8)  // unique per server start — triggers browser reload on reconnect
   const noCache = prod ? {} : { 'Cache-Control': 'no-store' } as Record<string, string>  // prevent Electron/browser caching in dev
+  // Trojan rate limiting — 100 req/s across all trojan endpoints
+  const TROJAN_RATE_LIMIT = 100
+  let _trojanReqCount = 0
+  let _trojanResetTimer: ReturnType<typeof setTimeout> | null = null
 
   // Coalesced + throttled broadcast — batches synchronous bursts via microtask; optionally throttles async streams
   // Leading edge fires immediately (after microtask coalesce); trailing flush ensures last state always arrives
@@ -478,8 +494,10 @@ export function createServer(config: ServerConfig): ServerHandle {
 
   // Upgrades HTTP to WebSocket — sends initial state, forwards actions to dispatch
   function handleWs(req: Request, user?: AioUser): Response {
-    // Validate origin — only accept localhost connections (skip when exposed — token handles auth)
-    if (!config.expose) {
+    // Validate origin — localhost always allowed; when exposed, allowedOrigins restricts further
+    // When not exposed: only localhost + allowedOrigins. When exposed: token handles auth,
+    // but if allowedOrigins is set, also enforce origin restriction (additive with token).
+    if (!config.expose || config.allowedOrigins?.length) {
       const origin = req.headers.get('origin')
       if (origin) {
         try {
@@ -504,13 +522,20 @@ export function createServer(config: ServerConfig): ServerHandle {
     }
     const { socket, response } = Deno.upgradeWebSocket(req)
     const clientId = crypto.randomUUID()
-    const meta: ClientMeta = { id: clientId, user, lastState: null, lastKeyJsons: {}, msgCount: 0, bytesThisSec: 0 }
+    const clientIndex = nextIndex()
+    const isElectron = /electron/i.test(req?.headers.get('user-agent') ?? '')
+    const meta: ClientMeta = { id: clientId, index: clientIndex, clientType: 'unknown', isElectron, user, lastState: null, lastKeyJsons: {}, msgCount: 0, bytesThisSec: 0 }
     socket.onerror = (e) => {
       debug(`ws: error ${clientId.slice(0, 8)} — ${e instanceof ErrorEvent ? e.message : e}`)
       connections.delete(socket)
+      if (meta.msgResetTimer) { clearTimeout(meta.msgResetTimer); meta.msgResetTimer = undefined }
+      if (meta.typeDetectTimer) { clearTimeout(meta.typeDetectTimer); meta.typeDetectTimer = undefined }
+      if (config.onDisconnect) try { config.onDisconnect(meta.user) } catch (err) { debug(`hook onDisconnect: ${err}`) }
     }
     socket.onopen = () => {
       connections.set(socket, meta)
+      // Auto-tag as reload watcher if client doesn't identify within 2s
+      meta.typeDetectTimer = setTimeout(() => { meta.typeDetectTimer = undefined; if (meta.clientType === 'unknown') meta.clientType = meta.isElectron ? 'electron-reload' : 'browser-reload' }, 2000)
       debug(`ws: connect ${clientId.slice(0, 8)} user=${user?.id ?? 'anon'} (${connections.size} total)`)
       if (config.onConnect) try { config.onConnect(meta.user) } catch (e) { debug(`hook onConnect: ${e}`) }
       try {
@@ -560,6 +585,23 @@ export function createServer(config: ServerConfig): ServerHandle {
           debug(`ws: byte rate exceeded for ${meta.id.slice(0, 8)} (${(meta.bytesThisSec / 1_000_000).toFixed(1)}MB/s)`)
           return
         }
+        // Client state response (dev mode) — resolves pending am request
+        if (e.data.startsWith('__clientState:')) {
+          const pending = pendingClientState.get(meta.id)
+          if (pending) {
+            pendingClientState.delete(meta.id)
+            clearTimeout(pending.timer)
+            try { pending.resolve(JSON.parse(e.data.slice(14))) }
+            catch { pending.resolve(null) }
+          }
+          return
+        }
+        // Client type identification — browser.ts sends __type:electron or __type:browser on connect
+        if (e.data.startsWith('__type:')) {
+          const t = e.data.slice(7)
+          if (t === 'electron' || t === 'browser') meta.clientType = t
+          return
+        }
         // Time-travel commands: __tt:undo, __tt:redo, __tt:goto:5, etc.
         if (e.data.startsWith('__tt:') && config.onTTCommand) {
           debug(`ws: tt command ${e.data}`)
@@ -588,7 +630,8 @@ export function createServer(config: ServerConfig): ServerHandle {
     }
     socket.onclose = () => {
       connections.delete(socket)
-      if (meta.msgResetTimer) clearTimeout(meta.msgResetTimer)
+      if (meta.msgResetTimer) { clearTimeout(meta.msgResetTimer); meta.msgResetTimer = undefined }
+      if (meta.typeDetectTimer) { clearTimeout(meta.typeDetectTimer); meta.typeDetectTimer = undefined }
       debug(`ws: disconnect ${clientId.slice(0, 8)} user=${meta.user?.id ?? 'anon'} (${connections.size} total)`)
       if (config.onDisconnect) try { config.onDisconnect(meta.user) } catch (e) { debug(`hook onDisconnect: ${e}`) }
     }
@@ -615,7 +658,7 @@ export function createServer(config: ServerConfig): ServerHandle {
     }
 
     if (!prod && pathname === '/__aio/error') {
-      return new Response(JSON.stringify(lastErrorData), { headers: { 'Content-Type': 'application/json' } })
+      return new Response(JSON.stringify(lastErrorData ?? { errors: [] }), { headers: { 'Content-Type': 'application/json' } })
     }
 
     if (!prod && pathname === '/__aio/client-error' && req?.method === 'POST') {
@@ -626,7 +669,7 @@ export function createServer(config: ServerConfig): ServerHandle {
       return new Response(null, { status: 204 })
     }
 
-    if (pathname === '/__snapshot' && config.getSnapshot && config.loadSnapshot) {
+    if (pathname === '/__aio/snapshot' && config.getSnapshot && config.loadSnapshot) {
       if (!req || req.method === 'GET') {
         return new Response(config.getSnapshot(), {
           headers: {
@@ -661,7 +704,7 @@ export function createServer(config: ServerConfig): ServerHandle {
     }
 
     // ── Health endpoint ──
-    if (pathname === '/__health' && config.getHealth) {
+    if (pathname === '/__aio/health' && config.getHealth) {
       try {
         const health = config.getHealth()
         return new Response(JSON.stringify(health, null, 2), {
@@ -675,13 +718,24 @@ export function createServer(config: ServerConfig): ServerHandle {
       }
     }
 
-    // ── Trojan: debug/control REST API (localhost-only, auth-gated when exposed) ──
-    if (config.trojan && pathname.startsWith('/__trojan/')) {
-      const route = pathname.slice('/__trojan/'.length)
+    // ── Trojan: control REST API (localhost-only) ──
+    // Moved under /__aio/trojan/ — internal framework endpoints, not user routes.
+    // Rate-limited, CSRF-protected, dev-only endpoints gated in prod.
+    if (config.trojan && pathname.startsWith('/__aio/trojan/')) {
+      const route = pathname.slice('/__aio/trojan/'.length)
       const trojan = config.trojan
       const json = (data: unknown) => new Response(JSON.stringify(data, null, 2), { headers: { 'Content-Type': 'application/json' } })
       const err = (msg: string, status = 400) => new Response(JSON.stringify({ error: msg }), { status, headers: { 'Content-Type': 'application/json' } })
       const method = req?.method ?? 'GET'
+
+      // Rate limiting — 100 requests/sec across all trojan endpoints
+      _trojanReqCount++
+      if (!_trojanResetTimer) {
+        _trojanResetTimer = setTimeout(() => { _trojanReqCount = 0; _trojanResetTimer = null }, 1000)
+      }
+      if (_trojanReqCount > TROJAN_RATE_LIMIT) {
+        return err('rate limit exceeded', 429)
+      }
 
       // GET endpoints — inspect
       if (method === 'GET') {
@@ -693,12 +747,62 @@ export function createServer(config: ServerConfig): ServerHandle {
           return json(getUIState(aioUser))
         }
         if (route === 'clients') {
-          const clients = [...connections.entries()].map(([ws, m]) => ({
-            id: m.id, user: m.user?.id, readyState: ws.readyState,
+          const wsClients = [...connections.entries()].map(([ws, m]) => ({
+            index: m.index, id: m.id, type: m.clientType, transport: 'ws' as const, user: m.user?.id, readyState: ws.readyState,
           }))
-          return json(clients)
+          const udsClients = (trojan.udsClients?.() ?? []).map(c => ({
+            index: c.index, id: c.id, type: 'electron' as const, transport: 'uds' as const,
+          }))
+          return json([...wsClients, ...udsClients])
         }
-        if (route === 'history') return json(trojan.getTTHistory?.() ?? { entries: [], index: 0, paused: false })
+        // Send a message to a specific client and wait for __clientState: response
+        const sendToClient = async (idx: number, msg: string): Promise<Response> => {
+          // Try WebSocket clients first
+          const wsEntry = [...connections.entries()].find(([, m]) => m.index === idx)
+          if (wsEntry) {
+            const [ws, m] = wsEntry
+            if (ws.readyState !== 1) return err(`client ${idx} not ready`, 503)
+            const statePromise = new Promise<unknown>((resolve) => {
+              const timer = setTimeout(() => {
+                pendingClientState.delete(m.id)
+                resolve({ error: 'client did not respond within 5s' })
+              }, 5000)
+              pendingClientState.set(m.id, { resolve, timer })
+            })
+            ws.send(msg)
+            return json(await statePromise)
+          }
+          // Try UDS clients
+          if (trojan.requestUdsClientState) {
+            return json(await trojan.requestUdsClientState(idx, msg))
+          }
+          return err(`client ${idx} not connected`, 404)
+        }
+
+        // Dev-only: component tree introspection and click simulation
+        if (route.startsWith('client/') && !prod) {
+          const idx = Number(route.slice(7))
+          if (!Number.isInteger(idx) || idx < 0) return err('invalid client index', 400)
+          return sendToClient(idx, '__getState')
+        }
+        if (route.startsWith('click/') && !prod) {
+          const rest = route.slice(6)
+          const slashIdx = rest.indexOf('/')
+          if (slashIdx === -1) return err('usage: click/<clientIndex>/<Component>:<index|prop:value>', 400)
+          const idx = Number(rest.slice(0, slashIdx))
+          const target = decodeURIComponent(rest.slice(slashIdx + 1))
+          if (!Number.isInteger(idx) || idx < 0) return err('invalid client index', 400)
+          return sendToClient(idx, '__click:' + target)
+        }
+        // Dev-only: time-travel history and transpile errors
+        if (route === 'history') {
+          if (prod) return err('dev-only endpoint', 403)
+          return json(trojan.getTTHistory?.() ?? { entries: [], index: 0, paused: false })
+        }
+        if (route === 'errors') {
+          if (prod) return err('dev-only endpoint', 403)
+          return json(lastErrorData ?? { errors: [] })
+        }
         if (route === 'schedules') return json(trojan.getSchedules())
         if (route === 'metrics') {
           return json({
@@ -716,8 +820,14 @@ export function createServer(config: ServerConfig): ServerHandle {
         }
       }
 
-      // POST endpoints — control
+      // POST endpoints — control (CSRF protected: require X-AIO header)
       if (method === 'POST' && req) {
+        if (!req.headers.get('x-aio')) {
+          return err('Missing X-AIO header', 403)
+        }
+        // Audit log all trojan POST mutations
+        debug(`[trojan] POST ${route}`)
+
         if (route === 'dispatch') {
           try {
             const body = await req.text()
@@ -732,13 +842,21 @@ export function createServer(config: ServerConfig): ServerHandle {
         if (route === 'snapshot') {
           if (!config.loadSnapshot) return err('snapshots not available', 501)
           try {
+            const clHeader = req.headers.get('content-length')
+            if (clHeader !== null && Number(clHeader) > SNAPSHOT_MAX_SIZE) {
+              return err(`snapshot too large (max ${SNAPSHOT_MAX_SIZE} bytes)`, 413)
+            }
             const body = await req.text()
+            if (body.length > SNAPSHOT_MAX_SIZE) {
+              return err(`snapshot too large (max ${SNAPSHOT_MAX_SIZE} bytes)`, 413)
+            }
             JSON.parse(body) // validate
             config.loadSnapshot(body)
             return json({ ok: true })
           } catch { return err('invalid JSON') }
         }
         if (route === 'tt') {
+          if (prod) return err('dev-only endpoint', 403)
           if (!config.onTTCommand) return err('time-travel not active', 501)
           try {
             const body = await req.text()
@@ -755,11 +873,11 @@ export function createServer(config: ServerConfig): ServerHandle {
             const body = await req.text()
             const { query } = JSON.parse(body)
             if (!query || typeof query !== 'string') return err('missing query field')
-            // Block destructive SQL — trojan API is read-only
+            // Allow-list: only SELECT queries (after normalization)
             if (query.includes(';')) return err('multi-statement queries not allowed', 403)
-            const first = query.trimStart().toUpperCase()
-            if (/^(INSERT|UPDATE|DELETE|DROP|ALTER|CREATE|ATTACH|DETACH|REINDEX|REPLACE|PRAGMA|WITH)\b/.test(first)) {
-              return err('trojan SQL is read-only — use dispatch for mutations', 403)
+            const normalized = query.trimStart().toUpperCase()
+            if (!normalized.startsWith('SELECT ') && !normalized.startsWith('SELECT\n') && !normalized.startsWith('SELECT\t') && normalized !== 'SELECT') {
+              return err('trojan SQL is read-only — only SELECT allowed', 403)
             }
             return json(await trojan.sqlQuery(query))
           } catch (e) { return err(String(e instanceof Error ? e.message : e)) }
@@ -771,6 +889,7 @@ export function createServer(config: ServerConfig): ServerHandle {
         }
         if (route === 'shutdown') {
           if (!trojan.shutdown) return err('shutdown not available', 501)
+          debug(`[trojan] shutdown requested`)
           // Respond first, then shut down (can't respond after process dies)
           const resp = json({ ok: true, msg: 'shutting down' })
           queueMicrotask(() => trojan.shutdown!())
@@ -796,10 +915,20 @@ export function createServer(config: ServerConfig): ServerHandle {
     const filename = pathname.replace(/^\//, '')
     const filepath = resolve(absBaseDir, filename)
     // Path traversal protection — resolved path must be inside baseDir
-    if (!filepath.startsWith(absBaseDir + SEPARATOR)) {
+    // Normalize: avoid double separator when absBaseDir already ends with one (e.g. root drive C:\)
+    const basePfx = absBaseDir.endsWith(SEPARATOR) ? absBaseDir : absBaseDir + SEPARATOR
+    if (!filepath.startsWith(basePfx)) {
       return new Response('Forbidden', { status: 403 })
     }
     const ext = extname(filepath)
+
+    // SPA fallback: extensionless paths (not internal /__* APIs) that don't exist are client-side routes
+    if (!ext && !pathname.startsWith('/__')) {
+      let exists = false
+      try { await Deno.stat(filepath); exists = true } catch { /* not found */ }
+      if (!exists) return new Response(generateHTML(title, prod, hasCSS, config.showStatus, config.width, config.height), { headers: { 'Content-Type': 'text/html', ...noCache } })
+    }
+
     const isText = TEXT_EXTENSIONS.has(ext)
 
     // Binary files — read as bytes, serve directly
@@ -965,7 +1094,7 @@ export function createServer(config: ServerConfig): ServerHandle {
       (req) => {
         const { pathname } = new URL(req.url)
         // Trojan server is 127.0.0.1-only — bypass auth, route control endpoints directly
-        if (pathname.startsWith('/__trojan/') || pathname.startsWith('/__snapshot') || pathname.startsWith('/__aio/')) {
+        if (pathname.startsWith('/__aio/') || pathname.startsWith('/__aio/snapshot') || pathname.startsWith('/__aio/health')) {
           return handleTrojan(req, pathname)
         }
         // Health probe for `am status`
@@ -996,11 +1125,19 @@ export function createServer(config: ServerConfig): ServerHandle {
     socketPath: udsPath,
     shutdown: async () => {
       if (reloadTimer) clearTimeout(reloadTimer)
+      if (broadcastThrottle) { clearTimeout(broadcastThrottle); broadcastThrottle = null }
+      if (_trojanResetTimer) { clearTimeout(_trojanResetTimer); _trojanResetTimer = null }
       fsWatcher?.close()
-      for (const [ws] of connections) {
+      // Clear all per-client timers before closing sockets
+      for (const [ws, meta] of connections) {
+        if (meta.msgResetTimer) { clearTimeout(meta.msgResetTimer); meta.msgResetTimer = undefined }
+        if (meta.typeDetectTimer) { clearTimeout(meta.typeDetectTimer); meta.typeDetectTimer = undefined }
         try { ws.close(1001, 'server shutting down') } catch { /* already closing */ }
       }
       connections.clear()
+      // Clear pending client state request timers
+      for (const [, pending] of pendingClientState) clearTimeout(pending.timer)
+      pendingClientState.clear()
       await Promise.all([
         httpServer.shutdown(),
         trojanServer?.shutdown(),

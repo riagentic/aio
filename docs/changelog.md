@@ -1,5 +1,41 @@
 # Changelog
 
+## v1.0.0-alpha1
+
+**Breaking: all internal endpoints moved under `/__aio/`**
+- `/__trojan/*` → `/__aio/trojan/*`
+- `/__snapshot` → `/__aio/snapshot`
+- `/__health` → `/__aio/health`
+- User routes (`/`, `/ws`, `/app.js`, static files) unchanged
+
+**Security hardening**
+- Trojan POST endpoints require `X-AIO` header (CSRF protection)
+- Trojan rate-limited to 100 req/s
+- SQL allow-list: only `SELECT` queries (replaces deny-list)
+- All trojan POST mutations audit-logged
+- `allowedOrigins` enforced even when `--expose` active (additive with token auth)
+- Dev-only endpoints (`history`, `errors`, `client/`, `click/`, `tt`) return 403 in prod
+- Snapshot size limit (10MB) enforced on trojan snapshot POST
+- Path traversal fix for Windows root drive edge case
+
+**Mixed mode features**
+- `feature()` supports methods + actions + effects in one feature — name collisions validated
+- `__aio.id` replaces `__aio.prefix` — correct semantic name for feature identity
+- `am dispatch` supports both methods (positional args) and actions (named payload)
+
+**Audit: all 10 bugs (B1–B10) resolved**
+- Trojan snapshot size limit, offline queue bound, selector comment, `_anyProcessed` flag, Electron cleanup, path traversal, cron UTC docs, `--` CLI filter, `cmdStatus` exit codes, SQL `insertMany` removal
+
+**Docs**
+- Architecture data flow diagram in core.md
+- `composeMiddleware` and `matchEffect` expanded with examples in api.md
+- Cron syntax documented in scheduling.md
+- Security model consolidated in auth.md
+
+**Tests: 801 passing (13.5K lines)**
+
+---
+
 ## v0.9.5
 
 **Fix: Electron dev mode stuck on "Loading..."**
@@ -102,7 +138,7 @@ JSR-native builds + Electron install simplification (see v0.9.2 below — same r
 
 **`log` — public logging singleton**
 - `import { log } from 'aio'` — usable from any feature or effect file
-- `log.info / warn / error` → `app.log` (+ `errors.log` for warn/error); `log.debug / trace` → `debug.log`
+- `log.info / warn / error` → `app.log` (+ `error.log` for errors, `warning.log` for warnings); `log.debug / trace` → `debug.log`
 - Each entry includes `src: "filename.ts:line"` — auto-detected from call stack, no manual tagging needed
 - Silent no-op when `logging` is not configured in `aio.run()` — safe to use unconditionally
 - Browser-side `log` is a no-op stub (server-only writes)
@@ -187,7 +223,7 @@ JSR-native builds + Electron install simplification (see v0.9.2 below — same r
 - `CallOptions` type exported for `{ timeout?: number; retries?: number }`
 
 **Structured logging — `logging` config in `aio.run()`**
-- Three outputs: `logs/app.log` (narrative), `logs/debug.log` (all actions), `logs/errors.log` (warn/error)
+- Five outputs: `log/app.log` (narrative), `log/debug.log` (all actions), `log/error.log` (errors), `log/warning.log` (warnings), `log/perf.log` (violations)
 - `app.log` is smart: machine state transitions, flow completions, feature lifecycle, deduped errors — no firehose
 - Error deduplication: first occurrence logged, repeats suppressed with count, summary on recovery
 - `debug.log`: every non-internal action, full payload, JSONL — for when something breaks
@@ -303,12 +339,12 @@ JSR-native builds + Electron install simplification (see v0.9.2 below — same r
 - `testFeature()` / `testBridge()` — isolated test harnesses
 - Foreign action listeners — react to other features' actions via machine
 - Scoped dispatch — executors limited to own actions + `dispatchTo` allowlist
-- `implement()` — deferred executor attachment for server-only imports
+- `implement()` — deferred executor attachment (removed in v1.0 — use async methods)
 - Feature lifecycle — `init` / `destroy` hooks, dependency-ordered
 - Feature registry — `enable` / `disable` / `health` at runtime
 - Middleware system — `aio.middleware.logger()`, `.validate()`, composable
-- State versioning — `version` + `migrations` for schema evolution
-- Health endpoint — `GET /__health` with per-feature status
+- State versioning — `version` + `migrations` (removed in v1.0 — use `appVersion` + `onRestore`)
+- Health endpoint — `GET /__aio/health` with per-feature status
 
 ## v0.4.0
 

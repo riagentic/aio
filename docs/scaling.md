@@ -44,7 +44,7 @@ execute: {
       'SELECT * FROM orders WHERE status = ? AND total > ? ORDER BY created_at DESC LIMIT 100',
       ['active', payload.minTotal]
     )
-    app.dispatch(myFeature.A.ordersLoaded(rows))  // small, filtered result
+    app.dispatch(myFeature.ordersLoaded(rows))  // small, filtered result
   },
 },
 ```
@@ -77,7 +77,7 @@ execute: {
       const placeholders = batch.map(() => '(?,?,?)').join(',')
       await app.db!.execute(`INSERT INTO orders(id,customer,total) VALUES ${placeholders}`, params)
     }
-    app.dispatch(myFeature.A.importDone(payload.parsedRows.length))
+    app.dispatch(myFeature.importDone(payload.parsedRows.length))
   },
 
   // Aggregation: compute on SQLite, send result to state
@@ -86,7 +86,7 @@ execute: {
       'SELECT SUM(total) as total, COUNT(*) as count FROM orders WHERE status = ?',
       ['active']
     )
-    app.dispatch(myFeature.A.statsLoaded(rows[0]))
+    app.dispatch(myFeature.statsLoaded(rows[0]))
   },
 },
 ```
@@ -103,7 +103,7 @@ execute: {
     const params = readings.flatMap(r => [r.ts, r.value])
     const placeholders = readings.map(() => '(?,?)').join(',')
     await app.db!.execute(`INSERT INTO readings(ts,value) VALUES ${placeholders}`, params)
-    app.dispatch(sensors.A.readingsUpdated(readings.length))  // one broadcast
+    app.dispatch(sensors.readingsUpdated(readings.length))  // one broadcast
   },
 },
 ```
@@ -161,7 +161,7 @@ Async effects (promises) return immediately — only the sync part is measured. 
 execute: {
   // ✅ GOOD — async, returns in < 1ms
   fetch(app, payload) {
-    fetch(payload.url).then(r => app.dispatch(myFeature.A.loaded(r)))
+    fetch(payload.url).then(r => app.dispatch(myFeature.loaded(r)))
   },
 
   // ❌ BAD — sync work blocks
@@ -233,10 +233,77 @@ reduce: {
 execute: {
   runAnalysis(app, payload) {
     const results = analyzeEverything(payload.data)  // still 200ms, but doesn't block UI
-    app.dispatch(myFeature.A.analysisDone(results))
+    app.dispatch(myFeature.analysisDone(results))
   },
 },
 ```
+
+## Performance tuning by scenario
+
+Quick reference — when you hit a specific issue, apply these settings.
+
+### State is large (>1MB)
+
+| Setting | Value | Why |
+|---------|-------|-----|
+| `stateForUI` | filter aggressively | Each client only gets what it needs |
+| `persist: { exclude: [...] }` | exclude caches, derived data | Less to write on each persist cycle |
+| `stateForDB` | only persist essential fields | Reduce SQLite write volume |
+
+Move large collections to SQLite and query on demand. State should hold the *current view*, not the *full dataset*.
+
+### Many concurrent clients (>100)
+
+| Setting | Value | Why |
+|---------|-------|-----|
+| `stateForUI` | per-user filtering | Less data per broadcast, less bandwidth |
+| `syncRate` | raise to 100–200ms | Batches multiple rapid state changes into fewer broadcasts |
+| `deltaThreshold` | raise to 512–1024 | Sends full state instead of patch when delta is almost as large — avoids wasted diff computation |
+
+### High-frequency actions (>10/sec)
+
+| Approach | How |
+|----------|-----|
+| Batch in methods | Accumulate events, dispatch once per batch |
+| Debounce on client | `useLocal` for keystroke state, `send` on blur/submit |
+| Write directly to SQLite | Use `app.db` in effects for high-volume writes, update state with summary only |
+| `perfBudget: { reduce: 20 }` | Catch slow reducers early — at 10 actions/sec, 100ms reducer = 100% CPU |
+
+### Long arrays in state
+
+Arrays in state cause full-array delta patches on every change. Solutions:
+
+- **Move to SQLite** — query with `LIMIT`/`OFFSET`, keep only the current page in state
+- **Use an object keyed by ID** — `{ [id]: item }` instead of `Item[]`. Delta patching is per-key, so changing one item sends only that key
+- **Split into a separate feature** — isolate the heavy collection so changes don't trigger re-renders in unrelated components
+
+### Electron / long-running desktop apps
+
+| Setting | Value | Why |
+|---------|-------|-----|
+| `persist: { exclude: [...] }` | exclude UI-only fields | Reduce Deno.Kv write frequency |
+| `perfMode: 'soft'` | warn, don't error | Desktop apps tolerate more latency than web |
+
+Time-travel history is capped at 200 entries (dev mode only, zero in prod). No action needed.
+
+### Production monitoring
+
+```ts
+await aio.run({
+  features: [...],
+  perfMode: 'strict',
+  perfBudget: { reduce: 50, effect: 10 },
+  onPerf: (metric) => {
+    // Send to your monitoring (Grafana, Datadog, etc.)
+    if (metric.reduce > 50) alertSlack(`Slow reduce: ${metric.actionType} ${metric.reduce}ms`)
+  },
+  onError: (err) => {
+    if (err.source === 'performance') log.warn('perf', err.message)
+  },
+})
+```
+
+---
 
 ## Limitations
 
@@ -247,5 +314,5 @@ execute: {
 - **`$p` and `$d` are reserved** — don't use `$p` or `$d` as state keys at any level (used internally for delta patches and key deletion within feature slices)
 - **WS message size limit** — messages over 1MB are silently dropped. Keep state and actions compact
 - **Actions dropped while offline** — when the server is unreachable, `send()` silently drops actions. Only the initial connect race (WS not yet open) queues up to 100 actions
-- **Max 100 concurrent WebSocket connections** — returns 503 beyond this limit
+- **Max 100 concurrent WebSocket connections** (configurable via `maxConnections`) — new connections get HTTP 503 "Too Many Connections". Existing connections are unaffected. The browser client auto-retries with exponential backoff, so shed clients reconnect when slots free up. Raise the limit for high-traffic apps: `aio.run({ maxConnections: 1000 })`
 - **Dev mode CDN** — React loaded from esm.sh in dev (first load needs internet). Compiled builds are fully offline

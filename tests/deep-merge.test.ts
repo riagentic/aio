@@ -1,4 +1,4 @@
-import { assertEquals } from 'https://deno.land/std@0.224.0/assert/mod.ts'
+import { assertEquals } from '@std/assert'
 import { deepMerge } from '../src/deep-merge.ts'
 
 Deno.test('deepMerge: persisted overrides matching types', () => {

@@ -2,7 +2,7 @@
 
 Start a new aio app from scratch.
 
-## Option A: One-liner (recommended)
+## Option A: Scaffolder (fastest)
 
 ```sh
 sh -c "$(curl -fsSL https://raw.githubusercontent.com/riagentic/aio/main/init.sh)" -- my-app
@@ -17,7 +17,7 @@ sh -c "$(curl -fsSL ...)" -- my-app --type=electron --template=minimal
 
 App types: `browser`, `electron`, `android`, `cli`, `service`, `remote-browser`, `remote-service`, `remote-electron`, `remote-cli`, `remote-android`. Templates: `empty`, `minimal`, `medium`, `large`.
 
-## Option B: JSR (recommended for new projects)
+## Option B: JSR (manual setup)
 
 ```sh
 deno add jsr:@riagentic/aio
@@ -48,6 +48,7 @@ deno install
 
 ```json
 {
+  "appId": "my-app",
   "title": "My App",
   "nodeModulesDir": "auto",
   "unstable": ["kv"],
@@ -57,7 +58,7 @@ deno install
     "jsxImportSourceTypes": "@types/react"
   },
   "imports": {
-    "aio":          "jsr:@riagentic/aio@^0.9",
+    "aio":          "jsr:@riagentic/aio@1.0.0-alpha1",
     "@types/react": "npm:@types/react@^18",
     "react":        "npm:react@^18",
     "react-dom":    "npm:react-dom@^18",
@@ -65,14 +66,14 @@ deno install
   },
   "tasks": {
     "dev":                    "deno run -A src/app.ts",
-    "am":                     "deno run -A jsr:@riagentic/aio@^0.9/src/am",
+    "am":                     "deno run -A jsr:@riagentic/aio@1.0.0-alpha1/src/am",
     "test":                   "deno test -A --unstable-kv tests/",
-    "compile:browser":        "deno run -A jsr:@riagentic/aio@^0.9/src/build --compile",
-    "compile:electron":       "deno run -A jsr:@riagentic/aio@^0.9/src/build --compile --electron",
-    "compile:electron:remote":"deno run -A jsr:@riagentic/aio@^0.9/src/build --client",
-    "compile:cli":            "deno run -A jsr:@riagentic/aio@^0.9/src/build --compile --cli",
-    "compile:service":        "deno run -A jsr:@riagentic/aio@^0.9/src/build --compile --service --headless",
-    "compile:android":        "deno run -A jsr:@riagentic/aio@^0.9/src/build --android"
+    "compile:browser":        "deno run -A jsr:@riagentic/aio@1.0.0-alpha1/src/build --compile",
+    "compile:electron":       "deno run -A jsr:@riagentic/aio@1.0.0-alpha1/src/build --compile --electron",
+    "compile:electron:remote":"deno run -A jsr:@riagentic/aio@1.0.0-alpha1/src/build --client",
+    "compile:cli":            "deno run -A jsr:@riagentic/aio@1.0.0-alpha1/src/build --compile --cli",
+    "compile:service":        "deno run -A jsr:@riagentic/aio@1.0.0-alpha1/src/build --compile --service --headless",
+    "compile:android":        "deno run -A jsr:@riagentic/aio@1.0.0-alpha1/src/build --android"
   }
 }
 ```
@@ -172,8 +173,7 @@ Or via CLI: `deno task dev --width=1200 --height=800`. Window bounds persist acr
 await aio.run({
   features: [counter],
   middleware: [aio.middleware.logger(), aio.middleware.validate()],
-  version: 1,
-  migrations: [],  // add migration functions as schema evolves
+  appVersion: '1.0.0',
 })
 ```
 
@@ -255,6 +255,25 @@ export const checkout = feature('checkout', {
   },
 })
 ```
+
+---
+
+## Troubleshooting
+
+**"Electron not found" or app window doesn't open**
+Run `deno task install:electron` first, or use `deno task dev -- --no-electron` to open in your browser instead.
+
+**"Module not found: aio"**
+Run `deno install` to download dependencies. Make sure your `deno.json` has the `"aio"` import mapped to `jsr:@riagentic/aio@1.0.0-alpha1`.
+
+**State resets on every restart**
+This is normal in dev if you changed your state shape. aio auto-persists to Deno.Kv — if the shape changed, the old state is merged with new defaults via `deepMerge`. Delete `data.kv/` to start fresh.
+
+**Port 8000 already in use**
+Another aio instance (or another app) is using the default port. Use `deno task am stop` to stop a running instance, or run with a different port: `deno task dev -- --port=9000`.
+
+**Hot reload not working**
+Make sure `prod: false` (the default in dev). Only files in `src/` with standard extensions (`.ts`, `.tsx`, `.js`, `.css`) trigger reload.
 
 ---
 

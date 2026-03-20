@@ -147,6 +147,66 @@ import { counter } from './features/counter/index.ts'
 await aio.run({ features: [counter] })
 ```
 
+## Coming from Redux / Zustand / MobX
+
+If you're migrating from a client-side state management library, here's how concepts map:
+
+### Redux → aio
+
+| Redux | aio | Notes |
+|-------|-----|-------|
+| `createSlice()` | `feature()` | One feature = one slice, but with built-in effects, machine, persistence |
+| `slice.reducer` | `methods` or `reduce` | Methods style: mutate directly. Explicit style: object-form handlers |
+| `slice.actions` | Auto-generated | `counter.increment(5)` dispatches directly after `aio.run()` |
+| `configureStore()` | `aio.run({ features })` | Composition, middleware, and DevTools are built-in |
+| `useSelector(s => s.counter)` | `useFeature(counter)` | Auto-scoped to the feature, selective re-renders |
+| `useDispatch()` + `dispatch(action)` | `send.increment()` | Typed, no raw dispatch needed |
+| `createAsyncThunk` | `async` methods or generators | `async save(s) { await fetch(...) }` — no thunk boilerplate |
+| `RTK Query` | `app.db` + effects | SQLite for data, effects for external APIs |
+| Middleware | `beforeReduce` or `middleware: [...]` | Same concept, simpler API |
+| Redux DevTools | `connectDevTools()` | Works with the same browser extension |
+| `persistReducer` (redux-persist) | Automatic | Deno.Kv persistence is built-in, zero config |
+
+**Key difference:** Redux state lives in the browser. aio state lives on the server — the browser gets a synced view via WebSocket. This means persistence, multi-client sync, and offline support are automatic.
+
+### Zustand → aio
+
+| Zustand | aio | Notes |
+|---------|-----|-------|
+| `create((set) => ...)` | `feature('name', { state, methods })` | Similar feel — mutate state directly |
+| `set({ count: 1 })` | `s.count = 1` inside a method | Same Immer-style mutation |
+| `useStore(s => s.count)` | `useFeature(counter)` | Auto-scoped |
+| `persist` middleware | Automatic | Built-in Deno.Kv + SQLite |
+| `devtools` middleware | `connectDevTools()` | Built-in |
+| Multiple stores | Multiple features | `feature('counter', ...)`, `feature('orders', ...)` |
+
+**Key difference:** Zustand is client-only. aio gives you the same DX but state is server-side with real-time sync to all clients.
+
+### Quick example — Redux slice → aio feature
+
+```ts
+// BEFORE: Redux
+const counterSlice = createSlice({
+  name: 'counter',
+  initialState: { count: 0 },
+  reducers: {
+    increment: (state, action) => { state.count += action.payload },
+    reset: (state) => { state.count = 0 },
+  },
+})
+
+// AFTER: aio
+const counter = feature('counter', {
+  state: { count: 0 },
+  methods: {
+    increment(s, by = 1) { s.count += by },
+    reset(s) { s.count = 0 },
+  },
+})
+```
+
+After `aio.run()`, call `counter.increment(5)` directly — no `dispatch()`, no action creators, no selector boilerplate.
+
 ## Mapping existing patterns
 
 | You have | AIO equivalent |
@@ -167,9 +227,9 @@ await aio.run({ features: [counter] })
 | State management (Redux, Zustand) | `feature()` replaces store + slices + selectors |
 | XState / state machines | `machine:` config in `feature()` — enforced transitions |
 | Express middleware | `aio.middleware.create(fn)` — intercepts actions before reduce |
-| Health checks / readiness probes | `GET /__health` — auto-generated, zero config |
+| Health checks / readiness probes | `GET /__aio/health` — auto-generated, zero config |
 | Feature flags | `app.features.enable/disable()` — runtime feature control |
-| DB migrations | `version: N` + `migrations: [...]` — state versioning on restore |
+| DB migrations | `appVersion` string for tracking + `onRestore` callback for state migration |
 
 ## File structure
 
@@ -324,7 +384,7 @@ const users = feature('users', {
     fetch(app) {
       fetch('/api/users')
         .then(r => r.json())
-        .then(data => app.dispatch(users.A.loaded(data)))
+        .then(data => app.dispatch(users.loaded(data)))
     },
   },
 })
@@ -352,50 +412,35 @@ const files = feature('files', {
   execute: {
     readFile(app, payload) {
       Deno.readTextFile(payload.path)
-        .then(content => app.dispatch(files.A.loaded(content)))
+        .then(content => app.dispatch(files.loaded(content)))
     },
   },
 })
 ```
 
-If you need to **import** server-only modules (helper libraries, native bindings, etc.), split the feature into two files:
+If you need **server-only modules**, use async methods — the browser dispatches via WebSocket and never runs the method body:
 
 ```ts
-// features/files/def.ts — browser-safe (state, actions, machine, reduce)
 export const files = feature('files', {
   state: { content: '' },
-  actions: { open: (path: string) => ({ path }), loaded: (content: string) => ({ content }) },
-  effects: { readFile: (path: string) => ({ path }) },
-  machine: false,
-  reduce: {
-    open() {},   // triggers readFile effect via execute
-    loaded(state, payload) { state.content = payload.content },
+  methods: {
+    async open(s, path: string) {
+      s.content = await Deno.readTextFile(path)
+    },
   },
 })
 ```
 
+For third-party server-only imports, use dynamic `import()` inside the method:
+
 ```ts
-// features/files/index.ts — server-only (adds execute)
-import { files } from './def.ts'
-import { openAndRead } from './helpers.ts'  // server-only import — safe here
-export { files }
-
-files.implement((app, effect) => {
-  if (effect.type === 'files:readFile') {
-    openAndRead(effect.payload.path)
-      .then(content => app.dispatch(files.A.loaded(content)))
-  }
-})
+async convert(s, path: string) {
+  const { transform } = await import('some-server-lib')
+  s.content = await transform(path)
+}
 ```
 
-```tsx
-// App.tsx → import { files } from './features/files/def.ts'    (browser-safe)
-// app.ts  → import { files } from './features/files/index.ts'  (full feature)
-```
-
-> **Why the split?** The aio dev server transpiles `.ts` files for the browser but doesn't tree-shake. Top-level `import` of server-only modules crashes the browser. The split keeps server-only imports in a file the browser never loads. This applies to Electron, browser, and Android builds — CLI and service targets run everything server-side and are unaffected.
->
-> **When you don't need the split:** If execute only uses Deno globals (`Deno.readTextFile`, `Deno.Command`, etc.) without importing server-only modules, a single file works fine — globals aren't evaluated until execute is called, and the browser never calls it.
+> **Why this works:** The browser never executes async method bodies — it dispatches `{ type: 'files:open', payload: { args: [path] } }` via WebSocket. The server runs the method. No file splitting needed.
 
 **Timers / polling** — use scheduled effects instead of manual `setInterval`:
 ```ts
@@ -474,26 +519,22 @@ const db = feature('db', {
 })
 ```
 
-### State versioning & migrations
+### App version
 
-Persist state across schema changes:
+Track your app version:
 
 ```ts
 await aio.run({
   features: [counter],
-  version: 3,
-  migrations: [
-    (s) => ({ ...s, counter: { ...s.counter, newField: 0 } }),       // v1→v2
-    (s) => ({ ...s, counter: { ...s.counter, renamed: s.counter.old } }), // v2→v3
-  ],
+  appVersion: '3.0.0',
 })
 ```
 
-Migrations run sequentially on restore. If any migration fails, falls back to initial state.
+`appVersion` is a simple string logged on startup and stored in `__aio.appVersion`. Default is `'0.1.0 (default)'`. Not persisted. For state schema changes, use `onRestore` to transform restored state.
 
 ### Health endpoint
 
-`GET /__health` returns feature status, uptime, and error counts:
+`GET /__aio/health` returns feature status, uptime, and error counts:
 
 ```json
 { "status": "healthy", "uptime": 3600, "features": {
@@ -598,7 +639,7 @@ Any `execute` handler that calls `app.db` must be `async`:
 execute: {
   loadStats(app) {
     const rows = app.db!.query('SELECT ...')
-    app.dispatch(myFeature.A.loaded(rows))
+    app.dispatch(myFeature.loaded(rows))
   },
 },
 
@@ -606,7 +647,7 @@ execute: {
 execute: {
   async loadStats(app) {
     const { rows } = await app.db!.query('SELECT ...')
-    app.dispatch(myFeature.A.loaded(rows))
+    app.dispatch(myFeature.loaded(rows))
   },
 },
 ```

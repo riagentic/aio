@@ -156,7 +156,9 @@ If a CSS file and a TS/TSX file change in the same debounce window, a full `__re
 
 ## am — App Manager
 
-Manage your aio app without `ps`, `kill`, or `curl`. Works for humans and AI agents alike. **AI coding agents: use `am` for all process and state management — don't shell out to raw `curl` or `kill`.**
+Full reference: **[am.md](am.md)**
+
+Manage your aio app without `ps`, `kill`, or `curl`. Quick overview:
 
 ```sh
 deno task am <command> [args] [--flags]
@@ -168,7 +170,7 @@ Output auto-detects: terminal → pretty text, piped → JSON. Override with `--
 
 | Flag | Effect |
 |------|--------|
-| `--app=X` | Target a specific app by ID (default: auto-resolved from `deno.json` name) |
+| `--app=X` | Target a specific app by ID (default: from `deno.json` `appId`) |
 | `--port=N` | Target a specific port (default: from lock file or 8000) |
 | `--wait[=N]` | start/stop: block until complete (default 10s/5s). state: poll every Ns (default 2s) |
 | `--json` | Force JSON output |
@@ -176,7 +178,7 @@ Output auto-detects: terminal → pretty text, piped → JSON. Override with `--
 
 ### Process management (singleton)
 
-Each app has a canonical `appId` — resolved once, used everywhere. Resolution order: `config.appId` > `deno.json "name"` > `config.ui.title` > `'aio-app'`. The ID is slugified (lowercase alphanumeric + hyphens).
+Each app requires `"appId"` in `deno.json` — the single source of truth for app identity. See [am.md](am.md) for full details.
 
 The `singleton` config option controls instance behavior:
 
@@ -253,14 +255,20 @@ Path syntax mirrors TypeScript: `fleet[0].stats.pnl` for traversal, `{id,name}` 
 ### Actions
 
 ```sh
-deno task am dispatch Increment by=1       # type + key=value payload
-deno task am dispatch Reset                # no payload
-deno task am dispatch --body='{"type":"BUY","payload":{"symbol":"AAPL"}}'  # raw JSON
+# Methods — positional args (no =)
+deno task am dispatch counter:increment 5                    # { payload: { args: [5] } }
+deno task am dispatch counter:reset                          # { payload: { args: [] } }
+
+# Actions — named payload (with =)
+deno task am dispatch counter:BulkUpdate items='[1,2]'       # { payload: { items: [1,2] } }
+
+# Raw JSON
+deno task am dispatch --body='{"type":"counter:increment","payload":{"args":[5]}}'
 deno task am actions                       # last 20 actions from history
 deno task am actions 50                    # last 50 actions
 ```
 
-Values in `key=value` pairs are auto-parsed: numbers, booleans, `null` via `JSON.parse` fallback, strings otherwise.
+Positional args (without `=`) are wrapped as `{ args: [...] }` — use for methods. Named `key=value` pairs produce `{ key: value }` — use for actions. Values are auto-parsed: numbers, booleans, `null`, JSON arrays/objects, strings.
 
 ### Time-travel
 
@@ -324,58 +332,56 @@ deno task am health && echo "up" || echo "down"
 deno task am state | jq '.fleet[0].stats'
 
 # Dispatch and verify
-deno task am dispatch BUY symbol=AAPL qty=10
+deno task am dispatch portfolio:buy symbol=AAPL qty=10
 deno task am state portfolio.positions
 ```
 
 ## Trojan — Control API
 
-aio exposes a REST API at `/__trojan/*` for full inspection and control. Available in both dev and prod modes — use `am` or `curl` directly.
+aio exposes a REST API at `/__aio/trojan/*` for full inspection and control. Available in both dev and prod modes — use `am` or `curl` directly.
 
 ### Inspect (GET)
 
 ```sh
-curl localhost:8000/__trojan/state        # raw full state (unfiltered)
-curl localhost:8000/__trojan/ui           # UI state (default view)
-curl localhost:8000/__trojan/ui?user=alice # UI state for specific user
-curl localhost:8000/__trojan/clients      # connected WS clients
-curl localhost:8000/__trojan/history      # time-travel entries
-curl localhost:8000/__trojan/schedules    # active timer/cron IDs
-curl localhost:8000/__trojan/metrics      # uptime, connections, schedule count
-curl localhost:8000/__trojan/config       # port, title, expose, authMode, prod
-curl localhost:8000/__trojan/health       # feature health (v0.5): status, enabled, errors per feature
+curl localhost:8000/__aio/trojan/state        # raw full state (unfiltered)
+curl localhost:8000/__aio/trojan/ui           # UI state (default view)
+curl localhost:8000/__aio/trojan/ui?user=alice # UI state for specific user
+curl localhost:8000/__aio/trojan/clients      # connected WS clients
+curl localhost:8000/__aio/trojan/history      # time-travel entries
+curl localhost:8000/__aio/trojan/schedules    # active timer/cron IDs
+curl localhost:8000/__aio/trojan/metrics      # uptime, connections, schedule count
+curl localhost:8000/__aio/trojan/config       # port, title, expose, authMode, prod
+curl localhost:8000/__aio/trojan/health       # feature health (v0.5): status, enabled, errors per feature
 ```
 
 ### Control (POST)
 
 ```sh
+# All POST endpoints require X-AIO: 1 header (CSRF protection)
+
 # Dispatch action
-curl -X POST localhost:8000/__trojan/dispatch \
-  -H 'Content-Type: application/json' \
+curl -X POST localhost:8000/__aio/trojan/dispatch \
+  -H 'X-AIO: 1' -H 'Content-Type: application/json' \
   -d '{"type":"INCREMENT","payload":{"by":1}}'
 
-# Dispatch as specific user
-curl -X POST localhost:8000/__trojan/dispatch \
-  -d '{"type":"BUY","payload":{},"user":{"id":"alice","role":"admin"}}'
-
 # Replace state
-curl -X POST localhost:8000/__trojan/snapshot \
+curl -X POST localhost:8000/__aio/trojan/snapshot -H 'X-AIO: 1' \
   -d '{"counter":99}'
 
-# Time-travel commands
-curl -X POST localhost:8000/__trojan/tt -d '{"cmd":"undo"}'
-curl -X POST localhost:8000/__trojan/tt -d '{"cmd":"redo"}'
-curl -X POST localhost:8000/__trojan/tt -d '{"cmd":"goto","arg":3}'
+# Time-travel commands (dev only — returns 403 in prod)
+curl -X POST localhost:8000/__aio/trojan/tt -H 'X-AIO: 1' -d '{"cmd":"undo"}'
+curl -X POST localhost:8000/__aio/trojan/tt -H 'X-AIO: 1' -d '{"cmd":"redo"}'
+curl -X POST localhost:8000/__aio/trojan/tt -H 'X-AIO: 1' -d '{"cmd":"goto","arg":3}'
 
-# SQL query (if db configured) — read-only, no PRAGMA/multi-statement/CTEs
-curl -X POST localhost:8000/__trojan/sql \
+# SQL query (if db configured) — SELECT only
+curl -X POST localhost:8000/__aio/trojan/sql -H 'X-AIO: 1' \
   -d '{"query":"SELECT * FROM users LIMIT 10"}'
 
 # Force persist to KV/SQLite
-curl -X POST localhost:8000/__trojan/persist
+curl -X POST localhost:8000/__aio/trojan/persist -H 'X-AIO: 1'
 ```
 
-All endpoints return JSON. Errors return `{"error":"..."}` with appropriate status codes. Auth is inherited — tokens required when `--expose` is active.
+All POST endpoints require the `X-AIO: 1` header. All endpoints return JSON. Errors return `{"error":"..."}` with appropriate status codes. Auth is inherited — tokens required when `--expose` is active.
 
 ## HTTP endpoints
 
@@ -385,10 +391,10 @@ All endpoints return JSON. Errors return `{"error":"..."}` with appropriate stat
 | `/ws` | always | WebSocket — state sync, action dispatch, delta broadcasts, TT commands |
 | `/__aio/ui.js` | dev only | Live-transpiled browser.ts — useAio, WS client, page(), msg() |
 | `/__aio/error` | dev only | Error overlay — fetches last transpile error |
-| `/__snapshot` GET | always | Full raw state dump — backup, debugging, export |
-| `/__snapshot` POST | always | Load state from JSON — restore, import, testing |
+| `/__aio/snapshot` GET | always | Full raw state dump — backup, debugging, export |
+| `/__aio/snapshot` POST | always | Load state from JSON — restore, import, testing |
 | `/app.js` `/style.css` | prod only | Pre-bundled dist assets from `dist/` |
-| `/__trojan/*` | always | Full control REST API — inspect state, dispatch, time-travel, SQL (see [Trojan](#trojan--control-api)) |
+| `/__aio/trojan/*` | always (dev-only endpoints return 403 in prod) | Control REST API — inspect state, dispatch, SQL. POST requires `X-AIO` header. (see [Trojan](#trojan--control-api)) |
 
 All endpoints inherit auth (token/user checks run before routing). In `--expose` mode, tokens are required.
 
@@ -408,4 +414,4 @@ All endpoints inherit auth (token/user checks run before routing). In `--expose`
 | Build Error: could not find 'npm:esbuild' | Add `"esbuild": "npm:esbuild@^0.24"` to deno.json imports, then `deno install` |
 | `am status` says "stopped" | No running process. Stale lock file auto-cleaned. Check `.aio.log` for errors |
 | `am start` says "port in use" | Non-aio process on the port. Use `--port=N`. (aio zombies are killed automatically) |
-| `am` targets wrong app | Use `--app=X` to specify the app ID, or check `deno.json "name"` |
+| `am` targets wrong app | Check `"appId"` in `deno.json` — must match between app and am |

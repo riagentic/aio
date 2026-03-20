@@ -297,7 +297,7 @@ Everything comes from a single import. In **deno.json**, `"aio"` maps to `jsr:@r
 
 **JSR (standard)** — `deno add jsr:@riagentic/aio` — recommended for new projects:
 
-- **Always up to date** — `deno add jsr:@riagentic/aio@^0.9` pins the minor, patches auto
+- **Always up to date** — `deno add jsr:@riagentic/aio@^1.0` pins the minor, patches auto
 - **Full toolchain** — dev server, build system, app manager, all compile targets via `jsr:@riagentic/aio/src/am` and `jsr:@riagentic/aio/src/build`
 - **Standard Deno workflow** — no framework files in your repo
 

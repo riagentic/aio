@@ -149,7 +149,7 @@ execute: {
     const { rows } = await app.db!.query<{ customer: string; revenue: number }>(
       'SELECT customer, SUM(total) as revenue FROM orders GROUP BY customer ORDER BY revenue DESC'
     )
-    app.dispatch(myFeature.A.reportLoaded(rows))
+    app.dispatch(myFeature.reportLoaded(rows))
   },
 
   async archiveOld(app) {
@@ -248,10 +248,10 @@ app.loadSnapshot!('{"counter": 42}')   // replaces state, broadcasts to all clie
 
 ```sh
 # Export
-curl http://localhost:8000/__snapshot          # GET → JSON state
+curl http://localhost:8000/__aio/snapshot          # GET → JSON state
 
 # Import (X-AIO header required for CSRF protection)
-curl -X POST http://localhost:8000/__snapshot \
+curl -X POST http://localhost:8000/__aio/snapshot \
   -H 'Content-Type: application/json' \
   -H 'X-AIO: 1' \
   -d '{"counter": 42}'                        # replaces state

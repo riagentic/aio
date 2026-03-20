@@ -1,4 +1,4 @@
-import { assertEquals } from 'https://deno.land/std@0.224.0/assert/mod.ts'
+import { assertEquals } from '@std/assert'
 import { slugify, formatMb, writePlaceholderIcon, copyDir } from '../src/build-helpers.ts'
 import { join } from '@std/path'
 

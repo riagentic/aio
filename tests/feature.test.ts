@@ -1,4 +1,4 @@
-import { assertEquals, assertThrows } from 'https://deno.land/std@0.224.0/assert/mod.ts'
+import { assertEquals, assertThrows } from '@std/assert'
 import { feature, composeFeatures, testFeature, tagSource } from '../src/feature.ts'
 import { schedule } from '../src/schedule.ts'
 import { aio } from '../src/aio.ts'
@@ -33,21 +33,21 @@ const counter = feature('counter', {
     increment(state, payload) {
       state.count += payload.by
       state.lastUpdatedAt = Date.now()
-      return [counter.E.log(`incremented to ${state.count}`)]
+      return [counter.__aio.effects.log(`incremented to ${state.count}`)]
     },
     decrement(state, payload) {
       state.count -= payload.by
       state.lastUpdatedAt = Date.now()
     },
     reset(state)   { state.count = 0 },
-    save(state)    { return [counter.E.persist(state.count)] },
+    save(state)    { return [counter.__aio.effects.persist(state.count)] },
     saved()        {},
     saveFailed(state, payload) { state.error = payload.error },
-    retry(state)   { state.error = null; return [counter.E.persist(state.count)] },
+    retry(state)   { state.error = null; return [counter.__aio.effects.persist(state.count)] },
     dismiss(state) { state.error = null },
   },
   execute: {
-    persist(app) { app.dispatch(counter.A.saved()) },
+    persist(app) { app.dispatch(counter.saved()) },
     log()        { /* noop in tests */ },
   },
   selectors: {
@@ -58,43 +58,43 @@ const counter = feature('counter', {
 
 // ── A catalog ──
 
-Deno.test('feature: A labels are featureName:actionKey format', () => {
-  assertEquals(counter.A.increment.type, 'counter:increment')
-  assertEquals(counter.A.decrement.type, 'counter:decrement')
-  assertEquals(counter.A.reset.type, 'counter:reset')
-  assertEquals(counter.A.save.type, 'counter:save')
-  assertEquals(counter.A.saved.type, 'counter:saved')
-  assertEquals(counter.A.saveFailed.type, 'counter:saveFailed')
+Deno.test('feature: action labels are featureName:actionKey format', () => {
+  assertEquals(counter.increment.type, 'counter:increment')
+  assertEquals(counter.decrement.type, 'counter:decrement')
+  assertEquals(counter.reset.type, 'counter:reset')
+  assertEquals(counter.save.type, 'counter:save')
+  assertEquals(counter.saved.type, 'counter:saved')
+  assertEquals(counter.saveFailed.type, 'counter:saveFailed')
 })
 
-Deno.test('feature: A creators produce { type, payload }', () => {
-  assertEquals(counter.A.increment(5), { type: 'counter:increment', payload: { by: 5 } })
-  assertEquals(counter.A.decrement(3), { type: 'counter:decrement', payload: { by: 3 } })
-  assertEquals(counter.A.reset(), { type: 'counter:reset', payload: {} })
-  assertEquals(counter.A.save(), { type: 'counter:save', payload: {} })
+Deno.test('feature: action creators produce { type, payload }', () => {
+  assertEquals(counter.increment(5), { type: 'counter:increment', payload: { by: 5 } })
+  assertEquals(counter.decrement(3), { type: 'counter:decrement', payload: { by: 3 } })
+  assertEquals(counter.reset(), { type: 'counter:reset', payload: {} })
+  assertEquals(counter.save(), { type: 'counter:save', payload: {} })
 })
 
 Deno.test('feature: default params preserved', () => {
-  assertEquals(counter.A.increment(), { type: 'counter:increment', payload: { by: 1 } })
+  assertEquals(counter.increment(), { type: 'counter:increment', payload: { by: 1 } })
 })
 
-Deno.test('feature: E labels and creators', () => {
-  assertEquals(counter.E.persist.type, 'counter:persist')
-  assertEquals(counter.E.log.type, 'counter:log')
-  assertEquals(counter.E.persist(42), { type: 'counter:persist', payload: { value: 42 } })
-  assertEquals(counter.E.log('hi'), { type: 'counter:log', payload: { message: 'hi' } })
+Deno.test('feature: effect labels and creators', () => {
+  assertEquals(counter.__aio.effects.persist.type, 'counter:persist')
+  assertEquals(counter.__aio.effects.log.type, 'counter:log')
+  assertEquals(counter.__aio.effects.persist(42), { type: 'counter:persist', payload: { value: 42 } })
+  assertEquals(counter.__aio.effects.log('hi'), { type: 'counter:log', payload: { message: 'hi' } })
 })
 
 Deno.test('feature: name and prefix', () => {
-  assertEquals(counter.name, 'counter')
-  assertEquals(counter._config.prefix, 'counter')
+  assertEquals(counter.__aio.id, 'counter')
+  assertEquals(counter.__aio.id, 'counter')
 })
 
 Deno.test('feature: selectors', () => {
   // selectors receive feature's own slice — auto-scoped
   const state = { counter: { count: 42, _status: 'idle' } }
-  assertEquals(counter.selectors.getCount!(state), 42)
-  assertEquals(counter.selectors.isIdle!(state), true)
+  assertEquals(counter.__aio.selectors.getCount!(state), 42)
+  assertEquals(counter.__aio.selectors.isIdle!(state), true)
 })
 
 // ── Machine validation ──
@@ -160,8 +160,8 @@ Deno.test('feature: simple machine accepted', () => {
       set(state, payload) { state.x = payload.x },
     },
   })
-  assertEquals(f.name, 'simple')
-  assertEquals(f.A.set.type, 'simple:set')
+  assertEquals(f.__aio.id, 'simple')
+  assertEquals(f.set.type, 'simple:set')
 })
 
 Deno.test('feature: foreign actions in machine allowed', () => {
@@ -179,8 +179,8 @@ Deno.test('feature: foreign actions in machine allowed', () => {
     machine: {
       initial: 'idle',
       states: {
-        idle: { placeOrder: 'waiting', [dc.A.priceUpdated.type]: 'idle' },
-        waiting: { [dc.A.priceUpdated.type]: 'idle' },
+        idle: { placeOrder: 'waiting', [dc.priceUpdated.type]: 'idle' },
+        waiting: { [dc.priceUpdated.type]: 'idle' },
       },
     },
     reduce: {
@@ -188,7 +188,7 @@ Deno.test('feature: foreign actions in machine allowed', () => {
     },
   })
 
-  assertEquals(te._config.foreignActions, ['dc:priceUpdated'])
+  assertEquals(te.__aio.foreignActions, ['dc:priceUpdated'])
 })
 
 // ── composeFeatures() ──
@@ -213,7 +213,7 @@ Deno.test('compose: simple machine has no _status', () => {
 
 Deno.test('compose: reduce routes action to correct feature', () => {
   const composed = composeFeatures([counter])
-  const result = composed.reduce(composed.initialState, counter.A.increment(5))
+  const result = composed.reduce(composed.initialState, counter.increment(5))
   const s = result.state.counter as Record<string, unknown>
   assertEquals(s.count, 5)
   assertEquals(s._status, 'idle')
@@ -224,7 +224,7 @@ Deno.test('compose: reduce routes action to correct feature', () => {
 Deno.test('compose: machine guard blocks invalid transitions', () => {
   const composed = composeFeatures([counter])
   // Can't 'saved' from idle — only valid in 'saving'
-  const result = composed.reduce(composed.initialState, counter.A.saved())
+  const result = composed.reduce(composed.initialState, counter.saved())
   assertEquals(result.effects.length, 0)
   assertEquals((result.state.counter as Record<string, unknown>).count, 0) // unchanged
 })
@@ -233,26 +233,26 @@ Deno.test('compose: state machine transitions correctly', () => {
   const composed = composeFeatures([counter])
 
   // idle → save → saving
-  const r1 = composed.reduce(composed.initialState, counter.A.save())
+  const r1 = composed.reduce(composed.initialState, counter.save())
   assertEquals((r1.state.counter as Record<string, unknown>)._status, 'saving')
   assertEquals(r1.effects.length, 1) // persist effect
 
   // saving → saved → idle
-  const r2 = composed.reduce(r1.state, counter.A.saved())
+  const r2 = composed.reduce(r1.state, counter.saved())
   assertEquals((r2.state.counter as Record<string, unknown>)._status, 'idle')
 
   // saving → saveFailed → error
-  const r3 = composed.reduce(r1.state, counter.A.saveFailed('disk full'))
+  const r3 = composed.reduce(r1.state, counter.saveFailed('disk full'))
   assertEquals((r3.state.counter as Record<string, unknown>)._status, 'error')
   assertEquals((r3.state.counter as Record<string, unknown>).error, 'disk full')
 
   // error → retry → saving
-  const r4 = composed.reduce(r3.state, counter.A.retry())
+  const r4 = composed.reduce(r3.state, counter.retry())
   assertEquals((r4.state.counter as Record<string, unknown>)._status, 'saving')
   assertEquals((r4.state.counter as Record<string, unknown>).error, null) // cleared
 
   // error → dismiss → idle
-  const r5 = composed.reduce(r3.state, counter.A.dismiss())
+  const r5 = composed.reduce(r3.state, counter.dismiss())
   assertEquals((r5.state.counter as Record<string, unknown>)._status, 'idle')
 })
 
@@ -271,7 +271,7 @@ Deno.test('compose: multiple features isolated', () => {
   })
 
   const composed = composeFeatures([a, b])
-  const r = composed.reduce(composed.initialState, a.A.inc())
+  const r = composed.reduce(composed.initialState, a.inc())
   assertEquals((r.state.alpha as Record<string, number>).x, 1)
   assertEquals((r.state.beta as Record<string, number>).y, 0)
 })
@@ -291,7 +291,7 @@ Deno.test('compose: foreign action routing', () => {
     actions: { noop: () => ({}) },
     machine: {
       initial: 'idle',
-      states: { idle: { noop: 'idle', [dc.A.priceUpdated.type]: 'idle' } },
+      states: { idle: { noop: 'idle', [dc.priceUpdated.type]: 'idle' } },
     },
     reduce: {
       ['dc:priceUpdated'](state, payload) { state.lastPrice = payload.price },
@@ -299,7 +299,7 @@ Deno.test('compose: foreign action routing', () => {
   })
 
   const composed = composeFeatures([dc, te])
-  const r = composed.reduce(composed.initialState, dc.A.priceUpdated(42000))
+  const r = composed.reduce(composed.initialState, dc.priceUpdated(42000))
 
   // DC updates its own state
   assertEquals((r.state.dc as Record<string, unknown>).price, 42000)
@@ -317,7 +317,7 @@ Deno.test('compose: executor scoped dispatch blocks foreign actions', () => {
     actions: { go: () => ({}) },
     effects: { run: () => ({}) },
     machine: false,
-    reduce: { go(_s) { return [a.E.run()] } },
+    reduce: { go(_s) { return [a.__aio.effects.run()] } },
     execute: {
       run(app) {
         // Try to dispatch foreign action
@@ -521,46 +521,6 @@ Deno.test('aio.middleware.metrics: tracks errors field initialized to 0', () => 
   delete (globalThis as Record<string, unknown>).__aioMetrics
 })
 
-// ── implement() — deferred executor attachment ──────────────────────
-
-Deno.test('implement: attaches execute to feature without one', () => {
-  const bare = feature('bare', {
-    state: { v: 0 },
-    actions: { set: (v: number) => ({ v }) },
-    effects: { log: (msg: string) => ({ msg }) },
-    machine: false,
-    reduce: {
-      set(state, payload) { state.v = payload.v },
-    },
-  })
-  assertEquals(bare._config.execute, undefined)
-
-  let called = false
-  bare.implement((_app, _effect) => { called = true })
-  assertEquals(typeof bare._config.execute, 'function')
-
-  // Call it to verify it's wired
-  bare._config.execute!({ dispatch: () => {}, getState: () => ({}) }, { type: 'bare:log', payload: { msg: 'hi' } })
-  assertEquals(called, true)
-})
-
-Deno.test('implement: overrides existing execute', () => {
-  let which = ''
-  const f = feature('over', {
-    state: {},
-    actions: { go: () => ({}) },
-    machine: false,
-    reduce() {},
-    execute() { which = 'original' },
-  })
-  f._config.execute!({ dispatch: () => {}, getState: () => ({}) }, { type: 'over:go', payload: {} })
-  assertEquals(which, 'original')
-
-  f.implement(() => { which = 'replaced' })
-  f._config.execute!({ dispatch: () => {}, getState: () => ({}) }, { type: 'over:go', payload: {} })
-  assertEquals(which, 'replaced')
-})
-
 // ── Fix A: ScheduleEffect in reduce return ──
 
 Deno.test('reduce: accepts ScheduleEffect in effects array', () => {
@@ -572,14 +532,14 @@ Deno.test('reduce: accepts ScheduleEffect in effects array', () => {
     reduce: {
       tick() {
         return [
-          f.E.log('hello'),
+          f.__aio.effects.log('hello'),
           schedule.after('sched:retry', 1000, { type: 'sched:tick', payload: {} }),
         ]
       },
     },
   })
   const composed = composeFeatures([f])
-  const result = composed.reduce(composed.initialState, f.A.tick())
+  const result = composed.reduce(composed.initialState, f.tick())
   assertEquals(result.effects.length, 2)
   assertEquals(result.effects[0]!.type, 'sched:log')
   assertEquals(result.effects[1]!.type, '__schedule')
@@ -595,7 +555,7 @@ Deno.test('compose: dispatchTo allows dispatching to allowlisted features', () =
     effects: { sync: () => ({}) },
     machine: false,
     dispatchTo: ['beta'],
-    reduce: { go() { return [alpha.E.sync()] } },
+    reduce: { go() { return [alpha.__aio.effects.sync()] } },
     execute: {
       sync(app) { app.dispatch({ type: 'beta:update', payload: {} }) },
     },
@@ -625,7 +585,7 @@ Deno.test('compose: dispatchTo blocks non-allowlisted features', () => {
     effects: { bad: () => ({}) },
     machine: false,
     dispatchTo: ['gamma'],  // beta NOT in allowlist
-    reduce: { go() { return [alpha.E.bad()] } },
+    reduce: { go() { return [alpha.__aio.effects.bad()] } },
     execute: {
       bad(app) { app.dispatch({ type: 'beta:update', payload: {} }) },
     },
@@ -658,7 +618,7 @@ Deno.test('compose: dispatch without dispatchTo blocks all foreign actions', () 
     effects: { bad: () => ({}) },
     machine: false,
     // no dispatchTo
-    reduce: { go() { return [alpha.E.bad()] } },
+    reduce: { go() { return [alpha.__aio.effects.bad()] } },
     execute: {
       bad(app) { app.dispatch({ type: 'beta:update', payload: {} }) },
     },
@@ -704,7 +664,7 @@ Deno.test('compose: machine: false does not receive foreign actions', () => {
     },
   })
   const composed = composeFeatures([alpha, beta])
-  const result = composed.reduce(composed.initialState, alpha.A.fire())
+  const result = composed.reduce(composed.initialState, alpha.fire())
   // beta should NOT have received the action — machine: false can't declare foreign listeners
   assertEquals(betaReduced, false)
   assertEquals((result.state.beta as Record<string, unknown>).heard, false)
@@ -724,7 +684,7 @@ Deno.test('compose: machine with foreign action declaration DOES receive foreign
     machine: {
       initial: 'idle',
       states: {
-        idle: { update: 'idle', [alpha.A.fire.type]: 'idle' },
+        idle: { update: 'idle', [alpha.fire.type]: 'idle' },
       },
     },
     reduce: {
@@ -733,7 +693,7 @@ Deno.test('compose: machine with foreign action declaration DOES receive foreign
     },
   })
   const composed = composeFeatures([alpha, beta])
-  const result = composed.reduce(composed.initialState, alpha.A.fire())
+  const result = composed.reduce(composed.initialState, alpha.fire())
   assertEquals(betaReduced, true)
   assertEquals((result.state.beta as Record<string, unknown>).heard, true)
 })
@@ -801,7 +761,7 @@ Deno.test('feature persist.exclude: sets persistExclude on internals', () => {
     persist: { exclude: ['htmlCache'] },
   })
 
-  assertEquals(f._config.persistExclude, ['htmlCache'])
+  assertEquals(f.__aio.persistExclude, ['htmlCache'])
 })
 
 Deno.test('feature persist.exclude: multiple fields', () => {
@@ -813,7 +773,7 @@ Deno.test('feature persist.exclude: multiple fields', () => {
     persist: { exclude: ['rendered', 'thumbnail'] },
   })
 
-  assertEquals(f._config.persistExclude, ['rendered', 'thumbnail'])
+  assertEquals(f.__aio.persistExclude, ['rendered', 'thumbnail'])
 })
 
 Deno.test('feature persist.exclude: absent by default', () => {
@@ -823,5 +783,106 @@ Deno.test('feature persist.exclude: absent by default', () => {
     machine: false,
   })
 
-  assertEquals(f._config.persistExclude, undefined)
+  assertEquals(f.__aio.persistExclude, undefined)
+})
+
+// ── Mixed mode: methods + actions + effects in one feature ──
+
+Deno.test('mixed: methods + actions coexist in one feature', () => {
+  const f = feature('mixed', {
+    state: { count: 0, label: '' },
+    methods: {
+      increment(s: { count: number }, by = 1) { s.count += by },
+    },
+    actions: {
+      SetLabel: (label: string) => ({ label }),
+    },
+    reduce: {
+      SetLabel(state: { label: string }, payload: { label: string }) { state.label = payload.label },
+    },
+  })
+
+  // Method works
+  assertEquals(f.increment(), { type: 'mixed:increment', payload: { args: [] } })
+  assertEquals(f.increment(5), { type: 'mixed:increment', payload: { args: [5] } })
+
+  // Action works (explicit actions are flattened at runtime)
+  assertEquals((f as unknown as Record<string, CallableFunction>).SetLabel!('hello'), { type: 'mixed:SetLabel', payload: { label: 'hello' } })
+})
+
+Deno.test('mixed: methods + actions + effects compose correctly', () => {
+  const effectsRun: string[] = []
+  const f = feature('shop', {
+    state: { items: [] as string[], synced: false },
+    methods: {
+      add(s: { items: string[] }, item: string) { s.items.push(item) },
+      clear(s: { items: string[] }) { s.items = [] },
+    },
+    actions: {
+      MarkSynced: () => ({}),
+    },
+    effects: {
+      SyncToServer: (items: string[]) => ({ items }),
+    },
+    reduce: {
+      MarkSynced(state: { synced: boolean }) { state.synced = true },
+    },
+    execute: {
+      SyncToServer(_app: unknown, payload: { items: string[] }) { effectsRun.push(`sync:${payload.items.join(',')}`) },
+    },
+  })
+
+  const composed = composeFeatures([f])
+  let state = composed.initialState
+
+  // Method dispatch works
+  state = composed.reduce(state, f.add!('apple')).state
+  assertEquals((state.shop as { items: string[] }).items, ['apple'])
+
+  // Action dispatch works (explicit actions flattened at runtime)
+  const markSynced = (f as unknown as Record<string, CallableFunction>).MarkSynced as () => { type: string; payload: unknown }
+  state = composed.reduce(state, markSynced()).state
+  assertEquals((state.shop as { synced: boolean }).synced, true)
+
+  // Effect from reduce works
+  assertEquals((f.__aio.effects as unknown as Record<string, { type: string }>).SyncToServer!.type, 'shop:SyncToServer')
+})
+
+Deno.test('mixed: name collision between method and action throws', () => {
+  assertThrows(
+    () => feature('bad', {
+      state: {},
+      methods: { save(s: Record<string, unknown>) { s.saved = true } },
+      actions: { save: () => ({}) },
+    }),
+    Error,
+    'collides with method',
+  )
+})
+
+Deno.test('mixed: name collision between method and effect throws', () => {
+  assertThrows(
+    () => feature('bad', {
+      state: {},
+      methods: { sync(s: Record<string, unknown>) { s.synced = true } },
+      effects: { sync: () => ({}) },
+    }),
+    Error,
+    'collides with method',
+  )
+})
+
+Deno.test('mixed: name collision between generator and action throws', () => {
+  assertThrows(
+    // deno-lint-ignore no-explicit-any
+    () => feature('bad' as any, {
+      state: {},
+      methods: { noop() {} },
+      // deno-lint-ignore no-explicit-any
+      generators: { *process(_ctx: any): any { yield 1 } },
+      actions: { process: () => ({}) },
+    } as any),
+    Error,
+    'collides with generator',
+  )
 })

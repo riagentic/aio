@@ -1,6 +1,6 @@
 // reactive.test.ts — tests for feature({ methods }) reactive style
 // (formerly reactive() — removed in v0.8, feature({ methods }) is identical)
-import { assertEquals, assertThrows } from 'https://deno.land/std@0.208.0/assert/mod.ts'
+import { assertEquals, assertThrows } from '@std/assert'
 import { composeFeatures, testFeature, feature, bindFeature } from '../src/feature.ts'
 import { schedule } from '../src/schedule.ts'
 import { call } from '../src/feature-impl.ts'
@@ -43,12 +43,12 @@ Deno.test('feature(methods): sync method mutates state', () => {
     },
   })
 
-  assertEquals(counter.name, 'counter')
-  assertEquals(counter.A.increment!.type, 'counter:increment')
+  assertEquals(counter.__aio.id, 'counter')
+  assertEquals(counter.increment!.type, 'counter:increment')
 
   const composed = composeFeatures([counter])
   let state = composed.initialState
-  state = composed.reduce(state, counter.A.increment!(5)).state
+  state = composed.reduce(state, counter.increment!(5)).state
   assertEquals((state.counter as { count: number }).count, 5)
 })
 
@@ -63,10 +63,10 @@ Deno.test('feature(methods): multiple sync mutations in sequence', () => {
 
   const composed = composeFeatures([counter])
   let state = composed.initialState
-  state = composed.reduce(state, counter.A.increment!(3)).state
-  state = composed.reduce(state, counter.A.increment!(7)).state
+  state = composed.reduce(state, counter.increment!(3)).state
+  state = composed.reduce(state, counter.increment!(7)).state
   assertEquals((state.counter as { count: number }).count, 10)
-  state = composed.reduce(state, counter.A.reset!()).state
+  state = composed.reduce(state, counter.reset!()).state
   assertEquals((state.counter as { count: number }).count, 0)
 })
 
@@ -79,10 +79,10 @@ Deno.test('feature(methods): generates correct action types', () => {
     },
   })
 
-  assertEquals(cart.A.addItem!.type, 'cart:addItem')
-  assertEquals(cart.A.clear!.type, 'cart:clear')
+  assertEquals(cart.addItem!.type, 'cart:addItem')
+  assertEquals(cart.clear!.type, 'cart:clear')
 
-  const action = cart.A.addItem!('book')
+  const action = cart.addItem!('book')
   assertEquals(action.type, 'cart:addItem')
   assertEquals(action.payload, { args: ['book'] })
 })
@@ -98,7 +98,7 @@ Deno.test('feature(methods): nested object mutation', () => {
 
   const composed = composeFeatures([app])
   let state = composed.initialState
-  state = composed.reduce(state, app.A.setTheme!('dark')).state
+  state = composed.reduce(state, app.setTheme!('dark')).state
   assertEquals((state.app as any).user.settings.theme, 'dark')
 })
 
@@ -114,13 +114,13 @@ Deno.test('feature(methods): array mutations via sync methods', () => {
 
   const composed = composeFeatures([list])
   let state = composed.initialState
-  state = composed.reduce(state, list.A.add!('a')).state
-  state = composed.reduce(state, list.A.add!('b')).state
-  state = composed.reduce(state, list.A.add!('c')).state
+  state = composed.reduce(state, list.add!('a')).state
+  state = composed.reduce(state, list.add!('b')).state
+  state = composed.reduce(state, list.add!('c')).state
   assertEquals((state.list as any).items, ['a', 'b', 'c'])
-  state = composed.reduce(state, list.A.remove!(1)).state
+  state = composed.reduce(state, list.remove!(1)).state
   assertEquals((state.list as any).items, ['a', 'c'])
-  state = composed.reduce(state, list.A.clear!()).state
+  state = composed.reduce(state, list.clear!()).state
   assertEquals((state.list as any).items, [])
 })
 
@@ -138,7 +138,7 @@ Deno.test('feature(methods): async method emits __exec effect', () => {
   })
 
   const composed = composeFeatures([loader])
-  const result = composed.reduce(composed.initialState, loader.A.load!())
+  const result = composed.reduce(composed.initialState, loader.load!() as any)
   assertEquals(result.effects.length, 1)
   assertEquals((result.effects[0] as any).type, 'loader:__exec')
 })
@@ -160,7 +160,7 @@ Deno.test('feature(methods): async method with live Proxy writes state', async (
   const composed = composeFeatures([loader])
   const app = createApp(composed)
 
-  app.dispatch(loader.A.fetchData!())
+  app.dispatch(loader.fetchData!() as any)
   await delay(50)
 
   assertEquals((app.state.loader as any).data, 'hello world')
@@ -184,7 +184,7 @@ Deno.test('feature(methods): async method reads fresh state', async () => {
   const composed = composeFeatures([store])
   const app = createApp(composed)
 
-  app.dispatch(store.A.compute!())
+  app.dispatch(store.compute!() as any)
   await delay(50)
 
   assertEquals((app.state.store as any).value, 42)
@@ -205,7 +205,7 @@ Deno.test('feature(methods): async array mutation via Proxy', async () => {
   const composed = composeFeatures([list])
   const app = createApp(composed)
 
-  app.dispatch(list.A.addAsync!('b'))
+  app.dispatch(list.addAsync!('b') as any)
   await delay(50)
 
   assertEquals((app.state.list as any).items, ['a', 'b'])
@@ -229,7 +229,7 @@ Deno.test('feature(methods): async consecutive writes are batched into one actio
   const composed = composeFeatures([counter])
   const app = createApp(composed)
 
-  app.dispatch(counter.A.setAll!())
+  app.dispatch(counter.setAll!() as any)
   await delay(50)
 
   assertEquals((app.state.counter as any).a, 1)
@@ -256,7 +256,7 @@ Deno.test('feature(methods): writes separated by await produce separate batches'
   const composed = composeFeatures([counter])
   const app = createApp(composed)
 
-  app.dispatch(counter.A.staggered!())
+  app.dispatch(counter.staggered!() as any)
   await delay(50)
 
   assertEquals((app.state.counter as any).a, 1)
@@ -288,16 +288,16 @@ Deno.test('feature(methods): machine guards on sync methods', () => {
   const composed = composeFeatures([door])
   let state = composed.initialState
 
-  state = composed.reduce(state, door.A.open!()).state
+  state = composed.reduce(state, door.open!()).state
   assertEquals((state.door as any).opened, true)
   assertEquals((state.door as any)._status, 'open')
 
   // Can't open again
   const before = state
-  state = composed.reduce(state, door.A.open!()).state
+  state = composed.reduce(state, door.open!()).state
   assertEquals(state, before)
 
-  state = composed.reduce(state, door.A.close!()).state
+  state = composed.reduce(state, door.close!()).state
   assertEquals((state.door as any).opened, false)
   assertEquals((state.door as any)._status, 'closed')
 })
@@ -327,7 +327,7 @@ Deno.test('feature(methods): async Proxy writes gated by machine', async () => {
   const app = createApp(composed)
 
   // Trigger load from idle
-  app.dispatch(fetcher.A.load!())
+  app.dispatch(fetcher.load!() as any)
   await delay(50)
 
   assertEquals((app.state.fetcher as any).data, 'result')
@@ -357,13 +357,13 @@ Deno.test('feature(methods): async writes blocked when method not in current mac
   const app = createApp(composed)
 
   // Try to write while locked → should be blocked (write not in locked.on)
-  app.dispatch(gate.A.write!())
+  app.dispatch(gate.write!() as any)
   await delay(50)
   assertEquals((app.state.gate as any).value, 'initial') // unchanged
 
   // Unlock, then write → should work
-  app.dispatch(gate.A.unlock!())
-  app.dispatch(gate.A.write!())
+  app.dispatch(gate.unlock!())
+  app.dispatch(gate.write!() as any)
   await delay(50)
   assertEquals((app.state.gate as any).value, 'written')
 })
@@ -398,8 +398,8 @@ Deno.test('feature(methods): coexists with feature(actions) in composeFeatures',
 
   const composed = composeFeatures([counter, logger])
   let state = composed.initialState
-  state = composed.reduce(state, counter.A.increment!()).state
-  state = composed.reduce(state, logger.A.log!('hello')).state
+  state = composed.reduce(state, counter.increment!()).state
+  state = composed.reduce(state, logger.log!('hello')).state
 
   assertEquals((state.counter as any).count, 1)
   assertEquals((state.logger as any).logs, ['hello'])
@@ -425,7 +425,7 @@ Deno.test('feature(methods): foreign action listeners', () => {
 
   const composed = composeFeatures([counter, watcher])
   let state = composed.initialState
-  state = composed.reduce(state, counter.A.increment!()).state
+  state = composed.reduce(state, counter.increment!()).state
   assertEquals((state.watcher as any).lastSeen, 'increment')
 })
 
@@ -441,7 +441,7 @@ Deno.test('feature(methods): selectors scoped to feature', () => {
   })
 
   const composed = composeFeatures([cart])
-  assertEquals(cart.selectors.total!(composed.initialState), 30)
+  assertEquals(cart.__aio.selectors.total!(composed.initialState), 30)
 })
 
 Deno.test('feature(methods): dispatchTo config', () => {
@@ -451,7 +451,7 @@ Deno.test('feature(methods): dispatchTo config', () => {
     methods: { set(s, v: number) { s.value = v } },
   })
 
-  assertEquals(source._config.crossDispatchPrefixes.has('target'), true)
+  assertEquals(source.__aio.crossDispatchPrefixes.has('target'), true)
 })
 
 Deno.test('feature(methods): onInit and onDestroy hooks', () => {
@@ -489,9 +489,9 @@ Deno.test('feature(methods): action creators flattened onto feature def', () => 
   assertEquals(action.type, 'counter:increment')
   assertEquals(action.payload, { args: [5] })
 
-  // A catalog works (creators only, no PascalCase labels)
-  assertEquals(counter.A.increment!.type, 'counter:increment')
-  assertEquals(counter.A.increment!(3).type, 'counter:increment')
+  // _actions catalog works (creators only, no PascalCase labels)
+  assertEquals(counter.increment!.type, 'counter:increment')
+  assertEquals(counter.increment!(3).type, 'counter:increment')
 })
 
 Deno.test('feature(methods): bindFeature enables direct dispatch and selectors', () => {
@@ -632,7 +632,7 @@ Deno.test('feature(methods): sync method returns schedule effect', () => {
 
   const composed = composeFeatures([timer])
   let state = composed.initialState
-  const result = composed.reduce(state, timer.A.start!())
+  const result = composed.reduce(state, timer.start!())
   state = result.state
 
   assertEquals((state.timer as any).count, 1)
@@ -656,7 +656,7 @@ Deno.test('feature(methods): sync method returns array of schedule effects', () 
   })
 
   const composed = composeFeatures([multi])
-  const result = composed.reduce(composed.initialState, multi.A.setup!())
+  const result = composed.reduce(composed.initialState, multi.setup!())
   assertEquals(result.effects.length, 2)
 })
 
@@ -677,13 +677,13 @@ Deno.test('feature(methods): listensTo auto-generates machine for foreign listen
   })
 
   // Verify machine was auto-generated
-  assertEquals(watcher._config.machine !== false, true)
-  assertEquals(watcher._config.foreignActions.includes('counter:increment'), true)
+  assertEquals(watcher.__aio.machine !== false, true)
+  assertEquals(watcher.__aio.foreignActions.includes('counter:increment'), true)
 
   // Integration: watcher receives counter's actions
   const composed = composeFeatures([counter, watcher])
   let state = composed.initialState
-  state = composed.reduce(state, counter.A.increment!()).state
+  state = composed.reduce(state, counter.increment!()).state
   // Foreign action routed to watcher's reducer
   assertEquals((state.watcher as any).seen, 0) // foreign actions don't auto-call methods — they're machine transitions
 })
@@ -700,7 +700,7 @@ Deno.test('feature(methods): listensTo ignored when explicit machine provided', 
   })
 
   // The explicit machine shouldn't include 'other:action' (it wasn't in states.active.on)
-  assertEquals(f._config.foreignActions.includes('other:action'), false)
+  assertEquals(f.__aio.foreignActions.includes('other:action'), false)
 })
 
 // ── call() inter-feature coordination ────────────────────────────────
@@ -753,7 +753,7 @@ Deno.test('call: async method can call another feature', async () => {
   bindFeature(callee, app.dispatch, app.getState)
   bindFeature(caller, app.dispatch, app.getState)
 
-  app.dispatch(caller.A.callOther!())
+  caller.callOther!()
   await delay(50)
 
   assertEquals((app.state.callee as { name: string }).name, 'from-caller', 'callee should have been called')
@@ -947,8 +947,8 @@ Deno.test('feature(generators): A catalog includes generator action keys', () =>
   })
 
   // camelCase creator with .type property
-  assertEquals(typeof (proc.A as Record<string, unknown>).run, 'function')
-  assertEquals((proc.A.run as unknown as { type: string }).type, 'proc:run')
+  assertEquals(typeof (proc.__aio.actions as Record<string, unknown>).run, 'function')
+  assertEquals(((proc as Record<string, unknown>).run as { type: string }).type, 'proc:run')
 })
 
 Deno.test('feature(generators): generators-only (no methods) works', async () => {
@@ -1078,6 +1078,6 @@ Deno.test('direct calling: call(fn) callback form — passthrough to feature met
   const app = createApp(composed)
   bindFeature(svc, app.dispatch, () => app.state.svc as Record<string, unknown>)
 
-  const out = await call(() => svc.compute(42)) as string
+  const out = await svc.compute(42) as string
   assertEquals(out, 'result-42')
 })

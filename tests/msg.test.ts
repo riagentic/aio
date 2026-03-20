@@ -1,5 +1,5 @@
-import { assertEquals } from 'https://deno.land/std@0.224.0/assert/mod.ts'
-import { msg } from '../mod.ts'
+import { assertEquals } from '@std/assert'
+import { msg } from '../src/msg.ts'
 
 Deno.test('msg() without payload creates empty payload', () => {
   const m = msg('CLICK')

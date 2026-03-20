@@ -1,6 +1,6 @@
 // Sync test — verify browser.ts and standalone.ts inline implementations match canonical
 // If you change msg.ts, factory.ts, or shared hooks, both must be updated to match
-import { assertEquals } from 'https://deno.land/std@0.224.0/assert/mod.ts'
+import { assertEquals } from '@std/assert'
 import { msg } from '../src/msg.ts'
 import { actions } from '../src/factory.ts'
 import { draft } from '../mod.ts'
@@ -51,7 +51,7 @@ Deno.test('sync: browser.ts inline factory matches canonical implementation', as
     'browser.ts _lowerFirst must use same logic as canonical factory.ts')
 
   // Creator must default empty payload to {}
-  assertEquals(src.includes('creators[key](...args) ?? {}'), true,
+  assertEquals(src.includes('creators[key]!(...args) ?? {}'), true,
     'browser.ts factory creator must use `?? {}` default — matches canonical factory.ts')
 })
 

@@ -211,9 +211,9 @@ const checkout = feature('checkout', {
   dispatchTo: [wallet, inventory],
   execute: {
     paymentComplete(app, payload) {
-      app.dispatch(wallet.A.credit(payload.amount))       // allowed
-      app.dispatch(inventory.A.reserve(payload.itemId))   // allowed
-      app.dispatch(shipping.A.schedule(payload.orderId))  // BLOCKED
+      app.dispatch(wallet.credit(payload.amount))       // allowed
+      app.dispatch(inventory.reserve(payload.itemId))   // allowed
+      app.dispatch(shipping.schedule(payload.orderId))  // BLOCKED
     },
   },
 })
@@ -303,9 +303,9 @@ const order = feature('order', {
         processPayment(amount)
       )
 
-      // Dispatch to another feature — use A catalog for action objects in ctx.dispatch
-      yield* ctx.dispatch(inventory.A.reserve(itemId))
-      yield* ctx.dispatch(analytics.A.trackEvent('checkout_complete'))
+      // Dispatch to another feature
+      yield* ctx.dispatch(inventory.reserve(itemId))
+      yield* ctx.dispatch(analytics.trackEvent('checkout_complete'))
 
       yield* ctx.done(s => { s.orderId = payment.id })
     },
@@ -327,7 +327,7 @@ const checkout = feature('checkout', {
   },
   generators: {
     start: function* (ctx, { amount }: { amount: number }) {
-      yield* ctx.dispatch(payment.A.charge(amount))
+      yield* ctx.dispatch(payment.charge(amount))
 
       // Pause until payment completes or times out
       // Pass the bound function directly — no strings
@@ -471,14 +471,14 @@ app.features!.enable('analytics')   // re-enables, dispatches Init, resets state
 2. Feature's effects are not executed
 3. Running flows are cancelled
 4. Scheduled effects are cancelled
-5. Destroy hook runs, `Feature:Destroy` action dispatches
+5. Destroy hook runs, `feature:__destroy` action dispatches
 6. Feature state resets to initial
 
 ### What enable does
 
 1. Feature is re-added to routing
 2. Error counter resets
-3. `Feature:Init` action dispatches
+3. `feature:__init` action dispatches
 4. Init hook runs
 5. State starts fresh from initial state
 
@@ -494,7 +494,7 @@ const health = app.features!.health()
 // ]
 ```
 
-Also available over HTTP: `GET /__health` returns the same data as JSON.
+Also available over HTTP: `GET /__aio/health` returns the same data as JSON.
 
 **Error tracking:** Every blocked `dispatchTo`, onInit/onDestroy failure, or executor crash increments the feature's error count. Check `errors` in health output to spot features that are misbehaving.
 
@@ -596,7 +596,7 @@ Every interaction is visible:
 
 1. **Time-travel panel** (Ctrl+.) — see every action, who dispatched it, and what state changed
 2. **`app.features.health()`** — error counts, last action per feature
-3. **`GET /__health`** — same health data over HTTP
+3. **`GET /__aio/health`** — same health data over HTTP
 4. **`aio.middleware.logger()`** — logs every action with feature prefix
 5. **`dispatchTo` errors** — blocked dispatches are logged with the exact fix needed
 
@@ -604,26 +604,15 @@ The action type prefix (`counter:increment`, `wallet:transfer`) tells you which 
 
 ---
 
-## State versioning and migrations
+## App version
 
-When your feature state shapes evolve over time:
+Track your app version for startup logging:
 
 ```ts
 await aio.run({
   features: [counter, wallet],
-  version: 2,
-  migrations: [
-    // v0 → v1: add wallet feature
-    (state) => ({ ...state, wallet: { balance: 0 } }),
-    // v1 → v2: rename field
-    (state) => {
-      const w = state.wallet as Record<string, unknown>
-      w.totalBalance = w.balance
-      delete w.balance
-      return state
-    },
-  ],
+  appVersion: '2.0.0',
 })
 ```
 
-Migrations run sequentially on restore from persistence. If a migration fails, the framework falls back to initial state and logs the error.
+`appVersion` is a simple string logged on startup and stored in `__aio.appVersion`. Default is `'0.1.0 (default)'`. It is not persisted.

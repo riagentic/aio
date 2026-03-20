@@ -1,7 +1,8 @@
 // Memoized selectors — cache derived state until inputs change
 // Similar to reselect, but simpler and optimized for aio's use case
 
-type Selector<S, R> = (state: S) => R
+/** A function that extracts a value from state */
+export type Selector<S, R> = (state: S) => R
 
 /**
  * Creates a memoized selector that caches results until inputs change.
@@ -30,17 +31,20 @@ export function createSelector<S, R1, Result>(
   selector1: Selector<S, R1>,
   resultFunc: (r1: R1) => Result,
 ): Selector<S, Result>
+/** Memoized selector with 2 inputs */
 export function createSelector<S, R1, R2, Result>(
   selector1: Selector<S, R1>,
   selector2: Selector<S, R2>,
   resultFunc: (r1: R1, r2: R2) => Result,
 ): Selector<S, Result>
+/** Memoized selector with 3 inputs */
 export function createSelector<S, R1, R2, R3, Result>(
   selector1: Selector<S, R1>,
   selector2: Selector<S, R2>,
   selector3: Selector<S, R3>,
   resultFunc: (r1: R1, r2: R2, r3: R3) => Result,
 ): Selector<S, Result>
+/** Memoized selector with 4 inputs */
 export function createSelector<S, R1, R2, R3, R4, Result>(
   selector1: Selector<S, R1>,
   selector2: Selector<S, R2>,
@@ -48,6 +52,7 @@ export function createSelector<S, R1, R2, R3, R4, Result>(
   selector4: Selector<S, R4>,
   resultFunc: (r1: R1, r2: R2, r3: R3, r4: R4) => Result,
 ): Selector<S, Result>
+/** Memoized selector with 5 inputs */
 export function createSelector<S, R1, R2, R3, R4, R5, Result>(
   selector1: Selector<S, R1>,
   selector2: Selector<S, R2>,
@@ -56,6 +61,7 @@ export function createSelector<S, R1, R2, R3, R4, R5, Result>(
   selector5: Selector<S, R5>,
   resultFunc: (r1: R1, r2: R2, r3: R3, r4: R4, r5: R5) => Result,
 ): Selector<S, Result>
+/** Memoized selector with 6 inputs */
 export function createSelector<S, R1, R2, R3, R4, R5, R6, Result>(
   selector1: Selector<S, R1>,
   selector2: Selector<S, R2>,
@@ -71,7 +77,7 @@ export function createSelector<S, Result>(
   const selectors = args.slice(0, -1) as Selector<S, unknown>[]
   const combiner = args[args.length - 1] as (...inputs: unknown[]) => Result
   
-  let lastInputs: unknown[] | null = null  // null on first call → always recomputes
+  let lastInputs: unknown[] | null = null  // null on first call → cache miss, always recomputes
   let lastResult: Result | undefined
 
   return (state: S): Result => {

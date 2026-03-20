@@ -52,8 +52,8 @@ The binary name comes from deno.json `"title"` (lowercased, spacesâ†’hyphens). O
 ```sh
 ./my-app                       # binary name derived from title "My App"
 ./my-app --port=3000           # custom port
-deno run -A jsr:@riagentic/aio@^0.9/src/build --compile --name=custom   # override
-deno run -A jsr:@riagentic/aio@^0.9/src/build --compile --force          # skip cache, rebuild from scratch
+deno run -A jsr:@riagentic/aio@^1.0/src/build --compile --name=custom   # override
+deno run -A jsr:@riagentic/aio@^1.0/src/build --compile --force          # skip cache, rebuild from scratch
 ```
 
 **Build flags:**
@@ -234,7 +234,7 @@ Bundles your app into a standalone Android APK that runs entirely in a WebView â
 
 ```sh
 deno task compile:android                  # debug APK
-deno run -A jsr:@riagentic/aio@^0.9/src/build --android --release  # release APK (needs signing config)
+deno run -A jsr:@riagentic/aio@^1.0/src/build --android --release  # release APK (needs signing config)
 ```
 
 **Same src/ code for both platforms.** Your `state.ts`, `actions.ts`, `reduce.ts`, `execute.ts`, and `App.tsx` work identically on desktop and Android. The only difference: effects using Deno APIs (file system, network server, etc.) will fail in standalone mode. Use `app.mode === 'standalone'` to branch:
