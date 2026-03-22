@@ -23,9 +23,8 @@ export type LockData = {
 export type InstanceInfo = LockData & { alive: boolean }
 
 /** What to do when another instance of the same app is already running */
-export type SingletonMode = boolean | 'takeover'
+export type SingletonMode = boolean
 // true = refuse if running (default)
-// 'takeover' = kill old instance, start new
 // false = allow multiple instances
 
 // ── App ID Resolution ────────────────────────────────────────
@@ -35,17 +34,11 @@ export function slugify(s: string): string {
   return s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'aio-app'
 }
 
-/** Resolve app ID from deno.json "appId" field. Mandatory — throws if missing. */
-export function resolveAppId(_opts?: { appId?: string; title?: string }): string {
-  // Explicit override (legacy compat — prefer deno.json)
-  if (_opts?.appId) return slugify(_opts.appId)
-
-  try {
-    const cfg = JSON.parse(Deno.readTextFileSync(join(Deno.cwd(), 'deno.json'))) as { appId?: string }
-    if (cfg.appId) return slugify(cfg.appId)
-  } catch { /* no deno.json */ }
-
-  throw new Error('[aio] missing "appId" in deno.json — add "appId": "my-app" to your deno.json')
+/** Resolve app ID — must be passed explicitly via aio.run({ appId }). Throws if missing.
+ *  Compiled builds don't have deno.json, so appId must be hardcoded in the app. */
+export function resolveAppId(appId?: string): string {
+  if (appId) return slugify(appId)
+  throw new Error('[aio] missing "appId" in aio.run() — add appId: "my-app" to your config')
 }
 
 // ── Lock File Paths ──────────────────────────────────────────
@@ -133,10 +126,10 @@ export class AppLock {
 
   /** Acquire the lock for this app.
    *  - Cleans stale locks (dead PID)
-   *  - Refuses if alive instance exists (singleton=true)
-   *  - Kills old instance first (singleton='takeover')
+   *  - Refuses if alive instance exists (killExisting=false)
+   *  - Kills old instance first (killExisting=true)
    *  Returns the existing LockData if refusing, null on success. */
-  async acquire(port: number, mode: SingletonMode = true): Promise<{ ok: true } | { ok: false; existing: LockData }> {
+  async acquire(port: number, killExisting = false): Promise<{ ok: true } | { ok: false; existing: LockData }> {
     const maxRetries = 30  // 3 seconds total
 
     for (let i = 0; i < maxRetries; i++) {
@@ -165,14 +158,8 @@ export class AppLock {
         continue
       }
 
-      // Owner is alive — behavior depends on mode
-      if (mode === false) {
-        // Multi-instance allowed — but same appId means same app, shouldn't overlap.
-        // This case shouldn't really happen (multi-instance apps get unique IDs).
-        return { ok: false, existing }
-      }
-
-      if (mode === 'takeover') {
+      // Owner is alive — behavior depends on killExisting
+      if (killExisting) {
         // Kill the old instance
         await killProcess(existing.pid)
         removeLock(this.appId)
@@ -180,7 +167,7 @@ export class AppLock {
         continue
       }
 
-      // mode === true (default) — refuse
+      // killExisting=false (default) — refuse
       return { ok: false, existing }
     }
 

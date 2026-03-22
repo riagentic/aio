@@ -6,14 +6,13 @@ A local-first note-taking app: SQLite persistence, URL routing, single-instance 
 
 ```json
 {
-  "appId": "aio-notes",
   "version": "0.1.0",
   "tasks": {
     "dev": "deno run -A src/app.ts",
     "compile:electron": "deno run -A src/app.ts --compile"
   },
   "imports": {
-    "aio": "jsr:@riagentic/aio@1.0.0-alpha1"
+    "aio": "jsr:@riagentic/aio@1.0.0-alpha2"
   }
 }
 ```
@@ -112,6 +111,7 @@ import { table, pk, text, integer } from 'aio/sql'
 import { notes } from './notes.ts'
 
 const app = await aio.run({
+  appId: 'aio-notes',
   features: [notes],
 
   db: {
@@ -250,7 +250,7 @@ export function mount(root: HTMLElement) {
 
 We set `singleton: true` in the config. When the user double-clicks the app while it's already running, the second process detects the lock file (`/tmp/aio/aio-notes.lock`), sees the first process is alive, and exits. Stale locks from crashed processes are cleaned up automatically.
 
-Alternatives: `singleton: 'takeover'` kills the old instance and starts fresh. `singleton: false` allows multiple instances (useful during development).
+Alternatives: `singleton: true, killExisting: true` kills the old instance and starts fresh. `singleton: false` allows multiple instances (useful during development).
 
 ## Step 7: Build to AppImage
 

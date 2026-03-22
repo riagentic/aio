@@ -301,7 +301,7 @@ import { cart } from './features/cart/index.ts'
 import { inventory } from './features/inventory/index.ts'
 import { payment } from './features/payment/index.ts'
 
-await aio.run({ features: [cart, inventory, payment] })
+await aio.run({ appId: 'checkout', features: [cart, inventory, payment] })
 ```
 
 ---

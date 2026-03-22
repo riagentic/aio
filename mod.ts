@@ -38,13 +38,13 @@
  * ```
  */
 import { produce, type Draft } from 'immer'
-import type { PerfMode, PerfBudget } from './src/dispatch.ts'
+import type { PerfCheck, PerfBudget } from './src/dispatch.ts'
 
 /** Framework version string */
 export { aio, VERSION, parseCli, lint } from './src/aio.ts'
 import type { AioApp } from './src/aio.ts'
 export type { AioApp }
-export type { FeaturesConfig, UiConfig, Lint, CliFlags, AioUser, AioError, PerfMode, PerfBudget, AioConfig, MiddlewareFn } from './src/aio.ts'
+export type { FeaturesConfig, UiConfig, Lint, CliFlags, AioUser, AioError, PerfCheck, PerfBudget, AioConfig, MiddlewareFn } from './src/aio.ts'
 export { log } from './src/logger.ts'
 export type { Log, LogConfig, LogLevel } from './src/logger.ts'
 export type { AioMeta } from './src/electron.ts'
@@ -573,8 +573,8 @@ export declare function initStandalone<S, A, E>(initialState: S, config: {
   stateForDB?: (state: S) => Partial<S>
   stateForUI?: (state: S) => unknown
   persistKey?: string
-  persistDebounce?: number
-  perfMode?: PerfMode
+  persistDebounceMs?: number
+  perfCheck?: PerfCheck
   perfBudget?: PerfBudget
   onRestore?: (state: S) => S
 }): AioApp<S, A>

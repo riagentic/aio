@@ -6,7 +6,7 @@ import { produce, type Draft } from 'immer'
 import { msg } from './msg.ts'
 import { actions, effects } from './factory.ts'
 import { deepMerge } from './deep-merge.ts'
-import { createDispatch, type PerfMode, type PerfBudget } from './dispatch.ts'
+import { createDispatch, type PerfCheck, type PerfBudget } from './dispatch.ts'
 import type { AioApp } from './aio.ts'
 import { isScheduleEffect, type ScheduleEffect } from './schedule.ts'
 
@@ -46,8 +46,8 @@ type StandaloneConfig<S, A, E> = {
   stateForDB?: (state: S) => unknown
   stateForUI?: (state: S) => unknown
   persistKey?: string
-  persistDebounce?: number       // ms between localStorage writes (default: 100)
-  perfMode?: PerfMode           // 'strict' or 'soft' — performance violation handling
+  persistDebounceMs?: number     // ms between localStorage writes (default: 100)
+  perfCheck?: PerfCheck         // 'strict' or 'soft' — performance violation handling
   perfBudget?: PerfBudget       // override default budgets
   freezeState?: boolean         // deep freeze state after reduce to catch mutations (default: true)
   onRestore?: (state: S) => S    // transform state after restore, before UI renders
@@ -86,7 +86,7 @@ export function initStandalone<S, A, E>(initialState: S, config: StandaloneConfi
   _state = getUIState(state)
 
   // Debounced localStorage persistence (matches KV debounce pattern)
-  const persistMs = config.persistDebounce ?? 100
+  const persistMs = config.persistDebounceMs ?? 100
   let persistTimer: ReturnType<typeof setTimeout> | null = null
   function schedulePersist(): void {
     if (!shouldPersist || persistTimer) return
@@ -124,7 +124,7 @@ export function initStandalone<S, A, E>(initialState: S, config: StandaloneConfi
     setState: (s) => { state = s },
     onDone: () => { _state = getUIState(state); _notify(); schedulePersist() },
     log: standaloneLog, debug: false,
-    perfMode: config.perfMode,
+    perfCheck: config.perfCheck,
     perfBudget: config.perfBudget,
     freezeState: config.freezeState ?? true,  // default: true for standalone
   })

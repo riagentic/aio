@@ -17,23 +17,22 @@ Create a new directory and `deno.json`:
 
 ```json
 {
-  "appId": "task-queue",
   "title": "Task Queue",
   "nodeModulesDir": "auto",
   "unstable": ["kv"],
   "imports": {
-    "aio": "jsr:@riagentic/aio@1.0.0-alpha1"
+    "aio": "jsr:@riagentic/aio@1.0.0-alpha2"
   },
   "tasks": {
-    "dev":              "deno run -A src/app.ts --headless",
-    "am":               "deno run -A jsr:@riagentic/aio@1.0.0-alpha1/src/am",
+    "dev":              "deno run -A src/app.ts --client=server-only",
+    "am":               "deno run -A jsr:@riagentic/aio@1.0.0-alpha2/src/am",
     "test":             "deno test -A --unstable-kv tests/",
-    "compile:service":  "deno run -A jsr:@riagentic/aio@1.0.0-alpha1/src/build --compile --service --headless"
+    "compile:service":  "deno run -A jsr:@riagentic/aio@1.0.0-alpha2/src/build --compile --service --headless"
   }
 }
 ```
 
-No React, no esbuild, no browser dependencies. The `--headless` flag tells aio to skip browser/Electron entirely.
+No React, no esbuild, no browser dependencies. The `--client=server-only` flag tells aio to skip browser/Electron entirely.
 
 Run `deno install` to pull the framework.
 
@@ -102,8 +101,9 @@ import { aio } from 'aio'
 import { queue } from './features/queue/index.ts'
 
 await aio.run({
+  appId: 'task-queue',
   features: [queue],
-  headless: true,
+  client: 'server-only',
   schedules: [
     { id: 'process-queue', every: 1000, action: queue.process() },
   ],
@@ -118,7 +118,7 @@ Start it:
 deno task dev
 ```
 
-The server starts. No window opens -- that is the point. You will see the `running (dev, headless)` log with the HTTP and WS URLs.
+The server starts. No window opens -- that is the point. You will see the `running (dev, server-only)` log with the HTTP and WS URLs.
 
 ## Step 4: CLI client
 
@@ -167,7 +167,7 @@ deno run -A src/cli.ts http://localhost:8000 "build v2.0"  # connect + enqueue
 
 ## Step 5: App manager (am)
 
-`am` works out of the box -- it reads `appId` from `deno.json` and finds the running instance via lock file.
+`am` works out of the box — it finds the running instance via the lock file created by `aio.run({ appId })`. Use `--app=X` to target a specific app.
 
 Start the service in the background:
 

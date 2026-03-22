@@ -9,7 +9,7 @@
 - **Write reactive, use generators or atomic actions when needed.**
 - **Pick your target, compile and ship!**
 
-`v1.0.0-alpha1`
+`v1.0.0-alpha2`
 
 > Define state once. It persists, syncs to all clients, drives the UI.
 
@@ -23,6 +23,54 @@
 
 All three can be mixed in a single feature. Start reactive, add generators or actions when needed.
 
+## Why aio?
+
+You're building a dashboard, trading tool, control panel, or internal app. You need state that persists, syncs to every client in real-time, and works offline. Today that means wiring together a state manager, a database, a WebSocket layer, a persistence layer, auth, and build tooling — six systems that don't know about each other.
+
+aio replaces all six. Define state once, it flows everywhere. One codebase compiles to browser, desktop, CLI, service, or mobile. No glue code, no sync bugs, no infrastructure decisions.
+
+## Taste
+
+**Prerequisites:** [Deno 2.6+](https://docs.deno.com/runtime/getting_started/installation/)
+
+```ts
+import { feature, aio } from 'aio'
+
+const counter = feature('counter', {
+  state: { count: 0 },
+  methods: {
+    increment(s, by = 1) { s.count += by },
+    reset(s)             { s.count = 0 },
+  },
+})
+
+await aio.run({ appId: 'taste', appVersion: '0.1.0', features: [counter] })
+// State persists across restarts. WebSocket sync included. 10 lines.
+```
+
+```sh
+# Option A: JSR (quick start)
+deno add jsr:@riagentic/aio
+
+# Option B: Clone into project (full source access, bleeding edge)
+git clone https://github.com/riagentic/aio dep/aio
+```
+
+Then in `deno.json`:
+```jsonc
+// JSR
+"imports": { "aio": "jsr:@riagentic/aio" }
+
+// Clone — same user code, full source access for debugging
+"imports": { "aio": "./dep/aio/mod.ts" }
+```
+
+```sh
+deno run -A src/app.ts             # run
+```
+
+→ [Quickstart](docs/quickstart.md) for UI setup, Electron, scaffolder, and all compile targets.
+
 ## What's included
 
 | | |
@@ -34,170 +82,12 @@ All three can be mixed in a single feature. Start reactive, add generators or ac
 | **Security** | auto-TLS (`--expose`) · multi-user token auth · rate limiting · CSRF protection · `allowedOrigins` |
 | **Scheduling** | cron · intervals · one-shot timers · cancel by ID or prefix |
 | **DX** | time-travel (Ctrl+.) · hot reload · `testFeature` harness · Redux DevTools · perf budgets · freeze detection |
-| **Electron** | desktop window · UDS+IPC (zero TCP in prod) · window persistence · DevTools toggle · `keepAlive` |
+| **Electron** | desktop window · UDS+IPC (zero TCP in prod) · window persistence · DevTools toggle · `keepServer` |
 | **Deploy** | browser · Electron · CLI · systemd service · Android APK (WebView) · single binary · remote (HTTPS) |
 
 [Architecture diagram](docs/core.md#architecture--data-flow) · [Full API reference](docs/api.md)
 
-## Quickstart
-
-**Prerequisites:** [Deno 2.6+](https://docs.deno.com/runtime/getting_started/installation/)
-
-### Minimal (headless — no UI)
-
-```ts
-// src/app.ts
-import { feature, aio } from 'aio'
-
-const counter = feature('counter', {
-  state: { count: 0 },
-  methods: {
-    increment(s, by = 1) { s.count += by },
-    reset(s)             { s.count = 0 },
-  },
-})
-
-await aio.run({ features: [counter], headless: true })
-```
-
-```
-$ deno run -A src/app.ts
-  _v_
- (o>o)  aio — counter
-  web   http://localhost:52413
-  ws    ws://localhost:52413/ws
-```
-
-State persists across restarts. That's it — 10 lines, full persistence + WebSocket sync.
-
-### With UI (Electron or browser)
-
-**1. Create project**
-
-```sh
-mkdir my-app && cd my-app
-```
-
-**2. `deno.json`**
-
-```json
-{
-  "appId": "my-app",
-  "nodeModulesDir": "auto",
-  "unstable": ["kv"],
-  "compilerOptions": {
-    "jsx": "react-jsx",
-    "jsxImportSource": "react",
-    "jsxImportSourceTypes": "@types/react"
-  },
-  "imports": {
-    "aio":          "jsr:@riagentic/aio@1.0.0-alpha1",
-    "react":        "npm:react@^18",
-    "react-dom":    "npm:react-dom@^18",
-    "@types/react": "npm:@types/react@^18",
-    "esbuild":      "npm:esbuild@^0.24"
-  },
-  "tasks": {
-    "dev":               "deno run -A src/app.ts",
-    "test":              "deno test -A --unstable-kv tests/",
-    "am":                "deno run -A jsr:@riagentic/aio@1.0.0-alpha1/src/am",
-    "install:electron":  "deno add npm:electron && deno install --allow-scripts=npm:electron"
-  }
-}
-```
-
-> Full compile tasks (browser, electron, CLI, service, android — local + remote) in [builds.md](docs/builds.md).
-
-**3. Source files**
-
-`src/features/counter/index.ts`
-```ts
-import { feature } from 'aio'
-
-export const counter = feature('counter', {
-  state: { count: 0 },
-  methods: {
-    increment(s, by = 1) { s.count += by },
-    decrement(s, by = 1) { s.count -= by },
-    reset(s)             { s.count = 0 },
-  },
-})
-```
-
-`src/App.tsx`
-```tsx
-import { useFeature } from 'aio'
-import { counter } from './features/counter/index.ts'
-
-export default function App() {
-  const { state, send } = useFeature(counter)
-  if (!state) return <div>Loading...</div>
-  return (
-    <div>
-      <button onClick={() => send.decrement()}>-</button>
-      <span> {state.count} </span>
-      <button onClick={() => send.increment()}>+</button>
-      <button onClick={() => send.reset()}>Reset</button>
-    </div>
-  )
-}
-```
-
-`src/app.ts`
-```ts
-import { aio } from 'aio'
-import { counter } from './features/counter/index.ts'
-
-await aio.run({ features: [counter] })
-```
-
-**4. Run**
-
-```sh
-deno install                       # install deps
-deno task dev                      # Electron (run install:electron first)
-deno task dev -- --no-electron     # browser
-deno task dev -- --headless        # server only
-```
-
-State persists across restarts. Hot reload on save.
-
-**5. Compile for production**
-
-| Target | Command | Output |
-|--------|---------|--------|
-| **Browser** | `deno task compile:browser` | Standalone binary — serves browser UI |
-| **Electron** | `deno task compile:electron` | AppImage (Linux) with embedded server |
-| **CLI** | `deno task compile:cli` | Headless binary — no UI |
-| **Service** | `deno task compile:service` | systemd service binary |
-| **Android** | `deno task compile:android` | APK with embedded server |
-
-Each target has a `:remote` variant for exposed HTTPS deployments. See [builds.md](docs/builds.md) for the full 10-target matrix.
-
-> `jsr:@riagentic/aio@1.0.0-alpha1/src/build` and `jsr:@riagentic/aio@1.0.0-alpha1/src/am` are part of the JSR package.
-
-## Example — async method with call()
-
-```typescript
-import { feature, call, aio } from 'aio'
-
-const api = feature('api', {
-  state: { data: null as string | null, saving: false },
-  methods: {
-    async save(s, value: string) {
-      s.saving = true
-      await call({ timeout: 3000 }, () => Deno.writeTextFile('./data.json', value))
-      s.data = value
-      s.saving = false   // auto-dispatched, persisted, synced to all clients
-    },
-  },
-})
-
-await aio.run({ features: [api] })
-```
-
-<details>
-<summary><strong>How it compares</strong></summary>
+## How aio compares
 
 | | **aio** | **Convex** | **Zero** | **ElectricSQL** | **Fresh** | **Next.js** | **Tauri** |
 |---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
@@ -236,13 +126,9 @@ await aio.run({ features: [api] })
 | Self-hosted | ✅ | 🔧 | ✅ | ✅ | ✅ | ✅ | ✅ |
 | **UI & rendering** | | | | | | | |
 | React UI | ✅ | ✅ | ✅ | ✅ | ⚛️ | ✅ | ✅ |
-| SSR / SSG | ❌ | ❌ | ❌ | ❌ | ✅ | ✅ | ❌ |
-| One codebase | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 🔧 |
 
 ✅ built-in · 🔧 manual setup · ⚛️ Preact · ❌ not included
 *Comparison is approximate — check each project for current capabilities.*
-
-</details>
 
 **aio's sweet spot:** apps where state is the product — dashboards, trading tools, control panels, internal tools, desktop utilities. One state, many clients, zero plumbing.
 
@@ -261,12 +147,20 @@ See [FAQ](docs/faq.md#when-not-to-use-aio) for details.
 
 ## Docs
 
-[Quickstart](docs/quickstart.md) · [Feature Anatomy](docs/syntax.md) · [Core API](docs/core.md) · [Reactivity](docs/reactivity.md) · [Generators](docs/generators.md) · [Scheduling](docs/scheduling.md) · [UI](docs/ui.md) · [Testing](docs/testing.md) · [Linter](docs/linter.md) · [Builds](docs/builds.md) · [Electron](docs/electron.md) · [Auth](docs/auth.md) · [Persistence](docs/persistence.md) · [CLI](docs/cli.md) · [am](docs/am.md) · [Structure](docs/structure.md) · [FAQ](docs/faq.md) · [Migration](docs/migration.md) · [Upgrade](docs/upgrade.md) · [Changelog](docs/changelog.md)
+**Getting Started:** [Quickstart](docs/quickstart.md) · [How-To](docs/howto.md) · [Migration](docs/migration.md)
+
+**Core:** [Feature Anatomy](docs/syntax.md) · [Reactivity](docs/reactivity.md) · [Generators](docs/generators.md) · [Core API](docs/core.md) · [API Reference](docs/api.md) · [Features](docs/features.md)
+
+**Data:** [Persistence](docs/persistence.md) · [SQLite](docs/sqldb.md) · [Scheduling](docs/scheduling.md)
+
+**Infrastructure:** [Auth](docs/auth.md) · [Builds](docs/builds.md) · [Electron](docs/electron.md) · [CLI](docs/cli.md) · [am](docs/am.md) · [Linter](docs/linter.md)
+
+**UI & Reference:** [UI](docs/ui.md) · [Structure](docs/structure.md) · [Scaling](docs/scaling.md) · [Testing](docs/testing.md) · [Debugging](docs/debugging.md) · [FAQ](docs/faq.md) · [Upgrade](docs/upgrade.md) · [Changelog](docs/changelog.md)
 
 ## Status
 
-**v1.0.0-alpha1** · [JSR](https://jsr.io/@riagentic/aio) · MIT
+**v1.0.0-alpha2** · [JSR](https://jsr.io/@riagentic/aio) · MIT
 
-801 tests · audit 8.9/10 · all 10 audit bugs fixed · security hardened
+860+ tests · security hardened
 
 Core (state, sync, persistence, features, scheduling) is stable. Electron, Android, and build targets are functional but less battle-tested.

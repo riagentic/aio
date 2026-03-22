@@ -1,5 +1,5 @@
-import { assertEquals } from '@std/assert'
-import { createServer, _timingSafeEqual } from '../src/server.ts'
+import { assertEquals, assertStringIncludes } from '@std/assert'
+import { buildBrowserImportMap, classifyBrowserError, createServer, _timingSafeEqual } from '../src/server.ts'
 import { join } from '@std/path'
 
 const TEST_PORT = 19800
@@ -1192,15 +1192,17 @@ Deno.test({
         assertEquals(data === null || typeof data === 'object', true)
       }
 
-      // ── /__aio/client-error: POST returns 204 ──
+      // ── /__aio/client-error: POST returns 200 with JSON classification ──
       {
         const resp = await fetch(`${url}/__aio/client-error`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ message: 'test error', stack: 'Error: test\n  at App.tsx:1:1' }),
         })
-        assertEquals(resp.status, 204)
-        await resp.body?.cancel()
+        assertEquals(resp.status, 200)
+        const classified = await resp.json()
+        assertEquals(typeof classified.classification, 'string')
+        assertEquals(typeof classified.label, 'string')
       }
 
       // ── /__aio/client-error: malformed body → still 204 ──
@@ -1232,4 +1234,77 @@ Deno.test('config: deno.json exports ./src/build and ./src/am', async () => {
     'deno.json must export ./src/build — required by compile:* tasks (jsr:@riagentic/aio/src/build)')
   assertEquals('./src/am' in (exports as Record<string, string>), true,
     'deno.json must export ./src/am — required by am task (jsr:@riagentic/aio/src/am)')
+})
+
+// --- buildBrowserImportMap tests ---
+
+Deno.test('buildBrowserImportMap: includes react defaults', () => {
+  const map = JSON.parse(buildBrowserImportMap({}))
+  assertEquals(map.imports['react'] !== undefined, true)
+  assertEquals(map.imports['react-dom/client'] !== undefined, true)
+  assertEquals(map.imports['react/jsx-runtime'] !== undefined, true)
+  assertEquals(map.imports['aio'], '/__aio/ui.js')
+})
+
+Deno.test('buildBrowserImportMap: adds npm packages from deno.json', () => {
+  const map = JSON.parse(buildBrowserImportMap({ 'xterm': 'npm:xterm@5.3.0' }))
+  assertEquals(map.imports['xterm'], 'https://esm.sh/xterm@5.3.0')
+})
+
+Deno.test('buildBrowserImportMap: handles scoped npm packages', () => {
+  const map = JSON.parse(buildBrowserImportMap({ '@xterm/xterm': 'npm:@xterm/xterm@5.5.0' }))
+  assertEquals(map.imports['@xterm/xterm'], 'https://esm.sh/@xterm/xterm@5.5.0')
+})
+
+Deno.test('buildBrowserImportMap: does not override react defaults', () => {
+  const map = JSON.parse(buildBrowserImportMap({ 'react': 'npm:react@19.0.0' }))
+  assertStringIncludes(map.imports['react'], 'esm.sh')
+})
+
+Deno.test('buildBrowserImportMap: skips jsr: imports', () => {
+  const map = JSON.parse(buildBrowserImportMap({ 'aio': 'jsr:@riagentic/aio@1.0.0' }))
+  assertEquals(map.imports['aio'], '/__aio/ui.js')
+})
+
+Deno.test('buildBrowserImportMap: skips non-npm non-jsr imports', () => {
+  const map = JSON.parse(buildBrowserImportMap({ 'mylib': './src/mylib.ts' }))
+  assertEquals(map.imports['mylib'], undefined)
+})
+
+Deno.test('buildBrowserImportMap: includes aio/browser mapping', () => {
+  const map = JSON.parse(buildBrowserImportMap({}))
+  assertEquals(map.imports['aio/browser'], '/__aio/ui.js')
+})
+
+// ── classifyBrowserError ──────────────────────────────────────
+
+Deno.test('classifyBrowserError: detects missing module specifier', () => {
+  const result = classifyBrowserError('TypeError: Failed to resolve module specifier "xterm"')
+  assertEquals(result.classification, 'missing-import')
+  assertStringIncludes(result.fix, 'deno.json')
+  assertStringIncludes(result.fix, 'xterm')
+})
+
+Deno.test('classifyBrowserError: detects @std server-only', () => {
+  const result = classifyBrowserError('Error: [aio] @std/fs.readFile is server-only')
+  assertEquals(result.classification, 'server-only')
+  assertStringIncludes(result.fix, 'server-only')
+})
+
+Deno.test('classifyBrowserError: detects Deno is not defined', () => {
+  const result = classifyBrowserError('ReferenceError: Deno is not defined')
+  assertEquals(result.classification, 'platform-api')
+  assertStringIncludes(result.fix, 'Deno')
+})
+
+Deno.test('classifyBrowserError: detects is not a function', () => {
+  const result = classifyBrowserError('TypeError: readFile is not a function')
+  assertEquals(result.classification, 'stubbed-call')
+  assertStringIncludes(result.fix, 'server-only')
+})
+
+Deno.test('classifyBrowserError: returns unknown for unrecognized errors', () => {
+  const result = classifyBrowserError('SyntaxError: Unexpected token')
+  assertEquals(result.classification, 'unknown')
+  assertEquals(result.fix, '')
 })

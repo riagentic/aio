@@ -9,15 +9,16 @@ For the docs index, see [manual.md](manual.md). For build flags, see [builds.md]
 `aio.run()` reads `Deno.args` automatically — no parsing code needed in your app. CLI flags override config values:
 
 ```sh
-deno task dev --port=3000 --no-electron --no-persist --title="My App"
+deno task dev --port=3000 --client=browser --no-persist --title="My App"
 ```
 
 | Flag | Effect |
 |------|--------|
 | `--port=N` | Override server port |
-| `--no-electron` | Skip Electron, open browser instead |
+| `--client=X` | Client mode: `electron`, `browser`, `cli`, `server-only` (replaces `--no-electron` / `--headless`) |
 | `--no-persist` | Disable Deno.Kv state persistence |
-| `--keep-alive` | Keep server running after Electron window closes |
+| `--keep-server` | Keep server running after Electron window closes |
+| `--kill-existing` | Kill existing instance before starting (use with `singleton: true`) |
 | `--title=X` | Override window/page title |
 | `--verbose` | Verbose logging — actions, state, effects, WS, HTTP, persistence |
 | `--prod` | Force prod mode — serve pre-built `dist/app.js` (auto-detected in compiled binaries) |
@@ -27,8 +28,7 @@ deno task dev --port=3000 --no-electron --no-persist --title="My App"
 | `--cert=PATH` | TLS certificate file (PEM) — used with `--expose` (auto-generated if omitted) |
 | `--key=PATH` | TLS private key file (PEM) — used with `--expose` (auto-generated if omitted) |
 | `--transport=X` | Transport mode: `uds`, `ws`, or `auto` (default: `auto`) |
-| `--headless` | Server-only — no browser or Electron (for CLI apps using `connectCli()`) |
-| `--url=URL` | Thin client mode — launch Electron connecting to remote aio server (no local server) |
+| `--server-url=URL` | Thin client mode — launch Electron connecting to remote aio server (no local server) |
 | `--version` | Print aio version and exit |
 | `--help` | Show available CLI flags and exit |
 
@@ -37,7 +37,7 @@ deno task dev --port=3000 --no-electron --no-persist --title="My App"
 Active flags are logged on startup:
 ```
 [12:00:00][INFO] ✓ state (1 keys) · reduce · execute · App.tsx
-[12:00:00][INFO] cli: --port=3000 --no-electron
+[12:00:00][INFO] cli: --port=3000 --client=browser
 [12:00:00][INFO] running (dev, browser)
 [12:00:00][INFO]   web       http://localhost:3000
 [12:00:00][INFO]   ws        ws://localhost:3000/ws
@@ -178,14 +178,14 @@ Output auto-detects: terminal → pretty text, piped → JSON. Override with `--
 
 ### Process management (singleton)
 
-Each app requires `"appId"` in `deno.json` — the single source of truth for app identity. See [am.md](am.md) for full details.
+Each app requires `appId` in `aio.run()` — the single source of truth for app identity. See [am.md](am.md) for full details.
 
 The `singleton` config option controls instance behavior:
 
 | Value | Behavior |
 |-------|----------|
 | `true` (default) | Refuse if another instance of the same app is running |
-| `'takeover'` | Kill existing instance, start new one (useful for dev servers) |
+| `singleton: true, killExisting: true` | Kill existing instance, start new one (useful for dev servers) |
 | `false` | Allow multiple instances |
 
 Locking uses a single lock file per app at `/tmp/aio-{appId}.lock` (or `$XDG_RUNTIME_DIR`). Contains `{ appId, pid, port, startedAt, status, cwd, socketPath?, trojanPort? }`. Stale locks (dead PID) are auto-cleaned.
@@ -194,7 +194,7 @@ Locking uses a single lock file per app at `/tmp/aio-{appId}.lock` (or `$XDG_RUN
 |-------------------|----------|
 | None | Start normally |
 | Dead (stale lock file) | Clean up, start |
-| Alive + responding | Refuse ("already running") — or takeover if `singleton: 'takeover'` |
+| Alive + responding | Refuse ("already running") — or kill if `singleton: true, killExisting: true` |
 | Alive + not responding (zombie) | Kill (SIGTERM → SIGKILL), then start |
 | Status `stopping` | Wait up to 3s, force kill if stuck, then start |
 | Status `starting` | Refuse ("instance is starting — use am restart") |
@@ -408,10 +408,10 @@ All endpoints inherit auth (token/user checks run before routing). In `--expose`
 | State resets on restart | `persist: true` (default) + `"unstable": ["kv"]` in deno.json |
 | `import from '../dep/aio/'` error | Always use `import from 'aio'` — never relative paths |
 | Port in use | Kill old process or use `--port=N` |
-| Electron not found | `deno task install:electron`. Or use `--no-electron` to open browser instead |
+| Electron not found | `deno task install:electron`. Or use `--client=browser` to open browser instead |
 | Electron installed but no window | Check that `node_modules/electron/dist/` exists — run `deno task install:electron` |
-| Server dies when Electron closes | Use `--keep-alive` flag or `ui: { keepAlive: true }` in config |
+| Server dies when Electron closes | Use `--keep-server` flag or `keepServer: true` in config |
 | Build Error: could not find 'npm:esbuild' | Add `"esbuild": "npm:esbuild@^0.24"` to deno.json imports, then `deno install` |
 | `am status` says "stopped" | No running process. Stale lock file auto-cleaned. Check `.aio.log` for errors |
 | `am start` says "port in use" | Non-aio process on the port. Use `--port=N`. (aio zombies are killed automatically) |
-| `am` targets wrong app | Check `"appId"` in `deno.json` — must match between app and am |
+| `am` targets wrong app | Check `appId` in `aio.run()` — use `--app=X` to target a specific app |

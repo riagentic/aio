@@ -43,10 +43,11 @@ export function flattenOnto(
 
 /** Bind a feature to a live app — replaces action creators with dispatch wrappers,
  *  selectors with bound state readers. Called by aio.run() after compose.
- *  Async methods return a Promise that resolves with the method's return value. */
+ *  All bound methods return a Promise — sync methods return Promise<void> (dispatch completion),
+ *  async methods return Promise<T> (method return value). */
 export function bindFeature(
   f: FeatureDef,
-  dispatch: (action: Msg) => void,
+  dispatch: (action: Msg) => Promise<void>,
   getState: () => Record<string, unknown>,
 ): void {
   if (f.__aio.bound) throw new Error(`[${f.__aio.id}] already bound — features can only bind to one app`)
@@ -69,10 +70,9 @@ export function bindFeature(
       ;(fn as unknown as Record<string, unknown>).type = (creator as unknown as { type: string }).type
       ;(f as Record<string, unknown>)[key] = fn
     } else {
-      // Sync methods: dispatch and return void
-      const fn = (...args: unknown[]) => {
+      // Sync methods: dispatch and return Promise<void> — resolves after reduce + effects
+      const fn = (...args: unknown[]) =>
         dispatch((creator as (...a: unknown[]) => Msg)(...args))
-      }
       ;(fn as unknown as Record<string, unknown>).type = (creator as unknown as { type: string }).type
       ;(f as Record<string, unknown>)[key] = fn
     }

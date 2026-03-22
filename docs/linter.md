@@ -6,7 +6,7 @@ Static analysis tool for aio projects. Scans your source files and reports error
 
 ```sh
 # From your project root
-deno run -A jsr:@riagentic/aio@1.0.0-alpha1/aiol/mod.ts
+deno run -A jsr:@riagentic/aio@1.0.0-alpha2/aiol/mod.ts
 
 # Or point at a specific directory
 deno run -A aiol/mod.ts /path/to/my-app
@@ -17,7 +17,7 @@ deno run -A aiol/mod.ts --json
 # Add as a task in deno.json
 {
   "tasks": {
-    "lint:aio": "deno run -A jsr:@riagentic/aio@1.0.0-alpha1/aiol/mod.ts"
+    "lint:aio": "deno run -A jsr:@riagentic/aio@1.0.0-alpha2/aiol/mod.ts"
   }
 }
 ```
@@ -39,7 +39,8 @@ Safe fixes are guaranteed harmless — they add missing config or remove dead co
 
 | Fix | What it adds |
 |-----|-------------|
-| Add `appId` | Derives from directory name |
+| Remove `appId` from deno.json | appId belongs in aio.run(), not deno.json |
+| Add `appId` to aio.run() | Derives from deno.json appId or directory name |
 | Add `unstable: ["kv"]` | Required for state persistence |
 | Add `nodeModulesDir: "auto"` | npm package resolution |
 | Add `@types/react` import | JSX type checking |
@@ -70,7 +71,8 @@ Run `--safe-fix`, then re-run without it to see remaining issues that need manua
 
 Validates `deno.json` for common mistakes:
 
-- Missing or invalid `appId`
+- `appId` in deno.json (should be in `aio.run()`)
+- Missing `appId` in `aio.run()`
 - Missing required imports (`aio`, `react`, `esbuild`)
 - Missing `unstable: ["kv"]` for persistence
 - Missing `compilerOptions.jsx` for React

@@ -48,7 +48,6 @@ deno install
 
 ```json
 {
-  "appId": "my-app",
   "title": "My App",
   "nodeModulesDir": "auto",
   "unstable": ["kv"],
@@ -58,7 +57,7 @@ deno install
     "jsxImportSourceTypes": "@types/react"
   },
   "imports": {
-    "aio":          "jsr:@riagentic/aio@1.0.0-alpha1",
+    "aio":          "jsr:@riagentic/aio@1.0.0-alpha2",
     "@types/react": "npm:@types/react@^18",
     "react":        "npm:react@^18",
     "react-dom":    "npm:react-dom@^18",
@@ -66,14 +65,14 @@ deno install
   },
   "tasks": {
     "dev":                    "deno run -A src/app.ts",
-    "am":                     "deno run -A jsr:@riagentic/aio@1.0.0-alpha1/src/am",
+    "am":                     "deno run -A jsr:@riagentic/aio@1.0.0-alpha2/src/am",
     "test":                   "deno test -A --unstable-kv tests/",
-    "compile:browser":        "deno run -A jsr:@riagentic/aio@1.0.0-alpha1/src/build --compile",
-    "compile:electron":       "deno run -A jsr:@riagentic/aio@1.0.0-alpha1/src/build --compile --electron",
-    "compile:electron:remote":"deno run -A jsr:@riagentic/aio@1.0.0-alpha1/src/build --client",
-    "compile:cli":            "deno run -A jsr:@riagentic/aio@1.0.0-alpha1/src/build --compile --cli",
-    "compile:service":        "deno run -A jsr:@riagentic/aio@1.0.0-alpha1/src/build --compile --service --headless",
-    "compile:android":        "deno run -A jsr:@riagentic/aio@1.0.0-alpha1/src/build --android"
+    "compile:browser":        "deno run -A jsr:@riagentic/aio@1.0.0-alpha2/src/build --compile",
+    "compile:electron":       "deno run -A jsr:@riagentic/aio@1.0.0-alpha2/src/build --compile --electron",
+    "compile:electron:remote":"deno run -A jsr:@riagentic/aio@1.0.0-alpha2/src/build --client",
+    "compile:cli":            "deno run -A jsr:@riagentic/aio@1.0.0-alpha2/src/build --compile --cli",
+    "compile:service":        "deno run -A jsr:@riagentic/aio@1.0.0-alpha2/src/build --compile --service --headless",
+    "compile:android":        "deno run -A jsr:@riagentic/aio@1.0.0-alpha2/src/build --android"
   }
 }
 ```
@@ -139,7 +138,7 @@ export default function App() {
 import { aio } from 'aio'
 import { counter } from './features/counter/index.ts'
 
-await aio.run({ features: [counter] })
+await aio.run({ appId: 'my-app', features: [counter] })
 ```
 
 ### Run
@@ -150,7 +149,7 @@ deno task dev
 
 That's it. Electron window opens, state persists across restarts, multiple browser tabs stay in sync.
 
-> **No Electron?** Add `--no-electron` to open in your browser instead: `deno task dev --no-electron`
+> **No Electron?** Add `--client=browser` to open in your browser instead: `deno task dev --client=browser`
 
 `aio.run()` returns an app object with runtime feature control — see [core.md](core.md#return-value--appfeatures) for `app.features.health()`, `enable()`, `disable()`, and more.
 
@@ -160,6 +159,7 @@ Set default Electron window dimensions in your `aio.run()` config:
 
 ```ts
 await aio.run({
+  appId: 'my-app',
   features: [counter],
   ui: { title: 'My App', width: 1200, height: 800 },
 })
@@ -171,6 +171,7 @@ Or via CLI: `deno task dev --width=1200 --height=800`. Window bounds persist acr
 
 ```ts
 await aio.run({
+  appId: 'my-app',
   features: [counter],
   middleware: [aio.middleware.logger(), aio.middleware.validate()],
   appVersion: '1.0.0',
@@ -261,10 +262,10 @@ export const checkout = feature('checkout', {
 ## Troubleshooting
 
 **"Electron not found" or app window doesn't open**
-Run `deno task install:electron` first, or use `deno task dev -- --no-electron` to open in your browser instead.
+Run `deno task install:electron` first, or use `deno task dev -- --client=browser` to open in your browser instead.
 
 **"Module not found: aio"**
-Run `deno install` to download dependencies. Make sure your `deno.json` has the `"aio"` import mapped to `jsr:@riagentic/aio@1.0.0-alpha1`.
+Run `deno install` to download dependencies. Make sure your `deno.json` has the `"aio"` import mapped to `jsr:@riagentic/aio@1.0.0-alpha2`.
 
 **State resets on every restart**
 This is normal in dev if you changed your state shape. aio auto-persists to Deno.Kv — if the shape changed, the old state is merged with new defaults via `deepMerge`. Delete `data.kv/` to start fresh.

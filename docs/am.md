@@ -10,23 +10,26 @@ Output auto-detects: terminal → pretty text, piped → JSON. Override with `--
 
 ## App Identity
 
-Every aio app requires an `appId` field in `deno.json`:
+Every aio app requires `appId` in the `aio.run()` call:
 
-```json
-{
-  "appId": "my-app"
-}
+```ts
+await aio.run({
+  appId: 'my-app',
+  features: [...]
+})
 ```
 
 This is the single source of truth for app identity — used for lock files, UDS sockets, KV/SQLite paths, and `am` commands. The value is slugified (lowercase alphanumeric + hyphens).
 
-**`appId` is mandatory.** The app will not start without it, and `am` will not work without it.
+**`appId` is mandatory.** The app will not start without it. It must be in `aio.run()`, not `deno.json` — compiled builds don't have access to `deno.json` at runtime.
+
+For `am` commands, use `--app=X` to specify which app to manage, or add `appId` to `deno.json` as a dev convenience (the linter will warn but `am` can read it).
 
 ## Global flags
 
 | Flag | Effect |
 |------|--------|
-| `--app=X` | Override appId (default: from `deno.json`) |
+| `--app=X` | Override appId (default: from `deno.json` in dev) |
 | `--port=N` | Override port (default: from lock file) |
 | `--wait[=N]` | start/stop: block until complete (default 10s/5s). state: poll every Ns (default 2s) |
 | `--json` | Force JSON output |

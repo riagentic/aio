@@ -1,9 +1,10 @@
 // Deep merge — restores persisted state while preserving new schema fields
 // Shared by aio.ts (Deno KV) and standalone.ts (localStorage)
 
-/** Returns true if v is a plain object (not null, not array) */
+/** Returns true if v is a plain object (not null, not array, not Map/Set/Date) */
 export function isPlainObject(v: unknown): v is Record<string, unknown> {
   return v !== null && typeof v === 'object' && !Array.isArray(v)
+    && !(v instanceof Map) && !(v instanceof Set) && !(v instanceof Date)
 }
 
 const BANNED_KEYS = new Set(['__proto__', 'constructor', 'prototype'])

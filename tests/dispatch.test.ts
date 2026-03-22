@@ -316,7 +316,7 @@ Deno.test('dispatch: errorCount tracks accumulated errors', () => {
   assertEquals(dispatch.errorCount(), 2)
 })
 
-Deno.test('dispatch: perfMode soft only warns, does not error', () => {
+Deno.test('dispatch: perfCheck on warns on violation, does not error', () => {
   let state = { n: 0 }
   let warned = false
   let errored = false
@@ -333,7 +333,7 @@ Deno.test('dispatch: perfMode soft only warns, does not error', () => {
     onDone: () => {},
     log: { debug: () => {}, warn: () => { warned = true }, error: () => { errored = true } },
     debug: false,
-    perfMode: 'soft',
+    perfCheck: 'on',
     perfBudget: { reduce: 0.01 }, // tiny budget to trigger
   })
   dispatch({ type: 'SLOW' })
@@ -478,4 +478,69 @@ Deno.test('dispatch: onDone throw does not wedge dispatch loop', () => {
   // Dispatch still works after onDone crash
   dispatch({ type: 'B' })
   assertEquals(state.n, 2)
+})
+
+// ── Promise-returning dispatch tests ──
+
+Deno.test('dispatch: returns Promise<void> that resolves after reduce + effects', async () => {
+  let state = { count: 0 }
+  const effects: string[] = []
+
+  const dispatch = createDispatch<typeof state, { type: string; payload: { by: number } }, { type: string }>({
+    reduce: (s, a) => ({ state: { count: s.count + a.payload.by }, effects: [{ type: 'LOG' }] }),
+    execute: (e) => { effects.push(e.type) },
+    getState: () => state,
+    setState: (s) => { state = s },
+    onDone: () => {},
+    log: noop, debug: false,
+  })
+
+  const promise = dispatch({ type: 'INC', payload: { by: 3 } })
+  assertEquals(promise instanceof Promise, true)
+  // State already updated synchronously before await
+  assertEquals(state.count, 3)
+  assertEquals(effects, ['LOG'])
+  // Promise resolves cleanly
+  await promise
+})
+
+Deno.test('dispatch: Promise resolves even on reduce error', async () => {
+  let state = { n: 0 }
+  const dispatch = createDispatch<typeof state, { type: string }, never>({
+    reduce: () => { throw new Error('boom') },
+    execute: () => {},
+    getState: () => state,
+    setState: (s) => { state = s },
+    onDone: () => {},
+    log: noop, debug: false,
+  })
+
+  // Should not hang — Promise resolves even on error
+  await dispatch({ type: 'BAD' })
+  assertEquals(state.n, 0)
+})
+
+Deno.test('dispatch: re-entrant dispatch returns Promise that resolves after processing', async () => {
+  let state = { count: 0 }
+  let dispatchRef: ((a: { type: string }) => Promise<void>) | null = null
+
+  const dispatch = createDispatch<typeof state, { type: string }, { type: string }>({
+    reduce: (s, a) => {
+      if (a.type === 'FIRST') return { state: { count: s.count + 1 }, effects: [{ type: 'CHAIN' }] }
+      if (a.type === 'SECOND') return { state: { count: s.count + 10 }, effects: [] }
+      return { state: s, effects: [] }
+    },
+    execute: (e) => {
+      if (e.type === 'CHAIN') dispatchRef!({ type: 'SECOND' })
+    },
+    getState: () => state,
+    setState: (s) => { state = s },
+    onDone: () => {},
+    log: noop, debug: false,
+  })
+
+  dispatchRef = dispatch
+  const p = dispatch({ type: 'FIRST' })
+  assertEquals(state.count, 11)  // both processed synchronously
+  await p  // resolves cleanly
 })

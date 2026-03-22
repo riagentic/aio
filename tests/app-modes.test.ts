@@ -477,27 +477,32 @@ Deno.test({ name: 'mode: full aio.run with feature — boot + dispatch + shutdow
 
   const app = await aio.run({
     features: [counter],
-    headless: true,
+    appId: 'test-app-modes',
+    appVersion: '0.0.0',
+    client: 'server-only',
     persist: false,
     singleton: false,
     port: P + 10,
     baseDir: await Deno.makeTempDir(),
   })
 
+  type AppState = { counter: { count: number } }
+  const getCount = () => (app.getState() as unknown as AppState).counter.count
+
   try {
-    assertEquals((app.getState() as { counter: { count: number } }).counter.count, 0)
+    assertEquals(getCount(), 0)
 
     counter.increment(5)
     await new Promise(r => setTimeout(r, 50))
-    assertEquals((app.getState() as { counter: { count: number } }).counter.count, 5)
+    assertEquals(getCount(), 5)
 
     counter.decrement(2)
     await new Promise(r => setTimeout(r, 50))
-    assertEquals((app.getState() as { counter: { count: number } }).counter.count, 3)
+    assertEquals(getCount(), 3)
 
     counter.reset()
     await new Promise(r => setTimeout(r, 50))
-    assertEquals((app.getState() as { counter: { count: number } }).counter.count, 0)
+    assertEquals(getCount(), 0)
 
     // connectCli against the live server
     const cli = connectCli<{ counter: { count: number } }>(`http://127.0.0.1:${P + 10}`)

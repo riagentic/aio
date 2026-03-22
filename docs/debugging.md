@@ -227,7 +227,7 @@ execute: {
 ```ts
 await aio.run({
   features: [counter],
-  perfMode: 'soft',          // 'soft' = console.warn, 'strict' = onError callback
+  perfCheck: 'on',           // 'on' = log to perf.log (default), 'off' = disable
   perfBudget: { reduce: 50, effect: 10 },
 })
 ```

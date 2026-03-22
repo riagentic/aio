@@ -4,6 +4,7 @@
 
 import { VERSION } from './aio.ts'
 import { AppLock, readLock, writeLock, removeLock, resolveAppId, instances, isProcessAlive, type LockData } from './single-instance-lock.ts'
+import { join } from '@std/path'
 
 // ── 1. Types & constants ─────────────────────────────────────
 
@@ -26,10 +27,16 @@ const STOP_CHECK_TIMEOUT_MS = 500
 
 // ── 2. Pure utilities ────────────────────────────────────────
 
-/** Resolve the appId for am commands — --app flag > deno.json appId (mandatory) */
+/** Resolve the appId for am commands — --app flag > deno.json appId.
+ *  am runs in dev only (not compiled), so deno.json is always available. */
 function resolveAmAppId(flag?: string): string {
-  if (flag) return flag
-  return resolveAppId()
+  if (flag) return resolveAppId(flag)
+  // am is a dev-time CLI tool — read from deno.json (unlike aio.run which requires explicit appId)
+  try {
+    const cfg = JSON.parse(Deno.readTextFileSync(join(Deno.cwd(), 'deno.json'))) as { appId?: string }
+    if (cfg.appId) return resolveAppId(cfg.appId)
+  } catch { /* no deno.json */ }
+  throw new Error('[am] missing appId — pass --app=X or add "appId" to deno.json')
 }
 
 /** Read lock data for current app — replaces old readPid() */

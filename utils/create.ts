@@ -32,11 +32,11 @@ const APP_TYPES: AppType[] = [
   { id: 'browser',         label: 'Browser',           desc: 'Full-stack web app — server + React UI',                hasUI: true,  hasServer: true,  isRemote: false },
   { id: 'electron',        label: 'Electron',          desc: 'Desktop app — Electron window + embedded server',       hasUI: true,  hasServer: true,  isRemote: false },
   { id: 'android',         label: 'Android',           desc: 'Mobile app — Android WebView + embedded server',        hasUI: true,  hasServer: true,  isRemote: false },
-  { id: 'cli',             label: 'CLI',               desc: 'Headless server + CLI interface, no UI',                hasUI: false, hasServer: true,  isRemote: false },
-  { id: 'service',         label: 'Service',           desc: 'Background daemon — headless server + systemd',         hasUI: false, hasServer: true,  isRemote: false },
+  { id: 'cli',             label: 'CLI',               desc: 'Server-only + CLI interface, no UI',                    hasUI: false, hasServer: true,  isRemote: false },
+  { id: 'service',         label: 'Service',           desc: 'Background daemon — server-only + systemd',             hasUI: false, hasServer: true,  isRemote: false },
   // Remote
   { id: 'remote-browser',  label: 'Browser (remote)',  desc: 'Exposed web server — 0.0.0.0 + auth + systemd',        hasUI: true,  hasServer: true,  isRemote: true },
-  { id: 'remote-service',  label: 'Service (remote)',  desc: 'Exposed headless server — 0.0.0.0 + auth + systemd',   hasUI: false, hasServer: true,  isRemote: true },
+  { id: 'remote-service',  label: 'Service (remote)',  desc: 'Exposed server-only — 0.0.0.0 + auth + systemd',       hasUI: false, hasServer: true,  isRemote: true },
   { id: 'remote-electron', label: 'Electron (remote)', desc: 'Thin Electron client — connects to remote server',     hasUI: false, hasServer: false, isRemote: true },
   { id: 'remote-cli',      label: 'CLI (remote)',      desc: 'Thin CLI client — connects to remote server',          hasUI: false, hasServer: false, isRemote: true },
   { id: 'remote-android',  label: 'Android (remote)',  desc: 'Thin Android client — connect page, no local server',  hasUI: false, hasServer: false, isRemote: true },
@@ -211,13 +211,13 @@ function denoJson(title: string, appType: AppType): string {
   if (isElectronApp) imports['electron'] = 'npm:electron'
 
   const devCmd = appType.hasServer
-    ? `deno run -A src/app.ts${!appType.hasUI ? ' --headless' : (appType.id === 'browser' || appType.id === 'remote-browser') ? ' --no-electron' : ''}`
+    ? `deno run -A src/app.ts${!appType.hasUI ? ' --client=server-only' : (appType.id === 'browser' || appType.id === 'remote-browser') ? ' --client=browser' : ''}`
     : appType.id === 'remote-cli'
       ? 'deno run -A src/client.ts'
       : appType.id === 'remote-electron'
-        ? 'deno run -A src/app.ts --url'
+        ? 'deno run -A src/app.ts --server-url'
         : appType.id === 'remote-android'
-          ? 'deno run -A src/app.ts --no-electron'
+          ? 'deno run -A src/app.ts --client=browser'
           : undefined
 
   const tasks: Record<string, string> = {}
@@ -287,6 +287,7 @@ export const counter = feature('counter', {
 })
 
 await aio.run({
+  appVersion: '0.1.0',
   features: [counter],
   ui: { title: '${title}' },
 })
@@ -319,6 +320,7 @@ function templateMinimal(title: string): Record<string, string> {
 import { counter } from './counter.ts'
 
 await aio.run({
+  appVersion: '0.1.0',
   features: [counter],
   ui: { title: '${title}' },
 })
@@ -365,6 +367,7 @@ function templateMedium(title: string): Record<string, string> {
 import { todo } from './features/todo.ts'
 
 await aio.run({
+  appVersion: '0.1.0',
   features: [todo],
   ui: { title: '${title}' },
 })
@@ -476,6 +479,7 @@ import { todo } from './features/todo/todo.ts'
 import { user } from './features/user/user.ts'
 
 await aio.run({
+  appVersion: '0.1.0',
   features: [todo, user],
   ui: { title: '${title}' },
 })
@@ -663,16 +667,16 @@ function applyAppType(files: Record<string, string>, appType: AppType, title: st
     result[path] = content
   }
 
-  // Inject headless: true for server types without UI
+  // Inject client: 'server-only' for server types without UI
   if (!appType.hasUI && result['src/app.ts']) {
     result['src/app.ts'] = result['src/app.ts'].replace(
       /ui:\s*\{[^}]*\},?\n/,
-      `headless: true,\n`,
+      `client: 'server-only',\n`,
     )
   }
 
-  // Browser types: dev task already uses --no-electron; no need to bake electron:false into app.ts
-  // (keeps config clean and lets users switch to Electron by just removing --no-electron)
+  // Browser types: dev task already uses --client=browser; no need to bake client:'browser' into app.ts
+  // (keeps config clean and lets users switch to Electron by just removing --client=browser)
 
   // Auth hint for remote server types — inside config object
   if (appType.isRemote && appType.hasServer && result['src/app.ts']) {
@@ -691,12 +695,12 @@ function clientOnlyFiles(appType: AppType, title: string): Record<string, string
       'src/app.ts': `import { aio, feature } from 'aio'
 
 // ${title} — Electron remote client
-// Dev:     deno task dev           (opens connect page)
-// Direct:  deno task dev --url=http://server:8000
-// Build:   deno task compile       (AppImage)
+// Dev:     deno task dev                              (opens connect page)
+// Direct:  deno task dev --server-url=http://server:8000
+// Build:   deno task compile                          (AppImage)
 
 const _stub = feature('app', { state: {}, methods: {} })
-await aio.run({ features: [_stub], ui: { title: '${title}' } })
+await aio.run({ appVersion: '0.1.0', features: [_stub], ui: { title: '${title}' } })
 `,
     }
   }
@@ -710,7 +714,7 @@ await aio.run({ features: [_stub], ui: { title: '${title}' } })
 // Build: deno task compile    (APK)
 
 const _stub = feature('app', { state: {}, methods: {} })
-await aio.run({ features: [_stub], ui: { title: '${title}' } })
+await aio.run({ appVersion: '0.1.0', features: [_stub], ui: { title: '${title}' } })
 `,
     'src/App.tsx': `import { useState } from 'react'
 
@@ -1207,11 +1211,11 @@ dist/
   const hint = appType.id === 'remote-cli'
     ? `  ${c.dim}deno task dev${c.reset}\n\n${c.dim}Connects to a running aio server (default: ws://localhost:8000/ws).${c.reset}`
     : appType.id === 'remote-electron'
-      ? `  ${c.dim}deno task dev${c.reset}                  ${c.dim}Open connect page${c.reset}\n  ${c.dim}deno task dev -- --url=http://server:8000${c.reset}  ${c.dim}Connect directly${c.reset}`
+      ? `  ${c.dim}deno task dev${c.reset}                             ${c.dim}Open connect page${c.reset}\n  ${c.dim}deno task dev -- --server-url=http://server:8000${c.reset}  ${c.dim}Connect directly${c.reset}`
       : appType.id === 'remote-android'
         ? `  ${c.dim}deno task dev${c.reset}\n\n${c.dim}Then open ${c.cyan}http://localhost:8000${c.dim} — connect page for testing.${c.reset}`
         : appType.id === 'electron'
-          ? `  ${c.dim}deno task dev${c.reset}\n\n${c.dim}Electron window opens automatically. Skip it with ${c.reset}--no-electron${c.dim} (browser tab instead).${c.reset}`
+          ? `  ${c.dim}deno task dev${c.reset}\n\n${c.dim}Electron window opens automatically. Skip it with ${c.reset}--client=browser${c.dim} (browser tab instead).${c.reset}`
           : appType.hasUI
             ? `  ${c.dim}deno task dev${c.reset}\n\n${c.dim}Then open ${c.cyan}http://localhost:8000${c.dim} in your browser.${c.reset}`
             : `  ${c.dim}deno task dev${c.reset}`

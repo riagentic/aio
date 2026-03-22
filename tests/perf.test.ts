@@ -23,12 +23,13 @@ function createTestDeps(overrides: Partial<DispatchDeps<TestState, TestAction, T
   }
 }
 
-// ── Default mode (strict) ────────────────────────────────────────────
+// ── perfCheck: on (default) ──────────────────────────────────────────
 
-Deno.test('perf: strict mode - slow reduce calls onError', async () => {
+Deno.test('perf: perfCheck on - slow reduce warns', async () => {
+  const warns: string[] = []
   const errors: AioError[] = []
   let reduceCount = 0
-  
+
   const deps = createTestDeps({
     reduce: () => {
       reduceCount++
@@ -38,24 +39,24 @@ Deno.test('perf: strict mode - slow reduce calls onError', async () => {
       return { state: { count: reduceCount }, effects: [] }
     },
     onError: (err) => { errors.push(err) },
-    perfMode: 'strict',
+    log: { debug: () => {}, warn: (msg) => { warns.push(msg) }, error: () => {} },
+    debug: false,
+    perfCheck: 'on',
   })
-  
+
   const dispatch = createDispatch(deps)
   dispatch({ type: 'Inc' })
-  
-  assertEquals(errors.length, 1)
-  assertEquals(errors[0]!.source, 'performance')
-  assertEquals(errors[0]!.actionType, 'Inc')
-  assertEquals(typeof errors[0]!.duration, 'number')
-  assertEquals(errors[0]!.duration! > 100, true)
-  assertEquals(errors[0]!.budget, 100)
-  assertEquals(errors[0]!.message?.includes('exceeded budget'), true)
+
+  assertEquals(warns.length, 1)
+  assertEquals(warns[0]!.includes('exceeded budget'), true)
+  assertEquals(warns[0]!.includes('Inc'), true)
+  assertEquals(errors.length, 0)  // onError never called for perf violations
 })
 
-Deno.test('perf: strict mode - slow effect calls onError', () => {
+Deno.test('perf: perfCheck on - slow effect warns', () => {
+  const warns: string[] = []
   const errors: AioError[] = []
-  
+
   const deps = createTestDeps({
     reduce: () => ({ state: { count: 1 }, effects: [{ type: 'Log', payload: { msg: 'test' } }] }),
     execute: () => {
@@ -64,38 +65,43 @@ Deno.test('perf: strict mode - slow effect calls onError', () => {
       while (performance.now() - start < 20) {}
     },
     onError: (err) => { errors.push(err) },
-    perfMode: 'strict',
+    log: { debug: () => {}, warn: (msg) => { warns.push(msg) }, error: () => {} },
+    debug: false,
+    perfCheck: 'on',
   })
-  
+
   const dispatch = createDispatch(deps)
   dispatch({ type: 'Inc' })
-  
-  assertEquals(errors.length, 1)
-  assertEquals(errors[0]!.source, 'performance')
-  assertEquals(errors[0]!.effectType, 'Log')
-  assertEquals(errors[0]!.duration! > 5, true)
-  assertEquals(errors[0]!.budget, 5)
+
+  assertEquals(warns.length, 1)
+  assertEquals(warns[0]!.includes('exceeded budget'), true)
+  assertEquals(errors.length, 0)  // onError never called for perf violations
 })
 
-Deno.test('perf: strict mode - fast reduce does not call onError', () => {
+Deno.test('perf: perfCheck on - fast reduce does not warn', () => {
+  const warns: string[] = []
   const errors: AioError[] = []
-  
+
   const deps = createTestDeps({
     onError: (err) => { errors.push(err) },
-    perfMode: 'strict',
+    log: { debug: () => {}, warn: (msg) => { warns.push(msg) }, error: () => {} },
+    debug: false,
+    perfCheck: 'on',
   })
-  
+
   const dispatch = createDispatch(deps)
   dispatch({ type: 'Inc' })
   dispatch({ type: 'Inc' })
   dispatch({ type: 'Inc' })
-  
+
+  assertEquals(warns.length, 0)
   assertEquals(errors.length, 0)
 })
 
-Deno.test('perf: strict mode - async effect not measured for duration', () => {
+Deno.test('perf: perfCheck on - async effect not measured for duration', () => {
+  const warns: string[] = []
   const errors: AioError[] = []
-  
+
   const deps = createTestDeps({
     reduce: () => ({ state: { count: 1 }, effects: [{ type: 'Log', payload: { msg: 'test' } }] }),
     execute: () => {
@@ -103,21 +109,24 @@ Deno.test('perf: strict mode - async effect not measured for duration', () => {
       return Promise.resolve()
     },
     onError: (err) => { errors.push(err) },
-    perfMode: 'strict',
+    log: { debug: () => {}, warn: (msg) => { warns.push(msg) }, error: () => {} },
+    debug: false,
+    perfCheck: 'on',
   })
-  
+
   const dispatch = createDispatch(deps)
   dispatch({ type: 'Inc' })
-  
+
+  assertEquals(warns.length, 0)
   assertEquals(errors.length, 0)
 })
 
-// ── Soft mode ────────────────────────────────────────────────────────
+// ── perfCheck: off ────────────────────────────────────────────────────
 
-Deno.test('perf: soft mode - slow reduce only warns', () => {
-  const errors: AioError[] = []
+Deno.test('perf: perfCheck off - slow reduce is silent', () => {
   const warns: string[] = []
-  
+  const errors: AioError[] = []
+
   const deps = createTestDeps({
     reduce: () => {
       const start = performance.now()
@@ -127,21 +136,20 @@ Deno.test('perf: soft mode - slow reduce only warns', () => {
     onError: (err) => { errors.push(err) },
     log: { debug: () => {}, warn: (msg) => { warns.push(msg) }, error: () => {} },
     debug: false,
-    perfMode: 'soft',
+    perfCheck: 'off',
   })
-  
+
   const dispatch = createDispatch(deps)
   dispatch({ type: 'Inc' })
-  
+
   assertEquals(errors.length, 0)
-  assertEquals(warns.length, 1)
-  assertEquals(warns[0]!.includes('exceeded budget'), true)
+  assertEquals(warns.length, 0)
 })
 
-Deno.test('perf: soft mode - slow effect only warns', () => {
-  const errors: AioError[] = []
+Deno.test('perf: perfCheck off - slow effect is silent', () => {
   const warns: string[] = []
-  
+  const errors: AioError[] = []
+
   const deps = createTestDeps({
     reduce: () => ({ state: { count: 1 }, effects: [{ type: 'Log', payload: { msg: 'test' } }] }),
     execute: () => {
@@ -151,86 +159,89 @@ Deno.test('perf: soft mode - slow effect only warns', () => {
     onError: (err) => { errors.push(err) },
     log: { debug: () => {}, warn: (msg) => { warns.push(msg) }, error: () => {} },
     debug: false,
-    perfMode: 'soft',
+    perfCheck: 'off',
   })
-  
+
   const dispatch = createDispatch(deps)
   dispatch({ type: 'Inc' })
-  
+
   assertEquals(errors.length, 0)
-  assertEquals(warns.length, 1)
+  assertEquals(warns.length, 0)
 })
 
 // ── Custom budgets ───────────────────────────────────────────────────
 
 Deno.test('perf: custom reduce budget', () => {
-  const errors: AioError[] = []
-  
+  const warns: string[] = []
+
   const deps = createTestDeps({
     reduce: () => {
       const start = performance.now()
       while (performance.now() - start < 30) {}
       return { state: { count: 1 }, effects: [] }
     },
-    onError: (err) => { errors.push(err) },
-    perfMode: 'strict',
+    log: { debug: () => {}, warn: (msg) => { warns.push(msg) }, error: () => {} },
+    debug: false,
+    perfCheck: 'on',
     perfBudget: { reduce: 10 },  // Very tight budget
   })
-  
+
   const dispatch = createDispatch(deps)
   dispatch({ type: 'Inc' })
-  
-  assertEquals(errors.length, 1)
-  assertEquals(errors[0]!.budget, 10)
-  assertEquals(errors[0]!.duration! > 10, true)
+
+  assertEquals(warns.length, 1)
+  assertEquals(warns[0]!.includes('10ms'), true)
 })
 
 Deno.test('perf: custom effect budget', () => {
-  const errors: AioError[] = []
-  
+  const warns: string[] = []
+
   const deps = createTestDeps({
     reduce: () => ({ state: { count: 1 }, effects: [{ type: 'Log', payload: { msg: 'test' } }] }),
     execute: () => {
       const start = performance.now()
       while (performance.now() - start < 15) {}
     },
-    onError: (err) => { errors.push(err) },
-    perfMode: 'strict',
+    log: { debug: () => {}, warn: (msg) => { warns.push(msg) }, error: () => {} },
+    debug: false,
+    perfCheck: 'on',
     perfBudget: { effect: 10 },
   })
-  
+
   const dispatch = createDispatch(deps)
   dispatch({ type: 'Inc' })
-  
-  assertEquals(errors.length, 1)
-  assertEquals(errors[0]!.budget, 10)
+
+  assertEquals(warns.length, 1)
+  assertEquals(warns[0]!.includes('10ms'), true)
 })
 
 Deno.test('perf: relaxed budget allows more time', () => {
-  const errors: AioError[] = []
-  
+  const warns: string[] = []
+
   const deps = createTestDeps({
     reduce: () => {
       const start = performance.now()
       while (performance.now() - start < 150) {}
       return { state: { count: 1 }, effects: [] }
     },
-    onError: (err) => { errors.push(err) },
-    perfMode: 'strict',
+    log: { debug: () => {}, warn: (msg) => { warns.push(msg) }, error: () => {} },
+    debug: false,
+    perfCheck: 'on',
     perfBudget: { reduce: 200 },  // Relaxed budget
   })
-  
+
   const dispatch = createDispatch(deps)
   dispatch({ type: 'Inc' })
-  
-  assertEquals(errors.length, 0)
+
+  assertEquals(warns.length, 0)
 })
 
 // ── Both reduce and effect slow ───────────────────────────────────────
 
-Deno.test('perf: reports both reduce and effect violations', () => {
+Deno.test('perf: reports both reduce and effect violations as warnings', () => {
+  const warns: string[] = []
   const errors: AioError[] = []
-  
+
   const deps = createTestDeps({
     reduce: () => {
       const start = performance.now()
@@ -242,24 +253,25 @@ Deno.test('perf: reports both reduce and effect violations', () => {
       while (performance.now() - start < 20) {}
     },
     onError: (err) => { errors.push(err) },
-    perfMode: 'strict',
+    log: { debug: () => {}, warn: (msg) => { warns.push(msg) }, error: () => {} },
+    debug: false,
+    perfCheck: 'on',
   })
-  
+
   const dispatch = createDispatch(deps)
   dispatch({ type: 'Inc' })
-  
-  assertEquals(errors.length, 2)
-  assertEquals(errors[0]!.source, 'performance')
-  assertEquals(errors[0]!.actionType, 'Inc')
-  assertEquals(errors[1]!.source, 'performance')
-  assertEquals(errors[1]!.effectType, 'Log')
+
+  assertEquals(warns.length, 2)
+  assertEquals(warns[0]!.includes('reduce'), true)
+  assertEquals(warns[1]!.includes('effect'), true)
+  assertEquals(errors.length, 0)  // onError never called for perf violations
 })
 
 // ── Default budgets when not specified ────────────────────────────────
 
 Deno.test('perf: default budgets are 100ms reduce, 5ms effect', () => {
-  const errors: AioError[] = []
-  
+  const warns: string[] = []
+
   const deps = createTestDeps({
     reduce: () => {
       const start = performance.now()
@@ -270,17 +282,18 @@ Deno.test('perf: default budgets are 100ms reduce, 5ms effect', () => {
       const start = performance.now()
       while (performance.now() - start < 20) {}
     },
-    onError: (err) => { errors.push(err) },
-    perfMode: 'strict',
+    log: { debug: () => {}, warn: (msg) => { warns.push(msg) }, error: () => {} },
+    debug: false,
+    perfCheck: 'on',
     // No perfBudget specified
   })
-  
+
   const dispatch = createDispatch(deps)
   dispatch({ type: 'Inc' })
-  
-  assertEquals(errors.length, 2)
-  assertEquals(errors[0]!.budget, 100)  // reduce default
-  assertEquals(errors[1]!.budget, 5)     // effect default
+
+  assertEquals(warns.length, 2)
+  assertEquals(warns[0]!.includes('100ms'), true)  // reduce default
+  assertEquals(warns[1]!.includes('5ms'), true)     // effect default
 })
 
 // ── effectTimeout ────────────────────────────────────────────────────

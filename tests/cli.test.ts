@@ -7,7 +7,7 @@ Deno.test('parseCli: defaults — empty args', () => {
   assertEquals(r.verbose, false)
   assertEquals(r.port, undefined)
   assertEquals(r.persist, undefined)
-  assertEquals(r.electron, undefined)
+  assertEquals(r.client, undefined)
 })
 
 Deno.test('parseCli: --port=3000', () => {
@@ -26,10 +26,10 @@ Deno.test('parseCli: --port=0 and --port=70000 ignored', () => {
 })
 
 Deno.test('parseCli: boolean flags', () => {
-  const r = parseCli(['--no-persist', '--no-electron', '--keep-alive', '--verbose', '--prod'])
+  const r = parseCli(['--no-persist', '--client=browser', '--keep-server', '--verbose', '--prod'])
   assertEquals(r.persist, false)
-  assertEquals(r.electron, false)
-  assertEquals(r.keepAlive, true)
+  assertEquals(r.client, 'browser')
+  assertEquals(r.keepServer, true)
   assertEquals(r.verbose, true)
   assertEquals(r.prod, true)
 })
@@ -86,30 +86,30 @@ Deno.test('parseCli: --help alongside other flags', () => {
   assertEquals(r.port, 3000)
 })
 
-Deno.test('parseCli: --url sets url', () => {
-  const r = parseCli(['--url=http://192.168.1.100:8000'])
-  assertEquals(r.url, 'http://192.168.1.100:8000')
+Deno.test('parseCli: --server-url sets serverUrl', () => {
+  const r = parseCli(['--server-url=http://192.168.1.100:8000'])
+  assertEquals(r.serverUrl, 'http://192.168.1.100:8000')
 })
 
-Deno.test('parseCli: --url alongside other flags', () => {
-  const r = parseCli(['--url=http://10.0.0.5:3000?token=abc', '--title=Remote'])
-  assertEquals(r.url, 'http://10.0.0.5:3000?token=abc')
+Deno.test('parseCli: --server-url alongside other flags', () => {
+  const r = parseCli(['--server-url=http://10.0.0.5:3000?token=abc', '--title=Remote'])
+  assertEquals(r.serverUrl, 'http://10.0.0.5:3000?token=abc')
   assertEquals(r.title, 'Remote')
 })
 
-Deno.test('parseCli: bare --url sets empty string', () => {
-  const r = parseCli(['--url'])
-  assertEquals(r.url, '')
+Deno.test('parseCli: bare --server-url sets empty string', () => {
+  const r = parseCli(['--server-url'])
+  assertEquals(r.serverUrl, '')
 })
 
-Deno.test('parseCli: --url-like flag is unknown, not swallowed by --url prefix', () => {
-  const r = parseCli(['--url-transform=foo'])
-  assertEquals(r.url, undefined)
+Deno.test('parseCli: --server-url-like flag is unknown, not swallowed by --server-url prefix', () => {
+  const r = parseCli(['--server-url-transform=foo'])
+  assertEquals(r.serverUrl, undefined)
 })
 
-Deno.test('parseCli: --headless flag', () => {
-  const r = parseCli(['--headless'])
-  assertEquals(r.headless, true)
+Deno.test('parseCli: --client=server-only flag', () => {
+  const r = parseCli(['--client=server-only'])
+  assertEquals(r.client, 'server-only')
 })
 
 Deno.test('parseCli: --width and --height', () => {
@@ -182,9 +182,9 @@ Deno.test('electronClientScript: contains connectTo function', () => {
   assertEquals(script.includes('/icon.png'), true)
 })
 
-Deno.test('electronClientScript: handles --url= from argv', () => {
+Deno.test('electronClientScript: handles --server-url= from argv', () => {
   const script = electronClientScript()
-  assertEquals(script.includes('--url='), true)
+  assertEquals(script.includes('--server-url='), true)
   assertEquals(script.includes('process.argv'), true)
 })
 
@@ -285,6 +285,33 @@ Deno.test('parseCli: --transport=invalid ignored', () => {
 Deno.test('parseCli: no --transport returns undefined', () => {
   const r = parseCli([])
   assertEquals(r.transport, undefined)
+})
+
+// ── --client flag ──────────────────────────────────────────────
+
+Deno.test('parseCli: --client=browser', () => {
+  const r = parseCli(['--client=browser'])
+  assertEquals(r.client, 'browser')
+})
+
+Deno.test('parseCli: --client=server-only', () => {
+  const r = parseCli(['--client=server-only'])
+  assertEquals(r.client, 'server-only')
+})
+
+Deno.test('parseCli: --client=cli', () => {
+  const r = parseCli(['--client=cli'])
+  assertEquals(r.client, 'cli')
+})
+
+Deno.test('parseCli: --client with invalid value ignored', () => {
+  const r = parseCli(['--client=invalid'])
+  assertEquals(r.client, undefined)
+})
+
+Deno.test('parseCli: --kill-existing', () => {
+  const r = parseCli(['--kill-existing'])
+  assertEquals(r.killExisting, true)
 })
 
 // ── electronMainScriptUDS ──────────────────────────────────────────

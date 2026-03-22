@@ -12,14 +12,12 @@ import { RESERVED_KEYS } from '../src/feature-types.ts'
 export const checkConfig: Checker = (ctx) => {
   const { denoJson: dj, report, pass } = ctx
   if (!dj) {
-    report('error', 'config', 'deno.json not found — create one with appId, imports, and tasks', { fix: 'See quickstart.md' })
+    report('error', 'config', 'deno.json not found — create one with imports and tasks', { fix: 'See quickstart.md' })
     return
   }
 
-  // appId
-  if (!dj.appId) report('warn', 'config', 'missing "appId" in deno.json — used for lock files, KV path, socket path', { fix: 'Add "appId": "my-app"', safeFix: fix.fixAddAppId })
-  else if (!/^[\w-]+$/.test(dj.appId)) report('warn', 'config', `appId "${dj.appId}" has special characters — use alphanumeric + hyphens only`)
-  else pass(`appId: ${dj.appId}`)
+  // appId — must be in aio.run(), NOT deno.json (compiled builds don't have deno.json)
+  if (dj.appId) report('warn', 'config', `appId "${dj.appId}" in deno.json — move to aio.run({ appId: "${dj.appId}" }) (compiled builds can't read deno.json)`, { fix: 'Remove "appId" from deno.json and add appId to aio.run()', safeFix: fix.fixRemoveAppId })
 
   // unstable: ["kv"]
   if (!dj.unstable?.includes('kv')) report('warn', 'config', 'missing "unstable": ["kv"] — required for state persistence', { fix: 'Add "unstable": ["kv"]', safeFix: fix.fixAddUnstableKv })
@@ -27,7 +25,7 @@ export const checkConfig: Checker = (ctx) => {
   // imports
   const imports = dj.imports ?? {}
   if (!imports['aio'] && !imports['@riagentic/aio']) report('error', 'config', 'missing "aio" import mapping — add "aio": "jsr:@riagentic/aio@..."')
-  if (!imports['react'] && !imports['react-dom']) pass('headless (no React)')
+  if (!imports['react'] && !imports['react-dom']) pass('server-only / CLI (no React)')
   else {
     if (!imports['react']) report('warn', 'config', 'missing "react" import')
     if (!imports['@types/react']) report('hint', 'config', 'missing "@types/react" — add for JSX type checking', { safeFix: fix.fixAddTypesReact })
@@ -58,10 +56,12 @@ export const checkConfig: Checker = (ctx) => {
 
 export const checkStructure: Checker = async (ctx) => {
   const { projectDir, appEntry, appTsx, sourceFiles, report, pass, denoJson } = ctx
-  const isHeadless = appEntry?.content.includes('headless') ?? false
+  // Detect server-only / CLI mode: check aio.run() config or --client flag in dev task
+  const isClientServerOnly = /client\s*:\s*['"](?:server-only|cli)['"]/.test(appEntry?.content ?? '')
   const tasks = denoJson?.tasks ?? {}
   const devTask = tasks['dev'] ?? ''
-  const headlessFromTask = devTask.includes('--headless')
+  const clientFromTask = /--client[= ](?:server-only|cli)/.test(devTask)
+  const isHeadless = isClientServerOnly || clientFromTask
 
   // app.ts entry point
   if (appEntry) pass('entry: src/app.ts')
@@ -73,18 +73,18 @@ export const checkStructure: Checker = async (ctx) => {
   }
 
   // App.tsx
-  if (!isHeadless && !headlessFromTask) {
+  if (!isHeadless) {
     if (appTsx) {
       pass('UI: App.tsx')
       if (!appTsx.content.includes('export default')) {
         report('warn', 'structure', 'App.tsx missing `export default` — framework can\'t mount your component', { file: appTsx.relative })
       }
     } else {
-      report('hint', 'structure', 'no App.tsx found — needed for browser/Electron UI (skip if headless)')
+      report('hint', 'structure', 'no App.tsx found — needed for browser/Electron UI (skip if client: "server-only" or "cli")')
     }
   } else {
-    if (appTsx) report('hint', 'structure', 'App.tsx exists but app runs headless — file is unused', { file: appTsx.relative })
-    else pass('headless mode (no App.tsx)')
+    if (appTsx) report('hint', 'structure', 'App.tsx exists but client is "server-only" or "cli" — file is unused', { file: appTsx.relative })
+    else pass('server-only / CLI mode (no App.tsx)')
   }
 
   // Feature organization
@@ -107,10 +107,16 @@ export const checkStructure: Checker = async (ctx) => {
     if (srcTests.length === 0) report('hint', 'structure', 'no tests/ directory and no .test.ts files found')
   }
 
-  // appVersion
+  // appId — mandatory in aio.run()
+  if (appEntry) {
+    if (appEntry.content.includes('appId')) pass('appId set in aio.run()')
+    else report('error', 'config', 'missing appId in aio.run() — mandatory for lock files, KV/SQLite paths, UDS socket', { file: appEntry.relative, fix: 'Add appId: "my-app" to your aio.run() config', safeFix: fix.fixAddAppIdToRun })
+  }
+
+  // appVersion — mandatory in v1.0
   if (appEntry) {
     if (appEntry.content.includes('appVersion')) pass('appVersion set')
-    else report('warn', 'config', 'no appVersion in aio.run() — defaults to "0.1.0 (default)", set appVersion: "x.y.z"', { file: appEntry.relative })
+    else report('error', 'config', 'missing appVersion in aio.run() — mandatory in v1.0, add appVersion: "x.y.z"', { file: appEntry.relative, fix: 'Add appVersion: "0.1.0" to your aio.run() config' })
   }
 }
 
@@ -356,26 +362,40 @@ export const checkUI: Checker = (ctx) => {
   const { tsxFiles, appTsx, report, pass } = ctx
 
   if (tsxFiles.length === 0) {
-    pass('no TSX files (headless/CLI)')
+    pass('no TSX files (server-only / CLI)')
     return
   }
 
-  // Browser import safety
+  // Browser import safety — check .tsx files AND feature files
   const BROWSER_IMPORTS = new Set(['react', 'react-dom/client', 'react/jsx-runtime', 'aio', 'aio/browser'])
-  for (const file of tsxFiles) {
+  const denoImports = new Set(Object.keys(ctx.denoJson?.imports ?? {}))
+  const SERVER_ONLY_PREFIXES_CHECK2 = ['@std/', 'node:']
+
+  const featureFiles = ctx.features.map(f => f.file).filter((f, i, arr) => arr.indexOf(f) === i)
+  const browserCheckedFiles = [
+    ...tsxFiles,
+    ...featureFiles.filter(f => f.ext !== '.tsx'),  // avoid double-checking
+  ]
+
+  for (const file of browserCheckedFiles) {
     // Named/default imports
     for (const m of file.content.matchAll(/(?:import|export)\s+.*?\s+from\s+['"]([^'"]+)['"]/g)) {
       const spec = m[1]!
-      if (spec.startsWith('.') || spec.startsWith('/') || BROWSER_IMPORTS.has(spec)) continue
+      if (spec.startsWith('.') || spec.startsWith('/')) continue
       if (m[0]!.startsWith('import type ') || m[0]!.startsWith('import type{')) continue
+      if (BROWSER_IMPORTS.has(spec)) continue
+      if (denoImports.has(spec)) continue  // in deno.json → auto-aliased
+      if (SERVER_ONLY_PREFIXES_CHECK2.some(p => spec.startsWith(p))) continue  // caught by Check 1
       const lineIdx = file.content.slice(0, m.index).split('\n').length
-      report('warn', 'ui', `${file.relative}:${lineIdx} — import "${spec}" won't resolve in browser dev mode`, { file: file.relative, line: lineIdx, fix: 'Move to a server-side .ts file or use via an effect' })
+      report('error', 'ui', `${file.relative}:${lineIdx} — import "${spec}" not found in deno.json imports`, { file: file.relative, line: lineIdx, fix: `Add "${spec}": "npm:${spec}" to deno.json imports — AIO auto-aliases for browser` })
     }
     // Side-effect imports
     for (const m of file.content.matchAll(/(?:^|\n)\s*import\s+['"]([^'"]+)['"]/g)) {
       const spec = m[1]!
-      if (spec.startsWith('.') || spec.startsWith('/') || BROWSER_IMPORTS.has(spec)) continue
-      report('warn', 'ui', `${file.relative}: side-effect import "${spec}" won't resolve in browser`, { file: file.relative })
+      if (spec.startsWith('.') || spec.startsWith('/')) continue
+      if (BROWSER_IMPORTS.has(spec) || denoImports.has(spec)) continue
+      if (SERVER_ONLY_PREFIXES_CHECK2.some(p => spec.startsWith(p))) continue
+      report('error', 'ui', `${file.relative}: side-effect import "${spec}" not in deno.json imports`, { file: file.relative, fix: `Add "${spec}": "npm:${spec}" to deno.json imports` })
     }
   }
 
@@ -387,6 +407,96 @@ export const checkUI: Checker = (ctx) => {
   // import React (not needed)
   if (appTsx && /import\s+React[\s,{]/.test(appTsx.content)) {
     report('hint', 'ui', 'App.tsx imports React — not needed with jsx: "react-jsx" transform', { file: appTsx.relative, safeFix: fix.fixRemoveImportReact(appTsx.path) })
+  }
+
+  // Server-only imports in feature definition files (shared with browser)
+  const SERVER_ONLY_PREFIXES = ['@std/', 'node:']
+  for (const file of featureFiles) {
+    // Skip .tsx files — already checked above
+    if (file.ext === '.tsx') continue
+
+    // Named/default imports
+    for (const m of file.content.matchAll(/(?:import|export)\s+.*?\s+from\s+['"]([^'"]+)['"]/g)) {
+      const spec = m[1]!
+      if (m[0]!.startsWith('import type ') || m[0]!.startsWith('import type{')) continue
+      const isServerOnly = SERVER_ONLY_PREFIXES.some(p => spec.startsWith(p))
+      if (!isServerOnly) continue
+      const lineIdx = file.content.slice(0, m.index).split('\n').length
+      report('error', 'ui', `${file.relative}:${lineIdx} — import "${spec}" is server-only but this file contains a feature() definition shared with the browser bundle`, { file: file.relative, line: lineIdx, fix: 'Move to a server-only file and use dynamic import, or use import type' })
+    }
+
+    // Deno.* usage
+    for (const m of file.content.matchAll(/\bDeno\.\w+/g)) {
+      const before = file.content.slice(0, m.index)
+      const lineStart = before.lastIndexOf('\n') + 1
+      const linePrefix = before.slice(lineStart)
+      if (linePrefix.includes('//') || linePrefix.includes('*')) continue
+      const lineIdx = before.split('\n').length
+      report('error', 'ui', `${file.relative}:${lineIdx} — ${m[0]} is server-only but this file contains a feature() definition shared with the browser bundle`, { file: file.relative, line: lineIdx, fix: 'Move Deno.* calls to a server-only file or async method' })
+    }
+  }
+
+  // Check 3: Transitive server-only import detection (2 levels from App.tsx)
+  if (appTsx) {
+    const SERVER_ONLY_IMPORT_RE = /(?:import|export)\s+(?!type\s).*?\s+from\s+['"]((?:@std\/|node:)[^'"]+)['"]/g
+    const LOCAL_IMPORT_RE = /(?:import|export)\s+.*?\s+from\s+['"](\.[^'"]+)['"]/g
+
+    // Helper: resolve a relative import path to a source file
+    const resolveFile = (fromFile: { relative: string }, relPath: string) => {
+      const fromDir = fromFile.relative.replace(/[^/]+$/, '')
+      const target = fromDir + relPath.replace('./', '')
+      return ctx.sourceFiles.find(f =>
+        f.relative === target || f.relative === target + '.ts' || f.relative === target + '.tsx'
+      )
+    }
+
+    // Level 1: App.tsx → local imports
+    for (const m1 of appTsx.content.matchAll(LOCAL_IMPORT_RE)) {
+      const resolved1 = resolveFile(appTsx, m1[1]!)
+      if (!resolved1) continue
+
+      // Level 2: imported file → its local imports
+      for (const m2 of resolved1.content.matchAll(LOCAL_IMPORT_RE)) {
+        const resolved2 = resolveFile(resolved1, m2[1]!)
+        if (!resolved2) continue
+
+        // Check level 2 file for server-only imports
+        for (const sm of resolved2.content.matchAll(SERVER_ONLY_IMPORT_RE)) {
+          const lineIdx = resolved2.content.slice(0, sm.index).split('\n').length
+          report('error', 'ui', `${appTsx.relative} → ${resolved1.relative} → ${resolved2.relative}:${lineIdx} — transitive server-only import "${sm[1]}" reaches browser bundle via import chain`, { file: resolved2.relative, line: lineIdx, fix: 'Move server-only code to a file that is dynamically imported' })
+        }
+      }
+    }
+  }
+
+  // Check 4: Static dynamic import detection — only warn when target has server-only imports
+  const STATIC_DYN_RE = /\bimport\(\s*['"](\.[^'"]+)['"]\s*\)/g
+
+  for (const file of browserCheckedFiles) {
+    for (const m of file.content.matchAll(STATIC_DYN_RE)) {
+      const target = m[1]!
+      // Resolve target file
+      const dir = file.relative.replace(/[^/]+$/, '')
+      const resolved = ctx.sourceFiles.find(f => {
+        const t = dir + target.replace('./', '')
+        return f.relative === t || f.relative === t + '.ts' || f.relative === t + '.tsx'
+      })
+      if (!resolved) continue
+
+      // Check if target has server-only imports
+      const serverImports: string[] = []
+      for (const sm of resolved.content.matchAll(/(?:import|export)\s+(?!type\s).*?\s+from\s+['"]((?:@std\/|node:)[^'"]+)['"]/g)) {
+        serverImports.push(sm[1]!)
+      }
+      if (/\bDeno\.\w+/.test(resolved.content) && !/\/\/.*Deno\./.test(resolved.content)) {
+        serverImports.push('Deno.*')
+      }
+
+      if (serverImports.length === 0) continue  // target is browser-safe, no warning
+
+      const lineIdx = file.content.slice(0, m.index).split('\n').length
+      report('warn', 'ui', `${file.relative}:${lineIdx} — static dynamic import('${target}') will be resolved by esbuild into browser bundle (${resolved.relative} contains server-only imports: ${serverImports.join(', ')})`, { file: file.relative, line: lineIdx, fix: `Use string variable: const _p = '${target.replace(/\.ts$/, '')}'; import(\`\${_p}.ts\`)` })
+    }
   }
 
   // useFeature without loading state

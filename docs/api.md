@@ -251,13 +251,13 @@ See [ui.md](ui.md#url-based-routing) for full reference with examples.
 
 | Config | Description |
 |--------|-------------|
-| `ui.syncRate` | Throttle UI updates: max 1 push per N ms — default `10` (100fps). `0` = microtask-only coalescing (unbounded). Leading edge fires immediately; trailing flush ensures last state always arrives within N ms. |
-| `ui.electron` | Open Electron window (default: `true`) |
-| `ui.keepAlive` | Keep server running after Electron closes (default: `false`) |
+| `ui.syncIntervalMs` | Throttle UI updates: max 1 push per N ms — default `10` (100fps). `0` = microtask-only coalescing (unbounded). Leading edge fires immediately; trailing flush ensures last state always arrives within N ms. |
+| `client` | `'electron' \| 'browser' \| 'cli' \| 'server-only'` — which UI client to launch (top-level, replaces `ui.electron` + `headless`) |
+| `keepServer` | Keep server running after Electron closes (default: `false`) (top-level, replaces `ui.keepAlive`) |
+| `transport` | `'uds' \| 'ws' \| 'auto'` — IPC transport (default: `'auto'`) (top-level, replaces `ui.transport`) |
 | `ui.title` | Window title (default: `'AIO App'`) |
 | `ui.width` / `ui.height` | Window dimensions (default: `800` / `600`) |
 | `ui.showStatus` | Show reconnection indicator (default: `true`) |
-| `ui.transport` | `'uds' \| 'ws' \| 'auto'` — IPC transport (default: `'auto'`) |
 
 ---
 

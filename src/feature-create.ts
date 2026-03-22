@@ -283,17 +283,7 @@ function createFeatureFromMethods<N extends string, S extends Record<string, unk
     }
   }
 
-  // Detect foreign actions
-  const foreignSet = new Set<string>()
-  if (machine !== false) {
-    for (const sc of Object.values(machine.states)) {
-      for (const key of Object.keys(sc)) {
-        if (key.includes(':') && !key.startsWith(prefix + ':')) {
-          foreignSet.add(key)
-        }
-      }
-    }
-  }
+  const foreignActions = detectForeignActions(machine, prefix)
 
   const allActionKeys = [...methodNames, ...generatorNames, ...explicitActionNames, ...[...asyncMethods].map(k => setKey(k))]
   if (asyncMethods.size > 0) allActionKeys.push('__error')
@@ -397,17 +387,7 @@ function createFeatureFromMethods<N extends string, S extends Record<string, unk
       }
     : undefined
 
-  // Build flows from generators
-  const flows: Record<string, FlowDef> = {}
-  const flowTriggers = new Map<string, string>()
-  for (const [key, fn] of Object.entries(rawGenerators)) {
-    const triggers = config.cancelOn?.[key] ?? fn.cancelOn
-    const cancelOnStrings = triggers?.map((t: string | { type: string }) =>
-      typeof t === 'string' ? t : t.type
-    )
-    flows[key] = { trigger: key, generator: fn, _stepNames: [], cancelOn: cancelOnStrings, argsStyle: 'spread' }
-    flowTriggers.set(key, key)
-  }
+  const { flows, flowTriggers } = buildFlows(rawGenerators, new Set(allActionKeys), name, config, 'spread')
 
   // Assemble internals
   const internals: Omit<FeatureAio, 'actions' | 'effects' | 'selectors' | 'bound'> = {
@@ -419,10 +399,10 @@ function createFeatureFromMethods<N extends string, S extends Record<string, unk
     effectKeys,
     id: prefix,
     actionTypeToKey,
-    foreignActions: [...foreignSet],
+    foreignActions,
     initType: `${prefix}:__init`,
     destroyType: `${prefix}:__destroy`,
-    crossDispatchPrefixes: new Set((config.dispatchTo ?? []).map(f => typeof f === 'string' ? f : ('__aio' in f ? (f as FeatureDef).__aio.id : (f as { name: string }).name))),
+    crossDispatchPrefixes: resolveCrossDispatchPrefixes(config.dispatchTo),
     onInit: config.onInit as ((app: ScopedApp) => void) | undefined,
     onDestroy: config.onDestroy as ((app: ScopedApp) => void) | undefined,
     methods: methods as FeatureMethods<Record<string, unknown>>,
@@ -433,14 +413,7 @@ function createFeatureFromMethods<N extends string, S extends Record<string, unk
     persistExclude: config.persist?.exclude,
   }
 
-  // Build selectors
-  const selectors: Record<string, (state: unknown) => unknown> = {}
-  if (config.selectors) {
-    for (const [key, fn] of Object.entries(config.selectors)) {
-      selectors[key] = (fullState: unknown) =>
-        fn((fullState as Record<string, unknown>)[name] as S)
-    }
-  }
+  const selectors = scopeSelectors(name, config.selectors)
 
   // Build public catalog — methods + generators (args-style) + explicit actions (custom payload)
   const publicCatalog: Record<string, unknown> = {}
@@ -490,6 +463,64 @@ function createFeatureFromMethods<N extends string, S extends Record<string, unk
   return def as unknown as FeatureDef<N, Record<string, never>, Record<string, never>, S> & DirectCalling<M>
 }
 
+// ── Shared helpers ────────────────────────────────────────────────────
+
+/** Detect foreign action types from machine transitions (types containing ':' from other features) */
+function detectForeignActions(machine: MachineConfig | false, prefix: string): string[] {
+  if (machine === false) return []
+  const foreignSet = new Set<string>()
+  for (const sc of Object.values(machine.states)) {
+    for (const key of Object.keys(sc)) {
+      if (key.includes(':') && !key.startsWith(prefix + ':')) foreignSet.add(key)
+    }
+  }
+  return [...foreignSet]
+}
+
+/** Resolve cross-dispatch prefixes from dispatchTo config (feature refs → prefix strings) */
+function resolveCrossDispatchPrefixes(dispatchTo: (string | FeatureDef | { name: string })[] | undefined): Set<string> {
+  return new Set((dispatchTo ?? []).map(f =>
+    typeof f === 'string' ? f : ('__aio' in f ? (f as FeatureDef).__aio.id : (f as { name: string }).name)
+  ))
+}
+
+/** Auto-scope selectors: user writes (s: S) => ..., we wrap to extract state[name] */
+function scopeSelectors<S>(
+  name: string,
+  selectors: Record<string, (state: S) => unknown> | undefined,
+): Record<string, (state: unknown) => unknown> {
+  const scoped: Record<string, (state: unknown) => unknown> = {}
+  if (!selectors) return scoped
+  for (const [key, fn] of Object.entries(selectors)) {
+    scoped[key] = (fullState: unknown) => fn((fullState as Record<string, unknown>)[name] as S)
+  }
+  return scoped
+}
+
+/** Build flow definitions from generator entries */
+function buildFlows(
+  rawGenerators: Record<string, GeneratorEntry>,
+  actionKeySet: Set<string>,
+  name: string,
+  config: { cancelOn?: Record<string, (string | { type: string })[]> },
+  argsStyle: 'spread' | 'payload',
+): { flows: Record<string, FlowDef>; flowTriggers: Map<string, string> } {
+  const flows: Record<string, FlowDef> = {}
+  const flowTriggers = new Map<string, string>()
+  for (const [key, fn] of Object.entries(rawGenerators)) {
+    if (argsStyle === 'payload' && !actionKeySet.has(key)) {
+      throw new Error(`[feature:${name}] generator '${key}' must match an action key`)
+    }
+    const triggers = config.cancelOn?.[key] ?? fn.cancelOn
+    const cancelOnStrings = triggers?.map((t: string | { type: string }) =>
+      typeof t === 'string' ? t : t.type
+    )
+    flows[key] = { trigger: key, generator: fn, _stepNames: [], cancelOn: cancelOnStrings, argsStyle }
+    flowTriggers.set(key, key)
+  }
+  return { flows, flowTriggers }
+}
+
 // ── Actions-based feature (classic style) ─────────────────────────────
 
 function createFeatureFromActions<
@@ -521,34 +552,11 @@ function createFeatureFromActions<
     validateMachine(name, machine, actionKeySet)
   }
 
-  // Detect foreign actions from machine (types containing ':' from other features)
-  const foreignSet = new Set<string>()
-  if (machine !== false) {
-    for (const sc of Object.values(machine.states)) {
-      for (const key of Object.keys(sc)) {
-        if (key.includes(':') && !key.startsWith(prefix + ':')) {
-          foreignSet.add(key)
-        }
-      }
-    }
-  }
-  const foreignActions = [...foreignSet]
+  const foreignActions = detectForeignActions(machine, prefix)
 
   // Build flows from generators (keyed by trigger action key)
   const rawGenerators = (config.generators ?? {}) as Record<string, GeneratorEntry>
-  const flows: Record<string, FlowDef> = {}
-  const flowTriggers = new Map<string, string>()
-  for (const [key, fn] of Object.entries(rawGenerators)) {
-    if (!actionKeySet.has(key)) {
-      throw new Error(`[feature:${name}] generator '${key}' must match an action key`)
-    }
-    const triggers = config.cancelOn?.[key] ?? fn.cancelOn
-    const cancelOnStrings = triggers?.map((t: string | { type: string }) =>
-      typeof t === 'string' ? t : t.type
-    )
-    flows[key] = { trigger: key, generator: fn, _stepNames: [], cancelOn: cancelOnStrings, argsStyle: 'payload' }
-    flowTriggers.set(key, key)
-  }
+  const { flows, flowTriggers } = buildFlows(rawGenerators, actionKeySet, name, config, 'payload')
 
   // Default noop reducer when only generators are used
   const noopReduce: FeatureReduceFn = () => undefined
@@ -615,7 +623,7 @@ function createFeatureFromActions<
     foreignActions,
     initType: `${prefix}:__init`,
     destroyType: `${prefix}:__destroy`,
-    crossDispatchPrefixes: new Set((config.dispatchTo ?? []).map(f => typeof f === 'string' ? f : ('__aio' in f ? (f as FeatureDef).__aio.id : (f as { name: string }).name))),
+    crossDispatchPrefixes: resolveCrossDispatchPrefixes(config.dispatchTo),
     onInit: config.onInit as ((app: ScopedApp) => void) | undefined,
     onDestroy: config.onDestroy as ((app: ScopedApp) => void) | undefined,
     flows: Object.keys(flows).length > 0 ? flows : undefined,
@@ -630,12 +638,7 @@ function createFeatureFromActions<
       throw new Error(`[${name}] selector '${key}' collides with reserved property`)
   }
 
-  // Auto-scope selectors: user writes (s: S) => ..., we wrap to extract state[name]
-  const scopedSelectors: Record<string, (state: unknown) => unknown> = {}
-  for (const [key, fn] of Object.entries(config.selectors ?? {})) {
-    scopedSelectors[key] = (fullState: unknown) =>
-      fn((fullState as Record<string, unknown>)[name] as S)
-  }
+  const scopedSelectors = scopeSelectors(name, config.selectors)
 
   const def: Record<string, unknown> = {
     __aio: {

@@ -395,7 +395,7 @@ testFeature(loader, 'fetch data', async (t) => {
 
 ### Direct cross-feature calling
 
-After `aio.run()`, async methods return typed Promises. Import any feature and `await` its methods directly — no strings, no special syntax:
+After `aio.run()`, all bound methods return Promises. Async methods return `Promise<T>` (the method's return value), sync methods return `Promise<void>` (resolves after reduce + effects). Import any feature and `await` its methods directly — no strings, no special syntax:
 
 ```typescript
 // features/orders/index.ts
@@ -448,6 +448,25 @@ For timeout/retry, wrap the direct call:
 ```typescript
 const reserved = await call({ timeout: 5000 }, () => inventory.reserve(items))
 ```
+
+### Dispatch behavior by caller context
+
+When a bound method calls another feature's method, the behavior depends on **where** the call happens. The dispatch loop is re-entrant-safe — if `dispatching=true` (inside a reducer), actions are queued. If `dispatching=false` (executor, effect, external), actions are processed immediately.
+
+| Caller | Callee | Call style | Dispatching | Behavior |
+|---|---|---|---|---|
+| **Sync method** (reducer) | Sync | `other.reset()` | `true` | Queued, processed after current reduce finishes. Can't `await` (sync function). |
+| **Sync method** (reducer) | Async | `other.fetch()` | `true` | Queued. Can't `await` (sync function). |
+| **Async method** (executor) | Sync | `other.reset()` | `false` | Processed **immediately**. State updated after call. |
+| **Async method** (executor) | Sync | `await other.reset()` | `false` | Works correctly. Resumes with state updated. |
+| **Async method** (executor) | Async | `await other.fetch()` | `false` | Works. Full async pipeline. |
+| **Effect handler** | Any | `other.method()` | `false` | Immediate. Can `await` if handler is async. |
+| **External** (UI/test) | Sync | `counter.increment(5)` | `false` | Fire-and-forget. Promise ignored. |
+| **External** (UI/test) | Any | `await counter.method()` | `false` | Works correctly. |
+
+**Key insight:** Async methods run in the **executor**, not the reducer. By the time the method body executes, the dispatch loop has finished (`dispatching=false`). So cross-feature calls from async methods start a **new, independent dispatch cycle** — not a nested one.
+
+Every cross-feature call dispatches a **real action** through the store — observable in time-travel, interceptable by middleware, triggers `listensTo` listeners. Nothing is lost compared to explicit dispatch.
 
 ### `listensTo` — foreign listeners without a machine
 
@@ -765,6 +784,8 @@ Async methods should complete or fail. They don't survive server restarts. For p
 
 ## Comparison
 
+### Feature styles
+
 | | `feature({ methods })` | `feature({ generators })` | `feature({ reduce })` |
 |---|---|---|---|
 | Boilerplate | Minimal | Minimal | Medium |
@@ -778,6 +799,25 @@ Async methods should complete or fail. They don't survive server restarts. For p
 | Step observability | Per-property | Per-yield | Per-action |
 | Mixable | Yes — all styles can coexist in one feature | Yes | Yes |
 | Best for | 80% of features | Multi-step workflows | Complex reactive logic |
+
+### Async methods vs generators
+
+Both generate real actions for cross-feature calls. The key differences are in coordination and lifecycle:
+
+| Capability | Async methods | Generators |
+|---|---|---|
+| Cross-feature calls | `await other.method()` | `yield* ctx.call('name', fn)` |
+| State mutation | Proxy (`s.x = 1`) | `yield* ctx.mutate('name', fn)` |
+| Wait for external event | Not possible | `yield* ctx.waitFor(action)` |
+| Cancellation | Manual (AbortController) | Automatic (`cancelOn`, re-trigger, feature disable) |
+| Parallel execution | `Promise.all(...)` | `yield* ctx.all(...)` |
+| Race | `Promise.race(...)` | `yield* ctx.race(...)` |
+| Named checkpoints | No (batched `__set` actions) | Yes (every `yield*` visible in time-travel) |
+| Observable sleep | `await delay(ms)` (invisible) | `yield* ctx.sleep('name', ms)` |
+| Complexity | Low | Medium |
+| Best for | Simple orchestration, CRUD | Sagas, multi-step workflows, event-driven flows |
+
+**Rule of thumb:** Use async methods unless you need `waitFor`, automatic cancellation, or named time-travel checkpoints. Generators add structure at the cost of `yield* ctx.` syntax.
 
 ---
 

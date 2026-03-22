@@ -36,10 +36,9 @@ async function removeLine(filePath: string, pattern: RegExp): Promise<boolean> {
 
 // ── Config fixes ────────────────────────────────────────────────────
 
-/** Add appId derived from directory name */
-export function fixAddAppId(projectDir: string): Promise<boolean> {
-  const name = basename(projectDir).toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/-+/g, '-')
-  return patchDenoJson(projectDir, (c) => { if (!c.appId) c.appId = name })
+/** Remove appId from deno.json (moved to aio.run()) */
+export function fixRemoveAppId(projectDir: string): Promise<boolean> {
+  return patchDenoJson(projectDir, (c) => { delete c.appId })
 }
 
 /** Add unstable: ["kv"] */
@@ -95,6 +94,32 @@ export function fixAddTestTask(projectDir: string): Promise<boolean> {
     if (!c.tasks) c.tasks = {}
     if (!c.tasks['test']) c.tasks['test'] = 'deno test -A --unstable-kv tests/'
   })
+}
+
+/** Add appId to aio.run() in src/app.ts — derives from deno.json appId or directory name */
+export function fixAddAppIdToRun(projectDir: string): Promise<boolean> {
+  return (async () => {
+    const appTs = join(projectDir, 'src', 'app.ts')
+    let content: string
+    try { content = await Deno.readTextFile(appTs) } catch { return false }
+    if (content.includes('appId')) return false // already has it
+
+    // Derive appId: prefer deno.json value, fallback to directory name
+    let appId: string
+    try {
+      const dj = JSON.parse(await Deno.readTextFile(join(projectDir, 'deno.json'))) as { appId?: string }
+      appId = dj.appId ?? basename(projectDir)
+    } catch {
+      appId = basename(projectDir)
+    }
+    appId = appId.toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '') || 'my-app'
+
+    // Insert appId after `aio.run({`
+    const patched = content.replace(/aio\.run\(\{/, `aio.run({\n  appId: '${appId}',`)
+    if (patched === content) return false
+    await Deno.writeTextFile(appTs, patched)
+    return true
+  })()
 }
 
 // ── Source file fixes ───────────────────────────────────────────────

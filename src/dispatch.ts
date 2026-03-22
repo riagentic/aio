@@ -2,7 +2,10 @@
 // Re-entrant-safe: effects can call dispatch(), actions are queued and drained in order
 import type { ScheduleEffect } from './schedule.ts'
 
-/** Performance mode — strict reports errors, soft only warns */
+/** Performance check — on: warn on violations, off: silent */
+export type PerfCheck = 'on' | 'off'
+
+/** @deprecated Use PerfCheck instead */
 export type PerfMode = 'strict' | 'soft'
 
 /** Performance budgets in milliseconds */
@@ -71,27 +74,28 @@ export type DispatchDeps<S, A, E> = {
   onPerf?: (timing: PerfTiming) => void  // called after each action with timing
   /** Write to perf.log — deduped by action type, once per violation */
   perfLog?: (source: 'reduce' | 'effect', type: string, duration: number, budget: number) => void
-  perfMode?: PerfMode
+  perfCheck?: PerfCheck
   perfBudget?: PerfBudget
   freezeState?: boolean  // deep freeze state after reduce in dev mode
   effectTimeout?: number  // ms before warning on a slow async effect (default: 30000, 0 = disabled)
 }
 
-/** Dispatch function with close() to reject further actions */
-type DispatchFn<A> = ((action: A) => void) & { close: () => void; errorCount: () => number }
+/** Dispatch function with close() to reject further actions.
+ *  Returns Promise<void> that resolves after action is fully processed (reduce + sync effects). */
+type DispatchFn<A> = ((action: A) => Promise<void>) & { close: () => void; errorCount: () => number }
 
 /** Creates a re-entrant-safe dispatch loop that drains queued actions in order */
 export function createDispatch<S, A, E>(deps: DispatchDeps<S, A, E>): DispatchFn<A> {
-  const { reduce, execute, getState, setState, onDone, log, onError, onPerf, perfLog, perfMode, perfBudget, freezeState } = deps
+  const { reduce, execute, getState, setState, onDone, log, onError, onPerf, perfLog, perfCheck, perfBudget, freezeState } = deps
   const effectTimeout = deps.effectTimeout ?? 30_000  // 0 = disabled
-  const strictPerf = perfMode !== 'soft'  // default: strict
+  const perfEnabled = perfCheck !== 'off'  // default: on
   const reduceBudget = perfBudget?.reduce ?? DEFAULT_REDUCE_BUDGET
   const effectBudget = perfBudget?.effect ?? DEFAULT_EFFECT_BUDGET
   let dispatching = false
   let closed = false
   let errors = 0
   let depth = 0  // global re-entrant depth counter (survives across dispatch calls)
-  const queue: A[] = []
+  const queue: { action: A; resolve: () => void }[] = []
 
   function tag(v: unknown): string {
     const o = v as Record<string, unknown>
@@ -104,27 +108,24 @@ export function createDispatch<S, A, E>(deps: DispatchDeps<S, A, E>): DispatchFn
   }
 
   function reportPerf(source: 'reduce' | 'effect', duration: number, budget: number, type?: string): void {
+    if (!perfEnabled) return
     const typeLabel = type ? ` (${type})` : ''
     const msg = `${source} exceeded budget: ${duration}ms > ${budget}ms${typeLabel}`
-
-    if (strictPerf) {
-      log.error(msg)
-      reportError({ source: 'performance', duration, budget, actionType: source === 'reduce' ? type : undefined, effectType: source === 'effect' ? type : undefined, message: msg })
-    } else {
-      log.warn(msg)
-    }
+    log.warn(msg)
     if (perfLog && type) perfLog(source, type, duration, budget)
   }
 
-  function dispatch(action: A): void {
-    if (closed) { log.warn('dispatch after close() — ignored'); return }
+  function dispatch(action: A): Promise<void> {
+    if (closed) { log.warn('dispatch after close() — ignored'); return Promise.resolve() }
     if (queue.length >= QUEUE_MAX) {
       log.error(`dispatch queue depth exceeded (${QUEUE_MAX}) — dropping action ${tag(action)}`)
       reportError({ source: 'reduce', actionType: (action as Record<string, unknown>)?.type as string, message: `queue depth exceeded ${QUEUE_MAX}` })
-      return
+      return Promise.resolve()
     }
-    queue.push(action)
-    if (dispatching) return
+    let resolve!: () => void
+    const promise = new Promise<void>(r => { resolve = r })
+    queue.push({ action, resolve })
+    if (dispatching) return promise
     dispatching = true
 
     let iterations = 0
@@ -132,11 +133,13 @@ export function createDispatch<S, A, E>(deps: DispatchDeps<S, A, E>): DispatchFn
     for (;;) { // outer loop: drain queue → onDone → re-drain if onDone queued more
     while (queue.length > 0) {
       if (++iterations > DISPATCH_MAX) {
-        log.error(`dispatch queue overflow (${DISPATCH_MAX} iterations, depth ${depth}) — possible infinite loop (next: ${tag(queue[0])}), flushing queue`)
+        log.error(`dispatch queue overflow (${DISPATCH_MAX} iterations, depth ${depth}) — possible infinite loop (next: ${tag(queue[0]!.action)}), flushing queue`)
+        for (const entry of queue) entry.resolve()  // resolve all pending to avoid unhandled rejections
         queue.length = 0
         break
       }
-      const current = queue.shift()!
+      const entry = queue.shift()!
+      const current = entry.action
       if (deps.debug) log.debug(`action → reduce: ${tag(current)}`)
 
       let reduced: { state: S; effects: (E | ScheduleEffect)[] }
@@ -149,6 +152,7 @@ export function createDispatch<S, A, E>(deps: DispatchDeps<S, A, E>): DispatchFn
       } catch (e) {
         log.error(`reduce error on ${tag(current)}: ${e}`)
         reportError({ source: 'reduce', error: e, actionType })
+        entry.resolve()  // resolve even on error — Promise signals completion, not success
         continue
       }
       const reduceDuration = performance.now() - reduceStart
@@ -163,6 +167,7 @@ export function createDispatch<S, A, E>(deps: DispatchDeps<S, A, E>): DispatchFn
 
       if (!reduced || typeof reduced !== 'object' || !('state' in reduced) || !Array.isArray(reduced.effects)) {
         log.error(`reduce() must return { state, effects[] } — got ${JSON.stringify(reduced)} for action ${tag(current)}`)
+        entry.resolve()  // resolve even on bad output
         continue
       }
 
@@ -239,6 +244,7 @@ export function createDispatch<S, A, E>(deps: DispatchDeps<S, A, E>): DispatchFn
           budget: { reduce: reduceBudget, effect: effectBudget },
         })
       }
+      entry.resolve()  // action fully processed — resolve its Promise
     }
 
     // onDone (persist + broadcast) runs while dispatching=true so re-entrant dispatches queue
@@ -251,6 +257,7 @@ export function createDispatch<S, A, E>(deps: DispatchDeps<S, A, E>): DispatchFn
     } // end outer loop
     depth--
     dispatching = false
+    return promise
   }
 
   dispatch.close = () => { closed = true }

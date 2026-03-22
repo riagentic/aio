@@ -17,13 +17,14 @@ function createApp(composed: ReturnType<typeof composeFeatures>) {
   let state = composed.initialState
   const actions: { type: string }[] = []
   const app = {
-    dispatch: (action: { type: string; payload: unknown }) => {
+    dispatch: (action: { type: string; payload: unknown }): Promise<void> => {
       actions.push(action)
       const result = composed.reduce(state, action)
       state = result.state
       for (const eff of result.effects) {
         composed.execute(app, eff as { type: string; payload: unknown })
       }
+      return Promise.resolve()
     },
     getState: () => state,
     get state() { return state },
@@ -1024,7 +1025,7 @@ Deno.test('direct calling: cross-feature — one feature calls another directly'
   assertEquals((app.state.orders2 as { total: number }).total, 110)
 })
 
-Deno.test('direct calling: sync methods still return void (not Promise)', () => {
+Deno.test('direct calling: sync methods return Promise<void> after bind', async () => {
   const counter = feature('ctr2', {
     state: { count: 0 },
     methods: {
@@ -1037,8 +1038,40 @@ Deno.test('direct calling: sync methods still return void (not Promise)', () => 
   bindFeature(counter, app.dispatch, () => app.state.ctr2 as Record<string, unknown>)
 
   const result = counter.increment(5)
-  assertEquals(result, undefined)
-  assertEquals((app.state.ctr2 as { count: number }).count, 5)
+  assertEquals(result instanceof Promise, true)  // sync methods now return Promise<void>
+  assertEquals((app.state.ctr2 as { count: number }).count, 5)  // state already updated (sync reduce)
+  await result  // awaiting works — resolves after reduce + effects
+})
+
+Deno.test('direct calling: await sync method from async method (cross-feature)', async () => {
+  const counter = feature('ctr3', {
+    state: { count: 0 },
+    methods: {
+      increment(s, by = 1) { s.count += by },
+    },
+  })
+
+  const orchestrator = feature('orch', {
+    state: { result: 0 },
+    methods: {
+      async run(s) {
+        await counter.increment(10)  // await sync method — should work after fix
+        // counter state should be updated by now
+        s.result = 42
+      },
+    },
+  })
+
+  const composed = composeFeatures([counter, orchestrator])
+  const app = createApp(composed)
+  bindFeature(counter, app.dispatch, () => app.state.ctr3 as Record<string, unknown>)
+  bindFeature(orchestrator, app.dispatch, () => app.state.orch as Record<string, unknown>)
+
+  await orchestrator.run()
+  await delay(30)
+
+  assertEquals((app.state.ctr3 as { count: number }).count, 10)
+  assertEquals((app.state.orch as { result: number }).result, 42)
 })
 
 Deno.test('direct calling: call(opts, fn) callback form with timeout', { sanitizeOps: false, sanitizeResources: false }, async () => {
