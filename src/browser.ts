@@ -100,13 +100,19 @@ async function _loadOfflineQueue(): Promise<_QueuedAction[]> {
   })
 }
 
+const MAX_OFFLINE_ACTIONS = 1000
 async function _saveOfflineAction(action: { type: string; payload?: unknown }): Promise<void> {
   const db = await _openIDB()
   if (!db) return
   try {
     const tx = db.transaction(_offlineStore, 'readwrite')
     const store = tx.objectStore(_offlineStore)
-    store.add({ action, ts: Date.now() })
+    // Cap queue size to prevent unbounded storage growth
+    const countReq = store.count()
+    countReq.onsuccess = () => {
+      if (countReq.result >= MAX_OFFLINE_ACTIONS) return  // drop — queue full
+      store.add({ action, ts: Date.now() })
+    }
   } catch { /* best-effort */ }
 }
 
@@ -328,18 +334,20 @@ function _renderTTPanel(): void {
   _ttPanel.style.display = _ttPanelVisible ? 'flex' : 'none'
 }
 
+let _ttKeyHandler: ((e: KeyboardEvent) => void) | null = null
 function _bindTTKey(): void {
   if (_ttKeyBound) return
   _ttKeyBound = true
   console.log('%c[aio] ⏱ time-travel active — Ctrl+. to toggle panel', 'color:#e94560;font-weight:bold')
-  document.addEventListener('keydown', (e) => {
+  _ttKeyHandler = (e: KeyboardEvent) => {
     if (e.ctrlKey && !e.shiftKey && !e.altKey && e.code === 'Period') {
       e.preventDefault()
       _ttPanelVisible = !_ttPanelVisible
       if (_ttPanelVisible) _renderTTPanel()
       if (_ttPanel) _ttPanel.style.display = _ttPanelVisible ? 'flex' : 'none'
     }
-  })
+  }
+  document.addEventListener('keydown', _ttKeyHandler)
 }
 
 /** Notifies all React subscribers of state change */
@@ -352,12 +360,22 @@ let _stateVersion = 0
 function _subscribe(onStoreChange: () => void): () => void {
   const listener: StateListener = () => onStoreChange()
   _listeners.add(listener)
-  if (!_ws && !_ipcConnected) { _closed = false; _connect() }
+  if (!_ws && !_ipcConnected) {
+    _closed = false; _connect()
+    // Re-register popstate listener if it was cleaned up
+    if (!_popstateHandler && typeof window !== 'undefined') {
+      _popstateHandler = _rSync
+      addEventListener('popstate', _popstateHandler)
+    }
+  }
   return () => {
     _listeners.delete(listener)
     if (_listeners.size === 0) {
       _closed = true; _ws?.close(); _ws = null
       _state = null; _queue = []; _retry = 0
+      // Clean up global listeners to prevent leaks
+      if (_ttKeyHandler) { document.removeEventListener('keydown', _ttKeyHandler); _ttKeyHandler = null; _ttKeyBound = false }
+      if (_popstateHandler) { removeEventListener('popstate', _popstateHandler); _popstateHandler = null }
     }
   }
 }
@@ -386,8 +404,10 @@ function _connectIPC() {
   _ipc.onMessage((line: string) => {
     if (line === '__reload') { location.reload(); return }
     if (line === '__css') {
-      const link = document.querySelector('link[rel="stylesheet"][href*="style.css"]') as HTMLLinkElement | null
-      if (link) link.href = '/style.css?t=' + Date.now()
+      document.querySelectorAll('link[rel="stylesheet"]').forEach(link => {
+        const el = link as HTMLLinkElement
+        if (el.href.startsWith(location.origin)) el.href = el.href.split('?')[0] + '?t=' + Date.now()
+      })
       return
     }
     if (line === '__getState') {
@@ -481,8 +501,10 @@ function _connect() {
   ws.onmessage = (e) => {
     if (e.data === '__reload') { _closed = true; ws.close(); return location.reload() }
     if (e.data === '__css') {
-      const link = document.querySelector('link[rel="stylesheet"][href*="style.css"]') as HTMLLinkElement | null
-      if (link) link.href = '/style.css?t=' + Date.now()
+      document.querySelectorAll('link[rel="stylesheet"]').forEach(link => {
+        const el = link as HTMLLinkElement
+        if (el.href.startsWith(location.origin)) el.href = el.href.split('?')[0] + '?t=' + Date.now()
+      })
       return
     }
     // Client UI request (dev mode) — respond with React component tree
@@ -1152,8 +1174,10 @@ function _rSync(): void {
   for (const fn of _rListeners) fn()
 }
 
+let _popstateHandler: (() => void) | null = null
 if (typeof window !== 'undefined') {
-  addEventListener('popstate', _rSync)
+  _popstateHandler = _rSync
+  addEventListener('popstate', _popstateHandler)
 }
 
 function _rSubscribe(fn: () => void): () => void {

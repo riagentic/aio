@@ -8,7 +8,6 @@ Create a directory and add `deno.json`:
 
 ```json
 {
-  "appId": "dash",
   "title": "Metrics Dashboard",
   "nodeModulesDir": "auto",
   "unstable": ["kv"],
@@ -18,7 +17,7 @@ Create a directory and add `deno.json`:
     "jsxImportSourceTypes": "@types/react"
   },
   "imports": {
-    "aio":          "jsr:@riagentic/aio@1.0.0-alpha1",
+    "aio":          "jsr:@riagentic/aio@1.0.0-alpha2",
     "@types/react": "npm:@types/react@^18",
     "react":        "npm:react@^18",
     "react-dom":    "npm:react-dom@^18",
@@ -108,6 +107,7 @@ import { aio } from 'aio'
 import { metrics } from './features/metrics/index.ts'
 
 await aio.run({
+  appId: 'dash',
   features: [metrics],
   schedules: [
     { id: 'poll-metrics', every: 5000, action: metrics.poll() },
@@ -127,6 +127,7 @@ import { aio, table, pk, real, integer } from 'aio'
 import { metrics } from './features/metrics/index.ts'
 
 await aio.run({
+  appId: 'dash',
   features: [metrics],
   schedules: [
     { id: 'poll-metrics', every: 5000, action: metrics.poll() },
@@ -178,6 +179,7 @@ const users: Record<string, AioUser> = {
 }
 
 await aio.run({
+  appId: 'dash',
   features: [metrics],
   users,
   schedules: [
@@ -328,7 +330,7 @@ Run with `deno task test`. `testFeature` wraps `Deno.test` with a harness that r
 Compile to a standalone binary:
 
 ```sh
-deno run -A jsr:@riagentic/aio@1.0.0-alpha1/src/build --compile --service
+deno run -A jsr:@riagentic/aio@1.0.0-alpha2/src/build --compile --service
 ```
 
 This produces two files: a binary and a systemd unit file. The binary is self-contained -- React, the bundled UI, SQLite, everything.

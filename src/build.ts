@@ -3,6 +3,7 @@
 import { resolve, join, dirname } from '@std/path'
 import { slugify, copyDir, findGradle, writePlaceholderIcon, ensureAppimagetool, formatMb } from './build-helpers.ts'
 import { ANDROID_TEMPLATE } from './android-template.ts'
+import { aioBrowserPlugin } from './esbuild-plugin.ts'
 const root = Deno.cwd()
 const dist = resolve(join(root, 'dist'))
 // Framework base URL — works for both local (file://) and JSR/remote (https://)
@@ -260,7 +261,7 @@ export function mount(el) { createRoot(el).render(createElement(App)) }
       jsx: 'automatic',
       jsxImportSource: 'react',
       alias: { ...esbuildAlias, ...reactAlias },
-      plugins: _IS_REMOTE ? [_httpPlugin] : [],
+      plugins: _IS_REMOTE ? [aioBrowserPlugin(), _httpPlugin] : [aioBrowserPlugin()],
       // Ensure node_modules in user's project root is searched — required when
       // framework files are resolved from JSR cache (outside the project tree)
       nodePaths: [join(root, 'node_modules')],
@@ -688,6 +689,18 @@ if (!doElectron) Deno.exit(0)
 // ── Step 3: Package with bundled Electron (platform-aware) ──
 
 const appDir = join(dist, 'AppDir')
+
+// Copy dist/ assets (app.js, style.css, icon.png) into AppDir/dist/ so Electron
+// can access them as real files (it can't read Deno's embedded VFS)
+const appDirDist = join(appDir, 'dist')
+await Deno.mkdir(appDirDist, { recursive: true })
+for (const name of ['app.js', 'style.css', 'icon.png']) {
+  try {
+    await Deno.copyFile(join(dist, name), join(appDirDist, name))
+  } catch { /* optional file */ }
+}
+console.log('[electron] ✓ dist/ assets copied to AppDir/dist/')
+
 const electronSrc = join(root, 'node_modules', 'electron', 'dist')
 const electronDst = join(appDir, 'electron')
 

@@ -1,5 +1,63 @@
 # Changelog
 
+## v1.0.0-alpha2
+
+### BREAKING: Config audit — naming, defaults, fallbacks
+
+**Config renames:**
+- `persistDebounce` → `persistDebounceMs`
+- `effectTimeout` → `effectTimeoutMs`
+- `deltaThreshold` → `fullStateThreshold`
+- `perfMode` → `perfCheck` (`'on'` | `'off'`)
+- `singleton: 'takeover'` → `singleton: true` + `killExisting: true`
+
+**Config restructure:**
+- `ui.electron` + `headless` → `client: 'electron'|'browser'|'cli'|'server-only'`
+- `ui.keepAlive` → `keepServer` (top-level)
+- `ui.transport` → `transport` (top-level)
+- `ui.syncRate` → `ui.syncIntervalMs`
+
+**Now mandatory:** `appVersion` (was optional, defaulted to '0.1.0')
+
+**CLI flag changes:**
+- `--no-electron` / `--headless` → `--client=electron|browser|cli|server-only`
+- `--url` → `--server-url`
+- `--keep-alive` → `--keep-server`
+- New: `--kill-existing`
+
+**Behavior changes:**
+- Electron not installed + `client:'electron'` → error (was: silent browser fallback)
+- TLS cert fails + `--expose` → error (was: silent HTTP fallback)
+- KV open fails + `persist:true` → error (was: silent no-persistence)
+- `$HOME` missing + persistence → error (was: /tmp fallback)
+
+---
+
+## v1.0.0-alpha2
+
+**Breaking: `appId` mandatory in `aio.run()`**
+- `appId` must be passed in `aio.run({ appId: 'my-app', ... })` — no longer read from `deno.json`
+- Compiled builds don't have `deno.json` at runtime, so appId must be hardcoded in the app
+- `am` CLI still reads `deno.json` as dev-time fallback (or use `--app=X`)
+- Linter now warns if `appId` is in `deno.json` (with auto-fix to remove it) and errors if missing from `aio.run()`
+
+**Promise-returning dispatch** (ISSUE-2)
+- `dispatch()` returns `Promise<void>` — resolves after reduce + sync effects complete
+- All bound feature methods return Promise: sync → `Promise<void>`, async → `Promise<T>`
+- `await syncMethod()` now works correctly (was a silent no-op before)
+- No breaking change — fire-and-forget calls work unchanged (returned Promise ignored)
+
+**Browser Import DX — three-layer defense**
+- esbuild plugin intercepts `@std/*` and `node:*` in prod builds — returns throwing proxy modules with clear error messages instead of cryptic browser failures
+- Dynamic import map: npm packages in `deno.json` automatically aliased for browser via esm.sh (no manual config needed)
+- `aiol` lint: 4 new checks — server-only imports in feature files, bare specifier validation, transitive detection (2 levels), static dynamic import detection
+- Error overlay enhanced with fix suggestions — classifies errors and shows actionable "FIX" box
+- Dev startup validation — warns about browser-unsafe imports on boot
+- All backward compatible — only affects code paths that were already broken
+
+**Reliable live reload** (ISSUE-1)
+- UDS wiring, event filter, health monitor, CSS selector, cache normalization, diagnostics
+
 ## v1.0.0-alpha1
 
 **Breaking: all internal endpoints moved under `/__aio/`**

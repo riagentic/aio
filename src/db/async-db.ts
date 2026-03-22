@@ -27,6 +27,8 @@ type Pending = { resolve: (v: unknown) => void; reject: (e: Error) => void }
  *  Workers spawn lazily on first call — zero overhead if SQLite is never used. */
 export function createDB(path: string, opts: DBOpts = {}): DB {
   const pending = new Map<number, Pending>()
+  // Track which pending IDs belong to which worker (for per-worker error isolation)
+  const workerPending = new WeakMap<Worker, Set<number>>()
   let nextId = 0
   let writerWorker: Worker | null = null
   let readerWorkers: Worker[] = []
@@ -35,10 +37,12 @@ export function createDB(path: string, opts: DBOpts = {}): DB {
 
   // Wire a worker's message handler into the shared pending map
   function wire(w: Worker): void {
+    workerPending.set(w, new Set())
     w.onmessage = ({ data }: MessageEvent<WorkerResponse>) => {
       const p = pending.get(data.id)
       if (!p) return
       pending.delete(data.id)
+      workerPending.get(w)?.delete(data.id)
       if (data.ok) p.resolve(data.data)
       else {
         const err = new Error(data.error)
@@ -47,8 +51,15 @@ export function createDB(path: string, opts: DBOpts = {}): DB {
       }
     }
     w.onerror = (e) => {
-      for (const p of pending.values()) p.reject(new Error(`db worker error: ${e.message}`))
-      pending.clear()
+      // Only reject requests belonging to THIS worker — don't cascade to other workers
+      const ids = workerPending.get(w)
+      if (ids) {
+        for (const id of ids) {
+          const p = pending.get(id)
+          if (p) { p.reject(new Error(`db worker error: ${e.message}`)); pending.delete(id) }
+        }
+        ids.clear()
+      }
     }
   }
 
@@ -57,6 +68,7 @@ export function createDB(path: string, opts: DBOpts = {}): DB {
     const id = nextId++
     return new Promise<T>((resolve, reject) => {
       pending.set(id, { resolve: resolve as (v: unknown) => void, reject })
+      workerPending.get(w)?.add(id)
       w.postMessage({ ...msg, id })
     })
   }
@@ -157,6 +169,21 @@ export function createDB(path: string, opts: DBOpts = {}): DB {
     async close(): Promise<void> {
       if (!ready) return
       await ensureWorkers()
+      // Wait for all in-flight requests to settle before closing
+      const allPending = [...pending.values()].map(p =>
+        new Promise<void>(resolve => {
+          const origResolve = p.resolve
+          const origReject = p.reject
+          p.resolve = (v) => { origResolve(v); resolve() }
+          p.reject = (e) => { origReject(e); resolve() }
+        })
+      )
+      if (allPending.length > 0) {
+        await Promise.race([
+          Promise.all(allPending),
+          new Promise<void>(resolve => setTimeout(resolve, 5000)), // 5s max wait for pending
+        ])
+      }
       // Close all workers with 5s timeout — terminate regardless
       await Promise.all([writerWorker!, ...readerWorkers].map(async (w) => {
         let timer: ReturnType<typeof setTimeout> | undefined

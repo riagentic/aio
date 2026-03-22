@@ -812,12 +812,13 @@ app.features!.enable('wallet')    // re-enable (dispatches Init, resets state)
 |--------|------|---------|-------------|
 | `features` | `FeatureEntry[]` | **required** | Array of features (or `{ feature, dependsOn }` objects) |
 | `middleware` | `MiddlewareFn[]` | — | Middleware chain applied before reduce |
-| `appVersion` | `string` | `'0.1.0 (default)'` | App version string — logged on startup, stored in `__aio.appVersion`. Not persisted. |
+| `appVersion` | `string` | **required** | App version string — logged on startup, stored in `__aio.appVersion`. Not persisted. |
 | `isolate` | `string[]` | — | Only activate these features (dev convenience) |
 | `beforeReduce` | `fn` | — | Intercept actions before reduce — return null to drop |
-| `appId` | — | — | **Set in `deno.json`, not here.** Mandatory. Used for lock file, UDS socket, KV/SQLite paths, TLS cert dir. See [am.md](am.md#app-identity). |
-| `singleton` | `boolean \| 'takeover'` | `true` | `true`: refuse if another instance running. `'takeover'`: kill existing, start new. `false`: allow multiple instances |
-| Additional options | — | — | `port`, `persist`, `persistKey`, `persistMode`, `persistDebounce`, `ui`, `baseDir`, `headless`, `users`, `db`, `schedules`, `perfMode`, `perfBudget`, `effectTimeout`, `freezeState`, `deltaThreshold`, `maxConnections`, `stateForUI`, `stateForDB`, `onRestore`, `onAction`, `onEffect`, `onConnect`, `onDisconnect`, `onStart`, `onStop`, `onError` |
+| `appId` | `string` | — | **Mandatory.** Unique app identity. Used for lock file, UDS socket, KV/SQLite paths, TLS cert dir. Must be in `aio.run()`, not `deno.json` (compiled builds can't read it). See [am.md](am.md#app-identity). |
+| `singleton` | `boolean` | `true` | `true`: refuse if another instance running. `false`: allow multiple instances. Use `killExisting: true` alongside `singleton: true` to kill existing instance |
+| `killExisting` | `boolean` | `false` | When `true`, kill existing instance before starting (replaces `singleton: 'takeover'`) |
+| Additional options | — | — | `port`, `persist`, `persistKey`, `persistMode`, `persistDebounceMs`, `client`, `keepServer`, `transport`, `ui`, `baseDir`, `users`, `db`, `schedules`, `perfCheck`, `perfBudget`, `effectTimeoutMs`, `freezeState`, `fullStateThreshold`, `maxConnections`, `stateForUI`, `stateForDB`, `onRestore`, `onAction`, `onEffect`, `onConnect`, `onDisconnect`, `onStart`, `onStop`, `onError` |
 
 ## Inter-feature coordination
 

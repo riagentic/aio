@@ -73,7 +73,7 @@ const counter = feature('counter', {     // Name: 'counter'
 ```ts
 import { aio } from 'aio'
 
-await aio.run({ features: [counter] })
+await aio.run({ appId: 'my-app', features: [counter] })
 ```
 
 Now `counter` is live. Call methods:
@@ -192,7 +192,7 @@ const dashboard = feature('dashboard', {
   }
 })
 
-// After aio.run({ features: [dashboard, counter, wallet] })
+// After aio.run({ appId: 'my-app', features: [dashboard, counter, wallet] })
 dashboard.summary()  // → 'Count: 5, Balance: 100'
 ```
 
@@ -756,13 +756,14 @@ testFeature(door, 'cannot open when already open', (t) => {
 import { aio } from 'aio'
 import { counter } from './features/counter.ts'
 
-await aio.run({ features: [counter] })
+await aio.run({ appId: 'my-app', features: [counter] })
 ```
 
 ### With UI (Electron)
 
 ```ts
 await aio.run({
+  appId: 'my-app',
   features: [counter, todos],
   ui: {
     title: 'My App',
@@ -776,7 +777,7 @@ await aio.run({
 ### Access the app object
 
 ```ts
-const app = await aio.run({ features: [...] })
+const app = await aio.run({ appId: 'my-app', features: [...] })
 
 app.getState()                     // Get full state
 counter.increment(5)               // Dispatch via direct calling (preferred)
@@ -827,6 +828,7 @@ function Counter() {
 
 ```ts
 await aio.run({
+  appId: 'my-app',
   features: [counter, todos, user]
 })
 ```
@@ -835,6 +837,7 @@ await aio.run({
 
 ```ts
 await aio.run({
+  appId: 'my-app',
   features: [
     counter,
     { feature: wallets, dependsOn: ['user'] },  // user must init first
@@ -1006,7 +1009,7 @@ const editor = feature('editor', {
   }
 })
 
-// After aio.run({ features: [editor], persist: true })
+// After aio.run({ appId: 'my-app', features: [editor], persist: true })
 // State is auto-saved to Deno.Kv
 // htmlCache and undoStack are NOT saved
 ```
@@ -1021,7 +1024,7 @@ You tried to mutate `state` outside a method. This happens when you:
 
 ```ts
 // ❌ WRONG - mutating directly
-const app = await aio.run({ features: [counter] })
+const app = await aio.run({ appId: 'my-app', features: [counter] })
 app.getState().counter.count += 1
 
 // ✓ RIGHT - use a method

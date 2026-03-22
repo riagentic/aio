@@ -19,23 +19,14 @@ Deno.test('slugify: basic', () => {
 
 // ── resolveAppId ──
 
-Deno.test('resolveAppId: explicit appId wins', () => {
-  assertEquals(resolveAppId({ appId: 'My Custom App' }), 'my-custom-app')
+Deno.test('resolveAppId: slugifies explicit appId', () => {
+  assertEquals(resolveAppId('My Custom App'), 'my-custom-app')
 })
 
-Deno.test('resolveAppId: title fallback', () => {
-  // When deno.json has "name", it takes precedence over title.
-  // Title fallback only applies when deno.json has no "name" field.
-  const id = resolveAppId({ title: 'Dashboard' })
-  assertEquals(typeof id, 'string')
-  assertEquals(id.length > 0, true)
-})
-
-Deno.test('resolveAppId: empty fallback', () => {
-  // Without deno.json name, falls back to 'aio-app' or deno.json name
-  const id = resolveAppId({})
-  assertEquals(typeof id, 'string')
-  assertEquals(id.length > 0, true)
+Deno.test('resolveAppId: throws when no appId provided', () => {
+  let threw = false
+  try { resolveAppId() } catch { threw = true }
+  assertEquals(threw, true)
 })
 
 // ── lockPath ──

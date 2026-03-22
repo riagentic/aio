@@ -62,11 +62,11 @@ Deno.test('applyAppType: strips .tsx for headless types', () => {
   }
 })
 
-Deno.test('applyAppType: injects headless: true for cli/service/remote-service', () => {
+Deno.test("applyAppType: injects client: 'server-only' for cli/service/remote-service", () => {
   for (const id of ['cli', 'service', 'remote-service']) {
     const t = APP_TYPES.find(a => a.id === id)!
     const files = applyAppType(templateEmpty('T'), t, 'T')
-    assert(files['src/app.ts']!.includes('headless: true'), `${id} missing headless: true`)
+    assert(files['src/app.ts']!.includes("client: 'server-only'"), `${id} missing client: 'server-only'`)
   }
 })
 
@@ -86,16 +86,16 @@ Deno.test('denoJson: remote-cli has dev task running client.ts', () => {
   assert(json.tasks.dev?.includes('client.ts'), 'dev task should run client.ts')
 })
 
-Deno.test('denoJson: remote-electron dev uses --url', () => {
+Deno.test('denoJson: remote-electron dev uses --server-url', () => {
   const t = APP_TYPES.find(a => a.id === 'remote-electron')!
   const json = JSON.parse(denoJson('T', t))
-  assert(json.tasks.dev?.includes('--url'), 'dev task should use --url')
+  assert(json.tasks.dev?.includes('--server-url'), 'dev task should use --server-url')
 })
 
-Deno.test('denoJson: remote-android dev uses --no-electron', () => {
+Deno.test('denoJson: remote-android dev uses --client=browser', () => {
   const t = APP_TYPES.find(a => a.id === 'remote-android')!
   const json = JSON.parse(denoJson('T', t))
-  assert(json.tasks.dev?.includes('--no-electron'), 'dev task should use --no-electron')
+  assert(json.tasks.dev?.includes('--client=browser'), 'dev task should use --client=browser')
 })
 
 // ── clientOnlyFiles ──

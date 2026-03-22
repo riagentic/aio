@@ -10,7 +10,7 @@ aio.run({ features: [...] }) →
   Deno.Kv persistence + HTTP/WS server + React UI (Electron or browser)
 ```
 
-Data flow: **UI → action → machine guard → reduce → new state + effects → persist → broadcast → execute effects**
+Data flow: **UI → method call (or action dispatch) → state mutation → persist → broadcast → sync all clients**
 
 ## Step 1: Add the framework
 
@@ -33,22 +33,20 @@ Merge these into your existing `deno.json`:
   },
   "imports": {
     // ADD these — keep your existing imports
-    "aio":          "jsr:@riagentic/aio@^0.9",
+    "aio":          "jsr:@riagentic/aio@1.0.0-alpha2",
     "@types/react": "npm:@types/react@^18",
     "react":        "npm:react@^18",
     "react-dom":    "npm:react-dom@^18",
-    "esbuild":      "npm:esbuild@^0.24",
-    "immer":        "npm:immer@^10",
-    "@std/path":    "jsr:@std/path@^1"
+    "esbuild":      "npm:esbuild@^0.24"
   },
   "tasks": {
     "dev":                    "deno run -A src/app.ts",
-    "am":                     "deno run -A jsr:@riagentic/aio@^0.9/src/am",
+    "am":                     "deno run -A jsr:@riagentic/aio@1.0.0-alpha2/src/am",
     "test":                   "deno test -A --unstable-kv tests/",
-    "compile:browser":        "deno run -A jsr:@riagentic/aio@^0.9/src/build --compile",
-    "compile:electron":       "deno run -A jsr:@riagentic/aio@^0.9/src/build --compile --electron",
-    "compile:electron:remote":"deno run -A jsr:@riagentic/aio@^0.9/src/build --client",
-    "compile:android":        "deno run -A jsr:@riagentic/aio@^0.9/src/build --android"
+    "compile:browser":        "deno run -A jsr:@riagentic/aio@1.0.0-alpha2/src/build --compile",
+    "compile:electron":       "deno run -A jsr:@riagentic/aio@1.0.0-alpha2/src/build --compile --electron",
+    "compile:electron:remote":"deno run -A jsr:@riagentic/aio@1.0.0-alpha2/src/build --client",
+    "compile:android":        "deno run -A jsr:@riagentic/aio@1.0.0-alpha2/src/build --android"
   }
 }
 ```

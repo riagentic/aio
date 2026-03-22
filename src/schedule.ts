@@ -157,11 +157,19 @@ export function createScheduleManager(
     timers.set(id, { timerId, kind })
   }
 
+  /** Safe dispatch — cleans up timer entry on error to prevent leaks */
+  function safeDispatch(id: string, action: { type: string; payload?: unknown }): void {
+    try { dispatch(action) } catch (e) {
+      log.error(`schedule: dispatch '${id}' failed: ${e}`)
+      cancelTimer(id)
+    }
+  }
+
   function handleAfter(id: string, ms: number, action: { type: string; payload?: unknown }): void {
     const timerId = setTimeout(() => {
       timers.delete(id)
       log.debug(`schedule: after '${id}' fired`)
-      dispatch(action)
+      safeDispatch(id, action)
     }, ms)
     setTimer(id, 'after', timerId)
     log.debug(`schedule: after '${id}' set for ${ms}ms`)
@@ -170,7 +178,7 @@ export function createScheduleManager(
   function handleEvery(id: string, ms: number, action: { type: string; payload?: unknown }): void {
     const timerId = setInterval(() => {
       log.debug(`schedule: every '${id}' fired`)
-      dispatch(action)
+      safeDispatch(id, action)
     }, ms)
     setTimer(id, 'every', timerId)
     log.debug(`schedule: every '${id}' set for ${ms}ms`)
@@ -183,7 +191,7 @@ export function createScheduleManager(
     const timerId = setTimeout(() => {
       timers.delete(id)
       log.debug(`schedule: at '${id}' fired`)
-      dispatch(action)
+      safeDispatch(id, action)
     }, delay)
     setTimer(id, 'at', timerId)
     log.debug(`schedule: at '${id}' set for ${delay}ms (${time})`)
@@ -195,7 +203,8 @@ export function createScheduleManager(
     function scheduleNext(): void {
       let next: Date
       try { next = nextCronTime(fields, new Date()) } catch (e) {
-        log.error(`schedule: cron '${id}' — ${e instanceof Error ? e.message : e}`)
+        log.error(`schedule: cron '${id}' — ${e instanceof Error ? e.message : e} — removing schedule`)
+        timers.delete(id)
         return
       }
       const delay = Math.max(0, next.getTime() - Date.now())
@@ -208,7 +217,7 @@ export function createScheduleManager(
       }
       const timerId = setTimeout(() => {
         log.debug(`schedule: cron '${id}' fired`)
-        dispatch(action)
+        safeDispatch(id, action)
         scheduleNext()
       }, delay)
       setTimer(id, 'cron', timerId)

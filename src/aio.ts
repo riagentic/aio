@@ -3,19 +3,19 @@ import { skv, type SkvInstance } from './skv.ts'
 import { loadOrCreateCert, type TlsCert } from './tls.ts'
 import { createServer, type ServerHandle } from './server.ts'
 import { launchElectron, launchElectronClient, type AioMeta } from './electron.ts'
-import { join, resolve } from '@std/path'
+import { join, resolve, dirname } from '@std/path'
 import { deepMerge } from './deep-merge.ts'
-import { createDispatch, type AioError, type PerfMode, type PerfBudget } from './dispatch.ts'
+import { createDispatch, type AioError, type PerfBudget } from './dispatch.ts'
 import { createTT, record, undo, redo, travelTo, pause, resume, stateAt, toBroadcast, type TTState, type PerfMetric } from './time-travel.ts'
 import { isScheduleEffect, createScheduleManager, type ScheduleEffect, type ScheduleDef } from './schedule.ts'
 import { createDB, initSchema, loadTables, syncTables, type DB } from './db/mod.ts'
 import type { TableDef } from './sql.ts'
-import { AppLock, resolveAppId, lockDir, type SingletonMode } from './single-instance-lock.ts'
+import { AppLock, resolveAppId, lockDir } from './single-instance-lock.ts'
 import { composeFeatures, bindFeature, type FeatureEntry, type FeatureDef, type ComposedFeatures, type FeatureStatus } from './feature.ts'
 import { AioLogger, setLogger, getLogger, type LogConfig } from './logger.ts'
 
 /** Framework version — printed by --version, checked in tests */
-export const VERSION = '1.0.0-alpha1'
+export const VERSION = '1.0.0-alpha2'
 
 /** Validates that framework version matches deno.json version at build time */
 function validateVersion(): void {
@@ -36,48 +36,51 @@ validateVersion()
 
 /** User identity — resolved from static token map */
 export type AioUser = { id: string; role: string }
-export type { AioError, PerfMode, PerfBudget } from './dispatch.ts'
+export type { AioError, PerfCheck, PerfBudget } from './dispatch.ts'
 
 
-/** Electron + browser window options */
+/** Window + UI sync options — applies to both Electron and browser clients */
 export type UiConfig = {
-  electron?: boolean   // default: true — opens electron window
-  keepAlive?: boolean  // default: false — keep server running after electron closes
-  title?: string       // default: 'AIO App'
-  width?: number       // default: 800
-  height?: number      // default: 600
-  showStatus?: boolean // default: true — show reconnection indicator
-  transport?: 'uds' | 'ws' | 'auto'  // default: 'auto' — UDS on linux/mac+electron, WS otherwise
-  syncRate?: number                   // throttle UI updates: max 1 push per N ms — default: 10 (100fps), 0 = microtask-only coalescing
+  title?: string           // default: 'AIO App'
+  width?: number           // default: 800
+  height?: number          // default: 600
+  showStatus?: boolean     // default: true
+  syncIntervalMs?: number  // default: 10 — max 1 UI push per N ms (0 = microtask coalescing)
 }
 
 /** Everything aio.run() needs to wire your app */
 export type AioConfig<S, A, E> = {
+  /** Unique app identity — used for lock file, UDS socket, KV/SQLite paths, TLS cert dir. Mandatory. */
+  appId: string
   reduce: (state: S, action: A) => { state: S; effects: (E | ScheduleEffect)[] }
   execute: (app: AioApp<S, A>, effect: E) => void
   persist?: boolean              // default: true — auto-opens Deno.Kv
   stateForDB?: (state: S) => Partial<S>   // filter what gets persisted (default: full state)
   stateForUI?: (state: S, user?: AioUser) => unknown   // filter what gets sent to UI (default: full state)
-  deltaThreshold?: number          // 0-1: ratio of changed keys that triggers full state broadcast (default: 0.5)
+  fullStateThreshold?: number      // 0-1: ratio of changed keys that triggers full state broadcast (default: 0.5)
   maxConnections?: number          // max concurrent WebSocket clients (default: 100)
   beforeReduce?: (action: A, state: S, user?: AioUser) => A | null  // intercept actions before reduce — return null to drop
   persistKey?: string            // KV key prefix (default: "state")
-  persistDebounce?: number       // ms between KV writes (default: 100)
+  persistDebounceMs?: number     // ms between KV writes (default: 100)
   persistMode?: 'single' | 'multi'  // 'single' (default): one blob ≤65KB. 'multi': one KV key per top-level state key — no 65KB limit
   users?: Record<string, AioUser>  // static token map — token is key, user is value
   ui?: UiConfig
   port?: number                  // default: 8000
   baseDir?: string               // default: ./src
-  headless?: boolean             // default: false — skip browser/electron, server-only (for CLI apps)
-  appVersion?: string            // app version string — logged on startup, available at __aio.appVersion
+  client?: 'electron' | 'browser' | 'cli' | 'server-only'  // default: 'electron'
+  keepServer?: boolean           // default: false — keep server running after client closes (moved from ui.keepAlive)
+  transport?: 'uds' | 'ws' | 'auto'  // default: 'auto' — UDS on linux/mac+electron, WS otherwise (moved from ui.transport)
+  killExisting?: boolean         // default: false
+  serverUrl?: string
+  appVersion: string             // app version string — logged on startup, available at __aio.appVersion
   schedules?: ScheduleDef[]      // static scheduled effects — started on boot
   db?: Record<string, TableDef>  // SQLite table definitions — arrays auto-sync
-  perfMode?: PerfMode           // 'strict' (default) or 'soft' — how to report performance violations
+  perfCheck?: 'on' | 'off'      // default: 'on' — enable/disable performance violation reporting
   perfBudget?: PerfBudget       // override default budgets (reduce: 100, effect: 5)
-  effectTimeout?: number        // ms before logging a warning for slow async effects — warning only, does not cancel (default: 30000 = 30s)
+  effectTimeoutMs?: number      // ms before logging a warning for slow async effects — warning only, does not cancel (default: 30000 = 30s)
   freezeState?: boolean         // default: false in prod, true in dev — deep freeze state after reduce to catch mutations
   onRestore?:    (state: S) => S       // transform state after restore, before server starts
-  singleton?: SingletonMode      // true (default)=refuse if running, 'takeover'=kill+replace, false=allow multi
+  singleton?: boolean            // true (default)=refuse if running, false=allow multi
   // Lifecycle hooks — observe-only, all optional, error-guarded
   onAction?:     (action: A, state: S, user?: AioUser) => void
   onEffect?:     (effect: E, user?: AioUser) => void
@@ -92,7 +95,7 @@ export type AioConfig<S, A, E> = {
 
 /** Handle returned by aio.run() — dispatch actions, read state, or shut down */
 export type AioApp<S = unknown, A = unknown> = {
-  dispatch: (action: A) => void
+  dispatch: (action: A) => Promise<void>
   getState: () => S
   snapshot?: () => string          // server-only (undefined in standalone)
   loadSnapshot?: (json: string) => void  // server-only (undefined in standalone)
@@ -383,12 +386,12 @@ function printLint(r: Lint): void {
 // ── CLI ─────────────────────────────────────────────────────────────
 
 /** CLI flags — overrides config values. Accepts args for testing. */
-export type CliFlags = { port?: number; persist?: boolean; electron?: boolean; keepAlive?: boolean; title?: string; verbose: boolean; prod?: boolean; version?: boolean; expose?: boolean; help?: boolean; url?: string; width?: number; height?: number; headless?: boolean; cert?: string; key?: string; isolate?: string[]; transport?: 'uds' | 'ws' }
+export type CliFlags = { port?: number; persist?: boolean; client?: 'electron' | 'browser' | 'cli' | 'server-only'; keepServer?: boolean; title?: string; verbose: boolean; prod?: boolean; version?: boolean; expose?: boolean; help?: boolean; serverUrl?: string; width?: number; height?: number; cert?: string; key?: string; isolate?: string[]; transport?: 'uds' | 'ws'; killExisting?: boolean }
 
 /** Parses CLI flags from Deno.args (or custom array for testing) */
 export function parseCli(args: readonly string[] = Deno.args): CliFlags {
   const r: CliFlags = { verbose: false }
-  const known = ['--port=', '--no-persist', '--no-electron', '--keep-alive', '--title=', '--verbose', '--prod', '--version', '--expose', '--help', '--url', '--width=', '--height=', '--headless', '--cert=', '--key=', '--isolate=', '--transport=']
+  const known = ['--port=', '--no-persist', '--client=', '--keep-server', '--title=', '--verbose', '--prod', '--version', '--expose', '--help', '--server-url', '--width=', '--height=', '--cert=', '--key=', '--isolate=', '--transport=', '--kill-existing']
   for (const arg of args) {
     if (arg.startsWith('--port=')) {
       const n = Number(arg.slice(7))
@@ -396,17 +399,21 @@ export function parseCli(args: readonly string[] = Deno.args): CliFlags {
       else log.warn(`invalid --port value: ${arg.slice(7)} (must be 1-65535)`)
     }
     else if (arg === '--no-persist') r.persist = false
-    else if (arg === '--no-electron') r.electron = false
-    else if (arg === '--keep-alive') r.keepAlive = true
+    else if (arg.startsWith('--client=')) {
+      const v = arg.slice(9)
+      if (v === 'electron' || v === 'browser' || v === 'cli' || v === 'server-only') r.client = v
+      else log.warn(`invalid --client value: ${v} (must be electron|browser|cli|server-only)`)
+    }
+    else if (arg === '--keep-server') r.keepServer = true
     else if (arg.startsWith('--title=')) r.title = arg.slice(8)
     else if (arg === '--verbose') r.verbose = true
     else if (arg === '--prod') r.prod = true
     else if (arg === '--version') r.version = true
     else if (arg === '--expose') r.expose = true
     else if (arg === '--help') r.help = true
-    else if (arg === '--url') r.url = ''
-    else if (arg.startsWith('--url=')) r.url = arg.slice(6)
-    else if (arg === '--headless') r.headless = true
+    else if (arg === '--server-url') r.serverUrl = ''
+    else if (arg.startsWith('--server-url=')) r.serverUrl = arg.slice(13)
+    else if (arg === '--kill-existing') r.killExisting = true
     else if (arg.startsWith('--cert=')) r.cert = arg.slice(7)
     else if (arg.startsWith('--key=')) r.key = arg.slice(6)
     else if (arg.startsWith('--width=')) {
@@ -441,16 +448,16 @@ Usage: deno run -A src/app.ts [flags]
 Flags:
   --port=N         Server port (default: 8000)
   --no-persist     Disable Deno.Kv persistence
-  --no-electron    Skip Electron, open browser
-  --keep-alive     Server survives Electron close
+  --client=X       Client mode: electron|browser|cli|server-only (default: electron)
+  --keep-server    Server survives Electron close (electron only)
   --title=X        Override window/page title
   --verbose        Verbose logging (actions, state, effects, WS, HTTP)
   --prod           Serve pre-built dist/app.js
   --expose         Bind 0.0.0.0 + HTTPS + generate auth token for LAN access
   --cert=PATH      TLS certificate file (PEM) — used with --expose (auto-generated if omitted)
   --key=PATH       TLS private key file (PEM) — used with --expose (auto-generated if omitted)
-  --headless       Server-only — no browser or Electron (for CLI apps)
-  --url[=URL]      Connect to remote aio server (Electron thin client)
+  --server-url[=X] Connect to remote aio server (Electron thin client)
+  --kill-existing  Kill running instance and take over
   --width=N        Initial window width (default: 800)
   --height=N       Initial window height (default: 600)
   --transport=X    Transport: 'uds' or 'ws' (default: auto — UDS for electron on linux/mac)
@@ -489,9 +496,11 @@ function resolveDbPath(appId: string): string {
   return join(resolveDataDir(appId), 'data.db')
 }
 
-/** Returns user home directory — $HOME, $USERPROFILE, or /tmp fallback */
+/** Returns user home directory — $HOME or $USERPROFILE, throws if neither set */
 function homedir(): string {
-  return Deno.env.get('HOME') ?? Deno.env.get('USERPROFILE') ?? '/tmp'
+  const home = Deno.env.get('HOME') ?? Deno.env.get('USERPROFILE')
+  if (!home) throw new Error('Cannot determine home directory — set $HOME environment variable')
+  return home
 }
 
 // ── UDS (Unix Domain Socket) ────────────────────────────────────────
@@ -679,34 +688,40 @@ function handleUDSConn(
 // ── Runtime ─────────────────────────────────────────────────────────
 
 let _running = false
-const _dispatchUser: AioUser | undefined = undefined
+// _dispatchUser removed — user context now extracted per-action from action._user (set by server dispatch)
 let _electronProc: Deno.ChildProcess | null = null
 
 /** v0.5 features-based config — pass to aio.run() instead of (initialState, config) */
 export type FeaturesConfig = {
+  /** Unique app identity — used for lock file, UDS socket, KV/SQLite paths, TLS cert dir. Mandatory. */
+  appId: string
   features: FeatureEntry[]
   port?: number
   persist?: boolean
   persistKey?: string
-  persistDebounce?: number
+  persistDebounceMs?: number
   persistMode?: 'single' | 'multi'
   ui?: UiConfig
   baseDir?: string
-  headless?: boolean
+  client?: 'electron' | 'browser' | 'cli' | 'server-only'
+  keepServer?: boolean
+  transport?: 'uds' | 'ws' | 'auto'
+  killExisting?: boolean
+  serverUrl?: string
   users?: Record<string, AioUser>
   db?: Record<string, TableDef>
-  perfMode?: PerfMode
+  perfCheck?: 'on' | 'off'
   perfBudget?: PerfBudget
-  effectTimeout?: number
+  effectTimeoutMs?: number
   freezeState?: boolean
-  singleton?: SingletonMode
-  deltaThreshold?: number
+  singleton?: boolean
+  fullStateThreshold?: number
   maxConnections?: number
   schedules?: ScheduleDef[]
   /** v0.5 middleware array — applied in order as beforeReduce chain */
   middleware?: MiddlewareFn[]
   /** Application version string — logged on startup, available at __aio.appVersion */
-  appVersion?: string
+  appVersion: string
   /** Isolate features — only these features are active (dev mode convenience) */
   isolate?: string[]
   beforeReduce?: (action: unknown, state: unknown, user?: AioUser) => unknown | null
@@ -797,7 +812,7 @@ async function run(a: any, b?: any): Promise<AioApp<any, any>> {
     }
 
     // Create structured logger if configured
-    const appId = resolveAppId()
+    const appId = resolveAppId(fc.appId)
     const logCfg = fc.logging === true ? {} : fc.logging
     const logger = logCfg ? new AioLogger({ ...logCfg, appName: appId }) : null
     if (logger) await logger.init()
@@ -807,7 +822,7 @@ async function run(a: any, b?: any): Promise<AioApp<any, any>> {
     ;(globalThis as Record<string, unknown>).__aioFeatures = composed
 
     // Build beforeReduce from middleware array + explicit beforeReduce
-    let beforeReduce = fc.beforeReduce as ((action: unknown, state: unknown) => unknown | null) | undefined
+    let beforeReduce = fc.beforeReduce as ((action: unknown, state: unknown, user?: AioUser) => unknown | null) | undefined
     if (fc.middleware?.length) {
       const mws = fc.middleware
       const chainedMw = (action: unknown, state: unknown, user?: AioUser): unknown | null => {
@@ -823,7 +838,7 @@ async function run(a: any, b?: any): Promise<AioApp<any, any>> {
         beforeReduce = (action, state, user?: AioUser) => {
           const r = chainedMw(action, state, user)
           if (r === null) return null
-          return prev(r, state)
+          return prev(r, state, user)
         }
       } else {
         beforeReduce = chainedMw
@@ -837,6 +852,7 @@ async function run(a: any, b?: any): Promise<AioApp<any, any>> {
 
     // Convert to legacy config
     const config: AioConfig<Record<string, unknown>, unknown, unknown> = {
+      appId: fc.appId,
       reduce: composed.reduce as AioConfig<Record<string, unknown>, unknown, unknown>['reduce'],
       execute: ((app: AioApp<Record<string, unknown>, unknown>, effect: unknown) => {
         composed.execute(
@@ -846,22 +862,26 @@ async function run(a: any, b?: any): Promise<AioApp<any, any>> {
       }) as AioConfig<Record<string, unknown>, unknown, unknown>['execute'],
       persist: fc.persist,
       persistKey: fc.persistKey,
-      persistDebounce: fc.persistDebounce,
+      persistDebounceMs: fc.persistDebounceMs,
       persistMode: fc.persistMode,
       port: fc.port,
       baseDir: fc.baseDir,
-      headless: fc.headless,
+      client: fc.client,
       users: fc.users,
       db: fc.db,
-      perfMode: fc.perfMode,
+      perfCheck: fc.perfCheck,
       perfBudget: fc.perfBudget,
-      effectTimeout: fc.effectTimeout,
+      effectTimeoutMs: fc.effectTimeoutMs,
       freezeState: fc.freezeState,
       singleton: fc.singleton,
-      deltaThreshold: fc.deltaThreshold,
+      killExisting: fc.killExisting,
+      keepServer: fc.keepServer,
+      fullStateThreshold: fc.fullStateThreshold,
       maxConnections: fc.maxConnections,
       schedules: fc.schedules,
       appVersion: fc.appVersion,
+      transport: fc.transport,
+      serverUrl: fc.serverUrl,
       ui: fc.ui,
       beforeReduce: beforeReduce as AioConfig<Record<string, unknown>, unknown, unknown>['beforeReduce'],
       onAction: logger
@@ -925,32 +945,34 @@ async function _run<S, A, E>(initialState: S, config: AioConfig<S, A, E>): Promi
   if (cli.version) { console.log(`aio ${VERSION}`); Deno.exit(0) }
 
   // App identity — resolved once, used for lock, UDS socket, KV/SQLite paths
-  const appId = resolveAppId()
+  const appId = resolveAppId(config.appId)
   log.debug(`app-id: ${appId}`)
 
   // Port — explicit wins, otherwise pick a random free port in 49152–65535
   const port = cli.port ?? config.port ?? await findFreePort()
 
   // Single-instance enforcement — identity-based lock in /tmp/aio/{appId}.lock
-  const singletonMode: SingletonMode = config.singleton ?? true
+  const singletonMode = config.singleton ?? true
+  const killExisting = (config.killExisting ?? false) || (cli.killExisting ?? false)
   let appLock: AppLock | null = null
   if (singletonMode !== false) {
     appLock = new AppLock(appId)
-    const result = await appLock.acquire(port, singletonMode)
+    const result = await appLock.acquire(port, killExisting)
     if (!result.ok) {
       const ex = result.existing
       const exUrl = `http://localhost:${ex.port}`
-      console.error(`[AIO] ${singletonMode === 'takeover' ? 'Failed to take over' : 'Already running'}: ${ex.appId} at ${exUrl} (pid ${ex.pid})`)
+      console.error(`[AIO] ${killExisting ? 'Failed to take over' : 'Already running'}: ${ex.appId} at ${exUrl} (pid ${ex.pid})`)
       Deno.exit(1)
     }
     log.debug(`lock: acquired ${lockDir()}/${appId}.lock (PID ${Deno.pid})`)
   }
 
-  // --url: thin client mode — launches connect-page electron that fetches meta from remote
-  if (cli.url !== undefined) {
-    if (cli.url) log.info(`connecting to ${cli.url}`)
+  // --server-url: thin client mode — launches connect-page electron that fetches meta from remote
+  const serverUrl = cli.serverUrl ?? config.serverUrl
+  if (serverUrl !== undefined) {
+    if (serverUrl) log.info(`connecting to ${serverUrl}`)
     else log.info('launching connect page')
-    const proc = await launchElectronClient(log, cli.url || undefined)
+    const proc = await launchElectronClient(log, serverUrl || undefined)
     if (proc) {
       const status = await proc.status
       log.info(`electron closed (code ${status.code ?? 0})`)
@@ -968,10 +990,15 @@ async function _run<S, A, E>(initialState: S, config: AioConfig<S, A, E>): Promi
   // Prod mode: explicit --prod flag or auto-detect in compiled binaries only
   // Running from source with dist/ lying around should NOT trigger prod
   const moduleRoot = import.meta.dirname ? resolve(import.meta.dirname, '..', '..', '..') : null
+  const execDir = isCompiled() ? resolve(dirname(Deno.execPath())) : null
   let distDir = resolve(join(Deno.cwd(), 'dist'))
   let prod = cli.prod ?? false
   if (!prod && isCompiled()) {
-    const candidates = [distDir, ...(moduleRoot ? [resolve(join(moduleRoot, 'dist'))] : [])]
+    const candidates = [
+      distDir,
+      ...(execDir ? [resolve(join(execDir, 'dist'))] : []),
+      ...(moduleRoot ? [resolve(join(moduleRoot, 'dist'))] : []),
+    ]
     for (const dir of candidates) {
       try {
         await Deno.stat(join(dir, 'app.js'))
@@ -983,7 +1010,9 @@ async function _run<S, A, E>(initialState: S, config: AioConfig<S, A, E>): Promi
     }
   }
 
-  const headless = cli.headless ?? config.headless ?? false
+  const client = cli.client ?? config.client ?? 'electron'
+  const useElectron = client === 'electron'
+  const isHeadless = client === 'server-only' || client === 'cli'
   const { reduce, execute, onAction, onEffect, onStart, onStop, onError } = config
   const shouldPersist = (cli.persist ?? config.persist) !== false
   const getUIState = config.stateForUI ?? ((s: S, _user?: AioUser) => s)
@@ -991,8 +1020,7 @@ async function _run<S, A, E>(initialState: S, config: AioConfig<S, A, E>): Promi
   const persistKey = config.persistKey ?? 'state'
   const persistMode = config.persistMode ?? 'single'
   const ui = config.ui ?? {}
-  const useElectronEarly = !headless && (cli.electron ?? ui.electron) !== false
-  const result = await lint(initialState, config, baseDir, prod, headless, useElectronEarly)
+  const result = await lint(initialState, config, baseDir, prod, isHeadless, useElectron)
   printLint(result)
 
   // Title: CLI > config > deno.json "title" > fallback
@@ -1000,7 +1028,7 @@ async function _run<S, A, E>(initialState: S, config: AioConfig<S, A, E>): Promi
   try { denoJsonTitle = JSON.parse(await Deno.readTextFile(join(Deno.cwd(), 'deno.json'))).title } catch { /* no deno.json or no title field */ }
   const title = cli.title ?? ui.title ?? denoJsonTitle ?? 'AIO App'
 
-  log.debug(`config: port=${port} persist=${shouldPersist} electron=${(cli.electron ?? ui.electron) !== false} title="${title}" baseDir=${baseDir}`)
+  log.debug(`config: port=${port} persist=${shouldPersist} client=${client} title="${title}" baseDir=${baseDir}`)
 
   let kvDb: SkvInstance | null = null
   let state = initialState
@@ -1050,8 +1078,7 @@ async function _run<S, A, E>(initialState: S, config: AioConfig<S, A, E>): Promi
         log.debug(`persist: no saved state, using initialState`)
       }
     } catch (e) {
-      log.warn(`persist: KV unavailable, running without persistence — ${e}`)
-      kvDb = null
+      throw new Error(`KV unavailable: ${e}\nFix permissions or set persist: false to disable persistence.`)
     }
   }
 
@@ -1073,7 +1100,7 @@ async function _run<S, A, E>(initialState: S, config: AioConfig<S, A, E>): Promi
   let prevDbState: Record<string, unknown> = { ...(state as Record<string, unknown>) }
 
   /** Debounced persistence — KV for UI state, SQLite for db arrays */
-  const persistMs = config.persistDebounce ?? 100
+  const persistMs = config.persistDebounceMs ?? 100
   let persistTimer: ReturnType<typeof setTimeout> | null = null
   let shuttingDown = false
   let prevPersistedKeys: string[] = []  // track multi-key keys for deletion when state keys removed
@@ -1168,11 +1195,14 @@ async function _run<S, A, E>(initialState: S, config: AioConfig<S, A, E>): Promi
       a = filtered as A
     }
     _anyProcessed = true
+    _currentActionUser = user
     if (onAction) try { onAction(a, s, user) } catch (e) { log.error(`hook onAction: ${e}`) }
     return reduce(s, a)
   }
+  // Track per-action user for onEffect hook (set in hookedReduce, consumed in hookedExecute)
+  let _currentActionUser: AioUser | undefined
   const hookedExecute: typeof execute = onEffect
-    ? (app, e) => { try { onEffect(e, _dispatchUser) } catch (err) { log.error(`hook onEffect: ${err}`) }; execute(app, e) }
+    ? (app, e) => { try { onEffect(e, _currentActionUser) } catch (err) { log.error(`hook onEffect: ${err}`) }; execute(app, e) }
     : execute
 
   // Time-travel — active in dev mode, zero cost in prod
@@ -1191,7 +1221,7 @@ async function _run<S, A, E>(initialState: S, config: AioConfig<S, A, E>): Promi
 
   // UDS handle — created after dispatch for electron+UDS transport
   let udsHandle: UDSHandle | null = null
-  const udsSyncRate = ui.syncRate ?? 10
+  const udsSyncIntervalMs = ui.syncIntervalMs ?? 10
   let udsQueued = false
   let udsDirty = false
   let udsThrottle: ReturnType<typeof setTimeout> | null = null
@@ -1245,16 +1275,16 @@ async function _run<S, A, E>(initialState: S, config: AioConfig<S, A, E>): Promi
       // Also broadcast to UDS clients (Electron IPC bridge) — throttled same as WS
       if (udsHandle) {
         udsDirty = true
-        if (!udsQueued && !(udsSyncRate > 0 && udsThrottle)) {
+        if (!udsQueued && !(udsSyncIntervalMs > 0 && udsThrottle)) {
           udsQueued = true
           queueMicrotask(() => {
             udsQueued = false; udsDirty = false
             udsHandle!.broadcast(JSON.stringify(getUIState(state)))
-            if (udsSyncRate > 0) {
+            if (udsSyncIntervalMs > 0) {
               udsThrottle = setTimeout(() => {
                 udsThrottle = null
                 if (udsDirty) { udsDirty = true; udsHandle!.broadcast(JSON.stringify(getUIState(state))) }
-              }, udsSyncRate)
+              }, udsSyncIntervalMs)
             }
           })
         }
@@ -1262,13 +1292,15 @@ async function _run<S, A, E>(initialState: S, config: AioConfig<S, A, E>): Promi
     },
     log, debug: VERBOSE,
     onError,
-    perfMode: config.perfMode,
+    perfCheck: config.perfCheck,
     perfBudget: config.perfBudget,
     perfLog: (source, type, duration, budget) => getLogger()?.perf(source, type, duration, budget),
     freezeState: config.freezeState ?? !prod,  // default: true in dev, false in prod
-    effectTimeout: config.effectTimeout,
+    effectTimeout: config.effectTimeoutMs,
     onPerf,
   })
+  const freezeEnabled = config.freezeState ?? !prod
+  log.info(`freezeState: ${freezeEnabled}${config.freezeState === undefined ? (prod ? ' (prod default)' : ' (dev default)') : ''}`)
 
   const app: AioApp<S, A> = {
     dispatch,
@@ -1350,7 +1382,7 @@ async function _run<S, A, E>(initialState: S, config: AioConfig<S, A, E>): Promi
         log.info(`tls: using cert ${tlsCert.certPath}`)
       }
     } catch (e) {
-      log.warn(`tls: cert generation failed (${e}) — falling back to plain HTTP`)
+      throw new Error(`TLS cert generation failed: ${e}\nProvide --cert=PATH --key=PATH or fix the issue. Cannot expose without HTTPS.`)
     }
   }
 
@@ -1376,9 +1408,8 @@ async function _run<S, A, E>(initialState: S, config: AioConfig<S, A, E>): Promi
     if (udsHandle) udsHandle.broadcast(JSON.stringify(getUIState(state)))
   }
 
-  // Resolve electron + transport early (needed for skipHttp decision)
-  const useElectron = !headless && (cli.electron ?? ui.electron) !== false
-  const transport = resolveTransport(cli.transport ?? ui.transport, useElectron, expose)
+  // Resolve transport (client already resolved above)
+  const transport = resolveTransport(cli.transport ?? config.transport, useElectron, expose)
 
   // Shared client index counter — WS and UDS clients get globally unique indices
   const clientCounter = { value: 0 }
@@ -1411,11 +1442,14 @@ async function _run<S, A, E>(initialState: S, config: AioConfig<S, A, E>): Promi
     cert: tlsCert?.cert,
     key: tlsCert?.key,
     showStatus: ui.showStatus,
-    deltaThreshold: config.deltaThreshold,
+    fullStateThreshold: config.fullStateThreshold,
     maxConnections: config.maxConnections,
-    syncRate: ui.syncRate,
+    syncIntervalMs: ui.syncIntervalMs,
     onConnect: config.onConnect,
     onDisconnect: config.onDisconnect,
+    onReload: (signal) => {
+      if (udsHandle) udsHandle.broadcast(signal)
+    },
     // Health endpoint — feature status when available, basic info otherwise
     getHealth: () => {
       const composed = (globalThis as Record<string, unknown>).__aioFeatures as ComposedFeatures | undefined
@@ -1459,7 +1493,7 @@ async function _run<S, A, E>(initialState: S, config: AioConfig<S, A, E>): Promi
     } catch { /* signal not supported on this platform */ }
   }
 
-  const appVersion = config.appVersion ?? '0.1.0 (default)'
+  const appVersion = config.appVersion
   ;(globalThis as Record<string, unknown>).__aioStartedAt = Date.now()
   const __aio = ((globalThis as Record<string, unknown>).__aio ??= {}) as Record<string, unknown>
   __aio.appVersion = appVersion
@@ -1507,7 +1541,7 @@ async function _run<S, A, E>(initialState: S, config: AioConfig<S, A, E>): Promi
   if (cliFlags.length) log.info(`cli: ${cliFlags.join(' ')}`)
   else log.debug('run with --help to see available flags')
   const mode = prod ? 'prod' : 'dev'
-  const shell = headless ? 'headless' : useElectron ? 'electron' : 'browser'
+  const shell = client
   const transportLabel = transport === 'uds' ? ', uds' : ''
 
   // Startup info — open resources + all app settings (always shown, even defaults)
@@ -1547,10 +1581,14 @@ async function _run<S, A, E>(initialState: S, config: AioConfig<S, A, E>): Promi
     log.info(`share: ${url}?token=${token}`)
   }
 
-  if (headless) {
+  const keepServer = cli.keepServer ?? config.keepServer ?? false
+  if (keepServer && client !== 'electron') {
+    throw new Error('keepServer only applies when client is electron')
+  }
+
+  if (isHeadless) {
     // Headless — server-only, no UI launch (CLI apps use connectCli() to connect)
   } else if (useElectron) {
-    const keepAlive = cli.keepAlive ?? ui.keepAlive ?? false
     const meta: AioMeta = { title, width: cli.width ?? ui.width, height: cli.height ?? ui.height }
     const electronUrl = token ? `${localUrl}?token=${token}` : localUrl
     const udsBaseDir = prod ? distDir : undefined  // prod: serve from dist/, dev: use HTTP
@@ -1560,16 +1598,15 @@ async function _run<S, A, E>(initialState: S, config: AioConfig<S, A, E>): Promi
     launchElectron(electronUrl, log, meta, udsConfig)
       .then(proc => {
         if (!proc) {
-          console.log('\n  \x1b[33m⚠ Electron not available\x1b[0m — falling back to browser')
-          console.log(`  \x1b[2mInstall:\x1b[0m  deno task install:electron`)
-          console.log(`  \x1b[2mOr open:\x1b[0m  ${url}\n`)
-          return
+          log.error('Electron not installed — install with: deno task install:electron')
+          log.error('Or use --client=browser to open in system browser')
+          Deno.exit(1)
         }
         _electronProc = proc
         proc.status
           .then(s => {
             _electronProc = null
-            if (keepAlive) {
+            if (keepServer) {
               log.info(`electron closed (code ${s.code ?? 0}) — server still running at ${url}`)
             } else {
               shutdown().then(() => Deno.exit(0))

@@ -95,7 +95,7 @@ For testing `call()` with timeout/retry in isolation — call it in a Deno.test 
 import { call } from 'aio'
 
 Deno.test('call resolves with return value', async () => {
-  await aio.run({ features: [inventory] })
+  await aio.run({ appId: 'my-app', features: [inventory] })
 
   // Direct call — typed, no strings
   const stock = await inventory.checkStock('widget')

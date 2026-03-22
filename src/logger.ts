@@ -364,9 +364,16 @@ export class AioLogger {
     return `${this.dir}/error.log`
   }
 
+  private _writeErrors = 0
   private write(path: string, entry: LogEntry): void {
     if (!this.ready) return
-    Deno.writeTextFile(path, JSON.stringify(entry) + '\n', { append: true }).catch(() => {})
+    Deno.writeTextFile(path, JSON.stringify(entry) + '\n', { append: true }).catch((e) => {
+      // Log first few write failures to console, then suppress to avoid flooding
+      if (this._writeErrors < 3) {
+        this._writeErrors++
+        console.error(`[logger] write failed for ${path}: ${e}`)
+      }
+    })
   }
 }
 

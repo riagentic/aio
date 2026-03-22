@@ -135,8 +135,8 @@ import { aio, connectCli } from 'aio'
 import { myFeature } from './features/myFeature/index.ts'
 import type { AppState } from './state.ts'
 
-// Start server headless — no browser/electron
-const app = await aio.run({ features: [myFeature], headless: true })
+// Start server-only — no browser/electron
+const app = await aio.run({ features: [myFeature], client: 'server-only' })
 
 // Connect CLI client to local server
 const cli = connectCli<AppState>(`http://localhost:${app.port}`)
@@ -192,14 +192,14 @@ For Android builds, aio uses a client-side dispatch loop instead of a server. Th
 import { initStandalone } from 'aio'
 
 const app = initStandalone(initialState, {
-  reduce,                    // (state, action) → { state, effects: (E | ScheduleEffect)[] }
+  reduce,                       // (state, action) → { state, effects: (E | ScheduleEffect)[] }
   execute,
-  persist: true,             // default: true — uses localStorage
-  persistKey: 'aio_state',   // default: 'aio_state'
-  persistDebounce: 100,      // ms between localStorage writes (default: 100)
-  stateForDB: (s) => s,      // which part of state to persist
-  stateForUI: (s) => s,      // which part of state to show in UI
-  onRestore: (s) => s,       // transform state after loading from localStorage
+  persist: true,                // default: true — uses localStorage
+  persistKey: 'aio_state',      // default: 'aio_state'
+  persistDebounceMs: 100,       // ms between localStorage writes (default: 100)
+  stateForDB: (s) => s,         // which part of state to persist
+  stateForUI: (s) => s,         // which part of state to show in UI
+  onRestore: (s) => s,          // transform state after loading from localStorage
 })
 ```
 
@@ -303,6 +303,100 @@ Same as `compile:browser:remote` but headless — no browser auto-open.
 Use this when the server only needs to serve API clients (CLI, Android, Electron remote), not browser users directly. The binary still includes `dist/app.js` so browser access works if needed.
 
 > **Note:** `compile:service` (local) generates `--headless --port=3000` without `--expose` — binds 127.0.0.1 only.
+
+## Import rules: server vs browser bundle
+
+aio apps have **two separate bundles** running simultaneously — code must respect the boundary between them.
+
+```
+┌─────────┬──────────────────────────────────┬──────────────────────────────────────┐
+│         │ Deno binary (server)             │ esbuild bundle (browser/Electron)    │
+├─────────┼──────────────────────────────────┼──────────────────────────────────────┤
+│ Entry   │ src/app.ts                       │ src/App.tsx (auto-detected)           │
+│ Bundler │ deno compile                     │ esbuild                              │
+│ Can use │ Deno APIs, @std/*, fs, processes │ Only browser-safe code               │
+└─────────┴──────────────────────────────────┴──────────────────────────────────────┘
+```
+
+### The rules
+
+**1. Feature `index.ts` must be browser-safe.**
+
+The feature index is imported by both worlds — `app.ts` (server) and UI components like `App.tsx` (browser). It must not contain Deno APIs or `@std/*` imports.
+
+```ts
+// features/mdview/index.ts
+// ✅ Safe — no Deno APIs, no @std/*
+import { feature } from 'aio'
+export const mdview = feature('mdview', { ... })
+```
+
+**2. Server-only code needs dynamic import with string concatenation.**
+
+esbuild statically analyzes all imports — even dynamic ones. To prevent it from pulling server-only modules into the browser bundle, break the path with a variable:
+
+```ts
+// ✅ Correct — esbuild can't resolve this, skips it
+const _hp = './helpers'
+const loadHelpers = () => import(`${_hp}.ts`)
+
+// ❌ Breaks browser bundle — esbuild pulls in @std/path
+import { basename } from '@std/path'
+
+// ❌ Still breaks — esbuild resolves plain dynamic imports too
+const loadHelpers = () => import('./helpers.ts')
+```
+
+**3. Dynamic-imported files must also be statically imported in `app.ts`.**
+
+`deno compile` only embeds files it can see in the static import graph. Without a static import, the file won't exist in the compiled binary and the dynamic import fails at runtime.
+
+```ts
+// app.ts
+import './features/mdview/helpers.ts'  // ← embed for deno compile
+// The dynamic import in index.ts finds it at runtime
+```
+
+**4. `import type` is always safe.**
+
+Type imports are erased at compile time — they cross both worlds freely.
+
+```ts
+// ✅ Fine everywhere — erased at compile time
+import type { MdviewState } from './helpers.ts'
+```
+
+### Quick reference
+
+| What | Rule |
+|------|------|
+| Feature `index.ts` | Browser-safe only — shared between server and UI |
+| Server-only code (`@std/*`, `Deno.*`) | Dynamic import with string concat trick |
+| Files loaded via dynamic import | Must also have static import in `app.ts` for `deno compile` |
+| `import type` | Always safe — erased at compile time |
+
+### Auto-aliasing npm packages (dev mode)
+
+AIO automatically makes npm packages from `deno.json` available in the browser during dev mode.
+
+**How it works:**
+1. Add the package to `deno.json` imports: `"xterm": "npm:xterm@5.3.0"`
+2. AIO generates a browser import map that maps `"xterm"` → `https://esm.sh/xterm@5.3.0`
+3. Browser imports resolve automatically — no extra configuration
+
+**Prod builds** bundle everything via esbuild — npm packages are resolved from `node_modules/` as usual.
+
+### Browser import validation
+
+AIO checks for common import mistakes at three levels:
+
+1. **Lint time** (`aiol`): Flags `@std/*`, `node:*`, `Deno.*` in feature files and `.tsx` files. Flags bare specifiers not in `deno.json`.
+2. **Build time**: esbuild plugin intercepts `@std/*` and `node:*` — returns clear error messages instead of cryptic failures.
+3. **Runtime**: Error overlay shows fix suggestions (e.g., "Add X to deno.json imports").
+
+Run `deno run -A aiol/mod.ts` to check for issues before building.
+
+---
 
 ## CSS in builds
 

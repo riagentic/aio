@@ -269,11 +269,11 @@ const CONNECT_HTML = \`<!DOCTYPE html>
 // ── Main ──
 
 app.on('ready', () => {
-  // Parse --url= from argv
+  // Parse --server-url= from argv
   let directUrl = null;
   for (const arg of process.argv) {
-    if (arg.startsWith('--url=')) {
-      directUrl = arg.slice(6);
+    if (arg.startsWith('--server-url=')) {
+      directUrl = arg.slice(14);
       break;
     }
   }
@@ -286,7 +286,7 @@ app.on('ready', () => {
 
   if (directUrl) {
     if (!directUrl.startsWith('http://') && !directUrl.startsWith('https://')) {
-      console.error('--url must use http:// or https:// scheme');
+      console.error('--server-url must use http:// or https:// scheme');
       process.exit(1);
     }
     connectTo(win, directUrl);
@@ -592,7 +592,7 @@ export async function launchElectron(url: string, log: Log, meta?: AioMeta, uds?
 export async function launchElectronClient(log: Log, url?: string): Promise<Deno.ChildProcess | null> {
   const bin = await findElectronBin(log)
   if (!bin) return null
-  const args = url ? [`--url=${url}`] : []
+  const args = url ? [`--server-url=${url}`] : []
   log.info(`launching aio client${url ? ` → ${url}` : ''}`)
   return spawnElectron(bin, electronClientScript(), args)
 }

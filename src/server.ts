@@ -26,13 +26,14 @@ export interface ServerConfig {
   key?: string             // PEM key string — required when cert is set
   users?: Record<string, AioUser>  // per-user token map (overrides token)
   showStatus?: boolean     // show reconnection indicator (default: true)
-  deltaThreshold?: number  // 0-1: ratio of changed keys for delta vs full broadcast (default: 0.5)
+  fullStateThreshold?: number  // 0-1: ratio of changed keys for delta vs full broadcast (default: 0.5)
   maxConnections?: number  // max concurrent WebSocket clients (default: 100)
-  syncRate?: number        // throttle UI updates: max 1 push per N ms (default: 10 = 100fps)
+  syncIntervalMs?: number  // throttle UI updates: max 1 push per N ms (default: 10 = 100fps)
   allowedOrigins?: string[]  // extra allowed origins beyond localhost (e.g. Docker, reverse proxy)
   clientCounter?: { value: number }  // shared index counter — WS and UDS get unique indices
   onConnect?: (user?: AioUser) => void
   onDisconnect?: (user?: AioUser) => void
+  onReload?: (signal: '__reload' | '__css') => void  // called on live-reload — lets aio.ts forward to UDS
   // Time-travel (dev mode)
   onTTCommand?: (cmd: string, arg?: number) => void
   getTTBroadcast?: () => unknown
@@ -88,6 +89,7 @@ export interface ServerHandle {
   clientCount: () => number
   trojanPort?: number  // set when TLS is active — HTTP-only trojan endpoint on 127.0.0.1
   socketPath?: string  // set when UDS is active
+  watcherActive?: boolean  // true if file watcher is running (dev mode only)
 }
 
 function fileExists(path: string): boolean {
@@ -134,17 +136,27 @@ function escHtml(s: string): string {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#x27;')
 }
 
-const IMPORT_MAP = `{
-      "imports": {
-        "react": "https://esm.sh/react@18.3.1",
-        "react-dom/client": "https://esm.sh/react-dom@18.3.1/client",
-        "react/jsx-runtime": "https://esm.sh/react@18.3.1/jsx-runtime",
-        "aio": "/__aio/ui.js"
-      }
-    }`
+/** Generates browser import map from framework defaults + deno.json npm packages.
+ *  npm packages → esm.sh CDN URLs. jsr/local imports are skipped (handled differently). */
+export function buildBrowserImportMap(denoImports: Record<string, string>): string {
+  const imports: Record<string, string> = {
+    'react': 'https://esm.sh/react@18.3.1',
+    'react-dom/client': 'https://esm.sh/react-dom@18.3.1/client',
+    'react/jsx-runtime': 'https://esm.sh/react@18.3.1/jsx-runtime',
+    'aio': '/__aio/ui.js',
+    'aio/browser': '/__aio/ui.js',
+  }
+  for (const [name, specifier] of Object.entries(denoImports)) {
+    if (!specifier.startsWith('npm:')) continue
+    if (imports[name]) continue  // don't override defaults
+    const bare = specifier.slice(4)  // strip 'npm:'
+    imports[name] = `https://esm.sh/${bare}`
+  }
+  return JSON.stringify({ imports })
+}
 
 // Generates the HTML shell — dev: CDN import map + live-transpiled App.tsx, prod: self-contained app.js
-function generateHTML(title: string, prod: boolean, hasCSS: boolean, showStatus?: boolean, width?: number, height?: number): string {
+function generateHTML(title: string, prod: boolean, hasCSS: boolean, importMap: string, showStatus?: boolean, width?: number, height?: number): string {
   const cssLink = hasCSS ? '\n  <link rel="stylesheet" href="/style.css">' : ''
   const statusScript = showStatus === false ? '\n  <script>window.__aioShowStatus=false</script>' : ''
   const metaW = width ? `\n  <meta name="aio:width" content="${width}">` : ''
@@ -179,7 +191,7 @@ function generateHTML(title: string, prod: boolean, hasCSS: boolean, showStatus?
 </head>
 <body>
   <div id="root"></div>
-  <script type="importmap">${IMPORT_MAP}</script>
+  <script type="importmap">${importMap}</script>
   <script type="module">
     import { createElement } from 'react'
     import { createRoot } from 'react-dom/client'
@@ -194,8 +206,9 @@ function generateHTML(title: string, prod: boolean, hasCSS: boolean, showStatus?
       ws.onmessage = ev => {
         if (ev.data === '__reload') { ws.close(); location.reload() }
         else if (ev.data === '__css') {
-          const link = document.querySelector('link[rel="stylesheet"][href*="style.css"]')
-          if (link) link.href = '/style.css?t=' + Date.now()
+          document.querySelectorAll('link[rel="stylesheet"]').forEach(link => {
+            if (link.href.startsWith(location.origin)) link.href = link.href.split('?')[0] + '?t=' + Date.now()
+          })
         } else if (typeof ev.data === 'string' && ev.data.startsWith('__boot:')) {
           const id = ev.data.slice(7)
           if (_bootId && _bootId !== id) { ws.close(); location.reload() }
@@ -203,6 +216,8 @@ function generateHTML(title: string, prod: boolean, hasCSS: boolean, showStatus?
         }
       }
       ws.onclose = () => setTimeout(_devWs, 2000)
+      ws.onerror = (e) => console.warn('[aio] reload WS error:', e)
+      ws.onopen = () => console.debug('[aio] reload WS connected')
     }
     _devWs()
     try {
@@ -213,12 +228,20 @@ function generateHTML(title: string, prod: boolean, hasCSS: boolean, showStatus?
       const r = await fetch('/__aio/error')
       const errData = r.ok ? await r.json().catch(() => null) : null
       const hasServerErr = errData && errData.errors && errData.errors.length
-      const label = hasServerErr ? 'Build Error' : 'Runtime Error'
-      fetch('/__aio/client-error', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: e?.message, stack: e?.stack })
-      }).catch(() => {})
+      let label = hasServerErr ? 'Build Error' : 'Runtime Error'
+      let fixText = ''
+      try {
+        const cr = await fetch('/__aio/client-error', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ message: e?.message, stack: e?.stack })
+        })
+        if (cr.ok) {
+          const classified = await cr.json()
+          if (classified.fix) fixText = classified.fix
+          if (classified.label) label = classified.label
+        }
+      } catch {}
       function mkBuildErrors(errors) {
         return errors.map(function(err) {
           const prefix = err.line != null ? String(err.line) + ' | ' : ''
@@ -243,12 +266,21 @@ function generateHTML(title: string, prod: boolean, hasCSS: boolean, showStatus?
         return '<div style="color:#f1fa8c;margin-bottom:.75rem">' + esc(lines[0]) + '</div>'
           + '<div style="background:#0d1117;padding:.6rem .9rem;border-radius:4px">' + frames.join('') + '</div>'
       }
+      function mkFix(fixText) {
+        if (!fixText) return ''
+        return '<div style="margin-top:1rem;padding:.75rem 1rem;background:#1a2332;border:1px solid #2a4a6a;border-radius:6px">'
+          + '<div style="color:#569cd6;font-weight:700;margin-bottom:.4rem;font-size:11px">FIX</div>'
+          + '<div style="color:#98c379">' + esc(fixText) + '</div>'
+          + '</div>'
+      }
       const body = hasServerErr ? mkBuildErrors(errData.errors) : mkStack(e?.stack)
+      const fixBox = mkFix(fixText)
       document.getElementById('root').innerHTML =
         '<div style="margin:0;padding:1.75rem 2rem;min-height:100vh;background:#141414;font:13px/1.7 monospace;box-sizing:border-box">'
         + '<div style="max-width:920px">'
         + '<div style="color:#ff6b6b;font-size:1.1rem;font-weight:700;margin-bottom:1.25rem;padding-bottom:.75rem;border-bottom:1px solid #2a2a2a">&#9888; ' + label + '</div>'
         + body
+        + fixBox
         + '<div style="margin-top:1.5rem;padding-top:.75rem;border-top:1px solid #2a2a2a;color:#444;font-size:11px">F12 DevTools &nbsp;&#183;&nbsp; am errors &nbsp;&#183;&nbsp; ' + new Date().toLocaleTimeString() + '</div>'
         + '</div></div>'
     }
@@ -275,6 +307,11 @@ async function getTransform() {
 const TRANSPILE_CACHE_MAX = 200
 const transpileCache = new Map<string, { source: string; code: string }>()
 
+/** Normalize path — resolve symlinks when possible, fall back to resolve() */
+function normPath(p: string): string {
+  try { return Deno.realPathSync(p) } catch { return resolve(p) }
+}
+
 /** Formats esbuild message with location info: "text (file:line:col)\n  > lineText" */
 function fmtEsbuildMsg(m: EsbuildMessage, file?: string): string {
   const loc = m.location
@@ -290,9 +327,52 @@ function fmtEsbuildError(err: unknown, file: string): string {
   return String(err)
 }
 
+/** Classifies browser errors and returns actionable fix suggestions */
+export function classifyBrowserError(message: string): { classification: string; fix: string; label: string } {
+  const missingModule = message.match(/Failed to resolve module specifier "([^"]+)"/)
+  if (missingModule) {
+    const pkg = missingModule[1]
+    return {
+      classification: 'missing-import',
+      label: 'Import Error',
+      fix: `Add "${pkg}": "npm:${pkg}" to deno.json imports — AIO auto-aliases npm packages for the browser.`,
+    }
+  }
+  if (message.includes('is server-only') && message.includes('[aio]')) {
+    return {
+      classification: 'server-only',
+      label: 'Server-Only Code',
+      fix: '@std/* and node:* are server-only. Move this code to an async method or effect, or use import type for types.',
+    }
+  }
+  if (message.includes('Deno is not defined')) {
+    return {
+      classification: 'platform-api',
+      label: 'Platform API',
+      fix: 'Deno.* APIs are server-only and unavailable in browser. Move to an async method or effect.',
+    }
+  }
+  if (message.includes('is not a function')) {
+    return {
+      classification: 'stubbed-call',
+      label: 'Import Error',
+      fix: 'This function may be from a server-only module. Check the import source — @std/* and node:* are not available in browser.',
+    }
+  }
+  if (message.includes('Cannot read properties of undefined')) {
+    return {
+      classification: 'destructure-stub',
+      label: 'Import Error',
+      fix: 'Likely destructuring from a server-only module. Check the import source.',
+    }
+  }
+  return { classification: 'unknown', fix: '', label: 'Runtime Error' }
+}
+
 // Converts .ts/.tsx to browser-ready JS via esbuild (cached, invalidated on file change)
 async function transpile(source: string, filepath: string, log?: (msg: string) => void): Promise<string> {
-  const cached = transpileCache.get(filepath)
+  const npath = normPath(filepath)
+  const cached = transpileCache.get(npath)
   if (cached && cached.source === source) return cached.code
   const transform = await getTransform()
   const loader = filepath.endsWith('.tsx') ? 'tsx' as const : 'ts' as const
@@ -308,7 +388,7 @@ async function transpile(source: string, filepath: string, log?: (msg: string) =
     const oldest = transpileCache.keys().next().value
     if (oldest) transpileCache.delete(oldest)
   }
-  transpileCache.set(filepath, { source, code })
+  transpileCache.set(npath, { source, code })
   return code
 }
 
@@ -423,6 +503,48 @@ export function _computeDelta(
 export function createServer(config: ServerConfig): ServerHandle {
   const { port, title, getUIState, dispatch, debug, prod = false, distDir } = config
   const absBaseDir = resolve(config.baseDir)  // normalize to absolute — fixes cache key matching
+  let denoImports: Record<string, string> = {}
+  try {
+    const djText = Deno.readTextFileSync(join(absBaseDir, '..', 'deno.json'))
+    denoImports = JSON.parse(djText).imports ?? {}
+  } catch { /* no deno.json or parse error — use defaults */ }
+  const IMPORT_MAP = buildBrowserImportMap(denoImports)
+
+  // Dev startup validation — quick scan for obvious browser import issues
+  if (!prod) {
+    const SERVER_ONLY_RE = /(?:import|export)\s+(?!type\s).*?\s+from\s+['"]((?:@std\/|node:)[^'"]+)['"]/g
+    const scanFiles: string[] = []
+    // Scan src/ for feature files and App.tsx
+    try {
+      for (const entry of Deno.readDirSync(absBaseDir)) {
+        if (entry.isFile && (entry.name.endsWith('.ts') || entry.name.endsWith('.tsx')) && !entry.name.endsWith('.test.ts')) {
+          scanFiles.push(entry.name)
+        }
+      }
+      // Check features/ subdirectory if it exists
+      try {
+        for (const entry of Deno.readDirSync(join(absBaseDir, 'features'))) {
+          if (entry.isFile && entry.name.endsWith('.ts') && !entry.name.endsWith('.test.ts')) {
+            scanFiles.push('features/' + entry.name)
+          }
+        }
+      } catch { /* no features dir */ }
+    } catch { /* can't read dir */ }
+
+    for (const name of scanFiles) {
+      try {
+        const content = Deno.readTextFileSync(join(absBaseDir, name))
+        // Only check files with feature() definitions or .tsx
+        if (!content.includes('feature(') && !name.endsWith('.tsx')) continue
+        for (const m of content.matchAll(SERVER_ONLY_RE)) {
+          const lineIdx = content.slice(0, m.index).split('\n').length
+          debug(`⚠ ${name}:${lineIdx} — "${m[1]}" is server-only, will fail in browser`)
+          debug(`  fix: move to server-only file or use dynamic import`)
+        }
+      } catch { /* file not found */ }
+    }
+  }
+
   const absDistDir = distDir ? resolve(distDir) : null
   // Detect style.css — dev: src/style.css, prod: dist/style.css
   const hasCSS = fileExists(join(absBaseDir, 'style.css')) || (absDistDir ? fileExists(join(absDistDir, 'style.css')) : false)
@@ -437,7 +559,7 @@ export function createServer(config: ServerConfig): ServerHandle {
   const nextIndex = () => clientCounter.value++
   // Pending client state requests (dev mode) — resolve when client responds
   const pendingClientState = new Map<string, { resolve: (v: unknown) => void; timer: ReturnType<typeof setTimeout> }>()
-  const syncRate = config.syncRate ?? 10
+  const syncIntervalMs = config.syncIntervalMs ?? 10
   let broadcastQueued = false
   let broadcastDirty = false
   let broadcastThrottle: ReturnType<typeof setTimeout> | null = null
@@ -457,7 +579,7 @@ export function createServer(config: ServerConfig): ServerHandle {
     broadcastDirty = true
 
     if (broadcastQueued) return        // microtask already pending this tick
-    if (syncRate > 0 && broadcastThrottle) return  // inside throttle window — trailing flush will catch it
+    if (syncIntervalMs > 0 && broadcastThrottle) return  // inside throttle window — trailing flush will catch it
 
     broadcastQueued = true
     queueMicrotask(() => {
@@ -474,7 +596,7 @@ export function createServer(config: ServerConfig): ServerHandle {
             continue
           }
           if (uiState === meta.lastState) continue  // skip if ref unchanged
-          const delta = _computeDelta(uiState, meta.lastState, meta.lastKeyJsons, config.deltaThreshold)
+          const delta = _computeDelta(uiState, meta.lastState, meta.lastKeyJsons, config.fullStateThreshold)
           meta.lastState = uiState
           meta.lastKeyJsons = delta.newKeyJsons
           if (delta.kind === 'skip') continue
@@ -483,11 +605,11 @@ export function createServer(config: ServerConfig): ServerHandle {
         }
       } catch (e) { debug(`broadcast error: ${e}`) }
 
-      if (syncRate > 0) {
+      if (syncIntervalMs > 0) {
         broadcastThrottle = setTimeout(() => {
           broadcastThrottle = null
           if (broadcastDirty) broadcast()  // trailing flush — last state always reaches UI
-        }, syncRate)
+        }, syncIntervalMs)
       }
     })
   }
@@ -641,7 +763,7 @@ export function createServer(config: ServerConfig): ServerHandle {
   // Serves HTML, virtual routes, and static/dist files
   async function serveStatic(pathname: string, req?: Request): Promise<Response> {
     if (pathname === '/') {
-      return new Response(generateHTML(title, prod, hasCSS, config.showStatus, config.width, config.height), { headers: { 'Content-Type': 'text/html', ...noCache } })
+      return new Response(generateHTML(title, prod, hasCSS, IMPORT_MAP, config.showStatus, config.width, config.height), { headers: { 'Content-Type': 'text/html', ...noCache } })
     }
 
     if (pathname === '/__aio/ui.js') {
@@ -665,8 +787,11 @@ export function createServer(config: ServerConfig): ServerHandle {
       try {
         const body = await req.json() as { message?: string; stack?: string }
         debug(`client error: ${body.stack ?? body.message ?? '(no details)'}`)
-      } catch { /* ignore malformed body */ }
-      return new Response(null, { status: 204 })
+        const classified = classifyBrowserError(body.message ?? '')
+        return new Response(JSON.stringify(classified), {
+          headers: { 'Content-Type': 'application/json' },
+        })
+      } catch { return new Response(null, { status: 204 }) }
     }
 
     if (pathname === '/__aio/snapshot' && config.getSnapshot && config.loadSnapshot) {
@@ -873,11 +998,16 @@ export function createServer(config: ServerConfig): ServerHandle {
             const body = await req.text()
             const { query } = JSON.parse(body)
             if (!query || typeof query !== 'string') return err('missing query field')
-            // Allow-list: only SELECT queries (after normalization)
+            // Safety: block multi-statement, allow only SELECT (query goes through read-only worker)
             if (query.includes(';')) return err('multi-statement queries not allowed', 403)
             const normalized = query.trimStart().toUpperCase()
             if (!normalized.startsWith('SELECT ') && !normalized.startsWith('SELECT\n') && !normalized.startsWith('SELECT\t') && normalized !== 'SELECT') {
               return err('trojan SQL is read-only — only SELECT allowed', 403)
+            }
+            // Block known dangerous patterns in subqueries/CTEs
+            const upper = query.toUpperCase()
+            if (/\b(INSERT|UPDATE|DELETE|DROP|ALTER|CREATE|ATTACH|DETACH|LOAD_EXTENSION|REINDEX|VACUUM)\b/.test(upper)) {
+              return err('trojan SQL is read-only — write/DDL keywords forbidden', 403)
             }
             return json(await trojan.sqlQuery(query))
           } catch (e) { return err(String(e instanceof Error ? e.message : e)) }
@@ -926,7 +1056,7 @@ export function createServer(config: ServerConfig): ServerHandle {
     if (!ext && !pathname.startsWith('/__')) {
       let exists = false
       try { await Deno.stat(filepath); exists = true } catch { /* not found */ }
-      if (!exists) return new Response(generateHTML(title, prod, hasCSS, config.showStatus, config.width, config.height), { headers: { 'Content-Type': 'text/html', ...noCache } })
+      if (!exists) return new Response(generateHTML(title, prod, hasCSS, IMPORT_MAP, config.showStatus, config.width, config.height), { headers: { 'Content-Type': 'text/html', ...noCache } })
     }
 
     const isText = TEXT_EXTENSIONS.has(ext)
@@ -988,9 +1118,9 @@ export function createServer(config: ServerConfig): ServerHandle {
     const ext = dot >= 0 ? path.slice(dot) : ''
     if (!RELOAD_EXT.has(ext)) return
     debug(`watch: changed ${path}`)
-    // Normalize to match cache keys — use realPathSync to resolve symlinks (e.g. /var → /private/var on macOS)
-    try { path = Deno.realPathSync(path) } catch { /* file deleted — resolve() fallback is fine */ }
-    transpileCache.delete(resolve(path))
+    // Normalize to match cache keys — resolve symlinks (e.g. /var → /private/var on macOS)
+    path = normPath(path)
+    transpileCache.delete(path)
     if (!path.endsWith('.css')) reloadIsFull = true
     if (reloadTimer) clearTimeout(reloadTimer)
     // 100ms debounce — batch rapid file changes into single reload
@@ -1004,24 +1134,68 @@ export function createServer(config: ServerConfig): ServerHandle {
           if (ws.readyState === WebSocket.OPEN) ws.send(signal)
         } catch { /* client disconnecting */ }
       }
+      config.onReload?.(signal as '__reload' | '__css')
     }, 100)
   }
 
   // Dev only: watch src/ for changes and live-reload
   let fsWatcher: Deno.FsWatcher | null = null
-  if (!prod) {
+  let watcherActive = false
+  let healthTimer: ReturnType<typeof setInterval> | null = null
+  const SENTINEL = `/tmp/aio-watch-${config.port}.tmp`
+  let lastWatcherEvent = Date.now()
+  let watcherRestarts = 0
+  const MAX_WATCHER_RESTARTS = 3
+
+  function startWatcher(): boolean {
     try {
-      fsWatcher = Deno.watchFs(absBaseDir, { recursive: true })
+      fsWatcher = Deno.watchFs([absBaseDir, SENTINEL], { recursive: true })
+      watcherActive = true
       ;(async () => {
         try {
           for await (const event of fsWatcher!) {
-            if (event.kind === 'modify' || event.kind === 'create') {
-              for (const path of event.paths) scheduleReload(path)
+            if (event.kind === 'access') continue
+            // Sentinel touch — update liveness timestamp, don't trigger reload
+            if (event.paths.some(p => p.includes('aio-watch-'))) {
+              lastWatcherEvent = Date.now()
+              continue
             }
+            lastWatcherEvent = Date.now()
+            for (const path of event.paths) scheduleReload(path)
           }
-        } catch (e) { console.warn(`[aio] file watcher stopped — hot reload disabled: ${e}`) }
+        } catch (e) {
+          watcherActive = false
+          console.warn(`[aio] live reload stopped: ${e}`)
+        }
       })()
-    } catch (e) { debug(`watch: failed to start — ${e}`) }
+      return true
+    } catch (e) {
+      console.warn(`[aio] live reload failed — hot reload disabled: ${e}`)
+      return false
+    }
+  }
+
+  if (!prod) {
+    // Ensure sentinel exists before watchFs — some systems throw if watched path is missing
+    try { Deno.writeTextFileSync(SENTINEL, '') } catch { /* /tmp not writable — skip sentinel */ }
+    if (startWatcher()) {
+      console.log(`[aio] live reload watching ${config.baseDir}`)
+    }
+    // Health check — touch sentinel every 30s, restart watcher if no events for 60s
+    healthTimer = setInterval(() => {
+      try { Deno.writeTextFileSync(SENTINEL, String(Date.now())) } catch { /* /tmp not writable — skip */ }
+      if (watcherActive && Date.now() - lastWatcherEvent > 60_000) {
+        watcherRestarts++
+        if (watcherRestarts > MAX_WATCHER_RESTARTS) {
+          console.warn(`[aio] live reload — watcher unresponsive after ${MAX_WATCHER_RESTARTS} restarts, giving up`)
+          if (healthTimer) { clearInterval(healthTimer); healthTimer = null }
+          return
+        }
+        console.warn(`[aio] live reload — watcher unresponsive, restarting (${watcherRestarts}/${MAX_WATCHER_RESTARTS})`)
+        try { fsWatcher?.close() } catch { /* already closed */ }
+        startWatcher()
+      }
+    }, 30_000)
   }
 
   const hostname = config.expose ? '0.0.0.0' : '127.0.0.1'
@@ -1123,11 +1297,14 @@ export function createServer(config: ServerConfig): ServerHandle {
     clientCount: () => connections.size,
     trojanPort,
     socketPath: udsPath,
+    watcherActive,
     shutdown: async () => {
       if (reloadTimer) clearTimeout(reloadTimer)
       if (broadcastThrottle) { clearTimeout(broadcastThrottle); broadcastThrottle = null }
       if (_trojanResetTimer) { clearTimeout(_trojanResetTimer); _trojanResetTimer = null }
       fsWatcher?.close()
+      if (healthTimer) { clearInterval(healthTimer); healthTimer = null }
+      try { Deno.removeSync(SENTINEL) } catch { /* already gone */ }
       // Clear all per-client timers before closing sockets
       for (const [ws, meta] of connections) {
         if (meta.msgResetTimer) { clearTimeout(meta.msgResetTimer); meta.msgResetTimer = undefined }

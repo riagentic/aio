@@ -175,15 +175,15 @@ execute: {
 
 | Mode | Behavior |
 |------|----------|
-| `'strict'` (default) | Calls `onError({ source: 'performance', ... })` + logs error |
-| `'soft'` | Only `console.warn()` — no callback |
+| `'on'` (default) | Logs perf violations to `perf.log` |
+| `'off'` | Disables perf measurement entirely |
 
 ### Custom budgets
 
 ```ts
 await aio.run(state, {
   reduce, execute,
-  perfMode: 'strict',           // or 'soft'
+  perfCheck: 'on',              // or 'off'
   perfBudget: {
     reduce: 50,   // warn if reduce > 50ms
     effect: 10,   // warn if sync effect > 10ms
@@ -211,8 +211,8 @@ await aio.run(state, {
 
 1. **Keep reduce fast** — state updates should be instant. Move heavy computation to effects
 2. **Effects should return immediately** — kick off async work, don't block
-3. **Use `perfMode: 'soft'` in dev** — see warnings in console during development
-4. **Use `perfMode: 'strict'` in prod** — log to monitoring via `onError`
+3. **Use `perfCheck: 'on'` (default)** — logs violations to `perf.log` automatically
+4. **Use `perfCheck: 'off'`** — disable measurement entirely for production profiling
 
 ### Example: Moving slow work out of reduce
 
@@ -257,8 +257,8 @@ Move large collections to SQLite and query on demand. State should hold the *cur
 | Setting | Value | Why |
 |---------|-------|-----|
 | `stateForUI` | per-user filtering | Less data per broadcast, less bandwidth |
-| `syncRate` | raise to 100–200ms | Batches multiple rapid state changes into fewer broadcasts |
-| `deltaThreshold` | raise to 512–1024 | Sends full state instead of patch when delta is almost as large — avoids wasted diff computation |
+| `ui.syncIntervalMs` | raise to 100–200ms | Batches multiple rapid state changes into fewer broadcasts |
+| `fullStateThreshold` | raise to 512–1024 | Sends full state instead of patch when delta is almost as large — avoids wasted diff computation |
 
 ### High-frequency actions (>10/sec)
 
@@ -282,7 +282,7 @@ Arrays in state cause full-array delta patches on every change. Solutions:
 | Setting | Value | Why |
 |---------|-------|-----|
 | `persist: { exclude: [...] }` | exclude UI-only fields | Reduce Deno.Kv write frequency |
-| `perfMode: 'soft'` | warn, don't error | Desktop apps tolerate more latency than web |
+| `perfCheck: 'on'` | log violations to perf.log | Desktop apps tolerate more latency than web |
 
 Time-travel history is capped at 200 entries (dev mode only, zero in prod). No action needed.
 
@@ -291,14 +291,11 @@ Time-travel history is capped at 200 entries (dev mode only, zero in prod). No a
 ```ts
 await aio.run({
   features: [...],
-  perfMode: 'strict',
+  perfCheck: 'on',
   perfBudget: { reduce: 50, effect: 10 },
   onPerf: (metric) => {
     // Send to your monitoring (Grafana, Datadog, etc.)
     if (metric.reduce > 50) alertSlack(`Slow reduce: ${metric.actionType} ${metric.reduce}ms`)
-  },
-  onError: (err) => {
-    if (err.source === 'performance') log.warn('perf', err.message)
   },
 })
 ```

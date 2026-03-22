@@ -21,12 +21,13 @@ The startup linter will warn you if electron is not installed.
 
 ## Configuration
 
-Disable Electron (browser-only mode):
+Use browser-only mode:
 
 ```ts
 await aio.run({
+  appId: 'my-app',
   features: [myFeature],
-  ui: { electron: false },  // auto-opens browser instead
+  client: 'browser',  // auto-opens browser instead of Electron
 })
 ```
 
@@ -34,12 +35,13 @@ Keep server running after Electron closes:
 
 ```ts
 await aio.run({
+  appId: 'my-app',
   features: [myFeature],
-  ui: { keepAlive: true },  // server survives electron window close
+  keepServer: true,  // server survives electron window close
 })
 ```
 
-Or use `--keep-alive` CLI flag. Useful for apps where the server is the primary process and electron is optional.
+Or use `--keep-server` CLI flag. Useful for apps where the server is the primary process and electron is optional.
 
 The HTTP server always runs regardless of Electron — you can access the app at `localhost:8000` in any browser, and multiple tabs stay in sync.
 
@@ -49,8 +51,9 @@ By default (`transport: 'auto'`), Electron apps on Linux/macOS use Unix domain s
 
 ```ts
 await aio.run({
+  appId: 'my-app',
   features: [myFeature],
-  ui: { transport: 'uds' },  // force UDS (or 'ws' to force WebSocket)
+  transport: 'uds',  // force UDS (or 'ws' to force WebSocket)
 })
 ```
 
@@ -71,7 +74,7 @@ Deno ↔ UDS/NDJSON ↔ Electron main (net.connect) ↔ IPC ↔ renderer (window
 - Windows (no UDS support) — always falls back to WS
 - `--expose` mode — needs real HTTP for remote access
 - Browser mode — no Electron IPC bridge available
-- `--url` thin client — connects to remote server over HTTP/WS
+- `--server-url` thin client — connects to remote server over HTTP/WS
 
 **CLI apps** can use `connectCliUDS(socketPath)` for headless UDS transport.
 
@@ -79,17 +82,17 @@ Deno ↔ UDS/NDJSON ↔ Electron main (net.connect) ↔ IPC ↔ renderer (window
 
 Electron remembers window size and position across runs. Bounds are saved to `window-state.json` in the app's `userData` directory. The directory is derived from the slugified title (e.g. "My Dashboard" → `my-dashboard`), ensuring each app gets its own persistent state.
 
-## Thin client (`--url`)
+## Thin client (`--server-url`)
 
 Connect to a remote aio server without running a local server:
 
 ```sh
-deno task dev --url=http://192.168.1.100:8000
+deno task dev --server-url=http://192.168.1.100:8000
 ```
 
 **What happens:**
 1. No local HTTP server starts
-2. Electron launches with a connect page (or directly navigates if `--url` is provided)
+2. Electron launches with a connect page (or directly navigates if `--server-url` is provided)
 3. Fetches the remote server's HTML to extract metadata (`<title>`, `<meta aio:width>`, `<meta aio:height>`)
 4. Sets window icon from `src/icon.png` (loaded from disk in UDS mode, fetched from server in WS mode)
 5. Resizes window to the server's configured dimensions, sets title
