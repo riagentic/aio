@@ -6,7 +6,8 @@ This doc explains every concept in aio. No prior framework knowledge needed.
 
 ## The Mental Model
 
-AIO is a **state container**. That's it. Your entire app state lives in one object:
+AIO is a **state container**. That's it. Your entire app state lives in one
+object:
 
 ```ts
 // Your whole app state looks like this:
@@ -17,9 +18,11 @@ AIO is a **state container**. That's it. Your entire app state lives in one obje
 }
 ```
 
-**Nothing else stores state.** No `useState`, no Redux, no context. Just this object.
+**Nothing else stores state.** No `useState`, no Redux, no context. Just this
+object.
 
 When something changes, AIO:
+
 1. Makes a copy of the state
 2. Applies your change
 3. Notifies everyone who's listening
@@ -32,36 +35,41 @@ That's the whole thing. Everything else is just ergonomics.
 
 A **feature** is a piece of state + the functions that modify it.
 
-Think of it like a module. Your `counter` feature owns `counter.count` and knows how to change it.
+Think of it like a module. Your `counter` feature owns `counter.count` and knows
+how to change it.
 
 ### Syntax
 
 ```ts
-import { feature } from 'aio'
+import { feature } from "aio";
 
-const counter = feature('counter', {
-  state: { count: 0 },              // What data does this feature own?
-  methods: {                        // How do we change it?
-    increment(s, by = 1) {           // 's' is the state you can mutate
-      s.count += by                 // mutate directly - AIO handles copying
+const counter = feature("counter", {
+  state: { count: 0 }, // What data does this feature own?
+  methods: { // How do we change it?
+    increment(s, by = 1) { // 's' is the state you can mutate
+      s.count += by; // mutate directly - AIO handles copying
     },
     reset(s) {
-      s.count = 0
-    }
-  }
-})
+      s.count = 0;
+    },
+  },
+});
 ```
 
 ### How to read this
 
 ```ts
-const counter = feature('counter', {     // Name: 'counter'
-  state: { count: 0 },                    // State: { count: 0 }
+const counter = feature("counter", { // Name: 'counter'
+  state: { count: 0 }, // State: { count: 0 }
   methods: {
-    increment(s, by = 1) { s.count += by },  // Method: increment count
-    reset(s) { s.count = 0 }                 // Method: reset count
-  }
-})
+    increment(s, by = 1) {
+      s.count += by;
+    }, // Method: increment count
+    reset(s) {
+      s.count = 0;
+    }, // Method: reset count
+  },
+});
 ```
 
 - `state` — initial data. Can be any object.
@@ -71,16 +79,16 @@ const counter = feature('counter', {     // Name: 'counter'
 ### Run the app
 
 ```ts
-import { aio } from 'aio'
+import { aio } from "aio";
 
-await aio.run({ appId: 'my-app', features: [counter] })
+await aio.run({ appId: "my-app", features: [counter] });
 ```
 
 Now `counter` is live. Call methods:
 
 ```ts
-counter.increment(5)   // Mutates state → { count: 5 }
-counter.reset()        // Mutates state → { count: 0 }
+counter.increment(5); // Mutates state → { count: 5 }
+counter.reset(); // Mutates state → { count: 0 }
 ```
 
 ---
@@ -110,7 +118,9 @@ methods: {
 }
 ```
 
-**Why?** AIO uses [Immer](https://immerjs.github.io/immer/). It tracks your mutations and creates a new state object automatically. You write "mutating" code, but the result is immutable.
+**Why?** AIO uses [Immer](https://immerjs.github.io/immer/). It tracks your
+mutations and creates a new state object automatically. You write "mutating"
+code, but the result is immutable.
 
 ### You can mutate deep objects
 
@@ -141,7 +151,7 @@ A **selector** is a function that computes derived state.
 
 ```ts
 // In your component, you'd do this every time:
-const doubled = counter.state.count * 2
+const doubled = counter.state.count * 2;
 ```
 
 ### With selector
@@ -161,7 +171,8 @@ const counter = feature('counter', {
 counter.doubled()   // → 0 (if count is 0)
 ```
 
-**The `s` you receive is already scoped.** You don't write `s.counter.count`, just `s.count`.
+**The `s` you receive is already scoped.** You don't write `s.counter.count`,
+just `s.count`.
 
 ### This is memoized
 
@@ -180,23 +191,24 @@ selectors: {
 Need data from other features? Pass them as parameters after `s`:
 
 ```ts
-const dashboard = feature('dashboard', {
-  state: { summary: '' },
-  
+const dashboard = feature("dashboard", {
+  state: { summary: "" },
+
   selectors: {
     // s = dashboard state, counter and wallet injected after aio.run()
     summary(s, counter, wallet) {
       // counter.count and wallet.balance are typed
-      return `Count: ${counter.count}, Balance: ${wallet.balance}`
-    }
-  }
-})
+      return `Count: ${counter.count}, Balance: ${wallet.balance}`;
+    },
+  },
+});
 
 // After aio.run({ appId: 'my-app', features: [dashboard, counter, wallet] })
-dashboard.summary()  // → 'Count: 5, Balance: 100'
+dashboard.summary(); // → 'Count: 5, Balance: 100'
 ```
 
-The framework automatically injects other features' state based on parameter names matching feature names.
+The framework automatically injects other features' state based on parameter
+names matching feature names.
 
 ---
 
@@ -230,49 +242,58 @@ methods: {
 ```
 
 **What happens:**
+
 1. `s.status = 'saving'` → batched into an internal `Counter:__setSave` action
 2. `await fetch(...)` → waits
-3. `s.status = 'done'` → batched into another internal `Counter:__setSave` action
+3. `s.status = 'done'` → batched into another internal `Counter:__setSave`
+   action
 
-Each assignment after an `await` creates a separate batched action. These `__set*` actions are internal bookkeeping — they are hidden from time-travel. The trigger action (`counter:save`) appears in time-travel.
+Each assignment after an `await` creates a separate batched action. These
+`__set*` actions are internal bookkeeping — they are hidden from time-travel.
+The trigger action (`counter:save`) appears in time-travel.
 
 ---
 
 ## Concept 5: State Machines
 
-A **state machine** guards actions. Only certain actions allowed in certain states.
+A **state machine** guards actions. Only certain actions allowed in certain
+states.
 
 ### Without machine
 
 ```ts
 // Any method can be called at any time
-counter.reset()   // Works even if that doesn't make sense
+counter.reset(); // Works even if that doesn't make sense
 ```
 
 ### With machine
 
 ```ts
-const door = feature('door', {
+const door = feature("door", {
   state: { isOpen: false },
-  
+
   machine: {
-    initial: 'closed',
+    initial: "closed",
     states: {
-      closed: { open: 'open' },        // Only 'open' allowed when closed
-      open: { close: 'closed' }        // Only 'close' allowed when open
-    }
+      closed: { open: "open" }, // Only 'open' allowed when closed
+      open: { close: "closed" }, // Only 'close' allowed when open
+    },
   },
-  
+
   methods: {
-    open(s) { s.isOpen = true },
-    close(s) { s.isOpen = false }
-  }
-})
+    open(s) {
+      s.isOpen = true;
+    },
+    close(s) {
+      s.isOpen = false;
+    },
+  },
+});
 
 // Start in 'closed' state
-door.open()    // ✓ Works → machine moves to 'open'
-door.open()    // ✗ Dropped! 'open' not allowed in 'open' state
-door.close()   // ✓ Works → machine moves to 'closed'
+door.open(); // ✓ Works → machine moves to 'open'
+door.open(); // ✗ Dropped! 'open' not allowed in 'open' state
+door.close(); // ✓ Works → machine moves to 'closed'
 ```
 
 ### How to read the machine
@@ -294,7 +315,7 @@ machine: {
 ### Check status in UI
 
 ```tsx
-const { status } = useFeature(door)
+const { status } = useFeature(door);
 
 // status is 'closed' or 'open' (string)
 ```
@@ -304,7 +325,7 @@ const { status } = useFeature(door)
 ```ts
 // Omit machine entirely — all actions always allowed
 // or explicitly:
-machine: false
+machine: false;
 ```
 
 ---
@@ -316,34 +337,35 @@ Import and call directly — fully typed, store-observable.
 ### The solution
 
 ```ts
-import { inventory } from '../inventory'
-import { payment } from '../payment'
+import { inventory } from "../inventory";
+import { payment } from "../payment";
 
-const checkout = feature('checkout', {
+const checkout = feature("checkout", {
   state: { orderId: null },
 
   methods: {
     async placeOrder(s, items) {
       // Call another feature's async method directly
-      await inventory.reserve(items)           // typed, dispatches through store
+      await inventory.reserve(items); // typed, dispatches through store
 
       // Call and get return value
-      const confirmed = await payment.charge(items.total)  // Promise<ConfirmResult>
+      const confirmed = await payment.charge(items.total); // Promise<ConfirmResult>
 
-      s.orderId = confirmed.orderId
-    }
-  }
-})
+      s.orderId = confirmed.orderId;
+    },
+  },
+});
 ```
 
 ### How this works
 
 ```ts
-await inventory.reserve(items)
+await inventory.reserve(items);
 //     ↑ feature   ↑ method   ↑ args
 ```
 
 **This dispatches a real action:**
+
 - `inventory:reserve { args: [items] }`
 - Time-travel sees it
 - Machine guards apply
@@ -352,25 +374,29 @@ await inventory.reserve(items)
 ### With timeout and retries
 
 ```ts
-import { call } from 'aio'
+import { call } from "aio";
 
 const result = await call(
   { timeout: 5000, retries: 2 },
-  () => payment.charge(items.total)   // callback form
-)
+  () => payment.charge(items.total), // callback form
+);
 ```
 
 ### When to use `call()` vs direct calling
 
-Use direct calling in almost all cases — it's fully typed, observable, and goes through the store.
-Use `call(opts, fn)` only when you need timeout or retry semantics:
+Use direct calling in almost all cases — it's fully typed, observable, and goes
+through the store. Use `call(opts, fn)` only when you need timeout or retry
+semantics:
 
 ```ts
 // Direct — preferred
-const reserved = await inventory.reserve(items)
+const reserved = await inventory.reserve(items);
 
 // With timeout/retry — only when needed
-const reserved = await call({ timeout: 5000, retries: 2 }, () => inventory.reserve(items))
+const reserved = await call(
+  { timeout: 5000, retries: 2 },
+  () => inventory.reserve(items),
+);
 ```
 
 ---
@@ -380,19 +406,19 @@ const reserved = await call({ timeout: 5000, retries: 2 }, () => inventory.reser
 ### 1. Observe — React when another feature dispatches
 
 ```ts
-import { counter } from '../counter'
+import { counter } from "../counter";
 
-const analytics = feature('analytics', {
+const analytics = feature("analytics", {
   state: { events: [] },
 
-  listensTo: [counter.increment],   // pass bound methods — no raw strings
+  listensTo: [counter.increment], // pass bound methods — no raw strings
 
   methods: {
     trackEvent(s, name) {
-      s.events.push(name)
+      s.events.push(name);
     },
   },
-})
+});
 
 // Now when counter.increment() is called:
 // 1. Counter feature handles it
@@ -402,15 +428,15 @@ const analytics = feature('analytics', {
 ### 2. Read — Call another feature's selector
 
 ```ts
-const dashboard = feature('dashboard', {
+const dashboard = feature("dashboard", {
   selectors: {
     summary(s, counter, wallet) {
       // s = dashboard state (not used here)
       // counter and wallet passed automatically after aio.run()
-      return `Count: ${counter.count}, Balance: ${wallet.balance}`
-    }
-  }
-})
+      return `Count: ${counter.count}, Balance: ${wallet.balance}`;
+    },
+  },
+});
 ```
 
 ### 3. Coordinate — Trigger another feature
@@ -418,17 +444,17 @@ const dashboard = feature('dashboard', {
 Direct import and call (preferred), or `dispatchTo` in executor:
 
 ```ts
-import { wallet } from '../wallet'
+import { wallet } from "../wallet";
 
-const checkout = feature('checkout', {
-  dispatchTo: [wallet],    // Allow dispatching to wallet — pass feature object
+const checkout = feature("checkout", {
+  dispatchTo: [wallet], // Allow dispatching to wallet — pass feature object
 
   execute: {
     paymentComplete(app, payload) {
-      app.dispatch(wallet.credit(payload.amount))   // allowed via dispatchTo
+      app.dispatch(wallet.credit(payload.amount)); // allowed via dispatchTo
     },
   },
-})
+});
 ```
 
 ---
@@ -440,31 +466,33 @@ The `methods` style is simpler. But sometimes you want more control.
 ### Methods style (simple)
 
 ```ts
-const counter = feature('counter', {
+const counter = feature("counter", {
   state: { count: 0 },
   methods: {
-    increment(s, by = 1) { s.count += by }
-  }
-})
+    increment(s, by = 1) {
+      s.count += by;
+    },
+  },
+});
 ```
 
 ### Actions/Reduce style (explicit)
 
 ```ts
-const counter = feature('counter', {
+const counter = feature("counter", {
   state: { count: 0 },
 
   actions: {
-    increment: (by = 1) => ({ by }),    // Action creator
+    increment: (by = 1) => ({ by }), // Action creator
   },
 
   // Object form — one named handler per action key
   reduce: {
     increment(state, payload) {
-      state.count += payload.by
+      state.count += payload.by;
     },
   },
-})
+});
 ```
 
 ### How to read actions/reduce
@@ -490,43 +518,44 @@ reduce: {
 
 ### When to use which?
 
-| Use methods when | Use actions/reduce when |
-|------------------|------------------------|
-| CRUD operations | Complex reactive logic |
+| Use methods when     | Use actions/reduce when             |
+| -------------------- | ----------------------------------- |
+| CRUD operations      | Complex reactive logic              |
 | Simple state updates | Multiple actions trigger same logic |
-| 80% of features | You need explicit control |
+| 80% of features      | You need explicit control           |
 
 ---
 
 ## Concept 9: Effects and Execute
 
-**Effects** are things that happen *after* state changes (API calls, timers, etc).
+**Effects** are things that happen _after_ state changes (API calls, timers,
+etc).
 
 ### With actions/reduce
 
 ```ts
-const counter = feature('counter', {
+const counter = feature("counter", {
   state: { count: 0 },
 
   actions: {
-    save: () => ({})
+    save: () => ({}),
   },
 
   effects: {
-    persist: (value: number) => ({ value })
+    persist: (value: number) => ({ value }),
   },
 
   // Named handler — no return needed; effects wired via execute object
   reduce: {
-    save() {},   // state unchanged — side effect handled in execute
+    save() {}, // state unchanged — side effect handled in execute
   },
 
   execute: {
     persist(_app, payload) {
-      fetch('/api/save', { body: payload.value })
+      fetch("/api/save", { body: payload.value });
     },
   },
-})
+});
 ```
 
 ### Flow: action → reduce → effects → execute
@@ -542,24 +571,26 @@ execute: runs for each effect
 ### With methods style (simpler)
 
 ```ts
-const counter = feature('counter', {
+const counter = feature("counter", {
   state: { count: 0 },
-  
+
   methods: {
     async save(s) {
-      await fetch('/api/save', { body: s.count })    // Just do it inline
-    }
-  }
-})
+      await fetch("/api/save", { body: s.count }); // Just do it inline
+    },
+  },
+});
 ```
 
-No need for effects/execute in most cases. Use methods style unless you have a reason.
+No need for effects/execute in most cases. Use methods style unless you have a
+reason.
 
 ---
 
 ## Concept 10: Generators (Sequential Workflows)
 
-When you have multi-step async logic, **generators** let you write it top-to-bottom.
+When you have multi-step async logic, **generators** let you write it
+top-to-bottom.
 
 ### Without generator (scattered)
 
@@ -573,39 +604,45 @@ When you have multi-step async logic, **generators** let you write it top-to-bot
 ### With generator
 
 ```ts
-import { feature } from 'aio'
+import { feature } from "aio";
 
-const checkout = feature('checkout', {
-  state: { step: 'idle', orderId: null },
+const checkout = feature("checkout", {
+  state: { step: "idle", orderId: null },
 
   methods: {
-    cancel(s) { s.step = 'cancelled' },   // sync method alongside generator
+    cancel(s) {
+      s.step = "cancelled";
+    }, // sync method alongside generator
   },
 
   generators: {
     // 'place' auto-creates the trigger action 'checkout:place'
     // methods-style: spread args matching method signature (minus s)
-    *place(ctx, items: string[]) {           // ← ctx and args are typed
+    *place(ctx, items: string[]) { // ← ctx and args are typed
       // Step 1
-      const valid = yield* ctx.call('validate', () => validateItems(items))
+      const valid = yield* ctx.call("validate", () => validateItems(items));
       if (!valid) {
-        yield* ctx.fail('invalid items')
-        return
+        yield* ctx.fail("invalid items");
+        return;
       }
 
       // Step 2
-      const orderId = yield* ctx.call('createOrder', () => createOrder(items))
+      const orderId = yield* ctx.call("createOrder", () => createOrder(items));
 
       // Step 3 - state is automatically typed from feature state
-      yield* ctx.mutate('save', s => { s.orderId = orderId; s.step = 'done' })
+      yield* ctx.mutate("save", (s) => {
+        s.orderId = orderId;
+        s.step = "done";
+      });
     },
   },
-})
+});
 ```
 
 ### Generator arg styles
 
 **Methods-style** (when feature has `methods`):
+
 ```ts
 generators: {
   *place(ctx, item: string, qty: number) {   // ← spread args, same as method
@@ -615,6 +652,7 @@ generators: {
 ```
 
 **Actions-style** (when feature has `actions`):
+
 ```ts
 generators: {
   place: function* (ctx, { item, qty }: { item: string; qty: number }) {
@@ -626,21 +664,26 @@ generators: {
 ### State is typed automatically
 
 ```ts
-const checkout = feature('checkout', {
-  state: { orderId: null as string | null, status: 'idle' },
-  
+const checkout = feature("checkout", {
+  state: { orderId: null as string | null, status: "idle" },
+
   generators: {
     *place(ctx, item: string) {
       // s in ctx.mutate is typed as { orderId: string | null, status: string }
-      yield* ctx.mutate('setOrderId', s => { s.orderId = '123' })  // ✓ typed
-      yield* ctx.mutate('setStatus', s => { s.status = 'done' })  // ✓ typed
-      const current = ctx.getState()  // ✓ typed
-    }
-  }
-})
+      yield* ctx.mutate("setOrderId", (s) => {
+        s.orderId = "123";
+      }); // ✓ typed
+      yield* ctx.mutate("setStatus", (s) => {
+        s.status = "done";
+      }); // ✓ typed
+      const current = ctx.getState(); // ✓ typed
+    },
+  },
+});
 ```
 
-No casts needed. The `s` parameter in `ctx.mutate`, `ctx.done`, and `ctx.getState()` is inferred from your feature's state.
+No casts needed. The `s` parameter in `ctx.mutate`, `ctx.done`, and
+`ctx.getState()` is inferred from your feature's state.
 
 ### How to read a generator
 
@@ -664,44 +707,46 @@ generators: {
 
 ### Generator context methods
 
-| Method | What it does |
-|--------|--------------|
-| `yield* ctx.call(name, fn)` | Run async work, return result |
-| `yield* ctx.mutate(name, fn)` | Update state synchronously |
-| `yield* ctx.done(fn?)` | Mark generator complete, optional final state |
-| `yield* ctx.fail(reason)` | Mark generator failed |
-| `yield* ctx.dispatch(action)` | Dispatch an action |
-| `yield* ctx.send(method, payload?)` | Shorthand dispatch to another feature |
-| `yield* ctx.all(...gens)` | Run multiple in parallel, wait for all |
-| `yield* ctx.all({...gens})` | Named form - destructure by name |
-| `yield* ctx.race({...gens})` | First to complete wins |
-| `yield* ctx.sleep(name, ms)` | Pause (visible in time-travel) |
-| `yield* ctx.waitFor(creator, timeout?)` | Pause until matching action arrives |
-| `ctx.getState()` | Read current feature state |
+| Method                                  | What it does                                  |
+| --------------------------------------- | --------------------------------------------- |
+| `yield* ctx.call(name, fn)`             | Run async work, return result                 |
+| `yield* ctx.mutate(name, fn)`           | Update state synchronously                    |
+| `yield* ctx.done(fn?)`                  | Mark generator complete, optional final state |
+| `yield* ctx.fail(reason)`               | Mark generator failed                         |
+| `yield* ctx.dispatch(action)`           | Dispatch an action                            |
+| `yield* ctx.send(method, payload?)`     | Shorthand dispatch to another feature         |
+| `yield* ctx.all(...gens)`               | Run multiple in parallel, wait for all        |
+| `yield* ctx.all({...gens})`             | Named form - destructure by name              |
+| `yield* ctx.race({...gens})`            | First to complete wins                        |
+| `yield* ctx.sleep(name, ms)`            | Pause (visible in time-travel)                |
+| `yield* ctx.waitFor(creator, timeout?)` | Pause until matching action arrives           |
+| `ctx.getState()`                        | Read current feature state                    |
 
 ### Cancelling generators
 
 Use `cancelOn` to abort a running generator when another action fires:
 
 ```ts
-const checkout = feature('checkout', {
-  state: { status: 'idle' },
-  
+const checkout = feature("checkout", {
+  state: { status: "idle" },
+
   methods: {
-    cancel(s) { s.status = 'cancelled' }
+    cancel(s) {
+      s.status = "cancelled";
+    },
   },
 
   generators: {
     *place(ctx, items) {
       // Long-running workflow...
-    }
+    },
   },
 
   // Abort 'place' generator when 'cancel' is dispatched
   cancelOn: {
-    place: [checkout.cancel],   // bound method with .type
-  }
-})
+    place: [checkout.cancel], // bound method with .type
+  },
+});
 ```
 
 ---
@@ -711,39 +756,39 @@ const checkout = feature('checkout', {
 ### Test a feature in isolation
 
 ```ts
-import { testFeature } from 'aio'
-import { counter } from './counter.ts'
+import { testFeature } from "aio";
+import { counter } from "./counter.ts";
 
-testFeature(counter, 'increment adds to count', (t) => {
-  t.init()
-  t.send.increment(5)
-  t.expect.state(s => s.count === 5)
-})
+testFeature(counter, "increment adds to count", (t) => {
+  t.init();
+  t.send.increment(5);
+  t.expect.state((s) => s.count === 5);
+});
 ```
 
 ### Test async methods
 
 ```ts
-testFeature(api, 'fetch loads data', async (t) => {
-  t.init()
-  t.send.fetch('https://api.example.com')
-  await t.settle()    // Wait for async to complete
-  t.expect.state(s => s.data !== null)
-})
+testFeature(api, "fetch loads data", async (t) => {
+  t.init();
+  t.send.fetch("https://api.example.com");
+  await t.settle(); // Wait for async to complete
+  t.expect.state((s) => s.data !== null);
+});
 ```
 
 ### Test state machine
 
 ```ts
-testFeature(door, 'cannot open when already open', (t) => {
-  t.init()
-  t.send.open()
-  t.expect.status('open')
-  
-  t.send.open()                    // Should be dropped
-  t.expect.status('open')          // Still 'open'
-  t.expect.noStateChange()
-})
+testFeature(door, "cannot open when already open", (t) => {
+  t.init();
+  t.send.open();
+  t.expect.status("open");
+
+  t.send.open(); // Should be dropped
+  t.expect.status("open"); // Still 'open'
+  t.expect.noStateChange();
+});
 ```
 
 ---
@@ -753,25 +798,25 @@ testFeature(door, 'cannot open when already open', (t) => {
 ### Minimal
 
 ```ts
-import { aio } from 'aio'
-import { counter } from './features/counter.ts'
+import { aio } from "aio";
+import { counter } from "./features/counter.ts";
 
-await aio.run({ appId: 'my-app', features: [counter] })
+await aio.run({ appId: "my-app", features: [counter] });
 ```
 
 ### With UI (Electron)
 
 ```ts
 await aio.run({
-  appId: 'my-app',
+  appId: "my-app",
   features: [counter, todos],
   ui: {
-    title: 'My App',
+    title: "My App",
     width: 1200,
     height: 800,
-    transport: 'auto'    // 'auto' = Electron if available, else browser
-  }
-})
+    transport: "auto", // 'auto' = Electron if available, else browser
+  },
+});
 ```
 
 ### Access the app object
@@ -793,14 +838,14 @@ await app.close()                  // Shutdown
 ### useFeature hook
 
 ```tsx
-import { useFeature } from 'aio'
-import { counter } from './features/counter.ts'
+import { useFeature } from "aio";
+import { counter } from "./features/counter.ts";
 
 function Counter() {
-  const { state, send, status } = useFeature(counter)
-  
-  if (!state) return <div>Connecting...</div>
-  
+  const { state, send, status } = useFeature(counter);
+
+  if (!state) return <div>Connecting...</div>;
+
   return (
     <div>
       <p>Count: {state.count}</p>
@@ -808,17 +853,17 @@ function Counter() {
       <button onClick={() => send.increment()}>+</button>
       <button onClick={() => send.reset()}>Reset</button>
     </div>
-  )
+  );
 }
 ```
 
 ### What you get
 
-| Property | Type | What it is |
-|----------|------|------------|
-| `state` | `S \| null` | Feature's state slice (null while connecting) |
-| `send` | `Record<string, Function>` | Typed method dispatchers |
-| `status` | `string \| undefined` | Current machine state (if machine exists) |
+| Property | Type                       | What it is                                    |
+| -------- | -------------------------- | --------------------------------------------- |
+| `state`  | `S \| null`                | Feature's state slice (null while connecting) |
+| `send`   | `Record<string, Function>` | Typed method dispatchers                      |
+| `status` | `string \| undefined`      | Current machine state (if machine exists)     |
 
 ---
 
@@ -828,22 +873,22 @@ function Counter() {
 
 ```ts
 await aio.run({
-  appId: 'my-app',
-  features: [counter, todos, user]
-})
+  appId: "my-app",
+  features: [counter, todos, user],
+});
 ```
 
 ### Dependencies
 
 ```ts
 await aio.run({
-  appId: 'my-app',
+  appId: "my-app",
   features: [
     counter,
-    { feature: wallets, dependsOn: ['user'] },  // user must init first
-    { feature: analytics, dependsOn: ['counter', 'user'] }
-  ]
-})
+    { feature: wallets, dependsOn: ["user"] }, // user must init first
+    { feature: analytics, dependsOn: ["counter", "user"] },
+  ],
+});
 ```
 
 ---
@@ -878,13 +923,13 @@ feature('name', {
 
 ### Methods style vs Actions style
 
-| | Methods | Actions |
-|---|---|---|
-| State mutation | `s.count += 1` | `reduce: { handler(state, payload) {} }` |
-| Async work | `async method(s)` | `execute: { handler(app, payload) {} }` |
-| Simplicity | ✓ Simple | ✗ More boilerplate |
-| Control | ✗ Less | ✓ More explicit |
-| Type inference | ✓ Automatic | ✗ Manual casts |
+|                | Methods           | Actions                                  |
+| -------------- | ----------------- | ---------------------------------------- |
+| State mutation | `s.count += 1`    | `reduce: { handler(state, payload) {} }` |
+| Async work     | `async method(s)` | `execute: { handler(app, payload) {} }`  |
+| Simplicity     | ✓ Simple          | ✗ More boilerplate                       |
+| Control        | ✗ Less            | ✓ More explicit                          |
+| Type inference | ✓ Automatic       | ✗ Manual casts                           |
 
 ### Generator context
 
@@ -907,10 +952,10 @@ cancelOn: {
 
 ```ts
 // Direct — preferred, fully typed
-await inventory.reserve(items)
+await inventory.reserve(items);
 
 // With timeout/retry
-await call({ timeout: 5000, retries: 2 }, () => inventory.reserve(items))
+await call({ timeout: 5000, retries: 2 }, () => inventory.reserve(items));
 ```
 
 ---
@@ -920,18 +965,18 @@ await call({ timeout: 5000, retries: 2 }, () => inventory.reserve(items))
 ### Pattern: Loading state
 
 ```ts
-const todos = feature('todos', {
+const todos = feature("todos", {
   state: { items: [], loading: false },
-  
+
   methods: {
     async load(s) {
-      s.loading = true
-      const res = await fetch('/api/todos')
-      s.items = await res.json()
-      s.loading = false
-    }
-  }
-})
+      s.loading = true;
+      const res = await fetch("/api/todos");
+      s.items = await res.json();
+      s.loading = false;
+    },
+  },
+});
 ```
 
 ### Pattern: Error handling
@@ -953,61 +998,77 @@ methods: {
 
 ### Pattern: Form state with validation
 
-Validation belongs in methods — check input, set errors, bail early. No special `validate` hook needed.
+Validation belongs in methods — check input, set errors, bail early. No special
+`validate` hook needed.
 
 ```ts
-const form = feature('form', {
+const form = feature("form", {
   state: {
-    email: '',
-    password: '',
+    email: "",
+    password: "",
     errors: {} as Record<string, string>,
     submitting: false,
   },
 
   methods: {
-    setEmail(s, email: string) { s.email = email; delete s.errors.email },
-    setPassword(s, password: string) { s.password = password; delete s.errors.password },
+    setEmail(s, email: string) {
+      s.email = email;
+      delete s.errors.email;
+    },
+    setPassword(s, password: string) {
+      s.password = password;
+      delete s.errors.password;
+    },
 
     async submit(s) {
       // Validate before doing anything — errors go into state, UI reacts
-      const errors: Record<string, string> = {}
-      if (!s.email) errors.email = 'required'
-      if (!s.email.includes('@')) errors.email = 'invalid email'
-      if (s.password.length < 8) errors.password = 'min 8 characters'
-      if (Object.keys(errors).length) { s.errors = errors; return }
+      const errors: Record<string, string> = {};
+      if (!s.email) errors.email = "required";
+      if (!s.email.includes("@")) errors.email = "invalid email";
+      if (s.password.length < 8) errors.password = "min 8 characters";
+      if (Object.keys(errors).length) {
+        s.errors = errors;
+        return;
+      }
 
       // Validation passed — proceed
-      s.errors = {}
-      s.submitting = true
-      const result = await submitForm(s.email, s.password)
-      s.submitting = false
-      if (result.error) s.errors = { submit: result.error }
-    }
-  }
-})
+      s.errors = {};
+      s.submitting = true;
+      const result = await submitForm(s.email, s.password);
+      s.submitting = false;
+      if (result.error) s.errors = { submit: result.error };
+    },
+  },
+});
 ```
 
-Validation is state mutation — the errors need to be in state so the UI can render them. Methods are the natural place for "check input, update state, maybe proceed."
+Validation is state mutation — the errors need to be in state so the UI can
+render them. Methods are the natural place for "check input, update state, maybe
+proceed."
 
 ### Pattern: Persistence
 
 Exclude ephemeral state from Deno.Kv persistence:
 
 ```ts
-const editor = feature('editor', {
-  state: { 
-    content: '',            // persisted
-    htmlCache: '',          // NOT persisted (regenerated from content)
-    undoStack: [],          // NOT persisted (cleared on reload)
+const editor = feature("editor", {
+  state: {
+    content: "", // persisted
+    htmlCache: "", // NOT persisted (regenerated from content)
+    undoStack: [], // NOT persisted (cleared on reload)
   },
-  
-  persist: { exclude: ['htmlCache', 'undoStack'] },
-  
+
+  persist: { exclude: ["htmlCache", "undoStack"] },
+
   methods: {
-    setContent(s, text) { s.content = text },
-    clearUndo(s) { s.undoStack = [] }
-  }
-})
+    setContent(s, text) {
+      s.content = text;
+    },
+    clearUndo(s) {
+      s.undoStack = [];
+    },
+  },
+});
 
 // After aio.run({ appId: 'my-app', features: [editor], persist: true })
 // State is auto-saved to Deno.Kv
@@ -1024,11 +1085,11 @@ You tried to mutate `state` outside a method. This happens when you:
 
 ```ts
 // ❌ WRONG - mutating directly
-const app = await aio.run({ appId: 'my-app', features: [counter] })
-app.getState().counter.count += 1
+const app = await aio.run({ appId: "my-app", features: [counter] });
+app.getState().counter.count += 1;
 
 // ✓ RIGHT - use a method
-counter.increment(1)
+counter.increment(1);
 ```
 
 ### "Action not allowed in state 'X'"
@@ -1052,11 +1113,11 @@ You forgot to `await aio.run()`. Methods are bound after the app starts.
 
 ```ts
 // ❌ WRONG - called before run
-counter.increment()  // Not bound yet!
+counter.increment(); // Not bound yet!
 
 // ✓ RIGHT - called after run
-await aio.run({ features: [counter] })
-counter.increment()  // Now it works
+await aio.run({ features: [counter] });
+counter.increment(); // Now it works
 ```
 
 ---

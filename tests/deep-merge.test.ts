@@ -1,182 +1,189 @@
-import { assertEquals } from '@std/assert'
-import { deepMerge } from '../src/deep-merge.ts'
+import { assertEquals } from "@std/assert";
+import { deepMerge } from "../src/deep-merge.ts";
 
-Deno.test('deepMerge: persisted overrides matching types', () => {
-  const initial = { count: 0, name: 'default' }
-  const persisted = { count: 42, name: 'saved' }
-  assertEquals(deepMerge(initial, persisted), { count: 42, name: 'saved' })
-})
+Deno.test("deepMerge: persisted overrides matching types", () => {
+  const initial = { count: 0, name: "default" };
+  const persisted = { count: 42, name: "saved" };
+  assertEquals(deepMerge(initial, persisted), { count: 42, name: "saved" });
+});
 
-Deno.test('deepMerge: drops keys removed from schema', () => {
-  const initial = { count: 0 }
-  const persisted = { count: 5, oldKey: 'stale' }
-  assertEquals(deepMerge(initial, persisted), { count: 5 })
-})
+Deno.test("deepMerge: drops keys removed from schema", () => {
+  const initial = { count: 0 };
+  const persisted = { count: 5, oldKey: "stale" };
+  assertEquals(deepMerge(initial, persisted), { count: 5 });
+});
 
-Deno.test('deepMerge: preserves new schema keys', () => {
-  const initial = { count: 0, newField: 'default' }
-  const persisted = { count: 5 }
-  assertEquals(deepMerge(initial, persisted), { count: 5, newField: 'default' })
-})
-
-Deno.test('deepMerge: rejects type mismatch (schema wins)', () => {
-  const initial = { count: 0 }
-  const persisted = { count: 'not a number' }
-  assertEquals(deepMerge(initial, persisted), { count: 0 })
-})
-
-Deno.test('deepMerge: merges nested objects recursively', () => {
-  const initial = { settings: { theme: 'light', fontSize: 14, newOpt: true } }
-  const persisted = { settings: { theme: 'dark', fontSize: 16 } }
+Deno.test("deepMerge: preserves new schema keys", () => {
+  const initial = { count: 0, newField: "default" };
+  const persisted = { count: 5 };
   assertEquals(deepMerge(initial, persisted), {
-    settings: { theme: 'dark', fontSize: 16, newOpt: true },
-  })
-})
+    count: 5,
+    newField: "default",
+  });
+});
 
-Deno.test('deepMerge: replaces arrays wholesale', () => {
-  const initial = { items: [1, 2, 3] }
-  const persisted = { items: [4, 5] }
-  assertEquals(deepMerge(initial, persisted), { items: [4, 5] })
-})
+Deno.test("deepMerge: rejects type mismatch (schema wins)", () => {
+  const initial = { count: 0 };
+  const persisted = { count: "not a number" };
+  assertEquals(deepMerge(initial, persisted), { count: 0 });
+});
 
-Deno.test('deepMerge: handles null persisted values with same type', () => {
-  const initial = { data: null }
-  const persisted = { data: null }
-  assertEquals(deepMerge(initial, persisted), { data: null })
-})
+Deno.test("deepMerge: merges nested objects recursively", () => {
+  const initial = { settings: { theme: "light", fontSize: 14, newOpt: true } };
+  const persisted = { settings: { theme: "dark", fontSize: 16 } };
+  assertEquals(deepMerge(initial, persisted), {
+    settings: { theme: "dark", fontSize: 16, newOpt: true },
+  });
+});
 
-Deno.test('deepMerge: object→primitive type mismatch keeps initial', () => {
-  const initial = { config: { a: 1 } }
-  const persisted = { config: 'broken' }
-  const result = deepMerge(initial, persisted)
-  assertEquals(result, { config: { a: 1 } })
-})
+Deno.test("deepMerge: replaces arrays wholesale", () => {
+  const initial = { items: [1, 2, 3] };
+  const persisted = { items: [4, 5] };
+  assertEquals(deepMerge(initial, persisted), { items: [4, 5] });
+});
 
-Deno.test('deepMerge: persisted null cannot wipe schema object', () => {
-  const initial = { config: { theme: 'light', size: 14 } }
-  const persisted = { config: null }
-  assertEquals(deepMerge(initial, persisted), { config: { theme: 'light', size: 14 } })
-})
+Deno.test("deepMerge: handles null persisted values with same type", () => {
+  const initial = { data: null };
+  const persisted = { data: null };
+  assertEquals(deepMerge(initial, persisted), { data: null });
+});
 
-Deno.test('deepMerge: null initial accepts persisted value', () => {
-  const initial = { data: null }
-  const persisted = { data: { loaded: true } }
-  assertEquals(deepMerge(initial, persisted), { data: { loaded: true } })
-})
+Deno.test("deepMerge: object→primitive type mismatch keeps initial", () => {
+  const initial = { config: { a: 1 } };
+  const persisted = { config: "broken" };
+  const result = deepMerge(initial, persisted);
+  assertEquals(result, { config: { a: 1 } });
+});
 
-Deno.test('deepMerge: empty persisted returns initial', () => {
-  const initial = { a: 1, b: 'hello' }
-  assertEquals(deepMerge(initial, {}), { a: 1, b: 'hello' })
-})
+Deno.test("deepMerge: persisted null cannot wipe schema object", () => {
+  const initial = { config: { theme: "light", size: 14 } };
+  const persisted = { config: null };
+  assertEquals(deepMerge(initial, persisted), {
+    config: { theme: "light", size: 14 },
+  });
+});
 
-Deno.test('deepMerge: blocks __proto__ pollution', () => {
-  const initial = { safe: 'yes' }
-  const persisted = JSON.parse('{"safe": "yes", "__proto__": {"polluted": true}}')
-  const result = deepMerge(initial, persisted)
-  assertEquals(result, { safe: 'yes' })
-  assertEquals(({} as Record<string, unknown>).polluted, undefined)
-})
+Deno.test("deepMerge: null initial accepts persisted value", () => {
+  const initial = { data: null };
+  const persisted = { data: { loaded: true } };
+  assertEquals(deepMerge(initial, persisted), { data: { loaded: true } });
+});
 
-Deno.test('deepMerge: blocks constructor/prototype keys', () => {
-  const initial = { a: 1 }
-  const persisted = { a: 2, constructor: 'evil', prototype: 'bad' }
-  assertEquals(deepMerge(initial, persisted), { a: 2 })
-})
+Deno.test("deepMerge: empty persisted returns initial", () => {
+  const initial = { a: 1, b: "hello" };
+  assertEquals(deepMerge(initial, {}), { a: 1, b: "hello" });
+});
 
-Deno.test('deepMerge: array→object type mismatch keeps initial (schema wins)', () => {
+Deno.test("deepMerge: blocks __proto__ pollution", () => {
+  const initial = { safe: "yes" };
+  const persisted = JSON.parse(
+    '{"safe": "yes", "__proto__": {"polluted": true}}',
+  );
+  const result = deepMerge(initial, persisted);
+  assertEquals(result, { safe: "yes" });
+  assertEquals(({} as Record<string, unknown>).polluted, undefined);
+});
+
+Deno.test("deepMerge: blocks constructor/prototype keys", () => {
+  const initial = { a: 1 };
+  const persisted = { a: 2, constructor: "evil", prototype: "bad" };
+  assertEquals(deepMerge(initial, persisted), { a: 2 });
+});
+
+Deno.test("deepMerge: array→object type mismatch keeps initial (schema wins)", () => {
   // persisted is array, initial is object → typeof mismatch → keep initial
-  const initial = { config: { theme: 'light' } } as Record<string, unknown>
-  const persisted = { config: ['broken'] } as Record<string, unknown>
-  assertEquals(deepMerge(initial, persisted), { config: { theme: 'light' } })
-})
+  const initial = { config: { theme: "light" } } as Record<string, unknown>;
+  const persisted = { config: ["broken"] } as Record<string, unknown>;
+  assertEquals(deepMerge(initial, persisted), { config: { theme: "light" } });
+});
 
-Deno.test('deepMerge: object→array type mismatch keeps initial (schema wins)', () => {
+Deno.test("deepMerge: object→array type mismatch keeps initial (schema wins)", () => {
   // persisted is plain object, initial is array → typeof match (both 'object') but isPlainObject check gates recursion
-  const initial = { items: ['a', 'b'] } as Record<string, unknown>
-  const persisted = { items: { 0: 'x' } } as Record<string, unknown>
+  const initial = { items: ["a", "b"] } as Record<string, unknown>;
+  const persisted = { items: { 0: "x" } } as Record<string, unknown>;
   // arrays are replaced wholesale only when types match; object→array is same typeof → persisted used
   // This is the documented behaviour: arrays replaced wholesale if types match
-  const result = deepMerge(initial, persisted)
-  assertEquals(typeof result.items, 'object')
-})
+  const result = deepMerge(initial, persisted);
+  assertEquals(typeof result.items, "object");
+});
 
-Deno.test('deepMerge: depth limit prevents stack overflow', () => {
+Deno.test("deepMerge: depth limit prevents stack overflow", () => {
   // Build a deeply nested structure (40 levels, limit is 32)
-  let initial: Record<string, unknown> = { value: 'init' }
-  let persisted: Record<string, unknown> = { value: 'saved' }
+  let initial: Record<string, unknown> = { value: "init" };
+  let persisted: Record<string, unknown> = { value: "saved" };
   for (let i = 0; i < 40; i++) {
-    initial = { nested: initial }
-    persisted = { nested: persisted }
+    initial = { nested: initial };
+    persisted = { nested: persisted };
   }
   // Should not throw — returns initial at depth limit
-  const result = deepMerge(initial, persisted)
-  assertEquals(typeof result, 'object')
+  const result = deepMerge(initial, persisted);
+  assertEquals(typeof result, "object");
   // At depth 32, merging stops and initial is returned — so deep values stay as initial
-  let node: Record<string, unknown> = result
-  for (let i = 0; i < 32; i++) node = node.nested as Record<string, unknown>
-  assertEquals(node.nested !== undefined, true) // still has nested structure (initial returned)
-})
+  let node: Record<string, unknown> = result;
+  for (let i = 0; i < 32; i++) node = node.nested as Record<string, unknown>;
+  assertEquals(node.nested !== undefined, true); // still has nested structure (initial returned)
+});
 
-Deno.test('deepMerge: type mismatch keeps initial (number vs string)', () => {
-  const initial = { count: 0 }
-  const persisted = { count: 'not-a-number' }
-  const result = deepMerge(initial, persisted as any)
-  assertEquals(result.count, 0)
-})
+Deno.test("deepMerge: type mismatch keeps initial (number vs string)", () => {
+  const initial = { count: 0 };
+  const persisted = { count: "not-a-number" };
+  const result = deepMerge(initial, persisted as any);
+  assertEquals(result.count, 0);
+});
 
-Deno.test('deepMerge: null in persisted replaces primitive', () => {
-  const initial = { name: 'default', value: 42 }
-  const persisted = { name: null, value: null }
-  const result = deepMerge(initial, persisted as any)
-  assertEquals(result.name, null)
-  assertEquals(result.value, null)
-})
+Deno.test("deepMerge: null in persisted replaces primitive", () => {
+  const initial = { name: "default", value: 42 };
+  const persisted = { name: null, value: null };
+  const result = deepMerge(initial, persisted as any);
+  assertEquals(result.name, null);
+  assertEquals(result.value, null);
+});
 
-Deno.test('deepMerge: null in persisted cannot wipe schema object', () => {
-  const initial = { config: { theme: 'dark' } }
-  const persisted = { config: null }
-  const result = deepMerge(initial, persisted as any)
-  assertEquals(result.config, { theme: 'dark' })
-})
+Deno.test("deepMerge: null in persisted cannot wipe schema object", () => {
+  const initial = { config: { theme: "dark" } };
+  const persisted = { config: null };
+  const result = deepMerge(initial, persisted as any);
+  assertEquals(result.config, { theme: "dark" });
+});
 
-Deno.test('deepMerge: array in persisted cannot replace schema object', () => {
-  const initial = { items: { list: [] } }
-  const persisted = { items: [1, 2, 3] }
-  const result = deepMerge(initial, persisted as any)
-  assertEquals(result.items, { list: [] })
-})
+Deno.test("deepMerge: array in persisted cannot replace schema object", () => {
+  const initial = { items: { list: [] } };
+  const persisted = { items: [1, 2, 3] };
+  const result = deepMerge(initial, persisted as any);
+  assertEquals(result.items, { list: [] });
+});
 
-Deno.test('deepMerge: arrays are replaced wholesale, not merged', () => {
-  const initial = { tags: ['a', 'b'] }
-  const persisted = { tags: ['x', 'y', 'z'] }
-  const result = deepMerge(initial, persisted)
-  assertEquals(result.tags, ['x', 'y', 'z'])
-})
+Deno.test("deepMerge: arrays are replaced wholesale, not merged", () => {
+  const initial = { tags: ["a", "b"] };
+  const persisted = { tags: ["x", "y", "z"] };
+  const result = deepMerge(initial, persisted);
+  assertEquals(result.tags, ["x", "y", "z"]);
+});
 
-Deno.test('deepMerge: deeply nested merge preserves structure', () => {
-  const initial = { a: { b: { c: { d: 1, e: 2 } } } }
-  const persisted = { a: { b: { c: { d: 99, e: 2 } } } }
-  const result = deepMerge(initial, persisted)
-  assertEquals(result, { a: { b: { c: { d: 99, e: 2 } } } })
-})
+Deno.test("deepMerge: deeply nested merge preserves structure", () => {
+  const initial = { a: { b: { c: { d: 1, e: 2 } } } };
+  const persisted = { a: { b: { c: { d: 99, e: 2 } } } };
+  const result = deepMerge(initial, persisted);
+  assertEquals(result, { a: { b: { c: { d: 99, e: 2 } } } });
+});
 
-Deno.test('deepMerge: MAX_DEPTH prevents stack overflow', () => {
+Deno.test("deepMerge: MAX_DEPTH prevents stack overflow", () => {
   // Build deeply nested objects (>32 levels)
-  let initial: Record<string, unknown> = { value: 1 }
-  let persisted: Record<string, unknown> = { value: 99 }
+  let initial: Record<string, unknown> = { value: 1 };
+  let persisted: Record<string, unknown> = { value: 99 };
   for (let i = 0; i < 40; i++) {
-    initial = { nested: initial }
-    persisted = { nested: persisted }
+    initial = { nested: initial };
+    persisted = { nested: persisted };
   }
   // Should not throw, returns initial at depth limit
-  const result = deepMerge(initial, persisted)
-  assertEquals(typeof result, 'object')
-})
+  const result = deepMerge(initial, persisted);
+  assertEquals(typeof result, "object");
+});
 
-Deno.test('deepMerge: __proto__ key is ignored', () => {
-  const initial = { safe: 1 }
-  const persisted = { safe: 2, __proto__: { polluted: true } }
-  const result = deepMerge(initial, persisted)
-  assertEquals(result.safe, 2)
-  assertEquals((result as any).polluted, undefined)
-})
+Deno.test("deepMerge: __proto__ key is ignored", () => {
+  const initial = { safe: 1 };
+  const persisted = { safe: 2, __proto__: { polluted: true } };
+  const result = deepMerge(initial, persisted);
+  assertEquals(result.safe, 2);
+  assertEquals((result as any).polluted, undefined);
+});

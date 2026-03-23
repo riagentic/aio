@@ -3,153 +3,205 @@
 // Usage: deno run -A aiol/mod.ts [project-dir]
 // Scans an aio project and reports errors, warnings, and optimization hints.
 
-import { buildContext } from './context.ts'
-import { ALL_CHECKS } from './checks.ts'
-import type { Report, Issue, Severity } from './types.ts'
+import { buildContext } from "./context.ts";
+import { ALL_CHECKS } from "./checks.ts";
+import type { Issue, Report, Severity } from "./types.ts";
 
-const VERSION = '0.1.0'
+const VERSION = "0.1.0";
 
 // ── Colors ──────────────────────────────────────────────────────────
 
 const C = {
-  reset: '\x1b[0m', bold: '\x1b[1m', dim: '\x1b[2m',
-  red: '\x1b[31m', yellow: '\x1b[33m', green: '\x1b[32m',
-  cyan: '\x1b[36m', gray: '\x1b[90m', magenta: '\x1b[35m',
-} as const
+  reset: "\x1b[0m",
+  bold: "\x1b[1m",
+  dim: "\x1b[2m",
+  red: "\x1b[31m",
+  yellow: "\x1b[33m",
+  green: "\x1b[32m",
+  cyan: "\x1b[36m",
+  gray: "\x1b[90m",
+  magenta: "\x1b[35m",
+} as const;
 
-const isCI = !!Deno.env.get('CI')
-const noColor = !!Deno.env.get('NO_COLOR') || Deno.args.includes('--no-color')
-const useColor = !noColor && !isCI
-const c = (code: string, text: string) => useColor ? `${code}${text}${C.reset}` : text
+const isCI = !!Deno.env.get("CI");
+const noColor = !!Deno.env.get("NO_COLOR") || Deno.args.includes("--no-color");
+const useColor = !noColor && !isCI;
+const c = (code: string, text: string) =>
+  useColor ? `${code}${text}${C.reset}` : text;
 
 // ── Severity formatting ─────────────────────────────────────────────
 
-const SEVERITY_ICON: Record<Severity, string> = { error: '✗', warn: '⚠', hint: '·' }
-const SEVERITY_COLOR: Record<Severity, string> = { error: C.red, warn: C.yellow, hint: C.cyan }
-const SEVERITY_LABEL: Record<Severity, string> = { error: 'ERROR', warn: 'WARN ', hint: 'HINT ' }
+const SEVERITY_ICON: Record<Severity, string> = {
+  error: "✗",
+  warn: "⚠",
+  hint: "·",
+};
+const SEVERITY_COLOR: Record<Severity, string> = {
+  error: C.red,
+  warn: C.yellow,
+  hint: C.cyan,
+};
+const SEVERITY_LABEL: Record<Severity, string> = {
+  error: "ERROR",
+  warn: "WARN ",
+  hint: "HINT ",
+};
 
 function formatIssue(issue: Issue, showFixable = false): string {
-  const icon = SEVERITY_ICON[issue.severity]
-  const color = SEVERITY_COLOR[issue.severity]
-  const label = SEVERITY_LABEL[issue.severity]
-  const location = issue.file ? (issue.line ? `${issue.file}:${issue.line}` : issue.file) : ''
-  const loc = location ? ` ${c(C.dim, location)}` : ''
-  const fix = issue.fix ? `\n     ${c(C.dim, `→ ${issue.fix}`)}` : ''
-  const fixable = showFixable && issue.safeFix ? ` ${c(C.green, '[fixable]')}` : ''
-  return `  ${c(color, `${icon} ${label}`)}  ${c(C.dim, `[${issue.area}]`)} ${issue.message}${fixable}${loc}${fix}`
+  const icon = SEVERITY_ICON[issue.severity];
+  const color = SEVERITY_COLOR[issue.severity];
+  const label = SEVERITY_LABEL[issue.severity];
+  const location = issue.file
+    ? (issue.line ? `${issue.file}:${issue.line}` : issue.file)
+    : "";
+  const loc = location ? ` ${c(C.dim, location)}` : "";
+  const fix = issue.fix ? `\n     ${c(C.dim, `→ ${issue.fix}`)}` : "";
+  const fixable = showFixable && issue.safeFix
+    ? ` ${c(C.green, "[fixable]")}`
+    : "";
+  return `  ${c(color, `${icon} ${label}`)}  ${
+    c(C.dim, `[${issue.area}]`)
+  } ${issue.message}${fixable}${loc}${fix}`;
 }
 
 // ── Output ──────────────────────────────────────────────────────────
 
 function printReport(report: Report, json: boolean, showFixable = false): void {
   if (json) {
-    console.log(JSON.stringify({
-      version: VERSION,
-      stats: report.stats,
-      passed: report.passed,
-      issues: report.issues,
-      summary: {
-        errors: report.issues.filter(i => i.severity === 'error').length,
-        warnings: report.issues.filter(i => i.severity === 'warn').length,
-        hints: report.issues.filter(i => i.severity === 'hint').length,
+    console.log(JSON.stringify(
+      {
+        version: VERSION,
+        stats: report.stats,
+        passed: report.passed,
+        issues: report.issues,
+        summary: {
+          errors: report.issues.filter((i) => i.severity === "error").length,
+          warnings: report.issues.filter((i) => i.severity === "warn").length,
+          hints: report.issues.filter((i) => i.severity === "hint").length,
+        },
       },
-    }, null, 2))
-    return
+      null,
+      2,
+    ));
+    return;
   }
 
-  console.log(`\n${c(C.bold, `aiol v${VERSION}`)} — scanning project\n`)
+  console.log(`\n${c(C.bold, `aiol v${VERSION}`)} — scanning project\n`);
 
   // Passed checks
   if (report.passed.length) {
     for (const p of report.passed) {
-      console.log(`  ${c(C.green, '✓')} ${p}`)
+      console.log(`  ${c(C.green, "✓")} ${p}`);
     }
-    console.log()
+    console.log();
   }
 
   // Group issues by severity
-  const errors = report.issues.filter(i => i.severity === 'error')
-  const warns = report.issues.filter(i => i.severity === 'warn')
-  const hints = report.issues.filter(i => i.severity === 'hint')
+  const errors = report.issues.filter((i) => i.severity === "error");
+  const warns = report.issues.filter((i) => i.severity === "warn");
+  const hints = report.issues.filter((i) => i.severity === "hint");
 
   if (errors.length) {
-    for (const issue of errors) console.log(formatIssue(issue, showFixable))
-    console.log()
+    for (const issue of errors) console.log(formatIssue(issue, showFixable));
+    console.log();
   }
   if (warns.length) {
-    for (const issue of warns) console.log(formatIssue(issue, showFixable))
-    console.log()
+    for (const issue of warns) console.log(formatIssue(issue, showFixable));
+    console.log();
   }
   if (hints.length) {
-    for (const issue of hints) console.log(formatIssue(issue, showFixable))
-    console.log()
+    for (const issue of hints) console.log(formatIssue(issue, showFixable));
+    console.log();
   }
 
   // Summary bar
-  const total = report.issues.length
-  const e = errors.length
-  const w = warns.length
-  const h = hints.length
+  const total = report.issues.length;
+  const e = errors.length;
+  const w = warns.length;
+  const h = hints.length;
 
-  console.log(c(C.dim, '─'.repeat(60)))
-  console.log(`  ${c(C.bold, 'Files:')} ${report.stats.filesScanned}  ${c(C.bold, 'Features:')} ${report.stats.featuresFound}  ${c(C.bold, 'Tests:')} ${report.stats.testsFound}`)
+  console.log(c(C.dim, "─".repeat(60)));
+  console.log(
+    `  ${c(C.bold, "Files:")} ${report.stats.filesScanned}  ${
+      c(C.bold, "Features:")
+    } ${report.stats.featuresFound}  ${
+      c(C.bold, "Tests:")
+    } ${report.stats.testsFound}`,
+  );
 
-  const fixable = report.issues.filter(i => i.safeFix).length
+  const fixable = report.issues.filter((i) => i.safeFix).length;
 
   if (total === 0) {
-    console.log(`  ${c(C.green + C.bold, '✓ No issues found — clean project!')}`)
+    console.log(
+      `  ${c(C.green + C.bold, "✓ No issues found — clean project!")}`,
+    );
   } else {
-    const parts: string[] = []
-    if (e) parts.push(c(C.red, `${e} error${e > 1 ? 's' : ''}`))
-    if (w) parts.push(c(C.yellow, `${w} warning${w > 1 ? 's' : ''}`))
-    if (h) parts.push(c(C.cyan, `${h} hint${h > 1 ? 's' : ''}`))
-    console.log(`  ${parts.join(' · ')}`)
+    const parts: string[] = [];
+    if (e) parts.push(c(C.red, `${e} error${e > 1 ? "s" : ""}`));
+    if (w) parts.push(c(C.yellow, `${w} warning${w > 1 ? "s" : ""}`));
+    if (h) parts.push(c(C.cyan, `${h} hint${h > 1 ? "s" : ""}`));
+    console.log(`  ${parts.join(" · ")}`);
     if (fixable > 0 && !showFixable) {
-      console.log(`  ${c(C.green, `${fixable} auto-fixable`)} — run with ${c(C.bold, '--safe-fix')} to apply`)
+      console.log(
+        `  ${c(C.green, `${fixable} auto-fixable`)} — run with ${
+          c(C.bold, "--safe-fix")
+        } to apply`,
+      );
     }
   }
-  console.log()
+  console.log();
 }
 
 // ── Safe fix execution ──────────────────────────────────────────────
 
-async function applySafeFixes(report: Report, projectDir: string): Promise<number> {
-  const fixable = report.issues.filter(i => i.safeFix)
-  let applied = 0
+async function applySafeFixes(
+  report: Report,
+  projectDir: string,
+): Promise<number> {
+  const fixable = report.issues.filter((i) => i.safeFix);
+  let applied = 0;
   for (const issue of fixable) {
     try {
-      const ok = await issue.safeFix!(projectDir)
+      const ok = await issue.safeFix!(projectDir);
       if (ok) {
-        applied++
-        console.log(`  ${c(C.green, '✓ fixed')}  ${c(C.dim, `[${issue.area}]`)} ${issue.message}`)
+        applied++;
+        console.log(
+          `  ${c(C.green, "✓ fixed")}  ${
+            c(C.dim, `[${issue.area}]`)
+          } ${issue.message}`,
+        );
       }
     } catch (e) {
-      console.log(`  ${c(C.red, '✗ failed')} ${c(C.dim, `[${issue.area}]`)} ${issue.message}: ${e}`)
+      console.log(
+        `  ${c(C.red, "✗ failed")} ${
+          c(C.dim, `[${issue.area}]`)
+        } ${issue.message}: ${e}`,
+      );
     }
   }
-  return applied
+  return applied;
 }
 
 // ── CLI ─────────────────────────────────────────────────────────────
 
 export async function lint(projectDir: string): Promise<Report> {
-  const { ctx, report } = await buildContext(projectDir)
+  const { ctx, report } = await buildContext(projectDir);
   for (const check of ALL_CHECKS) {
-    await check(ctx)
+    await check(ctx);
   }
   // Sort: errors first, then warnings, then hints
-  const order: Record<Severity, number> = { error: 0, warn: 1, hint: 2 }
-  report.issues.sort((a, b) => order[a.severity] - order[b.severity])
-  return report
+  const order: Record<Severity, number> = { error: 0, warn: 1, hint: 2 };
+  report.issues.sort((a, b) => order[a.severity] - order[b.severity]);
+  return report;
 }
 
 if (import.meta.main) {
-  const args = Deno.args.filter(a => !a.startsWith('-'))
-  const flags = new Set(Deno.args.filter(a => a.startsWith('-')))
-  const json = flags.has('--json')
-  const safeFix = flags.has('--safe-fix')
+  const args = Deno.args.filter((a) => !a.startsWith("-"));
+  const flags = new Set(Deno.args.filter((a) => a.startsWith("-")));
+  const json = flags.has("--json");
+  const safeFix = flags.has("--safe-fix");
 
-  if (flags.has('--help') || flags.has('-h')) {
+  if (flags.has("--help") || flags.has("-h")) {
     console.log(`aiol v${VERSION} — aio project linter
 
 Usage: deno run -A aiol/mod.ts [project-dir] [flags]
@@ -167,41 +219,48 @@ Scans an aio project directory and reports:
 
 Issues marked [fixable] can be auto-fixed with --safe-fix.
 Only harmless changes: missing config, unused imports. Never changes behavior.
-`)
-    Deno.exit(0)
+`);
+    Deno.exit(0);
   }
 
-  if (flags.has('--version') || flags.has('-v')) {
-    console.log(`aiol v${VERSION}`)
-    Deno.exit(0)
+  if (flags.has("--version") || flags.has("-v")) {
+    console.log(`aiol v${VERSION}`);
+    Deno.exit(0);
   }
 
-  const projectDir = args[0] ?? Deno.cwd()
+  const projectDir = args[0] ?? Deno.cwd();
 
   try {
-    await Deno.stat(projectDir)
+    await Deno.stat(projectDir);
   } catch {
-    console.error(`Error: directory not found: ${projectDir}`)
-    Deno.exit(1)
+    console.error(`Error: directory not found: ${projectDir}`);
+    Deno.exit(1);
   }
 
-  const report = await lint(projectDir)
+  const report = await lint(projectDir);
 
   if (safeFix) {
-    const fixable = report.issues.filter(i => i.safeFix).length
+    const fixable = report.issues.filter((i) => i.safeFix).length;
     if (fixable === 0) {
-      printReport(report, json, true)
-      console.log(`  ${c(C.dim, 'No auto-fixable issues found.')}\n`)
+      printReport(report, json, true);
+      console.log(`  ${c(C.dim, "No auto-fixable issues found.")}\n`);
     } else {
-      console.log(`\n${c(C.bold, `aiol v${VERSION}`)} — applying safe fixes\n`)
-      const applied = await applySafeFixes(report, projectDir)
-      console.log(`\n  ${c(C.green + C.bold, `${applied} fix${applied !== 1 ? 'es' : ''} applied`)}\n`)
+      console.log(`\n${c(C.bold, `aiol v${VERSION}`)} — applying safe fixes\n`);
+      const applied = await applySafeFixes(report, projectDir);
+      console.log(
+        `\n  ${
+          c(
+            C.green + C.bold,
+            `${applied} fix${applied !== 1 ? "es" : ""} applied`,
+          )
+        }\n`,
+      );
     }
   } else {
-    printReport(report, json, true)
+    printReport(report, json, true);
   }
 
   // Exit code: 1 if errors, 0 otherwise
-  const hasErrors = report.issues.some(i => i.severity === 'error')
-  Deno.exit(hasErrors ? 1 : 0)
+  const hasErrors = report.issues.some((i) => i.severity === "error");
+  Deno.exit(hasErrors ? 1 : 0);
 }

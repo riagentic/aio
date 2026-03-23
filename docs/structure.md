@@ -31,7 +31,9 @@ features/
     index.ts              ← feature() definition — everything starts here
 ```
 
-`index.ts` contains the feature definition — `feature({ methods })` for method style, `feature({ reduce })` for explicit control. No other files needed initially.
+`index.ts` contains the feature definition — `feature({ methods })` for method
+style, `feature({ reduce })` for explicit control. No other files needed
+initially.
 
 ### Growing feature (~200+ lines) — extract types and helpers
 
@@ -84,13 +86,13 @@ features/dc/
 
 ### When to split files
 
-| index.ts size | Action |
-|---|---|
-| Under 200 lines | Keep everything in index.ts |
-| ~200 lines | Extract types.ts and helpers.ts |
-| ~300 lines | Add ui/ folder for components |
-| ~500 lines | Extract reduce.ts, execute.ts, selectors.ts |
-| ~1000 lines | Ask: is this actually two features? Probably split the feature. |
+| index.ts size   | Action                                                          |
+| --------------- | --------------------------------------------------------------- |
+| Under 200 lines | Keep everything in index.ts                                     |
+| ~200 lines      | Extract types.ts and helpers.ts                                 |
+| ~300 lines      | Add ui/ folder for components                                   |
+| ~500 lines      | Extract reduce.ts, execute.ts, selectors.ts                     |
+| ~1000 lines     | Ask: is this actually two features? Probably split the feature. |
 
 **Rule: split when you feel the pain, not before.**
 
@@ -130,9 +132,12 @@ features/
       index.ts
 ```
 
-Domain folders (`trading/`, `data/`, `user/`, `alerts/`) are pure organization — no code, no index.ts. Just folders for navigation. Each feature inside works exactly the same way.
+Domain folders (`trading/`, `data/`, `user/`, `alerts/`) are pure organization —
+no code, no index.ts. Just folders for navigation. Each feature inside works
+exactly the same way.
 
-**Never nest deeper than one domain level.** `features/trading/engine/index.ts` — yes. `features/trading/engine/core/logic/index.ts` — never.
+**Never nest deeper than one domain level.** `features/trading/engine/index.ts`
+— yes. `features/trading/engine/core/logic/index.ts` — never.
 
 ---
 
@@ -161,30 +166,37 @@ shared/
 
 ### Rules
 
-- **Shared UI components** are pure: props in, JSX out. No `useFeature()`, no `useAio()`, no feature imports.
-- **Shared types** are framework-agnostic: no aio imports. Pure domain descriptions.
-- **Shared utils** are pure functions: no side effects, no state, no framework imports.
-- **Promote, don't pre-plan.** Code starts in the feature that uses it. Move to `shared/` only when a second feature needs it.
+- **Shared UI components** are pure: props in, JSX out. No `useFeature()`, no
+  `useAio()`, no feature imports.
+- **Shared types** are framework-agnostic: no aio imports. Pure domain
+  descriptions.
+- **Shared utils** are pure functions: no side effects, no state, no framework
+  imports.
+- **Promote, don't pre-plan.** Code starts in the feature that uses it. Move to
+  `shared/` only when a second feature needs it.
 
 ---
 
 ## State
 
-**There is no state.ts in `src/`.** Each feature defines its own state inside `feature()`:
+**There is no state.ts in `src/`.** Each feature defines its own state inside
+`feature()`:
 
 ```typescript
-export const counter = feature('counter', {
+export const counter = feature("counter", {
   state: {
     count: 0,
     error: null as string | null,
   },
   // ...
-})
+});
 ```
 
-Framework composes the full `AppState` from all registered features automatically when `aio.run({ features })` is called.
+Framework composes the full `AppState` from all registered features
+automatically when `aio.run({ features })` is called.
 
-If you need an `AppState` type (e.g. for selectors), the framework infers it from registered features.
+If you need an `AppState` type (e.g. for selectors), the framework infers it
+from registered features.
 
 ---
 
@@ -193,22 +205,22 @@ If you need an `AppState` type (e.g. for selectors), the framework infers it fro
 ### `app.ts` — boot only
 
 ```typescript
-import { aio } from 'aio'
-import { counter } from './features/counter/index.ts'
-import { dc } from './features/dc/index.ts'
-import { bridge } from './features/bridge-dc-te/index.ts'
-import { te } from './features/te/index.ts'
+import { aio } from "aio";
+import { counter } from "./features/counter/index.ts";
+import { dc } from "./features/dc/index.ts";
+import { bridge } from "./features/bridge-dc-te/index.ts";
+import { te } from "./features/te/index.ts";
 
 await aio.run({
   features: [
     counter,
     dc,
-    { feature: bridge, dependsOn: ['dc'] },
-    { feature: te, dependsOn: ['bridge-dc-te'] },
+    { feature: bridge, dependsOn: ["dc"] },
+    { feature: te, dependsOn: ["bridge-dc-te"] },
   ],
   port: 8000,
-  ui: { electron: true, title: 'My App' },
-})
+  ui: { electron: true, title: "My App" },
+});
 ```
 
 No logic. No state. Just imports and boot.
@@ -216,20 +228,20 @@ No logic. No state. Just imports and boot.
 ### `App.tsx` — layout and routing only
 
 ```tsx
-import { useAio, page } from 'aio'
-import { TradePage } from './features/te/ui/TradePage.tsx'
-import { SettingsPage } from './features/settings/ui/SettingsPage.tsx'
+import { page, useAio } from "aio";
+import { TradePage } from "./features/te/ui/TradePage.tsx";
+import { SettingsPage } from "./features/settings/ui/SettingsPage.tsx";
 
 export default function App() {
-  const { state, send } = useAio()
-  if (!state) return <div>Connecting...</div>
+  const { state, send } = useAio();
+  if (!state) return <div>Connecting...</div>;
 
   return (
     <div>
       <nav>...</nav>
       {page(state.page, { trade: TradePage, settings: SettingsPage })}
     </div>
-  )
+  );
 }
 ```
 
@@ -248,28 +260,29 @@ scripts/                  ← at project root, outside src/
   deploy.ts
 ```
 
-Feature-specific scripts live in the feature: `features/dc/scripts/import-historical.ts`
+Feature-specific scripts live in the feature:
+`features/dc/scripts/import-historical.ts`
 
 ---
 
 ## What Goes Where — Quick Reference
 
-| Thing | Location |
-|---|---|
-| Feature logic (state, actions, reduce, etc.) | `features/[feature]/index.ts` |
-| Feature domain types (when extracted) | `features/[feature]/types.ts` |
-| Feature pure functions (when extracted) | `features/[feature]/helpers.ts` |
-| Feature reducer (when extracted) | `features/[feature]/reduce.ts` |
-| Feature executor (when extracted) | `features/[feature]/execute.ts` |
-| Feature selectors (when extracted) | `features/[feature]/selectors.ts` |
-| Feature UI components | `features/[feature]/ui/` |
-| Feature scripts | `features/[feature]/scripts/` |
-| Domain types shared by 2+ features | `shared/types/` |
-| Pure functions shared by 2+ features | `shared/utils/` |
-| Reusable UI components (no feature deps) | `shared/ui/` |
-| App boot | `src/app.ts` |
-| Root layout + routing | `src/App.tsx` |
-| App-wide scripts | `scripts/` (project root) |
+| Thing                                        | Location                          |
+| -------------------------------------------- | --------------------------------- |
+| Feature logic (state, actions, reduce, etc.) | `features/[feature]/index.ts`     |
+| Feature domain types (when extracted)        | `features/[feature]/types.ts`     |
+| Feature pure functions (when extracted)      | `features/[feature]/helpers.ts`   |
+| Feature reducer (when extracted)             | `features/[feature]/reduce.ts`    |
+| Feature executor (when extracted)            | `features/[feature]/execute.ts`   |
+| Feature selectors (when extracted)           | `features/[feature]/selectors.ts` |
+| Feature UI components                        | `features/[feature]/ui/`          |
+| Feature scripts                              | `features/[feature]/scripts/`     |
+| Domain types shared by 2+ features           | `shared/types/`                   |
+| Pure functions shared by 2+ features         | `shared/utils/`                   |
+| Reusable UI components (no feature deps)     | `shared/ui/`                      |
+| App boot                                     | `src/app.ts`                      |
+| Root layout + routing                        | `src/App.tsx`                     |
+| App-wide scripts                             | `scripts/` (project root)         |
 
 ---
 
@@ -291,32 +304,50 @@ Feature-specific scripts live in the feature: `features/dc/scripts/import-histor
 
 ## The `'aio'` import
 
-Everything comes from a single import. In **deno.json**, `"aio"` maps to `jsr:@riagentic/aio` (standard) or `./dep/aio/mod.ts` (vendored via scaffolder). In the **browser**, it maps to `/__aio/ui.js` (a virtual route). Same import, different runtimes.
+Everything comes from a single import. In **deno.json**, `"aio"` maps to
+`jsr:@riagentic/aio` (standard) or `./dep/aio/mod.ts` (vendored via scaffolder).
+In the **browser**, it maps to `/__aio/ui.js` (a virtual route). Same import,
+different runtimes.
 
 ### Two ways to consume aio
 
-**JSR (standard)** — `deno add jsr:@riagentic/aio` — recommended for new projects:
+**JSR (standard)** — `deno add jsr:@riagentic/aio` — recommended for new
+projects:
 
-- **Always up to date** — `deno add jsr:@riagentic/aio@^1.0` pins the minor, patches auto
-- **Full toolchain** — dev server, build system, app manager, all compile targets via `jsr:@riagentic/aio/src/am` and `jsr:@riagentic/aio/src/build`
+- **Always up to date** — `deno add jsr:@riagentic/aio@^1.0` pins the minor,
+  patches auto
+- **Full toolchain** — dev server, build system, app manager, all compile
+  targets via `jsr:@riagentic/aio/src/am` and `jsr:@riagentic/aio/src/build`
 - **Standard Deno workflow** — no framework files in your repo
 
-**Vendored (scaffolded projects)** — aio lives inside your project at `dep/aio/`. Available via the scaffolder's one-liner:
+**Vendored (scaffolded projects)** — aio lives inside your project at
+`dep/aio/`. Available via the scaffolder's one-liner:
 
-- **Hackable** — edit the framework source directly, edits show up as a clean git diff
-- **Air-gapped** — `deno compile` bundles everything with no network access at build time
+- **Hackable** — edit the framework source directly, edits show up as a clean
+  git diff
+- **Air-gapped** — `deno compile` bundles everything with no network access at
+  build time
 
-To update vendored projects, replace the `dep/aio/` folder with the new version and check the [upgrade guide](upgrade.md).
+To update vendored projects, replace the `dep/aio/` folder with the new version
+and check the [upgrade guide](upgrade.md).
 
 ```ts
 // Server-side (Deno) — full API
-import { aio, feature, call, testFeature, schedule, type FeatureDef } from 'aio'
+import {
+  aio,
+  call,
+  feature,
+  type FeatureDef,
+  schedule,
+  testFeature,
+} from "aio";
 
 // Browser-side (App.tsx) — hooks + helpers
-import { useFeature, useAio, useLocal, page } from 'aio'
+import { page, useAio, useFeature, useLocal } from "aio";
 ```
 
-Never import from `'../dep/aio/...'` directly — always use `'aio'`. The startup linter will warn you if you forget.
+Never import from `'../dep/aio/...'` directly — always use `'aio'`. The startup
+linter will warn you if you forget.
 
 ---
 
@@ -324,39 +355,38 @@ Never import from `'../dep/aio/...'` directly — always use `'aio'`. The startu
 
 ### Framework (`jsr:@riagentic/aio` / `dep/aio/` when vendored)
 
-| File | Purpose |
-|------|---------|
-| `mod.ts` | Public API — all `'aio'` imports resolve here (Deno-side), type declarations for browser-only functions |
-| `src/aio.ts` | Core runtime — `aio.run()`, dispatch loop, CLI parser, KV path resolution, startup linter |
-| `src/browser.ts` | Browser-side module — `useFeature`, `useAio`, `useLocal`, `feature` (browser stub), `page` |
-| `src/server.ts` | HTTP + WebSocket server, TSX transpilation (dev), static serving (prod), delta broadcasting |
-| `src/build.ts` | Build script — bundles App.tsx + React, compiles binary, AppImage packaging |
-| `src/msg.ts` | Shared `msg()` constructor — used by mod.ts (server) and browser.ts (client) |
-| `src/feature.ts` | Feature system — `feature()`, `composeFeatures()`, `testFeature()` |
-| `src/flow.ts` | Generator runtime — `cancelOn()`, `GenCtx`, flow runner, cancellation |
-| `src/factory.ts` | `actions()` / `effects()` catalog factory — classic mode, generates PascalCase labels + camelCase creators |
-| `src/time-travel.ts` | Time-travel debugger — pure functions for undo/redo/goto, active in dev mode |
-| `src/dispatch.ts` | Shared dispatch loop — re-entrant queue with overflow guard, used by both aio.ts and standalone.ts |
-| `src/deep-merge.ts` | Deep merge utility — restores persisted state while preserving schema structure |
-| `src/skv.ts` | Thin Deno.Kv wrapper — `set`/`get`/`del`/`close` with string keys |
-| `src/standalone.ts` | Standalone runtime — full client-side dispatch loop for Android WebView (replaces browser.ts) |
-| `src/schedule.ts` | Scheduled effects — `schedule.after/every/at/cron/cancel`, cron parser, schedule manager |
-| `src/am.ts` | `am` — app manager CLI. Process lifecycle, state inspection, dispatch, time-travel, log tailing |
-| `src/electron.ts` | Electron launcher + aio-client connect page. Window state persistence, AioMeta extraction |
-| `android-template/` | Kotlin/Gradle template for Android APK builds (placeholder tokens replaced at build time) |
+| File                 | Purpose                                                                                                    |
+| -------------------- | ---------------------------------------------------------------------------------------------------------- |
+| `mod.ts`             | Public API — all `'aio'` imports resolve here (Deno-side), type declarations for browser-only functions    |
+| `src/aio.ts`         | Core runtime — `aio.run()`, dispatch loop, CLI parser, KV path resolution, startup linter                  |
+| `src/browser.ts`     | Browser-side module — `useFeature`, `useAio`, `useLocal`, `feature` (browser stub), `page`                 |
+| `src/server.ts`      | HTTP + WebSocket server, TSX transpilation (dev), static serving (prod), delta broadcasting                |
+| `src/build.ts`       | Build script — bundles App.tsx + React, compiles binary, AppImage packaging                                |
+| `src/msg.ts`         | Shared `msg()` constructor — used by mod.ts (server) and browser.ts (client)                               |
+| `src/feature.ts`     | Feature system — `feature()`, `composeFeatures()`, `testFeature()`                                         |
+| `src/flow.ts`        | Generator runtime — `cancelOn()`, `GenCtx`, flow runner, cancellation                                      |
+| `src/factory.ts`     | `actions()` / `effects()` catalog factory — classic mode, generates PascalCase labels + camelCase creators |
+| `src/time-travel.ts` | Time-travel debugger — pure functions for undo/redo/goto, active in dev mode                               |
+| `src/dispatch.ts`    | Shared dispatch loop — re-entrant queue with overflow guard, used by both aio.ts and standalone.ts         |
+| `src/deep-merge.ts`  | Deep merge utility — restores persisted state while preserving schema structure                            |
+| `src/skv.ts`         | Thin Deno.Kv wrapper — `set`/`get`/`del`/`close` with string keys                                          |
+| `src/standalone.ts`  | Standalone runtime — full client-side dispatch loop for Android WebView (replaces browser.ts)              |
+| `src/schedule.ts`    | Scheduled effects — `schedule.after/every/at/cron/cancel`, cron parser, schedule manager                   |
+| `src/am.ts`          | `am` — app manager CLI. Process lifecycle, state inspection, dispatch, time-travel, log tailing            |
+| `src/electron.ts`    | Electron launcher + aio-client connect page. Window state persistence, AioMeta extraction                  |
+| `android-template/`  | Kotlin/Gradle template for Android APK builds (placeholder tokens replaced at build time)                  |
 
 ### App (`src/`) — v0.5 feature-first
 
-| File | Purpose |
-|------|---------|
-| `src/app.ts` | Entry point — `aio.run({ features: [...] })`, nothing else |
-| `src/App.tsx` | Root UI — layout + routing, uses `useFeature()` or `useAio()` |
-| `src/features/<name>/index.ts` | Feature definition — `feature()` call with state, actions, machine, reduce, execute |
-| `src/features/<name>/types.ts` | (optional) Domain types extracted from feature |
-| `src/features/<name>/helpers.ts` | (optional) Pure functions extracted from feature |
-| `src/features/<name>/ui/*.tsx` | (optional) Feature-specific UI components |
-| `src/shared/types/` | (optional) Types shared across 2+ features |
-| `src/shared/ui/` | (optional) Pure reusable UI components |
-| `src/style.css` | (optional) Auto-injected into HTML if present |
-| `src/icon.png` | (optional) App icon used in AppImage builds |
-
+| File                             | Purpose                                                                             |
+| -------------------------------- | ----------------------------------------------------------------------------------- |
+| `src/app.ts`                     | Entry point — `aio.run({ features: [...] })`, nothing else                          |
+| `src/App.tsx`                    | Root UI — layout + routing, uses `useFeature()` or `useAio()`                       |
+| `src/features/<name>/index.ts`   | Feature definition — `feature()` call with state, actions, machine, reduce, execute |
+| `src/features/<name>/types.ts`   | (optional) Domain types extracted from feature                                      |
+| `src/features/<name>/helpers.ts` | (optional) Pure functions extracted from feature                                    |
+| `src/features/<name>/ui/*.tsx`   | (optional) Feature-specific UI components                                           |
+| `src/shared/types/`              | (optional) Types shared across 2+ features                                          |
+| `src/shared/ui/`                 | (optional) Pure reusable UI components                                              |
+| `src/style.css`                  | (optional) Auto-injected into HTML if present                                       |
+| `src/icon.png`                   | (optional) App icon used in AppImage builds                                         |

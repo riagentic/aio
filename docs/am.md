@@ -1,12 +1,14 @@
 # am — App Manager
 
-Manage your aio app without `ps`, `kill`, or `curl`. Works for humans and AI agents alike.
+Manage your aio app without `ps`, `kill`, or `curl`. Works for humans and AI
+agents alike.
 
 ```sh
 deno task am <command> [args] [--flags]
 ```
 
-Output auto-detects: terminal → pretty text, piped → JSON. Override with `--json` or `--quiet`.
+Output auto-detects: terminal → pretty text, piped → JSON. Override with
+`--json` or `--quiet`.
 
 ## App Identity
 
@@ -19,21 +21,26 @@ await aio.run({
 })
 ```
 
-This is the single source of truth for app identity — used for lock files, UDS sockets, KV/SQLite paths, and `am` commands. The value is slugified (lowercase alphanumeric + hyphens).
+This is the single source of truth for app identity — used for lock files, UDS
+sockets, KV/SQLite paths, and `am` commands. The value is slugified (lowercase
+alphanumeric + hyphens).
 
-**`appId` is mandatory.** The app will not start without it. It must be in `aio.run()`, not `deno.json` — compiled builds don't have access to `deno.json` at runtime.
+**`appId` is mandatory.** The app will not start without it. It must be in
+`aio.run()`, not `deno.json` — compiled builds don't have access to `deno.json`
+at runtime.
 
-For `am` commands, use `--app=X` to specify which app to manage, or add `appId` to `deno.json` as a dev convenience (the linter will warn but `am` can read it).
+For `am` commands, use `--app=X` to specify which app to manage, or add `appId`
+to `deno.json` as a dev convenience (the linter will warn but `am` can read it).
 
 ## Global flags
 
-| Flag | Effect |
-|------|--------|
-| `--app=X` | Override appId (default: from `deno.json` in dev) |
-| `--port=N` | Override port (default: from lock file) |
+| Flag         | Effect                                                                               |
+| ------------ | ------------------------------------------------------------------------------------ |
+| `--app=X`    | Override appId (default: from `deno.json` in dev)                                    |
+| `--port=N`   | Override port (default: from lock file)                                              |
 | `--wait[=N]` | start/stop: block until complete (default 10s/5s). state: poll every Ns (default 2s) |
-| `--json` | Force JSON output |
-| `--quiet` | Suppress output (exit code only) |
+| `--json`     | Force JSON output                                                                    |
+| `--quiet`    | Suppress output (exit code only)                                                     |
 
 ## Commands
 
@@ -53,13 +60,14 @@ Exit codes: `started` → 0, `stopped` → 1, `starting`/`stopping` → 2.
 
 **Singleton behavior** — controlled by `singleton` in `aio.run()`:
 
-| Value | Behavior |
-|-------|----------|
+| Value            | Behavior                              |
+| ---------------- | ------------------------------------- |
 | `true` (default) | Refuse if another instance is running |
-| `'takeover'` | Kill existing instance, start new one |
-| `false` | Allow multiple instances |
+| `'takeover'`     | Kill existing instance, start new one |
+| `false`          | Allow multiple instances              |
 
-Lock files are stored in `/tmp/aio/` (or `$XDG_RUNTIME_DIR/aio/`) as `{appId}.lock`. Stale locks (dead PID) are auto-cleaned.
+Lock files are stored in `/tmp/aio/` (or `$XDG_RUNTIME_DIR/aio/`) as
+`{appId}.lock`. Stale locks (dead PID) are auto-cleaned.
 
 ### Instance discovery
 
@@ -84,7 +92,8 @@ deno task am state counter --wait=5         # poll every 5s
 deno task am state counter --wait           # poll every 2s (default)
 ```
 
-Path syntax: `fleet[0].stats.pnl` for traversal, `{id,name}` for field picking, `[*]` for wildcard over arrays.
+Path syntax: `fleet[0].stats.pnl` for traversal, `{id,name}` for field picking,
+`[*]` for wildcard over arrays.
 
 ```sh
 deno task am ui                             # UI state (stateForUI filtered)
@@ -110,11 +119,14 @@ deno task am actions                       # last 20 actions from history
 deno task am actions 50                    # last 50 actions
 ```
 
-Positional args (without `=`) are wrapped as `{ args: [...] }` — use for methods. Named `key=value` pairs produce `{ key: value }` — use for actions. Values are auto-parsed: numbers, booleans, `null`, JSON arrays/objects, strings.
+Positional args (without `=`) are wrapped as `{ args: [...] }` — use for
+methods. Named `key=value` pairs produce `{ key: value }` — use for actions.
+Values are auto-parsed: numbers, booleans, `null`, JSON arrays/objects, strings.
 
 ### Time-travel (dev mode)
 
-In browser: press **Ctrl+.** to toggle the time-travel panel. Shows action history with timestamps and performance metrics.
+In browser: press **Ctrl+.** to toggle the time-travel panel. Shows action
+history with timestamps and performance metrics.
 
 ### Persistence & snapshots
 
@@ -144,26 +156,32 @@ deno task am config               # server config (port, title, auth mode, prod)
 
 `am clients` returns each client with:
 
-| Field | Values |
-|-------|--------|
-| `index` | Sequential ID (0, 1, 2...) |
-| `type` | `electron`, `browser`, `electron-reload`, `browser-reload` |
+| Field       | Values                                                        |
+| ----------- | ------------------------------------------------------------- |
+| `index`     | Sequential ID (0, 1, 2...)                                    |
+| `type`      | `electron`, `browser`, `electron-reload`, `browser-reload`    |
 | `transport` | `ws` (WebSocket) or `uds` (Unix Domain Socket / Electron IPC) |
 
 ### Client inspection (dev mode)
 
-Inspect the React component tree on a connected client — like React DevTools, but from the CLI.
+Inspect the React component tree on a connected client — like React DevTools,
+but from the CLI.
 
 ```sh
 deno task am client 0              # React component tree (names, useState, props)
 ```
 
 Returns:
+
 ```json
 [
   { "component": "App", "state": { "page": "dashboard" } },
   { "component": "Nav", "props": { "title": "My App" } },
-  { "component": "Counter", "state": [5, false], "props": { "label": "clicks" } }
+  {
+    "component": "Counter",
+    "state": [5, false],
+    "props": { "label": "clicks" }
+  }
 ]
 ```
 
@@ -179,16 +197,19 @@ deno task am click 0 Card title:Settings      # click Card where title="Settings
 ```
 
 Returns:
+
 ```json
 { "ok": true, "clicked": "Nav → <button>" }
 ```
 
 **How it works:**
+
 1. Finds the component in the React fiber tree by name + index or prop match
 2. Resolves the nearest DOM node (walks down to first `<div>`, `<button>`, etc.)
 3. Dispatches a real `click` event on that element
 
-Use `am client <index>` first to see available components and their props, then `am click` to interact.
+Use `am client <index>` first to see available components and their props, then
+`am click` to interact.
 
 ### Logs
 
@@ -223,23 +244,24 @@ deno task am help                 # full command list
 
 ## Trojan — Control API
 
-aio exposes a REST API at `/__aio/trojan/*` for inspection and control. Available in dev and prod.
+aio exposes a REST API at `/__aio/trojan/*` for inspection and control.
+Available in dev and prod.
 
 ### Inspect (GET)
 
-| Endpoint | Returns |
-|----------|---------|
-| `/__aio/trojan/state` | Raw full state (unfiltered) |
-| `/__aio/trojan/ui` | UI state (stateForUI filtered) |
-| `/__aio/trojan/ui?user=alice` | UI state for specific user |
-| `/__aio/trojan/clients` | Connected clients (type, transport, index) |
-| `/__aio/trojan/client/<n>` | React component tree from client n (dev mode) |
-| `/__aio/trojan/click/<n>/<target>` | Click component on client n (dev mode) |
-| `/__aio/trojan/history` | Time-travel entries |
-| `/__aio/trojan/schedules` | Active timer/cron IDs |
-| `/__aio/trojan/metrics` | Uptime, connections, schedule count |
-| `/__aio/trojan/config` | Port, title, expose, authMode, prod |
-| `/__aio/trojan/health` | Feature health: status, enabled, errors per feature |
+| Endpoint                           | Returns                                             |
+| ---------------------------------- | --------------------------------------------------- |
+| `/__aio/trojan/state`              | Raw full state (unfiltered)                         |
+| `/__aio/trojan/ui`                 | UI state (stateForUI filtered)                      |
+| `/__aio/trojan/ui?user=alice`      | UI state for specific user                          |
+| `/__aio/trojan/clients`            | Connected clients (type, transport, index)          |
+| `/__aio/trojan/client/<n>`         | React component tree from client n (dev mode)       |
+| `/__aio/trojan/click/<n>/<target>` | Click component on client n (dev mode)              |
+| `/__aio/trojan/history`            | Time-travel entries                                 |
+| `/__aio/trojan/schedules`          | Active timer/cron IDs                               |
+| `/__aio/trojan/metrics`            | Uptime, connections, schedule count                 |
+| `/__aio/trojan/config`             | Port, title, expose, authMode, prod                 |
+| `/__aio/trojan/health`             | Feature health: status, enabled, errors per feature |
 
 ### Control (POST)
 
@@ -261,7 +283,9 @@ curl -X POST localhost:8000/__aio/trojan/sql -H 'X-AIO: 1' \
   -d '{"query":"SELECT * FROM users LIMIT 10"}'
 ```
 
-All POST endpoints require the `X-AIO: 1` header (CSRF protection). All endpoints return JSON. Auth is inherited — tokens required when `--expose` is active.
+All POST endpoints require the `X-AIO: 1` header (CSRF protection). All
+endpoints return JSON. Auth is inherited — tokens required when `--expose` is
+active.
 
 ## For AI agents
 

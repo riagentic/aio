@@ -1,20 +1,21 @@
 // Electron launcher — tries packaged binary first, falls back to dev mode
 
-type Log = { info: (msg: string) => void; error: (msg: string) => void }
+type Log = { info: (msg: string) => void; error: (msg: string) => void };
 
 /** Window metadata extracted from config or HTML meta tags */
-export type AioMeta = { title?: string; width?: number; height?: number }
+export type AioMeta = { title?: string; width?: number; height?: number };
 
 /** Slugifies a title for use as Electron app name (stable userData path) */
 function toSlug(s: string): string {
-  return s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'aio-app'
+  return s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") ||
+    "aio-app";
 }
 
 /** Generates a minimal Electron main.cjs that loads the given URL */
 export function electronMainScript(url: string, meta?: AioMeta): string {
-  const w = meta?.width ?? 800
-  const h = meta?.height ?? 600
-  const slug = toSlug(meta?.title ?? 'aio-app')
+  const w = meta?.width ?? 800;
+  const h = meta?.height ?? 600;
+  const slug = toSlug(meta?.title ?? "aio-app");
   return `
 const { app, BrowserWindow, Menu } = require('electron');
 const path = require('path');
@@ -71,7 +72,7 @@ app.on('ready', () => {
   });
 });
 app.on('window-all-closed', () => process.exit(0));
-`.trim()
+`.trim();
 }
 
 /** Generates a self-contained Electron main.cjs with a connect page for aio-client */
@@ -304,7 +305,7 @@ app.on('ready', () => {
 });
 
 app.on('window-all-closed', () => process.exit(0));
-`.trim()
+`.trim();
 }
 
 /** Generates an Electron main.cjs that connects to backend via Unix domain socket + IPC bridge.
@@ -312,13 +313,16 @@ app.on('window-all-closed', () => process.exit(0));
  *  Prod mode: page served from disk via aio:// protocol (zero TCP ports), state via UDS+IPC
  *  Auto-detects: if baseDir has app.js → prod (aio://), otherwise → dev (HTTP) */
 export function electronMainScriptUDS(url: string, socketPath: string, opts: {
-  baseDir?: string; title?: string; hasCSS?: boolean; meta?: AioMeta
+  baseDir?: string;
+  title?: string;
+  hasCSS?: boolean;
+  meta?: AioMeta;
 }): string {
-  const w = opts.meta?.width ?? 800
-  const h = opts.meta?.height ?? 600
-  const slug = toSlug(opts.meta?.title ?? opts.title ?? 'aio-app')
-  const title = opts.title ?? 'aio'
-  const hasCSS = opts.hasCSS ?? false
+  const w = opts.meta?.width ?? 800;
+  const h = opts.meta?.height ?? 600;
+  const slug = toSlug(opts.meta?.title ?? opts.title ?? "aio-app");
+  const title = opts.title ?? "aio";
+  const hasCSS = opts.hasCSS ?? false;
   return `
 const { app, BrowserWindow, Menu, ipcMain, protocol } = require('electron');
 const { connect } = require('net');
@@ -328,7 +332,7 @@ Menu.setApplicationMenu(null);
 app.name = ${JSON.stringify(slug)};
 
 // ── Auto-detect: serve from disk (prod) or HTTP (dev) ──
-const BASE_DIR = ${JSON.stringify(opts.baseDir ?? '')};
+const BASE_DIR = ${JSON.stringify(opts.baseDir ?? "")};
 const USE_PROTOCOL = BASE_DIR && fs.existsSync(path.join(BASE_DIR, 'app.js'));
 
 const MIME = {
@@ -343,7 +347,9 @@ const PROD_HTML = \`<!DOCTYPE html>
 <head>
   <meta charset="UTF-8">
   <meta name="referrer" content="no-referrer">
-  <title>${title.replace(/[&<>"']/g, '')}</title>${hasCSS ? '\\n  <link rel="stylesheet" href="/style.css">' : ''}
+  <title>${title.replace(/[&<>"']/g, "")}</title>${
+    hasCSS ? '\\n  <link rel="stylesheet" href="/style.css">' : ""
+  }
 </head>
 <body>
   <div id="root"></div>
@@ -523,76 +529,113 @@ app.on('window-all-closed', () => {
   try { fs.unlinkSync(preloadFile); } catch {}
   process.exit(0);
 });
-`.trim()
+`.trim();
 }
 
 // OS-aware packaged Electron binary path
 function distBinPath(): string {
   switch (Deno.build.os) {
-    case 'darwin': return 'dist/mac/aio-ui-electron.app/Contents/MacOS/aio-ui-electron'
-    case 'windows': return 'dist/win-unpacked/aio-ui-electron.exe'
-    default: return 'dist/linux-unpacked/aio-ui-electron'
+    case "darwin":
+      return "dist/mac/aio-ui-electron.app/Contents/MacOS/aio-ui-electron";
+    case "windows":
+      return "dist/win-unpacked/aio-ui-electron.exe";
+    default:
+      return "dist/linux-unpacked/aio-ui-electron";
   }
 }
 
 /** Resolves an Electron binary — $ELECTRON_PATH > packaged dist > node_modules dev */
 export async function findElectronBin(log: Log): Promise<string | null> {
   // 1. ELECTRON_PATH env var (AppImage / custom deployment)
-  const envPath = Deno.env.get('ELECTRON_PATH')
+  const envPath = Deno.env.get("ELECTRON_PATH");
   if (envPath) {
-    try { await Deno.stat(envPath); return envPath }
-    catch { log.error(`$ELECTRON_PATH set but not found: ${envPath}`) }
+    try {
+      await Deno.stat(envPath);
+      return envPath;
+    } catch {
+      log.error(`$ELECTRON_PATH set but not found: ${envPath}`);
+    }
   }
 
   // 2. Packaged binary (electron-builder output)
-  const distBin = distBinPath()
-  try { await Deno.stat(distBin); return distBin }
-  catch { /* no packaged binary */ }
+  const distBin = distBinPath();
+  try {
+    await Deno.stat(distBin);
+    return distBin;
+  } catch { /* no packaged binary */ }
 
   // 3. node_modules dev binary
-  const electronBin = Deno.build.os === 'windows'
-    ? 'node_modules\\.bin\\electron.cmd'
-    : 'node_modules/.bin/electron'
-  try { await Deno.stat(electronBin); return electronBin }
-  catch { log.error('Electron not found — run: deno task install:electron') }
+  const electronBin = Deno.build.os === "windows"
+    ? "node_modules\\.bin\\electron.cmd"
+    : "node_modules/.bin/electron";
+  try {
+    await Deno.stat(electronBin);
+    return electronBin;
+  } catch {
+    log.error("Electron not found — run: deno task install:electron");
+  }
 
-  return null
+  return null;
 }
 
 /** Writes script to temp file, spawns Electron, cleans up after exit or process unload */
-async function spawnElectron(bin: string, script: string, extraArgs: string[] = []): Promise<Deno.ChildProcess> {
-  const tmpFile = await Deno.makeTempFile({ suffix: '.cjs' })
-  await Deno.writeTextFile(tmpFile, script)
-  const proc = new Deno.Command(bin, { args: [tmpFile, ...extraArgs] }).spawn()
-  const cleanup = () => Deno.remove(tmpFile).catch(() => {})
+async function spawnElectron(
+  bin: string,
+  script: string,
+  extraArgs: string[] = [],
+): Promise<Deno.ChildProcess> {
+  const tmpFile = await Deno.makeTempFile({ suffix: ".cjs" });
+  await Deno.writeTextFile(tmpFile, script);
+  const proc = new Deno.Command(bin, { args: [tmpFile, ...extraArgs] }).spawn();
+  const cleanup = () => Deno.remove(tmpFile).catch(() => {});
   // Primary cleanup: after Electron exits normally
-  proc.status.then(cleanup)
+  proc.status.then(cleanup);
   // Backup cleanup: covers SIGKILL / host process crash where proc.status never resolves
-  addEventListener('unload', cleanup)
-  proc.status.then(() => removeEventListener('unload', cleanup))
-  return proc
+  addEventListener("unload", cleanup);
+  proc.status.then(() => removeEventListener("unload", cleanup));
+  return proc;
 }
 
 /** Spawns Electron with the main app script */
-export async function launchElectron(url: string, log: Log, meta?: AioMeta, uds?: {
-  socketPath: string; baseDir?: string; title?: string; hasCSS?: boolean
-}): Promise<Deno.ChildProcess | null> {
-  const bin = await findElectronBin(log)
-  if (!bin) return null
-  const mode = bin.includes('node_modules') ? 'dev' : bin.includes('dist') ? 'packaged' : '$ELECTRON_PATH'
-  const transport = uds ? 'UDS' : 'WS'
-  log.info(`launching Electron (${mode}, ${transport})`)
+export async function launchElectron(
+  url: string,
+  log: Log,
+  meta?: AioMeta,
+  uds?: {
+    socketPath: string;
+    baseDir?: string;
+    title?: string;
+    hasCSS?: boolean;
+  },
+): Promise<Deno.ChildProcess | null> {
+  const bin = await findElectronBin(log);
+  if (!bin) return null;
+  const mode = bin.includes("node_modules")
+    ? "dev"
+    : bin.includes("dist")
+    ? "packaged"
+    : "$ELECTRON_PATH";
+  const transport = uds ? "UDS" : "WS";
+  log.info(`launching Electron (${mode}, ${transport})`);
   const script = uds
-    ? electronMainScriptUDS(url, uds.socketPath, { baseDir: uds.baseDir, title: uds.title, hasCSS: uds.hasCSS, meta })
-    : electronMainScript(url, meta)
-  return spawnElectron(bin, script)
+    ? electronMainScriptUDS(url, uds.socketPath, {
+      baseDir: uds.baseDir,
+      title: uds.title,
+      hasCSS: uds.hasCSS,
+      meta,
+    })
+    : electronMainScript(url, meta);
+  return spawnElectron(bin, script);
 }
 
 /** Launches Electron with the client connect-page script (no server needed) */
-export async function launchElectronClient(log: Log, url?: string): Promise<Deno.ChildProcess | null> {
-  const bin = await findElectronBin(log)
-  if (!bin) return null
-  const args = url ? [`--server-url=${url}`] : []
-  log.info(`launching aio client${url ? ` → ${url}` : ''}`)
-  return spawnElectron(bin, electronClientScript(), args)
+export async function launchElectronClient(
+  log: Log,
+  url?: string,
+): Promise<Deno.ChildProcess | null> {
+  const bin = await findElectronBin(log);
+  if (!bin) return null;
+  const args = url ? [`--server-url=${url}`] : [];
+  log.info(`launching aio client${url ? ` → ${url}` : ""}`);
+  return spawnElectron(bin, electronClientScript(), args);
 }

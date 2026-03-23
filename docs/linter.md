@@ -1,12 +1,13 @@
 # aiol — AIO Project Linter
 
-Static analysis tool for aio projects. Scans your source files and reports errors, warnings, and optimization hints — no runtime needed.
+Static analysis tool for aio projects. Scans your source files and reports
+errors, warnings, and optimization hints — no runtime needed.
 
 ## Usage
 
 ```sh
 # From your project root
-deno run -A jsr:@riagentic/aio@1.0.0-alpha2/aiol/mod.ts
+deno run -A jsr:@riagentic/aio@1.0.0-alpha3/aiol/mod.ts
 
 # Or point at a specific directory
 deno run -A aiol/mod.ts /path/to/my-app
@@ -17,7 +18,7 @@ deno run -A aiol/mod.ts --json
 # Add as a task in deno.json
 {
   "tasks": {
-    "lint:aio": "deno run -A jsr:@riagentic/aio@1.0.0-alpha2/aiol/mod.ts"
+    "lint:aio": "deno run -A jsr:@riagentic/aio@1.0.0-alpha3/aiol/mod.ts"
   }
 }
 ```
@@ -31,39 +32,42 @@ Exit code 1 if errors found, 0 otherwise. Useful in CI gates.
 deno run -A aiol/mod.ts --safe-fix
 ```
 
-Safe fixes are guaranteed harmless — they add missing config or remove dead code. They never change app behavior, never delete data, never modify logic. Issues that can be auto-fixed are marked `[fixable]` in the output.
+Safe fixes are guaranteed harmless — they add missing config or remove dead
+code. They never change app behavior, never delete data, never modify logic.
+Issues that can be auto-fixed are marked `[fixable]` in the output.
 
 ### What `--safe-fix` can fix
 
 **deno.json config additions:**
 
-| Fix | What it adds |
-|-----|-------------|
-| Remove `appId` from deno.json | appId belongs in aio.run(), not deno.json |
-| Add `appId` to aio.run() | Derives from deno.json appId or directory name |
-| Add `unstable: ["kv"]` | Required for state persistence |
-| Add `nodeModulesDir: "auto"` | npm package resolution |
-| Add `@types/react` import | JSX type checking |
-| Add `esbuild` import | Dev mode transpilation |
-| Add `compilerOptions` (jsx config) | React JSX transform settings |
-| Add `dev` task | `deno run -A src/app.ts` |
-| Add `test` task | `deno test -A --unstable-kv tests/` |
+| Fix                                | What it adds                                   |
+| ---------------------------------- | ---------------------------------------------- |
+| Remove `appId` from deno.json      | appId belongs in aio.run(), not deno.json      |
+| Add `appId` to aio.run()           | Derives from deno.json appId or directory name |
+| Add `unstable: ["kv"]`             | Required for state persistence                 |
+| Add `nodeModulesDir: "auto"`       | npm package resolution                         |
+| Add `@types/react` import          | JSX type checking                              |
+| Add `esbuild` import               | Dev mode transpilation                         |
+| Add `compilerOptions` (jsx config) | React JSX transform settings                   |
+| Add `dev` task                     | `deno run -A src/app.ts`                       |
+| Add `test` task                    | `deno test -A --unstable-kv tests/`            |
 
 **Source file cleanup:**
 
-| Fix | What it does |
-|-----|-------------|
+| Fix                   | What it does                                                                 |
+| --------------------- | ---------------------------------------------------------------------------- |
 | Remove `import React` | Unnecessary with `jsx: "react-jsx"` — the transform injects it automatically |
 
-Run `--safe-fix`, then re-run without it to see remaining issues that need manual attention.
+Run `--safe-fix`, then re-run without it to see remaining issues that need
+manual attention.
 
 ## Severity Levels
 
-| Level | Icon | Meaning |
-|-------|------|---------|
-| **error** | `✗` | Will break at runtime — must fix |
-| **warn** | `⚠` | Likely bug or performance issue — should fix |
-| **hint** | `·` | Sub-optimal but works — consider fixing |
+| Level     | Icon | Meaning                                      |
+| --------- | ---- | -------------------------------------------- |
+| **error** | `✗`  | Will break at runtime — must fix             |
+| **warn**  | `⚠`  | Likely bug or performance issue — should fix |
+| **hint**  | `·`  | Sub-optimal but works — consider fixing      |
 
 ## What It Checks
 
@@ -93,14 +97,16 @@ Static analysis of `feature()` calls:
 
 - Duplicate feature names across files
 - Empty state objects
-- Reserved state keys (`$p`, `$d`, `_status`, `__proto__`) — these collide with aio internals
+- Reserved state keys (`$p`, `$d`, `_status`, `__proto__`) — these collide with
+  aio internals
 - Mixing methods and actions styles in one feature
 - Feature with no methods and no actions (can't change state)
 - Non-standard naming (convention: lowercase with hyphens)
 
 ### 4. Performance
 
-- `useAio()` in non-root components (use `useFeature()` for selective re-renders)
+- `useAio()` in non-root components (use `useFeature()` for selective
+  re-renders)
 - Sync I/O (`Deno.readTextFileSync`, etc.) blocking the event loop
 - `setTimeout`/`setInterval` in feature code (use `schedule.after`/`every`)
 - Large collections in state that should be in SQLite
@@ -213,7 +219,8 @@ Add to your GitHub Actions workflow:
   run: deno run -A aiol/mod.ts
 ```
 
-The linter exits with code 1 on errors, so the build fails if there are breaking issues. Warnings and hints don't fail the build.
+The linter exits with code 1 on errors, so the build fails if there are breaking
+issues. Warnings and hints don't fail the build.
 
 ---
 

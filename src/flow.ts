@@ -6,254 +6,361 @@
 // GenCtx   — context passed to generator (call, mutate, done, fail, dispatch, all, race, sleep)
 // runFlow() — internal: advances generator, dispatches actions, mutates state
 
-import { produce } from 'immer'
-import { callWithOpts } from './feature-impl.ts'
-import type { Msg } from './feature-types.ts'
+import { produce } from "immer";
+import { callWithOpts } from "./feature-impl.ts";
+import type { Msg } from "./feature-types.ts";
+import type { FlowStepRecord } from "./error.ts";
+import { log } from "./logger.ts";
+
+// ── FlowHistory — ring buffer for step tracking ─────────────────────
+
+export class FlowHistory {
+  private _entries: FlowStepRecord[] = [];
+  private _cap: number;
+
+  constructor(cap = 50) {
+    this._cap = cap;
+  }
+
+  push(action: string): number {
+    const step = this._entries.length > 0
+      ? this._entries[this._entries.length - 1]!.step + 1
+      : 0;
+    this._entries.push({ step, action, status: "pending" });
+    if (this._entries.length > this._cap) this._entries.shift();
+    return step;
+  }
+
+  markOk(stepNum: number): void {
+    const e = this._entries.find((e) => e.step === stepNum);
+    if (e) e.status = "ok";
+  }
+
+  markError(stepNum: number): void {
+    const e = this._entries.find((e) => e.step === stepNum);
+    if (e) e.status = "error";
+  }
+
+  entries(): FlowStepRecord[] {
+    return [...this._entries];
+  }
+}
 
 // ── Types ────────────────────────────────────────────────────────────
 
 type FlowApp = {
-  dispatch: (action: Msg) => void
-  getState: () => Record<string, unknown>
-}
+  dispatch: (action: Msg) => void;
+  getState: () => Record<string, unknown>;
+};
 
 /** Yielded descriptor — internal protocol between generator and runner */
 export type FlowStep =
-  | { kind: 'call'; name: string; fn: () => unknown | Promise<unknown>; opts?: { timeout?: number; retries?: number } }
-  | { kind: 'step'; name: string; mutate: (draft: Record<string, unknown>) => void }
-  | { kind: 'done'; mutate?: (draft: Record<string, unknown>) => void }
-  | { kind: 'fail'; reason: string }
-  | { kind: 'dispatch'; action: { type: string; payload?: unknown } }
-  | { kind: 'all'; entries: FlowStep[] }
-  | { kind: 'race'; entries: Record<string, FlowStep> }
-  | { kind: 'sleep'; name: string; ms: number }
-  | { kind: 'waitFor'; actionType: string; timeout?: number }
+  | {
+    kind: "call";
+    name: string;
+    fn: () => unknown | Promise<unknown>;
+    opts?: { timeout?: number; retries?: number };
+  }
+  | {
+    kind: "step";
+    name: string;
+    mutate: (draft: Record<string, unknown>) => void;
+  }
+  | { kind: "done"; mutate?: (draft: Record<string, unknown>) => void }
+  | { kind: "fail"; reason: string }
+  | { kind: "dispatch"; action: { type: string; payload?: unknown } }
+  | { kind: "all"; entries: FlowStep[] }
+  | { kind: "race"; entries: Record<string, FlowStep> }
+  | { kind: "sleep"; name: string; ms: number }
+  | { kind: "waitFor"; actionType: string; timeout?: number };
 
 /** Generator return type for flows */
-export type Gen<T = void> = Generator<FlowStep, T, unknown>
+export type Gen<T = void> = Generator<FlowStep, T, unknown>;
 
 /** Action creator with attached .type — as returned by feature.actionKey.
  *  Pass to waitFor() for typed payload inference: `yield* ctx.waitFor(gateway.running)` */
 export type TypedCreator<P = unknown> = {
-  readonly type: string
-  (...args: unknown[]): { type: string; payload: P }
-}
+  readonly type: string;
+  (...args: unknown[]): { type: string; payload: P };
+};
 
 /** Context object passed to flow generators.
  *  S is the feature's state shape — inferred from the `state:` config. */
 export type GenCtx<S = Record<string, unknown>> = {
   /** Async call — dispatches action, executes fn, returns result.
    *  Optional opts for timeout (ms) and retries (count). */
-  call: <T>(name: string, fn: () => T | Promise<T>, opts?: { timeout?: number; retries?: number }) => Gen<Awaited<T>>
+  call: <T>(
+    name: string,
+    fn: () => T | Promise<T>,
+    opts?: { timeout?: number; retries?: number },
+  ) => Gen<Awaited<T>>;
   /** State mutation — dispatches action, applies Immer draft update */
-  mutate: (name: string, mutate: (draft: S) => void) => Gen<void>
+  mutate: (name: string, mutate: (draft: S) => void) => Gen<void>;
   /** Terminal success — dispatches done action, optional final state update */
-  done: (mutate?: (draft: S) => void) => Gen<void>
+  done: (mutate?: (draft: S) => void) => Gen<void>;
   /** Terminal failure — dispatches fail action with reason */
-  fail: (reason: string) => Gen<never>
+  fail: (reason: string) => Gen<never>;
   /** Dispatch an action to any feature */
-  dispatch: (action: { type: string; payload?: unknown }) => Gen<void>
+  dispatch: (action: { type: string; payload?: unknown }) => Gen<void>;
   /** Shorthand dispatch — pass a bound method (with .type) or plain type string.
    *  @example yield* ctx.send(analytics.log, { msg: 'done' }) */
-  send: (creatorOrType: { type: string } | string, payload?: unknown) => Gen<void>
+  send: (
+    creatorOrType: { type: string } | string,
+    payload?: unknown,
+  ) => Gen<void>;
   /** Run multiple calls in parallel, wait for all.
    *  Spread form: const [a, b] = yield* ctx.all(gen1, gen2)
    *  Named form:  const { a, b } = yield* ctx.all({ a: gen1, b: gen2 }) */
   all: {
-    <T extends readonly Gen<unknown>[]>(...gens: T): Gen<{ [K in keyof T]: T[K] extends Gen<infer R> ? R : never }>
-    <T extends Record<string, Gen<unknown>>>(entries: T): Gen<{ [K in keyof T]: T[K] extends Gen<infer R> ? R : never }>
-  }
+    <T extends readonly Gen<unknown>[]>(
+      ...gens: T
+    ): Gen<{ [K in keyof T]: T[K] extends Gen<infer R> ? R : never }>;
+    <T extends Record<string, Gen<unknown>>>(
+      entries: T,
+    ): Gen<{ [K in keyof T]: T[K] extends Gen<infer R> ? R : never }>;
+  };
   /** Race multiple calls — first to complete wins, rest are conceptually cancelled */
-  race: <T extends Record<string, Gen<unknown>>>(entries: T) => Gen<{ [K in keyof T]?: T[K] extends Gen<infer R> ? R : never }>
+  race: <T extends Record<string, Gen<unknown>>>(
+    entries: T,
+  ) => Gen<{ [K in keyof T]?: T[K] extends Gen<infer R> ? R : never }>;
   /** Sleep for N ms — dispatches a named action for visibility */
-  sleep: (name: string, ms: number) => Gen<void>
+  sleep: (name: string, ms: number) => Gen<void>;
   /** Wait for an action to be dispatched — pauses flow until matching action arrives.
    *  Pass a bound method (.type) or action creator for typed payload inference.
    *  @example yield* ctx.waitFor(gateway.running)       // bound method — untyped payload
    *  @example yield* ctx.waitFor(gateway.running)     // bound method — typed payload */
   waitFor: {
-    <P>(creator: TypedCreator<P>, timeout?: number): Gen<{ type: string; payload: P }>
-    (creatorOrType: { type: string } | string, timeout?: number): Gen<Msg>
-  }
+    <P>(
+      creator: TypedCreator<P>,
+      timeout?: number,
+    ): Gen<{ type: string; payload: P }>;
+    (creatorOrType: { type: string } | string, timeout?: number): Gen<Msg>;
+  };
   /** Read current feature state (fresh after each step) */
-  getState: () => S
-}
+  getState: () => S;
+};
 
 /** Flow options — kept for internal use */
 type FlowOptions = {
-  cancelOn?: string[]
-}
+  cancelOn?: string[];
+};
 
 /** Flow definition — internal, consumed by feature() */
 export type FlowDef = {
-  trigger: string
+  trigger: string;
   // deno-lint-ignore no-explicit-any
-  generator: (ctx: GenCtx<any>, ...args: unknown[]) => Gen<unknown>
+  generator: (ctx: GenCtx<any>, ...args: unknown[]) => Gen<unknown>;
   /** Auto-generated action types from yield point names */
-  _stepNames: string[]
+  _stepNames: string[];
   /** Action keys that cancel this flow */
-  cancelOn?: string[]
+  cancelOn?: string[];
   /** How to unpack the triggering action's payload into generator args:
    *  'spread' — payload.args array is spread (methods-style: item, qty, ...)
    *  'payload' — payload object is passed directly (actions-style: { item, qty }) */
-  argsStyle: 'spread' | 'payload'
-}
+  argsStyle: "spread" | "payload";
+};
 
 // ── ctx generators (yield descriptors) ───────────────────────────────
 
-function* callGen<T>(name: string, fn: () => T | Promise<T>, opts?: { timeout?: number; retries?: number }): Gen<Awaited<T>> {
-  return (yield { kind: 'call', name, fn, opts } as FlowStep) as Awaited<T>
+function* callGen<T>(
+  name: string,
+  fn: () => T | Promise<T>,
+  opts?: { timeout?: number; retries?: number },
+): Gen<Awaited<T>> {
+  return (yield { kind: "call", name, fn, opts } as FlowStep) as Awaited<T>;
 }
 
-function* mutateGen(name: string, mutate: (draft: Record<string, unknown>) => void): Gen<void> {
-  yield { kind: 'step', name, mutate } as FlowStep
+function* mutateGen(
+  name: string,
+  mutate: (draft: Record<string, unknown>) => void,
+): Gen<void> {
+  yield { kind: "step", name, mutate } as FlowStep;
 }
 
-function* doneGen(mutate?: (draft: Record<string, unknown>) => void): Gen<void> {
-  yield { kind: 'done', mutate } as FlowStep
+function* doneGen(
+  mutate?: (draft: Record<string, unknown>) => void,
+): Gen<void> {
+  yield { kind: "done", mutate } as FlowStep;
 }
 
 function* failGen(reason: string): Gen<never> {
-  yield { kind: 'fail', reason } as FlowStep
+  yield { kind: "fail", reason } as FlowStep;
   // unreachable — runner throws after fail
-  throw new Error('flow failed: ' + reason)
+  throw new Error("flow failed: " + reason);
 }
 
 function* dispatchGen(action: { type: string; payload?: unknown }): Gen<void> {
-  yield { kind: 'dispatch', action } as FlowStep
+  yield { kind: "dispatch", action } as FlowStep;
 }
 
-function* allGen<T extends readonly Gen<unknown>[]>(...gens: T): Gen<{ [K in keyof T]: T[K] extends Gen<infer R> ? R : never }> {
+function* allGen<T extends readonly Gen<unknown>[]>(
+  ...gens: T
+): Gen<{ [K in keyof T]: T[K] extends Gen<infer R> ? R : never }> {
   // Collect first step from each generator — only single-step generators supported (ctx.call, ctx.sleep)
-  const entries: FlowStep[] = []
+  const entries: FlowStep[] = [];
   for (const g of gens) {
-    const first = g.next()
+    const first = g.next();
     if (!first.done && first.value) {
-      entries.push(first.value)
+      entries.push(first.value);
       // Guard: multi-step generators silently lose steps — reject them
-      const second = g.next()
-      if (!second.done) throw new Error('ctx.all() only supports single-step generators (ctx.call, ctx.sleep) — multi-step generators are not supported')
+      const second = g.next();
+      if (!second.done) {
+        throw new Error(
+          "ctx.all() only supports single-step generators (ctx.call, ctx.sleep) — multi-step generators are not supported",
+        );
+      }
     }
   }
-  return (yield { kind: 'all', entries } as FlowStep) as { [K in keyof T]: T[K] extends Gen<infer R> ? R : never }
+  return (yield { kind: "all", entries } as FlowStep) as {
+    [K in keyof T]: T[K] extends Gen<infer R> ? R : never;
+  };
 }
 
-function* raceGen<T extends Record<string, Gen<unknown>>>(entries: T): Gen<{ [K in keyof T]?: T[K] extends Gen<infer R> ? R : never }> {
+function* raceGen<T extends Record<string, Gen<unknown>>>(
+  entries: T,
+): Gen<{ [K in keyof T]?: T[K] extends Gen<infer R> ? R : never }> {
   // Extract first step from each generator — only single-step generators supported (ctx.call, ctx.sleep)
-  const stepEntries: Record<string, FlowStep> = {}
+  const stepEntries: Record<string, FlowStep> = {};
   for (const [key, gen] of Object.entries(entries)) {
-    const first = gen.next()
+    const first = gen.next();
     if (!first.done && first.value) {
-      stepEntries[key] = first.value
-      const second = gen.next()
-      if (!second.done) throw new Error('ctx.race() only supports single-step generators (ctx.call, ctx.sleep) — multi-step generators are not supported')
+      stepEntries[key] = first.value;
+      const second = gen.next();
+      if (!second.done) {
+        throw new Error(
+          "ctx.race() only supports single-step generators (ctx.call, ctx.sleep) — multi-step generators are not supported",
+        );
+      }
     }
   }
-  return (yield { kind: 'race', entries: stepEntries } as FlowStep) as { [K in keyof T]?: T[K] extends Gen<infer R> ? R : never }
+  return (yield { kind: "race", entries: stepEntries } as FlowStep) as {
+    [K in keyof T]?: T[K] extends Gen<infer R> ? R : never;
+  };
 }
 
 function* sleepGen(name: string, ms: number): Gen<void> {
-  yield { kind: 'sleep', name, ms } as FlowStep
+  yield { kind: "sleep", name, ms } as FlowStep;
 }
 
-function* sendGen(creatorOrType: { type: string } | string, payload?: unknown): Gen<void> {
-  const type = typeof creatorOrType === 'string' ? creatorOrType : creatorOrType.type
-  yield { kind: 'dispatch', action: { type, payload } } as FlowStep
+function* sendGen(
+  creatorOrType: { type: string } | string,
+  payload?: unknown,
+): Gen<void> {
+  const type = typeof creatorOrType === "string"
+    ? creatorOrType
+    : creatorOrType.type;
+  yield { kind: "dispatch", action: { type, payload } } as FlowStep;
 }
 
-function* namedAllGen<T extends Record<string, Gen<unknown>>>(entries: T): Gen<{ [K in keyof T]: T[K] extends Gen<infer R> ? R : never }> {
-  const keys = Object.keys(entries)
-  const gens = keys.map(k => entries[k]!)
-  const results = (yield* (allGen as (...g: Gen<unknown>[]) => Gen<unknown[]>)(...gens)) as unknown[]
-  const out: Record<string, unknown> = {}
-  for (let i = 0; i < keys.length; i++) out[keys[i]!] = results[i]
-  return out as { [K in keyof T]: T[K] extends Gen<infer R> ? R : never }
+function* namedAllGen<T extends Record<string, Gen<unknown>>>(
+  entries: T,
+): Gen<{ [K in keyof T]: T[K] extends Gen<infer R> ? R : never }> {
+  const keys = Object.keys(entries);
+  const gens = keys.map((k) => entries[k]!);
+  const results = (yield* (allGen as (...g: Gen<unknown>[]) => Gen<unknown[]>)(
+    ...gens,
+  )) as unknown[];
+  const out: Record<string, unknown> = {};
+  for (let i = 0; i < keys.length; i++) out[keys[i]!] = results[i];
+  return out as { [K in keyof T]: T[K] extends Gen<infer R> ? R : never };
 }
 
-function* waitForGen(creatorOrType: string | { type: string }, timeout?: number): Gen<Msg> {
-  const actionType = typeof creatorOrType === 'string' ? creatorOrType : creatorOrType.type
-  return (yield { kind: 'waitFor', actionType, timeout } as FlowStep) as Msg
+function* waitForGen(
+  creatorOrType: string | { type: string },
+  timeout?: number,
+): Gen<Msg> {
+  const actionType = typeof creatorOrType === "string"
+    ? creatorOrType
+    : creatorOrType.type;
+  return (yield { kind: "waitFor", actionType, timeout } as FlowStep) as Msg;
 }
 
 /** Build a GenCtx — the context object passed to flow generators */
-function buildCtx(featureName: string, getFullState: () => Record<string, unknown>): GenCtx {
+function buildCtx(
+  featureName: string,
+  getFullState: () => Record<string, unknown>,
+): GenCtx {
   // deno-lint-ignore no-explicit-any
   const allDispatch = (...args: any[]): Gen<unknown> => {
     // Named object form: ctx.all({ a: gen, b: gen })
-    if (args.length === 1 && args[0] !== null && typeof args[0] === 'object' && typeof (args[0] as Record<string, unknown>).next !== 'function') {
-      return namedAllGen(args[0] as Record<string, Gen<unknown>>)
+    if (
+      args.length === 1 && args[0] !== null && typeof args[0] === "object" &&
+      typeof (args[0] as Record<string, unknown>).next !== "function"
+    ) {
+      return namedAllGen(args[0] as Record<string, Gen<unknown>>);
     }
-    return allGen(...args as Gen<unknown>[])
-  }
+    return allGen(...args as Gen<unknown>[]);
+  };
   return {
     call: callGen,
-    mutate: mutateGen as GenCtx['mutate'],
-    done: doneGen as GenCtx['done'],
+    mutate: mutateGen as GenCtx["mutate"],
+    done: doneGen as GenCtx["done"],
     fail: failGen,
     dispatch: dispatchGen,
     send: sendGen,
-    all: allDispatch as GenCtx['all'],
+    all: allDispatch as GenCtx["all"],
     race: raceGen,
     sleep: sleepGen,
-    waitFor: waitForGen as GenCtx['waitFor'],
+    waitFor: waitForGen as GenCtx["waitFor"],
     getState: () => getFullState()[featureName] as Record<string, unknown>,
-  }
+  };
 }
-
 
 // ── Flow runner ──────────────────────────────────────────────────────
 
 /** Internal: status for a running flow instance */
 type FlowInstance = {
-  generator: Gen<unknown>
-  featureName: string
-  flowName: string
-  prefix: string
-  aborted: boolean
+  generator: Gen<unknown>;
+  featureName: string;
+  flowName: string;
+  prefix: string;
+  aborted: boolean;
   /** AbortController for waitFor — cancellation is instant via signal, no polling */
-  abortController?: AbortController
-}
+  abortController?: AbortController;
+};
 
 /** Active flow instances per feature — keyed by featureName:flowName.
  *  Module-level for cross-function access (cancelFlow, cancelFeatureFlows, runFlow).
  *  Call resetFlows() between test runs to prevent cross-contamination. */
-const activeFlows = new Map<string, FlowInstance>()
+const activeFlows = new Map<string, FlowInstance>();
 
 // ── Action listener registry for waitFor ──────────────────────────────
 
-type ActionListener = { actionType: string; resolve: (action: Msg) => void }
-const _actionListeners = new Set<ActionListener>()
+type ActionListener = { actionType: string; resolve: (action: Msg) => void };
+const _actionListeners = new Set<ActionListener>();
 
 /** Notify waiting flows when an action is dispatched — called from the dispatch loop */
 export function notifyFlowListeners(action: Msg): void {
   for (const listener of _actionListeners) {
     if (action.type === listener.actionType) {
-      listener.resolve(action)
-      _actionListeners.delete(listener)
+      listener.resolve(action);
+      _actionListeners.delete(listener);
     }
   }
 }
 
 function abortInstance(instance: FlowInstance): void {
-  instance.aborted = true
-  instance.abortController?.abort()
-  try { instance.generator.return(undefined) } catch { /* ignore */ }
+  instance.aborted = true;
+  instance.abortController?.abort();
+  try {
+    instance.generator.return(undefined);
+  } catch { /* ignore */ }
 }
 
 /** Reset all active flows — for test isolation */
 export function resetFlows(): void {
-  for (const [, instance] of activeFlows) abortInstance(instance)
-  activeFlows.clear()
-  _actionListeners.clear()
+  for (const [, instance] of activeFlows) abortInstance(instance);
+  activeFlows.clear();
+  _actionListeners.clear();
 }
 
 /** Cancel a running flow (if any) */
 export function cancelFlow(featureName: string, flowName: string): void {
-  const key = `${featureName}:${flowName}`
-  const instance = activeFlows.get(key)
+  const key = `${featureName}:${flowName}`;
+  const instance = activeFlows.get(key);
   if (instance) {
-    abortInstance(instance)
-    activeFlows.delete(key)
+    abortInstance(instance);
+    activeFlows.delete(key);
   }
 }
 
@@ -261,8 +368,8 @@ export function cancelFlow(featureName: string, flowName: string): void {
 export function cancelFeatureFlows(featureName: string): void {
   for (const [key, instance] of activeFlows) {
     if (instance.featureName === featureName) {
-      abortInstance(instance)
-      activeFlows.delete(key)
+      abortInstance(instance);
+      activeFlows.delete(key);
     }
   }
 }
@@ -274,19 +381,28 @@ export async function runFlow(
   featureName: string,
   action: Msg,
   app: FlowApp,
+  onFlowError?: (
+    raw: unknown,
+    ctx: {
+      featureName: string;
+      flowName: string;
+      flowStep: number;
+      flowHistory: FlowStepRecord[];
+    },
+  ) => void,
 ): Promise<void> {
-  const prefix = featureName
-  const flowKey = `${featureName}:${flowName}`
+  const prefix = featureName;
+  const flowKey = `${featureName}:${flowName}`;
 
   // Cancel any existing instance of this flow
-  cancelFlow(featureName, flowName)
+  cancelFlow(featureName, flowName);
 
-  const ctx = buildCtx(featureName, () => app.getState())
-  const payload = action.payload as Record<string, unknown>
-  const genArgs: unknown[] = flowDef.argsStyle === 'spread'
+  const ctx = buildCtx(featureName, () => app.getState());
+  const payload = action.payload as Record<string, unknown>;
+  const genArgs: unknown[] = flowDef.argsStyle === "spread"
     ? (Array.isArray(payload?.args) ? payload.args : [])
-    : [payload]
-  const gen = flowDef.generator(ctx, ...genArgs)
+    : [payload];
+  const gen = flowDef.generator(ctx, ...genArgs);
 
   const instance: FlowInstance = {
     generator: gen,
@@ -294,42 +410,57 @@ export async function runFlow(
     flowName,
     prefix,
     aborted: false,
-  }
-  activeFlows.set(flowKey, instance)
+  };
+  activeFlows.set(flowKey, instance);
 
   // Register cancelOn listeners
-  const cancelListeners: ActionListener[] = []
+  const cancelListeners: ActionListener[] = [];
   if (flowDef.cancelOn) {
     for (const actionKey of flowDef.cancelOn) {
       // Resolve action key to full type: "stop" → "featureName:stop"
-      const fullType = actionKey.includes(':') ? actionKey : `${prefix}:${actionKey}`
+      const fullType = actionKey.includes(":")
+        ? actionKey
+        : `${prefix}:${actionKey}`;
       const listener: ActionListener = {
         actionType: fullType,
         resolve: () => cancelFlow(featureName, flowName),
-      }
-      cancelListeners.push(listener)
-      _actionListeners.add(listener)
+      };
+      cancelListeners.push(listener);
+      _actionListeners.add(listener);
     }
   }
 
+  const flowSteps = new FlowHistory(50);
+  let stepIndex = 0;
+
   try {
-    let result = gen.next()
-    let doneSeen = false
+    let result = gen.next();
+    let doneSeen = false;
 
     while (!result.done) {
-      if (instance.aborted) return
+      if (instance.aborted) return;
 
-      const step = result.value as FlowStep
-      if (step.kind === 'done' || step.kind === 'fail') doneSeen = true
+      const step = result.value as FlowStep;
+      if (step.kind === "done" || step.kind === "fail") doneSeen = true;
+
+      // Track step
+      const stepAction = step.kind === "call"
+        ? `${prefix}:${(step as { name: string }).name}`
+        : step.kind;
+      const currentStep = flowSteps.push(stepAction);
+
       try {
-        const stepResult = await executeStep(step, instance, app)
-        if (instance.aborted) return
-        result = gen.next(stepResult)
+        const stepResult = await executeStep(step, instance, app);
+        flowSteps.markOk(currentStep);
+        if (instance.aborted) return;
+        result = gen.next(stepResult);
       } catch (stepError) {
-        if (instance.aborted) return
+        flowSteps.markError(currentStep);
+        if (instance.aborted) return;
         // Feed error back into generator so try/catch inside flow works
-        result = gen.throw(stepError)
+        result = gen.throw(stepError);
       }
+      stepIndex++;
     }
 
     // Auto-complete if generator returned without ctx.done()
@@ -337,23 +468,33 @@ export async function runFlow(
       app.dispatch({
         type: `${prefix}:__flow:done`,
         payload: {},
-        _source: 'Effect',
-      } as Msg)
+        _source: "Effect",
+      } as Msg);
     }
   } catch (e) {
     if (!instance.aborted) {
-      // Dispatch error action
-      const errorType = `${prefix}:__flow:error`
+      // Dispatch error action (keep existing behavior)
       app.dispatch({
-        type: errorType,
+        type: `${prefix}:__flow:error`,
         payload: { flow: flowName, error: String(e) },
-        _source: 'Effect',
-      })
-      console.error(`[${featureName}] flow '${flowName}' threw: ${e}`)
+        _source: "Effect",
+      });
+
+      // Report through error infrastructure
+      if (onFlowError) {
+        onFlowError(e, {
+          featureName,
+          flowName,
+          flowStep: stepIndex,
+          flowHistory: flowSteps.entries(),
+        });
+      } else {
+        log.error("feature", `${featureName} flow '${flowName}' threw: ${e}`);
+      }
     }
   } finally {
-    activeFlows.delete(flowKey)
-    for (const l of cancelListeners) _actionListeners.delete(l)
+    activeFlows.delete(flowKey);
+    for (const l of cancelListeners) _actionListeners.delete(l);
   }
 }
 
@@ -363,175 +504,188 @@ async function executeStep(
   instance: FlowInstance,
   app: FlowApp,
 ): Promise<unknown> {
-  const { prefix, featureName } = instance
-  const flowPrefix = `${prefix}:__flow:`
+  const { prefix, featureName } = instance;
+  const flowPrefix = `${prefix}:__flow:`;
 
   switch (step.kind) {
-    case 'call': {
+    case "call": {
       // Dispatch start action
       app.dispatch({
         type: `${flowPrefix}${step.name}`,
         payload: { _flow: instance.flowName, _step: step.name },
-        _source: 'Effect',
-      })
+        _source: "Effect",
+      });
 
       // Execute with optional timeout/retry
-      const result = step.opts ? await callWithOpts(step.fn, step.opts) : await step.fn()
-      return result
+      const result = step.opts
+        ? await callWithOpts(step.fn, step.opts)
+        : await step.fn();
+      return result;
     }
 
-    case 'step': {
+    case "step": {
       // Dispatch step action
       app.dispatch({
         type: `${flowPrefix}${step.name}`,
         payload: { _flow: instance.flowName, _step: step.name },
-        _source: 'Effect',
-      })
+        _source: "Effect",
+      });
 
       // Apply state mutation via Immer
-      const fullState = app.getState()
-      const featureState = fullState[featureName] as Record<string, unknown>
+      const fullState = app.getState();
+      const featureState = fullState[featureName] as Record<string, unknown>;
       const nextSlice = produce(featureState, (draft) => {
-        step.mutate(draft as Record<string, unknown>)
-      })
+        step.mutate(draft as Record<string, unknown>);
+      });
 
       // Dispatch internal state update
       app.dispatch({
         type: `${prefix}:__FlowState`,
         payload: { _slice: nextSlice },
-        _source: 'Effect',
-      })
+        _source: "Effect",
+      });
 
-      return undefined
+      return undefined;
     }
 
-    case 'done': {
+    case "done": {
       // Apply optional final mutation
       if (step.mutate) {
-        const fullState = app.getState()
-        const featureState = fullState[featureName] as Record<string, unknown>
+        const fullState = app.getState();
+        const featureState = fullState[featureName] as Record<string, unknown>;
         const nextSlice = produce(featureState, (draft) => {
-          step.mutate!(draft as Record<string, unknown>)
-        })
+          step.mutate!(draft as Record<string, unknown>);
+        });
 
         app.dispatch({
           type: `${prefix}:__FlowState`,
           payload: { _slice: nextSlice },
-          _source: 'Effect',
-        })
+          _source: "Effect",
+        });
       }
 
       // Dispatch done action
       app.dispatch({
         type: `${flowPrefix}done`,
         payload: { _flow: instance.flowName },
-        _source: 'Effect',
-      })
+        _source: "Effect",
+      });
 
-      return undefined
+      return undefined;
     }
 
-    case 'fail': {
+    case "fail": {
       // Dispatch fail action
       app.dispatch({
         type: `${flowPrefix}failed`,
         payload: { _flow: instance.flowName, reason: step.reason },
-        _source: 'Effect',
-      })
+        _source: "Effect",
+      });
 
       // Stop the generator
-      instance.aborted = true
-      return undefined
+      instance.aborted = true;
+      return undefined;
     }
 
-    case 'dispatch': {
-      app.dispatch({ _source: 'Effect', payload: {}, ...step.action })
-      return undefined
+    case "dispatch": {
+      app.dispatch({ _source: "Effect", payload: {}, ...step.action });
+      return undefined;
     }
 
-    case 'all': {
+    case "all": {
       // Execute all entries in parallel
-      const promises = step.entries.map(entry =>
+      const promises = step.entries.map((entry) =>
         executeStep(entry, instance, app)
-      )
-      return Promise.all(promises)
+      );
+      return Promise.all(promises);
     }
 
-    case 'race': {
+    case "race": {
       // Race all entries — first to resolve wins
-      const entries = Object.entries(step.entries)
+      const entries = Object.entries(step.entries);
       const result = await Promise.race(
         entries.map(async ([key, entry]) => {
-          const value = await executeStep(entry, instance, app)
-          return { key, value }
-        })
-      )
-      return { [result.key]: result.value }
+          const value = await executeStep(entry, instance, app);
+          return { key, value };
+        }),
+      );
+      return { [result.key]: result.value };
     }
 
-    case 'sleep': {
+    case "sleep": {
       // Dispatch sleep action for visibility
       app.dispatch({
         type: `${flowPrefix}${step.name}`,
         payload: { _flow: instance.flowName, _step: step.name, ms: step.ms },
-        _source: 'Effect',
-      })
+        _source: "Effect",
+      });
 
-      await new Promise(resolve => setTimeout(resolve, step.ms))
-      return undefined
+      await new Promise((resolve) => setTimeout(resolve, step.ms));
+      return undefined;
     }
 
-    case 'waitFor': {
+    case "waitFor": {
       // Dispatch waiting action for visibility
       app.dispatch({
         type: `${flowPrefix}waitFor`,
-        payload: { _flow: instance.flowName, actionType: step.actionType, timeout: step.timeout },
-        _source: 'Effect',
-      })
+        payload: {
+          _flow: instance.flowName,
+          actionType: step.actionType,
+          timeout: step.timeout,
+        },
+        _source: "Effect",
+      });
 
       // AbortController per-step — cancellation is instant via signal, no polling loop.
-      const controller = new AbortController()
-      instance.abortController = controller
+      const controller = new AbortController();
+      instance.abortController = controller;
 
       // Hoist listener ref so timeout can delete the exact instance (not first match)
-      let listener: ActionListener
+      let listener: ActionListener;
       const actionPromise = new Promise<Msg>((resolve) => {
-        listener = { actionType: step.actionType, resolve }
-        _actionListeners.add(listener)
+        listener = { actionType: step.actionType, resolve };
+        _actionListeners.add(listener);
 
         // Resolve immediately on flow cancellation — no 50ms poll needed
-        controller.signal.addEventListener('abort', () => {
-          _actionListeners.delete(listener)
-          resolve({ type: '__aborted', payload: {} })
-        }, { once: true })
-      })
+        controller.signal.addEventListener("abort", () => {
+          _actionListeners.delete(listener);
+          resolve({ type: "__aborted", payload: {} });
+        }, { once: true });
+      });
 
       if (step.timeout !== undefined) {
-        const timeoutSentinel = Symbol('timeout')
+        const timeoutSentinel = Symbol("timeout");
         const result = await Promise.race([
           actionPromise,
-          new Promise<typeof timeoutSentinel>(resolve => setTimeout(() => resolve(timeoutSentinel), step.timeout)),
-        ])
-        instance.abortController = undefined
+          new Promise<typeof timeoutSentinel>((resolve) =>
+            setTimeout(() => resolve(timeoutSentinel), step.timeout)
+          ),
+        ]);
+        instance.abortController = undefined;
         if (result === timeoutSentinel) {
-          _actionListeners.delete(listener!)  // delete exact instance, not first match
-          throw new Error(`waitFor('${step.actionType}') timed out after ${step.timeout}ms`)
+          _actionListeners.delete(listener!); // delete exact instance, not first match
+          throw new Error(
+            `waitFor('${step.actionType}') timed out after ${step.timeout}ms`,
+          );
         }
-        return result
+        return result;
       }
 
       // Dev mode: warn if waitFor has no timeout and has been waiting 30s
-      let warnTimer: ReturnType<typeof setTimeout> | undefined
+      let warnTimer: ReturnType<typeof setTimeout> | undefined;
       if ((globalThis as Record<string, unknown>).__aioDev) {
         warnTimer = setTimeout(() => {
-          console.warn(`[aio:${instance.featureName}] waitFor('${step.actionType}') has been waiting 30s with no timeout — did you mean to add one?`)
-        }, 30_000)
+          log.warn(
+            "aio",
+            `${instance.featureName} waitFor('${step.actionType}') has been waiting 30s with no timeout — did you mean to add one?`,
+          );
+        }, 30_000);
       }
 
-      const result = await actionPromise
-      if (warnTimer) clearTimeout(warnTimer)
-      instance.abortController = undefined
-      return result
+      const result = await actionPromise;
+      if (warnTimer) clearTimeout(warnTimer);
+      instance.abortController = undefined;
+      return result;
     }
   }
 }
@@ -543,43 +697,66 @@ export function createFlowExecutor(
   featureName: string,
   flows: Record<string, FlowDef>,
   triggerToFlow: Map<string, string>,
+  onFlowError?: (
+    raw: unknown,
+    ctx: {
+      featureName: string;
+      flowName: string;
+      flowStep: number;
+      flowHistory: FlowStepRecord[];
+    },
+  ) => void,
 ): (app: FlowApp, action: Msg) => boolean {
   return (app: FlowApp, action: Msg): boolean => {
-    const prefix = featureName
+    const prefix = featureName;
 
     // Check if this action triggers a flow
-    const actionSuffix = action.type.startsWith(prefix + ':')
+    const actionSuffix = action.type.startsWith(prefix + ":")
       ? action.type.slice(prefix.length + 1)
-      : null
+      : null;
 
-    if (!actionSuffix) return false
+    if (!actionSuffix) return false;
 
-    const flowName = triggerToFlow.get(actionSuffix)
+    const flowName = triggerToFlow.get(actionSuffix);
 
-    if (!flowName) return false
+    if (!flowName) return false;
 
-    const flowDef = flows[flowName]
-    if (!flowDef) return false
+    const flowDef = flows[flowName];
+    if (!flowDef) return false;
 
     // Fire-and-forget: runFlow is async but NOT awaited here.
     // The dispatch loop returns immediately; flow advances in the background.
     // Each yield point dispatches its own observable action when it resolves.
-    runFlow(flowDef, flowName, featureName, action, app)
-      .catch(e => console.error(`[${featureName}] flow '${flowName}' error: ${e}`))
+    runFlow(flowDef, flowName, featureName, action, app, onFlowError)
+      .catch((e) => {
+        if (onFlowError) {
+          onFlowError(e, {
+            featureName,
+            flowName,
+            flowStep: -1,
+            flowHistory: [],
+          });
+        } else {
+          log.error("feature", `${featureName} flow '${flowName}' error: ${e}`);
+        }
+      });
 
-    return true
-  }
+    return true;
+  };
 }
 
 /** Build the __FlowState reducer — handles internal state updates from flows */
 export function createFlowReducer(featureName: string) {
-  const prefix = featureName
-  const flowStateType = `${prefix}:__FlowState`
+  const prefix = featureName;
+  const flowStateType = `${prefix}:__FlowState`;
 
-  return (state: Record<string, unknown>, action: Msg): Record<string, unknown> | null => {
-    if (action.type !== flowStateType) return null
+  return (
+    state: Record<string, unknown>,
+    action: Msg,
+  ): Record<string, unknown> | null => {
+    if (action.type !== flowStateType) return null;
 
-    const payload = action.payload as { _slice: Record<string, unknown> }
-    return { ...state, [featureName]: payload._slice }
-  }
+    const payload = action.payload as { _slice: Record<string, unknown> };
+    return { ...state, [featureName]: payload._slice };
+  };
 }

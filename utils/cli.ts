@@ -2,14 +2,18 @@
 // aio CLI — project management tool
 // Install: deno install -g -A -n aio utils/cli.ts
 
-import { create } from './create.ts'
+import { create } from "./create.ts";
 
-const VERSION = '0.4.0'
+const VERSION = "0.4.0";
 
 const c = {
-  bold: '\x1b[1m', dim: '\x1b[2m', cyan: '\x1b[36m', green: '\x1b[32m',
-  yellow: '\x1b[33m', reset: '\x1b[0m',
-}
+  bold: "\x1b[1m",
+  dim: "\x1b[2m",
+  cyan: "\x1b[36m",
+  green: "\x1b[32m",
+  yellow: "\x1b[33m",
+  reset: "\x1b[0m",
+};
 
 function help(): void {
   console.log(`
@@ -31,33 +35,35 @@ ${c.dim}Inside a project, use deno tasks:${c.reset}
   ${c.dim}deno task dev${c.reset}                   Dev server with hot reload
   ${c.dim}deno task am status${c.reset}             App manager
   ${c.dim}deno task compile${c.reset}               Build for production
-`)
+`);
 }
 
-const cmd = Deno.args[0]
+const cmd = Deno.args[0];
 
 switch (cmd) {
-  case 'create':
-  case 'init':
-  case 'new':
-    await create(Deno.args.slice(1))
-    break
+  case "create":
+  case "init":
+  case "new":
+    await create(Deno.args.slice(1));
+    break;
 
-  case 'version':
-  case '-v':
-  case '--version':
-    console.log(`aio ${VERSION}`)
-    break
+  case "version":
+  case "-v":
+  case "--version":
+    console.log(`aio ${VERSION}`);
+    break;
 
-  case 'help':
-  case '-h':
-  case '--help':
+  case "help":
+  case "-h":
+  case "--help":
   case undefined:
-    help()
-    break
+    help();
+    break;
 
   default:
-    console.log(`${c.yellow}Unknown command:${c.reset} ${cmd}`)
-    console.log(`${c.dim}Run ${c.cyan}aio help${c.dim} for available commands${c.reset}`)
-    Deno.exit(1)
+    console.log(`${c.yellow}Unknown command:${c.reset} ${cmd}`);
+    console.log(
+      `${c.dim}Run ${c.cyan}aio help${c.dim} for available commands${c.reset}`,
+    );
+    Deno.exit(1);
 }

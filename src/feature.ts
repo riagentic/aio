@@ -13,35 +13,38 @@
 // are imported directly by sibling files and NOT exposed here.
 
 export {
-  tagSource,
-  type ActionUnion,
-  type MachineConfig,
   type ActionSource,
-  type ScopedApp,
-  type FeatureDef,
-  type DirectCalling,
-  type FeatureEntry,
-  type Creators,
+  type ActionUnion,
   type Catalog,
-  type Msg,
+  type Creators,
+  type DirectCalling,
   type FeatureAio,
+  type FeatureDef,
+  type FeatureEntry,
   type FeatureExecuteFn,
-  type FlatActions,
   type FeatureReduceFn,
-} from './feature-types.ts'
+  type FlatActions,
+  type MachineConfig,
+  type Msg,
+  type ScopedApp,
+  tagSource,
+} from "./feature-types.ts";
 
-export { bindFeature } from './feature-catalog.ts'
-
-export { feature, type MethodsFeatureConfig, type ActionsFeatureConfig, type ReduceHandlers, type ExecuteHandlers } from './feature-create.ts'
+export { bindFeature } from "./feature-catalog.ts";
 
 export {
-  composeFeatures,
+  type ActionsFeatureConfig,
+  type ExecuteHandlers,
+  feature,
+  type MethodsFeatureConfig,
+  type ReduceHandlers,
+} from "./feature-create.ts";
+
+export {
+  type CircuitBreakerConfig,
   type ComposedFeatures,
+  composeFeatures,
   type FeatureStatus,
-} from './feature-compose.ts'
+} from "./feature-compose.ts";
 
-export {
-  testFeature,
-  testBridge,
-  type TestContext,
-} from './feature-test.ts'
+export { testBridge, type TestContext, testFeature } from "./feature-test.ts";
