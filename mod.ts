@@ -37,19 +37,41 @@
  * checkout.place('widget')   // starts generator
  * ```
  */
-import { produce, type Draft } from 'immer'
-import type { PerfCheck, PerfBudget } from './src/dispatch.ts'
+import { type Draft, produce } from "immer";
+import type { PerfBudget, PerfCheck } from "./src/dispatch.ts";
 
 /** Framework version string */
-export { aio, VERSION, parseCli, lint } from './src/aio.ts'
-import type { AioApp } from './src/aio.ts'
-export type { AioApp }
-export type { FeaturesConfig, UiConfig, Lint, CliFlags, AioUser, AioError, PerfCheck, PerfBudget, AioConfig, MiddlewareFn } from './src/aio.ts'
-export { log } from './src/logger.ts'
-export type { Log, LogConfig, LogLevel } from './src/logger.ts'
-export type { AioMeta } from './src/electron.ts'
-export type { LockData, InstanceInfo, SingletonMode } from './src/single-instance-lock.ts'
-export { instances, resolveAppId } from './src/single-instance-lock.ts'
+export { aio, lint, parseCli, VERSION } from "./src/aio.ts";
+import type { AioApp } from "./src/aio.ts";
+export type { AioApp };
+export type {
+  AioConfig,
+  AioError,
+  AioUser,
+  CliFlags,
+  FeaturesConfig,
+  Lint,
+  MiddlewareFn,
+  PerfBudget,
+  PerfCheck,
+  UiConfig,
+} from "./src/aio.ts";
+export type {
+  AioErrorCode,
+  AioErrorContext,
+  AioErrorSource,
+  FlowStepRecord,
+} from "./src/error.ts";
+export type { MemoryConfig, MemoryReport } from "./src/memory-monitor.ts";
+export { log } from "./src/logger.ts";
+export type { Log, LogConfig, LogLevel } from "./src/logger.ts";
+export type { AioMeta } from "./src/electron.ts";
+export type {
+  InstanceInfo,
+  LockData,
+  SingletonMode,
+} from "./src/single-instance-lock.ts";
+export { instances, resolveAppId } from "./src/single-instance-lock.ts";
 // slugify — internal (used by build.ts, not app code)
 
 /**
@@ -58,9 +80,37 @@ export { instances, resolveAppId } from './src/single-instance-lock.ts'
  * feature({ methods, generators }) — reactive + sequential workflows in one feature
  * feature({ actions, reduce })   — explicit style for full control (advanced)
  */
-export { feature, composeFeatures, testFeature, bindFeature } from './src/feature.ts'
+export {
+  bindFeature,
+  composeFeatures,
+  feature,
+  testFeature,
+} from "./src/feature.ts";
 // tagSource — internal (framework auto-tags action sources)
-export type { FeatureDef, FeatureEntry, MachineConfig, ActionUnion, TestContext, FeatureStatus, ScopedApp, DirectCalling, Creators, Catalog, Msg, FeatureAio, FeatureExecuteFn, FeatureReduceFn, FlatActions, ActionSource, MethodsFeatureConfig, ActionsFeatureConfig, ComposedFeatures, ReduceHandlers, ExecuteHandlers } from './src/feature.ts'
+export type {
+  ActionsFeatureConfig,
+  ActionSource,
+  ActionUnion,
+  Catalog,
+  CircuitBreakerConfig,
+  ComposedFeatures,
+  Creators,
+  DirectCalling,
+  ExecuteHandlers,
+  FeatureAio,
+  FeatureDef,
+  FeatureEntry,
+  FeatureExecuteFn,
+  FeatureReduceFn,
+  FeatureStatus,
+  FlatActions,
+  MachineConfig,
+  MethodsFeatureConfig,
+  Msg,
+  ReduceHandlers,
+  ScopedApp,
+  TestContext,
+} from "./src/feature.ts";
 
 /**
  * Inter-feature coordination — async methods return Promises with the correct type.
@@ -78,94 +128,118 @@ export type { FeatureDef, FeatureEntry, MachineConfig, ActionUnion, TestContext,
  *
  * `markAsync` — rare: explicitly mark a method as async when minification strips constructor names.
  */
-export { call, markAsync } from './src/feature-impl.ts'
-export type { CallOptions, Method, SyncMethod, AsyncMethod, FeatureMethods } from './src/feature-impl.ts'
+export { call, markAsync } from "./src/feature-impl.ts";
+export type {
+  AsyncMethod,
+  CallOptions,
+  FeatureMethods,
+  Method,
+  SyncMethod,
+} from "./src/feature-impl.ts";
 
 /**
  * Generator-based sequential workflows.
  * Write top-to-bottom async code; each yield point is observable.
  * Use cancelOn config key in feature() to declare cancellation triggers.
  */
-export type { GenCtx, Gen, TypedCreator, FlowStep, FlowDef } from './src/flow.ts'
+export type {
+  FlowDef,
+  FlowStep,
+  Gen,
+  GenCtx,
+  TypedCreator,
+} from "./src/flow.ts";
 
-/** 
+/**
  * Connect to a remote aio server from a CLI app.
  * Returns a CliApp with state, send, subscribe, close, connected, and ready.
  * @param url - WebSocket URL of the aio server (e.g., 'ws://localhost:8000/ws')
  * @param opts - Optional { token?: string } for auth
  */
-export { connectCli, connectCliUDS } from './src/cli-client.ts'
-export type { CliApp } from './src/cli-client.ts'
+export { connectCli, connectCliUDS } from "./src/cli-client.ts";
+export type { CliApp } from "./src/cli-client.ts";
 
 /**
  * Action/effect catalog factory — creates typed creators for explicit-style features.
  * Used inside `feature({ actions, effects })` config or for standalone catalogs.
  */
-export { actions, effects } from './src/factory.ts'
-export type { FactoryResult, LowerFirst, Prefixed, Creators as FactoryCreators } from './src/factory.ts'
+export { actions, effects } from "./src/factory.ts";
+export type {
+  Creators as FactoryCreators,
+  FactoryResult,
+  LowerFirst,
+  Prefixed,
+} from "./src/factory.ts";
 
 /**
  * Declarative schedules — timers, intervals, cron jobs as effects.
  * @see {@link https://aio.dev/manual#scheduled-effects}
  */
-export { schedule } from './src/schedule.ts'
-import type { ScheduleEffect } from './src/schedule.ts'
-export type { ScheduleEffect, ScheduleDef } from './src/schedule.ts'
+export { schedule } from "./src/schedule.ts";
+import type { ScheduleEffect } from "./src/schedule.ts";
+export type { ScheduleDef, ScheduleEffect } from "./src/schedule.ts";
 
 /**
  * SQLite column helpers for defining table schemas.
  * @see {@link https://aio.dev/manual#sqlite-persistence}
  */
-export { table, pk, text, integer, real, ref } from './src/sql.ts'
-export type { ColumnDef, ColumnOpts, QueryOpts, TableDef, WhereClause, WhereOp } from './src/sql.ts'
+export { integer, pk, real, ref, table, text } from "./src/sql.ts";
+export type {
+  ColumnDef,
+  ColumnOpts,
+  QueryOpts,
+  TableDef,
+  WhereClause,
+  WhereOp,
+} from "./src/sql.ts";
 
 /**
  * Async SQLite — Worker-backed, non-blocking.
  * `createDB` is for direct use; `app.db` is the instance managed by the framework.
  */
-export { createDB, DEFAULT_PRAGMAS } from './src/db/mod.ts'
-export type { DB, Tx, QueryResult, DBOpts } from './src/db/mod.ts'
+export { createDB, DEFAULT_PRAGMAS } from "./src/db/mod.ts";
+export type { DB, DBOpts, QueryResult, Tx } from "./src/db/mod.ts";
 
 /**
  * Memoized selectors for expensive state derivations.
  * Caches results until input selectors return new values.
  */
-export { createSelector, createSliceSelector } from './src/selector.ts'
-export type { Selector } from './src/selector.ts'
+export { createSelector, createSliceSelector } from "./src/selector.ts";
+export type { Selector } from "./src/selector.ts";
 
 /**
  * Composes multiple beforeReduce functions into one.
  * Functions run in order, passing the action through. Return null to drop.
- * 
+ *
  * @param fns - beforeReduce functions to compose
  * @returns Composed beforeReduce function
- * 
+ *
  * @example
  * ```ts
  * const validate = (action, state) => action.type === 'Bad' ? null : action
  * const enrich = (action, state) => ({ ...action, timestamp: Date.now() })
- * 
+ *
  * aio.run(state, {
  *   beforeReduce: composeMiddleware(validate, enrich),
  *   // ...
  * })
  * ```
  */
-export { composeMiddleware } from './src/aio.ts'
+export { composeMiddleware } from "./src/aio.ts";
 
 /**
  * Deep freeze for dev-mode immutability checking.
  */
-export { deepFreeze } from './src/dispatch.ts'
+export { deepFreeze } from "./src/dispatch.ts";
 
 /**
  * Immer-powered immutable state update.
  * Mutate the draft inside the callback, return effects array.
- * 
+ *
  * @param state - Current immutable state
  * @param fn - Callback that receives a draft to mutate; must return effects array
  * @returns New immutable state + effects
- * 
+ *
  * @example
  * ```ts
  * return draft(state, d => {
@@ -174,32 +248,40 @@ export { deepFreeze } from './src/dispatch.ts'
  * })
  * ```
  */
-export function draft<S, E>(state: S, fn: (d: Draft<S>) => E[]): { state: S; effects: E[] } {
-  let effects: E[] = []
+export function draft<S, E>(
+  state: S,
+  fn: (d: Draft<S>) => E[],
+): { state: S; effects: E[] } {
+  let effects: E[] = [];
   const next = produce(state, (d) => {
-    effects = fn(d)
-  })
+    effects = fn(d);
+  });
   // Clone effects to detach from revoked Immer draft references.
   // Effects built inside produce() may hold draft refs that crash after finalization.
   // Guard against undefined in case the reducer forgot a return statement.
   if (!effects) {
-    if (typeof globalThis !== 'undefined' && (globalThis as Record<string, unknown>).__aioDev) {
-      console.warn('draft(): reducer callback did not return an effects array — defaulting to []. Add "return []" to your reducer.')
+    if (
+      typeof globalThis !== "undefined" &&
+      (globalThis as Record<string, unknown>).__aioDev
+    ) {
+      console.warn(
+        'draft(): reducer callback did not return an effects array — defaulting to []. Add "return []" to your reducer.',
+      );
     }
-    effects = []
+    effects = [];
   }
-  if (effects.length) effects = structuredClone(effects)
-  return { state: next, effects }
+  if (effects.length) effects = structuredClone(effects);
+  return { state: next, effects };
 }
 
 /**
  * Typed effect handler dispatch — alternative to switch/case in execute().
  * Scales better for apps with many effect types.
- * 
+ *
  * @param effect - The effect to handle
  * @param handlers - Object mapping effect types to handler functions
  * @param fallback - Optional handler for unhandled effects
- * 
+ *
  * @example
  * ```ts
  * matchEffect(effect, {
@@ -211,12 +293,19 @@ export function draft<S, E>(state: S, fn: (d: Draft<S>) => E[]): { state: S; eff
 // deno-lint-ignore no-explicit-any
 export function matchEffect<E extends { type: string; payload?: any }>(
   effect: E,
-  handlers: Partial<{ [K in E['type']]: (payload: Extract<E, { type: K }> extends { payload: infer P } ? P : undefined) => void }>,
+  handlers: Partial<
+    {
+      [K in E["type"]]: (
+        payload: Extract<E, { type: K }> extends { payload: infer P } ? P
+          : undefined,
+      ) => void;
+    }
+  >,
   fallback?: (effect: E) => void,
 ): void {
-  const handler = handlers[effect.type as E['type']]
-  if (handler) handler((effect as { payload?: unknown }).payload as never)
-  else if (fallback) fallback(effect)
+  const handler = handlers[effect.type as E["type"]];
+  if (handler) handler((effect as { payload?: unknown }).payload as never);
+  else if (fallback) fallback(effect);
 }
 
 /**
@@ -236,9 +325,9 @@ export function matchEffect<E extends { type: string; payload?: any }>(
  * ```
  */
 export declare function useAio<S = unknown>(): {
-  state: S | null
-  send: (action: { type: string; payload?: unknown }) => void
-}
+  state: S | null;
+  send: (action: { type: string; payload?: unknown }) => void;
+};
 
 /**
  * React hook — connects UI to a specific feature.
@@ -255,58 +344,72 @@ export declare function useAio<S = unknown>(): {
  * ```
  */
 /** Keys built into FeatureDef — excluded from send proxy */
-export type _FeatureBuiltins = '__aio'
+export type _FeatureBuiltins = "__aio";
 /** Extract state type from feature def's phantom _stateType, fallback to unknown */
-// deno-lint-ignore no-explicit-any
-export type _InferState<F> = F extends { __aio: { stateType?: infer S } } ? S extends Record<string, any> ? S : Record<string, unknown> : Record<string, unknown>
+export type _InferState<F> = F extends { __aio: { stateType?: infer S } }
+  // deno-lint-ignore no-explicit-any
+  ? S extends Record<string, any> ? S : Record<string, unknown>
+  : Record<string, unknown>;
 /** Extract send proxy type from feature's callable methods */
-// deno-lint-ignore no-explicit-any
-export type _InferSend<F> = { [K in Exclude<keyof F, _FeatureBuiltins>]: F[K] extends (...args: infer P) => any ? (...args: P) => void : never }
+export type _InferSend<F> = {
+  [K in Exclude<keyof F, _FeatureBuiltins>]: F[K] extends // deno-lint-ignore no-explicit-any
+  (...args: infer P) => any ? (...args: P) => void
+    : never;
+};
 
 /** useFeature with fallback — state is never null */
 // deno-lint-ignore no-explicit-any
-export declare function useFeature<F extends Record<string, any>>(ref: F, options: { fallback: _InferState<F> }): {
-  state: _InferState<F>
-  send: _InferSend<F>
-  status: string | undefined
-}
+export declare function useFeature<F extends Record<string, any>>(
+  ref: F,
+  options: { fallback: _InferState<F> },
+): {
+  state: _InferState<F>;
+  send: _InferSend<F>;
+  status: string | undefined;
+};
 /** useFeature without fallback — state may be null before connection */
 // deno-lint-ignore no-explicit-any
-export declare function useFeature<F extends Record<string, any>>(ref: F, options?: { fallback?: never }): {
-  state: _InferState<F> | null
-  send: _InferSend<F>
-  status: string | undefined
-}
+export declare function useFeature<F extends Record<string, any>>(
+  ref: F,
+  options?: { fallback?: never },
+): {
+  state: _InferState<F> | null;
+  send: _InferSend<F>;
+  status: string | undefined;
+};
 
 /**
  * React hook for client-only state (not synced to server).
  * Useful for ephemeral UI state like form inputs, dropdowns, editing flags.
- * 
+ *
  * @typeParam T - The state type
  * @param initial - Initial value
  * @returns { local: T, set: (next) => void }
  */
 export declare function useLocal<T>(initial: T): {
-  local: T
-  set: (next: T | ((prev: T) => T)) => void
-}
+  local: T;
+  set: (next: T | ((prev: T) => T)) => void;
+};
 
 /**
  * State-based routing. Renders the component matching a page key.
- * 
+ *
  * @typeParam K - Union of page keys
  * @param current - Current page key from state
  * @param routes - Object mapping page keys to React components
  * @returns JSX element or null if no match
- * 
+ *
  * @example
  * ```tsx
  * {page(state.page, { home: Home, settings: Settings })}
  * ```
  */
-import type { ComponentType, ReactElement } from 'react'
+import type { ComponentType, ReactElement } from "react";
 /** State-based page router — renders the component matching the current page key */
-export declare function page<K extends string>(current: K, routes: Record<K, ComponentType>): ReactElement | null
+export declare function page<K extends string>(
+  current: K,
+  routes: Record<K, ComponentType>,
+): ReactElement | null;
 
 // ── URL-based routing ────────────────────────────────────────────────────────
 
@@ -326,11 +429,11 @@ export declare function page<K extends string>(current: K, routes: Record<K, Com
  * ```
  */
 export declare function useRoute(pattern?: string): {
-  path: string
-  params: Record<string, string>
-  search: URLSearchParams
-  matched: boolean
-}
+  path: string;
+  params: Record<string, string>;
+  search: URLSearchParams;
+  matched: boolean;
+};
 
 /**
  * Returns the `navigate` function. Prefer `<Link>` for user-initiated navigation;
@@ -345,7 +448,10 @@ export declare function useRoute(pattern?: string): {
  * }
  * ```
  */
-export declare function useNavigate(): (to: string | number, opts?: { replace?: boolean }) => void
+export declare function useNavigate(): (
+  to: string | number,
+  opts?: { replace?: boolean },
+) => void;
 
 /**
  * Navigate programmatically. Pass a string path or a history delta (number).
@@ -359,7 +465,10 @@ export declare function useNavigate(): (to: string | number, opts?: { replace?: 
  * navigate('/login', { replace: true })
  * ```
  */
-export declare function navigate(to: string | number, opts?: { replace?: boolean }): void
+export declare function navigate(
+  to: string | number,
+  opts?: { replace?: boolean },
+): void;
 
 /**
  * Renders `element` when the current URL matches `path`.
@@ -382,11 +491,11 @@ export declare function navigate(to: string | number, opts?: { replace?: boolean
  * ```
  */
 export declare function Route(props: {
-  path?: string
-  index?: boolean
-  element?: unknown
-  children?: unknown
-}): unknown
+  path?: string;
+  index?: boolean;
+  element?: unknown;
+  children?: unknown;
+}): unknown;
 
 /**
  * Renders the matched child route inside a parent `<Route>` layout.
@@ -399,7 +508,7 @@ export declare function Route(props: {
  * }
  * ```
  */
-export declare function Outlet(): unknown
+export declare function Outlet(): unknown;
 
 /**
  * Anchor that navigates without page reload. Adds `activeClass` when the path matches.
@@ -414,16 +523,16 @@ export declare function Outlet(): unknown
  * ```
  */
 export declare function Link(props: {
-  to: string
-  replace?: boolean
-  exact?: boolean
-  activeClass?: string
-  activeStyle?: Record<string, unknown>
-  children?: unknown
-  className?: string
-  style?: Record<string, unknown>
-  [k: string]: unknown
-}): unknown
+  to: string;
+  replace?: boolean;
+  exact?: boolean;
+  activeClass?: string;
+  activeStyle?: Record<string, unknown>;
+  children?: unknown;
+  className?: string;
+  style?: Record<string, unknown>;
+  [k: string]: unknown;
+}): unknown;
 
 /**
  * Like `<Link>` but applies `activeClass` (default: `'active'`) automatically.
@@ -436,10 +545,10 @@ export declare function Link(props: {
  * ```
  */
 export declare function NavLink(props: {
-  to: string
-  activeClass?: string
-  [k: string]: unknown
-}): unknown
+  to: string;
+  activeClass?: string;
+  [k: string]: unknown;
+}): unknown;
 
 /**
  * Navigates to `to` on mount. `replace` defaults to `true` (no history entry).
@@ -454,7 +563,9 @@ export declare function NavLink(props: {
  * }
  * ```
  */
-export declare function Redirect(props: { to: string; replace?: boolean }): null
+export declare function Redirect(
+  props: { to: string; replace?: boolean },
+): null;
 
 /**
  * Match a path pattern against a URL path. Returns extracted params or null.
@@ -469,26 +580,30 @@ export declare function Redirect(props: { to: string; replace?: boolean }): null
  * matchPath('*', '/any/path')                   // { '*': '/any/path' }
  * ```
  */
-export declare function matchPath(pattern: string, path: string, exact?: boolean): Record<string, string> | null
+export declare function matchPath(
+  pattern: string,
+  path: string,
+  exact?: boolean,
+): Record<string, string> | null;
 
-export type { RouteState, RouteProps, LinkProps } from './src/browser.ts'
+export type { LinkProps, RouteProps, RouteState } from "./src/browser.ts";
 
 /**
  * React hook for time-travel debugging in dev mode.
  * Returns null in production.
- * 
+ *
  * @returns Object with entries, controls for undo/redo/goto/pause/resume, or null
  */
 export declare function useTimeTravel(): {
-  entries: { id: number; type: string; ts: number }[]
-  index: number
-  paused: boolean
-  undo: () => void
-  redo: () => void
-  goto: (id: number) => void
-  pause: () => void
-  resume: () => void
-} | null
+  entries: { id: number; type: string; ts: number }[];
+  index: number;
+  paused: boolean;
+  undo: () => void;
+  redo: () => void;
+  goto: (id: number) => void;
+  pause: () => void;
+  resume: () => void;
+} | null;
 
 // ── Framework-agnostic client ─────────────────────────────────────────────
 
@@ -521,22 +636,22 @@ export declare function useTimeTravel(): {
  * ```
  */
 export declare const client: {
-  subscribe(fn: (state: unknown) => void): () => void
-  getState(): unknown
-  getFeatureState(name: string): unknown
-  send(action: { type: string; payload?: unknown }): void
+  subscribe(fn: (state: unknown) => void): () => void;
+  getState(): unknown;
+  getFeatureState(name: string): unknown;
+  send(action: { type: string; payload?: unknown }): void;
   route: {
-    subscribe(fn: () => void): () => void
-    getPath(): string
-    getSearch(): URLSearchParams
-    navigate(to: string | number, opts?: { replace?: boolean }): void
-  }
-}
+    subscribe(fn: () => void): () => void;
+    getPath(): string;
+    getSearch(): URLSearchParams;
+    navigate(to: string | number, opts?: { replace?: boolean }): void;
+  };
+};
 
 /**
  * Connect to Redux DevTools browser extension for state inspection.
  * Call after useAio() in development mode.
- * 
+ *
  * @example
  * ```ts
  * // In App.tsx
@@ -544,37 +659,40 @@ export declare const client: {
  * useEffect(() => { connectDevTools() }, [])
  * ```
  */
-export declare function connectDevTools(): void
+export declare function connectDevTools(): void;
 
 /**
  * Disconnect from Redux DevTools.
  */
-export declare function disconnectDevTools(): void
+export declare function disconnectDevTools(): void;
 
 /**
  * Utility type: extracts the union of all payload types from an actions/effects catalog.
  * Useful for discriminated union switch/case in reducers.
  */
-export type { UnionOf } from './src/standalone.ts'
+export type { UnionOf } from "./src/standalone.ts";
 
 /**
  * Standalone runtime for Android WebView (no Deno required).
  * Real implementation in standalone.ts, interface declared here for editor support.
- * 
+ *
  * @typeParam S - AppState type
  * @typeParam A - Action union type
  * @typeParam E - Effect union type
  * @returns AioApp instance with state access
  */
 export declare function initStandalone<S, A, E>(initialState: S, config: {
-  reduce: (state: S, action: A) => { state: S; effects: (E | ScheduleEffect)[] }
-  execute: (app: AioApp<S, A>, effect: E) => void
-  persist?: boolean
-  stateForDB?: (state: S) => Partial<S>
-  stateForUI?: (state: S) => unknown
-  persistKey?: string
-  persistDebounceMs?: number
-  perfCheck?: PerfCheck
-  perfBudget?: PerfBudget
-  onRestore?: (state: S) => S
-}): AioApp<S, A>
+  reduce: (
+    state: S,
+    action: A,
+  ) => { state: S; effects: (E | ScheduleEffect)[] };
+  execute: (app: AioApp<S, A>, effect: E) => void;
+  persist?: boolean;
+  stateForDB?: (state: S) => Partial<S>;
+  stateForUI?: (state: S) => unknown;
+  persistKey?: string;
+  persistDebounceMs?: number;
+  perfCheck?: PerfCheck;
+  perfBudget?: PerfBudget;
+  onRestore?: (state: S) => S;
+}): AioApp<S, A>;

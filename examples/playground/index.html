@@ -1,0 +1,369 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AIO Playground</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: system-ui, -apple-system, sans-serif; background: #1a1a2e; color: #e8e8e8; }
+    .header { padding: 1rem 2rem; background: #16213e; border-bottom: 1px solid #333; display: flex; align-items: center; gap: 1rem; }
+    .header h1 { font-size: 1.2rem; font-weight: 400; color: #4a9eff; letter-spacing: 0.05em; }
+    .header span { font-size: 0.8rem; color: #666; }
+    .layout { display: flex; height: calc(100vh - 52px); }
+    .editor-panel { flex: 1; display: flex; flex-direction: column; border-right: 1px solid #333; }
+    .preview-panel { flex: 1; display: flex; flex-direction: column; }
+    .panel-header { padding: 0.5rem 1rem; background: #16213e; font-size: 0.8rem; color: #888; display: flex; justify-content: space-between; align-items: center; }
+    .panel-header button { padding: 0.3rem 0.8rem; background: #4a9eff; border: none; border-radius: 4px; color: white; cursor: pointer; font-size: 0.8rem; }
+    .panel-header button:hover { background: #3a8eef; }
+    textarea { flex: 1; background: #0a0a1a; color: #e8e8e8; border: none; padding: 1rem; font-family: 'Fira Code', 'Cascadia Code', monospace; font-size: 0.9rem; line-height: 1.6; resize: none; outline: none; tab-size: 2; }
+    textarea::selection { background: #264f78; }
+    #preview { flex: 1; background: white; }
+    #preview iframe { width: 100%; height: 100%; border: none; }
+    .examples { display: flex; gap: 0.5rem; }
+    .examples button { padding: 0.2rem 0.6rem; background: transparent; border: 1px solid #444; border-radius: 3px; color: #aaa; cursor: pointer; font-size: 0.75rem; }
+    .examples button:hover { border-color: #4a9eff; color: #4a9eff; }
+    .examples button.active { border-color: #4a9eff; color: #4a9eff; background: rgba(74, 158, 255, 0.1); }
+    #error { color: #f44; padding: 0.5rem 1rem; font-size: 0.8rem; background: #1a0a0a; display: none; max-height: 80px; overflow: auto; }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <h1>aio playground</h1>
+    <span>standalone mode - no server needed</span>
+  </div>
+  <div class="layout">
+    <div class="editor-panel">
+      <div class="panel-header">
+        <div class="examples">
+          <button class="active" onclick="loadExample('counter')">Counter</button>
+          <button onclick="loadExample('todo')">Todo</button>
+          <button onclick="loadExample('timer')">Timer</button>
+        </div>
+        <button onclick="run()">Run</button>
+      </div>
+      <textarea id="code" spellcheck="false"></textarea>
+      <div id="error"></div>
+    </div>
+    <div class="preview-panel">
+      <div class="panel-header">
+        <span>Preview</span>
+        <span id="status"></span>
+      </div>
+      <div id="preview"></div>
+    </div>
+  </div>
+
+  <script>
+    const EXAMPLES = {
+      counter: `// Counter — simplest aio app
+const { initStandalone, draft } = aio;
+const { createElement: h, useState, useEffect } = React;
+
+// State + reducer + effects
+const initial = { count: 0 };
+
+function reduce(state, action) {
+  return draft(state, d => {
+    switch (action.type) {
+      case 'increment': d.count += action.payload?.by || 1; break;
+      case 'decrement': d.count -= action.payload?.by || 1; break;
+      case 'reset': d.count = 0; break;
+    }
+    return [];
+  });
+}
+
+const app = initStandalone(initial, { reduce, execute: () => {} });
+
+// UI
+function App() {
+  const { state, send } = aio.useAio();
+  if (!state) return h('div', null, 'Loading...');
+
+  const btn = { padding: '0.75rem 1.5rem', fontSize: '1.5rem', cursor: 'pointer' };
+  return h('div', { style: { textAlign: 'center', padding: '3rem', fontFamily: 'system-ui' } },
+    h('h1', null, 'Counter'),
+    h('div', { style: { fontSize: '4rem', margin: '1rem', color: '#4a9eff' } }, state.count),
+    h('div', { style: { display: 'flex', gap: '0.5rem', justifyContent: 'center' } },
+      h('button', { style: btn, onClick: () => send({ type: 'decrement' }) }, '−'),
+      h('button', { style: btn, onClick: () => send({ type: 'reset' }) }, 'Reset'),
+      h('button', { style: btn, onClick: () => send({ type: 'increment' }) }, '+'),
+    ),
+  );
+}`,
+
+      todo: `// Todo list with add, toggle, delete
+const { initStandalone, draft } = aio;
+const { createElement: h, useState } = React;
+
+const initial = { items: [], nextId: 1 };
+
+function reduce(state, action) {
+  return draft(state, d => {
+    switch (action.type) {
+      case 'add':
+        d.items.push({ id: d.nextId++, text: action.payload.text, done: false });
+        break;
+      case 'toggle': {
+        const item = d.items.find(t => t.id === action.payload.id);
+        if (item) item.done = !item.done;
+        break;
+      }
+      case 'remove':
+        d.items = d.items.filter(t => t.id !== action.payload.id);
+        break;
+    }
+    return [];
+  });
+}
+
+const app = initStandalone(initial, { reduce, execute: () => {}, persist: false });
+
+function App() {
+  const { state, send } = aio.useAio();
+  const [input, setInput] = useState('');
+  if (!state) return h('div', null, 'Loading...');
+
+  const onAdd = (e) => {
+    e.preventDefault();
+    if (input.trim()) { send({ type: 'add', payload: { text: input.trim() } }); setInput(''); }
+  };
+
+  return h('div', { style: { maxWidth: 400, margin: '2rem auto', fontFamily: 'system-ui' } },
+    h('h1', { style: { color: '#c77', textAlign: 'center' } }, 'todos'),
+    h('form', { onSubmit: onAdd, style: { display: 'flex', gap: '0.5rem', marginBottom: '1rem' } },
+      h('input', { value: input, onChange: e => setInput(e.target.value), placeholder: 'What needs to be done?', style: { flex: 1, padding: '0.5rem' } }),
+      h('button', { type: 'submit', style: { padding: '0.5rem 1rem' } }, 'Add'),
+    ),
+    ...state.items.map(t =>
+      h('div', { key: t.id, style: { display: 'flex', alignItems: 'center', gap: '0.5rem', padding: '0.5rem 0', borderBottom: '1px solid #eee' } },
+        h('input', { type: 'checkbox', checked: t.done, onChange: () => send({ type: 'toggle', payload: { id: t.id } }) }),
+        h('span', { style: { flex: 1, textDecoration: t.done ? 'line-through' : 'none', color: t.done ? '#999' : '#333' } }, t.text),
+        h('button', { onClick: () => send({ type: 'remove', payload: { id: t.id } }), style: { border: 'none', background: 'none', color: '#c44', cursor: 'pointer' } }, 'x'),
+      )
+    ),
+    state.items.length > 0 && h('div', { style: { marginTop: '0.5rem', fontSize: '0.85rem', color: '#888' } },
+      state.items.filter(t => !t.done).length + ' remaining'
+    ),
+  );
+}`,
+
+      timer: `// Timer with start/stop/reset and effects
+const { initStandalone, draft } = aio;
+const { createElement: h } = React;
+
+const initial = { seconds: 0, running: false };
+
+function reduce(state, action) {
+  return draft(state, d => {
+    const effects = [];
+    switch (action.type) {
+      case 'start': d.running = true; effects.push({ type: 'startTimer' }); break;
+      case 'stop': d.running = false; effects.push({ type: 'stopTimer' }); break;
+      case 'tick': if (d.running) d.seconds++; break;
+      case 'reset': d.seconds = 0; d.running = false; effects.push({ type: 'stopTimer' }); break;
+    }
+    return effects;
+  });
+}
+
+let interval = null;
+function execute(app, effect) {
+  if (effect.type === 'startTimer') {
+    if (interval) clearInterval(interval);
+    interval = setInterval(() => app.dispatch({ type: 'tick' }), 1000);
+  }
+  if (effect.type === 'stopTimer') {
+    if (interval) { clearInterval(interval); interval = null; }
+  }
+}
+
+const app = initStandalone(initial, { reduce, execute, persist: false });
+
+function App() {
+  const { state, send } = aio.useAio();
+  if (!state) return h('div', null, 'Loading...');
+
+  const mm = String(Math.floor(state.seconds / 60)).padStart(2, '0');
+  const ss = String(state.seconds % 60).padStart(2, '0');
+  const btn = { padding: '0.5rem 1.5rem', fontSize: '1rem', cursor: 'pointer', borderRadius: 4 };
+
+  return h('div', { style: { textAlign: 'center', padding: '3rem', fontFamily: 'system-ui' } },
+    h('h1', null, 'Timer'),
+    h('div', { style: { fontSize: '5rem', fontFamily: 'monospace', margin: '1rem', color: state.running ? '#4a9eff' : '#666' } }, mm + ':' + ss),
+    h('div', { style: { display: 'flex', gap: '0.5rem', justifyContent: 'center' } },
+      !state.running
+        ? h('button', { style: { ...btn, background: '#4a9eff', color: 'white', border: 'none' }, onClick: () => send({ type: 'start' }) }, 'Start')
+        : h('button', { style: { ...btn, background: '#f44', color: 'white', border: 'none' }, onClick: () => send({ type: 'stop' }) }, 'Stop'),
+      h('button', { style: btn, onClick: () => send({ type: 'reset' }) }, 'Reset'),
+    ),
+  );
+}`,
+    };
+
+    const codeEl = document.getElementById('code');
+    const previewEl = document.getElementById('preview');
+    const errorEl = document.getElementById('error');
+    const statusEl = document.getElementById('status');
+    let currentExample = 'counter';
+
+    function loadExample(name) {
+      currentExample = name;
+      codeEl.value = EXAMPLES[name] || '';
+      document.querySelectorAll('.examples button').forEach(b => b.classList.remove('active'));
+      document.querySelector(`.examples button[onclick="loadExample('${name}')"]`)?.classList.add('active');
+      run();
+    }
+
+    function run() {
+      errorEl.style.display = 'none';
+      const code = codeEl.value;
+
+      // Build iframe with React + Immer + aio standalone from CDN
+      const html = `<!DOCTYPE html>
+<html>
+<head>
+  <script src="https://esm.sh/react@18.3.1/umd/react.development.js"><\/script>
+  <script src="https://esm.sh/react-dom@18.3.1/umd/react-dom.development.js"><\/script>
+  <script src="https://esm.sh/immer@10.2.0/dist/immer.umd.development.js"><\/script>
+  <style>body { margin: 0; }</style>
+</head>
+<body>
+  <div id="root"></div>
+  <script>
+    // Mini aio standalone runtime (embedded for playground)
+    const aio = (function() {
+      const { produce } = immer;
+      const listeners = new Set();
+      let _state = null;
+      let _dispatch = null;
+
+      function draft(state, fn) {
+        let effects = [];
+        const next = produce(state, d => { effects = fn(d); });
+        if (!effects) effects = [];
+        return { state: next, effects };
+      }
+
+      function initStandalone(initial, config) {
+        let state = initial;
+        if (config.persist !== false) {
+          try {
+            const raw = localStorage.getItem('aio_playground');
+            if (raw) {
+              const p = JSON.parse(raw);
+              state = { ...initial, ...p };
+            }
+          } catch {}
+        }
+        _state = state;
+
+        let dispatching = false;
+        const queue = [];
+
+        function dispatch(action) {
+          queue.push(action);
+          if (dispatching) return;
+          dispatching = true;
+          let i = 0;
+          while (queue.length > 0 && i++ < 1000) {
+            const a = queue.shift();
+            try {
+              const result = config.reduce(state, a);
+              state = result.state;
+              _state = state;
+              for (const effect of result.effects || []) {
+                try { config.execute(app, effect); } catch (e) { console.error('[aio] effect error:', e); }
+              }
+            } catch (e) { console.error('[aio] reduce error:', e); }
+          }
+          dispatching = false;
+          for (const fn of listeners) fn(_state);
+          if (config.persist !== false) {
+            try { localStorage.setItem('aio_playground', JSON.stringify(state)); } catch {}
+          }
+        }
+
+        const app = { dispatch, getState: () => state };
+        _dispatch = dispatch;
+        return app;
+      }
+
+      function useAio() {
+        const [state, setState] = React.useState(_state);
+        React.useEffect(() => {
+          const fn = s => setState(s);
+          listeners.add(fn);
+          if (_state) setState(_state);
+          return () => listeners.delete(fn);
+        }, []);
+        return {
+          state,
+          send: action => { if (_dispatch) _dispatch(action); },
+        };
+      }
+
+      function useLocal(initial) {
+        const [v, set] = React.useState(initial);
+        return { local: v, set };
+      }
+
+      return { initStandalone, useAio, useLocal, draft };
+    })();
+
+    try {
+      ${code}
+
+      if (typeof App === 'function') {
+        ReactDOM.createRoot(document.getElementById('root')).render(React.createElement(App));
+      }
+    } catch (e) {
+      document.getElementById('root').innerHTML = '<pre style="color:red;padding:1rem">' + e.message + '\\n' + (e.stack || '') + '</pre>';
+    }
+  <\/script>
+</body>
+</html>`;
+
+      // Clean up previous iframe
+      previewEl.innerHTML = '';
+      const iframe = document.createElement('iframe');
+      iframe.sandbox = 'allow-scripts allow-same-origin';
+      previewEl.appendChild(iframe);
+
+      iframe.contentDocument.open();
+      iframe.contentDocument.write(html);
+      iframe.contentDocument.close();
+
+      statusEl.textContent = 'running';
+      setTimeout(() => statusEl.textContent = '', 1500);
+    }
+
+    // Handle tab key in editor
+    codeEl.addEventListener('keydown', e => {
+      if (e.key === 'Tab') {
+        e.preventDefault();
+        const start = codeEl.selectionStart;
+        codeEl.value = codeEl.value.substring(0, start) + '  ' + codeEl.value.substring(codeEl.selectionEnd);
+        codeEl.selectionStart = codeEl.selectionEnd = start + 2;
+      }
+      // Ctrl/Cmd+Enter to run
+      if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+        e.preventDefault();
+        run();
+      }
+    });
+
+    // Catch iframe errors
+    window.addEventListener('message', e => {
+      if (e.data?.type === 'error') {
+        errorEl.textContent = e.data.message;
+        errorEl.style.display = 'block';
+      }
+    });
+
+    // Load initial example
+    loadExample('counter');
+  </script>
+</body>
+</html>

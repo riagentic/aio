@@ -12,6 +12,13 @@ aio-counter
 .gradle/
 build/
 
+# Secrets
+.env
+
+# Build / test artifacts
+log/
+coverage/
+
 # Runtime-generated — never commit
 .aio.pid
 .aio.log

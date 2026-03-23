@@ -1,181 +1,215 @@
-import { assertEquals } from '@std/assert'
-import { AppLock, readLock, removeLock, lockPath, resolveAppId, slugify, instances, isProcessAlive } from '../src/single-instance-lock.ts'
+import { assertEquals } from "@std/assert";
+import {
+  AppLock,
+  instances,
+  isProcessAlive,
+  lockPath,
+  readLock,
+  removeLock,
+  resolveAppId,
+  slugify,
+} from "../src/single-instance-lock.ts";
 
-const TEST_APP = 'aio-test-lock-' + Deno.pid  // unique per test run to avoid collisions
+const TEST_APP = "aio-test-lock-" + Deno.pid; // unique per test run to avoid collisions
 
 async function cleanup() {
-  removeLock(TEST_APP)
+  removeLock(TEST_APP);
 }
 
 // ── slugify ──
 
-Deno.test('slugify: basic', () => {
-  assertEquals(slugify('My App'), 'my-app')
-  assertEquals(slugify('hello world!'), 'hello-world')
-  assertEquals(slugify(''), 'aio-app')
-  assertEquals(slugify('---'), 'aio-app')
-  assertEquals(slugify('My App! @v2'), 'my-app-v2')
-})
+Deno.test("slugify: basic", () => {
+  assertEquals(slugify("My App"), "my-app");
+  assertEquals(slugify("hello world!"), "hello-world");
+  assertEquals(slugify(""), "aio-app");
+  assertEquals(slugify("---"), "aio-app");
+  assertEquals(slugify("My App! @v2"), "my-app-v2");
+});
 
 // ── resolveAppId ──
 
-Deno.test('resolveAppId: slugifies explicit appId', () => {
-  assertEquals(resolveAppId('My Custom App'), 'my-custom-app')
-})
+Deno.test("resolveAppId: slugifies explicit appId", () => {
+  assertEquals(resolveAppId("My Custom App"), "my-custom-app");
+});
 
-Deno.test('resolveAppId: throws when no appId provided', () => {
-  let threw = false
-  try { resolveAppId() } catch { threw = true }
-  assertEquals(threw, true)
-})
+Deno.test("resolveAppId: throws when no appId provided", () => {
+  let threw = false;
+  try {
+    resolveAppId();
+  } catch {
+    threw = true;
+  }
+  assertEquals(threw, true);
+});
 
 // ── lockPath ──
 
-Deno.test('lockPath: contains appId under aio/ subdir', () => {
-  const p = lockPath('my-app')
-  assertEquals(p.includes('my-app.lock'), true)
-  assertEquals(p.includes('aio'), true)  // lives under .../aio/ directory
-})
+Deno.test("lockPath: contains appId under aio/ subdir", () => {
+  const p = lockPath("my-app");
+  assertEquals(p.includes("my-app.lock"), true);
+  assertEquals(p.includes("aio"), true); // lives under .../aio/ directory
+});
 
 // ── acquire / release basics ──
 
-Deno.test('AppLock: acquire succeeds when no lock exists', async () => {
-  await cleanup()
-  const lock = new AppLock(TEST_APP)
+Deno.test("AppLock: acquire succeeds when no lock exists", async () => {
+  await cleanup();
+  const lock = new AppLock(TEST_APP);
   try {
-    const result = await lock.acquire(19999)
-    assertEquals(result.ok, true)
+    const result = await lock.acquire(19999);
+    assertEquals(result.ok, true);
     // Lock file should exist with correct data
-    const data = readLock(TEST_APP)
-    assertEquals(data?.appId, TEST_APP)
-    assertEquals(data?.port, 19999)
-    assertEquals(data?.pid, Deno.pid)
-    assertEquals(data?.status, 'starting')
-    assertEquals(data?.cwd, Deno.cwd())
+    const data = readLock(TEST_APP);
+    assertEquals(data?.appId, TEST_APP);
+    assertEquals(data?.port, 19999);
+    assertEquals(data?.pid, Deno.pid);
+    assertEquals(data?.status, "starting");
+    assertEquals(data?.cwd, Deno.cwd());
   } finally {
-    lock.release()
-    await cleanup()
+    lock.release();
+    await cleanup();
   }
-})
+});
 
-Deno.test('AppLock: release removes lock file', async () => {
-  await cleanup()
-  const lock = new AppLock(TEST_APP)
+Deno.test("AppLock: release removes lock file", async () => {
+  await cleanup();
+  const lock = new AppLock(TEST_APP);
   try {
-    await lock.acquire(19999)
-    lock.release()
-    assertEquals(readLock(TEST_APP), null)
+    await lock.acquire(19999);
+    lock.release();
+    assertEquals(readLock(TEST_APP), null);
   } finally {
-    await cleanup()
+    await cleanup();
   }
-})
+});
 
-Deno.test('AppLock: acquire cleans dead process lock', async () => {
-  await cleanup()
+Deno.test("AppLock: acquire cleans dead process lock", async () => {
+  await cleanup();
   // Write a lock file with a dead PID
-  const { writeLock } = await import('../src/single-instance-lock.ts')
-  writeLock({ appId: TEST_APP, pid: 999999, port: 19999, startedAt: Date.now(), status: 'started', cwd: '/tmp' })
-  const lock = new AppLock(TEST_APP)
+  const { writeLock } = await import("../src/single-instance-lock.ts");
+  writeLock({
+    appId: TEST_APP,
+    pid: 999999,
+    port: 19999,
+    startedAt: Date.now(),
+    status: "started",
+    cwd: "/tmp",
+  });
+  const lock = new AppLock(TEST_APP);
   try {
-    const result = await lock.acquire(19999)
-    assertEquals(result.ok, true)
+    const result = await lock.acquire(19999);
+    assertEquals(result.ok, true);
   } finally {
-    lock.release()
-    await cleanup()
+    lock.release();
+    await cleanup();
   }
-})
+});
 
-Deno.test('AppLock: release is idempotent', async () => {
-  await cleanup()
-  const lock = new AppLock(TEST_APP)
-  lock.release() // no lock file — should not throw
-  lock.release() // call again — still no throw
-})
+Deno.test("AppLock: release is idempotent", async () => {
+  await cleanup();
+  const lock = new AppLock(TEST_APP);
+  lock.release(); // no lock file — should not throw
+  lock.release(); // call again — still no throw
+});
 
-Deno.test('AppLock: lock file contains startedAt timestamp', async () => {
-  await cleanup()
-  const before = Date.now()
-  const lock = new AppLock(TEST_APP)
+Deno.test("AppLock: lock file contains startedAt timestamp", async () => {
+  await cleanup();
+  const before = Date.now();
+  const lock = new AppLock(TEST_APP);
   try {
-    await lock.acquire(19999)
-    const data = readLock(TEST_APP)!
-    assertEquals(data.startedAt >= before, true)
-    assertEquals(data.startedAt <= Date.now(), true)
+    await lock.acquire(19999);
+    const data = readLock(TEST_APP)!;
+    assertEquals(data.startedAt >= before, true);
+    assertEquals(data.startedAt <= Date.now(), true);
   } finally {
-    lock.release()
-    await cleanup()
+    lock.release();
+    await cleanup();
   }
-})
+});
 
-Deno.test('AppLock: update modifies lock data', async () => {
-  await cleanup()
-  const lock = new AppLock(TEST_APP)
+Deno.test("AppLock: update modifies lock data", async () => {
+  await cleanup();
+  const lock = new AppLock(TEST_APP);
   try {
-    await lock.acquire(19999)
-    lock.update({ status: 'started', socketPath: '/tmp/test.sock' })
-    const data = readLock(TEST_APP)!
-    assertEquals(data.status, 'started')
-    assertEquals(data.socketPath, '/tmp/test.sock')
-    assertEquals(data.pid, Deno.pid)  // unchanged
+    await lock.acquire(19999);
+    lock.update({ status: "started", socketPath: "/tmp/test.sock" });
+    const data = readLock(TEST_APP)!;
+    assertEquals(data.status, "started");
+    assertEquals(data.socketPath, "/tmp/test.sock");
+    assertEquals(data.pid, Deno.pid); // unchanged
   } finally {
-    lock.release()
-    await cleanup()
+    lock.release();
+    await cleanup();
   }
-})
+});
 
-Deno.test('AppLock: release only removes own lock', async () => {
-  await cleanup()
+Deno.test("AppLock: release only removes own lock", async () => {
+  await cleanup();
   // Write a lock with a different PID (simulating another process)
-  const { writeLock } = await import('../src/single-instance-lock.ts')
-  writeLock({ appId: TEST_APP, pid: 999999, port: 19999, startedAt: Date.now(), status: 'started', cwd: '/tmp' })
-  const lock = new AppLock(TEST_APP)
-  lock.release()  // should NOT remove — PID doesn't match
+  const { writeLock } = await import("../src/single-instance-lock.ts");
+  writeLock({
+    appId: TEST_APP,
+    pid: 999999,
+    port: 19999,
+    startedAt: Date.now(),
+    status: "started",
+    cwd: "/tmp",
+  });
+  const lock = new AppLock(TEST_APP);
+  lock.release(); // should NOT remove — PID doesn't match
   // Lock should still exist (it has a different PID, but the process is dead so...)
   // Actually since 999999 is dead, readLock will still return data.
   // The key is that release() checks PID match — it won't remove someone else's lock.
   // In this case lock.acquired is false so release() is a no-op.
-  await cleanup()
-})
+  await cleanup();
+});
 
 // ── instances ──
 
-Deno.test('instances: returns empty when no locks', () => {
-  const all = instances('nonexistent-app-xyz')
-  assertEquals(all.length, 0)
-})
+Deno.test("instances: returns empty when no locks", () => {
+  const all = instances("nonexistent-app-xyz");
+  assertEquals(all.length, 0);
+});
 
-Deno.test('instances: finds running app', async () => {
-  await cleanup()
-  const lock = new AppLock(TEST_APP)
+Deno.test("instances: finds running app", async () => {
+  await cleanup();
+  const lock = new AppLock(TEST_APP);
   try {
-    await lock.acquire(19999)
-    lock.update({ status: 'started' })
-    const all = instances(TEST_APP)
-    assertEquals(all.length, 1)
-    assertEquals(all[0]!.appId, TEST_APP)
-    assertEquals(all[0]!.pid, Deno.pid)
-    assertEquals(all[0]!.alive, true)
+    await lock.acquire(19999);
+    lock.update({ status: "started" });
+    const all = instances(TEST_APP);
+    assertEquals(all.length, 1);
+    assertEquals(all[0]!.appId, TEST_APP);
+    assertEquals(all[0]!.pid, Deno.pid);
+    assertEquals(all[0]!.alive, true);
   } finally {
-    lock.release()
-    await cleanup()
+    lock.release();
+    await cleanup();
   }
-})
+});
 
-Deno.test('instances: cleans stale locks', async () => {
-  const staleApp = TEST_APP + '-stale'
-  const { writeLock } = await import('../src/single-instance-lock.ts')
-  writeLock({ appId: staleApp, pid: 999999, port: 19999, startedAt: Date.now(), status: 'started', cwd: '/tmp' })
-  const all = instances(staleApp)
-  assertEquals(all.length, 0)  // cleaned because PID 999999 is dead
-  assertEquals(readLock(staleApp), null)  // lock file removed
-})
+Deno.test("instances: cleans stale locks", async () => {
+  const staleApp = TEST_APP + "-stale";
+  const { writeLock } = await import("../src/single-instance-lock.ts");
+  writeLock({
+    appId: staleApp,
+    pid: 999999,
+    port: 19999,
+    startedAt: Date.now(),
+    status: "started",
+    cwd: "/tmp",
+  });
+  const all = instances(staleApp);
+  assertEquals(all.length, 0); // cleaned because PID 999999 is dead
+  assertEquals(readLock(staleApp), null); // lock file removed
+});
 
 // ── isProcessAlive ──
 
-Deno.test('isProcessAlive: current process is alive', () => {
-  assertEquals(isProcessAlive(Deno.pid), true)
-})
+Deno.test("isProcessAlive: current process is alive", () => {
+  assertEquals(isProcessAlive(Deno.pid), true);
+});
 
-Deno.test('isProcessAlive: dead PID returns false', () => {
-  assertEquals(isProcessAlive(999999), false)
-})
+Deno.test("isProcessAlive: dead PID returns false", () => {
+  assertEquals(isProcessAlive(999999), false);
+});

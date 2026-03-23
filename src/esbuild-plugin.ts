@@ -7,39 +7,42 @@
 // aiol lint checks (Layer 2), and error overlay (Layer 3).
 
 /** Creates an esbuild plugin that makes browser builds safe by intercepting server-only imports. */
-// deno-lint-ignore no-explicit-any
-export function aioBrowserPlugin(): { name: string; setup: (build: any) => void } {
+export function aioBrowserPlugin(): {
+  name: string;
+  // deno-lint-ignore no-explicit-any
+  setup: (build: any) => void;
+} {
   return {
-    name: 'aio-browser',
+    name: "aio-browser",
     // deno-lint-ignore no-explicit-any
     setup(build: any) {
       // Intercept @std/* — Deno standard library, never browser-safe
       build.onResolve({ filter: /^@std\// }, (args: { path: string }) => ({
         path: args.path,
-        namespace: 'aio-server-only',
-      }))
+        namespace: "aio-server-only",
+      }));
 
       // Intercept node:* — Node built-ins, never browser-safe
       build.onResolve({ filter: /^node:/ }, (args: { path: string }) => ({
         path: args.path,
-        namespace: 'aio-server-only',
-      }))
+        namespace: "aio-server-only",
+      }));
 
       // Return throwing proxy module for intercepted imports
       build.onLoad(
-        { filter: /.*/, namespace: 'aio-server-only' },
+        { filter: /.*/, namespace: "aio-server-only" },
         (args: { path: string }) => ({
           contents: serverOnlyProxy(args.path),
-          loader: 'js',
+          loader: "js",
         }),
-      )
+      );
     },
-  }
+  };
 }
 
 /** Generates JS source for a throwing Proxy module */
 function serverOnlyProxy(pkg: string): string {
-  const escaped = pkg.replace(/'/g, "\\'")
+  const escaped = pkg.replace(/'/g, "\\'");
   return `
 const _handler = {
   get(_, prop) {
@@ -52,5 +55,5 @@ const _handler = {
 };
 const _mod = new Proxy(function(){}, _handler);
 export default _mod;
-`
+`;
 }

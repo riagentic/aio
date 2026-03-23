@@ -1,10 +1,87 @@
 # Changelog
 
+## v1.0.0-alpha3
+
+**Logging enabled by default**
+
+- Logging is now on by default — set `logging: false` to disable
+- No need for `logging: true` or `logging: {}` in most apps
+
+**Logger rewrite — plain text, wipe-on-start, colored console**
+
+- Log format changed from JSONL to plain text — human-readable, grep-friendly
+- Format:
+  `{timestamp}  {LEVEL}  {category}  {message}  {data}  {duration}  {source}`
+- Colored ANSI console output in dev mode (auto-detected) — keyword highlighting
+  for started/ready/failed/error
+- Console fallback (when AioLogger not active) mirrors app.log — prints info +
+  error only
+- Logs wiped on each app start (clean slate). Use `backupLogs: true` (or
+  `--backup-logs`) to rotate instead
+- `rotate: { keep }` config replaced by `backupLogs: boolean` +
+  `backupKeep: number`
+
+**Unified logger singleton**
+
+- Single `logger.ts` module — removed duplicate logging from `aio.ts`
+- Shared `Listeners<T>` extracted — deduplicates browser.ts and standalone.ts
+
+**First-class error infrastructure**
+
+- `AioError` class — structured errors with `code`, `source`, `context`,
+  `correlationId`, `stateSnapshot`
+- 16 error codes: `REDUCE_ERROR`, `EFFECT_ERROR`, `FLOW_ERROR`, `INIT_ERROR`,
+  etc.
+- Correlation IDs on all errors — trace cause through `debug.log`
+- Memory pressure monitor — heap usage alerts before OOM, configurable
+  thresholds
+- Time-travel error markers — errors visible as red markers in TT timeline
+- `MemoryConfig` type exported:
+  `{ enabled?, interval?, warnThreshold?, criticalThreshold?, onMemoryPressure? }`
+
+**Diagnostics module — zero-config observability**
+
+- New `src/diagnostics/` module: state diffs, action log, checkpoint recovery,
+  crash handler
+- State diffs: key-level change detection logged to `debug.log` after each
+  action
+- Action log: rolling JSONL file (`log/actions.jsonl`) with configurable max
+  entries
+- Checkpoint: debounced atomic state snapshots to `log/checkpoint.json` with
+  `onCheckpointRestore` recovery callback
+- Crash handler: global `unhandledrejection`/`error` listeners with emergency
+  checkpoint write
+- Two-level config: sensible dev/prod defaults +
+  `diagnostics: { dev: {...}, prod: {...} }` overrides
+- Kill switch: `diagnostics: false` disables entire subsystem
+- New `afterAction` hook in dispatch for post-reduce observation
+
+**Circuit breaker rolling window**
+
+- `circuitBreaker.window` option: rolling time window for error counting (ms)
+- `featureErrors` changed from cumulative count to timestamp array — enables
+  sliding window pruning
+- Without `window`, behavior is unchanged (cumulative count, backward
+  compatible)
+
+**Console cleanup**
+
+- ~27 raw `console.*` calls in runtime files routed through structured `log.*`
+- CLI tools (`build.ts`, `am.ts`, `electron.ts`, `standalone.ts`) keep
+  `console.*` — outside app lifecycle
+
+**Performance**
+
+- Time-travel `MAX_ENTRIES` bumped to 20,000 (was 10,000)
+
+---
+
 ## v1.0.0-alpha2
 
 ### BREAKING: Config audit — naming, defaults, fallbacks
 
 **Config renames:**
+
 - `persistDebounce` → `persistDebounceMs`
 - `effectTimeout` → `effectTimeoutMs`
 - `deltaThreshold` → `fullStateThreshold`
@@ -12,7 +89,9 @@
 - `singleton: 'takeover'` → `singleton: true` + `killExisting: true`
 
 **Config restructure:**
-- `ui.electron` + `headless` → `client: 'electron'|'browser'|'cli'|'server-only'`
+
+- `ui.electron` + `headless` →
+  `client: 'electron'|'browser'|'cli'|'server-only'`
 - `ui.keepAlive` → `keepServer` (top-level)
 - `ui.transport` → `transport` (top-level)
 - `ui.syncRate` → `ui.syncIntervalMs`
@@ -20,13 +99,16 @@
 **Now mandatory:** `appVersion` (was optional, defaulted to '0.1.0')
 
 **CLI flag changes:**
+
 - `--no-electron` / `--headless` → `--client=electron|browser|cli|server-only`
 - `--url` → `--server-url`
 - `--keep-alive` → `--keep-server`
 - New: `--kill-existing`
 
 **Behavior changes:**
-- Electron not installed + `client:'electron'` → error (was: silent browser fallback)
+
+- Electron not installed + `client:'electron'` → error (was: silent browser
+  fallback)
 - TLS cert fails + `--expose` → error (was: silent HTTP fallback)
 - KV open fails + `persist:true` → error (was: silent no-persistence)
 - `$HOME` missing + persistence → error (was: /tmp fallback)
@@ -36,55 +118,84 @@
 ## v1.0.0-alpha2
 
 **Breaking: `appId` mandatory in `aio.run()`**
-- `appId` must be passed in `aio.run({ appId: 'my-app', ... })` — no longer read from `deno.json`
-- Compiled builds don't have `deno.json` at runtime, so appId must be hardcoded in the app
+
+- `appId` must be passed in `aio.run({ appId: 'my-app', ... })` — no longer read
+  from `deno.json`
+- Compiled builds don't have `deno.json` at runtime, so appId must be hardcoded
+  in the app
 - `am` CLI still reads `deno.json` as dev-time fallback (or use `--app=X`)
-- Linter now warns if `appId` is in `deno.json` (with auto-fix to remove it) and errors if missing from `aio.run()`
+- Linter now warns if `appId` is in `deno.json` (with auto-fix to remove it) and
+  errors if missing from `aio.run()`
 
 **Promise-returning dispatch** (ISSUE-2)
-- `dispatch()` returns `Promise<void>` — resolves after reduce + sync effects complete
-- All bound feature methods return Promise: sync → `Promise<void>`, async → `Promise<T>`
+
+- `dispatch()` returns `Promise<void>` — resolves after reduce + sync effects
+  complete
+- All bound feature methods return Promise: sync → `Promise<void>`, async →
+  `Promise<T>`
 - `await syncMethod()` now works correctly (was a silent no-op before)
-- No breaking change — fire-and-forget calls work unchanged (returned Promise ignored)
+- No breaking change — fire-and-forget calls work unchanged (returned Promise
+  ignored)
 
 **Browser Import DX — three-layer defense**
-- esbuild plugin intercepts `@std/*` and `node:*` in prod builds — returns throwing proxy modules with clear error messages instead of cryptic browser failures
-- Dynamic import map: npm packages in `deno.json` automatically aliased for browser via esm.sh (no manual config needed)
-- `aiol` lint: 4 new checks — server-only imports in feature files, bare specifier validation, transitive detection (2 levels), static dynamic import detection
-- Error overlay enhanced with fix suggestions — classifies errors and shows actionable "FIX" box
+
+- esbuild plugin intercepts `@std/*` and `node:*` in prod builds — returns
+  throwing proxy modules with clear error messages instead of cryptic browser
+  failures
+- Dynamic import map: npm packages in `deno.json` automatically aliased for
+  browser via esm.sh (no manual config needed)
+- `aiol` lint: 4 new checks — server-only imports in feature files, bare
+  specifier validation, transitive detection (2 levels), static dynamic import
+  detection
+- Error overlay enhanced with fix suggestions — classifies errors and shows
+  actionable "FIX" box
 - Dev startup validation — warns about browser-unsafe imports on boot
 - All backward compatible — only affects code paths that were already broken
 
 **Reliable live reload** (ISSUE-1)
-- UDS wiring, event filter, health monitor, CSS selector, cache normalization, diagnostics
+
+- UDS wiring, event filter, health monitor, CSS selector, cache normalization,
+  diagnostics
 
 ## v1.0.0-alpha1
 
 **Breaking: all internal endpoints moved under `/__aio/`**
+
 - `/__trojan/*` → `/__aio/trojan/*`
 - `/__snapshot` → `/__aio/snapshot`
 - `/__health` → `/__aio/health`
 - User routes (`/`, `/ws`, `/app.js`, static files) unchanged
 
 **Security hardening**
+
 - Trojan POST endpoints require `X-AIO` header (CSRF protection)
 - Trojan rate-limited to 100 req/s
 - SQL allow-list: only `SELECT` queries (replaces deny-list)
 - All trojan POST mutations audit-logged
-- `allowedOrigins` enforced even when `--expose` active (additive with token auth)
-- Dev-only endpoints (`history`, `errors`, `client/`, `click/`, `tt`) return 403 in prod
+- `allowedOrigins` enforced even when `--expose` active (additive with token
+  auth)
+- Dev-only endpoints (`history`, `errors`, `client/`, `click/`, `tt`) return 403
+  in prod
 - Snapshot size limit (10MB) enforced on trojan snapshot POST
 - Path traversal fix for Windows root drive edge case
 
 **Mixed mode features**
-- `feature()` supports methods + actions + effects in one feature — name collisions validated
-- `__aio.id` replaces `__aio.prefix` — correct semantic name for feature identity
-- `am dispatch` supports both methods (positional args) and actions (named payload)
+
+- `feature()` supports methods + actions + effects in one feature — name
+  collisions validated
+- `__aio.id` replaces `__aio.prefix` — correct semantic name for feature
+  identity
+- `am dispatch` supports both methods (positional args) and actions (named
+  payload)
 
 **Audit: all 10 bugs (B1–B10) resolved**
-- Trojan snapshot size limit, offline queue bound, selector comment, `_anyProcessed` flag, Electron cleanup, path traversal, cron UTC docs, `--` CLI filter, `cmdStatus` exit codes, SQL `insertMany` removal
+
+- Trojan snapshot size limit, offline queue bound, selector comment,
+  `_anyProcessed` flag, Electron cleanup, path traversal, cron UTC docs, `--`
+  CLI filter, `cmdStatus` exit codes, SQL `insertMany` removal
 
 **Docs**
+
 - Architecture data flow diagram in core.md
 - `composeMiddleware` and `matchEffect` expanded with examples in api.md
 - Cron syntax documented in scheduling.md
@@ -97,237 +208,393 @@
 ## v0.9.5
 
 **Fix: Electron dev mode stuck on "Loading..."**
-- `did-finish-load` fires when HTML is parsed, but `await import('/App.tsx')` loads modules asynchronously. The previous 50ms timeout expired before `browser.ts` registered its IPC listeners, so the buffered state message was dropped silently.
-- Replaced timeout guessing with a `__aio:ready` handshake: `_connectIPC()` sends `__aio:ready` after registering all listeners; Electron main replies with `__aio:open` + last buffered state — guaranteed to arrive after listeners exist.
+
+- `did-finish-load` fires when HTML is parsed, but `await import('/App.tsx')`
+  loads modules asynchronously. The previous 50ms timeout expired before
+  `browser.ts` registered its IPC listeners, so the buffered state message was
+  dropped silently.
+- Replaced timeout guessing with a `__aio:ready` handshake: `_connectIPC()`
+  sends `__aio:ready` after registering all listeners; Electron main replies
+  with `__aio:open` + last buffered state — guaranteed to arrive after listeners
+  exist.
 
 ---
 
 ## v0.9.4
 
 **Fix: UI fails to load from JSR (npm: specifier bug)**
-- esbuild, when running inside Deno, rewrites bare imports to Deno specifiers (e.g. `'react'` → `'npm:react@^18'`). Browsers can't fetch `npm:` URLs, causing `Failed to fetch dynamically imported module` for any app using JSR-published aio.
-- `transpile()` in server.ts now strips the `npm:` prefix and version suffix after transform, so browsers resolve via the HTML import map as intended.
+
+- esbuild, when running inside Deno, rewrites bare imports to Deno specifiers
+  (e.g. `'react'` → `'npm:react@^18'`). Browsers can't fetch `npm:` URLs,
+  causing `Failed to fetch dynamically imported module` for any app using
+  JSR-published aio.
+- `transpile()` in server.ts now strips the `npm:` prefix and version suffix
+  after transform, so browsers resolve via the HTML import map as intended.
 
 **Fix: compile:electron and am tasks failed from JSR**
-- `deno.json` only exported `.` — added `./src/build` and `./src/am` exports so `jsr:@riagentic/aio@0.9.4/src/build` and `/src/am` resolve correctly.
-- README now pins exact version (`0.9.4`) instead of `^0.9` range — prevents users from silently picking up a broken earlier version.
+
+- `deno.json` only exported `.` — added `./src/build` and `./src/am` exports so
+  `jsr:@riagentic/aio@0.9.4/src/build` and `/src/am` resolve correctly.
+- README now pins exact version (`0.9.4`) instead of `^0.9` range — prevents
+  users from silently picking up a broken earlier version.
 
 **Ports: random ephemeral, no more conflicts between apps**
-- Server port now defaults to a random free port in the private range 49152–65535 (bind-tested, not just checked). Explicit `port:` config or `--port` flag still override.
-- Lock and socket files moved from `/tmp/` into `/tmp/aio/` (or `$XDG_RUNTIME_DIR/aio/`) — one directory to `rm -rf` when needed. Filenames simplified: `counter.lock`, `counter.sock` (no redundant `aio-` prefix inside the `aio/` dir).
-- `am` already reads port and trojanPort from the lock file — no changes needed there.
+
+- Server port now defaults to a random free port in the private range
+  49152–65535 (bind-tested, not just checked). Explicit `port:` config or
+  `--port` flag still override.
+- Lock and socket files moved from `/tmp/` into `/tmp/aio/` (or
+  `$XDG_RUNTIME_DIR/aio/`) — one directory to `rm -rf` when needed. Filenames
+  simplified: `counter.lock`, `counter.sock` (no redundant `aio-` prefix inside
+  the `aio/` dir).
+- `am` already reads port and trojanPort from the lock file — no changes needed
+  there.
 
 **Startup log: full resource + config listing**
-- Every open resource is listed on startup: `web`, `ws`, `uds`, `trojan` (only when TLS active).
-- All app settings shown (even defaults): `id`, `title`, `singleton`, `persist`, `expose`, `auth`, `sqlite` (when configured), `schedules` (when configured), `maxconn` (when configured).
-- `ws:` uses `wss://` when TLS is active; `web:` uses `https://` when TLS is active.
+
+- Every open resource is listed on startup: `web`, `ws`, `uds`, `trojan` (only
+  when TLS active).
+- All app settings shown (even defaults): `id`, `title`, `singleton`, `persist`,
+  `expose`, `auth`, `sqlite` (when configured), `schedules` (when configured),
+  `maxconn` (when configured).
+- `ws:` uses `wss://` when TLS is active; `web:` uses `https://` when TLS is
+  active.
 
 **Tests**
-- Dev-mode server test suite: verifies `/__aio/ui.js` has no `npm:` specifiers, import map uses CDN URLs, `/__aio/error` and `/__aio/client-error` endpoints work correctly. Would have caught the v0.9.3 UI breakage.
-- Config test: verifies `deno.json` exports `./src/build` and `./src/am` — catches missing export regressions.
+
+- Dev-mode server test suite: verifies `/__aio/ui.js` has no `npm:` specifiers,
+  import map uses CDN URLs, `/__aio/error` and `/__aio/client-error` endpoints
+  work correctly. Would have caught the v0.9.3 UI breakage.
+- Config test: verifies `deno.json` exports `./src/build` and `./src/am` —
+  catches missing export regressions.
 
 ---
 
 ## v0.9.3
 
-JSR-native builds + Electron install simplification (see v0.9.2 below — same release train).
+JSR-native builds + Electron install simplification (see v0.9.2 below — same
+release train).
 
 ---
 
 ## v0.9.2
 
 **JSR-native builds — all compile targets work from JSR**
-- esbuild HTTP plugin: `build.ts` now loads `browser.ts` / `standalone.ts` directly from JSR via HTTP — no temp dir, no manual dep list, esbuild resolves the full import graph automatically
-- Android template embedded as TypeScript constants (`src/android-template.ts`, generated by `scripts/gen-android-template.ts`) — eliminates file-fetch workaround and stops copying `.gradle/` build cache into new projects
-- `import.meta.dirname` was `null` for JSR/HTTP modules — all affected paths now use `new URL(..., import.meta.url)` throughout server.ts and build.ts
+
+- esbuild HTTP plugin: `build.ts` now loads `browser.ts` / `standalone.ts`
+  directly from JSR via HTTP — no temp dir, no manual dep list, esbuild resolves
+  the full import graph automatically
+- Android template embedded as TypeScript constants (`src/android-template.ts`,
+  generated by `scripts/gen-android-template.ts`) — eliminates file-fetch
+  workaround and stops copying `.gradle/` build cache into new projects
+- `import.meta.dirname` was `null` for JSR/HTTP modules — all affected paths now
+  use `new URL(..., import.meta.url)` throughout server.ts and build.ts
 
 **Electron install simplified**
-- `electron` removed from default `deno.json` imports — no longer downloaded for browser/CLI users
-- `install:electron` task: `deno add npm:electron && deno install --allow-scripts=npm:electron` (was two manual steps)
-- Electron launch failure now logs a warning + fallback URL instead of silently doing nothing
+
+- `electron` removed from default `deno.json` imports — no longer downloaded for
+  browser/CLI users
+- `install:electron` task:
+  `deno add npm:electron && deno install --allow-scripts=npm:electron` (was two
+  manual steps)
+- Electron launch failure now logs a warning + fallback URL instead of silently
+  doing nothing
 
 ---
 
 ## v0.9.1
 
 **Rich error overlay — Build Error and Runtime Error**
-- **Build Error** now shows file path, line:col, the source line, and a `^` caret at the exact column (structured esbuild data via `/__aio/error` JSON endpoint)
-- **Runtime Error** — new category for JS crashes after transpilation (wrong import, `null.x`, top-level throw, React render throw); previously showed a blank "Build Error" with no info
-- Both error types always `console.error` to DevTools so the full trace appears in F12 even when the overlay is visible
-- Runtime errors POST to `/__aio/client-error` → written to `debug.log` and surfaced by `am errors`; critical for Electron where DevTools isn't open by default
+
+- **Build Error** now shows file path, line:col, the source line, and a `^`
+  caret at the exact column (structured esbuild data via `/__aio/error` JSON
+  endpoint)
+- **Runtime Error** — new category for JS crashes after transpilation (wrong
+  import, `null.x`, top-level throw, React render throw); previously showed a
+  blank "Build Error" with no info
+- Both error types always `console.error` to DevTools so the full trace appears
+  in F12 even when the overlay is visible
+- Runtime errors POST to `/__aio/client-error` → written to `debug.log` and
+  surfaced by `am errors`; critical for Electron where DevTools isn't open by
+  default
 
 **Live reload — always-active dev WebSocket**
-- Dev HTML page now establishes a `_devWs` connection before the app boots, independent of `useAio`
-- Previously, live reload only worked when the app used `useAio`/`useFeature`; plain React apps or apps that crashed before first render got no reload
-- `_devWs` handles `__reload`, `__css` (hot-swap stylesheet), and `__boot:` (reload on server restart)
-- Apps using `useAio` have two WS connections in dev mode — the page-level reload WS and the state-sync WS; both are lightweight and dev-only
+
+- Dev HTML page now establishes a `_devWs` connection before the app boots,
+  independent of `useAio`
+- Previously, live reload only worked when the app used `useAio`/`useFeature`;
+  plain React apps or apps that crashed before first render got no reload
+- `_devWs` handles `__reload`, `__css` (hot-swap stylesheet), and `__boot:`
+  (reload on server restart)
+- Apps using `useAio` have two WS connections in dev mode — the page-level
+  reload WS and the state-sync WS; both are lightweight and dev-only
 
 ---
 
 ## v0.9.0
 
 **UI sync rate throttling**
-- `ui.syncRate?: number` — cap UI push rate to 1 update per N ms (default: `10` = 100fps)
-- Leading edge fires immediately (via microtask coalesce); trailing flush guarantees last state arrives within N ms
-- Prevents React re-render floods from high-frequency dispatch (timers, generators, reactive chains)
+
+- `ui.syncRate?: number` — cap UI push rate to 1 update per N ms (default: `10`
+  = 100fps)
+- Leading edge fires immediately (via microtask coalesce); trailing flush
+  guarantees last state arrives within N ms
+- Prevents React re-render floods from high-frequency dispatch (timers,
+  generators, reactive chains)
 - Applies to both WebSocket and UDS (Electron IPC) transports
 - `syncRate: 0` = microtask-only coalescing (old behavior, unbounded)
 
 **Async Worker-based SQLite — replaces sync ORM**
-- `AioDB` / `AioTable<T>` removed — replaced by `DB` interface with fully async methods
-- `openDb()` / `loadTables()` / `syncTables()` / `reloadTable()` removed from public API (now private internals)
-- `createDB(path, opts?)` — new factory for standalone DB access; `opts: { readonly?, pragmas?, readers? }`
+
+- `AioDB` / `AioTable<T>` removed — replaced by `DB` interface with fully async
+  methods
+- `openDb()` / `loadTables()` / `syncTables()` / `reloadTable()` removed from
+  public API (now private internals)
+- `createDB(path, opts?)` — new factory for standalone DB access;
+  `opts: { readonly?, pragmas?, readers? }`
 - `DEFAULT_PRAGMAS` exported — the default pragma set applied by `createDB`
-- `DB.query<T>(sql, params?)` → `Promise<QueryResult<T>>` — SELECT, rows in `.rows`
-- `DB.execute(sql, params?)` → `Promise<QueryResult>` — INSERT/UPDATE/DELETE, changes in `.changes`
-- `DB.transaction(stmts[])` → `Promise<QueryResult[]>` — atomic multi-statement batch
+- `DB.query<T>(sql, params?)` → `Promise<QueryResult<T>>` — SELECT, rows in
+  `.rows`
+- `DB.execute(sql, params?)` → `Promise<QueryResult>` — INSERT/UPDATE/DELETE,
+  changes in `.changes`
+- `DB.transaction(stmts[])` → `Promise<QueryResult[]>` — atomic multi-statement
+  batch
 - `DB.close()` → `Promise<void>`
-- `QueryResult<T>` = `{ rows: T[], changes: number, lastInsertRowId: bigint }` (`lastInsertRowId` is now `bigint`, was `number`)
-- `readers?: number` on `createDB` opts — N readonly Workers for parallel reads; `query()` round-robins, `execute()`/`transaction()` go to writer
-- `app.db` type changed from `AioDB | undefined` to `DB | undefined` — all `app.db` calls now need `await`
-- Permissions: `--allow-read --allow-write` only — `--allow-ffi` no longer required
+- `QueryResult<T>` = `{ rows: T[], changes: number, lastInsertRowId: bigint }`
+  (`lastInsertRowId` is now `bigint`, was `number`)
+- `readers?: number` on `createDB` opts — N readonly Workers for parallel reads;
+  `query()` round-robins, `execute()`/`transaction()` go to writer
+- `app.db` type changed from `AioDB | undefined` to `DB | undefined` — all
+  `app.db` calls now need `await`
+- Permissions: `--allow-read --allow-write` only — `--allow-ffi` no longer
+  required
 - All SQLite docs consolidated in [sqldb.md](./sqldb.md)
 
 **Log rotation on (re)start**
-- Each app start renames existing logs: `debug.log` → `debug.log.1`, `debug.log.1` → `debug.log.2`, etc.
-- `rotate.keep` controls how many archives to retain per file (default: 7, 0 = unlimited)
+
+- Each app start renames existing logs: `debug.log` → `debug.log.1`,
+  `debug.log.1` → `debug.log.2`, etc.
+- `rotate.keep` controls how many archives to retain per file (default: 7, 0 =
+  unlimited)
 - `rotate.maxMb` removed — startup rotation replaces size-based rotation
 - Fresh log files created automatically after rotation
 
 **`log` — public logging singleton**
+
 - `import { log } from 'aio'` — usable from any feature or effect file
-- `log.info / warn / error` → `app.log` (+ `error.log` for errors, `warning.log` for warnings); `log.debug / trace` → `debug.log`
-- Each entry includes `src: "filename.ts:line"` — auto-detected from call stack, no manual tagging needed
-- Silent no-op when `logging` is not configured in `aio.run()` — safe to use unconditionally
+- `log.info / warn / error` → `app.log` (+ `error.log` for errors, `warning.log`
+  for warnings); `log.debug / trace` → `debug.log`
+- Each entry includes `src: "filename.ts:line"` — auto-detected from call stack,
+  no manual tagging needed
+- Silent no-op when `logging` is not configured in `aio.run()` — safe to use
+  unconditionally
 - Browser-side `log` is a no-op stub (server-only writes)
 - `LogLevel` type exported from public API
 
 **Scaffolder**
-- Generated projects use `jsr:@riagentic/aio` — no longer downloads framework source
+
+- Generated projects use `jsr:@riagentic/aio` — no longer downloads framework
+  source
 - `init.sh` passes `--reload` to bust stale Deno caches on fresh install
 - `test` task added to generated `deno.json`
 
 **Type system**
-- `noUncheckedIndexedAccess` enabled — indexed access now returns `T | undefined` throughout
+
+- `noUncheckedIndexedAccess` enabled — indexed access now returns
+  `T | undefined` throughout
 
 ---
 
 ## v0.8.0
 
 **Unified API — `feature({ methods })` is the default**
-- `reactive()` removed — `feature({ methods })` is the one API for method-style features (migration: rename only)
-- `feature({ methods })` is the default; `feature({ actions, reduce })` is the explicit/advanced style
-- `bridge()` removed — `call({ timeout, retries }, ...)` covers all request/response patterns
+
+- `reactive()` removed — `feature({ methods })` is the one API for method-style
+  features (migration: rename only)
+- `feature({ methods })` is the default; `feature({ actions, reduce })` is the
+  explicit/advanced style
+- `bridge()` removed — `call({ timeout, retries }, ...)` covers all
+  request/response patterns
 
 **Object-form `reduce` and `execute` — named handlers replace switch/case**
-- `reduce: { increment(state, payload) { ... } }` — one method per action key, payload typed from action creator
-- `execute: { persist(app, payload) { ... } }` — one method per effect key, payload typed from effect creator
-- No more `switch(action.type)`, no more `{ A }` / `{ E }` context parameters in the default path
-- Function form (`reduce(state, action, { on, emit }) {}`) remains as escape hatch for foreign action handling
+
+- `reduce: { increment(state, payload) { ... } }` — one method per action key,
+  payload typed from action creator
+- `execute: { persist(app, payload) { ... } }` — one method per effect key,
+  payload typed from effect creator
+- No more `switch(action.type)`, no more `{ A }` / `{ E }` context parameters in
+  the default path
+- Function form (`reduce(state, action, { on, emit }) {}`) remains as escape
+  hatch for foreign action handling
 
 **Generators — unified sequential workflow API**
-- Works in both styles: `feature({ methods, generators })` and `feature({ actions, generators })`
-- Methods style: each generator auto-creates an action `${featureName}:${name}` — no trigger string needed
+
+- Works in both styles: `feature({ methods, generators })` and
+  `feature({ actions, generators })`
+- Methods style: each generator auto-creates an action `${featureName}:${name}`
+  — no trigger string needed
 - Actions style: generator key must match an action key — becomes the trigger
-- `flows:` key removed from both feature styles — `generators` is the only path now
+- `flows:` key removed from both feature styles — `generators` is the only path
+  now
 - `flow()` export removed; `cancelOn()` exported instead
 
 **`GenCtx<S>` — typed generator state**
-- `GenCtx<S>` is generic — `S` is inferred from the `state:` config automatically
-- `ctx.mutate('label', s => { s.count += 1 })` — `s` is typed as your feature state, no casts needed
+
+- `GenCtx<S>` is generic — `S` is inferred from the `state:` config
+  automatically
+- `ctx.mutate('label', s => { s.count += 1 })` — `s` is typed as your feature
+  state, no casts needed
 - `ctx.done(s => { s.orderId = id })` — same, final mutation is fully typed
 - `ctx.getState()` returns `S` — read state after a step without casting
 - `ctx.mutate` is the primary name — `ctx.step` kept as a deprecated alias
-- Standalone reusable generators: annotate `ctx: GenCtx<{ count: number }>` explicitly
+- Standalone reusable generators: annotate `ctx: GenCtx<{ count: number }>`
+  explicitly
 
 **Typed generator arguments — no more payload casts**
-- Actions-style generators receive the payload object directly: `function*(ctx, { item, qty }: { item: string; qty: number })`
-- Methods-style generators receive spread args: `function*(ctx, item: string, qty: number)`
-- `action.payload as { ... }` casts in generators are gone — types flow from the action creator or method signature
+
+- Actions-style generators receive the payload object directly:
+  `function*(ctx, { item, qty }: { item: string; qty: number })`
+- Methods-style generators receive spread args:
+  `function*(ctx, item: string, qty: number)`
+- `action.payload as { ... }` casts in generators are gone — types flow from the
+  action creator or method signature
 
 **`ctx.send(creatorOrType, payload?)` — dispatch shorthand**
-- `yield* ctx.send(analytics.log, { msg: 'done' })` — shorter than `ctx.dispatch({ type: ..., payload: ... })`
-- Accepts bound method (`.type` used) or plain type string; `ctx.dispatch` still available for full action objects
+
+- `yield* ctx.send(analytics.log, { msg: 'done' })` — shorter than
+  `ctx.dispatch({ type: ..., payload: ... })`
+- Accepts bound method (`.type` used) or plain type string; `ctx.dispatch` still
+  available for full action objects
 
 **`ctx.all` — named form alongside spread**
+
 - `const { user, orders } = yield* ctx.all({ user: ctx.call(...), orders: ctx.call(...) })`
 - Spread form still works: `const [a, b] = yield* ctx.all(gen1, gen2)`
 
 **`ctx.waitFor` — accepts bound methods and typed creators**
-- `yield* ctx.waitFor(gateway.running)` — any object with `.type` works, not just A catalog creators
-- `yield* ctx.waitFor(feature.A.actionName)` — payload type fully inferred from A catalog creators
+
+- `yield* ctx.waitFor(gateway.running)` — any object with `.type` works, not
+  just A catalog creators
+- `yield* ctx.waitFor(feature.A.actionName)` — payload type fully inferred from
+  A catalog creators
 - `TypedCreator<P>` type exported for advanced use
 
 **`cancelOn()` — functional cancelOn for generators**
-- `cancelOn(['stop'], function*(ctx) {...})` — attach cancelOn to a generator function
-- Works in both `feature({ methods, generators })` and `feature({ actions, generators })`
+
+- `cancelOn(['stop'], function*(ctx) {...})` — attach cancelOn to a generator
+  function
+- Works in both `feature({ methods, generators })` and
+  `feature({ actions, generators })`
 
 **Lowercase action type strings — `featureName:actionKey` format**
-- All action types are now lowercase: `'counter:increment'` not `'Counter:Increment'`
-- Applies to all generated types: methods, generators, flow steps, errors, init/destroy
+
+- All action types are now lowercase: `'counter:increment'` not
+  `'Counter:Increment'`
+- Applies to all generated types: methods, generators, flow steps, errors,
+  init/destroy
 
 **No raw strings anywhere**
-- `listensTo`: pass bound methods directly — `[counter.increment]` not `['counter:increment']`
+
+- `listensTo`: pass bound methods directly — `[counter.increment]` not
+  `['counter:increment']`
 - `cancelOn()`: pass bound methods or `.type` strings
 - `ctx.waitFor()`: pass bound function — `ctx.waitFor(payment.complete)`
-- Machine `on` keys for foreign actions: use `[counter.increment.type]` not `'Counter:Increment'`
-- `dispatchTo: [wallet, fleet]` — pass feature refs directly, string form removed
+- Machine `on` keys for foreign actions: use `[counter.increment.type]` not
+  `'Counter:Increment'`
+- `dispatchTo: [wallet, fleet]` — pass feature refs directly, string form
+  removed
 
 **`call()` — extended inter-feature coordination**
-- `import { call } from 'aio'` — standalone function, usable anywhere after `aio.run()`
-- Dispatches a real action through the store (observable, interceptable, time-travelable)
-- **Returns async method's return value** — no bridge() needed for request/response
-- **`call({ timeout?, retries? }, () => feature.method(args))`** — timeout rejects after N ms, retries on failure
+
+- `import { call } from 'aio'` — standalone function, usable anywhere after
+  `aio.run()`
+- Dispatches a real action through the store (observable, interceptable,
+  time-travelable)
+- **Returns async method's return value** — no bridge() needed for
+  request/response
+- **`call({ timeout?, retries? }, () => feature.method(args))`** — timeout
+  rejects after N ms, retries on failure
 - `CallOptions` type exported for `{ timeout?: number; retries?: number }`
 
 **Structured logging — `logging` config in `aio.run()`**
-- Five outputs: `log/app.log` (narrative), `log/debug.log` (all actions), `log/error.log` (errors), `log/warning.log` (warnings), `log/perf.log` (violations)
-- `app.log` is smart: machine state transitions, flow completions, feature lifecycle, deduped errors — no firehose
-- Error deduplication: first occurrence logged, repeats suppressed with count, summary on recovery
-- `debug.log`: every non-internal action, full payload, JSONL — for when something breaks
+
+- Five outputs: `log/app.log` (narrative), `log/debug.log` (all actions),
+  `log/error.log` (errors), `log/warning.log` (warnings), `log/perf.log`
+  (violations)
+- `app.log` is smart: machine state transitions, flow completions, feature
+  lifecycle, deduped errors — no firehose
+- Error deduplication: first occurrence logged, repeats suppressed with count,
+  summary on recovery
+- `debug.log`: every non-internal action, full payload, JSONL — for when
+  something breaks
 - `suppressTypes`: exclude known high-frequency action types from all logs
 - `LogConfig` type exported
 
 **`ScopedApp.getFullState()` — cross-feature reads in `init`**
-- `init(app)` now has `app.getFullState()` alongside `app.getState()` (own slice)
-- `app.getState()` still returns the feature's own slice — fast path for self-reads
+
+- `init(app)` now has `app.getFullState()` alongside `app.getState()` (own
+  slice)
+- `app.getState()` still returns the feature's own slice — fast path for
+  self-reads
 
 **`useFeature(f, { fallback })` — skip the null guard**
-- `useFeature(counter, { fallback: initialState })` returns `state: S` (never null)
+
+- `useFeature(counter, { fallback: initialState })` returns `state: S` (never
+  null)
 - TypeScript overload: `{ fallback: S }` narrows the return type to `state: S`
 
 **`feature({ persist: { exclude } })` — per-feature persistence exclusion**
-- `persist: { exclude: ['htmlCache', 'largeBlob'] }` — omit fields from KV persistence without `stateForDB`
-- Auto-composes with other features' excludes — each feature owns its own persistence config
+
+- `persist: { exclude: ['htmlCache', 'largeBlob'] }` — omit fields from KV
+  persistence without `stateForDB`
+- Auto-composes with other features' excludes — each feature owns its own
+  persistence config
 
 **Machine `on` is optional for terminal states**
+
 - States with no outgoing transitions no longer need `on: {}`
-- `saving: {}` and `error: {}` are valid — omit `on` entirely for dead-end states
+- `saving: {}` and `error: {}` are valid — omit `on` entirely for dead-end
+  states
 
 **Type system improvements**
-- `_status` hidden from user-facing types — access via `useFeature().status` or `t.expect.status()`
-- Selectors auto-scoped — receive feature's own state slice in both `feature()` styles
-- Typed action union in `reduce` — `action.payload` auto-narrows in switch/case, no casts needed
+
+- `_status` hidden from user-facing types — access via `useFeature().status` or
+  `t.expect.status()`
+- Selectors auto-scoped — receive feature's own state slice in both `feature()`
+  styles
+- Typed action union in `reduce` — `action.payload` auto-narrows in switch/case,
+  no casts needed
 - `ActionUnion<Prefix, A>` exported for advanced use
-- Foreign actions in object-form `reduce` via computed keys: `[inventory.reserve.type](state, payload) { ... }`
-- `t.expect.effects()` uses full `featureName:effectKey` type strings: `['counter:log', 'counter:persist']`
-- Internal actions hidden from time-travel (`__set*`, `__exec`, `__error`, `__FlowState`)
+- Foreign actions in object-form `reduce` via computed keys:
+  `[inventory.reserve.type](state, payload) { ... }`
+- `t.expect.effects()` uses full `featureName:effectKey` type strings:
+  `['counter:log', 'counter:persist']`
+- Internal actions hidden from time-travel (`__set*`, `__exec`, `__error`,
+  `__FlowState`)
 - `GenCtx` type exported (renamed from `FlowCtx` in pre-release drafts)
 
 **DX improvements**
-- `settle()` auto-runs effects — `t.runEffects()` no longer needed, just `await t.settle()`
-- `ctx.put` renamed to `ctx.dispatch` in generators — consistent with framework dispatch semantics
+
+- `settle()` auto-runs effects — `t.runEffects()` no longer needed, just
+  `await t.settle()`
+- `ctx.put` renamed to `ctx.dispatch` in generators — consistent with framework
+  dispatch semantics
 - Inter-feature patterns reduced from 6 to 3: Observe / Read / Coordinate
 
 **Cleanup**
-- `reactive()` removed (was a 15-line shim) — `feature({ methods })` is identical
-- `bridge()` / `testBridge()` / `BridgeTestContext` removed — use `call({ timeout, retries })`
-- `machine: 'simple'` removed — use `machine: false` (breaking: rename in your config)
+
+- `reactive()` removed (was a 15-line shim) — `feature({ methods })` is
+  identical
+- `bridge()` / `testBridge()` / `BridgeTestContext` removed — use
+  `call({ timeout, retries })`
+- `machine: 'simple'` removed — use `machine: false` (breaking: rename in your
+  config)
 - Classic `aio.run(state, config)` API removed — use `aio.run({ features })`
 - `flow()` removed — use `generators` key with `cancelOn()` for cancellation
 - `FlowDef` removed from public API — internal type only
 - `flows:` key removed from `feature()` config (both methods and actions styles)
-- `{ A }` / `{ E }` context objects removed from reduce/execute (use named handlers or `{ on }` / `{ emit }`)
+- `{ A }` / `{ E }` context objects removed from reduce/execute (use named
+  handlers or `{ on }` / `{ emit }`)
 - Removed `FeatureContext` type from public API
 - Removed `_setFullApp` / `_callHandler` internal wiring
 
@@ -336,11 +603,14 @@ JSR-native builds + Electron install simplification (see v0.9.2 below — same r
 ## v0.7.0
 
 **reactive() — plain methods instead of reduce/execute**
+
 - Sync methods mutate state via Immer draft (batched, one action per call)
 - Sync methods can return schedule effects (timers, intervals)
 - Async methods get live Proxy — reads always fresh, writes auto-dispatch
-- Machine-gated async writes — method-tagged `__setMethod` actions with auto-injected transitions
-- Microtask batching — consecutive Proxy writes grouped into one action per sync frame
+- Machine-gated async writes — method-tagged `__setMethod` actions with
+  auto-injected transitions
+- Microtask batching — consecutive Proxy writes grouped into one action per sync
+  frame
 - `listensTo: string[]` — foreign action listeners without a full machine
 - Selectors, dispatchTo, onInit/onDestroy hooks
 - Direct calling — `counter.increment(5)` after `aio.run()`, no `.A.` namespace
@@ -348,6 +618,7 @@ JSR-native builds + Electron install simplification (see v0.9.2 below — same r
 - Async `testFeature()` — `t.runEffects()` + `t.settle()`
 
 **flow() improvements**
+
 - `ctx.waitFor(actionType, timeout?)` — pause until external action dispatched
 - `ctx.getState()` — read current feature state inside a flow
 - `cancelOn: string[]` — declarative flow cancellation on arbitrary actions
@@ -355,25 +626,34 @@ JSR-native builds + Electron install simplification (see v0.9.2 below — same r
 - Flow errors fed back into generator via `gen.throw()` for try/catch support
 
 **DX & infrastructure**
-- `aio.run()` binds dispatch + selectors to all features (reactive, feature, flow)
-- TypeScript inference — typed intersections with autocomplete for direct calling
+
+- `aio.run()` binds dispatch + selectors to all features (reactive, feature,
+  flow)
+- TypeScript inference — typed intersections with autocomplete for direct
+  calling
 - Pre-bind console.warn when methods called before `aio.run()`
 - `machine: false` — no state machine guards (replaces `machine: 'simple'`)
 - FeatureDef carries phantom State type for testFeature inference
 - `useSyncExternalStore` in useAio/useFeature for selective re-renders
-- `useFeature(ref)` added — feature-scoped state, typed send, machine status, selective re-renders; `useAio()` remains the right hook for root layout and cross-feature views
-- Startup linter validates empty features, `_status` reserved key, empty actionKeys
+- `useFeature(ref)` added — feature-scoped state, typed send, machine status,
+  selective re-renders; `useAio()` remains the right hook for root layout and
+  cross-feature views
+- Startup linter validates empty features, `_status` reserved key, empty
+  actionKeys
 - `--type` and `--template` CLI flags for non-interactive project scaffolding
 
 **Infra**
+
 - Nested delta patches — fine-grained state sync (only changed sub-keys sent)
 - UDS transport — zero TCP ports in prod electron builds, smart auto-detect
-- `Msg<P>` generic — reduce/execute callbacks allow `action.payload.field` without casts
+- `Msg<P>` generic — reduce/execute callbacks allow `action.payload.field`
+  without casts
 - WebSocket payload validation — malformed payloads rejected at boundary
 - Per-user action authorization — middleware and `beforeReduce` receive `user?`
 - App identity with identity-based singleton lock
 
 **Docs**
+
 - 15 topic files split from monolithic manual.md
 - features.md — all 5 inter-feature interaction patterns
 - debugging.md — error interpretation, time-travel forensics
@@ -388,20 +668,25 @@ JSR-native builds + Electron install simplification (see v0.9.2 below — same r
 
 ## v0.5.0
 
-- `feature()` — one function defines state, actions, effects, machine, reduce, execute, selectors
-- State machines — required guards with validated transitions, `_status` auto-managed
+- `feature()` — one function defines state, actions, effects, machine, reduce,
+  execute, selectors
+- State machines — required guards with validated transitions, `_status`
+  auto-managed
 - `A` / `E` dual-role objects — labels for switch + creators for dispatch
 - `aio.run({ features })` — compose features into single dispatch loop
 - `useFeature()` — scoped React hook with state, send, status
-- `bridge()` — cross-feature request/response with timeouts, retries, circuit breaker
+- `bridge()` — cross-feature request/response with timeouts, retries, circuit
+  breaker
 - `testFeature()` / `testBridge()` — isolated test harnesses
 - Foreign action listeners — react to other features' actions via machine
 - Scoped dispatch — executors limited to own actions + `dispatchTo` allowlist
-- `implement()` — deferred executor attachment (removed in v1.0 — use async methods)
+- `implement()` — deferred executor attachment (removed in v1.0 — use async
+  methods)
 - Feature lifecycle — `init` / `destroy` hooks, dependency-ordered
 - Feature registry — `enable` / `disable` / `health` at runtime
 - Middleware system — `aio.middleware.logger()`, `.validate()`, composable
-- State versioning — `version` + `migrations` (removed in v1.0 — use `appVersion` + `onRestore`)
+- State versioning — `version` + `migrations` (removed in v1.0 — use
+  `appVersion` + `onRestore`)
 - Health endpoint — `GET /__aio/health` with per-feature status
 
 ## v0.4.0

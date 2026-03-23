@@ -1,6 +1,8 @@
 # Scheduling
 
-aio has a built-in scheduler for timers, intervals, daily triggers, and cron jobs. Schedules are **pure effects** — returned from reducers or sync methods, handled by the runtime. No side effects in reducers, no external cron daemons.
+aio has a built-in scheduler for timers, intervals, daily triggers, and cron
+jobs. Schedules are **pure effects** — returned from reducers or sync methods,
+handled by the runtime. No side effects in reducers, no external cron daemons.
 
 ## Two ways to schedule
 
@@ -9,36 +11,38 @@ aio has a built-in scheduler for timers, intervals, daily triggers, and cron job
 Return a `ScheduleEffect` from any reducer or sync method:
 
 ```ts
-import { feature, schedule } from 'aio'
+import { feature, schedule } from "aio";
 
-const notifications = feature('notifications', {
+const notifications = feature("notifications", {
   state: { pending: 0 },
   methods: {
     queue(s) {
-      s.pending += 1
-      return schedule.after('flush', 2000, notifications.flush())
+      s.pending += 1;
+      return schedule.after("flush", 2000, notifications.flush());
     },
     flush(s) {
-      s.pending = 0
+      s.pending = 0;
     },
   },
-})
+});
 ```
 
-Each call to `queue()` resets the 2-second debounce — the scheduler cancels the previous timer and sets a new one.
+Each call to `queue()` resets the 2-second debounce — the scheduler cancels the
+previous timer and sets a new one.
 
 ### 2. Static — always-on at startup
 
-Pass schedules to `aio.run()` for timers that always run regardless of app state:
+Pass schedules to `aio.run()` for timers that always run regardless of app
+state:
 
 ```ts
 await aio.run({
   features: [reports],
   schedules: [
-    { id: 'daily-report', cron: '0 8 * * 1-5', action: reports.generate() },
-    { id: 'hourly-ping',  every: 60_000,        action: health.ping() },
+    { id: "daily-report", cron: "0 8 * * 1-5", action: reports.generate() },
+    { id: "hourly-ping", every: 60_000, action: health.ping() },
   ],
-})
+});
 ```
 
 ---
@@ -47,7 +51,8 @@ await aio.run({
 
 ### `schedule.after(id, ms, action)` — one-shot delay
 
-Fires `action` once after `ms` milliseconds. Cancels any previous timer with the same `id`.
+Fires `action` once after `ms` milliseconds. Cancels any previous timer with the
+same `id`.
 
 ```ts
 // Save 3 seconds after last keystroke (debounce pattern)
@@ -65,15 +70,16 @@ Fires `action` every `ms` milliseconds until cancelled.
 
 ```ts
 // Poll every 30 seconds
-return schedule.every('sync', 30_000, data.sync())
+return schedule.every("sync", 30_000, data.sync());
 ```
 
 ### `schedule.at(id, isoTime, action)` — one-shot at absolute time
 
-Fires once at a specific UTC datetime. `isoTime` is any string parseable by `new Date()`.
+Fires once at a specific UTC datetime. `isoTime` is any string parseable by
+`new Date()`.
 
 ```ts
-return schedule.at('promo-end', '2025-12-31T23:59:00Z', promo.expire())
+return schedule.at("promo-end", "2025-12-31T23:59:00Z", promo.expire());
 ```
 
 ### `schedule.cron(id, pattern, action)` — cron expression
@@ -81,7 +87,7 @@ return schedule.at('promo-end', '2025-12-31T23:59:00Z', promo.expire())
 Fires on a standard 5-field cron schedule (UTC).
 
 ```ts
-return schedule.cron('daily-report', '0 8 * * 1-5', reports.generate())
+return schedule.cron("daily-report", "0 8 * * 1-5", reports.generate());
 //                                    ^ ^ ^ ^ ^
 //                                    | | | | └── day of week (Mon-Fri)
 //                                    | | | └──── month (*)
@@ -92,16 +98,17 @@ return schedule.cron('daily-report', '0 8 * * 1-5', reports.generate())
 
 **Cron field syntax:**
 
-| Syntax | Example | Meaning |
-|--------|---------|---------|
-| `*` | `* * * * *` | Every minute |
-| `n` | `30` | At value 30 |
-| `n-m` | `1-5` | Range 1 to 5 |
-| `*/n` | `*/15` | Every n (0, 15, 30, 45) |
-| `n-m/s` | `0-59/10` | Range with step |
-| `a,b` | `1,15` | List |
+| Syntax  | Example     | Meaning                 |
+| ------- | ----------- | ----------------------- |
+| `*`     | `* * * * *` | Every minute            |
+| `n`     | `30`        | At value 30             |
+| `n-m`   | `1-5`       | Range 1 to 5            |
+| `*/n`   | `*/15`      | Every n (0, 15, 30, 45) |
+| `n-m/s` | `0-59/10`   | Range with step         |
+| `a,b`   | `1,15`      | List                    |
 
-> **Note:** cron fires against **UTC time**. `0 9 * * *` = 09:00 UTC. Offset the hour field for local time zones.
+> **Note:** cron fires against **UTC time**. `0 9 * * *` = 09:00 UTC. Offset the
+> hour field for local time zones.
 
 ### `schedule.cancel(id)` — cancel any timer
 
@@ -122,16 +129,18 @@ methods: {
 
 ## ID rules
 
-Schedule IDs must match `/^[\w\-:.]+$/` — alphanumeric, hyphens, underscores, colons, dots.
+Schedule IDs must match `/^[\w\-:.]+$/` — alphanumeric, hyphens, underscores,
+colons, dots.
 
 Good convention: `featureName.timerPurpose` or `featureName:action`.
 
 ```ts
-schedule.every('orders.poll', 10_000, orders.refresh())
-schedule.cron('reports:daily', '0 8 * * *', reports.generate())
+schedule.every("orders.poll", 10_000, orders.refresh());
+schedule.cron("reports:daily", "0 8 * * *", reports.generate());
 ```
 
-Returning a schedule effect with an existing ID **replaces** the previous timer — useful for debouncing.
+Returning a schedule effect with an existing ID **replaces** the previous timer
+— useful for debouncing.
 
 ---
 
@@ -210,15 +219,16 @@ generators: {
 
 ## Testing schedules
 
-`testFeature` gives you `runEffects()` to process returned effects synchronously:
+`testFeature` gives you `runEffects()` to process returned effects
+synchronously:
 
 ```ts
-testFeature(notifications, 'queues autosave', t => {
-  t.dispatch(notifications.queue())
-  const effects = t.runEffects()
+testFeature(notifications, "queues autosave", (t) => {
+  t.dispatch(notifications.queue());
+  const effects = t.runEffects();
   // check a schedule effect was returned
-  const sched = effects.find(e => e.type === '__schedule')
-  assertEquals(sched?.kind, 'after')
-  assertEquals(sched?.id, 'flush')
-})
+  const sched = effects.find((e) => e.type === "__schedule");
+  assertEquals(sched?.kind, "after");
+  assertEquals(sched?.id, "flush");
+});
 ```

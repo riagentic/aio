@@ -1,6 +1,8 @@
 # Building a Desktop Note-Taking App with Electron
 
-A local-first note-taking app: SQLite persistence, URL routing, single-instance lock, compiled to AppImage. The stack is aio + Electron + SQLite + React. No cloud, no accounts — just your notes on your machine.
+A local-first note-taking app: SQLite persistence, URL routing, single-instance
+lock, compiled to AppImage. The stack is aio + Electron + SQLite + React. No
+cloud, no accounts — just your notes on your machine.
 
 ## Step 1: Project setup
 
@@ -12,7 +14,7 @@ A local-first note-taking app: SQLite persistence, URL routing, single-instance 
     "compile:electron": "deno run -A src/app.ts --compile"
   },
   "imports": {
-    "aio": "jsr:@riagentic/aio@1.0.0-alpha2"
+    "aio": "jsr:@riagentic/aio@1.0.0-alpha3"
   }
 }
 ```
@@ -34,91 +36,93 @@ Methods mutate state directly — aio tracks changes and syncs to the UI.
 
 ```ts
 // src/notes.ts
-import { feature } from 'aio'
+import { feature } from "aio";
 
 type Note = {
-  id: string
-  title: string
-  content: string
-  createdAt: number
-}
+  id: string;
+  title: string;
+  content: string;
+  createdAt: number;
+};
 
 type NotesState = {
-  notes: Note[]
-  active: string | null
-  search: string
-}
+  notes: Note[];
+  active: string | null;
+  search: string;
+};
 
-export const notes = feature('notes', {
+export const notes = feature("notes", {
   state: {
     notes: [],
     active: null as string | null,
-    search: '',
+    search: "",
   } satisfies NotesState,
 
   methods: {
     create(s: NotesState, title: string) {
-      const id = crypto.randomUUID()
-      s.notes.unshift({ id, title, content: '', createdAt: Date.now() })
-      s.active = id
+      const id = crypto.randomUUID();
+      s.notes.unshift({ id, title, content: "", createdAt: Date.now() });
+      s.active = id;
     },
 
     update(s: NotesState, id: string, content: string) {
-      const note = s.notes.find(n => n.id === id)
-      if (note) note.content = content
+      const note = s.notes.find((n) => n.id === id);
+      if (note) note.content = content;
     },
 
     rename(s: NotesState, id: string, title: string) {
-      const note = s.notes.find(n => n.id === id)
-      if (note) note.title = title
+      const note = s.notes.find((n) => n.id === id);
+      if (note) note.title = title;
     },
 
     delete(s: NotesState, id: string) {
-      s.notes = s.notes.filter(n => n.id !== id)
-      if (s.active === id) s.active = s.notes[0]?.id ?? null
+      s.notes = s.notes.filter((n) => n.id !== id);
+      if (s.active === id) s.active = s.notes[0]?.id ?? null;
     },
 
     select(s: NotesState, id: string) {
-      s.active = id
+      s.active = id;
     },
 
     search(s: NotesState, query: string) {
-      s.search = query
+      s.search = query;
     },
   },
 
   selectors: {
     filtered: (s: NotesState) => {
-      if (!s.search) return s.notes
-      const q = s.search.toLowerCase()
-      return s.notes.filter(n =>
+      if (!s.search) return s.notes;
+      const q = s.search.toLowerCase();
+      return s.notes.filter((n) =>
         n.title.toLowerCase().includes(q) ||
         n.content.toLowerCase().includes(q)
-      )
+      );
     },
   },
-})
+});
 ```
 
-> Methods receive an Immer draft — mutate freely, aio produces immutable snapshots under the hood. `search` sets a filter string; the `filtered` selector does the actual filtering.
+> Methods receive an Immer draft — mutate freely, aio produces immutable
+> snapshots under the hood. `search` sets a filter string; the `filtered`
+> selector does the actual filtering.
 
 ## Step 3: SQLite persistence
 
 ```ts
 // src/app.ts
-import { aio } from 'aio'
-import { table, pk, text, integer } from 'aio/sql'
-import { notes } from './notes.ts'
+import { aio } from "aio";
+import { integer, pk, table, text } from "aio/sql";
+import { notes } from "./notes.ts";
 
 const app = await aio.run({
-  appId: 'aio-notes',
+  appId: "aio-notes",
   features: [notes],
 
   db: {
     notes: table({
       id: text({ unique: true }),
       title: text(),
-      content: text({ default: '' }),
+      content: text({ default: "" }),
       createdAt: integer(),
     }),
   },
@@ -126,18 +130,21 @@ const app = await aio.run({
   singleton: true,
 
   ui: {
-    title: 'Notes',
+    title: "Notes",
     width: 1000,
     height: 700,
   },
-})
+});
 ```
 
-When `db` has a table named `notes` and your feature state has a `notes` array, aio auto-syncs. Rows load on startup; inserts/updates/deletes propagate to SQLite on state change.
+When `db` has a table named `notes` and your feature state has a `notes` array,
+aio auto-syncs. Rows load on startup; inserts/updates/deletes propagate to
+SQLite on state change.
 
 ### stateForUI: don't send everything
 
-Sending all note content to the UI on every keystroke is wasteful. Use `stateForUI` to send only what the renderer needs:
+Sending all note content to the UI on every keystroke is wasteful. Use
+`stateForUI` to send only what the renderer needs:
 
 ```ts
 stateForUI(state) {
@@ -154,22 +161,23 @@ stateForUI(state) {
 },
 ```
 
-The UI gets a lightweight list plus the full active note. Edit a 50KB note? Only that note's content crosses the wire.
+The UI gets a lightweight list plus the full active note. Edit a 50KB note? Only
+that note's content crosses the wire.
 
 ## Step 4: URL routing
 
 ```tsx
 function App() {
   return (
-    <div style={{ display: 'flex', height: '100vh' }}>
+    <div style={{ display: "flex", height: "100vh" }}>
       <Sidebar />
-      <main style={{ flex: 1, padding: '1rem' }}>
+      <main style={{ flex: 1, padding: "1rem" }}>
         <Route path="/" index element={<NoteList />} />
         <Route path="/note/:id" element={<Editor />} />
         <Route path="/settings" element={<Settings />} />
       </main>
     </div>
-  )
+  );
 }
 ```
 
@@ -177,59 +185,70 @@ function App() {
 
 ```tsx
 function Sidebar() {
-  const { state, send } = useFeature(notes)
-  if (!state) return null
+  const { state, send } = useFeature(notes);
+  if (!state) return null;
 
   return (
-    <nav style={{ width: 250, borderRight: '1px solid #ddd', padding: '1rem' }}>
-      <button onClick={() => send.create('Untitled')}>New Note</button>
+    <nav style={{ width: 250, borderRight: "1px solid #ddd", padding: "1rem" }}>
+      <button
+        onClick={() =>
+          send.create("Untitled")}
+      >
+        New Note
+      </button>
       <input
         placeholder="Search..."
         value={state.search}
-        onChange={e => send.search(e.target.value)}
+        onChange={(e) => send.search(e.target.value)}
       />
-      {state.notes.map(n => (
+      {state.notes.map((n) => (
         <Link key={n.id} to={`/note/${n.id}`} activeClass="active">
           {n.title}
         </Link>
       ))}
       <Link to="/settings">Settings</Link>
     </nav>
-  )
+  );
 }
 ```
 
-`Link` adds the `active` CSS class when the path matches. The editor uses `useRoute` to pull the note ID from the URL:
+`Link` adds the `active` CSS class when the path matches. The editor uses
+`useRoute` to pull the note ID from the URL:
 
 ```tsx
 function Editor() {
-  const { params } = useRoute('/note/:id')
-  const navigate = useNavigate()
-  const { state, send } = useFeature(notes)
-  if (!state?.activeNote) return <p>Select a note</p>
+  const { params } = useRoute("/note/:id");
+  const navigate = useNavigate();
+  const { state, send } = useFeature(notes);
+  if (!state?.activeNote) return <p>Select a note</p>;
 
-  if (params.id !== state.active) send.select(params.id)
+  if (params.id !== state.active) send.select(params.id);
 
   return (
     <div>
       <input
         value={state.activeNote.title}
-        onChange={e => send.rename(params.id, e.target.value)}
+        onChange={(e) => send.rename(params.id, e.target.value)}
       />
       <textarea
         value={state.activeNote.content}
-        onChange={e => send.update(params.id, e.target.value)}
-        style={{ width: '100%', height: 'calc(100vh - 120px)' }}
+        onChange={(e) => send.update(params.id, e.target.value)}
+        style={{ width: "100%", height: "calc(100vh - 120px)" }}
       />
-      <button onClick={() => { send.delete(params.id); navigate('/') }}>
+      <button
+        onClick={() => {
+          send.delete(params.id);
+          navigate("/");
+        }}
+      >
         Delete
       </button>
     </div>
-  )
+  );
 }
 
 function Settings() {
-  return <div>App settings go here.</div>
+  return <div>App settings go here.</div>;
 }
 ```
 
@@ -239,18 +258,24 @@ Export a `mount` function — aio calls it when the Electron window loads:
 
 ```tsx
 export function mount(root: HTMLElement) {
-  const { createRoot } = await import('react-dom/client')
-  createRoot(root).render(<App />)
+  const { createRoot } = await import("react-dom/client");
+  createRoot(root).render(<App />);
 }
 ```
 
-`useFeature(notes)` gives scoped state and typed `send` — re-renders only when notes state changes.
+`useFeature(notes)` gives scoped state and typed `send` — re-renders only when
+notes state changes.
 
 ## Step 6: Single instance lock
 
-We set `singleton: true` in the config. When the user double-clicks the app while it's already running, the second process detects the lock file (`/tmp/aio/aio-notes.lock`), sees the first process is alive, and exits. Stale locks from crashed processes are cleaned up automatically.
+We set `singleton: true` in the config. When the user double-clicks the app
+while it's already running, the second process detects the lock file
+(`/tmp/aio/aio-notes.lock`), sees the first process is alive, and exits. Stale
+locks from crashed processes are cleaned up automatically.
 
-Alternatives: `singleton: true, killExisting: true` kills the old instance and starts fresh. `singleton: false` allows multiple instances (useful during development).
+Alternatives: `singleton: true, killExisting: true` kills the old instance and
+starts fresh. `singleton: false` allows multiple instances (useful during
+development).
 
 ## Step 7: Build to AppImage
 
@@ -258,9 +283,13 @@ Alternatives: `singleton: true, killExisting: true` kills the old instance and s
 deno task compile:electron
 ```
 
-This produces a self-contained binary. The Electron shell loads your UI from disk via a custom `aio://` protocol (no HTTP server in prod). SQLite data lives in `~/.local/share/aio-notes/`.
+This produces a self-contained binary. The Electron shell loads your UI from
+disk via a custom `aio://` protocol (no HTTP server in prod). SQLite data lives
+in `~/.local/share/aio-notes/`.
 
-Window position persists automatically — built into aio's Electron launcher, no code needed. App title and dimensions come from the `ui` config. To set a custom icon, drop `icon.png` in `src/`.
+Window position persists automatically — built into aio's Electron launcher, no
+code needed. App title and dimensions come from the `ui` config. To set a custom
+icon, drop `icon.png` in `src/`.
 
 ## Step 8: Testing
 
@@ -268,37 +297,41 @@ Test note operations without booting the full app:
 
 ```ts
 // src/notes.test.ts
-import { assertEquals } from '@std/assert'
-import { testFeature } from 'aio'
-import { notes } from './notes.ts'
+import { assertEquals } from "@std/assert";
+import { testFeature } from "aio";
+import { notes } from "./notes.ts";
 
-Deno.test('create and select note', () => {
-  const t = testFeature(notes)
-  t.send.create('First note')
-  assertEquals(t.state.notes.length, 1)
-  assertEquals(t.state.active, t.state.notes[0].id)
-})
+Deno.test("create and select note", () => {
+  const t = testFeature(notes);
+  t.send.create("First note");
+  assertEquals(t.state.notes.length, 1);
+  assertEquals(t.state.active, t.state.notes[0].id);
+});
 
-Deno.test('delete selects next', () => {
-  const t = testFeature(notes)
-  t.send.create('A')
-  t.send.create('B')
-  const idB = t.state.notes[0].id
-  t.send.delete(idB)
-  assertEquals(t.state.active, t.state.notes[0].id)
-})
+Deno.test("delete selects next", () => {
+  const t = testFeature(notes);
+  t.send.create("A");
+  t.send.create("B");
+  const idB = t.state.notes[0].id;
+  t.send.delete(idB);
+  assertEquals(t.state.active, t.state.notes[0].id);
+});
 
-Deno.test('search filters notes', () => {
-  const t = testFeature(notes)
-  t.send.create('Grocery list')
-  t.send.create('Meeting notes')
-  t.send.search('grocery')
-  assertEquals(notes.__aio.selectors.filtered(t.fullState).length, 1)
-})
+Deno.test("search filters notes", () => {
+  const t = testFeature(notes);
+  t.send.create("Grocery list");
+  t.send.create("Meeting notes");
+  t.send.search("grocery");
+  assertEquals(notes.__aio.selectors.filtered(t.fullState).length, 1);
+});
 ```
 
-Run with `deno test src/`. `testFeature` runs methods synchronously with full Immer drafts — same behavior as production, zero setup.
+Run with `deno test src/`. `testFeature` runs methods synchronously with full
+Immer drafts — same behavior as production, zero setup.
 
 ---
 
-That's the whole app: SQLite persistence, URL routing, single-instance lock, optimized UI sync, and a compiled binary. aio handled Electron lifecycle, window state, SQLite sync, state broadcasting, routing, and compilation. You wrote the feature logic and the UI.
+That's the whole app: SQLite persistence, URL routing, single-instance lock,
+optimized UI sync, and a compiled binary. aio handled Electron lifecycle, window
+state, SQLite sync, state broadcasting, routing, and compilation. You wrote the
+feature logic and the UI.

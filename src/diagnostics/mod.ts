@@ -1,0 +1,176 @@
+// src/diagnostics/mod.ts — Entry point: resolve config, init components, return hooks
+
+import {
+  type CheckpointData,
+  type DiagnosticsConfig,
+  resolveOptions,
+} from "./types.ts";
+import { computeDiffs, formatDiff } from "./state-diff.ts";
+import { createActionLog } from "./action-log.ts";
+import { createCheckpoint, readCheckpoint } from "./checkpoint.ts";
+import { installCrashHandler } from "./crash-handler.ts";
+import { log } from "../logger.ts";
+
+export type DiagnosticsHooks = {
+  afterAction: (
+    prev: Record<string, unknown>,
+    next: Record<string, unknown>,
+    action: { type: string; payload?: unknown },
+  ) => void;
+  onStart: (featureNames: string[]) => void;
+  onStop: () => Promise<void>;
+  onError: (featureName: string) => void;
+  getRecoveredState: () => CheckpointData | null;
+  setHealthGetter: (
+    fn: () => Record<string, { errors: number; enabled: boolean }>,
+  ) => void;
+  uninstallCrashHandler?: () => void;
+};
+
+/** Initialize the diagnostics subsystem. Returns null if disabled. */
+export function initDiagnostics(
+  config: DiagnosticsConfig,
+  isProd: boolean,
+  logDir: string,
+): DiagnosticsHooks | null {
+  const opts = resolveOptions(config, isProd);
+  if (opts === false) return null;
+
+  // ── Checkpoint (read early, before features init) ──
+  let recovered: CheckpointData | null = null;
+  let cpWriter: ReturnType<typeof createCheckpoint> | null = null;
+  if (opts.checkpoint) {
+    recovered = readCheckpoint(logDir);
+    if (recovered) {
+      const age = Date.now() - recovered.ts;
+      const ageSec = Math.round(age / 1000);
+      if (age > 3600_000) {
+        log.warn(
+          "checkpoint",
+          `recovered state is ${
+            Math.round(age / 60_000)
+          }m old — consider starting fresh`,
+        );
+      } else log.info("checkpoint", `found state from ${ageSec}s ago`);
+    }
+    const debounce = typeof opts.checkpoint === "object"
+      ? (opts.checkpoint.debounce ?? 5000)
+      : 5000;
+    cpWriter = createCheckpoint(logDir, debounce);
+  }
+
+  // ── Action log ──
+  let actionLog: ReturnType<typeof createActionLog> | null = null;
+  if (opts.actionLog) {
+    const max = typeof opts.actionLog === "object"
+      ? (opts.actionLog.max ?? 1000)
+      : 1000;
+    actionLog = createActionLog(`${logDir}/actions.jsonl`, max);
+  }
+
+  // ── State diffs ──
+  const diffEnabled = !!opts.stateDiffs;
+
+  // ── Internal state for checkpoint ──
+  let lastState: Record<string, unknown> = {};
+  const recentActions: string[] = [];
+  const MAX_RECENT = 20;
+  const featureErrorCounts = new Map<string, number>();
+  const featureEnabled = new Map<string, boolean>();
+  let healthGetter:
+    | (() => Record<string, { errors: number; enabled: boolean }>)
+    | null = null;
+
+  function getHealthSnapshot(): Record<
+    string,
+    { errors: number; enabled: boolean }
+  > {
+    if (healthGetter) return healthGetter();
+    const result: Record<string, { errors: number; enabled: boolean }> = {};
+    for (const [name, count] of featureErrorCounts) {
+      result[name] = {
+        errors: count,
+        enabled: featureEnabled.get(name) ?? true,
+      };
+    }
+    return result;
+  }
+
+  // ── Crash handler ──
+  let uninstallCrash: (() => void) | undefined;
+  if (opts.crashHandler) {
+    uninstallCrash = installCrashHandler({
+      log: { error: (msg, data) => log.error("crash", msg, data) },
+      getHealthData: () => ({ features: getHealthSnapshot() }),
+      writeEmergencyCheckpoint: () => {
+        if (cpWriter) {
+          cpWriter.writeSync({
+            ts: Date.now(),
+            state: lastState,
+            recentActions: [...recentActions],
+            features: getHealthSnapshot(),
+          });
+        }
+      },
+    });
+  }
+
+  // ── Hooks ──
+  function afterAction(
+    prev: Record<string, unknown>,
+    next: Record<string, unknown>,
+    action: { type: string; payload?: unknown },
+  ): void {
+    if (diffEnabled && prev !== next) {
+      const diffs = computeDiffs(prev, next);
+      for (const d of diffs) {
+        log.debug("state-diff", formatDiff(d.feature, d.changes));
+      }
+    }
+    if (actionLog) actionLog.append(action.type, action.payload);
+    lastState = next;
+    recentActions.push(action.type);
+    if (recentActions.length > MAX_RECENT) recentActions.shift();
+    if (cpWriter && prev !== next) {
+      cpWriter.schedule({
+        ts: Date.now(),
+        state: next,
+        recentActions: [...recentActions],
+        features: getHealthSnapshot(),
+      });
+    }
+  }
+
+  function onStart(featureNames: string[]): void {
+    for (const name of featureNames) {
+      featureErrorCounts.set(name, 0);
+      featureEnabled.set(name, true);
+    }
+  }
+
+  function onError(featureName: string): void {
+    featureErrorCounts.set(
+      featureName,
+      (featureErrorCounts.get(featureName) ?? 0) + 1,
+    );
+  }
+
+  async function onStop(): Promise<void> {
+    if (actionLog) await actionLog.flush();
+    if (cpWriter) await cpWriter.flush();
+  }
+
+  return {
+    afterAction,
+    onStart,
+    onStop,
+    onError,
+    getRecoveredState: () => recovered,
+    setHealthGetter: (fn) => {
+      healthGetter = fn;
+    },
+    uninstallCrashHandler: uninstallCrash,
+  };
+}
+
+export { type CheckpointData, type DiagnosticsConfig } from "./types.ts";
