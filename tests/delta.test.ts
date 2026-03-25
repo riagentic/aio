@@ -1,6 +1,10 @@
 import { assertEquals, assertNotEquals, assertStrictEquals } from "@std/assert";
 import { _computeDelta } from "../src/server.ts";
-import { _applyPatch, _preserveArrayRefs, _shallowEqual } from "../src/browser.ts";
+import {
+  _applyPatch,
+  _preserveArrayRefs,
+  _shallowEqual,
+} from "../src/browser.ts";
 
 // ── Flat state (v0.4 compatible) ────────────────────────────────
 
@@ -391,7 +395,9 @@ Deno.test("preserveArrayRefs: primitive changed → new array", () => {
 Deno.test("applyPatch: array sub-key preserves unchanged element refs", () => {
   const member0 = { id: "m0", pnl: 10 };
   const member1 = { id: "m1", pnl: 20 };
-  const prev = { fleet: { members: [member0, member1], filters: { active: true } } };
+  const prev = {
+    fleet: { members: [member0, member1], filters: { active: true } },
+  };
   // Patch: members array with member1.pnl changed, member0 unchanged
   const patch = {
     $p: { fleet: { members: [{ id: "m0", pnl: 10 }, { id: "m1", pnl: 99 }] } },
@@ -405,7 +411,10 @@ Deno.test("applyPatch: array sub-key preserves unchanged element refs", () => {
   assertNotEquals(members[1], member1);
   assertEquals(members[1], { id: "m1", pnl: 99 });
   // filters not in patch — should keep reference
-  assertStrictEquals(fleet.filters, (prev.fleet as Record<string, unknown>).filters);
+  assertStrictEquals(
+    fleet.filters,
+    (prev.fleet as Record<string, unknown>).filters,
+  );
 });
 
 Deno.test("applyPatch: all array elements unchanged → array ref preserved", () => {
@@ -416,7 +425,11 @@ Deno.test("applyPatch: all array elements unchanged → array ref preserved", ()
   };
   const result = _applyPatch(prev as Record<string, unknown>, patch);
   const feat = result.feat as Record<string, unknown>;
-  assertStrictEquals(feat.members, members, "entire array ref preserved when content identical");
+  assertStrictEquals(
+    feat.members,
+    members,
+    "entire array ref preserved when content identical",
+  );
 });
 
 Deno.test("applyPatch: non-array sub-keys still work normally", () => {

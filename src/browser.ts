@@ -68,13 +68,18 @@ function _diagEmit(ev: {
 
 /** Structural sharing for arrays: preserve element references for unchanged items.
  *  Returns the previous array reference if ALL elements are unchanged. */
-export function _preserveArrayRefs(newArr: unknown[], oldArr: unknown[]): unknown[] {
+export function _preserveArrayRefs(
+  newArr: unknown[],
+  oldArr: unknown[],
+): unknown[] {
   if (newArr.length !== oldArr.length) return newArr;
   let allSame = true;
   for (let i = 0; i < newArr.length; i++) {
     if (newArr[i] === oldArr[i]) continue;
-    if (newArr[i] && typeof newArr[i] === "object" && !Array.isArray(newArr[i]) &&
-        oldArr[i] && typeof oldArr[i] === "object" && !Array.isArray(oldArr[i])) {
+    if (
+      newArr[i] && typeof newArr[i] === "object" && !Array.isArray(newArr[i]) &&
+      oldArr[i] && typeof oldArr[i] === "object" && !Array.isArray(oldArr[i])
+    ) {
       if (_shallowEqual(newArr[i], oldArr[i])) {
         newArr[i] = oldArr[i]; // restore reference — element unchanged
         continue;
@@ -136,7 +141,10 @@ export function _applyPatch(
         if (_BLOCKED_KEYS.has(sk) || sk === "$d") continue;
         // Structural sharing: preserve per-element references for array sub-keys
         if (Array.isArray(sv) && Array.isArray(prev_slice[sk])) {
-          merged[sk] = _preserveArrayRefs(sv as unknown[], prev_slice[sk] as unknown[]);
+          merged[sk] = _preserveArrayRefs(
+            sv as unknown[],
+            prev_slice[sk] as unknown[],
+          );
         } else {
           merged[sk] = sv;
         }

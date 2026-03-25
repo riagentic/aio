@@ -19,18 +19,19 @@ line 1589) now check `=== false` instead of `!== undefined`. Omitting
 
 ## ~~AIO-8: `_applyPatch` breaks feature-level reference stability on sub-key changes~~ ✅ RESOLVED
 
-**Fixed:** Added `_preserveArrayRefs()` — structural sharing for array sub-keys in
-`_applyPatch`. Per-element shallow-equal preserves unchanged element references after
-JSON round-trip. 1 of 160 members changed → 159 keep their reference → `React.memo`
-skips 159 card re-renders. 8 new tests in delta.test.ts.
+**Fixed:** Added `_preserveArrayRefs()` — structural sharing for array sub-keys
+in `_applyPatch`. Per-element shallow-equal preserves unchanged element
+references after JSON round-trip. 1 of 160 members changed → 159 keep their
+reference → `React.memo` skips 159 card re-renders. 8 new tests in
+delta.test.ts.
 
 ---
 
 ## ~~AIO-9: `stateForUI` return value not memoized~~ ✅ RESOLVED
 
-**Fixed:** Memoize `stateForUI` by input state reference + user ID. Cache clears on
-state change. Same state + same user → cached result, no re-allocation. Eliminates
-~60 object allocations/sec in multi-tick apps.
+**Fixed:** Memoize `stateForUI` by input state reference + user ID. Cache clears
+on state change. Same state + same user → cached result, no re-allocation.
+Eliminates ~60 object allocations/sec in multi-tick apps.
 
 ---
 
