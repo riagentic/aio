@@ -1,11 +1,13 @@
 // src/diagnostics/types.ts — Shared types for the diagnostics module
 
 import type { MemoryConfig } from "../memory-monitor.ts";
+import type { VitalsConfig } from "../vitals/types.ts";
 
 /** Top-level diagnostics config — passed to aio.run({ diagnostics: ... }) */
 export type DiagnosticsConfig = false | {
   dev?: DiagnosticsOptions;
   prod?: DiagnosticsOptions;
+  onDiagnostic?: (event: import("../vitals/types.ts").DiagEvent) => void;
 };
 
 /** Per-mode options — each field: true=on, false=off, object=on with options, omitted=use default */
@@ -17,6 +19,8 @@ export type DiagnosticsOptions = {
   memoryMonitor?: boolean | MemoryConfig;
   timeTravel?: boolean;
   console?: boolean;
+  vitals?: boolean | VitalsConfig;
+  diagnosticBus?: boolean;
 };
 
 /** Checkpoint data written to log/checkpoint.json */
@@ -36,6 +40,8 @@ export const DEV_DEFAULTS: Required<DiagnosticsOptions> = {
   memoryMonitor: true,
   timeTravel: true,
   console: true,
+  vitals: true,
+  diagnosticBus: true,
 };
 
 export const PROD_DEFAULTS: Required<DiagnosticsOptions> = {
@@ -46,6 +52,8 @@ export const PROD_DEFAULTS: Required<DiagnosticsOptions> = {
   memoryMonitor: false,
   timeTravel: false,
   console: true,
+  vitals: { hints: false },
+  diagnosticBus: false,
 };
 
 /** Resolve effective options: built-in defaults + user overrides */

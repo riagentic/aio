@@ -21,7 +21,7 @@ Create a directory and add `deno.json`:
     "jsxImportSourceTypes": "@types/react"
   },
   "imports": {
-    "aio": "jsr:@riagentic/aio@1.0.0-alpha3",
+    "aio": "jsr:@riagentic/aio@1.0.0-alpha4",
     "@types/react": "npm:@types/react@^18",
     "react": "npm:react@^18",
     "react-dom": "npm:react-dom@^18",
@@ -385,7 +385,7 @@ mocking needed.
 Compile to a standalone binary:
 
 ```sh
-deno run -A jsr:@riagentic/aio@1.0.0-alpha3/src/build --compile --service
+deno run -A jsr:@riagentic/aio@1.0.0-alpha4/src/build --compile --service
 ```
 
 This produces two files: a binary and a systemd unit file. The binary is

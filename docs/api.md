@@ -100,7 +100,9 @@ with discriminated unions, define typed effect creators and use
 | `yield* ctx.race({...gens})`            | Race multiple calls — first to complete wins                                                |
 | `yield* ctx.sleep(name, ms)`            | Sleep for N ms — dispatches named action for visibility                                     |
 | `yield* ctx.waitFor(creator, timeout?)` | Wait for action to arrive, returns `{ type, payload }`                                      |
+| `yield* ctx.when(predicate, opts?)`     | Wait until state condition is true — checks immediately, then after every dispatch          |
 | `ctx.getState()`                        | Read current feature state (fresh after each step)                                          |
+| `ctx.getFullState()`                    | Read full app state tree (all features). Fresh after each step.                             |
 
 ---
 
@@ -128,6 +130,12 @@ with discriminated unions, define typed effect creators and use
 | `AioErrorContext`              | `{ featureName?, actionType?, effectType?, flowName?, flowStep?, hookName?, duration?, budget?, machineState? }`                             |
 | `MemoryConfig`                 | `{ enabled?, interval?, warnThreshold?, criticalThreshold?, onMemoryPressure? }`                                                             |
 | `MemoryReport`                 | `{ level, heapUsed, heapTotal, heapPct, featureStates, trend }`                                                                              |
+| `VitalsConfig`                 | `{ heartbeatInterval?, thresholds?, hints?, backpressure?, onVitalAlert? }` — see [vitals.md](vitals.md)                                     |
+| `VitalAlert`                   | `{ id, layer, status, duration, measured, threshold, hint, ts, correlationId? }`                                                             |
+| `VitalStatus`                  | `'healthy' \| 'degraded' \| 'warning' \| 'frozen' \| 'recovered'`                                                                            |
+| `VitalHint`                    | `{ cause, evidence[], suggestion, severity }` — diagnostic root-cause hint                                                                   |
+| `VitalThresholds`              | `{ render, transport, loop, queue }` — per-layer `{ degraded, warning, frozen }`                                                             |
+| `LoopVitals`                   | `{ queueDepth, drainRate, lastReduceTime, lastReduceAction, lastReduceFeature, p95ReduceTime, effectBacklog, circuitBreakers }`              |
 
 ---
 
@@ -272,29 +280,30 @@ Zero-config observability — see [diagnostics.md](diagnostics.md) for full guid
 
 **DiagnosticsOptions fields** (used in `dev` / `prod`):
 
-| Field           | Type                               | Description                                         |
-| --------------- | ---------------------------------- | --------------------------------------------------- |
-| `stateDiffs`    | `boolean`                          | Log key-level state changes after each action       |
-| `actionLog`     | `boolean \| { max?: number }`      | Rolling JSONL action log (default max: 1000)        |
-| `checkpoint`    | `boolean \| { debounce?: number }` | Periodic state snapshots (default debounce: 5000ms) |
-| `crashHandler`  | `boolean`                          | Global crash handler with emergency checkpoint      |
-| `memoryMonitor` | `boolean \| MemoryConfig`          | Heap usage alerts                                   |
-| `timeTravel`    | `boolean`                          | Time-travel debugger                                |
-| `console`       | `boolean`                          | Console output                                      |
+| Field           | Type                               | Description                                          |
+| --------------- | ---------------------------------- | ---------------------------------------------------- |
+| `stateDiffs`    | `boolean`                          | Log key-level state changes after each action        |
+| `actionLog`     | `boolean \| { max?: number }`      | Rolling JSONL action log (default max: 1000)         |
+| `checkpoint`    | `boolean \| { debounce?: number }` | Periodic state snapshots (default debounce: 5000ms)  |
+| `crashHandler`  | `boolean`                          | Global crash handler with emergency checkpoint       |
+| `memoryMonitor` | `boolean \| MemoryConfig`          | Heap usage alerts                                    |
+| `timeTravel`    | `boolean`                          | Time-travel debugger                                 |
+| `console`       | `boolean`                          | Console output                                       |
+| `vitals`        | `boolean \| VitalsConfig`          | Client freeze detection — see [vitals.md](vitals.md) |
 
 ---
 
 ## UI Config (`aio.run({ ui })`)
 
-| Config                   | Description                                                                                                                                                                                                  |
-| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `ui.syncIntervalMs`      | Throttle UI updates: max 1 push per N ms — default `10` (100fps). `0` = microtask-only coalescing (unbounded). Leading edge fires immediately; trailing flush ensures last state always arrives within N ms. |
-| `client`                 | `'electron' \| 'browser' \| 'cli' \| 'server-only'` — which UI client to launch (top-level, replaces `ui.electron` + `headless`)                                                                             |
-| `keepServer`             | Keep server running after Electron closes (default: `false`) (top-level, replaces `ui.keepAlive`)                                                                                                            |
-| `transport`              | `'uds' \| 'ws' \| 'auto'` — IPC transport (default: `'auto'`) (top-level, replaces `ui.transport`)                                                                                                           |
-| `ui.title`               | Window title (default: `'AIO App'`)                                                                                                                                                                          |
-| `ui.width` / `ui.height` | Window dimensions (default: `800` / `600`)                                                                                                                                                                   |
-| `ui.showStatus`          | Show reconnection indicator (default: `true`)                                                                                                                                                                |
+| Config                   | Description                                                                                                                                                                                                                                        |
+| ------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `syncIntervalMs`         | Throttle state broadcasts: max 1 push per N ms — default `10` (100fps). `0` = microtask-only coalescing (unbounded). Leading edge fires immediately; trailing flush ensures last state always arrives within N ms. Top-level config (not in `ui`). |
+| `client`                 | `'electron' \| 'browser' \| 'cli' \| 'server-only'` — which UI client to launch (top-level, replaces `ui.electron` + `headless`)                                                                                                                   |
+| `keepServer`             | Keep server running after Electron closes (default: `false`) (top-level, replaces `ui.keepAlive`)                                                                                                                                                  |
+| `transport`              | `'uds' \| 'ws' \| 'auto'` — IPC transport (default: `'auto'`) (top-level, replaces `ui.transport`)                                                                                                                                                 |
+| `ui.title`               | Window title (default: `'AIO App'`)                                                                                                                                                                                                                |
+| `ui.width` / `ui.height` | Window dimensions (default: `800` / `600`)                                                                                                                                                                                                         |
+| `ui.showStatus`          | Show reconnection indicator (default: `true`)                                                                                                                                                                                                      |
 
 ---
 
@@ -368,13 +377,13 @@ AioLogger is not active. No-ops when `logging: false`.
 
 ### Log outputs
 
-| File              | Content                                                                   |
-| ----------------- | ------------------------------------------------------------------------- |
-| `log/app.log`     | Narrative: feature lifecycle, flow completions, state transitions, errors |
-| `log/debug.log`   | All dispatched actions + `trace`/`debug` from `log.*` calls               |
-| `log/error.log`   | Errors only — for ops/alerting                                            |
-| `log/warning.log` | Warnings — non-fatal issues requiring attention                           |
-| `log/perf.log`    | Performance violations — slow reducers/effects, deduped per action type   |
+| File              | Content                                                                              |
+| ----------------- | ------------------------------------------------------------------------------------ |
+| `log/app.log`     | Narrative: feature lifecycle, flow completions, state transitions, errors            |
+| `log/debug.log`   | All dispatched actions + `trace`/`debug` from `log.*` calls                          |
+| `log/error.log`   | Errors only — for ops/alerting                                                       |
+| `log/warning.log` | Warnings — non-fatal issues requiring attention                                      |
+| `log/perf.log`    | Performance violations with phase breakdown (produce/clone/spread/routing/listeners) |
 
 ### Plain text entry format
 

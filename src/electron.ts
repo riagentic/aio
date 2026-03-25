@@ -445,7 +445,8 @@ app.on('ready', () => {
   const SOCK = ${JSON.stringify(socketPath)};
   let buf = '';
   let retry = 0;
-  let lastState = null;  // buffer last state for replay after page load
+  let lastFullState = null; // buffer initial FULL state (non-delta) for replay
+  let lastState = null;     // buffer latest state line (may be delta)
   let pageReady = false;
 
   let closing = false;
@@ -458,7 +459,16 @@ app.on('ready', () => {
   ipcMain.on('__aio:ready', () => {
     if (closing) return;
     if (sock) win.webContents.send('__aio:open');
-    if (lastState) win.webContents.send('__aio:msg', lastState);
+    // Always replay full state first (not a delta) so renderer gets complete state.
+    // Then replay latest delta on top if it's different (brings state up to date).
+    if (lastFullState) {
+      win.webContents.send('__aio:msg', lastFullState);
+      if (lastState && lastState !== lastFullState) {
+        win.webContents.send('__aio:msg', lastState);
+      }
+    } else if (lastState) {
+      win.webContents.send('__aio:msg', lastState);
+    }
   });
 
   function connectUDS() {
@@ -466,6 +476,7 @@ app.on('ready', () => {
     sock.setEncoding('utf8');
     sock.on('connect', () => {
       retry = 0;
+      lastFullState = null; // reset on reconnect — server sends fresh full state
       if (!closing && pageReady) win.webContents.send('__aio:open');
     });
     sock.on('data', (chunk) => {
@@ -475,6 +486,8 @@ app.on('ready', () => {
       for (const line of lines) {
         if (!line || closing) continue;
         lastState = line;
+        // Track full state separately — non-delta messages (no "$p" key)
+        if (line.indexOf('"$p"') === -1) lastFullState = line;
         if (pageReady) win.webContents.send('__aio:msg', line);
       }
     });

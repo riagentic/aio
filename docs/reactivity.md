@@ -865,8 +865,9 @@ order.cancel(); // plain method — still works alongside generators
 ```
 
 Generators get the full `GenCtx` API: `ctx.call`, `ctx.mutate`, `ctx.done`,
-`ctx.fail`, `ctx.sleep`, `ctx.waitFor`, `ctx.all`, `ctx.race`. Each yield is a
-named checkpoint — visible in time-travel, cancellable, step-by-step observable.
+`ctx.fail`, `ctx.sleep`, `ctx.waitFor`, `ctx.when`, `ctx.all`, `ctx.race`,
+`ctx.getState`, `ctx.getFullState`. Each yield is a named checkpoint — visible
+in time-travel, cancellable, step-by-step observable.
 
 **When to upgrade a method to a generator:**
 
@@ -942,18 +943,20 @@ persistent workflows, use scheduled effects or external job queues.
 Both generate real actions for cross-feature calls. The key differences are in
 coordination and lifecycle:
 
-| Capability              | Async methods                 | Generators                                          |
-| ----------------------- | ----------------------------- | --------------------------------------------------- |
-| Cross-feature calls     | `await other.method()`        | `yield* ctx.call('name', fn)`                       |
-| State mutation          | Proxy (`s.x = 1`)             | `yield* ctx.mutate('name', fn)`                     |
-| Wait for external event | Not possible                  | `yield* ctx.waitFor(action)`                        |
-| Cancellation            | Manual (AbortController)      | Automatic (`cancelOn`, re-trigger, feature disable) |
-| Parallel execution      | `Promise.all(...)`            | `yield* ctx.all(...)`                               |
-| Race                    | `Promise.race(...)`           | `yield* ctx.race(...)`                              |
-| Named checkpoints       | No (batched `__set` actions)  | Yes (every `yield*` visible in time-travel)         |
-| Observable sleep        | `await delay(ms)` (invisible) | `yield* ctx.sleep('name', ms)`                      |
-| Complexity              | Low                           | Medium                                              |
-| Best for                | Simple orchestration, CRUD    | Sagas, multi-step workflows, event-driven flows     |
+| Capability               | Async methods                 | Generators                                          |
+| ------------------------ | ----------------------------- | --------------------------------------------------- |
+| Cross-feature calls      | `await other.method()`        | `yield* ctx.call('name', fn)`                       |
+| State mutation           | Proxy (`s.x = 1`)             | `yield* ctx.mutate('name', fn)`                     |
+| Wait for external event  | Not possible                  | `yield* ctx.waitFor(action)`                        |
+| Wait for state condition | Not possible                  | `yield* ctx.when(predicate)`                        |
+| Read other features      | Not possible                  | `ctx.getFullState()`                                |
+| Cancellation             | Manual (AbortController)      | Automatic (`cancelOn`, re-trigger, feature disable) |
+| Parallel execution       | `Promise.all(...)`            | `yield* ctx.all(...)`                               |
+| Race                     | `Promise.race(...)`           | `yield* ctx.race(...)`                              |
+| Named checkpoints        | No (batched `__set` actions)  | Yes (every `yield*` visible in time-travel)         |
+| Observable sleep         | `await delay(ms)` (invisible) | `yield* ctx.sleep('name', ms)`                      |
+| Complexity               | Low                           | Medium                                              |
+| Best for                 | Simple orchestration, CRUD    | Sagas, multi-step workflows, event-driven flows     |
 
 **Rule of thumb:** Use async methods unless you need `waitFor`, automatic
 cancellation, or named time-travel checkpoints. Generators add structure at the

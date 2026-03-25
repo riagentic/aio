@@ -1,5 +1,112 @@
 # Changelog
 
+## Unreleased
+
+**Flow cross-feature state access**
+
+- `ctx.getFullState()` — read the full app state tree (all features) from inside
+  a generator. Same function available in `onInit`/`onDestroy`/`execute`, now
+  exposed in `GenCtx`. Fresh after each flow step.
+- `ctx.when(predicate, opts?)` — wait until a state condition is true. Checks
+  immediately (resolves instantly if already true), then re-checks after every
+  dispatch. Supports `{ timeout }` option. Predicate receives the full app
+  state. Works inside `ctx.race` and `ctx.all`.
+- `notifyStateListeners` called after every reduce cycle (including
+  `__FlowState` mutations from `ctx.mutate`/`ctx.done`)
+
+**Vital signs — client diagnostic system**
+
+- New `src/vitals/` module: three probes (loop, render, transport) + hint engine
+  for detecting and diagnosing UI freezes
+- `LoopProbe` — server-side dispatch metrics: reduce timing, queue depth, drain
+  rate, effect backlog, circuit breaker state, p95 reduce time
+- `RenderProbe` — client-side `setTimeout` drift freeze detection with action
+  correlation and death spiral detection
+- `TransportProbe` — ping/pong RTT measurement over WebSocket with server-side
+  client liveness watchdog
+- `HintEngine` — correlates all probe signals into root-cause hints with 7
+  pattern rules and severity classification (`likely` / `possible` /
+  `speculative`)
+- Severity model: `healthy -> degraded -> warning -> frozen -> recovered`
+- `VitalAlert` emitted via `onVitalAlert` callback with correlation IDs
+- HTTP endpoint: `GET /__aio/vitals` returns loop metrics + client liveness
+- Configurable per-layer thresholds, heartbeat interval, hint toggle
+- Enabled by default (dev: hints on, prod: hints off). Kill switch:
+  `vitals: false`
+
+**DiagReporter — actionable developer diagnostics**
+
+- Split architecture: server-side reporter (slow, stale, disconnect) +
+  client-side reporter (freeze, recovered) — each outputs to its respective
+  console
+- Structured console output: multi-line blocks with trigger, queue depth,
+  transport status, and root-cause hints for `likely`/`possible` severity;
+  one-liners for recoveries and speculative events
+- `onDiagnostic` hook on `DiagnosticsConfig` — fires for every `DiagEvent`, wire
+  to Sentry/Datadog/custom telemetry. Not throttled (app controls its own sink)
+- Console throttling: same kind+trigger suppressed for 2s to prevent spam
+- Recovery deduplication: `recovered` emitted only on actual transition from
+  degraded
+- `_applyPatch` reference stability: shallow-equal comparison preserves object
+  references for unchanged patched keys, eliminating phantom re-renders
+- `useAio()` dev warning: console.warn when full-state subscription detected,
+  deduplicated per call site. Active instances ref-counted (accurate after
+  unmount)
+- Re-render storm detection (hint rule #7): timer-based 1s window, warns when
+  > 30 subscribe callbacks/sec. Runs independently of probe status changes
+- Broadcast payload size tracking per client — UTF-8 bytes (exposed via
+  `/__aio/vitals`)
+- Per-feature state size tracking — UTF-8 bytes (exposed via `/__aio/vitals`)
+- `onClientStateSent()` wired — last broadcast timestamp per client now tracked
+- Pure `formatDiagEvent()` formatter — zero side effects, fully testable
+
+**PressureMonitor — resource pressure warnings**
+
+- Payload size warnings when broadcast exceeds 500KB (configurable)
+- Broadcast rate warnings at 30/sec (configurable, tumbling 1s window)
+- Client render degradation warnings (50ms/200ms drift — previously silent)
+- New DiagEvent kind `"pressure"` — fires via console + `onDiagnostic` hook
+- Server-side: `createPressureMonitor()` in vitals system
+- Client-side: inline render pressure in `onStatusChange`
+- Dev-only by default. Kill switch: `vitals: { pressure: false }`
+
+**Subscription stability (AIO-4/AIO-3)**
+
+- Fixed: `useAio()` created unstable subscribe reference every render, causing
+  `useSyncExternalStore` to re-subscribe and trigger full teardown (state null,
+  connection drop) on page switch. Silent — no errors in console
+- `_useAioSubscribe` moved to module scope — stable reference, no
+  re-subscription
+- Nuclear cleanup replaced with 300ms grace period. Transient listener gaps
+  (React reconciliation, page switches) no longer trigger teardown
+- Dual-channel diagnostics: `console.warn` + `_diagEmit` on all teardown events.
+  Teardown, teardown-averted, and state-nullified events are now always visible
+  in browser/Electron devtools
+- AIO-3 (`useFeature()` returns null after extended runtime) resolved as
+  secondary symptom — the grace period prevents the transient `_state = null`
+  windows
+
+**Diagnostic bus & health overlay**
+
+- **Diagnostic bus** — unified event channel for silent failures, visible via
+  health overlay (green/yellow/red dot, expandable panel). 18 previously-silent
+  failure points now emit dev-mode diagnostics
+- **Smart module loader** — pre-validates imports before `import()`. Shows root
+  cause (404, transpile error, server error) instead of generic "Failed to fetch
+  dynamically imported module". Per-file error storage replaces global singleton
+- **New error code:** `PERSIST_ERROR` for state persistence failures
+- **New classifier:** `dynamic-import-failed` for browser module load errors
+
+**Reduce phase performance breakdown**
+
+- `PerfMetric` now includes optional `breakdown` field with phase-level timing:
+  `produce`, `clone`, `spread`, `routing`, `listeners` (all in ms)
+- Breakdown visible in time-travel panel, `perf.log` budget violations, and
+  `onPerf` callback
+- Zero-cost when `perfCheck: "off"` — no `performance.now()` calls
+- `perf.log` entries for `BUDGET_REDUCE` now include phase breakdown showing
+  where time was spent
+
 ## v1.0.0-alpha3
 
 **Logging enabled by default**
@@ -94,7 +201,7 @@
   `client: 'electron'|'browser'|'cli'|'server-only'`
 - `ui.keepAlive` → `keepServer` (top-level)
 - `ui.transport` → `transport` (top-level)
-- `ui.syncRate` → `ui.syncIntervalMs`
+- `ui.syncRate` → `syncIntervalMs` (top-level)
 
 **Now mandatory:** `appVersion` (was optional, defaulted to '0.1.0')
 

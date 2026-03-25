@@ -39,7 +39,7 @@ Merge these into your existing `deno.json`:
   },
   "imports": {
     // ADD these — keep your existing imports
-    "aio": "jsr:@riagentic/aio@1.0.0-alpha3",
+    "aio": "jsr:@riagentic/aio@1.0.0-alpha4",
     "@types/react": "npm:@types/react@^18",
     "react": "npm:react@^18",
     "react-dom": "npm:react-dom@^18",
@@ -47,12 +47,12 @@ Merge these into your existing `deno.json`:
   },
   "tasks": {
     "dev": "deno run -A src/app.ts",
-    "am": "deno run -A jsr:@riagentic/aio@1.0.0-alpha3/src/am",
+    "am": "deno run -A jsr:@riagentic/aio@1.0.0-alpha4/src/am",
     "test": "deno test -A --unstable-kv tests/",
-    "compile:browser": "deno run -A jsr:@riagentic/aio@1.0.0-alpha3/src/build --compile",
-    "compile:electron": "deno run -A jsr:@riagentic/aio@1.0.0-alpha3/src/build --compile --electron",
-    "compile:electron:remote": "deno run -A jsr:@riagentic/aio@1.0.0-alpha3/src/build --client",
-    "compile:android": "deno run -A jsr:@riagentic/aio@1.0.0-alpha3/src/build --android"
+    "compile:browser": "deno run -A jsr:@riagentic/aio@1.0.0-alpha4/src/build --compile",
+    "compile:electron": "deno run -A jsr:@riagentic/aio@1.0.0-alpha4/src/build --compile --electron",
+    "compile:electron:remote": "deno run -A jsr:@riagentic/aio@1.0.0-alpha4/src/build --client",
+    "compile:android": "deno run -A jsr:@riagentic/aio@1.0.0-alpha4/src/build --android"
   }
 }
 ```

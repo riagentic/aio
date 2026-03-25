@@ -1,9 +1,18 @@
 // HTTP + WebSocket server with live TSX transpilation (dev) or static serving (prod)
 import { extname, join, resolve, SEPARATOR } from "@std/path";
-import type { AioUser } from "./aio.ts";
+import { type AioUser, DEFAULT_SYNC_INTERVAL_MS } from "./aio.ts";
+import type { RenderBudget } from "./vitals/types.ts";
+import type { VitalsSystem } from "./vitals/mod.ts";
+import {
+  diagEmit,
+  diagSubscribe,
+  initDiagnosticBus,
+} from "./diagnostic-bus.ts";
+import { setDiagEmit } from "./error.ts";
 export {
   buildBrowserImportMap,
   classifyBrowserError,
+  generateDiagnosticHTML,
   generateHTML,
   MIME,
   TEXT_EXTENSIONS,
@@ -11,10 +20,12 @@ export {
 import {
   buildBrowserImportMap,
   classifyBrowserError,
+  generateDiagnosticHTML,
   generateHTML,
   MIME,
   TEXT_EXTENSIONS,
 } from "./server-html.ts";
+import { type GraphResult, validateGraph } from "./graph-validator.ts";
 
 type DispatchFn = (event: unknown, user?: AioUser) => void;
 type GetUIStateFn = (user?: AioUser) => unknown;
@@ -40,14 +51,17 @@ export interface ServerConfig {
   key?: string; // PEM key string — required when cert is set
   users?: Record<string, AioUser>; // per-user token map (overrides token)
   showStatus?: boolean; // show reconnection indicator (default: true)
+  renderBudget?: RenderBudget; // sent to browser for RenderMeter thresholds
   fullStateThreshold?: number; // 0-1: ratio of changed keys for delta vs full broadcast (default: 0.5)
   maxConnections?: number; // max concurrent WebSocket clients (default: 100)
-  syncIntervalMs?: number; // throttle UI updates: max 1 push per N ms (default: 10 = 100fps)
+  syncIntervalMs?: number; // throttle state broadcasts: max 1 push per N ms (default: 50)
   allowedOrigins?: string[]; // extra allowed origins beyond localhost (e.g. Docker, reverse proxy)
   clientCounter?: { value: number }; // shared index counter — WS and UDS get unique indices
   onConnect?: (user?: AioUser) => void;
   onDisconnect?: (user?: AioUser) => void;
   onReload?: (signal: "__reload" | "__css") => void; // called on live-reload — lets aio.ts forward to UDS
+  // Vitals — latency monitoring & backpressure
+  vitalsSystem?: VitalsSystem;
   // Time-travel (dev mode)
   onTTCommand?: (cmd: string, arg?: number) => void;
   getTTBroadcast?: () => unknown;
@@ -122,6 +136,8 @@ function fileExists(path: string): boolean {
 // browser.ts URL — works for both local (file://) and JSR/HTTP installs (import.meta.dirname is null for remote modules)
 const BROWSER_TS_URL = new URL("browser.ts", import.meta.url);
 const LISTENERS_TS_URL = new URL("listeners.ts", import.meta.url);
+// Base URL for resolving sub-module imports (e.g. vitals/*.ts) served under /__aio/
+const AIO_SRC_BASE_URL = new URL(".", import.meta.url);
 
 type EsbuildMessage = {
   text: string;
@@ -138,6 +154,7 @@ type TransformResult = { code: string; warnings: EsbuildMessage[] };
 let transformFn:
   | ((input: string, opts: Record<string, unknown>) => Promise<TransformResult>)
   | null = null;
+let esbuildStop: (() => Promise<void>) | null = null;
 async function getTransform() {
   if (!transformFn) {
     // deno-lint-ignore no-import-prefix
@@ -146,8 +163,19 @@ async function getTransform() {
       input: string,
       opts: Record<string, unknown>,
     ) => Promise<TransformResult>;
+    esbuildStop = mod.stop as () => Promise<void>;
   }
   return transformFn!;
+}
+/** Stop esbuild subprocess — call on server shutdown to avoid resource leaks */
+async function stopEsbuild() {
+  if (esbuildStop) {
+    await esbuildStop();
+    // Allow child process to fully terminate before returning
+    await new Promise((r) => setTimeout(r, 10));
+    esbuildStop = null;
+    transformFn = null;
+  }
 }
 
 // Transpile cache — keyed by filepath, invalidated when source changes, capped at 200 entries
@@ -228,6 +256,9 @@ async function transpile(
 const WS_MAX_MESSAGE = 1_000_000; // 1MB — reject oversized WS messages
 const WS_MAX_CONNECTIONS = 100; // max concurrent WebSocket clients
 const SNAPSHOT_MAX_SIZE = 10_000_000; // 10MB — reject oversized snapshot uploads
+const BP_STALENESS_HIGH = 300; // ms — client render staleness triggering 4x throttle
+const BP_STALENESS_MODERATE = 100; // ms — client render staleness triggering 2x throttle
+const BP_RECOVERY_PINGS = 3; // consecutive low-staleness pings before stepping down multiplier
 
 /** Delta computation result */
 export type DeltaResult = {
@@ -359,13 +390,25 @@ export function _computeDelta(
 export function createServer(config: ServerConfig): ServerHandle {
   const { port, title, getUIState, dispatch, debug, prod = false, distDir } =
     config;
+  // Diagnostic bus — dev-only event system for surfacing silent failures
+  initDiagnosticBus(!prod);
+  if (!prod) {
+    setDiagEmit(diagEmit);
+  }
+
   const absBaseDir = resolve(config.baseDir); // normalize to absolute — fixes cache key matching
+
   let denoImports: Record<string, string> = {};
   try {
     const djText = Deno.readTextFileSync(join(absBaseDir, "..", "deno.json"));
     denoImports = JSON.parse(djText).imports ?? {};
   } catch { /* no deno.json or parse error — use defaults */ }
-  const IMPORT_MAP = buildBrowserImportMap(denoImports);
+  const importMapObj = buildBrowserImportMap(denoImports);
+  const IMPORT_MAP = JSON.stringify({ imports: importMapObj });
+
+  // Import graph validator state (dev mode only)
+  let graphResult: GraphResult | null = null;
+  let graphWasRed = false;
 
   // Dev startup validation — quick scan for obvious browser import issues
   if (!prod) {
@@ -414,6 +457,50 @@ export function createServer(config: ServerConfig): ServerHandle {
     }
   }
 
+  // Graph validation at startup (dev mode only) — tracked so shutdown can await it
+  let graphValidationDone: Promise<void> | null = null;
+  if (!prod) {
+    const entrypoint = join(absBaseDir, "App.tsx");
+    if (fileExists(entrypoint)) {
+      graphValidationDone = validateGraph(entrypoint, importMapObj, transpile)
+        .then((result) => {
+          graphResult = result;
+          const warnings = result.errors.filter((e) =>
+            e.category === "server-only-api" ||
+            e.category === "circular-dependency"
+          );
+          const blocking = result.errors.filter((e) =>
+            e.category !== "server-only-api" &&
+            e.category !== "circular-dependency"
+          );
+          if (result.valid) {
+            debug(
+              `graph: ✓ ${result.modules.size} modules validated (${
+                result.durationMs.toFixed(0)
+              }ms)${warnings.length ? ` (${warnings.length} warnings)` : ""}`,
+            );
+          } else {
+            for (const err of blocking) {
+              debug(
+                `graph: ✖ ${err.file}${
+                  err.line ? `:${err.line}` : ""
+                } — ${err.message}`,
+              );
+              debug(`  FIX: ${err.fix}`);
+            }
+            graphWasRed = true;
+          }
+          if (result.durationMs > 1000) {
+            debug(
+              `graph: ⚠ validation took ${
+                result.durationMs.toFixed(0)
+              }ms (budget: 1000ms)`,
+            );
+          }
+        }).catch((err) => debug(`graph: startup validation failed — ${err}`));
+    }
+  }
+
   const absDistDir = distDir ? resolve(distDir) : null;
   // Detect style.css — dev: src/style.css, prod: dist/style.css
   const hasCSS = fileExists(join(absBaseDir, "style.css")) ||
@@ -439,8 +526,28 @@ export function createServer(config: ServerConfig): ServerHandle {
     bytesThisSec: number;
     msgResetTimer?: ReturnType<typeof setTimeout>;
     typeDetectTimer?: ReturnType<typeof setTimeout>;
+    bpMultiplier: number; // backpressure: sync interval multiplier (1, 2, or 4)
+    bpConsecutiveLow: number; // backpressure: consecutive low-staleness pings
+    bpLastSentAt: number; // backpressure: timestamp of last broadcast to this client
   };
   const connections = new Map<WebSocket, ClientMeta>();
+  const _payloadStats = new Map<
+    string,
+    { lastPayloadBytes: number; totalBytes: number; count: number }
+  >();
+
+  // Forward diagnostic bus events to all connected dev clients via WS
+  if (!prod) {
+    diagSubscribe((ev) => {
+      const msg = "__diag:" + JSON.stringify(ev);
+      for (const [ws] of connections) {
+        try {
+          ws.send(msg);
+        } catch { /* client gone */ }
+      }
+    });
+  }
+
   // Shared counter — if config provides one, WS and UDS indices are globally unique
   const clientCounter = config.clientCounter ?? { value: 0 };
   const nextIndex = () => clientCounter.value++;
@@ -450,22 +557,26 @@ export function createServer(config: ServerConfig): ServerHandle {
     { resolve: (v: unknown) => void; timer: ReturnType<typeof setTimeout> }
   >();
   const PENDING_STATE_MAX = 50;
-  const syncIntervalMs = config.syncIntervalMs ?? 10;
+  const syncIntervalMs = config.syncIntervalMs ?? DEFAULT_SYNC_INTERVAL_MS;
   let broadcastQueued = false;
   let broadcastDirty = false;
   let broadcastThrottle: ReturnType<typeof setTimeout> | null = null;
   let lastError = ""; // last transpile error — served at /__aio/error
-  let lastErrorData: {
-    errors: Array<
-      {
-        text: string;
-        file?: string;
-        line?: number;
-        col?: number;
-        lineText?: string;
-      }
-    >;
-  } | null = null;
+  const errorMap = new Map<
+    string,
+    {
+      errors: Array<
+        {
+          text: string;
+          file?: string;
+          line?: number;
+          col?: number;
+          lineText?: string;
+        }
+      >;
+      ts: number;
+    }
+  >();
   const bootId = crypto.randomUUID().slice(0, 8); // unique per server start — triggers browser reload on reconnect
   const noCache = prod
     ? {}
@@ -491,6 +602,14 @@ export function createServer(config: ServerConfig): ServerHandle {
       try {
         for (const [ws, meta] of connections) {
           if (ws.readyState !== WebSocket.OPEN) continue;
+          if (config.vitalsSystem?.serverTransport.isFrozen(meta.id)) {
+            continue;
+          }
+          // Backpressure: skip client if not enough time elapsed since last send
+          if (meta.bpMultiplier > 1) {
+            const elapsed = Date.now() - meta.bpLastSentAt;
+            if (elapsed < syncIntervalMs * meta.bpMultiplier) continue;
+          }
           let uiState: unknown;
           try {
             uiState = getUIState(meta.user);
@@ -511,6 +630,23 @@ export function createServer(config: ServerConfig): ServerHandle {
           debug(`broadcast ${delta.kind} → client ${meta.id.slice(0, 8)}`);
           try {
             ws.send(delta.msg);
+            meta.bpLastSentAt = Date.now();
+            config.vitalsSystem?.serverTransport.onClientStateSent(
+              meta.id,
+              Date.now(),
+            );
+            const _bytes = new TextEncoder().encode(delta.msg).byteLength;
+            const _ps = _payloadStats.get(meta.id);
+            if (_ps) {
+              _ps.lastPayloadBytes = _bytes;
+              _ps.totalBytes += _bytes;
+              _ps.count++;
+            } else {_payloadStats.set(meta.id, {
+                lastPayloadBytes: _bytes,
+                totalBytes: _bytes,
+                count: 1,
+              });}
+            config.vitalsSystem?.pressureMonitor?.onBroadcast(meta.id, _bytes);
           } catch { /* client disconnecting */ }
         }
       } catch (e) {
@@ -569,6 +705,9 @@ export function createServer(config: ServerConfig): ServerHandle {
       lastKeyJsons: {},
       msgCount: 0,
       bytesThisSec: 0,
+      bpMultiplier: 1,
+      bpConsecutiveLow: 0,
+      bpLastSentAt: 0,
     };
     socket.onerror = (e) => {
       debug(
@@ -643,6 +782,13 @@ export function createServer(config: ServerConfig): ServerHandle {
       // Boot ID — browser reloads page if server restarted (stale JS in memory)
       socket.send("__boot:" + bootId);
     };
+    // WS message prefix registry:
+    //   __reload     — trigger page reload
+    //   __css        — CSS-only hot reload
+    //   __boot:<id>  — boot ID for session tracking
+    //   __tt:<json>  — time-travel state
+    //   __vitals:<json> — vital signs data
+    //   __diag:<json>   — diagnostic bus events (dev only)
     socket.onmessage = (e) => {
       try {
         // Rate limiting — reset counters every second
@@ -713,6 +859,61 @@ export function createServer(config: ServerConfig): ServerHandle {
           }
           return;
         }
+        // Vitals ping — latency measurement
+        if (typeof e.data === "string" && e.data.startsWith("__vitals:ping:")) {
+          try {
+            const ping = JSON.parse(e.data.slice(14));
+            const vmeta = connections.get(socket);
+            if (vmeta && config.vitalsSystem) {
+              config.vitalsSystem.serverTransport.onClientPing(
+                vmeta.id,
+                ping.t1,
+              );
+              // Backpressure: adapt per-client sync rate based on render staleness
+              const staleness = typeof ping.ms === "number" ? ping.ms : 0;
+              const prevMul = vmeta.bpMultiplier;
+              if (staleness > BP_STALENESS_HIGH) {
+                vmeta.bpMultiplier = 4;
+                vmeta.bpConsecutiveLow = 0;
+              } else if (staleness > BP_STALENESS_MODERATE) {
+                vmeta.bpMultiplier = 2;
+                vmeta.bpConsecutiveLow = 0;
+              } else {
+                vmeta.bpConsecutiveLow++;
+                if (
+                  vmeta.bpConsecutiveLow >= BP_RECOVERY_PINGS &&
+                  vmeta.bpMultiplier > 1
+                ) {
+                  vmeta.bpMultiplier = Math.max(1, vmeta.bpMultiplier / 2);
+                  vmeta.bpConsecutiveLow = 0;
+                }
+              }
+              if (vmeta.bpMultiplier !== prevMul) {
+                const cid = vmeta.id.slice(0, 8);
+                if (vmeta.bpMultiplier > prevMul) {
+                  console.warn(
+                    `[aio:vitals] client ${cid} — staleness ${
+                      Math.round(staleness)
+                    }ms, backpressure ${prevMul}x→${vmeta.bpMultiplier}x`,
+                  );
+                } else {
+                  console.warn(
+                    `[aio:vitals] client ${cid} — recovered, backpressure ${prevMul}x→${vmeta.bpMultiplier}x`,
+                  );
+                }
+              }
+              const pong = {
+                t1: ping.t1,
+                t2: Date.now(),
+                loop: config.vitalsSystem.getLoopVitalsForPong(),
+              };
+              socket.send("__vitals:pong:" + JSON.stringify(pong));
+            }
+          } catch (err) {
+            debug(`[vitals] bad ping: ${err}`);
+          }
+          return;
+        }
         const parsed = JSON.parse(e.data);
 
         if (!parsed || typeof parsed.type !== "string") {
@@ -750,6 +951,11 @@ export function createServer(config: ServerConfig): ServerHandle {
           meta.user?.id ?? "anon"
         } (${connections.size} total)`,
       );
+      if (config.vitalsSystem) {
+        config.vitalsSystem.serverTransport.removeClient(meta.id);
+        config.vitalsSystem.pressureMonitor?.onClientDisconnect(meta.id);
+        _payloadStats.delete(meta.id);
+      }
       if (config.onDisconnect) {
         try {
           config.onDisconnect(meta.user);
@@ -767,6 +973,12 @@ export function createServer(config: ServerConfig): ServerHandle {
     req?: Request,
   ): Promise<Response> {
     if (pathname === "/") {
+      if (!prod && graphResult && !graphResult.valid) {
+        return new Response(
+          generateDiagnosticHTML(graphResult.errors, title),
+          { headers: { "Content-Type": "text/html", ...noCache } },
+        );
+      }
       const importMap = IMPORT_MAP;
       return new Response(
         generateHTML(
@@ -777,6 +989,7 @@ export function createServer(config: ServerConfig): ServerHandle {
           config.showStatus,
           config.width,
           config.height,
+          config.renderBudget,
         ),
         { headers: { "Content-Type": "text/html", ...noCache } },
       );
@@ -821,8 +1034,37 @@ export function createServer(config: ServerConfig): ServerHandle {
       }
     }
 
+    // Generic handler for aio sub-module .ts files (e.g. vitals/*.ts)
+    // Resolves relative to aio src/ — prevents path traversal via ".." check
+    if (
+      pathname.startsWith("/__aio/") &&
+      (pathname.endsWith(".ts") || pathname.endsWith(".tsx")) &&
+      !pathname.includes("..")
+    ) {
+      const relPath = pathname.slice("/__aio/".length);
+      const fileUrl = new URL(relPath, AIO_SRC_BASE_URL);
+      try {
+        const source = await fetch(fileUrl).then((r) => r.text());
+        const code = await transpile(source, fileUrl.href, debug);
+        return new Response(code, {
+          headers: { "Content-Type": "application/javascript", ...noCache },
+        });
+      } catch (err) {
+        debug(`transpile ${relPath} error: ${fmtEsbuildError(err, relPath)}`);
+        return new Response(
+          `throw new Error(${JSON.stringify(relPath + " transpile failed")})`,
+          {
+            headers: { "Content-Type": "application/javascript", ...noCache },
+          },
+        );
+      }
+    }
+
     if (!prod && pathname === "/__aio/error") {
-      return new Response(JSON.stringify(lastErrorData ?? { errors: [] }), {
+      const cutoff = Date.now() - 30_000;
+      const allErrors = [...errorMap.values()].filter((e) => e.ts > cutoff)
+        .flatMap((e) => e.errors);
+      return new Response(JSON.stringify({ errors: allErrors }), {
         headers: { "Content-Type": "application/json" },
       });
     }
@@ -897,6 +1139,68 @@ export function createServer(config: ServerConfig): ServerHandle {
             status: 503,
             headers: { "Content-Type": "application/json" },
           },
+        );
+      }
+    }
+
+    // ── Vitals endpoint ──
+    if (pathname === "/__aio/vitals" && config.vitalsSystem) {
+      try {
+        const data = config.vitalsSystem.getEndpointData();
+        const pm = config.vitalsSystem.pressureMonitor;
+        const payloadStats: Record<string, Record<string, unknown>> = {};
+        for (const [id, stats] of _payloadStats) {
+          payloadStats[id] = {
+            ...stats,
+            bytesPerSec: pm?.getBytesPerSec(id) ?? 0,
+          };
+        }
+        const featureSizes = config.trojan
+          ? config.vitalsSystem.computeFeatureSizes(
+            config.trojan.getState() as Record<string, unknown>,
+          )
+          : {};
+        // Server-side gauges
+        const _gaugeOf = (name: string, current: number, capacity: number) => ({
+          name,
+          current,
+          capacity,
+          percent: capacity > 0
+            ? Math.min(100, Math.round((current / capacity) * 100))
+            : 0,
+        });
+        const loopVitals = config.vitalsSystem.loopProbe.getVitals();
+        const serverGauges = {
+          "server.queueDepth": _gaugeOf(
+            "server.queueDepth",
+            loopVitals.queueDepth,
+            1000,
+          ),
+          "server.reduceTime": _gaugeOf(
+            "server.reduceTime",
+            loopVitals.p95ReduceTime,
+            100,
+          ),
+        };
+        // Per-client backpressure multipliers
+        const clientBP: Record<string, number> = {};
+        for (const [, meta] of connections) {
+          clientBP[meta.id] = meta.bpMultiplier;
+        }
+        const responseData = {
+          ...data,
+          payloadStats,
+          featureSizes,
+          gauges: serverGauges,
+          clientBackpressure: clientBP,
+        };
+        return new Response(JSON.stringify(responseData, null, 2), {
+          headers: { "Content-Type": "application/json" },
+        });
+      } catch (e) {
+        return new Response(
+          JSON.stringify({ status: "error", error: String(e) }),
+          { status: 503, headers: { "Content-Type": "application/json" } },
         );
       }
     }
@@ -1028,7 +1332,10 @@ export function createServer(config: ServerConfig): ServerHandle {
         }
         if (route === "errors") {
           if (prod) return err("dev-only endpoint", 403);
-          return json(lastErrorData ?? { errors: [] });
+          const cutoff = Date.now() - 30_000;
+          const allErrors = [...errorMap.values()].filter((e) => e.ts > cutoff)
+            .flatMap((e) => e.errors);
+          return json({ errors: allErrors });
         }
         if (route === "schedules") return json(trojan.getSchedules());
         if (route === "metrics") {
@@ -1212,6 +1519,12 @@ export function createServer(config: ServerConfig): ServerHandle {
         exists = true;
       } catch { /* not found */ }
       if (!exists) {
+        if (!prod && graphResult && !graphResult.valid) {
+          return new Response(
+            generateDiagnosticHTML(graphResult.errors, title),
+            { headers: { "Content-Type": "text/html", ...noCache } },
+          );
+        }
         const importMap = IMPORT_MAP;
         return new Response(
           generateHTML(
@@ -1222,6 +1535,7 @@ export function createServer(config: ServerConfig): ServerHandle {
             config.showStatus,
             config.width,
             config.height,
+            config.renderBudget,
           ),
           { headers: { "Content-Type": "text/html", ...noCache } },
         );
@@ -1260,13 +1574,13 @@ export function createServer(config: ServerConfig): ServerHandle {
         body = await transpile(body, filepath, debug);
         contentType = "application/javascript";
         lastError = "";
-        lastErrorData = null;
+        errorMap.delete(filename);
       } catch (err) {
         const formatted = fmtEsbuildError(err, filename);
         debug(`transpile error: ${formatted}`);
         lastError = formatted;
         const rawMsgs = (err as { errors?: EsbuildMessage[] }).errors ?? [];
-        lastErrorData = {
+        errorMap.set(filename, {
           errors: rawMsgs.length
             ? rawMsgs.map((m) => ({
               text: m.text,
@@ -1276,7 +1590,11 @@ export function createServer(config: ServerConfig): ServerHandle {
               lineText: m.location?.lineText,
             }))
             : [{ text: formatted }],
-        };
+          ts: Date.now(),
+        });
+        for (const [f, e] of errorMap) {
+          if (Date.now() - e.ts > 60_000) errorMap.delete(f);
+        }
         return new Response(
           `throw new Error(${JSON.stringify(lastError)})`,
           {
@@ -1321,15 +1639,76 @@ export function createServer(config: ServerConfig): ServerHandle {
     // 100ms debounce — batch rapid file changes into single reload
     reloadTimer = setTimeout(() => {
       reloadTimer = null;
-      const signal = reloadIsFull ? "__reload" : "__css";
+      const wasFullReload = reloadIsFull;
       reloadIsFull = false;
-      debug(`${signal} → ${connections.size} client(s)`);
-      for (const ws of connections.keys()) {
-        try {
-          if (ws.readyState === WebSocket.OPEN) ws.send(signal);
-        } catch { /* client disconnecting */ }
-      }
-      config.onReload?.(signal as "__reload" | "__css");
+
+      (async () => {
+        // Re-validate import graph on file change (dev mode only)
+        if (!prod && fileExists(join(absBaseDir, "App.tsx"))) {
+          const timeout = new Promise<null>((r) =>
+            setTimeout(() => r(null), 2000)
+          );
+          const validation = validateGraph(
+            join(absBaseDir, "App.tsx"),
+            importMapObj,
+            transpile,
+          );
+          const result = await Promise.race([validation, timeout]);
+          if (result === null) {
+            debug("graph: ⚠ validation timed out (>2s) — serving app anyway");
+            graphResult = {
+              valid: true,
+              errors: [],
+              modules: new Map(),
+              durationMs: 2000,
+            };
+          } else {
+            graphResult = result;
+          }
+        }
+
+        if (!prod && graphResult && !graphResult.valid) {
+          // Graph is red — send error info to clients, suppress normal reload
+          const errJson = JSON.stringify(graphResult.errors);
+          for (const ws of connections.keys()) {
+            try {
+              if (ws.readyState === WebSocket.OPEN) {
+                ws.send("__graph_error:" + errJson);
+              }
+            } catch { /* disconnecting */ }
+          }
+          for (const err of graphResult.errors) {
+            debug(
+              `graph: ✖ ${err.file}${
+                err.line ? `:${err.line}` : ""
+              } — ${err.message}`,
+            );
+            debug(`  FIX: ${err.fix}`);
+          }
+          config.onReload?.("__reload");
+          graphWasRed = true;
+        } else if (!prod && graphWasRed) {
+          // Was red, now green — tell clients to reload
+          graphWasRed = false;
+          debug("graph: ✓ all errors fixed — reloading");
+          for (const ws of connections.keys()) {
+            try {
+              if (ws.readyState === WebSocket.OPEN) ws.send("__graph_clear");
+            } catch { /* disconnecting */ }
+          }
+          config.onReload?.("__reload");
+        } else {
+          // Normal reload (no graph issues)
+          const signal = wasFullReload ? "__reload" : "__css";
+          debug(`${signal} → ${connections.size} client(s)`);
+          for (const ws of connections.keys()) {
+            try {
+              if (ws.readyState === WebSocket.OPEN) ws.send(signal);
+            } catch { /* disconnecting */ }
+          }
+          config.onReload?.(signal as "__reload" | "__css");
+        }
+      })().catch((err) => debug(`graph: unexpected error — ${err}`));
     }, 100);
   }
 
@@ -1573,10 +1952,12 @@ export function createServer(config: ServerConfig): ServerHandle {
       // Clear pending client state request timers
       for (const [, pending] of pendingClientState) clearTimeout(pending.timer);
       pendingClientState.clear();
+      if (graphValidationDone) await graphValidationDone.catch(() => {});
       await Promise.all([
         httpServer.shutdown(),
         trojanServer?.shutdown(),
       ]);
+      await stopEsbuild();
       // Clean up UDS socket file
       if (udsPath) {
         try {

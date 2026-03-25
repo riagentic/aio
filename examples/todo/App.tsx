@@ -1,6 +1,6 @@
 // UI — todo list with inline editing, filtering, keyboard support
 import { useFeature, useLocal } from "aio";
-import { todo, type Filter, type Todo } from "./app.ts";
+import { type Filter, type Todo, todo } from "./app.ts";
 
 const FILTERS: Filter[] = ["all", "active", "done"];
 
@@ -18,7 +18,13 @@ export default function App() {
   const remaining = state.items.filter((t) => !t.done).length;
 
   return (
-    <div style={{ maxWidth: 480, margin: "2rem auto", fontFamily: "system-ui, sans-serif" }}>
+    <div
+      style={{
+        maxWidth: 480,
+        margin: "2rem auto",
+        fontFamily: "system-ui, sans-serif",
+      }}
+    >
       <h1 style={{ textAlign: "center", color: "#c77" }}>todos</h1>
 
       {/* Add */}
@@ -98,7 +104,12 @@ export default function App() {
             <button
               type="button"
               onClick={() => send.remove(t.id)}
-              style={{ color: "#c44", border: "none", background: "none", cursor: "pointer" }}
+              style={{
+                color: "#c44",
+                border: "none",
+                background: "none",
+                cursor: "pointer",
+              }}
             >
               x
             </button>
@@ -127,7 +138,9 @@ export default function App() {
                 onClick={() => send.setFilter(f)}
                 style={{
                   padding: "0.2rem 0.5rem",
-                  border: state.filter === f ? "1px solid #c77" : "1px solid transparent",
+                  border: state.filter === f
+                    ? "1px solid #c77"
+                    : "1px solid transparent",
                   background: "none",
                   cursor: "pointer",
                   borderRadius: 3,
@@ -140,7 +153,12 @@ export default function App() {
           <button
             type="button"
             onClick={() => send.clearDone()}
-            style={{ border: "none", background: "none", cursor: "pointer", color: "#888" }}
+            style={{
+              border: "none",
+              background: "none",
+              cursor: "pointer",
+              color: "#888",
+            }}
           >
             Clear done
           </button>

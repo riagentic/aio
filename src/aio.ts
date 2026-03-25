@@ -1,7 +1,7 @@
 // Core runtime — boots KV, server, electron, wires everything together
 import { skv, type SkvInstance } from "./skv.ts";
 import { loadOrCreateCert, type TlsCert } from "./tls.ts";
-import { createServer, type ServerHandle } from "./server.ts";
+import { _computeDelta, createServer, type ServerHandle } from "./server.ts";
 import {
   type AioMeta,
   launchElectron,
@@ -23,6 +23,7 @@ import {
   type PerfMetric,
   record,
   redo,
+  type ReduceBreakdown,
   resume,
   stateAt,
   toBroadcast,
@@ -67,6 +68,10 @@ import {
   type DiagnosticsConfig,
   initDiagnostics,
 } from "./diagnostics/mod.ts";
+import { resolveOptions as resolveDiagOptions } from "./diagnostics/types.ts";
+import { diagEmit } from "./diagnostic-bus.ts";
+import type { RenderBudget } from "./vitals/types.ts";
+import { createVitalsSystem, type VitalsSystem } from "./vitals/mod.ts";
 
 /** Framework version — defined in aio-cli.ts, re-exported here */
 export { VERSION } from "./aio-cli.ts";
@@ -103,8 +108,10 @@ export type UiConfig = {
   width?: number; // default: 800
   height?: number; // default: 600
   showStatus?: boolean; // default: true
-  syncIntervalMs?: number; // default: 10 — max 1 UI push per N ms (0 = microtask coalescing)
 };
+
+/** Default broadcast throttle: 50ms = max 20 state pushes/sec */
+export const DEFAULT_SYNC_INTERVAL_MS = 50;
 
 /** Everything aio.run() needs to wire your app */
 export type AioConfig<S, A, E> = {
@@ -119,6 +126,7 @@ export type AioConfig<S, A, E> = {
   stateForDB?: (state: S) => Partial<S>; // filter what gets persisted (default: full state)
   stateForUI?: (state: S, user?: AioUser) => unknown; // filter what gets sent to UI (default: full state)
   fullStateThreshold?: number; // 0-1: ratio of changed keys that triggers full state broadcast (default: 0.5)
+  syncIntervalMs?: number; // default: 50 — max 1 state push per N ms (0 = microtask coalescing only)
   maxConnections?: number; // max concurrent WebSocket clients (default: 100)
   beforeReduce?: (action: A, state: S, user?: AioUser) => A | null; // intercept actions before reduce — return null to drop
   persistKey?: string; // KV key prefix (default: "state")
@@ -138,6 +146,7 @@ export type AioConfig<S, A, E> = {
   db?: Record<string, TableDef>; // SQLite table definitions — arrays auto-sync
   perfCheck?: "on" | "off"; // default: 'on' — enable/disable performance violation reporting
   perfBudget?: PerfBudget; // override default budgets (reduce: 100, effect: 5)
+  renderBudget?: RenderBudget; // override render staleness/patch thresholds (sent to browser)
   effectTimeoutMs?: number; // ms before logging a warning for slow async effects — warning only, does not cancel (default: 30000 = 30s)
   freezeState?: boolean; // default: false in prod, true in dev — deep freeze state after reduce to catch mutations
   memory?: MemoryConfig; // memory pressure monitoring config
@@ -166,6 +175,8 @@ export type AioConfig<S, A, E> = {
   _healthGetter?: (
     state: unknown,
   ) => Record<string, { errors: number; enabled: boolean }>;
+  /** Internal: reduce breakdown getter — passed from FeaturesConfig via composeFeatures */
+  _reduceBreakdown?: () => ReduceBreakdown | undefined;
 };
 
 /** Handle returned by aio.run() — dispatch actions, read state, or shut down */
@@ -560,7 +571,6 @@ function printLint(r: Lint): void {
 export { parseCli, printHelp } from "./aio-cli.ts";
 export type { CliFlags } from "./aio-cli.ts";
 import { parseCli, printHelp } from "./aio-cli.ts";
-import type { CliFlags } from "./aio-cli.ts";
 
 // ── KV path resolution ──────────────────────────────────────────────
 
@@ -699,7 +709,17 @@ export function createUDSListener(
       // Send initial state
       const initial = JSON.stringify(getUIState()) + "\n";
       const writer = conn.writable.getWriter();
-      writer.write(new TextEncoder().encode(initial)).catch(() => {});
+      writer.write(new TextEncoder().encode(initial)).catch((e: unknown) => {
+        diagEmit({
+          type: "transport-error",
+          severity: "warning",
+          source: "server",
+          message: "UDS write failed — message not delivered to renderer",
+          detail: { error: String(e) },
+          hint:
+            "Electron IPC pipe may be broken. Check if renderer process is running.",
+        });
+      });
       writer.releaseLock();
 
       // Read incoming messages (actions + __clientState: responses)
@@ -875,6 +895,7 @@ export type FeaturesConfig = {
   memory?: MemoryConfig; // memory pressure monitoring config
   circuitBreaker?: CircuitBreakerConfig; // auto-disable features after N errors
   singleton?: boolean;
+  syncIntervalMs?: number;
   fullStateThreshold?: number;
   maxConnections?: number;
   schedules?: ScheduleDef[];
@@ -935,6 +956,14 @@ async function run(a: any, b?: any): Promise<AioApp<any, any>> {
     }
   }
   const fc = a as FeaturesConfig;
+  validateConfig(
+    fc as unknown as Record<string, unknown>,
+    VALID_FEATURES_CONFIG_KEYS,
+    "FeaturesConfig",
+  );
+  if (fc.ui) {
+    validateConfig(fc.ui as Record<string, unknown>, VALID_UI_KEYS, "ui");
+  }
   if (_running) {
     throw new Error("aio.run() already called — one instance per process");
   }
@@ -975,9 +1004,11 @@ async function run(a: any, b?: any): Promise<AioApp<any, any>> {
     // Mutable reportOpts ref — populated by _run, used by composeFeatures callbacks at runtime
     const _featureReportOpts: ReportErrorOpts = { onError: fc.onError };
 
+    const perfEnabled = fc.perfCheck !== "off";
     const composed = composeFeatures(featureEntries, {
       onFeatureError: (err) => reportAioError(err, _featureReportOpts),
       circuitBreaker: fc.circuitBreaker,
+      perfCheck: perfEnabled,
     });
 
     // Build auto-stateForDB from per-feature persist excludes (if user didn't supply one)
@@ -1105,6 +1136,7 @@ async function run(a: any, b?: any): Promise<AioApp<any, any>> {
       singleton: fc.singleton,
       killExisting: fc.killExisting,
       keepServer: fc.keepServer,
+      syncIntervalMs: fc.syncIntervalMs,
       fullStateThreshold: fc.fullStateThreshold,
       maxConnections: fc.maxConnections,
       schedules: fc.schedules,
@@ -1178,6 +1210,7 @@ async function run(a: any, b?: any): Promise<AioApp<any, any>> {
       _diagnostics: fc.diagnostics,
       _onCheckpointRestore: fc.onCheckpointRestore,
       _featureNames: composed.featureNames,
+      _reduceBreakdown: composed.lastBreakdown,
       _healthGetter: (state: unknown) => {
         const health = composed.registry.health(
           state as Record<string, unknown>,
@@ -1279,6 +1312,329 @@ async function run(a: any, b?: any): Promise<AioApp<any, any>> {
   }
 }
 
+// ── Runtime config validation ────────────────────────────────────────
+// Types are erased at runtime. These sets are the runtime source of truth.
+// If you add a key to AioConfig, FeaturesConfig, or UiConfig — add it here too.
+
+export const VALID_UI_KEYS = new Set<string>([
+  "title",
+  "width",
+  "height",
+  "showStatus",
+]);
+
+export const VALID_AIO_CONFIG_KEYS = new Set<string>([
+  "appId",
+  "reduce",
+  "execute",
+  "persist",
+  "stateForDB",
+  "stateForUI",
+  "fullStateThreshold",
+  "syncIntervalMs",
+  "maxConnections",
+  "beforeReduce",
+  "persistKey",
+  "persistDebounceMs",
+  "persistMode",
+  "users",
+  "ui",
+  "port",
+  "baseDir",
+  "client",
+  "keepServer",
+  "transport",
+  "killExisting",
+  "serverUrl",
+  "appVersion",
+  "schedules",
+  "db",
+  "perfCheck",
+  "perfBudget",
+  "renderBudget",
+  "effectTimeoutMs",
+  "freezeState",
+  "memory",
+  "circuitBreaker",
+  "onRestore",
+  "singleton",
+  "onAction",
+  "onEffect",
+  "onConnect",
+  "onDisconnect",
+  "onStart",
+  "onStop",
+  "onError",
+  // internal keys (prefixed with _)
+  "_onScheduleReady",
+  "_diagnostics",
+  "_onCheckpointRestore",
+  "_featureNames",
+  "_healthGetter",
+  "_reduceBreakdown",
+]);
+
+export const VALID_FEATURES_CONFIG_KEYS = new Set<string>([
+  "appId",
+  "features",
+  "port",
+  "persist",
+  "persistKey",
+  "persistDebounceMs",
+  "persistMode",
+  "ui",
+  "baseDir",
+  "client",
+  "keepServer",
+  "transport",
+  "killExisting",
+  "serverUrl",
+  "users",
+  "db",
+  "perfCheck",
+  "perfBudget",
+  "renderBudget",
+  "effectTimeoutMs",
+  "freezeState",
+  "memory",
+  "circuitBreaker",
+  "singleton",
+  "syncIntervalMs",
+  "fullStateThreshold",
+  "maxConnections",
+  "schedules",
+  "middleware",
+  "appVersion",
+  "isolate",
+  "beforeReduce",
+  "onAction",
+  "onEffect",
+  "onConnect",
+  "onDisconnect",
+  "onStart",
+  "onStop",
+  "onError",
+  "onRestore",
+  "stateForUI",
+  "stateForDB",
+  "logging",
+  "diagnostics",
+  "onCheckpointRestore",
+]);
+
+// Key descriptions: [default, explanation] — required keys have no default
+const CONFIG_DOCS: Record<string, [string, string]> = {
+  // Required
+  appId: ["", "unique app identity — lock file, UDS socket, KV/SQLite paths"],
+  appVersion: ["", "app version string — logged on startup"],
+  features: ["", "feature definitions array"],
+  // Core
+  reduce: ["", "state reducer (legacy API)"],
+  execute: ["", "effect executor (legacy API)"],
+  // Persistence
+  persist: ["true", "auto-open Deno.Kv for state persistence"],
+  persistKey: ['"state"', "KV key prefix"],
+  persistDebounceMs: ["100", "ms between KV writes"],
+  persistMode: [
+    '"single"',
+    '"single" (one blob ≤64KB) or "multi" (one key per top-level state key)',
+  ],
+  // Server
+  port: ["8000", "HTTP/WS server port"],
+  baseDir: ['"./src"', "source directory for transpilation"],
+  client: ['"electron"', '"electron" | "browser" | "cli" | "server-only"'],
+  keepServer: ["false", "keep server running after client closes"],
+  transport: ['"auto"', '"uds" | "ws" | "auto" — IPC transport'],
+  killExisting: ["false", "kill existing instance before starting"],
+  serverUrl: ["", "connect to remote server instead of starting one"],
+  singleton: ["true", "refuse to start if already running"],
+  // Sync
+  syncIntervalMs: [
+    "50",
+    "max 1 state push per N ms (0 = microtask coalescing only)",
+  ],
+  fullStateThreshold: [
+    "0.5",
+    "ratio of changed keys that triggers full state broadcast",
+  ],
+  maxConnections: ["100", "max concurrent WebSocket clients"],
+  // State filters
+  stateForUI: ["full state", "filter state before sending to UI"],
+  stateForDB: ["full state", "filter state before persisting"],
+  beforeReduce: ["", "intercept actions before reduce — return null to drop"],
+  // Auth
+  users: ["", "static token→user map for auth"],
+  // Database
+  db: ["", "SQLite table definitions — arrays auto-sync"],
+  // Performance
+  perfCheck: ['"on"', "enable/disable performance violation reporting"],
+  perfBudget: ["", "override default budgets (reduce: 100ms, effect: 5ms)"],
+  "renderBudget.staleness": [
+    "300",
+    "ms — primary staleness threshold (sent to browser)",
+  ],
+  "renderBudget.pendingPatches": [
+    "10",
+    "max pending patches before warning (sent to browser)",
+  ],
+  effectTimeoutMs: ["30000", "warn for slow async effects (ms)"],
+  freezeState: [
+    "dev:true",
+    "deep freeze state after reduce to catch mutations",
+  ],
+  // Monitoring
+  memory: ["", "memory pressure monitoring config"],
+  circuitBreaker: ["", "auto-disable features after N errors"],
+  diagnostics: ["auto", "state diffs, action log, checkpoint, crash handler"],
+  logging: ["true", "structured logging — false to disable"],
+  // Scheduling
+  schedules: ["", "static scheduled effects — started on boot"],
+  // Features API
+  middleware: ["", "middleware array — applied in order as beforeReduce chain"],
+  isolate: ["", "run only these features (dev convenience)"],
+  // Lifecycle hooks
+  onAction: ["", "called after every action"],
+  onEffect: ["", "called after every effect"],
+  onConnect: ["", "called when client connects"],
+  onDisconnect: ["", "called when client disconnects"],
+  onStart: ["", "called after server starts"],
+  onStop: ["", "called on shutdown"],
+  onError: ["", "called on framework error"],
+  onRestore: ["", "transform state after restore, before server starts"],
+  onCheckpointRestore: ["", "handle diagnostics checkpoint on startup"],
+};
+
+const UI_DOCS: Record<string, [string, string]> = {
+  title: ['"AIO App"', "window title"],
+  width: ["800", "window width (px)"],
+  height: ["600", "window height (px)"],
+  showStatus: ["true", "show connection status indicator"],
+};
+
+// Grouped optional keys — order matters for display
+const CONFIG_GROUPS: [string, string[]][] = [
+  ["Server & transport", [
+    "port",
+    "baseDir",
+    "client",
+    "keepServer",
+    "transport",
+    "killExisting",
+    "serverUrl",
+    "singleton",
+    "users",
+    "syncIntervalMs",
+    "fullStateThreshold",
+    "maxConnections",
+  ]],
+  ["App logic", [
+    "stateForUI",
+    "stateForDB",
+    "beforeReduce",
+    "middleware",
+    "isolate",
+    "persist",
+    "persistKey",
+    "persistDebounceMs",
+    "persistMode",
+    "onRestore",
+    "db",
+    "schedules",
+    "onAction",
+    "onEffect",
+    "onConnect",
+    "onDisconnect",
+    "onStart",
+    "onStop",
+    "onError",
+    "onCheckpointRestore",
+  ]],
+  ["Performance & monitoring", [
+    "perfCheck",
+    "perfBudget",
+    "renderBudget.staleness",
+    "renderBudget.pendingPatches",
+    "effectTimeoutMs",
+    "freezeState",
+    "memory",
+    "circuitBreaker",
+    "diagnostics",
+    "logging",
+  ]],
+];
+
+function formatValidConfig(): string {
+  const uiKeys = [...VALID_UI_KEYS].sort();
+
+  const pad = (s: string, len: number) =>
+    s + " ".repeat(Math.max(0, len - s.length));
+
+  function table(
+    title: string,
+    keys: string[],
+    docs: Record<string, [string, string]>,
+  ): string[] {
+    // Compute column widths
+    let nameW = 4, defW = 7; // "Name", "Default"
+    for (const k of keys) {
+      const d = docs[k];
+      nameW = Math.max(nameW, k.length);
+      if (d?.[0]) defW = Math.max(defW, d[0].length);
+    }
+    const lines: string[] = [];
+    lines.push(`  ${title}`);
+    lines.push(`  ${pad("Name", nameW)}  ${pad("Default", defW)}  Description`);
+    lines.push(
+      `  ${"─".repeat(nameW)}  ${"─".repeat(defW)}  ${"─".repeat(30)}`,
+    );
+    for (const k of keys) {
+      const d = docs[k];
+      const def = d?.[0] || "—";
+      const desc = d?.[1] || "";
+      lines.push(`  ${pad(k, nameW)}  ${pad(def, defW)}  ${desc}`);
+    }
+    return lines;
+  }
+
+  const lines: string[] = [];
+  lines.push("aio.run({");
+  lines.push("");
+  lines.push(
+    ...table("REQUIRED", ["appId", "appVersion", "features"], CONFIG_DOCS),
+  );
+
+  for (const [group, keys] of CONFIG_GROUPS) {
+    lines.push("");
+    lines.push(
+      ...table(`${group.toUpperCase()} (optional)`, keys, CONFIG_DOCS),
+    );
+  }
+
+  lines.push("");
+  lines.push(...table("UI (optional) — ui: { ... }", uiKeys, UI_DOCS));
+
+  lines.push("");
+  lines.push("})");
+  return lines.join("\n");
+}
+
+export function validateConfig(
+  obj: Record<string, unknown>,
+  validKeys: Set<string>,
+  label: string,
+  exit: (code: number) => never = Deno.exit as (code: number) => never,
+): void {
+  const unknown = Object.keys(obj).filter((k) => !validKeys.has(k));
+  if (unknown.length > 0) {
+    console.error(
+      `\n[aio] CONFIG ERROR: unknown ${label} key(s): ${unknown.join(", ")}`,
+    );
+    console.error(`\n[aio] Valid configuration:\n`);
+    console.error(formatValidConfig());
+    exit(1);
+  }
+}
+
 async function _run<S, A, E>(
   initialState: S,
   config: AioConfig<S, A, E>,
@@ -1368,11 +1724,23 @@ async function _run<S, A, E>(
   // Diagnostics — state diffs, action log, checkpoint, crash handler
   const diagConfig = config._diagnostics ?? {};
   const diagLogDir = "./log";
-  const diagHooks = config._diagnostics !== undefined
-    ? initDiagnostics(diagConfig, prod, diagLogDir)
-    : null;
+  const diagHooks = config._diagnostics === false
+    ? null
+    : initDiagnostics(diagConfig, prod, diagLogDir);
   if (diagHooks && config._featureNames) {
     diagHooks.onStart(config._featureNames);
+  }
+
+  // Vital Signs — loop/transport/render health probes
+  const diagResolvedOpts = config._diagnostics === false
+    ? false
+    : resolveDiagOptions(config._diagnostics ?? {}, prod);
+  let vitalsSystem: VitalsSystem | undefined;
+  if (diagResolvedOpts && diagResolvedOpts.vitals !== false) {
+    const vitalsConfig = typeof diagResolvedOpts.vitals === "object"
+      ? diagResolvedOpts.vitals
+      : {};
+    vitalsSystem = createVitalsSystem(vitalsConfig);
   }
 
   const client = cli.client ?? config.client ?? "electron";
@@ -1381,11 +1749,37 @@ async function _run<S, A, E>(
   const { reduce, execute, onAction, onEffect, onStart, onStop, onError } =
     config;
   const shouldPersist = (cli.persist ?? config.persist) !== false;
-  const getUIState = config.stateForUI ?? ((s: S, _user?: AioUser) => s);
+  const _rawStateForUI = config.stateForUI ?? ((s: S, _user?: AioUser) => s);
+  // Memoize stateForUI output — skip re-call when input state reference unchanged (AIO-9)
+  let _memoState: S | null = null;
+  const _memoResults = new Map<string, unknown>(); // key: user.id ?? ""
+  const getUIState = (s: S, user?: AioUser): unknown => {
+    if (s !== _memoState) {
+      _memoState = s;
+      _memoResults.clear();
+    }
+    const uid = user?.id ?? "";
+    const cached = _memoResults.get(uid);
+    if (cached !== undefined) return cached;
+    const result = _rawStateForUI(s, user);
+    _memoResults.set(uid, result);
+    return result;
+  };
   const getDBState = config.stateForDB ?? ((s: S) => s);
   const persistKey = config.persistKey ?? "state";
   const persistMode = config.persistMode ?? "single";
   const ui = config.ui ?? {};
+
+  // Validate config shape at runtime — types are erased, this is the safety net
+  validateConfig(
+    config as unknown as Record<string, unknown>,
+    VALID_AIO_CONFIG_KEYS,
+    "AioConfig",
+  );
+  if (config.ui) {
+    validateConfig(config.ui as Record<string, unknown>, VALID_UI_KEYS, "ui");
+  }
+
   const result = await lint(
     initialState,
     config,
@@ -1533,6 +1927,8 @@ async function _run<S, A, E>(
           log.debug("persist: sqlite synced");
         } catch (e) {
           log.error(`persist: sqlite sync failed — ${e}`);
+          const persistErr = createAioError("PERSIST_ERROR", e, {});
+          reportAioError(persistErr, _reportOpts);
         }
         prevDbState = { ...(state as Record<string, unknown>) };
       }
@@ -1549,6 +1945,8 @@ async function _run<S, A, E>(
               log.debug(`persist: saved multi (${keys.length} keys)`);
             } catch (e) {
               log.error(`persist: failed to save — ${e}`);
+              const persistErr = createAioError("PERSIST_ERROR", e, {});
+              reportAioError(persistErr, _reportOpts);
             }
           } else {
             const serialized = JSON.stringify(dbState);
@@ -1573,10 +1971,14 @@ async function _run<S, A, E>(
               log.debug(`persist: saved (${(bytes / 1024).toFixed(1)}KB)`);
             } catch (e) {
               log.error(`persist: failed to save — ${e}`);
+              const persistErr = createAioError("PERSIST_ERROR", e, {});
+              reportAioError(persistErr, _reportOpts);
             }
           }
         } catch (e) {
           log.error(`persist: stateForDB threw — ${e}`);
+          const persistErr = createAioError("PERSIST_ERROR", e, {});
+          reportAioError(persistErr, _reportOpts);
         }
       }
     }, persistMs);
@@ -1626,6 +2028,8 @@ async function _run<S, A, E>(
           );
         }
         log.error(`persist: flush failed — ${e}`);
+        const persistErr = createAioError("PERSIST_ERROR", e, {});
+        reportAioError(persistErr, _reportOpts);
       }
     }
   }
@@ -1641,7 +2045,20 @@ async function _run<S, A, E>(
     if (beforeReduce) {
       try {
         const filtered = beforeReduce(a, s, user);
-        if (filtered === null) return { state: s, effects: [] as E[] }; // dropped — _anyProcessed stays false
+        if (filtered === null) {
+          diagEmit({
+            type: "action-filtered",
+            severity: "info",
+            source: "middleware",
+            message: `Action '${
+              (a as { type?: string }).type
+            }' filtered by beforeReduce`,
+            detail: { actionType: (a as { type?: string }).type },
+            hint:
+              "A middleware or beforeReduce hook returned null, dropping this action.",
+          });
+          return { state: s, effects: [] as E[] }; // dropped — _anyProcessed stays false
+        }
         a = filtered as A;
       } catch (e) {
         const actionType = (a as Record<string, unknown>)?.type as
@@ -1736,27 +2153,58 @@ async function _run<S, A, E>(
 
   // UDS handle — created after dispatch for electron+UDS transport
   let udsHandle: UDSHandle | null = null;
-  const udsSyncIntervalMs = ui.syncIntervalMs ?? 10;
+  const udsSyncIntervalMs = config.syncIntervalMs ?? DEFAULT_SYNC_INTERVAL_MS;
   let udsQueued = false;
   let udsDirty = false;
   let udsThrottle: ReturnType<typeof setTimeout> | null = null;
+  // Delta compression state for UDS broadcasts (mirrors WS delta in server.ts)
+  let udsLastState: unknown = null;
+  let udsLastKeyJsons: Record<string, string> = {};
+  const udsFullStateThreshold = config.fullStateThreshold ?? 0.5;
 
-  // Track per-action performance for dev-mode time-travel panel
+  /** Broadcast UI state to UDS clients with delta compression. Reset tracking with `force` for state jumps. */
+  function udsBroadcastState(force = false) {
+    if (!udsHandle) return;
+    if (force) {
+      udsLastState = null;
+      udsLastKeyJsons = {};
+    }
+    const uiState = getUIState(state);
+    const delta = _computeDelta(
+      uiState,
+      udsLastState,
+      udsLastKeyJsons,
+      udsFullStateThreshold,
+    );
+    udsLastState = uiState;
+    udsLastKeyJsons = delta.newKeyJsons;
+    if (delta.kind === "skip") return;
+    udsHandle.broadcast(delta.msg);
+  }
+
+  // Track per-action performance for dev-mode time-travel panel + vitals
   let lastPerf: PerfMetric | undefined;
-  const onPerf = tt
+  const onPerf = (tt || vitalsSystem)
     ? (
       timing: {
         actionType: string;
         reduce: number;
         effects: number;
         budget: { reduce: number; effect: number };
+        breakdown?: ReduceBreakdown;
       },
     ) => {
-      lastPerf = {
-        reduce: timing.reduce,
-        effects: timing.effects,
-        budget: timing.budget,
-      };
+      if (tt) {
+        lastPerf = {
+          reduce: timing.reduce,
+          effects: timing.effects,
+          budget: timing.budget,
+          breakdown: timing.breakdown,
+        };
+      }
+      if (vitalsSystem) {
+        vitalsSystem.loopProbe.onPerf(timing);
+      }
     }
     : undefined;
 
@@ -1821,13 +2269,13 @@ async function _run<S, A, E>(
           queueMicrotask(() => {
             udsQueued = false;
             udsDirty = false;
-            udsHandle!.broadcast(JSON.stringify(getUIState(state)));
+            udsBroadcastState();
             if (udsSyncIntervalMs > 0) {
               udsThrottle = setTimeout(() => {
                 udsThrottle = null;
                 if (udsDirty) {
-                  udsDirty = true;
-                  udsHandle!.broadcast(JSON.stringify(getUIState(state)));
+                  udsDirty = false;
+                  udsBroadcastState();
                 }
               }, udsSyncIntervalMs);
             }
@@ -1840,11 +2288,12 @@ async function _run<S, A, E>(
     reportOpts: _reportOpts,
     perfCheck: config.perfCheck,
     perfBudget: config.perfBudget,
-    perfLog: (source, type, duration, budget) =>
-      getLogger()?.perf(source, type, duration, budget),
+    perfLog: (source, type, duration, budget, breakdown) =>
+      getLogger()?.perf(source, type, duration, budget, breakdown),
     freezeState: config.freezeState ?? !prod, // default: true in dev, false in prod
     effectTimeout: config.effectTimeoutMs,
     onPerf,
+    reduceBreakdown: config._reduceBreakdown,
     afterAction: diagHooks?.afterAction as
       | ((prev: S, next: S, action: A) => void)
       | undefined,
@@ -1857,6 +2306,30 @@ async function _run<S, A, E>(
         : ""
     }`,
   );
+
+  // Vital Signs — periodic queue/circuit-breaker check
+  let _vitalsCheckTimer: ReturnType<typeof setInterval> | undefined;
+  if (vitalsSystem) {
+    const interval = (typeof diagResolvedOpts === "object" &&
+      typeof diagResolvedOpts.vitals === "object" &&
+      diagResolvedOpts.vitals.heartbeatInterval) || 1000;
+    _vitalsCheckTimer = setInterval(() => {
+      vitalsSystem!.loopProbe.updateQueueDepth(dispatch.getQueueDepth());
+      vitalsSystem!.loopProbe.updateEffectBacklog(dispatch.getEffectBacklog());
+      const composed = (globalThis as Record<string, unknown>).__aioFeatures as
+        | ComposedFeatures
+        | undefined;
+      if (composed) {
+        const health = composed.registry.health(
+          state as Record<string, unknown>,
+        );
+        const tripped = health.filter((f: { enabled: boolean }) => !f.enabled)
+          .map((f: { name: string }) => f.name);
+        vitalsSystem!.loopProbe.updateCircuitBreakers(tripped);
+      }
+      vitalsSystem!.checkAndAlert();
+    }, interval);
+  }
 
   const app: AioApp<S, A> = {
     dispatch,
@@ -1886,7 +2359,7 @@ async function _run<S, A, E>(
       }
       schedulePersist();
       server.broadcast();
-      if (udsHandle) udsHandle.broadcast(JSON.stringify(getUIState(state)));
+      udsBroadcastState(true); // force full — state jump
       log.info("snapshot: loaded");
     },
     close: async () => {
@@ -1920,6 +2393,10 @@ async function _run<S, A, E>(
       }
     }
     if (diagHooks?.uninstallCrashHandler) diagHooks.uninstallCrashHandler();
+
+    // Vital Signs cleanup
+    if (_vitalsCheckTimer) clearInterval(_vitalsCheckTimer);
+    if (vitalsSystem) vitalsSystem.destroy();
 
     if (onStop) {
       try {
@@ -2038,7 +2515,7 @@ async function _run<S, A, E>(
     );
     server.broadcastTT();
     server.broadcast();
-    if (udsHandle) udsHandle.broadcast(JSON.stringify(getUIState(state)));
+    udsBroadcastState(true); // force full — time-travel state jump
   }
 
   // Resolve transport (client already resolved above)
@@ -2064,6 +2541,7 @@ async function _run<S, A, E>(
       port,
       clientCounter,
       title,
+      vitalsSystem,
       width: ui.width,
       height: ui.height,
       getUIState: (user?: AioUser) => getUIState(state, user),
@@ -2086,9 +2564,10 @@ async function _run<S, A, E>(
       cert: tlsCert?.cert,
       key: tlsCert?.key,
       showStatus: ui.showStatus,
+      renderBudget: config.renderBudget,
       fullStateThreshold: config.fullStateThreshold,
       maxConnections: config.maxConnections,
-      syncIntervalMs: ui.syncIntervalMs,
+      syncIntervalMs: config.syncIntervalMs,
       onConnect: config.onConnect,
       onDisconnect: config.onDisconnect,
       onReload: (signal) => {
@@ -2174,6 +2653,15 @@ async function _run<S, A, E>(
       onStart(app);
     } catch (e) {
       log.error(`hook onStart: ${e}`);
+      diagEmit({
+        type: "hook-start-failed",
+        severity: "error",
+        source: "lifecycle",
+        message: "onStart hook threw — app may be in broken state",
+        detail: { error: String(e) },
+        hint:
+          "Check your onStart callback. The app continues running but may not be fully initialized.",
+      });
     }
   }
 

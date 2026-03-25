@@ -1,5 +1,6 @@
-import { assertEquals, assertNotEquals } from "@std/assert";
+import { assertEquals, assertNotEquals, assertStrictEquals } from "@std/assert";
 import { _computeDelta } from "../src/server.ts";
+import { _applyPatch, _preserveArrayRefs, _shallowEqual } from "../src/browser.ts";
 
 // ── Flat state (v0.4 compatible) ────────────────────────────────
 
@@ -336,4 +337,93 @@ Deno.test("computeDelta: removed __proto__ key appears in $d (server-side)", () 
     assertEquals(Array.isArray(parsed.$d), true);
   }
   assertNotEquals(result.kind, "skip", "should detect removed __proto__ key");
+});
+
+// ── Structural sharing (_preserveArrayRefs) ─────────────────────
+
+Deno.test("preserveArrayRefs: identical flat objects → restores all references", () => {
+  const old0 = { id: "a", price: 100 };
+  const old1 = { id: "b", price: 200 };
+  const oldArr = [old0, old1];
+  // Simulates JSON round-trip — new objects, same values
+  const newArr = [{ id: "a", price: 100 }, { id: "b", price: 200 }];
+  const result = _preserveArrayRefs(newArr, oldArr);
+  assertStrictEquals(result, oldArr, "entire array ref preserved");
+  assertStrictEquals(result[0], old0, "element 0 ref preserved");
+  assertStrictEquals(result[1], old1, "element 1 ref preserved");
+});
+
+Deno.test("preserveArrayRefs: one element changed → new array, unchanged elements preserved", () => {
+  const old0 = { id: "a", price: 100 };
+  const old1 = { id: "b", price: 200 };
+  const oldArr = [old0, old1];
+  const newArr = [{ id: "a", price: 100 }, { id: "b", price: 999 }];
+  const result = _preserveArrayRefs(newArr, oldArr);
+  assertNotEquals(result, oldArr); // new array — something changed
+  assertStrictEquals(result[0], old0, "unchanged element 0 preserved");
+  assertNotEquals(result[1], old1); // element 1 changed
+  assertEquals(result[1], { id: "b", price: 999 });
+});
+
+Deno.test("preserveArrayRefs: different lengths → returns new array as-is", () => {
+  const oldArr = [{ id: "a" }];
+  const newArr = [{ id: "a" }, { id: "b" }];
+  const result = _preserveArrayRefs(newArr, oldArr);
+  assertStrictEquals(result, newArr);
+});
+
+Deno.test("preserveArrayRefs: primitive elements → exact equality", () => {
+  const oldArr = [1, 2, 3];
+  const newArr = [1, 2, 3];
+  const result = _preserveArrayRefs(newArr, oldArr);
+  assertStrictEquals(result, oldArr, "all same primitives → old ref");
+});
+
+Deno.test("preserveArrayRefs: primitive changed → new array", () => {
+  const oldArr = [1, 2, 3];
+  const newArr = [1, 99, 3];
+  const result = _preserveArrayRefs(newArr, oldArr);
+  assertNotEquals(result, oldArr);
+});
+
+// ── _applyPatch structural sharing integration ──────────────────
+
+Deno.test("applyPatch: array sub-key preserves unchanged element refs", () => {
+  const member0 = { id: "m0", pnl: 10 };
+  const member1 = { id: "m1", pnl: 20 };
+  const prev = { fleet: { members: [member0, member1], filters: { active: true } } };
+  // Patch: members array with member1.pnl changed, member0 unchanged
+  const patch = {
+    $p: { fleet: { members: [{ id: "m0", pnl: 10 }, { id: "m1", pnl: 99 }] } },
+  };
+  const result = _applyPatch(prev as Record<string, unknown>, patch);
+  const fleet = result.fleet as Record<string, unknown>;
+  const members = fleet.members as Array<Record<string, unknown>>;
+  // member0 should keep reference (unchanged)
+  assertStrictEquals(members[0], member0, "unchanged member keeps ref");
+  // member1 should be new (changed)
+  assertNotEquals(members[1], member1);
+  assertEquals(members[1], { id: "m1", pnl: 99 });
+  // filters not in patch — should keep reference
+  assertStrictEquals(fleet.filters, (prev.fleet as Record<string, unknown>).filters);
+});
+
+Deno.test("applyPatch: all array elements unchanged → array ref preserved", () => {
+  const members = [{ id: "a", v: 1 }, { id: "b", v: 2 }];
+  const prev = { feat: { members, other: "x" } };
+  const patch = {
+    $p: { feat: { members: [{ id: "a", v: 1 }, { id: "b", v: 2 }] } },
+  };
+  const result = _applyPatch(prev as Record<string, unknown>, patch);
+  const feat = result.feat as Record<string, unknown>;
+  assertStrictEquals(feat.members, members, "entire array ref preserved when content identical");
+});
+
+Deno.test("applyPatch: non-array sub-keys still work normally", () => {
+  const prev = { feat: { count: 5, label: "hi" } };
+  const patch = { $p: { feat: { count: 10 } } };
+  const result = _applyPatch(prev as Record<string, unknown>, patch);
+  const feat = result.feat as Record<string, unknown>;
+  assertEquals(feat.count, 10);
+  assertEquals(feat.label, "hi");
 });

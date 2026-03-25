@@ -2,6 +2,9 @@
 
 Error interpretation, state forensics, and common fix patterns.
 
+**Something broken?** Start with [troubleshooting.md](troubleshooting.md) —
+symptom-based guide with decision tree and fix paths.
+
 For the docs index, see [manual.md](manual.md). For time-travel details, see
 [ui.md](ui.md). For performance budgets, see [scaling.md](scaling.md). For the
 diagnostics module (state diffs, action log, checkpoint recovery), see
@@ -9,20 +12,21 @@ diagnostics module (state diffs, action log, checkpoint recovery), see
 
 ## Debugging toolkit — all your options
 
-| Tool                                                         | What it does                                                    | When to use                                               |
-| ------------------------------------------------------------ | --------------------------------------------------------------- | --------------------------------------------------------- |
-| [**AioError console output**](#aioerror-console-output)      | Rich error boxes with feature, action, stack trace, state, tips | First thing you see when something breaks                 |
-| [**Correlation IDs**](#correlation-ids)                      | Trace an action through its entire lifecycle                    | Multi-step flows, cross-feature debugging                 |
-| [**onError hook**](#onerror-hook)                            | Unified callback for ALL errors                                 | Monitoring, alerting, Sentry/Datadog integration          |
-| [**Time-travel debugger**](#time-travel-for-state-forensics) | Walk through every action and state snapshot                    | "How did state get into this shape?"                      |
-| [**Log files**](#log-files)                                  | 5 plain text logs (app, debug, error, warning, perf)            | Post-incident forensics                                   |
-| [**Memory pressure monitor**](#memory-pressure-monitor)      | Alerts before OOM with per-feature sizing                       | Long-running apps, memory leaks                           |
-| [**Feature health audit**](#feature-health-audit)            | Per-feature error count, status, last action                    | Runtime inspection, ops dashboards                        |
-| [**Health endpoint**](#feature-health-audit)                 | `GET /__aio/health` JSON API                                    | External monitoring, load balancers                       |
-| [**Browser error overlay**](#browser-errors)                 | Build Error / Runtime Error overlay with fix suggestions        | UI development                                            |
-| [**Performance budgets**](#performance-debugging)            | Warns when reducers/effects exceed time budgets                 | Finding slow code                                         |
-| [**Startup linter**](#startup-linter-output)                 | Validates feature config on `aio.run()`                         | Catching config mistakes early                            |
-| [**Diagnostics module**](diagnostics.md)                     | State diffs, action log, checkpoint recovery, crash handler     | Full observability — see [diagnostics.md](diagnostics.md) |
+| Tool                                                         | What it does                                                       | When to use                                               |
+| ------------------------------------------------------------ | ------------------------------------------------------------------ | --------------------------------------------------------- |
+| [**AioError console output**](#aioerror-console-output)      | Rich error boxes with feature, action, stack trace, state, tips    | First thing you see when something breaks                 |
+| [**Correlation IDs**](#correlation-ids)                      | Trace an action through its entire lifecycle                       | Multi-step flows, cross-feature debugging                 |
+| [**onError hook**](#onerror-hook)                            | Unified callback for ALL errors                                    | Monitoring, alerting, Sentry/Datadog integration          |
+| [**Time-travel debugger**](#time-travel-for-state-forensics) | Walk through every action and state snapshot                       | "How did state get into this shape?"                      |
+| [**Log files**](#log-files)                                  | 5 plain text logs (app, debug, error, warning, perf)               | Post-incident forensics                                   |
+| [**Memory pressure monitor**](#memory-pressure-monitor)      | Alerts before OOM with per-feature sizing                          | Long-running apps, memory leaks                           |
+| [**Feature health audit**](#feature-health-audit)            | Per-feature error count, status, last action                       | Runtime inspection, ops dashboards                        |
+| [**Health endpoint**](#feature-health-audit)                 | `GET /__aio/health` JSON API                                       | External monitoring, load balancers                       |
+| [**Browser error overlay**](#browser-errors)                 | Build Error / Runtime Error overlay with fix suggestions           | UI development                                            |
+| [**DiagReporter**](vitals.md#diagreporter)                   | Structured console output for freeze/stale/slow + root-cause hints | UI freezes, stale data, slow dispatch                     |
+| [**Performance budgets**](#performance-debugging)            | Warns when reducers/effects exceed time budgets                    | Finding slow code                                         |
+| [**Startup linter**](#startup-linter-output)                 | Validates feature config on `aio.run()`                            | Catching config mistakes early                            |
+| [**Diagnostics module**](diagnostics.md)                     | State diffs, action log, checkpoint recovery, crash handler        | Full observability — see [diagnostics.md](diagnostics.md) |
 
 ---
 
@@ -222,7 +226,7 @@ by default — set `logging: false` to disable.
 | `debug.log`   | All actions dispatched (unless suppressed)                  | Action-by-action replay          |
 | `error.log`   | Errors only                                                 | Incident investigation, alerting |
 | `warning.log` | Warnings — non-fatal issues                                 | Performance tuning               |
-| `perf.log`    | Budget violations                                           | Finding hot spots                |
+| `perf.log`    | Budget violations with phase breakdown                      | Finding hot spots                |
 
 ### Log format
 
@@ -464,10 +468,10 @@ which is useful in Electron where DevTools isn't open by default.
 ## Performance debugging
 
 Performance budget violations produce `BUDGET_REDUCE` or `BUDGET_EFFECT` errors
-(warn-level). Check `log/perf.log` first — it records every violation, deduped
-per action type.
+(warn-level). Check `log/perf.log` first — it records every violation.
 
-### Slow reducer
+When a reduce exceeds its budget, the log includes a **phase breakdown** showing
+where time was spent:
 
 ```
 ┌─ AIO WARNING ────────────────────────────────────────────────
@@ -475,12 +479,29 @@ per action type.
 │ Action: counter:analyze
 │ Duration: 250.0ms (budget: 100ms)
 │
-│ reduce exceeded budget: 250.0ms > 100ms
+│ reduce exceeded budget: 250ms > 100ms
+│ (produce=180ms clone=45ms spread=2ms routing=20ms listeners=3ms)
 │
 │ Tip: Possible infinite loop — check if reduce dispatches
 │      to itself.
 └──────────────────────────────────────────────────────────────
 ```
+
+The breakdown phases:
+
+| Phase       | What it measures                                             |
+| ----------- | ------------------------------------------------------------ |
+| `produce`   | Immer `produce()` — your reducer function                    |
+| `clone`     | `structuredClone()` — effect detachment from Immer draft     |
+| `spread`    | State object construction (`{ ...state, [feature]: slice }`) |
+| `routing`   | Owner feature lookup + reduce dispatch                       |
+| `listeners` | Foreign action listener fan-out                              |
+
+If `produce` dominates, your reducer is doing too much work. If `clone` is high,
+you're returning many/large effects from the reducer. The breakdown is also
+available in the time-travel panel (dev mode) on every action's `PerfMetric`.
+
+### Slow reducer
 
 The reducer is synchronous and blocks the dispatch loop. Move heavy computation
 to an effect:
@@ -591,6 +612,57 @@ const engine = feature("engine", {
 
 The `initial` value in your machine config doesn't match any key in `states`.
 Check for typos.
+
+---
+
+## Diagnostic Bus & Health Overlay
+
+The diagnostic bus surfaces silent failures that would otherwise go unnoticed.
+In dev mode, a health indicator appears in the bottom-right corner of the
+browser.
+
+### Health Indicator
+
+- **Green dot** — no issues detected
+- **Yellow dot + badge** — warnings accumulated (dropped actions, stripped keys,
+  etc.)
+- **Red dot + badge** — errors detected (state sync failure, persist failure,
+  etc.)
+
+Click the dot to expand a panel showing recent diagnostic events with severity,
+type, message, fix hint, and age.
+
+### Event Types
+
+| Type                    | Severity | Meaning                                   |
+| ----------------------- | -------- | ----------------------------------------- |
+| `action-dropped`        | warning  | Action silently dropped (queue full)      |
+| `state-sync-error`      | error    | Failed to parse state from server         |
+| `state-key-stripped`    | warning  | Reserved key name removed from state      |
+| `state-no-listeners`    | warning  | State updating but no React subscribers   |
+| `action-guarded`        | info     | Action blocked by machine state guard     |
+| `action-filtered`       | info     | Action dropped by beforeReduce middleware |
+| `effect-invalid`        | warning  | Effect missing .type string, skipped      |
+| `transport-error`       | warning  | UDS/IPC write failed                      |
+| `hook-start-failed`     | error    | onStart hook threw                        |
+| `persist-error`         | error    | State persistence failed                  |
+| `vitals-alert`          | varies   | Vital signs probe detected degradation    |
+| `offline-storage-error` | info     | IndexedDB operation failed                |
+
+### Configuration
+
+The diagnostic bus is enabled by default in dev mode. To disable:
+
+```ts
+aio.run({
+  diagnostics: {
+    dev: { diagnosticBus: false },
+  },
+});
+```
+
+Events older than 60 seconds auto-dismiss. Same event type is deduplicated
+within 5-second windows.
 
 ---
 

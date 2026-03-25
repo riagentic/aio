@@ -1,6 +1,7 @@
 // Shared dispatch loop — used by both aio.ts (server) and standalone.ts (Android)
 // Re-entrant-safe: effects can call dispatch(), actions are queued and drained in order
 import type { ScheduleEffect } from "./schedule.ts";
+import type { ReduceBreakdown } from "./time-travel.ts";
 import {
   type AioErrorCode,
   clearCorrelationId,
@@ -10,6 +11,7 @@ import {
   type ReportErrorOpts,
   setCorrelationId,
 } from "./error.ts";
+import { diagEmit } from "./diagnostic-bus.ts";
 export type { AioError } from "./error.ts";
 
 /** Performance check — on: warn on violations, off: silent */
@@ -30,6 +32,7 @@ export type PerfTiming = {
   reduce: number;
   effects: number;
   budget: { reduce: number; effect: number };
+  breakdown?: ReduceBreakdown;
 };
 
 /** Default budgets */
@@ -80,12 +83,15 @@ export type DispatchDeps<S, A, E> = {
     type: string,
     duration: number,
     budget: number,
+    breakdown?: ReduceBreakdown,
   ) => void;
   perfCheck?: PerfCheck;
   perfBudget?: PerfBudget;
   freezeState?: boolean; // deep freeze state after reduce in dev mode
   afterAction?: (prev: S, next: S, action: A) => void; // diagnostics hook — called after setState
   effectTimeout?: number; // ms before warning on a slow async effect (default: 30000, 0 = disabled)
+  /** Optional getter for reduce phase breakdown — provided by composeFeatures when perfCheck is on */
+  reduceBreakdown?: () => ReduceBreakdown | undefined;
 };
 
 /** Dispatch function with close() to reject further actions.
@@ -93,6 +99,8 @@ export type DispatchDeps<S, A, E> = {
 type DispatchFn<A> = ((action: A) => Promise<void>) & {
   close: () => void;
   errorCount: () => number;
+  getQueueDepth: () => number;
+  getEffectBacklog: () => number;
 };
 
 /** Creates a re-entrant-safe dispatch loop that drains queued actions in order */
@@ -112,6 +120,7 @@ export function createDispatch<S, A, E>(
     perfBudget,
     freezeState,
   } = deps;
+  const getBreakdown = deps.reduceBreakdown;
   const effectTimeout = deps.effectTimeout ?? 30_000; // 0 = disabled
   const perfEnabled = perfCheck !== "off"; // default: on
   const reduceBudget = perfBudget?.reduce ?? DEFAULT_REDUCE_BUDGET;
@@ -120,6 +129,7 @@ export function createDispatch<S, A, E>(
   let closed = false;
   let errors = 0;
   let depth = 0; // global re-entrant depth counter (survives across dispatch calls)
+  let effectsInFlight = 0;
   const queue: { action: A; resolve: () => void; cid: string }[] = [];
 
   const _reportOpts: ReportErrorOpts = {
@@ -153,7 +163,9 @@ export function createDispatch<S, A, E>(
       { featureName: type?.split(":")[0], actionType: type, duration, budget },
     );
     reportAioError(err, _reportOpts);
-    if (perfLog && type) perfLog(source, type, duration, budget);
+    if (perfLog && type) {
+      perfLog(source, type, duration, budget, getBreakdown?.());
+    }
   }
 
   function dispatch(action: A): Promise<void> {
@@ -267,7 +279,11 @@ export function createDispatch<S, A, E>(
                 tag(current)
               } — revoked Immer draft refs will crash downstream. ` +
                 `Ensure effects are plain objects, not derived from the draft. ` +
-                `Original: ${cloneErr instanceof Error ? cloneErr.message : String(cloneErr)}`,
+                `Original: ${
+                  cloneErr instanceof Error
+                    ? cloneErr.message
+                    : String(cloneErr)
+                }`,
               {
                 featureName: actionType?.split(":")[0],
                 actionType,
@@ -309,6 +325,17 @@ export function createDispatch<S, A, E>(
                 tag(current)
               }`,
             );
+            diagEmit({
+              type: "effect-invalid",
+              severity: "warning",
+              source: "dispatch",
+              message: `Invalid effect skipped (missing .type) from action '${
+                tag(current)
+              }'`,
+              detail: { actionType: tag(current) },
+              hint:
+                "Effects must be plain objects with a .type string. Check your reducer return value.",
+            });
             continue;
           }
           if (deps.debug) log.debug(`effect → execute: ${tag(effect)}`);
@@ -331,6 +358,7 @@ export function createDispatch<S, A, E>(
 
             // catch rejected promises from async effects + hard timeout
             if (r && typeof (r as Promise<void>).catch === "function") {
+              effectsInFlight++;
               const promise = r as Promise<void>;
               // Capture CID now — async callbacks fire after clearCorrelationId()
               const asyncCid = entry.cid;
@@ -341,6 +369,7 @@ export function createDispatch<S, A, E>(
               const tid = effectTimeout > 0
                 ? setTimeout(() => {
                   if (settled) return;
+                  effectsInFlight--;
                   settled = true;
                   const err = createAioError(
                     "EFFECT_TIMEOUT",
@@ -362,10 +391,12 @@ export function createDispatch<S, A, E>(
               promise
                 .then(() => {
                   if (tid !== null) clearTimeout(tid);
+                  if (!settled) effectsInFlight--;
                   settled = true;
                 })
                 .catch((e) => {
                   if (tid !== null) clearTimeout(tid);
+                  if (!settled) effectsInFlight--;
                   if (settled) return; // already timed out — don't double-report
                   settled = true;
                   const err = createAioError(
@@ -399,6 +430,7 @@ export function createDispatch<S, A, E>(
             reduce: reduceDuration,
             effects: totalEffectDuration,
             budget: { reduce: reduceBudget, effect: effectBudget },
+            breakdown: getBreakdown?.(),
           });
         }
         entry.resolve();
@@ -424,5 +456,7 @@ export function createDispatch<S, A, E>(
     closed = true;
   };
   dispatch.errorCount = () => errors;
+  dispatch.getQueueDepth = () => queue.length;
+  dispatch.getEffectBacklog = () => effectsInFlight;
   return dispatch as DispatchFn<A>;
 }

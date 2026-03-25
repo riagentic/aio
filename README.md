@@ -9,7 +9,7 @@
 - **Write reactive, use generators or atomic actions when needed.**
 - **Pick your target, compile and ship!**
 
-`v1.0.0-alpha3`
+`v1.0.0-alpha4`
 
 > Define state once. It persists, syncs to all clients, drives the UI.
 
@@ -185,7 +185,7 @@ See [FAQ](docs/faq.md#when-not-to-use-aio) for details.
 
 ## Status
 
-**v1.0.0-alpha3** · [JSR](https://jsr.io/@riagentic/aio) · MIT
+**v1.0.0-alpha4** · [JSR](https://jsr.io/@riagentic/aio) · MIT
 
 860+ tests · security hardened
 

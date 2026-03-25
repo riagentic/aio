@@ -64,44 +64,53 @@ import { join } from "@std/path";
 
 const SPA_PORT = 19960;
 
-Deno.test("server: SPA fallback — unknown extensionless path returns HTML", async () => {
-  const dir = await Deno.makeTempDir();
-  await Deno.writeTextFile(join(dir, "App.tsx"), "export default () => null");
-  const server = createServer({
-    port: SPA_PORT,
-    title: "SPA",
-    getUIState: () => ({}),
-    dispatch: () => {},
-    baseDir: dir,
-    debug: () => {},
-    prod: false,
-  });
-  await new Promise((r) => setTimeout(r, 50));
-  try {
-    // Client-side routes should return HTML, not 404
-    for (
-      const path of [
-        "/users",
-        "/users/42",
-        "/dashboard/settings",
-        "/any/deep/path",
-      ]
-    ) {
-      const resp = await fetch(`http://localhost:${SPA_PORT}${path}`);
-      assertEquals(resp.status, 200, `${path} should return 200`);
-      const body = await resp.text();
-      assertEquals(
-        body.includes("<!DOCTYPE html>"),
-        true,
-        `${path} should return HTML`,
-      );
+Deno.test({
+  name: "server: SPA fallback — unknown extensionless path returns HTML",
+  // Dev server spawns esbuild child process + fsWatcher async ops — not feasible to drain in test
+  sanitizeOps: false,
+  sanitizeResources: false,
+  fn: async () => {
+    const dir = await Deno.makeTempDir();
+    await Deno.writeTextFile(join(dir, "App.tsx"), "export default () => null");
+    const server = createServer({
+      port: SPA_PORT,
+      title: "SPA",
+      getUIState: () => ({}),
+      dispatch: () => {},
+      baseDir: dir,
+      debug: () => {},
+      prod: false,
+    });
+    await new Promise((r) => setTimeout(r, 50));
+    try {
+      // Client-side routes should return HTML, not 404
+      for (
+        const path of [
+          "/users",
+          "/users/42",
+          "/dashboard/settings",
+          "/any/deep/path",
+        ]
+      ) {
+        const resp = await fetch(`http://localhost:${SPA_PORT}${path}`);
+        assertEquals(resp.status, 200, `${path} should return 200`);
+        const body = await resp.text();
+        assertEquals(
+          body.includes("<!DOCTYPE html>"),
+          true,
+          `${path} should return HTML`,
+        );
+      }
+      // Assets with extensions should still 404
+      const r = await fetch(`http://localhost:${SPA_PORT}/missing.js`);
+      assertEquals(r.status, 404);
+      await r.body?.cancel();
+    } finally {
+      await server.shutdown();
+      // Stop esbuild child process spawned by dev-mode transpiler
+      const esbuild = await import("esbuild");
+      esbuild.stop();
+      await Deno.remove(dir, { recursive: true });
     }
-    // Assets with extensions should still 404
-    const r = await fetch(`http://localhost:${SPA_PORT}/missing.js`);
-    assertEquals(r.status, 404);
-    await r.body?.cancel();
-  } finally {
-    await server.shutdown();
-    await Deno.remove(dir, { recursive: true });
-  }
+  },
 });

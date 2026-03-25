@@ -72,7 +72,12 @@ export type FlowStep =
   | { kind: "all"; entries: FlowStep[] }
   | { kind: "race"; entries: Record<string, FlowStep> }
   | { kind: "sleep"; name: string; ms: number }
-  | { kind: "waitFor"; actionType: string; timeout?: number };
+  | { kind: "waitFor"; actionType: string; timeout?: number }
+  | {
+    kind: "when";
+    predicate: (state: Record<string, unknown>) => boolean;
+    timeout?: number;
+  };
 
 /** Generator return type for flows */
 export type Gen<T = void> = Generator<FlowStep, T, unknown>;
@@ -136,8 +141,17 @@ export type GenCtx<S = Record<string, unknown>> = {
     ): Gen<{ type: string; payload: P }>;
     (creatorOrType: { type: string } | string, timeout?: number): Gen<Msg>;
   };
+  /** Wait until a state condition is true. Checks immediately, then after every dispatch.
+   *  @param predicate — receives full app state, returns boolean
+   *  @param opts.timeout — ms before the wait fails (default: no timeout) */
+  when: (
+    predicate: (appState: Record<string, unknown>) => boolean,
+    opts?: { timeout?: number },
+  ) => Gen<void>;
   /** Read current feature state (fresh after each step) */
   getState: () => S;
+  /** Read full app state tree (all features). Fresh after each flow step. */
+  getFullState: () => Record<string, unknown>;
 };
 
 /** Flow options — kept for internal use */
@@ -275,6 +289,13 @@ function* waitForGen(
   return (yield { kind: "waitFor", actionType, timeout } as FlowStep) as Msg;
 }
 
+function* whenGen(
+  predicate: (appState: Record<string, unknown>) => boolean,
+  opts?: { timeout?: number },
+): Gen<void> {
+  yield { kind: "when", predicate, timeout: opts?.timeout } as FlowStep;
+}
+
 /** Build a GenCtx — the context object passed to flow generators */
 function buildCtx(
   featureName: string,
@@ -302,7 +323,9 @@ function buildCtx(
     race: raceGen,
     sleep: sleepGen,
     waitFor: waitForGen as GenCtx["waitFor"],
+    when: whenGen,
     getState: () => getFullState()[featureName] as Record<string, unknown>,
+    getFullState: () => getFullState(),
   };
 }
 
@@ -317,6 +340,8 @@ type FlowInstance = {
   aborted: boolean;
   /** AbortController for waitFor — cancellation is instant via signal, no polling */
   abortController?: AbortController;
+  /** Active state listener for ctx.when — tracked for abort cleanup */
+  stateListener?: StateListener;
 };
 
 /** Active flow instances per feature — keyed by featureName:flowName.
@@ -339,7 +364,33 @@ export function notifyFlowListeners(action: Msg): void {
   }
 }
 
+// ── State listener registry for ctx.when ─────────────────────────────
+
+type StateListener = {
+  predicate: (state: Record<string, unknown>) => boolean;
+  resolve: () => void;
+};
+const _stateListeners = new Set<StateListener>();
+
+/** Notify waiting flows when state changes — called from the dispatch loop after every reduce */
+export function notifyStateListeners(state: Record<string, unknown>): void {
+  for (const listener of _stateListeners) {
+    try {
+      if (listener.predicate(state)) {
+        listener.resolve();
+        _stateListeners.delete(listener);
+      }
+    } catch (e) {
+      log.debug("aio", `when() predicate threw: ${e}`);
+    }
+  }
+}
+
 function abortInstance(instance: FlowInstance): void {
+  if (instance.stateListener) {
+    _stateListeners.delete(instance.stateListener);
+    instance.stateListener = undefined;
+  }
   instance.aborted = true;
   instance.abortController?.abort();
   try {
@@ -352,6 +403,7 @@ export function resetFlows(): void {
   for (const [, instance] of activeFlows) abortInstance(instance);
   activeFlows.clear();
   _actionListeners.clear();
+  _stateListeners.clear();
 }
 
 /** Cancel a running flow (if any) */
@@ -686,6 +738,85 @@ async function executeStep(
       if (warnTimer) clearTimeout(warnTimer);
       instance.abortController = undefined;
       return result;
+    }
+
+    case "when": {
+      // Check immediately — if already true, no suspension needed
+      const currentState = app.getState();
+      try {
+        if (step.predicate(currentState)) return undefined;
+      } catch (e) {
+        log.debug("aio", `when() predicate threw: ${e}`);
+        // Fall through to register listener — treat throw as false
+      }
+
+      // Dispatch waiting action for visibility
+      app.dispatch({
+        type: `${flowPrefix}when`,
+        payload: {
+          _flow: instance.flowName,
+          timeout: step.timeout,
+        },
+        _source: "Effect",
+      });
+
+      // AbortController for instant cancellation (same pattern as waitFor)
+      const controller = new AbortController();
+      instance.abortController = controller;
+
+      let listener: StateListener;
+      const statePromise = new Promise<void>((resolve) => {
+        listener = { predicate: step.predicate, resolve };
+        _stateListeners.add(listener);
+        instance.stateListener = listener;
+
+        controller.signal.addEventListener("abort", () => {
+          _stateListeners.delete(listener);
+          instance.stateListener = undefined;
+          resolve(); // resolve with undefined on abort — abortInstance sets instance.aborted
+        }, { once: true });
+      });
+
+      if (step.timeout !== undefined) {
+        const timeoutSentinel = Symbol("timeout");
+        let timeoutId: ReturnType<typeof setTimeout>;
+        const result = await Promise.race([
+          statePromise.then(() => undefined as undefined),
+          new Promise<typeof timeoutSentinel>((resolve) => {
+            timeoutId = setTimeout(
+              () => resolve(timeoutSentinel),
+              step.timeout,
+            );
+          }),
+        ]);
+        clearTimeout(timeoutId!); // clear timer whether state won or timeout won
+        instance.abortController = undefined;
+        instance.stateListener = undefined;
+        if (result === timeoutSentinel) {
+          _stateListeners.delete(listener!);
+          throw new Error(
+            `when() timed out after ${step.timeout}ms`,
+          );
+        }
+        return undefined;
+      }
+
+      // Dev mode: warn if when() has no timeout and has been waiting 30s
+      let warnTimer: ReturnType<typeof setTimeout> | undefined;
+      if ((globalThis as Record<string, unknown>).__aioDev) {
+        warnTimer = setTimeout(() => {
+          log.warn(
+            "aio",
+            `${instance.featureName} when() has been waiting 30s with no timeout — did you mean to add one?`,
+          );
+        }, 30_000);
+      }
+
+      await statePromise;
+      if (warnTimer) clearTimeout(warnTimer);
+      instance.abortController = undefined;
+      instance.stateListener = undefined;
+      return undefined;
     }
   }
 }

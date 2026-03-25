@@ -3,6 +3,9 @@
 AIO includes built-in diagnostics for state tracking, crash recovery, and error
 monitoring. Everything works out of the box — zero config needed.
 
+**Something broken?** Start with [troubleshooting.md](troubleshooting.md) —
+symptom-based guide with fix paths.
+
 For the docs index, see [manual.md](manual.md). For log file details, see
 [debugging.md](debugging.md).
 
@@ -18,7 +21,73 @@ For the docs index, see [manual.md](manual.md). For log file details, see
 | Crash handler                  | on     | on                |
 | Time-travel                    | on     | off               |
 | Error counting                 | on     | on                |
+| Vital signs (freeze detection) | on     | on (hints off)    |
+| Resource pressure warnings     | on     | off               |
 | Circuit breaker (auto-disable) | opt-in | opt-in            |
+
+---
+
+## Vitals Quick Reference
+
+Everything below works out of the box — zero config. On first warning, the
+browser console prints the `/__aio/vitals` dashboard URL.
+
+### Browser Console (`console.warn`)
+
+| Signal             | Fires when                                | Hint                                                                    |
+| ------------------ | ----------------------------------------- | ----------------------------------------------------------------------- |
+| STALENESS DEGRADED | UI 300ms+ behind                          | "components too expensive" / "too many patches" / "main thread blocked" |
+| STALENESS WARNING  | UI 600ms+ behind                          | Same hints, higher urgency                                              |
+| RENDER FROZEN      | UI 1.5s+ behind                           | Trigger action name                                                     |
+| render recovered   | Freeze resolved                           | —                                                                       |
+| useAio() warning   | `useAio()` used instead of `useFeature()` | "subscribes to full state tree" (once per site)                         |
+| teardown           | All components unmounted 300ms            | Listener count                                                          |
+| teardown-averted   | Components re-mounted within grace        | —                                                                       |
+| action-dropped     | Queue full during disconnect              | Action type, queue size                                                 |
+
+### Server Terminal (`console.warn`)
+
+| Signal                 | Fires when                         | Detail                           |
+| ---------------------- | ---------------------------------- | -------------------------------- |
+| SLOW DISPATCH          | Reducer > 100ms                    | Action name, p95, queue depth    |
+| DISCONNECTED           | Client ping gap > 2s               | Client ID, frozen duration       |
+| STALE STATE            | Client RTT 100-500ms               | RTT, p95 reduce time             |
+| PRESSURE — payload     | Broadcast > 500KB                  | Payload size, client ID          |
+| PRESSURE — rate        | > 30 broadcasts/sec                | Count, threshold                 |
+| PRESSURE — bandwidth   | Client avg > 1MB/s                 | MB/s, client ID                  |
+| backpressure change    | Client staleness triggers throttle | Client ID, multiplier (1x→2x→4x) |
+| backpressure recovered | Client catches up                  | Client ID, multiplier step-down  |
+
+### Server Endpoint (`GET /__aio/vitals`)
+
+| Data               | Description                                            |
+| ------------------ | ------------------------------------------------------ |
+| server.loop        | queueDepth, drainRate, lastReduceTime, p95ReduceTime   |
+| server.gauges      | server.queueDepth (0-100%), server.reduceTime (0-100%) |
+| clients[]          | ID, status, RTT, frozenFor                             |
+| clientBackpressure | Per-client multiplier (1x/2x/4x)                       |
+| featureSizes       | Bytes per state key                                    |
+| payloadStats       | Total/avg/min/max broadcast bytes                      |
+
+### Silent (automatic, no log output)
+
+| What                    | Where   | Effect                                          |
+| ----------------------- | ------- | ----------------------------------------------- |
+| Notification coalescing | Browser | N patches/frame → 1 React render                |
+| Skip-identical          | Browser | No-op patches skip React entirely               |
+| Backpressure            | Server  | Throttles broadcasts to slow clients            |
+| Visibility pause        | Browser | Hidden tab → meter paused, no false alarms      |
+| Log suppression         | Browser | Max 5 warnings per incident, escalating backoff |
+
+### Optional Config
+
+```ts
+aio.run({
+  features: [...],
+  renderBudget: { staleness: 500, pendingPatches: 20 }, // tune thresholds
+  diagnostics: false, // disable everything (only explicit false)
+});
+```
 
 ---
 
@@ -143,6 +212,52 @@ the file write.
 
 ---
 
+## Vital Signs (Client Freeze Detection)
+
+Three probes detect and diagnose UI freezes across the full stack:
+
+- **LoopProbe** (server) — dispatch queue depth, reduce timing, effect backlog
+- **RenderProbe** (client) — `setTimeout` drift freeze detection
+- **TransportProbe** (client + server) — ping/pong RTT, client liveness watchdog
+
+A **hint engine** correlates all probe signals into a root-cause diagnosis
+(e.g., "Reducer for 'wallet/transfer' took 450ms" with severity and evidence).
+
+Enabled by default. Dev mode enables hints; prod disables hints for lower
+overhead. Kill switch: `vitals: false`.
+
+```ts
+diagnostics: {
+  dev: {
+    vitals: {
+      heartbeatInterval: 1000,
+      hints: true,
+      onVitalAlert: (alert) => console.log(alert.layer, alert.status),
+    },
+  },
+}
+```
+
+HTTP endpoint: `GET /__aio/vitals` — returns loop metrics + client liveness +
+payload stats + per-feature state sizes.
+
+**DiagReporter** — actionable console output when probes detect issues. Server
+reporter handles slow dispatch, stale state, disconnects. Client reporter
+handles render freezes. Structured blocks with root-cause hints in dev console.
+Wire `onDiagnostic` for telemetry:
+
+```ts
+diagnostics: {
+  dev: { vitals: true },
+  onDiagnostic: (event) => sentry.captureMessage(event.summary),
+}
+```
+
+For full configuration, types, thresholds, hint engine rules, and DiagReporter
+details, see [vitals.md](vitals.md).
+
+---
+
 ## Circuit Breaker
 
 Error counting per feature is always on (feeds the health endpoint and
@@ -167,15 +282,15 @@ prevents stale errors tripping the breaker.
 
 ## Log Files
 
-| File                  | Contents                                                      |
-| --------------------- | ------------------------------------------------------------- |
-| `log/app.log`         | Info + error — the main operational log                       |
-| `log/debug.log`       | Verbose: state diffs, action traces, framework internals      |
-| `log/error.log`       | Errors only — all `AioError` instances                        |
-| `log/warning.log`     | Warnings only                                                 |
-| `log/perf.log`        | Reducer/effect timings that exceeded their budget             |
-| `log/actions.jsonl`   | Rolling JSONL of all dispatched actions (dev only by default) |
-| `log/checkpoint.json` | Latest state snapshot for crash recovery                      |
+| File                  | Contents                                                                        |
+| --------------------- | ------------------------------------------------------------------------------- |
+| `log/app.log`         | Info + error — the main operational log                                         |
+| `log/debug.log`       | Verbose: state diffs, action traces, framework internals                        |
+| `log/error.log`       | Errors only — all `AioError` instances                                          |
+| `log/warning.log`     | Warnings only                                                                   |
+| `log/perf.log`        | Budget violations with phase breakdown (produce/clone/spread/routing/listeners) |
+| `log/actions.jsonl`   | Rolling JSONL of all dispatched actions (dev only by default)                   |
+| `log/checkpoint.json` | Latest state snapshot for crash recovery                                        |
 
 ---
 
