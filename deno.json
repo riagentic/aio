@@ -1,6 +1,6 @@
 {
   "name": "@riagentic/aio",
-  "version": "1.0.0-alpha3",
+  "version": "1.0.0-alpha4",
   "appId": "aio",
   "exports": {
     ".": "./mod.ts",
@@ -33,6 +33,7 @@
     "jsxImportSourceTypes": "@types/react"
   },
   "imports": {
+    "@std/testing": "jsr:@std/testing@^1.0.17",
     "@types/react": "npm:@types/react@^18",
     "react": "npm:react@^18",
     "react-dom": "npm:react-dom@^18",

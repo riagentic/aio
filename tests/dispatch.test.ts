@@ -802,11 +802,16 @@ Deno.test("dispatch: timed-out effect error suppressed if timeout already fired"
     { type: string },
     { type: string }
   >({
-    reduce: (s) => ({ state: { n: s.n + 1 }, effects: [{ type: "FAIL_LATE" }] }),
+    reduce: (s) => ({
+      state: { n: s.n + 1 },
+      effects: [{ type: "FAIL_LATE" }],
+    }),
     execute: (e) => {
       if (e.type === "FAIL_LATE") {
         // Rejects AFTER timeout fires
-        return new Promise((_, reject) => setTimeout(() => reject(new Error("late")), 200));
+        return new Promise((_, reject) =>
+          setTimeout(() => reject(new Error("late")), 200)
+        );
       }
     },
     getState: () => state,

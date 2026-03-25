@@ -288,7 +288,7 @@ _current view_, not the _full dataset_.
 | Setting              | Value              | Why                                                                                              |
 | -------------------- | ------------------ | ------------------------------------------------------------------------------------------------ |
 | `stateForUI`         | per-user filtering | Less data per broadcast, less bandwidth                                                          |
-| `ui.syncIntervalMs`  | raise to 100–200ms | Batches multiple rapid state changes into fewer broadcasts                                       |
+| `syncIntervalMs`     | raise to 100–200ms | Batches multiple rapid state changes into fewer broadcasts                                       |
 | `fullStateThreshold` | raise to 512–1024  | Sends full state instead of patch when delta is almost as large — avoids wasted diff computation |
 
 ### High-frequency actions (>10/sec)
@@ -330,10 +330,28 @@ await aio.run({
   perfBudget: { reduce: 50, effect: 10 },
   onPerf: (metric) => {
     // Send to your monitoring (Grafana, Datadog, etc.)
-    if (metric.reduce > 50) alertSlack(`Slow reduce: ${metric.actionType} ${metric.reduce}ms`)
+    if (metric.reduce > 50) {
+      // metric.breakdown has phase-level detail when perfCheck is on
+      const bd = metric.breakdown
+      alertSlack(`Slow reduce: ${metric.actionType} ${metric.reduce}ms` +
+        (bd ? ` (produce=${bd.produce.toFixed(0)}ms clone=${bd.clone.toFixed(0)}ms)` : ''))
+    }
   },
 })
 ```
+
+The `breakdown` field on `PerfMetric` provides phase-level timing:
+
+| Field       | What it measures                             |
+| ----------- | -------------------------------------------- |
+| `produce`   | Immer `produce()` — reducer execution (ms)   |
+| `clone`     | `structuredClone()` — effect detachment (ms) |
+| `spread`    | State object construction (ms)               |
+| `routing`   | Owner feature lookup + reduce (ms)           |
+| `listeners` | Foreign action listener fan-out (ms)         |
+
+The breakdown is also recorded in `perf.log` and visible in the time-travel
+panel.
 
 ---
 

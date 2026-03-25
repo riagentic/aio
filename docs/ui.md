@@ -42,7 +42,11 @@ export default function App() {
 - Auto-reconnects on disconnect with exponential backoff (1s → 2s → 4s → 8s base
   max, ±20% jitter). If the server restarted, reconnect triggers a page reload
   to pick up fresh code
-- Connection is cleaned up when the last connected component unmounts
+- Connection is cleaned up when the last connected component unmounts — with a
+  **300ms grace period** to prevent transient teardown during React
+  reconciliation or page switches. If a new subscriber arrives within 300ms, the
+  connection stays alive. Both teardown and averted-teardown events emit
+  `console.warn` and diagnostic events for full visibility
 - Generic `<S>` types the state — use your `AppState` type
 
 **No boilerplate needed in App.tsx:**
@@ -425,8 +429,8 @@ client.route.navigate(-1); // browser back
 ```
 
 **Lifecycle:** The WebSocket connects on the first `client.subscribe()` call and
-disconnects when the last subscriber unsubscribes — same behavior as `useAio`.
-React hooks and `client` share the same connection.
+disconnects when the last subscriber unsubscribes (after a 300ms grace period) —
+same behavior as `useAio`. React hooks and `client` share the same connection.
 
 ### Svelte 5 example (runes)
 
@@ -513,6 +517,72 @@ await aio.run({
 
 **Backwards compatible:** If your `stateForUI` doesn't use `user`, all clients
 get the same state.
+
+## Delta sync and React performance
+
+State travels from server to browser as JSON over WebSocket. JSON kills object
+references — but aio restores them. Here's how it works and what it means for
+your components.
+
+### How patches preserve references
+
+The server sends **delta patches** (only changed keys) by default. On the
+browser side, `_applyPatch` shallow-merges patches into existing state and uses
+`_shallowEqual` to check each slice. If a slice didn't actually change, **the
+previous object reference is reused**. This means:
+
+- `useFeature(ref)` selectors return the same reference for unchanged slices
+- `React.memo` comparators work correctly — unchanged props keep identity
+- You do **not** need extra `useMemo` wrappers around feature state
+
+### When references break
+
+Two cases cause full object replacement (all references lost):
+
+1. **First connect** — no previous state exists, everything is new
+2. **Full state message** — when >50% of flattened keys changed in one broadcast
+   cycle, the server sends the full state instead of a patch (configurable via
+   `fullStateThreshold`)
+
+Design state so that a single action changes a small number of keys. If most
+keys change every broadcast, all memos fail every time.
+
+### Delta granularity
+
+For namespaced state (`{ counter: { count }, dashboard: { items } }`), deltas
+are computed one level deep — changing `counter.count` sends only that sub-key,
+not the entire `counter` slice. This makes `useFeature` efficient even with
+large feature slices.
+
+### Built-in render diagnostics
+
+aio detects performance problems automatically via the **Render Meter** — a
+rAF-based monitor that tracks staleness (how far behind the UI is) and provides
+actionable feedback:
+
+- **Staleness gauge** — measures `now - lastPatchAt` for unpainted patches.
+  Status transitions: healthy → degraded (≥1x threshold) → warning (≥2x) →
+  frozen (≥5x) → recovered. Each transition emits a console warning with a
+  diagnostic hint
+- **Actionable hints** — when staleness is high, the meter identifies the likely
+  cause: expensive components (high frame time), too many patches (high pending
+  count), or main-thread blocking (neither high). Hints suggest specific fixes
+  like `React.memo()`, `syncIntervalMs`, or profiling
+- **Notification coalescing** — multiple WS patches within a single frame
+  produce one React notification, reducing unnecessary reconciliation passes
+- **Server backpressure** — the client reports staleness in its vitals ping; the
+  server adapts per-client broadcast rate (1x/2x/4x multiplier) so struggling
+  clients aren't overwhelmed with updates they can't paint
+- **Capacity gauges** — four 0–100% gauges (staleness, frameTime,
+  pendingPatches, paintRate) available at `/__aio/vitals` and via `getGauges()`
+  for custom monitoring
+- **Listener high-water mark** — peak listener count is tracked and reported
+  during teardown. A sudden spike suggests a subscription leak
+- **`useAio()` warning** — every call-site logs a one-time warning reminding you
+  to use `useFeature(ref)` for scoped re-renders
+
+Check browser console for `[aio:vitals]` messages — they surface real issues
+before users notice.
 
 ## Styling
 

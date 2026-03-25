@@ -380,16 +380,76 @@ export class AioLogger {
     type: string,
     duration: number,
     budget: number,
+    breakdown?: {
+      produce: number;
+      clone: number;
+      spread: number;
+      routing: number;
+      listeners: number;
+    },
   ): void {
     const entry: LogEntry = {
       ts: now(),
       lvl: "perf",
       cat: `perf:${source}`,
-      msg: `${type} exceeded budget: ${Math.round(duration)}ms > ${budget}ms`,
-      data: { type, duration: Math.round(duration), budget },
+      msg: breakdown
+        ? `${type} exceeded budget: ${
+          Math.round(duration)
+        }ms > ${budget}ms (produce=${Math.round(breakdown.produce)}ms clone=${
+          Math.round(breakdown.clone)
+        }ms spread=${Math.round(breakdown.spread)}ms routing=${
+          Math.round(breakdown.routing)
+        }ms listeners=${Math.round(breakdown.listeners)}ms)`
+        : `${type} exceeded budget: ${Math.round(duration)}ms > ${budget}ms`,
+      data: {
+        type,
+        duration: Math.round(duration),
+        budget,
+        ...(breakdown ? { breakdown } : {}),
+      },
     };
     this.write(this.path("perf"), entry); // perf.log
     this.write(this.path("debug"), entry); // debug.log gets everything
+    if (this.cfg.console) printConsole(entry);
+  }
+
+  /** Log a vital-signs measurement — render/transport/loop health */
+  vitals(
+    layer: "render" | "transport" | "loop",
+    status: string,
+    measured: number,
+    threshold: number,
+    hint?: { cause: string; suggestion: string; severity: string },
+  ): void {
+    const msg = hint
+      ? `[vitals:${layer}] ${status} ${
+        Math.round(measured)
+      }ms (threshold: ${threshold}ms) | cause(${hint.severity}): ${hint.cause} | fix: ${hint.suggestion}`
+      : `[vitals:${layer}] ${status} ${
+        Math.round(measured)
+      }ms (threshold: ${threshold}ms)`;
+    const entry: LogEntry = {
+      ts: now(),
+      lvl: status === "frozen" ? "warn" : "perf",
+      cat: `vitals:${layer}`,
+      msg,
+      data: { layer, status, measured: Math.round(measured), threshold, hint },
+    };
+    this.write(this.path("perf"), entry);
+    this.write(this.path("debug"), entry);
+    if (this.cfg.console) printConsole(entry);
+  }
+
+  /** Log a vital-signs summary line */
+  vitalsSummary(summary: string): void {
+    const entry: LogEntry = {
+      ts: now(),
+      lvl: "info",
+      cat: "vitals:summary",
+      msg: summary,
+    };
+    this.write(this.path("app"), entry);
+    this.write(this.path("debug"), entry);
     if (this.cfg.console) printConsole(entry);
   }
 

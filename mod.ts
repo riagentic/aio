@@ -40,7 +40,7 @@
 import { type Draft, produce } from "immer";
 import type { PerfBudget, PerfCheck } from "./src/dispatch.ts";
 
-/** Framework version string */
+/** Framework core — `aio.run()` starts the app, `lint` validates features, `parseCli` reads CLI flags */
 export { aio, lint, parseCli, VERSION } from "./src/aio.ts";
 import type { AioApp } from "./src/aio.ts";
 export type { AioApp };
@@ -63,6 +63,7 @@ export type {
   FlowStepRecord,
 } from "./src/error.ts";
 export type { MemoryConfig, MemoryReport } from "./src/memory-monitor.ts";
+/** Structured logger — `log.info()`, `log.warn()`, `log.error()`, `log.debug()` */
 export { log } from "./src/logger.ts";
 export type { Log, LogConfig, LogLevel } from "./src/logger.ts";
 export type { AioMeta } from "./src/electron.ts";
@@ -71,6 +72,7 @@ export type {
   LockData,
   SingletonMode,
 } from "./src/single-instance-lock.ts";
+/** Single-instance lock — `instances()` lists running apps, `resolveAppId` normalizes IDs */
 export { instances, resolveAppId } from "./src/single-instance-lock.ts";
 // slugify — internal (used by build.ts, not app code)
 

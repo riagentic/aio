@@ -1,5 +1,7 @@
 // ─── AioError Core — Types, Factory, Formatter, Reporter ─────────────────────
 
+import type { DiagnosticEvent } from "./diagnostic-bus.ts";
+
 // ─── Types ───────────────────────────────────────────────────────────────────
 
 export type AioErrorCode =
@@ -18,7 +20,11 @@ export type AioErrorCode =
   | "MEMORY_PRESSURE"
   | "MEMORY_CRITICAL"
   | "BUDGET_REDUCE"
-  | "BUDGET_EFFECT";
+  | "BUDGET_EFFECT"
+  | "PERSIST_ERROR"
+  | "UI_FREEZE"
+  | "TRANSPORT_STALL"
+  | "LOOP_SATURATED";
 
 export type AioErrorSource =
   | "reduce"
@@ -29,7 +35,9 @@ export type AioErrorSource =
   | "destroy"
   | "memory"
   | "dispatch"
-  | "machine";
+  | "machine"
+  | "vitals"
+  | "persist";
 
 export type FlowStepRecord = {
   step: number;
@@ -87,6 +95,10 @@ const CODE_TO_SOURCE: Record<AioErrorCode, AioErrorSource> = {
   MEMORY_CRITICAL: "memory",
   BUDGET_REDUCE: "reduce",
   BUDGET_EFFECT: "effect",
+  PERSIST_ERROR: "persist",
+  UI_FREEZE: "vitals",
+  TRANSPORT_STALL: "vitals",
+  LOOP_SATURATED: "vitals",
 };
 
 const WARN_CODES: Set<AioErrorCode> = new Set([
@@ -94,7 +106,21 @@ const WARN_CODES: Set<AioErrorCode> = new Set([
   "MEMORY_PRESSURE",
   "BUDGET_REDUCE",
   "BUDGET_EFFECT",
+  "UI_FREEZE",
+  "TRANSPORT_STALL",
+  "LOOP_SATURATED",
 ]);
+
+// ─── Diagnostic bus bridge ───────────────────────────────────────────────────
+
+let _diagEmitFn: ((ev: Omit<DiagnosticEvent, "ts">) => void) | null = null;
+
+/** Wire the diagnostic bus into reportError. Called once during server init. */
+export function setDiagEmit(
+  fn: (ev: Omit<DiagnosticEvent, "ts">) => void,
+): void {
+  _diagEmitFn = fn;
+}
 
 // ─── Correlation ID context ──────────────────────────────────────────────────
 
@@ -272,6 +298,8 @@ function generateTip(err: AioError): string | undefined {
       }ms (budget: ${
         err.context.budget ?? 5
       }ms). Return immediately and do work asynchronously.`;
+    case "PERSIST_ERROR":
+      return "Tip: State persist failed — changes are in memory but will be lost on restart. Check disk space and file permissions.";
     default:
       return undefined;
   }
@@ -431,6 +459,19 @@ export function reportError(err: AioError, opts: ReportErrorOpts = {}): void {
 
     // countError
     if (countError) countError();
+
+    // Diagnostic bus bridge — auto-surface in health overlay
+    if (_diagEmitFn) {
+      const isWarnForBus = WARN_CODES.has(err.code);
+      _diagEmitFn({
+        type: err.code.toLowerCase().replace(/_/g, "-"),
+        severity: isWarnForBus ? "warning" : "error",
+        source: err.source,
+        message: err.message,
+        detail: { code: err.code, ...err.context },
+        hint: generateTip(err),
+      });
+    }
   } catch {
     // Fallback — never throw from reportError
     console.error("[AIO] reportError failed, raw error:", err);

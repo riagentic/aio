@@ -535,6 +535,96 @@ if (s.count >= 10) {
 Not a generator — call it directly (no `yield*`). Use it when you need to read
 state for control flow decisions without another `ctx.mutate`.
 
+### `ctx.getFullState()` — read full app state
+
+Returns the full composed state tree (all features), not just the current
+feature's slice. Fresh after each flow step.
+
+```ts
+const full = ctx.getFullState();
+const auth = full.auth as { _status: string; user: string | null };
+
+if (auth._status !== "authenticated") {
+  yield * ctx.fail("not authenticated");
+  return;
+}
+
+// Read another feature's state mid-flow
+yield * ctx.call("submit", () => submitOrder(auth.user!));
+```
+
+Not a generator — call it directly (no `yield*`). Same function available in
+`onInit`, `onDestroy`, and `execute`. Read-only — cross-feature mutation goes
+through `dispatch`.
+
+### `ctx.when(predicate, opts?)` — wait for state condition
+
+Pauses the flow until a predicate on the full app state returns `true`. Checks
+immediately first — if the condition is already true, resolves without
+suspending.
+
+```ts
+// Wait until app is running — resolves instantly if already true
+yield * ctx.when((s) => (s.app as { _status: string })._status === "running");
+
+// With timeout
+try {
+  yield * ctx.when(
+    (s) => (s.auth as { _status: string })._status === "authenticated",
+    { timeout: 10_000 },
+  );
+} catch {
+  yield * ctx.fail("authentication timeout");
+  return;
+}
+
+// Proceed — both conditions are met
+yield * ctx.call("submit", () => submitOrder());
+yield * ctx.done();
+```
+
+**vs `waitFor`:** `waitFor` waits for a specific **action** to be dispatched.
+`when` waits for a **state condition** to become true, regardless of which
+action caused it. Use `when` when multiple actions can lead to the same state:
+
+```ts
+// Fragile — breaks if a new auth path is added
+yield * ctx.race({
+  a: ctx.waitFor(auth.logout),
+  b: ctx.waitFor(auth.sessionExpired),
+  c: ctx.waitFor(auth.kicked),
+});
+
+// Robust — doesn't care how the state was reached
+yield * ctx.when((s) => (s.auth as { _status: string })._status === "guest");
+```
+
+**What happens internally:**
+
+1. Checks predicate against current state immediately — if `true`, returns
+2. Dispatches `{feature}:__flow:when` action (time-travel visible)
+3. Registers a one-shot listener in the dispatch loop
+4. After every reduce cycle, the predicate is re-checked against the new state
+5. When `true`, the listener resolves and the flow continues
+6. If `timeout` is provided and expires, throws an error (catchable via
+   try/catch)
+7. If the predicate throws, it's treated as `false` (logged, dispatch loop never
+   crashes)
+
+**Works inside `ctx.race`:**
+
+```ts
+const result = yield * ctx.race({
+  ready: ctx.when((s) => (s.app as { _status: string })._status === "running"),
+  timeout: ctx.sleep("timeout", 5000),
+});
+
+if (!("ready" in result)) {
+  yield * ctx.fail("app not ready in time");
+  return;
+}
+```
+
 ### `ctx.waitFor(actionType, timeout?)` — wait for external action
 
 Pauses the flow until a matching action is dispatched anywhere in the system.
@@ -675,6 +765,8 @@ const wallet = feature("wallet", {
 | React to other features' actions                 | `reduce` + foreign listeners      |
 | Multi-step async sequence                        | `generators`                      |
 | Request/response with retries                    | `call({ timeout, retries }, ...)` |
+| Wait for cross-feature state condition           | `ctx.when(predicate)`             |
+| Read other features' state in a flow             | `ctx.getFullState()`              |
 
 ## Generator-only features
 
@@ -1371,6 +1463,7 @@ Flow actions follow the pattern: `{featureName}:__flow:{stepName}`
 | `{feature}:__flow:failed`  | `ctx.fail()` called         | Yes                                                       |
 | `{feature}:__flow:error`   | Unhandled exception         | Yes                                                       |
 | `{feature}:__flow:waitFor` | Waiting for external action | Yes                                                       |
+| `{feature}:__flow:when`    | Waiting for state condition | Yes                                                       |
 | `{feature}:__flowState`    | State mutation delivery     | No (hidden — internal only, never appears in time-travel) |
 | `{feature}:__flow`         | Flow trigger effect         | No (hidden — internal only, never appears in time-travel) |
 
@@ -1425,7 +1518,12 @@ type GenCtx<S = Record<string, unknown>> = {
     ): Gen<{ type: string; payload: P }>;
     (creatorOrType: { type: string } | string, timeout?: number): Gen<Msg>;
   };
+  when: (
+    predicate: (appState: Record<string, unknown>) => boolean,
+    opts?: { timeout?: number },
+  ) => Gen<void>;
   getState: () => S;
+  getFullState: () => Record<string, unknown>;
 };
 
 // Gen<T> — return type for generator functions

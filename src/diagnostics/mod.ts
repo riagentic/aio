@@ -10,6 +10,7 @@ import { createActionLog } from "./action-log.ts";
 import { createCheckpoint, readCheckpoint } from "./checkpoint.ts";
 import { installCrashHandler } from "./crash-handler.ts";
 import { log } from "../logger.ts";
+import { diagSubscribe } from "../diagnostic-bus.ts";
 
 export type DiagnosticsHooks = {
   afterAction: (
@@ -112,6 +113,14 @@ export function initDiagnostics(
           });
         }
       },
+    });
+  }
+
+  // ── Diagnostic bus → structured logger ──
+  if (opts.diagnosticBus !== false) {
+    diagSubscribe((ev) => {
+      if (ev.severity === "error") log.error("diag", ev.message);
+      else if (ev.severity === "warning") log.warn("diag", ev.message);
     });
   }
 

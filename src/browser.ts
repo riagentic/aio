@@ -15,22 +15,115 @@ import {
   useSyncExternalStore,
 } from "react";
 import { Listeners } from "./listeners.ts";
+import {
+  createRenderMeter,
+  renderHint,
+  type RenderMeterAPI,
+} from "./vitals/render-meter.ts";
+import { createTransportProbeClient } from "./vitals/transport-probe.ts";
+import {
+  DEFAULT_HEARTBEAT_INTERVAL,
+  DEFAULT_THRESHOLDS,
+} from "./vitals/types.ts";
+import { formatDiagEvent } from "./vitals/diag-formatter.ts";
+import type { DiagEvent } from "./vitals/types.ts";
+
+/** Window properties used by AIO diagnostics (avoids `declare global` for JSR compat). */
+interface AioWindow {
+  _aioDiag?: (ev: Record<string, unknown>) => void;
+  __aioConfig?: {
+    renderBudget?: { staleness?: number; pendingPatches?: number };
+  };
+}
+
+/** Typed accessor — `window` with AIO diagnostic extensions. */
+const _w = typeof window !== "undefined"
+  ? window as unknown as AioWindow & typeof globalThis
+  : undefined;
 
 const WS_MAX_QUEUE = 100;
 const OFFLINE_MAX_QUEUE = 100; // max actions queued while disconnected (post-connect)
 const OFFLINE_MAX_AGE = 24 * 60 * 60 * 1000; // 24 hours
-const _SAFE_KEYS = new Set(["__proto__", "constructor", "prototype"]);
+const _BLOCKED_KEYS = new Set(["__proto__", "constructor", "prototype"]);
+
+/** Emit a browser-side diagnostic event to the health overlay (dev mode only, 5s dedup) */
+const _diagLastEmit = new Map<string, number>();
+function _diagEmit(ev: {
+  type: string;
+  severity: "error" | "warning" | "info";
+  source: string;
+  message: string;
+  detail?: unknown;
+  hint?: string;
+}): void {
+  if (!_w || typeof _w._aioDiag !== "function") {
+    return;
+  }
+  const now = Date.now();
+  const last = _diagLastEmit.get(ev.type);
+  if (last && now - last < 5000) return;
+  _diagLastEmit.set(ev.type, now);
+  _w._aioDiag({ ...ev, ts: now });
+}
+
+/** Structural sharing for arrays: preserve element references for unchanged items.
+ *  Returns the previous array reference if ALL elements are unchanged. */
+export function _preserveArrayRefs(newArr: unknown[], oldArr: unknown[]): unknown[] {
+  if (newArr.length !== oldArr.length) return newArr;
+  let allSame = true;
+  for (let i = 0; i < newArr.length; i++) {
+    if (newArr[i] === oldArr[i]) continue;
+    if (newArr[i] && typeof newArr[i] === "object" && !Array.isArray(newArr[i]) &&
+        oldArr[i] && typeof oldArr[i] === "object" && !Array.isArray(oldArr[i])) {
+      if (_shallowEqual(newArr[i], oldArr[i])) {
+        newArr[i] = oldArr[i]; // restore reference — element unchanged
+        continue;
+      }
+    }
+    allSame = false;
+  }
+  return allSame ? oldArr : newArr;
+}
+
+/** Shallow-equal comparison for one level of properties. */
+export function _shallowEqual(a: unknown, b: unknown): boolean {
+  if (a === b) return true;
+  if (
+    typeof a !== "object" || typeof b !== "object" || a === null || b === null
+  ) return false;
+  const ka = Object.keys(a as Record<string, unknown>);
+  const kb = Object.keys(b as Record<string, unknown>);
+  if (ka.length !== kb.length) return false;
+  const objA = a as Record<string, unknown>;
+  const objB = b as Record<string, unknown>;
+  for (const k of ka) {
+    if (objA[k] !== objB[k]) return false;
+  }
+  return true;
+}
 
 /** Apply a delta patch ($p + $d) to previous state. Handles nested feature patches (v0.5).
  *  Preserves object references for unchanged slices (important for useSyncExternalStore selectors). */
-function _applyPatch(
+export function _applyPatch(
   prev: Record<string, unknown> | null,
   data: { $p: Record<string, unknown>; $d?: string[] },
 ): Record<string, unknown> {
   const next = prev ? { ...prev } : {} as Record<string, unknown>;
   // Apply patches — shallow merge for nested object patches (feature slices)
   for (const [k, v] of Object.entries(data.$p)) {
-    if (_SAFE_KEYS.has(k)) continue;
+    if (_BLOCKED_KEYS.has(k)) {
+      _diagEmit({
+        type: "state-key-stripped",
+        severity: "warning",
+        source: "browser",
+        message: "State key '" + k +
+          "' stripped — reserved JavaScript property name",
+        detail: { key: k },
+        hint: "Rename this state key. Reserved names: " +
+          [..._BLOCKED_KEYS].join(", "),
+      });
+      continue;
+    }
     if (
       v && typeof v === "object" && !Array.isArray(v) && next[k] &&
       typeof next[k] === "object" && !Array.isArray(next[k])
@@ -40,24 +133,40 @@ function _applyPatch(
       const prev_slice = next[k] as Record<string, unknown>;
       const merged = { ...prev_slice };
       for (const [sk, sv] of Object.entries(sub)) {
-        if (!_SAFE_KEYS.has(sk) && sk !== "$d") merged[sk] = sv;
+        if (_BLOCKED_KEYS.has(sk) || sk === "$d") continue;
+        // Structural sharing: preserve per-element references for array sub-keys
+        if (Array.isArray(sv) && Array.isArray(prev_slice[sk])) {
+          merged[sk] = _preserveArrayRefs(sv as unknown[], prev_slice[sk] as unknown[]);
+        } else {
+          merged[sk] = sv;
+        }
       }
       // Handle nested deletions ($d within the sub-patch)
       if (Array.isArray(sub.$d)) {
         for (const sk of sub.$d) {
-          if (typeof sk === "string" && !_SAFE_KEYS.has(sk)) delete merged[sk];
+          if (typeof sk === "string" && !_BLOCKED_KEYS.has(sk)) {
+            delete merged[sk];
+          }
         }
         delete merged.$d;
       }
       next[k] = merged;
+      // Preserve reference if patch didn't actually change anything
+      if (prev && _shallowEqual(merged, prev[k])) {
+        next[k] = prev[k] as Record<string, unknown>;
+      }
     } else {
       // Sanitize new objects — filter unsafe keys even for new top-level entries
       if (v && typeof v === "object" && !Array.isArray(v)) {
         const safe: Record<string, unknown> = {};
         for (const [sk, sv] of Object.entries(v as Record<string, unknown>)) {
-          if (!_SAFE_KEYS.has(sk)) safe[sk] = sv;
+          if (!_BLOCKED_KEYS.has(sk)) safe[sk] = sv;
         }
         next[k] = safe;
+        // Preserve reference if new object is shallow-equal to previous
+        if (prev && _shallowEqual(safe, prev[k])) {
+          next[k] = prev[k] as Record<string, unknown>;
+        }
       } else {
         next[k] = v;
       }
@@ -66,7 +175,7 @@ function _applyPatch(
   // Top-level deletions
   if (Array.isArray(data.$d)) {
     for (const k of data.$d) {
-      if (typeof k === "string" && !_SAFE_KEYS.has(k)) delete next[k];
+      if (typeof k === "string" && !_BLOCKED_KEYS.has(k)) delete next[k];
     }
   }
   // Preserve references: copy unchanged keys from prev (next was spread from prev,
@@ -132,7 +241,16 @@ async function _loadOfflineQueue(): Promise<_QueuedAction[]> {
         const cutoff = Date.now() - OFFLINE_MAX_AGE;
         resolve(actions.filter((a) => a.ts >= cutoff));
       };
-    } catch {
+    } catch (e) {
+      _diagEmit({
+        type: "offline-storage-error",
+        severity: "info",
+        source: "browser",
+        message: "IndexedDB operation failed — offline persistence unavailable",
+        detail: { error: String(e) },
+        hint:
+          "Offline action queue will use memory only. Check browser storage quota.",
+      });
       resolve([]);
     }
   });
@@ -153,7 +271,17 @@ async function _saveOfflineAction(
       if (countReq.result >= MAX_OFFLINE_ACTIONS) return; // drop — queue full
       store.add({ action, ts: Date.now() });
     };
-  } catch { /* best-effort */ }
+  } catch (e) {
+    _diagEmit({
+      type: "offline-storage-error",
+      severity: "info",
+      source: "browser",
+      message: "IndexedDB operation failed — offline persistence unavailable",
+      detail: { error: String(e) },
+      hint:
+        "Offline action queue will use memory only. Check browser storage quota.",
+    });
+  }
 }
 
 async function _clearOfflineQueue(): Promise<void> {
@@ -163,7 +291,17 @@ async function _clearOfflineQueue(): Promise<void> {
     const tx = db.transaction(_offlineStore, "readwrite");
     const store = tx.objectStore(_offlineStore);
     store.clear();
-  } catch { /* best-effort */ }
+  } catch (e) {
+    _diagEmit({
+      type: "offline-storage-error",
+      severity: "info",
+      source: "browser",
+      message: "IndexedDB operation failed — offline persistence unavailable",
+      detail: { error: String(e) },
+      hint:
+        "Offline action queue will use memory only. Check browser storage quota.",
+    });
+  }
 }
 
 // ── IPC transport detection (UDS mode via Electron) ──────────────────
@@ -209,6 +347,18 @@ type TTMeta = {
 };
 let _ttState: TTMeta | null = null;
 const _ttListeners = new Listeners<TTMeta>();
+
+// ── Vitals probes (client-side) ──────────────────────────────────────
+let _vitalsRenderMeter: RenderMeterAPI | null = null;
+let _vitalsUrlLogged = false;
+let _vitalsTransportProbe:
+  | ReturnType<typeof createTransportProbeClient>
+  | null = null;
+let _vitalsPingTimer: ReturnType<typeof setInterval> | null = null;
+const _useAioWarned = new Set<string>();
+let _useAioActiveCount = 0;
+let _cleanupTimer: ReturnType<typeof setTimeout> | null = null;
+let _listenerHighWater = 0; // peak listener count since last teardown — for diagnostics
 
 // ── Built-in TT panel (pure DOM, no React) ────────────────────────
 // Toggled via Ctrl+. (period), auto-registered on first __tt: message
@@ -459,16 +609,63 @@ function _bindTTKey(): void {
 
 /** Notifies all React subscribers of state change */
 function _notify() {
-  _stateVersion++;
   _listeners.notify(_state);
 }
 
 // ── useSyncExternalStore glue ───────────────────────────────────────
 let _stateVersion = 0;
 
+// ── State readiness — resolves when first state arrives ─────────────
+let _stateReadyResolve: (() => void) | null = null;
+let _stateReadyPromise: Promise<void> | null = null;
+
+/** Returns a Promise that resolves when _state becomes non-null.
+ *  Used by the HTML template to delay React mount until state is available. */
+export function _waitForState(): Promise<void> {
+  if (_state !== null) return Promise.resolve();
+  if (!_stateReadyPromise) {
+    _stateReadyPromise = new Promise<void>((resolve) => {
+      _stateReadyResolve = resolve;
+    });
+  }
+  // Eagerly start connection so state can arrive
+  if (!_ws && !_ipcConnected && !_connecting) {
+    _closed = false;
+    _connecting = true;
+    _connect();
+  }
+  return _stateReadyPromise;
+}
+
+/** Called from _notify() when state first arrives — resolves the readiness promise. */
+function _resolveStateReady(): void {
+  if (_stateReadyResolve) {
+    _stateReadyResolve();
+    _stateReadyResolve = null;
+    _stateReadyPromise = null;
+  }
+}
+
+/** Stable subscribe for useAio() — wraps _subscribe with active-count tracking.
+ *  Module-scoped so useSyncExternalStore sees a stable reference (no re-subscription). */
+export const _useAioSubscribe = (onStoreChange: () => void): () => void => {
+  _useAioActiveCount++;
+  const unsub = _subscribe(onStoreChange);
+  return () => {
+    _useAioActiveCount--;
+    unsub();
+  };
+};
+
 /** Subscribe callback for useSyncExternalStore — manages connection lifecycle */
-function _subscribe(onStoreChange: () => void): () => void {
-  const unsub = _listeners.add(() => onStoreChange());
+export function _subscribe(onStoreChange: () => void): () => void {
+  const unsub = _listeners.add(() => {
+    onStoreChange();
+  });
+  // Track peak listener count for diagnostic context
+  if (_listeners.size > _listenerHighWater) {
+    _listenerHighWater = _listeners.size;
+  }
   if (!_ws && !_ipcConnected && !_connecting) {
     _closed = false;
     _connecting = true;
@@ -482,22 +679,61 @@ function _subscribe(onStoreChange: () => void): () => void {
   return () => {
     unsub();
     if (_listeners.size === 0) {
-      _closed = true;
-      _ws?.close();
-      _ws = null;
-      _state = null;
-      _queue = [];
-      _retry = 0;
-      // Clean up global listeners to prevent leaks
-      if (_ttKeyHandler) {
-        document.removeEventListener("keydown", _ttKeyHandler);
-        _ttKeyHandler = null;
-        _ttKeyBound = false;
-      }
-      if (_popstateHandler) {
-        removeEventListener("popstate", _popstateHandler);
-        _popstateHandler = null;
-      }
+      if (_cleanupTimer) clearTimeout(_cleanupTimer);
+      const peakCount = _listenerHighWater;
+      _cleanupTimer = setTimeout(() => {
+        _cleanupTimer = null;
+        if (_listeners.size === 0) {
+          // Legitimate teardown — 300ms with zero listeners
+          console.warn(
+            `[aio] teardown — no listeners for 300ms (peak was ${peakCount}). Closing connection, clearing state.`,
+          );
+          _diagEmit({
+            type: "teardown",
+            severity: "warning",
+            source: "browser",
+            message: "Full teardown — no listeners remained after grace period",
+            detail: { graceMs: 300, peakListenerCount: peakCount },
+          });
+          _closed = true;
+          _ws?.close();
+          _ws = null;
+          _ipcConnected = false;
+          _connecting = false;
+          _state = null;
+          _stateReadyPromise = null;
+          _stateReadyResolve = null;
+          _queue = [];
+          _retry = 0;
+          _listenerHighWater = 0;
+          if (_vitalsRenderMeter) {
+            _vitalsRenderMeter.destroy();
+            _vitalsRenderMeter = null;
+          }
+          // Clean up global listeners to prevent leaks
+          if (_ttKeyHandler) {
+            document.removeEventListener("keydown", _ttKeyHandler);
+            _ttKeyHandler = null;
+            _ttKeyBound = false;
+          }
+          if (_popstateHandler) {
+            removeEventListener("popstate", _popstateHandler);
+            _popstateHandler = null;
+          }
+        } else {
+          // Transient gap — listeners recovered within grace period
+          console.warn(
+            `[aio] teardown averted — listeners dropped to 0 but recovered to ${_listeners.size} within 300ms`,
+          );
+          _diagEmit({
+            type: "teardown-averted",
+            severity: "info",
+            source: "browser",
+            message: "Transient listener gap — teardown cancelled",
+            detail: { recoveredCount: _listeners.size },
+          });
+        }
+      }, 300);
     }
   };
 }
@@ -566,6 +802,13 @@ function _connectIPC() {
       }
       return;
     }
+    if (line.startsWith("__diag:")) {
+      try {
+        const ev = JSON.parse(line.slice(7));
+        if (_w && typeof _w._aioDiag === "function") _w._aioDiag(ev);
+      } catch { /* ignore malformed diag */ }
+      return;
+    }
     if (line.startsWith("__boot:")) {
       const id = line.slice(7);
       if (_bootId && _bootId !== id) return location.reload();
@@ -575,18 +818,44 @@ function _connectIPC() {
     try {
       const data = JSON.parse(line);
       if (data === null || typeof data !== "object") return;
+      const prev = _state;
       if (data.$p && typeof data.$p === "object") {
-        _state = _applyPatch(_state as Record<string, unknown> | null, data);
+        if (_state === null) return;
+        _state = _applyPatch(_state as Record<string, unknown>, data);
       } else {
         _state = data;
       }
-      _notify();
+      if (_state === prev) return; // no-op patch — skip notification
+
+      // Synchronous bookkeeping
+      _stateVersion++;
+      if (_state !== null) _resolveStateReady();
+
+      // Deferred React notification via RenderMeter
+      if (_vitalsRenderMeter) {
+        _vitalsRenderMeter.recordPatch();
+        _vitalsRenderMeter.markDirty();
+      } else {
+        // Fallback if meter not yet initialized (initial connect)
+        _listeners.notify(_state);
+      }
+
+      // DevTools
       if (_devtoolsConnected && _lastAction) {
         _sendDevTools(_lastAction, _state);
         _lastAction = null;
       }
     } catch (err) {
       console.warn("[aio] bad state message:", err);
+      _diagEmit({
+        type: "state-sync-error",
+        severity: "error",
+        source: "browser",
+        message: "Failed to parse state message from server",
+        detail: { error: String(err) },
+        hint:
+          "Server sent malformed state. Check for serialization bugs on the server side.",
+      });
     }
   });
 
@@ -645,6 +914,87 @@ function _connect() {
       _offlineQueue = [];
       _clearOfflineQueue().catch(() => {});
     }
+
+    // Initialize vitals render meter
+    if (!_vitalsRenderMeter) {
+      const _rb = _w?.__aioConfig?.renderBudget;
+      _vitalsRenderMeter = createRenderMeter({
+        thresholds: _rb
+          ? { staleness: _rb.staleness, pendingPatches: _rb.pendingPatches }
+          : undefined,
+        onNotify: _notify,
+        onStatusChange: (status, gauges) => {
+          if (status !== "healthy" && !_vitalsUrlLogged) {
+            _vitalsUrlLogged = true;
+            console.warn(
+              `[aio:vitals] dashboard at ${location.origin}/__aio/vitals`,
+            );
+          }
+          if (status === "frozen" || status === "recovered") {
+            const kind = status === "frozen"
+              ? "freeze" as const
+              : "recovered" as const;
+            const event: DiagEvent = {
+              kind,
+              severity: kind === "freeze" ? "likely" : "speculative",
+              summary: kind === "freeze"
+                ? `RENDER FROZEN — staleness ${
+                  Math.round(gauges.staleness.current)
+                }ms`
+                : "render recovered",
+              detail: {
+                trigger: _vitalsRenderMeter?.getLastAction() ?? undefined,
+              },
+              timestamp: Date.now(),
+            };
+            const lines = formatDiagEvent(event);
+            if (lines.length === 1) console.warn(lines[0]);
+            else {
+              console.group(lines[0]);
+              for (let i = 1; i < lines.length; i++) console.warn(lines[i]);
+              console.groupEnd();
+            }
+          } else if (status === "degraded" || status === "warning") {
+            const event: DiagEvent = {
+              kind: "pressure",
+              severity: status === "degraded" ? "speculative" : "possible",
+              summary: `STALENESS ${status.toUpperCase()} — ${
+                Math.round(gauges.staleness.current)
+              }ms behind`,
+              detail: {
+                hint: renderHint(gauges) ??
+                  "check component complexity and update frequency",
+              },
+              timestamp: Date.now(),
+            };
+            const lines = formatDiagEvent(event);
+            if (lines.length === 1) console.warn(lines[0]);
+            else {
+              console.group(lines[0]);
+              for (let i = 1; i < lines.length; i++) console.warn(lines[i]);
+              console.groupEnd();
+            }
+          }
+        },
+      });
+    }
+    if (!_vitalsTransportProbe) {
+      _vitalsTransportProbe = createTransportProbeClient({
+        thresholds: DEFAULT_THRESHOLDS,
+        interval: DEFAULT_HEARTBEAT_INTERVAL,
+      });
+    }
+    if (!_vitalsPingTimer) {
+      _vitalsPingTimer = setInterval(() => {
+        if (_ws && _ws.readyState === WebSocket.OPEN && _vitalsTransportProbe) {
+          const ping = _vitalsTransportProbe.createPing();
+          const ms = _vitalsRenderMeter
+            ? Math.round(_vitalsRenderMeter.getStaleness())
+            : 0;
+          _ws.send("__vitals:ping:" + JSON.stringify({ t1: ping.t1, ms }));
+        }
+      }, DEFAULT_HEARTBEAT_INTERVAL);
+    }
   };
   ws.onmessage = (e) => {
     if (e.data === "__reload") {
@@ -688,6 +1038,26 @@ function _connect() {
       }
       return;
     }
+    // Vitals pong from server
+    if (typeof e.data === "string" && e.data.startsWith("__vitals:pong:")) {
+      try {
+        const pong = JSON.parse(e.data.slice(14));
+        if (_vitalsTransportProbe) {
+          _vitalsTransportProbe.processPong(pong);
+        }
+      } catch (err) {
+        console.warn("[aio:vitals] bad pong:", err);
+      }
+      return;
+    }
+    // Diagnostic bus event from server (dev mode)
+    if (typeof e.data === "string" && e.data.startsWith("__diag:")) {
+      try {
+        const ev = JSON.parse(e.data.slice(7));
+        if (_w && typeof _w._aioDiag === "function") _w._aioDiag(ev);
+      } catch { /* ignore malformed diag */ }
+      return;
+    }
     // Boot ID — reload page if server restarted (stale JS in memory)
     if (typeof e.data === "string" && e.data.startsWith("__boot:")) {
       const id = e.data.slice(7);
@@ -701,19 +1071,44 @@ function _connect() {
         console.warn("[aio] unexpected state type:", typeof data);
         return;
       }
+      const prev = _state;
       if (data.$p && typeof data.$p === "object") {
-        _state = _applyPatch(_state as Record<string, unknown> | null, data);
+        if (_state === null) return; // skip delta when no full state yet
+        _state = _applyPatch(_state as Record<string, unknown>, data);
       } else {
         _state = data;
       }
-      _notify();
-      // Notify Redux DevTools if connected
+      if (_state === prev) return; // no-op patch — skip notification
+
+      // Synchronous bookkeeping
+      _stateVersion++;
+      if (_state !== null) _resolveStateReady();
+
+      // Deferred React notification via RenderMeter
+      if (_vitalsRenderMeter) {
+        _vitalsRenderMeter.recordPatch();
+        _vitalsRenderMeter.markDirty();
+      } else {
+        // Fallback if meter not yet initialized (initial connect)
+        _listeners.notify(_state);
+      }
+
+      // DevTools
       if (_devtoolsConnected && _lastAction) {
         _sendDevTools(_lastAction, _state);
         _lastAction = null;
       }
     } catch (err) {
       console.warn("[aio] bad state message:", err);
+      _diagEmit({
+        type: "state-sync-error",
+        severity: "error",
+        source: "browser",
+        message: "Failed to parse state message from server",
+        detail: { error: String(err) },
+        hint:
+          "Server sent malformed state. Check for serialization bugs on the server side.",
+      });
     }
   };
   ws.onerror = () => {
@@ -723,6 +1118,10 @@ function _connect() {
   ws.onclose = () => {
     _ws = null;
     _connecting = false;
+    if (_vitalsPingTimer) {
+      clearInterval(_vitalsPingTimer);
+      _vitalsPingTimer = null;
+    }
     if (_closed || _listeners.size === 0) return;
     if (_wasConnected) _showStatus("Reconnecting\u2026", "#e25");
     // exponential backoff: 1s → 2s → 4s → 8s max, with ±20% jitter
@@ -739,6 +1138,13 @@ function _connect() {
 /** Sends action via IPC or WS — queues to memory during initial connect, persists to IndexedDB when disconnected */
 function _send(action: { type: string; payload?: unknown }) {
   _lastAction = action; // track for DevTools
+  if (_vitalsRenderMeter) {
+    const actionType = typeof action === "object" && action !== null
+      ? (action as Record<string, unknown>).type as string ?? ""
+      : "";
+    const feature = actionType.split("/")[0] ?? actionType.split(":")[0] ?? "";
+    _vitalsRenderMeter.recordAction(actionType, feature);
+  }
   // UDS+IPC mode — send via Electron IPC bridge
   if (_ipc && _ipcConnected) {
     _ipc.send(JSON.stringify(action));
@@ -754,10 +1160,38 @@ function _send(action: { type: string; payload?: unknown }) {
     if (_offlineQueue.length < OFFLINE_MAX_QUEUE) {
       _offlineQueue.push(action);
       _saveOfflineAction(action).catch(() => {}); // best-effort
+    } else {
+      _diagEmit({
+        type: "action-dropped",
+        severity: "warning",
+        source: "browser",
+        message: "Action '" + action.type + "' dropped — offline queue full (" +
+          OFFLINE_MAX_QUEUE + ")",
+        detail: { actionType: action.type, queueSize: _offlineQueue.length },
+        hint:
+          "Check network connection. Actions are queued when disconnected but the queue has a limit.",
+      });
     }
-    // else: offline queue full — drop (same behaviour as initial-connect WS_MAX_QUEUE)
+  } else {
+    _diagEmit({
+      type: "action-dropped",
+      severity: "warning",
+      source: "browser",
+      message: "Action '" + action.type + "' dropped — connect queue full (" +
+        WS_MAX_QUEUE + ")",
+      detail: { actionType: action.type, queueSize: _queue.length },
+      hint: "Server may be slow to respond. Check terminal for errors.",
+    });
   }
-  // else: never connected yet and queue full — drop (WS_MAX_QUEUE safety)
+}
+
+// ── Visibility guard — pause render meter when tab is hidden ────────
+if (typeof document !== "undefined") {
+  document.addEventListener("visibilitychange", () => {
+    if (_vitalsRenderMeter) {
+      _vitalsRenderMeter.setPaused(document.hidden);
+    }
+  });
 }
 
 // ── Redux DevTools Integration ─────────────────────────────────────
@@ -848,17 +1282,26 @@ export function disconnectDevTools(): void {
 
 /** React hook — full app state + untyped send. For root layout, routing, and anything that genuinely
  *  needs cross-feature state. Re-renders on every state change — use `useFeature(f)` in feature components
- *  for scoped state, typed send, and selective re-renders. */
+ *  for scoped state, typed send, and selective re-renders.
+ *  Note: state is guaranteed non-null because the framework waits for state before mounting React. */
 export function useAio<S = unknown>(): {
-  state: S | null;
+  state: S;
   send: (action: { type: string; payload?: unknown }) => void;
 } {
+  const stack = new Error().stack ?? "";
+  const key = stack.split("\n")[2] ?? "unknown";
+  if (!_useAioWarned.has(key)) {
+    _useAioWarned.add(key);
+    console.warn(
+      "[aio:vitals] useAio() subscribes to full state tree — re-renders on every change. Use useFeature(ref) instead.",
+    );
+  }
   const state = useSyncExternalStore(
-    _subscribe,
+    _useAioSubscribe,
     _getSnapshot,
     _getServerSnapshot,
   ) as S | null;
-  return { state, send: _send };
+  return { state: state as S, send: _send };
 }
 
 // WHY DUPLICATED: msg() and factory() are inline copies of msg.ts and factory.ts.
@@ -1054,6 +1497,30 @@ export function bridge(name: string, config: any) {
   return feature(name, { actions, machine: false, reduce: () => {} });
 }
 
+// ── Browser-safe `aio` stub ──────────────────────────────────────────
+// Server-side aio.run() starts an HTTP/WS server — impossible in browser.
+// This stub lets shared files (feature definitions, etc.) do:
+//   import { aio, feature } from "aio"
+//   export const myFeature = feature("x", { ... })
+//   await aio.run({ features: [myFeature], baseDir: "..." })
+// Without crashing when the same module is loaded in the browser.
+// deno-lint-ignore no-explicit-any
+export const aio: Record<string, any> = {
+  /** No-op in browser — server starts the runtime, browser connects to it */
+  run() {
+    return Promise.resolve();
+  },
+  middleware: {
+    logger: () => () => null,
+    devtools: () => () => null,
+    perfBudget: () => () => null,
+    validate: () => () => null,
+    metrics: () => () => null,
+    freeze: () => () => null,
+    create: () => () => null,
+  },
+};
+
 /** Cache for useFeature send objects (one per feature ref) */
 // deno-lint-ignore no-explicit-any
 const _featureSendCache = new WeakMap<
@@ -1098,7 +1565,7 @@ export function useFeature<S = unknown>(
   ref: FeatureRef,
   options?: { fallback?: S },
 ): {
-  state: S | null;
+  state: S;
   send: Record<string, (...args: unknown[]) => void>;
   status: string | undefined;
 } {
@@ -1116,8 +1583,10 @@ export function useFeature<S = unknown>(
     _getServerSnapshot as () => S | null,
   );
 
-  const resolved = featureState ??
-    (options?.fallback !== undefined ? options.fallback : null);
+  // State is guaranteed non-null because the framework waits for state before mounting React.
+  // Feature slice may still be null if the feature name doesn't exist in state.
+  const resolved = (featureState ??
+    (options?.fallback !== undefined ? options.fallback : featureState)) as S;
 
   const status = resolved
     ? (resolved as Record<string, unknown>)._status as string | undefined
@@ -1436,6 +1905,14 @@ export function _reset(): void {
   _devtoolsConnected = false;
   _ttKeyBound = false;
   _ipcConnected = false;
+  _connecting = false;
+  _stateReadyPromise = null;
+  _stateReadyResolve = null;
+  if (_cleanupTimer) {
+    clearTimeout(_cleanupTimer);
+    _cleanupTimer = null;
+  }
+  _listenerHighWater = 0;
   _stateVersion = 0;
 }
 

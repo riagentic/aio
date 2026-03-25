@@ -113,12 +113,20 @@ Deno.test("electron: clientScript — redirect handling bounded", () => {
 // ── electronMainScriptUDS ───────────────────────────────────────────
 
 Deno.test("electron: UDS script — socket path embedded", () => {
-  const s = electronMainScriptUDS("http://localhost:3000", "/tmp/test.sock", {});
+  const s = electronMainScriptUDS(
+    "http://localhost:3000",
+    "/tmp/test.sock",
+    {},
+  );
   assertStringIncludes(s, "/tmp/test.sock");
 });
 
 Deno.test("electron: UDS script — IPC bridge preload", () => {
-  const s = electronMainScriptUDS("http://localhost:3000", "/tmp/test.sock", {});
+  const s = electronMainScriptUDS(
+    "http://localhost:3000",
+    "/tmp/test.sock",
+    {},
+  );
   assertStringIncludes(s, "contextBridge.exposeInMainWorld");
   assertStringIncludes(s, "__aioIPC");
   assertStringIncludes(s, "__aio:send");
@@ -129,21 +137,33 @@ Deno.test("electron: UDS script — IPC bridge preload", () => {
 });
 
 Deno.test("electron: UDS script — NDJSON protocol", () => {
-  const s = electronMainScriptUDS("http://localhost:3000", "/tmp/test.sock", {});
+  const s = electronMainScriptUDS(
+    "http://localhost:3000",
+    "/tmp/test.sock",
+    {},
+  );
   // Uses newline-delimited JSON over UDS
   assertStringIncludes(s, "split('\\n')");
   assertStringIncludes(s, "json + '\\n'");
 });
 
 Deno.test("electron: UDS script — reconnection with exponential backoff", () => {
-  const s = electronMainScriptUDS("http://localhost:3000", "/tmp/test.sock", {});
+  const s = electronMainScriptUDS(
+    "http://localhost:3000",
+    "/tmp/test.sock",
+    {},
+  );
   assertStringIncludes(s, "Math.pow(2, retry)");
   assertStringIncludes(s, "8000"); // max backoff
   assertStringIncludes(s, "connectUDS");
 });
 
 Deno.test("electron: UDS script — ready handshake (not timeout)", () => {
-  const s = electronMainScriptUDS("http://localhost:3000", "/tmp/test.sock", {});
+  const s = electronMainScriptUDS(
+    "http://localhost:3000",
+    "/tmp/test.sock",
+    {},
+  );
   assertStringIncludes(s, "__aio:ready");
   assertStringIncludes(s, "ipcMain.on");
   // Should NOT use timeout-based state sending (the v0.9.4 bug)
@@ -186,7 +206,11 @@ Deno.test("electron: UDS script — custom meta dimensions", () => {
 });
 
 Deno.test("electron: UDS script — preload cleanup on exit", () => {
-  const s = electronMainScriptUDS("http://localhost:3000", "/tmp/test.sock", {});
+  const s = electronMainScriptUDS(
+    "http://localhost:3000",
+    "/tmp/test.sock",
+    {},
+  );
   assertStringIncludes(s, "unlinkSync(preloadFile)");
 });
 
@@ -201,13 +225,21 @@ Deno.test("electron: UDS script — MIME types for static serving", () => {
 });
 
 Deno.test("electron: UDS script — socket destruction on window close", () => {
-  const s = electronMainScriptUDS("http://localhost:3000", "/tmp/test.sock", {});
+  const s = electronMainScriptUDS(
+    "http://localhost:3000",
+    "/tmp/test.sock",
+    {},
+  );
   assertStringIncludes(s, "sock.destroy()");
   assertStringIncludes(s, "clearTimeout(reconnectTimer)");
 });
 
 Deno.test("electron: UDS script — buffers state until page ready", () => {
-  const s = electronMainScriptUDS("http://localhost:3000", "/tmp/test.sock", {});
+  const s = electronMainScriptUDS(
+    "http://localhost:3000",
+    "/tmp/test.sock",
+    {},
+  );
   assertStringIncludes(s, "lastState");
   assertStringIncludes(s, "pageReady");
 });

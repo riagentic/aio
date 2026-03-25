@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.0.0-alpha4
 
 ### Added
 
@@ -8,8 +8,8 @@
   persistence
 - Interactive playground (`examples/playground/`) — standalone HTML, 3 examples,
   live code editor, no server needed
-- Tests for `listeners.ts`, `sql.ts` (buildWhereOr, buildQuerySuffix, isWhereOp),
-  Electron script generators (29 unit tests)
+- Tests for `listeners.ts`, `sql.ts` (buildWhereOr, buildQuerySuffix,
+  isWhereOp), Electron script generators (29 unit tests)
 
 ### Fixed
 
@@ -23,8 +23,8 @@
 
 ### Changed
 
-- Extracted `server-html.ts` from `server.ts` (MIME, import map, HTML gen,
-  error classification)
+- Extracted `server-html.ts` from `server.ts` (MIME, import map, HTML gen, error
+  classification)
 - Extracted `aio-cli.ts` from `aio.ts` (CliFlags, parseCli, printHelp, VERSION)
 - `effectTimeout` behavior change: previously warn-only, now marks effect as
   abandoned after timeout. The underlying promise may still complete but the

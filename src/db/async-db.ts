@@ -99,7 +99,8 @@ export function createDB(path: string, opts: DBOpts = {}): DB {
     return { worker: w, opening };
   }
 
-  // Lazily spawn writer + all readers, wait for all to be ready
+  // Lazily spawn writer + all readers, wait for all to be ready.
+  // Writer opens first so the file exists before readers try readonly open.
   function ensureWorkers(): Promise<void> {
     if (ready) return ready;
 
@@ -109,14 +110,15 @@ export function createDB(path: string, opts: DBOpts = {}): DB {
     );
     writerWorker = w;
 
-    const readerOpenings: Promise<QueryResult>[] = [];
-    for (let i = 0; i < numReaders; i++) {
-      const { worker: r, opening } = spawnAndOpen(true);
-      readerWorkers.push(r);
-      readerOpenings.push(opening);
-    }
-
-    ready = Promise.all([writerOpen, ...readerOpenings]).then(() => undefined);
+    ready = writerOpen.then(() => {
+      const readerOpenings: Promise<QueryResult>[] = [];
+      for (let i = 0; i < numReaders; i++) {
+        const { worker: r, opening } = spawnAndOpen(true);
+        readerWorkers.push(r);
+        readerOpenings.push(opening);
+      }
+      return Promise.all(readerOpenings);
+    }).then(() => undefined);
     return ready;
   }
 
@@ -197,7 +199,9 @@ export function createDB(path: string, opts: DBOpts = {}): DB {
           // Only ROLLBACK if BEGIN succeeded (we're actually in a transaction)
           try {
             await gate<QueryResult>({ type: "execute", sql: "ROLLBACK" });
-          } catch { /* ROLLBACK may fail if BEGIN never succeeded — safe to ignore */ }
+          } catch {
+            /* ROLLBACK may fail if BEGIN never succeeded — safe to ignore */
+          }
           throw e;
         } finally {
           _inTransaction = false;

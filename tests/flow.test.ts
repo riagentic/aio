@@ -1037,3 +1037,405 @@ Deno.test({
   // Only the second instance should have completed
   assertEquals((app.getState().restart as any).value, 2);
 });
+
+// ── ctx.getFullState ────────────────────────────────────────────────
+
+const fullStateReader = feature("fullStateReader", {
+  state: { count: 5, seen: 0 },
+  actions: { start: () => ({}) },
+  generators: {
+    start: function* (ctx) {
+      const full = ctx.getFullState();
+      const own = full.fullStateReader as { count: number };
+      yield* ctx.done((s) => {
+        s.seen = own.count;
+      });
+    },
+  },
+});
+
+Deno.test("flow: ctx.getFullState reads own feature state", async () => {
+  const app = createTestApp([fullStateReader]);
+  app.dispatch(fullStateReader.start());
+  await app.flush();
+
+  const s = app.getState().fullStateReader as { count: number; seen: number };
+  assertEquals(s.seen, 5);
+});
+
+const provider = feature("provider", {
+  state: { value: 42 },
+  actions: {},
+});
+
+const consumer = feature("consumer", {
+  state: { grabbed: 0 },
+  actions: { start: () => ({}) },
+  generators: {
+    start: function* (ctx) {
+      const full = ctx.getFullState();
+      const other = full.provider as { value: number };
+      yield* ctx.done((s) => {
+        s.grabbed = other.value;
+      });
+    },
+  },
+});
+
+Deno.test("flow: ctx.getFullState reads other feature's state", async () => {
+  const app = createTestApp([provider, consumer]);
+  app.dispatch(consumer.start());
+  await app.flush();
+
+  assertEquals((app.getState().consumer as any).grabbed, 42);
+});
+
+const fullStateFresh = feature("fullStateFresh", {
+  state: { count: 0, seenOther: 0 },
+  actions: { start: () => ({}) },
+  generators: {
+    start: function* (ctx) {
+      yield* ctx.mutate("inc", (s) => {
+        s.count = 10;
+      });
+      // After mutation, getFullState should reflect the updated value
+      const full = ctx.getFullState();
+      const own = full.fullStateFresh as { count: number };
+      yield* ctx.done((s) => {
+        s.seenOther = own.count;
+      });
+    },
+  },
+});
+
+Deno.test({
+  name: "flow: ctx.getFullState returns fresh state after mutation step",
+  sanitizeOps: false,
+  sanitizeResources: false,
+}, async () => {
+  const app = createTestApp([fullStateFresh]);
+  app.dispatch(fullStateFresh.start());
+  await app.flush();
+
+  const s = app.getState().fullStateFresh as {
+    count: number;
+    seenOther: number;
+  };
+  assertEquals(s.seenOther, 10);
+});
+
+// ── ctx.when ────────────────────────────────────────────────────────
+
+const whenImmediate = feature("whenImmediate", {
+  state: { ready: true, proceeded: false },
+  actions: { start: () => ({}) },
+  generators: {
+    start: function* (ctx) {
+      // Condition is already true — should resolve instantly
+      yield* ctx.when((s) =>
+        (s.whenImmediate as { ready: boolean }).ready === true
+      );
+      yield* ctx.done((s) => {
+        s.proceeded = true;
+      });
+    },
+  },
+});
+
+Deno.test("flow: ctx.when resolves immediately when condition already true", async () => {
+  const app = createTestApp([whenImmediate]);
+  app.dispatch(whenImmediate.start());
+  await app.flush();
+
+  assertEquals((app.getState().whenImmediate as any).proceeded, true);
+});
+
+const whenTrigger = feature("whenTrigger", {
+  state: { active: false },
+  actions: { activate: () => ({}) },
+  reduce: {
+    activate(state) {
+      state.active = true;
+    },
+  },
+});
+
+const whenWaiter = feature("whenWaiter", {
+  state: { saw: false },
+  actions: { start: () => ({}) },
+  generators: {
+    start: function* (ctx) {
+      yield* ctx.when((s) =>
+        (s.whenTrigger as { active: boolean }).active === true
+      );
+      yield* ctx.done((s) => {
+        s.saw = true;
+      });
+    },
+  },
+});
+
+Deno.test("flow: ctx.when resolves when condition becomes true after dispatch", async () => {
+  const app = createTestApp([whenTrigger, whenWaiter]);
+  app.dispatch(whenWaiter.start());
+  await new Promise((r) => setTimeout(r, 30));
+
+  // Condition not yet true
+  assertEquals((app.getState().whenWaiter as any).saw, false);
+
+  // Trigger the condition
+  app.dispatch(whenTrigger.activate());
+  await new Promise((r) => setTimeout(r, 50));
+
+  assertEquals((app.getState().whenWaiter as any).saw, true);
+});
+
+// ── ctx.when edge cases ─────────────────────────────────────────────
+
+const whenTimeout = feature("whenTimeout", {
+  state: { timedOut: false },
+  actions: { start: () => ({}) },
+  generators: {
+    start: function* (ctx) {
+      try {
+        yield* ctx.when(() => false, { timeout: 50 }); // never true
+        yield* ctx.done();
+      } catch {
+        yield* ctx.done((s) => {
+          s.timedOut = true;
+        });
+      }
+    },
+  },
+});
+
+Deno.test("flow: ctx.when with timeout throws on expiry", async () => {
+  const app = createTestApp([whenTimeout]);
+  app.dispatch(whenTimeout.start());
+  await new Promise((r) => setTimeout(r, 200));
+
+  assertEquals((app.getState().whenTimeout as any).timedOut, true);
+});
+
+const whenThrows = feature("whenThrows", {
+  state: { proceeded: false },
+  actions: { start: () => ({}) },
+  generators: {
+    start: function* (ctx) {
+      try {
+        yield* ctx.when(() => {
+          throw new Error("boom");
+        }, { timeout: 50 });
+      } catch {
+        // Timeout expected — predicate always throws so condition never true
+        yield* ctx.done((s) => {
+          s.proceeded = true;
+        });
+      }
+    },
+  },
+});
+
+Deno.test("flow: ctx.when predicate that throws is treated as false", async () => {
+  const app = createTestApp([whenThrows]);
+  app.dispatch(whenThrows.start());
+  await new Promise((r) => setTimeout(r, 200));
+
+  // Should have timed out (predicate throws → treated as false → never resolves → timeout)
+  assertEquals((app.getState().whenThrows as any).proceeded, true);
+});
+
+const whenCancelled = feature("whenCancelled", {
+  state: { done: false },
+  actions: {
+    start: () => ({}),
+    stop: () => ({}),
+  },
+  generators: {
+    start: function* (ctx) {
+      yield* ctx.when(() => false); // waits forever
+      yield* ctx.done((s) => {
+        s.done = true;
+      });
+    },
+  },
+  cancelOn: { start: ["stop"] },
+});
+
+Deno.test({
+  name: "flow: cancelling a flow waiting on ctx.when cleans up listener",
+  sanitizeOps: false,
+  sanitizeResources: false,
+}, async () => {
+  const app = createTestApp([whenCancelled]);
+  app.dispatch(whenCancelled.start());
+  await new Promise((r) => setTimeout(r, 30));
+
+  // Cancel
+  app.dispatch(whenCancelled.stop());
+  await new Promise((r) => setTimeout(r, 50));
+
+  assertEquals((app.getState().whenCancelled as any).done, false);
+});
+
+const whenMultiA = feature("whenMultiA", {
+  state: { resolved: false },
+  actions: { start: () => ({}) },
+  generators: {
+    start: function* (ctx) {
+      yield* ctx.when((s) => (s.whenMultiTrigger as { a: boolean }).a === true);
+      yield* ctx.done((s) => {
+        s.resolved = true;
+      });
+    },
+  },
+});
+
+const whenMultiB = feature("whenMultiB", {
+  state: { resolved: false },
+  actions: { start: () => ({}) },
+  generators: {
+    start: function* (ctx) {
+      yield* ctx.when((s) => (s.whenMultiTrigger as { b: boolean }).b === true);
+      yield* ctx.done((s) => {
+        s.resolved = true;
+      });
+    },
+  },
+});
+
+const whenMultiTrigger = feature("whenMultiTrigger", {
+  state: { a: false, b: false },
+  actions: {
+    setA: () => ({}),
+    setB: () => ({}),
+  },
+  reduce: {
+    setA(state) {
+      state.a = true;
+    },
+    setB(state) {
+      state.b = true;
+    },
+  },
+});
+
+Deno.test("flow: multiple ctx.when listeners resolve independently", async () => {
+  const app = createTestApp([whenMultiTrigger, whenMultiA, whenMultiB]);
+  app.dispatch(whenMultiA.start());
+  app.dispatch(whenMultiB.start());
+  await new Promise((r) => setTimeout(r, 30));
+
+  // Trigger A only
+  app.dispatch(whenMultiTrigger.setA());
+  await new Promise((r) => setTimeout(r, 50));
+
+  assertEquals((app.getState().whenMultiA as any).resolved, true);
+  assertEquals((app.getState().whenMultiB as any).resolved, false);
+
+  // Trigger B
+  app.dispatch(whenMultiTrigger.setB());
+  await new Promise((r) => setTimeout(r, 50));
+
+  assertEquals((app.getState().whenMultiB as any).resolved, true);
+});
+
+// ── ctx.when integration ────────────────────────────────────────────
+
+const whenAndWaitFor = feature("whenAndWaitFor", {
+  state: { phase: "init" },
+  actions: {
+    start: () => ({}),
+    signal: () => ({}),
+  },
+  generators: {
+    start: function* (ctx) {
+      // First wait for state condition
+      yield* ctx.when((s) =>
+        (s.whenAndWaitForTrigger as { ready: boolean }).ready === true
+      );
+      yield* ctx.mutate("phase1", (s) => {
+        s.phase = "condition-met";
+      });
+
+      // Then wait for an action
+      yield* ctx.waitFor("whenAndWaitFor:signal");
+      yield* ctx.done((s) => {
+        s.phase = "complete";
+      });
+    },
+  },
+});
+
+const whenAndWaitForTrigger = feature("whenAndWaitForTrigger", {
+  state: { ready: false },
+  actions: { activate: () => ({}) },
+  reduce: {
+    activate(state) {
+      state.ready = true;
+    },
+  },
+});
+
+Deno.test("flow: ctx.when + ctx.waitFor in same flow", async () => {
+  const app = createTestApp([whenAndWaitForTrigger, whenAndWaitFor]);
+  app.dispatch(whenAndWaitFor.start());
+  await new Promise((r) => setTimeout(r, 30));
+
+  assertEquals((app.getState().whenAndWaitFor as any).phase, "init");
+
+  // Satisfy when condition
+  app.dispatch(whenAndWaitForTrigger.activate());
+  await new Promise((r) => setTimeout(r, 50));
+
+  assertEquals((app.getState().whenAndWaitFor as any).phase, "condition-met");
+
+  // Satisfy waitFor
+  app.dispatch(whenAndWaitFor.signal());
+  await new Promise((r) => setTimeout(r, 50));
+
+  assertEquals((app.getState().whenAndWaitFor as any).phase, "complete");
+});
+
+const whenRace = feature("whenRace", {
+  state: { winner: "" },
+  actions: { start: () => ({}) },
+  generators: {
+    start: function* (ctx) {
+      const result = yield* ctx.race({
+        condition: ctx.when((s) =>
+          (s.whenRaceTrigger as { flag: boolean }).flag === true
+        ),
+        timeout: ctx.sleep("timeout", 500),
+      });
+      yield* ctx.done((s) => {
+        s.winner = "condition" in result ? "condition" : "timeout";
+      });
+    },
+  },
+});
+
+const whenRaceTrigger = feature("whenRaceTrigger", {
+  state: { flag: false },
+  actions: { setFlag: () => ({}) },
+  reduce: {
+    setFlag(state) {
+      state.flag = true;
+    },
+  },
+});
+
+Deno.test({
+  name: "flow: ctx.when inside ctx.race resolves when condition met",
+  sanitizeOps: false,
+  sanitizeResources: false,
+}, async () => {
+  const app = createTestApp([whenRaceTrigger, whenRace]);
+  app.dispatch(whenRace.start());
+  await new Promise((r) => setTimeout(r, 30));
+
+  app.dispatch(whenRaceTrigger.setFlag());
+  await new Promise((r) => setTimeout(r, 50));
+
+  assertEquals((app.getState().whenRace as any).winner, "condition");
+});

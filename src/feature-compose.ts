@@ -8,10 +8,13 @@ import {
   cancelFeatureFlows,
   createFlowReducer,
   notifyFlowListeners,
+  notifyStateListeners,
   runFlow,
 } from "./flow.ts";
 import { resolveCall } from "./feature-impl.ts";
+import type { ReduceBreakdown } from "./time-travel.ts";
 import { type AioError, createAioError } from "./error.ts";
+import { diagEmit } from "./diagnostic-bus.ts";
 import type {
   FeatureDef,
   FeatureEntry,
@@ -67,6 +70,8 @@ export type ComposedFeatures = {
     /** Set callback for schedule cleanup on feature disable */
     setOnDisable: (fn: (prefix: string) => void) => void;
   };
+  /** Side-channel getter for last reduce breakdown (only when perfCheck is on) */
+  lastBreakdown?: () => ReduceBreakdown | undefined;
 };
 
 /** Resolve feature entries, validate dependencies, return topologically sorted list */
@@ -149,6 +154,7 @@ export function composeFeatures(
   opts?: {
     onFeatureError?: (err: AioError) => void;
     circuitBreaker?: CircuitBreakerConfig;
+    perfCheck?: boolean;
   },
 ): ComposedFeatures {
   if (entries.length === 0) {
@@ -162,6 +168,8 @@ export function composeFeatures(
   const _cbWindow = _circuitBreaker?.window;
   let _cbDispatch: ((a: Msg) => void) | undefined;
   let onFeatureDisable: ((prefix: string) => void) | undefined;
+  const _perfCheck = opts?.perfCheck ?? false;
+  let _lastBreakdown: ReduceBreakdown | undefined;
 
   // ── Validation ──
   for (const f of features) {
@@ -207,6 +215,7 @@ export function composeFeatures(
   type ReduceResult = {
     state: Record<string, unknown>;
     effects: (Msg | ScheduleEffect)[];
+    _bd?: { produce: number; clone: number; spread: number };
   };
 
   function reduceFeature(
@@ -243,11 +252,28 @@ export function composeFeatures(
         if ((globalThis as Record<string, unknown>).__aioDev) {
           log.warn("aio", msg);
         } else log.debug("aio", msg);
+        diagEmit({
+          type: "action-guarded",
+          severity: "info",
+          source: "feature-compose",
+          message:
+            `'${action.type}' blocked — machine '${featureName}' in '${currentStatus}' (allowed: ${
+              allowed || "none"
+            })`,
+          detail: {
+            featureName,
+            actionType: action.type,
+            machineState: currentStatus,
+          },
+          hint:
+            "This action is not allowed in the current machine state. May be intentional (guard) or a bug.",
+        });
         return { state: fullState, effects: [] }; // invalid transition → drop
       }
 
       // Run reduce with Immer (feature's slice only)
       let effects: (Msg | ScheduleEffect)[] = [];
+      const t0 = _perfCheck ? performance.now() : 0;
       const nextSlice = produce(
         featureState,
         (draft: Draft<Record<string, unknown>>) => {
@@ -258,8 +284,10 @@ export function composeFeatures(
           if (Array.isArray(result)) effects = result;
         },
       );
+      const tProduce = _perfCheck ? performance.now() - t0 : 0;
 
       // Clone effects to detach from Immer draft
+      const t1 = _perfCheck ? performance.now() : 0;
       if (effects.length) {
         try {
           effects = structuredClone(effects);
@@ -267,6 +295,7 @@ export function composeFeatures(
           log.warn("feature", "effects not cloneable — may hold draft refs");
         }
       }
+      const tClone = _perfCheck ? performance.now() - t1 : 0;
 
       // Inject flow trigger effect if this action starts a flow
       if (flowName) {
@@ -302,11 +331,24 @@ export function composeFeatures(
         }
       }
 
-      return { state: { ...fullState, [featureName]: withStatus }, effects };
+      const t2 = _perfCheck ? performance.now() : 0;
+      const returnObj = {
+        state: { ...fullState, [featureName]: withStatus },
+        effects,
+      };
+      const tSpread = _perfCheck ? performance.now() - t2 : 0;
+
+      return _perfCheck
+        ? {
+          ...returnObj,
+          _bd: { produce: tProduce, clone: tClone, spread: tSpread },
+        }
+        : returnObj;
     }
 
-    // Simple machine — no guards, no _status
+    // Simple path — no guards, no _status
     let effects: (Msg | ScheduleEffect)[] = [];
+    const st0 = _perfCheck ? performance.now() : 0;
     const nextSlice = produce(
       featureState,
       (draft: Draft<Record<string, unknown>>) => {
@@ -317,7 +359,9 @@ export function composeFeatures(
         if (Array.isArray(result)) effects = result;
       },
     );
+    const stProduce = _perfCheck ? performance.now() - st0 : 0;
 
+    const st1 = _perfCheck ? performance.now() : 0;
     if (effects.length) {
       try {
         effects = structuredClone(effects);
@@ -325,6 +369,7 @@ export function composeFeatures(
         log.warn("feature", "effects not cloneable — may hold draft refs");
       }
     }
+    const stClone = _perfCheck ? performance.now() - st1 : 0;
 
     // State validation
     if (f.__aio.validate) {
@@ -354,7 +399,16 @@ export function composeFeatures(
       });
     }
 
-    return { state: { ...fullState, [featureName]: nextSlice }, effects };
+    const simpleReturn: ReduceResult = {
+      state: { ...fullState, [featureName]: nextSlice },
+      effects,
+    };
+    return _perfCheck
+      ? {
+        ...simpleReturn,
+        _bd: { produce: stProduce, clone: stClone, spread: 0 },
+      }
+      : simpleReturn;
   }
 
   // ── Feature enable/disable registry ──
@@ -418,7 +472,10 @@ export function composeFeatures(
       const flowReducer = flowReducers.get(prefix);
       if (flowReducer) {
         const result = flowReducer(currentState, action);
-        if (result) return { state: result, effects: [] };
+        if (result) {
+          notifyStateListeners(result);
+          return { state: result, effects: [] };
+        }
       }
       return { state: currentState, effects: [] };
     }
@@ -456,6 +513,8 @@ export function composeFeatures(
     }
 
     // Route to owning feature (by prefix) — skip for lifecycle actions (state already handled)
+    const rt0 = _perfCheck ? performance.now() : 0;
+    let ownerBd: { produce: number; clone: number; spread: number } | undefined;
     if (!isLifecycle) {
       const colonIdx = (action.type as string).indexOf(":");
       if (colonIdx !== -1) {
@@ -465,6 +524,7 @@ export function composeFeatures(
           const result = reduceFeature(owner, currentState, action);
           currentState = result.state;
           allEffects.push(...result.effects);
+          ownerBd = result._bd;
           featureLastAction.set(owner.__aio.id, {
             type: action.type,
             at: Date.now(),
@@ -472,8 +532,10 @@ export function composeFeatures(
         }
       }
     }
+    const tRouting = _perfCheck ? performance.now() - rt0 : 0;
 
     // Route to foreign action listeners
+    const lt0 = _perfCheck ? performance.now() : 0;
     const listeners = listenersByType.get(action.type);
     if (listeners) {
       for (const listener of listeners) {
@@ -487,9 +549,21 @@ export function composeFeatures(
         });
       }
     }
+    const tListeners = _perfCheck ? performance.now() - lt0 : 0;
+
+    if (_perfCheck) {
+      _lastBreakdown = {
+        produce: ownerBd?.produce ?? 0,
+        clone: ownerBd?.clone ?? 0,
+        spread: ownerBd?.spread ?? 0,
+        routing: tRouting,
+        listeners: tListeners,
+      };
+    }
 
     // Notify waiting flows (ctx.waitFor) about dispatched actions
     notifyFlowListeners(action);
+    notifyStateListeners(currentState);
 
     // Reject pending call() if the action was blocked (machine dropped it, feature disabled, etc.)
     const callId = (action.payload as Record<string, unknown>)?._callId as
@@ -808,5 +882,6 @@ export function composeFeatures(
     initAll,
     destroyAll,
     registry,
+    ...(_perfCheck ? { lastBreakdown: () => _lastBreakdown } : {}),
   };
 }

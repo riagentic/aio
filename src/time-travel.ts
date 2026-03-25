@@ -1,11 +1,21 @@
 // Time-travel debugger — pure functions, no side effects
 // Active in dev mode, zero cost in prod
 
+/** Phase-level timing breakdown inside a single reduce cycle (ms) */
+export type ReduceBreakdown = {
+  produce: number; // Immer produce() — reducer execution
+  clone: number; // structuredClone() — effect detachment
+  spread: number; // state object construction
+  routing: number; // owner feature lookup + reduce
+  listeners: number; // foreign action listener fan-out
+};
+
 /** Performance timing for a single action (dev mode only) */
 export type PerfMetric = {
   reduce: number; // ms
   effects: number; // ms (sync portion only)
   budget: { reduce: number; effect: number };
+  breakdown?: ReduceBreakdown; // populated when perfCheck is on
 };
 
 /** Single history entry — full state snapshot per action */

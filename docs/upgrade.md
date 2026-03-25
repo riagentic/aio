@@ -34,7 +34,7 @@ await aio.run({
   client: "browser",
   keepServer: true,
   transport: "uds",
-  ui: { syncIntervalMs: 50 },
+  syncIntervalMs: 50,
 });
 ```
 
@@ -81,7 +81,7 @@ await aio.run({ appVersion: '1.0.0', features: [...] })
    `perfCheck: 'off'`
 3. Move `ui.electron`, `ui.keepAlive`, `ui.transport` out of `ui:{}` to
    top-level `client`, `keepServer`, `transport`
-4. Rename `ui.syncRate` → `ui.syncIntervalMs`
+4. Move `ui.syncRate` → top-level `syncIntervalMs`
 5. Replace `singleton: 'takeover'` → `singleton: true, killExisting: true`
 6. Replace `--no-electron` → `--client=browser`, `--headless` →
    `--client=server-only`

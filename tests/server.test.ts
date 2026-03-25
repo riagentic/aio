@@ -1391,50 +1391,43 @@ Deno.test("config: deno.json exports ./src/build and ./src/am", async () => {
 // --- buildBrowserImportMap tests ---
 
 Deno.test("buildBrowserImportMap: includes react defaults", () => {
-  const map = JSON.parse(buildBrowserImportMap({}));
-  assertEquals(map.imports["react"] !== undefined, true);
-  assertEquals(map.imports["react-dom/client"] !== undefined, true);
-  assertEquals(map.imports["react/jsx-runtime"] !== undefined, true);
-  assertEquals(map.imports["aio"], "/__aio/ui.js");
+  const map = buildBrowserImportMap({});
+  assertEquals(map["react"] !== undefined, true);
+  assertEquals(map["react-dom/client"] !== undefined, true);
+  assertEquals(map["react/jsx-runtime"] !== undefined, true);
+  assertEquals(map["aio"], "/__aio/ui.js");
 });
 
 Deno.test("buildBrowserImportMap: adds npm packages from deno.json", () => {
-  const map = JSON.parse(buildBrowserImportMap({ "xterm": "npm:xterm@5.3.0" }));
-  assertEquals(map.imports["xterm"], "https://esm.sh/xterm@5.3.0");
+  const map = buildBrowserImportMap({ "xterm": "npm:xterm@5.3.0" });
+  assertEquals(map["xterm"], "https://esm.sh/xterm@5.3.0");
 });
 
 Deno.test("buildBrowserImportMap: handles scoped npm packages", () => {
-  const map = JSON.parse(
-    buildBrowserImportMap({ "@xterm/xterm": "npm:@xterm/xterm@5.5.0" }),
-  );
-  assertEquals(
-    map.imports["@xterm/xterm"],
-    "https://esm.sh/@xterm/xterm@5.5.0",
-  );
+  const map = buildBrowserImportMap({
+    "@xterm/xterm": "npm:@xterm/xterm@5.5.0",
+  });
+  assertEquals(map["@xterm/xterm"], "https://esm.sh/@xterm/xterm@5.5.0");
 });
 
 Deno.test("buildBrowserImportMap: does not override react defaults", () => {
-  const map = JSON.parse(
-    buildBrowserImportMap({ "react": "npm:react@19.0.0" }),
-  );
-  assertStringIncludes(map.imports["react"], "esm.sh");
+  const map = buildBrowserImportMap({ "react": "npm:react@19.0.0" });
+  assertStringIncludes(map["react"]!, "esm.sh");
 });
 
 Deno.test("buildBrowserImportMap: skips jsr: imports", () => {
-  const map = JSON.parse(
-    buildBrowserImportMap({ "aio": "jsr:@riagentic/aio@1.0.0" }),
-  );
-  assertEquals(map.imports["aio"], "/__aio/ui.js");
+  const map = buildBrowserImportMap({ "aio": "jsr:@riagentic/aio@1.0.0" });
+  assertEquals(map["aio"], "/__aio/ui.js");
 });
 
 Deno.test("buildBrowserImportMap: skips non-npm non-jsr imports", () => {
-  const map = JSON.parse(buildBrowserImportMap({ "mylib": "./src/mylib.ts" }));
-  assertEquals(map.imports["mylib"], undefined);
+  const map = buildBrowserImportMap({ "mylib": "./src/mylib.ts" });
+  assertEquals(map["mylib"], undefined);
 });
 
 Deno.test("buildBrowserImportMap: includes aio/browser mapping", () => {
-  const map = JSON.parse(buildBrowserImportMap({}));
-  assertEquals(map.imports["aio/browser"], "/__aio/ui.js");
+  const map = buildBrowserImportMap({});
+  assertEquals(map["aio/browser"], "/__aio/ui.js");
 });
 
 // ── classifyBrowserError ──────────────────────────────────────

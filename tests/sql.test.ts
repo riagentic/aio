@@ -1,11 +1,7 @@
 // Tests for src/sql.ts — buildWhereOr, buildQuerySuffix, isWhereOp
 // (assertIdent, columnToSQL, createTableSQL, buildWhere already covered in db.test.ts)
 import { assertEquals } from "@std/assert";
-import {
-  buildQuerySuffix,
-  buildWhereOr,
-  isWhereOp,
-} from "../src/sql.ts";
+import { buildQuerySuffix, buildWhereOr, isWhereOp } from "../src/sql.ts";
 
 // ── isWhereOp ──────────────────────────────────────────────────────
 
