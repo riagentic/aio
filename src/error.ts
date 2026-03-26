@@ -4,6 +4,7 @@ import type { DiagnosticEvent } from "./diagnostic-bus.ts";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
+/** Discriminated error code — identifies the specific failure class (e.g. `'REDUCE_ERROR'`, `'EFFECT_TIMEOUT'`). */
 export type AioErrorCode =
   | "REDUCE_ERROR"
   | "EFFECT_ERROR"
@@ -26,6 +27,7 @@ export type AioErrorCode =
   | "TRANSPORT_STALL"
   | "LOOP_SATURATED";
 
+/** Origin subsystem that raised the error — `'reduce'`, `'effect'`, `'flow'`, `'vitals'`, etc. */
 export type AioErrorSource =
   | "reduce"
   | "effect"
@@ -39,12 +41,14 @@ export type AioErrorSource =
   | "vitals"
   | "persist";
 
+/** Record of a single generator flow step — step number, action name, and execution status. */
 export type FlowStepRecord = {
   step: number;
   action: string;
   status: "ok" | "error" | "pending";
 };
 
+/** Structured context attached to every `AioError` — feature name, action type, flow state, timing, etc. */
 export type AioErrorContext = {
   featureName?: string;
   actionType?: string;
@@ -143,15 +147,24 @@ export function generateCorrelationId(): string {
 
 // ─── AioError class ─────────────────────────────────────────────────────────
 
+/** Structured error with code, source, context, correlation ID, and optional state snapshot. */
 export class AioError extends Error {
+  /** Error classification code (e.g. `'REDUCE_ERROR'`, `'EFFECT_TIMEOUT'`). */
   readonly code: AioErrorCode;
+  /** Origin subsystem — `'reduce'`, `'effect'`, `'flow'`, `'vitals'`, etc. */
   readonly source: AioErrorSource;
+  /** Structured context — feature name, action type, flow state, timing. */
   readonly context: AioErrorContext;
+  /** Original error that caused this AioError, if wrapping. */
   readonly original: Error | undefined;
+  /** Unix timestamp (ms) when the error was created. */
   readonly timestamp: number;
+  /** Unique ID linking related errors across features and flows. */
   readonly correlationId: string;
+  /** Optional state snapshot captured at the time of the error. */
   readonly stateSnapshot: Record<string, unknown> | undefined;
 
+  /** Create a new AioError with code, message, context, and optional original error + state snapshot. */
   constructor(
     code: AioErrorCode,
     message: string,
@@ -171,6 +184,7 @@ export class AioError extends Error {
     this.stateSnapshot = stateSnapshot;
   }
 
+  /** Serialize to a plain object — suitable for JSON logging and diagnostic reports. */
   toJSON(): Record<string, unknown> {
     return {
       code: this.code,

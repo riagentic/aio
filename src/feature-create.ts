@@ -183,6 +183,7 @@ export function feature<
   config: MethodsFeatureConfig<N, S, M>,
   // deno-lint-ignore no-explicit-any
 ): FeatureDef<N, any, any, S> & DirectCalling<M>;
+/** Define a feature with explicit actions/reduce style — typed action creators + reducer handlers. */
 export function feature<
   N extends string,
   S extends Record<string, unknown>,

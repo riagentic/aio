@@ -288,24 +288,31 @@ deno run --v8-flags=--max-old-space-size=16384 main.ts
 
 ```
 [aio:vitals] RE-RENDER STORM — 47 subscribe callbacks in last 1s
-  useAio() detected:  yes (full-state subscription active)
-  hint:               switch from useAio() to useFeature(ref)
+  hint:               check for expensive components or unstable selectors
 ```
 
 **Root causes:**
 
-### Using `useAio()` instead of `useFeature(ref)`
+### Expensive components re-rendering
 
-`useAio()` subscribes to the entire state tree — re-renders on every change from
-any feature. Use `useFeature(ref)` for scoped subscriptions:
+`useAio()` returns a deep Proxy that auto-tracks which state paths your
+component reads — it only subscribes to those paths. This is efficient and the
+recommended API. If you still see re-render storms, the issue is not `useAio()`
+itself but expensive components doing too much work per render:
 
 ```ts
-// WRONG — re-renders on every state change
-const { state } = useAio();
+// FINE — useAio() only subscribes to paths you actually access
+const { state, send } = useAio();
+return <div>{state.counter.count}</div>; // subscribes to counter.count only
 
-// RIGHT — re-renders only when this feature's state changes
+// BETTER for hot components — useFeature scopes re-renders to one feature
 const { state, send } = useFeature(counterRef);
+return <div>{state.count}</div>;
 ```
+
+`useFeature(ref)` is a React re-render optimization — it scopes re-renders to a
+single feature's state changes. Use it for components that render frequently or
+are expensive to render, not as a subscription mechanism.
 
 ### Selector returning new object every time
 
@@ -319,10 +326,6 @@ useFeature(ref, (s) => ({ a: s.a, b: s.b }));
 const a = useFeature(ref, (s) => s.a);
 const b = useFeature(ref, (s) => s.b);
 ```
-
-**`useAio()` warning:** In dev mode, a one-time warning fires per call site.
-Active instances are ref-counted — accurately reports whether `useAio()` is
-still mounted.
 
 ---
 

@@ -32,6 +32,7 @@ framework experience needed.
 | [builds.md](builds.md)                   | All compile targets, build flags, Android/Electron packaging, systemd              |
 | [structure.md](structure.md)             | Project file organization, naming conventions                                      |
 | [scaling.md](scaling.md)                 | Architecture at scale, bottlenecks, best practices, capacity                       |
+| [traffic.md](traffic.md)                 | UI data traffic optimization — delta, throttling, selectors, backpressure, vitals  |
 | [vitals.md](vitals.md)                   | Client freeze detection — probes, hint engine, thresholds, alerts                  |
 | [troubleshooting.md](troubleshooting.md) | **Start here when stuck** — symptom-based guide, decision tree, fix paths          |
 | [debugging.md](debugging.md)             | Error interpretation, time-travel forensics, feature health                        |

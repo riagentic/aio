@@ -163,8 +163,8 @@ export function createDispatch<S, A, E>(
       { featureName: type?.split(":")[0], actionType: type, duration, budget },
     );
     reportAioError(err, _reportOpts);
-    if (perfLog && type) {
-      perfLog(source, type, duration, budget, getBreakdown?.());
+    if (perfLog) {
+      perfLog(source, type ?? "unknown", duration, budget, getBreakdown?.());
     }
   }
 

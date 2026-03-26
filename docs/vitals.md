@@ -122,6 +122,54 @@ means the main thread was blocked.
 **Status changes** fire via `onStatusChange` callback, which the browser client
 logs to console as `[aio:vitals] render <status>`.
 
+### RenderMeter (Client)
+
+Frame-level measurement using `requestAnimationFrame`. While RenderProbe detects
+freezes via `setTimeout` drift, RenderMeter provides continuous render health
+metrics — staleness, frame time, paint rate, and memory.
+
+**What it measures:**
+
+| Metric           | Description                                                      |
+| ---------------- | ---------------------------------------------------------------- |
+| `staleness`      | ms since last unpainted state update (`now - lastPatchAt`)       |
+| `frameTime`      | ms between consecutive `requestAnimationFrame` callbacks         |
+| `pendingPatches` | Unprocessed delta patches waiting to be painted                  |
+| `paintRate`      | Frames per second (1-second rolling window)                      |
+| `memory`         | JS heap usage gauge (Chrome/Edge only, via `performance.memory`) |
+
+**Status classification (staleness-based):**
+
+| Staleness       | Status     |
+| --------------- | ---------- |
+| < threshold     | `healthy`  |
+| >= threshold    | `degraded` |
+| >= 2× threshold | `warning`  |
+| >= 5× threshold | `frozen`   |
+
+Default staleness threshold: 300ms (configurable via `renderBudget.staleness`).
+
+**Frozen client behavior:** When a client is classified as `frozen`, the server
+skips sending deltas to it entirely — no point pushing data that won't be
+painted. When the client recovers, it resumes receiving deltas from the next
+broadcast cycle (accumulated state changes are captured in the next delta).
+
+**Visibility pause:** When the browser tab is hidden (`document.hidden`), the
+meter pauses measurement and suppresses false alarms. Hidden tabs don't receive
+`requestAnimationFrame` callbacks, which would otherwise trigger false freeze
+detection.
+
+**Configuration:**
+
+```ts
+aio.run({
+  renderBudget: {
+    staleness: 500, // ms — default: 300
+    pendingPatches: 20, // count — default: 10
+  },
+});
+```
+
 ### TransportProbe (Client + Server)
 
 Measures round-trip time between client and server using a `__vitals:ping/pong`
@@ -154,7 +202,68 @@ protocol over WebSocket.
 The pong includes server-side loop vitals so the client has full-stack context
 without a separate request.
 
+### IPC keepalive (UDS mode)
+
+In Electron/UDS mode, the full `__vitals:ping/pong` protocol is not used (it
+runs over WebSocket only). Instead, a lightweight `__ping` message is sent every
+60 seconds over the IPC bridge to keep the connection visibly alive. The server
+silently ignores these messages. This prevents passive viewing sessions
+(dashboards, monitoring) from appearing idle. See [electron.md](electron.md) for
+UDS connection lifecycle details.
+
 ---
+
+## Measurement Pipeline
+
+How diagnostic data flows from measurement to developer console:
+
+```
+Server                              Client
+┌─────────────────────┐    ┌──────────────────────────┐
+│ dispatch() called   │    │                          │
+│   ↓                 │    │ RenderProbe              │
+│ performance.now()   │    │   setTimeout drift → status │
+│   ↓                 │    │                          │
+│ LoopProbe collects: │    │ RenderMeter              │
+│   reduceTime        │    │   rAF gap → staleness    │
+│   queueDepth        │    │   frameTime, paintRate   │
+│   drainRate         │    │                          │
+│   effectBacklog     │    │ TransportProbe (client)  │
+│   p95ReduceTime     │    │   ping → measure RTT     │
+│         │           │    │         │                │
+│         ↓           │    │         ↓                │
+│ __vitals:pong ──────────→│ VitalsSnapshot assembled │
+│  (includes LoopVitals)   │         │                │
+│                     │    │         ↓                │
+│ DiagReporter        │    │ HintEngine               │
+│  (server console)   │    │   correlate all probes   │
+│   SLOW DISPATCH     │    │   → root-cause hint      │
+│   DISCONNECTED      │    │         │                │
+│   PRESSURE          │    │         ↓                │
+│                     │    │ DiagReporter (client)    │
+│ onDiagnostic hook ←─────←│   [aio:vitals] console  │
+│   (telemetry sink)  │    │   block with hint        │
+│                     │    │                          │
+│ GET /__aio/vitals   │    │ onVitalAlert callback    │
+│   (HTTP endpoint)   │    │                          │
+└─────────────────────┘    └──────────────────────────┘
+```
+
+**Timing:** The pipeline runs on each heartbeat interval (default: 1000ms).
+Client sends `__vitals:ping`, server responds with `__vitals:pong` containing
+current `LoopVitals`. Client assembles a `VitalsSnapshot` from all three layers
+and runs the hint engine.
+
+**Data lifecycle:**
+
+| Data point      | Window / Reset                                                       |
+| --------------- | -------------------------------------------------------------------- |
+| `p95ReduceTime` | Sliding window of last 100 reduces, sorted percentile                |
+| `drainRate`     | 5-second tumbling window of action timestamps                        |
+| `effectBacklog` | Live counter: +1 on async effect start, −1 on resolve/reject/timeout |
+| `queueDepth`    | Live: current `queue.length` in dispatch loop                        |
+| `paintRate`     | 1-second rolling window of rAF frame count                           |
+| `staleness`     | Instantaneous: `now - lastPatchAt`                                   |
 
 ## Hint Engine
 
@@ -289,14 +398,14 @@ Console output is throttled (same kind+trigger suppressed for 2s).
 
 Timer-based detection: checks every 1s whether `_subscribe` notification
 callbacks exceeded 30 in the last window. Runs independently of probe status
-changes — storms are detected even when all probes report healthy. Integrates
-with `useAio()` tracking — if full-state subscriptions are active AND a storm
-fires, the hint connects them:
+changes — storms are detected even when all probes report healthy. Since
+`useAio()` now uses a deep Proxy to auto-track accessed paths, subscriptions are
+always narrowed — a storm indicates expensive components or unstable selectors,
+not over-subscription:
 
 ```
 [aio:vitals] RE-RENDER STORM — 47 subscribe callbacks in last 1s
-  useAio() detected:  yes (full-state subscription active)
-  hint:               switch from useAio() to useFeature(ref) for granular subscriptions
+  hint:               check for expensive components or unstable selectors — useFeature(ref) can scope re-renders
 ```
 
 ### Resource pressure warnings
@@ -329,16 +438,14 @@ diagnostics: {
 
 `pressure: false` disables. Default: on in dev, off in prod.
 
-### `useAio()` dev warning
+### `useAio()` Proxy tracking
 
-`useAio()` subscribes to the entire state tree. Active instances are ref-counted
-— the count increments on subscribe, decrements on unsubscribe (component
-unmount), so storm hints accurately reflect whether `useAio()` is currently in
-use. In dev mode, a one-time warning fires per call site:
-
-```
-[aio:vitals] useAio() subscribes to full state tree — re-renders on every change. Use useFeature(ref) instead.
-```
+`useAio()` returns a deep recursive Proxy that automatically tracks which state
+paths each component reads. Only deltas for subscribed paths are sent from the
+server — no full-state subscription is possible. Active instances are
+ref-counted for accurate storm diagnostics. `useAio()` is the recommended API;
+`useFeature(ref)` is a React re-render optimization for scoping re-renders to a
+single feature.
 
 ---
 

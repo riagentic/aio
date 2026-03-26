@@ -1,6 +1,17 @@
 #!/usr/bin/env -S deno run -A
-// am — aio manager: process management + trojan HTTP client
-// Usage: deno task am <command> [args] [--json] [--quiet] [--port=N] [--app=X]
+/**
+ * @module
+ * am — aio manager: process management and runtime inspection CLI.
+ *
+ * Manages running aio apps, queries state, inspects React component trees,
+ * and automates UI actions via a trojan HTTP client.
+ *
+ * ```sh
+ * deno task am status
+ * deno task am state --app counter
+ * deno task am click "#submit"
+ * ```
+ */
 
 import { VERSION } from "./aio.ts";
 import {
@@ -17,13 +28,17 @@ import { join } from "@std/path";
 
 // ── 1. Types & constants ─────────────────────────────────────
 
+/** Output format for am CLI commands */
 export type OutputMode = "pretty" | "json" | "quiet";
+/** Result wrapper — success with data or failure with error message */
 export type Result<T = unknown> = { ok: true; data: T } | {
   ok: false;
   error: string;
 };
 
-// Legacy compat — keep PidFile as alias for LockData
+/** Process lock data — PID, port, socket path, start time, and app metadata. */
+export { type LockData } from "./single-instance-lock.ts";
+/** Process lock file data — alias for LockData */
 export type PidFile = LockData;
 
 const LOG_FILE = ".aio.log";
@@ -119,8 +134,10 @@ export function resolvePort(flag?: number, appId?: string): number {
   return readEntryConfig().port ?? DEFAULT_PORT;
 }
 
+/** Check if a process with the given PID is still running */
 export { isProcessAlive };
 
+/** Format seconds into human-readable uptime string (e.g. "2h 15m 30s") */
 export function formatUptime(seconds: number): string {
   if (seconds < 60) return `${seconds}s`;
   if (seconds < 3600) return `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
@@ -773,33 +790,10 @@ async function cmdWatch(args: string[], flags: GlobalFlags): Promise<void> {
   // Start initially if not already running
   if (!readPid(appId)) await cmdStart([], flags);
 
-  const DEBOUNCE_MS = 300;
-  let timer: ReturnType<typeof setTimeout> | null = null;
-  let restarting = false;
-
-  const watcher = Deno.watchFs(watchDir, { recursive: true });
-  for await (const event of watcher) {
-    if (!["modify", "create", "remove"].includes(event.kind)) continue;
-    const changed = event.paths.find((p) =>
-      p.endsWith(".ts") || p.endsWith(".tsx")
-    );
-    if (!changed) continue;
-
-    if (timer) clearTimeout(timer);
-    timer = setTimeout(async () => {
-      if (restarting) return;
-      restarting = true;
-      out(
-        mode === "pretty"
-          ? `change detected — restarting…`
-          : { event: "restart", trigger: changed },
-        mode,
-      );
-      await cmdRestart([], { ...flags, quiet: true });
-      out(mode === "pretty" ? "restarted" : { event: "restarted" }, mode);
-      restarting = false;
-    }, DEBOUNCE_MS);
-  }
+  // Auto-restart disabled — server.ts handles UI live reload (.tsx/.css/.html/.svg)
+  // via WebSocket without killing the process. Backend .ts changes require manual restart.
+  // Keep the process alive so the initial cmdStart above isn't orphaned.
+  await new Promise(() => {});
 }
 
 async function cmdStatus(_args: string[], flags: GlobalFlags): Promise<void> {
@@ -1593,7 +1587,8 @@ Flags: --app=X  --port=N  --entry=<path>  --wait[=N]  --json  --quiet  --body='{
 
 // ── 5. Main entry & router ───────────────────────────────────
 
-type GlobalFlags = {
+/** CLI global flags — port, output mode, filtering, and app targeting options. */
+export type GlobalFlags = {
   port?: number;
   json?: boolean;
   quiet?: boolean;
@@ -1640,6 +1635,7 @@ const COMMANDS: Record<string, CmdHandler> = {
   help: cmdHelp,
 };
 
+/** Parse CLI arguments into command, positional args, and global flags (--json, --quiet, --port, --app) */
 export function parseGlobalFlags(
   raw: string[],
 ): { command: string; args: string[]; flags: GlobalFlags } {

@@ -1,5 +1,6 @@
 // Memory Pressure Monitor — threshold alerts + trend detection
 
+/** Heap usage report emitted when memory exceeds thresholds — includes per-feature breakdown and trend. */
 export type MemoryReport = {
   level: "warn" | "critical";
   heapUsed: number;
@@ -12,12 +13,14 @@ export type MemoryReport = {
   trend: "rising" | "stable" | "falling";
 };
 
+/** Per-feature memory size entry — name, serialized byte size, and largest field info. */
 export type FeatureStateSize = {
   name: string;
   bytes: number;
   largestField?: { key: string; entries?: number };
 };
 
+/** Configuration for the memory pressure monitor — thresholds, polling interval, and callback. */
 export type MemoryConfig = {
   enabled?: boolean;
   interval?: number;

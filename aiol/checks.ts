@@ -1221,6 +1221,59 @@ export const checkScheduling: Checker = (ctx) => {
 };
 
 // ══════════════════════════════════════════════════════════════════════
+// 13. MEMO & STRUCTURAL SHARING (AIO-11)
+// ══════════════════════════════════════════════════════════════════════
+
+export const checkMemoUsage: Checker = (ctx) => {
+  const { tsxFiles, report } = ctx;
+
+  for (const file of tsxFiles) {
+    // Rule 1: React.memo import → suggest aio memo
+    if (
+      /import\s*\{[^}]*\bmemo\b[^}]*\}\s*from\s*['"]react['"]/.test(
+        file.content,
+      ) ||
+      /import\s+.*\bmemo\b.*\s+from\s*['"]react['"]/.test(file.content)
+    ) {
+      const lineIdx = file.lines.findIndex((l) =>
+        /from\s*['"]react['"]/.test(l) && /\bmemo\b/.test(l)
+      );
+      report(
+        "warn",
+        "perf",
+        `${file.relative}:${
+          lineIdx + 1
+        } — import { memo } from "react" uses shallow === comparison — import from "aio" instead (uses structural comparison, prevents wasted renders)`,
+        {
+          file: file.relative,
+          line: lineIdx + 1,
+          fix: 'Change to: import { memo } from "aio"',
+        },
+      );
+    }
+
+    // Rule 2: .map() rendering memo components without useProjection
+    const hasMap = /\.map\s*\(/.test(file.content);
+    const hasMemo = /\bmemo\s*\(/.test(file.content) ||
+      /\bmemo\b/.test(file.content);
+    const hasUseProjection = file.content.includes("useProjection");
+
+    if (hasMap && hasMemo && !hasUseProjection) {
+      report(
+        "hint",
+        "perf",
+        `${file.relative}: renders memo() components via .map() without useProjection() — derived arrays create new refs every render, defeating memo. Wrap transforms in useProjection()`,
+        {
+          file: file.relative,
+          fix:
+            "const projected = useProjection(() => transform(items), [items])",
+        },
+      );
+    }
+  }
+};
+
+// ══════════════════════════════════════════════════════════════════════
 // ALL CHECKS
 // ══════════════════════════════════════════════════════════════════════
 
@@ -1237,4 +1290,5 @@ export const ALL_CHECKS: Checker[] = [
   checkBuild,
   checkInterFeature,
   checkScheduling,
+  checkMemoUsage,
 ];

@@ -39,11 +39,14 @@
  */
 import { type Draft, produce } from "immer";
 import type { PerfBudget, PerfCheck } from "./src/dispatch.ts";
+import type { ComponentType, ReactElement } from "react";
 
 /** Framework core — `aio.run()` starts the app, `lint` validates features, `parseCli` reads CLI flags */
 export { aio, lint, parseCli, VERSION } from "./src/aio.ts";
 import type { AioApp } from "./src/aio.ts";
+/** The running app instance returned by `aio.run()` — provides state access, dispatch, db, and lifecycle */
 export type { AioApp };
+/** Core configuration, error, and middleware types for `aio.run()` */
 export type {
   AioConfig,
   AioError,
@@ -56,17 +59,48 @@ export type {
   PerfCheck,
   UiConfig,
 } from "./src/aio.ts";
+/** Structured error types — error codes, context, source tracking, and flow step records */
 export type {
   AioErrorCode,
   AioErrorContext,
   AioErrorSource,
   FlowStepRecord,
 } from "./src/error.ts";
-export type { MemoryConfig, MemoryReport } from "./src/memory-monitor.ts";
+/** Memory monitor configuration and heap usage report types */
+export type {
+  FeatureStateSize,
+  MemoryConfig,
+  MemoryReport,
+} from "./src/memory-monitor.ts";
+/** Client-side render budget thresholds — staleness and pending patch count */
+export type { RenderBudget } from "./src/vitals/types.ts";
+/** Phase-level timing breakdown inside a single reduce cycle */
+export type { ReduceBreakdown } from "./src/time-travel.ts";
+/** Diagnostics configuration and checkpoint recovery types */
+export type {
+  CheckpointData,
+  DiagnosticsConfig,
+  DiagnosticsOptions,
+} from "./src/diagnostics/types.ts";
+/** Structured diagnostic event and detail types from the vitals system */
+export type { DiagEvent, DiagEventDetail } from "./src/vitals/types.ts";
+/** Vitals types — configuration, alerts, thresholds, hints, status */
+export type {
+  LayerThreshold,
+  VitalAlert,
+  VitalHint,
+  VitalLayer,
+  VitalsConfig,
+  VitalStatus,
+  VitalThresholds,
+} from "./src/vitals/types.ts";
 /** Structured logger — `log.info()`, `log.warn()`, `log.error()`, `log.debug()` */
 export { log } from "./src/logger.ts";
+/** Logger configuration and level types */
 export type { Log, LogConfig, LogLevel } from "./src/logger.ts";
+/** Electron app metadata injected into the renderer process */
 export type { AioMeta } from "./src/electron.ts";
+/** Single-instance lock types — instance info, lock data, singleton mode */
 export type {
   InstanceInfo,
   LockData,
@@ -82,13 +116,12 @@ export { instances, resolveAppId } from "./src/single-instance-lock.ts";
  * feature({ methods, generators }) — reactive + sequential workflows in one feature
  * feature({ actions, reduce })   — explicit style for full control (advanced)
  */
-export {
-  bindFeature,
-  composeFeatures,
-  feature,
-  testFeature,
-} from "./src/feature.ts";
-// tagSource — internal (framework auto-tags action sources)
+export { bindFeature, testFeature } from "./src/feature.ts";
+/** Define a feature — methods, generators, actions/reduce, or mixed. The atomic unit of aio. */
+export { feature } from "./src/feature.ts";
+/** Compose features into a single dispatch/reduce/execute pipeline with dependency resolution. */
+export { composeFeatures } from "./src/feature.ts";
+/** Feature definition types — actions, catalogs, machine config, compose, test context */
 export type {
   ActionsFeatureConfig,
   ActionSource,
@@ -130,7 +163,10 @@ export type {
  *
  * `markAsync` — rare: explicitly mark a method as async when minification strips constructor names.
  */
-export { call, markAsync } from "./src/feature-impl.ts";
+/** Wrap an inter-feature call with timeout and/or retry — `call({ timeout: 5000 }, () => f.method())`. */
+export { call } from "./src/feature-impl.ts";
+export { markAsync } from "./src/feature-impl.ts";
+/** Method types for feature definitions — sync, async, call options */
 export type {
   AsyncMethod,
   CallOptions,
@@ -144,6 +180,7 @@ export type {
  * Write top-to-bottom async code; each yield point is observable.
  * Use cancelOn config key in feature() to declare cancellation triggers.
  */
+/** Generator workflow types — flow definitions, steps, context, and typed creators */
 export type {
   FlowDef,
   FlowStep,
@@ -159,13 +196,18 @@ export type {
  * @param opts - Optional { token?: string } for auth
  */
 export { connectCli, connectCliUDS } from "./src/cli-client.ts";
+/** CLI client connection type — state, send, subscribe, close, ready */
 export type { CliApp } from "./src/cli-client.ts";
 
 /**
  * Action/effect catalog factory — creates typed creators for explicit-style features.
  * Used inside `feature({ actions, effects })` config or for standalone catalogs.
  */
-export { actions, effects } from "./src/factory.ts";
+/** Create typed action creators — PascalCase labels + camelCase dispatch helpers. */
+export { actions } from "./src/factory.ts";
+/** Create typed effect creators — same API as `actions()` but for side-effect declarations. */
+export { effects } from "./src/factory.ts";
+/** Factory result and creator types for explicit-style action/effect catalogs */
 export type {
   Creators as FactoryCreators,
   FactoryResult,
@@ -179,6 +221,7 @@ export type {
  */
 export { schedule } from "./src/schedule.ts";
 import type { ScheduleEffect } from "./src/schedule.ts";
+/** Schedule definition and effect types for timers, intervals, and cron */
 export type { ScheduleDef, ScheduleEffect } from "./src/schedule.ts";
 
 /**
@@ -186,6 +229,7 @@ export type { ScheduleDef, ScheduleEffect } from "./src/schedule.ts";
  * @see {@link https://aio.dev/manual#sqlite-persistence}
  */
 export { integer, pk, real, ref, table, text } from "./src/sql.ts";
+/** SQL schema and query types — column definitions, table schemas, where clauses */
 export type {
   ColumnDef,
   ColumnOpts,
@@ -200,13 +244,16 @@ export type {
  * `createDB` is for direct use; `app.db` is the instance managed by the framework.
  */
 export { createDB, DEFAULT_PRAGMAS } from "./src/db/mod.ts";
+/** Database types — DB instance, options, query results, transaction handle */
 export type { DB, DBOpts, QueryResult, Tx } from "./src/db/mod.ts";
 
 /**
  * Memoized selectors for expensive state derivations.
  * Caches results until input selectors return new values.
  */
-export { createSelector, createSliceSelector } from "./src/selector.ts";
+/** Memoized selector — recomputes only when input selectors return new values. */
+export { createSelector } from "./src/selector.ts";
+export { createSliceSelector } from "./src/selector.ts";
 export type { Selector } from "./src/selector.ts";
 
 /**
@@ -394,6 +441,48 @@ export declare function useLocal<T>(initial: T): {
 };
 
 /**
+ * Derives state from a transformation, preserving element-level references.
+ *
+ * Like `useMemo`, but applies `_preserveArrayRefs` to the output — unchanged
+ * elements keep their previous object reference, enabling `memo()` to skip
+ * re-renders for unchanged list items.
+ *
+ * @typeParam T - Return type of the transform function
+ * @param fn - Transform function that derives state
+ * @param deps - Dependency array (same semantics as `useMemo`)
+ * @returns Transformed value with preserved references
+ *
+ * @example
+ * ```tsx
+ * const groups = useProjection(() => buildGroups(state.members), [state.members]);
+ * ```
+ */
+export declare function useProjection<T>(fn: () => T, deps: unknown[]): T;
+
+/**
+ * Drop-in replacement for `React.memo` with smarter default comparison.
+ *
+ * Uses `_shallowEqual` on each prop (one level deeper than React.memo's `===`).
+ * Catches the case where a parent creates new container objects that are
+ * structurally identical to the previous props.
+ *
+ * @typeParam P - Props type
+ * @param Component - React component to memoize
+ * @param compare - Optional custom comparison function (defaults to per-prop _shallowEqual)
+ * @returns Memoized component
+ *
+ * @example
+ * ```tsx
+ * import { memo } from "aio";  // NOT from "react"
+ * export default memo(MemberCard);
+ * ```
+ */
+export declare function memo<P extends Record<string, unknown>>(
+  Component: ComponentType<P>,
+  compare?: (prev: P, next: P) => boolean,
+): ComponentType<P>;
+
+/**
  * State-based routing. Renders the component matching a page key.
  *
  * @typeParam K - Union of page keys
@@ -406,7 +495,6 @@ export declare function useLocal<T>(initial: T): {
  * {page(state.page, { home: Home, settings: Settings })}
  * ```
  */
-import type { ComponentType, ReactElement } from "react";
 /** State-based page router — renders the component matching the current page key */
 export declare function page<K extends string>(
   current: K,
@@ -588,6 +676,7 @@ export declare function matchPath(
   exact?: boolean,
 ): Record<string, string> | null;
 
+/** Router component prop types and route state */
 export type { LinkProps, RouteProps, RouteState } from "./src/browser.ts";
 
 /**

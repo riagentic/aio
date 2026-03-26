@@ -1,5 +1,42 @@
 # Changelog
 
+## 1.0.0-alpha5
+
+### Added
+
+- Identity-keyed array delta compression (AIO-12) — `flattenKeys` detects arrays
+  with stable `id` fields, diffs per-element. 160-element array with 10 changes:
+  120KB → ~7.5KB per tick
+- 4-layer wasted render prevention (AIO-11) — `useProjection`, `memo` with
+  structural comparison, aiol lint rule, runtime warning
+- IPC keepalive ping (AIO-24) — `__ping` every 60s as defense-in-depth for
+  Electron IPC
+- `.ts` added to live-reload watcher extensions
+
+### Fixed
+
+- UDS ghost socket elimination (AIO-24) — removed idle timeout, close conn on
+  read-loop exit, `_ipcConnected` flag, write-error cleanup
+- UDS broadcast/sendTo write failures now close connection cleanly (AIO-25)
+- `_reset()` clears `_idMaps`, `_useAioActiveCount`, `_diagLastEmit`,
+  `_vitalsUrlLogged`, `_vitalsPingTimer`, `_vitalsTransportProbe` (AIO-14,
+  AIO-23)
+- `_applyArrPatch` self-heals on desync instead of injecting `undefined`
+  (AIO-15)
+- `flattenKeys` preserves empty arrays as atomic keys (AIO-16)
+- `onerror` handler cleans up vitals/payloadStats/pressureMonitor (AIO-17)
+- Double `onDisconnect` callback prevented via `disconnected` flag (AIO-18)
+- Delta-before-state now emits diagnostic event (AIO-19)
+- `ws.onopen` guards `readyState` after async gap (AIO-20)
+- `_accessedPaths` pruned on full state receive (AIO-21)
+- Graph validation race guard via `_graphGeneration` counter (AIO-22)
+- Electron IPC test updated to match dual-replay `lastFullState` template
+
+### Changed
+
+- `_preserveArrayRefs` bypassed entirely for identity-patched arrays (AIO-13) —
+  8,000 shallow comparisons per patch eliminated
+
 ## 1.0.0-alpha4
 
 ### Added

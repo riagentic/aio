@@ -732,12 +732,18 @@ export function createUDSListener(
   function sendTo(conn: Deno.Conn, msg: string): void {
     try {
       const writer = conn.writable.getWriter();
-      writer.write(new TextEncoder().encode(msg + "\n")).catch(() =>
-        connSet.delete(conn)
-      );
+      writer.write(new TextEncoder().encode(msg + "\n")).catch(() => {
+        connSet.delete(conn);
+        try {
+          conn.close();
+        } catch { /* already closed */ }
+      });
       writer.releaseLock();
     } catch {
       connSet.delete(conn);
+      try {
+        conn.close();
+      } catch { /* already closed */ }
     }
   }
 
@@ -748,10 +754,19 @@ export function createUDSListener(
       for (const conn of connSet) {
         try {
           const writer = conn.writable.getWriter();
-          writer.write(data).catch(() => connSet.delete(conn));
+          writer.write(data).catch(() => {
+            connSet.delete(conn);
+            try {
+              conn.close();
+            } catch { /* already closed */ }
+            debug("uds: broadcast write failed — conn closed");
+          });
           writer.releaseLock();
         } catch {
           connSet.delete(conn);
+          try {
+            conn.close();
+          } catch { /* already closed */ }
         }
       }
     },
@@ -809,26 +824,17 @@ function handleUDSConn(
   let buf = "";
   (async () => {
     const reader = conn.readable.getReader();
-    const IDLE_TIMEOUT = 300_000; // 5 min idle timeout — stalled clients get dropped
     try {
       while (true) {
-        // Race read against idle timeout to prevent stalled clients from blocking forever
-        const readResult = await Promise.race([
-          reader.read(),
-          new Promise<{ value: undefined; done: true }>((resolve) =>
-            setTimeout(
-              () => resolve({ value: undefined, done: true }),
-              IDLE_TIMEOUT,
-            )
-          ),
-        ]);
-        const { value, done } = readResult;
+        const { value, done } = await reader.read();
         if (done) break;
         buf += decoder.decode(value, { stream: true });
         const lines = buf.split("\n");
         buf = lines.pop()!;
         for (const line of lines) {
           if (!line) continue;
+          // IPC keepalive — just ignore
+          if (line === "__ping") continue;
           // Client state response
           if (line.startsWith("__clientState:")) {
             const client = clientMap.get(conn);
@@ -856,9 +862,12 @@ function handleUDSConn(
           }
         }
       }
-    } catch { /* connection closed */ }
+    } catch { /* connection closed or reader cancelled by conn.close() */ }
     connections.delete(conn);
     clientMap.delete(conn);
+    try {
+      conn.close();
+    } catch { /* already closed */ }
     debug(`uds: client disconnected (${connections.size} total)`);
   })();
 }

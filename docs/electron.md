@@ -91,6 +91,23 @@ Deno ↔ UDS/NDJSON ↔ Electron main (net.connect) ↔ IPC ↔ renderer (window
 
 **CLI apps** can use `connectCliUDS(socketPath)` for headless UDS transport.
 
+### Connection lifecycle
+
+UDS connections have no idle timeout — local sockets are kept alive indefinitely
+(the OS closes the socket if either process dies). When the server-side read
+loop ends (client disconnect or error), the connection is explicitly closed via
+`conn.close()`, which propagates to the Electron main process as a socket
+`close` event, then to the renderer as `__aio:close`.
+
+**IPC keepalive:** The browser sends a `__ping` message every 60 seconds over
+the IPC bridge as defense-in-depth. The server silently ignores these messages.
+This ensures the connection stays visibly alive even during purely passive
+viewing (dashboards, monitoring screens).
+
+**Write error handling:** If `sock.write()` in the Electron main process fails
+(broken pipe, destroyed socket), the socket is destroyed and the renderer is
+notified via `__aio:close`, triggering the reconnection UI.
+
 ## Window state persistence
 
 Electron remembers window size and position across runs. Bounds are saved to
