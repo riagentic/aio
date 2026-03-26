@@ -23,6 +23,18 @@ All exports are one import: `import { feature, call, aio } from 'aio'`
 | `call(opts, fn)`                | Call with `{ timeout?, retries? }` — wraps inter-feature calls                                |
 | `markAsync(fn)`                 | Explicitly mark a method as async — for minified bundles where constructor names are stripped |
 
+### Dispatch Introspection
+
+Available on the dispatch function returned by `aio.run()`:
+
+| API                           | Description                                         |
+| ----------------------------- | --------------------------------------------------- |
+| `dispatch.getQueueDepth()`    | Current number of pending actions in dispatch queue |
+| `dispatch.getEffectBacklog()` | Number of async effects currently in-flight         |
+
+These are primarily used internally by the vitals system (LoopProbe polls them
+on each heartbeat). Direct use is for custom monitoring or testing.
+
 ---
 
 ## Advanced
@@ -163,15 +175,17 @@ with discriminated unions, define typed effect creators and use
 
 ## React Hooks
 
-| Hook                    | Description                                                    |
-| ----------------------- | -------------------------------------------------------------- |
-| `useAio<S>()`           | Connect to server via WebSocket — `{ state, send }`            |
-| `useFeature(ref)`       | Connect to one feature — `{ state, send, status }`             |
-| `useLocal(initial)`     | Client-only state (not synced) — `{ local, set }`              |
-| `useTimeTravel()`       | Dev-mode time-travel controls — `{ entries, undo, redo, ... }` |
-| `connectDevTools()`     | Connect to Redux DevTools browser extension                    |
-| `disconnectDevTools()`  | Disconnect from Redux DevTools                                 |
-| `page(current, routes)` | State-based routing — renders component for current page key   |
+| Hook                        | Description                                                                  |
+| --------------------------- | ---------------------------------------------------------------------------- |
+| `useAio<S>()`               | Proxy-tracked state access — subscribes to what you read                     |
+| `useFeature(ref)`           | Scoped state + typed send — re-renders only when feature changes             |
+| `useProjection(fn, deps)`   | Like `useMemo` but preserves element-level refs via `_preserveArrayRefs`     |
+| `memo(Component, compare?)` | Drop-in `React.memo` replacement — `_shallowEqual` per prop instead of `===` |
+| `useLocal(initial)`         | Client-only state (not synced) — `{ local, set }`                            |
+| `useTimeTravel()`           | Dev-mode time-travel controls — `{ entries, undo, redo, ... }`               |
+| `connectDevTools()`         | Connect to Redux DevTools browser extension                                  |
+| `disconnectDevTools()`      | Disconnect from Redux DevTools                                               |
+| `page(current, routes)`     | State-based routing — renders component for current page key                 |
 
 ---
 
@@ -290,6 +304,25 @@ Zero-config observability — see [diagnostics.md](diagnostics.md) for full guid
 | `timeTravel`    | `boolean`                          | Time-travel debugger                                 |
 | `console`       | `boolean`                          | Console output                                       |
 | `vitals`        | `boolean \| VitalsConfig`          | Client freeze detection — see [vitals.md](vitals.md) |
+
+### Performance Config (`aio.run()`)
+
+| Config            | Type            | Default | Description                                             |
+| ----------------- | --------------- | ------- | ------------------------------------------------------- |
+| `perfCheck`       | `'on' \| 'off'` | `'on'`  | Enable/disable performance measurement and `perf.log`   |
+| `perfBudget`      | `PerfBudget`    | —       | Override reduce/effect timing thresholds                |
+| `effectTimeoutMs` | `number`        | `30000` | Hard timeout for async effects — fires `EFFECT_TIMEOUT` |
+
+```ts
+type PerfBudget = {
+  reduce?: number; // ms — default: 100. Warn if reduce() exceeds this
+  effect?: number; // ms — default: 5. Warn if sync effect exceeds this
+};
+```
+
+**Queue safety limit:** The dispatch queue has a hard cap of 10,000 pending
+actions (`QUEUE_MAX`). Exceeding this fires `QUEUE_OVERFLOW` error. This is not
+configurable — if you hit it, you have an infinite dispatch loop.
 
 ---
 

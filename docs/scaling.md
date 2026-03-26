@@ -136,6 +136,24 @@ type State = {
 };
 ```
 
+**Arrays of objects with `id` fields get per-element delta compression
+automatically.** If every element in an array is an object with a string `id`
+property, the delta system tracks each element individually. Only changed
+elements are sent over the wire — unchanged elements have zero cost.
+
+```ts
+// Good: 160 members, 10 change per tick → only 10 sent (~7.5KB, not 120KB)
+type State = {
+  fleet: {
+    members: Array<{ id: string; price: number; pnl: number }>;
+    status: string;
+  };
+};
+```
+
+Arrays without `id` fields (primitives, mixed types) are still compared
+atomically as before.
+
 ## Realistic capacity
 
 With careful design (small state, filtered UI, SQLite for bulk data):

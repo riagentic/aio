@@ -56,4 +56,4 @@ jobs:
         with:
           deno-version: "v2.x"
       - name: Publish to JSR
-        run: deno publish
+        run: deno publish --provenance

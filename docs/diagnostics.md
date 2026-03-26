@@ -89,6 +89,16 @@ aio.run({
 });
 ```
 
+Other performance options:
+
+```ts
+aio.run({
+  perfCheck: "on", // enable perf.log violations (default)
+  perfBudget: { reduce: 50, effect: 10 }, // ms thresholds
+  effectTimeoutMs: 60_000, // async effect hard timeout (default: 30s)
+});
+```
+
 ---
 
 ## Customizing
@@ -218,6 +228,8 @@ Three probes detect and diagnose UI freezes across the full stack:
 
 - **LoopProbe** (server) — dispatch queue depth, reduce timing, effect backlog
 - **RenderProbe** (client) — `setTimeout` drift freeze detection
+- **RenderMeter** (client) — `requestAnimationFrame`-based continuous
+  measurement (staleness, frame time, paint rate, memory)
 - **TransportProbe** (client + server) — ping/pong RTT, client liveness watchdog
 
 A **hint engine** correlates all probe signals into a root-cause diagnosis

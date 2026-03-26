@@ -149,6 +149,7 @@ export type CircuitBreakerConfig = {
   window?: number;
 };
 
+/** Compose an array of features into a single dispatch/reduce/execute pipeline with dependency resolution. */
 export function composeFeatures(
   entries: FeatureEntry[],
   opts?: {

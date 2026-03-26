@@ -159,6 +159,14 @@ Static analysis of `feature()` calls:
 
 - Invalid schedule IDs (must be alphanumeric + hyphens/colons/dots)
 
+### 13. Memo & Structural Sharing
+
+- `import { memo } from "react"` in `.tsx` → use `import { memo } from "aio"`
+  (aio's `memo` uses `_shallowEqual` per prop, preventing wasted renders from
+  structurally-identical-but-referentially-different props)
+- `.map()` rendering `memo()` components without `useProjection()` → derived
+  arrays create new refs every render, defeating memo. Wrap in `useProjection()`
+
 ## Example Output
 
 ```

@@ -506,7 +506,15 @@ app.on('ready', () => {
 
   // ── IPC bridge: renderer → UDS ──
   ipcMain.on('__aio:send', (_event, json) => {
-    if (sock && !sock.destroyed) sock.write(json + '\\n');
+    if (sock && !sock.destroyed) {
+      sock.write(json + '\\n', (err) => {
+        if (err && !closing) {
+          sock?.destroy();
+          sock = null;
+          if (pageReady) win.webContents.send('__aio:close');
+        }
+      });
+    }
   });
 
   // Local keyboard shortcuts

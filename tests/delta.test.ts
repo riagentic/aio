@@ -1,6 +1,16 @@
-import { assertEquals, assertNotEquals, assertStrictEquals } from "@std/assert";
-import { _computeDelta } from "../src/server.ts";
-import { _applyPatch, _preserveArrayRefs, _shallowEqual } from "../src/browser.ts";
+import {
+  assertEquals,
+  assertNotEquals,
+  assertNotStrictEquals,
+  assertStrictEquals,
+} from "@std/assert";
+import { _computeDelta, flattenKeys, unflattenPatch } from "../src/server.ts";
+import {
+  _applyPatch,
+  _preserveArrayRefs,
+  _rebuildIdMaps,
+  _shallowEqual,
+} from "../src/browser.ts";
 
 // ── Flat state (v0.4 compatible) ────────────────────────────────
 
@@ -391,7 +401,9 @@ Deno.test("preserveArrayRefs: primitive changed → new array", () => {
 Deno.test("applyPatch: array sub-key preserves unchanged element refs", () => {
   const member0 = { id: "m0", pnl: 10 };
   const member1 = { id: "m1", pnl: 20 };
-  const prev = { fleet: { members: [member0, member1], filters: { active: true } } };
+  const prev = {
+    fleet: { members: [member0, member1], filters: { active: true } },
+  };
   // Patch: members array with member1.pnl changed, member0 unchanged
   const patch = {
     $p: { fleet: { members: [{ id: "m0", pnl: 10 }, { id: "m1", pnl: 99 }] } },
@@ -405,7 +417,10 @@ Deno.test("applyPatch: array sub-key preserves unchanged element refs", () => {
   assertNotEquals(members[1], member1);
   assertEquals(members[1], { id: "m1", pnl: 99 });
   // filters not in patch — should keep reference
-  assertStrictEquals(fleet.filters, (prev.fleet as Record<string, unknown>).filters);
+  assertStrictEquals(
+    fleet.filters,
+    (prev.fleet as Record<string, unknown>).filters,
+  );
 });
 
 Deno.test("applyPatch: all array elements unchanged → array ref preserved", () => {
@@ -416,7 +431,11 @@ Deno.test("applyPatch: all array elements unchanged → array ref preserved", ()
   };
   const result = _applyPatch(prev as Record<string, unknown>, patch);
   const feat = result.feat as Record<string, unknown>;
-  assertStrictEquals(feat.members, members, "entire array ref preserved when content identical");
+  assertStrictEquals(
+    feat.members,
+    members,
+    "entire array ref preserved when content identical",
+  );
 });
 
 Deno.test("applyPatch: non-array sub-keys still work normally", () => {
@@ -426,4 +445,361 @@ Deno.test("applyPatch: non-array sub-keys still work normally", () => {
   const feat = result.feat as Record<string, unknown>;
   assertEquals(feat.count, 10);
   assertEquals(feat.label, "hi");
+});
+
+// ── Identity-keyed array flattening (AIO-12) ────────────────────
+
+Deno.test("flattenKeys: array of objects with id → $id: keys", () => {
+  const state = {
+    fleet: {
+      members: [
+        { id: "SOL_15m", price: 100 },
+        { id: "BTC_1h", price: 50000 },
+      ],
+    },
+  };
+  const flat = flattenKeys(state);
+  assertEquals(flat["fleet.members.$id:SOL_15m"], {
+    id: "SOL_15m",
+    price: 100,
+  });
+  assertEquals(flat["fleet.members.$id:BTC_1h"], {
+    id: "BTC_1h",
+    price: 50000,
+  });
+  assertEquals(flat["fleet.members"], undefined); // no atomic array key
+});
+
+Deno.test("flattenKeys: array without id fields → atomic (unchanged)", () => {
+  const state = { feat: { items: [1, 2, 3] } };
+  const flat = flattenKeys(state);
+  assertEquals(flat["feat.items"], [1, 2, 3]);
+  assertEquals(flat["feat.items.$id:1"], undefined);
+});
+
+Deno.test("flattenKeys: mixed array (some elements missing id) → atomic", () => {
+  const state = { feat: { items: [{ id: "a" }, { noId: true }] } };
+  const flat = flattenKeys(state);
+  assertEquals(flat["feat.items"], [{ id: "a" }, { noId: true }]);
+});
+
+Deno.test("flattenKeys: empty array → emitted as atomic key (not dropped)", () => {
+  const state = { feat: { items: [] as unknown[] } };
+  const flat = flattenKeys(state);
+  assertEquals(flat["feat.items"], []);
+  assertEquals(Object.keys(flat).filter((k) => k.includes("$id:")).length, 0);
+});
+
+Deno.test("flattenKeys: null element in array → atomic fallback", () => {
+  const state = { feat: { items: [{ id: "a" }, null] } };
+  const flat = flattenKeys(state);
+  assertEquals(flat["feat.items"], [{ id: "a" }, null]);
+});
+
+// ── unflattenPatch with $id: keys (AIO-12) ──────────────────────
+
+Deno.test("unflattenPatch: $id: changed keys → $arr patch", () => {
+  const changed: Record<string, unknown> = {
+    "fleet.members.$id:SOL_15m": { id: "SOL_15m", price: 142 },
+  };
+  const result = unflattenPatch(changed, []);
+  const members = (result.$p.fleet as Record<string, unknown>)
+    .members as Record<string, unknown>;
+  assertEquals(members.$arr, true);
+  assertEquals(members["$id:SOL_15m"], { id: "SOL_15m", price: 142 });
+});
+
+Deno.test("unflattenPatch: $id: removed keys → $rm array", () => {
+  const result = unflattenPatch({}, ["fleet.members.$id:DOGE_5m"]);
+  const members = (result.$p.fleet as Record<string, unknown>)
+    .members as Record<string, unknown>;
+  assertEquals(members.$arr, true);
+  assertEquals(members.$rm, ["DOGE_5m"]);
+});
+
+Deno.test("unflattenPatch: mixed $id: and scalar keys in same feature", () => {
+  const changed: Record<string, unknown> = {
+    "fleet.members.$id:SOL_15m": { id: "SOL_15m", price: 142 },
+    "fleet.status": "active",
+  };
+  const result = unflattenPatch(changed, []);
+  const fleet = result.$p.fleet as Record<string, unknown>;
+  assertEquals(fleet.status, "active");
+  const members = fleet.members as Record<string, unknown>;
+  assertEquals(members.$arr, true);
+  assertEquals(members["$id:SOL_15m"], { id: "SOL_15m", price: 142 });
+});
+
+Deno.test("unflattenPatch: $id: changed + $id: removed in same array", () => {
+  const changed: Record<string, unknown> = {
+    "fleet.members.$id:SOL_15m": { id: "SOL_15m", price: 142 },
+  };
+  const removed = ["fleet.members.$id:DOGE_5m"];
+  const result = unflattenPatch(changed, removed);
+  const members = (result.$p.fleet as Record<string, unknown>)
+    .members as Record<string, unknown>;
+  assertEquals(members.$arr, true);
+  assertEquals(members["$id:SOL_15m"], { id: "SOL_15m", price: 142 });
+  assertEquals(members.$rm, ["DOGE_5m"]);
+});
+
+Deno.test("unflattenPatch: non-$id: keys still work (backward compat)", () => {
+  const changed: Record<string, unknown> = { "counter.count": 5 };
+  const result = unflattenPatch(changed, []);
+  assertEquals((result.$p.counter as Record<string, unknown>).count, 5);
+});
+
+// ── _computeDelta with identity arrays (AIO-12) ─────────────────
+
+Deno.test("computeDelta: identity array — one element changed → delta with $arr", () => {
+  const state1 = {
+    fleet: {
+      members: [
+        { id: "SOL", price: 100 },
+        { id: "BTC", price: 50000 },
+        { id: "ETH", price: 3000 },
+      ],
+    },
+  };
+  const state2 = {
+    fleet: {
+      members: [
+        { id: "SOL", price: 142 },
+        { id: "BTC", price: 50000 },
+        { id: "ETH", price: 3000 },
+      ],
+    },
+  };
+  const init = _computeDelta(state1, null, {});
+  const delta = _computeDelta(state2, state1, init.newKeyJsons);
+  assertEquals(delta.kind, "delta");
+  const parsed = JSON.parse(delta.msg);
+  const members = parsed.$p.fleet.members;
+  assertEquals(members.$arr, true);
+  assertEquals(members["$id:SOL"], { id: "SOL", price: 142 });
+  assertEquals(members["$id:BTC"], undefined); // unchanged — not in patch
+  assertEquals(members["$id:ETH"], undefined); // unchanged — not in patch
+});
+
+Deno.test("computeDelta: identity array — element added → new $id: key", () => {
+  // Use 4-element → 5-element transition so added key is <50% of total (1/5 = 20%)
+  const state1 = {
+    fleet: {
+      members: [
+        { id: "SOL", price: 100 },
+        { id: "BTC", price: 50000 },
+        { id: "ETH", price: 3000 },
+        { id: "AVAX", price: 40 },
+      ],
+    },
+  };
+  const state2 = {
+    fleet: {
+      members: [
+        { id: "SOL", price: 100 },
+        { id: "BTC", price: 50000 },
+        { id: "ETH", price: 3000 },
+        { id: "AVAX", price: 40 },
+        { id: "DOT", price: 8 },
+      ],
+    },
+  };
+  const init = _computeDelta(state1, null, {});
+  const delta = _computeDelta(state2, state1, init.newKeyJsons);
+  assertEquals(delta.kind, "delta");
+  const parsed = JSON.parse(delta.msg);
+  assertEquals(parsed.$p.fleet.members["$id:DOT"], { id: "DOT", price: 8 });
+  assertEquals(parsed.$p.fleet.members["$id:SOL"], undefined); // unchanged
+  assertEquals(parsed.$p.fleet.members["$id:BTC"], undefined); // unchanged
+});
+
+Deno.test("computeDelta: identity array — element removed → $rm", () => {
+  // Use 5-element → 4-element transition so removed key is <50% of total (1/5 = 20%)
+  const state1 = {
+    fleet: {
+      members: [
+        { id: "SOL", price: 100 },
+        { id: "BTC", price: 50000 },
+        { id: "ETH", price: 3000 },
+        { id: "AVAX", price: 40 },
+        { id: "DOGE", price: 0.1 },
+      ],
+    },
+  };
+  const state2 = {
+    fleet: {
+      members: [
+        { id: "SOL", price: 100 },
+        { id: "BTC", price: 50000 },
+        { id: "ETH", price: 3000 },
+        { id: "AVAX", price: 40 },
+      ],
+    },
+  };
+  const init = _computeDelta(state1, null, {});
+  const delta = _computeDelta(state2, state1, init.newKeyJsons);
+  assertEquals(delta.kind, "delta");
+  const parsed = JSON.parse(delta.msg);
+  assertEquals(parsed.$p.fleet.members.$rm, ["DOGE"]);
+});
+
+Deno.test("computeDelta: identity array — no changes → skip", () => {
+  const state = { fleet: { members: [{ id: "SOL", price: 100 }] } };
+  const init = _computeDelta(state, null, {});
+  const delta = _computeDelta(state, state, init.newKeyJsons);
+  assertEquals(delta.kind, "skip");
+});
+
+Deno.test("computeDelta: identity array — all elements changed → may trigger full state", () => {
+  const state1 = {
+    fleet: { members: [{ id: "A", v: 1 }, { id: "B", v: 2 }] },
+  };
+  const state2 = {
+    fleet: { members: [{ id: "A", v: 99 }, { id: "B", v: 88 }] },
+  };
+  const init = _computeDelta(state1, null, {});
+  const delta = _computeDelta(state2, state1, init.newKeyJsons);
+  // 2 of 2 keys changed → 100% → exceeds 50% threshold → full state
+  assertEquals(delta.kind, "full");
+});
+
+// ── End-to-end: identity array round-trip (AIO-12) ──────────────
+
+Deno.test("e2e identity array: delta + patch round-trips correctly", () => {
+  const state1 = {
+    fleet: {
+      members: [
+        { id: "SOL", price: 100, pnl: 0 },
+        { id: "BTC", price: 50000, pnl: 10 },
+        { id: "ETH", price: 3000, pnl: -5 },
+      ],
+      status: "running",
+    },
+  };
+  const state2 = {
+    fleet: {
+      members: [
+        { id: "SOL", price: 142, pnl: 4.2 },
+        { id: "BTC", price: 50000, pnl: 10 },
+        { id: "ETH", price: 3000, pnl: -5 },
+      ],
+      status: "running",
+    },
+  };
+
+  const init = _computeDelta(state1, null, {});
+  _rebuildIdMaps(state1 as Record<string, unknown>);
+
+  const delta = _computeDelta(state2, state1, init.newKeyJsons);
+  assertEquals(delta.kind, "delta");
+
+  const parsed = JSON.parse(delta.msg);
+  const result = _applyPatch(state1 as Record<string, unknown>, parsed);
+  assertEquals(result, state2);
+});
+
+Deno.test("e2e identity array: element added round-trips", () => {
+  const state1 = {
+    feat: {
+      items: [
+        { id: "A", v: 1 },
+        { id: "B", v: 2 },
+        { id: "C", v: 3 },
+        { id: "D", v: 4 },
+      ],
+    },
+  };
+  const state2 = {
+    feat: {
+      items: [
+        { id: "A", v: 1 },
+        { id: "B", v: 2 },
+        { id: "C", v: 3 },
+        { id: "D", v: 4 },
+        { id: "E", v: 5 },
+      ],
+    },
+  };
+
+  const init = _computeDelta(state1, null, {});
+  _rebuildIdMaps(state1 as Record<string, unknown>);
+
+  const delta = _computeDelta(state2, state1, init.newKeyJsons);
+  assertEquals(delta.kind, "delta");
+
+  const result = _applyPatch(
+    state1 as Record<string, unknown>,
+    JSON.parse(delta.msg),
+  );
+  assertEquals(result, state2);
+});
+
+Deno.test("e2e identity array: element removed round-trips", () => {
+  const state1 = {
+    feat: {
+      items: [
+        { id: "A", v: 1 },
+        { id: "B", v: 2 },
+        { id: "C", v: 3 },
+        { id: "D", v: 4 },
+        { id: "E", v: 5 },
+      ],
+    },
+  };
+  const state2 = {
+    feat: {
+      items: [
+        { id: "A", v: 1 },
+        { id: "C", v: 3 },
+        { id: "D", v: 4 },
+        { id: "E", v: 5 },
+      ],
+    },
+  };
+
+  const init = _computeDelta(state1, null, {});
+  _rebuildIdMaps(state1 as Record<string, unknown>);
+
+  const delta = _computeDelta(state2, state1, init.newKeyJsons);
+  assertEquals(delta.kind, "delta");
+
+  const result = _applyPatch(
+    state1 as Record<string, unknown>,
+    JSON.parse(delta.msg),
+  );
+  assertEquals(result, state2);
+});
+
+Deno.test("e2e identity array: ref identity preserved for unchanged elements", () => {
+  const sol = { id: "SOL", price: 100 };
+  const btc = { id: "BTC", price: 50000 };
+  const eth = { id: "ETH", price: 3000 };
+  const state1 = { fleet: { members: [sol, btc, eth] } };
+  const state2 = {
+    fleet: { members: [{ id: "SOL", price: 142 }, btc, eth] },
+  };
+
+  const init = _computeDelta(state1, null, {});
+  _rebuildIdMaps(state1 as Record<string, unknown>);
+
+  const delta = _computeDelta(state2, state1, init.newKeyJsons);
+  const result = _applyPatch(
+    state1 as Record<string, unknown>,
+    JSON.parse(delta.msg),
+  );
+  const members = (result.fleet as Record<string, unknown>).members as Array<
+    Record<string, unknown>
+  >;
+
+  assertStrictEquals(
+    members[1],
+    btc,
+    "unchanged BTC element keeps ref identity",
+  );
+  assertStrictEquals(
+    members[2],
+    eth,
+    "unchanged ETH element keeps ref identity",
+  );
+  assertNotStrictEquals(members[0], sol, "changed SOL element gets new ref");
 });

@@ -6,11 +6,14 @@ import {
   type ComponentType,
   createContext,
   createElement,
+  memo as _reactMemo,
   type ReactNode,
   useCallback,
   useContext,
   useEffect,
   useLayoutEffect,
+  useMemo,
+  useRef,
   useState,
   useSyncExternalStore,
 } from "react";
@@ -66,22 +69,77 @@ function _diagEmit(ev: {
   _w._aioDiag({ ...ev, ts: now });
 }
 
+// ── Array ref stats (AIO-11 wasted render detection) ────────────────
+import type { ArrayRefStats } from "./vitals/types.ts";
+
+let _arrayRefStats: ArrayRefStats = {
+  preserved: 0,
+  changed: 0,
+  total: 0,
+  cycles: 0,
+};
+
+export function _getArrayRefStats(): ArrayRefStats {
+  return { ..._arrayRefStats };
+}
+
+export function _resetArrayRefStats(): void {
+  _arrayRefStats = { preserved: 0, changed: 0, total: 0, cycles: 0 };
+}
+
+/** Check if wasted renders are likely based on arrayRefStats + render status.
+ *  Returns a warning string or null. Resets stats after check. */
+export function _checkWastedRenders(
+  status: string,
+): string | null {
+  const stats = _getArrayRefStats();
+  _resetArrayRefStats(); // reset for next measurement window
+  if (
+    stats.total === 0 || stats.cycles < 3 ||
+    status === "healthy" || status === "recovered"
+  ) {
+    return null;
+  }
+  const ratio = stats.preserved / stats.total;
+  if (ratio <= 0.5) return null; // most elements genuinely changed — not wasted
+  return `[aio] WASTED RENDERS: _preserveArrayRefs preserved ${stats.preserved}/${stats.total} element refs (${
+    Math.round(ratio * 100)
+  }%), but render is ${status}. Your memo() comparators may be checking container references instead of element values. Use useProjection() for derived state and import { memo } from "aio" (not React). See docs/ui.md#derived-state--memo`;
+}
+
 /** Structural sharing for arrays: preserve element references for unchanged items.
  *  Returns the previous array reference if ALL elements are unchanged. */
-export function _preserveArrayRefs(newArr: unknown[], oldArr: unknown[]): unknown[] {
-  if (newArr.length !== oldArr.length) return newArr;
+export function _preserveArrayRefs(
+  newArr: unknown[],
+  oldArr: unknown[],
+): unknown[] {
+  if (newArr.length !== oldArr.length) {
+    _arrayRefStats.total += newArr.length;
+    _arrayRefStats.changed += newArr.length;
+    _arrayRefStats.cycles++;
+    return newArr;
+  }
   let allSame = true;
   for (let i = 0; i < newArr.length; i++) {
-    if (newArr[i] === oldArr[i]) continue;
-    if (newArr[i] && typeof newArr[i] === "object" && !Array.isArray(newArr[i]) &&
-        oldArr[i] && typeof oldArr[i] === "object" && !Array.isArray(oldArr[i])) {
+    _arrayRefStats.total++;
+    if (newArr[i] === oldArr[i]) {
+      _arrayRefStats.preserved++;
+      continue;
+    }
+    if (
+      newArr[i] && typeof newArr[i] === "object" && !Array.isArray(newArr[i]) &&
+      oldArr[i] && typeof oldArr[i] === "object" && !Array.isArray(oldArr[i])
+    ) {
       if (_shallowEqual(newArr[i], oldArr[i])) {
         newArr[i] = oldArr[i]; // restore reference — element unchanged
+        _arrayRefStats.preserved++;
         continue;
       }
     }
+    _arrayRefStats.changed++;
     allSame = false;
   }
+  _arrayRefStats.cycles++;
   return allSame ? oldArr : newArr;
 }
 
@@ -100,6 +158,101 @@ export function _shallowEqual(a: unknown, b: unknown): boolean {
     if (objA[k] !== objB[k]) return false;
   }
   return true;
+}
+
+/** Registry of identity-keyed arrays for per-element delta patching.
+ *  Key: "feature.arrayKey", Value: { ids: id→element map, order: insertion-order id array } */
+const _idMaps = new Map<
+  string,
+  { ids: Map<string, unknown>; order: string[] }
+>();
+
+/** Build _idMaps entries from a full state object. Called on full state receive and reconnect. */
+export function _rebuildIdMaps(state: Record<string, unknown>): void {
+  _idMaps.clear();
+  for (const [fk, fv] of Object.entries(state)) {
+    if (!fv || typeof fv !== "object" || Array.isArray(fv)) continue;
+    for (const [sk, sv] of Object.entries(fv as Record<string, unknown>)) {
+      if (!Array.isArray(sv) || sv.length === 0) continue;
+      let allHaveId = true;
+      for (const el of sv) {
+        if (
+          !el || typeof el !== "object" || Array.isArray(el) ||
+          typeof (el as Record<string, unknown>).id !== "string"
+        ) {
+          allHaveId = false;
+          break;
+        }
+      }
+      if (!allHaveId) continue;
+      const ids = new Map<string, unknown>();
+      const order: string[] = [];
+      for (const el of sv) {
+        const id = (el as Record<string, unknown>).id as string;
+        ids.set(id, el);
+        order.push(id);
+      }
+      _idMaps.set(`${fk}.${sk}`, { ids, order });
+    }
+  }
+}
+
+/** Apply a $arr identity-keyed array patch. Returns the reconstructed array. */
+function _applyArrPatch(
+  mapKey: string,
+  arrPatch: Record<string, unknown>,
+): unknown[] {
+  let entry = _idMaps.get(mapKey);
+  if (!entry) {
+    entry = { ids: new Map(), order: [] };
+    _idMaps.set(mapKey, entry);
+  }
+
+  // Apply updates and additions
+  for (const [k, v] of Object.entries(arrPatch)) {
+    if (k === "$arr" || k === "$rm") continue;
+    if (k.startsWith("$id:")) {
+      const id = k.slice(4);
+      if (!entry.ids.has(id)) {
+        entry.order.push(id);
+      }
+      entry.ids.set(id, v);
+    }
+  }
+
+  // Apply removals
+  if (Array.isArray(arrPatch.$rm)) {
+    for (const id of arrPatch.$rm) {
+      if (typeof id === "string") {
+        entry.ids.delete(id);
+        const idx = entry.order.indexOf(id);
+        if (idx !== -1) entry.order.splice(idx, 1);
+      }
+    }
+  }
+
+  // Reconstruct array from order — filter out any desynced entries
+  const result: unknown[] = [];
+  for (const id of entry.order) {
+    const el = entry.ids.get(id);
+    if (el !== undefined) {
+      result.push(el);
+    } else {
+      // order/ids desync — self-heal by removing stale id from order
+      _diagEmit({
+        type: "idmap-desync",
+        severity: "warning",
+        source: "browser",
+        message:
+          `_idMaps order/ids desync for id "${id}" in "${mapKey}" — skipped`,
+        hint:
+          "This may indicate a missed delta patch. State will self-correct on next full sync.",
+      });
+    }
+  }
+  // Clean up desynced order entries
+  entry.order = entry.order.filter((id) => entry!.ids.has(id));
+  return result;
 }
 
 /** Apply a delta patch ($p + $d) to previous state. Handles nested feature patches (v0.5).
@@ -134,9 +287,21 @@ export function _applyPatch(
       const merged = { ...prev_slice };
       for (const [sk, sv] of Object.entries(sub)) {
         if (_BLOCKED_KEYS.has(sk) || sk === "$d") continue;
-        // Structural sharing: preserve per-element references for array sub-keys
-        if (Array.isArray(sv) && Array.isArray(prev_slice[sk])) {
-          merged[sk] = _preserveArrayRefs(sv as unknown[], prev_slice[sk] as unknown[]);
+        // Identity-keyed array patch ($arr marker)
+        if (
+          sv && typeof sv === "object" && !Array.isArray(sv) &&
+          (sv as Record<string, unknown>).$arr === true
+        ) {
+          merged[sk] = _applyArrPatch(
+            `${k}.${sk}`,
+            sv as Record<string, unknown>,
+          );
+        } else if (Array.isArray(sv) && Array.isArray(prev_slice[sk])) {
+          // Structural sharing: preserve per-element references for atomic array sub-keys
+          merged[sk] = _preserveArrayRefs(
+            sv as unknown[],
+            prev_slice[sk] as unknown[],
+          );
         } else {
           merged[sk] = sv;
         }
@@ -329,6 +494,89 @@ let _wasConnected = false; // false during initial connect, true after first ope
 let _offlineReady = false; // true when offline queue loaded from IndexedDB
 let _offlineQueue: Array<{ type: string; payload?: unknown }> = []; // persisted actions
 let _lastAction: { type: string; payload?: unknown } | null = null; // for DevTools correlation
+
+// ── Deep proxy-tracked subscriptions ────────────────────────────────
+// Records the exact state paths the UI reads during render. Leaf access
+// (primitives, arrays) and ownKeys (iteration) record the full dot-path.
+// Intermediate object access returns nested Proxies without recording.
+// After render, paths are collapsed and sent to the server.
+
+export const _accessedPaths = new Set<string>();
+let _subsTimer: ReturnType<typeof setTimeout> | null = null;
+let _currentSubs: string[] = [];
+
+/** Deep recursive Proxy — tracks leaf access and iteration at any depth. */
+export function _trackingProxy(obj: unknown, parentPath = ""): unknown {
+  if (!obj || typeof obj !== "object" || Array.isArray(obj)) return obj;
+  return new Proxy(obj as Record<string, unknown>, {
+    get(target, prop: string | symbol) {
+      if (typeof prop === "string" && !_BLOCKED_KEYS.has(prop)) {
+        const fullPath = parentPath ? `${parentPath}.${prop}` : prop;
+        const value = Reflect.get(target, prop);
+        // Object (non-array) → return nested Proxy (user may go deeper)
+        if (value && typeof value === "object" && !Array.isArray(value)) {
+          return _trackingProxy(value, fullPath);
+        }
+        // Leaf (primitive, array, null) → track the full path
+        _accessedPaths.add(fullPath);
+        _scheduleSyncSubs();
+        return value;
+      }
+      return Reflect.get(target, prop);
+    },
+    ownKeys(target) {
+      // Iterating keys = "I need everything at this level and below"
+      _accessedPaths.add(parentPath || "*");
+      _scheduleSyncSubs();
+      return Reflect.ownKeys(target);
+    },
+  });
+}
+
+/** Collapse paths: if "a.b" and "a.b.c.d" both tracked, keep only "a.b" */
+export function _collapsePaths(paths: Set<string>): string[] {
+  const sorted = [...paths].sort();
+  const result: string[] = [];
+  for (const path of sorted) {
+    if (result.length > 0) {
+      const last = result[result.length - 1];
+      if (last === "*" || path.startsWith(last + ".")) continue;
+    }
+    result.push(path);
+  }
+  return result;
+}
+
+function _scheduleSyncSubs(): void {
+  if (_subsTimer !== null) return;
+  _subsTimer = setTimeout(() => {
+    _subsTimer = null;
+    const collapsed = _collapsePaths(_accessedPaths);
+    if (
+      collapsed.length !== _currentSubs.length ||
+      collapsed.some((s, i) => s !== _currentSubs[i])
+    ) {
+      _currentSubs = collapsed;
+      _wsSendSubs(collapsed);
+    }
+  }, 16);
+}
+
+function _wsSendSubs(subs: string[]): void {
+  const msg = "__subs:" + JSON.stringify(subs);
+  if (_ws && _ws.readyState === WebSocket.OPEN) _ws.send(msg);
+  if (_ipc && _ipcConnected) _ipc.send(msg);
+}
+
+/** Reset tracking state — for tests and _reset() */
+export function _resetTracking(): void {
+  _accessedPaths.clear();
+  _currentSubs = [];
+  if (_subsTimer !== null) {
+    clearTimeout(_subsTimer);
+    _subsTimer = null;
+  }
+}
 
 // Time-travel state — populated when server sends __tt: messages (dev mode)
 type TTMeta = {
@@ -706,6 +954,7 @@ export function _subscribe(onStoreChange: () => void): () => void {
           _queue = [];
           _retry = 0;
           _listenerHighWater = 0;
+          _idMaps.clear();
           if (_vitalsRenderMeter) {
             _vitalsRenderMeter.destroy();
             _vitalsRenderMeter = null;
@@ -748,6 +997,8 @@ function _getServerSnapshot(): unknown {
 let _bootId: string | null = null; // server boot ID — reload page if server restarted
 
 let _ipcConnected = false;
+let _ipcPingTimer: ReturnType<typeof setInterval> | null = null;
+const _IPC_PING_INTERVAL = 60_000; // 60s keepalive — defense-in-depth for UDS
 
 /** Connects via Electron IPC bridge (UDS mode) — messages are NDJSON lines */
 function _connectIPC() {
@@ -762,6 +1013,12 @@ function _connectIPC() {
     const q = _queue;
     _queue = [];
     for (const a of q) _ipc!.send(JSON.stringify(a));
+    // IPC keepalive — prevents stale connection detection in edge cases
+    if (!_ipcPingTimer) {
+      _ipcPingTimer = setInterval(() => {
+        if (_ipc && _ipcConnected) _ipc.send("__ping");
+      }, _IPC_PING_INTERVAL);
+    }
   });
 
   _ipc.onMessage((line: string) => {
@@ -820,10 +1077,26 @@ function _connectIPC() {
       if (data === null || typeof data !== "object") return;
       const prev = _state;
       if (data.$p && typeof data.$p === "object") {
-        if (_state === null) return;
+        if (_state === null) {
+          _diagEmit({
+            type: "delta-before-state",
+            severity: "warning",
+            source: "browser",
+            message: "Delta patch received before full state (IPC) — dropped",
+            hint:
+              "This usually means a reconnect race. The next full state sync will correct this.",
+          });
+          return;
+        }
         _state = _applyPatch(_state as Record<string, unknown>, data);
       } else {
         _state = data;
+        // Full state — rebuild identity maps and reset path tracking
+        // All components re-render on full state, so paths are re-collected naturally
+        if (_state && typeof _state === "object" && !Array.isArray(_state)) {
+          _rebuildIdMaps(_state as Record<string, unknown>);
+        }
+        _accessedPaths.clear();
       }
       if (_state === prev) return; // no-op patch — skip notification
 
@@ -860,6 +1133,11 @@ function _connectIPC() {
   });
 
   _ipc.onClose(() => {
+    _ipcConnected = false;
+    if (_ipcPingTimer) {
+      clearInterval(_ipcPingTimer);
+      _ipcPingTimer = null;
+    }
     if (_closed || _listeners.size === 0) return;
     if (_wasConnected) _showStatus("Reconnecting\u2026", "#e25");
   });
@@ -897,6 +1175,11 @@ function _connect() {
     if (_wasConnected) _showStatus("Connected", "#2a2", 2000);
     _wasConnected = true;
 
+    // Re-send tracked subscriptions on reconnect
+    if (_currentSubs.length > 0) {
+      ws.send("__subs:" + JSON.stringify(_currentSubs));
+    }
+
     // Flush memory queue (initial connect race)
     const q = _queue;
     _queue = [];
@@ -908,6 +1191,8 @@ function _connect() {
       _offlineQueue = persisted.map((p) => p.action);
       _offlineReady = true;
     }
+    // Guard: socket may have closed during async _loadOfflineQueue
+    if (ws.readyState !== WebSocket.OPEN) return;
     if (_offlineQueue.length) {
       console.log(`[aio] replaying ${_offlineQueue.length} offline actions`);
       for (const a of _offlineQueue) ws.send(JSON.stringify(a));
@@ -955,6 +1240,11 @@ function _connect() {
               console.groupEnd();
             }
           } else if (status === "degraded" || status === "warning") {
+            // AIO-11: Check for wasted renders (high preservation but still degraded)
+            const wastedWarning = _checkWastedRenders(status);
+            if (wastedWarning) {
+              console.warn(wastedWarning);
+            }
             const event: DiagEvent = {
               kind: "pressure",
               severity: status === "degraded" ? "speculative" : "possible",
@@ -1073,10 +1363,26 @@ function _connect() {
       }
       const prev = _state;
       if (data.$p && typeof data.$p === "object") {
-        if (_state === null) return; // skip delta when no full state yet
+        if (_state === null) {
+          _diagEmit({
+            type: "delta-before-state",
+            severity: "warning",
+            source: "browser",
+            message: "Delta patch received before full state (WS) — dropped",
+            hint:
+              "This usually means a reconnect race. The next full state sync will correct this.",
+          });
+          return;
+        }
         _state = _applyPatch(_state as Record<string, unknown>, data);
       } else {
         _state = data;
+        // Full state — rebuild identity maps and reset path tracking
+        // All components re-render on full state, so paths are re-collected naturally
+        if (_state && typeof _state === "object" && !Array.isArray(_state)) {
+          _rebuildIdMaps(_state as Record<string, unknown>);
+        }
+        _accessedPaths.clear();
       }
       if (_state === prev) return; // no-op patch — skip notification
 
@@ -1280,28 +1586,19 @@ export function disconnectDevTools(): void {
   }
 }
 
-/** React hook — full app state + untyped send. For root layout, routing, and anything that genuinely
- *  needs cross-feature state. Re-renders on every state change — use `useFeature(f)` in feature components
- *  for scoped state, typed send, and selective re-renders.
- *  Note: state is guaranteed non-null because the framework waits for state before mounting React. */
+/** React hook — full app state + untyped send. Deep-proxy-tracked: only accessed paths
+ *  are sent by the server. Use `useFeature(f)` for scoped re-renders (this hook
+ *  re-renders on every state change; useFeature re-renders only when its feature changes). */
 export function useAio<S = unknown>(): {
   state: S;
   send: (action: { type: string; payload?: unknown }) => void;
 } {
-  const stack = new Error().stack ?? "";
-  const key = stack.split("\n")[2] ?? "unknown";
-  if (!_useAioWarned.has(key)) {
-    _useAioWarned.add(key);
-    console.warn(
-      "[aio:vitals] useAio() subscribes to full state tree — re-renders on every change. Use useFeature(ref) instead.",
-    );
-  }
   const state = useSyncExternalStore(
     _useAioSubscribe,
     _getSnapshot,
     _getServerSnapshot,
   ) as S | null;
-  return { state: state as S, send: _send };
+  return { state: _trackingProxy(state) as S, send: _send };
 }
 
 // WHY DUPLICATED: msg() and factory() are inline copies of msg.ts and factory.ts.
@@ -1571,6 +1868,11 @@ export function useFeature<S = unknown>(
 } {
   const name = ref.__aio.id;
 
+  // Register feature path for proxy-tracked subscriptions.
+  // Guarantees feature-level subscription even if component reads no leaf values.
+  _accessedPaths.add(name);
+  _scheduleSyncSubs();
+
   // Selector: extract just this feature's slice from global state
   const getSliceSnapshot = useCallback((): S | null => {
     if (_state === null) return null;
@@ -1608,7 +1910,7 @@ export function useFeature<S = unknown>(
     _featureSendCache.set(ref, sendObj);
   }
 
-  return { state: resolved, send: sendObj, status };
+  return { state: _trackingProxy(resolved, name) as S, send: sendObj, status };
 }
 
 /** Client-only state — not synced to server, not persisted. For UI-local concerns (editing flags, form inputs, etc.) */
@@ -1617,6 +1919,94 @@ export function useLocal<T>(
 ): { local: T; set: (next: T | ((prev: T) => T)) => void } {
   const [local, setLocal] = useState<T>(initial);
   return { local, set: setLocal };
+}
+
+/** Core projection logic — testable without React.
+ *  Applies `_preserveArrayRefs` to result if array, or `_shallowEqual` ref preservation if object. */
+export function _projectWithSharing<T>(result: T, prev: T | null): T {
+  if (prev === null) return result;
+  if (Array.isArray(result) && Array.isArray(prev)) {
+    return _preserveArrayRefs(
+      result as unknown[],
+      prev as unknown[],
+    ) as unknown as T;
+  }
+  // Non-array object: preserve ref if shallow-equal
+  if (
+    result && typeof result === "object" && !Array.isArray(result) &&
+    typeof prev === "object" && _shallowEqual(result, prev)
+  ) {
+    return prev;
+  }
+  return result;
+}
+
+/** Derives state from a transformation, preserving element-level references.
+ *
+ *  Like `useMemo`, but when the transform re-runs and returns an array,
+ *  `_preserveArrayRefs` is applied to the output — unchanged elements keep
+ *  their previous object reference, enabling `memo()` to skip re-renders.
+ *
+ *  ```tsx
+ *  const groups = useProjection(() => buildGroups(state.members), [state.members]);
+ *  ```
+ */
+export function useProjection<T>(fn: () => T, deps: unknown[]): T {
+  const prevRef = useRef<T | null>(null);
+  const result = useMemo(() => {
+    const raw = fn();
+    const projected = _projectWithSharing(raw, prevRef.current);
+    prevRef.current = projected;
+    return projected;
+  }, deps);
+  return result;
+}
+
+/** Per-prop comparison: uses _shallowEqual for object props, === for primitives/arrays.
+ *  Exported for testing. */
+export function _memoCompare(
+  prevProps: Record<string, unknown>,
+  nextProps: Record<string, unknown>,
+): boolean {
+  const prevKeys = Object.keys(prevProps);
+  const nextKeys = Object.keys(nextProps);
+  if (prevKeys.length !== nextKeys.length) return false;
+  for (const key of prevKeys) {
+    const pv = prevProps[key];
+    const nv = nextProps[key];
+    if (pv === nv) continue;
+    // For plain objects (not arrays), use _shallowEqual
+    if (
+      pv && nv && typeof pv === "object" && typeof nv === "object" &&
+      !Array.isArray(pv) && !Array.isArray(nv)
+    ) {
+      if (!_shallowEqual(pv, nv)) return false;
+      continue;
+    }
+    return false; // primitives or arrays: strict ===
+  }
+  return true;
+}
+
+/** Drop-in replacement for React.memo with smarter default comparison.
+ *
+ *  Uses `_shallowEqual` on each prop (one level deeper than React.memo's default `===`).
+ *  This catches the case where a parent creates new container objects that are
+ *  structurally identical to the previous props — e.g. `{ ...member, extra: val }`.
+ *
+ *  ```tsx
+ *  import { memo } from "aio";  // instead of React.memo
+ *  export default memo(MemberCard);  // _shallowEqual per prop, not ===
+ *  ```
+ */
+export function memo<P extends Record<string, any>>(
+  Component: ComponentType<P>,
+  compare?: (prev: P, next: P) => boolean,
+): ComponentType<P> {
+  return _reactMemo(
+    Component,
+    compare ?? _memoCompare as (prev: P, next: P) => boolean,
+  ) as unknown as ComponentType<P>;
 }
 
 /** Renders the component matching the current page key. Usage: page(state.page, { home: Home, settings: Settings }) */
@@ -1905,6 +2295,10 @@ export function _reset(): void {
   _devtoolsConnected = false;
   _ttKeyBound = false;
   _ipcConnected = false;
+  if (_ipcPingTimer) {
+    clearInterval(_ipcPingTimer);
+    _ipcPingTimer = null;
+  }
   _connecting = false;
   _stateReadyPromise = null;
   _stateReadyResolve = null;
@@ -1914,6 +2308,17 @@ export function _reset(): void {
   }
   _listenerHighWater = 0;
   _stateVersion = 0;
+  _idMaps.clear();
+  _useAioActiveCount = 0;
+  _diagLastEmit.clear();
+  _resetArrayRefStats();
+  _vitalsUrlLogged = false;
+  if (_vitalsPingTimer) {
+    clearInterval(_vitalsPingTimer);
+    _vitalsPingTimer = null;
+  }
+  _vitalsTransportProbe = null;
+  _resetTracking();
 }
 
 // ── Framework-agnostic client ─────────────────────────────────────────────

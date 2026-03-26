@@ -1,10 +1,12 @@
 // aiol — aio linter types
 
+/** Issue severity level — `'error'` blocks release, `'warn'` is advisory, `'hint'` is informational. */
 export type Severity = "error" | "warn" | "hint";
 
 /** A fix function receives the project dir and returns true if it applied a change */
 export type SafeFixFn = (projectDir: string) => Promise<boolean>;
 
+/** A single lint finding — severity, area, message, optional file location, and optional auto-fix. */
 export type Issue = {
   severity: Severity;
   area: string;
@@ -16,6 +18,7 @@ export type Issue = {
   safeFix?: SafeFixFn;
 };
 
+/** Lint report — issues found, checks passed, and scan statistics. */
 export type Report = {
   issues: Issue[];
   passed: string[];

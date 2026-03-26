@@ -1,11 +1,22 @@
 #!/usr/bin/env -S deno run -A
-// aiol — aio linter
-// Usage: deno run -A aiol/mod.ts [project-dir]
-// Scans an aio project and reports errors, warnings, and optimization hints.
+/**
+ * @module
+ * aiol — aio linter and project validator.
+ *
+ * Scans an aio project and reports errors, warnings, and optimization hints.
+ * Checks feature definitions, import graphs, naming conventions, memo usage,
+ * and framework best practices.
+ *
+ * ```sh
+ * deno run -A aiol/mod.ts [project-dir]
+ * ```
+ */
 
 import { buildContext } from "./context.ts";
 import { ALL_CHECKS } from "./checks.ts";
-import type { Issue, Report, Severity } from "./types.ts";
+import type { Issue, Severity } from "./types.ts";
+export type { Issue, Report, SafeFixFn, Severity } from "./types.ts";
+import type { Report } from "./types.ts";
 
 const VERSION = "0.1.0";
 
@@ -184,6 +195,7 @@ async function applySafeFixes(
 
 // ── CLI ─────────────────────────────────────────────────────────────
 
+/** Run all aiol checks against a project directory and return a structured report */
 export async function lint(projectDir: string): Promise<Report> {
   const { ctx, report } = await buildContext(projectDir);
   for (const check of ALL_CHECKS) {

@@ -1,5 +1,6 @@
 // ─── Vital Signs — Types & Constants ────────────────────────────────────────
 
+/** Health status classification — healthy, degraded, warning, frozen, or recovered. */
 export type VitalStatus =
   | "healthy"
   | "degraded"
@@ -7,14 +8,17 @@ export type VitalStatus =
   | "frozen"
   | "recovered";
 
+/** Monitoring layer — render (client paint), transport (network), or loop (dispatch queue). */
 export type VitalLayer = "render" | "transport" | "loop";
 
+/** Threshold triplet for a single monitoring layer — degraded, warning, frozen (ms). */
 export type LayerThreshold = {
   degraded: number;
   warning: number;
   frozen: number;
 };
 
+/** Per-layer threshold configuration — render, transport, loop, and queue. */
 export type VitalThresholds = {
   render: LayerThreshold;
   transport: LayerThreshold;
@@ -31,6 +35,7 @@ export const DEFAULT_THRESHOLDS: VitalThresholds = {
   queue: { degraded: 50, warning: 200, frozen: 1000 },
 };
 
+/** Root-cause diagnostic hint — cause description, evidence, suggestion, and confidence level. */
 export type VitalHint = {
   cause: string;
   evidence: string[];
@@ -38,6 +43,7 @@ export type VitalHint = {
   severity: "likely" | "possible" | "speculative";
 };
 
+/** Alert emitted when a vital crosses a threshold — layer, status, measurement, hint, and timestamp. */
 export type VitalAlert = {
   id: string;
   layer: VitalLayer;
@@ -50,6 +56,7 @@ export type VitalAlert = {
   correlationId?: string;
 };
 
+/** Detail payload for diagnostic events — trigger, timing, queue depth, payload size, etc. */
 export type DiagEventDetail = {
   trigger?: string;
   reduceMs?: number;
@@ -64,6 +71,7 @@ export type DiagEventDetail = {
   hint?: string;
 };
 
+/** Structured diagnostic event emitted by the vitals system — freeze, staleness, pressure, etc. */
 export type DiagEvent = {
   kind: "freeze" | "stale" | "slow" | "disconnect" | "recovered" | "pressure";
   severity: "likely" | "possible" | "speculative";
@@ -79,6 +87,7 @@ export type Gauge = {
   percent: number; // Math.min(100, current / capacity * 100), clamped 0-100
 };
 
+/** Client-side render budget thresholds — staleness (ms) and pending patch count. */
 export type RenderBudget = {
   staleness?: number; // ms — primary threshold (default 300)
   pendingPatches?: number; // count before warning (default 10)
@@ -151,6 +160,7 @@ export type FreezeTimeline = {
   probeSnapshots: VitalsSnapshot;
 };
 
+/** Vitals system configuration — heartbeat interval, thresholds, hints, backpressure, and alert callback. */
 export type VitalsConfig = {
   heartbeatInterval?: number;
   thresholds?: Partial<VitalThresholds>;
@@ -159,4 +169,12 @@ export type VitalsConfig = {
   pressure?: boolean | { payloadThreshold?: number; rateThreshold?: number };
   onVitalAlert?: (alert: VitalAlert) => void;
   onDiagnostic?: (event: DiagEvent) => void;
+};
+
+export type ArrayRefStats = {
+  preserved: number;
+  changed: number;
+  total: number;
+  /** Number of patch cycles recorded since last reset */
+  cycles: number;
 };

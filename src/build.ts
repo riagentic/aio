@@ -1,5 +1,14 @@
-// Build script — bundles App.tsx into dist/app.js (self-contained, React included)
-// Flags: --compile (binary), --electron (AppImage), --android (APK), --client (aio-client AppImage), --force (skip cache)
+/**
+ * @module
+ * Build toolchain — bundles, compiles and packages aio apps for all targets.
+ *
+ * Flags: `--compile` (binary), `--electron` (AppImage), `--android` (APK),
+ * `--client` (aio-client AppImage), `--force` (skip cache).
+ *
+ * ```ts
+ * import { build } from "@riagentic/aio/src/build"
+ * ```
+ */
 import { dirname, join, resolve } from "@std/path";
 import {
   copyDir,

@@ -267,15 +267,43 @@ export type DeltaResult = {
   kind: "skip" | "delta" | "full";
 };
 
+/** Check if array qualifies for identity-keyed flattening:
+ *  every element must be a non-null object with a string `id` property. */
+function _isIdentityArray(
+  arr: unknown[],
+): arr is Array<Record<string, unknown> & { id: string }> {
+  if (arr.length === 0) return false;
+  for (const el of arr) {
+    if (!el || typeof el !== "object" || Array.isArray(el)) return false;
+    if (typeof (el as Record<string, unknown>).id !== "string") return false;
+  }
+  return true;
+}
+
 /** Flatten one level: for object-valued top-level keys, use dot-notation (e.g. "mdview.scrollY").
- *  Primitive/array top-level values stay as-is. This gives v0.5 namespaced state fine-grained delta. */
-function flattenKeys(obj: Record<string, unknown>): Record<string, unknown> {
+ *  Arrays of objects with stable `id` fields are expanded to per-element keys (e.g. "fleet.members.$id:SOL_15m").
+ *  Primitive/array-without-id top-level values stay as-is. */
+export function flattenKeys(
+  obj: Record<string, unknown>,
+): Record<string, unknown> {
   const flat: Record<string, unknown> = {};
   for (const k of Object.keys(obj)) {
     const v = obj[k];
     if (v && typeof v === "object" && !Array.isArray(v)) {
       for (const sk of Object.keys(v as Record<string, unknown>)) {
-        flat[`${k}.${sk}`] = (v as Record<string, unknown>)[sk];
+        const sv = (v as Record<string, unknown>)[sk];
+        if (Array.isArray(sv)) {
+          if (_isIdentityArray(sv)) {
+            for (const el of sv) {
+              flat[`${k}.${sk}.$id:${el.id}`] = el;
+            }
+          } else {
+            // Non-identity arrays (including empty) — emit as atomic key
+            flat[`${k}.${sk}`] = sv;
+          }
+        } else {
+          flat[`${k}.${sk}`] = sv;
+        }
       }
     } else {
       flat[k] = v;
@@ -284,13 +312,15 @@ function flattenKeys(obj: Record<string, unknown>): Record<string, unknown> {
   return flat;
 }
 
-/** Unflatten dot-notation keys back into nested structure for the patch */
-function unflattenPatch(
+/** Unflatten dot-notation keys back into nested structure for the patch.
+ *  Recognizes $id: prefixed keys and groups them into $arr array patches. */
+export function unflattenPatch(
   changed: Record<string, unknown>,
   removed: string[],
 ): { $p: Record<string, unknown>; $d?: string[] } {
   const patch: Record<string, unknown> = {};
   const topDeletions: string[] = [];
+
   for (const [k, v] of Object.entries(changed)) {
     const dot = k.indexOf(".");
     if (dot === -1) {
@@ -298,24 +328,65 @@ function unflattenPatch(
       continue;
     }
     const parent = k.slice(0, dot);
-    const child = k.slice(dot + 1);
+    const rest = k.slice(dot + 1);
+
     if (!patch[parent] || typeof patch[parent] !== "object") patch[parent] = {};
-    (patch[parent] as Record<string, unknown>)[child] = v;
+    const parentObj = patch[parent] as Record<string, unknown>;
+
+    // Check for $id: at second level: "fleet.members.$id:SOL" → rest = "members.$id:SOL"
+    const dot2 = rest.indexOf(".");
+    if (dot2 !== -1) {
+      const child = rest.slice(0, dot2);
+      const idKey = rest.slice(dot2 + 1);
+      if (idKey.startsWith("$id:")) {
+        // Identity-keyed array element
+        if (!parentObj[child] || typeof parentObj[child] !== "object") {
+          parentObj[child] = { $arr: true } as Record<string, unknown>;
+        }
+        (parentObj[child] as Record<string, unknown>)[idKey] = v;
+        continue;
+      }
+    }
+
+    // Regular nested key (no $id:)
+    parentObj[rest] = v;
   }
+
   for (const k of removed) {
     const dot = k.indexOf(".");
     if (dot === -1) {
       topDeletions.push(k);
       continue;
     }
-    // Nested removal: "mdview.oldKey" → { mdview: { $d: ['oldKey'] } }
     const parent = k.slice(0, dot);
-    const child = k.slice(dot + 1);
+    const rest = k.slice(dot + 1);
+
     if (!patch[parent] || typeof patch[parent] !== "object") patch[parent] = {};
-    const p = patch[parent] as Record<string, unknown>;
+    const parentObj = patch[parent] as Record<string, unknown>;
+
+    // Check for $id: removal: "fleet.members.$id:DOGE" → rest = "members.$id:DOGE"
+    const dot2 = rest.indexOf(".");
+    if (dot2 !== -1) {
+      const child = rest.slice(0, dot2);
+      const idKey = rest.slice(dot2 + 1);
+      if (idKey.startsWith("$id:")) {
+        if (!parentObj[child] || typeof parentObj[child] !== "object") {
+          parentObj[child] = { $arr: true } as Record<string, unknown>;
+        }
+        const arrPatch = parentObj[child] as Record<string, unknown>;
+        if (!arrPatch.$rm) arrPatch.$rm = [];
+        (arrPatch.$rm as string[]).push(idKey.slice(4)); // strip "$id:" prefix
+        continue;
+      }
+    }
+
+    // Regular nested removal: "mdview.oldKey" → { mdview: { $d: ['oldKey'] } }
+    const p = parentObj;
+    const child = rest;
     if (!p.$d) p.$d = [];
     (p.$d as string[]).push(child);
   }
+
   const result: { $p: Record<string, unknown>; $d?: string[] } = { $p: patch };
   if (topDeletions.length) result.$d = topDeletions;
   return result;
@@ -386,6 +457,74 @@ export function _computeDelta(
   return { msg: JSON.stringify(uiState), newKeyJsons, kind: "full" };
 }
 
+/** Extract only subscribed paths from state. Paths use dot notation.
+ *  "counter.value" → { counter: { value: <val> } }
+ *  "market" → { market: <entire object> }
+ *  "*" → full shallow copy.
+ *  Pure function — no side effects. */
+export function _filterByPaths(
+  state: unknown,
+  paths: Set<string>,
+): Record<string, unknown> {
+  if (!state || typeof state !== "object" || Array.isArray(state)) return {};
+  const src = state as Record<string, unknown>;
+  const out: Record<string, unknown> = {};
+
+  for (const path of paths) {
+    if (path === "*") return { ...src };
+
+    const parts = path.split(".");
+    // Navigate source to get value at path
+    let value: unknown = src;
+    for (let i = 0; i < parts.length; i++) {
+      const isLast = i === parts.length - 1;
+      // Can only descend into a non-null object
+      if (
+        value === null || value === undefined || typeof value !== "object" ||
+        Array.isArray(value)
+      ) {
+        value = undefined;
+        break;
+      }
+      const rec = value as Record<string, unknown>;
+      const key = parts[i] as string;
+      if (!isLast && !(key in rec)) {
+        // Intermediate key missing — path does not exist
+        value = undefined;
+        break;
+      }
+      value = rec[key];
+    }
+    if (value === undefined) continue;
+
+    // Set value at same path in output (create intermediate objects as needed)
+    let target: Record<string, unknown> = out;
+    for (let i = 0; i < parts.length - 1; i++) {
+      const key = parts[i] as string;
+      if (!(key in target) || typeof target[key] !== "object") {
+        target[key] = {};
+      }
+      target = target[key] as Record<string, unknown>;
+    }
+    // If value is an object and target already has content at this key (from a
+    // more specific path), merge rather than overwrite
+    const lastKey = parts[parts.length - 1] as string;
+    const existing = target[lastKey];
+    if (
+      existing && typeof existing === "object" && !Array.isArray(existing) &&
+      value && typeof value === "object" && !Array.isArray(value)
+    ) {
+      target[lastKey] = {
+        ...(existing as Record<string, unknown>),
+        ...(value as Record<string, unknown>),
+      };
+    } else {
+      target[lastKey] = value;
+    }
+  }
+  return out;
+}
+
 /** Starts HTTP + WS server, returns broadcast handle for state pushes and shutdown */
 export function createServer(config: ServerConfig): ServerHandle {
   const { port, title, getUIState, dispatch, debug, prod = false, distDir } =
@@ -409,6 +548,7 @@ export function createServer(config: ServerConfig): ServerHandle {
   // Import graph validator state (dev mode only)
   let graphResult: GraphResult | null = null;
   let graphWasRed = false;
+  let _graphGeneration = 0; // prevents stale async validations from overwriting newer results
 
   // Dev startup validation — quick scan for obvious browser import issues
   if (!prod) {
@@ -529,6 +669,8 @@ export function createServer(config: ServerConfig): ServerHandle {
     bpMultiplier: number; // backpressure: sync interval multiplier (1, 2, or 4)
     bpConsecutiveLow: number; // backpressure: consecutive low-staleness pings
     bpLastSentAt: number; // backpressure: timestamp of last broadcast to this client
+    subscriptions: Set<string> | null; // null = subscribe-all (backward compat)
+    disconnected: boolean; // guards against double onDisconnect (onerror + onclose)
   };
   const connections = new Map<WebSocket, ClientMeta>();
   const _payloadStats = new Map<
@@ -613,6 +755,10 @@ export function createServer(config: ServerConfig): ServerHandle {
           let uiState: unknown;
           try {
             uiState = getUIState(meta.user);
+            // Filter to subscribed paths only
+            if (meta.subscriptions) {
+              uiState = _filterByPaths(uiState, meta.subscriptions);
+            }
           } catch (e) {
             debug(`broadcast: getUIState error — ${e}`);
             continue;
@@ -708,6 +854,8 @@ export function createServer(config: ServerConfig): ServerHandle {
       bpMultiplier: 1,
       bpConsecutiveLow: 0,
       bpLastSentAt: 0,
+      subscriptions: null,
+      disconnected: false,
     };
     socket.onerror = (e) => {
       debug(
@@ -724,7 +872,15 @@ export function createServer(config: ServerConfig): ServerHandle {
         clearTimeout(meta.typeDetectTimer);
         meta.typeDetectTimer = undefined;
       }
-      if (config.onDisconnect) {
+      // Vitals/stats cleanup (symmetric with onclose)
+      if (config.vitalsSystem) {
+        config.vitalsSystem.serverTransport.removeClient(meta.id);
+        config.vitalsSystem.pressureMonitor?.onClientDisconnect(meta.id);
+        _payloadStats.delete(meta.id);
+      }
+      // Guard against double onDisconnect (onerror is usually followed by onclose)
+      if (!meta.disconnected && config.onDisconnect) {
+        meta.disconnected = true;
         try {
           config.onDisconnect(meta.user);
         } catch (err) {
@@ -914,6 +1070,51 @@ export function createServer(config: ServerConfig): ServerHandle {
           }
           return;
         }
+        // Subscription update — client declares which state paths it reads
+        if (e.data.startsWith("__subs:")) {
+          try {
+            const paths = JSON.parse(e.data.slice(7));
+            if (Array.isArray(paths)) {
+              if (paths.includes("*")) {
+                meta.subscriptions = null;
+              } else {
+                meta.subscriptions = new Set(
+                  paths.filter((p: unknown) => typeof p === "string"),
+                );
+              }
+              // Reset delta cache — state shape changed for this client
+              meta.lastState = null;
+              meta.lastKeyJsons = {};
+              // Send filtered state immediately
+              try {
+                let uiState: unknown = getUIState(meta.user);
+                if (meta.subscriptions) {
+                  uiState = _filterByPaths(uiState, meta.subscriptions);
+                }
+                const msg = JSON.stringify(uiState);
+                socket.send(msg);
+                meta.lastState = uiState;
+                if (
+                  uiState && typeof uiState === "object" &&
+                  !Array.isArray(uiState)
+                ) {
+                  const flat = flattenKeys(
+                    uiState as Record<string, unknown>,
+                  );
+                  for (const k of Object.keys(flat)) {
+                    meta.lastKeyJsons[k] = JSON.stringify(flat[k]);
+                  }
+                }
+                meta.bpLastSentAt = Date.now();
+              } catch (err) {
+                debug(`ws: filtered state send error — ${err}`);
+              }
+            }
+          } catch {
+            debug("ws: bad __subs message");
+          }
+          return;
+        }
         const parsed = JSON.parse(e.data);
 
         if (!parsed || typeof parsed.type !== "string") {
@@ -951,12 +1152,15 @@ export function createServer(config: ServerConfig): ServerHandle {
           meta.user?.id ?? "anon"
         } (${connections.size} total)`,
       );
+      // Vitals cleanup — safe to call even if onerror already cleaned up (idempotent deletes)
       if (config.vitalsSystem) {
         config.vitalsSystem.serverTransport.removeClient(meta.id);
         config.vitalsSystem.pressureMonitor?.onClientDisconnect(meta.id);
         _payloadStats.delete(meta.id);
       }
-      if (config.onDisconnect) {
+      // Guard against double onDisconnect (onerror fires before onclose)
+      if (!meta.disconnected && config.onDisconnect) {
+        meta.disconnected = true;
         try {
           config.onDisconnect(meta.user);
         } catch (e) {
@@ -1611,16 +1815,14 @@ export function createServer(config: ServerConfig): ServerHandle {
   }
 
   // File watcher — debounced live reload on src/ changes
-  // CSS-only changes send __css (inject without page reload), mixed changes send __reload
+  // Only frontend/UI files trigger reload — backend .ts, .json, .js etc. are ignored
+  // because reloading for them races with process restart (am.ts), causing UI freezes.
+  // .tsx/.html/.svg → full reload, .css → style inject (no page reload)
   const RELOAD_EXT = new Set([
     ".ts",
     ".tsx",
-    ".js",
-    ".jsx",
-    ".mjs",
     ".css",
     ".html",
-    ".json",
     ".svg",
   ]);
   let reloadTimer: ReturnType<typeof setTimeout> | null = null;
@@ -1645,6 +1847,7 @@ export function createServer(config: ServerConfig): ServerHandle {
       (async () => {
         // Re-validate import graph on file change (dev mode only)
         if (!prod && fileExists(join(absBaseDir, "App.tsx"))) {
+          const gen = ++_graphGeneration;
           const timeout = new Promise<null>((r) =>
             setTimeout(() => r(null), 2000)
           );
@@ -1654,6 +1857,8 @@ export function createServer(config: ServerConfig): ServerHandle {
             transpile,
           );
           const result = await Promise.race([validation, timeout]);
+          // Stale validation — a newer file change already started a new validation
+          if (gen !== _graphGeneration) return;
           if (result === null) {
             debug("graph: ⚠ validation timed out (>2s) — serving app anyway");
             graphResult = {

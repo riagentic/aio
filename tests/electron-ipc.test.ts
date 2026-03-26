@@ -194,7 +194,16 @@ Deno.test({
   ipcMain.on('__aio:ready', () => {
     if (closing) return;
     if (sock) win.webContents.send('__aio:open');
-    if (lastState) win.webContents.send('__aio:msg', lastState);
+    // Always replay full state first (not a delta) so renderer gets complete state.
+    // Then replay latest delta on top if it's different (brings state up to date).
+    if (lastFullState) {
+      win.webContents.send('__aio:msg', lastFullState);
+      if (lastState && lastState !== lastFullState) {
+        win.webContents.send('__aio:msg', lastState);
+      }
+    } else if (lastState) {
+      win.webContents.send('__aio:msg', lastState);
+    }
   });`,
           `  win.webContents.on('did-finish-load', () => {
     setTimeout(() => {

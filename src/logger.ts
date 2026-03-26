@@ -73,15 +73,25 @@ export function getLogger(): AioLogger | null {
 /** Public log API — falls back to console when AioLogger is not active.
  *  Supports both `log.info('cat', 'msg')` and `log.info('msg')` (defaults to 'aio' category). */
 export interface Log {
+  /** Log at trace level — `log.trace('msg')` or `log.trace('category', 'msg', data?)`. */
   trace(msg: string, data?: Record<string, unknown>): void;
+  /** Log at trace level with explicit category. */
   trace(cat: string, msg: string, data?: Record<string, unknown>): void;
+  /** Log at debug level — `log.debug('msg')` or `log.debug('category', 'msg', data?)`. */
   debug(msg: string, data?: Record<string, unknown>): void;
+  /** Log at debug level with explicit category. */
   debug(cat: string, msg: string, data?: Record<string, unknown>): void;
+  /** Log at info level — `log.info('msg')` or `log.info('category', 'msg', data?)`. */
   info(msg: string, data?: Record<string, unknown>): void;
+  /** Log at info level with explicit category. */
   info(cat: string, msg: string, data?: Record<string, unknown>): void;
+  /** Log at warn level — `log.warn('msg')` or `log.warn('category', 'msg', data?)`. */
   warn(msg: string, data?: Record<string, unknown>): void;
+  /** Log at warn level with explicit category. */
   warn(cat: string, msg: string, data?: Record<string, unknown>): void;
+  /** Log at error level — `log.error('msg')` or `log.error('category', 'msg', data?)`. */
   error(msg: string, data?: Record<string, unknown>): void;
+  /** Log at error level with explicit category. */
   error(cat: string, msg: string, data?: Record<string, unknown>): void;
 }
 

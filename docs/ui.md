@@ -6,14 +6,19 @@ For the docs index, see [manual.md](manual.md). For the core API (`feature`,
 `useFeature`), see [core.md](core.md). For Electron & thin client, see
 [electron.md](electron.md).
 
-## `useAio<S>()` — full state hook
+## `useAio<S>()` — smart state hook (recommended)
 
-React hook for **root layout, routing, and cross-feature views** — full app
-state + untyped `send`. For feature components, use
-[`useFeature(ref)`](core.md#usefeatureref--react-hook-for-features) — scoped
-state, typed `send`, machine `status`, and selective re-renders.
+The **recommended default** for accessing app state. Returns a deep recursive
+Proxy that automatically tracks which state paths your component reads. Only
+subscribed paths trigger re-renders and delta updates from the server — zero
+waste, zero config.
 
-React hook — connects to the server via WebSocket, syncs state, provides `send`.
+For scoped **React re-render optimization** (e.g. isolating a heavy component to
+a single feature slice), see
+[`useFeature(ref)`](core.md#usefeatureref--react-hook-for-features) — a
+`useSyncExternalStore` selector that limits re-renders to one slice.
+
+Connects to the server via WebSocket, syncs state, provides `send`.
 
 ```tsx
 import { useAio } from "aio";
@@ -33,7 +38,9 @@ export default function App() {
 **Details:**
 
 - `state: S | null` — `null` until WebSocket connects and server sends initial
-  state
+  state. The returned object is a **Proxy** — property accesses are tracked
+  automatically and sent to the server as `__subs:["path1","path2",...]` so only
+  relevant deltas are broadcast back
 - `send(action)` — sends action to server via WebSocket. Actions sent before the
   initial connect are queued and flushed. Actions sent while disconnected are
   **dropped** — a "Reconnecting…" indicator tells the user why
@@ -88,6 +95,88 @@ export default function App() {
 `useLocal` is just a typed `useState` wrapper with a consistent API. Use it when
 state doesn't need to survive page reload or be shared across tabs.
 
+## Derived State & `memo` — preventing wasted renders
+
+AIO's `_preserveArrayRefs` preserves element-level object references in state
+arrays after delta patches (structural sharing). This enables `memo()` to skip
+re-renders for unchanged elements. But if your component **transforms state**
+before passing to child components, the transformation creates new container
+objects that defeat structural sharing.
+
+### The problem
+
+```tsx
+// BAD: buildGroups() creates new objects every render → all 160 rows re-render
+function FleetTable() {
+  const { state } = useFeature(fleet);
+  const groups = buildGroups(state.members); // new refs!
+  return groups.map((g) => <GroupRow key={g.id} group={g} />);
+}
+export default memo(FleetTable); // memo can't help — groups are always new
+```
+
+AIO preserved 145/160 member refs, but `buildGroups()` wrapped them in new group
+objects. `memo()` sees new refs → re-renders everything → UI freezes.
+
+### `useProjection(fn, deps)` — structural sharing for derived state
+
+```tsx
+import { memo, useFeature, useProjection } from "aio";
+
+function FleetTable() {
+  const { state } = useFeature(fleet);
+  // useProjection applies _preserveArrayRefs to the OUTPUT
+  const groups = useProjection(
+    () => buildGroups(state.members),
+    [state.members],
+  );
+  return groups.map((g) => <GroupRow key={g.id} group={g} />);
+}
+```
+
+`useProjection` works like `useMemo` but goes one level deeper: when the
+transform re-runs, it applies `_preserveArrayRefs` to the result. Unchanged
+elements keep their previous refs — `memo()` skips them.
+
+### `memo(Component)` — smarter default comparison
+
+```tsx
+import { memo } from "aio"; // NOT from "react"
+
+// aio's memo uses _shallowEqual per prop (one level deeper than React.memo's ===)
+export default memo(GroupRow);
+```
+
+|                                                  | `React.memo`              | `aio memo`               |
+| ------------------------------------------------ | ------------------------- | ------------------------ |
+| Default comparison                               | `===` per prop            | `_shallowEqual` per prop |
+| `{ id: 1, name: "A" }` vs `{ id: 1, name: "A" }` | re-render (different ref) | skip (same values)       |
+| Custom comparator                                | supported                 | supported (second arg)   |
+
+### Best practice: combine both
+
+```tsx
+import { memo, useFeature, useProjection } from "aio";
+
+function FleetTable() {
+  const { state } = useFeature(fleet);
+  const groups = useProjection(() => buildGroups(state.members), [
+    state.members,
+  ]);
+  return groups.map((g) => <GroupRow key={g.id} group={g} />);
+}
+
+// memo() from aio — structural comparison as safety net
+const GroupRow = memo(function GroupRow({ group }) {
+  return <tr>...</tr>;
+});
+```
+
+**Layer 1:** `useProjection` prevents new refs from being created. **Layer 2:**
+`memo` from aio prevents re-renders even if new refs slip through. **Layer 3:**
+aiol linter catches `React.memo` imports and missing `useProjection`. **Layer
+4:** Runtime hint detects the symptom if all else fails.
+
 ## `page(current, routes)`
 
 Renders the component matching a page key from state. Simple state-based routing
@@ -116,7 +205,8 @@ export default function App() {
 
 Returns `null` if no route matches. Page components call `useAio()` internally
 if they need state — since it's a singleton, each page component gets the same
-shared connection.
+shared connection. Each component's Proxy independently tracks only the paths it
+reads.
 
 ## URL-based routing
 
@@ -400,9 +490,11 @@ export default function App() {
 ## Bring Your Own Framework
 
 The React hooks (`useAio`, `useFeature`, `useLocal`) are thin wrappers over a
-framework-agnostic core. If you use Svelte, Vue, Solid, or anything else, use
-`client` directly — it exposes the same singleton WebSocket connection, state,
-and routing.
+framework-agnostic core. `useAio` adds automatic Proxy-based path tracking;
+`useFeature` adds scoped `useSyncExternalStore` selectors for React re-render
+optimization. If you use Svelte, Vue, Solid, or anything else, use `client`
+directly — it exposes the same singleton WebSocket connection, state, and
+routing.
 
 ```ts
 import { client } from "aio";
@@ -531,7 +623,8 @@ browser side, `_applyPatch` shallow-merges patches into existing state and uses
 `_shallowEqual` to check each slice. If a slice didn't actually change, **the
 previous object reference is reused**. This means:
 
-- `useFeature(ref)` selectors return the same reference for unchanged slices
+- `useFeature(ref)` selectors (a React re-render optimization) return the same
+  reference for unchanged slices
 - `React.memo` comparators work correctly — unchanged props keep identity
 - You do **not** need extra `useMemo` wrappers around feature state
 
@@ -578,8 +671,6 @@ actionable feedback:
   for custom monitoring
 - **Listener high-water mark** — peak listener count is tracked and reported
   during teardown. A sudden spike suggests a subscription leak
-- **`useAio()` warning** — every call-site logs a one-time warning reminding you
-  to use `useFeature(ref)` for scoped re-renders
 
 Check browser console for `[aio:vitals]` messages — they surface real issues
 before users notice.
@@ -662,9 +753,10 @@ export function Header({ title }: { title: string }) {
 **Guidelines:**
 
 - `useAio()` is a singleton — call it from any component that needs state. No
-  prop-drilling needed
+  prop-drilling needed. Each call-site's Proxy tracks only the paths that
+  component actually reads
 - Sub-components can either take props (pure view) or call `useAio()` directly
-  (connected)
+  (connected) — the Proxy ensures only accessed paths trigger updates
 - Use `useLocal()` for ephemeral UI state (editing flags, input focus,
   dropdowns) — not app data
 

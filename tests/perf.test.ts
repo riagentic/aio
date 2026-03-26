@@ -366,3 +366,60 @@ Deno.test("perf: effectTimeout does not fire when effect completes in time", asy
 
   assertEquals(errors.length, 0);
 });
+
+// ── perfLog callback wiring ──────────────────────────────────────────
+
+Deno.test("perf: perfLog callback fires on budget violation", () => {
+  const logged: {
+    source: string;
+    type: string;
+    duration: number;
+    budget: number;
+  }[] = [];
+
+  const deps = createTestDeps({
+    reduce: () => {
+      const start = performance.now();
+      while (performance.now() - start < 150) {}
+      return { state: { count: 1 }, effects: [] };
+    },
+    perfCheck: "on",
+    perfBudget: { reduce: 100 },
+    perfLog: (source, type, duration, budget) => {
+      logged.push({ source, type, duration, budget });
+    },
+  });
+
+  const dispatch = createDispatch(deps);
+  dispatch({ type: "Inc" });
+
+  assertEquals(logged.length, 1);
+  assertEquals(logged[0]!.source, "reduce");
+  assertEquals(logged[0]!.type, "Inc");
+  assertEquals(logged[0]!.budget, 100);
+  assertEquals(logged[0]!.duration > 100, true);
+});
+
+Deno.test("perf: perfLog fires even when action type is missing", () => {
+  const logged: { source: string; type: string }[] = [];
+
+  const deps = createTestDeps({
+    reduce: () => {
+      const start = performance.now();
+      while (performance.now() - start < 150) {}
+      return { state: { count: 1 }, effects: [] };
+    },
+    perfCheck: "on",
+    perfBudget: { reduce: 100 },
+    perfLog: (source, type) => {
+      logged.push({ source, type });
+    },
+  });
+
+  const dispatch = createDispatch(deps);
+  // deno-lint-ignore no-explicit-any
+  dispatch({ payload: {} } as any); // no type field
+
+  assertEquals(logged.length, 1);
+  assertEquals(logged[0]!.type, "unknown");
+});
