@@ -139,6 +139,124 @@ to disable.
 
 ---
 
+## v1.0.0-alpha3 → v1.0.0-alpha4
+
+### Breaking changes
+
+**`effectTimeout` behavior change — warn → hard-cancel**
+
+```ts
+// BEFORE (alpha3): timed-out effects logged a warning but continued running
+// The effect could still resolve/reject after timeout — double-report possible
+
+// AFTER (alpha4): timed-out effects are abandoned
+// The framework considers the effect failed after timeout
+// Late rejections are suppressed (no double-report)
+// Timed-out effects count toward circuit breaker threshold
+```
+
+If you rely on effects completing after timeout (e.g., fire-and-forget with a
+generous timeout), this is a behavior change. Effects that exceed
+`effectTimeoutMs` are now killed and counted as failures.
+
+### Non-breaking additions
+
+- **Vital signs** — three probes (loop, render, transport) + hint engine for
+  detecting and diagnosing UI freezes. Enabled by default. Kill switch:
+  `vitals: false`. See [vitals.md](vitals.md)
+- **DiagReporter** — structured console diagnostics with `onDiagnostic` hook for
+  telemetry. See [diagnostics.md](diagnostics.md)
+- **PressureMonitor** — payload size and broadcast rate warnings. Kill switch:
+  `vitals: { pressure: false }`
+- **Subscription stability (AIO-3/4)** — `useAio()` no longer re-subscribes on
+  every render. 300ms grace period prevents teardown during page switches
+- **Diagnostic bus & health overlay** — unified event channel for 18
+  previously-silent failure points, visible via green/yellow/red dot overlay
+- **Flow cross-feature access** — `ctx.getFullState()` and `ctx.when(predicate)`
+  in generators. See [generators.md](generators.md)
+- **Reduce phase breakdown** — `PerfMetric.breakdown` field with phase timing
+- **Graph validator** — validates feature dependency graph at startup
+- **`structuredClone` dispatch fix** — reports `EFFECT_ERROR` instead of
+  silently continuing with revoked Immer drafts
+
+### Upgrade steps
+
+1. Update `deno.json`: `"aio": "jsr:@riagentic/aio@1.0.0-alpha4"`
+2. Review any code that depends on effects completing after timeout — they are
+   now hard-cancelled
+3. Vitals and diagnostics are on by default — add `vitals: false` to `aio.run()`
+   if you need to disable them
+4. Run `deno install && deno task dev`
+
+---
+
+## v1.0.0-alpha5 → v1.0.0-alpha6
+
+### Breaking changes
+
+None. This release is fully backward compatible with alpha5.
+
+### Non-breaking additions
+
+- **AIR native renderer (~8KB)** — signal-based VDOM engine with JSX, keyed
+  reconciliation, auto-memo, SSR/hydration, lifecycle, context, portals,
+  suspense, forms (`useForm`), animation (`useSpring`, `useTransition`), virtual
+  scrolling (`useVirtualList`), devtools. See [renderer.md](renderer.md)
+- **Adapter architecture** — `state-core.ts` as framework-agnostic foundation.
+  React and AIR adapters are thin consumers. New export paths: `aio/state-core`,
+  `aio/adapters/react`, `aio/adapters/air`, `aio/jsx-runtime`. See
+  [api.md](api.md)
+- **Delta protocol hardening (AIO-26..34)** — Electron replay fix, UDS
+  per-client subscriptions, `$f` filtered merge protocol, `unflattenPatch`
+  empty→identity array fix, periodic resync every ~5s, update-after-send,
+  ref-equality removal. See [changelog.md](changelog.md)
+
+### Upgrade steps
+
+1. Update `deno.json`: `"aio": "jsr:@riagentic/aio@1.0.0-alpha6"`
+2. Update task commands:
+   `"am": "deno run -A jsr:@riagentic/aio@1.0.0-alpha6/src/am"`
+3. To use AIR renderer instead of React: set `jsxImportSource` to
+   `@riagentic/aio` in `compilerOptions` and import from `aio/adapters/air`.
+   React apps need no changes — existing imports continue to work.
+4. Run `deno install && deno task dev`
+
+---
+
+## v1.0.0-alpha4 → v1.0.0-alpha5
+
+### Breaking changes
+
+None. This release is fully backward compatible with alpha4.
+
+### Non-breaking additions
+
+- **Identity-keyed array delta compression (AIO-12)** — arrays with `id` fields
+  are sent as per-element patches (`$arr`/`$id:`/`$rm` wire format). Typical
+  savings: 120KB → 7.5KB for 160-element arrays. Automatic — no code changes
+  needed. See [traffic.md](traffic.md)
+- **4-layer wasted render prevention (AIO-11)** — `useProjection(fn, deps)` for
+  derived state with structural sharing, `memo(Component)` with per-prop
+  `_shallowEqual`, `aiol` lint rule, runtime dev warning. See [ui.md](ui.md)
+- **Deep proxy-tracked subscriptions** — `useAio()` auto-tracks accessed state
+  paths; server filters broadcasts to only include paths the client reads
+- **UDS ghost socket elimination (AIO-24/25)** — no more ghost sockets after
+  client disconnect. IPC keepalive ping every 60s for passive viewing. See
+  [electron.md](electron.md)
+- **10 framework reliability fixes (AIO-14..23)** — dispatch, flow, server, and
+  electron edge cases
+- **JSR 100% documentation score** — JSDoc on all public exports, all
+  transitively-referenced types re-exported
+
+### Upgrade steps
+
+1. Update `deno.json`: `"aio": "jsr:@riagentic/aio@1.0.0-alpha5"`
+2. Update task commands:
+   `"am": "deno run -A jsr:@riagentic/aio@1.0.0-alpha5/src/am"`
+3. Consider adopting `useProjection()` + `memo()` for list-heavy UIs —
+   significant render reduction. See [ui.md](ui.md)
+4. Run `deno install && deno task dev`
+
 ---
 
 ## v0.9 → v1.0.0-alpha

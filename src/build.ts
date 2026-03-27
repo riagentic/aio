@@ -187,6 +187,9 @@ async function withDevExcluded(
 
 // App name: --name= flag > deno.json "title" field > directory name
 const mainConfig = JSON.parse(await Deno.readTextFile(join(root, "deno.json")));
+const rendererMode: "react" | "aio" = mainConfig.ui?.renderer === "aio"
+  ? "aio"
+  : "react";
 const appTitle = mainConfig.title as string | undefined;
 const configEntry = (mainConfig.entry as string | undefined) ?? "src/app.ts";
 const defaultName = appTitle
@@ -275,15 +278,28 @@ if (!doCli && !doHeadless && !doClient && !(doAndroid && doRemote)) {
     // Remote (JSR): 'aio' handled by HTTP plugin; local: mapped to framework file path
     const fwEntry = doAndroid ? "standalone.ts" : "browser.ts";
     const aioEntry = _IS_REMOTE ? null : join(frameworkSrcDir, fwEntry);
+    const reactImports = rendererMode === "aio"
+      ? {
+        // AIO renderer — jsx-runtime for automatic JSX transform, no React/ReactDOM
+        ...(frameworkSrcDir
+          ? {
+            "aio/jsx-runtime": join(frameworkSrcDir, "jsx-runtime.ts"),
+            "aio/renderer": join(frameworkSrcDir, "aio-renderer.ts"),
+          }
+          : {}),
+      }
+      : {
+        "react": "npm:react@^18",
+        "react-dom": "npm:react-dom@^18",
+        "react-dom/client": "npm:react-dom@^18/client",
+        "react/jsx-runtime": "npm:react@^18/jsx-runtime",
+      };
     const buildConfig = {
       compilerOptions: mainConfig.compilerOptions,
       imports: {
         ...mainConfig.imports,
         ...(aioEntry ? { "aio": aioEntry } : {}),
-        "react": "npm:react@^18",
-        "react-dom": "npm:react-dom@^18",
-        "react-dom/client": "npm:react-dom@^18/client",
-        "react/jsx-runtime": "npm:react@^18/jsx-runtime",
+        ...reactImports,
       },
     };
     const buildConfigPath = join(root, "_build.json");
@@ -300,7 +316,13 @@ if (!doCli && !doHeadless && !doClient && !(doAndroid && doRemote)) {
       () => true,
       () => false,
     );
-    const entryCode = doAndroid
+    const entryCode = rendererMode === "aio"
+      ? `\
+import { mount as _mount } from 'aio/renderer'
+import App from './src/App.tsx'
+export function mount(el) { _mount(el, App) }
+`
+      : doAndroid
       ? hasLegacyState
         ? `\
 import { createElement } from 'react'
@@ -345,13 +367,19 @@ export function mount(el) { createRoot(el).render(createElement(App)) }
       // Pin React to project root's copy — prevents duplicate instances when
       // dep/aio is symlinked (esbuild follows realpath → finds a different node_modules)
       const reactAlias: Record<string, string> = {};
-      for (const pkg of ["react", "react-dom", "react/jsx-runtime"]) {
-        try {
-          const p = join(root, "node_modules", ...pkg.split("/"));
-          await Deno.stat(p);
-          reactAlias[pkg] = p;
-        } catch { /* not installed — skip */ }
+      if (rendererMode !== "aio") {
+        for (const pkg of ["react", "react-dom", "react/jsx-runtime"]) {
+          try {
+            const p = join(root, "node_modules", ...pkg.split("/"));
+            await Deno.stat(p);
+            reactAlias[pkg] = p;
+          } catch { /* not installed — skip */ }
+        }
       }
+
+      const jsxConfig = rendererMode === "aio"
+        ? { jsx: "automatic" as const, jsxImportSource: "aio" }
+        : { jsx: "automatic" as const, jsxImportSource: "react" };
 
       const result = await esbuild.build({
         entryPoints: [buildEntryPath],
@@ -360,8 +388,7 @@ export function mount(el) { createRoot(el).render(createElement(App)) }
         platform: "browser",
         target: "esnext",
         outfile: out,
-        jsx: "automatic",
-        jsxImportSource: "react",
+        ...jsxConfig,
         alias: { ...esbuildAlias, ...reactAlias },
         plugins: _IS_REMOTE
           ? [aioBrowserPlugin(), _httpPlugin]

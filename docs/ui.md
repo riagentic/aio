@@ -489,54 +489,61 @@ export default function App() {
 
 ## Bring Your Own Framework
 
-The React hooks (`useAio`, `useFeature`, `useLocal`) are thin wrappers over a
-framework-agnostic core. `useAio` adds automatic Proxy-based path tracking;
-`useFeature` adds scoped `useSyncExternalStore` selectors for React re-render
-optimization. If you use Svelte, Vue, Solid, or anything else, use `client`
-directly — it exposes the same singleton WebSocket connection, state, and
-routing.
+AIO's hooks are thin wrappers over a framework-agnostic **state-core** module.
+If you use Svelte, Vue, Solid, or anything else, import from `state-core`
+directly and build your own adapter.
 
 ```ts
-import { client } from "aio";
+import {
+  _resolveWithFallback,
+  _trackingProxy,
+  createSendProxy,
+  type FeatureRef,
+  flushOfflineQueue,
+  getConnectedSignal,
+  getFeatureSignal,
+  getStateSignal,
+  send,
+  setTransport,
+  trackPath,
+} from "@riagentic/aio/state-core";
 
-// Subscribe to state changes — returns unsubscribe
-const unsub = client.subscribe((state) => {
-  // state is the full app state object (same shape as useAio's state)
-  console.log("counter:", state.counter);
+// Subscribe to a feature's state signal
+const sig = getFeatureSignal("counter");
+const unsub = sig.subscribe(() => {
+  console.log("counter:", sig.peek());
 });
 
 // Send actions
-client.send({ type: "counter:increment", payload: { by: 1 } });
+send({ type: "counter:increment", payload: { by: 1 } });
 
 // Read current state synchronously
-client.getState(); // full state
-client.getFeatureState("counter"); // single feature slice
-
-// Routing
-client.route.subscribe(() => {/* URL changed */});
-client.route.getPath(); // current pathname
-client.route.getSearch(); // URLSearchParams
-client.route.navigate("/users/42");
-client.route.navigate(-1); // browser back
+sig.peek(); // feature state snapshot
+getStateSignal().peek(); // full app state
 ```
 
-**Lifecycle:** The WebSocket connects on the first `client.subscribe()` call and
-disconnects when the last subscriber unsubscribes (after a 300ms grace period) —
-same behavior as `useAio`. React hooks and `client` share the same connection.
+**Transport:** Standalone adapters need a transport connected via
+`setTransport({ send, close })`. After connecting, call `flushOfflineQueue()` to
+deliver any actions queued before the transport was ready.
+
+For the full adapter architecture, custom adapter guide, and state-core API
+reference, see
+[renderer.md — Adapter Architecture](renderer.md#adapter-architecture).
 
 ### Svelte 5 example (runes)
 
 ```svelte
 <script>
-  import { client } from 'aio'
+  import { getStateSignal } from '@riagentic/aio/state-core'
 
-  let state = $state(client.getState())
+  const sig = getStateSignal()
+  let state = $state(sig.peek())
   $effect(() => {
-    return client.subscribe(s => { state = s })
+    return sig.subscribe(() => { state = sig.peek() })
   })
 </script>
 
-<button onclick={() => client.send({ type: 'counter:increment', payload: {} })}>
+<button onclick={() => send({ type: 'counter:increment', payload: {} })}>
   Count: {state?.counter?.count ?? '...'}
 </button>
 ```
@@ -545,20 +552,21 @@ same behavior as `useAio`. React hooks and `client` share the same connection.
 
 ```ts
 import { onUnmounted, ref } from "vue";
-import { client } from "aio";
+import { getStateSignal, send } from "@riagentic/aio/state-core";
 
 export function useAio() {
-  const state = ref(client.getState());
-  const unsub = client.subscribe((s) => {
-    state.value = s;
+  const sig = getStateSignal();
+  const state = ref(sig.peek());
+  const unsub = sig.subscribe(() => {
+    state.value = sig.peek();
   });
   onUnmounted(unsub);
-  return { state, send: client.send };
+  return { state, send };
 }
 ```
 
-> **Note:** Non-React adapters are community-maintained. The `client` API is
-> stable and supported — adapters built on it are your responsibility.
+> **Note:** Non-React/AIR adapters are community-maintained. The `state-core`
+> API is stable and supported — adapters built on it are your responsibility.
 
 ## UI state filtering
 

@@ -1,9 +1,13 @@
 {
   "name": "@riagentic/aio",
-  "version": "1.0.0-alpha5",
+  "version": "1.0.0-alpha6",
   "appId": "aio",
   "exports": {
     ".": "./mod.ts",
+    "./jsx-runtime": "./src/jsx-runtime.ts",
+    "./adapters/react": "./src/adapters/react.ts",
+    "./adapters/air": "./src/adapters/air.ts",
+    "./state-core": "./src/state-core.ts",
     "./src/build": "./src/build.ts",
     "./src/am": "./src/am.ts",
     "./aiol": "./aiol/mod.ts"
@@ -41,7 +45,8 @@
     "esbuild": "npm:esbuild@^0.24",
     "immer": "npm:immer@^10",
     "@std/path": "jsr:@std/path@^1",
-    "@std/assert": "jsr:@std/assert@^1"
+    "@std/assert": "jsr:@std/assert@^1",
+    "happy-dom": "npm:happy-dom@^17"
   },
   "fmt": {
     "exclude": ["node_modules/", "coverage/", "dist/", "android-template/"]

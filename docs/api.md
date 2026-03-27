@@ -1,6 +1,18 @@
 # API Reference
 
-All exports are one import: `import { feature, call, aio } from 'aio'`
+Main import: `import { feature, call, aio } from 'aio'`
+
+Additional export paths for framework adapters and advanced use:
+
+| Path                 | Import                                                                 | Use                                                         |
+| -------------------- | ---------------------------------------------------------------------- | ----------------------------------------------------------- |
+| `aio/state-core`     | `import { getFeatureSignal, setTransport, ... } from 'aio/state-core'` | Framework-agnostic state signals, transport, tracking proxy |
+| `aio/adapters/react` | `import { useFeature, useAio, useLocal } from 'aio/adapters/react'`    | React hooks (re-exported from main `aio` for convenience)   |
+| `aio/adapters/air`   | `import { useFeature, useAio } from 'aio/adapters/air'`                | AIR renderer hooks — signal-based, no React dependency      |
+| `aio/jsx-runtime`    | JSX transform target                                                   | AIR JSX runtime — set `jsxImportSource` in tsconfig         |
+
+> **Most apps only need the main `'aio'` import.** The sub-paths exist for
+> custom framework adapters, tree-shaking, or using AIR without React.
 
 ---
 

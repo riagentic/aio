@@ -455,19 +455,22 @@ app.on('ready', () => {
   // Track page readiness (data events need this to decide whether to forward or buffer)
   win.webContents.on('did-finish-load', () => { pageReady = true; });
 
-  // Renderer signals it has registered IPC listeners — replay buffered state now
+  // Renderer signals it has registered IPC listeners — request fresh state from server
   ipcMain.on('__aio:ready', () => {
     if (closing) return;
-    if (sock) win.webContents.send('__aio:open');
-    // Always replay full state first (not a delta) so renderer gets complete state.
-    // Then replay latest delta on top if it's different (brings state up to date).
+    if (sock) {
+      win.webContents.send('__aio:open');
+      // Request fresh full state from server via subscribe-all.
+      // This replaces relying on lastFullState which may be stale (captured on
+      // initial UDS connect before async feature initialization completed, and
+      // never updated because all subsequent states are $f-tagged or $p deltas).
+      // The server responds with current complete state — no $f because * = unfiltered.
+      sock.write('__subs:["*"]\\n');
+    }
+    // Also replay lastFullState as immediate fallback (may be stale but prevents
+    // blank screen while waiting for server response over UDS — <1ms latency)
     if (lastFullState) {
       win.webContents.send('__aio:msg', lastFullState);
-      if (lastState && lastState !== lastFullState) {
-        win.webContents.send('__aio:msg', lastState);
-      }
-    } else if (lastState) {
-      win.webContents.send('__aio:msg', lastState);
     }
   });
 
@@ -477,6 +480,7 @@ app.on('ready', () => {
     sock.on('connect', () => {
       retry = 0;
       lastFullState = null; // reset on reconnect — server sends fresh full state
+      lastState = null;
       if (!closing && pageReady) win.webContents.send('__aio:open');
     });
     sock.on('data', (chunk) => {
@@ -485,9 +489,13 @@ app.on('ready', () => {
       buf = lines.pop();
       for (const line of lines) {
         if (!line || closing) continue;
-        lastState = line;
-        // Track full state separately — non-delta messages (no "$p" key)
-        if (line.indexOf('"$p"') === -1) lastFullState = line;
+        // Only track JSON state messages for replay (skip control messages: __reload, __css, __boot:, etc.)
+        if (line[0] === '{') {
+          lastState = line;
+          // Track full state separately — non-delta (no "$p") and non-filtered (no "$f")
+          // Filtered responses ($f:1) are subscription subsets — must not overwrite full state
+          if (line.indexOf('"$p"') === -1 && line.indexOf('"$f"') === -1) lastFullState = line;
+        }
         if (pageReady) win.webContents.send('__aio:msg', line);
       }
     });

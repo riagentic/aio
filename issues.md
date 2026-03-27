@@ -178,3 +178,239 @@ Debug log emitted on broadcast write failure. UDS backpressure not needed —
 localhost throughput (~1GB/s) provides ~6000x headroom over current load
 (~150KB/s post AIO-12), and the write-failure path already handles the
 catastrophic case.
+
+---
+
+## ~~AIO-26: Electron first render — array fields arrive as `undefined`~~ ✅ RESOLVED
+
+**Fixed:** Root cause was delta mismatch in electron.ts `__aio:ready` replay.
+The handler sent `lastFullState` (self-consistent) then `lastState` (the latest
+delta). But `lastState` was a delta computed against an intermediate state the
+renderer never received — applying it on top of `lastFullState` skipped
+intermediate deltas, producing corrupt state with missing array fields.
+Suspected path #1 confirmed; paths #2 and #3 ruled out (subscription filtering
+via `__subs:` doesn't even reach the UDS handler — separate issue AIO-27).
+
+Three-part fix: (1) `__aio:ready` handler now only replays `lastFullState` —
+never sends `lastState` delta alongside it. Server's next broadcast tick brings
+the renderer up to date. (2) Removed `else if (lastState)` fallback that sent a
+stale delta with no base (browser would drop it anyway). (3) Reset
+`lastState = null` on UDS reconnect alongside `lastFullState` to prevent stale
+state leaking across connections.
+
+---
+
+## ~~AIO-27: UDS reader silently drops `__subs:` messages — subscription filtering broken for Electron~~ ✅ RESOLVED
+
+**Fixed:** Four-part fix: (1) Added `__subs:` prefix check in UDS read loop
+(`handleUDSConn`) — parses subscription paths, stores per-client, sends filtered
+state immediately (mirrors WS handler in `server.ts:1074-1116`). (2) Extended
+`UDSClient` with `subscriptions`, `lastState`, `lastKeyJsons` for per-client
+delta tracking. (3) Added `broadcastState(force?)` to `UDSHandle` — iterates
+clients, applies `_filterByPaths` per subscription, computes per-client delta
+via `_computeDelta`. (4) Removed single-delta state from `aio.ts`
+(`udsLastState`/`udsLastKeyJsons`) — delta tracking now lives per-client inside
+the UDS module, matching the WS architecture.
+
+---
+
+## ~~AIO-28: UDS subscription race — `_accessedPaths.clear()` + deferred render causes empty subs~~ ✅ RESOLVED
+
+**Fixed:** Two-part defense-in-depth: (1) `_cancelSubsTimer()` called after
+every `_accessedPaths.clear()` in both IPC and WS full-state handlers — pending
+timer can't fire on stale empty paths. (2) Guard in `_scheduleSyncSubs`: if
+`_accessedPaths.size === 0`, the timer callback returns early without sending
+empty subscriptions. Together, these prevent the race where a full-state arrival
+clears paths while a 16ms sub timer is pending.
+
+---
+
+## ~~AIO-29: Subscription filtering delivers persistently broken state to Electron UI~~ ✅ RESOLVED
+
+**Fixed:** Root cause was protocol conflation — filtered subscription responses
+(no `$p` key) were indistinguishable from initial full state. Browser replaced
+`_state` with filtered subset, Electron bridge overwrote `lastFullState` with
+filtered data. On reload, the filtered state was replayed as "full state",
+causing missing features.
+
+Protocol-level fix — `$f` marker: (1) Server adds `$f:1` to any non-delta
+message sent to a client with active subscriptions (both WS and UDS, both
+`__subs:` immediate responses and broadcast full states). (2) Browser merges
+`$f` messages into existing `_state` instead of replacing — preserves
+unsubscribed features. Does NOT clear `_accessedPaths`. (3) Electron bridge
+skips `$f` messages when updating `lastFullState` — only true full states are
+cached for replay. Three message types now explicit: `{data}` = full state
+(replace), `{$p:...}` = delta (patch), `{$f:1, data}` = filtered (merge). 5 new
+tests in aio29-filtered-marker.test.ts.
+
+---
+
+## ~~AIO-30: Control messages corrupt Electron state cache + shallow $f merge loses sub-keys~~ ✅ RESOLVED
+
+**Fixed:** Two bugs found and fixed:
+
+(1) **Control message corruption (CRITICAL)**: Electron bridge `sock.on('data')`
+updated `lastFullState` for ALL lines including `__reload`, `__css`, `__boot:`.
+Hot reload sent `"__reload"` → `lastFullState = "__reload"` → page reload →
+`__aio:ready` replayed `"__reload"` → browser reloaded again → **infinite
+loop**. Fix: Only track JSON lines (`line[0] === '{'`) for
+`lastState`/`lastFullState`.
+
+(2) **Shallow merge wipes sub-keys**: `$f` merge was `{...prev, ...data}` — one
+level deep. If filtered response had `ratelimit: {providers: [...]}` (no stats),
+the merge replaced entire `ratelimit` object, losing `stats`. Fix: Two-level
+deep merge preserves feature sub-keys not in the filtered update.
+
+---
+
+## ~~AIO-31: `unflattenPatch` creates conflicting identity patch + deletion — empty→non-empty array transition deletes key from state (CRITICAL)~~ ✅ RESOLVED
+
+**Crash:** `Cannot read properties of undefined (reading 'reduce')`, also
+`.length` and `.toFixed()` at different times after app start. Reload
+temporarily fixes it.
+
+**Root cause:** When an identity-keyed array transitions from `[]` to
+`[{id: ...}]`, `_computeDelta` correctly identifies the flat-key shape change:
+
+- Old flat keys (empty array, AIO-16 atomic): `feature.array` = `[]`
+- New flat keys (identity-keyed, AIO-12): `feature.array.$id:a`,
+  `feature.array.$id:b`
+
+This produces: changed = `{feature.array.$id:a, feature.array.$id:b}`, removed =
+`["feature.array"]`. Both are correct individually.
+
+`unflattenPatch` creates a **self-contradicting patch**:
+
+```json
+{ "$p": { "feature": {
+    "array": { "$arr": true, "$id:a": {...}, "$id:b": {...} },
+    "$d": ["array"]
+}}}
+```
+
+The identity entries (line 341-347) create
+`patch.feature.array = { $arr: true, ... }`. The removal (line 383-387) adds
+`"array"` to `patch.feature.$d`.
+
+`_applyPatch` (browser.ts) processes them in order:
+
+1. Line 291-298: `merged["array"] = _applyArrPatch(...)` → correct array created
+   ✓
+2. Line 310-314: `delete merged["array"]` → **immediately deleted** ✗
+
+Result: `state.feature.array = undefined`. Any `.reduce()`, `.length`,
+`.toFixed()` on that array or its elements crashes.
+
+**Affected arrays in this app (all start as `[]`, all elements have
+`id: string`):**
+
+- `ratelimit.providers` — populated at ~2s (ratelimit-tick schedule)
+- `fleet.members` — populated at fleet init (~3-5s)
+- `core.providers` — populated at core refresh
+- `health.checks` — populated at first health check
+- `bybitFleet.members` — populated at bybit fleet init
+
+**Why Reload fixes it:** Reload → `__aio:ready` → `__subs:["*"]` → fresh full
+state (replacement, no delta patching). By then all arrays are non-empty, no
+more empty→non-empty transitions.
+
+**Only affects delta path:** Full state replacement (`_state = data`) and `$f`
+merge (`_deepMergeFiltered`) are not affected. Bug activates when subscription
+filtering is active (specific path subscriptions, not `*`) and `_computeDelta`
+returns a delta (not full) containing the key-shape transition.
+
+**Introduced by:** AIO-12 (identity-keyed arrays) + AIO-16 (empty arrays as
+atomic keys). Neither considered the flat-key shape transition between atomic
+and identity representations.
+
+**Fix location:** `unflattenPatch` in `server.ts` (line 355-388).
+
+**Proposed fix — suppress `$d` deletion when identity patch exists for same
+key:**
+
+```typescript
+// In the removed-key loop, before adding to $d:
+// Check if same key already has an identity patch ($arr)
+if (
+  parentObj[child] && typeof parentObj[child] === "object" &&
+  !Array.isArray(parentObj[child]) &&
+  (parentObj[child] as Record<string, unknown>).$arr === true
+) {
+  continue; // identity patch supersedes atomic removal
+}
+```
+
+This ensures that when `array` transitions from atomic (`[]`) to identity-keyed
+(`[{id:...}]`), the `$d` deletion is suppressed because the identity patch
+already replaces the old value.
+
+**Also need reverse guard:** When array transitions from identity-keyed back to
+empty (`[{id:...}]` → `[]`), the `$id:` removals go through the `$rm` path (line
+372-380), not `$d`. This direction is already safe. But the `$arr` key itself
+(if present in old flat keys) would be a non-`$id:` removal → added to `$d`.
+Should be harmless since `$arr` is not a real state key, but worth verifying.
+
+**Fixed:** Applied the proposed fix — `unflattenPatch` now checks if the target
+key already has a `$arr` identity patch before adding it to `$d`. Identity patch
+supersedes atomic removal. Also fixed error boundary death spiral (AIO-32):
+error boundary now subscribes to `_subscribe` to prevent 300ms teardown and
+auto-recover on state change. 2 new tests in delta.test.ts, 5 in
+aio32-error-boundary.test.ts.
+
+---
+
+## ~~AIO-33: UDS delivers stale snapshot — UI shows ENTERING while reducer has idle~~ ✅ RESOLVED
+
+**Confirmed:** 2026-03-26. Reducer state verified via `deno task am state`: all
+3 members have `phase=idle`, `lastBar=20:00`, bars flowing normally. UI renders
+`ENTERING` — data is not reaching React side correctly.
+
+**Root cause:** Delta protocol had no self-healing mechanism. Once
+`lastKeyJsons` on the server advanced past what the client actually received
+(due to any transient message loss, async write timing, or Electron bridge relay
+gap), the server permanently believed the client had data it never received.
+Every subsequent broadcast computed no diff for those keys — the desync was
+permanent until app restart.
+
+Two bugs fixed:
+
+(1) **`lastKeyJsons` updated BEFORE send** — `broadcastState` (both WS and UDS)
+updated `client.lastKeyJsons` before calling `ws.send()` / `sendTo()`. If the
+send failed (WebSocket throw, UDS async write rejection), the server's key cache
+advanced but the client never received the data. Subsequent broadcasts would
+never re-detect the change. Fix: update `lastState` and `lastKeyJsons` AFTER
+successful send. On "skip" (no change), update immediately (no send needed).
+
+(2) **No periodic resync** — the delta protocol had zero recovery mechanism. A
+single lost message caused permanent staleness for affected keys. Fix: added
+`broadcastCount` per client. Every 100 broadcasts (~5s at 50ms sync interval),
+`lastState` and `lastKeyJsons` are reset to force a full state send. This
+guarantees any delta desync self-corrects within ~5 seconds.
+
+**Tests:** 2 new tests in delta.test.ts — verifies forced resync recovery and
+retry-on-failed-send behavior.
+
+---
+
+## ~~AIO-34: `_computeDelta` reference-equality shortcut unsafe with mutable state~~ ✅ RESOLVED
+
+**Found during:** AIO-33 investigation. Not the cause of AIO-33, but a real
+correctness gap.
+
+**Bug:** `_computeDelta` (server.ts:438) used `flat[k] === lastFlat[k]` to skip
+`JSON.stringify` for unchanged references. With `freezeState=false` (production
+default), state objects are mutable. If a nested object is mutated in-place
+(same reference, different content), the reference check produces a false
+positive — `lastKeyJsons` is permanently locked to the stale serialization. The
+server never re-serializes the element, the client never receives the update.
+
+**Impact:** Permanent stale UI for affected elements. Only recoverable via app
+restart or page reload (triggers fresh full state).
+
+**Fix:** Removed the reference-equality shortcut. `_computeDelta` now always
+`JSON.stringify`s every flat key and compares against `lastKeyJsons`. Also
+removed the now-unused `flattenKeys(lastState)` call. Cost: ~100μs per broadcast
+for typical apps (200 keys). Negligible vs WS/UDS transmission time.
+
+**Tests:** 2 new tests in delta.test.ts — verifies mutation detection on both
+identity-keyed array elements and regular nested objects.

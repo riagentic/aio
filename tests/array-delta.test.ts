@@ -1,5 +1,6 @@
 import {
   assertEquals,
+  assertNotEquals,
   assertNotStrictEquals,
   assertStrictEquals,
 } from "@std/assert";
@@ -199,4 +200,38 @@ Deno.test("applyPatch $arr: empty-array lifecycle — populated → all removed 
   assertEquals(items3.length, 2);
   assertEquals(items3[0], { id: "X", v: 10 });
   assertEquals(items3[1], { id: "Y", v: 20 });
+});
+
+Deno.test("_applyPatch: $arr identity patch survives contradicting $d deletion (defense-in-depth)", () => {
+  const prev = { feat: { items: [{ id: "old", v: 1 }], count: 5 } };
+  _rebuildIdMaps(prev);
+
+  // Manually construct a contradicting patch:
+  // $arr creates items, $d deletes items
+  const patch = {
+    $p: {
+      feat: {
+        items: {
+          $arr: true,
+          "$id:a": { id: "a", v: 1 },
+          "$id:b": { id: "b", v: 2 },
+        },
+        $d: ["items"],
+      },
+    },
+  };
+
+  const result = _applyPatch(prev, patch);
+  const feat = result.feat as Record<string, unknown>;
+
+  // items MUST survive — $arr takes precedence over $d
+  assertNotEquals(feat.items, undefined, "items must NOT be deleted");
+  assertEquals(Array.isArray(feat.items), true, "items must be an array");
+  assertEquals(
+    (feat.items as unknown[]).length,
+    3,
+    "items must have 3 elements (1 existing + 2 from $arr patch)",
+  );
+  // count must be preserved
+  assertEquals(feat.count, 5, "count must be preserved");
 });
