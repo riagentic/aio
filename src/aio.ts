@@ -1,7 +1,13 @@
 // Core runtime — boots KV, server, electron, wires everything together
 import { skv, type SkvInstance } from "./skv.ts";
 import { loadOrCreateCert, type TlsCert } from "./tls.ts";
-import { _computeDelta, createServer, type ServerHandle } from "./server.ts";
+import {
+  _computeDelta,
+  _filterByPaths,
+  createServer,
+  flattenKeys,
+  type ServerHandle,
+} from "./server.ts";
 import {
   type AioMeta,
   launchElectron,
@@ -108,6 +114,7 @@ export type UiConfig = {
   width?: number; // default: 800
   height?: number; // default: 600
   showStatus?: boolean; // default: true
+  renderer?: "react" | "aio"; // default: 'react' — 'aio' uses native VDOM engine (no React dependency)
 };
 
 /** Default broadcast throttle: 50ms = max 20 state pushes/sec */
@@ -659,9 +666,20 @@ function findFreePort(): number {
   throw new Error("no free port found in 49152–65535 after 50 attempts");
 }
 
-type UDSClient = { conn: Deno.Conn; index: number; id: string };
+type UDSClient = {
+  conn: Deno.Conn;
+  index: number;
+  id: string;
+  subscriptions: Set<string> | null;
+  lastState: unknown;
+  lastKeyJsons: Record<string, string>;
+  broadcastCount: number; // AIO-33: counter for periodic forced full-state resync
+};
 type UDSHandle = {
+  /** Send raw message to all clients (for __reload, __css, etc.) */
   broadcast: (msg: string) => void;
+  /** Broadcast UI state with per-client subscription filtering + delta compression */
+  broadcastState: (force?: boolean) => void;
   shutdown: () => void;
   socketPath: string;
   /** List connected UDS clients */
@@ -678,6 +696,7 @@ export function createUDSListener(
   onAction: (action: { type: string; payload?: unknown }) => void,
   debug: (msg: string) => void,
   clientCounter?: { value: number },
+  fullStateThreshold = 0.5,
 ): UDSHandle {
   // Clean up stale socket
   try {
@@ -702,6 +721,10 @@ export function createUDSListener(
         conn,
         index: counter.value++,
         id: crypto.randomUUID(),
+        subscriptions: null,
+        lastState: null,
+        lastKeyJsons: {},
+        broadcastCount: 0,
       };
       clientMap.set(conn, client);
       debug(`uds: client connected #${client.index} (${connSet.size} total)`);
@@ -722,8 +745,17 @@ export function createUDSListener(
       });
       writer.releaseLock();
 
-      // Read incoming messages (actions + __clientState: responses)
-      handleUDSConn(conn, connSet, clientMap, pendingState, onAction, debug);
+      // Read incoming messages (actions + __subs: + __clientState: responses)
+      handleUDSConn(
+        conn,
+        connSet,
+        clientMap,
+        pendingState,
+        onAction,
+        debug,
+        getUIState,
+        sendTo,
+      );
     }
   })().catch((e) => {
     if (!closed) debug(`uds: accept loop error — ${e}`);
@@ -768,6 +800,55 @@ export function createUDSListener(
             conn.close();
           } catch { /* already closed */ }
         }
+      }
+    },
+    broadcastState: (force = false) => {
+      for (const [conn, client] of clientMap) {
+        if (force) {
+          client.lastState = null;
+          client.lastKeyJsons = {};
+        }
+        let uiState: unknown;
+        try {
+          uiState = getUIState();
+          if (client.subscriptions) {
+            uiState = _filterByPaths(uiState, client.subscriptions);
+          }
+        } catch (e) {
+          debug(`uds: broadcastState getUIState error — ${e}`);
+          continue;
+        }
+        if (uiState === client.lastState) continue;
+        // AIO-33: periodic forced full-state resync — prevents any delta desync
+        // from becoming permanent. Every 100 broadcasts (~5s at 50ms interval),
+        // reset delta cache to force a full state send.
+        client.broadcastCount++;
+        if (client.broadcastCount >= 100) {
+          client.broadcastCount = 0;
+          client.lastState = null;
+          client.lastKeyJsons = {};
+        }
+        const delta = _computeDelta(
+          uiState,
+          client.lastState,
+          client.lastKeyJsons,
+          fullStateThreshold,
+        );
+        if (delta.kind === "skip") {
+          client.lastState = uiState;
+          client.lastKeyJsons = delta.newKeyJsons;
+          continue;
+        }
+        // Mark filtered full-state broadcasts with $f:1 so browser merges
+        if (client.subscriptions && delta.kind === "full") {
+          sendTo(conn, '{"$f":1,' + delta.msg.slice(1));
+        } else {
+          sendTo(conn, delta.msg);
+        }
+        // Update lastState/lastKeyJsons AFTER send (AIO-33 safety —
+        // if sendTo fails, next broadcast will re-detect the change)
+        client.lastState = uiState;
+        client.lastKeyJsons = delta.newKeyJsons;
       }
     },
     clients: () => [...clientMap.values()],
@@ -819,6 +900,8 @@ function handleUDSConn(
   >,
   onAction: (action: { type: string; payload?: unknown }) => void,
   debug: (msg: string) => void,
+  getUIState: () => unknown,
+  sendTo: (conn: Deno.Conn, msg: string) => void,
 ): void {
   const decoder = new TextDecoder();
   let buf = "";
@@ -849,6 +932,57 @@ function handleUDSConn(
                   pending.resolve(null);
                 }
               }
+            }
+            continue;
+          }
+          // Subscription update — mirrors WS handler in server.ts
+          if (line.startsWith("__subs:")) {
+            const client = clientMap.get(conn);
+            if (!client) continue;
+            try {
+              const paths = JSON.parse(line.slice(7));
+              if (Array.isArray(paths)) {
+                if (paths.includes("*")) {
+                  client.subscriptions = null;
+                } else {
+                  client.subscriptions = new Set(
+                    paths.filter((p: unknown) => typeof p === "string"),
+                  );
+                }
+                // Reset delta cache — state shape changed for this client
+                client.lastState = null;
+                client.lastKeyJsons = {};
+                // Send filtered state immediately
+                try {
+                  let uiState: unknown = getUIState();
+                  if (client.subscriptions) {
+                    uiState = _filterByPaths(uiState, client.subscriptions);
+                  }
+                  // Mark filtered responses with $f:1 so browser merges instead of replacing _state
+                  const toSend = client.subscriptions && uiState &&
+                      typeof uiState === "object" && !Array.isArray(uiState)
+                    ? { $f: 1, ...(uiState as Record<string, unknown>) }
+                    : uiState;
+                  const msg = JSON.stringify(toSend);
+                  sendTo(conn, msg);
+                  client.lastState = uiState;
+                  if (
+                    uiState && typeof uiState === "object" &&
+                    !Array.isArray(uiState)
+                  ) {
+                    const flat = flattenKeys(
+                      uiState as Record<string, unknown>,
+                    );
+                    for (const k of Object.keys(flat)) {
+                      client.lastKeyJsons[k] = JSON.stringify(flat[k]);
+                    }
+                  }
+                } catch (err) {
+                  debug(`uds: filtered state send error — ${err}`);
+                }
+              }
+            } catch {
+              debug("uds: bad __subs message");
             }
             continue;
           }
@@ -1330,6 +1464,7 @@ export const VALID_UI_KEYS = new Set<string>([
   "width",
   "height",
   "showStatus",
+  "renderer",
 ]);
 
 export const VALID_AIO_CONFIG_KEYS = new Set<string>([
@@ -2166,29 +2301,11 @@ async function _run<S, A, E>(
   let udsQueued = false;
   let udsDirty = false;
   let udsThrottle: ReturnType<typeof setTimeout> | null = null;
-  // Delta compression state for UDS broadcasts (mirrors WS delta in server.ts)
-  let udsLastState: unknown = null;
-  let udsLastKeyJsons: Record<string, string> = {};
-  const udsFullStateThreshold = config.fullStateThreshold ?? 0.5;
 
-  /** Broadcast UI state to UDS clients with delta compression. Reset tracking with `force` for state jumps. */
+  /** Broadcast UI state to UDS clients with per-client subscription filtering + delta compression. */
   function udsBroadcastState(force = false) {
     if (!udsHandle) return;
-    if (force) {
-      udsLastState = null;
-      udsLastKeyJsons = {};
-    }
-    const uiState = getUIState(state);
-    const delta = _computeDelta(
-      uiState,
-      udsLastState,
-      udsLastKeyJsons,
-      udsFullStateThreshold,
-    );
-    udsLastState = uiState;
-    udsLastKeyJsons = delta.newKeyJsons;
-    if (delta.kind === "skip") return;
-    udsHandle.broadcast(delta.msg);
+    udsHandle.broadcastState(force);
   }
 
   // Track per-action performance for dev-mode time-travel panel + vitals
@@ -2573,6 +2690,7 @@ async function _run<S, A, E>(
       cert: tlsCert?.cert,
       key: tlsCert?.key,
       showStatus: ui.showStatus,
+      renderer: ui.renderer,
       renderBudget: config.renderBudget,
       fullStateThreshold: config.fullStateThreshold,
       maxConnections: config.maxConnections,
@@ -2691,6 +2809,7 @@ async function _run<S, A, E>(
       },
       (msg: string) => log.debug(msg),
       clientCounter,
+      config.fullStateThreshold ?? 0.5,
     );
     log.info(`transport: UDS at ${socketPath}`);
   }

@@ -165,6 +165,7 @@ export type {
  */
 /** Wrap an inter-feature call with timeout and/or retry — `call({ timeout: 5000 }, () => f.method())`. */
 export { call } from "./src/feature-impl.ts";
+/** Mark a method as async when minification strips constructor names — rare escape hatch. */
 export { markAsync } from "./src/feature-impl.ts";
 /** Method types for feature definitions — sync, async, call options */
 export type {
@@ -253,7 +254,9 @@ export type { DB, DBOpts, QueryResult, Tx } from "./src/db/mod.ts";
  */
 /** Memoized selector — recomputes only when input selectors return new values. */
 export { createSelector } from "./src/selector.ts";
+/** Memoized selector scoped to a single feature slice — avoids full-state dependency. */
 export { createSliceSelector } from "./src/selector.ts";
+/** Selector type — a function from state to derived value with memoization. */
 export type { Selector } from "./src/selector.ts";
 
 /**
@@ -439,6 +442,16 @@ export declare function useLocal<T>(initial: T): {
   local: T;
   set: (next: T | ((prev: T) => T)) => void;
 };
+
+/**
+ * Subscribe to connection status (connected/disconnected).
+ *
+ * Returns `true` when the WebSocket or IPC transport is open, `false` otherwise.
+ * Re-renders the component when connection status changes.
+ *
+ * @returns `true` if connected, `false` if disconnected
+ */
+export declare function useConnected(): boolean;
 
 /**
  * Derives state from a transformation, preserving element-level references.
@@ -787,3 +800,74 @@ export declare function initStandalone<S, A, E>(initialState: S, config: {
   perfBudget?: PerfBudget;
   onRestore?: (state: S) => S;
 }): AioApp<S, A>;
+
+// ── AIO Native Renderer primitives ──────────────────────────────────────
+// Signal-based reactivity + VDOM engine. Used by renderer: "aio" mode.
+// These are standalone — no React dependency.
+
+/** Writable reactive value — `.value` reads (auto-tracks), `.set()` writes. */
+export { batch, computed, effect, signal } from "./src/signal.ts";
+/** Reactive primitive types */
+export type { Computed, Signal } from "./src/signal.ts";
+/** VDOM factory + fragment + error boundary symbols */
+export {
+  ErrorBoundary,
+  Fragment,
+  h,
+  lazy,
+  Portal,
+  renderToString,
+  Suspense,
+} from "./src/vdom.ts";
+/** VDOM node + ref types */
+export type { Ref, VNode } from "./src/vdom.ts";
+/** Mount, hydrate, unmount AIO component tree + lifecycle hooks + context */
+export {
+  _setDocument,
+  _unmount,
+  createContext,
+  hydrate,
+  mount,
+  onCleanup,
+  onMount,
+  setDevMode,
+  useContext,
+  useRef,
+} from "./src/aio-renderer.ts";
+/** Context type */
+export type { Context } from "./src/aio-renderer.ts";
+/** Mount handle returned by mount()/hydrate() */
+export type { MountHandle } from "./src/aio-renderer.ts";
+/** Form utilities — `useForm()` with signal-backed validation, `useFieldArray()` for dynamic lists. */
+export { useFieldArray, useForm } from "./src/form.ts";
+/** Form state, field state, field array, and validation rule types. */
+export type {
+  FieldArrayState,
+  FieldState,
+  FormState,
+  ValidationRule,
+} from "./src/form.ts";
+/** Animation hooks — `useSpring()` for physics-based tweens, `useTransition()` for enter/exit. */
+export { useSpring, useTransition } from "./src/animation.ts";
+/** Animation configuration and state types. */
+export type {
+  SpringConfig,
+  SpringValue,
+  TransitionConfig,
+  TransitionState,
+} from "./src/animation.ts";
+/** Virtual scrolling — `useVirtualList()` renders only visible items for large datasets. */
+export { useVirtualList } from "./src/virtual-list.ts";
+/** Virtual list configuration and state types. */
+export type {
+  VirtualListConfig,
+  VirtualListState,
+} from "./src/virtual-list.ts";
+/** DevTools integration — connect AIR renderer to component inspector. */
+export { connectAioDevTools } from "./src/devtools.ts";
+/** DevTools types — component tree nodes, render events, handle for disconnect. */
+export type {
+  ComponentTreeNode,
+  DevToolsHandle,
+  RenderEvent,
+} from "./src/devtools.ts";

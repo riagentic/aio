@@ -1,5 +1,56 @@
 # Changelog
 
+## 1.0.0-alpha6
+
+### Added
+
+- **AIR native renderer** — signal-based VDOM engine with JSX, keyed
+  reconciliation, auto-memo per-component reactivity (~8KB)
+- Renderer Phase 2: per-component signal tracking, auto-memo, VDomHooks
+- Renderer Phase 3: SSR, hydration, ErrorBoundary, AIO bridge hooks
+- Renderer Phase 4: lifecycle, context, portal, suspense, forms, devtools
+- Signal system — `signal()`, `computed()`, `effect()`, `batch()` reactive
+  primitives
+- VDOM engine — `h()`, diff, patch, keyed reconciliation
+- Form bindings — `useForm()` with signal-backed validation
+- Animation system — `useSpring()`, `useTransition()` signal-driven
+- Virtual list — `useVirtualList()` for large datasets
+- DevTools integration for AIR renderer (component tree, render counts)
+- **Adapter architecture** — `state-core.ts` as framework-agnostic foundation,
+  React and AIR adapters as thin consumers
+- `state-core` exports: `getFeatureSignal`, `getStateSignal`, `createSendProxy`,
+  `setTransport`, `flushOfflineQueue`, `_trackingProxy`, `_resolveWithFallback`
+- New export paths: `@riagentic/aio/state-core`,
+  `@riagentic/aio/adapters/react`, `@riagentic/aio/adapters/air`,
+  `@riagentic/aio/jsx-runtime`
+- Delta round-trip invariant tests
+- AIO-33 state integrity test suite
+
+### Fixed
+
+- Electron IPC `__aio:ready` requests fresh state from server via `__subs:*`
+  (AIO-26)
+- Unsafe delta replay removed from `__aio:ready` handler (AIO-26)
+- UDS `__subs:` handling and per-client subscription filtering (AIO-27)
+- Cancel sub timer on `_accessedPaths.clear()`, guard empty subs (AIO-28)
+- `$f` marker for filtered state — merge instead of replace (AIO-29)
+- Control messages no longer corrupt `lastFullState`, shallow `$f` merge
+  (AIO-30)
+- `useFeature` auto-merges init shape — prevents crash on incomplete state
+  (AIO-30)
+- Recursive deep merge for `$f` responses, prevents sub-sub-key loss (AIO-31)
+- `unflattenPatch` contradicting `$arr`+`$d` on empty→identity array transition
+  (AIO-31)
+- `_applyPatch` defense-in-depth: `$arr` identity patch survives contradicting
+  `$d` deletion with diagnostic warning
+- Dev-mode `_checkStateIntegrity` warns when keys from initial full state
+  disappear (state-shape-drift diagnostic)
+- Periodic resync every ~5s prevents permanent delta desync (AIO-33)
+- `lastKeyJsons` updated after successful send, not before (AIO-33)
+- Removed unsafe reference-equality shortcut in `_computeDelta` (AIO-34)
+- Renderer hydration `afterSubtree` — instanceStack leak fix
+- `useSpring` timestep hardening, lazy re-render, context signal cleanup
+
 ## 1.0.0-alpha5
 
 ### Added

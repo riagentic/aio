@@ -355,26 +355,29 @@ linter will warn you if you forget.
 
 ### Framework (`jsr:@riagentic/aio` / `dep/aio/` when vendored)
 
-| File                 | Purpose                                                                                                    |
-| -------------------- | ---------------------------------------------------------------------------------------------------------- |
-| `mod.ts`             | Public API — all `'aio'` imports resolve here (Deno-side), type declarations for browser-only functions    |
-| `src/aio.ts`         | Core runtime — `aio.run()`, dispatch loop, CLI parser, KV path resolution, startup linter                  |
-| `src/browser.ts`     | Browser-side module — `useFeature`, `useAio`, `useLocal`, `feature` (browser stub), `page`                 |
-| `src/server.ts`      | HTTP + WebSocket server, TSX transpilation (dev), static serving (prod), delta broadcasting                |
-| `src/build.ts`       | Build script — bundles App.tsx + React, compiles binary, AppImage packaging                                |
-| `src/msg.ts`         | Shared `msg()` constructor — used by mod.ts (server) and browser.ts (client)                               |
-| `src/feature.ts`     | Feature system — `feature()`, `composeFeatures()`, `testFeature()`                                         |
-| `src/flow.ts`        | Generator runtime — `cancelOn()`, `GenCtx`, flow runner, cancellation                                      |
-| `src/factory.ts`     | `actions()` / `effects()` catalog factory — classic mode, generates PascalCase labels + camelCase creators |
-| `src/time-travel.ts` | Time-travel debugger — pure functions for undo/redo/goto, active in dev mode                               |
-| `src/dispatch.ts`    | Shared dispatch loop — re-entrant queue with overflow guard, used by both aio.ts and standalone.ts         |
-| `src/deep-merge.ts`  | Deep merge utility — restores persisted state while preserving schema structure                            |
-| `src/skv.ts`         | Thin Deno.Kv wrapper — `set`/`get`/`del`/`close` with string keys                                          |
-| `src/standalone.ts`  | Standalone runtime — full client-side dispatch loop for Android WebView (replaces browser.ts)              |
-| `src/schedule.ts`    | Scheduled effects — `schedule.after/every/at/cron/cancel`, cron parser, schedule manager                   |
-| `src/am.ts`          | `am` — app manager CLI. Process lifecycle, state inspection, dispatch, time-travel, log tailing            |
-| `src/electron.ts`    | Electron launcher + aio-client connect page. Window state persistence, AioMeta extraction                  |
-| `android-template/`  | Kotlin/Gradle template for Android APK builds (placeholder tokens replaced at build time)                  |
+| File                    | Purpose                                                                                                    |
+| ----------------------- | ---------------------------------------------------------------------------------------------------------- |
+| `mod.ts`                | Public API — all `'aio'` imports resolve here (Deno-side), type declarations for browser-only functions    |
+| `src/aio.ts`            | Core runtime — `aio.run()`, dispatch loop, CLI parser, KV path resolution, startup linter                  |
+| `src/state-core.ts`     | Framework-agnostic state — signals, tracking proxy, send proxy, subscription tracking                      |
+| `src/adapters/react.ts` | React adapter — `useFeature`, `useAio`, `useLocal`, `useConnected` via `useSyncExternalStore`              |
+| `src/adapters/air.ts`   | AIR native adapter — same hook API, signal-based reactivity for AIO renderer                               |
+| `src/browser.ts`        | Full browser client — AIR hooks + WS/IPC lifecycle, DevTools, offline queue, vitals, time-travel           |
+| `src/server.ts`         | HTTP + WebSocket server, TSX transpilation (dev), static serving (prod), delta broadcasting                |
+| `src/build.ts`          | Build script — bundles App.tsx + React, compiles binary, AppImage packaging                                |
+| `src/msg.ts`            | Shared `msg()` constructor — used by mod.ts (server) and browser.ts (client)                               |
+| `src/feature.ts`        | Feature system — `feature()`, `composeFeatures()`, `testFeature()`                                         |
+| `src/flow.ts`           | Generator runtime — `cancelOn()`, `GenCtx`, flow runner, cancellation                                      |
+| `src/factory.ts`        | `actions()` / `effects()` catalog factory — classic mode, generates PascalCase labels + camelCase creators |
+| `src/time-travel.ts`    | Time-travel debugger — pure functions for undo/redo/goto, active in dev mode                               |
+| `src/dispatch.ts`       | Shared dispatch loop — re-entrant queue with overflow guard, used by both aio.ts and standalone.ts         |
+| `src/deep-merge.ts`     | Deep merge utility — restores persisted state while preserving schema structure                            |
+| `src/skv.ts`            | Thin Deno.Kv wrapper — `set`/`get`/`del`/`close` with string keys                                          |
+| `src/standalone.ts`     | Standalone runtime — full client-side dispatch loop for Android WebView (replaces browser.ts)              |
+| `src/schedule.ts`       | Scheduled effects — `schedule.after/every/at/cron/cancel`, cron parser, schedule manager                   |
+| `src/am.ts`             | `am` — app manager CLI. Process lifecycle, state inspection, dispatch, time-travel, log tailing            |
+| `src/electron.ts`       | Electron launcher + aio-client connect page. Window state persistence, AioMeta extraction                  |
+| `android-template/`     | Kotlin/Gradle template for Android APK builds (placeholder tokens replaced at build time)                  |
 
 ### App (`src/`) — v0.5 feature-first
 

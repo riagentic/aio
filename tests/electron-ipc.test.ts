@@ -190,19 +190,22 @@ Deno.test({
           `  // Track page readiness (data events need this to decide whether to forward or buffer)
   win.webContents.on('did-finish-load', () => { pageReady = true; });
 
-  // Renderer signals it has registered IPC listeners — replay buffered state now
+  // Renderer signals it has registered IPC listeners — request fresh state from server
   ipcMain.on('__aio:ready', () => {
     if (closing) return;
-    if (sock) win.webContents.send('__aio:open');
-    // Always replay full state first (not a delta) so renderer gets complete state.
-    // Then replay latest delta on top if it's different (brings state up to date).
+    if (sock) {
+      win.webContents.send('__aio:open');
+      // Request fresh full state from server via subscribe-all.
+      // This replaces relying on lastFullState which may be stale (captured on
+      // initial UDS connect before async feature initialization completed, and
+      // never updated because all subsequent states are $f-tagged or $p deltas).
+      // The server responds with current complete state — no $f because * = unfiltered.
+      sock.write('__subs:["*"]\\n');
+    }
+    // Also replay lastFullState as immediate fallback (may be stale but prevents
+    // blank screen while waiting for server response over UDS — <1ms latency)
     if (lastFullState) {
       win.webContents.send('__aio:msg', lastFullState);
-      if (lastState && lastState !== lastFullState) {
-        win.webContents.send('__aio:msg', lastState);
-      }
-    } else if (lastState) {
-      win.webContents.send('__aio:msg', lastState);
     }
   });`,
           `  win.webContents.on('did-finish-load', () => {

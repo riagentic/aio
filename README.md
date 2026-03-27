@@ -9,7 +9,7 @@
 - **Write reactive, use generators or atomic actions when needed.**
 - **Pick your target, compile and ship!**
 
-`v1.0.0-alpha5`
+`v1.0.0-alpha6`
 
 > Define state once. It persists, syncs to all clients, drives the UI.
 
@@ -90,12 +90,13 @@ compile targets.
 |                 |                                                                                                                                                   |
 | --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **State**       | reactive proxy (Immer) · state machines · generators · selectors · middleware · `call()` coordination · `draft()` · `useLocal` · `page()` routing |
+| **Renderer**    | AIR (~8KB) — signals, JSX, auto-memo, SSR/hydration, forms, animation, virtual-list · React adapter · custom adapter API                          |
 | **SQLite**      | async Worker (non-blocking) · read replicas · ORM · schema migrations · WAL · transactions · custom pragmas                                       |
 | **Persistence** | auto-persist to Deno.Kv · `stateForDB` transform · `persist.exclude` per feature                                                                  |
-| **Sync**        | WebSocket · delta patches · offline queue (IndexedDB, 24h TTL) · UDS/IPC · `stateForUI` per-user filtering                                        |
+| **Sync**        | WebSocket · delta patches · offline queue (IndexedDB, 24h TTL) · UDS/IPC · `stateForUI` per-user filtering · periodic resync                      |
 | **Security**    | auto-TLS (`--expose`) · multi-user token auth · rate limiting · CSRF protection · `allowedOrigins`                                                |
 | **Scheduling**  | cron · intervals · one-shot timers · cancel by ID or prefix                                                                                       |
-| **DX**          | time-travel (Ctrl+.) · hot reload · `testFeature` harness · Redux DevTools · perf budgets · freeze detection                                      |
+| **DX**          | time-travel (Ctrl+.) · hot reload · `testFeature` harness · Redux DevTools · perf budgets · freeze detection · AIR DevTools                       |
 | **Electron**    | desktop window · UDS+IPC (zero TCP in prod) · window persistence · DevTools toggle · `keepServer`                                                 |
 | **Deploy**      | browser · Electron · CLI · systemd service · Android APK (WebView) · single binary · remote (HTTPS)                                               |
 
@@ -140,7 +141,10 @@ compile targets.
 | systemd service          |   ✅    |     ❌     |    ❌    |       ❌        |    🔧     |     🔧      |    ❌     |
 | Self-hosted              |   ✅    |     🔧     |    ✅    |       ✅        |    ✅     |     ✅      |    ✅     |
 | **UI & rendering**       |         |            |          |                 |           |             |           |
-| React UI                 |   ✅    |     ✅     |    ✅    |       ✅        |    ⚛️     |     ✅      |    ✅     |
+| Built-in renderer        |   ✅    |     ❌     |    ❌    |       ❌        |    ⚛️     |     ❌      |    ❌     |
+| React adapter            |   ✅    |     ✅     |    ✅    |       ✅        |    ⚛️     |     ✅      |    ✅     |
+| Custom adapter API       |   ✅    |     ❌     |    ❌    |       ❌        |    ❌     |     ❌      |    ❌     |
+| SSR / hydration          |   ✅    |     ❌     |    ❌    |       ❌        |    ✅     |     ✅      |    ❌     |
 
 ✅ built-in · 🔧 manual setup · ⚛️ Preact · ❌ not included _Comparison is
 approximate — check each project for current capabilities._
@@ -178,16 +182,17 @@ See [FAQ](docs/faq.md#when-not-to-use-aio) for details.
 [Electron](docs/electron.md) · [CLI](docs/cli.md) · [am](docs/am.md) ·
 [Linter](docs/linter.md)
 
-**UI & Reference:** [UI](docs/ui.md) · [Structure](docs/structure.md) ·
-[Scaling](docs/scaling.md) · [Testing](docs/testing.md) ·
-[Debugging](docs/debugging.md) · [FAQ](docs/faq.md) · [Upgrade](docs/upgrade.md)
-· [Changelog](docs/changelog.md)
+**UI & Rendering:** [UI](docs/ui.md) · [Renderer](docs/renderer.md) ·
+[Structure](docs/structure.md) · [Scaling](docs/scaling.md) ·
+[Testing](docs/testing.md) · [Debugging](docs/debugging.md) · [FAQ](docs/faq.md)
+· [Upgrade](docs/upgrade.md) · [Changelog](docs/changelog.md)
 
 ## Status
 
-**v1.0.0-alpha5** · [JSR](https://jsr.io/@riagentic/aio) · MIT
+**v1.0.0-alpha6** · [JSR](https://jsr.io/@riagentic/aio) · MIT
 
-1300+ tests · security hardened
+1564 tests · security hardened
 
-Core (state, sync, persistence, features, scheduling) is stable. Electron,
+Core (state, sync, persistence, features, scheduling, renderer) is stable. AIR
+renderer is new in alpha6 — functional with full test coverage. Electron,
 Android, and build targets are functional but less battle-tested.

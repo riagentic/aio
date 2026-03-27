@@ -19,6 +19,43 @@ import {
 } from "react";
 import { Listeners } from "./listeners.ts";
 import {
+  handleTTMessage as _handleTTMessage,
+  resetTT as _resetTT,
+  setSendFn as _ttSetSendFn,
+  useTimeTravel,
+} from "./time-travel-panel.ts";
+import {
+  _accessedPaths as _coreAccessedPaths,
+  _applyPatch as _coreApplyPatch,
+  _BLOCKED_KEYS as _coreBLOCKED_KEYS,
+  _checkWastedRenders as _coreCheckWastedRenders,
+  _deepMergeFiltered as _coreDeepMergeFiltered,
+  _getArrayRefStats as _coreGetArrayRefStats,
+  _getState as _coreGetState,
+  _preserveArrayRefs as _corePreserveArrayRefs,
+  _rebuildIdMaps as _coreRebuildIdMaps,
+  _reset as _coreReset,
+  _resetArrayRefStats as _coreResetArrayRefStats,
+  _resolveWithFallback as _coreResolveWithFallback,
+  _shallowEqual as _coreShallowEqual,
+  _trackingProxy as _coreTrackingProxy,
+  cancelSubsTimer as _coreCancelSubsTimer,
+  collapsePaths as _coreCollapsePaths,
+  createSendProxy as _coreCreateSendProxy,
+  type FeatureRef as _CoreFeatureRef,
+  getConnectedSignal as _coreGetConnectedSignal,
+  getFeatureSignal as _coreGetFeatureSignal,
+  getStateSignal as _coreGetStateSignal,
+  handleMessage as _coreHandleMessage,
+  type HandleResult as _HandleResult,
+  isInitialStateReceived as _coreHasState,
+  resendSubscriptions as _coreResendSubs,
+  setConnected as _coreSetConnected,
+  setTransport as _coreSetTransport,
+  trackPath as _coreTrackPath,
+  type Transport as _CoreTransport,
+} from "./state-core.ts";
+import {
   createRenderMeter,
   renderHint,
   type RenderMeterAPI,
@@ -47,7 +84,7 @@ const _w = typeof window !== "undefined"
 const WS_MAX_QUEUE = 100;
 const OFFLINE_MAX_QUEUE = 100; // max actions queued while disconnected (post-connect)
 const OFFLINE_MAX_AGE = 24 * 60 * 60 * 1000; // 24 hours
-const _BLOCKED_KEYS = new Set(["__proto__", "constructor", "prototype"]);
+const _BLOCKED_KEYS = _coreBLOCKED_KEYS;
 
 /** Emit a browser-side diagnostic event to the health overlay (dev mode only, 5s dedup) */
 const _diagLastEmit = new Map<string, number>();
@@ -70,282 +107,50 @@ function _diagEmit(ev: {
 }
 
 // ── Array ref stats (AIO-11 wasted render detection) ────────────────
-import type { ArrayRefStats } from "./vitals/types.ts";
+// Delegated to state-core — re-export for backward compat
+export const _getArrayRefStats = _coreGetArrayRefStats;
+export const _resetArrayRefStats = _coreResetArrayRefStats;
+export const _checkWastedRenders = _coreCheckWastedRenders;
 
-let _arrayRefStats: ArrayRefStats = {
-  preserved: 0,
-  changed: 0,
-  total: 0,
-  cycles: 0,
-};
+// Delegated to state-core — re-export for backward compat
+export const _preserveArrayRefs = _corePreserveArrayRefs;
 
-export function _getArrayRefStats(): ArrayRefStats {
-  return { ..._arrayRefStats };
-}
+// Delegated to state-core — re-export for backward compat
+export const _shallowEqual = _coreShallowEqual;
 
-export function _resetArrayRefStats(): void {
-  _arrayRefStats = { preserved: 0, changed: 0, total: 0, cycles: 0 };
-}
+// Delegated to state-core — re-export for backward compat
+export const _rebuildIdMaps = _coreRebuildIdMaps;
 
-/** Check if wasted renders are likely based on arrayRefStats + render status.
- *  Returns a warning string or null. Resets stats after check. */
-export function _checkWastedRenders(
-  status: string,
-): string | null {
-  const stats = _getArrayRefStats();
-  _resetArrayRefStats(); // reset for next measurement window
-  if (
-    stats.total === 0 || stats.cycles < 3 ||
-    status === "healthy" || status === "recovered"
-  ) {
-    return null;
+// _applyArrPatch removed — delegated to state-core's _applyPatch
+
+// Delegated to state-core — re-export for backward compat
+export const _applyPatch = _coreApplyPatch;
+
+// Delegated to state-core — re-export for backward compat
+export const _deepMergeFiltered = _coreDeepMergeFiltered;
+
+/** Dev-mode state integrity check — warns when keys from initial full state disappear.
+ *  Captures initial shape on first call, compares on subsequent calls. */
+export function _checkStateIntegrity(state: unknown): void {
+  if (!state || typeof state !== "object" || Array.isArray(state)) return;
+  const obj = state as Record<string, unknown>;
+  if (_initialShapeKeys === null) {
+    _initialShapeKeys = new Set(Object.keys(obj));
+    return;
   }
-  const ratio = stats.preserved / stats.total;
-  if (ratio <= 0.5) return null; // most elements genuinely changed — not wasted
-  return `[aio] WASTED RENDERS: _preserveArrayRefs preserved ${stats.preserved}/${stats.total} element refs (${
-    Math.round(ratio * 100)
-  }%), but render is ${status}. Your memo() comparators may be checking container references instead of element values. Use useProjection() for derived state and import { memo } from "aio" (not React). See docs/ui.md#derived-state--memo`;
-}
-
-/** Structural sharing for arrays: preserve element references for unchanged items.
- *  Returns the previous array reference if ALL elements are unchanged. */
-export function _preserveArrayRefs(
-  newArr: unknown[],
-  oldArr: unknown[],
-): unknown[] {
-  if (newArr.length !== oldArr.length) {
-    _arrayRefStats.total += newArr.length;
-    _arrayRefStats.changed += newArr.length;
-    _arrayRefStats.cycles++;
-    return newArr;
-  }
-  let allSame = true;
-  for (let i = 0; i < newArr.length; i++) {
-    _arrayRefStats.total++;
-    if (newArr[i] === oldArr[i]) {
-      _arrayRefStats.preserved++;
-      continue;
-    }
-    if (
-      newArr[i] && typeof newArr[i] === "object" && !Array.isArray(newArr[i]) &&
-      oldArr[i] && typeof oldArr[i] === "object" && !Array.isArray(oldArr[i])
-    ) {
-      if (_shallowEqual(newArr[i], oldArr[i])) {
-        newArr[i] = oldArr[i]; // restore reference — element unchanged
-        _arrayRefStats.preserved++;
-        continue;
-      }
-    }
-    _arrayRefStats.changed++;
-    allSame = false;
-  }
-  _arrayRefStats.cycles++;
-  return allSame ? oldArr : newArr;
-}
-
-/** Shallow-equal comparison for one level of properties. */
-export function _shallowEqual(a: unknown, b: unknown): boolean {
-  if (a === b) return true;
-  if (
-    typeof a !== "object" || typeof b !== "object" || a === null || b === null
-  ) return false;
-  const ka = Object.keys(a as Record<string, unknown>);
-  const kb = Object.keys(b as Record<string, unknown>);
-  if (ka.length !== kb.length) return false;
-  const objA = a as Record<string, unknown>;
-  const objB = b as Record<string, unknown>;
-  for (const k of ka) {
-    if (objA[k] !== objB[k]) return false;
-  }
-  return true;
-}
-
-/** Registry of identity-keyed arrays for per-element delta patching.
- *  Key: "feature.arrayKey", Value: { ids: id→element map, order: insertion-order id array } */
-const _idMaps = new Map<
-  string,
-  { ids: Map<string, unknown>; order: string[] }
->();
-
-/** Build _idMaps entries from a full state object. Called on full state receive and reconnect. */
-export function _rebuildIdMaps(state: Record<string, unknown>): void {
-  _idMaps.clear();
-  for (const [fk, fv] of Object.entries(state)) {
-    if (!fv || typeof fv !== "object" || Array.isArray(fv)) continue;
-    for (const [sk, sv] of Object.entries(fv as Record<string, unknown>)) {
-      if (!Array.isArray(sv) || sv.length === 0) continue;
-      let allHaveId = true;
-      for (const el of sv) {
-        if (
-          !el || typeof el !== "object" || Array.isArray(el) ||
-          typeof (el as Record<string, unknown>).id !== "string"
-        ) {
-          allHaveId = false;
-          break;
-        }
-      }
-      if (!allHaveId) continue;
-      const ids = new Map<string, unknown>();
-      const order: string[] = [];
-      for (const el of sv) {
-        const id = (el as Record<string, unknown>).id as string;
-        ids.set(id, el);
-        order.push(id);
-      }
-      _idMaps.set(`${fk}.${sk}`, { ids, order });
-    }
-  }
-}
-
-/** Apply a $arr identity-keyed array patch. Returns the reconstructed array. */
-function _applyArrPatch(
-  mapKey: string,
-  arrPatch: Record<string, unknown>,
-): unknown[] {
-  let entry = _idMaps.get(mapKey);
-  if (!entry) {
-    entry = { ids: new Map(), order: [] };
-    _idMaps.set(mapKey, entry);
-  }
-
-  // Apply updates and additions
-  for (const [k, v] of Object.entries(arrPatch)) {
-    if (k === "$arr" || k === "$rm") continue;
-    if (k.startsWith("$id:")) {
-      const id = k.slice(4);
-      if (!entry.ids.has(id)) {
-        entry.order.push(id);
-      }
-      entry.ids.set(id, v);
-    }
-  }
-
-  // Apply removals
-  if (Array.isArray(arrPatch.$rm)) {
-    for (const id of arrPatch.$rm) {
-      if (typeof id === "string") {
-        entry.ids.delete(id);
-        const idx = entry.order.indexOf(id);
-        if (idx !== -1) entry.order.splice(idx, 1);
-      }
-    }
-  }
-
-  // Reconstruct array from order — filter out any desynced entries
-  const result: unknown[] = [];
-  for (const id of entry.order) {
-    const el = entry.ids.get(id);
-    if (el !== undefined) {
-      result.push(el);
-    } else {
-      // order/ids desync — self-heal by removing stale id from order
+  for (const k of _initialShapeKeys) {
+    if (!(k in obj)) {
       _diagEmit({
-        type: "idmap-desync",
+        type: "state-shape-drift",
         severity: "warning",
         source: "browser",
-        message:
-          `_idMaps order/ids desync for id "${id}" in "${mapKey}" — skipped`,
+        message: `State key "${k}" from initial shape is now missing`,
+        detail: { missingKey: k, currentKeys: Object.keys(obj) },
         hint:
-          "This may indicate a missed delta patch. State will self-correct on next full sync.",
+          "A key from the initial full state has disappeared. This may indicate a delta patch or merge bug.",
       });
     }
   }
-  // Clean up desynced order entries
-  entry.order = entry.order.filter((id) => entry!.ids.has(id));
-  return result;
-}
-
-/** Apply a delta patch ($p + $d) to previous state. Handles nested feature patches (v0.5).
- *  Preserves object references for unchanged slices (important for useSyncExternalStore selectors). */
-export function _applyPatch(
-  prev: Record<string, unknown> | null,
-  data: { $p: Record<string, unknown>; $d?: string[] },
-): Record<string, unknown> {
-  const next = prev ? { ...prev } : {} as Record<string, unknown>;
-  // Apply patches — shallow merge for nested object patches (feature slices)
-  for (const [k, v] of Object.entries(data.$p)) {
-    if (_BLOCKED_KEYS.has(k)) {
-      _diagEmit({
-        type: "state-key-stripped",
-        severity: "warning",
-        source: "browser",
-        message: "State key '" + k +
-          "' stripped — reserved JavaScript property name",
-        detail: { key: k },
-        hint: "Rename this state key. Reserved names: " +
-          [..._BLOCKED_KEYS].join(", "),
-      });
-      continue;
-    }
-    if (
-      v && typeof v === "object" && !Array.isArray(v) && next[k] &&
-      typeof next[k] === "object" && !Array.isArray(next[k])
-    ) {
-      // Nested feature patch — shallow merge sub-keys (filter unsafe keys)
-      const sub = v as Record<string, unknown>;
-      const prev_slice = next[k] as Record<string, unknown>;
-      const merged = { ...prev_slice };
-      for (const [sk, sv] of Object.entries(sub)) {
-        if (_BLOCKED_KEYS.has(sk) || sk === "$d") continue;
-        // Identity-keyed array patch ($arr marker)
-        if (
-          sv && typeof sv === "object" && !Array.isArray(sv) &&
-          (sv as Record<string, unknown>).$arr === true
-        ) {
-          merged[sk] = _applyArrPatch(
-            `${k}.${sk}`,
-            sv as Record<string, unknown>,
-          );
-        } else if (Array.isArray(sv) && Array.isArray(prev_slice[sk])) {
-          // Structural sharing: preserve per-element references for atomic array sub-keys
-          merged[sk] = _preserveArrayRefs(
-            sv as unknown[],
-            prev_slice[sk] as unknown[],
-          );
-        } else {
-          merged[sk] = sv;
-        }
-      }
-      // Handle nested deletions ($d within the sub-patch)
-      if (Array.isArray(sub.$d)) {
-        for (const sk of sub.$d) {
-          if (typeof sk === "string" && !_BLOCKED_KEYS.has(sk)) {
-            delete merged[sk];
-          }
-        }
-        delete merged.$d;
-      }
-      next[k] = merged;
-      // Preserve reference if patch didn't actually change anything
-      if (prev && _shallowEqual(merged, prev[k])) {
-        next[k] = prev[k] as Record<string, unknown>;
-      }
-    } else {
-      // Sanitize new objects — filter unsafe keys even for new top-level entries
-      if (v && typeof v === "object" && !Array.isArray(v)) {
-        const safe: Record<string, unknown> = {};
-        for (const [sk, sv] of Object.entries(v as Record<string, unknown>)) {
-          if (!_BLOCKED_KEYS.has(sk)) safe[sk] = sv;
-        }
-        next[k] = safe;
-        // Preserve reference if new object is shallow-equal to previous
-        if (prev && _shallowEqual(safe, prev[k])) {
-          next[k] = prev[k] as Record<string, unknown>;
-        }
-      } else {
-        next[k] = v;
-      }
-    }
-  }
-  // Top-level deletions
-  if (Array.isArray(data.$d)) {
-    for (const k of data.$d) {
-      if (typeof k === "string" && !_BLOCKED_KEYS.has(k)) delete next[k];
-    }
-  }
-  // Preserve references: copy unchanged keys from prev (next was spread from prev,
-  // so unchanged keys already share references — just need to avoid spreading when no patch)
-  return next;
 }
 
 // ── Offline queue persistence (IndexedDB) ─────────────────────────────
@@ -484,7 +289,7 @@ const _ipc: AioIPC | null = (typeof window !== "undefined" &&
 
 // Singleton WebSocket — shared across all useAio() calls (one connection per page)
 let _ws: WebSocket | null = null;
-let _state: unknown = null;
+let _initialShapeKeys: Set<string> | null = null;
 let _queue: Array<{ type: string; payload?: unknown }> = [];
 const _listeners = new Listeners<unknown>();
 let _retry = 0;
@@ -501,100 +306,19 @@ let _lastAction: { type: string; payload?: unknown } | null = null; // for DevTo
 // Intermediate object access returns nested Proxies without recording.
 // After render, paths are collapsed and sent to the server.
 
-export const _accessedPaths = new Set<string>();
-let _subsTimer: ReturnType<typeof setTimeout> | null = null;
-let _currentSubs: string[] = [];
+// Re-export subscription tracking from state-core for backward compat
+export const _accessedPaths = _coreAccessedPaths;
+export const _collapsePaths = (paths: Set<string>) => _coreCollapsePaths(paths);
 
-/** Deep recursive Proxy — tracks leaf access and iteration at any depth. */
-export function _trackingProxy(obj: unknown, parentPath = ""): unknown {
-  if (!obj || typeof obj !== "object" || Array.isArray(obj)) return obj;
-  return new Proxy(obj as Record<string, unknown>, {
-    get(target, prop: string | symbol) {
-      if (typeof prop === "string" && !_BLOCKED_KEYS.has(prop)) {
-        const fullPath = parentPath ? `${parentPath}.${prop}` : prop;
-        const value = Reflect.get(target, prop);
-        // Object (non-array) → return nested Proxy (user may go deeper)
-        if (value && typeof value === "object" && !Array.isArray(value)) {
-          return _trackingProxy(value, fullPath);
-        }
-        // Leaf (primitive, array, null) → track the full path
-        _accessedPaths.add(fullPath);
-        _scheduleSyncSubs();
-        return value;
-      }
-      return Reflect.get(target, prop);
-    },
-    ownKeys(target) {
-      // Iterating keys = "I need everything at this level and below"
-      _accessedPaths.add(parentPath || "*");
-      _scheduleSyncSubs();
-      return Reflect.ownKeys(target);
-    },
-  });
-}
-
-/** Collapse paths: if "a.b" and "a.b.c.d" both tracked, keep only "a.b" */
-export function _collapsePaths(paths: Set<string>): string[] {
-  const sorted = [...paths].sort();
-  const result: string[] = [];
-  for (const path of sorted) {
-    if (result.length > 0) {
-      const last = result[result.length - 1];
-      if (last === "*" || path.startsWith(last + ".")) continue;
-    }
-    result.push(path);
-  }
-  return result;
-}
-
-function _scheduleSyncSubs(): void {
-  if (_subsTimer !== null) return;
-  _subsTimer = setTimeout(() => {
-    _subsTimer = null;
-    const collapsed = _collapsePaths(_accessedPaths);
-    if (
-      collapsed.length !== _currentSubs.length ||
-      collapsed.some((s, i) => s !== _currentSubs[i])
-    ) {
-      _currentSubs = collapsed;
-      _wsSendSubs(collapsed);
-    }
-  }, 16);
-}
-
-function _wsSendSubs(subs: string[]): void {
-  const msg = "__subs:" + JSON.stringify(subs);
-  if (_ws && _ws.readyState === WebSocket.OPEN) _ws.send(msg);
-  if (_ipc && _ipcConnected) _ipc.send(msg);
-}
+/** Deep recursive Proxy — tracks leaf access and iteration at any depth.
+ *  Re-export of state-core's canonical implementation. */
+export const _trackingProxy = _coreTrackingProxy;
 
 /** Reset tracking state — for tests and _reset() */
 export function _resetTracking(): void {
-  _accessedPaths.clear();
-  _currentSubs = [];
-  if (_subsTimer !== null) {
-    clearTimeout(_subsTimer);
-    _subsTimer = null;
-  }
+  _coreAccessedPaths.clear();
+  _coreCancelSubsTimer();
 }
-
-// Time-travel state — populated when server sends __tt: messages (dev mode)
-type TTMeta = {
-  entries: {
-    id: number;
-    type: string;
-    ts: number;
-    perf?: {
-      reduce: number;
-      effects: number;
-      budget: { reduce: number; effect: number };
-    };
-  }[];
-  index: number;
-  paused: boolean;
-};
-let _ttState: TTMeta | null = null;
-const _ttListeners = new Listeners<TTMeta>();
 
 // ── Vitals probes (client-side) ──────────────────────────────────────
 let _vitalsRenderMeter: RenderMeterAPI | null = null;
@@ -607,13 +331,6 @@ const _useAioWarned = new Set<string>();
 let _useAioActiveCount = 0;
 let _cleanupTimer: ReturnType<typeof setTimeout> | null = null;
 let _listenerHighWater = 0; // peak listener count since last teardown — for diagnostics
-
-// ── Built-in TT panel (pure DOM, no React) ────────────────────────
-// Toggled via Ctrl+. (period), auto-registered on first __tt: message
-
-let _ttPanel: HTMLElement | null = null;
-let _ttPanelVisible = false;
-let _ttKeyBound = false;
 
 // ── Connection status indicator (pure DOM) ──────────────────────────
 let _statusEl: HTMLElement | null = null;
@@ -669,195 +386,9 @@ function _hideStatus(): void {
   }
 }
 
-function _sendTTCmd(cmd: string): void {
-  if (_ws && _ws.readyState === WebSocket.OPEN) _ws.send(cmd);
-}
-
-function _renderTTPanel(): void {
-  if (!_ttState) return;
-
-  if (!_ttPanel) {
-    _ttPanel = document.createElement("div");
-    _ttPanel.id = "__aio-tt";
-    _ttPanel.style.cssText =
-      "position:fixed;bottom:12px;right:12px;z-index:99999;width:280px;max-height:420px;" +
-      "background:rgba(240,240,245,.92);color:#333;border:1px solid rgba(0,0,0,.12);border-radius:10px;" +
-      "font:12px/1.5 monospace;box-shadow:0 8px 32px rgba(0,0,0,.15);display:none;flex-direction:column;" +
-      "overflow:hidden;backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);";
-    document.body.appendChild(_ttPanel);
-  }
-
-  const tt = _ttState;
-  const atStart = tt.index <= 0;
-  const atEnd = tt.index >= tt.entries.length - 1;
-
-  _ttPanel.innerHTML = "";
-
-  // Header — draggable
-  const hdr = document.createElement("div");
-  hdr.style.cssText =
-    "padding:8px 10px;background:rgba(0,0,0,.05);border-bottom:1px solid rgba(0,0,0,.08);" +
-    "display:flex;align-items:center;justify-content:space-between;cursor:grab;";
-  hdr.innerHTML =
-    `<span style="color:#666;font-weight:600">⏱ time-travel</span>` +
-    `<span style="color:#999;font-size:11px">${
-      tt.index + 1
-    }/${tt.entries.length}${
-      tt.paused ? ' <span style="color:#e25">🔒</span>' : ""
-    }</span>`;
-  _ttPanel.appendChild(hdr);
-
-  // Drag logic
-  let dragX = 0, dragY = 0;
-  hdr.onmousedown = (e) => {
-    e.preventDefault();
-    dragX = e.clientX - _ttPanel!.offsetLeft;
-    dragY = e.clientY - _ttPanel!.offsetTop;
-    hdr.style.cursor = "grabbing";
-    const onMove = (ev: MouseEvent) => {
-      _ttPanel!.style.left = (ev.clientX - dragX) + "px";
-      _ttPanel!.style.top = (ev.clientY - dragY) + "px";
-      _ttPanel!.style.right = "auto";
-      _ttPanel!.style.bottom = "auto";
-    };
-    const onUp = () => {
-      hdr.style.cursor = "grab";
-      document.removeEventListener("mousemove", onMove);
-      document.removeEventListener("mouseup", onUp);
-    };
-    document.addEventListener("mousemove", onMove);
-    document.addEventListener("mouseup", onUp);
-  };
-
-  // Buttons
-  const bar = document.createElement("div");
-  bar.style.cssText =
-    "padding:6px 10px;display:flex;gap:4px;border-bottom:1px solid rgba(0,0,0,.08);";
-  const btnStyle =
-    "padding:3px 8px;border:1px solid rgba(0,0,0,.12);border-radius:5px;background:rgba(0,0,0,.06);" +
-    "color:#444;cursor:pointer;font:11px monospace;";
-  const btnDisabled = btnStyle +
-    "opacity:0.3;cursor:default;pointer-events:none;";
-
-  const mkBtn = (
-    label: string,
-    onclick: () => void,
-    disabled = false,
-  ): HTMLButtonElement => {
-    const b = document.createElement("button");
-    b.textContent = label;
-    b.style.cssText = disabled ? btnDisabled : btnStyle;
-    if (!disabled) {
-      b.onclick = onclick;
-      b.onmouseenter = () => {
-        b.style.background = "rgba(0,0,0,.1)";
-      };
-      b.onmouseleave = () => {
-        b.style.background = "rgba(0,0,0,.06)";
-      };
-    }
-    return b;
-  };
-
-  bar.appendChild(mkBtn("◀ undo", () => _sendTTCmd("__tt:undo"), atStart));
-  bar.appendChild(mkBtn("redo ▶", () => _sendTTCmd("__tt:redo"), atEnd));
-  bar.appendChild(
-    mkBtn(
-      tt.paused ? "🔓 unlock" : "🔒 lock",
-      () => _sendTTCmd(tt.paused ? "__tt:resume" : "__tt:pause"),
-    ),
-  );
-  _ttPanel.appendChild(bar);
-
-  // Entry list
-  const list = document.createElement("div");
-  list.style.cssText = "overflow-y:auto;max-height:300px;padding:4px 0;";
-  for (let i = tt.entries.length - 1; i >= 0; i--) {
-    const e = tt.entries[i]!;
-    const row = document.createElement("div");
-    const isCurrent = i === tt.index;
-    row.style.cssText =
-      "padding:3px 10px;cursor:pointer;display:flex;justify-content:space-between;" +
-      (isCurrent
-        ? "background:rgba(0,0,0,.08);color:#111;font-weight:600;"
-        : "color:#555;");
-    row.onmouseenter = () => {
-      if (!isCurrent) row.style.background = "rgba(0,0,0,.04)";
-    };
-    row.onmouseleave = () => {
-      if (!isCurrent) row.style.background = "transparent";
-    };
-    row.onclick = () => _sendTTCmd("__tt:goto:" + e.id);
-
-    const name = document.createElement("span");
-    name.textContent = (isCurrent ? "▸ " : "  ") + e.type;
-    name.style.cssText =
-      "overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;";
-    row.appendChild(name);
-
-    // Performance timing (dev mode)
-    const right = document.createElement("span");
-    right.style.cssText =
-      "color:#aaa;flex-shrink:0;margin-left:8px;font-size:10px;display:flex;gap:6px;";
-
-    if (e.perf) {
-      const reduceColor = e.perf.reduce > e.perf.budget.reduce
-        ? "#e25"
-        : "#666";
-      const effectColor = e.perf.effects > e.perf.budget.effect
-        ? "#e25"
-        : "#666";
-      right.innerHTML =
-        `<span style="color:${reduceColor}">${
-          Math.round(e.perf.reduce)
-        }ms</span>` +
-        `<span style="color:${effectColor}">${
-          Math.round(e.perf.effects)
-        }ms</span>`;
-    } else {
-      const d = new Date(e.ts);
-      right.textContent = `${String(d.getHours()).padStart(2, "0")}:${
-        String(d.getMinutes()).padStart(2, "0")
-      }:${String(d.getSeconds()).padStart(2, "0")}`;
-    }
-    row.appendChild(right);
-
-    list.appendChild(row);
-  }
-  _ttPanel.appendChild(list);
-
-  // Footer
-  const foot = document.createElement("div");
-  foot.style.cssText =
-    "padding:4px 10px;border-top:1px solid rgba(0,0,0,.08);color:#aaa;font-size:10px;text-align:center;";
-  foot.textContent = "Ctrl+. to toggle";
-  _ttPanel.appendChild(foot);
-
-  _ttPanel.style.display = _ttPanelVisible ? "flex" : "none";
-}
-
-let _ttKeyHandler: ((e: KeyboardEvent) => void) | null = null;
-function _bindTTKey(): void {
-  if (_ttKeyBound) return;
-  _ttKeyBound = true;
-  console.log(
-    "%c[aio] ⏱ time-travel active — Ctrl+. to toggle panel",
-    "color:#e94560;font-weight:bold",
-  );
-  _ttKeyHandler = (e: KeyboardEvent) => {
-    if (e.ctrlKey && !e.shiftKey && !e.altKey && e.code === "Period") {
-      e.preventDefault();
-      _ttPanelVisible = !_ttPanelVisible;
-      if (_ttPanelVisible) _renderTTPanel();
-      if (_ttPanel) _ttPanel.style.display = _ttPanelVisible ? "flex" : "none";
-    }
-  };
-  document.addEventListener("keydown", _ttKeyHandler);
-}
-
 /** Notifies all React subscribers of state change */
 function _notify() {
-  _listeners.notify(_state);
+  _listeners.notify(_coreHasState() ? _coreGetState() : null);
 }
 
 // ── useSyncExternalStore glue ───────────────────────────────────────
@@ -867,10 +398,10 @@ let _stateVersion = 0;
 let _stateReadyResolve: (() => void) | null = null;
 let _stateReadyPromise: Promise<void> | null = null;
 
-/** Returns a Promise that resolves when _state becomes non-null.
+/** Returns a Promise that resolves when state-core receives first state.
  *  Used by the HTML template to delay React mount until state is available. */
 export function _waitForState(): Promise<void> {
-  if (_state !== null) return Promise.resolve();
+  if (_coreHasState()) return Promise.resolve();
   if (!_stateReadyPromise) {
     _stateReadyPromise = new Promise<void>((resolve) => {
       _stateReadyResolve = resolve;
@@ -948,23 +479,20 @@ export function _subscribe(onStoreChange: () => void): () => void {
           _ws = null;
           _ipcConnected = false;
           _connecting = false;
-          _state = null;
+          _coreReset();
+          _initialShapeKeys = null;
           _stateReadyPromise = null;
           _stateReadyResolve = null;
           _queue = [];
           _retry = 0;
           _listenerHighWater = 0;
-          _idMaps.clear();
+          _coreReset(); // clears idMaps, signals, state
           if (_vitalsRenderMeter) {
             _vitalsRenderMeter.destroy();
             _vitalsRenderMeter = null;
           }
           // Clean up global listeners to prevent leaks
-          if (_ttKeyHandler) {
-            document.removeEventListener("keydown", _ttKeyHandler);
-            _ttKeyHandler = null;
-            _ttKeyBound = false;
-          }
+          _resetTT();
           if (_popstateHandler) {
             removeEventListener("popstate", _popstateHandler);
             _popstateHandler = null;
@@ -988,7 +516,7 @@ export function _subscribe(onStoreChange: () => void): () => void {
 }
 
 function _getSnapshot(): unknown {
-  return _state;
+  return _coreHasState() ? _coreGetState() : null;
 }
 function _getServerSnapshot(): unknown {
   return null;
@@ -1009,6 +537,10 @@ function _connectIPC() {
     _retry = 0;
     if (_wasConnected) _showStatus("Connected", "#2a2", 2000);
     _wasConnected = true;
+    // Register IPC as state-core transport
+    _coreSetTransport({ send: (d: string) => _ipc!.send(d), close: () => {} });
+    _coreSetConnected(true);
+    _ttSetSendFn((cmd: string) => _ipc!.send(cmd));
     // Drain memory queue
     const q = _queue;
     _queue = [];
@@ -1049,14 +581,7 @@ function _connectIPC() {
       return;
     }
     if (line.startsWith("__tt:")) {
-      try {
-        _ttState = JSON.parse(line.slice(5));
-        _bindTTKey();
-        _ttListeners.notify(_ttState!);
-        if (_ttPanelVisible) _renderTTPanel();
-      } catch (err) {
-        console.warn("[aio] bad __tt: data:", err);
-      }
+      _handleTTMessage(line.slice(5));
       return;
     }
     if (line.startsWith("__diag:")) {
@@ -1075,47 +600,36 @@ function _connectIPC() {
     try {
       const data = JSON.parse(line);
       if (data === null || typeof data !== "object") return;
-      const prev = _state;
-      if (data.$p && typeof data.$p === "object") {
-        if (_state === null) {
-          _diagEmit({
-            type: "delta-before-state",
-            severity: "warning",
-            source: "browser",
-            message: "Delta patch received before full state (IPC) — dropped",
-            hint:
-              "This usually means a reconnect race. The next full state sync will correct this.",
-          });
-          return;
-        }
-        _state = _applyPatch(_state as Record<string, unknown>, data);
-      } else {
-        _state = data;
-        // Full state — rebuild identity maps and reset path tracking
-        // All components re-render on full state, so paths are re-collected naturally
-        if (_state && typeof _state === "object" && !Array.isArray(_state)) {
-          _rebuildIdMaps(_state as Record<string, unknown>);
-        }
-        _accessedPaths.clear();
+      const result: _HandleResult = _coreHandleMessage(data);
+      if (result === "dropped") {
+        _diagEmit({
+          type: "delta-before-state",
+          severity: "warning",
+          source: "browser",
+          message: "Delta patch received before full state (IPC) — dropped",
+          hint:
+            "This usually means a reconnect race. The next full state sync will correct this.",
+        });
+        return;
       }
-      if (_state === prev) return; // no-op patch — skip notification
+      if (result === "noop") return;
 
-      // Synchronous bookkeeping
+      const next = _coreGetState();
+      _checkStateIntegrity(next);
       _stateVersion++;
-      if (_state !== null) _resolveStateReady();
+      if (_coreHasState()) _resolveStateReady();
 
       // Deferred React notification via RenderMeter
       if (_vitalsRenderMeter) {
         _vitalsRenderMeter.recordPatch();
         _vitalsRenderMeter.markDirty();
       } else {
-        // Fallback if meter not yet initialized (initial connect)
-        _listeners.notify(_state);
+        _listeners.notify(next);
       }
 
       // DevTools
       if (_devtoolsConnected && _lastAction) {
-        _sendDevTools(_lastAction, _state);
+        _sendDevTools(_lastAction, next);
         _lastAction = null;
       }
     } catch (err) {
@@ -1124,7 +638,7 @@ function _connectIPC() {
         type: "state-sync-error",
         severity: "error",
         source: "browser",
-        message: "Failed to parse state message from server",
+        message: "Failed to parse state message from server (IPC)",
         detail: { error: String(err) },
         hint:
           "Server sent malformed state. Check for serialization bugs on the server side.",
@@ -1134,6 +648,9 @@ function _connectIPC() {
 
   _ipc.onClose(() => {
     _ipcConnected = false;
+    _coreSetTransport(null);
+    _coreSetConnected(false);
+    _ttSetSendFn(null);
     if (_ipcPingTimer) {
       clearInterval(_ipcPingTimer);
       _ipcPingTimer = null;
@@ -1165,6 +682,13 @@ function _connect() {
   ws.onopen = async () => {
     _connecting = false;
     _retry = 0;
+    // Register WS as state-core transport
+    _coreSetTransport({
+      send: (d: string) => ws.send(d),
+      close: () => ws.close(),
+    });
+    _coreSetConnected(true);
+    _ttSetSendFn((cmd: string) => ws.send(cmd));
     ws.send(
       "__type:" +
         (typeof navigator !== "undefined" &&
@@ -1176,9 +700,8 @@ function _connect() {
     _wasConnected = true;
 
     // Re-send tracked subscriptions on reconnect
-    if (_currentSubs.length > 0) {
-      ws.send("__subs:" + JSON.stringify(_currentSubs));
-    }
+    // Re-send tracked subscriptions on reconnect (state-core owns the path set)
+    _coreResendSubs();
 
     // Flush memory queue (initial connect race)
     const q = _queue;
@@ -1318,14 +841,7 @@ function _connect() {
     }
     // Time-travel metadata from server
     if (typeof e.data === "string" && e.data.startsWith("__tt:")) {
-      try {
-        _ttState = JSON.parse(e.data.slice(5));
-        _bindTTKey();
-        _ttListeners.notify(_ttState!);
-        if (_ttPanelVisible) _renderTTPanel();
-      } catch (err) {
-        console.warn("[aio] bad __tt: data:", err);
-      }
+      _handleTTMessage(e.data.slice(5));
       return;
     }
     // Vitals pong from server
@@ -1361,47 +877,36 @@ function _connect() {
         console.warn("[aio] unexpected state type:", typeof data);
         return;
       }
-      const prev = _state;
-      if (data.$p && typeof data.$p === "object") {
-        if (_state === null) {
-          _diagEmit({
-            type: "delta-before-state",
-            severity: "warning",
-            source: "browser",
-            message: "Delta patch received before full state (WS) — dropped",
-            hint:
-              "This usually means a reconnect race. The next full state sync will correct this.",
-          });
-          return;
-        }
-        _state = _applyPatch(_state as Record<string, unknown>, data);
-      } else {
-        _state = data;
-        // Full state — rebuild identity maps and reset path tracking
-        // All components re-render on full state, so paths are re-collected naturally
-        if (_state && typeof _state === "object" && !Array.isArray(_state)) {
-          _rebuildIdMaps(_state as Record<string, unknown>);
-        }
-        _accessedPaths.clear();
+      const result: _HandleResult = _coreHandleMessage(data);
+      if (result === "dropped") {
+        _diagEmit({
+          type: "delta-before-state",
+          severity: "warning",
+          source: "browser",
+          message: "Delta patch received before full state (WS) — dropped",
+          hint:
+            "This usually means a reconnect race. The next full state sync will correct this.",
+        });
+        return;
       }
-      if (_state === prev) return; // no-op patch — skip notification
+      if (result === "noop") return;
 
-      // Synchronous bookkeeping
+      const next = _coreGetState();
+      _checkStateIntegrity(next);
       _stateVersion++;
-      if (_state !== null) _resolveStateReady();
+      if (_coreHasState()) _resolveStateReady();
 
       // Deferred React notification via RenderMeter
       if (_vitalsRenderMeter) {
         _vitalsRenderMeter.recordPatch();
         _vitalsRenderMeter.markDirty();
       } else {
-        // Fallback if meter not yet initialized (initial connect)
-        _listeners.notify(_state);
+        _listeners.notify(next);
       }
 
       // DevTools
       if (_devtoolsConnected && _lastAction) {
-        _sendDevTools(_lastAction, _state);
+        _sendDevTools(_lastAction, next);
         _lastAction = null;
       }
     } catch (err) {
@@ -1410,7 +915,7 @@ function _connect() {
         type: "state-sync-error",
         severity: "error",
         source: "browser",
-        message: "Failed to parse state message from server",
+        message: "Failed to parse state message from server (WS)",
         detail: { error: String(err) },
         hint:
           "Server sent malformed state. Check for serialization bugs on the server side.",
@@ -1424,6 +929,9 @@ function _connect() {
   ws.onclose = () => {
     _ws = null;
     _connecting = false;
+    _coreSetTransport(null);
+    _coreSetConnected(false);
+    _ttSetSendFn(null);
     if (_vitalsPingTimer) {
       clearInterval(_vitalsPingTimer);
       _vitalsPingTimer = null;
@@ -1542,8 +1050,8 @@ function _initDevTools(): void {
         }
       });
       // Send initial state
-      if (_state !== null) {
-        _devtools.init(_state);
+      if (_coreHasState()) {
+        _devtools.init(_coreGetState());
       }
     }
   } catch {
@@ -1568,9 +1076,9 @@ function _sendDevTools(
 /** Connect to Redux DevTools extension (call after useAio in dev mode) */
 export function connectDevTools(): void {
   _initDevTools();
-  if (_devtools && _state !== null) {
+  if (_devtools && _coreHasState()) {
     try {
-      _devtools.init(_state);
+      _devtools.init(_coreGetState());
     } catch { /* ignore */ }
   }
 }
@@ -1819,11 +1327,21 @@ export const aio: Record<string, any> = {
 };
 
 /** Cache for useFeature send objects (one per feature ref) */
-// deno-lint-ignore no-explicit-any
 const _featureSendCache = new WeakMap<
-  Record<string, any>,
+  _CoreFeatureRef,
   Record<string, (...args: unknown[]) => void>
 >();
+
+function _getCachedSend(
+  ref: _CoreFeatureRef,
+): Record<string, (...args: unknown[]) => void> {
+  let obj = _featureSendCache.get(ref);
+  if (!obj) {
+    obj = _coreCreateSendProxy(ref.__aio.id, ref, _send);
+    _featureSendCache.set(ref, obj);
+  }
+  return obj;
+}
 
 /** v0.5 hook — connects UI to a specific feature with scoped state, typed send, and machine status.
  *  Uses selector-based subscription: only re-renders when this feature's slice changes (not on every WS message).
@@ -1836,14 +1354,8 @@ const _featureSendCache = new WeakMap<
  *  // state is CounterState, never null
  *  ```
  */
-// deno-lint-ignore no-explicit-any
-// deno-lint-ignore no-explicit-any
-// deno-lint-ignore no-explicit-any
-type FeatureRef = {
-  __aio: { id: string; actions: Record<string, any>; actionKeys: string[] };
-};
 export function useFeature<S>(
-  ref: FeatureRef,
+  ref: _CoreFeatureRef,
   options: { fallback: S },
 ): {
   state: S;
@@ -1851,7 +1363,7 @@ export function useFeature<S>(
   status: string | undefined;
 };
 export function useFeature<S = unknown>(
-  ref: FeatureRef,
+  ref: _CoreFeatureRef,
   options?: { fallback?: never },
 ): {
   state: S | null;
@@ -1859,7 +1371,7 @@ export function useFeature<S = unknown>(
   status: string | undefined;
 };
 export function useFeature<S = unknown>(
-  ref: FeatureRef,
+  ref: _CoreFeatureRef,
   options?: { fallback?: S },
 ): {
   state: S;
@@ -1869,14 +1381,12 @@ export function useFeature<S = unknown>(
   const name = ref.__aio.id;
 
   // Register feature path for proxy-tracked subscriptions.
-  // Guarantees feature-level subscription even if component reads no leaf values.
-  _accessedPaths.add(name);
-  _scheduleSyncSubs();
+  _coreTrackPath(name);
 
   // Selector: extract just this feature's slice from global state
   const getSliceSnapshot = useCallback((): S | null => {
-    if (_state === null) return null;
-    return (_state as Record<string, unknown>)[name] as S | null;
+    if (!_coreHasState()) return null;
+    return (_coreGetState() as Record<string, unknown>)[name] as S | null;
   }, [name]);
 
   const featureState = useSyncExternalStore(
@@ -1885,32 +1395,19 @@ export function useFeature<S = unknown>(
     _getServerSnapshot as () => S | null,
   );
 
-  // State is guaranteed non-null because the framework waits for state before mounting React.
-  // Feature slice may still be null if the feature name doesn't exist in state.
-  const resolved = (featureState ??
-    (options?.fallback !== undefined ? options.fallback : featureState)) as S;
+  // AIO-29 defense: deep-merge with feature's initial state or explicit fallback
+  const defaults = options?.fallback ?? (ref.__aio.state as S | undefined);
+  const resolved = _coreResolveWithFallback(featureState, defaults);
 
   const status = resolved
     ? (resolved as Record<string, unknown>)._status as string | undefined
     : undefined;
 
-  // Build send object (cached per feature ref) — auto-tags actions with _source: 'UI'
-  let sendObj = _featureSendCache.get(ref);
-  if (!sendObj) {
-    sendObj = {};
-    for (const key of ref.__aio.actionKeys) {
-      const creator = ref.__aio.actions[key];
-      if (typeof creator === "function") {
-        sendObj[key] = (...args: unknown[]) => {
-          const action = creator(...args);
-          _send({ ...action, _source: "UI" });
-        };
-      }
-    }
-    _featureSendCache.set(ref, sendObj);
-  }
-
-  return { state: _trackingProxy(resolved, name) as S, send: sendObj, status };
+  return {
+    state: _trackingProxy(resolved, name) as S,
+    send: _getCachedSend(ref),
+    status,
+  };
 }
 
 /** Client-only state — not synced to server, not persisted. For UI-local concerns (editing flags, form inputs, etc.) */
@@ -1919,6 +1416,17 @@ export function useLocal<T>(
 ): { local: T; set: (next: T | ((prev: T) => T)) => void } {
   const [local, setLocal] = useState<T>(initial);
   return { local, set: setLocal };
+}
+
+/** Subscribe to connection status (connected to server or not). */
+export function useConnected(): boolean {
+  const sig = _coreGetConnectedSignal();
+  const subscribe = useCallback(
+    (cb: () => void) => sig.subscribe(cb),
+    [],
+  );
+  const getSnapshot = useCallback(() => sig.peek(), []);
+  return useSyncExternalStore(subscribe, getSnapshot, () => false);
 }
 
 /** Core projection logic — testable without React.
@@ -2018,42 +1526,8 @@ export function page<K extends string>(
   return Component ? createElement(Component) : null;
 }
 
-/** Time-travel hook — returns null in prod mode */
-export function useTimeTravel(): {
-  entries: { id: number; type: string; ts: number }[];
-  index: number;
-  paused: boolean;
-  undo: () => void;
-  redo: () => void;
-  goto: (id: number) => void;
-  pause: () => void;
-  resume: () => void;
-} | null {
-  const [tt, setTT] = useState<TTMeta | null>(_ttState);
-
-  useEffect(() => {
-    const unsub = _ttListeners.add((t) => setTT({ ...t }));
-    if (_ttState) setTT({ ..._ttState });
-    return unsub;
-  }, []);
-
-  if (!tt) return null;
-
-  const sendTT = (cmd: string) => {
-    if (_ws && _ws.readyState === WebSocket.OPEN) _ws.send(cmd);
-  };
-
-  return {
-    entries: tt.entries,
-    index: tt.index,
-    paused: tt.paused,
-    undo: () => sendTT("__tt:undo"),
-    redo: () => sendTT("__tt:redo"),
-    goto: (id: number) => sendTT("__tt:goto:" + id),
-    pause: () => sendTT("__tt:pause"),
-    resume: () => sendTT("__tt:resume"),
-  };
-}
+// useTimeTravel — re-exported from time-travel-panel.ts for backward compat
+export { useTimeTravel };
 
 /** Log stub for browser — no-op (logging writes to server-side files) */
 export const log = {
@@ -2268,16 +1742,12 @@ export function _reset(): void {
   _closed = true;
   _ws?.close();
   _ws = null;
-  _state = null;
+  _initialShapeKeys = null;
   _queue = [];
   _retry = 0;
   _closed = false;
   _listeners.clear();
-  _ttState = null;
-  _ttListeners.clear();
-  _ttPanel?.remove();
-  _ttPanel = null;
-  _ttPanelVisible = false;
+  _resetTT();
   _statusEl?.remove();
   _statusEl = null;
   if (_statusTimer) {
@@ -2293,7 +1763,6 @@ export function _reset(): void {
   _lastAction = null;
   _devtools = null;
   _devtoolsConnected = false;
-  _ttKeyBound = false;
   _ipcConnected = false;
   if (_ipcPingTimer) {
     clearInterval(_ipcPingTimer);
@@ -2308,7 +1777,6 @@ export function _reset(): void {
   }
   _listenerHighWater = 0;
   _stateVersion = 0;
-  _idMaps.clear();
   _useAioActiveCount = 0;
   _diagLastEmit.clear();
   _resetArrayRefStats();
@@ -2319,6 +1787,7 @@ export function _reset(): void {
   }
   _vitalsTransportProbe = null;
   _resetTracking();
+  _coreReset(); // reset state-core signals
 }
 
 // ── Framework-agnostic client ─────────────────────────────────────────────
@@ -2330,18 +1799,22 @@ export const client = {
   /** Subscribe to state changes. Calls `fn(state)` on every update. Returns unsubscribe. Manages WS lifecycle (connects on first, disconnects on last). */
   subscribe(fn: (state: unknown) => void): () => void {
     // Wrap into the same _subscribe lifecycle (connect on first, disconnect on last)
-    const unsub = _subscribe(() => fn(_state));
+    const unsub = _subscribe(() =>
+      fn(_coreHasState() ? _coreGetState() : null)
+    );
     return unsub;
   },
 
   /** Current full state snapshot (null before first message). */
   getState(): unknown {
-    return _state;
+    return _coreHasState() ? _coreGetState() : null;
   },
 
   /** Get a single feature's state slice by name. */
   getFeatureState(name: string): unknown {
-    return _state ? (_state as Record<string, unknown>)[name] ?? null : null;
+    if (!_coreHasState()) return null;
+    const s = _coreGetState();
+    return s[name] ?? null;
   },
 
   /** Send an action to the server. Queued during initial connect, persisted offline after disconnect. */

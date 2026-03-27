@@ -59,17 +59,25 @@ function escHtml(s: string): string {
 const CDN = "https://esm.sh";
 
 /** Generates browser import map from framework defaults + deno.json npm packages.
- *  npm packages → esm.sh CDN URLs. jsr/local imports are skipped (handled differently). */
+ *  npm packages → esm.sh CDN URLs. jsr/local imports are skipped (handled differently).
+ *  When renderer is "aio", React CDN entries are omitted and aio/jsx-runtime points to native JSX. */
 export function buildBrowserImportMap(
   denoImports: Record<string, string>,
+  renderer?: "react" | "aio",
 ): Record<string, string> {
-  const imports: Record<string, string> = {
-    "react": `${CDN}/react@18.3.1`,
-    "react-dom/client": `${CDN}/react-dom@18.3.1/client`,
-    "react/jsx-runtime": `${CDN}/react@18.3.1/jsx-runtime`,
-    "aio": "/__aio/ui.js",
-    "aio/browser": "/__aio/ui.js",
-  };
+  const imports: Record<string, string> = renderer === "aio"
+    ? {
+      "aio": "/__aio/ui.js",
+      "aio/browser": "/__aio/ui.js",
+      "aio/jsx-runtime": "/__aio/jsx-runtime.ts",
+    }
+    : {
+      "react": `${CDN}/react@18.3.1`,
+      "react-dom/client": `${CDN}/react-dom@18.3.1/client`,
+      "react/jsx-runtime": `${CDN}/react@18.3.1/jsx-runtime`,
+      "aio": "/__aio/ui.js",
+      "aio/browser": "/__aio/ui.js",
+    };
   for (const [name, specifier] of Object.entries(denoImports)) {
     if (!specifier.startsWith("npm:")) continue;
     if (imports[name]) continue; // don't override defaults
@@ -89,6 +97,7 @@ export function generateHTML(
   width?: number,
   height?: number,
   renderBudget?: RenderBudget,
+  renderer?: "react" | "aio",
 ): string {
   const cssLink = hasCSS ? '\n  <link rel="stylesheet" href="/style.css">' : "";
   const statusScript = showStatus === false
@@ -125,6 +134,65 @@ export function generateHTML(
 </html>`;
   }
 
+  // Dev (AIO renderer): native VDOM — no React/ReactDOM, signal-driven re-render
+  if (renderer === "aio") {
+    return `<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <meta name="referrer" content="no-referrer">
+  <title>${
+      escHtml(title)
+    }</title>${metaW}${metaH}${cssLink}${statusScript}${configScript}
+</head>
+<body>
+  <div id="root"></div>
+  <script type="importmap">${importMap}</script>
+  <script type="module">
+    // Dev reload WS — live reload on file changes
+    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:'
+    const _tk = new URLSearchParams(location.search).get('token')
+    const _wsUrl = proto + '//' + location.host + '/ws' + (_tk ? '?token=' + encodeURIComponent(_tk) : '')
+    let _bootId = null
+    function _devWs() {
+      const ws = new WebSocket(_wsUrl)
+      ws.onmessage = ev => {
+        if (typeof ev.data === 'string' && ev.data.startsWith('__graph_error:')) {
+          ws.close(); location.reload(); return
+        }
+        if (ev.data === '__graph_clear') { ws.close(); location.reload(); return }
+        if (ev.data === '__reload') { ws.close(); location.reload() }
+        else if (ev.data === '__css') {
+          document.querySelectorAll('link[rel="stylesheet"]').forEach(link => {
+            if (link.href.startsWith(location.origin)) link.href = link.href.split('?')[0] + '?t=' + Date.now()
+          })
+        } else if (typeof ev.data === 'string' && ev.data.startsWith('__boot:')) {
+          const id = ev.data.slice(7)
+          if (_bootId && _bootId !== id) { ws.close(); location.reload() }
+          _bootId = id
+        }
+      }
+      ws.onclose = () => setTimeout(_devWs, 2000)
+      ws.onerror = (e) => console.warn('[aio] reload WS error:', e)
+      ws.onopen = () => console.debug('[aio] reload WS connected')
+    }
+    _devWs()
+
+    // Mount AIO app — wait for server state, then render
+    const _aioMod = await import('aio')
+    const _appMod = await import('/App.tsx?v=' + Date.now())
+    const App = _appMod.default
+    if (_aioMod._waitForState) {
+      document.getElementById('root').textContent = 'Loading\\u2026'
+      await _aioMod._waitForState()
+    }
+    const { mount: _mount } = await import('/__aio/aio-renderer.ts')
+    _mount(document.getElementById('root'), App)
+  </script>
+</body>
+</html>`;
+  }
+
   // Dev: CDN React via import map + live transpile + error overlay
   return `<!DOCTYPE html>
 <html>
@@ -141,11 +209,24 @@ export function generateHTML(
   <script type="module">
     import { createElement, Component } from 'react'
     import { createRoot } from 'react-dom/client'
-    // Error boundary — catches render errors that slip past Suspense. Shows error + auto-retries.
+    // Error boundary — catches render errors. Subscribes to state to:
+    // 1. Prevent 300ms teardown (keeps _listeners.size > 0 while children are unmounted)
+    // 2. Auto-recover when server sends a new state update
+    let _aioMod = null
     class _AioBoundary extends Component {
-      constructor(p) { super(p); this.state = { error: null } }
+      constructor(p) { super(p); this.state = { error: null }; this._unsub = null }
       static getDerivedStateFromError(e) { return { error: e } }
       componentDidCatch(e, info) { console.error('[aio] Render error:', e, info) }
+      componentDidMount() {
+        if (_aioMod && _aioMod._subscribe) {
+          this._unsub = _aioMod._subscribe(() => {
+            if (this.state.error) this.setState({ error: null })
+          })
+        }
+      }
+      componentWillUnmount() {
+        if (this._unsub) { this._unsub(); this._unsub = null }
+      }
       render() {
         if (this.state.error) {
           const e = this.state.error
@@ -216,11 +297,12 @@ export function generateHTML(
       // Import _waitForState from the framework — delays mount until server state arrives.
       // This eliminates the null-state race: React never renders until state is guaranteed non-null.
       const aio = await import('aio')
+      _aioMod = aio
       if (aio._waitForState) {
         document.getElementById('root').textContent = 'Loading\u2026'
         await aio._waitForState()
       }
-      // Mount React inside error boundary — catches render crashes, shows error + retry
+      // Mount React inside error boundary — subscribes to state to prevent teardown + auto-recover
       createRoot(document.getElementById('root')).render(
         createElement(_AioBoundary, null, createElement(App))
       )

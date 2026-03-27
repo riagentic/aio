@@ -1,6 +1,97 @@
 # Changelog
 
-## Unreleased
+## v1.0.0-alpha6
+
+**AIR native renderer (~8KB)**
+
+- Signal-based VDOM engine with JSX, keyed reconciliation, auto-memo
+  per-component reactivity
+- SSR + hydration, ErrorBoundary, lifecycle hooks, context, portals, suspense
+- Form bindings — `useForm()` with signal-backed validation, `useFieldArray()`
+  for dynamic lists
+- Animation — `useSpring()` physics-based tweens, `useTransition()` enter/exit
+- Virtual scrolling — `useVirtualList()` for large datasets
+- DevTools integration (component tree, render counts)
+
+**Adapter architecture**
+
+- `state-core.ts` as framework-agnostic foundation — React and AIR adapters
+  consume it as thin layers
+- New export paths: `@riagentic/aio/state-core`,
+  `@riagentic/aio/adapters/react`, `@riagentic/aio/adapters/air`,
+  `@riagentic/aio/jsx-runtime`
+
+**Delta protocol hardening (AIO-26..34)**
+
+- Electron IPC `__aio:ready` replays only `lastFullState` — no unsafe delta
+  replay (AIO-26)
+- UDS `__subs:` handling and per-client subscription filtering (AIO-27)
+- `$f` marker protocol — filtered state merges instead of replacing (AIO-29)
+- Control messages no longer corrupt `lastFullState` (AIO-30)
+- `unflattenPatch` contradiction on empty→identity array transition fixed
+  (AIO-31)
+- Periodic resync every ~5s prevents permanent delta desync (AIO-33)
+- `lastKeyJsons` updated after successful send, not before (AIO-33)
+- Removed unsafe reference-equality shortcut in `_computeDelta` (AIO-34)
+
+---
+
+## v1.0.0-alpha5
+
+**Identity-keyed array delta compression (AIO-12)**
+
+- Arrays containing objects with `id` fields are now detected by `flattenKeys`
+  and sent as identity-keyed deltas instead of full replacement
+- Wire format: `$arr` marker + `$id:<key>` per-element patches + `$rm` for
+  removals — only changed elements are sent
+- Typical savings: 120KB → 7.5KB per tick for a 160-element array
+- Browser-side `_idMaps` registry reconstructs arrays from patches preserving
+  object identity (React keys stable across updates)
+
+**4-layer wasted render prevention (AIO-11)**
+
+- `useProjection(fn, deps)` — derive data from state with structural sharing;
+  components only re-render when the projected value actually changes
+- `memo(Component, compare?)` — aio-aware memo that uses `_shallowEqual` per
+  prop (not referential equality on the entire props object)
+- `aiol` lint rule: warns when `.map()` renders `memo()` components without
+  `useProjection()`
+- Runtime dev warning: console.warn when full-state subscription detected in
+  `useAio()`, deduplicated per call site
+
+**Deep proxy-tracked subscriptions**
+
+- `useAio()` now auto-tracks which state paths each component accesses via Proxy
+  interception
+- Server filters delta broadcasts to only include paths the client actually
+  reads — reduces bandwidth for large state trees
+- Subscription filter sent on connect and updated on access pattern change
+
+**UDS ghost socket elimination (AIO-24/AIO-25)**
+
+- Removed idle timeout from UDS connections — local sockets stay alive
+  indefinitely (OS handles cleanup on process death)
+- Server explicitly calls `conn.close()` on read-loop end — no more ghost
+  sockets surviving after client disconnect
+- IPC keepalive: browser sends `__ping` every 60s over IPC bridge as
+  defense-in-depth for passive viewing (dashboards, monitoring)
+- Write error handling: failed `sock.write()` in Electron main destroys socket
+  and notifies renderer via `__aio:close`
+
+**Framework reliability fixes (AIO-14..23)**
+
+- 10 targeted fixes across dispatch, flow, server, and electron modules
+- Improved error propagation, edge case handling, and connection lifecycle
+
+**JSR documentation score — 100%**
+
+- JSDoc on all public exports across all 4 entrypoints
+- All transitively-referenced types re-exported from `mod.ts`
+- `deno doc --lint` passes with zero errors
+
+---
+
+## v1.0.0-alpha4
 
 **Flow cross-feature state access**
 
@@ -47,18 +138,6 @@
 - Console throttling: same kind+trigger suppressed for 2s to prevent spam
 - Recovery deduplication: `recovered` emitted only on actual transition from
   degraded
-- `_applyPatch` reference stability: shallow-equal comparison preserves object
-  references for unchanged patched keys, eliminating phantom re-renders
-- `useAio()` dev warning: console.warn when full-state subscription detected,
-  deduplicated per call site. Active instances ref-counted (accurate after
-  unmount)
-- Re-render storm detection (hint rule #7): timer-based 1s window, warns when
-  > 30 subscribe callbacks/sec. Runs independently of probe status changes
-- Broadcast payload size tracking per client — UTF-8 bytes (exposed via
-  `/__aio/vitals`)
-- Per-feature state size tracking — UTF-8 bytes (exposed via `/__aio/vitals`)
-- `onClientStateSent()` wired — last broadcast timestamp per client now tracked
-- Pure `formatDiagEvent()` formatter — zero side effects, fully testable
 
 **PressureMonitor — resource pressure warnings**
 
@@ -106,6 +185,47 @@
 - Zero-cost when `perfCheck: "off"` — no `performance.now()` calls
 - `perf.log` entries for `BUDGET_REDUCE` now include phase breakdown showing
   where time was spent
+
+**Render optimization**
+
+- `_applyPatch` reference stability: shallow-equal comparison preserves object
+  references for unchanged patched keys, eliminating phantom re-renders
+- `useAio()` dev warning: console.warn when full-state subscription detected,
+  deduplicated per call site. Active instances ref-counted (accurate after
+  unmount)
+- Re-render storm detection (hint rule #7): timer-based 1s window, warns when
+  > 30 subscribe callbacks/sec
+- Broadcast payload size tracking per client — UTF-8 bytes (exposed via
+  `/__aio/vitals`)
+- Per-feature state size tracking — UTF-8 bytes (exposed via `/__aio/vitals`)
+- `onClientStateSent()` wired — last broadcast timestamp per client now tracked
+- Pure `formatDiagEvent()` formatter — zero side effects, fully testable
+
+**Graph validator**
+
+- New `src/graph-validator.ts` — validates feature dependency graph at
+  `aio.run()` startup
+- Detects circular dependencies, missing features, and invalid `dispatchTo`
+  references
+
+**Internals**
+
+- `structuredClone` failure in dispatch now reports `EFFECT_ERROR` and drops
+  effects instead of silently continuing with revoked Immer draft refs
+- Effect timeout is now hard-cancel — timed-out effects are abandoned and
+  counted toward circuit breaker. Late rejections suppressed
+- `db.transaction()` callback: `_inTransaction` flag resets even when `BEGIN`
+  fails, preventing permanent deadlock
+- Extracted `server-html.ts` from `server.ts` (MIME, import map, HTML gen, error
+  classification)
+
+**Examples**
+
+- Todo app (`examples/todo/`) — CRUD, filtering, inline editing, persistence
+- Interactive playground (`examples/playground/`) — standalone HTML, 3 examples,
+  live code editor
+
+---
 
 ## v1.0.0-alpha3
 
@@ -219,10 +339,6 @@
 - TLS cert fails + `--expose` → error (was: silent HTTP fallback)
 - KV open fails + `persist:true` → error (was: silent no-persistence)
 - `$HOME` missing + persistence → error (was: /tmp fallback)
-
----
-
-## v1.0.0-alpha2
 
 **Breaking: `appId` mandatory in `aio.run()`**
 

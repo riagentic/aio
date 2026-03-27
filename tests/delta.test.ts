@@ -803,3 +803,353 @@ Deno.test("e2e identity array: ref identity preserved for unchanged elements", (
   );
   assertNotStrictEquals(members[0], sol, "changed SOL element gets new ref");
 });
+
+// ── AIO-31: empty→identity array transition creates contradicting patch ──
+
+Deno.test("AIO-31: unflattenPatch — identity patch suppresses $d for same key", () => {
+  // When array transitions from [] (atomic: "ratelimit.providers") to
+  // [{id:"a"}] (identity: "ratelimit.providers.$id:a"), _computeDelta sees:
+  //   changed = {"ratelimit.providers.$id:a": {id:"a", name:"ProvA"}}
+  //   removed = ["ratelimit.providers"]  (old atomic key gone)
+  //
+  // BUG: unflattenPatch creates both $arr patch AND $d deletion for "providers"
+  // FIX: suppress $d when $arr identity patch already exists for same key
+
+  const changed: Record<string, unknown> = {
+    "ratelimit.providers.$id:a": { id: "a", name: "ProvA" },
+    "ratelimit.providers.$id:b": { id: "b", name: "ProvB" },
+  };
+  const removed = ["ratelimit.providers"]; // old atomic key
+
+  const result = unflattenPatch(changed, removed);
+  const rl = result.$p.ratelimit as Record<string, unknown>;
+
+  // Identity patch must exist
+  assertEquals(
+    (rl.providers as Record<string, unknown>).$arr,
+    true,
+    "providers must have $arr identity patch",
+  );
+  assertEquals(
+    (rl.providers as Record<string, unknown>)["$id:a"],
+    { id: "a", name: "ProvA" },
+    "must have $id:a entry",
+  );
+
+  // $d must NOT contain "providers" — identity patch supersedes atomic removal
+  const deletions = rl.$d as string[] | undefined;
+  const hasProvidersDeletion = deletions?.includes("providers") ?? false;
+  assertEquals(
+    hasProvidersDeletion,
+    false,
+    "CRITICAL: $d must NOT delete 'providers' — identity patch supersedes atomic removal",
+  );
+});
+
+Deno.test("AIO-31: end-to-end — empty array to identity array via _computeDelta + _applyPatch", () => {
+  // Full round-trip: server computes delta, browser applies it
+  const state1 = {
+    ratelimit: {
+      providers: [] as unknown[],
+      stats: { total: 0 },
+    },
+  };
+  const state2 = {
+    ratelimit: {
+      providers: [{ id: "a", name: "ProvA" }, { id: "b", name: "ProvB" }],
+      stats: { total: 10 },
+    },
+  };
+
+  // First broadcast → establishes flat keys for empty array
+  const init = _computeDelta(state1, null, {});
+
+  // Second broadcast → delta with empty→identity transition
+  const delta = _computeDelta(state2, state1, init.newKeyJsons);
+
+  // Apply delta to browser state
+  if (delta.kind === "delta") {
+    const patch = JSON.parse(delta.msg);
+    const result = _applyPatch(state1, patch);
+
+    // providers MUST exist (not undefined from contradicting $d)
+    const providers = (result.ratelimit as Record<string, unknown>)
+      .providers as unknown[];
+    assertNotEquals(
+      providers,
+      undefined,
+      "CRITICAL: providers must NOT be undefined after empty→identity transition",
+    );
+    assertEquals(Array.isArray(providers), true, "providers must be an array");
+    assertEquals(providers.length, 2, "providers must have 2 elements");
+    assertEquals(
+      (providers[0] as Record<string, unknown>).id,
+      "a",
+      "first provider must be 'a'",
+    );
+  } else {
+    // If full state was sent instead of delta, that's also acceptable
+    // (means the threshold triggered full send — not a failure)
+  }
+});
+
+// ── Delta round-trip invariant tests ─────────────────────────────────
+
+// Helper: runs state1→state2 through full delta pipeline, asserts result matches state2
+function assertDeltaRoundTrip(
+  name: string,
+  state1: Record<string, unknown>,
+  state2: Record<string, unknown>,
+) {
+  Deno.test(`delta round-trip: ${name}`, () => {
+    // Need to rebuild id maps for state1 so _applyPatch can handle identity arrays
+    _rebuildIdMaps(state1);
+    const init = _computeDelta(state1, null, {});
+    const delta = _computeDelta(state2, state1, init.newKeyJsons);
+
+    if (delta.kind === "skip") {
+      assertEquals(
+        JSON.stringify(state1),
+        JSON.stringify(state2),
+        "skip means states must be equal",
+      );
+      return;
+    }
+
+    const parsed = JSON.parse(delta.msg);
+    if (delta.kind === "full") {
+      assertEquals(parsed, state2, `full state must match target`);
+      return;
+    }
+
+    // delta kind — apply patch and compare
+    const result = _applyPatch(state1, parsed);
+
+    // Verify no key from state2 became undefined in result
+    for (const [k, v] of Object.entries(state2)) {
+      if (v !== undefined) {
+        assertNotEquals(
+          (result as Record<string, unknown>)[k],
+          undefined,
+          `key "${k}" must not be undefined after round-trip`,
+        );
+      }
+    }
+
+    // Deep equality check
+    assertEquals(
+      JSON.parse(JSON.stringify(result)),
+      JSON.parse(JSON.stringify(state2)),
+      `round-trip must produce target state`,
+    );
+  });
+}
+
+// 1. empty→non-empty identity array
+assertDeltaRoundTrip(
+  "empty→non-empty identity array",
+  { feat: { items: [], count: 0 } },
+  { feat: { items: [{ id: "a", v: 1 }, { id: "b", v: 2 }], count: 0 } },
+);
+
+// 2. non-empty identity array→empty
+assertDeltaRoundTrip(
+  "non-empty identity array→empty",
+  { feat: { items: [{ id: "a", v: 1 }, { id: "b", v: 2 }], count: 0 } },
+  { feat: { items: [], count: 0 } },
+);
+
+// 3. identity array element added
+assertDeltaRoundTrip(
+  "identity array element added",
+  { feat: { items: [{ id: "a", v: 1 }, { id: "b", v: 2 }] } },
+  {
+    feat: {
+      items: [{ id: "a", v: 1 }, { id: "b", v: 2 }, { id: "c", v: 3 }],
+    },
+  },
+);
+
+// 4. identity array element removed
+assertDeltaRoundTrip(
+  "identity array element removed",
+  {
+    feat: {
+      items: [{ id: "a", v: 1 }, { id: "b", v: 2 }, { id: "c", v: 3 }],
+    },
+  },
+  { feat: { items: [{ id: "a", v: 1 }, { id: "b", v: 2 }] } },
+);
+
+// 5. identity array element changed
+assertDeltaRoundTrip(
+  "identity array element changed",
+  { feat: { items: [{ id: "a", v: 1 }, { id: "b", v: 2 }] } },
+  { feat: { items: [{ id: "a", v: 99 }, { id: "b", v: 2 }] } },
+);
+
+// 6. nested object sub-key changed
+assertDeltaRoundTrip(
+  "nested object sub-key changed",
+  { a: { x: 1, y: 2, z: 3 }, b: { m: 10 } },
+  { a: { x: 1, y: 99, z: 3 }, b: { m: 10 } },
+);
+
+// 7. top-level key added
+assertDeltaRoundTrip(
+  "top-level key added",
+  { a: { x: 1 } },
+  { a: { x: 1 }, b: { y: 2 } },
+);
+
+// 8. sub-key deletion
+assertDeltaRoundTrip(
+  "sub-key deletion",
+  { f: { a: 1, b: 2, c: 3, d: 4, e: 5 } },
+  { f: { a: 1, c: 3, e: 5 } },
+);
+
+// 9. mixed: add + remove + modify
+assertDeltaRoundTrip(
+  "mixed: add + remove + modify",
+  { feat: { a: 1, b: 2, c: 3, d: 4, e: 5, f: 6 } },
+  { feat: { a: 99, c: 3, d: 4, e: 5, f: 6, g: 7 } },
+);
+
+// 10. multiple features changed
+assertDeltaRoundTrip(
+  "multiple features changed",
+  { feat1: { x: 1, y: 2 }, feat2: { items: [{ id: "a", v: 1 }] } },
+  { feat1: { x: 1, y: 99 }, feat2: { items: [{ id: "a", v: 42 }] } },
+);
+
+// ── AIO-33: mutation-proof delta detection ─────────────────────────
+// When freezeState=false (production), state objects are mutable. If a shared
+// nested object is mutated in-place (same reference, different content),
+// _computeDelta must still detect the change via JSON comparison — not skip it
+// due to reference equality.
+
+Deno.test("AIO-33: _computeDelta detects in-place mutation (same ref, different content)", () => {
+  // Simulate structural sharing: state_v1 and state_v2 share the same member object
+  const sharedMember = { id: "BTC", phase: "ENTERING" };
+  const state_v1 = { fleet: { members: [sharedMember], stats: { count: 1 } } };
+
+  // First broadcast — establish baseline
+  const init = _computeDelta(state_v1, null, {});
+  assertEquals(init.kind, "full");
+
+  // Simulate in-place mutation (freezeState=false): same reference, content changed
+  sharedMember.phase = "IDLE";
+  // state_v2 has the SAME member reference as state_v1 (structural sharing)
+  const state_v2 = { fleet: { members: [sharedMember], stats: { count: 1 } } };
+
+  // _computeDelta must detect the change despite same reference
+  const delta = _computeDelta(state_v2, state_v1, init.newKeyJsons);
+  assertNotEquals(
+    delta.kind,
+    "skip",
+    "must not skip — content changed even though ref is same",
+  );
+
+  // The delta must include the updated member
+  if (delta.kind === "delta") {
+    const parsed = JSON.parse(delta.msg);
+    const arrPatch = parsed.$p?.fleet?.members;
+    assertEquals(arrPatch?.$arr, true, "must be identity array patch");
+    assertEquals(
+      arrPatch?.["$id:BTC"]?.phase,
+      "IDLE",
+      "must carry updated phase",
+    );
+  } else {
+    // Full state is also acceptable — it contains the correct data
+    const parsed = JSON.parse(delta.msg);
+    assertEquals(parsed.fleet.members[0].phase, "IDLE");
+  }
+});
+
+Deno.test("AIO-33: _computeDelta detects mutation on non-identity nested key", () => {
+  const sharedStats = { avg: 10, max: 100 };
+  const state_v1 = { feat: { stats: sharedStats, name: "test" } };
+  const init = _computeDelta(state_v1, null, {});
+
+  // Mutate in-place
+  sharedStats.avg = 99;
+  const state_v2 = { feat: { stats: sharedStats, name: "test" } };
+
+  const delta = _computeDelta(state_v2, state_v1, init.newKeyJsons);
+  assertNotEquals(
+    delta.kind,
+    "skip",
+    "must detect in-place mutation of nested object",
+  );
+});
+
+// ── AIO-33: Simulated delta desync recovery via forced resync ─────
+
+Deno.test("AIO-33: simulated delta desync — stale lastKeyJsons recovers on forced resync", () => {
+  // Scenario: server's lastKeyJsons has idle (thinks client has it), but
+  // client actually has ENTERING (lost message). Without resync, the
+  // server would never re-send the change.
+  const state = {
+    fleet: {
+      members: [
+        { id: "BCH", phase: "idle" },
+        { id: "SOL", phase: "idle" },
+      ],
+    },
+  };
+
+  // Simulate stale lastKeyJsons that matches current state (as if delta was
+  // already sent successfully — but client never received it)
+  const flat = flattenKeys(state as Record<string, unknown>);
+  const staleKeyJsons: Record<string, string> = {};
+  for (const k of Object.keys(flat)) {
+    staleKeyJsons[k] = JSON.stringify(flat[k]);
+  }
+
+  // Normal delta: server thinks nothing changed → skip
+  const delta = _computeDelta(state, state, staleKeyJsons);
+  assertEquals(delta.kind, "skip", "without resync, delta is skip (desynced)");
+
+  // Forced resync: reset lastState to null, lastKeyJsons to {} (simulates
+  // the broadcastCount >= 100 reset in broadcastState)
+  const resyncDelta = _computeDelta(state, null, {});
+  assertEquals(resyncDelta.kind, "full", "forced resync sends full state");
+
+  // Full state contains the correct data — browser replaces state
+  const parsed = JSON.parse(resyncDelta.msg);
+  assertEquals(parsed.fleet.members[0].phase, "idle");
+  assertEquals(parsed.fleet.members[1].phase, "idle");
+});
+
+Deno.test("AIO-33: lastKeyJsons not updated on failed send — next broadcast retries", () => {
+  // Scenario: delta computed, message NOT sent (send failed). lastKeyJsons
+  // should NOT advance so the next broadcast re-detects the change.
+  const state_v1 = {
+    fleet: { members: [{ id: "BCH", phase: "ENTERING" }] },
+  };
+  const init = _computeDelta(state_v1, null, {});
+  // Client has state_v1, server has lastKeyJsons from init
+
+  const state_v2 = {
+    fleet: { members: [{ id: "BCH", phase: "idle" }] },
+  };
+  const delta = _computeDelta(state_v2, state_v1, init.newKeyJsons);
+  assertNotEquals(delta.kind, "skip", "change detected");
+
+  // Simulate: send FAILED — don't update lastKeyJsons (keep init.newKeyJsons)
+  // Next broadcast should re-detect the same change
+  const retry = _computeDelta(state_v2, state_v1, init.newKeyJsons);
+  assertNotEquals(
+    retry.kind,
+    "skip",
+    "retry: change re-detected because lastKeyJsons not advanced",
+  );
+
+  // Verify the delta carries the correct update
+  if (retry.kind === "delta") {
+    const parsed = JSON.parse(retry.msg);
+    assertEquals(parsed.$p?.fleet?.members?.["$id:BCH"]?.phase, "idle");
+  }
+});

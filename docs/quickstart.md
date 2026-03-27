@@ -69,7 +69,7 @@ deno install
     "jsxImportSourceTypes": "@types/react"
   },
   "imports": {
-    "aio": "jsr:@riagentic/aio@1.0.0-alpha4",
+    "aio": "jsr:@riagentic/aio@1.0.0-alpha6",
     "@types/react": "npm:@types/react@^18",
     "react": "npm:react@^18",
     "react-dom": "npm:react-dom@^18",
@@ -77,14 +77,14 @@ deno install
   },
   "tasks": {
     "dev": "deno run -A src/app.ts",
-    "am": "deno run -A jsr:@riagentic/aio@1.0.0-alpha4/src/am",
+    "am": "deno run -A jsr:@riagentic/aio@1.0.0-alpha6/src/am",
     "test": "deno test -A --unstable-kv tests/",
-    "compile:browser": "deno run -A jsr:@riagentic/aio@1.0.0-alpha4/src/build --compile",
-    "compile:electron": "deno run -A jsr:@riagentic/aio@1.0.0-alpha4/src/build --compile --electron",
-    "compile:electron:remote": "deno run -A jsr:@riagentic/aio@1.0.0-alpha4/src/build --client",
-    "compile:cli": "deno run -A jsr:@riagentic/aio@1.0.0-alpha4/src/build --compile --cli",
-    "compile:service": "deno run -A jsr:@riagentic/aio@1.0.0-alpha4/src/build --compile --service --headless",
-    "compile:android": "deno run -A jsr:@riagentic/aio@1.0.0-alpha4/src/build --android"
+    "compile:browser": "deno run -A jsr:@riagentic/aio@1.0.0-alpha6/src/build --compile",
+    "compile:electron": "deno run -A jsr:@riagentic/aio@1.0.0-alpha6/src/build --compile --electron",
+    "compile:electron:remote": "deno run -A jsr:@riagentic/aio@1.0.0-alpha6/src/build --client",
+    "compile:cli": "deno run -A jsr:@riagentic/aio@1.0.0-alpha6/src/build --compile --cli",
+    "compile:service": "deno run -A jsr:@riagentic/aio@1.0.0-alpha6/src/build --compile --service --headless",
+    "compile:android": "deno run -A jsr:@riagentic/aio@1.0.0-alpha6/src/build --android"
   }
 }
 ```
@@ -297,7 +297,7 @@ to open in your browser instead.
 
 **"Module not found: aio"** Run `deno install` to download dependencies. Make
 sure your `deno.json` has the `"aio"` import mapped to
-`jsr:@riagentic/aio@1.0.0-alpha4`.
+`jsr:@riagentic/aio@1.0.0-alpha6`.
 
 **State resets on every restart** This is normal in dev if you changed your
 state shape. aio auto-persists to Deno.Kv — if the shape changed, the old state

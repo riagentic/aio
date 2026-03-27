@@ -51,6 +51,7 @@ export interface ServerConfig {
   key?: string; // PEM key string — required when cert is set
   users?: Record<string, AioUser>; // per-user token map (overrides token)
   showStatus?: boolean; // show reconnection indicator (default: true)
+  renderer?: "react" | "aio"; // default: 'react' — 'aio' uses native VDOM engine
   renderBudget?: RenderBudget; // sent to browser for RenderMeter thresholds
   fullStateThreshold?: number; // 0-1: ratio of changed keys for delta vs full broadcast (default: 0.5)
   maxConnections?: number; // max concurrent WebSocket clients (default: 100)
@@ -215,18 +216,21 @@ async function transpile(
   source: string,
   filepath: string,
   log?: (msg: string) => void,
+  renderer?: "react" | "aio",
 ): Promise<string> {
   const npath = normPath(filepath);
   const cached = transpileCache.get(npath);
   if (cached && cached.source === source) return cached.code;
   const transform = await getTransform();
   const loader = filepath.endsWith(".tsx") ? "tsx" as const : "ts" as const;
+  const jsxOpts = renderer === "aio"
+    ? { jsx: "automatic", jsxImportSource: "aio" }
+    : { jsx: "automatic", jsxImportSource: "react" };
   const result = await transform(source, {
     loader,
     format: "esm",
     target: "esnext",
-    jsx: "automatic",
-    jsxImportSource: "react",
+    ...jsxOpts,
   });
   if (result.warnings?.length && log) {
     for (const w of result.warnings) {
@@ -381,10 +385,20 @@ export function unflattenPatch(
     }
 
     // Regular nested removal: "mdview.oldKey" → { mdview: { $d: ['oldKey'] } }
-    const p = parentObj;
+    // AIO-31: suppress $d when identity patch ($arr) already exists for same key.
+    // This happens during empty→identity array transitions: the old atomic key
+    // ("feature.array") is "removed" while identity keys ("feature.array.$id:a")
+    // are "changed". The $arr patch supersedes the atomic removal.
     const child = rest;
-    if (!p.$d) p.$d = [];
-    (p.$d as string[]).push(child);
+    const existing = parentObj[child];
+    if (
+      existing && typeof existing === "object" && !Array.isArray(existing) &&
+      (existing as Record<string, unknown>).$arr === true
+    ) {
+      continue; // identity patch supersedes atomic removal
+    }
+    if (!parentObj.$d) parentObj.$d = [];
+    (parentObj.$d as string[]).push(child);
   }
 
   const result: { $p: Record<string, unknown>; $d?: string[] } = { $p: patch };
@@ -417,18 +431,12 @@ export function _computeDelta(
   }
 
   const flat = flattenKeys(uiState as Record<string, unknown>);
-  const lastFlat = flattenKeys(lastState as Record<string, unknown>);
   const keys = Object.keys(flat);
   const changed: Record<string, unknown> = {};
   const newKeyJsons: Record<string, string> = {};
   let changedCount = 0;
 
   for (const k of keys) {
-    // Skip stringify for unchanged references (check via flattened last)
-    if (flat[k] === lastFlat[k] && lastKeyJsons[k]) {
-      newKeyJsons[k] = lastKeyJsons[k];
-      continue;
-    }
     const json = JSON.stringify(flat[k]);
     newKeyJsons[k] = json;
     if (json !== lastKeyJsons[k]) {
@@ -542,7 +550,7 @@ export function createServer(config: ServerConfig): ServerHandle {
     const djText = Deno.readTextFileSync(join(absBaseDir, "..", "deno.json"));
     denoImports = JSON.parse(djText).imports ?? {};
   } catch { /* no deno.json or parse error — use defaults */ }
-  const importMapObj = buildBrowserImportMap(denoImports);
+  const importMapObj = buildBrowserImportMap(denoImports, config.renderer);
   const IMPORT_MAP = JSON.stringify({ imports: importMapObj });
 
   // Import graph validator state (dev mode only)
@@ -671,6 +679,7 @@ export function createServer(config: ServerConfig): ServerHandle {
     bpLastSentAt: number; // backpressure: timestamp of last broadcast to this client
     subscriptions: Set<string> | null; // null = subscribe-all (backward compat)
     disconnected: boolean; // guards against double onDisconnect (onerror + onclose)
+    broadcastCount: number; // AIO-33: counter for periodic forced full-state resync
   };
   const connections = new Map<WebSocket, ClientMeta>();
   const _payloadStats = new Map<
@@ -764,18 +773,36 @@ export function createServer(config: ServerConfig): ServerHandle {
             continue;
           }
           if (uiState === meta.lastState) continue; // skip if ref unchanged
+          // AIO-33: periodic forced full-state resync — prevents any delta desync
+          // from becoming permanent. Every 100 broadcasts (~5s at 50ms interval),
+          // reset delta cache to force a full state send.
+          meta.broadcastCount++;
+          if (meta.broadcastCount >= 100) {
+            meta.broadcastCount = 0;
+            meta.lastState = null;
+            meta.lastKeyJsons = {};
+          }
           const delta = _computeDelta(
             uiState,
             meta.lastState,
             meta.lastKeyJsons,
             config.fullStateThreshold,
           );
-          meta.lastState = uiState;
-          meta.lastKeyJsons = delta.newKeyJsons;
-          if (delta.kind === "skip") continue;
+          if (delta.kind === "skip") {
+            meta.lastState = uiState;
+            meta.lastKeyJsons = delta.newKeyJsons;
+            continue;
+          }
           debug(`broadcast ${delta.kind} → client ${meta.id.slice(0, 8)}`);
           try {
-            ws.send(delta.msg);
+            // Mark filtered full-state broadcasts with $f:1 so browser merges
+            const msgToSend = meta.subscriptions && delta.kind === "full"
+              ? '{"$f":1,' + delta.msg.slice(1)
+              : delta.msg;
+            ws.send(msgToSend);
+            // Update lastState/lastKeyJsons AFTER successful send (AIO-33 safety)
+            meta.lastState = uiState;
+            meta.lastKeyJsons = delta.newKeyJsons;
             meta.bpLastSentAt = Date.now();
             config.vitalsSystem?.serverTransport.onClientStateSent(
               meta.id,
@@ -856,6 +883,7 @@ export function createServer(config: ServerConfig): ServerHandle {
       bpLastSentAt: 0,
       subscriptions: null,
       disconnected: false,
+      broadcastCount: 0,
     };
     socket.onerror = (e) => {
       debug(
@@ -1091,7 +1119,12 @@ export function createServer(config: ServerConfig): ServerHandle {
                 if (meta.subscriptions) {
                   uiState = _filterByPaths(uiState, meta.subscriptions);
                 }
-                const msg = JSON.stringify(uiState);
+                // Mark filtered responses with $f:1 so browser merges instead of replacing _state
+                const toSend = meta.subscriptions && uiState &&
+                    typeof uiState === "object" && !Array.isArray(uiState)
+                  ? { $f: 1, ...(uiState as Record<string, unknown>) }
+                  : uiState;
+                const msg = JSON.stringify(toSend);
                 socket.send(msg);
                 meta.lastState = uiState;
                 if (
@@ -1194,6 +1227,7 @@ export function createServer(config: ServerConfig): ServerHandle {
           config.width,
           config.height,
           config.renderBudget,
+          config.renderer,
         ),
         { headers: { "Content-Type": "text/html", ...noCache } },
       );
@@ -1740,6 +1774,7 @@ export function createServer(config: ServerConfig): ServerHandle {
             config.width,
             config.height,
             config.renderBudget,
+            config.renderer,
           ),
           { headers: { "Content-Type": "text/html", ...noCache } },
         );
@@ -1775,7 +1810,7 @@ export function createServer(config: ServerConfig): ServerHandle {
     // Dev only: live-transpile .ts/.tsx via esbuild
     if (!prod && (ext === ".tsx" || ext === ".ts")) {
       try {
-        body = await transpile(body, filepath, debug);
+        body = await transpile(body, filepath, debug, config.renderer);
         contentType = "application/javascript";
         lastError = "";
         errorMap.delete(filename);

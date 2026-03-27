@@ -14,6 +14,7 @@
     "npm:@types/react@18": "18.3.22",
     "npm:electron@28": "28.3.3",
     "npm:esbuild@0.24": "0.24.2",
+    "npm:happy-dom@17": "17.6.3",
     "npm:immer@10": "10.2.0",
     "npm:react-dom@18": "18.3.1_react@18.3.1",
     "npm:react@18": "18.3.1"
@@ -460,6 +461,13 @@
     "graceful-fs@4.2.11": {
       "integrity": "sha512-RbJ5/jmFcNNCcDV5o9eTnBLJ/HszWV0P73bc+Ff4nS/rJj+YaS6IGyiOL0VoBYX+l1Wrl3k63h/KrH+nhJ0XvQ=="
     },
+    "happy-dom@17.6.3": {
+      "integrity": "sha512-UVIHeVhxmxedbWPCfgS55Jg2rDfwf2BCKeylcPSqazLz5w3Kri7Q4xdBJubsr/+VUzFLh0VjIvh13RaDA2/Xug==",
+      "dependencies": [
+        "webidl-conversions",
+        "whatwg-mimetype"
+      ]
+    },
     "has-property-descriptors@1.0.2": {
       "integrity": "sha512-55JNKuIW+vq4Ke1BjOTjM2YctQIvCT7GFzHwmfZPGo5wnrgkid0YQtnAleFSqumZm4az3n2BS+erby5ipJdgrg==",
       "dependencies": [
@@ -631,6 +639,12 @@
     "universalify@0.1.2": {
       "integrity": "sha512-rBJeI5CXAlmy1pV+617WB9J63U6XcazHHF2f2dbJix4XzpUF0RS3Zbj0FGIOCAva5P/d/GBOYaACQ1w+0azUkg=="
     },
+    "webidl-conversions@7.0.0": {
+      "integrity": "sha512-VwddBukDzu71offAQR975unBIGqfKZpM+8ZX6ySk8nYhVoo5CYaZyzt3YBvYtRtO+aoGlqxPg/B87NGVZ/fu6g=="
+    },
+    "whatwg-mimetype@3.0.0": {
+      "integrity": "sha512-nt+N2dzIutVRxARx1nghPKGv1xHikU7HKdfafKkLNLindmPU/ch3U31NOCGGA/dmPcmb1VlofO0vnKAcsm0o/Q=="
+    },
     "wrappy@1.0.2": {
       "integrity": "sha512-l4Sp/DRseor9wL6EvV2+TuQn63dMkPjZ/sp9XkghTEbV9KlPS1xUsZ3u7/IQO4wxtcFB4bgpQPRcR3QCvezPcQ=="
     },
@@ -798,6 +812,7 @@
       "jsr:@std/testing@^1.0.17",
       "npm:@types/react@18",
       "npm:esbuild@0.24",
+      "npm:happy-dom@17",
       "npm:immer@10",
       "npm:react-dom@18",
       "npm:react@18"

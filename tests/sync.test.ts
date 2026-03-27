@@ -166,8 +166,11 @@ Deno.test("sync: standalone AioApp type is imported from canonical source", asyn
 
 Deno.test("sync: browser.ts exports useTimeTravel hook", async () => {
   const src = await Deno.readTextFile(BROWSER_TS);
+  const exported = src.includes("export function useTimeTravel()") ||
+    src.includes("export { useTimeTravel }") ||
+    src.includes("export {useTimeTravel}");
   assertEquals(
-    src.includes("export function useTimeTravel()"),
+    exported,
     true,
     "browser.ts must export useTimeTravel() for dev-mode TT panel",
   );

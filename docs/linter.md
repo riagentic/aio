@@ -7,7 +7,7 @@ errors, warnings, and optimization hints — no runtime needed.
 
 ```sh
 # From your project root
-deno run -A jsr:@riagentic/aio@1.0.0-alpha4/aiol/mod.ts
+deno run -A jsr:@riagentic/aio@1.0.0-alpha5/aiol/mod.ts
 
 # Or point at a specific directory
 deno run -A aiol/mod.ts /path/to/my-app
@@ -18,7 +18,7 @@ deno run -A aiol/mod.ts --json
 # Add as a task in deno.json
 {
   "tasks": {
-    "lint:aio": "deno run -A jsr:@riagentic/aio@1.0.0-alpha4/aiol/mod.ts"
+    "lint:aio": "deno run -A jsr:@riagentic/aio@1.0.0-alpha5/aiol/mod.ts"
   }
 }
 ```
