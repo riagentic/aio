@@ -252,10 +252,27 @@ export function extractUserFrames(stack: string | undefined): string[] {
 
 function generateTip(err: AioError): string | undefined {
   switch (err.code) {
-    case "REDUCE_ERROR":
-      return `Tip: Check if the action payload has the expected shape. Reducer for "${
+    case "REDUCE_ERROR": {
+      const msg = err.message;
+      // AIO-60: Better hints for proxy/state errors
+      if (
+        msg.includes("ownKeys") || msg.includes("non-extensible") ||
+        msg.includes("proxy")
+      ) {
+        const method = err.context.actionType?.includes(":__set")
+          ? err.context.actionType.replace(/.*:__set/, "").replace(
+            /^./,
+            (c: string) => c.toLowerCase(),
+          )
+          : err.context.actionType?.split(":")[1] ?? "?";
+        return `Tip: Proxy state error in method "${method}" of feature "${
+          err.context.featureName ?? "?"
+        }". Avoid .map()/.spread/Object.keys() on live proxy state — use explicit property access or snapshot first: const items = [...s.items]`;
+      }
+      return `Tip: Reducer for "${
         err.context.actionType ?? "?"
-      }" threw — inspect state at crash.`;
+      }" threw — check action payload shape and inspect state at crash.`;
+    }
     case "EFFECT_ERROR":
       return `Tip: Sync effect "${
         err.context.effectType ?? "?"

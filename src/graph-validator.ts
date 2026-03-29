@@ -90,6 +90,12 @@ export function resolveSpecifier(
     };
   }
 
+  // JSX runtime specifiers are injected by the compiler (jsxImportSource),
+  // not explicit imports — treat as external even without an import map entry.
+  if (spec.endsWith("/jsx-runtime") || spec.endsWith("/jsx-dev-runtime")) {
+    return { kind: "external", url: spec };
+  }
+
   const mapped = importMap[spec];
   if (!mapped) {
     return {
@@ -168,7 +174,11 @@ export function checkPlatformSafety(code: string, file: string): GraphError[] {
     .replace(/(["'`])(?:(?!\1|\\).|\\.)*\1/g, '""');
   const DENO_RE = /\bDeno\.(\w+)/g;
   while ((m = DENO_RE.exec(stripped)) !== null) {
+    // Line number from stripped (line count preserved — replacements are same-line)
     const lineNum = stripped.slice(0, m.index).split("\n").length;
+    // Skip Deno.* usage guarded by `typeof Deno` on the same line (runtime-safe pattern)
+    const originalLine = code.split("\n")[lineNum - 1] ?? "";
+    if (/typeof\s+Deno\b/.test(originalLine)) continue;
     errors.push({
       file,
       line: lineNum,

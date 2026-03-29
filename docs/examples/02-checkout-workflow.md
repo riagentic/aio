@@ -275,7 +275,7 @@ Wire the features into a React component:
 
 ```tsx
 // App.tsx
-import { useFeature } from "aio";
+import { useFeature } from "aio/react";
 import { cart, type CartItem } from "./features/cart/index.ts";
 import { payment } from "./features/payment/index.ts";
 

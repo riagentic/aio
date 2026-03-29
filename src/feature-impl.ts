@@ -311,6 +311,14 @@ export function createLiveProxy<S extends Record<string, unknown>>(
   batcher: ReturnType<typeof createBatcher>,
   path: string[] = [],
 ): S {
+  // AIO-57: Target must stay extensible and mirror state's keys.
+  // ES Proxy invariant: if target is non-extensible, ownKeys must return exactly
+  // the target's own keys. If deepFreeze (dispatch.ts freezeState) reaches this
+  // proxy, it freezes the target → makes it non-extensible → ownKeys trap breaks
+  // when state has keys the target doesn't. Fix: sync target keys on each ownKeys
+  // call, and use configurable+writable descriptors so keys can always be added.
+  const target = {} as S;
+
   const handler: ProxyHandler<S> = {
     get(_target, prop, _receiver) {
       if (typeof prop === "symbol") return undefined;
@@ -350,9 +358,72 @@ export function createLiveProxy<S extends Record<string, unknown>>(
       batcher.add(methodName, { path: [...path, prop as string], value });
       return true;
     },
+
+    has(_target, prop) {
+      if (typeof prop === "symbol") return false;
+      const fresh = path.length === 0
+        ? getState()
+        : getNestedValue(getState(), path);
+      return prop in (fresh as object);
+    },
+
+    ownKeys() {
+      const fresh = path.length === 0
+        ? getState()
+        : getNestedValue(getState(), path);
+      const freshKeys = Reflect.ownKeys(fresh as object);
+      // Sync target keys with fresh state to satisfy ES invariant:
+      // target must have at least all keys returned by ownKeys.
+      const freshKeySet = new Set(
+        freshKeys.filter((k): k is string => typeof k === "string"),
+      );
+      // DELETE stale keys from target that no longer exist in fresh state
+      // (handles array/object replacement where old indices linger).
+      for (const k of Object.keys(target)) {
+        if (!freshKeySet.has(k)) {
+          delete (target as Record<string, unknown>)[k];
+        }
+      }
+      // ADD missing keys so getOwnPropertyDescriptor can satisfy the invariant.
+      for (const k of freshKeySet) {
+        if (!(k in target)) {
+          Object.defineProperty(target, k, {
+            configurable: true,
+            enumerable: true,
+            writable: true,
+            value: undefined,
+          });
+        }
+      }
+      return freshKeys;
+    },
+
+    getOwnPropertyDescriptor(_target, prop) {
+      if (typeof prop === "symbol") return undefined;
+      const fresh = path.length === 0
+        ? getState()
+        : getNestedValue(getState(), path);
+      // Check fresh state directly — target may be stale if state was replaced.
+      const freshObj = fresh as Record<string, unknown>;
+      if (!(prop in freshObj)) return undefined;
+      return {
+        configurable: true,
+        enumerable: true,
+        writable: true,
+        value: freshObj[prop as string],
+      };
+    },
+
+    // Prevent Object.freeze/preventExtensions from locking the target
+    preventExtensions() {
+      return false;
+    },
+    isExtensible() {
+      return true;
+    },
   };
 
-  return new Proxy({} as S, handler);
+  return new Proxy(target, handler);
 }
 
 // ── Method classification ──────────────────────────────────────────

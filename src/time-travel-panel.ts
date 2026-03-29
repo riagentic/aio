@@ -1,8 +1,7 @@
 // deno-lint-ignore-file
 // Browser-side time-travel panel — dev mode only.
-// Receives __tt: messages from server, renders a floating DOM panel,
-// and exposes the useTimeTravel() React hook.
-import { useEffect, useState } from "react";
+// Receives __tt: messages from server, renders a floating DOM panel.
+// React/AIR hooks live in time-travel-react.ts and time-travel-air.ts.
 import { Listeners } from "./listeners.ts";
 
 // ── Types ──────────────────────────────────────────────────────────────
@@ -37,8 +36,18 @@ export function setSendFn(fn: ((msg: string) => void) | null): void {
   _sendFn = fn;
 }
 
-function _sendTTCmd(cmd: string): void {
+export function _sendTTCmd(cmd: string): void {
   if (_sendFn) _sendFn(cmd);
+}
+
+/** Get current time-travel state. */
+export function getTTState(): TTMeta | null {
+  return _ttState;
+}
+
+/** Subscribe to TT state changes. Returns unsubscribe function. */
+export function subscribeTT(fn: (t: TTMeta) => void): () => void {
+  return _ttListeners.add(fn);
 }
 
 // ── Panel rendering ────────────────────────────────────────────────────
@@ -249,37 +258,4 @@ export function resetTT(): void {
     _ttKeyHandler = null;
     _ttKeyBound = false;
   }
-}
-
-/** React hook — subscribes to time-travel state and exposes commands. */
-export function useTimeTravel(): {
-  entries: { id: number; type: string; ts: number }[];
-  index: number;
-  paused: boolean;
-  undo: () => void;
-  redo: () => void;
-  goto: (id: number) => void;
-  pause: () => void;
-  resume: () => void;
-} | null {
-  const [tt, setTT] = useState<TTMeta | null>(_ttState);
-
-  useEffect(() => {
-    const unsub = _ttListeners.add((t) => setTT({ ...t }));
-    if (_ttState) setTT({ ..._ttState });
-    return unsub;
-  }, []);
-
-  if (!tt) return null;
-
-  return {
-    entries: tt.entries,
-    index: tt.index,
-    paused: tt.paused,
-    undo: () => _sendTTCmd("__tt:undo"),
-    redo: () => _sendTTCmd("__tt:redo"),
-    goto: (id: number) => _sendTTCmd("__tt:goto:" + id),
-    pause: () => _sendTTCmd("__tt:pause"),
-    resume: () => _sendTTCmd("__tt:resume"),
-  };
 }

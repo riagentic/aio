@@ -1,5 +1,36 @@
 # Changelog
 
+## v1.0.0-alpha7
+
+**Type-safe send & renderer split**
+
+- `useFeature` infers method signatures from feature definition — `send` is
+  fully typed
+- `aio/air` and `aio/react` subpath exports — one import per renderer, all
+  primitives included
+- React compat hooks — `useState`, `useEffect`, `useCallback`, `useMemo` for
+  zero-friction migration
+- AIR renderer primitives (`useRef`, `onMount`, `onCleanup`, `effect`,
+  `computed`, `signal`, `batch`) exported from `aio/air`
+
+**Monolith decomposition**
+
+- Extracted `middleware.ts` and `lint.ts` from `aio.ts`
+- Renderer exports stripped from `mod.ts` — base is server/protocol only
+
+**Bug fixes (AIO-55..70)**
+
+- Proxy stale `ownKeys` on second+ `.map()`/spread (AIO-57)
+- Signal equality — `.set()` same value no longer re-renders (AIO-59)
+- Ref callback reliability (AIO-58), JSX native DOM event types (AIO-62)
+- `useLocal` `.patch()` for single fields (AIO-66)
+- `useFeature` type inference without double-cast (AIO-67)
+- Array rendering `key` prop warnings (AIO-69)
+- CJS server-only stubs (AIO-55), `aio://` scheme privileges (AIO-56)
+- JSR no-slow-types compliance (explicit return types)
+
+---
+
 ## v1.0.0-alpha6
 
 **AIR native renderer (~8KB)**

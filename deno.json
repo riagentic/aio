@@ -1,9 +1,11 @@
 {
   "name": "@riagentic/aio",
-  "version": "1.0.0-alpha6",
+  "version": "1.0.0-alpha7",
   "appId": "aio",
   "exports": {
     ".": "./mod.ts",
+    "./air": "./src/air.ts",
+    "./react": "./src/react.ts",
     "./jsx-runtime": "./src/jsx-runtime.ts",
     "./adapters/react": "./src/adapters/react.ts",
     "./adapters/air": "./src/adapters/air.ts",
@@ -42,6 +44,8 @@
     "react": "npm:react@^18",
     "react-dom": "npm:react-dom@^18",
     "aio": "./mod.ts",
+    "aio/air": "./src/air.ts",
+    "aio/react": "./src/react.ts",
     "esbuild": "npm:esbuild@^0.24",
     "immer": "npm:immer@^10",
     "@std/path": "jsr:@std/path@^1",

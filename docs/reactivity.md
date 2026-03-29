@@ -390,7 +390,7 @@ time-travel.
 ## UI integration
 
 ```tsx
-import { useFeature } from "aio";
+import { useFeature } from "aio/react";
 import { todo } from "../features/todo";
 
 function TodoPage() {

@@ -1055,7 +1055,7 @@ const methods = {
 Connects a component to a specific feature with typed send and machine status:
 
 ```tsx
-import { useFeature } from "aio";
+import { useFeature } from "aio/react";
 import { counter } from "./features/counter/index.ts";
 
 export default function App() {

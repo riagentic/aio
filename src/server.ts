@@ -136,6 +136,7 @@ function fileExists(path: string): boolean {
 
 // browser.ts URL — works for both local (file://) and JSR/HTTP installs (import.meta.dirname is null for remote modules)
 const BROWSER_TS_URL = new URL("browser.ts", import.meta.url);
+const BROWSER_AIR_TS_URL = new URL("browser-air.ts", import.meta.url);
 const LISTENERS_TS_URL = new URL("listeners.ts", import.meta.url);
 // Base URL for resolving sub-module imports (e.g. vitals/*.ts) served under /__aio/
 const AIO_SRC_BASE_URL = new URL(".", import.meta.url);
@@ -610,7 +611,13 @@ export function createServer(config: ServerConfig): ServerHandle {
   if (!prod) {
     const entrypoint = join(absBaseDir, "App.tsx");
     if (fileExists(entrypoint)) {
-      graphValidationDone = validateGraph(entrypoint, importMapObj, transpile)
+      const graphTranspile = (s: string, f: string) =>
+        transpile(s, f, undefined, config.renderer);
+      graphValidationDone = validateGraph(
+        entrypoint,
+        importMapObj,
+        graphTranspile,
+      )
         .then((result) => {
           graphResult = result;
           const warnings = result.errors.filter((e) =>
@@ -1234,17 +1241,26 @@ export function createServer(config: ServerConfig): ServerHandle {
     }
 
     if (pathname === "/__aio/ui.js") {
+      const sourceUrl = config.renderer === "aio"
+        ? BROWSER_AIR_TS_URL
+        : BROWSER_TS_URL;
       try {
-        const source = await fetch(BROWSER_TS_URL).then((r) => r.text());
-        const code = await transpile(source, BROWSER_TS_URL.href, debug);
+        const source = await fetch(sourceUrl).then((r) => r.text());
+        const code = await transpile(
+          source,
+          sourceUrl.href,
+          debug,
+          config.renderer,
+        );
         return new Response(code, {
           headers: { "Content-Type": "application/javascript", ...noCache },
         });
       } catch (err) {
-        debug(
-          `transpile browser.ts error: ${fmtEsbuildError(err, "browser.ts")}`,
-        );
-        return new Response(`throw new Error("browser.ts transpile failed")`, {
+        const name = config.renderer === "aio"
+          ? "browser-air.ts"
+          : "browser.ts";
+        debug(`transpile ${name} error: ${fmtEsbuildError(err, name)}`);
+        return new Response(`throw new Error("${name} transpile failed")`, {
           headers: { "Content-Type": "application/javascript", ...noCache },
         });
       }
@@ -1283,7 +1299,12 @@ export function createServer(config: ServerConfig): ServerHandle {
       const fileUrl = new URL(relPath, AIO_SRC_BASE_URL);
       try {
         const source = await fetch(fileUrl).then((r) => r.text());
-        const code = await transpile(source, fileUrl.href, debug);
+        const code = await transpile(
+          source,
+          fileUrl.href,
+          debug,
+          config.renderer,
+        );
         return new Response(code, {
           headers: { "Content-Type": "application/javascript", ...noCache },
         });
@@ -1886,10 +1907,12 @@ export function createServer(config: ServerConfig): ServerHandle {
           const timeout = new Promise<null>((r) =>
             setTimeout(() => r(null), 2000)
           );
+          const revalTranspile = (s: string, f: string) =>
+            transpile(s, f, undefined, config.renderer);
           const validation = validateGraph(
             join(absBaseDir, "App.tsx"),
             importMapObj,
-            transpile,
+            revalTranspile,
           );
           const result = await Promise.race([validation, timeout]);
           // Stale validation — a newer file change already started a new validation

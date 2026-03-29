@@ -343,7 +343,7 @@ import {
 } from "aio";
 
 // Browser-side (App.tsx) — hooks + helpers
-import { page, useAio, useFeature, useLocal } from "aio";
+import { page, useAio, useFeature, useLocal } from "aio/react";
 ```
 
 Never import from `'../dep/aio/...'` directly — always use `'aio'`. The startup

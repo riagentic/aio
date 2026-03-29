@@ -788,6 +788,24 @@ function diffChildren(
     const someUnkeyed = nextChildren.some(
       (c) => typeof c === "object" && c.key === undefined,
     );
+    // AIO-69: Warn when multiple element children have no keys at all
+    if (!someKeyed && someUnkeyed && nextChildren.length > 2) {
+      const vnodeChildren = nextChildren.filter(
+        (c) => typeof c === "object" && typeof c.tag !== "undefined",
+      );
+      // Only warn for lists of same-tag elements (likely a .map() result)
+      if (vnodeChildren.length > 2) {
+        const tags = new Set(vnodeChildren.map((c) => (c as VNode).tag));
+        if (tags.size === 1) {
+          _devWarn(
+            "missing-keys",
+            `${vnodeChildren.length} <${
+              String([...tags][0])
+            }> children without keys. Add key props for correct reconciliation.`,
+          );
+        }
+      }
+    }
     // Mixed keyed/unkeyed children
     if (someKeyed && someUnkeyed) {
       _devWarn(
@@ -938,6 +956,11 @@ function removeDomCleanup(
   if (typeof vnode.tag === "function") {
     ctx.hooks?.unmountComponent(vnode);
     if (vnode._rendered != null) removeDomCleanup(vnode._rendered, ctx);
+  }
+  // AIO-58: Null element refs on cleanup (was missing — ref callbacks never got
+  // null on replace/unmount, leaking event listeners and DOM references)
+  if (typeof vnode.tag === "string" && vnode.props.ref) {
+    _callRef(vnode.props.ref, null);
   }
   if (
     vnode.tag === Fragment || vnode.tag === ErrorBoundary ||

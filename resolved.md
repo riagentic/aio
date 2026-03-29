@@ -187,3 +187,17 @@ alpha-ok).
 2. UDS reads `config.syncIntervalMs ?? 10` directly
 3. WS server receives `config.syncIntervalMs` (server.ts defaults to 10)
 4. Updated docs: api.md, scaling.md, upgrade.md, changelog.md
+
+### AIO-35: `_saveOfflineAction` missing IDB error handlers — silent action loss ✅
+
+**Severity:** MEDIUM · **Fixed:** 2026-03-28 **Category:** Bug / Error Handling
+**File:** `src/browser.ts`
+
+**Bug:** `countReq` had no `onerror` handler — if IndexedDB `count()` failed,
+the action was silently dropped. `store.add()` was fire-and-forget with no error
+check. The outer `try/catch` only caught synchronous exceptions; IDB request
+errors are async and bypassed it.
+
+**Fix:** Added `onerror` handler to `countReq`. Captured `store.add()` return
+and added `onerror` handler. Both emit `_diagEmit` with `offline-storage-error`
+type, consistent with `_loadOfflineQueue` pattern. No more silent action loss.

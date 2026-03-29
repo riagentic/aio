@@ -132,7 +132,7 @@ export const counter = feature("counter", {
 ### UI: `src/App.tsx`
 
 ```tsx
-import { useFeature } from "aio";
+import { useFeature } from "aio/react";
 import { counter } from "./features/counter/index.ts";
 
 export default function App() {

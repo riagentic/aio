@@ -1,9 +1,11 @@
 import { assertEquals, assertStringIncludes } from "@std/assert";
 import { aioBrowserPlugin } from "../src/esbuild-plugin.ts";
 
-type ResolveCallback = (
-  args: { path: string },
-) => { path: string; namespace: string } | undefined;
+type ResolveArgs = { path: string; kind?: string };
+type ResolveResult =
+  | { path: string; namespace?: string; external?: boolean }
+  | undefined;
+type ResolveCallback = (args: ResolveArgs) => ResolveResult;
 type LoadCallback = (
   args: { path: string; namespace: string },
 ) => { contents: string; loader: string } | undefined;
@@ -54,7 +56,7 @@ Deno.test("plugin: does NOT intercept regular imports", () => {
   }
 });
 
-Deno.test("plugin: server-only load returns throwing proxy", () => {
+Deno.test("plugin: server-only load returns CJS throwing proxy", () => {
   const plugin = aioBrowserPlugin();
   const { loaders } = collectPluginCallbacks(plugin);
   const loader = loaders.find((l) => l.namespace === "aio-server-only");
@@ -64,6 +66,8 @@ Deno.test("plugin: server-only load returns throwing proxy", () => {
   assertStringIncludes(result!.contents, "Proxy");
   assertStringIncludes(result!.contents, "server-only");
   assertStringIncludes(result!.contents, "@std/fs");
+  // AIO-55: Must use CJS (module.exports) so esbuild resolves named imports at runtime
+  assertStringIncludes(result!.contents, "module.exports");
 });
 
 Deno.test("plugin: proxy module includes package name in error", () => {
@@ -75,4 +79,33 @@ Deno.test("plugin: proxy module includes package name in error", () => {
     namespace: "aio-server-only",
   })!;
   assertStringIncludes(result.contents, "@std/path");
+});
+
+// AIO-55: *.server.ts dynamic imports are marked external
+Deno.test("plugin: marks *.server.ts dynamic imports as external", () => {
+  const plugin = aioBrowserPlugin();
+  const { resolvers } = collectPluginCallbacks(plugin);
+  const serverResolver = resolvers.find((r) =>
+    r.filter.test("./helpers.server.ts")
+  );
+  assertEquals(serverResolver !== undefined, true);
+  const result = serverResolver!.cb({
+    path: "./helpers.server.ts",
+    kind: "dynamic-import",
+  });
+  assertEquals(result?.external, true);
+});
+
+Deno.test("plugin: does NOT externalize *.server.ts static imports", () => {
+  const plugin = aioBrowserPlugin();
+  const { resolvers } = collectPluginCallbacks(plugin);
+  const serverResolver = resolvers.find((r) =>
+    r.filter.test("./helpers.server.ts")
+  );
+  assertEquals(serverResolver !== undefined, true);
+  const result = serverResolver!.cb({
+    path: "./helpers.server.ts",
+    kind: "import-statement",
+  });
+  assertEquals(result, undefined); // falls through to default resolution
 });

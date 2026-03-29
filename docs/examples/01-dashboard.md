@@ -236,7 +236,7 @@ history -- the sparkline will be empty for them. Connect as admin at
 
 ```tsx
 // src/App.tsx
-import { useFeature } from "aio";
+import { useFeature } from "aio/react";
 import { metrics } from "./features/metrics/index.ts";
 import type { Snapshot } from "./features/metrics/index.ts";
 

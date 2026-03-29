@@ -1,5 +1,16 @@
-// React Adapter — bridges state-core signals to React via useSyncExternalStore.
-// Same useFeature/useAio API as AIR adapter — different reactivity mechanism.
+/**
+ * @module
+ * React adapter — bridges state-core signals to React via `useSyncExternalStore`.
+ *
+ * Provides the same `useFeature`/`useAio`/`useLocal`/`useConnected` API as the
+ * AIR adapter but using React's reactivity mechanism.
+ *
+ * @example
+ * ```ts
+ * import { useFeature } from "aio/adapters/react";
+ * const { state, send } = useFeature(myFeature);
+ * ```
+ */
 
 import { useCallback, useState, useSyncExternalStore } from "react";
 import {
@@ -13,6 +24,12 @@ import {
   send,
   trackPath,
 } from "../state-core.ts";
+import type {
+  DirectCalling,
+  ExtractState,
+  FeatureDef,
+  SendOf,
+} from "../feature-types.ts";
 
 // ── Feature send cache ──────────────────────────────────────────────
 
@@ -38,6 +55,15 @@ function _getCachedSend(
  * Subscribe to a feature's server state via React.
  * Same { state, send } contract as AIR adapter.
  */
+// Typed overload — when passing a feature def with DirectCalling methods
+export function useFeature<
+  // deno-lint-ignore no-explicit-any
+  F extends FeatureDef<any, any, any, any> & DirectCalling<any>,
+>(
+  ref: F,
+  options?: { fallback?: ExtractState<F> },
+): { state: ExtractState<F>; send: SendOf<F>; status?: string };
+// Untyped overload — for dynamic FeatureRef usage
 export function useFeature<S = unknown>(
   ref: FeatureRef,
   options?: { fallback?: S },
@@ -45,7 +71,10 @@ export function useFeature<S = unknown>(
   state: S;
   send: Record<string, (...args: unknown[]) => void>;
   status?: string;
-} {
+};
+// Implementation
+// deno-lint-ignore no-explicit-any
+export function useFeature(ref: any, options?: any): any {
   const name = ref.__aio.id;
   trackPath(name);
 
@@ -63,14 +92,14 @@ export function useFeature<S = unknown>(
   const featureState = useSyncExternalStore(subscribe, getSnapshot, () => null);
 
   // AIO-29 defense: merge with fallback/defaults
-  const defaults = options?.fallback ?? (ref.__aio.state as S | undefined);
+  const defaults = options?.fallback ?? ref.__aio.state;
   const resolved = _resolveWithFallback(featureState, defaults);
 
   const status = resolved
     ? (resolved as Record<string, unknown>)._status as string | undefined
     : undefined;
   return {
-    state: _trackingProxy(resolved, name) as S,
+    state: _trackingProxy(resolved, name),
     send: _getCachedSend(ref),
     status,
   };
