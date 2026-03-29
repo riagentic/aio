@@ -9,7 +9,7 @@
 - **Write reactive, use generators or atomic actions when needed.**
 - **Pick your target, compile and ship!**
 
-`v1.0.0-alpha6`
+`v1.0.0-alpha7`
 
 > Define state once. It persists, syncs to all clients, drives the UI.
 
@@ -189,10 +189,11 @@ See [FAQ](docs/faq.md#when-not-to-use-aio) for details.
 
 ## Status
 
-**v1.0.0-alpha6** · [JSR](https://jsr.io/@riagentic/aio) · MIT
+**v1.0.0-alpha7** · [JSR](https://jsr.io/@riagentic/aio) · MIT
 
-1564 tests · security hardened
+1343 tests · security hardened
 
-Core (state, sync, persistence, features, scheduling, renderer) is stable. AIR
-renderer is new in alpha6 — functional with full test coverage. Electron,
-Android, and build targets are functional but less battle-tested.
+Core (state, sync, persistence, features, scheduling, renderer) is stable.
+Type-safe `send`, `aio/air` + `aio/react` barrel exports, and React compat hooks
+are new in alpha7. Electron, Android, and build targets are functional but less
+battle-tested.

@@ -18,6 +18,7 @@ export {
   type Catalog,
   type Creators,
   type DirectCalling,
+  type ExtractState,
   type FeatureAio,
   type FeatureDef,
   type FeatureEntry,
@@ -27,6 +28,7 @@ export {
   type MachineConfig,
   type Msg,
   type ScopedApp,
+  type SendOf,
   tagSource,
 } from "./feature-types.ts";
 

@@ -56,6 +56,7 @@ export function useVirtualList<T>(
   config: VirtualListConfig<T>,
 ): VirtualListState<T> {
   const { itemHeight, containerHeight, overscan = 3 } = config;
+  const safeItemHeight = Math.max(1, itemHeight);
   const scrollTopSig = signal(0);
 
   // Resolve items — support both plain array and signal
@@ -73,9 +74,10 @@ export function useVirtualList<T>(
     const scrollTop = scrollTopSig.value;
     const startIndex = Math.max(
       0,
-      Math.floor(scrollTop / itemHeight) - overscan,
+      Math.floor(scrollTop / safeItemHeight) - overscan,
     );
-    const visibleCount = Math.ceil(containerHeight / itemHeight) + 2 * overscan;
+    const visibleCount = Math.ceil(containerHeight / safeItemHeight) +
+      2 * overscan;
     const endIndex = Math.min(items.length, startIndex + visibleCount);
 
     const result: { item: T; index: number; offset: number }[] = [];

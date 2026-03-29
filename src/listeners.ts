@@ -19,7 +19,7 @@ export class Listeners<T> {
 
   /** Notify all listeners with a value */
   notify(value: T): void {
-    for (const fn of this.fns) fn(value);
+    for (const fn of Array.from(this.fns)) fn(value);
   }
 
   /** Remove all listeners */

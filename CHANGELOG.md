@@ -1,5 +1,39 @@
 # Changelog
 
+## 1.0.0-alpha7
+
+### Added
+
+- **Type-safe `send`** — `useFeature` infers method signatures from feature
+  definition; `send.methodName(...)` is fully typed with args and return
+- **`aio/air` and `aio/react` subpath exports** — barrel modules for each
+  renderer; all primitives available from a single import
+- **React compat hooks** — `useState`, `useEffect`, `useCallback`, `useMemo`
+  wrappers in `src/compat.ts` for zero-friction React migration
+- **AIR renderer primitives exported** — `useRef`, `onMount`, `onCleanup`,
+  `effect`, `computed`, `signal`, `batch` all re-exported from `aio/air`
+
+### Fixed
+
+- Proxy stale `ownKeys` — second+ `.map()`/spread on proxy state (AIO-57)
+- Signal equality — `.set()` with same value no longer triggers re-render
+  (AIO-59)
+- Ref callback invocation reliability (AIO-58)
+- JSX event types use native DOM events, no `as any` casts (AIO-62)
+- `useLocal` single-field `.patch()` (AIO-66)
+- `useFeature` type inference without double-cast (AIO-67)
+- `key` prop warnings for array rendering (AIO-69)
+- AIR renderer primitives not exported from main import (AIO-70)
+- CJS server-only stubs for esbuild (AIO-55)
+- `aio://` custom protocol `registerSchemesAsPrivileged` (AIO-56)
+- Explicit return types for JSR no-slow-types compliance
+
+### Changed
+
+- Extracted `middleware.ts` and `lint.ts` from `aio.ts` monolith
+- Renderer exports stripped from `mod.ts` — base is now server/protocol only
+- Docs imports updated to `aio/react` and `aio/air`
+
 ## 1.0.0-alpha6
 
 ### Added

@@ -121,7 +121,7 @@ objects. `memo()` sees new refs → re-renders everything → UI freezes.
 ### `useProjection(fn, deps)` — structural sharing for derived state
 
 ```tsx
-import { memo, useFeature, useProjection } from "aio";
+import { memo, useFeature, useProjection } from "aio/react";
 
 function FleetTable() {
   const { state } = useFeature(fleet);
@@ -156,7 +156,7 @@ export default memo(GroupRow);
 ### Best practice: combine both
 
 ```tsx
-import { memo, useFeature, useProjection } from "aio";
+import { memo, useFeature, useProjection } from "aio/react";
 
 function FleetTable() {
   const { state } = useFeature(fleet);

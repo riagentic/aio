@@ -157,6 +157,22 @@ Deno.test("checkPlatformSafety detects export * from node:", () => {
   assertEquals(errors[0]!.category, "server-only-api");
 });
 
+Deno.test("checkPlatformSafety skips Deno.* behind typeof guard", () => {
+  const code = `const args = typeof Deno !== 'undefined' ? Deno.args : [];`;
+  const errors = checkPlatformSafety(code, "./feature.ts");
+  const denoErrors = errors.filter((e) => e.message.includes("Deno."));
+  assertEquals(denoErrors.length, 0);
+});
+
+Deno.test("checkPlatformSafety still flags unguarded Deno.* after guarded usage", () => {
+  const code =
+    `const args = typeof Deno !== 'undefined' ? Deno.args : [];\nconst x = Deno.readTextFile("f");`;
+  const errors = checkPlatformSafety(code, "./feature.ts");
+  const denoErrors = errors.filter((e) => e.message.includes("Deno."));
+  assertEquals(denoErrors.length, 1);
+  assertStringIncludes(denoErrors[0]!.message, "readTextFile");
+});
+
 Deno.test("checkPlatformSafety detects export * from @std/", () => {
   const code = `export * from "@std/path";`;
   const errors = checkPlatformSafety(code, "./re-export.ts");

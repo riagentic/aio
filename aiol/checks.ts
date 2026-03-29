@@ -458,7 +458,10 @@ export const checkPerformance: Checker = (ctx) => {
   for (const f of features) {
     for (const key of f.stateKeys) {
       // Check if state value looks like an array initializer with many items
-      const arrayMatch = f.file.content.match(new RegExp(`${key}\\s*:\\s*\\[`));
+      const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const arrayMatch = f.file.content.match(
+        new RegExp(`${escaped}\\s*:\\s*\\[`),
+      );
       if (arrayMatch) {
         // Check for 'as' type annotation suggesting typed array
         const afterKey = f.file.content.slice(
@@ -739,7 +742,10 @@ export const checkUI: Checker = (ctx) => {
       "hint",
       "ui",
       "App.tsx uses createRoot — remove it, aio handles mounting",
-      { file: appTsx.relative },
+      {
+        file: appTsx.relative,
+        safeFix: fix.fixRemoveCreateRootImport(appTsx.path),
+      },
     );
   }
 
@@ -1144,20 +1150,6 @@ export const checkInterFeature: Checker = (ctx) => {
   const { features, sourceFiles, report } = ctx;
 
   if (features.length < 2) return;
-
-  // Check for circular imports between feature files
-  const featureImports = new Map<string, Set<string>>();
-  for (const f of features) {
-    const imports = new Set<string>();
-    for (
-      const m of f.file.content.matchAll(
-        /from\s+['"]\.?\/?.*?(\w[\w-]*)(?:\/index)?\.ts['"]/g,
-      )
-    ) {
-      imports.add(m[1]!);
-    }
-    featureImports.set(f.name, imports);
-  }
 
   // Detect cross-feature direct state access (anti-pattern)
   for (const file of sourceFiles) {

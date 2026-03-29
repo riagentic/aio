@@ -1,9 +1,20 @@
-// JSX automatic runtime for AIO renderer.
-// Provides jsx/jsxs/Fragment so esbuild's `jsxImportSource: "aio"` works
-// without explicit `import { h } from "aio"` in every component file.
+/**
+ * @module
+ * JSX automatic runtime for AIO renderer.
+ *
+ * Provides `jsx`/`jsxs`/`Fragment` so esbuild's `jsxImportSource: "aio"` works
+ * without explicit `import { h } from "aio"` in every component file.
+ *
+ * @example
+ * ```jsonc
+ * // deno.json
+ * { "compilerOptions": { "jsx": "react-jsx", "jsxImportSource": "aio" } }
+ * ```
+ */
 
 import { Fragment, h } from "./vdom.ts";
 
+/** VDOM fragment — groups children without a wrapper element. */
 export { Fragment };
 
 /** Automatic JSX transform — called by esbuild for single-child elements */

@@ -145,7 +145,6 @@ function parseFeatureConfig(source: string): {
       }
     }
   }
-  const start = firstBrace;
   if (end === -1) {
     return {
       hasState: false,
@@ -160,7 +159,7 @@ function parseFeatureConfig(source: string): {
     };
   }
 
-  const block = source.slice(start, end);
+  const block = source.slice(firstBrace, end);
   const hasState = /\bstate\s*:/.test(block);
   const hasMethods = /\bmethods\s*:/.test(block);
   const hasActions = /\bactions\s*:/.test(block);
@@ -185,11 +184,10 @@ function parseFeatureConfig(source: string): {
     }
     const stateBlock = block.slice(sIdx, sEnd);
     // Extract top-level keys (skip nested object contents)
-    let kd = 0;
     for (const m of stateBlock.matchAll(/([$\w]+)\s*:/g)) {
       // Count depth up to this match to ensure it's top-level
       const before = stateBlock.slice(0, m.index);
-      kd = 0;
+      let kd = 0;
       for (const ch of before) {
         if (ch === "{" || ch === "[") kd++;
         else if (ch === "}" || ch === "]") kd--;

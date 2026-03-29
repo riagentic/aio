@@ -1,8 +1,17 @@
 // deno-lint-ignore-file no-explicit-any
-// state-core.ts — Framework-agnostic canonical state store.
-//
-// Owns: delta pipeline, identity array tracking, structural sharing,
-// subscription tracking, send logic, transport abstraction.
+/**
+ * @module
+ * Framework-agnostic canonical state store.
+ *
+ * Owns: delta pipeline, identity array tracking, structural sharing,
+ * subscription tracking, send logic, transport abstraction.
+ * Both the React and AIR adapters consume this module.
+ *
+ * @example
+ * ```ts
+ * import { getFeatureSignal, send, setTransport } from "aio/state-core";
+ * ```
+ */
 // ZERO framework dependencies (no React, no DOM).
 //
 // Extracted from browser.ts's battle-tested delta pipeline (34 resolved issues)
@@ -39,6 +48,7 @@ export interface FeatureRef {
 
 // ── Constants ───────────────────────────────────────────────────────
 
+/** Prototype pollution guard — keys blocked from proxy/patch traversal. */
 export const _BLOCKED_KEYS: Set<string> = new Set([
   "__proto__",
   "constructor",
@@ -73,6 +83,7 @@ const _offlineQueue: any[] = [];
 
 // ── Array ref stats (AIO-11 wasted render detection) ────────────────
 
+/** Stats from `_preserveArrayRefs` — tracks how many references were preserved vs changed. */
 export interface ArrayRefStats {
   preserved: number;
   changed: number;
@@ -87,6 +98,7 @@ let _arrayRefStats: ArrayRefStats = {
   cycles: 0,
 };
 
+/** Returns a snapshot of current array reference preservation stats. */
 export function _getArrayRefStats(): ArrayRefStats {
   return { ..._arrayRefStats };
 }
@@ -340,6 +352,7 @@ export function _applyPatch(
 // ── Recursive deep merge for $f (filtered) responses ────────────────
 // AIO-31: Two-level merge lost sub-sub-keys. Recursive merge only overwrites
 // leaf values (primitives/arrays), preserving all object keys at every depth.
+/** Recursive deep merge for `$f` (filtered) responses — preserves sub-keys at every depth. */
 export function _deepMergeFiltered(
   prev: Record<string, unknown>,
   incoming: Record<string, unknown>,
@@ -426,7 +439,8 @@ function _applyPathDelete(state: Record<string, any>, path: string): void {
     const featureState = { ...(state[featureName] as Record<string, unknown>) };
     let current: Record<string, unknown> = featureState;
     for (let i = 1; i < parts.length - 1; i++) {
-      if (typeof current[parts[i]!] !== "object") return;
+      const val = current[parts[i]!];
+      if (!val || typeof val !== "object" || Array.isArray(val)) return;
       current[parts[i]!] = {
         ...(current[parts[i]!] as Record<string, unknown>),
       };
@@ -528,6 +542,7 @@ function _applyDeltaToSignals(
 
 // ── Subscription tracking ───────────────────────────────────────────
 
+/** Tracked state paths accessed by the current client — used for server subscription filtering. */
 export const _accessedPaths: Set<string> = new Set<string>();
 let _subsTimer: ReturnType<typeof setTimeout> | null = null;
 let _currentSubs: string[] = [];
@@ -547,6 +562,7 @@ export function collapsePaths(paths: Set<string> | string[]): string[] {
   return result;
 }
 
+/** Cancel the pending subscription update timer. */
 export function cancelSubsTimer(): void {
   if (_subsTimer !== null) {
     clearTimeout(_subsTimer);
@@ -602,14 +618,17 @@ export function setConnected(v: boolean): void {
 
 // ── State access ────────────────────────────────────────────────────
 
+/** Returns the root state signal — the canonical reactive state container. */
 export function getStateSignal(): Signal<Record<string, any>> {
   return _stateSignal;
 }
 
+/** Returns a signal scoped to a specific feature's state slice. Creates one if it doesn't exist. */
 export function getFeatureSignal(name: string, fallback?: any): Signal<any> {
   return _getOrCreateFeatureSignal(name, fallback);
 }
 
+/** Returns the connection status signal — `true` when transport is connected. */
 export function getConnectedSignal(): Signal<boolean> {
   return _connected;
 }
@@ -744,9 +763,7 @@ export function createSendProxy(
 }
 
 // ── Tracking proxy ──────────────────────────────────────────────────
-// Deep proxy that records accessed state paths for server subscription filtering.
-// Framework-agnostic — usable by React, AIR, or any renderer adapter.
-
+/** Deep proxy that records accessed state paths for server subscription filtering. */
 export function _trackingProxy(obj: unknown, parentPath = ""): unknown {
   if (!obj || typeof obj !== "object" || Array.isArray(obj)) return obj;
   return new Proxy(obj as Record<string, unknown>, {

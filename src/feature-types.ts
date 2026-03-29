@@ -207,6 +207,25 @@ export type DirectCalling<M> = {
     : never;
 };
 
+/** Extract state type from a feature definition */
+// deno-lint-ignore no-explicit-any
+export type ExtractState<F> = F extends FeatureDef<any, any, any, infer S> ? S
+  : Record<string, unknown>;
+
+/**
+ * Build a typed send proxy from raw methods M (before DirectCalling transform).
+ * Re-strips the state param and returns void (send dispatches, doesn't return).
+ */
+export type SendOf<F> = F extends DirectCalling<infer M> ? {
+    // deno-lint-ignore no-explicit-any
+    [K in keyof M]: M[K] extends (s: any, ...args: infer P) => Promise<any>
+      ? (...args: P) => void
+      // deno-lint-ignore no-explicit-any
+      : M[K] extends (s: any, ...args: infer P) => any ? (...args: P) => void
+      : never;
+  }
+  : Record<string, (...args: unknown[]) => void>;
+
 /** Feature entry in aio.run() features array */
 // deno-lint-ignore no-explicit-any
 export type FeatureEntry = FeatureDef<any, any, any, any> | {

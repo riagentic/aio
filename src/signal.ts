@@ -63,8 +63,22 @@ export function batch(fn: () => void): void {
   }
 }
 
+const _FLUSH_MAX_ITERATIONS = 100;
+let _flushing = false;
+let _flushIterations = 0;
+
 function _flush(): void {
+  if (_flushing) return; // re-entrant call — outer _flush will pick up new pending
+  _flushing = true;
+  _flushIterations = 0;
   while (_pendingSubscribers.size > 0) {
+    if (++_flushIterations > _FLUSH_MAX_ITERATIONS) {
+      console.warn(
+        "[aio:signal] _flush exceeded 100 iterations — possible infinite loop. Remaining subscribers cleared.",
+      );
+      _pendingSubscribers.clear();
+      break;
+    }
     const pending = [..._pendingSubscribers];
     _pendingSubscribers.clear();
     // Phase 1: prepare (cleanup) — all subscribers
@@ -76,6 +90,7 @@ function _flush(): void {
       sub.execute();
     }
   }
+  _flushing = false;
 }
 
 function _notify(subscribers: Set<Subscriber>): void {
@@ -84,6 +99,39 @@ function _notify(subscribers: Set<Subscriber>): void {
     _pendingSubscribers.add(sub);
   }
   if (_batchDepth === 0) _flush();
+}
+
+// ── Shallow equality (AIO-59) ──────────────────────────────────────
+
+/** Shallow comparison for plain objects/arrays. Returns true if all keys/values
+ *  match by ===. Used by signal.set() to skip no-op updates that create new
+ *  references but contain identical data (e.g. `{...state, count: 0}` when count
+ *  was already 0). */
+function _shallowEq(a: unknown, b: unknown): boolean {
+  if (a === b) return true;
+  if (
+    a === null || b === null || typeof a !== "object" || typeof b !== "object"
+  ) return false;
+  const isArrA = Array.isArray(a);
+  const isArrB = Array.isArray(b);
+  if (isArrA !== isArrB) return false;
+  if (isArrA) {
+    const aa = a as unknown[], bb = b as unknown[];
+    if (aa.length !== bb.length) return false;
+    for (let i = 0; i < aa.length; i++) {
+      if (aa[i] !== bb[i]) return false;
+    }
+    return true;
+  }
+  const ka = Object.keys(a as Record<string, unknown>);
+  const kb = Object.keys(b as Record<string, unknown>);
+  if (ka.length !== kb.length) return false;
+  const objA = a as Record<string, unknown>;
+  const objB = b as Record<string, unknown>;
+  for (const k of ka) {
+    if (objA[k] !== objB[k]) return false;
+  }
+  return true;
 }
 
 // ── Signal ──────────────────────────────────────────────────────────
@@ -105,28 +153,18 @@ class SignalImpl<T> implements Signal<T> {
 
   set(next: T): void {
     if (Object.is(this._value, next)) return;
-    if (_batchDepth > 0) {
-      // Inside batch: just update value and queue subscribers for later
-      this._value = next;
-      this._version++;
-      const snapshot = [...this._subscribers];
-      for (const sub of snapshot) {
-        _pendingSubscribers.add(sub); // Set deduplicates by identity
-      }
-    } else {
-      // Outside batch: run prepare (cleanup) BEFORE value update
-      const snapshot = [...this._subscribers];
-      for (const sub of snapshot) {
-        if (sub.prepare) sub.prepare();
-      }
-      // Update value
-      this._value = next;
-      this._version++;
-      // Run executions
-      for (const sub of snapshot) {
-        sub.execute();
-      }
+    // AIO-59: shallow equality for objects/arrays — skip notification when all
+    // values are identical by ===. Prevents infinite re-render loops when
+    // signal.set({...same values...}) is called from rAF/effect callbacks.
+    if (
+      next !== null && typeof next === "object" && _shallowEq(this._value, next)
+    ) return;
+    this._value = next;
+    this._version++;
+    for (const sub of this._subscribers) {
+      _pendingSubscribers.add(sub);
     }
+    if (_batchDepth === 0) _flush();
   }
 
   peek(): T {
@@ -147,6 +185,8 @@ export function signal<T>(initial: T): Signal<T> {
 }
 
 // ── Computed ────────────────────────────────────────────────────────
+
+const _computing = new Set<ComputedImpl<unknown>>();
 
 class ComputedImpl<T> implements Computed<T> {
   private _fn: () => T;
@@ -185,6 +225,11 @@ class ComputedImpl<T> implements Computed<T> {
   }
 
   private _recompute(): void {
+    if (_computing.has(this as unknown as ComputedImpl<unknown>)) {
+      throw new Error("[aio:signal] Circular dependency detected in computed");
+    }
+    _computing.add(this as unknown as ComputedImpl<unknown>);
+
     for (const unsub of this._unsubs) unsub();
     this._unsubs = [];
     this._deps.clear();
@@ -194,6 +239,7 @@ class ComputedImpl<T> implements Computed<T> {
       this._cached = this._fn();
     } finally {
       _trackEnd(deps);
+      _computing.delete(this as unknown as ComputedImpl<unknown>);
     }
 
     this._dirty = false;

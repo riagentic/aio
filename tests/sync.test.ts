@@ -12,6 +12,8 @@ import {
   useLocal as standaloneUseLocal,
 } from "../src/standalone.ts";
 import {
+  actions as browserActions,
+  msg as browserMsg,
   page as browserPage,
   useLocal as browserUseLocal,
 } from "../src/browser.ts";
@@ -46,33 +48,21 @@ Deno.test("sync: canonical actions() produces expected output", () => {
   assertEquals(A.reset(), { type: "Reset", payload: {} });
 });
 
-Deno.test("sync: browser.ts inline msg() matches canonical implementation", async () => {
-  const src = await Deno.readTextFile(BROWSER_TS);
-
-  // Core msg() behavior: empty payload defaults to {}
-  assertEquals(
-    src.includes("payload: payload ?? {}"),
-    true,
-    "browser.ts msg() must use `payload ?? {}` — matches canonical msg.ts",
-  );
+Deno.test("sync: browser.ts msg() matches canonical implementation", () => {
+  // browser.ts now re-exports from browser-shared.ts — verify behavioral parity
+  const { msg: bMsg } = await_import_browser();
+  assertEquals(bMsg("X"), msg("X"));
+  assertEquals(bMsg("Y", { z: 1 }), msg("Y", { z: 1 }));
+  assertEquals(bMsg("Z").payload, {});
 });
 
-Deno.test("sync: browser.ts inline factory matches canonical implementation", async () => {
-  const src = await Deno.readTextFile(BROWSER_TS);
-
-  // lowerFirst conversion must match factory.ts
-  assertEquals(
-    src.includes("s.charAt(0).toLowerCase() + s.slice(1)"),
-    true,
-    "browser.ts _lowerFirst must use same logic as canonical factory.ts",
-  );
-
-  // Creator must default empty payload to {}
-  assertEquals(
-    src.includes("creators[key]!(...args) ?? {}"),
-    true,
-    "browser.ts factory creator must use `?? {}` default — matches canonical factory.ts",
-  );
+Deno.test("sync: browser.ts factory matches canonical implementation", () => {
+  // browser.ts now re-exports from browser-shared.ts — verify behavioral parity
+  const { actions: bActions } = await_import_browser();
+  const bA = bActions({ Inc: (n: number) => ({ n }) });
+  const cA = actions({ Inc: (n: number) => ({ n }) });
+  assertEquals(bA.Inc, cA.Inc);
+  assertEquals(bA.inc(5), cA.inc(5));
 });
 
 Deno.test("sync: browser.ts exports _reset() for test isolation", async () => {
@@ -181,4 +171,8 @@ function await_import_standalone() {
   // standalone re-exports msg and actions from canonical sources
   // We already imported them — just return for clarity
   return { msg, actions };
+}
+
+function await_import_browser() {
+  return { msg: browserMsg, actions: browserActions };
 }

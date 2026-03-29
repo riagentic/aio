@@ -203,17 +203,20 @@ export function useFieldArray<T>(initial: T[] = []): FieldArrayState<T> {
     },
     remove(index: number) {
       const arr = [...sig.peek()];
+      if (index < 0 || index >= arr.length) return;
       arr.splice(index, 1);
       sig.set(arr);
     },
     move(from: number, to: number) {
       const arr = [...sig.peek()];
+      if (from < 0 || from >= arr.length || to < 0 || to > arr.length) return;
       const [item] = arr.splice(from, 1);
       arr.splice(to, 0, item!);
       sig.set(arr);
     },
     set(index: number, item: T) {
       const arr = [...sig.peek()];
+      if (index < 0 || index >= arr.length) return;
       arr[index] = item;
       sig.set(arr);
     },

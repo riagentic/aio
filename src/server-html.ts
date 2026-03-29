@@ -455,7 +455,7 @@ export function generateHTML(
       document.getElementById('root').innerHTML =
         '<div style="margin:0;padding:1.75rem 2rem;min-height:100vh;background:#141414;font:13px/1.7 monospace;box-sizing:border-box">'
         + '<div style="max-width:920px">'
-        + '<div style="color:#ff6b6b;font-size:1.1rem;font-weight:700;margin-bottom:1.25rem;padding-bottom:.75rem;border-bottom:1px solid #2a2a2a">&#9888; ' + label + '</div>'
+        + '<div style="color:#ff6b6b;font-size:1.1rem;font-weight:700;margin-bottom:1.25rem;padding-bottom:.75rem;border-bottom:1px solid #2a2a2a">&#9888; ' + esc(label) + '</div>'
         + body
         + fixBox
         + '<div style="margin-top:1.5rem;padding-top:.75rem;border-top:1px solid #2a2a2a;color:#444;font-size:11px">F12 DevTools &nbsp;&#183;&nbsp; am errors &nbsp;&#183;&nbsp; ' + new Date().toLocaleTimeString() + '</div>'

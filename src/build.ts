@@ -54,6 +54,62 @@ if (shellFlags.length > 1) {
   Deno.exit(1);
 }
 
+// ── Integrity verification for fetched sources ──────────────────────
+// On first build: record SHA-256 hashes to .aio-integrity.json
+// On subsequent builds: verify fetched source matches recorded hash.
+// Protects against CDN compromise, MITM, DNS hijack during build.
+
+const _integrityFile = join(root, ".aio-integrity.json");
+let _integrityMap: Record<string, string> | null = null;
+
+async function _sha256(text: string): Promise<string> {
+  const buf = await crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(text),
+  );
+  return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+async function _loadIntegrityMap(): Promise<Record<string, string>> {
+  if (_integrityMap) return _integrityMap;
+  try {
+    _integrityMap = JSON.parse(await Deno.readTextFile(_integrityFile));
+  } catch {
+    _integrityMap = {};
+  }
+  return _integrityMap!;
+}
+
+async function _saveIntegrityMap(): Promise<void> {
+  if (!_integrityMap) return;
+  await Deno.writeTextFile(
+    _integrityFile,
+    JSON.stringify(_integrityMap, null, 2) + "\n",
+  );
+}
+
+async function _verifyIntegrity(url: string, contents: string): Promise<void> {
+  const map = await _loadIntegrityMap();
+  const hash = await _sha256(contents);
+  const expected = map[url];
+  if (!expected) {
+    // First fetch — record hash
+    map[url] = hash;
+    await _saveIntegrityMap();
+    return;
+  }
+  if (hash !== expected) {
+    throw new Error(
+      `[build] Integrity check failed for ${url}\n` +
+        `  Expected: ${expected}\n` +
+        `  Got:      ${hash}\n` +
+        `  The content of this URL has changed since the last build.\n` +
+        `  If this is expected (e.g. framework version bump), delete .aio-integrity.json and rebuild.`,
+    );
+  }
+}
+
 // ── esbuild HTTP plugin — loads https:// modules (needed when running from JSR) ──
 // Intercepts 'aio' import → framework URL, then resolves relative imports within it.
 // deno-lint-ignore no-explicit-any
@@ -62,7 +118,9 @@ const _httpPlugin: any = {
   // deno-lint-ignore no-explicit-any
   setup(build: any) {
     const base = _FRAMEWORK_BASE.href;
-    const entry = doAndroid ? "standalone.ts" : "browser.ts";
+    const entry = doAndroid
+      ? (rendererMode === "aio" ? "standalone-air.ts" : "standalone.ts")
+      : (rendererMode === "aio" ? "browser-air.ts" : "browser.ts");
     const entryUrl = new URL(entry, base).href;
     // 'aio' → framework entry URL
     build.onResolve(
@@ -79,13 +137,16 @@ const _httpPlugin: any = {
       const url = new URL(args.path, args.pluginData?.url ?? base).href;
       return { path: url, namespace: "http-url", pluginData: { url } };
     });
-    // fetch and load any http-url file
+    // fetch and load any http-url file — with integrity verification
     // deno-lint-ignore no-explicit-any
     build.onLoad({ filter: /.*/, namespace: "http-url" }, async (args: any) => {
       const r = await fetch(args.path);
       if (!r.ok) throw new Error(`[build] fetch ${args.path} → ${r.status}`);
+      const contents = await r.text();
+      // Integrity check: on first fetch, record hash; on subsequent builds, verify
+      await _verifyIntegrity(args.path, contents);
       return {
-        contents: await r.text(),
+        contents,
         loader: "ts",
         pluginData: { url: args.path },
       };
@@ -229,8 +290,14 @@ if (!doCli && !doHeadless && !doClient && !(doAndroid && doRemote)) {
       // Check deno.json + framework source files (skip for remote — JSR version is pinned)
       if (!_IS_REMOTE) {
         const aioModule = doAndroid
-          ? join(frameworkSrcDir, "standalone.ts")
-          : join(frameworkSrcDir, "browser.ts");
+          ? join(
+            frameworkSrcDir,
+            rendererMode === "aio" ? "standalone-air.ts" : "standalone.ts",
+          )
+          : join(
+            frameworkSrcDir,
+            rendererMode === "aio" ? "browser-air.ts" : "browser.ts",
+          );
         for (
           const f of [
             join(root, "deno.json"),
@@ -276,7 +343,9 @@ if (!doCli && !doHeadless && !doClient && !(doAndroid && doRemote)) {
 
     // Generate temp build config — overrides 'aio' to browser/standalone, adds React
     // Remote (JSR): 'aio' handled by HTTP plugin; local: mapped to framework file path
-    const fwEntry = doAndroid ? "standalone.ts" : "browser.ts";
+    const fwEntry = doAndroid
+      ? (rendererMode === "aio" ? "standalone-air.ts" : "standalone.ts")
+      : (rendererMode === "aio" ? "browser-air.ts" : "browser.ts");
     const aioEntry = _IS_REMOTE ? null : join(frameworkSrcDir, fwEntry);
     const reactImports = rendererMode === "aio"
       ? {
