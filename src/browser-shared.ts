@@ -128,7 +128,7 @@ export function buildWsUrl(): string {
   const proto = location.protocol === "https:" ? "wss:" : "ws:";
   const tokenParam = new URLSearchParams(location.search).get("token");
   return proto + "//" + location.host + "/ws" +
-    (tokenParam ? "?token=" + tokenParam : "");
+    (tokenParam ? "?token=" + encodeURIComponent(tokenParam) : "");
 }
 
 /** Refresh all same-origin stylesheets (cache-bust with ?t=timestamp) */

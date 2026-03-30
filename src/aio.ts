@@ -24,7 +24,6 @@ import {
   createTT,
   markError,
   pause,
-  type PerfMetric,
   record,
   redo,
   type ReduceBreakdown,
@@ -95,8 +94,15 @@ function validateVersion(): void {
 // Run validation on first import
 validateVersion();
 
-/** User identity — resolved from static token map */
+/** User identity — resolved from static token map or dynamic resolveUser hook */
 export type AioUser = { id: string; role: string };
+
+/** Dynamic user resolution hook — called with extracted token + current state.
+ *  Return AioUser to authenticate, null to reject. Supports async (e.g. JWT verification). */
+export type ResolveUserFn<S = unknown> = (
+  token: string,
+  state: S,
+) => AioUser | null | Promise<AioUser | null>;
 export type { AioError } from "./error.ts";
 export type { PerfBudget, PerfCheck } from "./dispatch.ts";
 
@@ -106,7 +112,7 @@ export type UiConfig = {
   width?: number; // default: 800
   height?: number; // default: 600
   showStatus?: boolean; // default: true
-  renderer?: "react" | "aio"; // default: 'react' — 'aio' uses native VDOM engine (no React dependency)
+  renderer?: "react" | "aio"; // default: 'aio' — native AIR VDOM engine (no React dependency)
 };
 
 /** Default broadcast throttle: 50ms = max 20 state pushes/sec */
@@ -132,6 +138,7 @@ export type AioConfig<S, A, E> = {
   persistDebounceMs?: number; // ms between KV writes (default: 100)
   persistMode?: "single" | "multi"; // 'single' (default): one blob ≤65KB. 'multi': one KV key per top-level state key — no 65KB limit
   users?: Record<string, AioUser>; // static token map — token is key, user is value
+  resolveUser?: ResolveUserFn<S>; // dynamic user resolution — overrides users if both set (AIO-171)
   ui?: UiConfig;
   port?: number; // default: 8000
   baseDir?: string; // default: ./src
@@ -162,6 +169,8 @@ export type AioConfig<S, A, E> = {
   onError?: (error: AioError) => void;
   /** Internal: schedule cancel callback set by _run, used by features disable */
   _onScheduleReady?: (cancelByPrefix: (prefix: string) => void) => void;
+  /** Internal: AIO-222 — propagate reportOpts to feature error reporting */
+  _onReportOptsReady?: (opts: ReportErrorOpts) => void;
   /** Internal: diagnostics config passed from FeaturesConfig */
   _diagnostics?: DiagnosticsConfig;
   /** Internal: checkpoint restore callback passed from FeaturesConfig */
@@ -246,6 +255,7 @@ export type FeaturesConfig = {
   killExisting?: boolean;
   serverUrl?: string;
   users?: Record<string, AioUser>;
+  resolveUser?: ResolveUserFn;
   db?: Record<string, TableDef>;
   perfCheck?: "on" | "off";
   perfBudget?: PerfBudget;
@@ -328,261 +338,270 @@ async function run(a: any, b?: any): Promise<AioApp<any, any>> {
   }
   _running = true;
 
-  {
-    // --isolate: filter features to only the specified ones
-    let featureEntries = fc.features;
-    const cliIsolate = parseCli().isolate;
-    const isolate = fc.isolate ?? cliIsolate;
-    if (isolate && isolate.length) {
-      const isolateSet = new Set(isolate);
-      featureEntries = featureEntries.filter((entry) => {
-        const f = "__aio" in entry
-          ? entry as FeatureDef
-          : (entry as { feature: FeatureDef }).feature;
-        return isolateSet.has(f.__aio.id);
-      });
-      if (featureEntries.length === 0) {
-        log.warn(
-          `isolate: no features matched [${
-            [...isolateSet].join(", ")
-          }] — check spelling`,
-        );
-      } else {
-        log.info(
-          `isolate: ${
-            featureEntries.map((e) =>
-              ("__aio" in e
-                ? e as FeatureDef
-                : (e as { feature: FeatureDef }).feature).__aio.id
-            ).join(", ")
-          }`,
-        );
-      }
-    }
-
-    // Mutable reportOpts ref — populated by _run, used by composeFeatures callbacks at runtime
-    const _featureReportOpts: ReportErrorOpts = { onError: fc.onError };
-
-    const perfEnabled = fc.perfCheck !== "off";
-    const composed = composeFeatures(featureEntries, {
-      onFeatureError: (err) => reportAioError(err, _featureReportOpts),
-      circuitBreaker: fc.circuitBreaker,
-      perfCheck: perfEnabled,
-    });
-
-    // Build auto-stateForDB from per-feature persist excludes (if user didn't supply one)
-    let autoGetDBState = fc.stateForDB;
-    if (!fc.stateForDB) {
-      const featureExcludes = new Map<string, string[]>();
-      for (const f of composed.features) {
-        if (f.__aio.persistExclude?.length) {
-          featureExcludes.set(f.__aio.id, f.__aio.persistExclude);
+  try { // AIO-150: wrap entire init so _running resets on failure
+    { // block scope for isolate/compose variables
+      // --isolate: filter features to only the specified ones
+      let featureEntries = fc.features;
+      const cliIsolate = parseCli().isolate;
+      const isolate = fc.isolate ?? cliIsolate;
+      if (isolate && isolate.length) {
+        const isolateSet = new Set(isolate);
+        featureEntries = featureEntries.filter((entry) => {
+          const f = "__aio" in entry
+            ? entry as FeatureDef
+            : (entry as { feature: FeatureDef }).feature;
+          return isolateSet.has(f.__aio.id);
+        });
+        if (featureEntries.length === 0) {
+          log.warn(
+            `isolate: no features matched [${
+              [...isolateSet].join(", ")
+            }] — check spelling`,
+          );
+        } else {
+          log.info(
+            `isolate: ${
+              featureEntries.map((e) =>
+                ("__aio" in e
+                  ? e as FeatureDef
+                  : (e as { feature: FeatureDef }).feature).__aio.id
+              ).join(", ")
+            }`,
+          );
         }
       }
-      if (featureExcludes.size > 0) {
-        autoGetDBState = (s: unknown) => {
-          const result = { ...(s as Record<string, unknown>) };
-          for (const [featureName, excludeKeys] of featureExcludes) {
-            if (
-              result[featureName] && typeof result[featureName] === "object"
-            ) {
-              const filtered = {
-                ...(result[featureName] as Record<string, unknown>),
-              };
-              for (const key of excludeKeys) delete filtered[key];
-              result[featureName] = filtered;
+
+      // Mutable reportOpts ref — populated by _run, used by composeFeatures callbacks at runtime
+      const _featureReportOpts: ReportErrorOpts = { onError: fc.onError };
+
+      const perfEnabled = fc.perfCheck !== "off";
+      const composed = composeFeatures(featureEntries, {
+        onFeatureError: (err) => reportAioError(err, _featureReportOpts),
+        circuitBreaker: fc.circuitBreaker,
+        perfCheck: perfEnabled,
+      });
+
+      // Build auto-stateForDB from per-feature persist excludes (if user didn't supply one)
+      let autoGetDBState = fc.stateForDB;
+      if (!fc.stateForDB) {
+        const featureExcludes = new Map<string, string[]>();
+        for (const f of composed.features) {
+          if (f.__aio.persistExclude?.length) {
+            featureExcludes.set(f.__aio.id, f.__aio.persistExclude);
+          }
+        }
+        if (featureExcludes.size > 0) {
+          autoGetDBState = (s: unknown) => {
+            const result = { ...(s as Record<string, unknown>) };
+            for (const [featureName, excludeKeys] of featureExcludes) {
+              if (
+                result[featureName] && typeof result[featureName] === "object"
+              ) {
+                const filtered = {
+                  ...(result[featureName] as Record<string, unknown>),
+                };
+                for (const key of excludeKeys) delete filtered[key];
+                result[featureName] = filtered;
+              }
             }
+            return result;
+          };
+        }
+      }
+
+      // Log feature composition
+      log.info(`features: ${composed.featureNames.join(", ")}`);
+      // Log foreign action listeners
+      for (const f of composed.features) {
+        if (f.__aio.foreignActions.length) {
+          for (const fa of f.__aio.foreignActions) {
+            log.info(`${f.__aio.id}: listens to ${fa}`);
+          }
+        }
+      }
+
+      // Create structured logger if configured
+      const appId = resolveAppId(fc.appId);
+      const cliBackup = parseCli().backupLogs;
+      const logCfg = fc.logging === false
+        ? null
+        : (fc.logging === true || fc.logging === undefined ? {} : fc.logging);
+      const logger = logCfg
+        ? new AioLogger({
+          ...logCfg,
+          ...(cliBackup ? { backupLogs: true } : {}),
+          appName: appId,
+        })
+        : null;
+      if (logger) await logger.init();
+      setLogger(logger); // Store composed for useFeature (used by getUIState to expose feature names)
+      (globalThis as Record<string, unknown>).__aioFeatures = composed;
+
+      // Build beforeReduce from middleware array + explicit beforeReduce
+      let beforeReduce = fc.beforeReduce as
+        | ((action: unknown, state: unknown, user?: AioUser) => unknown | null)
+        | undefined;
+      if (fc.middleware?.length) {
+        const mws = fc.middleware;
+        const chainedMw = (
+          action: unknown,
+          state: unknown,
+          user?: AioUser,
+        ): unknown | null => {
+          let result: unknown | null = action;
+          for (const mw of mws) {
+            if (result === null) return null;
+            result = mw(result, state, user);
           }
           return result;
         };
-      }
-    }
-
-    // Log feature composition
-    log.info(`features: ${composed.featureNames.join(", ")}`);
-    // Log foreign action listeners
-    for (const f of composed.features) {
-      if (f.__aio.foreignActions.length) {
-        for (const fa of f.__aio.foreignActions) {
-          log.info(`${f.__aio.id}: listens to ${fa}`);
+        if (beforeReduce) {
+          const prev = beforeReduce;
+          beforeReduce = (action, state, user?: AioUser) => {
+            const r = chainedMw(action, state, user);
+            if (r === null) return null;
+            return prev(r, state, user);
+          };
+        } else {
+          beforeReduce = chainedMw;
         }
       }
-    }
 
-    // Create structured logger if configured
-    const appId = resolveAppId(fc.appId);
-    const cliBackup = parseCli().backupLogs;
-    const logCfg = fc.logging === false
-      ? null
-      : (fc.logging === true || fc.logging === undefined ? {} : fc.logging);
-    const logger = logCfg
-      ? new AioLogger({
-        ...logCfg,
-        ...(cliBackup ? { backupLogs: true } : {}),
-        appName: appId,
-      })
-      : null;
-    if (logger) await logger.init();
-    setLogger(logger); // Store composed for useFeature (used by getUIState to expose feature names)
-    (globalThis as Record<string, unknown>).__aioFeatures = composed;
+      const onRestore = fc.onRestore as
+        | ((state: unknown) => unknown)
+        | undefined;
 
-    // Build beforeReduce from middleware array + explicit beforeReduce
-    let beforeReduce = fc.beforeReduce as
-      | ((action: unknown, state: unknown, user?: AioUser) => unknown | null)
-      | undefined;
-    if (fc.middleware?.length) {
-      const mws = fc.middleware;
-      const chainedMw = (
-        action: unknown,
-        state: unknown,
-        user?: AioUser,
-      ): unknown | null => {
-        let result: unknown | null = action;
-        for (const mw of mws) {
-          if (result === null) return null;
-          result = mw(result, state, user);
-        }
-        return result;
-      };
-      if (beforeReduce) {
-        const prev = beforeReduce;
-        beforeReduce = (action, state, user?: AioUser) => {
-          const r = chainedMw(action, state, user);
-          if (r === null) return null;
-          return prev(r, state, user);
-        };
-      } else {
-        beforeReduce = chainedMw;
-      }
-    }
+      // Mutable ref — set after _run() so closures in config can access the app
+      let appRef: AioApp<Record<string, unknown>, unknown> | null = null;
 
-    const onRestore = fc.onRestore as ((state: unknown) => unknown) | undefined;
-
-    // Mutable ref — set after _run() so closures in config can access the app
-    let appRef: AioApp<Record<string, unknown>, unknown> | null = null;
-
-    // Convert to legacy config
-    const config: AioConfig<Record<string, unknown>, unknown, unknown> = {
-      appId: fc.appId,
-      reduce: composed.reduce as AioConfig<
-        Record<string, unknown>,
-        unknown,
-        unknown
-      >["reduce"],
-      execute:
-        ((app: AioApp<Record<string, unknown>, unknown>, effect: unknown) => {
-          composed.execute(
-            {
-              dispatch: (a) => app.dispatch(a),
-              getState: () => app.getState(),
-            },
-            effect as { type: string; payload: unknown },
-          );
-        }) as AioConfig<Record<string, unknown>, unknown, unknown>["execute"],
-      persist: fc.persist,
-      persistKey: fc.persistKey,
-      persistDebounceMs: fc.persistDebounceMs,
-      persistMode: fc.persistMode,
-      port: fc.port,
-      baseDir: fc.baseDir,
-      client: fc.client,
-      users: fc.users,
-      db: fc.db,
-      perfCheck: fc.perfCheck,
-      perfBudget: fc.perfBudget,
-      effectTimeoutMs: fc.effectTimeoutMs,
-      freezeState: fc.freezeState,
-      singleton: fc.singleton,
-      killExisting: fc.killExisting,
-      keepServer: fc.keepServer,
-      syncIntervalMs: fc.syncIntervalMs,
-      fullStateThreshold: fc.fullStateThreshold,
-      maxConnections: fc.maxConnections,
-      schedules: fc.schedules,
-      appVersion: fc.appVersion,
-      transport: fc.transport,
-      serverUrl: fc.serverUrl,
-      ui: fc.ui,
-      beforeReduce: beforeReduce as AioConfig<
-        Record<string, unknown>,
-        unknown,
-        unknown
-      >["beforeReduce"],
-      onAction: logger
-        ? ((action, state, user) => {
-          logger.observe(
-            action as { type: string; payload?: unknown },
-            state as Record<string, unknown>,
-          );
-          if (fc.onAction) fc.onAction(action, state, user);
-        }) as AioConfig<Record<string, unknown>, unknown, unknown>["onAction"]
-        : fc.onAction as AioConfig<
+      // Convert to legacy config
+      const config: AioConfig<Record<string, unknown>, unknown, unknown> = {
+        appId: fc.appId,
+        reduce: composed.reduce as AioConfig<
           Record<string, unknown>,
           unknown,
           unknown
-        >["onAction"],
-      onEffect: fc.onEffect as AioConfig<
-        Record<string, unknown>,
-        unknown,
-        unknown
-      >["onEffect"],
-      onConnect: fc.onConnect,
-      onDisconnect: fc.onDisconnect,
-      onStart: ((app: AioApp<Record<string, unknown>, unknown>) => {
-        // Run lifecycle init for all features
-        composed.initAll({
-          dispatch: (a) => app.dispatch(a),
-          getState: () => app.getState(),
-        });
-        logger?.onStart(composed.featureNames, app.port);
-        if (fc.onStart) fc.onStart(app);
-      }) as AioConfig<Record<string, unknown>, unknown, unknown>["onStart"],
-      onStop: () => {
-        logger?.onStop();
-        setLogger(null);
-        if (appRef) {
-          composed.destroyAll({
-            dispatch: (a) => appRef!.dispatch(a),
-            getState: () => appRef!.getState(),
+        >["reduce"],
+        execute:
+          ((app: AioApp<Record<string, unknown>, unknown>, effect: unknown) => {
+            composed.execute(
+              {
+                dispatch: (a) => app.dispatch(a),
+                getState: () => app.getState(),
+              },
+              effect as { type: string; payload: unknown },
+            );
+          }) as AioConfig<Record<string, unknown>, unknown, unknown>["execute"],
+        persist: fc.persist,
+        persistKey: fc.persistKey,
+        persistDebounceMs: fc.persistDebounceMs,
+        persistMode: fc.persistMode,
+        port: fc.port,
+        baseDir: fc.baseDir,
+        client: fc.client,
+        users: fc.users,
+        resolveUser: fc.resolveUser,
+        db: fc.db,
+        perfCheck: fc.perfCheck,
+        perfBudget: fc.perfBudget,
+        effectTimeoutMs: fc.effectTimeoutMs,
+        freezeState: fc.freezeState,
+        singleton: fc.singleton,
+        killExisting: fc.killExisting,
+        keepServer: fc.keepServer,
+        syncIntervalMs: fc.syncIntervalMs,
+        fullStateThreshold: fc.fullStateThreshold,
+        maxConnections: fc.maxConnections,
+        schedules: fc.schedules,
+        appVersion: fc.appVersion,
+        transport: fc.transport,
+        serverUrl: fc.serverUrl,
+        ui: fc.ui,
+        beforeReduce: beforeReduce as AioConfig<
+          Record<string, unknown>,
+          unknown,
+          unknown
+        >["beforeReduce"],
+        onAction: logger
+          ? ((action, state, user) => {
+            logger.observe(
+              action as { type: string; payload?: unknown },
+              state as Record<string, unknown>,
+            );
+            if (fc.onAction) fc.onAction(action, state, user);
+          }) as AioConfig<Record<string, unknown>, unknown, unknown>["onAction"]
+          : fc.onAction as AioConfig<
+            Record<string, unknown>,
+            unknown,
+            unknown
+          >["onAction"],
+        onEffect: fc.onEffect as AioConfig<
+          Record<string, unknown>,
+          unknown,
+          unknown
+        >["onEffect"],
+        onConnect: fc.onConnect,
+        onDisconnect: fc.onDisconnect,
+        onStart: ((app: AioApp<Record<string, unknown>, unknown>) => {
+          // Run lifecycle init for all features
+          composed.initAll({
+            dispatch: (a) => app.dispatch(a),
+            getState: () => app.getState(),
           });
-        }
-        if (fc.onStop) fc.onStop();
-      },
-      onError: fc.onError,
-      onRestore: onRestore as AioConfig<
-        Record<string, unknown>,
-        unknown,
-        unknown
-      >["onRestore"],
-      stateForUI: fc.stateForUI as AioConfig<
-        Record<string, unknown>,
-        unknown,
-        unknown
-      >["stateForUI"],
-      stateForDB: autoGetDBState as AioConfig<
-        Record<string, unknown>,
-        unknown,
-        unknown
-      >["stateForDB"],
-      _onScheduleReady: (cancelByPrefix) =>
-        composed.registry.setOnDisable(cancelByPrefix),
-      _diagnostics: fc.diagnostics,
-      _onCheckpointRestore: fc.onCheckpointRestore,
-      _featureNames: composed.featureNames,
-      _reduceBreakdown: composed.lastBreakdown,
-      _healthGetter: (state: unknown) => {
-        const health = composed.registry.health(
-          state as Record<string, unknown>,
-        );
-        const result: Record<string, { errors: number; enabled: boolean }> = {};
-        for (const h of health) {
-          result[h.name] = { errors: h.errors, enabled: h.enabled };
-        }
-        return result;
-      },
-    };
+          logger?.onStart(composed.featureNames, app.port);
+          if (fc.onStart) fc.onStart(app);
+        }) as AioConfig<Record<string, unknown>, unknown, unknown>["onStart"],
+        onStop: () => {
+          logger?.onStop();
+          setLogger(null);
+          if (appRef) {
+            composed.destroyAll({
+              dispatch: (a) => appRef!.dispatch(a),
+              getState: () => appRef!.getState(),
+            });
+          }
+          if (fc.onStop) fc.onStop();
+        },
+        onError: fc.onError,
+        onRestore: onRestore as AioConfig<
+          Record<string, unknown>,
+          unknown,
+          unknown
+        >["onRestore"],
+        stateForUI: fc.stateForUI as AioConfig<
+          Record<string, unknown>,
+          unknown,
+          unknown
+        >["stateForUI"],
+        stateForDB: autoGetDBState as AioConfig<
+          Record<string, unknown>,
+          unknown,
+          unknown
+        >["stateForDB"],
+        _onScheduleReady: (cancelByPrefix) =>
+          composed.registry.setOnDisable(cancelByPrefix),
+        _onReportOptsReady: (opts) => { // AIO-222
+          _featureReportOpts.logger = opts.logger;
+          _featureReportOpts.tt = opts.tt;
+          _featureReportOpts.prod = opts.prod;
+        },
+        _diagnostics: fc.diagnostics,
+        _onCheckpointRestore: fc.onCheckpointRestore,
+        _featureNames: composed.featureNames,
+        _reduceBreakdown: composed.lastBreakdown,
+        _healthGetter: (state: unknown) => {
+          const health = composed.registry.health(
+            state as Record<string, unknown>,
+          );
+          const result: Record<string, { errors: number; enabled: boolean }> =
+            {};
+          for (const h of health) {
+            result[h.name] = { errors: h.errors, enabled: h.enabled };
+          }
+          return result;
+        },
+      };
 
-    try {
       const app = await _run(composed.initialState, config);
       appRef = app;
 
@@ -642,7 +661,10 @@ async function run(a: any, b?: any): Promise<AioApp<any, any>> {
             getState: () => app.getState(),
           }),
         disable: (name: string) =>
-          composed.registry.disable(name, (a) => app.dispatch(a)),
+          composed.registry.disable(name, {
+            dispatch: (a) => app.dispatch(a),
+            getState: () => app.getState(),
+          }),
         status: (name: string) =>
           composed.registry.status(
             name,
@@ -664,10 +686,10 @@ async function run(a: any, b?: any): Promise<AioApp<any, any>> {
       }
 
       return app;
-    } catch (e) {
-      _running = false;
-      throw e;
     }
+  } catch (e) {
+    _running = false;
+    throw e;
   }
 }
 
@@ -808,8 +830,7 @@ async function _run<S, A, E>(
       _memoResults.clear();
     }
     const uid = user?.id ?? "";
-    const cached = _memoResults.get(uid);
-    if (cached !== undefined) return cached;
+    if (_memoResults.has(uid)) return _memoResults.get(uid); // AIO-245: handle undefined results
     const result = _rawStateForUI(s, user);
     _memoResults.set(uid, result);
     return result;
@@ -818,6 +839,7 @@ async function _run<S, A, E>(
   const persistKey = config.persistKey ?? "state";
   const persistMode = config.persistMode ?? "single";
   const ui = config.ui ?? {};
+  if (!ui.renderer) ui.renderer = "aio";
 
   // Validate config shape at runtime — types are erased, this is the safety net
   validateConfig(
@@ -1071,6 +1093,9 @@ async function _run<S, A, E>(
     prod,
   };
 
+  // AIO-222: propagate logger/tt/prod to feature error reporting
+  if (config._onReportOptsReady) config._onReportOptsReady(_reportOpts);
+
   // Schedule manager — handles __schedule effects from reducer + config-level schedules
   const scheduleManager = createScheduleManager(
     (action) => dispatch(action as A),
@@ -1087,14 +1112,18 @@ async function _run<S, A, E>(
   let udsDirty = false;
   let udsThrottle: ReturnType<typeof setTimeout> | null = null;
 
-  /** Broadcast UI state to UDS clients with per-client subscription filtering + delta compression. */
-  function udsBroadcastState(force = false) {
+  /** Broadcast UI state to UDS clients with per-client subscription filtering + delta/patches.
+   *  Pass `true` for force-full (snapshot/time-travel), or patches array for incremental. */
+  function udsBroadcastState(
+    forceOrPatches?:
+      | boolean
+      | Array<{ feature: string; ops: import("immer").Patch[] }>,
+  ) {
     if (!udsHandle) return;
-    udsHandle.broadcastState(force);
+    udsHandle.broadcastState(forceOrPatches);
   }
 
   // Track per-action performance for dev-mode time-travel panel + vitals
-  let lastPerf: PerfMetric | undefined;
   const onPerf = (tt || vitalsSystem)
     ? (
       timing: {
@@ -1105,8 +1134,9 @@ async function _run<S, A, E>(
         breakdown?: ReduceBreakdown;
       },
     ) => {
-      if (tt) {
-        lastPerf = {
+      // AIO-250: retroactively attach perf to the CURRENT TT entry (not the next one)
+      if (tt && tt.entries.length > 0) {
+        tt.entries[tt.index]!.perf = {
           reduce: timing.reduce,
           effects: timing.effects,
           budget: timing.budget,
@@ -1128,6 +1158,21 @@ async function _run<S, A, E>(
     return false;
   }
 
+  // Immer patch accumulator — collects patches across all reduce calls in a dispatch batch
+  type PatchEntry = { feature: string; ops: import("immer").Patch[] };
+  let _pendingPatches: PatchEntry[] = [];
+
+  /** Extract and accumulate patches from reduce result (patches field exists at runtime) */
+  function _collectPatches(
+    result: { state: S; effects: (E | ScheduleEffect)[] },
+  ): void {
+    const patches =
+      (result as unknown as { patches?: PatchEntry | PatchEntry[] }).patches;
+    if (!patches) return;
+    if (Array.isArray(patches)) _pendingPatches.push(...patches);
+    else _pendingPatches.push(patches);
+  }
+
   // Shared dispatch loop — re-entrant-safe, overflow-guarded
   const dispatch = createDispatch<S, A, E>({
     reduce: tt
@@ -1141,20 +1186,26 @@ async function _run<S, A, E>(
           return { state: s, effects: [] as E[] };
         }
         const result = hookedReduce(s, a);
+        _collectPatches(result);
         const actionType = (a as { type?: string }).type ?? "";
         if (!isInternalAction(actionType)) {
+          // AIO-250: don't pass lastPerf here — it contains PREVIOUS action's metrics.
+          // onPerf callback will retroactively update the TT entry after effects complete.
           tt = record(
             tt!,
             a as unknown as { type: string },
             result.state,
-            lastPerf,
+            undefined,
           );
-          lastPerf = undefined;
           server.broadcastTT();
         }
         return result;
       }
-      : hookedReduce,
+      : (s, a) => {
+        const result = hookedReduce(s, a);
+        _collectPatches(result);
+        return result;
+      },
     execute: (effect) => {
       if (isScheduleEffect(effect)) {
         scheduleManager.handle(effect as ScheduleEffect);
@@ -1169,9 +1220,16 @@ async function _run<S, A, E>(
     onDone: () => {
       const processed = _anyProcessed;
       _anyProcessed = false;
+      const patches = _pendingPatches;
+      _pendingPatches = [];
       if (!processed) return; // all actions dropped by beforeReduce — skip persist + broadcast
       if (!tt?.paused) schedulePersist();
-      server.broadcast();
+      // When stateForUI is configured, patches are invalid (computed against unfiltered state)
+      // — always use full filtered state broadcast instead
+      const validPatches = config.stateForUI
+        ? undefined
+        : (patches.length > 0 ? patches : undefined);
+      server.broadcast(validPatches);
       // Also broadcast to UDS clients (Electron IPC bridge) — throttled same as WS
       if (udsHandle) {
         udsDirty = true;
@@ -1180,7 +1238,7 @@ async function _run<S, A, E>(
           queueMicrotask(() => {
             udsQueued = false;
             udsDirty = false;
-            udsBroadcastState();
+            udsBroadcastState(validPatches);
             if (udsSyncIntervalMs > 0) {
               udsThrottle = setTimeout(() => {
                 udsThrottle = null;
@@ -1311,8 +1369,14 @@ async function _run<S, A, E>(
   // --expose: bind 0.0.0.0, generate access token, auto-TLS
   const expose = cli.expose ?? false;
   const users = config.users;
-  // --expose without users: auto-gen single token (backwards compatible)
-  const token = (expose && !users) ? crypto.randomUUID() : undefined;
+  // Bind resolveUser hook to current state — server.ts unifies with static users map (AIO-171)
+  const _resolveUser = config.resolveUser
+    ? (tok: string) => config.resolveUser!(tok, state)
+    : undefined;
+  // --expose without users/resolveUser: auto-gen single token (backwards compatible)
+  const token = (expose && !users && !_resolveUser)
+    ? crypto.randomUUID()
+    : undefined;
 
   // TLS: auto-generate self-signed cert when --expose (or use user-provided --cert/--key)
   let tlsCert: TlsCert | null = null;
@@ -1418,6 +1482,7 @@ async function _run<S, A, E>(
       expose,
       token,
       users,
+      resolveUser: _resolveUser,
       cert: tlsCert?.cert,
       key: tlsCert?.key,
       showStatus: ui.showStatus,
@@ -1426,6 +1491,7 @@ async function _run<S, A, E>(
       fullStateThreshold: config.fullStateThreshold,
       maxConnections: config.maxConnections,
       syncIntervalMs: config.syncIntervalMs,
+      hasStateFilter: config.stateForUI != null,
       onConnect: config.onConnect,
       onDisconnect: config.onDisconnect,
       onReload: (signal) => {
@@ -1541,6 +1607,7 @@ async function _run<S, A, E>(
       (msg: string) => log.debug(msg),
       clientCounter,
       config.fullStateThreshold ?? 0.5,
+      config.stateForUI != null,
     );
     log.info(`transport: UDS at ${socketPath}`);
   }

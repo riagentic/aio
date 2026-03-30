@@ -13,16 +13,31 @@ export type CrashHandlerDeps = {
 export function installCrashHandler(deps: CrashHandlerDeps): () => void {
   const { log, getHealthData, writeEmergencyCheckpoint } = deps;
 
+  let _handling = false;
+
   function handle(label: string, error: unknown): void {
-    const msg = error instanceof Error ? error.message : String(error);
-    const stack = error instanceof Error ? error.stack : undefined;
-    const health = getHealthData();
-    log.error(`[crash-handler] ${label}: ${msg}`, {
-      stack: stack ?? "no stack",
-      features: health.features as unknown as Record<string, unknown>,
-    });
-    if (typeof Deno !== "undefined" && "writeTextFileSync" in Deno) {
-      writeEmergencyCheckpoint();
+    if (_handling) return;
+    _handling = true;
+    try {
+      const msg = error instanceof Error ? error.message : String(error);
+      const stack = error instanceof Error ? error.stack : undefined;
+      let health: ReturnType<typeof getHealthData> | undefined;
+      try {
+        health = getHealthData();
+      } catch { /* health unavailable */ }
+      try {
+        log.error(`[crash-handler] ${label}: ${msg}`, {
+          stack: stack ?? "no stack",
+          features: health?.features as unknown as Record<string, unknown>,
+        });
+      } catch { /* logger failed during crash */ }
+      if (typeof Deno !== "undefined" && "writeTextFileSync" in Deno) {
+        try {
+          writeEmergencyCheckpoint();
+        } catch { /* checkpoint failed */ }
+      }
+    } finally {
+      _handling = false;
     }
   }
 

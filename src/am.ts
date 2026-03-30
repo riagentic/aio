@@ -96,7 +96,7 @@ function resolveAmAppId(flag?: string): string {
 
 /** Resolve port for am commands — --port flag > deno.json port > app.ts aio.run() port > DEFAULT_PORT */
 function resolveAmPort(flag?: number): number {
-  if (flag) return flag;
+  if (flag !== undefined) return flag; // AIO-212: don't ignore --port=0
   try {
     const cfg = JSON.parse(
       Deno.readTextFileSync(join(Deno.cwd(), "deno.json")),
@@ -1346,27 +1346,34 @@ async function cmdLog(args: string[], flags: GlobalFlags): Promise<void> {
   for await (const event of watcher) {
     if (event.kind !== "modify" && event.kind !== "create") continue;
     try {
+      // AIO-214: detect log rotation — reset offset if file shrunk
+      const stat = await Deno.stat(LOG_FILE);
+      if (stat.size < offset) offset = 0;
+      // AIO-213: use try/finally to ensure file handle is always closed
       const file = await Deno.open(LOG_FILE, { read: true });
-      await file.seek(offset, Deno.SeekMode.Start);
-      const chunk = new Uint8Array(65536);
-      let bytesRead: number | null;
-      while ((bytesRead = await file.read(chunk)) !== null) {
-        const text = new TextDecoder().decode(chunk.subarray(0, bytesRead));
-        offset += bytesRead;
-        buf += text;
-        // Output complete lines; buffer partial last line
-        const newline = buf.lastIndexOf("\n");
-        if (newline === -1) continue;
-        const toWrite = buf.slice(0, newline + 1);
-        buf = buf.slice(newline + 1);
-        const filtered = filter
-          ? toWrite.split("\n").filter((l) =>
-            l.toLowerCase().includes(filter.toLowerCase())
-          ).join("\n") + "\n"
-          : toWrite;
-        if (filtered.trim()) await Deno.stdout.write(enc.encode(filtered));
+      try {
+        await file.seek(offset, Deno.SeekMode.Start);
+        const chunk = new Uint8Array(65536);
+        let bytesRead: number | null;
+        while ((bytesRead = await file.read(chunk)) !== null) {
+          const text = new TextDecoder().decode(chunk.subarray(0, bytesRead));
+          offset += bytesRead;
+          buf += text;
+          // Output complete lines; buffer partial last line
+          const newline = buf.lastIndexOf("\n");
+          if (newline === -1) continue;
+          const toWrite = buf.slice(0, newline + 1);
+          buf = buf.slice(newline + 1);
+          const filtered = filter
+            ? toWrite.split("\n").filter((l) =>
+              l.toLowerCase().includes(filter.toLowerCase())
+            ).join("\n") + "\n"
+            : toWrite;
+          if (filtered.trim()) await Deno.stdout.write(enc.encode(filtered));
+        }
+      } finally {
+        file.close();
       }
-      file.close();
     } catch { /* file rotated or removed */ }
   }
 }

@@ -114,12 +114,22 @@ export function createPersistenceManager(
     }
   }
 
+  let persistRunning = false; // AIO-148: guard against concurrent persist ops
+
   function schedulePersist(): void {
-    if ((!kvDb && !asyncDb) || persistTimer || shuttingDown) return;
+    if ((!kvDb && !asyncDb) || persistTimer || shuttingDown || persistRunning) {
+      return;
+    }
     persistTimer = setTimeout(async () => {
       persistTimer = null;
-      await _syncSqlite();
-      await _syncKv();
+      if (persistRunning) return;
+      persistRunning = true;
+      try {
+        await _syncSqlite();
+        await _syncKv();
+      } finally {
+        persistRunning = false;
+      }
     }, persistMs);
   }
 
@@ -128,41 +138,56 @@ export function createPersistenceManager(
       clearTimeout(persistTimer);
       persistTimer = null;
     }
-    // Flush SQLite
-    if (asyncDb && dbSchema) {
-      try {
-        await syncTables(asyncDb, dbSchema, getState(), prevDbState);
-        prevDbState = { ...getState() };
-      } catch (e) {
-        log.error(`persist: sqlite flush failed — ${e}`);
-      }
+    // Wait for any running persist to finish before flushing (AIO-148)
+    if (persistRunning) {
+      await new Promise<void>((r) => {
+        const check = () => {
+          if (!persistRunning) r();
+          else setTimeout(check, 5);
+        };
+        check();
+      });
     }
-    // Flush KV
-    if (kvDb) {
-      try {
-        const dbState = getDBState(getState());
-        if (persistMode === "multi") {
-          const obj = dbState as Record<string, unknown>;
-          const keys = Object.keys(obj);
-          await kvDb.setMulti(persistKey, obj, prevPersistedKeys);
-          prevPersistedKeys = keys;
-        } else {
-          await kvDb.set(persistKey, dbState);
+    persistRunning = true;
+    try {
+      // Flush SQLite
+      if (asyncDb && dbSchema) {
+        try {
+          await syncTables(asyncDb, dbSchema, getState(), prevDbState);
+          prevDbState = { ...getState() };
+        } catch (e) {
+          log.error(`persist: sqlite flush failed — ${e}`);
         }
-        log.debug("persist: flushed");
-      } catch (e) {
-        const msg = String(e);
-        if (
-          msg.includes("too large") || msg.includes("65536") ||
-          msg.includes("value too")
-        ) {
-          log.warn(
-            `persist: state exceeds Deno KV 65KB limit — set persistMode:'multi' or use stateForDB / db:{} (SQLite)`,
-          );
-        }
-        log.error(`persist: flush failed — ${e}`);
-        _reportPersistError(e);
       }
+      // Flush KV
+      if (kvDb) {
+        try {
+          const dbState = getDBState(getState());
+          if (persistMode === "multi") {
+            const obj = dbState as Record<string, unknown>;
+            const keys = Object.keys(obj);
+            await kvDb.setMulti(persistKey, obj, prevPersistedKeys);
+            prevPersistedKeys = keys;
+          } else {
+            await kvDb.set(persistKey, dbState);
+          }
+          log.debug("persist: flushed");
+        } catch (e) {
+          const msg = String(e);
+          if (
+            msg.includes("too large") || msg.includes("65536") ||
+            msg.includes("value too")
+          ) {
+            log.warn(
+              `persist: state exceeds Deno KV 65KB limit — set persistMode:'multi' or use stateForDB / db:{} (SQLite)`,
+            );
+          }
+          log.error(`persist: flush failed — ${e}`);
+          _reportPersistError(e);
+        }
+      }
+    } finally {
+      persistRunning = false;
     }
   }
 

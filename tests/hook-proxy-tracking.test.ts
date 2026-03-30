@@ -6,6 +6,10 @@
 // We test the EXACT wiring by simulating what the hooks produce and verifying
 // that _accessedPaths is populated correctly, paths are collapsed, and __subs
 // messages would be sent.
+//
+// NOTE: AIO-206 added intermediate object tracking — accessing obj.a.b.c now
+// tracks "a", "a.b", and "a.b.c". Tests verify both raw paths and collapsed
+// subscription paths (which are what actually get sent to server).
 
 import { assertEquals } from "@std/assert";
 import { FakeTime } from "@std/testing/time";
@@ -28,12 +32,14 @@ Deno.test("useAio wiring: proxy tracks leaf access from root", () => {
   const _v = state.counter.count;
   assertEquals(_v, 5);
   assertEquals(_accessedPaths.has("counter.count"), true);
+  assertEquals(_accessedPaths.has("counter"), true, "intermediate tracked");
   assertEquals(
     _accessedPaths.has("market"),
     false,
     "untouched feature not tracked",
   );
-  assertEquals(_accessedPaths.size, 1);
+  // Collapsed subscription: only "counter" (subsumes counter.count)
+  assertEquals(_collapsePaths(_accessedPaths), ["counter"]);
   _resetTracking();
 });
 
@@ -53,7 +59,8 @@ Deno.test("useAio wiring: multiple features tracked independently", () => {
   assertEquals(_accessedPaths.has("counter.count"), true);
   assertEquals(_accessedPaths.has("market.instruments.SOL.price"), true);
   assertEquals(_accessedPaths.has("portfolio"), false);
-  assertEquals(_accessedPaths.size, 2);
+  // Collapsed: shortest prefix per feature
+  assertEquals(_collapsePaths(_accessedPaths), ["counter", "market"]);
   _resetTracking();
 });
 
@@ -65,7 +72,8 @@ Deno.test("useAio wiring: array access tracked as leaf", () => {
   const entries = state.logs.entries;
   assertEquals(entries.length, 3);
   assertEquals(_accessedPaths.has("logs.entries"), true);
-  assertEquals(_accessedPaths.size, 1);
+  assertEquals(_accessedPaths.has("logs"), true, "intermediate tracked");
+  assertEquals(_collapsePaths(_accessedPaths), ["logs"]);
   _resetTracking();
 });
 
@@ -87,16 +95,16 @@ Deno.test("useAio wiring: conditional access expands tracked paths", () => {
 
   // First render: only counter
   const _a = state.counter.count;
-  assertEquals(_accessedPaths.size, 1);
   assertEquals(_accessedPaths.has("counter.count"), true);
 
   // Second render: showLogs flips — now also reads logs
   const _b = state.logs.entries;
-  assertEquals(_accessedPaths.size, 2);
   assertEquals(_accessedPaths.has("logs.entries"), true);
 
-  // Paths accumulate (Set only grows)
-  assertEquals(_accessedPaths.has("counter.count"), true);
+  // Paths accumulate (Set only grows) — intermediates present too
+  assertEquals(_accessedPaths.has("counter"), true);
+  assertEquals(_accessedPaths.has("logs"), true);
+  assertEquals(_collapsePaths(_accessedPaths), ["counter", "logs"]);
   _resetTracking();
 });
 
@@ -117,6 +125,7 @@ Deno.test("useFeature wiring: proxy tracks with feature name prefix", () => {
     "path includes feature prefix",
   );
   assertEquals(_accessedPaths.has("count"), false, "bare name not tracked");
+  // With prefix, leaf-only access on primitives — no intermediate "counter"
   assertEquals(_accessedPaths.size, 1);
   _resetTracking();
 });
@@ -129,7 +138,10 @@ Deno.test("useFeature wiring: deep nested access prefixed correctly", () => {
   const _v = state.instruments.SOL.price;
   assertEquals(_v, 100);
   assertEquals(_accessedPaths.has("market.instruments.SOL.price"), true);
-  assertEquals(_accessedPaths.size, 1);
+  // Intermediates start from inside the feature (not the prefix itself)
+  assertEquals(_accessedPaths.has("market.instruments"), true);
+  assertEquals(_accessedPaths.has("market.instruments.SOL"), true);
+  assertEquals(_collapsePaths(_accessedPaths), ["market.instruments"]);
   _resetTracking();
 });
 
@@ -142,7 +154,13 @@ Deno.test("useFeature wiring: Object.keys on feature tracks feature-level", () =
   >;
 
   Object.keys(state);
-  assertEquals(_accessedPaths.has("counter"), true, "ownKeys at feature level");
+  // ownKeys with parentPath="counter" → tracks "counter"
+  assertEquals(
+    _accessedPaths.has("counter"),
+    true,
+    "ownKeys at feature level",
+  );
+  assertEquals(_accessedPaths.size, 1);
   _resetTracking();
 });
 
@@ -163,6 +181,7 @@ Deno.test("useFeature wiring: multiple features each get correct prefix", () => 
 
   assertEquals(_accessedPaths.has("counter.count"), true);
   assertEquals(_accessedPaths.has("market.price"), true);
+  // Prefixed features: only leaf paths tracked (no intermediates for single-level)
   assertEquals(_accessedPaths.size, 2);
   _resetTracking();
 });
@@ -170,14 +189,15 @@ Deno.test("useFeature wiring: multiple features each get correct prefix", () => 
 // ── useAio + useFeature equivalence ─────────────────────────────────
 
 Deno.test("useAio and useFeature produce same tracked paths", () => {
-  // useAio: state.counter.count → "counter.count"
+  // useAio: state.counter.count → tracks "counter" (intermediate) and "counter.count"
   _resetTracking();
   const fullState = { counter: { count: 5 } };
   const aioState = _trackingProxy(fullState) as typeof fullState;
   const _a = aioState.counter.count;
-  const aioPath = [..._accessedPaths][0];
+  const aioPaths = _collapsePaths(_accessedPaths);
+  assertEquals(aioPaths, ["counter"], "useAio collapses to feature-level");
 
-  // useFeature: state.count → "counter.count" (with prefix)
+  // useFeature: state.count → tracks only "counter.count" (no intermediate)
   _resetTracking();
   const featureState = { count: 5 };
   const featState = _trackingProxy(
@@ -185,10 +205,15 @@ Deno.test("useAio and useFeature produce same tracked paths", () => {
     "counter",
   ) as typeof featureState;
   const _b = featState.count;
-  const featPath = [..._accessedPaths][0];
+  const featPaths = _collapsePaths(_accessedPaths);
+  assertEquals(
+    featPaths,
+    ["counter.count"],
+    "useFeature tracks leaf with prefix",
+  );
 
-  assertEquals(aioPath, featPath, "same path from both hooks");
-  assertEquals(aioPath, "counter.count");
+  // Both produce subscriptions that overlap — server handles correctly
+  // useAio gets "counter" which subsumes "counter.count"
   _resetTracking();
 });
 
@@ -200,17 +225,15 @@ Deno.test("paths collapse correctly for subscription message", () => {
     market: { instruments: { SOL: { price: 100 }, BTC: { price: 50000 } } },
   }) as Record<string, unknown>;
 
-  // Access two prices from same feature
+  // Access two prices from same feature — intermediates tracked (AIO-206)
   // deno-lint-ignore no-explicit-any
   const _a = (state as any).market.instruments.SOL.price;
   // deno-lint-ignore no-explicit-any
   const _b = (state as any).market.instruments.BTC.price;
 
   const collapsed = _collapsePaths(_accessedPaths);
-  assertEquals(collapsed, [
-    "market.instruments.BTC.price",
-    "market.instruments.SOL.price",
-  ]);
+  // "market" subsumes all deeper paths
+  assertEquals(collapsed, ["market"]);
   _resetTracking();
 });
 
@@ -228,8 +251,8 @@ Deno.test("ownKeys collapses with leaf paths", () => {
   Object.keys((state as any).market.instruments);
 
   const collapsed = _collapsePaths(_accessedPaths);
-  // "market.instruments" subsumes "market.instruments.SOL.price"
-  assertEquals(collapsed, ["market.instruments"]);
+  // "market" subsumes everything (intermediate tracking)
+  assertEquals(collapsed, ["market"]);
   _resetTracking();
 });
 
@@ -292,8 +315,10 @@ Deno.test("repeated access does not duplicate paths", () => {
     const _v = (state as any).counter.count;
   }
 
-  assertEquals(_accessedPaths.size, 1, "Set deduplicates");
+  // "counter" and "counter.count" both tracked — Set deduplicates repeats
   assertEquals(_accessedPaths.has("counter.count"), true);
+  assertEquals(_accessedPaths.has("counter"), true);
+  assertEquals(_accessedPaths.size, 2);
   _resetTracking();
 });
 

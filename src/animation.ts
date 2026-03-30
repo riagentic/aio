@@ -55,21 +55,12 @@ export interface SpringConfig {
 
 // ── useTransition ───────────────────────────────────────────────────
 
-/**
- * Manage CSS transition states. Call outside the component body.
- *
- * ```ts
- * const fade = useTransition({ name: "fade", duration: 200 });
- * const App = () => fade.mounted
- *   ? h("div", { className: fade.className }, "Hello")
- *   : null;
- * // fade.enter() → adds to DOM with "fade-enter", then "fade-active"
- * // fade.exit()  → "fade-exit", then removes from DOM
- * ```
- */
+/** @deprecated Use `<Transition>` component with transition functions (fade, slide, scale) instead. */
 export function useTransition(config: TransitionConfig): TransitionState {
   const duration = config.duration ?? 300;
-  const stageSig: Signal<"enter" | "active" | "exit" | "idle"> = signal(
+  const stageSig: Signal<"enter" | "active" | "exit" | "idle"> = signal<
+    "enter" | "active" | "exit" | "idle"
+  >(
     config.initial ? "active" : "idle",
   );
   const mountedSig: Signal<boolean> = signal(!!config.initial);

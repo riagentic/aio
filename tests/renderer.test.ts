@@ -1,10 +1,11 @@
 import { assertEquals } from "@std/assert";
 import { Window } from "happy-dom";
-import { batch, computed, signal } from "../src/signal.ts";
+import { batch, computed, effect, signal } from "../src/signal.ts";
 import { Fragment, h } from "../src/vdom.ts";
 import {
   _setDocument,
   _unmount,
+  afterRender,
   mount,
   type MountHandle,
 } from "../src/aio-renderer.ts";
@@ -785,6 +786,441 @@ Deno.test({
     sig.set("v2");
     handle._flush();
     assertEquals(childCalls, callsAfterSwap);
+    _unmount(handle);
+    cleanup();
+  },
+});
+
+Deno.test({
+  name: "vdom: event handlers are auto-batched",
+  sanitizeOps: false,
+  sanitizeResources: false,
+  fn() {
+    const { document, root, cleanup } = createDOM();
+    _setDocument(document);
+
+    const a = signal(0);
+    const b = signal(0);
+    let renderCount = 0;
+
+    const App = () => {
+      renderCount++;
+      return h("button", {
+        onClick: () => {
+          a.set(1);
+          b.set(1);
+        },
+      }, `${a.value}+${b.value}`);
+    };
+
+    const handle = mount(root, App);
+    assertEquals(renderCount, 1);
+
+    // Simulate click
+    const btn = root.querySelector("button")!;
+    btn.click();
+    handle._flush();
+
+    // Should be 2 (initial + one batched re-render), not 3
+    assertEquals(renderCount, 2);
+    assertEquals(a.value, 1);
+    assertEquals(b.value, 1);
+
+    _unmount(handle);
+    cleanup();
+  },
+});
+
+Deno.test({
+  name: "renderer: effects auto-dispose on component unmount",
+  sanitizeOps: false,
+  sanitizeResources: false,
+  fn() {
+    const { document, root, cleanup } = createDOM();
+    _setDocument(document);
+
+    const visible = signal(true);
+    let effectRunCount = 0;
+    let effectCleanedUp = false;
+    const trigger = signal(0);
+
+    const Child = () => {
+      // Effect created during render — should auto-dispose when Child unmounts
+      effect(() => {
+        trigger.value;
+        effectRunCount++;
+        return () => {
+          effectCleanedUp = true;
+        };
+      });
+      return h("span", null, "child");
+    };
+
+    const App = () => visible.value ? h(Child, null) : h("span", null, "gone");
+
+    const handle = mount(root, App);
+    assertEquals(effectRunCount, 1);
+    assertEquals(effectCleanedUp, false);
+
+    // Unmount Child by toggling visible
+    visible.set(false);
+    handle._flush();
+    assertEquals(effectCleanedUp, true);
+
+    // Trigger the signal the effect was tracking — should NOT re-run
+    const countBefore = effectRunCount;
+    trigger.set(1);
+    assertEquals(effectRunCount, countBefore); // no re-run after dispose
+
+    _unmount(handle);
+    cleanup();
+  },
+});
+
+Deno.test({
+  name: "afterRender: callback runs after initial mount DOM commit",
+  sanitizeOps: false,
+  sanitizeResources: false,
+  fn() {
+    const { document, root, cleanup } = createDOM();
+    _setDocument(document);
+
+    const domTexts: string[] = [];
+
+    const App = () => {
+      afterRender(() => {
+        domTexts.push(root.textContent ?? "");
+      });
+      return h("div", null, "hello");
+    };
+
+    const handle = mount(root, App);
+    assertEquals(domTexts, ["hello"]); // callback ran after DOM commit
+    _unmount(handle);
+    cleanup();
+  },
+});
+
+Deno.test({
+  name: "afterRender: callback runs after re-render DOM commit",
+  sanitizeOps: false,
+  sanitizeResources: false,
+  fn() {
+    const { document, root, cleanup } = createDOM();
+    _setDocument(document);
+
+    const count = signal(0);
+    const domTexts: string[] = [];
+
+    const App = () => {
+      afterRender(() => {
+        domTexts.push(root.textContent ?? "");
+      });
+      return h("div", null, `count: ${count.value}`);
+    };
+
+    const handle = mount(root, App);
+    assertEquals(domTexts, ["count: 0"]);
+
+    count.set(1);
+    handle._flush();
+    assertEquals(domTexts, ["count: 0", "count: 1"]);
+
+    _unmount(handle);
+    cleanup();
+  },
+});
+
+Deno.test({
+  name: "afterRender: multiple callbacks run in registration order",
+  sanitizeOps: false,
+  sanitizeResources: false,
+  fn() {
+    const { document, root, cleanup } = createDOM();
+    _setDocument(document);
+
+    const order: number[] = [];
+
+    const App = () => {
+      afterRender(() => order.push(1));
+      afterRender(() => order.push(2));
+      return h("div", null, "test");
+    };
+
+    const handle = mount(root, App);
+    assertEquals(order, [1, 2]);
+    _unmount(handle);
+    cleanup();
+  },
+});
+
+// ── AIO-168: Empty Fragment comment anchor cleanup ──────────────────
+
+Deno.test({
+  name: "AIO-168: empty Fragment comment anchor removed on unmount",
+  sanitizeOps: false,
+  sanitizeResources: false,
+  fn() {
+    const { document, root, cleanup } = createDOM();
+    _setDocument(document);
+
+    const show = signal(true);
+    // Fragment starts non-empty, becomes empty via signal → diff creates comment anchor
+    const App = () =>
+      h(
+        "div",
+        { id: "wrap" },
+        h(Fragment, null, ...(show.value ? [h("span", null, "visible")] : [])),
+        h("p", null, "after"),
+      );
+
+    const handle = mount(root, App);
+    const wrap = root.querySelector("#wrap")!;
+    assertEquals(wrap.innerHTML, "<span>visible</span><p>after</p>");
+
+    // Make Fragment empty → diff inserts comment anchor (AIO-128)
+    show.set(false);
+    handle._flush();
+    // <p> + comment anchor (anchor appended after child removal)
+    assertEquals(wrap.childNodes.length, 2);
+    const commentNode = wrap.childNodes[1]!;
+    assertEquals(commentNode.nodeType, 8); // comment anchor
+
+    // Unmount — comment anchor must be cleaned up (AIO-168)
+    _unmount(handle);
+    assertEquals(root.innerHTML, "");
+    cleanup();
+  },
+});
+
+Deno.test({
+  name:
+    "AIO-168: empty Fragment comment anchor cleaned up after multiple cycles (no accumulation)",
+  sanitizeOps: false,
+  sanitizeResources: false,
+  fn() {
+    const { document, root, cleanup } = createDOM();
+    _setDocument(document);
+
+    const items = signal<string[]>(["a", "b"]);
+
+    // Fragment with dynamic children — goes full→empty→full→empty
+    const App = () =>
+      h(
+        "div",
+        { id: "wrap" },
+        h(Fragment, null, ...items.value.map((i) => h("span", null, i))),
+        h("p", null, "end"),
+      );
+
+    const handle = mount(root, App);
+    const wrap = root.querySelector("#wrap")!;
+    assertEquals(wrap.innerHTML, "<span>a</span><span>b</span><p>end</p>");
+
+    // Make Fragment empty → comment anchor created
+    items.set([]);
+    handle._flush();
+    let comments = 0;
+    for (let i = 0; i < wrap.childNodes.length; i++) {
+      if (wrap.childNodes[i]!.nodeType === 8) comments++;
+    }
+    assertEquals(
+      comments,
+      1,
+      "Should have 1 comment anchor for empty Fragment",
+    );
+
+    // Re-fill Fragment → comment anchor should be replaced by real content
+    items.set(["c"]);
+    handle._flush();
+    assertEquals(wrap.querySelector("span")!.textContent, "c");
+
+    // Empty again → 1 comment anchor, NOT 2 (no accumulation)
+    items.set([]);
+    handle._flush();
+    comments = 0;
+    for (let i = 0; i < wrap.childNodes.length; i++) {
+      if (wrap.childNodes[i]!.nodeType === 8) comments++;
+    }
+    assertEquals(
+      comments,
+      1,
+      "Should still have exactly 1 comment anchor (no accumulation)",
+    );
+
+    // Unmount cleans up everything
+    _unmount(handle);
+    assertEquals(root.innerHTML, "");
+    cleanup();
+  },
+});
+
+// ── AIO-169: _domNodeCount empty Fragment cursor alignment ──────────
+
+Deno.test({
+  name: "AIO-169: empty Fragment sibling positioned correctly after cursor fix",
+  sanitizeOps: false,
+  sanitizeResources: false,
+  fn() {
+    const { document, root, cleanup } = createDOM();
+    _setDocument(document);
+
+    const items = signal<string[]>(["x"]);
+    const label = signal("hello");
+
+    // Fragment with dynamic content followed by a sibling that also updates.
+    // If _domNodeCount is wrong for empty Fragment, the sibling's text update
+    // hits the wrong DOM node (cursor misalignment).
+    const App = () =>
+      h(
+        "div",
+        { id: "wrap" },
+        h(Fragment, null, ...items.value.map((i) => h("span", null, i))),
+        h("em", null, label.value),
+      );
+
+    const handle = mount(root, App);
+    const wrap = root.querySelector("#wrap")!;
+    assertEquals(wrap.innerHTML, "<span>x</span><em>hello</em>");
+
+    // Empty the Fragment → comment anchor
+    items.set([]);
+    handle._flush();
+    assertEquals(wrap.querySelector("em")!.textContent, "hello");
+
+    // Now update the sibling text — this is where AIO-169 manifests.
+    // With wrong _domNodeCount(empty Fragment)=0, cursor doesn't advance past
+    // the comment anchor, so the <em>'s oldDom snapshot is wrong and text
+    // update may target the wrong node.
+    label.set("world");
+    handle._flush();
+    assertEquals(
+      wrap.querySelector("em")!.textContent,
+      "world",
+      "AIO-169: sibling text after empty Fragment should update correctly",
+    );
+
+    _unmount(handle);
+    cleanup();
+  },
+});
+
+// ── AIO-170: Signal-binding style handling ──────────────────────────
+
+Deno.test({
+  name: "AIO-170: signal-bound style object applies correctly",
+  sanitizeOps: false,
+  sanitizeResources: false,
+  fn() {
+    const { document, root, cleanup } = createDOM();
+    _setDocument(document);
+
+    const style = signal<Record<string, string>>({
+      color: "red",
+      fontSize: "14px",
+    });
+
+    const App = () => h("div", { id: "box", style: style }, "styled");
+
+    const handle = mount(root, App);
+    const box = root.querySelector("#box") as HTMLElement;
+
+    // Signal style object should apply as inline styles
+    assertEquals(box.style.color, "red");
+    assertEquals(box.style.fontSize, "14px");
+
+    // Update signal → style should change
+    style.set({ color: "blue", marginTop: "10px" });
+    handle._flush();
+    assertEquals(box.style.color, "blue");
+    assertEquals(box.style.marginTop, "10px");
+    // fontSize should be cleared (not in new object)
+    assertEquals(box.style.fontSize, "");
+
+    _unmount(handle);
+    cleanup();
+  },
+});
+
+Deno.test({
+  name: "AIO-170: signal-bound style string applies correctly",
+  sanitizeOps: false,
+  sanitizeResources: false,
+  fn() {
+    const { document, root, cleanup } = createDOM();
+    _setDocument(document);
+
+    const style = signal("color: green");
+
+    const App = () => h("div", { id: "box", style: style }, "styled");
+
+    const handle = mount(root, App);
+    const box = root.querySelector("#box") as HTMLElement;
+
+    assertEquals(box.style.color, "green");
+
+    style.set("color: purple; font-weight: bold");
+    handle._flush();
+    assertEquals(box.style.color, "purple");
+
+    _unmount(handle);
+    cleanup();
+  },
+});
+
+// ── AIO-177: diffKeyed Fragment lastPlaced tracks first child, not last ─
+
+Deno.test({
+  name:
+    "AIO-177: keyed Fragment reorder — siblings positioned after last Fragment child",
+  sanitizeOps: false,
+  sanitizeResources: false,
+  fn() {
+    const { document, root, cleanup } = createDOM();
+    _setDocument(document);
+
+    const order = signal<"abc" | "dfc">("abc");
+
+    // Keyed children: Fragment with 2 spans, plus 2 keyed elements
+    const App = () => {
+      if (order.value === "abc") {
+        return h(
+          "div",
+          { id: "wrap" },
+          h(Fragment, { key: "f" }, h("span", null, "A"), h("span", null, "B")),
+          h("em", { key: "c" }, "C"),
+          h("b", { key: "d" }, "D"),
+        );
+      } else {
+        // Reorder: D first, then Fragment, then C
+        return h(
+          "div",
+          { id: "wrap" },
+          h("b", { key: "d" }, "D"),
+          h(Fragment, { key: "f" }, h("span", null, "A"), h("span", null, "B")),
+          h("em", { key: "c" }, "C"),
+        );
+      }
+    };
+
+    const handle = mount(root, App);
+    const wrap = root.querySelector("#wrap")!;
+    assertEquals(
+      wrap.innerHTML,
+      "<span>A</span><span>B</span><em>C</em><b>D</b>",
+    );
+
+    // Reorder: D, Fragment[A,B], C
+    order.set("dfc");
+    handle._flush();
+
+    // Expected: D, A, B, C — Fragment's children must stay together
+    assertEquals(
+      wrap.innerHTML,
+      "<b>D</b><span>A</span><span>B</span><em>C</em>",
+      "AIO-177: keyed Fragment reorder — C should be after B, not inserted between A and B",
+    );
+
     _unmount(handle);
     cleanup();
   },

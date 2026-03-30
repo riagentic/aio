@@ -105,7 +105,7 @@ export function testFeature<
       destroy: () => {
         const base = machine === false
           ? { ...f.__aio.state }
-          : { ...f.__aio.state, _status: "uninitialized" };
+          : { ...f.__aio.state, _status: machine.initial };
         state = { [f.__aio.id]: base };
         lastEffects = [];
       },

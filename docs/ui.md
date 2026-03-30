@@ -1,10 +1,12 @@
 # UI & Browser
 
-React hooks, components, styling, DevTools, and browser-side concerns.
+Hooks, components, styling, DevTools, and browser-side concerns. Works with both
+**air** (built-in, default) and the **React adapter**.
 
 For the docs index, see [manual.md](manual.md). For the core API (`feature`,
 `useFeature`), see [core.md](core.md). For Electron & thin client, see
-[electron.md](electron.md).
+[electron.md](electron.md). For air vs React comparison, see
+[renderer.md](renderer.md).
 
 ## `useAio<S>()` — smart state hook (recommended)
 
@@ -13,15 +15,15 @@ Proxy that automatically tracks which state paths your component reads. Only
 subscribed paths trigger re-renders and delta updates from the server — zero
 waste, zero config.
 
-For scoped **React re-render optimization** (e.g. isolating a heavy component to
-a single feature slice), see
-[`useFeature(ref)`](core.md#usefeatureref--react-hook-for-features) — a
-`useSyncExternalStore` selector that limits re-renders to one slice.
+For scoped re-render optimization (e.g. isolating a heavy component to a single
+feature slice), see
+[`useFeature(ref)`](core.md#usefeatureref--react-hook-for-features) — a selector
+that limits re-renders to one slice.
 
 Connects to the server via WebSocket, syncs state, provides `send`.
 
 ```tsx
-import { useAio } from "aio";
+import { useAio } from "aio/air"; // or "aio/react" if using React
 import type { AppState } from "./state.ts";
 
 export default function App() {
@@ -50,7 +52,7 @@ export default function App() {
   max, ±20% jitter). If the server restarted, reconnect triggers a page reload
   to pick up fresh code
 - Connection is cleaned up when the last connected component unmounts — with a
-  **300ms grace period** to prevent transient teardown during React
+  **300ms grace period** to prevent transient teardown during component
   reconciliation or page switches. If a new subscriber arrives within 300ms, the
   connection stays alive. Both teardown and averted-teardown events emit
   `console.warn` and diagnostic events for full visibility
@@ -58,7 +60,7 @@ export default function App() {
 
 **No boilerplate needed in App.tsx:**
 
-- No `import React` — JSX transforms are automatic
+- No `import React` — JSX transforms are automatic (both air and React adapter)
 - No `createRoot` — the framework mounts your default export
 - No WebSocket setup — `useAio` handles it
 - Just `export default function App()` and you're done
@@ -121,7 +123,7 @@ objects. `memo()` sees new refs → re-renders everything → UI freezes.
 ### `useProjection(fn, deps)` — structural sharing for derived state
 
 ```tsx
-import { memo, useFeature, useProjection } from "aio/react";
+import { memo, useFeature, useProjection } from "aio/air"; // or "aio/react"
 
 function FleetTable() {
   const { state } = useFeature(fleet);
@@ -147,7 +149,7 @@ import { memo } from "aio"; // NOT from "react"
 export default memo(GroupRow);
 ```
 
-|                                                  | `React.memo`              | `aio memo`               |
+|                                                  | `React.memo`              | aio `memo`               |
 | ------------------------------------------------ | ------------------------- | ------------------------ |
 | Default comparison                               | `===` per prop            | `_shallowEqual` per prop |
 | `{ id: 1, name: "A" }` vs `{ id: 1, name: "A" }` | re-render (different ref) | skip (same values)       |
@@ -156,7 +158,7 @@ export default memo(GroupRow);
 ### Best practice: combine both
 
 ```tsx
-import { memo, useFeature, useProjection } from "aio/react";
+import { memo, useFeature, useProjection } from "aio/air"; // or "aio/react"
 
 function FleetTable() {
   const { state } = useFeature(fleet);
@@ -174,8 +176,8 @@ const GroupRow = memo(function GroupRow({ group }) {
 
 **Layer 1:** `useProjection` prevents new refs from being created. **Layer 2:**
 `memo` from aio prevents re-renders even if new refs slip through. **Layer 3:**
-aiol linter catches `React.memo` imports and missing `useProjection`. **Layer
-4:** Runtime hint detects the symptom if all else fails.
+aiol linter catches bare `React.memo` imports and missing `useProjection`.
+**Layer 4:** Runtime hint detects the symptom if all else fails.
 
 ## `page(current, routes)`
 
@@ -343,12 +345,12 @@ export function DashboardLayout() {
 
 **`RouteProps`:**
 
-| Prop       | Type        | Description                                    |
-| ---------- | ----------- | ---------------------------------------------- |
-| `path`     | `string`    | Pattern — supports `:param` and `*`            |
-| `index`    | `boolean`   | Default child (matches parent path exactly)    |
-| `element`  | `ReactNode` | What to render on match                        |
-| `children` | `ReactNode` | Nested `<Route>` elements (enables `<Outlet>`) |
+| Prop       | Type      | Description                                    |
+| ---------- | --------- | ---------------------------------------------- |
+| `path`     | `string`  | Pattern — supports `:param` and `*`            |
+| `index`    | `boolean` | Default child (matches parent path exactly)    |
+| `element`  | `VNode`   | What to render on match                        |
+| `children` | `VNode`   | Nested `<Route>` elements (enables `<Outlet>`) |
 
 ### `<Link>` and `<NavLink>`
 
@@ -379,14 +381,14 @@ import { Link, NavLink } from 'aio'
 
 **`LinkProps`:**
 
-| Prop          | Type        | Default  | Description                               |
-| ------------- | ----------- | -------- | ----------------------------------------- |
-| `to`          | `string`    | required | Target path                               |
-| `replace`     | `boolean`   | `false`  | Use `replaceState` instead of `pushState` |
-| `exact`       | `boolean`   | `false`  | Exact match for active detection          |
-| `activeClass` | `string`    | —        | CSS class added when active               |
-| `activeStyle` | `object`    | —        | Inline styles merged when active          |
-| `children`    | `ReactNode` | —        | Link content                              |
+| Prop          | Type      | Default  | Description                               |
+| ------------- | --------- | -------- | ----------------------------------------- |
+| `to`          | `string`  | required | Target path                               |
+| `replace`     | `boolean` | `false`  | Use `replaceState` instead of `pushState` |
+| `exact`       | `boolean` | `false`  | Exact match for active detection          |
+| `activeClass` | `string`  | —        | CSS class added when active               |
+| `activeStyle` | `object`  | —        | Inline styles merged when active          |
+| `children`    | `VNode`   | —        | Link content                              |
 
 All other props (`className`, `style`, `aria-*`, etc.) pass through to the `<a>`
 element.
@@ -565,8 +567,9 @@ export function useAio() {
 }
 ```
 
-> **Note:** Non-React/AIR adapters are community-maintained. The `state-core`
-> API is stable and supported — adapters built on it are your responsibility.
+> **Note:** air and the React adapter are built-in. Other framework adapters
+> (Svelte, Vue, etc.) are community-maintained. The `state-core` API is stable
+> and supported — adapters built on it are your responsibility.
 
 ## UI state filtering
 
@@ -618,7 +621,7 @@ await aio.run({
 **Backwards compatible:** If your `stateForUI` doesn't use `user`, all clients
 get the same state.
 
-## Delta sync and React performance
+## Delta sync and rendering performance
 
 State travels from server to browser as JSON over WebSocket. JSON kills object
 references — but aio restores them. Here's how it works and what it means for
@@ -631,9 +634,8 @@ browser side, `_applyPatch` shallow-merges patches into existing state and uses
 `_shallowEqual` to check each slice. If a slice didn't actually change, **the
 previous object reference is reused**. This means:
 
-- `useFeature(ref)` selectors (a React re-render optimization) return the same
-  reference for unchanged slices
-- `React.memo` comparators work correctly — unchanged props keep identity
+- `useFeature(ref)` selectors return the same reference for unchanged slices
+- `memo()` comparators work correctly — unchanged props keep identity
 - You do **not** need extra `useMemo` wrappers around feature state
 
 ### When references break
@@ -668,9 +670,9 @@ actionable feedback:
 - **Actionable hints** — when staleness is high, the meter identifies the likely
   cause: expensive components (high frame time), too many patches (high pending
   count), or main-thread blocking (neither high). Hints suggest specific fixes
-  like `React.memo()`, `syncIntervalMs`, or profiling
+  like `memo()`, `syncIntervalMs`, or profiling
 - **Notification coalescing** — multiple WS patches within a single frame
-  produce one React notification, reducing unnecessary reconciliation passes
+  produce one render notification, reducing unnecessary reconciliation passes
 - **Server backpressure** — the client reports staleness in its vitals ping; the
   server adapts per-client broadcast rate (1x/2x/4x multiplier) so struggling
   clients aren't overwhelmed with updates they can't paint

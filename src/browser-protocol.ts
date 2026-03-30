@@ -225,7 +225,17 @@ export async function _loadOfflineQueue(): Promise<_QueuedAction[]> {
       req.onsuccess = () => {
         const actions = req.result as _QueuedAction[];
         const cutoff = Date.now() - OFFLINE_MAX_AGE;
-        resolve(actions.filter((a) => a.ts >= cutoff));
+        const valid = actions.filter((a) => a.ts >= cutoff);
+        // AIO-224: prune expired entries from IDB to prevent unbounded growth
+        const expired = actions.filter((a) => a.ts < cutoff);
+        if (expired.length > 0) {
+          try {
+            const delTx = db.transaction(_offlineStore, "readwrite");
+            const delStore = delTx.objectStore(_offlineStore);
+            for (const e of expired) if (e.id != null) delStore.delete(e.id); // AIO-242: use primary key, not timestamp
+          } catch { /* best-effort prune */ }
+        }
+        resolve(valid);
       };
     } catch (e) {
       _diagEmit({
@@ -249,35 +259,40 @@ export async function _saveOfflineAction(
   const db = await _openIDB();
   if (!db) return;
   try {
-    const tx = db.transaction(_offlineStore, "readwrite");
-    const store = tx.objectStore(_offlineStore);
-    const countReq = store.count();
-    countReq.onsuccess = () => {
-      if (countReq.result >= MAX_OFFLINE_ACTIONS) return;
-      const addReq = store.add({ action, ts: Date.now() });
-      addReq.onerror = () => {
+    await new Promise<void>((resolve, reject) => {
+      const tx = db.transaction(_offlineStore, "readwrite");
+      const store = tx.objectStore(_offlineStore);
+      const countReq = store.count();
+      countReq.onsuccess = () => {
+        if (countReq.result >= MAX_OFFLINE_ACTIONS) return; // tx will auto-complete
+        const addReq = store.add({ action, ts: Date.now() });
+        addReq.onerror = () => {
+          _diagEmit({
+            type: "offline-storage-error",
+            severity: "info",
+            source: "browser",
+            message: "IndexedDB add() failed — offline action lost",
+            detail: { error: String(addReq.error) },
+            hint:
+              "Offline action queue will use memory only. Check browser storage quota.",
+          });
+        };
+      };
+      countReq.onerror = () => {
         _diagEmit({
           type: "offline-storage-error",
           severity: "info",
           source: "browser",
-          message: "IndexedDB add() failed — offline action lost",
-          detail: { error: String(addReq.error) },
+          message: "IndexedDB count() failed — offline action lost",
+          detail: { error: String(countReq.error) },
           hint:
             "Offline action queue will use memory only. Check browser storage quota.",
         });
       };
-    };
-    countReq.onerror = () => {
-      _diagEmit({
-        type: "offline-storage-error",
-        severity: "info",
-        source: "browser",
-        message: "IndexedDB count() failed — offline action lost",
-        detail: { error: String(countReq.error) },
-        hint:
-          "Offline action queue will use memory only. Check browser storage quota.",
-      });
-    };
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+      tx.onabort = () => reject(tx.error);
+    });
   } catch (e) {
     _diagEmit({
       type: "offline-storage-error",
@@ -295,9 +310,15 @@ export async function _clearOfflineQueue(): Promise<void> {
   const db = await _openIDB();
   if (!db) return;
   try {
+    // AIO-221: await transaction completion to prevent duplicate replay
     const tx = db.transaction(_offlineStore, "readwrite");
     const store = tx.objectStore(_offlineStore);
     store.clear();
+    await new Promise<void>((resolve, reject) => {
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+      tx.onabort = () => reject(tx.error);
+    });
   } catch (e) {
     _diagEmit({
       type: "offline-storage-error",
@@ -600,7 +621,7 @@ function _initDevTools(): void {
             payload?.type === "JUMP_TO_STATE" ||
             payload?.type === "JUMP_TO_ACTION"
           ) {
-            console.log(
+            console.debug(
               "[aio] DevTools time-travel: use Ctrl+. panel for client-side state navigation",
             );
           }
@@ -906,8 +927,10 @@ let _rSearch: URLSearchParams = typeof location !== "undefined"
   : new URLSearchParams();
 export const _rListeners = new Listeners<void>();
 
-export const routePath: Signal<string> = signal(_rPath);
-export const routeSearch: Signal<URLSearchParams> = signal(_rSearch);
+export const routePath: Signal<string> = signal<string>(_rPath);
+export const routeSearch: Signal<URLSearchParams> = signal<URLSearchParams>(
+  _rSearch,
+);
 
 export function _rSync(): void {
   _rPath = location.pathname;
@@ -918,8 +941,15 @@ export function _rSync(): void {
 }
 
 export let _popstateHandler: (() => void) | null = null;
+export let _navigateHandler: EventListener | null = null;
 export function _setPopstateHandler(h: (() => void) | null): void {
   _popstateHandler = h;
+}
+export function _setNavigateHandler(h: EventListener | null): void {
+  _navigateHandler = h;
+}
+export function _setVisibilityHandler(h: (() => void) | null): void {
+  _visibilityHandler = h;
 }
 if (typeof window !== "undefined") {
   _popstateHandler = _rSync;
@@ -928,15 +958,14 @@ if (typeof window !== "undefined") {
   // intercepts via will-navigate, prevents navigation, and relays the URL back
   // to the renderer as CustomEvent('aio:navigate'). We handle it here so both
   // browser.ts (React) and browser-air.ts (AIR) get navigation support.
-  addEventListener(
-    "aio:navigate",
-    ((e: CustomEvent<{ url: string }>) => {
-      try {
-        const url = new URL(e.detail.url);
-        navigate(url.pathname + url.search + url.hash);
-      } catch { /* invalid URL — ignore */ }
-    }) as EventListener,
-  );
+  // Store ref for cleanup in _reset() (AIO-141)
+  _navigateHandler = ((e: CustomEvent<{ url: string }>) => {
+    try {
+      const url = new URL(e.detail.url);
+      navigate(url.pathname + url.search + url.hash);
+    } catch { /* invalid URL — ignore */ }
+  }) as EventListener;
+  addEventListener("aio:navigate", _navigateHandler);
 }
 
 export function _rSubscribe(fn: () => void): () => void {
@@ -973,7 +1002,12 @@ export function matchPath(
   if (!m) return null;
   const params: Record<string, string> = {};
   keys.forEach((k, i) => {
-    let v = decodeURIComponent(m[i + 1] ?? "");
+    let v: string;
+    try {
+      v = decodeURIComponent(m[i + 1] ?? "");
+    } catch {
+      v = m[i + 1] ?? "";
+    }
     if (k === "*") v = v.replace(/\/$/, "");
     params[k] = v;
   });
@@ -988,7 +1022,14 @@ export function navigate(
     history.go(to);
     return;
   }
-  const url = new URL(to, location.href);
+  // AIO-193: guard against malformed URLs — prevents route state desync
+  let url: URL;
+  try {
+    url = new URL(to, location.href);
+  } catch {
+    console.error(`[aio:navigate] Invalid URL: ${to}`);
+    return;
+  }
   if (opts?.replace) history.replaceState(null, "", url);
   else history.pushState(null, "", url);
   _rSync();
@@ -1045,10 +1086,12 @@ export function _resetEnsured(): void {
 
 // ── Visibility guard ────────────────────────────────────────────────
 
+export let _visibilityHandler: (() => void) | null = null;
 if (typeof document !== "undefined") {
-  document.addEventListener("visibilitychange", () => {
+  _visibilityHandler = () => {
     if (_vitalsRenderMeter) {
       _vitalsRenderMeter.setPaused(document.hidden);
     }
-  });
+  };
+  document.addEventListener("visibilitychange", _visibilityHandler);
 }

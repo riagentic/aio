@@ -68,6 +68,7 @@ export function buildBrowserImportMap(
   const imports: Record<string, string> = renderer === "aio"
     ? {
       "aio": "/__aio/ui.js",
+      "aio/air": "/__aio/air.js",
       "aio/browser": "/__aio/ui.js",
       "aio/jsx-runtime": "/__aio/jsx-runtime.ts",
     }
@@ -76,6 +77,7 @@ export function buildBrowserImportMap(
       "react-dom/client": `${CDN}/react-dom@18.3.1/client`,
       "react/jsx-runtime": `${CDN}/react@18.3.1/jsx-runtime`,
       "aio": "/__aio/ui.js",
+      "aio/air": "/__aio/air.js",
       "aio/browser": "/__aio/ui.js",
     };
   for (const [name, specifier] of Object.entries(denoImports)) {
@@ -147,7 +149,7 @@ export function generateHTML(
 </head>
 <body>
   <div id="root"></div>
-  <script type="importmap">${importMap}</script>
+  <script type="importmap">${importMap.replace(/</g, "\\u003c")}</script>
   <script type="module">
     // Dev reload WS — live reload on file changes
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:'
@@ -205,7 +207,7 @@ export function generateHTML(
 </head>
 <body>
   <div id="root"></div>
-  <script type="importmap">${importMap}</script>
+  <script type="importmap">${importMap.replace(/</g, "\\u003c")}</script>
   <script type="module">
     import { createElement, Component } from 'react'
     import { createRoot } from 'react-dom/client'

@@ -48,6 +48,11 @@ function shouldSkip(): string | null {
   if (!Deno.env.get("DISPLAY") && !Deno.env.get("WAYLAND_DISPLAY")) {
     return "no display (set DISPLAY or WAYLAND_DISPLAY)";
   }
+  // This E2E test requires the full dev server build pipeline (esbuild + JSX transform).
+  // Skip if explicitly not requested — run with ELECTRON_E2E=1 to enable.
+  if (!Deno.env.get("ELECTRON_E2E")) {
+    return "E2E disabled — set ELECTRON_E2E=1 to run";
+  }
   return null;
 }
 
@@ -72,12 +77,16 @@ async function waitForCdpPage(
   );
 }
 
-function cdpSession(
+async function cdpSession(
   wsUrl: string,
-): { eval: (expr: string) => Promise<string>; close: () => void } {
+): Promise<{ eval: (expr: string) => Promise<string>; close: () => void }> {
   const ws = new WebSocket(wsUrl);
   let msgId = 0;
   const pending = new Map<number, (v: string) => void>();
+  await new Promise<void>((resolve, reject) => {
+    ws.onopen = () => resolve();
+    ws.onerror = (e) => reject(e);
+  });
   ws.onmessage = (e) => {
     const data = JSON.parse(e.data as string) as {
       id: number;
@@ -104,7 +113,7 @@ function cdpSession(
 }
 
 async function pollDom(
-  cdp: ReturnType<typeof cdpSession>,
+  cdp: Awaited<ReturnType<typeof cdpSession>>,
   selector: string,
   timeoutMs = 10_000,
 ): Promise<string> {
@@ -188,6 +197,7 @@ Deno.test({
         .replace(
           // Inject broken behavior: replace __aio:ready handler with a 1ms did-finish-load timeout
           `  // Track page readiness (data events need this to decide whether to forward or buffer)
+  win.webContents.on('did-start-navigation', () => { pageReady = false; }); // AIO-247: reset on F5/Ctrl+R
   win.webContents.on('did-finish-load', () => { pageReady = true; });
 
   // Renderer signals it has registered IPC listeners — request fresh state from server
@@ -201,11 +211,11 @@ Deno.test({
       // never updated because all subsequent states are $f-tagged or $p deltas).
       // The server responds with current complete state — no $f because * = unfiltered.
       sock.write('__subs:["*"]\\n');
-    }
-    // Also replay lastFullState as immediate fallback (may be stale but prevents
-    // blank screen while waiting for server response over UDS — <1ms latency)
-    if (lastFullState) {
-      win.webContents.send('__aio:msg', lastFullState);
+      // AIO-259: replay only when connected — without __aio:open the renderer
+      // would show stale data with no active connection for actions/updates
+      if (lastFullState) {
+        win.webContents.send('__aio:msg', lastFullState);
+      }
     }
   });`,
           `  win.webContents.on('did-finish-load', () => {
@@ -222,8 +232,7 @@ Deno.test({
 
       proc = await launchElectron(brokenFile, CDP_PORT);
       const target1 = await waitForCdpPage(CDP_PORT);
-      const cdp1 = cdpSession(target1.webSocketDebuggerUrl);
-      await new Promise((r) => setTimeout(r, 500)); // let WS connect
+      const cdp1 = await cdpSession(target1.webSocketDebuggerUrl);
       const statusBroken = await pollDom(cdp1, "aio-status", 5_000);
       cdp1.close();
       proc.kill();
@@ -249,8 +258,7 @@ Deno.test({
 
       proc = await launchElectron(fixedFile, CDP_PORT);
       const target2 = await waitForCdpPage(CDP_PORT);
-      const cdp2 = cdpSession(target2.webSocketDebuggerUrl);
-      await new Promise((r) => setTimeout(r, 500)); // let WS connect
+      const cdp2 = await cdpSession(target2.webSocketDebuggerUrl);
       const statusFixed = await pollDom(cdp2, "aio-status", 8_000);
       cdp2.close();
 

@@ -87,6 +87,15 @@ app.on('ready', () => {
       event.preventDefault();
       win.webContents.toggleDevTools();
     }
+    // Ctrl+Shift+Delete — clear all caches and hard reload
+    if (ctrl && input.shift && input.key === 'Delete') {
+      event.preventDefault();
+      win.webContents.session.clearCache().then(() => {
+        win.webContents.session.clearStorageData().then(() => {
+          win.webContents.reloadIgnoringCache();
+        });
+      });
+    }
   });
 });
 app.on('window-all-closed', () => process.exit(0));
@@ -120,7 +129,10 @@ function saveBounds(win) {
   try { fs.writeFileSync(stateFile, JSON.stringify(win.getBounds())); } catch {}
 }
 
+let _boundsTracked = false; // AIO-234: prevent listener accumulation
 function trackBounds(win) {
+  if (_boundsTracked) return;
+  _boundsTracked = true;
   let t;
   const save = () => { clearTimeout(t); t = setTimeout(() => saveBounds(win), 500); };
   win.on('resize', save);
@@ -292,7 +304,7 @@ app.on('ready', () => {
   let directUrl = null;
   for (const arg of process.argv) {
     if (arg.startsWith('--server-url=')) {
-      directUrl = arg.slice(14);
+      directUrl = arg.slice(13); // AIO-230: '--server-url=' is 13 chars
       break;
     }
   }
@@ -429,12 +441,18 @@ app.on('ready', () => {
   if (USE_PROTOCOL) {
     protocol.handle('aio', async (req) => {
       const url = new URL(req.url);
-      const pathname = decodeURIComponent(url.pathname);
+      let pathname;
+      try { pathname = decodeURIComponent(url.pathname); } catch { pathname = url.pathname; }
       // Root or no extension → serve generated index.html
       if (pathname === '/' || pathname === '') {
         return new Response(PROD_HTML, { headers: { 'Content-Type': 'text/html' } });
       }
-      const filePath = path.join(BASE_DIR, pathname);
+      const filePath = path.resolve(path.join(BASE_DIR, pathname));
+      // Path traversal protection (AIO-131) — resolved path must stay inside BASE_DIR
+      const basePfx = BASE_DIR.endsWith(path.sep) ? BASE_DIR : BASE_DIR + path.sep;
+      if (!filePath.startsWith(basePfx) && filePath !== BASE_DIR) {
+        return new Response('Forbidden', { status: 403 });
+      }
       try {
         const data = await require('fs/promises').readFile(filePath);
         const ext = path.extname(filePath).toLowerCase();
@@ -485,6 +503,7 @@ app.on('ready', () => {
   win.on('close', () => { closing = true; });
 
   // Track page readiness (data events need this to decide whether to forward or buffer)
+  win.webContents.on('did-start-navigation', () => { pageReady = false; }); // AIO-247: reset on F5/Ctrl+R
   win.webContents.on('did-finish-load', () => { pageReady = true; });
 
   // Renderer signals it has registered IPC listeners — request fresh state from server
@@ -498,11 +517,11 @@ app.on('ready', () => {
       // never updated because all subsequent states are $f-tagged or $p deltas).
       // The server responds with current complete state — no $f because * = unfiltered.
       sock.write('__subs:["*"]\\n');
-    }
-    // Also replay lastFullState as immediate fallback (may be stale but prevents
-    // blank screen while waiting for server response over UDS — <1ms latency)
-    if (lastFullState) {
-      win.webContents.send('__aio:msg', lastFullState);
+      // AIO-259: replay only when connected — without __aio:open the renderer
+      // would show stale data with no active connection for actions/updates
+      if (lastFullState) {
+        win.webContents.send('__aio:msg', lastFullState);
+      }
     }
   });
 
@@ -546,10 +565,11 @@ app.on('ready', () => {
 
   // ── IPC bridge: renderer → UDS ──
   ipcMain.on('__aio:send', (_event, json) => {
-    if (sock && !sock.destroyed) {
-      sock.write(json + '\\n', (err) => {
-        if (err && !closing) {
-          sock?.destroy();
+    const s = sock;
+    if (s && !s.destroyed) {
+      s.write(json + '\\n', (err) => {
+        if (err && !closing && sock === s) {
+          s.destroy();
           sock = null;
           if (pageReady) win.webContents.send('__aio:close');
         }
@@ -569,6 +589,15 @@ app.on('ready', () => {
       event.preventDefault();
       win.webContents.toggleDevTools();
     }
+    // Ctrl+Shift+Delete — clear all caches and hard reload
+    if (ctrl && input.shift && input.key === 'Delete') {
+      event.preventDefault();
+      win.webContents.session.clearCache().then(() => {
+        win.webContents.session.clearStorageData().then(() => {
+          win.webContents.reloadIgnoringCache();
+        });
+      });
+    }
   });
 
   if (!USE_PROTOCOL) {
@@ -581,12 +610,14 @@ app.on('ready', () => {
   }
 
   // Dev: load from HTTP (esbuild bundling), Prod: load from disk (aio:// protocol)
-  win.loadURL(USE_PROTOCOL ? 'aio:///': ${JSON.stringify(url)});
+  // AIO-73: aio:/// (no host) fails with ERR_INVALID_URL in Electron 41+.
+  // Use aio://app/ (with host component) instead.
+  win.loadURL(USE_PROTOCOL ? 'aio://app/': ${JSON.stringify(url)});
   // AIO-54: Electron swallows <a> clicks before DOM dispatch. will-navigate fires
   // at main-process level — preventDefault blocks navigation but the click never
   // reaches JS. Relay intercepted URL back to renderer via IPC → preload dispatches
   // CustomEvent('aio:navigate') so app navigation handlers work transparently.
-  const _appOrigin = USE_PROTOCOL ? 'aio://' : new URL(${
+  const _appOrigin = USE_PROTOCOL ? 'aio://app' : new URL(${
     JSON.stringify(url)
   }).origin;
   win.webContents.on('will-navigate', (event, navUrl) => {

@@ -1,5 +1,5 @@
 // UI — todo list with inline editing, filtering, keyboard support
-import { useFeature, useLocal } from "aio";
+import { useFeature, useLocal } from "aio/air";
 import { type Filter, type Todo, todo } from "./app.ts";
 
 const FILTERS: Filter[] = ["all", "active", "done"];
@@ -12,10 +12,10 @@ export default function App() {
 
   if (!state) return <div style={{ padding: "2rem" }}>Connecting...</div>;
 
-  const filtered: Todo[] = state.items.filter((t) =>
+  const filtered: Todo[] = state.items.filter((t: Todo) =>
     state.filter === "all" ? true : state.filter === "done" ? t.done : !t.done
   );
-  const remaining = state.items.filter((t) => !t.done).length;
+  const remaining = state.items.filter((t: Todo) => !t.done).length;
 
   return (
     <div
@@ -40,7 +40,7 @@ export default function App() {
       >
         <input
           value={input}
-          onChange={(e) => setInput(e.target.value)}
+          onChange={(e) => setInput((e.target as HTMLInputElement).value)}
           placeholder="What needs to be done?"
           style={{ flex: 1, padding: "0.5rem", fontSize: "1rem" }}
         />
@@ -69,7 +69,7 @@ export default function App() {
               ? (
                 <input
                   value={editText}
-                  onChange={(e) => setEditText(e.target.value)}
+                  onChange={(e) => setEditText((e.target as HTMLInputElement).value)}
                   onBlur={() => {
                     if (editText.trim()) send.edit(t.id, editText.trim());
                     setEditing(null);
@@ -87,7 +87,7 @@ export default function App() {
               )
               : (
                 <span
-                  onDoubleClick={() => {
+                  onDblClick={() => {
                     setEditing(t.id);
                     setEditText(t.text);
                   }}

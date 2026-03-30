@@ -752,10 +752,11 @@ Deno.test("dispatch: re-entrant dispatch returns Promise that resolves after pro
 
 // ── structuredClone fail-loudly ──
 
-Deno.test("dispatch: structuredClone failure reports error and drops effects", () => {
+Deno.test("dispatch: structuredClone failure falls back to JSON clone per-effect (AIO-139)", () => {
   const errors: AioError[] = [];
   let state = { n: 0 };
-  // Effects containing a function cannot be structuredCloned
+  // Effects containing a function cannot be structuredCloned,
+  // but JSON round-trip preserves serializable fields (fn is dropped)
   const uncloneable = { type: "BAD", fn: () => {} };
   const executed: string[] = [];
 
@@ -784,12 +785,11 @@ Deno.test("dispatch: structuredClone failure reports error and drops effects", (
   dispatch({ type: "A" });
   // State should still update (reduce succeeded)
   assertEquals(state.n, 1);
-  // Effects should NOT have executed (dropped after clone failure)
-  assertEquals(executed.length, 0);
-  // Error should have been reported
-  assertEquals(errors.length, 1);
-  assertEquals(errors[0]!.code, "EFFECT_ERROR");
-  assertEquals(errors[0]!.message.includes("not cloneable"), true);
+  // Effect should survive via JSON fallback (fn lost, type preserved)
+  assertEquals(executed.length, 1);
+  assertEquals(executed[0], "BAD");
+  // No error reported — JSON fallback succeeded
+  assertEquals(errors.length, 0);
 });
 
 // ── effectTimeout hard-cancel — no double-report ──
@@ -829,4 +829,44 @@ Deno.test("dispatch: timed-out effect error suppressed if timeout already fired"
   // Should get EFFECT_TIMEOUT only, not EFFECT_ASYNC_ERROR (no double-report)
   assertEquals(errors.filter((e) => e.code === "EFFECT_TIMEOUT").length, 1);
   assertEquals(errors.filter((e) => e.code === "EFFECT_ASYNC_ERROR").length, 0);
+});
+
+// ── AIO-118: double onDone on dispatch overflow ───────────────────────
+
+Deno.test("AIO-118: onDone called exactly once on DISPATCH_MAX overflow", () => {
+  let state = { n: 0 };
+  let onDoneCount = 0;
+
+  const dispatch = createDispatch<
+    typeof state,
+    { type: string },
+    { type: string }
+  >({
+    reduce: (s, _a) => ({
+      state: s,
+      effects: [{ type: "LOOP" }],
+    }),
+    execute: (_e) => {
+      // Re-entrant dispatch to trigger overflow
+      dispatch({ type: "loop" });
+    },
+    getState: () => state,
+    setState: (s) => {
+      state = s;
+    },
+    onDone: () => {
+      onDoneCount++;
+    },
+    log: noop,
+    debug: false,
+    reportOpts: { onError: () => {} },
+  });
+
+  dispatch({ type: "start" });
+
+  assertEquals(
+    onDoneCount,
+    1,
+    "onDone should be called exactly once on overflow, not twice",
+  );
 });

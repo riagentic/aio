@@ -16,11 +16,8 @@ Deno.test("proxy: leaf access records full path", () => {
   const proxy = _trackingProxy(state) as Record<string, any>;
   const _v = proxy.counter.value;
   assertEquals(_accessedPaths.has("counter.value"), true);
-  assertEquals(
-    _accessedPaths.has("counter"),
-    false,
-    "intermediate should not be tracked",
-  );
+  // AIO-206: intermediate object accesses are also tracked
+  assertEquals(_accessedPaths.has("counter"), true);
   _resetTracking();
 });
 
@@ -30,7 +27,12 @@ Deno.test("proxy: deep nested leaf records full dot-path", () => {
   const proxy = _trackingProxy(state) as Record<string, any>;
   const _v = proxy.market.instruments.SOL.price;
   assertEquals(_accessedPaths.has("market.instruments.SOL.price"), true);
-  assertEquals(_accessedPaths.size, 1, "only the leaf path tracked");
+  // AIO-206: all intermediate paths tracked too
+  assertEquals(_accessedPaths.has("market"), true);
+  assertEquals(_accessedPaths.has("market.instruments"), true);
+  assertEquals(_accessedPaths.has("market.instruments.SOL"), true);
+  // collapsePaths reduces to shortest prefix
+  assertEquals(_collapsePaths(_accessedPaths), ["market"]);
   _resetTracking();
 });
 
@@ -46,7 +48,8 @@ Deno.test("proxy: multiple leaf accesses from same feature", () => {
   const _b = proxy.market.instruments.BTC.price;
   assertEquals(_accessedPaths.has("market.instruments.SOL.price"), true);
   assertEquals(_accessedPaths.has("market.instruments.BTC.price"), true);
-  assertEquals(_accessedPaths.size, 2);
+  // Intermediates also tracked — collapsed result is what matters for subscriptions
+  assertEquals(_collapsePaths(_accessedPaths), ["market"]);
   _resetTracking();
 });
 

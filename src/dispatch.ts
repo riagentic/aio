@@ -192,6 +192,7 @@ export function createDispatch<S, A, E>(
     dispatching = true;
 
     let iterations = 0;
+    let overflowed = false;
     depth++;
     for (;;) { // outer loop: drain queue → onDone → re-drain if onDone queued more
       while (queue.length > 0) {
@@ -213,6 +214,7 @@ export function createDispatch<S, A, E>(
             reportAioError(err2, _reportOpts);
           }
           clearCorrelationId();
+          overflowed = true;
           break;
         }
         const entry = queue.shift()!;
@@ -269,29 +271,38 @@ export function createDispatch<S, A, E>(
         // Deep-clone effects to detach from Immer draft references.
         // Without this, effects created inside produce() hold revoked draft refs
         // that crash on JSON.stringify or property access after produce() finalizes.
+        // Clone individually so one non-cloneable effect doesn't drop all (AIO-139).
         if (reduced.effects.length) {
-          try {
-            reduced = { ...reduced, effects: structuredClone(reduced.effects) };
-          } catch (cloneErr) {
-            const err = createAioError(
-              "EFFECT_ERROR",
-              `effects not cloneable for ${
-                tag(current)
-              } — revoked Immer draft refs will crash downstream. ` +
-                `Ensure effects are plain objects, not derived from the draft. ` +
-                `Original: ${
-                  cloneErr instanceof Error
-                    ? cloneErr.message
-                    : String(cloneErr)
-                }`,
-              {
-                featureName: actionType?.split(":")[0],
-                actionType,
-              },
-            );
-            reportAioError(err, _reportOpts);
-            reduced = { ...reduced, effects: [] };
+          const cloned: (E | ScheduleEffect)[] = [];
+          for (const eff of reduced.effects) {
+            try {
+              cloned.push(structuredClone(eff));
+            } catch (cloneErr) {
+              // Try JSON round-trip as fallback
+              try {
+                cloned.push(JSON.parse(JSON.stringify(eff)));
+              } catch {
+                const err = createAioError(
+                  "EFFECT_ERROR",
+                  `effect not cloneable for ${
+                    tag(current)
+                  } — revoked Immer draft refs will crash downstream. ` +
+                    `Ensure effects are plain objects, not derived from the draft. ` +
+                    `Original: ${
+                      cloneErr instanceof Error
+                        ? cloneErr.message
+                        : String(cloneErr)
+                    }`,
+                  {
+                    featureName: actionType?.split(":")[0],
+                    actionType,
+                  },
+                );
+                reportAioError(err, _reportOpts);
+              }
+            }
           }
+          reduced = { ...reduced, effects: cloned };
         }
 
         const prev = getState();
@@ -397,7 +408,16 @@ export function createDispatch<S, A, E>(
                 .catch((e) => {
                   if (tid !== null) clearTimeout(tid);
                   if (!settled) effectsInFlight--;
-                  if (settled) return; // already timed out — don't double-report
+                  if (settled) { // AIO-235: log real error even after timeout
+                    log.warn(
+                      `async effect '${
+                        effectType ?? "?"
+                      }' rejected after timeout: ${
+                        e instanceof Error ? e.message : String(e)
+                      }`,
+                    );
+                    return;
+                  }
                   settled = true;
                   const err = createAioError(
                     "EFFECT_ASYNC_ERROR",
@@ -438,14 +458,20 @@ export function createDispatch<S, A, E>(
       }
 
       // onDone (persist + broadcast) runs while dispatching=true so re-entrant dispatches queue
-      try {
-        onDone();
-      } catch (e) {
-        const err = createAioError("EFFECT_ERROR", e, { actionType: "onDone" });
-        reportAioError(err, _reportOpts);
+      // Skip if overflow already called onDone (AIO-118: avoid double call)
+      if (!overflowed) {
+        try {
+          onDone();
+        } catch (e) {
+          const err = createAioError("EFFECT_ERROR", e, {
+            actionType: "onDone",
+          });
+          reportAioError(err, _reportOpts);
+        }
       }
       // If onDone queued new actions, loop back to drain them
-      if (queue.length === 0) break;
+      // AIO-229: also break on overflow to prevent infinite loop if onDone dispatches
+      if (queue.length === 0 || overflowed) break;
     } // end outer loop
     depth--;
     dispatching = false;

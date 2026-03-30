@@ -90,6 +90,7 @@ export function createRenderMeter(config: RenderMeterConfig): RenderMeterAPI {
   let lastFeature: string | null = null;
   let dirty = false;
   let paused = false;
+  let destroyed = false;
   let rafId: number | null = null;
 
   // ── Memory gauge (Chrome/Edge only) ─────────────────────────────────────
@@ -159,7 +160,7 @@ export function createRenderMeter(config: RenderMeterConfig): RenderMeterAPI {
   // ── Core tick (called per rAF or manually) ─────────────────────────────
 
   function tick(now: number): void {
-    if (paused) return;
+    if (destroyed || paused) return;
 
     // Step 1: flush coalesced notification
     if (dirty) {
@@ -252,9 +253,15 @@ export function createRenderMeter(config: RenderMeterConfig): RenderMeterAPI {
   // ── Auto rAF loop ─────────────────────────────────────────────────────
 
   function scheduleLoop() {
+    if (destroyed) return;
     rafId = requestAnimationFrame(() => {
-      tick(performance.now());
-      scheduleLoop(); // always reschedule — meter never goes dark
+      if (destroyed) return;
+      try {
+        tick(performance.now());
+      } catch (e) {
+        console.error("[aio:render-meter] tick error:", e); // AIO-151
+      }
+      scheduleLoop();
     });
   }
 
@@ -299,6 +306,7 @@ export function createRenderMeter(config: RenderMeterConfig): RenderMeterAPI {
     },
 
     destroy() {
+      destroyed = true;
       if (rafId !== null) {
         cancelAnimationFrame(rafId);
         rafId = null;

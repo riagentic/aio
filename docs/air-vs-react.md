@@ -102,6 +102,8 @@ These are only available in `aio/air`. No React equivalent.
 | `batch(fn)`                                               | Coalesce signal updates           |
 | `onMount(fn)`                                             | Run after first render            |
 | `onCleanup(fn)`                                           | Run before re-render / on unmount |
+| `useId()`                                                 | SSR-safe unique ID                |
+| `useOptimistic(state, fn)`                                | Optimistic UI during async ops    |
 | `mount(root, App)`                                        | Mount AIR app to DOM              |
 | `hydrate(root, App)`                                      | Hydrate SSR'd AIR app             |
 | `h(tag, props, children)`                                 | JSX factory                       |
@@ -605,6 +607,8 @@ Complete mapping between React, AIR native, and AIR compat:
 | `useReducer(r, init)`   | `useFeature(ref)` or `useLocal(init)` | Not provided                                              |
 | `useLayoutEffect`       | `onMount()` (runs post-render)        | Not provided                                              |
 | `forwardRef`            | Use `ref` prop directly               | Not provided                                              |
+| `useId()`               | `useId()`                             | Same (identical API)                                      |
+| `useOptimistic(s, fn)`  | `useOptimistic(s, fn)`                | Same (identical API)                                      |
 | `useImperativeHandle`   | Not provided                          | Not provided                                              |
 
 ---

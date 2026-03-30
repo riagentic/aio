@@ -3,8 +3,9 @@
  * @module
  * Framework-agnostic canonical state store.
  *
- * Owns: delta pipeline, identity array tracking, structural sharing,
- * subscription tracking, send logic, transport abstraction.
+ * Owns: Immer patch application, subscription tracking, send logic,
+ * transport abstraction. Delta generation uses Immer's produceWithPatches
+ * in feature-compose.ts; patch application uses Immer's applyPatches here.
  * Both the React and AIR adapters consume this module.
  *
  * @example
@@ -18,6 +19,9 @@
 // combined with aio-hooks.ts's signal-based state management.
 
 import { batch, type Signal, signal } from "./signal.ts";
+import { applyPatches, enablePatches, type Patch } from "immer";
+
+enablePatches();
 
 // ── Types ───────────────────────────────────────────────────────────
 
@@ -62,7 +66,7 @@ let _transport: Transport | null = null;
 
 // Signals
 let _stateSignal: Signal<Record<string, any>> = signal({});
-let _connected: Signal<boolean> = signal(false);
+let _connected: Signal<boolean> = signal<boolean>(false);
 const _featureSignals = new Map<string, Signal<any>>();
 
 // Ready promise
@@ -139,7 +143,7 @@ export function _shallowEqual(a: unknown, b: unknown): boolean {
   const objA = a as Record<string, unknown>;
   const objB = b as Record<string, unknown>;
   for (const k of ka) {
-    if (objA[k] !== objB[k]) return false;
+    if (!Object.hasOwn(objB, k) || objA[k] !== objB[k]) return false; // AIO-237: key-existence check
   }
   return true;
 }
@@ -159,6 +163,7 @@ export function _preserveArrayRefs(
     return newArr;
   }
   let allSame = true;
+  let result: unknown[] | null = null; // AIO-257: lazy copy — never mutate input
   for (let i = 0; i < newArr.length; i++) {
     _arrayRefStats.total++;
     if (newArr[i] === oldArr[i]) {
@@ -170,7 +175,8 @@ export function _preserveArrayRefs(
       oldArr[i] && typeof oldArr[i] === "object" && !Array.isArray(oldArr[i])
     ) {
       if (_shallowEqual(newArr[i], oldArr[i])) {
-        newArr[i] = oldArr[i]; // restore reference — element unchanged
+        if (!result) result = newArr.slice();
+        result[i] = oldArr[i]; // restore reference — element unchanged
         _arrayRefStats.preserved++;
         continue;
       }
@@ -179,12 +185,13 @@ export function _preserveArrayRefs(
     allSame = false;
   }
   _arrayRefStats.cycles++;
-  return allSame ? oldArr : newArr;
+  return allSame ? oldArr : (result ?? newArr);
 }
 
 // ── Identity-keyed array maps ───────────────────────────────────────
 
-/** Build _idMaps entries from a full state object. Called on full state receive and reconnect. */
+/** @deprecated Legacy — remove after v1.0.0 stable. Only needed for $arr delta backward compat.
+ *  Build _idMaps entries from a full state object. Called on full state receive and reconnect. */
 export function _rebuildIdMaps(state: Record<string, unknown>): void {
   _idMaps.clear();
   for (const [fk, fv] of Object.entries(state)) {
@@ -214,7 +221,8 @@ export function _rebuildIdMaps(state: Record<string, unknown>): void {
   }
 }
 
-/** Apply a $arr identity-keyed array patch. Returns the reconstructed array. */
+/** @deprecated Legacy — remove after v1.0.0 stable. Server no longer produces $arr format.
+ *  Apply a $arr identity-keyed array patch. Returns the reconstructed array. */
 export function _applyArrPatch(
   mapKey: string,
   arrPatch: Record<string, unknown>,
@@ -263,7 +271,8 @@ export function _applyArrPatch(
 
 // ── Delta application ───────────────────────────────────────────────
 
-/** Apply a delta patch ($p + $d) to previous state. Handles nested feature patches (v0.5).
+/** @deprecated Legacy — remove after v1.0.0 stable. Server no longer produces $p/$d format.
+ *  Apply a delta patch ($p + $d) to previous state. Handles nested feature patches (v0.5).
  *  Preserves object references for unchanged slices. */
 export function _applyPatch(
   prev: Record<string, unknown> | null,
@@ -352,13 +361,17 @@ export function _applyPatch(
 // ── Recursive deep merge for $f (filtered) responses ────────────────
 // AIO-31: Two-level merge lost sub-sub-keys. Recursive merge only overwrites
 // leaf values (primitives/arrays), preserving all object keys at every depth.
-/** Recursive deep merge for `$f` (filtered) responses — preserves sub-keys at every depth. */
+/** @deprecated Legacy — remove after v1.0.0 stable. Server no longer produces $f format.
+ *  Recursive deep merge for `$f` (filtered) responses — preserves sub-keys at every depth. */
 export function _deepMergeFiltered(
   prev: Record<string, unknown>,
   incoming: Record<string, unknown>,
+  depth = 0,
 ): Record<string, unknown> {
+  if (depth > 32) return prev; // AIO-238: depth limit — prevent stack overflow from malicious payloads
   const result: Record<string, unknown> = { ...prev };
   for (const key of Object.keys(incoming)) {
+    if (_BLOCKED_KEYS.has(key)) continue; // AIO-238: prototype pollution guard
     const oldVal = prev[key];
     const newVal = incoming[key];
     if (
@@ -368,6 +381,7 @@ export function _deepMergeFiltered(
       result[key] = _deepMergeFiltered(
         oldVal as Record<string, unknown>,
         newVal as Record<string, unknown>,
+        depth + 1,
       );
     } else {
       result[key] = newVal;
@@ -395,12 +409,21 @@ function _applyFullState(state: Record<string, any>): void {
     for (const [key, value] of Object.entries(state)) {
       _getOrCreateFeatureSignal(key, value).set(value);
     }
+    // AIO-189: remove feature signals for features no longer in state
+    for (const key of _featureSignals.keys()) {
+      if (!(key in state)) {
+        _featureSignals.delete(key);
+      }
+    }
   });
-  _rebuildIdMaps(state);
+  _rebuildIdMaps(state); // needed for legacy $arr delta backward compat
 }
 
 // ── Path-based deletion (including $id: identity array elements) ─────
 
+/** @deprecated Legacy — remove after v1.0.0 stable. Server no longer produces path-delete format.
+ *  Mutate state object for deep path deletions. Signal notifications are handled
+ *  by the caller's batch() — this function must NOT fire signals (AIO-101). */
 function _applyPathDelete(state: Record<string, any>, path: string): void {
   const parts = path.split(".");
 
@@ -414,9 +437,7 @@ function _applyPathDelete(state: Record<string, any>, path: string): void {
       idMap.ids.delete(id);
       const orderIdx = idMap.order.indexOf(id);
       if (orderIdx >= 0) idMap.order.splice(orderIdx, 1);
-      // Rebuild array from id map
       const arr = idMap.order.map((oid) => idMap.ids.get(oid)).filter(Boolean);
-      // Set on feature state
       const featureName = parts[0]!;
       const fieldName = parts.slice(1, idIdx).join(".");
       const featureState = {
@@ -424,7 +445,6 @@ function _applyPathDelete(state: Record<string, any>, path: string): void {
       };
       featureState[fieldName] = arr;
       state[featureName] = featureState;
-      _getOrCreateFeatureSignal(featureName, featureState).set(featureState);
     }
     return;
   }
@@ -432,8 +452,6 @@ function _applyPathDelete(state: Record<string, any>, path: string): void {
   // Simple path deletion
   if (parts.length === 1) {
     delete state[parts[0]!];
-    const sig = _featureSignals.get(parts[0]!);
-    if (sig) sig.set(undefined);
   } else {
     const featureName = parts[0]!;
     const featureState = { ...(state[featureName] as Record<string, unknown>) };
@@ -448,11 +466,10 @@ function _applyPathDelete(state: Record<string, any>, path: string): void {
     }
     delete current[parts[parts.length - 1]!];
     state[featureName] = featureState;
-    _getOrCreateFeatureSignal(featureName, featureState).set(featureState);
   }
 }
 
-// ── Delta application (signal-wired) ────────────────────────────────
+// ── @deprecated Legacy delta application (signal-wired) — remove after v1.0.0 stable ──
 
 function _applyDeltaToSignals(
   data: { $p?: Record<string, any>; $d?: string[]; $f?: number },
@@ -609,6 +626,12 @@ export function resendSubscriptions(): void {
 /** Set the abstract transport (WS adapter, IPC adapter, etc). */
 export function setTransport(transport: Transport | null): void {
   _transport = transport;
+  // AIO-183: reset initial state flag on reconnect so next message is
+  // treated as full state, not patches applied to potentially stale state
+  if (transport) {
+    _initialStateReceived = false;
+    flushOfflineQueue();
+  }
 }
 
 /** Update connection status signal. */
@@ -635,6 +658,7 @@ export function getConnectedSignal(): Signal<boolean> {
 
 // ── Filtered state application (wire format: { $f:1, feat1:{...}, ... }) ──
 
+/** @deprecated Legacy — remove after v1.0.0 stable. */
 function _applyFilteredToSignals(data: Record<string, any>): void {
   const prev = _stateSignal.peek();
   const next = _deepMergeFiltered(prev, data);
@@ -647,7 +671,7 @@ function _applyFilteredToSignals(data: Record<string, any>): void {
       );
     }
   });
-  _rebuildIdMaps(next);
+  _rebuildIdMaps(next); // needed for legacy $arr delta backward compat
 }
 
 // ── Message handling ────────────────────────────────────────────────
@@ -662,7 +686,7 @@ export type HandleResult = "full" | "delta" | "noop" | "dropped";
 export function handleMessage(data: any): HandleResult {
   if (!_initialStateReceived) {
     // Delta before first state — drop (reconnect race)
-    if (data.$p || data.$d) return "dropped";
+    if (data.$p || data.$d || data.$patches) return "dropped";
     // First message is full state (clean $f marker if present)
     const cleaned = data.$f ? { ...data } : data;
     if (cleaned !== data) delete cleaned.$f;
@@ -677,7 +701,45 @@ export function handleMessage(data: any): HandleResult {
     return "full";
   }
 
-  // Delta patch: { $p: {...}, $d: [...] }
+  // Immer patches: { $patches: [{op, path, value}, ...] }
+  if (data.$patches && Array.isArray(data.$patches)) {
+    const prev = _stateSignal.peek();
+    const patches: Patch[] = data.$patches;
+    if (patches.length === 0) return "noop";
+
+    try {
+      const next = applyPatches(prev, patches);
+      if (next === prev) return "noop";
+
+      // Determine which features were affected
+      const changedFeatures = new Set<string>();
+      for (const p of patches) {
+        if (p.path.length > 0 && typeof p.path[0] === "string") {
+          changedFeatures.add(p.path[0]);
+        }
+      }
+
+      batch(() => {
+        _stateSignal.set(next);
+        for (const featureName of changedFeatures) {
+          if (_BLOCKED_KEYS.has(featureName)) continue;
+          const featureState = (next as Record<string, unknown>)[featureName];
+          _getOrCreateFeatureSignal(featureName, featureState).set(
+            featureState,
+          );
+        }
+      });
+      return "delta";
+    } catch (e) {
+      // applyPatches failed — client state desynced, request full state from server
+      console.warn("[aio] applyPatches failed, requesting resync:", e);
+      if (_transport) _transport.send("__resync");
+      return "noop";
+    }
+  }
+
+  // @deprecated Legacy delta patch: { $p: {...}, $d: [...] } — remove after v1.0.0 stable
+  // Server no longer produces this format; kept for cached old-format clients only.
   if (data.$p || data.$d) {
     const prev = _stateSignal.peek();
     _applyDeltaToSignals({ $p: data.$p, $d: data.$d });
@@ -693,28 +755,42 @@ export function handleMessage(data: any): HandleResult {
     return _stateSignal.peek() === prev ? "noop" : "delta";
   }
 
-  // Full state replacement (reconnect)
+  // Safety: reject objects with wire-protocol markers as full state — prevents stale
+  // client JS from interpreting patch/delta messages as full state replacement
+  if (data.$patches || data.$p || data.$d || data.$f) {
+    console.warn("[aio] unexpected wire marker in full-state path — dropped");
+    return "noop";
+  }
+
+  // Full state replacement (reconnect / subscription response)
+  // Do NOT clear _accessedPaths here — that nukes "*" from useAio() and causes
+  // subsequent __subs messages to exclude features not read by useFeature() (AIO-170)
   _applyFullState(data);
-  _accessedPaths.clear();
-  cancelSubsTimer();
   return "full";
 }
 
 // ── Send ────────────────────────────────────────────────────────────
 
-/** Send an action via transport. Queues offline if no transport. */
-export function send(action: { type: string; payload?: any }): void {
+/** Send an action via transport. Queues offline if no transport.
+ *  Returns false if the action was dropped (offline queue full). */
+export function send(action: { type: string; payload?: any }): boolean {
   const tagged = { ...action, _source: "UI" };
   const json = JSON.stringify(tagged);
 
   if (_transport) {
     _transport.send(json);
-  } else {
-    // Queue for later
-    if (_offlineQueue.length < MAX_OFFLINE_QUEUE) {
-      _offlineQueue.push(tagged);
-    }
+    return true;
   }
+  // Queue for later
+  if (_offlineQueue.length < MAX_OFFLINE_QUEUE) {
+    _offlineQueue.push(tagged);
+    return true;
+  }
+  // AIO-196: warn instead of silent drop
+  console.warn(
+    `[aio:state] Action "${action.type}" dropped — offline queue full (${MAX_OFFLINE_QUEUE})`,
+  );
+  return false;
 }
 
 /** Flush queued offline actions through the current transport. */
@@ -772,6 +848,7 @@ export function _trackingProxy(obj: unknown, parentPath = ""): unknown {
         const fullPath = parentPath ? `${parentPath}.${prop}` : prop;
         const value = Reflect.get(target, prop);
         if (value && typeof value === "object" && !Array.isArray(value)) {
+          trackPath(fullPath); // AIO-206: track object access itself
           return _trackingProxy(value, fullPath);
         }
         trackPath(fullPath);

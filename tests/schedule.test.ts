@@ -122,15 +122,16 @@ Deno.test("manager: at fires at specified time", async () => {
   assertEquals(mgr.active().includes("soon"), false);
 });
 
-Deno.test("manager: at with past time fires immediately", async () => {
+Deno.test("manager: at with past time is skipped (AIO-236)", () => {
   const dispatched: { type: string }[] = [];
   const mgr = createScheduleManager((a) => dispatched.push(a), noop);
 
   const past = new Date(Date.now() - 10_000).toISOString();
   mgr.handle(schedule.at("old", past, { type: "PastFire" }));
 
-  await new Promise((r) => setTimeout(r, 30));
-  assertEquals(dispatched, [{ type: "PastFire" }]);
+  // Past time should be skipped — no timer created, no dispatch
+  assertEquals(dispatched, []);
+  assertEquals(mgr.active().length, 0);
 });
 
 Deno.test("manager: at with invalid date string throws", () => {
@@ -349,7 +350,7 @@ Deno.test("manager: cancelByPrefix cancels matching timers", async () => {
   mgr.handle(schedule.after("feature:b", 50, { type: "B" }));
   mgr.handle(schedule.after("other:c", 50, { type: "C" }));
   assertEquals(mgr.active().length, 3);
-  mgr.cancelByPrefix("feature:");
+  mgr.cancelByPrefix("feature"); // AIO-198: prefix without colon — code appends ":"
   assertEquals(mgr.active(), ["other:c"]);
   await new Promise((r) => setTimeout(r, 80));
   assertEquals(dispatched, [{ type: "C" }]); // only other:c fired

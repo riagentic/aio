@@ -174,8 +174,8 @@ Deno.test("aio24: UDS script — write error handler on IPC bridge", () => {
     "/tmp/test.sock",
     {},
   );
-  // sock.write should have an error callback
-  assertStringIncludes(s, "sock.write(json", "IPC bridge must write to socket");
+  // IPC bridge writes via local ref with error callback
+  assertStringIncludes(s, "s.write(json", "IPC bridge must write to socket");
   assertStringIncludes(
     s,
     "__aio:close",

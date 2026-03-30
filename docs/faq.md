@@ -91,14 +91,19 @@ state channel is for state — heavy I/O happens outside it.
 
 ---
 
-### Why only React?
+### Why AIR and React — what about Vue / Svelte / Solid?
+
+aio ships two renderers: **AIR** (built-in, signal-based, ~8KB) and a **React
+adapter**. AIR is the recommended default for new projects — zero dependencies,
+automatic memoization, built-in forms/animation/SSR. The React adapter exists
+for teams with existing React codebases or React-specific library dependencies.
 
 The core is framework-agnostic. `client` gives you direct access to state,
 actions, and routing — wire it into Svelte, Vue, Solid, or anything else in ~20
 lines. See [ui.md](ui.md#bring-your-own-framework) for examples.
 
-React is the only maintained adapter. The `client` API is stable and supported —
-adapters built on it are your responsibility.
+The `client` API is stable and supported — custom adapters built on it are your
+responsibility. See [renderer.md](renderer.md) for the full comparison.
 
 ---
 

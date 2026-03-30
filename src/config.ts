@@ -25,6 +25,7 @@ export const VALID_AIO_CONFIG_KEYS = new Set<string>([
   "persistDebounceMs",
   "persistMode",
   "users",
+  "resolveUser",
   "ui",
   "port",
   "baseDir",
@@ -59,6 +60,7 @@ export const VALID_AIO_CONFIG_KEYS = new Set<string>([
   "_featureNames",
   "_healthGetter",
   "_reduceBreakdown",
+  "_onReportOptsReady",
 ]);
 
 export const VALID_FEATURES_CONFIG_KEYS = new Set<string>([
@@ -77,6 +79,7 @@ export const VALID_FEATURES_CONFIG_KEYS = new Set<string>([
   "killExisting",
   "serverUrl",
   "users",
+  "resolveUser",
   "db",
   "perfCheck",
   "perfBudget",
@@ -143,6 +146,10 @@ const CONFIG_DOCS: Record<string, [string, string]> = {
   stateForDB: ["full state", "filter state before persisting"],
   beforeReduce: ["", "intercept actions before reduce — return null to drop"],
   users: ["", "static token→user map for auth"],
+  resolveUser: [
+    "",
+    "dynamic (token,state)→user hook for runtime auth (AIO-171)",
+  ],
   db: ["", "SQLite table definitions — arrays auto-sync"],
   perfCheck: ['"on"', "enable/disable performance violation reporting"],
   perfBudget: ["", "override default budgets (reduce: 100ms, effect: 5ms)"],

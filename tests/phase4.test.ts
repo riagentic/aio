@@ -27,7 +27,10 @@ import {
   onMount,
   setDevMode as setDevModeRenderer,
   useContext,
+  useId,
+  useOptimistic,
   useRef,
+  useSignal,
 } from "../src/aio-renderer.ts";
 import type { MountHandle } from "../src/aio-renderer.ts";
 import { useFieldArray, useForm } from "../src/form.ts";
@@ -146,6 +149,111 @@ Deno.test({
     count.set(1);
     handle._flush();
     assertEquals(log, ["initial", "cleanup"]);
+    cleanup();
+  },
+});
+
+Deno.test({
+  name:
+    "lifecycle: onCleanup inside onMount registers and fires on unmount (AIO-74)",
+  ...S,
+  fn() {
+    const { cleanup, mount: m } = setupMount();
+    let cleaned = false;
+    const App = () => {
+      onMount(() => {
+        // onCleanup inside onMount — this is the documented pattern
+        onCleanup(() => {
+          cleaned = true;
+        });
+      });
+      return h("div", null, "hello");
+    };
+    const handle = m(App);
+    assertEquals(cleaned, false);
+    _unmount(handle);
+    assertEquals(cleaned, true);
+    cleanup();
+  },
+});
+
+// ════════════════════════════════════════════════════════════════════
+// 2b. useSignal — component-scoped signals
+// ════════════════════════════════════════════════════════════════════
+
+Deno.test({
+  name: "useSignal: creates signal scoped to component",
+  ...S,
+  fn() {
+    const { root, cleanup, mount: m } = setupMount();
+    const App = () => {
+      const count = useSignal(0);
+      return h("span", null, String(count.value));
+    };
+    m(App);
+    assertEquals(root.innerHTML, "<span>0</span>");
+    cleanup();
+  },
+});
+
+Deno.test({
+  name: "useSignal: persists across re-renders",
+  ...S,
+  fn() {
+    const { root, cleanup, mount: m } = setupMount();
+    const trigger = signal(0);
+    let sigRef: ReturnType<typeof useSignal<number>> | null = null;
+    const App = () => {
+      const count = useSignal(42);
+      sigRef = count;
+      trigger.value; // track trigger for re-render
+      return h("span", null, String(count.value));
+    };
+    const handle = m(App);
+    assertEquals(root.innerHTML, "<span>42</span>");
+    const firstSig = sigRef;
+
+    // Re-render — should get same signal instance
+    trigger.set(1);
+    handle._flush();
+    assertEquals(sigRef === firstSig, true);
+    cleanup();
+  },
+});
+
+Deno.test({
+  name: "useSignal: .set() triggers component re-render",
+  ...S,
+  fn() {
+    const { root, cleanup, mount: m } = setupMount();
+    let sig: ReturnType<typeof useSignal<number>> | null = null;
+    const App = () => {
+      const count = useSignal(0);
+      sig = count;
+      return h("span", null, String(count.value));
+    };
+    const handle = m(App);
+    assertEquals(root.innerHTML, "<span>0</span>");
+
+    sig!.set(5);
+    handle._flush();
+    assertEquals(root.innerHTML, "<span>5</span>");
+    cleanup();
+  },
+});
+
+Deno.test({
+  name: "useSignal: multiple useSignal calls maintain independent state",
+  ...S,
+  fn() {
+    const { root, cleanup, mount: m } = setupMount();
+    const App = () => {
+      const a = useSignal(10);
+      const b = useSignal("hello");
+      return h("div", null, `${a.value}-${b.value}`);
+    };
+    m(App);
+    assertEquals(root.innerHTML, "<div>10-hello</div>");
     cleanup();
   },
 });
@@ -978,6 +1086,204 @@ Deno.test({
     await new Promise((r) => setTimeout(r, 10));
     handle._flush();
     assertEquals(root.innerHTML, "<span>Error: network failure</span>");
+    cleanup();
+  },
+});
+
+// ── useId tests ─────────────────────────────────────────────────────
+
+Deno.test({
+  name: "useId: returns stable unique IDs across re-renders",
+  ...S,
+  fn() {
+    const { root, mount: m, cleanup } = setupMount();
+    const ids: string[] = [];
+    const trigger = signal(0);
+
+    function App() {
+      const id1 = useId();
+      const id2 = useId();
+      ids.push(id1, id2);
+      return h("div", { id: id1 }, `${trigger.value}-${id2}`);
+    }
+
+    const handle = m(App);
+    // First render: two unique IDs
+    assertEquals(ids.length, 2);
+    assert(ids[0]!.startsWith(":r"));
+    assert(ids[1]!.startsWith(":r"));
+    assert(ids[0] !== ids[1], "IDs must be unique");
+
+    // Re-render: same IDs persist
+    trigger.set(1);
+    handle._flush();
+    assertEquals(ids.length, 4);
+    assertEquals(ids[2], ids[0], "ID 1 must persist across re-renders");
+    assertEquals(ids[3], ids[1], "ID 2 must persist across re-renders");
+    cleanup();
+  },
+});
+
+Deno.test({
+  name: "useId: different components get different IDs",
+  ...S,
+  fn() {
+    const { root, mount: m, cleanup } = setupMount();
+    const ids: string[] = [];
+
+    function Child() {
+      const id = useId();
+      ids.push(id);
+      return h("span", { id }, "child");
+    }
+
+    function App() {
+      const id = useId();
+      ids.push(id);
+      return h("div", null, h(Child, null), h(Child, null));
+    }
+
+    m(App);
+    assertEquals(ids.length, 3);
+    // All three IDs must be unique
+    const unique = new Set(ids);
+    assertEquals(unique.size, 3, "All IDs must be unique");
+    cleanup();
+  },
+});
+
+Deno.test({
+  name: "useId: SSR renders deterministic IDs",
+  ...S,
+  fn() {
+    function Inner() {
+      const id = useId();
+      return h("label", { htmlFor: id }, h("input", { id }));
+    }
+
+    function App() {
+      return h("div", null, h(Inner, null), h(Inner, null));
+    }
+
+    const html1 = renderToString(h(App, null));
+    const html2 = renderToString(h(App, null));
+    // Each renderToString call resets counter — same output
+    assertEquals(
+      html1,
+      html2,
+      "SSR must produce deterministic IDs across calls",
+    );
+    // Both Inner components should have different IDs
+    assert(html1.includes(":r0:"), "First component gets :r0:");
+    assert(html1.includes(":r1:"), "Second component gets :r1:");
+  },
+});
+
+// ── useOptimistic tests ─────────────────────────────────────────────
+
+Deno.test({
+  name: "useOptimistic: shows passthrough when no optimistic action",
+  ...S,
+  fn() {
+    const { root, mount: m, cleanup } = setupMount();
+
+    function App() {
+      const [display] = useOptimistic(
+        "confirmed",
+        (_cur: string, opt: string) => opt,
+      );
+      return h("div", null, display);
+    }
+
+    m(App);
+    assertEquals(root.innerHTML, "<div>confirmed</div>");
+    cleanup();
+  },
+});
+
+Deno.test({
+  name: "useOptimistic: applies optimistic overlay on addOptimistic",
+  ...S,
+  fn() {
+    const { root, mount: m, cleanup } = setupMount();
+    let addFn: ((v: string) => void) | null = null;
+
+    function App() {
+      const [display, add] = useOptimistic(
+        "old",
+        (_cur: string, opt: string) => opt,
+      );
+      addFn = add;
+      return h("div", null, display);
+    }
+
+    const handle = m(App);
+    assertEquals(root.innerHTML, "<div>old</div>");
+
+    // Add optimistic value
+    addFn!("optimistic!");
+    handle._flush();
+    assertEquals(root.innerHTML, "<div>optimistic!</div>");
+    cleanup();
+  },
+});
+
+Deno.test({
+  name: "useOptimistic: clears overlay when passthrough changes",
+  ...S,
+  fn() {
+    const { root, mount: m, cleanup } = setupMount();
+    const serverState = signal("v1");
+    let addFn: ((v: string) => void) | null = null;
+
+    function App() {
+      const [display, add] = useOptimistic(
+        serverState.value,
+        (_cur: string, opt: string) => opt,
+      );
+      addFn = add;
+      return h("div", null, display);
+    }
+
+    const handle = m(App);
+    assertEquals(root.innerHTML, "<div>v1</div>");
+
+    // Add optimistic overlay
+    addFn!("pending...");
+    handle._flush();
+    assertEquals(root.innerHTML, "<div>pending...</div>");
+
+    // Server confirms new state → overlay clears
+    serverState.set("v2");
+    handle._flush();
+    assertEquals(root.innerHTML, "<div>v2</div>");
+    cleanup();
+  },
+});
+
+Deno.test({
+  name: "useOptimistic: stacks multiple optimistic actions",
+  ...S,
+  fn() {
+    const { root, mount: m, cleanup } = setupMount();
+    let addFn: ((v: number) => void) | null = null;
+
+    function App() {
+      const [count, add] = useOptimistic(
+        0,
+        (cur: number, delta: number) => cur + delta,
+      );
+      addFn = add;
+      return h("div", null, String(count));
+    }
+
+    const handle = m(App);
+    assertEquals(root.innerHTML, "<div>0</div>");
+
+    addFn!(5);
+    addFn!(3);
+    handle._flush();
+    assertEquals(root.innerHTML, "<div>8</div>");
     cleanup();
   },
 });

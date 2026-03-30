@@ -85,6 +85,13 @@ export function diagEmit(event: Omit<DiagnosticEvent, "ts">): void {
   if (last !== undefined && now - last < DEDUP_WINDOW_MS) return;
   _dedup.set(event.type, now);
 
+  // Prune stale entries when Map grows beyond threshold
+  if (_dedup.size > 50) {
+    for (const [t, ts] of _dedup) {
+      if (now - ts > DEDUP_WINDOW_MS) _dedup.delete(t);
+    }
+  }
+
   const full: DiagnosticEvent = { ...event, ts: now };
 
   // O(1) ring buffer insert
@@ -107,6 +114,11 @@ export function diagSubscribe(fn: DiagnosticListener): () => void {
   return () => {
     _listeners.delete(fn);
   };
+}
+
+/** Expose dedup map size for testing (not part of public API) */
+export function _diagDedupSize(): number {
+  return _dedup.size;
 }
 
 /**

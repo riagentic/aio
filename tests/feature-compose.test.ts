@@ -381,7 +381,7 @@ Deno.test("registry: disable/enable toggle", () => {
     getState: () => composed.initialState,
   };
 
-  composed.registry.disable("counter", app.dispatch);
+  composed.registry.disable("counter", app);
   assertEquals(composed.registry.isEnabled("counter"), false);
 
   composed.registry.enable("counter", app);
@@ -395,7 +395,7 @@ Deno.test("registry: disabled feature actions are dropped", () => {
     getState: () => composed.initialState,
   };
 
-  composed.registry.disable("counter", app.dispatch);
+  composed.registry.disable("counter", app);
 
   // Action to disabled feature should be dropped (state unchanged)
   const result = composed.reduce(composed.initialState, {
@@ -521,12 +521,107 @@ Deno.test("errors: re-enable resets error counter", () => {
   );
 
   // Disable then re-enable resets errors
-  composed.registry.disable("errFeat2", app.dispatch);
+  composed.registry.disable("errFeat2", app);
   composed.registry.enable("errFeat2", app);
   assertEquals(
     composed.registry.health(composed.initialState).find((h: FeatureStatus) =>
       h.name === "errFeat2"
     )!.errors,
     0,
+  );
+});
+
+// ── AIO-71 #7: Feature method error context ─────────────────────────
+
+Deno.test("reduce error includes feature name and method name in message", () => {
+  const buggy = feature("wallet", {
+    state: { balance: 0 },
+    methods: {
+      withdraw(s, amount: number) {
+        if (amount > s.balance) {
+          throw new Error("insufficient funds");
+        }
+        s.balance -= amount;
+      },
+    },
+  });
+
+  const composed = composeFeatures([buggy]);
+  const action: Msg = {
+    type: "wallet:withdraw",
+    payload: { args: [100] },
+  };
+
+  let caught: Error | undefined;
+  try {
+    composed.reduce(composed.initialState, action);
+  } catch (e) {
+    caught = e as Error;
+  }
+
+  assertExists(caught, "should have thrown");
+  // Error message must include feature name and method name for DX
+  const msg = caught!.message;
+  assertEquals(
+    msg.includes("wallet") && msg.includes("withdraw"),
+    true,
+    `error message should include feature name 'wallet' and method name 'withdraw', got: "${msg}"`,
+  );
+  // Original error message must be preserved
+  assertEquals(
+    msg.includes("insufficient funds"),
+    true,
+    `original error message should be preserved, got: "${msg}"`,
+  );
+});
+
+Deno.test("reduce error includes context for machine-guarded features", () => {
+  const stateful = feature("door", {
+    state: { locked: false },
+    machine: {
+      initial: "closed",
+      states: {
+        closed: { open: "open", lock: "closed" },
+        open: { close: "closed" },
+      },
+    },
+    methods: {
+      open(s) {
+        if (s.locked) throw new Error("door is locked");
+      },
+      close(_s) {},
+      lock(s) {
+        s.locked = true;
+      },
+    },
+  });
+
+  const composed = composeFeatures([stateful]);
+  // Lock the door first
+  let state = composed.reduce(composed.initialState, {
+    type: "door:lock",
+    payload: {},
+  }).state;
+  // Set locked=true on the state manually since lock method runs through Immer
+  // Actually lock method already sets s.locked = true, let's use the returned state
+  // Now open — the method will throw because locked=true
+  let caught: Error | undefined;
+  try {
+    composed.reduce(state, { type: "door:open", payload: {} });
+  } catch (e) {
+    caught = e as Error;
+  }
+
+  assertExists(caught, "should have thrown");
+  const msg = caught!.message;
+  assertEquals(
+    msg.includes("door") && msg.includes("open"),
+    true,
+    `error message should include feature 'door' and method 'open', got: "${msg}"`,
+  );
+  assertEquals(
+    msg.includes("door is locked"),
+    true,
+    `original error preserved, got: "${msg}"`,
   );
 });

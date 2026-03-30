@@ -1,0 +1,222 @@
+// <TransitionGroup> — animate list enter/exit/reorder with optional FLIP.
+// Wraps keyed children. New items get enter transitions, removed items get
+// exit transitions (deferred DOM removal), reordered items get FLIP animation.
+
+import type { VNode } from "./vdom.ts";
+import { h } from "./vdom.ts";
+import {
+  _applyTransition,
+  _isHTMLElement,
+  _removeTransition,
+  type TransitionFn,
+  type TransitionOptions,
+} from "./transition.ts";
+import { _runTickTransition } from "./transition-component.ts";
+
+// AIO-192: Track FLIP cleanup timers per element to cancel on re-animation
+const _flipTimers = new WeakMap<HTMLElement, number>();
+
+// ── Exit handler registry (shared with <Transition>) ────────────────
+
+const _groupExitHandlers = new WeakMap<
+  HTMLElement,
+  (el: HTMLElement) => Promise<void>
+>();
+
+/** Look up a group exit handler. @internal */
+export function _getGroupExitHandler(
+  el: HTMLElement,
+): ((el: HTMLElement) => Promise<void>) | undefined {
+  return _groupExitHandlers.get(el);
+}
+
+// ── Types ───────────────────────────────────────────────────────────
+
+export interface TransitionGroupProps {
+  /** Transition function for entering items. */
+  enter?: TransitionFn;
+  /** Transition function for exiting items. */
+  exit?: TransitionFn;
+  /** Transition options. */
+  options?: TransitionOptions;
+  /** Enable FLIP animation for reordering. Default false. */
+  flip?: boolean;
+  /** FLIP transition duration in ms. Default 300. */
+  flipDuration?: number;
+  /** Children — must be keyed VNodes. */
+  children: (VNode | string | number)[];
+}
+
+// ── Lifecycle hooks (injected by aio-renderer via transition-component) ──
+
+let _afterRender: ((fn: () => void) => void) | null = null;
+let _useRef: (<T>(initial: T) => { current: T }) | null = null;
+
+/** Set afterRender and useRef hooks (injected by aio-renderer to avoid circular import). @internal */
+export function _setGroupAfterRender(
+  fn: (cb: () => void) => void,
+  // deno-lint-ignore no-explicit-any
+  refFn?: <T>(initial: T) => { current: T } | any,
+): void {
+  _afterRender = fn;
+  if (refFn) _useRef = refFn;
+}
+
+// ── Component ───────────────────────────────────────────────────────
+
+/**
+ * Animate list additions, removals, and reordering.
+ *
+ * ```tsx
+ * <TransitionGroup enter={fade} exit={fade} flip>
+ *   {items.value.map(item => <div key={item.id}>{item.text}</div>)}
+ * </TransitionGroup>
+ * ```
+ */
+export function TransitionGroup(props: TransitionGroupProps): VNode {
+  const { enter, exit, options = {}, flip, flipDuration = 300, children } =
+    props;
+
+  // Filter to VNode children only (skip text/number)
+  const vnodeChildren = children.filter(
+    (c): c is VNode => typeof c === "object" && c !== null,
+  );
+
+  // AIO-250: Read previous keys/rects from ref (captured in _afterRender of the
+  // PREVIOUS render, when _dom was available). Fresh VNodes from h() have no _dom.
+  const prevRef = _useRef
+    ? _useRef<{
+      keys: Set<string | number>;
+      rects: Map<string | number, DOMRect>;
+    }>({ keys: new Set(), rects: new Map() })
+    : { current: { keys: new Set<string | number>(), rects: new Map() } };
+
+  const savedExistingKeys = prevRef.current.keys;
+  const savedPrevRects = prevRef.current.rects;
+
+  // Register afterRender to handle enter animations and exit handler setup
+  if (_afterRender) {
+    const enterFn = enter;
+    const exitFn = exit;
+    const opts = options;
+    const doFlip = flip;
+    const flipDur = flipDuration;
+
+    _afterRender(() => {
+      for (const child of vnodeChildren) {
+        const dom = child._dom;
+        if (!dom || !_isHTMLElement(dom)) continue;
+
+        // Enter animation for new items
+        if (
+          enterFn && child.key !== undefined &&
+          !savedExistingKeys.has(child.key)
+        ) {
+          const result = enterFn(dom, opts);
+          if (result.css) {
+            const handle = _applyTransition(
+              dom,
+              result,
+              "in",
+              dom.ownerDocument,
+            );
+            setTimeout(
+              () => _removeTransition(handle),
+              result.duration + (result.delay ?? 0),
+            );
+          } else if (result.tick) {
+            _runTickTransition(dom, {
+              duration: result.duration,
+              tick: result.tick,
+            }, "in");
+          }
+        }
+
+        // Register exit handler for all items
+        if (exitFn) {
+          _groupExitHandlers.set(dom, (el: HTMLElement) => {
+            const result = exitFn(el, opts);
+            if (result.css) {
+              const handle = _applyTransition(
+                el,
+                result,
+                "out",
+                el.ownerDocument,
+              );
+              return new Promise<void>((resolve) => {
+                setTimeout(() => {
+                  _removeTransition(handle);
+                  resolve();
+                }, result.duration + (result.delay ?? 0));
+              });
+            }
+            if (result.tick) {
+              return _runTickTransition(el, {
+                duration: result.duration,
+                tick: result.tick,
+              }, "out");
+            }
+            return Promise.resolve();
+          });
+        }
+
+        // FLIP animation for moved items
+        if (
+          doFlip && child.key !== undefined && savedPrevRects.has(child.key)
+        ) {
+          const oldRect = savedPrevRects.get(child.key)!;
+          const newRect = dom.getBoundingClientRect();
+          const dx = oldRect.left - newRect.left;
+          const dy = oldRect.top - newRect.top;
+
+          if (Math.abs(dx) > 0.5 || Math.abs(dy) > 0.5) {
+            // AIO-192: cancel any pending FLIP cleanup before starting new animation
+            const oldTimer = _flipTimers.get(dom);
+            if (oldTimer !== undefined) clearTimeout(oldTimer);
+
+            // Invert: apply inverse transform
+            dom.style.transform = `translate(${dx}px, ${dy}px)`;
+            dom.style.transition = "none";
+
+            // Play: remove transform, let CSS transition animate
+            requestAnimationFrame(() => {
+              dom.style.transition = `transform ${flipDur}ms ease`;
+              dom.style.transform = "";
+
+              // Clean up after transition
+              const cleanup = () => {
+                dom.style.transition = "";
+                dom.removeEventListener("transitionend", cleanup);
+                _flipTimers.delete(dom);
+              };
+              dom.addEventListener("transitionend", cleanup);
+              // Safety timeout — tracked per element (AIO-192)
+              _flipTimers.set(
+                dom,
+                setTimeout(cleanup, flipDur + 50) as unknown as number,
+              );
+            });
+          }
+        }
+      }
+
+      // AIO-250: Capture current keys and rects for the NEXT render cycle.
+      // Now _dom is available on all children after diff.
+      const nextKeys = new Set<string | number>();
+      const nextRects = new Map<string | number, DOMRect>();
+      for (const child of vnodeChildren) {
+        if (child.key !== undefined && child._dom) {
+          nextKeys.add(child.key);
+          if (doFlip && child._dom instanceof HTMLElement) {
+            nextRects.set(child.key, child._dom.getBoundingClientRect());
+          }
+        }
+      }
+      prevRef.current = { keys: nextKeys, rects: nextRects };
+    });
+  }
+
+  // Return children wrapped in a fragment-like structure
+  // The children are passed through directly — the keyed reconciler handles reordering
+  return h("span", { style: "display:contents" }, ...vnodeChildren);
+}

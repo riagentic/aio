@@ -191,7 +191,9 @@ Deno.test({
     assertEquals(effectCount, 1);
     sig.set(5);
     handle._flush();
-    assertEquals(effectCount, 2);
+    // AIO-182: effect re-created on re-render, so runs 3 times:
+    // 1. mount, 2. signal change, 3. re-render recreates effect
+    assertEquals(effectCount, 3);
     _unmount(handle);
     cleanup();
   },

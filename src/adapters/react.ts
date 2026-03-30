@@ -131,17 +131,31 @@ export function useAio<S = unknown>(): {
 
 /**
  * Local component state via React's useState.
- * Same API as AIR adapter's useLocal for adapter contract compatibility.
+ * Same API as AIR adapter's useLocal for adapter contract compatibility (AIO-158).
  */
 export function useLocal<T>(
   initial: T,
-): { readonly local: T; set: (next: T) => void } {
+): {
+  readonly local: T;
+  set: (next: T | ((prev: T) => T)) => void;
+  patch: T extends Record<string, unknown> ? (partial: Partial<T>) => void
+    : never;
+} {
   const [value, setValue] = useState(initial);
   return {
     get local() {
       return value;
     },
-    set: setValue,
+    set: setValue as (next: T | ((prev: T) => T)) => void,
+    patch: ((partial: Partial<T>) => {
+      setValue((prev) => {
+        if (prev && typeof prev === "object" && !Array.isArray(prev)) {
+          return { ...prev, ...partial };
+        }
+        return prev;
+      });
+    }) as T extends Record<string, unknown> ? (partial: Partial<T>) => void
+      : never,
   };
 }
 

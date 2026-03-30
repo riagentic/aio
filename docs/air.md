@@ -39,9 +39,13 @@ Zero dependencies. ~8KB total. Same developer experience.
   - [computed()](#computed)
   - [effect()](#effect)
   - [batch()](#batch)
+  - [untrack()](#untrack)
+  - [watch()](#watch)
+  - [on()](#on)
+  - [afterRender()](#afterrender)
 - [Components](#components)
   - [Props & Children](#props--children)
-  - [Conditional Rendering](#conditional-rendering)
+  - [Conditional Rendering (+ Show)](#conditional-rendering)
   - [Lists & Keys](#lists--keys)
   - [Fragments](#fragments)
   - [Refs](#refs)
@@ -53,17 +57,26 @@ Zero dependencies. ~8KB total. Same developer experience.
   - [onMount()](#onmount)
   - [onCleanup()](#oncleanup)
   - [useRef()](#useref)
+  - [useId()](#useid)
+  - [useOptimistic()](#useoptimistic)
 - [Context](#context)
   - [createContext()](#createcontext)
   - [useContext()](#usecontext)
+  - [useContextSelector()](#usecontextselector)
   - [Context.Provider](#contextprovider)
 - [Error Handling](#error-handling)
 - [Code Splitting](#code-splitting)
   - [lazy()](#lazy)
   - [Suspense](#suspense)
+- [Async Data](#async-data)
+  - [resource()](#resource)
+- [Directives — use Prop](#directives--use-prop)
+- [Islands](#islands)
+  - [island()](#island)
 - [Portals](#portals)
 - [Server-Side Rendering](#server-side-rendering)
   - [renderToString()](#rendertostring)
+  - [renderToStream()](#rendertostream)
   - [Hydration](#hydration)
 - [Routing](#routing)
   - [useRoute()](#useroute)
@@ -73,10 +86,18 @@ Zero dependencies. ~8KB total. Same developer experience.
   - [useForm()](#useform)
   - [useFieldArray()](#usefieldarray)
 - [Animation](#animation)
+  - [Transition Presets](#transition-presets--fade-slide-scale)
+  - [\<Transition\>](#transition)
+  - [\<TransitionGroup\>](#transitiongroup)
   - [useTransition()](#usetransition)
   - [useSpring()](#usespring)
 - [Virtual Scrolling](#virtual-scrolling)
   - [useVirtualList()](#usevirtuallist)
+- [Element Dimensions](#element-dimensions)
+  - [useDimensions()](#usedimensions)
+- [Deferred Loading](#deferred-loading)
+  - [\<Defer\>](#defer)
+- [Accessibility (Dev Mode)](#accessibility-dev-mode)
 - [DevTools](#devtools)
 - [Mounting & Rendering](#mounting--rendering)
   - [mount()](#mount)
@@ -87,6 +108,8 @@ Zero dependencies. ~8KB total. Same developer experience.
   - [Per-Component Reactivity](#per-component-reactivity)
   - [Auto-Memo](#auto-memo)
   - [Per-Mount Isolation](#per-mount-isolation)
+  - [Frozen VNodes](#frozen-vnodes-static-optimization)
+  - [Signal-Bound Attributes](#signal-bound-attributes)
 - [React Compat Hooks](#react-compat-hooks)
 - [Custom Adapters](#custom-adapters)
 - [h() — Non-TSX Usage](#h--non-tsx-usage)
@@ -210,21 +233,26 @@ const StatusBar = () => {
 
 Things you do manually in React that AIR handles for you:
 
-| React boilerplate              | AIR equivalent                 | Why it's automatic                                    |
-| ------------------------------ | ------------------------------ | ----------------------------------------------------- |
-| `useState` + setter            | `signal` — read/write anywhere | State lives outside components, no re-render cascade  |
-| `useMemo(() => ..., [deps])`   | `computed(() => ...)`          | Auto-tracks which signals are read, no dep array      |
-| `useEffect(() => ..., [deps])` | `effect(() => ...)`            | Auto-tracks dependencies, no stale closures           |
-| `useCallback(fn, [deps])`      | Plain function                 | Signals read `.peek()` in handlers — always fresh     |
-| `React.memo(Component)`        | Automatic                      | Props shallow-compared on every parent re-render      |
-| Dependency arrays              | Nothing                        | Signals track reads automatically                     |
-| Stale closure bugs             | Impossible                     | No closures over stale state — signals always current |
-| Context re-render storms       | Doesn't happen                 | Context values are signals — only readers re-render   |
-| `react-hook-form`              | Built-in `useForm`             | Signal-based, field-level reactivity                  |
-| `react-spring`                 | Built-in `useSpring`           | Signal-tracked spring physics                         |
-| `react-transition-group`       | Built-in `useTransition`       | CSS transition orchestration                          |
-| `react-window`                 | Built-in `useVirtualList`      | Windowed scrolling                                    |
-| ErrorBoundary class (37 LOC)   | `<ErrorBoundary>`              | Built-in, one line                                    |
+| React boilerplate              | AIR equivalent                       | Why it's automatic                                    |
+| ------------------------------ | ------------------------------------ | ----------------------------------------------------- |
+| `useState` + setter            | `signal` — read/write anywhere       | State lives outside components, no re-render cascade  |
+| `useMemo(() => ..., [deps])`   | `computed(() => ...)`                | Auto-tracks which signals are read, no dep array      |
+| `useEffect(() => ..., [deps])` | `effect(() => ...)`                  | Auto-tracks dependencies, no stale closures           |
+| `useCallback(fn, [deps])`      | Plain function                       | Signals read `.peek()` in handlers — always fresh     |
+| `React.memo(Component)`        | Automatic                            | Props shallow-compared on every parent re-render      |
+| Dependency arrays              | Nothing                              | Signals track reads automatically                     |
+| Stale closure bugs             | Impossible                           | No closures over stale state — signals always current |
+| Context re-render storms       | Doesn't happen                       | Context values are signals — only readers re-render   |
+| `react-hook-form`              | Built-in `useForm`                   | Signal-based, field-level reactivity                  |
+| `react-spring`                 | Built-in `useSpring`                 | Signal-tracked spring physics                         |
+| `react-transition-group`       | `<Transition>` / `<TransitionGroup>` | Declarative CSS enter/exit + FLIP reorder             |
+| `react-window`                 | Built-in `useVirtualList`            | Windowed scrolling                                    |
+| ErrorBoundary class (37 LOC)   | `<ErrorBoundary>`                    | Built-in, one line                                    |
+| Conditional render + types     | `<Show when={v}>`                    | TypeScript narrows the truthy value                   |
+| `React.lazy` + Suspense        | `<Defer trigger="viewport">`         | Viewport/idle/hover/timer triggers                    |
+| `useSWR` / `react-query`       | `resource()`                         | Signal-based async data with auto-refetch             |
+| Custom ResizeObserver hook     | `useDimensions()`                    | Reactive width/height signals                         |
+| `eslint-plugin-jsx-a11y`       | Built-in dev-mode a11y               | Runtime warnings for img/alt, keyboard, labels        |
 
 ---
 
@@ -271,11 +299,26 @@ handlers (no tracking needed — you don't want the handler to be a dependency).
 
 **Signal\<T\> interface:**
 
-| Member       | Description                                       |
-| ------------ | ------------------------------------------------- |
-| `.value`     | Read with automatic dependency tracking           |
-| `.peek()`    | Read without tracking (use in event handlers)     |
-| `.set(next)` | Write and notify. No-op if `Object.is(old, next)` |
+| Member            | Description                                       |
+| ----------------- | ------------------------------------------------- |
+| `.value`          | Read with automatic dependency tracking           |
+| `.peek()`         | Read without tracking (use in event handlers)     |
+| `.set(next)`      | Write and notify. No-op if `Object.is(old, next)` |
+| `.set(prev => v)` | Updater form — receives current value             |
+| `.subscribe(fn)`  | Manual subscriber, returns unsubscribe fn         |
+| `._name`          | Optional debug name (pass as 2nd arg to signal)   |
+
+**Updater form:**
+
+```tsx
+count.set((prev) => prev + 1); // safe — no stale closures
+```
+
+**Named signals (for devtools and diagnostics):**
+
+```ts
+const count = signal(0, "count"); // _name appears in devtools + flush warnings
+```
 
 ### computed()
 
@@ -351,6 +394,114 @@ batch(() => {
 // Components that track both are notified once, not twice.
 ```
 
+### untrack()
+
+```ts
+function untrack<T>(fn: () => T): T;
+```
+
+Execute a function without tracking signal reads. Useful inside effects or
+components when you need to read a signal without creating a dependency.
+
+```tsx
+import { effect, signal, untrack } from "aio/air";
+
+const a = signal(1);
+const b = signal(2);
+
+effect(() => {
+  // Tracks 'a', but reads 'b' without tracking
+  console.log(a.value, untrack(() => b.value));
+});
+
+b.set(10); // effect does NOT re-run (b is untracked)
+a.set(2); // effect re-runs (a is tracked)
+```
+
+### watch()
+
+```ts
+function watch<T>(
+  source: Signal<T> | Computed<T>,
+  fn: (next: T, prev: T | undefined) => void,
+  opts?: { immediate?: boolean },
+): () => void;
+```
+
+Watch a single signal or computed for changes. Returns a dispose function.
+
+```tsx
+import { signal, watch } from "aio/air";
+
+const theme = signal("light");
+
+const stop = watch(theme, (next, prev) => {
+  console.log(`Theme changed: ${prev} → ${next}`);
+  document.body.className = next;
+});
+
+theme.set("dark"); // logs: "Theme changed: light → dark"
+stop(); // stops watching
+```
+
+With `immediate: true`, the callback fires once with current value on creation:
+
+```ts
+watch(theme, (val) => applyTheme(val), { immediate: true });
+```
+
+### on()
+
+```ts
+function on<T>(
+  source: Signal<T> | Computed<T>,
+  fn: (next: T, prev: T) => void,
+): () => void;
+```
+
+Like `watch()` but skips the initial value — only fires on **changes**. Both
+`next` and `prev` are guaranteed defined.
+
+```tsx
+import { on, signal } from "aio/air";
+
+const count = signal(0);
+
+const stop = on(count, (next, prev) => {
+  console.log(`Changed from ${prev} to ${next}`);
+});
+
+count.set(1); // logs: "Changed from 0 to 1"
+```
+
+### afterRender()
+
+```ts
+function afterRender(fn: () => void): void;
+```
+
+Register a callback to run after the current render pass commits to the DOM.
+Must be called inside a component body.
+
+```tsx
+import { afterRender, signal } from "aio/air";
+
+const App = () => {
+  const height = signal(0);
+
+  afterRender(() => {
+    // DOM is committed — safe to measure
+    const el = document.getElementById("content");
+    if (el) height.set(el.offsetHeight);
+  });
+
+  return <div id="content">Height: {height.value}px</div>;
+};
+```
+
+Useful for DOM measurements, scroll positioning, or third-party library
+initialization that needs the real DOM.
+
 ---
 
 ## Components
@@ -382,7 +533,7 @@ Components can return `null` to render nothing.
 
 ### Conditional Rendering
 
-Same as React — use ternary or `&&`:
+Ternary or `&&` (same as React):
 
 ```tsx
 const loggedIn = signal(false);
@@ -394,6 +545,29 @@ const App = () => (
   </div>
 );
 ```
+
+**`<Show>` component** — conditional rendering with TypeScript narrowing:
+
+```tsx
+import { Show, signal } from "aio/air";
+
+const user = signal<{ name: string } | null>(null);
+
+const App = () => (
+  <Show when={user.value} fallback={<span>Loading...</span>}>
+    {(u) => <div>Hello, {u.name}!</div>}
+  </Show>
+);
+```
+
+`Show` narrows the type — `u` is `{ name: string }`, not `null`. The render
+function only runs when `when` is truthy.
+
+| Prop       | Type                   | Description                       |
+| ---------- | ---------------------- | --------------------------------- |
+| `when`     | `T \| falsy`           | Condition — truthy enables render |
+| `fallback` | `VChild`               | Shown when `when` is falsy        |
+| `children` | `(value: T) => VChild` | Render function with narrowed T   |
 
 ### Lists & Keys
 
@@ -564,7 +738,14 @@ const Timer = () => {
 function onCleanup(fn: () => void): void;
 ```
 
-Runs before each re-render (previous render's cleanup) and on unmount.
+Behavior depends on **where** it's called:
+
+| Context                     | Runs on re-render | Runs on unmount |
+| --------------------------- | ----------------- | --------------- |
+| Component body              | Yes               | Yes             |
+| Inside `onMount()` callback | No                | Yes             |
+
+**Body-level** — cleanup before each re-render and on unmount:
 
 ```tsx
 import { onCleanup, signal } from "aio/air";
@@ -572,7 +753,7 @@ import { onCleanup, signal } from "aio/air";
 const Fetcher = (props: { url: string }) => {
   const data = signal(null);
   const controller = new AbortController();
-  onCleanup(() => controller.abort());
+  onCleanup(() => controller.abort()); // aborts on re-render AND unmount
 
   fetch(props.url, { signal: controller.signal })
     .then((r) => r.json())
@@ -583,6 +764,27 @@ const Fetcher = (props: { url: string }) => {
     : <span>Loading...</span>;
 };
 ```
+
+**Inside onMount()** — cleanup only on unmount (like React's
+`useEffect(fn, [])`):
+
+```tsx
+import { onCleanup, onMount } from "aio/air";
+
+const KeyboardListener = () => {
+  onMount(() => {
+    const handler = (e: KeyboardEvent) => console.log(e.key);
+    document.addEventListener("keydown", handler);
+    onCleanup(() => document.removeEventListener("keydown", handler));
+    // ^ runs ONLY on unmount — listener survives re-renders
+  });
+
+  return <div>Press any key</div>;
+};
+```
+
+This is the recommended pattern for persistent listeners, subscriptions, and
+third-party integrations that must survive re-renders.
 
 Throwing inside a cleanup callback does not break subsequent cleanups.
 
@@ -613,6 +815,83 @@ const Counter = () => {
 ```
 
 Multiple `useRef` calls maintain independent identity across re-renders.
+
+### useId()
+
+```ts
+function useId(): string;
+```
+
+Generate a unique, SSR-stable ID. Persists across re-renders. Format: `:r{N}:`.
+
+```tsx
+import { useId } from "aio/air";
+
+const FormField = ({ label }: { label: string }) => {
+  const id = useId();
+  return (
+    <div>
+      <label htmlFor={id}>{label}</label>
+      <input id={id} />
+    </div>
+  );
+};
+```
+
+IDs are deterministic — the same component tree produces the same IDs on server
+and client, making `useId()` safe for SSR + hydration. Each `mount()` root has
+its own counter, so multiple roots don't collide.
+
+**React equivalent:** `useId()` (React 18+). Same API, same behavior.
+
+### useOptimistic()
+
+```ts
+function useOptimistic<T, A = T>(
+  passthrough: T,
+  updateFn: (current: T, optimistic: A) => T,
+): [T, (action: A) => void];
+```
+
+Show an immediate UI update while an async action (e.g., server round-trip) is
+in flight. When `passthrough` changes (server confirms), the optimistic overlay
+clears automatically.
+
+```tsx
+import { useFeature, useOptimistic } from "aio/air";
+import { todoFeature } from "./app.ts";
+
+const TodoList = () => {
+  const { state, send } = useFeature(todoFeature);
+
+  const [items, addOptimistic] = useOptimistic(
+    state.items,
+    (current, newItem: { id: number; text: string }) => [...current, newItem],
+  );
+
+  function handleAdd(text: string) {
+    // Show immediately in UI
+    addOptimistic({ id: Date.now(), text });
+    // Send to server — when server confirms, state.items updates
+    // and the optimistic overlay clears
+    send.addTodo(text);
+  }
+
+  return (
+    <ul>
+      {items.map((item) => <li key={item.id}>{item.text}</li>)}
+    </ul>
+  );
+};
+```
+
+- `passthrough` — the confirmed state (usually from `useFeature`).
+- `updateFn` — pure function that applies optimistic values on top of current
+  state.
+- Multiple `addOptimistic()` calls stack — all pending overlays apply in order.
+- When `passthrough` reference changes, all pending overlays clear.
+
+**React equivalent:** `useOptimistic()` (React 19). Same API shape.
 
 ---
 
@@ -667,6 +946,31 @@ const App = () => (
 **Key difference from React:** Context values are stored as signals internally.
 When a Provider's value changes, **only components that called `useContext`**
 re-render. No "context re-render storm" — only actual consumers update.
+
+### useContextSelector()
+
+```ts
+function useContextSelector<T, R>(
+  ctx: Context<T>,
+  selector: (value: T) => R,
+): R;
+```
+
+Select a subset of context — re-renders only when the selected value changes
+(shallow equality check). Prevents re-rendering when unrelated context fields
+update.
+
+```tsx
+import { createContext, useContextSelector } from "aio/air";
+
+const AppCtx = createContext({ theme: "light", locale: "en", count: 0 });
+
+// Only re-renders when theme changes, ignores count/locale changes
+const ThemedBox = () => {
+  const theme = useContextSelector(AppCtx, (ctx) => ctx.theme);
+  return <div className={theme}>themed</div>;
+};
+```
 
 **Nesting:** Inner Providers override outer ones:
 
@@ -751,6 +1055,160 @@ resolve.
 
 ---
 
+## Async Data
+
+### resource()
+
+```ts
+function resource<S, T>(
+  source: () => S,
+  fetcher: (source: S, opts: { signal: AbortSignal }) => Promise<T>,
+): Resource<T>;
+```
+
+Fetch async data as reactive signals. Automatically refetches when the source
+signal changes. Aborts in-flight requests on source change or dispose.
+
+```tsx
+import { resource, signal } from "aio/air";
+
+const userId = signal(1);
+
+const user = resource(
+  () => userId.value,
+  async (id, { signal }) => {
+    const res = await fetch(`/api/users/${id}`, { signal });
+    return res.json();
+  },
+);
+
+const UserCard = () => {
+  if (user.loading.value) return <span>Loading...</span>;
+  if (user.error.value) return <span>Error!</span>;
+  return <div>{user.value?.name}</div>;
+};
+```
+
+**Resource\<T\>:**
+
+| Member          | Type                     | Description                                     |
+| --------------- | ------------------------ | ----------------------------------------------- |
+| `value`         | `T \| undefined`         | Current data (undefined during fetch)           |
+| `latest`        | `Signal<T \| undefined>` | Last successful data (preserved during refetch) |
+| `loading`       | `Signal<boolean>`        | True while fetching                             |
+| `error`         | `Signal<unknown>`        | Error from last failed fetch                    |
+| `refetch()`     | `void`                   | Manually trigger refetch                        |
+| `mutate(value)` | `void`                   | Optimistically set value (clears error)         |
+| `dispose()`     | `void`                   | Stop tracking, abort in-flight                  |
+
+---
+
+## Directives — `use` Prop
+
+Attach reusable behaviors to DOM elements via the `use` prop:
+
+```tsx
+import { signal } from "aio/air";
+
+// Define an action (receives element + optional value)
+function autoFocus(el: HTMLElement) {
+  el.focus();
+  return () => {}; // optional cleanup
+}
+
+function tooltip(el: HTMLElement, text: string) {
+  el.title = text;
+  return () => {
+    el.title = "";
+  };
+}
+
+// Use on elements
+const App = () => (
+  <div>
+    <input use={autoFocus} />
+    <button use={[tooltip, "Click me!"]}>Hover</button>
+  </div>
+);
+```
+
+**Action signature:**
+
+```ts
+type Action = (el: HTMLElement, value?: unknown) => void | (() => void);
+```
+
+- `use={fn}` — calls `fn(element)`
+- `use={[fn, value]}` — calls `fn(element, value)`
+- Return a cleanup function for teardown on unmount or when `use` changes
+
+Actions are cleaned up and re-applied when the `use` prop identity changes
+during diffing. Skipped in SSR.
+
+---
+
+## Islands
+
+Mount external framework components (React, Vue, Solid, etc.) into AIR pages.
+AIR owns the page layout; islands manage their own subtree.
+
+### island()
+
+```ts
+function island<M>(config: IslandConfig<M>): ComponentFn;
+```
+
+```tsx
+import { island, signal } from "aio/air";
+
+const ReactChart = island({
+  load: () => import("./react-chart.tsx"),
+  mount: (container, Chart, props) => {
+    const root = ReactDOM.createRoot(container);
+    root.render(<Chart {...props} />);
+    return {
+      update: (p) => root.render(<Chart {...p} />),
+      unmount: () => root.unmount(),
+    };
+  },
+  props: () => ({ data: chartData.value }),
+});
+
+// Use like a normal AIR component
+const Dashboard = () => (
+  <div>
+    <h1>Dashboard</h1>
+    <ReactChart />
+  </div>
+);
+```
+
+**IslandConfig\<M\>:**
+
+| Prop      | Type                                            | Description                           |
+| --------- | ----------------------------------------------- | ------------------------------------- |
+| `load`    | `() => Promise<M>`                              | Lazy module loader                    |
+| `mount`   | `(container, component, props) => IslandHandle` | Mount into container, return handle   |
+| `props`   | `() => Record<string, unknown>`                 | Reactive props (signal reads tracked) |
+| `loading` | `() => VChild`                                  | Optional loading placeholder          |
+
+**IslandHandle:**
+
+| Method      | Description                        |
+| ----------- | ---------------------------------- |
+| `update(p)` | Update props in external component |
+| `unmount()` | Clean up external component        |
+
+**How it works:**
+
+1. `load()` lazy-imports the external module
+2. `mount()` creates the external component in a container `<div>`
+3. Signal changes in `props()` automatically call `handle.update()`
+4. On AIR unmount, `handle.unmount()` cleans up the external component
+5. Failed loads allow retry (module promise clears on error)
+
+---
+
 ## Portals
 
 Render children into a DOM node outside the component hierarchy:
@@ -799,11 +1257,50 @@ Features:
 
 - Components are executed and serialized
 - Void elements self-close correctly
-- HTML entities are escaped
+- HTML entities escaped (including backticks in attributes)
 - Style objects converted to CSS strings
-- Event handlers, refs, and keys are omitted
+- Event handlers, refs, keys, and `use` directives are omitted
 - ErrorBoundary catches errors and renders fallback
 - Suspense renders fallback for unresolved lazy components
+
+### renderToStream()
+
+```ts
+async function* renderToStream(
+  vnode: VNode | string | number | null,
+): AsyncGenerator<string, void, unknown>;
+```
+
+Streaming SSR — yields HTML chunks as an async generator. Elements yield opening
+tag, then children (recursively), then closing tag. Ideal for HTTP streaming.
+
+```tsx
+import { renderToStream } from "aio/air";
+
+// Deno HTTP server with streaming
+Deno.serve(async () => {
+  const stream = new ReadableStream({
+    async start(controller) {
+      const enc = new TextEncoder();
+      for await (const chunk of renderToStream(<App />)) {
+        controller.enqueue(enc.encode(chunk));
+      }
+      controller.close();
+    },
+  });
+  return new Response(stream, {
+    headers: { "content-type": "text/html; charset=utf-8" },
+  });
+});
+```
+
+Suspense boundaries with unresolved lazy children yield fallback content
+synchronously. Content outside Suspense boundaries streams immediately.
+
+| Method           | Use case                              |
+| ---------------- | ------------------------------------- |
+| `renderToString` | Simple SSR, small pages, tests        |
+| `renderToStream` | Large pages, HTTP streaming, low TTFB |
 
 ### Hydration
 
@@ -1031,13 +1528,104 @@ const TagEditor = () => (
 
 ## Animation
 
+AIR provides a layered animation system: CSS-first declarative transitions for
+enter/exit animations, imperative spring physics for continuous values, and
+low-level transition hooks for full control.
+
+### Transition Presets — fade, slide, scale
+
+Built-in CSS animation functions. Pass to `<Transition>` or `<TransitionGroup>`:
+
+```tsx
+import { fade, scale, slide } from "aio/air";
+```
+
+| Preset  | Enter                 | Exit                 |
+| ------- | --------------------- | -------------------- |
+| `fade`  | Opacity 0 → 1         | Opacity 1 → 0        |
+| `slide` | translateY(-20px) → 0 | 0 → translateY(20px) |
+| `scale` | scale(0.95) → 1       | 1 → scale(0.95)      |
+
+Each preset accepts `TransitionOptions`:
+
+```ts
+fade(node, { duration: 300, delay: 100, easing: "ease-out" });
+```
+
+### \<Transition\>
+
+Animate a single child's enter and exit:
+
+```tsx
+import { fade, signal, Transition } from "aio/air";
+
+const visible = signal(true);
+
+const App = () => (
+  <div>
+    <button onClick={() => visible.set(!visible.peek())}>Toggle</button>
+    <Transition enter={fade} exit={fade}>
+      {visible.value && <div className="card">Hello</div>}
+    </Transition>
+  </div>
+);
+```
+
+When the child appears, the `enter` transition plays. When removed, the `exit`
+transition plays and DOM removal is **deferred** until the animation completes.
+
+**TransitionProps:**
+
+| Prop       | Type                | Description                       |
+| ---------- | ------------------- | --------------------------------- |
+| `enter`    | `TransitionFn`      | Enter animation (e.g., `fade`)    |
+| `exit`     | `TransitionFn`      | Exit animation (e.g., `fade`)     |
+| `options`  | `TransitionOptions` | Duration, delay, easing overrides |
+| `children` | any                 | Single conditional child          |
+
+### \<TransitionGroup\>
+
+Animate lists with enter, exit, and FLIP reorder animations:
+
+```tsx
+import { fade, signal, TransitionGroup } from "aio/air";
+
+const items = signal(["a", "b", "c"]);
+
+const List = () => (
+  <TransitionGroup enter={fade} exit={fade} flip flipDuration={200}>
+    {items.value.map((item) => <div key={item}>{item}</div>)}
+  </TransitionGroup>
+);
+```
+
+When items are added, `enter` plays. Removed items animate with `exit` before
+DOM removal. When items reorder, FLIP (First-Last-Invert-Play) smoothly animates
+position changes.
+
+**TransitionGroupProps:**
+
+| Prop           | Type                | Default | Description                   |
+| -------------- | ------------------- | ------- | ----------------------------- |
+| `enter`        | `TransitionFn`      | —       | Enter animation               |
+| `exit`         | `TransitionFn`      | —       | Exit animation                |
+| `options`      | `TransitionOptions` | —       | Shared animation options      |
+| `flip`         | `boolean`           | `false` | Enable FLIP reorder animation |
+| `flipDuration` | `number`            | `300`   | FLIP animation duration (ms)  |
+
+### Deferred DOM Removal
+
+When a `<Transition>` or `<TransitionGroup>` exit animation is active, AIR holds
+the DOM node until the animation completes. This is handled via the
+`onBeforeRemove` VDOM hook with a 5-second safety timeout.
+
 ### useTransition()
 
 ```ts
 function useTransition(config: TransitionConfig): TransitionState;
 ```
 
-CSS transition orchestration. Call outside the component body.
+Imperative CSS transition orchestration. Call outside the component body.
 
 ```tsx
 import { useTransition } from "aio/air";
@@ -1053,20 +1641,6 @@ const App = () => (
 ```
 
 CSS classes applied: `fade-enter` -> `fade-active` -> `fade-exit` -> idle.
-
-```css
-.fade-enter {
-  opacity: 0;
-}
-.fade-active {
-  opacity: 1;
-  transition: opacity 200ms;
-}
-.fade-exit {
-  opacity: 0;
-  transition: opacity 200ms;
-}
-```
 
 **TransitionConfig:**
 
@@ -1202,6 +1776,126 @@ Items can be a `Signal<T[]>` — the visible window recomputes automatically.
 
 ---
 
+## Element Dimensions
+
+### useDimensions()
+
+```ts
+function useDimensions(): DimensionsState;
+```
+
+Track an element's content dimensions reactively via `ResizeObserver`. Call
+inside a component body.
+
+```tsx
+import { useDimensions } from "aio/air";
+
+const ResizablePanel = () => {
+  const dims = useDimensions();
+
+  return (
+    <div ref={dims.ref} style={{ resize: "both", overflow: "auto" }}>
+      Width: {dims.width.value}px, Height: {dims.height.value}px
+    </div>
+  );
+};
+```
+
+**DimensionsState:**
+
+| Member   | Type                               | Description                    |
+| -------- | ---------------------------------- | ------------------------------ |
+| `ref`    | `{ current: HTMLElement \| null }` | Attach to the measured element |
+| `width`  | `Signal<number>`                   | Content width in px            |
+| `height` | `Signal<number>`                   | Content height in px           |
+
+The observer disconnects automatically on component unmount.
+
+---
+
+## Deferred Loading
+
+### \<Defer\>
+
+Trigger-based lazy loading — load components when they enter the viewport,
+become idle, on hover, on interaction, after a timer, or immediately.
+
+```tsx
+import { Defer } from "aio/air";
+
+const App = () => (
+  <div>
+    {/* Load when scrolled into view */}
+    <Defer
+      trigger="viewport"
+      load={() => import("./heavy-chart.ts")}
+      placeholder={<div>Chart placeholder</div>}
+      loading={<div>Loading chart...</div>}
+    />
+
+    {/* Load after 2 seconds */}
+    <Defer
+      trigger={2000}
+      load={() => import("./analytics.ts")}
+    />
+
+    {/* Load on hover */}
+    <Defer
+      trigger="hover"
+      load={() => import("./preview.ts")}
+      placeholder={<div>Hover to preview</div>}
+    />
+  </div>
+);
+```
+
+**DeferProps:**
+
+| Prop             | Type                                      | Description                             |
+| ---------------- | ----------------------------------------- | --------------------------------------- |
+| `trigger`        | `DeferTrigger`                            | When to start loading                   |
+| `load`           | `() => Promise<{ default: ComponentFn }>` | Lazy loader                             |
+| `placeholder`    | `VChild`                                  | Shown before trigger fires              |
+| `loading`        | `VChild`                                  | Shown while loading (after trigger)     |
+| `error`          | `VChild`                                  | Shown on load error                     |
+| `loadingMinMs`   | `number`                                  | Minimum time to show loading state (ms) |
+| `componentProps` | `Record<string, unknown>`                 | Props passed to loaded component        |
+
+**DeferTrigger:**
+
+| Value           | Behavior                                       |
+| --------------- | ---------------------------------------------- |
+| `"viewport"`    | IntersectionObserver — loads when visible      |
+| `"idle"`        | requestIdleCallback (or 200ms fallback)        |
+| `"hover"`       | mouseenter on container                        |
+| `"interaction"` | click or keydown on container                  |
+| `"immediate"`   | Loads right away (like `lazy` but with states) |
+| `number`        | setTimeout with given ms                       |
+
+---
+
+## Accessibility (Dev Mode)
+
+When dev mode is enabled via `setDevMode(true)`, AIR warns about common
+accessibility issues during element creation:
+
+| Check                      | Warning                                        |
+| -------------------------- | ---------------------------------------------- |
+| `<img>` without `alt`      | Missing alt attribute                          |
+| `onClick` without keyboard | Non-interactive element needs `onKeyDown`      |
+| `<input>` without label    | Needs `id`, `aria-label`, or `aria-labelledby` |
+
+These are `console.warn` messages in dev mode only — zero overhead in
+production.
+
+```tsx
+import { setDevMode } from "aio/air";
+
+setDevMode(true); // enable a11y warnings + excessive re-render detection
+```
+
+---
+
 ## DevTools
 
 Connect to the AIO DevTools inspector and Redux DevTools Extension.
@@ -1218,7 +1912,10 @@ const devtools = connectAioDevTools();
 ```
 
 Automatically bridges to Redux DevTools browser extension. Render events appear
-as `RENDER/ComponentName` actions.
+as `RENDER/ComponentName` actions with signal trigger names when available.
+
+In dev mode, each re-render records which signal(s) triggered it. Use named
+signals (`signal(0, "count")`) for clear devtools output.
 
 **DevToolsHandle:**
 
@@ -1343,6 +2040,56 @@ const handle2 = mount(root2, App2);
 // Signal changes in App1's tree queue re-renders only in handle1
 ```
 
+### Frozen VNodes (Static Optimization)
+
+`h()` automatically detects static subtrees — elements with string tags, no
+key/ref/use, all primitive props, and all static children. These VNodes get a
+`_static = true` flag at creation time.
+
+During diffing, when both old and new VNodes are static with the same tag, a
+`_staticEqual()` deep comparison runs (depth-limited to 6 levels). If identical,
+the entire subtree is skipped — no DOM operations at all.
+
+```tsx
+// This entire subtree is frozen — zero diff cost on re-render
+const Header = () => (
+  <header>
+    <h1>My App</h1>
+    <nav>
+      <a href="/">Home</a>
+      <a href="/about">About</a>
+    </nav>
+  </header>
+);
+```
+
+This is fully automatic — no API surface, no opt-in needed.
+
+### Signal-Bound Attributes
+
+When a Signal is passed directly as an element prop, AIR creates a direct
+`effect()` that updates the DOM attribute without going through the VDOM diff:
+
+```tsx
+const color = signal("red");
+
+// Signal value binds directly to the DOM attribute
+const App = () => <div className={color} />;
+// When color.set("blue") fires, the class attribute updates via effect
+// — no component re-render, no VDOM diff
+```
+
+This works for any prop (className, title, disabled, etc.) and for style object
+properties:
+
+```tsx
+const bg = signal("red");
+const App = () => <div style={{ backgroundColor: bg }} />;
+```
+
+Signal bindings are automatically cleaned up on unmount. When a different signal
+is passed on re-render, old bindings are disposed and new ones created.
+
 ---
 
 ## React Compat Hooks
@@ -1451,24 +2198,30 @@ h("ul", null, items.map((i) => h("li", { key: i.id }, i.name)));
 
 ### Signals
 
-| Function   | Signature                      | Description                    |
-| ---------- | ------------------------------ | ------------------------------ |
-| `signal`   | `signal<T>(init): Signal<T>`   | Writable reactive value        |
-| `computed` | `computed<T>(fn): Computed<T>` | Lazy derived value             |
-| `effect`   | `effect(fn): dispose`          | Side effect with auto-tracking |
-| `batch`    | `batch(fn): void`              | Coalesce updates               |
+| Function   | Signature                           | Description                    |
+| ---------- | ----------------------------------- | ------------------------------ |
+| `signal`   | `signal<T>(init, name?): Signal<T>` | Writable reactive value        |
+| `computed` | `computed<T>(fn): Computed<T>`      | Lazy derived value             |
+| `effect`   | `effect(fn): dispose`               | Side effect with auto-tracking |
+| `batch`    | `batch(fn): void`                   | Coalesce updates               |
+| `untrack`  | `untrack<T>(fn): T`                 | Read without tracking          |
+| `watch`    | `watch(source, fn, opts?): dispose` | Watch signal for changes       |
+| `on`       | `on(source, fn): dispose`           | Like watch, skips initial      |
 
 ### Components & VDOM
 
-| Function         | Signature                           | Description                                |
-| ---------------- | ----------------------------------- | ------------------------------------------ |
-| `h`              | `h(tag, props, ...children): VNode` | Create virtual node (TSX compiles to this) |
-| `Fragment`       | `<>...</>`                          | Wrapper-less children group                |
-| `ErrorBoundary`  | `<ErrorBoundary fallback={fn}>`     | Error catcher with fallback                |
-| `Portal`         | `<Portal target={node}>`            | Render into external DOM node              |
-| `Suspense`       | `<Suspense fallback={node}>`        | Loading fallback for lazy                  |
-| `lazy`           | `lazy(loader): ComponentFn`         | Code-split component                       |
-| `renderToString` | `renderToString(vnode): string`     | SSR                                        |
+| Function         | Signature                              | Description                                |
+| ---------------- | -------------------------------------- | ------------------------------------------ |
+| `h`              | `h(tag, props, ...children): VNode`    | Create virtual node (TSX compiles to this) |
+| `Fragment`       | `<>...</>`                             | Wrapper-less children group                |
+| `ErrorBoundary`  | `<ErrorBoundary fallback={fn}>`        | Error catcher with fallback                |
+| `Portal`         | `<Portal target={node}>`               | Render into external DOM node              |
+| `Suspense`       | `<Suspense fallback={node}>`           | Loading fallback for lazy                  |
+| `Show`           | `<Show when={val} fallback={...}>`     | Conditional render with narrowing          |
+| `lazy`           | `lazy(loader): ComponentFn`            | Code-split component                       |
+| `Defer`          | `<Defer trigger="viewport" load={fn}>` | Trigger-based lazy loading                 |
+| `renderToString` | `renderToString(vnode): string`        | Sync SSR                                   |
+| `renderToStream` | `renderToStream(vnode): AsyncGen`      | Streaming SSR                              |
 
 ### Renderer
 
@@ -1479,13 +2232,19 @@ h("ul", null, items.map((i) => h("li", { key: i.id }, i.name)));
 
 ### Hooks (inside component body)
 
-| Function        | Signature                               | Description                   |
-| --------------- | --------------------------------------- | ----------------------------- |
-| `onMount`       | `onMount(fn): void`                     | After first render            |
-| `onCleanup`     | `onCleanup(fn): void`                   | Before re-render & on unmount |
-| `useRef`        | `useRef<T>(init): { current: T }`       | Persistent mutable ref        |
-| `createContext` | `createContext<T>(default): Context<T>` | Create context                |
-| `useContext`    | `useContext<T>(ctx): T`                 | Read context value            |
+| Function             | Signature                                 | Description                       |
+| -------------------- | ----------------------------------------- | --------------------------------- |
+| `onMount`            | `onMount(fn): void`                       | After first render                |
+| `onCleanup`          | `onCleanup(fn): void`                     | Before re-render & on unmount     |
+| `afterRender`        | `afterRender(fn): void`                   | After DOM commit                  |
+| `useRef`             | `useRef<T>(init): { current: T }`         | Persistent mutable ref            |
+| `useSignal`          | `useSignal<T>(init, opts?): Signal<T>`    | Component-scoped signal           |
+| `useId`              | `useId(): string`                         | SSR-safe unique ID                |
+| `useOptimistic`      | `useOptimistic<T,A>(state, fn): [T, add]` | Optimistic UI overlay             |
+| `createContext`      | `createContext<T>(default): Context<T>`   | Create context                    |
+| `useContext`         | `useContext<T>(ctx): T`                   | Read context value                |
+| `useContextSelector` | `useContextSelector<T,R>(ctx, sel): R`    | Selective context (re-render opt) |
+| `useDimensions`      | `useDimensions(): DimensionsState`        | Element size tracking             |
 
 ### Server State Hooks
 
@@ -1497,6 +2256,12 @@ h("ul", null, items.map((i) => h("li", { key: i.id }, i.name)));
 | `useConnected`  | `useConnected(): boolean`                  | Connection status                |
 | `useProjection` | `useProjection(fn): T`                     | Derived state with ref stability |
 | `useTimeTravel` | `useTimeTravel(ref): TimeTravelState`      | Debug time travel                |
+
+### Async Data
+
+| Function   | Signature                                | Description                    |
+| ---------- | ---------------------------------------- | ------------------------------ |
+| `resource` | `resource(source, fetcher): Resource<T>` | Reactive async data as signals |
 
 ### Routing
 
@@ -1510,17 +2275,29 @@ h("ul", null, items.map((i) => h("li", { key: i.id }, i.name)));
 | `NavLink`     | `<NavLink to="...">`               | Link with active class   |
 | `Redirect`    | `<Redirect to="...">`              | Navigate on mount        |
 
+### Animation
+
+| Function          | Signature                                     | Description                    |
+| ----------------- | --------------------------------------------- | ------------------------------ |
+| `fade`            | `TransitionFn`                                | Opacity enter/exit preset      |
+| `slide`           | `TransitionFn`                                | Vertical slide preset          |
+| `scale`           | `TransitionFn`                                | Scale enter/exit preset        |
+| `Transition`      | `<Transition enter={fn} exit={fn}>`           | Single child enter/exit        |
+| `TransitionGroup` | `<TransitionGroup enter={fn} exit={fn} flip>` | List enter/exit + FLIP reorder |
+| `useTransition`   | `useTransition(config): TransitionState`      | Imperative CSS transitions     |
+| `useSpring`       | `useSpring(config?): SpringValue`             | Spring physics animation       |
+
 ### Utilities
 
-| Function             | Signature                                        | Description                  |
-| -------------------- | ------------------------------------------------ | ---------------------------- |
-| `useForm`            | `useForm<T>(config): FormState<T>`               | Form state + validation      |
-| `useFieldArray`      | `useFieldArray<T>(init?): FieldArrayState<T>`    | Dynamic array field          |
-| `useTransition`      | `useTransition(config): TransitionState`         | CSS transition orchestration |
-| `useSpring`          | `useSpring(config?): SpringValue`                | Spring physics animation     |
-| `useVirtualList`     | `useVirtualList<T>(config): VirtualListState<T>` | Windowed list                |
-| `connectAioDevTools` | `connectAioDevTools(): DevToolsHandle`           | Inspector + Redux DevTools   |
-| `memo`               | `memo(Component): Component`                     | No-op (auto-memo built-in)   |
+| Function             | Signature                                        | Description                   |
+| -------------------- | ------------------------------------------------ | ----------------------------- |
+| `useForm`            | `useForm<T>(config): FormState<T>`               | Form state + validation       |
+| `useFieldArray`      | `useFieldArray<T>(init?): FieldArrayState<T>`    | Dynamic array field           |
+| `useVirtualList`     | `useVirtualList<T>(config): VirtualListState<T>` | Windowed list                 |
+| `island`             | `island<M>(config): ComponentFn`                 | External framework mounting   |
+| `connectAioDevTools` | `connectAioDevTools(): DevToolsHandle`           | Inspector + Redux DevTools    |
+| `setDevMode`         | `setDevMode(enabled): void`                      | Enable a11y + render warnings |
+| `memo`               | `memo(Component): Component`                     | No-op (auto-memo built-in)    |
 
 ### React Compat (migration)
 

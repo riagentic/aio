@@ -12,15 +12,23 @@ aio/react  → React adapter — standard React hooks over aio's state pipeline
 Both connect to the same server, use the same features, and share the same
 protocol. The difference is how they manage UI reactivity.
 
-|                        | AIR (`aio/air`)                            | React (`aio/react`)                    |
-| ---------------------- | ------------------------------------------ | -------------------------------------- |
-| **Reactivity**         | Signals — auto-tracked, no dep arrays      | React hooks — `useSyncExternalStore`   |
-| **Memoization**        | Automatic (shallow prop compare)           | Manual (`React.memo`, `useCallback`)   |
-| **Dependencies**       | Zero (built-in VDOM)                       | React 18+ and ReactDOM                 |
-| **Bundle size**        | ~8KB total                                 | React + ReactDOM (~40KB min)           |
-| **Built-in utilities** | Forms, animation, virtual scroll, devtools | Bring your own (react-hook-form, etc.) |
-| **JSX**                | Same TSX syntax                            | Same TSX syntax                        |
-| **Server state**       | `useFeature`, `useAio`, `useLocal`         | `useFeature`, `useAio`, `useLocal`     |
+|                        | AIR (`aio/air`)                                              | React (`aio/react`)                         |
+| ---------------------- | ------------------------------------------------------------ | ------------------------------------------- |
+| **Reactivity**         | Signals — auto-tracked, no dep arrays                        | React hooks — `useSyncExternalStore`        |
+| **Memoization**        | Automatic (shallow prop compare + frozen VNodes)             | Manual (`React.memo`, `useCallback`)        |
+| **Dependencies**       | Zero (built-in VDOM)                                         | React 18+ and ReactDOM                      |
+| **Bundle size**        | ~8KB total                                                   | React + ReactDOM (~40KB min)                |
+| **Built-in utilities** | Forms, animation, transitions, virtual scroll, SSR streaming | Bring your own (react-hook-form, etc.)      |
+| **Conditional render** | `<Show>` with type narrowing                                 | Ternary / `&&`                              |
+| **Async data**         | `resource()` — signals with auto-refetch                     | `useEffect` + state                         |
+| **Deferred loading**   | `<Defer>` with viewport/idle/hover triggers                  | `React.lazy` + Suspense                     |
+| **Element dimensions** | `useDimensions()` — reactive ResizeObserver                  | Custom hook needed                          |
+| **A11y warnings**      | Built-in dev-mode checks                                     | eslint-plugin-jsx-a11y                      |
+| **SSR**                | `renderToString` + `renderToStream` (streaming)              | `renderToString` / `renderToPipeableStream` |
+| **Islands**            | `island()` — mount React/Vue/Solid inside AIR                | N/A                                         |
+| **Directives**         | `use` prop for reusable DOM behaviors                        | Custom hooks + refs                         |
+| **JSX**                | Same TSX syntax                                              | Same TSX syntax                             |
+| **Server state**       | `useFeature`, `useAio`, `useLocal`                           | `useFeature`, `useAio`, `useLocal`          |
 
 ## Import Paths
 
@@ -44,8 +52,10 @@ dependencies. Feature definitions and server logic always import from `aio`.
 
 - Starting a new project
 - You want zero external dependencies
-- You want automatic optimizations (no memo, no dep arrays)
-- You need built-in forms, animation, virtual scrolling
+- You want automatic optimizations (frozen VNodes, signal bindings, no memo)
+- You need built-in forms, animation, transitions, virtual scrolling, SSR
+  streaming
+- You want `<Show>`, `<Defer>`, `resource()`, `useDimensions()`, dev-mode a11y
 - Bundle size matters
 
 **Choose React when:**
@@ -61,7 +71,8 @@ side-by-side comparison and step-by-step migration guide in both directions.
 ## Detailed Guides
 
 - **[AIR Renderer](air.md)** — signals, components, lifecycle, forms, animation,
-  virtual scrolling, SSR, architecture
+  transitions, virtual scrolling, SSR streaming, resource, Show, Defer, islands,
+  directives, dimensions, a11y, devtools, architecture
 - **[React Renderer](react.md)** — React hooks, routing, components over aio
   state
 - **[AIR vs React](air-vs-react.md)** — API comparison, migration tables, compat

@@ -46,9 +46,14 @@ Deno.test("h: flattens nested children arrays", () => {
   assertEquals(vn.children.length, 3);
 });
 
-Deno.test("h: filters null/undefined/boolean children", () => {
+Deno.test("h: preserves null/undefined/boolean as placeholders (AIO-107)", () => {
   const vn = h("div", null, null, undefined, false, "text", 0);
-  assertEquals(vn.children.length, 2);
+  // 3 null placeholders + "text" + 0 = 5 children
+  assertEquals(vn.children.length, 5);
+  // Placeholders are VNodes with _Null tag
+  assertEquals(typeof vn.children[0], "object");
+  assertEquals(vn.children[3], "text");
+  assertEquals(vn.children[4], 0);
 });
 
 Deno.test({
@@ -323,6 +328,297 @@ Deno.test({
     const Outer = () => h("div", null, h(Inner, null));
     _render(root, h(Outer, null), null, ctx);
     assertEquals(root.innerHTML, "<div><b>bold</b></div>");
+    cleanup();
+  },
+});
+
+// --- AIO-114 regression tests ---
+
+Deno.test({
+  name:
+    "diff: mixed keyed + non-keyed children — no DOM leak on re-render (AIO-114)",
+  ...S,
+  fn() {
+    const { document, ctx, cleanup } = createDOM();
+    const root = document.createElement("div");
+
+    // Initial: keyed list + non-keyed button
+    const old = h(
+      "div",
+      null,
+      h("span", { key: "a" }, "A"),
+      h("span", { key: "b" }, "B"),
+      h("button", null, "Toggle"),
+    );
+    _render(root, old, null, ctx);
+    const container = root.firstChild as HTMLElement;
+    assertEquals(container.childNodes.length, 3, "initial: 3 children");
+
+    // Re-render with same structure — non-keyed button must be patched, not duplicated
+    const next = h(
+      "div",
+      null,
+      h("span", { key: "a" }, "A"),
+      h("span", { key: "b" }, "B"),
+      h("button", null, "Toggle"),
+    );
+    _diff(root, next, old, ctx);
+    assertEquals(
+      container.childNodes.length,
+      3,
+      "after re-render: still 3 children (no leak)",
+    );
+
+    // Third render — verify no accumulation
+    const next2 = h(
+      "div",
+      null,
+      h("span", { key: "a" }, "A"),
+      h("span", { key: "b" }, "B"),
+      h("button", null, "Toggle"),
+    );
+    _diff(root, next2, next, ctx);
+    assertEquals(
+      container.childNodes.length,
+      3,
+      "after 3rd render: still 3 children",
+    );
+    cleanup();
+  },
+});
+
+Deno.test({
+  name:
+    "diff: mixed keyed + conditional non-keyed — removed conditionals don't leak (AIO-114)",
+  ...S,
+  fn() {
+    const { document, ctx, cleanup } = createDOM();
+    const root = document.createElement("div");
+
+    // Initial: keyed list + conditional badge + button
+    const old = h(
+      "div",
+      null,
+      h("span", { key: "a" }, "A"),
+      h("span", null, "BADGE"),
+      h("button", null, "Click"),
+    );
+    _render(root, old, null, ctx);
+    const container = root.firstChild as HTMLElement;
+    assertEquals(container.childNodes.length, 3);
+
+    // Re-render: badge removed (conditional false)
+    const next = h(
+      "div",
+      null,
+      h("span", { key: "a" }, "A"),
+      h("button", null, "Click"),
+    );
+    _diff(root, next, old, ctx);
+    // Should have 2 children: keyed span + button. Old badge removed.
+    assertEquals(
+      container.childNodes.length,
+      2,
+      "badge removed, no orphan DOM",
+    );
+    cleanup();
+  },
+});
+
+Deno.test({
+  name:
+    "diff: mixed keyed + non-keyed — keyed reorder preserves non-keyed identity (AIO-114)",
+  ...S,
+  fn() {
+    const { document, ctx, cleanup } = createDOM();
+    const root = document.createElement("div");
+
+    const old = h(
+      "ul",
+      null,
+      h("li", { key: "x" }, "X"),
+      h("li", { key: "y" }, "Y"),
+      h("li", null, "footer"),
+    );
+    _render(root, old, null, ctx);
+    const ul = root.firstChild as HTMLElement;
+    const footerBefore = ul.children[2];
+
+    // Reorder keyed, non-keyed stays
+    const next = h(
+      "ul",
+      null,
+      h("li", { key: "y" }, "Y"),
+      h("li", { key: "x" }, "X"),
+      h("li", null, "footer"),
+    );
+    _diff(root, next, old, ctx);
+    assertEquals(ul.children.length, 3, "still 3 children after reorder");
+    assertEquals(ul.children[0]!.textContent, "Y");
+    assertEquals(ul.children[1]!.textContent, "X");
+    assertEquals(ul.children[2]!.textContent, "footer");
+    // Non-keyed element should preserve DOM identity (patched in place)
+    assertEquals(
+      ul.children[2],
+      footerBefore,
+      "non-keyed DOM identity preserved",
+    );
+    cleanup();
+  },
+});
+
+Deno.test({
+  name:
+    "diff: keyed Fragment siblings don't corrupt non-keyed cursor walk (AIO-114)",
+  ...S,
+  fn() {
+    const { document, ctx, cleanup } = createDOM();
+    const root = document.createElement("div");
+
+    // Keyed Fragment expands to multiple DOM nodes, followed by non-keyed element
+    const old = h(
+      "div",
+      null,
+      h(Fragment, { key: "frag" }, h("span", null, "A"), h("span", null, "B")),
+      h("button", null, "Action"),
+    );
+    _render(root, old, null, ctx);
+    const container = root.firstChild as HTMLElement;
+    // Fragment(2 spans) + button = 3 DOM nodes
+    assertEquals(container.childNodes.length, 3, "initial: 3 DOM nodes");
+
+    // Re-render same structure — button must not leak
+    const next = h(
+      "div",
+      null,
+      h(Fragment, { key: "frag" }, h("span", null, "A"), h("span", null, "B")),
+      h("button", null, "Action"),
+    );
+    _diff(root, next, old, ctx);
+    assertEquals(
+      container.childNodes.length,
+      3,
+      "after re-render: still 3 DOM nodes",
+    );
+
+    // Third render to confirm no accumulation
+    const next2 = h(
+      "div",
+      null,
+      h(Fragment, { key: "frag" }, h("span", null, "A"), h("span", null, "B")),
+      h("button", null, "Action"),
+    );
+    _diff(root, next2, next, ctx);
+    assertEquals(
+      container.childNodes.length,
+      3,
+      "after 3rd render: still 3 DOM nodes",
+    );
+    cleanup();
+  },
+});
+
+Deno.test({
+  name: "diff: non-keyed count shrinks and grows correctly (AIO-114)",
+  ...S,
+  fn() {
+    const { document, ctx, cleanup } = createDOM();
+    const root = document.createElement("div");
+
+    // 3 non-keyed + 1 keyed
+    const v1 = h(
+      "div",
+      null,
+      h("span", { key: "k" }, "keyed"),
+      h("em", null, "a"),
+      h("em", null, "b"),
+      h("em", null, "c"),
+    );
+    _render(root, v1, null, ctx);
+    const container = root.firstChild as HTMLElement;
+    assertEquals(container.childNodes.length, 4);
+
+    // Shrink to 1 non-keyed
+    const v2 = h(
+      "div",
+      null,
+      h("span", { key: "k" }, "keyed"),
+      h("em", null, "only"),
+    );
+    _diff(root, v2, v1, ctx);
+    assertEquals(container.childNodes.length, 2, "shrink: 2 DOM nodes");
+
+    // Grow to 4 non-keyed
+    const v3 = h(
+      "div",
+      null,
+      h("span", { key: "k" }, "keyed"),
+      h("em", null, "w"),
+      h("em", null, "x"),
+      h("em", null, "y"),
+      h("em", null, "z"),
+    );
+    _diff(root, v3, v2, ctx);
+    assertEquals(container.childNodes.length, 5, "grow: 5 DOM nodes");
+    cleanup();
+  },
+});
+
+// ── AIO-116: text node nodeType validation in diffUnkeyed/diffKeyed ────
+
+Deno.test({
+  name:
+    "AIO-116: diffUnkeyed must not set textContent on element nodes when cursor desyncs",
+  ...S,
+  fn() {
+    const { document: doc, ctx, cleanup } = createDOM();
+    const root = doc.createElement("div");
+    doc.body.appendChild(root);
+
+    // Initial render: parent with text child + element child
+    const v1 = h("div", null, "hello", h("span", null, "world"));
+    _render(root, v1, null, ctx);
+    const container = root.firstChild as HTMLElement;
+
+    // Externally mutate DOM: replace text node with an element
+    // Simulates cursor desync (Fragment shift, external mutation, etc.)
+    const textNode = container.childNodes[0]!;
+    const injected = doc.createElement("b");
+    injected.innerHTML = "<em>keep</em><strong>this</strong>";
+    container.replaceChild(injected, textNode);
+    // DOM: [<b><em>keep</em><strong>this</strong></b>, <span>world</span>]
+    assertEquals(container.childNodes[0]!.nodeName, "B");
+    assertEquals(
+      (container.childNodes[0] as HTMLElement).childNodes.length,
+      2,
+      "<b> has 2 children before diff",
+    );
+
+    // Re-render: old vnode says "hello" (text), new says "updated" (text)
+    // BUG: cursor points to <b>, code sets <b>.textContent = "updated"
+    //       which DESTROYS <b>'s children (<em> and <strong>)
+    const v2 = h("div", null, "updated", h("span", null, "world"));
+    _diff(root, v2, v1, ctx);
+
+    // After fix: the <b> element's children should NOT be destroyed.
+    // The diff should either skip the element or create a fresh text node.
+    // Check that no element node had its children wiped:
+    let elementCorrupted = false;
+    for (let i = 0; i < container.childNodes.length; i++) {
+      const node = container.childNodes[i]!;
+      if (node.nodeType === 1 && node.nodeName === "B") {
+        // If <b> survived, it should still have its original 2 children
+        if ((node as HTMLElement).childNodes.length < 2) {
+          elementCorrupted = true;
+        }
+      }
+    }
+    assertEquals(
+      elementCorrupted,
+      false,
+      "element node children should not be destroyed by textContent assignment on wrong nodeType",
+    );
+
     cleanup();
   },
 });

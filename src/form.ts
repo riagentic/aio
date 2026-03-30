@@ -7,6 +7,16 @@ import { type Signal, signal } from "./signal.ts";
 
 export type ValidationRule<T> = (value: T) => string | null;
 
+export type AsyncValidationRule<T> = (value: T) => Promise<string | null>;
+
+export type CrossFieldValidator<T extends Record<string, unknown>> = (
+  values: T,
+) => Record<string, string> | null;
+
+export interface FormOptions<T extends Record<string, unknown>> {
+  validators?: CrossFieldValidator<T>[];
+}
+
 export interface FieldState<T> {
   /** Current field value (signal-tracked). */
   readonly value: T;
@@ -16,6 +26,8 @@ export interface FieldState<T> {
   readonly dirty: boolean;
   /** Whether the field has been touched (blurred). */
   readonly touched: boolean;
+  /** Whether async validation is in progress. */
+  readonly validating: boolean;
   /** Set the field value. */
   set(next: T): void;
   /** Mark as touched (call on blur). */
@@ -77,21 +89,38 @@ export interface FieldArrayState<T> {
  * ```
  */
 export function useForm<T extends Record<string, unknown>>(
-  config: { [K in keyof T]: { initial: T[K]; rules?: ValidationRule<T[K]>[] } },
+  config: {
+    [K in keyof T]: {
+      initial: T[K];
+      rules?: ValidationRule<T[K]>[];
+      asyncRules?: AsyncValidationRule<T[K]>[];
+      debounceMs?: number;
+    };
+  },
+  options?: FormOptions<T>,
 ): FormState<T> {
-  // deno-lint-ignore no-explicit-any
-  const fieldStates: Record<string, FieldState<any>> = {};
+  const fieldStates: Record<
+    string,
+    // deno-lint-ignore no-explicit-any
+    FieldState<any> & { _setError(err: string): void }
+  > = {};
 
   for (
     const [name, cfg] of Object.entries(config) as [
       string,
-      { initial: unknown; rules?: ValidationRule<unknown>[] },
+      {
+        initial: unknown;
+        rules?: ValidationRule<unknown>[];
+        // deno-lint-ignore no-explicit-any
+        asyncRules?: AsyncValidationRule<any>[];
+        debounceMs?: number;
+      },
     ][]
   ) {
-    const valueSig: Signal<unknown> = signal(cfg.initial);
-    const errorSig: Signal<string | null> = signal(null);
-    const dirtySig: Signal<boolean> = signal(false);
-    const touchedSig: Signal<boolean> = signal(false);
+    const valueSig: Signal<unknown> = signal<unknown>(cfg.initial);
+    const errorSig: Signal<string | null> = signal<string | null>(null);
+    const dirtySig: Signal<boolean> = signal<boolean>(false);
+    const touchedSig: Signal<boolean> = signal<boolean>(false);
     const initial = cfg.initial;
     const rules = cfg.rules ?? [];
 
@@ -101,6 +130,51 @@ export function useForm<T extends Record<string, unknown>>(
         if (err) return err;
       }
       return null;
+    };
+
+    const validatingSig: Signal<boolean> = signal<boolean>(false);
+    const asyncRules = cfg.asyncRules ?? [];
+    const debounceMs = cfg.debounceMs ?? 0;
+    let debounceTimer: ReturnType<typeof setTimeout> | undefined;
+    let asyncVersion = 0;
+
+    const runAsyncValidation = (v: unknown) => {
+      if (asyncRules.length === 0) return;
+      const syncErr = validate(v);
+      if (syncErr) {
+        validatingSig.set(false);
+        return;
+      }
+      const version = ++asyncVersion;
+      validatingSig.set(true);
+
+      const run = async () => {
+        try {
+          for (const rule of asyncRules) {
+            const err = await rule(v);
+            if (version !== asyncVersion) return;
+            if (err) {
+              errorSig.set(err);
+              validatingSig.set(false);
+              return;
+            }
+          }
+          if (version !== asyncVersion) return;
+          errorSig.set(null);
+          validatingSig.set(false);
+        } catch (e) {
+          if (version !== asyncVersion) return;
+          errorSig.set(e instanceof Error ? e.message : "Validation failed");
+          validatingSig.set(false);
+        }
+      };
+
+      if (debounceMs > 0) {
+        if (debounceTimer) clearTimeout(debounceTimer);
+        debounceTimer = setTimeout(run, debounceMs);
+      } else {
+        run();
+      }
     };
 
     fieldStates[name] = {
@@ -116,20 +190,33 @@ export function useForm<T extends Record<string, unknown>>(
       get touched() {
         return touchedSig.value;
       },
+      get validating() {
+        return validatingSig.value;
+      },
       set(next: unknown) {
         valueSig.set(next);
         dirtySig.set(!Object.is(next, initial));
-        if (touchedSig.peek()) errorSig.set(validate(next));
+        if (touchedSig.peek()) {
+          errorSig.set(validate(next));
+          runAsyncValidation(next);
+        }
       },
       touch() {
         touchedSig.set(true);
         errorSig.set(validate(valueSig.peek()));
+        runAsyncValidation(valueSig.peek());
       },
       reset() {
         valueSig.set(initial);
         errorSig.set(null);
         dirtySig.set(false);
         touchedSig.set(false);
+        validatingSig.set(false);
+        asyncVersion++;
+        if (debounceTimer) clearTimeout(debounceTimer);
+      },
+      _setError(err: string) {
+        errorSig.set(err);
       },
     };
   }
@@ -139,6 +226,7 @@ export function useForm<T extends Record<string, unknown>>(
     get valid() {
       for (const f of Object.values(fieldStates)) {
         if (f.error !== null) return false;
+        if (f.validating) return false;
       }
       return true;
     },
@@ -159,7 +247,25 @@ export function useForm<T extends Record<string, unknown>>(
       let valid = true;
       for (const f of Object.values(fieldStates)) {
         f.touch();
-        if (f.error !== null) valid = false;
+        if (f.error !== null || f.validating) valid = false;
+      }
+      // Cross-field validators
+      if (options?.validators) {
+        const vals = this.values();
+        for (const validator of options.validators) {
+          const result = validator(vals);
+          if (result) {
+            for (const [fieldName, err] of Object.entries(result)) {
+              if (fieldStates[fieldName]) {
+                // Only set cross-field error if field doesn't already have a per-field error
+                if (!fieldStates[fieldName].error) {
+                  fieldStates[fieldName]._setError(err);
+                }
+                valid = false;
+              }
+            }
+          }
+        }
       }
       return valid;
     },

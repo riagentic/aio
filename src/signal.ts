@@ -6,10 +6,13 @@
 export interface Signal<T> {
   readonly value: T;
   set(next: T): void;
+  update(fn: (prev: T) => T): void;
   peek(): T;
   subscribe(fn: () => void): () => void;
   /** @internal */ readonly _subscribers: Set<Subscriber>;
   /** @internal */ readonly _version: number;
+  /** Debug name for devtools (optional). */
+  readonly _name?: string;
 }
 
 export interface Computed<T> {
@@ -44,6 +47,26 @@ export function _trackEnd(
   return deps;
 }
 
+/** Read signals without tracking — reads inside fn() will NOT create
+ *  subscriptions in the current tracking context. */
+export function untrack<T>(fn: () => T): T {
+  const savedLen = _trackStack.length;
+  const throwaway = new Set<SignalImpl<unknown>>();
+  _trackStack.push(throwaway);
+  let result: T;
+  try {
+    result = fn();
+  } catch (err) {
+    _trackStack.pop();
+    throw err;
+  }
+  _trackStack.pop();
+  if (_trackStack.length !== savedLen) {
+    throw new Error("Signal tracking stack corrupted in untrack()");
+  }
+  return result;
+}
+
 function _currentTracker(): Set<SignalImpl<unknown>> | undefined {
   return _trackStack[_trackStack.length - 1];
 }
@@ -53,6 +76,7 @@ function _currentTracker(): Set<SignalImpl<unknown>> | undefined {
 let _batchDepth = 0;
 const _pendingSubscribers = new Set<Subscriber>();
 
+/** Group multiple signal writes into one flush — subscribers notified once at the end. */
 export function batch(fn: () => void): void {
   _batchDepth++;
   try {
@@ -71,26 +95,41 @@ function _flush(): void {
   if (_flushing) return; // re-entrant call — outer _flush will pick up new pending
   _flushing = true;
   _flushIterations = 0;
-  while (_pendingSubscribers.size > 0) {
-    if (++_flushIterations > _FLUSH_MAX_ITERATIONS) {
-      console.warn(
-        "[aio:signal] _flush exceeded 100 iterations — possible infinite loop. Remaining subscribers cleared.",
-      );
+  try {
+    while (_pendingSubscribers.size > 0) {
+      if (++_flushIterations > _FLUSH_MAX_ITERATIONS) {
+        console.warn(
+          `[aio:signal] _flush exceeded ${_FLUSH_MAX_ITERATIONS} iterations — possible infinite loop. ` +
+            `${_pendingSubscribers.size} subscriber(s) still pending. ` +
+            `Use signal(value, "name") for easier debugging. Remaining subscribers cleared.`,
+        );
+        _pendingSubscribers.clear();
+        break;
+      }
+      const pending = [..._pendingSubscribers];
       _pendingSubscribers.clear();
-      break;
+      // Phase 1: prepare (cleanup) — all subscribers run even if one throws
+      for (const sub of pending) {
+        if (sub.prepare) {
+          try {
+            sub.prepare();
+          } catch (e) {
+            console.error("[aio:signal] effect cleanup error:", e);
+          }
+        }
+      }
+      // Phase 2: execute (re-run) — all subscribers run even if one throws
+      for (const sub of pending) {
+        try {
+          sub.execute();
+        } catch (e) {
+          console.error("[aio:signal] effect execute error:", e);
+        }
+      }
     }
-    const pending = [..._pendingSubscribers];
-    _pendingSubscribers.clear();
-    // Phase 1: prepare (cleanup) — all subscribers
-    for (const sub of pending) {
-      if (sub.prepare) sub.prepare();
-    }
-    // Phase 2: execute (re-run) — all subscribers
-    for (const sub of pending) {
-      sub.execute();
-    }
+  } finally {
+    _flushing = false;
   }
-  _flushing = false;
 }
 
 function _notify(subscribers: Set<Subscriber>): void {
@@ -112,6 +151,11 @@ function _shallowEq(a: unknown, b: unknown): boolean {
   if (
     a === null || b === null || typeof a !== "object" || typeof b !== "object"
   ) return false;
+  // AIO-228: only shallow-compare plain objects and arrays — not class instances
+  const protoA = Object.getPrototypeOf(a);
+  const protoB = Object.getPrototypeOf(b);
+  if (protoA !== protoB) return false;
+  if (protoA !== Object.prototype && protoA !== Array.prototype) return false;
   const isArrA = Array.isArray(a);
   const isArrB = Array.isArray(b);
   if (isArrA !== isArrB) return false;
@@ -129,7 +173,7 @@ function _shallowEq(a: unknown, b: unknown): boolean {
   const objA = a as Record<string, unknown>;
   const objB = b as Record<string, unknown>;
   for (const k of ka) {
-    if (objA[k] !== objB[k]) return false;
+    if (!Object.hasOwn(objB, k) || objA[k] !== objB[k]) return false; // AIO-237: key-existence check
   }
   return true;
 }
@@ -140,9 +184,11 @@ class SignalImpl<T> implements Signal<T> {
   _value: T;
   readonly _subscribers = new Set<Subscriber>();
   _version = 0;
+  _name?: string;
 
-  constructor(initial: T) {
+  constructor(initial: T, name?: string) {
     this._value = initial;
+    this._name = name;
   }
 
   get value(): T {
@@ -152,19 +198,26 @@ class SignalImpl<T> implements Signal<T> {
   }
 
   set(next: T): void {
-    if (Object.is(this._value, next)) return;
+    const resolved = next;
+    if (Object.is(this._value, resolved)) return;
     // AIO-59: shallow equality for objects/arrays — skip notification when all
     // values are identical by ===. Prevents infinite re-render loops when
     // signal.set({...same values...}) is called from rAF/effect callbacks.
     if (
-      next !== null && typeof next === "object" && _shallowEq(this._value, next)
+      resolved !== null && typeof resolved === "object" &&
+      _shallowEq(this._value, resolved)
     ) return;
-    this._value = next;
+    this._value = resolved;
     this._version++;
     for (const sub of this._subscribers) {
       _pendingSubscribers.add(sub);
     }
     if (_batchDepth === 0) _flush();
+  }
+
+  /** Update value using a function of the previous value. */
+  update(fn: (prev: T) => T): void {
+    this.set(fn(this._value));
   }
 
   peek(): T {
@@ -180,8 +233,13 @@ class SignalImpl<T> implements Signal<T> {
   }
 }
 
-export function signal<T>(initial: T): Signal<T> {
-  return new SignalImpl(initial);
+/** Create a reactive signal with an initial value. Reads auto-track in effects and computed. */
+export function signal<T>(
+  initial: T,
+  nameOrOpts?: string | { name?: string },
+): Signal<T> {
+  const name = typeof nameOrOpts === "string" ? nameOrOpts : nameOrOpts?.name;
+  return new SignalImpl(initial, name);
 }
 
 // ── Computed ────────────────────────────────────────────────────────
@@ -213,6 +271,7 @@ class ComputedImpl<T> implements Computed<T> {
   }
 
   get value(): T {
+    if (this._disposed) return this._cached as T;
     const tracker = _currentTracker();
     if (tracker) tracker.add(this as unknown as SignalImpl<unknown>);
     if (this._dirty) this._recompute();
@@ -220,6 +279,7 @@ class ComputedImpl<T> implements Computed<T> {
   }
 
   peek(): T {
+    if (this._disposed) return this._cached as T;
     if (this._dirty) this._recompute();
     return this._cached as T;
   }
@@ -238,8 +298,9 @@ class ComputedImpl<T> implements Computed<T> {
     try {
       this._cached = this._fn();
     } finally {
-      _trackEnd(deps);
+      // AIO-258: delete first — if _trackEnd throws, _computing must still be cleaned
       _computing.delete(this as unknown as ComputedImpl<unknown>);
+      _trackEnd(deps);
     }
 
     this._dirty = false;
@@ -285,8 +346,48 @@ export function _computedCollectEnd(list: Disposable[]): void {
 
 /** Dispose all computeds in a list (cleanup on re-render). */
 export function _computedDisposeAll(list: Disposable[]): void {
-  for (const c of list) c.dispose();
-  list.length = 0;
+  try {
+    for (const c of list) {
+      try {
+        c.dispose();
+      } catch (e) {
+        console.error("[aio:signal] computed dispose error:", e);
+      }
+    }
+  } finally {
+    list.length = 0;
+  }
+}
+
+// ── Effect collector (for renderer auto-dispose) ─────────────────────
+
+let _effectCollector: (() => void)[] | null = null;
+
+/** Start collecting effect dispose functions created during a render pass. */
+export function _effectCollectStart(): (() => void)[] {
+  const list: (() => void)[] = [];
+  _effectCollector = list;
+  return list;
+}
+
+/** Stop collecting effect dispose functions. */
+export function _effectCollectEnd(list: (() => void)[]): void {
+  if (_effectCollector === list) _effectCollector = null;
+}
+
+/** Dispose all collected effects (cleanup on unmount or re-render). */
+export function _effectDisposeAll(list: (() => void)[]): void {
+  try {
+    for (const dispose of list) {
+      try {
+        dispose();
+      } catch (e) {
+        console.error("[aio:signal] effect dispose error:", e);
+      }
+    }
+  } finally {
+    list.length = 0;
+  }
 }
 
 // ── Effect ──────────────────────────────────────────────────────────
@@ -317,6 +418,10 @@ export function effect(fn: () => void | CleanupFn): CleanupFn {
         _trackEnd(deps);
       }
 
+      // AIO-188: fn() may have called dispose() (self-dispose).
+      // Don't re-subscribe to deps if already disposed.
+      if (disposed) return;
+
       for (const dep of deps) {
         dep._subscribers.add(sub);
         unsubs.push(() => dep._subscribers.delete(sub));
@@ -327,7 +432,7 @@ export function effect(fn: () => void | CleanupFn): CleanupFn {
   // Initial run (no prepare needed)
   sub.execute();
 
-  return () => {
+  const dispose = () => {
     disposed = true;
     if (cleanup) {
       cleanup();
@@ -336,4 +441,9 @@ export function effect(fn: () => void | CleanupFn): CleanupFn {
     for (const unsub of unsubs) unsub();
     unsubs = [];
   };
+
+  // Register with effect collector if active (renderer auto-dispose)
+  if (_effectCollector) _effectCollector.push(dispose);
+
+  return dispose;
 }

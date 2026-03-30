@@ -171,10 +171,18 @@ export function nextCronTime(fields: CronFields, after: Date): Date {
 
   const maxIterations = 366 * 24 * 60; // ~1 year of minutes
   for (let i = 0; i < maxIterations; i++) {
+    // POSIX cron: when both DOM and DOW are restricted, use OR (AIO-133)
+    const domRestricted = fields.dom.length < 31;
+    const dowRestricted = fields.dow.length < 7;
+    const domMatch = fields.dom.includes(d.getUTCDate());
+    const dowMatch = fields.dow.includes(d.getUTCDay());
+    const dayMatch = (domRestricted && dowRestricted)
+      ? (domMatch || dowMatch)
+      : (domMatch && dowMatch);
+
     if (
       fields.month.includes(d.getUTCMonth() + 1) &&
-      fields.dom.includes(d.getUTCDate()) &&
-      fields.dow.includes(d.getUTCDay()) &&
+      dayMatch &&
       fields.hour.includes(d.getUTCHours()) &&
       fields.minute.includes(d.getUTCMinutes())
     ) {
@@ -254,6 +262,9 @@ export function createScheduleManager(
     ms: number,
     action: { type: string; payload?: unknown },
   ): void {
+    if (ms < 1) {
+      throw new Error(`schedule.after '${id}': ms must be >= 1, got ${ms}`); // AIO-252
+    }
     const timerId = setTimeout(() => {
       timers.delete(id);
       log.debug(`schedule: after '${id}' fired`);
@@ -268,6 +279,9 @@ export function createScheduleManager(
     ms: number,
     action: { type: string; payload?: unknown },
   ): void {
+    if (ms < 10) {
+      throw new Error(`schedule.every '${id}': ms must be >= 10, got ${ms}`); // AIO-252
+    }
     const timerId = setInterval(() => {
       log.debug(`schedule: every '${id}' fired`);
       safeDispatch(id, action);
@@ -285,14 +299,30 @@ export function createScheduleManager(
     if (Number.isNaN(target)) {
       throw new Error(`invalid schedule.at time: ${JSON.stringify(time)}`);
     }
-    const delay = Math.max(0, target - Date.now());
-    const timerId = setTimeout(() => {
-      timers.delete(id);
-      log.debug(`schedule: at '${id}' fired`);
-      safeDispatch(id, action);
-    }, delay);
-    setTimer(id, "at", timerId);
-    log.debug(`schedule: at '${id}' set for ${delay}ms (${time})`);
+    // AIO-236: skip if target time is in the past
+    if (target <= Date.now()) {
+      log.debug(`schedule: at '${id}' time is in the past — skipping`);
+      return;
+    }
+    const MAX_DELAY = 2_147_483_647; // 2^31-1 ms — setTimeout max safe value
+    function scheduleCheck(): void {
+      const delay = Math.max(0, target - Date.now());
+      if (delay > MAX_DELAY) {
+        // Re-check in 24h (AIO-134)
+        const timerId = setTimeout(scheduleCheck, 86_400_000);
+        setTimer(id, "at", timerId);
+        log.debug(`schedule: at '${id}' re-check in 24h (${delay}ms > max)`);
+        return;
+      }
+      const timerId = setTimeout(() => {
+        timers.delete(id);
+        log.debug(`schedule: at '${id}' fired`);
+        safeDispatch(id, action);
+      }, delay);
+      setTimer(id, "at", timerId);
+      log.debug(`schedule: at '${id}' set for ${delay}ms (${time})`);
+    }
+    scheduleCheck();
   }
 
   function handleCron(
@@ -328,7 +358,8 @@ export function createScheduleManager(
       const timerId = setTimeout(() => {
         log.debug(`schedule: cron '${id}' fired`);
         safeDispatch(id, action);
-        scheduleNext();
+        // Only reschedule if action didn't cancel this cron (AIO-142)
+        if (timers.has(id)) scheduleNext();
       }, delay);
       setTimer(id, "cron", timerId);
       log.debug(
@@ -364,6 +395,7 @@ export function createScheduleManager(
 
   function start(defs: ScheduleDef[]): void {
     for (const def of defs) {
+      validateId(def.id); // AIO-251: validate config-level schedule IDs
       if ("every" in def) handleEvery(def.id, def.every, def.action);
       else if ("after" in def) handleAfter(def.id, def.after, def.action);
       else if ("at" in def) handleAt(def.id, def.at, def.action);
@@ -376,10 +408,12 @@ export function createScheduleManager(
     timers.clear();
   }
 
-  /** Cancel all timers whose ID starts with prefix (e.g. feature name) */
+  /** Cancel all timers whose ID starts with prefix + ":" (e.g. feature name).
+   *  AIO-198: match delimiter to avoid "user" cancelling "userProfile" timers. */
   function cancelByPrefix(prefix: string): void {
+    const match = prefix + ":";
     for (const [id] of timers) {
-      if (id.startsWith(prefix)) cancelTimer(id);
+      if (id === prefix || id.startsWith(match)) cancelTimer(id);
     }
   }
 

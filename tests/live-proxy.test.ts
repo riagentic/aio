@@ -85,3 +85,45 @@ Deno.test("liveProxy: ownKeys reflects state changes", () => {
   setState({ a: 1, b: 2 });
   assertEquals(Object.keys(proxy), ["a", "b"]);
 });
+
+// ── AIO-77: Batcher method isolation ─────────────────────────────
+
+Deno.test("batcher: concurrent methods dispatch separate actions", async () => {
+  const actions: { type: string }[] = [];
+  const batcher = createBatcher(
+    "feat",
+    (a) => actions.push(a as typeof actions[0]),
+  );
+
+  batcher.add("fetchPrices", { path: ["prices"], value: [100] });
+  // Different method → flushes "fetchPrices" synchronously, queues "updateUI"
+  batcher.add("updateUI", { path: ["ui", "tab"], value: "chart" });
+
+  assertEquals(
+    actions.length,
+    1,
+    "first batch flushed synchronously on method change",
+  );
+  assertEquals(actions[0]!.type, "feat:__setFetchPrices");
+
+  await new Promise<void>((r) => queueMicrotask(r));
+
+  assertEquals(actions.length, 2, "second batch flushed via microtask");
+  assertEquals(actions[1]!.type, "feat:__setUpdateUI");
+});
+
+Deno.test("batcher: same method batches into one action", async () => {
+  const actions: { type: string }[] = [];
+  const batcher = createBatcher(
+    "feat",
+    (a) => actions.push(a as typeof actions[0]),
+  );
+
+  batcher.add("update", { path: ["a"], value: 1 });
+  batcher.add("update", { path: ["b"], value: 2 });
+
+  await new Promise<void>((r) => queueMicrotask(r));
+
+  assertEquals(actions.length, 1, "same method should batch into one action");
+  assertEquals(actions[0]!.type, "feat:__setUpdate");
+});

@@ -150,6 +150,8 @@ with discriminated unions, define typed effect creators and use
 | `LogConfig`                    | `{ level?, dir?, console?, heartbeat?, suppressTypes?, backupLogs?, backupKeep? }`                                                           |
 | `LogLevel`                     | `'trace' \| 'debug' \| 'info' \| 'warn' \| 'error'`                                                                                          |
 | `AioError`                     | Error class — `{ code, source, context, original?, correlationId, timestamp, stateSnapshot? }`                                               |
+| `AioUser`                      | `{ id: string; role: string }` — resolved user identity                                                                                      |
+| `ResolveUserFn<S>`             | `(token: string, state: S) => AioUser \| null \| Promise<AioUser \| null>` — dynamic auth hook                                               |
 | `AioErrorCode`                 | 16 error codes — `'REDUCE_ERROR' \| 'EFFECT_ERROR' \| ...` (see [debugging.md](debugging.md#error-codes-reference))                          |
 | `AioErrorContext`              | `{ featureName?, actionType?, effectType?, flowName?, flowStep?, hookName?, duration?, budget?, machineState? }`                             |
 | `MemoryConfig`                 | `{ enabled?, interval?, warnThreshold?, criticalThreshold?, onMemoryPressure? }`                                                             |

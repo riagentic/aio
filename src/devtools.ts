@@ -40,9 +40,9 @@ export interface DevToolsHandle {
 let _connected = false;
 // deno-lint-ignore no-explicit-any
 let _reduxDevTools: any = null;
-const _treeSig: Signal<ComponentTreeNode[]> = signal([]);
-const _rendersSig: Signal<RenderEvent[]> = signal([]);
-const _totalRendersSig: Signal<number> = signal(0);
+const _treeSig: Signal<ComponentTreeNode[]> = signal<ComponentTreeNode[]>([]);
+const _rendersSig: Signal<RenderEvent[]> = signal<RenderEvent[]>([]);
+const _totalRendersSig: Signal<number> = signal<number>(0);
 const MAX_RENDER_EVENTS = 200;
 
 // ── Redux DevTools bridge ───────────────────────────────────────────

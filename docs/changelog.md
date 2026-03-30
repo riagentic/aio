@@ -1,5 +1,30 @@
 # Changelog
 
+## v1.0.0-alpha8
+
+**Dynamic auth & nuclear audit hardening**
+
+- `resolveUser` hook — async JWT/OAuth/database auth with `ResolveUserFn<S>`
+  type. Unified `_buildUserResolver` factory, single auth code path (AIO-171)
+- Patch compaction + size guard in broadcast protocol
+- `ResolveUserFn` type exported from `mod.ts`
+
+**Nuclear audit — 58 bugs fixed across 23 files (AIO-57..236)**
+
+- 13 rounds of adversarial code review covering all 100 source files
+- Security: prototype pollution guard on `_deepMergeFiltered` (AIO-238)
+- Delta protocol: backpressure recovery, filtered merge, array identity
+  patching, periodic resync hardening
+- Renderer: flush guard on disposed root, hydration signal binding, keyed
+  fragment placement, Suspense partial cleanup
+- Feature system: proxy stale tracking, async batching, flow lifecycle cleanup,
+  delegation leak, schedule prefix handling
+- Electron: `pageReady` reset on F5 reload, IPC null cleanup
+- Server: `stateForUI` memo fix for undefined, TT perf timing, schedule ID
+  validation
+
+---
+
 ## v1.0.0-alpha7
 
 **Type-safe send & renderer split**

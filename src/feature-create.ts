@@ -368,6 +368,8 @@ function createFeatureFromMethods<
     const on: Record<string, string> = {};
     for (const key of methodNames) on[key] = "active";
     for (const key of asyncMethods) on[setKey(key)] = "active";
+    for (const key of generatorNames) on[key] = "active"; // AIO-220
+    for (const key of explicitActionNames) on[key] = "active"; // AIO-241: include explicit actions in auto-machine
     if (asyncMethods.size > 0) on["__error"] = "active";
     for (const entry of config.listensTo) {
       const actionType = typeof entry === "string" ? entry : entry.type;
