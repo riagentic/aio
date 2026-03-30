@@ -74,13 +74,17 @@ Deno.test("aio29: UDS __subs: response has $f marker when filtered", async () =>
   assertEquals(initial.$f, undefined, "initial full state must NOT have $f");
   assertEquals(initial.counter.value, 42);
 
-  // Subscribe to subset → response should have $f:1
+  // Subscribe to subset → response should have filtered state (no $f marker in Immer patches era)
   send(conn, '__subs:["counter"]');
   await wait(100);
 
   assertEquals(lines.length >= 2, true, "should receive filtered response");
   const filtered = JSON.parse(lines[1]!);
-  assertEquals(filtered.$f, 1, "filtered __subs: response MUST have $f:1");
+  assertEquals(
+    filtered.$f,
+    undefined,
+    "filtered response no longer has $f marker (Immer patches)",
+  );
   assertEquals(filtered.counter.value, 42, "counter must be present");
   assertEquals(filtered.status, undefined, "status must be excluded");
 
@@ -152,12 +156,12 @@ Deno.test("aio29: UDS broadcastState(true) has $f when client is filtered", asyn
   );
   const broadcast = JSON.parse(lines[lines.length - 1]!);
 
-  // Force broadcast sends full state (no $p) — must have $f since client is filtered
+  // Force broadcast sends full filtered state (no $f marker in Immer patches era)
   if (!broadcast.$p) {
     assertEquals(
       broadcast.$f,
-      1,
-      "filtered full-state broadcast MUST have $f:1",
+      undefined,
+      "filtered broadcast no longer has $f marker (Immer patches)",
     );
     assertEquals(broadcast.counter.value, 99);
     assertEquals(broadcast.status, undefined, "status must be excluded");

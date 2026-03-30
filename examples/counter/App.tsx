@@ -1,8 +1,8 @@
 // UI component — export default, framework mounts it
-import { useFeature } from "aio";
+import { useFeature } from "aio/air";
 import { counter } from "./app.ts";
 
-const btn: React.CSSProperties = {
+const btn: Record<string, string> = {
   padding: "0.75rem 1.5rem",
   fontSize: "1.25rem",
   cursor: "pointer",

@@ -70,6 +70,7 @@ import {
   // Offline
   _loadOfflineQueue,
   _memoCompare,
+  _navigateHandler,
   _notify,
   _popstateHandler,
   _preserveArrayRefs,
@@ -98,11 +99,13 @@ import {
   _setClientSend,
   _setConnectFn,
   _setListenerHighWater,
+  _setNavigateHandler,
   _setPopstateHandler,
   // Subscription management
   _setSubscribeTriggers,
   _setTeardownFn,
   _setUseAioActiveCount,
+  _setVisibilityHandler,
   _setVitalsPingTimer,
   _setVitalsRenderMeter,
   _setVitalsTransportProbe,
@@ -116,6 +119,7 @@ import {
   _trackingProxy,
   _useAioActiveCount,
   _useAioSubscribe,
+  _visibilityHandler,
   _vitalsPingTimer,
   // Vitals state
   _vitalsRenderMeter,
@@ -252,6 +256,10 @@ _setTeardownFn(() => {
   _ws = null;
   _ipcConnected = false;
   _connecting = false;
+  if (_ipcPingTimer) {
+    clearInterval(_ipcPingTimer);
+    _ipcPingTimer = null;
+  }
   _coreReset();
   _resetInitialShapeKeys();
   _resetStateReady();
@@ -268,6 +276,14 @@ _setTeardownFn(() => {
     removeEventListener("popstate", _popstateHandler);
     _setPopstateHandler(null);
   }
+  if (_navigateHandler) {
+    removeEventListener("aio:navigate", _navigateHandler);
+    _setNavigateHandler(null);
+  }
+  if (_visibilityHandler && typeof document !== "undefined") {
+    document.removeEventListener("visibilitychange", _visibilityHandler);
+    _setVisibilityHandler(null);
+  }
 });
 
 // Wire client.send
@@ -275,10 +291,14 @@ _setClientSend(_send);
 
 /** Connects via Electron IPC bridge (UDS mode) — messages are NDJSON lines */
 function _connectIPC() {
-  if (!_ipc || _ipcConnected) return;
+  if (!_ipc || _ipcConnected) {
+    _connecting = false; // AIO-218: reset flag when bailing out
+    return;
+  }
   _ipcConnected = true;
 
   _ipc.onOpen(() => {
+    _connecting = false; // AIO-218: clear connecting flag on success
     _retry = 0;
     if (_wasConnected) _showStatus("Connected", "#2a2", 2000);
     _wasConnected = true;
@@ -375,6 +395,7 @@ function _connectIPC() {
 
   _ipc.onClose(() => {
     _ipcConnected = false;
+    _connecting = false; // AIO-218: allow reconnection triggers after close
     _coreSetTransport(null);
     _coreSetConnected(false);
     _ttSetSendFn(null);
@@ -384,6 +405,10 @@ function _connectIPC() {
     }
     if (_closed || _listeners.size === 0) return;
     if (_wasConnected) _showStatus("Reconnecting\u2026", "#e25");
+    // AIO-219: schedule reconnection with backoff (match WS behavior)
+    const base = Math.min(1000 * Math.pow(2, _retry), 8000);
+    _retry++;
+    setTimeout(_connect, base * (0.8 + Math.random() * 0.4));
   });
 
   // Signal to Electron main that listeners are ready — triggers replay of buffered state
@@ -405,12 +430,12 @@ function _connect() {
   ws.onopen = async () => {
     _connecting = false;
     _retry = 0;
-    // Register WS as state-core transport
+    // Register WS as state-core transport (needed for sends below, but don't
+    // signal connected yet — wait until offline queue is loaded first)
     _coreSetTransport({
       send: (d: string) => ws.send(d),
       close: () => ws.close(),
     });
-    _coreSetConnected(true);
     _ttSetSendFn((cmd: string) => ws.send(cmd));
     ws.send(
       "__type:" +
@@ -422,16 +447,8 @@ function _connect() {
     if (_wasConnected) _showStatus("Connected", "#2a2", 2000);
     _wasConnected = true;
 
-    // Re-send tracked subscriptions on reconnect
-    // Re-send tracked subscriptions on reconnect (state-core owns the path set)
-    _coreResendSubs();
-
-    // Flush memory queue (initial connect race)
-    const q = _queue;
-    _queue = [];
-    for (const a of q) ws.send(JSON.stringify(a));
-
-    // Load and replay offline queue (persisted during disconnect)
+    // Load offline queue FIRST — before subscriptions trigger server broadcasts
+    // (AIO-119: ensure offline actions are replayed before server sends state patches)
     if (!_offlineReady) {
       const persisted = await _loadOfflineQueue();
       _offlineQueue = persisted.map((p) => p.action);
@@ -439,8 +456,19 @@ function _connect() {
     }
     // Guard: socket may have closed during async _loadOfflineQueue
     if (ws.readyState !== WebSocket.OPEN) return;
+
+    // NOW signal connected and resend subscriptions — offline queue is ready
+    _coreSetConnected(true);
+    _coreResendSubs();
+
+    // Flush memory queue (initial connect race)
+    const q = _queue;
+    _queue = [];
+    for (const a of q) ws.send(JSON.stringify(a));
+
+    // Replay offline queue immediately after subs (before server broadcasts)
     if (_offlineQueue.length) {
-      console.log(`[aio] replaying ${_offlineQueue.length} offline actions`);
+      console.debug(`[aio] replaying ${_offlineQueue.length} offline actions`);
       for (const a of _offlineQueue) ws.send(JSON.stringify(a));
       _offlineQueue = [];
       _clearOfflineQueue().catch(() => {});
@@ -640,7 +668,6 @@ function _connect() {
   };
   ws.onclose = () => {
     _ws = null;
-    _connecting = false;
     _coreSetTransport(null);
     _coreSetConnected(false);
     _ttSetSendFn(null);
@@ -648,7 +675,12 @@ function _connect() {
       clearInterval(_vitalsPingTimer);
       _setVitalsPingTimer(null);
     }
-    if (_closed || _listeners.size === 0) return;
+    if (_closed || _listeners.size === 0) {
+      _connecting = false;
+      return;
+    }
+    // AIO-246: keep _connecting=true during backoff to prevent connection storms
+    _connecting = true;
     if (_wasConnected) _showStatus("Reconnecting\u2026", "#e25");
     // exponential backoff: 1s → 2s → 4s → 8s max, with ±20% jitter
     const base = Math.min(1000 * Math.pow(2, _retry), 8000);
@@ -656,7 +688,10 @@ function _connect() {
     console.warn(
       `[aio] disconnected, retrying in ${(base / 1000).toFixed(1)}s...`,
     );
-    setTimeout(_connect, base * (0.8 + Math.random() * 0.4));
+    setTimeout(() => {
+      _connecting = false;
+      _connect();
+    }, base * (0.8 + Math.random() * 0.4));
   };
   _ws = ws;
 }
@@ -1124,6 +1159,14 @@ export function _reset(): void {
   if (_popstateHandler) {
     removeEventListener("popstate", _popstateHandler);
     _setPopstateHandler(null);
+  }
+  if (_navigateHandler) {
+    removeEventListener("aio:navigate", _navigateHandler);
+    _setNavigateHandler(null);
+  }
+  if (_visibilityHandler && typeof document !== "undefined") {
+    document.removeEventListener("visibilitychange", _visibilityHandler);
+    _setVisibilityHandler(null);
   }
   _resetTracking();
   _coreReset(); // reset state-core signals

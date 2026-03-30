@@ -45,7 +45,7 @@ export function useState<T>(
 
   const setter = (next: T | ((prev: T) => T)): void => {
     if (typeof next === "function") {
-      sig.set((next as (prev: T) => T)(sig.peek()));
+      sig.update(next as (prev: T) => T);
     } else {
       sig.set(next);
     }
@@ -82,13 +82,15 @@ export function useEffect(
       }
     });
   } else {
-    // No deps or non-empty deps → effect (created once via useRef)
-    const created = useRef(false);
-    if (!created.current) {
-      created.current = true;
-      const dispose = effect(fn);
-      onCleanup(dispose);
-    }
+    // No deps or non-empty deps → effect with fresh closure each render.
+    // Store fn in ref so the effect always calls the latest closure,
+    // preventing stale captures of non-signal values (props, locals).
+    // AIO-182: Re-create effect every render — _effectDisposeAll kills
+    // the previous one during re-render cleanup, so we must re-create it.
+    const fnRef = useRef(fn);
+    fnRef.current = fn;
+    const dispose = effect(() => fnRef.current());
+    onCleanup(dispose);
   }
 }
 

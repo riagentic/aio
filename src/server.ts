@@ -26,6 +26,7 @@ import {
   TEXT_EXTENSIONS,
 } from "./server-html.ts";
 import { type GraphResult, validateGraph } from "./graph-validator.ts";
+import { compactPatches } from "./patch-compact.ts";
 
 type DispatchFn = (event: unknown, user?: AioUser) => void;
 type GetUIStateFn = (user?: AioUser) => unknown;
@@ -50,14 +51,16 @@ export interface ServerConfig {
   cert?: string; // PEM cert string — enables HTTPS when set (auto-generated when --expose)
   key?: string; // PEM key string — required when cert is set
   users?: Record<string, AioUser>; // per-user token map (overrides token)
+  resolveUser?: (token: string) => AioUser | null | Promise<AioUser | null>; // dynamic user resolution (AIO-171)
   showStatus?: boolean; // show reconnection indicator (default: true)
-  renderer?: "react" | "aio"; // default: 'react' — 'aio' uses native VDOM engine
+  renderer?: "react" | "aio"; // default: 'aio' — native AIR VDOM engine
   renderBudget?: RenderBudget; // sent to browser for RenderMeter thresholds
   fullStateThreshold?: number; // 0-1: ratio of changed keys for delta vs full broadcast (default: 0.5)
   maxConnections?: number; // max concurrent WebSocket clients (default: 100)
   syncIntervalMs?: number; // throttle state broadcasts: max 1 push per N ms (default: 50)
   allowedOrigins?: string[]; // extra allowed origins beyond localhost (e.g. Docker, reverse proxy)
   clientCounter?: { value: number }; // shared index counter — WS and UDS get unique indices
+  hasStateFilter?: boolean; // true when stateForUI is configured — disables patch-based broadcast (patches bypass filtering)
   onConnect?: (user?: AioUser) => void;
   onDisconnect?: (user?: AioUser) => void;
   onReload?: (signal: "__reload" | "__css") => void; // called on live-reload — lets aio.ts forward to UDS
@@ -96,27 +99,43 @@ export function _timingSafeEqual(a: string, b: string): boolean {
   return result === 0;
 }
 
-/** Resolves user from token map — checks query param and Authorization header */
-function resolveUser(
-  users: Record<string, AioUser>,
-  url: URL,
-  req: Request,
-): AioUser | null {
+/** Extract token from query param or Authorization header */
+function _extractToken(url: URL, req: Request): string | null {
   const qToken = url.searchParams.get("token");
+  if (qToken) return qToken;
   const auth = req.headers.get("authorization");
-  const hToken = auth?.startsWith("Bearer ") ? auth.slice(7) : null;
-  for (const candidate of [qToken, hToken]) {
-    if (!candidate) continue;
-    for (const [t, user] of Object.entries(users)) {
-      if (_timingSafeEqual(candidate, t)) return user;
-    }
+  return auth?.startsWith("Bearer ") ? auth.slice(7) : null;
+}
+
+/** User resolver function — built once from resolveUser hook or static users map */
+type UserResolverFn = (
+  token: string,
+) => AioUser | null | Promise<AioUser | null>;
+
+/** Build a unified user resolver from config (AIO-171).
+ *  resolveUser hook takes precedence over static users map. */
+function _buildUserResolver(config: {
+  resolveUser?: UserResolverFn;
+  users?: Record<string, AioUser>;
+}): UserResolverFn | null {
+  if (config.resolveUser) return config.resolveUser;
+  if (config.users) {
+    const users = config.users;
+    return (token: string) => {
+      for (const [t, user] of Object.entries(users)) {
+        if (_timingSafeEqual(token, t)) return user;
+      }
+      return null;
+    };
   }
   return null;
 }
 
 /** Returned to aio.run() so it can push state updates and shut down cleanly */
 export interface ServerHandle {
-  broadcast: () => void;
+  broadcast: (
+    patches?: Array<{ feature: string; ops: import("immer").Patch[] }>,
+  ) => void;
   broadcastTT: () => void;
   shutdown: () => Promise<void>;
   clientCount: () => number;
@@ -137,6 +156,7 @@ function fileExists(path: string): boolean {
 // browser.ts URL — works for both local (file://) and JSR/HTTP installs (import.meta.dirname is null for remote modules)
 const BROWSER_TS_URL = new URL("browser.ts", import.meta.url);
 const BROWSER_AIR_TS_URL = new URL("browser-air.ts", import.meta.url);
+const AIR_TS_URL = new URL("air.ts", import.meta.url);
 const LISTENERS_TS_URL = new URL("listeners.ts", import.meta.url);
 // Base URL for resolving sub-module imports (e.g. vitals/*.ts) served under /__aio/
 const AIO_SRC_BASE_URL = new URL(".", import.meta.url);
@@ -224,9 +244,9 @@ async function transpile(
   if (cached && cached.source === source) return cached.code;
   const transform = await getTransform();
   const loader = filepath.endsWith(".tsx") ? "tsx" as const : "ts" as const;
-  const jsxOpts = renderer === "aio"
-    ? { jsx: "automatic", jsxImportSource: "aio" }
-    : { jsx: "automatic", jsxImportSource: "react" };
+  const jsxOpts = renderer === "react"
+    ? { jsx: "automatic", jsxImportSource: "react" }
+    : { jsx: "automatic", jsxImportSource: "aio" };
   const result = await transform(source, {
     loader,
     format: "esm",
@@ -265,275 +285,6 @@ const BP_STALENESS_HIGH = 300; // ms — client render staleness triggering 4x t
 const BP_STALENESS_MODERATE = 100; // ms — client render staleness triggering 2x throttle
 const BP_RECOVERY_PINGS = 3; // consecutive low-staleness pings before stepping down multiplier
 
-/** Delta computation result */
-export type DeltaResult = {
-  msg: string;
-  newKeyJsons: Record<string, string>;
-  kind: "skip" | "delta" | "full";
-};
-
-/** Check if array qualifies for identity-keyed flattening:
- *  every element must be a non-null object with a string `id` property. */
-function _isIdentityArray(
-  arr: unknown[],
-): arr is Array<Record<string, unknown> & { id: string }> {
-  if (arr.length === 0) return false;
-  for (const el of arr) {
-    if (!el || typeof el !== "object" || Array.isArray(el)) return false;
-    if (typeof (el as Record<string, unknown>).id !== "string") return false;
-  }
-  return true;
-}
-
-/** Flatten one level: for object-valued top-level keys, use dot-notation (e.g. "mdview.scrollY").
- *  Arrays of objects with stable `id` fields are expanded to per-element keys (e.g. "fleet.members.$id:SOL_15m").
- *  Primitive/array-without-id top-level values stay as-is. */
-export function flattenKeys(
-  obj: Record<string, unknown>,
-): Record<string, unknown> {
-  const flat: Record<string, unknown> = {};
-  for (const k of Object.keys(obj)) {
-    const v = obj[k];
-    if (v && typeof v === "object" && !Array.isArray(v)) {
-      for (const sk of Object.keys(v as Record<string, unknown>)) {
-        const sv = (v as Record<string, unknown>)[sk];
-        if (Array.isArray(sv)) {
-          if (_isIdentityArray(sv)) {
-            for (const el of sv) {
-              flat[`${k}.${sk}.$id:${el.id}`] = el;
-            }
-          } else {
-            // Non-identity arrays (including empty) — emit as atomic key
-            flat[`${k}.${sk}`] = sv;
-          }
-        } else {
-          flat[`${k}.${sk}`] = sv;
-        }
-      }
-    } else {
-      flat[k] = v;
-    }
-  }
-  return flat;
-}
-
-/** Unflatten dot-notation keys back into nested structure for the patch.
- *  Recognizes $id: prefixed keys and groups them into $arr array patches. */
-export function unflattenPatch(
-  changed: Record<string, unknown>,
-  removed: string[],
-): { $p: Record<string, unknown>; $d?: string[] } {
-  const patch: Record<string, unknown> = {};
-  const topDeletions: string[] = [];
-
-  for (const [k, v] of Object.entries(changed)) {
-    const dot = k.indexOf(".");
-    if (dot === -1) {
-      patch[k] = v;
-      continue;
-    }
-    const parent = k.slice(0, dot);
-    const rest = k.slice(dot + 1);
-
-    if (!patch[parent] || typeof patch[parent] !== "object") patch[parent] = {};
-    const parentObj = patch[parent] as Record<string, unknown>;
-
-    // Check for $id: at second level: "fleet.members.$id:SOL" → rest = "members.$id:SOL"
-    const dot2 = rest.indexOf(".");
-    if (dot2 !== -1) {
-      const child = rest.slice(0, dot2);
-      const idKey = rest.slice(dot2 + 1);
-      if (idKey.startsWith("$id:")) {
-        // Identity-keyed array element
-        if (!parentObj[child] || typeof parentObj[child] !== "object") {
-          parentObj[child] = { $arr: true } as Record<string, unknown>;
-        }
-        (parentObj[child] as Record<string, unknown>)[idKey] = v;
-        continue;
-      }
-    }
-
-    // Regular nested key (no $id:)
-    parentObj[rest] = v;
-  }
-
-  for (const k of removed) {
-    const dot = k.indexOf(".");
-    if (dot === -1) {
-      topDeletions.push(k);
-      continue;
-    }
-    const parent = k.slice(0, dot);
-    const rest = k.slice(dot + 1);
-
-    if (!patch[parent] || typeof patch[parent] !== "object") patch[parent] = {};
-    const parentObj = patch[parent] as Record<string, unknown>;
-
-    // Check for $id: removal: "fleet.members.$id:DOGE" → rest = "members.$id:DOGE"
-    const dot2 = rest.indexOf(".");
-    if (dot2 !== -1) {
-      const child = rest.slice(0, dot2);
-      const idKey = rest.slice(dot2 + 1);
-      if (idKey.startsWith("$id:")) {
-        if (!parentObj[child] || typeof parentObj[child] !== "object") {
-          parentObj[child] = { $arr: true } as Record<string, unknown>;
-        }
-        const arrPatch = parentObj[child] as Record<string, unknown>;
-        if (!arrPatch.$rm) arrPatch.$rm = [];
-        (arrPatch.$rm as string[]).push(idKey.slice(4)); // strip "$id:" prefix
-        continue;
-      }
-    }
-
-    // Regular nested removal: "mdview.oldKey" → { mdview: { $d: ['oldKey'] } }
-    // AIO-31: suppress $d when identity patch ($arr) already exists for same key.
-    // This happens during empty→identity array transitions: the old atomic key
-    // ("feature.array") is "removed" while identity keys ("feature.array.$id:a")
-    // are "changed". The $arr patch supersedes the atomic removal.
-    const child = rest;
-    const existing = parentObj[child];
-    if (
-      existing && typeof existing === "object" && !Array.isArray(existing) &&
-      (existing as Record<string, unknown>).$arr === true
-    ) {
-      continue; // identity patch supersedes atomic removal
-    }
-    if (!parentObj.$d) parentObj.$d = [];
-    (parentObj.$d as string[]).push(child);
-  }
-
-  const result: { $p: Record<string, unknown>; $d?: string[] } = { $p: patch };
-  if (topDeletions.length) result.$d = topDeletions;
-  return result;
-}
-
-/** Computes delta patch between old and new UI state — pure function, testable in isolation.
- *  Uses dot-notation for object-valued top-level keys (v0.5 namespaced state) to enable
- *  fine-grained delta within feature slices. */
-export function _computeDelta(
-  uiState: unknown,
-  lastState: unknown,
-  lastKeyJsons: Record<string, string>,
-  threshold = 0.5,
-): DeltaResult {
-  // First broadcast or non-object state — full send
-  if (
-    lastState === null || !uiState || typeof uiState !== "object" ||
-    Array.isArray(uiState)
-  ) {
-    const newKeyJsons: Record<string, string> = {};
-    if (uiState && typeof uiState === "object" && !Array.isArray(uiState)) {
-      const flat = flattenKeys(uiState as Record<string, unknown>);
-      for (const k of Object.keys(flat)) {
-        newKeyJsons[k] = JSON.stringify(flat[k]);
-      }
-    }
-    return { msg: JSON.stringify(uiState), newKeyJsons, kind: "full" };
-  }
-
-  const flat = flattenKeys(uiState as Record<string, unknown>);
-  const keys = Object.keys(flat);
-  const changed: Record<string, unknown> = {};
-  const newKeyJsons: Record<string, string> = {};
-  let changedCount = 0;
-
-  for (const k of keys) {
-    const json = JSON.stringify(flat[k]);
-    newKeyJsons[k] = json;
-    if (json !== lastKeyJsons[k]) {
-      changed[k] = flat[k];
-      changedCount++;
-    }
-  }
-  const removed: string[] = [];
-  for (const k of Object.keys(lastKeyJsons)) {
-    if (!(k in newKeyJsons)) {
-      removed.push(k);
-      changedCount++;
-    }
-  }
-
-  if (changedCount === 0) return { msg: "", newKeyJsons, kind: "skip" };
-
-  // Patch when changed ratio is below threshold (default 50% — small patches are cheaper than full state).
-  // Use max(new, old) key count so removals don't shrink the denominator and bias toward full state.
-  const totalKeys = Math.max(keys.length, Object.keys(lastKeyJsons).length);
-  if (changedCount < totalKeys * threshold) {
-    const patch = unflattenPatch(changed, removed);
-    return { msg: JSON.stringify(patch), newKeyJsons, kind: "delta" };
-  }
-
-  return { msg: JSON.stringify(uiState), newKeyJsons, kind: "full" };
-}
-
-/** Extract only subscribed paths from state. Paths use dot notation.
- *  "counter.value" → { counter: { value: <val> } }
- *  "market" → { market: <entire object> }
- *  "*" → full shallow copy.
- *  Pure function — no side effects. */
-export function _filterByPaths(
-  state: unknown,
-  paths: Set<string>,
-): Record<string, unknown> {
-  if (!state || typeof state !== "object" || Array.isArray(state)) return {};
-  const src = state as Record<string, unknown>;
-  const out: Record<string, unknown> = {};
-
-  for (const path of paths) {
-    if (path === "*") return { ...src };
-
-    const parts = path.split(".");
-    // Navigate source to get value at path
-    let value: unknown = src;
-    for (let i = 0; i < parts.length; i++) {
-      const isLast = i === parts.length - 1;
-      // Can only descend into a non-null object
-      if (
-        value === null || value === undefined || typeof value !== "object" ||
-        Array.isArray(value)
-      ) {
-        value = undefined;
-        break;
-      }
-      const rec = value as Record<string, unknown>;
-      const key = parts[i] as string;
-      if (!isLast && !(key in rec)) {
-        // Intermediate key missing — path does not exist
-        value = undefined;
-        break;
-      }
-      value = rec[key];
-    }
-    if (value === undefined) continue;
-
-    // Set value at same path in output (create intermediate objects as needed)
-    let target: Record<string, unknown> = out;
-    for (let i = 0; i < parts.length - 1; i++) {
-      const key = parts[i] as string;
-      if (!(key in target) || typeof target[key] !== "object") {
-        target[key] = {};
-      }
-      target = target[key] as Record<string, unknown>;
-    }
-    // If value is an object and target already has content at this key (from a
-    // more specific path), merge rather than overwrite
-    const lastKey = parts[parts.length - 1] as string;
-    const existing = target[lastKey];
-    if (
-      existing && typeof existing === "object" && !Array.isArray(existing) &&
-      value && typeof value === "object" && !Array.isArray(value)
-    ) {
-      target[lastKey] = {
-        ...(existing as Record<string, unknown>),
-        ...(value as Record<string, unknown>),
-      };
-    } else {
-      target[lastKey] = value;
-    }
-  }
-  return out;
-}
-
 /** Starts HTTP + WS server, returns broadcast handle for state pushes and shutdown */
 export function createServer(config: ServerConfig): ServerHandle {
   const { port, title, getUIState, dispatch, debug, prod = false, distDir } =
@@ -543,6 +294,9 @@ export function createServer(config: ServerConfig): ServerHandle {
   if (!prod) {
     setDiagEmit(diagEmit);
   }
+
+  // Unified user resolver — one code path for both static map and dynamic hook (AIO-171)
+  const _userResolver = _buildUserResolver(config);
 
   const absBaseDir = resolve(config.baseDir); // normalize to absolute — fixes cache key matching
 
@@ -675,8 +429,7 @@ export function createServer(config: ServerConfig): ServerHandle {
     clientType: ClientType;
     isElectron: boolean;
     user?: AioUser;
-    lastState: unknown;
-    lastKeyJsons: Record<string, string>;
+    lastFullJson?: string; // JSON of last sent state — used for change detection in fallback path
     msgCount: number;
     bytesThisSec: number;
     msgResetTimer?: ReturnType<typeof setTimeout>;
@@ -686,7 +439,6 @@ export function createServer(config: ServerConfig): ServerHandle {
     bpLastSentAt: number; // backpressure: timestamp of last broadcast to this client
     subscriptions: Set<string> | null; // null = subscribe-all (backward compat)
     disconnected: boolean; // guards against double onDisconnect (onerror + onclose)
-    broadcastCount: number; // AIO-33: counter for periodic forced full-state resync
   };
   const connections = new Map<WebSocket, ClientMeta>();
   const _payloadStats = new Map<
@@ -744,16 +496,46 @@ export function createServer(config: ServerConfig): ServerHandle {
   let _trojanReqCount = 0;
   let _trojanResetTimer: ReturnType<typeof setTimeout> | null = null;
 
+  // Helper: get filtered full-state JSON for a client (respects subscriptions)
+  function _getFilteredFullJson(meta: ClientMeta): string | undefined {
+    let uiState: unknown;
+    try {
+      uiState = getUIState(meta.user);
+      if (meta.subscriptions) {
+        const filtered: Record<string, unknown> = {};
+        const src = uiState as Record<string, unknown>;
+        for (const sub of meta.subscriptions) {
+          const feat = sub.includes(".") ? sub.slice(0, sub.indexOf(".")) : sub;
+          if (feat in src && !(feat in filtered)) filtered[feat] = src[feat];
+        }
+        uiState = filtered;
+      }
+    } catch (e) {
+      debug(`broadcast: getUIState error — ${e}`);
+      return undefined;
+    }
+    return JSON.stringify(uiState);
+  }
+
   // Coalesced + throttled broadcast — batches synchronous bursts via microtask; optionally throttles async streams
   // Leading edge fires immediately (after microtask coalesce); trailing flush ensures last state always arrives
-  // Per-client delta: each client tracks its own lastState/lastKeyJsons (supports getUIState per client)
-  function broadcast(): void {
+  // Per-client: patch-based when patches available, delta fallback for trailing flushes
+  type PatchEntry = { feature: string; ops: import("immer").Patch[] };
+  let _bufferedPatches: PatchEntry[] = [];
+
+  function broadcast(patches?: PatchEntry[]): void {
     broadcastDirty = true;
+    // When stateForUI is configured, patches are invalid (computed against unfiltered state)
+    // — skip patch accumulation, always use full filtered state fallback
+    if (patches && !config.hasStateFilter) _bufferedPatches.push(...patches);
 
     if (broadcastQueued) return; // microtask already pending this tick
     if (syncIntervalMs > 0 && broadcastThrottle) return; // inside throttle window — trailing flush will catch it
 
     broadcastQueued = true;
+    const patchesToSend = _bufferedPatches;
+    _bufferedPatches = [];
+
     queueMicrotask(() => {
       broadcastQueued = false;
       broadcastDirty = false;
@@ -766,66 +548,88 @@ export function createServer(config: ServerConfig): ServerHandle {
           // Backpressure: skip client if not enough time elapsed since last send
           if (meta.bpMultiplier > 1) {
             const elapsed = Date.now() - meta.bpLastSentAt;
-            if (elapsed < syncIntervalMs * meta.bpMultiplier) continue;
-          }
-          let uiState: unknown;
-          try {
-            uiState = getUIState(meta.user);
-            // Filter to subscribed paths only
-            if (meta.subscriptions) {
-              uiState = _filterByPaths(uiState, meta.subscriptions);
+            if (elapsed < syncIntervalMs * meta.bpMultiplier) {
+              meta.lastFullJson = undefined; // AIO-244: force full-state recovery on next send
+              continue;
             }
-          } catch (e) {
-            debug(`broadcast: getUIState error — ${e}`);
-            continue;
           }
-          if (uiState === meta.lastState) continue; // skip if ref unchanged
-          // AIO-33: periodic forced full-state resync — prevents any delta desync
-          // from becoming permanent. Every 100 broadcasts (~5s at 50ms interval),
-          // reset delta cache to force a full state send.
-          meta.broadcastCount++;
-          if (meta.broadcastCount >= 100) {
-            meta.broadcastCount = 0;
-            meta.lastState = null;
-            meta.lastKeyJsons = {};
+
+          let msgToSend: string | undefined;
+
+          // Patch-based path: filter patches by client subscriptions and send $patches
+          // Subscriptions contain collapsed paths (e.g. "counter", "counter.count").
+          // A feature's patches match if any subscription IS the feature name or starts with "feature."
+          if (patchesToSend.length > 0) {
+            const clientPatches = meta.subscriptions
+              ? patchesToSend.filter((p) => {
+                for (const sub of meta.subscriptions!) {
+                  if (sub === p.feature || sub.startsWith(p.feature + ".")) {
+                    return true;
+                  }
+                }
+                return false;
+              })
+              : patchesToSend;
+
+            const allOps = compactPatches(
+              clientPatches.flatMap((p) =>
+                p.ops.map((op) => ({
+                  ...op,
+                  path: [p.feature, ...op.path],
+                }))
+              ),
+            );
+
+            if (allOps.length > 0) {
+              const patchJson = JSON.stringify({ $patches: allOps });
+              // Size guard: if patch payload exceeds full state, send full state instead
+              const fullJson = _getFilteredFullJson(meta);
+              if (fullJson && patchJson.length > fullJson.length) {
+                debug?.(
+                  `broadcast: patch payload (${patchJson.length}B) > full state (${fullJson.length}B) — sending full state`,
+                );
+                if (fullJson !== meta.lastFullJson) {
+                  meta.lastFullJson = fullJson;
+                  msgToSend = fullJson;
+                }
+              } else {
+                msgToSend = patchJson;
+                // AIO-208: update lastFullJson after patch send to prevent stale delta
+                if (fullJson) meta.lastFullJson = fullJson;
+              }
+            }
           }
-          const delta = _computeDelta(
-            uiState,
-            meta.lastState,
-            meta.lastKeyJsons,
-            config.fullStateThreshold,
-          );
-          if (delta.kind === "skip") {
-            meta.lastState = uiState;
-            meta.lastKeyJsons = delta.newKeyJsons;
-            continue;
+
+          // Fallback: trailing flush or no patches — send full state
+          if (!msgToSend) {
+            const json = _getFilteredFullJson(meta);
+            if (!json) continue;
+            if (json === meta.lastFullJson) continue; // no change
+            meta.lastFullJson = json;
+            msgToSend = json;
           }
-          debug(`broadcast ${delta.kind} → client ${meta.id.slice(0, 8)}`);
+
+          if (!msgToSend) continue;
           try {
-            // Mark filtered full-state broadcasts with $f:1 so browser merges
-            const msgToSend = meta.subscriptions && delta.kind === "full"
-              ? '{"$f":1,' + delta.msg.slice(1)
-              : delta.msg;
             ws.send(msgToSend);
-            // Update lastState/lastKeyJsons AFTER successful send (AIO-33 safety)
-            meta.lastState = uiState;
-            meta.lastKeyJsons = delta.newKeyJsons;
             meta.bpLastSentAt = Date.now();
             config.vitalsSystem?.serverTransport.onClientStateSent(
               meta.id,
               Date.now(),
             );
-            const _bytes = new TextEncoder().encode(delta.msg).byteLength;
+            const _bytes = new TextEncoder().encode(msgToSend).byteLength;
             const _ps = _payloadStats.get(meta.id);
             if (_ps) {
               _ps.lastPayloadBytes = _bytes;
               _ps.totalBytes += _bytes;
               _ps.count++;
-            } else {_payloadStats.set(meta.id, {
+            } else {
+              _payloadStats.set(meta.id, {
                 lastPayloadBytes: _bytes,
                 totalBytes: _bytes,
                 count: 1,
-              });}
+              });
+            }
             config.vitalsSystem?.pressureMonitor?.onBroadcast(meta.id, _bytes);
           } catch { /* client disconnecting */ }
         }
@@ -836,7 +640,7 @@ export function createServer(config: ServerConfig): ServerHandle {
       if (syncIntervalMs > 0) {
         broadcastThrottle = setTimeout(() => {
           broadcastThrottle = null;
-          if (broadcastDirty) broadcast(); // trailing flush — last state always reaches UI
+          if (broadcastDirty) broadcast(); // trailing flush — no patches available, sends full state
         }, syncIntervalMs);
       }
     });
@@ -881,8 +685,6 @@ export function createServer(config: ServerConfig): ServerHandle {
       clientType: "unknown",
       isElectron,
       user,
-      lastState: null,
-      lastKeyJsons: {},
       msgCount: 0,
       bytesThisSec: 0,
       bpMultiplier: 1,
@@ -890,7 +692,6 @@ export function createServer(config: ServerConfig): ServerHandle {
       bpLastSentAt: 0,
       subscriptions: null,
       disconnected: false,
-      broadcastCount: 0,
     };
     socket.onerror = (e) => {
       debug(
@@ -949,15 +750,8 @@ export function createServer(config: ServerConfig): ServerHandle {
       try {
         const uiState = getUIState(meta.user);
         const msg = JSON.stringify(uiState);
-        // Init delta cache so first broadcast computes a proper delta (dot-notation for nested)
-        if (uiState && typeof uiState === "object" && !Array.isArray(uiState)) {
-          const flat = flattenKeys(uiState as Record<string, unknown>);
-          for (const k of Object.keys(flat)) {
-            meta.lastKeyJsons[k] = JSON.stringify(flat[k]);
-          }
-        }
-        meta.lastState = uiState;
         socket.send(msg);
+        meta.lastFullJson = msg; // AIO-255: only after confirmed send
       } catch (e) {
         debug(`ws: getUIState error on connect — ${e}`);
       }
@@ -971,7 +765,9 @@ export function createServer(config: ServerConfig): ServerHandle {
         }
       }
       // Boot ID — browser reloads page if server restarted (stale JS in memory)
-      socket.send("__boot:" + bootId);
+      try {
+        socket.send("__boot:" + bootId);
+      } catch { /* socket closing during onopen (AIO-155) */ }
     };
     // WS message prefix registry:
     //   __reload     — trigger page reload
@@ -980,6 +776,7 @@ export function createServer(config: ServerConfig): ServerHandle {
     //   __tt:<json>  — time-travel state
     //   __vitals:<json> — vital signs data
     //   __diag:<json>   — diagnostic bus events (dev only)
+    //   __resync       — client requests full state (patch desync recovery)
     socket.onmessage = (e) => {
       try {
         // Rate limiting — reset counters every second
@@ -1117,34 +914,25 @@ export function createServer(config: ServerConfig): ServerHandle {
                   paths.filter((p: unknown) => typeof p === "string"),
                 );
               }
-              // Reset delta cache — state shape changed for this client
-              meta.lastState = null;
-              meta.lastKeyJsons = {};
               // Send filtered state immediately
               try {
                 let uiState: unknown = getUIState(meta.user);
                 if (meta.subscriptions) {
-                  uiState = _filterByPaths(uiState, meta.subscriptions);
-                }
-                // Mark filtered responses with $f:1 so browser merges instead of replacing _state
-                const toSend = meta.subscriptions && uiState &&
-                    typeof uiState === "object" && !Array.isArray(uiState)
-                  ? { $f: 1, ...(uiState as Record<string, unknown>) }
-                  : uiState;
-                const msg = JSON.stringify(toSend);
-                socket.send(msg);
-                meta.lastState = uiState;
-                if (
-                  uiState && typeof uiState === "object" &&
-                  !Array.isArray(uiState)
-                ) {
-                  const flat = flattenKeys(
-                    uiState as Record<string, unknown>,
-                  );
-                  for (const k of Object.keys(flat)) {
-                    meta.lastKeyJsons[k] = JSON.stringify(flat[k]);
+                  const filtered: Record<string, unknown> = {};
+                  const src = uiState as Record<string, unknown>;
+                  for (const sub of meta.subscriptions) {
+                    const feat = sub.includes(".")
+                      ? sub.slice(0, sub.indexOf("."))
+                      : sub;
+                    if (feat in src && !(feat in filtered)) {
+                      filtered[feat] = src[feat];
+                    }
                   }
+                  uiState = filtered;
                 }
+                const msg = JSON.stringify(uiState);
+                socket.send(msg);
+                meta.lastFullJson = msg;
                 meta.bpLastSentAt = Date.now();
               } catch (err) {
                 debug(`ws: filtered state send error — ${err}`);
@@ -1152,6 +940,33 @@ export function createServer(config: ServerConfig): ServerHandle {
             }
           } catch {
             debug("ws: bad __subs message");
+          }
+          return;
+        }
+        // Resync request — client detected patch desync, send full state
+        if (e.data === "__resync") {
+          debug(`ws: client ${meta.id} requested resync`);
+          try {
+            let uiState: unknown = getUIState(meta.user);
+            if (meta.subscriptions) {
+              const filtered: Record<string, unknown> = {};
+              const src = uiState as Record<string, unknown>;
+              for (const sub of meta.subscriptions) {
+                const feat = sub.includes(".")
+                  ? sub.slice(0, sub.indexOf("."))
+                  : sub;
+                if (feat in src && !(feat in filtered)) {
+                  filtered[feat] = src[feat];
+                }
+              }
+              uiState = filtered;
+            }
+            const msg = JSON.stringify(uiState);
+            socket.send(msg);
+            meta.lastFullJson = msg;
+            meta.bpLastSentAt = Date.now();
+          } catch (err) {
+            debug(`ws: resync send error — ${err}`);
           }
           return;
         }
@@ -1261,6 +1076,26 @@ export function createServer(config: ServerConfig): ServerHandle {
           : "browser.ts";
         debug(`transpile ${name} error: ${fmtEsbuildError(err, name)}`);
         return new Response(`throw new Error("${name} transpile failed")`, {
+          headers: { "Content-Type": "application/javascript", ...noCache },
+        });
+      }
+    }
+
+    if (pathname === "/__aio/air.js") {
+      try {
+        const source = await fetch(AIR_TS_URL).then((r) => r.text());
+        const code = await transpile(
+          source,
+          AIR_TS_URL.href,
+          debug,
+          config.renderer,
+        );
+        return new Response(code, {
+          headers: { "Content-Type": "application/javascript", ...noCache },
+        });
+      } catch (err) {
+        debug(`transpile air.ts error: ${fmtEsbuildError(err, "air.ts")}`);
+        return new Response(`throw new Error("air.ts transpile failed")`, {
           headers: { "Content-Type": "application/javascript", ...noCache },
         });
       }
@@ -1497,11 +1332,15 @@ export function createServer(config: ServerConfig): ServerHandle {
       if (method === "GET") {
         if (route === "state") return json(trojan.getState());
         if (route === "ui") {
-          const user = new URL(req!.url).searchParams.get("user") ?? undefined;
-          const users = config.users;
-          const aioUser = user && users
-            ? Object.values(users).find((u) => u.id === user)
-            : undefined;
+          const userId = new URL(req!.url).searchParams.get("user") ??
+            undefined;
+          let aioUser: AioUser | undefined;
+          if (userId && config.users) {
+            aioUser = Object.values(config.users).find((u) => u.id === userId);
+          } else if (userId) {
+            // resolveUser or no-auth mode: construct synthetic AioUser for trojan inspection
+            aioUser = { id: userId, role: "unknown" };
+          }
           return json(getUIState(aioUser));
         }
         if (route === "clients") {
@@ -1548,7 +1387,16 @@ export function createServer(config: ServerConfig): ServerHandle {
               }
               pendingClientState.set(m.id, { resolve, timer });
             });
-            ws.send(msg);
+            try {
+              ws.send(msg);
+            } catch (e) {
+              const entry = pendingClientState.get(m.id);
+              if (entry) {
+                clearTimeout(entry.timer);
+                pendingClientState.delete(m.id);
+              }
+              return err(`send failed: ${e}`, 503);
+            }
             return json(await statePromise);
           }
           // Try UDS clients
@@ -1576,7 +1424,12 @@ export function createServer(config: ServerConfig): ServerHandle {
             );
           }
           const idx = Number(rest.slice(0, slashIdx));
-          const target = decodeURIComponent(rest.slice(slashIdx + 1));
+          let target: string;
+          try {
+            target = decodeURIComponent(rest.slice(slashIdx + 1));
+          } catch {
+            target = rest.slice(slashIdx + 1);
+          }
           if (!Number.isInteger(idx) || idx < 0) {
             return err("invalid client index", 400);
           }
@@ -1609,8 +1462,8 @@ export function createServer(config: ServerConfig): ServerHandle {
             port,
             title,
             expose: config.expose ?? false,
-            authMode: config.users
-              ? "users"
+            authMode: _userResolver
+              ? (config.resolveUser ? "resolveUser" : "users")
               : config.token
               ? "token"
               : "public",
@@ -1995,9 +1848,11 @@ export function createServer(config: ServerConfig): ServerHandle {
             // Sentinel touch — update liveness timestamp, don't trigger reload
             if (event.paths.some((p) => p.includes("aio-watch-"))) {
               lastWatcherEvent = Date.now();
+              if (watcherRestarts > 0) watcherRestarts = 0; // AIO-157: reset on recovery
               continue;
             }
             lastWatcherEvent = Date.now();
+            if (watcherRestarts > 0) watcherRestarts = 0; // AIO-157: reset on recovery
             for (const path of event.paths) scheduleReload(path);
           }
         } catch (e) {
@@ -2066,9 +1921,11 @@ export function createServer(config: ServerConfig): ServerHandle {
     const url = new URL(req.url);
     const { pathname } = url;
 
-    // Auth path 1: per-user token map — resolve user or reject
-    if (config.users) {
-      const user = resolveUser(config.users, url, req);
+    // Auth path 1: per-user auth — resolveUser hook or static users map (AIO-171)
+    if (_userResolver) {
+      const token = _extractToken(url, req);
+      if (!token) return new Response("Unauthorized", { status: 401 });
+      const user = await _userResolver(token);
       if (!user) return new Response("Unauthorized", { status: 401 });
       if (pathname === "/ws") return handleWs(req, user);
       debug(`http: ${req.method} ${pathname} user=${user.id}`);

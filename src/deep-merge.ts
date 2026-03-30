@@ -19,8 +19,13 @@ export function deepMerge(
   initial: Record<string, unknown>,
   persisted: Record<string, unknown>,
   depth = 0,
+  _seen?: WeakSet<object>,
 ): Record<string, unknown> {
   if (depth >= MAX_DEPTH) return initial; // prevent stack overflow on deeply nested payloads
+  // AIO-185: cycle detection for circular references
+  const seen = _seen ?? new WeakSet<object>();
+  if (seen.has(persisted)) return initial;
+  seen.add(persisted);
   const result: Record<string, unknown> = { ...initial };
   for (const key of Object.keys(persisted)) {
     if (BANNED_KEYS.has(key)) continue; // prevent prototype pollution
@@ -28,11 +33,13 @@ export function deepMerge(
     const iv = initial[key];
     const pv = persisted[key];
     if (isPlainObject(iv) && isPlainObject(pv)) {
-      result[key] = deepMerge(iv, pv, depth + 1);
+      result[key] = deepMerge(iv, pv, depth + 1, seen);
     } else if (pv === null && isPlainObject(iv)) {
       // persisted null can't wipe schema object → keep initial
     } else if (isPlainObject(iv) && Array.isArray(pv)) {
       // persisted array can't replace schema object → keep initial
+    } else if (Array.isArray(iv) && isPlainObject(pv)) {
+      // persisted object can't replace schema array → keep initial (AIO-144)
     } else if (typeof iv === typeof pv || iv === null || pv === null) {
       result[key] = pv; // same type → use persisted
     }

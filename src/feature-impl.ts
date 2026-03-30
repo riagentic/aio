@@ -205,6 +205,21 @@ function getNestedValue(obj: unknown, path: string[]): unknown {
   return current;
 }
 
+// AIO-240: delete a nested key by path
+function deleteNestedKey(
+  obj: Record<string, unknown>,
+  path: string[],
+): void {
+  if (path.length === 0) return;
+  let current: unknown = obj;
+  for (let i = 0; i < path.length - 1; i++) {
+    if (current === null || current === undefined) return;
+    current = (current as Record<string, unknown>)[path[i]!];
+  }
+  if (current === null || current === undefined) return;
+  delete (current as Record<string, unknown>)[path[path.length - 1]!];
+}
+
 function setNestedValue(
   obj: Record<string, unknown>,
   path: string[],
@@ -213,8 +228,10 @@ function setNestedValue(
   if (path.length === 0) return;
   let current: unknown = obj;
   for (let i = 0; i < path.length - 1; i++) {
+    if (current === null || current === undefined) return; // AIO-231
     current = (current as Record<string, unknown>)[path[i]!];
   }
+  if (current === null || current === undefined) return; // AIO-231
   (current as Record<string, unknown>)[path[path.length - 1]!] = value;
 }
 
@@ -234,7 +251,8 @@ export function applyMutations(
   mutations: Mutation[],
 ): void {
   for (const m of mutations) {
-    if (m.op) applyArrayOp(s, m.path, m.op, m.args ?? []);
+    if (m.op === "delete") deleteNestedKey(s, m.path); // AIO-240: handle property deletion
+    else if (m.op) applyArrayOp(s, m.path, m.op, m.args ?? []);
     else setNestedValue(s, m.path, m.value);
   }
 }
@@ -262,6 +280,11 @@ export function createBatcher(prefix: string, dispatch: (action: Msg) => void) {
   const batch: BatchState = { mutations: [], scheduled: false, method: "" };
 
   function add(method: string, mutation: Mutation): void {
+    // Different method → flush previous batch immediately so mutations
+    // are never misattributed (AIO-77)
+    if (batch.mutations.length > 0 && batch.method !== method) {
+      flush();
+    }
     batch.mutations.push(mutation);
     batch.method = method;
     if (!batch.scheduled) {
@@ -334,7 +357,12 @@ export function createLiveProxy<S extends Record<string, unknown>>(
         typeof value === "function"
       ) {
         return (...args: unknown[]) => {
+          // AIO-253: compute return value from a copy before batching the mutation
+          const copy = [...fresh as unknown[]];
+          // deno-lint-ignore no-explicit-any
+          const result = (copy as any)[key](...args);
           batcher.add(methodName, { path: [...path], op: key, args });
+          return result;
         };
       }
 
@@ -359,11 +387,23 @@ export function createLiveProxy<S extends Record<string, unknown>>(
       return true;
     },
 
+    // AIO-240: intercept `delete` so property removal is batched as a mutation
+    deleteProperty(_target, prop) {
+      if (typeof prop === "symbol") return false;
+      batcher.add(methodName, {
+        path: [...path, prop as string],
+        value: undefined,
+        op: "delete",
+      });
+      return true;
+    },
+
     has(_target, prop) {
       if (typeof prop === "symbol") return false;
       const fresh = path.length === 0
         ? getState()
         : getNestedValue(getState(), path);
+      if (fresh === null || fresh === undefined) return false; // AIO-232
       return prop in (fresh as object);
     },
 
@@ -371,6 +411,7 @@ export function createLiveProxy<S extends Record<string, unknown>>(
       const fresh = path.length === 0
         ? getState()
         : getNestedValue(getState(), path);
+      if (fresh === null || fresh === undefined) return []; // AIO-232
       const freshKeys = Reflect.ownKeys(fresh as object);
       // Sync target keys with fresh state to satisfy ES invariant:
       // target must have at least all keys returned by ownKeys.
@@ -403,6 +444,7 @@ export function createLiveProxy<S extends Record<string, unknown>>(
       const fresh = path.length === 0
         ? getState()
         : getNestedValue(getState(), path);
+      if (fresh === null || fresh === undefined) return undefined; // AIO-232
       // Check fresh state directly — target may be stale if state was replaced.
       const freshObj = fresh as Record<string, unknown>;
       if (!(prop in freshObj)) return undefined;

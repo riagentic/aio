@@ -510,8 +510,8 @@ export class AioLogger {
       this.write(this.path("debug"), e);
     }
 
-    // app.log: info + error only
-    if (lvl === "info" || lvl === "error") {
+    // app.log: info, warn + error; console: same (AIO-233)
+    if (lvl === "info" || lvl === "warn" || lvl === "error") {
       this.write(this.path("app"), e);
       if (this.cfg.console) printConsole(e);
     }

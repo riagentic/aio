@@ -1,6 +1,6 @@
 {
   "name": "@riagentic/aio",
-  "version": "1.0.0-alpha7",
+  "version": "1.0.0-alpha8",
   "appId": "aio",
   "exports": {
     ".": "./mod.ts",
@@ -35,12 +35,10 @@
     "noUncheckedIndexedAccess": true,
     "lib": ["deno.ns", "deno.unstable", "dom", "dom.iterable"],
     "jsx": "react-jsx",
-    "jsxImportSource": "react",
-    "jsxImportSourceTypes": "@types/react"
+    "jsxImportSource": "aio"
   },
   "imports": {
     "@std/testing": "jsr:@std/testing@^1.0.17",
-    "@types/react": "npm:@types/react@^18",
     "react": "npm:react@^18",
     "react-dom": "npm:react-dom@^18",
     "aio": "./mod.ts",
@@ -61,7 +59,7 @@
   "tasks": {
     "test": "deno test -A --unstable-kv tests/",
     "test:core": "deno test -A --unstable-kv --ignore=tests/am.test.ts,tests/build.test.ts,tests/server.test.ts,tests/tls.test.ts,tests/single-instance-lock.test.ts,tests/cli.test.ts,tests/cli-client.test.ts,tests/electron-ipc.test.ts,tests/app-modes.test.ts tests/",
-    "check": "deno check mod.ts",
+    "check": "deno check mod.ts aiol/mod.ts init.ts",
     "lint": "deno lint src/",
     "lint:aio": "deno run -A aiol/mod.ts",
     "example": "deno run -A examples/counter/app.ts",

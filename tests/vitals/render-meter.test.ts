@@ -279,6 +279,41 @@ Deno.test("hint: high staleness + both high → combined advice", () => {
   assertEquals(hint !== null && hint.includes("AND"), true);
 });
 
+// ─── AIO-122: destroy stops tick from producing side effects ────────────────
+
+Deno.test("render-meter: tick after destroy is a no-op (AIO-122)", () => {
+  let notifyCount = 0;
+  const statuses: string[] = [];
+  const meter = createRenderMeter({
+    ...baseConfig(),
+    onNotify: () => {
+      notifyCount++;
+    },
+    onStatusChange: (s) => {
+      statuses.push(s);
+    },
+  });
+
+  // Warm up with a tick
+  meter.recordPatch(100);
+  meter.markDirty();
+  meter.tick(100);
+  const notifyAfterFirstTick = notifyCount;
+  const statusesAfterFirstTick = statuses.length;
+
+  // Destroy, then try to tick again
+  meter.destroy();
+  meter.recordPatch(200);
+  meter.markDirty();
+  meter.tick(5000); // should be a no-op
+
+  // No new notifications or status changes after destroy
+  assertEquals(notifyCount, notifyAfterFirstTick);
+  assertEquals(statuses.length, statusesAfterFirstTick);
+  assertEquals(meter.getStaleness(), 0);
+  assertEquals(meter.getStatus(), "healthy");
+});
+
 // ─── Memory gauge tests ──────────────────────────────────────────────────────
 
 Deno.test("render-meter: memory gauge returns null when API unavailable", () => {

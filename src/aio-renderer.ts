@@ -12,23 +12,46 @@ import {
   _computedCollectEnd,
   _computedCollectStart,
   _computedDisposeAll,
+  _effectCollectEnd,
+  _effectCollectStart,
+  _effectDisposeAll,
   _trackEnd,
   _trackStart,
+  batch,
+  computed,
   type Disposable,
   type Signal,
   signal,
 } from "./signal.ts";
+import { bindSignalProps, cleanupSignalBindings } from "./signal-binding.ts";
 import type { ComponentFn, RenderCtx, VDomHooks, VNode } from "./vdom.ts";
 import {
+  _applyActions,
+  _bindSignalTextChildren,
   _callRef,
+  _cleanupSignalTextChildren,
   _diff,
+  _ensureDelegation,
+  _isDelegated,
+  _mapEventName,
   _render,
+  _setDelegationRoot,
+  _setDevA11yCheck,
+  _setSsrStartHook,
+  _setWrapped,
+  _teardownDelegation,
   Fragment,
   getDom,
   h,
   setDevMode as _setDevModeVdom,
+  SVG_TAGS,
 } from "./vdom.ts";
 import { _isDevToolsConnected, _recordRender } from "./devtools.ts";
+import { _getExitHandler, _setLifecycleHooks } from "./transition-component.ts";
+import {
+  _getGroupExitHandler,
+  _setGroupAfterRender,
+} from "./transition-group.ts";
 
 // ── Helpers ─────────────────────────────────────────────────────────
 
@@ -58,6 +81,7 @@ interface ComponentInstance {
   deps: Set<any>;
   unsubs: (() => void)[];
   computeds: Disposable[];
+  effectDisposes: (() => void)[];
   parentDom: Node;
   vnode: VNode;
   oldRendered: VNode | string | number | null;
@@ -74,8 +98,10 @@ interface ComponentInstance {
   _root: RootState;
   /** Callbacks to run after first mount. */
   mountCallbacks: (() => void)[];
-  /** Cleanup callbacks to run on unmount or before re-render. */
+  /** Cleanup callbacks to run on unmount or before re-render (body-level). */
   cleanupCallbacks: (() => void)[];
+  /** Cleanup callbacks registered inside onMount — run ONLY on unmount. */
+  mountCleanupCallbacks: (() => void)[];
   /** Whether the component has been mounted (first render complete). */
   mounted: boolean;
   /** Context values provided by this component (if it's a Provider). */
@@ -89,6 +115,10 @@ interface ComponentInstance {
   /** Dev mode: render count for excessive re-render detection. */
   _devRenderCount?: number;
   _devRenderResetTimer?: ReturnType<typeof setTimeout>;
+  /** Dev mode: name of the signal that triggered the last re-render. */
+  _triggerSignals?: Set<string>;
+  /** Parent component instance — used to rebuild ancestor stack for signal re-renders (AIO-249). */
+  parent: ComponentInstance | null;
 }
 
 interface RootState {
@@ -102,6 +132,12 @@ interface RootState {
   flushScheduled: boolean;
   /** Root App component for full re-render (lazy resolve). */
   App: ComponentFn;
+  /** Per-root afterRender callback queue. */
+  afterRenderQueue: (() => void)[];
+  /** Per-root counter for useId() — deterministic across renders. */
+  _idCounter: number;
+  /** AIO-209: cycle detection counts — persists across yield boundaries. */
+  _renderCounts: Map<ComponentInstance, number>;
 }
 
 interface HookState {
@@ -109,6 +145,7 @@ interface HookState {
   // deno-lint-ignore no-explicit-any
   deps: Set<any> | null;
   collected: Disposable[] | null;
+  effectCollected: (() => void)[] | null;
   parentDom: Node;
   isSvg: boolean;
 }
@@ -130,6 +167,7 @@ interface LifecycleCollector {
 }
 
 let _currentCollector: LifecycleCollector | null = null;
+let _insideMount = false;
 const _instanceStack: ComponentInstance[] = [];
 
 /**
@@ -142,12 +180,18 @@ export function onMount(fn: () => void): void {
 }
 
 /**
- * Register a cleanup callback that runs on unmount and before each re-render.
- * Must be called inside a component function body during render.
+ * Register a cleanup callback.
+ * - Called in component body: runs on unmount AND before each re-render.
+ * - Called inside onMount(): runs ONLY on unmount (AIO-76 fix).
+ * Must be called inside a component function body or onMount callback.
  */
 export function onCleanup(fn: () => void): void {
   if (!_currentCollector) return;
-  _currentCollector.cleanupCallbacks.push(fn);
+  if (_insideMount && "mountCleanupCallbacks" in _currentCollector) {
+    (_currentCollector as ComponentInstance).mountCleanupCallbacks.push(fn);
+  } else {
+    _currentCollector.cleanupCallbacks.push(fn);
+  }
 }
 
 /**
@@ -174,6 +218,113 @@ export function useRef<T>(initial: T): { current: T } {
     return ref;
   }
   return collector.refs[idx] as { current: T };
+}
+
+/**
+ * Create a component-scoped signal that persists across re-renders.
+ * Like signal() but tied to the component lifecycle — auto-GC'd on unmount.
+ * Must be called inside a component function body during render.
+ */
+export function useSignal<T>(initial: T): Signal<T> {
+  if (!_currentCollector) {
+    if (_devMode) {
+      console.warn(
+        "[aio-dev] useSignal() called outside a component render. The signal will not persist across re-renders.",
+      );
+    }
+    return signal(initial);
+  }
+  const collector = _currentCollector;
+  if (!collector.refs) collector.refs = [];
+  if (collector.refIndex === undefined) collector.refIndex = 0;
+  const idx = collector.refIndex++;
+  if (idx >= collector.refs.length) {
+    // First render — create signal and store in ref slot
+    const sig = signal(initial);
+    collector.refs.push(sig as unknown as { current: unknown });
+    return sig;
+  }
+  return collector.refs[idx] as unknown as Signal<T>;
+}
+
+// ── useId — SSR-safe unique ID ─────────────────────────────────────
+
+/** SSR counter — used by renderToString when no RootState exists. */
+let _ssrIdCounter = 0;
+
+/** Reset SSR ID counter. Called at the start of each renderToString. */
+export function _resetSsrIdCounter(): void {
+  _ssrIdCounter = 0;
+}
+
+/**
+ * Generate a unique, SSR-stable ID. Persists across re-renders.
+ * Format: `:r{N}:` — deterministic per render tree traversal order.
+ * Must be called inside a component function body during render.
+ */
+export function useId(): string {
+  if (!_currentCollector) {
+    // SSR path — no collector, use global SSR counter
+    return `:r${_ssrIdCounter++}:`;
+  }
+  const collector = _currentCollector;
+  if (!collector.refs) collector.refs = [];
+  if (collector.refIndex === undefined) collector.refIndex = 0;
+  const idx = collector.refIndex++;
+  if (idx >= collector.refs.length) {
+    // First render — allocate ID from root counter
+    const root = _activeRoot;
+    const n = root ? root._idCounter++ : _ssrIdCounter++;
+    const ref = { current: `:r${n}:` };
+    collector.refs.push(ref);
+    return ref.current;
+  }
+  return (collector.refs[idx] as { current: string }).current;
+}
+
+// ── useOptimistic — optimistic UI during async operations ──────────
+
+/**
+ * Optimistic UI hook. Shows an immediate update while an async action runs,
+ * then reverts to the real state when it completes (success or failure).
+ *
+ * @param passthrough - Current confirmed state (usually from server/feature).
+ * @param updateFn - Pure function: (current, optimisticValue) => newState.
+ * @returns [displayState, addOptimistic] — display reflects optimistic overlay
+ *   when pending, otherwise passthrough. addOptimistic(value) applies the overlay.
+ */
+export function useOptimistic<T, A = T>(
+  passthrough: T,
+  updateFn: (current: T, optimistic: A) => T,
+): [T, (action: A) => void] {
+  // Pending actions in a ref (no reactivity on mutation).
+  // A version signal triggers re-render when addOptimistic is called.
+  const pendingRef = useRef<A[]>([]);
+  const version = useSignal(0);
+
+  // When passthrough changes (server confirmed), clear all pending actions.
+  const prevRef = useRef<T>(passthrough);
+  if (passthrough !== prevRef.current) {
+    prevRef.current = passthrough;
+    pendingRef.current = [];
+  }
+
+  // Track version signal so component re-renders on addOptimistic.
+  // Read is the tracking mechanism — value itself is unused.
+  void version.value;
+
+  // Display state: apply all pending optimistic actions on top of passthrough.
+  let display = passthrough;
+  for (const action of pendingRef.current) {
+    display = updateFn(display, action);
+  }
+
+  function addOptimistic(action: A): void {
+    pendingRef.current = [...pendingRef.current, action];
+    version.set(version.peek() + 1);
+  }
+
+  return [display, addOptimistic];
 }
 
 // ── Context / Provider ──────────────────────────────────────────────
@@ -229,6 +380,70 @@ export function useContext<T>(ctx: Context<T>): T {
   return ctx._default;
 }
 
+/**
+ * Select a slice of context. Component only re-renders when the selected value changes.
+ * Uses a computed signal so only the selected slice is tracked as a dependency.
+ * Must be called inside a component function body during render.
+ */
+export function useContextSelector<T, R>(
+  ctx: Context<T>,
+  selector: (value: T) => R,
+): R {
+  // Walk the instance stack to find the context signal directly (without tracking)
+  let contextSignal: Signal<T> | null = null;
+  for (let i = _instanceStack.length - 1; i >= 0; i--) {
+    const inst = _instanceStack[i]!;
+    if (inst.contexts?.has(ctx._id)) {
+      const entry = inst.contexts.get(ctx._id);
+      if (entry && typeof entry === "object" && "value" in entry) {
+        contextSignal = entry as Signal<T>;
+      }
+      break;
+    }
+  }
+
+  if (!contextSignal) {
+    // No provider — apply selector to default
+    return selector(ctx._default);
+  }
+
+  // Read the context signal and apply selector — the computed tracks the context signal,
+  // but the component only tracks the computed's output value.
+  // The computed memo ensures the component only re-renders when the selected slice changes.
+  const sig = contextSignal;
+  const selected = computed(() => selector(sig.value));
+  return selected.value;
+}
+
+// ── afterRender queue (per-root isolated) ───────────────────────────
+
+/** Currently active root during render — used by afterRender() to find the right queue. */
+let _activeRoot: RootState | null = null;
+
+/**
+ * Register a callback to run after the current render cycle commits to the DOM.
+ * Works for both initial mount and signal-triggered re-renders.
+ * Use for DOM measurement, scroll restoration, imperative DOM API calls, etc.
+ */
+export function afterRender(fn: () => void): void {
+  if (_activeRoot) {
+    _activeRoot.afterRenderQueue.push(fn);
+  }
+}
+
+function _flushAfterRender(root: RootState): void {
+  const cbs = root.afterRenderQueue;
+  if (cbs.length === 0) return;
+  root.afterRenderQueue = [];
+  for (const cb of cbs) {
+    try {
+      cb();
+    } catch (e) {
+      console.error("[aio-renderer] afterRender callback error:", e);
+    }
+  }
+}
+
 // ── State ───────────────────────────────────────────────────────────
 
 const _stateMap = new WeakMap<MountHandle, RootState>();
@@ -247,11 +462,58 @@ export function _setDocument(doc: AnyDoc): void {
 let _devMode = false;
 const DEV_RENDER_LIMIT = 50;
 
+/** @internal Dev-mode a11y checks on element creation. */
+function _devA11yCheck(tag: string, props: Record<string, unknown>): void {
+  // img without alt
+  if (tag === "img" && !("alt" in props)) {
+    console.warn(
+      `[aio-dev] <img> missing "alt" attribute. Add alt="" for decorative images or descriptive text for meaningful ones.`,
+    );
+  }
+
+  // onClick without keyboard handler (on non-interactive elements)
+  if (
+    props.onClick &&
+    !props.onKeyDown &&
+    !props.onKeyUp &&
+    !props.onKeyPress &&
+    tag !== "button" &&
+    tag !== "a" &&
+    tag !== "input" &&
+    tag !== "select" &&
+    tag !== "textarea"
+  ) {
+    console.warn(
+      `[aio-dev] <${tag}> has onClick but no keyboard handler. Add onKeyDown for keyboard accessibility.`,
+    );
+  }
+
+  // form input without label association
+  if (
+    (tag === "input" || tag === "textarea" || tag === "select") &&
+    !props["aria-label"] &&
+    !props["aria-labelledby"] &&
+    !props.id
+  ) {
+    console.warn(
+      `[aio-dev] <${tag}> has no label association. Add id (for <label htmlFor>), aria-label, or aria-labelledby.`,
+    );
+  }
+}
+
 /** Enable dev-mode warnings (excessive re-renders, also enables VDOM key warnings). */
 export function setDevMode(enabled: boolean): void {
   _devMode = enabled;
   _setDevModeVdom(enabled);
+  _setDevA11yCheck(enabled ? _devA11yCheck : null);
 }
+
+// Wire lifecycle hooks to <Transition> and <TransitionGroup> (avoids circular import)
+_setLifecycleHooks(onMount, onCleanup, afterRender);
+_setGroupAfterRender(afterRender, useRef);
+
+// Wire SSR ID counter reset into renderToString
+_setSsrStartHook(_resetSsrIdCounter);
 
 // ── Shallow props comparison (auto-memo) ────────────────────────────
 
@@ -263,7 +525,7 @@ function _shallowEqual(
   const bKeys = Object.keys(b);
   if (aKeys.length !== bKeys.length) return false;
   for (const k of aKeys) {
-    if (!Object.is(a[k], b[k])) return false;
+    if (!Object.hasOwn(b, k) || !Object.is(a[k], b[k])) return false; // AIO-237: key-existence check
   }
   return true;
 }
@@ -293,6 +555,9 @@ export function mount(root: any, App: ComponentFn): MountHandle {
     pendingComponents: new Set(),
     flushScheduled: false,
     App,
+    afterRenderQueue: [],
+    _idCounter: 0,
+    _renderCounts: new Map(),
   };
 
   const handle: MountHandle = {
@@ -313,10 +578,29 @@ export function mount(root: any, App: ComponentFn): MountHandle {
     _rerenderRoot(state);
   };
 
-  // Initial render
-  const vnode = h(App, null);
-  _render(state.root, vnode, null, state.ctx);
-  state.vnode = vnode;
+  // Wire deferred removal for <Transition> / <TransitionGroup> exit animations
+  state.ctx.onBeforeRemove = (el) => {
+    const inner = _getExitHandler(el);
+    const outer = _getGroupExitHandler(el);
+    if (inner && outer) {
+      return Promise.all([inner(el), outer(el)]).then(() => {});
+    }
+    const handler = inner ?? outer;
+    return handler ? handler(el) : undefined;
+  };
+
+  // Initial render — set active root so afterRender() finds the right queue
+  _activeRoot = state;
+  _setDelegationRoot(root);
+  try {
+    const vnode = h(App, null);
+    _render(state.root, vnode, null, state.ctx);
+    state.vnode = vnode;
+    _flushAfterRender(state);
+  } finally {
+    _activeRoot = null;
+    _setDelegationRoot(null);
+  }
 
   return handle;
 }
@@ -338,6 +622,9 @@ export function hydrate(root: any, App: ComponentFn): MountHandle {
     pendingComponents: new Set(),
     flushScheduled: false,
     App,
+    afterRenderQueue: [],
+    _idCounter: 0,
+    _renderCounts: new Map(),
   };
 
   const handle: MountHandle = {
@@ -353,50 +640,85 @@ export function hydrate(root: any, App: ComponentFn): MountHandle {
     if (state.disposed) return;
     _rerenderRoot(state);
   };
+  state.ctx.onBeforeRemove = (el) => {
+    const inner = _getExitHandler(el);
+    const outer = _getGroupExitHandler(el);
+    if (inner && outer) {
+      return Promise.all([inner(el), outer(el)]).then(() => {});
+    }
+    const handler = inner ?? outer;
+    return handler ? handler(el) : undefined;
+  };
 
   // Execute component tree to build VNode structure
-  const vnode = h(App, null);
-
-  // Walk existing DOM and attach references
-  const success = _hydrateNode(root, vnode, state.ctx, false, 0);
-  if (!success) {
-    // Mismatch — fall back to full render
-    root.innerHTML = "";
-    _render(root, vnode, null, state.ctx);
+  _activeRoot = state;
+  _setDelegationRoot(root);
+  try {
+    const vnode = h(App, null);
+    const consumed = _hydrateNode(root, vnode, state.ctx, false, 0);
+    if (consumed < 0) {
+      root.innerHTML = "";
+      _render(root, vnode, null, state.ctx);
+    }
+    state.vnode = vnode;
+    _flushAfterRender(state);
+  } finally {
+    _activeRoot = null;
+    _setDelegationRoot(null);
   }
-  state.vnode = vnode;
 
   return handle;
 }
 
-/** Hydrate a single VNode against existing DOM. Returns true on success. */
+/**
+ * Hydrate a single VNode against existing DOM.
+ * Returns the number of DOM nodes consumed (>= 0) on success, or -1 on failure.
+ * AIO-92: Fragments/components can consume N DOM nodes, not always 1.
+ */
 function _hydrateNode(
   parent: Node,
   vnode: VNode | string | number,
   ctx: RenderCtx,
   isSvg: boolean,
   childIndex: number,
-): boolean {
-  const domNode = parent.childNodes[childIndex];
-  if (!domNode) return false;
-
-  // Text nodes
+): number {
+  // Text nodes — consume exactly 1 DOM node
   if (typeof vnode === "string" || typeof vnode === "number") {
-    if (domNode.nodeType !== 3) return false; // Not a text node
+    const domNode = parent.childNodes[childIndex];
+    if (!domNode) return -1;
+    if (domNode.nodeType !== 3) return -1;
     if (domNode.textContent !== String(vnode)) {
-      domNode.textContent = String(vnode); // Fix mismatch
+      domNode.textContent = String(vnode);
     }
-    return true;
+    return 1;
   }
 
-  // Component — execute and hydrate rendered output
+  // Null placeholder — consume 1 comment node (AIO-107)
+  if (vnode.tag === Symbol.for("aio.Null") as typeof vnode.tag) {
+    const domNode = parent.childNodes[childIndex];
+    if (domNode && domNode.nodeType === 8) { // Comment node
+      vnode._dom = domNode;
+      return 1;
+    }
+    // No comment found (SSR mismatch) — create one
+    const comment = (parent.ownerDocument ?? document).createComment("");
+    const anchor = parent.childNodes[childIndex];
+    if (anchor) parent.insertBefore(comment, anchor);
+    else parent.appendChild(comment);
+    vnode._dom = comment;
+    return 1;
+  }
+
+  // Component — consume whatever the rendered output consumes
   if (typeof vnode.tag === "function") {
     const hookState = ctx.hooks?.beforeComponent(vnode, null, parent, isSvg);
     let rendered: VNode | string | number | null;
     try {
       rendered = (vnode.tag as ComponentFn)({
         ...vnode.props,
-        children: vnode.children,
+        children: vnode.children.length > 0
+          ? vnode.children
+          : (vnode.props.children ?? vnode.children),
       });
     } catch (e) {
       ctx.hooks?.abortComponent?.(vnode, hookState);
@@ -406,20 +728,20 @@ function _hydrateNode(
     ctx.hooks?.afterComponent(vnode, rendered, hookState);
     if (rendered == null) {
       ctx.hooks?.afterSubtree?.(vnode);
-      return true;
+      return 0; // null render = 0 DOM nodes
     }
-    const ok = _hydrateNode(parent, rendered, ctx, isSvg, childIndex);
-    if (ok) vnode._dom = getDom(rendered) ?? undefined;
+    const count = _hydrateNode(parent, rendered, ctx, isSvg, childIndex);
+    if (count >= 0) vnode._dom = getDom(rendered) ?? undefined;
     ctx.hooks?.afterSubtree?.(vnode);
-    return ok;
+    return count;
   }
 
-  // Portal — skip during hydration (portal content was not in SSR output)
+  // Portal — consumes 0 DOM nodes (renders elsewhere)
   if (vnode.tag === Symbol.for("aio.Portal") as typeof vnode.tag) {
-    return true; // Nothing to hydrate — portal renders elsewhere
+    return 0;
   }
 
-  // ErrorBoundary / Suspense / Fragment — hydrate children sequentially
+  // ErrorBoundary / Suspense / Fragment — children are inline in parent DOM
   if (
     vnode.tag === (Symbol.for("aio.Fragment") as typeof vnode.tag) ||
     vnode.tag === (Symbol.for("aio.ErrorBoundary") as typeof vnode.tag) ||
@@ -427,49 +749,89 @@ function _hydrateNode(
   ) {
     let idx = childIndex;
     for (const child of vnode.children) {
-      if (!_hydrateNode(parent, child, ctx, isSvg, idx)) return false;
-      idx++;
+      const consumed = _hydrateNode(parent, child, ctx, isSvg, idx);
+      if (consumed < 0) return -1;
+      idx += consumed;
     }
-    const firstDom = vnode.children.length > 0
-      ? getDom(vnode.children[0]!)
-      : null;
-    if (firstDom) vnode._dom = firstDom;
-    return true;
+    // AIO-256: loop to find first DOM-bearing child (matches diff path in vdom.ts)
+    for (const child of vnode.children) {
+      const d = getDom(child);
+      if (d) {
+        vnode._dom = d;
+        break;
+      }
+    }
+    return idx - childIndex; // total DOM nodes consumed
   }
 
-  // Element
-  if (domNode.nodeType !== 1) return false;
+  // Element — consume exactly 1 DOM node, hydrate children inside it
+  const domNode = parent.childNodes[childIndex];
+  if (!domNode || domNode.nodeType !== 1) return -1;
   const el = domNode as HTMLElement;
   if (el.tagName.toLowerCase() !== (vnode.tag as string).toLowerCase()) {
-    return false;
+    return -1;
   }
 
-  // Attach _dom reference
   vnode._dom = el;
-
-  // Apply props (event listeners, refs — attributes already in DOM from SSR)
   _hydrateProps(el, vnode.props);
 
-  // Hydrate children
-  const nowSvg = isSvg || el.tagName === "svg";
+  const nowSvg = isSvg || SVG_TAGS.has(el.tagName.toLowerCase());
+  let childIdx = 0;
   for (let i = 0; i < vnode.children.length; i++) {
-    if (!_hydrateNode(el, vnode.children[i]!, ctx, nowSvg, i)) return false;
+    const consumed = _hydrateNode(
+      el,
+      vnode.children[i]!,
+      ctx,
+      nowSvg,
+      childIdx,
+    );
+    if (consumed < 0) return -1;
+    childIdx += consumed;
   }
 
-  return true;
+  // AIO-249: bind signal text children during hydration (matches createDom path in vdom.ts)
+  if (vnode._signalChildren) {
+    _bindSignalTextChildren(el, vnode._signalChildren);
+  }
+
+  return 1; // element itself is 1 DOM node in parent
 }
 
-/** Apply event listeners and refs during hydration (attributes are already set). */
+/** Apply event listeners, signal bindings, and refs during hydration (attributes are already set). */
 function _hydrateProps(el: HTMLElement, props: Record<string, unknown>): void {
+  // AIO-166: detect onChange+onInput collision on form elements
+  const _isFormEl = el.tagName === "INPUT" || el.tagName === "TEXTAREA" ||
+    el.tagName === "SELECT";
+  const _hasOnInput = "onInput" in props && _isFormEl;
   for (const [k, v] of Object.entries(props)) {
-    if (k === "key" || k === "children" || k === "ref") continue;
+    if (k === "key" || k === "children" || k === "ref" || k === "use") continue;
     if (k.startsWith("on") && typeof v === "function") {
-      const evt = k.slice(2).toLowerCase();
-      el.addEventListener(evt, v as EventListener);
+      const evt = _mapEventName(
+        k.slice(2).toLowerCase(),
+        el,
+        k === "onChange" ? _hasOnInput : undefined,
+      );
+      // Wrap in batch() — same as applyProps in vdom.ts — so multiple signal
+      // writes in a single event handler coalesce into one re-render.
+      const handler = v as EventListener;
+      const wrapped = ((e: Event) => batch(() => handler(e))) as EventListener;
+      if (_isDelegated(evt) && _activeRoot) {
+        // Delegated: store in lookup map, ensure root listener exists
+        _ensureDelegation(_activeRoot.root, evt);
+        _setWrapped(el, evt, wrapped);
+      } else {
+        // Non-delegated: per-element listener
+        el.addEventListener(evt, wrapped);
+        _setWrapped(el, evt, wrapped);
+      }
     }
   }
+  // Bind signal props — create direct signal→DOM effects (same as createDom path)
+  bindSignalProps(el, props);
   // Handle ref
   if (props.ref) _callRef(props.ref, el);
+  // Apply action directives (AIO-89: `use` was skipped during hydration)
+  if (props.use) _applyActions(el, props.use);
 }
 
 // ── Unmount ─────────────────────────────────────────────────────────
@@ -486,6 +848,11 @@ export function _unmount(handle: MountHandle): void {
     _unmountTree(state.vnode, state.ctx);
   }
 
+  // Clean up event delegation root listeners
+  if (state.root && typeof state.root.addEventListener === "function") {
+    _teardownDelegation(state.root);
+  }
+
   state.root.innerHTML = "";
 }
 
@@ -498,6 +865,11 @@ function _unmountTree(
     ctx.hooks?.unmountComponent(vnode);
     _unmountTree(vnode._rendered ?? null, ctx);
   } else {
+    // Dispose signal binding effects on this element (AIO-78)
+    if (vnode._dom && typeof (vnode._dom as Element).tagName === "string") {
+      cleanupSignalBindings(vnode._dom as Element);
+      _cleanupSignalTextChildren(vnode._dom as Element);
+    }
     for (const child of vnode.children) {
       _unmountTree(child, ctx);
     }
@@ -518,16 +890,70 @@ function _scheduleComponentRender(inst: ComponentInstance): void {
   }
 }
 
+// "Kis's Concurrency" — lightweight yield mechanism during batch flush.
+// Budget per flush cycle: yield to browser after 12ms so input stays responsive.
+// Leaves ~4ms for browser work within a 16ms frame budget. Unlike React's 10K-line
+// priority scheduler, this is a simple time-slice that handles 95% of cases where
+// many components update from a single signal change.
+const _FLUSH_BUDGET_MS = 12;
+
 function _flushPending(root: RootState): void {
   root.flushScheduled = false;
-  while (root.pendingComponents.size > 0) {
-    const batch = [...root.pendingComponents];
-    root.pendingComponents.clear();
-    for (const inst of batch) {
-      if (inst.disposed || !inst.pendingRender) continue;
-      inst.pendingRender = false;
-      _rerenderComponent(inst);
+  if (root.disposed) return; // AIO-243: guard against flush on disposed root after yield
+  const prevRoot = _activeRoot;
+  _activeRoot = root;
+  _setDelegationRoot(root.root);
+  const _now = typeof performance !== "undefined"
+    ? () => performance.now()
+    : Date.now;
+  try {
+    const deadline = _now() + _FLUSH_BUDGET_MS;
+    // AIO-167: Cycle detection — track per-component render count within a single
+    // flush. An individual component re-rendering >10 times in one flush is a signal
+    // write during render (A triggers B triggers A). A raw iteration cap is wrong
+    // because (a) long cascades of DIFFERENT components are legitimate and (b)
+    // clearing pendingComponents without resetting pendingRender creates zombies.
+    // AIO-209: use root-scoped map that persists across yield boundaries
+    const _renderCounts = root._renderCounts;
+    const _CYCLE_LIMIT = 10;
+    while (root.pendingComponents.size > 0) {
+      const batch = [...root.pendingComponents];
+      root.pendingComponents.clear();
+      for (const inst of batch) {
+        if (inst.disposed || !inst.pendingRender) continue;
+        // Check for render cycle before processing
+        const count = (_renderCounts.get(inst) ?? 0) + 1;
+        _renderCounts.set(inst, count);
+        if (count > _CYCLE_LIMIT) {
+          const name = typeof inst.vnode.tag === "function"
+            ? (inst.vnode.tag.name || "Anonymous")
+            : "Component";
+          console.error(
+            `[aio-renderer] ${name} re-rendered ${_CYCLE_LIMIT} times in a single flush — ` +
+              `likely signal write during render. Breaking cycle for this component.`,
+          );
+          // Reset pendingRender so the component isn't permanently frozen —
+          // it can still respond to future signal changes from user interaction.
+          inst.pendingRender = false;
+          continue;
+        }
+        inst.pendingRender = false;
+        _rerenderComponent(inst);
+        // Yield to browser if over budget — schedule continuation
+        if (_now() > deadline && root.pendingComponents.size > 0) {
+          _activeRoot = prevRoot;
+          _setDelegationRoot(null);
+          root.flushScheduled = true;
+          queueMicrotask(() => _flushPending(root));
+          return; // afterRender fires when continuation completes
+        }
+      }
     }
+    root._renderCounts.clear(); // AIO-209: reset after full flush completes
+    _flushAfterRender(root);
+  } finally {
+    _activeRoot = prevRoot;
+    _setDelegationRoot(null);
   }
 }
 
@@ -540,9 +966,18 @@ function _rerenderRoot(state: RootState): void {
     const inst = (oldVnode as VNode)._instance as ComponentInstance | undefined;
     if (inst) inst.selfTriggered = true;
   }
-  const vnode = h(state.App, null);
-  _diff(state.root, vnode, oldVnode, state.ctx);
-  state.vnode = vnode;
+  const prevRoot = _activeRoot;
+  _activeRoot = state;
+  _setDelegationRoot(state.root);
+  try {
+    const vnode = h(state.App, null);
+    _diff(state.root, vnode, oldVnode, state.ctx);
+    state.vnode = vnode;
+    _flushAfterRender(state);
+  } finally {
+    _activeRoot = prevRoot;
+    _setDelegationRoot(null);
+  }
 }
 
 // ── Per-component re-render ─────────────────────────────────────────
@@ -577,14 +1012,30 @@ function _rerenderComponent(inst: ComponentInstance): void {
   // Run cleanup callbacks before re-render (exception-safe)
   _runCleanups(inst.cleanupCallbacks);
   inst.cleanupCallbacks = [];
+  inst.mountCallbacks = []; // AIO-161: prevent accumulation on re-render
 
-  // Unsubscribe old deps and dispose old computeds
+  // Unsubscribe old deps and dispose old computeds/effects
   for (const unsub of inst.unsubs) unsub();
   inst.unsubs = [];
   _computedDisposeAll(inst.computeds);
+  _effectDisposeAll(inst.effectDisposes);
+
+  // AIO-249: Build ancestor chain so useContext() can walk _instanceStack
+  // during signal-triggered re-renders (stack is otherwise empty).
+  const ancestors: ComponentInstance[] = [];
+  let ancestor = inst.parent;
+  while (ancestor) {
+    ancestors.push(ancestor);
+    ancestor = ancestor.parent;
+  }
+  // Push ancestors root-first so the stack order matches normal rendering
+  for (let i = ancestors.length - 1; i >= 0; i--) {
+    _instanceStack.push(ancestors[i]!);
+  }
 
   // Re-execute component with tracking
   const collected = _computedCollectStart();
+  const effectCollected = _effectCollectStart();
   const deps = _trackStart();
   inst.refIndex = 0;
   _currentCollector = inst;
@@ -592,53 +1043,93 @@ function _rerenderComponent(inst: ComponentInstance): void {
   try {
     rendered = (vnode.tag as ComponentFn)({
       ...vnode.props,
-      children: vnode.children,
+      children: vnode.children.length > 0
+        ? vnode.children
+        : (vnode.props.children ?? vnode.children),
     });
   } catch (error) {
-    // Error during signal-triggered re-render — keep old output, log error
+    // Error during signal-triggered re-render — keep old output, log error (AIO-138)
     _currentCollector = null;
     _trackEnd(deps);
     _computedCollectEnd(collected);
+    _effectCollectEnd(effectCollected);
+    // Dispose orphaned computeds/effects from the failed render (AIO-160)
+    _computedDisposeAll(collected);
+    _effectDisposeAll(effectCollected);
     console.error("[aio-renderer] Component render error:", error);
-    // Re-subscribe to deps so future updates still work
-    _subscribeComponentDeps(inst, inst.deps);
+    // Subscribe to the NEW deps tracked during the (partial) failed render.
+    // Using inst.deps would subscribe to disposed computeds → zombie component.
+    _subscribeComponentDeps(inst, deps);
+    inst.deps = deps;
     return;
+  } finally {
+    // AIO-249: Pop ancestor chain (both success and error paths)
+    for (let _a = 0; _a < ancestors.length; _a++) {
+      _instanceStack.pop();
+    }
   }
   _currentCollector = null;
   _trackEnd(deps);
   _computedCollectEnd(collected);
+  _effectCollectEnd(effectCollected);
 
   vnode._rendered = rendered;
 
   // Push onto instance stack so children can find context (Provider support)
   _instanceStack.push(inst);
 
-  // Diff only this subtree
+  // Diff only this subtree — try-finally guarantees stack pop AND state update
+  // even if _diff throws (AIO-180: prevents zombie component on diff exception)
   const ctx = inst._ctx;
-  _diff(inst.parentDom, rendered ?? null, oldRendered ?? null, ctx, inst.isSvg);
-  vnode._dom = rendered ? (getDom(rendered) ?? undefined) : undefined;
+  try {
+    _diff(
+      inst.parentDom,
+      rendered ?? null,
+      oldRendered ?? null,
+      ctx,
+      inst.isSvg,
+    );
+    vnode._dom = rendered ? (getDom(rendered) ?? undefined) : undefined;
 
-  _instanceStack.pop();
+    // Record render event for DevTools (only on successful diff)
+    if (_devStart) {
+      const name = typeof vnode.tag === "function"
+        ? (vnode.tag.name || "Anonymous")
+        : "Component";
+      _recordRender({
+        component: name,
+        timestamp: Date.now(),
+        durationMs: performance.now() - _devStart,
+        trigger: "signal",
+        signalNames: inst._triggerSignals?.size
+          ? [...inst._triggerSignals]
+          : undefined,
+      });
+      inst._triggerSignals = undefined;
+    }
+  } finally {
+    _instanceStack.pop();
 
-  // Record render event for DevTools
-  if (_devStart) {
+    // Update instance state regardless of _diff success (AIO-180).
+    // Without this, a _diff throw leaves inst with disposed deps/computeds
+    // and no signal subscriptions → zombie component that never re-renders.
+    inst.oldRendered = rendered;
+    inst.deps = deps;
+    inst.computeds = collected;
+    inst.effectDisposes = effectCollected;
+    inst.selfTriggered = false;
+    _subscribeComponentDeps(inst, deps);
+  }
+
+  // AIO-167 diagnostic: warn if component has no signal deps after re-render
+  if (_devMode && deps.size === 0 && inst.unsubs.length === 0) {
     const name = typeof vnode.tag === "function"
       ? (vnode.tag.name || "Anonymous")
       : "Component";
-    _recordRender({
-      component: name,
-      timestamp: Date.now(),
-      durationMs: performance.now() - _devStart,
-      trigger: "signal",
-    });
+    console.warn(
+      `[aio-dev] ${name} re-rendered with 0 signal deps — component will not respond to future signal changes.`,
+    );
   }
-
-  // Update instance
-  inst.oldRendered = rendered;
-  inst.deps = deps;
-  inst.computeds = collected;
-  inst.selfTriggered = false;
-  _subscribeComponentDeps(inst, deps);
 }
 
 // ── Subscribe component instance to its deps ────────────────────────
@@ -648,11 +1139,14 @@ function _subscribeComponentDeps(
   // deno-lint-ignore no-explicit-any
   deps: Set<any>,
 ): void {
-  const subscriber = {
-    execute: () => _scheduleComponentRender(inst),
-  };
-
   for (const dep of deps) {
+    const subscriber = {
+      execute: () => {
+        if (!inst._triggerSignals) inst._triggerSignals = new Set();
+        inst._triggerSignals.add(dep._name ?? "anonymous");
+        _scheduleComponentRender(inst);
+      },
+    };
     dep._subscribers.add(subscriber);
     inst.unsubs.push(() => dep._subscribers.delete(subscriber));
   }
@@ -677,7 +1171,14 @@ function _createHooks(rootState: RootState): VDomHooks {
           _shallowEqual(vnode.props, inst.prevProps) &&
           _childrenEqual(vnode.children, inst.prevChildren)
         ) {
-          return { skip: true, deps: null, collected: null, parentDom, isSvg };
+          return {
+            skip: true,
+            deps: null,
+            collected: null,
+            effectCollected: null,
+            parentDom,
+            isSvg,
+          };
         }
       }
 
@@ -686,13 +1187,16 @@ function _createHooks(rootState: RootState): VDomHooks {
         // Run cleanup callbacks before re-render (exception-safe)
         _runCleanups(inst.cleanupCallbacks);
         inst.cleanupCallbacks = [];
+        inst.mountCallbacks = []; // AIO-161: prevent accumulation on re-render
         // Clean up old tracking before re-render
         for (const unsub of inst.unsubs) unsub();
         inst.unsubs = [];
         _computedDisposeAll(inst.computeds);
+        _effectDisposeAll(inst.effectDisposes);
       }
 
       const collected = _computedCollectStart();
+      const effectCollected = _effectCollectStart();
       const deps = _trackStart();
 
       // Set collector for onMount/onCleanup/useRef registration during component execution
@@ -701,7 +1205,14 @@ function _createHooks(rootState: RootState): VDomHooks {
       collector.refIndex = 0; // Reset ref index for this render pass
       _currentCollector = collector;
 
-      return { skip: false, deps, collected, parentDom, isSvg };
+      return {
+        skip: false,
+        deps,
+        collected,
+        effectCollected,
+        parentDom,
+        isSvg,
+      };
     },
 
     afterComponent(
@@ -717,6 +1228,7 @@ function _createHooks(rootState: RootState): VDomHooks {
 
       _trackEnd(hs.deps!);
       _computedCollectEnd(hs.collected!);
+      _effectCollectEnd(hs.effectCollected!);
 
       const collector = _currentCollector!;
       _currentCollector = null;
@@ -729,6 +1241,7 @@ function _createHooks(rootState: RootState): VDomHooks {
           deps: hs.deps!,
           unsubs: [],
           computeds: hs.collected!,
+          effectDisposes: hs.effectCollected!,
           parentDom: hs.parentDom,
           vnode,
           oldRendered: rendered,
@@ -742,16 +1255,22 @@ function _createHooks(rootState: RootState): VDomHooks {
           _root: rootState,
           mountCallbacks: collector.mountCallbacks,
           cleanupCallbacks: collector.cleanupCallbacks,
+          mountCleanupCallbacks: [],
           mounted: false,
           contexts: collector.contexts,
           refs: collector.refs,
           refIndex: collector.refIndex,
+          // AIO-249: capture parent so signal re-renders can rebuild ancestor stack
+          parent: _instanceStack.length > 0
+            ? _instanceStack[_instanceStack.length - 1]!
+            : null,
         };
         vnode._instance = inst;
       } else {
         // Update existing instance
         inst.deps = hs.deps!;
         inst.computeds = hs.collected!;
+        inst.effectDisposes = hs.effectCollected!;
         inst.vnode = vnode;
         inst.oldRendered = rendered;
         inst.parentDom = hs.parentDom;
@@ -759,6 +1278,10 @@ function _createHooks(rootState: RootState): VDomHooks {
         inst.prevProps = { ...vnode.props };
         inst.prevChildren = vnode.children;
         inst.selfTriggered = false;
+        // AIO-249: update parent in case component moved in tree
+        inst.parent = _instanceStack.length > 0
+          ? _instanceStack[_instanceStack.length - 1]!
+          : null;
         // Clear pending render — this component is being rendered in the current diff pass,
         // so it must not be re-rendered again by _flushPending (which lacks ancestor context).
         if (inst.pendingRender) {
@@ -778,7 +1301,16 @@ function _createHooks(rootState: RootState): VDomHooks {
         const cbs = inst.mountCallbacks;
         inst.mountCallbacks = [];
         inst.mounted = true;
-        for (const cb of cbs) cb();
+        // Restore collector so onCleanup() inside onMount() can register (AIO-74)
+        // Set _insideMount so onCleanup() pushes to mountCleanupCallbacks (AIO-76)
+        _currentCollector = inst as unknown as LifecycleCollector;
+        _insideMount = true;
+        try {
+          for (const cb of cbs) cb();
+        } finally {
+          _insideMount = false;
+          _currentCollector = null;
+        }
       } else if (isFirstRender) {
         inst.mounted = true;
       }
@@ -794,6 +1326,10 @@ function _createHooks(rootState: RootState): VDomHooks {
       if (hs && !hs.skip && hs.deps) {
         _trackEnd(hs.deps);
         _computedCollectEnd(hs.collected!);
+        _effectCollectEnd(hs.effectCollected!);
+        // AIO-205: dispose orphaned computeds/effects from partial render
+        _computedDisposeAll(hs.collected!);
+        _effectDisposeAll(hs.effectCollected!);
       }
       _currentCollector = null;
     },
@@ -801,15 +1337,18 @@ function _createHooks(rootState: RootState): VDomHooks {
     unmountComponent(vnode: VNode): void {
       const inst = vnode._instance as ComponentInstance | undefined;
       if (!inst) return;
-      // Run cleanup callbacks on unmount (exception-safe)
+      // Run both body-level and mount-level cleanups on unmount (exception-safe)
       _runCleanups(inst.cleanupCallbacks);
       inst.cleanupCallbacks = [];
+      _runCleanups(inst.mountCleanupCallbacks);
+      inst.mountCleanupCallbacks = [];
       inst.disposed = true;
       inst.pendingRender = false;
       inst._root.pendingComponents.delete(inst);
       for (const unsub of inst.unsubs) unsub();
       inst.unsubs = [];
       _computedDisposeAll(inst.computeds);
+      _effectDisposeAll(inst.effectDisposes);
       vnode._instance = undefined;
     },
   };

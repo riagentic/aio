@@ -1,6 +1,11 @@
 // feature-compose.ts — composeFeatures + resolve + registry
 
-import { type Draft, produce } from "immer";
+import {
+  type Draft,
+  enablePatches,
+  type Patch,
+  produceWithPatches,
+} from "immer";
 import { log } from "./logger.ts";
 import type { ScheduleEffect } from "./schedule.ts";
 import type { FlowDef } from "./flow.ts";
@@ -12,6 +17,8 @@ import {
   runFlow,
 } from "./flow.ts";
 import { resolveCall } from "./feature-impl.ts";
+
+enablePatches();
 import type { ReduceBreakdown } from "./time-travel.ts";
 import { type AioError, createAioError } from "./error.ts";
 import { diagEmit } from "./diagnostic-bus.ts";
@@ -60,7 +67,10 @@ export type ComposedFeatures = {
       name: string,
       app: { dispatch: (a: Msg) => void; getState: () => unknown },
     ) => void;
-    disable: (name: string, dispatch: (a: Msg) => void) => void;
+    disable: (
+      name: string,
+      app: { dispatch: (a: Msg) => void; getState: () => unknown },
+    ) => void;
     isEnabled: (name: string) => boolean;
     status: (
       name: string,
@@ -167,7 +177,9 @@ export function composeFeatures(
   const _circuitBreaker = opts?.circuitBreaker;
   const _cbMaxErrors = _circuitBreaker?.maxErrors ?? 0;
   const _cbWindow = _circuitBreaker?.window;
-  let _cbDispatch: ((a: Msg) => void) | undefined;
+  let _cbApp:
+    | { dispatch: (a: Msg) => void; getState: () => unknown }
+    | undefined;
   let onFeatureDisable: ((prefix: string) => void) | undefined;
   const _perfCheck = opts?.perfCheck ?? false;
   let _lastBreakdown: ReduceBreakdown | undefined;
@@ -213,9 +225,11 @@ export function composeFeatures(
   }
 
   // ── Per-feature reduce ──
+  type FeaturePatches = { feature: string; ops: Patch[] };
   type ReduceResult = {
     state: Record<string, unknown>;
     effects: (Msg | ScheduleEffect)[];
+    patches?: FeaturePatches | FeaturePatches[];
     _bd?: { produce: number; clone: number; spread: number };
   };
 
@@ -273,28 +287,53 @@ export function composeFeatures(
       }
 
       // Run reduce with Immer (feature's slice only)
+      // _status is set INSIDE the draft so produceWithPatches captures it in patches
+      const targetStatus = transitions[lookupKey];
       let effects: (Msg | ScheduleEffect)[] = [];
       const t0 = _perfCheck ? performance.now() : 0;
-      const nextSlice = produce(
-        featureState,
-        (draft: Draft<Record<string, unknown>>) => {
-          const result = reduce(draft, action, {
-            A: f.__aio.actions,
-            E: f.__aio.effects,
-          });
-          if (Array.isArray(result)) effects = result;
-        },
-      );
+      let nextSlice: Record<string, unknown>;
+      let featurePatches: Patch[] = [];
+      try {
+        [nextSlice, featurePatches] = produceWithPatches(
+          featureState,
+          (draft: Draft<Record<string, unknown>>) => {
+            const result = reduce(draft, action, {
+              A: f.__aio.actions,
+              E: f.__aio.effects,
+            });
+            if (Array.isArray(result)) effects = result;
+            // Set machine _status inside draft so patch captures the transition
+            if (draft._status !== targetStatus) {
+              draft._status = targetStatus;
+            }
+          },
+        );
+      } catch (e) {
+        const methodName = ownKey ?? action.type;
+        const orig = e instanceof Error ? e.message : String(e);
+        throw new Error(
+          `Feature '${featureName}' method '${methodName}' threw: ${orig}`,
+          { cause: e },
+        );
+      }
       const tProduce = _perfCheck ? performance.now() - t0 : 0;
 
-      // Clone effects to detach from Immer draft
+      // Clone effects individually to detach from Immer draft (AIO-146)
       const t1 = _perfCheck ? performance.now() : 0;
       if (effects.length) {
-        try {
-          effects = structuredClone(effects);
-        } catch {
-          log.warn("feature", "effects not cloneable — may hold draft refs");
+        const cloned: typeof effects = [];
+        for (const eff of effects) {
+          try {
+            cloned.push(structuredClone(eff));
+          } catch {
+            try {
+              cloned.push(JSON.parse(JSON.stringify(eff)));
+            } catch {
+              log.warn("feature", "effect not cloneable — dropped");
+            }
+          }
         }
+        effects = cloned;
       }
       const tClone = _perfCheck ? performance.now() - t1 : 0;
 
@@ -306,15 +345,9 @@ export function composeFeatures(
         });
       }
 
-      // Update _status to target state
-      const target = transitions[lookupKey];
-      const withStatus = nextSlice._status !== target
-        ? { ...nextSlice, _status: target }
-        : nextSlice;
-
-      // State validation
+      // State validation (nextSlice already has correct _status from draft)
       if (f.__aio.validate) {
-        const result = f.__aio.validate(withStatus);
+        const result = f.__aio.validate(nextSlice);
         if (result !== true) {
           if (_reportError) {
             _reportError(
@@ -334,8 +367,11 @@ export function composeFeatures(
 
       const t2 = _perfCheck ? performance.now() : 0;
       const returnObj = {
-        state: { ...fullState, [featureName]: withStatus },
+        state: { ...fullState, [featureName]: nextSlice },
         effects,
+        patches: featurePatches.length > 0
+          ? { feature: featureName, ops: featurePatches }
+          : undefined,
       };
       const tSpread = _perfCheck ? performance.now() - t2 : 0;
 
@@ -350,25 +386,45 @@ export function composeFeatures(
     // Simple path — no guards, no _status
     let effects: (Msg | ScheduleEffect)[] = [];
     const st0 = _perfCheck ? performance.now() : 0;
-    const nextSlice = produce(
-      featureState,
-      (draft: Draft<Record<string, unknown>>) => {
-        const result = reduce(draft, action, {
-          A: f.__aio.actions,
-          E: f.__aio.effects,
-        });
-        if (Array.isArray(result)) effects = result;
-      },
-    );
+    let nextSlice: Record<string, unknown>;
+    let featurePatches: Patch[] = [];
+    try {
+      [nextSlice, featurePatches] = produceWithPatches(
+        featureState,
+        (draft: Draft<Record<string, unknown>>) => {
+          const result = reduce(draft, action, {
+            A: f.__aio.actions,
+            E: f.__aio.effects,
+          });
+          if (Array.isArray(result)) effects = result;
+        },
+      );
+    } catch (e) {
+      const methodName = ownKey ?? action.type;
+      const orig = e instanceof Error ? e.message : String(e);
+      throw new Error(
+        `Feature '${featureName}' method '${methodName}' threw: ${orig}`,
+        { cause: e },
+      );
+    }
     const stProduce = _perfCheck ? performance.now() - st0 : 0;
 
+    // Clone effects individually to detach from Immer draft (AIO-146)
     const st1 = _perfCheck ? performance.now() : 0;
     if (effects.length) {
-      try {
-        effects = structuredClone(effects);
-      } catch {
-        log.warn("feature", "effects not cloneable — may hold draft refs");
+      const cloned: typeof effects = [];
+      for (const eff of effects) {
+        try {
+          cloned.push(structuredClone(eff));
+        } catch {
+          try {
+            cloned.push(JSON.parse(JSON.stringify(eff)));
+          } catch {
+            log.warn("feature", "effect not cloneable — dropped");
+          }
+        }
       }
+      effects = cloned;
     }
     const stClone = _perfCheck ? performance.now() - st1 : 0;
 
@@ -403,6 +459,9 @@ export function composeFeatures(
     const simpleReturn: ReduceResult = {
       state: { ...fullState, [featureName]: nextSlice },
       effects,
+      patches: featurePatches.length > 0
+        ? { feature: featureName, ops: featurePatches }
+        : undefined,
     };
     return _perfCheck
       ? {
@@ -430,9 +489,9 @@ export function composeFeatures(
     const count = timestamps.length;
     if (
       _cbMaxErrors > 0 && count >= _cbMaxErrors &&
-      !disabledFeatures.has(name) && _cbDispatch
+      !disabledFeatures.has(name) && _cbApp
     ) {
-      registry.disable(name, _cbDispatch);
+      registry.disable(name, _cbApp);
       if (_circuitBreaker?.onTrip) _circuitBreaker.onTrip(name, count);
       if (_reportError) {
         _reportError(
@@ -463,8 +522,9 @@ export function composeFeatures(
   ): ReduceResult => {
     let currentState = state;
     const allEffects: (Msg | ScheduleEffect)[] = [];
+    const allPatches: Array<{ feature: string; ops: Patch[] }> = [];
 
-    // Handle flow state updates (__FlowState) — direct state replacement from flow runner
+    // Handle flow state updates (__FlowState) — produceWithPatches on feature slice
     if (
       typeof action.type === "string" && action.type.endsWith(":__FlowState")
     ) {
@@ -472,42 +532,96 @@ export function composeFeatures(
       const prefix = action.type.slice(0, colonIdx);
       const flowReducer = flowReducers.get(prefix);
       if (flowReducer) {
-        const result = flowReducer(currentState, action);
-        if (result) {
-          notifyStateListeners(result);
-          return { state: result, effects: [] };
-        }
+        const featureSlice = (currentState[prefix] ?? {}) as Record<
+          string,
+          unknown
+        >;
+        const payload = action.payload as { _slice: Record<string, unknown> };
+        const [nextSlice, flowPatches] = produceWithPatches(
+          featureSlice,
+          (draft: Draft<Record<string, unknown>>) => {
+            const incoming = payload._slice;
+            // Apply incoming fields
+            for (const key of Object.keys(incoming)) {
+              draft[key] = incoming[key];
+            }
+            // Remove keys not in incoming slice
+            for (const key of Object.keys(draft)) {
+              if (!(key in incoming)) delete draft[key];
+            }
+          },
+        );
+        const nextState = { ...currentState, [prefix]: nextSlice };
+        notifyStateListeners(nextState);
+        return {
+          state: nextState,
+          effects: [],
+          patches: flowPatches.length > 0
+            ? { feature: prefix, ops: flowPatches }
+            : undefined,
+        };
       }
       return { state: currentState, effects: [] };
     }
 
-    // Handle lifecycle actions (Init/Destroy) — apply state change, then continue routing
-    // so foreign action listeners can react to lifecycle events
+    // Handle lifecycle actions (Init/Destroy) — produceWithPatches on feature slice
+    // Continue routing so foreign action listeners can react to lifecycle events
     let isLifecycle = false;
     for (const f of features) {
       if (action.type === f.__aio.initType) {
         const machine = f.__aio.machine;
         const status = machine === false ? undefined : machine.initial;
-        // Merge: initial defaults ← existing (KV-restored) data ← _status
         const existing = currentState[f.__aio.id] as
           | Record<string, unknown>
           | undefined;
         const base = { ...f.__aio.state, ...existing };
-        currentState = {
-          ...currentState,
-          [f.__aio.id]: status != null ? { ...base, _status: status } : base,
-        };
+        const targetSlice: Record<string, unknown> = status != null
+          ? { ...base, _status: status }
+          : base;
+        const featureSlice = (existing ?? {}) as Record<string, unknown>;
+        const [nextFeature, initPatches] = produceWithPatches(
+          featureSlice,
+          (draft: Draft<Record<string, unknown>>) => {
+            for (const key of Object.keys(targetSlice)) {
+              draft[key] = targetSlice[key];
+            }
+            // Remove keys not in target
+            for (const key of Object.keys(draft)) {
+              if (!(key in targetSlice)) delete draft[key];
+            }
+          },
+        );
+        currentState = { ...currentState, [f.__aio.id]: nextFeature };
+        if (initPatches.length > 0) {
+          allPatches.push({ feature: f.__aio.id, ops: initPatches });
+        }
         isLifecycle = true;
         break;
       }
       if (action.type === f.__aio.destroyType) {
         const machine = f.__aio.machine;
-        currentState = {
-          ...currentState,
-          [f.__aio.id]: machine === false
-            ? { ...f.__aio.state }
-            : { ...f.__aio.state, _status: machine.initial },
-        };
+        const targetSlice: Record<string, unknown> = machine === false
+          ? { ...f.__aio.state }
+          : { ...f.__aio.state, _status: machine.initial };
+        const featureSlice = (currentState[f.__aio.id] ?? {}) as Record<
+          string,
+          unknown
+        >;
+        const [nextFeature, destroyPatches] = produceWithPatches(
+          featureSlice,
+          (draft: Draft<Record<string, unknown>>) => {
+            for (const key of Object.keys(targetSlice)) {
+              draft[key] = targetSlice[key];
+            }
+            for (const key of Object.keys(draft)) {
+              if (!(key in targetSlice)) delete draft[key];
+            }
+          },
+        );
+        currentState = { ...currentState, [f.__aio.id]: nextFeature };
+        if (destroyPatches.length > 0) {
+          allPatches.push({ feature: f.__aio.id, ops: destroyPatches });
+        }
         isLifecycle = true;
         break;
       }
@@ -525,6 +639,11 @@ export function composeFeatures(
           const result = reduceFeature(owner, currentState, action);
           currentState = result.state;
           allEffects.push(...result.effects);
+          if (result.patches) {
+            if (Array.isArray(result.patches)) {
+              allPatches.push(...result.patches);
+            } else allPatches.push(result.patches);
+          }
           ownerBd = result._bd;
           featureLastAction.set(owner.__aio.id, {
             type: action.type,
@@ -544,6 +663,10 @@ export function composeFeatures(
         const result = reduceFeature(listener, currentState, action);
         currentState = result.state;
         allEffects.push(...result.effects);
+        if (result.patches) {
+          if (Array.isArray(result.patches)) allPatches.push(...result.patches);
+          else allPatches.push(result.patches);
+        }
         featureLastAction.set(listener.__aio.id, {
           type: action.type,
           at: Date.now(),
@@ -587,7 +710,11 @@ export function composeFeatures(
       }
     }
 
-    return { state: currentState, effects: allEffects };
+    return {
+      state: currentState,
+      effects: allEffects,
+      patches: allPatches.length > 0 ? allPatches : undefined,
+    };
   };
 
   // ── Flow executors ──
@@ -751,7 +878,7 @@ export function composeFeatures(
     app: { dispatch: (a: Msg) => void; getState: () => unknown },
   ): void => {
     // Wire circuit breaker dispatch — first time we have access to app.dispatch
-    if (!_cbDispatch) _cbDispatch = app.dispatch;
+    if (!_cbApp) _cbApp = app;
     for (const f of features) {
       app.dispatch(
         tagSource({ type: f.__aio.initType, payload: {} }, "System"),
@@ -811,6 +938,9 @@ export function composeFeatures(
       app.dispatch(
         tagSource({ type: f.__aio.destroyType, payload: {} }, "System"),
       );
+      // Clear error tracking for destroyed features (AIO-147)
+      featureErrors.delete(f.__aio.id);
+      featureLastAction.delete(f.__aio.id);
     }
   };
 
@@ -827,22 +957,74 @@ export function composeFeatures(
         app.dispatch(
           tagSource({ type: f.__aio.initType, payload: {} }, "System"),
         );
+        // AIO-202: call onInit — match initAll() pattern
+        if (f.__aio.onInit) {
+          const scopedApp: ScopedApp & { _onError?: (err: AioError) => void } =
+            {
+              _onError: _reportError,
+              dispatch: (a: Msg) => app.dispatch(tagSource(a, "System")),
+              getState: () =>
+                (app.getState() as Record<string, unknown>)[
+                  f.__aio.id
+                ] as unknown,
+              getFullState: () => app.getState() as Record<string, unknown>,
+            };
+          try {
+            f.__aio.onInit(scopedApp);
+          } catch (e) {
+            if (_reportError) {
+              _reportError(
+                createAioError("INIT_ERROR", e, { featureName: f.__aio.id }),
+              );
+            } else {
+              log.error("feature", `${f.__aio.id} init: ${e}`);
+            }
+            countFeatureError(f.__aio.id);
+          }
+        }
       }
     },
     disable: (
       name: string,
-      dispatch: ((a: Msg) => void) | { dispatch: (a: Msg) => void },
+      app: { dispatch: (a: Msg) => void; getState: () => unknown },
     ) => {
       disabledFeatures.add(name);
       const f = features.find((f) => f.__aio.id === name);
-      const doDispatch = typeof dispatch === "function"
-        ? dispatch
-        : dispatch.dispatch;
       if (f) {
         cancelFeatureFlows(f.__aio.id);
-        doDispatch(
+        // AIO-203: call onDestroy — match destroyAll() pattern
+        if (f.__aio.onDestroy) {
+          const scopedApp: ScopedApp & { _onError?: (err: AioError) => void } =
+            {
+              _onError: _reportError,
+              dispatch: (a: Msg) => app.dispatch(tagSource(a, "System")),
+              getState: () =>
+                (app.getState() as Record<string, unknown>)[
+                  f.__aio.id
+                ] as unknown,
+              getFullState: () => app.getState() as Record<string, unknown>,
+            };
+          try {
+            f.__aio.onDestroy(scopedApp);
+          } catch (e) {
+            if (_reportError) {
+              _reportError(
+                createAioError("DESTROY_ERROR", e, {
+                  featureName: f.__aio.id,
+                }),
+              );
+            } else {
+              log.error("feature", `${f.__aio.id} destroy: ${e}`);
+            }
+            countFeatureError(f.__aio.id);
+          }
+        }
+        app.dispatch(
           tagSource({ type: f.__aio.destroyType, payload: {} }, "System"),
         );
+        // Clear error tracking for disabled features (AIO-147)
+        featureErrors.delete(f.__aio.id);
+        featureLastAction.delete(f.__aio.id);
         // Notify host to cancel schedules for this feature
         if (onFeatureDisable) onFeatureDisable(f.__aio.id);
       }

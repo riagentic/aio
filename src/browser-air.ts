@@ -97,7 +97,10 @@ function _handleState(data: Record<string, unknown>) {
 }
 
 function _connectIPC() {
-  if (!_ipc || _ipcConnected) return;
+  if (!_ipc || _ipcConnected) {
+    _connecting = false; // AIO-211: reset flag when bailing out
+    return;
+  }
   _ipcConnected = true;
 
   _ipc.onOpen(() => {
@@ -133,6 +136,7 @@ function _connectIPC() {
 
   _ipc.onClose(() => {
     _ipcConnected = false;
+    _connecting = false; // AIO-211: allow reconnection triggers after close
     _coreSetTransport(null);
     _coreSetConnected(false);
     if (_ipcPingTimer) {
@@ -141,6 +145,10 @@ function _connectIPC() {
     }
     if (_closed) return;
     if (_wasConnected) _showStatus("Reconnecting\u2026", "#e25");
+    // Reconnect with exponential backoff (mirrors WS path)
+    const delay = Math.min(1000 * 2 ** _retry, 30000);
+    _retry++;
+    setTimeout(() => _connect(), delay);
   });
 
   _ipc.ready();
@@ -198,13 +206,12 @@ function _connect() {
     _coreSetTransport(null);
     _coreSetConnected(false);
     if (_closed) return;
+    // Mark connecting immediately so subscribe/connect triggers respect backoff
+    _connecting = true;
     if (_wasConnected) _showStatus("Reconnecting\u2026", "#e25");
     const delay = Math.min(1000 * 2 ** _retry, 30000);
     _retry++;
-    setTimeout(() => {
-      _connecting = true;
-      _connect();
-    }, delay);
+    setTimeout(() => _connect(), delay);
   };
   ws.onerror = () => ws.close();
   _ws = ws;
@@ -299,6 +306,7 @@ export { useTimeTravel };
 
 // ── AIR renderer primitives (AIO-70) ─────────────────────────────────
 export {
+  afterRender,
   type Context,
   createContext,
   hydrate,
@@ -307,9 +315,19 @@ export {
   onCleanup,
   onMount,
   useContext,
+  useContextSelector,
+  useId,
+  useOptimistic,
   useRef,
+  useSignal,
 } from "./aio-renderer.ts";
-export { type ComponentFn, h, type VChild, type VNode } from "./vdom.ts";
+export {
+  type Action,
+  type ComponentFn,
+  h,
+  type VChild,
+  type VNode,
+} from "./vdom.ts";
 export {
   batch,
   type Computed,
@@ -317,7 +335,47 @@ export {
   effect,
   type Signal,
   signal,
+  untrack,
 } from "./signal.ts";
+export { Show } from "./show.ts";
+export { ErrorBoundary, Fragment, lazy, Portal, Suspense } from "./vdom.ts";
+
+// ── Transitions and animations ──────────────────────────────────────
+export { Transition, type TransitionProps } from "./transition-component.ts";
+export {
+  TransitionGroup,
+  type TransitionGroupProps,
+} from "./transition-group.ts";
+export {
+  fade,
+  scale,
+  slide,
+  type TransitionFn,
+  type TransitionOptions,
+} from "./transition.ts";
+export {
+  type SpringConfig,
+  type SpringValue,
+  type TransitionConfig,
+  type TransitionState,
+  useSpring,
+  useTransition,
+} from "./animation.ts";
+
+// ── Island (external framework mounting) ────────────────────────────
+export { island, type IslandConfig, type IslandHandle } from "./island.ts";
+
+// ── Trigger-based lazy loading ──────────────────────────────────────
+export { Defer, type DeferProps, type DeferTrigger } from "./defer.ts";
+
+// ── Async data as signals ────────────────────────────────────────────
+export { type Resource, resource } from "./resource.ts";
+
+// ── Reactive element dimensions ──────────────────────────────────────
+export { type DimensionsState, useDimensions } from "./dimensions.ts";
+
+// ── Streaming SSR ──────────────────────────────────────────────────
+export { renderToStream } from "./ssr-stream.ts";
 
 // ── Shared utilities (AIO-47) ──
 export { actions, effects, msg, schedule } from "./browser-shared.ts";
@@ -332,21 +390,39 @@ import {
 // ── AIR hooks (signal-based, with ensureConnected) ─────────────────
 
 import type { _CoreFeatureRef as FeatureRef } from "./browser-protocol.ts";
+import type {
+  DirectCalling,
+  ExtractState,
+  FeatureDef,
+  SendOf,
+} from "./feature-types.ts";
 
-// AIO-67: Typed overload — infer State from FeatureDef generic
-/** AIR useFeature — signal-based, auto-tracked. Calls ensureConnected().
- *  Pass a feature definition to get full type inference on state and send. */
+// AIO-67 + AIO-75: Typed overloads — infer State and Send from FeatureDef
+/** Typed overload — full inference when passing a feature definition. */
+export function useFeature<
+  F extends FeatureDef<any, any, any, any> & DirectCalling<any>,
+>(
+  ref: F,
+): {
+  state: ExtractState<F>;
+  send: SendOf<F>;
+  status: string | undefined;
+};
+/** Untyped overload — for dynamic FeatureRef usage. */
 export function useFeature<
   S extends Record<string, unknown> = Record<string, unknown>,
 >(
-  ref: FeatureRef & { __aio: { state?: S } },
+  ref: FeatureRef,
 ): {
   state: S;
   send: Record<string, (...args: unknown[]) => void>;
   status: string | undefined;
-} {
+};
+/** AIR useFeature — signal-based, auto-tracked. Calls ensureConnected().
+ *  Pass a feature definition to get full type inference on state and send. */
+export function useFeature(ref: any): any {
   ensureConnected();
-  const result = _airUseFeature<S>(ref);
+  const result = _airUseFeature(ref);
   const status = result.state
     ? (result.state as Record<string, unknown>)._status as string | undefined
     : undefined;

@@ -1,5 +1,40 @@
 # Changelog
 
+## 1.0.0-alpha8
+
+### Added
+
+- **Dynamic user resolution (`resolveUser`)** — async hook for JWT, OAuth, or
+  database-backed auth. Supports `Promise<AioUser | null>` return type. Unified
+  `_buildUserResolver` factory replaces separate static/dynamic code paths
+  (AIO-171)
+- **`ResolveUserFn` type** exported from `mod.ts`
+- **Patch compaction** — broadcast protocol compacts redundant patches before
+  sending, reducing wire overhead for rapid-fire mutations
+- **Broadcast size guard** — oversized patch sets auto-fallback to full-state
+  send
+
+### Fixed
+
+- 58 bugs fixed across 23 files in 13-round nuclear audit (AIO-57..236)
+- Prototype pollution guard on `_deepMergeFiltered` (AIO-238 — security)
+- Delta protocol hardening — backpressure recovery, filtered merge, array
+  identity patching, periodic resync improvements
+- Renderer fixes — flush guard on disposed root, hydration signal binding, keyed
+  fragment placement, Suspense cleanup
+- Feature system — proxy tracking, async method batching, flow cleanup,
+  delegation leak, schedule prefix handling
+- Electron — `pageReady` reset on reload, IPC null cleanup
+- Server — stateForUI memoization for undefined results, time-travel perf
+  metrics timing, config schedule ID validation
+
+### Changed
+
+- `_extractToken` and `_buildUserResolver` replace inline auth resolution in
+  server.ts — single code path for all auth modes
+- Auth mode reporting: `authMode` now distinguishes `"resolveUser"` from
+  `"users"` in trojan API
+
 ## 1.0.0-alpha7
 
 ### Added

@@ -1,5 +1,6 @@
 import { assertEquals, assertExists } from "@std/assert";
 import { composeFeatures, feature } from "../src/feature.ts";
+import { _actionListeners, cancelFlow } from "../src/flow.ts";
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
@@ -1438,4 +1439,119 @@ Deno.test({
   await new Promise((r) => setTimeout(r, 50));
 
   assertEquals((app.getState().whenRace as any).winner, "condition");
+});
+
+// ── AIO-117: waitFor listener leak on flow cancellation ──────────────
+
+const leakyWaiter = feature("leakyWaiter", {
+  state: { phase: "init" },
+  actions: {
+    start: () => ({}),
+    signal: () => ({}),
+  },
+  generators: {
+    start: function* (ctx) {
+      yield* ctx.waitFor("leakyWaiter:signal"); // no timeout
+      yield* ctx.done((s) => {
+        s.phase = "done";
+      });
+    },
+  },
+});
+
+Deno.test("flow: AIO-117 waitFor listener cleaned up on flow cancellation", async () => {
+  const app = createTestApp([leakyWaiter]);
+
+  // Start flow — it will block on waitFor
+  app.dispatch(leakyWaiter.start());
+  await new Promise((r) => setTimeout(r, 30));
+
+  // Listener should be registered
+  const beforeCancel = [..._actionListeners].filter(
+    (l) => l.actionType === "leakyWaiter:signal",
+  );
+  assertEquals(
+    beforeCancel.length,
+    1,
+    "listener should be registered while waiting",
+  );
+
+  // Cancel the flow before the action arrives
+  cancelFlow("leakyWaiter", "start");
+  await new Promise((r) => setTimeout(r, 30));
+
+  // Listener MUST be cleaned up — this is the bug
+  const afterCancel = [..._actionListeners].filter(
+    (l) => l.actionType === "leakyWaiter:signal",
+  );
+  assertEquals(
+    afterCancel.length,
+    0,
+    "AIO-117: waitFor listener leaked after flow cancellation",
+  );
+});
+
+// AIO-117 part 2: waitFor listener leak when flow completes via finally block
+// (e.g., re-trigger cancels old flow — the finally cleanup must handle waitFor listeners)
+const leakyRetrigger = feature("leakyRetrigger", {
+  state: { phase: "init" },
+  actions: {
+    start: () => ({}),
+    signal: () => ({}),
+  },
+  generators: {
+    start: function* (ctx) {
+      yield* ctx.waitFor("leakyRetrigger:signal"); // no timeout
+      yield* ctx.done((s) => {
+        s.phase = "done";
+      });
+    },
+  },
+});
+
+Deno.test("flow: AIO-117 waitFor listener cleaned up in finally on flow completion", async () => {
+  const app = createTestApp([leakyRetrigger]);
+
+  // Start flow — it will block on waitFor
+  app.dispatch(leakyRetrigger.start());
+  await new Promise((r) => setTimeout(r, 30));
+
+  // Verify listener exists
+  const before = [..._actionListeners].filter(
+    (l) => l.actionType === "leakyRetrigger:signal",
+  );
+  assertEquals(
+    before.length,
+    1,
+    "listener should exist while waitFor is pending",
+  );
+
+  // Re-trigger: starts a new flow, cancelling the old one
+  // The old flow's finally block should clean up its waitFor listener
+  app.dispatch(leakyRetrigger.start());
+  await new Promise((r) => setTimeout(r, 30));
+
+  // There should be exactly 1 listener (from the NEW flow instance), not 2
+  const after = [..._actionListeners].filter(
+    (l) => l.actionType === "leakyRetrigger:signal",
+  );
+  assertEquals(
+    after.length,
+    1,
+    "AIO-117: old waitFor listener leaked on re-trigger — expected 1 (new), got " +
+      after.length,
+  );
+
+  // Clean up: cancel the remaining flow
+  cancelFlow("leakyRetrigger", "start");
+  await new Promise((r) => setTimeout(r, 30));
+
+  const final = [..._actionListeners].filter(
+    (l) => l.actionType === "leakyRetrigger:signal",
+  );
+  assertEquals(
+    final.length,
+    0,
+    "all listeners should be cleaned up after final cancel",
+  );
 });

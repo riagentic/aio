@@ -94,7 +94,7 @@ Deno.test("logger: debug.log gets everything (info, warn, error, debug)", async 
   setLogger(null);
 });
 
-Deno.test("logger: app.log gets only info and error", async () => {
+Deno.test("logger: app.log gets info, warn, and error", async () => {
   const dir = tmpDir();
   const l = mkLogger({ dir });
   await l.init();
@@ -106,9 +106,11 @@ Deno.test("logger: app.log gets only info and error", async () => {
   log.trace("cat", "trace msg");
   await flush();
   const lines = await readLines(`${dir}/app.log`);
-  assertEquals(lines.length, 2);
+  // AIO-233: app.log includes info, warn + error (not debug/trace)
+  assertEquals(lines.length, 3);
   assertStringIncludes(lines[0]!, "INFO");
-  assertStringIncludes(lines[1]!, "ERROR");
+  assertStringIncludes(lines[1]!, "WARN");
+  assertStringIncludes(lines[2]!, "ERROR");
   setLogger(null);
 });
 

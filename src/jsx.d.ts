@@ -4,7 +4,66 @@
 
 type AioEventHandler<E extends Event = Event> = (event: E) => void;
 
-type AioHTMLAttributes = {
+// Mapped event handlers — eliminates index signature conflict (AIO-76)
+type AioEventMap = {
+  Click: MouseEvent;
+  DblClick: MouseEvent;
+  MouseDown: MouseEvent;
+  MouseUp: MouseEvent;
+  MouseMove: MouseEvent;
+  MouseEnter: MouseEvent;
+  MouseLeave: MouseEvent;
+  MouseOver: MouseEvent;
+  MouseOut: MouseEvent;
+  ContextMenu: MouseEvent;
+  KeyDown: KeyboardEvent;
+  KeyUp: KeyboardEvent;
+  KeyPress: KeyboardEvent;
+  Focus: FocusEvent;
+  Blur: FocusEvent;
+  FocusIn: FocusEvent;
+  FocusOut: FocusEvent;
+  Change: Event;
+  Input: InputEvent;
+  Submit: SubmitEvent;
+  Reset: Event;
+  Invalid: Event;
+  TouchStart: TouchEvent;
+  TouchEnd: TouchEvent;
+  TouchMove: TouchEvent;
+  TouchCancel: TouchEvent;
+  PointerDown: PointerEvent;
+  PointerUp: PointerEvent;
+  PointerMove: PointerEvent;
+  PointerEnter: PointerEvent;
+  PointerLeave: PointerEvent;
+  PointerOver: PointerEvent;
+  PointerOut: PointerEvent;
+  PointerCancel: PointerEvent;
+  Wheel: WheelEvent;
+  Scroll: Event;
+  Drag: DragEvent;
+  DragStart: DragEvent;
+  DragEnd: DragEvent;
+  DragEnter: DragEvent;
+  DragLeave: DragEvent;
+  DragOver: DragEvent;
+  Drop: DragEvent;
+  Copy: ClipboardEvent;
+  Cut: ClipboardEvent;
+  Paste: ClipboardEvent;
+  AnimationStart: AnimationEvent;
+  AnimationEnd: AnimationEvent;
+  AnimationIteration: AnimationEvent;
+  TransitionEnd: TransitionEvent;
+  Load: Event;
+  Error: Event;
+};
+type AioMappedEventHandlers = {
+  [K in keyof AioEventMap as `on${K}`]?: AioEventHandler<AioEventMap[K]>;
+};
+
+type AioHTMLAttributes = AioMappedEventHandlers & {
   // Standard HTML attributes
   id?: string;
   className?: string | string[] | Record<string, boolean>;
@@ -41,83 +100,6 @@ type AioHTMLAttributes = {
 
   // dangerouslySetInnerHTML
   dangerouslySetInnerHTML?: { __html: string };
-
-  // Mouse events — native MouseEvent
-  onClick?: AioEventHandler<MouseEvent>;
-  onDblClick?: AioEventHandler<MouseEvent>;
-  onMouseDown?: AioEventHandler<MouseEvent>;
-  onMouseUp?: AioEventHandler<MouseEvent>;
-  onMouseMove?: AioEventHandler<MouseEvent>;
-  onMouseEnter?: AioEventHandler<MouseEvent>;
-  onMouseLeave?: AioEventHandler<MouseEvent>;
-  onMouseOver?: AioEventHandler<MouseEvent>;
-  onMouseOut?: AioEventHandler<MouseEvent>;
-  onContextMenu?: AioEventHandler<MouseEvent>;
-
-  // Keyboard events — native KeyboardEvent
-  onKeyDown?: AioEventHandler<KeyboardEvent>;
-  onKeyUp?: AioEventHandler<KeyboardEvent>;
-  onKeyPress?: AioEventHandler<KeyboardEvent>;
-
-  // Focus events — native FocusEvent
-  onFocus?: AioEventHandler<FocusEvent>;
-  onBlur?: AioEventHandler<FocusEvent>;
-  onFocusIn?: AioEventHandler<FocusEvent>;
-  onFocusOut?: AioEventHandler<FocusEvent>;
-
-  // Form events — native Event/InputEvent
-  onChange?: AioEventHandler<Event>;
-  onInput?: AioEventHandler<InputEvent>;
-  onSubmit?: AioEventHandler<SubmitEvent>;
-  onReset?: AioEventHandler<Event>;
-  onInvalid?: AioEventHandler<Event>;
-
-  // Touch events — native TouchEvent
-  onTouchStart?: AioEventHandler<TouchEvent>;
-  onTouchEnd?: AioEventHandler<TouchEvent>;
-  onTouchMove?: AioEventHandler<TouchEvent>;
-  onTouchCancel?: AioEventHandler<TouchEvent>;
-
-  // Pointer events — native PointerEvent
-  onPointerDown?: AioEventHandler<PointerEvent>;
-  onPointerUp?: AioEventHandler<PointerEvent>;
-  onPointerMove?: AioEventHandler<PointerEvent>;
-  onPointerEnter?: AioEventHandler<PointerEvent>;
-  onPointerLeave?: AioEventHandler<PointerEvent>;
-  onPointerOver?: AioEventHandler<PointerEvent>;
-  onPointerOut?: AioEventHandler<PointerEvent>;
-  onPointerCancel?: AioEventHandler<PointerEvent>;
-
-  // Wheel/scroll events
-  onWheel?: AioEventHandler<WheelEvent>;
-  onScroll?: AioEventHandler<Event>;
-
-  // Drag events — native DragEvent
-  onDrag?: AioEventHandler<DragEvent>;
-  onDragStart?: AioEventHandler<DragEvent>;
-  onDragEnd?: AioEventHandler<DragEvent>;
-  onDragEnter?: AioEventHandler<DragEvent>;
-  onDragLeave?: AioEventHandler<DragEvent>;
-  onDragOver?: AioEventHandler<DragEvent>;
-  onDrop?: AioEventHandler<DragEvent>;
-
-  // Clipboard events
-  onCopy?: AioEventHandler<ClipboardEvent>;
-  onCut?: AioEventHandler<ClipboardEvent>;
-  onPaste?: AioEventHandler<ClipboardEvent>;
-
-  // Animation/transition events
-  onAnimationStart?: AioEventHandler<AnimationEvent>;
-  onAnimationEnd?: AioEventHandler<AnimationEvent>;
-  onAnimationIteration?: AioEventHandler<AnimationEvent>;
-  onTransitionEnd?: AioEventHandler<TransitionEvent>;
-
-  // Media events
-  onLoad?: AioEventHandler<Event>;
-  onError?: AioEventHandler<Event>;
-
-  // Catch-all for any other event handler
-  [key: `on${Uppercase<string>}${string}`]: AioEventHandler | undefined;
 };
 
 type AioInputAttributes = AioHTMLAttributes & {
@@ -244,38 +226,44 @@ type AioSVGAttributes = AioHTMLAttributes & {
   [key: string]: unknown;
 };
 
-declare namespace JSX {
-  type Element = import("./vdom.ts").VNode;
-  interface IntrinsicElements {
-    // Form elements
-    input: AioInputAttributes;
-    textarea: AioTextAreaAttributes;
-    select: AioSelectAttributes;
-    option: AioOptionAttributes;
-    button: AioButtonAttributes;
-    form: AioFormAttributes;
-    label: AioLabelAttributes;
+// Module-scoped JSX types for jsxImportSource: "aio"
+// NOT a global `declare namespace JSX` — avoids TS2300 collision with @types/react
+// TypeScript resolves these via the "aio/jsx-runtime" module declaration below.
 
-    // Links and media
-    a: AioAnchorAttributes;
-    img: AioImgAttributes;
+declare module "aio/jsx-runtime" {
+  export namespace JSX {
+    type Element = import("./vdom.ts").VNode;
+    interface IntrinsicElements {
+      // Form elements
+      input: AioInputAttributes;
+      textarea: AioTextAreaAttributes;
+      select: AioSelectAttributes;
+      option: AioOptionAttributes;
+      button: AioButtonAttributes;
+      form: AioFormAttributes;
+      label: AioLabelAttributes;
 
-    // SVG
-    svg: AioSVGAttributes;
-    path: AioSVGAttributes;
-    circle: AioSVGAttributes;
-    rect: AioSVGAttributes;
-    line: AioSVGAttributes;
-    polyline: AioSVGAttributes;
-    polygon: AioSVGAttributes;
-    text: AioSVGAttributes;
-    g: AioSVGAttributes;
-    defs: AioSVGAttributes;
-    use: AioSVGAttributes;
-    clipPath: AioSVGAttributes;
-    mask: AioSVGAttributes;
+      // Links and media
+      a: AioAnchorAttributes;
+      img: AioImgAttributes;
 
-    // All other HTML elements use base attributes
-    [tag: string]: AioHTMLAttributes;
+      // SVG
+      svg: AioSVGAttributes;
+      path: AioSVGAttributes;
+      circle: AioSVGAttributes;
+      rect: AioSVGAttributes;
+      line: AioSVGAttributes;
+      polyline: AioSVGAttributes;
+      polygon: AioSVGAttributes;
+      text: AioSVGAttributes;
+      g: AioSVGAttributes;
+      defs: AioSVGAttributes;
+      use: AioSVGAttributes;
+      clipPath: AioSVGAttributes;
+      mask: AioSVGAttributes;
+
+      // All other HTML elements use base attributes
+      [tag: string]: AioHTMLAttributes;
+    }
   }
 }

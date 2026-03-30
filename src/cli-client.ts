@@ -2,6 +2,10 @@
 // Connects to an aio server via WebSocket or UDS, receives state updates, sends actions.
 // Same delta protocol as browser.ts but no DOM, no React — pure Deno runtime.
 
+import { applyPatches, enablePatches, type Patch } from "immer";
+
+enablePatches();
+
 const WS_MAX_QUEUE = 100;
 
 /** Reactive WS client handle — subscribe to state, send actions, close when done */
@@ -71,8 +75,18 @@ export function connectCli<S>(
         const data = JSON.parse(raw);
         if (data === null || typeof data !== "object") return;
 
-        // Delta patch — same protocol as browser.ts
-        if (data.$p && typeof data.$p === "object") {
+        // Immer patches — new format from server
+        if (data.$patches && Array.isArray(data.$patches)) {
+          if (state != null) {
+            try {
+              state = applyPatches(state, data.$patches as Patch[]) as S;
+            } catch {
+              // desync — request full state from server
+              if (ws && ws.readyState === WebSocket.OPEN) ws.send("__resync");
+            }
+          }
+          // Legacy delta patch
+        } else if (data.$p && typeof data.$p === "object") {
           const prev = state as Record<string, unknown> | null;
           const next: Record<string, unknown> = prev
             ? { ...prev, ...data.$p }
@@ -93,12 +107,12 @@ export function connectCli<S>(
         }
 
         // Resolve ready on first state
-        if (_readyResolve) {
+        if (state != null && _readyResolve) {
           _readyResolve(state);
           _readyResolve = null;
         }
 
-        for (const fn of listeners) fn(state);
+        if (state != null) { for (const fn of listeners) fn(state); }
       } catch { /* bad JSON — skip */ }
     };
 

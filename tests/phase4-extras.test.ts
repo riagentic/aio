@@ -671,3 +671,137 @@ Deno.test({
     cleanup();
   },
 });
+
+// ── AIO-76: onCleanup inside onMount must survive re-renders ────────
+
+Deno.test({
+  name: "AIO-76: onCleanup inside onMount runs only on unmount, not re-render",
+  ...S,
+  fn() {
+    const { root, mount: m, cleanup } = setupMount();
+
+    const count = signal(0);
+    let listenerActive = false;
+    let cleanupCalls = 0;
+
+    function App() {
+      const c = count.value;
+      onMount(() => {
+        listenerActive = true;
+        onCleanup(() => {
+          listenerActive = false;
+          cleanupCalls++;
+        });
+      });
+      return h("div", null, String(c));
+    }
+
+    const handle = m(App);
+    assertEquals(listenerActive, true);
+    assertEquals(cleanupCalls, 0);
+
+    // Re-render — mount cleanup must NOT fire
+    count.set(1);
+    handle._flush();
+    assertEquals(listenerActive, true, "listener should survive re-render");
+    assertEquals(cleanupCalls, 0, "mount cleanup should not fire on re-render");
+
+    // Another re-render
+    count.set(2);
+    handle._flush();
+    assertEquals(
+      listenerActive,
+      true,
+      "listener should survive second re-render",
+    );
+    assertEquals(cleanupCalls, 0);
+
+    // Unmount — NOW mount cleanup fires
+    _unmount(handle);
+    assertEquals(
+      listenerActive,
+      false,
+      "listener should be cleaned up on unmount",
+    );
+    assertEquals(
+      cleanupCalls,
+      1,
+      "mount cleanup should fire exactly once on unmount",
+    );
+    cleanup();
+  },
+});
+
+Deno.test({
+  name: "AIO-76: body-level onCleanup still fires on re-render",
+  ...S,
+  fn() {
+    const { root, mount: m, cleanup } = setupMount();
+
+    const count = signal(0);
+    let bodyCleanupCalls = 0;
+
+    function App() {
+      const c = count.value;
+      onCleanup(() => {
+        bodyCleanupCalls++;
+      });
+      return h("div", null, String(c));
+    }
+
+    const handle = m(App);
+    assertEquals(bodyCleanupCalls, 0);
+
+    count.set(1);
+    handle._flush();
+    assertEquals(bodyCleanupCalls, 1, "body cleanup should fire on re-render");
+
+    count.set(2);
+    handle._flush();
+    assertEquals(bodyCleanupCalls, 2, "body cleanup fires each re-render");
+
+    _unmount(handle);
+    assertEquals(bodyCleanupCalls, 3, "body cleanup also fires on unmount");
+    cleanup();
+  },
+});
+
+Deno.test({
+  name:
+    "AIO-76: real pattern — addEventListener in onMount survives re-renders",
+  ...S,
+  fn() {
+    const { root, mount: m, cleanup, document: doc } = setupMount();
+
+    const count = signal(0);
+    const events: string[] = [];
+
+    function App() {
+      const c = count.value;
+      onMount(() => {
+        const handler = () => events.push("click");
+        doc.addEventListener("click", handler);
+        onCleanup(() => doc.removeEventListener("click", handler));
+      });
+      return h("div", null, String(c));
+    }
+
+    const handle = m(App);
+
+    // Simulate click
+    doc.dispatchEvent(new Event("click"));
+    assertEquals(events, ["click"]);
+
+    // Re-render — listener must survive
+    count.set(1);
+    handle._flush();
+    doc.dispatchEvent(new Event("click"));
+    assertEquals(events, ["click", "click"], "listener survived re-render");
+
+    // Unmount — listener removed
+    _unmount(handle);
+    doc.dispatchEvent(new Event("click"));
+    assertEquals(events, ["click", "click"], "listener removed after unmount");
+    cleanup();
+  },
+});

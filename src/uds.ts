@@ -1,22 +1,21 @@
 // UDS (Unix Domain Socket) transport — NDJSON listener for Electron IPC bridge (AIO-52 Phase 3)
 // Extracted from aio.ts. Same protocol as WS (state JSON, __reload, __css, __tt:, __boot:).
 
-import { _computeDelta, _filterByPaths, flattenKeys } from "./server.ts";
-import { diagEmit } from "./diagnostic-bus.ts";
+import { compactPatches } from "./patch-compact.ts";
 
 export type UDSClient = {
   conn: Deno.Conn;
   index: number;
   id: string;
   subscriptions: Set<string> | null;
-  lastState: unknown;
-  lastKeyJsons: Record<string, string>;
-  broadcastCount: number;
+  lastFullJson?: string;
 };
+
+type PatchEntry = { feature: string; ops: import("immer").Patch[] };
 
 export type UDSHandle = {
   broadcast: (msg: string) => void;
-  broadcastState: (force?: boolean) => void;
+  broadcastState: (forceOrPatches?: boolean | PatchEntry[]) => void;
   shutdown: () => void;
   socketPath: string;
   clients: () => UDSClient[];
@@ -29,7 +28,8 @@ export function createUDSListener(
   onAction: (action: { type: string; payload?: unknown }) => void,
   debug: (msg: string) => void,
   clientCounter?: { value: number },
-  fullStateThreshold = 0.5,
+  _fullStateThreshold = 0.5, // deprecated: kept for API compat, no longer used
+  hasStateFilter = false, // when true, skip patches (computed against unfiltered state)
 ): UDSHandle {
   try {
     Deno.removeSync(socketPath);
@@ -54,27 +54,13 @@ export function createUDSListener(
         index: counter.value++,
         id: crypto.randomUUID(),
         subscriptions: null,
-        lastState: null,
-        lastKeyJsons: {},
-        broadcastCount: 0,
       };
       clientMap.set(conn, client);
       debug(`uds: client connected #${client.index} (${connSet.size} total)`);
 
-      const initial = JSON.stringify(getUIState()) + "\n";
-      const writer = conn.writable.getWriter();
-      writer.write(new TextEncoder().encode(initial)).catch((e: unknown) => {
-        diagEmit({
-          type: "transport-error",
-          severity: "warning",
-          source: "server",
-          message: "UDS write failed — message not delivered to renderer",
-          detail: { error: String(e) },
-          hint:
-            "Electron IPC pipe may be broken. Check if renderer process is running.",
-        });
-      });
-      writer.releaseLock();
+      // AIO-239: route initial write through sendTo() to use per-connection write queue
+      const initial = JSON.stringify(getUIState());
+      sendTo(conn, initial);
 
       _handleUDSConn(
         conn,
@@ -91,89 +77,118 @@ export function createUDSListener(
     if (!closed) debug(`uds: accept loop error — ${e}`);
   });
 
+  // AIO-216: per-connection write queue to prevent byte interleaving
+  const _writeQueues = new WeakMap<Deno.Conn, Promise<void>>();
+
   function sendTo(conn: Deno.Conn, msg: string): void {
-    try {
+    const encoded = new TextEncoder().encode(msg + "\n");
+    const prev = _writeQueues.get(conn) ?? Promise.resolve();
+    const next = prev.then(async () => {
       const writer = conn.writable.getWriter();
-      writer.write(new TextEncoder().encode(msg + "\n")).catch(() => {
-        connSet.delete(conn);
-        try {
-          conn.close();
-        } catch { /* already closed */ }
-      });
-      writer.releaseLock();
-    } catch {
+      try {
+        await writer.write(encoded);
+      } finally {
+        writer.releaseLock();
+      }
+    }).catch(() => {
+      _writeQueues.delete(conn);
       connSet.delete(conn);
       try {
         conn.close();
       } catch { /* already closed */ }
+    });
+    _writeQueues.set(conn, next);
+  }
+
+  function _getFilteredFullJson(
+    client: Pick<UDSClient, "subscriptions">,
+  ): string | undefined {
+    let uiState: unknown;
+    try {
+      uiState = getUIState();
+      if (client.subscriptions) {
+        const filtered: Record<string, unknown> = {};
+        const src = uiState as Record<string, unknown>;
+        for (const sub of client.subscriptions) {
+          const feat = sub.includes(".") ? sub.slice(0, sub.indexOf(".")) : sub;
+          if (feat in src && !(feat in filtered)) filtered[feat] = src[feat];
+        }
+        uiState = filtered;
+      }
+    } catch (e) {
+      debug(`uds: getUIState error — ${e}`);
+      return undefined;
     }
+    return JSON.stringify(uiState);
   }
 
   return {
     socketPath,
+    // AIO-239: route broadcast through sendTo() to use per-connection write queue
     broadcast: (msg: string) => {
-      const data = new TextEncoder().encode(msg + "\n");
-      for (const conn of connSet) {
-        try {
-          const writer = conn.writable.getWriter();
-          writer.write(data).catch(() => {
-            connSet.delete(conn);
-            try {
-              conn.close();
-            } catch { /* already closed */ }
-            debug("uds: broadcast write failed — conn closed");
-          });
-          writer.releaseLock();
-        } catch {
-          connSet.delete(conn);
-          try {
-            conn.close();
-          } catch { /* already closed */ }
-        }
-      }
+      for (const conn of connSet) sendTo(conn, msg);
     },
-    broadcastState: (force = false) => {
+    broadcastState: (forceOrPatches?: boolean | PatchEntry[]) => {
+      const force = forceOrPatches === true;
+      // When stateForUI is configured, patches are invalid — always use full filtered state
+      const patches = !hasStateFilter && Array.isArray(forceOrPatches)
+        ? forceOrPatches
+        : undefined;
+
       for (const [conn, client] of clientMap) {
         if (force) {
-          client.lastState = null;
-          client.lastKeyJsons = {};
+          client.lastFullJson = undefined;
         }
-        let uiState: unknown;
-        try {
-          uiState = getUIState();
-          if (client.subscriptions) {
-            uiState = _filterByPaths(uiState, client.subscriptions);
+
+        // Patch-based path: filter patches by client subscriptions and send $patches
+        if (patches && patches.length > 0 && !force) {
+          const clientPatches = client.subscriptions
+            ? patches.filter((p) => {
+              for (const sub of client.subscriptions!) {
+                if (
+                  sub === p.feature || sub.startsWith(p.feature + ".")
+                ) return true;
+              }
+              return false;
+            })
+            : patches;
+
+          const allOps = compactPatches(
+            clientPatches.flatMap((p) =>
+              p.ops.map((op) => ({
+                ...op,
+                path: [p.feature, ...op.path],
+              }))
+            ),
+          );
+
+          if (allOps.length > 0) {
+            const patchJson = JSON.stringify({ $patches: allOps });
+            // Size guard: if patches exceed full state, send full state instead
+            const fullJson = _getFilteredFullJson(client);
+            if (fullJson && patchJson.length > fullJson.length) {
+              debug(
+                `uds: patch payload (${patchJson.length}B) > full state (${fullJson.length}B) — sending full state`,
+              );
+              if (fullJson !== client.lastFullJson) {
+                client.lastFullJson = fullJson;
+                sendTo(conn, fullJson);
+              }
+            } else {
+              sendTo(conn, patchJson);
+              // AIO-217: update lastFullJson after patch send to prevent stale delta
+              if (fullJson) client.lastFullJson = fullJson;
+            }
+            continue;
           }
-        } catch (e) {
-          debug(`uds: broadcastState getUIState error — ${e}`);
-          continue;
         }
-        if (uiState === client.lastState) continue;
-        // AIO-33: periodic forced full-state resync every 100 broadcasts
-        client.broadcastCount++;
-        if (client.broadcastCount >= 100) {
-          client.broadcastCount = 0;
-          client.lastState = null;
-          client.lastKeyJsons = {};
-        }
-        const delta = _computeDelta(
-          uiState,
-          client.lastState,
-          client.lastKeyJsons,
-          fullStateThreshold,
-        );
-        if (delta.kind === "skip") {
-          client.lastState = uiState;
-          client.lastKeyJsons = delta.newKeyJsons;
-          continue;
-        }
-        if (client.subscriptions && delta.kind === "full") {
-          sendTo(conn, '{"$f":1,' + delta.msg.slice(1));
-        } else {
-          sendTo(conn, delta.msg);
-        }
-        client.lastState = uiState;
-        client.lastKeyJsons = delta.newKeyJsons;
+
+        // Fallback: force-full, trailing flush, or no patches — send full state
+        const json = _getFilteredFullJson(client);
+        if (!json) continue;
+        if (json === client.lastFullJson) continue; // no change
+        client.lastFullJson = json;
+        sendTo(conn, json);
       }
     },
     clients: () => [...clientMap.values()],
@@ -186,6 +201,12 @@ export function createUDSListener(
         return Promise.resolve({ error: `client ${index} not connected` });
       }
       return new Promise<unknown>((resolve) => {
+        // AIO-223: cleanup existing pending request before overwriting
+        const existing = pendingState.get(client.id);
+        if (existing) {
+          clearTimeout(existing.timer);
+          existing.resolve({ error: "superseded by new request" });
+        }
         const timer = setTimeout(() => {
           pendingState.delete(client.id);
           resolve({ error: "client did not respond within 5s" });
@@ -240,6 +261,7 @@ function _handleUDSConn(
         for (const line of lines) {
           if (!line) continue;
           if (line === "__ping") continue;
+
           if (line.startsWith("__clientState:")) {
             const client = clientMap.get(conn);
             if (client) {
@@ -269,36 +291,58 @@ function _handleUDSConn(
                     paths.filter((p: unknown) => typeof p === "string"),
                   );
                 }
-                client.lastState = null;
-                client.lastKeyJsons = {};
                 try {
                   let uiState: unknown = getUIState();
                   if (client.subscriptions) {
-                    uiState = _filterByPaths(uiState, client.subscriptions);
-                  }
-                  const toSend = client.subscriptions && uiState &&
-                      typeof uiState === "object" && !Array.isArray(uiState)
-                    ? { $f: 1, ...(uiState as Record<string, unknown>) }
-                    : uiState;
-                  sendTo(conn, JSON.stringify(toSend));
-                  client.lastState = uiState;
-                  if (
-                    uiState && typeof uiState === "object" &&
-                    !Array.isArray(uiState)
-                  ) {
-                    const flat = flattenKeys(
-                      uiState as Record<string, unknown>,
-                    );
-                    for (const k of Object.keys(flat)) {
-                      client.lastKeyJsons[k] = JSON.stringify(flat[k]);
+                    const filtered: Record<string, unknown> = {};
+                    const src = uiState as Record<string, unknown>;
+                    for (const sub of client.subscriptions) {
+                      const feat = sub.includes(".")
+                        ? sub.slice(0, sub.indexOf("."))
+                        : sub;
+                      if (feat in src && !(feat in filtered)) {
+                        filtered[feat] = src[feat];
+                      }
                     }
+                    uiState = filtered;
                   }
+                  const msg = JSON.stringify(uiState);
+                  sendTo(conn, msg);
+                  client.lastFullJson = msg;
                 } catch (err) {
                   debug(`uds: filtered state send error — ${err}`);
                 }
               }
             } catch {
               debug("uds: bad __subs message");
+            }
+            continue;
+          }
+          // Resync request — client detected patch desync, send full state
+          if (line === "__resync") {
+            const client = clientMap.get(conn);
+            if (client) {
+              try {
+                let uiState: unknown = getUIState();
+                if (client.subscriptions) {
+                  const filtered: Record<string, unknown> = {};
+                  const src = uiState as Record<string, unknown>;
+                  for (const sub of client.subscriptions) {
+                    const feat = sub.includes(".")
+                      ? sub.slice(0, sub.indexOf("."))
+                      : sub;
+                    if (feat in src && !(feat in filtered)) {
+                      filtered[feat] = src[feat];
+                    }
+                  }
+                  uiState = filtered;
+                }
+                const msg = JSON.stringify(uiState);
+                sendTo(conn, msg);
+                client.lastFullJson = msg;
+              } catch (err) {
+                debug(`uds: resync send error — ${err}`);
+              }
             }
             continue;
           }
@@ -311,6 +355,9 @@ function _handleUDSConn(
         }
       }
     } catch { /* connection closed */ }
+    try {
+      reader.releaseLock();
+    } catch { /* stream may be errored (AIO-149) */ }
     connections.delete(conn);
     clientMap.delete(conn);
     try {

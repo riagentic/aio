@@ -54,6 +54,7 @@ export type {
   MiddlewareFn,
   PerfBudget,
   PerfCheck,
+  ResolveUserFn,
   UiConfig,
 } from "./src/aio.ts";
 /** Structured error types — error codes, context, source tracking, and flow step records */

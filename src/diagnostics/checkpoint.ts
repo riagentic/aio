@@ -5,6 +5,22 @@ import type { CheckpointData } from "./types.ts";
 const FILE = "checkpoint.json";
 const TMP = "checkpoint.json.tmp";
 
+/** Safe JSON.stringify that handles circular references (AIO-152). */
+function _safeStringify(data: unknown): string {
+  try {
+    return JSON.stringify(data);
+  } catch {
+    const seen = new WeakSet();
+    return JSON.stringify(data, (_key, value) => {
+      if (typeof value === "object" && value !== null) {
+        if (seen.has(value)) return "[Circular]";
+        seen.add(value);
+      }
+      return value;
+    });
+  }
+}
+
 /** Read checkpoint from dir. Returns null if missing, corrupt, or unreadable. */
 export function readCheckpoint(dir: string): CheckpointData | null {
   try {
@@ -28,7 +44,7 @@ export function createCheckpoint(dir: string, debounceMs: number) {
   async function write(data: CheckpointData): Promise<void> {
     const tmp = `${dir}/${TMP}`;
     const target = `${dir}/${FILE}`;
-    const json = JSON.stringify(data);
+    const json = _safeStringify(data);
     await Deno.writeTextFile(tmp, json);
     await Deno.rename(tmp, target);
   }
@@ -36,7 +52,7 @@ export function createCheckpoint(dir: string, debounceMs: number) {
   /** Synchronous emergency write — for crash handler. */
   function writeSync(data: CheckpointData): void {
     try {
-      Deno.writeTextFileSync(`${dir}/${FILE}`, JSON.stringify(data));
+      Deno.writeTextFileSync(`${dir}/${FILE}`, _safeStringify(data));
     } catch { /* best effort during crash */ }
   }
 

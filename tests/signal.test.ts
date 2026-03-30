@@ -8,6 +8,7 @@ import {
   effect,
   type Signal,
   signal,
+  untrack,
 } from "../src/signal.ts";
 
 Deno.test("signal: read and write", () => {
@@ -352,6 +353,45 @@ Deno.test("signal: rAF-style repeated set with same values is no-op", () => {
   assertEquals(renderCount, 1); // no re-renders
 });
 
+// ── Updater function on signal.update() ──────────────────────────────
+
+Deno.test("signal: update with updater function", () => {
+  const s = signal(10);
+  s.update((prev) => prev + 5);
+  assertEquals(s.value, 15);
+});
+
+Deno.test("signal: update receives current value", () => {
+  const s = signal("hello");
+  s.update((prev) => prev + " world");
+  assertEquals(s.value, "hello world");
+});
+
+Deno.test("signal: update triggers subscribers", () => {
+  const s = signal(0);
+  let calls = 0;
+  effect(() => {
+    s.value;
+    calls++;
+  });
+  assertEquals(calls, 1);
+  s.update((prev) => prev + 1);
+  assertEquals(calls, 2);
+  assertEquals(s.value, 1);
+});
+
+Deno.test("signal: update no-op when result is same value", () => {
+  const s = signal(5);
+  let calls = 0;
+  effect(() => {
+    s.value;
+    calls++;
+  });
+  assertEquals(calls, 1);
+  s.update((_prev) => 5); // same value
+  assertEquals(calls, 1); // no re-trigger
+});
+
 // ── AIO-50: Glitch-free outside batch ──────────────────────────────
 
 Deno.test("signal: no glitch when set() outside batch triggers cascading updates", () => {
@@ -374,4 +414,112 @@ Deno.test("signal: no glitch when set() outside batch triggers cascading updates
   });
   assertEquals(log, [11, 12, 23]); // 3 + 20 (not 13 then 23)
   dispose();
+});
+
+// ── untrack() ─────────────────────────────────────────────────────────
+
+Deno.test("untrack: reads inside untrack are not tracked", () => {
+  const a = signal(1);
+  const b = signal(2);
+  const deps = _trackStart();
+  const va = a.value; // tracked
+  const vb = untrack(() => b.value); // NOT tracked
+  const tracked = _trackEnd(deps);
+  assertEquals(va, 1);
+  assertEquals(vb, 2);
+  assertEquals(tracked.size, 1); // only 'a' tracked
+});
+
+Deno.test("untrack: effect does not re-run for untracked signals", () => {
+  const tracked = signal(0);
+  const untracked_ = signal(0);
+  let runs = 0;
+  effect(() => {
+    tracked.value;
+    untrack(() => untracked_.value);
+    runs++;
+  });
+  assertEquals(runs, 1);
+  untracked_.set(1); // should NOT re-trigger
+  assertEquals(runs, 1);
+  tracked.set(1); // SHOULD re-trigger
+  assertEquals(runs, 2);
+});
+
+Deno.test("untrack: returns the value of the function", () => {
+  const s = signal(42);
+  const result = untrack(() => s.value * 2);
+  assertEquals(result, 84);
+});
+
+Deno.test("untrack: restores tracking stack when fn throws", () => {
+  const a = signal(0);
+  let runs = 0;
+  effect(() => {
+    a.value; // track a
+    runs++;
+    try {
+      untrack(() => {
+        throw new Error("boom");
+      });
+    } catch { /* expected */ }
+  });
+  assertEquals(runs, 1);
+  // After the throw, tracking should still work — a is still tracked
+  a.set(1);
+  assertEquals(runs, 2);
+});
+
+Deno.test("untrack: restores tracking context after call", () => {
+  const a = signal(1);
+  const b = signal(2);
+  const c = signal(3);
+  const deps = _trackStart();
+  void a.value; // tracked
+  untrack(() => void b.value); // not tracked
+  void c.value; // tracked
+  const tracked = _trackEnd(deps);
+  assertEquals(tracked.size, 2); // a and c
+});
+
+// ── AIO-120: Disposed computed must not recompute ────────────────────
+
+Deno.test("computed: disposed computed returns cached value and does not re-subscribe", () => {
+  const s = signal(1);
+  let computeCount = 0;
+  const c = computed(() => {
+    computeCount++;
+    return s.value * 10;
+  });
+
+  // Force initial computation
+  assertEquals(c.value, 10);
+  assertEquals(computeCount, 1);
+
+  // Signal should have a subscriber from the computed
+  const subsBefore =
+    (s as unknown as { _subscribers: Set<unknown> })._subscribers.size;
+  assertEquals(subsBefore > 0, true);
+
+  // Mark the computed dirty by changing its dependency BEFORE disposing
+  s.set(99);
+
+  // Now dispose — the computed is dirty (dep changed) but not yet recomputed
+  (c as unknown as { dispose(): void }).dispose();
+
+  // After dispose, signal should have no subscribers from this computed
+  const subsAfterDispose =
+    (s as unknown as { _subscribers: Set<unknown> })._subscribers.size;
+  assertEquals(subsAfterDispose, 0);
+
+  // Access disposed computed — must return last cached value (10), NOT recompute
+  // This is the bug: without the fix, _recompute() runs, re-establishing subscriptions
+  assertEquals(c.value, 10);
+  assertEquals(c.peek(), 10);
+  assertEquals(computeCount, 1); // must NOT have recomputed
+
+  // Must NOT have re-subscribed to the signal
+  const subsAfterAccess =
+    (s as unknown as { _subscribers: Set<unknown> })._subscribers.size;
+  assertEquals(subsAfterAccess, 0);
 });

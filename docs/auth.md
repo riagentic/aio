@@ -57,13 +57,15 @@ deno task dev --expose --cert=/etc/ssl/myapp.pem --key=/etc/ssl/myapp.key
 
 ## Multi-user auth
 
-Three auth modes:
+Four auth modes:
 
 1. **Public** (default) — no auth, all clients are anonymous
 2. **Single token** (`--expose`) — auto-generated UUID, all users are anonymous
    but verified
 3. **Per-user tokens** (`users` config) — static token → user mapping with
    identity
+4. **Dynamic resolution** (`resolveUser` config) — custom hook for JWT, OAuth,
+   database lookup, or any async verification
 
 ### Per-user tokens
 
@@ -99,6 +101,54 @@ await aio.run({
 ```
 [12:00:00][INFO] share (alice/admin): http://0.0.0.0:8000?token=alice-secret-123
 [12:00:00][INFO] share (bob/viewer): http://0.0.0.0:8000?token=bob-secret-456
+```
+
+### Dynamic user resolution (`resolveUser`)
+
+For apps that need JWT verification, database lookups, or external auth
+providers, use the `resolveUser` hook instead of static tokens:
+
+```ts
+import type { ResolveUserFn } from "aio";
+
+const resolveUser: ResolveUserFn = async (token, state) => {
+  // Example: verify JWT and return user
+  try {
+    const payload = await verifyJwt(token, JWT_SECRET);
+    return { id: payload.sub, role: payload.role };
+  } catch {
+    return null; // reject — 401
+  }
+};
+
+await aio.run({
+  features: [myFeature],
+  resolveUser,
+  stateForUI: (state, user?) => {
+    if (user?.role === "admin") return state;
+    return { publicData: state.publicData };
+  },
+});
+```
+
+**How it works:**
+
+- Token is extracted from `?token=` query param or `Authorization: Bearer`
+  header (same as static `users`)
+- `resolveUser(token, state)` is called with the extracted token and current app
+  state
+- Return `AioUser` to authenticate, `null` to reject (401)
+- Supports async — return a `Promise<AioUser | null>` for JWT verification,
+  database lookups, etc.
+- If both `resolveUser` and `users` are set, `resolveUser` takes precedence
+
+**Type:**
+
+```ts
+type ResolveUserFn<S = unknown> = (
+  token: string,
+  state: S,
+) => AioUser | null | Promise<AioUser | null>;
 ```
 
 ### `AioUser` type
@@ -141,14 +191,14 @@ A summary of aio's security posture and known limitations:
 
 ### What aio protects
 
-| Threat                                    | Protection                                                                                |
-| ----------------------------------------- | ----------------------------------------------------------------------------------------- |
-| Unauthorized WebSocket/HTTP access        | Token auth (`--expose` or `users:`) — timing-safe comparison                              |
-| Cross-origin browser requests (localhost) | `Origin` header validation — only same-origin allowed when not exposed                    |
-| State leakage per user                    | `stateForUI(state, user?)` — server-side filtering per client                             |
-| Trojan API abuse from web                 | `/__aio/trojan/*` bound to `127.0.0.1` HTTP-only — unreachable from browser even with TLS |
-| Reducer/effect crashes taking down server | All errors caught and logged, dispatch loop continues                                     |
-| XSS in error overlay                      | `escHtml()` sanitizes filenames, paths, and error text                                    |
+| Threat                                    | Protection                                                                                    |
+| ----------------------------------------- | --------------------------------------------------------------------------------------------- |
+| Unauthorized WebSocket/HTTP access        | Token auth (`--expose`, `users`, or `resolveUser`) — timing-safe comparison for static tokens |
+| Cross-origin browser requests (localhost) | `Origin` header validation — only same-origin allowed when not exposed                        |
+| State leakage per user                    | `stateForUI(state, user?)` — server-side filtering per client                                 |
+| Trojan API abuse from web                 | `/__aio/trojan/*` bound to `127.0.0.1` HTTP-only — unreachable from browser even with TLS     |
+| Reducer/effect crashes taking down server | All errors caught and logged, dispatch loop continues                                         |
+| XSS in error overlay                      | `escHtml()` sanitizes filenames, paths, and error text                                        |
 
 ### Known limitations
 

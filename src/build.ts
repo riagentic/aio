@@ -61,6 +61,7 @@ if (shellFlags.length > 1) {
 
 const _integrityFile = join(root, ".aio-integrity.json");
 let _integrityMap: Record<string, string> | null = null;
+let _integrityPromise: Promise<Record<string, string>> | null = null; // AIO-225
 
 async function _sha256(text: string): Promise<string> {
   const buf = await crypto.subtle.digest(
@@ -71,14 +72,20 @@ async function _sha256(text: string): Promise<string> {
     .join("");
 }
 
-async function _loadIntegrityMap(): Promise<Record<string, string>> {
-  if (_integrityMap) return _integrityMap;
-  try {
-    _integrityMap = JSON.parse(await Deno.readTextFile(_integrityFile));
-  } catch {
-    _integrityMap = {};
+function _loadIntegrityMap(): Promise<Record<string, string>> {
+  if (_integrityMap) return Promise.resolve(_integrityMap);
+  // AIO-225: deduplicate concurrent loads to prevent race condition
+  if (!_integrityPromise) {
+    _integrityPromise = (async () => {
+      try {
+        _integrityMap = JSON.parse(await Deno.readTextFile(_integrityFile));
+      } catch {
+        _integrityMap = {};
+      }
+      return _integrityMap!;
+    })();
   }
-  return _integrityMap!;
+  return _integrityPromise;
 }
 
 async function _saveIntegrityMap(): Promise<void> {
@@ -207,18 +214,19 @@ async function withDevExcluded(
     } catch { /* dir missing */ }
   }
 
-  for (const name of _devTopLevel) await _rm(join(_nmDir, name));
-  for (const scope of ["@electron", "@esbuild"]) {
-    await _rmDir(join(_denoDir, "node_modules", scope));
-  }
-  await _rm(join(_nmDir, ".bin", "esbuild"));
-
-  console.log(
-    `[${tag}] excluding ${excludes.length} dev dirs, removed ${saved.length} symlinks`,
-  );
-
   let ok = false;
   try {
+    // AIO-226: removal inside try so finally always restores on error
+    for (const name of _devTopLevel) await _rm(join(_nmDir, name));
+    for (const scope of ["@electron", "@esbuild"]) {
+      await _rmDir(join(_denoDir, "node_modules", scope));
+    }
+    await _rm(join(_nmDir, ".bin", "esbuild"));
+
+    console.log(
+      `[${tag}] excluding ${excludes.length} dev dirs, removed ${saved.length} symlinks`,
+    );
+
     ok = await fn(excludes);
   } finally {
     for (const { path, target, isDir } of saved) {
@@ -286,7 +294,9 @@ if (!doCli && !doHeadless && !doClient && !(doAndroid && doRemote)) {
   async function isBundleFresh(): Promise<boolean> {
     if (doForce) return false;
     try {
-      const outMtime = (await Deno.stat(out)).mtime!.getTime();
+      const outStat = await Deno.stat(out);
+      if (!outStat.mtime) return false; // AIO-227: can't verify freshness → rebuild
+      const outMtime = outStat.mtime.getTime();
       // Check deno.json + framework source files (skip for remote — JSR version is pinned)
       if (!_IS_REMOTE) {
         const aioModule = doAndroid
@@ -367,7 +377,7 @@ if (!doCli && !doHeadless && !doClient && !(doAndroid && doRemote)) {
       compilerOptions: mainConfig.compilerOptions,
       imports: {
         ...mainConfig.imports,
-        ...(aioEntry ? { "aio": aioEntry } : {}),
+        ...(aioEntry ? { "aio": aioEntry, "aio/air": aioEntry } : {}),
         ...reactImports,
       },
     };

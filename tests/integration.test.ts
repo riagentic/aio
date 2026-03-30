@@ -79,21 +79,19 @@ Deno.test("integration: WS connect → initial state → action → delta broadc
       flag: true,
     });
 
-    // 2. First action → delta patch (per-client cache initialized on connect)
+    // 2. First action → full state (no patches provided, fallback sends full state)
     ws.send(JSON.stringify({ type: "INCREMENT", payload: { by: 5 } }));
     await waitFor(() => received.length >= 2);
 
-    const delta1 = JSON.parse(received[1]!);
-    assertEquals(delta1.$p, { counter: 5 }); // only changed key
-    assertEquals(delta1.$d, undefined); // no deleted keys
+    const state1 = JSON.parse(received[1]!);
+    assertEquals(state1, { counter: 5, name: "test", flag: true });
 
-    // 3. Second action → still delta (1 of 3 keys = 33% < 50%)
+    // 3. Second action → full state again
     ws.send(JSON.stringify({ type: "INCREMENT", payload: { by: 3 } }));
     await waitFor(() => received.length >= 3);
 
-    const delta2 = JSON.parse(received[2]!);
-    assertEquals(delta2.$p, { counter: 8 }); // only changed key
-    assertEquals(delta2.$d, undefined); // no deleted keys
+    const state2 = JSON.parse(received[2]!);
+    assertEquals(state2, { counter: 8, name: "test", flag: true });
 
     ws.close();
   } finally {

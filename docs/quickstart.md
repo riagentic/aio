@@ -65,30 +65,29 @@ deno install
   "unstable": ["kv"],
   "compilerOptions": {
     "jsx": "react-jsx",
-    "jsxImportSource": "react",
-    "jsxImportSourceTypes": "@types/react"
+    "jsxImportSource": "aio"
   },
   "imports": {
-    "aio": "jsr:@riagentic/aio@1.0.0-alpha7",
-    "@types/react": "npm:@types/react@^18",
-    "react": "npm:react@^18",
-    "react-dom": "npm:react-dom@^18",
+    "aio": "jsr:@riagentic/aio@1.0.0-alpha8",
+    "aio/air": "jsr:@riagentic/aio@1.0.0-alpha8/air",
     "esbuild": "npm:esbuild@^0.24"
   },
   "tasks": {
     "dev": "deno run -A src/app.ts",
-    "am": "deno run -A jsr:@riagentic/aio@1.0.0-alpha7/src/am",
+    "am": "deno run -A jsr:@riagentic/aio@1.0.0-alpha8/src/am",
     "test": "deno test -A --unstable-kv tests/",
-    "compile:browser": "deno run -A jsr:@riagentic/aio@1.0.0-alpha7/src/build --compile",
-    "compile:electron": "deno run -A jsr:@riagentic/aio@1.0.0-alpha7/src/build --compile --electron",
-    "compile:electron:remote": "deno run -A jsr:@riagentic/aio@1.0.0-alpha7/src/build --client",
-    "compile:cli": "deno run -A jsr:@riagentic/aio@1.0.0-alpha7/src/build --compile --cli",
-    "compile:service": "deno run -A jsr:@riagentic/aio@1.0.0-alpha7/src/build --compile --service --headless",
-    "compile:android": "deno run -A jsr:@riagentic/aio@1.0.0-alpha7/src/build --android"
+    "compile:browser": "deno run -A jsr:@riagentic/aio@1.0.0-alpha8/src/build --compile",
+    "compile:electron": "deno run -A jsr:@riagentic/aio@1.0.0-alpha8/src/build --compile --electron",
+    "compile:electron:remote": "deno run -A jsr:@riagentic/aio@1.0.0-alpha8/src/build --client",
+    "compile:cli": "deno run -A jsr:@riagentic/aio@1.0.0-alpha8/src/build --compile --cli",
+    "compile:service": "deno run -A jsr:@riagentic/aio@1.0.0-alpha8/src/build --compile --service --headless",
+    "compile:android": "deno run -A jsr:@riagentic/aio@1.0.0-alpha8/src/build --android"
   }
 }
 ```
 
+- `"jsxImportSource": "aio"` — uses air, the built-in renderer (~8KB, zero
+  dependencies). No React needed.
 - `"title"` — app name, used as default window title and binary name (lowercased
   slug) when compiling. Optional, falls back to `"AIO App"`.
 - `"esbuild"` — required for dev mode transpilation and bundle step. Excluded
@@ -135,7 +134,7 @@ export const counter = feature("counter", {
 ### App.tsx
 
 ```tsx
-import { useFeature } from "aio/react";
+import { useFeature } from "aio/air";
 import { counter } from "./features/counter/index.ts";
 
 export default function App() {
@@ -289,6 +288,56 @@ export const checkout = feature("checkout", {
 
 ---
 
+## Using React instead of air
+
+air is the default renderer — zero dependencies, ~8KB. If you prefer React
+(existing codebase, React ecosystem libraries), add React to your project:
+
+**deno.json changes:**
+
+```json
+{
+  "compilerOptions": {
+    "jsx": "react-jsx",
+    "jsxImportSource": "react",
+    "jsxImportSourceTypes": "@types/react"
+  },
+  "imports": {
+    "aio": "jsr:@riagentic/aio@1.0.0-alpha8",
+    "aio/react": "jsr:@riagentic/aio@1.0.0-alpha8/react",
+    "@types/react": "npm:@types/react@^18",
+    "react": "npm:react@^18",
+    "react-dom": "npm:react-dom@^18",
+    "esbuild": "npm:esbuild@^0.24"
+  }
+}
+```
+
+**App.tsx** — import from `aio/react` instead of `aio/air`:
+
+```tsx
+import { useFeature } from "aio/react";
+import { counter } from "./features/counter/index.ts";
+
+export default function App() {
+  const { state, send, status } = useFeature(counter);
+  if (!state) return <div>Connecting...</div>;
+
+  return (
+    <div>
+      <h1>{state.count}</h1>
+      <button onClick={() => send.increment()}>+</button>
+    </div>
+  );
+}
+```
+
+Everything else (features, server, build, testing) is identical. Only the import
+path and `deno.json` compiler options change. See [renderer.md](renderer.md) for
+a detailed comparison.
+
+---
+
 ## Troubleshooting
 
 **"Electron not found" or app window doesn't open** Run
@@ -297,7 +346,7 @@ to open in your browser instead.
 
 **"Module not found: aio"** Run `deno install` to download dependencies. Make
 sure your `deno.json` has the `"aio"` import mapped to
-`jsr:@riagentic/aio@1.0.0-alpha7`.
+`jsr:@riagentic/aio@1.0.0-alpha8`.
 
 **State resets on every restart** This is normal in dev if you changed your
 state shape. aio auto-persists to Deno.Kv — if the shape changed, the old state

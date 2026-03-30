@@ -12,6 +12,13 @@ import type { Msg } from "./feature-types.ts";
 import type { FlowStepRecord } from "./error.ts";
 import { log } from "./logger.ts";
 
+class FlowFailError extends Error {
+  constructor(reason: string) {
+    super(reason);
+    this.name = "FlowFailError";
+  }
+}
+
 // ── FlowHistory — ring buffer for step tracking ─────────────────────
 
 export class FlowHistory {
@@ -352,14 +359,16 @@ const activeFlows = new Map<string, FlowInstance>();
 // ── Action listener registry for waitFor ──────────────────────────────
 
 type ActionListener = { actionType: string; resolve: (action: Msg) => void };
-const _actionListeners = new Set<ActionListener>();
+/** @internal — exported for test assertions only */
+export const _actionListeners = new Set<ActionListener>();
 
 /** Notify waiting flows when an action is dispatched — called from the dispatch loop */
 export function notifyFlowListeners(action: Msg): void {
-  for (const listener of _actionListeners) {
+  const snapshot = [..._actionListeners];
+  for (const listener of snapshot) {
     if (action.type === listener.actionType) {
-      listener.resolve(action);
       _actionListeners.delete(listener);
+      listener.resolve(action);
     }
   }
 }
@@ -381,7 +390,12 @@ export function notifyStateListeners(state: Record<string, unknown>): void {
         _stateListeners.delete(listener);
       }
     } catch (e) {
-      log.debug("aio", `when() predicate threw: ${e}`);
+      // AIO-199: remove broken predicate to prevent infinite retry leak.
+      // Resolve the listener so the flow can proceed (generator receives
+      // undefined, re-checks state, and handles the error condition).
+      log.debug("aio", `when() predicate threw — removing listener: ${e}`);
+      _stateListeners.delete(listener);
+      listener.resolve();
     }
   }
 }
@@ -465,6 +479,9 @@ export async function runFlow(
   };
   activeFlows.set(flowKey, instance);
 
+  // Track waitFor listeners for cleanup in finally block (AIO-117)
+  const waitForListeners = new Set<ActionListener>();
+
   // Register cancelOn listeners
   const cancelListeners: ActionListener[] = [];
   if (flowDef.cancelOn) {
@@ -502,7 +519,12 @@ export async function runFlow(
       const currentStep = flowSteps.push(stepAction);
 
       try {
-        const stepResult = await executeStep(step, instance, app);
+        const stepResult = await executeStep(
+          step,
+          instance,
+          app,
+          waitForListeners,
+        );
         flowSteps.markOk(currentStep);
         if (instance.aborted) return;
         result = gen.next(stepResult);
@@ -524,6 +546,9 @@ export async function runFlow(
       } as Msg);
     }
   } catch (e) {
+    // AIO-253: FlowFailError means ctx.fail() already dispatched its action — just exit cleanly
+    if (e instanceof FlowFailError) return;
+
     if (!instance.aborted) {
       // Dispatch error action (keep existing behavior)
       app.dispatch({
@@ -545,8 +570,15 @@ export async function runFlow(
       }
     }
   } finally {
-    activeFlows.delete(flowKey);
+    // Only delete from activeFlows if this instance is still the current one
+    // (a re-triggered flow may have already replaced it)
+    if (activeFlows.get(flowKey) === instance) {
+      activeFlows.delete(flowKey);
+    }
     for (const l of cancelListeners) _actionListeners.delete(l);
+    // AIO-117: clean up any pending waitFor listeners
+    for (const l of waitForListeners) _actionListeners.delete(l);
+    waitForListeners.clear();
   }
 }
 
@@ -555,7 +587,11 @@ async function executeStep(
   step: FlowStep,
   instance: FlowInstance,
   app: FlowApp,
+  waitForListeners?: Set<ActionListener>,
 ): Promise<unknown> {
+  // AIO-255: bail immediately if flow was aborted (prevents all/race continuations)
+  if (instance.aborted) return undefined;
+
   const { prefix, featureName } = instance;
   const flowPrefix = `${prefix}:__flow:`;
 
@@ -634,9 +670,8 @@ async function executeStep(
         _source: "Effect",
       });
 
-      // Stop the generator
-      instance.aborted = true;
-      return undefined;
+      // AIO-253: throw sentinel so generator try/finally blocks execute properly
+      throw new FlowFailError(step.reason);
     }
 
     case "dispatch": {
@@ -647,7 +682,7 @@ async function executeStep(
     case "all": {
       // Execute all entries in parallel
       const promises = step.entries.map((entry) =>
-        executeStep(entry, instance, app)
+        executeStep(entry, instance, app, waitForListeners)
       );
       return Promise.all(promises);
     }
@@ -657,7 +692,12 @@ async function executeStep(
       const entries = Object.entries(step.entries);
       const result = await Promise.race(
         entries.map(async ([key, entry]) => {
-          const value = await executeStep(entry, instance, app);
+          const value = await executeStep(
+            entry,
+            instance,
+            app,
+            waitForListeners,
+          );
           return { key, value };
         }),
       );
@@ -665,14 +705,21 @@ async function executeStep(
     }
 
     case "sleep": {
-      // Dispatch sleep action for visibility
       app.dispatch({
         type: `${flowPrefix}${step.name}`,
         payload: { _flow: instance.flowName, _step: step.name, ms: step.ms },
         _source: "Effect",
       });
-
-      await new Promise((resolve) => setTimeout(resolve, step.ms));
+      const controller = new AbortController();
+      instance.abortController = controller;
+      await new Promise<void>((resolve) => {
+        const timer = setTimeout(resolve, step.ms);
+        controller.signal.addEventListener("abort", () => {
+          clearTimeout(timer);
+          resolve();
+        }, { once: true });
+      });
+      instance.abortController = undefined;
       return undefined;
     }
 
@@ -697,10 +744,12 @@ async function executeStep(
       const actionPromise = new Promise<Msg>((resolve) => {
         listener = { actionType: step.actionType, resolve };
         _actionListeners.add(listener);
+        waitForListeners?.add(listener);
 
         // Resolve immediately on flow cancellation — no 50ms poll needed
         controller.signal.addEventListener("abort", () => {
           _actionListeners.delete(listener);
+          waitForListeners?.delete(listener);
           resolve({ type: "__aborted", payload: {} });
         }, { once: true });
       });
@@ -716,10 +765,12 @@ async function executeStep(
         instance.abortController = undefined;
         if (result === timeoutSentinel) {
           _actionListeners.delete(listener!); // delete exact instance, not first match
+          waitForListeners?.delete(listener!);
           throw new Error(
             `waitFor('${step.actionType}') timed out after ${step.timeout}ms`,
           );
         }
+        waitForListeners?.delete(listener!);
         return result;
       }
 
@@ -737,6 +788,7 @@ async function executeStep(
       const result = await actionPromise;
       if (warnTimer) clearTimeout(warnTimer);
       instance.abortController = undefined;
+      waitForListeners?.delete(listener!);
       return result;
     }
 
@@ -792,8 +844,8 @@ async function executeStep(
         clearTimeout(timeoutId!); // clear timer whether state won or timeout won
         instance.abortController = undefined;
         instance.stateListener = undefined;
+        _stateListeners.delete(listener!); // AIO-207: always clean up listener
         if (result === timeoutSentinel) {
-          _stateListeners.delete(listener!);
           throw new Error(
             `when() timed out after ${step.timeout}ms`,
           );

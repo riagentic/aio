@@ -88,6 +88,7 @@ export function useFeature(ref: any): any {
   return { state, send: createSendProxy(name, ref) };
 }
 
+/** Subscribe to the full app state. Prefer `useFeature` for scoped access. */
 export function useAio<
   S extends Record<string, unknown> = Record<string, unknown>,
 >(): {
@@ -123,6 +124,7 @@ export function useAio<
   return { state, send };
 }
 
+/** Client-only reactive state — not synced to server. Returns `{ local, set, patch }`. */
 export function useLocal<T>(
   initial: T,
 ): {
@@ -141,7 +143,7 @@ export function useLocal<T>(
     set: (next: T | ((prev: T) => T)) => {
       // AIO-66: Accept updater function like React's useState
       if (typeof next === "function") {
-        sig.set((next as (prev: T) => T)(sig.peek()));
+        sig.update(next as (prev: T) => T);
       } else {
         sig.set(next);
       }
@@ -157,6 +159,7 @@ export function useLocal<T>(
   };
 }
 
+/** Returns `true` when the WebSocket/IPC transport is connected to the server. */
 export function useConnected(): boolean {
   return getConnectedSignal().value;
 }

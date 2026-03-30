@@ -1466,3 +1466,5 @@ Deno.test("classifyBrowserError: returns unknown for unrecognized errors", () =>
   assertEquals(result.classification, "unknown");
   assertEquals(result.fix, "");
 });
+
+// _injectFilterFlag tests removed — function deleted in Immer patches migration

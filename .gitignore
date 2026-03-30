@@ -30,6 +30,8 @@ window-state.json
 # Planning / scratch notes
 untracked/
 docs/superpowers/
+issues.md
+resolved.md
 
 # Claude
 .claude/

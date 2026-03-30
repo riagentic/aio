@@ -19,12 +19,12 @@ framework experience needed.
 | [generators.md](generators.md)           | Sequential async workflows — `generators` key, `cancelOn()`, `GenCtx` API          |
 | [features.md](features.md)               | Inter-feature patterns (Observe/Read/Coordinate), runtime control, architecture    |
 | [ui.md](ui.md)                           | `useAio()`, `useFeature()`, `useLocal()`, URL routing, Redux DevTools, time-travel |
-| [renderer.md](renderer.md)               | AIO native renderer — signals, components, adapter architecture, custom adapters   |
+| [renderer.md](renderer.md)               | AIR + React — two renderers, one framework. Comparison, adapter architecture       |
 | [electron.md](electron.md)               | Desktop app setup, UDS transport, window persistence, thin client                  |
 | [persistence.md](persistence.md)         | Deno.Kv auto-persist, SQLite auto-sync, offline queue, incremental sync            |
 | [sqldb.md](sqldb.md)                     | SQLite schema, async query/execute/transaction, WAL mode, read replicas            |
 | [scheduling.md](scheduling.md)           | `schedule.after/every/at/cron`, cancel by ID, dynamic vs static schedules          |
-| [auth.md](auth.md)                       | `--expose`, multi-user tokens, per-user authorization, security model              |
+| [auth.md](auth.md)                       | `--expose`, multi-user tokens, `resolveUser` hook, per-user auth, security model   |
 | [testing.md](testing.md)                 | `testFeature()`, `TestContext` API, async testing, `settle()`                      |
 | [linter.md](linter.md)                   | `aiol` — static analysis, 12 check areas, `--safe-fix`, CI integration             |
 | [api.md](api.md)                         | Complete API reference — exports, types, config, hooks, SQLite, middleware         |

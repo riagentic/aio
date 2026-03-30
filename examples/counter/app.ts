@@ -17,6 +17,8 @@ export const counter = feature("counter", {
 });
 
 await aio.run({
+  appId: "counter",
+  appVersion: "1.0.0",
   features: [counter],
   baseDir: import.meta.dirname!,
 });
