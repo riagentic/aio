@@ -26,12 +26,14 @@ coverage/
 data.kv
 data.db
 window-state.json
+telemetry-id
 
 # Planning / scratch notes
 untracked/
 docs/superpowers/
 issues.md
 resolved.md
+rules.md
 
 # Claude
 .claude/

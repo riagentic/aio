@@ -466,7 +466,7 @@ async function withGuardrailServer(
         !Array.isArray((reduced as Record<string, unknown>).effects)
       ) {
         console.error(`[test] bad reducer shape`);
-        return; // skip, don't crash
+        return; // guard: invalid reducer shape, abort this iteration
       }
       const r = reduced as {
         state: Record<string, unknown>;

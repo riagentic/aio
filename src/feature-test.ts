@@ -119,7 +119,7 @@ export function testFeature<
         },
         status: (expected) => {
           const fs = state[f.__aio.id] as Record<string, unknown>;
-          const actual = fs._status;
+          const actual = fs.__aio_status;
           if (actual !== expected) {
             throw new Error(`expected status '${expected}', got '${actual}'`);
           }

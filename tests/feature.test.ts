@@ -242,13 +242,13 @@ Deno.test("feature: foreign actions in machine allowed", () => {
 
 // ── composeFeatures() ──
 
-Deno.test("compose: initialState includes _status", () => {
+Deno.test("compose: initialState includes __aio_status", () => {
   const composed = composeFeatures([counter]);
   const state = composed.initialState as Record<
     string,
     Record<string, unknown>
   >;
-  assertEquals(state.counter!._status, "idle");
+  assertEquals(state.counter!.__aio_status, "idle");
   assertEquals(state.counter!.count, 0);
 });
 
@@ -271,7 +271,7 @@ Deno.test("compose: reduce routes action to correct feature", () => {
   const result = composed.reduce(composed.initialState, counter.increment(5));
   const s = result.state.counter as Record<string, unknown>;
   assertEquals(s.count, 5);
-  assertEquals(s._status, "idle");
+  assertEquals(s.__aio_status, "idle");
   assertEquals(result.effects.length, 1);
   assertEquals(result.effects[0]!.type, "counter:log");
 });
@@ -289,16 +289,25 @@ Deno.test("compose: state machine transitions correctly", () => {
 
   // idle → save → saving
   const r1 = composed.reduce(composed.initialState, counter.save());
-  assertEquals((r1.state.counter as Record<string, unknown>)._status, "saving");
+  assertEquals(
+    (r1.state.counter as Record<string, unknown>).__aio_status,
+    "saving",
+  );
   assertEquals(r1.effects.length, 1); // persist effect
 
   // saving → saved → idle
   const r2 = composed.reduce(r1.state, counter.saved());
-  assertEquals((r2.state.counter as Record<string, unknown>)._status, "idle");
+  assertEquals(
+    (r2.state.counter as Record<string, unknown>).__aio_status,
+    "idle",
+  );
 
   // saving → saveFailed → error
   const r3 = composed.reduce(r1.state, counter.saveFailed("disk full"));
-  assertEquals((r3.state.counter as Record<string, unknown>)._status, "error");
+  assertEquals(
+    (r3.state.counter as Record<string, unknown>).__aio_status,
+    "error",
+  );
   assertEquals(
     (r3.state.counter as Record<string, unknown>).error,
     "disk full",
@@ -306,12 +315,18 @@ Deno.test("compose: state machine transitions correctly", () => {
 
   // error → retry → saving
   const r4 = composed.reduce(r3.state, counter.retry());
-  assertEquals((r4.state.counter as Record<string, unknown>)._status, "saving");
+  assertEquals(
+    (r4.state.counter as Record<string, unknown>).__aio_status,
+    "saving",
+  );
   assertEquals((r4.state.counter as Record<string, unknown>).error, null); // cleared
 
   // error → dismiss → idle
   const r5 = composed.reduce(r3.state, counter.dismiss());
-  assertEquals((r5.state.counter as Record<string, unknown>)._status, "idle");
+  assertEquals(
+    (r5.state.counter as Record<string, unknown>).__aio_status,
+    "idle",
+  );
 });
 
 Deno.test("compose: multiple features isolated", () => {

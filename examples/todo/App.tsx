@@ -69,7 +69,8 @@ export default function App() {
               ? (
                 <input
                   value={editText}
-                  onChange={(e) => setEditText((e.target as HTMLInputElement).value)}
+                  onChange={(e) =>
+                    setEditText((e.target as HTMLInputElement).value)}
                   onBlur={() => {
                     if (editText.trim()) send.edit(t.id, editText.trim());
                     setEditing(null);

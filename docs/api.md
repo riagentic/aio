@@ -2,17 +2,7 @@
 
 Main import: `import { feature, call, aio } from 'aio'`
 
-Additional export paths for framework adapters and advanced use:
-
-| Path                 | Import                                                                 | Use                                                         |
-| -------------------- | ---------------------------------------------------------------------- | ----------------------------------------------------------- |
-| `aio/state-core`     | `import { getFeatureSignal, setTransport, ... } from 'aio/state-core'` | Framework-agnostic state signals, transport, tracking proxy |
-| `aio/adapters/react` | `import { useFeature, useAio, useLocal } from 'aio/adapters/react'`    | React hooks (re-exported from main `aio` for convenience)   |
-| `aio/adapters/air`   | `import { useFeature, useAio } from 'aio/adapters/air'`                | AIR renderer hooks — signal-based, no React dependency      |
-| `aio/jsx-runtime`    | JSX transform target                                                   | AIR JSX runtime — set `jsxImportSource` in tsconfig         |
-
-> **Most apps only need the main `'aio'` import.** The sub-paths exist for
-> custom framework adapters, tree-shaking, or using AIR without React.
+> **Most apps only need the main `'aio'` import.**
 
 ---
 
@@ -27,13 +17,13 @@ Additional export paths for framework adapters and advanced use:
 
 ## Runtime
 
-| API                             | Description                                                                                   |
-| ------------------------------- | --------------------------------------------------------------------------------------------- |
-| `aio.run(config)`               | Start the app — see Config section for options                                                |
-| `aio.middleware.logger()`       | Log all actions to console (dev mode)                                                         |
-| `aio.middleware.validate(defs)` | Validate action shapes before reduce                                                          |
-| `call(opts, fn)`                | Call with `{ timeout?, retries? }` — wraps inter-feature calls                                |
-| `markAsync(fn)`                 | Explicitly mark a method as async — for minified bundles where constructor names are stripped |
+| API                         | Description                                                                                   |
+| --------------------------- | --------------------------------------------------------------------------------------------- |
+| `aio.run(config)`           | Start the app — see Config section for options                                                |
+| `aio.middleware.logger()`   | Log all actions to console (dev mode)                                                         |
+| `aio.middleware.validate()` | Validate action shapes before reduce — checks `type` is string, `payload` is plain object     |
+| `call(opts, fn)`            | Call with `{ timeout?, retries? }` — wraps inter-feature calls                                |
+| `markAsync(fn)`             | Explicitly mark a method as async — for minified bundles where constructor names are stripped |
 
 ### Dispatch Introspection
 
@@ -54,10 +44,37 @@ on each heartbeat). Direct use is for custom monitoring or testing.
 | API                                        | Description                                                             |
 | ------------------------------------------ | ----------------------------------------------------------------------- |
 | `composeFeatures(entries)`                 | Combine features manually — for custom composition                      |
+| `bindFeature(feature, dispatch, getState)` | Wire a feature to a live dispatch bus without aio.run()                 |
 | `composeMiddleware(...fns)`                | Compose beforeReduce functions — return null to drop action             |
 | `draft(state, fn)`                         | Immer wrapper for `actions/reduce` style — returns `{ state, effects }` |
 | `matchEffect(effect, handlers, fallback?)` | Typed effect dispatch — alternative to switch/case in execute           |
 | `deepFreeze(obj)`                          | Deep freeze for dev-mode immutability checks                            |
+
+### `bindFeature(feature, dispatch, getState)`
+
+Wires a feature definition to a live dispatch bus without going through
+`aio.run()`. For advanced composition, testing, or custom host environments.
+
+```ts
+import { bindFeature, feature } from "aio";
+
+const myFeature = feature("my", {
+  state: { x: 0 },
+  methods: {
+    increment(s) {
+      s.x++;
+    },
+  },
+});
+
+// Wire to custom dispatch
+bindFeature(myFeature, customDispatch, customGetState);
+await myFeature.increment(); // dispatches through customDispatch
+```
+
+Throws if the feature is already bound to another dispatch bus. Features can
+only bind to one bus at a time. For testing, use `testFeature()` instead — it
+handles binding automatically.
 
 ### `composeMiddleware(...fns)`
 
@@ -365,27 +382,34 @@ configurable — if you hit it, you have an infinite dispatch loop.
 
 ## Middleware
 
-| API                                               | Description                              |
-| ------------------------------------------------- | ---------------------------------------- |
-| `beforeReduce: (action, state) => action \| null` | Filter/transform actions before reduce   |
-| `afterReduce: (state, action) => void`            | Side effects after state update          |
-| `onAction: (action, state) => void`               | Observe all actions (logging, analytics) |
+Only `beforeReduce` is middleware. `onAction` and other hooks are lifecycle
+config keys under `aio.run()`, not middleware.
+
+| API                                                      | Description                                                    |
+| -------------------------------------------------------- | -------------------------------------------------------------- |
+| `beforeReduce: (action, state, user?) => action \| null` | Filter/transform actions before reduce — return `null` to drop |
 
 ---
 
 ## Testing
 
-| API                          | Description                                      |
-| ---------------------------- | ------------------------------------------------ |
-| `t.dispatch(action)`         | Dispatch action in test                          |
-| `t.getState()`               | Get current test state                           |
-| `t.expect.state(feature)`    | Get feature's state slice                        |
-| `t.expect.status(expected)`  | Assert machine status                            |
-| `t.expect.matches(expected)` | Assert state matches partial object              |
-| `t.settle()`                 | Wait for all effects + async methods to complete |
-| `t.spy(fn)`                  | Track calls to a function                        |
-| `t.spy.calls`                | Array of `[...args]` for each call               |
-| `t.spy.reset()`              | Clear spy call history                           |
+`testFeature(def, name, fn)` — isolated test harness. `t` is
+`TestContext<S, A>`:
+
+| API                         | Description                                                                        |
+| --------------------------- | ---------------------------------------------------------------------------------- |
+| `t.send[key](...args)`      | Dispatch typed action — one sender per declared action                             |
+| `t.getState()`              | Get current feature state                                                          |
+| `t.expect.state(fn)`        | Assert state via predicate — `fn(s, ...args) => boolean`, throws on false          |
+| `t.expect.status(expected)` | Assert machine status matches string                                               |
+| `t.expect.effects(types[])` | Assert exact effect types returned by last action                                  |
+| `t.expect.effectCount(n)`   | Assert number of effects returned by last action                                   |
+| `t.expect.invariant(fn)`    | Assert predicate holds for current state — `fn(s) => boolean`, throws on false     |
+| `t.settle(ms?)`             | Run effects + wait for async — no arg: drain microtasks; with ms: timer-based wait |
+| `t.getEffects()`            | Get effects array returned by last dispatched action                               |
+| `t.randomActions(n)`        | Dispatch N random valid actions (property-based testing)                           |
+| `t.init()`                  | Reset feature to initial state                                                     |
+| `t.destroy()`               | Destroy feature — resets to initial + 'uninitialized' status                       |
 
 ---
 
@@ -455,11 +479,11 @@ keyword-highlighted).
 
 ## Utility
 
-| API                    | Description                                          |
-| ---------------------- | ---------------------------------------------------- |
-| `VERSION`              | Framework version string                             |
-| `parseCli(args)`       | Parse CLI flags — returns `{ command, flags, args }` |
-| `lint(features)`       | Validate feature definitions at startup              |
-| `instances()`          | List running aio instances (from lock file)          |
-| `resolveAppId(appDir)` | Resolve app identity from directory                  |
-| `slugify(name)`        | Convert name to URL-safe slug                        |
+| API                    | Description                                                  |
+| ---------------------- | ------------------------------------------------------------ |
+| `VERSION`              | Framework version string                                     |
+| `parseCli(args)`       | Parse CLI flags — returns `{ command, flags, args }`         |
+| `lint(features)`       | Validate feature definitions at startup                      |
+| `instances()`          | List running aio instances (from lock file)                  |
+| `resolveAppId(appDir)` | Resolve app identity from directory                          |
+| `slugify(name)`        | Convert name to URL-safe slug _(internal — not for app use)_ |

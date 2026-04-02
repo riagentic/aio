@@ -150,11 +150,11 @@ Deno.test("integration: async feature(methods) method with machine + sync method
 
   assertEquals((app.state.workflow as any).data, "fetched-data");
   assertEquals((app.state.workflow as any).step, "done");
-  assertEquals((app.state.workflow as any)._status, "running");
+  assertEquals((app.state.workflow as any).__aio_status, "running");
 
   // Transition back to idle
   app.dispatch(workflow.complete!());
-  assertEquals((app.state.workflow as any)._status, "idle");
+  assertEquals((app.state.workflow as any).__aio_status, "idle");
 });
 
 // ── Lifecycle hooks with multiple reactive features ─────────────────

@@ -75,6 +75,7 @@ let _readyResolve: ((state: any) => void) | null = null;
 let _readyPromise = new Promise<any>((resolve) => {
   _readyResolve = resolve;
 });
+let _readyTimeout: ReturnType<typeof setTimeout> | null = null;
 
 // Identity-keyed array maps: "feature.arrayKey" -> { ids: Map<id, element>, order: id[] }
 const _idMaps = new Map<
@@ -131,9 +132,9 @@ export function _checkWastedRenders(status: string): string | null {
 
 // ── Shallow equality ────────────────────────────────────────────────
 
-/** Shallow-equal comparison for one level of properties. */
+/** Shallow-equal comparison for one level of properties. Uses Object.is for NaN correctness. */
 export function _shallowEqual(a: unknown, b: unknown): boolean {
-  if (a === b) return true;
+  if (Object.is(a, b)) return true;
   if (
     typeof a !== "object" || typeof b !== "object" || a === null || b === null
   ) return false;
@@ -143,7 +144,7 @@ export function _shallowEqual(a: unknown, b: unknown): boolean {
   const objA = a as Record<string, unknown>;
   const objB = b as Record<string, unknown>;
   for (const k of ka) {
-    if (!Object.hasOwn(objB, k) || objA[k] !== objB[k]) return false; // AIO-237: key-existence check
+    if (!Object.hasOwn(objB, k) || !Object.is(objA[k], objB[k])) return false; // AIO-237: key-existence check
   }
   return true;
 }
@@ -470,10 +471,17 @@ function _applyPathDelete(state: Record<string, any>, path: string): void {
 }
 
 // ── @deprecated Legacy delta application (signal-wired) — remove after v1.0.0 stable ──
+let _warnedLegacyDelta = false;
 
 function _applyDeltaToSignals(
   data: { $p?: Record<string, any>; $d?: string[]; $f?: number },
 ): void {
+  if (!_warnedLegacyDelta) {
+    _warnedLegacyDelta = true;
+    console.warn(
+      "[aio DEPRECATED] received $p/$d delta format — server/client mismatch. Upgrade to v1.0.0+",
+    );
+  }
   const prev = _stateSignal.peek();
 
   // $f (filtered) — deep merge into existing state
@@ -684,6 +692,8 @@ export type HandleResult = "full" | "delta" | "noop" | "dropped";
  *  before calling this — state-core has no browser-specific protocol knowledge.
  *  Returns what happened so caller can react (notify listeners, devtools, etc). */
 export function handleMessage(data: any): HandleResult {
+  // AIO-272: validate input — null/undefined messages crash transport
+  if (!data || typeof data !== "object") return "noop";
   if (!_initialStateReceived) {
     // Delta before first state — drop (reconnect race)
     if (data.$p || data.$d || data.$patches) return "dropped";
@@ -695,6 +705,10 @@ export function handleMessage(data: any): HandleResult {
     _accessedPaths.clear();
     cancelSubsTimer();
     if (_readyResolve) {
+      if (_readyTimeout !== null) {
+        clearTimeout(_readyTimeout);
+        _readyTimeout = null;
+      }
       _readyResolve(cleaned);
       _readyResolve = null;
     }
@@ -738,8 +752,10 @@ export function handleMessage(data: any): HandleResult {
     }
   }
 
-  // @deprecated Legacy delta patch: { $p: {...}, $d: [...] } — remove after v1.0.0 stable
-  // Server no longer produces this format; kept for cached old-format clients only.
+  // @deprecated Legacy delta patch: { $p: {...}, $d: [...] }
+  // AIO-272: Target removal: v1.0.0 stable. Server no longer produces this format.
+  // Old cached clients or reconnect with stale state may still receive it. Safe to
+  // remove once all clients are on v1.0.0+. Migration: server now sends $patches instead.
   if (data.$p || data.$d) {
     const prev = _stateSignal.peek();
     _applyDeltaToSignals({ $p: data.$p, $d: data.$d });
@@ -840,8 +856,13 @@ export function createSendProxy(
 
 // ── Tracking proxy ──────────────────────────────────────────────────
 /** Deep proxy that records accessed state paths for server subscription filtering. */
-export function _trackingProxy(obj: unknown, parentPath = ""): unknown {
+export function _trackingProxy(
+  obj: unknown,
+  parentPath = "",
+  depth = 0,
+): unknown {
   if (!obj || typeof obj !== "object" || Array.isArray(obj)) return obj;
+  if (depth > 100) return obj; // AIO-261: depth limit for circular references
   return new Proxy(obj as Record<string, unknown>, {
     get(target, prop: string | symbol) {
       if (typeof prop === "string" && !_BLOCKED_KEYS.has(prop)) {
@@ -849,7 +870,7 @@ export function _trackingProxy(obj: unknown, parentPath = ""): unknown {
         const value = Reflect.get(target, prop);
         if (value && typeof value === "object" && !Array.isArray(value)) {
           trackPath(fullPath); // AIO-206: track object access itself
-          return _trackingProxy(value, fullPath);
+          return _trackingProxy(value, fullPath, depth + 1);
         }
         trackPath(fullPath);
         return value;
@@ -888,8 +909,16 @@ export function _resolveWithFallback<S>(
 
 // ── Lifecycle ───────────────────────────────────────────────────────
 
-/** Promise resolving on first state. */
+/** Promise resolving on first state, or rejecting after 30s timeout. */
 export function ready(): Promise<unknown> {
+  if (_readyTimeout === null) {
+    _readyTimeout = setTimeout(() => {
+      if (_readyResolve) {
+        _readyResolve(null); // resolve with null rather than hang
+        _readyResolve = null;
+      }
+    }, 30_000);
+  }
   return _readyPromise;
 }
 
@@ -931,8 +960,14 @@ export function _reset(): void {
   _currentSubs = [];
   cancelSubsTimer();
   // Reset ready promise
+  if (_readyTimeout !== null) {
+    clearTimeout(_readyTimeout);
+    _readyTimeout = null;
+  }
   _readyResolve = null;
   _readyPromise = new Promise<any>((resolve) => {
     _readyResolve = resolve;
   });
+  // AIO-272: reset legacy delta warning so new connections get fresh warnings
+  _warnedLegacyDelta = false;
 }

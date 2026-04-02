@@ -589,13 +589,10 @@ export function createServer(config: ServerConfig): ServerHandle {
                   `broadcast: patch payload (${patchJson.length}B) > full state (${fullJson.length}B) — sending full state`,
                 );
                 if (fullJson !== meta.lastFullJson) {
-                  meta.lastFullJson = fullJson;
                   msgToSend = fullJson;
                 }
               } else {
                 msgToSend = patchJson;
-                // AIO-208: update lastFullJson after patch send to prevent stale delta
-                if (fullJson) meta.lastFullJson = fullJson;
               }
             }
           }
@@ -605,13 +602,16 @@ export function createServer(config: ServerConfig): ServerHandle {
             const json = _getFilteredFullJson(meta);
             if (!json) continue;
             if (json === meta.lastFullJson) continue; // no change
-            meta.lastFullJson = json;
             msgToSend = json;
           }
 
           if (!msgToSend) continue;
+          // AIO-285: track what we're sending to update lastFullJson AFTER send
+          const fullJsonToSend = _getFilteredFullJson(meta);
           try {
             ws.send(msgToSend);
+            // AIO-285: update lastFullJson AFTER successful send to prevent desync
+            if (fullJsonToSend) meta.lastFullJson = fullJsonToSend;
             meta.bpLastSentAt = Date.now();
             config.vitalsSystem?.serverTransport.onClientStateSent(
               meta.id,
@@ -802,6 +802,18 @@ export function createServer(config: ServerConfig): ServerHandle {
         }
         if (e.data.length > WS_MAX_MESSAGE) {
           debug(`ws: message too large (${e.data.length} bytes), dropped`);
+          // AIO-272: notify client so they know the message was rejected
+          try {
+            socket.send(
+              JSON.stringify({
+                error: "message_too_large",
+                code: 1009,
+                size: e.data.length,
+              }),
+            );
+          } catch {
+            // If send fails (client already gone), we've done our best
+          }
           return;
         }
         meta.bytesThisSec += e.data.length;
@@ -1771,16 +1783,13 @@ export function createServer(config: ServerConfig): ServerHandle {
           // Stale validation — a newer file change already started a new validation
           if (gen !== _graphGeneration) return;
           if (result === null) {
-            debug("graph: ⚠ validation timed out (>2s) — serving app anyway");
-            graphResult = {
-              valid: true,
-              errors: [],
-              modules: new Map(),
-              durationMs: 2000,
-            };
-          } else {
-            graphResult = result;
+            // AIO-280: timeout — keep previous result, don't assume valid
+            debug(
+              "graph: ⚠ validation timed out (>2s) — keeping previous state",
+            );
+            return;
           }
+          graphResult = result;
         }
 
         if (!prod && graphResult && !graphResult.valid) {

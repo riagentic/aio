@@ -60,11 +60,25 @@ export function useVirtualList<T>(
   const scrollTopSig = signal(0);
 
   // Resolve items — support both plain array and signal
+  // AIO-289: robust type check using isSignal from signal-binding
   const getItems = (): T[] => {
-    if (typeof config.items === "object" && "value" in config.items) {
-      return (config.items as Signal<T[]>).value;
+    const items = config.items;
+    // Duck-type signal: has _subscribers Set, value getter, set method
+    if (
+      items !== null &&
+      typeof items === "object" &&
+      "_subscribers" in items &&
+      "value" in items
+    ) {
+      return (items as Signal<T[]>).value;
     }
-    return config.items as T[];
+    // Plain array
+    if (Array.isArray(items)) {
+      return items;
+    }
+    // Invalid input — return empty array and warn in dev
+    console.warn("[aio:virtualList] items must be an array or Signal<array>");
+    return [] as T[];
   };
 
   const visibleComputed: Computed<

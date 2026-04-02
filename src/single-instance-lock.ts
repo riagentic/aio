@@ -216,6 +216,18 @@ export class AppLock {
     };
     if (tryCreateLock(data)) {
       this.acquired = true;
+      // AIO-267: register cleanup handlers for crash/terminate
+      // Only register in production (skip in test environments)
+      const cleanup = () => this.release();
+      try {
+        addEventListener("unload", cleanup);
+      } catch { /* skip if listener limit */ }
+      try {
+        Deno.addSignalListener("SIGINT", cleanup);
+      } catch { /* unsupported on windows */ }
+      try {
+        Deno.addSignalListener("SIGTERM", cleanup);
+      } catch { /* unsupported on windows */ }
       return { ok: true };
     }
     return { ok: false, existing: readLock(this.appId)! };

@@ -171,12 +171,13 @@ export function createUDSListener(
                 `uds: patch payload (${patchJson.length}B) > full state (${fullJson.length}B) — sending full state`,
               );
               if (fullJson !== client.lastFullJson) {
-                client.lastFullJson = fullJson;
                 sendTo(conn, fullJson);
+                // AIO-286: update lastFullJson after send queues successfully
+                client.lastFullJson = fullJson;
               }
             } else {
               sendTo(conn, patchJson);
-              // AIO-217: update lastFullJson after patch send to prevent stale delta
+              // AIO-286: update lastFullJson after send queues successfully
               if (fullJson) client.lastFullJson = fullJson;
             }
             continue;
@@ -187,8 +188,9 @@ export function createUDSListener(
         const json = _getFilteredFullJson(client);
         if (!json) continue;
         if (json === client.lastFullJson) continue; // no change
-        client.lastFullJson = json;
         sendTo(conn, json);
+        // AIO-286: update lastFullJson after send queues successfully
+        client.lastFullJson = json;
       }
     },
     clients: () => [...clientMap.values()],

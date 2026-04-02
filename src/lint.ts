@@ -180,7 +180,9 @@ export async function lint(
           ) continue;
           // import type is erased by TS — never reaches the browser
           if (
-            m[0].startsWith("import type ") || m[0].startsWith("import type{")
+            m[0].startsWith("import type ") ||
+            m[0].startsWith("import type{") ||
+            /^import\s*\{[^}]*\btype\b/.test(m[0]) // AIO-276: detect inline type import
           ) continue;
           r.warn.push(
             `${entry.name}: import "${spec}" won't work in browser — dev mode transpiles but doesn't bundle. Move this import to a server-side .ts file, or use the npm package via an effect.`,

@@ -186,10 +186,15 @@ export function composeFeatures(
 
   // ── Validation ──
   for (const f of features) {
-    if (f.__aio.state._status !== undefined) {
-      log.warn(
-        "feature",
-        `${f.__aio.id} state._status is reserved for machine status — rename it to avoid conflicts`,
+    const reservedKeys = Object.keys(f.__aio.state).filter((k) =>
+      k === "_status" || k.startsWith("__aio_")
+    );
+    if (reservedKeys.length > 0) {
+      throw new Error(
+        `feature "${f.__aio.id}" uses reserved key(s): ${
+          reservedKeys.join(", ")
+        }. ` +
+          `Rename '_status' to avoid conflicts with aio internals.`,
       );
     }
     if (f.__aio.actionKeys.length === 0) {
@@ -206,7 +211,7 @@ export function composeFeatures(
     const machine = f.__aio.machine;
     const status = machine === false ? undefined : machine.initial;
     initialState[f.__aio.id] = status != null
-      ? { ...f.__aio.state, _status: status }
+      ? { ...f.__aio.state, __aio_status: status }
       : { ...f.__aio.state };
   }
 
@@ -250,7 +255,8 @@ export function composeFeatures(
 
     // Machine guard
     if (machine !== false) {
-      const currentStatus = (featureState._status ?? machine.initial) as string;
+      const currentStatus =
+        (featureState.__aio_status ?? machine.initial) as string;
       const stateConfig = machine.states[currentStatus];
       if (!stateConfig) return { state: fullState, effects: [] };
 
@@ -303,8 +309,8 @@ export function composeFeatures(
             });
             if (Array.isArray(result)) effects = result;
             // Set machine _status inside draft so patch captures the transition
-            if (draft._status !== targetStatus) {
-              draft._status = targetStatus;
+            if (draft.__aio_status !== targetStatus) {
+              draft.__aio_status = targetStatus;
             }
           },
         );
@@ -830,20 +836,13 @@ export function composeFeatures(
             const msg =
               `[${f.__aio.id}] cross-dispatch blocked → '${targetPrefix}'. Fix: add dispatchTo: [${targetPrefix}]`;
             countFeatureError(f.__aio.id);
-            if ((globalThis as Record<string, unknown>).__aioDev) {
-              throw new Error(msg);
-            }
-            if (_reportError) {
-              _reportError(
-                createAioError("MACHINE_BLOCKED", msg, {
-                  featureName: f.__aio.id,
-                  actionType: a.type,
-                }),
-              );
-            } else {
-              log.error("feature", msg);
-            }
-            return;
+            _reportError?.(
+              createAioError("MACHINE_BLOCKED", msg, {
+                featureName: f.__aio.id,
+                actionType: a.type,
+              }),
+            );
+            throw new Error(msg);
           }
         }
         app.dispatch(tagSource(a, "Effect"));
@@ -988,14 +987,16 @@ export function composeFeatures(
       name: string,
       app: { dispatch: (a: Msg) => void; getState: () => unknown },
     ) => {
-      disabledFeatures.add(name);
       const f = features.find((f) => f.__aio.id === name);
-      if (f) {
-        cancelFeatureFlows(f.__aio.id);
-        // AIO-203: call onDestroy — match destroyAll() pattern
-        if (f.__aio.onDestroy) {
-          const scopedApp: ScopedApp & { _onError?: (err: AioError) => void } =
-            {
+      // Phase 1: Mark disabled (no-throw, immediate)
+      disabledFeatures.add(name);
+      try {
+        if (f) {
+          cancelFeatureFlows(f.__aio.id);
+          if (f.__aio.onDestroy) {
+            const scopedApp: ScopedApp & {
+              _onError?: (err: AioError) => void;
+            } = {
               _onError: _reportError,
               dispatch: (a: Msg) => app.dispatch(tagSource(a, "System")),
               getState: () =>
@@ -1004,28 +1005,32 @@ export function composeFeatures(
                 ] as unknown,
               getFullState: () => app.getState() as Record<string, unknown>,
             };
-          try {
             f.__aio.onDestroy(scopedApp);
-          } catch (e) {
-            if (_reportError) {
-              _reportError(
-                createAioError("DESTROY_ERROR", e, {
-                  featureName: f.__aio.id,
-                }),
-              );
-            } else {
-              log.error("feature", `${f.__aio.id} destroy: ${e}`);
-            }
-            countFeatureError(f.__aio.id);
           }
+          app.dispatch(
+            tagSource({ type: f.__aio.destroyType, payload: {} }, "System"),
+          );
         }
-        app.dispatch(
-          tagSource({ type: f.__aio.destroyType, payload: {} }, "System"),
-        );
-        // Clear error tracking for disabled features (AIO-147)
+      } catch (e) {
+        // Rollback: re-enable and report
+        disabledFeatures.delete(name);
+        countFeatureError(f?.__aio.id ?? name);
+        const msg = `disable("${name}") failed, rolled back: ${e}`;
+        if (_reportError) {
+          _reportError(
+            createAioError("DESTROY_ERROR", msg, {
+              featureName: f?.__aio.id ?? name,
+            }),
+          );
+        } else {
+          log.error("feature", msg);
+        }
+        return;
+      }
+      // Phase 2: Final cleanup (no-throw)
+      if (f) {
         featureErrors.delete(f.__aio.id);
         featureLastAction.delete(f.__aio.id);
-        // Notify host to cancel schedules for this feature
         if (onFeatureDisable) onFeatureDisable(f.__aio.id);
       }
     },
@@ -1035,7 +1040,7 @@ export function composeFeatures(
       state: Record<string, unknown>,
     ): string | undefined => {
       const fs = state[name] as Record<string, unknown> | undefined;
-      return fs?._status as string | undefined;
+      return fs?.__aio_status as string | undefined;
     },
     health: (state: Record<string, unknown>): FeatureStatus[] => {
       return features.map((f) => {
@@ -1043,7 +1048,7 @@ export function composeFeatures(
         const last = featureLastAction.get(f.__aio.id);
         return {
           name: f.__aio.id,
-          status: fs?._status as string | undefined,
+          status: fs?.__aio_status as string | undefined,
           enabled: !disabledFeatures.has(f.__aio.id),
           errors: (featureErrors.get(f.__aio.id) ?? []).length,
           lastAction: last?.type,

@@ -100,7 +100,9 @@ export function diagEmit(event: Omit<DiagnosticEvent, "ts">): void {
   if (_count < RING_CAP) _count++;
 
   // Notify listeners
-  for (const fn of _listeners) {
+  // AIO-273: snapshot before iteration to prevent skip/duplicate on subscribe/unsubscribe during notification
+  const snapshot = [..._listeners];
+  for (const fn of snapshot) {
     fn(full);
   }
 }

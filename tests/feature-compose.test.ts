@@ -174,12 +174,18 @@ Deno.test("machine guard: blocks action not allowed in current state", () => {
   // closed → open works
   const r2 = composed.reduce(composed.initialState, door.open());
   assertEquals((r2.state.door as { opened: boolean }).opened, true);
-  assertEquals((r2.state.door as { _status: string })._status, "open");
+  assertEquals(
+    (r2.state.door as { __aio_status: string }).__aio_status,
+    "open",
+  );
 
   // open state — 'lock' is not allowed
   const r3 = composed.reduce(r2.state, door.lock());
   assertEquals(r3.effects.length, 0);
-  assertEquals((r3.state.door as { _status: string })._status, "open"); // unchanged
+  assertEquals(
+    (r3.state.door as { __aio_status: string }).__aio_status,
+    "open",
+  ); // unchanged
 });
 
 Deno.test("machine guard: returns unchanged state reference", () => {

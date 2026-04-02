@@ -244,16 +244,33 @@ export function createScheduleManager(
     timers.set(id, { timerId, kind });
   }
 
-  /** Safe dispatch — cleans up timer entry on error to prevent leaks */
+  /** Safe dispatch — cleans up timer entry on error to prevent leaks.
+   *  One-shot timers (after/at): retry up to 3 times with 5s backoff.
+   *  Repeating timers (every/cron): cancel on failure. */
   function safeDispatch(
     id: string,
     action: { type: string; payload?: unknown },
+    kind: "after" | "every" | "at" | "cron",
+    retryCount = 0,
   ): void {
     try {
       dispatch(action);
     } catch (e) {
       log.error(`schedule: dispatch '${id}' failed: ${e}`);
-      cancelTimer(id);
+      if (kind === "every" || kind === "cron") {
+        cancelTimer(id);
+      } else if (retryCount < 3) {
+        const timerId = setTimeout(
+          () => safeDispatch(id, action, kind, retryCount + 1),
+          5000,
+        );
+        setTimer(id, kind, timerId);
+      } else {
+        log.error(
+          `schedule: dispatch '${id}' failed after 3 retries — giving up`,
+        );
+        cancelTimer(id);
+      }
     }
   }
 
@@ -268,7 +285,7 @@ export function createScheduleManager(
     const timerId = setTimeout(() => {
       timers.delete(id);
       log.debug(`schedule: after '${id}' fired`);
-      safeDispatch(id, action);
+      safeDispatch(id, action, "after");
     }, ms);
     setTimer(id, "after", timerId);
     log.debug(`schedule: after '${id}' set for ${ms}ms`);
@@ -284,7 +301,7 @@ export function createScheduleManager(
     }
     const timerId = setInterval(() => {
       log.debug(`schedule: every '${id}' fired`);
-      safeDispatch(id, action);
+      safeDispatch(id, action, "every");
     }, ms);
     setTimer(id, "every", timerId);
     log.debug(`schedule: every '${id}' set for ${ms}ms`);
@@ -317,7 +334,7 @@ export function createScheduleManager(
       const timerId = setTimeout(() => {
         timers.delete(id);
         log.debug(`schedule: at '${id}' fired`);
-        safeDispatch(id, action);
+        safeDispatch(id, action, "at");
       }, delay);
       setTimer(id, "at", timerId);
       log.debug(`schedule: at '${id}' set for ${delay}ms (${time})`);
@@ -357,7 +374,12 @@ export function createScheduleManager(
       }
       const timerId = setTimeout(() => {
         log.debug(`schedule: cron '${id}' fired`);
-        safeDispatch(id, action);
+        // AIO-265: log error but continue rescheduling on dispatch failure
+        try {
+          dispatch(action);
+        } catch (e) {
+          log.error(`schedule: cron '${id}' dispatch failed: ${e}`);
+        }
         // Only reschedule if action didn't cancel this cron (AIO-142)
         if (timers.has(id)) scheduleNext();
       }, delay);

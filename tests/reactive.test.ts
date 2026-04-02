@@ -330,7 +330,7 @@ Deno.test("feature(methods): machine guards on sync methods", () => {
 
   state = composed.reduce(state, door.open!()).state;
   assertEquals((state.door as any).opened, true);
-  assertEquals((state.door as any)._status, "open");
+  assertEquals((state.door as any).__aio_status, "open");
 
   // Can't open again
   const before = state;
@@ -339,7 +339,7 @@ Deno.test("feature(methods): machine guards on sync methods", () => {
 
   state = composed.reduce(state, door.close!()).state;
   assertEquals((state.door as any).opened, false);
-  assertEquals((state.door as any)._status, "closed");
+  assertEquals((state.door as any).__aio_status, "closed");
 });
 
 Deno.test("feature(methods): async Proxy writes gated by machine", async () => {

@@ -584,10 +584,10 @@ Either:
 2. The machine definition is missing a transition
 3. A race condition dispatched an action after a state transition
 
-### "state._status is reserved"
+### "uses reserved key(s): _status"
 
-The `_status` key is auto-managed by the machine system. Rename your field
-(e.g., `_status` → `currentStatus`).
+The `_status` and `__aio_*` keys are reserved by the framework. Rename your
+field (e.g., `_status` → `currentStatus`).
 
 ### "already bound"
 

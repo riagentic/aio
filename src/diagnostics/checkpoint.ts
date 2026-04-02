@@ -60,12 +60,18 @@ export function createCheckpoint(dir: string, debounceMs: number) {
   function schedule(data: CheckpointData): void {
     pending = data;
     if (debounceMs <= 0) {
-      write(data).catch(() => {});
+      write(data).catch((e) =>
+        console.error(`[checkpoint] write failed: ${e}`)
+      ); // AIO-279: log instead of swallow
       return;
     }
     if (timer) clearTimeout(timer);
     timer = setTimeout(() => {
-      if (pending) write(pending).catch(() => {});
+      if (pending) {
+        write(pending).catch((e) =>
+          console.error(`[checkpoint] write failed: ${e}`)
+        ); // AIO-279
+      }
       timer = null;
     }, debounceMs);
   }

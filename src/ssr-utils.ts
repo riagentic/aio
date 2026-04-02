@@ -22,10 +22,9 @@ export function escapeHtml(s: string): string {
 }
 
 export function escapeAttr(s: string): string {
-  return s.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(
-    /'/g,
-    "&#x27;",
-  ).replace(/`/g, "&#96;");
+  return s.replace(/&/g, "&amp;").replace(/"/g, "&quot;")
+    .replace(/'/g, "&#x27;").replace(/`/g, "&#96;")
+    .replace(/\n/g, "&#xa;").replace(/\r/g, "&#xd;"); // AIO-277: escape newlines
 }
 
 export function resolveClassName(v: unknown): string {

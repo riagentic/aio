@@ -174,14 +174,19 @@ export function TransitionGroup(props: TransitionGroupProps): VNode {
             const oldTimer = _flipTimers.get(dom);
             if (oldTimer !== undefined) clearTimeout(oldTimer);
 
-            // Invert: apply inverse transform
-            dom.style.transform = `translate(${dx}px, ${dy}px)`;
+            // AIO-287: preserve pre-existing transforms (scale, rotate, etc.)
+            // Compose FLIP translation on top of existing transform
+            const existingTransform = dom.style.transform;
+            const flipTransform = `translate(${dx}px, ${dy}px)`;
+            dom.style.transform = existingTransform
+              ? `${existingTransform} ${flipTransform}`
+              : flipTransform;
             dom.style.transition = "none";
 
-            // Play: remove transform, let CSS transition animate
+            // Play: remove flip transform, restore original transform
             requestAnimationFrame(() => {
               dom.style.transition = `transform ${flipDur}ms ease`;
-              dom.style.transform = "";
+              dom.style.transform = existingTransform || "";
 
               // Clean up after transition
               const cleanup = () => {
