@@ -108,10 +108,6 @@ src/
 
 ### features/counter/index.ts
 
-> **Start here.** 95% of features only need `methods`. The `actions + reduce`
-> style exists for complex reactive logic — don't reach for it until you feel
-> the pain.
-
 ```ts
 import { feature } from "aio";
 
@@ -126,6 +122,73 @@ export const counter = feature("counter", {
     },
     reset(s) {
       s.count = 0;
+    },
+  },
+});
+```
+
+### Choosing a programming style
+
+aio offers three styles — pick the simplest that fits your use case:
+
+| Use this...            | When...                                                      | Examples                                       |
+| ---------------------- | ------------------------------------------------------------ | ---------------------------------------------- |
+| **`methods`**          | State changes are direct, async is independent               | Counter, form fields, toggles, simple CRUD     |
+| **`generators`**       | Steps must run in order, need timeout/retry/race             | API fetch sequences, multi-step flows, polling |
+| **`actions + reduce`** | Need strict state machine transitions, multiple entry points | Checkout wizard, auth flows, complex gating    |
+
+**Start with `methods`.** You need `generators` when:
+
+- Two async calls must happen in sequence
+- You need `.timeout()` or `.retries()` on a call
+- You need `.race()` between two operations
+
+**You need `actions + reduce` when:**
+
+- The same state change can be triggered from multiple places
+- You need strict state machine guards (idle → loading → done/error)
+
+```ts
+// methods — for simple state updates
+export const counter = feature("counter", {
+  state: { count: 0 },
+  methods: {
+    increment(s, by = 1) {
+      s.count += by;
+    },
+  },
+});
+
+// generators — for sequential workflows with timeout/retry
+export const fetcher = feature("fetcher", {
+  state: { data: null, loading: false },
+  *fetch(ctx, url: string) {
+    ctx.mutate("loading", (s) => {
+      s.loading = true;
+    });
+    const result = yield* ctx.call("fetch", () => fetch(url), {
+      timeout: 5000,
+    });
+    ctx.mutate("done", (s) => {
+      s.data = result;
+      s.loading = false;
+    });
+  },
+});
+
+// actions + reduce — for state machine control
+export const checkout = feature("checkout", {
+  state: { step: "idle" as "idle" | "processing" | "done" },
+  actions: {
+    start: () => ({}),
+    complete: () => ({}),
+  },
+  reduce: {
+    start(state) {
+      state.step = "processing";
+    },
+    complete(state) {
+      state.step = "done";
     },
   },
 });
@@ -159,7 +222,11 @@ export default function App() {
 import { aio } from "aio";
 import { counter } from "./features/counter/index.ts";
 
-await aio.run({ appId: "my-app", features: [counter] });
+await aio.run({
+  appId: "my-app", // required — unique per deployment
+  appVersion: "1.0.0", // required — for version tracking, crash reports, KV schema migration
+  features: [counter],
+});
 ```
 
 ### Run
@@ -198,9 +265,9 @@ across runs automatically.
 ```ts
 await aio.run({
   appId: "my-app",
+  appVersion: "1.0.0", // required in v1.0
   features: [counter],
   middleware: [aio.middleware.logger(), aio.middleware.validate()],
-  appVersion: "1.0.0",
 });
 ```
 
@@ -257,6 +324,52 @@ export const api = feature("api", {
   },
 });
 ```
+
+### Immer proxy restrictions
+
+State in `methods` is a live Immer draft. Some patterns break the proxy chain
+and will throw a `PROXY_ERROR`:
+
+```
+DON'T:  s.items.map(x => ...)       // creates new array — breaks proxy
+DON'T:  s.items.filter(x => ...)    // creates new array — breaks proxy
+DON'T:  s.items.splice(...)         // mutates in-place but returns new — breaks proxy
+DON'T:  const x = {...s}            // spread to plain object — loses reactivity
+DON'T:  Object.keys(s)              // returns own keys, not tracked paths
+DON'T:  for (const k in s)          // enumerates, not reliable for proxy tracking
+```
+
+```
+DO:     s.items.forEach(x => ...)   // OK — iterates without replacement
+DO:     s.items.length              // OK — direct property access
+DO:     s.items[0]                 // OK — direct index access
+DO:     const arr = [...s.items]    // OK — snapshot to NEW array first
+DO:     for (const item of s.items) // OK — iteration
+DO:     s.nested.value             // OK — direct path access
+```
+
+If you need array operations, snapshot first: `const items = [...s.items];` then
+operate on the snapshot — Immer will apply the changes to the draft.
+
+### Awaiting methods
+
+Async methods return `Promise<void>` (or `Promise<T>` if they return a value).
+All method calls can be fire-and-forget or awaited:
+
+```ts
+// Fire-and-forget — OK when order doesn't matter
+counter.increment();
+counter.fetch("/data.json");
+
+// With await — when order matters
+await counter.increment();
+await counter.fetch("/data.json"); // waits for fetch + state sync before continuing
+
+// With await + return value
+const result = await counter.fetch("/data.json"); // returns method's return value
+```
+
+Use `await` when subsequent code depends on the state change being applied.
 
 ### Advanced / explicit control — actions + reduce
 

@@ -48,7 +48,7 @@ export function createPersistenceManager(
   let persistTimer: ReturnType<typeof setTimeout> | null = null;
   let shuttingDown = false;
   let prevPersistedKeys: string[] = [];
-  let prevDbState: Record<string, unknown> = { ...getState() };
+  let prevDbState: Record<string, unknown> = structuredClone(getState());
 
   function _reportPersistError(e: unknown): void {
     const err = createAioError("PERSIST_ERROR", e, {});
@@ -57,14 +57,15 @@ export function createPersistenceManager(
 
   async function _syncSqlite(): Promise<void> {
     if (!asyncDb || !dbSchema) return;
+    const stateSnapshot = structuredClone(getState());
     try {
-      await syncTables(asyncDb, dbSchema, getState(), prevDbState);
+      await syncTables(asyncDb, dbSchema, stateSnapshot, prevDbState);
+      prevDbState = stateSnapshot;
       log.debug("persist: sqlite synced");
     } catch (e) {
       log.error(`persist: sqlite sync failed — ${e}`);
       _reportPersistError(e);
     }
-    prevDbState = { ...getState() };
   }
 
   async function _syncKv(): Promise<void> {
@@ -75,8 +76,12 @@ export function createPersistenceManager(
         const obj = dbState as Record<string, unknown>;
         const keys = Object.keys(obj);
         try {
-          await kvDb.setMulti(persistKey, obj, prevPersistedKeys);
-          prevPersistedKeys = keys;
+          const result = await kvDb.setMulti(
+            persistKey,
+            obj,
+            prevPersistedKeys,
+          );
+          if (result.ok) prevPersistedKeys = keys;
           log.debug(`persist: saved multi (${keys.length} keys)`);
         } catch (e) {
           log.error(`persist: failed to save — ${e}`);
@@ -152,9 +157,10 @@ export function createPersistenceManager(
     try {
       // Flush SQLite
       if (asyncDb && dbSchema) {
+        const stateSnapshot = structuredClone(getState());
         try {
-          await syncTables(asyncDb, dbSchema, getState(), prevDbState);
-          prevDbState = { ...getState() };
+          await syncTables(asyncDb, dbSchema, stateSnapshot, prevDbState);
+          prevDbState = stateSnapshot;
         } catch (e) {
           log.error(`persist: sqlite flush failed — ${e}`);
         }
@@ -166,8 +172,12 @@ export function createPersistenceManager(
           if (persistMode === "multi") {
             const obj = dbState as Record<string, unknown>;
             const keys = Object.keys(obj);
-            await kvDb.setMulti(persistKey, obj, prevPersistedKeys);
-            prevPersistedKeys = keys;
+            const result = await kvDb.setMulti(
+              persistKey,
+              obj,
+              prevPersistedKeys,
+            );
+            if (result.ok) prevPersistedKeys = keys;
           } else {
             await kvDb.set(persistKey, dbState);
           }
@@ -197,7 +207,7 @@ export function createPersistenceManager(
 
   /** Reset prev-state tracking after snapshot load */
   function resetPrevState(): void {
-    prevDbState = { ...getState() };
+    prevDbState = structuredClone(getState());
   }
 
   return { schedulePersist, flushPersist, setShuttingDown, resetPrevState };

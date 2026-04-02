@@ -18,6 +18,7 @@ import {
   _trackEnd,
   _trackStart,
   batch,
+  type Computed as _Computed,
   computed,
   type Disposable,
   type Signal,
@@ -410,6 +411,8 @@ export function useContextSelector<T, R>(
   // Read the context signal and apply selector — the computed tracks the context signal,
   // but the component only tracks the computed's output value.
   // The computed memo ensures the component only re-renders when the selected slice changes.
+  // NOTE: This creates a new computed on every render. The computed is lightweight
+  // and automatically disposed when the component re-renders (collected via _computedCollector).
   const sig = contextSignal;
   const selected = computed(() => selector(sig.value));
   return selected.value;
@@ -842,6 +845,7 @@ export function _unmount(handle: MountHandle): void {
 
   state.disposed = true;
   state.pendingComponents.clear();
+  state._renderCounts.clear(); // AIO-278: clear renderCounts on unmount
 
   // Recursively unmount all component instances in the tree
   if (state.vnode && typeof state.vnode === "object") {
@@ -909,13 +913,14 @@ function _flushPending(root: RootState): void {
   try {
     const deadline = _now() + _FLUSH_BUDGET_MS;
     // AIO-167: Cycle detection — track per-component render count within a single
-    // flush. An individual component re-rendering >10 times in one flush is a signal
+    // flush. An individual component re-rendering >25 times in one flush is a signal
     // write during render (A triggers B triggers A). A raw iteration cap is wrong
     // because (a) long cascades of DIFFERENT components are legitimate and (b)
     // clearing pendingComponents without resetting pendingRender creates zombies.
     // AIO-209: use root-scoped map that persists across yield boundaries
+    // AIO-288: increased from 10 to 25 to avoid false positives in complex reactive graphs
     const _renderCounts = root._renderCounts;
-    const _CYCLE_LIMIT = 10;
+    const _CYCLE_LIMIT = 25;
     while (root.pendingComponents.size > 0) {
       const batch = [...root.pendingComponents];
       root.pendingComponents.clear();

@@ -85,7 +85,12 @@ export function _ensureDelegation(root: Element, evt: string): void {
       if ((node as Node).nodeType !== 1) continue;
       const handler = _wrappedListeners.get(node as Element)?.get(evt);
       if (handler) {
-        handler(e);
+        // AIO-281: catch handler errors to prevent parent handlers from being skipped
+        try {
+          handler(e);
+        } catch (err) {
+          console.error("[aio] event handler error:", err);
+        }
         // Respect stopPropagation — check if propagation was stopped
         if (e.cancelBubble) break;
       }

@@ -89,6 +89,9 @@ export function createPressureMonitor(
             timestamp: now,
           }, `bandwidth:${clientId}`);
         }
+        // AIO-271: reset window after check to prevent averaging forever
+        bw.startedAt = now;
+        bw.totalBytes = 0;
       }
     } else {
       _clientBandwidth.set(clientId, { startedAt: now, totalBytes: bytes });

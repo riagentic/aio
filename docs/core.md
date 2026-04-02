@@ -187,7 +187,8 @@ machine: {
 
 The framework tracks the current machine state internally. Use
 `useFeature(counter).status` in the UI or `t.expect.status('idle')` in tests —
-never read `_status` directly from state.
+never read `__aio_status` directly from state — use `registry.status()` or
+`useFeature().status` in UI.
 
 **Validation at definition time:**
 

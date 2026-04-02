@@ -9,7 +9,7 @@
 - **Write reactive, use generators or atomic actions when needed.**
 - **Pick your target, compile and ship!**
 
-`v1.0.0-alpha8`
+`v1.0.0-alpha9`
 
 > Define state once. It persists, syncs to all clients, drives the UI.
 
@@ -189,11 +189,12 @@ See [FAQ](docs/faq.md#when-not-to-use-aio) for details.
 
 ## Status
 
-**v1.0.0-alpha8** · [JSR](https://jsr.io/@riagentic/aio) · MIT
+**v1.0.0-alpha9** · [JSR](https://jsr.io/@riagentic/aio) · MIT
 
-1343 tests · security hardened · 58+ bugs fixed in nuclear audit
+1343 tests · security hardened · 144+ bugs fixed across 4 nuclear audit waves
 
-Core (state, sync, persistence, features, scheduling, renderer) is stable.
-Dynamic user auth (`resolveUser`), 58 bug fixes across 23 files, and
-protocol/security hardening are new in alpha8. Electron, Android, and build
-targets are functional but less battle-tested.
+Core (state, sync, persistence, features, scheduling, renderer) is stable. New
+in alpha9: structured `boot/` module (CLI parsing, identity, lock, Electron
+helpers), `__aio_status` machine key (renamed from `_status`), `bindFeature()`
+API, signal NaN-correctness, and AIR renderer hardening (AIO-287..291).
+Electron, Android, and build targets are functional but less battle-tested.

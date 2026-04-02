@@ -1,5 +1,48 @@
 # Changelog
 
+## 1.0.0-alpha9
+
+### Added
+
+- **`src/boot/` module** — structured startup orchestration: `parseCli()`,
+  `printHelp()`, `handleCliExit()` (CLI); `bootIdentity()` (appId/port/title
+  resolution); `bootLock()` (single-instance lock); `electron-helpers.ts`
+  (`toSlug`, `escapeForExecuteJavaScript`, `requireElectronVersion`,
+  `buildWillNavigateHandler`, `buildCertificateHandler`,
+  `buildKeyboardShortcuts`, `WINDOW_STATE_HELPERS`)
+- **`bindFeature(feature, dispatch, getState)`** — wire a feature to a custom
+  dispatch bus without `aio.run()`, for advanced composition and custom hosts
+- **Legacy delta deprecation warning** — `$p/$d` format now logs a one-time
+  console warning on receipt; server no longer produces it
+
+### Fixed
+
+- **AIO-287..291** — 7 AIR renderer bugs: signal flush guard on re-entrant
+  notify, in-flight subscriber tracking, `_FLUSH_MAX_ITERATIONS` raised to 1000,
+  phase-1 failure isolation in flush loop
+- **Signal equality** — all comparisons use `Object.is` (NaN-correct,
+  cross-realm safe via duck-typing instead of prototype checks)
+- **Persistence** — `result.ok` guard on KV `setMulti`; snapshots use
+  `structuredClone` before write
+- **Dispatch JSON fallback** — warns explicitly when `structuredClone` fails and
+  JSON round-trip is used (data loss: `undefined`/`NaN`/`Infinity`/`Date`)
+- **`disable()` rollback** — failure during cleanup rolls back
+  `disabledFeatures` set and logs the error; feature re-enabled on destroy
+  failure
+- **Catch logging audit** — all silent catches now log or carry a documented
+  rationale comment; no swallowed errors remain
+
+### Changed
+
+- **`_status` → `__aio_status`** (breaking) — internal machine state key
+  renamed. Direct reads of `feature._status` must migrate (see upgrade guide).
+  The reserved-key guard now **throws** (was: warn) and also blocks any
+  `__aio_*` prefix in feature state definitions.
+- **`appVersion` required in examples** — quickstart and all docs examples now
+  include `appVersion` in `aio.run()` calls
+- **Quickstart style guide** — added decision table for `methods` vs
+  `generators` vs `actions + reduce`
+
 ## 1.0.0-alpha8
 
 ### Added

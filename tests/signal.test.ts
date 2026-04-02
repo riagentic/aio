@@ -253,14 +253,14 @@ Deno.test("signal: _flush stops after max iterations (no infinite loop)", () => 
   let count = 0;
   const disposeA = effect(() => {
     const v = a.value;
-    if (v > 0 && count < 200) {
+    if (v > 0 && count < 2000) {
       count++;
       b.set(v + 1);
     }
   });
   const disposeB = effect(() => {
     const v = b.value;
-    if (v > 0 && count < 200) {
+    if (v > 0 && count < 2000) {
       count++;
       a.set(v + 1);
     }
@@ -268,9 +268,9 @@ Deno.test("signal: _flush stops after max iterations (no infinite loop)", () => 
   count = 0;
   // Kick off the ping-pong from outside both effects
   a.set(1);
-  // The guard caps at 100 flush iterations. count should be bounded.
+  // The guard caps at 1000 flush iterations. count should be bounded.
   assertEquals(count > 1, true);
-  assertEquals(count < 200, true);
+  assertEquals(count < 1500, true); // AIO-288: updated for 1000 limit (was < 200)
   disposeA();
   disposeB();
 });

@@ -347,11 +347,11 @@ export const checkFeatures: Checker = (ctx) => {
           loc,
         );
       }
-      if (key === "_status") {
+      if (key === "__aio_status" || key.startsWith("__aio_")) {
         report(
-          "warn",
+          "error",
           "features",
-          `feature "${f.name}" state has "_status" key — this is managed by aio for machine state, will be overwritten`,
+          `feature "${f.name}" state has "${key}" key — reserved for aio internals`,
           loc,
         );
       }

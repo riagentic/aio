@@ -1,5 +1,47 @@
 # Changelog
 
+## v1.0.0-alpha9
+
+**Boot module, `__aio_status` rename & quality hardening**
+
+- `src/boot/` module — `parseCli()`, `bootIdentity()`, `bootLock()`, and
+  Electron helpers (`toSlug`, `escapeForExecuteJavaScript`,
+  `requireElectronVersion`, `buildWillNavigateHandler`,
+  `buildCertificateHandler`, `buildKeyboardShortcuts`, `WINDOW_STATE_HELPERS`)
+  extracted into structured startup orchestration
+- `bindFeature(feature, dispatch, getState)` — new API: wire a feature to a
+  custom dispatch bus without `aio.run()`
+- Signal equality uses `Object.is` throughout — NaN-correct and cross-realm safe
+  (duck-typing, no prototype checks)
+- Legacy `$p/$d` delta format now emits a one-time deprecation warning on
+  receipt; target removal v1.0.0
+
+**Breaking: `_status` → `__aio_status`**
+
+- The internal machine state key is now `__aio_status`. Any code that reads
+  `featureState._status` directly must update to `__aio_status` (use
+  `useFeature().status` or `registry.status()` instead — they're stable).
+- Reserved-key guard now **throws** at startup (was warn) and blocks any key
+  starting with `__aio_`.
+
+**AIO-287..291 — AIR renderer (7 bugs fixed)**
+
+- Signal flush: in-flight tracking prevents re-entrant subscriber double-run
+- `_FLUSH_MAX_ITERATIONS` raised to 1000 — prevents premature flush abort on
+  large signal graphs
+- Phase-1 failure isolation: a failing prepare step no longer blocks phase-2 for
+  other subscribers
+
+**Quality hardening**
+
+- Persistence: `result.ok` guard on KV `setMulti`; snapshots `structuredClone`
+  before write
+- Dispatch: JSON fallback warns explicitly on data loss
+- `disable()` rollback on destroy failure — feature re-enabled, error logged
+- All silent catches now log or carry documented rationale
+
+---
+
 ## v1.0.0-alpha8
 
 **Dynamic auth & nuclear audit hardening**

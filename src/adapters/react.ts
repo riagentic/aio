@@ -96,7 +96,7 @@ export function useFeature(ref: any, options?: any): any {
   const resolved = _resolveWithFallback(featureState, defaults);
 
   const status = resolved
-    ? (resolved as Record<string, unknown>)._status as string | undefined
+    ? (resolved as Record<string, unknown>).__aio_status as string | undefined
     : undefined;
   return {
     state: _trackingProxy(resolved, name),

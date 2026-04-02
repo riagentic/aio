@@ -215,6 +215,7 @@ export function createDispatch<S, A, E>(
           }
           clearCorrelationId();
           overflowed = true;
+          closed = true;
           break;
         }
         const entry = queue.shift()!;
@@ -278,9 +279,22 @@ export function createDispatch<S, A, E>(
             try {
               cloned.push(structuredClone(eff));
             } catch (cloneErr) {
-              // Try JSON round-trip as fallback
+              // Try JSON round-trip as fallback — WARNING: loses undefined, NaN, Infinity, Date
               try {
-                cloned.push(JSON.parse(JSON.stringify(eff)));
+                const jsoned = JSON.parse(JSON.stringify(eff));
+                // AIO-272: warn when JSON fallback is used — data loss occurred
+                console.warn(
+                  `[aio:dispatch] effect clone fallback for "${
+                    tag(current)
+                  }" — ` +
+                    `undefined, NaN, Infinity, Date values become null. ` +
+                    `Original error: ${
+                      cloneErr instanceof Error
+                        ? cloneErr.message
+                        : String(cloneErr)
+                    }`,
+                );
+                cloned.push(jsoned);
               } catch {
                 const err = createAioError(
                   "EFFECT_ERROR",
@@ -299,6 +313,7 @@ export function createDispatch<S, A, E>(
                   },
                 );
                 reportAioError(err, _reportOpts);
+                cloned.push(eff);
               }
             }
           }

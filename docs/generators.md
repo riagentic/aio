@@ -542,9 +542,9 @@ feature's slice. Fresh after each flow step.
 
 ```ts
 const full = ctx.getFullState();
-const auth = full.auth as { _status: string; user: string | null };
+const auth = full.auth as { __aio_status: string; user: string | null };
 
-if (auth._status !== "authenticated") {
+if (auth.__aio_status !== "authenticated") {
   yield * ctx.fail("not authenticated");
   return;
 }
@@ -565,12 +565,16 @@ suspending.
 
 ```ts
 // Wait until app is running — resolves instantly if already true
-yield * ctx.when((s) => (s.app as { _status: string })._status === "running");
+yield *
+  ctx.when((s) =>
+    (s.app as { __aio_status: string }).__aio_status === "running"
+  );
 
 // With timeout
 try {
   yield * ctx.when(
-    (s) => (s.auth as { _status: string })._status === "authenticated",
+    (s) =>
+      (s.auth as { __aio_status: string }).__aio_status === "authenticated",
     { timeout: 10_000 },
   );
 } catch {
@@ -596,7 +600,10 @@ yield * ctx.race({
 });
 
 // Robust — doesn't care how the state was reached
-yield * ctx.when((s) => (s.auth as { _status: string })._status === "guest");
+yield *
+  ctx.when((s) =>
+    (s.auth as { __aio_status: string }).__aio_status === "guest"
+  );
 ```
 
 **What happens internally:**
@@ -615,7 +622,9 @@ yield * ctx.when((s) => (s.auth as { _status: string })._status === "guest");
 
 ```ts
 const result = yield * ctx.race({
-  ready: ctx.when((s) => (s.app as { _status: string })._status === "running"),
+  ready: ctx.when((s) =>
+    (s.app as { __aio_status: string }).__aio_status === "running"
+  ),
   timeout: ctx.sleep("timeout", 5000),
 });
 

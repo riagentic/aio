@@ -468,7 +468,7 @@ export class AioLogger {
   private checkTransitions(state: Record<string, unknown>): void {
     for (const [name, last] of this.lastStatus) {
       const newStatus = (state[name] as Record<string, unknown> | undefined)
-        ?._status as string | undefined;
+        ?.__aio_status as string | undefined;
       if (newStatus !== undefined && newStatus !== last) {
         this.lastStatus.set(name, newStatus);
         if (newStatus) this.emit("info", `feature:${name}`, newStatus);

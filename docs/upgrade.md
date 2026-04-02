@@ -5,6 +5,410 @@ breaks, and exact steps to update your code.
 
 ---
 
+## v1.0.0-alpha8 → v1.0.0-alpha9
+
+### Breaking changes
+
+**`_status` → `__aio_status` (machine state internal key)**
+
+The internal machine state field is renamed. If you were reading it directly
+(which the docs warned against), update all references:
+
+```ts
+// BEFORE (alpha8)
+const raw = app.getState().myFeature as { _status: string };
+if (raw._status === "idle") { ... }
+
+// AFTER (alpha9) — preferred: don't read internal key directly
+const { status } = useFeature(myFeature);   // UI — stable, never changes
+const s = registry.status("myFeature");     // server/test — stable
+
+// If you must read the raw state (advanced/testing):
+const raw = app.getState().myFeature as { __aio_status: string };
+if (raw.__aio_status === "idle") { ... }
+```
+
+Also in `ctx.when()` and `ctx.getFullState()` inside generators — all `_status`
+references must become `__aio_status`:
+
+```ts
+// BEFORE
+yield * ctx.when((s) => (s.auth as { _status: string })._status === "guest");
+
+// AFTER
+yield *
+  ctx.when((s) =>
+    (s.auth as { __aio_status: string }).__aio_status === "guest"
+  );
+```
+
+**Reserved-key guard now throws (was warn)**
+
+If any feature has a state field named `_status` or prefixed `__aio_`, the
+framework now throws at startup instead of logging a warning. Rename the field
+before upgrading:
+
+```ts
+// BEFORE — feature with _status field (only warned in alpha8)
+feature("myFeature", { state: { _status: "ok", count: 0 }, ... })
+
+// AFTER — rename the field
+feature("myFeature", { state: { connectionStatus: "ok", count: 0 }, ... })
+```
+
+### New APIs
+
+**`bindFeature(feature, dispatch, getState)`**
+
+Wire a feature to a custom dispatch bus without `aio.run()`. Useful for custom
+host environments, micro-frontend composition, or unit testing with a real
+reducer but no full server stack.
+
+```ts
+import { bindFeature, feature } from "aio";
+
+const myFeature = feature("my", {
+  state: { x: 0 },
+  methods: {
+    increment(s) {
+      s.x++;
+    },
+  },
+});
+
+bindFeature(myFeature, customDispatch, customGetState);
+await myFeature.increment();
+```
+
+Throws if the feature is already bound. Use `testFeature()` for test harnesses.
+
+**`src/boot/` — structured startup helpers**
+
+New module for apps that need fine-grained boot control:
+
+```ts
+import { bootIdentity, bootLock, handleCliExit, parseCli } from "aio/boot";
+
+const cli = parseCli();
+handleCliExit(cli); // handles --help / --version
+
+const identity = await bootIdentity({
+  appId: "my-app",
+  configPort: 8080,
+  cliPort: cli.port,
+  cliTitle: cli.title,
+  log,
+});
+
+const { appLock } = await bootLock({
+  appId: identity.appId,
+  singletonMode: true,
+  killExisting: cli.killExisting ?? false,
+  port: identity.port,
+  log,
+});
+```
+
+Electron helpers (`toSlug`, `escapeForExecuteJavaScript`,
+`requireElectronVersion`, `buildWillNavigateHandler`, `buildCertificateHandler`,
+`buildKeyboardShortcuts`, `WINDOW_STATE_HELPERS`) are also exported from
+`aio/boot`.
+
+### Other changes (no action required)
+
+- Signal equality now uses `Object.is` — `NaN === NaN` in signals, cross-realm
+  objects compare by duck-typing. No behavioral change for normal values.
+- Persistence snapshots use `structuredClone` before KV write — prevents
+  mutations after snapshot from corrupting persisted state.
+- JSON fallback in dispatch now logs a warning when `structuredClone` fails —
+  watch for `[aio:dispatch] effect clone fallback` in logs.
+- `disable()` now rolls back if cleanup throws — the feature stays enabled
+  rather than becoming permanently stuck in a disabled-but-broken state.
+
+### Upgrade steps
+
+1. Search for `_status` in your codebase: `grep -r "_status" src/`
+2. Replace direct reads with `useFeature().status` (UI) or `registry.status()`
+   (server). If you must read raw state, rename to `__aio_status`.
+3. Rename any feature state field called `_status` to something else.
+4. Run `deno task test` — the reserved-key guard throws at startup so you'll
+   catch violations immediately.
+
+---
+
+_Future versions will be documented here as they are released._
+
+---
+
+## v1.0.0-alpha7 → v1.0.0-alpha8
+
+### Breaking changes
+
+None. This release is fully backward compatible with alpha7.
+
+### Non-breaking additions
+
+- **Dynamic user resolution (`resolveUser`)** — async hook for JWT, OAuth, or
+  database-backed auth. Add `resolveUser` to your `aio.run()` config for dynamic
+  auth instead of static `users` map. See
+  [auth.md](auth.md#dynamic-user-resolution-resolveuser)
+- **`ResolveUserFn` type** — exported from `mod.ts` for typed resolver
+  definitions
+- **Patch compaction** — broadcast protocol compacts redundant patches, reducing
+  wire overhead
+- **Broadcast size guard** — oversized patches auto-fallback to full-state
+- **58 bug fixes** across 23 files from 13-round nuclear audit (AIO-57..236)
+
+### Upgrade steps
+
+1. Update `deno.json`: `"aio": "jsr:@riagentic/aio@1.0.0-alpha8"`
+2. Update task commands:
+   `"am": "deno run -A jsr:@riagentic/aio@1.0.0-alpha8/src/am"`
+3. If you use static `users` auth and want to migrate to dynamic auth, add
+   `resolveUser` to your config (see [auth.md](auth.md)). Static `users` still
+   works unchanged.
+4. Run `deno install && deno task dev`
+
+---
+
+---
+
+## v1.0.0-alpha6 → v1.0.0-alpha7
+
+### Breaking changes
+
+**Renderer exports removed from `mod.ts`**
+
+`mod.ts` no longer re-exports renderer primitives. Import from the dedicated
+barrel modules instead:
+
+```ts
+// BEFORE (alpha6) — deep internal imports
+import { onCleanup, onMount, useRef } from "dep/aio/src/aio-renderer.ts";
+
+// AFTER (alpha7) — clean barrel imports
+import { effect, onCleanup, onMount, signal, useRef } from "aio/air";
+// or for React adapter:
+import { useFeature, useLocal } from "aio/react";
+```
+
+**`middleware.ts` and `lint.ts` extracted from `aio.ts`**
+
+If you imported these internals directly from `aio.ts`, update paths:
+
+```ts
+// BEFORE
+import { composeMiddleware } from "dep/aio/src/aio.ts";
+import { lint } from "dep/aio/src/aio.ts";
+
+// AFTER
+import { composeMiddleware } from "dep/aio/src/middleware.ts";
+import { lint } from "dep/aio/src/lint.ts";
+```
+
+Public API via `import from "aio"` is unchanged — these are re-exported.
+
+### Non-breaking additions
+
+- **Type-safe `send`** — `useFeature` infers method signatures from the feature
+  definition. `send.methodName(...)` is fully typed. No code changes needed.
+- **`aio/air` and `aio/react` barrel exports** — one import for all primitives.
+  Old imports continue to work.
+- **React compat hooks** — `useState`, `useEffect`, `useCallback`, `useMemo`
+  available from `aio/react`. Drop-in replacements for React muscle memory.
+- **12 bug fixes (AIO-55..70)** — proxy ownKeys, signal equality, ref callbacks,
+  JSX types, useLocal patch, useFeature inference, CJS stubs, aio:// scheme.
+
+### Upgrade steps
+
+1. Update `deno.json`: `"aio": "jsr:@riagentic/aio@1.0.0-alpha7"`
+2. Update task commands:
+   `"am": "deno run -A jsr:@riagentic/aio@1.0.0-alpha7/src/am"`
+3. Replace any deep renderer imports with `aio/air` or `aio/react` barrel
+   imports. `deno check` will flag broken paths.
+4. Run `deno install && deno task dev`
+
+---
+
+---
+
+## v1.0.0-alpha5 → v1.0.0-alpha6
+
+### Breaking changes
+
+None. This release is fully backward compatible with alpha5.
+
+### Non-breaking additions
+
+- **AIR native renderer (~8KB)** — signal-based VDOM engine with JSX, keyed
+  reconciliation, auto-memo, SSR/hydration, lifecycle, context, portals,
+  suspense, forms (`useForm`), animation (`useSpring`, `useTransition`), virtual
+  scrolling (`useVirtualList`), devtools. See [renderer.md](renderer.md)
+- **Adapter architecture** — `state-core.ts` as framework-agnostic foundation.
+  React and AIR adapters are thin consumers. New export paths: `aio/state-core`,
+  `aio/adapters/react`, `aio/adapters/air`, `aio/jsx-runtime`. See
+  [api.md](api.md)
+- **Delta protocol hardening (AIO-26..34)** — Electron replay fix, UDS
+  per-client subscriptions, `$f` filtered merge protocol, `unflattenPatch`
+  empty→identity array fix, periodic resync every ~5s, update-after-send,
+  ref-equality removal. See [changelog.md](changelog.md)
+
+### Upgrade steps
+
+1. Update `deno.json`: `"aio": "jsr:@riagentic/aio@1.0.0-alpha6"`
+2. Update task commands:
+   `"am": "deno run -A jsr:@riagentic/aio@1.0.0-alpha6/src/am"`
+3. To use AIR renderer instead of React: set `jsxImportSource` to
+   `@riagentic/aio` in `compilerOptions` and import from `aio/adapters/air`.
+   React apps need no changes — existing imports continue to work.
+4. Run `deno install && deno task dev`
+
+---
+
+---
+
+## v1.0.0-alpha4 → v1.0.0-alpha5
+
+### Breaking changes
+
+None. This release is fully backward compatible with alpha4.
+
+### Non-breaking additions
+
+- **Identity-keyed array delta compression (AIO-12)** — arrays with `id` fields
+  are sent as per-element patches (`$arr`/`$id:`/`$rm` wire format). Typical
+  savings: 120KB → 7.5KB for 160-element arrays. Automatic — no code changes
+  needed. See [traffic.md](traffic.md)
+- **4-layer wasted render prevention (AIO-11)** — `useProjection(fn, deps)` for
+  derived state with structural sharing, `memo(Component)` with per-prop
+  `_shallowEqual`, `aiol` lint rule, runtime dev warning. See [ui.md](ui.md)
+- **Deep proxy-tracked subscriptions** — `useAio()` auto-tracks accessed state
+  paths; server filters broadcasts to only include paths the client reads
+- **UDS ghost socket elimination (AIO-24/25)** — no more ghost sockets after
+  client disconnect. IPC keepalive ping every 60s for passive viewing. See
+  [electron.md](electron.md)
+- **10 framework reliability fixes (AIO-14..23)** — dispatch, flow, server, and
+  electron edge cases
+- **JSR 100% documentation score** — JSDoc on all public exports, all
+  transitively-referenced types re-exported
+
+### Upgrade steps
+
+1. Update `deno.json`: `"aio": "jsr:@riagentic/aio@1.0.0-alpha5"`
+2. Update task commands:
+   `"am": "deno run -A jsr:@riagentic/aio@1.0.0-alpha5/src/am"`
+3. Consider adopting `useProjection()` + `memo()` for list-heavy UIs —
+   significant render reduction. See [ui.md](ui.md)
+4. Run `deno install && deno task dev`
+
+---
+
+---
+
+## v1.0.0-alpha3 → v1.0.0-alpha4
+
+### Breaking changes
+
+**`effectTimeout` behavior change — warn → hard-cancel**
+
+```ts
+// BEFORE (alpha3): timed-out effects logged a warning but continued running
+// The effect could still resolve/reject after timeout — double-report possible
+
+// AFTER (alpha4): timed-out effects are abandoned
+// The framework considers the effect failed after timeout
+// Late rejections are suppressed (no double-report)
+// Timed-out effects count toward circuit breaker threshold
+```
+
+If you rely on effects completing after timeout (e.g., fire-and-forget with a
+generous timeout), this is a behavior change. Effects that exceed
+`effectTimeoutMs` are now killed and counted as failures.
+
+### Non-breaking additions
+
+- **Vital signs** — three probes (loop, render, transport) + hint engine for
+  detecting and diagnosing UI freezes. Enabled by default. Kill switch:
+  `vitals: false`. See [vitals.md](vitals.md)
+- **DiagReporter** — structured console diagnostics with `onDiagnostic` hook for
+  telemetry. See [diagnostics.md](diagnostics.md)
+- **PressureMonitor** — payload size and broadcast rate warnings. Kill switch:
+  `vitals: { pressure: false }`
+- **Subscription stability (AIO-3/4)** — `useAio()` no longer re-subscribes on
+  every render. 300ms grace period prevents teardown during page switches
+- **Diagnostic bus & health overlay** — unified event channel for 18
+  previously-silent failure points, visible via green/yellow/red dot overlay
+- **Flow cross-feature access** — `ctx.getFullState()` and `ctx.when(predicate)`
+  in generators. See [generators.md](generators.md)
+- **Reduce phase breakdown** — `PerfMetric.breakdown` field with phase timing
+- **Graph validator** — validates feature dependency graph at startup
+- **`structuredClone` dispatch fix** — reports `EFFECT_ERROR` instead of
+  silently continuing with revoked Immer drafts
+
+### Upgrade steps
+
+1. Update `deno.json`: `"aio": "jsr:@riagentic/aio@1.0.0-alpha4"`
+2. Review any code that depends on effects completing after timeout — they are
+   now hard-cancelled
+3. Vitals and diagnostics are on by default — add `vitals: false` to `aio.run()`
+   if you need to disable them
+4. Run `deno install && deno task dev`
+
+---
+
+---
+
+## v1.0.0-alpha2 → v1.0.0-alpha3
+
+### Breaking changes
+
+**Log format changed from JSONL to plain text**
+
+If you have tooling parsing JSON logs, update it. New format:
+
+```
+2026-03-23 14:22:35.123  INFO   feature:auth  ready  port=3000
+```
+
+**`rotate` config replaced by `backupLogs` + `backupKeep`**
+
+```ts
+// BEFORE (alpha2)
+await aio.run({
+  logging: { rotate: { keep: 7 } },
+});
+
+// AFTER (alpha3)
+await aio.run({
+  logging: { backupLogs: true, backupKeep: 7 },
+});
+```
+
+Default behavior changed: logs are wiped on each app start (clean slate). Set
+`backupLogs: true` to rotate instead.
+
+**Logging enabled by default**
+
+Logging is now on by default — no need for `logging: true`. Set `logging: false`
+to disable.
+
+### Non-breaking additions
+
+- `AioError` class with structured error codes, correlation IDs, state snapshots
+- Memory pressure monitor (`MemoryConfig`)
+- Time-travel error markers
+- Time-travel `MAX_ENTRIES` bumped to 20,000
+
+### Upgrade steps
+
+1. Remove `logging: true` from `aio.run()` — it's the default now
+2. Replace `rotate: { keep: N }` → `backupLogs: true, backupKeep: N`
+3. Update any log parsing scripts: format is now plain text, not JSONL
+
+---
+
+---
+
 ## v1.0.0-alpha1 → v1.0.0-alpha2
 
 ### Breaking changes
@@ -90,261 +494,6 @@ await aio.run({ appVersion: '1.0.0', features: [...] })
 
 ---
 
-## v1.0.0-alpha2 → v1.0.0-alpha3
-
-### Breaking changes
-
-**Log format changed from JSONL to plain text**
-
-If you have tooling parsing JSON logs, update it. New format:
-
-```
-2026-03-23 14:22:35.123  INFO   feature:auth  ready  port=3000
-```
-
-**`rotate` config replaced by `backupLogs` + `backupKeep`**
-
-```ts
-// BEFORE (alpha2)
-await aio.run({
-  logging: { rotate: { keep: 7 } },
-});
-
-// AFTER (alpha3)
-await aio.run({
-  logging: { backupLogs: true, backupKeep: 7 },
-});
-```
-
-Default behavior changed: logs are wiped on each app start (clean slate). Set
-`backupLogs: true` to rotate instead.
-
-**Logging enabled by default**
-
-Logging is now on by default — no need for `logging: true`. Set `logging: false`
-to disable.
-
-### Non-breaking additions
-
-- `AioError` class with structured error codes, correlation IDs, state snapshots
-- Memory pressure monitor (`MemoryConfig`)
-- Time-travel error markers
-- Time-travel `MAX_ENTRIES` bumped to 20,000
-
-### Upgrade steps
-
-1. Remove `logging: true` from `aio.run()` — it's the default now
-2. Replace `rotate: { keep: N }` → `backupLogs: true, backupKeep: N`
-3. Update any log parsing scripts: format is now plain text, not JSONL
-
----
-
-## v1.0.0-alpha3 → v1.0.0-alpha4
-
-### Breaking changes
-
-**`effectTimeout` behavior change — warn → hard-cancel**
-
-```ts
-// BEFORE (alpha3): timed-out effects logged a warning but continued running
-// The effect could still resolve/reject after timeout — double-report possible
-
-// AFTER (alpha4): timed-out effects are abandoned
-// The framework considers the effect failed after timeout
-// Late rejections are suppressed (no double-report)
-// Timed-out effects count toward circuit breaker threshold
-```
-
-If you rely on effects completing after timeout (e.g., fire-and-forget with a
-generous timeout), this is a behavior change. Effects that exceed
-`effectTimeoutMs` are now killed and counted as failures.
-
-### Non-breaking additions
-
-- **Vital signs** — three probes (loop, render, transport) + hint engine for
-  detecting and diagnosing UI freezes. Enabled by default. Kill switch:
-  `vitals: false`. See [vitals.md](vitals.md)
-- **DiagReporter** — structured console diagnostics with `onDiagnostic` hook for
-  telemetry. See [diagnostics.md](diagnostics.md)
-- **PressureMonitor** — payload size and broadcast rate warnings. Kill switch:
-  `vitals: { pressure: false }`
-- **Subscription stability (AIO-3/4)** — `useAio()` no longer re-subscribes on
-  every render. 300ms grace period prevents teardown during page switches
-- **Diagnostic bus & health overlay** — unified event channel for 18
-  previously-silent failure points, visible via green/yellow/red dot overlay
-- **Flow cross-feature access** — `ctx.getFullState()` and `ctx.when(predicate)`
-  in generators. See [generators.md](generators.md)
-- **Reduce phase breakdown** — `PerfMetric.breakdown` field with phase timing
-- **Graph validator** — validates feature dependency graph at startup
-- **`structuredClone` dispatch fix** — reports `EFFECT_ERROR` instead of
-  silently continuing with revoked Immer drafts
-
-### Upgrade steps
-
-1. Update `deno.json`: `"aio": "jsr:@riagentic/aio@1.0.0-alpha4"`
-2. Review any code that depends on effects completing after timeout — they are
-   now hard-cancelled
-3. Vitals and diagnostics are on by default — add `vitals: false` to `aio.run()`
-   if you need to disable them
-4. Run `deno install && deno task dev`
-
----
-
-## v1.0.0-alpha7 → v1.0.0-alpha8
-
-### Breaking changes
-
-None. This release is fully backward compatible with alpha7.
-
-### Non-breaking additions
-
-- **Dynamic user resolution (`resolveUser`)** — async hook for JWT, OAuth, or
-  database-backed auth. Add `resolveUser` to your `aio.run()` config for dynamic
-  auth instead of static `users` map. See
-  [auth.md](auth.md#dynamic-user-resolution-resolveuser)
-- **`ResolveUserFn` type** — exported from `mod.ts` for typed resolver
-  definitions
-- **Patch compaction** — broadcast protocol compacts redundant patches, reducing
-  wire overhead
-- **Broadcast size guard** — oversized patches auto-fallback to full-state
-- **58 bug fixes** across 23 files from 13-round nuclear audit (AIO-57..236)
-
-### Upgrade steps
-
-1. Update `deno.json`: `"aio": "jsr:@riagentic/aio@1.0.0-alpha8"`
-2. Update task commands:
-   `"am": "deno run -A jsr:@riagentic/aio@1.0.0-alpha8/src/am"`
-3. If you use static `users` auth and want to migrate to dynamic auth, add
-   `resolveUser` to your config (see [auth.md](auth.md)). Static `users` still
-   works unchanged.
-4. Run `deno install && deno task dev`
-
----
-
-## v1.0.0-alpha6 → v1.0.0-alpha7
-
-### Breaking changes
-
-**Renderer exports removed from `mod.ts`**
-
-`mod.ts` no longer re-exports renderer primitives. Import from the dedicated
-barrel modules instead:
-
-```ts
-// BEFORE (alpha6) — deep internal imports
-import { onCleanup, onMount, useRef } from "dep/aio/src/aio-renderer.ts";
-
-// AFTER (alpha7) — clean barrel imports
-import { effect, onCleanup, onMount, signal, useRef } from "aio/air";
-// or for React adapter:
-import { useFeature, useLocal } from "aio/react";
-```
-
-**`middleware.ts` and `lint.ts` extracted from `aio.ts`**
-
-If you imported these internals directly from `aio.ts`, update paths:
-
-```ts
-// BEFORE
-import { composeMiddleware } from "dep/aio/src/aio.ts";
-import { lint } from "dep/aio/src/aio.ts";
-
-// AFTER
-import { composeMiddleware } from "dep/aio/src/middleware.ts";
-import { lint } from "dep/aio/src/lint.ts";
-```
-
-Public API via `import from "aio"` is unchanged — these are re-exported.
-
-### Non-breaking additions
-
-- **Type-safe `send`** — `useFeature` infers method signatures from the feature
-  definition. `send.methodName(...)` is fully typed. No code changes needed.
-- **`aio/air` and `aio/react` barrel exports** — one import for all primitives.
-  Old imports continue to work.
-- **React compat hooks** — `useState`, `useEffect`, `useCallback`, `useMemo`
-  available from `aio/react`. Drop-in replacements for React muscle memory.
-- **12 bug fixes (AIO-55..70)** — proxy ownKeys, signal equality, ref callbacks,
-  JSX types, useLocal patch, useFeature inference, CJS stubs, aio:// scheme.
-
-### Upgrade steps
-
-1. Update `deno.json`: `"aio": "jsr:@riagentic/aio@1.0.0-alpha7"`
-2. Update task commands:
-   `"am": "deno run -A jsr:@riagentic/aio@1.0.0-alpha7/src/am"`
-3. Replace any deep renderer imports with `aio/air` or `aio/react` barrel
-   imports. `deno check` will flag broken paths.
-4. Run `deno install && deno task dev`
-
----
-
-## v1.0.0-alpha5 → v1.0.0-alpha6
-
-### Breaking changes
-
-None. This release is fully backward compatible with alpha5.
-
-### Non-breaking additions
-
-- **AIR native renderer (~8KB)** — signal-based VDOM engine with JSX, keyed
-  reconciliation, auto-memo, SSR/hydration, lifecycle, context, portals,
-  suspense, forms (`useForm`), animation (`useSpring`, `useTransition`), virtual
-  scrolling (`useVirtualList`), devtools. See [renderer.md](renderer.md)
-- **Adapter architecture** — `state-core.ts` as framework-agnostic foundation.
-  React and AIR adapters are thin consumers. New export paths: `aio/state-core`,
-  `aio/adapters/react`, `aio/adapters/air`, `aio/jsx-runtime`. See
-  [api.md](api.md)
-- **Delta protocol hardening (AIO-26..34)** — Electron replay fix, UDS
-  per-client subscriptions, `$f` filtered merge protocol, `unflattenPatch`
-  empty→identity array fix, periodic resync every ~5s, update-after-send,
-  ref-equality removal. See [changelog.md](changelog.md)
-
-### Upgrade steps
-
-1. Update `deno.json`: `"aio": "jsr:@riagentic/aio@1.0.0-alpha6"`
-2. Update task commands:
-   `"am": "deno run -A jsr:@riagentic/aio@1.0.0-alpha6/src/am"`
-3. To use AIR renderer instead of React: set `jsxImportSource` to
-   `@riagentic/aio` in `compilerOptions` and import from `aio/adapters/air`.
-   React apps need no changes — existing imports continue to work.
-4. Run `deno install && deno task dev`
-
----
-
-## v1.0.0-alpha4 → v1.0.0-alpha5
-
-### Breaking changes
-
-None. This release is fully backward compatible with alpha4.
-
-### Non-breaking additions
-
-- **Identity-keyed array delta compression (AIO-12)** — arrays with `id` fields
-  are sent as per-element patches (`$arr`/`$id:`/`$rm` wire format). Typical
-  savings: 120KB → 7.5KB for 160-element arrays. Automatic — no code changes
-  needed. See [traffic.md](traffic.md)
-- **4-layer wasted render prevention (AIO-11)** — `useProjection(fn, deps)` for
-  derived state with structural sharing, `memo(Component)` with per-prop
-  `_shallowEqual`, `aiol` lint rule, runtime dev warning. See [ui.md](ui.md)
-- **Deep proxy-tracked subscriptions** — `useAio()` auto-tracks accessed state
-  paths; server filters broadcasts to only include paths the client reads
-- **UDS ghost socket elimination (AIO-24/25)** — no more ghost sockets after
-  client disconnect. IPC keepalive ping every 60s for passive viewing. See
-  [electron.md](electron.md)
-- **10 framework reliability fixes (AIO-14..23)** — dispatch, flow, server, and
-  electron edge cases
-- **JSR 100% documentation score** — JSDoc on all public exports, all
-  transitively-referenced types re-exported
-
-### Upgrade steps
-
-1. Update `deno.json`: `"aio": "jsr:@riagentic/aio@1.0.0-alpha5"`
-2. Update task commands:
-   `"am": "deno run -A jsr:@riagentic/aio@1.0.0-alpha5/src/am"`
-3. Consider adopting `useProjection()` + `memo()` for list-heavy UIs —
-   significant render reduction. See [ui.md](ui.md)
-4. Run `deno install && deno task dev`
-
 ---
 
 ## v0.9 → v1.0.0-alpha
@@ -415,6 +564,8 @@ counter.increment(5); // still works fire-and-forget (backward compatible)
 
 ---
 
+---
+
 ## v0.8 → v0.9
 
 ### Breaking changes
@@ -480,6 +631,8 @@ log.info("payments", "charge processed", { amount: 99 });
 4. Await all `app.db` calls (now async)
 5. Coerce `lastInsertRowId` to `Number()` if used
 6. Run `deno install && deno task dev`
+
+---
 
 ---
 
@@ -769,293 +922,6 @@ states: { saving: {}, error: {} }
 
 ---
 
-## v0.1 → v0.2
-
-### New features
-
-- **CSS hot reload** — CSS-only changes inject without page reload (React state
-  preserved)
-- **`--expose` flag** — bind `0.0.0.0` with auto-generated UUID token for LAN
-  access
-- **`--version` / `--help` flags**
-- **`--url` thin client** — launch Electron connecting to a remote aio server.
-  See [electron.md — Thin client](electron.md#thin-client---url)
-- **`--width` / `--height` flags** — override Electron window dimensions from
-  CLI
-- **Window config** — `ui: { width, height }` sets default Electron window size.
-  Embedded as `<meta>` tags for thin client discovery
-- **Window state persistence** — Electron remembers window bounds across runs
-  via `window-state.json`
-- **Configurable `persistDebounce`** — control KV write frequency (default:
-  100ms)
-- **Per-user `stateForUI(state, user?)`** — server-controlled per-user state
-  filtering
-- **Multi-user auth** — `users: Record<string, AioUser>` token map with per-user
-  identity. See [auth.md — Multi-user auth](auth.md#multi-user-auth)
-- **camelCase factory creators** — `A.increment()` alongside `A.Increment` label
-- **Startup linter** — validates state, config, App.tsx, esbuild, electron on
-  boot
-- **Error overlay** — transpile errors shown on page instead of blank screen
-- **Guardrail hardening** — bad reducer output, invalid effects, and reducer
-  throws are caught and logged instead of crashing
-- **Lifecycle hooks** — 6 optional `on*` callbacks with `user?` parameter:
-  `onAction`, `onEffect`, `onConnect`, `onDisconnect`, `onStart`, `onStop`.
-  Observe-only, error-guarded. See
-  [core.md — Lifecycle hooks](core.md#lifecycle-hooks)
-- **Time-travel** — dev mode records action history with undo/redo/goto. Press
-  Ctrl+. for browser panel, or use `am tt undo`. `useTimeTravel()` hook for
-  programmatic control. 200-entry cap, zero cost in prod. See
-  [ui.md — Time-Travel](ui.md#time-travel)
-- **am — app manager** — CLI for process lifecycle, state inspection, dispatch,
-  time-travel, log tailing. `deno task am help`. Output: pretty for terminals,
-  JSON for scripts/agents. See [cli.md — am](cli.md#am--app-manager)
-- **Connection status indicator** — shows "Reconnecting..." pill on disconnect
-  and "Connected" briefly on reconnect. Pure DOM, no user code. Disable with
-  `ui: { showStatus: false }`
-- **State snapshots** — `app.snapshot()` / `app.loadSnapshot(json)` + HTTP
-  `GET/POST /__aio/snapshot`. See
-  [persistence.md — State snapshots](persistence.md#state-snapshots)
-- **Scheduled effects** — `schedule.after/every/at/cron/cancel` — declarative
-  timers, intervals, cron jobs as effects. See
-  [core.md — Scheduled effects](core.md#scheduled-effects)
-- **aio-client** — standalone Electron connect-page app
-  (`compile:electron:remote`). Connects to any aio server without Deno
-- **One-liner init** — `sh -c "$(curl -fsSL .../init.sh)" -- my-app` scaffolds a
-  new project with interactive template menu
-- **SQLite persistence** — 3-tier data layer for structured data.
-  `db: { orders: table({...}) }` in config. Level 1: auto-sync arrays to/from
-  SQLite. Level 2: `app.db.orders.where(...)` ORM. Level 3: `app.db.query(...)`
-  raw SQL. Uses `node:sqlite` (built into Deno 2.2+, zero deps). See
-  [persistence.md — SQLite](persistence.md#sqlite-persistence)
-
-### Breaking changes
-
-#### 1. `execute(app, effect)` parameter order swapped
-
-**v0.1:** `execute(effect, app)` **v0.2:** `execute(app, effect)`
-
-This matches `reduce(state, action)` — context first, thing-to-process second.
-
-```diff
-- export function execute(effect: Effect, app: AioApp<AppState, Action>): void {
-+ export function execute(app: AioApp<AppState, Action>, effect: Effect): void {
-```
-
-The startup linter warns if your first parameter is named `effect`.
-
-#### 2. `subscribe()` removed
-
-`subscribe(keys)` was a client-side bandwidth filter. It's been replaced by
-`stateForUI(state, user?)` — a server-controlled per-user filter that's more
-secure and doesn't leak the full state shape.
-
-**If you used `subscribe()`:**
-
-```diff
-  // App.tsx — REMOVE subscribe call
-- import { useAio, subscribe } from 'aio'
-+ import { useAio } from 'aio'
-
-  export default function App() {
-    const { state, send } = useAio<UIState>()
--   useEffect(() => { subscribe(['stats']) }, [])
-    // ...
-  }
-```
-
-```diff
-  // app.ts — ADD stateForUI with per-user filtering
-  await aio.run(initialState, {
-    reduce, execute,
--   stateForUI: (s) => s,
-+   stateForUI: (s, _user?) => ({ stats: s.stats }),  // server controls what clients see
-  })
-```
-
-#### 3. Factory creators are now camelCase
-
-**v0.1:** Only PascalCase labels existed (`A.Increment` = string `"Increment"`)
-**v0.2:** Also generates camelCase creators (`A.increment(5)` =
-`{ type: "Increment", payload: { by: 5 } }`)
-
-No breaking change if you used the old `msg()` pattern — it still works. But the
-recommended pattern is now:
-
-```ts
-// Old (still works)
-send(msg("Increment", { by: 5 }));
-
-// New (recommended)
-send(A.increment(5));
-```
-
-### Upgrade steps
-
-1. **Swap execute params:** Find `execute(effect, app)` → change to
-   `execute(app, effect)`
-2. **Remove subscribe:** Delete any `subscribe()` calls from App.tsx. If you
-   need per-user filtering, add `stateForUI: (s, user?) => ...` to your
-   `aio.run()` config
-3. **Update dep/aio/:** Copy the new `dep/aio/` folder over the old one
-4. **Run `deno install`**
-5. **Run `deno task dev`** — the startup linter will catch remaining issues
-
----
-
-## v0.2 → v0.3
-
-### New features
-
-- **Performance budgets** — dispatch loop timing with configurable thresholds.
-  `perfMode: 'strict' | 'soft'` and `perfBudget: { reduce?, effect? }` in
-  config. Violations call `onError({ source: 'performance', ... })` or warn
-  (soft). Per-action perf metrics recorded in time-travel history. See
-  [scaling.md — Performance budgets](scaling.md#performance-budgets)
-- **Redux DevTools** — connect to the Redux DevTools browser extension for state
-  inspection and action history. `connectDevTools()` / `disconnectDevTools()`
-  from `'aio'`. See [ui.md — Redux DevTools](ui.md#redux-devtools-integration)
-- **Incremental SQLite sync** — tables with a `pk()` column now use row-level
-  INSERT/UPDATE/DELETE diffs instead of full table replacement. Significantly
-  faster for large datasets. No migration needed — PK detection is automatic
-- **Memoized selectors** — `createSelector(...inputFns, resultFn)` and
-  `createSliceSelector`. Caches derived values until inputs change, preventing
-  redundant recalculations.
-- **`matchEffect(effect, handlers, fallback?)`** — typed alternative to
-  switch/case in `execute()`. Scales better for large effect catalogs.
-- **`composeMiddleware(...fns)`** — compose multiple `beforeReduce` functions
-  into a single pipeline. Return `null` from any function to drop the action.
-- **Android schedule warning** — unsupported schedule effects on Android now log
-  `console.warn` instead of silently dropping
-
-### Breaking changes
-
-None. All v0.2 code runs unchanged on v0.3.
-
-### Upgrade steps
-
-1. Replace `dep/aio/` with the v0.3 folder
-2. Run `deno install`
-3. Run `deno task dev` — no linter warnings expected for v0.2 code
-
-### Optional improvements
-
-Take advantage of new features at your own pace:
-
-```ts
-// Performance budgets (catch slow reducers in CI)
-await aio.run(state, {
-  reduce,
-  execute,
-  perfMode: "strict",
-  perfBudget: { reduce: 50, effect: 3000 },
-  onError: ({ source, error }) => console.error(`[${source}]`, error),
-});
-```
-
-```tsx
-// Redux DevTools (add to App.tsx in dev)
-import { connectDevTools, useAio } from "aio";
-export default function App() {
-  const { state, send } = useAio<AppState>();
-  useEffect(() => {
-    connectDevTools();
-  }, []);
-  // ...
-}
-```
-
-```ts
-// Memoized selectors (avoid recomputing expensive derivations)
-import { createSelector } from "aio";
-const selectFiltered = createSelector(
-  (s: AppState) => s.items,
-  (s: AppState) => s.filter,
-  (items, filter) => items.filter((i) => i.status === filter),
-);
-```
-
----
-
-## v0.3 → v0.4
-
-### New features
-
-- **Zero-config HTTPS** — `--expose` now auto-generates a self-signed ECDSA
-  P-256 cert (cached in `.aio-tls/`). Traffic is encrypted by default. Use
-  `--cert=path.pem --key=path.pem` to bring your own CA-signed cert. Electron
-  windows accept self-signed localhost certs automatically
-- **`am watch [dir]`** — hot-restart on `.ts`/`.tsx` changes in `src/` (or
-  custom dir). 300ms debounce, same as `am restart`. Usage: `deno task am watch`
-  or `deno task am watch src/`
-- **`am logs --follow` / `-f`** — stream log output live (like `tail -f`).
-  Usage: `deno task am logs -f` or `deno task am logs --follow [filter]`
-- **`am status` exit codes** — now explicit: `0`=started, `1`=stopped,
-  `2`=transitional (starting/stopping). Useful for scripts and CI
-- **`persistMode:'multi'`** — store each top-level state key as a separate
-  Deno.Kv entry, bypassing the 65KB/key limit. Set `persistMode: 'multi'` in
-  config
-- **ORM additions** — `table.whereOr(filters[])` for OR-joined WHERE,
-  `table.upsert(row)` for INSERT OR REPLACE, `QueryOpts` with `orderBy`,
-  `limit`, `offset` on `all(opts?)` and `where(filter, opts?)`
-
-### Bug fixes
-
-- **`_computeDelta` threshold** — fixed denominator to
-  `Math.max(newKeys, oldKeys)` — previously undercounted when state keys were
-  removed, causing unnecessary full-state broadcasts
-- **`scheduleReload` symlink** — resolves real path via `Deno.realPathSync`
-  before cache lookup — fixes hot-reload on macOS (`/var` → `/private/var`
-  symlink)
-- **`syncTables` full scan** — eliminated `SELECT * FROM table` on every sync
-  cycle; now diffs state vs previous in memory. Zero DB reads per sync
-
-### Breaking changes
-
-None. All v0.3 code runs unchanged on v0.4.
-
-### Upgrade steps
-
-1. Replace `dep/aio/` with the v0.4 folder
-2. Run `deno install`
-3. Run `deno task dev` — no changes required
-
-### Optional improvements
-
-```sh
-# Hot-restart on file changes
-deno task am watch
-
-# Stream logs live
-deno task am logs -f
-
-# Check if app is running (exit code 0=yes, 1=no, 2=transitional)
-deno task am status; echo $?
-```
-
-```ts
-// Bypass 65KB KV limit for large state
-await aio.run(state, {
-  reduce,
-  execute,
-  persistMode: "multi",
-});
-```
-
-```ts
-// ORM: OR queries, upsert, pagination
-const adults = table.whereOr([{ role: "admin" }, { role: "mod" }]);
-table.upsert({ id: 1, name: "alice" });
-const page = table.all({ orderBy: "name", limit: 20, offset: 40 });
-```
-
-```sh
-# Expose with auto-HTTPS (zero config)
-deno task dev --expose
-
-# Expose with your own cert
-deno task dev --expose --cert=/etc/ssl/myapp.pem --key=/etc/ssl/myapp.key
-```
-
 ---
 
 ## v0.6 → v0.7
@@ -1190,6 +1056,8 @@ guides.
 
 ---
 
+---
+
 ## v0.5 → v0.6
 
 ### New features — generator-based flows
@@ -1245,6 +1113,8 @@ const myFeature = feature("myFeature", {
 ```
 
 See [generators.md](generators.md) for the full guide.
+
+---
 
 ---
 
@@ -1736,4 +1606,297 @@ deno task test   # verify framework tests pass
 
 ---
 
-_Future versions will be documented here as they are released._
+---
+
+## v0.3 → v0.4
+
+### New features
+
+- **Zero-config HTTPS** — `--expose` now auto-generates a self-signed ECDSA
+  P-256 cert (cached in `.aio-tls/`). Traffic is encrypted by default. Use
+  `--cert=path.pem --key=path.pem` to bring your own CA-signed cert. Electron
+  windows accept self-signed localhost certs automatically
+- **`am watch [dir]`** — hot-restart on `.ts`/`.tsx` changes in `src/` (or
+  custom dir). 300ms debounce, same as `am restart`. Usage: `deno task am watch`
+  or `deno task am watch src/`
+- **`am logs --follow` / `-f`** — stream log output live (like `tail -f`).
+  Usage: `deno task am logs -f` or `deno task am logs --follow [filter]`
+- **`am status` exit codes** — now explicit: `0`=started, `1`=stopped,
+  `2`=transitional (starting/stopping). Useful for scripts and CI
+- **`persistMode:'multi'`** — store each top-level state key as a separate
+  Deno.Kv entry, bypassing the 65KB/key limit. Set `persistMode: 'multi'` in
+  config
+- **ORM additions** — `table.whereOr(filters[])` for OR-joined WHERE,
+  `table.upsert(row)` for INSERT OR REPLACE, `QueryOpts` with `orderBy`,
+  `limit`, `offset` on `all(opts?)` and `where(filter, opts?)`
+
+### Bug fixes
+
+- **`_computeDelta` threshold** — fixed denominator to
+  `Math.max(newKeys, oldKeys)` — previously undercounted when state keys were
+  removed, causing unnecessary full-state broadcasts
+- **`scheduleReload` symlink** — resolves real path via `Deno.realPathSync`
+  before cache lookup — fixes hot-reload on macOS (`/var` → `/private/var`
+  symlink)
+- **`syncTables` full scan** — eliminated `SELECT * FROM table` on every sync
+  cycle; now diffs state vs previous in memory. Zero DB reads per sync
+
+### Breaking changes
+
+None. All v0.3 code runs unchanged on v0.4.
+
+### Upgrade steps
+
+1. Replace `dep/aio/` with the v0.4 folder
+2. Run `deno install`
+3. Run `deno task dev` — no changes required
+
+### Optional improvements
+
+```sh
+# Hot-restart on file changes
+deno task am watch
+
+# Stream logs live
+deno task am logs -f
+
+# Check if app is running (exit code 0=yes, 1=no, 2=transitional)
+deno task am status; echo $?
+```
+
+```ts
+// Bypass 65KB KV limit for large state
+await aio.run(state, {
+  reduce,
+  execute,
+  persistMode: "multi",
+});
+```
+
+```ts
+// ORM: OR queries, upsert, pagination
+const adults = table.whereOr([{ role: "admin" }, { role: "mod" }]);
+table.upsert({ id: 1, name: "alice" });
+const page = table.all({ orderBy: "name", limit: 20, offset: 40 });
+```
+
+```sh
+# Expose with auto-HTTPS (zero config)
+deno task dev --expose
+
+# Expose with your own cert
+deno task dev --expose --cert=/etc/ssl/myapp.pem --key=/etc/ssl/myapp.key
+```
+
+---
+
+---
+
+## v0.2 → v0.3
+
+### New features
+
+- **Performance budgets** — dispatch loop timing with configurable thresholds.
+  `perfMode: 'strict' | 'soft'` and `perfBudget: { reduce?, effect? }` in
+  config. Violations call `onError({ source: 'performance', ... })` or warn
+  (soft). Per-action perf metrics recorded in time-travel history. See
+  [scaling.md — Performance budgets](scaling.md#performance-budgets)
+- **Redux DevTools** — connect to the Redux DevTools browser extension for state
+  inspection and action history. `connectDevTools()` / `disconnectDevTools()`
+  from `'aio'`. See [ui.md — Redux DevTools](ui.md#redux-devtools-integration)
+- **Incremental SQLite sync** — tables with a `pk()` column now use row-level
+  INSERT/UPDATE/DELETE diffs instead of full table replacement. Significantly
+  faster for large datasets. No migration needed — PK detection is automatic
+- **Memoized selectors** — `createSelector(...inputFns, resultFn)` and
+  `createSliceSelector`. Caches derived values until inputs change, preventing
+  redundant recalculations.
+- **`matchEffect(effect, handlers, fallback?)`** — typed alternative to
+  switch/case in `execute()`. Scales better for large effect catalogs.
+- **`composeMiddleware(...fns)`** — compose multiple `beforeReduce` functions
+  into a single pipeline. Return `null` from any function to drop the action.
+- **Android schedule warning** — unsupported schedule effects on Android now log
+  `console.warn` instead of silently dropping
+
+### Breaking changes
+
+None. All v0.2 code runs unchanged on v0.3.
+
+### Upgrade steps
+
+1. Replace `dep/aio/` with the v0.3 folder
+2. Run `deno install`
+3. Run `deno task dev` — no linter warnings expected for v0.2 code
+
+### Optional improvements
+
+Take advantage of new features at your own pace:
+
+```ts
+// Performance budgets (catch slow reducers in CI)
+await aio.run(state, {
+  reduce,
+  execute,
+  perfMode: "strict",
+  perfBudget: { reduce: 50, effect: 3000 },
+  onError: ({ source, error }) => console.error(`[${source}]`, error),
+});
+```
+
+```tsx
+// Redux DevTools (add to App.tsx in dev)
+import { connectDevTools, useAio } from "aio";
+export default function App() {
+  const { state, send } = useAio<AppState>();
+  useEffect(() => {
+    connectDevTools();
+  }, []);
+  // ...
+}
+```
+
+```ts
+// Memoized selectors (avoid recomputing expensive derivations)
+import { createSelector } from "aio";
+const selectFiltered = createSelector(
+  (s: AppState) => s.items,
+  (s: AppState) => s.filter,
+  (items, filter) => items.filter((i) => i.status === filter),
+);
+```
+
+---
+
+---
+
+## v0.1 → v0.2
+
+### New features
+
+- **CSS hot reload** — CSS-only changes inject without page reload (React state
+  preserved)
+- **`--expose` flag** — bind `0.0.0.0` with auto-generated UUID token for LAN
+  access
+- **`--version` / `--help` flags**
+- **`--url` thin client** — launch Electron connecting to a remote aio server.
+  See [electron.md — Thin client](electron.md#thin-client---url)
+- **`--width` / `--height` flags** — override Electron window dimensions from
+  CLI
+- **Window config** — `ui: { width, height }` sets default Electron window size.
+  Embedded as `<meta>` tags for thin client discovery
+- **Window state persistence** — Electron remembers window bounds across runs
+  via `window-state.json`
+- **Configurable `persistDebounce`** — control KV write frequency (default:
+  100ms)
+- **Per-user `stateForUI(state, user?)`** — server-controlled per-user state
+  filtering
+- **Multi-user auth** — `users: Record<string, AioUser>` token map with per-user
+  identity. See [auth.md — Multi-user auth](auth.md#multi-user-auth)
+- **camelCase factory creators** — `A.increment()` alongside `A.Increment` label
+- **Startup linter** — validates state, config, App.tsx, esbuild, electron on
+  boot
+- **Error overlay** — transpile errors shown on page instead of blank screen
+- **Guardrail hardening** — bad reducer output, invalid effects, and reducer
+  throws are caught and logged instead of crashing
+- **Lifecycle hooks** — 6 optional `on*` callbacks with `user?` parameter:
+  `onAction`, `onEffect`, `onConnect`, `onDisconnect`, `onStart`, `onStop`.
+  Observe-only, error-guarded. See
+  [core.md — Lifecycle hooks](core.md#lifecycle-hooks)
+- **Time-travel** — dev mode records action history with undo/redo/goto. Press
+  Ctrl+. for browser panel, or use `am tt undo`. `useTimeTravel()` hook for
+  programmatic control. 200-entry cap, zero cost in prod. See
+  [ui.md — Time-Travel](ui.md#time-travel)
+- **am — app manager** — CLI for process lifecycle, state inspection, dispatch,
+  time-travel, log tailing. `deno task am help`. Output: pretty for terminals,
+  JSON for scripts/agents. See [cli.md — am](cli.md#am--app-manager)
+- **Connection status indicator** — shows "Reconnecting..." pill on disconnect
+  and "Connected" briefly on reconnect. Pure DOM, no user code. Disable with
+  `ui: { showStatus: false }`
+- **State snapshots** — `app.snapshot()` / `app.loadSnapshot(json)` + HTTP
+  `GET/POST /__aio/snapshot`. See
+  [persistence.md — State snapshots](persistence.md#state-snapshots)
+- **Scheduled effects** — `schedule.after/every/at/cron/cancel` — declarative
+  timers, intervals, cron jobs as effects. See
+  [core.md — Scheduled effects](core.md#scheduled-effects)
+- **aio-client** — standalone Electron connect-page app
+  (`compile:electron:remote`). Connects to any aio server without Deno
+- **One-liner init** — `sh -c "$(curl -fsSL .../init.sh)" -- my-app` scaffolds a
+  new project with interactive template menu
+- **SQLite persistence** — 3-tier data layer for structured data.
+  `db: { orders: table({...}) }` in config. Level 1: auto-sync arrays to/from
+  SQLite. Level 2: `app.db.orders.where(...)` ORM. Level 3: `app.db.query(...)`
+  raw SQL. Uses `node:sqlite` (built into Deno 2.2+, zero deps). See
+  [persistence.md — SQLite](persistence.md#sqlite-persistence)
+
+### Breaking changes
+
+#### 1. `execute(app, effect)` parameter order swapped
+
+**v0.1:** `execute(effect, app)` **v0.2:** `execute(app, effect)`
+
+This matches `reduce(state, action)` — context first, thing-to-process second.
+
+```diff
+- export function execute(effect: Effect, app: AioApp<AppState, Action>): void {
++ export function execute(app: AioApp<AppState, Action>, effect: Effect): void {
+```
+
+The startup linter warns if your first parameter is named `effect`.
+
+#### 2. `subscribe()` removed
+
+`subscribe(keys)` was a client-side bandwidth filter. It's been replaced by
+`stateForUI(state, user?)` — a server-controlled per-user filter that's more
+secure and doesn't leak the full state shape.
+
+**If you used `subscribe()`:**
+
+```diff
+  // App.tsx — REMOVE subscribe call
+- import { useAio, subscribe } from 'aio'
++ import { useAio } from 'aio'
+
+  export default function App() {
+    const { state, send } = useAio<UIState>()
+-   useEffect(() => { subscribe(['stats']) }, [])
+    // ...
+  }
+```
+
+```diff
+  // app.ts — ADD stateForUI with per-user filtering
+  await aio.run(initialState, {
+    reduce, execute,
+-   stateForUI: (s) => s,
++   stateForUI: (s, _user?) => ({ stats: s.stats }),  // server controls what clients see
+  })
+```
+
+#### 3. Factory creators are now camelCase
+
+**v0.1:** Only PascalCase labels existed (`A.Increment` = string `"Increment"`)
+**v0.2:** Also generates camelCase creators (`A.increment(5)` =
+`{ type: "Increment", payload: { by: 5 } }`)
+
+No breaking change if you used the old `msg()` pattern — it still works. But the
+recommended pattern is now:
+
+```ts
+// Old (still works)
+send(msg("Increment", { by: 5 }));
+
+// New (recommended)
+send(A.increment(5));
+```
+
+### Upgrade steps
+
+1. **Swap execute params:** Find `execute(effect, app)` → change to
+   `execute(app, effect)`
+2. **Remove subscribe:** Delete any `subscribe()` calls from App.tsx. If you
+   need per-user filtering, add `stateForUI: (s, user?) => ...` to your
+   `aio.run()` config
+3. **Update dep/aio/:** Copy the new `dep/aio/` folder over the old one
+4. **Run `deno install`**
+5. **Run `deno task dev`** — the startup linter will catch remaining issues
+
+---

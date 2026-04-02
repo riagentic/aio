@@ -79,17 +79,22 @@ const _pendingSubscribers = new Set<Subscriber>();
 /** Group multiple signal writes into one flush — subscribers notified once at the end. */
 export function batch(fn: () => void): void {
   _batchDepth++;
+  let threw = false;
   try {
     fn();
+  } catch (e) {
+    threw = true;
+    throw e;
   } finally {
     _batchDepth--;
-    if (_batchDepth === 0) _flush();
+    if (!threw && _batchDepth === 0) _flush();
   }
 }
 
-const _FLUSH_MAX_ITERATIONS = 100;
+const _FLUSH_MAX_ITERATIONS = 1000;
 let _flushing = false;
 let _flushIterations = 0;
+const _inFlight = new Set<Subscriber>();
 
 function _flush(): void {
   if (_flushing) return; // re-entrant call — outer _flush will pick up new pending
@@ -108,24 +113,31 @@ function _flush(): void {
       }
       const pending = [..._pendingSubscribers];
       _pendingSubscribers.clear();
-      // Phase 1: prepare (cleanup) — all subscribers run even if one throws
+      // Mark all as in-flight so re-entrant _notify skips them
+      for (const sub of pending) _inFlight.add(sub);
+      // Phase 1: prepare (cleanup) — track failures
+      const phase1Failed = new Set<Subscriber>();
       for (const sub of pending) {
         if (sub.prepare) {
           try {
             sub.prepare();
           } catch (e) {
             console.error("[aio:signal] effect cleanup error:", e);
+            phase1Failed.add(sub);
           }
         }
       }
-      // Phase 2: execute (re-run) — all subscribers run even if one throws
+      // Phase 2: execute (re-run) — skip those that failed phase 1
       for (const sub of pending) {
+        if (phase1Failed.has(sub)) continue;
         try {
           sub.execute();
         } catch (e) {
           console.error("[aio:signal] effect execute error:", e);
         }
       }
+      // Done with this batch
+      for (const sub of pending) _inFlight.delete(sub);
     }
   } finally {
     _flushing = false;
@@ -135,6 +147,8 @@ function _flush(): void {
 function _notify(subscribers: Set<Subscriber>): void {
   const snapshot = [...subscribers];
   for (const sub of snapshot) {
+    // Skip if already being processed in this flush batch
+    if (_inFlight.has(sub)) continue;
     _pendingSubscribers.add(sub);
   }
   if (_batchDepth === 0) _flush();
@@ -143,19 +157,18 @@ function _notify(subscribers: Set<Subscriber>): void {
 // ── Shallow equality (AIO-59) ──────────────────────────────────────
 
 /** Shallow comparison for plain objects/arrays. Returns true if all keys/values
- *  match by ===. Used by signal.set() to skip no-op updates that create new
- *  references but contain identical data (e.g. `{...state, count: 0}` when count
- *  was already 0). */
+ *  match by Object.is (handles NaN correctly). Used by signal.set() to skip no-op
+ *  updates that create new references but contain identical data (e.g. `{...state, count: 0}`
+ *  when count was already 0).
+ *
+ *  Cross-realm safe: uses duck-typing (own enumerable keys) instead of prototype
+ *  checks, so objects from iframes/Workers compare correctly even when their
+ *  prototype chain differs from the main realm's Object.prototype. */
 function _shallowEq(a: unknown, b: unknown): boolean {
-  if (a === b) return true;
+  if (Object.is(a, b)) return true;
   if (
     a === null || b === null || typeof a !== "object" || typeof b !== "object"
   ) return false;
-  // AIO-228: only shallow-compare plain objects and arrays — not class instances
-  const protoA = Object.getPrototypeOf(a);
-  const protoB = Object.getPrototypeOf(b);
-  if (protoA !== protoB) return false;
-  if (protoA !== Object.prototype && protoA !== Array.prototype) return false;
   const isArrA = Array.isArray(a);
   const isArrB = Array.isArray(b);
   if (isArrA !== isArrB) return false;
@@ -163,7 +176,7 @@ function _shallowEq(a: unknown, b: unknown): boolean {
     const aa = a as unknown[], bb = b as unknown[];
     if (aa.length !== bb.length) return false;
     for (let i = 0; i < aa.length; i++) {
-      if (aa[i] !== bb[i]) return false;
+      if (!Object.is(aa[i], bb[i])) return false;
     }
     return true;
   }
@@ -173,7 +186,7 @@ function _shallowEq(a: unknown, b: unknown): boolean {
   const objA = a as Record<string, unknown>;
   const objB = b as Record<string, unknown>;
   for (const k of ka) {
-    if (!Object.hasOwn(objB, k) || objA[k] !== objB[k]) return false; // AIO-237: key-existence check
+    if (!Object.hasOwn(objB, k) || !Object.is(objA[k], objB[k])) return false; // AIO-237: key-existence check
   }
   return true;
 }

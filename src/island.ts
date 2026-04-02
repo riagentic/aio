@@ -30,6 +30,27 @@ export interface IslandConfig<M = unknown> {
   props: () => Record<string, unknown>;
   /** Optional loading placeholder component. */
   loading?: () => VChild;
+  /** Optional cache key — change to force reload of the module (e.g., version hash). */
+  cacheKey?: string | number;
+}
+
+// Cache for islands WITH explicit cacheKey. Islands without cacheKey use
+// per-closure caching (the original behavior - load once per island() call).
+const _moduleCache = new Map<
+  string | number,
+  { module: unknown; promise: Promise<unknown> | null }
+>();
+
+/**
+ * Clear the island module cache for a specific key, or all cached islands.
+ * Only affects islands with explicit cacheKey configured.
+ */
+export function clearIslandCache(cacheKey?: string | number): void {
+  if (cacheKey !== undefined) {
+    _moduleCache.delete(cacheKey);
+  } else {
+    _moduleCache.clear();
+  }
 }
 
 /**
@@ -38,21 +59,44 @@ export interface IslandConfig<M = unknown> {
  * signal-to-props bridging, and cleanup on unmount.
  */
 export function island<M = unknown>(config: IslandConfig<M>): ComponentFn {
-  let moduleCache: M | null = null;
-  let modulePromise: Promise<M> | null = null;
+  // Islands WITH cacheKey: use global cache (shared across instances)
+  // Islands WITHOUT cacheKey: use local closure cache (original behavior)
+  const cacheKey = config.cacheKey;
+
+  let localModuleCache: M | null = null;
+  let localModulePromise: Promise<M> | null = null;
 
   function loadModule(): Promise<M> {
-    if (moduleCache) return Promise.resolve(moduleCache);
-    if (!modulePromise) {
-      modulePromise = config.load().then((mod) => {
-        moduleCache = mod;
+    // With cacheKey: use global cache
+    if (cacheKey !== undefined) {
+      const cached = _moduleCache.get(cacheKey);
+      if (cached?.module) return Promise.resolve(cached.module as M);
+      if (cached?.promise) return cached.promise as Promise<M>;
+
+      const promise = config.load().then((mod) => {
+        _moduleCache.set(cacheKey, { module: mod, promise: null });
         return mod;
       }).catch((err) => {
-        modulePromise = null; // Allow retry on next mount
+        _moduleCache.set(cacheKey, { module: null, promise: null });
+        throw err;
+      });
+
+      _moduleCache.set(cacheKey, { module: null, promise });
+      return promise as Promise<M>;
+    }
+
+    // Without cacheKey: use local closure cache (original behavior)
+    if (localModuleCache) return Promise.resolve(localModuleCache);
+    if (!localModulePromise) {
+      localModulePromise = config.load().then((mod) => {
+        localModuleCache = mod;
+        return mod;
+      }).catch((err) => {
+        localModulePromise = null;
         throw err;
       });
     }
-    return modulePromise;
+    return localModulePromise;
   }
 
   return function IslandComponent(

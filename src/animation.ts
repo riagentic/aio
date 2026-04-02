@@ -145,7 +145,7 @@ export function useSpring(config: SpringConfig = {}): SpringValue {
     const displacement = current - target;
     const springForce = -stiffness * displacement;
     const dampingForce = -damping * velocity;
-    const acceleration = (springForce + dampingForce) / mass;
+    const acceleration = mass > 0 ? (springForce + dampingForce) / mass : 0; // AIO-275: guard mass=0
 
     velocity += acceleration * dt;
     current += velocity * dt;

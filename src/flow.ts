@@ -347,8 +347,8 @@ type FlowInstance = {
   aborted: boolean;
   /** AbortController for waitFor — cancellation is instant via signal, no polling */
   abortController?: AbortController;
-  /** Active state listener for ctx.when — tracked for abort cleanup */
-  stateListener?: StateListener;
+  /** Active state listeners for ctx.when — tracked for abort cleanup (AIO-263: Set for parallel when()) */
+  stateListeners: Set<StateListener>;
 };
 
 /** Active flow instances per feature — keyed by featureName:flowName.
@@ -401,10 +401,10 @@ export function notifyStateListeners(state: Record<string, unknown>): void {
 }
 
 function abortInstance(instance: FlowInstance): void {
-  if (instance.stateListener) {
-    _stateListeners.delete(instance.stateListener);
-    instance.stateListener = undefined;
+  for (const sl of instance.stateListeners) {
+    _stateListeners.delete(sl);
   }
+  instance.stateListeners.clear();
   instance.aborted = true;
   instance.abortController?.abort();
   try {
@@ -476,6 +476,7 @@ export async function runFlow(
     flowName,
     prefix,
     aborted: false,
+    stateListeners: new Set(),
   };
   activeFlows.set(flowKey, instance);
 
@@ -588,9 +589,11 @@ async function executeStep(
   instance: FlowInstance,
   app: FlowApp,
   waitForListeners?: Set<ActionListener>,
+  abortSignal?: AbortSignal, // AIO-262: for race abort propagation
 ): Promise<unknown> {
   // AIO-255: bail immediately if flow was aborted (prevents all/race continuations)
-  if (instance.aborted) return undefined;
+  // AIO-262: also bail if race was aborted (loser cleanup)
+  if (instance.aborted || abortSignal?.aborted) return undefined;
 
   const { prefix, featureName } = instance;
   const flowPrefix = `${prefix}:__flow:`;
@@ -688,7 +691,8 @@ async function executeStep(
     }
 
     case "race": {
-      // Race all entries — first to resolve wins
+      // AIO-262: abort losers when winner resolves to prevent listener leaks
+      const raceController = new AbortController();
       const entries = Object.entries(step.entries);
       const result = await Promise.race(
         entries.map(async ([key, entry]) => {
@@ -697,10 +701,13 @@ async function executeStep(
             instance,
             app,
             waitForListeners,
+            raceController.signal,
           );
           return { key, value };
         }),
       );
+      // Abort all losers
+      raceController.abort();
       return { [result.key]: result.value };
     }
 
@@ -820,11 +827,11 @@ async function executeStep(
       const statePromise = new Promise<void>((resolve) => {
         listener = { predicate: step.predicate, resolve };
         _stateListeners.add(listener);
-        instance.stateListener = listener;
+        instance.stateListeners.add(listener); // AIO-263: track in instance set for parallel when()
 
         controller.signal.addEventListener("abort", () => {
           _stateListeners.delete(listener);
-          instance.stateListener = undefined;
+          instance.stateListeners.delete(listener);
           resolve(); // resolve with undefined on abort — abortInstance sets instance.aborted
         }, { once: true });
       });
@@ -843,8 +850,8 @@ async function executeStep(
         ]);
         clearTimeout(timeoutId!); // clear timer whether state won or timeout won
         instance.abortController = undefined;
-        instance.stateListener = undefined;
-        _stateListeners.delete(listener!); // AIO-207: always clean up listener
+        instance.stateListeners.delete(listener!); // AIO-207: always clean up listener
+        _stateListeners.delete(listener!);
         if (result === timeoutSentinel) {
           throw new Error(
             `when() timed out after ${step.timeout}ms`,
@@ -867,7 +874,7 @@ async function executeStep(
       await statePromise;
       if (warnTimer) clearTimeout(warnTimer);
       instance.abortController = undefined;
-      instance.stateListener = undefined;
+      instance.stateListeners.delete(listener!);
       return undefined;
     }
   }

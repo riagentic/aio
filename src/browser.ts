@@ -832,7 +832,7 @@ export function useFeature<S = unknown>(
   const resolved = _coreResolveWithFallback(featureState, defaults);
 
   const status = resolved
-    ? (resolved as Record<string, unknown>)._status as string | undefined
+    ? (resolved as Record<string, unknown>).__aio_status as string | undefined
     : undefined;
 
   return {

@@ -221,7 +221,12 @@ function _send(action: { type: string; payload?: unknown }) {
   const tagged = { ...action, _source: "UI" };
   const json = JSON.stringify(tagged);
   if (_ws && _ws.readyState === WebSocket.OPEN) {
-    _ws.send(json);
+    try {
+      _ws.send(json);
+    } catch {
+      // AIO-282: send may throw if buffer full or socket closing — queue for later
+      _queue.push(tagged);
+    }
   } else if (_ipc && _ipcConnected) {
     _ipc.send(json);
   } else {
@@ -424,7 +429,9 @@ export function useFeature(ref: any): any {
   ensureConnected();
   const result = _airUseFeature(ref);
   const status = result.state
-    ? (result.state as Record<string, unknown>)._status as string | undefined
+    ? (result.state as Record<string, unknown>).__aio_status as
+      | string
+      | undefined
     : undefined;
   return { state: result.state, send: result.send, status };
 }
