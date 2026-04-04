@@ -161,6 +161,7 @@ export const log: Log = {
   },
 };
 
+/** Structured file logger — routes entries to app.log, debug.log, error.log, warning.log, and perf.log. */
 export class AioLogger {
   private cfg: Required<LogConfig>;
   private dir: string;
@@ -536,7 +537,11 @@ export class AioLogger {
   private _writeErrors = 0;
   private write(path: string, entry: LogEntry): void {
     if (!this.ready) return;
-    Deno.writeTextFile(path, formatText(entry) + "\n", { append: true }).catch(
+    Deno.writeTextFile(path, formatText(entry) + "\n", { append: true }).then(
+      () => {
+        this._writeErrors = 0;
+      },
+    ).catch(
       (e) => {
         if (this._writeErrors < 3) {
           this._writeErrors++;
@@ -592,6 +597,14 @@ function isDevMode(): boolean {
 
 // ── Plain text formatter ──────────────────────────────────────────────
 
+function safeStringify(v: unknown): string {
+  try {
+    return JSON.stringify(v);
+  } catch {
+    return String(v);
+  }
+}
+
 function formatText(e: LogEntry): string {
   const lvl = (typeof e.lvl === "string" ? e.lvl : "debug").toUpperCase()
     .padEnd(5);
@@ -599,7 +612,7 @@ function formatText(e: LogEntry): string {
   const data = e.data
     ? "  " +
       Object.entries(e.data).map(([k, v]) =>
-        `${k}=${typeof v === "object" ? JSON.stringify(v) : v}`
+        `${k}=${typeof v === "object" ? safeStringify(v) : v}`
       ).join(" ")
     : "";
   const dur = e.dur !== undefined ? `  ${e.dur}ms` : "";
@@ -672,7 +685,7 @@ function printConsole(e: LogEntry): void {
     ? "  " +
       Object.entries(e.data).map(([k, v]) =>
         `${C.dim}${k}${C.reset}=${C.cyan}${
-          typeof v === "object" ? JSON.stringify(v) : v
+          typeof v === "object" ? safeStringify(v) : v
         }${C.reset}`
       ).join(" ")
     : "";

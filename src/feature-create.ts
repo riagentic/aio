@@ -32,6 +32,7 @@ import type {
   ScopedApp,
 } from "./feature-types.ts";
 import { checkReservedKeys, RESERVED_KEYS } from "./feature-types.ts";
+import { normalizeSyncConfig, type SyncConfig } from "./sync/types.ts";
 import { type AioError, createAioError } from "./error.ts";
 import { buildCatalog, flattenOnto } from "./feature-catalog.ts";
 import { validateMachine } from "./feature-machine.ts";
@@ -91,6 +92,8 @@ export type MethodsFeatureConfig<
   validate?: (state: S) => true | string;
   /** State keys to exclude from KV persistence — e.g. { exclude: ['htmlCache', 'largeBlob'] } */
   persist?: { exclude?: string[] };
+  /** CRDT sync — true for defaults, or partial config to override merge strategies, identity keys, retention */
+  sync?: true | Partial<SyncConfig>;
   onInit?: (app: ScopedApp<S>) => void;
   onDestroy?: (app: ScopedApp<S>) => void;
 };
@@ -164,6 +167,8 @@ export type ActionsFeatureConfig<
   validate?: (state: S) => true | string;
   /** State keys to exclude from KV persistence — e.g. { exclude: ['htmlCache', 'largeBlob'] } */
   persist?: { exclude?: string[] };
+  /** CRDT sync — true for defaults, or partial config to override merge strategies, identity keys, retention */
+  sync?: true | Partial<SyncConfig>;
   onInit?: (app: ScopedApp<S>) => void;
   onDestroy?: (app: ScopedApp<S>) => void;
 };
@@ -611,6 +616,7 @@ function createFeatureFromMethods<
     flowTriggers: flowTriggers.size > 0 ? flowTriggers : undefined,
     validate: config.validate,
     persistExclude: config.persist?.exclude,
+    syncConfig: config.sync ? normalizeSyncConfig(config.sync) : undefined,
   };
 
   const selectors = scopeSelectors(name, config.selectors);
@@ -906,6 +912,7 @@ function createFeatureFromActions<
     flowTriggers: flowTriggers.size > 0 ? flowTriggers : undefined,
     validate: config.validate,
     persistExclude: config.persist?.exclude,
+    syncConfig: config.sync ? normalizeSyncConfig(config.sync) : undefined,
   };
 
   // Validate selector names don't collide with reserved keys

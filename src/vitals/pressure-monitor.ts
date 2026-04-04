@@ -10,6 +10,7 @@ const DEFAULT_PAYLOAD_THRESHOLD = 512_000; // 500KB
 const DEFAULT_RATE_THRESHOLD = 30; // broadcasts/sec
 const DEFAULT_BANDWIDTH_THRESHOLD = 1_048_576; // 1MB/s
 
+/** Configuration for the pressure monitor — payload size, broadcast rate, and bandwidth thresholds. */
 export type PressureMonitorConfig = {
   payloadThreshold?: number;
   rateThreshold?: number;
@@ -18,6 +19,7 @@ export type PressureMonitorConfig = {
   onConsole?: (lines: string[]) => void;
 };
 
+/** Pressure monitor API — tracks broadcast payload sizes and per-client bandwidth. */
 export type PressureMonitorAPI = {
   onBroadcast(clientId: string, bytes: number): void;
   onClientDisconnect(clientId: string): void;
@@ -25,6 +27,7 @@ export type PressureMonitorAPI = {
   destroy(): void;
 };
 
+/** Create a pressure monitor that detects large payloads, high broadcast rates, and bandwidth spikes. */
 export function createPressureMonitor(
   config: PressureMonitorConfig,
 ): PressureMonitorAPI {

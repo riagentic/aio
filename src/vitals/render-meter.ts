@@ -6,6 +6,7 @@ import type { Gauge, VitalStatus } from "./types.ts";
 
 // ─── Config & API Types ─────────────────────────────────────────────────────
 
+/** Configuration for the rAF-based render meter — thresholds, status change, and notification hooks. */
 export type RenderMeterConfig = {
   manualTick?: boolean;
   thresholds?: { staleness?: number; pendingPatches?: number };
@@ -13,6 +14,7 @@ export type RenderMeterConfig = {
   onNotify?: () => void; // called when coalesced dirty flag flushes
 };
 
+/** Four render health gauges — staleness, frame time, pending patches, and paint rate. */
 export type RenderGauges = {
   staleness: Gauge;
   frameTime: Gauge;
@@ -20,6 +22,7 @@ export type RenderGauges = {
   paintRate: Gauge;
 };
 
+/** Client-side rAF render meter API — records patches, reads gauges, and classifies render health. */
 export type RenderMeterAPI = {
   recordPatch(now?: number): void;
   recordAction(type: string, feature: string): void;
@@ -39,6 +42,7 @@ export type RenderMeterAPI = {
 
 const HINT_THRESHOLD = 50; // gauge percent above which a metric is "high"
 
+/** Return a human-readable diagnostic hint based on which render gauges are elevated, or null if healthy. */
 export function renderHint(gauges: RenderGauges): string | null {
   if (gauges.staleness.percent < HINT_THRESHOLD) return null;
 
@@ -68,6 +72,7 @@ const LOG_SUPPRESS_MAX = LOG_SUPPRESS_SCHEDULE.length;
 
 // ─── Factory ────────────────────────────────────────────────────────────────
 
+/** Create a client-side rAF render meter that measures staleness, frame time, and paint rate. */
 export function createRenderMeter(config: RenderMeterConfig): RenderMeterAPI {
   const stalenessCapacity = config.thresholds?.staleness ??
     DEFAULT_STALENESS_THRESHOLD;

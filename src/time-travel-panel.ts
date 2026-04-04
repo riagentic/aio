@@ -217,7 +217,7 @@ function _renderTTPanel(): void {
 function _bindTTKey(): void {
   if (_ttKeyBound) return;
   _ttKeyBound = true;
-  console.log(
+  console.debug(
     "%c[aio] ⏱ time-travel active — Ctrl+. to toggle panel",
     "color:#e94560;font-weight:bold",
   );

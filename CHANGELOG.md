@@ -1,5 +1,35 @@
 # Changelog
 
+## 1.0.0-alpha10
+
+### Added
+
+- **`src/sync/` module** — offline-first CRDT sync engine with
+  server-authoritative merging. Includes hybrid logical clock (HLC), op buffer
+  with storage abstraction and cap enforcement, merge strategies (LWW, counter,
+  LWW-per-key, set-add, set-remove), rebase engine for unconfirmed ops, and
+  client sync engine with op stamping, ack, status, and reconnect
+- **Server-side sync** — `__op`/`__sync` message handlers, atomic compaction
+  with schema definitions, sync table init, KV exclusion for sync keys
+- **Sync feature API** — `sync` config on features, sync routing hook in
+  `state-core send()`, barrel export via `src/sync/mod.ts`
+- **Client log forwarding** — forward client console output to server
+- **DOM-based UI snapshot & interaction** — `am ui` now captures live DOM tree
+  from connected clients, with `am ui <userId>` for server-state filtering
+
+### Fixed
+
+- **`afterSubtree` crash** — `instanceof HTMLElement` replaced with
+  `nodeType === 1` check to work in non-browser environments (happy-dom); added
+  missing `_devMode` guard (was always stamping `data-component`)
+- **`_syncFeatureIds`** registered in valid config keys
+- **`am ui`** test aligned with refactored `cmdUi` (DOM snapshot default path)
+
+### Changed
+
+- **Test count** — 1343 → 1774 (431 new tests, mostly sync/CRDT coverage
+  including property-based, integration, and reconnection tests)
+
 ## 1.0.0-alpha9
 
 ### Added

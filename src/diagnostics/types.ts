@@ -10,7 +10,7 @@ export type DiagnosticsConfig = false | {
   onDiagnostic?: (event: import("../vitals/types.ts").DiagEvent) => void;
 };
 
-/** Per-mode options — each field: true=on, false=off, object=on with options, omitted=use default */
+/** Per-mode toggle/config for each diagnostic subsystem */
 export type DiagnosticsOptions = {
   stateDiffs?: boolean;
   actionLog?: boolean | { max?: number };
@@ -44,6 +44,7 @@ export const DEV_DEFAULTS: Required<DiagnosticsOptions> = {
   diagnosticBus: true,
 };
 
+/** Production defaults — minimal overhead, crash handler and vitals only */
 export const PROD_DEFAULTS: Required<DiagnosticsOptions> = {
   stateDiffs: false,
   actionLog: false,

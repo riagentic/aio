@@ -61,6 +61,7 @@ export const VALID_AIO_CONFIG_KEYS = new Set<string>([
   "_healthGetter",
   "_reduceBreakdown",
   "_onReportOptsReady",
+  "_syncFeatureIds",
 ]);
 
 export const VALID_FEATURES_CONFIG_KEYS = new Set<string>([

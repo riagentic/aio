@@ -22,10 +22,12 @@ import { diagEmit } from "../diagnostic-bus.ts";
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
+/** Server-side transport probe API — client liveness tracking and freeze detection. */
 export type TransportProbeServerAPI = ReturnType<
   typeof createTransportProbeServer
 >;
 
+/** Unified vitals system — wires loop, transport, and pressure probes into a single API. */
 export type VitalsSystem = {
   loopProbe: LoopProbeAPI;
   serverTransport: TransportProbeServerAPI;
@@ -40,6 +42,7 @@ export type VitalsSystem = {
   destroy: () => void;
 };
 
+/** Serializable data exposed via the /__aio/vitals HTTP endpoint. */
 export type VitalsEndpointData = {
   server: { loop: ReturnType<LoopProbeAPI["getVitals"]> };
   clients: Array<
@@ -49,6 +52,7 @@ export type VitalsEndpointData = {
 
 // ─── Threshold Resolution ───────────────────────────────────────────────────
 
+/** Merge partial user thresholds with built-in defaults, returning a complete VitalThresholds. */
 export function resolveThresholds(
   custom?: Partial<VitalThresholds>,
 ): VitalThresholds {
@@ -63,6 +67,7 @@ export function resolveThresholds(
 
 // ─── Factory ────────────────────────────────────────────────────────────────
 
+/** Create the unified vitals system from config — wires probes, diagnostics, and pressure monitoring. */
 export function createVitalsSystem(config: VitalsConfig): VitalsSystem {
   const thresholds = resolveThresholds(config.thresholds);
   const hintsEnabled = config.hints !== false;

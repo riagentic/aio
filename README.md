@@ -9,7 +9,7 @@
 - **Write reactive, use generators or atomic actions when needed.**
 - **Pick your target, compile and ship!**
 
-`v1.0.0-alpha9`
+`v1.0.0-alpha10`
 
 > Define state once. It persists, syncs to all clients, drives the UI.
 
@@ -82,8 +82,8 @@ Then in `deno.json`:
 deno run -A src/app.ts             # run
 ```
 
-→ [Quickstart](docs/quickstart.md) for UI setup, Electron, scaffolder, and all
-compile targets.
+→ [Quickstart](docs/basics/quickstart.md) for UI setup, Electron, scaffolder,
+and all compile targets.
 
 ## What's included
 
@@ -100,8 +100,8 @@ compile targets.
 | **Electron**    | desktop window · UDS+IPC (zero TCP in prod) · window persistence · DevTools toggle · `keepServer`                                                 |
 | **Deploy**      | browser · Electron · CLI · systemd service · Android APK (WebView) · single binary · remote (HTTPS)                                               |
 
-[Architecture diagram](docs/core.md#architecture--data-flow) ·
-[Full API reference](docs/api.md)
+[Core Concepts](docs/basics/concepts.md) ·
+[Full API reference](docs/basics/api-reference.md)
 
 ## How aio compares
 
@@ -164,37 +164,52 @@ clients, zero plumbing.
 | High-traffic public APIs       | Hono, Fastify, bare Deno.serve |
 | Complex form-heavy CRUD        | Rails, Django, Laravel         |
 
-See [FAQ](docs/faq.md#when-not-to-use-aio) for details.
+See [FAQ](docs/basics/faq.md#when-not-to-use-aio) for details.
 
 ## Docs
 
-**Getting Started:** [Quickstart](docs/quickstart.md) · [How-To](docs/howto.md)
-· [Migration](docs/migration.md)
+**Getting Started:** [Quickstart](docs/basics/quickstart.md) ·
+[Concepts](docs/basics/concepts.md) ·
+[Project Structure](docs/basics/project-structure.md) ·
+[Migration](docs/basics/migration.md)
 
-**Core:** [Feature Anatomy](docs/syntax.md) · [Reactivity](docs/reactivity.md) ·
-[Generators](docs/generators.md) · [Core API](docs/core.md) ·
-[API Reference](docs/api.md) · [Features](docs/features.md)
+**State:** [Features](docs/state/features.md) · [Methods](docs/state/methods.md)
+· [Machines](docs/state/machines.md) · [Generators](docs/state/generators.md) ·
+[Actions & Reduce](docs/state/actions-reduce.md) ·
+[Scheduling](docs/state/scheduling.md)
 
-**Data:** [Persistence](docs/persistence.md) · [SQLite](docs/sqldb.md) ·
-[Scheduling](docs/scheduling.md)
+**UI:** [AIR Setup](docs/ui/air-setup.md) · [Signals](docs/ui/air-signals.md) ·
+[Components](docs/ui/air-components.md) · [React Adapter](docs/ui/react.md) ·
+[AIR vs React](docs/ui/comparison.md)
 
-**Infrastructure:** [Auth](docs/auth.md) · [Builds](docs/builds.md) ·
-[Electron](docs/electron.md) · [CLI](docs/cli.md) · [am](docs/am.md) ·
-[Linter](docs/linter.md)
+**Data:** [Auto-Persist](docs/persistence/auto-persist.md) ·
+[SQLite](docs/persistence/sqlite.md) · [CRDT Sync](docs/persistence/crdt.md) ·
+[Delta](docs/persistence/delta.md) · [Offline](docs/persistence/offline.md)
 
-**UI & Rendering:** [UI](docs/ui.md) · [Renderer](docs/renderer.md) ·
-[Structure](docs/structure.md) · [Scaling](docs/scaling.md) ·
-[Testing](docs/testing.md) · [Debugging](docs/debugging.md) · [FAQ](docs/faq.md)
-· [Upgrade](docs/upgrade.md) · [Changelog](docs/changelog.md)
+**Clients:** [Browser](docs/clients/browser.md) ·
+[Electron](docs/clients/electron.md) ·
+[App Manager](docs/clients/app-manager.md)
+
+**Infrastructure:** [Auth](docs/auth/auth.md) ·
+[Build Targets](docs/build/targets.md) · [Scaling](docs/build/scaling.md) ·
+[Testing](docs/testing/feature-testing.md) · [Linter](docs/testing/linter.md)
+
+**Debug:** [Errors](docs/debugging/errors.md) ·
+[Vitals](docs/debugging/vitals.md) ·
+[Troubleshooting](docs/debugging/troubleshooting.md) ·
+[Performance](docs/debugging/performance.md)
+
+**Reference:** [API](docs/basics/api-reference.md) · [FAQ](docs/basics/faq.md) ·
+[Upgrade](docs/upgrade/README.md) · [Changelog](docs/basics/changelog.md)
 
 ## Status
 
-**v1.0.0-alpha9** · [JSR](https://jsr.io/@riagentic/aio) · MIT
+**v1.0.0-alpha10** · [JSR](https://jsr.io/@riagentic/aio) · MIT
 
-1343 tests · security hardened · 144+ bugs fixed across 4 nuclear audit waves
+1774 tests · security hardened · 144+ bugs fixed across 4 nuclear audit waves
 
-Core (state, sync, persistence, features, scheduling, renderer) is stable. New
-in alpha9: structured `boot/` module (CLI parsing, identity, lock, Electron
-helpers), `__aio_status` machine key (renamed from `_status`), `bindFeature()`
-API, signal NaN-correctness, and AIR renderer hardening (AIO-287..291).
-Electron, Android, and build targets are functional but less battle-tested.
+New in alpha10: offline-first CRDT sync engine (HLC, merge strategies, rebase,
+compaction), client log forwarding, DOM-based UI snapshot & interaction, docs
+restructured into domain folders. Core (state, sync, persistence, features,
+scheduling, renderer) is stable. Electron, Android, and build targets are
+functional but less battle-tested.

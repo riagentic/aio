@@ -15,8 +15,10 @@ export type WorkerMsg =
   | { type: "transaction"; stmts: { sql: string; params?: unknown[] }[] }
   | { type: "close" };
 
+/** Worker message with a correlation id for the promise bridge */
 export type WorkerRequest = WorkerMsg & { id: number };
 
+/** Success or error response sent back from the DB worker thread */
 export type WorkerResponse =
   | { id: number; ok: true; data: QueryResult | QueryResult[] }
   | { id: number; ok: false; error: string; stack?: string };

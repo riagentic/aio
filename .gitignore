@@ -31,6 +31,7 @@ telemetry-id
 # Planning / scratch notes
 untracked/
 docs/superpowers/
+.superpowers/
 issues.md
 resolved.md
 rules.md

@@ -165,6 +165,7 @@ export type Mutation = {
 
 // ── Helpers ────────────────────────────────────────────────────────
 
+/** Uppercase the first character of a string. */
 export function capitalize(s: string): string {
   return s.charAt(0).toUpperCase() + s.slice(1);
 }
@@ -183,6 +184,7 @@ export function markAsync<T extends (...args: unknown[]) => Promise<unknown>>(
   return fn;
 }
 
+/** Check if a function is async — detects `async function` or explicitly marked with `markAsync`. */
 // deno-lint-ignore ban-types
 export function isAsyncFunction(fn: Function): boolean {
   return (fn as unknown as Record<symbol, boolean>)[_asyncMark] === true ||
@@ -246,6 +248,7 @@ function applyArrayOp(
   (arr as any)[op](...args);
 }
 
+/** Apply a batch of mutations (set, delete, array ops) to a state object. */
 export function applyMutations(
   s: Record<string, unknown>,
   mutations: Mutation[],
@@ -276,6 +279,7 @@ type BatchState = {
   method: string;
 };
 
+/** Create a microtask batcher that groups async method mutations into single dispatched actions. */
 export function createBatcher(prefix: string, dispatch: (action: Msg) => void) {
   const batch: BatchState = { mutations: [], scheduled: false, method: "" };
 
@@ -326,6 +330,7 @@ const ARRAY_MUTATORS = new Set([
   "copyWithin",
 ]);
 
+/** Create a proxy over feature state that intercepts writes and batches them as mutations. */
 export function createLiveProxy<S extends Record<string, unknown>>(
   featureName: string,
   prefix: string,
@@ -470,6 +475,7 @@ export function createLiveProxy<S extends Record<string, unknown>>(
 
 // ── Method classification ──────────────────────────────────────────
 
+/** Partition feature methods into sync and async sets based on function type. */
 export function classifyMethods<S extends Record<string, unknown>>(
   methods: FeatureMethods<S>,
 ): {

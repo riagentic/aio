@@ -6,6 +6,7 @@
 import type { ScheduleEffect } from "./schedule.ts";
 import type { FlowDef } from "./flow.ts";
 import type { FeatureMethods } from "./feature-impl.ts";
+import type { SyncConfig } from "./sync/types.ts";
 
 /** Map of named action/effect creator functions */
 export type Creators = Record<
@@ -138,6 +139,8 @@ export type FeatureAio<
   validate?: (state: any) => true | string;
   /** State keys to exclude from KV persistence */
   persistExclude?: string[];
+  /** CRDT sync configuration */
+  syncConfig?: SyncConfig;
   /** Bind guard — true after bindFeature() */
   bound: boolean;
   /** Phantom — carries State type for TypeScript inference (never set at runtime) */
@@ -207,7 +210,7 @@ export type DirectCalling<M> = {
     : never;
 };
 
-/** Extract state type from a feature definition */
+/** Extract the state type from a FeatureDef — useful for typing selectors and external consumers. */
 // deno-lint-ignore no-explicit-any
 export type ExtractState<F> = F extends FeatureDef<any, any, any, infer S> ? S
   : Record<string, unknown>;
@@ -226,7 +229,7 @@ export type SendOf<F> = F extends DirectCalling<infer M> ? {
   }
   : Record<string, (...args: unknown[]) => void>;
 
-/** Feature entry in aio.run() features array */
+/** Feature entry in aio.run() — a bare FeatureDef or an object with dependency declarations. */
 // deno-lint-ignore no-explicit-any
 export type FeatureEntry = FeatureDef<any, any, any, any> | {
   // deno-lint-ignore no-explicit-any

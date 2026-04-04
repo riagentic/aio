@@ -12,6 +12,11 @@ import {
 import { createContext, onMount, useContext, useRef } from "./aio-renderer.ts";
 import { type ComponentFn, h, type VChild } from "./vdom.ts";
 import { useTimeTravel } from "./time-travel-air.ts";
+import { handleTTMessage } from "./time-travel-panel.ts";
+import { installConsoleIntercept } from "./console-intercept.ts";
+import { interact } from "./dom-interact.ts";
+import { snapshotDOM } from "./dom-snapshot.ts";
+import type { InteractCommand } from "./dom-inspector-types.ts";
 
 // ── Protocol imports (renderer-agnostic) ───────────────────────────
 import {
@@ -49,6 +54,7 @@ import {
   _subscribe,
   _trackingProxy,
   _useAioSubscribe,
+  _w,
   _waitForState,
   aio,
   bridge,
@@ -77,6 +83,15 @@ let _connecting = false;
 let _wasConnected = false;
 let _retry = 0;
 let _queue: Array<{ type: string; payload?: unknown }> = [];
+
+/** Hook for CRDT sync messages (__ack, __op, __sync). Set by app code after sync engine creation. */
+let _onSyncMessage: ((msg: Record<string, unknown>) => void) | null = null;
+/** Register a sync message handler for __ack/__op/__sync messages from server */
+export function setSyncMessageHandler(
+  handler: ((msg: Record<string, unknown>) => void) | null,
+): void {
+  _onSyncMessage = handler;
+}
 const _bootId: { current: string | null } = { current: null };
 
 const _ipc: AioIPCBridge | null = detectIPC();
@@ -94,6 +109,73 @@ function _handleState(data: Record<string, unknown>) {
   _checkStateIntegrity(_coreGetState());
   _incStateVersion();
   if (_coreHasState()) _resolveStateReady();
+}
+
+/** Send message back to server via current transport. */
+function _sendRaw(msg: string): void {
+  if (_ws && _ws.readyState === WebSocket.OPEN) {
+    try {
+      _ws.send(msg);
+    } catch { /* buffer full */ }
+  } else if (_ipc && _ipcConnected) {
+    _ipc.send(msg);
+  }
+}
+
+/** Route __-prefixed commands from server. Returns true if consumed. */
+function _routeCommand(line: string): boolean {
+  if (!line.startsWith("__")) return false;
+
+  if (line === "__ui:snapshot" || line === "__ui:snapshot:all") {
+    const all = line.endsWith(":all");
+    try {
+      const tree = snapshotDOM(undefined, all);
+      _sendRaw("__ui:snapshot-result:" + JSON.stringify(tree));
+    } catch (e) {
+      _sendRaw("__ui:snapshot-result:" + JSON.stringify({ error: String(e) }));
+    }
+    return true;
+  }
+
+  if (line.startsWith("__ui:interact:")) {
+    try {
+      const cmd: InteractCommand = JSON.parse(
+        line.slice("__ui:interact:".length),
+      );
+      const result = interact(cmd);
+      _sendRaw("__ui:interact-result:" + JSON.stringify(result));
+    } catch (e) {
+      _sendRaw(
+        "__ui:interact-result:" + JSON.stringify({
+          ok: false,
+          selector: "",
+          action: "",
+          error: String(e),
+        }),
+      );
+    }
+    return true;
+  }
+
+  // Time-travel metadata from server
+  if (line.startsWith("__tt:")) {
+    handleTTMessage(line.slice(5));
+    return true;
+  }
+
+  // Diagnostic bus event from server (dev mode)
+  if (line.startsWith("__diag:")) {
+    try {
+      const ev = JSON.parse(line.slice(7));
+      if (_w && typeof _w._aioDiag === "function") _w._aioDiag(ev);
+    } catch { /* ignore malformed diag */ }
+    return true;
+  }
+
+  // Vitals pong — AIR doesn't use transport probe, but don't treat as state
+  if (line.startsWith("__vitals:")) return true;
+
+  return true; // consumed but unrecognized — don't parse as state
 }
 
 function _connectIPC() {
@@ -123,8 +205,7 @@ function _connectIPC() {
 
   _ipc.onMessage((line: string) => {
     if (handleControlMessage(line, _bootId)) return;
-    // Skip React-only commands (__getState, __click, __tt, __diag)
-    if (line.startsWith("__")) return;
+    if (_routeCommand(line)) return;
     try {
       const data = JSON.parse(line);
       if (data === null || typeof data !== "object") return;
@@ -191,11 +272,15 @@ function _connect() {
     if (typeof e.data === "string" && handleControlMessage(e.data, _bootId)) {
       return;
     }
-    // Skip React-only WS commands
-    if (typeof e.data === "string" && e.data.startsWith("__")) return;
+    if (typeof e.data === "string" && _routeCommand(e.data)) return;
     try {
       const data = JSON.parse(e.data);
       if (data === null || typeof data !== "object") return;
+      // CRDT sync messages — route to sync engine hook if installed
+      if (data.__ack || data.__op || data.__sync) {
+        if (typeof _onSyncMessage === "function") _onSyncMessage(data);
+        return;
+      }
       _handleState(data);
     } catch (err) {
       console.warn("[aio:air] bad state message:", err);
@@ -269,6 +354,9 @@ _setTeardownFn(() => {
 });
 
 _setClientSend(_send);
+
+// ── Console interceptor ────────────────────────────────────────
+installConsoleIntercept(_sendRaw);
 
 // ── Public re-exports (same surface as browser.ts) ─────────────────
 export {

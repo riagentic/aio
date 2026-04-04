@@ -26,8 +26,10 @@ export type VitalThresholds = {
   queue: LayerThreshold;
 };
 
+/** Default heartbeat interval in milliseconds for vitals ping/pong cycle. */
 export const DEFAULT_HEARTBEAT_INTERVAL = 1000;
 
+/** Built-in threshold defaults (ms) for render, transport, loop, and queue layers. */
 export const DEFAULT_THRESHOLDS: VitalThresholds = {
   render: { degraded: 50, warning: 200, frozen: 2000 },
   transport: { degraded: 100, warning: 500, frozen: 2000 },
@@ -80,6 +82,7 @@ export type DiagEvent = {
   timestamp: number;
 };
 
+/** Named metric gauge — current value, capacity, and percentage (0-100). */
 export type Gauge = {
   name: string;
   current: number;
@@ -93,6 +96,7 @@ export type RenderBudget = {
   pendingPatches?: number; // count before warning (default 10)
 };
 
+/** Server-side dispatch loop health — queue depth, drain rate, reduce timing, and circuit breakers. */
 export type LoopVitals = {
   queueDepth: number;
   drainRate: number;
@@ -104,6 +108,7 @@ export type LoopVitals = {
   circuitBreakers: string[];
 };
 
+/** Per-client liveness state — last ping/send timestamps, status, and optional freeze start. */
 export type ClientLiveness = {
   clientId: string;
   lastPing: number;
@@ -112,6 +117,7 @@ export type ClientLiveness = {
   frozenSince?: number;
 };
 
+/** Diagnostic report emitted when a client render freeze is detected. */
 export type RenderFreezeReport = {
   frozenFor: number;
   lastActionBefore: string | null;
@@ -121,6 +127,7 @@ export type RenderFreezeReport = {
   memoryAfter?: number;
 };
 
+/** Timeline of status transitions for a single probe layer — first degraded/warning/frozen/recovered timestamps. */
 export type ProbeTimeline = {
   probe: VitalLayer;
   firstDegradedAt: number | null;
@@ -129,6 +136,7 @@ export type ProbeTimeline = {
   recoveredAt: number | null;
 };
 
+/** Point-in-time snapshot of all three vitals layers — render, transport, and loop. */
 export type VitalsSnapshot = {
   render: {
     status: VitalStatus;
@@ -152,6 +160,7 @@ export type VitalsSnapshot = {
   };
 };
 
+/** Freeze cascade analysis — duration, origin layer, cascade order, and probe snapshots. */
 export type FreezeTimeline = {
   totalDuration: number;
   cascadeOrigin: VitalLayer;
@@ -171,6 +180,7 @@ export type VitalsConfig = {
   onDiagnostic?: (event: DiagEvent) => void;
 };
 
+/** Tracks array reference identity across patch cycles — preserved vs changed counts. */
 export type ArrayRefStats = {
   preserved: number;
   changed: number;

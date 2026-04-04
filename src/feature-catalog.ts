@@ -4,6 +4,7 @@ import type { Creators, FeatureDef, Msg } from "./feature-types.ts";
 import { checkReservedKeys } from "./feature-types.ts";
 import { registerCall } from "./feature-impl.ts";
 
+/** Build a prefixed action/effect catalog from creator functions — maps keys to typed dispatchers. */
 export function buildCatalog(
   prefix: string,
   creators: Creators,

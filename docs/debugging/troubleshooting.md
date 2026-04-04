@@ -1,0 +1,307 @@
+# Troubleshooting
+
+Symptom-based guide -- find what you're seeing, follow the fix path.
+
+## Quick decision tree
+
+```
+Something wrong?
+|
++-- Error box in console?      -> S1 Error Codes
++-- UI frozen / blank?         -> S2 Freezes
++-- Data stale / not updating? -> S3 Stale Data
++-- App slow but not frozen?   -> S4 Slow Actions
++-- Memory warning?            -> S5 Memory
++-- WebSocket disconnecting?   -> S6 Connection
++-- Re-renders too frequent?   -> S7 Re-renders
++-- Feature stopped working?   -> S8 Circuit Breaker
++-- "PRESSURE" warning?        -> S10 Pressure Warnings
++-- Nothing obvious?           -> S9 Silent Failures
+```
+
+---
+
+## S1 -- Error box in console
+
+| Code                 | What broke                      | Fix                                         |
+| -------------------- | ------------------------------- | ------------------------------------------- |
+| `REDUCE_ERROR`       | Reducer threw                   | Check payload shape, guard undefined fields |
+| `EFFECT_ERROR`       | Sync effect threw               | Move I/O to async, return promises          |
+| `EFFECT_TIMEOUT`     | Async effect exceeded 30s       | Optimize or increase `effectTimeoutMs`      |
+| `EFFECT_ASYNC_ERROR` | Promise rejected                | Add error handling in `execute`             |
+| `FLOW_STEP_ERROR`    | Flow generator step threw       | Wrap steps in try/catch                     |
+| `FLOW_UNCAUGHT`      | Flow threw without catch        | Add try/catch, check step history in error  |
+| `MACHINE_BLOCKED`    | Action blocked by state machine | Check transitions, verify machine state     |
+| `QUEUE_OVERFLOW`     | Queue exceeded 10,000           | Find dispatch loop -- see S4                |
+| `DISPATCH_LOOP`      | 1000+ iterations detected       | Effect dispatching to itself -- break cycle |
+| `MEMORY_PRESSURE`    | Heap above 75%                  | See S5                                      |
+| `MEMORY_CRITICAL`    | Heap above 90%                  | See S5 (urgent)                             |
+| `BUDGET_REDUCE`      | Reducer exceeded 100ms          | Move heavy work to async effects            |
+| `BUDGET_EFFECT`      | Effect exceeded 5ms             | Return immediately, work async              |
+
+**Tracing:** Every error has a correlation ID. Grep logs:
+
+```bash
+grep 'a1b2c3d4' log/error.log   # all errors in this dispatch
+grep 'a1b2c3d4' log/debug.log   # full action chain
+```
+
+---
+
+## S2 -- UI frozen / blank
+
+**Console output:**
+
+```
+[aio:vitals] RENDER FROZEN -- no update for 3.2s
+  trigger:    portfolio.refresh reduce took 1847ms (p95: 45ms)
+  hint:       slow reducer blocking main thread
+```
+
+### Reducer blocking main thread
+
+DiagReporter shows `trigger: <feature>.<action> reduce took Xms`.
+
+```ts
+// WRONG -- heavy work in reducer
+reduce: { analyze(s) { s.results = heavyComputation(s.data) } }
+
+// RIGHT -- move to async effect
+reduce: { analyze(s) { s.analyzing = true } },
+execute: {
+  async runAnalysis(app, payload) {
+    const results = await heavyComputation(payload.data)
+    app.dispatch(myFeature.analysisDone(results))
+  }
+}
+```
+
+### Queue saturation
+
+DiagReporter shows `queue: N actions pending, drain rate X/s`.
+
+```ts
+// WRONG -- rapid-fire dispatches
+for (const item of items) app.dispatch(feature.process(item));
+
+// RIGHT -- batch
+app.dispatch(feature.processBatch(items));
+```
+
+### Non-AIO code blocking
+
+DiagReporter shows `hint: Main thread blocked by non-AIO code`. Check:
+third-party libraries, large DOM operations, synchronous I/O, heavy
+`JSON.parse`.
+
+### Blank page on load
+
+React mount racing against state arrival. Ensure you're using `aio.run()` and
+not mounting React manually before state arrives.
+
+---
+
+## S3 -- Stale data
+
+UI shows old values. Data arrived on server but browser didn't update.
+
+**Checklist:**
+
+1. **WebSocket connected?** DevTools Network WS tab. If disconnected, see S6.
+2. **Transport probe?** Look for `[aio:vitals] transport degraded`. High RTT =
+   network latency.
+3. **Delta issue?** If state changed but delta was `skip`, check
+   `fullStateThreshold`.
+4. **Reducer not mutating?** Verify with `[state-diff]` entries in
+   `log/debug.log`. No diff = no change.
+5. **Reference issue?** Use `useFeature(ref)` with a specific selector if
+   component depends on parent object reference.
+
+---
+
+## S4 -- Slow actions
+
+App works but feels sluggish. Check `log/perf.log`:
+
+```
+[BUDGET] wallet:transfer 450ms > 100ms budget
+  produce: 420ms  clone: 15ms  spread: 5ms  routing: 2ms  listeners: 8ms
+```
+
+| Phase       | If slow                          |
+| ----------- | -------------------------------- |
+| `produce`   | Move computation to effect       |
+| `clone`     | Large state -- prune             |
+| `spread`    | Too many features?               |
+| `routing`   | Shouldn't be slow                |
+| `listeners` | Too many cross-feature listeners |
+
+HTTP check: `GET /__aio/vitals` returns live `queueDepth`, `drainRate`,
+`lastReduceTime`, `p95ReduceTime`.
+
+---
+
+## S5 -- Memory pressure
+
+```
+MEMORY_PRESSURE -- heap at 78% (1.56 GB / 2.0 GB)
+Top features: 1. barHistory 847 MB  2. orderer 12 MB
+```
+
+| Trend     | Meaning                      | Fix                                        |
+| --------- | ---------------------------- | ------------------------------------------ |
+| `rising`  | Unbounded growth -- will OOM | Cap arrays, use ring buffers               |
+| `stable`  | High but not growing         | Increase limit or move to external storage |
+| `falling` | GC recovering                | Usually fine, monitor                      |
+
+**Cap array growth:**
+
+```ts
+reduce: {
+  addCandle(s, payload) {
+    s.candles.push(payload.candle)
+    if (s.candles.length > 10_000) s.candles = s.candles.slice(-10_000)
+  }
+}
+```
+
+For large datasets, move to SQLite. Increase V8 heap:
+`deno run --v8-flags=--max-old-space-size=16384 main.ts`.
+
+---
+
+## S6 -- Connection issues
+
+```
+[aio:vitals] transport frozen (no pong in 3.2s)
+[aio:vitals] DISCONNECT -- client abc123 unreachable for 5.1s
+```
+
+1. **Network issue?** Transport frozen but Loop/Render healthy = network
+   problem. AIO auto-reconnects.
+2. **Server overloaded?** LoopProbe also degraded = server can't process pings.
+   Check queue depth.
+3. **Client frozen?** RenderProbe also frozen = browser can't send pings. See
+   S2.
+4. **Connection indicator:** Browser colored dot bottom-left. Red =
+   disconnected, yellow = reconnecting, green = connected.
+
+---
+
+## S7 -- Too many re-renders
+
+```
+[aio:vitals] RE-RENDER STORM -- 47 subscribe callbacks in last 1s
+```
+
+`useAio()` auto-tracks accessed paths via deep Proxy -- subscribes only to what
+you read. If you still see storms, the issue is expensive components:
+
+```ts
+// FINE -- useAio() only subscribes to accessed paths
+const { state, send } = useAio();
+return <div>{state.counter.count}</div>;
+
+// BETTER for hot components -- useFeature scopes to one feature
+const { state, send } = useFeature(counterRef);
+```
+
+Selector returning new object every time:
+
+```ts
+// WRONG -- new object every render
+useFeature(ref, (s) => ({ a: s.a, b: s.b }));
+
+// RIGHT -- return stable values
+const a = useFeature(ref, (s) => s.a);
+const b = useFeature(ref, (s) => s.b);
+```
+
+---
+
+## S8 -- Feature stopped working
+
+Circuit breaker may have tripped. Check: `curl localhost:3000/__aio/health`.
+Look for `"enabled": false` or high error counts.
+
+```ts
+circuitBreaker: {
+  maxErrors: 10,
+  window: 60_000,  // rolling 60s
+  onTrip: (name, count) => console.error(`${name} tripped: ${count} errors`),
+}
+```
+
+Re-enable: fix root cause, restart app.
+
+---
+
+## S9 -- Silent failures
+
+**Health overlay:** Bottom-right corner (dev mode). Green/yellow/red. Click to
+expand diagnostic bus events.
+
+**Check log files:**
+
+| File              | Look for                               |
+| ----------------- | -------------------------------------- |
+| `log/error.log`   | Errors missed in console               |
+| `log/warning.log` | Stripped keys, dropped actions         |
+| `log/debug.log`   | Full action trace, unexpected patterns |
+| `log/perf.log`    | Budget violations                      |
+
+**Common silent issues:**
+
+| Diagnostic event     | Fix                             |
+| -------------------- | ------------------------------- |
+| `action-dropped`     | Debounce dispatches             |
+| `state-key-stripped` | Rename field (avoid `$p`, `$v`) |
+| `state-no-listeners` | Add `useFeature()` in component |
+| `effect-invalid`     | Add `type: "effectName"`        |
+| `persist-error`      | Check permissions, disk space   |
+
+---
+
+## S10 -- Pressure warnings
+
+Early warnings before failure. Fire when resources approach limits.
+
+**Payload pressure:** `PRESSURE -- broadcast payload 623KB`. Fix: reduce state
+size, prune arrays, raise `pressure.payloadThreshold`.
+
+**Rate pressure:** `PRESSURE -- 34 broadcasts/sec`. Fix: debounce dispatches,
+batch actions, raise `pressure.rateThreshold`.
+
+**Render pressure:** `PRESSURE -- render degraded (82ms drift)`. Fix: check
+heavy sync work. See S2 if it escalates.
+
+```ts
+diagnostics: {
+  dev: {
+    vitals: {
+      pressure: { payloadThreshold: 1_000_000, rateThreshold: 60 },
+    },
+  },
+}
+```
+
+---
+
+## Forensics workflow
+
+1. `log/error.log` -- find the first error
+2. Grep `log/debug.log` for the `cid` -- full action chain
+3. `log/perf.log` -- budget violations around the same time
+4. `log/actions.jsonl` -- replay the action sequence
+5. `log/checkpoint.json` -- state snapshot at last checkpoint
+6. Time-travel (Ctrl+.) -- step through actions visually
+
+## Useful commands
+
+```bash
+curl localhost:3000/__aio/vitals | jq .     # live vitals
+curl localhost:3000/__aio/health | jq .     # feature health
+grep 'a1b2c3d4' log/debug.log              # trace by correlation ID
+tail -f log/perf.log                        # watch budget violations
+grep -c 'feature:wallet' log/error.log      # count errors per feature
+```

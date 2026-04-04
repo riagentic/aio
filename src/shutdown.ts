@@ -29,10 +29,12 @@ export interface ShutdownRefs {
   log: Log;
 }
 
+/** Shutdown orchestrator API — idempotent multi-phase graceful shutdown. */
 export interface ShutdownOrchestrator {
   shutdown: () => Promise<void>;
 }
 
+/** Create a shutdown orchestrator that runs persist, diag, vitals, hooks, and DB cleanup in order. */
 export function createShutdownOrchestrator(
   refs: ShutdownRefs,
 ): ShutdownOrchestrator {

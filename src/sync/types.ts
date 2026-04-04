@@ -1,0 +1,125 @@
+// src/sync/types.ts — Shared CRDT types
+
+/** Hybrid Logical Clock: [physical_ms, counter, nodeId] */
+export type HLC = [physical: number, counter: number, nodeId: string];
+
+/** Merge strategy names */
+export type MergeStrategy =
+  | "lww"
+  | "counter"
+  | "lww-per-key"
+  | "set-add"
+  | "set-remove";
+
+/** Per-feature sync configuration (normalized from sync: true | {...}) */
+export interface SyncConfig {
+  merge: Record<string, MergeStrategy>;
+  identity: Record<string, string>;
+  offline: { retention: string };
+  onConflict?: (conflicts: SyncConflict[]) => void;
+  onSync?: (stats: SyncStats) => void;
+}
+
+/** Conflict descriptor passed to onConflict callback */
+export interface SyncConflict {
+  field: string;
+  local: unknown;
+  remote: unknown;
+  resolution: MergeStrategy;
+}
+
+/** Stats passed to onSync callback */
+export interface SyncStats {
+  merged: number;
+  conflicts: number;
+  elapsed: number;
+}
+
+/** Sync status exposed to UI via useFeature() */
+export interface SyncStatus {
+  status: "online" | "offline" | "syncing" | "blocked";
+  pending: number;
+  lastSync: number;
+}
+
+/** A stamped operation in the op-log */
+export interface SyncOp {
+  id: string;
+  feature: string;
+  action: string;
+  payload: unknown;
+  hlc: HLC;
+  confirmed: boolean;
+}
+
+/** Wire message: client→server or server→client op */
+export interface OpMessage {
+  __op: {
+    id: string;
+    hlc: HLC;
+    feature: string;
+    action: string;
+    payload: unknown;
+  };
+}
+
+/** Wire message: server→client ack */
+export interface AckMessage {
+  __ack: { opId: string; serverHlc: HLC };
+}
+
+/** Wire message: client→server sync request */
+export interface SyncRequest {
+  __sync: {
+    clientId: string;
+    features: Record<string, { lastHlc: HLC | null }>;
+    pendingOps: SyncOp[];
+  };
+}
+
+/** Wire message: server→client sync response */
+export interface SyncResponse {
+  __sync:
+    | {
+      mode: "incremental";
+      ops: SyncOp[];
+      rebase?: SyncOp[];
+      lowWater: HLC;
+    }
+    | {
+      mode: "snapshot";
+      snapshot: Record<string, unknown>;
+      ops: SyncOp[];
+      lowWater: HLC;
+    };
+}
+
+/** Default sync config values */
+export const SYNC_DEFAULTS = {
+  maxDrift: 60_000,
+  pendingCap: 500,
+  compactOps: 1000,
+  compactIntervalMs: 3_600_000,
+  syncRetryMs: 10_000,
+  defaultRetention: "4h",
+} as const;
+
+/** Normalize sync: true | SyncConfig → SyncConfig */
+export function normalizeSyncConfig(
+  raw: true | Partial<SyncConfig>,
+): SyncConfig {
+  if (raw === true) {
+    return {
+      merge: {},
+      identity: {},
+      offline: { retention: SYNC_DEFAULTS.defaultRetention },
+    };
+  }
+  return {
+    merge: raw.merge ?? {},
+    identity: raw.identity ?? {},
+    offline: raw.offline ?? { retention: SYNC_DEFAULTS.defaultRetention },
+    onConflict: raw.onConflict,
+    onSync: raw.onSync,
+  };
+}
