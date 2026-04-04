@@ -3,6 +3,7 @@
 import type { MachineConfig } from "./feature-types.ts";
 import { log } from "./logger.ts";
 
+/** Validate a state machine config — checks initial state, transitions, reachability, and dead-ends. */
 export function validateMachine(
   name: string,
   machine: MachineConfig,

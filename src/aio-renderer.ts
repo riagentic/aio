@@ -1321,7 +1321,18 @@ function _createHooks(rootState: RootState): VDomHooks {
       }
     },
 
-    afterSubtree(_vnode: VNode): void {
+    afterSubtree(vnode: VNode): void {
+      // Stamp data-component on the component's root DOM element (dev mode only)
+      if (
+        _devMode && typeof vnode.tag === "function" && vnode._dom &&
+        (vnode._dom as { nodeType?: number }).nodeType === 1
+      ) {
+        const el = vnode._dom as Element;
+        const name = (vnode.tag as { name?: string }).name;
+        if (name && name !== "_" && name !== "Component") {
+          el.setAttribute("data-component", name);
+        }
+      }
       _instanceStack.pop();
     },
 

@@ -2,6 +2,7 @@
 // Extracted from aio.ts. Same protocol as WS (state JSON, __reload, __css, __tt:, __boot:).
 
 import { compactPatches } from "./patch-compact.ts";
+import { writeClientLog } from "./client-log.ts";
 
 export type UDSClient = {
   conn: Deno.Conn;
@@ -93,6 +94,7 @@ export function createUDSListener(
     }).catch(() => {
       _writeQueues.delete(conn);
       connSet.delete(conn);
+      clientMap.delete(conn);
       try {
         conn.close();
       } catch { /* already closed */ }
@@ -250,6 +252,7 @@ function _handleUDSConn(
   sendTo: (conn: Deno.Conn, msg: string) => void,
 ): void {
   const decoder = new TextDecoder();
+  const MAX_BUF = 10 * 1024 * 1024; // 10MB — prevent OOM from missing newlines
   let buf = "";
   (async () => {
     const reader = conn.readable.getReader();
@@ -258,6 +261,12 @@ function _handleUDSConn(
         const { value, done } = await reader.read();
         if (done) break;
         buf += decoder.decode(value, { stream: true });
+        if (buf.length > MAX_BUF && !buf.includes("\n")) {
+          debug(
+            `uds: client buffer exceeded ${MAX_BUF}B without newline — closing`,
+          );
+          break;
+        }
         const lines = buf.split("\n");
         buf = lines.pop()!;
         for (const line of lines) {
@@ -273,6 +282,40 @@ function _handleUDSConn(
                 clearTimeout(pending.timer);
                 try {
                   pending.resolve(JSON.parse(line.slice(14)));
+                } catch {
+                  pending.resolve(null);
+                }
+              }
+            }
+            continue;
+          }
+          // Client log forwarding
+          if (line.startsWith("__log:")) {
+            const client = clientMap.get(conn);
+            if (client) {
+              try {
+                const entry = JSON.parse(line.slice(6));
+                writeClientLog(client.index, entry);
+              } catch { /* malformed — drop */ }
+            }
+            continue;
+          }
+          // UI snapshot/interact results — resolve pending
+          if (
+            line.startsWith("__ui:snapshot-result:") ||
+            line.startsWith("__ui:interact-result:")
+          ) {
+            const client = clientMap.get(conn);
+            if (client) {
+              const pending = pendingState.get(client.id);
+              if (pending) {
+                pendingState.delete(client.id);
+                clearTimeout(pending.timer);
+                const payload = line.startsWith("__ui:snapshot-result:")
+                  ? line.slice("__ui:snapshot-result:".length)
+                  : line.slice("__ui:interact-result:".length);
+                try {
+                  pending.resolve(JSON.parse(payload));
                 } catch {
                   pending.resolve(null);
                 }

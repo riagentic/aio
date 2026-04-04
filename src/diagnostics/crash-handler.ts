@@ -1,6 +1,7 @@
 // src/diagnostics/crash-handler.ts — Last-words logger for unhandled errors
 // Server-runtime only: file write guarded by typeof Deno check
 
+/** Dependencies injected into the crash handler for logging and emergency checkpoints */
 export type CrashHandlerDeps = {
   log: { error: (msg: string, data?: Record<string, unknown>) => void };
   getHealthData: () => {

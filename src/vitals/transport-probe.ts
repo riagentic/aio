@@ -11,11 +11,13 @@ import type {
 
 // ─── Wire Protocol ───────────────────────────────────────────────────────────
 
+/** Client-to-server vitals ping message with departure timestamp. */
 export type VitalsPing = {
   type: "__vitals:ping";
   t1: number;
 };
 
+/** Server-to-client vitals pong reply with timestamps and optional loop health. */
 export type VitalsPong = {
   type: "__vitals:pong";
   t1: number;
@@ -37,12 +39,14 @@ function evaluateStatus(
 
 // ─── Client Probe ────────────────────────────────────────────────────────────
 
+/** Configuration for the client-side transport probe — thresholds, ping interval, and status callback. */
 export type TransportProbeClientConfig = {
   thresholds: VitalThresholds;
   interval: number;
   onStatusChange?: (status: VitalStatus) => void;
 };
 
+/** Create a client-side transport probe that measures RTT via ping/pong and classifies connection health. */
 export function createTransportProbeClient(config: TransportProbeClientConfig) {
   const { thresholds, onStatusChange } = config;
   const t = thresholds.transport;
@@ -106,12 +110,14 @@ export function createTransportProbeClient(config: TransportProbeClientConfig) {
 
 // ─── Server Probe ────────────────────────────────────────────────────────────
 
+/** Configuration for the server-side transport probe — thresholds and freeze/recovery callbacks. */
 export type TransportProbeServerConfig = {
   thresholds: VitalThresholds;
   onClientFrozen?: (clientId: string) => void;
   onClientRecovered?: (clientId: string) => void;
 };
 
+/** Create a server-side transport probe that tracks per-client liveness and detects freezes. */
 export function createTransportProbeServer(config: TransportProbeServerConfig) {
   const { thresholds, onClientFrozen, onClientRecovered } = config;
   const t = thresholds.transport;

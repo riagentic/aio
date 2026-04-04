@@ -10,6 +10,7 @@ import type {
 
 // ─── Config & API Types ─────────────────────────────────────────────────────
 
+/** Configuration for the setTimeout-drift render probe — thresholds, interval, and status callback. */
 export type RenderProbeConfig = {
   thresholds: VitalThresholds;
   interval: number;
@@ -20,6 +21,7 @@ export type RenderProbeConfig = {
   ) => void;
 };
 
+/** Client-side setTimeout-drift render probe API — freeze detection and status tracking. */
 export type RenderProbeAPI = {
   getStatus: () => VitalStatus;
   getFirstDegradedAt: () => number | null;
@@ -41,6 +43,7 @@ const FREEZE_COUNT_RESET_MS = 30_000;
 
 // ─── Factory ────────────────────────────────────────────────────────────────
 
+/** Create a client-side render probe that detects freezes via setTimeout drift measurement. */
 export function createRenderProbe(config: RenderProbeConfig): RenderProbeAPI {
   const { thresholds, interval, manualTick, onStatusChange } = config;
   const rt = thresholds.render;

@@ -3,6 +3,7 @@ import { formatDiagEvent } from "./diag-formatter.ts";
 
 const THROTTLE_MS = 2000;
 
+/** Point-in-time snapshot of the dispatch loop for diagnostic reporting. */
 export type LoopSnapshot = {
   status: string;
   queueDepth: number;
@@ -16,11 +17,13 @@ export type LoopSnapshot = {
   firstDegradedAt: number | null;
 };
 
+/** Point-in-time snapshot of connected client statuses for diagnostic reporting. */
 export type TransportSnapshot = {
   clients: Array<{ id: string; status: string; frozenFor?: number }>;
   // Note: RTT is client-side only (transport-probe client). Server has no per-client RTT.
 };
 
+/** Configuration for the server-side diagnostic reporter — snapshot providers and output hooks. */
 export type ServerDiagReporterConfig = {
   onDiagnostic?: (event: DiagEvent) => void;
   onConsole?: (lines: string[]) => void; // override for testing; defaults to console.warn
@@ -28,6 +31,7 @@ export type ServerDiagReporterConfig = {
   getTransportSnapshot: () => TransportSnapshot;
 };
 
+/** Create a server-side diagnostic reporter that maps vitals alerts to structured DiagEvents. */
 export function createServerDiagReporter(config: ServerDiagReporterConfig) {
   const lastStatus = new Map<string, DiagEvent["kind"]>();
   const lastConsoleEmit = new Map<string, number>();

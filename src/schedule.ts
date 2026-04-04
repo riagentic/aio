@@ -88,6 +88,7 @@ export const schedule = {
   }),
 };
 
+/** Type guard — returns true if the value is a ScheduleEffect (type === "__schedule"). */
 export function isScheduleEffect(e: unknown): e is ScheduleEffect {
   return !!e && typeof e === "object" &&
     (e as Record<string, unknown>).type === "__schedule";
@@ -95,6 +96,7 @@ export function isScheduleEffect(e: unknown): e is ScheduleEffect {
 
 // ── Cron parser ─────────────────────────────────────────────────────
 
+/** Parsed cron expression — expanded arrays of valid minute, hour, day-of-month, month, and day-of-week values. */
 export type CronFields = {
   minute: number[]; // 0-59
   hour: number[]; // 0-23
@@ -145,6 +147,7 @@ function parseField(field: string, min: number, max: number): number[] {
   return [...new Set(values)].sort((a, b) => a - b);
 }
 
+/** Parse a 5-field cron pattern string into expanded CronFields arrays. */
 export function parseCron(pattern: string): CronFields {
   const parts = pattern.trim().split(/\s+/);
   if (parts.length !== 5) {
@@ -161,6 +164,7 @@ export function parseCron(pattern: string): CronFields {
   };
 }
 
+/** Compute the next UTC time matching the given cron fields, starting from the minute after `after`. */
 // NOTE: cron fields are matched against UTC time (getUTCHours, getUTCDay, etc.).
 // A pattern like "0 9 * * 1-5" fires at 09:00 UTC, not local time.
 // If local-time cron is needed, offset the hour field by your UTC offset.
@@ -203,6 +207,7 @@ type Log = {
 };
 type TimerEntry = { timerId: ReturnType<typeof setTimeout>; kind: string };
 
+/** Create a schedule manager that handles after/every/at/cron effects and config-level schedule definitions. */
 export function createScheduleManager(
   dispatch: (action: { type: string; payload?: unknown }) => void,
   log: Log,

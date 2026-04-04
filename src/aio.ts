@@ -185,6 +185,8 @@ export type AioConfig<S, A, E> = {
   ) => Record<string, { errors: number; enabled: boolean }>;
   /** Internal: reduce breakdown getter — passed from FeaturesConfig via composeFeatures */
   _reduceBreakdown?: () => ReduceBreakdown | undefined;
+  /** Internal: feature IDs with sync: true — for CRDT table init & KV exclusion */
+  _syncFeatureIds?: string[];
 };
 
 /** Handle returned by aio.run() — dispatch actions, read state, or shut down */
@@ -600,6 +602,9 @@ async function run(a: any, b?: any): Promise<AioApp<any, any>> {
           }
           return result;
         },
+        _syncFeatureIds: composed.features
+          .filter((f) => f.__aio.syncConfig)
+          .map((f) => f.__aio.id),
       };
 
       const app = await _run(composed.initialState, config);
@@ -895,6 +900,52 @@ async function _run<S, A, E>(
     }
   }
 
+  // Initialize sync tables and handler if any feature has sync: true
+  const syncFeatureIds = config._syncFeatureIds ?? [];
+  // Mutable ref for broadcast — set after server creation
+  const _syncBroadcastRef: {
+    fn: (msg: string, exclude?: WebSocket) => void;
+  } = { fn: () => {} };
+  let syncHandler:
+    | {
+      handleOp: (
+        op: unknown,
+        meta: { id: string; user?: unknown },
+        socket: WebSocket,
+      ) => void;
+      handleSync: (
+        sync: unknown,
+        meta: { id: string; user?: unknown },
+        socket: WebSocket,
+      ) => void;
+    }
+    | undefined;
+
+  if (syncFeatureIds.length > 0) {
+    if (asyncDb) {
+      const { SYNC_SCHEMA } = await import("./sync/compact.ts");
+      for (const sql of SYNC_SCHEMA) {
+        await asyncDb.execute(sql);
+      }
+      const { createServerSyncHandler } = await import(
+        "./sync/server-handler.ts"
+      );
+      syncHandler = createServerSyncHandler({
+        db: asyncDb,
+        syncFeatureIds,
+        getFeatureState: (feature: string) =>
+          (state as Record<string, Record<string, unknown>>)[feature] ?? {},
+        broadcastRaw: _syncBroadcastRef,
+        log,
+      });
+      log.info(`sync: ${syncFeatureIds.length} feature(s) with CRDT tables`);
+    } else {
+      log.warn(
+        `sync: ${syncFeatureIds.length} feature(s) have sync: true but no SQLite DB — CRDT disabled`,
+      );
+    }
+  }
+
   // KV: strip db-managed keys so arrays aren't double-stored
   const origGetDBState = getDBState;
   const kvGetDBState = dbKeys.length
@@ -982,6 +1033,9 @@ async function _run<S, A, E>(
     getDBState: kvGetDBState as (s: Record<string, unknown>) => unknown,
     log,
     getReportOpts: () => _reportOpts,
+    syncFeatures: syncFeatureIds.length > 0
+      ? new Set(syncFeatureIds)
+      : undefined,
   });
   const { schedulePersist } = persistence;
 
@@ -1454,6 +1508,7 @@ async function _run<S, A, E>(
   const server: ServerHandle = skipHttp
     ? {
       broadcast: () => {},
+      broadcastRaw: () => {},
       broadcastTT: () => {},
       shutdown: async () => {},
       clientCount: () => 0,
@@ -1530,6 +1585,7 @@ async function _run<S, A, E>(
           getTTBroadcast: () => toBroadcast(tt!),
         }
         : {}),
+      ...(syncHandler ? { syncHandler } : {}),
       trojan: {
         getState: () => state,
         getSchedules: () => scheduleManager.active(),
@@ -1552,6 +1608,9 @@ async function _run<S, A, E>(
             : Promise.resolve({ error: "UDS not active" }),
       },
     });
+
+  // Wire sync broadcast now that server handle is available
+  if (syncHandler) _syncBroadcastRef.fn = server.broadcastRaw;
 
   if (skipHttp) log.info("prod+UDS: HTTP server skipped (zero TCP ports)");
 

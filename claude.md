@@ -1,102 +1,70 @@
 # claude.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with
-code in this repository.
-
 ## What is aio
 
-aio ("eye-oh") is a full-stack TypeScript framework on Deno 2.6+ for building
-state-driven apps with automatic persistence (Deno.Kv), WebSocket sync, and
-optional Electron/Android packaging. Elm-like architecture:
-`(state, action) → { state, effects[] }`.
+Full-stack TypeScript framework on Deno 2.6+. State-driven apps with auto
+persistence (Deno.Kv), CRDT sync, AIR renderer, optional Electron/Android.
+Elm-like: `(state, action) → { state, effects[] }`. v1.0.0-alpha10, 1564 tests.
 
 ## Commands
 
 ```sh
-deno task test                    # run all tests (794, requires -A --unstable-kv)
-deno task example                 # run example counter app (hot reload, time-travel)
-deno task am <cmd>                # app manager: start/stop/status/state/dispatch/tt/...
-deno check mod.ts                 # type-check framework
-deno task lint                    # lint framework source
+deno task test              # all tests (-A --unstable-kv)
+deno task test:core         # skip env-dependent tests (build, server, tls, electron)
+deno task check             # type-check (mod.ts, aiol, init)
+deno task lint              # lint src/
+deno task lint:aio          # aiol custom linter
+deno task am <cmd>          # app manager: start/stop/status/state/dispatch/tt/logs
 ```
 
-Single test file: `deno test -A --unstable-kv tests/server.test.ts`
-
-### am — app manager CLI
-
-Use `deno task am` (or `deno run -A src/am.ts`) for all process management and
-app control. Prefer `am` over raw `curl`, `ps`, `kill`.
-
-```sh
-deno task am start [--port=N]     # start app (singleton — kills zombies, refuses if running)
-deno task am stop                 # graceful shutdown (trojan API → SIGTERM → SIGKILL)
-deno task am status               # stopped|starting|started|stopping
-deno task am state [path]         # read state (dot-path: fleet.0.stats)
-deno task am dispatch Type k=v    # send action
-deno task am tt undo|redo|goto N  # time-travel
-deno task am logs [--filter=X]    # tail app log with optional filter
-deno task am config               # server configuration
-```
-
-Output auto-detects: terminal → pretty, piped → JSON. Override with `--json` or
-`--quiet`.
+Single file: `deno test -A --unstable-kv tests/signal.test.ts`
 
 ## Architecture
 
-Framework source lives at repo root (`src/`, `mod.ts`). Example app in
-`examples/counter/`. User projects get `dep/aio/` via scaffolder. Public API
-surface is `mod.ts`.
+Source at repo root (`src/`, `mod.ts`). Public API: `mod.ts` exports map.
+Example: `examples/counter/`. Docs: `docs/` (domain folders).
 
 ### Core flow
 
-1. `aio.run(initialState, config)` boots KV, restores state via `deepMerge`,
-   starts HTTP+WS server
-2. Browser connects via WebSocket, gets initial state, renders React via
-   `useAio<S>()` hook
-3. User dispatches action → server reduces → persists → broadcasts delta →
-   executes effects
-4. Effects can dispatch follow-up actions (re-entrant queue with overflow guard)
+1. `aio.run({ features })` boots KV, restores state, starts HTTP+WS server
+2. Browser connects via WS, gets state, renders via AIR (`useFeature()`) or
+   React
+3. User calls method → server reduces → persists → broadcasts delta → executes
+   effects
+4. Effects can dispatch follow-ups (re-entrant queue with overflow guard)
 
 ### Key modules
 
-- **aio.ts** — orchestrator: CLI, KV, hooks, dispatch wiring, server creation
-- **server.ts** — HTTP + WS server, file watcher, live TSX transpile (esbuild),
-  delta broadcast, trojan API
-- **browser.ts** — `useAio`, `useLocal`, `page`, WS singleton, reconnect, TT
-  panel (inlined, not importable separately)
+- **aio.ts** — orchestrator: CLI, KV, hooks, dispatch wiring, server
+- **server.ts** — HTTP+WS, file watcher, TSX transpile, delta broadcast, trojan
+  API
+- **state-core.ts** — feature registry, dispatch, send(), sync routing
+- **feature-create.ts** — `feature()` API: methods, machines, generators,
+  lifecycle
+- **aio-renderer.ts** — AIR: signal-driven JSX, mount/hydrate/diff
+- **signal.ts** — reactive primitives: signal, computed, effect
+- **browser.ts / browser-protocol.ts** — client runtime, WS, offline queue,
+  routing
 - **dispatch.ts** — action queue, reduce→effect loop, guardrails
-- **time-travel.ts** — pure functions: record/undo/redo/travelTo/pause/resume
-- **standalone.ts** — Android WebView runtime (duplicates some browser.ts,
-  guarded by sync.test.ts)
-- **schedule.ts** — declarative timers/intervals/cron as effects, schedule
-  manager
-- **electron.ts** — Electron launcher, aio-client connect page, window state
-  persistence, AioMeta
-- **cli-client.ts** — WS client for Deno CLI apps: connectCli(), delta patches,
-  reconnect
-- **build.ts** — esbuild bundling + deno compile + Electron AppImage +
-  aio-client + CLI + Android APK
-- **am.ts** — app manager CLI: process lifecycle, state inspection, dispatch,
-  time-travel control
+- **sync/** — CRDT sync engine: HLC, merge, op buffer, rebase, compaction
+- **vitals/** — observability: loop/render/transport probes, pressure monitor
+- **build.ts** — esbuild + deno compile + Electron + Android APK + CLI
+- **am.ts** — app manager CLI: process lifecycle, state, dispatch, time-travel
+- **schedule.ts** — declarative timers/intervals/cron as effects
 
-### Auth model
+### Auth
 
-Three modes: public (default), single auto-token (`--expose`), per-user tokens
-(`users: Record<string, AioUser>`). Token checked via timing-safe comparison.
-User identity flows through hooks and `getUIState(state, user?)`.
+Public (default), single auto-token (`--expose`), or per-user tokens. Token via
+timing-safe comparison. User flows through hooks and `getUIState()`.
 
 ### Delta broadcasting
 
-Per-client `ClientMeta = { id, user?, lastState, lastKeyJsons }`. Changes <50%
-of keys → `$p` patch + `$d` deletes. Otherwise full state. CSS-only changes send
-`__css` signal (no page reload).
+Per-client tracking. <50% changed keys → `$p` patch + `$d` deletes, else full
+state.
 
 ## Conventions
 
-- `factory` and `msg()` are inlined in browser.ts — must stay in sync
-  (sync.test.ts enforces)
-- Tests colocated in `tests/` (not next to source — framework is a single dep)
-- Lifecycle hooks are observe-only and error-guarded (never break dispatch)
-- `_dispatchUser` module-level variable carries user context through effect
-  chains
-- Server binds 127.0.0.1 by default; `--expose` required for 0.0.0.0
+- `factory` and `msg()` inlined in browser-shared.ts — must stay in sync
+- Tests in `tests/` (not next to source)
+- Lifecycle hooks: observe-only, error-guarded (never break dispatch)
+- Server binds 127.0.0.1 by default; `--expose` for 0.0.0.0

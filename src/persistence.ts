@@ -9,6 +9,7 @@ import { createAioError, reportError as reportAioError } from "./error.ts";
 import type { ReportErrorOpts } from "./error.ts";
 import type { Log } from "./logger.ts";
 
+/** Configuration for the persistence manager — KV/SQLite handles, debounce timing, and state accessors. */
 export interface PersistenceConfig {
   kvDb: SkvInstance | null;
   asyncDb: DB | null;
@@ -20,8 +21,10 @@ export interface PersistenceConfig {
   getDBState: (s: Record<string, unknown>) => unknown;
   log: Log;
   getReportOpts: () => ReportErrorOpts;
+  syncFeatures?: Set<string>;
 }
 
+/** Persistence manager API — debounced state persistence to KV and/or SQLite. */
 export interface PersistenceManager {
   schedulePersist(): void;
   flushPersist(): Promise<void>;
@@ -29,6 +32,7 @@ export interface PersistenceManager {
   resetPrevState(): void;
 }
 
+/** Create a persistence manager that debounces state writes to Deno KV and/or SQLite. */
 export function createPersistenceManager(
   cfg: PersistenceConfig,
 ): PersistenceManager {
@@ -68,10 +72,19 @@ export function createPersistenceManager(
     }
   }
 
+  // Exclude sync features from KV — they use their own SQLite op-log
+  const kvGetState = cfg.syncFeatures?.size
+    ? () => {
+      const s = { ...getState() };
+      for (const f of cfg.syncFeatures!) delete s[f];
+      return s;
+    }
+    : getState;
+
   async function _syncKv(): Promise<void> {
     if (!kvDb) return;
     try {
-      const dbState = getDBState(getState());
+      const dbState = getDBState(kvGetState());
       if (persistMode === "multi") {
         const obj = dbState as Record<string, unknown>;
         const keys = Object.keys(obj);
@@ -168,7 +181,7 @@ export function createPersistenceManager(
       // Flush KV
       if (kvDb) {
         try {
-          const dbState = getDBState(getState());
+          const dbState = getDBState(kvGetState());
           if (persistMode === "multi") {
             const obj = dbState as Record<string, unknown>;
             const keys = Object.keys(obj);

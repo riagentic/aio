@@ -5,6 +5,7 @@ import { type Signal, signal } from "./signal.ts";
 
 // ── Types ───────────────────────────────────────────────────────────
 
+/** Reactive state for a CSS enter/exit transition lifecycle. */
 export interface TransitionState {
   /** Current stage: "enter" | "active" | "exit" | "idle". */
   readonly stage: "enter" | "active" | "exit" | "idle";
@@ -20,6 +21,7 @@ export interface TransitionState {
   toggle(): void;
 }
 
+/** Reactive spring-animated numeric value with physics-based interpolation. */
 export interface SpringValue {
   /** Current animated value (signal-tracked). */
   readonly value: number;
@@ -31,6 +33,7 @@ export interface SpringValue {
   set(value: number): void;
 }
 
+/** Configuration for CSS class-based enter/exit transitions. */
 export interface TransitionConfig {
   /** Base CSS class name (e.g., "fade"). Produces "fade-enter", "fade-active", "fade-exit". */
   name: string;
@@ -40,6 +43,7 @@ export interface TransitionConfig {
   initial?: boolean;
 }
 
+/** Configuration for spring physics animation — stiffness, damping, mass, and precision. */
 export interface SpringConfig {
   /** Initial value. Default 0. */
   initial?: number;

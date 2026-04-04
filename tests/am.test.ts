@@ -727,7 +727,8 @@ Deno.test("am-cli: status — exit code 1 when no server", async () => {
 
 Deno.test("am-cli: ui — returns filtered stateForUI result", async () => {
   await withTrojanServer(async () => {
-    const r = await runAm(["ui"]);
+    // Pass a user arg so cmdUi hits the server-state /ui route (no arg → DOM snapshot)
+    const r = await runAm(["ui", "testuser"]);
     assertEquals(r.code, 0);
     // stateForUI in withTrojanServer returns { count: appState.count }
     const data = r.json as { count: number };

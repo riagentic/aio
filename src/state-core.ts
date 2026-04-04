@@ -86,6 +86,17 @@ const _idMaps = new Map<
 // Offline action queue (memory-only, no IndexedDB — framework-agnostic)
 const _offlineQueue: any[] = [];
 
+/** Sync engine hook — set by sync-engine.ts when sync features exist */
+let _syncHandler:
+  | ((action: { type: string; payload?: unknown }) => boolean)
+  | null = null;
+
+export function setSyncHandler(
+  handler: ((action: { type: string; payload?: unknown }) => boolean) | null,
+): void {
+  _syncHandler = handler;
+}
+
 // ── Array ref stats (AIO-11 wasted render detection) ────────────────
 
 /** Stats from `_preserveArrayRefs` — tracks how many references were preserved vs changed. */
@@ -790,6 +801,9 @@ export function handleMessage(data: any): HandleResult {
 /** Send an action via transport. Queues offline if no transport.
  *  Returns false if the action was dropped (offline queue full). */
 export function send(action: { type: string; payload?: any }): boolean {
+  // Sync features route through CRDT engine
+  if (_syncHandler && _syncHandler(action)) return true;
+
   const tagged = { ...action, _source: "UI" };
   const json = JSON.stringify(tagged);
 

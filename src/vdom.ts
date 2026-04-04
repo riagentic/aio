@@ -369,9 +369,11 @@ export type Ref<T = Node> = ((value: T | null) => void) | { current: T | null };
 
 // ── Types ───────────────────────────────────────────────────────────
 
+/** A component function that receives props and returns a VNode tree or null. */
 // deno-lint-ignore no-explicit-any
 export type ComponentFn = (props: any) => VNode | null;
 
+/** Valid child types for h() — VNodes, primitives, null/undefined/boolean, or nested arrays. */
 export type VChild =
   | VNode
   | string
@@ -381,6 +383,7 @@ export type VChild =
   | boolean
   | VChild[];
 
+/** Virtual DOM node — describes a tag, its props, and children for diffing and patching. */
 export interface VNode {
   tag:
     | string
@@ -403,6 +406,7 @@ export interface VNode {
   _signalChildren?: Map<number, Signal<unknown>>;
 }
 
+/** Fragment sentinel — groups children without adding a wrapper DOM element. */
 export const Fragment = Symbol.for("aio.Fragment");
 /** Null placeholder — preserves positional stability in unkeyed children (AIO-107). */
 export const _Null = Symbol.for("aio.Null");
@@ -475,6 +479,7 @@ export function _getLazyListeners(fn: ComponentFn): Set<() => void> | null {
     ._lazyListeners ?? null;
 }
 
+/** Create a virtual DOM node — the JSX factory function for AIO components. */
 export function h(
   tag:
     | string
@@ -673,6 +678,7 @@ export function _render(
   if (dom) parent.appendChild(dom);
 }
 
+/** Create real DOM nodes from a VNode tree — handles elements, text, fragments, and components. */
 export function createDom(
   vnode: VNode | string | number,
   ctx: RenderCtx,
@@ -1791,6 +1797,7 @@ function diffKeyed(
   }
 }
 
+/** Get the real DOM node associated with a VNode, or null if not mounted. */
 export function getDom(vnode: VNode | string | number): Node | null {
   if (typeof vnode === "object" && vnode !== null) {
     return vnode._dom ?? null;

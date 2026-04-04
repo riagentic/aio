@@ -27,6 +27,8 @@ import {
 } from "./server-html.ts";
 import { type GraphResult, validateGraph } from "./graph-validator.ts";
 import { compactPatches } from "./patch-compact.ts";
+import { initClientLog, writeClientLog } from "./client-log.ts";
+import type { ClientLogEntry } from "./dom-inspector-types.ts";
 
 type DispatchFn = (event: unknown, user?: AioUser) => void;
 type GetUIStateFn = (user?: AioUser) => unknown;
@@ -85,6 +87,19 @@ export interface ServerConfig {
     /** Send a message to a UDS client and wait for __clientState: response */
     requestUdsClientState?: (index: number, msg?: string) => Promise<unknown>;
   };
+  // CRDT sync handlers — set when any feature has sync: true
+  syncHandler?: {
+    handleOp: (
+      op: unknown,
+      meta: { id: string; user?: unknown },
+      socket: WebSocket,
+    ) => void;
+    handleSync: (
+      sync: unknown,
+      meta: { id: string; user?: unknown },
+      socket: WebSocket,
+    ) => void;
+  };
 }
 
 // Constant-time string comparison — prevents timing attacks on token auth
@@ -136,6 +151,8 @@ export interface ServerHandle {
   broadcast: (
     patches?: Array<{ feature: string; ops: import("immer").Patch[] }>,
   ) => void;
+  /** Send raw string message to all connected WS clients, optionally excluding one */
+  broadcastRaw: (msg: string, exclude?: WebSocket) => void;
   broadcastTT: () => void;
   shutdown: () => Promise<void>;
   clientCount: () => number;
@@ -293,6 +310,7 @@ export function createServer(config: ServerConfig): ServerHandle {
   initDiagnosticBus(!prod);
   if (!prod) {
     setDiagEmit(diagEmit);
+    initClientLog("./log");
   }
 
   // Unified user resolver — one code path for both static map and dynamic hook (AIO-171)
@@ -827,12 +845,55 @@ export function createServer(config: ServerConfig): ServerHandle {
         }
         // Client state response (dev mode) — resolves pending am request
         if (e.data.startsWith("__clientState:")) {
-          const pending = pendingClientState.get(meta.id);
+          const key = `${meta.id}:clientState`;
+          const pending = pendingClientState.get(key);
           if (pending) {
-            pendingClientState.delete(meta.id);
+            pendingClientState.delete(key);
             clearTimeout(pending.timer);
             try {
               pending.resolve(JSON.parse(e.data.slice(14)));
+            } catch {
+              pending.resolve(null);
+            }
+          }
+          return;
+        }
+        // Client log forwarding (dev mode)
+        if (!prod && e.data.startsWith("__log:")) {
+          try {
+            const entry = JSON.parse(e.data.slice(6)) as ClientLogEntry;
+            writeClientLog(meta.index, entry);
+          } catch { /* malformed — drop */ }
+          return;
+        }
+        // UI snapshot result — resolves pending trojan request (keyed by id:snapshot)
+        if (e.data.startsWith("__ui:snapshot-result:")) {
+          const key = `${meta.id}:snapshot`;
+          const pending = pendingClientState.get(key);
+          if (pending) {
+            pendingClientState.delete(key);
+            clearTimeout(pending.timer);
+            try {
+              pending.resolve(
+                JSON.parse(e.data.slice("__ui:snapshot-result:".length)),
+              );
+            } catch {
+              pending.resolve(null);
+            }
+          }
+          return;
+        }
+        // UI interact result — resolves pending trojan request (keyed by id:interact)
+        if (e.data.startsWith("__ui:interact-result:")) {
+          const key = `${meta.id}:interact`;
+          const pending = pendingClientState.get(key);
+          if (pending) {
+            pendingClientState.delete(key);
+            clearTimeout(pending.timer);
+            try {
+              pending.resolve(
+                JSON.parse(e.data.slice("__ui:interact-result:".length)),
+              );
             } catch {
               pending.resolve(null);
             }
@@ -983,6 +1044,50 @@ export function createServer(config: ServerConfig): ServerHandle {
           return;
         }
         const parsed = JSON.parse(e.data);
+
+        // CRDT sync messages — validate and route before regular action dispatch
+        if (parsed.__op) {
+          if (!config.syncHandler) {
+            debug(`ws: __op received but no syncHandler configured — dropping`);
+            return;
+          }
+          const op = parsed.__op;
+          if (
+            !op || typeof op !== "object" || typeof op.id !== "string" ||
+            typeof op.feature !== "string" || typeof op.action !== "string" ||
+            !Array.isArray(op.hlc) ||
+            ["__proto__", "constructor", "prototype"].includes(op.feature)
+          ) {
+            debug(`ws: invalid __op — malformed or forbidden fields`);
+            return;
+          }
+          config.syncHandler.handleOp(op, {
+            id: meta.id,
+            user: meta.user,
+          }, socket);
+          return;
+        }
+        if (parsed.__sync) {
+          if (!config.syncHandler) {
+            debug(
+              `ws: __sync received but no syncHandler configured — dropping`,
+            );
+            return;
+          }
+          const sync = parsed.__sync;
+          if (
+            !sync || typeof sync !== "object" ||
+            typeof sync.clientId !== "string"
+          ) {
+            debug(`ws: invalid __sync — malformed`);
+            return;
+          }
+          config.syncHandler.handleSync(sync, {
+            id: meta.id,
+            user: meta.user,
+          }, socket);
+          return;
+        }
 
         if (!parsed || typeof parsed.type !== "string") {
           debug(`ws: invalid action — missing type field`);
@@ -1340,6 +1445,67 @@ export function createServer(config: ServerConfig): ServerHandle {
         return err("rate limit exceeded", 429);
       }
 
+      // Derive request kind from the command message for deduplication key
+      const _reqKind = (msg: string) =>
+        msg.startsWith("__ui:snapshot")
+          ? "snapshot"
+          : msg.startsWith("__ui:interact")
+          ? "interact"
+          : "clientState";
+
+      // Send a message to a specific client and wait for response
+      const sendToClient = async (
+        idx: number,
+        msg: string,
+      ): Promise<Response> => {
+        // Try WebSocket clients first
+        const wsEntry = [...connections.entries()].find(([, m]) =>
+          m.index === idx
+        );
+        if (wsEntry) {
+          const [ws, m] = wsEntry;
+          if (ws.readyState !== 1) return err(`client ${idx} not ready`, 503);
+          const pendingKey = `${m.id}:${_reqKind(msg)}`;
+          const statePromise = new Promise<unknown>((resolve) => {
+            const timer = setTimeout(() => {
+              pendingClientState.delete(pendingKey);
+              resolve({ error: "client did not respond within 5s" });
+            }, 5000);
+            // Evict oldest if at capacity
+            if (pendingClientState.size >= PENDING_STATE_MAX) {
+              const oldest = pendingClientState.keys().next().value!;
+              const entry = pendingClientState.get(oldest)!;
+              clearTimeout(entry.timer);
+              entry.resolve({ error: "evicted — too many pending requests" });
+              pendingClientState.delete(oldest);
+            }
+            // Supersede existing request of same kind to same client
+            const existing = pendingClientState.get(pendingKey);
+            if (existing) {
+              clearTimeout(existing.timer);
+              existing.resolve({ error: "superseded by new request" });
+            }
+            pendingClientState.set(pendingKey, { resolve, timer });
+          });
+          try {
+            ws.send(msg);
+          } catch (e) {
+            const entry = pendingClientState.get(pendingKey);
+            if (entry) {
+              clearTimeout(entry.timer);
+              pendingClientState.delete(pendingKey);
+            }
+            return err(`send failed: ${e}`, 503);
+          }
+          return json(await statePromise);
+        }
+        // Try UDS clients
+        if (trojan.requestUdsClientState) {
+          return json(await trojan.requestUdsClientState(idx, msg));
+        }
+        return err(`client ${idx} not connected`, 404);
+      };
+
       // GET endpoints — inspect
       if (method === "GET") {
         if (route === "state") return json(trojan.getState());
@@ -1372,51 +1538,6 @@ export function createServer(config: ServerConfig): ServerHandle {
           }));
           return json([...wsClients, ...udsClients]);
         }
-        // Send a message to a specific client and wait for __clientState: response
-        const sendToClient = async (
-          idx: number,
-          msg: string,
-        ): Promise<Response> => {
-          // Try WebSocket clients first
-          const wsEntry = [...connections.entries()].find(([, m]) =>
-            m.index === idx
-          );
-          if (wsEntry) {
-            const [ws, m] = wsEntry;
-            if (ws.readyState !== 1) return err(`client ${idx} not ready`, 503);
-            const statePromise = new Promise<unknown>((resolve) => {
-              const timer = setTimeout(() => {
-                pendingClientState.delete(m.id);
-                resolve({ error: "client did not respond within 5s" });
-              }, 5000);
-              // Evict oldest if at capacity
-              if (pendingClientState.size >= PENDING_STATE_MAX) {
-                const oldest = pendingClientState.keys().next().value!;
-                const entry = pendingClientState.get(oldest)!;
-                clearTimeout(entry.timer);
-                entry.resolve({ error: "evicted — too many pending requests" });
-                pendingClientState.delete(oldest);
-              }
-              pendingClientState.set(m.id, { resolve, timer });
-            });
-            try {
-              ws.send(msg);
-            } catch (e) {
-              const entry = pendingClientState.get(m.id);
-              if (entry) {
-                clearTimeout(entry.timer);
-                pendingClientState.delete(m.id);
-              }
-              return err(`send failed: ${e}`, 503);
-            }
-            return json(await statePromise);
-          }
-          // Try UDS clients
-          if (trojan.requestUdsClientState) {
-            return json(await trojan.requestUdsClientState(idx, msg));
-          }
-          return err(`client ${idx} not connected`, 404);
-        };
 
         // Dev-only: component tree introspection and click simulation
         if (route.startsWith("client/") && !prod) {
@@ -1446,6 +1567,20 @@ export function createServer(config: ServerConfig): ServerHandle {
             return err("invalid client index", 400);
           }
           return sendToClient(idx, "__click:" + target);
+        }
+        // DOM snapshot from AIR client
+        if (route.startsWith("dom/") && !prod) {
+          const rest = route.slice(4);
+          const qIdx = rest.indexOf("?");
+          const idxStr = qIdx >= 0 ? rest.slice(0, qIdx) : rest;
+          const idx = Number(idxStr);
+          if (!Number.isInteger(idx) || idx < 0) {
+            return err("invalid client index", 400);
+          }
+          const url = new URL(req!.url);
+          const all = url.searchParams.get("all") === "true";
+          const cmd = all ? "__ui:snapshot:all" : "__ui:snapshot";
+          return sendToClient(idx, cmd);
         }
         // Dev-only: time-travel history and transpile errors
         if (route === "history") {
@@ -1503,6 +1638,19 @@ export function createServer(config: ServerConfig): ServerHandle {
             delete action.user;
             dispatch(action, undefined);
             return json({ ok: true });
+          } catch {
+            return err("invalid JSON");
+          }
+        }
+        if (route.startsWith("interact/") && !prod) {
+          const idx = Number(route.slice(9));
+          if (!Number.isInteger(idx) || idx < 0) {
+            return err("invalid client index", 400);
+          }
+          try {
+            const body = await req.text();
+            const cmd = JSON.parse(body);
+            return sendToClient(idx, "__ui:interact:" + JSON.stringify(cmd));
           } catch {
             return err("invalid JSON");
           }
@@ -1571,7 +1719,7 @@ export function createServer(config: ServerConfig): ServerHandle {
             // Block known dangerous patterns in subqueries/CTEs
             const upper = query.toUpperCase();
             if (
-              /\b(INSERT|UPDATE|DELETE|DROP|ALTER|CREATE|ATTACH|DETACH|LOAD_EXTENSION|REINDEX|VACUUM)\b/
+              /\b(INSERT|UPDATE|DELETE|DROP|ALTER|CREATE|ATTACH|DETACH|LOAD_EXTENSION|REINDEX|VACUUM|REPLACE|PRAGMA|BEGIN|COMMIT|ROLLBACK|SAVEPOINT|RELEASE|MERGE)\b/
                 .test(upper)
             ) {
               return err(
@@ -2040,6 +2188,14 @@ export function createServer(config: ServerConfig): ServerHandle {
 
   return {
     broadcast,
+    broadcastRaw: (msg: string, exclude?: WebSocket) => {
+      for (const [ws] of connections) {
+        if (ws === exclude) continue;
+        try {
+          if (ws.readyState === WebSocket.OPEN) ws.send(msg);
+        } catch { /* ignore send errors */ }
+      }
+    },
     broadcastTT,
     clientCount: () => connections.size,
     trojanPort,

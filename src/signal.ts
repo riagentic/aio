@@ -3,6 +3,7 @@
 
 // ── Types ───────────────────────────────────────────────────────────
 
+/** Reactive value container — reads auto-track in effects and computed. */
 export interface Signal<T> {
   readonly value: T;
   set(next: T): void;
@@ -15,6 +16,7 @@ export interface Signal<T> {
   readonly _name?: string;
 }
 
+/** Derived reactive value — recomputes lazily when dependencies change. */
 export interface Computed<T> {
   readonly value: T;
   peek(): T;
@@ -33,12 +35,14 @@ type CleanupFn = () => void;
 
 const _trackStack: Set<SignalImpl<unknown>>[] = [];
 
+/** @internal Begin dependency tracking — returns the set that collects accessed signals. */
 export function _trackStart(): Set<SignalImpl<unknown>> {
   const deps = new Set<SignalImpl<unknown>>();
   _trackStack.push(deps);
   return deps;
 }
 
+/** @internal End dependency tracking — validates and pops the tracking stack. */
 export function _trackEnd(
   deps: Set<SignalImpl<unknown>>,
 ): Set<SignalImpl<unknown>> {
@@ -334,6 +338,7 @@ class ComputedImpl<T> implements Computed<T> {
   }
 }
 
+/** Create a derived signal that recomputes when its dependencies change. */
 export function computed<T>(fn: () => T): Computed<T> {
   return new ComputedImpl(fn);
 }
@@ -405,6 +410,7 @@ export function _effectDisposeAll(list: (() => void)[]): void {
 
 // ── Effect ──────────────────────────────────────────────────────────
 
+/** Run a side-effect that re-executes when its tracked signals change; returns a dispose function. */
 export function effect(fn: () => void | CleanupFn): CleanupFn {
   let cleanup: CleanupFn | void;
   let unsubs: CleanupFn[] = [];
