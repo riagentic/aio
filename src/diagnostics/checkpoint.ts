@@ -28,7 +28,7 @@ export function readCheckpoint(dir: string): CheckpointData | null {
     const data = JSON.parse(text) as CheckpointData;
     if (
       !data || typeof data.ts !== "number" || !data.state ||
-      !Array.isArray(data.recentActions) || !data.features
+      !Array.isArray(data.recentActions) || !data.cells
     ) return null;
     return data;
   } catch {

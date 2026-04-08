@@ -114,6 +114,7 @@ Deno.test("mode: browser local — serve HTML + WS state sync", async () => {
 
 Deno.test({
   name: "mode: electron local — UDS transport + state sync",
+  // sanitizers disabled: UDS listener has async accept loop that outlives test
   sanitizeResources: false,
   sanitizeOps: false,
   fn: async () => {
@@ -570,17 +571,18 @@ Deno.test("mode: multi-user — different users see different state", async () =
 });
 
 // =====================================================================
-// BONUS: Full aio.run() with features — end-to-end boot
+// BONUS: Full aio.run() with cells — end-to-end boot
 // =====================================================================
 
 Deno.test({
-  name: "mode: full aio.run with feature — boot + dispatch + shutdown",
+  name: "mode: full aio.run with cell — boot + dispatch + shutdown",
+  // sanitizers disabled: aio.run() starts server + internal timers that outlive test
   sanitizeOps: false,
   sanitizeResources: false,
   fn: async () => {
-    const { feature, aio } = await import("../mod.ts");
+    const { cell, aio } = await import("../mod.ts");
 
-    const counter = feature("counter", {
+    const counter = cell("counter", {
       state: { count: 0 },
       methods: {
         increment(s: { count: number }, by = 1) {
@@ -596,7 +598,7 @@ Deno.test({
     });
 
     const app = await aio.run({
-      features: [counter],
+      cells: [counter],
       appId: "test-app-modes",
       appVersion: "0.0.0",
       client: "server-only",

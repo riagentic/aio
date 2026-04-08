@@ -196,12 +196,11 @@ Deno.test("custom persistKey", async () => {
   assertEquals(JSON.parse(storage.get("custom_key")!), { count: 7 });
 });
 
-Deno.test("stateForDB filters persisted state", async () => {
+Deno.test("standalone persists full state (no stateForDB — use cell-level persist)", async () => {
   setup();
   const app = initStandalone({ count: 0 }, {
     reduce: makeReduce(),
     execute: () => {},
-    stateForDB: (s) => ({ count: s.count }),
   });
   app.dispatch({ type: "INC", payload: { by: 3 } });
   await new Promise((r) => setTimeout(r, 150));
@@ -432,39 +431,6 @@ Deno.test("listeners: subscribe and unsubscribe do not leak", async () => {
   // Dispatch should still work after many simulated mount/unmounts
   app.dispatch({ type: "INC", payload: { by: 1 } });
   assertEquals(app.getState(), { count: 1 });
-  await app.close();
-});
-
-// ── stateForUI in standalone ────────────────────────────
-
-Deno.test("stateForUI filters what listeners receive", async () => {
-  setup();
-  type FullState = { count: number; secret: string };
-  const reduce = (
-    state: FullState,
-    action: Action,
-  ): { state: FullState; effects: Effect[] } => {
-    if (action.type === "INC") {
-      return { state: { ...state, count: state.count + 1 }, effects: [] };
-    }
-    return { state, effects: [] };
-  };
-
-  // stateForUI hides the secret
-  const app = initStandalone({ count: 0, secret: "hidden" } as FullState, {
-    reduce,
-    execute: () => {},
-    persist: false,
-    stateForUI: (s) => ({ count: s.count }),
-  });
-
-  app.dispatch({ type: "INC" });
-
-  // Internal state has secret
-  const full = app.getState() as FullState;
-  assertEquals(full.secret, "hidden");
-  assertEquals(full.count, 1);
-
   await app.close();
 });
 

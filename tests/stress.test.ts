@@ -8,12 +8,12 @@
 //   - Reducer throughput meets minimum bar
 
 import { assertEquals } from "@std/assert";
-import { composeFeatures, feature } from "../src/feature.ts";
+import { cell, composeCells } from "../src/cell.ts";
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
-function createTestApp(entries: Parameters<typeof composeFeatures>[0]) {
-  const composed = composeFeatures(entries);
+function createTestApp(entries: Parameters<typeof composeCells>[0]) {
+  const composed = composeCells(entries);
   let state = { ...composed.initialState };
   let actionCount = 0;
 
@@ -36,9 +36,9 @@ function createTestApp(entries: Parameters<typeof composeFeatures>[0]) {
   return app;
 }
 
-// ── Features ─────────────────────────────────────────────────────────
+// ── Cells ─────────────────────────────────────────────────────────
 
-const counter = feature("counter", {
+const counter = cell("counter", {
   state: { count: 0 },
   actions: {
     increment: (by = 1) => ({ by }),
@@ -58,7 +58,7 @@ const counter = feature("counter", {
   },
 });
 
-const multiSlice = feature("multi", {
+const multiSlice = cell("multi", {
   state: {
     a: 0,
     b: 0,
@@ -116,7 +116,7 @@ Deno.test("stress: alternating increment/decrement — net zero", () => {
   assertEquals(app.actionCount, N * 2);
 });
 
-Deno.test("stress: multi-feature rapid dispatch — all slices correct", () => {
+Deno.test("stress: multi-cell rapid dispatch — all slices correct", () => {
   const app = createTestApp([counter, multiSlice]);
   const N = 3_000;
 
@@ -189,7 +189,7 @@ Deno.test("stress: reset mid-stream doesn't corrupt state", () => {
 
 // ── Generator stress ─────────────────────────────────────────────────
 
-const flowCounter = feature("flowCounter", {
+const flowCounter = cell("flowCounter", {
   state: { completed: 0 },
   actions: { start: (id: number) => ({ id }) },
   generators: {
@@ -204,6 +204,7 @@ const flowCounter = feature("flowCounter", {
 
 Deno.test({
   name: "stress: 100 concurrent generators complete without corruption",
+  // sanitizers disabled: 100 fire-and-forget generators with internal async ops
   sanitizeOps: false,
   sanitizeResources: false,
 }, async () => {
@@ -241,7 +242,7 @@ Deno.test("stress: state reads during rapid dispatch are consistent", () => {
 
 // ── Large payload dispatch ──────────────────────────────────────────
 
-const bigPayload = feature("bigPayload", {
+const bigPayload = cell("bigPayload", {
   state: { size: 0 },
   actions: {
     store: (data: string) => ({ data }),

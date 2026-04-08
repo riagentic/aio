@@ -15,37 +15,32 @@ AIO auto-persists your entire state to Deno.Kv. On restart, persisted state is
 - Type mismatches (e.g. persisted `null` where initial has an object) fall back
   to initial
 
-## Filtering persisted state
+## Per-Cell Persistence
 
-**Per-feature exclusion (recommended):**
+Each cell declares what gets persisted. Default: `"none"` (not persisted).
 
 ```ts
-const editor = feature('editor', {
-  state: {
-    content: '',
-    htmlCache: '',   // derived — no need to persist
-    thumbnail: '',   // generated — rebuild on load
-  },
-  methods: { ... },
-  persist: { exclude: ['htmlCache', 'thumbnail'] },
-})
+// Persist everything
+persist: "all",
+
+// Persist nothing (default — omit or set explicitly)
+persist: "none",
+
+// Only persist these fields
+persist: { include: ["count", "name"] },
+
+// Persist everything except these fields
+persist: { exclude: ["cache", "htmlCache"] },
 ```
 
-Fields in `exclude` are stripped from the KV snapshot automatically. Multiple
-features can each declare excludes — they compose without manual merging.
-
-**App-level exclusion** — use `stateForDB` for full control or to filter entire
-features:
+Use `cellDefaults` in `aio.run()` to set a default for all cells:
 
 ```ts
 await aio.run({
-  features: [myFeature],
-  stateForDB: (s) => ({ counter: s.counter }),
+  cells: [counter, auth],
+  cellDefaults: { persist: "all" },
 });
 ```
-
-`stateForDB` at `aio.run()` level takes precedence over per-feature
-`persist.exclude` — only one runs.
 
 ## Multi-key mode
 
@@ -55,7 +50,7 @@ separately:
 
 ```ts
 await aio.run({
-  features: [myFeature],
+  cells: [myCell],
   persistMode: "multi",
 });
 ```
@@ -67,7 +62,7 @@ a different `persistKey` or clear the KV store when switching.
 
 ```ts
 await aio.run({
-  features: [myFeature],
+  cells: [myCell],
   persist: false,
 });
 ```
@@ -92,7 +87,7 @@ Export and import state for debugging, backup, or state transfer.
 standalone/Android mode.
 
 ```ts
-const app = await aio.run({ features: [myFeature] });
+const app = await aio.run({ cells: [myCell] });
 
 const json = app.snapshot!(); // export current state as JSON
 app.loadSnapshot!('{"counter": 42}'); // replace state, broadcast to all clients

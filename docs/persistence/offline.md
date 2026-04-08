@@ -32,7 +32,7 @@ reconnect.
 On reconnect, all pending actions flush at once. Microtask coalescing ensures
 this produces at most a few broadcasts, not N.
 
-**CRDT sync features** use a separate op buffer (not the offline queue) with
+**CRDT sync cells** use a separate op buffer (not the offline queue) with
 HLC-stamped ops, ack tracking, and rebase on reconnect. See
 [CRDT Protocol](crdt-protocol.md) for the sync-specific reconnect flow.
 
@@ -133,15 +133,15 @@ Localhost is always allowed. Additional hostnames via `allowedOrigins`.
 
 ### High impact
 
-- Use `stateForUI` — send only what each client needs
+- Use cell-level `ui` config — send only what each client needs
 - Use `useAio()` (proxy-tracked) — automatic subscriptions
 - Flatten state shape — independent top-level keys
 - Separate hot/cold data
 
 ### Medium impact
 
-- `createSelector` for derived data in `stateForUI`
-- Batch related actions in feature methods
+- `createSelector` for derived data in cell `ui.forUser`
+- Batch related actions in cell methods
 - Debounce client input (100-200ms)
 - Tune `syncIntervalMs` for your use case
 - Strip internal state from UI
@@ -186,10 +186,10 @@ Localhost is always allowed. Additional hostnames via `allowedOrigins`.
    frozen clients, high staleness, payload warnings
 2. **Console backpressure**: look for `[aio:vitals]` escalation messages
 3. **Payload sizes**: `grep "pressure" log/perf.log` — >500KB means state too
-   large or `stateForUI` not filtering enough
+   large or cell `ui` config not filtering enough
 4. **Browser DevTools**: Network → WS filter. Watch message sizes vs
    `syncIntervalMs`
 5. **Re-renders**: React DevTools — ensure components read only needed paths.
-   Use `useFeature` to scope re-renders
+   Use `useCell` to scope re-renders
 6. **State shape**: `am state` CLI — look for hot data mixed with cold under
    same parent key

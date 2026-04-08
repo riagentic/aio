@@ -8,7 +8,8 @@
 
 import { assertEquals } from "@std/assert";
 import { FakeTime } from "@std/testing/time";
-import { _reset, _subscribe, _useAioSubscribe } from "../src/browser.ts";
+import { _reset } from "../src/browser.ts";
+import { _subscribe, _useAioSubscribe } from "../src/browser-protocol.ts";
 
 // ── Stable reference tests ──────────────────────────────────────────
 

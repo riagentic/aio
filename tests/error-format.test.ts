@@ -8,9 +8,9 @@ import {
   formatErrorCompact,
 } from "../src/error.ts";
 
-Deno.test("formatErrorBox — contains feature name and error code", () => {
+Deno.test("formatErrorBox — contains cell name and error code", () => {
   const err = createAioError("REDUCE_ERROR", new Error("kaboom"), {
-    featureName: "orderer",
+    cellName: "orderer",
     actionType: "orderer:buy",
   });
   const output = formatErrorBox(err);
@@ -21,7 +21,7 @@ Deno.test("formatErrorBox — contains feature name and error code", () => {
 
 Deno.test("formatErrorBox — warning codes show AIO WARNING", () => {
   const err = createAioError("BUDGET_REDUCE", "slow", {
-    featureName: "test",
+    cellName: "test",
     duration: 200,
     budget: 100,
   });
@@ -31,7 +31,7 @@ Deno.test("formatErrorBox — warning codes show AIO WARNING", () => {
 
 Deno.test("formatErrorBox — includes flow history", () => {
   const err = createAioError("FLOW_UNCAUGHT", "fail", {
-    featureName: "test",
+    cellName: "test",
     flowName: "exec",
     flowStep: 2,
     flowHistory: [
@@ -47,7 +47,7 @@ Deno.test("formatErrorBox — includes flow history", () => {
 
 Deno.test("formatErrorBox — includes tip for EFFECT_TIMEOUT", () => {
   const err = createAioError("EFFECT_TIMEOUT", "timeout", {
-    featureName: "api",
+    cellName: "api",
     effectType: "api:fetch",
   });
   const output = formatErrorBox(err);
@@ -60,7 +60,7 @@ Deno.test("formatErrorBox — truncates state snapshot", () => {
   const err = createAioError(
     "REDUCE_ERROR",
     "fail",
-    { featureName: "test" },
+    { cellName: "test" },
     bigState,
   );
   const output = formatErrorBox(err);
@@ -69,7 +69,7 @@ Deno.test("formatErrorBox — truncates state snapshot", () => {
 
 Deno.test("formatErrorCompact — one-liner format", () => {
   const err = createAioError("EFFECT_ERROR", "boom", {
-    featureName: "api",
+    cellName: "api",
     actionType: "api:fetch",
   });
   const output = formatErrorCompact(err);
@@ -79,7 +79,7 @@ Deno.test("formatErrorCompact — one-liner format", () => {
 });
 
 Deno.test("formatErrorCompact — includes correlation id when set", () => {
-  const err = createAioError("BUDGET_EFFECT", "slow", { featureName: "test" });
+  const err = createAioError("BUDGET_EFFECT", "slow", { cellName: "test" });
   const output = formatErrorCompact(err);
   assertStringIncludes(output, "BUDGET_EFFECT");
   assertStringIncludes(output, "test");
@@ -88,11 +88,11 @@ Deno.test("formatErrorCompact — includes correlation id when set", () => {
 Deno.test("formatErrorBox — stack frames filtered (framework hidden)", () => {
   const original = new Error("test");
   original.stack = `Error: test
-    at reducer (src/features/orderer.ts:47:12)
+    at reducer (src/cells/orderer.ts:47:12)
     at Dispatch.reduce (dep/aio/src/dispatch.ts:152:9)
     at Dispatch.flush (dep/aio/src/dispatch.ts:72:3)
     at node_modules/something/index.js:10:5`;
-  const err = createAioError("REDUCE_ERROR", original, { featureName: "test" });
+  const err = createAioError("REDUCE_ERROR", original, { cellName: "test" });
   const output = formatErrorBox(err);
   assertStringIncludes(output, "orderer.ts:47:12");
   assertEquals(output.includes("dep/aio/src/dispatch.ts"), false);

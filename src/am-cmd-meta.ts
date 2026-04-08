@@ -1,0 +1,145 @@
+/**
+ * @module
+ * Meta commands for am — version, new, help.
+ */
+
+import { VERSION } from "./aio.ts";
+import type { GlobalFlags } from "./am-types.ts";
+import { detectMode, out, outError } from "./am-output.ts";
+
+export function cmdVersion(_args: string[], flags: GlobalFlags): void {
+  const mode = detectMode(flags);
+  out(mode === "pretty" ? `am ${VERSION}` : { version: VERSION }, mode);
+}
+
+export async function cmdNew(
+  args: string[],
+  flags: GlobalFlags,
+): Promise<void> {
+  const kind = args[0];
+  const name = args[1];
+  const mode = detectMode(flags);
+
+  if (!kind || !name) {
+    outError("usage: am new <cell|page> <name>", mode);
+    return;
+  }
+
+  if (kind === "cell") {
+    const dir = `src/cells/${name}`;
+    const file = `${dir}/index.ts`;
+    try {
+      await Deno.stat(file);
+      outError(`${file} already exists`, mode);
+      return;
+    } catch { /* ok */ }
+    await Deno.mkdir(dir, { recursive: true });
+    const content = `import { cell } from 'aio'
+
+export const ${name} = cell('${name}', {
+  state: {},
+  methods: {
+  },
+})
+`;
+    await Deno.writeTextFile(file, content);
+    out(flags.json ? { created: file } : `created ${file}`, mode);
+  } else if (kind === "page") {
+    const pascal = name.charAt(0).toUpperCase() + name.slice(1);
+    const dir = "src/pages";
+    const file = `${dir}/${pascal}.tsx`;
+    try {
+      await Deno.stat(file);
+      outError(`${file} already exists`, mode);
+      return;
+    } catch { /* ok */ }
+    await Deno.mkdir(dir, { recursive: true });
+    const content = `import { useAio } from 'aio'
+
+export function ${pascal}() {
+  const { state } = useAio()
+  if (!state) return <div>Loading\u2026</div>
+
+  return (
+    <div>
+      <h1>${pascal}</h1>
+    </div>
+  )
+}
+`;
+    await Deno.writeTextFile(file, content);
+    out(flags.json ? { created: file } : `created ${file}`, mode);
+  } else {
+    outError(
+      `unknown scaffold type: '${kind}' — use 'cell' or 'page'`,
+      mode,
+    );
+  }
+}
+
+/** Show help text. Accepts command keys to list available commands. */
+export function cmdHelp(
+  _args: string[],
+  flags: GlobalFlags,
+  commandKeys: string[],
+): void {
+  if (flags.json) {
+    out({ commands: commandKeys }, "json");
+    return;
+  }
+  console.log(`am ${VERSION} — aio manager
+
+Process (singleton — one instance per app identity):
+  start                   Start app (kills zombies, refuses if already running)
+  stop                    Graceful shutdown (SIGTERM → SIGKILL)
+  restart                 Stop + start
+  watch [dir]             Hot-restart on .ts/.tsx change in dir (default: src/)
+  status                  stopped|starting|started|stopping (exit 0=started, 1=stopped, 2=transitional)
+  instances               List all running aio apps on this machine
+
+State:
+  state [path] [--wait=N] State query (dot-path, [*] wildcard, {pick})
+  ui [user]               UI state (server) or DOM snapshot (--client=N)
+  dispatch <Type> [k=v]   Dispatch action (or --body='{"type":...}')
+  actions                 Time-travel history
+
+Time-travel:
+  tt undo|redo            Step back/forward
+  tt goto <N>             Jump to index
+  tt pause|resume         Freeze/unfreeze state
+
+Persistence:
+  persist                 Force immediate persist
+  snapshot                Dump state JSON to stdout
+  snapshot save [file]    Save snapshot to file
+  snapshot load <file>    Load snapshot from file
+
+Inspect:
+  clients                 Connected WebSocket clients (with index)
+  client <index>          Request React component tree from client (dev mode)
+  click <idx> <Comp> [n]  Click component — by index or prop:value (dev mode)
+  ui [--client=N] [--all] DOM snapshot from client (default: client 0, visible only)
+  interact <action> <sel> Interact with UI element (click/type/select/focus/blur/scroll/hover)
+  sql <query>             Execute read-only SQL
+  tables                  List SQLite tables
+  schedules               Active scheduled effects
+  log [filter]            Tail app log (--client for client.log) (--filter --lines --follow)
+  errors                  Last build error
+  metrics                 Uptime, connections, schedules
+  health                  HTTP health check
+  config                  Server configuration
+
+Scaffold:
+  new cell <name>      Generate src/cells/<name>/index.ts
+  new page <name>         Generate src/pages/<Name>.tsx
+
+Other:
+  version                 Print version
+  help                    This message
+
+Flags: --app=X  --port=N  --entry=<path>  --wait[=N]  --json  --quiet  --body='{...}'  --filter=X  --lines=N  --follow/-f  --transport=ws|uds  --client=N/-cN  --all
+
+--app: target specific app by ID (default: resolved from deno.json name)
+--entry: override entry point (default: deno.json "entry" > src/app.ts > src/main.ts)
+--wait: start/stop block until complete (default 10s/5s). state polls every Ns.`);
+}

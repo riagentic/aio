@@ -1,5 +1,8 @@
 # Upgrade from v0.7 to v0.8
 
+> **Note:** `feature()` was renamed to `cell()` in alpha11. See
+> [upgrade guide](from-alpha10-to-alpha11.md).
+
 ### Breaking changes
 
 **`reduce` and `execute` are now objects (named handlers)**
@@ -114,18 +117,6 @@ yield * ctx.dispatch(wallet.credit(100));
 ```
 
 ---
-
-**`dispatchTo` accepts feature objects — string form removed**
-
-```ts
-// BEFORE (v0.7)
-dispatchTo: ["wallet", "fleet"];
-
-// AFTER (v0.8)
-import { wallet } from "../wallet";
-import { fleet } from "../fleet";
-dispatchTo: [wallet, fleet];
-```
 
 **Async method signature — `ctx` parameter removed**
 
@@ -247,8 +238,7 @@ states: { saving: {}, error: {} }
 7. **Fix machine on keys** — replace raw string keys with computed
    `[feature.method.type]`
 8. **Remove `send(feature.method(args))`** — replace with `send.method(args)`
-9. **Fix `dispatchTo`** — replace string arrays with imported feature refs
-10. **Fix `t.expect.effects()`** — prefix all effect keys with `featureName:`
-11. **Fix async method signatures** — remove `ctx` parameter
-12. Replace `dep/aio/` with the v0.8 folder
-13. Run `deno install && deno task dev` — linter will flag remaining issues
+9. **Fix `t.expect.effects()`** — prefix all effect keys with `featureName:`
+10. **Fix async method signatures** — remove `ctx` parameter
+11. Replace `dep/aio/` with the v0.8 folder
+12. Run `deno install && deno task dev` — linter will flag remaining issues

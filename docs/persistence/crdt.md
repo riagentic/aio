@@ -1,18 +1,18 @@
 # CRDT Sync Layer
 
-Offline-first collaborative state for AIO features. Opt-in per feature,
+Offline-first collaborative state for AIO cells. Opt-in per cell,
 server-authoritative, hybrid op-log + snapshot architecture.
 
-Sync wraps the existing dispatch loop. Sync-enabled features stamp mutations as
+Sync wraps the existing dispatch loop. Sync-enabled cells stamp mutations as
 operations with HLC timestamps, store them in an op-log (IndexedDB client,
-SQLite server), and merge on reconnect. Non-sync features are unaffected.
+SQLite server), and merge on reconnect. Non-sync cells are unaffected.
 
 See also: [Wire protocol & internals](crdt-protocol.md)
 
 ## Quick Start
 
 ```ts
-const todos = feature("todos", {
+const todos = cell("todos", {
   state: { items: [], filter: "all" },
   sync: true, // all fields LWW, 4h retention
   methods: {
@@ -29,7 +29,7 @@ const todos = feature("todos", {
 With custom merge strategies:
 
 ```ts
-const inventory = feature("inventory", {
+const inventory = cell("inventory", {
   state: { stock: {}, quantity: 0, items: [] },
   sync: {
     merge: { stock: "lww-per-key", quantity: "counter", items: "set-add" },
@@ -128,7 +128,7 @@ interface SyncConfig {
 
 ## Sync Status
 
-Per sync-enabled feature:
+Per sync-enabled cell:
 
 ```ts
 interface SyncStatus {
@@ -165,8 +165,8 @@ onSync(stats) {
 
 ## Persistence
 
-Sync features are automatically excluded from KV. Their state lives in the
-SQLite op-log and snapshot tables. Non-sync features use KV as before.
+Sync cells are automatically excluded from KV. Their state lives in the SQLite
+op-log and snapshot tables. Non-sync cells use KV as before.
 
 ## Module Structure
 

@@ -12,7 +12,7 @@ export type UDSClient = {
   lastFullJson?: string;
 };
 
-type PatchEntry = { feature: string; ops: import("immer").Patch[] };
+type PatchEntry = { cell: string; ops: import("immer").Patch[] };
 
 export type UDSHandle = {
   broadcast: (msg: string) => void;
@@ -30,7 +30,11 @@ export function createUDSListener(
   debug: (msg: string) => void,
   clientCounter?: { value: number },
   _fullStateThreshold = 0.5, // deprecated: kept for API compat, no longer used
-  hasStateFilter = false, // when true, skip patches (computed against unfiltered state)
+  _cellPatchStrategies?: Map<string, "raw" | "skip" | "filter" | "full">, // unused — patches pre-filtered by aio.ts
+  _cellFilterFields?: Map<
+    string,
+    { mode: "include" | "exclude"; fields: Set<string> }
+  >, // unused — patches pre-filtered by aio.ts
 ): UDSHandle {
   try {
     Deno.removeSync(socketPath);
@@ -81,13 +85,14 @@ export function createUDSListener(
   // AIO-216: per-connection write queue to prevent byte interleaving
   const _writeQueues = new WeakMap<Deno.Conn, Promise<void>>();
 
-  function sendTo(conn: Deno.Conn, msg: string): void {
+  function sendTo(conn: Deno.Conn, msg: string, onSent?: () => void): void {
     const encoded = new TextEncoder().encode(msg + "\n");
     const prev = _writeQueues.get(conn) ?? Promise.resolve();
     const next = prev.then(async () => {
       const writer = conn.writable.getWriter();
       try {
         await writer.write(encoded);
+        onSent?.();
       } finally {
         writer.releaseLock();
       }
@@ -132,8 +137,8 @@ export function createUDSListener(
     },
     broadcastState: (forceOrPatches?: boolean | PatchEntry[]) => {
       const force = forceOrPatches === true;
-      // When stateForUI is configured, patches are invalid — always use full filtered state
-      const patches = !hasStateFilter && Array.isArray(forceOrPatches)
+      // Patches are pre-filtered by aio.ts filterPatchesByStrategy — use directly
+      const patches = Array.isArray(forceOrPatches)
         ? forceOrPatches
         : undefined;
 
@@ -148,7 +153,7 @@ export function createUDSListener(
             ? patches.filter((p) => {
               for (const sub of client.subscriptions!) {
                 if (
-                  sub === p.feature || sub.startsWith(p.feature + ".")
+                  sub === p.cell || sub.startsWith(p.cell + ".")
                 ) return true;
               }
               return false;
@@ -159,7 +164,7 @@ export function createUDSListener(
             clientPatches.flatMap((p) =>
               p.ops.map((op) => ({
                 ...op,
-                path: [p.feature, ...op.path],
+                path: [p.cell, ...op.path],
               }))
             ),
           );
@@ -173,14 +178,22 @@ export function createUDSListener(
                 `uds: patch payload (${patchJson.length}B) > full state (${fullJson.length}B) — sending full state`,
               );
               if (fullJson !== client.lastFullJson) {
-                sendTo(conn, fullJson);
-                // AIO-286: update lastFullJson after send queues successfully
-                client.lastFullJson = fullJson;
+                const fj = fullJson;
+                sendTo(conn, fullJson, () => {
+                  client.lastFullJson = fj;
+                });
               }
             } else {
-              sendTo(conn, patchJson);
-              // AIO-286: update lastFullJson after send queues successfully
-              if (fullJson) client.lastFullJson = fullJson;
+              const fj = fullJson;
+              sendTo(
+                conn,
+                patchJson,
+                fj
+                  ? () => {
+                    client.lastFullJson = fj;
+                  }
+                  : undefined,
+              );
             }
             continue;
           }
@@ -190,9 +203,10 @@ export function createUDSListener(
         const json = _getFilteredFullJson(client);
         if (!json) continue;
         if (json === client.lastFullJson) continue; // no change
-        sendTo(conn, json);
-        // AIO-286: update lastFullJson after send queues successfully
-        client.lastFullJson = json;
+        const j = json;
+        sendTo(conn, json, () => {
+          client.lastFullJson = j;
+        });
       }
     },
     clients: () => [...clientMap.values()],
@@ -249,7 +263,7 @@ function _handleUDSConn(
   onAction: (action: { type: string; payload?: unknown }) => void,
   debug: (msg: string) => void,
   getUIState: () => unknown,
-  sendTo: (conn: Deno.Conn, msg: string) => void,
+  sendTo: (conn: Deno.Conn, msg: string, onSent?: () => void) => void,
 ): void {
   const decoder = new TextDecoder();
   const MAX_BUF = 10 * 1024 * 1024; // 10MB — prevent OOM from missing newlines
@@ -352,8 +366,9 @@ function _handleUDSConn(
                     uiState = filtered;
                   }
                   const msg = JSON.stringify(uiState);
-                  sendTo(conn, msg);
-                  client.lastFullJson = msg;
+                  sendTo(conn, msg, () => {
+                    client.lastFullJson = msg;
+                  });
                 } catch (err) {
                   debug(`uds: filtered state send error — ${err}`);
                 }
@@ -383,8 +398,9 @@ function _handleUDSConn(
                   uiState = filtered;
                 }
                 const msg = JSON.stringify(uiState);
-                sendTo(conn, msg);
-                client.lastFullJson = msg;
+                sendTo(conn, msg, () => {
+                  client.lastFullJson = msg;
+                });
               } catch (err) {
                 debug(`uds: resync send error — ${err}`);
               }

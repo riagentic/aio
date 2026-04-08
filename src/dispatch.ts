@@ -90,7 +90,7 @@ export type DispatchDeps<S, A, E> = {
   freezeState?: boolean; // deep freeze state after reduce in dev mode
   afterAction?: (prev: S, next: S, action: A) => void; // diagnostics hook — called after setState
   effectTimeout?: number; // ms before warning on a slow async effect (default: 30000, 0 = disabled)
-  /** Optional getter for reduce phase breakdown — provided by composeFeatures when perfCheck is on */
+  /** Optional getter for reduce phase breakdown — provided by composeCells when perfCheck is on */
   reduceBreakdown?: () => ReduceBreakdown | undefined;
 };
 
@@ -98,6 +98,7 @@ export type DispatchDeps<S, A, E> = {
  *  Returns Promise<void> that resolves after action is fully processed (reduce + sync effects). */
 type DispatchFn<A> = ((action: A) => Promise<void>) & {
   close: () => void;
+  drain: () => Promise<void>;
   errorCount: () => number;
   getQueueDepth: () => number;
   getEffectBacklog: () => number;
@@ -130,6 +131,7 @@ export function createDispatch<S, A, E>(
   let errors = 0;
   let depth = 0; // global re-entrant depth counter (survives across dispatch calls)
   let effectsInFlight = 0;
+  const effectPromises = new Set<Promise<void>>();
   const queue: { action: A; resolve: () => void; cid: string }[] = [];
 
   const _reportOpts: ReportErrorOpts = {
@@ -160,7 +162,7 @@ export function createDispatch<S, A, E>(
     const err = createAioError(
       code,
       `${source} exceeded budget: ${duration.toFixed(1)}ms > ${budget}ms`,
-      { featureName: type?.split(":")[0], actionType: type, duration, budget },
+      { cellName: type?.split(":")[0], actionType: type, duration, budget },
     );
     reportAioError(err, _reportOpts);
     if (perfLog) {
@@ -234,7 +236,7 @@ export function createDispatch<S, A, E>(
           reduced = reduce(getState(), current);
         } catch (e) {
           const err = createAioError("REDUCE_ERROR", e, {
-            featureName: actionType?.split(":")[0],
+            cellName: actionType?.split(":")[0],
             actionType,
           }, getState() as Record<string, unknown>);
           reportAioError(err, _reportOpts);
@@ -261,7 +263,7 @@ export function createDispatch<S, A, E>(
             `reduce() must return { state, effects[] } — got ${
               JSON.stringify(reduced)
             }`,
-            { featureName: actionType?.split(":")[0], actionType },
+            { cellName: actionType?.split(":")[0], actionType },
           );
           reportAioError(err, _reportOpts);
           entry.resolve();
@@ -308,7 +310,7 @@ export function createDispatch<S, A, E>(
                         : String(cloneErr)
                     }`,
                   {
-                    featureName: actionType?.split(":")[0],
+                    cellName: actionType?.split(":")[0],
                     actionType,
                   },
                 );
@@ -403,7 +405,7 @@ export function createDispatch<S, A, E>(
                       effectType ?? "?"
                     } exceeded ${effectTimeout}ms — effect abandoned`,
                     {
-                      featureName: effectType?.split(":")[0],
+                      cellName: effectType?.split(":")[0],
                       effectType,
                       duration: effectTimeout,
                       budget: effectTimeout,
@@ -414,7 +416,7 @@ export function createDispatch<S, A, E>(
                   reportAioError(err, _reportOpts);
                 }, effectTimeout)
                 : null;
-              promise
+              const tracked = promise
                 .then(() => {
                   if (tid !== null) clearTimeout(tid);
                   if (!settled) effectsInFlight--;
@@ -438,7 +440,7 @@ export function createDispatch<S, A, E>(
                     "EFFECT_ASYNC_ERROR",
                     e,
                     {
-                      featureName: effectType?.split(":")[0],
+                      cellName: effectType?.split(":")[0],
                       actionType,
                       effectType,
                     },
@@ -446,11 +448,12 @@ export function createDispatch<S, A, E>(
                     asyncCid,
                   );
                   reportAioError(err, _reportOpts);
-                });
+                }).finally(() => effectPromises.delete(tracked));
+              effectPromises.add(tracked);
             }
           } catch (e) {
             const err = createAioError("EFFECT_ERROR", e, {
-              featureName: effectType?.split(":")[0],
+              cellName: effectType?.split(":")[0],
               actionType,
               effectType,
             });
@@ -495,6 +498,11 @@ export function createDispatch<S, A, E>(
 
   dispatch.close = () => {
     closed = true;
+  };
+  dispatch.drain = async () => {
+    while (effectPromises.size > 0) {
+      await Promise.allSettled([...effectPromises]);
+    }
   };
   dispatch.errorCount = () => errors;
   dispatch.getQueueDepth = () => queue.length;

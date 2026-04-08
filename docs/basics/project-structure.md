@@ -1,162 +1,138 @@
-# AIO -- File & Directory Structure
+# AIO -- Project Structure
 
-> One structure that scales from 1 feature to 100. No reorganization needed.
+> One structure that scales from 1 cell to 100. No reorganization needed.
 
-## The Complete Structure
+## Directory Layout
 
 ```
 src/
-  app.ts                  <- aio.run({ features }) -- boot, nothing else
-  App.tsx                 <- root UI -- layout + routing only
-  features/               <- all features live here
-  shared/                 <- code used by 2+ features
-    types/                <- domain types
-    utils/                <- pure functions
-    ui/                   <- reusable UI components
+  app.ts              <- aio.run({ cells }) -- wiring only
+  App.tsx             <- root layout + routing only
+  cell/               <- aio cell definitions (state + methods + machine)
+  type/               <- all exported types, always
+  lib/                <- pure functions, no aio imports
+  ui/                 <- components
+  test/               <- tests, mirrors source structure
 ```
 
-Three folders. Two root files. That's the entire app.
+Six folders. Two root files. That is the entire app.
 
 ---
 
-## Features
+## Zero-Thought Placement Rules
 
-### One feature = one folder
-
-```
-features/
-  counter/
-    index.ts              <- feature() definition
-```
-
-### Growing feature (~200+ lines)
-
-```
-features/counter/
-  index.ts                <- feature() call, imports from below
-  types.ts                <- domain types, enums (no aio imports)
-  helpers.ts              <- pure functions, factories (no aio imports)
-```
-
-### Feature with UI (~300+ lines)
-
-```
-features/counter/
-  index.ts
-  types.ts
-  helpers.ts
-  ui/
-    CounterPage.tsx       <- uses useFeature(counter)
-    CounterDisplay.tsx    <- pure component, props only
-```
-
-### Complex feature (~500+ lines)
-
-```
-features/counter/
-  index.ts                <- feature() assembler
-  types.ts
-  helpers.ts
-  reduce.ts               <- reducer logic
-  execute.ts              <- executor logic
-  selectors.ts            <- complex/memoized selectors
-  ui/
-    CounterPage.tsx
-    CounterControls.tsx
-```
-
-### When to split files
-
-| index.ts size   | Action                                                          |
-| --------------- | --------------------------------------------------------------- |
-| Under 200 lines | Keep everything in index.ts                                     |
-| ~200 lines      | Extract types.ts and helpers.ts                                 |
-| ~300 lines      | Add ui/ folder for components                                   |
-| ~500 lines      | Extract reduce.ts, execute.ts, selectors.ts                     |
-| ~1000 lines     | Ask: is this actually two features? Probably split the feature. |
-
-**Rule: split when you feel the pain, not before.**
+| What you wrote                       | Where it goes        | Rule                           |
+| ------------------------------------ | -------------------- | ------------------------------ |
+| `export type` / `export interface`   | `type/`              | Always. No exceptions.         |
+| `cell()` definition                  | `cell/`              | Always. One cell per file.     |
+| Extracted reducer/executor/generator | `cell/` next to cell | Imports aio = stays with cell. |
+| Pure function, no aio import         | `lib/`               | Always.                        |
+| Component / JSX                      | `ui/`                | Always.                        |
+| Test                                 | `test/`              | Mirrors source.                |
+| `aio.run()`                          | `app.ts`             | One file.                      |
 
 ---
 
-## Scaling: Domain Grouping
+## Import Rules (Enforceable by Linter)
 
-When the app grows beyond ~10-15 features, group by domain (one level only):
+| Folder  | Can import from                    |
+| ------- | ---------------------------------- |
+| `type/` | nothing (zero deps)                |
+| `lib/`  | `type/` only                       |
+| `cell/` | `type/` + `lib/` + `aio`           |
+| `ui/`   | `type/` + `lib/` + `cell/` + `aio` |
+| `test/` | anything                           |
+
+Types flow down. Logic flows down. Nothing flows up.
+
+---
+
+## Small App (Flat)
 
 ```
-features/
-  trading/
-    engine/
-      index.ts
-    orders/
-      index.ts
-  data/
-    collector/
-      index.ts
-    indicators/
-      index.ts
-  user/
+src/
+  app.ts
+  App.tsx
+  cell/
+    counter.ts
+    auth.ts
+  type/
+    counter.ts
+    auth.ts
+  lib/
+    math.ts
+    format.ts
+  ui/
+    HomePage.tsx
+    LoginPage.tsx
+    shared/
+      Button.tsx
+  test/
+    cell/
+      counter.test.ts
+    lib/
+      math.test.ts
+```
+
+---
+
+## Larger App (Domain Subdirs)
+
+When a folder exceeds ~10 files, add one level of domain subdirectories.
+
+```
+src/
+  app.ts
+  App.tsx
+  cell/
+    trading/
+      engine.ts
+      orders.ts
     auth/
-      index.ts
-    settings/
-      index.ts
-```
-
-Domain folders are pure organization -- no code, no index.ts. **Never nest
-deeper than one domain level.**
-
----
-
-## Shared
-
-Code shared across 2+ features:
-
-```
-shared/
-  types/
-    order.ts              <- used by trading/engine + trading/orders
-    price.ts              <- used by data/collector + trading/engine
-  utils/
-    format.ts             <- formatCurrency, formatDate, etc.
-    math.ts               <- calculations used across features
+      login.ts
+      session.ts
+  type/
+    trading/
+      order.ts
+      position.ts
+    auth/
+      user.ts
+  lib/
+    trading/
+      risk.ts
+      pnl.ts
+    format.ts
   ui/
-    Button.tsx            <- pure, reusable, no feature imports
-    Modal.tsx
-    Table.tsx
+    trading/
+      OrderBook.tsx
+      TradeForm.tsx
+    auth/
+      LoginPage.tsx
+    shared/
+      Button.tsx
+  test/
+    cell/trading/
+      engine.test.ts
+    lib/trading/
+      risk.test.ts
 ```
 
-### Rules
-
-- **Shared UI** -- pure: props in, JSX out. No `useFeature()`, no feature
-  imports
-- **Shared types** -- framework-agnostic: no aio imports
-- **Shared utils** -- pure functions: no side effects, no state
-- **Promote, don't pre-plan.** Move to `shared/` only when a second feature
-  needs it
-
----
-
-## State
-
-**There is no state.ts in `src/`.** Each feature defines its own state inside
-`feature()`. Framework composes `AppState` from all registered features
-automatically.
+**Never nest deeper than `cell/[domain]/[cell].ts`.**
 
 ---
 
 ## Root Files
 
-### `app.ts` -- boot only
+### `app.ts` -- wiring only
 
-```typescript
+```ts
 import { aio } from "aio";
-import { counter } from "./features/counter/index.ts";
-import { dc } from "./features/dc/index.ts";
+import { counter } from "./cell/counter.ts";
+import { auth } from "./cell/auth.ts";
 
 await aio.run({
-  features: [counter, dc],
+  cells: [counter, auth],
   port: 8000,
-  ui: { electron: true, title: "My App" },
 });
 ```
 
@@ -165,9 +141,9 @@ No logic. No state. Just imports and boot.
 ### `App.tsx` -- layout and routing only
 
 ```tsx
-import { page, useAio } from "aio";
-import { TradePage } from "./features/te/ui/TradePage.tsx";
-import { SettingsPage } from "./features/settings/ui/SettingsPage.tsx";
+import { page, useAio } from "aio/react";
+import { TradePage } from "./ui/trading/TradePage.tsx";
+import { SettingsPage } from "./ui/SettingsPage.tsx";
 
 export default function App() {
   const { state, send } = useAio();
@@ -181,53 +157,39 @@ export default function App() {
 }
 ```
 
-No business logic. No feature state management. Just layout and routing.
+No business logic. No cell state management. Just layout and routing.
 
 ---
 
-## What Goes Where -- Quick Reference
+## Growth Rules
 
-| Thing                             | Location                        |
-| --------------------------------- | ------------------------------- |
-| Feature logic (state, methods)    | `features/[feature]/index.ts`   |
-| Feature domain types              | `features/[feature]/types.ts`   |
-| Feature pure functions            | `features/[feature]/helpers.ts` |
-| Feature reducer (when extracted)  | `features/[feature]/reduce.ts`  |
-| Feature executor (when extracted) | `features/[feature]/execute.ts` |
-| Feature UI components             | `features/[feature]/ui/`        |
-| Feature scripts                   | `features/[feature]/scripts/`   |
-| Shared domain types               | `shared/types/`                 |
-| Shared pure functions             | `shared/utils/`                 |
-| Reusable UI (no feature deps)     | `shared/ui/`                    |
-| App boot                          | `src/app.ts`                    |
-| Root layout + routing             | `src/App.tsx`                   |
-| App-wide scripts                  | `scripts/` (project root)       |
+- Flat until ~10 files per folder, then domain subdirs (one level only)
+- Never nest deeper than `cell/[domain]/[cell].ts`
+- One cell per file, always
+- Split when a file exceeds ~200 lines
 
 ---
 
 ## Forbidden
 
-- No `src/state.ts` -- state lives inside features
+- No `src/state.ts` -- state lives inside cells
 - No `src/actions.ts`, `src/effects.ts`, `src/reduce.ts` -- framework
   auto-generates
-- No `src/models/` or `src/lib/` -- use `shared/types/` or feature files
-- No `src/components/` -- use `shared/ui/` or feature `ui/`
-- No nesting deeper than `features/[domain]/[feature]/`
-- No files over 300 lines -- split or extract
-- No pre-planned shared abstractions -- promote from features when needed
+- No nesting deeper than one domain level
+- No files over 200 lines -- split or extract
+- No aio imports in `type/` or `lib/`
 
 ---
 
-## The `'aio'` import
+## The `'aio'` Import
 
 Everything comes from a single import. `"aio"` maps to `jsr:@riagentic/aio`
-(standard) or `./dep/aio/mod.ts` (vendored). Never import from
-`'../dep/aio/...'` directly.
+(standard) or `./dep/aio/mod.ts` (vendored).
 
 ```ts
 // Server-side (Deno)
-import { aio, call, feature, schedule, testFeature } from "aio";
+import { aio, call, cell, schedule, testCell } from "aio";
 
 // Browser-side (App.tsx)
-import { page, useAio, useFeature, useLocal } from "aio/react";
+import { page, useAio, useCell, useLocal } from "aio/react";
 ```

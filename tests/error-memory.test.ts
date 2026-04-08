@@ -40,7 +40,7 @@ Deno.test("memory monitor — no report when heap below threshold", async () => 
       external: 0,
     }),
     getHeapLimit: () => 1000,
-    getFeatureStates: () => [],
+    getCellStates: () => [],
   });
   await new Promise((r) => setTimeout(r, 120));
   monitor.stop();
@@ -62,8 +62,7 @@ Deno.test("memory monitor — MEMORY_PRESSURE when heap >= warn threshold", asyn
       external: 0,
     }),
     getHeapLimit: () => 1000,
-    getFeatureStates:
-      () => [{ name: "test", state: { items: new Array(1000) } }],
+    getCellStates: () => [{ name: "test", state: { items: new Array(1000) } }],
   });
   await new Promise((r) => setTimeout(r, 120));
   monitor.stop();
@@ -86,14 +85,14 @@ Deno.test("memory monitor — MEMORY_CRITICAL when heap >= critical threshold", 
       external: 0,
     }),
     getHeapLimit: () => 1000,
-    getFeatureStates: () => [],
+    getCellStates: () => [],
   });
   await new Promise((r) => setTimeout(r, 120));
   monitor.stop();
   assertEquals(reports[0]!.level, "critical");
 });
 
-Deno.test("memory monitor — featureStates sorted largest first", async () => {
+Deno.test("memory monitor — cellStates sorted largest first", async () => {
   const reports: MemoryReport[] = [];
   const monitor = createMemoryMonitor({
     enabled: true,
@@ -108,14 +107,14 @@ Deno.test("memory monitor — featureStates sorted largest first", async () => {
       external: 0,
     }),
     getHeapLimit: () => 1000,
-    getFeatureStates: () => [
+    getCellStates: () => [
       { name: "small", state: { x: 1 } },
       { name: "big", state: { items: new Array(10000).fill("data") } },
     ],
   });
   await new Promise((r) => setTimeout(r, 120));
   monitor.stop();
-  assertEquals(reports[0]!.featureStates[0]!.name, "big");
+  assertEquals(reports[0]!.cellStates[0]!.name, "big");
 });
 
 Deno.test("memory monitor — stop clears interval", async () => {
@@ -132,7 +131,7 @@ Deno.test("memory monitor — stop clears interval", async () => {
       external: 0,
     }),
     getHeapLimit: () => 1000,
-    getFeatureStates: () => [],
+    getCellStates: () => [],
   });
   monitor.stop();
   await new Promise((r) => setTimeout(r, 100));
@@ -153,7 +152,7 @@ Deno.test("memory monitor — disabled does nothing", async () => {
       external: 0,
     }),
     getHeapLimit: () => 1000,
-    getFeatureStates: () => [],
+    getCellStates: () => [],
   });
   await new Promise((r) => setTimeout(r, 120));
   monitor.stop();

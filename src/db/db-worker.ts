@@ -74,7 +74,9 @@ self.onmessage = ({ data }: MessageEvent<WorkerRequest>) => {
           }
           db.exec("COMMIT");
         } catch (e) {
-          db.exec("ROLLBACK");
+          try {
+            db.exec("ROLLBACK");
+          } catch { /* rollback failed — original error is more useful */ }
           throw e;
         }
         respond({ id, ok: true, data: results });

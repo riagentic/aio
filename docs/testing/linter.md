@@ -88,29 +88,28 @@ Validates `deno.json` for common mistakes:
 - Missing entry point (`src/app.ts`)
 - Missing `App.tsx` for UI targets
 - Unused `App.tsx` in headless mode
-- Feature files scattered outside `src/features/`
+- Cell files scattered outside `src/cell/`
 - No test directory or test files
 
-### 3. Feature Definitions
+### 3. Cell Definitions
 
-Static analysis of `feature()` calls:
+Static analysis of `cell()` calls:
 
-- Duplicate feature names across files
+- Duplicate cell names across files
 - Empty state objects
 - Reserved state keys (`$p`, `$d`, `_status`, `__proto__`) — these collide with
   aio internals
-- Mixing methods and actions styles in one feature
-- Feature with no methods and no actions (can't change state)
+- Mixing methods and actions styles in one cell
+- Cell with no methods and no actions (can't change state)
 - Non-standard naming (convention: lowercase with hyphens)
 
 ### 4. Performance
 
-- `useAio()` in non-root components (use `useFeature()` for selective
-  re-renders)
+- `useAio()` in non-root components (use `useCell()` for selective re-renders)
 - Sync I/O (`Deno.readTextFileSync`, etc.) blocking the event loop
-- `setTimeout`/`setInterval` in feature code (use `schedule.after`/`every`)
+- `setTimeout`/`setInterval` in cell code (use `schedule.after`/`every`)
 - Large collections in state that should be in SQLite
-- Missing `stateForUI` with many state keys
+- Missing cell-level `ui` config with many state keys
 - `console.log` instead of structured `log` from aio
 
 ### 5. Security
@@ -131,18 +130,18 @@ Static analysis of `feature()` calls:
 - Non-browser imports in `.tsx` files (won't resolve in dev mode)
 - `createRoot` in user code (framework handles mounting)
 - Unnecessary `import React` (automatic with jsx transform)
-- `useFeature()` without loading/fallback state
+- `useCell()` without loading/fallback state
 
 ### 8. Testing
 
-- Features without matching test files
-- Test files that don't use `testFeature()` harness
+- Cells without matching test files
+- Test files that don't use `testCell()` harness
 - Missing `test` task in `deno.json`
 
 ### 9. Code Patterns
 
 - `any` usage (prefer `unknown` + narrowing)
-- Thrown exceptions in feature code (prefer error states)
+- Thrown exceptions in cell code (prefer error states)
 - Legacy `../dep/aio/` import paths
 - Node.js APIs (`require`, `process.env`, `__dirname`)
 
@@ -151,9 +150,9 @@ Static analysis of `feature()` calls:
 - esbuild not installed (required for dev mode)
 - Electron package incomplete (`dist/` missing)
 
-### 11. Inter-Feature Patterns
+### 11. Inter-Cell Patterns
 
-- Direct state access across features (use selectors or `dispatchTo`)
+- Direct state access across cells (use selectors)
 
 ### 12. Scheduling
 
@@ -175,19 +174,19 @@ aiol v0.1.0 — scanning project
   ✓ appId: my-app
   ✓ entry: src/app.ts
   ✓ UI: App.tsx
-  ✓ 3 feature(s): cart, inventory, payment
-  ✓ all 3 features have tests
-  ✓ stateForUI configured
+  ✓ 3 cell(s): cart, inventory, payment
+  ✓ all 3 cells have tests
+  ✓ cell ui filters configured
   ✓ localhost-only (no --expose)
 
-  ⚠ WARN   [perf] src/features/cart/index.ts: sync I/O (Deno.readTextFileSync)
+  ⚠ WARN   [perf] src/cell/cart/index.ts: sync I/O (Deno.readTextFileSync)
   ⚠ WARN   [security] src/config.ts:12 — possible hardcoded token
 
-  · HINT   [perf] src/components/Dashboard.tsx: uses useAio() — prefer useFeature()
+  · HINT   [perf] src/components/Dashboard.tsx: uses useAio() — prefer useCell()
   · HINT   [testing] no "test" task in deno.json [fixable]
 
 ────────────────────────────────────────────────────────────
-  Files: 12  Features: 3  Tests: 3
+  Files: 12  Cells: 3  Tests: 3
   2 warnings · 2 hints
   1 auto-fixable — run with --safe-fix to apply
 ```
@@ -203,14 +202,14 @@ Returns structured data for CI integration:
 ```json
 {
   "version": "0.1.0",
-  "stats": { "filesScanned": 12, "featuresFound": 3, "testsFound": 3 },
-  "passed": ["appId: my-app", "3 feature(s): cart, inventory, payment"],
+  "stats": { "filesScanned": 12, "cellsFound": 3, "testsFound": 3 },
+  "passed": ["appId: my-app", "3 cell(s): cart, inventory, payment"],
   "issues": [
     {
       "severity": "warn",
       "area": "perf",
       "message": "sync I/O blocks the event loop",
-      "file": "src/features/cart/index.ts",
+      "file": "src/cell/cart/index.ts",
       "line": 18
     }
   ],

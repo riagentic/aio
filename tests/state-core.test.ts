@@ -17,12 +17,12 @@ import {
   _resetArrayRefStats,
   _shallowEqual,
   cancelSubsTimer,
+  type CellRef,
   collapsePaths,
   createSendProxy,
-  type FeatureRef,
   flushOfflineQueue,
+  getCellSignal,
   getConnectedSignal,
-  getFeatureSignal,
   getStateSignal,
   handleMessage,
   isInitialStateReceived,
@@ -43,7 +43,7 @@ function setup() {
 
 // ── Delta tests ─────────────────────────────────────────────────────
 
-Deno.test("state-core: _injectState sets full state and feature signals", () => {
+Deno.test("state-core: _injectState sets full state and cell signals", () => {
   setup();
   try {
     _injectState({ counter: { count: 5 }, timer: { elapsed: 10 } });
@@ -52,11 +52,11 @@ Deno.test("state-core: _injectState sets full state and feature signals", () => 
     assertEquals(state.counter, { count: 5 });
     assertEquals(state.timer, { elapsed: 10 });
 
-    // Feature signals should be populated
-    const counterSig = getFeatureSignal("counter");
+    // Cell signals should be populated
+    const counterSig = getCellSignal("counter");
     assertEquals(counterSig.peek(), { count: 5 });
 
-    const timerSig = getFeatureSignal("timer");
+    const timerSig = getCellSignal("timer");
     assertEquals(timerSig.peek(), { elapsed: 10 });
 
     // Full state signal
@@ -79,8 +79,8 @@ Deno.test("state-core: _injectDelta applies $p patch", () => {
     assertEquals(state.counter.count, 10);
     assertEquals(state.counter.label, "hello"); // preserved
 
-    // Feature signal updated
-    assertEquals(getFeatureSignal("counter").peek().count, 10);
+    // Cell signal updated
+    assertEquals(getCellSignal("counter").peek().count, 10);
   } finally {
     _reset();
   }
@@ -351,7 +351,7 @@ Deno.test("state-core: handleMessage — first message is full state", () => {
     assertEquals(isInitialStateReceived(), true);
     assertEquals(_getState().counter.count, 0);
     assertEquals(_getState().timer.elapsed, 0);
-    assertEquals(getFeatureSignal("counter").peek(), { count: 0 });
+    assertEquals(getCellSignal("counter").peek(), { count: 0 });
   } finally {
     _reset();
   }
@@ -364,7 +364,7 @@ Deno.test("state-core: handleMessage — subsequent delta", () => {
     handleMessage({ $p: { counter: { count: 42 } } }); // delta
 
     assertEquals(_getState().counter.count, 42);
-    assertEquals(getFeatureSignal("counter").peek().count, 42);
+    assertEquals(getCellSignal("counter").peek().count, 42);
   } finally {
     _reset();
   }
@@ -382,7 +382,8 @@ Deno.test("state-core: createSendProxy creates typed methods", () => {
     const sent: string[] = [];
     setTransport({ send: (d: string) => sent.push(d), close: () => {} });
 
-    const ref: FeatureRef = {
+    // CellRef interface requires __aio — this is the public type shape
+    const ref: CellRef = {
       __aio: { id: "counter", actionKeys: ["increment", "decrement"] },
     };
     const proxy = createSendProxy("counter", ref);
@@ -409,7 +410,8 @@ Deno.test("state-core: createSendProxy uses action creators when available", () 
     const sent: string[] = [];
     setTransport({ send: (d: string) => sent.push(d), close: () => {} });
 
-    const ref: FeatureRef = {
+    // CellRef interface requires __aio — this is the public type shape
+    const ref: CellRef = {
       __aio: {
         id: "counter",
         actionKeys: ["increment", "reset"],
@@ -507,7 +509,7 @@ Deno.test("state-core: setConnected updates connected signal", () => {
 
 // ── Nested deletion in delta ────────────────────────────────────────
 
-Deno.test("state-core: nested $d deletion within feature patch", () => {
+Deno.test("state-core: nested $d deletion within cell patch", () => {
   setup();
   try {
     _injectState({ feat: { a: 1, b: 2, c: 3 } });

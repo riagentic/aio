@@ -1,5 +1,8 @@
 # Upgrade from v1.0.0-alpha8 to v1.0.0-alpha9
 
+> **Note:** `feature()` was renamed to `cell()` in alpha11. See
+> [upgrade guide](from-alpha10-to-alpha11.md).
+
 ### Breaking changes
 
 **`_status` → `__aio_status` (machine state internal key)**

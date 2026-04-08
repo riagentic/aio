@@ -1,26 +1,25 @@
-# Multi-Feature Checkout Workflow
+# Multi-Cell Checkout Workflow
 
-Build an e-commerce checkout: cart, inventory, payment -- three features
+Build an e-commerce checkout: cart, inventory, payment -- three cells
 coordinating through generators, direct calling, and machine guards. Covers
-generators, cross-feature `call()`, `cancelOn`, machine guards, error recovery,
-and testing.
+generators, cross-cell `call()`, `cancelOn`, machine guards, error recovery, and
+testing.
 
-Prerequisites: [quickstart.md](../quickstart.md) done, one feature under your
-belt.
+Prerequisites: [quickstart.md](../quickstart.md) done, one cell under your belt.
 
 ---
 
-## Step 1: Cart feature
+## Step 1: Cart cell
 
 The cart is pure sync state -- add items, remove them, compute a total.
 
 ```ts
-// features/cart/index.ts
-import { feature } from "aio";
+// cell/cart/index.ts
+import { cell } from "aio";
 
 export type CartItem = { id: string; name: string; price: number; qty: number };
 
-export const cart = feature("cart", {
+export const cart = cell("cart", {
   state: {
     items: [] as CartItem[],
     total: 0,
@@ -58,19 +57,19 @@ it becomes a cancellation trigger for the payment generator.
 
 ---
 
-## Step 2: Inventory feature
+## Step 2: Inventory cell
 
 `reserve` is async (API call) and can fail. The payment generator needs to know
 when it does.
 
 ```ts
-// features/inventory/index.ts
-import { feature } from 'aio'
+// cell/inventory/index.ts
+import { cell } from 'aio'
 import type { CartItem } from '../cart/index.ts'
 
 type StockMap = Record<string, number>
 
-export const inventory = feature('inventory', {
+export const inventory = cell('inventory', {
   state: { stock: {} as StockMap, reserved: {} as StockMap },
   methods: {
     check(s, itemId: string): number {
@@ -107,14 +106,14 @@ right tool. Save generators for multi-step workflows.
 
 ---
 
-## Step 3: Payment feature with generator
+## Step 3: Payment cell with generator
 
 Payment is a multi-step workflow: reserve inventory, charge card, confirm. Each
 step is observable, cancellable, and recoverable.
 
 ```ts
-// features/payment/index.ts
-import { feature } from "aio";
+// cell/payment/index.ts
+import { cell } from "aio";
 import { inventory } from "../inventory/index.ts";
 import { cart } from "../cart/index.ts";
 import type { CartItem } from "../cart/index.ts";
@@ -126,7 +125,7 @@ async function chargeCard(total: number): Promise<{ chargeId: string }> {
   return { chargeId: `ch_${Date.now()}` };
 }
 
-export const payment = feature("payment", {
+export const payment = cell("payment", {
   state: {
     status: "idle" as "idle" | "processing" | "confirmed" | "failed",
     chargeId: null as string | null,
@@ -198,7 +197,7 @@ time-travel.
 
 ---
 
-## Step 4: Cross-feature coordination
+## Step 4: Cross-cell coordination
 
 The payment generator calls inventory directly via
 `ctx.call('reserve', () => inventory.reserve(items))`. After `aio.run()`, this
@@ -223,9 +222,8 @@ const reserved = await call(
 );
 ```
 
-> **Direct calling vs `dispatchTo`:** Direct calling is request/response -- you
-> need the result. `dispatchTo` is fire-and-forget from executors. Payment needs
-> to know if reservation succeeded, so direct calling is the right choice.
+> **Direct calling:** Request/response style — call a method, get a result.
+> Cross-cell communication uses direct method calls or effects.
 
 ---
 
@@ -235,8 +233,8 @@ Prevent double-submit. A user clicking "Pay" twice shouldn't trigger two
 charges. Add a machine:
 
 ```ts
-// Add these keys to the payment feature from Step 3:
-export const payment = feature("payment", {
+// Add these keys to the payment cell from Step 3:
+export const payment = cell("payment", {
   // ... state, methods, generators, cancelOn from Step 3, plus:
   machine: {
     initial: "idle",
@@ -265,23 +263,23 @@ transitions back to `idle`. Combined with `cancelOn`, this both cancels the
 generator and resets the machine state.
 
 `listensTo: [cart.clear]` tells the framework to route `cart:clear` actions to
-this feature. Without it, foreign actions are ignored.
+this cell. Without it, foreign actions are ignored.
 
 ---
 
 ## Step 6: React UI
 
-Wire the features into a React component:
+Wire the cells into a React component:
 
 ```tsx
 // App.tsx
-import { useFeature } from "aio/react";
-import { cart, type CartItem } from "./features/cart/index.ts";
-import { payment } from "./features/payment/index.ts";
+import { useCell } from "aio/react";
+import { cart, type CartItem } from "./cell/cart/index.ts";
+import { payment } from "./cell/payment/index.ts";
 
 export default function App() {
-  const c = useFeature(cart);
-  const p = useFeature(payment);
+  const c = useCell(cart);
+  const p = useCell(payment);
   if (!c.state || !p.state) return <div>Connecting...</div>;
 
   return (
@@ -347,21 +345,21 @@ export default function App() {
 }
 ```
 
-`useFeature` gives you `state`, `send` (typed dispatchers), and `status`
-(current machine state). The machine status drives the UI -- the Pay button only
-renders in `idle` state, and the machine silently drops `process` in
-`processing` state. Defense in depth.
+`useCell` gives you `state`, `send` (typed dispatchers), and `status` (current
+machine state). The machine status drives the UI -- the Pay button only renders
+in `idle` state, and the machine silently drops `process` in `processing` state.
+Defense in depth.
 
 Boot it:
 
 ```ts
 // app.ts
 import { aio } from "aio";
-import { cart } from "./features/cart/index.ts";
-import { inventory } from "./features/inventory/index.ts";
-import { payment } from "./features/payment/index.ts";
+import { cart } from "./cell/cart/index.ts";
+import { inventory } from "./cell/inventory/index.ts";
+import { payment } from "./cell/payment/index.ts";
 
-await aio.run({ appId: "checkout", features: [cart, inventory, payment] });
+await aio.run({ appId: "checkout", cells: [cart, inventory, payment] });
 ```
 
 ---
@@ -369,13 +367,13 @@ await aio.run({ appId: "checkout", features: [cart, inventory, payment] });
 ## Step 7: Testing the flow
 
 ```ts
-// features/payment/payment.test.ts
-import { testFeature } from "aio";
+// cell/payment/payment.test.ts
+import { testCell } from "aio";
 import { payment } from "./index.ts";
 
 const ITEMS = [{ id: "widget", name: "Widget", price: 25, qty: 1 }];
 
-testFeature(payment, "happy path: reserve + charge + confirm", async (t) => {
+testCell(payment, "happy path: reserve + charge + confirm", async (t) => {
   t.init();
   t.send.process(ITEMS, 25);
   await t.settle();
@@ -384,7 +382,7 @@ testFeature(payment, "happy path: reserve + charge + confirm", async (t) => {
   t.expect.state((s) => s.error === null);
 });
 
-testFeature(payment, "charge failure releases inventory", async (t) => {
+testCell(payment, "charge failure releases inventory", async (t) => {
   t.init();
   t.send.process(ITEMS, 15000); // > 10000 triggers simulated card decline
   await t.settle();
@@ -392,14 +390,14 @@ testFeature(payment, "charge failure releases inventory", async (t) => {
   t.expect.state((s) => s.error === "Card declined");
 });
 
-testFeature(payment, "cart clear cancels in-progress payment", async (t) => {
+testCell(payment, "cart clear cancels in-progress payment", async (t) => {
   t.init();
   t.send.process(ITEMS, 25);
   t.send.reset(); // cancel mid-flight (in full app, cart.clear() triggers cancelOn)
   t.expect.status("idle");
 });
 
-testFeature(payment, "machine blocks double-submit", (t) => {
+testCell(payment, "machine blocks double-submit", (t) => {
   t.init();
   t.send.process(ITEMS, 25);
   t.expect.status("processing");
@@ -408,7 +406,7 @@ testFeature(payment, "machine blocks double-submit", (t) => {
 });
 ```
 
-Each `testFeature` wraps `Deno.test` with a fresh instance. `t.settle()` runs
+Each `testCell` wraps `Deno.test` with a fresh instance. `t.settle()` runs
 effects and drains async. No teardown.
 
 ---
@@ -443,17 +441,17 @@ cleanup happened. No log diving.
 
 ## What you built
 
-Three features, each self-contained, coordinating through typed method calls:
+Three cells, each self-contained, coordinating through typed method calls:
 
-| Concept               | Where it shows up                                     |
-| --------------------- | ----------------------------------------------------- |
-| Generators            | `payment.*process` -- multi-step async, top-to-bottom |
-| Cross-feature calling | `inventory.reserve(items)` inside `ctx.call`          |
-| `cancelOn`            | `cart.clear` cancels the payment generator            |
-| Machine guards        | `processing` state drops duplicate `process` calls    |
-| Foreign actions       | `[cart.clear.type]` transitions payment machine       |
-| Error recovery        | Charge failure triggers `inventory.release()` cleanup |
-| Time-travel           | Every `yield*` is a named action in history           |
+| Concept            | Where it shows up                                     |
+| ------------------ | ----------------------------------------------------- |
+| Generators         | `payment.*process` -- multi-step async, top-to-bottom |
+| Cross-cell calling | `inventory.reserve(items)` inside `ctx.call`          |
+| `cancelOn`         | `cart.clear` cancels the payment generator            |
+| Machine guards     | `processing` state drops duplicate `process` calls    |
+| Foreign actions    | `[cart.clear.type]` transitions payment machine       |
+| Error recovery     | Charge failure triggers `inventory.release()` cleanup |
+| Time-travel        | Every `yield*` is a named action in history           |
 
 The generator replaced what would otherwise be scattered across actions,
 effects, executor cases, and machine states. Read the `*process` function and
@@ -465,7 +463,6 @@ you know the entire checkout flow.
 
 - [generators.md](../generators.md) -- full GenCtx API, `ctx.all`, `ctx.race`,
   reusable generators
-- [features.md](../features.md) -- all inter-feature patterns (observe, read,
-  coordinate)
+- [cells.md](../cells.md) -- all inter-cell patterns (observe, read, coordinate)
 - [testing.md](../testing.md) -- TestContext API, property-based fuzzing
 - [debugging.md](../debugging.md) -- error identification, performance debugging

@@ -6,18 +6,18 @@ AioError format, error codes, correlation IDs, log files, and the onError hook.
 
 | Tool                        | What it does                                                | When to use                               |
 | --------------------------- | ----------------------------------------------------------- | ----------------------------------------- |
-| **AioError console output** | Rich error boxes with feature, action, stack, state, tips   | First thing you see when something breaks |
-| **Correlation IDs**         | Trace an action through its entire lifecycle                | Multi-step flows, cross-feature debugging |
+| **AioError console output** | Rich error boxes with cell, action, stack, state, tips      | First thing you see when something breaks |
+| **Correlation IDs**         | Trace an action through its entire lifecycle                | Multi-step flows, cross-cell debugging    |
 | **onError hook**            | Unified callback for ALL errors                             | Monitoring, alerting, Sentry/Datadog      |
 | **Time-travel debugger**    | Walk through every action and state snapshot                | "How did state get into this shape?"      |
 | **Log files**               | 5 plain text logs (app, debug, error, warning, perf)        | Post-incident forensics                   |
-| **Memory pressure monitor** | Alerts before OOM with per-feature sizing                   | Long-running apps, memory leaks           |
-| **Feature health audit**    | Per-feature error count, status, last action                | Runtime inspection, ops dashboards        |
+| **Memory pressure monitor** | Alerts before OOM with per-cell sizing                      | Long-running apps, memory leaks           |
+| **Cell health audit**       | Per-cell error count, status, last action                   | Runtime inspection, ops dashboards        |
 | **Client log forwarding**   | All client console output in `log/client.log`               | Client-side errors without devtools       |
 | **Browser error overlay**   | Build Error / Runtime Error overlay with fix suggestions    | UI development                            |
 | **DiagReporter**            | Structured console output for freeze/stale/slow + hints     | UI freezes, stale data, slow dispatch     |
 | **Performance budgets**     | Warns when reducers/effects exceed time budgets             | Finding slow code                         |
-| **Startup linter**          | Validates feature config on `aio.run()`                     | Catching config mistakes early            |
+| **Startup linter**          | Validates cell config on `aio.run()`                        | Catching config mistakes early            |
 | **Diagnostics module**      | State diffs, action log, checkpoint recovery, crash handler | Full observability                        |
 
 ---
@@ -29,13 +29,13 @@ colored boxes:
 
 ```
 +-  AIO ERROR -----------------------------------------+
-| REDUCE_ERROR in feature 'orderer'                    |
+| REDUCE_ERROR in cell 'orderer'                    |
 | Action: orderer:placeOrder                           |
 | Machine state: idle                                  |
 |                                                      |
 | Cannot read property 'price' of undefined            |
 |                                                      |
-| at orderer.reduce (src/features/orderer.ts:47:12)    |
+| at orderer.reduce (src/cell/orderer.ts:47:12)    |
 |                                                      |
 | State at crash:                                      |
 |   { status: 'idle', orders: [], lastPrice: null }    |
@@ -46,7 +46,7 @@ colored boxes:
 +------------------------------------------------------+
 ```
 
-**Fields shown:** error code, feature name, action/effect/flow, filtered stack
+**Fields shown:** error code, cell name, action/effect/flow, filtered stack
 trace (your code only), state snapshot, actionable tip, correlation ID.
 
 In prod mode, errors are compact one-liners:
@@ -66,8 +66,8 @@ In prod mode, errors are compact one-liners:
 | `FLOW_STEP_ERROR`    | Flow        | A flow generator step threw (fed back to generator)        |
 | `FLOW_UNCAUGHT`      | Flow        | Flow threw without user try/catch -- includes step history |
 | `HOOK_ERROR`         | Hook        | `beforeReduce`, `onAction`, or `onEffect` hook threw       |
-| `INIT_ERROR`         | Lifecycle   | Feature `onInit` callback threw                            |
-| `DESTROY_ERROR`      | Lifecycle   | Feature `onDestroy` callback threw                         |
+| `INIT_ERROR`         | Lifecycle   | Cell `onInit` callback threw                               |
+| `DESTROY_ERROR`      | Lifecycle   | Cell `onDestroy` callback threw                            |
 | `MACHINE_BLOCKED`    | Machine     | Action blocked by state machine (warn-level)               |
 | `QUEUE_OVERFLOW`     | Dispatch    | Dispatch queue exceeded 10,000 entries                     |
 | `DISPATCH_LOOP`      | Dispatch    | 1,000 iterations detected -- possible infinite loop        |
@@ -80,34 +80,34 @@ In prod mode, errors are compact one-liners:
 
 The error code prefix tells you which layer broke:
 
-| Prefix                   | Layer             | Where to look                          |
-| ------------------------ | ----------------- | -------------------------------------- |
-| `REDUCE_*`               | Feature reducer   | Your `reduce` or `methods` code        |
-| `EFFECT_*`               | Feature executor  | Your `execute` handlers, async methods |
-| `FLOW_*`                 | Generator flow    | Your `generators` code                 |
-| `HOOK_*`                 | Lifecycle hooks   | `beforeReduce`, `onAction`, `onEffect` |
-| `INIT_*` / `DESTROY_*`   | Feature lifecycle | `onInit`, `onDestroy` callbacks        |
-| `MACHINE_*`              | State machine     | Machine config, transition guards      |
-| `QUEUE_*` / `DISPATCH_*` | Dispatch loop     | Infinite dispatch cycles               |
-| `MEMORY_*`               | Runtime           | Unbounded state growth                 |
-| `BUDGET_*`               | Performance       | Slow reducer or effect                 |
+| Prefix                   | Layer           | Where to look                          |
+| ------------------------ | --------------- | -------------------------------------- |
+| `REDUCE_*`               | Cell reducer    | Your `reduce` or `methods` code        |
+| `EFFECT_*`               | Cell executor   | Your `execute` handlers, async methods |
+| `FLOW_*`                 | Generator flow  | Your `generators` code                 |
+| `HOOK_*`                 | Lifecycle hooks | `beforeReduce`, `onAction`, `onEffect` |
+| `INIT_*` / `DESTROY_*`   | Cell lifecycle  | `onInit`, `onDestroy` callbacks        |
+| `MACHINE_*`              | State machine   | Machine config, transition guards      |
+| `QUEUE_*` / `DISPATCH_*` | Dispatch loop   | Infinite dispatch cycles               |
+| `MEMORY_*`               | Runtime         | Unbounded state growth                 |
+| `BUDGET_*`               | Performance     | Slow reducer or effect                 |
 
 ### Action type prefix
 
 All actions are prefixed: `counter:increment`, `wallet:transfer`. Format is
-`featureName:actionKey`. The prefix (before `:`) is the feature name.
+`cellName:actionKey`. The prefix (before `:`) is the cell name.
 
 ---
 
 ## Correlation IDs
 
 Every dispatched action gets a unique 8-char correlation ID. All errors produced
-during that action's lifecycle -- reduce, effects, cross-feature calls -- share
-the same ID.
+during that action's lifecycle -- reduce, effects, cross-cell calls -- share the
+same ID.
 
 ```
-2026-03-23 14:22:35.123  ERROR  feature:orderer  placeOrder failed  code=REDUCE_ERROR cid=a1b2c3d4
-2026-03-23 14:22:35.124  ERROR  feature:orderer  effect failed  code=EFFECT_ASYNC_ERROR cid=a1b2c3d4
+2026-03-23 14:22:35.123  ERROR  cell:orderer  placeOrder failed  code=REDUCE_ERROR cid=a1b2c3d4
+2026-03-23 14:22:35.124  ERROR  cell:orderer  effect failed  code=EFFECT_ASYNC_ERROR cid=a1b2c3d4
 ```
 
 Grep by correlation ID to see the full chain:
@@ -124,11 +124,11 @@ Every error in AIO routes through the `onError` callback:
 
 ```ts
 await aio.run({
-  features: [counter, wallet],
+  cells: [counter, wallet],
   onError(err) {
     console.log(err.code); // 'REDUCE_ERROR'
     console.log(err.source); // 'reduce'
-    console.log(err.context.featureName); // 'orderer'
+    console.log(err.context.cellName); // 'orderer'
     console.log(err.context.actionType); // 'orderer:placeOrder'
     console.log(err.original?.stack); // full original stack trace
     console.log(err.correlationId); // 'a1b2c3d4'
@@ -142,16 +142,16 @@ await aio.run({
 
 ### AioError fields
 
-| Field           | Type                 | Description                                               |
-| --------------- | -------------------- | --------------------------------------------------------- |
-| `code`          | `AioErrorCode`       | Machine-readable error type                               |
-| `source`        | `AioErrorSource`     | Layer: `'reduce'`, `'effect'`, `'flow'`, `'hook'`, etc.   |
-| `message`       | `string`             | Human-readable error message                              |
-| `context`       | `AioErrorContext`    | Structured metadata (feature, action, effect, flow, etc.) |
-| `original`      | `Error \| undefined` | Original thrown Error with preserved `.stack`             |
-| `correlationId` | `string`             | 8-char UUID tracing the action lifecycle                  |
-| `timestamp`     | `number`             | `Date.now()` at error creation                            |
-| `stateSnapshot` | `unknown`            | Feature state at time of error (when available)           |
+| Field           | Type                 | Description                                             |
+| --------------- | -------------------- | ------------------------------------------------------- |
+| `code`          | `AioErrorCode`       | Machine-readable error type                             |
+| `source`        | `AioErrorSource`     | Layer: `'reduce'`, `'effect'`, `'flow'`, `'hook'`, etc. |
+| `message`       | `string`             | Human-readable error message                            |
+| `context`       | `AioErrorContext`    | Structured metadata (cell, action, effect, flow, etc.)  |
+| `original`      | `Error \| undefined` | Original thrown Error with preserved `.stack`           |
+| `correlationId` | `string`             | 8-char UUID tracing the action lifecycle                |
+| `timestamp`     | `number`             | `Date.now()` at error creation                          |
+| `stateSnapshot` | `unknown`            | Cell state at time of error (when available)            |
 
 ---
 
@@ -172,7 +172,7 @@ by default.
 ### Log format
 
 ```
-2026-03-23 14:22:35.123  ERROR  feature:orderer  placeOrder failed  code=REDUCE_ERROR cid=a1b2c3d4
+2026-03-23 14:22:35.123  ERROR  cell:orderer  placeOrder failed  code=REDUCE_ERROR cid=a1b2c3d4
 ```
 
 Columns: timestamp, level (padded to 5), category (padded to 10), message, data

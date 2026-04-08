@@ -15,14 +15,12 @@ function createDOM() {
   const doc = win.document as unknown as Document;
   const root = doc.createElement("div");
   doc.body.appendChild(root);
-  return { document: doc, root, cleanup: () => win.close() };
+  return { document: doc, root, cleanup: () => win.happyDOM.close() };
 }
 
 Deno.test({
   name: "useContextSelector: reads selected value from context",
-  sanitizeOps: false,
-  sanitizeResources: false,
-  fn() {
+  async fn() {
     const { document: doc, root, cleanup } = createDOM();
     _setDocument(doc);
     const Ctx = createContext({ theme: "dark", lang: "en" });
@@ -43,15 +41,13 @@ Deno.test({
     const handle = mount(root, App);
     assertEquals(root.innerHTML, "<span>light</span>");
     _unmount(handle);
-    cleanup();
+    await cleanup();
   },
 });
 
 Deno.test({
   name: "useContextSelector: only re-renders when selected slice changes",
-  sanitizeOps: false,
-  sanitizeResources: false,
-  fn() {
+  async fn() {
     const { document: doc, root, cleanup } = createDOM();
     _setDocument(doc);
     const ctxValue = signal({ theme: "dark", lang: "en" });
@@ -80,15 +76,13 @@ Deno.test({
     assertEquals(root.innerHTML, "<span>light</span>");
 
     _unmount(handle);
-    cleanup();
+    await cleanup();
   },
 });
 
 Deno.test({
   name: "useContextSelector: falls back to default when no provider",
-  sanitizeOps: false,
-  sanitizeResources: false,
-  fn() {
+  async fn() {
     const { document: doc, root, cleanup } = createDOM();
     _setDocument(doc);
     const Ctx = createContext({ theme: "dark", lang: "en" });
@@ -105,6 +99,6 @@ Deno.test({
     const handle = mount(root, App);
     assertEquals(root.innerHTML, "<span>dark</span>");
     _unmount(handle);
-    cleanup();
+    await cleanup();
   },
 });

@@ -2,17 +2,17 @@
  * @module
  * Full-stack Deno framework — one state, propagated everywhere.
  *
- * v1.0: clean API, framework-agnostic client, feature.ts split, perf.log, am client inspection.
+ * v1.0: clean API, framework-agnostic client, cell.ts split, perf.log, am client inspection.
  * v0.9: async Worker-based SQLite, `log` public singleton, scaffolder via JSR.
- * Use `feature({ methods })` for reactive style (default),
- * `feature({ generators })` for sequential workflows,
- * `feature({ actions, reduce })` for explicit control (advanced).
+ * Use `cell({ methods })` for reactive style (default),
+ * `cell({ generators })` for sequential workflows,
+ * `cell({ actions, reduce })` for explicit control (advanced).
  *
  * ```ts
- * import { feature, call, aio } from 'aio'
+ * import { cell, call, aio } from 'aio'
  *
  * // Reactive style — default
- * const counter = feature('counter', {
+ * const counter = cell('counter', {
  *   state: { count: 0 },
  *   methods: {
  *     increment(s, by = 1) { s.count += by },
@@ -21,7 +21,7 @@
  * })
  *
  * // Sequential workflow — generator with typed state
- * const checkout = feature('checkout', {
+ * const checkout = cell('checkout', {
  *   state: { orderId: null as string | null },
  *   methods: { reset(s) { s.orderId = null } },
  *   generators: {
@@ -32,13 +32,13 @@
  *   },
  * })
  *
- * await aio.run({ features: [counter, checkout] })
+ * await aio.run({ cells: [counter, checkout] })
  * counter.increment(5)       // direct call — dispatches through store
  * checkout.place('widget')   // starts generator
  * ```
  */
 import { type Draft, produce } from "immer";
-/** Framework core — `aio.run()` starts the app, `lint` validates features, `parseCli` reads CLI flags */
+/** Framework core — `aio.run()` starts the app, `lint` validates cells, `parseCli` reads CLI flags */
 export { aio, lint, parseCli, VERSION } from "./src/aio.ts";
 import type { AioApp } from "./src/aio.ts";
 /** The running app instance returned by `aio.run()` — provides state access, dispatch, db, and lifecycle */
@@ -48,8 +48,8 @@ export type {
   AioConfig,
   AioError,
   AioUser,
+  CellsConfig,
   CliFlags,
-  FeaturesConfig,
   Lint,
   MiddlewareFn,
   PerfBudget,
@@ -66,7 +66,7 @@ export type {
 } from "./src/error.ts";
 /** Memory monitor configuration and heap usage report types */
 export type {
-  FeatureStateSize,
+  CellStateSize,
   MemoryConfig,
   MemoryReport,
 } from "./src/memory-monitor.ts";
@@ -109,46 +109,46 @@ export { instances, resolveAppId } from "./src/single-instance-lock.ts";
 // slugify — internal (used by build.ts, not app code)
 
 /**
- * v0.8 unified feature API.
- * feature({ methods })           — default reactive style (sync/async, Immer proxy, direct calling)
- * feature({ methods, generators }) — reactive + sequential workflows in one feature
- * feature({ actions, reduce })   — explicit style for full control (advanced)
+ * v0.8 unified cell API.
+ * cell({ methods })           — default reactive style (sync/async, Immer proxy, direct calling)
+ * cell({ methods, generators }) — reactive + sequential workflows in one cell
+ * cell({ actions, reduce })   — explicit style for full control (advanced)
  */
-export { bindFeature, testFeature } from "./src/feature.ts";
-/** Define a feature — methods, generators, actions/reduce, or mixed. The atomic unit of aio. */
-export { feature } from "./src/feature.ts";
-/** Compose features into a single dispatch/reduce/execute pipeline with dependency resolution. */
-export { composeFeatures } from "./src/feature.ts";
-/** Feature definition types — actions, catalogs, machine config, compose, test context */
+export { bindCell, testCell } from "./src/cell.ts";
+/** Define a cell — methods, generators, actions/reduce, or mixed. The atomic unit of aio. */
+export { cell } from "./src/cell.ts";
+/** Compose cells into a single dispatch/reduce/execute pipeline with dependency resolution. */
+export { composeCells } from "./src/cell.ts";
+/** Cell definition types — actions, catalogs, machine config, compose, test context */
 export type {
-  ActionsFeatureConfig,
+  ActionsCellConfig,
   ActionSource,
   ActionUnion,
   Catalog,
+  CellAio,
+  CellDef,
+  CellEntry,
+  CellExecuteFn,
+  CellReduceFn,
+  CellStatus,
   CircuitBreakerConfig,
-  ComposedFeatures,
+  ComposedCells,
   Creators,
   DirectCalling,
   ExecuteHandlers,
   ExtractState,
-  FeatureAio,
-  FeatureDef,
-  FeatureEntry,
-  FeatureExecuteFn,
-  FeatureReduceFn,
-  FeatureStatus,
   FlatActions,
   MachineConfig,
-  MethodsFeatureConfig,
+  MethodsCellConfig,
   Msg,
   ReduceHandlers,
   ScopedApp,
   SendOf,
   TestContext,
-} from "./src/feature.ts";
+} from "./src/cell.ts";
 
 /**
- * Inter-feature coordination — async methods return Promises with the correct type.
+ * Inter-cell coordination — async methods return Promises with the correct type.
  * Everything goes through the store (observable, time-travelable).
  *
  * Simple — preferred for most cases:
@@ -163,23 +163,23 @@ export type {
  *
  * `markAsync` — rare: explicitly mark a method as async when minification strips constructor names.
  */
-/** Wrap an inter-feature call with timeout and/or retry — `call({ timeout: 5000 }, () => f.method())`. */
-export { call } from "./src/feature-impl.ts";
+/** Wrap an inter-cell call with timeout and/or retry — `call({ timeout: 5000 }, () => f.method())`. */
+export { call } from "./src/cell-impl.ts";
 /** Mark a method as async when minification strips constructor names — rare escape hatch. */
-export { markAsync } from "./src/feature-impl.ts";
-/** Method types for feature definitions — sync, async, call options */
+export { markAsync } from "./src/cell-impl.ts";
+/** Method types for cell definitions — sync, async, call options */
 export type {
   AsyncMethod,
   CallOptions,
-  FeatureMethods,
+  CellMethods,
   Method,
   SyncMethod,
-} from "./src/feature-impl.ts";
+} from "./src/cell-impl.ts";
 
 /**
  * Generator-based sequential workflows.
  * Write top-to-bottom async code; each yield point is observable.
- * Use cancelOn config key in feature() to declare cancellation triggers.
+ * Use cancelOn config key in cell() to declare cancellation triggers.
  */
 /** Generator workflow types — flow definitions, steps, context, and typed creators */
 export type {
@@ -187,6 +187,7 @@ export type {
   FlowStep,
   Gen,
   GenCtx,
+  SingleStepGen,
   TypedCreator,
 } from "./src/flow.ts";
 
@@ -201,8 +202,8 @@ export { connectCli, connectCliUDS } from "./src/cli-client.ts";
 export type { CliApp } from "./src/cli-client.ts";
 
 /**
- * Action/effect catalog factory — creates typed creators for explicit-style features.
- * Used inside `feature({ actions, effects })` config or for standalone catalogs.
+ * Action/effect catalog factory — creates typed creators for explicit-style cells.
+ * Used inside `cell({ actions, effects })` config or for standalone catalogs.
  */
 /** Create typed action creators — PascalCase labels + camelCase dispatch helpers. */
 export { actions } from "./src/factory.ts";
@@ -253,7 +254,7 @@ export type { DB, DBOpts, QueryResult, Tx } from "./src/db/mod.ts";
  */
 /** Memoized selector — recomputes only when input selectors return new values. */
 export { createSelector } from "./src/selector.ts";
-/** Memoized selector scoped to a single feature slice — avoids full-state dependency. */
+/** Memoized selector scoped to a single cell slice — avoids full-state dependency. */
 export { createSliceSelector } from "./src/selector.ts";
 /** Selector type — a function from state to derived value with memoization. */
 export type { Selector } from "./src/selector.ts";
@@ -359,16 +360,16 @@ export function matchEffect<E extends { type: string; payload?: any }>(
   else if (fallback) fallback(effect);
 }
 
-/** Keys built into FeatureDef — excluded from send proxy */
-export type _FeatureBuiltins = "__aio";
-/** Extract state type from feature def's phantom _stateType, fallback to unknown */
+/** Keys built into CellDef — excluded from send proxy */
+export type _CellBuiltins = "__aio";
+/** Extract state type from cell def's phantom _stateType, fallback to unknown */
 export type _InferState<F> = F extends { __aio: { stateType?: infer S } }
   // deno-lint-ignore no-explicit-any
   ? S extends Record<string, any> ? S : Record<string, unknown>
   : Record<string, unknown>;
-/** Extract send proxy type from feature's callable methods */
+/** Extract send proxy type from cell's callable methods */
 export type _InferSend<F> = {
-  [K in Exclude<keyof F, _FeatureBuiltins>]: F[K] extends // deno-lint-ignore no-explicit-any
+  [K in Exclude<keyof F, _CellBuiltins>]: F[K] extends // deno-lint-ignore no-explicit-any
   (...args: infer P) => any ? (...args: P) => void
     : never;
 };

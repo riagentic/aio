@@ -14,7 +14,7 @@ Something wrong?
 +-- Memory warning?            -> S5 Memory
 +-- WebSocket disconnecting?   -> S6 Connection
 +-- Re-renders too frequent?   -> S7 Re-renders
-+-- Feature stopped working?   -> S8 Circuit Breaker
++-- Cell stopped working?   -> S8 Circuit Breaker
 +-- "PRESSURE" warning?        -> S10 Pressure Warnings
 +-- Nothing obvious?           -> S9 Silent Failures
 ```
@@ -60,7 +60,7 @@ grep 'a1b2c3d4' log/debug.log   # full action chain
 
 ### Reducer blocking main thread
 
-DiagReporter shows `trigger: <feature>.<action> reduce took Xms`.
+DiagReporter shows `trigger: <cell>.<action> reduce took Xms`.
 
 ```ts
 // WRONG -- heavy work in reducer
@@ -71,7 +71,7 @@ reduce: { analyze(s) { s.analyzing = true } },
 execute: {
   async runAnalysis(app, payload) {
     const results = await heavyComputation(payload.data)
-    app.dispatch(myFeature.analysisDone(results))
+    app.dispatch(myCell.analysisDone(results))
   }
 }
 ```
@@ -82,10 +82,10 @@ DiagReporter shows `queue: N actions pending, drain rate X/s`.
 
 ```ts
 // WRONG -- rapid-fire dispatches
-for (const item of items) app.dispatch(feature.process(item));
+for (const item of items) app.dispatch(cell.process(item));
 
 // RIGHT -- batch
-app.dispatch(feature.processBatch(items));
+app.dispatch(cell.processBatch(items));
 ```
 
 ### Non-AIO code blocking
@@ -114,8 +114,8 @@ UI shows old values. Data arrived on server but browser didn't update.
    `fullStateThreshold`.
 4. **Reducer not mutating?** Verify with `[state-diff]` entries in
    `log/debug.log`. No diff = no change.
-5. **Reference issue?** Use `useFeature(ref)` with a specific selector if
-   component depends on parent object reference.
+5. **Reference issue?** Use `useCell(ref)` with a specific selector if component
+   depends on parent object reference.
 
 ---
 
@@ -128,13 +128,13 @@ App works but feels sluggish. Check `log/perf.log`:
   produce: 420ms  clone: 15ms  spread: 5ms  routing: 2ms  listeners: 8ms
 ```
 
-| Phase       | If slow                          |
-| ----------- | -------------------------------- |
-| `produce`   | Move computation to effect       |
-| `clone`     | Large state -- prune             |
-| `spread`    | Too many features?               |
-| `routing`   | Shouldn't be slow                |
-| `listeners` | Too many cross-feature listeners |
+| Phase       | If slow                       |
+| ----------- | ----------------------------- |
+| `produce`   | Move computation to effect    |
+| `clone`     | Large state -- prune          |
+| `spread`    | Too many cells?               |
+| `routing`   | Shouldn't be slow             |
+| `listeners` | Too many cross-cell listeners |
 
 HTTP check: `GET /__aio/vitals` returns live `queueDepth`, `drainRate`,
 `lastReduceTime`, `p95ReduceTime`.
@@ -145,7 +145,7 @@ HTTP check: `GET /__aio/vitals` returns live `queueDepth`, `drainRate`,
 
 ```
 MEMORY_PRESSURE -- heap at 78% (1.56 GB / 2.0 GB)
-Top features: 1. barHistory 847 MB  2. orderer 12 MB
+Top cells: 1. barHistory 847 MB  2. orderer 12 MB
 ```
 
 | Trend     | Meaning                      | Fix                                        |
@@ -202,24 +202,24 @@ you read. If you still see storms, the issue is expensive components:
 const { state, send } = useAio();
 return <div>{state.counter.count}</div>;
 
-// BETTER for hot components -- useFeature scopes to one feature
-const { state, send } = useFeature(counterRef);
+// BETTER for hot components -- useCell scopes to one cell
+const { state, send } = useCell(counterRef);
 ```
 
 Selector returning new object every time:
 
 ```ts
 // WRONG -- new object every render
-useFeature(ref, (s) => ({ a: s.a, b: s.b }));
+useCell(ref, (s) => ({ a: s.a, b: s.b }));
 
 // RIGHT -- return stable values
-const a = useFeature(ref, (s) => s.a);
-const b = useFeature(ref, (s) => s.b);
+const a = useCell(ref, (s) => s.a);
+const b = useCell(ref, (s) => s.b);
 ```
 
 ---
 
-## S8 -- Feature stopped working
+## S8 -- Cell stopped working
 
 Circuit breaker may have tripped. Check: `curl localhost:3000/__aio/health`.
 Look for `"enabled": false` or high error counts.
@@ -256,7 +256,7 @@ expand diagnostic bus events.
 | -------------------- | ------------------------------- |
 | `action-dropped`     | Debounce dispatches             |
 | `state-key-stripped` | Rename field (avoid `$p`, `$v`) |
-| `state-no-listeners` | Add `useFeature()` in component |
+| `state-no-listeners` | Add `useCell()` in component    |
 | `effect-invalid`     | Add `type: "effectName"`        |
 | `persist-error`      | Check permissions, disk space   |
 
@@ -300,8 +300,8 @@ diagnostics: {
 
 ```bash
 curl localhost:3000/__aio/vitals | jq .     # live vitals
-curl localhost:3000/__aio/health | jq .     # feature health
+curl localhost:3000/__aio/health | jq .     # cell health
 grep 'a1b2c3d4' log/debug.log              # trace by correlation ID
 tail -f log/perf.log                        # watch budget violations
-grep -c 'feature:wallet' log/error.log      # count errors per feature
+grep -c 'cell:wallet' log/error.log      # count errors per cell
 ```

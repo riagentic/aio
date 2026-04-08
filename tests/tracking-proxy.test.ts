@@ -5,7 +5,7 @@ import {
   _collapsePaths,
   _resetTracking,
   _trackingProxy,
-} from "../src/browser.ts";
+} from "../src/browser-protocol.ts";
 
 // NOTE: Every test MUST call _resetTracking() at END to clear dangling timers
 // from _scheduleSyncSubs, otherwise Deno's op sanitizer will fail.
@@ -36,7 +36,7 @@ Deno.test("proxy: deep nested leaf records full dot-path", () => {
   _resetTracking();
 });
 
-Deno.test("proxy: multiple leaf accesses from same feature", () => {
+Deno.test("proxy: multiple leaf accesses from same cell", () => {
   _resetTracking();
   const state = {
     market: {

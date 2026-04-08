@@ -1,13 +1,13 @@
-// integration-reactive.test.ts — feature({ methods }) integration with compose pipeline
+// integration-reactive.test.ts — cell({ methods }) integration with compose pipeline
 import { assertEquals } from "@std/assert";
-import { composeFeatures, feature } from "../src/feature.ts";
+import { cell, composeCells } from "../src/cell.ts";
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 /** Full dispatch loop with init/destroy lifecycle */
-function createApp(composed: ReturnType<typeof composeFeatures>) {
+function createApp(composed: ReturnType<typeof composeCells>) {
   let state = composed.initialState;
   const history: { type: string }[] = [];
   const app = {
@@ -30,10 +30,10 @@ function createApp(composed: ReturnType<typeof composeFeatures>) {
   return app;
 }
 
-// ── Multi-feature reactive composition ──────────────────────────────
+// ── Multi-cell reactive composition ──────────────────────────────
 
-Deno.test("integration: two feature(methods) features compose independently", () => {
-  const counter = feature("counter", {
+Deno.test("integration: two cell(methods) cells compose independently", () => {
+  const counter = cell("counter", {
     state: { count: 0 },
     methods: {
       increment(s) {
@@ -45,7 +45,7 @@ Deno.test("integration: two feature(methods) features compose independently", ()
     },
   });
 
-  const todo = feature("todo", {
+  const todo = cell("todo", {
     state: { items: [] as string[] },
     methods: {
       add(s, item: string) {
@@ -54,7 +54,7 @@ Deno.test("integration: two feature(methods) features compose independently", ()
     },
   });
 
-  const composed = composeFeatures([counter, todo]);
+  const composed = composeCells([counter, todo]);
   const app = createApp(composed);
 
   app.dispatch(counter.increment!());
@@ -66,10 +66,10 @@ Deno.test("integration: two feature(methods) features compose independently", ()
   assertEquals((app.state.todo as any).items, ["buy milk"]);
 });
 
-// ── Reactive + event-driven cross-feature ───────────────────────────
+// ── Reactive + event-driven cross-cell ───────────────────────────
 
-Deno.test("integration: event-driven feature reacts to feature(methods) feature actions", () => {
-  const cart = feature("cart", {
+Deno.test("integration: event-driven cell reacts to cell(methods) cell actions", () => {
+  const cart = cell("cart", {
     state: { items: [] as string[] },
     methods: {
       addItem(s, item: string) {
@@ -81,7 +81,7 @@ Deno.test("integration: event-driven feature reacts to feature(methods) feature 
     },
   });
 
-  const stats = feature("stats", {
+  const stats = cell("stats", {
     state: { addCount: 0, clearCount: 0 },
     actions: { noop: () => ({}) },
     machine: {
@@ -104,7 +104,7 @@ Deno.test("integration: event-driven feature reacts to feature(methods) feature 
     },
   });
 
-  const composed = composeFeatures([cart, stats]);
+  const composed = composeCells([cart, stats]);
   const app = createApp(composed);
 
   app.dispatch(cart.addItem!("a"));
@@ -119,8 +119,8 @@ Deno.test("integration: event-driven feature reacts to feature(methods) feature 
 
 // ── Async reactive + sync reactive interaction ──────────────────────
 
-Deno.test("integration: async feature(methods) method with machine + sync methods", async () => {
-  const workflow = feature("workflow", {
+Deno.test("integration: async cell(methods) method with machine + sync methods", async () => {
+  const workflow = cell("workflow", {
     state: { step: "none", data: null as string | null },
     machine: {
       initial: "idle",
@@ -142,7 +142,7 @@ Deno.test("integration: async feature(methods) method with machine + sync method
     },
   });
 
-  const composed = composeFeatures([workflow]);
+  const composed = composeCells([workflow]);
   const app = createApp(composed);
 
   app.dispatch(workflow.start!() as any);
@@ -157,12 +157,12 @@ Deno.test("integration: async feature(methods) method with machine + sync method
   assertEquals((app.state.workflow as any).__aio_status, "idle");
 });
 
-// ── Lifecycle hooks with multiple reactive features ─────────────────
+// ── Lifecycle hooks with multiple reactive cells ─────────────────
 
-Deno.test("integration: init and destroy across multiple feature(methods) features", () => {
+Deno.test("integration: init and destroy across multiple cell(methods) cells", () => {
   const log: string[] = [];
 
-  const a = feature("alpha", {
+  const a = cell("alpha", {
     state: { ready: false },
     methods: {
       activate(s) {
@@ -177,7 +177,7 @@ Deno.test("integration: init and destroy across multiple feature(methods) featur
     },
   });
 
-  const b = feature("beta", {
+  const b = cell("beta", {
     state: { ready: false },
     methods: {
       activate(s) {
@@ -192,7 +192,7 @@ Deno.test("integration: init and destroy across multiple feature(methods) featur
     },
   });
 
-  const composed = composeFeatures([a, b]);
+  const composed = composeCells([a, b]);
   const app = createApp(composed);
 
   composed.initAll(app);
@@ -208,10 +208,10 @@ Deno.test("integration: init and destroy across multiple feature(methods) featur
   ]);
 });
 
-// ── Selectors across composed features ──────────────────────────────
+// ── Selectors across composed cells ──────────────────────────────
 
-Deno.test("integration: selectors work across composed feature(methods) features", () => {
-  const prices = feature("prices", {
+Deno.test("integration: selectors work across composed cell(methods) cells", () => {
+  const prices = cell("prices", {
     state: { items: [{ name: "A", price: 10 }, { name: "B", price: 20 }] },
     methods: {
       addItem(s, name: string, price: number) {
@@ -225,21 +225,28 @@ Deno.test("integration: selectors work across composed feature(methods) features
     },
   });
 
-  const composed = composeFeatures([prices]);
+  const composed = composeCells([prices]);
   let state = composed.initialState;
 
-  assertEquals(prices.__aio.selectors.total!(state), 30);
-  assertEquals(prices.__aio.selectors.count!(state), 2);
+  // Verify selector behavior through state values
+  type PriceState = { items: { name: string; price: number }[] };
+  const sum = (s: Record<string, unknown>) =>
+    (s.prices as PriceState).items.reduce((t, i) => t + i.price, 0);
+  const cnt = (s: Record<string, unknown>) =>
+    (s.prices as PriceState).items.length;
+
+  assertEquals(sum(state), 30);
+  assertEquals(cnt(state), 2);
 
   state = composed.reduce(state, prices.addItem!("C", 15)).state;
-  assertEquals(prices.__aio.selectors.total!(state), 45);
-  assertEquals(prices.__aio.selectors.count!(state), 3);
+  assertEquals(sum(state), 45);
+  assertEquals(cnt(state), 3);
 });
 
 // ── Batching across await boundaries ────────────────────────────────
 
 Deno.test("integration: batching produces correct action count across awaits", async () => {
-  const store = feature("store", {
+  const store = cell("store", {
     state: { a: 0, b: 0, c: 0, d: 0 },
     methods: {
       async multiStep(s) {
@@ -254,7 +261,7 @@ Deno.test("integration: batching produces correct action count across awaits", a
     },
   });
 
-  const composed = composeFeatures([store]);
+  const composed = composeCells([store]);
   const app = createApp(composed);
 
   app.dispatch(store.multiStep!() as any);

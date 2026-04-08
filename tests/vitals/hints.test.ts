@@ -35,7 +35,7 @@ function makeSnapshot(overrides: Partial<{
       drainRate: 50,
       lastReduceTime: 5,
       lastReduceAction: "",
-      lastReduceFeature: "",
+      lastReduceCell: "",
       p95ReduceTime: 8,
       effectBacklog: 0,
       circuitBreakers: [],
@@ -57,7 +57,7 @@ Deno.test("hints: rule 1 — slow reduce causes render freeze", () => {
       status: "warning",
       lastReduceTime: 3100,
       lastReduceAction: "orders/RECALC",
-      lastReduceFeature: "orders",
+      lastReduceCell: "orders",
       firstDegradedAt: 50,
     },
   });
@@ -76,7 +76,7 @@ Deno.test("hints: rule 2 — queue saturation", () => {
       drainRate: 3,
       firstDegradedAt: 50,
       lastReduceAction: "market/TICK",
-      lastReduceFeature: "market",
+      lastReduceCell: "market",
     },
     transport: { status: "degraded", firstDegradedAt: 200 },
   });

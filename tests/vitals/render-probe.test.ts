@@ -18,7 +18,7 @@ Deno.test("render-probe: records last action", () => {
   const probe = createRenderProbe(baseConfig());
   probe.recordAction("click", "ui");
   assertEquals(probe.getLastAction(), "click");
-  assertEquals(probe.getLastFeature(), "ui");
+  assertEquals(probe.getLastCell(), "ui");
   probe.destroy();
 });
 
@@ -98,7 +98,7 @@ Deno.test("render-probe: destroy clears state", () => {
 
   assertEquals(probe.getStatus(), "healthy");
   assertEquals(probe.getLastAction(), null);
-  assertEquals(probe.getLastFeature(), null);
+  assertEquals(probe.getLastCell(), null);
   assertEquals(probe.getUnprocessedDeltas(), 0);
   assertEquals(probe.getPreviousFreezeCount(), 0);
   assertEquals(probe.getFirstDegradedAt(), null);

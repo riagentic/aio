@@ -1,4 +1,4 @@
-// Phase 4 Tests — 12 features: exports, lifecycle, context, JSX, useRef, Portal,
+// Phase 4 Tests — 12 cells: exports, lifecycle, context, JSX, useRef, Portal,
 // Suspense/lazy, dev warnings, forms, animations, virtual scrolling, devtools.
 
 import { assert, assertEquals, assertExists } from "@std/assert";
@@ -42,13 +42,12 @@ import {
   connectAioDevTools,
 } from "../src/devtools.ts";
 
-// happy-dom creates internal timers, disable Deno's leak detection for DOM tests
-const S = { sanitizeOps: false, sanitizeResources: false } as const;
+// happy-dom timers drained via win.happyDOM.close() — sanitizers re-enabled
 
 function createDOM(): { document: Document; cleanup: () => void } {
   const win = new Window({ url: "https://localhost" });
   const doc = win.document as unknown as Document;
-  return { document: doc, cleanup: () => win.close() };
+  return { document: doc, cleanup: () => win.happyDOM.close() };
 }
 
 function setupMount(): {
@@ -75,8 +74,7 @@ function setupMount(): {
 
 Deno.test({
   name: "export: ErrorBoundary, Portal, Suspense, lazy are importable",
-  ...S,
-  fn() {
+  async fn() {
     assertExists(ErrorBoundary);
     assertExists(Portal);
     assertExists(Suspense);
@@ -91,8 +89,7 @@ Deno.test({
 
 Deno.test({
   name: "lifecycle: onMount fires after first render",
-  ...S,
-  fn() {
+  async fn() {
     const { root, cleanup, mount: m } = setupMount();
     let mounted = false;
     const App = () => {
@@ -104,14 +101,13 @@ Deno.test({
     m(App);
     assertEquals(mounted, true);
     assertEquals(root.innerHTML, "<div>hello</div>");
-    cleanup();
+    await cleanup();
   },
 });
 
 Deno.test({
   name: "lifecycle: onCleanup fires on unmount",
-  ...S,
-  fn() {
+  async fn() {
     const { root, cleanup, mount: m } = setupMount();
     let cleaned = false;
     const App = () => {
@@ -127,14 +123,13 @@ Deno.test({
     assertEquals(cleaned, false);
     _unmount(handle);
     assertEquals(cleaned, true);
-    cleanup();
+    await cleanup();
   },
 });
 
 Deno.test({
   name: "lifecycle: onCleanup fires before signal re-render",
-  ...S,
-  fn() {
+  async fn() {
     const { cleanup, mount: m } = setupMount();
     const count = signal(0);
     const log: string[] = [];
@@ -149,15 +144,14 @@ Deno.test({
     count.set(1);
     handle._flush();
     assertEquals(log, ["initial", "cleanup"]);
-    cleanup();
+    await cleanup();
   },
 });
 
 Deno.test({
   name:
     "lifecycle: onCleanup inside onMount registers and fires on unmount (AIO-74)",
-  ...S,
-  fn() {
+  async fn() {
     const { cleanup, mount: m } = setupMount();
     let cleaned = false;
     const App = () => {
@@ -173,7 +167,7 @@ Deno.test({
     assertEquals(cleaned, false);
     _unmount(handle);
     assertEquals(cleaned, true);
-    cleanup();
+    await cleanup();
   },
 });
 
@@ -183,8 +177,7 @@ Deno.test({
 
 Deno.test({
   name: "useSignal: creates signal scoped to component",
-  ...S,
-  fn() {
+  async fn() {
     const { root, cleanup, mount: m } = setupMount();
     const App = () => {
       const count = useSignal(0);
@@ -192,14 +185,13 @@ Deno.test({
     };
     m(App);
     assertEquals(root.innerHTML, "<span>0</span>");
-    cleanup();
+    await cleanup();
   },
 });
 
 Deno.test({
   name: "useSignal: persists across re-renders",
-  ...S,
-  fn() {
+  async fn() {
     const { root, cleanup, mount: m } = setupMount();
     const trigger = signal(0);
     let sigRef: ReturnType<typeof useSignal<number>> | null = null;
@@ -217,14 +209,13 @@ Deno.test({
     trigger.set(1);
     handle._flush();
     assertEquals(sigRef === firstSig, true);
-    cleanup();
+    await cleanup();
   },
 });
 
 Deno.test({
   name: "useSignal: .set() triggers component re-render",
-  ...S,
-  fn() {
+  async fn() {
     const { root, cleanup, mount: m } = setupMount();
     let sig: ReturnType<typeof useSignal<number>> | null = null;
     const App = () => {
@@ -238,14 +229,13 @@ Deno.test({
     sig!.set(5);
     handle._flush();
     assertEquals(root.innerHTML, "<span>5</span>");
-    cleanup();
+    await cleanup();
   },
 });
 
 Deno.test({
   name: "useSignal: multiple useSignal calls maintain independent state",
-  ...S,
-  fn() {
+  async fn() {
     const { root, cleanup, mount: m } = setupMount();
     const App = () => {
       const a = useSignal(10);
@@ -254,7 +244,7 @@ Deno.test({
     };
     m(App);
     assertEquals(root.innerHTML, "<div>10-hello</div>");
-    cleanup();
+    await cleanup();
   },
 });
 
@@ -264,36 +254,33 @@ Deno.test({
 
 Deno.test({
   name: "context: Provider passes value to children",
-  ...S,
-  fn() {
+  async fn() {
     const { root, cleanup, mount: m } = setupMount();
     const ThemeCtx = createContext("light");
     const Child = () => h("span", null, useContext(ThemeCtx));
     const App = () => h(ThemeCtx.Provider, { value: "dark" }, h(Child, null));
     m(App);
     assertEquals(root.innerHTML, "<span>dark</span>");
-    cleanup();
+    await cleanup();
   },
 });
 
 Deno.test({
   name: "context: default value when no Provider",
-  ...S,
-  fn() {
+  async fn() {
     const { root, cleanup, mount: m } = setupMount();
     const Ctx = createContext(42);
     const Child = () => h("span", null, String(useContext(Ctx)));
     const App = () => h(Child, null);
     m(App);
     assertEquals(root.innerHTML, "<span>42</span>");
-    cleanup();
+    await cleanup();
   },
 });
 
 Deno.test({
   name: "context: nested Providers override",
-  ...S,
-  fn() {
+  async fn() {
     const { root, cleanup, mount: m } = setupMount();
     const Ctx = createContext("a");
     const Inner = () => h("span", null, useContext(Ctx));
@@ -305,7 +292,7 @@ Deno.test({
       );
     m(App);
     assertEquals(root.innerHTML, "<span>inner</span>");
-    cleanup();
+    await cleanup();
   },
 });
 
@@ -315,7 +302,6 @@ Deno.test({
 
 Deno.test({
   name: "jsx-runtime: exports jsx, jsxs, Fragment",
-  ...S,
   async fn() {
     const mod = await import("../src/jsx-runtime.ts");
     assertExists(mod.jsx);
@@ -335,8 +321,7 @@ Deno.test({
 
 Deno.test({
   name: "useRef: persists across re-renders",
-  ...S,
-  fn() {
+  async fn() {
     const { root, cleanup, mount: m } = setupMount();
     const count = signal(0);
     let renderCount = 0;
@@ -352,14 +337,13 @@ Deno.test({
     handle._flush();
     assertEquals(root.innerHTML, "<span>renders=2 count=1</span>");
     assertEquals(renderCount, 2);
-    cleanup();
+    await cleanup();
   },
 });
 
 Deno.test({
   name: "useRef: does not trigger re-render on mutation",
-  ...S,
-  fn() {
+  async fn() {
     const { root, cleanup, mount: m } = setupMount();
     let renderCount = 0;
     const App = () => {
@@ -371,7 +355,7 @@ Deno.test({
     m(App);
     assertEquals(renderCount, 1);
     assertEquals(root.innerHTML, "<span>stable</span>");
-    cleanup();
+    await cleanup();
   },
 });
 
@@ -381,8 +365,7 @@ Deno.test({
 
 Deno.test({
   name: "portal: renders children into target DOM node",
-  ...S,
-  fn() {
+  async fn() {
     const { document, cleanup, mount: m } = setupMount();
     const portalTarget = document.createElement("div");
     portalTarget.id = "portal";
@@ -402,14 +385,13 @@ Deno.test({
     mount(root, App);
     assertEquals(root.innerHTML, "<span>main</span>");
     assertEquals(portalTarget.innerHTML, "<div>portal content</div>");
-    cleanup();
+    await cleanup();
   },
 });
 
 Deno.test({
   name: "portal: SSR skips portal content",
-  ...S,
-  fn() {
+  async fn() {
     const html = renderToString(
       h(Portal, { target: null }, h("div", null, "should not appear")),
     );
@@ -423,8 +405,7 @@ Deno.test({
 
 Deno.test({
   name: "suspense SSR: shows fallback for unresolved lazy",
-  ...S,
-  fn() {
+  async fn() {
     const LazyComp = lazy(() => new Promise(() => {})); // never resolves
     const html = renderToString(
       h(
@@ -439,8 +420,7 @@ Deno.test({
 
 Deno.test({
   name: "suspense: shows fallback in DOM for unresolved lazy",
-  ...S,
-  fn() {
+  async fn() {
     const { root, cleanup, mount: m } = setupMount();
     const LazyComp = lazy(() => new Promise(() => {})); // never resolves
     const App = () =>
@@ -451,14 +431,13 @@ Deno.test({
       );
     m(App);
     assertEquals(root.innerHTML, "<span>Loading...</span>");
-    cleanup();
+    await cleanup();
   },
 });
 
 Deno.test({
   name: "suspense: renders children when not lazy",
-  ...S,
-  fn() {
+  async fn() {
     const html = renderToString(
       h(
         Suspense,
@@ -476,8 +455,7 @@ Deno.test({
 
 Deno.test({
   name: "dev: warns on duplicate keys",
-  ...S,
-  fn() {
+  async fn() {
     const { document, cleanup } = createDOM();
     const ctx = { doc: document };
     const warnings: string[] = [];
@@ -505,7 +483,7 @@ Deno.test({
       setDevMode(false);
       console.warn = origWarn;
     }
-    cleanup();
+    await cleanup();
   },
 });
 
@@ -515,8 +493,7 @@ Deno.test({
 
 Deno.test({
   name: "useForm: initial values and validation",
-  ...S,
-  fn() {
+  async fn() {
     const form = useForm({
       name: {
         initial: "",
@@ -555,8 +532,7 @@ Deno.test({
 
 Deno.test({
   name: "useForm: validate all at once",
-  ...S,
-  fn() {
+  async fn() {
     const form = useForm({
       email: {
         initial: "",
@@ -572,8 +548,7 @@ Deno.test({
 
 Deno.test({
   name: "useFieldArray: push, remove, move",
-  ...S,
-  fn() {
+  async fn() {
     const arr = useFieldArray<string>(["a", "b"]);
     assertEquals(arr.items, ["a", "b"]);
 
@@ -598,7 +573,6 @@ Deno.test({
 
 Deno.test({
   name: "useTransition: enter/exit lifecycle",
-  ...S,
   async fn() {
     const fade = useTransition({ name: "fade", duration: 50 });
 
@@ -629,8 +603,7 @@ Deno.test({
 
 Deno.test({
   name: "useTransition: initial=true starts as active",
-  ...S,
-  fn() {
+  async fn() {
     const t = useTransition({ name: "slide", initial: true });
     assertEquals(t.stage, "active");
     assertEquals(t.mounted, true);
@@ -639,8 +612,7 @@ Deno.test({
 
 Deno.test({
   name: "useSpring: immediate set",
-  ...S,
-  fn() {
+  async fn() {
     const spring = useSpring({ initial: 0 });
     assertEquals(spring.value, 0);
     spring.set(100);
@@ -655,8 +627,7 @@ Deno.test({
 
 Deno.test({
   name: "useVirtualList: renders only visible items",
-  ...S,
-  fn() {
+  async fn() {
     const items = Array.from(
       { length: 1000 },
       (_, i) => ({ id: i, name: `Item ${i}` }),
@@ -678,8 +649,7 @@ Deno.test({
 
 Deno.test({
   name: "useVirtualList: scrollToIndex changes visible window",
-  ...S,
-  fn() {
+  async fn() {
     const items = Array.from({ length: 100 }, (_, i) => i);
     const vlist = useVirtualList({
       items,
@@ -698,8 +668,7 @@ Deno.test({
 
 Deno.test({
   name: "useVirtualList: works with signal items",
-  ...S,
-  fn() {
+  async fn() {
     const itemsSig = signal([1, 2, 3, 4, 5]);
     const vlist = useVirtualList({
       items: itemsSig,
@@ -714,8 +683,7 @@ Deno.test({
 
 Deno.test({
   name: "useVirtualList: container and inner styles",
-  ...S,
-  fn() {
+  async fn() {
     const vlist = useVirtualList({
       items: [1, 2, 3],
       itemHeight: 30,
@@ -733,8 +701,7 @@ Deno.test({
 
 Deno.test({
   name: "devtools: connect and record render events",
-  ...S,
-  fn() {
+  async fn() {
     const handle = connectAioDevTools();
     assertEquals(handle.connected, true);
     assertEquals(handle.totalRenders, 0);
@@ -756,8 +723,7 @@ Deno.test({
 
 Deno.test({
   name: "devtools: _isDevToolsConnected reflects state",
-  ...S,
-  fn() {
+  async fn() {
     const handle = connectAioDevTools();
     assertEquals(_isDevToolsConnected(), true);
     handle.disconnect();
@@ -771,7 +737,6 @@ Deno.test({
 
 Deno.test({
   name: "suspense: lazy component resolves and replaces fallback",
-  ...S,
   async fn() {
     const { root, cleanup, mount: m } = setupMount();
     let resolveFn!: (
@@ -799,7 +764,7 @@ Deno.test({
     await new Promise((r) => setTimeout(r, 10));
     handle._flush();
     assertEquals(root.innerHTML, "<div>Loaded!</div>");
-    cleanup();
+    await cleanup();
   },
 });
 
@@ -809,8 +774,7 @@ Deno.test({
 
 Deno.test({
   name: "portal: content removed on unmount",
-  ...S,
-  fn() {
+  async fn() {
     const { document, cleanup, mount: m } = setupMount();
     const portalTarget = document.createElement("div");
     document.body.appendChild(portalTarget);
@@ -829,7 +793,7 @@ Deno.test({
     show.set(false);
     handle._flush();
     assertEquals(portalTarget.innerHTML, "");
-    cleanup();
+    await cleanup();
   },
 });
 
@@ -839,8 +803,7 @@ Deno.test({
 
 Deno.test({
   name: "context: updates when Provider value changes via signal",
-  ...S,
-  fn() {
+  async fn() {
     const { root, cleanup, mount: m } = setupMount();
     const ThemeCtx = createContext("light");
     const theme = signal("light");
@@ -853,7 +816,7 @@ Deno.test({
     theme.set("dark");
     handle._flush();
     assertEquals(root.innerHTML, "<span>dark</span>");
-    cleanup();
+    await cleanup();
   },
 });
 
@@ -863,8 +826,7 @@ Deno.test({
 
 Deno.test({
   name: "useRef: multiple refs in same component persist independently",
-  ...S,
-  fn() {
+  async fn() {
     const { root, cleanup, mount: m } = setupMount();
     const count = signal(0);
     const App = () => {
@@ -878,7 +840,7 @@ Deno.test({
     count.set(1);
     handle._flush();
     assertEquals(root.innerHTML, "<span>2-hello-1</span>");
-    cleanup();
+    await cleanup();
   },
 });
 
@@ -888,8 +850,7 @@ Deno.test({
 
 Deno.test({
   name: "lifecycle: throwing cleanup does not break subsequent cleanups",
-  ...S,
-  fn() {
+  async fn() {
     const { cleanup, mount: m } = setupMount();
     const count = signal(0);
     const log: string[] = [];
@@ -913,7 +874,7 @@ Deno.test({
     } finally {
       console.error = origErr;
     }
-    cleanup();
+    await cleanup();
   },
 });
 
@@ -923,8 +884,7 @@ Deno.test({
 
 Deno.test({
   name: "dev: setDevMode(false) clears warning dedup",
-  ...S,
-  fn() {
+  async fn() {
     const { document, cleanup } = createDOM();
     const ctx = { doc: document };
     const warnings: string[] = [];
@@ -967,7 +927,7 @@ Deno.test({
       setDevMode(false);
       console.warn = origWarn;
     }
-    cleanup();
+    await cleanup();
   },
 });
 
@@ -977,8 +937,7 @@ Deno.test({
 
 Deno.test({
   name: "useForm: bind() value tracks signal changes",
-  ...S,
-  fn() {
+  async fn() {
     const form = useForm({
       name: { initial: "Alice" },
     });
@@ -995,8 +954,7 @@ Deno.test({
 
 Deno.test({
   name: "hydrate: context Provider passes value to children",
-  ...S,
-  fn() {
+  async fn() {
     const { document, cleanup } = createDOM();
     _setDocument(document);
     const root = document.createElement("div");
@@ -1011,7 +969,7 @@ Deno.test({
     hydrate(root, App);
     // After hydration, context should be wired — DOM unchanged
     assertEquals(root.innerHTML, "<span>dark</span>");
-    cleanup();
+    await cleanup();
   },
 });
 
@@ -1021,8 +979,7 @@ Deno.test({
 
 Deno.test({
   name: "hydrate: nested components — instanceStack cleaned up",
-  ...S,
-  fn() {
+  async fn() {
     const { document, cleanup } = createDOM();
     _setDocument(document);
     const root = document.createElement("div");
@@ -1043,7 +1000,7 @@ Deno.test({
     hydrate(root, App);
     assertEquals(childCtxValue, "nested");
     assertEquals(root.innerHTML, "<span><b>nested</b></span>");
-    cleanup();
+    await cleanup();
   },
 });
 
@@ -1053,7 +1010,6 @@ Deno.test({
 
 Deno.test({
   name: "suspense: lazy error propagates to ErrorBoundary",
-  ...S,
   async fn() {
     const { root, cleanup, mount: m } = setupMount();
     let rejectFn!: (err: Error) => void;
@@ -1086,7 +1042,7 @@ Deno.test({
     await new Promise((r) => setTimeout(r, 10));
     handle._flush();
     assertEquals(root.innerHTML, "<span>Error: network failure</span>");
-    cleanup();
+    await cleanup();
   },
 });
 
@@ -1094,8 +1050,7 @@ Deno.test({
 
 Deno.test({
   name: "useId: returns stable unique IDs across re-renders",
-  ...S,
-  fn() {
+  async fn() {
     const { root, mount: m, cleanup } = setupMount();
     const ids: string[] = [];
     const trigger = signal(0);
@@ -1120,14 +1075,13 @@ Deno.test({
     assertEquals(ids.length, 4);
     assertEquals(ids[2], ids[0], "ID 1 must persist across re-renders");
     assertEquals(ids[3], ids[1], "ID 2 must persist across re-renders");
-    cleanup();
+    await cleanup();
   },
 });
 
 Deno.test({
   name: "useId: different components get different IDs",
-  ...S,
-  fn() {
+  async fn() {
     const { root, mount: m, cleanup } = setupMount();
     const ids: string[] = [];
 
@@ -1148,14 +1102,13 @@ Deno.test({
     // All three IDs must be unique
     const unique = new Set(ids);
     assertEquals(unique.size, 3, "All IDs must be unique");
-    cleanup();
+    await cleanup();
   },
 });
 
 Deno.test({
   name: "useId: SSR renders deterministic IDs",
-  ...S,
-  fn() {
+  async fn() {
     function Inner() {
       const id = useId();
       return h("label", { htmlFor: id }, h("input", { id }));
@@ -1183,8 +1136,7 @@ Deno.test({
 
 Deno.test({
   name: "useOptimistic: shows passthrough when no optimistic action",
-  ...S,
-  fn() {
+  async fn() {
     const { root, mount: m, cleanup } = setupMount();
 
     function App() {
@@ -1197,14 +1149,13 @@ Deno.test({
 
     m(App);
     assertEquals(root.innerHTML, "<div>confirmed</div>");
-    cleanup();
+    await cleanup();
   },
 });
 
 Deno.test({
   name: "useOptimistic: applies optimistic overlay on addOptimistic",
-  ...S,
-  fn() {
+  async fn() {
     const { root, mount: m, cleanup } = setupMount();
     let addFn: ((v: string) => void) | null = null;
 
@@ -1224,14 +1175,13 @@ Deno.test({
     addFn!("optimistic!");
     handle._flush();
     assertEquals(root.innerHTML, "<div>optimistic!</div>");
-    cleanup();
+    await cleanup();
   },
 });
 
 Deno.test({
   name: "useOptimistic: clears overlay when passthrough changes",
-  ...S,
-  fn() {
+  async fn() {
     const { root, mount: m, cleanup } = setupMount();
     const serverState = signal("v1");
     let addFn: ((v: string) => void) | null = null;
@@ -1257,14 +1207,13 @@ Deno.test({
     serverState.set("v2");
     handle._flush();
     assertEquals(root.innerHTML, "<div>v2</div>");
-    cleanup();
+    await cleanup();
   },
 });
 
 Deno.test({
   name: "useOptimistic: stacks multiple optimistic actions",
-  ...S,
-  fn() {
+  async fn() {
     const { root, mount: m, cleanup } = setupMount();
     let addFn: ((v: number) => void) | null = null;
 
@@ -1284,6 +1233,6 @@ Deno.test({
     addFn!(3);
     handle._flush();
     assertEquals(root.innerHTML, "<div>8</div>");
-    cleanup();
+    await cleanup();
   },
 });

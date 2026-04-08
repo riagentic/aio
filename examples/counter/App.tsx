@@ -1,5 +1,5 @@
 // UI component — export default, framework mounts it
-import { useFeature } from "aio/air";
+import { useCell } from "aio/air";
 import { counter } from "./app.ts";
 
 const btn: Record<string, string> = {
@@ -9,7 +9,7 @@ const btn: Record<string, string> = {
 };
 
 export default function App() {
-  const { state, send } = useFeature(counter);
+  const { state, send } = useCell(counter);
   if (!state) return <div>Connecting...</div>;
 
   return (

@@ -12,12 +12,12 @@ Deno.test("TT — error entry has error field", () => {
   markError(tt, {
     code: "REDUCE_ERROR",
     message: "kaboom",
-    featureName: "test",
+    cellName: "test",
   });
   assertEquals(tt.entries[tt.index]!.error, {
     code: "REDUCE_ERROR",
     message: "kaboom",
-    featureName: "test",
+    cellName: "test",
   });
 });
 

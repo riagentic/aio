@@ -2,11 +2,12 @@ import { assertEquals } from "jsr:@std/assert";
 import { _injectDelta, _injectState, _reset } from "../src/state-core.ts";
 import {
   useAio,
+  useCell,
   useConnected,
-  useFeature,
   useLocal,
 } from "../src/adapters/air.ts";
 
+// CellRef interface requires __aio — this is the public type shape for client-side cell references
 const fakeRef = {
   __aio: {
     id: "counter",
@@ -16,33 +17,33 @@ const fakeRef = {
   },
 };
 
-Deno.test("air: useFeature reads feature state", () => {
+Deno.test("air: useCell reads cell state", () => {
   _reset();
   _injectState({ counter: { count: 42 } });
-  const { state } = useFeature(fakeRef);
+  const { state } = useCell(fakeRef);
   assertEquals(state.count, 42);
   _reset();
 });
 
-Deno.test("air: useFeature falls back to ref default when no state", () => {
+Deno.test("air: useCell falls back to ref default when no state", () => {
   _reset();
-  const { state } = useFeature(fakeRef);
+  const { state } = useCell(fakeRef);
   assertEquals(state.count, 0);
   _reset();
 });
 
-Deno.test("air: useFeature send has typed methods", () => {
+Deno.test("air: useCell send has typed methods", () => {
   _reset();
   _injectState({ counter: { count: 0 } });
-  const { send } = useFeature(fakeRef);
+  const { send } = useCell(fakeRef);
   assertEquals(typeof send.increment, "function");
   _reset();
 });
 
-Deno.test("air: useFeature state updates on delta", () => {
+Deno.test("air: useCell state updates on delta", () => {
   _reset();
   _injectState({ counter: { count: 0 } });
-  const { state } = useFeature(fakeRef);
+  const { state } = useCell(fakeRef);
   assertEquals(state.count, 0);
   _injectDelta({ $p: { counter: { count: 5 } } });
   assertEquals(state.count, 5);

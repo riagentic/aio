@@ -31,7 +31,7 @@ Deno.test("loop-probe: initial state is healthy with zeroes", () => {
   assertEquals(vitals.queueDepth, 0);
   assertEquals(vitals.lastReduceTime, 0);
   assertEquals(vitals.lastReduceAction, "");
-  assertEquals(vitals.lastReduceFeature, "");
+  assertEquals(vitals.lastReduceCell, "");
   assertEquals(vitals.p95ReduceTime, 0);
   assertEquals(vitals.effectBacklog, 0);
   assertEquals(vitals.circuitBreakers, []);
@@ -48,16 +48,16 @@ Deno.test("loop-probe: onPerf updates reduce metrics", () => {
 
   assertEquals(vitals.lastReduceTime, 42);
   assertEquals(vitals.lastReduceAction, "orders/PLACE_ORDER");
-  assertEquals(vitals.lastReduceFeature, "orders");
+  assertEquals(vitals.lastReduceCell, "orders");
 });
 
-Deno.test("loop-probe: onPerf extracts feature from colon pattern", () => {
+Deno.test("loop-probe: onPerf extracts cell from colon pattern", () => {
   const probe = createLoopProbe(DEFAULT_THRESHOLDS);
 
   probe.onPerf(makeTiming("portfolio:REBALANCE", 10));
   const vitals = probe.getVitals();
 
-  assertEquals(vitals.lastReduceFeature, "portfolio");
+  assertEquals(vitals.lastReduceCell, "portfolio");
   assertEquals(vitals.lastReduceAction, "portfolio:REBALANCE");
 });
 

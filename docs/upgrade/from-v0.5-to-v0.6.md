@@ -1,5 +1,8 @@
 # Upgrade from v0.5 to v0.6
 
+> **Note:** `feature()` was renamed to `cell()` in alpha11. See
+> [upgrade guide](from-alpha10-to-alpha11.md).
+
 ### New features — generator-based flows
 
 v0.6 adds `flow()` — sequential async workflows using generators. _(The `flows:`

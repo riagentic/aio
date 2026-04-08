@@ -3,8 +3,8 @@
 A start-to-finish walkthrough. You type along, building a server metrics
 dashboard that tracks CPU, memory, and request counts. Multiple browser tabs
 stay in sync. Per-user auth controls who sees what. SQLite stores history for
-queries. By the end you will have used: features, scheduling, SQLite
-persistence, auth, React UI, and testing -- all in one app.
+queries. By the end you will have used: cells, scheduling, SQLite persistence,
+auth, React UI, and testing -- all in one app.
 
 ## Step 1: Project setup
 
@@ -41,22 +41,22 @@ deno.json
 src/
   app.ts
   App.tsx
-  features/metrics/index.ts
-  features/metrics/metrics.test.ts
+  cell/metrics/index.ts
+  cell/metrics/metrics.test.ts
 ```
 
-## Step 2: Metrics feature
+## Step 2: Metrics cell
 
-The metrics feature owns CPU, memory, request count, and a history buffer. Sync
+The metrics cell owns CPU, memory, request count, and a history buffer. Sync
 methods update values; an async method persists a request record.
 
 ```ts
-// src/features/metrics/index.ts
-import { feature } from "aio";
+// src/cell/metrics/index.ts
+import { cell } from "aio";
 
 export type Snapshot = { cpu: number; mem: number; ts: number };
 
-export const metrics = feature("metrics", {
+export const metrics = cell("metrics", {
   state: {
     cpu: 0,
     mem: 0,
@@ -83,7 +83,7 @@ export const metrics = feature("metrics", {
 
 `update` is synchronous -- it mutates the Immer draft directly. `recordRequest`
 is async, which means it goes through the full dispatch/effect pipeline and can
-be awaited from other features.
+be awaited from other cells.
 
 > **Tip:** Keep the history array bounded. SQLite handles the full archive; the
 > in-memory buffer is just for the sparkline.
@@ -95,7 +95,7 @@ this declaratively -- no `setInterval` in your code. Add an async `poll` method
 that reads real system data:
 
 ```ts
-// src/features/metrics/index.ts — add this method
+// src/cell/metrics/index.ts — add this method
     async poll(s) {
       // Deno built-in: loadavg for CPU approximation, memoryUsage for heap
       const [load1] = Deno.loadavg()  // 1-minute load average
@@ -114,11 +114,11 @@ Wire it up in `app.ts` with a static schedule:
 ```ts
 // src/app.ts
 import { aio } from "aio";
-import { metrics } from "./features/metrics/index.ts";
+import { metrics } from "./cell/metrics/index.ts";
 
 await aio.run({
   appId: "dash",
-  features: [metrics],
+  cells: [metrics],
   schedules: [
     { id: "poll-metrics", every: 5000, action: metrics.poll() },
   ],
@@ -135,11 +135,11 @@ The in-memory history resets on restart. Add SQLite to keep a permanent record.
 ```ts
 // src/app.ts
 import { aio, integer, pk, real, table } from "aio";
-import { metrics } from "./features/metrics/index.ts";
+import { metrics } from "./cell/metrics/index.ts";
 
 await aio.run({
   appId: "dash",
-  features: [metrics],
+  cells: [metrics],
   schedules: [
     { id: "poll-metrics", every: 5000, action: metrics.poll() },
   ],
@@ -196,7 +196,7 @@ const users: Record<string, AioUser> = {
 
 await aio.run({
   appId: "dash",
-  features: [metrics],
+  cells: [metrics],
   users,
   schedules: [
     { id: "poll-metrics", every: 5000, action: metrics.poll() },
@@ -209,22 +209,26 @@ await aio.run({
       ts: integer(),
     }),
   },
-  stateForUI: (state, user?) => {
-    if (user?.role === "admin") return state;
-    // Viewers get current values but not the history array
-    return {
-      metrics: {
-        cpu: state.metrics.cpu,
-        mem: state.metrics.mem,
-        requests: state.metrics.requests,
-        history: [],
-      },
-    };
-  },
 });
 ```
 
-`stateForUI` runs per client on every broadcast. Viewers get live numbers but no
+Per-user filtering is configured on the cell itself:
+
+```ts
+export const metrics = cell("metrics", {
+  state: { cpu: 0, mem: 0, requests: 0, history: [] as Snapshot[] },
+  ui: {
+    forUser: (exposed, user?) => {
+      if (user?.role === "admin") return exposed;
+      // Viewers get current values but not the history array
+      return { ...exposed, history: [] };
+    },
+  },
+  // ... methods
+});
+```
+
+`ui.forUser` runs per client on every broadcast. Viewers get live numbers but no
 history -- the sparkline will be empty for them. Connect as admin at
 `http://localhost:8000?token=admin-token-123` or viewer at
 `?token=viewer-token-456`.
@@ -236,12 +240,12 @@ history -- the sparkline will be empty for them. Connect as admin at
 
 ```tsx
 // src/App.tsx
-import { useFeature } from "aio/react";
-import { metrics } from "./features/metrics/index.ts";
-import type { Snapshot } from "./features/metrics/index.ts";
+import { useCell } from "aio/react";
+import { metrics } from "./cell/metrics/index.ts";
+import type { Snapshot } from "./cell/metrics/index.ts";
 
 export default function App() {
-  const { state, send } = useFeature(metrics);
+  const { state, send } = useCell(metrics);
   if (!state) return <div>Connecting...</div>;
 
   return (
@@ -336,21 +340,21 @@ function Sparkline(
 }
 ```
 
-`useFeature(metrics)` gives you typed state and a typed `send` proxy. The
-sparkline is just flex divs proportional to the value -- red above 80%, green
-below. Open two browser tabs: both update simultaneously. Click "Simulate
-Request" in one and watch the counter increment in both.
+`useCell(metrics)` gives you typed state and a typed `send` proxy. The sparkline
+is just flex divs proportional to the value -- red above 80%, green below. Open
+two browser tabs: both update simultaneously. Click "Simulate Request" in one
+and watch the counter increment in both.
 
 ## Step 7: Testing
 
 Test the sync method in isolation. No server, no browser, no mocking.
 
 ```ts
-// src/features/metrics/metrics.test.ts
-import { testFeature } from "aio";
+// src/cell/metrics/metrics.test.ts
+import { testCell } from "aio";
 import { metrics } from "./index.ts";
 
-testFeature(metrics, "update records snapshot", (t) => {
+testCell(metrics, "update records snapshot", (t) => {
   t.init();
   t.send.update(45.2, 512);
   t.expect.state((s) => s.cpu === 45.2);
@@ -359,7 +363,7 @@ testFeature(metrics, "update records snapshot", (t) => {
   t.expect.state((s) => s.history[0].cpu === 45.2);
 });
 
-testFeature(metrics, "history caps at 100", (t) => {
+testCell(metrics, "history caps at 100", (t) => {
   t.init();
   for (let i = 0; i < 110; i++) {
     t.send.update(i, i);
@@ -368,7 +372,7 @@ testFeature(metrics, "history caps at 100", (t) => {
   t.expect.state((s) => s.history[0].cpu === 10);
 });
 
-testFeature(metrics, "recordRequest increments", async (t) => {
+testCell(metrics, "recordRequest increments", async (t) => {
   t.init();
   t.send.recordRequest();
   await t.settle();
@@ -376,7 +380,7 @@ testFeature(metrics, "recordRequest increments", async (t) => {
 });
 ```
 
-Run with `deno task test`. `testFeature` wraps `Deno.test` with a harness that
+Run with `deno task test`. `testCell` wraps `Deno.test` with a harness that
 resets state between runs. `t.send` dispatches through the real reducer -- no
 mocking needed.
 
@@ -409,5 +413,5 @@ journalctl -u dash -f
 > `--compile --service --remote`. The systemd unit will include `--expose` and
 > auto-generate TLS.
 
-That is the entire app: one feature, one schedule, one SQLite table, two users,
-and a React UI -- all wired together by `aio.run()`.
+That is the entire app: one cell, one schedule, one SQLite table, two users, and
+a React UI -- all wired together by `aio.run()`.

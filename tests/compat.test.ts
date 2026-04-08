@@ -25,16 +25,14 @@ function createDOM(): {
   const doc = win.document as unknown as Document;
   const root = doc.createElement("div");
   doc.body.appendChild(root);
-  return { document: doc, root, cleanup: () => win.close() };
+  return { document: doc, root, cleanup: () => win.happyDOM.close() };
 }
 
 // ── useState ───────────────────────────────────────────────────────
 
 Deno.test({
   name: "compat: useState returns [value, setter] tuple",
-  sanitizeOps: false,
-  sanitizeResources: false,
-  fn() {
+  async fn() {
     const { document, root, cleanup } = createDOM();
     _setDocument(document);
     let captured: [number, (n: number | ((p: number) => number)) => void] = [
@@ -49,15 +47,13 @@ Deno.test({
     assertEquals(captured[0], 42);
     assertEquals(root.innerHTML, "<div>42</div>");
     _unmount(handle);
-    cleanup();
+    await cleanup();
   },
 });
 
 Deno.test({
   name: "compat: useState setter triggers re-render",
-  sanitizeOps: false,
-  sanitizeResources: false,
-  fn() {
+  async fn() {
     const { document, root, cleanup } = createDOM();
     _setDocument(document);
     let setter: (n: number | ((p: number) => number)) => void = () => {};
@@ -72,15 +68,13 @@ Deno.test({
     handle._flush();
     assertEquals(root.innerHTML, "<div>7</div>");
     _unmount(handle);
-    cleanup();
+    await cleanup();
   },
 });
 
 Deno.test({
   name: "compat: useState setter accepts updater function",
-  sanitizeOps: false,
-  sanitizeResources: false,
-  fn() {
+  async fn() {
     const { document, root, cleanup } = createDOM();
     _setDocument(document);
     let setter: (n: number | ((p: number) => number)) => void = () => {};
@@ -98,15 +92,13 @@ Deno.test({
     handle._flush();
     assertEquals(root.innerHTML, "<div>30</div>");
     _unmount(handle);
-    cleanup();
+    await cleanup();
   },
 });
 
 Deno.test({
   name: "compat: useState accepts lazy initializer function",
-  sanitizeOps: false,
-  sanitizeResources: false,
-  fn() {
+  async fn() {
     const { document, root, cleanup } = createDOM();
     _setDocument(document);
     let captured = 0;
@@ -119,7 +111,7 @@ Deno.test({
     assertEquals(captured, 42);
     assertEquals(root.innerHTML, "<div>42</div>");
     _unmount(handle);
-    cleanup();
+    await cleanup();
   },
 });
 
@@ -127,9 +119,7 @@ Deno.test({
 
 Deno.test({
   name: "compat: useEffect with empty deps runs on mount",
-  sanitizeOps: false,
-  sanitizeResources: false,
-  fn() {
+  async fn() {
     const { document, root, cleanup } = createDOM();
     _setDocument(document);
     let mounted = false;
@@ -142,15 +132,13 @@ Deno.test({
     const handle = mount(root, App);
     assertEquals(mounted, true);
     _unmount(handle);
-    cleanup();
+    await cleanup();
   },
 });
 
 Deno.test({
   name: "compat: useEffect cleanup runs on unmount",
-  sanitizeOps: false,
-  sanitizeResources: false,
-  fn() {
+  async fn() {
     const { document, root, cleanup } = createDOM();
     _setDocument(document);
     let cleaned = false;
@@ -166,15 +154,13 @@ Deno.test({
     assertEquals(cleaned, false);
     _unmount(handle);
     assertEquals(cleaned, true);
-    cleanup();
+    await cleanup();
   },
 });
 
 Deno.test({
   name: "compat: useEffect with non-empty deps reacts to signal changes",
-  sanitizeOps: false,
-  sanitizeResources: false,
-  fn() {
+  async fn() {
     const { document, root, cleanup } = createDOM();
     _setDocument(document);
     const sig = signal(0);
@@ -195,7 +181,7 @@ Deno.test({
     // 1. mount, 2. signal change, 3. re-render recreates effect
     assertEquals(effectCount, 3);
     _unmount(handle);
-    cleanup();
+    await cleanup();
   },
 });
 
@@ -203,9 +189,7 @@ Deno.test({
 
 Deno.test({
   name: "compat: useCallback returns function as-is",
-  sanitizeOps: false,
-  sanitizeResources: false,
-  fn() {
+  async fn() {
     const { document, root, cleanup } = createDOM();
     _setDocument(document);
     const original = () => 123;
@@ -217,7 +201,7 @@ Deno.test({
     const handle = mount(root, App);
     assertEquals(captured, original);
     _unmount(handle);
-    cleanup();
+    await cleanup();
   },
 });
 
@@ -225,9 +209,7 @@ Deno.test({
 
 Deno.test({
   name: "compat: useMemo calls fn and returns result",
-  sanitizeOps: false,
-  sanitizeResources: false,
-  fn() {
+  async fn() {
     const { document, root, cleanup } = createDOM();
     _setDocument(document);
     let called = 0;
@@ -244,7 +226,7 @@ Deno.test({
     assertEquals(captured, 99);
     assertEquals(root.innerHTML, "<div>99</div>");
     _unmount(handle);
-    cleanup();
+    await cleanup();
   },
 });
 
@@ -252,9 +234,7 @@ Deno.test({
 
 Deno.test({
   name: "compat: dev hints fire once per name",
-  sanitizeOps: false,
-  sanitizeResources: false,
-  fn() {
+  async fn() {
     const { document, root, cleanup } = createDOM();
     _setDocument(document);
 
@@ -288,6 +268,6 @@ Deno.test({
       (globalThis as Record<string, unknown>).__aioDev = false;
       _resetHints();
     }
-    cleanup();
+    await cleanup();
   },
 });

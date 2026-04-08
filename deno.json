@@ -1,6 +1,6 @@
 {
   "name": "@riagentic/aio",
-  "version": "1.0.0-alpha10",
+  "version": "1.0.0-alpha11",
   "appId": "aio",
   "exports": {
     ".": "./mod.ts",
@@ -10,6 +10,11 @@
     "./adapters/react": "./src/adapters/react.ts",
     "./adapters/air": "./src/adapters/air.ts",
     "./state-core": "./src/state-core.ts",
+    "./db": "./src/db/mod.ts",
+    "./sync": "./src/sync/mod.ts",
+    "./testing": "./src/cell-test.ts",
+    "./schedule": "./src/schedule.ts",
+    "./selectors": "./src/selector.ts",
     "./src/build": "./src/build.ts",
     "./src/am": "./src/am.ts",
     "./aiol": "./aiol/mod.ts"
@@ -45,6 +50,11 @@
     "aio": "./mod.ts",
     "aio/air": "./src/air.ts",
     "aio/react": "./src/react.ts",
+    "aio/db": "./src/db/mod.ts",
+    "aio/sync": "./src/sync/mod.ts",
+    "aio/testing": "./src/cell-test.ts",
+    "aio/schedule": "./src/schedule.ts",
+    "aio/selectors": "./src/selector.ts",
     "esbuild": "npm:esbuild@0.24.2",
     "immer": "npm:immer@10.2.0",
     "@std/path": "jsr:@std/path@1.1.3",

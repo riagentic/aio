@@ -24,7 +24,7 @@ export type Report = {
   passed: string[];
   stats: {
     filesScanned: number;
-    featuresFound: number;
+    cellsFound: number;
     testsFound: number;
   };
 };
@@ -52,7 +52,7 @@ export type SourceFile = {
   lines: string[];
 };
 
-export type FeatureInfo = {
+export type CellInfo = {
   name: string;
   file: SourceFile;
   line: number;
@@ -75,7 +75,7 @@ export type LintContext = {
   tsxFiles: SourceFile[];
   tsFiles: SourceFile[];
   testFiles: SourceFile[];
-  features: FeatureInfo[];
+  cells: CellInfo[];
   appEntry: SourceFile | null;
   appTsx: SourceFile | null;
   styleCss: SourceFile | null;

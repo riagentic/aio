@@ -1,5 +1,8 @@
 # Upgrade from v1.0.0-alpha9 to v1.0.0-alpha10
 
+> **Note:** `feature()` was renamed to `cell()` in alpha11. See
+> [upgrade guide](from-alpha10-to-alpha11.md).
+
 ### No breaking changes
 
 Alpha10 is fully additive. No API renames, no config changes, no migration

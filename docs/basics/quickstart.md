@@ -28,7 +28,7 @@ deno add jsr:@riagentic/aio
 Then import:
 
 ```ts
-import { aio, feature } from "aio";
+import { aio, cell } from "aio";
 ```
 
 ## Prerequisites
@@ -74,18 +74,18 @@ import { aio, feature } from "aio";
 ```
 deno.json
 src/
-  app.ts                       <- aio.run({ features }) -- boot only
+  app.ts                       <- aio.run({ cells }) -- boot only
   App.tsx                      <- root UI -- layout + routing only
-  features/counter/index.ts    <- feature() -- state, methods, machine
+  cell/counter/index.ts    <- cell() -- state, methods, machine
   style.css                    <- (optional)
 ```
 
-## Define a feature
+## Define a cell
 
 ```ts
-import { feature } from "aio";
+import { cell } from "aio";
 
-export const counter = feature("counter", {
+export const counter = cell("counter", {
   state: { count: 0 },
   methods: {
     increment(s, by = 1) {
@@ -101,44 +101,23 @@ export const counter = feature("counter", {
 });
 ```
 
-## Choosing a programming style
+## Programming style
 
-| Use this...            | When...                                     | Examples                                    |
-| ---------------------- | ------------------------------------------- | ------------------------------------------- |
-| **`methods`**          | Direct state changes, independent async     | Counter, forms, toggles, CRUD               |
-| **`generators`**       | Sequential steps, timeout/retry/race        | API fetch sequences, polling, multi-step    |
-| **`actions + reduce`** | Strict state machine, multiple entry points | Checkout wizard, auth flows, complex gating |
+**Start with `methods`.** They handle state changes, async work, and side
+effects in one place. This covers the vast majority of apps.
 
-**Start with `methods`.** Reach for `generators` when you need sequential async
-with timeout/retry, or `actions + reduce` for strict machine gating.
-
-```ts
-// generators -- for sequential workflows with timeout/retry
-export const fetcher = feature("fetcher", {
-  state: { data: null, loading: false },
-  *fetch(ctx, url: string) {
-    ctx.mutate("loading", (s) => {
-      s.loading = true;
-    });
-    const result = yield* ctx.call("fetch", () => fetch(url), {
-      timeout: 5000,
-    });
-    ctx.mutate("done", (s) => {
-      s.data = result;
-      s.loading = false;
-    });
-  },
-});
-```
+When you outgrow methods, aio has generators for sequential async workflows and
+an explicit actions/reduce pipeline for strict state machines — see the
+[State Management](../state/README.md) guide for L2 and L3 patterns.
 
 ## Create the UI
 
 ```tsx
-import { useFeature } from "aio/air";
-import { counter } from "./features/counter/index.ts";
+import { useCell } from "aio/air";
+import { counter } from "./cell/counter/index.ts";
 
 export default function App() {
-  const { state, send, status } = useFeature(counter);
+  const { state, send, status } = useCell(counter);
   if (!state) return <div>Connecting...</div>;
 
   return (
@@ -157,12 +136,12 @@ export default function App() {
 
 ```ts
 import { aio } from "aio";
-import { counter } from "./features/counter/index.ts";
+import { counter } from "./cell/counter/index.ts";
 
 await aio.run({
   appId: "my-app",
   appVersion: "1.0.0",
-  features: [counter],
+  cells: [counter],
 });
 ```
 
@@ -180,7 +159,7 @@ stay in sync. No Electron? Use `deno task dev --client=browser`.
 ```ts
 await aio.run({
   appId: "my-app",
-  features: [counter],
+  cells: [counter],
   ui: { title: "My App", width: 1200, height: 800 },
 });
 ```
@@ -190,17 +169,17 @@ Or via CLI: `deno task dev --width=1200 --height=800`.
 ## Testing
 
 ```ts
-import { testFeature } from "aio";
-import { counter } from "./features/counter/index.ts";
+import { testCell } from "aio";
+import { counter } from "./cell/counter/index.ts";
 
-testFeature(counter, "increment from idle", (t) => {
+testCell(counter, "increment from idle", (t) => {
   t.init();
   t.send.increment(5);
   t.expect.state((s) => s.count === 5);
   t.expect.status("idle");
 });
 
-testFeature(backup, "runs backup", async (t) => {
+testCell(backup, "runs backup", async (t) => {
   t.init();
   t.send.run();
   t.runEffects();
@@ -212,9 +191,9 @@ testFeature(backup, "runs backup", async (t) => {
 ## Async methods
 
 ```ts
-import { call, feature } from "aio";
+import { call, cell } from "aio";
 
-export const api = feature("api", {
+export const api = cell("api", {
   state: { data: null as string | null },
   methods: {
     clear(s) {
@@ -244,6 +223,9 @@ DO:     s.items.forEach(x => ...)   // OK -- iterates without replacement
 DO:     s.items[0]                  // OK -- direct index access
 DO:     const arr = [...s.items]    // OK -- snapshot to NEW array first
 ```
+
+See [Methods — Common Pitfalls](../state/methods.md#common-pitfalls) for more
+examples and the async batching rules.
 
 ## Using React instead of air
 

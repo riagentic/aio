@@ -37,18 +37,18 @@ Deno.test("validateConfig: rejects unknown AioConfig key", () => {
   assertEquals(f.result.code, 1);
 });
 
-Deno.test("validateConfig: accepts all valid FeaturesConfig keys", () => {
+Deno.test("validateConfig: accepts all valid CellsConfig keys", () => {
   const obj: Record<string, unknown> = {};
   for (const k of VALID_FEATURES_CONFIG_KEYS) obj[k] = "test";
-  validateConfig(obj, VALID_FEATURES_CONFIG_KEYS, "FeaturesConfig");
+  validateConfig(obj, VALID_FEATURES_CONFIG_KEYS, "CellsConfig");
 });
 
-Deno.test("validateConfig: rejects unknown FeaturesConfig key", () => {
+Deno.test("validateConfig: rejects unknown CellsConfig key", () => {
   const f = fakeExit();
   validateConfig(
-    { appId: "test", features: [], syncRate: 50 },
+    { appId: "test", cells: [], syncRate: 50 },
     VALID_FEATURES_CONFIG_KEYS,
-    "FeaturesConfig",
+    "CellsConfig",
     f.exit,
   );
   assertEquals(f.result.code, 1);

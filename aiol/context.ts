@@ -1,9 +1,9 @@
-// aiol — project scanner: reads files, extracts features, builds LintContext
+// aiol — project scanner: reads files, extracts cells, builds LintContext
 
 import { basename, extname, join, relative } from "@std/path";
 import type {
+  CellInfo,
   DenoJsonConfig,
-  FeatureInfo,
   Issue,
   LintContext,
   Report,
@@ -72,21 +72,21 @@ async function readDenoJson(
   return { config: null, path: null };
 }
 
-/** Extract feature() calls from source files via regex (no AST needed) */
-function extractFeatures(files: SourceFile[]): FeatureInfo[] {
-  const features: FeatureInfo[] = [];
-  // Match: feature('name', { ... }) or feature("name", { ... })
-  const featureRe = /\bfeature\s*\(\s*(['"`])(\w[\w-]*)\1/g;
+/** Extract cell() calls from source files via regex (no AST needed) */
+function extractCells(files: SourceFile[]): CellInfo[] {
+  const cells: CellInfo[] = [];
+  // Match: cell('name', { ... }) or cell("name", { ... })
+  const cellRe = /\bcell\s*\(\s*(['"`])(\w[\w-]*)\1/g;
 
   for (const file of files) {
-    for (const match of file.content.matchAll(featureRe)) {
+    for (const match of file.content.matchAll(cellRe)) {
       const name = match[2]!;
       const lineIdx = file.content.slice(0, match.index).split("\n").length;
       // Scan forward from match to find the config object
       const afterMatch = file.content.slice(match.index!);
-      const info = parseFeatureConfig(afterMatch);
+      const info = parseCellConfig(afterMatch);
 
-      features.push({
+      cells.push({
         name,
         file,
         line: lineIdx,
@@ -102,11 +102,11 @@ function extractFeatures(files: SourceFile[]): FeatureInfo[] {
       });
     }
   }
-  return features;
+  return cells;
 }
 
-/** Parse feature config block to extract state keys, methods, etc. */
-function parseFeatureConfig(source: string): {
+/** Parse cell config block to extract state keys, methods, etc. */
+function parseCellConfig(source: string): {
   hasState: boolean;
   hasMethods: boolean;
   hasActions: boolean;
@@ -117,8 +117,8 @@ function parseFeatureConfig(source: string): {
   methodNames: string[];
   actionNames: string[];
 } {
-  // Find the config object: first { after feature('name',
-  // The source starts at `feature('name',...` so find the first {
+  // Find the config object: first { after cell('name',
+  // The source starts at `cell('name',...` so find the first {
   const firstBrace = source.indexOf("{");
   if (firstBrace === -1) {
     return {
@@ -267,12 +267,12 @@ export async function buildContext(
   // Collect source files from src/ and project root
   const srcDir = join(projectDir, "src");
   await collectFiles(srcDir, projectDir, sourceFiles);
-  // Also scan features/ if it exists at root level
-  const featuresDir = join(projectDir, "features");
+  // Also scan cells/ if it exists at root level
+  const cellsDir = join(projectDir, "cells");
   try {
-    await Deno.stat(featuresDir);
-    await collectFiles(featuresDir, projectDir, sourceFiles);
-  } catch { /* no features/ */ }
+    await Deno.stat(cellsDir);
+    await collectFiles(cellsDir, projectDir, sourceFiles);
+  } catch { /* no cells/ */ }
   // Scan root .ts/.tsx files
   try {
     for await (const entry of Deno.readDir(projectDir)) {
@@ -321,7 +321,7 @@ export async function buildContext(
   const testFiles = sourceFiles.filter((f) =>
     f.name.endsWith(".test.ts") || f.name.endsWith(".test.tsx")
   );
-  const features = extractFeatures(
+  const cells = extractCells(
     sourceFiles.filter((f) => !f.name.endsWith(".test.ts")),
   );
 
@@ -340,7 +340,7 @@ export async function buildContext(
     tsxFiles,
     tsFiles,
     testFiles,
-    features,
+    cells,
     appEntry,
     appTsx,
     styleCss,
@@ -365,7 +365,7 @@ export async function buildContext(
     passed,
     stats: {
       filesScanned: sourceFiles.length,
-      featuresFound: features.length,
+      cellsFound: cells.length,
       testsFound: testFiles.length,
     },
   };

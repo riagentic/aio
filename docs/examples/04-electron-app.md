@@ -23,20 +23,20 @@ File structure:
 
 ```
 src/
-  app.ts           # entry — wires features, boots aio
-  notes.ts         # notes feature — state, methods, SQLite schema
+  app.ts           # entry — wires cells, boots aio
+  notes.ts         # notes cell — state, methods, SQLite schema
   ui.tsx           # React UI — sidebar, editor, settings
 ```
 
 Three files. That's the whole app.
 
-## Step 2: Notes feature
+## Step 2: Notes cell
 
 Methods mutate state directly — aio tracks changes and syncs to the UI.
 
 ```ts
 // src/notes.ts
-import { feature } from "aio";
+import { cell } from "aio";
 
 type Note = {
   id: string;
@@ -51,7 +51,7 @@ type NotesState = {
   search: string;
 };
 
-export const notes = feature("notes", {
+export const notes = cell("notes", {
   state: {
     notes: [],
     active: null as string | null,
@@ -116,7 +116,7 @@ import { notes } from "./notes.ts";
 
 const app = await aio.run({
   appId: "aio-notes",
-  features: [notes],
+  cells: [notes],
 
   db: {
     notes: table({
@@ -137,28 +137,37 @@ const app = await aio.run({
 });
 ```
 
-When `db` has a table named `notes` and your feature state has a `notes` array,
-aio auto-syncs. Rows load on startup; inserts/updates/deletes propagate to
-SQLite on state change.
+When `db` has a table named `notes` and your cell state has a `notes` array, aio
+auto-syncs. Rows load on startup; inserts/updates/deletes propagate to SQLite on
+state change.
 
-### stateForUI: don't send everything
+### Cell-level UI config: don't send everything
 
-Sending all note content to the UI on every keystroke is wasteful. Use
-`stateForUI` to send only what the renderer needs:
+Sending all note content to the UI on every keystroke is wasteful. Configure
+`ui` on the cell to send only what the renderer needs:
 
 ```ts
-stateForUI(state) {
-  const s = state.notes as NotesState
-  const activeNote = s.notes.find(n => n.id === s.active)
-  return {
-    notes: {
-      notes: s.notes.map(n => ({ id: n.id, title: n.title, createdAt: n.createdAt })),
-      active: s.active,
-      activeNote,  // full content for the selected note only
-      search: s.search,
+export const notes = cell("notes", {
+  state: { notes: [], active: null, search: "" } satisfies NotesState,
+  ui: {
+    forUser: (exposed) => {
+      const activeNote = exposed.notes.find((n: Note) =>
+        n.id === exposed.active
+      );
+      return {
+        notes: exposed.notes.map((n: Note) => ({
+          id: n.id,
+          title: n.title,
+          createdAt: n.createdAt,
+        })),
+        active: exposed.active,
+        activeNote, // full content for the selected note only
+        search: exposed.search,
+      };
     },
-  }
-},
+  },
+  // ... methods, selectors
+});
 ```
 
 The UI gets a lightweight list plus the full active note. Edit a 50KB note? Only
@@ -185,7 +194,7 @@ function App() {
 
 ```tsx
 function Sidebar() {
-  const { state, send } = useFeature(notes);
+  const { state, send } = useCell(notes);
   if (!state) return null;
 
   return (
@@ -219,7 +228,7 @@ function Sidebar() {
 function Editor() {
   const { params } = useRoute("/note/:id");
   const navigate = useNavigate();
-  const { state, send } = useFeature(notes);
+  const { state, send } = useCell(notes);
   if (!state?.activeNote) return <p>Select a note</p>;
 
   if (params.id !== state.active) send.select(params.id);
@@ -263,7 +272,7 @@ export function mount(root: HTMLElement) {
 }
 ```
 
-`useFeature(notes)` gives scoped state and typed `send` — re-renders only when
+`useCell(notes)` gives scoped state and typed `send` — re-renders only when
 notes state changes.
 
 ## Step 6: Single instance lock
@@ -298,18 +307,18 @@ Test note operations without booting the full app:
 ```ts
 // src/notes.test.ts
 import { assertEquals } from "@std/assert";
-import { testFeature } from "aio";
+import { testCell } from "aio";
 import { notes } from "./notes.ts";
 
 Deno.test("create and select note", () => {
-  const t = testFeature(notes);
+  const t = testCell(notes);
   t.send.create("First note");
   assertEquals(t.state.notes.length, 1);
   assertEquals(t.state.active, t.state.notes[0].id);
 });
 
 Deno.test("delete selects next", () => {
-  const t = testFeature(notes);
+  const t = testCell(notes);
   t.send.create("A");
   t.send.create("B");
   const idB = t.state.notes[0].id;
@@ -318,7 +327,7 @@ Deno.test("delete selects next", () => {
 });
 
 Deno.test("search filters notes", () => {
-  const t = testFeature(notes);
+  const t = testCell(notes);
   t.send.create("Grocery list");
   t.send.create("Meeting notes");
   t.send.search("grocery");
@@ -326,12 +335,12 @@ Deno.test("search filters notes", () => {
 });
 ```
 
-Run with `deno test src/`. `testFeature` runs methods synchronously with full
-Immer drafts — same behavior as production, zero setup.
+Run with `deno test src/`. `testCell` runs methods synchronously with full Immer
+drafts — same behavior as production, zero setup.
 
 ---
 
 That's the whole app: SQLite persistence, URL routing, single-instance lock,
 optimized UI sync, and a compiled binary. aio handled Electron lifecycle, window
 state, SQLite sync, state broadcasting, routing, and compilation. You wrote the
-feature logic and the UI.
+cell logic and the UI.

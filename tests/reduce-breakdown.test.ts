@@ -35,12 +35,13 @@ Deno.test("PerfTiming accepts optional breakdown field", () => {
   assertEquals(timing.breakdown?.produce, 35);
 });
 
-import { composeFeatures } from "../src/feature-compose.ts";
-import type { FeatureEntry } from "../src/feature-types.ts";
+import { composeCells } from "../src/cell-compose.ts";
+import type { CellEntry } from "../src/cell-types.ts";
 import type { ReduceBreakdown } from "../src/time-travel.ts";
 
-// Minimal feature for testing
-function testFeature(id: string) {
+// framework internals test — __aio access intentional
+// Constructs raw cell internals to test compose wiring without cell() factory
+function testCell(id: string) {
   return {
     __aio: {
       id,
@@ -59,7 +60,6 @@ function testFeature(id: string) {
       },
       initType: `${id}:Init`,
       destroyType: `${id}:Destroy`,
-      crossDispatchPrefixes: new Set<string>(),
       flowTriggers: undefined,
       flows: undefined,
       validate: undefined,
@@ -70,9 +70,9 @@ function testFeature(id: string) {
   };
 }
 
-Deno.test("composeFeatures with perfCheck exposes lastBreakdown()", () => {
-  const composed = composeFeatures(
-    [testFeature("counter")] as unknown as FeatureEntry[],
+Deno.test("composeCells with perfCheck exposes lastBreakdown()", () => {
+  const composed = composeCells(
+    [testCell("counter")] as unknown as CellEntry[],
     { perfCheck: true },
   );
 
@@ -95,9 +95,9 @@ Deno.test("composeFeatures with perfCheck exposes lastBreakdown()", () => {
   assertEquals(bd!.produce >= 0, true);
 });
 
-Deno.test("composeFeatures without perfCheck — no lastBreakdown", () => {
-  const composed = composeFeatures(
-    [testFeature("counter")] as unknown as FeatureEntry[],
+Deno.test("composeCells without perfCheck — no lastBreakdown", () => {
+  const composed = composeCells(
+    [testCell("counter")] as unknown as CellEntry[],
   );
   assertEquals(composed.lastBreakdown, undefined);
 });

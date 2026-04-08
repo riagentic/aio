@@ -49,7 +49,7 @@ Deno.test("CLI templates: state types match server templates", () => {
   const tpls = getCliTemplates();
   // Empty: { count: number }
   assert(tpls[0]!.fn("T")["src/client.ts"]!.includes("count: number"));
-  // Minimal: counter feature slice
+  // Minimal: counter cell slice
   assert(tpls[1]!.fn("T")["src/state.ts"]!.includes("counter:"));
   // Medium: todo + TodoItem
   const medState = tpls[2]!.fn("T")["src/state.ts"]!;

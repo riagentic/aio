@@ -4,7 +4,7 @@
  * aiol — aio linter and project validator.
  *
  * Scans an aio project and reports errors, warnings, and optimization hints.
- * Checks feature definitions, import graphs, naming conventions, memo usage,
+ * Checks cell definitions, import graphs, naming conventions, memo usage,
  * and framework best practices.
  *
  * ```sh
@@ -133,8 +133,8 @@ function printReport(report: Report, json: boolean, showFixable = false): void {
   console.log(c(C.dim, "─".repeat(60)));
   console.log(
     `  ${c(C.bold, "Files:")} ${report.stats.filesScanned}  ${
-      c(C.bold, "Features:")
-    } ${report.stats.featuresFound}  ${
+      c(C.bold, "Cells:")
+    } ${report.stats.cellsFound}  ${
       c(C.bold, "Tests:")
     } ${report.stats.testsFound}`,
   );

@@ -75,7 +75,7 @@ type AppState = {
 };
 
 await aio.run({
-  features: [myFeature],
+  cells: [myCell],
   db: { users: usersTable, orders: ordersTable },
 });
 ```
@@ -89,7 +89,7 @@ await aio.run({
 Mutate state arrays in reducers. The framework handles the rest:
 
 ```ts
-const orders = feature("orders", {
+const orders = cell("orders", {
   state: { orders: [] as Order[], nextId: 1 },
   methods: {
     add(s, payload: { customer: string; userId: number }) {
@@ -135,7 +135,7 @@ execute: {
     const { rows } = await app.db!.query<{ customer: string; revenue: number }>(
       'SELECT customer, SUM(total) as revenue FROM orders GROUP BY customer ORDER BY revenue DESC'
     )
-    app.dispatch(myFeature.reportLoaded(rows))
+    app.dispatch(myCell.reportLoaded(rows))
   },
 },
 ```

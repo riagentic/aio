@@ -14,13 +14,13 @@ import {
 Deno.test("createAioError — preserves original Error stack", () => {
   const original = new Error("kaboom");
   const err = createAioError("REDUCE_ERROR", original, {
-    featureName: "orderer",
+    cellName: "orderer",
     actionType: "orderer:buy",
   });
   assertInstanceOf(err, Error);
   assertEquals(err.code, "REDUCE_ERROR");
   assertEquals(err.source, "reduce");
-  assertEquals(err.context.featureName, "orderer");
+  assertEquals(err.context.cellName, "orderer");
   assertEquals(err.context.actionType, "orderer:buy");
   assertEquals(err.original, original);
   assertStringIncludes(err.original!.stack!, "error.test.ts");
@@ -28,7 +28,7 @@ Deno.test("createAioError — preserves original Error stack", () => {
 
 Deno.test("createAioError — extracts stack from non-Error (string)", () => {
   const err = createAioError("EFFECT_ERROR", "network down", {
-    featureName: "api",
+    cellName: "api",
   });
   assertEquals(err.message, "network down");
   assertEquals(err.original, undefined);
@@ -49,7 +49,7 @@ Deno.test('createAioError — correlationId is "none" when no context', () => {
 
 Deno.test("AioError.toJSON — produces structured object", () => {
   const err = createAioError("FLOW_UNCAUGHT", new Error("fail"), {
-    featureName: "orderer",
+    cellName: "orderer",
     flowName: "exec",
     flowStep: 3,
   });

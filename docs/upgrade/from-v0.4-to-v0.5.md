@@ -1,5 +1,8 @@
 # Upgrade from v0.4 to v0.5
 
+> **Note:** `feature()` was renamed to `cell()` in alpha11. See
+> [upgrade guide](from-alpha10-to-alpha11.md).
+
 ### New features — feature-based architecture
 
 v0.5 introduces `feature()` — one function defines state, actions, effects,

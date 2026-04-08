@@ -2,13 +2,13 @@
  * @module
  * React adapter — bridges state-core signals to React via `useSyncExternalStore`.
  *
- * Provides the same `useFeature`/`useAio`/`useLocal`/`useConnected` API as the
+ * Provides the same `useCell`/`useAio`/`useLocal`/`useConnected` API as the
  * AIR adapter but using React's reactivity mechanism.
  *
  * @example
  * ```ts
- * import { useFeature } from "aio/adapters/react";
- * const { state, send } = useFeature(myFeature);
+ * import { useCell } from "aio/adapters/react";
+ * const { state, send } = useCell(myCell);
  * ```
  */
 
@@ -16,35 +16,35 @@ import { useCallback, useState, useSyncExternalStore } from "react";
 import {
   _resolveWithFallback,
   _trackingProxy,
+  type CellRef,
   createSendProxy,
-  type FeatureRef,
+  getCellSignal,
   getConnectedSignal,
-  getFeatureSignal,
   getStateSignal,
   send,
   trackPath,
 } from "../state-core.ts";
 import type {
+  CellDef,
   DirectCalling,
   ExtractState,
-  FeatureDef,
   SendOf,
-} from "../feature-types.ts";
+} from "../cell-types.ts";
 
-// ── Feature send cache ──────────────────────────────────────────────
+// ── Cell send cache ──────────────────────────────────────────────
 
-const _featureSendCache = new WeakMap<
-  FeatureRef,
+const _cellSendCache = new WeakMap<
+  CellRef,
   Record<string, (...args: unknown[]) => void>
 >();
 
 function _getCachedSend(
-  ref: FeatureRef,
+  ref: CellRef,
 ): Record<string, (...args: unknown[]) => void> {
-  let obj = _featureSendCache.get(ref);
+  let obj = _cellSendCache.get(ref);
   if (!obj) {
     obj = createSendProxy(ref.__aio.id, ref);
-    _featureSendCache.set(ref, obj);
+    _cellSendCache.set(ref, obj);
   }
   return obj;
 }
@@ -52,20 +52,20 @@ function _getCachedSend(
 // ── Hooks ───────────────────────────────────────────────────────────
 
 /**
- * Subscribe to a feature's server state via React.
+ * Subscribe to a cell's server state via React.
  * Same { state, send } contract as AIR adapter.
  */
-// Typed overload — when passing a feature def with DirectCalling methods
-export function useFeature<
+// Typed overload — when passing a cell def with DirectCalling methods
+export function useCell<
   // deno-lint-ignore no-explicit-any
-  F extends FeatureDef<any, any, any, any> & DirectCalling<any>,
+  F extends CellDef<any, any, any, any> & DirectCalling<any, any>,
 >(
   ref: F,
   options?: { fallback?: ExtractState<F> },
 ): { state: ExtractState<F>; send: SendOf<F>; status?: string };
-// Untyped overload — for dynamic FeatureRef usage
-export function useFeature<S = unknown>(
-  ref: FeatureRef,
+// Untyped overload — for dynamic CellRef usage
+export function useCell<S = unknown>(
+  ref: CellRef,
   options?: { fallback?: S },
 ): {
   state: S;
@@ -74,11 +74,11 @@ export function useFeature<S = unknown>(
 };
 // Implementation
 // deno-lint-ignore no-explicit-any
-export function useFeature(ref: any, options?: any): any {
+export function useCell(ref: any, options?: any): any {
   const name = ref.__aio.id;
   trackPath(name);
 
-  const sig = getFeatureSignal(name, ref.__aio.state);
+  const sig = getCellSignal(name, ref.__aio.state);
 
   const subscribe = useCallback(
     (cb: () => void) => sig.subscribe(cb),
@@ -89,11 +89,11 @@ export function useFeature(ref: any, options?: any): any {
     [name],
   );
 
-  const featureState = useSyncExternalStore(subscribe, getSnapshot, () => null);
+  const cellState = useSyncExternalStore(subscribe, getSnapshot, () => null);
 
   // AIO-29 defense: merge with fallback/defaults
   const defaults = options?.fallback ?? ref.__aio.state;
-  const resolved = _resolveWithFallback(featureState, defaults);
+  const resolved = _resolveWithFallback(cellState, defaults);
 
   const status = resolved
     ? (resolved as Record<string, unknown>).__aio_status as string | undefined
@@ -107,7 +107,7 @@ export function useFeature(ref: any, options?: any): any {
 
 /**
  * Subscribe to the entire app state via React.
- * Re-renders on every state change — prefer useFeature for scoped updates.
+ * Re-renders on every state change — prefer useCell for scoped updates.
  */
 export function useAio<S = unknown>(): {
   state: S;

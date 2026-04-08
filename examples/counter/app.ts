@@ -1,7 +1,7 @@
-// Entry point — define feature, wire to aio.run()
-import { aio, feature } from "aio";
+// Entry point — define cell, wire to aio.run()
+import { aio, cell } from "aio";
 
-export const counter = feature("counter", {
+export const counter = cell("counter", {
   state: { count: 0 },
   methods: {
     increment(s, by = 1) {
@@ -19,6 +19,6 @@ export const counter = feature("counter", {
 await aio.run({
   appId: "counter",
   appVersion: "1.0.0",
-  features: [counter],
+  cells: [counter],
   baseDir: import.meta.dirname!,
 });

@@ -24,14 +24,14 @@ const res = yield *
   ctx.call("upload", () => upload(file), { timeout: 5000, retries: 2 });
 ```
 
-Internally: dispatches `{feature}:__flow:{name}` → calls `fn()` → returns
-result. If `fn` throws after all retries, dispatches `{feature}:__flow:error`.
+Internally: dispatches `{cell}:__flow:{name}` → calls `fn()` → returns result.
+If `fn` throws after all retries, dispatches `{cell}:__flow:error`.
 
 ---
 
 ## `ctx.mutate(name, fn)`
 
-Updates feature state via Immer draft. Dispatches a named action.
+Updates cell state via Immer draft. Dispatches a named action.
 
 ```ts
 yield * ctx.mutate("updateBalance", (s) => {
@@ -41,13 +41,13 @@ yield * ctx.mutate("updateBalance", (s) => {
 ```
 
 Applied immediately — subsequent calls see updated state. State is typed
-automatically when generators are inside `feature()`.
+automatically when generators are inside `cell()`.
 
 ---
 
 ## `ctx.done(fn?)`
 
-Terminal success. Dispatches `{feature}:__flow:done`. Optional final mutation.
+Terminal success. Dispatches `{cell}:__flow:done`. Optional final mutation.
 
 ```ts
 yield * ctx.done((s) => {
@@ -61,7 +61,7 @@ yield * ctx.done(); // without mutation
 
 ## `ctx.fail(reason)`
 
-Terminal failure. Dispatches `{feature}:__flow:failed`. Stops the generator.
+Terminal failure. Dispatches `{cell}:__flow:failed`. Stops the generator.
 
 ```ts
 if (!valid) {
@@ -78,8 +78,8 @@ Dispatches a regular action into the system. Fire-and-forget.
 
 ```ts
 yield * ctx.dispatch(checkout.reset());
-yield * ctx.dispatch(wallet.credit(100)); // cross-feature
-yield * ctx.dispatch(checkout.start("widget")); // own feature
+yield * ctx.dispatch(wallet.credit(100)); // cross-cell
+yield * ctx.dispatch(checkout.start("widget")); // own cell
 ```
 
 ---
@@ -146,8 +146,7 @@ per-call time-travel visibility.
 
 ## `ctx.getState()`
 
-Returns current feature state. Always fresh. **Not a generator — call
-directly.**
+Returns current cell state. Always fresh. **Not a generator — call directly.**
 
 ```ts
 yield * ctx.mutate("increment", (s) => {
@@ -164,7 +163,7 @@ if (s.count >= 10) {
 
 ## `ctx.getFullState()`
 
-Returns the full composed state tree (all features). **Not a generator.**
+Returns the full composed state tree (all cells). **Not a generator.**
 
 ```ts
 const full = ctx.getFullState();
@@ -175,7 +174,7 @@ if (auth.__aio_status !== "authenticated") {
 }
 ```
 
-Read-only — cross-feature mutation goes through `dispatch`.
+Read-only — cross-cell mutation goes through `dispatch`.
 
 ---
 

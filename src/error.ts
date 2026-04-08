@@ -48,9 +48,9 @@ export type FlowStepRecord = {
   status: "ok" | "error" | "pending";
 };
 
-/** Structured context attached to every `AioError` — feature name, action type, flow state, timing, etc. */
+/** Structured context attached to every `AioError` — cell name, action type, flow state, timing, etc. */
 export type AioErrorContext = {
-  featureName?: string;
+  cellName?: string;
   actionType?: string;
   effectType?: string;
   flowName?: string;
@@ -71,7 +71,7 @@ export type ReportErrorOpts = {
       err: {
         code: AioErrorCode;
         message: string;
-        featureName?: string;
+        cellName?: string;
         flowStep?: number;
       },
     ) => void;
@@ -153,13 +153,13 @@ export class AioError extends Error {
   readonly code: AioErrorCode;
   /** Origin subsystem — `'reduce'`, `'effect'`, `'flow'`, `'vitals'`, etc. */
   readonly source: AioErrorSource;
-  /** Structured context — feature name, action type, flow state, timing. */
+  /** Structured context — cell name, action type, flow state, timing. */
   readonly context: AioErrorContext;
   /** Original error that caused this AioError, if wrapping. */
   readonly original: Error | undefined;
   /** Unix timestamp (ms) when the error was created. */
   readonly timestamp: number;
-  /** Unique ID linking related errors across features and flows. */
+  /** Unique ID linking related errors across cells and flows. */
   readonly correlationId: string;
   /** Optional state snapshot captured at the time of the error. */
   readonly stateSnapshot: Record<string, unknown> | undefined;
@@ -217,7 +217,8 @@ export function createAioError(
   } else if (typeof raw === "string") {
     message = raw;
   } else if (raw === null || raw === undefined) {
-    message = `[${code}] unknown error (null)`;
+    message =
+      `[${code}] error object was null/undefined — check that the throwing code passes an Error instance`;
   } else {
     message = String(raw);
   }
@@ -265,8 +266,8 @@ function generateTip(err: AioError): string | undefined {
             (c: string) => c.toLowerCase(),
           )
           : err.context.actionType?.split(":")[1] ?? "?";
-        return `Tip: Proxy state error in method "${method}" of feature "${
-          err.context.featureName ?? "?"
+        return `Tip: Proxy state error in method "${method}" of cell "${
+          err.context.cellName ?? "?"
         }". Avoid .map()/.spread/Object.keys() on live proxy state — use explicit property access or snapshot first: const items = [...s.items]`;
       }
       return `Tip: Reducer for "${
@@ -298,12 +299,12 @@ function generateTip(err: AioError): string | undefined {
         err.context.hookName ?? "?"
       }" threw. Hooks should be side-effect-free observers — avoid mutations or throwing.`;
     case "INIT_ERROR":
-      return `Tip: Feature "${
-        err.context.featureName ?? "?"
+      return `Tip: Cell "${
+        err.context.cellName ?? "?"
       }" onInit threw. Check for missing dependencies or invalid initial state.`;
     case "DESTROY_ERROR":
-      return `Tip: Feature "${
-        err.context.featureName ?? "?"
+      return `Tip: Cell "${
+        err.context.cellName ?? "?"
       }" onDestroy threw. Cleanup should be best-effort — guard against already-cleaned resources.`;
     case "MACHINE_BLOCKED":
       return `Tip: Machine in state "${
@@ -314,7 +315,7 @@ function generateTip(err: AioError): string | undefined {
     case "DISPATCH_LOOP":
       return `Tip: 1000+ iterations detected. A reducer or effect is dispatching back to itself. Break the cycle.`;
     case "MEMORY_PRESSURE":
-      return `Tip: Heap usage rising. Check per-feature state sizes — prune unbounded arrays or move large data to SQLite.`;
+      return `Tip: Heap usage rising. Check per-cell state sizes — prune unbounded arrays or move large data to SQLite.`;
     case "MEMORY_CRITICAL":
       return `Tip: Heap critically high — OOM imminent. Emergency prune large state or increase memory limit with --v8-flags=--max-old-space-size=N.`;
     case "BUDGET_REDUCE":
@@ -359,8 +360,8 @@ export function formatErrorBox(err: AioError): string {
     `${color}┏━━ AIO ${label} ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}`,
   );
   lines.push(`${bar} ${BOLD}Code:${RESET}    ${err.code}`);
-  if (err.context.featureName) {
-    lines.push(`${bar} ${BOLD}Feature:${RESET} ${err.context.featureName}`);
+  if (err.context.cellName) {
+    lines.push(`${bar} ${BOLD}Cell:${RESET} ${err.context.cellName}`);
   }
   if (err.context.actionType) {
     lines.push(`${bar} ${BOLD}Action:${RESET}  ${err.context.actionType}`);
@@ -439,7 +440,7 @@ export function formatErrorBox(err: AioError): string {
 
 export function formatErrorCompact(err: AioError): string {
   const parts = [`[${err.code}]`];
-  if (err.context.featureName) parts.push(err.context.featureName);
+  if (err.context.cellName) parts.push(err.context.cellName);
   parts.push(err.message);
   if (err.correlationId !== "none") parts.push(`cid=${err.correlationId}`);
   return parts.join(" ");
@@ -475,7 +476,9 @@ export function reportError(err: AioError, opts: ReportErrorOpts = {}): void {
     if (onError) {
       try {
         onError(err);
-      } catch { /* swallow */ }
+      } catch (hookErr) {
+        console.error("[aio] onError hook threw:", hookErr);
+      }
     }
 
     // TT markError
@@ -483,7 +486,7 @@ export function reportError(err: AioError, opts: ReportErrorOpts = {}): void {
       tt.markError({
         code: err.code,
         message: err.message,
-        featureName: err.context.featureName,
+        cellName: err.context.cellName,
         flowStep: err.context.flowStep,
       });
     }

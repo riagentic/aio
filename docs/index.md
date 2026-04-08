@@ -2,6 +2,7 @@
 
 ## Getting Started
 
+- [Architecture](ARCHITECTURE.md) — module map, data flow, key boundaries
 - [Quickstart](basics/quickstart.md) — install and run your first app
 - [Core Concepts](basics/concepts.md) — mental model and framework rules
 - [Project Structure](basics/project-structure.md) — file organization
@@ -9,15 +10,18 @@
 
 ## State Management
 
-- [Features](state/features.md) — feature() config and anatomy
+- [Which Approach?](state/which-approach.md) — decision tree: methods vs
+  generators vs actions/reduce
+- [Cells](state/cells.md) — cell() config and anatomy
 - [Methods](state/methods.md) — sync/async methods, selectors
 - [State Machines](state/machines.md) — guards and transitions
-- [Composition](state/composition.md) — cross-feature communication
+- [Composition](state/composition.md) — cross-cell communication
 - [Generators](state/generators.md) — sequential async workflows
 - [Generators API](state/generators-api.md) — GenCtx method reference
 - [Scheduling](state/scheduling.md) — timers, intervals, cron
-- [Actions & Reduce](state/actions-reduce.md) — explicit style
 - [Lifecycle](state/lifecycle.md) — hooks, middleware, aio.run()
+- [Actions & Reduce](state/actions-reduce.md) — advanced: explicit action/reduce
+  pipeline
 
 ## Rendering
 
@@ -35,6 +39,8 @@
 
 ## Persistence & Data
 
+- [How It Works](persistence/how-it-works.md) — end-to-end persistence
+  architecture
 - [Auto-Persist](persistence/auto-persist.md) — Deno.Kv state persistence
 - [SQLite](persistence/sqlite.md) — schema, queries, transactions
 - [CRDT](persistence/crdt.md) — conflict-free sync
@@ -58,7 +64,7 @@
 
 ## Testing
 
-- [Feature Testing](testing/feature-testing.md) — testFeature, assertions
+- [Cell Testing](testing/cell-testing.md) — testCell, assertions
 - [Linter](testing/linter.md) — aiol static analysis
 
 ## Auth & Security
@@ -79,6 +85,6 @@
 ## Tutorials
 
 - [Dashboard](examples/01-dashboard.md) — real-time metrics
-- [Checkout](examples/02-checkout-workflow.md) — multi-feature e-commerce
+- [Checkout](examples/02-checkout-workflow.md) — multi-cell e-commerce
 - [CLI Service](examples/03-cli-service.md) — headless task queue
 - [Electron App](examples/04-electron-app.md) — local-first notes

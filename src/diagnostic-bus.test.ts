@@ -26,14 +26,14 @@ Deno.test("diagnostic-bus: dev mode stores events", () => {
     type: "feat:load",
     severity: "info",
     source: "core",
-    message: "feature loaded",
+    message: "cell loaded",
   });
   const events = diagRecent();
   assertEquals(events.length, 1);
   assertEquals(events[0]!.type, "feat:load");
   assertEquals(events[0]!.severity, "info");
   assertEquals(events[0]!.source, "core");
-  assertEquals(events[0]!.message, "feature loaded");
+  assertEquals(events[0]!.message, "cell loaded");
   assertExists(events[0]!.ts);
   assertEquals(typeof events[0]!.ts, "number");
   assertEquals(isDiagDev(), true);
@@ -154,16 +154,16 @@ Deno.test("diagnostic-bus: detail and hint fields are preserved", () => {
   diagEmit({
     type: "feat:error",
     severity: "error",
-    source: "feature-impl",
+    source: "cell-impl",
     message: "dispatch failed",
-    detail: { featureId: "counter", action: "increment" },
+    detail: { cellId: "counter", action: "increment" },
     hint: "Check reducer registration",
     docLink: "https://docs.example.com/errors#dispatch",
   });
   const events = diagRecent();
   assertEquals(events.length, 1);
   assertEquals(events[0]!.detail, {
-    featureId: "counter",
+    cellId: "counter",
     action: "increment",
   });
   assertEquals(events[0]!.hint, "Check reducer registration");

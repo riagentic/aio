@@ -19,7 +19,7 @@ async function runCheckUI(dir: string) {
   return report.issues;
 }
 
-Deno.test("aiol: flags @std/* import in feature file", async () => {
+Deno.test("aiol: flags @std/* import in cell file", async () => {
   await withTmpDir(async (dir) => {
     await Deno.mkdir(join(dir, "src"), { recursive: true });
     await Deno.writeTextFile(
@@ -37,8 +37,8 @@ Deno.test("aiol: flags @std/* import in feature file", async () => {
       join(dir, "src", "counter.ts"),
       `
 import { join } from '@std/path'
-import { feature } from 'aio'
-export const counter = feature('counter', {
+import { cell } from 'aio'
+export const counter = cell('counter', {
   state: { count: 0 },
   methods: { inc: (s) => { s.count++ } }
 })
@@ -54,7 +54,7 @@ export const counter = feature('counter', {
   });
 });
 
-Deno.test("aiol: allows import type in feature file", async () => {
+Deno.test("aiol: allows import type in cell file", async () => {
   await withTmpDir(async (dir) => {
     await Deno.mkdir(join(dir, "src"), { recursive: true });
     await Deno.writeTextFile(
@@ -72,8 +72,8 @@ Deno.test("aiol: allows import type in feature file", async () => {
       join(dir, "src", "counter.ts"),
       `
 import type { WalkEntry } from '@std/fs'
-import { feature } from 'aio'
-export const counter = feature('counter', {
+import { cell } from 'aio'
+export const counter = cell('counter', {
   state: { count: 0 },
   methods: { inc: (s) => { s.count++ } }
 })
@@ -84,7 +84,7 @@ export const counter = feature('counter', {
   });
 });
 
-Deno.test("aiol: flags Deno.* usage in feature file", async () => {
+Deno.test("aiol: flags Deno.* usage in cell file", async () => {
   await withTmpDir(async (dir) => {
     await Deno.mkdir(join(dir, "src"), { recursive: true });
     await Deno.writeTextFile(
@@ -101,8 +101,8 @@ Deno.test("aiol: flags Deno.* usage in feature file", async () => {
     await Deno.writeTextFile(
       join(dir, "src", "counter.ts"),
       `
-import { feature } from 'aio'
-export const counter = feature('counter', {
+import { cell } from 'aio'
+export const counter = cell('counter', {
   state: { text: '' },
   methods: { load: async (s) => { s.text = await Deno.readTextFile('/tmp/x') } }
 })
@@ -118,7 +118,7 @@ export const counter = feature('counter', {
   });
 });
 
-Deno.test("aiol: flags node:* import in feature file", async () => {
+Deno.test("aiol: flags node:* import in cell file", async () => {
   await withTmpDir(async (dir) => {
     await Deno.mkdir(join(dir, "src"), { recursive: true });
     await Deno.writeTextFile(
@@ -136,8 +136,8 @@ Deno.test("aiol: flags node:* import in feature file", async () => {
       join(dir, "src", "counter.ts"),
       `
 import { readFileSync } from 'node:fs'
-import { feature } from 'aio'
-export const counter = feature('counter', {
+import { cell } from 'aio'
+export const counter = cell('counter', {
   state: { count: 0 },
   methods: { inc: (s) => { s.count++ } }
 })
@@ -166,7 +166,7 @@ Deno.test("aiol: flags bare specifier not in deno.json", async () => {
     await Deno.writeTextFile(
       join(dir, "src", "App.tsx"),
       `
-import { useFeature } from 'aio'
+import { useCell } from 'aio'
 import { Terminal } from 'xterm'
 export default function App() { return <div/> }
 `,
@@ -224,9 +224,9 @@ Deno.test("aiol: flags static dynamic import of server-only file", async () => {
     await Deno.writeTextFile(
       join(dir, "src", "counter.ts"),
       `
-import { feature } from 'aio'
+import { cell } from 'aio'
 const load = () => import('./helpers.ts')
-export const counter = feature('counter', { state: { count: 0 }, methods: { inc: (s) => { s.count++ } } })
+export const counter = cell('counter', { state: { count: 0 }, methods: { inc: (s) => { s.count++ } } })
 `,
     );
     await Deno.writeTextFile(
@@ -264,9 +264,9 @@ Deno.test("aiol: does NOT flag dynamic import of browser-safe file", async () =>
     await Deno.writeTextFile(
       join(dir, "src", "counter.ts"),
       `
-import { feature } from 'aio'
+import { cell } from 'aio'
 const load = () => import('./ui-utils.ts')
-export const counter = feature('counter', { state: { count: 0 }, methods: { inc: (s) => { s.count++ } } })
+export const counter = cell('counter', { state: { count: 0 }, methods: { inc: (s) => { s.count++ } } })
 `,
     );
     await Deno.writeTextFile(
@@ -285,7 +285,7 @@ export function formatNumber(n: number) { return n.toLocaleString() }
 
 Deno.test("aiol: flags transitive @std/* import 2 levels deep", async () => {
   await withTmpDir(async (dir) => {
-    await Deno.mkdir(join(dir, "src", "features"), { recursive: true });
+    await Deno.mkdir(join(dir, "src", "cells"), { recursive: true });
     await Deno.writeTextFile(
       join(dir, "deno.json"),
       JSON.stringify({
@@ -293,26 +293,26 @@ Deno.test("aiol: flags transitive @std/* import 2 levels deep", async () => {
         unstable: ["kv"],
       }),
     );
-    // App.tsx imports feature index
+    // App.tsx imports cell index
     await Deno.writeTextFile(
       join(dir, "src", "App.tsx"),
       `
-import { counter } from './features/counter.ts'
+import { counter } from './cells/counter.ts'
 export default function App() { return <div/> }
 `,
     );
-    // Feature index imports helpers (no direct @std)
+    // Cell index imports helpers (no direct @std)
     await Deno.writeTextFile(
-      join(dir, "src", "features", "counter.ts"),
+      join(dir, "src", "cells", "counter.ts"),
       `
-import { feature } from 'aio'
+import { cell } from 'aio'
 import { loadData } from './helpers.ts'
-export const counter = feature('counter', { state: { count: 0 }, methods: { inc: (s) => { s.count++ } } })
+export const counter = cell('counter', { state: { count: 0 }, methods: { inc: (s) => { s.count++ } } })
 `,
     );
     // Helpers has @std import
     await Deno.writeTextFile(
-      join(dir, "src", "features", "helpers.ts"),
+      join(dir, "src", "cells", "helpers.ts"),
       `
 import { join } from '@std/path'
 export function loadData() { return join('a', 'b') }

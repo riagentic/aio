@@ -3,7 +3,7 @@ import { assertEquals, assertExists } from "@std/assert";
 Deno.test("headless: base aio import provides server symbols", async () => {
   const base = await import("../mod.ts");
   assertExists(base.aio);
-  assertExists(base.feature);
+  assertExists(base.cell);
   assertExists(base.log);
   assertExists(base.lint);
   assertExists(base.parseCli);
@@ -41,9 +41,9 @@ Deno.test("headless: base aio import does NOT provide renderer symbols", async (
     "useState should not be in base",
   );
   assertEquals(
-    (base as any).useFeature,
+    (base as any).useCell,
     undefined,
-    "useFeature should not be in base",
+    "useCell should not be in base",
   );
   assertEquals(
     (base as any).useAio,

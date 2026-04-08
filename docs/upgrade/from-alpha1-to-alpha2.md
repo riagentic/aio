@@ -1,5 +1,8 @@
 # Upgrade from v1.0.0-alpha1 to v1.0.0-alpha2
 
+> **Note:** `feature()` was renamed to `cell()` in alpha11. See
+> [upgrade guide](from-alpha10-to-alpha11.md).
+
 ### Breaking changes
 
 **Config renames — all field names updated**

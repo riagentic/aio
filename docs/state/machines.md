@@ -7,7 +7,7 @@ dropped** — no error, no state change.
 ## Basic example
 
 ```ts
-const door = feature("door", {
+const door = cell("door", {
   state: { isOpen: false },
   machine: {
     initial: "closed",
@@ -52,7 +52,7 @@ machine: {
 ## Realistic example — upload workflow
 
 ```ts
-const upload = feature("upload", {
+const upload = cell("upload", {
   state: { progress: 0, error: null as string | null },
   machine: {
     initial: "idle",
@@ -114,21 +114,21 @@ For strict per-step machine control on async workflows, use `generators` instead
 ## Check status in UI
 
 ```tsx
-const { status } = useFeature(door);
+const { status } = useCell(door);
 // status is 'closed' or 'open' (string)
 ```
 
 In tests: `t.expect.status('idle')`. Never read `__aio_status` directly — use
-`registry.status()` or `useFeature().status` in UI.
+`registry.status()` or `useCell().status` in UI.
 
 ---
 
 ## Foreign actions in machines
 
-A machine can declare actions from other features:
+A machine can declare actions from other cells:
 
 ```ts
-const analytics = feature("analytics", {
+const analytics = cell("analytics", {
   state: { events: [] as string[] },
   actions: { clear: () => ({}) },
   machine: {
@@ -149,8 +149,8 @@ const analytics = feature("analytics", {
 });
 ```
 
-Foreign actions are routed to both the owning feature and all listeners. Always
-use `.type` or pass functions directly — never raw strings.
+Foreign actions are routed to both the owning cell and all listeners. Always use
+`.type` or pass functions directly — never raw strings.
 
 ---
 

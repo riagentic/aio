@@ -1,7 +1,7 @@
 // Async versions of schema init, table loading, and incremental state sync
 
 import type { DB } from "./types.ts";
-import { createTableSQL, type TableDef } from "../sql.ts";
+import { assertIdent, createTableSQL, type TableDef } from "../sql.ts";
 
 /** CREATE TABLE IF NOT EXISTS for all tables — called on DB open */
 export async function initSchema(
@@ -20,6 +20,7 @@ export async function loadTables(
 ): Promise<Record<string, unknown[]>> {
   const result: Record<string, unknown[]> = {};
   for (const name of Object.keys(schema)) {
+    assertIdent(name, "table name");
     const { rows } = await db.query(`SELECT * FROM ${name}`);
     result[name] = rows;
   }
@@ -60,8 +61,10 @@ export async function syncTables(
   const stmts: { sql: string; params?: unknown[] }[] = [];
 
   for (const name of changed) {
+    assertIdent(name, "table name");
     const rows = state[name] as Record<string, unknown>[];
     const cols = Object.keys(schema[name]!.columns);
+    for (const col of cols) assertIdent(col, "column name");
     const pk = findPk(schema[name]!);
 
     if (pk && rows.length > 0) {

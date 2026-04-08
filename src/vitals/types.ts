@@ -102,7 +102,7 @@ export type LoopVitals = {
   drainRate: number;
   lastReduceTime: number;
   lastReduceAction: string;
-  lastReduceFeature: string;
+  lastReduceCell: string;
   p95ReduceTime: number;
   effectBacklog: number;
   circuitBreakers: string[];
@@ -121,7 +121,7 @@ export type ClientLiveness = {
 export type RenderFreezeReport = {
   frozenFor: number;
   lastActionBefore: string | null;
-  lastFeature: string | null;
+  lastCell: string | null;
   unprocessedDeltas: number;
   memoryBefore?: number;
   memoryAfter?: number;

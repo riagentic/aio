@@ -14,7 +14,7 @@ Deno.test("checkpoint: write and read round-trip", async () => {
     ts: Date.now(),
     state: { counter: { count: 5 } },
     recentActions: ["counter:increment"],
-    features: { counter: { errors: 0, enabled: true } },
+    cells: { counter: { errors: 0, enabled: true } },
   });
   const data = readCheckpoint(dir);
   assertExists(data);
@@ -43,7 +43,7 @@ Deno.test("checkpoint: atomic write leaves no .tmp on success", async () => {
     ts: Date.now(),
     state: { x: 1 },
     recentActions: [],
-    features: {},
+    cells: {},
   });
   let tmpExists = true;
   try {
@@ -62,7 +62,7 @@ Deno.test("checkpoint: writeSync for emergency", async () => {
     ts: Date.now(),
     state: { emergency: true },
     recentActions: ["crash:boom"],
-    features: {},
+    cells: {},
   });
   const data = readCheckpoint(dir);
   assertExists(data);

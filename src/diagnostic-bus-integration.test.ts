@@ -28,7 +28,7 @@ Deno.test("reportError auto-emits to diagnostic bus via bridge", () => {
   );
 
   const err = createAioError("REDUCE_ERROR", "test reduce failure", {
-    featureName: "counter",
+    cellName: "counter",
     actionType: "counter:increment",
   });
   reportError(err);

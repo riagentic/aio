@@ -127,14 +127,14 @@ h("ul", null, items.map((i) => h("li", { key: i.id }, i.name)));
 
 ## Server State Hooks
 
-| Function        | Signature                                  | Description          |
-| --------------- | ------------------------------------------ | -------------------- |
-| `useFeature`    | `useFeature(ref): { state, send, status }` | Subscribe to feature |
-| `useAio`        | `useAio(): { state, send }`                | Subscribe to all     |
-| `useLocal`      | `useLocal(init): { local, set, patch }`    | Client-only state    |
-| `useConnected`  | `useConnected(): boolean`                  | Connection status    |
-| `useProjection` | `useProjection(fn): T`                     | Derived state        |
-| `useTimeTravel` | `useTimeTravel(ref): TimeTravelState`      | Debug time travel    |
+| Function        | Signature                               | Description       |
+| --------------- | --------------------------------------- | ----------------- |
+| `useCell`       | `useCell(ref): { state, send, status }` | Subscribe to cell |
+| `useAio`        | `useAio(): { state, send }`             | Subscribe to all  |
+| `useLocal`      | `useLocal(init): { local, set, patch }` | Client-only state |
+| `useConnected`  | `useConnected(): boolean`               | Connection status |
+| `useProjection` | `useProjection(fn): T`                  | Derived state     |
+| `useTimeTravel` | `useTimeTravel(ref): TimeTravelState`   | Debug time travel |
 
 ## Routing
 

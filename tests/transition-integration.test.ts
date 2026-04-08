@@ -10,7 +10,7 @@ import { Transition } from "../src/transition-component.ts";
 import { TransitionGroup } from "../src/transition-group.ts";
 import { fade, scale, slide } from "../src/transition.ts";
 
-const DOM_TEST_OPTS = { sanitizeOps: false, sanitizeResources: false };
+// happy-dom timers drained via win.happyDOM.close() — sanitizers enabled
 
 function createDOM() {
   const win = new Window({ url: "https://localhost" });
@@ -25,7 +25,6 @@ function createDOM() {
 
 Deno.test({
   name: "Integration: Transition inside conditional parent rendering",
-  ...DOM_TEST_OPTS,
   async fn() {
     const { win, doc, root } = createDOM();
     _setDocument(doc);
@@ -86,7 +85,7 @@ Deno.test({
     );
 
     _unmount(handle);
-    win.close();
+    await win.happyDOM.close();
   },
 });
 
@@ -95,7 +94,6 @@ Deno.test({
 
 Deno.test({
   name: "Integration: TransitionGroup signal-driven list add/remove",
-  ...DOM_TEST_OPTS,
   async fn() {
     const { win, doc, root } = createDOM();
     _setDocument(doc);
@@ -144,7 +142,7 @@ Deno.test({
     assertEquals(root.querySelectorAll("div").length, 3, "3 items remain");
 
     _unmount(handle);
-    win.close();
+    await win.happyDOM.close();
   },
 });
 
@@ -153,7 +151,6 @@ Deno.test({
 
 Deno.test({
   name: "Integration: Transition exit only (no enter animation)",
-  ...DOM_TEST_OPTS,
   async fn() {
     const { win, doc, root } = createDOM();
     _setDocument(doc);
@@ -190,7 +187,7 @@ Deno.test({
     );
 
     _unmount(handle);
-    win.close();
+    await win.happyDOM.close();
   },
 });
 
@@ -199,7 +196,6 @@ Deno.test({
 
 Deno.test({
   name: "Integration: TransitionGroup simultaneous add and remove",
-  ...DOM_TEST_OPTS,
   async fn() {
     const { win, doc, root } = createDOM();
     _setDocument(doc);
@@ -243,7 +239,7 @@ Deno.test({
     assertEquals(root.querySelectorAll("div").length, 3, "3 items total");
 
     _unmount(handle);
-    win.close();
+    await win.happyDOM.close();
   },
 });
 
@@ -253,7 +249,6 @@ Deno.test({
 Deno.test({
   name:
     "Integration: Transition different enter (fade) and exit (slide) functions",
-  ...DOM_TEST_OPTS,
   async fn() {
     const { win, doc, root } = createDOM();
     _setDocument(doc);
@@ -294,7 +289,7 @@ Deno.test({
     );
 
     _unmount(handle);
-    win.close();
+    await win.happyDOM.close();
   },
 });
 
@@ -303,7 +298,6 @@ Deno.test({
 
 Deno.test({
   name: "Integration: TransitionGroup all items removed at once",
-  ...DOM_TEST_OPTS,
   async fn() {
     const { win, doc, root } = createDOM();
     _setDocument(doc);
@@ -336,7 +330,7 @@ Deno.test({
     assertEquals(root.querySelector("#c"), null, "c removed");
 
     _unmount(handle);
-    win.close();
+    await win.happyDOM.close();
   },
 });
 
@@ -345,7 +339,6 @@ Deno.test({
 
 Deno.test({
   name: "Integration: Transition rapid show/hide/show toggle",
-  ...DOM_TEST_OPTS,
   async fn() {
     const { win, doc, root } = createDOM();
     _setDocument(doc);
@@ -396,6 +389,6 @@ Deno.test({
     );
 
     _unmount(handle);
-    win.close();
+    await win.happyDOM.close();
   },
 });

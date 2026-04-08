@@ -1,10 +1,10 @@
 // Entry point — todo app with CRUD, filtering, persistence
-import { aio, feature } from "aio";
+import { aio, cell } from "aio";
 
 export type Todo = { id: number; text: string; done: boolean };
 export type Filter = "all" | "active" | "done";
 
-export const todo = feature("todo", {
+export const todo = cell("todo", {
   state: {
     items: [] as Todo[],
     nextId: 1,
@@ -38,6 +38,6 @@ export const todo = feature("todo", {
 await aio.run({
   appId: "todo",
   appVersion: "1.0.0",
-  features: [todo],
+  cells: [todo],
   baseDir: import.meta.dirname!,
 });

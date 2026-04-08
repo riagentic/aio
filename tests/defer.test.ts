@@ -9,7 +9,7 @@ function createDOM() {
   const doc = win.document as unknown as Document;
   const root = doc.createElement("div");
   doc.body.appendChild(root);
-  return { document: doc, root, cleanup: () => win.close() };
+  return { document: doc, root, cleanup: () => win.happyDOM.close() };
 }
 
 function delay(ms: number) {
@@ -18,8 +18,6 @@ function delay(ms: number) {
 
 Deno.test({
   name: "Defer: immediate trigger loads content right away",
-  sanitizeOps: false,
-  sanitizeResources: false,
   async fn() {
     const { document: doc, root, cleanup } = createDOM();
     _setDocument(doc);
@@ -50,14 +48,12 @@ Deno.test({
     assertEquals(root.innerHTML, "<div>loaded</div>");
 
     _unmount(handle);
-    cleanup();
+    await cleanup();
   },
 });
 
 Deno.test({
   name: "Defer: timer trigger loads after delay",
-  sanitizeOps: false,
-  sanitizeResources: false,
   async fn() {
     const { document: doc, root, cleanup } = createDOM();
     _setDocument(doc);
@@ -89,14 +85,12 @@ Deno.test({
     assertEquals(root.innerHTML, "<div>loaded</div>");
 
     _unmount(handle);
-    cleanup();
+    await cleanup();
   },
 });
 
 Deno.test({
   name: "Defer: shows error fallback on load failure",
-  sanitizeOps: false,
-  sanitizeResources: false,
   async fn() {
     const { document: doc, root, cleanup } = createDOM();
     _setDocument(doc);
@@ -116,14 +110,12 @@ Deno.test({
     assertEquals(root.innerHTML, "<span>failed</span>");
 
     _unmount(handle);
-    cleanup();
+    await cleanup();
   },
 });
 
 Deno.test({
   name: "Defer: falls back to placeholder when no error prop",
-  sanitizeOps: false,
-  sanitizeResources: false,
   async fn() {
     const { document: doc, root, cleanup } = createDOM();
     _setDocument(doc);
@@ -143,14 +135,12 @@ Deno.test({
     assertEquals(root.innerHTML.includes("placeholder"), true);
 
     _unmount(handle);
-    cleanup();
+    await cleanup();
   },
 });
 
 Deno.test({
   name: "Defer: passes componentProps to loaded component",
-  sanitizeOps: false,
-  sanitizeResources: false,
   async fn() {
     const { document: doc, root, cleanup } = createDOM();
     _setDocument(doc);
@@ -173,6 +163,6 @@ Deno.test({
     assertEquals(root.innerHTML, "<h1>Hello World</h1>");
 
     _unmount(handle);
-    cleanup();
+    await cleanup();
   },
 });

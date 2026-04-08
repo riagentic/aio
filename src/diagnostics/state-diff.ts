@@ -1,29 +1,29 @@
 // src/diagnostics/state-diff.ts — Key-level state diff detection + formatting
 
-/** A single key change within a feature */
+/** A single key change within a cell */
 export type KeyChange = { key: string; from: unknown; to: unknown };
 
-/** Diff result for one feature */
-export type FeatureDiff = { feature: string; changes: KeyChange[] };
+/** Diff result for one cell */
+export type CellDiff = { cell: string; changes: KeyChange[] };
 
-/** Compare prev and next app state, return per-feature key-level diffs.
- *  Skips features where the slice is referentially identical (cheap). */
+/** Compare prev and next app state, return per-cell key-level diffs.
+ *  Skips cells where the slice is referentially identical (cheap). */
 export function computeDiffs(
   prev: Record<string, unknown>,
   next: Record<string, unknown>,
-): FeatureDiff[] {
+): CellDiff[] {
   if (prev === next) return [];
-  const diffs: FeatureDiff[] = [];
-  for (const feature of Object.keys(next)) {
-    const prevSlice = prev[feature];
-    const nextSlice = next[feature];
+  const diffs: CellDiff[] = [];
+  for (const cell of Object.keys(next)) {
+    const prevSlice = prev[cell];
+    const nextSlice = next[cell];
     if (prevSlice === nextSlice) continue;
     if (
       !prevSlice || typeof prevSlice !== "object" || !nextSlice ||
       typeof nextSlice !== "object"
     ) {
       diffs.push({
-        feature,
+        cell,
         changes: [{ key: "_root", from: prevSlice, to: nextSlice }],
       });
       continue;
@@ -37,7 +37,7 @@ export function computeDiffs(
         changes.push({ key, from: ps[key], to: ns[key] });
       }
     }
-    if (changes.length) diffs.push({ feature, changes });
+    if (changes.length) diffs.push({ cell, changes });
   }
   return diffs;
 }
@@ -55,10 +55,10 @@ function truncate(v: unknown): string {
   return s.length > MAX_VAL ? s.slice(0, MAX_VAL) + "…" : s;
 }
 
-/** Format a feature's changes into a single log line */
-export function formatDiff(feature: string, changes: KeyChange[]): string {
+/** Format a cell's changes into a single log line */
+export function formatDiff(cell: string, changes: KeyChange[]): string {
   const parts = changes.map((c) =>
     `${c.key} ${truncate(c.from)}→${truncate(c.to)}`
   );
-  return `${feature}: ${parts.join(", ")}`;
+  return `${cell}: ${parts.join(", ")}`;
 }

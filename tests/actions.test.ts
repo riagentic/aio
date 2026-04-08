@@ -10,14 +10,12 @@ function createDOM() {
   const doc = win.document as unknown as Document;
   const root = doc.createElement("div");
   doc.body.appendChild(root);
-  return { document: doc, root, cleanup: () => win.close() };
+  return { document: doc, root, cleanup: () => win.happyDOM.close() };
 }
 
 Deno.test({
   name: "actions: use prop calls action with DOM element on mount",
-  sanitizeOps: false,
-  sanitizeResources: false,
-  fn() {
+  async fn() {
     const { document: doc, root, cleanup } = createDOM();
     _setDocument(doc);
     let receivedNode: HTMLElement | null = null;
@@ -34,15 +32,13 @@ Deno.test({
     assertEquals(receivedNode !== null, true);
     assertEquals(receivedNode!.tagName, "DIV");
     _unmount(handle);
-    cleanup();
+    await cleanup();
   },
 });
 
 Deno.test({
   name: "actions: cleanup runs on unmount",
-  sanitizeOps: false,
-  sanitizeResources: false,
-  fn() {
+  async fn() {
     const { document: doc, root, cleanup } = createDOM();
     _setDocument(doc);
     let cleanedUp = false;
@@ -68,15 +64,13 @@ Deno.test({
     assertEquals(cleanedUp, true);
 
     _unmount(handle);
-    cleanup();
+    await cleanup();
   },
 });
 
 Deno.test({
   name: "actions: multiple actions on same element",
-  sanitizeOps: false,
-  sanitizeResources: false,
-  fn() {
+  async fn() {
     const { document: doc, root, cleanup } = createDOM();
     _setDocument(doc);
     const calls: string[] = [];
@@ -111,15 +105,13 @@ Deno.test({
     assertEquals(calls, ["a-mount", "b-mount", "a-cleanup", "b-cleanup"]);
 
     _unmount(handle);
-    cleanup();
+    await cleanup();
   },
 });
 
 Deno.test({
   name: "actions: action with no cleanup is fine",
-  sanitizeOps: false,
-  sanitizeResources: false,
-  fn() {
+  async fn() {
     const { document: doc, root, cleanup } = createDOM();
     _setDocument(doc);
     let called = false;
@@ -135,15 +127,13 @@ Deno.test({
     const handle = mount(root, App);
     assertEquals(called, true);
     _unmount(handle);
-    cleanup();
+    await cleanup();
   },
 });
 
 Deno.test({
   name: "actions: use prop change cleans up old and applies new",
-  sanitizeOps: false,
-  sanitizeResources: false,
-  fn() {
+  async fn() {
     const { document: doc, root, cleanup } = createDOM();
     _setDocument(doc);
     const calls: string[] = [];
@@ -182,15 +172,13 @@ Deno.test({
     assertEquals(calls, ["a-mount", "a-cleanup", "b-mount"]);
 
     _unmount(handle);
-    cleanup();
+    await cleanup();
   },
 });
 
 Deno.test({
   name: "actions: use prop skipped for non-array values",
-  sanitizeOps: false,
-  sanitizeResources: false,
-  fn() {
+  async fn() {
     const { document: doc, root, cleanup } = createDOM();
     _setDocument(doc);
 
@@ -202,6 +190,6 @@ Deno.test({
     const handle = mount(root, App);
     assertEquals(root.innerHTML, "<div>hello</div>");
     _unmount(handle);
-    cleanup();
+    await cleanup();
   },
 });

@@ -25,14 +25,14 @@ export type RenderGauges = {
 /** Client-side rAF render meter API — records patches, reads gauges, and classifies render health. */
 export type RenderMeterAPI = {
   recordPatch(now?: number): void;
-  recordAction(type: string, feature: string): void;
+  recordAction(type: string, cell: string): void;
   markDirty(): void;
   getGauges(): RenderGauges;
   getMemoryGauge(): Gauge | null;
   getStaleness(): number;
   getStatus(): VitalStatus;
   getLastAction(): string | null;
-  getLastFeature(): string | null;
+  getLastCell(): string | null;
   tick(now: number): void; // manual mode — takes absolute timestamp (not elapsed ms like RenderProbe)
   setPaused(paused: boolean): void;
   destroy(): void;
@@ -92,7 +92,7 @@ export function createRenderMeter(config: RenderMeterConfig): RenderMeterAPI {
   let frameCountInWindow = 0;
   let windowStart = 0;
   let lastAction: string | null = null;
-  let lastFeature: string | null = null;
+  let lastCell: string | null = null;
   let dirty = false;
   let paused = false;
   let destroyed = false;
@@ -282,9 +282,9 @@ export function createRenderMeter(config: RenderMeterConfig): RenderMeterAPI {
       pendingPatches++;
     },
 
-    recordAction(type: string, feature: string) {
+    recordAction(type: string, cell: string) {
       lastAction = type;
-      lastFeature = feature;
+      lastCell = cell;
     },
 
     markDirty() {
@@ -296,7 +296,7 @@ export function createRenderMeter(config: RenderMeterConfig): RenderMeterAPI {
     getStaleness: () => staleness,
     getStatus: () => status,
     getLastAction: () => lastAction,
-    getLastFeature: () => lastFeature,
+    getLastCell: () => lastCell,
 
     tick,
 

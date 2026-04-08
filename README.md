@@ -9,19 +9,19 @@
 - **Write reactive, use generators or atomic actions when needed.**
 - **Pick your target, compile and ship!**
 
-`v1.0.0-alpha10`
+`v1.0.0-alpha11`
 
 > Define state once. It persists, syncs to all clients, drives the UI.
 
 ## Three styles — mixable
 
-| Style          | API                            | Best for                                      |
-| -------------- | ------------------------------ | --------------------------------------------- |
-| **Reactive**   | `feature({ methods })`         | Most features — CRUD, forms, async            |
-| **Sequential** | `feature({ generators })`      | Multi-step workflows, wizards, checkout flows |
-| **Explicit**   | `feature({ actions, reduce })` | Full control, complex cross-feature logic     |
+| Style          | API                         | Best for                                      |
+| -------------- | --------------------------- | --------------------------------------------- |
+| **Reactive**   | `cell({ methods })`         | Most cells — CRUD, forms, async               |
+| **Sequential** | `cell({ generators })`      | Multi-step workflows, wizards, checkout flows |
+| **Explicit**   | `cell({ actions, reduce })` | Full control, complex cross-cell logic        |
 
-All three can be mixed in a single feature. Start reactive, add generators or
+All three can be mixed in a single cell. Start reactive, add generators or
 actions when needed.
 
 ## Why aio?
@@ -42,9 +42,9 @@ bugs, no infrastructure decisions.
 [Deno 2.6+](https://docs.deno.com/runtime/getting_started/installation/)
 
 ```ts
-import { aio, feature } from "aio";
+import { aio, cell } from "aio";
 
-const counter = feature("counter", {
+const counter = cell("counter", {
   state: { count: 0 },
   methods: {
     increment(s, by = 1) {
@@ -56,7 +56,7 @@ const counter = feature("counter", {
   },
 });
 
-await aio.run({ appId: "taste", appVersion: "0.1.0", features: [counter] });
+await aio.run({ appId: "taste", appVersion: "0.1.0", cells: [counter] });
 // State persists across restarts. WebSocket sync included. 10 lines.
 ```
 
@@ -92,11 +92,11 @@ and all compile targets.
 | **State**       | reactive proxy (Immer) · state machines · generators · selectors · middleware · `call()` coordination · `draft()` · `useLocal` · `page()` routing |
 | **Renderer**    | AIR (~8KB) — signals, JSX, auto-memo, SSR/hydration, forms, animation, virtual-list · React adapter · custom adapter API                          |
 | **SQLite**      | async Worker (non-blocking) · read replicas · ORM · schema migrations · WAL · transactions · custom pragmas                                       |
-| **Persistence** | auto-persist to Deno.Kv · `stateForDB` transform · `persist.exclude` per feature                                                                  |
-| **Sync**        | WebSocket · delta patches · offline queue (IndexedDB, 24h TTL) · UDS/IPC · `stateForUI` per-user filtering · periodic resync                      |
+| **Persistence** | auto-persist to Deno.Kv · cell-level `persist` config (`include`/`exclude`) per cell                                                              |
+| **Sync**        | WebSocket · delta patches · offline queue (IndexedDB, 24h TTL) · UDS/IPC · cell-level `ui` per-user filtering · periodic resync                   |
 | **Security**    | auto-TLS (`--expose`) · multi-user token auth · rate limiting · CSRF protection · `allowedOrigins`                                                |
 | **Scheduling**  | cron · intervals · one-shot timers · cancel by ID or prefix                                                                                       |
-| **DX**          | time-travel (Ctrl+.) · hot reload · `testFeature` harness · Redux DevTools · perf budgets · freeze detection · AIR DevTools                       |
+| **DX**          | time-travel (Ctrl+.) · hot reload · `testCell` harness · Redux DevTools · perf budgets · freeze detection · AIR DevTools                          |
 | **Electron**    | desktop window · UDS+IPC (zero TCP in prod) · window persistence · DevTools toggle · `keepServer`                                                 |
 | **Deploy**      | browser · Electron · CLI · systemd service · Android APK (WebView) · single binary · remote (HTTPS)                                               |
 
@@ -124,7 +124,7 @@ and all compile targets.
 | Multi-user auth          |   ✅    |     ✅     |    ✅    |       🔧        |    🔧     |     🔧      |    ❌     |
 | **Architecture**         |         |            |          |                 |           |             |           |
 | Generator flows          |   ✅    |     ❌     |    ❌    |       ❌        |    ❌     |     ❌      |    ❌     |
-| Feature lifecycle        |   ✅    |     🔧     |    ❌    |       ❌        |    ❌     |     ❌      |    ❌     |
+| Cell lifecycle           |   ✅    |     🔧     |    ❌    |       ❌        |    ❌     |     ❌      |    ❌     |
 | Cron / scheduled tasks   |   ✅    |     ✅     |    ❌    |       ❌        |    ❌     |     🔧      |    ❌     |
 | Middleware               |   ✅    |     ✅     |    ❌    |       ❌        |    ✅     |     ✅      |    ❌     |
 | **Developer experience** |         |            |          |                 |           |             |           |
@@ -173,8 +173,8 @@ See [FAQ](docs/basics/faq.md#when-not-to-use-aio) for details.
 [Project Structure](docs/basics/project-structure.md) ·
 [Migration](docs/basics/migration.md)
 
-**State:** [Features](docs/state/features.md) · [Methods](docs/state/methods.md)
-· [Machines](docs/state/machines.md) · [Generators](docs/state/generators.md) ·
+**State:** [Cells](docs/state/cells.md) · [Methods](docs/state/methods.md) ·
+[Machines](docs/state/machines.md) · [Generators](docs/state/generators.md) ·
 [Actions & Reduce](docs/state/actions-reduce.md) ·
 [Scheduling](docs/state/scheduling.md)
 
@@ -192,7 +192,7 @@ See [FAQ](docs/basics/faq.md#when-not-to-use-aio) for details.
 
 **Infrastructure:** [Auth](docs/auth/auth.md) ·
 [Build Targets](docs/build/targets.md) · [Scaling](docs/build/scaling.md) ·
-[Testing](docs/testing/feature-testing.md) · [Linter](docs/testing/linter.md)
+[Testing](docs/testing/cell-testing.md) · [Linter](docs/testing/linter.md)
 
 **Debug:** [Errors](docs/debugging/errors.md) ·
 [Vitals](docs/debugging/vitals.md) ·
@@ -204,12 +204,14 @@ See [FAQ](docs/basics/faq.md#when-not-to-use-aio) for details.
 
 ## Status
 
-**v1.0.0-alpha10** · [JSR](https://jsr.io/@riagentic/aio) · MIT
+**v1.0.0-alpha11** · [JSR](https://jsr.io/@riagentic/aio) · MIT
 
-1774 tests · security hardened · 144+ bugs fixed across 4 nuclear audit waves
+1774 tests · security hardened · 184+ bugs fixed across 5 nuclear audit waves
 
-New in alpha10: offline-first CRDT sync engine (HLC, merge strategies, rebase,
-compaction), client log forwarding, DOM-based UI snapshot & interaction, docs
-restructured into domain folders. Core (state, sync, persistence, features,
-scheduling, renderer) is stable. Electron, Android, and build targets are
+New in alpha11: `feature()` → `cell()` rename, cell-level `persist`/`ui` filters
+(replace `stateForDB`/`stateForUI`), type-safe machine states with literal
+`.type` inference, clean import boundaries (`aio/core` removed, renderers no
+longer re-export server API), monolith decomposition into focused modules,
+`dispatchTo` removed (use direct calling). Core (state, sync, persistence,
+cells, scheduling, renderer) is stable. Electron, Android, and build targets are
 functional but less battle-tested.

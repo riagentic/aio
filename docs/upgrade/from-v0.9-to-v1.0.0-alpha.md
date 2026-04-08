@@ -1,5 +1,8 @@
 # Upgrade from v0.9 to v1.0.0-alpha
 
+> **Note:** `feature()` was renamed to `cell()` in alpha11. See
+> [upgrade guide](from-alpha10-to-alpha11.md).
+
 ### Breaking changes
 
 **`appId` mandatory in `aio.run()`**

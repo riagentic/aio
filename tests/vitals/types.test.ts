@@ -75,7 +75,7 @@ Deno.test("types: LoopVitals shape compiles", () => {
     drainRate: 100,
     lastReduceTime: 2,
     lastReduceAction: "inc",
-    lastReduceFeature: "counter",
+    lastReduceCell: "counter",
     p95ReduceTime: 5,
     effectBacklog: 0,
     circuitBreakers: [],
@@ -97,7 +97,7 @@ Deno.test("types: RenderFreezeReport shape compiles", () => {
   const _rfr: RenderFreezeReport = {
     frozenFor: 3000,
     lastActionBefore: "click",
-    lastFeature: "ui",
+    lastCell: "ui",
     unprocessedDeltas: 5,
   };
   assertEquals(_rfr.frozenFor, 3000);

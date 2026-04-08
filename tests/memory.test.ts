@@ -7,13 +7,13 @@
 //   - Completed generators don't leak into activeFlows
 
 import { assertEquals } from "@std/assert";
-import { composeFeatures, feature } from "../src/feature.ts";
+import { cell, composeCells } from "../src/cell.ts";
 import { resetFlows } from "../src/flow.ts";
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
-function createTestApp(entries: Parameters<typeof composeFeatures>[0]) {
-  const composed = composeFeatures(entries);
+function createTestApp(entries: Parameters<typeof composeCells>[0]) {
+  const composed = composeCells(entries);
   let state = { ...composed.initialState };
 
   const app = {
@@ -40,9 +40,9 @@ function forceGC(): Promise<void> {
   });
 }
 
-// ── Features ─────────────────────────────────────────────────────────
+// ── Cells ─────────────────────────────────────────────────────────
 
-const counter = feature("counter", {
+const counter = cell("counter", {
   state: { count: 0 },
   actions: {
     increment: (by = 1) => ({ by }),
@@ -58,7 +58,7 @@ const counter = feature("counter", {
   },
 });
 
-const flowFeature = feature("flow", {
+const flowCell = cell("flow", {
   state: { completed: 0 },
   actions: { start: () => ({}) },
   generators: {
@@ -71,7 +71,7 @@ const flowFeature = feature("flow", {
   },
 });
 
-const waitFeature = feature("waiter", {
+const waitCell = cell("waiter", {
   state: { received: 0 },
   actions: {
     begin: () => ({}),
@@ -121,15 +121,16 @@ Deno.test("memory: 10k dispatches — heap growth < 20MB", async () => {
 
 Deno.test({
   name: "memory: 100 generator cycles — no listener leak",
+  // sanitizers disabled: fire-and-forget generators with internal timers that outlive test
   sanitizeOps: false,
   sanitizeResources: false,
 }, async () => {
   resetFlows();
-  const app = createTestApp([flowFeature]);
+  const app = createTestApp([flowCell]);
   const N = 100;
 
   for (let i = 0; i < N; i++) {
-    app.dispatch(flowFeature.start());
+    app.dispatch(flowCell.start());
     await new Promise((r) => setTimeout(r, 10));
   }
 
@@ -146,17 +147,18 @@ Deno.test({
 
 Deno.test({
   name: "memory: waitFor listeners cleaned up after signal",
+  // sanitizers disabled: generator waitFor + dispatch cycle leaves pending async ops
   sanitizeOps: false,
   sanitizeResources: false,
 }, async () => {
   resetFlows();
-  const app = createTestApp([waitFeature]);
+  const app = createTestApp([waitCell]);
 
   // Start 20 wait cycles — each begins a waitFor, then gets signalled
   for (let i = 0; i < 20; i++) {
-    app.dispatch(waitFeature.begin());
+    app.dispatch(waitCell.begin());
     await new Promise((r) => setTimeout(r, 10));
-    app.dispatch(waitFeature.signal());
+    app.dispatch(waitCell.signal());
     await new Promise((r) => setTimeout(r, 20));
   }
 
@@ -167,12 +169,13 @@ Deno.test({
 
 Deno.test({
   name: "memory: waitFor listeners cleaned up on timeout",
+  // sanitizers disabled: 50 generators with 20ms timeouts — some timers outlive test
   sanitizeOps: false,
   sanitizeResources: false,
 }, async () => {
   resetFlows();
 
-  const shortWait = feature("shortWait", {
+  const shortWait = cell("shortWait", {
     state: { timedOut: 0 },
     actions: { go: () => ({}) },
     generators: {
@@ -206,7 +209,7 @@ Deno.test({
 Deno.test("memory: rapid state reset prevents unbounded growth", async () => {
   resetFlows();
 
-  const bigState = feature("big", {
+  const bigState = cell("big", {
     state: { items: [] as string[] },
     actions: {
       fill: () => ({}),

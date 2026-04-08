@@ -2,7 +2,7 @@ import { assertEquals, assertExists } from "@std/assert";
 import {
   createMemoryMonitor,
   detectTrend,
-  measureFeatureState,
+  measureCellState,
   sizeof,
 } from "../src/memory-monitor.ts";
 
@@ -59,33 +59,33 @@ Deno.test("sizeof: TypedArray returns byteLength", () => {
   assertEquals(sizeof(new Float64Array(4)), 32);
 });
 
-// ── measureFeatureState ────────────────────────────────────────────
+// ── measureCellState ────────────────────────────────────────────
 
-Deno.test("measureFeatureState: simple state returns name and bytes", () => {
-  const result = measureFeatureState("counter", { count: 0 });
+Deno.test("measureCellState: simple state returns name and bytes", () => {
+  const result = measureCellState("counter", { count: 0 });
   assertEquals(result.name, "counter");
   // key "count" = 10, value 0 = 8 => 18
   assertEquals(result.bytes, 18);
 });
 
-Deno.test("measureFeatureState: finds largest field", () => {
+Deno.test("measureCellState: finds largest field", () => {
   const state = { small: 1, big: "a]long string here!!" };
-  const result = measureFeatureState("test", state);
+  const result = measureCellState("test", state);
   assertExists(result.largestField);
   assertEquals(result.largestField!.key, "big");
 });
 
-Deno.test("measureFeatureState: counts array entries on largest field", () => {
+Deno.test("measureCellState: counts array entries on largest field", () => {
   const state = { items: [1, 2, 3, 4, 5], flag: true };
-  const result = measureFeatureState("list", state);
+  const result = measureCellState("list", state);
   assertExists(result.largestField);
   assertEquals(result.largestField!.key, "items");
   assertEquals(result.largestField!.entries, 5);
 });
 
-Deno.test("measureFeatureState: counts object entries on largest field", () => {
+Deno.test("measureCellState: counts object entries on largest field", () => {
   const state = { meta: { a: 1, b: 2, c: 3 }, x: 1 };
-  const result = measureFeatureState("obj", state);
+  const result = measureCellState("obj", state);
   assertExists(result.largestField);
   assertEquals(result.largestField!.key, "meta");
   assertEquals(result.largestField!.entries, 3);
@@ -142,7 +142,7 @@ Deno.test("createMemoryMonitor: disabled returns noop stop", () => {
     },
     getMemoryUsage: () => ({ heapUsed: 0, heapTotal: 1, rss: 0, external: 0 }),
     getHeapLimit: () => 0,
-    getFeatureStates: () => [],
+    getCellStates: () => [],
   });
   assertExists(monitor.stop);
   monitor.stop(); // should not throw
@@ -165,7 +165,7 @@ Deno.test("createMemoryMonitor: fires callback when above warn threshold", async
       external: 0,
     }),
     getHeapLimit: () => 100,
-    getFeatureStates: () => [{ name: "f1", state: { x: 1 } }],
+    getCellStates: () => [{ name: "f1", state: { x: 1 } }],
   });
 
   await new Promise((r) => setTimeout(r, 80));
@@ -192,7 +192,7 @@ Deno.test("createMemoryMonitor: critical level when above criticalThreshold", as
       external: 0,
     }),
     getHeapLimit: () => 100,
-    getFeatureStates: () => [],
+    getCellStates: () => [],
   });
 
   await new Promise((r) => setTimeout(r, 60));
@@ -220,7 +220,7 @@ Deno.test("createMemoryMonitor: does not fire when below warnThreshold", async (
       external: 0,
     }),
     getHeapLimit: () => 100,
-    getFeatureStates: () => [],
+    getCellStates: () => [],
   });
 
   await new Promise((r) => setTimeout(r, 80));
@@ -247,7 +247,7 @@ Deno.test("createMemoryMonitor: respects trendWindow config", async () => {
       return { heapUsed: pct * 100, heapTotal: 100, rss: 120, external: 0 };
     },
     getHeapLimit: () => 100,
-    getFeatureStates: () => [],
+    getCellStates: () => [],
   });
 
   await new Promise((r) => setTimeout(r, 120));
@@ -276,7 +276,7 @@ Deno.test("createMemoryMonitor: stop() clears interval", async () => {
       external: 0,
     }),
     getHeapLimit: () => 100,
-    getFeatureStates: () => [],
+    getCellStates: () => [],
   });
 
   await new Promise((r) => setTimeout(r, 60));

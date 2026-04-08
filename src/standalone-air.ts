@@ -65,8 +65,6 @@ type StandaloneConfig<S, A, E> = {
   ) => { state: S; effects: (E | ScheduleEffect)[] };
   execute: (app: AioApp<S, A>, effect: E) => void;
   persist?: boolean;
-  stateForDB?: (state: S) => unknown;
-  stateForUI?: (state: S) => unknown;
   persistKey?: string;
   persistDebounceMs?: number;
   perfCheck?: PerfCheck;
@@ -84,8 +82,8 @@ export function initStandalone<S, A, E>(
 ): AioApp<S, A> {
   const { reduce, execute } = config;
   const shouldPersist = config.persist !== false;
-  const getDBState = config.stateForDB ?? ((s: S) => s);
-  const getUIState = config.stateForUI ?? ((s: S) => s);
+  const getDBState = (s: S) => s;
+  const getUIState = (s: S) => s;
   const persistKey = config.persistKey ?? STORAGE_KEY;
 
   // Restore from localStorage

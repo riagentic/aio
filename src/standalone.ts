@@ -8,6 +8,7 @@ import { actions, effects } from "./factory.ts";
 import { deepMerge } from "./deep-merge.ts";
 import { createDispatch, type PerfBudget, type PerfCheck } from "./dispatch.ts";
 import {
+  type AioError,
   createAioError,
   reportError as reportAioError,
   type ReportErrorOpts,
@@ -60,14 +61,13 @@ type StandaloneConfig<S, A, E> = {
   ) => { state: S; effects: (E | ScheduleEffect)[] };
   execute: (app: AioApp<S, A>, effect: E) => void;
   persist?: boolean;
-  stateForDB?: (state: S) => unknown;
-  stateForUI?: (state: S) => unknown;
   persistKey?: string;
   persistDebounceMs?: number; // ms between localStorage writes (default: 100)
   perfCheck?: PerfCheck; // 'strict' or 'soft' — performance violation handling
   perfBudget?: PerfBudget; // override default budgets
   freezeState?: boolean; // deep freeze state after reduce to catch mutations (default: true)
   onRestore?: (state: S) => S; // transform state after restore, before UI renders
+  onError?: (err: AioError) => void; // error reporting callback
 };
 
 const STORAGE_KEY = "aio_state";
@@ -79,8 +79,8 @@ export function initStandalone<S, A, E>(
 ): AioApp<S, A> {
   const { reduce, execute } = config;
   const shouldPersist = config.persist !== false;
-  const getDBState = config.stateForDB ?? ((s: S) => s);
-  const getUIState = config.stateForUI ?? ((s: S) => s);
+  const getDBState = (s: S) => s;
+  const getUIState = (s: S) => s;
   const persistKey = config.persistKey ?? STORAGE_KEY;
 
   // Restore from localStorage
@@ -103,7 +103,7 @@ export function initStandalone<S, A, E>(
   // Build error reporting opts (standalone is always prod-like, compact format)
   // Memory monitor not available in standalone/browser mode (no Deno.memoryUsage API)
   const _reportOpts: ReportErrorOpts = {
-    onError: undefined, // standalone doesn't expose onError config yet
+    onError: config.onError,
     prod: true,
   };
 

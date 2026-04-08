@@ -72,7 +72,7 @@ Deno.test("integration: render probe detects freeze and provides report", () => 
   assertExists(report);
   assertEquals(report!.frozenFor >= 2000, true);
   assertEquals(report!.lastActionBefore, "orders/RECALC");
-  assertEquals(report!.lastFeature, "orders");
+  assertEquals(report!.lastCell, "orders");
   assertEquals(report!.unprocessedDeltas, 2);
 
   probe.tick(10);

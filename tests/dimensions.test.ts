@@ -10,14 +10,12 @@ function createDOM() {
   const doc = win.document as unknown as Document;
   const root = doc.createElement("div");
   doc.body.appendChild(root);
-  return { document: doc, root, cleanup: () => win.close() };
+  return { document: doc, root, cleanup: () => win.happyDOM.close() };
 }
 
 Deno.test({
   name: "useDimensions: returns ref and dimension signals",
-  sanitizeOps: false,
-  sanitizeResources: false,
-  fn() {
+  async fn() {
     const { document: doc, root, cleanup } = createDOM();
     _setDocument(doc);
     const captured: { dims: DimensionsState | null } = { dims: null };
@@ -37,15 +35,13 @@ Deno.test({
     assertEquals(dims.width.value, 0);
     assertEquals(dims.height.value, 0);
     _unmount(handle);
-    cleanup();
+    await cleanup();
   },
 });
 
 Deno.test({
   name: "useDimensions: persists ref identity across re-renders",
-  sanitizeOps: false,
-  sanitizeResources: false,
-  fn() {
+  async fn() {
     const { document: doc, root, cleanup } = createDOM();
     _setDocument(doc);
     const refs: DimensionsState[] = [];
@@ -59,6 +55,6 @@ Deno.test({
     const handle = mount(root, App);
     assertEquals(refs.length, 1);
     _unmount(handle);
-    cleanup();
+    await cleanup();
   },
 });

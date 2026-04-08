@@ -1,11 +1,34 @@
 # Changelog
 
+## v1.0.0-alpha11
+
+### Breaking Changes
+
+- **`feature()` → `cell()`** — Core API renamed. All `Feature*` types now
+  `Cell*`. `useFeature()` → `useCell()`, `testFeature()` → `testCell()`,
+  `composeFeatures()` → `composeCells()`, `aio.run({ features })` →
+  `aio.run({ cells })`. See
+  [upgrade guide](../upgrade/from-alpha10-to-alpha11.md).
+- **`am new feature` → `am new cell`** — CLI scaffolding updated.
+
+### New
+
+- **Recommended project structure** — New `cell/type/lib/ui/test` layout. See
+  [project structure](project-structure.md).
+
+### Internal
+
+- 130 source files renamed, zero behavior change.
+- Linter updated: detects `cell()` definitions and `useCell()` usage.
+
+---
+
 ## v1.0.0-alpha10
 
 **CRDT sync module, client observability, nuclear audit**
 
 - **CRDT sync** -- offline-first, server-authoritative collaborative state.
-  Per-feature `sync: { merge }` config with 5 merge strategies (lww, counter,
+  Per-cell `sync: { merge }` config with 5 merge strategies (lww, counter,
   lww-per-key, set-add, set-remove). HLC causality, op buffer (IndexedDB),
   rebase engine, client sync engine, server-side compaction (SQLite op-log)
 - **Client log forwarding** -- `installConsoleIntercept()` forwards browser
@@ -14,9 +37,9 @@
   depth 50) with unique selectors and visibility tracking
 - **DOM interaction** -- `interact()` dispatches click, type, select, focus,
   blur, scroll, hover with validation
-- `feature()` accepts `sync` config option (additive, no breaking changes)
+- `cell()` accepts `sync` config option (additive, no breaking changes)
 - Server routes `__op`/`__sync` messages for sync protocol
-- KV persistence auto-excludes sync-enabled features (uses SQLite instead)
+- KV persistence auto-excludes sync-enabled cells (uses SQLite instead)
 - Nuclear audit: 40 findings fixed across sync, server, client, DOM modules
 - Renderer fix in release prep
 
@@ -28,15 +51,15 @@
 
 - `src/boot/` module -- `parseCli()`, `bootIdentity()`, `bootLock()`, and
   Electron helpers extracted into structured startup orchestration
-- `bindFeature(feature, dispatch, getState)` -- wire a feature to a custom
-  dispatch bus without `aio.run()`
+- `bindCell(cell, dispatch, getState)` -- wire a cell to a custom dispatch bus
+  without `aio.run()`
 - Signal equality uses `Object.is` throughout -- NaN-correct, cross-realm safe
 - Legacy `$p/$d` delta format emits one-time deprecation warning; removal in
   v1.0.0
 
 **Breaking: `_status` -> `__aio_status`**
 
-- Internal machine state key renamed. Use `useFeature().status` or
+- Internal machine state key renamed. Use `useCell().status` or
   `registry.status()` instead of reading directly.
 - Reserved-key guard now **throws** at startup (was warn) and blocks any key
   starting with `__aio_`.
@@ -72,7 +95,7 @@
 - Delta protocol: backpressure recovery, filtered merge, array identity patching
 - Renderer: flush guard on disposed root, hydration signal binding, keyed
   fragment placement, Suspense partial cleanup
-- Feature system: proxy stale tracking, async batching, flow lifecycle cleanup
+- Cell system: proxy stale tracking, async batching, flow lifecycle cleanup
 - Electron: `pageReady` reset on F5 reload, IPC null cleanup
 - Server: `stateForUI` memo fix, TT perf timing, schedule ID validation
 
@@ -82,15 +105,15 @@
 
 **Type-safe send & renderer split**
 
-- `useFeature` infers method signatures -- `send` is fully typed
+- `useCell` infers method signatures -- `send` is fully typed
 - `aio/air` and `aio/react` subpath exports
 - React compat hooks for zero-friction migration
 - AIR renderer primitives exported from `aio/air`
 - Monolith decomposition: extracted `middleware.ts` and `lint.ts` from `aio.ts`
 
 **Bug fixes (AIO-55..70)** -- Proxy stale `ownKeys`, signal equality, ref
-callback reliability, JSX DOM event types, `useLocal` `.patch()`, `useFeature`
-type inference, array `key` prop warnings, CJS server stubs, JSR compliance
+callback reliability, JSX DOM event types, `useLocal` `.patch()`, `useCell` type
+inference, array `key` prop warnings, CJS server stubs, JSR compliance
 
 ---
 
@@ -149,7 +172,7 @@ flow, server, electron
 - Reduce phase performance breakdown in time-travel and `perf.log`
 - Render optimization: `_applyPatch` reference stability, re-render storm
   detection
-- Graph validator: circular deps, missing features at startup
+- Graph validator: circular deps, missing cells at startup
 - Todo app and interactive playground examples
 
 ---
@@ -187,7 +210,7 @@ flow, server, electron
 
 - All internal endpoints moved under `/__aio/`
 - Security: CSRF header, rate limiting, SQL allow-list, audit logging
-- Mixed mode features: `feature()` supports methods + actions + effects together
+- Mixed mode cells: `cell()` supports methods + actions + effects together
 - 10 audit bugs resolved (B1-B10)
 - Tests: 801 passing (13.5K lines)
 
@@ -231,20 +254,20 @@ flow, server, electron
 
 ## v0.8.0
 
-- `reactive()` removed -- `feature({ methods })` is the one API
+- `reactive()` removed -- `cell({ methods })` is the one API
 - Object-form `reduce` and `execute` -- named handlers replace switch/case
 - Generators unified: `generators` key replaces `flows`
 - `GenCtx<S>` generic, typed generator arguments
 - `call()` standalone function with timeout/retries
 - Structured logging, `ScopedApp.getFullState()`,
-  `feature({ persist: { exclude } })`
-- Lowercase action type strings (`featureName:actionKey`)
+  `cell({ persist: { exclude } })`
+- Lowercase action type strings (`cellName:actionKey`)
 
 ## v0.7.0
 
 - `reactive()` -- plain methods instead of reduce/execute
 - `flow()` improvements: `ctx.waitFor`, `ctx.getState`, `cancelOn`
-- `useFeature(ref)`, nested delta patches, UDS transport, app identity
+- `useCell(ref)`, nested delta patches, UDS transport, app identity
 
 ## v0.6.0
 
@@ -252,8 +275,8 @@ flow, server, electron
 
 ## v0.5.0
 
-- `feature()`, state machines, `aio.run({ features })`, `useFeature()`,
-  `bridge()`, `testFeature()`, middleware, health endpoint
+- `cell()`, state machines, `aio.run({ cells })`, `useCell()`, `bridge()`,
+  `testCell()`, middleware, health endpoint
 
 ## v0.4.0
 

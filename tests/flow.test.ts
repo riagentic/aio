@@ -1,12 +1,12 @@
 import { assertEquals, assertExists } from "@std/assert";
-import { composeFeatures, feature } from "../src/feature.ts";
+import { cell, composeCells } from "../src/cell.ts";
 import { _actionListeners, cancelFlow } from "../src/flow.ts";
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
 /** Mini dispatch loop for testing — processes actions + effects synchronously where possible */
-function createTestApp(entries: Parameters<typeof composeFeatures>[0]) {
-  const composed = composeFeatures(entries);
+function createTestApp(entries: Parameters<typeof composeCells>[0]) {
+  const composed = composeCells(entries);
   let state = { ...composed.initialState };
   const dispatched: { type: string; payload: unknown }[] = [];
 
@@ -30,7 +30,7 @@ function createTestApp(entries: Parameters<typeof composeFeatures>[0]) {
 
 // ── Basic flow ───────────────────────────────────────────────────────
 
-const basic = feature("basic", {
+const basic = cell("basic", {
   state: { value: 0, done: false },
   actions: {
     start: (n: number) => ({ n }),
@@ -77,9 +77,9 @@ Deno.test("flow: basic flow updates state", async () => {
   assertEquals(s.done, true);
 });
 
-// ── Flow-only feature (no reduce) ────────────────────────────────────
+// ── Flow-only cell (no reduce) ────────────────────────────────────
 
-const flowOnly = feature("flowOnly", {
+const flowOnly = cell("flowOnly", {
   state: { result: "" },
   actions: {
     go: (input: string) => ({ input }),
@@ -97,7 +97,7 @@ const flowOnly = feature("flowOnly", {
   },
 });
 
-Deno.test("flow: feature with only generators (no reduce)", async () => {
+Deno.test("flow: cell with only generators (no reduce)", async () => {
   const app = createTestApp([flowOnly]);
   app.dispatch(flowOnly.go("hello"));
   await app.flush();
@@ -106,9 +106,9 @@ Deno.test("flow: feature with only generators (no reduce)", async () => {
   assertEquals(s.result, "HELLO");
 });
 
-// ── Mixed feature (reduce + generators) ──────────────────────────────
+// ── Mixed cell (reduce + generators) ──────────────────────────────
 
-const mixed = feature("mixed", {
+const mixed = cell("mixed", {
   state: { count: 0, synced: false },
   actions: {
     increment: (by = 1) => ({ by }),
@@ -136,14 +136,14 @@ const mixed = feature("mixed", {
   },
 });
 
-Deno.test("flow: mixed feature — reduce works independently", () => {
+Deno.test("flow: mixed cell — reduce works independently", () => {
   const app = createTestApp([mixed]);
   app.dispatch(mixed.increment(5));
   const s = app.getState().mixed as { count: number };
   assertEquals(s.count, 5);
 });
 
-Deno.test("flow: mixed feature — generator works alongside reduce", async () => {
+Deno.test("flow: mixed cell — generator works alongside reduce", async () => {
   const app = createTestApp([mixed]);
   app.dispatch(mixed.increment(3));
   app.dispatch(mixed.sync());
@@ -156,7 +156,7 @@ Deno.test("flow: mixed feature — generator works alongside reduce", async () =
 
 // ── Generator with ctx.dispatch ───────────────────────────────────────
 
-const putter = feature("putter", {
+const putter = cell("putter", {
   state: { step: "" },
   actions: {
     start: () => ({}),
@@ -195,7 +195,7 @@ Deno.test("flow: ctx.dispatch dispatches regular action", async () => {
 
 // ── ctx.send shorthand ────────────────────────────────────────────────
 
-const sender = feature("sender", {
+const sender = cell("sender", {
   state: { step: "" },
   actions: {
     start: () => ({}),
@@ -232,7 +232,7 @@ Deno.test("flow: ctx.send dispatches via bound creator", async () => {
 
 // ── Generator with ctx.fail ───────────────────────────────────────────
 
-const failer = feature("failer", {
+const failer = cell("failer", {
   state: { value: 0 },
   actions: {
     start: () => ({}),
@@ -269,7 +269,7 @@ Deno.test("flow: ctx.fail stops execution and dispatches failed action", async (
 
 // ── Generator with ctx.sleep ──────────────────────────────────────────
 
-const sleeper = feature("sleeper", {
+const sleeper = cell("sleeper", {
   state: { woke: false },
   actions: {
     start: () => ({}),
@@ -299,7 +299,7 @@ Deno.test("flow: ctx.sleep pauses then continues", async () => {
 
 // ── Generator with ctx.all (spread form) ─────────────────────────────
 
-const parallel = feature("parallel", {
+const parallel = cell("parallel", {
   state: { a: 0, b: 0 },
   actions: {
     start: () => ({}),
@@ -330,7 +330,7 @@ Deno.test("flow: ctx.all (spread) runs calls in parallel", async () => {
 
 // ── Generator with ctx.all (named form) ──────────────────────────────
 
-const namedParallel = feature("namedParallel", {
+const namedParallel = cell("namedParallel", {
   state: { x: 0, y: 0 },
   actions: {
     start: () => ({}),
@@ -361,7 +361,7 @@ Deno.test("flow: ctx.all (named) runs calls in parallel and returns by name", as
 
 // ── Generator with ctx.race ───────────────────────────────────────────
 
-const racer = feature("racer", {
+const racer = cell("racer", {
   state: { winner: "" },
   actions: {
     start: () => ({}),
@@ -386,6 +386,7 @@ const racer = feature("racer", {
 
 Deno.test({
   name: "flow: ctx.race picks first to resolve",
+  // sanitizers disabled: ctx.race has intentional fire-and-forget losers (dangling promises)
   sanitizeOps: false,
   sanitizeResources: false,
 }, async () => {
@@ -402,7 +403,7 @@ Deno.test({
 Deno.test("flow: throws if generator key not in actions", () => {
   let error: Error | null = null;
   try {
-    feature("bad", {
+    cell("bad", {
       state: {},
       actions: { go: () => ({}) },
       generators: {
@@ -419,7 +420,7 @@ Deno.test("flow: throws if generator key not in actions", () => {
 
 // ── Sync call in generator ────────────────────────────────────────────
 
-const syncFlow = feature("syncFlow", {
+const syncFlow = cell("syncFlow", {
   state: { value: 0 },
   actions: {
     start: () => ({}),
@@ -445,7 +446,7 @@ Deno.test("flow: ctx.call works with sync functions", async () => {
 
 // ── Multiple steps ────────────────────────────────────────────────────
 
-const multiStep = feature("multiStep", {
+const multiStep = cell("multiStep", {
   state: { steps: [] as string[] },
   actions: {
     start: () => ({}),
@@ -477,7 +478,7 @@ Deno.test("flow: multiple ctx.mutate calls execute in order", async () => {
 
 // ── Error handling in generator ───────────────────────────────────────
 
-const errorFlow = feature("errorFlow", {
+const errorFlow = cell("errorFlow", {
   state: { value: 0 },
   actions: {
     start: () => ({}),
@@ -508,7 +509,7 @@ Deno.test("flow: error in ctx.call dispatches error action", async () => {
 
 // ── ctx.waitFor ───────────────────────────────────────────────────────
 
-const waiter = feature("waiter", {
+const waiter = cell("waiter", {
   state: { received: "" },
   actions: {
     start: () => ({}),
@@ -539,7 +540,7 @@ Deno.test("flow: ctx.waitFor pauses until matching action dispatched", async () 
   assertEquals((app.getState().waiter as any).received, "hello");
 });
 
-const timeoutWaiter = feature("timeoutWaiter", {
+const timeoutWaiter = cell("timeoutWaiter", {
   state: { timedOut: false },
   actions: {
     start: () => ({}),
@@ -569,7 +570,7 @@ Deno.test("flow: ctx.waitFor with timeout throws on expiry", async () => {
 
 // ── ctx.getState ──────────────────────────────────────────────────────
 
-const stateReader = feature("stateReader", {
+const stateReader = cell("stateReader", {
   state: { count: 0, doubled: 0 },
   actions: {
     start: () => ({}),
@@ -590,6 +591,7 @@ const stateReader = feature("stateReader", {
 
 Deno.test({
   name: "flow: ctx.getState reads fresh state after step",
+  // sanitizers disabled: generator async steps leave pending microtasks
   sanitizeOps: false,
   sanitizeResources: false,
 }, async () => {
@@ -604,7 +606,7 @@ Deno.test({
 
 // ── cancelOn ──────────────────────────────────────────────────────────
 
-const cancellable = feature("cancellable", {
+const cancellable = cell("cancellable", {
   state: { running: false, finished: false },
   actions: {
     start: () => ({}),
@@ -629,6 +631,7 @@ const cancellable = feature("cancellable", {
 
 Deno.test({
   name: "flow: cancelOn stops generator when matching action dispatched",
+  // sanitizers disabled: cancelled generator ctx.sleep leaves a dangling timer
   sanitizeOps: false,
   sanitizeResources: false,
 }, async () => {
@@ -646,7 +649,7 @@ Deno.test({
 
 // ── ctx.dispatch with payload-optional actions ────────────────────────
 
-const putCompat = feature("putCompat", {
+const putCompat = cell("putCompat", {
   state: { sent: false },
   actions: {
     start: () => ({}),
@@ -680,7 +683,7 @@ Deno.test("flow: ctx.dispatch accepts action without payload", async () => {
 
 // ── ctx.race with 3+ entries, multiple resolve near-simultaneously ──
 
-const race3 = feature("race3", {
+const race3 = cell("race3", {
   state: { winner: "" },
   actions: { start: () => ({}) },
   generators: {
@@ -726,7 +729,7 @@ Deno.test({
 
 // ── ctx.race where instant (sync) entry beats async ─────────────────
 
-const raceSyncAsync = feature("raceSyncAsync", {
+const raceSyncAsync = cell("raceSyncAsync", {
   state: { winner: "" },
   actions: { start: () => ({}) },
   generators: {
@@ -760,7 +763,7 @@ Deno.test({
 
 // ── ctx.waitFor with timeout=0 — should time out immediately ────────
 
-const zeroTimeout = feature("zeroTimeout", {
+const zeroTimeout = cell("zeroTimeout", {
   state: { timedOut: false },
   actions: { start: () => ({}) },
   generators: {
@@ -787,7 +790,7 @@ Deno.test("flow edge: ctx.waitFor with timeout=0 times out immediately", async (
 
 // ── ctx.call with timeout — times out if fn is too slow ─────────────
 
-const callTimeout = feature("callTimeout", {
+const callTimeout = cell("callTimeout", {
   state: { result: "" },
   actions: { start: () => ({}) },
   generators: {
@@ -822,7 +825,7 @@ Deno.test({
 
 // ── ctx.call with retries — retries then succeeds ───────────────────
 
-const callRetry = feature("callRetry", {
+const callRetry = cell("callRetry", {
   state: { attempts: 0, result: "" },
   actions: { start: () => ({}) },
   generators: {
@@ -853,7 +856,7 @@ Deno.test("flow edge: ctx.call with retries recovers after failures", async () =
 
 // ── ctx.call with retries — exhausts retries and fails ──────────────
 
-const callRetryFail = feature("callRetryFail", {
+const callRetryFail = cell("callRetryFail", {
   state: { result: "" },
   actions: { start: () => ({}) },
   generators: {
@@ -884,7 +887,7 @@ Deno.test("flow edge: ctx.call exhausts retries then throws", async () => {
 
 // ── Generator cancelled mid-ctx.all — partial results don't apply ───
 
-const cancelMidAll = feature("cancelMidAll", {
+const cancelMidAll = cell("cancelMidAll", {
   state: { done: false },
   actions: {
     start: () => ({}),
@@ -922,7 +925,7 @@ Deno.test({
 
 // ── ctx.all with one entry throwing — whole all fails ───────────────
 
-const allWithError = feature("allWithError", {
+const allWithError = cell("allWithError", {
   state: { result: "" },
   actions: { start: () => ({}) },
   generators: {
@@ -954,7 +957,7 @@ Deno.test("flow edge: ctx.all fails if any entry throws", async () => {
 
 // ── ctx.race where all entries reject — race rejects ────────────────
 
-const raceAllFail = feature("raceAllFail", {
+const raceAllFail = cell("raceAllFail", {
   state: { result: "" },
   actions: { start: () => ({}) },
   generators: {
@@ -986,7 +989,7 @@ Deno.test("flow edge: ctx.race rejects when first entry rejects", async () => {
 
 // ── Generator auto-completes without ctx.done() ─────────────────────
 
-const noDone = feature("noDone", {
+const noDone = cell("noDone", {
   state: { value: 42 },
   actions: { start: () => ({}) },
   generators: {
@@ -1011,7 +1014,7 @@ Deno.test("flow edge: generator without ctx.done() auto-dispatches done", async 
 
 // ── Restarting a flow while it's already running ────────────────────
 
-const restart = feature("restart", {
+const restart = cell("restart", {
   state: { value: 0 },
   actions: { start: (n: number) => ({ n }) },
   generators: {
@@ -1041,7 +1044,7 @@ Deno.test({
 
 // ── ctx.getFullState ────────────────────────────────────────────────
 
-const fullStateReader = feature("fullStateReader", {
+const fullStateReader = cell("fullStateReader", {
   state: { count: 5, seen: 0 },
   actions: { start: () => ({}) },
   generators: {
@@ -1055,7 +1058,7 @@ const fullStateReader = feature("fullStateReader", {
   },
 });
 
-Deno.test("flow: ctx.getFullState reads own feature state", async () => {
+Deno.test("flow: ctx.getFullState reads own cell state", async () => {
   const app = createTestApp([fullStateReader]);
   app.dispatch(fullStateReader.start());
   await app.flush();
@@ -1064,12 +1067,12 @@ Deno.test("flow: ctx.getFullState reads own feature state", async () => {
   assertEquals(s.seen, 5);
 });
 
-const provider = feature("provider", {
+const provider = cell("provider", {
   state: { value: 42 },
   actions: {},
 });
 
-const consumer = feature("consumer", {
+const consumer = cell("consumer", {
   state: { grabbed: 0 },
   actions: { start: () => ({}) },
   generators: {
@@ -1083,7 +1086,7 @@ const consumer = feature("consumer", {
   },
 });
 
-Deno.test("flow: ctx.getFullState reads other feature's state", async () => {
+Deno.test("flow: ctx.getFullState reads other cell's state", async () => {
   const app = createTestApp([provider, consumer]);
   app.dispatch(consumer.start());
   await app.flush();
@@ -1091,7 +1094,7 @@ Deno.test("flow: ctx.getFullState reads other feature's state", async () => {
   assertEquals((app.getState().consumer as any).grabbed, 42);
 });
 
-const fullStateFresh = feature("fullStateFresh", {
+const fullStateFresh = cell("fullStateFresh", {
   state: { count: 0, seenOther: 0 },
   actions: { start: () => ({}) },
   generators: {
@@ -1127,7 +1130,7 @@ Deno.test({
 
 // ── ctx.when ────────────────────────────────────────────────────────
 
-const whenImmediate = feature("whenImmediate", {
+const whenImmediate = cell("whenImmediate", {
   state: { ready: true, proceeded: false },
   actions: { start: () => ({}) },
   generators: {
@@ -1151,7 +1154,7 @@ Deno.test("flow: ctx.when resolves immediately when condition already true", asy
   assertEquals((app.getState().whenImmediate as any).proceeded, true);
 });
 
-const whenTrigger = feature("whenTrigger", {
+const whenTrigger = cell("whenTrigger", {
   state: { active: false },
   actions: { activate: () => ({}) },
   reduce: {
@@ -1161,7 +1164,7 @@ const whenTrigger = feature("whenTrigger", {
   },
 });
 
-const whenWaiter = feature("whenWaiter", {
+const whenWaiter = cell("whenWaiter", {
   state: { saw: false },
   actions: { start: () => ({}) },
   generators: {
@@ -1193,7 +1196,7 @@ Deno.test("flow: ctx.when resolves when condition becomes true after dispatch", 
 
 // ── ctx.when edge cases ─────────────────────────────────────────────
 
-const whenTimeout = feature("whenTimeout", {
+const whenTimeout = cell("whenTimeout", {
   state: { timedOut: false },
   actions: { start: () => ({}) },
   generators: {
@@ -1218,7 +1221,7 @@ Deno.test("flow: ctx.when with timeout throws on expiry", async () => {
   assertEquals((app.getState().whenTimeout as any).timedOut, true);
 });
 
-const whenThrows = feature("whenThrows", {
+const whenThrows = cell("whenThrows", {
   state: { proceeded: false },
   actions: { start: () => ({}) },
   generators: {
@@ -1246,7 +1249,7 @@ Deno.test("flow: ctx.when predicate that throws is treated as false", async () =
   assertEquals((app.getState().whenThrows as any).proceeded, true);
 });
 
-const whenCancelled = feature("whenCancelled", {
+const whenCancelled = cell("whenCancelled", {
   state: { done: false },
   actions: {
     start: () => ({}),
@@ -1279,7 +1282,7 @@ Deno.test({
   assertEquals((app.getState().whenCancelled as any).done, false);
 });
 
-const whenMultiA = feature("whenMultiA", {
+const whenMultiA = cell("whenMultiA", {
   state: { resolved: false },
   actions: { start: () => ({}) },
   generators: {
@@ -1292,7 +1295,7 @@ const whenMultiA = feature("whenMultiA", {
   },
 });
 
-const whenMultiB = feature("whenMultiB", {
+const whenMultiB = cell("whenMultiB", {
   state: { resolved: false },
   actions: { start: () => ({}) },
   generators: {
@@ -1305,7 +1308,7 @@ const whenMultiB = feature("whenMultiB", {
   },
 });
 
-const whenMultiTrigger = feature("whenMultiTrigger", {
+const whenMultiTrigger = cell("whenMultiTrigger", {
   state: { a: false, b: false },
   actions: {
     setA: () => ({}),
@@ -1343,7 +1346,7 @@ Deno.test("flow: multiple ctx.when listeners resolve independently", async () =>
 
 // ── ctx.when integration ────────────────────────────────────────────
 
-const whenAndWaitFor = feature("whenAndWaitFor", {
+const whenAndWaitFor = cell("whenAndWaitFor", {
   state: { phase: "init" },
   actions: {
     start: () => ({}),
@@ -1368,7 +1371,7 @@ const whenAndWaitFor = feature("whenAndWaitFor", {
   },
 });
 
-const whenAndWaitForTrigger = feature("whenAndWaitForTrigger", {
+const whenAndWaitForTrigger = cell("whenAndWaitForTrigger", {
   state: { ready: false },
   actions: { activate: () => ({}) },
   reduce: {
@@ -1398,7 +1401,7 @@ Deno.test("flow: ctx.when + ctx.waitFor in same flow", async () => {
   assertEquals((app.getState().whenAndWaitFor as any).phase, "complete");
 });
 
-const whenRace = feature("whenRace", {
+const whenRace = cell("whenRace", {
   state: { winner: "" },
   actions: { start: () => ({}) },
   generators: {
@@ -1416,7 +1419,7 @@ const whenRace = feature("whenRace", {
   },
 });
 
-const whenRaceTrigger = feature("whenRaceTrigger", {
+const whenRaceTrigger = cell("whenRaceTrigger", {
   state: { flag: false },
   actions: { setFlag: () => ({}) },
   reduce: {
@@ -1443,7 +1446,7 @@ Deno.test({
 
 // ── AIO-117: waitFor listener leak on flow cancellation ──────────────
 
-const leakyWaiter = feature("leakyWaiter", {
+const leakyWaiter = cell("leakyWaiter", {
   state: { phase: "init" },
   actions: {
     start: () => ({}),
@@ -1493,7 +1496,7 @@ Deno.test("flow: AIO-117 waitFor listener cleaned up on flow cancellation", asyn
 
 // AIO-117 part 2: waitFor listener leak when flow completes via finally block
 // (e.g., re-trigger cancels old flow — the finally cleanup must handle waitFor listeners)
-const leakyRetrigger = feature("leakyRetrigger", {
+const leakyRetrigger = cell("leakyRetrigger", {
   state: { phase: "init" },
   actions: {
     start: () => ({}),

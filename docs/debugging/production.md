@@ -1,6 +1,6 @@
 # Production
 
-Memory monitoring, feature health, common error patterns, and production failure
+Memory monitoring, cell health, common error patterns, and production failure
 scenarios.
 
 ## Memory pressure monitor
@@ -14,7 +14,7 @@ AIO monitors heap usage and alerts before OOM. Critical for long-running apps.
 | MEMORY_PRESSURE -- heap at 78% (1.56 GB / 2.0 GB)       |
 | GC reclaimed only 2.1% on last cycle                     |
 |                                                          |
-| Top features by state size:                              |
+| Top cells by state size:                              |
 |   1. barHistory  -- 847 MB (state.candles: 1,240,000)    |
 |   2. orderer     -- 12 MB                                |
 |   3. portfolio   -- 3 MB                                 |
@@ -36,7 +36,7 @@ await aio.run({
     onMemoryPressure(report) {
       // report.level: 'warn' | 'critical'
       // report.heapUsed, report.heapTotal, report.heapPct
-      // report.featureStates: sorted by size, largest first
+      // report.cellStates: sorted by size, largest first
       // report.trend: 'rising' | 'stable' | 'falling'
       if (report.level === "critical") {
         barHistory.pruneOldEntries(1000);
@@ -49,8 +49,8 @@ await aio.run({
 ### How it works
 
 - Samples `Deno.memoryUsage()` every `interval` ms (near-zero cost)
-- At/above threshold: measures per-feature state sizes, reports largest feature
-  and growing field
+- At/above threshold: measures per-cell state sizes, reports largest cell and
+  growing field
 - Trend detection: 3 consecutive rising samples = `'rising'`
 - Memory pressure errors also hit `onError` as `MEMORY_PRESSURE` /
   `MEMORY_CRITICAL`
@@ -72,25 +72,25 @@ Key points:
 
 ---
 
-## Feature health audit
+## Cell health audit
 
-Inspect feature health at runtime:
+Inspect cell health at runtime:
 
 ```ts
-const app = await aio.run({ features: [counter, wallet] });
+const app = await aio.run({ cells: [counter, wallet] });
 
-app.features!.health();
+app.cells!.health();
 // [
 //   { name: 'counter', status: 'idle', enabled: true, errors: 0, lastAction: 'counter:increment' },
 //   { name: 'wallet', status: 'saving', enabled: true, errors: 0, lastAction: 'wallet:save' },
 // ]
 
-app.features!.status("counter"); // 'idle'
-app.features!.list(); // ['counter', 'wallet']
-app.features!.disable("wallet"); // dispatches wallet:__destroy, stops routing
+app.cells!.status("counter"); // 'idle'
+app.cells!.list(); // ['counter', 'wallet']
+app.cells!.disable("wallet"); // dispatches wallet:__destroy, stops routing
 ```
 
-HTTP endpoint: `GET /__aio/health` returns JSON with per-feature status.
+HTTP endpoint: `GET /__aio/health` returns JSON with per-cell status.
 
 ---
 
@@ -99,7 +99,7 @@ HTTP endpoint: `GET /__aio/health` returns JSON with per-feature status.
 ### Machine-dropped actions
 
 ```
-MACHINE_BLOCKED in feature 'counter'
+MACHINE_BLOCKED in cell 'counter'
 Action: counter:save -- machine is in 'error' state (allowed: retry, dismiss)
 ```
 
@@ -113,21 +113,8 @@ The `_status` and `__aio_*` keys are reserved. Rename your field (e.g.,
 
 ### "already bound"
 
-Same feature instance passed to `aio.run()` twice, or `aio.run()` called twice
+Same cell instance passed to `aio.run()` twice, or `aio.run()` called twice
 without creating new instances.
-
-### "dispatch blocked" (cross-feature)
-
-Executor tried to dispatch to another feature's actions. Dev mode throws; prod
-logs and drops.
-
-Fix: add the target to `dispatchTo`:
-
-```ts
-const engine = feature("engine", {
-  dispatchTo: [wallet],
-});
-```
 
 ### "machine initial state not found"
 
@@ -193,7 +180,7 @@ continues, state accumulates, client gets latest on reconnect via full-state
 sync.
 
 If the _server_ crashes mid-generator: generator is lost (in-memory). On
-restart, features reinitialize to persisted state. Design generators to be
+restart, cells reinitialize to persisted state. Design generators to be
 resumable -- check state in `onInit`.
 
 ### Electron process killed during state flush
@@ -224,18 +211,18 @@ Fix: always pass a timeout: `ctx.waitFor(action, 30_000)`.
 Offline queue (IndexedDB) caps at 100 actions. Beyond that, actions silently
 dropped. Intentional -- stale actions from hours-offline shouldn't replay.
 
-### Feature error accumulation
+### Cell error accumulation
 
-Effect errors increment a per-feature counter visible via `health()`. Feature
-keeps running -- errors don't auto-disable. Use `onError` or periodic health
-checks to detect high error counts.
+Effect errors increment a per-cell counter visible via `health()`. Cell keeps
+running -- errors don't auto-disable. Use `onError` or periodic health checks to
+detect high error counts.
 
 ### Memory growth in long-running apps
 
 Common causes:
 
 - **Unbounded state arrays**: memory monitor catches this -- look for
-  `MEMORY_PRESSURE` with per-feature sizing
+  `MEMORY_PRESSURE` with per-cell sizing
 - **Time-travel history**: capped at 200 entries (dev only, zero in prod)
 - **Stuck generators**: leak one `waitFor` listener each. 30s dev warning
   catches this

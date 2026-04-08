@@ -1,13 +1,12 @@
-# Composition — Cross-Feature Communication
+# Composition — Cross-Cell Communication
 
-Features don't share state — they communicate through three interaction
-patterns.
+Cells don't share state — they communicate through three interaction patterns.
 
-| Pattern                     | What                                 | When                                    |
-| --------------------------- | ------------------------------------ | --------------------------------------- |
-| [Observe](#1-observe)       | React when another feature acts      | Sync state, analytics, side-effects     |
-| [Read](#2-read--selectors)  | Read another feature's derived state | UI display, computed values             |
-| [Coordinate](#3-coordinate) | Trigger or call another feature      | Effects, async workflows, orchestration |
+| Pattern                     | What                              | When                                    |
+| --------------------------- | --------------------------------- | --------------------------------------- |
+| [Observe](#1-observe)       | React when another cell acts      | Sync state, analytics, side-effects     |
+| [Read](#2-read--selectors)  | Read another cell's derived state | UI display, computed values             |
+| [Coordinate](#3-coordinate) | Trigger or call another cell      | Effects, async workflows, orchestration |
 
 **Observe** and **Read** are passive. **Coordinate** is active.
 
@@ -18,7 +17,7 @@ patterns.
 ### listensTo — the simple way
 
 ```ts
-const analytics = feature("analytics", {
+const analytics = cell("analytics", {
   state: { events: [] as string[] },
   listensTo: [cart.addItem, cart.clear], // bound methods — refactor-safe
   methods: {
@@ -34,10 +33,10 @@ if you provide an explicit `machine`.
 
 ### Full machine — manual foreign listeners
 
-For features that need real machine states alongside foreign listeners:
+For cells that need real machine states alongside foreign listeners:
 
 ```ts
-const analytics = feature("analytics", {
+const analytics = cell("analytics", {
   state: { events: [] as string[] },
   machine: {
     initial: "active",
@@ -60,7 +59,7 @@ const analytics = feature("analytics", {
 ```
 
 **How it works:** Foreign actions are identified by the `:` separator not
-matching the feature's prefix. The framework routes the action to both the owner
+matching the cell's prefix. The framework routes the action to both the owner
 and all listeners — owner reduces first.
 
 ---
@@ -70,7 +69,7 @@ and all listeners — owner reduces first.
 Selectors expose derived state. They don't create coupling — read-only views:
 
 ```ts
-const counter = feature("counter", {
+const counter = cell("counter", {
   state: { count: 0, limit: 100 },
   selectors: {
     remaining: (s: { count: number; limit: number }) => s.limit - s.count,
@@ -80,12 +79,12 @@ const counter = feature("counter", {
 counter.remaining(); // → 100
 ```
 
-**Cross-feature in UI** — read from multiple features:
+**Cross-cell in UI** — read from multiple cells:
 
 ```tsx
 export default function Dashboard() {
-  const c = useFeature(counter);
-  const w = useFeature(wallet);
+  const c = useCell(counter);
+  const w = useCell(wallet);
   return (
     <div>
       <p>Remaining: {counter.remaining()}</p>
@@ -101,13 +100,13 @@ export default function Dashboard() {
 
 ### Direct calling (default — 80% of cases)
 
-Import any feature and call its methods directly:
+Import any cell and call its methods directly:
 
 ```ts
 import { inventory } from "../inventory";
 import { pricing } from "../pricing";
 
-const orders = feature("orders", {
+const orders = cell("orders", {
   state: { orderId: null as string | null, total: 0 },
   methods: {
     async placeOrder(s, items: Item[]) {
@@ -142,26 +141,6 @@ async placeOrder(s, items: Item[]) {
 | `timeout` | `number` (ms) | Rejects if method doesn't complete in time |
 | `retries` | `number`      | Retries on failure up to N times           |
 
-### dispatchTo — fire and forget from executors
-
-When an executor dispatches to another feature, declare it:
-
-```ts
-const checkout = feature("checkout", {
-  dispatchTo: [wallet, inventory],
-  execute: {
-    paymentComplete(app, payload) {
-      app.dispatch(wallet.credit(payload.amount)); // allowed
-      app.dispatch(inventory.reserve(payload.itemId)); // allowed
-      app.dispatch(shipping.schedule(payload.orderId)); // BLOCKED
-    },
-  },
-});
-```
-
-Without `dispatchTo`, executors can only dispatch own actions. Blocked
-dispatches log an error and increment the feature's error count.
-
 ### ctx.dispatch in generators
 
 ```ts
@@ -174,7 +153,7 @@ generators: {
 }
 ```
 
-`ctx.dispatch()` bypasses `dispatchTo` — dispatches directly to the global loop.
+`ctx.dispatch()` dispatches directly to the global loop.
 
 ### ctx.waitFor — pause until external action
 
@@ -206,8 +185,8 @@ methods directly for refactor safety.
 | **Effect handler**          | `false`     | Immediate                              |
 | **External** (UI/test)      | `false`     | Fire-and-forget or await               |
 
-**Key insight:** Async methods run in the executor. Cross-feature calls from
-async methods start a new, independent dispatch cycle — not a nested one.
+**Key insight:** Async methods run in the executor. Cross-cell calls from async
+methods start a new, independent dispatch cycle — not a nested one.
 
 ---
 

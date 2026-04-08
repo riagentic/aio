@@ -20,8 +20,8 @@ import {
   routeSearch,
   schedule,
   useAio,
+  useCell,
   useConnected,
-  useFeature,
   useNavigate,
   useRoute,
 } from "../src/browser-air.ts";
@@ -136,8 +136,8 @@ Deno.test("browser-air: memo returns component unchanged", () => {
 
 // ── Hook existence tests (can't fully test without AIR renderer) ───
 
-Deno.test("browser-air: useFeature is a function", () => {
-  assertEquals(typeof useFeature, "function");
+Deno.test("browser-air: useCell is a function", () => {
+  assertEquals(typeof useCell, "function");
 });
 
 Deno.test("browser-air: useAio is a function", () => {
@@ -160,6 +160,8 @@ Deno.test("browser-air: useNavigate is a function", () => {
 
 Deno.test({
   name: "browser-air: ensureConnected is idempotent",
+  // Sanitizers disabled: ensureConnected() creates a WebSocket stub internally
+  // that cannot be fully torn down without a real browser environment
   sanitizeResources: false,
   sanitizeOps: false,
   fn() {

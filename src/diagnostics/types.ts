@@ -28,7 +28,7 @@ export type CheckpointData = {
   ts: number;
   state: Record<string, unknown>;
   recentActions: string[];
-  features: Record<string, { errors: number; enabled: boolean }>;
+  cells: Record<string, { errors: number; enabled: boolean }>;
 };
 
 /** Built-in defaults per mode */

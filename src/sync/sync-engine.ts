@@ -8,36 +8,39 @@ import { rebase, type SyncReducer } from "./rebase.ts";
 /** Dependencies injected into the client-side sync engine. */
 export interface SyncEngineDeps {
   clientId: string;
-  features: Record<string, SyncConfig>;
+  cells: Record<string, SyncConfig>;
   buffer: OpBuffer;
   send: (msg: string) => void;
   reducer: SyncReducer;
   getConfirmedState: () => Record<string, Record<string, unknown>>;
-  /** Update confirmed state for a feature — called on remote ops and snapshots */
-  setConfirmedState: (feature: string, state: Record<string, unknown>) => void;
-  onStateUpdate: (feature: string, optimistic: Record<string, unknown>) => void;
+  /** Update confirmed state for a cell — called on remote ops and snapshots */
+  setConfirmedState: (cell: string, state: Record<string, unknown>) => void;
+  onStateUpdate: (cell: string, optimistic: Record<string, unknown>) => void;
+  log?: {
+    warn: (msg: string) => void;
+  };
 }
 
 /** Client-side CRDT sync engine that buffers local ops, rebases on acks, and manages online/offline state. */
 export interface SyncEngine {
   handleLocalAction(
-    feature: string,
+    cell: string,
     action: string,
     payload: unknown,
   ): Promise<void>;
-  handleAck(feature: string, opId: string, serverHlc: HLC): Promise<void>;
+  handleAck(cell: string, opId: string, serverHlc: HLC): Promise<void>;
   handleRemoteOp(op: SyncOp): Promise<void>;
   handleSyncResponse(response: {
     mode: string;
     ops?: SyncOp[];
     rebase?: SyncOp[];
     snapshot?: Record<string, Record<string, unknown>>;
-    lowWater: HLC;
+    lowWater: HLC | Record<string, HLC>;
   }): Promise<void>;
   setOnline(online: boolean): void;
-  getStatus(feature: string): SyncStatus;
+  getStatus(cell: string): SyncStatus;
   requestSync(): Promise<void>;
-  isSyncFeature(featureName: string): boolean;
+  isSyncCell(cellName: string): boolean;
 }
 
 /** Create a client-side sync engine that coordinates op buffering, HLC clocks, and rebase. */
@@ -47,126 +50,156 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
   let online = true;
   const statuses = new Map<string, SyncStatus>();
 
-  // Per-feature async mutex to prevent interleaved handleLocalAction calls
+  // Per-cell async mutex — serializes all state mutations (local, ack, remote, sync)
   const _locks = new Map<string, Promise<void>>();
 
-  for (const feature of Object.keys(deps.features)) {
-    statuses.set(feature, { status: "online", pending: 0, lastSync: 0 });
+  for (const cell of Object.keys(deps.cells)) {
+    statuses.set(cell, { status: "online", pending: 0, lastSync: 0 });
   }
 
-  function updateStatus(feature: string, patch: Partial<SyncStatus>) {
-    const current = statuses.get(feature);
+  function updateStatus(cell: string, patch: Partial<SyncStatus>) {
+    const current = statuses.get(cell);
     if (!current) return;
-    statuses.set(feature, { ...current, ...patch });
+    statuses.set(cell, { ...current, ...patch });
   }
 
-  /** Serialize async work per feature to prevent interleaved state. */
-  function withLock(feature: string, fn: () => Promise<void>): Promise<void> {
-    const prev = _locks.get(feature) ?? Promise.resolve();
+  /** Serialize async work per cell to prevent interleaved state. */
+  function withLock(cell: string, fn: () => Promise<void>): Promise<void> {
+    const prev = _locks.get(cell) ?? Promise.resolve();
     const next = prev.then(fn, fn); // run even if prev rejected
-    _locks.set(feature, next);
+    _locks.set(cell, next);
     return next;
   }
 
-  async function rebaseFeature(feature: string) {
-    const confirmedState = deps.getConfirmedState()[feature] ?? {};
-    const unconfirmed = await deps.buffer.getUnconfirmed(feature);
+  async function rebaseCell(cell: string) {
+    const confirmedState = deps.getConfirmedState()[cell] ?? {};
+    const unconfirmed = await deps.buffer.getUnconfirmed(cell);
     const result = rebase(confirmedState, unconfirmed, deps.reducer);
-    deps.onStateUpdate(feature, result.optimistic);
-    updateStatus(feature, { pending: result.surviving.length });
+    deps.onStateUpdate(cell, result.optimistic);
+    updateStatus(cell, { pending: result.surviving.length });
   }
 
   return {
-    handleLocalAction(feature, action, payload) {
-      return withLock(feature, async () => {
+    handleLocalAction(cell, action, payload) {
+      return withLock(cell, async () => {
         const hlc = clock.tick();
         const id = `${deps.clientId}-${(++_opCounter).toString(36)}`;
         const op: SyncOp = {
           id,
-          feature,
+          cell,
           action,
           payload,
           hlc,
           confirmed: false,
         };
 
-        const accepted = await deps.buffer.add(op);
+        // Try to make room by pruning confirmed ops before rejecting
+        let accepted = await deps.buffer.add(op);
         if (!accepted) {
-          updateStatus(feature, { status: "blocked" });
+          await deps.buffer.pruneConfirmed(cell);
+          accepted = await deps.buffer.add(op);
+        }
+        if (!accepted) {
+          updateStatus(cell, { status: "blocked" });
+          deps.log?.warn(
+            `[sync] ${cell}: op buffer full (pending cap reached) — op dropped. Reconnect or reduce mutation rate.`,
+          );
           return;
         }
 
-        await rebaseFeature(feature);
+        await rebaseCell(cell);
 
         if (online) {
           deps.send(
-            JSON.stringify({ __op: { id, hlc, feature, action, payload } }),
+            JSON.stringify({ __op: { id, hlc, cell, action, payload } }),
           );
         }
       });
     },
 
-    async handleAck(feature, opId, serverHlc) {
-      clock.receive(serverHlc);
-      await deps.buffer.confirm(feature, opId, serverHlc);
-      await rebaseFeature(feature);
-      updateStatus(feature, { lastSync: Date.now() });
+    handleAck(cell, opId, serverHlc) {
+      return withLock(cell, async () => {
+        clock.receive(serverHlc);
+        await deps.buffer.confirm(cell, opId, serverHlc);
+        await rebaseCell(cell);
+        updateStatus(cell, { lastSync: Date.now() });
+      });
     },
 
-    async handleRemoteOp(op) {
-      if (!this.isSyncFeature(op.feature)) return;
-      clock.receive(op.hlc);
-
-      const confirmed = deps.getConfirmedState()[op.feature] ?? {};
-      const next = deps.reducer(confirmed, op.action, op.payload);
-      if (next !== null) {
-        deps.setConfirmedState(op.feature, next);
-      }
-      await rebaseFeature(op.feature);
+    handleRemoteOp(op) {
+      if (!this.isSyncCell(op.cell)) return Promise.resolve();
+      return withLock(op.cell, async () => {
+        clock.receive(op.hlc);
+        const confirmed = deps.getConfirmedState()[op.cell] ?? {};
+        const next = deps.reducer(confirmed, op.action, op.payload);
+        if (next !== null) {
+          deps.setConfirmedState(op.cell, next);
+        }
+        await rebaseCell(op.cell);
+      });
     },
 
     async handleSyncResponse(response) {
-      // Track which features were affected
-      const affected = new Set<string>();
-
-      // Apply snapshot to confirmed state before rebase
-      if (response.mode === "snapshot" && response.snapshot) {
-        for (const [feature, state] of Object.entries(response.snapshot)) {
-          deps.setConfirmedState(feature, state);
-          await deps.buffer.saveSnapshot(feature, {
-            state,
-            hlc: response.lowWater,
-          });
-          affected.add(feature);
-        }
-      }
-
-      // Apply incremental ops to confirmed state
+      // Receive HLCs into global clock (safe outside per-cell lock)
       if (response.ops) {
-        for (const op of response.ops) {
-          clock.receive(op.hlc);
-          const confirmed = deps.getConfirmedState()[op.feature] ?? {};
-          const next = deps.reducer(confirmed, op.action, op.payload);
-          if (next !== null) {
-            deps.setConfirmedState(op.feature, next);
-          }
-          affected.add(op.feature);
-        }
+        for (const op of response.ops) clock.receive(op.hlc);
       }
-
       if (response.rebase) {
         for (const op of response.rebase) clock.receive(op.hlc);
       }
 
-      // Only rebase affected features; preserve "blocked" status
-      for (const feature of affected) {
-        const s = statuses.get(feature);
-        if (s?.status === "blocked") continue; // don't clear blocked until buffer resolved
-        updateStatus(feature, { status: "syncing" });
-        await rebaseFeature(feature);
-        updateStatus(feature, {
-          status: online ? "online" : "offline",
-          lastSync: Date.now(),
+      // Collect snapshot work per cell
+      const snapshots = new Map<string, Record<string, unknown>>();
+      if (response.mode === "snapshot" && response.snapshot) {
+        for (const [f, s] of Object.entries(response.snapshot)) {
+          snapshots.set(f, s);
+        }
+      }
+
+      // Group ops by cell
+      const opsByCell = new Map<string, SyncOp[]>();
+      if (response.ops) {
+        for (const op of response.ops) {
+          const list = opsByCell.get(op.cell) ?? [];
+          list.push(op);
+          opsByCell.set(op.cell, list);
+        }
+      }
+
+      // Resolve per-cell lowWater (supports both single HLC and per-cell map)
+      const lw = response.lowWater;
+      const isPerCell = lw && !Array.isArray(lw) && typeof lw === "object";
+      const getLW = (f: string): HLC =>
+        isPerCell ? (lw as Record<string, HLC>)[f] ?? clock.now() : lw as HLC;
+
+      // Process each affected cell: snapshot → ops → rebase (all under one lock)
+      const affected = new Set([...snapshots.keys(), ...opsByCell.keys()]);
+      for (const cell of affected) {
+        await withLock(cell, async () => {
+          const snap = snapshots.get(cell);
+          if (snap) {
+            deps.setConfirmedState(cell, snap);
+            await deps.buffer.saveSnapshot(cell, {
+              state: snap,
+              hlc: getLW(cell),
+            });
+          }
+          const ops = opsByCell.get(cell);
+          if (ops) {
+            for (const op of ops) {
+              const confirmed = deps.getConfirmedState()[cell] ?? {};
+              const next = deps.reducer(confirmed, op.action, op.payload);
+              if (next !== null) deps.setConfirmedState(cell, next);
+            }
+          }
+          const s = statuses.get(cell);
+          if (s?.status === "blocked") return;
+          updateStatus(cell, { status: "syncing" });
+          await rebaseCell(cell);
+          updateStatus(cell, {
+            status: online ? "online" : "offline",
+            lastSync: Date.now(),
+          });
         });
       }
     },
@@ -174,13 +207,13 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
     setOnline(v) {
       const wasOffline = !online;
       online = v;
-      for (const feature of Object.keys(deps.features)) {
+      for (const cell of Object.keys(deps.cells)) {
         if (!v) {
-          updateStatus(feature, { status: "offline" });
+          updateStatus(cell, { status: "offline" });
         } else {
-          const s = statuses.get(feature);
+          const s = statuses.get(cell);
           if (s?.status === "offline") {
-            updateStatus(feature, { status: "online" });
+            updateStatus(cell, { status: "online" });
           }
         }
       }
@@ -188,55 +221,55 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
       if (v && wasOffline) {
         this.requestSync().catch(() => {
           // Revert to offline if sync request fails
-          for (const feature of Object.keys(deps.features)) {
-            const s = statuses.get(feature);
+          for (const cell of Object.keys(deps.cells)) {
+            const s = statuses.get(cell);
             if (s?.status === "syncing") {
-              updateStatus(feature, { status: "offline" });
+              updateStatus(cell, { status: "offline" });
             }
           }
         });
       }
     },
 
-    getStatus(feature) {
-      return statuses.get(feature) ??
+    getStatus(cell) {
+      return statuses.get(cell) ??
         { status: "online", pending: 0, lastSync: 0 };
     },
 
     async requestSync() {
       if (!online) return; // don't send while offline
-      const features: Record<string, { lastHlc: HLC | null }> = {};
+      const cells: Record<string, { lastHlc: HLC | null }> = {};
       const allPending: SyncOp[] = [];
 
-      for (const feature of Object.keys(deps.features)) {
-        const meta = await deps.buffer.getMeta(feature);
-        features[feature] = { lastHlc: meta?.lastHlc ?? null };
-        const unconfirmed = await deps.buffer.getUnconfirmed(feature);
+      for (const cell of Object.keys(deps.cells)) {
+        const meta = await deps.buffer.getMeta(cell);
+        cells[cell] = { lastHlc: meta?.lastHlc ?? null };
+        const unconfirmed = await deps.buffer.getUnconfirmed(cell);
         allPending.push(...unconfirmed.slice(0, SYNC_DEFAULTS.pendingCap));
-        updateStatus(feature, { status: "syncing" });
+        updateStatus(cell, { status: "syncing" });
       }
 
       try {
         deps.send(JSON.stringify({
           __sync: {
             clientId: deps.clientId,
-            features,
+            cells,
             pendingOps: allPending,
           },
         }));
       } catch {
         // Revert status on send failure
-        for (const feature of Object.keys(deps.features)) {
-          const s = statuses.get(feature);
+        for (const cell of Object.keys(deps.cells)) {
+          const s = statuses.get(cell);
           if (s?.status === "syncing") {
-            updateStatus(feature, { status: online ? "online" : "offline" });
+            updateStatus(cell, { status: online ? "online" : "offline" });
           }
         }
       }
     },
 
-    isSyncFeature(featureName) {
-      return featureName in deps.features;
+    isSyncCell(cellName) {
+      return cellName in deps.cells;
     },
   };
 }

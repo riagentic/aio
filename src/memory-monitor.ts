@@ -1,6 +1,6 @@
 // Memory Pressure Monitor — threshold alerts + trend detection
 
-/** Heap usage report emitted when memory exceeds thresholds — includes per-feature breakdown and trend. */
+/** Heap usage report emitted when memory exceeds thresholds — includes per-cell breakdown and trend. */
 export type MemoryReport = {
   level: "warn" | "critical";
   heapUsed: number;
@@ -9,12 +9,12 @@ export type MemoryReport = {
   heapPct: number;
   gcReclaimed: number;
   gcReclaimedPct: number;
-  featureStates: FeatureStateSize[];
+  cellStates: CellStateSize[];
   trend: "rising" | "stable" | "falling";
 };
 
-/** Per-feature memory size entry — name, serialized byte size, and largest field info. */
-export type FeatureStateSize = {
+/** Per-cell memory size entry — name, serialized byte size, and largest field info. */
+export type CellStateSize = {
   name: string;
   bytes: number;
   largestField?: { key: string; entries?: number };
@@ -37,7 +37,7 @@ type MemoryUsage = {
   rss: number;
   external: number;
 };
-type FeatureEntry = { name: string; state: unknown };
+type CellEntry = { name: string; state: unknown };
 
 type MonitorDeps = {
   enabled: boolean;
@@ -49,7 +49,7 @@ type MonitorDeps = {
   onReport: (report: MemoryReport) => void;
   getMemoryUsage: () => MemoryUsage;
   getHeapLimit: () => number; // V8 heap_size_limit — the actual max, not lazily-allocated heapTotal
-  getFeatureStates: () => FeatureEntry[];
+  getCellStates: () => CellEntry[];
 };
 
 /** Recursive size estimator for JS values. */
@@ -88,13 +88,13 @@ export function sizeof(obj: unknown, seen?: Set<unknown>): number {
   return total;
 }
 
-/** Measure a single feature's state size + identify largest field. */
-export function measureFeatureState(
+/** Measure a single cell's state size + identify largest field. */
+export function measureCellState(
   name: string,
   state: unknown,
-): FeatureStateSize {
+): CellStateSize {
   const bytes = sizeof(state);
-  const result: FeatureStateSize = { name, bytes };
+  const result: CellStateSize = { name, bytes };
 
   if (
     state && typeof state === "object" && !ArrayBuffer.isView(state) &&
@@ -155,10 +155,10 @@ export function createMemoryMonitor(deps: MonitorDeps): { stop: () => void } {
 
     if (heapPct < deps.warnThreshold) return;
 
-    // Measure feature states
-    const entries = deps.getFeatureStates();
-    const featureStates = entries
-      .map((e) => measureFeatureState(e.name, e.state))
+    // Measure cell states
+    const entries = deps.getCellStates();
+    const cellStates = entries
+      .map((e) => measureCellState(e.name, e.state))
       .sort((a, b) => b.bytes - a.bytes);
 
     const level: "warn" | "critical" = heapPct >= deps.criticalThreshold
@@ -174,7 +174,7 @@ export function createMemoryMonitor(deps: MonitorDeps): { stop: () => void } {
       heapPct,
       gcReclaimed,
       gcReclaimedPct,
-      featureStates,
+      cellStates,
       trend,
     });
   }, deps.interval);

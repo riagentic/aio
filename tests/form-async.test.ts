@@ -7,8 +7,6 @@ function delay(ms: number) {
 
 Deno.test({
   name: "form: async validator runs after sync rules pass",
-  sanitizeOps: false,
-  sanitizeResources: false,
   async fn() {
     const form = useForm({
       username: {
@@ -50,8 +48,6 @@ Deno.test({
 
 Deno.test({
   name: "form: async validator debounce",
-  sanitizeOps: false,
-  sanitizeResources: false,
   async fn() {
     let callCount = 0;
     const form = useForm({
@@ -88,8 +84,6 @@ Deno.test({
 
 Deno.test({
   name: "form: cross-field validation",
-  sanitizeOps: false,
-  sanitizeResources: false,
   fn() {
     const form = useForm(
       {
@@ -121,8 +115,6 @@ Deno.test({
 
 Deno.test({
   name: "form: cross-field + per-field rules work together",
-  sanitizeOps: false,
-  sanitizeResources: false,
   fn() {
     const form = useForm(
       {
@@ -153,8 +145,6 @@ Deno.test({
 
 Deno.test({
   name: "form: existing sync-only useForm still works unchanged",
-  sanitizeOps: false,
-  sanitizeResources: false,
   fn() {
     const form = useForm({
       name: {

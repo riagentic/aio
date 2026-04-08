@@ -55,7 +55,7 @@ Deno.test("e2e — action → reduce throw → onError → TT flagged", async ()
 });
 
 Deno.test("e2e — reportError self-guard: formatter crash degrades gracefully", () => {
-  const err = createAioError("REDUCE_ERROR", "test", { featureName: "test" });
+  const err = createAioError("REDUCE_ERROR", "test", { cellName: "test" });
 
   // Override toJSON to throw — simulates formatter failure
   const _original = err.toJSON.bind(err);

@@ -6,7 +6,7 @@ import { _setDocument, _unmount, mount } from "../src/aio-renderer.ts";
 import { TransitionGroup } from "../src/transition-group.ts";
 import { fade } from "../src/transition.ts";
 
-const DOM_TEST_OPTS = { sanitizeOps: false, sanitizeResources: false };
+// happy-dom timers drained via win.happyDOM.close() — sanitizers enabled
 
 function createDOM() {
   const win = new Window({ url: "https://localhost" });
@@ -18,8 +18,7 @@ function createDOM() {
 
 Deno.test({
   name: "TransitionGroup: renders keyed children",
-  ...DOM_TEST_OPTS,
-  fn() {
+  async fn() {
     const { win, doc, root } = createDOM();
     _setDocument(doc);
     const items = signal(["a", "b", "c"]);
@@ -34,15 +33,16 @@ Deno.test({
     const wrapper = root.querySelector("span");
     assertEquals(wrapper !== null, true);
     assertEquals(wrapper!.querySelectorAll("div").length, 3);
+    // Wait for enter animation timers to complete before unmount
+    await new Promise((r) => setTimeout(r, 350));
     _unmount(handle);
-    win.close();
+    await win.happyDOM.close();
   },
 });
 
 Deno.test({
   name: "TransitionGroup: new items get enter animation",
-  ...DOM_TEST_OPTS,
-  fn() {
+  async fn() {
     const { win, doc, root } = createDOM();
     _setDocument(doc);
     const items = signal(["a", "b"]);
@@ -65,14 +65,15 @@ Deno.test({
     assertEquals(c !== null, true);
     assertEquals(c.style.animation !== "", true);
 
+    // Wait for enter animation timers to complete before unmount
+    await new Promise((r) => setTimeout(r, 350));
     _unmount(handle);
-    win.close();
+    await win.happyDOM.close();
   },
 });
 
 Deno.test({
   name: "TransitionGroup: removed items have deferred exit",
-  ...DOM_TEST_OPTS,
   async fn() {
     const { win, doc, root } = createDOM();
     _setDocument(doc);
@@ -98,14 +99,13 @@ Deno.test({
     assertEquals(root.querySelector("#b"), null);
 
     _unmount(handle);
-    win.close();
+    await win.happyDOM.close();
   },
 });
 
 Deno.test({
   name: "TransitionGroup: reorder preserves all items",
-  ...DOM_TEST_OPTS,
-  fn() {
+  async fn() {
     const { win, doc, root } = createDOM();
     _setDocument(doc);
     const items = signal(["a", "b", "c"]);
@@ -127,15 +127,16 @@ Deno.test({
     assertEquals(root.querySelector("#b") !== null, true);
     assertEquals(root.querySelector("#c") !== null, true);
 
+    // Wait for FLIP animation timers to complete before unmount
+    await new Promise((r) => setTimeout(r, 400));
     _unmount(handle);
-    win.close();
+    await win.happyDOM.close();
   },
 });
 
 Deno.test({
   name: "TransitionGroup: works with empty list",
-  ...DOM_TEST_OPTS,
-  fn() {
+  async fn() {
     const { win, doc, root } = createDOM();
     _setDocument(doc);
     const items = signal<string[]>([]);
@@ -148,6 +149,7 @@ Deno.test({
     const handle = mount(root, App);
     assertEquals(root.querySelectorAll("div").length, 0);
     _unmount(handle);
-    win.close();
+    // No animations started — no wait needed
+    await win.happyDOM.close();
   },
 });

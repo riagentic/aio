@@ -1,5 +1,8 @@
 # Upgrade from v1.0.0-alpha3 to v1.0.0-alpha4
 
+> **Note:** `feature()` was renamed to `cell()` in alpha11. See
+> [upgrade guide](from-alpha10-to-alpha11.md).
+
 ### Breaking changes
 
 **`effectTimeout` behavior change — warn → hard-cancel**

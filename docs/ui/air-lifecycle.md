@@ -107,7 +107,7 @@ Show an immediate UI update while an async action is in flight. When
 
 ```tsx
 const TodoList = () => {
-  const { state, send } = useFeature(todoFeature);
+  const { state, send } = useCell(todoCell);
 
   const [items, addOptimistic] = useOptimistic(
     state.items,

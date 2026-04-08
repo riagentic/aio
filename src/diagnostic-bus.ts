@@ -12,7 +12,7 @@ export type DiagnosticEvent = {
   /** Source module or subsystem that emitted the event */
   source: string;
   message: string;
-  /** Arbitrary structured detail (e.g. payload, feature id) */
+  /** Arbitrary structured detail (e.g. payload, cell id) */
   detail?: unknown;
   /** Unix ms timestamp — added by diagEmit */
   ts: number;

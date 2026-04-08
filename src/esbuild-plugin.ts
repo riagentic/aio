@@ -30,7 +30,7 @@ export function aioBrowserPlugin(): {
       }));
 
       // AIO-55: Mark *.server.ts dynamic imports as external — convention for
-      // server-only helper modules. Feature methods run server-side; any
+      // server-only helper modules. Cell methods run server-side; any
       // import('./foo.server.ts') inside them is dead code in the browser bundle.
       build.onResolve(
         { filter: /\.server\.ts$/ },

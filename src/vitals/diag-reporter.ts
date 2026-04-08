@@ -10,7 +10,7 @@ export type LoopSnapshot = {
   drainRate: number;
   lastReduceTime: number;
   lastReduceAction: string;
-  lastReduceFeature: string;
+  lastReduceCell: string;
   p95ReduceTime: number;
   effectBacklog: number;
   circuitBreakers: string[];
@@ -91,7 +91,7 @@ export function createServerDiagReporter(config: ServerDiagReporterConfig) {
     const hint = alert.hint;
 
     if (kind === "slow") {
-      detail.trigger = loop.lastReduceAction || loop.lastReduceFeature ||
+      detail.trigger = loop.lastReduceAction || loop.lastReduceCell ||
         undefined;
       detail.reduceMs = loop.lastReduceTime;
       detail.p95Ms = loop.p95ReduceTime;

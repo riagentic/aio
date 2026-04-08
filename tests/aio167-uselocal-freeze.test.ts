@@ -25,7 +25,7 @@ function createDOM(): {
   const doc = win.document as unknown as Document;
   const root = doc.createElement("div");
   doc.body.appendChild(root);
-  return { document: doc, root, cleanup: () => win.close() };
+  return { document: doc, root, cleanup: () => win.happyDOM.close() };
 }
 
 /** Inline useLocal (same logic as adapters/air.ts) to avoid adapter import complications */
@@ -48,9 +48,7 @@ function useLocal<T>(initial: T) {
 Deno.test({
   name:
     "AIO-167: useLocal tab switch works after multiple round-trips (direct mount)",
-  sanitizeOps: false,
-  sanitizeResources: false,
-  fn() {
+  async fn() {
     const { document, root, cleanup } = createDOM();
     _setDocument(document);
 
@@ -91,7 +89,7 @@ Deno.test({
     assertEquals(root.querySelector("#page span")!.textContent, "Tab: b");
 
     _unmount(handle);
-    cleanup();
+    await cleanup();
   },
 });
 
@@ -100,9 +98,7 @@ Deno.test({
 Deno.test({
   name:
     "AIO-167: useLocal survives type-mismatch createDom (simulated router switch)",
-  sanitizeOps: false,
-  sanitizeResources: false,
-  fn() {
+  async fn() {
     const { document, root, cleanup } = createDOM();
     _setDocument(document);
 
@@ -163,7 +159,7 @@ Deno.test({
     assertEquals(root.querySelector(".tab-label")!.textContent, "Tab: a");
 
     _unmount(handle);
-    cleanup();
+    await cleanup();
   },
 });
 
@@ -172,9 +168,7 @@ Deno.test({
 Deno.test({
   name:
     "AIO-167: useLocal works after navigate away and back (full round-trip)",
-  sanitizeOps: false,
-  sanitizeResources: false,
-  fn() {
+  async fn() {
     const { document, root, cleanup } = createDOM();
     _setDocument(document);
 
@@ -245,7 +239,7 @@ Deno.test({
     assertEquals(root.querySelector(".label")!.textContent, "Tab: a");
 
     _unmount(handle);
-    cleanup();
+    await cleanup();
   },
 });
 
@@ -253,9 +247,7 @@ Deno.test({
 
 Deno.test({
   name: "AIO-167: ternary component children survive round-trip tab switch",
-  sanitizeOps: false,
-  sanitizeResources: false,
-  fn() {
+  async fn() {
     const { document, root, cleanup } = createDOM();
     _setDocument(document);
 
@@ -344,7 +336,7 @@ Deno.test({
     assertEquals(root.querySelector("#tableB"), null);
 
     _unmount(handle);
-    cleanup();
+    await cleanup();
   },
 });
 
@@ -352,8 +344,6 @@ Deno.test({
 
 Deno.test({
   name: "AIO-167: useLocal round-trip with microtask flush (async scheduling)",
-  sanitizeOps: false,
-  sanitizeResources: false,
   async fn() {
     const { document, root, cleanup } = createDOM();
     _setDocument(document);
@@ -438,7 +428,7 @@ Deno.test({
     );
 
     _unmount(handle);
-    cleanup();
+    await cleanup();
   },
 });
 
@@ -446,8 +436,6 @@ Deno.test({
 
 Deno.test({
   name: "AIO-167: ternary components + async flush after router navigation",
-  sanitizeOps: false,
-  sanitizeResources: false,
   async fn() {
     const { document, root, cleanup } = createDOM();
     _setDocument(document);
@@ -520,7 +508,7 @@ Deno.test({
     }
 
     _unmount(handle);
-    cleanup();
+    await cleanup();
   },
 });
 
@@ -528,8 +516,6 @@ Deno.test({
 
 Deno.test({
   name: "AIO-167: cycle detection resets pendingRender (no zombie components)",
-  sanitizeOps: false,
-  sanitizeResources: false,
   async fn() {
     const { document, root, cleanup } = createDOM();
     _setDocument(document);
@@ -573,7 +559,7 @@ Deno.test({
     );
 
     _unmount(handle);
-    cleanup();
+    await cleanup();
   },
 });
 
@@ -581,9 +567,7 @@ Deno.test({
 
 Deno.test({
   name: "AIO-167: signal subscription count stays correct across re-renders",
-  sanitizeOps: false,
-  sanitizeResources: false,
-  fn() {
+  async fn() {
     const { document, root, cleanup } = createDOM();
     _setDocument(document);
 
@@ -632,6 +616,6 @@ Deno.test({
     );
 
     _unmount(handle);
-    cleanup();
+    await cleanup();
   },
 });

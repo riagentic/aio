@@ -153,6 +153,8 @@ async function launchElectron(
 Deno.test({
   name:
     "electron: IPC ready handshake — state arrives in renderer after 300ms module load",
+  // Sanitizers disabled: Electron child process, CDP WebSocket, UDS listener, and esbuild
+  // dev server all have async teardown that outlives the test boundary
   sanitizeResources: false,
   sanitizeOps: false,
   fn: async () => {
@@ -207,7 +209,7 @@ Deno.test({
       win.webContents.send('__aio:open');
       // Request fresh full state from server via subscribe-all.
       // This replaces relying on lastFullState which may be stale (captured on
-      // initial UDS connect before async feature initialization completed, and
+      // initial UDS connect before async cell initialization completed, and
       // never updated because all subsequent states are $f-tagged or $p deltas).
       // The server responds with current complete state — no $f because * = unfiltered.
       sock.write('__subs:["*"]\\n');

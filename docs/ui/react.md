@@ -4,12 +4,12 @@ Standard React hooks connected to aio's server state pipeline. Use your existing
 React knowledge — aio handles transport, persistence, and synchronization.
 
 ```tsx
-import { useFeature } from "aio/react";
+import { useCell } from "aio/react";
 import { createRoot } from "react-dom/client";
-import { counter } from "./features/counter.ts";
+import { counter } from "./cell/counter.ts";
 
 function App() {
-  const { state, send } = useFeature(counter);
+  const { state, send } = useCell(counter);
   return (
     <button onClick={() => send.increment()}>
       Count: {state.count}
@@ -44,10 +44,10 @@ createRoot(document.getElementById("root")!).render(<App />);
 
 ```ts
 // Components — all hooks + routing + server symbols
-import { feature, log, useFeature, useLocal, useRoute } from "aio/react";
+import { cell, log, useCell, useLocal, useRoute } from "aio/react";
 
 // Server-only code
-import { aio, feature, log } from "aio";
+import { aio, cell, log } from "aio";
 ```
 
 `aio/react` is a single import for everything a component file needs.
@@ -59,14 +59,14 @@ import { aio, feature, log } from "aio";
 These hooks connect React to aio's server state via WebSocket/IPC. Under the
 hood, they use `useSyncExternalStore` to bridge signal-based state into React.
 
-### useFeature
+### useCell
 
 ```tsx
-import { useFeature } from "aio/react";
-import { counter } from "./features/counter.ts";
+import { useCell } from "aio/react";
+import { counter } from "./cell/counter.ts";
 
 function CounterDisplay() {
-  const { state, send } = useFeature(counter);
+  const { state, send } = useCell(counter);
   return (
     <div>
       <span>Count: {state.count}</span>
@@ -76,9 +76,9 @@ function CounterDisplay() {
 }
 ```
 
-- `state` is reactive — component re-renders when the feature's state changes
-- `send` has typed methods matching the feature's actions/methods
-- Type inference from the feature definition
+- `state` is reactive — component re-renders when the cell's state changes
+- `send` has typed methods matching the cell's actions/methods
+- Type inference from the cell definition
 
 ### useAio
 
@@ -96,7 +96,7 @@ function Dashboard() {
 }
 ```
 
-Re-renders on **any** state change. Prefer `useFeature` for scoped updates.
+Re-renders on **any** state change. Prefer `useCell` for scoped updates.
 
 ### useLocal
 
@@ -128,10 +128,10 @@ function StatusBar() {
 ### useProjection — Derived state
 
 ```tsx
-import { memo, useFeature, useProjection } from "aio/react";
+import { memo, useCell, useProjection } from "aio/react";
 
 function FleetTable() {
-  const { state } = useFeature(fleet);
+  const { state } = useCell(fleet);
   const groups = useProjection(
     () => buildGroups(state.members),
     [state.members],
@@ -249,14 +249,14 @@ provide your own transport via `setTransport()`.
 
 ## Differences from Plain React
 
-| Aspect          | Plain React               | AIO React (`aio/react`)              |
-| --------------- | ------------------------- | ------------------------------------ |
-| **State**       | Local only (`useState`)   | Local + server-synced (`useFeature`) |
-| **Transport**   | Manual (fetch, WebSocket) | Built-in WS/IPC with reconnect       |
-| **Persistence** | Manual                    | Automatic (Deno.Kv)                  |
-| **State sync**  | Manual                    | Automatic (server -> all clients)    |
-| **Routing**     | react-router (external)   | Built-in signal-based                |
-| **Events**      | React synthetic events    | React synthetic events               |
+| Aspect          | Plain React               | AIO React (`aio/react`)           |
+| --------------- | ------------------------- | --------------------------------- |
+| **State**       | Local only (`useState`)   | Local + server-synced (`useCell`) |
+| **Transport**   | Manual (fetch, WebSocket) | Built-in WS/IPC with reconnect    |
+| **Persistence** | Manual                    | Automatic (Deno.Kv)               |
+| **State sync**  | Manual                    | Automatic (server -> all clients) |
+| **Routing**     | react-router (external)   | Built-in signal-based             |
+| **Events**      | React synthetic events    | React synthetic events            |
 
 Everything else is standard React. `useState`, `useEffect`, third-party
 libraries — all work normally. AIO's hooks are additions, not replacements.
@@ -267,14 +267,14 @@ libraries — all work normally. AIO's hooks are additions, not replacements.
 
 ### Server State Hooks
 
-| Function        | Signature                                  | Description          |
-| --------------- | ------------------------------------------ | -------------------- |
-| `useFeature`    | `useFeature(ref): { state, send, status }` | Subscribe to feature |
-| `useAio`        | `useAio(): { state, send }`                | Subscribe to all     |
-| `useLocal`      | `useLocal(init): { local, set, patch }`    | Client-only state    |
-| `useConnected`  | `useConnected(): boolean`                  | Connection status    |
-| `useProjection` | `useProjection(fn): T`                     | Derived state        |
-| `useTimeTravel` | `useTimeTravel(ref): TimeTravelState`      | Debug time travel    |
+| Function        | Signature                               | Description       |
+| --------------- | --------------------------------------- | ----------------- |
+| `useCell`       | `useCell(ref): { state, send, status }` | Subscribe to cell |
+| `useAio`        | `useAio(): { state, send }`             | Subscribe to all  |
+| `useLocal`      | `useLocal(init): { local, set, patch }` | Client-only state |
+| `useConnected`  | `useConnected(): boolean`               | Connection status |
+| `useProjection` | `useProjection(fn): T`                  | Derived state     |
+| `useTimeTravel` | `useTimeTravel(ref): TimeTravelState`   | Debug time travel |
 
 ### Routing
 

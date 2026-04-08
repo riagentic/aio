@@ -34,7 +34,7 @@ Deno.test("mod: getRecoveredState returns null when no checkpoint", () => {
   if (hooks!.uninstallCrashHandler) hooks!.uninstallCrashHandler();
 });
 
-Deno.test("mod: onStart initializes feature tracking", () => {
+Deno.test("mod: onStart initializes cell tracking", () => {
   const hooks = initDiagnostics(
     { dev: { crashHandler: false, checkpoint: false, actionLog: false } },
     false,

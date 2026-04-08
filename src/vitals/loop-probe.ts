@@ -20,8 +20,8 @@ export type LoopProbeAPI = {
 const P95_WINDOW = 100;
 const DRAIN_WINDOW_MS = 5_000;
 
-/** Extract feature name from "feature/ACTION" or "feature:ACTION" patterns */
-function extractFeature(actionType: string): string {
+/** Extract cell name from "cell/ACTION" or "cell:ACTION" patterns */
+function extractCell(actionType: string): string {
   const slashIdx = actionType.indexOf("/");
   if (slashIdx > 0) return actionType.slice(0, slashIdx);
   const colonIdx = actionType.indexOf(":");
@@ -48,7 +48,7 @@ export function createLoopProbe(thresholds: VitalThresholds): LoopProbeAPI {
   let effectBacklog = 0;
   let lastReduceTime = 0;
   let lastReduceAction = "";
-  let lastReduceFeature = "";
+  let lastReduceCell = "";
   let p95ReduceTime = 0;
   let circuitBreakers: string[] = [];
   let firstDegradedAt: number | null = null;
@@ -89,7 +89,7 @@ export function createLoopProbe(thresholds: VitalThresholds): LoopProbeAPI {
   function onPerf(timing: PerfTiming): void {
     lastReduceTime = timing.reduce;
     lastReduceAction = timing.actionType;
-    lastReduceFeature = extractFeature(timing.actionType);
+    lastReduceCell = extractCell(timing.actionType);
 
     // Update p95 sliding window
     reduceTimes.push(timing.reduce);
@@ -132,7 +132,7 @@ export function createLoopProbe(thresholds: VitalThresholds): LoopProbeAPI {
       drainRate: computeDrainRate(),
       lastReduceTime,
       lastReduceAction,
-      lastReduceFeature,
+      lastReduceCell,
       p95ReduceTime,
       effectBacklog,
       circuitBreakers: [...circuitBreakers],
@@ -154,7 +154,7 @@ export function createLoopProbe(thresholds: VitalThresholds): LoopProbeAPI {
     effectBacklog = 0;
     lastReduceTime = 0;
     lastReduceAction = "";
-    lastReduceFeature = "";
+    lastReduceCell = "";
     p95ReduceTime = 0;
     circuitBreakers = [];
     firstDegradedAt = null;

@@ -20,7 +20,7 @@ Async effects (promises) return immediately -- only the sync part is measured.
 execute: {
   // GOOD -- async, returns in < 1ms
   fetch(app, payload) {
-    fetch(payload.url).then(r => app.dispatch(myFeature.loaded(r)))
+    fetch(payload.url).then(r => app.dispatch(myCell.loaded(r)))
   },
 
   // BAD -- sync work blocks
@@ -37,19 +37,19 @@ execute: {
 When a reduce exceeds its budget, the log includes a phase breakdown:
 
 ```
-BUDGET_REDUCE in feature 'counter'
+BUDGET_REDUCE in cell 'counter'
 Action: counter:analyze
 Duration: 250.0ms (budget: 100ms)
 (produce=180ms clone=45ms spread=2ms routing=20ms listeners=3ms)
 ```
 
-| Phase       | What it measures                                          | If slow                          |
-| ----------- | --------------------------------------------------------- | -------------------------------- |
-| `produce`   | Immer `produce()` -- your reducer function                | Move computation to effect       |
-| `clone`     | `structuredClone()` -- effect detachment from Immer draft | Returning many/large effects     |
-| `spread`    | State object construction                                 | Too many features?               |
-| `routing`   | Owner feature lookup + reduce dispatch                    | Shouldn't be slow                |
-| `listeners` | Foreign action listener fan-out                           | Too many cross-feature listeners |
+| Phase       | What it measures                                          | If slow                       |
+| ----------- | --------------------------------------------------------- | ----------------------------- |
+| `produce`   | Immer `produce()` -- your reducer function                | Move computation to effect    |
+| `clone`     | `structuredClone()` -- effect detachment from Immer draft | Returning many/large effects  |
+| `spread`    | State object construction                                 | Too many cells?               |
+| `routing`   | Owner cell lookup + reduce dispatch                       | Shouldn't be slow             |
+| `listeners` | Foreign action listener fan-out                           | Too many cross-cell listeners |
 
 If `produce` dominates, your reducer is doing too much work:
 
@@ -62,7 +62,7 @@ reduce: { analyze(state) { state.analyzing = true } },
 execute: {
   async runAnalysis(app, payload) {
     const results = await heavyComputation(payload.data)
-    app.dispatch(myFeature.analysisDone(results))
+    app.dispatch(myCell.analysisDone(results))
   },
 },
 ```
@@ -79,7 +79,7 @@ work asynchronously:
 execute: {
   load(app) {
     const data = JSON.parse(Deno.readTextFileSync('big.json'))
-    app.dispatch(myFeature.done(data))
+    app.dispatch(myCell.done(data))
   },
 }
 
@@ -87,7 +87,7 @@ execute: {
 execute: {
   load(app) {
     Deno.readTextFile('big.json')
-      .then(text => app.dispatch(myFeature.done(JSON.parse(text))))
+      .then(text => app.dispatch(myCell.done(JSON.parse(text))))
   },
 }
 ```
@@ -107,7 +107,7 @@ execute: {
 
 ```ts
 await aio.run({
-  features: [counter],
+  cells: [counter],
   perfCheck: "on", // or 'off'
   perfBudget: { reduce: 50, effect: 10 }, // ms
 });
@@ -120,7 +120,7 @@ functional while surfacing issues.
 
 ```ts
 await aio.run({
-  features: [...],
+  cells: [...],
   onError: (err) => {
     if (err.source === "performance") {
       console.error(

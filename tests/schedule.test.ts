@@ -346,11 +346,11 @@ Deno.test("nextCronTime: yearly pattern", () => {
 Deno.test("manager: cancelByPrefix cancels matching timers", async () => {
   const dispatched: { type: string }[] = [];
   const mgr = createScheduleManager((a) => dispatched.push(a), noop);
-  mgr.handle(schedule.after("feature:a", 50, { type: "A" }));
-  mgr.handle(schedule.after("feature:b", 50, { type: "B" }));
+  mgr.handle(schedule.after("cell:a", 50, { type: "A" }));
+  mgr.handle(schedule.after("cell:b", 50, { type: "B" }));
   mgr.handle(schedule.after("other:c", 50, { type: "C" }));
   assertEquals(mgr.active().length, 3);
-  mgr.cancelByPrefix("feature"); // AIO-198: prefix without colon — code appends ":"
+  mgr.cancelByPrefix("cell"); // AIO-198: prefix without colon — code appends ":"
   assertEquals(mgr.active(), ["other:c"]);
   await new Promise((r) => setTimeout(r, 80));
   assertEquals(dispatched, [{ type: "C" }]); // only other:c fired
