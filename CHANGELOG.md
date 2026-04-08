@@ -1,5 +1,55 @@
 # Changelog
 
+## 1.0.0-alpha11
+
+### Added
+
+- **`cell()` API** — renamed from `feature()`. All internal naming updated
+  (cell-impl, cell-types, cell-machine, cell-compose, cell-catalog, cell-test)
+- **Type-safe machine states** — `cell({ machine })` infers literal `.type`
+  union from state map keys; transitions type-checked at compile time
+- **Per-cell field filters** — `persist` and `ui` config on cells controls which
+  fields are persisted to KV and which are sent to clients. Strategies: `"all"`,
+  `"none"`, `{ include }`, `{ exclude }`
+- **Patch strategies** — per-cell `patchStrategy`: `"auto"` (default), `"full"`,
+  `"filter"` with field-level control over what gets broadcast
+- **State migration system** — `version` + `onMigrate(state, fromVersion)` on
+  cells. Version tracked in KV, migration runs on restore when version mismatch
+  detected. Failed migrations reset to `initialState` (safe fallback)
+- **Per-cell locking** — async mutex in server sync handler serializes
+  `handleOp` + compaction per cell, preventing race between op persist and
+  compaction DELETE
+- **LWW set merge** — `set-add` and `set-remove` CRDT strategies now use HLC
+  comparison for content conflicts instead of always keeping local
+- **Clean import boundaries** — removed `aio/core` export, stripped server
+  re-exports from `aio/air` and `aio/react`. `Msg` type unified via single
+  import from `cell-types.ts`
+- **Upgrade guide** — `docs/upgrade/from-alpha10-to-alpha11.md`
+
+### Fixed
+
+- **Sync server race condition** — fire-and-forget `tryCompact()` could
+  interleave with `handleOp`, losing ops. Now awaited inside per-cell lock
+- **Silent op drops** — sync engine buffer-full silently discarded ops. Now
+  prunes confirmed ops first, warns on actual drop
+- **Migration failure safety** — `onMigrate` throwing left stale persisted
+  state. Now resets to cell's `initialState` with error log
+- **Low-water corruption** — `getLowWater` JSON parse failure was silent. Now
+  logs warning and triggers full snapshot
+- **Duplicate `Msg` type** — `cell-impl.ts` had its own `Msg` definition
+  diverging from `cell-types.ts`. Replaced with import
+- 184 bugs fixed across 5 audit waves (waves 1-4 in alpha8-10, wave 5 in
+  alpha11)
+
+### Changed
+
+- **`feature()` → `cell()`** (breaking) — all public API renamed. See upgrade
+  guide for migration steps
+- **`bindFeature` → `bindCell`**, **`testFeature` → `testCell`**,
+  **`composeCells`** (was `composeFeatures`)
+- **Test count** — 1774 → 1949 (175 new tests: migration, patch filter, merge
+  null safety, sync locking, protocol, virtual list)
+
 ## 1.0.0-alpha10
 
 ### Added

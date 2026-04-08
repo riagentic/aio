@@ -9,8 +9,8 @@ export function createMemoryStorage(): OpBufferStorage {
   const snapshots: Record<string, { state: unknown; hlc: HLC }> = {};
 
   return {
-    async loadOps(feature: string) {
-      return ops.filter((o) => o.feature === feature);
+    async loadOps(cell: string) {
+      return ops.filter((o) => o.cell === cell);
     },
     async saveOp(op: SyncOp) {
       ops.push(op);
@@ -19,35 +19,35 @@ export function createMemoryStorage(): OpBufferStorage {
       const op = ops.find((o) => o.id === opId);
       if (op) op.confirmed = true;
     },
-    async pruneConfirmed(feature: string) {
+    async pruneConfirmed(cell: string) {
       for (let i = ops.length - 1; i >= 0; i--) {
-        if (ops[i]!.feature === feature && ops[i]!.confirmed) ops.splice(i, 1);
+        if (ops[i]!.cell === cell && ops[i]!.confirmed) ops.splice(i, 1);
       }
     },
-    async countUnconfirmed(feature: string) {
-      return ops.filter((o) => o.feature === feature && !o.confirmed).length;
+    async countUnconfirmed(cell: string) {
+      return ops.filter((o) => o.cell === cell && !o.confirmed).length;
     },
-    async loadMeta(feature: string) {
-      return meta[feature];
+    async loadMeta(cell: string) {
+      return meta[cell];
     },
-    async saveMeta(feature: string, data: { lastHlc: HLC | null }) {
-      meta[feature] = data;
+    async saveMeta(cell: string, data: { lastHlc: HLC | null }) {
+      meta[cell] = data;
     },
-    async loadSnapshot(feature: string) {
-      return snapshots[feature];
+    async loadSnapshot(cell: string) {
+      return snapshots[cell];
     },
     async saveSnapshot(
-      feature: string,
+      cell: string,
       data: { state: unknown; hlc: HLC },
     ) {
-      snapshots[feature] = data;
+      snapshots[cell] = data;
     },
-    async clear(feature: string) {
+    async clear(cell: string) {
       for (let i = ops.length - 1; i >= 0; i--) {
-        if (ops[i]!.feature === feature) ops.splice(i, 1);
+        if (ops[i]!.cell === cell) ops.splice(i, 1);
       }
-      delete meta[feature];
-      delete snapshots[feature];
+      delete meta[cell];
+      delete snapshots[cell];
     },
   };
 }

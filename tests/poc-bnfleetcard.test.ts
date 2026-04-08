@@ -175,14 +175,12 @@ function setup() {
   const root = doc.createElement("div");
   doc.body.appendChild(root);
   _setDocument(doc);
-  return { root, cleanup: () => win.close() };
+  return { root, cleanup: () => win.happyDOM.close() };
 }
 
 Deno.test({
   name: "PoC: BnFleetCard renders under AIO renderer",
-  sanitizeOps: false,
-  sanitizeResources: false,
-  fn() {
+  async fn() {
     const { root, cleanup } = setup();
     const fleetState = signal<FleetState>({
       members: [
@@ -228,15 +226,13 @@ Deno.test({
     assertEquals(root.innerHTML.includes("+1.20%"), true); // positive pnl
 
     _unmount(handle);
-    cleanup();
+    await cleanup();
   },
 });
 
 Deno.test({
   name: "PoC: BnFleetCard click handler works",
-  sanitizeOps: false,
-  sanitizeResources: false,
-  fn() {
+  async fn() {
     const { root, cleanup } = setup();
     let navigated = false;
     const state: FleetState = {
@@ -258,6 +254,6 @@ Deno.test({
     assertEquals(navigated, true);
 
     _unmount(handle);
-    cleanup();
+    await cleanup();
   },
 });

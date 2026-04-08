@@ -22,7 +22,7 @@ function testReducer(
 
 const mkOp = (id: string, action: string, payload: unknown): SyncOp => ({
   id,
-  feature: "test",
+  cell: "test",
   action,
   payload,
   hlc: [Date.now(), 0, "c1"],

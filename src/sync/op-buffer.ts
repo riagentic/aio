@@ -4,38 +4,38 @@ import { SYNC_DEFAULTS } from "./types.ts";
 
 /** Storage abstraction — IndexedDB in browser, in-memory for tests */
 export interface OpBufferStorage {
-  loadOps(feature: string): Promise<SyncOp[]>;
+  loadOps(cell: string): Promise<SyncOp[]>;
   saveOp(op: SyncOp): Promise<void>;
   confirmOp(opId: string): Promise<void>;
-  pruneConfirmed(feature: string): Promise<void>;
-  countUnconfirmed(feature: string): Promise<number>;
-  loadMeta(feature: string): Promise<{ lastHlc: HLC | null } | undefined>;
-  saveMeta(feature: string, data: { lastHlc: HLC | null }): Promise<void>;
-  loadSnapshot(feature: string): Promise<
+  pruneConfirmed(cell: string): Promise<void>;
+  countUnconfirmed(cell: string): Promise<number>;
+  loadMeta(cell: string): Promise<{ lastHlc: HLC | null } | undefined>;
+  saveMeta(cell: string, data: { lastHlc: HLC | null }): Promise<void>;
+  loadSnapshot(cell: string): Promise<
     { state: unknown; hlc: HLC } | undefined
   >;
   saveSnapshot(
-    feature: string,
+    cell: string,
     data: { state: unknown; hlc: HLC },
   ): Promise<void>;
-  clear(feature: string): Promise<void>;
+  clear(cell: string): Promise<void>;
 }
 
 /** Client-side operation buffer that caps pending ops and delegates to storage. */
 export interface OpBuffer {
   add(op: SyncOp): Promise<boolean>;
-  confirm(feature: string, opId: string, serverHlc: HLC): Promise<void>;
-  getUnconfirmed(feature: string): Promise<SyncOp[]>;
-  pruneConfirmed(feature: string): Promise<void>;
-  getMeta(feature: string): Promise<{ lastHlc: HLC | null } | undefined>;
+  confirm(cell: string, opId: string, serverHlc: HLC): Promise<void>;
+  getUnconfirmed(cell: string): Promise<SyncOp[]>;
+  pruneConfirmed(cell: string): Promise<void>;
+  getMeta(cell: string): Promise<{ lastHlc: HLC | null } | undefined>;
   saveSnapshot(
-    feature: string,
+    cell: string,
     data: { state: unknown; hlc: HLC },
   ): Promise<void>;
-  loadSnapshot(feature: string): Promise<
+  loadSnapshot(cell: string): Promise<
     { state: unknown; hlc: HLC } | undefined
   >;
-  clear(feature: string): Promise<void>;
+  clear(cell: string): Promise<void>;
 }
 
 /** Configuration options for the op buffer. */
@@ -52,26 +52,26 @@ export function createOpBuffer(
 
   return {
     async add(op: SyncOp): Promise<boolean> {
-      const count = await storage.countUnconfirmed(op.feature);
+      const count = await storage.countUnconfirmed(op.cell);
       if (count >= cap) return false;
       await storage.saveOp(op);
       return true;
     },
 
-    async confirm(feature: string, opId: string, serverHlc: HLC) {
+    async confirm(cell: string, opId: string, serverHlc: HLC) {
       await storage.confirmOp(opId);
-      await storage.saveMeta(feature, { lastHlc: serverHlc });
+      await storage.saveMeta(cell, { lastHlc: serverHlc });
     },
 
-    async getUnconfirmed(feature: string) {
-      const ops = await storage.loadOps(feature);
+    async getUnconfirmed(cell: string) {
+      const ops = await storage.loadOps(cell);
       return ops.filter((o) => !o.confirmed);
     },
 
-    pruneConfirmed: (feature) => storage.pruneConfirmed(feature),
-    getMeta: (feature) => storage.loadMeta(feature),
-    saveSnapshot: (feature, data) => storage.saveSnapshot(feature, data),
-    loadSnapshot: (feature) => storage.loadSnapshot(feature),
-    clear: (feature) => storage.clear(feature),
+    pruneConfirmed: (cell) => storage.pruneConfirmed(cell),
+    getMeta: (cell) => storage.loadMeta(cell),
+    saveSnapshot: (cell, data) => storage.saveSnapshot(cell, data),
+    loadSnapshot: (cell) => storage.loadSnapshot(cell),
+    clear: (cell) => storage.clear(cell),
   };
 }

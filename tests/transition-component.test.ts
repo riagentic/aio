@@ -6,7 +6,7 @@ import { _setDocument, _unmount, mount } from "../src/aio-renderer.ts";
 import { Transition } from "../src/transition-component.ts";
 import { fade } from "../src/transition.ts";
 
-const DOM_TEST_OPTS = { sanitizeOps: false, sanitizeResources: false };
+// happy-dom timers drained via win.happyDOM.close() — sanitizers re-enabled
 
 function createDOM() {
   const win = new Window({ url: "https://localhost" });
@@ -18,8 +18,7 @@ function createDOM() {
 
 Deno.test({
   name: "Transition: renders child normally",
-  ...DOM_TEST_OPTS,
-  fn() {
+  async fn() {
     const { win, doc, root } = createDOM();
     _setDocument(doc);
     const App = () =>
@@ -32,15 +31,16 @@ Deno.test({
     const box = root.querySelector("#box");
     assertEquals(box !== null, true);
     assertEquals(box!.textContent, "hello");
+    // Wait for enter animation timer to complete before unmount
+    await new Promise((r) => setTimeout(r, 350));
     _unmount(handle);
-    win.close();
+    await win.happyDOM.close();
   },
 });
 
 Deno.test({
   name: "Transition: null child renders nothing",
-  ...DOM_TEST_OPTS,
-  fn() {
+  async fn() {
     const { win, doc, root } = createDOM();
     _setDocument(doc);
     const App = () => h(Transition, { enter: fade, exit: fade }, null);
@@ -48,13 +48,12 @@ Deno.test({
     // AIO-107: null children produce invisible comment placeholders for positional stability
     assertEquals(root.innerHTML, "<!---->");
     _unmount(handle);
-    win.close();
+    await win.happyDOM.close();
   },
 });
 
 Deno.test({
   name: "Transition: child removal is deferred during exit animation",
-  ...DOM_TEST_OPTS,
   async fn() {
     const { win, doc, root } = createDOM();
     _setDocument(doc);
@@ -80,14 +79,13 @@ Deno.test({
     assertEquals(root.querySelector("#box"), null);
 
     _unmount(handle);
-    win.close();
+    await win.happyDOM.close();
   },
 });
 
 Deno.test({
   name: "Transition: enter animation applies css to element",
-  ...DOM_TEST_OPTS,
-  fn() {
+  async fn() {
     const { win, doc, root } = createDOM();
     _setDocument(doc);
     const App = () =>
@@ -97,15 +95,16 @@ Deno.test({
     assertEquals(box !== null, true);
     // Enter animation should have been applied via afterRender
     assertEquals(box.style.animation !== "", true);
+    // Wait for enter animation timer to complete before unmount
+    await new Promise((r) => setTimeout(r, 350));
     _unmount(handle);
-    win.close();
+    await win.happyDOM.close();
   },
 });
 
 Deno.test({
   name: "Transition: works without exit (immediate removal)",
-  ...DOM_TEST_OPTS,
-  fn() {
+  async fn() {
     const { win, doc, root } = createDOM();
     _setDocument(doc);
     const show = signal(true);
@@ -123,7 +122,9 @@ Deno.test({
     // No exit transition — should be removed immediately
     assertEquals(root.querySelector("#box"), null);
 
+    // Wait for enter animation timer to complete before unmount
+    await new Promise((r) => setTimeout(r, 350));
     _unmount(handle);
-    win.close();
+    await win.happyDOM.close();
   },
 });

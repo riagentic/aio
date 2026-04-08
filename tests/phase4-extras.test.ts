@@ -33,12 +33,12 @@ import {
   connectAioDevTools,
 } from "../src/devtools.ts";
 
-const S = { sanitizeOps: false, sanitizeResources: false } as const;
+// happy-dom timers drained via win.happyDOM.close() — sanitizers re-enabled
 
 function createDOM(): { document: Document; cleanup: () => void } {
   const win = new Window({ url: "https://localhost" });
   const doc = win.document as unknown as Document;
-  return { document: doc, cleanup: () => win.close() };
+  return { document: doc, cleanup: () => win.happyDOM.close() };
 }
 
 function setupMount(): {
@@ -65,8 +65,7 @@ function setupMount(): {
 
 Deno.test({
   name: "rerender: error keeps old output and re-subscribes",
-  ...S,
-  fn() {
+  async fn() {
     const { root, cleanup, mount: m } = setupMount();
     const count = signal(0);
     let shouldThrow = false;
@@ -96,7 +95,7 @@ Deno.test({
     count.set(3);
     handle._flush();
     assertEquals(root.innerHTML, "<span>count:3</span>"); // recovered
-    cleanup();
+    await cleanup();
   },
 });
 
@@ -106,8 +105,7 @@ Deno.test({
 
 Deno.test({
   name: "onCleanup: fires before each re-render",
-  ...S,
-  fn() {
+  async fn() {
     const { root, cleanup, mount: m } = setupMount();
     const count = signal(0);
     const cleanupLog: number[] = [];
@@ -134,7 +132,7 @@ Deno.test({
     // Unmount: cleanup from render-2 fires
     _unmount(handle);
     assertEquals(cleanupLog, [0, 1, 2]);
-    cleanup();
+    await cleanup();
   },
 });
 
@@ -144,8 +142,7 @@ Deno.test({
 
 Deno.test({
   name: "useRef: persists same object across re-renders",
-  ...S,
-  fn() {
+  async fn() {
     const { root, cleanup, mount: m } = setupMount();
     const count = signal(0);
     const refValues: unknown[] = [];
@@ -172,7 +169,7 @@ Deno.test({
       refValues[0] === refValues[1],
       "useRef should return same object across renders",
     );
-    cleanup();
+    await cleanup();
   },
 });
 
@@ -182,7 +179,6 @@ Deno.test({
 
 Deno.test({
   name: "useTransition: starts idle, enter→active→exit→idle",
-  ...S,
   async fn() {
     const t = useTransition({ name: "fade", duration: 50 });
 
@@ -216,7 +212,6 @@ Deno.test({
 
 Deno.test({
   name: "useTransition: toggle flips between enter and exit",
-  ...S,
   async fn() {
     const t = useTransition({ name: "slide", duration: 50 });
 
@@ -238,8 +233,7 @@ Deno.test({
 
 Deno.test({
   name: "useTransition: initial=true starts active",
-  ...S,
-  fn() {
+  async fn() {
     const t = useTransition({ name: "fade", duration: 300, initial: true });
     assertEquals(t.stage, "active");
     assertEquals(t.mounted, true);
@@ -253,8 +247,7 @@ Deno.test({
 
 Deno.test({
   name: "useSpring: initial value and immediate set",
-  ...S,
-  fn() {
+  async fn() {
     const s = useSpring({ initial: 10 });
     assertEquals(s.value, 10);
     assertEquals(s.animating, false);
@@ -267,8 +260,7 @@ Deno.test({
 
 Deno.test({
   name: "useSpring: .to() in non-RAF env resolves immediately",
-  ...S,
-  fn() {
+  async fn() {
     // In Deno test env there's no requestAnimationFrame, so .to() falls back to immediate
     const s = useSpring({ initial: 0 });
     s.to(100);
@@ -283,8 +275,7 @@ Deno.test({
 
 Deno.test({
   name: "useVirtualList: renders visible window with overscan",
-  ...S,
-  fn() {
+  async fn() {
     const items = Array.from(
       { length: 100 },
       (_, i) => ({ id: i, name: `Item ${i}` }),
@@ -308,8 +299,7 @@ Deno.test({
 
 Deno.test({
   name: "useVirtualList: scrollToIndex updates visible window",
-  ...S,
-  fn() {
+  async fn() {
     const items = Array.from({ length: 100 }, (_, i) => ({ id: i }));
     const vl = useVirtualList({
       items,
@@ -330,8 +320,7 @@ Deno.test({
 
 Deno.test({
   name: "useVirtualList: signal-backed items reactive",
-  ...S,
-  fn() {
+  async fn() {
     const itemsSig = signal([{ id: 1 }, { id: 2 }, { id: 3 }]);
     const vl = useVirtualList({
       items: itemsSig,
@@ -351,8 +340,7 @@ Deno.test({
 
 Deno.test({
   name: "useVirtualList: container and inner styles",
-  ...S,
-  fn() {
+  async fn() {
     const items = [{ id: 1 }];
     const vl = useVirtualList({ items, itemHeight: 40, containerHeight: 300 });
 
@@ -369,8 +357,7 @@ Deno.test({
 
 Deno.test({
   name: "useForm: initial values and field state",
-  ...S,
-  fn() {
+  async fn() {
     const form = useForm({
       name: { initial: "", rules: [(v: string) => v ? null : "Required"] },
       age: { initial: 0 },
@@ -386,8 +373,7 @@ Deno.test({
 
 Deno.test({
   name: "useForm: set triggers dirty and validation on touched",
-  ...S,
-  fn() {
+  async fn() {
     const form = useForm({
       email: {
         initial: "",
@@ -413,8 +399,7 @@ Deno.test({
 
 Deno.test({
   name: "useForm: validate() touches all and returns validity",
-  ...S,
-  fn() {
+  async fn() {
     const form = useForm({
       a: { initial: "", rules: [(v: string) => v ? null : "Required"] },
       b: { initial: "ok" },
@@ -431,8 +416,7 @@ Deno.test({
 
 Deno.test({
   name: "useForm: reset clears all state",
-  ...S,
-  fn() {
+  async fn() {
     const form = useForm({
       name: {
         initial: "default",
@@ -455,8 +439,7 @@ Deno.test({
 
 Deno.test({
   name: "useForm: values() returns plain object",
-  ...S,
-  fn() {
+  async fn() {
     const form = useForm({ x: { initial: 1 }, y: { initial: "hi" } });
     form.fields.x.set(42);
     assertEquals(form.values(), { x: 42, y: "hi" });
@@ -465,8 +448,7 @@ Deno.test({
 
 Deno.test({
   name: "useForm: bind returns reactive props",
-  ...S,
-  fn() {
+  async fn() {
     const form = useForm({ name: { initial: "" } });
     const bound = form.bind("name");
     assertEquals(bound.value, "");
@@ -489,8 +471,7 @@ Deno.test({
 
 Deno.test({
   name: "useFieldArray: push, remove, set, move, reset",
-  ...S,
-  fn() {
+  async fn() {
     const arr = useFieldArray([{ name: "A" }, { name: "B" }]);
 
     assertEquals(arr.items.length, 2);
@@ -528,8 +509,7 @@ Deno.test({
 
 Deno.test({
   name: "devtools: connect and disconnect",
-  ...S,
-  fn() {
+  async fn() {
     const dt = connectAioDevTools();
     assertEquals(dt.connected, true);
     assertEquals(dt.totalRenders, 0);
@@ -566,8 +546,11 @@ Deno.test({
 
 Deno.test({
   name: "devMode: excessive re-render warning fires at limit",
-  ...S,
-  fn() {
+  // sanitizers disabled: dev-mode uses a 1s debounce timer (_devRenderResetTimer)
+  // that intentionally outlives the test — cannot be drained without breaking the API
+  sanitizeOps: false,
+  sanitizeResources: false,
+  async fn() {
     const { root, cleanup, mount: m } = setupMount();
     setDevModeRenderer(true);
 
@@ -598,7 +581,8 @@ Deno.test({
 
     console.warn = origWarn;
     setDevModeRenderer(false);
-    cleanup();
+    _unmount(handle);
+    await cleanup();
   },
 });
 
@@ -608,8 +592,7 @@ Deno.test({
 
 Deno.test({
   name: "useRef: multiple refs in same component maintain identity",
-  ...S,
-  fn() {
+  async fn() {
     const { root, cleanup, mount: m } = setupMount();
     const trigger = signal(0);
     const refs: { a: unknown; b: unknown }[] = [];
@@ -636,7 +619,7 @@ Deno.test({
     // Same identity
     assert(refs[0]!.a === refs[1]!.a, "ref a should be same object");
     assert(refs[0]!.b === refs[1]!.b, "ref b should be same object");
-    cleanup();
+    await cleanup();
   },
 });
 
@@ -646,8 +629,7 @@ Deno.test({
 
 Deno.test({
   name: "onMount: fires only on first render, not on re-render",
-  ...S,
-  fn() {
+  async fn() {
     const { root, cleanup, mount: m } = setupMount();
     const count = signal(0);
     const mountLog: string[] = [];
@@ -668,7 +650,7 @@ Deno.test({
     count.set(2);
     handle._flush();
     assertEquals(mountLog, ["mounted"]); // still just one
-    cleanup();
+    await cleanup();
   },
 });
 
@@ -676,8 +658,7 @@ Deno.test({
 
 Deno.test({
   name: "AIO-76: onCleanup inside onMount runs only on unmount, not re-render",
-  ...S,
-  fn() {
+  async fn() {
     const { root, mount: m, cleanup } = setupMount();
 
     const count = signal(0);
@@ -728,14 +709,13 @@ Deno.test({
       1,
       "mount cleanup should fire exactly once on unmount",
     );
-    cleanup();
+    await cleanup();
   },
 });
 
 Deno.test({
   name: "AIO-76: body-level onCleanup still fires on re-render",
-  ...S,
-  fn() {
+  async fn() {
     const { root, mount: m, cleanup } = setupMount();
 
     const count = signal(0);
@@ -762,15 +742,14 @@ Deno.test({
 
     _unmount(handle);
     assertEquals(bodyCleanupCalls, 3, "body cleanup also fires on unmount");
-    cleanup();
+    await cleanup();
   },
 });
 
 Deno.test({
   name:
     "AIO-76: real pattern — addEventListener in onMount survives re-renders",
-  ...S,
-  fn() {
+  async fn() {
     const { root, mount: m, cleanup, document: doc } = setupMount();
 
     const count = signal(0);
@@ -802,6 +781,6 @@ Deno.test({
     _unmount(handle);
     doc.dispatchEvent(new Event("click"));
     assertEquals(events, ["click", "click"], "listener removed after unmount");
-    cleanup();
+    await cleanup();
   },
 });

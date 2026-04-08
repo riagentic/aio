@@ -2,6 +2,15 @@
 
 AIO ships two renderers — AIR (recommended, ~8KB) and React (compatibility).
 
+**Which one?**
+
+- **Use AIR** if starting fresh — smaller bundle, built-in signals, forms,
+  routing, animations
+- **Use React** if you have an existing React codebase or team with React
+  expertise
+- Both use the same `useCell()` / `useAio()` hooks — switching later is
+  straightforward
+
 ## AIR Renderer
 
 - [Setup](air-setup.md) — connecting to AIO server state

@@ -1,5 +1,8 @@
 # Upgrade from v0.6 to v0.7
 
+> **Note:** `feature()` was renamed to `cell()` in alpha11. See
+> [upgrade guide](from-alpha10-to-alpha11.md).
+
 ### New features — reactive features
 
 v0.7 adds `reactive()`, improves `flow()`, and overhauls DX. No breaking
@@ -14,7 +17,7 @@ changes. All v0.6 code works unchanged.
 - Microtask batching — consecutive Proxy writes grouped into one action per sync
   frame
 - `listensTo: string[]` — foreign action listeners without a full machine
-- Selectors, dispatchTo, onInit/onDestroy hooks all work
+- Selectors, onInit/onDestroy hooks all work
 
 **flow() improvements**
 

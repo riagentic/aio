@@ -11,7 +11,7 @@ export type MergeStrategy =
   | "set-add"
   | "set-remove";
 
-/** Per-feature sync configuration (normalized from sync: true | {...}) */
+/** Per-cell sync configuration (normalized from sync: true | {...}) */
 export interface SyncConfig {
   merge: Record<string, MergeStrategy>;
   identity: Record<string, string>;
@@ -35,7 +35,7 @@ export interface SyncStats {
   elapsed: number;
 }
 
-/** Sync status exposed to UI via useFeature() */
+/** Sync status exposed to UI via useCell() */
 export interface SyncStatus {
   status: "online" | "offline" | "syncing" | "blocked";
   pending: number;
@@ -45,7 +45,7 @@ export interface SyncStatus {
 /** A stamped operation in the op-log */
 export interface SyncOp {
   id: string;
-  feature: string;
+  cell: string;
   action: string;
   payload: unknown;
   hlc: HLC;
@@ -57,7 +57,7 @@ export interface OpMessage {
   __op: {
     id: string;
     hlc: HLC;
-    feature: string;
+    cell: string;
     action: string;
     payload: unknown;
   };
@@ -72,25 +72,26 @@ export interface AckMessage {
 export interface SyncRequest {
   __sync: {
     clientId: string;
-    features: Record<string, { lastHlc: HLC | null }>;
+    cells: Record<string, { lastHlc: HLC | null }>;
     pendingOps: SyncOp[];
   };
 }
 
-/** Wire message: server→client sync response */
+/** Wire message: server→client sync response.
+ *  lowWater is per-cell map when server tracks multiple cells (see server-handler.ts). */
 export interface SyncResponse {
   __sync:
     | {
       mode: "incremental";
       ops: SyncOp[];
       rebase?: SyncOp[];
-      lowWater: HLC;
+      lowWater: HLC | Record<string, HLC>;
     }
     | {
       mode: "snapshot";
       snapshot: Record<string, unknown>;
       ops: SyncOp[];
-      lowWater: HLC;
+      lowWater: HLC | Record<string, HLC>;
     };
 }
 

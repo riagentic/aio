@@ -13,7 +13,7 @@ describe("Reconnection", () => {
 
     const engine = createSyncEngine({
       clientId: "c1",
-      features: { counter: normalizeSyncConfig(true) },
+      cells: { counter: normalizeSyncConfig(true) },
       buffer: createOpBuffer(createMemoryStorage()),
       send: (msg) => sent.push(JSON.parse(msg)),
       reducer: (state, action) => {
@@ -48,7 +48,7 @@ describe("Reconnection", () => {
     const syncMsg = sent.find((m: any) => m.__sync) as any;
     assertEquals(!!syncMsg, true);
     assertEquals(syncMsg.__sync.clientId, "c1");
-    assertEquals("counter" in syncMsg.__sync.features, true);
+    assertEquals("counter" in syncMsg.__sync.cells, true);
   });
 
   it("handles incremental sync response", async () => {
@@ -84,7 +84,7 @@ describe("Reconnection", () => {
   it(">cap pending triggers blocked status", async () => {
     const engine = createSyncEngine({
       clientId: "c1",
-      features: { counter: normalizeSyncConfig(true) },
+      cells: { counter: normalizeSyncConfig(true) },
       buffer: createOpBuffer(createMemoryStorage(), { pendingCap: 2 }),
       send: () => {},
       reducer: (s) => ({ ...s, count: ((s.count as number) || 0) + 1 }),

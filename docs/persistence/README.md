@@ -2,6 +2,10 @@
 
 How AIO stores, syncs, and transports state.
 
+## Overview
+
+- [How It Works](how-it-works.md) — end-to-end: state change → disk → restore
+
 ## Storage
 
 - [Auto-Persist](auto-persist.md) — Deno.Kv automatic state persistence

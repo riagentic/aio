@@ -3,9 +3,9 @@
 WebSocket client API, connection lifecycle, and UI state management for browser
 clients. Works with both **air** (built-in, default) and the **React adapter**.
 
-For the core API (`feature`, `useFeature`), see [core.md](../core.md). For
-Electron & thin client, see [electron.md](electron.md). For air vs React
-comparison, see [renderer.md](../renderer.md).
+For the core API (`cell`, `useCell`), see [core.md](../core.md). For Electron &
+thin client, see [electron.md](electron.md). For air vs React comparison, see
+[renderer.md](../renderer.md).
 
 ## `useAio<S>()` — smart state hook
 
@@ -15,8 +15,7 @@ subscribed paths trigger re-renders and delta updates from the server — zero
 waste, zero config.
 
 For scoped re-render optimization (e.g. isolating a heavy component to a single
-feature slice), see
-[`useFeature(ref)`](../core.md#usefeatureref--react-hook-for-features).
+cell slice), see [`useCell(ref)`](../core.md#usecellref--react-hook-for-cells).
 
 ```tsx
 import { useAio } from "aio/air"; // or "aio/react" if using React
@@ -180,38 +179,39 @@ compression as WebSocket.
 
 ## UI state filtering
 
-Use `stateForUI` to control what the browser sees. Useful for stripping
-server-only data:
+Use cell-level `ui` config to control what the browser sees:
 
 ```ts
-await aio.run({
-  features: [myFeature],
-  stateForUI: (s) => ({
-    counter: s.counter,
-    username: s.username,
-    // s.apiKey is NOT sent to the browser
-  }),
+const myCell = cell("myCell", {
+  state: { counter: 0, username: "", apiKey: "secret" },
+  methods: {/* ... */},
+  ui: { exclude: ["apiKey"] }, // apiKey is NOT sent to the browser
 });
 ```
 
-When `stateForUI` is set, `useAio<T>()` should use the filtered shape as its
-generic, not the full `AppState`.
-
-### Per-user stateForUI
-
-`stateForUI` accepts an optional `user` — an `AioUser` object resolved from the
-client's auth token. Useful for role-based state filtering:
+Or use `cellDefaults` to expose all cells, then tighten per-cell:
 
 ```ts
 await aio.run({
-  features: [myFeature],
-  users: {
-    "alice-token": { id: "alice", role: "admin" },
-    "bob-token": { id: "bob", role: "viewer" },
-  },
-  stateForUI: (state, user?) => {
-    if (user?.role === "admin") return state;
-    return { items: state.items.filter((i) => i.ownerId === user?.id) };
+  cells: [myCell],
+  cellDefaults: { ui: "all" },
+});
+```
+
+### Per-user UI filtering
+
+Add `forUser` for role-based state filtering:
+
+```ts
+const orders = cell("orders", {
+  state: { items: [], internal: {} },
+  methods: {/* ... */},
+  ui: {
+    include: ["items"],
+    forUser: (exposed, user?) =>
+      user?.role === "admin"
+        ? exposed
+        : { items: exposed.items.filter((i) => i.ownerId === user?.id) },
   },
 });
 ```
@@ -219,9 +219,9 @@ await aio.run({
 **How it works:**
 
 1. Each WebSocket connection resolves an `AioUser` from its auth token
-2. On every broadcast, `stateForUI(state, user?)` is called per client
-3. Delta patches are computed per client — each client has its own delta cache.
-   Patches are granular to sub-keys within feature slices
+2. Structural filter (`include`/`exclude`) is applied once per state change
+   (cached)
+3. `forUser` runs per client on filtered clone — cannot access excluded fields
 4. `user` is `undefined` in public mode (no `users` config)
 
 ## Client log forwarding
@@ -301,7 +301,7 @@ and reuses object references for unchanged slices — `memo()` and selectors wor
 correctly without extra wrappers.
 
 Full state is sent on first connect or when >50% of keys changed (configurable
-via `fullStateThreshold`). Deltas are computed one level deep per feature slice.
+via `fullStateThreshold`). Deltas are computed one level deep per cell slice.
 
 The **Render Meter** tracks staleness and adapts broadcast rate via
 backpressure. See [Delta](../persistence/delta.md) for compression details and

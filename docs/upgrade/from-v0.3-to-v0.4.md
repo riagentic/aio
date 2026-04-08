@@ -1,5 +1,8 @@
 # Upgrade from v0.3 to v0.4
 
+> **Note:** `feature()` was renamed to `cell()` in alpha11. See
+> [upgrade guide](from-alpha10-to-alpha11.md).
+
 ### New features
 
 - **Zero-config HTTPS** — `--expose` now auto-generates a self-signed ECDSA

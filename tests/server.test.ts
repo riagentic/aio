@@ -613,7 +613,7 @@ Deno.test("trojan: GET /ui returns filtered UI state", async () => {
     assertEquals(resp.status, 200);
     const data = await resp.json();
     assertEquals(data.count, 42);
-    assertEquals(data.name, undefined); // filtered out by stateForUI
+    assertEquals(data.name, undefined); // filtered out by getUIState
   });
 });
 

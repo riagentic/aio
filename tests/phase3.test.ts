@@ -8,9 +8,9 @@ import {
   _injectDelta,
   _injectState,
   _reset as _resetAio,
-  type FeatureRef,
+  type CellRef,
 } from "../src/state-core.ts";
-import { useAio, useFeature, useLocal } from "../src/adapters/air.ts";
+import { useAio, useCell, useLocal } from "../src/adapters/air.ts";
 
 function createDOM(): {
   document: Document;
@@ -21,16 +21,14 @@ function createDOM(): {
   const doc = win.document as unknown as Document;
   const root = doc.createElement("div");
   doc.body.appendChild(root);
-  return { document: doc, root, cleanup: () => win.close() };
+  return { document: doc, root, cleanup: () => win.happyDOM.close() };
 }
 
 // ── Multi-root mount isolation ──────────────────────────────────────
 
 Deno.test({
   name: "phase3: multi-root isolation — two mounts don't interfere",
-  sanitizeOps: false,
-  sanitizeResources: false,
-  fn() {
+  async fn() {
     const { document, root, cleanup } = createDOM();
     _setDocument(document);
     const root2 = document.createElement("div");
@@ -69,7 +67,7 @@ Deno.test({
 
     _unmount(handleA);
     _unmount(handleB);
-    cleanup();
+    await cleanup();
   },
 });
 
@@ -77,9 +75,7 @@ Deno.test({
 
 Deno.test({
   name: "phase3: className array — joins truthy values",
-  sanitizeOps: false,
-  sanitizeResources: false,
-  fn() {
+  async fn() {
     const { document, root, cleanup } = createDOM();
     _setDocument(document);
     const active = signal(true);
@@ -99,15 +95,13 @@ Deno.test({
       "base",
     );
     _unmount(handle);
-    cleanup();
+    await cleanup();
   },
 });
 
 Deno.test({
   name: "phase3: className object — keys with truthy values",
-  sanitizeOps: false,
-  sanitizeResources: false,
-  fn() {
+  async fn() {
     const { document, root, cleanup } = createDOM();
     _setDocument(document);
     const App = () =>
@@ -118,15 +112,13 @@ Deno.test({
       "btn primary",
     );
     _unmount(handle);
-    cleanup();
+    await cleanup();
   },
 });
 
 Deno.test({
   name: "phase3: className string — works as before",
-  sanitizeOps: false,
-  sanitizeResources: false,
-  fn() {
+  async fn() {
     const { document, root, cleanup } = createDOM();
     _setDocument(document);
     const App = () => h("div", { className: "foo bar" });
@@ -136,7 +128,7 @@ Deno.test({
       "foo bar",
     );
     _unmount(handle);
-    cleanup();
+    await cleanup();
   },
 });
 
@@ -144,9 +136,7 @@ Deno.test({
 
 Deno.test({
   name: "phase3: callback ref — called with DOM node on mount",
-  sanitizeOps: false,
-  sanitizeResources: false,
-  fn() {
+  async fn() {
     const { document, root, cleanup } = createDOM();
     _setDocument(document);
     let captured: Node | null = null;
@@ -163,15 +153,13 @@ Deno.test({
       "div",
     );
     _unmount(handle);
-    cleanup();
+    await cleanup();
   },
 });
 
 Deno.test({
   name: "phase3: object ref — current set on mount",
-  sanitizeOps: false,
-  sanitizeResources: false,
-  fn() {
+  async fn() {
     const { document, root, cleanup } = createDOM();
     _setDocument(document);
     const myRef: { current: Node | null } = { current: null };
@@ -180,15 +168,13 @@ Deno.test({
     assertNotEquals(myRef.current, null);
     assertEquals((myRef.current as HTMLElement).tagName?.toLowerCase(), "div");
     _unmount(handle);
-    cleanup();
+    await cleanup();
   },
 });
 
 Deno.test({
   name: "phase3: ref nulled on element removal",
-  sanitizeOps: false,
-  sanitizeResources: false,
-  fn() {
+  async fn() {
     const { document, root, cleanup } = createDOM();
     _setDocument(document);
     let refValue: Node | null = null;
@@ -211,7 +197,7 @@ Deno.test({
     handle._flush();
     assertEquals(refValue, null);
     _unmount(handle);
-    cleanup();
+    await cleanup();
   },
 });
 
@@ -219,9 +205,7 @@ Deno.test({
 
 Deno.test({
   name: "phase3: ErrorBoundary catches child render error",
-  sanitizeOps: false,
-  sanitizeResources: false,
-  fn() {
+  async fn() {
     const { document, root, cleanup } = createDOM();
     _setDocument(document);
     const Broken = () => {
@@ -238,15 +222,13 @@ Deno.test({
     const handle = mount(root, App);
     assertEquals(root.querySelector(".error")?.textContent, "boom");
     _unmount(handle);
-    cleanup();
+    await cleanup();
   },
 });
 
 Deno.test({
   name: "phase3: ErrorBoundary — siblings unaffected",
-  sanitizeOps: false,
-  sanitizeResources: false,
-  fn() {
+  async fn() {
     const { document, root, cleanup } = createDOM();
     _setDocument(document);
     const Broken = () => {
@@ -269,15 +251,13 @@ Deno.test({
     assertEquals(spans[1]?.textContent, "after");
     assertEquals(root.querySelector("b")?.textContent, "fail");
     _unmount(handle);
-    cleanup();
+    await cleanup();
   },
 });
 
 Deno.test({
   name: "phase3: ErrorBoundary — no error renders children normally",
-  sanitizeOps: false,
-  sanitizeResources: false,
-  fn() {
+  async fn() {
     const { document, root, cleanup } = createDOM();
     _setDocument(document);
     const Safe = () => h("span", null, "ok");
@@ -293,7 +273,7 @@ Deno.test({
     assertEquals(root.querySelector("span")?.textContent, "ok");
     assertEquals(root.querySelector("b"), null);
     _unmount(handle);
-    cleanup();
+    await cleanup();
   },
 });
 
@@ -301,9 +281,7 @@ Deno.test({
 
 Deno.test({
   name: "ssr: renderToString — simple element",
-  sanitizeOps: false,
-  sanitizeResources: false,
-  fn() {
+  async fn() {
     const html = renderToString(h("div", { className: "box" }, "hello"));
     assertEquals(html, '<div class="box">hello</div>');
   },
@@ -311,9 +289,7 @@ Deno.test({
 
 Deno.test({
   name: "ssr: renderToString — nested elements",
-  sanitizeOps: false,
-  sanitizeResources: false,
-  fn() {
+  async fn() {
     const html = renderToString(
       h("ul", null, h("li", null, "a"), h("li", null, "b")),
     );
@@ -323,9 +299,7 @@ Deno.test({
 
 Deno.test({
   name: "ssr: renderToString — component",
-  sanitizeOps: false,
-  sanitizeResources: false,
-  fn() {
+  async fn() {
     const Greeting = (props: { name: string }) =>
       h("span", null, `Hi ${props.name}`);
     const html = renderToString(h(Greeting, { name: "World" }));
@@ -335,9 +309,7 @@ Deno.test({
 
 Deno.test({
   name: "ssr: renderToString — fragment",
-  sanitizeOps: false,
-  sanitizeResources: false,
-  fn() {
+  async fn() {
     const html = renderToString(
       h(Fragment, null, h("a", null, "1"), h("b", null, "2")),
     );
@@ -347,9 +319,7 @@ Deno.test({
 
 Deno.test({
   name: "ssr: renderToString — void elements",
-  sanitizeOps: false,
-  sanitizeResources: false,
-  fn() {
+  async fn() {
     const html = renderToString(h("input", { type: "text", value: "hi" }));
     assertEquals(html, '<input type="text" value="hi">');
   },
@@ -357,9 +327,7 @@ Deno.test({
 
 Deno.test({
   name: "ssr: renderToString — boolean attributes",
-  sanitizeOps: false,
-  sanitizeResources: false,
-  fn() {
+  async fn() {
     const html = renderToString(
       h("input", { type: "checkbox", checked: true, disabled: false }),
     );
@@ -369,9 +337,7 @@ Deno.test({
 
 Deno.test({
   name: "ssr: renderToString — style object",
-  sanitizeOps: false,
-  sanitizeResources: false,
-  fn() {
+  async fn() {
     const html = renderToString(
       h("div", { style: { color: "red", fontSize: "14px" } }),
     );
@@ -381,9 +347,7 @@ Deno.test({
 
 Deno.test({
   name: "ssr: renderToString — className array",
-  sanitizeOps: false,
-  sanitizeResources: false,
-  fn() {
+  async fn() {
     const html = renderToString(h("div", { className: ["a", false, "b"] }));
     assertEquals(html, '<div class="a b"></div>');
   },
@@ -391,9 +355,7 @@ Deno.test({
 
 Deno.test({
   name: "ssr: renderToString — className object",
-  sanitizeOps: false,
-  sanitizeResources: false,
-  fn() {
+  async fn() {
     const html = renderToString(
       h("div", { className: { active: true, hidden: false } }),
     );
@@ -403,9 +365,7 @@ Deno.test({
 
 Deno.test({
   name: "ssr: renderToString — HTML escaping",
-  sanitizeOps: false,
-  sanitizeResources: false,
-  fn() {
+  async fn() {
     const html = renderToString(h("div", null, "<script>alert(1)</script>"));
     assertEquals(html, "<div>&lt;script&gt;alert(1)&lt;/script&gt;</div>");
   },
@@ -413,9 +373,7 @@ Deno.test({
 
 Deno.test({
   name: "ssr: renderToString — dangerouslySetInnerHTML",
-  sanitizeOps: false,
-  sanitizeResources: false,
-  fn() {
+  async fn() {
     const html = renderToString(
       h("div", { dangerouslySetInnerHTML: { __html: "<b>bold</b>" } }),
     );
@@ -425,9 +383,7 @@ Deno.test({
 
 Deno.test({
   name: "ssr: renderToString — ErrorBoundary catches",
-  sanitizeOps: false,
-  sanitizeResources: false,
-  fn() {
+  async fn() {
     const Broken = () => {
       throw new Error("ssr-boom");
     };
@@ -442,9 +398,7 @@ Deno.test({
 
 Deno.test({
   name: "ssr: renderToString — null/skip event handlers",
-  sanitizeOps: false,
-  sanitizeResources: false,
-  fn() {
+  async fn() {
     const html = renderToString(h("button", { onClick: () => {} }, "click"));
     assertEquals(html, "<button>click</button>");
   },
@@ -452,9 +406,7 @@ Deno.test({
 
 Deno.test({
   name: "ssr: renderToString — ref skipped",
-  sanitizeOps: false,
-  sanitizeResources: false,
-  fn() {
+  async fn() {
     const html = renderToString(h("div", { ref: () => {} }, "ref"));
     assertEquals(html, "<div>ref</div>");
   },
@@ -464,9 +416,7 @@ Deno.test({
 
 Deno.test({
   name: "phase3: hydrate — attaches to existing DOM",
-  sanitizeOps: false,
-  sanitizeResources: false,
-  fn() {
+  async fn() {
     const { document, root, cleanup } = createDOM();
     _setDocument(document);
 
@@ -482,15 +432,13 @@ Deno.test({
     assertEquals(root.innerHTML, "<div><span>hello</span></div>");
 
     _unmount(handle);
-    cleanup();
+    await cleanup();
   },
 });
 
 Deno.test({
   name: "phase3: hydrate — attaches event listeners",
-  sanitizeOps: false,
-  sanitizeResources: false,
-  fn() {
+  async fn() {
     const { document, root, cleanup } = createDOM();
     _setDocument(document);
 
@@ -508,15 +456,13 @@ Deno.test({
     assertEquals(clicked, true);
 
     _unmount(handle);
-    cleanup();
+    await cleanup();
   },
 });
 
 Deno.test({
   name: "phase3: hydrate — signal changes work after hydration",
-  sanitizeOps: false,
-  sanitizeResources: false,
-  fn() {
+  async fn() {
     const { document, root, cleanup } = createDOM();
     _setDocument(document);
 
@@ -531,28 +477,27 @@ Deno.test({
     assertEquals(root.innerHTML, "<div>Count: 5</div>");
 
     _unmount(handle);
-    cleanup();
+    await cleanup();
   },
 });
 
-// ── AIO Hooks: useFeature ───────────────────────────────────────────
+// ── AIO Hooks: useCell ───────────────────────────────────────────
 
 Deno.test({
-  name: "aio-hooks: useFeature — reads injected state reactively",
-  sanitizeOps: false,
-  sanitizeResources: false,
-  fn() {
+  name: "aio-hooks: useCell — reads injected state reactively",
+  async fn() {
     const { document, root, cleanup } = createDOM();
     _setDocument(document);
     _resetAio();
 
-    const counter: FeatureRef = {
+    // CellRef interface requires __aio — this is the public type shape
+    const counter: CellRef = {
       __aio: { id: "counter", state: { count: 0 } },
     };
     _injectState({ counter: { count: 42 } });
 
     const App = () => {
-      const { state } = useFeature(counter);
+      const { state } = useCell(counter);
       return h("div", null, `Count: ${state.count}`);
     };
 
@@ -566,26 +511,24 @@ Deno.test({
 
     _unmount(handle);
     _resetAio();
-    cleanup();
+    await cleanup();
   },
 });
 
 Deno.test({
-  name: "aio-hooks: useFeature — fallback to initial state",
-  sanitizeOps: false,
-  sanitizeResources: false,
-  fn() {
+  name: "aio-hooks: useCell — fallback to initial state",
+  async fn() {
     const { document, root, cleanup } = createDOM();
     _setDocument(document);
     _resetAio();
 
-    const counter: FeatureRef = {
+    const counter: CellRef = {
       __aio: { id: "counter", state: { count: 0 } },
     };
     // No state injected — should use fallback from ref
 
     const App = () => {
-      const { state } = useFeature(counter);
+      const { state } = useCell(counter);
       return h("div", null, `Count: ${state.count}`);
     };
 
@@ -594,21 +537,19 @@ Deno.test({
 
     _unmount(handle);
     _resetAio();
-    cleanup();
+    await cleanup();
   },
 });
 
 Deno.test({
-  name: "aio-hooks: useFeature — send proxy dispatches actions",
-  sanitizeOps: false,
-  sanitizeResources: false,
-  fn() {
+  name: "aio-hooks: useCell — send proxy dispatches actions",
+  async fn() {
     _resetAio();
 
-    const counter: FeatureRef = {
+    const counter: CellRef = {
       __aio: { id: "counter", state: { count: 0 } },
     };
-    const { send } = useFeature(counter);
+    const { send } = useCell(counter);
 
     // Can't test WebSocket sending without mock, but verify send is callable
     assertEquals(typeof send.increment, "function");
@@ -625,9 +566,7 @@ Deno.test({
 
 Deno.test({
   name: "aio-hooks: useAio — reads full state reactively",
-  sanitizeOps: false,
-  sanitizeResources: false,
-  fn() {
+  async fn() {
     const { document, root, cleanup } = createDOM();
     _setDocument(document);
     _resetAio();
@@ -648,7 +587,7 @@ Deno.test({
 
     _unmount(handle);
     _resetAio();
-    cleanup();
+    await cleanup();
   },
 });
 
@@ -656,9 +595,7 @@ Deno.test({
 
 Deno.test({
   name: "aio-hooks: useLocal — local state reactive in component",
-  sanitizeOps: false,
-  sanitizeResources: false,
-  fn() {
+  async fn() {
     const { document, root, cleanup } = createDOM();
     _setDocument(document);
 
@@ -674,7 +611,7 @@ Deno.test({
     assertEquals(root.innerHTML, "<div>editing</div>");
 
     _unmount(handle);
-    cleanup();
+    await cleanup();
   },
 });
 
@@ -682,9 +619,7 @@ Deno.test({
 
 Deno.test({
   name: "aio-hooks: $id array patch — adds and updates elements",
-  sanitizeOps: false,
-  sanitizeResources: false,
-  fn() {
+  async fn() {
     _resetAio();
 
     _injectState({
@@ -724,9 +659,7 @@ Deno.test({
 
 Deno.test({
   name: "aio-hooks: $id array patch — removes elements via $d",
-  sanitizeOps: false,
-  sanitizeResources: false,
-  fn() {
+  async fn() {
     _resetAio();
 
     _injectState({
@@ -753,14 +686,12 @@ Deno.test({
 
 Deno.test({
   name: "aio-hooks: $id array — renders reactively in component",
-  sanitizeOps: false,
-  sanitizeResources: false,
-  fn() {
+  async fn() {
     const { document, root, cleanup } = createDOM();
     _setDocument(document);
     _resetAio();
 
-    const fleet: FeatureRef = {
+    const fleet: CellRef = {
       __aio: { id: "fleet", state: { members: [] } },
     };
     _injectState({
@@ -773,7 +704,7 @@ Deno.test({
     });
 
     const App = () => {
-      const { state } = useFeature(fleet);
+      const { state } = useCell(fleet);
       const members = (state as Record<string, unknown>).members as {
         id: string;
         name: string;
@@ -804,7 +735,7 @@ Deno.test({
 
     _unmount(handle);
     _resetAio();
-    cleanup();
+    await cleanup();
   },
 });
 
@@ -812,9 +743,7 @@ Deno.test({
 
 Deno.test({
   name: "aio-hooks: filtered delta ($f:1) deep merges",
-  sanitizeOps: false,
-  sanitizeResources: false,
-  fn() {
+  async fn() {
     _resetAio();
 
     _injectState({
@@ -842,10 +771,8 @@ Deno.test({
 // ── AIO Hooks: simple $d deletion ──────────────────────────────────
 
 Deno.test({
-  name: "aio-hooks: $d deletes feature-level key",
-  sanitizeOps: false,
-  sanitizeResources: false,
-  fn() {
+  name: "aio-hooks: $d deletes cell-level key",
+  async fn() {
     _resetAio();
 
     _injectState({

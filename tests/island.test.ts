@@ -11,7 +11,7 @@ function createDOM() {
   const doc = win.document as unknown as Document;
   const root = doc.createElement("div");
   doc.body.appendChild(root);
-  return { document: doc, root, cleanup: () => win.close() };
+  return { document: doc, root, cleanup: () => win.happyDOM.close() };
 }
 
 function delay(ms: number) {
@@ -20,8 +20,6 @@ function delay(ms: number) {
 
 Deno.test({
   name: "island: mounts external component after lazy load",
-  sanitizeOps: false,
-  sanitizeResources: false,
   async fn() {
     const { document: doc, root, cleanup } = createDOM();
     _setDocument(doc);
@@ -61,14 +59,12 @@ Deno.test({
     assertEquals(root.querySelector("span")?.textContent, "external: hello");
 
     _unmount(handle);
-    cleanup();
+    await cleanup();
   },
 });
 
 Deno.test({
   name: "island: updates external component when props signal changes",
-  sanitizeOps: false,
-  sanitizeResources: false,
   async fn() {
     const { document: doc, root, cleanup } = createDOM();
     _setDocument(doc);
@@ -108,14 +104,12 @@ Deno.test({
     assertEquals(updateCount >= 1, true);
 
     _unmount(handle);
-    cleanup();
+    await cleanup();
   },
 });
 
 Deno.test({
   name: "island: unmounts external component on AIR unmount",
-  sanitizeOps: false,
-  sanitizeResources: false,
   async fn() {
     const { document: doc, root, cleanup } = createDOM();
     _setDocument(doc);
@@ -153,14 +147,12 @@ Deno.test({
     assertEquals(unmounted, true);
 
     _unmount(handle);
-    cleanup();
+    await cleanup();
   },
 });
 
 Deno.test({
   name: "island: shows loading placeholder while module loads",
-  sanitizeOps: false,
-  sanitizeResources: false,
   async fn() {
     const { document: doc, root, cleanup } = createDOM();
     _setDocument(doc);
@@ -194,6 +186,6 @@ Deno.test({
     assertEquals(root.querySelector("b")?.textContent, "loaded");
 
     _unmount(handle);
-    cleanup();
+    await cleanup();
   },
 });

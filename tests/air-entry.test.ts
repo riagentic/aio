@@ -2,7 +2,7 @@ import { assertExists } from "@std/assert";
 
 Deno.test("air entry: exports all AIR-native hooks", async () => {
   const air = await import("../src/air.ts");
-  assertExists(air.useFeature);
+  assertExists(air.useCell);
   assertExists(air.useAio);
   assertExists(air.useLocal);
   assertExists(air.onMount);
@@ -26,17 +26,12 @@ Deno.test("air entry: exports React compat hooks", async () => {
   assertExists(air.memo);
 });
 
-Deno.test("air entry: exports base aio symbols", async () => {
+Deno.test("air entry: exports browser-side protocol symbols", async () => {
   const air = await import("../src/air.ts");
-  assertExists(air.feature);
-  assertExists(air.aio);
-  assertExists(air.log);
-  assertExists(air.client);
-  assertExists(air.msg);
-  assertExists(air.lint);
-  assertExists(air.call);
-  assertExists(air.draft);
-  assertExists(air.createDB);
+  assertExists(air.cell); // client-side cell (protocol-cell.ts)
+  assertExists(air.aio); // client-side aio (protocol-cell.ts)
+  assertExists(air.log); // client-side log (protocol-cell.ts)
+  assertExists(air.msg); // client-side msg (browser-shared.ts)
 });
 
 Deno.test("air entry: exports VDOM extras", async () => {

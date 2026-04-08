@@ -39,7 +39,7 @@ function* checkout(ctx, { item }: { item: string }) {
 ### Inline — `generators` key (recommended)
 
 ```ts
-const order = feature("order", {
+const order = cell("order", {
   state: { status: "idle" as string, orderId: null as string | null },
   methods: {
     reset(s) {
@@ -64,13 +64,13 @@ const order = feature("order", {
 order.place(); // dispatches Order:Place, starts the generator
 ```
 
-### With `feature({ actions })` — payload object
+### With `cell({ actions })` — payload object
 
-In actions-based features, the generator key matches an action key and receives
-the **payload object** directly:
+In actions-based cells, the generator key matches an action key and receives the
+**payload object** directly:
 
 ```ts
-const checkout = feature("checkout", {
+const checkout = cell("checkout", {
   state: { status: "idle", orderId: null as string | null },
   actions: { start: (item: string) => ({ item }), cancel: () => ({}) },
   generators: {
@@ -85,9 +85,8 @@ const checkout = feature("checkout", {
 });
 ```
 
-> **Arg styles:** `feature({ methods })` → spread args:
-> `*place(ctx, item, qty)`. `feature({ actions })` → payload object:
-> `*place(ctx, { item, qty })`.
+> **Arg styles:** `cell({ methods })` → spread args: `*place(ctx, item, qty)`.
+> `cell({ actions })` → payload object: `*place(ctx, { item, qty })`.
 
 ---
 
@@ -116,7 +115,7 @@ const price = yield* ctx.call(...)  // 42 — correct
 ## Complete example
 
 ```ts
-const checkout = feature("checkout", {
+const checkout = cell("checkout", {
   state: {
     price: 0,
     orderId: null as string | null,
@@ -239,9 +238,9 @@ strings as last resort.
 If a generator is triggered while a previous instance runs, the old one is
 automatically cancelled. Only the latest instance runs.
 
-### Feature disable/destroy
+### Cell disable/destroy
 
-All running generators are cancelled immediately when a feature is disabled.
+All running generators are cancelled immediately when a cell is disabled.
 Generators use structured concurrency — no manual cleanup needed.
 
 ---

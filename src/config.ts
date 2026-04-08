@@ -1,6 +1,6 @@
 // Runtime config validation & documentation — extracted from aio.ts (AIO-52)
 // Types are erased at runtime. These sets are the runtime source of truth.
-// If you add a key to AioConfig, FeaturesConfig, or UiConfig — add it here too.
+// If you add a key to AioConfig, CellsConfig, or UiConfig — add it here too.
 
 export const VALID_UI_KEYS = new Set<string>([
   "title",
@@ -15,8 +15,6 @@ export const VALID_AIO_CONFIG_KEYS = new Set<string>([
   "reduce",
   "execute",
   "persist",
-  "stateForDB",
-  "stateForUI",
   "fullStateThreshold",
   "syncIntervalMs",
   "maxConnections",
@@ -57,16 +55,23 @@ export const VALID_AIO_CONFIG_KEYS = new Set<string>([
   "_onScheduleReady",
   "_diagnostics",
   "_onCheckpointRestore",
-  "_featureNames",
+  "_cellNames",
   "_healthGetter",
   "_reduceBreakdown",
   "_onReportOptsReady",
-  "_syncFeatureIds",
+  "_syncCellIds",
+  "_getDBState",
+  "_getUIState",
+  "_cellPatchStrategies",
+  "_cellFilterFields",
+  "_cellMigrations",
+  "_cellVersions",
 ]);
 
 export const VALID_FEATURES_CONFIG_KEYS = new Set<string>([
   "appId",
-  "features",
+  "cells",
+  "cellDefaults",
   "port",
   "persist",
   "persistKey",
@@ -106,8 +111,6 @@ export const VALID_FEATURES_CONFIG_KEYS = new Set<string>([
   "onStop",
   "onError",
   "onRestore",
-  "stateForUI",
-  "stateForDB",
   "logging",
   "diagnostics",
   "onCheckpointRestore",
@@ -116,7 +119,7 @@ export const VALID_FEATURES_CONFIG_KEYS = new Set<string>([
 const CONFIG_DOCS: Record<string, [string, string]> = {
   appId: ["", "unique app identity — lock file, UDS socket, KV/SQLite paths"],
   appVersion: ["", "app version string — logged on startup"],
-  features: ["", "feature definitions array"],
+  cells: ["", "cell definitions array"],
   reduce: ["", "state reducer (legacy API)"],
   execute: ["", "effect executor (legacy API)"],
   persist: ["true", "auto-open Deno.Kv for state persistence"],
@@ -143,8 +146,6 @@ const CONFIG_DOCS: Record<string, [string, string]> = {
     "ratio of changed keys that triggers full state broadcast",
   ],
   maxConnections: ["100", "max concurrent WebSocket clients"],
-  stateForUI: ["full state", "filter state before sending to UI"],
-  stateForDB: ["full state", "filter state before persisting"],
   beforeReduce: ["", "intercept actions before reduce — return null to drop"],
   users: ["", "static token→user map for auth"],
   resolveUser: [
@@ -168,12 +169,12 @@ const CONFIG_DOCS: Record<string, [string, string]> = {
     "deep freeze state after reduce to catch mutations",
   ],
   memory: ["", "memory pressure monitoring config"],
-  circuitBreaker: ["", "auto-disable features after N errors"],
+  circuitBreaker: ["", "auto-disable cells after N errors"],
   diagnostics: ["auto", "state diffs, action log, checkpoint, crash handler"],
   logging: ["true", "structured logging — false to disable"],
   schedules: ["", "static scheduled effects — started on boot"],
   middleware: ["", "middleware array — applied in order as beforeReduce chain"],
-  isolate: ["", "run only these features (dev convenience)"],
+  isolate: ["", "run only these cells (dev convenience)"],
   onAction: ["", "called after every action"],
   onEffect: ["", "called after every effect"],
   onConnect: ["", "called when client connects"],
@@ -208,8 +209,6 @@ const CONFIG_GROUPS: [string, string[]][] = [
     "maxConnections",
   ]],
   ["App logic", [
-    "stateForUI",
-    "stateForDB",
     "beforeReduce",
     "middleware",
     "isolate",
@@ -278,7 +277,7 @@ export function formatValidConfig(): string {
   lines.push("aio.run({");
   lines.push("");
   lines.push(
-    ...table("REQUIRED", ["appId", "appVersion", "features"], CONFIG_DOCS),
+    ...table("REQUIRED", ["appId", "appVersion", "cells"], CONFIG_DOCS),
   );
   for (const [group, keys] of CONFIG_GROUPS) {
     lines.push("");

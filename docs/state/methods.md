@@ -1,14 +1,14 @@
 # Methods — Sync, Async, and Selectors
 
-The default way to build aio features. No action catalogs, no effect catalogs,
-no switch/case. Just methods that mutate state.
+The default way to build aio cells. No action catalogs, no effect catalogs, no
+switch/case. Just methods that mutate state.
 
 ## Quick example
 
 ```ts
-import { aio, feature } from "aio";
+import { aio, cell } from "aio";
 
-const todo = feature("todo", {
+const todo = cell("todo", {
   state: {
     items: [] as { text: string; done: boolean }[],
     filter: "all" as "all" | "active" | "done",
@@ -39,13 +39,13 @@ const todo = feature("todo", {
   },
 });
 
-await aio.run({ features: [todo] });
+await aio.run({ cells: [todo] });
 todo.add("buy milk");
 todo.toggle(0);
 const count = todo.remaining(); // → 0
 ```
 
-After `aio.run()`, call methods and selectors directly on the feature — no
+After `aio.run()`, call methods and selectors directly on the cell — no
 `dispatch()`, no passing state.
 
 ---
@@ -72,7 +72,7 @@ becomes the action type: `increment` → `counter:increment`.
 **What you can do:** mutate any property, nested objects, array methods (`push`,
 `splice`, `sort`), delete properties — anything Immer supports.
 
-**What you cannot do:** async operations, access other features' state.
+**What you cannot do:** async operations, access other cells' state.
 
 ### Returning schedule effects
 
@@ -170,10 +170,10 @@ async riskyOp(s) {
 
 ## Selectors
 
-Derived values from feature state:
+Derived values from cell state:
 
 ```ts
-const cart = feature("cart", {
+const cart = cell("cart", {
   state: { items: [] as { price: number; qty: number }[] },
   methods: {/* ... */},
   selectors: {
@@ -188,8 +188,8 @@ const total = cart.total();
 const empty = cart.isEmpty();
 ```
 
-Selectors are scoped to the feature's state slice automatically. After
-`aio.run()` binds the feature, selectors read current state implicitly.
+Selectors are scoped to the cell's state slice automatically. After `aio.run()`
+binds the cell, selectors read current state implicitly.
 
 ---
 
@@ -198,7 +198,7 @@ Selectors are scoped to the feature's state slice automatically. After
 After `aio.run()`, methods and selectors are callable directly:
 
 ```ts
-await aio.run({ features: [counter] });
+await aio.run({ cells: [counter] });
 
 counter.increment(5); // dispatches counter:increment
 counter.reset(); // dispatches counter:reset
@@ -208,6 +208,59 @@ counter.increment.type; // → 'counter:increment'
 
 Before `aio.run()`, calling a method returns an action object without
 dispatching. After `aio.run()`, calling dispatches automatically.
+
+---
+
+## Common Pitfalls
+
+### Immer proxy restrictions (sync methods)
+
+The `s` parameter is an Immer draft — a Proxy that records mutations. Some
+JavaScript patterns don't work on proxies:
+
+```ts
+// DON'T — these read the proxy in ways Immer can't track:
+methods: {
+  bad(s) {
+    const copy = { ...s }             // spread reads all keys — fails
+    const keys = Object.keys(s)       // same issue
+    const mapped = s.items.map(...)   // .map() returns proxy-wrapped results
+    JSON.stringify(s)                 // reads entire tree through proxy
+  },
+}
+
+// DO — access specific properties or snapshot first:
+methods: {
+  good(s) {
+    const name = s.user.name          // direct access — works
+    s.items.push({ text: "new" })     // mutator methods — works
+    s.items.forEach(i => i.done = true)  // forEach — works
+    const items = [...s.items]        // snapshot to plain array first
+    const filtered = items.filter(i => !i.done)  // now safe
+  },
+}
+```
+
+**Rule of thumb:** mutate directly, read specific properties. If you need to
+transform an array, snapshot it first with `[...s.array]`.
+
+### Async batching and time-travel
+
+Each `await` in an async method creates a new state snapshot:
+
+```ts
+async checkout(s) {
+  s.status = "validating"  // snapshot 1: { status: "validating" }
+  await validate()
+  s.status = "charging"    // snapshot 2: { status: "charging" }
+  await charge()
+  s.status = "done"        // snapshot 3: { status: "done" }
+}
+```
+
+Time-travel will show 3 separate entries: `__setCheckout` for each batch. This
+is by design — each await returns control to the event loop, so the framework
+captures state at each boundary.
 
 ---
 

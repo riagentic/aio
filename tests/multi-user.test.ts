@@ -1,4 +1,4 @@
-// multi-user.test.ts — stateForUI per-user isolation
+// multi-user.test.ts — per-user UI state isolation
 //
 // Verifies:
 //   - User A never sees user B's filtered state
@@ -107,6 +107,7 @@ function nextMessage(ws: WebSocket, ms = 2000): Promise<unknown> {
 
 Deno.test({
   name: "multi-user: admin sees full state, viewer sees filtered",
+  // sanitizers disabled: WebSocket server has async accept loop that outlives test
   sanitizeOps: false,
   sanitizeResources: false,
 }, async () => {
@@ -152,6 +153,7 @@ Deno.test({
 
 Deno.test({
   name: "multi-user: concurrent connections get isolated views",
+  // sanitizers disabled: WebSocket server has async accept loop that outlives test
   sanitizeOps: false,
   sanitizeResources: false,
 }, async () => {

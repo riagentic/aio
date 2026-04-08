@@ -184,11 +184,11 @@ Deno.test("render-meter: paintRate calculates fps over 1s window", () => {
   meter.destroy();
 });
 
-Deno.test("render-meter: recordAction stores last action/feature", () => {
+Deno.test("render-meter: recordAction stores last action/cell", () => {
   const meter = createRenderMeter(baseConfig());
   meter.recordAction("counter/increment", "counter");
   assertEquals(meter.getLastAction(), "counter/increment");
-  assertEquals(meter.getLastFeature(), "counter");
+  assertEquals(meter.getLastCell(), "counter");
   meter.destroy();
 });
 

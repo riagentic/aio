@@ -2,52 +2,52 @@
  * @module
  * AIR adapter — signal-based hooks for AIO native renderer.
  *
- * `useFeature`/`useAio` read from state-core signals directly.
+ * `useCell`/`useAio` read from state-core signals directly.
  * Signal reads auto-track in AIR's per-component scope.
  *
  * @example
  * ```ts
- * import { useFeature } from "aio/adapters/air";
- * const { state, send } = useFeature(myFeature);
+ * import { useCell } from "aio/adapters/air";
+ * const { state, send } = useCell(myCell);
  * ```
  */
 
 import { signal } from "../signal.ts";
 import { useRef } from "../aio-renderer.ts";
 import {
+  type CellRef,
   createSendProxy,
-  type FeatureRef,
+  getCellSignal,
   getConnectedSignal,
-  getFeatureSignal,
   getStateSignal,
   send,
   trackPath,
 } from "../state-core.ts";
 import type {
+  CellDef,
   DirectCalling,
   ExtractState,
-  FeatureDef,
   SendOf,
-} from "../feature-types.ts";
+} from "../cell-types.ts";
 
-// Typed overload — when passing a feature def with DirectCalling methods
-export function useFeature<
+// Typed overload — when passing a cell def with DirectCalling methods
+export function useCell<
   // deno-lint-ignore no-explicit-any
-  F extends FeatureDef<any, any, any, any> & DirectCalling<any>,
+  F extends CellDef<any, any, any, any> & DirectCalling<any, any>,
 >(
   ref: F,
 ): { state: ExtractState<F>; send: SendOf<F> };
-// Untyped overload — for dynamic FeatureRef usage
-export function useFeature<
+// Untyped overload — for dynamic CellRef usage
+export function useCell<
   S extends Record<string, unknown> = Record<string, unknown>,
 >(
-  ref: FeatureRef,
+  ref: CellRef,
 ): { state: S; send: Record<string, (...args: unknown[]) => void> };
 // Implementation
 // deno-lint-ignore no-explicit-any
-export function useFeature(ref: any): any {
+export function useCell(ref: any): any {
   const name = ref.__aio.id;
-  const sig = getFeatureSignal(name, ref.__aio.state);
+  const sig = getCellSignal(name, ref.__aio.state);
   trackPath(name);
 
   // deno-lint-ignore no-explicit-any
@@ -88,7 +88,7 @@ export function useFeature(ref: any): any {
   return { state, send: createSendProxy(name, ref) };
 }
 
-/** Subscribe to the full app state. Prefer `useFeature` for scoped access. */
+/** Subscribe to the full app state. Prefer `useCell` for scoped access. */
 export function useAio<
   S extends Record<string, unknown> = Record<string, unknown>,
 >(): {

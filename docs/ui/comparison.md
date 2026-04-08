@@ -18,7 +18,7 @@ Side-by-side comparison and step-by-step migration guides in both directions.
 | **Virtual scroll**   | Built-in `useVirtualList`             | Bring your own                                  |
 | **Error boundaries** | `<ErrorBoundary>` (one line)          | Class component (15+ LOC)                       |
 | **SSR**              | Built-in `renderToString` + `hydrate` | `react-dom/server` + `react-dom/client`         |
-| **Server state**     | `useFeature`, `useAio`, `useLocal`    | `useFeature`, `useAio`, `useLocal`              |
+| **Server state**     | `useCell`, `useAio`, `useLocal`       | `useCell`, `useAio`, `useLocal`                 |
 | **Routing**          | Built-in (signal-based)               | Built-in (same API)                             |
 
 ---
@@ -29,7 +29,7 @@ Side-by-side comparison and step-by-step migration guides in both directions.
 
 Same name, same behavior, same types in both renderers:
 
-`useFeature(ref)`, `useAio()`, `useLocal(init)`, `useConnected()`,
+`useCell(ref)`, `useAio()`, `useLocal(init)`, `useConnected()`,
 `useProjection(fn)`, `useTimeTravel(ref)`, `useRoute(pattern?)`,
 `useNavigate()`, `Route`, `Outlet`, `Link`, `NavLink`, `Redirect`,
 `useRef(init)`, `createContext(default)`, `useContext(ctx)`, `page(key, routes)`
@@ -230,8 +230,8 @@ In dev mode, one-time `console.info` hints suggest AIR-native alternatives.
 ### Step 1: Change Import
 
 ```diff
-- import { mount, signal, useFeature } from "aio/air";
-+ import { useFeature } from "aio/react";
+- import { mount, signal, useCell } from "aio/air";
++ import { useCell } from "aio/react";
 + import { useState } from "react";
 + import { createRoot } from "react-dom/client";
 ```
@@ -296,6 +296,6 @@ DevTools), familiar React patterns, community support.
 **Lose:** Automatic memoization, signal-based reactivity, built-in utilities,
 smaller bundle, simpler mental model.
 
-Both renderers connect to the same server, same features, same protocol. The
+Both renderers connect to the same server, same cells, same protocol. The
 difference is how they manage UI reactivity. See
 [renderer architecture](air-setup.md#architecture-overview).

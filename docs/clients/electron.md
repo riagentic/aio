@@ -31,7 +31,7 @@ Use browser-only mode:
 ```ts
 await aio.run({
   appId: "my-app",
-  features: [myFeature],
+  cells: [myCell],
   client: "browser", // auto-opens browser instead of Electron
 });
 ```
@@ -41,7 +41,7 @@ Keep server running after Electron closes:
 ```ts
 await aio.run({
   appId: "my-app",
-  features: [myFeature],
+  cells: [myCell],
   keepServer: true, // server survives electron window close
 });
 ```
@@ -61,7 +61,7 @@ slightly faster.
 ```ts
 await aio.run({
   appId: "my-app",
-  features: [myFeature],
+  cells: [myCell],
   transport: "uds", // force UDS (or 'ws' to force WebSocket)
 });
 ```

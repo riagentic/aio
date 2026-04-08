@@ -1,25 +1,50 @@
 # API Reference
 
-Main import: `import { feature, call, aio } from 'aio'`
+Universal: `import { aio, cell, log } from "aio"` (state, lifecycle, logging)
+
+Rendering: `import { useCell, signal } from "aio/air"` (or `"aio/react"`)
+
+Focused imports:
+
+```ts
+import { createDB } from "aio/db"; // SQLite only
+import { testCell } from "aio/testing"; // Test harness only
+import { schedule } from "aio/schedule"; // Scheduling only
+import { createSelector } from "aio/selectors"; // Selectors only
+```
+
+### Start Here
+
+Most apps only need these five APIs:
+
+| API                         | What it does                       | Guide                                                     |
+| --------------------------- | ---------------------------------- | --------------------------------------------------------- |
+| `cell(name, config)`        | Define a piece of state + behavior | [Cells](../state/cells.md)                                |
+| `aio.run(config)`           | Boot the app                       | [Lifecycle](../state/lifecycle.md)                        |
+| `useCell(ref)`              | Connect UI to cell state           | [AIR Setup](../ui/air-setup.md) / [React](../ui/react.md) |
+| `testCell(def, name, fn)`   | Test a cell in isolation           | [Cell Testing](../testing/cell-testing.md)                |
+| `log.info(tag, msg, data?)` | Structured logging                 | [Logging](#logging)                                       |
+
+Everything below is the full reference, organized by category.
 
 ---
 
 ## Core
 
-| API                         | Description                                                         |
-| --------------------------- | ------------------------------------------------------------------- |
-| `feature(name, config)`     | Define a feature with state, methods/generators, machine, selectors |
-| `testFeature(def, config?)` | Create isolated test harness for a feature                          |
+| API                      | Description                                                                    |
+| ------------------------ | ------------------------------------------------------------------------------ |
+| `cell(name, config)`     | Define a cell — see [Cells](../state/cells.md), [Methods](../state/methods.md) |
+| `testCell(def, config?)` | Isolated test harness — see [Cell Testing](../testing/cell-testing.md)         |
 
 ## Runtime
 
-| API                         | Description                                                     |
-| --------------------------- | --------------------------------------------------------------- |
-| `aio.run(config)`           | Start the app -- see Feature Config for options                 |
-| `aio.middleware.logger()`   | Log all actions to console (dev mode)                           |
-| `aio.middleware.validate()` | Validate action shapes before reduce                            |
-| `call(opts, fn)`            | Call with `{ timeout?, retries? }` -- wraps inter-feature calls |
-| `markAsync(fn)`             | Mark a method as async for minified bundles                     |
+| API                         | Description                                                                            |
+| --------------------------- | -------------------------------------------------------------------------------------- |
+| `aio.run(config)`           | Start the app — see [Lifecycle](../state/lifecycle.md) and [Cell Config](#cell-config) |
+| `aio.middleware.logger()`   | Log all actions to console (dev mode)                                                  |
+| `aio.middleware.validate()` | Validate action shapes before reduce                                                   |
+| `call(opts, fn)`            | Call with `{ timeout?, retries? }` -- wraps inter-cell calls                           |
+| `markAsync(fn)`             | Mark a method as async for minified bundles                                            |
 
 ### Dispatch Introspection
 
@@ -32,8 +57,8 @@ Main import: `import { feature, call, aio } from 'aio'`
 
 | API                                        | Description                                           |
 | ------------------------------------------ | ----------------------------------------------------- |
-| `composeFeatures(entries)`                 | Combine features manually                             |
-| `bindFeature(feature, dispatch, getState)` | Wire a feature to a custom dispatch bus               |
+| `composeCells(entries)`                    | Combine cells manually                                |
+| `bindCell(cell, dispatch, getState)`       | Wire a cell to a custom dispatch bus                  |
 | `composeMiddleware(...fns)`                | Compose beforeReduce functions -- return null to drop |
 | `draft(state, fn)`                         | Immer wrapper for actions/reduce style                |
 | `matchEffect(effect, handlers, fallback?)` | Typed effect dispatch -- alternative to switch/case   |
@@ -49,19 +74,19 @@ Main import: `import { feature, call, aio } from 'aio'`
 | `yield* ctx.mutate(name, fn)`           | State mutation via Immer draft                               |
 | `yield* ctx.done(fn?)`                  | Terminal success, optional final mutation                    |
 | `yield* ctx.fail(reason)`               | Terminal failure with reason                                 |
-| `yield* ctx.dispatch(action)`           | Dispatch arbitrary action to any feature                     |
+| `yield* ctx.dispatch(action)`           | Dispatch arbitrary action to any cell                        |
 | `yield* ctx.send(creator, payload?)`    | Shorthand dispatch via bound method or type string           |
 | `yield* ctx.all(...gens)`               | Run multiple calls in parallel (spread or named object form) |
 | `yield* ctx.race({...gens})`            | Race multiple calls -- first to complete wins                |
 | `yield* ctx.sleep(name, ms)`            | Sleep for N ms with named action for visibility              |
 | `yield* ctx.waitFor(creator, timeout?)` | Wait for action, returns `{ type, payload }`                 |
 | `yield* ctx.when(predicate, opts?)`     | Wait until state condition is true                           |
-| `ctx.getState()`                        | Read current feature state (fresh after each step)           |
+| `ctx.getState()`                        | Read current cell state (fresh after each step)              |
 | `ctx.getFullState()`                    | Read full app state tree                                     |
 
 ---
 
-## Feature Config
+## Cell Config
 
 | Key          | Description                                                    |
 | ------------ | -------------------------------------------------------------- |
@@ -71,12 +96,11 @@ Main import: `import { feature, call, aio } from 'aio'`
 | `cancelOn`   | Cancellation triggers per generator -- `{ genKey: [actions] }` |
 | `selectors`  | Derived state -- `{ getName: s => s.name }` (auto-scoped)      |
 | `machine`    | State machine guards -- `{ initial, states }` or `false`       |
-| `listensTo`  | Foreign action listeners -- `[otherFeature.action]`            |
+| `listensTo`  | Foreign action listeners -- `[otherCell.action]`               |
 | `actions`    | Action creators (explicit style)                               |
 | `effects`    | Effect creators (explicit style)                               |
 | `reduce`     | Reducer handlers (explicit style)                              |
 | `execute`    | Effect handlers (explicit style)                               |
-| `dispatchTo` | Cross-dispatch allowlist -- `[wallet, notifications]`          |
 | `persist`    | KV persistence config -- `{ exclude: ['tempCache'] }`          |
 | `onInit`     | Init hook -- `(app) => { ... }` runs after aio.run()           |
 | `onDestroy`  | Destroy hook -- `(app) => { ... }` runs before shutdown        |
@@ -88,7 +112,7 @@ Main import: `import { feature, call, aio } from 'aio'`
 | Hook                        | Description                                            |
 | --------------------------- | ------------------------------------------------------ |
 | `useAio<S>()`               | Proxy-tracked state access                             |
-| `useFeature(ref)`           | Scoped state + typed send, selective re-renders        |
+| `useCell(ref)`              | Scoped state + typed send, selective re-renders        |
 | `useProjection(fn, deps)`   | Structural sharing for derived data                    |
 | `memo(Component, compare?)` | `React.memo` replacement with `_shallowEqual` per prop |
 | `useLocal(initial)`         | Client-only state (not synced) -- `{ local, set }`     |
@@ -103,7 +127,7 @@ Main import: `import { feature, call, aio } from 'aio'`
 | ---------------------------------- | -------------------------------------------------- |
 | `client.subscribe(fn)`             | Subscribe to state changes, returns unsubscribe    |
 | `client.getState()`                | Current state snapshot (null before first message) |
-| `client.getFeatureState(name)`     | Single feature's state slice                       |
+| `client.getCellState(name)`        | Single cell's state slice                          |
 | `client.send(action)`              | Send action to server                              |
 | `client.route.subscribe(fn)`       | Subscribe to URL changes                           |
 | `client.route.navigate(to, opts?)` | Navigate -- string path or history delta           |
@@ -126,16 +150,16 @@ Main import: `import { feature, call, aio } from 'aio'`
 
 ## SQLite
 
-| API                     | Description                                                  |
-| ----------------------- | ------------------------------------------------------------ |
-| `createDB(path, opts?)` | Create async Worker-based DB                                 |
-| `DEFAULT_PRAGMAS`       | Default pragma set applied by `createDB`                     |
-| `table(columns)`        | Define a SQLite table -- `table({ id: pk(), name: text() })` |
-| `pk()`                  | Primary key column                                           |
-| `text()`                | Text column                                                  |
-| `integer()`             | Integer column                                               |
-| `real()`                | Float column                                                 |
-| `ref(table)`            | Foreign key reference                                        |
+| API                     | Description                                                           |
+| ----------------------- | --------------------------------------------------------------------- |
+| `createDB(path, opts?)` | Create async Worker-based DB — see [SQLite](../persistence/sqlite.md) |
+| `DEFAULT_PRAGMAS`       | Default pragma set applied by `createDB`                              |
+| `table(columns)`        | Define a SQLite table -- `table({ id: pk(), name: text() })`          |
+| `pk()`                  | Primary key column                                                    |
+| `text()`                | Text column                                                           |
+| `integer()`             | Integer column                                                        |
+| `real()`                | Float column                                                          |
+| `ref(table)`            | Foreign key reference                                                 |
 
 ### DB interface
 
@@ -156,16 +180,17 @@ Main import: `import { feature, call, aio } from 'aio'`
 | API                                   | Description                                        |
 | ------------------------------------- | -------------------------------------------------- |
 | `createSelector(...inputs, resultFn)` | Memoized selector -- recomputes when inputs change |
-| `createSliceSelector(feature)`        | Scoped selector -- auto-wraps with feature slice   |
+| `createSliceSelector(cell)`           | Scoped selector -- auto-wraps with cell slice      |
 
 ## Persistence
 
-| Config                                  | Description                          |
-| --------------------------------------- | ------------------------------------ |
-| `persist: true`                         | Auto-persist state to Deno.Kv        |
-| `persist: { exclude: [...] }`           | Per-feature persistence exclusion    |
-| `stateForDB: (state) => partial`        | Transform state before persist       |
-| `stateForUI: (state, user?) => partial` | Transform state before sending to UI |
+| Config                                                   | Description                                    |
+| -------------------------------------------------------- | ---------------------------------------------- |
+| `persist: true`                                          | Auto-persist state to Deno.Kv                  |
+| `persist: "all" \| "none" \| { include } \| { exclude }` | Per-cell persistence filter                    |
+| `ui: "all" \| "none" \| { include } \| { exclude }`      | Per-cell UI visibility filter                  |
+| `ui: { include, forUser }`                               | Per-cell UI visibility with per-user transform |
+| `cellDefaults: { ui, persist }`                          | App-level defaults for all cells               |
 
 ## Middleware
 
@@ -179,10 +204,10 @@ Main import: `import { feature, call, aio } from 'aio'`
 
 | Type              | Description                                                      |
 | ----------------- | ---------------------------------------------------------------- |
-| `FeatureDef`      | Return type of `feature()` -- callable methods at top level      |
-| `FeatureEntry`    | Feature or `{ feature, dependsOn? }`                             |
+| `CellDef`         | Return type of `cell()` -- callable methods at top level         |
+| `CellEntry`       | Cell or `{ cell, dependsOn? }`                                   |
 | `MachineConfig`   | `{ initial, states: { state: { action: target } } }`             |
-| `GenCtx<S>`       | Generator context -- S inferred from feature state               |
+| `GenCtx<S>`       | Generator context -- S inferred from cell state                  |
 | `Gen<T>`          | Generator return type for flows                                  |
 | `TypedCreator<P>` | Action creator with `.type`                                      |
 | `CallOptions`     | `{ timeout?: number; retries?: number }`                         |
@@ -201,12 +226,12 @@ Main import: `import { feature, call, aio } from 'aio'`
 
 ## Testing
 
-`testFeature(def, name, fn)` -- `t` is `TestContext<S, A>`:
+`testCell(def, name, fn)` -- `t` is `TestContext<S, A>`:
 
 | API                         | Description                                |
 | --------------------------- | ------------------------------------------ |
 | `t.send[key](...args)`      | Dispatch typed action                      |
-| `t.getState()`              | Get current feature state                  |
+| `t.getState()`              | Get current cell state                     |
 | `t.expect.state(fn)`        | Assert state via predicate                 |
 | `t.expect.status(expected)` | Assert machine status                      |
 | `t.expect.effects(types[])` | Assert exact effect types from last action |
@@ -216,7 +241,7 @@ Main import: `import { feature, call, aio } from 'aio'`
 | `t.getEffects()`            | Get effects from last action               |
 | `t.randomActions(n)`        | Dispatch N random valid actions            |
 | `t.init()`                  | Reset to initial state                     |
-| `t.destroy()`               | Destroy feature                            |
+| `t.destroy()`               | Destroy cell                               |
 
 ---
 
@@ -231,7 +256,7 @@ log.error("db", "connection lost", { error: "ECONNREFUSED" });
 
 | File              | Content                                     |
 | ----------------- | ------------------------------------------- |
-| `log/app.log`     | Feature lifecycle, transitions, errors      |
+| `log/app.log`     | Cell lifecycle, transitions, errors         |
 | `log/debug.log`   | All dispatched actions + trace/debug        |
 | `log/error.log`   | Errors only                                 |
 | `log/warning.log` | Warnings                                    |
@@ -243,6 +268,6 @@ log.error("db", "connection lost", { error: "ECONNREFUSED" });
 | ---------------------- | ----------------------------------- |
 | `VERSION`              | Framework version string            |
 | `parseCli(args)`       | Parse CLI flags                     |
-| `lint(features)`       | Validate feature definitions        |
+| `lint(cells)`          | Validate cell definitions           |
 | `instances()`          | List running aio instances          |
 | `resolveAppId(appDir)` | Resolve app identity from directory |

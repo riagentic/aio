@@ -1,5 +1,11 @@
 # Upgrade from v0.1 to v0.2
 
+> **Note:** `feature()` was renamed to `cell()` in alpha11. See
+> [upgrade guide](from-alpha10-to-alpha11.md).
+>
+> **Note:** `stateForUI` (introduced in this version) was removed in alpha11,
+> replaced by cell-level `ui: { include, exclude, forUser }` config.
+
 ### New features
 
 - **CSS hot reload** — CSS-only changes inject without page reload (React state

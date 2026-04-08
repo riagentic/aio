@@ -98,7 +98,7 @@ Deno.test("client: getLastLoop returns loop from pong", () => {
     drainRate: 100,
     lastReduceTime: 10,
     lastReduceAction: "test/ACT",
-    lastReduceFeature: "test",
+    lastReduceCell: "test",
     p95ReduceTime: 15,
     effectBacklog: 0,
     circuitBreakers: [],

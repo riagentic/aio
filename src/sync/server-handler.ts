@@ -5,12 +5,13 @@ import type { DB } from "../db/types.ts";
 import type { HLC, SyncOp } from "./types.ts";
 import { createHLC, type HLClock } from "./hlc.ts";
 import { compactSyncOps } from "./compact.ts";
+import { getLowWater, loadOpsSince, persistOp } from "./server-store.ts";
 
 /** Dependencies injected into the server-side sync handler. */
 export interface SyncHandlerDeps {
   db: DB;
-  syncFeatureIds: string[];
-  getFeatureState: (feature: string) => Record<string, unknown>;
+  syncCellIds: string[];
+  getCellState: (cell: string) => Record<string, unknown>;
   /** Send raw message to all connected clients except the given socket.
    *  Mutable ref: set after server creation to break circular dependency. */
   broadcastRaw: { fn: (msg: string, exclude?: WebSocket) => void };
@@ -27,7 +28,7 @@ export interface ServerSyncHandler {
     op: unknown,
     meta: { id: string; user?: unknown },
     socket: WebSocket,
-  ) => void;
+  ) => void | Promise<void>;
   handleSync: (
     sync: unknown,
     meta: { id: string; user?: unknown },
@@ -35,160 +36,99 @@ export interface ServerSyncHandler {
   ) => void;
 }
 
+const FORBIDDEN = ["__proto__", "constructor", "prototype"];
+
+/** Validate a sync op has required fields and no proto-pollution vectors. */
+export function isValidSyncOp(
+  op: unknown,
+): op is {
+  id: string;
+  hlc: HLC;
+  cell: string;
+  action: string;
+  payload: unknown;
+} {
+  if (!op || typeof op !== "object") return false;
+  const o = op as Record<string, unknown>;
+  return (
+    typeof o.id === "string" && o.id.length > 0 &&
+    typeof o.cell === "string" && !FORBIDDEN.includes(o.cell) &&
+    typeof o.action === "string" && !FORBIDDEN.includes(o.action) &&
+    Array.isArray(o.hlc) && o.hlc.length === 3 &&
+    typeof o.hlc[0] === "number" && typeof o.hlc[1] === "number" &&
+    typeof o.hlc[2] === "string"
+  );
+}
+
 /** Create a server-side sync handler that relays CRDT ops between clients. */
 export function createServerSyncHandler(
   deps: SyncHandlerDeps,
 ): ServerSyncHandler {
   const clock: HLClock = createHLC("server");
-  const features = new Set(deps.syncFeatureIds);
+  const syncCells = new Set(deps.syncCellIds);
 
-  async function persistOp(op: {
-    id: string;
-    hlc: HLC;
-    feature: string;
-    action: string;
-    payload: unknown;
-  }): Promise<void> {
-    const [hlcPhys, hlcCnt, hlcNode] = op.hlc;
-    await deps.db.execute(
-      `INSERT OR IGNORE INTO sync_ops (id, feature, action, payload, hlc_phys, hlc_cnt, hlc_node, server_ts)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      [
-        op.id,
-        op.feature,
-        op.action,
-        JSON.stringify(op.payload),
-        hlcPhys,
-        hlcCnt,
-        hlcNode,
-        Date.now(),
-      ],
-    );
+  // Per-cell async mutex — serializes handleOp + compact to prevent
+  // race where an op is persisted between state capture and DELETE in compact.
+  const _locks = new Map<string, Promise<void>>();
+  function withLock(cell: string, fn: () => Promise<void>): Promise<void> {
+    const prev = _locks.get(cell) ?? Promise.resolve();
+    const next = prev.then(fn, fn);
+    _locks.set(cell, next);
+    return next;
   }
 
-  async function loadOpsSince(
-    feature: string,
-    hlc: HLC | null,
-  ): Promise<SyncOp[]> {
-    if (!hlc) {
-      // No last HLC — return all ops for this feature
-      const { rows } = await deps.db.query<{
-        id: string;
-        feature: string;
-        action: string;
-        payload: string;
-        hlc_phys: number;
-        hlc_cnt: number;
-        hlc_node: string;
-      }>(
-        `SELECT id, feature, action, payload, hlc_phys, hlc_cnt, hlc_node
-         FROM sync_ops WHERE feature = ? ORDER BY hlc_phys, hlc_cnt`,
-        [feature],
-      );
-      return rows.map((r) => ({
-        id: r.id,
-        feature: r.feature,
-        action: r.action,
-        payload: JSON.parse(r.payload),
-        hlc: [r.hlc_phys, r.hlc_cnt, r.hlc_node] as HLC,
-        confirmed: true,
-      }));
-    }
-
-    const [phys, cnt] = hlc;
-    const { rows } = await deps.db.query<{
-      id: string;
-      feature: string;
-      action: string;
-      payload: string;
-      hlc_phys: number;
-      hlc_cnt: number;
-      hlc_node: string;
-    }>(
-      `SELECT id, feature, action, payload, hlc_phys, hlc_cnt, hlc_node
-       FROM sync_ops WHERE feature = ?
-       AND (hlc_phys > ? OR (hlc_phys = ? AND hlc_cnt > ?))
-       ORDER BY hlc_phys, hlc_cnt`,
-      [feature, phys, phys, cnt],
-    );
-    return rows.map((r) => ({
-      id: r.id,
-      feature: r.feature,
-      action: r.action,
-      payload: JSON.parse(r.payload),
-      hlc: [r.hlc_phys, r.hlc_cnt, r.hlc_node] as HLC,
-      confirmed: true,
-    }));
-  }
-
-  async function getLowWater(
-    feature: string,
-  ): Promise<HLC | null> {
-    const { rows } = await deps.db.query<{ low_water: string }>(
-      "SELECT low_water FROM sync_meta WHERE feature = ?",
-      [feature],
-    );
-    if (!rows[0]) return null;
-    try {
-      return JSON.parse(rows[0].low_water) as HLC;
-    } catch {
-      return null;
-    }
-  }
-
-  async function tryCompact(feature: string): Promise<void> {
+  async function tryCompact(cell: string): Promise<void> {
     try {
       await compactSyncOps({
         db: deps.db,
-        feature,
-        getState: () => deps.getFeatureState(feature),
+        cell,
+        getState: () => deps.getCellState(cell),
         serverHlc: clock.now(),
         log: deps.log,
       });
     } catch (e) {
-      deps.log.error(`[sync:server] compact failed for ${feature}: ${e}`);
+      deps.log.error(`[sync:server] compact failed for ${cell}: ${e}`);
     }
   }
 
   return {
-    handleOp(raw, meta, socket) {
-      const op = raw as {
-        id: string;
-        hlc: HLC;
-        feature: string;
-        action: string;
-        payload: unknown;
-      };
-
-      if (!features.has(op.feature)) {
+    async handleOp(raw, meta, socket) {
+      if (!isValidSyncOp(raw)) {
+        deps.log.warn(`[sync:server] invalid op from ${meta.id} — dropping`);
+        return;
+      }
+      const op = raw;
+      if (!syncCells.has(op.cell)) {
         deps.log.warn(
-          `[sync:server] op for unknown feature "${op.feature}" — dropping`,
+          `[sync:server] op for unknown cell "${op.cell}" — dropping`,
         );
         return;
       }
 
-      // Update server clock
-      clock.receive(op.hlc);
-      const serverHlc = clock.tick();
+      await withLock(op.cell, async () => {
+        clock.receive(op.hlc);
+        const serverHlc = clock.tick();
 
-      // Persist → ack → broadcast (fire-and-forget with error logging)
-      persistOp(op).then(() => {
-        // Send ack to originator
+        // Persist → ack → broadcast (await persist before ack — AIO-audit3)
         try {
-          socket.send(JSON.stringify({
-            __ack: { feature: op.feature, opId: op.id, serverHlc },
-          }));
-        } catch {
-          // Client disconnected
+          await persistOp(deps.db, op);
+        } catch (e) {
+          deps.log.error(`[sync:server] failed to persist op ${op.id}: ${e}`);
+          return; // Don't ack — client will retry
         }
 
-        // Broadcast to other clients
+        try {
+          socket.send(JSON.stringify({
+            __ack: { cell: op.cell, opId: op.id, serverHlc },
+          }));
+        } catch { /* client disconnected */ }
+
         deps.broadcastRaw.fn(
           JSON.stringify({
             __op: {
               id: op.id,
               hlc: op.hlc,
-              feature: op.feature,
+              cell: op.cell,
               action: op.action,
               payload: op.payload,
             },
@@ -196,96 +136,100 @@ export function createServerSyncHandler(
           socket,
         );
 
-        // Try compaction in background
-        tryCompact(op.feature);
-      }).catch((e) => {
-        deps.log.error(`[sync:server] failed to persist op ${op.id}: ${e}`);
-      });
+        await tryCompact(op.cell);
 
-      deps.log.debug(
-        `[sync:server] op ${op.id} from ${meta.id} for ${op.feature}:${op.action}`,
-      );
+        deps.log.debug(
+          `[sync:server] persisted op ${op.id} for ${op.cell}:${op.action}`,
+        );
+      });
     },
 
     handleSync(raw, _meta, socket) {
-      const sync = raw as {
+      const r = raw as Record<string, unknown>;
+      if (
+        !r || typeof r !== "object" ||
+        typeof r.clientId !== "string" || !r.clientId ||
+        (r.cells !== undefined &&
+          (typeof r.cells !== "object" || r.cells === null)) ||
+        (r.pendingOps !== undefined && !Array.isArray(r.pendingOps))
+      ) {
+        deps.log.warn("[sync:server] handleSync: invalid envelope — dropping");
+        return;
+      }
+      const sync = r as {
         clientId: string;
-        features: Record<string, { lastHlc: HLC | null }>;
+        cells: Record<string, { lastHlc: HLC | null }>;
         pendingOps: SyncOp[];
       };
 
       (async () => {
-        // Process pending ops from client first
-        for (const op of sync.pendingOps ?? []) {
-          if (!features.has(op.feature)) continue;
-          clock.receive(op.hlc);
-          await persistOp({
-            id: op.id,
-            hlc: op.hlc,
-            feature: op.feature,
-            action: op.action,
-            payload: op.payload,
+        // Persist pending ops under per-cell lock (prevents compact race)
+        for (const pending of sync.pendingOps ?? []) {
+          if (!isValidSyncOp(pending)) {
+            deps.log.warn(
+              "[sync:server] handleSync: invalid pending op — skipping",
+            );
+            continue;
+          }
+          if (!syncCells.has(pending.cell)) continue;
+          await withLock(pending.cell, async () => {
+            clock.receive(pending.hlc);
+            await persistOp(deps.db, pending);
           });
         }
 
-        // Build response per feature
+        // Build response per cell (read under lock to get consistent view)
         const responseOps: SyncOp[] = [];
         let useSnapshot = false;
         const snapshot: Record<string, Record<string, unknown>> = {};
-        let lowWater: HLC = clock.now();
+        const lowWaterMap: Record<string, HLC> = {};
 
         for (
-          const [feature, { lastHlc }] of Object.entries(
-            sync.features ?? {},
+          const [cell, { lastHlc }] of Object.entries(
+            sync.cells ?? {},
           )
         ) {
-          if (!features.has(feature)) continue;
+          if (!syncCells.has(cell)) continue;
 
-          const featureLowWater = await getLowWater(feature);
-          if (featureLowWater) {
-            lowWater = featureLowWater;
-          }
+          await withLock(cell, async () => {
+            const cellLW = await getLowWater(deps.db, cell);
+            if (cellLW) lowWaterMap[cell] = cellLW;
 
-          // Check if client's lastHlc is older than low_water (compacted away)
-          if (
-            featureLowWater && lastHlc &&
-            (lastHlc[0] < featureLowWater[0] ||
-              (lastHlc[0] === featureLowWater[0] &&
-                lastHlc[1] < featureLowWater[1]))
-          ) {
-            // Client is too far behind — send snapshot
-            useSnapshot = true;
-            snapshot[feature] = deps.getFeatureState(feature);
-          } else {
-            // Incremental — send ops since client's lastHlc
-            const ops = await loadOpsSince(feature, lastHlc);
-            responseOps.push(...ops);
-          }
+            // Client's lastHlc older than low_water → compacted, send snapshot
+            if (
+              cellLW && lastHlc &&
+              (lastHlc[0] < cellLW[0] ||
+                (lastHlc[0] === cellLW[0] && lastHlc[1] < cellLW[1]))
+            ) {
+              useSnapshot = true;
+              snapshot[cell] = deps.getCellState(cell);
+            } else {
+              const ops = await loadOpsSince(deps.db, cell, lastHlc);
+              responseOps.push(...ops);
+            }
+          });
         }
 
-        // Send response
         const response = useSnapshot
           ? {
             __sync: {
               mode: "snapshot" as const,
               snapshot,
               ops: responseOps,
-              lowWater,
+              lowWater: lowWaterMap,
             },
           }
           : {
             __sync: {
               mode: "incremental" as const,
               ops: responseOps,
-              lowWater,
+              lowWater: lowWaterMap,
             },
           };
 
         try {
           socket.send(JSON.stringify(response));
-        } catch {
-          // Client disconnected
-        }
+        } catch { /* client disconnected */ }
 
         deps.log.debug(
           `[sync:server] sync response: ${response.__sync.mode}, ${responseOps.length} ops`,

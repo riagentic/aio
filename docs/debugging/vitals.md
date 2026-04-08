@@ -42,7 +42,7 @@ Any state can return directly to `healthy`.
 
 ```ts
 aio.run({
-  features: [...],
+  cells: [...],
   diagnostics: {
     dev: {
       vitals: {
@@ -75,16 +75,16 @@ Kill switch: `vitals: false`.
 Monitors the dispatch loop -- reduce durations, queue depth, effect backlog,
 circuit breaker state.
 
-| Metric              | Description                              |
-| ------------------- | ---------------------------------------- |
-| `lastReduceTime`    | Duration of the most recent reduce (ms)  |
-| `lastReduceAction`  | Action type that triggered it            |
-| `lastReduceFeature` | Feature that owned the reduce            |
-| `p95ReduceTime`     | 95th percentile over last 100 reduces    |
-| `queueDepth`        | Pending actions in dispatch queue        |
-| `drainRate`         | Actions processed per second (5s window) |
-| `effectBacklog`     | Pending effects awaiting execution       |
-| `circuitBreakers`   | Names of tripped circuit breakers        |
+| Metric             | Description                              |
+| ------------------ | ---------------------------------------- |
+| `lastReduceTime`   | Duration of the most recent reduce (ms)  |
+| `lastReduceAction` | Action type that triggered it            |
+| `lastReduceCell`   | Cell that owned the reduce               |
+| `p95ReduceTime`    | 95th percentile over last 100 reduces    |
+| `queueDepth`       | Pending actions in dispatch queue        |
+| `drainRate`        | Actions processed per second (5s window) |
+| `effectBacklog`    | Pending effects awaiting execution       |
+| `circuitBreakers`  | Names of tripped circuit breakers        |
 
 Queue thresholds are checked first (higher priority than reduce-time).
 
@@ -310,7 +310,7 @@ type VitalAlert = {
   "payloadStats": {
     "abc123": { "lastPayloadBytes": 1234, "totalBytes": 56789 }
   },
-  "featureSizes": { "counter": 128, "wallet": 4096 }
+  "cellSizes": { "counter": 128, "wallet": 4096 }
 }
 ```
 
@@ -331,7 +331,7 @@ type LoopVitals = {
   drainRate: number;
   lastReduceTime: number;
   lastReduceAction: string;
-  lastReduceFeature: string;
+  lastReduceCell: string;
   p95ReduceTime: number;
   effectBacklog: number;
   circuitBreakers: string[];

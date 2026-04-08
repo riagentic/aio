@@ -126,7 +126,7 @@ Flags:
   --width=N        Initial window width (default: 800)
   --height=N       Initial window height (default: 600)
   --transport=X    Transport: 'uds' or 'ws' (default: auto — UDS for electron on linux/mac)
-  --isolate=a,b    Only activate specified features (v0.5)
+  --isolate=a,b    Only activate specified cells (v0.5)
   --version        Print version and exit
   --help           Show this help`);
 }

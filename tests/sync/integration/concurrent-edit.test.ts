@@ -59,7 +59,7 @@ describe("Concurrent edits", () => {
 
     const engineA = createSyncEngine({
       clientId: "a",
-      features: { todos: normalizeSyncConfig(true) },
+      cells: { todos: normalizeSyncConfig(true) },
       buffer: createOpBuffer(createMemoryStorage()),
       send: (msg) => sentA.push(msg),
       reducer: (state, action, payload) => {
@@ -80,7 +80,7 @@ describe("Concurrent edits", () => {
 
     const engineB = createSyncEngine({
       clientId: "b",
-      features: { todos: normalizeSyncConfig(true) },
+      cells: { todos: normalizeSyncConfig(true) },
       buffer: createOpBuffer(createMemoryStorage()),
       send: (msg) => sentB.push(msg),
       reducer: (state, action, payload) => {

@@ -34,10 +34,10 @@ export function composeMiddleware<S, A>(
 
 /** Built-in middleware factories for aio.run({ middleware: [...] }) */
 export const middleware = {
-  /** Log all dispatched actions (or filter by feature name) */
-  logger: (opts?: { features?: string[] }): MiddlewareFn => {
-    const filter = opts?.features
-      ? new Set(opts.features.map((f) => f.toLowerCase()))
+  /** Log all dispatched actions (or filter by cell name) */
+  logger: (opts?: { cells?: string[] }): MiddlewareFn => {
+    const filter = opts?.cells
+      ? new Set(opts.cells.map((f) => f.toLowerCase()))
       : null;
     return (action, _state) => {
       const type = (action as { type: string }).type;
@@ -96,7 +96,7 @@ export const middleware = {
     };
   },
 
-  /** Track action counts, timing, error rates per feature */
+  /** Track action counts, timing, error rates per cell */
   metrics: (): MiddlewareFn => {
     const counters = new Map<string, { count: number; errors: number }>();
     (globalThis as Record<string, unknown>).__aioMetrics = counters;

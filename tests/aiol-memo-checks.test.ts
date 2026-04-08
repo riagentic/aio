@@ -12,7 +12,7 @@ function makeCtx(tsxFiles: SourceFile[]): LintContext & { _issues: Issue[] } {
     tsxFiles,
     tsFiles: [],
     testFiles: [],
-    features: [],
+    cells: [],
     appEntry: null,
     appTsx: null,
     styleCss: null,

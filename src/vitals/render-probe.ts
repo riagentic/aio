@@ -26,11 +26,11 @@ export type RenderProbeAPI = {
   getStatus: () => VitalStatus;
   getFirstDegradedAt: () => number | null;
   getLastAction: () => string | null;
-  getLastFeature: () => string | null;
+  getLastCell: () => string | null;
   getUnprocessedDeltas: () => number;
   getPreviousFreezeCount: () => number;
   getMeasured: () => number;
-  recordAction: (action: string, feature: string) => void;
+  recordAction: (action: string, cell: string) => void;
   recordDelta: () => void;
   clearDeltas: () => void;
   tick: (elapsedMs: number) => RenderFreezeReport | null;
@@ -53,7 +53,7 @@ export function createRenderProbe(config: RenderProbeConfig): RenderProbeAPI {
   let measured = 0;
   let firstDegradedAt: number | null = null;
   let lastAction: string | null = null;
-  let lastFeature: string | null = null;
+  let lastCell: string | null = null;
   let unprocessedDeltas = 0;
   let previousFreezeCount = 0;
   let lastFreezeCountResetAt = 0;
@@ -91,7 +91,7 @@ export function createRenderProbe(config: RenderProbeConfig): RenderProbeAPI {
       report = {
         frozenFor: elapsedMs,
         lastActionBefore: lastAction,
-        lastFeature: lastFeature,
+        lastCell: lastCell,
         unprocessedDeltas,
       };
     }
@@ -144,14 +144,14 @@ export function createRenderProbe(config: RenderProbeConfig): RenderProbeAPI {
     getStatus: () => status,
     getFirstDegradedAt: () => firstDegradedAt,
     getLastAction: () => lastAction,
-    getLastFeature: () => lastFeature,
+    getLastCell: () => lastCell,
     getUnprocessedDeltas: () => unprocessedDeltas,
     getPreviousFreezeCount: () => previousFreezeCount,
     getMeasured: () => measured,
 
-    recordAction(action: string, feature: string) {
+    recordAction(action: string, cell: string) {
       lastAction = action;
-      lastFeature = feature;
+      lastCell = cell;
     },
 
     recordDelta() {
@@ -173,7 +173,7 @@ export function createRenderProbe(config: RenderProbeConfig): RenderProbeAPI {
       measured = 0;
       firstDegradedAt = null;
       lastAction = null;
-      lastFeature = null;
+      lastCell = null;
       unprocessedDeltas = 0;
       previousFreezeCount = 0;
       lastFreezeCountResetAt = 0;

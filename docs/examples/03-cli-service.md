@@ -39,12 +39,12 @@ tells aio to skip browser/Electron entirely.
 
 Run `deno install` to pull the framework.
 
-## Step 2: Queue feature
+## Step 2: Queue cell
 
-Create `src/features/queue/index.ts`:
+Create `src/cell/queue/index.ts`:
 
 ```ts
-import { feature } from "aio";
+import { cell } from "aio";
 
 export type Job = {
   id: string;
@@ -54,7 +54,7 @@ export type Job = {
   error?: string;
 };
 
-export const queue = feature("queue", {
+export const queue = cell("queue", {
   state: {
     jobs: [] as Job[],
     processing: null as string | null,
@@ -113,11 +113,11 @@ Create `src/app.ts`:
 
 ```ts
 import { aio } from "aio";
-import { queue } from "./features/queue/index.ts";
+import { queue } from "./cell/queue/index.ts";
 
 await aio.run({
   appId: "task-queue",
-  features: [queue],
+  cells: [queue],
   client: "server-only",
   schedules: [
     { id: "process-queue", every: 1000, action: queue.process() },
@@ -144,7 +144,7 @@ Create `src/cli.ts` -- a separate process that connects to the running server:
 
 ```ts
 import { connectCli } from "aio";
-import type { Job } from "./features/queue/index.ts";
+import type { Job } from "./cell/queue/index.ts";
 
 type QueueState = {
   queue: {
@@ -192,7 +192,7 @@ deno run -A src/cli.ts http://localhost:8000 "build v2.0"  # connect + enqueue
 auto-reconnects with exponential backoff and queues actions sent before the
 connection opens.
 
-> **Payload format:** Methods-style features expect `{ args: [...] }` as the
+> **Payload format:** Methods-style cells expect `{ args: [...] }` as the
 > payload. `queue.enqueue(task)` becomes
 > `{ type: 'queue:enqueue', payload: { args: [task] } }`.
 
@@ -288,10 +288,10 @@ too: `deno task am state --port=3000 --app=task-queue`.
 Create `tests/queue.test.ts`:
 
 ```ts
-import { testFeature } from "aio";
-import { queue } from "../src/features/queue/index.ts";
+import { testCell } from "aio";
+import { queue } from "../src/cell/queue/index.ts";
 
-testFeature(queue, "enqueue adds a pending job", (t) => {
+testCell(queue, "enqueue adds a pending job", (t) => {
   t.init();
   t.send.enqueue("build v2.0");
   t.expect.state((s) => s.jobs.length === 1);
@@ -299,7 +299,7 @@ testFeature(queue, "enqueue adds a pending job", (t) => {
   t.expect.state((s) => s.jobs[0].task === "build v2.0");
 });
 
-testFeature(queue, "process picks next pending job", async (t) => {
+testCell(queue, "process picks next pending job", async (t) => {
   t.init();
   t.send.enqueue("job-1");
   t.send.enqueue("job-2");
@@ -310,7 +310,7 @@ testFeature(queue, "process picks next pending job", async (t) => {
   t.expect.state((s) => s.jobs[1].status === "pending");
 });
 
-testFeature(queue, "random action fuzzing", (t) => {
+testCell(queue, "random action fuzzing", (t) => {
   t.init();
   t.randomActions(50);
   t.expect.invariant((s) => Array.isArray(s.jobs));
@@ -327,7 +327,7 @@ deno task test
 
 ---
 
-That covers the full service lifecycle: define features, schedule work, control
-via CLI and `am`, compile to a binary, deploy with systemd, connect remotely. No
+That covers the full service lifecycle: define cells, schedule work, control via
+CLI and `am`, compile to a binary, deploy with systemd, connect remotely. No
 React, no Electron, no browser -- just aio doing what it does with state, on a
 server.

@@ -366,7 +366,7 @@ The compat layer covers all common patterns. `onChange` is auto-mapped to
 | `useImperativeHandle`  | Expose methods via ref       | Not provided                                    | Use ref callback. Rare pattern. | ✅ OK     |
 | `useLayoutEffect`      | Sync after DOM, before paint | `afterRender()`                                 | Covers most cases               | ✅ OK     |
 | `forwardRef`           | Pass ref through HOC         | Not needed                                      | Refs are regular props in AIR   | ✅ Better |
-| `useReducer`           | Reducer pattern              | `useFeature()`                                  | Server features ARE reducers    | ✅ Better |
+| `useReducer`           | Reducer pattern              | `useCell()`                                     | Server cells ARE reducers       | ✅ Better |
 | `useSyncExternalStore` | Subscribe external           | `effect()` + `signal`                           | Signals ARE the store           | ✅ Better |
 | Event delegation       | Root-level listeners         | Root-level delegation via `composedPath`        | Implemented                     | ✅ Done   |
 | `onChange` compat      | Fires on keystroke           | Auto-mapped to `onInput` on form elements       | Implemented                     | ✅ Done   |

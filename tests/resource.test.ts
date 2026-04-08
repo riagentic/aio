@@ -11,7 +11,7 @@ function createDOM() {
   const doc = win.document as unknown as Document;
   const root = doc.createElement("div");
   doc.body.appendChild(root);
-  return { document: doc, root, cleanup: () => win.close() };
+  return { document: doc, root, cleanup: () => win.happyDOM.close() };
 }
 
 function delay(ms: number) {
@@ -20,8 +20,6 @@ function delay(ms: number) {
 
 Deno.test({
   name: "resource: initial fetch populates value",
-  sanitizeOps: false,
-  sanitizeResources: false,
   async fn() {
     const userId = signal(1);
     const res = resource(
@@ -44,8 +42,6 @@ Deno.test({
 
 Deno.test({
   name: "resource: re-fetches when source signal changes",
-  sanitizeOps: false,
-  sanitizeResources: false,
   async fn() {
     const userId = signal(1);
     const res = resource(
@@ -68,8 +64,6 @@ Deno.test({
 
 Deno.test({
   name: "resource: .latest persists through refetch",
-  sanitizeOps: false,
-  sanitizeResources: false,
   async fn() {
     let resolveSecond: ((v: string) => void) | undefined;
     const src = signal("a");
@@ -106,8 +100,6 @@ Deno.test({
 
 Deno.test({
   name: "resource: captures fetch errors in .error signal",
-  sanitizeOps: false,
-  sanitizeResources: false,
   async fn() {
     const src = signal("go");
     const res = resource(
@@ -129,8 +121,6 @@ Deno.test({
 
 Deno.test({
   name: "resource: .mutate() clears error state",
-  sanitizeOps: false,
-  sanitizeResources: false,
   async fn() {
     const src = signal("go");
     const res = resource(
@@ -155,8 +145,6 @@ Deno.test({
 
 Deno.test({
   name: "resource: .refetch() re-triggers fetch",
-  sanitizeOps: false,
-  sanitizeResources: false,
   async fn() {
     let calls = 0;
     const src = signal("x");
@@ -181,8 +169,6 @@ Deno.test({
 
 Deno.test({
   name: "resource: .mutate() sets value locally without refetch",
-  sanitizeOps: false,
-  sanitizeResources: false,
   async fn() {
     let calls = 0;
     const src = signal("x");
@@ -208,8 +194,6 @@ Deno.test({
 
 Deno.test({
   name: "resource: aborts in-flight fetch on source change",
-  sanitizeOps: false,
-  sanitizeResources: false,
   async fn() {
     let aborted = false;
     const src = signal("a");
@@ -239,8 +223,6 @@ Deno.test({
 
 Deno.test({
   name: "resource: works with AIR renderer",
-  sanitizeOps: false,
-  sanitizeResources: false,
   async fn() {
     const { document: doc, root, cleanup } = createDOM();
     _setDocument(doc);
@@ -265,6 +247,6 @@ Deno.test({
 
     res.dispose();
     _unmount(handle);
-    cleanup();
+    await cleanup();
   },
 });

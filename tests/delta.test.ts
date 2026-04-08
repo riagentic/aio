@@ -9,7 +9,7 @@ import {
   _getState,
   _injectState,
   _reset,
-  getFeatureSignal,
+  getCellSignal,
   handleMessage,
 } from "../src/state-core.ts";
 
@@ -66,17 +66,17 @@ Deno.test("patches: multiple field updates in one produce", () => {
 
 // ── Additions ───────────────────────────────────────────────────────
 
-Deno.test("patches: add new top-level feature", () => {
+Deno.test("patches: add new top-level cell", () => {
   const initial = { counter: { count: 0 } };
   setup(initial);
 
   const { patches } = serverProduce(initial, (d) => {
-    d.newFeature = { enabled: true, items: [1, 2, 3] };
+    d.newCell = { enabled: true, items: [1, 2, 3] };
   });
 
   handleMessage({ $patches: patches });
   const state = _getState();
-  assertEquals(state.newFeature, { enabled: true, items: [1, 2, 3] });
+  assertEquals(state.newCell, { enabled: true, items: [1, 2, 3] });
   assertEquals(state.counter, { count: 0 }); // untouched
 });
 
@@ -94,7 +94,7 @@ Deno.test("patches: add nested property", () => {
 
 // ── Deletions ───────────────────────────────────────────────────────
 
-Deno.test("patches: delete top-level feature", () => {
+Deno.test("patches: delete top-level cell", () => {
   const initial = { counter: { count: 0 }, toRemove: { x: 1 } };
   setup(initial);
 
@@ -215,11 +215,11 @@ Deno.test("patches: deeply nested update", () => {
   assertEquals(panel.visible, true);
 });
 
-Deno.test("patches: feature signal updated on patch", () => {
+Deno.test("patches: cell signal updated on patch", () => {
   const initial = { counter: { count: 0 } };
   setup(initial);
 
-  const sig = getFeatureSignal("counter");
+  const sig = getCellSignal("counter");
   assertEquals(sig.peek(), { count: 0 });
 
   const { patches } = serverProduce(initial, (d) => {
@@ -243,15 +243,15 @@ Deno.test("patches: replace entire array", () => {
 });
 
 Deno.test("patches: boolean toggle", () => {
-  const initial = { feature: { enabled: false } };
+  const initial = { cell: { enabled: false } };
   setup(initial);
 
   const { patches } = serverProduce(initial, (d) => {
-    (d.feature as Record<string, unknown>).enabled = true;
+    (d.cell as Record<string, unknown>).enabled = true;
   });
 
   handleMessage({ $patches: patches });
-  assertEquals((_getState().feature as Record<string, unknown>).enabled, true);
+  assertEquals((_getState().cell as Record<string, unknown>).enabled, true);
 });
 
 // ── Multiple sequential patches ─────────────────────────────────────

@@ -3,12 +3,12 @@ import { Window } from "happy-dom";
 import { Fragment, h, type VNode } from "../src/vdom.ts";
 import { _diff, _render } from "../src/vdom.ts";
 
-const S = { sanitizeOps: false, sanitizeResources: false } as const;
+// happy-dom timers drained via win.happyDOM.close() — sanitizers re-enabled
 
 function createDOM() {
   const win = new Window({ url: "https://localhost" });
   const doc = win.document as unknown as Document;
-  return { document: doc, ctx: { doc }, cleanup: () => win.close() };
+  return { document: doc, ctx: { doc }, cleanup: () => win.happyDOM.close() };
 }
 
 Deno.test("h: marks fully-static element VNodes as _static", () => {
@@ -56,8 +56,7 @@ Deno.test("h: does NOT mark VNode with key as _static", () => {
 
 Deno.test({
   name: "diff: skips static VNodes — reuses DOM",
-  ...S,
-  fn() {
+  async fn() {
     const { document, ctx, cleanup } = createDOM();
     const root = document.createElement("div");
     const old = h("div", { className: "box" }, "hello");
@@ -69,14 +68,13 @@ Deno.test({
 
     assertEquals(next._dom, origDom);
     assertEquals(root.innerHTML, '<div class="box">hello</div>');
-    cleanup();
+    await cleanup();
   },
 });
 
 Deno.test({
   name: "diff: does NOT skip when static VNode tags differ",
-  ...S,
-  fn() {
+  async fn() {
     const { document, ctx, cleanup } = createDOM();
     const root = document.createElement("div");
     const old = h("div", null, "hello");
@@ -86,6 +84,6 @@ Deno.test({
     _diff(root, next, old, ctx);
 
     assertEquals(root.innerHTML, "<span>hello</span>");
-    cleanup();
+    await cleanup();
   },
 });

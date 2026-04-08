@@ -4,7 +4,7 @@ import { h } from "../src/vdom.ts";
 import { _setDocument, mount } from "../src/aio-renderer.ts";
 import { signal } from "../src/signal.ts";
 
-const S = { sanitizeOps: false, sanitizeResources: false } as const;
+// happy-dom timers drained via win.happyDOM.close() — sanitizers re-enabled
 
 function setup() {
   const win = new Window({ url: "https://localhost" });
@@ -12,13 +12,12 @@ function setup() {
   _setDocument(doc);
   const root = doc.createElement("div");
   doc.body.appendChild(root);
-  return { win, doc, root, cleanup: () => win.close() };
+  return { win, doc, root, cleanup: () => win.happyDOM.close() };
 }
 
 Deno.test({
   name: "signal binding: signal prop updates DOM directly",
-  ...S,
-  fn() {
+  async fn() {
     const { root, cleanup } = setup();
     const cls = signal("red");
 
@@ -31,14 +30,13 @@ Deno.test({
     cls.set("blue");
     handle._flush();
     assertEquals(el.getAttribute("class"), "blue");
-    cleanup();
+    await cleanup();
   },
 });
 
 Deno.test({
   name: "signal binding: multiple signal props on same element",
-  ...S,
-  fn() {
+  async fn() {
     const { root, cleanup } = setup();
     const cls = signal("a");
     const title = signal("t1");
@@ -58,14 +56,13 @@ Deno.test({
     title.set("t2");
     handle._flush();
     assertEquals(el.getAttribute("title"), "t2");
-    cleanup();
+    await cleanup();
   },
 });
 
 Deno.test({
   name: "signal binding: style object with signal values",
-  ...S,
-  fn() {
+  async fn() {
     const { root, cleanup } = setup();
     const color = signal("red");
 
@@ -79,14 +76,13 @@ Deno.test({
     color.set("blue");
     handle._flush();
     assertEquals(el.style.color, "blue");
-    cleanup();
+    await cleanup();
   },
 });
 
 Deno.test({
   name: "signal binding: re-bind cleans old signal effects",
-  ...S,
-  fn() {
+  async fn() {
     const { root, cleanup } = setup();
     const sigA = signal("a");
     const sigB = signal("b");
@@ -114,14 +110,13 @@ Deno.test({
     sigB.set("updated");
     handle._flush();
     assertEquals(el.getAttribute("title"), "updated");
-    cleanup();
+    await cleanup();
   },
 });
 
 Deno.test({
   name: "signal binding: cleans up effects on unmount",
-  ...S,
-  fn() {
+  async fn() {
     const { root, cleanup } = setup();
     const cls = signal("red");
     const show = signal(true);
@@ -137,6 +132,6 @@ Deno.test({
     handle._flush();
     assertEquals(root.querySelector("#child"), null);
     assertEquals(cls._subscribers.size < subsBefore, true);
-    cleanup();
+    await cleanup();
   },
 });

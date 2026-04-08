@@ -16,7 +16,7 @@ Deno.test("computeDiffs: detects single field change", () => {
   const next = { counter: { count: 10, total: 10 } };
   const diffs = computeDiffs(prev, next);
   assertEquals(diffs.length, 1);
-  assertEquals(diffs[0]!.feature, "counter");
+  assertEquals(diffs[0]!.cell, "counter");
   assertEquals(diffs[0]!.changes.length, 1);
   assertEquals(diffs[0]!.changes[0]!.key, "count");
 });
@@ -28,13 +28,13 @@ Deno.test("computeDiffs: detects multiple field changes", () => {
   assertEquals(diffs[0]!.changes.length, 2);
 });
 
-Deno.test("computeDiffs: ignores unchanged features", () => {
+Deno.test("computeDiffs: ignores unchanged cells", () => {
   const shared = { status: "idle" };
   const prev = { counter: { count: 5 }, wallet: shared };
   const next = { counter: { count: 10 }, wallet: shared };
   const diffs = computeDiffs(prev, next);
   assertEquals(diffs.length, 1);
-  assertEquals(diffs[0]!.feature, "counter");
+  assertEquals(diffs[0]!.cell, "counter");
 });
 
 Deno.test("formatDiff: truncates long values", () => {

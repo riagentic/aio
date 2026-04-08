@@ -31,11 +31,19 @@ export function mergeField(
         remoteHlc,
       );
     case "set-add":
-      return mergeSetAdd(local as unknown[], remote as unknown[], idField);
+      return mergeSetAdd(
+        local as unknown[],
+        localHlc,
+        remote as unknown[],
+        remoteHlc,
+        idField,
+      );
     case "set-remove":
       return mergeSetRemove(
         local as unknown[],
+        localHlc,
         remote as unknown[],
+        remoteHlc,
         base as unknown[],
         idField,
       );
@@ -93,18 +101,29 @@ function mergeLWWPerKey(
   return { value: merged, conflict };
 }
 
+/** Extract a stable id from a set item. Primitives use String() (callers must
+ *  ensure uniqueness). Objects without the idField throw — silent collisions
+ *  on "" would cause data loss in CRDT sets. */
 function _getId(idField: string): (item: unknown) => string {
   return (item: unknown) => {
     if (item === null || item === undefined || typeof item !== "object") {
       return String(item);
     }
-    return String((item as Record<string, unknown>)[idField] ?? "");
+    const id = (item as Record<string, unknown>)[idField];
+    if (id === undefined || id === null) {
+      throw new Error(
+        `merge: set item missing required id field "${idField}"`,
+      );
+    }
+    return String(id);
   };
 }
 
 function mergeSetAdd(
   local: unknown[],
+  localHlc: HLC,
   remote: unknown[],
+  remoteHlc: HLC,
   idField: string,
 ): MergeResult {
   const safeLocal = local ?? [];
@@ -118,9 +137,13 @@ function mergeSetAdd(
     if (!merged.has(id)) {
       merged.set(id, item);
     } else {
-      // Both sides added same id — check for content divergence
+      // Both sides added same id — LWW on content divergence
       const existing = merged.get(id);
-      if (JSON.stringify(existing) !== JSON.stringify(item)) conflict = true;
+      if (JSON.stringify(existing) !== JSON.stringify(item)) {
+        conflict = true;
+        // Remote wins if its HLC is newer
+        if (compareHLC(remoteHlc, localHlc) > 0) merged.set(id, item);
+      }
     }
   }
   return { value: [...merged.values()], conflict };
@@ -128,7 +151,9 @@ function mergeSetAdd(
 
 function mergeSetRemove(
   local: unknown[],
+  localHlc: HLC,
   remote: unknown[],
+  remoteHlc: HLC,
   base: unknown[],
   idField: string,
 ): MergeResult {
@@ -145,6 +170,7 @@ function mergeSetRemove(
   const result: unknown[] = [];
   const allIds = new Set([...localIds, ...remoteIds]);
   let conflict = false;
+  const remoteWins = compareHLC(remoteHlc, localHlc) > 0;
 
   for (const id of allIds) {
     const inBase = baseIds.has(id);
@@ -154,11 +180,15 @@ function mergeSetRemove(
     if (inBase && !inLocal) continue; // locally removed
     if (inBase && !inRemote) continue; // remotely removed
 
-    // Both sides added same id with different content
+    // Both sides have same id — LWW on content divergence
     if (inLocal && inRemote) {
       const lv = localMap.get(id);
       const rv = remoteMap.get(id);
-      if (JSON.stringify(lv) !== JSON.stringify(rv)) conflict = true;
+      if (JSON.stringify(lv) !== JSON.stringify(rv)) {
+        conflict = true;
+        result.push(remoteWins ? rv : lv);
+        continue;
+      }
     }
 
     result.push(localMap.get(id) ?? remoteMap.get(id));

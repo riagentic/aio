@@ -11,14 +11,12 @@ function createDOM() {
   const doc = win.document as unknown as Document;
   const root = doc.createElement("div");
   doc.body.appendChild(root);
-  return { document: doc, root, cleanup: () => win.close() };
+  return { document: doc, root, cleanup: () => win.happyDOM.close() };
 }
 
 Deno.test({
   name: "Show: renders children when condition is truthy",
-  sanitizeOps: false,
-  sanitizeResources: false,
-  fn() {
+  async fn() {
     const { document: doc, root, cleanup } = createDOM();
     _setDocument(doc);
     const user = signal<{ name: string } | null>({ name: "Alice" });
@@ -34,15 +32,13 @@ Deno.test({
     const handle = mount(root, App);
     assertEquals(root.innerHTML, "<div>Alice</div>");
     _unmount(handle);
-    cleanup();
+    await cleanup();
   },
 });
 
 Deno.test({
   name: "Show: renders fallback when condition is falsy",
-  sanitizeOps: false,
-  sanitizeResources: false,
-  fn() {
+  async fn() {
     const { document: doc, root, cleanup } = createDOM();
     _setDocument(doc);
     const user = signal<{ name: string } | null>(null);
@@ -58,15 +54,13 @@ Deno.test({
     const handle = mount(root, App);
     assertEquals(root.innerHTML, "<span>loading</span>");
     _unmount(handle);
-    cleanup();
+    await cleanup();
   },
 });
 
 Deno.test({
   name: "Show: switches between children and fallback reactively",
-  sanitizeOps: false,
-  sanitizeResources: false,
-  fn() {
+  async fn() {
     const { document: doc, root, cleanup } = createDOM();
     _setDocument(doc);
     const user = signal<{ name: string } | null>(null);
@@ -91,15 +85,13 @@ Deno.test({
     assertEquals(root.innerHTML, "<span>loading</span>");
 
     _unmount(handle);
-    cleanup();
+    await cleanup();
   },
 });
 
 Deno.test({
   name: "Show: renders nothing when falsy and no fallback",
-  sanitizeOps: false,
-  sanitizeResources: false,
-  fn() {
+  async fn() {
     const { document: doc, root, cleanup } = createDOM();
     _setDocument(doc);
     const flag = signal(false);
@@ -119,15 +111,13 @@ Deno.test({
     assertEquals(root.innerHTML, "<div>visible</div>");
 
     _unmount(handle);
-    cleanup();
+    await cleanup();
   },
 });
 
 Deno.test({
   name: "Show: works with primitive truthy values",
-  sanitizeOps: false,
-  sanitizeResources: false,
-  fn() {
+  async fn() {
     const { document: doc, root, cleanup } = createDOM();
     _setDocument(doc);
     const count = signal(0);
@@ -148,6 +138,6 @@ Deno.test({
     assertEquals(root.innerHTML, "<div>42</div>");
 
     _unmount(handle);
-    cleanup();
+    await cleanup();
   },
 });

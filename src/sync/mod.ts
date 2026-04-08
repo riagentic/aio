@@ -38,6 +38,9 @@ export {
 
 export {
   createServerSyncHandler,
+  isValidSyncOp,
   type ServerSyncHandler,
   type SyncHandlerDeps,
 } from "./server-handler.ts";
+
+export { getLowWater, loadOpsSince, persistOp } from "./server-store.ts";

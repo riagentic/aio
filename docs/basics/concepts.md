@@ -23,14 +23,14 @@ notifies everyone listening. Everything else is ergonomics.
 
 ---
 
-## Concept 1: Features
+## Concept 1: Cells
 
-A **feature** is a piece of state + the functions that modify it.
+A **cell** is a piece of state + the functions that modify it.
 
 ```ts
-import { feature } from "aio";
+import { cell } from "aio";
 
-const counter = feature("counter", {
+const counter = cell("counter", {
   state: { count: 0 },
   methods: {
     increment(s, by = 1) {
@@ -49,7 +49,7 @@ const counter = feature("counter", {
 
 ```ts
 import { aio } from "aio";
-await aio.run({ appId: "my-app", features: [counter] });
+await aio.run({ appId: "my-app", cells: [counter] });
 
 counter.increment(5); // { count: 5 }
 counter.reset(); // { count: 0 }
@@ -94,7 +94,7 @@ methods: {
 Derived state, memoized automatically.
 
 ```ts
-const counter = feature('counter', {
+const counter = cell('counter', {
   state: { count: 0 },
   methods: { ... },
   selectors: {
@@ -106,12 +106,12 @@ const counter = feature('counter', {
 counter.doubled()   // 0
 ```
 
-The `s` is scoped to the feature -- use `s.count`, not `s.counter.count`.
+The `s` is scoped to the cell -- use `s.count`, not `s.counter.count`.
 
-### Selectors with cross-feature dependencies
+### Selectors with cross-cell dependencies
 
 ```ts
-const dashboard = feature("dashboard", {
+const dashboard = cell("dashboard", {
   state: { summary: "" },
   selectors: {
     summary(s, counter, wallet) {
@@ -119,7 +119,7 @@ const dashboard = feature("dashboard", {
     },
   },
 });
-// Parameter names match feature names -- auto-injected after aio.run()
+// Parameter names match cell names -- auto-injected after aio.run()
 ```
 
 ---
@@ -140,7 +140,7 @@ methods: {
 ```
 
 Each assignment after an `await` creates a separate batched action. The trigger
-action (`feature:save`) appears in time-travel.
+action (`cell:save`) appears in time-travel.
 
 ---
 
@@ -149,7 +149,7 @@ action (`feature:save`) appears in time-travel.
 Guard which actions are allowed in which states:
 
 ```ts
-const door = feature("door", {
+const door = cell("door", {
   state: { isOpen: false },
   machine: {
     initial: "closed",
@@ -185,7 +185,7 @@ machine: {
 }
 ```
 
-Check status in UI: `const { status } = useFeature(door);`
+Check status in UI: `const { status } = useCell(door);`
 
 No machine needed? Omit it entirely, or use `machine: false`.
 
@@ -195,22 +195,22 @@ No machine needed? Omit it entirely, or use `machine: false`.
 
 Mandatory rules for correct AIO framework usage.
 
-**AIO1** All app logic MUST live in features created via
-`feature('name', {...})` -- no loose state, no ad-hoc logic outside features.
+**AIO1** All app logic MUST live in cells created via `cell('name', {...})` --
+no loose state, no ad-hoc logic outside cells.
 
 **AIO2** State MUST only be mutated inside methods (sync/async) or reduce
 handlers -- never directly from outside.
 
-**AIO3** Single entry point: `aio.run({ appId, features: [...] })` -- no manual
+**AIO3** Single entry point: `aio.run({ appId, cells: [...] })` -- no manual
 store creation, no manual server setup.
 
-**AIO4** UI components MUST access state via `useFeature(ref)` or `useAio()`
-hooks -- never import or read state directly.
+**AIO4** UI components MUST access state via `useCell(ref)` or `useAio()` hooks
+-- never import or read state directly.
 
-**AIO5** Cross-feature communication MUST use direct method calls or `listensTo`
--- never raw dispatch with string action types.
+**AIO5** Cross-cell communication MUST use direct method calls or `listensTo` --
+never raw dispatch with string action types.
 
-**AIO6** All bound feature methods return Promise -- use `await` for
+**AIO6** All bound cell methods return Promise -- use `await` for
 synchronization outside of sync methods.
 
 **AIO7** Sync methods (reducers) MUST NOT contain side effects -- only state

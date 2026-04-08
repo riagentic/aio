@@ -69,7 +69,7 @@ Deno.test("logger: plain text format — no JSON", async () => {
   assertStringIncludes(lines[0]!, "INFO");
   assertStringIncludes(lines[0]!, "app");
   assertStringIncludes(lines[0]!, "started");
-  assertStringIncludes(lines[0]!, "features=counter");
+  assertStringIncludes(lines[0]!, "cells=counter");
 });
 
 Deno.test("logger: debug.log gets everything (info, warn, error, debug)", async () => {

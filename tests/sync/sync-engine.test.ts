@@ -15,7 +15,7 @@ describe("SyncEngine", () => {
 
     const deps: SyncEngineDeps = {
       clientId: "c1",
-      features: { todos: normalizeSyncConfig(true) },
+      cells: { todos: normalizeSyncConfig(true) },
       buffer,
       send: (msg: string) => sent.push(JSON.parse(msg)),
       reducer: (
@@ -44,8 +44,8 @@ describe("SyncEngine", () => {
     const { engine, sent } = setup();
     await engine.handleLocalAction("todos", "add", { text: "hello" });
     assertEquals(sent.length, 1);
-    const msg = sent[0] as { __op: { feature: string; action: string } };
-    assertEquals(msg.__op.feature, "todos");
+    const msg = sent[0] as { __op: { cell: string; action: string } };
+    assertEquals(msg.__op.cell, "todos");
     assertEquals(msg.__op.action, "add");
   });
 
@@ -54,7 +54,7 @@ describe("SyncEngine", () => {
     const storage = createMemoryStorage();
     const engine = createSyncEngine({
       clientId: "c1",
-      features: { todos: normalizeSyncConfig(true) },
+      cells: { todos: normalizeSyncConfig(true) },
       buffer: createOpBuffer(storage),
       send: (msg: string) => sent.push(msg),
       reducer: (s) => s,
@@ -83,7 +83,7 @@ describe("SyncEngine", () => {
   it("reports blocked when cap exceeded", async () => {
     const engine = createSyncEngine({
       clientId: "c1",
-      features: { todos: normalizeSyncConfig(true) },
+      cells: { todos: normalizeSyncConfig(true) },
       buffer: createOpBuffer(createMemoryStorage(), { pendingCap: 2 }),
       send: () => {},
       reducer: (s: Record<string, unknown>) => s,
@@ -115,12 +115,12 @@ describe("SyncEngine", () => {
     const msg = sent[0] as {
       __sync: {
         clientId: string;
-        features: Record<string, unknown>;
+        cells: Record<string, unknown>;
         pendingOps: unknown[];
       };
     };
     assertEquals(msg.__sync.clientId, "c1");
-    assertEquals("todos" in msg.__sync.features, true);
+    assertEquals("todos" in msg.__sync.cells, true);
     assertEquals(msg.__sync.pendingOps.length, 1);
   });
 
@@ -128,7 +128,7 @@ describe("SyncEngine", () => {
     let confirmedState: Record<string, unknown> = { items: [] };
     const engine = createSyncEngine({
       clientId: "c1",
-      features: { todos: normalizeSyncConfig(true) },
+      cells: { todos: normalizeSyncConfig(true) },
       buffer: createOpBuffer(createMemoryStorage()),
       send: () => {},
       reducer: (s) => s,
@@ -155,7 +155,7 @@ describe("SyncEngine", () => {
     let optimisticState: Record<string, unknown> = {};
     const engine = createSyncEngine({
       clientId: "c1",
-      features: { todos: normalizeSyncConfig(true) },
+      cells: { todos: normalizeSyncConfig(true) },
       buffer: createOpBuffer(createMemoryStorage()),
       send: () => {},
       reducer: (state, action, payload) => {
@@ -178,7 +178,7 @@ describe("SyncEngine", () => {
 
     await engine.handleRemoteOp({
       id: "remote-1",
-      feature: "todos",
+      cell: "todos",
       action: "add",
       payload: { text: "from-peer" },
       hlc: [2000, 0, "c2"],

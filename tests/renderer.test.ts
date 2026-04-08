@@ -19,29 +19,25 @@ function createDOM(): {
   const doc = win.document as unknown as Document;
   const root = doc.createElement("div");
   doc.body.appendChild(root);
-  return { document: doc, root, cleanup: () => win.close() };
+  return { document: doc, root, cleanup: () => win.happyDOM.close() };
 }
 
 Deno.test({
   name: "mount: renders simple component",
-  sanitizeOps: false,
-  sanitizeResources: false,
-  fn() {
+  async fn() {
     const { document, root, cleanup } = createDOM();
     _setDocument(document);
     const App = () => h("div", null, "Hello AIO");
     const handle = mount(root, App);
     assertEquals(root.innerHTML, "<div>Hello AIO</div>");
     _unmount(handle);
-    cleanup();
+    await cleanup();
   },
 });
 
 Deno.test({
   name: "mount: renders component with props",
-  sanitizeOps: false,
-  sanitizeResources: false,
-  fn() {
+  async fn() {
     const { document, root, cleanup } = createDOM();
     _setDocument(document);
     const Greeting = (props: { name: string }) =>
@@ -50,15 +46,13 @@ Deno.test({
     const handle = mount(root, App);
     assertEquals(root.innerHTML, "<span>Hi World</span>");
     _unmount(handle);
-    cleanup();
+    await cleanup();
   },
 });
 
 Deno.test({
   name: "mount: re-renders when signal changes",
-  sanitizeOps: false,
-  sanitizeResources: false,
-  fn() {
+  async fn() {
     const { document, root, cleanup } = createDOM();
     _setDocument(document);
     const count = signal(0);
@@ -69,15 +63,13 @@ Deno.test({
     handle._flush();
     assertEquals(root.innerHTML, "<div>Count: 1</div>");
     _unmount(handle);
-    cleanup();
+    await cleanup();
   },
 });
 
 Deno.test({
   name: "mount: computed works in components",
-  sanitizeOps: false,
-  sanitizeResources: false,
-  fn() {
+  async fn() {
     const { document, root, cleanup } = createDOM();
     _setDocument(document);
     const a = signal(2);
@@ -92,15 +84,13 @@ Deno.test({
     handle._flush();
     assertEquals(root.innerHTML, "<div>Sum: 13</div>");
     _unmount(handle);
-    cleanup();
+    await cleanup();
   },
 });
 
 Deno.test({
   name: "mount: event handlers work with signals",
-  sanitizeOps: false,
-  sanitizeResources: false,
-  fn() {
+  async fn() {
     const { document, root, cleanup } = createDOM();
     _setDocument(document);
     const count = signal(0);
@@ -114,15 +104,13 @@ Deno.test({
     handle._flush();
     assertEquals(root.innerHTML, "<button>Count: 1</button>");
     _unmount(handle);
-    cleanup();
+    await cleanup();
   },
 });
 
 Deno.test({
   name: "mount: renders lists with map",
-  sanitizeOps: false,
-  sanitizeResources: false,
-  fn() {
+  async fn() {
     const { document, root, cleanup } = createDOM();
     _setDocument(document);
     const items = signal(["a", "b", "c"]);
@@ -134,15 +122,13 @@ Deno.test({
     handle._flush();
     assertEquals(root.querySelectorAll("li").length, 2);
     _unmount(handle);
-    cleanup();
+    await cleanup();
   },
 });
 
 Deno.test({
   name: "mount: conditional rendering with &&",
-  sanitizeOps: false,
-  sanitizeResources: false,
-  fn() {
+  async fn() {
     const { document, root, cleanup } = createDOM();
     _setDocument(document);
     const show = signal(true);
@@ -153,15 +139,13 @@ Deno.test({
     handle._flush();
     assertEquals(root.querySelector("span"), null);
     _unmount(handle);
-    cleanup();
+    await cleanup();
   },
 });
 
 Deno.test({
   name: "mount: unmount cleans up signal subscriptions",
-  sanitizeOps: false,
-  sanitizeResources: false,
-  fn() {
+  async fn() {
     const { document, root, cleanup } = createDOM();
     _setDocument(document);
     const count = signal(0);
@@ -178,15 +162,13 @@ Deno.test({
     _unmount(handle);
     count.set(2);
     assertEquals(renderCalls, 2);
-    cleanup();
+    await cleanup();
   },
 });
 
 Deno.test({
   name: "vdom: style diffing removes stale properties",
-  sanitizeOps: false,
-  sanitizeResources: false,
-  fn() {
+  async fn() {
     const { document, root, cleanup } = createDOM();
     _setDocument(document);
     const bold = signal(true);
@@ -206,15 +188,13 @@ Deno.test({
     // fontWeight must be REMOVED, not persist as ghost
     assertEquals(el.style.fontWeight, "");
     _unmount(handle);
-    cleanup();
+    await cleanup();
   },
 });
 
 Deno.test({
   name: "vdom: dangerouslySetInnerHTML works",
-  sanitizeOps: false,
-  sanitizeResources: false,
-  fn() {
+  async fn() {
     const { document, root, cleanup } = createDOM();
     _setDocument(document);
     const App = () =>
@@ -222,15 +202,13 @@ Deno.test({
     const handle = mount(root, App);
     assertEquals(root.innerHTML, "<div><b>bold</b></div>");
     _unmount(handle);
-    cleanup();
+    await cleanup();
   },
 });
 
 Deno.test({
   name: "vdom: keyed list reorder preserves DOM nodes",
-  sanitizeOps: false,
-  sanitizeResources: false,
-  fn() {
+  async fn() {
     const { document, root, cleanup } = createDOM();
     _setDocument(document);
     const order = signal(["a", "b", "c"]);
@@ -253,15 +231,13 @@ Deno.test({
     assertEquals(newLis[0], cNode);
     assertEquals(newLis[2], aNode);
     _unmount(handle);
-    cleanup();
+    await cleanup();
   },
 });
 
 Deno.test({
   name: "mount: no double component execution",
-  sanitizeOps: false,
-  sanitizeResources: false,
-  fn() {
+  async fn() {
     const { document, root, cleanup } = createDOM();
     _setDocument(document);
     let childCalls = 0;
@@ -275,15 +251,13 @@ Deno.test({
     assertEquals(childCalls, 1);
     assertEquals(root.innerHTML, "<div><span>test</span></div>");
     _unmount(handle);
-    cleanup();
+    await cleanup();
   },
 });
 
 Deno.test({
   name: "vdom: Fragment re-render updates correctly",
-  sanitizeOps: false,
-  sanitizeResources: false,
-  fn() {
+  async fn() {
     const { document, root, cleanup } = createDOM();
     _setDocument(document);
     const label = signal("hello");
@@ -295,15 +269,13 @@ Deno.test({
     handle._flush();
     assertEquals(root.innerHTML, "<span>world</span><b>fixed</b>");
     _unmount(handle);
-    cleanup();
+    await cleanup();
   },
 });
 
 Deno.test({
   name: "vdom: component returning null renders nothing",
-  sanitizeOps: false,
-  sanitizeResources: false,
-  fn() {
+  async fn() {
     const { document, root, cleanup } = createDOM();
     _setDocument(document);
     const show = signal(false);
@@ -315,15 +287,13 @@ Deno.test({
     handle._flush();
     assertEquals(root.querySelector("div")?.textContent, "yes");
     _unmount(handle);
-    cleanup();
+    await cleanup();
   },
 });
 
 Deno.test({
   name: "vdom: nested components 3+ deep with signal re-render",
-  sanitizeOps: false,
-  sanitizeResources: false,
-  fn() {
+  async fn() {
     const { document, root, cleanup } = createDOM();
     _setDocument(document);
     const count = signal(0);
@@ -336,15 +306,13 @@ Deno.test({
     handle._flush();
     assertEquals(root.innerHTML, "<main><div><span>n=42</span></div></main>");
     _unmount(handle);
-    cleanup();
+    await cleanup();
   },
 });
 
 Deno.test({
   name: "vdom: empty keyed list clears all children",
-  sanitizeOps: false,
-  sanitizeResources: false,
-  fn() {
+  async fn() {
     const { document, root, cleanup } = createDOM();
     _setDocument(document);
     const items = signal(["a", "b", "c"]);
@@ -357,15 +325,13 @@ Deno.test({
     assertEquals(root.querySelectorAll("li").length, 0);
     assertEquals(root.innerHTML, "<ul></ul>");
     _unmount(handle);
-    cleanup();
+    await cleanup();
   },
 });
 
 Deno.test({
   name: "signal: computed disposal prevents leak",
-  sanitizeOps: false,
-  sanitizeResources: false,
-  fn() {
+  async fn() {
     const { document, root, cleanup } = createDOM();
     _setDocument(document);
     const a = signal(1);
@@ -392,15 +358,13 @@ Deno.test({
     assertEquals(computedCalls, 3);
     assertEquals(root.innerHTML, "<div>20</div>");
     _unmount(handle);
-    cleanup();
+    await cleanup();
   },
 });
 
 Deno.test({
   name: "vdom: form element checked prop uses DOM property",
-  sanitizeOps: false,
-  sanitizeResources: false,
-  fn() {
+  async fn() {
     const { document, root, cleanup } = createDOM();
     _setDocument(document);
     const checked = signal(true);
@@ -412,15 +376,13 @@ Deno.test({
     handle._flush();
     assertEquals(input.checked, false);
     _unmount(handle);
-    cleanup();
+    await cleanup();
   },
 });
 
 Deno.test({
   name: "vdom: Fragment conditional removal cleans up all children",
-  sanitizeOps: false,
-  sanitizeResources: false,
-  fn() {
+  async fn() {
     const { document, root, cleanup } = createDOM();
     _setDocument(document);
     const show = signal(true);
@@ -441,15 +403,13 @@ Deno.test({
     handle._flush();
     assertEquals(root.querySelectorAll("span").length, 2);
     _unmount(handle);
-    cleanup();
+    await cleanup();
   },
 });
 
 Deno.test({
   name: "vdom: component VNode→null→VNode cycle",
-  sanitizeOps: false,
-  sanitizeResources: false,
-  fn() {
+  async fn() {
     const { document, root, cleanup } = createDOM();
     _setDocument(document);
     const show = signal(true);
@@ -466,7 +426,7 @@ Deno.test({
     handle._flush();
     assertEquals(root.innerHTML, "<div><b>on</b></div>");
     _unmount(handle);
-    cleanup();
+    await cleanup();
   },
 });
 
@@ -475,9 +435,7 @@ Deno.test({
 Deno.test({
   name:
     "phase2: per-component isolation — sibling signal change only re-renders affected component",
-  sanitizeOps: false,
-  sanitizeResources: false,
-  fn() {
+  async fn() {
     const { document, root, cleanup } = createDOM();
     _setDocument(document);
     const sigA = signal("a1");
@@ -510,16 +468,14 @@ Deno.test({
     assertEquals(callsB, 2);
     assertEquals(root.innerHTML, "<div><span>a2</span><span>b2</span></div>");
     _unmount(handle);
-    cleanup();
+    await cleanup();
   },
 });
 
 Deno.test({
   name:
     "phase2: auto-memo — child skipped when parent re-renders with same props",
-  sanitizeOps: false,
-  sanitizeResources: false,
-  fn() {
+  async fn() {
     const { document, root, cleanup } = createDOM();
     _setDocument(document);
     const parentSig = signal("p1");
@@ -544,16 +500,14 @@ Deno.test({
     assertEquals(childCalls, 1); // Child NOT re-executed (auto-memo)
     assertEquals(root.innerHTML, "<div><b>p2</b><span>fixed</span></div>");
     _unmount(handle);
-    cleanup();
+    await cleanup();
   },
 });
 
 Deno.test({
   name:
     "phase2: nested component — only grandchild re-renders when its signal changes",
-  sanitizeOps: false,
-  sanitizeResources: false,
-  fn() {
+  async fn() {
     const { document, root, cleanup } = createDOM();
     _setDocument(document);
     const deep = signal(0);
@@ -584,15 +538,13 @@ Deno.test({
     assertEquals(innerCalls, 2); // re-rendered
     assertEquals(root.innerHTML, "<main><div><span>v=42</span></div></main>");
     _unmount(handle);
-    cleanup();
+    await cleanup();
   },
 });
 
 Deno.test({
   name: "phase2: component unmount cleans up signal subscriptions",
-  sanitizeOps: false,
-  sanitizeResources: false,
-  fn() {
+  async fn() {
     const { document, root, cleanup } = createDOM();
     _setDocument(document);
     const sig = signal("v1");
@@ -614,15 +566,13 @@ Deno.test({
     handle._flush();
     assertEquals(childCalls, callsAfterRemove); // Child NOT re-executed after unmount
     _unmount(handle);
-    cleanup();
+    await cleanup();
   },
 });
 
 Deno.test({
   name: "phase2: auto-memo passes when props change",
-  sanitizeOps: false,
-  sanitizeResources: false,
-  fn() {
+  async fn() {
     const { document, root, cleanup } = createDOM();
     _setDocument(document);
     const count = signal(0);
@@ -640,7 +590,7 @@ Deno.test({
     assertEquals(childCalls, 2);
     assertEquals(root.innerHTML, "<div><span>n=5</span></div>");
     _unmount(handle);
-    cleanup();
+    await cleanup();
   },
 });
 
@@ -649,9 +599,7 @@ Deno.test({
 Deno.test({
   name:
     "phase2: component→component nesting — parentDom propagated correctly for independent re-render",
-  sanitizeOps: false,
-  sanitizeResources: false,
-  fn() {
+  async fn() {
     const { document, root, cleanup } = createDOM();
     _setDocument(document);
     const sig = signal("v1");
@@ -671,15 +619,13 @@ Deno.test({
     assertEquals(layoutCalls, 2);
     assertEquals(root.innerHTML, "<section>v2</section>");
     _unmount(handle);
-    cleanup();
+    await cleanup();
   },
 });
 
 Deno.test({
   name: "phase2: batch multiple signals — each component re-renders once",
-  sanitizeOps: false,
-  sanitizeResources: false,
-  fn() {
+  async fn() {
     const { document, root, cleanup } = createDOM();
     _setDocument(document);
     const s1 = signal("a");
@@ -708,16 +654,14 @@ Deno.test({
     assertEquals(callsB, 2);
     assertEquals(root.innerHTML, "<div><span>a2</span><span>b2</span></div>");
     _unmount(handle);
-    cleanup();
+    await cleanup();
   },
 });
 
 Deno.test({
   name:
     "phase2: dynamic dep tracking — component tracks different signals on re-render",
-  sanitizeOps: false,
-  sanitizeResources: false,
-  fn() {
+  async fn() {
     const { document, root, cleanup } = createDOM();
     _setDocument(document);
     const toggle = signal(true);
@@ -750,15 +694,13 @@ Deno.test({
     assertEquals(calls, 3);
     assertEquals(root.innerHTML, "<div><span>B3</span></div>");
     _unmount(handle);
-    cleanup();
+    await cleanup();
   },
 });
 
 Deno.test({
   name: "vdom: type-mismatch replacement cleans up component instances",
-  sanitizeOps: false,
-  sanitizeResources: false,
-  fn() {
+  async fn() {
     const { document, root, cleanup } = createDOM();
     _setDocument(document);
     const mode = signal<"comp" | "elem">("comp");
@@ -787,15 +729,13 @@ Deno.test({
     handle._flush();
     assertEquals(childCalls, callsAfterSwap);
     _unmount(handle);
-    cleanup();
+    await cleanup();
   },
 });
 
 Deno.test({
   name: "vdom: event handlers are auto-batched",
-  sanitizeOps: false,
-  sanitizeResources: false,
-  fn() {
+  async fn() {
     const { document, root, cleanup } = createDOM();
     _setDocument(document);
 
@@ -827,15 +767,13 @@ Deno.test({
     assertEquals(b.value, 1);
 
     _unmount(handle);
-    cleanup();
+    await cleanup();
   },
 });
 
 Deno.test({
   name: "renderer: effects auto-dispose on component unmount",
-  sanitizeOps: false,
-  sanitizeResources: false,
-  fn() {
+  async fn() {
     const { document, root, cleanup } = createDOM();
     _setDocument(document);
 
@@ -873,15 +811,13 @@ Deno.test({
     assertEquals(effectRunCount, countBefore); // no re-run after dispose
 
     _unmount(handle);
-    cleanup();
+    await cleanup();
   },
 });
 
 Deno.test({
   name: "afterRender: callback runs after initial mount DOM commit",
-  sanitizeOps: false,
-  sanitizeResources: false,
-  fn() {
+  async fn() {
     const { document, root, cleanup } = createDOM();
     _setDocument(document);
 
@@ -897,15 +833,13 @@ Deno.test({
     const handle = mount(root, App);
     assertEquals(domTexts, ["hello"]); // callback ran after DOM commit
     _unmount(handle);
-    cleanup();
+    await cleanup();
   },
 });
 
 Deno.test({
   name: "afterRender: callback runs after re-render DOM commit",
-  sanitizeOps: false,
-  sanitizeResources: false,
-  fn() {
+  async fn() {
     const { document, root, cleanup } = createDOM();
     _setDocument(document);
 
@@ -927,15 +861,13 @@ Deno.test({
     assertEquals(domTexts, ["count: 0", "count: 1"]);
 
     _unmount(handle);
-    cleanup();
+    await cleanup();
   },
 });
 
 Deno.test({
   name: "afterRender: multiple callbacks run in registration order",
-  sanitizeOps: false,
-  sanitizeResources: false,
-  fn() {
+  async fn() {
     const { document, root, cleanup } = createDOM();
     _setDocument(document);
 
@@ -950,7 +882,7 @@ Deno.test({
     const handle = mount(root, App);
     assertEquals(order, [1, 2]);
     _unmount(handle);
-    cleanup();
+    await cleanup();
   },
 });
 
@@ -958,9 +890,7 @@ Deno.test({
 
 Deno.test({
   name: "AIO-168: empty Fragment comment anchor removed on unmount",
-  sanitizeOps: false,
-  sanitizeResources: false,
-  fn() {
+  async fn() {
     const { document, root, cleanup } = createDOM();
     _setDocument(document);
 
@@ -989,16 +919,14 @@ Deno.test({
     // Unmount — comment anchor must be cleaned up (AIO-168)
     _unmount(handle);
     assertEquals(root.innerHTML, "");
-    cleanup();
+    await cleanup();
   },
 });
 
 Deno.test({
   name:
     "AIO-168: empty Fragment comment anchor cleaned up after multiple cycles (no accumulation)",
-  sanitizeOps: false,
-  sanitizeResources: false,
-  fn() {
+  async fn() {
     const { document, root, cleanup } = createDOM();
     _setDocument(document);
 
@@ -1051,7 +979,7 @@ Deno.test({
     // Unmount cleans up everything
     _unmount(handle);
     assertEquals(root.innerHTML, "");
-    cleanup();
+    await cleanup();
   },
 });
 
@@ -1059,9 +987,7 @@ Deno.test({
 
 Deno.test({
   name: "AIO-169: empty Fragment sibling positioned correctly after cursor fix",
-  sanitizeOps: false,
-  sanitizeResources: false,
-  fn() {
+  async fn() {
     const { document, root, cleanup } = createDOM();
     _setDocument(document);
 
@@ -1101,7 +1027,7 @@ Deno.test({
     );
 
     _unmount(handle);
-    cleanup();
+    await cleanup();
   },
 });
 
@@ -1109,9 +1035,7 @@ Deno.test({
 
 Deno.test({
   name: "AIO-170: signal-bound style object applies correctly",
-  sanitizeOps: false,
-  sanitizeResources: false,
-  fn() {
+  async fn() {
     const { document, root, cleanup } = createDOM();
     _setDocument(document);
 
@@ -1138,15 +1062,13 @@ Deno.test({
     assertEquals(box.style.fontSize, "");
 
     _unmount(handle);
-    cleanup();
+    await cleanup();
   },
 });
 
 Deno.test({
   name: "AIO-170: signal-bound style string applies correctly",
-  sanitizeOps: false,
-  sanitizeResources: false,
-  fn() {
+  async fn() {
     const { document, root, cleanup } = createDOM();
     _setDocument(document);
 
@@ -1164,7 +1086,7 @@ Deno.test({
     assertEquals(box.style.color, "purple");
 
     _unmount(handle);
-    cleanup();
+    await cleanup();
   },
 });
 
@@ -1173,9 +1095,7 @@ Deno.test({
 Deno.test({
   name:
     "AIO-177: keyed Fragment reorder — siblings positioned after last Fragment child",
-  sanitizeOps: false,
-  sanitizeResources: false,
-  fn() {
+  async fn() {
     const { document, root, cleanup } = createDOM();
     _setDocument(document);
 
@@ -1222,6 +1142,6 @@ Deno.test({
     );
 
     _unmount(handle);
-    cleanup();
+    await cleanup();
   },
 });

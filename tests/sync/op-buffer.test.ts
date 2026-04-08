@@ -5,9 +5,9 @@ import type { SyncOp } from "../../src/sync/types.ts";
 import { createMemoryStorage } from "./_memory-storage.ts";
 
 describe("OpBuffer", () => {
-  const mkOp = (id: string, feature = "todos"): SyncOp => ({
+  const mkOp = (id: string, cell = "todos"): SyncOp => ({
     id,
-    feature,
+    cell,
     action: "add",
     payload: { text: "test" },
     hlc: [Date.now(), 0, "c1"],
@@ -59,7 +59,7 @@ describe("OpBuffer", () => {
     assertEquals(meta?.lastHlc, [2000, 5, "s"]);
   });
 
-  it("clears all data for a feature", async () => {
+  it("clears all data for a cell", async () => {
     const buf = createOpBuffer(createMemoryStorage());
     await buf.add(mkOp("op1"));
     await buf.clear("todos");

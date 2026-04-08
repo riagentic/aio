@@ -16,24 +16,29 @@ dispatch(action)
   → React re-render
 ```
 
-## stateForUI filtering
+## Cell-level UI filtering
 
-The biggest server-side win. Controls what the server _computes_ per client:
+The biggest server-side win. Controls what the server _sends_ per client:
 
 ```ts
-await aio.run({
-  stateForUI: (state, user) => ({
-    prices: state.prices,
-    ...(user?.role === "admin"
-      ? { orders: state.orders }
-      : { myOrders: state.orders.filter((o) => o.userId === user?.id) }),
-  }),
+const orders = cell("orders", {
+  state: { items: [], internal: [] },
+  ui: {
+    exclude: ["internal"],
+    forUser: (exposed, user?) => {
+      if (user?.role === "admin") return exposed;
+      return {
+        ...exposed,
+        items: exposed.items.filter((o) => o.userId === user?.id),
+      };
+    },
+  },
 });
 ```
 
-Called once per unique user per state change. Memoized per user ID — if state
-reference hasn't changed, the previous result returns without calling your
-function. Never do expensive computation here — use `createSelector`.
+Each cell declares its own `ui` config. `include`/`exclude` control which keys
+are sent. `forUser` runs per unique user per state change — memoized per user
+ID. Never do expensive computation here — use `createSelector`.
 
 ## Delta compression
 
@@ -50,7 +55,7 @@ Automatic — no configuration required for basic operation.
 ```json
 {
   "$p": { "counter": { "count": 42 }, "prices": { "BTC": 67000 } },
-  "$d": ["removedFeature"]
+  "$d": ["removedCell"]
 }
 ```
 
@@ -161,15 +166,15 @@ const state = useAio();
 return <div>{state.counter.count}</div>;
 ```
 
-### `useFeature` — re-render scoping
+### `useCell` — re-render scoping
 
 ```tsx
-const counter = useFeature(counterRef);
+const counter = useCell(counterRef);
 return <div>{counter.count}</div>;
 ```
 
-Narrows `useSyncExternalStore` to one feature slice. Client-side rendering
-concern — subscription narrowing handled by `useAio` automatically.
+Narrows `useSyncExternalStore` to one cell slice. Client-side rendering concern
+— subscription narrowing handled by `useAio` automatically.
 
 ## Proxy-tracked subscriptions
 

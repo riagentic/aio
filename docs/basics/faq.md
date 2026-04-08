@@ -43,8 +43,8 @@ sequential workflows with branching, use [generators](../state/generators.md).
 
 Building hierarchical statecharts (entry/exit actions, history states, parallel
 regions) would mean building a worse XState inside aio. If you genuinely need
-statecharts, use XState for that feature's internal logic and expose results
-through an aio feature.
+statecharts, use XState for that cell's internal logic and expose results
+through an aio cell.
 
 ---
 
@@ -124,7 +124,7 @@ methods: {
 }
 ```
 
-No `feature({ validate })` needed — it would just be another place to look. See
+No `cell({ validate })` needed — it would just be another place to look. See
 [../howto.md](../howto.md#pattern-form-state-with-validation) for the full
 pattern.
 

@@ -9,7 +9,7 @@ Deno.test("crash-handler: installs and returns uninstall fn", () => {
         logs.push(msg);
       },
     },
-    getHealthData: () => ({ features: {} }),
+    getHealthData: () => ({ cells: {} }),
     writeEmergencyCheckpoint: () => {},
   });
   assertEquals(typeof uninstall, "function");
@@ -24,7 +24,7 @@ Deno.test("crash-handler: uninstall removes handlers cleanly", () => {
         callCount++;
       },
     },
-    getHealthData: () => ({ features: {} }),
+    getHealthData: () => ({ cells: {} }),
     writeEmergencyCheckpoint: () => {},
   });
   uninstall();

@@ -48,7 +48,7 @@ describe("compactSyncOps", () => {
 
     const deps: CompactDeps = {
       db: mock.db as any,
-      feature: "todos",
+      cell: "todos",
       getState: () => ({ items: [], filter: "all" }),
       serverHlc: [Date.now(), 0, "s"] as HLC,
       compactOps: 1000,
@@ -71,7 +71,7 @@ describe("compactSyncOps", () => {
 
     const deps: CompactDeps = {
       db: mock.db as any,
-      feature: "todos",
+      cell: "todos",
       getState: () => ({ items: [] }),
       serverHlc: [Date.now(), 0, "s"] as HLC,
       compactOps: 1000,

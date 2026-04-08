@@ -20,11 +20,14 @@ export type Selector<S, R> = (state: S) => R;
  *   (todos, filter) => todos.filter(t => t.status === filter)
  * )
  *
- * // In stateForUI:
- * stateForUI: (state) => ({
- *   visibleTodos: selectVisibleTodos(state),
- *   user: state.user
- * })
+ * // In a cell's ui.forUser:
+ * ui: {
+ *   include: ["todos", "filter"],
+ *   forUser: (exposed) => ({
+ *     ...exposed,
+ *     visibleTodos: selectVisibleTodos(exposed),
+ *   }),
+ * }
  * ```
  */
 export function createSelector<S, R1, Result>(

@@ -1,5 +1,5 @@
 // tests/hook-proxy-tracking.test.ts
-// Tests that useAio() and useFeature() correctly wire proxy tracking.
+// Tests that useAio() and useCell() correctly wire proxy tracking.
 //
 // Strategy: We can't call React hooks outside a component, but both hooks
 // do the same thing: wrap state in _trackingProxy(state) or _trackingProxy(state, name).
@@ -18,7 +18,7 @@ import {
   _collapsePaths,
   _resetTracking,
   _trackingProxy,
-} from "../src/browser.ts";
+} from "../src/browser-protocol.ts";
 
 // ── useAio() wiring: _trackingProxy(state) ─────────────────────────
 
@@ -36,14 +36,14 @@ Deno.test("useAio wiring: proxy tracks leaf access from root", () => {
   assertEquals(
     _accessedPaths.has("market"),
     false,
-    "untouched feature not tracked",
+    "untouched cell not tracked",
   );
   // Collapsed subscription: only "counter" (subsumes counter.count)
   assertEquals(_collapsePaths(_accessedPaths), ["counter"]);
   _resetTracking();
 });
 
-Deno.test("useAio wiring: multiple features tracked independently", () => {
+Deno.test("useAio wiring: multiple cells tracked independently", () => {
   _resetTracking();
   const raw = {
     counter: { count: 5 },
@@ -52,14 +52,14 @@ Deno.test("useAio wiring: multiple features tracked independently", () => {
   };
   const state = _trackingProxy(raw) as typeof raw;
 
-  // Dashboard reads from 2 features, ignores portfolio
+  // Dashboard reads from 2 cells, ignores portfolio
   const _a = state.counter.count;
   const _b = state.market.instruments.SOL.price;
 
   assertEquals(_accessedPaths.has("counter.count"), true);
   assertEquals(_accessedPaths.has("market.instruments.SOL.price"), true);
   assertEquals(_accessedPaths.has("portfolio"), false);
-  // Collapsed: shortest prefix per feature
+  // Collapsed: shortest prefix per cell
   assertEquals(_collapsePaths(_accessedPaths), ["counter", "market"]);
   _resetTracking();
 });
@@ -108,21 +108,21 @@ Deno.test("useAio wiring: conditional access expands tracked paths", () => {
   _resetTracking();
 });
 
-// ── useFeature() wiring: _trackingProxy(state, name) ───────────────
+// ── useCell() wiring: _trackingProxy(state, name) ───────────────
 
-Deno.test("useFeature wiring: proxy tracks with feature name prefix", () => {
+Deno.test("useCell wiring: proxy tracks with cell name prefix", () => {
   _resetTracking();
-  // useFeature(counterRef) does: return { state: _trackingProxy(resolved, name) }
+  // useCell(counterRef) does: return { state: _trackingProxy(resolved, name) }
   // where name = ref.__aio.id = "counter", resolved = _state["counter"]
-  const featureState = { count: 5, label: "clicks" };
-  const state = _trackingProxy(featureState, "counter") as typeof featureState;
+  const cellState = { count: 5, label: "clicks" };
+  const state = _trackingProxy(cellState, "counter") as typeof cellState;
 
   const _v = state.count;
   assertEquals(_v, 5);
   assertEquals(
     _accessedPaths.has("counter.count"),
     true,
-    "path includes feature prefix",
+    "path includes cell prefix",
   );
   assertEquals(_accessedPaths.has("count"), false, "bare name not tracked");
   // With prefix, leaf-only access on primitives — no intermediate "counter"
@@ -130,25 +130,25 @@ Deno.test("useFeature wiring: proxy tracks with feature name prefix", () => {
   _resetTracking();
 });
 
-Deno.test("useFeature wiring: deep nested access prefixed correctly", () => {
+Deno.test("useCell wiring: deep nested access prefixed correctly", () => {
   _resetTracking();
-  const featureState = { instruments: { SOL: { price: 100, volume: 999 } } };
-  const state = _trackingProxy(featureState, "market") as typeof featureState;
+  const cellState = { instruments: { SOL: { price: 100, volume: 999 } } };
+  const state = _trackingProxy(cellState, "market") as typeof cellState;
 
   const _v = state.instruments.SOL.price;
   assertEquals(_v, 100);
   assertEquals(_accessedPaths.has("market.instruments.SOL.price"), true);
-  // Intermediates start from inside the feature (not the prefix itself)
+  // Intermediates start from inside the cell (not the prefix itself)
   assertEquals(_accessedPaths.has("market.instruments"), true);
   assertEquals(_accessedPaths.has("market.instruments.SOL"), true);
   assertEquals(_collapsePaths(_accessedPaths), ["market.instruments"]);
   _resetTracking();
 });
 
-Deno.test("useFeature wiring: Object.keys on feature tracks feature-level", () => {
+Deno.test("useCell wiring: Object.keys on cell tracks cell-level", () => {
   _resetTracking();
-  const featureState = { count: 5, label: "x" };
-  const state = _trackingProxy(featureState, "counter") as Record<
+  const cellState = { count: 5, label: "x" };
+  const state = _trackingProxy(cellState, "counter") as Record<
     string,
     unknown
   >;
@@ -158,15 +158,15 @@ Deno.test("useFeature wiring: Object.keys on feature tracks feature-level", () =
   assertEquals(
     _accessedPaths.has("counter"),
     true,
-    "ownKeys at feature level",
+    "ownKeys at cell level",
   );
   assertEquals(_accessedPaths.size, 1);
   _resetTracking();
 });
 
-Deno.test("useFeature wiring: multiple features each get correct prefix", () => {
+Deno.test("useCell wiring: multiple cells each get correct prefix", () => {
   _resetTracking();
-  // Simulate two useFeature calls on same page
+  // Simulate two useCell calls on same page
   const counterState = _trackingProxy({ count: 5 }, "counter") as Record<
     string,
     unknown
@@ -181,35 +181,35 @@ Deno.test("useFeature wiring: multiple features each get correct prefix", () => 
 
   assertEquals(_accessedPaths.has("counter.count"), true);
   assertEquals(_accessedPaths.has("market.price"), true);
-  // Prefixed features: only leaf paths tracked (no intermediates for single-level)
+  // Prefixed cells: only leaf paths tracked (no intermediates for single-level)
   assertEquals(_accessedPaths.size, 2);
   _resetTracking();
 });
 
-// ── useAio + useFeature equivalence ─────────────────────────────────
+// ── useAio + useCell equivalence ─────────────────────────────────
 
-Deno.test("useAio and useFeature produce same tracked paths", () => {
+Deno.test("useAio and useCell produce same tracked paths", () => {
   // useAio: state.counter.count → tracks "counter" (intermediate) and "counter.count"
   _resetTracking();
   const fullState = { counter: { count: 5 } };
   const aioState = _trackingProxy(fullState) as typeof fullState;
   const _a = aioState.counter.count;
   const aioPaths = _collapsePaths(_accessedPaths);
-  assertEquals(aioPaths, ["counter"], "useAio collapses to feature-level");
+  assertEquals(aioPaths, ["counter"], "useAio collapses to cell-level");
 
-  // useFeature: state.count → tracks only "counter.count" (no intermediate)
+  // useCell: state.count → tracks only "counter.count" (no intermediate)
   _resetTracking();
-  const featureState = { count: 5 };
+  const cellState = { count: 5 };
   const featState = _trackingProxy(
-    featureState,
+    cellState,
     "counter",
-  ) as typeof featureState;
+  ) as typeof cellState;
   const _b = featState.count;
   const featPaths = _collapsePaths(_accessedPaths);
   assertEquals(
     featPaths,
     ["counter.count"],
-    "useFeature tracks leaf with prefix",
+    "useCell tracks leaf with prefix",
   );
 
   // Both produce subscriptions that overlap — server handles correctly
@@ -225,7 +225,7 @@ Deno.test("paths collapse correctly for subscription message", () => {
     market: { instruments: { SOL: { price: 100 }, BTC: { price: 50000 } } },
   }) as Record<string, unknown>;
 
-  // Access two prices from same feature — intermediates tracked (AIO-206)
+  // Access two prices from same cell — intermediates tracked (AIO-206)
   // deno-lint-ignore no-explicit-any
   const _a = (state as any).market.instruments.SOL.price;
   // deno-lint-ignore no-explicit-any
@@ -293,9 +293,9 @@ Deno.test("null state passthrough (useAio before connect)", () => {
   _resetTracking();
 });
 
-Deno.test("useFeature with null feature state", () => {
+Deno.test("useCell with null cell state", () => {
   _resetTracking();
-  // Feature not in state yet → resolved = null
+  // Cell not in state yet → resolved = null
   const state = _trackingProxy(null, "counter");
   assertEquals(state, null);
   assertEquals(_accessedPaths.size, 0);
@@ -349,14 +349,14 @@ Deno.test("proxy does not interfere with spread", () => {
 Deno.test("proxy does not interfere with destructuring", () => {
   _resetTracking();
   const raw = { counter: { count: 5, label: "clicks" } };
-  const state = _trackingProxy(raw, "myFeature") as typeof raw;
+  const state = _trackingProxy(raw, "myCell") as typeof raw;
 
   const { count, label } = state.counter;
   assertEquals(count, 5);
   assertEquals(label, "clicks");
   // Destructuring does get("count") + get("label") — NOT ownKeys
   // So each property is tracked as a leaf path
-  assertEquals(_accessedPaths.has("myFeature.counter.count"), true);
-  assertEquals(_accessedPaths.has("myFeature.counter.label"), true);
+  assertEquals(_accessedPaths.has("myCell.counter.count"), true);
+  assertEquals(_accessedPaths.has("myCell.counter.label"), true);
   _resetTracking();
 });

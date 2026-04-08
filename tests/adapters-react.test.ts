@@ -8,10 +8,10 @@ import {
   _resolveWithFallback,
   _trackingProxy,
   cancelSubsTimer,
+  type CellRef,
   createSendProxy,
-  type FeatureRef,
+  getCellSignal,
   getConnectedSignal,
-  getFeatureSignal,
   getStateSignal,
   setConnected,
   setTransport,
@@ -29,9 +29,9 @@ function setup() {
 
 // ── Adapter exports ─────────────────────────────────────────────────
 
-Deno.test("react adapter: exports useFeature", () => {
-  assertExists(reactAdapter.useFeature);
-  assertEquals(typeof reactAdapter.useFeature, "function");
+Deno.test("react adapter: exports useCell", () => {
+  assertExists(reactAdapter.useCell);
+  assertEquals(typeof reactAdapter.useCell, "function");
 });
 
 Deno.test("react adapter: exports useAio", () => {
@@ -51,10 +51,10 @@ Deno.test("react adapter: exports useConnected", () => {
 
 // ── Signal subscription (powers the React hooks) ────────────────────
 
-Deno.test("react adapter: feature signal fires on state injection", () => {
+Deno.test("react adapter: cell signal fires on state injection", () => {
   setup();
   try {
-    const sig = getFeatureSignal("counter", { count: 0 });
+    const sig = getCellSignal("counter", { count: 0 });
     let fired = 0;
     const unsub = sig.subscribe(() => {
       fired++;
@@ -70,11 +70,11 @@ Deno.test("react adapter: feature signal fires on state injection", () => {
   }
 });
 
-Deno.test("react adapter: feature signal fires on delta", () => {
+Deno.test("react adapter: cell signal fires on delta", () => {
   setup();
   try {
     _injectState({ counter: { count: 0 } });
-    const sig = getFeatureSignal("counter");
+    const sig = getCellSignal("counter");
     let fired = 0;
     const unsub = sig.subscribe(() => {
       fired++;
@@ -199,13 +199,14 @@ Deno.test("react adapter: _resolveWithFallback merges defaults", () => {
   assertEquals(_resolveWithFallback(null, undefined), null);
 });
 
+// CellRef interface requires __aio — this is the public type shape for client-side cell references
 Deno.test("react adapter: createSendProxy with action creators", () => {
   setup();
   try {
     const sent: string[] = [];
     setTransport({ send: (d: string) => sent.push(d), close: () => {} });
 
-    const ref: FeatureRef = {
+    const ref: CellRef = {
       __aio: {
         id: "counter",
         actionKeys: ["increment"],
@@ -235,7 +236,7 @@ Deno.test("react adapter: createSendProxy fallback without creators", () => {
     const sent: string[] = [];
     setTransport({ send: (d: string) => sent.push(d), close: () => {} });
 
-    const ref: FeatureRef = {
+    const ref: CellRef = {
       __aio: { id: "counter", actionKeys: ["increment"] },
     };
     const proxy = createSendProxy("counter", ref);

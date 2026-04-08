@@ -11,9 +11,9 @@ handled by the runtime. No side effects in reducers, no external cron daemons.
 Return a `ScheduleEffect` from any reducer or sync method:
 
 ```ts
-import { feature, schedule } from "aio";
+import { cell, schedule } from "aio";
 
-const notifications = feature("notifications", {
+const notifications = cell("notifications", {
   state: { pending: 0 },
   methods: {
     queue(s) {
@@ -37,7 +37,7 @@ state:
 
 ```ts
 await aio.run({
-  features: [reports],
+  cells: [reports],
   schedules: [
     { id: "daily-report", cron: "0 8 * * 1-5", action: reports.generate() },
     { id: "hourly-ping", every: 60_000, action: health.ping() },
@@ -132,7 +132,7 @@ methods: {
 Schedule IDs must match `/^[\w\-:.]+$/` — alphanumeric, hyphens, underscores,
 colons, dots.
 
-Good convention: `featureName.timerPurpose` or `featureName:action`.
+Good convention: `cellName.timerPurpose` or `cellName:action`.
 
 ```ts
 schedule.every("orders.poll", 10_000, orders.refresh());
@@ -219,11 +219,10 @@ generators: {
 
 ## Testing schedules
 
-`testFeature` gives you `runEffects()` to process returned effects
-synchronously:
+`testCell` gives you `runEffects()` to process returned effects synchronously:
 
 ```ts
-testFeature(notifications, "queues autosave", (t) => {
+testCell(notifications, "queues autosave", (t) => {
   t.dispatch(notifications.queue());
   const effects = t.runEffects();
   const sched = effects.find((e) => e.type === "__schedule");

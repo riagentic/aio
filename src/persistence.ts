@@ -21,7 +21,11 @@ export interface PersistenceConfig {
   getDBState: (s: Record<string, unknown>) => unknown;
   log: Log;
   getReportOpts: () => ReportErrorOpts;
-  syncFeatures?: Set<string>;
+  syncCells?: Set<string>;
+  /** Cell version map — keyed by cell id. Persisted alongside state for migration detection. */
+  cellVersions?: Record<string, number>;
+  /** App ID — used as prefix for version key in KV */
+  appId?: string;
 }
 
 /** Persistence manager API — debounced state persistence to KV and/or SQLite. */
@@ -72,11 +76,11 @@ export function createPersistenceManager(
     }
   }
 
-  // Exclude sync features from KV — they use their own SQLite op-log
-  const kvGetState = cfg.syncFeatures?.size
+  // Exclude sync cells from KV — they use their own SQLite op-log
+  const kvGetState = cfg.syncCells?.size
     ? () => {
       const s = { ...getState() };
-      for (const f of cfg.syncFeatures!) delete s[f];
+      for (const f of cfg.syncCells!) delete s[f];
       return s;
     }
     : getState;
@@ -107,7 +111,7 @@ export function createPersistenceManager(
           log.error(
             `persist: state is ${
               (bytes / 1024).toFixed(1)
-            }KB — exceeds Deno KV 65KB limit. Use persistMode:'multi', stateForDB filter, or db:{} (SQLite)`,
+            }KB — exceeds Deno KV 65KB limit. Use persistMode:'multi', cell-level persist filters, or db:{} (SQLite)`,
           );
           return;
         }
@@ -115,7 +119,7 @@ export function createPersistenceManager(
           log.warn(
             `persist: state is ${
               (bytes / 1024).toFixed(1)
-            }KB — approaching 65KB KV limit. Consider persistMode:'multi', stateForDB, or SQLite`,
+            }KB — approaching 65KB KV limit. Consider persistMode:'multi', cell-level persist filters, or SQLite`,
           );
         }
         try {
@@ -127,7 +131,7 @@ export function createPersistenceManager(
         }
       }
     } catch (e) {
-      log.error(`persist: stateForDB threw — ${e}`);
+      log.error(`persist: getDBState threw — ${e}`);
       _reportPersistError(e);
     }
   }
@@ -202,7 +206,7 @@ export function createPersistenceManager(
             msg.includes("value too")
           ) {
             log.warn(
-              `persist: state exceeds Deno KV 65KB limit — set persistMode:'multi' or use stateForDB / db:{} (SQLite)`,
+              `persist: state exceeds Deno KV 65KB limit — set persistMode:'multi', cell-level persist filters, or db:{} (SQLite)`,
             );
           }
           log.error(`persist: flush failed — ${e}`);

@@ -75,14 +75,17 @@ const users: Record<string, AioUser> = {
   "bob-secret-456": { id: "bob", role: "viewer" },
 };
 
-await aio.run({
-  features: [myFeature],
-  users,
-  stateForUI: (state, user?) => {
-    if (user?.role === "admin") return state;
-    return { publicData: state.publicData };
+const myCell = cell("myCell", {
+  state: { publicData: {}, secret: {} },
+  methods: {/* ... */},
+  ui: {
+    include: ["publicData", "secret"],
+    forUser: (exposed, user?) =>
+      user?.role === "admin" ? exposed : { publicData: exposed.publicData },
   },
 });
+
+await aio.run({ cells: [myCell], users });
 ```
 
 **Token flow:**
@@ -119,14 +122,7 @@ const resolveUser: ResolveUserFn = async (token, state) => {
   }
 };
 
-await aio.run({
-  features: [myFeature],
-  resolveUser,
-  stateForUI: (state, user?) => {
-    if (user?.role === "admin") return state;
-    return { publicData: state.publicData };
-  },
-});
+await aio.run({ cells: [myCell], resolveUser });
 ```
 
 **How it works:**
@@ -172,7 +168,7 @@ Or via `beforeReduce`:
 
 ```ts
 await aio.run({
-  features: [myFeature],
+  cells: [myCell],
   beforeReduce: (action, state, user?) => {
     if (action.type === "Admin" && user?.role !== "admin") return null;
     return action;
@@ -193,7 +189,7 @@ A summary of aio's security posture and known limitations:
 | ----------------------------------------- | --------------------------------------------------------------------------------------------- |
 | Unauthorized WebSocket/HTTP access        | Token auth (`--expose`, `users`, or `resolveUser`) — timing-safe comparison for static tokens |
 | Cross-origin browser requests (localhost) | `Origin` header validation — only same-origin allowed when not exposed                        |
-| State leakage per user                    | `stateForUI(state, user?)` — server-side filtering per client                                 |
+| State leakage per user                    | Cell-level `ui: { include, forUser }` — server-side filtering per client                      |
 | Trojan API abuse from web                 | `/__aio/trojan/*` bound to `127.0.0.1` HTTP-only — unreachable from browser even with TLS     |
 | Reducer/effect crashes taking down server | All errors caught and logged, dispatch loop continues                                         |
 | XSS in error overlay                      | `escHtml()` sanitizes filenames, paths, and error text                                        |

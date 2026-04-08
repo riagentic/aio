@@ -1,9 +1,9 @@
 // aiol — all lint checks organized by area
 
-import type { Checker, FeatureInfo } from "./types.ts";
+import type { CellInfo, Checker } from "./types.ts";
 import { join } from "@std/path";
 import * as fix from "./fixes.ts";
-import { RESERVED_KEYS } from "../src/feature-types.ts";
+import { RESERVED_KEYS } from "../src/cell-types.ts";
 
 // ══════════════════════════════════════════════════════════════════════
 // 1. PROJECT CONFIG (deno.json)
@@ -193,20 +193,18 @@ export const checkStructure: Checker = async (ctx) => {
     } else pass("server-only / CLI mode (no App.tsx)");
   }
 
-  // Feature organization
-  const featureFiles = sourceFiles.filter((f) =>
-    f.content.includes("feature(") && !f.name.endsWith(".test.ts") &&
+  // Cell organization
+  const cellFiles = sourceFiles.filter((f) =>
+    f.content.includes("cell(") && !f.name.endsWith(".test.ts") &&
     f.name !== "app.ts"
   );
-  if (featureFiles.length > 3) {
-    const inFeatureDir = featureFiles.filter((f) =>
-      f.relative.includes("features/")
-    );
-    if (inFeatureDir.length < featureFiles.length / 2) {
+  if (cellFiles.length > 3) {
+    const inCellDir = cellFiles.filter((f) => f.relative.includes("cells/"));
+    if (inCellDir.length < cellFiles.length / 2) {
       report(
         "hint",
         "structure",
-        `${featureFiles.length} feature files scattered — consider organizing in src/features/`,
+        `${cellFiles.length} cell files scattered — consider organizing in src/cells/`,
         { fix: "See structure.md" },
       );
     }
@@ -261,25 +259,25 @@ export const checkStructure: Checker = async (ctx) => {
 // 3. FEATURE DEFINITIONS
 // ══════════════════════════════════════════════════════════════════════
 
-export const checkFeatures: Checker = (ctx) => {
-  const { features, report, pass } = ctx;
+export const checkCells: Checker = (ctx) => {
+  const { cells, report, pass } = ctx;
 
-  if (features.length === 0) {
+  if (cells.length === 0) {
     report(
       "hint",
-      "features",
-      "no feature() calls found — is this a legacy (reduce/execute) app?",
+      "cells",
+      "no cell() calls found — is this a legacy (reduce/execute) app?",
     );
     return;
   }
 
   pass(
-    `${features.length} feature(s): ${features.map((f) => f.name).join(", ")}`,
+    `${cells.length} cell(s): ${cells.map((f) => f.name).join(", ")}`,
   );
 
   // Duplicate names
-  const names = new Map<string, FeatureInfo[]>();
-  for (const f of features) {
+  const names = new Map<string, CellInfo[]>();
+  for (const f of cells) {
     const list = names.get(f.name) ?? [];
     list.push(f);
     names.set(f.name, list);
@@ -288,30 +286,30 @@ export const checkFeatures: Checker = (ctx) => {
     if (list.length > 1) {
       report(
         "error",
-        "features",
-        `duplicate feature name "${name}" — found in ${
+        "cells",
+        `duplicate cell name "${name}" — found in ${
           list.map((f) => f.file.relative).join(", ")
         }`,
       );
     }
   }
 
-  for (const f of features) {
+  for (const f of cells) {
     const loc = { file: f.file.relative, line: f.line };
 
     // Empty state
     if (!f.hasState) {
       report(
         "warn",
-        "features",
-        `feature "${f.name}" has no state — every feature needs initial state`,
+        "cells",
+        `cell "${f.name}" has no state — every cell needs initial state`,
         loc,
       );
     } else if (f.stateKeys.length === 0) {
       report(
         "warn",
-        "features",
-        `feature "${f.name}" has empty state object {}`,
+        "cells",
+        `cell "${f.name}" has empty state object {}`,
         loc,
       );
     }
@@ -320,8 +318,8 @@ export const checkFeatures: Checker = (ctx) => {
     if (!f.hasMethods && !f.hasActions) {
       report(
         "warn",
-        "features",
-        `feature "${f.name}" has no methods and no actions — it can't change state`,
+        "cells",
+        `cell "${f.name}" has no methods and no actions — it can't change state`,
         loc,
       );
     }
@@ -330,8 +328,8 @@ export const checkFeatures: Checker = (ctx) => {
     if (f.hasMethods && f.hasActions) {
       report(
         "warn",
-        "features",
-        `feature "${f.name}" has both methods and actions — pick one style`,
+        "cells",
+        `cell "${f.name}" has both methods and actions — pick one style`,
         loc,
       );
     }
@@ -342,29 +340,29 @@ export const checkFeatures: Checker = (ctx) => {
       if (reserved.includes(key)) {
         report(
           "error",
-          "features",
-          `feature "${f.name}" state has reserved key "${key}" — will cause data corruption`,
+          "cells",
+          `cell "${f.name}" state has reserved key "${key}" — will cause data corruption`,
           loc,
         );
       }
       if (key === "__aio_status" || key.startsWith("__aio_")) {
         report(
           "error",
-          "features",
-          `feature "${f.name}" state has "${key}" key — reserved for aio internals`,
+          "cells",
+          `cell "${f.name}" state has "${key}" key — reserved for aio internals`,
           loc,
         );
       }
     }
 
-    // Reserved key collisions — methods, actions, generators using reserved FeatureDef property names
+    // Reserved key collisions — methods, actions, generators using reserved CellDef property names
     const allUserKeys = [...f.methodNames, ...f.actionNames];
     for (const key of allUserKeys) {
       if (RESERVED_KEYS.has(key)) {
         report(
           "error",
-          "features",
-          `feature "${f.name}" has ${
+          "cells",
+          `cell "${f.name}" has ${
             f.hasMethods ? "method" : "action"
           } "${key}" — collides with reserved property. Reserved: ${
             [...RESERVED_KEYS].join(", ")
@@ -374,12 +372,12 @@ export const checkFeatures: Checker = (ctx) => {
       }
     }
 
-    // Feature name conventions
+    // Cell name conventions
     if (!/^[a-z][\w-]*$/.test(f.name)) {
       report(
         "hint",
-        "features",
-        `feature "${f.name}" — convention is lowercase with hyphens (e.g., "user-profile")`,
+        "cells",
+        `cell "${f.name}" — convention is lowercase with hyphens (e.g., "user-profile")`,
         loc,
       );
     }
@@ -391,22 +389,21 @@ export const checkFeatures: Checker = (ctx) => {
 // ══════════════════════════════════════════════════════════════════════
 
 export const checkPerformance: Checker = (ctx) => {
-  const { sourceFiles, features, appEntry, report, pass } = ctx;
+  const { sourceFiles, cells, appEntry, report, pass } = ctx;
 
-  // Check for useAio vs useFeature in TSX files
+  // Check for useAio vs useCell in TSX files
   for (const file of ctx.tsxFiles) {
     if (file.name === "App.tsx") continue; // root layout — useAio is OK
     const useAioCount = (file.content.match(/\buseAio\b/g) ?? []).length;
-    const useFeatureCount =
-      (file.content.match(/\buseFeature\b/g) ?? []).length;
-    if (useAioCount > 0 && useFeatureCount === 0) {
+    const useCellCount = (file.content.match(/\buseCell\b/g) ?? []).length;
+    if (useAioCount > 0 && useCellCount === 0) {
       report(
         "warn",
         "perf",
-        `${file.relative}: uses useAio() — prefer useFeature(ref) for scoped state + selective re-renders`,
+        `${file.relative}: uses useAio() — prefer useCell(ref) for scoped state + selective re-renders`,
         {
           file: file.relative,
-          fix: "Replace useAio() with useFeature(myFeature)",
+          fix: "Replace useAio() with useCell(myCell)",
         },
       );
     }
@@ -437,10 +434,10 @@ export const checkPerformance: Checker = (ctx) => {
     }
   }
 
-  // Check for setTimeout/setInterval in feature files (should use schedule)
+  // Check for setTimeout/setInterval in cell files (should use schedule)
   for (const file of sourceFiles) {
     if (file.name.endsWith(".test.ts") || file.name === "app.ts") continue;
-    if (!file.content.includes("feature(")) continue;
+    if (!file.content.includes("cell(")) continue;
     if (
       file.content.includes("setTimeout") ||
       file.content.includes("setInterval")
@@ -448,14 +445,14 @@ export const checkPerformance: Checker = (ctx) => {
       report(
         "hint",
         "perf",
-        `${file.relative}: setTimeout/setInterval in feature code — use schedule.after/every for observable, cancellable timers`,
+        `${file.relative}: setTimeout/setInterval in cell code — use schedule.after/every for observable, cancellable timers`,
         { file: file.relative },
       );
     }
   }
 
   // Large state arrays — hint about SQLite
-  for (const f of features) {
+  for (const f of cells) {
     for (const key of f.stateKeys) {
       // Check if state value looks like an array initializer with many items
       const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -477,7 +474,7 @@ export const checkPerformance: Checker = (ctx) => {
             report(
               "hint",
               "perf",
-              `feature "${f.name}" state.${key} is a typed array — if it grows large (100+), consider SQLite`,
+              `cell "${f.name}" state.${key} is a typed array — if it grows large (100+), consider SQLite`,
               { file: f.file.relative },
             );
           }
@@ -486,20 +483,24 @@ export const checkPerformance: Checker = (ctx) => {
     }
   }
 
-  // Check for missing stateForUI
-  if (appEntry && features.length > 0) {
-    if (!appEntry.content.includes("stateForUI")) {
-      const totalKeys = features.reduce((n, f) => n + f.stateKeys.length, 0);
+  // Check for missing cell-level ui filters
+  if (appEntry && cells.length > 0) {
+    const hasUiConfig = cells.some((c) =>
+      c.file.content.includes("ui:") || c.file.content.includes("ui :")
+    );
+    const hasCellDefaults = appEntry.content.includes("cellDefaults");
+    if (!hasUiConfig && !hasCellDefaults) {
+      const totalKeys = cells.reduce((n, f) => n + f.stateKeys.length, 0);
       if (totalKeys > 10) {
         report(
           "hint",
           "perf",
-          `${totalKeys} state keys across ${features.length} features — consider stateForUI to filter what's sent to browser`,
+          `${totalKeys} state keys across ${cells.length} cells — consider cell-level ui filters or cellDefaults to control what's sent to browser`,
           { file: appEntry.relative },
         );
       }
     } else {
-      pass("stateForUI configured");
+      pass("cell-level ui visibility configured");
     }
   }
 
@@ -669,7 +670,7 @@ export const checkUI: Checker = (ctx) => {
     return;
   }
 
-  // Browser import safety — check .tsx files AND feature files
+  // Browser import safety — check .tsx files AND cell files
   const BROWSER_IMPORTS = new Set([
     "react",
     "react-dom/client",
@@ -680,12 +681,12 @@ export const checkUI: Checker = (ctx) => {
   const denoImports = new Set(Object.keys(ctx.denoJson?.imports ?? {}));
   const SERVER_ONLY_PREFIXES_CHECK2 = ["@std/", "node:"];
 
-  const featureFiles = ctx.features.map((f) => f.file).filter((f, i, arr) =>
+  const cellFiles = ctx.cells.map((f) => f.file).filter((f, i, arr) =>
     arr.indexOf(f) === i
   );
   const browserCheckedFiles = [
     ...tsxFiles,
-    ...featureFiles.filter((f) => f.ext !== ".tsx"), // avoid double-checking
+    ...cellFiles.filter((f) => f.ext !== ".tsx"), // avoid double-checking
   ];
 
   for (const file of browserCheckedFiles) {
@@ -759,9 +760,9 @@ export const checkUI: Checker = (ctx) => {
     );
   }
 
-  // Server-only imports in feature definition files (shared with browser)
+  // Server-only imports in cell definition files (shared with browser)
   const SERVER_ONLY_PREFIXES = ["@std/", "node:"];
-  for (const file of featureFiles) {
+  for (const file of cellFiles) {
     // Skip .tsx files — already checked above
     if (file.ext === ".tsx") continue;
 
@@ -781,7 +782,7 @@ export const checkUI: Checker = (ctx) => {
       report(
         "error",
         "ui",
-        `${file.relative}:${lineIdx} — import "${spec}" is server-only but this file contains a feature() definition shared with the browser bundle`,
+        `${file.relative}:${lineIdx} — import "${spec}" is server-only but this file contains a cell() definition shared with the browser bundle`,
         {
           file: file.relative,
           line: lineIdx,
@@ -803,7 +804,7 @@ export const checkUI: Checker = (ctx) => {
         "ui",
         `${file.relative}:${lineIdx} — ${
           m[0]
-        } is server-only but this file contains a feature() definition shared with the browser bundle`,
+        } is server-only but this file contains a cell() definition shared with the browser bundle`,
         {
           file: file.relative,
           line: lineIdx,
@@ -913,17 +914,17 @@ export const checkUI: Checker = (ctx) => {
     }
   }
 
-  // useFeature without loading state
+  // useCell without loading state
   for (const file of tsxFiles) {
-    const useFeatureCalls = file.content.match(/useFeature\(/g);
+    const useCellCalls = file.content.match(/useCell\(/g);
     if (
-      useFeatureCalls && !file.content.includes("fallback") &&
+      useCellCalls && !file.content.includes("fallback") &&
       !file.content.includes("Loading") && !file.content.includes("Connecting")
     ) {
       report(
         "hint",
         "ui",
-        `${file.relative}: useFeature() without loading/fallback state — state is null until WS connects`,
+        `${file.relative}: useCell() without loading/fallback state — state is null until WS connects`,
         {
           file: file.relative,
           fix: "Add: if (!state) return <div>Loading...</div>",
@@ -938,46 +939,44 @@ export const checkUI: Checker = (ctx) => {
 // ══════════════════════════════════════════════════════════════════════
 
 export const checkTesting: Checker = (ctx) => {
-  const { features, testFiles, report, pass, denoJson } = ctx;
+  const { cells, testFiles, report, pass, denoJson } = ctx;
 
-  if (features.length === 0) return;
+  if (cells.length === 0) return;
 
-  // Check each feature has a test
-  const testedFeatures = new Set<string>();
+  // Check each cell has a test
+  const testedCells = new Set<string>();
   for (const tf of testFiles) {
-    for (const f of features) {
+    for (const f of cells) {
       if (
         tf.content.includes(`'${f.name}'`) ||
         tf.content.includes(`"${f.name}"`) || tf.content.includes(f.name)
       ) {
-        testedFeatures.add(f.name);
+        testedCells.add(f.name);
       }
     }
   }
 
-  const untestedFeatures = features.filter((f) => !testedFeatures.has(f.name));
-  if (untestedFeatures.length === 0) {
-    pass(`all ${features.length} features have tests`);
+  const untestedCells = cells.filter((f) => !testedCells.has(f.name));
+  if (untestedCells.length === 0) {
+    pass(`all ${cells.length} cells have tests`);
   } else {
-    for (const f of untestedFeatures) {
+    for (const f of untestedCells) {
       report(
         "hint",
         "testing",
-        `feature "${f.name}" has no test file — create ${f.name}.test.ts`,
+        `cell "${f.name}" has no test file — create ${f.name}.test.ts`,
         { file: f.file.relative },
       );
     }
   }
 
-  // testFeature usage
-  const usesTestFeature = testFiles.some((f) =>
-    f.content.includes("testFeature")
-  );
-  if (testFiles.length > 0 && !usesTestFeature) {
+  // testCell usage
+  const usesTestCell = testFiles.some((f) => f.content.includes("testCell"));
+  if (testFiles.length > 0 && !usesTestCell) {
     report(
       "hint",
       "testing",
-      "test files found but none use testFeature() — it provides typed helpers and auto-cleanup",
+      "test files found but none use testCell() — it provides typed helpers and auto-cleanup",
     );
   }
 
@@ -1025,8 +1024,8 @@ export const checkPatterns: Checker = (ctx) => {
       );
     }
 
-    // Thrown exceptions in feature code (prefer Result pattern)
-    if (file.content.includes("feature(")) {
+    // Thrown exceptions in cell code (prefer Result pattern)
+    if (file.content.includes("cell(")) {
       const throwLines = file.lines.filter((l) =>
         /\bthrow\s+new\s+/.test(l) && !l.trim().startsWith("//")
       );
@@ -1034,7 +1033,7 @@ export const checkPatterns: Checker = (ctx) => {
         report(
           "hint",
           "patterns",
-          `${file.relative}: throw in feature code — consider returning error state instead (machines handle error states well)`,
+          `${file.relative}: throw in cell code — consider returning error state instead (machines handle error states well)`,
           { file: file.relative },
         );
       }
@@ -1146,29 +1145,27 @@ export const checkBuild: Checker = async (ctx) => {
 // 11. INTER-FEATURE PATTERNS
 // ══════════════════════════════════════════════════════════════════════
 
-export const checkInterFeature: Checker = (ctx) => {
-  const { features, sourceFiles, report } = ctx;
+export const checkInterCell: Checker = (ctx) => {
+  const { cells, sourceFiles, report } = ctx;
 
-  if (features.length < 2) return;
+  if (cells.length < 2) return;
 
-  // Detect cross-feature direct state access (anti-pattern)
+  // Detect cross-cell direct state access (anti-pattern)
   for (const file of sourceFiles) {
     if (file.name.endsWith(".test.ts")) continue;
-    for (const f of features) {
-      // Check if file (that defines a DIFFERENT feature) directly accesses another feature's state
-      const definesFeature = features.find((feat) =>
-        feat.file.path === file.path
-      );
-      if (!definesFeature || definesFeature.name === f.name) continue;
-      // Look for patterns like: otherFeature.state or getState().otherFeature
+    for (const f of cells) {
+      // Check if file (that defines a DIFFERENT cell) directly accesses another cell's state
+      const definesCell = cells.find((feat) => feat.file.path === file.path);
+      if (!definesCell || definesCell.name === f.name) continue;
+      // Look for patterns like: otherCell.state or getState().otherCell
       if (
         file.content.includes(`getState().${f.name}`) ||
         file.content.includes(`state.${f.name}`)
       ) {
         report(
           "hint",
-          "inter-feature",
-          `${file.relative}: accesses "${f.name}" state directly — use selectors or dispatchTo for loose coupling`,
+          "inter-cell",
+          `${file.relative}: accesses "${f.name}" state directly — use selectors for loose coupling`,
           { file: file.relative },
         );
       }
@@ -1272,7 +1269,7 @@ export const checkMemoUsage: Checker = (ctx) => {
 export const ALL_CHECKS: Checker[] = [
   checkConfig,
   checkStructure,
-  checkFeatures,
+  checkCells,
   checkPerformance,
   checkSecurity,
   checkPersistence,
@@ -1280,7 +1277,7 @@ export const ALL_CHECKS: Checker[] = [
   checkTesting,
   checkPatterns,
   checkBuild,
-  checkInterFeature,
+  checkInterCell,
   checkScheduling,
   checkMemoUsage,
 ];

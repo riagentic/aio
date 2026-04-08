@@ -35,7 +35,7 @@ export type VitalsSystem = {
   getEndpointData: () => VitalsEndpointData;
   getLoopVitalsForPong: () => unknown;
   formatTimelineSummary: () => string;
-  computeFeatureSizes: (
+  computeCellSizes: (
     state: Record<string, unknown>,
   ) => Record<string, number>;
   pressureMonitor: PressureMonitorAPI | null;
@@ -222,13 +222,13 @@ export function createVitalsSystem(config: VitalsConfig): VitalsSystem {
       }
       return parts.join(" ");
     },
-    computeFeatureSizes: (
+    computeCellSizes: (
       state: Record<string, unknown>,
     ): Record<string, number> => {
       const enc = new TextEncoder();
       const sizes: Record<string, number> = {};
-      for (const [name, featureState] of Object.entries(state)) {
-        sizes[name] = enc.encode(JSON.stringify(featureState)).byteLength;
+      for (const [name, cellState] of Object.entries(state)) {
+        sizes[name] = enc.encode(JSON.stringify(cellState)).byteLength;
       }
       return sizes;
     },

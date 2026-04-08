@@ -1,4 +1,4 @@
-# AIR Advanced Features
+# AIR Advanced Patterns
 
 SSR, portals, islands, code splitting, virtual scrolling, dimensions, deferred
 loading, accessibility, custom adapters, and framework integration.
@@ -254,8 +254,8 @@ Build adapters for any framework using `aio/state-core`:
 ```ts
 import {
   createSendProxy,
+  getCellSignal,
   getConnectedSignal,
-  getFeatureSignal,
   getStateSignal,
   send,
   setTransport,
@@ -263,7 +263,7 @@ import {
 } from "aio/state-core";
 ```
 
-**Minimal contract:** `useFeature(ref)` via `getFeatureSignal()`, `useAio()` via
+**Minimal contract:** `useCell(ref)` via `getCellSignal()`, `useAio()` via
 `getStateSignal()`, `useLocal(initial)` as framework-local state,
 `useConnected()` via `getConnectedSignal()`.
 

@@ -17,7 +17,7 @@ Every aio app requires `appId` in the `aio.run()` call:
 ```ts
 await aio.run({
   appId: 'my-app',
-  features: [...]
+  cells: [...]
 })
 ```
 
@@ -100,14 +100,14 @@ const slug = slugify("My Cool App!"); // 'my-cool-app'
 
 ```sh
 deno task am state                          # full state (raw, unfiltered)
-deno task am state counter                  # single feature slice
+deno task am state counter                  # single cell slice
 deno task am state counter.count            # nested path
 deno task am state fleet[0].stats           # array index traversal
 deno task am state fleet[0].{name,active}   # pick specific fields
 deno task am state fleet[*].{pair,status}   # wildcard: pluck from every element
 deno task am state {counter,page}           # pick from root
 deno task am state counter --wait=5         # poll every 5s
-deno task am ui                             # UI state (stateForUI filtered)
+deno task am ui                             # UI state (cell-level ui filtered)
 deno task am ui alice                       # UI state for specific user
 ```
 
@@ -185,7 +185,7 @@ deno task am log --follow         # stream (like tail -f), also: -f
 deno task am log --client         # tail client log (log/client.log)
 deno task am errors               # last transpile error (dev mode)
 deno task am watch                # hot-restart on file change in src/
-deno task am new feature payments # scaffold feature
+deno task am new cell payments # scaffold cell
 deno task am new page settings    # scaffold page
 ```
 
@@ -199,7 +199,7 @@ prod.
 | Endpoint                      | Returns                                    |
 | ----------------------------- | ------------------------------------------ |
 | `/__aio/trojan/state`         | Raw full state (unfiltered)                |
-| `/__aio/trojan/ui`            | UI state (stateForUI filtered)             |
+| `/__aio/trojan/ui`            | UI state (cell-level ui filtered)          |
 | `/__aio/trojan/ui?user=alice` | UI state for specific user                 |
 | `/__aio/trojan/clients`       | Connected clients (type, transport, index) |
 | `/__aio/trojan/ui/<n>`        | DOM snapshot from client n (dev mode)      |
@@ -208,7 +208,7 @@ prod.
 | `/__aio/trojan/schedules`     | Active timer/cron IDs                      |
 | `/__aio/trojan/metrics`       | Uptime, connections, schedule count        |
 | `/__aio/trojan/config`        | Port, title, expose, authMode, prod        |
-| `/__aio/trojan/health`        | Feature health: status, enabled, errors    |
+| `/__aio/trojan/health`        | Cell health: status, enabled, errors       |
 
 ### Control (POST)
 

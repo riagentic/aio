@@ -164,7 +164,7 @@ export function checkPlatformSafety(code: string, file: string): GraphError[] {
       message: `"${m[1]}" is server-only`,
       fix: `${
         m[1]
-      } is server-only and not available in browser. Move to a feature effect or use \`import type\`.`,
+      } is server-only and not available in browser. Move to a cell effect or use \`import type\`.`,
     });
   }
   // Deno.* usage — strip comments AND string literals to avoid false positives
@@ -184,9 +184,7 @@ export function checkPlatformSafety(code: string, file: string): GraphError[] {
       line: lineNum,
       category: "server-only-api",
       message: `Deno.${m[1]} is server-only`,
-      fix: `Deno.${
-        m[1]
-      }() is not available in browser. Move to a feature effect.`,
+      fix: `Deno.${m[1]}() is not available in browser. Move to a cell effect.`,
     });
   }
   return errors;
@@ -349,7 +347,7 @@ export async function validateGraph(
 
   // Only blocking categories prevent the app from loading.
   // Server-only APIs and circular imports are warnings — they exist in server-side
-  // feature code that the browser imports but never executes those code paths.
+  // cell code that the browser imports but never executes those code paths.
   const BLOCKING: Set<ErrorCategory> = new Set([
     "file-not-found",
     "transpile-error",
@@ -358,7 +356,7 @@ export async function validateGraph(
   const blockingErrors = errors.filter((e) => BLOCKING.has(e.category));
 
   // Don't block on missing-import-map for server-only modules (@std/*, node:*)
-  // — these are in feature code that runs server-side only
+  // — these are in cell code that runs server-side only
   const realBlockingErrors = blockingErrors.filter((e) => {
     if (e.category !== "missing-import-map") return true;
     // If the specifier is a server-only module, it's a warning not a blocker

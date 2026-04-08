@@ -2,9 +2,17 @@
 // Browser-protocol: renderer-agnostic protocol layer for aio.
 // Extracted from browser.ts — no React imports.
 // browser.ts (React) and browser-air.ts (AIR) import from here.
+//
+// This file is the thin orchestrator. Logic lives in:
+//   protocol-types.ts         — types + constants
+//   protocol-diagnostics.ts   — _diagEmit, state integrity
+//   protocol-offline.ts       — IndexedDB offline queue
+//   protocol-status.ts        — DOM connection status widget
+//   protocol-devtools.ts      — Redux DevTools integration
+//   protocol-router.ts        — client-side router
+//   protocol-cell.ts          — cell(), bridge(), aio stubs
+//   protocol-subscription.ts  — listeners, vitals state, state readiness
 
-import { Listeners } from "./listeners.ts";
-import { resetTT as _resetTT } from "./time-travel-panel.ts";
 import {
   _accessedPaths as _coreAccessedPaths,
   _applyPatch as _coreApplyPatch,
@@ -21,9 +29,9 @@ import {
   _shallowEqual as _coreShallowEqual,
   _trackingProxy as _coreTrackingProxy,
   cancelSubsTimer as _coreCancelSubsTimer,
+  type CellRef as _CoreCellRef,
   collapsePaths as _coreCollapsePaths,
   createSendProxy as _coreCreateSendProxy,
-  type FeatureRef as _CoreFeatureRef,
   getConnectedSignal as _coreGetConnectedSignal,
   handleMessage as _coreHandleMessage,
   type HandleResult as _HandleResult,
@@ -46,10 +54,10 @@ import {
 } from "./vitals/types.ts";
 import { formatDiagEvent } from "./vitals/diag-formatter.ts";
 import type { DiagEvent } from "./vitals/types.ts";
-import { type Signal, signal } from "./signal.ts";
+import { resetTT as _resetTT } from "./time-travel-panel.ts";
 
 // ── Re-export state-core types/functions needed by browser.ts ───────
-export type { _CoreFeatureRef, _CoreTransport, _HandleResult };
+export type { _CoreCellRef, _CoreTransport, _HandleResult };
 export {
   _coreCreateSendProxy,
   _coreGetConnectedSignal,
@@ -76,57 +84,103 @@ export {
   type RenderMeterAPI,
 };
 
-// ── Types ───────────────────────────────────────────────────────────
+// ── Re-exports from sub-modules ─────────────────────────────────────
 
-/** Window properties used by AIO diagnostics (avoids `declare global` for JSR compat). */
-export interface AioWindow {
-  _aioDiag?: (ev: Record<string, unknown>) => void;
-  __aioConfig?: {
-    renderBudget?: { staleness?: number; pendingPatches?: number };
-  };
-}
+export type {
+  AioIPC,
+  AioWindow,
+  DevToolsConnection,
+  LinkProps,
+  RouteProps,
+  RouteState,
+} from "./protocol-types.ts";
+export {
+  OFFLINE_MAX_AGE,
+  OFFLINE_MAX_QUEUE,
+  WS_MAX_QUEUE,
+} from "./protocol-types.ts";
 
-/** IPC transport (UDS mode via Electron) */
-export type AioIPC = {
-  send: (json: string) => void;
-  ready: () => void;
-  onMessage: (fn: (line: string) => void) => void;
-  onOpen: (fn: () => void) => void;
-  onClose: (fn: () => void) => void;
-};
+export {
+  _checkStateIntegrity,
+  _diagEmit,
+  _diagLastEmit,
+  _resetInitialShapeKeys,
+  _w,
+} from "./protocol-diagnostics.ts";
 
-// ── Constants ───────────────────────────────────────────────────────
+export {
+  _clearOfflineQueue,
+  _loadOfflineQueue,
+  _resetIDB,
+  _saveOfflineAction,
+  MAX_OFFLINE_ACTIONS,
+} from "./protocol-offline.ts";
 
-export const _w = typeof window !== "undefined"
-  ? window as unknown as AioWindow & typeof globalThis
-  : undefined;
+export { _hideStatus, _resetStatus, _showStatus } from "./protocol-status.ts";
 
-export const WS_MAX_QUEUE = 100;
-export const OFFLINE_MAX_QUEUE = 100;
-export const OFFLINE_MAX_AGE = 24 * 60 * 60 * 1000; // 24 hours
+export {
+  _devtools,
+  _devtoolsConnected,
+  _resetDevTools,
+  _sendDevTools,
+  connectDevTools,
+  disconnectDevTools,
+} from "./protocol-devtools.ts";
+
+export {
+  _getRPath,
+  _getRSearch,
+  _navigateHandler,
+  _popstateHandler,
+  _rListeners,
+  _rSnapshot,
+  _rSubscribe,
+  _rSync,
+  _setNavigateHandler,
+  _setPopstateHandler,
+  matchPath,
+  navigate,
+  routePath,
+  routeSearch,
+} from "./protocol-router.ts";
+
+export { aio, bridge, cell } from "./protocol-cell.ts";
+
+export {
+  _cleanupTimer,
+  _incStateVersion,
+  _listenerHighWater,
+  _listeners,
+  _notify,
+  _resetStateReady,
+  _resetStateVersion,
+  _resolveStateReady,
+  _setCleanupTimer,
+  _setConnectFn,
+  _setListenerHighWater,
+  _setSubscribeTriggers,
+  _setTeardownFn,
+  _setUseAioActiveCount,
+  _setVitalsPingTimer,
+  _setVitalsRenderMeter,
+  _setVitalsTransportProbe,
+  _setVitalsUrlLogged,
+  _stateVersion,
+  _subscribe,
+  _useAioActiveCount,
+  _useAioSubscribe,
+  _useAioWarned,
+  _vitalsPingTimer,
+  _vitalsRenderMeter,
+  _vitalsTransportProbe,
+  _vitalsUrlLogged,
+  _waitForState,
+} from "./protocol-subscription.ts";
+
+// ── Constants (re-export from state-core) ───────────────────────────
+
 /** Prototype pollution guard — re-export from state-core. */
 export const _BLOCKED_KEYS: Set<string> = _coreBLOCKED_KEYS;
-
-// ── Diagnostics ─────────────────────────────────────────────────────
-
-export const _diagLastEmit = new Map<string, number>();
-export function _diagEmit(ev: {
-  type: string;
-  severity: "error" | "warning" | "info";
-  source: string;
-  message: string;
-  detail?: unknown;
-  hint?: string;
-}): void {
-  if (!_w || typeof _w._aioDiag !== "function") {
-    return;
-  }
-  const now = Date.now();
-  const last = _diagLastEmit.get(ev.type);
-  if (last && now - last < 5000) return;
-  _diagLastEmit.set(ev.type, now);
-  _w._aioDiag({ ...ev, ts: now });
-}
 
 // ── Array ref stats (AIO-11 wasted render detection) ────────────────
 export const _getArrayRefStats = _coreGetArrayRefStats;
@@ -137,206 +191,6 @@ export const _shallowEqual = _coreShallowEqual;
 export const _rebuildIdMaps = _coreRebuildIdMaps;
 export const _applyPatch = _coreApplyPatch;
 export const _deepMergeFiltered = _coreDeepMergeFiltered;
-
-// ── State integrity ─────────────────────────────────────────────────
-
-let _initialShapeKeys: Set<string> | null = null;
-
-export function _checkStateIntegrity(state: unknown): void {
-  if (!state || typeof state !== "object" || Array.isArray(state)) return;
-  const obj = state as Record<string, unknown>;
-  if (_initialShapeKeys === null) {
-    _initialShapeKeys = new Set(Object.keys(obj));
-    return;
-  }
-  for (const k of _initialShapeKeys) {
-    if (!(k in obj)) {
-      _diagEmit({
-        type: "state-shape-drift",
-        severity: "warning",
-        source: "browser",
-        message: `State key "${k}" from initial shape is now missing`,
-        detail: { missingKey: k, currentKeys: Object.keys(obj) },
-        hint:
-          "A key from the initial full state has disappeared. This may indicate a delta patch or merge bug.",
-      });
-    }
-  }
-}
-
-/** Reset _initialShapeKeys — for _reset() */
-export function _resetInitialShapeKeys(): void {
-  _initialShapeKeys = null;
-}
-
-// ── Offline queue persistence (IndexedDB) ─────────────────────────────
-
-const _offlineDB = "__aio_offline";
-const _offlineStore = "queue";
-const _offlineVersion = 1;
-interface _QueuedAction {
-  id?: number;
-  action: { type: string; payload?: unknown };
-  ts: number;
-}
-let _idb: IDBDatabase | null = null;
-let _idbPromise: Promise<IDBDatabase | null> | null = null;
-
-function _openIDB(): Promise<IDBDatabase | null> {
-  if (_idb) return Promise.resolve(_idb);
-  if (_idbPromise) return _idbPromise;
-  _idbPromise = new Promise<IDBDatabase | null>((resolve) => {
-    try {
-      const req = indexedDB.open(_offlineDB, _offlineVersion);
-      req.onerror = () => {
-        _idbPromise = null;
-        resolve(null);
-      };
-      req.onsuccess = () => {
-        _idb = req.result;
-        resolve(req.result);
-      };
-      req.onupgradeneeded = () => {
-        const db = req.result;
-        if (!db.objectStoreNames.contains(_offlineStore)) {
-          db.createObjectStore(_offlineStore, {
-            keyPath: "id",
-            autoIncrement: true,
-          });
-        }
-      };
-    } catch {
-      _idbPromise = null;
-      resolve(null);
-    }
-  });
-  return _idbPromise;
-}
-
-export async function _loadOfflineQueue(): Promise<_QueuedAction[]> {
-  const db = await _openIDB();
-  if (!db) return [];
-  return new Promise((resolve) => {
-    try {
-      const tx = db.transaction(_offlineStore, "readonly");
-      const store = tx.objectStore(_offlineStore);
-      const req = store.getAll();
-      req.onerror = () => resolve([]);
-      req.onsuccess = () => {
-        const actions = req.result as _QueuedAction[];
-        const cutoff = Date.now() - OFFLINE_MAX_AGE;
-        const valid = actions.filter((a) => a.ts >= cutoff);
-        // AIO-224: prune expired entries from IDB to prevent unbounded growth
-        const expired = actions.filter((a) => a.ts < cutoff);
-        if (expired.length > 0) {
-          try {
-            const delTx = db.transaction(_offlineStore, "readwrite");
-            const delStore = delTx.objectStore(_offlineStore);
-            for (const e of expired) if (e.id != null) delStore.delete(e.id); // AIO-242: use primary key, not timestamp
-          } catch { /* best-effort prune */ }
-        }
-        resolve(valid);
-      };
-    } catch (e) {
-      _diagEmit({
-        type: "offline-storage-error",
-        severity: "info",
-        source: "browser",
-        message: "IndexedDB operation failed — offline persistence unavailable",
-        detail: { error: String(e) },
-        hint:
-          "Offline action queue will use memory only. Check browser storage quota.",
-      });
-      resolve([]);
-    }
-  });
-}
-
-export const MAX_OFFLINE_ACTIONS = 1000;
-export async function _saveOfflineAction(
-  action: { type: string; payload?: unknown },
-): Promise<void> {
-  const db = await _openIDB();
-  if (!db) return;
-  try {
-    await new Promise<void>((resolve, reject) => {
-      const tx = db.transaction(_offlineStore, "readwrite");
-      const store = tx.objectStore(_offlineStore);
-      const countReq = store.count();
-      countReq.onsuccess = () => {
-        if (countReq.result >= MAX_OFFLINE_ACTIONS) return; // tx will auto-complete
-        const addReq = store.add({ action, ts: Date.now() });
-        addReq.onerror = () => {
-          _diagEmit({
-            type: "offline-storage-error",
-            severity: "info",
-            source: "browser",
-            message: "IndexedDB add() failed — offline action lost",
-            detail: { error: String(addReq.error) },
-            hint:
-              "Offline action queue will use memory only. Check browser storage quota.",
-          });
-        };
-      };
-      countReq.onerror = () => {
-        _diagEmit({
-          type: "offline-storage-error",
-          severity: "info",
-          source: "browser",
-          message: "IndexedDB count() failed — offline action lost",
-          detail: { error: String(countReq.error) },
-          hint:
-            "Offline action queue will use memory only. Check browser storage quota.",
-        });
-      };
-      tx.oncomplete = () => resolve();
-      tx.onerror = () => reject(tx.error);
-      tx.onabort = () => reject(tx.error);
-    });
-  } catch (e) {
-    _diagEmit({
-      type: "offline-storage-error",
-      severity: "info",
-      source: "browser",
-      message: "IndexedDB operation failed — offline persistence unavailable",
-      detail: { error: String(e) },
-      hint:
-        "Offline action queue will use memory only. Check browser storage quota.",
-    });
-  }
-}
-
-export async function _clearOfflineQueue(): Promise<void> {
-  const db = await _openIDB();
-  if (!db) return;
-  try {
-    // AIO-221: await transaction completion to prevent duplicate replay
-    const tx = db.transaction(_offlineStore, "readwrite");
-    const store = tx.objectStore(_offlineStore);
-    store.clear();
-    await new Promise<void>((resolve, reject) => {
-      tx.oncomplete = () => resolve();
-      tx.onerror = () => reject(tx.error);
-      tx.onabort = () => reject(tx.error);
-    });
-  } catch (e) {
-    _diagEmit({
-      type: "offline-storage-error",
-      severity: "info",
-      source: "browser",
-      message: "IndexedDB operation failed — offline persistence unavailable",
-      detail: { error: String(e) },
-      hint:
-        "Offline action queue will use memory only. Check browser storage quota.",
-    });
-  }
-}
-
-/** Reset IDB state — for _reset() */
-export function _resetIDB(): void {
-  _idb = null;
-  _idbPromise = null;
-}
 
 // ── Subscription tracking re-exports ────────────────────────────────
 
@@ -350,236 +204,7 @@ export function _resetTracking(): void {
   _coreCancelSubsTimer();
 }
 
-// ── Vitals / render meter state ─────────────────────────────────────
-
-export let _vitalsRenderMeter: RenderMeterAPI | null = null;
-export function _setVitalsRenderMeter(v: RenderMeterAPI | null): void {
-  _vitalsRenderMeter = v;
-}
-export let _vitalsUrlLogged = false;
-export function _setVitalsUrlLogged(v: boolean): void {
-  _vitalsUrlLogged = v;
-}
-export let _vitalsTransportProbe:
-  | ReturnType<typeof createTransportProbeClient>
-  | null = null;
-export function _setVitalsTransportProbe(
-  v: typeof _vitalsTransportProbe,
-): void {
-  _vitalsTransportProbe = v;
-}
-export let _vitalsPingTimer: ReturnType<typeof setInterval> | null = null;
-export function _setVitalsPingTimer(v: typeof _vitalsPingTimer): void {
-  _vitalsPingTimer = v;
-}
-export const _useAioWarned = new Set<string>();
-export let _useAioActiveCount = 0;
-export function _setUseAioActiveCount(n: number): void {
-  _useAioActiveCount = n;
-}
-export let _cleanupTimer: ReturnType<typeof setTimeout> | null = null;
-export function _setCleanupTimer(v: typeof _cleanupTimer): void {
-  _cleanupTimer = v;
-}
-export let _listenerHighWater = 0;
-export function _setListenerHighWater(n: number): void {
-  _listenerHighWater = n;
-}
-
-// ── Connection status indicator (pure DOM) ──────────────────────────
-
-let _statusEl: HTMLElement | null = null;
-let _statusTimer: ReturnType<typeof setTimeout> | null = null;
-let _statusStyleInjected = false;
-
-function _injectStatusStyle(): void {
-  if (_statusStyleInjected) return;
-  _statusStyleInjected = true;
-  const style = document.createElement("style");
-  style.textContent =
-    "@keyframes __aio-pulse{0%,100%{opacity:1}50%{opacity:.5}}";
-  document.head.appendChild(style);
-}
-
-export function _showStatus(
-  text: string,
-  color: string,
-  autohide?: number,
-): void {
-  if (
-    (window as unknown as Record<string, unknown>).__aioShowStatus === false
-  ) return;
-  _injectStatusStyle();
-  if (_statusTimer) {
-    clearTimeout(_statusTimer);
-    _statusTimer = null;
-  }
-  if (!_statusEl) {
-    _statusEl = document.createElement("div");
-    _statusEl.style.cssText =
-      "position:fixed;bottom:12px;left:50%;transform:translateX(-50%);z-index:99999;" +
-      "font:12px/1 monospace;padding:6px 14px;border-radius:20px;" +
-      "background:rgba(240,240,245,.92);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);" +
-      "border:1px solid rgba(0,0,0,.12);box-shadow:0 4px 16px rgba(0,0,0,.12);" +
-      "transition:opacity .3s;pointer-events:none;";
-    document.body.appendChild(_statusEl);
-  }
-  _statusEl.textContent = text;
-  _statusEl.style.color = color;
-  _statusEl.style.opacity = "1";
-  _statusEl.style.animation = autohide
-    ? "none"
-    : "__aio-pulse 2s ease-in-out infinite";
-  if (autohide) {
-    _statusTimer = setTimeout(() => {
-      if (_statusEl) _statusEl.style.opacity = "0";
-    }, autohide);
-  }
-}
-
-export function _hideStatus(): void {
-  if (_statusEl) _statusEl.style.opacity = "0";
-  if (_statusTimer) {
-    clearTimeout(_statusTimer);
-    _statusTimer = null;
-  }
-}
-
-/** Reset status UI state — for _reset() */
-export function _resetStatus(): void {
-  _statusEl?.remove();
-  _statusEl = null;
-  if (_statusTimer) {
-    clearTimeout(_statusTimer);
-    _statusTimer = null;
-  }
-}
-
-// ── State notification ──────────────────────────────────────────────
-
-export const _listeners = new Listeners<unknown>();
-
-export function _notify() {
-  _listeners.notify(_coreHasState() ? _coreGetState() : null);
-}
-
-// ── State version & readiness ───────────────────────────────────────
-
-export let _stateVersion = 0;
-export function _incStateVersion(): void {
-  _stateVersion++;
-}
-export function _resetStateVersion(): void {
-  _stateVersion = 0;
-}
-
-let _stateReadyResolve: (() => void) | null = null;
-let _stateReadyPromise: Promise<void> | null = null;
-
-/** Called from _notify() when state first arrives — resolves the readiness promise. */
-export function _resolveStateReady(): void {
-  if (_stateReadyResolve) {
-    _stateReadyResolve();
-    _stateReadyResolve = null;
-    _stateReadyPromise = null;
-  }
-}
-
-export function _resetStateReady(): void {
-  _stateReadyPromise = null;
-  _stateReadyResolve = null;
-}
-
-// _waitForState needs _connect — injected from browser.ts
-let _connectFn: (() => void) | null = null;
-export function _setConnectFn(fn: () => void): void {
-  _connectFn = fn;
-}
-
-export function _waitForState(): Promise<void> {
-  if (_coreHasState()) return Promise.resolve();
-  if (!_stateReadyPromise) {
-    _stateReadyPromise = new Promise<void>((resolve) => {
-      _stateReadyResolve = resolve;
-    });
-  }
-  if (_connectFn) _connectFn();
-  return _stateReadyPromise;
-}
-
-// ── Subscription management ─────────────────────────────────────────
-
-export const _useAioSubscribe = (onStoreChange: () => void): () => void => {
-  _useAioActiveCount++;
-  const unsub = _subscribe(onStoreChange);
-  return () => {
-    _useAioActiveCount--;
-    unsub();
-  };
-};
-
-// _subscribe needs _connect, _rSync, _popstateHandler — injected
-let _subscribeTriggerConnect: (() => void) | null = null;
-let _subscribeTriggerPopstate: (() => void) | null = null;
-export function _setSubscribeTriggers(
-  connect: () => void,
-  popstate: () => void,
-): void {
-  _subscribeTriggerConnect = connect;
-  _subscribeTriggerPopstate = popstate;
-}
-
-export function _subscribe(onStoreChange: () => void): () => void {
-  const unsub = _listeners.add(() => {
-    onStoreChange();
-  });
-  if (_listeners.size > _listenerHighWater) {
-    _listenerHighWater = _listeners.size;
-  }
-  if (_subscribeTriggerConnect) {
-    _subscribeTriggerConnect();
-  }
-  return () => {
-    unsub();
-    if (_listeners.size === 0) {
-      if (_cleanupTimer) clearTimeout(_cleanupTimer);
-      const peakCount = _listenerHighWater;
-      _cleanupTimer = setTimeout(() => {
-        _cleanupTimer = null;
-        if (_listeners.size === 0) {
-          console.warn(
-            `[aio] teardown — no listeners for 300ms (peak was ${peakCount}). Closing connection, clearing state.`,
-          );
-          _diagEmit({
-            type: "teardown",
-            severity: "warning",
-            source: "browser",
-            message: "Full teardown — no listeners remained after grace period",
-            detail: { graceMs: 300, peakListenerCount: peakCount },
-          });
-          // Trigger full teardown via browser.ts callback
-          if (_teardownFn) _teardownFn();
-        } else {
-          console.warn(
-            `[aio] teardown averted — listeners dropped to 0 but recovered to ${_listeners.size} within 300ms`,
-          );
-          _diagEmit({
-            type: "teardown-averted",
-            severity: "info",
-            source: "browser",
-            message: "Transient listener gap — teardown cancelled",
-            detail: { recoveredCount: _listeners.size },
-          });
-        }
-      }, 300);
-    }
-  };
-}
-
-let _teardownFn: (() => void) | null = null;
-export function _setTeardownFn(fn: () => void): void {
-  _teardownFn = fn;
-}
+// ── Snapshot helpers ─────────────────────────────────────────────────
 
 export function _getSnapshot(): unknown {
   return _coreHasState() ? _coreGetState() : null;
@@ -588,220 +213,10 @@ export function _getServerSnapshot(): unknown {
   return null;
 }
 
-// ── DevTools ────────────────────────────────────────────────────────
-
-interface DevToolsConnection {
-  init: (state: unknown) => void;
-  send: (action: { type: string; payload?: unknown }, state: unknown) => void;
-  subscribe: (
-    listener: (
-      message: { type: string; payload?: unknown; state?: string },
-    ) => void,
-  ) => () => void;
-  disconnect: () => void;
-}
-
-export let _devtools: DevToolsConnection | null = null;
-export let _devtoolsConnected = false;
-
-function _initDevTools(): void {
-  if (_devtoolsConnected) return;
-  const ext =
-    (window as unknown as Record<string, unknown>).__REDUX_DEVTOOLS_EXTENSION__;
-  if (!ext) return;
-
-  try {
-    _devtools = (ext as { connect: () => DevToolsConnection }).connect();
-    if (_devtools) {
-      _devtoolsConnected = true;
-      _devtools.subscribe((msg) => {
-        if (msg.type === "DISPATCH") {
-          const payload = msg.payload as { type?: string } | undefined;
-          if (
-            payload?.type === "JUMP_TO_STATE" ||
-            payload?.type === "JUMP_TO_ACTION"
-          ) {
-            console.debug(
-              "[aio] DevTools time-travel: use Ctrl+. panel for client-side state navigation",
-            );
-          }
-        }
-      });
-      if (_coreHasState()) {
-        _devtools.init(_coreGetState());
-      }
-    }
-  } catch {
-    // DevTools not available or failed to connect
-  }
-}
-
-export function _sendDevTools(
-  action: { type: string; payload?: unknown },
-  state: unknown,
-): void {
-  if (_devtools && _devtoolsConnected) {
-    try {
-      _devtools.send(action, state);
-    } catch {
-      _devtoolsConnected = false;
-    }
-  }
-}
-
-export function connectDevTools(): void {
-  _initDevTools();
-  if (_devtools && _coreHasState()) {
-    try {
-      _devtools.init(_coreGetState());
-    } catch { /* ignore */ }
-  }
-}
-
-export function disconnectDevTools(): void {
-  if (_devtools) {
-    try {
-      _devtools.disconnect();
-    } catch { /* ignore */ }
-    _devtools = null;
-    _devtoolsConnected = false;
-  }
-}
-
-export function _resetDevTools(): void {
-  _devtools = null;
-  _devtoolsConnected = false;
-}
-
-// ── feature + bridge + aio stub ─────────────────────────────────────
-
-// deno-lint-ignore no-explicit-any
-type _Creators = Record<string, (...args: any[]) => any>;
-
-// deno-lint-ignore no-explicit-any
-export function feature(
-  name: string,
-  config: {
-    state?: any;
-    actions?: _Creators;
-    methods?: Record<string, unknown>;
-    generators?: Record<string, unknown>;
-    effects?: _Creators;
-    machine?: any;
-    reduce?: any;
-    execute?: any;
-    selectors?: any;
-  },
-): Record<string, unknown> {
-  const prefix = name;
-  // deno-lint-ignore no-explicit-any
-  const buildCat = (creators: _Creators): Record<string, any> => {
-    const cat: Record<string, unknown> = {};
-    for (const key of Object.keys(creators)) {
-      const label = `${prefix}:${key}`;
-      cat[key] = Object.assign(
-        (...args: unknown[]) => ({
-          type: label,
-          payload: creators[key]!(...args) ?? {},
-        }),
-        { type: label },
-      );
-    }
-    return cat;
-  };
-  if (config.methods) {
-    const allKeys = [
-      ...Object.keys(config.methods),
-      ...Object.keys(config.generators ?? {}),
-    ];
-    const cat: Record<string, unknown> = {};
-    for (const key of allKeys) {
-      const label = `${prefix}:${key}`;
-      cat[key] = Object.assign(
-        (...args: unknown[]) => ({ type: label, payload: { args } }),
-        { type: label },
-      );
-    }
-    // deno-lint-ignore no-explicit-any
-    const eCat = buildCat((config.effects ?? {}) as any);
-    const def: Record<string, unknown> = {
-      __aio: {
-        state: config.state ?? {},
-        machine: config.machine ?? false,
-        selectors: config.selectors ?? {},
-        actionKeys: allKeys,
-        effectKeys: Object.keys(config.effects ?? {}),
-        id: prefix,
-        actions: cat,
-        effects: eCat,
-        bound: false,
-      },
-    };
-    for (const [key, value] of Object.entries(cat)) {
-      def[key] = value;
-    }
-    return def;
-  }
-  const aCat = buildCat(config.actions ?? {});
-  const def: Record<string, unknown> = {
-    __aio: {
-      state: config.state ?? {},
-      machine: config.machine ?? false,
-      selectors: config.selectors ?? {},
-      actionKeys: Object.keys(config.actions ?? {}),
-      effectKeys: Object.keys(config.effects ?? {}),
-      id: prefix,
-      actions: aCat,
-      effects: buildCat(config.effects ?? {}),
-      bound: false,
-    },
-  };
-  for (const [key, value] of Object.entries(aCat)) {
-    def[key] = value;
-  }
-  return def;
-}
-
-// deno-lint-ignore no-explicit-any
-export function bridge(name: string, config: any): Record<string, unknown> {
-  const channels = Object.keys(config.channels ?? {});
-  // deno-lint-ignore no-explicit-any
-  const actions: Record<string, (...args: any[]) => Record<string, unknown>> =
-    {};
-  for (const ch of channels) {
-    actions[`${ch}Request`] = (...args: unknown[]) => ({
-      ...(config.channels[ch]?.request?.(...args) ?? {}),
-      _channel: ch,
-    });
-    actions[`${ch}Response`] = (...args: unknown[]) => ({
-      ...(config.channels[ch]?.response?.(...args) ?? {}),
-      _channel: ch,
-    });
-    actions[`${ch}Timeout`] = () => ({ _channel: ch });
-  }
-  return feature(name, { actions, machine: false, reduce: () => {} });
-}
-
-// deno-lint-ignore no-explicit-any
-export const aio: Record<string, any> = {
-  run() {
-    return Promise.resolve();
-  },
-  middleware: {
-    logger: () => () => null,
-    devtools: () => () => null,
-    perfBudget: () => () => null,
-    validate: () => () => null,
-    metrics: () => () => null,
-    freeze: () => () => null,
-    create: () => () => null,
-  },
-};
-
 // ── Send cache ──────────────────────────────────────────────────────
 
-export const _featureSendCache = new WeakMap<
-  _CoreFeatureRef,
+export const _cellSendCache = new WeakMap<
+  _CoreCellRef,
   Record<string, (...args: unknown[]) => void>
 >();
 
@@ -876,28 +291,37 @@ export function _setClientSend(
   _clientSend = fn;
 }
 
+import {
+  _getRPath,
+  _getRSearch,
+  _rListeners,
+  navigate as _navigate,
+} from "./protocol-router.ts";
+import {
+  _callConnectFn,
+  _subscribe,
+  _vitalsRenderMeter as _vmRenderMeter,
+} from "./protocol-subscription.ts";
+
 export const client: {
   subscribe(fn: (state: unknown) => void): () => void;
   getState(): unknown;
-  getFeatureState(name: string): unknown;
+  getCellState(name: string): unknown;
   send(action: { type: string; payload?: unknown }): void;
   route: {
     subscribe(fn: () => void): () => void;
     getPath(): string;
     getSearch(): URLSearchParams;
-    navigate: typeof navigate;
+    navigate: typeof _navigate;
   };
 } = {
   subscribe(fn: (state: unknown) => void): () => void {
-    const unsub = _subscribe(() =>
-      fn(_coreHasState() ? _coreGetState() : null)
-    );
-    return unsub;
+    return _subscribe(() => fn(_coreHasState() ? _coreGetState() : null));
   },
   getState(): unknown {
     return _coreHasState() ? _coreGetState() : null;
   },
-  getFeatureState(name: string): unknown {
+  getCellState(name: string): unknown {
     if (!_coreHasState()) return null;
     const s = _coreGetState();
     return s[name] ?? null;
@@ -910,167 +334,14 @@ export const client: {
       return _rListeners.add(() => fn());
     },
     getPath(): string {
-      return _rPath;
+      return _getRPath();
     },
     getSearch(): URLSearchParams {
-      return _rSearch;
+      return _getRSearch();
     },
-    navigate,
+    navigate: _navigate,
   },
 };
-
-// ── Router infrastructure ───────────────────────────────────────────
-
-let _rPath = typeof location !== "undefined" ? location.pathname : "/";
-let _rSearch: URLSearchParams = typeof location !== "undefined"
-  ? new URLSearchParams(location.search)
-  : new URLSearchParams();
-export const _rListeners = new Listeners<void>();
-
-export const routePath: Signal<string> = signal<string>(_rPath);
-export const routeSearch: Signal<URLSearchParams> = signal<URLSearchParams>(
-  _rSearch,
-);
-
-export function _rSync(): void {
-  _rPath = location.pathname;
-  _rSearch = new URLSearchParams(location.search);
-  routePath.set(_rPath);
-  routeSearch.set(_rSearch);
-  _rListeners.notify(undefined);
-}
-
-export let _popstateHandler: (() => void) | null = null;
-export let _navigateHandler: EventListener | null = null;
-export function _setPopstateHandler(h: (() => void) | null): void {
-  _popstateHandler = h;
-}
-export function _setNavigateHandler(h: EventListener | null): void {
-  _navigateHandler = h;
-}
-export function _setVisibilityHandler(h: (() => void) | null): void {
-  _visibilityHandler = h;
-}
-if (typeof window !== "undefined") {
-  _popstateHandler = _rSync;
-  addEventListener("popstate", _popstateHandler);
-  // AIO-54: Electron swallows <a> clicks before DOM dispatch. The main process
-  // intercepts via will-navigate, prevents navigation, and relays the URL back
-  // to the renderer as CustomEvent('aio:navigate'). We handle it here so both
-  // browser.ts (React) and browser-air.ts (AIR) get navigation support.
-  // Store ref for cleanup in _reset() (AIO-141)
-  _navigateHandler = ((e: CustomEvent<{ url: string }>) => {
-    try {
-      const url = new URL(e.detail.url);
-      navigate(url.pathname + url.search + url.hash);
-    } catch { /* invalid URL — ignore */ }
-  }) as EventListener;
-  addEventListener("aio:navigate", _navigateHandler);
-}
-
-export function _rSubscribe(fn: () => void): () => void {
-  return _rListeners.add(() => fn());
-}
-
-export function _rSnapshot(): string {
-  return typeof location !== "undefined"
-    ? location.pathname + location.search
-    : "/";
-}
-
-export function matchPath(
-  pattern: string,
-  path: string,
-  exact = true,
-): Record<string, string> | null {
-  const keys: string[] = [];
-  const segments = pattern.replace(/\/+$/, "").split("/");
-  const regParts = segments.map((seg) => {
-    if (seg.startsWith(":")) {
-      keys.push(seg.slice(1));
-      return "([^/]+)";
-    }
-    if (seg === "*") {
-      keys.push("*");
-      return "(.*)";
-    }
-    return seg.replace(/[.+?^${}()|[\]\\]/g, "\\$&");
-  });
-  const suffix = exact ? "\\/?$" : "(\\/|$)";
-  const re = new RegExp("^" + regParts.join("\\/") + suffix);
-  const m = re.exec(path);
-  if (!m) return null;
-  const params: Record<string, string> = {};
-  keys.forEach((k, i) => {
-    let v: string;
-    try {
-      v = decodeURIComponent(m[i + 1] ?? "");
-    } catch {
-      v = m[i + 1] ?? "";
-    }
-    if (k === "*") v = v.replace(/\/$/, "");
-    params[k] = v;
-  });
-  return params;
-}
-
-export function navigate(
-  to: string | number,
-  opts?: { replace?: boolean },
-): void {
-  if (typeof to === "number") {
-    history.go(to);
-    return;
-  }
-  // AIO-193: guard against malformed URLs — prevents route state desync
-  let url: URL;
-  try {
-    url = new URL(to, location.href);
-  } catch {
-    console.error(`[aio:navigate] Invalid URL: ${to}`);
-    return;
-  }
-  if (opts?.replace) history.replaceState(null, "", url);
-  else history.pushState(null, "", url);
-  _rSync();
-}
-
-// ── Types (exported) ────────────────────────────────────────────────
-
-export type RouteState = {
-  path: string;
-  params: Record<string, string>;
-  search: URLSearchParams;
-  matched: boolean;
-};
-
-export type RouteProps = {
-  path?: string;
-  index?: boolean;
-  element?: unknown;
-  children?: unknown;
-};
-
-export type LinkProps = {
-  to: string;
-  replace?: boolean;
-  exact?: boolean;
-  activeClass?: string;
-  activeStyle?: Record<string, unknown>;
-  children?: unknown;
-  className?: string;
-  style?: Record<string, unknown>;
-  [k: string]: unknown;
-};
-
-// ── Routing state accessors ─────────────────────────────────────────
-
-export function _getRPath(): string {
-  return _rPath;
-}
-export function _getRSearch(): URLSearchParams {
-  return _rSearch;
-}
 
 // ── ensureConnected ─────────────────────────────────────────────────
 
@@ -1078,7 +349,7 @@ let _ensured = false;
 export function ensureConnected(): void {
   if (_ensured) return;
   _ensured = true;
-  if (_connectFn) _connectFn();
+  _callConnectFn();
 }
 export function _resetEnsured(): void {
   _ensured = false;
@@ -1087,10 +358,13 @@ export function _resetEnsured(): void {
 // ── Visibility guard ────────────────────────────────────────────────
 
 export let _visibilityHandler: (() => void) | null = null;
+export function _setVisibilityHandler(h: (() => void) | null): void {
+  _visibilityHandler = h;
+}
 if (typeof document !== "undefined") {
   _visibilityHandler = () => {
-    if (_vitalsRenderMeter) {
-      _vitalsRenderMeter.setPaused(document.hidden);
+    if (_vmRenderMeter) {
+      _vmRenderMeter.setPaused(document.hidden);
     }
   };
   document.addEventListener("visibilitychange", _visibilityHandler);

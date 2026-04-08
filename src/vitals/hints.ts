@@ -81,7 +81,7 @@ export function evaluateHints(
   ) {
     return {
       cause:
-        `Reducer for '${snap.loop.lastReduceFeature}/${snap.loop.lastReduceAction}' took ${
+        `Reducer for '${snap.loop.lastReduceCell}/${snap.loop.lastReduceAction}' took ${
           Math.round(snap.loop.lastReduceTime)
         }ms`,
       evidence: [
@@ -107,7 +107,7 @@ export function evaluateHints(
         `Dispatch queue backed up to ${snap.loop.queueDepth} actions, drain rate: ${snap.loop.drainRate}/s`,
       evidence: [
         `queue depth: ${snap.loop.queueDepth} (threshold: ${thresholds.queue.frozen})`,
-        `top contributor: ${snap.loop.lastReduceFeature}/${snap.loop.lastReduceAction}`,
+        `top contributor: ${snap.loop.lastReduceCell}/${snap.loop.lastReduceAction}`,
       ],
       suggestion: "Debounce rapid-fire dispatches, or batch related actions.",
       severity: classifySeverity(2, true, true),

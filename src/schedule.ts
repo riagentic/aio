@@ -435,7 +435,7 @@ export function createScheduleManager(
     timers.clear();
   }
 
-  /** Cancel all timers whose ID starts with prefix + ":" (e.g. feature name).
+  /** Cancel all timers whose ID starts with prefix + ":" (e.g. cell name).
    *  AIO-198: match delimiter to avoid "user" cancelling "userProfile" timers. */
   function cancelByPrefix(prefix: string): void {
     const match = prefix + ":";

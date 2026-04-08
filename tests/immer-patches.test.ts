@@ -84,11 +84,11 @@ import {
   _getState,
   _injectState,
   _reset,
-  getFeatureSignal,
+  getCellSignal,
   handleMessage,
 } from "../src/state-core.ts";
 
-Deno.test("handleMessage: $patches replace op updates state + feature signal", () => {
+Deno.test("handleMessage: $patches replace op updates state + cell signal", () => {
   _reset();
   // First inject initial state
   _injectState({ counter: { count: 0 }, user: { name: "Alice" } });
@@ -99,8 +99,8 @@ Deno.test("handleMessage: $patches replace op updates state + feature signal", (
 
   assertEquals(result, "delta");
   assertEquals(_getState().counter.count, 5);
-  assertEquals(getFeatureSignal("counter").peek().count, 5);
-  // user feature unchanged
+  assertEquals(getCellSignal("counter").peek().count, 5);
+  // user cell unchanged
   assertEquals(_getState().user.name, "Alice");
   _reset();
 });
@@ -154,7 +154,7 @@ Deno.test("handleMessage: $patches before initial state returns dropped", () => 
   _reset();
 });
 
-Deno.test("handleMessage: $patches affecting multiple features", () => {
+Deno.test("handleMessage: $patches affecting multiple cells", () => {
   _reset();
   _injectState({ feat1: { a: 1 }, feat2: { b: 2 } });
 
@@ -166,7 +166,7 @@ Deno.test("handleMessage: $patches affecting multiple features", () => {
   });
 
   assertEquals(result, "delta");
-  assertEquals(getFeatureSignal("feat1").peek().a, 10);
-  assertEquals(getFeatureSignal("feat2").peek().b, 20);
+  assertEquals(getCellSignal("feat1").peek().a, 10);
+  assertEquals(getCellSignal("feat2").peek().b, 20);
   _reset();
 });

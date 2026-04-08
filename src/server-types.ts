@@ -1,0 +1,95 @@
+// Server type definitions — extracted from server.ts for clarity
+import type { AioUser } from "./aio.ts";
+import type { RenderBudget } from "./vitals/types.ts";
+import type { VitalsSystem } from "./vitals/mod.ts";
+
+export type DispatchFn = (event: unknown, user?: AioUser) => void;
+export type GetUIStateFn = (user?: AioUser) => unknown;
+
+/** Internal config — passed by aio.run(), not user-facing */
+export interface ServerConfig {
+  port: number;
+  socketPath?: string; // Unix domain socket path — when set, serves over UDS instead of TCP
+  title: string;
+  width?: number; // window width hint (embedded in HTML meta)
+  height?: number; // window height hint (embedded in HTML meta)
+  getUIState: GetUIStateFn; // optional user for per-user filtering
+  dispatch: DispatchFn;
+  getSnapshot?: () => string;
+  loadSnapshot?: (json: string) => void;
+  baseDir: string;
+  debug: (msg: string) => void;
+  prod?: boolean; // serve pre-built dist/ instead of live-transpiling
+  distDir?: string; // absolute path to dist/ (required when prod=true)
+  expose?: boolean; // bind 0.0.0.0 instead of 127.0.0.1
+  token?: string; // access token required when expose=true (no users)
+  cert?: string; // PEM cert string — enables HTTPS when set (auto-generated when --expose)
+  key?: string; // PEM key string — required when cert is set
+  users?: Record<string, AioUser>; // per-user token map (overrides token)
+  resolveUser?: (token: string) => AioUser | null | Promise<AioUser | null>; // dynamic user resolution (AIO-171)
+  showStatus?: boolean; // show reconnection indicator (default: true)
+  renderer?: "react" | "aio"; // default: 'aio' — native AIR VDOM engine
+  renderBudget?: RenderBudget; // sent to browser for RenderMeter thresholds
+  fullStateThreshold?: number; // 0-1: ratio of changed keys for delta vs full broadcast (default: 0.5)
+  maxConnections?: number; // max concurrent WebSocket clients (default: 100)
+  syncIntervalMs?: number; // throttle state broadcasts: max 1 push per N ms (default: 50)
+  allowedOrigins?: string[]; // extra allowed origins beyond localhost (e.g. Docker, reverse proxy)
+  clientCounter?: { value: number }; // shared index counter — WS and UDS get unique indices
+  cellPatchStrategies?: Map<string, "raw" | "skip" | "filter" | "full">; // per-cell patch strategy
+  cellFilterFields?: Map<
+    string,
+    { mode: "include" | "exclude"; fields: Set<string> }
+  >; // field sets for "filter" cells
+  onConnect?: (user?: AioUser) => void;
+  onDisconnect?: (user?: AioUser) => void;
+  onReload?: (signal: "__reload" | "__css") => void; // called on live-reload — lets aio.ts forward to UDS
+  // Vitals — latency monitoring & backpressure
+  vitalsSystem?: VitalsSystem;
+  // Time-travel (dev mode)
+  onTTCommand?: (cmd: string, arg?: number) => void;
+  getTTBroadcast?: () => unknown;
+  // Health endpoint — GET /__aio/health
+  getHealth?: () => unknown;
+  // Trojan — control API at /__aio/trojan/* (localhost-only, CSRF-protected, rate-limited)
+  trojan?: {
+    getState: () => unknown; // raw unfiltered state
+    getSchedules: () => string[]; // active schedule IDs
+    getTTHistory?: () => unknown; // time-travel entries (wire format)
+    forcePersist?: () => void; // trigger immediate persist
+    sqlQuery?: (sql: string) => Promise<unknown[]>; // read-only SQL query (async)
+    shutdown?: () => Promise<void>; // graceful shutdown
+    startedAt: number; // Date.now() at boot
+    /** UDS clients (Electron IPC) — for am client command */
+    udsClients?: () => { index: number; id: string }[];
+    /** Send a message to a UDS client and wait for __clientState: response */
+    requestUdsClientState?: (index: number, msg?: string) => Promise<unknown>;
+  };
+  // CRDT sync handlers — set when any cell has sync: true
+  syncHandler?: {
+    handleOp: (
+      op: unknown,
+      meta: { id: string; user?: unknown },
+      socket: WebSocket,
+    ) => void;
+    handleSync: (
+      sync: unknown,
+      meta: { id: string; user?: unknown },
+      socket: WebSocket,
+    ) => void;
+  };
+}
+
+/** Returned to aio.run() so it can push state updates and shut down cleanly */
+export interface ServerHandle {
+  broadcast: (
+    patches?: Array<{ cell: string; ops: import("immer").Patch[] }>,
+  ) => void;
+  /** Send raw string message to all connected WS clients, optionally excluding one */
+  broadcastRaw: (msg: string, exclude?: WebSocket) => void;
+  broadcastTT: () => void;
+  shutdown: () => Promise<void>;
+  clientCount: () => number;
+  trojanPort?: number; // set when TLS is active — HTTP-only trojan endpoint on 127.0.0.1
+  socketPath?: string; // set when UDS is active
+  watcherActive?: boolean; // true if file watcher is running (dev mode only)
+}

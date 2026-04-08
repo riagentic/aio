@@ -1,6 +1,6 @@
 # Testing
 
-Verifying features work correctly.
+Verifying cells work correctly.
 
-- [Feature Testing](feature-testing.md) — testFeature, assertions, async, fuzz
+- [Cell Testing](cell-testing.md) — testCell, assertions, async, fuzz
 - [Linter](linter.md) — aiol static analysis, CI integration

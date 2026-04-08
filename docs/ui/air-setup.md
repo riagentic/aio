@@ -39,13 +39,13 @@ Write `.tsx` files. The JSX compiler maps `<div>` to AIR's virtual DOM — no
 React import needed. AIO uses `@types/react` for HTML intrinsic element types.
 
 ```ts
-import { computed, effect, mount, signal, useFeature } from "aio/air";
+import { computed, effect, mount, signal, useCell } from "aio/air";
 ```
 
 **Import rule:**
 
-- `"aio"` — server code: `feature`, `aio`, `log`, types
-- `"aio/air"` — client code: `useFeature`, `signal`, `mount`, UI utilities
+- `"aio"` — server code: `cell`, `aio`, `log`, types
+- `"aio/air"` — client code: `useCell`, `signal`, `mount`, UI utilities
 
 ---
 
@@ -55,10 +55,10 @@ import { computed, effect, mount, signal, useFeature } from "aio/air";
 ┌──────────────────────────────────────────────────────────────────┐
 │                          Server (Deno)                           │
 │                                                                  │
-│   feature("counter", { state, methods })                         │
-│   feature("todo",    { state, methods, persist })                │
+│   cell("counter", { state, methods })                         │
+│   cell("todo",    { state, methods, persist })                │
 │                                                                  │
-│   aio.run({ features: [...], baseDir })                          │
+│   aio.run({ cells: [...], baseDir })                          │
 │   ─── dispatch loop ── reduce ── effects ── persist ── broadcast │
 └──────────────────────┬───────────────────────────────────────────┘
                        │ WebSocket / IPC
@@ -67,8 +67,8 @@ import { computed, effect, mount, signal, useFeature } from "aio/air";
 ┌──────────────────────────────────────────────────────────────────┐
 │                    Client (AIR Renderer)                          │
 │                                                                  │
-│   state-core: signals per feature ← server broadcasts            │
-│   adapters/air: useFeature() → { state, send }                   │
+│   state-core: signals per cell ← server broadcasts            │
+│   adapters/air: useCell() → { state, send }                   │
 │   aio-renderer: mount() → per-component signal tracking          │
 │                                                                  │
 │   signal() / computed() / effect() — local reactivity            │
@@ -76,8 +76,8 @@ import { computed, effect, mount, signal, useFeature } from "aio/air";
 └──────────────────────────────────────────────────────────────────┘
 ```
 
-**The server owns business logic and state.** Features define methods, state
-shape, persistence rules, and inter-feature communication.
+**The server owns business logic and state.** Cells define methods, state shape,
+persistence rules, and inter-cell communication.
 
 **The client owns rendering and local interaction.** AIR reads server state via
 signals, sends actions back, and handles everything visual.
@@ -89,9 +89,9 @@ signals, sends actions back, and handles everything visual.
 **`app.ts` — Server entry point:**
 
 ```ts
-import { aio, feature } from "aio";
+import { aio, cell } from "aio";
 
-export const counter = feature("counter", {
+export const counter = cell("counter", {
   state: { count: 0 },
   methods: {
     increment(s, by = 1) {
@@ -106,17 +106,17 @@ export const counter = feature("counter", {
   },
 });
 
-await aio.run({ features: [counter], baseDir: import.meta.dirname! });
+await aio.run({ cells: [counter], baseDir: import.meta.dirname! });
 ```
 
 **`App.tsx` — UI component:**
 
 ```tsx
-import { useFeature } from "aio/air";
+import { useCell } from "aio/air";
 import { counter } from "./app.ts";
 
 export default function App() {
-  const { state, send } = useFeature(counter);
+  const { state, send } = useCell(counter);
   return (
     <div>
       <h1>{state.count}</h1>
@@ -141,7 +141,7 @@ browser, connects WebSocket, and streams state. Works across tabs.
 3. Action sent via WebSocket → { type: "counter:increment", ... }
 4. Server dispatches through reduce() → s.count += 1
 5. Server broadcasts delta → { counter: { count: 1 } }
-6. state-core updates feature signal → batch(() => featureSignal.set(...))
+6. state-core updates cell signal → batch(() => cellSignal.set(...))
 7. AIR re-renders only components that read counter.count
 ```
 
@@ -149,14 +149,14 @@ browser, connects WebSocket, and streams state. Works across tabs.
 
 ## Connecting UI to Server State
 
-### useFeature — Subscribe to a feature
+### useCell — Subscribe to a cell
 
 ```tsx
-import { useFeature } from "aio/air";
+import { useCell } from "aio/air";
 import { counter } from "./app.ts";
 
 const Counter = () => {
-  const { state, send } = useFeature(counter);
+  const { state, send } = useCell(counter);
   return <span>{state.count}</span>;
 };
 ```
@@ -174,7 +174,7 @@ const Dashboard = () => {
 };
 ```
 
-Re-renders on **any** state change. Prefer `useFeature` for scoped updates.
+Re-renders on **any** state change. Prefer `useCell` for scoped updates.
 
 ### useLocal — Client-only state
 
@@ -233,7 +233,7 @@ const SearchBar = () => (
 
 | State type                        | Use                        | Why                             |
 | --------------------------------- | -------------------------- | ------------------------------- |
-| Business data (persisted, shared) | `useFeature`               | Server is source of truth       |
+| Business data (persisted, shared) | `useCell`                  | Server is source of truth       |
 | Component-local UI toggle         | `useLocal`                 | Signal-backed, component-scoped |
 | Cross-component UI state          | `signal()` at module level | Shared without prop drilling    |
 | Cached derivation                 | `computed()`               | Auto-tracked, no dep arrays     |

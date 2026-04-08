@@ -19,9 +19,9 @@ export type DiagnosticsHooks = {
     next: Record<string, unknown>,
     action: { type: string; payload?: unknown },
   ) => void;
-  onStart: (featureNames: string[]) => void;
+  onStart: (cellNames: string[]) => void;
   onStop: () => Promise<void>;
-  onError: (featureName: string) => void;
+  onError: (cellName: string) => void;
   getRecoveredState: () => CheckpointData | null;
   setHealthGetter: (
     fn: () => Record<string, { errors: number; enabled: boolean }>,
@@ -38,7 +38,7 @@ export function initDiagnostics(
   const opts = resolveOptions(config, isProd);
   if (opts === false) return null;
 
-  // ── Checkpoint (read early, before features init) ──
+  // ── Checkpoint (read early, before cells init) ──
   let recovered: CheckpointData | null = null;
   let cpWriter: ReturnType<typeof createCheckpoint> | null = null;
   if (opts.checkpoint) {
@@ -77,8 +77,8 @@ export function initDiagnostics(
   let lastState: Record<string, unknown> = {};
   const recentActions: string[] = [];
   const MAX_RECENT = 20;
-  const featureErrorCounts = new Map<string, number>();
-  const featureEnabled = new Map<string, boolean>();
+  const cellErrorCounts = new Map<string, number>();
+  const cellEnabled = new Map<string, boolean>();
   let healthGetter:
     | (() => Record<string, { errors: number; enabled: boolean }>)
     | null = null;
@@ -89,10 +89,10 @@ export function initDiagnostics(
   > {
     if (healthGetter) return healthGetter();
     const result: Record<string, { errors: number; enabled: boolean }> = {};
-    for (const [name, count] of featureErrorCounts) {
+    for (const [name, count] of cellErrorCounts) {
       result[name] = {
         errors: count,
-        enabled: featureEnabled.get(name) ?? true,
+        enabled: cellEnabled.get(name) ?? true,
       };
     }
     return result;
@@ -103,14 +103,14 @@ export function initDiagnostics(
   if (opts.crashHandler) {
     uninstallCrash = installCrashHandler({
       log: { error: (msg, data) => log.error("crash", msg, data) },
-      getHealthData: () => ({ features: getHealthSnapshot() }),
+      getHealthData: () => ({ cells: getHealthSnapshot() }),
       writeEmergencyCheckpoint: () => {
         if (cpWriter) {
           cpWriter.writeSync({
             ts: Date.now(),
             state: lastState,
             recentActions: [...recentActions],
-            features: getHealthSnapshot(),
+            cells: getHealthSnapshot(),
           });
         }
       },
@@ -134,7 +134,7 @@ export function initDiagnostics(
     if (diffEnabled && prev !== next) {
       const diffs = computeDiffs(prev, next);
       for (const d of diffs) {
-        log.debug("state-diff", formatDiff(d.feature, d.changes));
+        log.debug("state-diff", formatDiff(d.cell, d.changes));
       }
     }
     if (actionLog) actionLog.append(action.type, action.payload);
@@ -146,22 +146,22 @@ export function initDiagnostics(
         ts: Date.now(),
         state: next,
         recentActions: [...recentActions],
-        features: getHealthSnapshot(),
+        cells: getHealthSnapshot(),
       });
     }
   }
 
-  function onStart(featureNames: string[]): void {
-    for (const name of featureNames) {
-      featureErrorCounts.set(name, 0);
-      featureEnabled.set(name, true);
+  function onStart(cellNames: string[]): void {
+    for (const name of cellNames) {
+      cellErrorCounts.set(name, 0);
+      cellEnabled.set(name, true);
     }
   }
 
-  function onError(featureName: string): void {
-    featureErrorCounts.set(
-      featureName,
-      (featureErrorCounts.get(featureName) ?? 0) + 1,
+  function onError(cellName: string): void {
+    cellErrorCounts.set(
+      cellName,
+      (cellErrorCounts.get(cellName) ?? 0) + 1,
     );
   }
 

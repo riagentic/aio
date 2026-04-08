@@ -13,14 +13,12 @@ function createDOM() {
   const doc = win.document as unknown as Document;
   const root = doc.createElement("div");
   doc.body.appendChild(root);
-  return { document: doc, root, cleanup: () => win.close() };
+  return { document: doc, root, cleanup: () => win.happyDOM.close() };
 }
 
 Deno.test({
   name: "dev-mode: warns on img without alt",
-  sanitizeOps: false,
-  sanitizeResources: false,
-  fn() {
+  async fn() {
     const { document: doc, root, cleanup } = createDOM();
     _setDocument(doc);
     setDevMode(true);
@@ -41,16 +39,14 @@ Deno.test({
     } finally {
       console.warn = origWarn;
       setDevMode(false);
-      cleanup();
+      await cleanup();
     }
   },
 });
 
 Deno.test({
   name: "dev-mode: no warning when img has alt",
-  sanitizeOps: false,
-  sanitizeResources: false,
-  fn() {
+  async fn() {
     const { document: doc, root, cleanup } = createDOM();
     _setDocument(doc);
     setDevMode(true);
@@ -71,16 +67,14 @@ Deno.test({
     } finally {
       console.warn = origWarn;
       setDevMode(false);
-      cleanup();
+      await cleanup();
     }
   },
 });
 
 Deno.test({
   name: "dev-mode: warns on onClick without keyboard handler",
-  sanitizeOps: false,
-  sanitizeResources: false,
-  fn() {
+  async fn() {
     const { document: doc, root, cleanup } = createDOM();
     _setDocument(doc);
     setDevMode(true);
@@ -101,16 +95,14 @@ Deno.test({
     } finally {
       console.warn = origWarn;
       setDevMode(false);
-      cleanup();
+      await cleanup();
     }
   },
 });
 
 Deno.test({
   name: "dev-mode: no keyboard warning on button with onClick",
-  sanitizeOps: false,
-  sanitizeResources: false,
-  fn() {
+  async fn() {
     const { document: doc, root, cleanup } = createDOM();
     _setDocument(doc);
     setDevMode(true);
@@ -131,16 +123,14 @@ Deno.test({
     } finally {
       console.warn = origWarn;
       setDevMode(false);
-      cleanup();
+      await cleanup();
     }
   },
 });
 
 Deno.test({
   name: "dev-mode: warns on input without label",
-  sanitizeOps: false,
-  sanitizeResources: false,
-  fn() {
+  async fn() {
     const { document: doc, root, cleanup } = createDOM();
     _setDocument(doc);
     setDevMode(true);
@@ -161,16 +151,14 @@ Deno.test({
     } finally {
       console.warn = origWarn;
       setDevMode(false);
-      cleanup();
+      await cleanup();
     }
   },
 });
 
 Deno.test({
   name: "dev-mode: no label warning with aria-label",
-  sanitizeOps: false,
-  sanitizeResources: false,
-  fn() {
+  async fn() {
     const { document: doc, root, cleanup } = createDOM();
     _setDocument(doc);
     setDevMode(true);
@@ -191,16 +179,14 @@ Deno.test({
     } finally {
       console.warn = origWarn;
       setDevMode(false);
-      cleanup();
+      await cleanup();
     }
   },
 });
 
 Deno.test({
   name: "dev-mode: no warnings when devMode is off",
-  sanitizeOps: false,
-  sanitizeResources: false,
-  fn() {
+  async fn() {
     const { document: doc, root, cleanup } = createDOM();
     _setDocument(doc);
     setDevMode(false);
@@ -220,7 +206,7 @@ Deno.test({
       _unmount(handle);
     } finally {
       console.warn = origWarn;
-      cleanup();
+      await cleanup();
     }
   },
 });

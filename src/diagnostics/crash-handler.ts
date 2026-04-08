@@ -5,7 +5,7 @@
 export type CrashHandlerDeps = {
   log: { error: (msg: string, data?: Record<string, unknown>) => void };
   getHealthData: () => {
-    features: Record<string, { errors: number; enabled: boolean }>;
+    cells: Record<string, { errors: number; enabled: boolean }>;
   };
   writeEmergencyCheckpoint: () => void;
 };
@@ -29,7 +29,7 @@ export function installCrashHandler(deps: CrashHandlerDeps): () => void {
       try {
         log.error(`[crash-handler] ${label}: ${msg}`, {
           stack: stack ?? "no stack",
-          features: health?.features as unknown as Record<string, unknown>,
+          cells: health?.cells as unknown as Record<string, unknown>,
         });
       } catch { /* logger failed during crash */ }
       if (typeof Deno !== "undefined" && "writeTextFileSync" in Deno) {

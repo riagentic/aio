@@ -4,7 +4,7 @@
 // Tests verify:
 // 1. UDS __subs: response includes $f:1 when client has subscriptions
 // 2. UDS broadcastState includes $f:1 on filtered full-state sends
-// 3. Browser merges $f messages into existing _state (preserves unsubscribed features)
+// 3. Browser merges $f messages into existing _state (preserves unsubscribed cells)
 // 4. Electron bridge does NOT update lastFullState for $f messages
 // 5. Unfiltered responses (no subscriptions) do NOT have $f
 
@@ -212,11 +212,11 @@ Deno.test("aio29: electron bridge skips $f for lastFullState", () => {
   );
 });
 
-// ── 5. Browser: $f merge preserves unsubscribed features ────────────
+// ── 5. Browser: $f merge preserves unsubscribed cells ────────────
 // (Unit test of the merge logic — tests the concept, not browser internals)
 
-Deno.test("aio29: $f merge concept — filtered state preserves existing features", () => {
-  // Simulate: existing state has all features
+Deno.test("aio29: $f merge concept — filtered state preserves existing cells", () => {
+  // Simulate: existing state has all cells
   const existingState: Record<string, unknown> = {
     ratelimit: { providers: [{ id: "a", name: "A" }], stats: { total: 10 } },
     status: { ok: true, uptime: 3600 },
@@ -232,7 +232,7 @@ Deno.test("aio29: $f merge concept — filtered state preserves existing feature
     },
   };
 
-  // Two-level merge: preserve unsubscribed features AND sub-keys within features
+  // Two-level merge: preserve unsubscribed cells AND sub-keys within cells
   const { $f, ...data } = filteredResponse;
   assertEquals($f, 1, "$f must be present");
 
@@ -253,7 +253,7 @@ Deno.test("aio29: $f merge concept — filtered state preserves existing feature
     }
   }
 
-  // Merged state must have ALL features
+  // Merged state must have ALL cells
   assertEquals(
     (merged.status as Record<string, unknown>).ok,
     true,
@@ -264,7 +264,7 @@ Deno.test("aio29: $f merge concept — filtered state preserves existing feature
     99,
     "unsubscribed 'extra' must survive merge",
   );
-  // Updated feature must have new data
+  // Updated cell must have new data
   assertEquals(
     ((merged.ratelimit as Record<string, unknown>).providers as unknown[])
       .length,
@@ -275,7 +275,7 @@ Deno.test("aio29: $f merge concept — filtered state preserves existing feature
 
 // ── 6. Two-level merge preserves sub-keys not in filtered update ─────
 
-Deno.test("aio29: two-level $f merge preserves unsubscribed feature sub-keys", () => {
+Deno.test("aio29: two-level $f merge preserves unsubscribed cell sub-keys", () => {
   // Existing state: ratelimit has providers, stats, and limits
   const prev: Record<string, unknown> = {
     ratelimit: {
@@ -360,30 +360,30 @@ Deno.test("aio29: electron bridge skips control messages for state tracking", ()
   );
 });
 
-// ── 8. useFeature defaults — incomplete state gets merged with init shape ──
+// ── 8. useCell defaults — incomplete state gets merged with init shape ──
 
-Deno.test("aio29: useFeature defaults merge — incomplete state gets init shape sub-keys", () => {
-  // Simulate what useFeature does internally:
-  // featureState from server (incomplete — providers not populated yet)
-  const featureState: Record<string, unknown> = {};
+Deno.test("aio29: useCell defaults merge — incomplete state gets init shape sub-keys", () => {
+  // Simulate what useCell does internally:
+  // cellState from server (incomplete — providers not populated yet)
+  const cellState: Record<string, unknown> = {};
 
-  // Feature ref's __aio.state (the initial state schema from feature definition)
+  // Cell ref's __aio.state (the initial state schema from cell definition)
   const initShape: Record<string, unknown> = {
     providers: [],
     stats: { total: 0 },
   };
 
-  // The merge logic: overlay featureState onto initShape defaults
+  // The merge logic: overlay cellState onto initShape defaults
   const defaults = initShape;
   let resolved: Record<string, unknown>;
   if (
-    defaults && typeof featureState === "object" &&
-    !Array.isArray(featureState) &&
+    defaults && typeof cellState === "object" &&
+    !Array.isArray(cellState) &&
     typeof defaults === "object" && !Array.isArray(defaults)
   ) {
-    resolved = { ...defaults, ...featureState };
+    resolved = { ...defaults, ...cellState };
   } else {
-    resolved = featureState;
+    resolved = cellState;
   }
 
   // providers must exist (from defaults) even though server sent {}
@@ -404,9 +404,9 @@ Deno.test("aio29: useFeature defaults merge — incomplete state gets init shape
   );
 });
 
-Deno.test("aio29: useFeature defaults merge — complete state overrides defaults", () => {
-  // featureState from server (complete — has real data)
-  const featureState: Record<string, unknown> = {
+Deno.test("aio29: useCell defaults merge — complete state overrides defaults", () => {
+  // cellState from server (complete — has real data)
+  const cellState: Record<string, unknown> = {
     providers: [{ id: "a", name: "ProvA" }],
     stats: { total: 42 },
   };
@@ -415,7 +415,7 @@ Deno.test("aio29: useFeature defaults merge — complete state overrides default
     providers: [],
     stats: { total: 0 },
   };
-  const resolved = { ...initShape, ...featureState };
+  const resolved = { ...initShape, ...cellState };
 
   // Real data must override defaults
   assertEquals(
@@ -479,7 +479,7 @@ Deno.test("aio31: $f deep merge preserves sub-sub-keys not in filtered response"
   assertEquals(limits.max, 1000, "limits preserved (not in filter)");
   assertEquals(limits.remaining, 500, "limits.remaining preserved");
 
-  // Top-level features not in filtered response must survive
+  // Top-level cells not in filtered response must survive
   assertEquals(
     (merged.status as Record<string, unknown>).ok,
     true,
@@ -489,21 +489,21 @@ Deno.test("aio31: $f deep merge preserves sub-sub-keys not in filtered response"
 
 Deno.test("aio31: deep merge replaces arrays and primitives, only recurses objects", () => {
   const prev: Record<string, unknown> = {
-    feature: {
+    cell: {
       items: [1, 2, 3],
       count: 10,
       meta: { label: "old", tags: ["a", "b"] },
     },
   };
   const incoming: Record<string, unknown> = {
-    feature: {
+    cell: {
       items: [4, 5],
       meta: { tags: ["c"] },
     },
   };
 
   const merged = _deepMergeFiltered(prev, incoming);
-  const f = merged.feature as Record<string, unknown>;
+  const f = merged.cell as Record<string, unknown>;
 
   // Arrays replaced (not merged)
   assertEquals(f.items, [4, 5], "arrays must be replaced wholesale");

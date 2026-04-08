@@ -1,15 +1,16 @@
 # Actions & Reduce — Explicit Control Style
 
-> **Not the starting point.** Use `feature({ methods })` for most features. This
-> style gives full explicit control — reach for it when methods can't express
-> what you need.
+> **Advanced — most apps don't need this.** Use `cell({ methods })` for most
+> cells, and [generators](generators.md) for sequential workflows. This style
+> gives full explicit control — reach for it when you need action replay, audit
+> trails, or strict pure/impure separation.
 
 ## Full example
 
 ```ts
-import { feature } from "aio";
+import { cell } from "aio";
 
-export const counter = feature("counter", {
+export const counter = cell("counter", {
   state: { count: 0, lastUpdatedAt: 0, error: null as string | null },
 
   actions: {
@@ -102,7 +103,7 @@ For foreign action handling, dynamic routing, or shared logic:
 ```ts
 reduce(state, action, { on, emit }) {
   on(counter.increment, (payload) => { state.watchedCount = payload.by })
-  if (action.type === 'myFeature:save') {
+  if (action.type === 'myCell:save') {
     emit('persist', { value: state.count })
   }
 },
@@ -129,37 +130,15 @@ execute: {
 **Scoped dispatch rules:**
 
 - `app.dispatch(ownAction())` — always allowed
-- `app.dispatch(otherFeature.action())` — blocked unless declared in
-  `dispatchTo`
-- `app.getState()` — returns this feature's slice only
+- `app.getState()` — returns this cell's slice only
 - `app.getFullState?.()` — returns entire app state (in `init`, `destroy`,
   `execute`)
 
 ---
 
-## dispatchTo
-
-```ts
-import { wallet } from "../wallet";
-
-const te = feature("te", {
-  dispatchTo: [wallet, fleet],
-  execute: {
-    transferComplete(app, payload) {
-      app.dispatch(wallet.credit(payload.amount)); // allowed
-    },
-  },
-});
-```
-
-Blocked dispatches log:
-`[te] dispatch('wallet:credit') blocked — add wallet to dispatchTo`
-
----
-
 ## Selectors
 
-Receive the feature's own state slice:
+Receive the cell's own state slice:
 
 ```ts
 selectors: {
@@ -174,12 +153,12 @@ counter.isPositive(); // → boolean
 
 ## Foreign actions
 
-A feature can react to another feature's actions:
+A cell can react to another cell's actions:
 
 ### With listensTo
 
 ```ts
-const analytics = feature("analytics", {
+const analytics = cell("analytics", {
   state: { events: [] as string[] },
   listensTo: [counter.increment, counter.reset],
   reduce: {
@@ -193,7 +172,7 @@ const analytics = feature("analytics", {
 ### With explicit machine
 
 ```ts
-const analytics = feature("analytics", {
+const analytics = cell("analytics", {
   state: { events: [] as string[] },
   actions: { clear: () => ({}) },
   machine: {
@@ -251,7 +230,7 @@ When execute needs server-only imports, use an async method with dynamic
 `import()`:
 
 ```ts
-export const backup = feature("backup", {
+export const backup = cell("backup", {
   state: { lastBackup: null as string | null },
   methods: {
     async run(s) {

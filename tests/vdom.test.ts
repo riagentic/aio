@@ -3,8 +3,7 @@ import { Window } from "happy-dom";
 import { Fragment, h, type VNode } from "../src/vdom.ts";
 import { _diff, _render } from "../src/vdom.ts";
 
-// happy-dom creates internal timers, disable Deno's leak detection for DOM tests
-const S = { sanitizeOps: false, sanitizeResources: false } as const;
+// happy-dom timers drained via win.happyDOM.close() — sanitizers re-enabled
 
 function createDOM(): {
   document: Document;
@@ -13,7 +12,7 @@ function createDOM(): {
 } {
   const win = new Window({ url: "https://localhost" });
   const doc = win.document as unknown as Document;
-  return { document: doc, ctx: { doc }, cleanup: () => win.close() };
+  return { document: doc, ctx: { doc }, cleanup: () => win.happyDOM.close() };
 }
 
 Deno.test("h: creates element vnode", () => {
@@ -58,33 +57,30 @@ Deno.test("h: preserves null/undefined/boolean as placeholders (AIO-107)", () =>
 
 Deno.test({
   name: "render: creates text node",
-  ...S,
-  fn() {
+  async fn() {
     const { document, ctx, cleanup } = createDOM();
     const root = document.createElement("div");
     _render(root, h("span", null, "hello"), null, ctx);
     assertEquals(root.innerHTML, "<span>hello</span>");
-    cleanup();
+    await cleanup();
   },
 });
 
 Deno.test({
   name: "render: sets attributes",
-  ...S,
-  fn() {
+  async fn() {
     const { document, ctx, cleanup } = createDOM();
     const root = document.createElement("div");
     _render(root, h("input", { type: "text", value: "abc" }), null, ctx);
     const input = root.firstChild as HTMLInputElement;
     assertEquals(input.getAttribute("type"), "text");
-    cleanup();
+    await cleanup();
   },
 });
 
 Deno.test({
   name: "render: applies style object",
-  ...S,
-  fn() {
+  async fn() {
     const { document, ctx, cleanup } = createDOM();
     const root = document.createElement("div");
     _render(
@@ -96,14 +92,13 @@ Deno.test({
     const el = root.firstChild as HTMLElement;
     assertEquals(el.style.color, "red");
     assertEquals(el.style.fontSize, "12px");
-    cleanup();
+    await cleanup();
   },
 });
 
 Deno.test({
   name: "render: event handlers",
-  ...S,
-  fn() {
+  async fn() {
     const { document, ctx, cleanup } = createDOM();
     const root = document.createElement("div");
     let clicked = false;
@@ -120,14 +115,13 @@ Deno.test({
     const btn = root.firstChild as HTMLElement;
     btn.click();
     assertEquals(clicked, true);
-    cleanup();
+    await cleanup();
   },
 });
 
 Deno.test({
   name: "render: nested elements",
-  ...S,
-  fn() {
+  async fn() {
     const { document, ctx, cleanup } = createDOM();
     const root = document.createElement("div");
     _render(
@@ -137,14 +131,13 @@ Deno.test({
       ctx,
     );
     assertEquals(root.querySelectorAll("li").length, 2);
-    cleanup();
+    await cleanup();
   },
 });
 
 Deno.test({
   name: "render: fragment renders children without wrapper",
-  ...S,
-  fn() {
+  async fn() {
     const { document, ctx, cleanup } = createDOM();
     const root = document.createElement("div");
     _render(
@@ -155,14 +148,13 @@ Deno.test({
     );
     assertEquals(root.childNodes.length, 2);
     assertEquals((root.firstChild as HTMLElement).tagName, "A");
-    cleanup();
+    await cleanup();
   },
 });
 
 Deno.test({
   name: "render: className prop maps to class attribute",
-  ...S,
-  fn() {
+  async fn() {
     const { document, ctx, cleanup } = createDOM();
     const root = document.createElement("div");
     _render(root, h("div", { className: "foo bar" }), null, ctx);
@@ -170,14 +162,13 @@ Deno.test({
       (root.firstChild as HTMLElement).getAttribute("class"),
       "foo bar",
     );
-    cleanup();
+    await cleanup();
   },
 });
 
 Deno.test({
   name: "diff: updates text content",
-  ...S,
-  fn() {
+  async fn() {
     const { document, ctx, cleanup } = createDOM();
     const root = document.createElement("div");
     const old = h("span", null, "old");
@@ -185,14 +176,13 @@ Deno.test({
     const next = h("span", null, "new");
     _diff(root, next, old, ctx);
     assertEquals(root.innerHTML, "<span>new</span>");
-    cleanup();
+    await cleanup();
   },
 });
 
 Deno.test({
   name: "diff: updates attributes",
-  ...S,
-  fn() {
+  async fn() {
     const { document, ctx, cleanup } = createDOM();
     const root = document.createElement("div");
     const old = h("div", { id: "a", title: "old" });
@@ -202,14 +192,13 @@ Deno.test({
     const el = root.firstChild as HTMLElement;
     assertEquals(el.getAttribute("id"), "b");
     assertEquals(el.getAttribute("title"), null);
-    cleanup();
+    await cleanup();
   },
 });
 
 Deno.test({
   name: "diff: replaces element when tag changes",
-  ...S,
-  fn() {
+  async fn() {
     const { document, ctx, cleanup } = createDOM();
     const root = document.createElement("div");
     const old = h("span", null, "text");
@@ -217,14 +206,13 @@ Deno.test({
     const next = h("div", null, "text");
     _diff(root, next, old, ctx);
     assertEquals((root.firstChild as HTMLElement).tagName, "DIV");
-    cleanup();
+    await cleanup();
   },
 });
 
 Deno.test({
   name: "diff: adds new children",
-  ...S,
-  fn() {
+  async fn() {
     const { document, ctx, cleanup } = createDOM();
     const root = document.createElement("div");
     const old = h("ul", null, h("li", null, "a"));
@@ -232,14 +220,13 @@ Deno.test({
     const next = h("ul", null, h("li", null, "a"), h("li", null, "b"));
     _diff(root, next, old, ctx);
     assertEquals(root.querySelectorAll("li").length, 2);
-    cleanup();
+    await cleanup();
   },
 });
 
 Deno.test({
   name: "diff: removes extra children",
-  ...S,
-  fn() {
+  async fn() {
     const { document, ctx, cleanup } = createDOM();
     const root = document.createElement("div");
     const old = h("ul", null, h("li", null, "a"), h("li", null, "b"));
@@ -247,14 +234,13 @@ Deno.test({
     const next = h("ul", null, h("li", null, "a"));
     _diff(root, next, old, ctx);
     assertEquals(root.querySelectorAll("li").length, 1);
-    cleanup();
+    await cleanup();
   },
 });
 
 Deno.test({
   name: "diff: keyed reorder preserves DOM nodes",
-  ...S,
-  fn() {
+  async fn() {
     const { document, ctx, cleanup } = createDOM();
     const root = document.createElement("div");
     const old = h(
@@ -277,14 +263,13 @@ Deno.test({
     _diff(root, next, old, ctx);
     assertEquals(ul.children[2], origB);
     assertEquals(ul.children[0]!.textContent, "C");
-    cleanup();
+    await cleanup();
   },
 });
 
 Deno.test({
   name: "render: SVG elements use correct namespace",
-  ...S,
-  fn() {
+  async fn() {
     const { document, ctx, cleanup } = createDOM();
     const root = document.createElement("div");
     _render(
@@ -300,35 +285,33 @@ Deno.test({
     const svg = root.firstChild as SVGElement;
     assertEquals(svg.tagName, "svg");
     assertEquals(svg.namespaceURI, "http://www.w3.org/2000/svg");
-    cleanup();
+    await cleanup();
   },
 });
 
 Deno.test({
   name: "render: function component",
-  ...S,
-  fn() {
+  async fn() {
     const { document, ctx, cleanup } = createDOM();
     const root = document.createElement("div");
     const Greeting = (props: { name: string }) =>
       h("span", null, `Hi ${props.name}`);
     _render(root, h(Greeting, { name: "World" }), null, ctx);
     assertEquals(root.innerHTML, "<span>Hi World</span>");
-    cleanup();
+    await cleanup();
   },
 });
 
 Deno.test({
   name: "render: nested components",
-  ...S,
-  fn() {
+  async fn() {
     const { document, ctx, cleanup } = createDOM();
     const root = document.createElement("div");
     const Inner = () => h("b", null, "bold");
     const Outer = () => h("div", null, h(Inner, null));
     _render(root, h(Outer, null), null, ctx);
     assertEquals(root.innerHTML, "<div><b>bold</b></div>");
-    cleanup();
+    await cleanup();
   },
 });
 
@@ -337,8 +320,7 @@ Deno.test({
 Deno.test({
   name:
     "diff: mixed keyed + non-keyed children — no DOM leak on re-render (AIO-114)",
-  ...S,
-  fn() {
+  async fn() {
     const { document, ctx, cleanup } = createDOM();
     const root = document.createElement("div");
 
@@ -383,15 +365,14 @@ Deno.test({
       3,
       "after 3rd render: still 3 children",
     );
-    cleanup();
+    await cleanup();
   },
 });
 
 Deno.test({
   name:
     "diff: mixed keyed + conditional non-keyed — removed conditionals don't leak (AIO-114)",
-  ...S,
-  fn() {
+  async fn() {
     const { document, ctx, cleanup } = createDOM();
     const root = document.createElement("div");
 
@@ -421,15 +402,14 @@ Deno.test({
       2,
       "badge removed, no orphan DOM",
     );
-    cleanup();
+    await cleanup();
   },
 });
 
 Deno.test({
   name:
     "diff: mixed keyed + non-keyed — keyed reorder preserves non-keyed identity (AIO-114)",
-  ...S,
-  fn() {
+  async fn() {
     const { document, ctx, cleanup } = createDOM();
     const root = document.createElement("div");
 
@@ -463,15 +443,14 @@ Deno.test({
       footerBefore,
       "non-keyed DOM identity preserved",
     );
-    cleanup();
+    await cleanup();
   },
 });
 
 Deno.test({
   name:
     "diff: keyed Fragment siblings don't corrupt non-keyed cursor walk (AIO-114)",
-  ...S,
-  fn() {
+  async fn() {
     const { document, ctx, cleanup } = createDOM();
     const root = document.createElement("div");
 
@@ -514,14 +493,13 @@ Deno.test({
       3,
       "after 3rd render: still 3 DOM nodes",
     );
-    cleanup();
+    await cleanup();
   },
 });
 
 Deno.test({
   name: "diff: non-keyed count shrinks and grows correctly (AIO-114)",
-  ...S,
-  fn() {
+  async fn() {
     const { document, ctx, cleanup } = createDOM();
     const root = document.createElement("div");
 
@@ -560,7 +538,7 @@ Deno.test({
     );
     _diff(root, v3, v2, ctx);
     assertEquals(container.childNodes.length, 5, "grow: 5 DOM nodes");
-    cleanup();
+    await cleanup();
   },
 });
 
@@ -569,8 +547,7 @@ Deno.test({
 Deno.test({
   name:
     "AIO-116: diffUnkeyed must not set textContent on element nodes when cursor desyncs",
-  ...S,
-  fn() {
+  async fn() {
     const { document: doc, ctx, cleanup } = createDOM();
     const root = doc.createElement("div");
     doc.body.appendChild(root);
@@ -619,6 +596,6 @@ Deno.test({
       "element node children should not be destroyed by textContent assignment on wrong nodeType",
     );
 
-    cleanup();
+    await cleanup();
   },
 });

@@ -117,51 +117,54 @@ Deno.test("aio24: server ignores __ping keepalive (not dispatched as action)", a
 // ── Browser: _ipcConnected set false in onClose ────────────────────
 
 Deno.test("aio24: browser.ts _ipc.onClose sets _ipcConnected = false", async () => {
-  // Verify the source has the fix
-  const src = await Deno.readTextFile("src/browser.ts");
-  const onCloseBlock = src.match(/_ipc\.onClose\(\(\) => \{[\s\S]*?\}\);/);
-  if (!onCloseBlock) throw new Error("_ipc.onClose not found");
+  // IPC transport code lives in browser-transport-ipc.ts after split
+  const src = await Deno.readTextFile("src/browser-transport-ipc.ts");
+  const onCloseBlock = src.match(/\.onClose\(\(\) => \{[\s\S]*?\}\);/);
+  if (!onCloseBlock) throw new Error("onClose not found");
   assertStringIncludes(
     onCloseBlock[0],
-    "_ipcConnected = false",
-    "onClose must set _ipcConnected = false before any early returns",
+    "ipcConnected = false",
+    "onClose must set ipcConnected = false before any early returns",
   );
 });
 
 // ── Browser: IPC keepalive ping timer ──────────────────────────────
 
 Deno.test("aio24: browser.ts has IPC keepalive ping", async () => {
-  const src = await Deno.readTextFile("src/browser.ts");
+  // IPC transport code lives in browser-transport-ipc.ts after split
+  const src = await Deno.readTextFile("src/browser-transport-ipc.ts");
   assertStringIncludes(
     src,
-    "_ipcPingTimer",
+    "ipcPingTimer",
     "IPC ping timer variable must exist",
   );
   assertStringIncludes(src, '__ping"', "Must send __ping message");
   assertStringIncludes(
     src,
-    "_IPC_PING_INTERVAL",
+    "IPC_PING_INTERVAL",
     "Ping interval constant must exist",
   );
 });
 
 Deno.test("aio24: IPC ping timer cleaned up in onClose", async () => {
-  const src = await Deno.readTextFile("src/browser.ts");
-  const onCloseBlock = src.match(/_ipc\.onClose\(\(\) => \{[\s\S]*?\}\);/);
-  if (!onCloseBlock) throw new Error("_ipc.onClose not found");
+  // IPC transport code lives in browser-transport-ipc.ts after split
+  const src = await Deno.readTextFile("src/browser-transport-ipc.ts");
+  const onCloseBlock = src.match(/\.onClose\(\(\) => \{[\s\S]*?\}\);/);
+  if (!onCloseBlock) throw new Error("onClose not found");
   assertStringIncludes(
     onCloseBlock[0],
-    "clearInterval(_ipcPingTimer)",
+    "clearInterval(T.ipcPingTimer)",
     "onClose must clear ping timer",
   );
 });
 
 Deno.test("aio24: IPC ping timer cleaned up in _reset", async () => {
-  const src = await Deno.readTextFile("src/browser.ts");
-  const resetFn = src.slice(src.indexOf("export function _reset()"));
+  // Reset logic lives in browser-transport-reset.ts after split
+  const src = await Deno.readTextFile("src/browser-transport-reset.ts");
+  const resetFn = src.slice(src.indexOf("export function resetTransport()"));
   assertStringIncludes(
     resetFn,
-    "clearInterval(_ipcPingTimer)",
+    "clearInterval(T.ipcPingTimer)",
     "_reset must clear ping timer",
   );
 });

@@ -21,6 +21,9 @@ import {
 const BROWSER_TS = resolve(
   join(import.meta.dirname ?? ".", "..", "src", "browser.ts"),
 );
+const BROWSER_HOOKS_TS = resolve(
+  join(import.meta.dirname ?? ".", "..", "src", "browser-hooks.ts"),
+);
 const STANDALONE_TS = resolve(
   join(import.meta.dirname ?? ".", "..", "src", "standalone.ts"),
 );
@@ -111,7 +114,8 @@ Deno.test("sync: standalone msg/factory re-exports match canonical", () => {
 
 // Can't call React hooks outside a component, but we can verify function signatures match
 Deno.test("sync: standalone useLocal/page function signatures match browser.ts", async () => {
-  const browserSrc = await Deno.readTextFile(BROWSER_TS);
+  // browser.ts is a re-export facade — implementation lives in browser-hooks.ts
+  const browserSrc = await Deno.readTextFile(BROWSER_HOOKS_TS);
   const standaloneSrc = await Deno.readTextFile(STANDALONE_TS);
 
   // useLocal: both take initial T, return { local, set }

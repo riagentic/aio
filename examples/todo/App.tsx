@@ -1,11 +1,11 @@
 // UI — todo list with inline editing, filtering, keyboard support
-import { useFeature, useLocal } from "aio/air";
+import { useCell, useLocal } from "aio/air";
 import { type Filter, type Todo, todo } from "./app.ts";
 
 const FILTERS: Filter[] = ["all", "active", "done"];
 
 export default function App() {
-  const { state, send } = useFeature(todo);
+  const { state, send } = useCell(todo);
   const { local: input, set: setInput } = useLocal("");
   const { local: editing, set: setEditing } = useLocal<number | null>(null);
   const { local: editText, set: setEditText } = useLocal("");

@@ -87,7 +87,7 @@ export function createPressureMonitor(
               bytesPerSec: Math.round(bps),
               trigger: clientId,
               hint:
-                "reduce state size, raise syncIntervalMs, or use stateForUI to filter",
+                "reduce state size, raise syncIntervalMs, or use cell-level ui filters",
             },
             timestamp: now,
           }, `bandwidth:${clientId}`);
@@ -111,7 +111,7 @@ export function createPressureMonitor(
         detail: {
           payloadBytes: bytes,
           trigger: clientId,
-          hint: "large state delta — check feature sizes at /__aio/vitals",
+          hint: "large state delta — check cell sizes at /__aio/vitals",
         },
         timestamp: now,
       }, `payload:${clientId}`);

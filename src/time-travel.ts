@@ -6,7 +6,7 @@ export type ReduceBreakdown = {
   produce: number; // Immer produce() — reducer execution
   clone: number; // structuredClone() — effect detachment
   spread: number; // state object construction
-  routing: number; // owner feature lookup + reduce
+  routing: number; // owner cell lookup + reduce
   listeners: number; // foreign action listener fan-out
 };
 
@@ -28,7 +28,7 @@ export type HistoryEntry<S, A> = {
   error?: {
     code: string;
     message: string;
-    featureName?: string;
+    cellName?: string;
     flowStep?: number;
   };
 };
@@ -104,7 +104,7 @@ export function markError<S, A>(
   err: {
     code: string;
     message: string;
-    featureName?: string;
+    cellName?: string;
     flowStep?: number;
   },
 ): void {

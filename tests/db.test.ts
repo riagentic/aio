@@ -1016,8 +1016,6 @@ Deno.test("db: read replicas — queries work alongside writer", async (t) => {
 
 Deno.test({
   name: "db: read replicas — close terminates all workers",
-  sanitizeOps: false,
-  sanitizeResources: false,
   fn: async () => {
     // Dedicated temp dir avoids WAL journal contention with parallel tests
     const dir = Deno.makeTempDirSync();
