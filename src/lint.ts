@@ -98,10 +98,8 @@ export async function lint(
   // Specifiers available in the browser import map — everything else silently fails
   // Keep in sync with IMPORT_MAP in server.ts
   const BROWSER_IMPORTS = new Set([
-    "react",
-    "react-dom/client",
-    "react/jsx-runtime",
     "aio",
+    "aio/air",
   ]);
 
   try {

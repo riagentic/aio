@@ -185,7 +185,7 @@ machine: {
 }
 ```
 
-Check status in UI: `const { status } = useCell(door);`
+Check status in UI: `door.__aio_status` or `registry.status()`.
 
 No machine needed? Omit it entirely, or use `machine: false`.
 
@@ -204,8 +204,8 @@ handlers -- never directly from outside.
 **AIO3** Single entry point: `aio.run({ appId, cells: [...] })` -- no manual
 store creation, no manual server setup.
 
-**AIO4** UI components MUST access state via `useCell(ref)` or `useAio()` hooks
--- never import or read state directly.
+**AIO4** UI components MUST access state via direct cell access (e.g.
+`counter.count`) or `useAio()` hooks -- import the cell and read its properties.
 
 **AIO5** Cross-cell communication MUST use direct method calls or `listensTo` --
 never raw dispatch with string action types.

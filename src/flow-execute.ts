@@ -31,6 +31,7 @@ export async function executeStep(
 
   switch (step.kind) {
     case "call": {
+      if (instance.aborted || abortSignal?.aborted) return undefined;
       app.dispatch({
         type: `${flowPrefix}${step.name}`,
         payload: { _flow: instance.flowName, _step: step.name },
@@ -39,10 +40,12 @@ export async function executeStep(
       const result = step.opts
         ? await callWithOpts(step.fn, step.opts)
         : await step.fn();
+      if (instance.aborted || abortSignal?.aborted) return undefined;
       return result;
     }
 
     case "step": {
+      if (instance.aborted || abortSignal?.aborted) return undefined;
       app.dispatch({
         type: `${flowPrefix}${step.name}`,
         payload: { _flow: instance.flowName, _step: step.name },
@@ -62,6 +65,7 @@ export async function executeStep(
     }
 
     case "done": {
+      if (instance.aborted || abortSignal?.aborted) return undefined;
       if (step.mutate) {
         const fullState = app.getState();
         const cellState = fullState[cellName] as Record<string, unknown>;
@@ -83,6 +87,7 @@ export async function executeStep(
     }
 
     case "fail": {
+      if (instance.aborted || abortSignal?.aborted) return undefined;
       app.dispatch({
         type: `${flowPrefix}failed`,
         payload: { _flow: instance.flowName, reason: step.reason },
@@ -93,6 +98,7 @@ export async function executeStep(
     }
 
     case "dispatch": {
+      if (instance.aborted || abortSignal?.aborted) return undefined;
       app.dispatch({ _source: "Effect", payload: {}, ...step.action });
       return undefined;
     }
@@ -125,6 +131,7 @@ export async function executeStep(
     }
 
     case "sleep": {
+      if (instance.aborted || abortSignal?.aborted) return undefined;
       app.dispatch({
         type: `${flowPrefix}${step.name}`,
         payload: { _flow: instance.flowName, _step: step.name, ms: step.ms },
@@ -140,6 +147,7 @@ export async function executeStep(
         }, { once: true });
       });
       instance.abortController = undefined;
+      if (instance.aborted || abortSignal?.aborted) return undefined;
       return undefined;
     }
 

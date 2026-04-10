@@ -62,6 +62,9 @@ export function useContext<T>(ctx: Context<T>): T {
 /**
  * Select a slice of context. Component only re-renders when the selected value changes.
  * Uses a computed signal so only the selected slice is tracked as a dependency.
+ * When called inside a component render, the computed is auto-collected by
+ * _computedCollector for disposal on next render. When called outside a render
+ * (e.g. in a test), the computed is disposed immediately after reading its value.
  */
 export function useContextSelector<T, R>(
   ctx: Context<T>,
@@ -85,5 +88,13 @@ export function useContextSelector<T, R>(
 
   const sig = contextSignal;
   const selected = computed(() => selector(sig.value));
+
+  // Inside component render: _computedCollector is active, so the computed
+  // is auto-registered for disposal on next render/unmount.
+  // Outside component render: no collector, so dispose immediately to prevent leak.
+  if (!_currentCollector) {
+    (selected as unknown as { dispose(): void }).dispose();
+  }
+
   return selected.value;
 }

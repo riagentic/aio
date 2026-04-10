@@ -49,7 +49,10 @@ deno task dev --expose --cert=/etc/ssl/myapp.pem --key=/etc/ssl/myapp.key
 - The token is a `crypto.randomUUID()` — regenerated on each restart
 - **Token-in-URL risk**: `?token=...` appears in server logs, browser history,
   and HTTPS `Referer` headers. For sensitive deployments use
-  `Authorization: Bearer <token>` header instead
+  `Authorization: Bearer <token>` header instead. AIO logs a warning at startup
+  when `--expose` is active with token auth.
+- When TLS is active, the internal trojan API on localhost also requires the
+  same token — unauthenticated localhost access is no longer permitted
 - Electron windows on the same machine accept the self-signed cert automatically
   (no warning)
 

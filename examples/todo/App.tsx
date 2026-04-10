@@ -1,21 +1,18 @@
 // UI — todo list with inline editing, filtering, keyboard support
-import { useCell, useLocal } from "aio/air";
+import { useLocal } from "aio/air";
 import { type Filter, type Todo, todo } from "./app.ts";
 
 const FILTERS: Filter[] = ["all", "active", "done"];
 
 export default function App() {
-  const { state, send } = useCell(todo);
   const { local: input, set: setInput } = useLocal("");
   const { local: editing, set: setEditing } = useLocal<number | null>(null);
   const { local: editText, set: setEditText } = useLocal("");
 
-  if (!state) return <div style={{ padding: "2rem" }}>Connecting...</div>;
-
-  const filtered: Todo[] = state.items.filter((t: Todo) =>
-    state.filter === "all" ? true : state.filter === "done" ? t.done : !t.done
+  const filtered: Todo[] = todo.items.filter((t: Todo) =>
+    todo.filter === "all" ? true : todo.filter === "done" ? t.done : !t.done
   );
-  const remaining = state.items.filter((t: Todo) => !t.done).length;
+  const remaining = todo.items.filter((t: Todo) => !t.done).length;
 
   return (
     <div
@@ -32,7 +29,7 @@ export default function App() {
         onSubmit={(e) => {
           e.preventDefault();
           if (input.trim()) {
-            send.add(input.trim());
+            todo.add(input.trim());
             setInput("");
           }
         }}
@@ -63,7 +60,7 @@ export default function App() {
             <input
               type="checkbox"
               checked={t.done}
-              onChange={() => send.toggle(t.id)}
+              onChange={() => todo.toggle(t.id)}
             />
             {editing === t.id
               ? (
@@ -72,12 +69,12 @@ export default function App() {
                   onChange={(e) =>
                     setEditText((e.target as HTMLInputElement).value)}
                   onBlur={() => {
-                    if (editText.trim()) send.edit(t.id, editText.trim());
+                    if (editText.trim()) todo.edit(t.id, editText.trim());
                     setEditing(null);
                   }}
                   onKeyDown={(e) => {
                     if (e.key === "Enter") {
-                      if (editText.trim()) send.edit(t.id, editText.trim());
+                      if (editText.trim()) todo.edit(t.id, editText.trim());
                       setEditing(null);
                     }
                     if (e.key === "Escape") setEditing(null);
@@ -104,7 +101,7 @@ export default function App() {
               )}
             <button
               type="button"
-              onClick={() => send.remove(t.id)}
+              onClick={() => todo.remove(t.id)}
               style={{
                 color: "#c44",
                 border: "none",
@@ -119,7 +116,7 @@ export default function App() {
       </ul>
 
       {/* Footer */}
-      {state.items.length > 0 && (
+      {todo.items.length > 0 && (
         <div
           style={{
             display: "flex",
@@ -136,10 +133,10 @@ export default function App() {
               <button
                 key={f}
                 type="button"
-                onClick={() => send.setFilter(f)}
+                onClick={() => todo.setFilter(f)}
                 style={{
                   padding: "0.2rem 0.5rem",
-                  border: state.filter === f
+                  border: todo.filter === f
                     ? "1px solid #c77"
                     : "1px solid transparent",
                   background: "none",
@@ -153,7 +150,7 @@ export default function App() {
           </div>
           <button
             type="button"
-            onClick={() => send.clearDone()}
+            onClick={() => todo.clearDone()}
             style={{
               border: "none",
               background: "none",

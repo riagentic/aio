@@ -60,19 +60,23 @@ export type CellFieldFilter<K extends string = string> =
   | { include: K[] }
   | { exclude: K[] };
 
-/** Cell-level UI visibility — CellFieldFilter + optional per-user transform */
-export type CellVisibility<K extends string = string> = CellFieldFilter<K> | {
+/** Cell-level UI visibility — CellFieldFilter + optional per-user transform.
+ *  S generic enables typed `forUser` callback — receives Pick/Omit of state based on include/exclude. */
+export type CellVisibility<
+  K extends string = string,
+  S extends Record<string, unknown> = Record<string, unknown>,
+> = CellFieldFilter<K> | {
   include: K[];
   exclude?: never;
   forUser?: (
-    exposed: Record<string, unknown>,
+    exposed: Pick<S, K & keyof S>,
     user?: FilterUser,
   ) => Record<string, unknown>;
 } | {
   exclude: K[];
   include?: never;
   forUser?: (
-    exposed: Record<string, unknown>,
+    exposed: Omit<S, K & keyof S>,
     user?: FilterUser,
   ) => Record<string, unknown>;
 };
@@ -146,8 +150,8 @@ export type CellAio<
   initType: string;
   /** Destroy type string (e.g. 'counter:__destroy') */
   destroyType: string;
-  /** Custom init handler */
-  onInit?: (app: ScopedApp<unknown>) => void;
+  /** Custom init handler — receives the app and the cell's initial state */
+  onInit?: (app: ScopedApp<unknown>, initState?: unknown) => void;
   /** Custom destroy handler */
   onDestroy?: (app: ScopedApp<unknown>) => void;
   /** Generator-based flows */
@@ -189,7 +193,7 @@ export type CellAio<
 };
 
 /** Reserved property names on CellDef — user-defined names must not collide */
-export const RESERVED_KEYS = new Set(["A", "E", "__aio", "state"]);
+export const RESERVED_KEYS = new Set(["A", "E", "__aio", "fx", "state"]);
 
 /** Validate that user-defined keys don't collide with reserved CellDef properties.
  *  Throws with a clear explanation if collision found. */
@@ -221,6 +225,9 @@ export type CellDef<
 > = {
   /** @internal — framework plumbing, not for user code */
   readonly __aio: CellAio<Actions, Effects, State>;
+  /** Public effect creator catalog — use in reduce: `return [cell.fx.persist(value)]` */
+  // deno-lint-ignore no-explicit-any
+  readonly fx?: Catalog<string, any>;
 };
 
 /** Flattened action senders — method names callable directly on the cell.
@@ -257,6 +264,11 @@ export type DirectCalling<N extends string = string, M = unknown> = {
 /** Extract the state type from a CellDef — useful for typing selectors and external consumers. */
 // deno-lint-ignore no-explicit-any
 export type ExtractState<F> = F extends CellDef<any, any, any, infer S> ? S
+  : Record<string, unknown>;
+
+/** Alias for ExtractState — `StateOf<typeof counter>` reads naturally in app code. */
+// deno-lint-ignore no-explicit-any
+export type StateOf<F> = F extends CellDef<any, any, any, infer S> ? S
   : Record<string, unknown>;
 
 /**

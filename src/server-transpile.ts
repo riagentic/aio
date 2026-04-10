@@ -80,16 +80,18 @@ export async function transpile(
   source: string,
   filepath: string,
   log?: (msg: string) => void,
-  renderer?: "react" | "aio",
 ): Promise<string> {
   const npath = normPath(filepath);
   const cached = transpileCache.get(npath);
-  if (cached && cached.source === source) return cached.code;
+  if (cached && cached.source === source) {
+    // LRU: move to end (most recently used)
+    transpileCache.delete(npath);
+    transpileCache.set(npath, cached);
+    return cached.code;
+  }
   const transform = await getTransform();
   const loader = filepath.endsWith(".tsx") ? "tsx" as const : "ts" as const;
-  const jsxOpts = renderer === "react"
-    ? { jsx: "automatic", jsxImportSource: "react" }
-    : { jsx: "automatic", jsxImportSource: "aio" };
+  const jsxOpts = { jsx: "automatic", jsxImportSource: "aio" };
   const result = await transform(source, {
     loader,
     format: "esm",

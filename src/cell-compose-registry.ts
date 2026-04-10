@@ -115,7 +115,7 @@ export function buildRegistry(
         if (f.__aio.onInit) {
           const scopedApp = makeScopedApp(f, app, reportError);
           try {
-            f.__aio.onInit(scopedApp);
+            f.__aio.onInit(scopedApp, f.__aio.state);
           } catch (e) {
             if (reportError) {
               reportError(
@@ -226,7 +226,7 @@ export function initAll(
         getFullState: () => app.getState() as Record<string, unknown>,
       };
       try {
-        f.__aio.onInit(scopedApp);
+        f.__aio.onInit(scopedApp, f.__aio.state);
       } catch (e) {
         if (reportError) {
           reportError(

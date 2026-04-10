@@ -12,7 +12,7 @@ When the last `useAio` listener unsubscribes (e.g., route change):
 2. New listeners within 300ms → timer cancelled, connection kept
 3. Still zero after 300ms → full teardown (WebSocket closed, state cleared)
 
-This handles React's mount/unmount cycle during route transitions.
+This handles the mount/unmount cycle during route transitions.
 
 **Tip:** Keep at least one `useAio` hook at the layout/root level to prevent
 connection churn on routes that don't use state.
@@ -189,7 +189,6 @@ Localhost is always allowed. Additional hostnames via `allowedOrigins`.
    large or cell `ui` config not filtering enough
 4. **Browser DevTools**: Network → WS filter. Watch message sizes vs
    `syncIntervalMs`
-5. **Re-renders**: React DevTools — ensure components read only needed paths.
-   Use `useCell` to scope re-renders
+5. **Re-renders**: Use direct cell access (`counter.count`) to scope re-renders
 6. **State shape**: `am state` CLI — look for hot data mixed with cold under
    same parent key

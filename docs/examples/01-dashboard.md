@@ -4,7 +4,7 @@ A start-to-finish walkthrough. You type along, building a server metrics
 dashboard that tracks CPU, memory, and request counts. Multiple browser tabs
 stay in sync. Per-user auth controls who sees what. SQLite stores history for
 queries. By the end you will have used: cells, scheduling, SQLite persistence,
-auth, React UI, and testing -- all in one app.
+auth, AIR UI, and testing -- all in one app.
 
 ## Step 1: Project setup
 
@@ -17,14 +17,11 @@ Create a directory and add `deno.json`:
   "unstable": ["kv"],
   "compilerOptions": {
     "jsx": "react-jsx",
-    "jsxImportSource": "react",
-    "jsxImportSourceTypes": "@types/react"
+    "jsxImportSource": "aio"
   },
   "imports": {
     "aio": "jsr:@riagentic/aio@1.0.0-alpha8",
-    "@types/react": "npm:@types/react@^18",
-    "react": "npm:react@^18",
-    "react-dom": "npm:react-dom@^18",
+    "aio/air": "jsr:@riagentic/aio@1.0.0-alpha8/air",
     "esbuild": "npm:esbuild@^0.24"
   },
   "tasks": {
@@ -236,18 +233,14 @@ history -- the sparkline will be empty for them. Connect as admin at
 > **Warning:** In production, load tokens from environment variables:
 > `Deno.env.get('ADMIN_TOKEN')!`.
 
-## Step 6: React UI
+## Step 6: AIR UI
 
 ```tsx
 // src/App.tsx
-import { useCell } from "aio/react";
 import { metrics } from "./cell/metrics/index.ts";
 import type { Snapshot } from "./cell/metrics/index.ts";
 
 export default function App() {
-  const { state, send } = useCell(metrics);
-  if (!state) return <div>Connecting...</div>;
-
   return (
     <div style={{ fontFamily: "system-ui", padding: "2rem", maxWidth: 800 }}>
       <h1>Metrics Dashboard</h1>
@@ -259,20 +252,20 @@ export default function App() {
           gap: "1rem",
         }}
       >
-        <Card label="CPU" value={`${state.cpu.toFixed(1)}%`} />
-        <Card label="Memory" value={`${state.mem} MB`} />
-        <Card label="Requests" value={String(state.requests)} />
+        <Card label="CPU" value={`${metrics.cpu.toFixed(1)}%`} />
+        <Card label="Memory" value={`${metrics.mem} MB`} />
+        <Card label="Requests" value={String(metrics.requests)} />
       </div>
 
-      {state.history.length > 0 && (
+      {metrics.history.length > 0 && (
         <div style={{ marginTop: "2rem" }}>
           <h2>CPU History</h2>
-          <Sparkline data={state.history} field="cpu" max={100} />
+          <Sparkline data={metrics.history} field="cpu" max={100} />
           <h2>Memory History</h2>
           <Sparkline
-            data={state.history}
+            data={metrics.history}
             field="mem"
-            max={Math.max(...state.history.map((h) => h.mem), 1)}
+            max={Math.max(...metrics.history.map((h) => h.mem), 1)}
           />
         </div>
       )}
@@ -280,7 +273,7 @@ export default function App() {
       <button
         style={{ marginTop: "2rem", padding: "0.5rem 1rem" }}
         onClick={() =>
-          send.recordRequest()}
+          metrics.recordRequest()}
       >
         Simulate Request
       </button>
@@ -340,10 +333,10 @@ function Sparkline(
 }
 ```
 
-`useCell(metrics)` gives you typed state and a typed `send` proxy. The sparkline
-is just flex divs proportional to the value -- red above 80%, green below. Open
-two browser tabs: both update simultaneously. Click "Simulate Request" in one
-and watch the counter increment in both.
+Direct cell access gives you typed state and typed methods. The sparkline is
+just flex divs proportional to the value -- red above 80%, green below. Open two
+browser tabs: both update simultaneously. Click "Simulate Request" in one and
+watch the counter increment in both.
 
 ## Step 7: Testing
 
@@ -393,7 +386,7 @@ deno run -A jsr:@riagentic/aio@1.0.0-alpha8/src/build --compile --service
 ```
 
 This produces two files: a binary and a systemd unit file. The binary is
-self-contained -- React, the bundled UI, SQLite, everything.
+self-contained -- AIR, the bundled UI, SQLite, everything.
 
 Install it:
 
@@ -414,4 +407,4 @@ journalctl -u dash -f
 > auto-generate TLS.
 
 That is the entire app: one cell, one schedule, one SQLite table, two users, and
-a React UI -- all wired together by `aio.run()`.
+an AIR UI -- all wired together by `aio.run()`.

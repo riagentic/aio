@@ -96,8 +96,8 @@ third-party libraries, large DOM operations, synchronous I/O, heavy
 
 ### Blank page on load
 
-React mount racing against state arrival. Ensure you're using `aio.run()` and
-not mounting React manually before state arrives.
+UI mount racing against state arrival. Ensure you're using `aio.run()` and not
+mounting manually before state arrives.
 
 ---
 
@@ -114,7 +114,7 @@ UI shows old values. Data arrived on server but browser didn't update.
    `fullStateThreshold`.
 4. **Reducer not mutating?** Verify with `[state-diff]` entries in
    `log/debug.log`. No diff = no change.
-5. **Reference issue?** Use `useCell(ref)` with a specific selector if component
+5. **Reference issue?** Use direct cell access for scoped updates if component
    depends on parent object reference.
 
 ---
@@ -202,19 +202,8 @@ you read. If you still see storms, the issue is expensive components:
 const { state, send } = useAio();
 return <div>{state.counter.count}</div>;
 
-// BETTER for hot components -- useCell scopes to one cell
-const { state, send } = useCell(counterRef);
-```
-
-Selector returning new object every time:
-
-```ts
-// WRONG -- new object every render
-useCell(ref, (s) => ({ a: s.a, b: s.b }));
-
-// RIGHT -- return stable values
-const a = useCell(ref, (s) => s.a);
-const b = useCell(ref, (s) => s.b);
+// BETTER for hot components -- direct cell access scopes to one cell
+return <div>{counter.count}</div>;
 ```
 
 ---
@@ -256,7 +245,7 @@ expand diagnostic bus events.
 | -------------------- | ------------------------------- |
 | `action-dropped`     | Debounce dispatches             |
 | `state-key-stripped` | Rename field (avoid `$p`, `$v`) |
-| `state-no-listeners` | Add `useCell()` in component    |
+| `state-no-listeners` | Read cell state in a component  |
 | `effect-invalid`     | Add `type: "effectName"`        |
 | `persist-error`      | Check permissions, disk space   |
 

@@ -267,88 +267,68 @@ this cell. Without it, foreign actions are ignored.
 
 ---
 
-## Step 6: React UI
+## Step 6: AIR UI
 
-Wire the cells into a React component:
+Wire the cells into a component:
 
 ```tsx
 // App.tsx
-import { useCell } from "aio/react";
 import { cart, type CartItem } from "./cell/cart/index.ts";
 import { payment } from "./cell/payment/index.ts";
 
 export default function App() {
-  const c = useCell(cart);
-  const p = useCell(payment);
-  if (!c.state || !p.state) return <div>Connecting...</div>;
-
   return (
     <div>
       <h1>Checkout</h1>
 
       <section>
-        <h2>Cart ({c.state.items.length} items)</h2>
+        <h2>Cart ({cart.items.length} items)</h2>
         <button
           onClick={() =>
-            c.send.add({ id: "widget", name: "Widget", price: 25, qty: 1 })}
+            cart.add({ id: "widget", name: "Widget", price: 25, qty: 1 })}
         >
           Add Widget ($25)
         </button>
         <ul>
-          {c.state.items.map((item: CartItem) => (
+          {cart.items.map((item: CartItem) => (
             <li key={item.id}>
               {item.name} x{item.qty} = ${item.price * item.qty}
-              <button onClick={() => c.send.remove(item.id)}>Remove</button>
+              <button onClick={() => cart.remove(item.id)}>Remove</button>
             </li>
           ))}
         </ul>
-        <p>Total: ${c.state.total}</p>
-        {c.state.items.length > 0 && (
-          <button onClick={() => c.send.clear()}>Clear Cart</button>
+        <p>Total: ${cart.total}</p>
+        {cart.items.length > 0 && (
+          <button onClick={() => cart.clear()}>Clear Cart</button>
         )}
       </section>
 
       <section>
-        <h2>Payment: {p.status}</h2>
-        {p.state.error && <p style={{ color: "red" }}>{p.state.error}</p>}
-        {p.state.chargeId && <p>Charge ID: {p.state.chargeId}</p>}
+        <h2>Payment</h2>
+        {payment.error && <p style={{ color: "red" }}>{payment.error}</p>}
+        {payment.chargeId && <p>Charge ID: {payment.chargeId}</p>}
 
-        {p.status === "idle" && c.state.items.length > 0 && (
+        {cart.items.length > 0 && (
           <button
             onClick={() =>
-              p.send.process(
-                c.state!.items as CartItem[],
-                c.state!.total as number,
+              payment.process(
+                cart.items as CartItem[],
+                cart.total as number,
               )}
           >
-            Pay ${c.state.total}
+            Pay ${cart.total}
           </button>
         )}
-        {p.status === "processing" && <p>Processing...</p>}
-        {p.status === "failed" && (
-          <button
-            onClick={() =>
-              p.send.process(
-                c.state!.items as CartItem[],
-                c.state!.total as number,
-              )}
-          >
-            Retry
-          </button>
-        )}
-        {(p.status === "confirmed" || p.status === "failed") && (
-          <button onClick={() => p.send.reset()}>Start Over</button>
-        )}
+        <button onClick={() => payment.reset()}>Start Over</button>
       </section>
     </div>
   );
 }
 ```
 
-`useCell` gives you `state`, `send` (typed dispatchers), and `status` (current
-machine state). The machine status drives the UI -- the Pay button only renders
-in `idle` state, and the machine silently drops `process` in `processing` state.
-Defense in depth.
+Direct cell access gives you typed state properties and typed methods. The
+machine status drives server-side action gating -- `process` in `processing`
+state is silently dropped. Defense in depth.
 
 Boot it:
 

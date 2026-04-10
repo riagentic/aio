@@ -100,5 +100,19 @@ export function bindCell(
     (f as Record<string, unknown>)[key] = () => selectorFn(getState());
   }
 
+  // Bind state keys: install getters for direct state access (counter.count)
+  const cellName = f.__aio.id;
+  for (const key of Object.keys(f.__aio.state)) {
+    if (key in f) continue; // method/selector already owns this name
+    Object.defineProperty(f, key, {
+      get() {
+        const s = getState()[cellName] as Record<string, unknown> | undefined;
+        return s ? s[key] : (f.__aio.state as Record<string, unknown>)[key];
+      },
+      enumerable: false,
+      configurable: true, // browser-side reactive binding can override
+    });
+  }
+
   (f.__aio as Record<string, unknown>).bound = true;
 }

@@ -28,7 +28,7 @@ export interface BuildConfig {
   binaryName: string;
   appTitle: string | undefined;
   configEntry: string;
-  rendererMode: "react" | "aio";
+  rendererMode: "aio";
 
   // Platform
   os: string;
@@ -80,9 +80,7 @@ export async function loadBuildConfig(): Promise<BuildConfig> {
   const mainConfig = JSON.parse(
     await Deno.readTextFile(join(root, "deno.json")),
   );
-  const rendererMode: "react" | "aio" = mainConfig.ui?.renderer === "aio"
-    ? "aio"
-    : "react";
+  const rendererMode = "aio" as const;
   const appTitle = mainConfig.title as string | undefined;
   const configEntry = (mainConfig.entry as string | undefined) ?? "src/app.ts";
   const defaultName = appTitle

@@ -240,7 +240,7 @@ const upload = cell("upload", {
 ```
 
 Read it as: "when in X, only Y is allowed." Calling `upload.start()` while
-uploading is dropped. Check status in UI: `useCell(upload).status`. No machine
+uploading is dropped. Check status in UI via `registry.status()`. No machine
 needed? Omit it -- all actions always run.
 
 ## Next Steps

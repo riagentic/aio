@@ -42,7 +42,6 @@ export interface ServerSetupDeps<S, A> {
     width?: number;
     height?: number;
     showStatus?: boolean;
-    renderer?: "react" | "aio";
   };
   title: string;
   // Config knobs
@@ -208,7 +207,6 @@ export async function setupTransport<S, A>(
       cert: tlsCert?.cert,
       key: tlsCert?.key,
       showStatus: ui.showStatus,
-      renderer: ui.renderer,
       renderBudget: config.renderBudget,
       fullStateThreshold: config.fullStateThreshold,
       maxConnections: config.maxConnections,

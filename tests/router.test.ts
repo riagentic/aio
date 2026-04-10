@@ -1,5 +1,5 @@
 import { assertEquals } from "@std/assert";
-import { matchPath } from "../src/browser.ts";
+import { matchPath } from "../src/browser-protocol.ts";
 
 // ── matchPath ────────────────────────────────────────────────────────────
 

@@ -136,21 +136,34 @@ export function createPersistenceManager(
     }
   }
 
-  let persistRunning = false; // AIO-148: guard against concurrent persist ops
+  let persistRunning = false;
+  let persistNeeded = false;
 
   function schedulePersist(): void {
-    if ((!kvDb && !asyncDb) || persistTimer || shuttingDown || persistRunning) {
+    if ((!kvDb && !asyncDb) || shuttingDown) {
       return;
     }
+    if (persistRunning) {
+      persistNeeded = true;
+      return;
+    }
+    if (persistTimer) return;
     persistTimer = setTimeout(async () => {
       persistTimer = null;
-      if (persistRunning) return;
+      if (persistRunning) {
+        persistNeeded = true;
+        return;
+      }
       persistRunning = true;
       try {
         await _syncSqlite();
         await _syncKv();
       } finally {
         persistRunning = false;
+        if (persistNeeded) {
+          persistNeeded = false;
+          schedulePersist();
+        }
       }
     }, persistMs);
   }

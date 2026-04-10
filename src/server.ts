@@ -74,7 +74,7 @@ export function createServer(config: ServerConfig): ServerHandle {
     const djText = Deno.readTextFileSync(join(absBaseDir, "..", "deno.json"));
     denoImports = JSON.parse(djText).imports ?? {};
   } catch { /* no deno.json or parse error — use defaults */ }
-  const importMapObj = buildBrowserImportMap(denoImports, config.renderer);
+  const importMapObj = buildBrowserImportMap(denoImports);
   const IMPORT_MAP = JSON.stringify({ imports: importMapObj });
 
   const absDistDir = distDir ? resolve(distDir) : null;
@@ -90,7 +90,7 @@ export function createServer(config: ServerConfig): ServerHandle {
 
   // ── Dev startup checks ──
   const graphValidation = !prod
-    ? startGraphValidation(absBaseDir, importMapObj, config.renderer, debug)
+    ? startGraphValidation(absBaseDir, importMapObj, debug)
     : null;
   if (!prod) scanServerOnlyImports(absBaseDir, debug);
 
@@ -141,7 +141,6 @@ export function createServer(config: ServerConfig): ServerHandle {
     hasCSS,
     importMap: IMPORT_MAP,
     noCache,
-    renderer: config.renderer,
     showStatus: config.showStatus,
     width: config.width,
     height: config.height,
@@ -174,7 +173,6 @@ export function createServer(config: ServerConfig): ServerHandle {
     watcher = createFileWatcher({
       absBaseDir,
       port,
-      renderer: config.renderer,
       importMapObj,
       debug,
       broadcastWs: (msg) => broadcaster.broadcastRaw(msg),
@@ -305,10 +303,24 @@ export function createServer(config: ServerConfig): ServerHandle {
           trojanPort = addr.port;
         },
       },
-      async (req) => {
+      (req) => {
+        // Authenticate trojan requests on localhost — same token as main server
+        if (config.token) {
+          const url = new URL(req.url);
+          const qToken = url.searchParams.get("token");
+          const auth = req.headers.get("authorization");
+          const hToken = auth?.startsWith("Bearer ") ? auth.slice(7) : null;
+          const validQ = qToken !== null &&
+            _timingSafeEqual(qToken, config.token);
+          const validH = hToken !== null &&
+            _timingSafeEqual(hToken, config.token);
+          if (!validQ && !validH) {
+            return new Response("Unauthorized", { status: 401 });
+          }
+        }
         const { pathname } = new URL(req.url);
         if (pathname.startsWith("/__aio/")) {
-          return await staticHandler.serveStatic(pathname, req);
+          return staticHandler.serveStatic(pathname, req);
         }
         if (pathname === "/") return new Response("ok", { status: 200 });
         return new Response("Not Found", { status: 404 });

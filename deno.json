@@ -1,13 +1,11 @@
 {
   "name": "@riagentic/aio",
-  "version": "1.0.0-alpha11",
+  "version": "1.0.0-alpha12",
   "appId": "aio",
   "exports": {
     ".": "./mod.ts",
     "./air": "./src/air.ts",
-    "./react": "./src/react.ts",
     "./jsx-runtime": "./src/jsx-runtime.ts",
-    "./adapters/react": "./src/adapters/react.ts",
     "./adapters/air": "./src/adapters/air.ts",
     "./state-core": "./src/state-core.ts",
     "./db": "./src/db/mod.ts",
@@ -45,11 +43,9 @@
   },
   "imports": {
     "@std/testing": "jsr:@std/testing@1.0.17",
-    "react": "npm:react@18.3.1",
-    "react-dom": "npm:react-dom@18.3.1",
     "aio": "./mod.ts",
     "aio/air": "./src/air.ts",
-    "aio/react": "./src/react.ts",
+    "aio/jsx-runtime": "./src/jsx-runtime.ts",
     "aio/db": "./src/db/mod.ts",
     "aio/sync": "./src/sync/mod.ts",
     "aio/testing": "./src/cell-test.ts",
@@ -70,7 +66,7 @@
   "tasks": {
     "test": "deno test -A --unstable-kv tests/",
     "test:core": "deno test -A --unstable-kv --ignore=tests/am.test.ts,tests/build.test.ts,tests/server.test.ts,tests/tls.test.ts,tests/single-instance-lock.test.ts,tests/cli.test.ts,tests/cli-client.test.ts,tests/electron-ipc.test.ts,tests/app-modes.test.ts tests/",
-    "check": "deno check mod.ts aiol/mod.ts init.ts",
+    "check": "deno check mod.ts aiol/mod.ts init.ts examples/counter/App.tsx examples/todo/App.tsx",
     "lint": "deno lint src/",
     "lint:aio": "deno run -A aiol/mod.ts",
     "example": "deno run -A examples/counter/app.ts",

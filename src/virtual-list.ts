@@ -96,12 +96,14 @@ export function useVirtualList<T>(
 
     const result: { item: T; index: number; offset: number }[] = [];
     for (let i = startIndex; i < endIndex; i++) {
-      result.push({ item: items[i]!, index: i, offset: i * itemHeight });
+      result.push({ item: items[i]!, index: i, offset: i * safeItemHeight });
     }
     return result;
   });
 
-  const totalHeightComputed = computed(() => getItems().length * itemHeight);
+  const totalHeightComputed = computed(() =>
+    getItems().length * safeItemHeight
+  );
 
   return {
     get visible() {
@@ -118,7 +120,7 @@ export function useVirtualList<T>(
       scrollTopSig.set(el.scrollTop);
     },
     scrollToIndex(index: number) {
-      scrollTopSig.set(index * itemHeight);
+      scrollTopSig.set(index * safeItemHeight);
     },
     get containerStyle() {
       return {

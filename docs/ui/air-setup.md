@@ -39,13 +39,14 @@ Write `.tsx` files. The JSX compiler maps `<div>` to AIR's virtual DOM — no
 React import needed. AIO uses `@types/react` for HTML intrinsic element types.
 
 ```ts
-import { computed, effect, mount, signal, useCell } from "aio/air";
+import { computed, effect, mount, signal } from "aio/air";
 ```
 
 **Import rule:**
 
-- `"aio"` — server code: `cell`, `aio`, `log`, types
-- `"aio/air"` — client code: `useCell`, `signal`, `mount`, UI utilities
+- `"aio"` — server code: `cell`, `aio`, `log`, types. Cell imports are also used
+  directly in components for state reads and method calls.
+- `"aio/air"` — client code: `signal`, `mount`, `useLocal`, UI utilities
 
 ---
 
@@ -68,7 +69,7 @@ import { computed, effect, mount, signal, useCell } from "aio/air";
 │                    Client (AIR Renderer)                          │
 │                                                                  │
 │   state-core: signals per cell ← server broadcasts            │
-│   adapters/air: useCell() → { state, send }                   │
+│   cell.count → signal-backed getter (auto-reactive)            │
 │   aio-renderer: mount() → per-component signal tracking          │
 │                                                                  │
 │   signal() / computed() / effect() — local reactivity            │
@@ -112,21 +113,22 @@ await aio.run({ cells: [counter], baseDir: import.meta.dirname! });
 **`App.tsx` — UI component:**
 
 ```tsx
-import { useCell } from "aio/air";
 import { counter } from "./app.ts";
 
 export default function App() {
-  const { state, send } = useCell(counter);
   return (
     <div>
-      <h1>{state.count}</h1>
-      <button onClick={() => send.increment()}>+</button>
-      <button onClick={() => send.decrement()}>-</button>
-      <button onClick={() => send.reset()}>Reset</button>
+      <h1>{counter.count}</h1>
+      <button onClick={() => counter.increment()}>+</button>
+      <button onClick={() => counter.decrement()}>-</button>
+      <button onClick={() => counter.reset()}>Reset</button>
     </div>
   );
 }
 ```
+
+One import, zero ceremony. `counter.count` is reactive (signal-backed).
+`counter.increment()` dispatches to the server. No hooks needed.
 
 Run with `deno run -A app.ts`. AIO starts the server, compiles UI, opens a
 browser, connects WebSocket, and streams state. Works across tabs.
@@ -136,7 +138,7 @@ browser, connects WebSocket, and streams state. Works across tabs.
 ## Data Flow
 
 ```
-1. User clicks → onClick={() => send.increment())
+1. User clicks → onClick={() => counter.increment())
 2. AIR batches the handler → batch(() => handler(event))
 3. Action sent via WebSocket → { type: "counter:increment", ... }
 4. Server dispatches through reduce() → s.count += 1
@@ -149,21 +151,18 @@ browser, connects WebSocket, and streams state. Works across tabs.
 
 ## Connecting UI to Server State
 
-### useCell — Subscribe to a cell
+### Direct cell access (preferred)
 
 ```tsx
-import { useCell } from "aio/air";
 import { counter } from "./app.ts";
 
-const Counter = () => {
-  const { state, send } = useCell(counter);
-  return <span>{state.count}</span>;
-};
+const Counter = () => <span>{counter.count}</span>;
 ```
 
-- `state` is reactive — reading `state.count` in JSX auto-tracks it.
-- `send` is typed. `send.increment(5)` dispatches to the server with args.
+- `counter.count` is reactive — reading it in JSX auto-tracks the signal.
+- `counter.increment(5)` dispatches to the server with typed args.
 - **Only this component re-renders** when `counter.count` changes.
+- No hooks, no destructuring, no loading guards. Just import and use.
 
 ### useAio — Subscribe to all state
 
@@ -174,7 +173,8 @@ const Dashboard = () => {
 };
 ```
 
-Re-renders on **any** state change. Prefer `useCell` for scoped updates.
+Re-renders on **any** state change. Prefer direct cell access for scoped
+updates.
 
 ### useLocal — Client-only state
 
@@ -233,7 +233,7 @@ const SearchBar = () => (
 
 | State type                        | Use                        | Why                             |
 | --------------------------------- | -------------------------- | ------------------------------- |
-| Business data (persisted, shared) | `useCell`                  | Server is source of truth       |
+| Business data (persisted, shared) | Direct cell access         | Server is source of truth       |
 | Component-local UI toggle         | `useLocal`                 | Signal-backed, component-scoped |
 | Cross-component UI state          | `signal()` at module level | Shared without prop drilling    |
 | Cached derivation                 | `computed()`               | Auto-tracked, no dep arrays     |

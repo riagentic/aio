@@ -1,67 +1,25 @@
-# AIR vs React -- Comparison & Migration
+# Migrating from React to AIR
 
-Side-by-side comparison and step-by-step migration guides in both directions.
+Step-by-step migration guide for teams moving from React to AIR.
 
 ---
 
 ## At a Glance
 
-|                      | AIR (`aio/air`)                       | React (`aio/react`)                             |
-| -------------------- | ------------------------------------- | ----------------------------------------------- |
-| **Reactivity model** | Signals (auto-tracked)                | React hooks (manual deps)                       |
-| **Memoization**      | Automatic                             | Manual (`React.memo`, `useCallback`, `useMemo`) |
-| **Dependencies**     | Zero                                  | React 18+, ReactDOM                             |
-| **Bundle size**      | ~8KB                                  | ~40KB+ (React + ReactDOM)                       |
-| **Events**           | Native DOM events                     | React synthetic events                          |
-| **Forms**            | Built-in `useForm`                    | Bring your own                                  |
-| **Animation**        | Built-in `useSpring`, `useTransition` | Bring your own                                  |
-| **Virtual scroll**   | Built-in `useVirtualList`             | Bring your own                                  |
-| **Error boundaries** | `<ErrorBoundary>` (one line)          | Class component (15+ LOC)                       |
-| **SSR**              | Built-in `renderToString` + `hydrate` | `react-dom/server` + `react-dom/client`         |
-| **Server state**     | `useCell`, `useAio`, `useLocal`       | `useCell`, `useAio`, `useLocal`                 |
-| **Routing**          | Built-in (signal-based)               | Built-in (same API)                             |
-
----
-
-## API Comparison
-
-### Identical API
-
-Same name, same behavior, same types in both renderers:
-
-`useCell(ref)`, `useAio()`, `useLocal(init)`, `useConnected()`,
-`useProjection(fn)`, `useTimeTravel(ref)`, `useRoute(pattern?)`,
-`useNavigate()`, `Route`, `Outlet`, `Link`, `NavLink`, `Redirect`,
-`useRef(init)`, `createContext(default)`, `useContext(ctx)`, `page(key, routes)`
-
-### AIR-Only API
-
-| API                          | Purpose                          |
-| ---------------------------- | -------------------------------- |
-| `signal(init)`               | Reactive value                   |
-| `computed(fn)`               | Lazy derived value               |
-| `effect(fn)`                 | Reactive side effect             |
-| `batch(fn)`                  | Coalesce signal updates          |
-| `onMount(fn)` / `onCleanup`  | Lifecycle hooks                  |
-| `mount(root, App)`           | Mount AIR app to DOM             |
-| `useForm(config)`            | Signal-based form state          |
-| `useSpring(config)`          | Spring physics animation         |
-| `useVirtualList(config)`     | Windowed scrolling               |
-| `<ErrorBoundary>`            | One-line error catching          |
-| `<Defer trigger="viewport">` | Trigger-based lazy loading       |
-| `resource()`                 | Signal-based async data          |
-| `island()`                   | Mount React/Vue/Solid inside AIR |
-
-### React-Only Patterns
-
-| Pattern                      | AIR alternative                |
-| ---------------------------- | ------------------------------ |
-| `useState`                   | `signal()` or `useLocal()`     |
-| `useEffect`                  | `effect()` or `onMount()`      |
-| `useCallback`                | Not needed (no stale closures) |
-| `useMemo`                    | `computed()`                   |
-| `React.memo`                 | Not needed (auto-memo)         |
-| `createRoot` / `hydrateRoot` | `mount()` / `hydrate()`        |
+|                      | React                                           | AIR (`aio/air`)                          |
+| -------------------- | ----------------------------------------------- | ---------------------------------------- |
+| **Reactivity model** | React hooks (manual deps)                       | Signals (auto-tracked)                   |
+| **Memoization**      | Manual (`React.memo`, `useCallback`, `useMemo`) | Automatic                                |
+| **Dependencies**     | React 18+, ReactDOM                             | Zero                                     |
+| **Bundle size**      | ~40KB+ (React + ReactDOM)                       | ~8KB                                     |
+| **Events**           | React synthetic events                          | Native DOM events                        |
+| **Forms**            | Bring your own                                  | Built-in `useForm`                       |
+| **Animation**        | Bring your own                                  | Built-in `useSpring`, `<Transition>`     |
+| **Virtual scroll**   | Bring your own                                  | Built-in `useVirtualList`                |
+| **Error boundaries** | Class component (15+ LOC)                       | `<ErrorBoundary>` (one line)             |
+| **SSR**              | `react-dom/server` + `react-dom/client`         | Built-in `renderToString` + `hydrate`    |
+| **Server state**     | Direct cell access, `useAio`, `useLocal`        | Direct cell access, `useAio`, `useLocal` |
+| **Routing**          | Built-in (same API)                             | Built-in (signal-based)                  |
 
 ---
 
@@ -181,7 +139,7 @@ const LoginForm = () => (
 
 ---
 
-## Migration: React to AIR
+## Migration Steps
 
 ### Step 1: Change Import
 
@@ -225,42 +183,6 @@ In dev mode, one-time `console.info` hints suggest AIR-native alternatives.
 
 ---
 
-## Migration: AIR to React
-
-### Step 1: Change Import
-
-```diff
-- import { mount, signal, useCell } from "aio/air";
-+ import { useCell } from "aio/react";
-+ import { useState } from "react";
-+ import { createRoot } from "react-dom/client";
-```
-
-### Step 2: Replace Signal Patterns
-
-```diff
-- const count = signal(0);
-+ const [count, setCount] = useState(0);
-
-- const derived = computed(() => items.value.length);
-+ const derived = useMemo(() => items.length, [items]);
-
-- effect(() => { console.log(count.value); });
-+ useEffect(() => { console.log(count); }, [count]);
-```
-
-### Step 3: Replace AIR Utilities
-
-| AIR                      | React replacement                     |
-| ------------------------ | ------------------------------------- |
-| `mount(root, App)`       | `createRoot(root).render(<App />)`    |
-| `useForm(config)`        | `react-hook-form` or manual state     |
-| `useSpring(config)`      | `react-spring` or `framer-motion`     |
-| `useVirtualList(config)` | `react-window` or `react-virtualized` |
-| `<ErrorBoundary>`        | Class component error boundary        |
-
----
-
 ## Hook Migration Table
 
 | React                   | AIR (recommended)                  | AIR (compat)                       |
@@ -278,24 +200,14 @@ In dev mode, one-time `console.info` hints suggest AIR-native alternatives.
 
 ---
 
-## What You Gain / Lose
+## What You Gain
 
-### React to AIR
+**Zero dependencies** (~32KB saved), no dependency arrays, no stale closures,
+automatic memoization, built-in forms/animation/virtual scroll, signal-based
+context (no re-render storms).
 
-**Gain:** Zero dependencies (~32KB saved), no dependency arrays, no stale
-closures, automatic memoization, built-in forms/animation/virtual scroll,
-signal-based context (no re-render storms).
+**What you lose:** React ecosystem (Material UI, react-query), React DevTools
+(use aio DevTools), React Native support.
 
-**Lose:** React ecosystem (Material UI, react-query), React DevTools (use aio
-DevTools), familiar React patterns, community support.
-
-### AIR to React
-
-**Gain:** Vast React ecosystem, React DevTools, community support, React Native.
-
-**Lose:** Automatic memoization, signal-based reactivity, built-in utilities,
-smaller bundle, simpler mental model.
-
-Both renderers connect to the same server, same cells, same protocol. The
-difference is how they manage UI reactivity. See
-[renderer architecture](air-setup.md#architecture-overview).
+See [renderer architecture](air-setup.md#architecture-overview) for how AIR
+connects to server state.

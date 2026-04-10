@@ -263,9 +263,9 @@ import {
 } from "aio/state-core";
 ```
 
-**Minimal contract:** `useCell(ref)` via `getCellSignal()`, `useAio()` via
-`getStateSignal()`, `useLocal(initial)` as framework-local state,
-`useConnected()` via `getConnectedSignal()`.
+**Minimal contract:** `getCellSignal()` for cell state, `getStateSignal()` for
+full state, `useLocal(initial)` as framework-local state, `useConnected()` via
+`getConnectedSignal()`.
 
 ### Svelte 5 (Runes)
 
@@ -298,8 +298,7 @@ export function useAio() {
 }
 ```
 
-AIR and React adapters are built-in. Other framework adapters are
-community-maintained.
+AIR is the built-in adapter. Other framework adapters are community-maintained.
 
 ---
 

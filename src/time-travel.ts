@@ -63,6 +63,7 @@ export type TTCommand =
   | { cmd: "resume" };
 
 const MAX_ENTRIES = 200;
+const MAX_STATE_BYTES = 100_000; // Skip clone above 100KB to protect dev-mode memory
 
 /** Creates empty TT state */
 export function createTT<S, A>(): TTState<S, A> {
@@ -78,10 +79,29 @@ export function record<S, A>(
 ): TTState<S, A> {
   // Truncate forward entries (standard undo/redo: branch, not tree)
   const entries = tt.entries.slice(0, tt.index + 1);
+
+  // Skip expensive clone for very large state to protect dev-mode memory
+  let clonedState: S;
+  try {
+    const estimated = JSON.stringify(state as Record<string, unknown>).length;
+    if (estimated > MAX_STATE_BYTES) {
+      console.warn(
+        `[aio:tt] state is ${
+          (estimated / 1024).toFixed(1)
+        }KB — skipping time-travel snapshot for performance. Consider persistMode:'multi' or cell-level persist filters.`,
+      );
+      clonedState = state;
+    } else {
+      clonedState = structuredClone(state);
+    }
+  } catch {
+    clonedState = state;
+  }
+
   const entry: HistoryEntry<S, A> = {
     id: tt.nextId,
     action,
-    state: structuredClone(state),
+    state: clonedState,
     ts: Date.now(),
     perf,
   };

@@ -1,6 +1,13 @@
 // Build helpers — pure/extractable utilities used by build.ts
 import { join } from "@std/path";
 
+/** Known SHA-256 hashes for appimagetool builds (continuous release).
+ *  Update when upgrading — run: `curl -sL <url> | sha256sum` */
+const APPIMAGETOOL_HASHES: Record<string, string> = {
+  // x86_64: "sha256:<hash>", // Uncomment and fill when pinning a specific build
+  // aarch64: "sha256:<hash>",
+};
+
 /** Slugify a string for use as binary/app name */
 export function slugify(s: string): string {
   return s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") ||
@@ -105,6 +112,28 @@ export async function ensureAppimagetool(
       "[appimage] \u2717 downloaded file is not a valid ELF binary",
     );
     Deno.exit(1);
+  }
+  // Integrity check — verify SHA-256 hash if known for this arch
+  const expectedHash = APPIMAGETOOL_HASHES[arch];
+  if (expectedHash) {
+    const hashBytes = await crypto.subtle.digest("SHA-256", bytes);
+    const hashHex = Array.from(new Uint8Array(hashBytes))
+      .map((b) => b.toString(16).padStart(2, "0"))
+      .join("");
+    if (hashHex !== expectedHash) {
+      console.error(
+        `[appimage] ✗ integrity check failed: expected ${expectedHash}, got ${hashHex}`,
+      );
+      try {
+        await Deno.remove(toolPath);
+      } catch { /* ignore */ }
+      Deno.exit(1);
+    }
+    console.log("[appimage] ✓ integrity check passed");
+  } else {
+    console.warn(
+      "[appimage] ⚠ no pinned hash for this arch — skipping integrity check. Pin a hash in APPIMAGETOOL_HASHES for production builds.",
+    );
   }
   await Deno.writeFile(toolPath, bytes);
   await Deno.chmod(toolPath, 0o755);

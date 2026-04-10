@@ -284,6 +284,7 @@ export function createCellFromMethods<
       effects: eCatalog,
       bound: false,
     },
+    fx: eCatalog,
   };
 
   // Flatten onto cell def

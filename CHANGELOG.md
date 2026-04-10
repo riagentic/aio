@@ -1,5 +1,57 @@
 # Changelog
 
+## 1.0.0-alpha12
+
+### Breaking
+
+- **React renderer removed** — AIR is the sole renderer. `aio/react`,
+  `src/react.ts`, `src/browser.ts`, `src/standalone.ts`, `src/browser-fiber.ts`,
+  `src/browser-hooks.ts`, `src/browser-router.ts`, `src/time-travel-react.ts`,
+  `src/adapters/react.ts` and their tests are gone. See
+  `docs/upgrade/from-alpha11-to-alpha12.md`
+
+### Added
+
+- **Direct reactive cell access** — `counter.count` is now type-safe. Both
+  `cell()` overloads return `… & Readonly<S>` so UI code can read state off the
+  cell without a hook. Backed by `src/cell-reactive.ts` which installs
+  signal-backed getters via `Object.defineProperty`
+- **JSX runtime wired up** — `aio/jsx-runtime` added to exports and import map.
+  `src/jsx-runtime.ts` triple-slash-references `jsx.d.ts` so
+  `JSX.IntrinsicElements` resolves and `<div/>` type-checks
+- **`deno task check` covers examples** — now runs against
+  `examples/counter/App.tsx` and `examples/todo/App.tsx` so JSX regressions
+  break the task
+
+### Fixed
+
+- **Blank render in minimal apps** — dev HTML bootstrap now calls
+  `ensureConnected()` before `_waitForState()`, so apps that use direct cell
+  access without any UI hook still get cells bound reactively
+- **Immer draft proxies in effects** — effects are cloned inside `produce()`
+  before Immer revokes draft proxies; uncloneable effects are dropped rather
+  than passed through as revoked proxies
+- **Hardening wave** — trojan auth, `fatalOnStart`, effect async errors, cleanup
+  hooks
+- **Stale `VERSION`** — `src/aio-cli.ts` constant bumped alpha8 → alpha12 (was
+  stale since alpha8)
+
+### Tests
+
+- **Regression: blank render via direct cell access** —
+  `tests/boot-direct-access.test.ts` mounts a no-hook component with `happy-dom`
+  and asserts `counter.count` renders after `bindAllCellsReactive()`, pins the
+  undefined-without-binding failure mode, and guards the seeded-initial-state
+  fallback
+
+### Docs
+
+- Direct cell access is the primary UI pattern; TS2722 troubleshooting added
+- Quickstart covers both JSR and vendored (`dep/aio/`) `deno.json`, verified
+  end-to-end against a fresh `/tmp` project with headless chrome + CDP driver
+- Upgrade guide: `aio/adapters/react` subpath removed alongside `aio/react`;
+  `aio/jsx-runtime` added to the required imports diff
+
 ## 1.0.0-alpha11
 
 ### Added

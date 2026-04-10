@@ -1,6 +1,9 @@
 // deno-lint-ignore-file
 // cell(), bridge(), and aio stub — browser-side action creator factories.
 
+import { registerCell } from "./cell-reactive.ts";
+import type { CellDef } from "./cell-types.ts";
+
 // deno-lint-ignore no-explicit-any
 type _Creators = Record<string, (...args: any[]) => any>;
 
@@ -66,6 +69,7 @@ export function cell(
     for (const [key, value] of Object.entries(cat)) {
       def[key] = value;
     }
+    registerCell(def as unknown as CellDef);
     return def;
   }
   const aCat = buildCat(config.actions ?? {});
@@ -85,6 +89,7 @@ export function cell(
   for (const [key, value] of Object.entries(aCat)) {
     def[key] = value;
   }
+  registerCell(def as unknown as CellDef);
   return def;
 }
 

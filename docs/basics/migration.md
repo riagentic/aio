@@ -27,14 +27,11 @@ all clients**
   "unstable": ["kv"],
   "compilerOptions": {
     "jsx": "react-jsx",
-    "jsxImportSource": "react",
-    "jsxImportSourceTypes": "@types/react"
+    "jsxImportSource": "aio"
   },
   "imports": {
     "aio": "jsr:@riagentic/aio@1.0.0-alpha8",
-    "@types/react": "npm:@types/react@^18",
-    "react": "npm:react@^18",
-    "react-dom": "npm:react-dom@^18",
+    "aio/air": "jsr:@riagentic/aio@1.0.0-alpha8/air",
     "esbuild": "npm:esbuild@^0.24"
   },
   "tasks": {
@@ -77,16 +74,13 @@ After `aio.run()`, call methods directly: `counter.increment(5)`.
 ### UI: `src/App.tsx`
 
 ```tsx
-import { useCell } from "aio/react";
 import { counter } from "./cell/counter/index.ts";
 
 export default function App() {
-  const { state, send, status } = useCell(counter);
-  if (!state) return <div>Connecting...</div>;
   return (
     <div>
-      <h1>{state.count}</h1>
-      <button onClick={() => send.increment()}>+</button>
+      <h1>{counter.count}</h1>
+      <button onClick={() => counter.increment()}>+</button>
     </div>
   );
 }
@@ -112,7 +106,7 @@ await aio.run({ cells: [counter] });
 | `slice.reducer`                      | `methods` or `reduce`         | Mutate directly in methods style                   |
 | `slice.actions`                      | Auto-generated                | `counter.increment(5)` after `aio.run()`           |
 | `configureStore()`                   | `aio.run({ cells })`          | Composition, middleware, DevTools built-in         |
-| `useSelector(s => s.counter)`        | `useCell(counter)`            | Auto-scoped, selective re-renders                  |
+| `useSelector(s => s.counter)`        | `counter.count` (direct)      | Auto-scoped, selective re-renders                  |
 | `useDispatch()` + `dispatch(action)` | `send.increment()`            | Typed, no raw dispatch                             |
 | `createAsyncThunk`                   | `async` methods or generators | No thunk boilerplate                               |
 | `persistReducer`                     | Automatic                     | Deno.Kv persistence built-in                       |
@@ -123,7 +117,7 @@ await aio.run({ cells: [counter] });
 | ------------------------ | ---------------------------------- | ------------------------- |
 | `create((set) => ...)`   | `cell('name', { state, methods })` | Similar Immer-style DX    |
 | `set({ count: 1 })`      | `s.count = 1` inside a method      | Same mutation style       |
-| `useStore(s => s.count)` | `useCell(counter)`                 | Auto-scoped               |
+| `useStore(s => s.count)` | `counter.count` (direct)           | Auto-scoped               |
 | `persist` middleware     | Automatic                          | Built-in Deno.Kv + SQLite |
 | Multiple stores          | Multiple cells                     | One cell per domain       |
 
@@ -172,9 +166,9 @@ const counter = cell("counter", {
 | SQLite / raw SQL                  | Built-in `app.db` -- [3-tier SQLite](../persistence.md) |
 | `setInterval` / `setTimeout`      | Declarative `schedule.every` / `schedule.after`         |
 | cron jobs                         | `schedule.cron` -- runs in-process                      |
-| React state + useEffect           | `useCell(f)` -- all state lives on server               |
+| React state + useEffect           | Direct cell access -- all state lives on server         |
 | Multiple useState hooks           | Cell state + `useLocal()` for ephemeral UI              |
-| WebSocket setup                   | Delete it -- `useCell()` handles everything             |
+| WebSocket setup                   | Delete it -- direct cell access handles everything      |
 | createRoot / ReactDOM             | Delete it -- framework mounts `export default` from App |
 | HMR / hot reload                  | Delete it -- built-in, no config                        |
 | State management (Redux, Zustand) | `cell()` replaces store + slices + selectors            |
@@ -187,7 +181,7 @@ const counter = cell("counter", {
 
 ```
 BEFORE: Component -> useState -> fetch -> setState -> render
-AFTER:  Component -> useCell(f) -> send.action() -> server reduces -> broadcast -> render
+AFTER:  Component -> counter.count -> counter.action() -> server reduces -> broadcast -> render
 ```
 
 For ephemeral per-client state (editing, focus, dropdowns), use `useLocal()`.
@@ -256,6 +250,6 @@ Remove `--allow-ffi` from run/compile commands. Any `execute` handler calling
 - [ ] `deno.json` updated with imports, compilerOptions, unstable
 - [ ] `deno install` ran successfully
 - [ ] `src/cell/<name>/index.ts` -- cell with state and methods
-- [ ] `src/App.tsx` -- `export default` component using `useCell()`
+- [ ] `src/App.tsx` -- `export default` component using direct cell access
 - [ ] `src/app.ts` -- entry point calling `aio.run({ cells: [...] })`
 - [ ] `deno task dev` runs and startup checks pass

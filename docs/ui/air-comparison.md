@@ -137,10 +137,9 @@ AIO-72.
 diffing. Svelte compiles to surgical DOM mutations. AIR's VDOM adds ~2-3x
 overhead vs compiled approaches.
 
-**Why AIR keeps VDOM:** AIO apps can switch between AIR and React renderers. SSR
-`renderToString` needs a tree. `ErrorBoundary`, `Suspense`, `Portal` are simpler
-with a tree. The VDOM is an architectural trade-off for flexibility, not a
-technical limitation.
+**Why AIR keeps VDOM:** SSR `renderToString` needs a tree. `ErrorBoundary`,
+`Suspense`, `Portal` are simpler with a tree. The VDOM is an architectural
+trade-off for flexibility, not a technical limitation.
 
 **Signal->DOM bypass: ✅** AIR's hybrid approach — VDOM for structure, but
 signal props create direct `effect()` -> DOM bindings that skip the diff.
@@ -366,7 +365,7 @@ The compat layer covers all common patterns. `onChange` is auto-mapped to
 | `useImperativeHandle`  | Expose methods via ref       | Not provided                                    | Use ref callback. Rare pattern. | ✅ OK     |
 | `useLayoutEffect`      | Sync after DOM, before paint | `afterRender()`                                 | Covers most cases               | ✅ OK     |
 | `forwardRef`           | Pass ref through HOC         | Not needed                                      | Refs are regular props in AIR   | ✅ Better |
-| `useReducer`           | Reducer pattern              | `useCell()`                                     | Server cells ARE reducers       | ✅ Better |
+| `useReducer`           | Reducer pattern              | Direct cell access                              | Server cells ARE reducers       | ✅ Better |
 | `useSyncExternalStore` | Subscribe external           | `effect()` + `signal`                           | Signals ARE the store           | ✅ Better |
 | Event delegation       | Root-level listeners         | Root-level delegation via `composedPath`        | Implemented                     | ✅ Done   |
 | `onChange` compat      | Fires on keystroke           | Auto-mapped to `onInput` on form elements       | Implemented                     | ✅ Done   |

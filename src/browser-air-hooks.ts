@@ -17,7 +17,7 @@ import type {
 } from "./cell-types.ts";
 
 // AIO-67 + AIO-75: Typed overloads -- infer State and Send from CellDef
-/** Typed overload -- full inference when passing a cell definition. */
+/** Subscribe to a cell — use direct cell access instead for new code. */
 export function useCell<
   // deno-lint-ignore no-explicit-any
   F extends CellDef<any, any, any, any> & DirectCalling<any, any>,
@@ -28,7 +28,7 @@ export function useCell<
   send: SendOf<F>;
   status: string | undefined;
 };
-/** Untyped overload -- for dynamic CellRef usage. */
+/** Subscribe to a cell — use direct cell access instead for new code. */
 export function useCell<
   S extends Record<string, unknown> = Record<string, unknown>,
 >(
@@ -38,8 +38,7 @@ export function useCell<
   send: Record<string, (...args: unknown[]) => void>;
   status: string | undefined;
 };
-/** AIR useCell -- signal-based, auto-tracked. Calls ensureConnected().
- *  Pass a cell definition to get full type inference on state and send. */
+/** Subscribe to a cell — use direct cell access instead for new code. */
 // deno-lint-ignore no-explicit-any
 export function useCell(ref: any): any {
   ensureConnected();

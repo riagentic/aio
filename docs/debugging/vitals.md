@@ -239,8 +239,8 @@ Structured block when severity is `likely`/`possible`:
 [aio] teardown averted -- listeners dropped to 0 but recovered to 3 within 300ms
 ```
 
-300ms grace period prevents transient listener gaps (React reconciliation, page
-switches, hot reload) from triggering full teardown.
+300ms grace period prevents transient listener gaps (component reconciliation,
+page switches, hot reload) from triggering full teardown.
 
 ### onDiagnostic hook
 

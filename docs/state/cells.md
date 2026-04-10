@@ -6,7 +6,7 @@ actions, effects, machine guards, reducer, and executor.
 ## Architecture — Data Flow
 
 ```
-  UI (React / Svelte / Vue)          Server (Deno)
+  UI (AIR / Svelte / Vue)             Server (Deno)
   ─────────────────────────          ──────────────────────────────────
 
   user clicks button
@@ -100,6 +100,7 @@ After `cell()` returns a cell ref, the outside world can access:
 | Action (explicit style) | Direct call or dispatch       | `cart.start()`                     |
 | Selector                | Direct call (after bind)      | `counter.total()`                  |
 | `.type` on any callable | Read property                 | `cart.clear.type` → `"cart:clear"` |
+| `.fx` effect catalog    | Typed creators                | `counter.fx.persist(value)`        |
 
 ### What `.type` is for
 
@@ -121,6 +122,17 @@ machine: {
 Everything under `__aio` is framework plumbing. You can inspect it for debugging
 (`counter.__aio.machine`, `counter.__aio.actionKeys`) but never need it in
 normal code.
+
+### Type helper: StateOf
+
+Extract a cell's state type without casts:
+
+```ts
+import type { StateOf } from "aio";
+
+type CounterState = StateOf<typeof counter>;
+// { count: number }
+```
 
 ---
 
@@ -158,11 +170,14 @@ dispatch, async, access other cells' state.
 ### Lifecycle hooks
 
 ```ts
-onInit(app) { app.dispatch(...) },
+onInit(app, initState) { app.dispatch(...) },
 onDestroy(app) { /* cleanup */ },
 ```
 
-Same capabilities as execute — dispatch and read state. One-time calls.
+Same capabilities as execute — dispatch and read state. One-time calls. The
+second argument `initState` is the cell's initial/default state object, provided
+because `app.getState()` may not yet reflect the `__init` dispatch at the time
+`onInit` runs.
 
 ---
 
@@ -185,3 +200,107 @@ multi-step. Add `actions/reduce/execute` for fine-grained action control.
 methods and selectors are properly typed. The state parameter `s` is stripped
 from method signatures, so `increment(s, by: number)` becomes
 `counter.increment(by: number)`.
+
+## Naming rules
+
+State keys, methods, actions, effects, and selectors share the cell's namespace.
+Some collisions are fine, others are not.
+
+### Allowed — state key overlaps with method/action/effect/selector
+
+```ts
+const gateway = cell("gateway", {
+  state: { error: null as string | null },
+  actions: { error: (msg: string) => ({ msg }) }, // ✅ OK
+  reduce: {
+    error(s, p) {
+      s.error = p.msg;
+    },
+  },
+});
+```
+
+The method/action always takes priority on the cell object. State is still
+readable through the signal (in components) or `getState()` (on server). This is
+common for patterns like `error` state + `error` action.
+
+### Not allowed — two behaviors with the same name
+
+| Collision                        | Allowed? | Reason                                  |
+| -------------------------------- | -------- | --------------------------------------- |
+| state ↔ method                   | ✅       | Method wins on cell, state via signal   |
+| state ↔ action                   | ✅       | Action wins on cell, state via signal   |
+| state ↔ effect                   | ✅       | Effect wins on cell, state via signal   |
+| state ↔ selector                 | ✅       | Selector wins on cell, state via signal |
+| method ↔ method                  | ❌       | Duplicate — which runs?                 |
+| method ↔ generator               | ❌       | Both dispatch, ambiguous                |
+| method ↔ action                  | ❌       | Both create `prefix:name` type          |
+| action ↔ effect                  | ❌       | Both use same type pattern              |
+| action ↔ selector                | ❌       | Both flatten onto cell                  |
+| any ↔ `__aio`, `A`, `E`, `state` | ❌       | Reserved for framework                  |
+
+**Rule of thumb:** Two _behaviors_ (things that do something) can't share a
+name. A behavior and a _value_ (state key) can.
+
+## Troubleshooting
+
+### TS2722: "Cannot invoke an object which is possibly 'undefined'" on `cell.method()`
+
+Symptom: every direct call (`counter.increment()`, `fleet.startAll()`, …)
+reports TS2722 under `noUncheckedIndexedAccess: true`.
+
+Cause: something in your code is widening the `methods` (or `actions`) object to
+an index-signature type like `Record<string, …>` **before** `cell()` sees it.
+When that happens, the typed return of `cell()` becomes an index signature, and
+under `noUncheckedIndexedAccess` every property access is `Fn | undefined` — so
+TypeScript refuses the call.
+
+`cell()` relies on **literal inference** to produce named, callable properties.
+Anything that flattens the methods object into a `Record<…>` breaks it.
+
+**Fix — inline the methods object at the call site:**
+
+```ts
+// ❌ Widens — `methods` is `Record<string, (s) => void>`, literal shape lost
+const methods: Record<string, (s: State) => void> = {
+  navigate(s, route: string) {
+    s.route = route;
+  },
+};
+const core = cell("core", { state, methods });
+core.navigate("about"); // TS2722
+
+// ❌ Also widens — explicit config type defaults M to the constraint
+const cfg: MethodsCellConfig<"core", State> = {
+  state,
+  methods: {
+    navigate(s, route: string) {
+      s.route = route;
+    },
+  },
+};
+const core = cell("core", cfg);
+
+// ✅ Inline — TypeScript infers the exact method shape
+const core = cell("core", {
+  state,
+  methods: {
+    navigate(s, route: string) {
+      s.route = route;
+    },
+  },
+});
+core.navigate("about"); // OK
+```
+
+**Rules of thumb:**
+
+- Don't extract `methods` (or `actions`) into a separate variable.
+- Don't annotate the cell config with `MethodsCellConfig<…>` /
+  `ActionsCellConfig<…>` — let inference flow from the literal.
+- If you need to split a large cell across files, export the cell itself, not
+  its methods object.
+
+To confirm you're hitting this, hover over a method in your editor: widened
+cells show `((…args) => …) | undefined`; properly inferred cells show
+`(…args) => …`.

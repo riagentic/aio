@@ -74,7 +74,6 @@ export interface GraphValidationHandle {
 export function startGraphValidation(
   absBaseDir: string,
   importMapObj: Record<string, string>,
-  renderer: "react" | "aio" | undefined,
   debug: (msg: string) => void,
 ): GraphValidationHandle {
   let graphResult: GraphResult | null = null;
@@ -91,8 +90,7 @@ export function startGraphValidation(
     };
   }
 
-  const graphTranspile = (s: string, f: string) =>
-    transpile(s, f, undefined, renderer);
+  const graphTranspile = (s: string, f: string) => transpile(s, f);
   const done = validateGraph(entrypoint, importMapObj, graphTranspile)
     .then((result) => {
       graphResult = result;

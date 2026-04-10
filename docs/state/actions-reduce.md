@@ -91,8 +91,23 @@ reduce: {
 },
 ```
 
-Handlers receive an Immer draft — mutate in place. The reduce object cannot
-return effects — use `execute` for side effects.
+Handlers receive an Immer draft — mutate in place. To trigger side effects,
+return effect objects using `cell.fx`:
+
+```ts
+reduce: {
+  save(state) {
+    state.status = "saving";
+    return [counter.fx.persist(state.count)];
+  },
+},
+```
+
+`cell.fx` is the public effect catalog — typed, with autocomplete.
+
+> **Effect payloads can reference state.** aio clones effects inside `produce()`
+> before Immer revokes the draft, so state refs in effect payloads work. Stick
+> to plain serializable values (no functions, symbols, or circular refs).
 
 ---
 

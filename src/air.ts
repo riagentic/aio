@@ -9,7 +9,7 @@
  * @example
  * ```ts
  * import { aio, cell } from "aio";            // state (universal)
- * import { useCell, signal, onMount } from "aio/air";  // rendering (browser)
+ * import { signal, onMount } from "aio/air";  // rendering (browser)
  * ```
  */
 
@@ -35,13 +35,8 @@ export type {
   FormState,
   ValidationRule,
 } from "./form.ts";
-export { useSpring, useTransition } from "./animation.ts";
-export type {
-  SpringConfig,
-  SpringValue,
-  TransitionConfig,
-  TransitionState,
-} from "./animation.ts";
+export { useSpring } from "./animation.ts";
+export type { SpringConfig, SpringValue } from "./animation.ts";
 // ── Transitions ─────────────────────────────────────────────────────
 export { fade, scale, slide } from "./transition.ts";
 export type {

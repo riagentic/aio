@@ -99,7 +99,10 @@ export function reduceCell(
             A: f.__aio.actions,
             E: f.__aio.effects,
           });
-          if (Array.isArray(result)) effects = result;
+          // Clone effects NOW — while the draft is still alive.
+          if (Array.isArray(result)) {
+            effects = cloneEffects(result, action.type);
+          }
           if (draft.__aio_status !== targetStatus) {
             draft.__aio_status = targetStatus;
           }
@@ -115,7 +118,7 @@ export function reduceCell(
     }
     const tProduce = _perfCheck ? performance.now() - t0 : 0;
 
-    effects = cloneEffects(effects);
+    // Effects already cloned inside produceWithPatches (before draft revocation)
     const tClone = _perfCheck ? performance.now() - t0 - tProduce : 0;
 
     if (flowName) {
@@ -177,7 +180,10 @@ export function reduceCell(
           A: f.__aio.actions,
           E: f.__aio.effects,
         });
-        if (Array.isArray(result)) effects = result;
+        // Clone effects NOW — while the draft is still alive.
+        // After produceWithPatches returns, Immer revokes the draft proxy,
+        // making any state refs in effect payloads unreadable.
+        if (Array.isArray(result)) effects = cloneEffects(result, action.type);
       },
     );
   } catch (e) {
@@ -190,7 +196,7 @@ export function reduceCell(
   }
   const stProduce = _perfCheck ? performance.now() - st0 : 0;
 
-  effects = cloneEffects(effects, action.type);
+  // Effects already cloned inside produceWithPatches (before draft revocation)
   const stClone = _perfCheck ? performance.now() - st0 - stProduce : 0;
 
   if (f.__aio.validate) {
@@ -246,7 +252,6 @@ function cloneEffects(
       try {
         cloned.push(JSON.parse(JSON.stringify(eff)));
       } catch {
-        // Preserve original (matches dispatch.ts behavior) — may hold revoked Immer refs
         const effType = (eff as Record<string, unknown>)?.type ?? "?";
         log.warn(
           "cell",
@@ -258,6 +263,7 @@ function cloneEffects(
               cloneErr instanceof Error ? cloneErr.message : String(cloneErr)
             }`,
         );
+        // Safe to keep: cloneEffects now runs inside produce() while draft is alive
         cloned.push(eff);
       }
     }

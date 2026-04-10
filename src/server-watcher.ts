@@ -13,7 +13,6 @@ const RELOAD_EXT = new Set([".ts", ".tsx", ".css", ".html", ".svg"]);
 export interface WatcherDeps {
   absBaseDir: string;
   port: number;
-  renderer?: "react" | "aio";
   importMapObj: Record<string, string>;
   debug: (msg: string) => void;
   /** Broadcast a string message to all open WS connections */
@@ -91,8 +90,7 @@ export function createFileWatcher(deps: WatcherDeps): FileWatcher {
           const timeout = new Promise<null>((r) =>
             setTimeout(() => r(null), 2000)
           );
-          const revalTranspile = (s: string, f: string) =>
-            transpile(s, f, undefined, deps.renderer);
+          const revalTranspile = (s: string, f: string) => transpile(s, f);
           const validation = validateGraph(
             join(absBaseDir, "App.tsx"),
             deps.importMapObj,

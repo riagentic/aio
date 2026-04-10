@@ -309,7 +309,6 @@ async function _run<S, A, E>(
   const persistKey = config.persistKey ?? "state";
   const persistMode = config.persistMode ?? "single";
   const ui = config.ui ?? {} as UiConfig;
-  if (!ui.renderer) ui.renderer = "aio";
 
   validateConfig(
     config as unknown as Record<string, unknown>,
@@ -620,6 +619,7 @@ async function _run<S, A, E>(
     udsHandle,
     app,
     onStart,
+    fatalOnStart: config.fatalOnStart,
     scheduleManager,
     schedules: config.schedules,
     shouldPersist,

@@ -129,7 +129,6 @@ h("ul", null, items.map((i) => h("li", { key: i.id }, i.name)));
 
 | Function        | Signature                               | Description       |
 | --------------- | --------------------------------------- | ----------------- |
-| `useCell`       | `useCell(ref): { state, send, status }` | Subscribe to cell |
 | `useAio`        | `useAio(): { state, send }`             | Subscribe to all  |
 | `useLocal`      | `useLocal(init): { local, set, patch }` | Client-only state |
 | `useConnected`  | `useConnected(): boolean`               | Connection status |
@@ -157,7 +156,6 @@ h("ul", null, items.map((i) => h("li", { key: i.id }, i.name)));
 | `scale`           | `TransitionFn`                                | Scale preset           |
 | `Transition`      | `<Transition enter={fn} exit={fn}>`           | Single child animation |
 | `TransitionGroup` | `<TransitionGroup enter={fn} exit={fn} flip>` | List animation + FLIP  |
-| `useTransition`   | `useTransition(config): TransitionState`      | Imperative CSS         |
 | `useSpring`       | `useSpring(config?): SpringValue`             | Spring physics         |
 
 ## Utilities
