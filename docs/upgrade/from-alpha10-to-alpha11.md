@@ -171,7 +171,59 @@ This is automatic. No config needed.
 | `ui: { include/exclude }` | Filtered Immer patches                                    |
 | `ui: { ..., forUser }`    | Full filtered state (per-user transform prevents patches) |
 
+---
+
+## Direct Cell Access (New)
+
+Cells now expose state fields directly. No hooks, no `send`, no loading guards.
+
+### Before (useCell + send)
+
+```tsx
+import { useCell } from "aio/air";
+import { counter } from "./app.ts";
+
+export default function App() {
+  const { state, send } = useCell(counter);
+  if (!state) return <div>Connecting...</div>;
+  return (
+    <div>
+      <h1>{state.count}</h1>
+      <button onClick={() => send.increment()}>+</button>
+    </div>
+  );
+}
+```
+
+### After (direct access)
+
+```tsx
+import { counter } from "./app.ts";
+
+export default function App() {
+  return (
+    <div>
+      <h1>{counter.count}</h1>
+      <button onClick={() => counter.increment()}>+</button>
+    </div>
+  );
+}
+```
+
+One import, zero ceremony. State reads are reactive (signal-backed in the
+browser). Methods dispatch directly (already worked since binding).
+
+**Note:** `useCell` was removed from public exports in alpha12. Use the direct
+pattern shown above.
+
+If a state key and method share a name (e.g., `error`), the method takes
+priority on the cell object. State is still accessible via the signal
+internally.
+
+---
+
 ### What Still Works
 
 - `persist: { exclude: [...] }` syntax is unchanged
 - All existing cell configs continue to work
+- `useCell` was removed in alpha12 — use direct cell access

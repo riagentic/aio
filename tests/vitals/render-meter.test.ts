@@ -240,7 +240,7 @@ Deno.test("hint: high staleness + high frameTime → expensive components", () =
   );
   assertEquals(
     hint !== null &&
-      (hint.includes("Components") || hint.includes("React.memo")),
+      (hint.includes("Components") || hint.includes("memo()")),
     true,
   );
 });
@@ -256,13 +256,13 @@ Deno.test("hint: high staleness + high pendingPatches → too many patches", () 
   );
 });
 
-Deno.test("hint: high staleness + low all → non-React blocking", () => {
+Deno.test("hint: high staleness + low all → main thread blocking", () => {
   const hint = renderHint(
     mockGauges({ staleness: 80, frameTime: 10, pendingPatches: 10 }),
   );
   assertEquals(
     hint !== null &&
-      (hint.includes("non-React") || hint.includes("outside React")),
+      (hint.includes("outside renderer") || hint.includes("heavy JS")),
     true,
   );
 });

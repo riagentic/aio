@@ -217,7 +217,6 @@ export function createDispatch<S, A, E>(
           }
           clearCorrelationId();
           overflowed = true;
-          closed = true;
           break;
         }
         const entry = queue.shift()!;
@@ -302,8 +301,8 @@ export function createDispatch<S, A, E>(
                   "EFFECT_ERROR",
                   `effect not cloneable for ${
                     tag(current)
-                  } — revoked Immer draft refs will crash downstream. ` +
-                    `Ensure effects are plain objects, not derived from the draft. ` +
+                  } — keeping original. Effects are pre-cloned inside produce(), ` +
+                    `so this should not happen with revoked drafts. ` +
                     `Original: ${
                       cloneErr instanceof Error
                         ? cloneErr.message

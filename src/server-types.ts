@@ -28,7 +28,6 @@ export interface ServerConfig {
   users?: Record<string, AioUser>; // per-user token map (overrides token)
   resolveUser?: (token: string) => AioUser | null | Promise<AioUser | null>; // dynamic user resolution (AIO-171)
   showStatus?: boolean; // show reconnection indicator (default: true)
-  renderer?: "react" | "aio"; // default: 'aio' — native AIR VDOM engine
   renderBudget?: RenderBudget; // sent to browser for RenderMeter thresholds
   fullStateThreshold?: number; // 0-1: ratio of changed keys for delta vs full broadcast (default: 0.5)
   maxConnections?: number; // max concurrent WebSocket clients (default: 100)

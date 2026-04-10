@@ -1,7 +1,6 @@
 // deno-lint-ignore-file
 // Browser-protocol: renderer-agnostic protocol layer for aio.
-// Extracted from browser.ts — no React imports.
-// browser.ts (React) and browser-air.ts (AIR) import from here.
+// browser-air.ts (AIR renderer) imports from here.
 //
 // This file is the thin orchestrator. Logic lives in:
 //   protocol-types.ts         — types + constants
@@ -56,7 +55,7 @@ import { formatDiagEvent } from "./vitals/diag-formatter.ts";
 import type { DiagEvent } from "./vitals/types.ts";
 import { resetTT as _resetTT } from "./time-travel-panel.ts";
 
-// ── Re-export state-core types/functions needed by browser.ts ───────
+// ── Re-export state-core types/functions needed by browser-air.ts ───
 export type { _CoreCellRef, _CoreTransport, _HandleResult };
 export {
   _coreCreateSendProxy,
@@ -72,7 +71,7 @@ export {
   _coreTrackPath,
 };
 
-// Re-export vitals/render-meter for browser.ts connection code
+// Re-export vitals/render-meter for browser-air.ts connection code
 export {
   createRenderMeter,
   createTransportProbeClient,
@@ -281,7 +280,7 @@ export const log: {
 };
 
 // ── client API ──────────────────────────────────────────────────────
-// _send is injected from browser.ts to avoid circular dep
+// _send is injected from browser-air.ts to avoid circular dep
 let _clientSend:
   | ((action: { type: string; payload?: unknown }) => void)
   | null = null;
@@ -345,10 +344,15 @@ export const client: {
 
 // ── ensureConnected ─────────────────────────────────────────────────
 
+import { bindAllCellsReactive } from "./cell-reactive.ts";
+
 let _ensured = false;
 export function ensureConnected(): void {
   if (_ensured) return;
   _ensured = true;
+  bindAllCellsReactive(
+    _clientSend ?? undefined,
+  );
   _callConnectFn();
 }
 export function _resetEnsured(): void {

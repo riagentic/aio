@@ -28,7 +28,6 @@ export type UiConfig = {
   width?: number; // default: 800
   height?: number; // default: 600
   showStatus?: boolean; // default: true
-  renderer?: "react" | "aio"; // default: 'aio' — native AIR VDOM engine (no React dependency)
 };
 
 /** @deprecated Use CellsConfig with `cells: [...]` instead. AioConfig is the legacy
@@ -78,6 +77,8 @@ export type AioConfig<S, A, E> = {
   onConnect?: (user?: AioUser) => void;
   onDisconnect?: (user?: AioUser) => void;
   onStart?: (app: AioApp<S, A>) => void;
+  /** If true, an onStart error terminates the process. Default: false (log and continue). */
+  fatalOnStart?: boolean;
   onStop?: () => void;
   onError?: (error: AioError) => void;
   /** Internal: schedule cancel callback set by _run, used by cells disable */
@@ -196,6 +197,7 @@ export type CellsConfig = {
   onConnect?: (user?: AioUser) => void;
   onDisconnect?: (user?: AioUser) => void;
   onStart?: (app: AioApp) => void;
+  fatalOnStart?: boolean;
   onStop?: () => void;
   onError?: (error: AioError) => void;
   onRestore?: (state: unknown) => unknown;

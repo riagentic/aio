@@ -2,13 +2,16 @@
  * @module
  * AIR adapter — signal-based hooks for AIO native renderer.
  *
- * `useCell`/`useAio` read from state-core signals directly.
- * Signal reads auto-track in AIR's per-component scope.
+ * Preferred: use cells directly — `counter.count` (reactive),
+ * `counter.increment()` (dispatches). No hooks needed.
+ *
+ * `useCell`/`useAio` still available for backward compat.
  *
  * @example
  * ```ts
- * import { useCell } from "aio/adapters/air";
- * const { state, send } = useCell(myCell);
+ * import { counter } from "./app.ts";
+ * // counter.count — reactive state read
+ * // counter.increment() — dispatches action
  * ```
  */
 
@@ -30,14 +33,14 @@ import type {
   SendOf,
 } from "../cell-types.ts";
 
-// Typed overload — when passing a cell def with DirectCalling methods
+/** Subscribe to a cell — use direct cell access instead for new code. */
 export function useCell<
   // deno-lint-ignore no-explicit-any
   F extends CellDef<any, any, any, any> & DirectCalling<any, any>,
 >(
   ref: F,
 ): { state: ExtractState<F>; send: SendOf<F> };
-// Untyped overload — for dynamic CellRef usage
+/** Subscribe to a cell — use direct cell access instead for new code. */
 export function useCell<
   S extends Record<string, unknown> = Record<string, unknown>,
 >(

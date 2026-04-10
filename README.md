@@ -9,7 +9,7 @@
 - **Write reactive, use generators or atomic actions when needed.**
 - **Pick your target, compile and ship!**
 
-`v1.0.0-alpha11`
+`v1.0.0-alpha12`
 
 > Define state once. It persists, syncs to all clients, drives the UI.
 
@@ -206,12 +206,11 @@ See [FAQ](docs/basics/faq.md#when-not-to-use-aio) for details.
 
 **v1.0.0-alpha11** · [JSR](https://jsr.io/@riagentic/aio) · MIT
 
-1774 tests · security hardened · 184+ bugs fixed across 5 nuclear audit waves
+1958 tests · security hardened · 184+ bugs fixed across 5 nuclear audit waves
 
-New in alpha11: `feature()` → `cell()` rename, cell-level `persist`/`ui` filters
-(replace `stateForDB`/`stateForUI`), type-safe machine states with literal
-`.type` inference, clean import boundaries (`aio/core` removed, renderers no
-longer re-export server API), monolith decomposition into focused modules,
-`dispatchTo` removed (use direct calling). Core (state, sync, persistence,
-cells, scheduling, renderer) is stable. Electron, Android, and build targets are
-functional but less battle-tested.
+New in alpha11: **direct cell access** (`counter.count`, `counter.increment()` —
+no hooks, no `send`), `feature()` → `cell()` rename, cell-level `persist`/`ui`
+filters (replace `stateForDB`/`stateForUI`), type-safe machine states with
+literal `.type` inference, LWW set merge, per-cell sync locking, state migration
+system. Core (state, sync, persistence, cells, scheduling, renderer) is stable.
+Electron, Android, and build targets are functional but less battle-tested.

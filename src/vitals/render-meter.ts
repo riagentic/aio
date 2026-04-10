@@ -50,7 +50,7 @@ export function renderHint(gauges: RenderGauges): string | null {
   const highPending = gauges.pendingPatches.percent >= HINT_THRESHOLD;
 
   if (highFrame && !highPending) {
-    return "Components too expensive — profile with React DevTools, consider React.memo() or simpler renders";
+    return "Components too expensive — profile renders, consider memo() or simpler components";
   }
   if (!highFrame && highPending) {
     return "Too many patches arriving — raise syncIntervalMs or batch server-side actions";
@@ -58,7 +58,7 @@ export function renderHint(gauges: RenderGauges): string | null {
   if (highFrame && highPending) {
     return "Both render cost and patch rate are high — simplify components AND reduce update frequency";
   }
-  return "Main thread blocked by non-React work — check for heavy JS outside React (timers, workers, third-party scripts)";
+  return "Main thread blocked outside renderer — check for heavy JS (timers, workers, third-party scripts)";
 }
 
 // ─── Constants ──────────────────────────────────────────────────────────────

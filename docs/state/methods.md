@@ -244,6 +244,24 @@ methods: {
 **Rule of thumb:** mutate directly, read specific properties. If you need to
 transform an array, snapshot it first with `[...s.array]`.
 
+### Effects and state references
+
+Sync methods can return schedule effects. Effect payloads can reference state
+values directly — aio clones effects inside `produce()` before Immer revokes the
+draft, so state references in effects work transparently:
+
+```ts
+methods: {
+  snapshot(s) {
+    return { type: "backup:save", payload: { items: s.items } } // ✅ works
+  },
+}
+```
+
+If an effect contains non-cloneable values (functions, symbols, circular refs),
+aio logs a warning and keeps the original. Stick to plain serializable objects
+in effect payloads for best results.
+
 ### Async batching and time-travel
 
 Each `await` in an async method creates a new state snapshot:

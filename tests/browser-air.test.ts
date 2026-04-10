@@ -20,7 +20,6 @@ import {
   routeSearch,
   schedule,
   useAio,
-  useCell,
   useConnected,
   useNavigate,
   useRoute,
@@ -135,10 +134,6 @@ Deno.test("browser-air: memo returns component unchanged", () => {
 });
 
 // ── Hook existence tests (can't fully test without AIR renderer) ───
-
-Deno.test("browser-air: useCell is a function", () => {
-  assertEquals(typeof useCell, "function");
-});
 
 Deno.test("browser-air: useAio is a function", () => {
   assertEquals(typeof useAio, "function");

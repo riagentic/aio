@@ -255,7 +255,25 @@ export function buildMethodsExecutor(
       for (const k of effectKeys) effectTypeToKey.set(`${prefix}:${k}`, k);
       const key = effectTypeToKey.get(effect.type) ?? effect.type;
       const h = executeHandlers[key];
-      if (h) void h(app, (effect as { payload: unknown }).payload);
+      if (h) {
+        const result = h(app, (effect as { payload: unknown }).payload);
+        if (result && typeof result === "object" && "catch" in result) {
+          (result as Promise<void>).catch((e) => {
+            const _onError = (app as Record<string, unknown>)._onError as
+              | ((err: import("./error.ts").AioError) => void)
+              | undefined;
+            if (_onError) {
+              _onError(createAioError("EFFECT_ASYNC_ERROR", e, {
+                cellName: name,
+                actionType: `${prefix}:${key}`,
+                effectType: effect.type as string,
+              }));
+            } else {
+              log.error("cell", `${name} ${key}() execute threw: ${e}`);
+            }
+          });
+        }
+      }
     } else if (config.execute && typeof config.execute === "function") {
       const emitMap: Record<string, string> = {};
       for (const k of effectKeys) emitMap[k] = `${prefix}:${k}`;

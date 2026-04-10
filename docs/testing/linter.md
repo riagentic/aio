@@ -46,9 +46,9 @@ Issues that can be auto-fixed are marked `[fixable]` in the output.
 | Add `appId` to aio.run()           | Derives from deno.json appId or directory name |
 | Add `unstable: ["kv"]`             | Required for state persistence                 |
 | Add `nodeModulesDir: "auto"`       | npm package resolution                         |
-| Add `@types/react` import          | JSX type checking                              |
+| Add `@types/react` import          | JSX type checking (intrinsic element types)    |
 | Add `esbuild` import               | Dev mode transpilation                         |
-| Add `compilerOptions` (jsx config) | React JSX transform settings                   |
+| Add `compilerOptions` (jsx config) | JSX transform settings                         |
 | Add `dev` task                     | `deno run -A src/app.ts`                       |
 | Add `test` task                    | `deno test -A --unstable-kv tests/`            |
 
@@ -77,9 +77,9 @@ Validates `deno.json` for common mistakes:
 
 - `appId` in deno.json (should be in `aio.run()`)
 - Missing `appId` in `aio.run()`
-- Missing required imports (`aio`, `react`, `esbuild`)
+- Missing required imports (`aio`, `esbuild`)
 - Missing `unstable: ["kv"]` for persistence
-- Missing `compilerOptions.jsx` for React
+- Missing `compilerOptions.jsx` for JSX
 - Missing `nodeModulesDir`
 - No `dev`, `test`, or `compile:*` tasks
 
@@ -105,7 +105,8 @@ Static analysis of `cell()` calls:
 
 ### 4. Performance
 
-- `useAio()` in non-root components (use `useCell()` for selective re-renders)
+- `useAio()` in non-root components (use direct cell access for selective
+  re-renders)
 - Sync I/O (`Deno.readTextFileSync`, etc.) blocking the event loop
 - `setTimeout`/`setInterval` in cell code (use `schedule.after`/`every`)
 - Large collections in state that should be in SQLite
@@ -130,7 +131,7 @@ Static analysis of `cell()` calls:
 - Non-browser imports in `.tsx` files (won't resolve in dev mode)
 - `createRoot` in user code (framework handles mounting)
 - Unnecessary `import React` (automatic with jsx transform)
-- `useCell()` without loading/fallback state
+- Cell access without connection check
 
 ### 8. Testing
 
@@ -160,9 +161,9 @@ Static analysis of `cell()` calls:
 
 ### 13. Memo & Structural Sharing
 
-- `import { memo } from "react"` in `.tsx` — use `import { memo } from "aio"`
-  (aio's `memo` uses `_shallowEqual` per prop, preventing wasted renders from
-  structurally-identical-but-referentially-different props)
+- `import { memo } from "react"` in `.tsx` — use
+  `import { memo } from "aio/air"` (AIR auto-memos all components; `memo()` is a
+  no-op for migration compat)
 - `.map()` rendering `memo()` components without `useProjection()` — derived
   arrays create new refs every render, defeating memo. Wrap in `useProjection()`
 
@@ -182,7 +183,7 @@ aiol v0.1.0 — scanning project
   ⚠ WARN   [perf] src/cell/cart/index.ts: sync I/O (Deno.readTextFileSync)
   ⚠ WARN   [security] src/config.ts:12 — possible hardcoded token
 
-  · HINT   [perf] src/components/Dashboard.tsx: uses useAio() — prefer useCell()
+  · HINT   [perf] src/components/Dashboard.tsx: uses useAio() — prefer direct cell access
   · HINT   [testing] no "test" task in deno.json [fixable]
 
 ────────────────────────────────────────────────────────────

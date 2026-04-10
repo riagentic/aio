@@ -2,12 +2,7 @@
 
 import type { RenderBudget } from "./vitals/types.ts";
 import { escHtml } from "./server-html-constants.ts";
-import {
-  devWsScript,
-  errorBoundaryScript,
-  healthOverlayScript,
-} from "./server-html-scripts.ts";
-import { errorOverlayScript } from "./server-html-error-overlay.ts";
+import { devWsScript } from "./server-html-scripts.ts";
 
 /** Builds the common <head> content shared across all modes */
 function headContent(
@@ -48,7 +43,6 @@ export function generateHTML(
   width?: number,
   height?: number,
   renderBudget?: RenderBudget,
-  renderer?: "react" | "aio",
 ): string {
   const head = headContent(
     title,
@@ -60,8 +54,7 @@ export function generateHTML(
   );
 
   if (prod) return prodHTML(head);
-  if (renderer === "aio") return aioDevHTML(head, importMap);
-  return reactDevHTML(head, importMap);
+  return aioDevHTML(head, importMap);
 }
 
 /** Prod: app.js bundles React + useAio + user code, exports mount() */
@@ -93,37 +86,17 @@ ${head}
   <script type="importmap">${importMap.replace(/</g, "\\u003c")}</script>
   <script type="module">${devWsScript()}
 
-    // Mount AIO app — wait for server state, then render
+    // Mount AIO app — bind cells reactively, wait for server state, then render
     const _aioMod = await import('aio')
     const _appMod = await import('/App.tsx?v=' + Date.now())
     const App = _appMod.default
+    if (_aioMod.ensureConnected) _aioMod.ensureConnected()
     if (_aioMod._waitForState) {
       document.getElementById('root').textContent = 'Loading\\u2026'
       await _aioMod._waitForState()
     }
     const { mount: _mount } = await import('/__aio/aio-renderer.ts')
     _mount(document.getElementById('root'), App)
-  </script>
-</body>
-</html>`;
-}
-
-/** Dev: CDN React via import map + live transpile + error overlay */
-function reactDevHTML(head: string, importMap: string): string {
-  return `<!DOCTYPE html>
-<html>
-<head>
-${head}
-</head>
-<body>
-  <div id="root"></div>
-  <script type="importmap">${importMap.replace(/</g, "\\u003c")}</script>
-  <script type="module">
-    import { createElement, Component } from 'react'
-    import { createRoot } from 'react-dom/client'
-    // Error boundary — catches render errors. Subscribes to state to:
-    // 1. Prevent 300ms teardown (keeps _listeners.size > 0 while children are unmounted)
-    // 2. Auto-recover when server sends a new state update${errorBoundaryScript()}${devWsScript()}${errorOverlayScript()}${healthOverlayScript()}
   </script>
 </body>
 </html>`;

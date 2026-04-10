@@ -8,8 +8,13 @@
 
 import { assertEquals } from "@std/assert";
 import { FakeTime } from "@std/testing/time";
-import { _reset } from "../src/browser.ts";
-import { _subscribe, _useAioSubscribe } from "../src/browser-protocol.ts";
+import { _reset } from "../src/state-core.ts";
+import {
+  _cleanupTimer,
+  _setCleanupTimer,
+  _subscribe,
+  _useAioSubscribe,
+} from "../src/browser-protocol.ts";
 
 // ── Stable reference tests ──────────────────────────────────────────
 
@@ -32,6 +37,11 @@ Deno.test("subscribe: _useAioSubscribe wraps _subscribe (listener count tracks)"
     // Should have registered a listener via _subscribe
     // Unsubscribe should work without throwing
     unsub();
+    // Clean up the 300ms teardown timer started by unsubscribe
+    if (_cleanupTimer) {
+      clearTimeout(_cleanupTimer);
+      _setCleanupTimer(null);
+    }
   } finally {
     if (origLocation === undefined) {
       // deno-lint-ignore no-explicit-any

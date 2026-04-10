@@ -114,12 +114,11 @@ For strict per-step machine control on async workflows, use `generators` instead
 ## Check status in UI
 
 ```tsx
-const { status } = useCell(door);
-// status is 'closed' or 'open' (string)
+// In tests: t.expect.status('idle')
+// In server code: registry.status('door')
 ```
 
-In tests: `t.expect.status('idle')`. Never read `__aio_status` directly — use
-`registry.status()` or `useCell().status` in UI.
+Never read `__aio_status` directly — use `registry.status()` in server code.
 
 ---
 

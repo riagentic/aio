@@ -792,9 +792,7 @@
       "jsr:@std/testing@1.0.17",
       "npm:esbuild@0.24.2",
       "npm:happy-dom@17.6.3",
-      "npm:immer@10.2.0",
-      "npm:react-dom@18.3.1",
-      "npm:react@18.3.1"
+      "npm:immer@10.2.0"
     ],
     "packageJson": {
       "dependencies": [

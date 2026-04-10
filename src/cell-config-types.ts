@@ -69,7 +69,7 @@ export type MethodsCellConfig<
   /** UI visibility — "all" exposes everything, "none" (default) hides cell from clients.
    *  { include: [...] } or { exclude: [...] } for field-level control.
    *  Add forUser for per-user filtering on the already-filtered state. */
-  ui?: CellVisibility<keyof S & string>;
+  ui?: CellVisibility<keyof S & string, S>;
   /** CRDT sync — true for defaults, or partial config to override merge strategies, identity keys, retention */
   sync?: true | Partial<SyncConfig>;
   /** State version — increment when state shape changes. Default: 0. */
@@ -151,7 +151,7 @@ export type ActionsCellConfig<
   /** UI visibility — "all" exposes everything, "none" (default) hides cell from clients.
    *  { include: [...] } or { exclude: [...] } for field-level control.
    *  Add forUser for per-user filtering on the already-filtered state. */
-  ui?: CellVisibility<keyof S & string>;
+  ui?: CellVisibility<keyof S & string, S>;
   /** CRDT sync — true for defaults, or partial config to override merge strategies, identity keys, retention */
   sync?: true | Partial<SyncConfig>;
   /** State version — increment when state shape changes. Default: 0. */

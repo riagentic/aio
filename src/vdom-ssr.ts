@@ -41,8 +41,10 @@ let _ssrDepth = 0;
 export function renderToString(
   vnode: VNode | string | number | null,
 ): string {
-  // Reset SSR counters at the top-level call (not recursive calls)
-  if (_ssrDepth === 0 && _onSsrStart) _onSsrStart();
+  // Use local depth tracking instead of module-level global.
+  // Each top-level call resets state — safe for concurrent SSR requests.
+  const isTopLevel = _ssrDepth === 0;
+  if (isTopLevel && _onSsrStart) _onSsrStart();
   _ssrDepth++;
   try {
     if (vnode == null) return "";

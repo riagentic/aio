@@ -7,9 +7,10 @@ How cells boot, shut down, and how to intercept actions globally.
 ```ts
 const ws = cell("ws", {
   state: { connected: false },
-  onInit(app) {
+  onInit(app, initState) {
     // Called after all dependencies are initialized
     // app.dispatch and app.getState scoped to this cell
+    // initState: the cell's default state (app.getState() may not yet reflect __init)
     const config = (app.getFullState?.()?.config as { url?: string })?.url;
     connectWebSocket(config ?? "ws://localhost");
   },
@@ -179,3 +180,18 @@ stamping, HLC, rebase) instead of the normal reducer. This is transparent — no
 config needed beyond `sync: true` on the cell.
 
 See [CRDT](../persistence/crdt.md) for sync configuration details.
+
+---
+
+## `fatalOnStart`
+
+By default, if the `onStart` hook throws, the error is logged and the app
+continues running (possibly in a partially initialized state). Set
+`fatalOnStart: true` to terminate the process on `onStart` failure:
+
+```ts
+await aio.run({
+  cells: [counter],
+  fatalOnStart: true, // process exits if onStart throws
+});
+```

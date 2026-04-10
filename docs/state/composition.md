@@ -83,12 +83,10 @@ counter.remaining(); // → 100
 
 ```tsx
 export default function Dashboard() {
-  const c = useCell(counter);
-  const w = useCell(wallet);
   return (
     <div>
       <p>Remaining: {counter.remaining()}</p>
-      <p>Balance: {w.state.balance}</p>
+      <p>Balance: {wallet.balance}</p>
     </div>
   );
 }

@@ -1,7 +1,7 @@
 # Building a Desktop Note-Taking App with Electron
 
 A local-first note-taking app: SQLite persistence, URL routing, single-instance
-lock, compiled to AppImage. The stack is aio + Electron + SQLite + React. No
+lock, compiled to AppImage. The stack is aio + Electron + SQLite + AIR. No
 cloud, no accounts — just your notes on your machine.
 
 ## Step 1: Project setup
@@ -25,7 +25,7 @@ File structure:
 src/
   app.ts           # entry — wires cells, boots aio
   notes.ts         # notes cell — state, methods, SQLite schema
-  ui.tsx           # React UI — sidebar, editor, settings
+  ui.tsx           # AIR UI — sidebar, editor, settings
 ```
 
 Three files. That's the whole app.
@@ -194,23 +194,20 @@ function App() {
 
 ```tsx
 function Sidebar() {
-  const { state, send } = useCell(notes);
-  if (!state) return null;
-
   return (
     <nav style={{ width: 250, borderRight: "1px solid #ddd", padding: "1rem" }}>
       <button
         onClick={() =>
-          send.create("Untitled")}
+          notes.create("Untitled")}
       >
         New Note
       </button>
       <input
         placeholder="Search..."
-        value={state.search}
-        onChange={(e) => send.search(e.target.value)}
+        value={notes.search}
+        onChange={(e) => notes.search(e.target.value)}
       />
-      {state.notes.map((n) => (
+      {notes.notes.map((n) => (
         <Link key={n.id} to={`/note/${n.id}`} activeClass="active">
           {n.title}
         </Link>
@@ -228,16 +225,15 @@ function Sidebar() {
 function Editor() {
   const { params } = useRoute("/note/:id");
   const navigate = useNavigate();
-  const { state, send } = useCell(notes);
-  if (!state?.activeNote) return <p>Select a note</p>;
+  if (!notes.activeNote) return <p>Select a note</p>;
 
-  if (params.id !== state.active) send.select(params.id);
+  if (params.id !== notes.active) notes.select(params.id);
 
   return (
     <div>
       <input
-        value={state.activeNote.title}
-        onChange={(e) => send.rename(params.id, e.target.value)}
+        value={notes.activeNote.title}
+        onChange={(e) => notes.rename(params.id, e.target.value)}
       />
       <textarea
         value={state.activeNote.content}
@@ -263,16 +259,8 @@ function Settings() {
 
 ## Step 5: Mount the UI
 
-Export a `mount` function — aio calls it when the Electron window loads:
-
-```tsx
-export function mount(root: HTMLElement) {
-  const { createRoot } = await import("react-dom/client");
-  createRoot(root).render(<App />);
-}
-```
-
-`useCell(notes)` gives scoped state and typed `send` — re-renders only when
+AIR mounts the default export automatically — no manual `mount()` call needed.
+Direct cell access gives scoped state and typed methods — re-renders only when
 notes state changes.
 
 ## Step 6: Single instance lock

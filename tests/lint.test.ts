@@ -183,11 +183,11 @@ Deno.test("lint: warns on npm import in .tsx that won't work in browser", async 
   });
 });
 
-Deno.test("lint: no warn for react/aio imports in .tsx", async () => {
+Deno.test("lint: no warn for aio imports in .tsx", async () => {
   await withTmpDir(async (dir) => {
     await Deno.writeTextFile(
       join(dir, "App.tsx"),
-      "import { useAio } from 'aio'\nimport { useState } from 'react'\nexport default function App() {}",
+      "import { useAio } from 'aio'\nimport { signal } from 'aio/air'\nexport default function App() {}",
     );
     const r = await lint({}, { reduce: () => {}, execute: () => {} }, dir);
     assertEquals(

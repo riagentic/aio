@@ -18,8 +18,7 @@ import {
 } from "./server-transpile.ts";
 import { handleTrojan as _handleTrojanRoute } from "./server-trojan.ts";
 
-// browser.ts URL — works for both local (file://) and JSR/HTTP installs
-const BROWSER_TS_URL = new URL("browser.ts", import.meta.url);
+// browser-air.ts URL — works for both local (file://) and JSR/HTTP installs
 const BROWSER_AIR_TS_URL = new URL("browser-air.ts", import.meta.url);
 const AIR_TS_URL = new URL("air.ts", import.meta.url);
 const LISTENERS_TS_URL = new URL("listeners.ts", import.meta.url);
@@ -39,7 +38,6 @@ export interface StaticDeps {
   hasCSS: boolean;
   importMap: string; // JSON stringified import map
   noCache: Record<string, string>;
-  renderer?: "react" | "aio";
   showStatus?: boolean;
   width?: number;
   height?: number;
@@ -112,7 +110,6 @@ export function createStaticHandler(deps: StaticDeps): {
       hasCSS,
       importMap,
       noCache,
-      renderer,
       showStatus,
       width,
       height,
@@ -138,7 +135,6 @@ export function createStaticHandler(deps: StaticDeps): {
           width,
           height,
           renderBudget,
-          renderer,
         ),
         { headers: { "Content-Type": "text/html", ...noCache } },
       );
@@ -146,10 +142,7 @@ export function createStaticHandler(deps: StaticDeps): {
 
     // ── AIO virtual JS modules ──
     if (pathname === "/__aio/ui.js") {
-      return await serveAioModule(
-        renderer === "aio" ? BROWSER_AIR_TS_URL : BROWSER_TS_URL,
-        renderer === "aio" ? "browser-air.ts" : "browser.ts",
-      );
+      return await serveAioModule(BROWSER_AIR_TS_URL, "browser-air.ts");
     }
     if (pathname === "/__aio/air.js") {
       return await serveAioModule(AIR_TS_URL, "air.ts");
@@ -245,10 +238,10 @@ export function createStaticHandler(deps: StaticDeps): {
     fileUrl: URL,
     label: string,
   ): Promise<Response> {
-    const { debug, noCache, renderer } = deps;
+    const { debug, noCache } = deps;
     try {
       const source = await fetch(fileUrl).then((r) => r.text());
-      const code = await transpile(source, fileUrl.href, debug, renderer);
+      const code = await transpile(source, fileUrl.href, debug);
       return new Response(code, {
         headers: { "Content-Type": "application/javascript", ...noCache },
       });
@@ -388,7 +381,6 @@ export function createStaticHandler(deps: StaticDeps): {
       hasCSS,
       importMap,
       noCache,
-      renderer,
       showStatus,
       width,
       height,
@@ -431,7 +423,6 @@ export function createStaticHandler(deps: StaticDeps): {
             width,
             height,
             renderBudget,
-            renderer,
           ),
           { headers: { "Content-Type": "text/html", ...noCache } },
         );
@@ -467,7 +458,7 @@ export function createStaticHandler(deps: StaticDeps): {
     // Dev only: live-transpile .ts/.tsx via esbuild
     if (!prod && (ext === ".tsx" || ext === ".ts")) {
       try {
-        body = await transpile(body, filepath, debug, renderer);
+        body = await transpile(body, filepath, debug);
         contentType = "application/javascript";
         lastError = "";
         errorMap.delete(filename);

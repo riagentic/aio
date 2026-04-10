@@ -34,6 +34,7 @@
  *
  * await aio.run({ cells: [counter, checkout] })
  * counter.increment(5)       // direct call — dispatches through store
+ * counter.count              // direct state read — reactive in components
  * checkout.place('widget')   // starts generator
  * ```
  */
@@ -144,6 +145,7 @@ export type {
   ReduceHandlers,
   ScopedApp,
   SendOf,
+  StateOf,
   TestContext,
 } from "./src/cell.ts";
 

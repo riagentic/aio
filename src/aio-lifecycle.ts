@@ -50,6 +50,7 @@ export interface LifecycleDeps<S, A> {
   // must accept typed AioApp<S, A> via contravariance
   // deno-lint-ignore no-explicit-any
   onStart: ((app: any) => void) | undefined;
+  fatalOnStart: boolean | undefined;
   // Schedules
   scheduleManager: { start: (defs: ScheduleDef[]) => void };
   schedules: ScheduleDef[] | undefined;
@@ -96,6 +97,7 @@ export function startLifecycle<S, A>(deps: LifecycleDeps<S, A>): void {
     udsHandle,
     app,
     onStart,
+    fatalOnStart,
     scheduleManager,
     schedules,
     shouldPersist,
@@ -136,6 +138,10 @@ export function startLifecycle<S, A>(deps: LifecycleDeps<S, A>): void {
         hint:
           "Check your onStart callback. The app continues running but may not be fully initialized.",
       });
+      if (fatalOnStart) {
+        log.error("fatalOnStart is true — exiting due to onStart failure");
+        Deno.exit(1);
+      }
     }
   }
 
@@ -156,6 +162,16 @@ export function startLifecycle<S, A>(deps: LifecycleDeps<S, A>): void {
   const transportLabel = transport === "uds" ? ", uds" : "";
 
   const p = (key: string) => `  ${key.padEnd(10)}`;
+  if (expose && token) {
+    log.warn(
+      "⚠ token auth via URL query parameter is insecure in expose mode — use Authorization header instead",
+    );
+  }
+  if (expose && !users && !token) {
+    log.warn(
+      "⚠ no authentication configured with --expose — any website can connect via WebSocket",
+    );
+  }
   if (skipHttp) {
     log.info(`running (${mode}, ${shell}, uds — no TCP port)`);
   } else {

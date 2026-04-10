@@ -107,16 +107,14 @@ Show an immediate UI update while an async action is in flight. When
 
 ```tsx
 const TodoList = () => {
-  const { state, send } = useCell(todoCell);
-
   const [items, addOptimistic] = useOptimistic(
-    state.items,
+    todoCell.items,
     (current, newItem: { id: number; text: string }) => [...current, newItem],
   );
 
   function handleAdd(text: string) {
     addOptimistic({ id: Date.now(), text });
-    send.addTodo(text);
+    todoCell.addTodo(text);
   }
 
   return <ul>{items.map((item) => <li key={item.id}>{item.text}</li>)}</ul>;
@@ -219,14 +217,14 @@ component rejection. Event handler errors are **not** caught (same as React).
 Connect to the Redux DevTools browser extension for state inspection.
 
 ```tsx
-import { connectDevTools, useAio } from "aio";
+import { connectDevTools, useAio } from "aio/air";
 
 export default function App() {
   const { state, send } = useAio<AppState>();
 
-  useEffect(() => {
+  onMount(() => {
     if (import.meta.env.DEV) connectDevTools();
-  }, []);
+  });
   // ...
 }
 ```
@@ -248,7 +246,7 @@ In dev mode, aio records every action and state snapshot. Press **Ctrl+.**
 For custom UIs, use the hook instead of the built-in panel:
 
 ```tsx
-import { useAio, useTimeTravel } from "aio";
+import { useAio, useTimeTravel } from "aio/air";
 
 export default function App() {
   const { state, send } = useAio<AppState>();

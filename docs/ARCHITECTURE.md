@@ -35,7 +35,7 @@ directly.
 | `build-*`          | Build system: bundling, compilation, targets            | `build.ts` (entry), `build-bundle.ts`                      |
 | `electron.ts`      | Electron integration: scripts, IPC, spawning            | Single file (desktop target)                               |
 | `am-*`             | App Manager CLI: inspect, state, process mgmt           | `am.ts` (entry), `am-cmd-*.ts`                             |
-| `adapters/`        | Renderer adapters (AIR, React)                          | `air.ts`, `react.ts`                                       |
+| `adapters/`        | Renderer adapters                                       | `air.ts`                                                   |
 | `signal.ts`        | Reactive signal primitives                              | Standalone signal implementation                           |
 | `transition*.ts`   | CSS transitions and animation                           | Transition components + groups                             |
 | `time-travel*.ts`  | Dev-mode time-travel debugging                          | Panel UI + state snapshots                                 |
@@ -58,7 +58,7 @@ directly.
 │       ↕                   ↕                       │
 │  browser-router      vdom / signal                │
 │       ↕                   ↕                       │
-│  browser-air/react   useCell / useAio             │
+│  browser-air         direct cell / useAio            │
 └──────────────────────────────────────────────────┘
 ```
 
@@ -70,8 +70,8 @@ processing.
 `sync: true` on a cell. It handles HLC timestamps, op-log, merge strategies, and
 conflict resolution.
 
-**Renderers are pluggable.** AIR (`browser-air.ts`, `vdom-*`, `renderer-*`) and
-React (`browser.ts`, `adapters/react.ts`) use the same state subscription API.
+**AIR is the renderer.** AIR (`browser-air.ts`, `vdom-*`, `renderer-*`) uses the
+state subscription API. Custom adapters can be built on `state-core.ts`.
 
 ## File Naming Conventions
 

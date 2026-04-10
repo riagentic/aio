@@ -141,7 +141,7 @@ No logic. No state. Just imports and boot.
 ### `App.tsx` -- layout and routing only
 
 ```tsx
-import { page, useAio } from "aio/react";
+import { page, useAio } from "aio/air";
 import { TradePage } from "./ui/trading/TradePage.tsx";
 import { SettingsPage } from "./ui/SettingsPage.tsx";
 
@@ -191,5 +191,5 @@ Everything comes from a single import. `"aio"` maps to `jsr:@riagentic/aio`
 import { aio, call, cell, schedule, testCell } from "aio";
 
 // Browser-side (App.tsx)
-import { page, useAio, useCell, useLocal } from "aio/react";
+import { page, useAio, useLocal } from "aio/air";
 ```

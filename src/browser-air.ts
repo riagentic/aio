@@ -110,14 +110,7 @@ export {
   type TransitionFn,
   type TransitionOptions,
 } from "./transition.ts";
-export {
-  type SpringConfig,
-  type SpringValue,
-  type TransitionConfig,
-  type TransitionState,
-  useSpring,
-  useTransition,
-} from "./animation.ts";
+export { type SpringConfig, type SpringValue, useSpring } from "./animation.ts";
 
 // ── Island (external framework mounting) ────────────────────────────
 export { island, type IslandConfig, type IslandHandle } from "./island.ts";
@@ -141,7 +134,6 @@ export { actions, effects, msg, schedule } from "./browser-shared.ts";
 export {
   memo,
   useAio,
-  useCell,
   useConnected,
   useLocal,
   useProjection,

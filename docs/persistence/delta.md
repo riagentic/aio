@@ -13,8 +13,16 @@ dispatch(action)
   → ws.send(json) → browser
   → _applyPatch(prev, delta) → merged state
   → Proxy (useAio) tracks reads → __subs sent back to server
-  → React re-render
+  → UI re-render
 ```
+
+> **Array tracking limitation**: The client-side subscription proxy tracks
+> object property paths (e.g., `orders.items`) but does not track into array
+> elements (e.g., `orders.items.0.name`). If your component accesses
+> `items[0].name`, the server will send updates for the entire `items` key
+> rather than just the accessed element. This is an optimization gap, not a
+> correctness issue — the state is always accurate, just potentially broader
+> than necessary.
 
 ## Cell-level UI filtering
 
@@ -72,7 +80,7 @@ await aio.run({
 ### Reference preservation
 
 `_applyPatch` preserves object references for unchanged slices — critical for
-React's `useSyncExternalStore`.
+AIR's signal subscriptions and `memo()` components.
 
 **Identity-keyed arrays** (objects with string `id`) get per-element delta
 patching automatically:
@@ -166,15 +174,15 @@ const state = useAio();
 return <div>{state.counter.count}</div>;
 ```
 
-### `useCell` — re-render scoping
+### Direct cell access — re-render scoping
 
 ```tsx
-const counter = useCell(counterRef);
+import { counter } from "./app.ts";
 return <div>{counter.count}</div>;
 ```
 
-Narrows `useSyncExternalStore` to one cell slice. Client-side rendering concern
-— subscription narrowing handled by `useAio` automatically.
+Reading `counter.count` auto-tracks via the cell signal. Only components that
+read a specific cell's state re-render when it changes.
 
 ## Proxy-tracked subscriptions
 

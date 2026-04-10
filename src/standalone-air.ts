@@ -35,9 +35,11 @@ export function draft<S, E>(
 ): { state: S; effects: E[] } {
   let effects: E[] = [];
   const next = produce(state, (d) => {
-    effects = fn(d);
+    const result = fn(d);
+    // Clone inside produce() while draft is still alive — after produce()
+    // returns, Immer revokes draft proxies making state refs unreadable.
+    effects = result.length ? structuredClone(result) : result;
   });
-  if (effects.length) effects = structuredClone(effects);
   return { state: next, effects };
 }
 

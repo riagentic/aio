@@ -44,30 +44,90 @@ import { aio, cell } from "aio";
   "nodeModulesDir": "auto",
   "unstable": ["kv"],
   "compilerOptions": {
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "lib": ["deno.ns", "deno.unstable", "dom", "dom.iterable"],
     "jsx": "react-jsx",
     "jsxImportSource": "aio"
   },
   "imports": {
-    "aio": "jsr:@riagentic/aio@1.0.0-alpha8",
-    "aio/air": "jsr:@riagentic/aio@1.0.0-alpha8/air",
-    "esbuild": "npm:esbuild@^0.24"
+    "aio": "jsr:@riagentic/aio@^1.0.0-alpha12",
+    "aio/air": "jsr:@riagentic/aio@^1.0.0-alpha12/air",
+    "aio/jsx-runtime": "jsr:@riagentic/aio@^1.0.0-alpha12/jsx-runtime",
+    "esbuild": "npm:esbuild@^0.24",
+    "electron": "npm:electron"
   },
   "tasks": {
     "dev": "deno run -A src/app.ts",
-    "am": "deno run -A jsr:@riagentic/aio@1.0.0-alpha8/src/am",
+    "install:electron": "deno install --allow-scripts=npm:electron",
+    "am": "deno run -A jsr:@riagentic/aio/src/am",
     "test": "deno test -A --unstable-kv tests/",
-    "compile:browser": "deno run -A jsr:@riagentic/aio@1.0.0-alpha8/src/build --compile",
-    "compile:electron": "deno run -A jsr:@riagentic/aio@1.0.0-alpha8/src/build --compile --electron",
-    "compile:cli": "deno run -A jsr:@riagentic/aio@1.0.0-alpha8/src/build --compile --cli",
-    "compile:service": "deno run -A jsr:@riagentic/aio@1.0.0-alpha8/src/build --compile --service --headless",
-    "compile:android": "deno run -A jsr:@riagentic/aio@1.0.0-alpha8/src/build --android"
+    "compile:browser": "deno run -A jsr:@riagentic/aio/src/build --compile",
+    "compile:electron": "deno run -A jsr:@riagentic/aio/src/build --compile --electron",
+    "compile:cli": "deno run -A jsr:@riagentic/aio/src/build --compile --cli",
+    "compile:service": "deno run -A jsr:@riagentic/aio/src/build --compile --service --headless",
+    "compile:android": "deno run -A jsr:@riagentic/aio/src/build --android"
   }
 }
 ```
 
 - `"jsxImportSource": "aio"` — uses air, the built-in renderer (~8KB, zero deps)
+- `"aio/jsx-runtime"` entry is required so the JSX compiler can resolve the
+  runtime when it rewrites `<div/>` into `jsx()` calls
 - `"title"` — app name, used as window title and binary name
-- `immer`, `@std/path` — internal deps, resolved automatically via JSR
+- Internal deps (`immer`, `@std/path`, …) are fetched transitively by JSR — no
+  consumer entries needed
+
+### Vendored variant (`dep/aio/`)
+
+When aio is checked out as a sibling repo at `dep/aio/` (local development,
+air-gapped builds, or pinning to an untagged commit), the import map points at
+local files and must also declare aio's internal bare-specifier deps (Deno can't
+fetch them transitively without a JSR manifest):
+
+```json
+{
+  "title": "My App",
+  "nodeModulesDir": "auto",
+  "unstable": ["kv"],
+  "compilerOptions": {
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "lib": ["deno.ns", "deno.unstable", "dom", "dom.iterable"],
+    "jsx": "react-jsx",
+    "jsxImportSource": "aio"
+  },
+  "imports": {
+    "aio": "./dep/aio/mod.ts",
+    "aio/air": "./dep/aio/src/air.ts",
+    "aio/jsx-runtime": "./dep/aio/src/jsx-runtime.ts",
+    "immer": "npm:immer@10.2.0",
+    "@std/path": "jsr:@std/path@1.1.3",
+    "esbuild": "npm:esbuild@^0.24",
+    "electron": "npm:electron"
+  },
+  "tasks": {
+    "dev": "deno run -A src/app.ts",
+    "install:electron": "deno install --allow-scripts=npm:electron",
+    "am": "deno run -A ./dep/aio/src/am.ts",
+    "test": "deno test -A --unstable-kv tests/",
+    "compile:browser": "deno run -A ./dep/aio/src/build.ts --compile",
+    "compile:electron": "deno run -A ./dep/aio/src/build.ts --compile --electron",
+    "compile:cli": "deno run -A ./dep/aio/src/build.ts --compile --cli",
+    "compile:service": "deno run -A ./dep/aio/src/build.ts --compile --service --headless",
+    "compile:android": "deno run -A ./dep/aio/src/build.ts --android"
+  }
+}
+```
+
+Clone aio into `dep/aio/` and you're set:
+
+```sh
+mkdir -p dep && git clone https://github.com/riagentic/aio dep/aio
+```
+
+The rest of the project (`import { cell } from "aio"`) is unchanged — the import
+map abstracts the source.
 
 ## File structure
 
@@ -76,7 +136,7 @@ deno.json
 src/
   app.ts                       <- aio.run({ cells }) -- boot only
   App.tsx                      <- root UI -- layout + routing only
-  cell/counter/index.ts    <- cell() -- state, methods, machine
+  cell/counter/index.ts    <- cell() -- state + methods (or generators)
   style.css                    <- (optional)
 ```
 
@@ -113,20 +173,15 @@ an explicit actions/reduce pipeline for strict state machines — see the
 ## Create the UI
 
 ```tsx
-import { useCell } from "aio/air";
 import { counter } from "./cell/counter/index.ts";
 
 export default function App() {
-  const { state, send, status } = useCell(counter);
-  if (!state) return <div>Connecting...</div>;
-
   return (
     <div>
-      <h1>{state.count}</h1>
-      <p>Status: {status}</p>
-      <button onClick={() => send.decrement()}>-</button>
-      <button onClick={() => send.reset()}>Reset</button>
-      <button onClick={() => send.increment()}>+</button>
+      <h1>{counter.count}</h1>
+      <button type="button" onClick={() => counter.decrement()}>-</button>
+      <button type="button" onClick={() => counter.reset()}>Reset</button>
+      <button type="button" onClick={() => counter.increment()}>+</button>
     </div>
   );
 }
@@ -179,12 +234,11 @@ testCell(counter, "increment from idle", (t) => {
   t.expect.status("idle");
 });
 
-testCell(backup, "runs backup", async (t) => {
+testCell(counter, "async settle", async (t) => {
   t.init();
-  t.send.run();
-  t.runEffects();
+  t.send.increment(1);
   await t.settle();
-  t.expect.state((s) => s.lastBackup !== null);
+  t.expect.state((s) => s.count === 1);
 });
 ```
 
@@ -200,8 +254,12 @@ export const api = cell("api", {
       s.data = null;
     },
     async fetch(s, url: string) {
-      const res = await fetch(url);
-      s.data = await res.text();
+      // `call` adds timeout/retry around any async work
+      const text = await call(
+        { timeout: 5000, retries: 2 },
+        async () => (await fetch(url)).text(),
+      );
+      s.data = text;
     },
   },
 });
@@ -226,12 +284,6 @@ DO:     const arr = [...s.items]    // OK -- snapshot to NEW array first
 
 See [Methods — Common Pitfalls](../state/methods.md#common-pitfalls) for more
 examples and the async batching rules.
-
-## Using React instead of air
-
-Change `deno.json` to `"jsxImportSource": "react"`, add React imports, then
-import from `aio/react` instead of `aio/air`. Everything else is identical. See
-[../renderer.md](../renderer.md) for details.
 
 ## Troubleshooting
 

@@ -19,6 +19,8 @@ export interface TransitionState {
   exit(): void;
   /** Toggle between enter and exit. */
   toggle(): void;
+  /** Cancel pending timers and clean up. Call on component unmount. */
+  dispose(): void;
 }
 
 /** Reactive spring-animated numeric value with physics-based interpolation. */
@@ -31,6 +33,8 @@ export interface SpringValue {
   to(target: number): void;
   /** Immediately set value (no animation). */
   set(value: number): void;
+  /** Cancel animation and clean up. Call on component unmount or when the spring is no longer needed. */
+  dispose(): void;
 }
 
 /** Configuration for CSS class-based enter/exit transitions. */
@@ -109,6 +113,7 @@ export function useTransition(config: TransitionConfig): TransitionState {
       if (s === "idle" || s === "exit") this.enter();
       else this.exit();
     },
+    dispose: clear,
   };
 }
 
@@ -206,6 +211,12 @@ export function useSpring(config: SpringConfig = {}): SpringValue {
       velocity = 0;
       valueSig.set(v);
       animatingSig.set(false);
+    },
+    dispose() {
+      if (rafId !== undefined && typeof cancelAnimationFrame !== "undefined") {
+        cancelAnimationFrame(rafId);
+        rafId = undefined;
+      }
     },
   };
 }

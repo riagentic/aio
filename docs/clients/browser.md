@@ -1,24 +1,20 @@
 # Browser
 
 WebSocket client API, connection lifecycle, and UI state management for browser
-clients. Works with both **air** (built-in, default) and the **React adapter**.
+clients.
 
-For the core API (`cell`, `useCell`), see [core.md](../core.md). For Electron &
-thin client, see [electron.md](electron.md). For air vs React comparison, see
-[renderer.md](../renderer.md).
+For the core API (`cell`), see [core.md](../core.md). For Electron & thin
+client, see [electron.md](electron.md).
 
-## `useAio<S>()` — smart state hook
+## Direct cell access (recommended)
 
-The **recommended default** for accessing app state. Returns a deep recursive
-Proxy that automatically tracks which state paths your component reads. Only
-subscribed paths trigger re-renders and delta updates from the server — zero
-waste, zero config.
+Import cells and use their properties directly — reactive and auto-tracked. For
+full-state access, `useAio()` is also available but re-renders on any change.
 
-For scoped re-render optimization (e.g. isolating a heavy component to a single
-cell slice), see [`useCell(ref)`](../core.md#usecellref--react-hook-for-cells).
+For scoped re-render optimization, import and read from specific cells.
 
 ```tsx
-import { useAio } from "aio/air"; // or "aio/react" if using React
+import { useAio } from "aio/air";
 import type { AppState } from "./state.ts";
 
 export default function App() {
@@ -45,7 +41,7 @@ export default function App() {
 
 **No boilerplate needed in App.tsx:**
 
-- No `import React` — JSX transforms are automatic (both air and React adapter)
+- No `import React` — JSX transforms are automatic
 - No `createRoot` — the framework mounts your default export
 - No WebSocket setup — `useAio` handles it
 - Just `export default function App()` and you're done
@@ -102,7 +98,7 @@ When the last listener unsubscribes:
 2. If new listeners subscribe within 300ms -> timer cancelled, connection kept.
 3. If still zero after 300ms -> full teardown (WebSocket closed, state cleared).
 
-This handles React's mount/unmount cycle during route transitions — components
+This handles the mount/unmount cycle during route transitions — components
 unmount from the old route before mounting on the new route.
 
 ### What triggers teardown

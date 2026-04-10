@@ -57,24 +57,24 @@ In prod mode, errors are compact one-liners:
 
 ### Error codes reference
 
-| Code                 | Source      | What happened                                              |
-| -------------------- | ----------- | ---------------------------------------------------------- |
-| `REDUCE_ERROR`       | Reducer     | Reducer threw or returned invalid shape                    |
-| `EFFECT_ERROR`       | Effect      | Sync effect (executor) threw                               |
-| `EFFECT_TIMEOUT`     | Effect      | Async effect exceeded timeout (default 30s)                |
-| `EFFECT_ASYNC_ERROR` | Effect      | Async effect promise rejected                              |
-| `FLOW_STEP_ERROR`    | Flow        | A flow generator step threw (fed back to generator)        |
-| `FLOW_UNCAUGHT`      | Flow        | Flow threw without user try/catch -- includes step history |
-| `HOOK_ERROR`         | Hook        | `beforeReduce`, `onAction`, or `onEffect` hook threw       |
-| `INIT_ERROR`         | Lifecycle   | Cell `onInit` callback threw                               |
-| `DESTROY_ERROR`      | Lifecycle   | Cell `onDestroy` callback threw                            |
-| `MACHINE_BLOCKED`    | Machine     | Action blocked by state machine (warn-level)               |
-| `QUEUE_OVERFLOW`     | Dispatch    | Dispatch queue exceeded 10,000 entries                     |
-| `DISPATCH_LOOP`      | Dispatch    | 1,000 iterations detected -- possible infinite loop        |
-| `MEMORY_PRESSURE`    | Memory      | Heap above warning threshold (default 75%)                 |
-| `MEMORY_CRITICAL`    | Memory      | Heap above critical threshold (default 90%)                |
-| `BUDGET_REDUCE`      | Performance | Reducer exceeded time budget (default 100ms)               |
-| `BUDGET_EFFECT`      | Performance | Effect exceeded time budget (default 5ms)                  |
+| Code                 | Source      | What happened                                                 |
+| -------------------- | ----------- | ------------------------------------------------------------- |
+| `REDUCE_ERROR`       | Reducer     | Reducer threw or returned invalid shape                       |
+| `EFFECT_ERROR`       | Effect      | Sync effect (executor) threw                                  |
+| `EFFECT_TIMEOUT`     | Effect      | Async effect exceeded timeout (default 30s)                   |
+| `EFFECT_ASYNC_ERROR` | Effect      | Async effect promise rejected                                 |
+| `FLOW_STEP_ERROR`    | Flow        | A flow generator step threw (fed back to generator)           |
+| `FLOW_UNCAUGHT`      | Flow        | Flow threw without user try/catch -- includes step history    |
+| `HOOK_ERROR`         | Hook        | `beforeReduce`, `onAction`, or `onEffect` hook threw          |
+| `INIT_ERROR`         | Lifecycle   | Cell `onInit` callback threw                                  |
+| `DESTROY_ERROR`      | Lifecycle   | Cell `onDestroy` callback threw                               |
+| `MACHINE_BLOCKED`    | Machine     | Action blocked by state machine (warn-level)                  |
+| `QUEUE_OVERFLOW`     | Dispatch    | Dispatch queue exceeded 10,000 entries                        |
+| `DISPATCH_LOOP`      | Dispatch    | 1,000 iterations detected -- dispatch recovers after draining |
+| `MEMORY_PRESSURE`    | Memory      | Heap above warning threshold (default 75%)                    |
+| `MEMORY_CRITICAL`    | Memory      | Heap above critical threshold (default 90%)                   |
+| `BUDGET_REDUCE`      | Performance | Reducer exceeded time budget (default 100ms)                  |
+| `BUDGET_EFFECT`      | Performance | Effect exceeded time budget (default 5ms)                     |
 
 ### Error layer identification
 
@@ -228,7 +228,7 @@ stream.
 | `action-dropped`        | warning  | Action silently dropped (queue full)      |
 | `state-sync-error`      | error    | Failed to parse state from server         |
 | `state-key-stripped`    | warning  | Reserved key name removed from state      |
-| `state-no-listeners`    | warning  | State updating but no React subscribers   |
+| `state-no-listeners`    | warning  | State updating but no UI subscribers      |
 | `action-guarded`        | info     | Action blocked by machine state guard     |
 | `action-filtered`       | info     | Action dropped by beforeReduce middleware |
 | `effect-invalid`        | warning  | Effect missing .type string, skipped      |

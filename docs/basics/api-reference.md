@@ -2,7 +2,7 @@
 
 Universal: `import { aio, cell, log } from "aio"` (state, lifecycle, logging)
 
-Rendering: `import { useCell, signal } from "aio/air"` (or `"aio/react"`)
+Rendering: `import { signal } from "aio/air"`
 
 Focused imports:
 
@@ -17,13 +17,13 @@ import { createSelector } from "aio/selectors"; // Selectors only
 
 Most apps only need these five APIs:
 
-| API                         | What it does                       | Guide                                                     |
-| --------------------------- | ---------------------------------- | --------------------------------------------------------- |
-| `cell(name, config)`        | Define a piece of state + behavior | [Cells](../state/cells.md)                                |
-| `aio.run(config)`           | Boot the app                       | [Lifecycle](../state/lifecycle.md)                        |
-| `useCell(ref)`              | Connect UI to cell state           | [AIR Setup](../ui/air-setup.md) / [React](../ui/react.md) |
-| `testCell(def, name, fn)`   | Test a cell in isolation           | [Cell Testing](../testing/cell-testing.md)                |
-| `log.info(tag, msg, data?)` | Structured logging                 | [Logging](#logging)                                       |
+| API                         | What it does                       | Guide                                      |
+| --------------------------- | ---------------------------------- | ------------------------------------------ |
+| `cell(name, config)`        | Define a piece of state + behavior | [Cells](../state/cells.md)                 |
+| `aio.run(config)`           | Boot the app                       | [Lifecycle](../state/lifecycle.md)         |
+| `counter.count` (direct)    | Connect UI to cell state           | [AIR Setup](../ui/air-setup.md)            |
+| `testCell(def, name, fn)`   | Test a cell in isolation           | [Cell Testing](../testing/cell-testing.md) |
+| `log.info(tag, msg, data?)` | Structured logging                 | [Logging](#logging)                        |
 
 Everything below is the full reference, organized by category.
 
@@ -107,19 +107,19 @@ Everything below is the full reference, organized by category.
 
 ---
 
-## React Hooks
+## AIR Hooks
 
-| Hook                        | Description                                            |
-| --------------------------- | ------------------------------------------------------ |
-| `useAio<S>()`               | Proxy-tracked state access                             |
-| `useCell(ref)`              | Scoped state + typed send, selective re-renders        |
-| `useProjection(fn, deps)`   | Structural sharing for derived data                    |
-| `memo(Component, compare?)` | `React.memo` replacement with `_shallowEqual` per prop |
-| `useLocal(initial)`         | Client-only state (not synced) -- `{ local, set }`     |
-| `useTimeTravel()`           | Dev-mode time-travel controls                          |
-| `connectDevTools()`         | Connect to Redux DevTools browser extension            |
-| `disconnectDevTools()`      | Disconnect from Redux DevTools                         |
-| `page(current, routes)`     | State-based routing                                    |
+| Hook                        | Description                                        |
+| --------------------------- | -------------------------------------------------- |
+| `useAio<S>()`               | Proxy-tracked state access                         |
+| Direct cell access          | Scoped state + typed methods, selective re-renders |
+| `useProjection(fn, deps)`   | Structural sharing for derived data                |
+| `memo(Component, compare?)` | No-op (auto-memo via shallow prop compare)         |
+| `useLocal(initial)`         | Client-only state (not synced) -- `{ local, set }` |
+| `useTimeTravel()`           | Dev-mode time-travel controls                      |
+| `connectDevTools()`         | Connect to Redux DevTools browser extension        |
+| `disconnectDevTools()`      | Disconnect from Redux DevTools                     |
+| `page(current, routes)`     | State-based routing                                |
 
 ## Framework-agnostic Client
 

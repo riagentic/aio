@@ -83,6 +83,7 @@ export function resource<S, T>(
       doFetch(sourceValue);
     },
     mutate(value: T) {
+      if (abortController) abortController.abort();
       batch(() => {
         data.set(value);
         latest.set(value);

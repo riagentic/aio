@@ -43,13 +43,13 @@ Duration: 250.0ms (budget: 100ms)
 (produce=180ms clone=45ms spread=2ms routing=20ms listeners=3ms)
 ```
 
-| Phase       | What it measures                                          | If slow                       |
-| ----------- | --------------------------------------------------------- | ----------------------------- |
-| `produce`   | Immer `produce()` -- your reducer function                | Move computation to effect    |
-| `clone`     | `structuredClone()` -- effect detachment from Immer draft | Returning many/large effects  |
-| `spread`    | State object construction                                 | Too many cells?               |
-| `routing`   | Owner cell lookup + reduce dispatch                       | Shouldn't be slow             |
-| `listeners` | Foreign action listener fan-out                           | Too many cross-cell listeners |
+| Phase       | What it measures                                     | If slow                       |
+| ----------- | ---------------------------------------------------- | ----------------------------- |
+| `produce`   | Immer `produce()` + effect cloning (inside callback) | Move computation to effect    |
+| `clone`     | Legacy — now included in `produce` timing            | N/A                           |
+| `spread`    | State object construction                            | Too many cells?               |
+| `routing`   | Owner cell lookup + reduce dispatch                  | Shouldn't be slow             |
+| `listeners` | Foreign action listener fan-out                      | Too many cross-cell listeners |
 
 If `produce` dominates, your reducer is doing too much work:
 

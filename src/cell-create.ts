@@ -15,6 +15,7 @@ import type {
 import type { Method } from "./cell-impl.ts";
 import { createCellFromMethods } from "./cell-methods-factory.ts";
 import { createCellFromActions } from "./cell-actions-factory.ts";
+import { registerCell } from "./cell-reactive.ts";
 import type {
   ActionsCellConfig,
   ExecuteHandlers,
@@ -44,7 +45,7 @@ export function cell<
   name: N,
   config: MethodsCellConfig<N, S, M, States>,
   // deno-lint-ignore no-explicit-any
-): CellDef<N, any, any, S> & DirectCalling<N, M>;
+): CellDef<N, any, any, S> & DirectCalling<N, M> & Readonly<S>;
 /** Define a cell with explicit actions/reduce style — typed action creators + reducer handlers. */
 export function cell<
   N extends string,
@@ -55,7 +56,7 @@ export function cell<
 >(
   name: N,
   config: ActionsCellConfig<N, S, A, E, States>,
-): CellDef<N, A, E, S> & FlatActions<N, A>;
+): CellDef<N, A, E, S> & FlatActions<N, A> & Readonly<S>;
 // deno-lint-ignore no-explicit-any
 export function cell(name: string, config: any): any {
   const hasMethods = config.methods &&
@@ -67,14 +68,16 @@ export function cell(name: string, config: any): any {
 
   // Methods present (with optional generators, actions, effects) → unified builder
   if (hasMethods || (hasGenerators && !hasActions)) {
-    return createCellFromMethods(
+    const def = createCellFromMethods(
       name,
       config as MethodsCellConfig<string, Record<string, unknown>>,
     );
+    registerCell(def);
+    return def;
   }
 
   // Actions-only (no methods) → explicit builder
-  return createCellFromActions(
+  const def = createCellFromActions(
     name,
     config as ActionsCellConfig<
       string,
@@ -83,4 +86,6 @@ export function cell(name: string, config: any): any {
       Creators
     >,
   );
+  registerCell(def);
+  return def;
 }

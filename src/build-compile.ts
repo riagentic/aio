@@ -6,14 +6,12 @@ import { dirname, join } from "@std/path";
 import type { BuildConfig } from "./build-config.ts";
 
 // Dev-only packages excluded from all compile targets
-const _devTopLevel = ["electron", "esbuild", "react", "react-dom"];
+const _devTopLevel = ["electron", "esbuild"];
 const _devDenoPrefixes = [
   "electron@",
   "esbuild@",
   "@esbuild+",
   "@electron+",
-  "react@",
-  "react-dom@",
 ];
 
 type SavedLink = { path: string; target: string; isDir: boolean };

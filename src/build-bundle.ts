@@ -30,7 +30,6 @@ async function isBundleFresh(cfg: BuildConfig): Promise<boolean> {
     doAndroid,
     isRemote,
     frameworkSrcDir,
-    rendererMode,
     root,
   } = cfg;
   if (doForce) return false;
@@ -41,15 +40,10 @@ async function isBundleFresh(cfg: BuildConfig): Promise<boolean> {
 
     // Check deno.json + framework source files (skip for remote — JSR version is pinned)
     if (!isRemote) {
-      const aioModule = doAndroid
-        ? join(
-          frameworkSrcDir,
-          rendererMode === "aio" ? "standalone-air.ts" : "standalone.ts",
-        )
-        : join(
-          frameworkSrcDir,
-          rendererMode === "aio" ? "browser-air.ts" : "browser.ts",
-        );
+      const aioModule = join(
+        frameworkSrcDir,
+        doAndroid ? "standalone-air.ts" : "browser-air.ts",
+      );
       for (
         const f of [
           join(root, "deno.json"),
@@ -78,42 +72,12 @@ async function isBundleFresh(cfg: BuildConfig): Promise<boolean> {
   }
 }
 
-/** Generate the esbuild entry point code based on target */
-async function makeEntryCode(cfg: BuildConfig): Promise<string> {
-  const { rendererMode, doAndroid, root, frameworkSrcDir } = cfg;
-  if (rendererMode === "aio") {
-    return `\
+/** Generate the esbuild entry point code */
+function makeEntryCode(): string {
+  return `\
 import { mount as _mount } from 'aio/renderer'
 import App from './src/App.tsx'
 export function mount(el) { _mount(el, App) }
-`;
-  }
-  if (doAndroid) {
-    const hasLegacyState = await Deno.stat(join(root, "src/state.ts")).then(
-      () => true,
-      () => false,
-    );
-    if (hasLegacyState) {
-      return `\
-import { createElement } from 'react'
-import { createRoot } from 'react-dom/client'
-import { initStandalone } from 'aio'
-import { initialState } from './src/state.ts'
-import { reduce } from './src/reduce.ts'
-import { execute } from './src/execute.ts'
-import App from './src/App.tsx'
-initStandalone(initialState, { reduce, execute })
-createRoot(document.getElementById('root')).render(createElement(App))
-`;
-    }
-  }
-  // Default: React with mount export
-  void frameworkSrcDir; // not used for react mode
-  return `\
-import { createElement } from 'react'
-import { createRoot } from 'react-dom/client'
-import App from './src/App.tsx'
-export function mount(el) { createRoot(el).render(createElement(App)) }
 `;
 }
 
@@ -128,7 +92,6 @@ export async function runBundle(
     root,
     isRemote,
     frameworkSrcDir,
-    rendererMode,
     doAndroid,
   } = cfg;
 
@@ -149,31 +112,20 @@ export async function runBundle(
     await Deno.mkdir(dist, { recursive: true });
 
     // Build import map for esbuild
-    const fwEntry = doAndroid
-      ? (rendererMode === "aio" ? "standalone-air.ts" : "standalone.ts")
-      : (rendererMode === "aio" ? "browser-air.ts" : "browser.ts");
+    const fwEntry = doAndroid ? "standalone-air.ts" : "browser-air.ts";
     const aioEntry = isRemote ? null : join(frameworkSrcDir, fwEntry);
-    const reactImports = rendererMode === "aio"
+    const aioImports = frameworkSrcDir
       ? {
-        ...(frameworkSrcDir
-          ? {
-            "aio/jsx-runtime": join(frameworkSrcDir, "jsx-runtime.ts"),
-            "aio/renderer": join(frameworkSrcDir, "aio-renderer.ts"),
-          }
-          : {}),
+        "aio/jsx-runtime": join(frameworkSrcDir, "jsx-runtime.ts"),
+        "aio/renderer": join(frameworkSrcDir, "aio-renderer.ts"),
       }
-      : {
-        "react": "npm:react@^18",
-        "react-dom": "npm:react-dom@^18",
-        "react-dom/client": "npm:react-dom@^18/client",
-        "react/jsx-runtime": "npm:react@^18/jsx-runtime",
-      };
+      : {};
     const buildConfig = {
       compilerOptions: mainConfig.compilerOptions,
       imports: {
         ...(mainConfig.imports as Record<string, string>),
         ...(aioEntry ? { "aio": aioEntry, "aio/air": aioEntry } : {}),
-        ...reactImports,
+        ...aioImports,
       },
     };
     const buildConfigPath = join(root, "_build.json");
@@ -184,7 +136,7 @@ export async function runBundle(
 
     // Generate temp entry
     const buildEntryPath = join(root, "_build_entry.tsx");
-    const entryCode = await makeEntryCode(cfg);
+    const entryCode = makeEntryCode();
     await Deno.writeTextFile(buildEntryPath, entryCode);
 
     // esbuild alias: skip npm:/jsr: specifiers (resolved via node_modules)
@@ -201,21 +153,7 @@ export async function runBundle(
     try {
       // deno-lint-ignore no-import-prefix
       const esbuild = await import("npm:esbuild@^0.24");
-      // Pin React to project root's copy
-      const reactAlias: Record<string, string> = {};
-      if (rendererMode !== "aio") {
-        for (const pkg of ["react", "react-dom", "react/jsx-runtime"]) {
-          try {
-            const p = join(root, "node_modules", ...pkg.split("/"));
-            await Deno.stat(p);
-            reactAlias[pkg] = p;
-          } catch { /* not installed — skip */ }
-        }
-      }
-
-      const jsxConfig = rendererMode === "aio"
-        ? { jsx: "automatic" as const, jsxImportSource: "aio" }
-        : { jsx: "automatic" as const, jsxImportSource: "react" };
+      const jsxConfig = { jsx: "automatic" as const, jsxImportSource: "aio" };
 
       const result = await esbuild.build({
         entryPoints: [buildEntryPath],
@@ -225,7 +163,7 @@ export async function runBundle(
         target: "esnext",
         outfile: out,
         ...jsxConfig,
-        alias: { ...esbuildAlias, ...reactAlias },
+        alias: esbuildAlias,
         plugins: isRemote
           ? [aioBrowserPlugin(), makeHttpPlugin(cfg)]
           : [aioBrowserPlugin()],

@@ -29,6 +29,7 @@ export {
   type Msg,
   type ScopedApp,
   type SendOf,
+  type StateOf,
   tagSource,
 } from "./cell-types.ts";
 
@@ -50,3 +51,10 @@ export {
 } from "./cell-compose.ts";
 
 export { testBridge, testCell, type TestContext } from "./cell-test.ts";
+
+export {
+  _resetCellRegistry,
+  bindAllCellsReactive,
+  bindCellReactive,
+  getRegisteredCells,
+} from "./cell-reactive.ts";

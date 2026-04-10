@@ -85,50 +85,6 @@ FLIP (First-Last-Invert-Play) smoothly animates position changes on reorder.
 
 ---
 
-## useTransition()
-
-```ts
-function useTransition(config: TransitionConfig): TransitionState;
-```
-
-Imperative CSS transition orchestration. Call outside the component body.
-
-```tsx
-import { useTransition } from "aio/air";
-
-const fade = useTransition({ name: "fade", duration: 200 });
-
-const App = () => (
-  <div>
-    <button onClick={() => fade.toggle()}>Toggle</button>
-    {fade.mounted && <div className={fade.className}>I fade in and out</div>}
-  </div>
-);
-```
-
-CSS classes applied: `fade-enter` -> `fade-active` -> `fade-exit` -> idle.
-
-**TransitionConfig:**
-
-| Prop       | Type      | Default | Description           |
-| ---------- | --------- | ------- | --------------------- |
-| `name`     | `string`  | --      | Base class name       |
-| `duration` | `number`  | `300`   | Exit duration in ms   |
-| `initial`  | `boolean` | `false` | Start in active state |
-
-**TransitionState:**
-
-| Member      | Type                                      | Description                 |
-| ----------- | ----------------------------------------- | --------------------------- |
-| `stage`     | `"enter" \| "active" \| "exit" \| "idle"` | Current stage               |
-| `mounted`   | `boolean`                                 | Whether to render in DOM    |
-| `className` | `string`                                  | CSS class for current stage |
-| `enter()`   | `void`                                    | Start enter                 |
-| `exit()`    | `void`                                    | Start exit                  |
-| `toggle()`  | `void`                                    | Flip between enter/exit     |
-
----
-
 ## useSpring()
 
 ```ts
@@ -167,9 +123,14 @@ mount(document.getElementById("root")!, Box);
 
 **SpringValue:**
 
-| Member       | Type      | Description                    |
-| ------------ | --------- | ------------------------------ |
-| `value`      | `number`  | Signal-tracked current value   |
-| `animating`  | `boolean` | Whether animation is running   |
-| `to(target)` | `void`    | Animate to target              |
-| `set(value)` | `void`    | Immediately set (no animation) |
+| Member       | Type      | Description                                     |
+| ------------ | --------- | ----------------------------------------------- |
+| `value`      | `number`  | Signal-tracked current value                    |
+| `animating`  | `boolean` | Whether animation is running                    |
+| `to(target)` | `void`    | Animate to target                               |
+| `set(value)` | `void`    | Immediately set (no animation)                  |
+| `dispose()`  | `void`    | Cancel animation and clean up — call on unmount |
+
+> **Cleanup:** Call `x.dispose()` when the spring is no longer needed (e.g., in
+> `onCleanup`). This cancels any in-flight `requestAnimationFrame` loop and
+> prevents memory leaks.

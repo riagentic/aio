@@ -34,8 +34,7 @@
 - [Animation](ui/air-animation.md) — transitions and springs
 - [Advanced](ui/air-advanced.md) — SSR, portals, islands
 - [API Reference](ui/air-reference.md) — cheat sheet
-- [React](ui/react.md) — React adapter
-- [AIR vs React](ui/comparison.md) — comparison and migration
+- [Migration from React](ui/comparison.md) — comparison and migration
 
 ## Persistence & Data
 

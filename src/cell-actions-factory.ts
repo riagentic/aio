@@ -26,6 +26,8 @@ import {
   normalizeUiFilter,
   scopeSelectors,
 } from "./cell-helpers.ts";
+import { createAioError } from "./error.ts";
+import { log } from "./logger.ts";
 
 export function createCellFromActions<
   N extends string,
@@ -156,6 +158,7 @@ export function createCellFromActions<
       effects: eCatalog as unknown,
       bound: false,
     },
+    fx: eCatalog,
   };
 
   // Flatten action creators + string constants directly onto the cell def
@@ -232,7 +235,24 @@ function buildActionsExecutor(
     return (app: ScopedApp, effect: Msg): void => {
       const key = effectTypeToKey.get(effect.type) ?? effect.type;
       const h = handlers[key];
-      if (h) void h(app, (effect as { payload: unknown }).payload);
+      if (h) {
+        const result = h(app, (effect as { payload: unknown }).payload);
+        if (result && typeof result === "object" && "catch" in result) {
+          (result as Promise<void>).catch((e) => {
+            const _onError = (app as Record<string, unknown>)._onError as
+              | ((err: import("./error.ts").AioError) => void)
+              | undefined;
+            if (_onError) {
+              _onError(createAioError("EFFECT_ASYNC_ERROR", e, {
+                cellName: prefix,
+                effectType: effect.type as string,
+              }));
+            } else {
+              log.error("cell", `${prefix} ${key}() execute threw: ${e}`);
+            }
+          });
+        }
+      }
     };
   }
 

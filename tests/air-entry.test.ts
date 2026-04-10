@@ -2,7 +2,6 @@ import { assertExists } from "@std/assert";
 
 Deno.test("air entry: exports all AIR-native hooks", async () => {
   const air = await import("../src/air.ts");
-  assertExists(air.useCell);
   assertExists(air.useAio);
   assertExists(air.useLocal);
   assertExists(air.onMount);
@@ -17,7 +16,7 @@ Deno.test("air entry: exports all AIR-native hooks", async () => {
   assertExists(air.useRef);
 });
 
-Deno.test("air entry: exports React compat hooks", async () => {
+Deno.test("air entry: exports standard hooks", async () => {
   const air = await import("../src/air.ts");
   assertExists(air.useState);
   assertExists(air.useEffect);
