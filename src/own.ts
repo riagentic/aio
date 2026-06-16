@@ -36,14 +36,20 @@ export type OwnEffect =
 const pendingFactories = new Map<number, () => OwnResource>();
 let nextToken = 1;
 
-export const own = {
+/** Keyed disposer-slot API for cell-owned native resources. */
+export interface Own {
   /** Acquire a resource under `id`. Same id ⇒ previous disposer runs first. */
+  set(id: string, factory: () => OwnResource): OwnEffect;
+  /** Dispose the resource under `id` (no-op when the slot is empty). */
+  dispose(id: string): OwnEffect;
+}
+
+export const own: Own = {
   set(id: string, factory: () => OwnResource): OwnEffect {
     const token = nextToken++;
     pendingFactories.set(token, factory);
     return { type: "__own", kind: "set", id, token };
   },
-  /** Dispose the resource under `id` (no-op when the slot is empty). */
   dispose(id: string): OwnEffect {
     return { type: "__own", kind: "dispose", id };
   },
@@ -128,7 +134,9 @@ export function createOwnManager(log: Log): {
     if (!factory) {
       // Replay or duplicate delivery — the one-shot factory was already
       // consumed. Never re-acquire (and never kill the live resource).
-      log.warn(`own: no pending factory for '${effect.id}' — skipped (replay?)`);
+      log.warn(
+        `own: no pending factory for '${effect.id}' — skipped (replay?)`,
+      );
       return;
     }
     runDisposer(effect.id); // same id ⇒ replace

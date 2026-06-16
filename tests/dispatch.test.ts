@@ -123,9 +123,52 @@ Deno.test("dispatch: close() prevents further dispatching", () => {
   assertEquals(state.n, 1);
 
   dispatch.close();
-  dispatch({ type: "B" });
+  // B-4: a dropped action rejects — caller must not proceed as if applied.
+  let rejected: AioError | null = null;
+  dispatch({ type: "B" }).catch((e) => {
+    rejected = e as AioError;
+  });
   assertEquals(state.n, 1); // unchanged
   assertEquals(warned, true);
+  // Allow the microtask to settle, then assert the rejection.
+  return Promise.resolve().then(() => {
+    assertEquals(rejected !== null, true);
+    assertEquals((rejected as unknown as AioError).code, "DISPATCH_CLOSED");
+  });
+});
+
+Deno.test("dispatch: dropped action rejects with QUEUE_OVERFLOW (B-4)", async () => {
+  let state = { n: 0 };
+  let dispatchRef: ((a: { type: string }) => Promise<void>) | null = null;
+  let flood = false;
+  const overflowRejections: AioError[] = [];
+
+  const dispatch = createDispatch<typeof state, { type: string }, never>({
+    reduce: (s) => ({ state: { n: s.n + 1 }, effects: [] }),
+    execute: () => {},
+    getState: () => state,
+    setState: (s) => {
+      state = s;
+    },
+    onDone: () => {
+      if (flood) {
+        flood = false;
+        for (let i = 0; i < 10_001; i++) {
+          dispatchRef!({ type: "QUEUED" }).catch((e: AioError) => {
+            if (e.code === "QUEUE_OVERFLOW") overflowRejections.push(e);
+          });
+        }
+      }
+    },
+    log: noop,
+    debug: false,
+  });
+
+  dispatchRef = dispatch;
+  flood = true;
+  await dispatch({ type: "TRIGGER" });
+  // The action(s) beyond QUEUE_MAX reject rather than silently resolving.
+  assertEquals(overflowRejections.length > 0, true);
 });
 
 Deno.test("dispatch: bad reducer output is logged and skipped", () => {

@@ -190,24 +190,20 @@ export async function lint(
     }
   } catch { /* baseDir doesn't exist — already caught above */ }
 
-  // Check esbuild — needed for dev mode TSX transpilation
+  // Check esbuild — needed for dev mode TSX transpilation.
+  // B-5: probe reality, not the filesystem. The transpiler loads esbuild via
+  // `import("npm:esbuild@0.24.2")` (Deno's npm cache — no node_modules/ needed),
+  // so the old `node_modules/esbuild` stat produced a false "not installed"
+  // warning on every standard dev boot and was cwd-dependent. Resolve the same
+  // way the transpiler does; only warn if that genuinely fails.
   if (!prod) {
-    const esbuildDir = join(Deno.cwd(), "node_modules", "esbuild");
-    const esbuildBin = join(Deno.cwd(), "node_modules", ".bin", "esbuild");
-    let esbuildFound = false;
     try {
-      await Deno.stat(esbuildDir);
-      esbuildFound = true;
-    } catch { /* try bin */ }
-    if (!esbuildFound) {
-      try {
-        await Deno.stat(esbuildBin);
-        esbuildFound = true;
-      } catch { /* not found */ }
-    }
-    if (!esbuildFound) {
+      // deno-lint-ignore no-import-prefix
+      await import("npm:esbuild@0.24.2");
+    } catch {
       r.warn.push(
-        "esbuild not installed — dev mode needs it for TSX transpilation",
+        "esbuild not installed — dev mode needs it for TSX transpilation. " +
+          "Run with network access once to populate Deno's npm cache.",
       );
     }
   }

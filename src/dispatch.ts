@@ -4,6 +4,7 @@ import type { ScheduleEffect } from "./schedule.ts";
 import type { OwnEffect } from "./own.ts";
 import type { ReduceBreakdown } from "./time-travel.ts";
 import {
+  type AioError,
   type AioErrorCode,
   clearCorrelationId,
   createAioError,
@@ -168,10 +169,24 @@ export function createDispatch<S, A, E>(
     }
   }
 
+  // B-4: a dropped action must REJECT, not resolve — `await cell.method()` has
+  // to learn the state change was never applied. Awaiters get the rejection;
+  // a no-op .catch keeps fire-and-forget callers from surfacing an unhandled
+  // rejection (same policy as the browser ack wrapper, cell-reactive.ts).
+  function rejectDropped(err: AioError): Promise<void> {
+    const p = Promise.reject<void>(err);
+    p.catch(() => {});
+    return p;
+  }
+
   function dispatch(action: A): Promise<void> {
     if (closed) {
       log.warn("dispatch after close() — ignored");
-      return Promise.resolve();
+      return rejectDropped(createAioError(
+        "DISPATCH_CLOSED",
+        "dispatch after close() — action dropped, not applied",
+        { actionType: (action as Record<string, unknown>)?.type as string },
+      ));
     }
     if (queue.length >= QUEUE_MAX) {
       const err = createAioError(
@@ -180,7 +195,7 @@ export function createDispatch<S, A, E>(
         { actionType: (action as Record<string, unknown>)?.type as string },
       );
       reportAioError(err, _reportOpts);
-      return Promise.resolve();
+      return rejectDropped(err);
     }
     let resolve!: () => void;
     const promise = new Promise<void>((r) => {
@@ -281,15 +296,14 @@ export function createDispatch<S, A, E>(
             try {
               cloned.push(structuredClone(eff));
             } catch (cloneErr) {
-              const effType =
-                (eff as Record<string, unknown> | null)?.type as
-                  | string
-                  | undefined;
+              const effType = (eff as Record<string, unknown> | null)?.type as
+                | string
+                | undefined;
               const err = createAioError(
                 "EFFECT_ERROR",
-                `effect "${
-                  effType ?? "?"
-                }" from action "${tag(current)}" is not structuredClone-able — dropped. ` +
+                `effect "${effType ?? "?"}" from action "${
+                  tag(current)
+                }" is not structuredClone-able — dropped. ` +
                   `Effects must be plain JSON-shaped objects (no functions, DOM nodes, class instances, etc). ` +
                   `Original: ${
                     cloneErr instanceof Error

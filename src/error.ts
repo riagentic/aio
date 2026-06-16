@@ -18,6 +18,7 @@ export type AioErrorCode =
   | "MACHINE_BLOCKED"
   | "QUEUE_OVERFLOW"
   | "DISPATCH_LOOP"
+  | "DISPATCH_CLOSED"
   | "MEMORY_PRESSURE"
   | "MEMORY_CRITICAL"
   | "BUDGET_REDUCE"
@@ -95,6 +96,7 @@ const CODE_TO_SOURCE: Record<AioErrorCode, AioErrorSource> = {
   MACHINE_BLOCKED: "machine",
   QUEUE_OVERFLOW: "dispatch",
   DISPATCH_LOOP: "dispatch",
+  DISPATCH_CLOSED: "dispatch",
   MEMORY_PRESSURE: "memory",
   MEMORY_CRITICAL: "memory",
   BUDGET_REDUCE: "reduce",
@@ -314,6 +316,8 @@ function generateTip(err: AioError): string | undefined {
       return `Tip: Action queue exceeded ${10_000} entries. You may have a dispatch loop — check effects that dispatch synchronously.`;
     case "DISPATCH_LOOP":
       return `Tip: 1000+ iterations detected. A reducer or effect is dispatching back to itself. Break the cycle.`;
+    case "DISPATCH_CLOSED":
+      return `Tip: Action dispatched after the app/cell was closed — it was not applied. Stop dispatching during/after shutdown, or guard awaited calls.`;
     case "MEMORY_PRESSURE":
       return `Tip: Heap usage rising. Check per-cell state sizes — prune unbounded arrays or move large data to SQLite.`;
     case "MEMORY_CRITICAL":

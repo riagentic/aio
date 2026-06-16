@@ -19,8 +19,12 @@ let transformFn:
 let esbuildStop: (() => Promise<void>) | null = null;
 async function getTransform() {
   if (!transformFn) {
+    // B-6: pin the EXACT version that deno.json pins (esbuild@0.24.2) — a `^0.24`
+    // range could resolve a different esbuild than the project tested. The npm:
+    // specifier (not the bare import-map "esbuild") is deliberate: a dynamic npm:
+    // import keeps `deno compile` from embedding the native binary.
     // deno-lint-ignore no-import-prefix
-    const mod = await import("npm:esbuild@^0.24");
+    const mod = await import("npm:esbuild@0.24.2");
     transformFn = mod.transform as (
       input: string,
       opts: Record<string, unknown>,
