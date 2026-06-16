@@ -1,4 +1,3 @@
-// deno-lint-ignore-file no-explicit-any
 /**
  * @module
  * Framework-agnostic canonical state store.
@@ -112,12 +111,14 @@ export function setTransport(
 // ── Testing helpers ──────────────────────────────────────────────────
 
 /** Inject state directly (for testing without transport). */
+// deno-lint-ignore no-explicit-any
 export function _injectState(state: Record<string, any>): void {
   _applyFullState(state);
   _markInitialStateReceived();
 }
 
 /** Get the current internal state (for testing). */
+// deno-lint-ignore no-explicit-any
 export function _getState(): Record<string, any> {
   return _stateSignal.peek();
 }

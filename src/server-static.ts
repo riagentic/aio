@@ -42,6 +42,7 @@ export interface StaticDeps {
   width?: number;
   height?: number;
   renderBudget?: RenderBudget;
+  uiEntry?: string; // AIO-8.1
   // Graph validation state — mutable ref from server.ts (dev only)
   getGraphResult: () => GraphResult | null;
   // Snapshot support
@@ -114,6 +115,7 @@ export function createStaticHandler(deps: StaticDeps): {
       width,
       height,
       renderBudget,
+      uiEntry,
     } = deps;
 
     // ── Root / SPA entry ──
@@ -135,6 +137,7 @@ export function createStaticHandler(deps: StaticDeps): {
           width,
           height,
           renderBudget,
+          uiEntry,
         ),
         { headers: { "Content-Type": "text/html", ...noCache } },
       );
@@ -385,6 +388,7 @@ export function createStaticHandler(deps: StaticDeps): {
       width,
       height,
       renderBudget,
+      uiEntry,
     } = deps;
 
     const filename = pathname.replace(/^\//, "");
@@ -423,6 +427,7 @@ export function createStaticHandler(deps: StaticDeps): {
             width,
             height,
             renderBudget,
+            uiEntry,
           ),
           { headers: { "Content-Type": "text/html", ...noCache } },
         );

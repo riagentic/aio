@@ -1,14 +1,19 @@
 # Scheduling
 
 aio has a built-in scheduler for timers, intervals, daily triggers, and cron
-jobs. Schedules are **pure effects** — returned from reducers or sync methods,
-handled by the runtime. No side effects in reducers, no external cron daemons.
+jobs. Schedules are **pure effects** — returned from reducers or methods
+(sync or async, AIO-381), handled by the runtime. No side effects in reducers,
+no external cron daemons.
+
+> Timers are one kind of owned resource. For disposables — file watchers,
+> sockets, subprocesses — the same keyed replace semantics exist as
+> [`own.set`](methods.md#owning-native-resources-ownset-aio-382).
 
 ## Two ways to schedule
 
 ### 1. Dynamic — from a reducer or method
 
-Return a `ScheduleEffect` from any reducer or sync method:
+Return a `ScheduleEffect` from any reducer or method (sync or async):
 
 ```ts
 import { cell, schedule } from "aio";

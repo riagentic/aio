@@ -3,6 +3,7 @@ import type { AioError, ReportErrorOpts } from "./error.ts";
 import type { PerfBudget } from "./dispatch.ts";
 import type { CellPatchStrategy, PatchFilterFields } from "./state-filter.ts";
 import type { ScheduleDef, ScheduleEffect } from "./schedule.ts";
+import type { OwnEffect } from "./own.ts";
 import type { DB } from "./db/mod.ts";
 import type { TableDef } from "./sql.ts";
 import type { CellStatus, CircuitBreakerConfig } from "./cell.ts";
@@ -28,6 +29,9 @@ export type UiConfig = {
   width?: number; // default: 800
   height?: number; // default: 600
   showStatus?: boolean; // default: true
+  /** AIO-8.1: UI entry file, relative to baseDir. Default: "App.tsx" (the
+   *  filename convention). Set to serve/watch a different component file. */
+  entry?: string;
 };
 
 /** @deprecated Use CellsConfig with `cells: [...]` instead. AioConfig is the legacy
@@ -39,7 +43,7 @@ export type AioConfig<S, A, E> = {
   reduce: (
     state: S,
     action: A,
-  ) => { state: S; effects: (E | ScheduleEffect)[] };
+  ) => { state: S; effects: (E | ScheduleEffect | OwnEffect)[] };
   execute: (app: AioApp<S, A>, effect: E) => void;
   persist?: boolean; // default: true — auto-opens Deno.Kv
   fullStateThreshold?: number; // 0-1: ratio of changed keys that triggers full state broadcast (default: 0.5)

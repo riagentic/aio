@@ -1,8 +1,9 @@
 // cell-test.ts — testCell() harness for isolated cell testing
 
 import type { ScheduleEffect } from "./schedule.ts";
+import type { OwnEffect } from "./own.ts";
 import { resetFlows } from "./flow.ts";
-import { resetPending } from "./cell-impl.ts";
+import { registerCall, resetPending, resolveCall } from "./cell-impl.ts";
 import type { Catalog, CellDef, Creators, Msg } from "./cell-types.ts";
 import { composeCells } from "./cell-compose.ts";
 
@@ -16,10 +17,21 @@ export type TestContext<
   init: () => void;
   /** Destroy cell (reset to initial + 'uninitialized' status) */
   destroy: () => void;
-  /** Typed action senders — one per declared action, arguments inferred from action creators */
+  /** Typed action senders — one per declared action, arguments inferred from action creators.
+   *
+   *  Fire-and-forget by default (sync dispatch, like production `cell.method()`).
+   *  AIO-379: **awaiting** the returned promise runs the method to completion —
+   *  for async methods this executes the trigger and resolves when the method
+   *  (and all its state writes) have been applied:
+   *
+   *  ```ts
+   *  await t.send.load()              // async method fully done here
+   *  t.expect.state(s => s.data !== null)
+   *  ```
+   */
   send: {
     [K in keyof A & string]: A[K] extends (...args: infer P) => unknown
-      ? (...args: P) => void
+      ? (...args: P) => Promise<void>
       : never;
   };
   /** Assertions */
@@ -39,13 +51,15 @@ export type TestContext<
   /** Get current cell state */
   getState: () => S;
   /** Get effects from last dispatched action */
-  getEffects: () => (Msg | ScheduleEffect)[];
+  getEffects: () => (Msg | ScheduleEffect | OwnEffect)[];
   /** Dispatch N random valid actions (for property-based testing) */
   randomActions: (n: number) => void;
   /** Run pending effects (executor). Deprecated — `settle()` now auto-runs effects. */
   runEffects: () => void;
   /** Run effects + wait for async to complete. Replaces `runEffects() + settle()`.
-   *  No arg: drain microtasks (fast, for in-memory async). With ms: timer-based wait. */
+   *  AIO-379: async method triggers are tracked to real completion — no-arg
+   *  settle() is deterministic even when the method does slow work (dynamic
+   *  imports, file IO). Pass ms only to wait out real timers (setTimeout chains). */
   settle: (ms?: number) => Promise<void>;
 };
 
@@ -72,7 +86,14 @@ export function testCell<
     const machine = f.__aio.machine;
 
     let state = { ...composed.initialState };
-    let lastEffects: (Msg | ScheduleEffect)[] = [];
+    let lastEffects: (Msg | ScheduleEffect | OwnEffect)[] = [];
+
+    // AIO-379: effects already run by an awaited send (or a previous settle) —
+    // settle()/runEffects() skip these so nothing executes twice.
+    const executed = new WeakSet<object>();
+    const prefix = f.__aio.id;
+    const execType = `${prefix}:__exec`;
+    const asyncMethods: Set<string> = f.__aio.asyncMethods ?? new Set();
 
     const app = {
       dispatch,
@@ -85,16 +106,66 @@ export function testCell<
       lastEffects = result.effects;
     }
 
+    /** Execute an async-method trigger effect and return a promise that
+     *  resolves when the method (and its batched writes) completed. */
+    function runExec(eff: Msg): Promise<void> {
+      executed.add(eff);
+      const payload = eff.payload as Record<string, unknown>;
+      const callId = (payload._callId as string | undefined) ??
+        (payload._callId = crypto.randomUUID()) as string;
+      const done = registerCall(callId);
+      done.catch(() => {}); // mark handled — fire-and-forget callers must not surface unhandled rejections
+      composed.execute(app, eff as { type: string; payload: unknown });
+      // Propagate rejection to awaiters — matches production `await cell.method()`.
+      return done.then(() => {});
+    }
+
+    async function drainMicrotasks(): Promise<void> {
+      for (let i = 0; i < 10; i++) await Promise.resolve();
+    }
+
     // Build send proxy from action creators (cast to typed form — runtime matches compile-time shape)
     const send = {} as TestContext<S, Catalog<N, A>>["send"];
     for (const key of f.__aio.actionKeys) {
       const creator = (f.__aio.actions as Record<string, unknown>)[key];
-      if (typeof creator === "function") {
-        // deno-lint-ignore no-explicit-any
-        (send as Record<string, (...args: any[]) => void>)[key] = (
-          ...args: unknown[]
-        ) => dispatch((creator as (...a: unknown[]) => Msg)(...args));
-      }
+      if (typeof creator !== "function") continue;
+      // deno-lint-ignore no-explicit-any
+      (send as Record<string, (...args: any[]) => Promise<void>>)[key] = (
+        ...args: unknown[]
+      ) => {
+        const msg = (creator as (...a: unknown[]) => Msg)(...args);
+        if (!asyncMethods.has(key)) {
+          dispatch(msg);
+          return Promise.resolve();
+        }
+        // Async method: tag the dispatch with a callId so completion is
+        // observable, and capture this send's own trigger effects.
+        const callId = crypto.randomUUID();
+        (msg.payload as Record<string, unknown>)._callId = callId;
+        dispatch(msg);
+        const myExecs = lastEffects.filter((e): e is Msg =>
+          (e as Msg).type === execType &&
+          ((e as Msg).payload as Record<string, unknown>)?._callId === callId
+        );
+        // Lazy completion: dispatching stays synchronous (legacy tests see the
+        // exact old behavior — no timers, no executor runs). Awaiting the
+        // promise executes the trigger and resolves on real method completion.
+        let started: Promise<void> | null = null;
+        const start = (): Promise<void> => {
+          if (started) return started;
+          const pending = myExecs.filter((e) => !executed.has(e));
+          started = pending.length === 0
+            ? Promise.resolve() // machine-blocked, or already run via settle()
+            : Promise.all(pending.map(runExec)).then(drainMicrotasks);
+          return started;
+        };
+        return {
+          then: (onF, onR) => start().then(onF, onR),
+          catch: (onR) => start().catch(onR),
+          finally: (onC) => start().finally(onC),
+          [Symbol.toStringTag]: "Promise",
+        } as Promise<void>;
+      };
     }
 
     const ctx: TestContext<S, Catalog<N, A>> = {
@@ -158,19 +229,32 @@ export function testCell<
       },
       runEffects: () => {
         for (const eff of lastEffects) {
+          if (executed.has(eff)) continue;
+          executed.add(eff);
           composed.execute(app, eff as { type: string; payload: unknown });
         }
       },
       settle: async (ms?: number): Promise<void> => {
-        // Auto-run pending effects first (eliminates need to call runEffects separately)
+        // Auto-run pending effects first (eliminates need to call runEffects
+        // separately). AIO-379: async method triggers are awaited to real
+        // completion — settle() is deterministic regardless of how long the
+        // method takes. Each effect runs at most once across awaits/settles.
+        const completions: Promise<void>[] = [];
         for (const eff of lastEffects) {
-          composed.execute(app, eff as { type: string; payload: unknown });
+          if (executed.has(eff)) continue;
+          if ((eff as Msg).type === execType) {
+            completions.push(runExec(eff as Msg));
+          } else {
+            executed.add(eff);
+            composed.execute(app, eff as { type: string; payload: unknown });
+          }
         }
-        // Wait for async to complete — timer if ms given, otherwise drain microtasks
+        if (completions.length > 0) await Promise.allSettled(completions);
+        // Timer wait if ms given (for real setTimeout chains), else drain microtasks
         if (ms !== undefined) {
           await new Promise((resolve) => setTimeout(resolve, ms));
         } else {
-          for (let i = 0; i < 10; i++) await Promise.resolve();
+          await drainMicrotasks();
         }
       },
     };

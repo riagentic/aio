@@ -17,8 +17,11 @@ export function validateMachine(
     errors.push(`machine.initial '${machine.initial}' not in declared states`);
   }
 
-  // Validate transitions + dead-end detection in one pass
+  // Validate transitions + dead-end detection in one pass.
+  // AIO-380: function targets are resolved at dispatch time — their target
+  // can't be checked statically (the runtime guards against invalid returns).
   const warnings: string[] = [];
+  let hasFnTargets = false;
   for (const [stateName, stateConfig] of Object.entries(machine.states)) {
     const transitions = stateConfig;
     if (Object.keys(transitions).length === 0) {
@@ -27,7 +30,9 @@ export function validateMachine(
       );
     }
     for (const [key, target] of Object.entries(transitions)) {
-      if (!stateNames.has(target)) {
+      if (typeof target === "function") {
+        hasFnTargets = true;
+      } else if (!stateNames.has(target)) {
         errors.push(
           `state '${stateName}' → unknown target '${target}' on '${key}'`,
         );
@@ -38,24 +43,28 @@ export function validateMachine(
     }
   }
 
-  // Reachability: BFS from initial, then flag unreachable states
-  const reachable = new Set<string>([machine.initial]);
-  let changed = true;
-  while (changed) {
-    changed = false;
-    for (const [sn, sc] of Object.entries(machine.states)) {
-      if (!reachable.has(sn)) continue;
-      for (const t of Object.values(sc)) {
-        if (!reachable.has(t)) {
-          reachable.add(t);
-          changed = true;
+  // Reachability: BFS from initial, then flag unreachable states.
+  // Function targets may reach any state — skip the check when present.
+  if (!hasFnTargets) {
+    const reachable = new Set<string>([machine.initial]);
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (const [sn, sc] of Object.entries(machine.states)) {
+        if (!reachable.has(sn)) continue;
+        for (const t of Object.values(sc)) {
+          if (typeof t !== "string") continue;
+          if (!reachable.has(t)) {
+            reachable.add(t);
+            changed = true;
+          }
         }
       }
     }
-  }
-  for (const sn of stateNames) {
-    if (!reachable.has(sn)) {
-      errors.push(`state '${sn}' unreachable from '${machine.initial}'`);
+    for (const sn of stateNames) {
+      if (!reachable.has(sn)) {
+        errors.push(`state '${sn}' unreachable from '${machine.initial}'`);
+      }
     }
   }
 

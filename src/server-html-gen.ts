@@ -43,6 +43,7 @@ export function generateHTML(
   width?: number,
   height?: number,
   renderBudget?: RenderBudget,
+  uiEntry = "App.tsx", // AIO-8.1: convention default, override via ui.entry
 ): string {
   const head = headContent(
     title,
@@ -54,7 +55,7 @@ export function generateHTML(
   );
 
   if (prod) return prodHTML(head);
-  return aioDevHTML(head, importMap);
+  return aioDevHTML(head, importMap, uiEntry);
 }
 
 /** Prod: app.js bundles React + useAio + user code, exports mount() */
@@ -75,7 +76,7 @@ ${head}
 }
 
 /** Dev (AIO renderer): native VDOM — no React/ReactDOM, signal-driven re-render */
-function aioDevHTML(head: string, importMap: string): string {
+function aioDevHTML(head: string, importMap: string, uiEntry = "App.tsx"): string {
   return `<!DOCTYPE html>
 <html>
 <head>
@@ -88,7 +89,7 @@ ${head}
 
     // Mount AIO app — bind cells reactively, wait for server state, then render
     const _aioMod = await import('aio')
-    const _appMod = await import('/App.tsx?v=' + Date.now())
+    const _appMod = await import('/${uiEntry}?v=' + Date.now())
     const App = _appMod.default
     if (_aioMod.ensureConnected) _aioMod.ensureConnected()
     if (_aioMod._waitForState) {

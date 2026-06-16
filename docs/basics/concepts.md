@@ -110,17 +110,33 @@ The `s` is scoped to the cell -- use `s.count`, not `s.counter.count`.
 
 ### Selectors with cross-cell dependencies
 
+Use the **deps form** to read other cells' slices. The plain form
+(`(s) => ...`) only sees the cell's own slice.
+
 ```ts
+const counter = cell("counter", { state: { count: 0 }, /* ... */ });
+const wallet = cell("wallet", { state: { balance: 0 }, /* ... */ });
+
 const dashboard = cell("dashboard", {
-  state: { summary: "" },
+  state: { theme: "dark" },
   selectors: {
-    summary(s, counter, wallet) {
-      return `Count: ${counter.count}, Balance: ${wallet.balance}`;
+    summary: {
+      // List the cell names you want to read. The order is the order
+      // of the extra arguments to fn.
+      deps: ["counter", "wallet"],
+      fn: (s, counter, wallet) =>
+        `Count: ${counter.count}, Balance: ${wallet.balance}, theme=${s.theme}`,
     },
   },
 });
-// Parameter names match cell names -- auto-injected after aio.run()
 ```
+
+Dep names are validated at `aio.run()` (composition time). An unknown dep
+throws a clear error like `[dashboard] selector 'summary' depends on unknown
+cell 'walet' — known cells: counter, wallet`.
+
+> The selector's first argument is always the cell's **own** slice. The
+> remaining arguments are the dep cells' current slices in `deps` order.
 
 ---
 
@@ -199,7 +215,10 @@ Mandatory rules for correct AIO framework usage.
 no loose state, no ad-hoc logic outside cells.
 
 **AIO2** State MUST only be mutated inside methods (sync/async) or reduce
-handlers -- never directly from outside.
+handlers — never directly from outside. In dev, cell signal values are
+deep-frozen so a stray `cell.x = …` from a component throws
+`TypeError: Cannot assign to read only property` and a dev hint
+explains the rule.
 
 **AIO3** Single entry point: `aio.run({ appId, cells: [...] })` -- no manual
 store creation, no manual server setup.
@@ -210,8 +229,10 @@ store creation, no manual server setup.
 **AIO5** Cross-cell communication MUST use direct method calls or `listensTo` --
 never raw dispatch with string action types.
 
-**AIO6** All bound cell methods return Promise -- use `await` for
-synchronization outside of sync methods.
+**AIO6** All bound cell methods return a Promise — sync methods resolve with
+`void` once the dispatch is applied, async methods resolve with the return
+value. Use `await` to read state after the change is applied. Unawaited calls
+are fire-and-forget.
 
 **AIO7** Sync methods (reducers) MUST NOT contain side effects -- only state
 mutations and fire-and-forget dispatches. No fetch, file I/O, or timers in sync

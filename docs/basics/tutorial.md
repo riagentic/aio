@@ -168,7 +168,7 @@ cancels a running generator when a specified action dispatches.
 
 ## 6. Persistence and UI Visibility
 
-Both `persist` and `ui` accept: `"all"`, `"none"` (default),
+Both `persist` and `ui` accept: `"all"` (default), `"none"`,
 `{ include: [...] }`, or `{ exclude: [...] }`. Set app-wide defaults with
 `cellDefaults`.
 

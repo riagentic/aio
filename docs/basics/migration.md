@@ -254,3 +254,21 @@ Remove `--allow-ffi` from run/compile commands. Any `execute` handler calling
 - [ ] `src/App.tsx` -- `export default` component using direct cell access
 - [ ] `src/app.ts` -- entry point calling `aio.run({ cells: [...] })`
 - [ ] `deno task dev` runs and startup checks pass
+
+## Migrating from React
+
+During migration, React's hooks are available from the compat entry — each logs
+a one-time dev hint pointing at the AIR-native equivalent:
+
+```ts
+import { useEffect, useState } from "aio/air/compat";
+```
+
+| React | AIR native |
+| ----- | ---------- |
+| `useState` | `useLocal()` for object state, `signal()` for module-scoped |
+| `useEffect` | `onMount()` for setup/teardown, `effect()` for reactive |
+| `useMemo` | `computed()` |
+| `useCallback` | unnecessary — components are auto-optimized |
+
+The re-exports on `aio/air` are deprecated and will be removed post-1.0.

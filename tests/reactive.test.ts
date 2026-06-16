@@ -53,11 +53,11 @@ Deno.test("cell(methods): sync method mutates state", () => {
   });
 
   // Cell identity verified via action type prefix (public API)
-  assertEquals(counter.increment!.type, "counter:increment");
+  assertEquals((counter.__aio.actions as unknown as Record<string, any>).increment.type, "counter:increment");
 
   const composed = composeCells([counter]);
   let state = composed.initialState;
-  state = composed.reduce(state, counter.increment!(5)).state;
+  state = composed.reduce(state, (counter.__aio.actions as unknown as Record<string, any>).increment(5)).state;
   assertEquals((state.counter as { count: number }).count, 5);
 });
 
@@ -76,10 +76,10 @@ Deno.test("cell(methods): multiple sync mutations in sequence", () => {
 
   const composed = composeCells([counter]);
   let state = composed.initialState;
-  state = composed.reduce(state, counter.increment!(3)).state;
-  state = composed.reduce(state, counter.increment!(7)).state;
+  state = composed.reduce(state, (counter.__aio.actions as unknown as Record<string, any>).increment(3)).state;
+  state = composed.reduce(state, (counter.__aio.actions as unknown as Record<string, any>).increment(7)).state;
   assertEquals((state.counter as { count: number }).count, 10);
-  state = composed.reduce(state, counter.reset!()).state;
+  state = composed.reduce(state, (counter.__aio.actions as unknown as Record<string, any>).reset()).state;
   assertEquals((state.counter as { count: number }).count, 0);
 });
 
@@ -96,10 +96,10 @@ Deno.test("cell(methods): generates correct action types", () => {
     },
   });
 
-  assertEquals(cart.addItem!.type, "cart:addItem");
-  assertEquals(cart.clear!.type, "cart:clear");
+  assertEquals((cart.__aio.actions as unknown as Record<string, any>).addItem.type, "cart:addItem");
+  assertEquals((cart.__aio.actions as unknown as Record<string, any>).clear.type, "cart:clear");
 
-  const action = cart.addItem!("book");
+  const action = (cart.__aio.actions as unknown as Record<string, any>).addItem("book");
   assertEquals(action.type, "cart:addItem");
   assertEquals(action.payload, { args: ["book"] });
 });
@@ -119,7 +119,7 @@ Deno.test("cell(methods): nested object mutation", () => {
 
   const composed = composeCells([app]);
   let state = composed.initialState;
-  state = composed.reduce(state, app.setTheme!("dark")).state;
+  state = composed.reduce(state, (app.__aio.actions as unknown as Record<string, any>).setTheme("dark")).state;
   assertEquals((state.app as any).user.settings.theme, "dark");
 });
 
@@ -141,13 +141,13 @@ Deno.test("cell(methods): array mutations via sync methods", () => {
 
   const composed = composeCells([list]);
   let state = composed.initialState;
-  state = composed.reduce(state, list.add!("a")).state;
-  state = composed.reduce(state, list.add!("b")).state;
-  state = composed.reduce(state, list.add!("c")).state;
+  state = composed.reduce(state, (list.__aio.actions as unknown as Record<string, any>).add("a")).state;
+  state = composed.reduce(state, (list.__aio.actions as unknown as Record<string, any>).add("b")).state;
+  state = composed.reduce(state, (list.__aio.actions as unknown as Record<string, any>).add("c")).state;
   assertEquals((state.list as any).items, ["a", "b", "c"]);
-  state = composed.reduce(state, list.remove!(1)).state;
+  state = composed.reduce(state, (list.__aio.actions as unknown as Record<string, any>).remove(1)).state;
   assertEquals((state.list as any).items, ["a", "c"]);
-  state = composed.reduce(state, list.clear!()).state;
+  state = composed.reduce(state, (list.__aio.actions as unknown as Record<string, any>).clear()).state;
   assertEquals((state.list as any).items, []);
 });
 
@@ -165,7 +165,10 @@ Deno.test("cell(methods): async method emits __exec effect", () => {
   });
 
   const composed = composeCells([loader]);
-  const result = composed.reduce(composed.initialState, loader.load!() as any);
+  const result = composed.reduce(
+    composed.initialState,
+    (loader.__aio.actions as unknown as Record<string, any>).load() as any,
+  );
   assertEquals(result.effects.length, 1);
   assertEquals((result.effects[0] as any).type, "loader:__exec");
 });
@@ -189,7 +192,7 @@ Deno.test("cell(methods): async method with live Proxy writes state", async () =
   const composed = composeCells([loader]);
   const app = createApp(composed);
 
-  app.dispatch(loader.fetchData!() as any);
+  app.dispatch((loader.__aio.actions as unknown as Record<string, any>).fetchData() as any);
   await delay(50);
 
   assertEquals((app.state.loader as any).data, "hello world");
@@ -215,7 +218,7 @@ Deno.test("cell(methods): async method reads fresh state", async () => {
   const composed = composeCells([store]);
   const app = createApp(composed);
 
-  app.dispatch(store.compute!() as any);
+  app.dispatch((store.__aio.actions as unknown as Record<string, any>).compute() as any);
   await delay(50);
 
   assertEquals((app.state.store as any).value, 42);
@@ -236,7 +239,7 @@ Deno.test("cell(methods): async array mutation via Proxy", async () => {
   const composed = composeCells([list]);
   const app = createApp(composed);
 
-  app.dispatch(list.addAsync!("b") as any);
+  app.dispatch((list.__aio.actions as unknown as Record<string, any>).addAsync("b") as any);
   await delay(50);
 
   assertEquals((app.state.list as any).items, ["a", "b"]);
@@ -260,7 +263,7 @@ Deno.test("cell(methods): async consecutive writes are batched into one action",
   const composed = composeCells([counter]);
   const app = createApp(composed);
 
-  app.dispatch(counter.setAll!() as any);
+  app.dispatch((counter.__aio.actions as unknown as Record<string, any>).setAll() as any);
   await delay(50);
 
   assertEquals((app.state.counter as any).a, 1);
@@ -287,7 +290,7 @@ Deno.test("cell(methods): writes separated by await produce separate batches", a
   const composed = composeCells([counter]);
   const app = createApp(composed);
 
-  app.dispatch(counter.staggered!() as any);
+  app.dispatch((counter.__aio.actions as unknown as Record<string, any>).staggered() as any);
   await delay(50);
 
   assertEquals((app.state.counter as any).a, 1);
@@ -323,16 +326,16 @@ Deno.test("cell(methods): machine guards on sync methods", () => {
   const composed = composeCells([door]);
   let state = composed.initialState;
 
-  state = composed.reduce(state, door.open!()).state;
+  state = composed.reduce(state, (door.__aio.actions as unknown as Record<string, any>).open()).state;
   assertEquals((state.door as any).opened, true);
   assertEquals((state.door as any).__aio_status, "open");
 
   // Can't open again
   const before = state;
-  state = composed.reduce(state, door.open!()).state;
+  state = composed.reduce(state, (door.__aio.actions as unknown as Record<string, any>).open()).state;
   assertEquals(state, before);
 
-  state = composed.reduce(state, door.close!()).state;
+  state = composed.reduce(state, (door.__aio.actions as unknown as Record<string, any>).close()).state;
   assertEquals((state.door as any).opened, false);
   assertEquals((state.door as any).__aio_status, "closed");
 });
@@ -362,7 +365,7 @@ Deno.test("cell(methods): async Proxy writes gated by machine", async () => {
   const app = createApp(composed);
 
   // Trigger load from idle
-  app.dispatch(fetcher.load!() as any);
+  app.dispatch((fetcher.__aio.actions as unknown as Record<string, any>).load() as any);
   await delay(50);
 
   assertEquals((app.state.fetcher as any).data, "result");
@@ -392,13 +395,13 @@ Deno.test("cell(methods): async writes blocked when method not in current machin
   const app = createApp(composed);
 
   // Try to write while locked → should be blocked (write not in locked.on)
-  app.dispatch(gate.write!() as any);
+  app.dispatch((gate.__aio.actions as unknown as Record<string, any>).write() as any);
   await delay(50);
   assertEquals((app.state.gate as any).value, "initial"); // unchanged
 
   // Unlock, then write → should work
-  app.dispatch(gate.unlock!());
-  app.dispatch(gate.write!() as any);
+  app.dispatch((gate.__aio.actions as unknown as Record<string, any>).unlock());
+  app.dispatch((gate.__aio.actions as unknown as Record<string, any>).write() as any);
   await delay(50);
   assertEquals((app.state.gate as any).value, "written");
 });
@@ -441,8 +444,8 @@ Deno.test("cell(methods): coexists with cell(actions) in composeCells", () => {
 
   const composed = composeCells([counter, logger]);
   let state = composed.initialState;
-  state = composed.reduce(state, counter.increment!()).state;
-  state = composed.reduce(state, logger.log!("hello")).state;
+  state = composed.reduce(state, (counter.__aio.actions as unknown as Record<string, any>).increment()).state;
+  state = composed.reduce(state, (logger.__aio.actions as unknown as Record<string, any>).log("hello")).state;
 
   assertEquals((state.counter as any).count, 1);
   assertEquals((state.logger as any).logs, ["hello"]);
@@ -476,7 +479,7 @@ Deno.test("cell(methods): foreign action listeners", () => {
 
   const composed = composeCells([counter, watcher]);
   let state = composed.initialState;
-  state = composed.reduce(state, counter.increment!()).state;
+  state = composed.reduce(state, (counter.__aio.actions as unknown as Record<string, any>).increment()).state;
   assertEquals((state.watcher as any).lastSeen, "increment");
 });
 
@@ -545,13 +548,13 @@ Deno.test("cell(methods): action creators flattened onto cell def", () => {
   });
 
   // Flattened creators
-  const action = (counter as any).increment(5);
+  const action = (counter.__aio.actions as unknown as Record<string, any>).increment(5);
   assertEquals(action.type, "counter:increment");
   assertEquals(action.payload, { args: [5] });
 
   // _actions catalog works (creators only, no PascalCase labels)
-  assertEquals(counter.increment!.type, "counter:increment");
-  assertEquals(counter.increment!(3).type, "counter:increment");
+  assertEquals((counter.__aio.actions as unknown as Record<string, any>).increment.type, "counter:increment");
+  assertEquals((counter.__aio.actions as unknown as Record<string, any>).increment(3).type, "counter:increment");
 });
 
 Deno.test("cell(methods): bindCell enables direct dispatch and selectors", () => {
@@ -571,7 +574,7 @@ Deno.test("cell(methods): bindCell enables direct dispatch and selectors", () =>
   const app = createApp(composed);
 
   // Before binding, flattened creator returns action object
-  const action = (counter as any).increment(5);
+  const action = (counter.__aio.actions as unknown as Record<string, any>).increment(5);
   assertEquals(action.type, "counter:increment");
 
   // Bind to app
@@ -725,7 +728,7 @@ Deno.test("cell(methods): sync method returns schedule effect", () => {
 
   const composed = composeCells([timer]);
   let state = composed.initialState;
-  const result = composed.reduce(state, timer.start!());
+  const result = composed.reduce(state, (timer.__aio.actions as unknown as Record<string, any>).start());
   state = result.state;
 
   assertEquals((state.timer as any).count, 1);
@@ -749,7 +752,10 @@ Deno.test("cell(methods): sync method returns array of schedule effects", () => 
   });
 
   const composed = composeCells([multi]);
-  const result = composed.reduce(composed.initialState, multi.setup!());
+  const result = composed.reduce(
+    composed.initialState,
+    (multi.__aio.actions as unknown as Record<string, any>).setup(),
+  );
   assertEquals(result.effects.length, 2);
 });
 
@@ -785,7 +791,7 @@ Deno.test("cell(methods): listensTo auto-generates machine for foreign listeners
 
   // Integration: watcher receives counter's actions
   let state = composed.initialState;
-  state = composed.reduce(state, counter.increment!()).state;
+  state = composed.reduce(state, (counter.__aio.actions as unknown as Record<string, any>).increment()).state;
   // Foreign action routed to watcher's reducer
   assertEquals((state.watcher as any).seen, 0); // foreign actions don't auto-call methods — they're machine transitions
 });
@@ -816,7 +822,10 @@ Deno.test("cell(methods): listensTo ignored when explicit machine provided", () 
   });
   const composed = composeCells([f, other]);
   // Dispatch other:action — f should NOT receive it (not in its machine)
-  const r = composed.reduce(composed.initialState, other.action!());
+  const r = composed.reduce(
+    composed.initialState,
+    (other.__aio.actions as unknown as Record<string, any>).action(),
+  );
   assertEquals((r.state.test as { v: number }).v, 0); // unchanged
 });
 

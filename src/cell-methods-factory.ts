@@ -13,7 +13,7 @@ import type {
 } from "./cell-types.ts";
 import { checkReservedKeys, RESERVED_KEYS } from "./cell-types.ts";
 import { normalizeSyncConfig } from "./sync/types.ts";
-import { buildCatalog } from "./cell-catalog.ts";
+import { buildCatalog, makeUnboundGuard } from "./cell-catalog.ts";
 import { validateMachine } from "./cell-machine.ts";
 import type { GeneratorEntry, MethodsCellConfig } from "./cell-config-types.ts";
 import {
@@ -101,6 +101,22 @@ export function createCellFromMethods<
     allNames.set(n, "effect");
   }
 
+  // AIO-6.1: a state key colliding with any callable is a definition-time error —
+  // the callable wins on the cell object, so `cell.key` in a component would return
+  // the function and the state would be silently unreachable (violates AIO4).
+  for (const stateKey of Object.keys(config.state ?? {})) {
+    const kind = allNames.get(stateKey);
+    if (kind) {
+      throw new Error(
+        `[cell:${name}] state key '${stateKey}' collides with ${kind} '${stateKey}' — ` +
+          `reading ${name}.${stateKey} in a component would return the function, ` +
+          `not the state. Rename one (e.g. state key 'last${
+            stateKey.charAt(0).toUpperCase() + stateKey.slice(1)
+          }').`,
+      );
+    }
+  }
+
   // Classify methods as sync or async (uses isAsyncFunction — symbol-based, minification-safe)
   const { syncMethods, asyncMethods } = classifyMethods(
     methods as CellMethods<Record<string, unknown>>,
@@ -138,6 +154,8 @@ export function createCellFromMethods<
       _method,
       error,
     });
+    // AIO-381: bridge action for schedule effects returned by async methods
+    actionCreators["__effects"] = (effects: unknown[]) => ({ effects });
   }
 
   const { typeToKey: actionTypeToKey } = buildCatalog(prefix, actionCreators);
@@ -175,7 +193,7 @@ export function createCellFromMethods<
     ...explicitActionNames,
     ...[...asyncMethods].map((k) => setKey(k)),
   ];
-  if (asyncMethods.size > 0) allActionKeys.push("__error");
+  if (asyncMethods.size > 0) allActionKeys.push("__error", "__effects");
 
   // Validate machine if provided
   if (machine !== false) {
@@ -217,13 +235,17 @@ export function createCellFromMethods<
   // Assemble internals — mirrored in cell-actions-factory.ts (CellAio type enforces field consistency)
   const internals: Omit<
     CellAio,
-    "actions" | "effects" | "selectors" | "bound"
+    | "actions"
+    | "effects"
+    | "selectors"
+    | "bound"
+    | "selectorDeps"
   > = {
     state: config.state as Record<string, unknown>,
     machine,
     reduce,
     execute,
-    actionKeys: allActionKeys,
+    actionKeys: [...new Set(allActionKeys)],
     effectKeys,
     id: prefix,
     actionTypeToKey,
@@ -232,9 +254,10 @@ export function createCellFromMethods<
     destroyType: `${prefix}:__destroy`,
     onInit: config.onInit as ((app: ScopedApp) => void) | undefined,
     onDestroy: config.onDestroy as ((app: ScopedApp) => void) | undefined,
-    methods: methods as CellMethods<Record<string, unknown>>,
-    syncMethods,
+    scope: "server",
     asyncMethods,
+    // Mirrors cell-actions-factory.ts — dropping these here silently disables
+    // persist/ui filters, flows, validation and migrations for methods-style cells.
     flows: Object.keys(flows).length > 0 ? flows : undefined,
     flowTriggers: flowTriggers.size > 0 ? flowTriggers : undefined,
     validate: config.validate,
@@ -252,6 +275,13 @@ export function createCellFromMethods<
   };
 
   const selectors = scopeSelectors(name, config.selectors);
+  const selectorDeps: Record<string, readonly string[]> = {};
+  if (config.selectors) {
+    for (const [key, def] of Object.entries(config.selectors)) {
+      if (typeof def === "function") continue;
+      selectorDeps[key] = def.deps;
+    }
+  }
 
   // Build public catalog — methods + generators (args-style) + explicit actions (custom payload)
   const publicCatalog: Record<string, unknown> = {};
@@ -280,6 +310,7 @@ export function createCellFromMethods<
     __aio: {
       ...internals,
       selectors,
+      selectorDeps,
       actions: publicCatalog,
       effects: eCatalog,
       bound: false,
@@ -303,7 +334,7 @@ export function createCellFromMethods<
         `[${name}] method '${key}' collides with selector of same name`,
       );
     }
-    def[key] = value;
+    def[key] = makeUnboundGuard(name, key, value);
   }
 
   return def as unknown as

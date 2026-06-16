@@ -1,6 +1,7 @@
 // cell-compose-types.ts — shared types for the compose pipeline
 
 import type { ScheduleEffect } from "./schedule.ts";
+import type { OwnEffect } from "./own.ts";
 import type { ReduceBreakdown } from "./time-travel.ts";
 import type { CellDef, Msg } from "./cell-types.ts";
 
@@ -20,7 +21,7 @@ export type ComposedCells = {
   reduce: (
     state: Record<string, unknown>,
     action: Msg,
-  ) => { state: Record<string, unknown>; effects: (Msg | ScheduleEffect)[] };
+  ) => { state: Record<string, unknown>; effects: (Msg | ScheduleEffect | OwnEffect)[] };
   execute: (
     app: { dispatch: (a: Msg) => void; getState: () => unknown },
     effect: Msg,

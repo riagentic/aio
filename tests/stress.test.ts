@@ -94,7 +94,7 @@ Deno.test("stress: 10k rapid increments — state is consistent", () => {
   const N = 10_000;
 
   for (let i = 0; i < N; i++) {
-    app.dispatch(counter.increment(1));
+    app.dispatch(counter.__aio.actions.increment(1));
   }
 
   const s = app.getState().counter as { count: number };
@@ -107,8 +107,8 @@ Deno.test("stress: alternating increment/decrement — net zero", () => {
   const N = 5_000;
 
   for (let i = 0; i < N; i++) {
-    app.dispatch(counter.increment(3));
-    app.dispatch(counter.decrement(3));
+    app.dispatch(counter.__aio.actions.increment(3));
+    app.dispatch(counter.__aio.actions.decrement(3));
   }
 
   const s = app.getState().counter as { count: number };
@@ -121,10 +121,10 @@ Deno.test("stress: multi-cell rapid dispatch — all slices correct", () => {
   const N = 3_000;
 
   for (let i = 0; i < N; i++) {
-    app.dispatch(counter.increment(1));
-    app.dispatch(multiSlice.incA());
-    app.dispatch(multiSlice.incB());
-    app.dispatch(multiSlice.incC());
+    app.dispatch(counter.__aio.actions.increment(1));
+    app.dispatch(multiSlice.__aio.actions.incA());
+    app.dispatch(multiSlice.__aio.actions.incB());
+    app.dispatch(multiSlice.__aio.actions.incC());
   }
 
   const c = app.getState().counter as { count: number };
@@ -141,7 +141,7 @@ Deno.test("stress: throughput — at least 5k actions/sec", () => {
 
   const start = performance.now();
   for (let i = 0; i < N; i++) {
-    app.dispatch(counter.increment(1));
+    app.dispatch(counter.__aio.actions.increment(1));
   }
   const elapsed = performance.now() - start;
   const opsPerSec = Math.round(N / (elapsed / 1000));
@@ -165,7 +165,7 @@ Deno.test("stress: array append under load — bounded and consistent", () => {
   const N = 2_000;
 
   for (let i = 0; i < N; i++) {
-    app.dispatch(multiSlice.append(i));
+    app.dispatch(multiSlice.__aio.actions.append(i));
   }
 
   const m = app.getState().multi as { log: number[] };
@@ -179,9 +179,9 @@ Deno.test("stress: array append under load — bounded and consistent", () => {
 Deno.test("stress: reset mid-stream doesn't corrupt state", () => {
   const app = createTestApp([counter]);
 
-  for (let i = 0; i < 1000; i++) app.dispatch(counter.increment(1));
-  app.dispatch(counter.reset());
-  for (let i = 0; i < 500; i++) app.dispatch(counter.increment(2));
+  for (let i = 0; i < 1000; i++) app.dispatch(counter.__aio.actions.increment(1));
+  app.dispatch(counter.__aio.actions.reset());
+  for (let i = 0; i < 500; i++) app.dispatch(counter.__aio.actions.increment(2));
 
   const s = app.getState().counter as { count: number };
   assertEquals(s.count, 1000);
@@ -214,7 +214,7 @@ Deno.test({
   // Fire N generators — each one replaces the previous (same flow key)
   // Only the last one should complete since flows auto-cancel previous instances
   for (let i = 0; i < N; i++) {
-    app.dispatch(flowCounter.start(i));
+    app.dispatch(flowCounter.__aio.actions.start(i));
   }
 
   await new Promise((r) => setTimeout(r, 500));
@@ -234,7 +234,7 @@ Deno.test("stress: state reads during rapid dispatch are consistent", () => {
   const app = createTestApp([counter]);
 
   for (let i = 0; i < 5_000; i++) {
-    app.dispatch(counter.increment(1));
+    app.dispatch(counter.__aio.actions.increment(1));
     const s = app.getState().counter as { count: number };
     assertEquals(s.count, i + 1, `state inconsistent at iteration ${i}`);
   }
@@ -259,7 +259,7 @@ Deno.test("stress: large payloads don't break dispatch", () => {
   const big = "x".repeat(100_000); // 100KB string
 
   for (let i = 0; i < 50; i++) {
-    app.dispatch(bigPayload.store(big));
+    app.dispatch(bigPayload.__aio.actions.store(big));
   }
 
   const s = app.getState().bigPayload as { size: number };

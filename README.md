@@ -58,6 +58,7 @@ const counter = cell("counter", {
 
 await aio.run({ appId: "taste", appVersion: "0.1.0", cells: [counter] });
 // State persists across restarts. WebSocket sync included. 10 lines.
+// (both default on — see docs/state/cell-visibility.md to narrow per cell)
 ```
 
 ```sh

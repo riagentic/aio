@@ -1192,3 +1192,33 @@ Deno.test("db: _inTransaction flag resets even when callback transaction fails",
   Deno.removeSync(path);
   Deno.removeSync(dir);
 });
+
+Deno.test("db: lastWriterError captures swallowed write error", async () => {
+  const path = tmpDb();
+  const db = createDB(path);
+
+  // Cause a write failure — execute() returns a rejected promise from the worker
+  const err = await assertRejects(() =>
+    db.execute("INSERT INTO not_a_table VALUES (1)")
+  );
+  assertEquals(err instanceof Error, true);
+
+  // lastWriterError should surface the swallowed error
+  const stored = db.lastWriterError?.() ?? null;
+  assertEquals(stored instanceof Error, true);
+  assertEquals(stored!.message.includes("not_a_table"), true);
+
+  await db.close();
+  Deno.removeSync(path);
+
+  // lastWriterError should reset after successful write
+  const path2 = tmpDb();
+  const db2 = createDB(path2);
+  await db2.execute("CREATE TABLE ok (id INT)");
+  const ok = await db2.execute("INSERT INTO ok VALUES (1)");
+  assertEquals(ok.changes, 1);
+  assertEquals(db2.lastWriterError!(), null);
+
+  await db2.close();
+  Deno.removeSync(path2);
+});

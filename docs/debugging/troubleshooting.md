@@ -116,6 +116,9 @@ UI shows old values. Data arrived on server but browser didn't update.
    `log/debug.log`. No diff = no change.
 5. **Reference issue?** Use direct cell access for scoped updates if component
    depends on parent object reference.
+6. **Visibility?** Check the `cells: <name> ui=… persist=…` line printed at
+   startup — is the field you expect actually exposed? See
+   [cell-visibility](../state/cell-visibility.md).
 
 ---
 

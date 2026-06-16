@@ -65,8 +65,8 @@ actions, effects, machine guards, reducer, and executor.
 | `machine`    | `MachineConfig \| false`              | No       | State machine guards. `false` or omit = no guards                                  |
 | `listensTo`  | `(Function \| string)[]`              | No       | Foreign actions to listen to — pass bound methods                                  |
 | `sync`       | `true \| SyncConfig`                  | No       | Enable CRDT sync — see [CRDT docs](../persistence/crdt.md)                         |
-| `persist`    | `CellFieldFilter`                     | No       | `"all"`, `"none"`, `{ include: [...] }`, `{ exclude: [...] }` — default `"none"`   |
-| `ui`         | `CellVisibility`                      | No       | Same as persist, plus optional `forUser` for per-user filtering — default `"none"` |
+| `persist`    | `CellFieldFilter`                     | No       | `"all"`, `"none"`, `{ include: [...] }`, `{ exclude: [...] }` — default `"all"`    |
+| `ui`         | `CellVisibility`                      | No       | Same as persist, plus optional `forUser` for per-user filtering — default `"all"`  |
 | `init`       | `(app) => void`                       | No       | Called when cell initializes                                                       |
 | `destroy`    | `(app) => void`                       | No       | Called when cell destroys                                                          |
 
@@ -136,6 +136,22 @@ type CounterState = StateOf<typeof counter>;
 
 ---
 
+## Shared vs per-client state
+
+Three tools, one decision: who needs to see the state?
+
+| Tool | Lives | Use when |
+|---|---|---|
+| shared cell (default, `scope: "server"`) | server store, synced to every client, persists | state is the app's truth: domain data, anything two clients or a restart must agree on |
+| client cell (`scope: "client"`) | one browser tab, signal-backed, sync methods only | UI state that outlives one component but belongs to one tab: filters, panel layout, draft inputs |
+| `useLocal` | one component instance | ephemeral interaction state: open/closed, hover, in-progress text |
+
+A `scope: "client"` cell never registers with the server store, never syncs, never
+persists to Deno.Kv. Methods run synchronously in the browser against the cell's
+signal; each tab has its own copy. Async methods, generators, actions, and machines
+throw at `cell()` time (v1 limitation) — do async work in the component, then call a
+sync method with the result.
+
 ## Internals by component
 
 ### Sync methods
@@ -204,34 +220,37 @@ from method signatures, so `increment(s, by: number)` becomes
 ## Naming rules
 
 State keys, methods, actions, effects, and selectors share the cell's namespace.
-Some collisions are fine, others are not.
+Every name must be unique — collisions throw at definition time.
 
-### Allowed — state key overlaps with method/action/effect/selector
+### Not allowed — a state key sharing a name with any callable
 
 ```ts
 const gateway = cell("gateway", {
   state: { error: null as string | null },
-  actions: { error: (msg: string) => ({ msg }) }, // ✅ OK
-  reduce: {
-    error(s, p) {
-      s.error = p.msg;
-    },
-  },
+  actions: { error: (msg: string) => ({ msg }) }, // ❌ throws at cell() time
+  reduce: { error(s, p) { s.error = p.msg; } },
+});
+// Error: [cell:gateway] state key 'error' collides with action 'error' —
+// reading gateway.error in a component would return the function, not the
+// state. Rename one (e.g. state key 'lastError').
+```
+
+The callable wins on the cell object, which makes the state silently
+unreachable from components — so this is a definition-time error. Rename the
+state key:
+
+```ts
+const gateway = cell("gateway", {
+  state: { lastError: null as string | null },
+  actions: { error: (msg: string) => ({ msg }) }, // ✅
+  reduce: { error(s, p) { s.lastError = p.msg; } },
 });
 ```
 
-The method/action always takes priority on the cell object. State is still
-readable through the signal (in components) or `getState()` (on server). This is
-common for patterns like `error` state + `error` action.
-
-### Not allowed — two behaviors with the same name
-
 | Collision                        | Allowed? | Reason                                  |
 | -------------------------------- | -------- | --------------------------------------- |
-| state ↔ method                   | ✅       | Method wins on cell, state via signal   |
-| state ↔ action                   | ✅       | Action wins on cell, state via signal   |
-| state ↔ effect                   | ✅       | Effect wins on cell, state via signal   |
-| state ↔ selector                 | ✅       | Selector wins on cell, state via signal |
+| state ↔ method/action/effect     | ❌       | Callable wins, state unreachable (AIO4) |
+| state ↔ selector                 | ❌       | Selector wins, state unreachable        |
 | method ↔ method                  | ❌       | Duplicate — which runs?                 |
 | method ↔ generator               | ❌       | Both dispatch, ambiguous                |
 | method ↔ action                  | ❌       | Both create `prefix:name` type          |
@@ -239,8 +258,8 @@ common for patterns like `error` state + `error` action.
 | action ↔ selector                | ❌       | Both flatten onto cell                  |
 | any ↔ `__aio`, `A`, `E`, `state` | ❌       | Reserved for framework                  |
 
-**Rule of thumb:** Two _behaviors_ (things that do something) can't share a
-name. A behavior and a _value_ (state key) can.
+**Rule of thumb:** every name in a cell — state key or behavior — must be
+unique. Collisions throw at `cell()` time with a rename suggestion.
 
 ## Troubleshooting
 

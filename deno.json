@@ -5,6 +5,7 @@
   "exports": {
     ".": "./mod.ts",
     "./air": "./src/air.ts",
+    "./air/compat": "./src/air-compat.ts",
     "./jsx-runtime": "./src/jsx-runtime.ts",
     "./adapters/air": "./src/adapters/air.ts",
     "./state-core": "./src/state-core.ts",
@@ -45,6 +46,7 @@
     "@std/testing": "jsr:@std/testing@1.0.17",
     "aio": "./mod.ts",
     "aio/air": "./src/air.ts",
+    "aio/air/compat": "./src/air-compat.ts",
     "aio/jsx-runtime": "./src/jsx-runtime.ts",
     "aio/db": "./src/db/mod.ts",
     "aio/sync": "./src/sync/mod.ts",

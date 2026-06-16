@@ -1,6 +1,7 @@
 // Entry point — define cell, wire to aio.run()
 import { aio, cell } from "aio";
 
+// persists by default — restart and count survives (persist: "all" is the default)
 export const counter = cell("counter", {
   state: { count: 0 },
   methods: {

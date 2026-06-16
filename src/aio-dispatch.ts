@@ -12,6 +12,7 @@ import {
 } from "./error.ts";
 import { record, type ReduceBreakdown, type TTState } from "./time-travel.ts";
 import { isScheduleEffect, type ScheduleEffect } from "./schedule.ts";
+import { isOwnEffect, type OwnEffect } from "./own.ts";
 import { diagEmit } from "./diagnostic-bus.ts";
 
 /** User identity — mirrors AioUser from aio.ts without circular import */
@@ -27,7 +28,7 @@ export type DispatchSetupDeps<S, A, E, App = any> = {
   reduce: (
     state: S,
     action: A,
-  ) => { state: S; effects: (E | ScheduleEffect)[] };
+  ) => { state: S; effects: (E | ScheduleEffect | OwnEffect)[] };
   execute: (app: App, effect: E) => void;
   beforeReduce?: (action: A, state: S, user?: User) => A | null;
   onAction?: (action: A, state: S, user?: User) => void;
@@ -42,6 +43,7 @@ export type DispatchSetupDeps<S, A, E, App = any> = {
     broadcastTT: () => void;
   };
   scheduleManager: { handle: (e: ScheduleEffect) => void };
+  ownManager: { handle: (e: OwnEffect) => void };
   schedulePersist: () => void;
   getTT: () => TTState<S, { type: string }> | null;
   setTT: (tt: TTState<S, { type: string }>) => void;
@@ -115,6 +117,7 @@ export function setupDispatch<S, A, E, App = any>(
     getApp,
     getServer,
     scheduleManager,
+    ownManager,
     schedulePersist,
     getTT,
     setTT,
@@ -204,7 +207,7 @@ export function setupDispatch<S, A, E, App = any>(
   let _pendingPatches: PatchEntry[] = [];
 
   function _collectPatches(
-    result: { state: S; effects: (E | ScheduleEffect)[] },
+    result: { state: S; effects: (E | ScheduleEffect | OwnEffect)[] },
   ): void {
     const patches =
       (result as unknown as { patches?: PatchEntry | PatchEntry[] }).patches;
@@ -249,6 +252,10 @@ export function setupDispatch<S, A, E, App = any>(
     execute: (effect) => {
       if (isScheduleEffect(effect)) {
         scheduleManager.handle(effect as ScheduleEffect);
+        return;
+      }
+      if (isOwnEffect(effect)) {
+        ownManager.handle(effect);
         return;
       }
       hookedExecute(getApp(), effect as E);

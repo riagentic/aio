@@ -7,6 +7,7 @@ import {
   getRegisteredCells,
 } from "../src/cell-reactive.ts";
 import { _resetSignals, getCellSignal } from "../src/state-signals.ts";
+import { _setAckTimeoutMs, _rejectAllPending, _resolveAck } from "../src/browser-ack.ts";
 
 // ── Registration ─────────────────────────────────────────────────────
 
@@ -16,24 +17,45 @@ Deno.test("cell() registers cell in registry", () => {
     state: { x: 1 },
     methods: { noop(_s: { x: number }) {} },
   });
-  assertEquals(getRegisteredCells().has(c), true);
+  assertEquals(getRegisteredCells().has(c.__aio.id), true);
+  _resetCellRegistry();
+});
+
+Deno.test("cell() replaces existing entry with same id (dedup)", () => {
+  _resetCellRegistry();
+  const c1 = cell("dedup", {
+    state: { x: 1 },
+    methods: { noop(_s: { x: number }) {} },
+  });
+  // Simulate HMR re-definition: same id, new object reference
+  const c2 = cell("dedup", {
+    state: { x: 2 },
+    methods: { noop(_s: { x: number }) {} },
+  });
+  assertEquals(getRegisteredCells().size, 1);
+  assertEquals(getRegisteredCells().get("dedup"), c2);
   _resetCellRegistry();
 });
 
 // ── State key / method overlap — method wins, no crash ───────────────
 
-Deno.test("cell() allows overlapping state key and method name", () => {
+Deno.test("AIO-6.1: cell() throws when a state key collides with a method name", () => {
   _resetCellRegistry();
-  const c = cell("overlap", {
-    state: { count: 0, increment: 0 },
-    methods: {
-      increment(s: { count: number; increment: number }) {
-        s.count++;
+  let caught: Error | null = null;
+  try {
+    cell("overlap", {
+      state: { count: 0, increment: 0 },
+      methods: {
+        increment(s: { count: number; increment: number }) {
+          s.count++;
+        },
       },
-    },
-  });
-  // Method wins — increment is a function, not a state getter
-  assertEquals(typeof c.increment, "function");
+    });
+  } catch (e) {
+    caught = e as Error;
+  }
+  assertEquals(caught instanceof Error, true);
+  assertEquals(caught!.message.includes("collides with method 'increment'"), true);
   _resetCellRegistry();
 });
 
@@ -172,10 +194,10 @@ Deno.test("bindCellReactive does not override methods", () => {
 
 // ── AIO-NEW-4: action methods dispatch via sendFn ────────────────────
 
-Deno.test("bindCellReactive wraps action methods with sendFn", () => {
+Deno.test("bindCellReactive wraps action methods with sendFn", async () => {
   _resetCellRegistry();
   _resetSignals();
-
+  _setAckTimeoutMs(0); // disable ack timer — no need for an actual ack
   const c = cell("dispatch", {
     state: { count: 0 },
     methods: {
@@ -185,24 +207,34 @@ Deno.test("bindCellReactive wraps action methods with sendFn", () => {
     },
   });
 
-  const dispatched: { type: string; payload?: unknown }[] = [];
-  const sendFn = (action: { type: string; payload?: unknown }) => {
+  const dispatched: { type: string; payload?: unknown; cid?: string }[] = [];
+  const sendFn = (
+    action: { type: string; payload?: unknown; cid?: string },
+  ) => {
     dispatched.push(action);
   };
 
   bindCellReactive(c, sendFn);
 
-  // Call the method — should dispatch, not return raw action object
+  // Call the method — should dispatch with a cid and return a Promise<void>.
   const result = c.increment(5);
-  assertEquals(result, undefined); // dispatch returns void, not action object
+  assertEquals(result instanceof Promise, true);
+  // The wrapper sends in a microtask — wait one tick to observe the dispatch.
+  await Promise.resolve();
   assertEquals(dispatched.length, 1);
   assertEquals(dispatched[0]!.type, "dispatch:increment");
+  assertEquals(typeof dispatched[0]!.cid, "string");
+  assertEquals((dispatched[0]!.cid as string).length > 0, true);
+  // Resolve the ack so the awaited promise settles.
+  _resolveAck(dispatched[0]!.cid!);
+  await result;
 
   _resetCellRegistry();
   _resetSignals();
+  _rejectAllPending(new Error("test reset"));
 });
 
-Deno.test("bindCellReactive without sendFn leaves action creators as-is", () => {
+Deno.test("bindCellReactive without sendFn leaves method as unbound guard", () => {
   _resetCellRegistry();
   _resetSignals();
 
@@ -215,13 +247,14 @@ Deno.test("bindCellReactive without sendFn leaves action creators as-is", () => 
     },
   });
 
-  // No sendFn — action creators should remain raw
+  // No sendFn — method is not wrapped, so calling it hits the unbound guard
   bindCellReactive(c);
 
+  // Prod mode (no __aioDev) — guard warns and returns Promise<void>
   const result = c.increment();
-  // Without sendFn, creator returns the action object
+  assertEquals(result instanceof Promise, true);
   // deno-lint-ignore no-explicit-any
-  assertEquals((result as any).type, "nodispatch:increment");
+  assertEquals(typeof (c.__aio.actions.increment as any).type, "string");
 
   _resetCellRegistry();
   _resetSignals();
@@ -229,21 +262,25 @@ Deno.test("bindCellReactive without sendFn leaves action creators as-is", () => 
 
 // ── Actions-based cell — overlapping state/action name ────────────────
 
-Deno.test("actions cell: allows overlapping state key and action name", () => {
+Deno.test("AIO-6.1: actions cell throws when a state key collides with an action name", () => {
   _resetCellRegistry();
-  const c = cell("actoverlap", {
-    state: { error: null as string | null },
-    actions: {
-      error: (msg: string) => ({ msg }),
-    },
-    reduce: {
-      error(s: { error: string | null }, p: { msg: string }) {
-        s.error = p.msg;
+  let caught: Error | null = null;
+  try {
+    cell("actoverlap", {
+      state: { error: null as string | null },
+      actions: {
+        error: (msg: string) => ({ msg }),
       },
-    },
-  });
-  // Action wins — error is a function on the cell
-  // deno-lint-ignore no-explicit-any
-  assertEquals(typeof (c as any).error, "function");
+      reduce: {
+        error(s: { error: string | null }, p: { msg: string }) {
+          s.error = p.msg;
+        },
+      },
+    });
+  } catch (e) {
+    caught = e as Error;
+  }
+  assertEquals(caught instanceof Error, true);
+  assertEquals(caught!.message.includes("collides with action 'error'"), true);
   _resetCellRegistry();
 });

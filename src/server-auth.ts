@@ -1,3 +1,5 @@
+const _encoder = new TextEncoder();
+
 // Authentication helpers — timing-safe comparison, token extraction, user resolution.
 // Extracted from server.ts — no side effects, pure functions.
 import type { AioUser } from "./aio.ts";
@@ -5,9 +7,8 @@ import type { AioUser } from "./aio.ts";
 // Constant-time string comparison — prevents timing attacks on token auth
 // Compares full length even on mismatch to avoid leaking token length
 export function _timingSafeEqual(a: string, b: string): boolean {
-  const encoder = new TextEncoder();
-  const ab = encoder.encode(a);
-  const bb = encoder.encode(b);
+  const ab = _encoder.encode(a);
+  const bb = _encoder.encode(b);
   const len = Math.max(ab.length, bb.length);
   let result = ab.length ^ bb.length; // length difference contributes to result
   for (let i = 0; i < len; i++) result |= (ab[i] ?? 0) ^ (bb[i] ?? 0);

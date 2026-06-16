@@ -1,6 +1,7 @@
 // cell-methods-internals.ts — machine, reducer, and executor builders for methods-based cells
 
-import type { ScheduleEffect } from "./schedule.ts";
+import { isScheduleEffect, type ScheduleEffect } from "./schedule.ts";
+import { isOwnEffect, type OwnEffect } from "./own.ts";
 import type { AsyncMethod, Method, Mutation, SyncMethod } from "./cell-impl.ts";
 import {
   applyMutations,
@@ -66,18 +67,30 @@ export function buildMethodsMachine(
     for (
       const stateConfig of Object.values(cloned.states) as Record<
         string,
-        string
+        unknown
       >[]
     ) {
       for (const [key, target] of Object.entries(stateConfig)) {
-        if (
-          !key.includes(":") && asyncMethods.has(key) && cloned.states[target]
-        ) {
+        if (key.includes(":") || !asyncMethods.has(key)) continue;
+        if (typeof target === "function") {
+          // AIO-380: function target — possible targets unknown statically.
+          // Allow the method's writes in every state (consistent with "if the
+          // method is allowed, its writes are allowed").
+          for (
+            const [sn, sc] of Object.entries(cloned.states) as [
+              string,
+              Record<string, unknown>,
+            ][]
+          ) {
+            if (!(setKey(key) in sc)) sc[setKey(key)] = sn;
+          }
+        } else if (cloned.states[target as string]) {
           // __setMethod must be allowed in the TARGET state (self-transition),
           // not the source — async proxy writes dispatch after the machine
           // has already transitioned to the target state.
-          (cloned.states[target] as Record<string, string>)[setKey(key)] =
-            target;
+          (cloned.states[target as string] as Record<string, string>)[
+            setKey(key)
+          ] = target as string;
         }
       }
     }
@@ -89,6 +102,9 @@ export function buildMethodsMachine(
         ][]
       ) {
         stateConfig["__error"] = stateName;
+        // AIO-381: async methods can return schedule effects — routed through
+        // an internal self-loop action so they reach the scheduler.
+        stateConfig["__effects"] = stateName;
       }
     }
     machine = cloned;
@@ -114,7 +130,7 @@ export function buildMethodsReducer(
     | Record<string, (state: unknown, payload: unknown) => void>
     | undefined,
 ): CellReduceFn {
-  return (state: unknown, action: Msg): (Msg | ScheduleEffect)[] | void => {
+  return (state: unknown, action: Msg): (Msg | ScheduleEffect | OwnEffect)[] | void => {
     const s = state as Record<string, unknown>;
     const ownKey = actionTypeToKey.get(action.type);
     if (!ownKey) return;
@@ -129,6 +145,15 @@ export function buildMethodsReducer(
     // Error action — no state change
     if (ownKey === "__error") return;
 
+    // AIO-381: schedule effects returned by an async method — the executor
+    // bridges them here so they flow through the standard effect path.
+    if (ownKey === "__effects") {
+      const eff = (action.payload as { effects?: unknown[] })?.effects;
+      return Array.isArray(eff)
+        ? (eff as (Msg | ScheduleEffect | OwnEffect)[])
+        : undefined;
+    }
+
     // Method-style: call method directly on draft
     const method = methods[ownKey];
     if (method) {
@@ -140,6 +165,22 @@ export function buildMethodsReducer(
           s as Record<string, unknown>,
           ...args,
         );
+        // AIO-8.2: a sync-classified method returning a thenable means the
+        // build transpiled async functions (constructor.name check defeated).
+        // Dev: throw before the half-applied state dispatches. Prod: log on.
+        if (
+          result && typeof (result as { then?: unknown }).then === "function"
+        ) {
+          const msg =
+            `[${name}] method '${ownKey}' returned a Promise but was classified sync — ` +
+            `your build transpiled async functions. Wrap it: ` +
+            `${ownKey}: markAsync(async (s) => {...})`;
+          if ((globalThis as Record<string, unknown>).__aioDev) {
+            throw new Error(msg);
+          }
+          log.error("cell", msg);
+          return;
+        }
         return result ? (Array.isArray(result) ? result : [result]) : undefined;
       }
       if (asyncMethods.has(ownKey)) {
@@ -159,7 +200,7 @@ export function buildMethodsReducer(
       const h = explicitReduce[ownKey];
       if (h) {
         return h(s, (action as { payload: unknown }).payload) as
-          | (Msg | ScheduleEffect)[]
+          | (Msg | ScheduleEffect | OwnEffect)[]
           | void;
       }
     }
@@ -205,6 +246,25 @@ export function buildMethodsExecutor(
         ..._args,
       )
         .then((value) => {
+          // AIO-381/382: async methods can return schedule + own effects,
+          // same as sync methods. Detection is conservative — only
+          // `__schedule`/`__own`-typed values count, so data returns to
+          // direct callers are never eaten.
+          const isRuntimeEffect = (v: unknown) =>
+            isScheduleEffect(v) || isOwnEffect(v);
+          const retEffects = isRuntimeEffect(value)
+            ? [value as ScheduleEffect | OwnEffect]
+            : Array.isArray(value) && value.length > 0 &&
+                value.every(isRuntimeEffect)
+            ? value as (ScheduleEffect | OwnEffect)[]
+            : [];
+          if (retEffects.length > 0) {
+            app.dispatch({
+              type: `${prefix}:__effects`,
+              payload: { effects: retEffects },
+              _source: "Effect",
+            } as Msg);
+          }
           if (
             (app as Record<string, unknown>)._isDisabled &&
             ((app as Record<string, unknown>)._isDisabled as () => boolean)()

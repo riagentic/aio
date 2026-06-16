@@ -22,8 +22,32 @@ const count = signal(0);
 count.value; // 0 — reads with tracking (use in JSX)
 count.peek(); // 0 — reads without tracking (use in event handlers)
 count.set(1); // updates and notifies subscribers
-count.set(1); // no-op — same value (Object.is check)
+count.set(1); // no-op — same value (see equality rules below)
 ```
+
+### Equality: when does `set()` notify?
+
+`set()` skips the update (no notification) when the new value is "the same".
+The exact rules:
+
+| New value                  | Skipped when…                                              |
+| -------------------------- | ---------------------------------------------------------- |
+| Primitives, same reference | `Object.is(old, next)`                                     |
+| Plain object / array       | Shallow-equal: same keys/length, all values `Object.is`    |
+| `Date` / `RegExp`          | Same time value / same source+flags                        |
+| Typed arrays               | Same bytes                                                 |
+| `Set` / `Map`              | **Never skipped** — always notifies (AIO-364)              |
+| Class instances            | **Never skipped** — always notifies (AIO-378)              |
+
+Set/Map and class instances hold state where shallow comparison can't see it
+(entries, private fields, getters), so a fresh instance always counts as a
+change. Shallow equality only applies to *plain* objects — `{...state}` spreads
+and array literals — where it prevents infinite re-render loops from
+`set({ ...sameValues })` in effect/rAF callbacks.
+
+Escape hatch: `set(next, { force: true })` always notifies, regardless of
+equality. In dev mode, named signals `console.warn` whenever an update is
+skipped, telling you which rule matched.
 
 **In TSX:**
 
@@ -41,16 +65,40 @@ const Counter = () => (
 Use `.value` in JSX expressions (creates tracking). Use `.peek()` in event
 handlers (no tracking needed).
 
+**Module-level signals survive component unmount/remount:**
+
+```tsx
+// Module-level UI state (survives unmount)
+const ui = signal({ collapsed: [] as string[] }, 'sidebar');
+
+function Sidebar() {
+  return <TreeRow collapsed={ui.value.collapsed} />;
+}
+// Each component independently re-renders when signals IT reads change —
+// no parent subscription needed (AIO-7.5).
+```
+
 **Signal\<T\> interface:**
 
-| Member            | Description                                       |
-| ----------------- | ------------------------------------------------- |
-| `.value`          | Read with automatic dependency tracking           |
-| `.peek()`         | Read without tracking (use in event handlers)     |
-| `.set(next)`      | Write and notify. No-op if `Object.is(old, next)` |
-| `.set(prev => v)` | Updater form — receives current value             |
-| `.subscribe(fn)`  | Manual subscriber, returns unsubscribe fn         |
-| `._name`          | Optional debug name (pass as 2nd arg to signal)   |
+| Member | Description |
+| ------ | ----------- |
+| `.value` | Read with automatic dependency tracking |
+| `.peek()` | Read without tracking (use in event handlers) |
+| `.set(next)` | Write and notify. No-op for equal values — see "Equality" above |
+| `.set(next, { force: true })` | Bypass equality checks and always notify |
+| `.set(prev => v)` | Updater form — receives current value |
+| `.subscribe(fn)` | Manual subscriber, returns unsubscribe fn |
+
+> **Legacy idiom — delete on sight:** older code reads `void sig.value` in a
+> parent component "so children re-render". Child subscriptions have been
+> independent of parents since AIO-7.5 — the read is dead weight (and an
+> extra parent re-render). Components subscribe by reading `.value` in their
+> own render; nothing else is needed.
+| `._name` | Optional debug name (pass as 2nd arg to signal) |
+
+**Dev mode** (`localStorage.AIO_DEV = '1'` or `aio.config.dev = true`):
+- Named signals log `console.warn` when updates are skipped (identical reference or shallow-equal).
+- Missing parent subscriptions are warned when a child reads a signal the parent does not touch.
 
 Pass an optional name as 2nd arg: `signal(0, "count")` for devtools output.
 

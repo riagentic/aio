@@ -137,7 +137,14 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
         if (pending) {
           const confirmed = deps.getConfirmedState()[cell] ?? {};
           const next = deps.reducer(confirmed, pending.action, pending.payload);
-          if (next !== null) deps.setConfirmedState(cell, next);
+          // Reducer contract: null = no-op. undefined is treated as a bug.
+          if (next === undefined) {
+            console.warn(
+              `[aio:sync] reducer returned undefined for action "${pending.action}" in cell "${cell}". Expected state object or null.`,
+            );
+          } else if (next !== null) {
+            deps.setConfirmedState(cell, next);
+          }
         }
         await deps.buffer.confirm(cell, opId, serverHlc);
         await rebaseCell(cell);
@@ -151,7 +158,11 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
         clock.receive(op.hlc);
         const confirmed = deps.getConfirmedState()[op.cell] ?? {};
         const next = deps.reducer(confirmed, op.action, op.payload);
-        if (next !== null) {
+        if (next === undefined) {
+          console.warn(
+            `[aio:sync] reducer returned undefined for action "${op.action}" in cell "${op.cell}". Expected state object or null.`,
+          );
+        } else if (next !== null) {
           deps.setConfirmedState(op.cell, next);
         }
         // Advance lastHlc cursor for remote broadcasted ops

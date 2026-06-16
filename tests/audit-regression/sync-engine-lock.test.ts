@@ -16,6 +16,7 @@ function mockBuffer(): OpBuffer {
     getUnconfirmed: async () => ops.filter((o) => !o.confirmed),
     pruneConfirmed: async () => {},
     getMeta: async () => undefined,
+    saveMeta: async () => {},
     saveSnapshot: async () => {},
     loadSnapshot: async () => undefined,
     clear: async () => {},

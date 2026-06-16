@@ -49,4 +49,7 @@ export interface DB {
   transaction<T>(fn: (tx: Tx) => Promise<T>): Promise<T>;
   /** Close all workers and release resources */
   close(): Promise<void>;
+  /** Returns the last error swallowed by the write-lock chain, or null if none.
+   *  Primarily for diagnostics — callers should still await their own promise. */
+  lastWriterError?(): Error | null;
 }

@@ -8,11 +8,72 @@
 
 import { batch, type Signal, signal } from "./signal.ts";
 
+// ── Dev-only deep freeze for cell signal values ─────────────────────
+// AIO-4.4: in dev, deep-freeze the value before installing it in a cell
+// signal so component-side mutations throw "Cannot assign to read only
+// property" with a clear hint. Skip slices >100KB to keep dev boot snappy.
+const FREEZE_SIZE_LIMIT = 100_000;
+
+function _maybeFreezeInDev<T>(value: T): T {
+  if ((globalThis as Record<string, unknown>).__aioDev !== true) return value;
+  if (value === null || typeof value !== "object") return value;
+  // Cheap size estimate: stringify once, bail if over limit.
+  let size: number;
+  try {
+    size = JSON.stringify(value).length;
+  } catch {
+    return value; // circular — skip
+  }
+  if (size > FREEZE_SIZE_LIMIT) {
+    if (!(globalThis as Record<string, unknown>).__aioFreezeSkipped) {
+      (globalThis as Record<string, unknown>).__aioFreezeSkipped = true;
+      // One-time warn to keep dev boot snappy.
+      console.info(
+        `[aio] dev freeze skipped: cell slice > ${FREEZE_SIZE_LIMIT}B`,
+      );
+    }
+    return value;
+  }
+  try {
+    return deepFreeze(value);
+  } catch {
+    return value;
+  }
+}
+
+function deepFreeze<T>(obj: T): T {
+  if (obj === null || typeof obj !== "object") return obj;
+  Object.freeze(obj);
+  for (const v of Object.values(obj as Record<string, unknown>)) {
+    if (v !== null && typeof v === "object" && !Object.isFrozen(v)) {
+      deepFreeze(v);
+    }
+  }
+  return obj;
+}
+
+// ── HMR-safe singleton cache ─────────────────────────────────────────
+// Module re-evaluation (dev mode HMR) must not replace the canonical
+// signal instances — otherwise old subscribers point to leaked signals.
+const _global = globalThis as Record<string, any>;
+if (!_global.__aioSignals) {
+  _global.__aioSignals = {
+    state: signal<Record<string, any>>({}),
+    connected: signal<boolean>(false),
+    cells: new Map<string, Signal<any>>(),
+  };
+}
+const _cache = _global.__aioSignals as {
+  state: Signal<Record<string, any>>;
+  connected: Signal<boolean>;
+  cells: Map<string, Signal<any>>;
+};
+
 // ── Module state ─────────────────────────────────────────────────────
 
-export let _stateSignal: Signal<Record<string, any>> = signal({});
-export let _connected: Signal<boolean> = signal<boolean>(false);
-export const _cellSignals = new Map<string, Signal<any>>();
+export let _stateSignal: Signal<Record<string, any>> = _cache.state;
+export let _connected: Signal<boolean> = _cache.connected;
+export const _cellSignals = _cache.cells;
 
 // ── Internal helpers ─────────────────────────────────────────────────
 
@@ -32,7 +93,9 @@ export function _applyFullState(state: Record<string, any>): void {
   batch(() => {
     _stateSignal.set(state);
     for (const [key, value] of Object.entries(state)) {
-      _getOrCreateCellSignal(key, value).set(value);
+      // AIO-4.4: freeze the value before installing in the cell signal so
+      // component-side mutations throw in dev.
+      _getOrCreateCellSignal(key, _maybeFreezeInDev(value)).set(value);
     }
     // AIO-189: remove cell signals for cells no longer in state
     for (const key of _cellSignals.keys()) {
@@ -70,4 +133,6 @@ export function _resetSignals(): void {
   _stateSignal = signal({});
   _connected = signal(false);
   _cellSignals.clear();
+  _cache.state = _stateSignal;
+  _cache.connected = _connected;
 }

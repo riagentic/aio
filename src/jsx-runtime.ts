@@ -46,9 +46,17 @@ export const jsxs = jsx;
 
 type AioEventHandler<E extends Event = Event> = (event: E) => void;
 
+/** AIO-7.3: event with `currentTarget` typed as the handling element —
+ *  `e.currentTarget.value` works without casts (React expectation). */
+export type AirEvent<T extends EventTarget, E extends Event = Event> = E & {
+  currentTarget: T;
+  target: EventTarget;
+};
+
 type AioEventMap = {
   Click: MouseEvent;
   DblClick: MouseEvent;
+  DoubleClick: MouseEvent; // AIO-7.2: React alias — maps to dblclick
   MouseDown: MouseEvent;
   MouseUp: MouseEvent;
   MouseMove: MouseEvent;
@@ -101,11 +109,15 @@ type AioEventMap = {
   Error: Event;
 };
 
-type AioMappedEventHandlers = {
-  [K in keyof AioEventMap as `on${K}`]?: AioEventHandler<AioEventMap[K]>;
+type AioMappedEventHandlers<T extends EventTarget = HTMLElement> = {
+  [K in keyof AioEventMap as `on${K}`]?: (
+    e: AirEvent<T, AioEventMap[K]>,
+  ) => void;
 };
 
-type AioHTMLAttributes = AioMappedEventHandlers & {
+type AioHTMLAttributes<T extends EventTarget = HTMLElement> =
+  & AioMappedEventHandlers<T>
+  & {
   id?: string;
   className?: string | string[] | Record<string, boolean>;
   class?: string;
@@ -131,7 +143,7 @@ type AioHTMLAttributes = AioMappedEventHandlers & {
   dangerouslySetInnerHTML?: { __html: string };
 };
 
-type AioInputAttributes = AioHTMLAttributes & {
+type AioInputAttributes = AioHTMLAttributes<HTMLInputElement> & {
   type?: string;
   value?: string | number;
   defaultValue?: string | number;
@@ -155,7 +167,7 @@ type AioInputAttributes = AioHTMLAttributes & {
   size?: number;
 };
 
-type AioTextAreaAttributes = AioHTMLAttributes & {
+type AioTextAreaAttributes = AioHTMLAttributes<HTMLTextAreaElement> & {
   value?: string;
   defaultValue?: string;
   disabled?: boolean;
@@ -171,7 +183,7 @@ type AioTextAreaAttributes = AioHTMLAttributes & {
   autoFocus?: boolean;
 };
 
-type AioSelectAttributes = AioHTMLAttributes & {
+type AioSelectAttributes = AioHTMLAttributes<HTMLSelectElement> & {
   value?: string | number;
   defaultValue?: string | number;
   disabled?: boolean;
@@ -182,7 +194,7 @@ type AioSelectAttributes = AioHTMLAttributes & {
   autoFocus?: boolean;
 };
 
-type AioAnchorAttributes = AioHTMLAttributes & {
+type AioAnchorAttributes = AioHTMLAttributes<HTMLAnchorElement> & {
   href?: string;
   target?: string;
   rel?: string;
@@ -191,7 +203,7 @@ type AioAnchorAttributes = AioHTMLAttributes & {
   type?: string;
 };
 
-type AioImgAttributes = AioHTMLAttributes & {
+type AioImgAttributes = AioHTMLAttributes<HTMLImageElement> & {
   src?: string;
   alt?: string;
   width?: string | number;
@@ -203,7 +215,7 @@ type AioImgAttributes = AioHTMLAttributes & {
   sizes?: string;
 };
 
-type AioFormAttributes = AioHTMLAttributes & {
+type AioFormAttributes = AioHTMLAttributes<HTMLFormElement> & {
   action?: string;
   method?: string;
   encType?: string;
@@ -213,7 +225,7 @@ type AioFormAttributes = AioHTMLAttributes & {
   name?: string;
 };
 
-type AioButtonAttributes = AioHTMLAttributes & {
+type AioButtonAttributes = AioHTMLAttributes<HTMLButtonElement> & {
   type?: "button" | "submit" | "reset";
   disabled?: boolean;
   name?: string;
@@ -258,6 +270,11 @@ type AioSVGAttributes = AioHTMLAttributes & {
 // deno-lint-ignore no-namespace
 export namespace JSX {
   export type Element = VNode;
+  /** Attributes valid on every JSX element, including function components.
+   *  `key` is extracted by `jsx()` before props reach the component. */
+  export interface IntrinsicAttributes {
+    key?: string | number;
+  }
   export interface IntrinsicElements {
     input: AioInputAttributes;
     textarea: AioTextAreaAttributes;
@@ -284,6 +301,7 @@ export namespace JSX {
     clipPath: AioSVGAttributes;
     mask: AioSVGAttributes;
 
-    [tag: string]: AioHTMLAttributes;
+    // deno-lint-ignore no-explicit-any -- index must admit element-specific handler types (AIO-7.3)
+    [tag: string]: AioHTMLAttributes<any>;
   }
 }

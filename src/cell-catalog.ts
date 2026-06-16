@@ -3,6 +3,43 @@
 import type { CellDef, Creators, Msg } from "./cell-types.ts";
 import { checkReservedKeys } from "./cell-types.ts";
 import { registerCall } from "./cell-impl.ts";
+import { log } from "./logger.ts";
+
+/** Wrap a raw action creator with a guard for the pre-binding state.
+ *  In dev (__aioDev set): throws with a clear message so the user knows
+ *  the cell hasn't been bound to aio.run() yet.
+ *  In prod: logs a warning once per (cell, key) and returns Promise.resolve().
+ *  The wrapper preserves the .type accessor and is replaced wholesale by
+ *  bindCell / bindCellReactive — bound calls pay zero overhead. */
+export function makeUnboundGuard(
+  cellName: string,
+  key: string,
+  raw: unknown,
+): (...args: unknown[]) => Promise<void> {
+  const type = (raw as { type: string }).type;
+  const isDev = (globalThis as Record<string, unknown>).__aioDev === true;
+  if (isDev) {
+    const guarded = (() => {
+      throw new Error(
+        `[${cellName}] ${key}() called before aio.run() — add this cell to aio.run({ cells: [...] })`,
+      );
+    }) as (...args: unknown[]) => Promise<void>;
+    (guarded as unknown as { type: string }).type = type;
+    return guarded;
+  }
+  let warned = false;
+  const guarded = ((..._args: unknown[]): Promise<void> => {
+    if (!warned) {
+      warned = true;
+      log.warn(
+        `[${cellName}] ${key}() called before aio.run() — add this cell to aio.run({ cells: [...] })`,
+      );
+    }
+    return Promise.resolve();
+  }) as (...args: unknown[]) => Promise<void>;
+  (guarded as unknown as { type: string }).type = type;
+  return guarded;
+}
 
 /** Build a prefixed action/effect catalog from creator functions — maps keys to typed dispatchers. */
 export function buildCatalog(
@@ -29,7 +66,11 @@ export function buildCatalog(
 }
 
 /** Flatten action creators + string constants from catalog directly onto a cell def object.
- *  Throws if any key collides with a reserved property or a selector. */
+ *  Explicit action creators are PURE FACTORIES — they stay callable before
+ *  bindCell so config-time patterns (schedules arrays, tests, composition)
+ *  can build actions. Only methods/generators get the pre-run loud guard
+ *  (AIO-2.3) — those imply dispatch. Throws if any key collides with a
+ *  reserved property or a selector. */
 export function flattenOnto(
   target: Record<string, unknown>,
   catalog: Record<string, unknown>,
@@ -44,6 +85,7 @@ export function flattenOnto(
         `[${cellName}] action '${key}' collides with selector of same name`,
       );
     }
+    // Pure factory passthrough — bindCell later wraps with dispatch.
     target[key] = value;
   }
 }
@@ -95,9 +137,13 @@ export function bindCell(
     }
   }
 
-  // Bind selectors: wrap with getState
+  // Bind selectors: wrap with getState. Pass the full state as the second arg
+  // so deps-form selectors can read other cells' current slices.
   for (const [key, selectorFn] of Object.entries(f.__aio.selectors)) {
-    (f as Record<string, unknown>)[key] = () => selectorFn(getState());
+    (f as Record<string, unknown>)[key] = () => {
+      const state = getState();
+      return selectorFn(state[f.__aio.id], state);
+    };
   }
 
   // Bind state keys: install getters for direct state access (counter.count)

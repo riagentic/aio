@@ -69,6 +69,13 @@ export function createDB(path: string, opts: DBOpts = {}): DB {
         }
         ids.clear();
       }
+      // Terminate zombie worker and clear refs so next call respawns
+      try {
+        w.terminate();
+      } catch { /* ignore */ }
+      ready = null;
+      if (writerWorker === w) writerWorker = null;
+      readerWorkers = readerWorkers.filter((rw) => rw !== w);
     };
   }
 
@@ -140,9 +147,16 @@ export function createDB(path: string, opts: DBOpts = {}): DB {
   // standalone execute() calls can never interleave into an open transaction.
   let _writerLock: Promise<void> = Promise.resolve();
   let _inTransaction = false;
+  let _lastWriterError: Error | null = null;
   function withWriterLock<T>(fn: () => Promise<T>): Promise<T> {
     const result: Promise<T> = _writerLock.then(fn);
-    _writerLock = result.then(() => {}, () => {}); // advance chain regardless of outcome
+    _writerLock = result.then(
+      () => {},
+      (err: Error) => {
+        _lastWriterError = err;
+        return undefined;
+      },
+    ); // advance chain regardless of outcome, but capture the error
     return result;
   }
 
@@ -207,6 +221,9 @@ export function createDB(path: string, opts: DBOpts = {}): DB {
           _inTransaction = false;
         }
       });
+    },
+    lastWriterError(): Error | null {
+      return _lastWriterError;
     },
     async close(): Promise<void> {
       if (!ready) return;

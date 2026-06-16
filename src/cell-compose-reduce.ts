@@ -3,6 +3,7 @@
 import { type Draft, type Patch, produceWithPatches } from "immer";
 import { log } from "./logger.ts";
 import type { ScheduleEffect } from "./schedule.ts";
+import type { OwnEffect } from "./own.ts";
 import type { FlowDef } from "./flow.ts";
 import {
   createFlowReducer,
@@ -20,7 +21,7 @@ type CellPatches = { cell: string; ops: Patch[] };
 
 export type ReduceResult = {
   state: Record<string, unknown>;
-  effects: (Msg | ScheduleEffect)[];
+  effects: (Msg | ScheduleEffect | OwnEffect)[];
   patches?: CellPatches | CellPatches[];
   _bd?: { produce: number; clone: number; spread: number };
 };
@@ -86,8 +87,8 @@ export function reduceCell(
       return { state: fullState, effects: [] };
     }
 
-    const targetStatus = transitions[lookupKey];
-    let effects: (Msg | ScheduleEffect)[] = [];
+    const targetSpec = transitions[lookupKey];
+    let effects: (Msg | ScheduleEffect | OwnEffect)[] = [];
     const t0 = _perfCheck ? performance.now() : 0;
     let nextSlice: Record<string, unknown>;
     let cellPatches: Patch[] = [];
@@ -102,6 +103,40 @@ export function reduceCell(
           // Clone effects NOW — while the draft is still alive.
           if (Array.isArray(result)) {
             effects = cloneEffects(result, action.type);
+          }
+          // AIO-380: function targets resolve at dispatch time, after the
+          // reducer ran — sync methods see post-method state. A throwing or
+          // invalid guard never corrupts dispatch: log and stay put.
+          let targetStatus: string = currentStatus;
+          if (typeof targetSpec === "function") {
+            try {
+              const payload = (action as { payload?: unknown }).payload;
+              const args =
+                payload && typeof payload === "object" &&
+                  Array.isArray((payload as { args?: unknown }).args)
+                  ? (payload as { args: unknown[] }).args
+                  : payload === undefined
+                  ? []
+                  : [payload];
+              const resolved = targetSpec(draft, ...args);
+              if (resolved == null) {
+                targetStatus = currentStatus;
+              } else if (machine.states[resolved]) {
+                targetStatus = resolved;
+              } else {
+                log.error(
+                  "cell",
+                  `${cellName} transition fn for '${lookupKey}' returned unknown state '${resolved}' — staying in '${currentStatus}'`,
+                );
+              }
+            } catch (e) {
+              log.error(
+                "cell",
+                `${cellName} transition fn for '${lookupKey}' threw: ${e} — staying in '${currentStatus}'`,
+              );
+            }
+          } else {
+            targetStatus = targetSpec as string;
           }
           if (draft.__aio_status !== targetStatus) {
             draft.__aio_status = targetStatus;
@@ -168,7 +203,7 @@ export function reduceCell(
   }
 
   // Simple path — no machine guards
-  let effects: (Msg | ScheduleEffect)[] = [];
+  let effects: (Msg | ScheduleEffect | OwnEffect)[] = [];
   const st0 = _perfCheck ? performance.now() : 0;
   let nextSlice: Record<string, unknown>;
   let cellPatches: Patch[] = [];
@@ -243,9 +278,9 @@ export function reduceCell(
  *  fallback. JSON loses undefined/NaN/Infinity/Date/Map/Set and silently
  *  corrupted the executor's payload contract. */
 function cloneEffects(
-  effects: (Msg | ScheduleEffect)[],
+  effects: (Msg | ScheduleEffect | OwnEffect)[],
   actionType?: string,
-): (Msg | ScheduleEffect)[] {
+): (Msg | ScheduleEffect | OwnEffect)[] {
   if (!effects.length) return effects;
   const cloned: typeof effects = [];
   for (const eff of effects) {
@@ -302,7 +337,7 @@ export function buildRootReducer(
     action: Msg,
   ): ReduceResult => {
     let currentState = state;
-    const allEffects: (Msg | ScheduleEffect)[] = [];
+    const allEffects: (Msg | ScheduleEffect | OwnEffect)[] = [];
     const allPatches: Array<{ cell: string; ops: Patch[] }> = [];
     const { disabledCells, cellLastAction, perfCheck: _perfCheck } = ctx;
 

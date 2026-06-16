@@ -16,6 +16,7 @@ export interface ShutdownRefs {
   onStop: (() => void | Promise<void>) | undefined;
   appLock: { release: () => void } | null;
   scheduleManager: { cancelAll: () => void };
+  ownManager: { disposeAll: () => void };
   dispatch: { close: () => void };
   getElectronProc: () => { kill: () => void } | null;
   clearElectronProc: () => void;
@@ -87,6 +88,7 @@ export function createShutdownOrchestrator(
 
     // Phase 6: Subsystem cleanup
     refs.scheduleManager.cancelAll();
+    refs.ownManager.disposeAll();
     refs.dispatch.close();
 
     const ep = refs.getElectronProc();

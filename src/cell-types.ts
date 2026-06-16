@@ -4,6 +4,7 @@
 // Everything else in cell-* imports from here.
 
 import type { ScheduleEffect } from "./schedule.ts";
+import type { OwnEffect } from "./own.ts";
 import type { FlowDef } from "./flow.ts";
 import type { CellMethods } from "./cell-impl.ts";
 import type { SyncConfig } from "./sync/types.ts";
@@ -39,11 +40,21 @@ export type ActionUnion<Prefix extends string, A extends Creators> = {
   };
 }[keyof A & string];
 
+/** Transition target — a state name, or a function deciding the target from
+ *  state + action args (AIO-380). The function runs after the reducer applied
+ *  (sync methods see post-method state; async method triggers run before the
+ *  method body, so branch on args there). Return null/undefined to stay in the
+ *  current state. Must be pure — a throwing/invalid guard logs and stays put. */
+export type TransitionTarget<States extends string = string> =
+  | States
+  // deno-lint-ignore no-explicit-any
+  | ((state: any, ...args: any[]) => States | null | undefined);
+
 /** State machine definition — States generic enables autocomplete + compiler checks on state names.
  *  States is inferred from the keys of `states`; `initial` and transition targets are validated against it. */
 export type MachineConfig<States extends string = string> = {
   initial: NoInfer<States>;
-  states: Record<States, Record<string, NoInfer<States>>>;
+  states: Record<States, Record<string, TransitionTarget<NoInfer<States>>>>;
 };
 
 /** Action source — auto-tagged at dispatch time for logging/debugging */
@@ -112,7 +123,7 @@ export type CellReduceFn = (
   state: unknown,
   action: Msg,
   ctx?: Record<string, unknown>,
-) => (Msg | ScheduleEffect)[] | void;
+) => (Msg | ScheduleEffect | OwnEffect)[] | void;
 /** Internal executor function signature */
 export type CellExecuteFn = (app: ScopedApp, effect: Msg) => void;
 
@@ -130,8 +141,12 @@ export type CellAio<
   reduce: CellReduceFn;
   /** Executor function (handles effects) */
   execute?: CellExecuteFn;
-  /** Selector functions */
-  selectors: Record<string, (state: unknown) => unknown>;
+  /** Selector functions — receive (ownSlice, fullState?). Deps-form selectors
+   *  use fullState to read other cells' current slices. */
+  selectors: Record<string, (state: unknown, fullState?: unknown) => unknown>;
+  /** Per-selector dep names — used by composeCellsWiring to validate against
+   *  the known cell list at composition time. Keys mirror `selectors`. */
+  selectorDeps: Record<string, readonly string[]>;
   /** Action creator catalog */
   actions: Catalog<string, Actions>;
   /** Effect creator catalog */
@@ -150,6 +165,15 @@ export type CellAio<
   initType: string;
   /** Destroy type string (e.g. 'counter:__destroy') */
   destroyType: string;
+  /** AIO-5.1: cell scope. `"client"` cells live in the browser only; their
+   *  server-side def is a no-op. Defaults to `"server"` (i.e. normal). */
+  scope: "client" | "server";
+  /** AIO-5.1: raw sync methods of a client-scoped cell — bindCellReactive runs
+   *  these locally against the cell signal (no server dispatch). */
+  clientMethods?: Record<
+    string,
+    (s: Record<string, unknown>, ...args: unknown[]) => unknown
+  >;
   /** Custom init handler — receives the app and the cell's initial state */
   onInit?: (app: ScopedApp<unknown>, initState?: unknown) => void;
   /** Custom destroy handler */
@@ -246,18 +270,20 @@ export type FlatActions<
 };
 
 /** Direct calling type — maps method signatures to callable functions on the cell.
- *  Before aio.run(): returns action object. After binding: dispatches (sync) or returns Promise (async).
- *  Each has a `.type` property for use in waitFor/cancelOn/listensTo.
- *  N prefix enables literal `.type` (e.g. `"counter:increment"` instead of `string`). */
+ *  After aio.run() and bindCell: sync methods return Promise<void> (dispatch complete);
+ *  async methods return Promise<R> (method return value). The `.type` property is preserved
+ *  for use in waitFor/cancelOn/listensTo. N prefix enables literal `.type`
+ *  (e.g. `"counter:increment"` instead of `string`).
+ *  Before aio.run(), calling a method throws in dev / warns-and-resolves in prod (see
+ *  makeUnboundGuard). Internal callers that need the raw action object use
+ *  `def.__aio.actions[key]` (the unwrapped catalog). */
 export type DirectCalling<N extends string = string, M = unknown> = {
   [K in keyof M & string]: // deno-lint-ignore no-explicit-any
     M[K] extends (s: any, ...args: infer P) => Promise<infer R>
       ? ((...args: P) => Promise<R>) & { readonly type: `${N}:${K}` }
       // deno-lint-ignore no-explicit-any
       : M[K] extends (s: any, ...args: infer P) => any
-        ? ((...args: P) => { type: `${N}:${K}`; payload: unknown }) & {
-          readonly type: `${N}:${K}`;
-        }
+        ? ((...args: P) => Promise<void>) & { readonly type: `${N}:${K}` }
       : never;
 };
 

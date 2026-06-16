@@ -1,7 +1,11 @@
 # Cell-Level Visibility & Persistence
 
+> Per-tab state that should NOT be shared or persisted belongs in a [client-scoped cell](cells.md#shared-vs-per-client-state) (`scope: "client"`) or `useLocal`.
+
+
 Control what state each cell exposes to clients (`ui`) and persists to disk
-(`persist`). Default for both: `"none"` — nothing leaks unless you opt in.
+(`persist`). Default for both: `"all"` — zero-config persists and exposes
+everything. Opt out per cell (or via `cellDefaults`) for privacy or size tuning.
 
 ## Quick Start
 
@@ -22,8 +26,8 @@ Both `persist` and `ui` accept the same filter shapes:
 
 | Config                    | Effect                    |
 | ------------------------- | ------------------------- |
-| `"all"`                   | Include everything        |
-| `"none"`                  | Include nothing (default) |
+| `"all"`                   | Include everything (default) |
+| `"none"`                  | Include nothing           |
 | `{ include: ["a", "b"] }` | Only these fields         |
 | `{ exclude: ["cache"] }`  | Everything except these   |
 
@@ -39,11 +43,11 @@ const trading = cell("trading", {
 ## Resolution Order
 
 Cell-level config wins over `cellDefaults`, which wins over the framework
-default (`"none"`):
+default (`"all"`):
 
 ```
-cell.persist > cellDefaults.persist > "none"
-cell.ui      > cellDefaults.ui      > "none"
+cell.persist > cellDefaults.persist > "all"
+cell.ui      > cellDefaults.ui      > "all"
 ```
 
 ## Per-User Filtering (`forUser`)
@@ -135,12 +139,13 @@ const analytics = cell("analytics", {
 
 ## Persistence vs UI
 
-Both default to `"none"` but serve different purposes:
+Both default to `"all"` but serve different purposes:
 
-- **`persist`**: Controls what's saved to KV on disk. Opt-in = data safety (only
-  persist what you explicitly allow).
-- **`ui`**: Controls what's sent to browser clients. Opt-in = security (prevents
-  accidental data exposure).
+- **`persist`**: Controls what's saved to KV on disk. Default-on means restart
+  safety. Opt out per cell for ephemeral or sensitive data.
+- **`ui`**: Controls what's sent to browser clients. Default-on means zero-config
+  client sync. Opt out (or narrow with `include`/`exclude`) for fields a client
+  shouldn't see.
 
 They're independent — a cell can persist everything but expose nothing to UI
 (background worker), or expose everything but persist nothing (ephemeral UI
