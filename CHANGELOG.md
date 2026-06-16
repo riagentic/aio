@@ -1,5 +1,39 @@
 # Changelog
 
+## 1.0.0-alpha13
+
+### Security
+
+- **Nuclear audit waves 6-11** — 64+ bugs fixed: sync protocol routing gaps,
+  cursor never advancing bug, concurrent HLC drop, SVG namespace handling,
+  watcher sentinel TOCTOU, logger flush race, signal listener leak, rate
+  limiter abuse detection, op buffer TTL eviction, onTTCommand guard, state
+  module cleanup. Total: ~194 bugs across 11 audit waves.
+
+### Fixed
+
+- **Sync protocol routing** — `onTTCommand` guard added to prevent
+  time-travel commands from leaking into production sync
+- **Sync cursor** — cursor now advances correctly after processing
+- **HLC** — concurrent HLC drop fixed (was dropping ops on concurrent tick)
+- **SVG namespace** — AIR renderer now handles SVG namespace correctly
+- **Watcher sentinel TOCTOU** — file watcher race condition eliminated
+- **Logger flush** — logger flush race on shutdown
+- **Signal listener leak** — effect cleanup now properly disposes signal
+  listeners
+- **Rate limiter abuse detection** — enhanced detection of abusive clients
+- **Op buffer TTL eviction** — eviction now respects per-op TTL
+
+### Docs
+
+- Full docs audit for alpha13 accuracy
+- Version bumps throughout (alpha12 → alpha13)
+- Fix dead/broken links across all docs
+- Remove stale `stateForUI`/`stateForDB` references (removed in alpha11)
+- Quickstart, migration, examples all updated to alpha13 imports
+
+---
+
 ## 1.0.0-alpha12
 
 ### Breaking

@@ -71,6 +71,11 @@ export function tmplKeyboardShortcuts(): string {
         });
       });
     }
+    // Ctrl+P — renderer window.print() is a no-op on Electron 41 Linux, call from main instead
+    if (ctrl && !input.shift && input.key.toLowerCase() === 'p') {
+      event.preventDefault();
+      win.webContents.print({ silent: false, printBackground: true });
+    }
   });`;
 }
 
@@ -162,6 +167,8 @@ contextBridge.exposeInMainWorld('__aioIPC', {
   onMessage: (fn)   => ipcRenderer.on('__aio:msg',   (_e, line) => fn(line)),
   onOpen:    (fn)   => ipcRenderer.on('__aio:open',  () => fn()),
   onClose:   (fn)   => ipcRenderer.on('__aio:close', () => fn()),
+  // Renderer window.print() is a silent no-op on Electron 41 Linux — route through main
+  print:     ()     => ipcRenderer.send('__aio:print'),
 });
 // AIO-54: Relay intercepted <a> navigations back to renderer as CustomEvent
 ipcRenderer.on('__aio:navigate', (_e, url) => {

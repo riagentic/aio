@@ -1,5 +1,5 @@
 import { assertEquals } from "jsr:@std/assert";
-import { _injectDelta, _injectState, _reset } from "../src/state-core.ts";
+import { _injectState, _reset, handleMessage } from "../src/state-core.ts";
 import {
   useAio,
   useCell,
@@ -45,7 +45,9 @@ Deno.test("air: useCell state updates on delta", () => {
   _injectState({ counter: { count: 0 } });
   const { state } = useCell(fakeRef);
   assertEquals(state.count, 0);
-  _injectDelta({ $p: { counter: { count: 5 } } });
+  handleMessage({
+    $patches: [{ op: "replace", path: ["counter", "count"], value: 5 }],
+  });
   assertEquals(state.count, 5);
   _reset();
 });

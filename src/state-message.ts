@@ -1,17 +1,13 @@
 // deno-lint-ignore-file no-explicit-any
 /**
  * @module
- * Message handling and lifecycle — processes server messages (full state, Immer patches, legacy deltas).
+ * Message handling and lifecycle — processes server messages (full state, Immer patches).
  * Owns: handleMessage, ready(), isInitialStateReceived(), ready promise management.
  */
 
 import { batch } from "./signal.ts";
 import { applyPatches, type Patch } from "immer";
 import { _BLOCKED_KEYS } from "./state-array-utils.ts";
-import {
-  _applyDeltaToSignals,
-  _applyFilteredToSignals,
-} from "./state-legacy-signals.ts";
 import {
   _applyFullState,
   _getOrCreateCellSignal,
@@ -45,12 +41,9 @@ export function handleMessage(data: any): HandleResult {
   if (!data || typeof data !== "object") return "noop";
   if (!_initialStateReceived) {
     // Delta before first state — drop (reconnect race)
-    if (data.$p || data.$d || data.$patches) return "dropped";
-    // First message is full state (clean $f marker if present)
-    const cleaned = data.$f ? { ...data } : data;
-    if (cleaned !== data) delete cleaned.$f;
+    if (data.$patches) return "dropped";
     _initialStateReceived = true;
-    _applyFullState(cleaned);
+    _applyFullState(data);
     _accessedPaths.clear();
     cancelSubsTimer();
     if (_readyResolve) {
@@ -58,14 +51,20 @@ export function handleMessage(data: any): HandleResult {
         clearTimeout(_readyTimeout);
         _readyTimeout = null;
       }
-      _readyResolve(cleaned);
+      _readyResolve(data);
       _readyResolve = null;
     }
     return "full";
   }
 
   // Immer patches: { $patches: [{op, path, value}, ...] }
-  if (data.$patches && Array.isArray(data.$patches)) {
+  if (data.$patches) {
+    if (!Array.isArray(data.$patches)) {
+      // Safety: a message carrying $patches as a non-array is malformed wire
+      // protocol — never fall through to full-state replacement with it.
+      console.warn("[aio] malformed $patches (not an array) — dropped");
+      return "dropped";
+    }
     const prev = _stateSignal.peek();
     const patches: Patch[] = data.$patches;
     if (patches.length === 0) return "noop";
@@ -98,30 +97,6 @@ export function handleMessage(data: any): HandleResult {
       if (transport) transport.send("__resync");
       return "noop";
     }
-  }
-
-  // @deprecated Legacy delta patch: { $p: {...}, $d: [...] }
-  // AIO-272: Target removal: v1.0.0 stable. Server no longer produces this format.
-  if (data.$p || data.$d) {
-    const prev = _stateSignal.peek();
-    _applyDeltaToSignals({ $p: data.$p, $d: data.$d });
-    return _stateSignal.peek() === prev ? "noop" : "delta";
-  }
-
-  // Filtered state (wire format): { $f: 1, feat1: {...}, ... }
-  if (data.$f) {
-    const prev = _stateSignal.peek();
-    const payload = { ...data };
-    delete payload.$f;
-    _applyFilteredToSignals(payload);
-    return _stateSignal.peek() === prev ? "noop" : "delta";
-  }
-
-  // Safety: reject objects with wire-protocol markers as full state — prevents stale
-  // client JS from interpreting patch/delta messages as full state replacement
-  if (data.$patches || data.$p || data.$d || data.$f) {
-    console.warn("[aio] unexpected wire marker in full-state path — dropped");
-    return "noop";
   }
 
   // Full state replacement (reconnect / subscription response)

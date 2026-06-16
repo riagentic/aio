@@ -3,11 +3,10 @@
  * @module
  * Core signal management for state-core.
  * Owns: _stateSignal, _connected, _cellSignals, and _applyFullState.
- * Consumed by state-message.ts and state-legacy-delta.ts.
+ * Consumed by state-message.ts.
  */
 
 import { batch, type Signal, signal } from "./signal.ts";
-import { _rebuildIdMaps } from "./state-id-maps.ts";
 
 // ── Module state ─────────────────────────────────────────────────────
 
@@ -42,7 +41,6 @@ export function _applyFullState(state: Record<string, any>): void {
       }
     }
   });
-  _rebuildIdMaps(state); // needed for legacy $arr delta backward compat
 }
 
 // ── Public API ───────────────────────────────────────────────────────

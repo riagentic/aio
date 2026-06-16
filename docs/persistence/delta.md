@@ -147,7 +147,7 @@ recovery, normal delta mechanism handles catch-up.
 ### `createSelector` — server-side
 
 ```ts
-import { createSelector } from "aio/selector.ts";
+import { createSelector } from "aio/selectors";
 
 const selectPortfolioValue = createSelector(
   (s: State) => s.positions,

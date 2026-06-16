@@ -7,7 +7,10 @@ import { log } from "./logger.ts";
 
 /** True when running inside a compiled binary (AppImage, deno compile) */
 export function isCompiled(): boolean {
-  return !!Deno.env.get("APPIMAGE") || !import.meta.url.startsWith("file:///");
+  if (Deno.env.get("APPIMAGE")) return true;
+  // Deno compile VFS: modules embedded at file:///tmp/deno-compile-<app>/...
+  if (import.meta.url.includes("/deno-compile-")) return true;
+  return !import.meta.url.startsWith("file://");
 }
 
 /** Returns user home directory — $HOME or $USERPROFILE, throws if neither set */

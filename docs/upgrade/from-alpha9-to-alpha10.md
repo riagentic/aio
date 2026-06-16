@@ -114,7 +114,7 @@ feature("name", {
 });
 ```
 
-See [Features config](../state/features.md) for the full config table.
+See [Cells config](../state/cells.md) for the full config table.
 
 ### Internal changes (no action required)
 

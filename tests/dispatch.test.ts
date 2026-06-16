@@ -750,47 +750,51 @@ Deno.test("dispatch: re-entrant dispatch returns Promise that resolves after pro
   await p; // resolves cleanly
 });
 
-// ── structuredClone fail-loudly ──
+// ── structuredClone fail-loudly (audit F-8) ──
 
-Deno.test("dispatch: structuredClone failure falls back to JSON clone per-effect (AIO-139)", () => {
-  const errors: AioError[] = [];
-  let state = { n: 0 };
-  // Effects containing a function cannot be structuredCloned,
-  // but JSON round-trip preserves serializable fields (fn is dropped)
-  const uncloneable = { type: "BAD", fn: () => {} };
-  const executed: string[] = [];
+Deno.test(
+  "dispatch: non-cloneable effect is reported and dropped (not JSON-coerced)",
+  () => {
+    const errors: AioError[] = [];
+    let state = { n: 0 };
+    // Effects containing a function cannot be structuredCloned.
+    // Audit F-8: we no longer silently JSON-coerce (which lost undefined,
+    // NaN, Infinity, Date, Map, Set). We report EFFECT_ERROR and drop the effect.
+    const uncloneable = { type: "BAD", fn: () => {} };
+    const executed: string[] = [];
 
-  const dispatch = createDispatch<
-    typeof state,
-    { type: string },
-    { type: string; fn?: () => void }
-  >({
-    reduce: (s) => ({
-      state: { n: s.n + 1 },
-      effects: [uncloneable],
-    }),
-    execute: (e) => {
-      executed.push(e.type);
-    },
-    getState: () => state,
-    setState: (s) => {
-      state = s;
-    },
-    onDone: () => {},
-    log: noop,
-    debug: false,
-    reportOpts: { onError: (err) => errors.push(err) },
-  });
+    const dispatch = createDispatch<
+      typeof state,
+      { type: string },
+      { type: string; fn?: () => void }
+    >({
+      reduce: (s) => ({
+        state: { n: s.n + 1 },
+        effects: [uncloneable],
+      }),
+      execute: (e) => {
+        executed.push(e.type);
+      },
+      getState: () => state,
+      setState: (s) => {
+        state = s;
+      },
+      onDone: () => {},
+      log: noop,
+      debug: false,
+      reportOpts: { onError: (err) => errors.push(err) },
+    });
 
-  dispatch({ type: "A" });
-  // State should still update (reduce succeeded)
-  assertEquals(state.n, 1);
-  // Effect should survive via JSON fallback (fn lost, type preserved)
-  assertEquals(executed.length, 1);
-  assertEquals(executed[0], "BAD");
-  // No error reported — JSON fallback succeeded
-  assertEquals(errors.length, 0);
-});
+    dispatch({ type: "A" });
+    // Reduce still succeeds — state advances.
+    assertEquals(state.n, 1);
+    // Effect is dropped rather than shipped with a corrupted payload.
+    assertEquals(executed.length, 0);
+    // A loud EFFECT_ERROR is reported so the app author sees the failure.
+    assertEquals(errors.length, 1);
+    assertEquals(errors[0]!.code, "EFFECT_ERROR");
+  },
+);
 
 // ── effectTimeout hard-cancel — no double-report ──
 

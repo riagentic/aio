@@ -1,6 +1,7 @@
 // Trojan admin API — extracted from server.ts serveStatic()
 // Control REST API at /__aio/trojan/* (localhost-only, CSRF-protected, rate-limited)
 import type { AioUser } from "./aio.ts";
+import { _isFrameworkInternalActionType } from "./server-ws.ts";
 
 /** Client info visible to trojan introspection endpoints */
 export interface TrojanClientInfo {
@@ -58,6 +59,12 @@ export interface TrojanDeps {
 
 const TROJAN_RATE_LIMIT = 100;
 const SNAPSHOT_MAX_SIZE = 10_000_000;
+/** Auto-LIMIT applied to trojan SELECTs that don't set their own — bounds
+ *  result size and SQLite worker time. Audit F-9. */
+const TROJAN_SQL_DEFAULT_LIMIT = 10_000;
+/** Hard cap on serialized result bytes to prevent OOM from a wide SELECT
+ *  (e.g. millions of small rows still under DEFAULT_LIMIT). Audit F-9. */
+const TROJAN_SQL_MAX_RESULT_BYTES = 10_000_000;
 let _trojanReqCount = 0;
 let _trojanResetTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -274,6 +281,14 @@ async function handlePost(
       if (!action || typeof action.type !== "string") {
         return err("missing type field");
       }
+      // Same gate as server-ws — framework-internal actions (__set*, __exec, …)
+      // must not enter the dispatch loop from a network-sourced caller.
+      if (_isFrameworkInternalActionType(action.type)) {
+        return err(
+          `framework-internal action type "${action.type}" not dispatchable from trojan`,
+          403,
+        );
+      }
       if (
         action.payload !== undefined &&
         (typeof action.payload !== "object" || action.payload === null ||
@@ -370,7 +385,23 @@ async function handlePost(
           403,
         );
       }
-      return json(await trojan.sqlQuery(query));
+      // Audit F-9: enforce row + byte caps so a wide/unbounded SELECT cannot
+      // block the SQLite worker or OOM the server.
+      const hasLimit = /\bLIMIT\b/.test(upper);
+      const effectiveQuery = hasLimit
+        ? query
+        : `${query.trimEnd()} LIMIT ${TROJAN_SQL_DEFAULT_LIMIT}`;
+      const rows = await trojan.sqlQuery(effectiveQuery);
+      const serialized = JSON.stringify(rows, null, 2);
+      if (serialized.length > TROJAN_SQL_MAX_RESULT_BYTES) {
+        return err(
+          `result exceeds ${TROJAN_SQL_MAX_RESULT_BYTES} bytes — add a tighter LIMIT or narrower columns`,
+          413,
+        );
+      }
+      return new Response(serialized, {
+        headers: { "Content-Type": "application/json" },
+      });
     } catch (e) {
       return err(String(e instanceof Error ? e.message : e));
     }

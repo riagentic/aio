@@ -33,6 +33,7 @@ export interface ServerConfig {
   maxConnections?: number; // max concurrent WebSocket clients (default: 100)
   syncIntervalMs?: number; // throttle state broadcasts: max 1 push per N ms (default: 50)
   allowedOrigins?: string[]; // extra allowed origins beyond localhost (e.g. Docker, reverse proxy)
+  strictOrigin?: boolean; // require Origin header on WS upgrade when expose=true (defense-in-depth vs CSWSH from origin-stripping intermediaries)
   clientCounter?: { value: number }; // shared index counter — WS and UDS get unique indices
   cellPatchStrategies?: Map<string, "raw" | "skip" | "filter" | "full">; // per-cell patch strategy
   cellFilterFields?: Map<

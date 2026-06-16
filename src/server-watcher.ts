@@ -5,6 +5,7 @@ import { join } from "@std/path";
 import type { GraphResult } from "./graph-validator.ts";
 import { validateGraph } from "./graph-validator.ts";
 import { normPath, transpile, transpileCache } from "./server-transpile.ts";
+import { lockDir } from "./single-instance-lock.ts";
 
 /** File extensions that trigger live reload */
 const RELOAD_EXT = new Set([".ts", ".tsx", ".css", ".html", ".svg"]);
@@ -51,8 +52,13 @@ export function createFileWatcher(deps: WatcherDeps): FileWatcher {
   // --- Watcher state ---
   let fsWatcher: Deno.FsWatcher | null = null;
   let watcherActive = false;
+  let _sentinelOk = false;
   let healthTimer: ReturnType<typeof setInterval> | null = null;
-  const SENTINEL = `/tmp/aio-watch-${port}.tmp`;
+  // Sentinel lives in per-user lockDir ($XDG_RUNTIME_DIR/aio or /tmp/aio), not
+  // the world-writable /tmp root. Atomic createNew on first write refuses to
+  // follow a pre-existing symlink — prevents local attacker clobbering files
+  // readable to the dev's UID via a planted symlink (F-2).
+  const SENTINEL = join(lockDir(), `watch-${port}.tmp`);
   let lastWatcherEvent = Date.now();
   let watcherRestarts = 0;
   const MAX_WATCHER_RESTARTS = 3;
@@ -143,14 +149,15 @@ export function createFileWatcher(deps: WatcherDeps): FileWatcher {
 
   function startWatcher(): boolean {
     try {
-      fsWatcher = Deno.watchFs([absBaseDir, SENTINEL], { recursive: true });
+      const paths = _sentinelOk ? [absBaseDir, SENTINEL] : [absBaseDir];
+      fsWatcher = Deno.watchFs(paths, { recursive: true });
       watcherActive = true;
       (async () => {
         try {
           for await (const event of fsWatcher!) {
             if (event.kind === "access") continue;
             // Sentinel touch — update liveness timestamp, don't trigger reload
-            if (event.paths.some((p) => p.includes("aio-watch-"))) {
+            if (event.paths.some((p) => p === SENTINEL)) {
               lastWatcherEvent = Date.now();
               if (watcherRestarts > 0) watcherRestarts = 0; // AIO-157: reset on recovery
               continue;
@@ -171,18 +178,51 @@ export function createFileWatcher(deps: WatcherDeps): FileWatcher {
     }
   }
 
-  function start(): boolean {
-    // Ensure sentinel exists before watchFs — some systems throw if watched path is missing
+  // Create sentinel atomically. Returns true if we own a real file at SENTINEL,
+  // false if the path is hostile or dir is not writable. lstatSync avoids
+  // following symlinks (F-2 defense); createNew:true is O_EXCL atomic.
+  function ensureSentinel(): boolean {
     try {
-      Deno.writeTextFileSync(SENTINEL, "");
-    } catch { /* /tmp not writable — skip sentinel */ }
+      const info = Deno.lstatSync(SENTINEL);
+      if (!info.isFile) {
+        console.warn(
+          `[aio] live reload — sentinel path ${SENTINEL} is not a regular file (symlink/dir), refusing to use`,
+        );
+        return false;
+      }
+      Deno.removeSync(SENTINEL);
+    } catch (e) {
+      if (!(e instanceof Deno.errors.NotFound)) return false;
+    }
+    try {
+      const f = Deno.openSync(SENTINEL, { createNew: true, write: true });
+      f.close();
+      return true;
+    } catch {
+      return false; // dir not writable or raced — watcher falls back to absBaseDir only
+    }
+  }
+
+  function start(): boolean {
+    _sentinelOk = ensureSentinel();
     if (!startWatcher()) return false;
     console.log(`[aio] live reload watching ${absBaseDir}`);
-    // Health check — touch sentinel every 30s, restart watcher if no events for 60s
+    // Health check — touch sentinel every 30s, restart watcher if no events for 60s.
+    // lstatSync+open(write+truncate) instead of writeTextFileSync so we never
+    // follow a symlink if one gets swapped in mid-run (F-2 defense).
     healthTimer = setInterval(() => {
-      try {
-        Deno.writeTextFileSync(SENTINEL, String(Date.now()));
-      } catch { /* /tmp not writable — skip */ }
+      if (_sentinelOk) {
+        try {
+          const info = Deno.lstatSync(SENTINEL);
+          if (info.isFile) {
+            const f = Deno.openSync(SENTINEL, { write: true, truncate: true });
+            f.writeSync(new TextEncoder().encode(String(Date.now())));
+            f.close();
+          } else {
+            _sentinelOk = false; // something replaced it with a symlink/dir — stop touching
+          }
+        } catch { /* gone or hostile — skip touch */ }
+      }
       if (watcherActive && Date.now() - lastWatcherEvent > 60_000) {
         watcherRestarts++;
         if (watcherRestarts > MAX_WATCHER_RESTARTS) {

@@ -75,8 +75,14 @@ function _parseAndRoute(line: string): void {
   try {
     const data = JSON.parse(line);
     if (data === null || typeof data !== "object") return;
-    if (data.__ack || data.__op || data.__sync) {
-      if (typeof _onSyncMessage === "function") _onSyncMessage(data);
+    if (data.__ack || data.__op || data.__sync || data.__sync_error) {
+      if (typeof _onSyncMessage === "function") {
+        _onSyncMessage(data);
+      } else {
+        console.warn(
+          `[aio:air] sync message (${Object.keys(data).filter(k => k.startsWith("__")).join(", ")}) but no handler — discarding`,
+        );
+      }
       return;
     }
     _handleState(data);

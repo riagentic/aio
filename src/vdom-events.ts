@@ -133,7 +133,12 @@ export function _setWrapped(el: Element, evt: string, fn: EventListener): void {
 }
 
 export function _deleteWrapped(el: Element, evt: string): void {
-  _wrappedListeners.get(el)?.delete(evt);
+  const map = _wrappedListeners.get(el);
+  if (!map) return;
+  map.delete(evt);
+  if (map.size === 0) {
+    _wrappedListeners.delete(el);
+  }
 }
 
 // ── onChange → onInput mapping (AIO-72: React compat) ──────────────

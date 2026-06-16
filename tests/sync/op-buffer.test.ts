@@ -66,4 +66,31 @@ describe("OpBuffer", () => {
     const loaded = await buf.getUnconfirmed("todos");
     assertEquals(loaded.length, 0);
   });
+
+  it("evicts stale ops when buffer is full (H3 backpressure fix)", async () => {
+    const buf = createOpBuffer(createMemoryStorage(), { pendingCap: 2, staleAfter: 10_000 });
+
+    await buf.add({ ...mkOp("fresh"), _clientTs: Date.now() });
+    await buf.add({ ...mkOp("old-stale"), _clientTs: Date.now() - 5 * 60_000 }); // 5 min old
+
+    const result = await buf.add({ ...mkOp("new-op"), _clientTs: Date.now() });
+    assertEquals(result, true); // accepted after eviction
+
+    const unconfirmed = await buf.getUnconfirmed("todos");
+    assertEquals(unconfirmed.length, 2);
+    const ids = unconfirmed.map((o) => o.id).sort();
+    assertEquals(ids, ["fresh", "new-op"]); // stale op was evicted
+  });
+
+  it("does not evict non-stale ops when buffer is full", async () => {
+    const buf = createOpBuffer(createMemoryStorage(), { pendingCap: 2 });
+
+    // Add two fresh ops (no _clientTs means they're not eligible for TTL eviction)
+    await buf.add(mkOp("fresh1"));
+    await buf.add(mkOp("fresh2"));
+
+    // Adding a third should fail — no stale ops to evict
+    const result = await buf.add({ ...mkOp("new-op"), _clientTs: Date.now() });
+    assertEquals(result, false);
+  });
 });

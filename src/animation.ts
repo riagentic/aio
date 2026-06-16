@@ -1,27 +1,9 @@
-// AIO Animation Hooks — useTransition, useSpring for CSS animation orchestration.
+// AIO Animation Hooks — useSpring for physics-based numeric interpolation.
 // Signal-based, works with the AIO renderer's tracking system.
 
-import { type Signal, signal } from "./signal.ts";
+import { signal } from "./signal.ts";
 
 // ── Types ───────────────────────────────────────────────────────────
-
-/** Reactive state for a CSS enter/exit transition lifecycle. */
-export interface TransitionState {
-  /** Current stage: "enter" | "active" | "exit" | "idle". */
-  readonly stage: "enter" | "active" | "exit" | "idle";
-  /** Whether the element should be in the DOM. */
-  readonly mounted: boolean;
-  /** CSS class string for the current stage. */
-  readonly className: string;
-  /** Trigger enter transition. */
-  enter(): void;
-  /** Trigger exit transition. */
-  exit(): void;
-  /** Toggle between enter and exit. */
-  toggle(): void;
-  /** Cancel pending timers and clean up. Call on component unmount. */
-  dispose(): void;
-}
 
 /** Reactive spring-animated numeric value with physics-based interpolation. */
 export interface SpringValue {
@@ -37,16 +19,6 @@ export interface SpringValue {
   dispose(): void;
 }
 
-/** Configuration for CSS class-based enter/exit transitions. */
-export interface TransitionConfig {
-  /** Base CSS class name (e.g., "fade"). Produces "fade-enter", "fade-active", "fade-exit". */
-  name: string;
-  /** Duration in ms. Default 300. */
-  duration?: number;
-  /** Whether to start entered. Default false. */
-  initial?: boolean;
-}
-
 /** Configuration for spring physics animation — stiffness, damping, mass, and precision. */
 export interface SpringConfig {
   /** Initial value. Default 0. */
@@ -59,62 +31,6 @@ export interface SpringConfig {
   mass?: number;
   /** Precision threshold. Default 0.01. */
   precision?: number;
-}
-
-// ── useTransition ───────────────────────────────────────────────────
-
-/** @deprecated Use `<Transition>` component with transition functions (fade, slide, scale) instead. */
-export function useTransition(config: TransitionConfig): TransitionState {
-  const duration = config.duration ?? 300;
-  const stageSig: Signal<"enter" | "active" | "exit" | "idle"> = signal<
-    "enter" | "active" | "exit" | "idle"
-  >(
-    config.initial ? "active" : "idle",
-  );
-  const mountedSig: Signal<boolean> = signal(!!config.initial);
-  let timer: ReturnType<typeof setTimeout> | undefined;
-
-  const clear = () => {
-    if (timer) {
-      clearTimeout(timer);
-      timer = undefined;
-    }
-  };
-
-  return {
-    get stage() {
-      return stageSig.value;
-    },
-    get mounted() {
-      return mountedSig.value;
-    },
-    get className() {
-      const s = stageSig.value;
-      if (s === "idle") return "";
-      return `${config.name}-${s}`;
-    },
-    enter() {
-      clear();
-      mountedSig.set(true);
-      stageSig.set("enter");
-      // Transition to active after a frame (allows browser to apply enter styles)
-      timer = setTimeout(() => stageSig.set("active"), 16);
-    },
-    exit() {
-      clear();
-      stageSig.set("exit");
-      timer = setTimeout(() => {
-        mountedSig.set(false);
-        stageSig.set("idle");
-      }, duration);
-    },
-    toggle() {
-      const s = stageSig.peek();
-      if (s === "idle" || s === "exit") this.enter();
-      else this.exit();
-    },
-    dispose: clear,
-  };
 }
 
 // ── useSpring ───────────────────────────────────────────────────────

@@ -214,10 +214,10 @@ Everything below is the full reference, organized by category.
 | `ScopedApp<S>`    | App context for init/destroy/execute                             |
 | `TestContext`     | Test harness -- `{ dispatch, getState, expect, settle }`         |
 | `AioError`        | Error with `code`, `source`, `context`, `correlationId`          |
-| `AioErrorCode`    | 16 error codes -- see [../debugging.md](../debugging.md)         |
+| `AioErrorCode`    | 16 error codes -- see [Errors](../debugging/errors.md)         |
 | `LogConfig`       | Logging configuration                                            |
 | `LogLevel`        | `'trace' \| 'debug' \| 'info' \| 'warn' \| 'error'`              |
-| `VitalsConfig`    | Client diagnostic config -- see [../vitals.md](../vitals.md)     |
+| `VitalsConfig`    | Client diagnostic config -- see [Vitals](../debugging/vitals.md)     |
 | `VitalAlert`      | `{ id, layer, status, duration, measured, threshold, hint, ts }` |
 | `MemoryConfig`    | Heap monitoring config                                           |
 | `ScheduleEffect`  | `{ _schedule: true, key, type, ... }` from sync methods          |

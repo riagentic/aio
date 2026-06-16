@@ -77,10 +77,16 @@ export function createBroadcaster(deps: BroadcastDeps): Broadcaster {
     broadcastQueued = true;
     const patchesToSend = _bufferedPatches;
     _bufferedPatches = [];
+    // Audit F-6: reset dirty BEFORE scheduling the microtask so any broadcast()
+    // call between now and the throttle callback re-arms it. Resetting inside
+    // the microtask (the previous behavior) raced with re-entrant broadcast()
+    // calls and dropped patches that arrived in the schedule→run gap; the next
+    // throttle callback then saw dirty=false and the buffered patches sat
+    // indefinitely until something else triggered a broadcast.
+    broadcastDirty = false;
 
     queueMicrotask(() => {
       broadcastQueued = false;
-      broadcastDirty = false;
       try {
         for (const [ws, meta] of connections) {
           if (ws.readyState !== WebSocket.OPEN) continue;

@@ -72,7 +72,13 @@ export function createServerSyncHandler(
   const _locks = new Map<string, Promise<void>>();
   function withLock(cell: string, fn: () => Promise<void>): Promise<void> {
     const prev = _locks.get(cell) ?? Promise.resolve();
-    const next = prev.then(fn, fn);
+    // F-8: mirror client-side sync-engine cleanup so the map doesn't retain
+    // an entry per cell ever touched. Only delete if we're still the latest.
+    const next = prev.then(fn, fn).finally(() => {
+      if (_locks.get(cell) === next) {
+        _locks.delete(cell);
+      }
+    });
     _locks.set(cell, next);
     return next;
   }
@@ -158,7 +164,7 @@ export function createServerSyncHandler(
       }
       const sync = r as {
         clientId: string;
-        cells: Record<string, { lastHlc: HLC | null }>;
+        cells: Record<string, { lastHlc: HLC | null; lastServerTs?: number }>;
         pendingOps: SyncOp[];
       };
 
@@ -183,9 +189,10 @@ export function createServerSyncHandler(
         let useSnapshot = false;
         const snapshot: Record<string, Record<string, unknown>> = {};
         const lowWaterMap: Record<string, HLC> = {};
+        let maxServerTs: number | undefined;
 
         for (
-          const [cell, { lastHlc }] of Object.entries(
+          const [cell, { lastHlc, lastServerTs }] of Object.entries(
             sync.cells ?? {},
           )
         ) {
@@ -194,6 +201,9 @@ export function createServerSyncHandler(
           await withLock(cell, async () => {
             const cellLW = await getLowWater(deps.db, cell);
             if (cellLW) lowWaterMap[cell] = cellLW;
+
+            // Use server_ts cursor when available — strictly monotonic, no concurrency ambiguity
+            const effectiveServerTs = lastServerTs ?? undefined;
 
             // Client's lastHlc older than low_water → compacted, send snapshot
             if (
@@ -204,8 +214,13 @@ export function createServerSyncHandler(
               useSnapshot = true;
               snapshot[cell] = deps.getCellState(cell);
             } else {
-              const ops = await loadOpsSince(deps.db, cell, lastHlc);
+              const ops = await loadOpsSince(deps.db, cell, lastHlc, effectiveServerTs);
               responseOps.push(...ops);
+            }
+
+            // Track max server_ts for echo-back to client
+            if (effectiveServerTs != null && (!maxServerTs || effectiveServerTs > maxServerTs)) {
+              maxServerTs = effectiveServerTs;
             }
           });
         }
@@ -217,6 +232,7 @@ export function createServerSyncHandler(
               snapshot,
               ops: responseOps,
               lowWater: lowWaterMap,
+              lastServerTs: maxServerTs,
             },
           }
           : {
@@ -224,6 +240,7 @@ export function createServerSyncHandler(
               mode: "incremental" as const,
               ops: responseOps,
               lowWater: lowWaterMap,
+              lastServerTs: maxServerTs,
             },
           };
 
@@ -236,6 +253,12 @@ export function createServerSyncHandler(
         );
       })().catch((e) => {
         deps.log.error(`[sync:server] handleSync failed: ${e}`);
+        // Notify client so it can back off and retry instead of hanging in "syncing"
+        try {
+          socket.send(JSON.stringify({
+            __sync_error: { reason: String(e) },
+          }));
+        } catch { /* client disconnected */ }
       });
     },
   };

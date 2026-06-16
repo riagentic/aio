@@ -17,9 +17,6 @@ export type { AioError } from "./error.ts";
 /** Performance check — on: warn on violations, off: silent */
 export type PerfCheck = "on" | "off";
 
-/** @deprecated Use PerfCheck instead */
-export type PerfMode = "strict" | "soft";
-
 /** Performance budgets in milliseconds */
 export type PerfBudget = {
   reduce?: number; // default: 100 — "feels instant" threshold
@@ -274,48 +271,38 @@ export function createDispatch<S, A, E>(
         // Without this, effects created inside produce() hold revoked draft refs
         // that crash on JSON.stringify or property access after produce() finalizes.
         // Clone individually so one non-cloneable effect doesn't drop all (AIO-139).
+        // Audit F-8: a non-cloneable effect is REPORTED and DROPPED — never
+        // silently coerced via JSON round-trip (that lost undefined/NaN/Infinity
+        // /Date and corrupted the executor's payload contract).
         if (reduced.effects.length) {
           const cloned: (E | ScheduleEffect)[] = [];
           for (const eff of reduced.effects) {
             try {
               cloned.push(structuredClone(eff));
             } catch (cloneErr) {
-              // Try JSON round-trip as fallback — WARNING: loses undefined, NaN, Infinity, Date
-              try {
-                const jsoned = JSON.parse(JSON.stringify(eff));
-                // AIO-272: warn when JSON fallback is used — data loss occurred
-                console.warn(
-                  `[aio:dispatch] effect clone fallback for "${
-                    tag(current)
-                  }" — ` +
-                    `undefined, NaN, Infinity, Date values become null. ` +
-                    `Original error: ${
-                      cloneErr instanceof Error
-                        ? cloneErr.message
-                        : String(cloneErr)
-                    }`,
-                );
-                cloned.push(jsoned);
-              } catch {
-                const err = createAioError(
-                  "EFFECT_ERROR",
-                  `effect not cloneable for ${
-                    tag(current)
-                  } — keeping original. Effects are pre-cloned inside produce(), ` +
-                    `so this should not happen with revoked drafts. ` +
-                    `Original: ${
-                      cloneErr instanceof Error
-                        ? cloneErr.message
-                        : String(cloneErr)
-                    }`,
-                  {
-                    cellName: actionType?.split(":")[0],
-                    actionType,
-                  },
-                );
-                reportAioError(err, _reportOpts);
-                cloned.push(eff);
-              }
+              const effType =
+                (eff as Record<string, unknown> | null)?.type as
+                  | string
+                  | undefined;
+              const err = createAioError(
+                "EFFECT_ERROR",
+                `effect "${
+                  effType ?? "?"
+                }" from action "${tag(current)}" is not structuredClone-able — dropped. ` +
+                  `Effects must be plain JSON-shaped objects (no functions, DOM nodes, class instances, etc). ` +
+                  `Original: ${
+                    cloneErr instanceof Error
+                      ? cloneErr.message
+                      : String(cloneErr)
+                  }`,
+                {
+                  cellName: actionType?.split(":")[0],
+                  actionType,
+                  effectType: effType,
+                },
+              );
+              reportAioError(err, _reportOpts);
+              // do NOT push — drop the effect rather than corrupt its payload
             }
           }
           reduced = { ...reduced, effects: cloned };

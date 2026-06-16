@@ -2,8 +2,8 @@
 
 Desktop app packaging, thin client, and window management.
 
-For build targets (AppImage, zip, systemd), see [builds.md](builds.md). For the
-docs index, see [manual.md](manual.md).
+For build targets (AppImage, zip, systemd), see [Build Targets](../build/targets.md). For the
+docs index, see [index.md](../index.md).
 
 ## Setup
 

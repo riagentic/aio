@@ -30,16 +30,17 @@ all clients**
     "jsxImportSource": "aio"
   },
   "imports": {
-    "aio": "jsr:@riagentic/aio@1.0.0-alpha8",
-    "aio/air": "jsr:@riagentic/aio@1.0.0-alpha8/air",
+    "aio": "jsr:@riagentic/aio@^1.0.0-alpha13",
+    "aio/air": "jsr:@riagentic/aio@^1.0.0-alpha13/air",
+    "aio/jsx-runtime": "jsr:@riagentic/aio@^1.0.0-alpha13/jsx-runtime",
     "esbuild": "npm:esbuild@^0.24"
   },
   "tasks": {
     "dev": "deno run -A src/app.ts",
-    "am": "deno run -A jsr:@riagentic/aio@1.0.0-alpha8/src/am",
+    "am": "deno run -A jsr:@riagentic/aio@^1.0.0-alpha13/src/am",
     "test": "deno test -A --unstable-kv tests/",
-    "compile:browser": "deno run -A jsr:@riagentic/aio@1.0.0-alpha8/src/build --compile",
-    "compile:electron": "deno run -A jsr:@riagentic/aio@1.0.0-alpha8/src/build --compile --electron"
+    "compile:browser": "deno run -A jsr:@riagentic/aio@^1.0.0-alpha13/src/build --compile",
+    "compile:electron": "deno run -A jsr:@riagentic/aio@^1.0.0-alpha13/src/build --compile --electron"
   }
 }
 ```
@@ -163,7 +164,7 @@ const counter = cell("counter", {
 | --------------------------------- | ------------------------------------------------------- |
 | REST API endpoints                | Actions via WebSocket, no HTTP needed                   |
 | Database reads/writes             | Cell-level `persist`/`ui` config + auto Deno.Kv         |
-| SQLite / raw SQL                  | Built-in `app.db` -- [3-tier SQLite](../persistence.md) |
+| SQLite / raw SQL                  | Built-in `app.db` -- [3-tier SQLite](../persistence/sqlite.md) |
 | `setInterval` / `setTimeout`      | Declarative `schedule.every` / `schedule.after`         |
 | cron jobs                         | `schedule.cron` -- runs in-process                      |
 | React state + useEffect           | Direct cell access -- all state lives on server         |

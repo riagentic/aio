@@ -14,14 +14,11 @@
 
 import {
   _accessedPaths as _coreAccessedPaths,
-  _applyPatch as _coreApplyPatch,
   _BLOCKED_KEYS as _coreBLOCKED_KEYS,
   _checkWastedRenders as _coreCheckWastedRenders,
-  _deepMergeFiltered as _coreDeepMergeFiltered,
   _getArrayRefStats as _coreGetArrayRefStats,
   _getState as _coreGetState,
   _preserveArrayRefs as _corePreserveArrayRefs,
-  _rebuildIdMaps as _coreRebuildIdMaps,
   _reset as _coreReset,
   _resetArrayRefStats as _coreResetArrayRefStats,
   _resolveWithFallback as _coreResolveWithFallback,
@@ -187,9 +184,6 @@ export const _resetArrayRefStats = _coreResetArrayRefStats;
 export const _checkWastedRenders = _coreCheckWastedRenders;
 export const _preserveArrayRefs = _corePreserveArrayRefs;
 export const _shallowEqual = _coreShallowEqual;
-export const _rebuildIdMaps = _coreRebuildIdMaps;
-export const _applyPatch = _coreApplyPatch;
-export const _deepMergeFiltered = _coreDeepMergeFiltered;
 
 // ── Subscription tracking re-exports ────────────────────────────────
 

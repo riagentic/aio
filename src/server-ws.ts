@@ -17,6 +17,24 @@ const BP_STALENESS_HIGH = 300; // ms — client render staleness triggering 4x t
 const BP_STALENESS_MODERATE = 100; // ms — 2x throttle
 const BP_RECOVERY_PINGS = 3; // consecutive low-staleness pings before stepping down
 
+/** Consecutive drop threshold before client is flagged as abusive (H3/H4 fix). */
+const CONSECUTIVE_DROP_THRESHOLD = 50;
+
+/** How long (ms) an abusive client key stays denylisted after forced close.
+ *  Plugs F-4: per-socket strike counters get reset on reconnect, so an IP
+ *  can amplify throughput by cycling connections. Denylist survives reconnects. */
+const ABUSE_DENYLIST_MS = 60_000;
+
+/** Action types that may only be dispatched from server-internal code paths.
+ *  Match either a top-level `__name` or a cell-prefixed `cell:__name` form. */
+export function _isFrameworkInternalActionType(type: string): boolean {
+  if (type.startsWith("__")) return true;
+  const colon = type.indexOf(":");
+  if (colon === -1) return false;
+  return type.charCodeAt(colon + 1) === 0x5f /* "_" */ &&
+    type.charCodeAt(colon + 2) === 0x5f;
+}
+
 export type ClientType =
   | "electron"
   | "browser"
@@ -38,8 +56,12 @@ export type ClientMeta = {
   bpMultiplier: number;
   bpConsecutiveLow: number;
   bpLastSentAt: number;
+  // H3/H4 fix: track consecutive drops for abuse detection (backpressure deadlock prevention)
+  consecutiveDrops: number;
   subscriptions: Set<string> | null;
   disconnected: boolean;
+  /** Stable client key (usually remote IP) used for cross-connection abuse tracking. */
+  clientKey?: string;
 };
 
 /** Dependencies injected from server.ts closure */
@@ -51,6 +73,9 @@ export interface WsDeps {
   maxConnections?: number;
   expose?: boolean;
   allowedOrigins?: string[];
+  /** When true AND expose=true, require Origin header on WS upgrade.
+   *  Plugs F-6: empty/absent Origin is otherwise accepted by the handshake. */
+  strictOrigin?: boolean;
   clientCounter: { value: number };
   bootId: string;
   vitalsSystem?: VitalsSystem;
@@ -74,7 +99,7 @@ export interface WsDeps {
 
 /** Returned by createWsManager — the WS subsystem's public API */
 export interface WsManager {
-  handleWs: (req: Request, user?: AioUser) => Response;
+  handleWs: (req: Request, user?: AioUser, clientKey?: string) => Response;
   connections: Map<WebSocket, ClientMeta>;
   payloadStats: Map<
     string,
@@ -106,6 +131,24 @@ export function createWsManager(deps: WsDeps): WsManager {
   >();
   const nextIndex = () => deps.clientCounter.value++;
 
+  // F-4: IP/client-key denylist with TTL. Survives socket reconnects so
+  // abusive clients can't reset their strike count by opening new connections.
+  const abuseDenylist = new Map<string, number>(); // key → expiresAt (epoch ms)
+  function _isDenied(key: string | undefined): boolean {
+    if (!key) return false;
+    const expiresAt = abuseDenylist.get(key);
+    if (expiresAt === undefined) return false;
+    if (Date.now() > expiresAt) {
+      abuseDenylist.delete(key);
+      return false;
+    }
+    return true;
+  }
+  function _addToDenylist(key: string | undefined): void {
+    if (!key) return;
+    abuseDenylist.set(key, Date.now() + ABUSE_DENYLIST_MS);
+  }
+
   // Derive request kind from WS command message for deduplication key
   const reqKind = (msg: string) =>
     msg.startsWith("__ui:snapshot")
@@ -114,23 +157,43 @@ export function createWsManager(deps: WsDeps): WsManager {
       ? "interact"
       : "clientState";
 
-  function handleWs(req: Request, user?: AioUser): Response {
-    if (!deps.expose || deps.allowedOrigins?.length) {
-      const origin = req.headers.get("origin");
-      if (origin) {
-        try {
-          const u = new URL(origin);
-          const h = u.hostname;
-          const isLocal = h === "localhost" || h === "127.0.0.1" ||
-            h === "::1" || h === "[::1]";
-          const isAllowed = deps.allowedOrigins?.includes(h) ?? false;
-          if (!isLocal && !isAllowed) {
-            deps.debug(`ws: rejected origin ${origin}`);
-            return new Response("Forbidden", { status: 403 });
-          }
-        } catch {
-          return new Response("Bad Request", { status: 400 });
+  function handleWs(req: Request, user?: AioUser, clientKey?: string): Response {
+    // F-4: reject denylisted clients at handshake so reconnect loops can't
+    // reset per-socket abuse counters.
+    if (_isDenied(clientKey)) {
+      deps.debug(`ws: rejected denylisted client ${clientKey}`);
+      return new Response("Too Many Requests", { status: 429 });
+    }
+    // CSWSH defense — always validate Origin header. Browsers attach Origin to
+    // every cross-origin WebSocket upgrade; same-origin tools (curl, internal
+    // health checks) typically omit it, in which case we accept the upgrade.
+    //
+    // Audit F-2: previous logic only ran the check when (!expose || allowedOrigins),
+    // so `--expose` without an explicit allowedOrigins accepted any origin —
+    // a Cross-Site WebSocket Hijacking surface for token-in-URL deployments.
+    const origin = req.headers.get("origin");
+    // F-6: defense-in-depth for --expose deployments. When strictOrigin is on,
+    // reject upgrades that have no Origin header (or empty string). Without this,
+    // origin-stripping proxies and certain sandboxed contexts reach the handler
+    // with falsy `origin` and bypass the check below.
+    if (deps.expose && deps.strictOrigin && !origin) {
+      deps.debug("ws: rejected — strictOrigin requires Origin header");
+      return new Response("Forbidden", { status: 403 });
+    }
+    if (origin) {
+      try {
+        const u = new URL(origin);
+        const h = u.hostname;
+        const isLocal = h === "localhost" || h === "127.0.0.1" ||
+          h === "::1" || h === "[::1]";
+        const allowed = deps.allowedOrigins ?? [];
+        const isAllowed = allowed.includes(h) || allowed.includes("*");
+        if (!isLocal && !isAllowed) {
+          deps.debug(`ws: rejected origin ${origin}`);
+          return new Response("Forbidden", { status: 403 });
         }
+      } catch {
+        return new Response("Bad Request", { status: 400 });
       }
     }
 
@@ -156,6 +219,8 @@ export function createWsManager(deps: WsDeps): WsManager {
       bpLastSentAt: 0,
       subscriptions: null,
       disconnected: false,
+      consecutiveDrops: 0,
+      clientKey,
     };
 
     socket.onerror = (e) => {
@@ -273,6 +338,7 @@ export function createWsManager(deps: WsDeps): WsManager {
     meta: ClientMeta,
     e: MessageEvent,
   ): void {
+    // Rate limiting — per-second counter (original behavior)
     meta.msgCount++;
     if (!meta.msgResetTimer) {
       meta.msgResetTimer = setTimeout(() => {
@@ -281,14 +347,28 @@ export function createWsManager(deps: WsDeps): WsManager {
         meta.msgResetTimer = undefined;
       }, 1000);
     }
+
+    // H3/H4 fix: track consecutive drops for abuse detection (backpressure deadlock prevention)
     if (meta.msgCount > WS_RATE_LIMIT) {
-      deps.debug(
-        `ws: rate limit exceeded for ${
-          meta.id.slice(0, 8)
-        } (${meta.msgCount}/s)`,
-      );
+      meta.consecutiveDrops++;
+      if (meta.consecutiveDrops >= CONSECUTIVE_DROP_THRESHOLD) {
+        deps.debug(
+          `ws: client ${meta.id.slice(0, 8)} flagged — ${meta.consecutiveDrops} consecutive drops`,
+        );
+        // F-4: block this client-key at handshake for ABUSE_DENYLIST_MS
+        // so reconnect loops can't reset the strike counter.
+        _addToDenylist(meta.clientKey);
+        try {
+          socket.close(1008, "Rate limit exceeded");
+        } catch { /* already closed */ }
+        return;
+      }
       return;
     }
+
+    // Reset consecutive drop counter on successful message
+    meta.consecutiveDrops = 0;
+
     if (typeof e.data !== "string") {
       deps.debug(`ws: binary message dropped — only JSON strings accepted`);
       return;
@@ -390,6 +470,20 @@ export function createWsManager(deps: WsDeps): WsManager {
       deps.debug(`ws: invalid action — missing type field`);
       return;
     }
+    // Block framework-internal action types from network sources.
+    // Internal actions (cell:__setX, cell:__exec, cell:__error, cell:__flow,
+    // cell:__FlowState, cell:__Init, cell:__Destroy) carry trusted payload shapes
+    // (e.g. mutation lists) that bypass cell method bodies. Accepting them from
+    // clients is a remote-code-style vector — see audit F-1 (prototype pollution
+    // via __setMethod with crafted mutation paths).
+    if (_isFrameworkInternalActionType(parsed.type)) {
+      deps.debug(
+        `ws: rejected framework-internal action type "${parsed.type}" from client ${
+          meta.id.slice(0, 8)
+        }`,
+      );
+      return;
+    }
     if (
       parsed.payload !== undefined &&
       (typeof parsed.payload !== "object" || parsed.payload === null ||
@@ -428,10 +522,10 @@ export function createWsManager(deps: WsDeps): WsManager {
     if (body.startsWith("goto:")) {
       const n = Number(body.slice(5));
       if (Number.isInteger(n) && n >= 0 && n < 1_000_000) {
-        deps.onTTCommand!("goto", n);
+        deps.onTTCommand?.("goto", n);
       }
     } else {
-      deps.onTTCommand!(body);
+      deps.onTTCommand?.(body);
     }
   }
 

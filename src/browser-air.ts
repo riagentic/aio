@@ -9,7 +9,6 @@ export { setSyncMessageHandler } from "./browser-air-transport.ts";
 // ── Protocol re-exports (public API surface) ────────────────────────
 export {
   _accessedPaths,
-  _applyPatch,
   _BLOCKED_KEYS,
   _checkStateIntegrity,
   _checkWastedRenders,
@@ -20,14 +19,12 @@ export {
   _coreResendSubs,
   _coreSetConnected,
   _coreSetTransport,
-  _deepMergeFiltered,
   _getArrayRefStats,
   type _HandleResult,
   _incStateVersion,
   _memoCompare,
   _preserveArrayRefs,
   _projectWithSharing,
-  _rebuildIdMaps,
   _resetArrayRefStats,
   _resetTracking,
   _resolveStateReady,

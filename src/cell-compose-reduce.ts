@@ -238,7 +238,10 @@ export function reduceCell(
     : simpleReturn;
 }
 
-/** Clone effects array to detach from Immer draft (AIO-146) */
+/** Clone effects array to detach from Immer draft (AIO-146).
+ *  Audit F-8: a non-cloneable effect is logged and DROPPED — no JSON-roundtrip
+ *  fallback. JSON loses undefined/NaN/Infinity/Date/Map/Set and silently
+ *  corrupted the executor's payload contract. */
 function cloneEffects(
   effects: (Msg | ScheduleEffect)[],
   actionType?: string,
@@ -249,23 +252,18 @@ function cloneEffects(
     try {
       cloned.push(structuredClone(eff));
     } catch (cloneErr) {
-      try {
-        cloned.push(JSON.parse(JSON.stringify(eff)));
-      } catch {
-        const effType = (eff as Record<string, unknown>)?.type ?? "?";
-        log.warn(
-          "cell",
-          `effect not cloneable for ${
-            actionType ?? "?"
-          } (effect: ${effType}) — ` +
-            `keeping original. Ensure effects are plain objects. ` +
-            `Error: ${
-              cloneErr instanceof Error ? cloneErr.message : String(cloneErr)
-            }`,
-        );
-        // Safe to keep: cloneEffects now runs inside produce() while draft is alive
-        cloned.push(eff);
-      }
+      const effType = (eff as Record<string, unknown> | null)?.type ?? "?";
+      log.error(
+        "cell",
+        `effect "${effType}" from action "${
+          actionType ?? "?"
+        }" is not structuredClone-able — dropped. ` +
+          `Effects must be plain JSON-shaped objects (no functions, DOM nodes, class instances). ` +
+          `Original: ${
+            cloneErr instanceof Error ? cloneErr.message : String(cloneErr)
+          }`,
+      );
+      // do NOT push — drop the effect rather than ship a corrupted payload
     }
   }
   return cloned;

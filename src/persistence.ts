@@ -136,35 +136,40 @@ export function createPersistenceManager(
     }
   }
 
-  let persistRunning = false;
+  // Audit F-10: track the currently running persist as an explicit Promise.
+  // flushPersist() awaits it instead of busy-polling a boolean every 5ms.
+  let inFlight: Promise<void> | null = null;
   let persistNeeded = false;
+
+  async function _runPersistCycle(): Promise<void> {
+    try {
+      await _syncSqlite();
+      await _syncKv();
+    } finally {
+      inFlight = null;
+      if (persistNeeded && !shuttingDown) {
+        persistNeeded = false;
+        schedulePersist();
+      }
+    }
+  }
 
   function schedulePersist(): void {
     if ((!kvDb && !asyncDb) || shuttingDown) {
       return;
     }
-    if (persistRunning) {
+    if (inFlight) {
       persistNeeded = true;
       return;
     }
     if (persistTimer) return;
-    persistTimer = setTimeout(async () => {
+    persistTimer = setTimeout(() => {
       persistTimer = null;
-      if (persistRunning) {
+      if (inFlight) {
         persistNeeded = true;
         return;
       }
-      persistRunning = true;
-      try {
-        await _syncSqlite();
-        await _syncKv();
-      } finally {
-        persistRunning = false;
-        if (persistNeeded) {
-          persistNeeded = false;
-          schedulePersist();
-        }
-      }
+      inFlight = _runPersistCycle();
     }, persistMs);
   }
 
@@ -173,62 +178,59 @@ export function createPersistenceManager(
       clearTimeout(persistTimer);
       persistTimer = null;
     }
-    // Wait for any running persist to finish before flushing (AIO-148)
-    if (persistRunning) {
-      await new Promise<void>((r) => {
-        const check = () => {
-          if (!persistRunning) r();
-          else setTimeout(check, 5);
-        };
-        check();
-      });
+    // Wait for any in-flight scheduled persist to finish so we don't overlap.
+    // Previously polled a boolean every 5ms (AIO-148); now we just await the
+    // Promise directly — no CPU churn during slow shutdowns.
+    if (inFlight) {
+      await inFlight.catch(() => {/* errors already reported inside cycle */});
     }
-    persistRunning = true;
-    try {
-      // Flush SQLite
-      if (asyncDb && dbSchema) {
-        const stateSnapshot = structuredClone(getState());
-        try {
-          await syncTables(asyncDb, dbSchema, stateSnapshot, prevDbState);
-          prevDbState = stateSnapshot;
-        } catch (e) {
-          log.error(`persist: sqlite flush failed — ${e}`);
-        }
-      }
-      // Flush KV
-      if (kvDb) {
-        try {
-          const dbState = getDBState(kvGetState());
-          if (persistMode === "multi") {
-            const obj = dbState as Record<string, unknown>;
-            const keys = Object.keys(obj);
-            const result = await kvDb.setMulti(
-              persistKey,
-              obj,
-              prevPersistedKeys,
-            );
-            if (result.ok) prevPersistedKeys = keys;
-          } else {
-            await kvDb.set(persistKey, dbState);
+    const cycle = (async () => {
+      try {
+        if (asyncDb && dbSchema) {
+          const stateSnapshot = structuredClone(getState());
+          try {
+            await syncTables(asyncDb, dbSchema, stateSnapshot, prevDbState);
+            prevDbState = stateSnapshot;
+          } catch (e) {
+            log.error(`persist: sqlite flush failed — ${e}`);
           }
-          log.debug("persist: flushed");
-        } catch (e) {
-          const msg = String(e);
-          if (
-            msg.includes("too large") || msg.includes("65536") ||
-            msg.includes("value too")
-          ) {
-            log.warn(
-              `persist: state exceeds Deno KV 65KB limit — set persistMode:'multi', cell-level persist filters, or db:{} (SQLite)`,
-            );
-          }
-          log.error(`persist: flush failed — ${e}`);
-          _reportPersistError(e);
         }
+        if (kvDb) {
+          try {
+            const dbState = getDBState(kvGetState());
+            if (persistMode === "multi") {
+              const obj = dbState as Record<string, unknown>;
+              const keys = Object.keys(obj);
+              const result = await kvDb.setMulti(
+                persistKey,
+                obj,
+                prevPersistedKeys,
+              );
+              if (result.ok) prevPersistedKeys = keys;
+            } else {
+              await kvDb.set(persistKey, dbState);
+            }
+            log.debug("persist: flushed");
+          } catch (e) {
+            const msg = String(e);
+            if (
+              msg.includes("too large") || msg.includes("65536") ||
+              msg.includes("value too")
+            ) {
+              log.warn(
+                `persist: state exceeds Deno KV 65KB limit — set persistMode:'multi', cell-level persist filters, or db:{} (SQLite)`,
+              );
+            }
+            log.error(`persist: flush failed — ${e}`);
+            _reportPersistError(e);
+          }
+        }
+      } finally {
+        inFlight = null;
       }
-    } finally {
-      persistRunning = false;
-    }
+    })();
+    inFlight = cycle;
+    await cycle;
   }
 
   function setShuttingDown(): void {

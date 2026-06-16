@@ -5,7 +5,7 @@ coordinating through generators, direct calling, and machine guards. Covers
 generators, cross-cell `call()`, `cancelOn`, machine guards, error recovery, and
 testing.
 
-Prerequisites: [quickstart.md](../quickstart.md) done, one cell under your belt.
+Prerequisites: [Quickstart](../basics/quickstart.md) done, one cell under your belt.
 
 ---
 
@@ -441,8 +441,8 @@ you know the entire checkout flow.
 
 ## Next steps
 
-- [generators.md](../generators.md) -- full GenCtx API, `ctx.all`, `ctx.race`,
+- [Generators](../state/generators.md) -- full GenCtx API, `ctx.all`, `ctx.race`,
   reusable generators
-- [cells.md](../cells.md) -- all inter-cell patterns (observe, read, coordinate)
-- [testing.md](../testing.md) -- TestContext API, property-based fuzzing
-- [debugging.md](../debugging.md) -- error identification, performance debugging
+- [Cells](../state/cells.md) -- all inter-cell patterns (observe, read, coordinate)
+- [Testing](../testing/cell-testing.md) -- TestContext API, property-based fuzzing
+- [Debugging](../debugging/errors.md) -- error identification, performance debugging

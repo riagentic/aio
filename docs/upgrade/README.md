@@ -4,6 +4,8 @@ One guide per version migration. Find your current version and follow the steps.
 
 ## v1.0.0-alpha
 
+- [alpha12 → alpha13](from-alpha12-to-alpha13.md)
+- [alpha11 → alpha12](from-alpha11-to-alpha12.md)
 - [alpha10 → alpha11](from-alpha10-to-alpha11.md)
 - [alpha9 → alpha10](from-alpha9-to-alpha10.md)
 - [alpha8 → alpha9](from-alpha8-to-alpha9.md)
