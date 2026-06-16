@@ -272,8 +272,8 @@ code depends on the state change being applied.
 
 State in `methods` is an Immer draft. Plain reads, spreads, `.map`/`.filter`,
 `Object.keys`, and `JSON.stringify` all work — the only rule is that **values
-you take OUT of a method** (effect payloads, return values, logs) are
-snapshots. aio clones them for you; the live draft stays in the method body.
+you take OUT of a method** (effect payloads, return values, logs) are snapshots.
+aio clones them for you; the live draft stays in the method body.
 
 ```ts
 methods: {
@@ -287,23 +287,27 @@ methods: {
 }
 ```
 
-Mutations to the draft are batched and produce a state diff. Reads on the
-draft see the current (mutated) state. Values returned or passed to
-`return [cell.fx.persist(s)]` are snapshots of the current draft — they
-are not reactive.
+Mutations to the draft are batched and produce a state diff. Reads on the draft
+see the current (mutated) state. Values returned or passed to
+`return [cell.fx.persist(s)]` are snapshots of the current draft — they are not
+reactive.
 
 For the live-proxy read semantics inside `async` methods (where you `await`
-something and re-read state), see [Methods — async live proxy](../state/methods.md).
+something and re-read state), see
+[Methods — async live proxy](../state/methods.md).
 
 ## Troubleshooting
 
-- **First step, always:** `deno run -A jsr:@riagentic/aio/src/doctor` — validates the 6 magic deno.json lines (jsx, jsxImportSource, import map entries, kv, electron nodeModulesDir, Deno version) with a one-line fix per failure.
+- **First step, always:** `deno run -A jsr:@riagentic/aio/src/doctor` —
+  validates the 6 magic deno.json lines (jsx, jsxImportSource, import map
+  entries, kv, electron nodeModulesDir, Deno version) with a one-line fix per
+  failure.
 
 - **"Electron not found"** -- Run `deno task install:electron`, or use
   `--client=browser`
 - **"Module not found: aio"** -- Run `deno install`, check import map
-- **State resets on restart** -- Persistence is ON by default; a reset means
-  the state shape changed (old keys deep-merge with new defaults — see
+- **State resets on restart** -- Persistence is ON by default; a reset means the
+  state shape changed (old keys deep-merge with new defaults — see
   [cell versioning](../state/cells.md)) or `data.kv/` was deleted
 - **Port 8000 in use** -- Use `deno task am stop` or `--port=9000`
 - **Hot reload not working** -- Ensure `prod: false` (default in dev)

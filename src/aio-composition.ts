@@ -76,8 +76,9 @@ export function composeCellsWiring(
   // AIO-5.1: client-scoped cells never register with the server store — one
   // `cells` array can hold both scopes; client cells are skipped here, not errored.
   const serverEntries = input.cellEntries.filter((entry) => {
-    const def = (entry as { cell?: { __aio?: { scope?: string; id?: string } } })
-      .cell ?? (entry as { __aio?: { scope?: string; id?: string } });
+    const def =
+      (entry as { cell?: { __aio?: { scope?: string; id?: string } } })
+        .cell ?? (entry as { __aio?: { scope?: string; id?: string } });
     if (def.__aio?.scope === "client") {
       log.debug(`skipping client-scoped cell '${def.__aio.id}' on server`);
       return false;

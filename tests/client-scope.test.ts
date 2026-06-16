@@ -15,7 +15,10 @@ Deno.test("5.1: client cell — methods mutate local slice and trigger re-render
     scope: "client" as const,
     state: { filter: "all" as "all" | "active" | "done" },
     methods: {
-      setFilter(s: { filter: "all" | "active" | "done" }, f: "all" | "active" | "done") {
+      setFilter(
+        s: { filter: "all" | "active" | "done" },
+        f: "all" | "active" | "done",
+      ) {
         s.filter = f;
       },
     },
@@ -67,7 +70,9 @@ Deno.test("5.1: client cell — async method throws at cell() time", () => {
   }
   assertEquals(caught instanceof Error, true);
   assertEquals(
-    (caught as unknown as Error).message.includes("client-scoped cells support sync methods only"),
+    (caught as unknown as Error).message.includes(
+      "client-scoped cells support sync methods only",
+    ),
     true,
   );
   reset();
@@ -85,7 +90,11 @@ Deno.test("5.1: client cell — generators throw at cell() time", () => {
         noop(_s: any) {},
       },
       // deno-lint-ignore no-explicit-any
-      generators: { noop: function* (_ctx: any) { yield; } } as any,
+      generators: {
+        noop: function* (_ctx: any) {
+          yield;
+        },
+      } as any,
     });
   } catch (e) {
     caught = e as Error;
@@ -130,7 +139,9 @@ Deno.test(
       state: { count: 0 },
       methods: {
         // deno-lint-ignore no-explicit-any
-        inc(s: any) { s.count++; },
+        inc(s: any) {
+          s.count++;
+        },
       },
     });
     const view = cell("view", {
@@ -138,7 +149,9 @@ Deno.test(
       state: { filter: "all" },
       methods: {
         // deno-lint-ignore no-explicit-any
-        setFilter(s: any, f: string) { s.filter = f; },
+        setFilter(s: any, f: string) {
+          s.filter = f;
+        },
       },
     });
     const wiring = composeCellsWiring({

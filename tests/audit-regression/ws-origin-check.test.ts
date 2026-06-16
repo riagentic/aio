@@ -63,7 +63,11 @@ Deno.test("F-2: localhost origin accepted regardless of expose", () => {
       const res = mgr.handleWs(wsRequest(origin));
       // 101 Switching Protocols on success, NOT 403.
       // (Other failure modes — e.g. invalid WS handshake — are out of scope.)
-      assertEquals(res.status === 403, false, `origin ${origin} expose=${expose}`);
+      assertEquals(
+        res.status === 403,
+        false,
+        `origin ${origin} expose=${expose}`,
+      );
     }
   }
 });

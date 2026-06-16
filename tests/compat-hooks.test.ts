@@ -227,7 +227,9 @@ Deno.test("8.2: sync-classified method returning a Promise throws in dev", async
     assertEquals(threw.includes("markAsync"), true);
   } finally {
     delete (globalThis as Record<string, unknown>).__aioDev;
-    const { _resetCellRegistry: reset } = await import("../src/cell-reactive.ts");
+    const { _resetCellRegistry: reset } = await import(
+      "../src/cell-reactive.ts"
+    );
     reset();
   }
 });

@@ -57,10 +57,18 @@ Deno.test("integration: two cell(methods) cells compose independently", () => {
   const composed = composeCells([counter, todo]);
   const app = createApp(composed);
 
-  app.dispatch((counter.__aio.actions as unknown as Record<string, any>).increment());
-  app.dispatch((counter.__aio.actions as unknown as Record<string, any>).increment());
-  app.dispatch((todo.__aio.actions as unknown as Record<string, any>).add("buy milk"));
-  app.dispatch((counter.__aio.actions as unknown as Record<string, any>).decrement());
+  app.dispatch(
+    (counter.__aio.actions as unknown as Record<string, any>).increment(),
+  );
+  app.dispatch(
+    (counter.__aio.actions as unknown as Record<string, any>).increment(),
+  );
+  app.dispatch(
+    (todo.__aio.actions as unknown as Record<string, any>).add("buy milk"),
+  );
+  app.dispatch(
+    (counter.__aio.actions as unknown as Record<string, any>).decrement(),
+  );
 
   assertEquals((app.state.counter as any).count, 1);
   assertEquals((app.state.todo as any).items, ["buy milk"]);
@@ -107,10 +115,16 @@ Deno.test("integration: event-driven cell reacts to cell(methods) cell actions",
   const composed = composeCells([cart, stats]);
   const app = createApp(composed);
 
-  app.dispatch((cart.__aio.actions as unknown as Record<string, any>).addItem("a"));
-  app.dispatch((cart.__aio.actions as unknown as Record<string, any>).addItem("b"));
+  app.dispatch(
+    (cart.__aio.actions as unknown as Record<string, any>).addItem("a"),
+  );
+  app.dispatch(
+    (cart.__aio.actions as unknown as Record<string, any>).addItem("b"),
+  );
   app.dispatch((cart.__aio.actions as unknown as Record<string, any>).clear());
-  app.dispatch((cart.__aio.actions as unknown as Record<string, any>).addItem("c"));
+  app.dispatch(
+    (cart.__aio.actions as unknown as Record<string, any>).addItem("c"),
+  );
 
   assertEquals((app.state.cart as any).items, ["c"]);
   assertEquals((app.state.stats as any).addCount, 3);
@@ -145,7 +159,9 @@ Deno.test("integration: async cell(methods) method with machine + sync methods",
   const composed = composeCells([workflow]);
   const app = createApp(composed);
 
-  app.dispatch((workflow.__aio.actions as unknown as Record<string, any>).start() as any);
+  app.dispatch(
+    (workflow.__aio.actions as unknown as Record<string, any>).start() as any,
+  );
   await delay(50);
 
   assertEquals((app.state.workflow as any).data, "fetched-data");
@@ -153,7 +169,9 @@ Deno.test("integration: async cell(methods) method with machine + sync methods",
   assertEquals((app.state.workflow as any).__aio_status, "running");
 
   // Transition back to idle
-  app.dispatch((workflow.__aio.actions as unknown as Record<string, any>).complete());
+  app.dispatch(
+    (workflow.__aio.actions as unknown as Record<string, any>).complete(),
+  );
   assertEquals((app.state.workflow as any).__aio_status, "idle");
 });
 
@@ -238,7 +256,10 @@ Deno.test("integration: selectors work across composed cell(methods) cells", () 
   assertEquals(sum(state), 30);
   assertEquals(cnt(state), 2);
 
-  state = composed.reduce(state, (prices.__aio.actions as unknown as Record<string, any>).addItem("C", 15)).state;
+  state = composed.reduce(
+    state,
+    (prices.__aio.actions as unknown as Record<string, any>).addItem("C", 15),
+  ).state;
   assertEquals(sum(state), 45);
   assertEquals(cnt(state), 3);
 });
@@ -264,7 +285,9 @@ Deno.test("integration: batching produces correct action count across awaits", a
   const composed = composeCells([store]);
   const app = createApp(composed);
 
-  app.dispatch((store.__aio.actions as unknown as Record<string, any>).multiStep() as any);
+  app.dispatch(
+    (store.__aio.actions as unknown as Record<string, any>).multiStep() as any,
+  );
   await delay(50);
 
   assertEquals((app.state.store as any).a, 1);

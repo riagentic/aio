@@ -52,23 +52,23 @@ actions, effects, machine guards, reducer, and executor.
 
 ## cell() config
 
-| Key          | Type                                  | Required | Description                                                                        |
-| ------------ | ------------------------------------- | -------- | ---------------------------------------------------------------------------------- |
-| `state`      | `Record<string, unknown>`             | Yes      | Initial state                                                                      |
-| `methods`    | `Record<string, Function>`            | Yes*     | Sync or async methods — `(s, ...args) => void`                                     |
-| `generators` | `Record<string, GeneratorFn>`         | No       | Sequential workflows — auto-creates trigger action per generator                   |
-| `actions`    | `Record<string, Function>`            | Yes*     | Action creators — `(arg) => ({ arg })`                                             |
-| `effects`    | `Record<string, Function>`            | No       | Effect creators — `(arg) => ({ arg })`                                             |
-| `reduce`     | `Record<string, Handler> \| Function` | No       | Named handlers or function form                                                    |
-| `execute`    | `Record<string, Handler> \| Function` | No       | Named effect handlers or function form                                             |
-| `selectors`  | `Record<string, (s) => T>`            | No       | Derived values, auto-scoped to cell state                                          |
-| `machine`    | `MachineConfig \| false`              | No       | State machine guards. `false` or omit = no guards                                  |
-| `listensTo`  | `(Function \| string)[]`              | No       | Foreign actions to listen to — pass bound methods                                  |
-| `sync`       | `true \| SyncConfig`                  | No       | Enable CRDT sync — see [CRDT docs](../persistence/crdt.md)                         |
-| `persist`    | `CellFieldFilter`                     | No       | `"all"`, `"none"`, `{ include: [...] }`, `{ exclude: [...] }` — default `"all"`    |
-| `ui`         | `CellVisibility`                      | No       | Same as persist, plus optional `forUser` for per-user filtering — default `"all"`  |
-| `init`       | `(app) => void`                       | No       | Called when cell initializes                                                       |
-| `destroy`    | `(app) => void`                       | No       | Called when cell destroys                                                          |
+| Key          | Type                                  | Required | Description                                                                       |
+| ------------ | ------------------------------------- | -------- | --------------------------------------------------------------------------------- |
+| `state`      | `Record<string, unknown>`             | Yes      | Initial state                                                                     |
+| `methods`    | `Record<string, Function>`            | Yes*     | Sync or async methods — `(s, ...args) => void`                                    |
+| `generators` | `Record<string, GeneratorFn>`         | No       | Sequential workflows — auto-creates trigger action per generator                  |
+| `actions`    | `Record<string, Function>`            | Yes*     | Action creators — `(arg) => ({ arg })`                                            |
+| `effects`    | `Record<string, Function>`            | No       | Effect creators — `(arg) => ({ arg })`                                            |
+| `reduce`     | `Record<string, Handler> \| Function` | No       | Named handlers or function form                                                   |
+| `execute`    | `Record<string, Handler> \| Function` | No       | Named effect handlers or function form                                            |
+| `selectors`  | `Record<string, (s) => T>`            | No       | Derived values, auto-scoped to cell state                                         |
+| `machine`    | `MachineConfig \| false`              | No       | State machine guards. `false` or omit = no guards                                 |
+| `listensTo`  | `(Function \| string)[]`              | No       | Foreign actions to listen to — pass bound methods                                 |
+| `sync`       | `true \| SyncConfig`                  | No       | Enable CRDT sync — see [CRDT docs](../persistence/crdt.md)                        |
+| `persist`    | `CellFieldFilter`                     | No       | `"all"`, `"none"`, `{ include: [...] }`, `{ exclude: [...] }` — default `"all"`   |
+| `ui`         | `CellVisibility`                      | No       | Same as persist, plus optional `forUser` for per-user filtering — default `"all"` |
+| `init`       | `(app) => void`                       | No       | Called when cell initializes                                                      |
+| `destroy`    | `(app) => void`                       | No       | Called when cell destroys                                                         |
 
 \* `methods` or `actions` required (or `generators` alone). All three styles can
 coexist — all callable names must be unique within the cell.
@@ -140,17 +140,17 @@ type CounterState = StateOf<typeof counter>;
 
 Three tools, one decision: who needs to see the state?
 
-| Tool | Lives | Use when |
-|---|---|---|
-| shared cell (default, `scope: "server"`) | server store, synced to every client, persists | state is the app's truth: domain data, anything two clients or a restart must agree on |
-| client cell (`scope: "client"`) | one browser tab, signal-backed, sync methods only | UI state that outlives one component but belongs to one tab: filters, panel layout, draft inputs |
-| `useLocal` | one component instance | ephemeral interaction state: open/closed, hover, in-progress text |
+| Tool                                     | Lives                                             | Use when                                                                                         |
+| ---------------------------------------- | ------------------------------------------------- | ------------------------------------------------------------------------------------------------ |
+| shared cell (default, `scope: "server"`) | server store, synced to every client, persists    | state is the app's truth: domain data, anything two clients or a restart must agree on           |
+| client cell (`scope: "client"`)          | one browser tab, signal-backed, sync methods only | UI state that outlives one component but belongs to one tab: filters, panel layout, draft inputs |
+| `useLocal`                               | one component instance                            | ephemeral interaction state: open/closed, hover, in-progress text                                |
 
-A `scope: "client"` cell never registers with the server store, never syncs, never
-persists to Deno.Kv. Methods run synchronously in the browser against the cell's
-signal; each tab has its own copy. Async methods, generators, actions, and machines
-throw at `cell()` time (v1 limitation) — do async work in the component, then call a
-sync method with the result.
+A `scope: "client"` cell never registers with the server store, never syncs,
+never persists to Deno.Kv. Methods run synchronously in the browser against the
+cell's signal; each tab has its own copy. Async methods, generators, actions,
+and machines throw at `cell()` time (v1 limitation) — do async work in the
+component, then call a sync method with the result.
 
 ## Internals by component
 
@@ -228,22 +228,29 @@ Every name must be unique — collisions throw at definition time.
 const gateway = cell("gateway", {
   state: { error: null as string | null },
   actions: { error: (msg: string) => ({ msg }) }, // ❌ throws at cell() time
-  reduce: { error(s, p) { s.error = p.msg; } },
+  reduce: {
+    error(s, p) {
+      s.error = p.msg;
+    },
+  },
 });
 // Error: [cell:gateway] state key 'error' collides with action 'error' —
 // reading gateway.error in a component would return the function, not the
 // state. Rename one (e.g. state key 'lastError').
 ```
 
-The callable wins on the cell object, which makes the state silently
-unreachable from components — so this is a definition-time error. Rename the
-state key:
+The callable wins on the cell object, which makes the state silently unreachable
+from components — so this is a definition-time error. Rename the state key:
 
 ```ts
 const gateway = cell("gateway", {
   state: { lastError: null as string | null },
   actions: { error: (msg: string) => ({ msg }) }, // ✅
-  reduce: { error(s, p) { s.lastError = p.msg; } },
+  reduce: {
+    error(s, p) {
+      s.lastError = p.msg;
+    },
+  },
 });
 ```
 

@@ -1,7 +1,4 @@
-import {
-  assertEquals,
-  assertStrictEquals,
-} from "@std/assert";
+import { assertEquals, assertStrictEquals } from "@std/assert";
 import {
   _accessedPaths,
   _getState,

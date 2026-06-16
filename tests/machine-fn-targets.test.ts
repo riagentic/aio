@@ -17,7 +17,8 @@ const docs = cell("docs380", {
       viewing: {
         openDoc: "viewing",
         // Close the last doc → 'empty'; otherwise stay 'viewing'.
-        closeDoc: (s: { open: string[] }) => s.open.length > 0 ? "viewing" : "empty",
+        closeDoc: (s: { open: string[] }) =>
+          s.open.length > 0 ? "viewing" : "empty",
       },
     },
   },
@@ -69,19 +70,23 @@ const files = cell("files380", {
   },
 });
 
-testCell(files, "async fn target branches on args (pre-execution state)", async (t) => {
-  t.init();
-  await t.send.open!("/a.md");
-  t.expect.status("viewing");
-  t.expect.state((s) => s.current === "/a.md");
+testCell(
+  files,
+  "async fn target branches on args (pre-execution state)",
+  async (t) => {
+    t.init();
+    await t.send.open!("/a.md");
+    t.expect.status("viewing");
+    t.expect.state((s) => s.current === "/a.md");
 
-  await t.send.remove!("/other.md"); // not the open file → stay viewing
-  t.expect.status("viewing");
+    await t.send.remove!("/other.md"); // not the open file → stay viewing
+    t.expect.status("viewing");
 
-  await t.send.remove!("/a.md"); // deleting the open file → empty
-  t.expect.status("empty");
-  t.expect.state((s) => s.current === "");
-});
+    await t.send.remove!("/a.md"); // deleting the open file → empty
+    t.expect.status("empty");
+    t.expect.state((s) => s.current === "");
+  },
+);
 
 // Null/undefined → stay; unknown state → logged, stay; throwing fn → logged, stay.
 const guard = cell("guard380", {
@@ -122,19 +127,27 @@ testCell(guard, "fn returning null stays in current state", (t) => {
   t.expect.state((s) => s.n === 1); // reducer still applied
 });
 
-testCell(guard, "fn returning unknown state stays put (logged, not thrown)", (t) => {
-  t.init();
-  t.send.bogus!();
-  t.expect.status("idle");
-  t.expect.state((s) => s.n === 1);
-});
+testCell(
+  guard,
+  "fn returning unknown state stays put (logged, not thrown)",
+  (t) => {
+    t.init();
+    t.send.bogus!();
+    t.expect.status("idle");
+    t.expect.state((s) => s.n === 1);
+  },
+);
 
-testCell(guard, "throwing fn never corrupts dispatch — state applies, status stays", (t) => {
-  t.init();
-  t.send.explode!();
-  t.expect.status("idle");
-  t.expect.state((s) => s.n === 1);
-});
+testCell(
+  guard,
+  "throwing fn never corrupts dispatch — state applies, status stays",
+  (t) => {
+    t.init();
+    t.send.explode!();
+    t.expect.status("idle");
+    t.expect.state((s) => s.n === 1);
+  },
+);
 
 // Validation: fn targets pass validateMachine; static checks still apply.
 Deno.test("validateMachine: fn targets skip static target/reachability checks", () => {

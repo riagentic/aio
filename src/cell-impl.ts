@@ -221,8 +221,9 @@ function _rejectUnsafeMutation(reason: string, m: Mutation): never {
     path: Array.isArray(m.path) ? m.path : null,
     op: m.op ?? null,
   };
-  const msg =
-    `[aio:cell] blocked unsafe mutation — ${reason} (path=${JSON.stringify(detail.path)})`;
+  const msg = `[aio:cell] blocked unsafe mutation — ${reason} (path=${
+    JSON.stringify(detail.path)
+  })`;
   diagEmit({
     type: "mutation-blocked",
     severity: "error",
@@ -241,16 +242,16 @@ function _rejectUnsafeMutation(reason: string, m: Mutation): never {
  *  via diag bus + console.warn so app authors can find missing initialization. */
 function _warnDroppedMutation(reason: string, m: Mutation): void {
   const detail = { reason, path: m.path, op: m.op ?? null };
-  const msg =
-    `[aio:cell] dropped mutation — ${reason} (path=${JSON.stringify(m.path)})`;
+  const msg = `[aio:cell] dropped mutation — ${reason} (path=${
+    JSON.stringify(m.path)
+  })`;
   diagEmit({
     type: "mutation-dropped",
     severity: "warning",
     source: "cell",
     message: msg,
     detail,
-    hint:
-      "An async-method mutation walked through a null/undefined parent. " +
+    hint: "An async-method mutation walked through a null/undefined parent. " +
       "Initialize the parent object/array, or guard the access in the method.",
   });
   console.warn(msg);

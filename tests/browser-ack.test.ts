@@ -8,10 +8,7 @@ import {
   _resolveAck,
   _setAckTimeoutMs,
 } from "../src/browser-ack.ts";
-import {
-  _resetCellRegistry,
-  bindCellReactive,
-} from "../src/cell-reactive.ts";
+import { _resetCellRegistry, bindCellReactive } from "../src/cell-reactive.ts";
 import { _resetSignals } from "../src/state-signals.ts";
 
 // Tests for 2.2: browser-side method calls return a Promise that resolves
@@ -114,7 +111,7 @@ Deno.test("2.2: timeout rejects the promise with a clear message", async () => {
     },
   });
 
-  bindCellReactive(c, (_action) => { /* no ack */ });
+  bindCellReactive(c, (_action) => {/* no ack */});
 
   const result = c.increment();
   let caught: Error | null = null;

@@ -60,7 +60,13 @@
     "happy-dom": "npm:happy-dom@17.6.3"
   },
   "fmt": {
-    "exclude": ["node_modules/", "coverage/", "dist/", "android-template/"]
+    "exclude": [
+      "node_modules/",
+      "coverage/",
+      "dist/",
+      "android-template/",
+      ".katana/"
+    ]
   },
   "lint": {
     "exclude": ["node_modules/", "tests/", "scripts/", "utils/"]

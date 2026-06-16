@@ -209,7 +209,10 @@ Deno.test("machine guard: returns unchanged state reference", () => {
   });
   const composed = composeCells([m]);
   // 'blocked' not valid from state 'a' (only valid in 'b')
-  const result = composed.reduce(composed.initialState, m.__aio.actions.blocked());
+  const result = composed.reduce(
+    composed.initialState,
+    m.__aio.actions.blocked(),
+  );
   assertEquals(result.state, composed.initialState);
 });
 
@@ -279,7 +282,10 @@ Deno.test("validate: with machine — invalid state rejects", () => {
     onCellError: (err) => errors.push(err),
   });
   // Valid
-  const r1 = composed.reduce(composed.initialState, guarded.__aio.actions.set(50));
+  const r1 = composed.reduce(
+    composed.initialState,
+    guarded.__aio.actions.set(50),
+  );
   assertEquals((r1.state.guarded as { val: number }).val, 50);
 
   // Invalid — exceeds 100

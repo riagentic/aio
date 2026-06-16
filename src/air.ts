@@ -77,7 +77,7 @@ export {
   useEffect,
   /** @deprecated import from "aio/air/compat" — exists for React migration only. Native: computed(). */
   useMemo,
+  useRef,
   /** @deprecated import from "aio/air/compat" — exists for React migration only. Native: useLocal()/signal(). */
   useState,
-  useRef,
 } from "./compat.ts";

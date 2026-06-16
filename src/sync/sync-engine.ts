@@ -291,12 +291,18 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
 
     async requestSync() {
       if (!online) return; // don't send while offline
-      const cells: Record<string, { lastHlc: HLC | null; lastServerTs?: number }> = {};
+      const cells: Record<
+        string,
+        { lastHlc: HLC | null; lastServerTs?: number }
+      > = {};
       const allPending: SyncOp[] = [];
 
       for (const cell of Object.keys(deps.cells)) {
         const meta = await deps.buffer.getMeta(cell);
-        cells[cell] = { lastHlc: meta?.lastHlc ?? null, lastServerTs: meta?.lastServerTs };
+        cells[cell] = {
+          lastHlc: meta?.lastHlc ?? null,
+          lastServerTs: meta?.lastServerTs,
+        };
         const unconfirmed = await deps.buffer.getUnconfirmed(cell);
         allPending.push(...unconfirmed.slice(0, SYNC_DEFAULTS.pendingCap));
         updateStatus(cell, { status: "syncing" });

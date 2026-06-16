@@ -55,11 +55,15 @@ const gated = cell("gated379", {
   },
 });
 
-testCell(loader, "await send: async method fully applied on resolve", async (t) => {
-  t.init();
-  await t.send.load!();
-  t.expect.state((s) => s.data === "loaded");
-});
+testCell(
+  loader,
+  "await send: async method fully applied on resolve",
+  async (t) => {
+    t.init();
+    await t.send.load!();
+    t.expect.state((s) => s.data === "loaded");
+  },
+);
 
 testCell(loader, "sync sends return an awaitable promise too", async (t) => {
   t.init();
@@ -75,31 +79,43 @@ testCell(loader, "unawaited send stays fire-and-forget (no execution)", (t) => {
   assertEquals(sideEffectRuns, before);
 });
 
-testCell(loader, "settle() waits for real async completion (no ms guessing)", async (t) => {
-  t.init();
-  t.send.load!();
-  await t.settle(); // 30ms of real work — old microtask drain would miss this
-  t.expect.state((s) => s.data === "loaded");
-});
+testCell(
+  loader,
+  "settle() waits for real async completion (no ms guessing)",
+  async (t) => {
+    t.init();
+    t.send.load!();
+    await t.settle(); // 30ms of real work — old microtask drain would miss this
+    t.expect.state((s) => s.data === "loaded");
+  },
+);
 
-testCell(loader, "await send then settle(): method executes exactly once", async (t) => {
-  t.init();
-  const before = sideEffectRuns;
-  await t.send.load!();
-  await t.settle();
-  await t.settle();
-  assertEquals(sideEffectRuns, before + 1);
-});
+testCell(
+  loader,
+  "await send then settle(): method executes exactly once",
+  async (t) => {
+    t.init();
+    const before = sideEffectRuns;
+    await t.send.load!();
+    await t.settle();
+    await t.settle();
+    assertEquals(sideEffectRuns, before + 1);
+  },
+);
 
-testCell(loader, "settle() then await send: no double execution either", async (t) => {
-  t.init();
-  const before = sideEffectRuns;
-  const done = t.send.load!();
-  await t.settle();
-  await done; // resolves immediately — settle already ran and awaited it
-  assertEquals(sideEffectRuns, before + 1);
-  t.expect.state((s) => s.data === "loaded");
-});
+testCell(
+  loader,
+  "settle() then await send: no double execution either",
+  async (t) => {
+    t.init();
+    const before = sideEffectRuns;
+    const done = t.send.load!();
+    await t.settle();
+    await done; // resolves immediately — settle already ran and awaited it
+    assertEquals(sideEffectRuns, before + 1);
+    t.expect.state((s) => s.data === "loaded");
+  },
+);
 
 testCell(loader, "await send rejects when the method throws", async (t) => {
   t.init();
@@ -108,21 +124,29 @@ testCell(loader, "await send rejects when the method throws", async (t) => {
   t.expect.state((s) => s.data === "exploding");
 });
 
-testCell(loader, "settle() swallows method errors (wait-until-quiet, not assert)", async (t) => {
-  t.init();
-  t.send.boom!();
-  await t.settle(); // must not reject
-  t.expect.state((s) => s.data === "exploding");
-});
+testCell(
+  loader,
+  "settle() swallows method errors (wait-until-quiet, not assert)",
+  async (t) => {
+    t.init();
+    t.send.boom!();
+    await t.settle(); // must not reject
+    t.expect.state((s) => s.data === "exploding");
+  },
+);
 
-testCell(gated, "awaiting a machine-blocked async send resolves immediately", async (t) => {
-  t.init();
-  await t.send.run!(); // blocked in 'locked' — resolves, runs nothing
-  t.expect.status("locked");
-  t.expect.state((s) => s.ran === false);
+testCell(
+  gated,
+  "awaiting a machine-blocked async send resolves immediately",
+  async (t) => {
+    t.init();
+    await t.send.run!(); // blocked in 'locked' — resolves, runs nothing
+    t.expect.status("locked");
+    t.expect.state((s) => s.ran === false);
 
-  t.send.unlock!();
-  await t.send.run!();
-  t.expect.status("open");
-  t.expect.state((s) => s.ran === true);
-});
+    t.send.unlock!();
+    await t.send.run!();
+    t.expect.status("open");
+    t.expect.state((s) => s.ran === true);
+  },
+);

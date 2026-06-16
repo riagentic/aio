@@ -139,8 +139,7 @@ Deno.test(
         summary: {
           deps: ["counter"],
           // deno-lint-ignore no-explicit-any
-          fn: (s: any, counter: any) =>
-            `note=${s.note} count=${counter.count}`,
+          fn: (s: any, counter: any) => `note=${s.note} count=${counter.count}`,
         },
       },
     });

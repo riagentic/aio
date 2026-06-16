@@ -179,9 +179,13 @@ Deno.test("stress: array append under load — bounded and consistent", () => {
 Deno.test("stress: reset mid-stream doesn't corrupt state", () => {
   const app = createTestApp([counter]);
 
-  for (let i = 0; i < 1000; i++) app.dispatch(counter.__aio.actions.increment(1));
+  for (let i = 0; i < 1000; i++) {
+    app.dispatch(counter.__aio.actions.increment(1));
+  }
   app.dispatch(counter.__aio.actions.reset());
-  for (let i = 0; i < 500; i++) app.dispatch(counter.__aio.actions.increment(2));
+  for (let i = 0; i < 500; i++) {
+    app.dispatch(counter.__aio.actions.increment(2));
+  }
 
   const s = app.getState().counter as { count: number };
   assertEquals(s.count, 1000);

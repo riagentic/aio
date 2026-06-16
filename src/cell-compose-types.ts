@@ -21,7 +21,10 @@ export type ComposedCells = {
   reduce: (
     state: Record<string, unknown>,
     action: Msg,
-  ) => { state: Record<string, unknown>; effects: (Msg | ScheduleEffect | OwnEffect)[] };
+  ) => {
+    state: Record<string, unknown>;
+    effects: (Msg | ScheduleEffect | OwnEffect)[];
+  };
   execute: (
     app: { dispatch: (a: Msg) => void; getState: () => unknown },
     effect: Msg,

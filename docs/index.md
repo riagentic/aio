@@ -40,7 +40,8 @@
 - [Advanced](ui/air-advanced.md) — SSR, portals, islands
 - [API Reference](ui/air-reference.md) — cheat sheet
 - [Migration from React](ui/comparison.md) — comparison and migration
-- [AIR vs Frameworks](ui/air-comparison.md) — detailed comparison with Solid, Svelte, Vue
+- [AIR vs Frameworks](ui/air-comparison.md) — detailed comparison with Solid,
+  Svelte, Vue
 
 ## Persistence & Data
 
