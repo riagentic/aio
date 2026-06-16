@@ -83,10 +83,10 @@ export type MethodsCellConfig<
     ) => void);
   /** Optional state validator — called after every reduce. Return true to accept, or a string error message to reject. */
   validate?: (state: S) => true | string;
-  /** Persistence filter — "all" persists everything, "none" (default) persists nothing.
+  /** Persistence filter — "all" (default) persists everything, "none" persists nothing.
    *  { include: [...] } or { exclude: [...] } for field-level control. */
   persist?: CellFieldFilter<keyof S & string>;
-  /** UI visibility — "all" exposes everything, "none" (default) hides cell from clients.
+  /** UI visibility — "all" (default) exposes everything, "none" hides cell from clients.
    *  { include: [...] } or { exclude: [...] } for field-level control.
    *  Add forUser for per-user filtering on the already-filtered state. */
   ui?: CellVisibility<keyof S & string, S>;
@@ -165,10 +165,10 @@ export type ActionsCellConfig<
   cancelOn?: Record<string, (string | { type: string })[]>;
   /** Optional state validator — called after every reduce. Return true to accept, or a string error message to reject. */
   validate?: (state: S) => true | string;
-  /** Persistence filter — "all" persists everything, "none" (default) persists nothing.
+  /** Persistence filter — "all" (default) persists everything, "none" persists nothing.
    *  { include: [...] } or { exclude: [...] } for field-level control. */
   persist?: CellFieldFilter<keyof S & string>;
-  /** UI visibility — "all" exposes everything, "none" (default) hides cell from clients.
+  /** UI visibility — "all" (default) exposes everything, "none" hides cell from clients.
    *  { include: [...] } or { exclude: [...] } for field-level control.
    *  Add forUser for per-user filtering on the already-filtered state. */
   ui?: CellVisibility<keyof S & string, S>;

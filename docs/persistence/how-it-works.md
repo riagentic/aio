@@ -128,4 +128,4 @@ persist field filters, or move to SQLite.
 - [Auto-Persist](auto-persist.md) — KV configuration
 - [SQLite](sqlite.md) — schema, queries, transactions
 - [CRDT Protocol](crdt-protocol.md) — sync persistence layer
-- [Architecture](../ARCHITECTURE.md) — full module map
+- [Architecture](../basics/architecture.md) — full module map

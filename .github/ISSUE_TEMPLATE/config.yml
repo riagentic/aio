@@ -2,7 +2,7 @@ blank_issues_enabled: false
 contact_links:
   - name: Security vulnerability
     url: https://github.com/riagentic/aio/security/advisories/new
-    about: Report security issues privately — see SECURITY.md. Do not open a public issue.
+    about: Report security issues privately via GitHub advisories. Do not open a public issue.
   - name: Question / discussion
     url: https://github.com/riagentic/aio/discussions
     about: Usage questions and ideas — ask here before filing a bug.

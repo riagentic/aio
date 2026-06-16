@@ -1005,13 +1005,25 @@ export const checkPatterns: Checker = (ctx) => {
       continue;
     }
 
-    // any usage (outside lint-ignore comments)
-    const anyLines = file.lines
-      .map((l, i) => ({ line: l, num: i + 1 }))
-      .filter(({ line }) => {
+    // any usage (outside lint-ignore comments). Exempt: (1) files that opt out
+    // of deno linting at the file level — if `any` is intentional for deno it's
+    // intentional for aiol too; (2) type-definition modules (*types.ts), where
+    // `any` is generic plumbing (infer/variadic positions), not lazy typing.
+    const fileLintIgnored = file.lines.some((l) =>
+      l.trim().startsWith("// deno-lint-ignore-file")
+    );
+    const isTypeModule = file.name.endsWith("types.ts");
+    const anyLines = (fileLintIgnored || isTypeModule) ? [] : file.lines
+      .map((l, i) => ({ line: l, num: i + 1, idx: i }))
+      .filter(({ line, idx }) => {
         const trimmed = line.trim();
         if (trimmed.startsWith("//") || trimmed.startsWith("*")) return false;
         if (trimmed.includes("deno-lint-ignore")) return false;
+        // Honor deno's line-level ignore on the preceding line — that's its
+        // real scope (the directive applies to the line below it).
+        if ((file.lines[idx - 1] ?? "").includes("deno-lint-ignore")) {
+          return false;
+        }
         // Match : any, as any, <any> but not variable names containing "any"
         return /:\s*any\b|as\s+any\b|<any>/.test(line);
       });
@@ -1024,8 +1036,10 @@ export const checkPatterns: Checker = (ctx) => {
       );
     }
 
-    // Thrown exceptions in cell code (prefer Result pattern)
-    if (file.content.includes("cell(")) {
+    // Thrown exceptions in cell code (prefer Result pattern). Fires only on an
+    // actual `cell({ ... })` call — not on framework files that *define* cell
+    // (their throws are config-validation errors, by design).
+    if (/\bcell\s*\(\s*\{/.test(file.content)) {
       const throwLines = file.lines.filter((l) =>
         /\bthrow\s+new\s+/.test(l) && !l.trim().startsWith("//")
       );

@@ -170,7 +170,7 @@ Static analysis of `cell()` calls:
 ## Example Output
 
 ```
-aiol v0.1.0 — scanning project
+aiol v1.0.0-alpha13 — scanning project
 
   ✓ appId: my-app
   ✓ entry: src/app.ts

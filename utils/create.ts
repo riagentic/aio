@@ -223,6 +223,14 @@ function titleCase(name: string): string {
     .join(" ");
 }
 
+// Derive an aio appId (lock file / KV / socket identity) from the title
+function slug(title: string): string {
+  return title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(
+    /^-+|-+$/g,
+    "",
+  ) || "app";
+}
+
 // ── Framework delivery ──
 
 async function downloadFramework(projectDir: string): Promise<void> {
@@ -328,10 +336,9 @@ function denoJson(title: string, appType: AppType): string {
   const isElectronApp = appType.id === "electron" ||
     appType.id === "remote-electron";
   const imports: Record<string, string> = {
-    "@types/react": "npm:@types/react@^18",
-    "react": "npm:react@^18",
-    "react-dom": "npm:react-dom@^18",
     "aio": "./dep/aio/mod.ts",
+    "aio/air": "./dep/aio/src/air.ts",
+    "aio/jsx-runtime": "./dep/aio/src/jsx-runtime.ts",
     "esbuild": "npm:esbuild@^0.24",
     "immer": "npm:immer@^10",
     "@std/path": "jsr:@std/path@^1",
@@ -383,13 +390,16 @@ function denoJson(title: string, appType: AppType): string {
     nodeModulesDir: "auto",
     unstable: ["kv"],
   };
+  // aio re-exports DOM-touching modules (vitals, air, jsx-runtime) even from
+  // server entry points, so every project needs the dom libs to type-check.
+  const compilerOptions: Record<string, unknown> = {
+    lib: ["deno.ns", "deno.unstable", "dom", "dom.iterable"],
+  };
   if (appType.hasUI || appType.id === "remote-android") {
-    obj.compilerOptions = {
-      jsx: "react-jsx",
-      jsxImportSource: "react",
-      jsxImportSourceTypes: "@types/react",
-    };
+    compilerOptions.jsx = "react-jsx";
+    compilerOptions.jsxImportSource = "aio";
   }
+  obj.compilerOptions = compilerOptions;
   obj.imports = imports;
   obj.tasks = tasks;
 
@@ -417,9 +427,9 @@ function compileFlags(appType: AppType): string {
 
 function templateEmpty(title: string): Record<string, string> {
   return {
-    "src/app.ts": `import { aio, feature } from 'aio'
+    "src/app.ts": `import { aio, cell } from 'aio'
 
-export const counter = feature('counter', {
+export const counter = cell('counter', {
   state: { count: 0 },
   methods: {
     inc(s) { s.count++ },
@@ -428,26 +438,23 @@ export const counter = feature('counter', {
 })
 
 await aio.run({
+  appId: '${slug(title)}',
   appVersion: '0.1.0',
-  features: [counter],
+  cells: [counter],
   ui: { title: '${title}' },
+  baseDir: import.meta.dirname!,
 })
 `,
-    "src/App.tsx": `import { useAio, msg } from 'aio'
-
-type State = { counter: { count: number } }
+    "src/App.tsx": `import { counter } from './app.ts'
 
 export default function App() {
-  const { state, send } = useAio<State>()
-  if (!state) return <div>Loading...</div>
-
   return (
     <div style={{ padding: '3rem', fontFamily: 'system-ui', textAlign: 'center' }}>
       <h1>${title}</h1>
-      <div style={{ fontSize: '4rem', margin: '1rem 0' }}>{state.counter.count}</div>
-      <button onClick={() => send(msg('counter:dec'))}>-</button>
+      <div style={{ fontSize: '4rem', margin: '1rem 0' }}>{counter.count}</div>
+      <button type="button" onClick={() => counter.dec()}>-</button>
       {' '}
-      <button onClick={() => send(msg('counter:inc'))}>+</button>
+      <button type="button" onClick={() => counter.inc()}>+</button>
     </div>
   )
 }
@@ -458,17 +465,19 @@ export default function App() {
 function templateMinimal(title: string): Record<string, string> {
   return {
     "src/app.ts": `import { aio } from 'aio'
-import { counter } from './counter.ts'
+import { counter } from './cell/counter.ts'
 
 await aio.run({
+  appId: '${slug(title)}',
   appVersion: '0.1.0',
-  features: [counter],
+  cells: [counter],
   ui: { title: '${title}' },
+  baseDir: import.meta.dirname!,
 })
 `,
-    "src/counter.ts": `import { feature } from 'aio'
+    "src/cell/counter.ts": `import { cell } from 'aio'
 
-export const counter = feature('counter', {
+export const counter = cell('counter', {
   state: { count: 0 },
   methods: {
     increment(s, by = 1) { s.count += by },
@@ -477,23 +486,19 @@ export const counter = feature('counter', {
   },
 })
 `,
-    "src/App.tsx": `import { useFeature } from 'aio'
-import { counter } from './counter.ts'
+    "src/App.tsx": `import { counter } from './cell/counter.ts'
 
 export default function App() {
-  const { state, send } = useFeature(counter)
-  if (!state) return <div>Connecting...</div>
-
   return (
     <div style={{ padding: '3rem', fontFamily: 'system-ui, sans-serif', textAlign: 'center' }}>
       <h1>${title}</h1>
       <div style={{ fontSize: '4rem', margin: '1rem 0', color: '#00a6cc' }}>
-        {state.count}
+        {counter.count}
       </div>
       <div style={{ display: 'flex', gap: '0.5rem', justifyContent: 'center' }}>
-        <button onClick={() => send.decrement()}>-</button>
-        <button onClick={() => send.reset()}>Reset</button>
-        <button onClick={() => send.increment()}>+</button>
+        <button type="button" onClick={() => counter.decrement()}>-</button>
+        <button type="button" onClick={() => counter.reset()}>Reset</button>
+        <button type="button" onClick={() => counter.increment()}>+</button>
       </div>
     </div>
   )
@@ -505,19 +510,21 @@ export default function App() {
 function templateMedium(title: string): Record<string, string> {
   return {
     "src/app.ts": `import { aio } from 'aio'
-import { todo } from './features/todo.ts'
+import { todo } from './cell/todo.ts'
 
 await aio.run({
+  appId: '${slug(title)}',
   appVersion: '0.1.0',
-  features: [todo],
+  cells: [todo],
   ui: { title: '${title}' },
+  baseDir: import.meta.dirname!,
 })
 `,
-    "src/features/todo.ts": `import { feature } from 'aio'
+    "src/cell/todo.ts": `import { cell } from 'aio'
 
 export type TodoItem = { id: number; text: string; done: boolean }
 
-export const todo = feature('todo', {
+export const todo = cell('todo', {
   state: { items: [] as TodoItem[], nextId: 1 },
   methods: {
     addTodo(s, text: string) {
@@ -533,27 +540,23 @@ export const todo = feature('todo', {
   },
 })
 `,
-    "src/ui/TodoList.tsx": `import { useFeature } from 'aio'
-import { todo } from '../features/todo.ts'
+    "src/ui/TodoList.tsx": `import { todo } from '../cell/todo.ts'
 
 export function TodoList() {
-  const { state, send } = useFeature(todo)
-  if (!state) return null
-
   return (
     <div>
       <ul style={{ listStyle: 'none', padding: 0 }}>
-        {state.items.map(item => (
+        {todo.items.map(item => (
           <li key={item.id} style={{ display: 'flex', gap: '0.5rem', alignItems: 'center', margin: '0.3rem 0' }}>
             <input
               type="checkbox"
               checked={item.done}
-              onChange={() => send.toggleTodo(item.id)}
+              onChange={() => todo.toggleTodo(item.id)}
             />
             <span style={{ textDecoration: item.done ? 'line-through' : 'none', flex: 1 }}>
               {item.text}
             </span>
-            <button onClick={() => send.removeTodo(item.id)}>×</button>
+            <button type="button" onClick={() => todo.removeTodo(item.id)}>×</button>
           </li>
         ))}
       </ul>
@@ -561,18 +564,16 @@ export function TodoList() {
   )
 }
 `,
-    "src/ui/AddTodo.tsx": `import { useState } from 'react'
-import { useFeature } from 'aio'
-import { todo } from '../features/todo.ts'
+    "src/ui/AddTodo.tsx": `import { useLocal } from 'aio/air'
+import { todo } from '../cell/todo.ts'
 
 export function AddTodo() {
-  const { send } = useFeature(todo)
-  const [text, setText] = useState('')
+  const { local: text, set: setText } = useLocal('')
 
   const add = () => {
     const trimmed = text.trim()
     if (!trimmed) return
-    send.addTodo(trimmed)
+    todo.addTodo(trimmed)
     setText('')
   }
 
@@ -580,7 +581,7 @@ export function AddTodo() {
     <form onSubmit={e => { e.preventDefault(); add() }} style={{ display: 'flex', gap: '0.5rem' }}>
       <input
         value={text}
-        onChange={e => setText(e.target.value)}
+        onChange={e => setText(e.currentTarget.value)}
         placeholder="What needs to be done?"
         style={{ flex: 1, padding: '0.4rem' }}
       />
@@ -589,22 +590,18 @@ export function AddTodo() {
   )
 }
 `,
-    "src/App.tsx": `import { useFeature } from 'aio'
-import { todo } from './features/todo.ts'
+    "src/App.tsx": `import { todo } from './cell/todo.ts'
 import { TodoList } from './ui/TodoList.tsx'
 import { AddTodo } from './ui/AddTodo.tsx'
 
 export default function App() {
-  const { state } = useFeature(todo)
-  if (!state) return <div>Loading...</div>
-
   return (
     <div style={{ maxWidth: '500px', margin: '2rem auto', fontFamily: 'system-ui, sans-serif' }}>
       <h1>${title}</h1>
       <AddTodo />
       <TodoList />
       <p style={{ color: '#888', fontSize: '0.85rem', marginTop: '1rem' }}>
-        {state.items.filter(i => !i.done).length} remaining
+        {todo.items.filter(i => !i.done).length} remaining
       </p>
     </div>
   )
@@ -616,20 +613,22 @@ export default function App() {
 function templateLarge(title: string): Record<string, string> {
   return {
     "src/app.ts": `import { aio } from 'aio'
-import { todo } from './features/todo/todo.ts'
-import { user } from './features/user/user.ts'
+import { todo } from './cell/todo/todo.ts'
+import { user } from './cell/user/user.ts'
 
 await aio.run({
+  appId: '${slug(title)}',
   appVersion: '0.1.0',
-  features: [todo, user],
+  cells: [todo, user],
   ui: { title: '${title}' },
+  baseDir: import.meta.dirname!,
 })
 `,
-    "src/features/todo/todo.ts": `import { feature } from 'aio'
+    "src/cell/todo/todo.ts": `import { cell } from 'aio'
 
 export type TodoItem = { id: number; text: string; done: boolean }
 
-export const todo = feature('todo', {
+export const todo = cell('todo', {
   state: { items: [] as TodoItem[], nextId: 1 },
   methods: {
     addTodo(s, text: string) {
@@ -648,9 +647,9 @@ export const todo = feature('todo', {
   },
 })
 `,
-    "src/features/user/user.ts": `import { feature } from 'aio'
+    "src/cell/user/user.ts": `import { cell } from 'aio'
 
-export const user = feature('user', {
+export const user = cell('user', {
   state: { name: 'Anonymous', theme: 'light' as 'light' | 'dark' },
   methods: {
     setName(s, name: string) { s.name = name },
@@ -658,68 +657,58 @@ export const user = feature('user', {
   },
 })
 `,
-    "src/ui/layout/Header.tsx": `import { useFeature } from 'aio'
-import { user } from '../../features/user/user.ts'
+    "src/ui/layout/Header.tsx": `import { user } from '../../cell/user/user.ts'
 
 export function Header() {
-  const { state, send } = useFeature(user)
-  if (!state) return null
-
   return (
     <header style={{
       display: 'flex', justifyContent: 'space-between', alignItems: 'center',
       padding: '0.75rem 1rem', borderBottom: '1px solid #eee',
     }}>
-      <span style={{ fontSize: '0.85rem', color: '#888' }}>{state.name}</span>
-      <button onClick={() => send.toggleTheme()}>
-        {state.theme === 'light' ? '🌙' : '☀️'}
+      <span style={{ fontSize: '0.85rem', color: '#888' }}>{user.name}</span>
+      <button type="button" onClick={() => user.toggleTheme()}>
+        {user.theme === 'light' ? '🌙' : '☀️'}
       </button>
     </header>
   )
 }
 `,
-    "src/ui/todo/TodoList.tsx": `import { useFeature } from 'aio'
-import { todo } from '../../features/todo/todo.ts'
+    "src/ui/todo/TodoList.tsx": `import { todo } from '../../cell/todo/todo.ts'
 
 export function TodoList() {
-  const { state, send } = useFeature(todo)
-  if (!state) return null
-
   return (
     <div>
       <ul style={{ listStyle: 'none', padding: 0 }}>
-        {state.items.map(item => (
+        {todo.items.map(item => (
           <li key={item.id} style={{ display: 'flex', gap: '0.5rem', alignItems: 'center', margin: '0.3rem 0' }}>
-            <input type="checkbox" checked={item.done} onChange={() => send.toggleTodo(item.id)} />
+            <input type="checkbox" checked={item.done} onChange={() => todo.toggleTodo(item.id)} />
             <span style={{ textDecoration: item.done ? 'line-through' : 'none', flex: 1, color: item.done ? '#aaa' : 'inherit' }}>
               {item.text}
             </span>
-            <button onClick={() => send.removeTodo(item.id)} style={{ fontSize: '0.8rem' }}>×</button>
+            <button type="button" onClick={() => todo.removeTodo(item.id)} style={{ fontSize: '0.8rem' }}>×</button>
           </li>
         ))}
       </ul>
       <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.85rem', color: '#888', marginTop: '0.5rem' }}>
-        <span>{state.items.filter(i => !i.done).length} remaining</span>
-        {state.items.some(i => i.done) && (
-          <button onClick={() => send.clearDone()} style={{ fontSize: '0.8rem' }}>Clear done</button>
+        <span>{todo.items.filter(i => !i.done).length} remaining</span>
+        {todo.items.some(i => i.done) && (
+          <button type="button" onClick={() => todo.clearDone()} style={{ fontSize: '0.8rem' }}>Clear done</button>
         )}
       </div>
     </div>
   )
 }
 `,
-    "src/ui/todo/AddTodo.tsx": `import { useState } from 'react'
-import { useFeature } from 'aio'
-import { todo } from '../../features/todo/todo.ts'
+    "src/ui/todo/AddTodo.tsx": `import { useLocal } from 'aio/air'
+import { todo } from '../../cell/todo/todo.ts'
 
 export function AddTodo() {
-  const { send } = useFeature(todo)
-  const [text, setText] = useState('')
+  const { local: text, set: setText } = useLocal('')
 
   const add = () => {
     const trimmed = text.trim()
     if (!trimmed) return
-    send.addTodo(trimmed)
+    todo.addTodo(trimmed)
     setText('')
   }
 
@@ -727,7 +716,7 @@ export function AddTodo() {
     <form onSubmit={e => { e.preventDefault(); add() }} style={{ display: 'flex', gap: '0.5rem', marginBottom: '1rem' }}>
       <input
         value={text}
-        onChange={e => setText(e.target.value)}
+        onChange={e => setText(e.currentTarget.value)}
         placeholder="What needs to be done?"
         style={{ flex: 1, padding: '0.5rem' }}
       />
@@ -736,19 +725,16 @@ export function AddTodo() {
   )
 }
 `,
-    "src/ui/user/Settings.tsx": `import { useState } from 'react'
-import { useFeature } from 'aio'
-import { user } from '../../features/user/user.ts'
+    "src/ui/user/Settings.tsx": `import { useLocal } from 'aio/air'
+import { user } from '../../cell/user/user.ts'
 
 export function Settings() {
-  const { state, send } = useFeature(user)
-  const [editing, setEditing] = useState(false)
-  const [name, setName] = useState('')
-  if (!state) return null
+  const { local: editing, set: setEditing } = useLocal(false)
+  const { local: name, set: setName } = useLocal('')
 
   const save = () => {
     const trimmed = name.trim()
-    if (trimmed) send.setName(trimmed)
+    if (trimmed) user.setName(trimmed)
     setEditing(false)
   }
 
@@ -757,29 +743,25 @@ export function Settings() {
       <h3 style={{ margin: '0 0 0.5rem' }}>Settings</h3>
       {editing ? (
         <form onSubmit={e => { e.preventDefault(); save() }} style={{ display: 'flex', gap: '0.5rem' }}>
-          <input value={name} onChange={e => setName(e.target.value)} placeholder="Your name" style={{ padding: '0.3rem' }} />
+          <input value={name} onChange={e => setName(e.currentTarget.value)} placeholder="Your name" style={{ padding: '0.3rem' }} />
           <button type="submit">Save</button>
         </form>
       ) : (
-        <button onClick={() => { setName(state.name); setEditing(true) }}>Change name</button>
+        <button type="button" onClick={() => { setName(user.name); setEditing(true) }}>Change name</button>
       )}
     </div>
   )
 }
 `,
-    "src/App.tsx": `import { useFeature } from 'aio'
-import { user } from './features/user/user.ts'
+    "src/App.tsx": `import { user } from './cell/user/user.ts'
 import { Header } from './ui/layout/Header.tsx'
 import { TodoList } from './ui/todo/TodoList.tsx'
 import { AddTodo } from './ui/todo/AddTodo.tsx'
 import { Settings } from './ui/user/Settings.tsx'
 
 export default function App() {
-  const { state } = useFeature(user)
-  if (!state) return <div style={{ padding: '2rem' }}>Loading...</div>
-
-  const bg = state.theme === 'dark' ? '#1a1a2e' : '#fff'
-  const fg = state.theme === 'dark' ? '#e0e0e0' : '#222'
+  const bg = user.theme === 'dark' ? '#1a1a2e' : '#fff'
+  const fg = user.theme === 'dark' ? '#e0e0e0' : '#222'
 
   return (
     <div style={{ minHeight: '100vh', background: bg, color: fg }}>
@@ -829,7 +811,7 @@ function applyAppType(
   if (appType.isRemote && appType.hasServer && result["src/app.ts"]) {
     result["src/app.ts"] = result["src/app.ts"].replace(
       /\n\}\)\n$/,
-      `\n  // users: { admin: { name: 'Admin', token: 'change-me' } },\n})\n`,
+      `\n  // users: { 'change-me-token': { id: 'admin', role: 'admin' } },\n})\n`,
     );
   }
 
@@ -842,34 +824,46 @@ function clientOnlyFiles(
 ): Record<string, string> {
   if (appType.id === "remote-electron") {
     return {
-      "src/app.ts": `import { aio, feature } from 'aio'
+      "src/app.ts": `import { aio, cell } from 'aio'
 
 // ${title} — Electron remote client
 // Dev:     deno task dev                              (opens connect page)
 // Direct:  deno task dev --server-url=http://server:8000
 // Build:   deno task compile                          (AppImage)
 
-const _stub = feature('app', { state: {}, methods: {} })
-await aio.run({ appVersion: '0.1.0', features: [_stub], ui: { title: '${title}' } })
+const _stub = cell('app', { state: {}, methods: {} })
+await aio.run({
+  appId: '${slug(title)}',
+  appVersion: '0.1.0',
+  cells: [_stub],
+  ui: { title: '${title}' },
+  baseDir: import.meta.dirname!,
+})
 `,
     };
   }
 
   // remote-android: connect page HTML served locally for dev, APK for compile
   return {
-    "src/app.ts": `import { aio, feature } from 'aio'
+    "src/app.ts": `import { aio, cell } from 'aio'
 
 // ${title} — Android remote client
 // Dev:   deno task dev        (serves connect page at http://localhost:8000)
 // Build: deno task compile    (APK)
 
-const _stub = feature('app', { state: {}, methods: {} })
-await aio.run({ appVersion: '0.1.0', features: [_stub], ui: { title: '${title}' } })
+const _stub = cell('app', { state: {}, methods: {} })
+await aio.run({
+  appId: '${slug(title)}',
+  appVersion: '0.1.0',
+  cells: [_stub],
+  ui: { title: '${title}' },
+  baseDir: import.meta.dirname!,
+})
 `,
-    "src/App.tsx": `import { useState } from 'react'
+    "src/App.tsx": `import { useLocal } from 'aio/air'
 
 export default function App() {
-  const [url, setUrl] = useState('')
+  const { local: url, set: setUrl } = useLocal('')
 
   const connect = () => {
     const target = url.trim()
@@ -882,7 +876,7 @@ export default function App() {
         <h1 style={{ fontSize: '2rem', fontWeight: 300, letterSpacing: '.1em', color: '#4a9eff', marginBottom: '1.5rem' }}>${title}</h1>
         <input
           value={url}
-          onChange={e => setUrl(e.target.value)}
+          onChange={e => setUrl(e.currentTarget.value)}
           onKeyDown={e => e.key === 'Enter' && connect()}
           placeholder="http://server:8000"
           style={{ width: '100%', padding: '.8rem 1rem', fontSize: '1rem', background: '#16213e', border: '1px solid #333', borderRadius: '8px', color: '#e0e0e0', outline: 'none', marginBottom: '.8rem' }}
@@ -918,9 +912,9 @@ app.subscribe(state => {
   console.log('State updated:', state)
 })
 
-// Example: send an action
-// import { msg } from 'aio'
-// app.send(msg('Inc'))
+// Example: send an action to a methods-style cell.
+// A call to \`counter.increment(1)\` on the server maps to:
+// app.send({ type: 'counter:increment', payload: { args: [1] } })
 
 // Keep alive — Ctrl+C to exit
 await new Promise(() => {})
@@ -931,17 +925,16 @@ await new Promise(() => {})
 function cliTemplateMinimal(_title: string): Record<string, string> {
   return {
     "src/state.ts":
-      `// Mirror of server state — feature 'counter' namespaces its state
+      `// Mirror of server state — cell 'counter' namespaces its state
 export type AppState = { counter: { count: number } }
 `,
-    "src/commands.ts": `import { msg } from 'aio'
-
-export function parseCommand(args: string[]): { type: string; payload?: unknown } | null {
+    "src/commands.ts":
+      `export function parseCommand(args: string[]): { type: string; payload?: unknown } | null {
   const [cmd, ...rest] = args
   switch (cmd) {
-    case 'inc': return msg('counter:increment', { args: [Number(rest[0]) || 1] })
-    case 'dec': return msg('counter:decrement', { args: [Number(rest[0]) || 1] })
-    case 'reset': return msg('counter:reset', { args: [] })
+    case 'inc': return { type: 'counter:increment', payload: { args: [Number(rest[0]) || 1] } }
+    case 'dec': return { type: 'counter:decrement', payload: { args: [Number(rest[0]) || 1] } }
+    case 'reset': return { type: 'counter:reset', payload: { args: [] } }
     default: return null
   }
 }
@@ -998,17 +991,16 @@ export type AppState = {
   todo: { items: TodoItem[]; nextId: number }
 }
 `,
-    "src/commands.ts": `import { msg } from 'aio'
-
-export function parseCommand(args: string[]): { type: string; payload?: unknown } | null {
+    "src/commands.ts":
+      `export function parseCommand(args: string[]): { type: string; payload?: unknown } | null {
   const [cmd, ...rest] = args
   switch (cmd) {
     case 'add': {
       const text = rest.join(' ').trim()
-      return text ? msg('AddTodo', { text }) : null
+      return text ? { type: 'todo:addTodo', payload: { args: [text] } } : null
     }
-    case 'toggle': return rest[0] ? msg('ToggleTodo', { id: Number(rest[0]) }) : null
-    case 'remove': return rest[0] ? msg('RemoveTodo', { id: Number(rest[0]) }) : null
+    case 'toggle': return rest[0] ? { type: 'todo:toggleTodo', payload: { args: [Number(rest[0])] } } : null
+    case 'remove': return rest[0] ? { type: 'todo:removeTodo', payload: { args: [Number(rest[0])] } } : null
     case 'list': return null // handled in client
     default: return null
   }
@@ -1098,32 +1090,30 @@ export type AppState = {
   user: UserState
 }
 `,
-    "src/commands/todo.ts": `import { msg } from 'aio'
-
-export function parseTodoCommand(args: string[]): { type: string; payload?: unknown } | null {
+    "src/commands/todo.ts":
+      `export function parseTodoCommand(args: string[]): { type: string; payload?: unknown } | null {
   const [cmd, ...rest] = args
   switch (cmd) {
     case 'add': {
       const text = rest.join(' ').trim()
-      return text ? msg('AddTodo', { text }) : null
+      return text ? { type: 'todo:addTodo', payload: { args: [text] } } : null
     }
-    case 'toggle': return rest[0] ? msg('ToggleTodo', { id: Number(rest[0]) }) : null
-    case 'remove': return rest[0] ? msg('RemoveTodo', { id: Number(rest[0]) }) : null
-    case 'clear': return msg('ClearDone')
+    case 'toggle': return rest[0] ? { type: 'todo:toggleTodo', payload: { args: [Number(rest[0])] } } : null
+    case 'remove': return rest[0] ? { type: 'todo:removeTodo', payload: { args: [Number(rest[0])] } } : null
+    case 'clear': return { type: 'todo:clearDone', payload: { args: [] } }
     default: return null
   }
 }
 `,
-    "src/commands/user.ts": `import { msg } from 'aio'
-
-export function parseUserCommand(args: string[]): { type: string; payload?: unknown } | null {
+    "src/commands/user.ts":
+      `export function parseUserCommand(args: string[]): { type: string; payload?: unknown } | null {
   const [cmd, ...rest] = args
   switch (cmd) {
     case 'name': {
       const name = rest.join(' ').trim()
-      return name ? msg('SetName', { name }) : null
+      return name ? { type: 'user:setName', payload: { args: [name] } } : null
     }
-    case 'theme': return msg('ToggleTheme')
+    case 'theme': return { type: 'user:toggleTheme', payload: { args: [] } }
     default: return null
   }
 }
@@ -1214,29 +1204,29 @@ function getTemplates(appType: AppType): Template[] {
     {
       label: "Empty",
       desc: ui
-        ? "2 files — inline feature + App.tsx. Fastest start."
-        : "1 file — inline feature. Fastest start.",
+        ? "2 files — inline cell + App.tsx. Fastest start."
+        : "1 file — inline cell. Fastest start.",
       fn: templateEmpty,
     },
     {
       label: "Minimal",
       desc: ui
-        ? "3 files — counter feature + app entry + UI. Methods style."
-        : "2 files — counter feature + app entry. Methods style.",
+        ? "3 files — counter cell + app entry + UI. Methods style."
+        : "2 files — counter cell + app entry. Methods style.",
       fn: templateMinimal,
     },
     {
       label: "Medium",
       desc: ui
-        ? "5 files — todo feature + UI components. Feature API."
-        : "2 files — todo feature + app entry. Feature API.",
+        ? "5 files — todo cell + UI components. Cell API."
+        : "2 files — todo cell + app entry. Cell API.",
       fn: templateMedium,
     },
     {
       label: "Large",
       desc: ui
-        ? "9 files — todo + user features + UI hierarchy. Full architecture."
-        : "3 files — todo + user features + app entry. Full architecture.",
+        ? "9 files — todo + user cells + UI hierarchy. Full architecture."
+        : "3 files — todo + user cells + app entry. Full architecture.",
       fn: templateLarge,
     },
   ];

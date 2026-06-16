@@ -16,8 +16,10 @@ import { buildContext } from "./context.ts";
 import { ALL_CHECKS } from "./checks.ts";
 import type { Issue, Report, Severity } from "./types.ts";
 export type { Issue, Report, SafeFixFn, Severity } from "./types.ts";
+import denoJson from "../deno.json" with { type: "json" };
 
-const VERSION = "0.1.0";
+// Single source of truth — aiol shares the framework version (deno.json).
+const VERSION = denoJson.version;
 
 // ── Colors ──────────────────────────────────────────────────────────
 

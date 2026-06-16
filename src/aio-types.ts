@@ -46,9 +46,9 @@ export type WsLimits = {
   bytesPerSec?: number;
 };
 
-/** @deprecated Use CellsConfig with `cells: [...]` instead. AioConfig is the legacy
- *  reduce/execute API — still supported but not recommended for new projects.
- *  See: docs/upgrade/from-alpha10-to-alpha11.md */
+/** @internal Engine-level reduce/execute config. The public authoring surface is
+ *  `CellsConfig` (`cells: [...]`); `aio-cells-bridge.ts` compiles cells down to this
+ *  shape for `_run()`. Not exported from `aio` — internal to the runtime. */
 export type AioConfig<S, A, E> = {
   /** Unique app identity — used for lock file, UDS socket, KV/SQLite paths, TLS cert dir. Mandatory. */
   appId: string;
