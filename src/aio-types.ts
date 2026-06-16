@@ -34,6 +34,18 @@ export type UiConfig = {
   entry?: string;
 };
 
+/** Per-client WebSocket safety limits for `--expose` deployments. All optional —
+ *  omitted fields keep the hardened defaults. Tune only when a reverse proxy or
+ *  trusted-LAN posture needs different ceilings (W6.6). */
+export type WsLimits = {
+  /** Max bytes per WS message before it's dropped. Default: 1_000_000 (1MB). */
+  maxMessageBytes?: number;
+  /** Max messages per second per client. Default: 100. */
+  messagesPerSec?: number;
+  /** Max bytes per second per client (bandwidth DoS guard). Default: 5_000_000. */
+  bytesPerSec?: number;
+};
+
 /** @deprecated Use CellsConfig with `cells: [...]` instead. AioConfig is the legacy
  *  reduce/execute API — still supported but not recommended for new projects.
  *  See: docs/upgrade/from-alpha10-to-alpha11.md */
@@ -49,6 +61,7 @@ export type AioConfig<S, A, E> = {
   fullStateThreshold?: number; // 0-1: ratio of changed keys that triggers full state broadcast (default: 0.5)
   syncIntervalMs?: number; // default: 50 — max 1 state push per N ms (0 = microtask coalescing only)
   maxConnections?: number; // max concurrent WebSocket clients (default: 100)
+  wsLimits?: WsLimits; // per-client WS rate/size limits (advanced; defaults hardened)
   beforeReduce?: (action: A, state: S, user?: AioUser) => A | null; // intercept actions before reduce — return null to drop
   persistKey?: string; // KV key prefix (default: "state")
   persistDebounceMs?: number; // ms between KV writes (default: 100)
@@ -184,6 +197,8 @@ export type CellsConfig = {
   syncIntervalMs?: number;
   fullStateThreshold?: number;
   maxConnections?: number;
+  /** Per-client WebSocket safety limits (advanced; defaults are hardened). */
+  wsLimits?: WsLimits;
   schedules?: ScheduleDef[];
   /** v0.5 middleware array — applied in order as beforeReduce chain */
   middleware?: import("./middleware.ts").MiddlewareFn[];

@@ -71,10 +71,15 @@ In prod mode, errors are compact one-liners:
 | `MACHINE_BLOCKED`    | Machine     | Action blocked by state machine (warn-level)                  |
 | `QUEUE_OVERFLOW`     | Dispatch    | Dispatch queue exceeded 10,000 entries                        |
 | `DISPATCH_LOOP`      | Dispatch    | 1,000 iterations detected -- dispatch recovers after draining |
+| `DISPATCH_CLOSED`    | Dispatch    | Action dispatched after close() -- dropped, not applied       |
 | `MEMORY_PRESSURE`    | Memory      | Heap above warning threshold (default 75%)                    |
 | `MEMORY_CRITICAL`    | Memory      | Heap above critical threshold (default 90%)                   |
 | `BUDGET_REDUCE`      | Performance | Reducer exceeded time budget (default 100ms)                  |
 | `BUDGET_EFFECT`      | Performance | Effect exceeded time budget (default 5ms)                     |
+| `PERSIST_ERROR`      | Persistence | State persist to KV/SQLite failed -- in memory, lost on exit  |
+| `UI_FREEZE`          | Vitals      | UI/main thread stalled past the freeze threshold (warn)       |
+| `TRANSPORT_STALL`    | Vitals      | WS transport made no progress under backpressure (warn)       |
+| `LOOP_SATURATED`     | Vitals      | Event loop saturated -- work queued faster than it drains     |
 
 ### Error layer identification
 
@@ -91,6 +96,7 @@ The error code prefix tells you which layer broke:
 | `QUEUE_*` / `DISPATCH_*` | Dispatch loop   | Infinite dispatch cycles               |
 | `MEMORY_*`               | Runtime         | Unbounded state growth                 |
 | `BUDGET_*`               | Performance     | Slow reducer or effect                 |
+| `PERSIST_*`              | Persistence     | KV/SQLite write failures               |
 
 ### Action type prefix
 
