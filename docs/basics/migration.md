@@ -160,23 +160,23 @@ const counter = cell("counter", {
 
 ## Mapping existing patterns
 
-| You have                          | AIO equivalent                                          |
-| --------------------------------- | ------------------------------------------------------- |
-| REST API endpoints                | Actions via WebSocket, no HTTP needed                   |
-| Database reads/writes             | Cell-level `persist`/`ui` config + auto Deno.Kv         |
+| You have                          | AIO equivalent                                                 |
+| --------------------------------- | -------------------------------------------------------------- |
+| REST API endpoints                | Actions via WebSocket, no HTTP needed                          |
+| Database reads/writes             | Cell-level `persist`/`ui` config + auto Deno.Kv                |
 | SQLite / raw SQL                  | Built-in `app.db` -- [3-tier SQLite](../persistence/sqlite.md) |
-| `setInterval` / `setTimeout`      | Declarative `schedule.every` / `schedule.after`         |
-| cron jobs                         | `schedule.cron` -- runs in-process                      |
-| React state + useEffect           | Direct cell access -- all state lives on server         |
-| Multiple useState hooks           | Cell state + `useLocal()` for ephemeral UI              |
-| WebSocket setup                   | Delete it -- direct cell access handles everything      |
-| createRoot / ReactDOM             | Delete it -- framework mounts `export default` from App |
-| HMR / hot reload                  | Delete it -- built-in, no config                        |
-| State management (Redux, Zustand) | `cell()` replaces store + slices + selectors            |
-| XState / state machines           | `machine:` config in `cell()`                           |
-| Express middleware                | `aio.middleware.create(fn)`                             |
-| Health checks                     | `GET /__aio/health` -- auto-generated                   |
-| Cell flags                        | `app.cells.enable/disable()` -- runtime control         |
+| `setInterval` / `setTimeout`      | Declarative `schedule.every` / `schedule.after`                |
+| cron jobs                         | `schedule.cron` -- runs in-process                             |
+| React state + useEffect           | Direct cell access -- all state lives on server                |
+| Multiple useState hooks           | Cell state + `useLocal()` for ephemeral UI                     |
+| WebSocket setup                   | Delete it -- direct cell access handles everything             |
+| createRoot / ReactDOM             | Delete it -- framework mounts `export default` from App        |
+| HMR / hot reload                  | Delete it -- built-in, no config                               |
+| State management (Redux, Zustand) | `cell()` replaces store + slices + selectors                   |
+| XState / state machines           | `machine:` config in `cell()`                                  |
+| Express middleware                | `aio.middleware.create(fn)`                                    |
+| Health checks                     | `GET /__aio/health` -- auto-generated                          |
+| Cell flags                        | `app.cells.enable/disable()` -- runtime control                |
 
 ## Mental shift: state lives on the server
 
@@ -264,11 +264,11 @@ a one-time dev hint pointing at the AIR-native equivalent:
 import { useEffect, useState } from "aio/air/compat";
 ```
 
-| React | AIR native |
-| ----- | ---------- |
-| `useState` | `useLocal()` for object state, `signal()` for module-scoped |
-| `useEffect` | `onMount()` for setup/teardown, `effect()` for reactive |
-| `useMemo` | `computed()` |
-| `useCallback` | unnecessary — components are auto-optimized |
+| React         | AIR native                                                  |
+| ------------- | ----------------------------------------------------------- |
+| `useState`    | `useLocal()` for object state, `signal()` for module-scoped |
+| `useEffect`   | `onMount()` for setup/teardown, `effect()` for reactive     |
+| `useMemo`     | `computed()`                                                |
+| `useCallback` | unnecessary — components are auto-optimized                 |
 
 The re-exports on `aio/air` are deprecated and will be removed post-1.0.

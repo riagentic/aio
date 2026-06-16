@@ -5,9 +5,9 @@
 The todo.md DX plan, phases 1–9 complete. Behavior changes, plainly:
 
 - **Defaults flipped to honest**: `persist` and `ui` default to `"all"` —
-  zero-config persists and syncs, as the README always claimed. Opt out per
-  cell (`persist: "none"` / include/exclude). The "mode cliff" (one configured
-  cell flipping global behavior) is gone.
+  zero-config persists and syncs, as the README always claimed. Opt out per cell
+  (`persist: "none"` / include/exclude). The "mode cliff" (one configured cell
+  flipping global behavior) is gone.
 - **`await method()` is real**: bound methods return Promises — sync resolves
   after the dispatch is applied, async resolves with the return value; in the
   browser the Promise resolves on server ack, so a state read on the next line
@@ -17,22 +17,21 @@ The todo.md DX plan, phases 1–9 complete. Behavior changes, plainly:
 - **Client-scoped cells**: `scope: "client"` — browser-local, per-tab,
   signal-backed, sync methods only; skipped by server composition. The todo
   example's filter uses it.
-- **useEffect deps are honored** (React semantics, signal auto-tracking
-  disabled inside deps-driven effects); React compat hooks moved to
-  `aio/air/compat` (main-surface exports deprecated, removed post-1.0).
+- **useEffect deps are honored** (React semantics, signal auto-tracking disabled
+  inside deps-driven effects); React compat hooks moved to `aio/air/compat`
+  (main-surface exports deprecated, removed post-1.0).
 - **Typed events**: `e.currentTarget` is element-typed on intrinsic handlers
   (AirEvent<T>); `onDoubleClick` aliased; unknown event names warn in dev.
 - **Child signal subscriptions are independent of parents** — the
   `void sig.value` incantation is deleted from docs; invariant pinned by test.
-- **Sync-classified methods returning a Promise throw in dev** (transpiled
-  async detection) with a `markAsync` fix message.
+- **Sync-classified methods returning a Promise throw in dev** (transpiled async
+  detection) with a `markAsync` fix message.
 - **`ui.entry`** option replaces the hardcoded App.tsx convention (default
   unchanged); **`aio doctor`** validates the six magic deno.json lines.
 
 Known debt (pre-existing, unchanged): db/integration test files crash their
-SQLite child worker in this dev environment (fails at alpha13 too); 29 lint
-hits in sync/* (require-await ×28, one unused import).
-
+SQLite child worker in this dev environment (fails at alpha13 too); 29 lint hits
+in sync/* (require-await ×28, one unused import).
 
 ## 1.0.0-alpha13
 
@@ -40,14 +39,14 @@ hits in sync/* (require-await ×28, one unused import).
 
 - **Nuclear audit waves 6-11** — 64+ bugs fixed: sync protocol routing gaps,
   cursor never advancing bug, concurrent HLC drop, SVG namespace handling,
-  watcher sentinel TOCTOU, logger flush race, signal listener leak, rate
-  limiter abuse detection, op buffer TTL eviction, onTTCommand guard, state
-  module cleanup. Total: ~194 bugs across 11 audit waves.
+  watcher sentinel TOCTOU, logger flush race, signal listener leak, rate limiter
+  abuse detection, op buffer TTL eviction, onTTCommand guard, state module
+  cleanup. Total: ~194 bugs across 11 audit waves.
 
 ### Fixed
 
-- **Sync protocol routing** — `onTTCommand` guard added to prevent
-  time-travel commands from leaking into production sync
+- **Sync protocol routing** — `onTTCommand` guard added to prevent time-travel
+  commands from leaking into production sync
 - **Sync cursor** — cursor now advances correctly after processing
 - **HLC** — concurrent HLC drop fixed (was dropping ops on concurrent tick)
 - **SVG namespace** — AIR renderer now handles SVG namespace correctly

@@ -5,7 +5,11 @@
 import { assertEquals } from "@std/assert";
 import { cell } from "../src/cell.ts";
 import { testCell } from "../src/cell-test.ts";
-import { isScheduleEffect, schedule, type ScheduleEffect } from "../src/schedule.ts";
+import {
+  isScheduleEffect,
+  schedule,
+  type ScheduleEffect,
+} from "../src/schedule.ts";
 
 const poller = cell("poller381", {
   state: { tries: 0, data: null as string | null },
@@ -30,7 +34,10 @@ const poller = cell("poller381", {
       await Promise.resolve();
       s.tries += 1;
       return [
-        schedule.after("poller.retry", 500, { type: "poller381:refresh", payload: { args: [] } }),
+        schedule.after("poller.retry", 500, {
+          type: "poller381:refresh",
+          payload: { args: [] },
+        }),
         schedule.cancel("poller.stale"),
       ];
     },
@@ -58,30 +65,41 @@ const gated = cell("gated381", {
     async fetchOnce(s): Promise<ScheduleEffect> {
       await Promise.resolve();
       s.ran = true;
-      return schedule.after("gated.next", 100, { type: "gated381:done", payload: { args: [] } });
+      return schedule.after("gated.next", 100, {
+        type: "gated381:done",
+        payload: { args: [] },
+      });
     },
   },
 });
 
-testCell(poller, "async method returning a schedule effect emits it", async (t) => {
-  t.init();
-  await t.send.fetchData!();
-  t.expect.state((s) => s.tries === 1);
-  const effects = t.getEffects();
-  assertEquals(effects.length, 1);
-  assertEquals(isScheduleEffect(effects[0]), true);
-  assertEquals((effects[0] as { kind: string }).kind, "after");
-  assertEquals((effects[0] as { id: string }).id, "poller.retry");
-});
+testCell(
+  poller,
+  "async method returning a schedule effect emits it",
+  async (t) => {
+    t.init();
+    await t.send.fetchData!();
+    t.expect.state((s) => s.tries === 1);
+    const effects = t.getEffects();
+    assertEquals(effects.length, 1);
+    assertEquals(isScheduleEffect(effects[0]), true);
+    assertEquals((effects[0] as { kind: string }).kind, "after");
+    assertEquals((effects[0] as { id: string }).id, "poller.retry");
+  },
+);
 
-testCell(poller, "async method returning an effect array emits all of them", async (t) => {
-  t.init();
-  await t.send.fetchAll!();
-  const effects = t.getEffects();
-  assertEquals(effects.length, 2);
-  assertEquals(effects.every(isScheduleEffect), true);
-  assertEquals((effects[1] as { kind: string }).kind, "cancel");
-});
+testCell(
+  poller,
+  "async method returning an effect array emits all of them",
+  async (t) => {
+    t.init();
+    await t.send.fetchAll!();
+    const effects = t.getEffects();
+    assertEquals(effects.length, 2);
+    assertEquals(effects.every(isScheduleEffect), true);
+    assertEquals((effects[1] as { kind: string }).kind, "cancel");
+  },
+);
 
 testCell(poller, "plain data returns are not misread as effects", async (t) => {
   t.init();
@@ -91,12 +109,16 @@ testCell(poller, "plain data returns are not misread as effects", async (t) => {
   assertEquals(t.getEffects().length, 0);
 });
 
-testCell(gated, "machine-gated cell: returned effect passes the __effects self-loop", async (t) => {
-  t.init();
-  await t.send.fetchOnce!();
-  t.expect.status("busy");
-  t.expect.state((s) => s.ran === true);
-  const effects = t.getEffects();
-  assertEquals(effects.length, 1);
-  assertEquals((effects[0] as { id: string }).id, "gated.next");
-});
+testCell(
+  gated,
+  "machine-gated cell: returned effect passes the __effects self-loop",
+  async (t) => {
+    t.init();
+    await t.send.fetchOnce!();
+    t.expect.status("busy");
+    t.expect.state((s) => s.ran === true);
+    const effects = t.getEffects();
+    assertEquals(effects.length, 1);
+    assertEquals((effects[0] as { id: string }).id, "gated.next");
+  },
+);

@@ -7,7 +7,11 @@ import {
   getRegisteredCells,
 } from "../src/cell-reactive.ts";
 import { _resetSignals, getCellSignal } from "../src/state-signals.ts";
-import { _setAckTimeoutMs, _rejectAllPending, _resolveAck } from "../src/browser-ack.ts";
+import {
+  _rejectAllPending,
+  _resolveAck,
+  _setAckTimeoutMs,
+} from "../src/browser-ack.ts";
 
 // ── Registration ─────────────────────────────────────────────────────
 
@@ -55,7 +59,10 @@ Deno.test("AIO-6.1: cell() throws when a state key collides with a method name",
     caught = e as Error;
   }
   assertEquals(caught instanceof Error, true);
-  assertEquals(caught!.message.includes("collides with method 'increment'"), true);
+  assertEquals(
+    caught!.message.includes("collides with method 'increment'"),
+    true,
+  );
   _resetCellRegistry();
 });
 

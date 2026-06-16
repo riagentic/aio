@@ -149,7 +149,10 @@ Deno.test(
   "F-1: _isFrameworkInternalActionType identifies cell:__name and __name patterns",
   () => {
     // Framework-internal — must be rejected from network sources
-    assertEquals(_isFrameworkInternalActionType("counter:__setIncrement"), true);
+    assertEquals(
+      _isFrameworkInternalActionType("counter:__setIncrement"),
+      true,
+    );
     assertEquals(_isFrameworkInternalActionType("counter:__exec"), true);
     assertEquals(_isFrameworkInternalActionType("counter:__error"), true);
     assertEquals(_isFrameworkInternalActionType("counter:__flow"), true);

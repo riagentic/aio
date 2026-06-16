@@ -76,7 +76,11 @@ ${head}
 }
 
 /** Dev (AIO renderer): native VDOM — no React/ReactDOM, signal-driven re-render */
-function aioDevHTML(head: string, importMap: string, uiEntry = "App.tsx"): string {
+function aioDevHTML(
+  head: string,
+  importMap: string,
+  uiEntry = "App.tsx",
+): string {
   return `<!DOCTYPE html>
 <html>
 <head>

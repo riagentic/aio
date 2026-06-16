@@ -56,7 +56,10 @@ function mergeLWW(
   remote: unknown,
   remoteHlc: HLC,
 ): MergeResult {
-  if (local === remote || stableJSONStringify(local) === stableJSONStringify(remote)) {
+  if (
+    local === remote ||
+    stableJSONStringify(local) === stableJSONStringify(remote)
+  ) {
     return { value: local, conflict: false };
   }
   const winner = compareHLC(localHlc, remoteHlc) >= 0 ? local : remote;

@@ -1,9 +1,9 @@
 # Scheduling
 
 aio has a built-in scheduler for timers, intervals, daily triggers, and cron
-jobs. Schedules are **pure effects** — returned from reducers or methods
-(sync or async, AIO-381), handled by the runtime. No side effects in reducers,
-no external cron daemons.
+jobs. Schedules are **pure effects** — returned from reducers or methods (sync
+or async, AIO-381), handled by the runtime. No side effects in reducers, no
+external cron daemons.
 
 > Timers are one kind of owned resource. For disposables — file watchers,
 > sockets, subprocesses — the same keyed replace semantics exist as

@@ -54,7 +54,10 @@ Deno.test("4.4: dev — nested mutation also throws", () => {
     const sig = getCellSignal("user");
     let caught: Error | null = null;
     try {
-      ((sig.peek() as Record<string, unknown>).profile as Record<string, unknown>)
+      ((sig.peek() as Record<string, unknown>).profile as Record<
+        string,
+        unknown
+      >)
         .name = "bob";
     } catch (e) {
       caught = e as Error;

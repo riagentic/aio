@@ -16,7 +16,9 @@ interface DenoJson {
 }
 
 /** Run all doctor checks against a directory containing deno.json. */
-export async function runDoctor(dir = "."): Promise<{ checks: Check[]; ok: boolean }> {
+export async function runDoctor(
+  dir = ".",
+): Promise<{ checks: Check[]; ok: boolean }> {
   const checks: Check[] = [];
   let cfg: DenoJson | null = null;
   try {
@@ -60,7 +62,9 @@ export async function runDoctor(dir = "."): Promise<{ checks: Check[]; ok: boole
   });
 
   // Electron needs nodeModulesDir
-  const usesElectron = Object.values(imports).some((v) => v.includes("electron"));
+  const usesElectron = Object.values(imports).some((v) =>
+    v.includes("electron")
+  );
   if (usesElectron) {
     checks.push({
       name: "nodeModulesDir set (electron imported)",

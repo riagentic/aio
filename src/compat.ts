@@ -4,7 +4,11 @@
 // Isolated — deletable when no longer needed.
 
 import { effect, type Signal, signal, untrack } from "./signal.ts";
-import { onCleanup, onMount, useRef as rendererUseRef } from "./aio-renderer.ts";
+import {
+  onCleanup,
+  onMount,
+  useRef as rendererUseRef,
+} from "./aio-renderer.ts";
 
 // ── Dev hints (once per function name per session) ─────────────────
 

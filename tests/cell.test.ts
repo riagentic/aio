@@ -66,7 +66,9 @@ const counter = cell("counter", {
   },
   execute: {
     persist(app) {
-      app.dispatch((counter.__aio.actions as unknown as Record<string, any>).saved());
+      app.dispatch(
+        (counter.__aio.actions as unknown as Record<string, any>).saved(),
+      );
     },
     log() {/* noop in tests */},
   },
@@ -88,23 +90,38 @@ Deno.test("cell: action labels are cellName:actionKey format", () => {
 });
 
 Deno.test("cell: action creators produce { type, payload }", () => {
-  assertEquals((counter.__aio.actions as unknown as Record<string, any>).increment(5), {
-    type: "counter:increment",
-    payload: { by: 5 },
-  });
-  assertEquals((counter.__aio.actions as unknown as Record<string, any>).decrement(3), {
-    type: "counter:decrement",
-    payload: { by: 3 },
-  });
-  assertEquals((counter.__aio.actions as unknown as Record<string, any>).reset(), { type: "counter:reset", payload: {} });
-  assertEquals((counter.__aio.actions as unknown as Record<string, any>).save(), { type: "counter:save", payload: {} });
+  assertEquals(
+    (counter.__aio.actions as unknown as Record<string, any>).increment(5),
+    {
+      type: "counter:increment",
+      payload: { by: 5 },
+    },
+  );
+  assertEquals(
+    (counter.__aio.actions as unknown as Record<string, any>).decrement(3),
+    {
+      type: "counter:decrement",
+      payload: { by: 3 },
+    },
+  );
+  assertEquals(
+    (counter.__aio.actions as unknown as Record<string, any>).reset(),
+    { type: "counter:reset", payload: {} },
+  );
+  assertEquals(
+    (counter.__aio.actions as unknown as Record<string, any>).save(),
+    { type: "counter:save", payload: {} },
+  );
 });
 
 Deno.test("cell: default params preserved", () => {
-  assertEquals((counter.__aio.actions as unknown as Record<string, any>).increment(), {
-    type: "counter:increment",
-    payload: { by: 1 },
-  });
+  assertEquals(
+    (counter.__aio.actions as unknown as Record<string, any>).increment(),
+    {
+      type: "counter:increment",
+      payload: { by: 1 },
+    },
+  );
 });
 
 Deno.test("cell: effect labels and creators", () => {
@@ -130,7 +147,10 @@ Deno.test("cell: selectors via compose", () => {
   // Test selectors through compose — the public consumption path
   const composed = composeCells([counter]);
   let state = composed.initialState;
-  state = composed.reduce(state, (counter.__aio.actions as unknown as Record<string, any>).increment(42)).state;
+  state = composed.reduce(
+    state,
+    (counter.__aio.actions as unknown as Record<string, any>).increment(42),
+  ).state;
   // Verify selector behavior by checking composed state
   assertEquals((state.counter as Record<string, unknown>).count, 42);
   assertEquals((state.counter as Record<string, unknown>).__aio_status, "idle");
@@ -242,7 +262,10 @@ Deno.test("cell: foreign actions in machine allowed", () => {
 
   // Verify foreign action routing works via compose (behavioral test)
   const composed = composeCells([dc, te]);
-  const r = composed.reduce(composed.initialState, (dc.__aio.actions as unknown as Record<string, any>).priceUpdated(42000));
+  const r = composed.reduce(
+    composed.initialState,
+    (dc.__aio.actions as unknown as Record<string, any>).priceUpdated(42000),
+  );
   assertEquals((r.state.te as Record<string, unknown>).price, 42000);
 });
 
@@ -274,7 +297,10 @@ Deno.test("compose: simple machine has no _status", () => {
 
 Deno.test("compose: reduce routes action to correct cell", () => {
   const composed = composeCells([counter]);
-  const result = composed.reduce(composed.initialState, (counter.__aio.actions as unknown as Record<string, any>).increment(5));
+  const result = composed.reduce(
+    composed.initialState,
+    (counter.__aio.actions as unknown as Record<string, any>).increment(5),
+  );
   const s = result.state.counter as Record<string, unknown>;
   assertEquals(s.count, 5);
   assertEquals(s.__aio_status, "idle");
@@ -285,7 +311,10 @@ Deno.test("compose: reduce routes action to correct cell", () => {
 Deno.test("compose: machine guard blocks invalid transitions", () => {
   const composed = composeCells([counter]);
   // Can't 'saved' from idle — only valid in 'saving'
-  const result = composed.reduce(composed.initialState, (counter.__aio.actions as unknown as Record<string, any>).saved());
+  const result = composed.reduce(
+    composed.initialState,
+    (counter.__aio.actions as unknown as Record<string, any>).saved(),
+  );
   assertEquals(result.effects.length, 0);
   assertEquals((result.state.counter as Record<string, unknown>).count, 0); // unchanged
 });
@@ -294,7 +323,10 @@ Deno.test("compose: state machine transitions correctly", () => {
   const composed = composeCells([counter]);
 
   // idle → save → saving
-  const r1 = composed.reduce(composed.initialState, (counter.__aio.actions as unknown as Record<string, any>).save());
+  const r1 = composed.reduce(
+    composed.initialState,
+    (counter.__aio.actions as unknown as Record<string, any>).save(),
+  );
   assertEquals(
     (r1.state.counter as Record<string, unknown>).__aio_status,
     "saving",
@@ -302,14 +334,22 @@ Deno.test("compose: state machine transitions correctly", () => {
   assertEquals(r1.effects.length, 1); // persist effect
 
   // saving → saved → idle
-  const r2 = composed.reduce(r1.state, (counter.__aio.actions as unknown as Record<string, any>).saved());
+  const r2 = composed.reduce(
+    r1.state,
+    (counter.__aio.actions as unknown as Record<string, any>).saved(),
+  );
   assertEquals(
     (r2.state.counter as Record<string, unknown>).__aio_status,
     "idle",
   );
 
   // saving → saveFailed → error
-  const r3 = composed.reduce(r1.state, (counter.__aio.actions as unknown as Record<string, any>).saveFailed("disk full"));
+  const r3 = composed.reduce(
+    r1.state,
+    (counter.__aio.actions as unknown as Record<string, any>).saveFailed(
+      "disk full",
+    ),
+  );
   assertEquals(
     (r3.state.counter as Record<string, unknown>).__aio_status,
     "error",
@@ -320,7 +360,10 @@ Deno.test("compose: state machine transitions correctly", () => {
   );
 
   // error → retry → saving
-  const r4 = composed.reduce(r3.state, (counter.__aio.actions as unknown as Record<string, any>).retry());
+  const r4 = composed.reduce(
+    r3.state,
+    (counter.__aio.actions as unknown as Record<string, any>).retry(),
+  );
   assertEquals(
     (r4.state.counter as Record<string, unknown>).__aio_status,
     "saving",
@@ -328,7 +371,10 @@ Deno.test("compose: state machine transitions correctly", () => {
   assertEquals((r4.state.counter as Record<string, unknown>).error, null); // cleared
 
   // error → dismiss → idle
-  const r5 = composed.reduce(r3.state, (counter.__aio.actions as unknown as Record<string, any>).dismiss());
+  const r5 = composed.reduce(
+    r3.state,
+    (counter.__aio.actions as unknown as Record<string, any>).dismiss(),
+  );
   assertEquals(
     (r5.state.counter as Record<string, unknown>).__aio_status,
     "idle",
@@ -354,7 +400,10 @@ Deno.test("compose: multiple cells isolated", () => {
   });
 
   const composed = composeCells([a, b]);
-  const r = composed.reduce(composed.initialState, (a.__aio.actions as unknown as Record<string, any>).inc());
+  const r = composed.reduce(
+    composed.initialState,
+    (a.__aio.actions as unknown as Record<string, any>).inc(),
+  );
   assertEquals((r.state.alpha as Record<string, number>).x, 1);
   assertEquals((r.state.beta as Record<string, number>).y, 0);
 });
@@ -386,7 +435,10 @@ Deno.test("compose: foreign action routing", () => {
   });
 
   const composed = composeCells([dc, te]);
-  const r = composed.reduce(composed.initialState, (dc.__aio.actions as unknown as Record<string, any>).priceUpdated(42000));
+  const r = composed.reduce(
+    composed.initialState,
+    (dc.__aio.actions as unknown as Record<string, any>).priceUpdated(42000),
+  );
 
   // DC updates its own state
   assertEquals((r.state.dc as Record<string, unknown>).price, 42000);
@@ -641,7 +693,10 @@ Deno.test("reduce: accepts ScheduleEffect in effects array", () => {
     },
   });
   const composed = composeCells([f]);
-  const result = composed.reduce(composed.initialState, (f.__aio.actions as unknown as Record<string, any>).tick());
+  const result = composed.reduce(
+    composed.initialState,
+    (f.__aio.actions as unknown as Record<string, any>).tick(),
+  );
   assertEquals(result.effects.length, 2);
   assertEquals(result.effects[0]!.type, "sched:log");
   assertEquals(result.effects[1]!.type, "__schedule");
@@ -671,7 +726,10 @@ Deno.test("compose: machine: false does not receive foreign actions", () => {
     },
   });
   const composed = composeCells([alpha, beta]);
-  const result = composed.reduce(composed.initialState, (alpha.__aio.actions as unknown as Record<string, any>).fire());
+  const result = composed.reduce(
+    composed.initialState,
+    (alpha.__aio.actions as unknown as Record<string, any>).fire(),
+  );
   // beta should NOT have received the action — machine: false can't declare foreign listeners
   assertEquals(betaReduced, false);
   assertEquals((result.state.beta as Record<string, unknown>).heard, false);
@@ -703,7 +761,10 @@ Deno.test("compose: machine with foreign action declaration DOES receive foreign
     },
   });
   const composed = composeCells([alpha, beta]);
-  const result = composed.reduce(composed.initialState, (alpha.__aio.actions as unknown as Record<string, any>).fire());
+  const result = composed.reduce(
+    composed.initialState,
+    (alpha.__aio.actions as unknown as Record<string, any>).fire(),
+  );
   assertEquals(betaReduced, true);
   assertEquals((result.state.beta as Record<string, unknown>).heard, true);
 });
@@ -919,14 +980,20 @@ Deno.test("mixed: methods + actions coexist in one cell", () => {
   });
 
   // Method works
-  assertEquals((f.__aio.actions as unknown as Record<string, any>).increment(), {
-    type: "mixed:increment",
-    payload: { args: [] },
-  });
-  assertEquals((f.__aio.actions as unknown as Record<string, any>).increment(5), {
-    type: "mixed:increment",
-    payload: { args: [5] },
-  });
+  assertEquals(
+    (f.__aio.actions as unknown as Record<string, any>).increment(),
+    {
+      type: "mixed:increment",
+      payload: { args: [] },
+    },
+  );
+  assertEquals(
+    (f.__aio.actions as unknown as Record<string, any>).increment(5),
+    {
+      type: "mixed:increment",
+      payload: { args: [5] },
+    },
+  );
 
   // Action works (explicit actions are flattened at runtime)
   assertEquals(
@@ -969,7 +1036,10 @@ Deno.test("mixed: methods + actions + effects compose correctly", () => {
   let state = composed.initialState;
 
   // Method dispatch works
-  state = composed.reduce(state, (f.__aio.actions as unknown as Record<string, any>).add("apple")).state;
+  state = composed.reduce(
+    state,
+    (f.__aio.actions as unknown as Record<string, any>).add("apple"),
+  ).state;
   assertEquals((state.shop as { items: string[] }).items, ["apple"]);
 
   // Action dispatch works (explicit actions flattened at runtime)

@@ -213,7 +213,10 @@ function buildActionsReducer(
       string,
       (state: unknown, payload: unknown) => void
     >;
-    return (state: unknown, action: Msg): (Msg | ScheduleEffect | OwnEffect)[] | void => {
+    return (
+      state: unknown,
+      action: Msg,
+    ): (Msg | ScheduleEffect | OwnEffect)[] | void => {
       const key = actionTypeToKey.get(action.type);
       if (!key) {
         // Foreign action key — use full type string
@@ -240,7 +243,10 @@ function buildActionsReducer(
     action: Msg,
     ctx: { on: Record<string, string> },
   ) => (Msg | ScheduleEffect | OwnEffect)[] | void;
-  return (state: unknown, action: Msg): (Msg | ScheduleEffect | OwnEffect)[] | void =>
+  return (
+    state: unknown,
+    action: Msg,
+  ): (Msg | ScheduleEffect | OwnEffect)[] | void =>
     userReduceFn(state, action, { on: onMap });
 }
 

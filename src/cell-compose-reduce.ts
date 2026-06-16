@@ -111,13 +111,12 @@ export function reduceCell(
           if (typeof targetSpec === "function") {
             try {
               const payload = (action as { payload?: unknown }).payload;
-              const args =
-                payload && typeof payload === "object" &&
+              const args = payload && typeof payload === "object" &&
                   Array.isArray((payload as { args?: unknown }).args)
-                  ? (payload as { args: unknown[] }).args
-                  : payload === undefined
-                  ? []
-                  : [payload];
+                ? (payload as { args: unknown[] }).args
+                : payload === undefined
+                ? []
+                : [payload];
               const resolved = targetSpec(draft, ...args);
               if (resolved == null) {
                 targetStatus = currentStatus;

@@ -125,9 +125,7 @@ export function createFileWatcher(deps: WatcherDeps): FileWatcher {
           for (const err of graphResult.errors) {
             log.error(
               "graph",
-              `✖ ${err.file}${
-                err.line ? `:${err.line}` : ""
-              } — ${err.message}`,
+              `✖ ${err.file}${err.line ? `:${err.line}` : ""} — ${err.message}`,
             );
             log.warn("graph", `FIX: ${err.fix}`);
           }

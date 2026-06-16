@@ -79,7 +79,9 @@ Deno.test("F-6: patches added between schedule and microtask flush on next throt
   assertEquals(
     sent.length,
     1,
-    `expected 1 send after microtask, got ${sent.length}: ${JSON.stringify(sent)}`,
+    `expected 1 send after microtask, got ${sent.length}: ${
+      JSON.stringify(sent)
+    }`,
   );
 
   // Wait long enough for throttle to expire AND its re-broadcast microtask to run.

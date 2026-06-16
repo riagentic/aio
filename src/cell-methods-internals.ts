@@ -130,7 +130,10 @@ export function buildMethodsReducer(
     | Record<string, (state: unknown, payload: unknown) => void>
     | undefined,
 ): CellReduceFn {
-  return (state: unknown, action: Msg): (Msg | ScheduleEffect | OwnEffect)[] | void => {
+  return (
+    state: unknown,
+    action: Msg,
+  ): (Msg | ScheduleEffect | OwnEffect)[] | void => {
     const s = state as Record<string, unknown>;
     const ownKey = actionTypeToKey.get(action.type);
     if (!ownKey) return;

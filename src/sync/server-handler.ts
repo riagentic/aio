@@ -214,12 +214,20 @@ export function createServerSyncHandler(
               useSnapshot = true;
               snapshot[cell] = deps.getCellState(cell);
             } else {
-              const ops = await loadOpsSince(deps.db, cell, lastHlc, effectiveServerTs);
+              const ops = await loadOpsSince(
+                deps.db,
+                cell,
+                lastHlc,
+                effectiveServerTs,
+              );
               responseOps.push(...ops);
             }
 
             // Track max server_ts for echo-back to client
-            if (effectiveServerTs != null && (!maxServerTs || effectiveServerTs > maxServerTs)) {
+            if (
+              effectiveServerTs != null &&
+              (!maxServerTs || effectiveServerTs > maxServerTs)
+            ) {
               maxServerTs = effectiveServerTs;
             }
           });

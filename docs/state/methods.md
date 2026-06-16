@@ -147,12 +147,12 @@ The live proxy supports the read patterns you'd expect:
 - **`JSON.stringify(s)`** — works (ownKeys + getOwnPropertyDescriptor give a
   plain snapshot)
 - **Array read methods** — `s.items.map`, `.filter`, `.find`, `.findIndex`,
-  `.some`, `.every`, `.reduce`, `.slice`, `.concat`, `.includes`,
-  `.indexOf`, `.flat`, `.flatMap`, `.forEach`, `.entries`, `.keys`,
-  `.values`, `.join`, `.toSorted`, `.toReversed`, `.toSpliced`. These
-  execute against a `structuredClone` snapshot of the array, so the result
-  is plain data (not a live proxy). They see the **current** state, fresh
-  per call — re-read after an `await` and you get the new state.
+  `.some`, `.every`, `.reduce`, `.slice`, `.concat`, `.includes`, `.indexOf`,
+  `.flat`, `.flatMap`, `.forEach`, `.entries`, `.keys`, `.values`, `.join`,
+  `.toSorted`, `.toReversed`, `.toSpliced`. These execute against a
+  `structuredClone` snapshot of the array, so the result is plain data (not a
+  live proxy). They see the **current** state, fresh per call — re-read after an
+  `await` and you get the new state.
 
 For anything that isn't covered (function-valued properties on the state,
 unusual array methods), the live proxy throws:
@@ -180,10 +180,10 @@ async fetchData(s) {
 }
 ```
 
-Detection is conservative: only values that *are* schedule effects (or an
-array of them) count. Any other return value passes through untouched to
-direct callers (`const stock = await inventory.checkStock(...)`), so data
-returns and effect returns never collide.
+Detection is conservative: only values that _are_ schedule effects (or an array
+of them) count. Any other return value passes through untouched to direct
+callers (`const stock = await inventory.checkStock(...)`), so data returns and
+effect returns never collide.
 
 ### Follow-up actions: don't reach for setTimeout
 
@@ -191,12 +191,12 @@ To trigger another action when a method finishes, **never** write
 `setTimeout(() => cell.other(), 0)` — it escapes the action log, time-travel,
 and cancellation. The sanctioned tools:
 
-| You want…                            | Use                                                  |
-| ------------------------------------ | ---------------------------------------------------- |
-| "after this, dispatch X"             | `return schedule.after('id', 0, cell.other())`       |
-| a multi-step sequential workflow     | a [generator](generators.md) with `ctx.dispatch()`   |
-| debounce / retry / polling           | `schedule.after` / `schedule.every` (id = replace)   |
-| own a watcher / socket / subprocess  | `return own.set('cell:id', factory)` (AIO-382)       |
+| You want…                           | Use                                                |
+| ----------------------------------- | -------------------------------------------------- |
+| "after this, dispatch X"            | `return schedule.after('id', 0, cell.other())`     |
+| a multi-step sequential workflow    | a [generator](generators.md) with `ctx.dispatch()` |
+| debounce / retry / polling          | `schedule.after` / `schedule.every` (id = replace) |
+| own a watcher / socket / subprocess | `return own.set('cell:id', factory)` (AIO-382)     |
 
 ### Owning native resources: `own.set` (AIO-382)
 
@@ -226,10 +226,10 @@ const workspace = cell("workspace", {
 
 The factory runs in the runtime (not in the reducer) and may return a disposer
 function or a closeable object (`{ close() }` / `{ dispose() }`). The effect
-itself is plain data — the factory travels out-of-band, so on time-travel
-replay the runtime skips re-acquisition instead of resurrecting watchers.
-Prefix ids with the cell name (`cell:resource`) — disable cleanup matches on
-the `:` delimiter, like schedule ids.
+itself is plain data — the factory travels out-of-band, so on time-travel replay
+the runtime skips re-acquisition instead of resurrecting watchers. Prefix ids
+with the cell name (`cell:resource`) — disable cleanup matches on the `:`
+delimiter, like schedule ids.
 
 ### Error handling
 
@@ -302,13 +302,15 @@ counter.increment.type; // → 'counter:increment'
 ```
 
 Before `aio.run()`, calling a method does **not** dispatch. In development it
-throws immediately with `[counter] increment() called before aio.run() — add
-this cell to aio.run({ cells: [...] })`; in production it logs the same message
-once and resolves with `void`. The intent: surface "I clicked and nothing
-happened, no error anywhere" as an immediate failure.
+throws immediately with
+`[counter] increment() called before aio.run() — add
+this cell to aio.run({ cells: [...] })`;
+in production it logs the same message once and resolves with `void`. The
+intent: surface "I clicked and nothing happened, no error anywhere" as an
+immediate failure.
 
-To get the raw action object pre-binding (composition, tests, time-travel),
-use the internal catalog: `counter.__aio.actions.increment(5)` returns
+To get the raw action object pre-binding (composition, tests, time-travel), use
+the internal catalog: `counter.__aio.actions.increment(5)` returns
 `{ type: "counter:increment", payload: { args: [5] } }`.
 
 ---
@@ -318,11 +320,11 @@ use the internal catalog: `counter.__aio.actions.increment(5)` returns
 ### State in sync methods is a standard Immer draft
 
 The `s` parameter is an Immer draft. Plain JavaScript reads, spreads,
-`.map`/`.filter`, `Object.keys`, and `JSON.stringify` all work — they read
-the current state of the draft, just like a plain object. The only thing to
-watch is that **values you take out of the method** (return values, effect
-payloads, `JSON.stringify` results) are snapshots; the live draft stays in
-the method body.
+`.map`/`.filter`, `Object.keys`, and `JSON.stringify` all work — they read the
+current state of the draft, just like a plain object. The only thing to watch is
+that **values you take out of the method** (return values, effect payloads,
+`JSON.stringify` results) are snapshots; the live draft stays in the method
+body.
 
 ```ts
 methods: {
@@ -336,11 +338,10 @@ methods: {
 }
 ```
 
-**One thing to know:** `JSON.stringify(s)` works for reading, but the result
-is a string snapshot at that moment. If you need an object snapshot to pass
-to a reducer, use `structuredClone(s)` — Immer drafts aren't structured-
-cloneable, so this throws; use the `[...s.items]` / `{...s}` patterns above
-for cloning.
+**One thing to know:** `JSON.stringify(s)` works for reading, but the result is
+a string snapshot at that moment. If you need an object snapshot to pass to a
+reducer, use `structuredClone(s)` — Immer drafts aren't structured- cloneable,
+so this throws; use the `[...s.items]` / `{...s}` patterns above for cloning.
 
 ### Mutations on returned snapshots are ignored
 
@@ -356,11 +357,10 @@ methods: {
 }
 ```
 
-The mutation to `snap` is harmless (no state change) because `snap` is a
-fresh plain object. aio dispatches the return value as-is, and the caller
-gets a plain object with `x: 99` that has no reactive effect. The draft
-itself was not mutated; if you wanted to mutate the draft, do it before
-spreading.
+The mutation to `snap` is harmless (no state change) because `snap` is a fresh
+plain object. aio dispatches the return value as-is, and the caller gets a plain
+object with `x: 99` that has no reactive effect. The draft itself was not
+mutated; if you wanted to mutate the draft, do it before spreading.
 
 ### Effects and state references
 

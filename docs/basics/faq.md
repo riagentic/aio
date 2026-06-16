@@ -100,8 +100,8 @@ migration from React codebases.
 
 The core is framework-agnostic. `client` gives you direct access to state,
 actions, and routing — wire it into Svelte, Vue, Solid, or anything else in ~20
-lines. See [AIR Setup](../ui/air-setup.md#architecture-overview) for the
-client API.
+lines. See [AIR Setup](../ui/air-setup.md#architecture-overview) for the client
+API.
 
 The `client` API is stable and supported — custom adapters built on it are your
 responsibility.

@@ -74,7 +74,10 @@ export function cell(name: string, config: any): any {
         (config.methods ?? {}) as Record<string, unknown>,
       )
     ) {
-      if ((fn as { constructor: { name: string } }).constructor.name === "AsyncFunction") {
+      if (
+        (fn as { constructor: { name: string } }).constructor.name ===
+          "AsyncFunction"
+      ) {
         throw new Error(
           `[${name}] client-scoped cells support sync methods only (no server ` +
             `round-trip exists); do async work in the component and call sync ` +
