@@ -91,8 +91,8 @@ const upload = cell("upload", {
 
 ## Function transition targets (AIO-380)
 
-A static `action → state` mapping can't express "where this lands depends on
-the data". When the target depends on state or the action's arguments, use a
+A static `action → state` mapping can't express "where this lands depends on the
+data". When the target depends on state or the action's arguments, use a
 function:
 
 ```ts
@@ -118,8 +118,8 @@ const viewer = cell("viewer", {
 Rules:
 
 - **Signature** — `(state, ...args) => targetState | null | undefined`. Args
-  follow the same convention as generators: methods-style cells get spread
-  args, actions-style cells get the payload object.
+  follow the same convention as generators: methods-style cells get spread args,
+  actions-style cells get the payload object.
 - **Timing** — the function runs **after** the reducer applied, so for sync
   methods it sees post-method state. Async method triggers reduce before the
   method body runs — there, branch on the args (the state is pre-execution).
@@ -132,9 +132,9 @@ Rules:
   Function targets are checked at dispatch time instead, and the unreachable-
   state check is skipped for machines that contain them.
 
-Use function targets sparingly — if every transition is a function, the
-machine no longer documents the workflow. They exist so the machine can stay
-truthful in the few places where reality branches.
+Use function targets sparingly — if every transition is a function, the machine
+no longer documents the workflow. They exist so the machine can stay truthful in
+the few places where reality branches.
 
 ---
 
@@ -177,8 +177,8 @@ function DoorBadge() {
 ```
 
 If your UI keys behavior off a state field (`s.filePath ? ... : ...`) where a
-machine state already encodes the same fact, render from `status` instead —
-it keeps the machine honest and the drift visible.
+machine state already encodes the same fact, render from `status` instead — it
+keeps the machine honest and the drift visible.
 
 ---
 

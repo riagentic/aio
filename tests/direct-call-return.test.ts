@@ -1,5 +1,5 @@
 import { assertEquals } from "@std/assert";
-import { cell, composeCells, bindCell } from "../src/cell.ts";
+import { bindCell, cell, composeCells } from "../src/cell.ts";
 
 // Tests for 2.1: server-side bound methods all return a Promise that
 // resolves once dispatch is complete. Sync → Promise<void>; async → Promise<R>.
@@ -47,8 +47,9 @@ Deno.test("2.1 A: bound sync method returns a Promise that resolves to undefined
     () => app.state as Record<string, unknown>,
   );
 
-  const ret = (counter as unknown as { increment: (...a: unknown[]) => unknown })
-    .increment(5);
+  const ret =
+    (counter as unknown as { increment: (...a: unknown[]) => unknown })
+      .increment(5);
   assertEquals(ret instanceof Promise, true);
   await ret;
   assertEquals(
@@ -126,14 +127,14 @@ Deno.test(
       () => app.state as Record<string, unknown>,
     );
 
-  const inc = (counter as unknown as {
-    increment: (...a: unknown[]) => Promise<void>;
-  }).increment;
-  await inc(2);
-  assertEquals((app.state.counter as { count: number }).count, 2);
-  await inc(3);
-  assertEquals((app.state.counter as { count: number }).count, 5);
-},
+    const inc = (counter as unknown as {
+      increment: (...a: unknown[]) => Promise<void>;
+    }).increment;
+    await inc(2);
+    assertEquals((app.state.counter as { count: number }).count, 2);
+    await inc(3);
+    assertEquals((app.state.counter as { count: number }).count, 5);
+  },
 );
 
 // ── 2.3: Pre-binding behavior ─────────────────────────────────────────────
@@ -180,7 +181,8 @@ Deno.test(
         },
       },
     });
-    const ret = (counter as unknown as { increment: () => unknown }).increment();
+    const ret = (counter as unknown as { increment: () => unknown })
+      .increment();
     assertEquals(ret instanceof Promise, true);
     await ret;
   },
@@ -209,7 +211,8 @@ Deno.test(
       );
 
       // Post-binding: should not throw, should return a Promise<void>.
-      const ret = (counter as unknown as { increment: () => unknown }).increment();
+      const ret = (counter as unknown as { increment: () => unknown })
+        .increment();
       assertEquals(ret instanceof Promise, true);
     } finally {
       (globalThis as Record<string, unknown>).__aioDev = false;

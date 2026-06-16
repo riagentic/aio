@@ -68,8 +68,7 @@ export default function App() {
               ? (
                 <input
                   value={editText}
-                  onChange={(e) =>
-                    setEditText(e.currentTarget.value)}
+                  onChange={(e) => setEditText(e.currentTarget.value)}
                   onBlur={() => {
                     if (editText.trim()) todo.edit(t.id, editText.trim());
                     setEditing(null);

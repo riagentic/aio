@@ -88,7 +88,11 @@ Deno.test(
     } catch (e) {
       caught = e as Error;
     }
-    assertEquals(caught, null, "spread/keys/entries should not throw on Immer draft");
+    assertEquals(
+      caught,
+      null,
+      "spread/keys/entries should not throw on Immer draft",
+    );
     assertEquals(result, "dispatch ok");
   },
 );
@@ -108,7 +112,11 @@ Deno.test(
     } catch (e) {
       caught = e as Error;
     }
-    assertEquals(caught, null, ".map/.filter/.find/for...of/.length should not throw");
+    assertEquals(
+      caught,
+      null,
+      ".map/.filter/.find/for...of/.length should not throw",
+    );
   },
 );
 
@@ -127,7 +135,11 @@ Deno.test(
     } catch (e) {
       caught = e as Error;
     }
-    assertEquals(caught, null, "JSON.stringify should not throw on Immer draft");
+    assertEquals(
+      caught,
+      null,
+      "JSON.stringify should not throw on Immer draft",
+    );
   },
 );
 
@@ -303,7 +315,11 @@ Deno.test("4.3 live proxy: array read methods return plain data", () => {
   state = { items: [1, 2] };
   // deno-lint-ignore no-explicit-any
   let pushed: any = null;
-  const batcher2 = { add: (_m: string, op: any) => { pushed = op; } };
+  const batcher2 = {
+    add: (_m: string, op: any) => {
+      pushed = op;
+    },
+  };
   const proxy2 = createLiveProxy("c", "c", "m", () => state, batcher2);
   // push on a nested array proxy records the path to the array.
   proxy2.items.push(3);
@@ -368,7 +384,13 @@ Deno.test(
       doSomething: () => "should not work",
     };
     // deno-lint-ignore no-explicit-any
-    const proxy = createLiveProxy("mycell", "mycell", "myMethod", () => state, batcher);
+    const proxy = createLiveProxy(
+      "mycell",
+      "mycell",
+      "myMethod",
+      () => state,
+      batcher,
+    );
     let caught: Error | null = null;
     try {
       // deno-lint-ignore no-explicit-any

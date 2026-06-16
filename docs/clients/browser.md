@@ -3,8 +3,8 @@
 WebSocket client API, connection lifecycle, and UI state management for browser
 clients.
 
-For the core API (`cell`), see [Concepts](../basics/concepts.md). For Electron & thin
-client, see [electron.md](electron.md).
+For the core API (`cell`), see [Concepts](../basics/concepts.md). For Electron &
+thin client, see [electron.md](electron.md).
 
 ## Direct cell access (recommended)
 
@@ -66,8 +66,8 @@ disconnects don't pollute the console).
 
 Rejection happens on:
 
-- **Server reject** — the dispatch was refused (validation, machine guard, etc.).
-  The promise rejects with the server's error message.
+- **Server reject** — the dispatch was refused (validation, machine guard,
+  etc.). The promise rejects with the server's error message.
 - **Timeout** — 15 seconds elapse without an ack. The promise rejects with
   `method not acknowledged in 15000ms — server overloaded or disconnected`.
 - **Disconnect** — the WebSocket closes while the action is in flight. The

@@ -33,7 +33,10 @@ Deno.test("own.set returns a plain, structuredClone-safe effect", () => {
 Deno.test("isOwnEffect guards correctly", () => {
   assertEquals(isOwnEffect(own.set("a", () => {})), true);
   assertEquals(isOwnEffect(own.dispose("a")), true);
-  assertEquals(isOwnEffect({ type: "__schedule", kind: "cancel", id: "a" }), false);
+  assertEquals(
+    isOwnEffect({ type: "__schedule", kind: "cancel", id: "a" }),
+    false,
+  );
   assertEquals(isOwnEffect(null), false);
   assertEquals(isOwnEffect("__own"), false);
 });
@@ -85,7 +88,9 @@ Deno.test("own manager: disposeByPrefix matches the ':' delimiter (AIO-198 rule)
   const mgr = createOwnManager(noop);
   const events: string[] = [];
   mgr.handle(own.set("user:watcher", () => () => events.push("user")));
-  mgr.handle(own.set("userProfile:watcher", () => () => events.push("userProfile")));
+  mgr.handle(
+    own.set("userProfile:watcher", () => () => events.push("userProfile")),
+  );
   mgr.disposeByPrefix("user");
   assertEquals(events, ["user"]);
   assertEquals(mgr.active(), ["userProfile:watcher"]);
@@ -168,12 +173,16 @@ testCell(holder, "sync method returning own.dispose emits the effect", (t) => {
   assertEquals((effects[0] as OwnEffect).kind, "dispose");
 });
 
-testCell(holder, "async method returning own.set bridges via __effects (AIO-381 path)", async (t) => {
-  t.init();
-  await t.send.acquireAsync!();
-  t.expect.state((s) => s.acquired === 1);
-  const effects = t.getEffects();
-  assertEquals(effects.length, 1);
-  assertEquals(isOwnEffect(effects[0]), true);
-  assertEquals((effects[0] as OwnEffect).kind, "set");
-});
+testCell(
+  holder,
+  "async method returning own.set bridges via __effects (AIO-381 path)",
+  async (t) => {
+    t.init();
+    await t.send.acquireAsync!();
+    t.expect.state((s) => s.acquired === 1);
+    const effects = t.getEffects();
+    assertEquals(effects.length, 1);
+    assertEquals(isOwnEffect(effects[0]), true);
+    assertEquals((effects[0] as OwnEffect).kind, "set");
+  },
+);

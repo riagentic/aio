@@ -110,12 +110,12 @@ The `s` is scoped to the cell -- use `s.count`, not `s.counter.count`.
 
 ### Selectors with cross-cell dependencies
 
-Use the **deps form** to read other cells' slices. The plain form
-(`(s) => ...`) only sees the cell's own slice.
+Use the **deps form** to read other cells' slices. The plain form (`(s) => ...`)
+only sees the cell's own slice.
 
 ```ts
-const counter = cell("counter", { state: { count: 0 }, /* ... */ });
-const wallet = cell("wallet", { state: { balance: 0 }, /* ... */ });
+const counter = cell("counter", { state: { count: 0 } /* ... */ });
+const wallet = cell("wallet", { state: { balance: 0 } /* ... */ });
 
 const dashboard = cell("dashboard", {
   state: { theme: "dark" },
@@ -131,8 +131,9 @@ const dashboard = cell("dashboard", {
 });
 ```
 
-Dep names are validated at `aio.run()` (composition time). An unknown dep
-throws a clear error like `[dashboard] selector 'summary' depends on unknown
+Dep names are validated at `aio.run()` (composition time). An unknown dep throws
+a clear error like
+`[dashboard] selector 'summary' depends on unknown
 cell 'walet' — known cells: counter, wallet`.
 
 > The selector's first argument is always the cell's **own** slice. The
@@ -217,8 +218,8 @@ no loose state, no ad-hoc logic outside cells.
 **AIO2** State MUST only be mutated inside methods (sync/async) or reduce
 handlers — never directly from outside. In dev, cell signal values are
 deep-frozen so a stray `cell.x = …` from a component throws
-`TypeError: Cannot assign to read only property` and a dev hint
-explains the rule.
+`TypeError: Cannot assign to read only property` and a dev hint explains the
+rule.
 
 **AIO3** Single entry point: `aio.run({ appId, cells: [...] })` -- no manual
 store creation, no manual server setup.

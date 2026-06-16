@@ -118,30 +118,30 @@ type AioMappedEventHandlers<T extends EventTarget = HTMLElement> = {
 type AioHTMLAttributes<T extends EventTarget = HTMLElement> =
   & AioMappedEventHandlers<T>
   & {
-  id?: string;
-  className?: string | string[] | Record<string, boolean>;
-  class?: string;
-  style?:
-    | string
-    | Partial<CSSStyleDeclaration>
-    | Record<string, string | number>;
-  title?: string;
-  tabIndex?: number;
-  hidden?: boolean;
-  role?: string;
-  slot?: string;
-  dir?: string;
-  lang?: string;
-  draggable?: boolean;
-  spellcheck?: boolean;
-  contentEditable?: boolean | "true" | "false" | "plaintext-only";
-  [key: `data-${string}`]: string | number | boolean | undefined;
-  [key: `aria-${string}`]: string | number | boolean | undefined;
-  ref?: ((el: HTMLElement | null) => void) | { current: HTMLElement | null };
-  key?: string | number;
-  children?: unknown;
-  dangerouslySetInnerHTML?: { __html: string };
-};
+    id?: string;
+    className?: string | string[] | Record<string, boolean>;
+    class?: string;
+    style?:
+      | string
+      | Partial<CSSStyleDeclaration>
+      | Record<string, string | number>;
+    title?: string;
+    tabIndex?: number;
+    hidden?: boolean;
+    role?: string;
+    slot?: string;
+    dir?: string;
+    lang?: string;
+    draggable?: boolean;
+    spellcheck?: boolean;
+    contentEditable?: boolean | "true" | "false" | "plaintext-only";
+    [key: `data-${string}`]: string | number | boolean | undefined;
+    [key: `aria-${string}`]: string | number | boolean | undefined;
+    ref?: ((el: HTMLElement | null) => void) | { current: HTMLElement | null };
+    key?: string | number;
+    children?: unknown;
+    dangerouslySetInnerHTML?: { __html: string };
+  };
 
 type AioInputAttributes = AioHTMLAttributes<HTMLInputElement> & {
   type?: string;

@@ -165,10 +165,12 @@ export class AppLock {
   /** Unregister signal handlers to prevent listener leaks (e.g. in tests). */
   private _unregisterCleanupHandlers(): void {
     try {
-      AppLock._sigintHandler && Deno.removeSignalListener("SIGINT", AppLock._sigintHandler);
+      AppLock._sigintHandler &&
+        Deno.removeSignalListener("SIGINT", AppLock._sigintHandler);
     } catch { /* already removed or unsupported */ }
     try {
-      AppLock._sigtermHandler && Deno.removeSignalListener("SIGTERM", AppLock._sigtermHandler);
+      AppLock._sigtermHandler &&
+        Deno.removeSignalListener("SIGTERM", AppLock._sigtermHandler);
     } catch { /* already removed or unsupported */ }
     AppLock._sigintHandler = undefined;
     AppLock._sigtermHandler = undefined;

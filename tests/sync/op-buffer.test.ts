@@ -68,7 +68,10 @@ describe("OpBuffer", () => {
   });
 
   it("evicts stale ops when buffer is full (H3 backpressure fix)", async () => {
-    const buf = createOpBuffer(createMemoryStorage(), { pendingCap: 2, staleAfter: 10_000 });
+    const buf = createOpBuffer(createMemoryStorage(), {
+      pendingCap: 2,
+      staleAfter: 10_000,
+    });
 
     await buf.add({ ...mkOp("fresh"), _clientTs: Date.now() });
     await buf.add({ ...mkOp("old-stale"), _clientTs: Date.now() - 5 * 60_000 }); // 5 min old
