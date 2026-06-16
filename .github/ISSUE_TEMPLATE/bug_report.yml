@@ -1,0 +1,34 @@
+name: Bug report
+description: Something behaves incorrectly or crashes.
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you observed vs. what you expected.
+      placeholder: "await counter.increment() resolved but state didn't change…"
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Minimal reproduction
+      description: Smallest cell/component that shows it. A code block is ideal.
+      render: ts
+    validations:
+      required: true
+  - type: input
+    id: versions
+    attributes:
+      label: Versions
+      description: "Run `deno --version` and note your aio version."
+      placeholder: "aio 1.0.0-alpha13 · Deno 2.8.2 · Linux"
+    validations:
+      required: true
+  - type: textarea
+    id: error
+    attributes:
+      label: Error output / aio error code
+      description: Paste any `[CODE]` aio error or stack trace (see docs/debugging/errors.md).
+      render: shell

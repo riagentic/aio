@@ -64,18 +64,56 @@ async function main(): Promise<void> {
     );
   }
 
+  // R2.2: every AioErrorCode must be documented in docs/debugging/errors.md, so
+  // a new code can never ship without an operator-facing explanation.
+  const codeIssues = await checkErrorCodes();
+  console.log(
+    `\nError-code coverage: ${
+      codeIssues.length ? `${codeIssues.length} undocumented` : "all documented"
+    }`,
+  );
+
+  // Version-string drift is ADVISORY: docs legitimately reference historical
+  // versions (migration notes) and example CLI output, so it warns but never
+  // gates. Error-code coverage is EXACT, so it is the hard gate.
   if (issues.length) {
-    console.log(`\nMismatches:\n${issues.join("\n")}`);
-    Deno.exit(1);
-  } else {
-    console.log("\nAll version references match.");
+    console.log(
+      `\nVersion references differing from v${expected} ` +
+        `(review — historical/example mentions are expected):\n${
+          issues.join("\n")
+        }`,
+    );
   }
+  if (codeIssues.length) {
+    console.log(
+      `\nUndocumented error codes (must fix):\n${codeIssues.join("\n")}`,
+    );
+    Deno.exit(1);
+  }
+  console.log("\n✓ All error codes documented.");
+}
+
+/** Assert every `AioErrorCode` value defined in src/error.ts appears in
+ *  docs/debugging/errors.md. Returns one message per undocumented code. */
+async function checkErrorCodes(): Promise<string[]> {
+  const errorTs = await Deno.readTextFile(
+    new URL("../src/error.ts", import.meta.url).pathname,
+  );
+  const union = errorTs.match(/export type AioErrorCode =([\s\S]*?);/);
+  if (!union) return ["  could not parse AioErrorCode union from src/error.ts"];
+  const codes = [...union[1]!.matchAll(/"([A-Z_]+)"/g)].map((m) => m[1]!);
+  const errorsMd = await Deno.readTextFile(
+    new URL("../docs/debugging/errors.md", import.meta.url).pathname,
+  );
+  return codes
+    .filter((code) => !errorsMd.includes(code))
+    .map((code) => `  ${code} is not documented in docs/debugging/errors.md`);
 }
 
 async function detectVersion(): Promise<string | undefined> {
   try {
     const changelog = await Deno.readTextFile(
-      new URL("../docs/changelog.md", import.meta.url).pathname,
+      new URL("../docs/basics/changelog.md", import.meta.url).pathname,
     );
     const match = changelog.match(/^## v(\d+\.\d+\.\d+)/m);
     return match?.[1];
