@@ -128,6 +128,7 @@ export function createServer(config: ServerConfig): ServerHandle {
     debug,
     prod,
     maxConnections: config.maxConnections,
+    wsLimits: config.wsLimits,
     expose: config.expose,
     allowedOrigins: config.allowedOrigins,
     strictOrigin: config.strictOrigin,

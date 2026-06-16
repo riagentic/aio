@@ -72,6 +72,7 @@ export interface WsDeps {
   debug: (msg: string) => void;
   prod: boolean;
   maxConnections?: number;
+  wsLimits?: import("./aio-types.ts").WsLimits;
   expose?: boolean;
   allowedOrigins?: string[];
   /** When true AND expose=true, require Origin header on WS upgrade.
@@ -121,6 +122,12 @@ const PENDING_STATE_MAX = 50;
 
 /** Factory — creates isolated WS manager with its own connection state */
 export function createWsManager(deps: WsDeps): WsManager {
+  // W6.6: per-client limits are configurable; defaults stay the hardened
+  // constants so existing deployments are unchanged.
+  const wsMaxMessage = deps.wsLimits?.maxMessageBytes ?? WS_MAX_MESSAGE;
+  const wsRateLimit = deps.wsLimits?.messagesPerSec ?? WS_RATE_LIMIT;
+  const wsBytesPerSec = deps.wsLimits?.bytesPerSec ?? WS_BYTES_PER_SEC;
+
   // Global rolling-window message counter — protects against distributed
   // clients each staying under the per-socket limit while flooding the server.
   let _totalMsgsThisSec = 0;
@@ -369,7 +376,7 @@ export function createWsManager(deps: WsDeps): WsManager {
 
     // Global rate-limit fuse: rolling window counter on WsManager itself
     _totalMsgsThisSec++;
-    if (_totalMsgsThisSec > WS_RATE_LIMIT * 2) {
+    if (_totalMsgsThisSec > wsRateLimit * 2) {
       const msg =
         `ws: global rate limit exceeded (${_totalMsgsThisSec} msg/sec) — dropping from client ${
           meta.id.slice(0, 8)
@@ -385,7 +392,7 @@ export function createWsManager(deps: WsDeps): WsManager {
     }
 
     // H3/H4 fix: track consecutive drops for abuse detection (backpressure deadlock prevention)
-    if (meta.msgCount > WS_RATE_LIMIT) {
+    if (meta.msgCount > wsRateLimit) {
       meta.consecutiveDrops++;
       if (meta.consecutiveDrops >= CONSECUTIVE_DROP_THRESHOLD) {
         const msg = `ws: client ${
@@ -423,7 +430,7 @@ export function createWsManager(deps: WsDeps): WsManager {
       });
       return;
     }
-    if (e.data.length > WS_MAX_MESSAGE) {
+    if (e.data.length > wsMaxMessage) {
       const msg = `ws: message too large (${e.data.length} bytes), dropped`;
       log.error("ws", msg);
       writeClientLog(meta.index, {
@@ -444,7 +451,7 @@ export function createWsManager(deps: WsDeps): WsManager {
       return;
     }
     meta.bytesThisSec += e.data.length;
-    if (meta.bytesThisSec > WS_BYTES_PER_SEC) {
+    if (meta.bytesThisSec > wsBytesPerSec) {
       const msg = `ws: byte rate exceeded for ${meta.id.slice(0, 8)} (${
         (meta.bytesThisSec / 1_000_000).toFixed(1)
       }MB/s)`;

@@ -550,6 +550,58 @@ Deno.test("server: WS rate limiting drops messages over 100/sec", async () => {
   }
 });
 
+// ── W6.6: configurable WS rate limit ─────────────────────────────────
+
+const CUSTOM_RATE_PORT = 19819;
+
+Deno.test("server: wsLimits.messagesPerSec overrides the default rate cap", async () => {
+  const dir = await Deno.makeTempDir();
+  await Deno.mkdir(join(dir, "dist"), { recursive: true });
+  await Deno.writeTextFile(
+    join(dir, "dist", "app.js"),
+    "export function mount(){}",
+  );
+  let actionCount = 0;
+  const server = createServer({
+    port: CUSTOM_RATE_PORT,
+    title: "CustomRateTest",
+    getUIState: () => ({ n: actionCount }),
+    dispatch: () => {
+      actionCount++;
+    },
+    baseDir: dir,
+    debug: () => {},
+    prod: true,
+    distDir: join(dir, "dist"),
+    wsLimits: { messagesPerSec: 10 }, // far below the 100 default
+  });
+  await new Promise((r) => setTimeout(r, 50));
+  try {
+    const ws = new WebSocket(`ws://127.0.0.1:${CUSTOM_RATE_PORT}/ws`);
+    await new Promise<void>((r) => {
+      ws.onopen = () => r();
+    });
+    await new Promise((r) => setTimeout(r, 50));
+
+    actionCount = 0;
+    for (let i = 0; i < 120; i++) {
+      ws.send(JSON.stringify({ type: "TICK" }));
+    }
+    await new Promise((r) => setTimeout(r, 200));
+
+    // With a 10/sec cap, well under the 100 default must get through.
+    assertEquals(
+      actionCount <= 12,
+      true,
+      `expected <=12 dispatches under messagesPerSec:10, got ${actionCount}`,
+    );
+    ws.close();
+  } finally {
+    await server.shutdown();
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
 // ── Trojan API tests ────────────────────────────────────────────────
 
 const TROJAN_PORT = 19807;

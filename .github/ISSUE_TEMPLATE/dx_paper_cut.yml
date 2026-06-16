@@ -1,0 +1,28 @@
+name: DX paper-cut
+description: It works, but the developer experience was confusing, surprising, or harder than it should be.
+labels: [dx]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Paper-cuts are how aio stays intuitive. Small friction counts —
+        a confusing default, a surprising API, boilerplate that felt unnecessary.
+  - type: textarea
+    id: friction
+    attributes:
+      label: What was harder than expected
+      description: What you were trying to do, and where it tripped you up.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected instead
+      description: The behavior or API shape that would have felt natural.
+    validations:
+      required: true
+  - type: input
+    id: area
+    attributes:
+      label: Area
+      placeholder: "signals · cells · persistence · build · docs · …"

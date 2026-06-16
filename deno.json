@@ -77,6 +77,7 @@
     "check": "deno check src/ mod.ts aiol/mod.ts init.ts examples/",
     "lint": "deno lint src/",
     "lint:aio": "deno run -A aiol/mod.ts",
+    "docs:check": "deno run --allow-read scripts/check-docs.ts",
     "example": "deno run -A examples/counter/app.ts",
     "am": "deno run -A src/am.ts",
     "docs": "deno doc --html --name=aio --output=docs/api-ref mod.ts"

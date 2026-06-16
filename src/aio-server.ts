@@ -4,6 +4,7 @@
 import { join } from "@std/path";
 import { loadOrCreateCert, type TlsCert } from "./tls.ts";
 import { createServer } from "./server.ts";
+import { VERSION } from "./aio-cli.ts";
 import type { ServerHandle } from "./server-types.ts";
 import { createUDSListener, type UDSHandle } from "./uds.ts";
 import type { CellPatchStrategy, PatchFilterFields } from "./state-filter.ts";
@@ -51,6 +52,7 @@ export interface ServerSetupDeps<S, A> {
     renderBudget?: import("./vitals/types.ts").RenderBudget;
     fullStateThreshold?: number;
     maxConnections?: number;
+    wsLimits?: import("./aio-types.ts").WsLimits;
     syncIntervalMs?: number;
     _cellPatchStrategies?: Map<string, CellPatchStrategy>;
     _cellFilterFields?: Map<string, PatchFilterFields>;
@@ -212,6 +214,7 @@ export async function setupTransport<S, A>(
       renderBudget: config.renderBudget,
       fullStateThreshold: config.fullStateThreshold,
       maxConnections: config.maxConnections,
+      wsLimits: config.wsLimits,
       syncIntervalMs: config.syncIntervalMs,
       cellPatchStrategies: config._cellPatchStrategies,
       cellFilterFields: config._cellFilterFields,
@@ -242,9 +245,16 @@ export async function setupTransport<S, A>(
               lastAction: fs.lastAction,
             };
           }
-          return { status: "healthy", uptime, cells: cellsHealth };
+          // W4.1: include the framework version so operators can confirm which
+          // build is live (deploy verification, rolling-restart checks).
+          return {
+            status: "healthy",
+            version: VERSION,
+            uptime,
+            cells: cellsHealth,
+          };
         }
-        return { status: "healthy", uptime };
+        return { status: "healthy", version: VERSION, uptime };
       },
       ...(tt
         ? {

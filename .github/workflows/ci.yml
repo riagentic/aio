@@ -1,0 +1,70 @@
+name: CI
+
+# Makes the project's own gates binding: fmt, lint, check, and the full test
+# suite must pass before merge. Mirrors the local `deno task` gates so "green
+# locally" and "green in CI" mean the same thing.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Fast, deterministic gates — run once on the latest stable Deno.
+  gates:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+      - name: Format check
+        run: deno fmt --check
+      - name: Lint
+        run: deno task lint
+      - name: Type check (full tree)
+        run: deno task check
+      - name: Docs check (every error code documented)
+        run: deno task docs:check
+
+  # Full test suite across the supported Deno range and a second OS, so
+  # platform- or version-specific regressions can't merge silently.
+  test:
+    needs: gates
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        deno: [v2.x] # latest stable
+        include:
+          # Supported floor (README claims "Deno 2.6+") — proven, not assumed.
+          - os: ubuntu-latest
+            deno: "2.6.0"
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: ${{ matrix.deno }}
+      - name: Test
+        run: deno task test
+
+  # Catch JSR manifest / slow-types / export breakage before release day.
+  publish-dry-run:
+    needs: gates
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+      - name: Publish dry-run
+        run: deno publish --dry-run --allow-dirty

@@ -195,7 +195,9 @@ async function run(a: any, b?: any): Promise<AioApp<any, any>> {
         .map((r) => r.cell);
       if (allUi.length) {
         log.warn(
-          `--expose with ui="all" on cells: ${allUi.join(", ")} — every authenticated client sees this state. Narrow with ui:{include:[...]} if needed.`,
+          `--expose with ui="all" on cells: ${
+            allUi.join(", ")
+          } — every authenticated client sees this state. Narrow with ui:{include:[...]} if needed.`,
         );
       }
     }
@@ -583,6 +585,7 @@ async function _run<S, A, E>(
       renderBudget: config.renderBudget,
       fullStateThreshold: config.fullStateThreshold,
       maxConnections: config.maxConnections,
+      wsLimits: config.wsLimits,
       syncIntervalMs: config.syncIntervalMs,
       _cellPatchStrategies: config._cellPatchStrategies,
       _cellFilterFields: config._cellFilterFields,
