@@ -9,6 +9,7 @@
 
 import type { Msg } from "./cell-types.ts";
 import type { ScheduleEffect } from "./schedule.ts";
+import type { OwnEffect } from "./own.ts";
 import { diagEmit } from "./diagnostic-bus.ts";
 
 // Internal method types — `any` at spread args/return is unavoidable when
@@ -18,7 +19,7 @@ export type SyncMethod<S> = (
   s: S,
   // deno-lint-ignore no-explicit-any
   ...args: any[]
-) => void | ScheduleEffect | ScheduleEffect[];
+) => void | ScheduleEffect | OwnEffect | (ScheduleEffect | OwnEffect)[];
 /** Async cell method — runs in executor, mutations batched via proxy */
 // deno-lint-ignore no-explicit-any
 export type AsyncMethod<S> = (s: S, ...args: any[]) => Promise<any>;
@@ -437,6 +438,65 @@ const ARRAY_MUTATORS = new Set([
   "copyWithin",
 ]);
 
+/** Array read methods (non-mutating) that we intercept on the live proxy to
+ *  return plain data from a structuredClone snapshot. Mutators remain in
+ *  ARRAY_MUTATORS and are handled separately. */
+const ARRAY_READ_METHODS = new Set([
+  "map",
+  "filter",
+  "find",
+  "findIndex",
+  "some",
+  "every",
+  "reduce",
+  "reduceRight",
+  "slice",
+  "concat",
+  "includes",
+  "indexOf",
+  "lastIndexOf",
+  "flat",
+  "flatMap",
+  "forEach",
+  "entries",
+  "keys",
+  "values",
+  "join",
+  "toLocaleString",
+  "toString",
+  "toSorted",
+  "toReversed",
+  "toSpliced",
+]);
+
+/** Snapshot a value for read-method interception. structuredClone throws on
+ *  functions/symbols, so we fall back to a JSON round trip for uncloneable
+ *  values. */
+function snapshotForRead(value: unknown): unknown {
+  if (value === null || value === undefined) return value;
+  if (typeof value !== "object") return value;
+  try {
+    return structuredClone(value);
+  } catch {
+    try {
+      return JSON.parse(JSON.stringify(value));
+    } catch {
+      return value;
+    }
+  }
+}
+
+/** Throw the canonical "live async state" error. */
+function throwLiveStateError(
+  cellName: string,
+  methodName: string,
+  op: string,
+): never {
+  throw new Error(
+    `[${cellName}:${methodName}] ${op} is not supported on live async state — snapshot first: const items = [...s.items]`,
+  );
+}
+
 /** Create a proxy over cell state that intercepts writes and batches them as mutations. */
 export function createLiveProxy<S extends Record<string, unknown>>(
   cellName: string,
@@ -464,7 +524,21 @@ export function createLiveProxy<S extends Record<string, unknown>>(
         : getNestedValue(getState(), path);
       const value = (fresh as Record<string, unknown>)[key];
 
-      // Array method interception
+      // Array method interception — read methods
+      if (
+        Array.isArray(fresh) && ARRAY_READ_METHODS.has(key) &&
+        typeof value === "function"
+      ) {
+        return (...args: unknown[]) => {
+          // Snapshot the array before running the read method so the result
+          // is plain data, not a live-proxy-wrapped value.
+          const snap = snapshotForRead(fresh);
+          // deno-lint-ignore no-explicit-any
+          return (snap as any)[key](...args);
+        };
+      }
+
+      // Array method interception — mutators
       if (
         Array.isArray(fresh) && ARRAY_MUTATORS.has(key) &&
         typeof value === "function"
@@ -496,6 +570,13 @@ export function createLiveProxy<S extends Record<string, unknown>>(
           _proxyCache.set(cacheKey, cached);
         }
         return cached;
+      }
+
+      // AIO-4.3: any other function value on a non-array is a usage we
+      // don't support. Throw the canonical "live async state" error so
+      // users get an actionable message rather than silent wrong data.
+      if (typeof value === "function" && !Array.isArray(fresh)) {
+        throwLiveStateError(cellName, methodName, `${key}()`);
       }
 
       return value;

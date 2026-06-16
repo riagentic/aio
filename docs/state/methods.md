@@ -76,7 +76,7 @@ becomes the action type: `increment` → `counter:increment`.
 
 ### Returning schedule effects
 
-Sync methods can return schedule effects:
+Methods — sync **and** async (AIO-381) — can return schedule effects:
 
 ```ts
 methods: {
@@ -136,6 +136,100 @@ async loadItems(s) {
 
 Supported array mutators: `push`, `pop`, `shift`, `unshift`, `splice`, `sort`,
 `reverse`, `fill`, `copyWithin`.
+
+### Read patterns
+
+The live proxy supports the read patterns you'd expect:
+
+- **Direct property reads** — `s.user.name`, `s.items.length`
+- **Spread on objects** — `{ ...s }` returns a plain object with fresh values
+- **`Object.keys(s)` / `Object.entries(s)`** — returns plain key/value arrays
+- **`JSON.stringify(s)`** — works (ownKeys + getOwnPropertyDescriptor give a
+  plain snapshot)
+- **Array read methods** — `s.items.map`, `.filter`, `.find`, `.findIndex`,
+  `.some`, `.every`, `.reduce`, `.slice`, `.concat`, `.includes`,
+  `.indexOf`, `.flat`, `.flatMap`, `.forEach`, `.entries`, `.keys`,
+  `.values`, `.join`, `.toSorted`, `.toReversed`, `.toSpliced`. These
+  execute against a `structuredClone` snapshot of the array, so the result
+  is plain data (not a live proxy). They see the **current** state, fresh
+  per call — re-read after an `await` and you get the new state.
+
+For anything that isn't covered (function-valued properties on the state,
+unusual array methods), the live proxy throws:
+
+```
+[mycell:myMethod] doSomething() is not supported on live async state — snapshot first: const items = [...s.items]
+```
+
+The fix is to take a plain snapshot of what you need before calling the
+unsupported op: `const items = [...s.items]`, `const config = { ...s.config }`,
+then call the op on the snapshot.
+
+### Returning schedule effects from async methods (AIO-381)
+
+Async methods can return schedule effects too — same as sync methods:
+
+```ts
+async fetchData(s) {
+  try {
+    s.data = await api.getData()
+  } catch {
+    s.retries += 1
+    return schedule.after('fetch.retry', s.retries * 2000, data.fetchData())
+  }
+}
+```
+
+Detection is conservative: only values that *are* schedule effects (or an
+array of them) count. Any other return value passes through untouched to
+direct callers (`const stock = await inventory.checkStock(...)`), so data
+returns and effect returns never collide.
+
+### Follow-up actions: don't reach for setTimeout
+
+To trigger another action when a method finishes, **never** write
+`setTimeout(() => cell.other(), 0)` — it escapes the action log, time-travel,
+and cancellation. The sanctioned tools:
+
+| You want…                            | Use                                                  |
+| ------------------------------------ | ---------------------------------------------------- |
+| "after this, dispatch X"             | `return schedule.after('id', 0, cell.other())`       |
+| a multi-step sequential workflow     | a [generator](generators.md) with `ctx.dispatch()`   |
+| debounce / retry / polling           | `schedule.after` / `schedule.every` (id = replace)   |
+| own a watcher / socket / subprocess  | `return own.set('cell:id', factory)` (AIO-382)       |
+
+### Owning native resources: `own.set` (AIO-382)
+
+Methods are reducers — they have no place to keep a file watcher, socket, or
+subprocess handle. Don't park disposers in module-scope variables; return an
+`own.set` effect. It has the exact replace contract `schedule.after` has for
+timers, extended to disposables:
+
+```ts
+import { cell, own } from "aio";
+
+const workspace = cell("workspace", {
+  state: { dir: "" },
+  methods: {
+    async setWorkspace(s, dir: string) {
+      s.dir = dir;
+      // Same id ⇒ the previous watcher's disposer runs first. All slots are
+      // disposed on cell disable and on app shutdown — no manual teardown.
+      return own.set("workspace:watcher", () => watchDir(dir, onChange));
+    },
+    close(_s) {
+      return own.dispose("workspace:watcher");
+    },
+  },
+});
+```
+
+The factory runs in the runtime (not in the reducer) and may return a disposer
+function or a closeable object (`{ close() }` / `{ dispose() }`). The effect
+itself is plain data — the factory travels out-of-band, so on time-travel
+replay the runtime skips re-acquisition instead of resurrecting watchers.
+Prefix ids with the cell name (`cell:resource`) — disable cleanup matches on
+the `:` delimiter, like schedule ids.
 
 ### Error handling
 
@@ -200,49 +294,73 @@ After `aio.run()`, methods and selectors are callable directly:
 ```ts
 await aio.run({ cells: [counter] });
 
-counter.increment(5); // dispatches counter:increment
+await counter.increment(5); // Promise resolves once the dispatch is applied
+// (browser: resolves on server ack — state read on the next line is fresh)
 counter.reset(); // dispatches counter:reset
 counter.isPositive(); // reads state → true
 counter.increment.type; // → 'counter:increment'
 ```
 
-Before `aio.run()`, calling a method returns an action object without
-dispatching. After `aio.run()`, calling dispatches automatically.
+Before `aio.run()`, calling a method does **not** dispatch. In development it
+throws immediately with `[counter] increment() called before aio.run() — add
+this cell to aio.run({ cells: [...] })`; in production it logs the same message
+once and resolves with `void`. The intent: surface "I clicked and nothing
+happened, no error anywhere" as an immediate failure.
+
+To get the raw action object pre-binding (composition, tests, time-travel),
+use the internal catalog: `counter.__aio.actions.increment(5)` returns
+`{ type: "counter:increment", payload: { args: [5] } }`.
 
 ---
 
 ## Common Pitfalls
 
-### Immer proxy restrictions (sync methods)
+### State in sync methods is a standard Immer draft
 
-The `s` parameter is an Immer draft — a Proxy that records mutations. Some
-JavaScript patterns don't work on proxies:
+The `s` parameter is an Immer draft. Plain JavaScript reads, spreads,
+`.map`/`.filter`, `Object.keys`, and `JSON.stringify` all work — they read
+the current state of the draft, just like a plain object. The only thing to
+watch is that **values you take out of the method** (return values, effect
+payloads, `JSON.stringify` results) are snapshots; the live draft stays in
+the method body.
 
 ```ts
-// DON'T — these read the proxy in ways Immer can't track:
 methods: {
-  bad(s) {
-    const copy = { ...s }             // spread reads all keys — fails
-    const keys = Object.keys(s)       // same issue
-    const mapped = s.items.map(...)   // .map() returns proxy-wrapped results
-    JSON.stringify(s)                 // reads entire tree through proxy
-  },
-}
-
-// DO — access specific properties or snapshot first:
-methods: {
-  good(s) {
-    const name = s.user.name          // direct access — works
-    s.items.push({ text: "new" })     // mutator methods — works
-    s.items.forEach(i => i.done = true)  // forEach — works
-    const items = [...s.items]        // snapshot to plain array first
-    const filtered = items.filter(i => !i.done)  // now safe
+  toggle(s) {
+    s.done = !s.done;                          // mutation — tracked by Immer
+    const count = s.items.length;               // read — works
+    const filtered = s.items.filter((x) => x.active); // read — works
+    const copy = { ...s, updatedAt: Date.now() };     // read + extend — works
+    return { count, filtered, copy };            // values out are snapshots
   },
 }
 ```
 
-**Rule of thumb:** mutate directly, read specific properties. If you need to
-transform an array, snapshot it first with `[...s.array]`.
+**One thing to know:** `JSON.stringify(s)` works for reading, but the result
+is a string snapshot at that moment. If you need an object snapshot to pass
+to a reducer, use `structuredClone(s)` — Immer drafts aren't structured-
+cloneable, so this throws; use the `[...s.items]` / `{...s}` patterns above
+for cloning.
+
+### Mutations on returned snapshots are ignored
+
+If you do:
+
+```ts
+methods: {
+  leak(s) {
+    const snap = { ...s };
+    snap.x = 99; // no-op — snap is a fresh plain object, not tracked
+    return snap;
+  },
+}
+```
+
+The mutation to `snap` is harmless (no state change) because `snap` is a
+fresh plain object. aio dispatches the return value as-is, and the caller
+gets a plain object with `x: 99` that has no reactive effect. The draft
+itself was not mutated; if you wanted to mutate the draft, do it before
+spreading.
 
 ### Effects and state references
 

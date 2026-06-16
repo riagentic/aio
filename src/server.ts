@@ -8,7 +8,7 @@ import {
   initDiagnosticBus,
 } from "./diagnostic-bus.ts";
 import { setDiagEmit } from "./error.ts";
-import { initClientLog } from "./client-log.ts";
+import { disposeClientLog, initClientLog, writeClientLog } from "./client-log.ts";
 
 // ── Re-exports (public API) ──
 export {
@@ -89,8 +89,12 @@ export function createServer(config: ServerConfig): ServerHandle {
   const syncIntervalMs = config.syncIntervalMs ?? DEFAULT_SYNC_INTERVAL_MS;
 
   // ── Dev startup checks ──
+  const uiEntry = config.uiEntry ?? "App.tsx";
+  if (!prod) {
+    debug(`ui: serving ${uiEntry}${config.uiEntry ? "" : " (default convention — set ui.entry to override)"}`);
+  }
   const graphValidation = !prod
-    ? startGraphValidation(absBaseDir, importMapObj, debug)
+    ? startGraphValidation(absBaseDir, importMapObj, debug, uiEntry)
     : null;
   if (!prod) scanServerOnlyImports(absBaseDir, debug);
 
@@ -129,6 +133,16 @@ export function createServer(config: ServerConfig): ServerHandle {
   if (!prod) {
     diagSubscribe((ev) => {
       broadcaster.broadcastRaw("__diag:" + JSON.stringify(ev));
+      if (ev.severity === "error" || ev.severity === "warning") {
+        for (const meta of wsMgr.connections.values()) {
+          writeClientLog(meta.index, {
+            level: ev.severity === "error" ? "error" : "warn",
+            msg: ev.message,
+            ts: Date.now(),
+            source: "diag",
+          });
+        }
+      }
     });
   }
 
@@ -143,6 +157,7 @@ export function createServer(config: ServerConfig): ServerHandle {
     importMap: IMPORT_MAP,
     noCache,
     showStatus: config.showStatus,
+    uiEntry: config.uiEntry,
     width: config.width,
     height: config.height,
     renderBudget: config.renderBudget,
@@ -173,6 +188,7 @@ export function createServer(config: ServerConfig): ServerHandle {
   if (!prod) {
     watcher = createFileWatcher({
       absBaseDir,
+      uiEntry,
       port,
       importMapObj,
       debug,
@@ -363,6 +379,7 @@ export function createServer(config: ServerConfig): ServerHandle {
           Deno.removeSync(udsPath);
         } catch { /* already removed */ }
       }
+      disposeClientLog();
     },
   };
 }

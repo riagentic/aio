@@ -66,6 +66,51 @@ export function cell(name: string, config: any): any {
   const hasActions = config.actions &&
     Object.keys(config.actions as Record<string, () => unknown>).length > 0;
 
+  // AIO-5.1: client-scoped cells — browser-local state, sync methods only.
+  // Validation happens at cell() time so misuse fails at definition, not at runtime.
+  if (config.scope === "client") {
+    for (
+      const [key, fn] of Object.entries(
+        (config.methods ?? {}) as Record<string, unknown>,
+      )
+    ) {
+      if ((fn as { constructor: { name: string } }).constructor.name === "AsyncFunction") {
+        throw new Error(
+          `[${name}] client-scoped cells support sync methods only (no server ` +
+            `round-trip exists); do async work in the component and call sync ` +
+            `methods with results — '${key}' is async`,
+        );
+      }
+    }
+    if (hasGenerators) {
+      throw new Error(
+        `[${name}] client-scoped cells do not support generators (v1 limitation)`,
+      );
+    }
+    if (hasActions) {
+      throw new Error(
+        `[${name}] client-scoped cells do not support actions (v1 limitation) — use methods`,
+      );
+    }
+    if (config.machine) {
+      throw new Error(
+        `[${name}] client-scoped cells do not support machine (v1 limitation)`,
+      );
+    }
+    const def = createCellFromMethods(
+      name,
+      config as MethodsCellConfig<string, Record<string, unknown>>,
+    );
+    def.__aio.scope = "client";
+    // Raw sync methods — bindCellReactive runs these locally against the cell signal.
+    def.__aio.clientMethods = config.methods as Record<
+      string,
+      (s: Record<string, unknown>, ...args: unknown[]) => unknown
+    >;
+    registerCell(def);
+    return def;
+  }
+
   // Methods present (with optional generators, actions, effects) → unified builder
   if (hasMethods || (hasGenerators && !hasActions)) {
     const def = createCellFromMethods(

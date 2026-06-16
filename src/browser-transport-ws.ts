@@ -23,6 +23,7 @@ import {
   handleClickCmd,
   T,
 } from "./browser-transport-state.ts";
+import { _rejectAck, _rejectAllPending, _resolveAck } from "./browser-ack.ts";
 import { handleStateMessage } from "./browser-transport-handler.ts";
 import { initVitals } from "./browser-transport-vitals.ts";
 import { connectIPC } from "./browser-transport-ipc.ts";
@@ -119,6 +120,22 @@ export function connect(): void {
       }
       return;
     }
+    if (typeof e.data === "string" && e.data.startsWith("__ack:")) {
+      // AIO-2.2: settle the pending ack for this cid.
+      // Format: __ack:<cid>:<ok>  (ok is "1" or "0")
+      const rest = e.data.slice(6);
+      const sep = rest.indexOf(":");
+      if (sep > 0) {
+        const cid = rest.slice(0, sep);
+        const ok = rest.slice(sep + 1) === "1";
+        if (ok) {
+          _resolveAck(cid);
+        } else {
+          _rejectAck(cid, new Error("server rejected action"));
+        }
+      }
+      return;
+    }
     if (typeof e.data === "string" && e.data.startsWith("__diag:")) {
       try {
         const ev = JSON.parse(e.data.slice(7));
@@ -139,6 +156,8 @@ export function connect(): void {
     _coreSetTransport(null);
     _coreSetConnected(false);
     _ttSetSendFn(null);
+    // AIO-2.2: reject any pending acks — the connection is gone.
+    _rejectAllPending(new Error("connection lost"));
     if (_vitalsPingTimer) {
       clearInterval(_vitalsPingTimer);
       _setVitalsPingTimer(null);

@@ -18,6 +18,7 @@ import {
   undo,
 } from "./time-travel.ts";
 import { createScheduleManager } from "./schedule.ts";
+import { createOwnManager } from "./own.ts";
 import { getLogger, log } from "./logger.ts";
 
 // Phase modules — extracted _run() logic
@@ -176,6 +177,7 @@ async function run(a: any, b?: any): Promise<AioApp<any, any>> {
       beforeReduce,
       onRestore,
       cellReportOpts,
+      visibilityReport,
     } = composeCellsWiring({
       cellEntries,
       cellDefaults: fc.cellDefaults,
@@ -186,6 +188,17 @@ async function run(a: any, b?: any): Promise<AioApp<any, any>> {
       beforeReduce: fc.beforeReduce,
       onRestore: fc.onRestore,
     });
+
+    if (parseCli().expose) {
+      const allUi = visibilityReport
+        .filter((r) => r.ui === "all")
+        .map((r) => r.cell);
+      if (allUi.length) {
+        log.warn(
+          `--expose with ui="all" on cells: ${allUi.join(", ")} — every authenticated client sees this state. Narrow with ui:{include:[...]} if needed.`,
+        );
+      }
+    }
 
     // Logger
     const logger = await initLogger(fc);
@@ -303,6 +316,8 @@ async function _run<S, A, E>(
   const { reduce, execute, onAction, onEffect, onStart, onStop, onError } =
     config;
   const shouldPersist = (cli.persist ?? config.persist) !== false;
+  // autoGetUIState is always defined by composeCellsWiring (ui defaults to "all"),
+  // so the (s) => s fallback here is a safety net, not the primary path.
   const _rawGetUIState = config._getUIState ?? ((s: S, _user?: AioUser) => s);
   const getUIState = createMemoizedUIState(_rawGetUIState);
   const getDBState = config._getDBState ?? ((s: S) => s);
@@ -375,8 +390,12 @@ async function _run<S, A, E>(
     (action) => dispatch(action as A),
     log,
   );
+  const ownManager = createOwnManager(log);
   if (config._onScheduleReady) {
-    config._onScheduleReady((prefix) => scheduleManager.cancelByPrefix(prefix));
+    config._onScheduleReady((prefix) => {
+      scheduleManager.cancelByPrefix(prefix);
+      ownManager.disposeByPrefix(prefix);
+    });
   }
 
   const udsCtrl = createUdsBroadcastController({
@@ -437,6 +456,7 @@ async function _run<S, A, E>(
       broadcastTT: () => server.broadcastTT(),
     }),
     scheduleManager,
+    ownManager,
     schedulePersist: () => schedulePersist(),
     getTT: () => tt,
     setTT: (t) => {
@@ -493,6 +513,7 @@ async function _run<S, A, E>(
     onStop,
     appLock,
     scheduleManager,
+    ownManager,
     dispatch,
     getElectronProc: () => _electronProc,
     clearElectronProc: () => {

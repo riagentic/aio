@@ -3,6 +3,7 @@
 
 import { compactPatches } from "./patch-compact.ts";
 import { writeClientLog } from "./client-log.ts";
+import { log } from "./logger.ts";
 
 export type UDSClient = {
   conn: Deno.Conn;
@@ -79,7 +80,7 @@ export function createUDSListener(
       );
     }
   })().catch((e) => {
-    if (!closed) debug(`uds: accept loop error — ${e}`);
+    if (!closed) log.error("uds", `accept loop error — ${e}`);
   });
 
   // AIO-216: per-connection write queue to prevent byte interleaving
@@ -123,7 +124,7 @@ export function createUDSListener(
         uiState = filtered;
       }
     } catch (e) {
-      debug(`uds: getUIState error — ${e}`);
+      log.error("uds", `getUIState error — ${e}`);
       return undefined;
     }
     return JSON.stringify(uiState);
@@ -276,8 +277,9 @@ function _handleUDSConn(
         if (done) break;
         buf += decoder.decode(value, { stream: true });
         if (buf.length > MAX_BUF && !buf.includes("\n")) {
-          debug(
-            `uds: client buffer exceeded ${MAX_BUF}B without newline — closing`,
+          log.error(
+            "uds",
+            `client buffer exceeded ${MAX_BUF}B without newline — closing`,
           );
           break;
         }
@@ -370,11 +372,11 @@ function _handleUDSConn(
                     client.lastFullJson = msg;
                   });
                 } catch (err) {
-                  debug(`uds: filtered state send error — ${err}`);
+                  log.warn("uds", `filtered state send error — ${err}`);
                 }
               }
             } catch {
-              debug("uds: bad __subs message");
+              log.warn("uds", "bad __subs message");
             }
             continue;
           }
@@ -402,7 +404,7 @@ function _handleUDSConn(
                   client.lastFullJson = msg;
                 });
               } catch (err) {
-                debug(`uds: resync send error — ${err}`);
+                log.warn("uds", `resync send error — ${err}`);
               }
             }
             continue;
@@ -411,7 +413,7 @@ function _handleUDSConn(
             const action = JSON.parse(line);
             if (action && typeof action.type === "string") onAction(action);
           } catch {
-            debug("uds: malformed message");
+            log.warn("uds", "malformed message");
           }
         }
       }

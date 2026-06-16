@@ -299,6 +299,25 @@ Deno.test("tt integration: paused dispatch drops actions", () => {
   assertEquals(stateAt(tt), { count: 0 });
 });
 
+Deno.test("tt: record snapshot is immutable from live state", () => {
+  let tt = createTT<{ inner: { count: number } }, A>();
+  const live = { inner: { count: 0 } };
+  tt = record(tt, { type: "A" }, live);
+
+  // Mutate live state — snapshot should be independent
+  live.inner.count = 99;
+  assertEquals(tt.entries[0]!.state.inner.count, 0);
+});
+
+Deno.test("tt: record uses degraded clone when structuredClone fails", () => {
+  let tt = createTT<{ fn: () => void; count: number }, A>();
+  const live = { fn: () => {}, count: 0 };
+  // structuredClone fails on functions, falls back to JSON parse/stringify
+  tt = record(tt, { type: "A" }, live);
+  live.count = 99;
+  assertEquals(tt.entries[0]!.state.count, 0);
+});
+
 Deno.test("tt integration: state restores correctly on undo/redo cycle", () => {
   let tt = makeTT();
   tt = record(tt, { type: "A" }, { count: 1 });

@@ -2,6 +2,7 @@
 // browser-air-transport: WS/IPC transport layer for AIR renderer.
 // Minimal WS transport (no React, no vitals) — just WS <-> state-core bridge.
 
+import { diagEmit } from "./diagnostic-bus.ts";
 import { installConsoleIntercept } from "./console-intercept.ts";
 import { routeCommand } from "./browser-air-commands.ts";
 import {
@@ -33,6 +34,19 @@ let _connecting = false;
 let _wasConnected = false;
 let _retry = 0;
 let _queue: Array<{ type: string; payload?: unknown }> = [];
+const QUEUE_MAX = 1000;
+let _connectionDegraded = false;
+
+function _updateDegraded(): void {
+  const degraded = _queue.length > QUEUE_MAX * 0.8;
+  if (_connectionDegraded !== degraded) _connectionDegraded = degraded;
+}
+
+/** Returns true when the offline action queue is >80% full — UI can use this
+ *  to show a "reconnecting / slow connection" indicator. */
+export function isConnectionDegraded(): boolean {
+  return _connectionDegraded;
+}
 let _onSyncMessage: ((msg: Record<string, unknown>) => void) | null = null;
 
 /** Register a sync message handler for __ack/__op/__sync messages from server */
@@ -80,7 +94,9 @@ function _parseAndRoute(line: string): void {
         _onSyncMessage(data);
       } else {
         console.warn(
-          `[aio:air] sync message (${Object.keys(data).filter(k => k.startsWith("__")).join(", ")}) but no handler — discarding`,
+          `[aio:air] sync message (${
+            Object.keys(data).filter((k) => k.startsWith("__")).join(", ")
+          }) but no handler — discarding`,
         );
       }
       return;
@@ -94,6 +110,7 @@ function _parseAndRoute(line: string): void {
 function _flushQueue(send: (d: string) => void) {
   const q = _queue;
   _queue = [];
+  _connectionDegraded = false;
   for (const a of q) send(JSON.stringify(a));
 }
 
@@ -194,9 +211,24 @@ function _send(action: { type: string; payload?: unknown }) {
       _ws.send(json);
     } catch {
       _queue.push(tagged);
+      _updateDegraded();
     }
   } else if (_ipc && _ipcConnected) _ipc.send(json);
-  else _queue.push(tagged);
+  else {
+    if (_queue.length >= QUEUE_MAX) {
+      _queue.shift();
+      diagEmit({
+        type: "browser-air-transport:queue-drop",
+        severity: "warning",
+        source: "browser-air-transport",
+        message: "Queued action dropped (queue full)",
+        detail: { max: QUEUE_MAX },
+        hint: "Check network connectivity or reduce mutation rate",
+      });
+    }
+    _queue.push(tagged);
+    _updateDegraded();
+  }
 }
 
 // ── Wire transport into protocol layer ──────────────────────────────

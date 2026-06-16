@@ -1,6 +1,7 @@
 // cell-actions-factory.ts — createCellFromActions: explicit actions/reduce-based cell factory
 
 import type { ScheduleEffect } from "./schedule.ts";
+import type { OwnEffect } from "./own.ts";
 import type {
   CellAio,
   CellDef,
@@ -47,6 +48,26 @@ export function createCellFromActions<
   checkReservedKeys(name, [...actionKeySet], "action");
   checkReservedKeys(name, effectKeyList, "effect");
   checkReservedKeys(name, selectorNames, "selector");
+
+  // AIO-6.1: a state key colliding with any callable is a definition-time error —
+  // the callable wins on the cell object, so `cell.key` in a component would return
+  // the function and the state would be silently unreachable (violates AIO4).
+  for (const stateKey of Object.keys(config.state ?? {})) {
+    const kind = actionKeySet.has(stateKey)
+      ? "action"
+      : effectKeyList.includes(stateKey)
+      ? "effect"
+      : null;
+    if (kind) {
+      throw new Error(
+        `[cell:${name}] state key '${stateKey}' collides with ${kind} '${stateKey}' — ` +
+          `reading ${name}.${stateKey} in a component would return the function, ` +
+          `not the state. Rename one (e.g. state key 'last${
+            stateKey.charAt(0).toUpperCase() + stateKey.slice(1)
+          }').`,
+      );
+    }
+  }
 
   const machine: MachineConfig | false =
     (config.machine === false || config.machine == null)
@@ -107,7 +128,7 @@ export function createCellFromActions<
 
   const internals: Omit<
     CellAio,
-    "actions" | "effects" | "selectors" | "bound"
+    "actions" | "effects" | "selectors" | "bound" | "selectorDeps"
   > = {
     state: config.state,
     machine,
@@ -129,6 +150,7 @@ export function createCellFromActions<
     ui: normalizeUiFilter(config.ui),
     uiForUser: extractForUser(config.ui),
     syncConfig: config.sync ? normalizeSyncConfig(config.sync) : undefined,
+    scope: "server",
     version: config.version ?? 0,
     onMigrate: config.onMigrate as
       | ((
@@ -149,11 +171,19 @@ export function createCellFromActions<
   }
 
   const scopedSelectors = scopeSelectors(name, config.selectors);
+  const selectorDeps: Record<string, readonly string[]> = {};
+  if (config.selectors) {
+    for (const [key, def] of Object.entries(config.selectors)) {
+      if (typeof def === "function") continue;
+      selectorDeps[key] = def.deps;
+    }
+  }
 
   const def: Record<string, unknown> = {
     __aio: {
       ...internals,
       selectors: scopedSelectors,
+      selectorDeps,
       actions: aCatalog as unknown,
       effects: eCatalog as unknown,
       bound: false,
@@ -183,14 +213,14 @@ function buildActionsReducer(
       string,
       (state: unknown, payload: unknown) => void
     >;
-    return (state: unknown, action: Msg): (Msg | ScheduleEffect)[] | void => {
+    return (state: unknown, action: Msg): (Msg | ScheduleEffect | OwnEffect)[] | void => {
       const key = actionTypeToKey.get(action.type);
       if (!key) {
         // Foreign action key — use full type string
         const h = handlers[action.type];
         if (h) {
           return h(state, (action as { payload: unknown }).payload) as
-            | (Msg | ScheduleEffect)[]
+            | (Msg | ScheduleEffect | OwnEffect)[]
             | void;
         }
         return;
@@ -198,7 +228,7 @@ function buildActionsReducer(
       const h = handlers[key];
       if (h) {
         return h(state, (action as { payload: unknown }).payload) as
-          | (Msg | ScheduleEffect)[]
+          | (Msg | ScheduleEffect | OwnEffect)[]
           | void;
       }
     };
@@ -209,8 +239,8 @@ function buildActionsReducer(
     state: unknown,
     action: Msg,
     ctx: { on: Record<string, string> },
-  ) => (Msg | ScheduleEffect)[] | void;
-  return (state: unknown, action: Msg): (Msg | ScheduleEffect)[] | void =>
+  ) => (Msg | ScheduleEffect | OwnEffect)[] | void;
+  return (state: unknown, action: Msg): (Msg | ScheduleEffect | OwnEffect)[] | void =>
     userReduceFn(state, action, { on: onMap });
 }
 

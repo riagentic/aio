@@ -71,7 +71,7 @@ Deno.test("compose basic: reduce returns effects array", () => {
     },
   });
   const composed = composeCells([fx]);
-  const result = composed.reduce(composed.initialState, fx.go());
+  const result = composed.reduce(composed.initialState, fx.__aio.actions.go());
   assertEquals(result.effects.length, 1);
   assertEquals(result.effects[0]!.type, "fx:sideEffect");
 });
@@ -168,12 +168,12 @@ Deno.test("machine guard: blocks action not allowed in current state", () => {
 
   const composed = composeCells([door]);
   // closed state — 'close' is not allowed
-  const r1 = composed.reduce(composed.initialState, door.close());
+  const r1 = composed.reduce(composed.initialState, door.__aio.actions.close());
   assertEquals(r1.effects.length, 0);
   assertEquals((r1.state.door as { opened: boolean }).opened, false); // unchanged
 
   // closed → open works
-  const r2 = composed.reduce(composed.initialState, door.open());
+  const r2 = composed.reduce(composed.initialState, door.__aio.actions.open());
   assertEquals((r2.state.door as { opened: boolean }).opened, true);
   assertEquals(
     (r2.state.door as { __aio_status: string }).__aio_status,
@@ -181,7 +181,7 @@ Deno.test("machine guard: blocks action not allowed in current state", () => {
   );
 
   // open state — 'lock' is not allowed
-  const r3 = composed.reduce(r2.state, door.lock());
+  const r3 = composed.reduce(r2.state, door.__aio.actions.lock());
   assertEquals(r3.effects.length, 0);
   assertEquals(
     (r3.state.door as { __aio_status: string }).__aio_status,
@@ -209,7 +209,7 @@ Deno.test("machine guard: returns unchanged state reference", () => {
   });
   const composed = composeCells([m]);
   // 'blocked' not valid from state 'a' (only valid in 'b')
-  const result = composed.reduce(composed.initialState, m.blocked());
+  const result = composed.reduce(composed.initialState, m.__aio.actions.blocked());
   assertEquals(result.state, composed.initialState);
 });
 
@@ -279,11 +279,11 @@ Deno.test("validate: with machine — invalid state rejects", () => {
     onCellError: (err) => errors.push(err),
   });
   // Valid
-  const r1 = composed.reduce(composed.initialState, guarded.set(50));
+  const r1 = composed.reduce(composed.initialState, guarded.__aio.actions.set(50));
   assertEquals((r1.state.guarded as { val: number }).val, 50);
 
   // Invalid — exceeds 100
-  const r2 = composed.reduce(r1.state, guarded.set(200));
+  const r2 = composed.reduce(r1.state, guarded.__aio.actions.set(200));
   assertEquals((r2.state.guarded as { val: number }).val, 50); // unchanged
   assertEquals(errors.length, 1);
 });
@@ -430,7 +430,7 @@ Deno.test("registry: status returns _status from machine", () => {
     "idle",
   );
 
-  const r = composed.reduce(composed.initialState, stateful.go());
+  const r = composed.reduce(composed.initialState, stateful.__aio.actions.go());
   assertEquals(composed.registry.status("stateful", r.state), "active");
 });
 

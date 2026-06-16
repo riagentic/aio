@@ -46,6 +46,34 @@ export default function App() {
 - No WebSocket setup — `useAio` handles it
 - Just `export default function App()` and you're done
 
+## Awaiting methods in the browser
+
+Cell methods return a `Promise<void>` in the browser too. Awaiting the promise
+guarantees the server has reduced the action and the patch has been broadcast —
+reading state on the next line sees the new value.
+
+```ts
+async function addTodo(text: string) {
+  await todo.add(text);
+  // `todo.items` is fresh here — the server has acked the dispatch
+  console.log(todo.items.length);
+}
+```
+
+If you don't need the synchronization, the call is fire-and-forget — the
+unawaited promise is harmless (a no-op `.catch()` is attached internally so
+disconnects don't pollute the console).
+
+Rejection happens on:
+
+- **Server reject** — the dispatch was refused (validation, machine guard, etc.).
+  The promise rejects with the server's error message.
+- **Timeout** — 15 seconds elapse without an ack. The promise rejects with
+  `method not acknowledged in 15000ms — server overloaded or disconnected`.
+- **Disconnect** — the WebSocket closes while the action is in flight. The
+  promise rejects with `connection lost`. (Fire-and-forget callers don't see
+  this because of the internal `.catch()`.)
+
 ## `useLocal<T>(initial)`
 
 Client-only state hook — not synced to server, not persisted. For ephemeral UI

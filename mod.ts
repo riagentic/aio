@@ -228,6 +228,15 @@ export { schedule } from "./src/schedule.ts";
 export type { ScheduleDef, ScheduleEffect } from "./src/schedule.ts";
 
 /**
+ * Keyed disposer slots — own native resources (watchers, sockets) from
+ * reducers/methods with schedule-like replace semantics. Disposed on cell
+ * disable and app shutdown.
+ */
+export { own } from "./src/own.ts";
+/** Own effect type for keyed resource slots */
+export type { OwnDisposer, OwnEffect, OwnResource } from "./src/own.ts";
+
+/**
  * SQLite column helpers for defining table schemas.
  * @see {@link https://aio.dev/manual#sqlite-persistence}
  */

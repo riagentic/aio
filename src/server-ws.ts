@@ -3,6 +3,7 @@
 import type { AioUser } from "./aio.ts";
 import { filterStateBySubs, parseSubs } from "./broadcast-utils.ts";
 import { writeClientLog } from "./client-log.ts";
+import { log } from "./logger.ts";
 import type { ClientLogEntry } from "./dom-inspector-types.ts";
 import type { VitalsSystem } from "./vitals/mod.ts";
 
@@ -120,6 +121,11 @@ const PENDING_STATE_MAX = 50;
 
 /** Factory — creates isolated WS manager with its own connection state */
 export function createWsManager(deps: WsDeps): WsManager {
+  // Global rolling-window message counter — protects against distributed
+  // clients each staying under the per-socket limit while flooding the server.
+  let _totalMsgsThisSec = 0;
+  let _globalRateTimer: ReturnType<typeof setTimeout> | undefined;
+
   const connections = new Map<WebSocket, ClientMeta>();
   const payloadStats = new Map<
     string,
@@ -157,7 +163,11 @@ export function createWsManager(deps: WsDeps): WsManager {
       ? "interact"
       : "clientState";
 
-  function handleWs(req: Request, user?: AioUser, clientKey?: string): Response {
+  function handleWs(
+    req: Request,
+    user?: AioUser,
+    clientKey?: string,
+  ): Response {
     // F-4: reject denylisted clients at handshake so reconnect loops can't
     // reset per-socket abuse counters.
     if (_isDenied(clientKey)) {
@@ -224,8 +234,9 @@ export function createWsManager(deps: WsDeps): WsManager {
     };
 
     socket.onerror = (e) => {
-      deps.debug(
-        `ws: error ${clientId.slice(0, 8)} — ${
+      log.warn(
+        "ws",
+        `error ${clientId.slice(0, 8)} — ${
           e instanceof ErrorEvent ? e.message : e
         }`,
       );
@@ -237,7 +248,7 @@ export function createWsManager(deps: WsDeps): WsManager {
         try {
           deps.onDisconnect(meta.user);
         } catch (err) {
-          deps.debug(`hook onDisconnect: ${err}`);
+          log.warn("ws", `hook onDisconnect: ${err}`);
         }
       }
     };
@@ -306,7 +317,7 @@ export function createWsManager(deps: WsDeps): WsManager {
         try {
           deps.onDisconnect(meta.user);
         } catch (e) {
-          deps.debug(`hook onDisconnect: ${e}`);
+          log.warn("ws", `hook onDisconnect: ${e}`);
         }
       }
     };
@@ -348,13 +359,45 @@ export function createWsManager(deps: WsDeps): WsManager {
       }, 1000);
     }
 
+    // Reset global rolling-window counter once per second (lazy)
+    if (!_globalRateTimer) {
+      _globalRateTimer = setTimeout(() => {
+        _totalMsgsThisSec = 0;
+        _globalRateTimer = undefined;
+      }, 1000);
+    }
+
+    // Global rate-limit fuse: rolling window counter on WsManager itself
+    _totalMsgsThisSec++;
+    if (_totalMsgsThisSec > WS_RATE_LIMIT * 2) {
+      const msg =
+        `ws: global rate limit exceeded (${_totalMsgsThisSec} msg/sec) — dropping from client ${
+          meta.id.slice(0, 8)
+        }`;
+      log.error("ws", msg);
+      writeClientLog(meta.index, {
+        level: "error",
+        msg,
+        ts: Date.now(),
+        source: "server-ws",
+      });
+      return;
+    }
+
     // H3/H4 fix: track consecutive drops for abuse detection (backpressure deadlock prevention)
     if (meta.msgCount > WS_RATE_LIMIT) {
       meta.consecutiveDrops++;
       if (meta.consecutiveDrops >= CONSECUTIVE_DROP_THRESHOLD) {
-        deps.debug(
-          `ws: client ${meta.id.slice(0, 8)} flagged — ${meta.consecutiveDrops} consecutive drops`,
-        );
+        const msg = `ws: client ${
+          meta.id.slice(0, 8)
+        } flagged — ${meta.consecutiveDrops} consecutive drops`;
+        log.error("ws", msg);
+        writeClientLog(meta.index, {
+          level: "error",
+          msg,
+          ts: Date.now(),
+          source: "server-ws",
+        });
         // F-4: block this client-key at handshake for ABUSE_DENYLIST_MS
         // so reconnect loops can't reset the strike counter.
         _addToDenylist(meta.clientKey);
@@ -370,11 +413,25 @@ export function createWsManager(deps: WsDeps): WsManager {
     meta.consecutiveDrops = 0;
 
     if (typeof e.data !== "string") {
-      deps.debug(`ws: binary message dropped — only JSON strings accepted`);
+      const msg = "ws: binary message dropped — only JSON strings accepted";
+      log.error("ws", msg);
+      writeClientLog(meta.index, {
+        level: "error",
+        msg,
+        ts: Date.now(),
+        source: "server-ws",
+      });
       return;
     }
     if (e.data.length > WS_MAX_MESSAGE) {
-      deps.debug(`ws: message too large (${e.data.length} bytes), dropped`);
+      const msg = `ws: message too large (${e.data.length} bytes), dropped`;
+      log.error("ws", msg);
+      writeClientLog(meta.index, {
+        level: "error",
+        msg,
+        ts: Date.now(),
+        source: "server-ws",
+      });
       try {
         socket.send(
           JSON.stringify({
@@ -388,11 +445,16 @@ export function createWsManager(deps: WsDeps): WsManager {
     }
     meta.bytesThisSec += e.data.length;
     if (meta.bytesThisSec > WS_BYTES_PER_SEC) {
-      deps.debug(
-        `ws: byte rate exceeded for ${meta.id.slice(0, 8)} (${
-          (meta.bytesThisSec / 1_000_000).toFixed(1)
-        }MB/s)`,
-      );
+      const msg = `ws: byte rate exceeded for ${meta.id.slice(0, 8)} (${
+        (meta.bytesThisSec / 1_000_000).toFixed(1)
+      }MB/s)`;
+      log.error("ws", msg);
+      writeClientLog(meta.index, {
+        level: "error",
+        msg,
+        ts: Date.now(),
+        source: "server-ws",
+      });
       return;
     }
 
@@ -467,7 +529,8 @@ export function createWsManager(deps: WsDeps): WsManager {
       return;
     }
     if (!parsed || typeof parsed.type !== "string") {
-      deps.debug(`ws: invalid action — missing type field`);
+      const msg = "ws: invalid action — missing type field";
+      log.warn("ws", msg);
       return;
     }
     // Block framework-internal action types from network sources.
@@ -477,11 +540,11 @@ export function createWsManager(deps: WsDeps): WsManager {
     // clients is a remote-code-style vector — see audit F-1 (prototype pollution
     // via __setMethod with crafted mutation paths).
     if (_isFrameworkInternalActionType(parsed.type)) {
-      deps.debug(
+      const msg =
         `ws: rejected framework-internal action type "${parsed.type}" from client ${
           meta.id.slice(0, 8)
-        }`,
-      );
+        }`;
+      log.warn("ws", msg);
       return;
     }
     if (
@@ -496,6 +559,20 @@ export function createWsManager(deps: WsDeps): WsManager {
       `ws: recv ${JSON.stringify(parsed)} user=${meta.user?.id ?? "anon"}`,
     );
     deps.dispatch(parsed, meta.user);
+    // AIO-2.2: emit per-action ack if the client supplied a cid. Schedules a
+    // microtask so the ack goes out AFTER any synchronous broadcast that the
+    // dispatch triggered (broadcast itself uses queueMicrotask — by queuing
+    // ours after dispatch returns, we run after the broadcast's send).
+    if (typeof parsed.cid === "string" && parsed.cid.length > 0) {
+      const cid = parsed.cid;
+      queueMicrotask(() => {
+        try {
+          if (socket.readyState === WebSocket.OPEN) {
+            socket.send(`__ack:${cid}:1`);
+          }
+        } catch { /* client gone */ }
+      });
+    }
   }
 
   function _resolvePending(
@@ -560,14 +637,16 @@ export function createWsManager(deps: WsDeps): WsManager {
         if (vmeta.bpMultiplier !== prevMul) {
           const cid = vmeta.id.slice(0, 8);
           if (vmeta.bpMultiplier > prevMul) {
-            console.warn(
-              `[aio:vitals] client ${cid} — staleness ${
+            log.warn(
+              "vitals",
+              `client ${cid} — staleness ${
                 Math.round(staleness)
               }ms, backpressure ${prevMul}x→${vmeta.bpMultiplier}x`,
             );
           } else {
-            console.warn(
-              `[aio:vitals] client ${cid} — recovered, backpressure ${prevMul}x→${vmeta.bpMultiplier}x`,
+            log.warn(
+              "vitals",
+              `client ${cid} — recovered, backpressure ${prevMul}x→${vmeta.bpMultiplier}x`,
             );
           }
         }
@@ -579,14 +658,14 @@ export function createWsManager(deps: WsDeps): WsManager {
         socket.send("__vitals:pong:" + JSON.stringify(pong));
       }
     } catch (err) {
-      deps.debug(`[vitals] bad ping: ${err}`);
+      log.warn("vitals", `bad ping: ${err}`);
     }
   }
 
   function _handleSubs(socket: WebSocket, meta: ClientMeta, raw: string): void {
     const subs = parseSubs(raw);
     if (subs === undefined) {
-      deps.debug("ws: bad __subs message");
+      log.warn("ws", "bad __subs message");
       return;
     }
     meta.subscriptions = subs;
@@ -598,7 +677,7 @@ export function createWsManager(deps: WsDeps): WsManager {
       meta.lastFullJson = msg;
       meta.bpLastSentAt = Date.now();
     } catch (err) {
-      deps.debug(`ws: filtered state send error — ${err}`);
+      log.warn("ws", `filtered state send error — ${err}`);
     }
   }
 
@@ -612,7 +691,7 @@ export function createWsManager(deps: WsDeps): WsManager {
       meta.lastFullJson = msg;
       meta.bpLastSentAt = Date.now();
     } catch (err) {
-      deps.debug(`ws: resync send error — ${err}`);
+      log.warn("ws", `resync send error — ${err}`);
     }
   }
 
@@ -622,7 +701,7 @@ export function createWsManager(deps: WsDeps): WsManager {
     socket: WebSocket,
   ): void {
     if (!deps.syncHandler) {
-      deps.debug(`ws: __op received but no syncHandler configured — dropping`);
+      log.warn("ws", "__op received but no syncHandler configured — dropping");
       return;
     }
     const op = parsed.__op as Record<string, unknown>;
@@ -632,7 +711,7 @@ export function createWsManager(deps: WsDeps): WsManager {
       !Array.isArray(op.hlc) ||
       ["__proto__", "constructor", "prototype"].includes(op.cell as string)
     ) {
-      deps.debug(`ws: invalid __op — malformed or forbidden fields`);
+      log.warn("ws", "invalid __op — malformed or forbidden fields");
       return;
     }
     deps.syncHandler.handleOp(op, { id: meta.id, user: meta.user }, socket);
@@ -644,8 +723,9 @@ export function createWsManager(deps: WsDeps): WsManager {
     socket: WebSocket,
   ): void {
     if (!deps.syncHandler) {
-      deps.debug(
-        `ws: __sync received but no syncHandler configured — dropping`,
+      log.warn(
+        "ws",
+        "__sync received but no syncHandler configured — dropping",
       );
       return;
     }
@@ -653,7 +733,7 @@ export function createWsManager(deps: WsDeps): WsManager {
     if (
       !sync || typeof sync !== "object" || typeof sync.clientId !== "string"
     ) {
-      deps.debug(`ws: invalid __sync — malformed`);
+      log.warn("ws", "invalid __sync — malformed");
       return;
     }
     deps.syncHandler.handleSync(sync, { id: meta.id, user: meta.user }, socket);
@@ -718,6 +798,10 @@ export function createWsManager(deps: WsDeps): WsManager {
   }
 
   function shutdown(): void {
+    if (_globalRateTimer) {
+      clearTimeout(_globalRateTimer);
+      _globalRateTimer = undefined;
+    }
     for (const [ws, meta] of connections) {
       _clearTimers(meta);
       try {

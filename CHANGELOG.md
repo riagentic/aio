@@ -1,5 +1,39 @@
 # Changelog
 
+## 1.0.0-alpha14 — DX overhaul (BREAKING for alpha users)
+
+The todo.md DX plan, phases 1–9 complete. Behavior changes, plainly:
+
+- **Defaults flipped to honest**: `persist` and `ui` default to `"all"` —
+  zero-config persists and syncs, as the README always claimed. Opt out per
+  cell (`persist: "none"` / include/exclude). The "mode cliff" (one configured
+  cell flipping global behavior) is gone.
+- **`await method()` is real**: bound methods return Promises — sync resolves
+  after the dispatch is applied, async resolves with the return value; in the
+  browser the Promise resolves on server ack, so a state read on the next line
+  is fresh (cid/ack protocol). Calling before `aio.run()` throws in dev.
+- **State/callable name collisions now throw at `cell()` time** with a rename
+  suggestion (previously the callable silently shadowed the state key).
+- **Client-scoped cells**: `scope: "client"` — browser-local, per-tab,
+  signal-backed, sync methods only; skipped by server composition. The todo
+  example's filter uses it.
+- **useEffect deps are honored** (React semantics, signal auto-tracking
+  disabled inside deps-driven effects); React compat hooks moved to
+  `aio/air/compat` (main-surface exports deprecated, removed post-1.0).
+- **Typed events**: `e.currentTarget` is element-typed on intrinsic handlers
+  (AirEvent<T>); `onDoubleClick` aliased; unknown event names warn in dev.
+- **Child signal subscriptions are independent of parents** — the
+  `void sig.value` incantation is deleted from docs; invariant pinned by test.
+- **Sync-classified methods returning a Promise throw in dev** (transpiled
+  async detection) with a `markAsync` fix message.
+- **`ui.entry`** option replaces the hardcoded App.tsx convention (default
+  unchanged); **`aio doctor`** validates the six magic deno.json lines.
+
+Known debt (pre-existing, unchanged): db/integration test files crash their
+SQLite child worker in this dev environment (fails at alpha13 too); 29 lint
+hits in sync/* (require-await ×28, one unused import).
+
+
 ## 1.0.0-alpha13
 
 ### Security

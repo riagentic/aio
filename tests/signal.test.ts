@@ -336,6 +336,48 @@ Deno.test("signal: set with different key count triggers update", () => {
   assertEquals(calls, 2);
 });
 
+Deno.test("signal: set with different Date triggers update", () => {
+  const s = signal(new Date(2024, 0, 1));
+  let calls = 0;
+  effect(() => {
+    s.value;
+    calls++;
+  });
+  assertEquals(calls, 1);
+  s.set(new Date(2025, 0, 1));
+  assertEquals(calls, 2);
+  s.set(new Date(2025, 0, 1));
+  assertEquals(calls, 2);
+});
+
+Deno.test("signal: set with different RegExp triggers update", () => {
+  const s = signal(/foo/g);
+  let calls = 0;
+  effect(() => {
+    s.value;
+    calls++;
+  });
+  assertEquals(calls, 1);
+  s.set(/bar/gi);
+  assertEquals(calls, 2);
+  s.set(/bar/gi);
+  assertEquals(calls, 2);
+});
+
+Deno.test("signal: set with different typed array triggers update", () => {
+  const s = signal(new Uint8Array([1, 2, 3]));
+  let calls = 0;
+  effect(() => {
+    s.value;
+    calls++;
+  });
+  assertEquals(calls, 1);
+  s.set(new Uint8Array([4, 5, 6]));
+  assertEquals(calls, 2);
+  s.set(new Uint8Array([4, 5, 6]));
+  assertEquals(calls, 2);
+});
+
 Deno.test("signal: rAF-style repeated set with same values is no-op", () => {
   // Simulates the AIO-59 infinite loop scenario:
   // rAF callback sets signal with {matchCount: 0, currentMatch: -1} every frame
@@ -522,4 +564,123 @@ Deno.test("computed: disposed computed returns cached value and does not re-subs
   const subsAfterAccess =
     (s as unknown as { _subscribers: Set<unknown> })._subscribers.size;
   assertEquals(subsAfterAccess, 0);
+});
+
+// ── AIO-364: Set/Map shallow equality ────────────────────────────────
+
+Deno.test("signal: set with new Set triggers update", () => {
+  const s = signal(new Set<string>());
+  let calls = 0;
+  effect(() => {
+    s.value;
+    calls++;
+  });
+  assertEquals(calls, 1);
+  s.set(new Set(["a"]));
+  assertEquals(calls, 2);
+});
+
+Deno.test("signal: set with new Map triggers update", () => {
+  const s = signal(new Map<string, number>());
+  let calls = 0;
+  effect(() => {
+    s.value;
+    calls++;
+  });
+  assertEquals(calls, 1);
+  s.set(new Map([["a", 1]]));
+  assertEquals(calls, 2);
+});
+
+// ── AIO-378: class instances are never shallow-equal ─────────────────
+
+Deno.test("signal: set with new class instance triggers update (private state)", () => {
+  class Counter {
+    #n: number;
+    constructor(n: number) {
+      this.#n = n;
+    }
+    get n() {
+      return this.#n;
+    }
+  }
+  const s = signal(new Counter(0));
+  let calls = 0;
+  effect(() => {
+    s.value;
+    calls++;
+  });
+  assertEquals(calls, 1);
+  // Object.keys() sees no own enumerable keys on either instance — before
+  // AIO-378 this compared "shallow-equal" and the update was swallowed.
+  s.set(new Counter(1));
+  assertEquals(calls, 2);
+  assertEquals(s.peek().n, 1);
+});
+
+Deno.test("signal: set with new class instance triggers update (same enumerable keys)", () => {
+  class Point {
+    constructor(public x: number) {}
+    magnitude() {
+      return Math.abs(this.x);
+    }
+  }
+  const s = signal(new Point(1));
+  let calls = 0;
+  effect(() => {
+    s.value;
+    calls++;
+  });
+  assertEquals(calls, 1);
+  // Identical enumerable keys/values but distinct instances — class instances
+  // may differ in non-enumerable ways, so they must never be skipped.
+  s.set(new Point(1));
+  assertEquals(calls, 2);
+});
+
+Deno.test("signal: plain objects still skip shallow-equal updates after AIO-378", () => {
+  const s = signal({ a: 1, b: "x" });
+  let calls = 0;
+  effect(() => {
+    s.value;
+    calls++;
+  });
+  assertEquals(calls, 1);
+  s.set({ a: 1, b: "x" }); // shallow-equal plain object — still a no-op
+  assertEquals(calls, 1);
+  s.set(Object.assign(Object.create(null), { a: 1, b: "x" })); // null-proto counts as plain
+  assertEquals(calls, 1);
+  s.set({ a: 2, b: "x" });
+  assertEquals(calls, 2);
+});
+
+// ── AIO-364: force flag ──────────────────────────────────────────────
+
+Deno.test("signal: force flag bypasses shallow equality", () => {
+  const s = signal({ a: 1 });
+  let calls = 0;
+  effect(() => {
+    s.value;
+    calls++;
+  });
+  assertEquals(calls, 1);
+  // Same shape, no force — no-op
+  s.set({ a: 1 });
+  assertEquals(calls, 1);
+  // Same shape, with force — triggers
+  s.set({ a: 1 }, { force: true });
+  assertEquals(calls, 2);
+});
+
+Deno.test("signal: force flag bypasses reference equality", () => {
+  const s = signal(5);
+  let calls = 0;
+  effect(() => {
+    s.value;
+    calls++;
+  });
+  assertEquals(calls, 1);
+  // Same primitive, with force — triggers
+  s.set(5, { force: true });
+  assertEquals(calls, 2);
 });

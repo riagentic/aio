@@ -95,7 +95,17 @@ export function record<S, A>(
       clonedState = structuredClone(state);
     }
   } catch {
-    clonedState = state;
+    // Degraded fallback: JSON-round-trip so we never store the live mutable
+    // reference. If JSON also fails (circular ref), warn and store state as
+    // last resort — undo history may share the reference, but we've tried.
+    try {
+      clonedState = JSON.parse(JSON.stringify(state)) as S;
+    } catch {
+      console.warn(
+        "[aio:tt] state is not cloneable — undo history may share references with live state",
+      );
+      clonedState = state;
+    }
   }
 
   const entry: HistoryEntry<S, A> = {

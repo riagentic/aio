@@ -69,4 +69,15 @@ export { on, watch } from "./watch.ts";
 export type { WatchOptions } from "./watch.ts";
 
 // ── React migration compat hooks ─────────────────────────────────────
-export { useCallback, useEffect, useMemo, useState } from "./compat.ts";
+// Kept for one release; import from "aio/air/compat" instead.
+export {
+  /** @deprecated import from "aio/air/compat" — exists for React migration only. Native: useCallback is unnecessary in AIR. */
+  useCallback,
+  /** @deprecated import from "aio/air/compat" — exists for React migration only. Native: onMount()/effect(). */
+  useEffect,
+  /** @deprecated import from "aio/air/compat" — exists for React migration only. Native: computed(). */
+  useMemo,
+  /** @deprecated import from "aio/air/compat" — exists for React migration only. Native: useLocal()/signal(). */
+  useState,
+  useRef,
+} from "./compat.ts";

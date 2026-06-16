@@ -3,7 +3,16 @@
 import type { Draft } from "immer";
 import type { Gen, GenCtx } from "./flow.ts";
 import type { ScheduleEffect } from "./schedule.ts";
+import type { OwnEffect } from "./own.ts";
 import type { Method } from "./cell-impl.ts";
+
+/** Selector definition. Plain form receives the cell's own slice; deps form
+ *  receives the cell's own slice plus the current slices of the named dep
+ *  cells in the order listed. The cell slice is passed to the selector fresh
+ *  on every read — `bindCell` re-evaluates whenever a dep cell changes. */
+export type SelectorDef<S> =
+  | ((s: S) => unknown)
+  | { deps: readonly string[]; fn: (s: S, ...deps: unknown[]) => unknown };
 import type {
   ActionUnion,
   CellFieldFilter,
@@ -33,13 +42,24 @@ export type MethodsCellConfig<
 > = {
   state: S;
   methods: M;
+  /** Cell scope. `"client"` cells live in the browser only — never registered
+   *  with the server, never synced, never persisted (unless `persist: "local"`).
+   *  Methods are bound locally against a signal-backed slice; each tab has its
+   *  own copy. Sync methods only in v1 — async/generators/actions/machine throw
+   *  at `cell()` time. */
+  scope?: "client";
   /** Generator functions — sequential async workflows, auto-triggered by dispatching their action. */
   // deno-lint-ignore no-explicit-any
   generators?: Record<string, (ctx: GenCtx<S>, ...args: any[]) => Gen<unknown>>;
   /** Cancellation triggers per generator — { generatorKey: [actionsOrTypes] }.
    *  Accepts bound action creators (.type) or plain strings. */
   cancelOn?: Record<string, (string | { type: string })[]>;
-  selectors?: Record<string, (s: S) => unknown>;
+  /** Selectors — derived values, auto-scoped to cell state.
+   *  Plain form: `(s) => R` receives the cell's own slice.
+   *  Deps form: `{ deps: readonly string[]; fn: (s, ...depSlices) => R }` — deps are
+   *  other cells' current slices in the order listed. Dep names are validated at
+   *  aio.run() (composition time); an unknown dep throws with a clear message. */
+  selectors?: Record<string, SelectorDef<S>>;
   machine?: MachineConfig<States> | false;
   /** Listen to foreign actions — auto-generates machine transitions.
    *  Accept strings or bound methods/actions with .type (e.g. `inventory.reserve.type`). */
@@ -126,7 +146,7 @@ export type ActionsCellConfig<
       state: Draft<S>,
       action: ActionUnion<N, A>,
       ctx: { on: Record<string, string> },
-    ) => (Msg | ScheduleEffect)[] | void);
+    ) => (Msg | ScheduleEffect | OwnEffect)[] | void);
   /** Object form (default): named handlers per effect key — receives typed payload.
    *  Function form (advanced escape hatch): receives full effect + { emit } map of type strings. */
   execute?:
@@ -136,7 +156,7 @@ export type ActionsCellConfig<
       effect: Msg,
       ctx: { emit: Record<string, string> },
     ) => void);
-  selectors?: Record<string, (s: S) => unknown>;
+  selectors?: Record<string, SelectorDef<S>>;
   /** Generator functions keyed by their trigger action — action key must be in `actions`. */
   // deno-lint-ignore no-explicit-any
   generators?: Record<string, (ctx: GenCtx<S>, ...args: any[]) => Gen<unknown>>;

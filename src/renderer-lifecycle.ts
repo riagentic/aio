@@ -70,9 +70,19 @@ export function useRef<T>(initial: T): { current: T } {
 // ── useSignal ─────────────────────────────────────────────────────────
 
 /**
- * Create a component-scoped signal that persists across re-renders.
- * Like signal() but tied to the component lifecycle — auto-GC'd on unmount.
- * Must be called inside a component function body during render.
+ * Creates a component-scoped signal. Auto-GC'd on unmount.
+ * For state that survives remounts, use a module-level `signal()`.
+ *
+ * @example
+ * ```tsx
+ * // Module-level UI state (survives unmount)
+ * const ui = signal({ collapsed: [] as string[] }, 'sidebar')
+ *
+ * function Sidebar() {
+ *   void ui.value // subscribe parent
+ *   return <TreeRow collapsed={ui.value.collapsed} />
+ * }
+ * ```
  */
 export function useSignal<T>(initial: T): Signal<T> {
   if (!_currentCollector) {

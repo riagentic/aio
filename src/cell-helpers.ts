@@ -50,16 +50,42 @@ export function normalizeUiFilter(
 
 // ── Selector helpers ──────────────────────────────────────────────────
 
-/** Auto-scope selectors: user writes (s: S) => ..., we wrap to extract state[name] */
+import type { SelectorDef } from "./cell-config-types.ts";
+
+/** Auto-scope selectors: user writes (s: S) => ..., we wrap.
+ *  Plain form: receive own slice only. Deps form: receive own slice + listed
+ *  dep cell slices (looked up by name in the full state).
+ *  The `_cellName` param is preserved for backward compatibility with
+ *  factories that pass it; it is currently unused now that plain selectors
+ *  receive the own slice directly from the bind wrapper. */
 export function scopeSelectors<S>(
-  name: string,
-  selectors: Record<string, (state: S) => unknown> | undefined,
-): Record<string, (state: unknown) => unknown> {
-  const scoped: Record<string, (state: unknown) => unknown> = {};
+  _cellName: string,
+  selectors: Record<string, SelectorDef<S>> | undefined,
+): Record<string, (state: unknown, fullState?: unknown) => unknown> {
+  const scoped: Record<
+    string,
+    (state: unknown, fullState?: unknown) => unknown
+  > = {};
   if (!selectors) return scoped;
-  for (const [key, fn] of Object.entries(selectors)) {
-    scoped[key] = (fullState: unknown) =>
-      fn((fullState as Record<string, unknown>)[name] as S);
+  for (const [key, def] of Object.entries(selectors)) {
+    if (typeof def === "function") {
+      // Plain form — unchanged from the original contract.
+      scoped[key] = (ownSlice: unknown) =>
+        (def as (s: S) => unknown)(ownSlice as S);
+      continue;
+    }
+    // Deps form — receive full state, return own slice + each dep slice in order.
+    const { deps, fn } = def;
+    scoped[key] = (ownSlice: unknown, fullState: unknown) => {
+      const full = fullState as Record<string, unknown> | undefined;
+      const depSlices = deps.map((d) =>
+        full ? full[d] : (ownSlice as Record<string, unknown>)[d]
+      );
+      return (fn as (s: S, ...deps: unknown[]) => unknown)(
+        ownSlice as S,
+        ...depSlices,
+      );
+    };
   }
   return scoped;
 }

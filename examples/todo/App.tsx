@@ -1,6 +1,6 @@
 // UI — todo list with inline editing, filtering, keyboard support
 import { useLocal } from "aio/air";
-import { type Filter, type Todo, todo } from "./app.ts";
+import { type Filter, type Todo, todo, view } from "./app.ts";
 
 const FILTERS: Filter[] = ["all", "active", "done"];
 
@@ -10,7 +10,7 @@ export default function App() {
   const { local: editText, set: setEditText } = useLocal("");
 
   const filtered: Todo[] = todo.items.filter((t: Todo) =>
-    todo.filter === "all" ? true : todo.filter === "done" ? t.done : !t.done
+    view.filter === "all" ? true : view.filter === "done" ? t.done : !t.done
   );
   const remaining = todo.items.filter((t: Todo) => !t.done).length;
 
@@ -29,6 +29,8 @@ export default function App() {
         onSubmit={(e) => {
           e.preventDefault();
           if (input.trim()) {
+            // await = applied: the Promise resolves on server ack, so state
+            // read right after is fresh (AIO6). Unawaited = fire-and-forget.
             todo.add(input.trim());
             setInput("");
           }
@@ -37,7 +39,7 @@ export default function App() {
       >
         <input
           value={input}
-          onChange={(e) => setInput((e.target as HTMLInputElement).value)}
+          onChange={(e) => setInput(e.currentTarget.value)}
           placeholder="What needs to be done?"
           style={{ flex: 1, padding: "0.5rem", fontSize: "1rem" }}
         />
@@ -67,7 +69,7 @@ export default function App() {
                 <input
                   value={editText}
                   onChange={(e) =>
-                    setEditText((e.target as HTMLInputElement).value)}
+                    setEditText(e.currentTarget.value)}
                   onBlur={() => {
                     if (editText.trim()) todo.edit(t.id, editText.trim());
                     setEditing(null);
@@ -133,10 +135,10 @@ export default function App() {
               <button
                 key={f}
                 type="button"
-                onClick={() => todo.setFilter(f)}
+                onClick={() => view.setFilter(f)}
                 style={{
                   padding: "0.2rem 0.5rem",
-                  border: todo.filter === f
+                  border: view.filter === f
                     ? "1px solid #c77"
                     : "1px solid transparent",
                   background: "none",

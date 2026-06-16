@@ -6,7 +6,7 @@
 /** Reactive value container — reads auto-track in effects and computed. */
 export interface Signal<T> {
   readonly value: T;
-  set(next: T): void;
+  set(next: T, opts?: { force?: boolean }): void;
   update(fn: (prev: T) => T): void;
   peek(): T;
   subscribe(fn: () => void): () => void;
@@ -73,6 +73,14 @@ export function untrack<T>(fn: () => T): T {
 
 function _currentTracker(): Set<SignalImpl<unknown>> | undefined {
   return _trackStack[_trackStack.length - 1];
+}
+
+// ── Dev mode ────────────────────────────────────────────────────────
+
+let _devMode = false;
+/** Enable dev-mode signal tracing (console warnings for skipped updates). */
+export function _setSignalDevMode(v: boolean): void {
+  _devMode = v;
 }
 
 // ── Batching ────────────────────────────────────────────────────────
@@ -168,11 +176,44 @@ function _notify(subscribers: Set<Subscriber>): void {
  *  Cross-realm safe: uses duck-typing (own enumerable keys) instead of prototype
  *  checks, so objects from iframes/Workers compare correctly even when their
  *  prototype chain differs from the main realm's Object.prototype. */
+/** Plain object check that survives cross-realm objects (iframes/Workers):
+ *  accepts null prototypes and prototypes constructed by any realm's `Object`. */
+function _isPlainObject(o: unknown): boolean {
+  const proto = Object.getPrototypeOf(o);
+  if (proto === null) return true;
+  const ctor = (proto as { constructor?: unknown }).constructor;
+  return typeof ctor === "function" && (ctor as { name?: string }).name === "Object";
+}
+
 function _shallowEq(a: unknown, b: unknown): boolean {
   if (Object.is(a, b)) return true;
   if (
     a === null || b === null || typeof a !== "object" || typeof b !== "object"
   ) return false;
+  // AIO-364: Set/Map have no enumerable keys — Object.keys() would always say equal.
+  // Treat every Set/Map assignment as potentially different so updates propagate.
+  if (
+    a instanceof Set || a instanceof Map || b instanceof Set || b instanceof Map
+  ) {
+    return false;
+  }
+  // Non-plain objects: Date, RegExp, typed arrays — Object.keys() returns [],
+  // so two different instances would incorrectly compare equal.
+  if (a instanceof Date && b instanceof Date) {
+    return a.getTime() === b.getTime();
+  }
+  if (a instanceof RegExp && b instanceof RegExp) {
+    return a.source === b.source && a.flags === b.flags;
+  }
+  if (ArrayBuffer.isView(a) && ArrayBuffer.isView(b)) {
+    if (a.byteLength !== b.byteLength) return false;
+    const av = new Uint8Array(a.buffer, a.byteOffset, a.byteLength);
+    const bv = new Uint8Array(b.buffer, b.byteOffset, b.byteLength);
+    for (let i = 0; i < av.length; i++) {
+      if (av[i] !== bv[i]) return false;
+    }
+    return true;
+  }
   const isArrA = Array.isArray(a);
   const isArrB = Array.isArray(b);
   if (isArrA !== isArrB) return false;
@@ -184,6 +225,13 @@ function _shallowEq(a: unknown, b: unknown): boolean {
     }
     return true;
   }
+  // AIO-378: key-based comparison is only meaningful for plain objects. Class
+  // instances hold state in private fields / prototype getters that
+  // Object.keys() can't see, so two different instances would compare equal
+  // and updates would be silently swallowed (same failure class as AIO-364).
+  // Cross-realm duck-typing: "plain" = prototype is null or a prototype whose
+  // own constructor is named "Object" (realm-independent).
+  if (!_isPlainObject(a) || !_isPlainObject(b)) return false;
   const ka = Object.keys(a as Record<string, unknown>);
   const kb = Object.keys(b as Record<string, unknown>);
   if (ka.length !== kb.length) return false;
@@ -214,16 +262,31 @@ class SignalImpl<T> implements Signal<T> {
     return this._value;
   }
 
-  set(next: T): void {
+  set(next: T, opts?: { force?: boolean }): void {
     const resolved = next;
-    if (Object.is(this._value, resolved)) return;
+    if (!opts?.force && Object.is(this._value, resolved)) {
+      if (this._name && _devMode) {
+        console.warn(
+          `[aio] signal "${this._name}" update skipped (identical reference)`,
+        );
+      }
+      return;
+    }
     // AIO-59: shallow equality for objects/arrays — skip notification when all
     // values are identical by ===. Prevents infinite re-render loops when
     // signal.set({...same values...}) is called from rAF/effect callbacks.
     if (
+      !opts?.force &&
       resolved !== null && typeof resolved === "object" &&
       _shallowEq(this._value, resolved)
-    ) return;
+    ) {
+      if (this._name && _devMode) {
+        console.warn(
+          `[aio] signal "${this._name}" update skipped (shallow-equal)`,
+        );
+      }
+      return;
+    }
     this._value = resolved;
     this._version++;
     for (const sub of this._subscribers) {

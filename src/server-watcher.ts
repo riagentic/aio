@@ -6,6 +6,7 @@ import type { GraphResult } from "./graph-validator.ts";
 import { validateGraph } from "./graph-validator.ts";
 import { normPath, transpile, transpileCache } from "./server-transpile.ts";
 import { lockDir } from "./single-instance-lock.ts";
+import { log } from "./logger.ts";
 
 /** File extensions that trigger live reload */
 const RELOAD_EXT = new Set([".ts", ".tsx", ".css", ".html", ".svg"]);
@@ -13,6 +14,7 @@ const RELOAD_EXT = new Set([".ts", ".tsx", ".css", ".html", ".svg"]);
 /** Callbacks the watcher uses to interact with server internals */
 export interface WatcherDeps {
   absBaseDir: string;
+  uiEntry?: string; // AIO-8.1: UI entry file (default "App.tsx")
   port: number;
   importMapObj: Record<string, string>;
   debug: (msg: string) => void;
@@ -91,14 +93,14 @@ export function createFileWatcher(deps: WatcherDeps): FileWatcher {
 
       (async () => {
         // Re-validate import graph on file change (dev mode only)
-        if (fileExists(join(absBaseDir, "App.tsx"))) {
+        if (fileExists(join(absBaseDir, deps.uiEntry ?? "App.tsx"))) {
           const gen = ++graphGeneration;
           const timeout = new Promise<null>((r) =>
             setTimeout(() => r(null), 2000)
           );
           const revalTranspile = (s: string, f: string) => transpile(s, f);
           const validation = validateGraph(
-            join(absBaseDir, "App.tsx"),
+            join(absBaseDir, deps.uiEntry ?? "App.tsx"),
             deps.importMapObj,
             revalTranspile,
           );
@@ -121,12 +123,13 @@ export function createFileWatcher(deps: WatcherDeps): FileWatcher {
           const errJson = JSON.stringify(graphResult.errors);
           deps.broadcastWs("__graph_error:" + errJson);
           for (const err of graphResult.errors) {
-            debug(
-              `graph: ✖ ${err.file}${
+            log.error(
+              "graph",
+              `✖ ${err.file}${
                 err.line ? `:${err.line}` : ""
               } — ${err.message}`,
             );
-            debug(`  FIX: ${err.fix}`);
+            log.warn("graph", `FIX: ${err.fix}`);
           }
           deps.onReload?.("__reload");
           graphWasRed = true;

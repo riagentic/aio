@@ -12,6 +12,7 @@ import {
 } from "./error.ts";
 import type { AioApp } from "./aio.ts";
 import { isScheduleEffect, type ScheduleEffect } from "./schedule.ts";
+import { isOwnEffect, type OwnEffect } from "./own.ts";
 import { Listeners } from "./listeners.ts";
 import { signal } from "./signal.ts";
 import { useRef } from "./aio-renderer.ts";
@@ -64,7 +65,7 @@ type StandaloneConfig<S, A, E> = {
   reduce: (
     state: S,
     action: A,
-  ) => { state: S; effects: (E | ScheduleEffect)[] };
+  ) => { state: S; effects: (E | ScheduleEffect | OwnEffect)[] };
   execute: (app: AioApp<S, A>, effect: E) => void;
   persist?: boolean;
   persistKey?: string;
@@ -163,6 +164,13 @@ export function initStandalone<S, A, E>(
       if (isScheduleEffect(effect)) {
         console.warn(
           "[aio] scheduled effects are not supported in standalone mode — ignoring",
+          effect,
+        );
+        return;
+      }
+      if (isOwnEffect(effect)) {
+        console.warn(
+          "[aio] own effects are not supported in standalone mode — ignoring",
           effect,
         );
         return;

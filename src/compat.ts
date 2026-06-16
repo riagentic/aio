@@ -3,8 +3,8 @@
 // Dev-mode hints guide toward AIR-native alternatives.
 // Isolated — deletable when no longer needed.
 
-import { effect, type Signal, signal } from "./signal.ts";
-import { onCleanup, onMount, useRef } from "./aio-renderer.ts";
+import { effect, type Signal, signal, untrack } from "./signal.ts";
+import { onCleanup, onMount, useRef as rendererUseRef } from "./aio-renderer.ts";
 
 // ── Dev hints (once per function name per session) ─────────────────
 
@@ -22,6 +22,9 @@ export function _resetHints(): void {
   _hinted.clear();
 }
 
+/** Re-export useRef from renderer for compat */
+export const useRef = rendererUseRef;
+
 // ── useState ───────────────────────────────────────────────────────
 
 export function useState<T>(
@@ -32,7 +35,7 @@ export function useState<T>(
     "[aio] useState() is signal-backed in AIR. Recommended: useLocal() for object state, signal() for module-scoped.",
   );
 
-  const ref = useRef<Signal<T> | null>(null);
+  const ref = rendererUseRef<Signal<T> | null>(null);
   if (ref.current === null) {
     // Matches React behavior: functions are always treated as lazy initializers.
     // If T is itself a function type, wrap it: useState(() => myFn)
@@ -62,8 +65,55 @@ export function useEffect(
 ): void {
   _hint(
     "useEffect",
-    "[aio] useEffect() mapped to AIR primitives. Deps ignored (auto-tracked). Recommended: onMount() for setup, effect() for reactive.",
+    "[aio] useEffect() mapped to AIR primitives. Deps are honored (React semantics). Signal-native alternative: effect() auto-tracks reads.",
   );
+
+  if (deps && deps.length > 0) {
+    // AIO-7.1: real React semantics — run after mount, re-run only when deps
+    // differ by Object.is on a later render, cleanup before re-run. Signal
+    // auto-tracking is disabled (untrack): behavior is purely deps-driven.
+    const store = useRef<{
+      deps: unknown[] | null;
+      cleanup: (() => void) | null;
+    }>({ deps: null, cleanup: null });
+    const fnRef = useRef(fn);
+    fnRef.current = fn;
+
+    const prev = store.current.deps;
+    const changed = prev === null ||
+      deps.length !== prev.length ||
+      deps.some((d, i) => !Object.is(d, prev[i]));
+
+    // onCleanup registrations are per-render (cleared on re-render cleanup,
+    // AIO-182) — re-register every render so the unmount path always holds.
+    onCleanup(() => {
+      if (store.current.cleanup) {
+        store.current.cleanup();
+        store.current.cleanup = null;
+      }
+    });
+
+    if (changed) {
+      const first = prev === null;
+      store.current.deps = deps.slice(); // record at schedule time — no double-fire
+      const run = () => {
+        if (store.current.cleanup) {
+          store.current.cleanup();
+          store.current.cleanup = null;
+        }
+        const cleanup = untrack(() => fnRef.current());
+        if (typeof cleanup === "function") {
+          store.current.cleanup = cleanup;
+        }
+      };
+      if (first) {
+        onMount(run); // first run lands after the mount commit
+      } else {
+        queueMicrotask(run); // re-runs land after the render commit
+      }
+    }
+    return;
+  }
 
   if (deps && deps.length === 0) {
     // Empty deps → mount/cleanup semantics
@@ -111,5 +161,13 @@ export function useMemo<T>(fn: () => T, _deps?: unknown[]): T {
     "useMemo",
     "[aio] useMemo() is unnecessary in AIR — use computed() for cached derivations. Safe to remove.",
   );
-  return fn();
+  const ref = useRef<{ deps: unknown[] | undefined; value: T } | null>(null);
+  if (
+    ref.current === null ||
+    !_deps ||
+    !_deps.every((d, i) => d === ref.current?.deps?.[i])
+  ) {
+    ref.current = { deps: _deps, value: fn() };
+  }
+  return ref.current.value;
 }

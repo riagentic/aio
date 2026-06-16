@@ -1,6 +1,7 @@
 // Shared dispatch loop — used by both aio.ts (server) and standalone.ts (Android)
 // Re-entrant-safe: effects can call dispatch(), actions are queued and drained in order
 import type { ScheduleEffect } from "./schedule.ts";
+import type { OwnEffect } from "./own.ts";
 import type { ReduceBreakdown } from "./time-travel.ts";
 import {
   type AioErrorCode,
@@ -61,8 +62,8 @@ export type DispatchDeps<S, A, E> = {
   reduce: (
     state: S,
     action: A,
-  ) => { state: S; effects: (E | ScheduleEffect)[] };
-  execute: (effect: E | ScheduleEffect) => void | Promise<void>;
+  ) => { state: S; effects: (E | ScheduleEffect | OwnEffect)[] };
+  execute: (effect: E | ScheduleEffect | OwnEffect) => void | Promise<void>;
   getState: () => S;
   setState: (s: S) => void;
   onDone: () => void; // called once after queue fully drains (persist + broadcast)
@@ -221,7 +222,7 @@ export function createDispatch<S, A, E>(
         const current = entry.action;
         if (deps.debug) log.debug(`action → reduce: ${tag(current)}`);
 
-        let reduced: { state: S; effects: (E | ScheduleEffect)[] };
+        let reduced: { state: S; effects: (E | ScheduleEffect | OwnEffect)[] };
         const actionType = (current as Record<string, unknown>)?.type as
           | string
           | undefined;
@@ -275,7 +276,7 @@ export function createDispatch<S, A, E>(
         // silently coerced via JSON round-trip (that lost undefined/NaN/Infinity
         // /Date and corrupted the executor's payload contract).
         if (reduced.effects.length) {
-          const cloned: (E | ScheduleEffect)[] = [];
+          const cloned: (E | ScheduleEffect | OwnEffect)[] = [];
           for (const eff of reduced.effects) {
             try {
               cloned.push(structuredClone(eff));

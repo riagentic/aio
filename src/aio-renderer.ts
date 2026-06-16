@@ -36,6 +36,7 @@ import {
 } from "./renderer-state.ts";
 import {
   _resetSsrIdCounter,
+  _setLifecycleDevMode,
   onCleanup,
   onMount,
   useRef,
@@ -47,6 +48,7 @@ import {
   afterRender,
 } from "./renderer-flush.ts";
 import { _createHooks, _setFlushDevMode } from "./renderer-rerender.ts";
+import { _setSignalDevMode } from "./signal.ts";
 import { _setHydrateDoc } from "./renderer-hydrate.ts";
 
 // -- Re-exports (public API -- all importers use aio-renderer.ts) ------
@@ -124,6 +126,8 @@ function _devA11yCheck(tag: string, props: Record<string, unknown>): void {
 export function setDevMode(enabled: boolean): void {
   _setFlushDevMode(enabled);
   _setDevModeVdom(enabled);
+  _setSignalDevMode(enabled);
+  _setLifecycleDevMode(enabled);
   _setDevA11yCheck(enabled ? _devA11yCheck : null);
 }
 

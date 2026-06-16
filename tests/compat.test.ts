@@ -159,7 +159,7 @@ Deno.test({
 });
 
 Deno.test({
-  name: "compat: useEffect with non-empty deps reacts to signal changes",
+  name: "compat: useEffect with non-empty deps — React semantics (AIO-7.1)",
   async fn() {
     const { document, root, cleanup } = createDOM();
     _setDocument(document);
@@ -167,19 +167,20 @@ Deno.test({
     let effectCount = 0;
     const App = () => {
       useEffect(() => {
-        // Access signal value so effect auto-tracks it
-        const _v = sig.value;
+        const _v = sig.value; // read inside — must NOT auto-track (untracked)
         effectCount++;
-      }, [sig.value]);
+      }, [sig.value]); // dep changes on re-render → re-fires once per change
       return h("div", null, String(sig.value));
     };
     const handle = mount(root, App);
+    await new Promise((r) => setTimeout(r, 0)); // first run lands post-mount
     assertEquals(effectCount, 1);
     sig.set(5);
     handle._flush();
-    // AIO-182: effect re-created on re-render, so runs 3 times:
-    // 1. mount, 2. signal change, 3. re-render recreates effect
-    assertEquals(effectCount, 3);
+    await new Promise((r) => setTimeout(r, 0)); // re-run lands post-render
+    // Deps-driven: exactly one re-run for one dep change — no auto-track
+    // double-fire, no effect-recreation extra run (old AIO-182 behavior).
+    assertEquals(effectCount, 2);
     _unmount(handle);
     await cleanup();
   },

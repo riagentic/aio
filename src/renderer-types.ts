@@ -48,9 +48,8 @@ export interface ComponentInstance {
   refs?: { current: any }[];
   /** Current ref index counter (reset each render). */
   refIndex?: number;
-  /** Dev mode: render count for excessive re-render detection. */
-  _devRenderCount?: number;
-  _devRenderResetTimer?: ReturnType<typeof setTimeout>;
+  /** Dev mode: rolling window of render timestamps for burst detection. */
+  _devRenderTimestamps?: number[];
   /** Dev mode: name of the signal that triggered the last re-render. */
   _triggerSignals?: Set<string>;
   /** Parent component instance — used to rebuild ancestor stack (AIO-249). */

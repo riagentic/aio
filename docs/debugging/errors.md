@@ -237,3 +237,16 @@ stream.
 | `persist-error`         | error    | State persistence failed                  |
 | `vitals-alert`          | varies   | Vital signs probe detected degradation    |
 | `offline-storage-error` | info     | IndexedDB operation failed                |
+
+## `TypeError: Cannot assign to read only property` in dev
+
+In dev, every cell's state slice is deep-frozen when it arrives from the
+server. A component that tries to mutate the value directly
+(`counter.count = 99`) throws with this message — the dev hint
+`[aio] state is read-only — call a cell method to change it (rule AIO2)`
+fires once. Fix: call a cell method, or `useLocal()` for component-local
+state that should be mutable.
+
+In prod, slices are not frozen; stray mutations silently desync. The dev
+freeze is your early warning.
+

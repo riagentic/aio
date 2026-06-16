@@ -42,6 +42,7 @@ export interface ServerSetupDeps<S, A> {
     width?: number;
     height?: number;
     showStatus?: boolean;
+    entry?: string; // AIO-8.1
   };
   title: string;
   // Config knobs
@@ -207,6 +208,7 @@ export async function setupTransport<S, A>(
       cert: tlsCert?.cert,
       key: tlsCert?.key,
       showStatus: ui.showStatus,
+      uiEntry: ui.entry,
       renderBudget: config.renderBudget,
       fullStateThreshold: config.fullStateThreshold,
       maxConnections: config.maxConnections,

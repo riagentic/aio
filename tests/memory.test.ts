@@ -98,7 +98,7 @@ Deno.test("memory: 10k dispatches — heap growth < 20MB", async () => {
   const before = Deno.memoryUsage().heapUsed;
 
   for (let i = 0; i < N; i++) {
-    app.dispatch(counter.increment(1));
+    app.dispatch(counter.__aio.actions.increment(1));
   }
 
   await forceGC();
@@ -130,7 +130,7 @@ Deno.test({
   const N = 100;
 
   for (let i = 0; i < N; i++) {
-    app.dispatch(flowCell.start());
+    app.dispatch(flowCell.__aio.actions.start());
     await new Promise((r) => setTimeout(r, 10));
   }
 
@@ -156,9 +156,9 @@ Deno.test({
 
   // Start 20 wait cycles — each begins a waitFor, then gets signalled
   for (let i = 0; i < 20; i++) {
-    app.dispatch(waitCell.begin());
+    app.dispatch(waitCell.__aio.actions.begin());
     await new Promise((r) => setTimeout(r, 10));
-    app.dispatch(waitCell.signal());
+    app.dispatch(waitCell.__aio.actions.signal());
     await new Promise((r) => setTimeout(r, 20));
   }
 
@@ -195,7 +195,7 @@ Deno.test({
 
   // Fire 50 generators that all time out after 20ms
   for (let i = 0; i < 50; i++) {
-    app.dispatch(shortWait.go());
+    app.dispatch(shortWait.__aio.actions.go());
     await new Promise((r) => setTimeout(r, 5));
   }
 
@@ -232,8 +232,8 @@ Deno.test("memory: rapid state reset prevents unbounded growth", async () => {
 
   // Fill and clear 100 times — old arrays should be GC'd
   for (let i = 0; i < 100; i++) {
-    app.dispatch(bigState.fill());
-    app.dispatch(bigState.clear());
+    app.dispatch(bigState.__aio.actions.fill());
+    app.dispatch(bigState.__aio.actions.clear());
   }
 
   await forceGC();

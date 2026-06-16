@@ -5,6 +5,14 @@ export const WS_MAX_QUEUE = 100;
 export const OFFLINE_MAX_QUEUE = 100;
 export const OFFLINE_MAX_AGE = 24 * 60 * 60 * 1000; // 24 hours
 
+/** Maximum time a client waits for an ack before rejecting the method promise. */
+export const ACK_TIMEOUT_MS = 15_000;
+
+/** Per-action acknowledgement: when a client→server action carries `cid`, the
+ *  server responds with `__ack:<cid>:<ok>` after the dispatch has been reduced.
+ *  The client side settles the corresponding pending promise. */
+export type AckMessage = { cid: string; ok: boolean; error?: string };
+
 /** Window properties used by AIO diagnostics (avoids `declare global` for JSR compat). */
 export interface AioWindow {
   _aioDiag?: (ev: Record<string, unknown>) => void;

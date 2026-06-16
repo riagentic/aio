@@ -8,7 +8,6 @@ export const todo = cell("todo", {
   state: {
     items: [] as Todo[],
     nextId: 1,
-    filter: "all" as Filter,
   },
   methods: {
     add(s, text: string) {
@@ -28,16 +27,24 @@ export const todo = cell("todo", {
     clearDone(s) {
       s.items = s.items.filter((t) => !t.done);
     },
+  },
+});
+
+// Per-tab UI state — client-scoped cell: never syncs, never persists to KV.
+// Two tabs filter independently while `todo.items` stays in sync (AIO-5.1).
+export const view = cell("view", {
+  scope: "client",
+  state: { filter: "all" as Filter },
+  methods: {
     setFilter(s, filter: Filter) {
       s.filter = filter;
     },
   },
-  persist: { exclude: ["filter"] },
 });
 
 await aio.run({
   appId: "todo",
   appVersion: "1.0.0",
-  cells: [todo],
+  cells: [todo, view],
   baseDir: import.meta.dirname!,
 });

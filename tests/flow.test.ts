@@ -58,7 +58,7 @@ const basic = cell("basic", {
 
 Deno.test("flow: basic flow dispatches step actions", async () => {
   const app = createTestApp([basic]);
-  app.dispatch(basic.start(5));
+  app.dispatch(basic.__aio.actions.start(5));
   await app.flush();
 
   const types = app.dispatched.map((d) => d.type);
@@ -69,7 +69,7 @@ Deno.test("flow: basic flow dispatches step actions", async () => {
 
 Deno.test("flow: basic flow updates state", async () => {
   const app = createTestApp([basic]);
-  app.dispatch(basic.start(5));
+  app.dispatch(basic.__aio.actions.start(5));
   await app.flush();
 
   const s = app.getState().basic as { value: number; done: boolean };
@@ -99,7 +99,7 @@ const flowOnly = cell("flowOnly", {
 
 Deno.test("flow: cell with only generators (no reduce)", async () => {
   const app = createTestApp([flowOnly]);
-  app.dispatch(flowOnly.go("hello"));
+  app.dispatch(flowOnly.__aio.actions.go("hello"));
   await app.flush();
 
   const s = app.getState().flowOnly as { result: string };
@@ -138,15 +138,15 @@ const mixed = cell("mixed", {
 
 Deno.test("flow: mixed cell — reduce works independently", () => {
   const app = createTestApp([mixed]);
-  app.dispatch(mixed.increment(5));
+  app.dispatch(mixed.__aio.actions.increment(5));
   const s = app.getState().mixed as { count: number };
   assertEquals(s.count, 5);
 });
 
 Deno.test("flow: mixed cell — generator works alongside reduce", async () => {
   const app = createTestApp([mixed]);
-  app.dispatch(mixed.increment(3));
-  app.dispatch(mixed.sync());
+  app.dispatch(mixed.__aio.actions.increment(3));
+  app.dispatch(mixed.__aio.actions.sync());
   await app.flush();
 
   const s = app.getState().mixed as { count: number; synced: boolean };
@@ -186,7 +186,7 @@ const putter = cell("putter", {
 
 Deno.test("flow: ctx.dispatch dispatches regular action", async () => {
   const app = createTestApp([putter]);
-  app.dispatch(putter.start());
+  app.dispatch(putter.__aio.actions.start());
   await app.flush();
 
   const s = app.getState().putter as { step: string };
@@ -223,7 +223,7 @@ const sender = cell("sender", {
 
 Deno.test("flow: ctx.send dispatches via bound creator", async () => {
   const app = createTestApp([sender]);
-  app.dispatch(sender.start());
+  app.dispatch(sender.__aio.actions.start());
   await app.flush();
 
   const s = app.getState().sender as { step: string };
@@ -257,7 +257,7 @@ const failer = cell("failer", {
 
 Deno.test("flow: ctx.fail stops execution and dispatches failed action", async () => {
   const app = createTestApp([failer]);
-  app.dispatch(failer.start());
+  app.dispatch(failer.__aio.actions.start());
   await app.flush();
 
   const types = app.dispatched.map((d) => d.type);
@@ -286,7 +286,7 @@ const sleeper = cell("sleeper", {
 
 Deno.test("flow: ctx.sleep pauses then continues", async () => {
   const app = createTestApp([sleeper]);
-  app.dispatch(sleeper.start());
+  app.dispatch(sleeper.__aio.actions.start());
 
   const before = app.getState().sleeper as { woke: boolean };
   assertEquals(before.woke, false);
@@ -320,7 +320,7 @@ const parallel = cell("parallel", {
 
 Deno.test("flow: ctx.all (spread) runs calls in parallel", async () => {
   const app = createTestApp([parallel]);
-  app.dispatch(parallel.start());
+  app.dispatch(parallel.__aio.actions.start());
   await app.flush();
 
   const s = app.getState().parallel as { a: number; b: number };
@@ -351,7 +351,7 @@ const namedParallel = cell("namedParallel", {
 
 Deno.test("flow: ctx.all (named) runs calls in parallel and returns by name", async () => {
   const app = createTestApp([namedParallel]);
-  app.dispatch(namedParallel.start());
+  app.dispatch(namedParallel.__aio.actions.start());
   await app.flush();
 
   const s = app.getState().namedParallel as { x: number; y: number };
@@ -391,7 +391,7 @@ Deno.test({
   sanitizeResources: false,
 }, async () => {
   const app = createTestApp([racer]);
-  app.dispatch(racer.start());
+  app.dispatch(racer.__aio.actions.start());
   await app.flush();
 
   const s = app.getState().racer as { winner: string };
@@ -437,7 +437,7 @@ const syncFlow = cell("syncFlow", {
 
 Deno.test("flow: ctx.call works with sync functions", async () => {
   const app = createTestApp([syncFlow]);
-  app.dispatch(syncFlow.start());
+  app.dispatch(syncFlow.__aio.actions.start());
   await app.flush();
 
   const s = app.getState().syncFlow as { value: number };
@@ -469,7 +469,7 @@ const multiStep = cell("multiStep", {
 
 Deno.test("flow: multiple ctx.mutate calls execute in order", async () => {
   const app = createTestApp([multiStep]);
-  app.dispatch(multiStep.start());
+  app.dispatch(multiStep.__aio.actions.start());
   await app.flush();
 
   const s = app.getState().multiStep as { steps: string[] };
@@ -497,7 +497,7 @@ const errorFlow = cell("errorFlow", {
 
 Deno.test("flow: error in ctx.call dispatches error action", async () => {
   const app = createTestApp([errorFlow]);
-  app.dispatch(errorFlow.start());
+  app.dispatch(errorFlow.__aio.actions.start());
   await app.flush();
 
   const types = app.dispatched.map((d) => d.type);
@@ -529,12 +529,12 @@ const waiter = cell("waiter", {
 
 Deno.test("flow: ctx.waitFor pauses until matching action dispatched", async () => {
   const app = createTestApp([waiter]);
-  app.dispatch(waiter.start());
+  app.dispatch(waiter.__aio.actions.start());
   await new Promise((r) => setTimeout(r, 20));
 
   assertEquals((app.getState().waiter as any).received, "");
 
-  app.dispatch(waiter.signal("hello"));
+  app.dispatch(waiter.__aio.actions.signal("hello"));
   await new Promise((r) => setTimeout(r, 50));
 
   assertEquals((app.getState().waiter as any).received, "hello");
@@ -562,7 +562,7 @@ const timeoutWaiter = cell("timeoutWaiter", {
 
 Deno.test("flow: ctx.waitFor with timeout throws on expiry", async () => {
   const app = createTestApp([timeoutWaiter]);
-  app.dispatch(timeoutWaiter.start());
+  app.dispatch(timeoutWaiter.__aio.actions.start());
   await new Promise((r) => setTimeout(r, 200));
 
   assertEquals((app.getState().timeoutWaiter as any).timedOut, true);
@@ -596,7 +596,7 @@ Deno.test({
   sanitizeResources: false,
 }, async () => {
   const app = createTestApp([stateReader]);
-  app.dispatch(stateReader.start());
+  app.dispatch(stateReader.__aio.actions.start());
   await app.flush();
 
   const s = app.getState().stateReader as { count: number; doubled: number };
@@ -636,12 +636,12 @@ Deno.test({
   sanitizeResources: false,
 }, async () => {
   const app = createTestApp([cancellable]);
-  app.dispatch(cancellable.start());
+  app.dispatch(cancellable.__aio.actions.start());
   await new Promise((r) => setTimeout(r, 50));
 
   assertEquals((app.getState().cancellable as any).running, true);
 
-  app.dispatch(cancellable.stop());
+  app.dispatch(cancellable.__aio.actions.stop());
   await new Promise((r) => setTimeout(r, 100));
 
   assertEquals((app.getState().cancellable as any).finished, false);
@@ -667,7 +667,7 @@ const putCompat = cell("putCompat", {
 
 Deno.test("flow: ctx.dispatch accepts action without payload", async () => {
   const app = createTestApp([putCompat]);
-  app.dispatch(putCompat.start());
+  app.dispatch(putCompat.__aio.actions.start());
   await app.flush();
 
   assertEquals((app.getState().putCompat as any).sent, true);
@@ -720,7 +720,7 @@ Deno.test({
   sanitizeResources: false,
 }, async () => {
   const app = createTestApp([race3]);
-  app.dispatch(race3.start());
+  app.dispatch(race3.__aio.actions.start());
   await new Promise((r) => setTimeout(r, 100));
 
   const s = app.getState().race3 as { winner: string };
@@ -754,7 +754,7 @@ Deno.test({
   sanitizeResources: false,
 }, async () => {
   const app = createTestApp([raceSyncAsync]);
-  app.dispatch(raceSyncAsync.start());
+  app.dispatch(raceSyncAsync.__aio.actions.start());
   await app.flush();
 
   const s = app.getState().raceSyncAsync as { winner: string };
@@ -781,7 +781,7 @@ const zeroTimeout = cell("zeroTimeout", {
 
 Deno.test("flow edge: ctx.waitFor with timeout=0 times out immediately", async () => {
   const app = createTestApp([zeroTimeout]);
-  app.dispatch(zeroTimeout.start());
+  app.dispatch(zeroTimeout.__aio.actions.start());
   await new Promise((r) => setTimeout(r, 50));
 
   // timeout=0 means the timeout fires on next tick — should catch
@@ -817,7 +817,7 @@ Deno.test({
   sanitizeResources: false,
 }, async () => {
   const app = createTestApp([callTimeout]);
-  app.dispatch(callTimeout.start());
+  app.dispatch(callTimeout.__aio.actions.start());
   await new Promise((r) => setTimeout(r, 100));
 
   assertEquals((app.getState().callTimeout as any).result, "timed-out");
@@ -846,7 +846,7 @@ const callRetry = cell("callRetry", {
 
 Deno.test("flow edge: ctx.call with retries recovers after failures", async () => {
   const app = createTestApp([callRetry]);
-  app.dispatch(callRetry.start());
+  app.dispatch(callRetry.__aio.actions.start());
   await new Promise((r) => setTimeout(r, 200));
 
   const s = app.getState().callRetry as { attempts: number; result: string };
@@ -879,7 +879,7 @@ const callRetryFail = cell("callRetryFail", {
 
 Deno.test("flow edge: ctx.call exhausts retries then throws", async () => {
   const app = createTestApp([callRetryFail]);
-  app.dispatch(callRetryFail.start());
+  app.dispatch(callRetryFail.__aio.actions.start());
   await app.flush();
 
   assertEquals((app.getState().callRetryFail as any).result, "exhausted");
@@ -913,11 +913,11 @@ Deno.test({
   sanitizeResources: false,
 }, async () => {
   const app = createTestApp([cancelMidAll]);
-  app.dispatch(cancelMidAll.start());
+  app.dispatch(cancelMidAll.__aio.actions.start());
   await new Promise((r) => setTimeout(r, 20));
 
   // Cancel while slow call is still pending
-  app.dispatch(cancelMidAll.abort());
+  app.dispatch(cancelMidAll.__aio.actions.abort());
   await new Promise((r) => setTimeout(r, 600));
 
   assertEquals((app.getState().cancelMidAll as any).done, false);
@@ -949,7 +949,7 @@ const allWithError = cell("allWithError", {
 
 Deno.test("flow edge: ctx.all fails if any entry throws", async () => {
   const app = createTestApp([allWithError]);
-  app.dispatch(allWithError.start());
+  app.dispatch(allWithError.__aio.actions.start());
   await app.flush();
 
   assertEquals((app.getState().allWithError as any).result, "caught");
@@ -981,7 +981,7 @@ const raceAllFail = cell("raceAllFail", {
 
 Deno.test("flow edge: ctx.race rejects when first entry rejects", async () => {
   const app = createTestApp([raceAllFail]);
-  app.dispatch(raceAllFail.start());
+  app.dispatch(raceAllFail.__aio.actions.start());
   await app.flush();
 
   assertEquals((app.getState().raceAllFail as any).result, "all-failed");
@@ -1004,7 +1004,7 @@ const noDone = cell("noDone", {
 
 Deno.test("flow edge: generator without ctx.done() auto-dispatches done", async () => {
   const app = createTestApp([noDone]);
-  app.dispatch(noDone.start());
+  app.dispatch(noDone.__aio.actions.start());
   await app.flush();
 
   assertEquals((app.getState().noDone as any).value, 100);
@@ -1033,9 +1033,9 @@ Deno.test({
   sanitizeResources: false,
 }, async () => {
   const app = createTestApp([restart]);
-  app.dispatch(restart.start(1)); // first instance
+  app.dispatch(restart.__aio.actions.start(1)); // first instance
   await new Promise((r) => setTimeout(r, 20));
-  app.dispatch(restart.start(2)); // second instance — should cancel first
+  app.dispatch(restart.__aio.actions.start(2)); // second instance — should cancel first
   await new Promise((r) => setTimeout(r, 200));
 
   // Only the second instance should have completed
@@ -1060,7 +1060,7 @@ const fullStateReader = cell("fullStateReader", {
 
 Deno.test("flow: ctx.getFullState reads own cell state", async () => {
   const app = createTestApp([fullStateReader]);
-  app.dispatch(fullStateReader.start());
+  app.dispatch(fullStateReader.__aio.actions.start());
   await app.flush();
 
   const s = app.getState().fullStateReader as { count: number; seen: number };
@@ -1088,7 +1088,7 @@ const consumer = cell("consumer", {
 
 Deno.test("flow: ctx.getFullState reads other cell's state", async () => {
   const app = createTestApp([provider, consumer]);
-  app.dispatch(consumer.start());
+  app.dispatch(consumer.__aio.actions.start());
   await app.flush();
 
   assertEquals((app.getState().consumer as any).grabbed, 42);
@@ -1118,7 +1118,7 @@ Deno.test({
   sanitizeResources: false,
 }, async () => {
   const app = createTestApp([fullStateFresh]);
-  app.dispatch(fullStateFresh.start());
+  app.dispatch(fullStateFresh.__aio.actions.start());
   await app.flush();
 
   const s = app.getState().fullStateFresh as {
@@ -1148,7 +1148,7 @@ const whenImmediate = cell("whenImmediate", {
 
 Deno.test("flow: ctx.when resolves immediately when condition already true", async () => {
   const app = createTestApp([whenImmediate]);
-  app.dispatch(whenImmediate.start());
+  app.dispatch(whenImmediate.__aio.actions.start());
   await app.flush();
 
   assertEquals((app.getState().whenImmediate as any).proceeded, true);
@@ -1181,14 +1181,14 @@ const whenWaiter = cell("whenWaiter", {
 
 Deno.test("flow: ctx.when resolves when condition becomes true after dispatch", async () => {
   const app = createTestApp([whenTrigger, whenWaiter]);
-  app.dispatch(whenWaiter.start());
+  app.dispatch(whenWaiter.__aio.actions.start());
   await new Promise((r) => setTimeout(r, 30));
 
   // Condition not yet true
   assertEquals((app.getState().whenWaiter as any).saw, false);
 
   // Trigger the condition
-  app.dispatch(whenTrigger.activate());
+  app.dispatch(whenTrigger.__aio.actions.activate());
   await new Promise((r) => setTimeout(r, 50));
 
   assertEquals((app.getState().whenWaiter as any).saw, true);
@@ -1215,7 +1215,7 @@ const whenTimeout = cell("whenTimeout", {
 
 Deno.test("flow: ctx.when with timeout throws on expiry", async () => {
   const app = createTestApp([whenTimeout]);
-  app.dispatch(whenTimeout.start());
+  app.dispatch(whenTimeout.__aio.actions.start());
   await new Promise((r) => setTimeout(r, 200));
 
   assertEquals((app.getState().whenTimeout as any).timedOut, true);
@@ -1242,7 +1242,7 @@ const whenThrows = cell("whenThrows", {
 
 Deno.test("flow: ctx.when predicate that throws is treated as false", async () => {
   const app = createTestApp([whenThrows]);
-  app.dispatch(whenThrows.start());
+  app.dispatch(whenThrows.__aio.actions.start());
   await new Promise((r) => setTimeout(r, 200));
 
   // Should have timed out (predicate throws → treated as false → never resolves → timeout)
@@ -1272,11 +1272,11 @@ Deno.test({
   sanitizeResources: false,
 }, async () => {
   const app = createTestApp([whenCancelled]);
-  app.dispatch(whenCancelled.start());
+  app.dispatch(whenCancelled.__aio.actions.start());
   await new Promise((r) => setTimeout(r, 30));
 
   // Cancel
-  app.dispatch(whenCancelled.stop());
+  app.dispatch(whenCancelled.__aio.actions.stop());
   await new Promise((r) => setTimeout(r, 50));
 
   assertEquals((app.getState().whenCancelled as any).done, false);
@@ -1326,19 +1326,19 @@ const whenMultiTrigger = cell("whenMultiTrigger", {
 
 Deno.test("flow: multiple ctx.when listeners resolve independently", async () => {
   const app = createTestApp([whenMultiTrigger, whenMultiA, whenMultiB]);
-  app.dispatch(whenMultiA.start());
-  app.dispatch(whenMultiB.start());
+  app.dispatch(whenMultiA.__aio.actions.start());
+  app.dispatch(whenMultiB.__aio.actions.start());
   await new Promise((r) => setTimeout(r, 30));
 
   // Trigger A only
-  app.dispatch(whenMultiTrigger.setA());
+  app.dispatch(whenMultiTrigger.__aio.actions.setA());
   await new Promise((r) => setTimeout(r, 50));
 
   assertEquals((app.getState().whenMultiA as any).resolved, true);
   assertEquals((app.getState().whenMultiB as any).resolved, false);
 
   // Trigger B
-  app.dispatch(whenMultiTrigger.setB());
+  app.dispatch(whenMultiTrigger.__aio.actions.setB());
   await new Promise((r) => setTimeout(r, 50));
 
   assertEquals((app.getState().whenMultiB as any).resolved, true);
@@ -1383,19 +1383,19 @@ const whenAndWaitForTrigger = cell("whenAndWaitForTrigger", {
 
 Deno.test("flow: ctx.when + ctx.waitFor in same flow", async () => {
   const app = createTestApp([whenAndWaitForTrigger, whenAndWaitFor]);
-  app.dispatch(whenAndWaitFor.start());
+  app.dispatch(whenAndWaitFor.__aio.actions.start());
   await new Promise((r) => setTimeout(r, 30));
 
   assertEquals((app.getState().whenAndWaitFor as any).phase, "init");
 
   // Satisfy when condition
-  app.dispatch(whenAndWaitForTrigger.activate());
+  app.dispatch(whenAndWaitForTrigger.__aio.actions.activate());
   await new Promise((r) => setTimeout(r, 50));
 
   assertEquals((app.getState().whenAndWaitFor as any).phase, "condition-met");
 
   // Satisfy waitFor
-  app.dispatch(whenAndWaitFor.signal());
+  app.dispatch(whenAndWaitFor.__aio.actions.signal());
   await new Promise((r) => setTimeout(r, 50));
 
   assertEquals((app.getState().whenAndWaitFor as any).phase, "complete");
@@ -1435,10 +1435,10 @@ Deno.test({
   sanitizeResources: false,
 }, async () => {
   const app = createTestApp([whenRaceTrigger, whenRace]);
-  app.dispatch(whenRace.start());
+  app.dispatch(whenRace.__aio.actions.start());
   await new Promise((r) => setTimeout(r, 30));
 
-  app.dispatch(whenRaceTrigger.setFlag());
+  app.dispatch(whenRaceTrigger.__aio.actions.setFlag());
   await new Promise((r) => setTimeout(r, 50));
 
   assertEquals((app.getState().whenRace as any).winner, "condition");
@@ -1466,7 +1466,7 @@ Deno.test("flow: AIO-117 waitFor listener cleaned up on flow cancellation", asyn
   const app = createTestApp([leakyWaiter]);
 
   // Start flow — it will block on waitFor
-  app.dispatch(leakyWaiter.start());
+  app.dispatch(leakyWaiter.__aio.actions.start());
   await new Promise((r) => setTimeout(r, 30));
 
   // Listener should be registered
@@ -1516,7 +1516,7 @@ Deno.test("flow: AIO-117 waitFor listener cleaned up in finally on flow completi
   const app = createTestApp([leakyRetrigger]);
 
   // Start flow — it will block on waitFor
-  app.dispatch(leakyRetrigger.start());
+  app.dispatch(leakyRetrigger.__aio.actions.start());
   await new Promise((r) => setTimeout(r, 30));
 
   // Verify listener exists
@@ -1531,7 +1531,7 @@ Deno.test("flow: AIO-117 waitFor listener cleaned up in finally on flow completi
 
   // Re-trigger: starts a new flow, cancelling the old one
   // The old flow's finally block should clean up its waitFor listener
-  app.dispatch(leakyRetrigger.start());
+  app.dispatch(leakyRetrigger.__aio.actions.start());
   await new Promise((r) => setTimeout(r, 30));
 
   // There should be exactly 1 listener (from the NEW flow instance), not 2

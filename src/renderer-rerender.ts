@@ -58,20 +58,22 @@ export function _rerenderComponent(inst: ComponentInstance): void {
   if (inst.disposed) return;
 
   if (_devMode) {
-    inst._devRenderCount = (inst._devRenderCount ?? 0) + 1;
-    if (inst._devRenderCount === DEV_RENDER_LIMIT) {
+    const now = performance.now();
+    const window = inst._devRenderTimestamps ?? [];
+    // Evict timestamps older than 1 second
+    const cutoff = now - 1000;
+    let i = 0;
+    while (i < window.length && window[i]! < cutoff) i++;
+    if (i > 0) window.splice(0, i);
+    window.push(now);
+    inst._devRenderTimestamps = window;
+    if (window.length === DEV_RENDER_LIMIT) {
       const name = typeof inst.vnode.tag === "function"
         ? (inst.vnode.tag.name || "Anonymous")
         : "Component";
       console.warn(
         `[aio-dev] ${name} re-rendered ${DEV_RENDER_LIMIT} times in rapid succession. Possible infinite loop.`,
       );
-    }
-    if (!inst._devRenderResetTimer) {
-      inst._devRenderResetTimer = setTimeout(() => {
-        inst._devRenderCount = 0;
-        inst._devRenderResetTimer = undefined;
-      }, 1000);
     }
   }
 
@@ -189,11 +191,39 @@ export function _rerenderComponent(inst: ComponentInstance): void {
 
 // ── Subscribe component instance to its deps ─────────────────────────
 
+const _warnedMissingDeps = new WeakMap<ComponentInstance, Set<string>>();
+
 export function _subscribeComponentDeps(
   inst: ComponentInstance,
   // deno-lint-ignore no-explicit-any
   deps: Set<any>,
 ): void {
+  if (_devMode && inst.parent) {
+    const parentDeps = inst.parent.deps;
+    for (const dep of deps) {
+      if (parentDeps.has(dep)) continue;
+      if (!dep._name) continue;
+      let warned = _warnedMissingDeps.get(inst);
+      if (!warned) {
+        warned = new Set();
+        _warnedMissingDeps.set(inst, warned);
+      }
+      if (warned.has(dep._name)) continue;
+      warned.add(dep._name);
+      const parentName = typeof inst.parent.vnode.tag === "function"
+        ? (inst.parent.vnode.tag.name || "Anonymous")
+        : "Component";
+      const childName = typeof inst.vnode.tag === "function"
+        ? (inst.vnode.tag.name || "Anonymous")
+        : "Component";
+      // AIO-7.5: child subscriptions are independent of the parent (tested in
+      // child-signal-subscription.test.ts) — this is a debug breadcrumb, not advice.
+      console.debug(
+        `[aio-dev] Child "${childName}" reads signal "${dep._name}" not read by parent "${parentName}" — fine since AIO-7.5.`,
+      );
+    }
+  }
+
   for (const dep of deps) {
     const subscriber = {
       execute: () => {

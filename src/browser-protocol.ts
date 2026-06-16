@@ -276,10 +276,14 @@ export const log: {
 // ── client API ──────────────────────────────────────────────────────
 // _send is injected from browser-air.ts to avoid circular dep
 let _clientSend:
-  | ((action: { type: string; payload?: unknown }) => void)
+  | ((
+    action: { type: string; payload?: unknown; cid?: string },
+  ) => void | Promise<void>)
   | null = null;
 export function _setClientSend(
-  fn: (action: { type: string; payload?: unknown }) => void,
+  fn: (
+    action: { type: string; payload?: unknown; cid?: string },
+  ) => void | Promise<void>,
 ): void {
   _clientSend = fn;
 }
@@ -339,11 +343,14 @@ export const client: {
 // ── ensureConnected ─────────────────────────────────────────────────
 
 import { bindAllCellsReactive } from "./cell-reactive.ts";
+import { _installReadOnlyHint } from "./dev-readonly-hint.ts";
 
 let _ensured = false;
 export function ensureConnected(): void {
   if (_ensured) return;
   _ensured = true;
+  // AIO-4.4: install the read-only dev hint on first connect.
+  _installReadOnlyHint();
   bindAllCellsReactive(
     _clientSend ?? undefined,
   );

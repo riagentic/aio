@@ -75,9 +75,10 @@ export function startGraphValidation(
   absBaseDir: string,
   importMapObj: Record<string, string>,
   debug: (msg: string) => void,
+  uiEntry = "App.tsx", // AIO-8.1
 ): GraphValidationHandle {
   let graphResult: GraphResult | null = null;
-  const entrypoint = join(absBaseDir, "App.tsx");
+  const entrypoint = join(absBaseDir, uiEntry);
 
   if (!fileExists(entrypoint)) {
     const set = (r: GraphResult) => {

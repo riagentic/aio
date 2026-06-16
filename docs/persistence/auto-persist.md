@@ -17,13 +17,13 @@ AIO auto-persists your entire state to Deno.Kv. On restart, persisted state is
 
 ## Per-Cell Persistence
 
-Each cell declares what gets persisted. Default: `"none"` (not persisted).
+Each cell declares what gets persisted. Default: `"all"` (everything persists).
 
 ```ts
-// Persist everything
+// Persist everything (default — omit or set explicitly)
 persist: "all",
 
-// Persist nothing (default — omit or set explicitly)
+// Persist nothing
 persist: "none",
 
 // Only persist these fields
@@ -33,7 +33,8 @@ persist: { include: ["count", "name"] },
 persist: { exclude: ["cache", "htmlCache"] },
 ```
 
-Use `cellDefaults` in `aio.run()` to set a default for all cells:
+To opt every cell out by default (e.g. for privacy-sensitive apps), use
+`cellDefaults` in `aio.run()`:
 
 ```ts
 await aio.run({
