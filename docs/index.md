@@ -2,7 +2,7 @@
 
 ## Getting Started
 
-- [Architecture](ARCHITECTURE.md) — module map, data flow, key boundaries
+- [Architecture](basics/architecture.md) — module map, data flow, key boundaries
 - [Quickstart](basics/quickstart.md) — install and run your first app
 - [Core Concepts](basics/concepts.md) — mental model and framework rules
 - [Project Structure](basics/project-structure.md) — file organization

@@ -1,8 +1,13 @@
 # Changelog
 
-## 1.0.0-alpha14 — DX overhaul (BREAKING for alpha users)
+## 1.0.0-alpha13 — DX overhaul + production hardening (BREAKING for alpha users)
 
-The todo.md DX plan, phases 1–9 complete. Behavior changes, plainly:
+The largest release since the `feature()` → `cell()` rename: the full DX
+overhaul (phases 1–9), a production-readiness pass that fixed every audited
+defect and made the project's own gates green, binding, and CI-enforced, plus
+nuclear audit waves 6–11.
+
+### DX overhaul — the framework now behaves as its docs and your intuition predict
 
 - **Defaults flipped to honest**: `persist` and `ui` default to `"all"` —
   zero-config persists and syncs, as the README always claimed. Opt out per cell
@@ -18,8 +23,10 @@ The todo.md DX plan, phases 1–9 complete. Behavior changes, plainly:
   signal-backed, sync methods only; skipped by server composition. The todo
   example's filter uses it.
 - **useEffect deps are honored** (React semantics, signal auto-tracking disabled
-  inside deps-driven effects); React compat hooks moved to `aio/air/compat`
-  (main-surface exports deprecated, removed post-1.0).
+  inside deps-driven effects); React compat hooks
+  (`useState`/`useEffect`/`useMemo`/`useCallback`) live **only** at
+  `aio/air/compat` — removed from the `aio/air` main surface (`useRef` stays, it
+  is a native AIR primitive).
 - **Typed events**: `e.currentTarget` is element-typed on intrinsic handlers
   (AirEvent<T>); `onDoubleClick` aliased; unknown event names warn in dev.
 - **Child signal subscriptions are independent of parents** — the
@@ -29,41 +36,56 @@ The todo.md DX plan, phases 1–9 complete. Behavior changes, plainly:
 - **`ui.entry`** option replaces the hardcoded App.tsx convention (default
   unchanged); **`aio doctor`** validates the six magic deno.json lines.
 
-Known debt (pre-existing, unchanged): db/integration test files crash their
-SQLite child worker in this dev environment (fails at alpha13 too); 29 lint hits
-in sync/* (require-await ×28, one unused import).
+### Correctness fixes (full production audit — `bugs.md` B-1…B-13)
 
-## 1.0.0-alpha13
+- **Signal graph never drops updates** — computed invalidation is now eager
+  (push dirty flags synchronously, pull values lazily), so an effect reading a
+  signal plus a derived computed written in the same `batch()` is glitch-free.
+  This sat under every DOM event handler. (B-2)
+- **SQLite worker type-checks again** on current Deno; `deno check` now covers
+  `src/` (incl. worker entries) so it can't silently rot. (B-1, B-9)
+- **Dropped dispatches reject instead of resolving** — under overload or after
+  close(), `await cell.method()` no longer succeeds on unapplied state. (B-4)
+- **Persistence/offline silent-failure trio fixed**: failed multi-key KV commits
+  are reported, the offline queue warns when full, and the shutdown flush
+  re-runs so a late write can't be lost. (B-7, B-8, B-10)
+- **esbuild**: the false "not installed" warning is gone (it probes the real
+  import) and dev transpile + prod bundle are pinned to the exact tested
+  version. (B-5, B-6)
+- **Lint to zero**, and the gate is now binding. (B-3)
 
-### Security
+### Operations & security
 
-- **Nuclear audit waves 6-11** — 64+ bugs fixed: sync protocol routing gaps,
-  cursor never advancing bug, concurrent HLC drop, SVG namespace handling,
-  watcher sentinel TOCTOU, logger flush race, signal listener leak, rate limiter
-  abuse detection, op buffer TTL eviction, onTTCommand guard, state module
-  cleanup. Total: ~194 bugs across 11 audit waves.
+- **Configurable WebSocket limits** (`wsLimits`: message size / messages-per-sec
+  / bytes-per-sec) for tuning `--expose` deployments without forking; defaults
+  unchanged.
+- **`/health` reports the framework version** for deploy verification.
+- **Token-in-URL** (`?token=`) auth emits a one-time warning — it stays a
+  fallback but flags the leak surface. (B-11)
 
-### Fixed
+### Release engineering
 
-- **Sync protocol routing** — `onTTCommand` guard added to prevent time-travel
-  commands from leaking into production sync
-- **Sync cursor** — cursor now advances correctly after processing
-- **HLC** — concurrent HLC drop fixed (was dropping ops on concurrent tick)
-- **SVG namespace** — AIR renderer now handles SVG namespace correctly
-- **Watcher sentinel TOCTOU** — file watcher race condition eliminated
-- **Logger flush** — logger flush race on shutdown
-- **Signal listener leak** — effect cleanup now properly disposes signal
-  listeners
-- **Rate limiter abuse detection** — enhanced detection of abusive clients
-- **Op buffer TTL eviction** — eviction now respects per-op TTL
+- **CI workflow** (`.github/workflows/ci.yml`): fmt / lint / check / full test
+  suite across the supported Deno range + a JSR publish dry-run — "green" is now
+  provable on every PR.
+- **Whole-tree `deno fmt`** so the formatting gate is binding, and a
+  **`docs:check` gate** that fails if any `AioErrorCode` ships undocumented.
+- **GitHub issue templates** (bug / DX paper-cut / docs-lie) for a real feedback
+  loop.
+
+### Hardening — nuclear audit waves 6–11 (~194 fixes)
+
+- Sync protocol routing (`onTTCommand` guard stops time-travel commands leaking
+  into prod sync), sync cursor advance, concurrent HLC drop, SVG namespace,
+  watcher sentinel TOCTOU, logger flush race, signal listener leak, rate-limiter
+  abuse detection, op-buffer TTL eviction, state-module cleanup.
 
 ### Docs
 
-- Full docs audit for alpha13 accuracy
-- Version bumps throughout (alpha12 → alpha13)
-- Fix dead/broken links across all docs
-- Remove stale `stateForUI`/`stateForDB` references (removed in alpha11)
-- Quickstart, migration, examples all updated to alpha13 imports
+- New **`from-alpha12-to-alpha13`** upgrade guide for the breaking changes;
+  fixed the stale "persist defaults to none" claim in the alpha10→11 guide;
+  every error code is documented in `docs/debugging/errors.md`; dead links fixed
+  and stale `stateForUI`/`stateForDB` references removed.
 
 ---
 

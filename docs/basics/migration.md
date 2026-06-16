@@ -271,4 +271,5 @@ import { useEffect, useState } from "aio/air/compat";
 | `useMemo`     | `computed()`                                                |
 | `useCallback` | unnecessary — components are auto-optimized                 |
 
-The re-exports on `aio/air` are deprecated and will be removed post-1.0.
+React compat hooks live **only** at `aio/air/compat` — they are not exported
+from `aio/air`. (`useRef` is a native AIR primitive and stays on `aio/air`.)
