@@ -98,8 +98,23 @@ export function createPersistenceManager(
             obj,
             prevPersistedKeys,
           );
-          if (result.ok) prevPersistedKeys = keys;
-          log.debug(`persist: saved multi (${keys.length} keys)`);
+          if (result.ok) {
+            // B-7: only advance the persisted-key set and log "saved" when the
+            // atomic commit actually succeeded.
+            prevPersistedKeys = keys;
+            log.debug(`persist: saved multi (${keys.length} keys)`);
+          } else {
+            // B-7: a failed atomic commit is NOT success — report it and keep
+            // persistNeeded so the next cycle retries, instead of silently
+            // declaring the keys persisted (future data loss once .check()s
+            // are added to the atomic op).
+            persistNeeded = true;
+            const err = new Error(
+              "persist: multi-key atomic commit returned ok:false — state not saved",
+            );
+            log.error(err.message);
+            _reportPersistError(err);
+          }
         } catch (e) {
           log.error(`persist: failed to save — ${e}`);
           _reportPersistError(e);
@@ -184,53 +199,72 @@ export function createPersistenceManager(
     if (inFlight) {
       await inFlight.catch(() => {/* errors already reported inside cycle */});
     }
-    const cycle = (async () => {
-      try {
-        if (asyncDb && dbSchema) {
-          const stateSnapshot = structuredClone(getState());
-          try {
-            await syncTables(asyncDb, dbSchema, stateSnapshot, prevDbState);
-            prevDbState = stateSnapshot;
-          } catch (e) {
-            log.error(`persist: sqlite flush failed — ${e}`);
-          }
-        }
-        if (kvDb) {
-          try {
-            const dbState = getDBState(kvGetState());
-            if (persistMode === "multi") {
-              const obj = dbState as Record<string, unknown>;
-              const keys = Object.keys(obj);
-              const result = await kvDb.setMulti(
-                persistKey,
-                obj,
-                prevPersistedKeys,
-              );
-              if (result.ok) prevPersistedKeys = keys;
-            } else {
-              await kvDb.set(persistKey, dbState);
+    // B-10: loop until nothing is pending. A schedulePersist() that lands while
+    // this flush is writing (a late effect changing state) sets persistNeeded;
+    // unlike _runPersistCycle, the old flush ignored it, so that final write was
+    // lost if the process then exited. We reset persistNeeded before each cycle
+    // (the cycle reads fresh getState(), so it captures the latest state) and
+    // re-run while a concurrent schedule marked more work.
+    do {
+      persistNeeded = false;
+      const cycle = (async () => {
+        try {
+          if (asyncDb && dbSchema) {
+            const stateSnapshot = structuredClone(getState());
+            try {
+              await syncTables(asyncDb, dbSchema, stateSnapshot, prevDbState);
+              prevDbState = stateSnapshot;
+            } catch (e) {
+              log.error(`persist: sqlite flush failed — ${e}`);
             }
-            log.debug("persist: flushed");
-          } catch (e) {
-            const msg = String(e);
-            if (
-              msg.includes("too large") || msg.includes("65536") ||
-              msg.includes("value too")
-            ) {
-              log.warn(
-                `persist: state exceeds Deno KV 65KB limit — set persistMode:'multi', cell-level persist filters, or db:{} (SQLite)`,
-              );
-            }
-            log.error(`persist: flush failed — ${e}`);
-            _reportPersistError(e);
           }
+          if (kvDb) {
+            try {
+              const dbState = getDBState(kvGetState());
+              if (persistMode === "multi") {
+                const obj = dbState as Record<string, unknown>;
+                const keys = Object.keys(obj);
+                const result = await kvDb.setMulti(
+                  persistKey,
+                  obj,
+                  prevPersistedKeys,
+                );
+                if (result.ok) {
+                  prevPersistedKeys = keys;
+                } else {
+                  // B-7: failed atomic commit on the final flush — surface it
+                  // rather than reporting "flushed".
+                  const err = new Error(
+                    "persist: multi-key atomic commit returned ok:false on flush — state not saved",
+                  );
+                  log.error(err.message);
+                  _reportPersistError(err);
+                }
+              } else {
+                await kvDb.set(persistKey, dbState);
+              }
+              log.debug("persist: flushed");
+            } catch (e) {
+              const msg = String(e);
+              if (
+                msg.includes("too large") || msg.includes("65536") ||
+                msg.includes("value too")
+              ) {
+                log.warn(
+                  `persist: state exceeds Deno KV 65KB limit — set persistMode:'multi', cell-level persist filters, or db:{} (SQLite)`,
+                );
+              }
+              log.error(`persist: flush failed — ${e}`);
+              _reportPersistError(e);
+            }
+          }
+        } finally {
+          inFlight = null;
         }
-      } finally {
-        inFlight = null;
-      }
-    })();
-    inFlight = cycle;
-    await cycle;
+      })();
+      inFlight = cycle;
+      await cycle;
+    } while (persistNeeded);
   }
 
   function setShuttingDown(): void {

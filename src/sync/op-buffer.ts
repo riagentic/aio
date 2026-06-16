@@ -5,15 +5,22 @@ import { SYNC_DEFAULTS } from "./types.ts";
 /** Parse a retention string like "4h" into milliseconds. */
 function parseRetention(retention: string): number {
   const match = retention.match(/^(\d+)(ms|s|m|h)$/);
-  if (!match) return SYNC_DEFAULTS.defaultRetention === "4h" ? 4 * 3600_000 : 1000;
+  if (!match) {
+    return SYNC_DEFAULTS.defaultRetention === "4h" ? 4 * 3600_000 : 1000;
+  }
   const [, value, unit] = match;
   const n = Number(value);
   switch (unit) {
-    case "ms": return n;
-    case "s": return n * 1000;
-    case "m": return n * 60_000;
-    case "h": return n * 3600_000;
-    default: return 1000;
+    case "ms":
+      return n;
+    case "s":
+      return n * 1000;
+    case "m":
+      return n * 60_000;
+    case "h":
+      return n * 3600_000;
+    default:
+      return 1000;
   }
 }
 
@@ -46,28 +53,32 @@ export function createMemoryStorage(): OpBufferStorage {
     { state: unknown; hlc: HLC }
   >();
 
+  // Synchronous in-memory maps wrapped to satisfy the async OpBufferStorage
+  // contract — Promise.resolve() keeps the return types without a no-op `async`.
   return {
-    async loadOps(cell: string): Promise<SyncOp[]> {
-      return ops.get(cell) ?? [];
+    loadOps(cell: string): Promise<SyncOp[]> {
+      return Promise.resolve(ops.get(cell) ?? []);
     },
 
-    async saveOp(op: SyncOp): Promise<void> {
+    saveOp(op: SyncOp): Promise<void> {
       const cellOps = ops.get(op.cell) ?? [];
       cellOps.push(op);
       ops.set(op.cell, cellOps);
+      return Promise.resolve();
     },
 
-    async confirmOp(opId: string): Promise<void> {
+    confirmOp(opId: string): Promise<void> {
       for (const cellOps of ops.values()) {
         const op = cellOps.find((o) => o.id === opId);
         if (op) {
           op.confirmed = true;
-          return;
+          break;
         }
       }
+      return Promise.resolve();
     },
 
-    async pruneConfirmed(cell: string): Promise<void> {
+    pruneConfirmed(cell: string): Promise<void> {
       const cellOps = ops.get(cell);
       if (cellOps) {
         ops.set(
@@ -75,9 +86,10 @@ export function createMemoryStorage(): OpBufferStorage {
           cellOps.filter((o) => !o.confirmed),
         );
       }
+      return Promise.resolve();
     },
 
-    async pruneStale(cell: string, opId: string): Promise<void> {
+    pruneStale(cell: string, opId: string): Promise<void> {
       const cellOps = ops.get(cell);
       if (cellOps) {
         ops.set(
@@ -85,42 +97,48 @@ export function createMemoryStorage(): OpBufferStorage {
           cellOps.filter((o) => o.id !== opId),
         );
       }
+      return Promise.resolve();
     },
 
-    async countUnconfirmed(cell: string): Promise<number> {
-      return (ops.get(cell) ?? []).filter((o) => !o.confirmed).length;
+    countUnconfirmed(cell: string): Promise<number> {
+      return Promise.resolve(
+        (ops.get(cell) ?? []).filter((o) => !o.confirmed).length,
+      );
     },
 
-    async loadMeta(
+    loadMeta(
       cell: string,
     ): Promise<{ lastHlc: HLC | null; lastServerTs?: number } | undefined> {
-      return metas.get(cell);
+      return Promise.resolve(metas.get(cell));
     },
 
-    async saveMeta(
+    saveMeta(
       cell: string,
       data: { lastHlc: HLC | null; lastServerTs?: number },
     ): Promise<void> {
       metas.set(cell, data);
+      return Promise.resolve();
     },
 
-    async loadSnapshot(
+    loadSnapshot(
       cell: string,
     ): Promise<{ state: unknown; hlc: HLC } | undefined> {
-      return snapshots.get(cell);
+      return Promise.resolve(snapshots.get(cell));
     },
 
-    async saveSnapshot(
+    saveSnapshot(
       cell: string,
       data: { state: unknown; hlc: HLC },
     ): Promise<void> {
       snapshots.set(cell, data);
+      return Promise.resolve();
     },
 
-    async clear(cell: string): Promise<void> {
+    clear(cell: string): Promise<void> {
       ops.delete(cell);
       metas.delete(cell);
       snapshots.delete(cell);
+      return Promise.resolve();
     },
   };
 }
@@ -156,17 +174,19 @@ export function createIndexedDBStorage(
   }
 
   return {
-    async loadOps(cell: string): Promise<SyncOp[]> {
-      return withDB(async (db) => {
+    loadOps(cell: string): Promise<SyncOp[]> {
+      return withDB((db) => {
         const tx = db.transaction(storeName, "readonly");
         const store = tx.objectStore(storeName);
         const index = store.index("type-cell");
         const key = ["op", cell] as [string, string];
-        return new Promise<Array<Record<string, unknown>>>((resolve, reject) => {
-          const request = index.getAll(key);
-          request.onsuccess = () => resolve(request.result ?? []);
-          request.onerror = () => reject(request.error);
-        });
+        return new Promise<Array<Record<string, unknown>>>(
+          (resolve, reject) => {
+            const request = index.getAll(key);
+            request.onsuccess = () => resolve(request.result ?? []);
+            request.onerror = () => reject(request.error);
+          },
+        );
       }).then((ops) =>
         ops
           .filter((o: Record<string, unknown>) => o.type === "op")
@@ -174,7 +194,7 @@ export function createIndexedDBStorage(
       );
     },
 
-    async saveOp(op: SyncOp): Promise<void> {
+    saveOp(op: SyncOp): Promise<void> {
       return withDB(async (db) => {
         const tx = db.transaction(storeName, "readwrite");
         const store = tx.objectStore(storeName);
@@ -191,7 +211,7 @@ export function createIndexedDBStorage(
       });
     },
 
-    async confirmOp(opId: string): Promise<void> {
+    confirmOp(opId: string): Promise<void> {
       return withDB(async (db) => {
         const tx = db.transaction(storeName, "readwrite");
         const store = tx.objectStore(storeName);
@@ -213,8 +233,8 @@ export function createIndexedDBStorage(
       });
     },
 
-    async pruneConfirmed(cell: string): Promise<void> {
-      return withDB(async (db) => {
+    pruneConfirmed(cell: string): Promise<void> {
+      return withDB((db) => {
         const tx = db.transaction(storeName, "readwrite");
         const store = tx.objectStore(storeName);
         const index = store.index("type-cell");
@@ -255,7 +275,7 @@ export function createIndexedDBStorage(
       });
     },
 
-    async pruneStale(cell: string, opId: string): Promise<void> {
+    pruneStale(_cell: string, opId: string): Promise<void> {
       return withDB(async (db) => {
         const tx = db.transaction(storeName, "readwrite");
         const store = tx.objectStore(storeName);
@@ -267,8 +287,8 @@ export function createIndexedDBStorage(
       });
     },
 
-    async countUnconfirmed(cell: string): Promise<number> {
-      return withDB(async (db) => {
+    countUnconfirmed(cell: string): Promise<number> {
+      return withDB((db) => {
         const tx = db.transaction(storeName, "readonly");
         const store = tx.objectStore(storeName);
         const index = store.index("type-cell");
@@ -287,10 +307,10 @@ export function createIndexedDBStorage(
       });
     },
 
-    async loadMeta(
+    loadMeta(
       cell: string,
     ): Promise<{ lastHlc: HLC | null; lastServerTs?: number } | undefined> {
-      return withDB(async (db) => {
+      return withDB((db) => {
         const tx = db.transaction(storeName, "readonly");
         const store = tx.objectStore(storeName);
         return new Promise((resolve, reject) => {
@@ -301,7 +321,7 @@ export function createIndexedDBStorage(
       });
     },
 
-    async saveMeta(
+    saveMeta(
       cell: string,
       data: { lastHlc: HLC | null; lastServerTs?: number },
     ): Promise<void> {
@@ -321,10 +341,10 @@ export function createIndexedDBStorage(
       });
     },
 
-    async loadSnapshot(
+    loadSnapshot(
       cell: string,
     ): Promise<{ state: unknown; hlc: HLC } | undefined> {
-      return withDB(async (db) => {
+      return withDB((db) => {
         const tx = db.transaction(storeName, "readonly");
         const store = tx.objectStore(storeName);
         return new Promise((resolve, reject) => {
@@ -335,7 +355,7 @@ export function createIndexedDBStorage(
       });
     },
 
-    async saveSnapshot(
+    saveSnapshot(
       cell: string,
       data: { state: unknown; hlc: HLC },
     ): Promise<void> {
@@ -355,7 +375,7 @@ export function createIndexedDBStorage(
       });
     },
 
-    async clear(cell: string): Promise<void> {
+    clear(cell: string): Promise<void> {
       return withDB(async (db) => {
         const tx = db.transaction(storeName, "readwrite");
         const store = tx.objectStore(storeName);
@@ -388,7 +408,7 @@ export function createIndexedDBStorage(
             delReq1.onerror = () => reject(delReq1.error);
           });
         }).catch(() => {});
-        await withDB(async (db) => {
+        await withDB((db) => {
           const tx = db.transaction(storeName, "readwrite");
           const store = tx.objectStore(storeName);
           return new Promise<void>((resolve, reject) => {
@@ -446,7 +466,8 @@ export function createOpBuffer(
 ): OpBuffer {
   const cap = opts?.pendingCap ?? SYNC_DEFAULTS.pendingCap;
   const onDrop = opts?.onDrop;
-  const staleAfterMs = opts?.staleAfter ?? parseRetention(SYNC_DEFAULTS.defaultRetention);
+  const staleAfterMs = opts?.staleAfter ??
+    parseRetention(SYNC_DEFAULTS.defaultRetention);
 
   return {
     async add(op: SyncOp): Promise<boolean> {

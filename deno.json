@@ -68,7 +68,7 @@
   "tasks": {
     "test": "deno test -A --unstable-kv tests/",
     "test:core": "deno test -A --unstable-kv --ignore=tests/am.test.ts,tests/build.test.ts,tests/server.test.ts,tests/tls.test.ts,tests/single-instance-lock.test.ts,tests/cli.test.ts,tests/cli-client.test.ts,tests/electron-ipc.test.ts,tests/app-modes.test.ts tests/",
-    "check": "deno check mod.ts aiol/mod.ts init.ts examples/counter/App.tsx examples/todo/App.tsx",
+    "check": "deno check src/ mod.ts aiol/mod.ts init.ts examples/",
     "lint": "deno lint src/",
     "lint:aio": "deno run -A aiol/mod.ts",
     "example": "deno run -A examples/counter/app.ts",

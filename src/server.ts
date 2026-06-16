@@ -8,7 +8,11 @@ import {
   initDiagnosticBus,
 } from "./diagnostic-bus.ts";
 import { setDiagEmit } from "./error.ts";
-import { disposeClientLog, initClientLog, writeClientLog } from "./client-log.ts";
+import {
+  disposeClientLog,
+  initClientLog,
+  writeClientLog,
+} from "./client-log.ts";
 
 // ── Re-exports (public API) ──
 export {
@@ -51,6 +55,21 @@ function fileExists(path: string): boolean {
   }
 }
 
+// B-11: tokens in the URL query string leak via browser history, proxy logs,
+// and Referer headers. The timing-safe `?token=` path stays as an opt-in
+// fallback (e.g. WS upgrades that can't set headers), but warn once per process
+// the first time it's actually relied on so it isn't a silent hijacking surface.
+let _tokenInUrlWarned = false;
+function _warnTokenInUrl(): void {
+  if (_tokenInUrlWarned) return;
+  _tokenInUrlWarned = true;
+  console.warn(
+    "[aio] security: authenticated via ?token= in the URL — tokens leak via " +
+      "browser history, proxy logs, and Referer. Prefer the Authorization: " +
+      "Bearer header. Query-param auth is a fallback for header-less contexts.",
+  );
+}
+
 /** Starts HTTP + WS server, returns broadcast handle for state pushes and shutdown */
 export function createServer(config: ServerConfig): ServerHandle {
   const { port, title, getUIState, dispatch, debug, prod = false, distDir } =
@@ -91,7 +110,11 @@ export function createServer(config: ServerConfig): ServerHandle {
   // ── Dev startup checks ──
   const uiEntry = config.uiEntry ?? "App.tsx";
   if (!prod) {
-    debug(`ui: serving ${uiEntry}${config.uiEntry ? "" : " (default convention — set ui.entry to override)"}`);
+    debug(
+      `ui: serving ${uiEntry}${
+        config.uiEntry ? "" : " (default convention — set ui.entry to override)"
+      }`,
+    );
   }
   const graphValidation = !prod
     ? startGraphValidation(absBaseDir, importMapObj, debug, uiEntry)
@@ -276,6 +299,7 @@ export function createServer(config: ServerConfig): ServerHandle {
       if (!validQ && !validH) {
         return new Response("Unauthorized", { status: 401 });
       }
+      if (validQ && !validH) _warnTokenInUrl();
     }
 
     if (pathname === "/ws") return wsMgr.handleWs(req, undefined, clientKey);

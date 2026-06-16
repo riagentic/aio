@@ -89,6 +89,10 @@ export async function _loadOfflineQueue(): Promise<_QueuedAction[]> {
 
 export const MAX_OFFLINE_ACTIONS = 1000;
 
+// B-8: warn once per session when the offline queue is full and actions start
+// being dropped — otherwise edits made offline vanish without any trace.
+let _offlineQueueFullWarned = false;
+
 export async function _saveOfflineAction(
   action: { type: string; payload?: unknown },
 ): Promise<void> {
@@ -100,7 +104,24 @@ export async function _saveOfflineAction(
       const store = tx.objectStore(_offlineStore);
       const countReq = store.count();
       countReq.onsuccess = () => {
-        if (countReq.result >= MAX_OFFLINE_ACTIONS) return; // tx will auto-complete
+        if (countReq.result >= MAX_OFFLINE_ACTIONS) {
+          // B-8: queue is full — the action is dropped. Surface it (once per
+          // session) instead of silently losing the user's offline edits.
+          if (!_offlineQueueFullWarned) {
+            _offlineQueueFullWarned = true;
+            _diagEmit({
+              type: "offline-queue-full",
+              severity: "warning",
+              source: "browser",
+              message:
+                `Offline action queue is full (${MAX_OFFLINE_ACTIONS}) — new offline actions are being dropped`,
+              detail: { queueDepth: countReq.result, dropped: action.type },
+              hint:
+                "Reconnect to flush the queue. Actions made while full are lost.",
+            });
+          }
+          return; // tx will auto-complete
+        }
         const addReq = store.add({ action, ts: Date.now() });
         addReq.onerror = () => {
           _diagEmit({

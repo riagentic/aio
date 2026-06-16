@@ -152,8 +152,10 @@ export async function runBundle(
 
     let bundleOk = false;
     try {
+      // B-6: pin the EXACT version deno.json pins (esbuild@0.24.2) so dev
+      // transpile and prod bundle never resolve a different esbuild than tested.
       // deno-lint-ignore no-import-prefix
-      const esbuild = await import("npm:esbuild@^0.24");
+      const esbuild = await import("npm:esbuild@0.24.2");
       const jsxConfig = { jsx: "automatic" as const, jsxImportSource: "aio" };
 
       const result = await esbuild.build({

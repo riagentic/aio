@@ -23,10 +23,16 @@ export interface Computed<T> {
   /** @internal */ readonly _subscribers: Set<Subscriber>;
 }
 
-/** @internal two-phase subscriber: prepare (cleanup) then execute (re-run) */
+/** @internal two-phase subscriber: prepare (cleanup) then execute (re-run).
+ *  A subscriber with `invalidate` is an eager link (a computed's dependency
+ *  edge): on a dependency change it is invalidated *synchronously* rather than
+ *  queued, so dirty flags propagate through the whole computed graph before any
+ *  effect re-runs. Subscribers without `invalidate` (effects, external
+ *  subscribers) are queued for the next flush. */
 interface Subscriber {
   prepare?: () => void;
   execute: () => void;
+  invalidate?: () => void;
 }
 
 type CleanupFn = () => void;
@@ -106,7 +112,6 @@ export function batch(fn: () => void): void {
 const _FLUSH_MAX_ITERATIONS = 1000;
 let _flushing = false;
 let _flushIterations = 0;
-const _inFlight = new Set<Subscriber>();
 
 function _flush(): void {
   if (_flushing) return; // re-entrant call — outer _flush will pick up new pending
@@ -125,8 +130,6 @@ function _flush(): void {
       }
       const pending = [..._pendingSubscribers];
       _pendingSubscribers.clear();
-      // Mark all as in-flight so re-entrant _notify skips them
-      for (const sub of pending) _inFlight.add(sub);
       // Phase 1: prepare (cleanup) — track failures
       const phase1Failed = new Set<Subscriber>();
       for (const sub of pending) {
@@ -148,22 +151,22 @@ function _flush(): void {
           console.error("[aio:signal] effect execute error:", e);
         }
       }
-      // Done with this batch
-      for (const sub of pending) _inFlight.delete(sub);
     }
   } finally {
     _flushing = false;
   }
 }
 
-function _notify(subscribers: Set<Subscriber>): void {
-  const snapshot = [...subscribers];
-  for (const sub of snapshot) {
-    // Skip if already being processed in this flush batch
-    if (_inFlight.has(sub)) continue;
-    _pendingSubscribers.add(sub);
+/** Propagate a dependency change to its subscribers. Computed links carry an
+ *  `invalidate` and are run *synchronously* (marking the whole computed graph
+ *  dirty before any effect reads it — glitch-free, B-2). Plain subscribers
+ *  (effects, external) are queued for the next flush. */
+function _propagate(subscribers: Set<Subscriber>): void {
+  // Snapshot: invalidate()/execute() may mutate the subscriber set.
+  for (const sub of [...subscribers]) {
+    if (sub.invalidate) sub.invalidate();
+    else _pendingSubscribers.add(sub);
   }
-  if (_batchDepth === 0) _flush();
 }
 
 // ── Shallow equality (AIO-59) ──────────────────────────────────────
@@ -182,7 +185,8 @@ function _isPlainObject(o: unknown): boolean {
   const proto = Object.getPrototypeOf(o);
   if (proto === null) return true;
   const ctor = (proto as { constructor?: unknown }).constructor;
-  return typeof ctor === "function" && (ctor as { name?: string }).name === "Object";
+  return typeof ctor === "function" &&
+    (ctor as { name?: string }).name === "Object";
 }
 
 function _shallowEq(a: unknown, b: unknown): boolean {
@@ -289,9 +293,7 @@ class SignalImpl<T> implements Signal<T> {
     }
     this._value = resolved;
     this._version++;
-    for (const sub of this._subscribers) {
-      _pendingSubscribers.add(sub);
-    }
+    _propagate(this._subscribers);
     if (_batchDepth === 0) _flush();
   }
 
@@ -386,17 +388,22 @@ class ComputedImpl<T> implements Computed<T> {
     this._dirty = false;
     this._deps = deps;
 
-    const markDirtySub: Subscriber = {
-      execute: () => {
+    // Eager dependency link: when a dep changes, mark this computed dirty and
+    // propagate *synchronously* — recursing into dependent computeds and
+    // queueing dependent effects. This guarantees a same-batch read after the
+    // write never sees a stale-clean computed (B-2). Recompute stays lazy.
+    const link: Subscriber = {
+      execute: () => {}, // never queued — invalidation is eager
+      invalidate: () => {
         if (!this._dirty) {
           this._dirty = true;
-          _notify(this._subscribers);
+          _propagate(this._subscribers);
         }
       },
     };
     for (const dep of deps) {
-      dep._subscribers.add(markDirtySub);
-      this._unsubs.push(() => dep._subscribers.delete(markDirtySub));
+      dep._subscribers.add(link);
+      this._unsubs.push(() => dep._subscribers.delete(link));
     }
   }
 }

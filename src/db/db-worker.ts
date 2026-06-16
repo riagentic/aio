@@ -1,6 +1,13 @@
 /// <reference lib="deno.worker" />
-// Worker thread — owns the SQLite connection, processes requests sequentially
+// Worker thread — owns the SQLite connection, processes requests sequentially.
 
+// B-1: `node:sqlite` type resolution breaks when a stale `@types/node` (<22.5,
+// pulled in transitively under node_modules) shadows Deno's bundled node types
+// — that package predates the node:sqlite module. The specifier resolves fine
+// at runtime (deno run does not type-check); suppress here so `deno check src/`
+// is green regardless of the installed @types/node version. Tracking: B-9 wires
+// src/ into the check gate.
+// @ts-ignore node:sqlite types unavailable when an old @types/node shadows them
 import { DatabaseSync } from "node:sqlite";
 import type { QueryResult, WorkerRequest, WorkerResponse } from "./types.ts";
 

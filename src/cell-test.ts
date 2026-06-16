@@ -3,7 +3,7 @@
 import type { ScheduleEffect } from "./schedule.ts";
 import type { OwnEffect } from "./own.ts";
 import { resetFlows } from "./flow.ts";
-import { registerCall, resetPending, resolveCall } from "./cell-impl.ts";
+import { registerCall, resetPending } from "./cell-impl.ts";
 import type { Catalog, CellDef, Creators, Msg } from "./cell-types.ts";
 import { composeCells } from "./cell-compose.ts";
 
@@ -262,4 +262,3 @@ export function testCell<
     await fn(ctx);
   });
 }
-
