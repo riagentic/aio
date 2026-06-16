@@ -131,8 +131,23 @@ export async function ensureAppimagetool(
     }
     console.log("[appimage] ✓ integrity check passed");
   } else {
+    // No pinned hash — refuse release builds. Dev builds can opt out via AIO_DEV=1.
+    // Prevents supply-chain compromise of downloaded appimagetool from slipping
+    // into shipped AppImages.
+    const devBypass = Deno.env.get("AIO_DEV") === "1";
+    if (!devBypass) {
+      console.error(
+        `[appimage] ✗ no pinned SHA-256 hash for arch "${arch}" — refusing to build.\n` +
+          `         Pin a hash in APPIMAGETOOL_HASHES (src/build-helpers.ts).\n` +
+          `         For local experiments only, set AIO_DEV=1 to bypass.`,
+      );
+      try {
+        await Deno.remove(toolPath);
+      } catch { /* ignore */ }
+      Deno.exit(1);
+    }
     console.warn(
-      "[appimage] ⚠ no pinned hash for this arch — skipping integrity check. Pin a hash in APPIMAGETOOL_HASHES for production builds.",
+      "[appimage] ⚠ AIO_DEV=1 — skipping integrity check. DO NOT use for releases.",
     );
   }
   await Deno.writeFile(toolPath, bytes);

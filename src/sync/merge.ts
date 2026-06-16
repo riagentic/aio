@@ -56,7 +56,7 @@ function mergeLWW(
   remote: unknown,
   remoteHlc: HLC,
 ): MergeResult {
-  if (local === remote || JSON.stringify(local) === JSON.stringify(remote)) {
+  if (local === remote || stableJSONStringify(local) === stableJSONStringify(remote)) {
     return { value: local, conflict: false };
   }
   const winner = compareHLC(localHlc, remoteHlc) >= 0 ? local : remote;
@@ -101,6 +101,24 @@ function mergeLWWPerKey(
   return { value: merged, conflict };
 }
 
+/** Stable JSON serialization that sorts object keys for deterministic output,
+ *  ensuring equivalent objects produce identical strings regardless of key order. */
+function stableJSONStringify(val: unknown): string {
+  return JSON.stringify(val, (_key, value) => {
+    if (value && typeof value === "object" && !Array.isArray(value)) {
+      const sorted: Record<string, unknown> = {};
+      for (const key of Object.keys(value as Record<string, unknown>).sort()) {
+        sorted[key] = (value as Record<string, unknown>)[key];
+      }
+      return sorted;
+    }
+    if (Array.isArray(value)) {
+      return value.map((v) => stableJSONStringify(v));
+    }
+    return value;
+  });
+}
+
 /** Extract a stable id from a set item. Primitives use String() (callers must
  *  ensure uniqueness). Objects without the idField throw — silent collisions
  *  on "" would cause data loss in CRDT sets. */
@@ -139,7 +157,7 @@ function mergeSetAdd(
     } else {
       // Both sides added same id — LWW on content divergence
       const existing = merged.get(id);
-      if (JSON.stringify(existing) !== JSON.stringify(item)) {
+      if (stableJSONStringify(existing) !== stableJSONStringify(item)) {
         conflict = true;
         // Remote wins if its HLC is newer
         if (compareHLC(remoteHlc, localHlc) > 0) merged.set(id, item);
@@ -184,7 +202,7 @@ function mergeSetRemove(
     if (inLocal && inRemote) {
       const lv = localMap.get(id);
       const rv = remoteMap.get(id);
-      if (JSON.stringify(lv) !== JSON.stringify(rv)) {
+      if (stableJSONStringify(lv) !== stableJSONStringify(rv)) {
         conflict = true;
         result.push(remoteWins ? rv : lv);
         continue;

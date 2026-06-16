@@ -34,7 +34,7 @@ import {
 } from "../src/aio-renderer.ts";
 import type { MountHandle } from "../src/aio-renderer.ts";
 import { useFieldArray, useForm } from "../src/form.ts";
-import { useSpring, useTransition } from "../src/animation.ts";
+import { useSpring } from "../src/animation.ts";
 import { useVirtualList } from "../src/virtual-list.ts";
 import {
   _isDevToolsConnected,
@@ -570,45 +570,6 @@ Deno.test({
 // ════════════════════════════════════════════════════════════════════
 // 10. Animation hooks
 // ════════════════════════════════════════════════════════════════════
-
-Deno.test({
-  name: "useTransition: enter/exit lifecycle",
-  async fn() {
-    const fade = useTransition({ name: "fade", duration: 50 });
-
-    assertEquals(fade.stage, "idle");
-    assertEquals(fade.mounted, false);
-    assertEquals(fade.className, "");
-
-    fade.enter();
-    assertEquals(fade.stage, "enter");
-    assertEquals(fade.mounted, true);
-    assertEquals(fade.className, "fade-enter");
-
-    // Wait for enter → active transition
-    await new Promise((r) => setTimeout(r, 30));
-    assertEquals(fade.stage, "active");
-    assertEquals(fade.className, "fade-active");
-
-    fade.exit();
-    assertEquals(fade.stage, "exit");
-    assertEquals(fade.className, "fade-exit");
-
-    // Wait for exit → idle
-    await new Promise((r) => setTimeout(r, 60));
-    assertEquals(fade.stage, "idle");
-    assertEquals(fade.mounted, false);
-  },
-});
-
-Deno.test({
-  name: "useTransition: initial=true starts as active",
-  async fn() {
-    const t = useTransition({ name: "slide", initial: true });
-    assertEquals(t.stage, "active");
-    assertEquals(t.mounted, true);
-  },
-});
 
 Deno.test({
   name: "useSpring: immediate set",

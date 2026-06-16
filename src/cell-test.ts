@@ -179,13 +179,3 @@ export function testCell<
   });
 }
 
-/** @deprecated bridge() removed in v0.8 — use call({ timeout, retries }, ...) instead */
-export function testBridge(
-  _b: CellDef,
-  _testName: string,
-  _fn: (t: never) => void,
-): void {
-  throw new Error(
-    "testBridge() removed in v0.8 — use call({ timeout, retries }) and testCell() instead",
-  );
-}

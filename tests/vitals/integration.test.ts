@@ -2,7 +2,6 @@
 import { assertEquals, assertExists } from "@std/assert";
 import { createVitalsSystem } from "../../src/vitals/mod.ts";
 import { createTransportProbeClient } from "../../src/vitals/transport-probe.ts";
-import { createRenderProbe } from "../../src/vitals/render-probe.ts";
 import { DEFAULT_THRESHOLDS } from "../../src/vitals/types.ts";
 import type { DiagEvent, VitalAlert } from "../../src/vitals/types.ts";
 
@@ -55,30 +54,6 @@ Deno.test("integration: transport probe client <-> server ping/pong flow", () =>
 
   sys.destroy();
   client.destroy();
-});
-
-Deno.test("integration: render probe detects freeze and provides report", () => {
-  const probe = createRenderProbe({
-    thresholds: DEFAULT_THRESHOLDS,
-    interval: 100,
-    manualTick: true,
-  });
-
-  probe.recordAction("orders/RECALC", "orders");
-  probe.recordDelta();
-  probe.recordDelta();
-
-  const report = probe.tick(3000);
-  assertExists(report);
-  assertEquals(report!.frozenFor >= 2000, true);
-  assertEquals(report!.lastActionBefore, "orders/RECALC");
-  assertEquals(report!.lastCell, "orders");
-  assertEquals(report!.unprocessedDeltas, 2);
-
-  probe.tick(10);
-  assertEquals(probe.getStatus(), "recovered");
-  assertEquals(probe.getPreviousFreezeCount(), 1);
-  probe.destroy();
 });
 
 Deno.test("integration: endpoint data with frozen client", () => {

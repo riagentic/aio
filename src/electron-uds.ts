@@ -30,6 +30,8 @@ const { app, BrowserWindow, Menu, ipcMain, protocol } = require('electron');
 const { connect } = require('net');
 const path = require('path');
 const fs = require('fs');
+// Electron 41 + Linux: CloudPrintEnable triggers mDNS discovery that blocks window.print() dialog via Avahi timeout
+app.commandLine.appendSwitch('disable-features', 'CloudPrintEnable');
 Menu.setApplicationMenu(null);
 app.name = ${JSON.stringify(slug)};
 
@@ -159,6 +161,10 @@ ${tmplBoundsTracking()}
     });
   }
   connectUDS();
+
+  ipcMain.on('__aio:print', () => {
+    if (!win.isDestroyed()) win.webContents.print({ silent: false, printBackground: true });
+  });
 
   ipcMain.on('__aio:send', (_event, json) => {
     const s = sock;

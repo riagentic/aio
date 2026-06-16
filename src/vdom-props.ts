@@ -20,6 +20,17 @@ import {
   _setWrapped,
 } from "./vdom-events.ts";
 
+// SVG namespaced attribute prefixes — require setAttributeNS/removeAttributeNS
+// so the attr lands in the correct namespace. Plain setAttribute puts it in the
+// null namespace, which xlink: consumers (e.g. <use xlink:href>) won't resolve.
+const _XLINK_NS = "http://www.w3.org/1999/xlink";
+const _XML_NS = "http://www.w3.org/XML/1998/namespace";
+function _attrNS(k: string): string | null {
+  if (k.startsWith("xlink:")) return _XLINK_NS;
+  if (k.startsWith("xml:")) return _XML_NS;
+  return null;
+}
+
 // ── applyProps ────────────────────────────────────────────────────────
 
 export function applyProps(
@@ -60,7 +71,9 @@ export function applyProps(
         // deno-lint-ignore no-explicit-any
         (el as any)[k] = typeof (el as any)[k] === "boolean" ? false : "";
       } else {
-        el.removeAttribute(k);
+        const ns = _attrNS(k);
+        if (ns) el.removeAttributeNS(ns, k.slice(k.indexOf(":") + 1));
+        else el.removeAttribute(k);
       }
     }
   }
@@ -151,9 +164,13 @@ export function applyProps(
       // deno-lint-ignore no-explicit-any
       (el as any)[k] = rv ?? "";
     } else if (rv === false || rv == null) {
-      el.removeAttribute(k);
+      const ns = _attrNS(k);
+      if (ns) el.removeAttributeNS(ns, k.slice(k.indexOf(":") + 1));
+      else el.removeAttribute(k);
     } else {
-      el.setAttribute(k, String(rv));
+      const ns = _attrNS(k);
+      if (ns) el.setAttributeNS(ns, k, String(rv));
+      else el.setAttribute(k, String(rv));
     }
   }
 }

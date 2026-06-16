@@ -257,8 +257,6 @@ export type {
 } from "./types.ts";
 export { DEFAULT_HEARTBEAT_INTERVAL, DEFAULT_THRESHOLDS } from "./types.ts";
 export { createLoopProbe } from "./loop-probe.ts";
-/** @deprecated Use createRenderMeter instead — rAF-based, staleness-driven */
-export { createRenderProbe } from "./render-probe.ts";
 export {
   createTransportProbeClient,
   createTransportProbeServer,

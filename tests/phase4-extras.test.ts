@@ -1,6 +1,6 @@
 // Phase 4 Extras — renderer correctness tests + satellite module tests.
 // Covers: rerender error recovery, onCleanup before re-render, useRef persistence,
-// useTransition, useSpring, useVirtualList, useForm, useFieldArray, devtools, dev warnings.
+// useSpring, useVirtualList, useForm, useFieldArray, devtools, dev warnings.
 
 import {
   assert,
@@ -25,7 +25,7 @@ import {
 } from "../src/aio-renderer.ts";
 import type { MountHandle } from "../src/aio-renderer.ts";
 import { useFieldArray, useForm } from "../src/form.ts";
-import { useSpring, useTransition } from "../src/animation.ts";
+import { useSpring } from "../src/animation.ts";
 import { useVirtualList } from "../src/virtual-list.ts";
 import {
   _isDevToolsConnected,
@@ -170,74 +170,6 @@ Deno.test({
       "useRef should return same object across renders",
     );
     await cleanup();
-  },
-});
-
-// ════════════════════════════════════════════════════════════════════
-// useTransition tests
-// ════════════════════════════════════════════════════════════════════
-
-Deno.test({
-  name: "useTransition: starts idle, enter→active→exit→idle",
-  async fn() {
-    const t = useTransition({ name: "fade", duration: 50 });
-
-    assertEquals(t.stage, "idle");
-    assertEquals(t.mounted, false);
-    assertEquals(t.className, "");
-
-    // Enter
-    t.enter();
-    assertEquals(t.stage, "enter");
-    assertEquals(t.mounted, true);
-    assertEquals(t.className, "fade-enter");
-
-    // Wait for enter→active transition (16ms setTimeout)
-    await new Promise((r) => setTimeout(r, 30));
-    assertEquals(t.stage, "active");
-    assertEquals(t.className, "fade-active");
-
-    // Exit
-    t.exit();
-    assertEquals(t.stage, "exit");
-    assertEquals(t.mounted, true);
-    assertEquals(t.className, "fade-exit");
-
-    // Wait for exit→idle (50ms duration)
-    await new Promise((r) => setTimeout(r, 70));
-    assertEquals(t.stage, "idle");
-    assertEquals(t.mounted, false);
-  },
-});
-
-Deno.test({
-  name: "useTransition: toggle flips between enter and exit",
-  async fn() {
-    const t = useTransition({ name: "slide", duration: 50 });
-
-    t.toggle(); // idle → enter
-    assertEquals(t.stage, "enter");
-    assertEquals(t.mounted, true);
-
-    await new Promise((r) => setTimeout(r, 30));
-    assertEquals(t.stage, "active");
-
-    t.toggle(); // active → exit
-    assertEquals(t.stage, "exit");
-
-    await new Promise((r) => setTimeout(r, 70));
-    assertEquals(t.stage, "idle");
-    assertEquals(t.mounted, false);
-  },
-});
-
-Deno.test({
-  name: "useTransition: initial=true starts active",
-  async fn() {
-    const t = useTransition({ name: "fade", duration: 300, initial: true });
-    assertEquals(t.stage, "active");
-    assertEquals(t.mounted, true);
-    assertEquals(t.className, "fade-active");
   },
 });
 

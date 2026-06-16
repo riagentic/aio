@@ -30,16 +30,11 @@ import {
   setTransport as _setTransport,
 } from "./state-transport.ts";
 import { _resetSubs } from "./state-subs.ts";
-import { _idMaps } from "./state-id-maps.ts";
 import {
   _markInitialStateReceived,
   _resetInitialStateFlag,
   _resetMessageState,
 } from "./state-message.ts";
-import {
-  _applyDeltaToSignals,
-  _resetLegacyDeltaWarning,
-} from "./state-legacy-signals.ts";
 
 enablePatches();
 
@@ -59,16 +54,6 @@ export {
   _resetArrayRefStats,
   _shallowEqual,
 } from "./state-array-utils.ts";
-
-// Legacy delta / id-maps
-export {
-  _applyArrPatch,
-  _applyPatch,
-  _applyPathDelete,
-  _deepMergeFiltered,
-  _idMaps,
-  _rebuildIdMaps,
-} from "./state-id-maps.ts";
 
 // Signals
 export {
@@ -132,13 +117,6 @@ export function _injectState(state: Record<string, any>): void {
   _markInitialStateReceived();
 }
 
-/** Inject a delta patch (for testing). */
-export function _injectDelta(
-  delta: { $p?: Record<string, any>; $d?: string[]; $f?: number },
-): void {
-  _applyDeltaToSignals(delta);
-}
-
 /** Get the current internal state (for testing). */
 export function _getState(): Record<string, any> {
   return _stateSignal.peek();
@@ -149,8 +127,5 @@ export function _reset(): void {
   _resetTransport();
   _resetSignals();
   _resetSubs();
-  _idMaps.clear();
   _resetMessageState();
-  // AIO-272: reset legacy delta warning so new connections get fresh warnings
-  _resetLegacyDeltaWarning();
 }

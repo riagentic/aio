@@ -6,6 +6,10 @@
 - [Quickstart](basics/quickstart.md) — install and run your first app
 - [Core Concepts](basics/concepts.md) — mental model and framework rules
 - [Project Structure](basics/project-structure.md) — file organization
+- [API Reference](basics/api-reference.md) — all exports, types, configs
+- [Tutorial](basics/tutorial.md) — step-by-step from zero to running app
+- [FAQ](basics/faq.md) — design decisions and non-goals
+- [Changelog](basics/changelog.md) — version history
 - [Migration Guide](basics/migration.md) — adopting aio in an existing app
 
 ## State Management
@@ -13,6 +17,7 @@
 - [Which Approach?](state/which-approach.md) — decision tree: methods vs
   generators vs actions/reduce
 - [Cells](state/cells.md) — cell() config and anatomy
+- [Cell Visibility](state/cell-visibility.md) — per-cell ui/persist filters
 - [Methods](state/methods.md) — sync/async methods, selectors
 - [State Machines](state/machines.md) — guards and transitions
 - [Composition](state/composition.md) — cross-cell communication
@@ -35,6 +40,7 @@
 - [Advanced](ui/air-advanced.md) — SSR, portals, islands
 - [API Reference](ui/air-reference.md) — cheat sheet
 - [Migration from React](ui/comparison.md) — comparison and migration
+- [AIR vs Frameworks](ui/air-comparison.md) — detailed comparison with Solid, Svelte, Vue
 
 ## Persistence & Data
 

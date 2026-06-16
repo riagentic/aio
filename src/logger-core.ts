@@ -204,19 +204,35 @@ export class AioLogger {
   }
 
   private _writeErrors = 0;
+  // Track in-flight writes so shutdown can flush them. Keeping promises in a
+  // Set instead of awaiting lets writes stay fire-and-forget on the hot path
+  // but still gives us a drain point on shutdown (F-3).
+  private _pending = new Set<Promise<void>>();
   private write(path: string, entry: LogEntry): void {
     if (!this.ready) return;
-    Deno.writeTextFile(path, formatText(entry) + "\n", { append: true }).then(
+    const p = Deno.writeTextFile(path, formatText(entry) + "\n", {
+      append: true,
+    }).then(
       () => {
         this._writeErrors = 0;
       },
-    ).catch(
       (e) => {
         if (this._writeErrors < 3) {
           this._writeErrors++;
           console.error(`[logger] write failed for ${path}: ${e}`);
         }
       },
-    );
+    ).finally(() => {
+      this._pending.delete(p);
+    });
+    this._pending.add(p);
+  }
+
+  /** Drain in-flight writes with a timeout. Safe to call multiple times. */
+  async flush(timeoutMs = 500): Promise<void> {
+    if (this._pending.size === 0) return;
+    const snapshot = [...this._pending];
+    const timeout = new Promise<void>((r) => setTimeout(r, timeoutMs));
+    await Promise.race([Promise.allSettled(snapshot), timeout]);
   }
 }

@@ -50,6 +50,8 @@ export interface SyncOp {
   payload: unknown;
   hlc: HLC;
   confirmed: boolean;
+  /** Client-side creation timestamp (ms) for TTL-based eviction during backpressure. */
+  _clientTs?: number;
 }
 
 /** Wire message: client→server or server→client op */
@@ -72,7 +74,7 @@ export interface AckMessage {
 export interface SyncRequest {
   __sync: {
     clientId: string;
-    cells: Record<string, { lastHlc: HLC | null }>;
+    cells: Record<string, { lastHlc: HLC | null; lastServerTs?: number }>;
     pendingOps: SyncOp[];
   };
 }
@@ -86,12 +88,14 @@ export interface SyncResponse {
       ops: SyncOp[];
       rebase?: SyncOp[];
       lowWater: HLC | Record<string, HLC>;
+      lastServerTs?: number;
     }
     | {
       mode: "snapshot";
       snapshot: Record<string, unknown>;
       ops: SyncOp[];
       lowWater: HLC | Record<string, HLC>;
+      lastServerTs?: number;
     };
 }
 

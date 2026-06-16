@@ -64,8 +64,21 @@ export function createHLC(
     },
 
     restore(hlc: HLC) {
+      const now = wallClock();
+      // Reject untrusted values that would break causal ordering.
+      // Wall clock must be within ±1 hour of current time and non-negative.
+      if (hlc[0] < 0 || hlc[0] > now + SYNC_DEFAULTS.maxDrift) {
+        physical = now;
+        counter = 0;
+        return;
+      }
+      // Counter must be non-negative to avoid wrap-around issues.
+      if (hlc[1] < 0) {
+        counter = 0;
+      } else {
+        counter = hlc[1];
+      }
       physical = hlc[0];
-      counter = hlc[1];
     },
   };
 }

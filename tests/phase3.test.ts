@@ -5,10 +5,10 @@ import { ErrorBoundary, Fragment, h, renderToString } from "../src/vdom.ts";
 import { _setDocument, _unmount, hydrate, mount } from "../src/aio-renderer.ts";
 import {
   _getState,
-  _injectDelta,
   _injectState,
   _reset as _resetAio,
   type CellRef,
+  handleMessage,
 } from "../src/state-core.ts";
 import { useAio, useCell, useLocal } from "../src/adapters/air.ts";
 
@@ -504,8 +504,10 @@ Deno.test({
     const handle = mount(root, App);
     assertEquals(root.innerHTML, "<div>Count: 42</div>");
 
-    // Delta update
-    _injectDelta({ $p: { counter: { count: 99 } } });
+    // Delta update (Immer patches)
+    handleMessage({
+      $patches: [{ op: "replace", path: ["counter", "count"], value: 99 }],
+    });
     handle._flush();
     assertEquals(root.innerHTML, "<div>Count: 99</div>");
 
@@ -581,7 +583,9 @@ Deno.test({
     const handle = mount(root, App);
     assertEquals(root.innerHTML, '<div>{"count":10}</div>');
 
-    _injectDelta({ $p: { counter: { count: 20 } } });
+    handleMessage({
+      $patches: [{ op: "replace", path: ["counter", "count"], value: 20 }],
+    });
     handle._flush();
     assertEquals(root.innerHTML, '<div>{"count":20}</div>');
 
@@ -615,177 +619,3 @@ Deno.test({
   },
 });
 
-// ── AIO Hooks: $id: identity array ─────────────────────────────────
-
-Deno.test({
-  name: "aio-hooks: $id array patch — adds and updates elements",
-  async fn() {
-    _resetAio();
-
-    _injectState({
-      fleet: {
-        members: [
-          { id: "SOL", name: "Solana", price: 100 },
-          { id: "BTC", name: "Bitcoin", price: 50000 },
-        ],
-      },
-    });
-
-    // Verify initial state
-    const state = _getState();
-    assertEquals(state.fleet.members.length, 2);
-
-    // $id: patch — update SOL price, add ETH
-    _injectDelta({
-      $p: {
-        fleet: {
-          members: {
-            $arr: true,
-            "$id:SOL": { id: "SOL", name: "Solana", price: 200 },
-            "$id:ETH": { id: "ETH", name: "Ethereum", price: 3000 },
-          },
-        },
-      },
-    });
-
-    const updated = _getState();
-    assertEquals(updated.fleet.members.length, 3);
-    assertEquals(updated.fleet.members[0].price, 200); // SOL updated
-    assertEquals(updated.fleet.members[2].id, "ETH"); // ETH added
-
-    _resetAio();
-  },
-});
-
-Deno.test({
-  name: "aio-hooks: $id array patch — removes elements via $d",
-  async fn() {
-    _resetAio();
-
-    _injectState({
-      fleet: {
-        members: [
-          { id: "SOL", name: "Solana" },
-          { id: "BTC", name: "Bitcoin" },
-          { id: "ETH", name: "Ethereum" },
-        ],
-      },
-    });
-
-    // Remove BTC via $d path
-    _injectDelta({ $d: ["fleet.members.$id:BTC"] });
-
-    const updated = _getState();
-    assertEquals(updated.fleet.members.length, 2);
-    assertEquals(updated.fleet.members[0].id, "SOL");
-    assertEquals(updated.fleet.members[1].id, "ETH");
-
-    _resetAio();
-  },
-});
-
-Deno.test({
-  name: "aio-hooks: $id array — renders reactively in component",
-  async fn() {
-    const { document, root, cleanup } = createDOM();
-    _setDocument(document);
-    _resetAio();
-
-    const fleet: CellRef = {
-      __aio: { id: "fleet", state: { members: [] } },
-    };
-    _injectState({
-      fleet: {
-        members: [
-          { id: "SOL", name: "Solana" },
-          { id: "BTC", name: "Bitcoin" },
-        ],
-      },
-    });
-
-    const App = () => {
-      const { state } = useCell(fleet);
-      const members = (state as Record<string, unknown>).members as {
-        id: string;
-        name: string;
-      }[];
-      return h(
-        "ul",
-        null,
-        ...members.map((m) => h("li", { key: m.id }, m.name)),
-      );
-    };
-
-    const handle = mount(root, App);
-    assertEquals(root.querySelectorAll("li").length, 2);
-
-    // Add via $id patch
-    _injectDelta({
-      $p: {
-        fleet: {
-          members: {
-            $arr: true,
-            "$id:ETH": { id: "ETH", name: "Ethereum" },
-          },
-        },
-      },
-    });
-    handle._flush();
-    assertEquals(root.querySelectorAll("li").length, 3);
-
-    _unmount(handle);
-    _resetAio();
-    await cleanup();
-  },
-});
-
-// ── AIO Hooks: delta deep merge ($f) ───────────────────────────────
-
-Deno.test({
-  name: "aio-hooks: filtered delta ($f:1) deep merges",
-  async fn() {
-    _resetAio();
-
-    _injectState({
-      dashboard: {
-        stats: { online: 5, total: 10 },
-        config: { theme: "dark" },
-      },
-    });
-
-    // Filtered response — only updates stats.online, preserves stats.total and config
-    _injectDelta({
-      $p: { dashboard: { stats: { online: 8 } } },
-      $f: 1,
-    });
-
-    const state = _getState();
-    assertEquals(state.dashboard.stats.online, 8);
-    assertEquals(state.dashboard.stats.total, 10); // Preserved
-    assertEquals(state.dashboard.config.theme, "dark"); // Preserved
-
-    _resetAio();
-  },
-});
-
-// ── AIO Hooks: simple $d deletion ──────────────────────────────────
-
-Deno.test({
-  name: "aio-hooks: $d deletes cell-level key",
-  async fn() {
-    _resetAio();
-
-    _injectState({
-      counter: { count: 5 },
-      todo: { items: [] },
-    });
-
-    _injectDelta({ $d: ["todo"] });
-
-    const state = _getState();
-    assertEquals(state.counter.count, 5);
-    assertEquals(state.todo, undefined);
-
-    _resetAio();
-  },
-});

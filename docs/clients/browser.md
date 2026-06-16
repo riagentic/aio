@@ -3,7 +3,7 @@
 WebSocket client API, connection lifecycle, and UI state management for browser
 clients.
 
-For the core API (`cell`), see [core.md](../core.md). For Electron & thin
+For the core API (`cell`), see [Concepts](../basics/concepts.md). For Electron & thin
 client, see [electron.md](electron.md).
 
 ## Direct cell access (recommended)

@@ -50,7 +50,7 @@ export {
   type ComposedCells,
 } from "./cell-compose.ts";
 
-export { testBridge, testCell, type TestContext } from "./cell-test.ts";
+export { testCell, type TestContext } from "./cell-test.ts";
 
 export {
   _resetCellRegistry,

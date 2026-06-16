@@ -24,6 +24,10 @@ export function createMemoryStorage(): OpBufferStorage {
         if (ops[i]!.cell === cell && ops[i]!.confirmed) ops.splice(i, 1);
       }
     },
+    async pruneStale(_cell: string, opId: string) {
+      const idx = ops.findIndex((o) => o.id === opId);
+      if (idx !== -1) ops.splice(idx, 1);
+    },
     async countUnconfirmed(cell: string) {
       return ops.filter((o) => o.cell === cell && !o.confirmed).length;
     },

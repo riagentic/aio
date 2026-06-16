@@ -9,6 +9,7 @@
 
 import type { Msg } from "./cell-types.ts";
 import type { ScheduleEffect } from "./schedule.ts";
+import { diagEmit } from "./diagnostic-bus.ts";
 
 // Internal method types — `any` at spread args/return is unavoidable when
 // mapping over heterogeneous method signatures at the type-system boundary.
@@ -193,6 +194,67 @@ export function setKey(method: string): string {
 
 // ── Mutation helpers ───────────────────────────────────────────────
 
+/** Path keys that would walk into JS prototype chain — banned to prevent
+ *  prototype pollution via crafted mutation payloads from network sources. */
+const BANNED_PATH_KEYS = new Set(["__proto__", "constructor", "prototype"]);
+
+/** Bound on path depth to reject pathological payloads early. */
+const MAX_MUTATION_PATH_DEPTH = 32;
+
+/** Validate a mutation path: array of plain strings, no banned keys, bounded depth. */
+function isSafeMutationPath(path: unknown): path is string[] {
+  if (!Array.isArray(path)) return false;
+  if (path.length > MAX_MUTATION_PATH_DEPTH) return false;
+  for (const k of path) {
+    if (typeof k !== "string") return false;
+    if (BANNED_PATH_KEYS.has(k)) return false;
+  }
+  return true;
+}
+
+/** Hard reject a mutation that would compromise integrity (prototype pollution etc).
+ *  Always throws — the dispatch loop catches and reports as REDUCE_ERROR with full context. */
+function _rejectUnsafeMutation(reason: string, m: Mutation): never {
+  const detail = {
+    reason,
+    path: Array.isArray(m.path) ? m.path : null,
+    op: m.op ?? null,
+  };
+  const msg =
+    `[aio:cell] blocked unsafe mutation — ${reason} (path=${JSON.stringify(detail.path)})`;
+  diagEmit({
+    type: "mutation-blocked",
+    severity: "error",
+    source: "cell",
+    message: msg,
+    detail,
+    hint:
+      "Mutation path contained __proto__/constructor/prototype, an unknown array op, or a malformed shape. " +
+      "Likely a malicious or buggy framework-internal action received from an untrusted source.",
+  });
+  throw new Error(msg);
+}
+
+/** Soft warn for a mutation dropped because an intermediate path key is null/undefined.
+ *  Does NOT throw — preserves long-standing behavior, but surfaces the silent drop
+ *  via diag bus + console.warn so app authors can find missing initialization. */
+function _warnDroppedMutation(reason: string, m: Mutation): void {
+  const detail = { reason, path: m.path, op: m.op ?? null };
+  const msg =
+    `[aio:cell] dropped mutation — ${reason} (path=${JSON.stringify(m.path)})`;
+  diagEmit({
+    type: "mutation-dropped",
+    severity: "warning",
+    source: "cell",
+    message: msg,
+    detail,
+    hint:
+      "An async-method mutation walked through a null/undefined parent. " +
+      "Initialize the parent object/array, or guard the access in the method.",
+  });
+  console.warn(msg);
+}
+
 function getNestedValue(obj: unknown, path: string[]): unknown {
   let current = obj;
   for (const key of path) {
@@ -205,53 +267,103 @@ function getNestedValue(obj: unknown, path: string[]): unknown {
 // AIO-240: delete a nested key by path
 function deleteNestedKey(
   obj: Record<string, unknown>,
-  path: string[],
+  m: Mutation,
 ): void {
+  const path = m.path;
   if (path.length === 0) return;
   let current: unknown = obj;
   for (let i = 0; i < path.length - 1; i++) {
-    if (current === null || current === undefined) return;
+    if (current === null || current === undefined) {
+      _warnDroppedMutation(
+        `null intermediate at path[${i - 1}] for delete`,
+        m,
+      );
+      return;
+    }
     current = (current as Record<string, unknown>)[path[i]!];
   }
-  if (current === null || current === undefined) return;
+  if (current === null || current === undefined) {
+    _warnDroppedMutation(`null parent for delete leaf`, m);
+    return;
+  }
   delete (current as Record<string, unknown>)[path[path.length - 1]!];
 }
 
 function setNestedValue(
   obj: Record<string, unknown>,
-  path: string[],
-  value: unknown,
+  m: Mutation,
 ): void {
+  const path = m.path;
   if (path.length === 0) return;
   let current: unknown = obj;
   for (let i = 0; i < path.length - 1; i++) {
-    if (current === null || current === undefined) return; // AIO-231
+    if (current === null || current === undefined) {
+      _warnDroppedMutation(`null intermediate at path[${i - 1}] for set`, m);
+      return;
+    }
     current = (current as Record<string, unknown>)[path[i]!];
   }
-  if (current === null || current === undefined) return; // AIO-231
-  (current as Record<string, unknown>)[path[path.length - 1]!] = value;
+  if (current === null || current === undefined) {
+    _warnDroppedMutation(`null parent for set leaf`, m);
+    return;
+  }
+  (current as Record<string, unknown>)[path[path.length - 1]!] = m.value;
 }
 
 function applyArrayOp(
   obj: Record<string, unknown>,
-  path: string[],
-  op: string,
-  args: unknown[],
+  m: Mutation,
 ): void {
-  const arr = path.length === 0 ? obj : getNestedValue(obj, path);
-  if (!Array.isArray(arr)) return; // deno-lint-ignore no-explicit-any
-  (arr as any)[op](...args);
+  const arr = m.path.length === 0 ? obj : getNestedValue(obj, m.path);
+  if (!Array.isArray(arr)) {
+    _warnDroppedMutation(`target at path is not an array (op=${m.op})`, m);
+    return;
+  }
+  // deno-lint-ignore no-explicit-any
+  (arr as any)[m.op as string](...(m.args ?? []));
 }
 
-/** Apply a batch of mutations (set, delete, array ops) to a state object. */
+/** Apply a batch of mutations (set, delete, array ops) to a state object.
+ *  Hard-rejects mutations with banned-key paths or unknown array ops to
+ *  prevent prototype pollution and sandbox-escape from network-sourced payloads. */
 export function applyMutations(
   s: Record<string, unknown>,
   mutations: Mutation[],
 ): void {
+  if (!Array.isArray(mutations)) {
+    _rejectUnsafeMutation(
+      "mutations payload is not an array",
+      { path: [], value: mutations } as Mutation,
+    );
+  }
   for (const m of mutations) {
-    if (m.op === "delete") deleteNestedKey(s, m.path); // AIO-240: handle property deletion
-    else if (m.op) applyArrayOp(s, m.path, m.op, m.args ?? []);
-    else setNestedValue(s, m.path, m.value);
+    if (!m || typeof m !== "object") {
+      _rejectUnsafeMutation("mutation entry is not an object", {
+        path: [],
+        value: m,
+      } as Mutation);
+    }
+    if (!isSafeMutationPath(m.path)) {
+      _rejectUnsafeMutation(
+        "path contains banned key (__proto__/constructor/prototype), non-string segment, or exceeds depth",
+        m,
+      );
+    }
+    if (m.op === "delete") {
+      deleteNestedKey(s, m);
+    } else if (m.op !== undefined) {
+      if (typeof m.op !== "string" || !ARRAY_MUTATORS.has(m.op)) {
+        _rejectUnsafeMutation(
+          `unsupported array op "${String(m.op)}" — only ${
+            [...ARRAY_MUTATORS].join("/")
+          } are allowed`,
+          m,
+        );
+      }
+      applyArrayOp(s, m);
+    } else {
+      setNestedValue(s, m);
+    }
   }
 }
 

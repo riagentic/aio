@@ -12,6 +12,7 @@ interface OpRow {
   hlc_phys: number;
   hlc_cnt: number;
   hlc_node: string;
+  server_ts?: number;
 }
 
 function rowToOp(r: OpRow): SyncOp {
@@ -47,12 +48,25 @@ export async function persistOp(
   );
 }
 
-/** Load all ops for a cell since the given HLC (exclusive). Null = all ops. */
+/** Load all ops for a cell since the given cursor. Uses server_ts when available (strictly monotonic), falls back to HLC for backwards compat. */
 export async function loadOpsSince(
   db: DB,
   cell: string,
   hlc: HLC | null,
+  lastServerTs?: number | null,
 ): Promise<SyncOp[]> {
+  // Use server_ts cursor when available — strictly monotonic per-server, no concurrency ambiguity
+  if (lastServerTs != null && lastServerTs > 0) {
+    const { rows } = await db.query<OpRow>(
+      `SELECT id, cell, action, payload, hlc_phys, hlc_cnt, hlc_node
+       FROM sync_ops WHERE cell = ? AND server_ts > ?
+       ORDER BY server_ts`,
+      [cell, lastServerTs],
+    );
+    return rows.map(rowToOp);
+  }
+
+  // Fallback to HLC cursor for backwards compat
   if (!hlc) {
     const { rows } = await db.query<OpRow>(
       `SELECT id, cell, action, payload, hlc_phys, hlc_cnt, hlc_node

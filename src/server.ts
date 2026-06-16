@@ -103,6 +103,7 @@ export function createServer(config: ServerConfig): ServerHandle {
     maxConnections: config.maxConnections,
     expose: config.expose,
     allowedOrigins: config.allowedOrigins,
+    strictOrigin: config.strictOrigin,
     clientCounter: config.clientCounter ?? { value: 0 },
     bootId,
     vitalsSystem: config.vitalsSystem,
@@ -222,9 +223,19 @@ export function createServer(config: ServerConfig): ServerHandle {
   }
 
   // ── HTTP request handler (with auth gates) ──
-  const handleRequest = async (req: Request): Promise<Response> => {
+  const handleRequest = async (
+    req: Request,
+    info?: Deno.ServeHandlerInfo,
+  ): Promise<Response> => {
     const url = new URL(req.url);
     const { pathname } = url;
+    // F-4: derive a stable client key for cross-connection abuse tracking.
+    // TCP: remote hostname (IP). UDS: no key — in-process trust, skip denylist.
+    const addr = info?.remoteAddr;
+    const clientKey =
+      addr && "hostname" in addr && typeof addr.hostname === "string"
+        ? addr.hostname
+        : undefined;
 
     // Auth path 1: per-user auth — resolveUser hook or static users map (AIO-171)
     if (_userResolver) {
@@ -232,7 +243,7 @@ export function createServer(config: ServerConfig): ServerHandle {
       if (!token) return new Response("Unauthorized", { status: 401 });
       const user = await _userResolver(token);
       if (!user) return new Response("Unauthorized", { status: 401 });
-      if (pathname === "/ws") return wsMgr.handleWs(req, user);
+      if (pathname === "/ws") return wsMgr.handleWs(req, user, clientKey);
       debug(`http: ${req.method} ${pathname} user=${user.id}`);
       const resp = await staticHandler.serveStatic(pathname, req);
       resp.headers.set("X-Content-Type-Options", "nosniff");
@@ -251,7 +262,7 @@ export function createServer(config: ServerConfig): ServerHandle {
       }
     }
 
-    if (pathname === "/ws") return wsMgr.handleWs(req);
+    if (pathname === "/ws") return wsMgr.handleWs(req, undefined, clientKey);
     debug(`http: ${req.method} ${pathname}`);
     const resp = await staticHandler.serveStatic(pathname, req);
     resp.headers.set("X-Content-Type-Options", "nosniff");

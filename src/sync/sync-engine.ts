@@ -2,7 +2,7 @@
 import type { HLC, SyncConfig, SyncOp, SyncStatus } from "./types.ts";
 import { SYNC_DEFAULTS } from "./types.ts";
 import type { OpBuffer } from "./op-buffer.ts";
-import { createHLC, type HLClock } from "./hlc.ts";
+import { compareHLC, createHLC, type HLClock } from "./hlc.ts";
 import { rebase, type SyncReducer } from "./rebase.ts";
 
 /** Dependencies injected into the client-side sync engine. */
@@ -36,6 +36,7 @@ export interface SyncEngine {
     rebase?: SyncOp[];
     snapshot?: Record<string, Record<string, unknown>>;
     lowWater: HLC | Record<string, HLC>;
+    lastServerTs?: number;
   }): Promise<void>;
   setOnline(online: boolean): void;
   getStatus(cell: string): SyncStatus;
@@ -66,7 +67,13 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
   /** Serialize async work per cell to prevent interleaved state. */
   function withLock(cell: string, fn: () => Promise<void>): Promise<void> {
     const prev = _locks.get(cell) ?? Promise.resolve();
-    const next = prev.then(fn, fn); // run even if prev rejected
+    const next = prev.then(fn, fn).finally(() => {
+      // Clean up completed lock entry to prevent unbounded memory growth.
+      // Only remove if this promise is still the current one (no new work queued).
+      if (_locks.get(cell) === next) {
+        _locks.delete(cell);
+      }
+    });
     _locks.set(cell, next);
     return next;
   }
@@ -91,6 +98,7 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
           payload,
           hlc,
           confirmed: false,
+          _clientTs: Date.now(),
         };
 
         // Try to make room by pruning confirmed ops before rejecting
@@ -120,6 +128,17 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
     handleAck(cell, opId, serverHlc) {
       return withLock(cell, async () => {
         clock.receive(serverHlc);
+        // Apply the acked op to confirmed state BEFORE marking it confirmed.
+        // Otherwise rebaseCell(confirmed, unconfirmed-without-acked) drops the
+        // op's effect from optimistic state — UI snaps back to pre-op value.
+        const pending = (await deps.buffer.getUnconfirmed(cell)).find(
+          (o) => o.id === opId,
+        );
+        if (pending) {
+          const confirmed = deps.getConfirmedState()[cell] ?? {};
+          const next = deps.reducer(confirmed, pending.action, pending.payload);
+          if (next !== null) deps.setConfirmedState(cell, next);
+        }
         await deps.buffer.confirm(cell, opId, serverHlc);
         await rebaseCell(cell);
         updateStatus(cell, { lastSync: Date.now() });
@@ -134,6 +153,11 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
         const next = deps.reducer(confirmed, op.action, op.payload);
         if (next !== null) {
           deps.setConfirmedState(op.cell, next);
+        }
+        // Advance lastHlc cursor for remote broadcasted ops
+        const meta = await deps.buffer.getMeta(op.cell);
+        if (!meta?.lastHlc || compareHLC(op.hlc, meta.lastHlc) > 0) {
+          await deps.buffer.saveMeta(op.cell, { lastHlc: op.hlc });
         }
         await rebaseCell(op.cell);
       });
@@ -184,6 +208,8 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
               hlc: getLW(cell),
             });
           }
+          let newLastHlc: HLC | null = null;
+          if (snap) newLastHlc = getLW(cell);
           const ops = opsByCell.get(cell);
           if (ops) {
             for (const op of ops) {
@@ -191,6 +217,22 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
               const next = deps.reducer(confirmed, op.action, op.payload);
               if (next !== null) deps.setConfirmedState(cell, next);
             }
+            const firstHlc = ops[0]?.hlc;
+            if (firstHlc) {
+              const highest = ops.reduce(
+                (m: HLC, o) => compareHLC(o.hlc, m) > 0 ? o.hlc : m,
+                firstHlc,
+              );
+              if (!newLastHlc || compareHLC(highest, newLastHlc) > 0) {
+                newLastHlc = highest;
+              }
+            }
+          }
+          if (newLastHlc) {
+            await deps.buffer.saveMeta(cell, {
+              lastHlc: newLastHlc,
+              lastServerTs: response.lastServerTs,
+            });
           }
           const s = statuses.get(cell);
           if (s?.status === "blocked") return;
@@ -238,12 +280,12 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
 
     async requestSync() {
       if (!online) return; // don't send while offline
-      const cells: Record<string, { lastHlc: HLC | null }> = {};
+      const cells: Record<string, { lastHlc: HLC | null; lastServerTs?: number }> = {};
       const allPending: SyncOp[] = [];
 
       for (const cell of Object.keys(deps.cells)) {
         const meta = await deps.buffer.getMeta(cell);
-        cells[cell] = { lastHlc: meta?.lastHlc ?? null };
+        cells[cell] = { lastHlc: meta?.lastHlc ?? null, lastServerTs: meta?.lastServerTs };
         const unconfirmed = await deps.buffer.getUnconfirmed(cell);
         allPending.push(...unconfirmed.slice(0, SYNC_DEFAULTS.pendingCap));
         updateStatus(cell, { status: "syncing" });

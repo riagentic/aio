@@ -1,5 +1,58 @@
 # Changelog
 
+## v1.0.0-alpha13
+
+**Hardening release — nuclear audit waves 6-11, no breaking changes.**
+
+### Fixed
+
+- Sync protocol routing gaps (`onTTCommand` guard)
+- Sync cursor never advancing after processing
+- Concurrent HLC drop (was dropping ops on concurrent tick)
+- SVG namespace handling in AIR renderer
+- Watcher sentinel TOCTOU race condition
+- Logger flush race on shutdown
+- Signal listener leak (effect cleanup now disposes listeners)
+- Rate limiter abuse detection
+- Op buffer TTL eviction (respects per-op TTL)
+
+### Docs
+
+- Full docs audit for alpha13 accuracy
+- Fix dead/broken links across all docs
+- New [alpha12→alpha13 upgrade guide](../upgrade/from-alpha12-to-alpha13.md)
+
+---
+
+## v1.0.0-alpha12
+
+**AIR-only renderer, direct reactive cell access, JSX runtime**
+
+### Breaking
+
+- **React renderer removed** — AIR is the sole renderer. Removed: `aio/react`,
+  React adapters, React-specific modules. See
+  [upgrade guide](../upgrade/from-alpha11-to-alpha12.md).
+
+### Added
+
+- **Direct reactive cell access** — `counter.count` is type-safe. Both `cell()`
+  overloads return `… & Readonly<S>` so UI can read state without a hook
+- **JSX runtime wired** — `aio/jsx-runtime` exports, triple-slash references
+  `jsx.d.ts` so `<div/>` type-checks
+- **`deno task check` covers examples** — JSX regressions caught in CI
+- **`cell.fx`** — public effect catalog
+- **`StateOf` type helper** — `StateOf<typeof counter>` extracts state type
+- **`fatalOnStart` option** — fail fast on boot errors
+
+### Fixed
+
+- Blank render in minimal apps (direct cell access without UI hook)
+- Immer draft proxies in effects (clone inside `produce()`)
+- Stale `VERSION` constant (was alpha8 since alpha8)
+
+---
+
 ## v1.0.0-alpha11
 
 ### Breaking Changes

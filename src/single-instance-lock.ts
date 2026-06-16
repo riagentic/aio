@@ -141,6 +141,45 @@ export class AppLock {
     this.appId = appId;
   }
 
+  /** Register process-termination hooks so the lock file is removed on crash /
+   *  SIGINT / SIGTERM / page unload. Idempotent — safe to call from every
+   *  acquire() exit path. Audit F-7: previously only registered in the
+   *  last-ditch fallback, so normal startups leaked stale locks on hard exit. */
+  private _registerCleanupHandlers(): void {
+    if (AppLock._cleanupRegistered) return;
+    AppLock._cleanupRegistered = true;
+    const cleanup = () => this.release();
+    try {
+      addEventListener("unload", cleanup);
+    } catch { /* skip if listener limit */ }
+    try {
+      AppLock._sigintHandler = cleanup;
+      Deno.addSignalListener("SIGINT", cleanup);
+    } catch { /* unsupported on windows */ }
+    try {
+      AppLock._sigtermHandler = cleanup;
+      Deno.addSignalListener("SIGTERM", cleanup);
+    } catch { /* unsupported on windows */ }
+  }
+
+  /** Unregister signal handlers to prevent listener leaks (e.g. in tests). */
+  private _unregisterCleanupHandlers(): void {
+    try {
+      AppLock._sigintHandler && Deno.removeSignalListener("SIGINT", AppLock._sigintHandler);
+    } catch { /* already removed or unsupported */ }
+    try {
+      AppLock._sigtermHandler && Deno.removeSignalListener("SIGTERM", AppLock._sigtermHandler);
+    } catch { /* already removed or unsupported */ }
+    AppLock._sigintHandler = undefined;
+    AppLock._sigtermHandler = undefined;
+    AppLock._cleanupRegistered = false;
+  }
+
+  // ── Shared cleanup state (only one set of handlers ever registered) ──
+  private static _cleanupRegistered = false;
+  private static _sigintHandler?: () => void;
+  private static _sigtermHandler?: () => void;
+
   /** Acquire the lock for this app.
    *  - Cleans stale locks (dead PID)
    *  - Refuses if alive instance exists (killExisting=false)
@@ -167,6 +206,7 @@ export class AppLock {
         };
         if (tryCreateLock(data)) {
           this.acquired = true;
+          this._registerCleanupHandlers();
           return { ok: true };
         }
         // Race — someone else created it between our read and write. Retry.
@@ -216,18 +256,7 @@ export class AppLock {
     };
     if (tryCreateLock(data)) {
       this.acquired = true;
-      // AIO-267: register cleanup handlers for crash/terminate
-      // Only register in production (skip in test environments)
-      const cleanup = () => this.release();
-      try {
-        addEventListener("unload", cleanup);
-      } catch { /* skip if listener limit */ }
-      try {
-        Deno.addSignalListener("SIGINT", cleanup);
-      } catch { /* unsupported on windows */ }
-      try {
-        Deno.addSignalListener("SIGTERM", cleanup);
-      } catch { /* unsupported on windows */ }
+      this._registerCleanupHandlers();
       return { ok: true };
     }
     return { ok: false, existing: readLock(this.appId)! };
@@ -240,7 +269,7 @@ export class AppLock {
     writeLock({ ...existing, ...partial });
   }
 
-  /** Release the lock — removes the file */
+  /** Release the lock — removes the file and unregisters signal handlers */
   release(): void {
     if (!this.acquired) return;
     // Only remove if it's still ours (PID matches)
@@ -249,6 +278,7 @@ export class AppLock {
       removeLock(this.appId);
     }
     this.acquired = false;
+    this._unregisterCleanupHandlers();
   }
 }
 

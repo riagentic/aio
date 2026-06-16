@@ -76,8 +76,9 @@ async function isBundleFresh(cfg: BuildConfig): Promise<boolean> {
 function makeEntryCode(): string {
   return `\
 import { mount as _mount } from 'aio/renderer'
+import { ensureConnected } from 'aio/air'
 import App from './src/App.tsx'
-export function mount(el) { _mount(el, App) }
+export function mount(el) { ensureConnected(); _mount(el, App) }
 `;
 }
 

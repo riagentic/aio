@@ -206,9 +206,8 @@ Deno.test("server: expose skips origin check on WS", async () => {
         "Sec-WebSocket-Version": "13",
       },
     });
-    // Should get 101 (upgrade) not 403 — but Deno returns 101 for successful upgrade
-    // If origin check were active, we'd get 403
-    assertEquals(resp.status !== 403, true);
+    // With audit F-2 fix: Origin is always validated; no allowedOrigins means reject non-local
+    assertEquals(resp.status, 403);
     await resp.body?.cancel();
   });
 });

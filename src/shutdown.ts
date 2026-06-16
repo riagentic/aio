@@ -13,7 +13,7 @@ export interface ShutdownRefs {
   } | null;
   getVitalsCheckTimer: () => ReturnType<typeof setInterval> | undefined;
   getVitalsSystem: () => { destroy: () => void } | undefined;
-  onStop: (() => void) | undefined;
+  onStop: (() => void | Promise<void>) | undefined;
   appLock: { release: () => void } | null;
   scheduleManager: { cancelAll: () => void };
   dispatch: { close: () => void };
@@ -69,10 +69,11 @@ export function createShutdownOrchestrator(
     const vSys = refs.getVitalsSystem();
     if (vSys) vSys.destroy();
 
-    // Phase 4: User hooks
+    // Phase 4: User hooks — await so logger.flush() (wired inside bridge onStop)
+    // completes before we move on to releasing locks and closing subsystems (F-3).
     if (refs.onStop) {
       try {
-        refs.onStop();
+        await refs.onStop();
       } catch (e) {
         log.error(`hook onStop: ${e}`);
       }

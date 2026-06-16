@@ -100,8 +100,8 @@ migration from React codebases.
 
 The core is framework-agnostic. `client` gives you direct access to state,
 actions, and routing — wire it into Svelte, Vue, Solid, or anything else in ~20
-lines. See [air-advanced.md](../ui/air-advanced.md#custom-adapters) for
-examples.
+lines. See [AIR Setup](../ui/air-setup.md#architecture-overview) for the
+client API.
 
 The `client` API is stable and supported — custom adapters built on it are your
 responsibility.
@@ -126,8 +126,7 @@ methods: {
 ```
 
 No `cell({ validate })` needed — it would just be another place to look. See
-[../howto.md](../howto.md#pattern-form-state-with-validation) for the full
-pattern.
+[Methods](../state/methods.md) for form state patterns.
 
 ---
 
@@ -147,7 +146,7 @@ owns its own state, a reverse proxy routes by tenant ID. No shared state adapter
 needed.
 
 If you need multi-server shared state, look at Phoenix LiveView, Elixir
-clustering, or a custom CRDT layer. See [../scaling.md](../scaling.md) for
+clustering, or a custom CRDT layer. See [Scaling](../build/scaling.md) for
 capacity guidance.
 
 ---
@@ -161,7 +160,7 @@ They're architecturally incompatible.
 
 **How to deploy aio:** `deno compile` produces a single binary. Copy it to any
 VPS (DigitalOcean, Hetzner, Fly.io with persistent volumes), run it. One file,
-one process. See [../builds.md](../builds.md) for all compile targets.
+one process. See [Build Targets](../build/targets.md) for all compile targets.
 
 ---
 

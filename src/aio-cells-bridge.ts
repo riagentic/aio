@@ -129,8 +129,12 @@ export function buildLegacyConfig(
       logger?.onStart(composed.cellNames, app.port);
       if (fc.onStart) fc.onStart(app);
     }) as AioConfig<Record<string, unknown>, unknown, unknown>["onStart"],
-    onStop: () => {
+    onStop: async () => {
       logger?.onStop();
+      // Drain in-flight writes before clearing the singleton. Without this,
+      // the final "stopped" entry + any late error logs race the process exit
+      // and can be lost (F-3).
+      await logger?.flush();
       setLogger(null);
       if (appRef.current) {
         composed.destroyAll({
