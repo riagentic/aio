@@ -46,7 +46,6 @@ import type { AioApp } from "./src/aio.ts";
 export type { AioApp };
 /** Core configuration, error, and middleware types for `aio.run()` */
 export type {
-  AioConfig,
   AioError,
   AioUser,
   CellsConfig,

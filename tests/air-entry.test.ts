@@ -1,4 +1,4 @@
-import { assertExists } from "@std/assert";
+import { assertEquals, assertExists } from "@std/assert";
 
 Deno.test("air entry: exports all AIR-native hooks", async () => {
   const air = await import("../src/air.ts");
@@ -16,13 +16,25 @@ Deno.test("air entry: exports all AIR-native hooks", async () => {
   assertExists(air.useRef);
 });
 
-Deno.test("air entry: exports standard hooks", async () => {
-  const air = await import("../src/air.ts");
-  assertExists(air.useState);
-  assertExists(air.useEffect);
-  assertExists(air.useCallback);
-  assertExists(air.useMemo);
+Deno.test("air entry: React compat hooks are NOT on the main surface", async () => {
+  // useState/useEffect/useMemo/useCallback live only at "aio/air/compat".
+  const air = await import("../src/air.ts") as Record<string, unknown>;
+  assertEquals(air.useState, undefined);
+  assertEquals(air.useEffect, undefined);
+  assertEquals(air.useCallback, undefined);
+  assertEquals(air.useMemo, undefined);
+  // memo and useRef are native AIR primitives — they stay on "aio/air".
   assertExists(air.memo);
+  assertExists(air.useRef);
+});
+
+Deno.test("air/compat: exports the React migration hooks", async () => {
+  const compat = await import("../src/air-compat.ts");
+  assertExists(compat.useState);
+  assertExists(compat.useEffect);
+  assertExists(compat.useCallback);
+  assertExists(compat.useMemo);
+  assertExists(compat.useRef);
 });
 
 Deno.test("air entry: exports browser-side protocol symbols", async () => {

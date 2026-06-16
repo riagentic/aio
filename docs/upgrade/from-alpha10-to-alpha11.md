@@ -113,6 +113,12 @@ No logic changes needed — this is a pure rename.
 
 ### Breaking Changes
 
+> **⚠️ Superseded in alpha13.** This `"none"` default applied only to
+> alpha11–alpha12. alpha13 reverted the default back to `"all"` (zero-config
+> persists and syncs again) — see
+> [from-alpha12-to-alpha13](./from-alpha12-to-alpha13.md). If you are on
+> alpha13+, ignore the `"none"` guidance below.
+
 **`persist` default changed to `"none"`.** Cells no longer persist state by
 default. Add `persist: "all"` to cells that need persistence, or set a default
 for all cells:
