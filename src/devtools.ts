@@ -5,6 +5,7 @@ import { type Signal, signal } from "./signal.ts";
 
 // ── Types ───────────────────────────────────────────────────────────
 
+/** One node of the live component tree exposed by {@linkcode DevToolsHandle}. */
 export interface ComponentTreeNode {
   name: string;
   props: Record<string, unknown>;
@@ -14,6 +15,7 @@ export interface ComponentTreeNode {
   lastRenderMs: number;
 }
 
+/** One re-render record in the {@linkcode DevToolsHandle} ring buffer. */
 export interface RenderEvent {
   component: string;
   timestamp: number;
@@ -22,6 +24,7 @@ export interface RenderEvent {
   signalNames?: string[];
 }
 
+/** Live inspection handle returned by {@linkcode connectAioDevTools}. */
 export interface DevToolsHandle {
   /** Current component tree (signal-tracked for live updates). */
   readonly tree: ComponentTreeNode[];

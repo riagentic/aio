@@ -1,5 +1,14 @@
 // cell-test.ts — testCell() harness for isolated cell testing
 
+// One-stop test surface: component harness re-exported so all test APIs share
+// a single import (`aio/testing`) — additive, A1 audit.
+export {
+  setDocument,
+  testComponent,
+  type TestComponentHandle,
+  type TestComponentOptions,
+} from "./test-component.ts";
+
 import type { ScheduleEffect } from "./schedule.ts";
 import type { OwnEffect } from "./own.ts";
 import { resetFlows } from "./flow.ts";

@@ -12,6 +12,7 @@ import {
   writeLock,
 } from "./single-instance-lock.ts";
 import { join } from "@std/path";
+import type { GlobalFlags } from "./am-types.ts";
 
 // ── Entry config cache ──────────────────────────────────────
 
@@ -207,6 +208,49 @@ export function resolvePath(
     if (cur === undefined) return { found: false };
   }
   return { found: true, value: cur };
+}
+
+/** Parse CLI arguments into command, positional args, and global flags (--json, --quiet, --port, --app) */
+export function parseGlobalFlags(
+  raw: string[],
+): { command: string; args: string[]; flags: GlobalFlags } {
+  const flags: GlobalFlags = {};
+  const rest: string[] = [];
+
+  for (const a of raw) {
+    if (a === "--json") flags.json = true;
+    else if (a === "--quiet") flags.quiet = true;
+    else if (a.startsWith("--port=")) {
+      const v = Number(a.slice(7));
+      flags.port = isNaN(v) ? undefined : v;
+    } else if (a.startsWith("--body=")) flags.jsonBody = a.slice(7);
+    else if (a.startsWith("--filter=")) flags.filter = a.slice(9);
+    else if (a.startsWith("--lines=")) {
+      const v = Number(a.slice(8));
+      flags.lines = isNaN(v) ? undefined : v;
+    } else if (a.startsWith("--wait=")) {
+      const v = Number(a.slice(7));
+      flags.wait = isNaN(v) ? undefined : v;
+    } else if (a === "--wait") flags.wait = 0; // bare --wait = use default
+    else if (a === "--follow" || a === "-f") flags.follow = true;
+    else if (a.startsWith("--entry=")) flags.entry = a.slice(8);
+    else if (a.startsWith("--transport=")) flags.transport = a.slice(12);
+    else if (a.startsWith("--app=")) flags.app = a.slice(6);
+    else if (a.startsWith("--client=")) {
+      const v = Number(a.slice(9));
+      flags.client = isNaN(v) ? undefined : v;
+    } else if (
+      a.startsWith("-c") && a.length > 2 && !isNaN(Number(a.slice(2)))
+    ) {
+      flags.client = Number(a.slice(2));
+    } else if (a === "--client") flags.client = 0;
+    else if (a === "--all") flags.all = true;
+    else rest.push(a);
+  }
+
+  const command = rest[0] ?? "help";
+  const args = rest.slice(1);
+  return { command, args, flags };
 }
 
 /** Parse "key=val" pairs → object, auto-parse values */

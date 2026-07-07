@@ -3,8 +3,9 @@
 
 import { ACK_TIMEOUT_MS } from "./protocol-types.ts";
 
-/** Single pending ack: the promise's resolve/reject + a timeout handle. */
+/** Single pending ack: the shared promise, its resolve/reject + a timeout. */
 type PendingEntry = {
+  promise: Promise<void>;
   resolve: () => void;
   reject: (err: Error) => void;
   timer: ReturnType<typeof setTimeout> | undefined;
@@ -19,21 +20,35 @@ export function _setAckTimeoutMs(ms: number): void {
 }
 
 /** Register a pending ack. The returned promise resolves on `_resolveAck`,
- *  rejects on `_rejectAck` (timeout, disconnect, drop), or the timer fires. */
+ *  rejects on `_rejectAck` (timeout, disconnect, drop), or the timer fires.
+ *
+ *  Idempotent per cid: an action passes through several layers that each
+ *  register (cell binding, transport send) — re-registering the same cid
+ *  MUST return the same shared promise instead of overwriting the pending
+ *  entry, otherwise the first caller's promise is orphaned and times out
+ *  even though the server acked (AIO-2.2 regression). */
 export function _registerAck(cid: string): Promise<void> {
-  return new Promise<void>((resolve, reject) => {
-    const timer = _ackTimeoutMs > 0
-      ? setTimeout(() => {
-        _pending.delete(cid);
-        reject(
-          new Error(
-            `method not acknowledged in ${_ackTimeoutMs}ms — server overloaded or disconnected`,
-          ),
-        );
-      }, _ackTimeoutMs)
-      : undefined;
-    _pending.set(cid, { resolve, reject, timer });
+  const existing = _pending.get(cid);
+  if (existing) return existing.promise;
+
+  let resolve!: () => void;
+  let reject!: (err: Error) => void;
+  const promise = new Promise<void>((res, rej) => {
+    resolve = res;
+    reject = rej;
   });
+  const timer = _ackTimeoutMs > 0
+    ? setTimeout(() => {
+      _pending.delete(cid);
+      reject(
+        new Error(
+          `method not acknowledged in ${_ackTimeoutMs}ms — server overloaded or disconnected`,
+        ),
+      );
+    }, _ackTimeoutMs)
+    : undefined;
+  _pending.set(cid, { promise, resolve, reject, timer });
+  return promise;
 }
 
 /** Settle a pending ack. Returns true if a pending entry was found. */

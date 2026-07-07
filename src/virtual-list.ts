@@ -5,6 +5,7 @@ import { type Computed, computed, type Signal, signal } from "./signal.ts";
 
 // ── Types ───────────────────────────────────────────────────────────
 
+/** Configuration for {@linkcode useVirtualList}. */
 export interface VirtualListConfig<T> {
   /** Total items array. */
   items: T[] | Signal<T[]>;
@@ -16,6 +17,7 @@ export interface VirtualListConfig<T> {
   overscan?: number;
 }
 
+/** Virtualized window state returned by {@linkcode useVirtualList}. */
 export interface VirtualListState<T> {
   /** Visible items with their index and offset. */
   readonly visible: { item: T; index: number; offset: number }[];

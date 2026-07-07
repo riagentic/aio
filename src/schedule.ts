@@ -207,7 +207,11 @@ type Log = {
 };
 type TimerEntry = { timerId: ReturnType<typeof setTimeout>; kind: string };
 
-/** Create a schedule manager that handles after/every/at/cron effects and config-level schedule definitions. */
+/**
+ * Create a schedule manager that handles after/every/at/cron effects and
+ * config-level schedule definitions.
+ * @internal Runtime wiring — not public API, stripped from the snapshot.
+ */
 export function createScheduleManager(
   dispatch: (action: { type: string; payload?: unknown }) => void,
   log: Log,

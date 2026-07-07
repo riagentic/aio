@@ -34,6 +34,11 @@ export function diffChildren(
   ctx: RenderCtx,
   isSvg: boolean,
   diffFn: DiffFn,
+  // AIO-395: when the children belong to a Fragment that shares `parent`
+  // with siblings, the region starts AFTER this node — not at
+  // parent.firstChild. Without it, every keyed sub-diff re-anchors at the
+  // parent start and drags its nodes to the front (list reversal).
+  startAnchor: Node | null = null,
 ): void {
   const hasKeys = nextChildren.some(
     (c) => typeof c === "object" && c.key !== undefined,
@@ -91,6 +96,7 @@ export function diffChildren(
       ctx,
       isSvg,
       diffFn,
+      startAnchor,
     );
   } else {
     diffUnkeyed(parent, nextChildren, oldChildren, ctx, isSvg, diffFn);
@@ -167,6 +173,7 @@ function diffKeyed(
   ctx: RenderCtx,
   isSvg: boolean,
   diffFn: DiffFn,
+  startAnchor: Node | null = null,
 ): void {
   // Build map of old keys → old VNode, collect old non-keyed (AIO-114)
   const oldMap = new Map<string | number, VNode>();
@@ -200,7 +207,10 @@ function diffKeyed(
   }
 
   const usedKeys = new Set<string | number>();
-  let lastPlaced: Node | null = null;
+  // AIO-395: seed placement at the region start — `lastPlaced.nextSibling`
+  // then resolves to the first node of THIS fragment's region instead of
+  // parent.firstChild.
+  let lastPlaced: Node | null = startAnchor;
   let nkIdx = 0;
 
   for (const nc of (nextChildren as (VNode | string | number)[])) {

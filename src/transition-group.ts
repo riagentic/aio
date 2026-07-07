@@ -32,6 +32,7 @@ export function _getGroupExitHandler(
 
 // ── Types ───────────────────────────────────────────────────────────
 
+/** Props for {@linkcode TransitionGroup}. */
 export interface TransitionGroupProps {
   /** Transition function for entering items. */
   enter?: TransitionFn;

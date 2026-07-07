@@ -63,6 +63,7 @@ export function cell<
   name: N,
   config: ActionsCellConfig<N, S, A, E, States>,
 ): CellDef<N, A, E, S> & FlatActions<N, A> & Readonly<S>;
+/** Implementation — dispatches on config shape (methods / actions / mixed). */
 // deno-lint-ignore no-explicit-any
 export function cell(name: string, config: any): any {
   const hasMethods = config.methods &&

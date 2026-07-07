@@ -5,11 +5,4 @@
 //   useEffect  → onMount() / effect()
 //   useMemo    → computed()
 //   useCallback→ unnecessary (components are auto-optimized)
-export {
-  _resetHints,
-  useCallback,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-} from "./compat.ts";
+export { useCallback, useEffect, useMemo, useRef, useState } from "./compat.ts";
