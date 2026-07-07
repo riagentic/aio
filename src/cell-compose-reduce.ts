@@ -61,10 +61,35 @@ export function reduceCell(
 
     if (!(lookupKey in transitions)) {
       const allowed = Object.keys(transitions).join(", ");
-      const msg =
-        `[aio:${cellName}] '${action.type}' blocked — machine is in '${currentStatus}' state (allowed: ${
-          allowed || "none"
-        })`;
+      // The auto-injected async self-loops (__setMethod, __error) are only
+      // allowed in the method's own state. If the machine moved on before the
+      // async method resolved, its RESULT is discarded here — a subtle,
+      // timing-dependent footgun. Name the method, not the internal action.
+      let msg: string;
+      let hint: string;
+      if (lookupKey.startsWith("__set")) {
+        const method = lookupKey.charAt(5).toLowerCase() + lookupKey.slice(6);
+        msg =
+          `[aio:${cellName}] async result for '${method}()' discarded — the machine left the method's state and is now in '${currentStatus}' before it resolved (allowed: ${
+            allowed || "none"
+          })`;
+        hint =
+          `'${method}()' resolved after a transition moved '${cellName}' to '${currentStatus}'. Guard against the stale result, or allow '${lookupKey}' in '${currentStatus}'.`;
+      } else if (lookupKey === "__error") {
+        msg =
+          `[aio:${cellName}] async error discarded — machine is in '${currentStatus}' where the failure handler isn't allowed (allowed: ${
+            allowed || "none"
+          })`;
+        hint =
+          `An async method rejected after the machine moved to '${currentStatus}'. Allow '__error' there, or handle the rejection inside the method.`;
+      } else {
+        msg =
+          `[aio:${cellName}] '${action.type}' blocked — machine is in '${currentStatus}' state (allowed: ${
+            allowed || "none"
+          })`;
+        hint =
+          "This action is not allowed in the current machine state. May be intentional (guard) or a bug.";
+      }
       if ((globalThis as Record<string, unknown>).__aioDev) {
         log.warn("aio", msg);
       } else log.debug("aio", msg);
@@ -72,17 +97,13 @@ export function reduceCell(
         type: "action-guarded",
         severity: "info",
         source: "cell-compose",
-        message:
-          `'${action.type}' blocked — machine '${cellName}' in '${currentStatus}' (allowed: ${
-            allowed || "none"
-          })`,
+        message: msg,
         detail: {
           cellName,
           actionType: action.type,
           machineState: currentStatus,
         },
-        hint:
-          "This action is not allowed in the current machine state. May be intentional (guard) or a bug.",
+        hint,
       });
       return { state: fullState, effects: [] };
     }

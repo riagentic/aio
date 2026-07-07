@@ -132,9 +132,10 @@ Deno.test("bindCellReactive installs signal-backed getters", () => {
     },
   });
 
-  // Before reactive binding, state keys are not on the cell
+  // Before reactive binding, state keys return their declared defaults
+  // (AIO-391: creation-time getters; overridden by the signal-backed ones below)
   // deno-lint-ignore no-explicit-any
-  assertEquals((c as any).value, undefined);
+  assertEquals((c as any).value, 10);
 
   // Bind reactively
   bindCellReactive(c);

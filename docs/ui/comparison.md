@@ -145,7 +145,7 @@ const LoginForm = () => (
 
 ```diff
 - import { useState, useEffect, useCallback, useMemo } from "react";
-+ import { useState, useEffect, useCallback, useMemo } from "aio/air";
++ import { useState, useEffect, useCallback, useMemo } from "aio/air/compat";
 ```
 
 AIR provides compat versions. Your code compiles and runs immediately.

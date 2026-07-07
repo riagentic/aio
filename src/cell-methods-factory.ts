@@ -13,7 +13,11 @@ import type {
 } from "./cell-types.ts";
 import { checkReservedKeys, RESERVED_KEYS } from "./cell-types.ts";
 import { normalizeSyncConfig } from "./sync/types.ts";
-import { buildCatalog, makeUnboundGuard } from "./cell-catalog.ts";
+import {
+  buildCatalog,
+  installDefaultStateGetters,
+  makeUnboundGuard,
+} from "./cell-catalog.ts";
 import { validateMachine } from "./cell-machine.ts";
 import type { GeneratorEntry, MethodsCellConfig } from "./cell-config-types.ts";
 import {
@@ -336,6 +340,9 @@ export function createCellFromMethods<
     }
     def[key] = makeUnboundGuard(name, key, value);
   }
+
+  // Pre-bind reads (`cell.key` before aio.run()) return the declared default.
+  installDefaultStateGetters(def as unknown as CellDef);
 
   return def as unknown as
     & CellDef<N, Record<string, never>, Record<string, never>, S>

@@ -1,5 +1,43 @@
 # Changelog
 
+## 1.0.0-alpha14 — AIR test harness + lifecycle fixes (in progress)
+
+Field-report-driven release: AIR renderer lifecycle correctness and a public
+component test harness (risharp session 1–2 feedback).
+
+### Added
+
+- **`useRaf` hook** — requestAnimationFrame loop with automatic cleanup
+  (AIO-392)
+- **Public `testComponent`/`setDocument` harness** — render and drive AIR
+  components in tests without a browser (AIO-393)
+- **`CellEffect` type** — typed self-referencing effects in cell configs
+- **`cell.method.action()` descriptor accessor** — schedule methods without
+  hand-writing action objects
+- **`aio create --vendored`** — git-clones the framework into `dep/aio/`
+  (`git -C dep/aio pull` to update) with the vendored import map already correct
+  (risharp follow-up)
+
+### Fixed
+
+- **`onMount` runs after the DOM subtree and refs are committed** — refs are
+  populated and children attached when it fires (AIO-390)
+- **Pre-bind cell reads return declared state defaults** instead of undefined
+  (AIO-391)
+- **Typed `t.send` senders** in the test harness; refactor-safe scheduling docs
+- **Clearer async-guard diagnostics**, type-only Deno refs, `testCell`
+  self-dispatch
+
+### Docs
+
+- **Backoff on rate-limit** — worked self-scheduling `after`-chain pattern for
+  dynamic polling (replaces hand-rolled `backoffUntil` state), cross-linked from
+  `schedule.every` and static schedules (risoto P2)
+- **Keyed map with default** — declare-once accessor pattern for
+  `Record<string, T>` cell reads in JSX, no sprinkled `?? 0` guards (risoto P3)
+- README vendored snippet now declares `immer` + `@std/path` (the doctor-check
+  footgun)
+
 ## 1.0.0-alpha13 — DX overhaul + production hardening (BREAKING for alpha users)
 
 The largest release since the `feature()` → `cell()` rename: the full DX

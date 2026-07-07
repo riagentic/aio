@@ -179,6 +179,17 @@ export function checkPlatformSafety(code: string, file: string): GraphError[] {
     // Skip Deno.* usage guarded by `typeof Deno` on the same line (runtime-safe pattern)
     const originalLine = code.split("\n")[lineNum - 1] ?? "";
     if (/typeof\s+Deno\b/.test(originalLine)) continue;
+    // Skip type-only references (e.g. `e: Deno.FsEvent`, `as Deno.Conn`,
+    // `Array<Deno.FsEvent>`) — types are erased by esbuild and never reach the
+    // browser. Type position = preceded by a type token (`:` `<` `|` `&` or
+    // as/extends/implements/keyof) and not a call (not immediately followed by
+    // `(`). A bare value-ref after `:` is the only residual miss (rare).
+    const beforeOnLine = stripped.slice(0, m.index);
+    const lineStart = beforeOnLine.slice(beforeOnLine.lastIndexOf("\n") + 1);
+    const afterChar = stripped[m.index + m[0].length] ?? "";
+    const inTypePosition = /[:<|&]\s*$/.test(lineStart) ||
+      /\b(?:as|extends|implements|keyof)\s+$/.test(lineStart);
+    if (inTypePosition && afterChar !== "(") continue;
     errors.push({
       file,
       line: lineNum,

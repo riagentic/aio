@@ -23,12 +23,13 @@ ${c.bold}Usage:${c.reset}
   aio <command> [options]
 
 ${c.bold}Commands:${c.reset}
-  ${c.cyan}create${c.reset} <path> [--mirror]   Create a new aio project
+  ${c.cyan}create${c.reset} <path> [--vendored|--mirror]   Create a new aio project
   ${c.cyan}version${c.reset}                     Show version
   ${c.cyan}help${c.reset}                        Show this help
 
 ${c.bold}Examples:${c.reset}
   ${c.dim}aio create my-app${c.reset}              Download framework + scaffold
+  ${c.dim}aio create my-app --vendored${c.reset}    Git-clone framework (git pull to update)
   ${c.dim}aio create ~/dev/app --mirror${c.reset}   Symlink to local framework (dev)
 
 ${c.dim}Inside a project, use deno tasks:${c.reset}

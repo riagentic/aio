@@ -163,6 +163,9 @@ const Counter = () => <span>{counter.count}</span>;
 - `counter.increment(5)` dispatches to the server with typed args.
 - **Only this component re-renders** when `counter.count` changes.
 - No hooks, no destructuring, no loading guards. Just import and use.
+- Map-shaped state (`balances.sol[key]`): declare the `?? default` guard once as
+  an accessor — see
+  [Keyed map with default](../state/methods.md#keyed-map-with-default).
 
 ### useAio — Subscribe to all state
 
