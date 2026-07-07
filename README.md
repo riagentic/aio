@@ -9,7 +9,7 @@
 - **Write reactive, use generators or atomic actions when needed.**
 - **Pick your target, compile and ship!**
 
-`v1.0.0-alpha13`
+`v1.0.0-alpha14`
 
 > Define state once. It persists, syncs to all clients, drives the UI.
 
@@ -75,8 +75,12 @@ Then in `deno.json`:
 // JSR
 "imports": { "aio": "jsr:@riagentic/aio" }
 
-// Clone — same user code, full source access for debugging
-"imports": { "aio": "./dep/aio/mod.ts" }
+// Clone — also declare aio's deps (Deno can't fetch them transitively)
+"imports": {
+  "aio": "./dep/aio/mod.ts",
+  "immer": "npm:immer@^10",
+  "@std/path": "jsr:@std/path@^1"
+}
 ```
 
 ```sh
@@ -91,7 +95,7 @@ and all compile targets.
 |                 |                                                                                                                                                   |
 | --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **State**       | reactive proxy (Immer) · state machines · generators · selectors · middleware · `call()` coordination · `draft()` · `useLocal` · `page()` routing |
-| **Renderer**    | AIR (~8KB) — signals, JSX, auto-memo, SSR/hydration, forms, animation, virtual-list · React adapter · custom adapter API                          |
+| **Renderer**    | AIR (~8KB) — signals, JSX, auto-memo, SSR/hydration, forms, animation, virtual-list · React-compat hooks (`aio/air/compat`) · custom adapter API  |
 | **SQLite**      | async Worker (non-blocking) · read replicas · ORM · schema migrations · WAL · transactions · custom pragmas                                       |
 | **Persistence** | auto-persist to Deno.Kv · cell-level `persist` config (`include`/`exclude`) per cell                                                              |
 | **Sync**        | WebSocket · delta patches · offline queue (IndexedDB, 24h TTL) · UDS/IPC · cell-level `ui` per-user filtering · periodic resync                   |
@@ -143,7 +147,8 @@ and all compile targets.
 | Self-hosted              |   ✅    |     🔧     |    ✅    |       ✅        |    ✅     |     ✅      |    ✅     |
 | **UI & rendering**       |         |            |          |                 |           |             |           |
 | Built-in renderer        |   ✅    |     ❌     |    ❌    |       ❌        |    ⚛️     |     ❌      |    ❌     |
-| React adapter            |   ✅    |     ✅     |    ✅    |       ✅        |    ⚛️     |     ✅      |    ✅     |
+| React adapter            |   ❌    |     ✅     |    ✅    |       ✅        |    ⚛️     |     ✅      |    ✅     |
+| React-compat hooks       |   ✅    |     ❌     |    ❌    |       ❌        |    ⚛️     |     ❌      |    ❌     |
 | Custom adapter API       |   ✅    |     ❌     |    ❌    |       ❌        |    ❌     |     ❌      |    ❌     |
 | SSR / hydration          |   ✅    |     ❌     |    ❌    |       ❌        |    ✅     |     ✅      |    ❌     |
 
@@ -180,8 +185,7 @@ See [FAQ](docs/basics/faq.md#when-not-to-use-aio) for details.
 [Scheduling](docs/state/scheduling.md)
 
 **UI:** [AIR Setup](docs/ui/air-setup.md) · [Signals](docs/ui/air-signals.md) ·
-[Components](docs/ui/air-components.md) · [React Adapter](docs/ui/react.md) ·
-[AIR vs React](docs/ui/comparison.md)
+[Components](docs/ui/air-components.md) · [AIR vs React](docs/ui/comparison.md)
 
 **Data:** [Auto-Persist](docs/persistence/auto-persist.md) ·
 [SQLite](docs/persistence/sqlite.md) · [CRDT Sync](docs/persistence/crdt.md) ·
@@ -205,12 +209,16 @@ See [FAQ](docs/basics/faq.md#when-not-to-use-aio) for details.
 
 ## Status
 
-**v1.0.0-alpha13** · [JSR](https://jsr.io/@riagentic/aio) · MIT
+**v1.0.0-alpha14** · [JSR](https://jsr.io/@riagentic/aio) · MIT
 
-1958+ tests · security hardened · 194+ bugs fixed across 11 nuclear audit waves
+2005+ tests · security hardened · 194+ bugs fixed across 11 nuclear audit waves
 
-New in alpha13: **AIR-only renderer** (React removed), direct reactive cell
-access as primary UI pattern, typed `StateOf` helper, `cell.fx` public effect
-catalog, `fatalOnStart` option, Immer draft proxy fix in effects. Core (state,
-sync, persistence, cells, scheduling, renderer) is stable. Electron, Android,
-and build targets are functional but less battle-tested.
+New in alpha14: `useRaf` hook, public `testComponent`/`setDocument` test
+harness, `onMount` runs after the DOM subtree and refs are committed, pre-bind
+cell reads return declared state defaults, `CellEffect` type,
+`cell.method.action()` descriptor accessor. Alpha13 was the **DX overhaul**
+(honest `persist`/`ui` defaults, awaitable methods, React-compat hooks moved to
+`aio/air/compat`); alpha12 removed React — **AIR is the sole renderer** with
+direct reactive cell access as the primary UI pattern. Core (state, sync, cells,
+scheduling, renderer) is stable. Electron, Android, and build targets are
+functional but less battle-tested.

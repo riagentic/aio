@@ -5,6 +5,7 @@
 // Called from ensureConnected() for all registered cells.
 
 import type { CellDef } from "./cell-types.ts";
+import { attachMeta } from "./cell-catalog.ts";
 import { getCellSignal } from "./state-signals.ts";
 import { _registerAck } from "./browser-ack.ts";
 
@@ -48,9 +49,12 @@ export function bindCellReactive(
   const initialState = def.__aio.state;
   const sig = getCellSignal(cellName, initialState);
 
-  // Install signal-backed state getters
+  // Install signal-backed state getters. Overrides the creation-time default
+  // getter (installDefaultStateGetters); skip only if a method/selector owns the
+  // name (impossible per AIO-6.1, but defensive — a default getter reads as a
+  // non-function and is correctly overridden).
   for (const key of Object.keys(initialState)) {
-    if (key in def && key !== "__aio") continue;
+    if (typeof (def as Record<string, unknown>)[key] === "function") continue;
 
     Object.defineProperty(def, key, {
       get() {
@@ -75,7 +79,13 @@ export function bindCellReactive(
         sig.set(next);
         return Promise.resolve();
       };
-      (fn as unknown as Record<string, unknown>).type = `${cellName}:${key}`;
+      const label = `${cellName}:${key}`;
+      const creator = Object.assign(
+        (...args: unknown[]) => ({ type: label, payload: { args } }),
+        { type: label },
+      );
+      (creator as unknown as Record<string, unknown>).action = creator;
+      attachMeta(fn, creator);
       Object.defineProperty(def, key, {
         value: fn,
         enumerable: false,
@@ -98,7 +108,6 @@ export function bindCellReactive(
       const creator = (def.__aio.actions as Record<string, unknown>)[key];
       if (typeof creator !== "function") continue;
 
-      const type = (creator as unknown as { type: string }).type;
       const fn = (...args: unknown[]) => {
         const action = (creator as (...a: unknown[]) => {
           type: string;
@@ -115,7 +124,7 @@ export function bindCellReactive(
         promise.catch(() => {});
         return promise;
       };
-      (fn as unknown as { type: string }).type = type;
+      attachMeta(fn, creator);
       (def as Record<string, unknown>)[key] = fn;
     }
   }

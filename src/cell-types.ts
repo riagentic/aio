@@ -30,6 +30,19 @@ export type Catalog<Prefix extends string, T extends Creators> =
     };
   };
 
+/** Derive a concrete action-creator catalog from a methods map M — strips the
+ *  leading state param, preserving each method's arg signature. Lets the
+ *  methods-style cell() overload expose typed Actions (instead of `any`) so
+ *  consumers like testCell's `t.send` get refactor-safe, non-optional senders. */
+export type MethodsToCreators<M> = {
+  [K in keyof M]: M[K] extends (
+    // deno-lint-ignore no-explicit-any
+    s: any,
+    ...args: infer P
+  ) => unknown ? (...args: P) => Record<string, unknown>
+    : never;
+};
+
 /** Discriminated union of all actions — enables auto-narrowing in reduce switch/case.
  *  Foreign/internal actions (init, destroy, cross-cell): cast to Msg for raw access. */
 export type ActionUnion<Prefix extends string, A extends Creators> = {
@@ -266,7 +279,14 @@ export type FlatActions<
     & ((
       ...args: Parameters<A[K]>
     ) => { type: `${N}:${K}`; payload: ReturnType<A[K]> })
-    & { readonly type: `${N}:${K}` };
+    & { readonly type: `${N}:${K}` }
+    & {
+      /** Build the `{ type, payload }` action descriptor — pass to `schedule.*`,
+       *  generators, `waitFor`, etc. Refactor-safe; survives bind. */
+      readonly action: (
+        ...args: Parameters<A[K]>
+      ) => { type: `${N}:${K}`; payload: ReturnType<A[K]> };
+    };
 };
 
 /** Direct calling type — maps method signatures to callable functions on the cell.
@@ -280,12 +300,27 @@ export type FlatActions<
 export type DirectCalling<N extends string = string, M = unknown> = {
   [K in keyof M & string]: // deno-lint-ignore no-explicit-any
     M[K] extends (s: any, ...args: infer P) => Promise<infer R>
-      ? ((...args: P) => Promise<R>) & { readonly type: `${N}:${K}` }
+      ? ((...args: P) => Promise<R>) & MethodMeta<N, K, P>
       // deno-lint-ignore no-explicit-any
       : M[K] extends (s: any, ...args: infer P) => any
-        ? ((...args: P) => Promise<void>) & { readonly type: `${N}:${K}` }
+        ? ((...args: P) => Promise<void>) & MethodMeta<N, K, P>
       : never;
 };
+
+/** Public accessors attached to every bound method: the refactor-safe `.type`
+ *  constant and `.action(...args)` descriptor builder (`{ type, payload }`).
+ *  Method payloads carry `{ args }` — the shape `schedule.*` re-dispatches. */
+export type MethodMeta<
+  N extends string,
+  K extends string,
+  P extends unknown[],
+> =
+  & { readonly type: `${N}:${K}` }
+  & {
+    readonly action: (
+      ...args: P
+    ) => { type: `${N}:${K}`; payload: { args: P } };
+  };
 
 /** Extract the state type from a CellDef — useful for typing selectors and external consumers. */
 // deno-lint-ignore no-explicit-any

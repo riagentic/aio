@@ -4,6 +4,7 @@ import type { ScheduleEffect } from "./schedule.ts";
 import type { OwnEffect } from "./own.ts";
 import { resetFlows } from "./flow.ts";
 import { registerCall, resetPending } from "./cell-impl.ts";
+import { attachMeta } from "./cell-catalog.ts";
 import type { Catalog, CellDef, Creators, Msg } from "./cell-types.ts";
 import { composeCells } from "./cell-compose.ts";
 
@@ -166,6 +167,23 @@ export function testCell<
           [Symbol.toStringTag]: "Promise",
         } as Promise<void>;
       };
+    }
+
+    // Bind the cell's own method functions to the harness send — mirrors what
+    // aio.run() does on bind. Without this, code that self-dispatches (a
+    // cell.method() call inside a method, or a deferred setTimeout self-call)
+    // hits the "called before aio.run()" unbound guard and logs a spurious
+    // warning even though the harness IS driving the cell. Scoped to this def;
+    // each testCell() rebinds, so guard-assertion tests on other cells are
+    // unaffected.
+    for (const key of f.__aio.actionKeys) {
+      const dispatcher = (send as Record<string, unknown>)[key];
+      if (typeof dispatcher !== "function") continue;
+      // Preserve the public `.type` / `.action()` accessors on the rebound
+      // surface so self-dispatch and `cell.method.action()` work in tests too.
+      const creator = (f.__aio.actions as Record<string, unknown>)[key];
+      if (creator) attachMeta(dispatcher, creator);
+      (f as Record<string, unknown>)[key] = dispatcher;
     }
 
     const ctx: TestContext<S, Catalog<N, A>> = {

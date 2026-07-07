@@ -317,6 +317,26 @@ async function mirrorFramework(projectDir: string): Promise<void> {
   );
 }
 
+async function cloneFramework(projectDir: string): Promise<void> {
+  const repoUrl = `https://github.com/${REPO}`;
+  console.log(`\n${c.cyan}▸${c.reset} Cloning aio framework (vendored)...`);
+  const clone = new Deno.Command("git", {
+    args: ["clone", repoUrl, `${projectDir}/dep/aio`],
+    stdout: "inherit",
+    stderr: "inherit",
+  });
+  const { success } = await clone.output().catch(() => ({ success: false }));
+  if (!success) {
+    console.error(
+      `${c.red}✗${c.reset} git clone failed — is git installed and ${repoUrl} reachable?`,
+    );
+    Deno.exit(1);
+  }
+  console.log(
+    `${c.green}✓${c.reset} Framework cloned to dep/aio/ — update anytime with ${c.dim}git -C dep/aio pull${c.reset}`,
+  );
+}
+
 // ── File writer ──
 
 async function writeFile(
@@ -364,6 +384,10 @@ function denoJson(title: string, appType: AppType): string {
   const tasks: Record<string, string> = {};
   if (devCmd) tasks.dev = devCmd;
   if (appType.hasServer) tasks.am = "deno run -A dep/aio/src/am.ts";
+  // Error remedies across src/ say "run: deno task install:electron" — keep it emitted
+  if (isElectronApp) {
+    tasks["install:electron"] = "deno install --allow-scripts=npm:electron";
+  }
   tasks.test = "deno test -A --unstable-kv tests/";
   tasks.compile = `deno run -A dep/aio/src/build.ts ${compileFlags(appType)}`;
   tasks["compile:browser"] = "deno run -A dep/aio/src/build.ts --compile";
@@ -1263,10 +1287,12 @@ export async function create(args: string[]): Promise<void> {
   // Parse args
   let rawPath = "";
   let mirror = false;
+  let vendored = false;
   let typeFlag = "";
   let templateFlag = "";
   for (const a of args) {
     if (a === "--mirror") mirror = true;
+    else if (a === "--vendored") vendored = true;
     else if (a.startsWith("--type=")) typeFlag = a.slice(7);
     else if (a.startsWith("--template=")) templateFlag = a.slice(11);
     else if (!a.startsWith("--")) rawPath = a;
@@ -1362,6 +1388,8 @@ export async function create(args: string[]): Promise<void> {
 
   if (mirror) {
     await mirrorFramework(projectDir);
+  } else if (vendored) {
+    await cloneFramework(projectDir);
   } else {
     await downloadFramework(projectDir);
   }

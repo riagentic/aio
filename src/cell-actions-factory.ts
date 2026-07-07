@@ -15,7 +15,11 @@ import type {
 } from "./cell-types.ts";
 import { checkReservedKeys, RESERVED_KEYS } from "./cell-types.ts";
 import { normalizeSyncConfig } from "./sync/types.ts";
-import { buildCatalog, flattenOnto } from "./cell-catalog.ts";
+import {
+  buildCatalog,
+  flattenOnto,
+  installDefaultStateGetters,
+} from "./cell-catalog.ts";
 import { validateMachine } from "./cell-machine.ts";
 import type { ActionsCellConfig } from "./cell-config-types.ts";
 import type { GeneratorEntry } from "./cell-config-types.ts";
@@ -193,6 +197,9 @@ export function createCellFromActions<
 
   // Flatten action creators + string constants directly onto the cell def
   flattenOnto(def, aCatalog, selectorKeys, name);
+
+  // Pre-bind reads (`cell.key` before aio.run()) return the declared default.
+  installDefaultStateGetters(def as unknown as CellDef);
 
   return def as unknown as CellDef<N, A, E, S> & FlatActions<N, A>;
 }

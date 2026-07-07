@@ -4,7 +4,7 @@
 
 Full-stack TypeScript framework on Deno 2.6+. State-driven apps with auto
 persistence (Deno.Kv), CRDT sync, AIR renderer, optional Electron/Android.
-Elm-like: `(state, action) → { state, effects[] }`. v1.0.0-alpha13, 1958+ tests.
+Elm-like: `(state, action) → { state, effects[] }`. v1.0.0-alpha14, 2005+ tests.
 
 ## Commands
 
@@ -26,9 +26,8 @@ Example: `examples/counter/`. Docs: `docs/` (domain folders).
 
 ### Core flow
 
-1. `aio.run({ features })` boots KV, restores state, starts HTTP+WS server
-2. Browser connects via WS, gets state, renders via AIR (`useFeature()`) or
-   React
+1. `aio.run({ cells })` boots KV, restores state, starts HTTP+WS server
+2. Browser connects via WS, gets state, renders via AIR (`useCell()`) or React
 3. User calls method → server reduces → persists → broadcasts delta → executes
    effects
 4. Effects can dispatch follow-ups (re-entrant queue with overflow guard)
@@ -38,9 +37,8 @@ Example: `examples/counter/`. Docs: `docs/` (domain folders).
 - **aio.ts** — orchestrator: CLI, KV, hooks, dispatch wiring, server
 - **server.ts** — HTTP+WS, file watcher, TSX transpile, delta broadcast, trojan
   API
-- **state-core.ts** — feature registry, dispatch, send(), sync routing
-- **feature-create.ts** — `feature()` API: methods, machines, generators,
-  lifecycle
+- **state-core.ts** — cell registry, dispatch, send(), sync routing
+- **cell-create.ts** — `cell()` API: methods, machines, generators, lifecycle
 - **aio-renderer.ts** — AIR: signal-driven JSX, mount/hydrate/diff
 - **signal.ts** — reactive primitives: signal, computed, effect
 - **browser.ts / browser-protocol.ts** — client runtime, WS, offline queue,

@@ -14,12 +14,27 @@ import { diagEmit } from "./diagnostic-bus.ts";
 
 // Internal method types — `any` at spread args/return is unavoidable when
 // mapping over heterogeneous method signatures at the type-system boundary.
+
+/** Everything a method may return as an effect — a single schedule/own effect or
+ *  an array of them. Use it as the return annotation when a method references its
+ *  own cell (`return self.x.action()`), which otherwise trips TypeScript's
+ *  self-referential-inference guard (TS7022/7023):
+ *
+ *  ```ts
+ *  skip(s): CellEffect { return schedule.after("next", 0, cycle.tick.action()); }
+ *  // conditional: `: CellEffect | void` · async: `: Promise<CellEffect | void>`
+ *  ``` */
+export type CellEffect =
+  | ScheduleEffect
+  | OwnEffect
+  | (ScheduleEffect | OwnEffect)[];
+
 /** Synchronous cell method — mutates state, optionally returns effects */
 export type SyncMethod<S> = (
   s: S,
   // deno-lint-ignore no-explicit-any
   ...args: any[]
-) => void | ScheduleEffect | OwnEffect | (ScheduleEffect | OwnEffect)[];
+) => void | CellEffect;
 /** Async cell method — runs in executor, mutations batched via proxy */
 // deno-lint-ignore no-explicit-any
 export type AsyncMethod<S> = (s: S, ...args: any[]) => Promise<any>;

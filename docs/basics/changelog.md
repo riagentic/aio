@@ -1,5 +1,23 @@
 # Changelog
 
+## v1.0.0-alpha14 (in progress)
+
+**AIR test harness + lifecycle fixes — no breaking changes.**
+
+### Added
+
+- `useRaf` hook — requestAnimationFrame loop with automatic cleanup (AIO-392)
+- Public `testComponent`/`setDocument` harness for AIR component tests (AIO-393)
+- `CellEffect` type for typed self-referencing effects
+- `cell.method.action()` descriptor accessor for scheduling
+
+### Fixed
+
+- `onMount` runs after the DOM subtree and refs are committed (AIO-390)
+- Pre-bind cell reads return declared state defaults (AIO-391)
+- Typed `t.send` senders; clearer async-guard diagnostics; `testCell`
+  self-dispatch
+
 ## v1.0.0-alpha13
 
 **Hardening release — nuclear audit waves 6-11, no breaking changes.**

@@ -234,6 +234,9 @@ export type { ScheduleDef, ScheduleEffect } from "./src/schedule.ts";
 export { own } from "./src/own.ts";
 /** Own effect type for keyed resource slots */
 export type { OwnDisposer, OwnEffect, OwnResource } from "./src/own.ts";
+/** Union of everything a method may return as an effect — use as the return
+ *  annotation when a method references its own cell (breaks TS7022/7023). */
+export type { CellEffect } from "./src/cell-impl.ts";
 
 /**
  * SQLite column helpers for defining table schemas.
