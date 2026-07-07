@@ -7,6 +7,9 @@
  * in cell-compose.ts; patch application uses Immer's applyPatches here.
  * Both the React and AIR adapters consume this module.
  *
+ * @experimental The whole `aio/state-core` entry is for custom-transport /
+ * custom-client authors and is excluded from the 1.0 stability guarantee.
+ *
  * @example
  * ```ts
  * import { getCellSignal, send, setTransport } from "aio/state-core";
@@ -45,6 +48,7 @@ export type { HandleResult } from "./state-message.ts";
 export type { ArrayRefStats } from "./state-array-utils.ts";
 
 // Array utilities
+/** @internal Cross-module wiring — not public API, stripped from the snapshot. */
 export {
   _BLOCKED_KEYS,
   _checkWastedRenders,
@@ -64,22 +68,23 @@ export {
 
 // Subscriptions
 export {
-  _accessedPaths,
   cancelSubsTimer,
   collapsePaths,
   resendSubscriptions,
   trackPath,
 } from "./state-subs.ts";
+/** @internal Cross-module wiring — not public API, stripped from the snapshot. */
+export { _accessedPaths } from "./state-subs.ts";
 
 // Transport & dispatch
 export {
-  _resolveWithFallback,
-  _trackingProxy,
   createSendProxy,
   flushOfflineQueue,
   send,
   setSyncHandler,
 } from "./state-transport.ts";
+/** @internal Cross-module wiring — not public API, stripped from the snapshot. */
+export { _resolveWithFallback, _trackingProxy } from "./state-transport.ts";
 
 // Message handling & lifecycle
 export {
@@ -110,20 +115,29 @@ export function setTransport(
 
 // ── Testing helpers ──────────────────────────────────────────────────
 
-/** Inject state directly (for testing without transport). */
+/**
+ * Inject state directly (for testing without transport).
+ * @internal Test helper — not public API, stripped from the snapshot.
+ */
 // deno-lint-ignore no-explicit-any
 export function _injectState(state: Record<string, any>): void {
   _applyFullState(state);
   _markInitialStateReceived();
 }
 
-/** Get the current internal state (for testing). */
+/**
+ * Get the current internal state (for testing).
+ * @internal Test helper — not public API, stripped from the snapshot.
+ */
 // deno-lint-ignore no-explicit-any
 export function _getState(): Record<string, any> {
   return _stateSignal.peek();
 }
 
-/** Reset all internal state (for test isolation). */
+/**
+ * Reset all internal state (for test isolation).
+ * @internal Test helper — not public API, stripped from the snapshot.
+ */
 export function _reset(): void {
   _resetTransport();
   _resetSignals();

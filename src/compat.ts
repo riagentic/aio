@@ -31,6 +31,10 @@ export const useRef = rendererUseRef;
 
 // ── useState ───────────────────────────────────────────────────────
 
+/**
+ * React-compatible `useState`, signal-backed. Migration shim — prefer
+ * `useLocal()` for object state or `signal()` for module-scoped state.
+ */
 export function useState<T>(
   initial: T | (() => T),
 ): [T, (next: T | ((prev: T) => T)) => void] {
@@ -63,6 +67,10 @@ export function useState<T>(
 
 // ── useEffect ──────────────────────────────────────────────────────
 
+/**
+ * React-compatible `useEffect` mapped to AIR lifecycle primitives; deps are
+ * honored (React semantics). Migration shim — prefer `onMount()` / `effect()`.
+ */
 export function useEffect(
   fn: () => void | (() => void),
   deps?: unknown[],
@@ -150,6 +158,10 @@ export function useEffect(
 
 // ── useCallback ────────────────────────────────────────────────────
 
+/**
+ * React-compatible `useCallback`. Identity shim — AIR components are
+ * auto-optimized, so this is safe to remove after migration.
+ */
 export function useCallback<T>(fn: T, _deps?: unknown[]): T {
   _hint(
     "useCallback",
@@ -160,6 +172,10 @@ export function useCallback<T>(fn: T, _deps?: unknown[]): T {
 
 // ── useMemo ────────────────────────────────────────────────────────
 
+/**
+ * React-compatible `useMemo` with dep comparison. Migration shim — prefer
+ * `computed()` for cached derivations.
+ */
 export function useMemo<T>(fn: () => T, _deps?: unknown[]): T {
   _hint(
     "useMemo",

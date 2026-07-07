@@ -3,6 +3,7 @@ import type { ComponentFn, VChild, VNode } from "./vdom.ts";
 import { signal } from "./signal.ts";
 import { onCleanup, onMount, useRef } from "./aio-renderer.ts";
 
+/** When {@linkcode Defer} starts loading — a named trigger or a timer in ms. */
 export type DeferTrigger =
   | "viewport"
   | "idle"
@@ -11,6 +12,7 @@ export type DeferTrigger =
   | "immediate"
   | number; // timer in ms
 
+/** Props for {@linkcode Defer}. */
 export interface DeferProps {
   /** When to start loading. Number = timer in ms. */
   trigger: DeferTrigger;
@@ -30,6 +32,16 @@ export interface DeferProps {
 
 type DeferState = "idle" | "loading" | "loaded" | "error";
 
+/**
+ * Trigger-based lazy loading — renders a placeholder until the trigger fires
+ * (viewport visibility, idle, hover, interaction, or a timer), then loads and
+ * mounts the component.
+ *
+ * @example
+ * ```tsx
+ * <Defer trigger="viewport" load={() => import("./Chart.tsx")} placeholder={<Spinner />} />
+ * ```
+ */
 export function Defer(props: DeferProps): VNode | null {
   const {
     trigger,

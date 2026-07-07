@@ -14,7 +14,9 @@ let _rSearch: URLSearchParams = typeof location !== "undefined"
 
 export const _rListeners = new Listeners<void>();
 
+/** Current pathname as a signal — auto-tracked in AIR components. */
 export const routePath: Signal<string> = signal<string>(_rPath);
+/** Current query string as a `URLSearchParams` signal. */
 export const routeSearch: Signal<URLSearchParams> = signal<URLSearchParams>(
   _rSearch,
 );
@@ -100,6 +102,10 @@ export function matchPath(
   return params;
 }
 
+/**
+ * Programmatic navigation. Pass a path (`navigate("/users/42")`, optionally
+ * `{ replace: true }`) or a history delta (`navigate(-1)`).
+ */
 export function navigate(
   to: string | number,
   opts?: { replace?: boolean },

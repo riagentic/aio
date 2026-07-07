@@ -30,6 +30,7 @@ export type AioIPC = {
   onClose: (fn: () => void) => void;
 };
 
+/** Match state returned by {@linkcode useRoute}. */
 export type RouteState = {
   path: string;
   params: Record<string, string>;
@@ -37,6 +38,7 @@ export type RouteState = {
   matched: boolean;
 };
 
+/** Props for {@linkcode Route}. */
 export type RouteProps = {
   path?: string;
   index?: boolean;
@@ -44,6 +46,7 @@ export type RouteProps = {
   children?: unknown;
 };
 
+/** Props for {@linkcode Link} / {@linkcode NavLink}. */
 export type LinkProps = {
   to: string;
   replace?: boolean;

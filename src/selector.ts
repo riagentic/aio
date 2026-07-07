@@ -74,6 +74,7 @@ export function createSelector<S, R1, R2, R3, R4, R5, R6, Result>(
   selector6: Selector<S, R6>,
   resultFunc: (r1: R1, r2: R2, r3: R3, r4: R4, r5: R5, r6: R6) => Result,
 ): Selector<S, Result>;
+/** Implementation — variadic: N input selectors followed by a combiner. */
 export function createSelector<S, Result>(
   ...args: [...Selector<S, unknown>[], (...inputs: unknown[]) => Result]
 ): Selector<S, Result> {

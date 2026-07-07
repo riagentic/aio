@@ -383,7 +383,7 @@ mocking needed.
 Compile to a standalone binary:
 
 ```sh
-deno run -A jsr:@riagentic/aio@^1.0.0-alpha13/src/build --compile --service
+deno run -A jsr:@riagentic/aio@^1.0.0-alpha14/build --compile --service
 ```
 
 This produces two files: a binary and a systemd unit file. The binary is

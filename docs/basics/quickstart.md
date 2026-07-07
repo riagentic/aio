@@ -65,13 +65,13 @@ import { aio, cell } from "aio";
   "tasks": {
     "dev": "deno run -A src/app.ts",
     "install:electron": "deno install --allow-scripts=npm:electron",
-    "am": "deno run -A jsr:@riagentic/aio/src/am",
+    "am": "deno run -A jsr:@riagentic/aio/am",
     "test": "deno test -A --unstable-kv tests/",
-    "compile:browser": "deno run -A jsr:@riagentic/aio/src/build --compile",
-    "compile:electron": "deno run -A jsr:@riagentic/aio/src/build --compile --electron",
-    "compile:cli": "deno run -A jsr:@riagentic/aio/src/build --compile --cli",
-    "compile:service": "deno run -A jsr:@riagentic/aio/src/build --compile --service --headless",
-    "compile:android": "deno run -A jsr:@riagentic/aio/src/build --android"
+    "compile:browser": "deno run -A jsr:@riagentic/aio/build --compile",
+    "compile:electron": "deno run -A jsr:@riagentic/aio/build --compile --electron",
+    "compile:cli": "deno run -A jsr:@riagentic/aio/build --compile --cli",
+    "compile:service": "deno run -A jsr:@riagentic/aio/build --compile --service --headless",
+    "compile:android": "deno run -A jsr:@riagentic/aio/build --android"
   }
 }
 ```

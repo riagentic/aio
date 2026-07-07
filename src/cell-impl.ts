@@ -72,6 +72,7 @@ export type CallOptions = { timeout?: number; retries?: number };
  * const reserved = await call({ timeout: 5000, retries: 2 }, () => inventory.reserve(items))
  */
 export function call<T>(opts: CallOptions, fn: () => Promise<T>): Promise<T>;
+/** Implementation — see the documented overload above. */
 export function call(
   opts: CallOptions,
   fn: () => Promise<unknown>,
@@ -529,7 +530,15 @@ export function createLiveProxy<S extends Record<string, unknown>>(
   // proxy, it freezes the target → makes it non-extensible → ownKeys trap breaks
   // when state has keys the target doesn't. Fix: sync target keys on each ownKeys
   // call, and use configurable+writable descriptors so keys can always be added.
-  const target = {} as S;
+  //
+  // The target's KIND must match the proxied value: Array.isArray() and
+  // JSON.stringify() inspect the proxy's target, so an array value behind an
+  // object target serializes as {"0":...} instead of [...] — corrupting any
+  // nested array read through the proxy.
+  const initialValue = path.length === 0
+    ? getState()
+    : getNestedValue(getState(), path);
+  const target = (Array.isArray(initialValue) ? [] : {}) as unknown as S;
 
   const handler: ProxyHandler<S> = {
     get(_target, prop, _receiver) {
@@ -665,6 +674,16 @@ export function createLiveProxy<S extends Record<string, unknown>>(
       // Check fresh state directly — target may be stale if state was replaced.
       const freshObj = fresh as Record<string, unknown>;
       if (!(prop in freshObj)) return undefined;
+      // Array targets: `length` is non-configurable on the target, so the
+      // reported descriptor must match (ES proxy invariant) or the trap throws.
+      if (prop === "length" && Array.isArray(fresh)) {
+        return {
+          configurable: false,
+          enumerable: false,
+          writable: true,
+          value: (fresh as unknown[]).length,
+        };
+      }
       return {
         configurable: true,
         enumerable: true,

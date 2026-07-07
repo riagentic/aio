@@ -19,6 +19,12 @@ function _ensureTTSub(): void {
   if (current) _ttSig.set({ ...current });
 }
 
+/**
+ * Signal-based hook exposing the time-travel debugger: action history plus
+ * undo/redo/goto/pause controls. Returns `null` until time travel is active.
+ *
+ * @experimental Not covered by the 1.0 stability guarantee — API may change.
+ */
 export function useTimeTravel(): {
   entries: { id: number; type: string; ts: number }[];
   index: number;

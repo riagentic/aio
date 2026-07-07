@@ -1417,7 +1417,7 @@ Deno.test({
 
 // ── Package exports / config correctness ─────────────────────────────────────
 
-Deno.test("config: deno.json exports ./src/build and ./src/am", async () => {
+Deno.test("config: deno.json exports ./build and ./am", async () => {
   const denoJsonPath = join(import.meta.dirname ?? ".", "..", "deno.json");
   const denoJson = JSON.parse(await Deno.readTextFile(denoJsonPath));
   const exports = denoJson.exports as Record<string, string> | string;
@@ -1428,15 +1428,23 @@ Deno.test("config: deno.json exports ./src/build and ./src/am", async () => {
     "deno.json exports must be an object to expose multiple entrypoints",
   );
   assertEquals(
-    "./src/build" in (exports as Record<string, string>),
+    "./build" in (exports as Record<string, string>),
     true,
-    "deno.json must export ./src/build — required by compile:* tasks (jsr:@riagentic/aio/src/build)",
+    "deno.json must export ./build — required by compile:* tasks (jsr:@riagentic/aio/build)",
   );
   assertEquals(
-    "./src/am" in (exports as Record<string, string>),
+    "./am" in (exports as Record<string, string>),
     true,
-    "deno.json must export ./src/am — required by am task (jsr:@riagentic/aio/src/am)",
+    "deno.json must export ./am — required by am task (jsr:@riagentic/aio/am)",
   );
+  // A1 audit: path-shaped and superseded entries must stay gone
+  for (const gone of ["./src/build", "./src/am", "./adapters/air"]) {
+    assertEquals(
+      gone in (exports as Record<string, string>),
+      false,
+      `deno.json must not export ${gone} — removed in the A1 surface audit`,
+    );
+  }
 });
 
 // --- buildBrowserImportMap tests ---

@@ -12,6 +12,7 @@ export function cell(
   name: string,
   config: {
     state?: any;
+    scope?: "client";
     actions?: _Creators;
     methods?: Record<string, unknown>;
     generators?: Record<string, unknown>;
@@ -66,6 +67,25 @@ export function cell(
         bound: false,
       },
     };
+    // AIO-5.1: client-scoped cells run their sync methods locally against the
+    // cell signal — mark the def so bindCellReactive takes the client branch
+    // instead of wiring server dispatch (parity with cell-create.ts).
+    if (config.scope === "client") {
+      for (const [key, fn] of Object.entries(config.methods)) {
+        if (
+          (fn as { constructor: { name: string } }).constructor.name ===
+            "AsyncFunction"
+        ) {
+          throw new Error(
+            `[${name}] client-scoped cells support sync methods only (no ` +
+              `server round-trip exists); do async work in the component and ` +
+              `call sync methods with results — '${key}' is async`,
+          );
+        }
+      }
+      (def.__aio as Record<string, unknown>).scope = "client";
+      (def.__aio as Record<string, unknown>).clientMethods = config.methods;
+    }
     for (const [key, value] of Object.entries(cat)) {
       def[key] = value;
     }

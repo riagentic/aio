@@ -2,12 +2,29 @@
 
 ## v1.0.0-alpha14 (in progress)
 
-**AIR test harness + lifecycle fixes — no breaking changes.**
+**AIR test harness, lifecycle fixes + public-surface audit — BREAKING (entry
+renames, surface trims).** See
+[upgrade guide](../upgrade/from-alpha13-to-alpha14.md).
+
+### Breaking (public-surface audit, roadmap A1)
+
+- Entry renames: `./src/build` → `./build` (exports `build(cfg?)`, no
+  build-on-import), `./src/am` → `./am` (pure CLI entry, zero exports)
+- `aio/adapters/air` removed — import `useAio`/`useLocal`/`useConnected` from
+  `aio/air`
+- `aio/air` trimmed 145 → 101 exports: state re-exports moved to `aio` only;
+  `_`-internals and protocol plumbing hidden; `useTimeTravel` `@experimental`
+- `aio/state-core` entry + `aio/sync` engine internals tagged `@experimental`;
+  `aio/db` worker wire format and `aio/air/compat` `_resetHints` hidden
 
 ### Added
 
 - `useRaf` hook — requestAnimationFrame loop with automatic cleanup (AIO-392)
 - Public `testComponent`/`setDocument` harness for AIR component tests (AIO-393)
+- `aio create --vendored` — clones the framework into `dep/aio/` with the import
+  map already correct
+- `aio/testing` re-exports `testComponent`/`setDocument` — one import for all
+  test APIs
 - `CellEffect` type for typed self-referencing effects
 - `cell.method.action()` descriptor accessor for scheduling
 
@@ -15,6 +32,11 @@
 
 - `onMount` runs after the DOM subtree and refs are committed (AIO-390)
 - Pre-bind cell reads return declared state defaults (AIO-391)
+- Fragment-in-map keyed children keep DOM order across re-renders (AIO-395)
+- Awaited methods no longer falsely time out — ack registration is idempotent
+  per cid (AIO-396)
+- Nested array state reads serialize as arrays through the live proxy (AIO-397)
+- Browser-side `cell()` honors `scope: "client"` (AIO-398)
 - Typed `t.send` senders; clearer async-guard diagnostics; `testCell`
   self-dispatch
 

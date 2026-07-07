@@ -1,18 +1,17 @@
 import { assertEquals } from "@std/assert";
 import {
-  formatUptime,
-  isProcessAlive,
   parseGlobalFlags,
   parsePayload,
   readPid,
   removePid,
-  resolveControlPort,
   resolvePath,
   resolvePort,
   writePid,
-} from "../src/am.ts";
-import type { PidFile } from "../src/am.ts";
-import { lockPath } from "../src/single-instance-lock.ts";
+} from "../src/am-utils.ts";
+import { formatUptime } from "../src/am-output.ts";
+import { resolveControlPort } from "../src/am-http.ts";
+import { isProcessAlive, lockPath } from "../src/single-instance-lock.ts";
+import type { LockData as PidFile } from "../src/single-instance-lock.ts";
 import { createServer } from "../src/server.ts";
 import { join } from "@std/path";
 import { VERSION } from "../src/aio.ts";

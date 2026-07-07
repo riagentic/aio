@@ -38,6 +38,7 @@ function factory<D extends string, T extends Creators>(
   domain: D,
   creators: T,
 ): FactoryResult<T, D>;
+/** Implementation — with or without a domain-prefix first argument. */
 function factory(first: unknown, second?: unknown): unknown {
   const domain = typeof first === "string" ? first : "";
   const creators = (typeof first === "string" ? second : first) as Creators;
