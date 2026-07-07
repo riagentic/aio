@@ -67,7 +67,10 @@ export type AioErrorContext = {
 
 export type ReportErrorOpts = {
   onError?: (err: AioError) => void;
-  logger?: { error: (msg: string, data?: Record<string, unknown>) => void };
+  logger?: {
+    error: (msg: string, data?: Record<string, unknown>) => void;
+    warn?: (msg: string, data?: Record<string, unknown>) => void;
+  };
   tt?: {
     markError: (
       err: {
@@ -118,6 +121,53 @@ const WARN_CODES: Set<AioErrorCode> = new Set([
   "TRANSPORT_STALL",
   "LOOP_SATURATED",
 ]);
+
+// Perf/vitals codes fire repeatedly by nature — a slow effect trips the budget
+// on every call, a long-running compute effect trips the timeout each pass.
+// Reporting each one floods the console/log with identical noise. We throttle
+// the CONSOLE + logger output per (code, cell/action) to once per window, while
+// still counting them and surfacing them on the diagnostic bus so nothing is
+// silently lost. The window resets so a genuinely recurring regression is still
+// re-surfaced periodically.
+const THROTTLED_CODES: Set<AioErrorCode> = new Set([
+  "BUDGET_REDUCE",
+  "BUDGET_EFFECT",
+  "EFFECT_TIMEOUT",
+  "UI_FREEZE",
+  "TRANSPORT_STALL",
+  "LOOP_SATURATED",
+]);
+const _perfThrottleMs = 10_000;
+const _perfLastReported = new Map<string, number>();
+const _perfSuppressed = new Map<string, number>();
+
+/** True if this repetitive perf/vitals report should be suppressed from the
+ *  console/log right now. Returns a suppressed-count on the first emission after
+ *  a throttle window so the dev sees how many were coalesced. */
+function _perfThrottle(
+  err: AioError,
+): { suppress: boolean; coalesced: number } {
+  if (!THROTTLED_CODES.has(err.code)) return { suppress: false, coalesced: 0 };
+  const key = `${err.code}:${
+    err.context.actionType ?? err.context.cellName ?? ""
+  }`;
+  const now = Date.now();
+  const last = _perfLastReported.get(key);
+  if (last !== undefined && now - last < _perfThrottleMs) {
+    _perfSuppressed.set(key, (_perfSuppressed.get(key) ?? 0) + 1);
+    return { suppress: true, coalesced: 0 };
+  }
+  _perfLastReported.set(key, now);
+  const coalesced = _perfSuppressed.get(key) ?? 0;
+  _perfSuppressed.delete(key);
+  return { suppress: false, coalesced };
+}
+
+/** Reset perf-throttle state — for test isolation. */
+export function _resetPerfThrottle(): void {
+  _perfLastReported.clear();
+  _perfSuppressed.clear();
+}
 
 // ─── Diagnostic bus bridge ───────────────────────────────────────────────────
 
@@ -340,6 +390,12 @@ function generateTip(err: AioError): string | undefined {
       return "Tip: State persist failed — changes are in memory but will be lost on restart. Check disk space and file permissions.";
     case "PERSIST_SCHEMA":
       return "Tip: Stored state and framework persistence-schema versions are incompatible. Upgrade aio (older store) or restore a backup (newer store); as a last resort clear the app's KV store.";
+    case "UI_FREEZE":
+      return "Tip: The UI thread stalled — look for synchronous heavy work in render paths or event handlers. Move computation into an async effect or split it with useRaf/setTimeout batches.";
+    case "TRANSPORT_STALL":
+      return "Tip: The WebSocket made no progress under backpressure — the client can't keep up with broadcast volume. Reduce update frequency (debounce state writes), narrow `ui` filters so less state syncs, or check for a saturated network link.";
+    case "LOOP_SATURATED":
+      return "Tip: The event loop is saturated — work is queued faster than it drains. Look for tight dispatch loops, unbatched state writes, or schedules firing faster than their handlers finish (self-scheduling `after` chains beat rapid `every`).";
     default:
       return undefined;
   }
@@ -460,24 +516,34 @@ export function reportError(err: AioError, opts: ReportErrorOpts = {}): void {
   try {
     const { onError, logger, tt, countError, prod } = opts;
     const isWarn = WARN_CODES.has(err.code);
+    // Throttle repetitive perf/vitals noise from the console + logger (counts
+    // and the diagnostic bus below still see every occurrence).
+    const { suppress, coalesced } = _perfThrottle(err);
 
     // Console output
-    if (prod) {
-      const compact = formatErrorCompact(err);
-      if (isWarn) console.warn(compact);
-      else console.error(compact);
-    } else {
-      const box = formatErrorBox(err);
-      if (isWarn) console.warn(box);
-      else console.error(box);
+    if (!suppress) {
+      const suffix = coalesced > 0
+        ? ` (${coalesced} more suppressed in the last ${
+          _perfThrottleMs / 1000
+        }s)`
+        : "";
+      if (prod) {
+        const compact = formatErrorCompact(err) + suffix;
+        if (isWarn) console.warn(compact);
+        else console.error(compact);
+      } else {
+        const box = formatErrorBox(err) + (suffix ? `\n${suffix.trim()}` : "");
+        if (isWarn) console.warn(box);
+        else console.error(box);
+      }
     }
 
-    // Logger
-    if (logger) {
-      logger.error(
-        formatErrorCompact(err),
-        err.toJSON() as Record<string, unknown>,
-      );
+    // Logger — warn-level for WARN_CODES (a slow effect is not an error), and
+    // suppressed while throttled so the structured log doesn't flood either.
+    if (logger && !suppress) {
+      const payload = err.toJSON() as Record<string, unknown>;
+      const write = isWarn && logger.warn ? logger.warn : logger.error;
+      write(formatErrorCompact(err), payload);
     }
 
     // onError hook (guarded)

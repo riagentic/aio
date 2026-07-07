@@ -439,7 +439,24 @@ function _handleUDSConn(
           }
           try {
             const action = JSON.parse(line);
-            if (action && typeof action.type === "string") onAction(action);
+            if (action && typeof action.type === "string") {
+              onAction(action);
+              // AIO-402: per-action ack — parity with the WS server
+              // (server-ws.ts). Settles the Promise returned by an awaited
+              // method call; without it every `await cell.method()` over the
+              // UDS+IPC transport (electron dev/prod) hangs until the 15s ack
+              // timeout, so calculations, imports and progress appear frozen.
+              // queueMicrotask so the ack follows any broadcast the dispatch
+              // triggered (broadcast also defers via microtask).
+              if (typeof action.cid === "string" && action.cid.length > 0) {
+                const cid = action.cid;
+                queueMicrotask(() => {
+                  try {
+                    sendTo(conn, `__ack:${cid}:1`);
+                  } catch { /* client gone */ }
+                });
+              }
+            }
           } catch {
             log.warn("uds", "malformed message");
           }

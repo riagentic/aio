@@ -110,6 +110,33 @@ export const schedule: {
   cancel: (id: string): _SchedResult => _schedEffect("cancel", id),
 };
 
+// ── own stubs (browser-compatible — pure effect creators, no registry) ──
+// Cell modules import `own` at module top; the browser loads them for typed
+// action creators, so the import must resolve. Methods only run server-side,
+// so the factory is never invoked here — no factory registry needed.
+
+type _OwnResult = {
+  type: "__own";
+  kind: string;
+  id: string;
+  token?: number;
+};
+
+let _ownToken = 1;
+
+export const own: {
+  set(id: string, factory: () => unknown): _OwnResult;
+  dispose(id: string): _OwnResult;
+} = {
+  set: (id: string, _factory: () => unknown): _OwnResult => ({
+    type: "__own",
+    kind: "set",
+    id,
+    token: _ownToken++,
+  }),
+  dispose: (id: string): _OwnResult => ({ type: "__own", kind: "dispose", id }),
+};
+
 // ── Transport helpers (shared between browser.ts and browser-air.ts) ──
 
 /** IPC bridge type — exposed by Electron preload as window.__aioIPC */

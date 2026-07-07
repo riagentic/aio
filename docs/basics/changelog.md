@@ -34,9 +34,14 @@ renames, surface trims).** See
 - Pre-bind cell reads return declared state defaults (AIO-391)
 - Fragment-in-map keyed children keep DOM order across re-renders (AIO-395)
 - Awaited methods no longer falsely time out — ack registration is idempotent
-  per cid (AIO-396)
+  per cid (AIO-396), and the AIR command router settles acks instead of
+  swallowing them (AIO-399)
 - Nested array state reads serialize as arrays through the live proxy (AIO-397)
 - Browser-side `cell()` honors `scope: "client"` (AIO-398)
+- `onMount` fires exactly once — re-renders no longer remount wrappers that take
+  children (AIO-400)
+- Perf guards throttled — repetitive budget/timeout reports coalesce to once per
+  10s at warn level; all still counted and on the diagnostic bus (AIO-401)
 - Typed `t.send` senders; clearer async-guard diagnostics; `testCell`
   self-dispatch
 

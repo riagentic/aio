@@ -23,7 +23,7 @@ Create a new directory and `deno.json`:
   "nodeModulesDir": "auto",
   "unstable": ["kv"],
   "imports": {
-    "aio": "jsr:@riagentic/aio@^1.0.0-alpha13"
+    "aio": "jsr:@riagentic/aio@^1.0.0-alpha14"
   },
   "tasks": {
     "dev": "deno run -A src/app.ts --client=server-only",
