@@ -84,8 +84,8 @@ Deno.test({
 });
 
 Deno.test({
-  name: "boot: direct access WITHOUT binding returns undefined — " +
-    "this is the blank-render bug bindAllCellsReactive is load-bearing against",
+  name: "boot: direct access WITHOUT binding returns the declared default " +
+    "(AIO-391) — creation-time getters avoid the blank-render/NaN footgun",
   async fn() {
     const { cleanup } = setup();
 
@@ -94,15 +94,14 @@ Deno.test({
       methods: { noop(_s: { count: number }) {} },
     });
 
-    // No bindAllCellsReactive(), no _applyFullState(). The signal-backed
-    // getters are not installed, so reading `counter.count` returns
-    // undefined — which rendered as an empty h1 in the quickstart. This
-    // test pins the contract so if the boot order in server-html-gen.ts
-    // ever drops the ensureConnected() call, the first test above breaks
-    // and this one still documents why.
+    // No bindAllCellsReactive(), no _applyFullState(). installDefaultStateGetters
+    // (run at cell() creation) makes pre-bind reads return the declared default
+    // instead of `undefined` — so components render sane values in SSR/tests/
+    // isolation (previously this rendered an empty h1 / produced NaN). Binding
+    // later overrides these with the live signal-backed getters.
     assertEquals(
       (counter as unknown as { count: number | undefined }).count,
-      undefined,
+      42,
     );
 
     await cleanup();

@@ -16,7 +16,6 @@ export function makeUnboundGuard(
   key: string,
   raw: unknown,
 ): (...args: unknown[]) => Promise<void> {
-  const type = (raw as { type: string }).type;
   const isDev = (globalThis as Record<string, unknown>).__aioDev === true;
   if (isDev) {
     const guarded = (() => {
@@ -24,7 +23,7 @@ export function makeUnboundGuard(
         `[${cellName}] ${key}() called before aio.run() — add this cell to aio.run({ cells: [...] })`,
       );
     }) as (...args: unknown[]) => Promise<void>;
-    (guarded as unknown as { type: string }).type = type;
+    attachMeta(guarded, raw);
     return guarded;
   }
   let warned = false;
@@ -37,8 +36,21 @@ export function makeUnboundGuard(
     }
     return Promise.resolve();
   }) as (...args: unknown[]) => Promise<void>;
-  (guarded as unknown as { type: string }).type = type;
+  attachMeta(guarded, raw);
   return guarded;
+}
+
+/** Attach the public method metadata onto a bound/guarded callable so user code
+ *  never reaches into `__aio`:
+ *   - `.type`     — the prefixed action type string (refactor-safe constant).
+ *   - `.action()` — `(...args) => { type, payload }`, the raw action descriptor
+ *     for `schedule.*`, generators, `waitFor`, etc. `raw` is the catalog creator
+ *     (`__aio.actions[key]`), pure and usable before bind (config-time schedules).
+ *  Both are non-enumerable-by-convention extra props on the callable. */
+export function attachMeta(fn: unknown, raw: unknown): void {
+  const f = fn as Record<string, unknown>;
+  f.type = (raw as { type: string }).type;
+  f.action = raw;
 }
 
 /** Build a prefixed action/effect catalog from creator functions — maps keys to typed dispatchers. */
@@ -58,6 +70,10 @@ export function buildCatalog(
       }),
       { type: label }, // A.increment.type = 'counter:increment'
     );
+    // A.increment.action(5) = { type, payload } even after bindCell replaces the
+    // flattened call surface with a dispatch wrapper. The catalog creator is its
+    // own descriptor builder, so `.action` is a self-reference here.
+    (fn as unknown as Record<string, unknown>).action = fn;
     catalog[key] = fn;
     typeToKey.set(label, key);
   }
@@ -124,15 +140,13 @@ export function bindCell(
         });
         return promise;
       };
-      (fn as unknown as Record<string, unknown>).type =
-        (creator as unknown as { type: string }).type;
+      attachMeta(fn, creator);
       (f as Record<string, unknown>)[key] = fn;
     } else {
       // Sync methods: dispatch and return Promise<void> — resolves after reduce + effects
       const fn = (...args: unknown[]) =>
         dispatch((creator as (...a: unknown[]) => Msg)(...args));
-      (fn as unknown as Record<string, unknown>).type =
-        (creator as unknown as { type: string }).type;
+      attachMeta(fn, creator);
       (f as Record<string, unknown>)[key] = fn;
     }
   }
@@ -146,10 +160,14 @@ export function bindCell(
     };
   }
 
-  // Bind state keys: install getters for direct state access (counter.count)
+  // Bind state keys: install getters for direct state access (counter.count).
+  // Overrides the creation-time default getter (installDefaultStateGetters) with
+  // a live, app-state-backed one. Skip only if a method/selector owns the name
+  // (impossible per AIO-6.1, but defensive — reading a default getter yields a
+  // non-function, so it is correctly overridden).
   const cellName = f.__aio.id;
   for (const key of Object.keys(f.__aio.state)) {
-    if (key in f) continue; // method/selector already owns this name
+    if (typeof (f as Record<string, unknown>)[key] === "function") continue;
     Object.defineProperty(f, key, {
       get() {
         const s = getState()[cellName] as Record<string, unknown> | undefined;
@@ -161,4 +179,24 @@ export function bindCell(
   }
 
   (f.__aio as Record<string, unknown>).bound = true;
+}
+
+/** Install creation-time getters returning each state key's declared default,
+ *  so reading `cell.key` BEFORE aio.run() yields the declared value instead of
+ *  `undefined` (sane SSR/test/isolation renders; avoids NaN from undefined math).
+ *  bindCell / bindCellReactive later override these (all configurable) with live
+ *  getters. State keys can't collide with methods/selectors (AIO-6.1 enforces it
+ *  at definition), so installing and overriding them is always safe. */
+export function installDefaultStateGetters(def: CellDef): void {
+  const state = def.__aio.state as Record<string, unknown>;
+  for (const key of Object.keys(state)) {
+    if (key in def) continue; // defensive — a callable already owns the name
+    Object.defineProperty(def, key, {
+      get() {
+        return (def.__aio.state as Record<string, unknown>)[key];
+      },
+      enumerable: false,
+      configurable: true,
+    });
+  }
 }

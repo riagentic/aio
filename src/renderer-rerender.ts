@@ -371,22 +371,12 @@ export function _createHooks(rootState: RootState): VDomHooks {
       _subscribeComponentDeps(inst, hs.deps!);
       _instanceStack.push(inst);
 
-      if (isFirstRender && inst.mountCallbacks.length > 0) {
-        const cbs = inst.mountCallbacks;
-        inst.mountCallbacks = [];
-        inst.mounted = true;
-        // AIO-74: restore collector; AIO-76: route onCleanup to mountCleanupCallbacks
-        _setCurrentCollector(inst as unknown as LifecycleCollector);
-        _setInsideMount(true);
-        try {
-          for (const cb of cbs) cb();
-        } finally {
-          _setInsideMount(false);
-          _setCurrentCollector(null);
-        }
-      } else if (isFirstRender) {
-        inst.mounted = true;
-      }
+      // AIO-390: onMount must run AFTER the component's DOM subtree (and refs)
+      // are committed. The subtree is built between afterComponent and
+      // afterSubtree (createDom / diff of `rendered`), so firing is deferred to
+      // afterSubtree. Here we only mark mounted (re-render gating); the captured
+      // mountCallbacks stay on the instance until the subtree exists.
+      if (isFirstRender) inst.mounted = true;
     },
 
     afterSubtree(vnode: VNode): void {
@@ -401,6 +391,26 @@ export function _createHooks(rootState: RootState): VDomHooks {
           el.setAttribute("data-component", name);
         }
       }
+
+      // AIO-390: fire onMount now that the subtree's DOM + refs are committed,
+      // so `ref.current` is the real node inside onMount. Children's afterSubtree
+      // already ran during subtree build, so they mount before their parent
+      // (bottom-up, matching React). Instance is still on the stack, so onMount's
+      // onCleanup routing (AIO-76) is unchanged.
+      const inst = vnode._instance as ComponentInstance | undefined;
+      if (inst && inst.mountCallbacks.length > 0) {
+        const cbs = inst.mountCallbacks;
+        inst.mountCallbacks = [];
+        _setCurrentCollector(inst as unknown as LifecycleCollector);
+        _setInsideMount(true);
+        try {
+          for (const cb of cbs) cb();
+        } finally {
+          _setInsideMount(false);
+          _setCurrentCollector(null);
+        }
+      }
+
       _instanceStack.pop();
     },
 

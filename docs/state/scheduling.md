@@ -17,13 +17,14 @@ Return a `ScheduleEffect` from any reducer or method (sync or async):
 
 ```ts
 import { cell, schedule } from "aio";
+import type { ScheduleEffect } from "aio";
 
 const notifications = cell("notifications", {
   state: { pending: 0 },
   methods: {
-    queue(s) {
+    queue(s): ScheduleEffect {
       s.pending += 1;
-      return schedule.after("flush", 2000, notifications.flush());
+      return schedule.after("flush", 2000, notifications.flush.action());
     },
     flush(s) {
       s.pending = 0;
@@ -35,6 +36,24 @@ const notifications = cell("notifications", {
 Each call to `queue()` resets the 2-second debounce — the scheduler cancels the
 previous timer and sets a new one.
 
+> **Build the action with `cell.method.action(...args)`.** It returns the
+> `{ type, payload }` descriptor the scheduler re-dispatches — typed,
+> refactor-safe (a rename is a **compile error**, not a silently dead timer),
+> and arguments are passed straight through: `cart.setQty.action(3)`. Do **not**
+> pass `cell.method()` — a called method returns `Promise<void>`, not an action.
+> (`cell.method.type` is also available as the bare type string for
+> `waitFor`/`listensTo`/`cancelOn`.)
+>
+> **Self-reference needs a return-type annotation.** When a method schedules an
+> action on its _own_ cell (`notifications.flush` referenced inside
+> `notifications`), TypeScript hits a circular-inference error (TS7022/TS7023 —
+> _"implicitly has type any … referenced in its own initializer"_). Annotating
+> the return breaks the cycle — use `CellEffect` (the union of every effect a
+> method may return), or `CellEffect | void` / `Promise<CellEffect | void>` for
+> conditional/async methods. Scheduling **another** cell's action needs no
+> annotation. See
+> [Referencing the cell inside its own methods](methods.md#referencing-the-cell-inside-its-own-methods-the-celleffect-annotation).
+
 ### 2. Static — always-on at startup
 
 Pass schedules to `aio.run()` for timers that always run regardless of app
@@ -44,11 +63,20 @@ state:
 await aio.run({
   cells: [reports],
   schedules: [
-    { id: "daily-report", cron: "0 8 * * 1-5", action: reports.generate() },
-    { id: "hourly-ping", every: 60_000, action: health.ping() },
+    {
+      id: "daily-report",
+      cron: "0 8 * * 1-5",
+      action: reports.generate.action(),
+    },
+    { id: "hourly-ping", every: 60_000, action: health.ping.action() },
   ],
 });
 ```
+
+For pollers that need to change their own cadence (e.g. back off on API rate
+limits), don't use a static `every` — seed a one-shot `after` and let the method
+schedule its next run:
+[Backoff on rate-limit](#backoff-on-rate-limit-dynamic-polling).
 
 ---
 
@@ -62,9 +90,9 @@ same `id`.
 ```ts
 // Save 3 seconds after last keystroke (debounce pattern)
 methods: {
-  type(s, text: string) {
+  type(s, text: string): ScheduleEffect {
     s.draft = text
-    return schedule.after('autosave', 3000, draft.save())
+    return schedule.after('autosave', 3000, draft.save.action())
   },
 }
 ```
@@ -75,8 +103,13 @@ Fires `action` every `ms` milliseconds until cancelled.
 
 ```ts
 // Poll every 30 seconds
-return schedule.every("sync", 30_000, data.sync());
+return schedule.every("sync", 30_000, data.sync.action());
 ```
+
+> Intervals fire on a fixed clock and can't be deferred per-tick. If the poller
+> must slow itself down (rate-limit backoff), use a self-scheduling `after`
+> chain instead — see
+> [Backoff on rate-limit](#backoff-on-rate-limit-dynamic-polling).
 
 ### `schedule.at(id, isoTime, action)` — one-shot at absolute time
 
@@ -84,7 +117,7 @@ Fires once at a specific UTC datetime. `isoTime` is any string parseable by
 `new Date()`.
 
 ```ts
-return schedule.at("promo-end", "2025-12-31T23:59:00Z", promo.expire());
+return schedule.at("promo-end", "2025-12-31T23:59:00Z", promo.expire.action());
 ```
 
 ### `schedule.cron(id, pattern, action)` — cron expression
@@ -92,7 +125,7 @@ return schedule.at("promo-end", "2025-12-31T23:59:00Z", promo.expire());
 Fires on a standard 5-field cron schedule (UTC).
 
 ```ts
-return schedule.cron("daily-report", "0 8 * * 1-5", reports.generate());
+return schedule.cron("daily-report", "0 8 * * 1-5", reports.generate.action());
 //                                    ^ ^ ^ ^ ^
 //                                    | | | | └── day of week (Mon-Fri)
 //                                    | | | └──── month (*)
@@ -119,11 +152,11 @@ return schedule.cron("daily-report", "0 8 * * 1-5", reports.generate());
 
 ```ts
 methods: {
-  startSync(s) {
+  startSync(s): ScheduleEffect {
     s.syncing = true
-    return schedule.every('sync', 5000, data.sync())
+    return schedule.every('sync', 5000, data.sync.action())
   },
-  stopSync(s) {
+  stopSync(s): ScheduleEffect {
     s.syncing = false
     return schedule.cancel('sync')
   },
@@ -140,8 +173,8 @@ colons, dots.
 Good convention: `cellName.timerPurpose` or `cellName:action`.
 
 ```ts
-schedule.every("orders.poll", 10_000, orders.refresh());
-schedule.cron("reports:daily", "0 8 * * *", reports.generate());
+schedule.every("orders.poll", 10_000, orders.refresh.action());
+schedule.cron("reports:daily", "0 8 * * *", reports.generate.action());
 ```
 
 Returning a schedule effect with an existing ID **replaces** the previous timer
@@ -155,9 +188,9 @@ Returning a schedule effect with an existing ID **replaces** the previous timer
 
 ```ts
 methods: {
-  search(s, query: string) {
+  search(s, query: string): ScheduleEffect {
     s.query = query
-    return schedule.after('search.debounce', 300, search.execute())
+    return schedule.after('search.debounce', 300, search.execute.action())
   },
 }
 ```
@@ -166,26 +199,58 @@ methods: {
 
 ```ts
 methods: {
-  async fetchData(s) {
+  async fetchData(s): Promise<ScheduleEffect | void> {
     try {
       s.data = await call(() => api.getData())
     } catch {
       s.retries += 1
-      return schedule.after('fetch.retry', s.retries * 2000, data.fetchData())
+      return schedule.after('fetch.retry', s.retries * 2000, data.fetchData.action())
     }
   },
 }
+```
+
+### Backoff on rate-limit (dynamic polling)
+
+A static `every` schedule fires on a fixed clock — it cannot be deferred
+per-tick, so a rate-limited API forces you to hand-roll `backoffUntil` state and
+waste wakeups. Instead, own the loop: seed one `after` and let the method
+schedule its own next run. Replace-by-ID means each return sets the next delay
+dynamically — no clock state in the cell, no wasted ticks.
+
+```ts
+// ❌ static every + manual backoff clock (wasted wakeups, bespoke state)
+// schedules: [{ id: 'prices:refresh', every: 30_000, action: prices.refresh.action() }]
+// if (Date.now() < s.backoffUntil) return  // guard every tick
+
+// ✅ self-scheduling after chain — the method picks its own next delay
+methods: {
+  async refresh(s): Promise<ScheduleEffect> {
+    try {
+      s.byId = await call(() => api.prices())
+      return schedule.after('prices:refresh', 30_000, prices.refresh.action())
+    } catch (err) {
+      const backoff = isRateLimit(err) ? 60_000 : 5_000
+      return schedule.after('prices:refresh', backoff, prices.refresh.action())
+    }
+  },
+}
+
+// seed the loop at startup (ms must be >= 1)
+schedules: [
+  { id: 'prices:refresh', after: 1, action: prices.refresh.action() },
+]
 ```
 
 ### Toggle polling on/off
 
 ```ts
 methods: {
-  enablePolling(s) {
+  enablePolling(s): ScheduleEffect {
     s.polling = true
-    return schedule.every('prices.poll', 5000, prices.refresh())
+    return schedule.every('prices.poll', 5000, prices.refresh.action())
   },
-  disablePolling(s) {
+  disablePolling(s): ScheduleEffect {
     s.polling = false
     return schedule.cancel('prices.poll')
   },
@@ -196,9 +261,9 @@ methods: {
 
 ```ts
 methods: {
-  activity(s) {
+  activity(s): ScheduleEffect {
     s.lastActive = Date.now()
-    return schedule.after('session.timeout', 30 * 60_000, auth.logout())
+    return schedule.after('session.timeout', 30 * 60_000, auth.logout.action())
   },
 }
 ```
@@ -212,7 +277,7 @@ Schedules work inside generators too — yield them like any other effect:
 ```ts
 generators: {
   *processOrder(ctx, orderId: string) {
-    yield* ctx.dispatch(schedule.after('order.timeout', 60_000, orders.timeout(orderId)))
+    yield* ctx.dispatch(schedule.after('order.timeout', 60_000, orders.timeout.action(orderId)))
     const result = yield* ctx.call('submit', () => submitOrder(orderId))
     yield* ctx.dispatch(schedule.cancel('order.timeout'))
     yield* ctx.done(s => { s.status = 'submitted' })
@@ -224,13 +289,17 @@ generators: {
 
 ## Testing schedules
 
-`testCell` gives you `runEffects()` to process returned effects synchronously:
+`testCell` lets you assert on the schedule effects a method returns — `t.send.*`
+dispatches, `t.getEffects()` returns what it emitted. (testCell does not run a
+live scheduler, so it checks the _effect_, not the eventual timer fire.)
 
 ```ts
+import { isScheduleEffect } from "aio";
+
 testCell(notifications, "queues autosave", (t) => {
-  t.dispatch(notifications.queue());
-  const effects = t.runEffects();
-  const sched = effects.find((e) => e.type === "__schedule");
+  t.init();
+  t.send.queue();
+  const sched = t.getEffects().find(isScheduleEffect);
   assertEquals(sched?.kind, "after");
   assertEquals(sched?.id, "flush");
 });

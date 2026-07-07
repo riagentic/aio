@@ -11,6 +11,39 @@ import { testCell } from "../src/cell-test.ts";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+const selfDispatch = cell("selfdispatch", {
+  state: { count: 0 },
+  methods: {
+    inc(s) {
+      s.count++;
+    },
+  },
+});
+
+testCell(
+  selfDispatch,
+  "cell-def methods are bound — self-dispatch doesn't trip the unbound guard",
+  (t) => {
+    const warnings: string[] = [];
+    const orig = console.warn;
+    console.warn = (...a: unknown[]) => warnings.push(a.map(String).join(" "));
+    try {
+      t.init();
+      // Calling the cell def's own method (what self/cross-cell code and
+      // deferred setTimeout callbacks do) must dispatch via the harness, not
+      // hit the "called before aio.run()" guard.
+      (selfDispatch as unknown as { inc: () => void }).inc();
+      t.expect.state((s) => s.count === 1);
+    } finally {
+      console.warn = orig;
+    }
+    assertEquals(
+      warnings.some((w) => w.includes("called before aio.run()")),
+      false,
+    );
+  },
+);
+
 let sideEffectRuns = 0;
 
 const loader = cell("loader379", {

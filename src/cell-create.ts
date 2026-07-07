@@ -11,6 +11,7 @@ import type {
   Creators,
   DirectCalling,
   FlatActions,
+  MethodsToCreators,
 } from "./cell-types.ts";
 import type { Method } from "./cell-impl.ts";
 import { createCellFromMethods } from "./cell-methods-factory.ts";
@@ -44,8 +45,13 @@ export function cell<
 >(
   name: N,
   config: MethodsCellConfig<N, S, M, States>,
+  // Actions carry a concrete creators map derived from the methods (not `any`)
+  // so downstream tooling — notably testCell's `t.send` — recovers typed,
+  // non-optional method senders instead of an index signature. (Capturing
+  // generators/mixed actions here too was tried but degraded method `s`
+  // inference, so the typed surface stays scoped to methods.)
   // deno-lint-ignore no-explicit-any
-): CellDef<N, any, any, S> & DirectCalling<N, M> & Readonly<S>;
+): CellDef<N, MethodsToCreators<M>, any, S> & DirectCalling<N, M> & Readonly<S>;
 /** Define a cell with explicit actions/reduce style — typed action creators + reducer handlers. */
 export function cell<
   N extends string,

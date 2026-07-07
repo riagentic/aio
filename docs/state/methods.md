@@ -80,9 +80,9 @@ Methods — sync **and** async (AIO-381) — can return schedule effects:
 
 ```ts
 methods: {
-  startPolling(s) {
+  startPolling(s): ScheduleEffect {
     s.polling = true
-    return schedule.every('poll', 30_000, poller.refresh)
+    return schedule.every('poll', 30_000, poller.refresh.action())
   },
   stopPolling(s) {
     s.polling = false
@@ -90,6 +90,65 @@ methods: {
   },
 }
 ```
+
+### Referencing the cell inside its own methods (the `: CellEffect` annotation)
+
+When a method schedules an action on **its own cell**, it names the cell that is
+still being defined:
+
+```ts
+const cycle = cell("cycle", {
+  state: { phase: "work", n: 0 },
+  methods: {
+    tick(s) {
+      s.n += 1;
+    },
+    skip(s) {
+      // ⛔ references `cycle` inside `cycle`'s own initializer
+      return schedule.after("cycle.next", 0, cycle.tick.action());
+    },
+  },
+});
+// TS7022: 'cycle' implicitly has type 'any' … referenced in its own initializer
+// TS7023: 'skip' implicitly has return type 'any' …
+```
+
+This is a **TypeScript limitation**, not an aio bug: to infer `cycle`'s type TS
+must infer `skip`'s return type, which evaluates `cycle.tick.action()`, which
+needs `cycle`'s type — a cycle. (It can't be fixed framework-side without fixing
+every method's return type and thereby losing real return types like
+`await cell.checkStock()` → `Promise<Stock>`.)
+
+**Fix: annotate the method's return** — that gives TS the type directly, so it
+no longer infers it from the body. Use `CellEffect` (exported from `aio`), the
+union of every effect a method may return:
+
+```ts
+import type { CellEffect } from "aio";
+
+const cycle = cell("cycle", {
+  state: { phase: "work", n: 0 },
+  methods: {
+    tick(s) {
+      s.n += 1;
+    },
+    skip(s): CellEffect { // ← breaks the cycle
+      return schedule.after("cycle.next", 0, cycle.tick.action());
+    },
+    maybeStop(s): CellEffect | void { // ← conditional returns
+      if (s.n > 3) return schedule.cancel("cycle.next");
+    },
+    async poll(s): Promise<CellEffect | void> { // ← async methods
+      await Promise.resolve();
+      return schedule.after("cycle.retry", 500, cycle.tick.action());
+    },
+  },
+});
+```
+
+Scheduling **another** cell's action needs no annotation — only self-reference
+does. The same applies to a free helper that references the cell before its
+declaration: annotate it `(): CellEffect`.
 
 ---
 
@@ -170,12 +229,12 @@ then call the op on the snapshot.
 Async methods can return schedule effects too — same as sync methods:
 
 ```ts
-async fetchData(s) {
+async fetchData(s): Promise<ScheduleEffect | void> {
   try {
     s.data = await api.getData()
   } catch {
     s.retries += 1
-    return schedule.after('fetch.retry', s.retries * 2000, data.fetchData())
+    return schedule.after('fetch.retry', s.retries * 2000, data.fetchData.action())
   }
 }
 ```
@@ -191,12 +250,12 @@ To trigger another action when a method finishes, **never** write
 `setTimeout(() => cell.other(), 0)` — it escapes the action log, time-travel,
 and cancellation. The sanctioned tools:
 
-| You want…                           | Use                                                |
-| ----------------------------------- | -------------------------------------------------- |
-| "after this, dispatch X"            | `return schedule.after('id', 0, cell.other())`     |
-| a multi-step sequential workflow    | a [generator](generators.md) with `ctx.dispatch()` |
-| debounce / retry / polling          | `schedule.after` / `schedule.every` (id = replace) |
-| own a watcher / socket / subprocess | `return own.set('cell:id', factory)` (AIO-382)     |
+| You want…                           | Use                                                   |
+| ----------------------------------- | ----------------------------------------------------- |
+| "after this, dispatch X"            | `return schedule.after('id', 0, cell.other.action())` |
+| a multi-step sequential workflow    | a [generator](generators.md) with `ctx.dispatch()`    |
+| debounce / retry / polling          | `schedule.after` / `schedule.every` (id = replace)    |
+| own a watcher / socket / subprocess | `return own.set('cell:id', factory)` (AIO-382)        |
 
 ### Owning native resources: `own.set` (AIO-382)
 
@@ -284,6 +343,26 @@ const empty = cart.isEmpty();
 
 Selectors are scoped to the cell's state slice automatically. After `aio.run()`
 binds the cell, selectors read current state implicitly.
+
+### Keyed map with default
+
+Map-shaped state (`Record<string, T>`) returns `undefined` for keys that haven't
+been populated yet, so direct reads need a guard at every call site:
+
+```tsx
+<span>{balances.sol[pubKey] ?? 0}</span>; // ?? 0 sprinkled at every read
+```
+
+Declare the guarded read once as a plain accessor function next to the cell —
+each call reads the reactive getter, so it stays auto-tracked in JSX:
+
+```ts
+export const sol = (pubKey: string) => balances.sol[pubKey] ?? 0;
+```
+
+```tsx
+<span>{sol(item.pubKey)}</span>; // one guard, every read safe
+```
 
 ---
 

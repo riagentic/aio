@@ -9,6 +9,30 @@
 
 Each `mount()` creates an independent render root with its own pending queue.
 
+### Testing components
+
+`testComponent` is the public harness for testing AIR components — symmetric
+with `testCell` for cells. Bring your own DOM (happy-dom / jsdom) so the
+framework stays free of test-only deps; `setDocument` points the renderer at it.
+
+| Function        | Signature                                                      | Description                                     |
+| --------------- | -------------------------------------------------------------- | ----------------------------------------------- |
+| `testComponent` | `testComponent(App, { document, root? }): TestComponentHandle` | Mount for tests → `{ root, html(), unmount() }` |
+| `setDocument`   | `setDocument(doc): void`                                       | Point the renderer at a DOM document            |
+
+```ts
+import { Window } from "happy-dom";
+import { testComponent } from "aio/air";
+
+const win = new Window();
+const t = testComponent(App, { document: win.document });
+assertEquals(t.html(), "<div>hi</div>");
+t.unmount();
+```
+
+To drive `requestAnimationFrame` / `useRaf` in a test, stub
+`globalThis.requestAnimationFrame` before mounting and flush frames manually.
+
 ---
 
 ## Architecture
@@ -68,6 +92,44 @@ const App = () => <div className={color} />;
 // color.set("blue") updates class directly — no component re-render
 ```
 
+### Node Identity & Stateful-Node Preservation
+
+When a parent re-renders, AIR **diffs** rather than recreates — a DOM node is
+**reused** (not rebuilt) as long as its position resolves to the same VNode.
+This matters for stateful nodes (`<canvas>`, `<video>`, `<iframe>`, map/editor
+widgets) whose internal state (canvas bitmap, playback position, a running
+`useRaf` loop) must survive re-renders.
+
+Reuse rules:
+
+- **Same tag at the same position → reused.** The existing DOM element is kept
+  and only changed props/children are patched (`<canvas>` stays the same
+  element). A **different tag** at that position → the old node is destroyed and
+  a new one created.
+- **Unkeyed children** are matched **by index** (position). Reordering an
+  unkeyed list re-patches nodes in place — fine for stateless content, but it
+  will move a stateful node's _contents_ to a different item.
+- **Keyed children** (`key={id}`) are matched **by key identity** across
+  reorders, so the right DOM node follows its data. **Always `key` lists that
+  contain stateful nodes or that reorder.**
+
+```tsx
+// ✅ canvas DOM node (and its bitmap / useRaf loop) survives parent re-renders
+const Scene = () => <canvas ref={ref} />;
+
+// ✅ key stateful items so reorders move the correct node
+<ul>
+  {videos.map((v) => (
+    <li key={v.id}>
+      <video src={v.src} />
+    </li>
+  ))}
+</ul>;
+```
+
+To force a stateful node to be **recreated** intentionally (e.g. reset a
+canvas), change its `key`.
+
 ---
 
 ## h() -- Non-TSX Usage
@@ -112,18 +174,19 @@ h("ul", null, items.map((i) => h("li", { key: i.id }, i.name)));
 
 ## Hooks (inside component body)
 
-| Function             | Signature                                 | Description                   |
-| -------------------- | ----------------------------------------- | ----------------------------- |
-| `onMount`            | `onMount(fn): void`                       | After first render            |
-| `onCleanup`          | `onCleanup(fn): void`                     | Before re-render & on unmount |
-| `afterRender`        | `afterRender(fn): void`                   | After DOM commit              |
-| `useRef`             | `useRef<T>(init): { current: T }`         | Persistent mutable ref        |
-| `useId`              | `useId(): string`                         | SSR-safe unique ID            |
-| `useOptimistic`      | `useOptimistic<T,A>(state, fn): [T, add]` | Optimistic UI overlay         |
-| `createContext`      | `createContext<T>(default): Context<T>`   | Create context                |
-| `useContext`         | `useContext<T>(ctx): T`                   | Read context value            |
-| `useContextSelector` | `useContextSelector<T,R>(ctx, sel): R`    | Selective context             |
-| `useDimensions`      | `useDimensions(): DimensionsState`        | Element size tracking         |
+| Function             | Signature                                 | Description                    |
+| -------------------- | ----------------------------------------- | ------------------------------ |
+| `onMount`            | `onMount(fn): void`                       | After first render             |
+| `onCleanup`          | `onCleanup(fn): void`                     | Before re-render & on unmount  |
+| `afterRender`        | `afterRender(fn): void`                   | After DOM commit               |
+| `useRef`             | `useRef<T>(init): { current: T }`         | Persistent mutable ref         |
+| `useId`              | `useId(): string`                         | SSR-safe unique ID             |
+| `useOptimistic`      | `useOptimistic<T,A>(state, fn): [T, add]` | Optimistic UI overlay          |
+| `createContext`      | `createContext<T>(default): Context<T>`   | Create context                 |
+| `useContext`         | `useContext<T>(ctx): T`                   | Read context value             |
+| `useContextSelector` | `useContextSelector<T,R>(ctx, sel): R`    | Selective context              |
+| `useDimensions`      | `useDimensions(): DimensionsState`        | Element size tracking          |
+| `useRaf`             | `useRaf(cb, active?): void`               | Managed rAF loop, auto-cleanup |
 
 ## Server State Hooks
 

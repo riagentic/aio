@@ -150,6 +150,29 @@ Deno.test("checkPlatformSafety ignores Deno in strings", () => {
   assertEquals(errors.length, 0);
 });
 
+Deno.test("checkPlatformSafety ignores type-only Deno.* references", () => {
+  // Types are erased by esbuild and never reach the browser — must not flag.
+  assertEquals(
+    checkPlatformSafety(`function f(e: Deno.FsEvent) { return e }`, "./a.ts")
+      .length,
+    0,
+  );
+  assertEquals(
+    checkPlatformSafety(`let w: Array<Deno.FsWatcher>;`, "./b.ts").length,
+    0,
+  );
+  assertEquals(
+    checkPlatformSafety(`const c = x as Deno.Conn;`, "./c.ts").length,
+    0,
+  );
+  // Value usage is still flagged, including inside an object literal.
+  assertEquals(
+    checkPlatformSafety(`const o = { h: Deno.serve(() => {}) };`, "./d.ts")
+      .length,
+    1,
+  );
+});
+
 Deno.test("checkPlatformSafety detects export * from node:", () => {
   const code = `export * from "node:path";`;
   const errors = checkPlatformSafety(code, "./utils.ts");

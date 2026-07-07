@@ -19,6 +19,11 @@ App types: `browser`, `electron`, `android`, `cli`, `service`, `remote-browser`,
 `remote-service`, `remote-electron`, `remote-cli`, `remote-android`. Templates:
 `empty`, `minimal`, `medium`, `large`.
 
+Add `--vendored` to git-clone the framework into `dep/aio/` (instead of the
+default tarball snapshot) — keeps `.git` so `git -C dep/aio pull` updates it.
+The generated `deno.json` already declares the vendored import map (`aio`,
+`immer`, `@std/path`), so no manual wiring is needed either way.
+
 ## Option B: JSR (manual setup)
 
 ```sh
@@ -124,6 +129,12 @@ Clone aio into `dep/aio/` and you're set:
 
 ```sh
 mkdir -p dep && git clone https://github.com/riagentic/aio dep/aio
+```
+
+Or let the scaffolder do both (clone + correct deno.json) in one step:
+
+```sh
+sh -c "$(curl -fsSL ...)" -- my-app --vendored
 ```
 
 The rest of the project (`import { cell } from "aio"`) is unchanged — the import

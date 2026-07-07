@@ -11,11 +11,28 @@ render. Unlike React, you _can_ call them conditionally or in loops.
 function onMount(fn: () => void): void;
 ```
 
-Runs **once** after the component's first render.
+Runs **once** after the component's first render — and, since AIO-390, **after
+the component's DOM subtree and refs are committed**. Inside `onMount`,
+`ref.current` is the real node, so imperative setup (`getContext`, `focus()`,
+measuring, third-party widgets) works directly. Children mount before their
+parents (bottom-up, like React).
 
 ```tsx
-import { onCleanup, onMount, signal } from "aio/air";
+import { onCleanup, onMount, signal, useRef } from "aio/air";
 
+const Chart = () => {
+  const ref = useRef<HTMLCanvasElement>(null!);
+
+  onMount(() => {
+    const ctx = ref.current.getContext("2d"); // ref.current is committed here
+    draw(ctx);
+  });
+
+  return <canvas ref={ref} />;
+};
+```
+
+```tsx
 const Timer = () => {
   const elapsed = signal(0);
 
@@ -65,6 +82,45 @@ function useRef<T>(initial: T): { current: T };
 
 Persist a mutable value across re-renders. Mutations do **not** trigger
 re-render. Multiple `useRef` calls maintain independent identity.
+
+---
+
+## useRaf()
+
+```ts
+function useRaf(
+  cb: (time: number, delta: number) => void,
+  active?: boolean,
+): void;
+```
+
+A managed `requestAnimationFrame` loop with automatic cleanup — no manual
+`cancelAnimationFrame` bookkeeping. `cb` receives the frame timestamp (ms) and
+the delta since the previous frame (0 on the first frame). The **latest** `cb`
+is always used, so a closure reading live cell state stays current across
+re-renders. The loop cancels on unmount. Pass `active: false` to not start it.
+
+```tsx
+import { useRaf, useRef } from "aio/air";
+
+const Canvas = () => {
+  const ref = useRef<HTMLCanvasElement>(null!);
+  useRaf((_t, dt) => {
+    const ctx = ref.current?.getContext("2d");
+    if (ctx) draw(ctx, cycle.phase, dt); // live cell read, every frame
+  });
+  return <canvas ref={ref} />;
+};
+```
+
+> Reading cell state inside a raw rAF callback (or any imperative code) is a
+> **live read** — it returns the current value at call time, no `effect()`
+> needed. Reads inside an `effect`/render are additionally _tracked_ for
+> reactivity; imperative reads are not tracked, which is exactly what you want
+> in a frame loop.
+
+For element size, see [`useDimensions`](air-reference.md)
+(`ResizeObserver`-backed width/height signals).
 
 ---
 

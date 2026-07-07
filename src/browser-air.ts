@@ -121,6 +121,17 @@ export { type Resource, resource } from "./resource.ts";
 // ── Reactive element dimensions ──────────────────────────────────────
 export { type DimensionsState, useDimensions } from "./dimensions.ts";
 
+// ── Managed requestAnimationFrame loop ───────────────────────────────
+export { useRaf } from "./raf.ts";
+
+// ── Component test harness (symmetric with testCell) ─────────────────
+export {
+  setDocument,
+  testComponent,
+  type TestComponentHandle,
+  type TestComponentOptions,
+} from "./test-component.ts";
+
 // ── Streaming SSR ──────────────────────────────────────────────────
 export { renderToStream } from "./ssr-stream.ts";
 
