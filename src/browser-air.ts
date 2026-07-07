@@ -136,7 +136,7 @@ export {
 export { renderToStream } from "./ssr-stream.ts";
 
 // ── Shared utilities (AIO-47) ──────────────────────────────────────
-export { actions, effects, msg, schedule } from "./browser-shared.ts";
+export { actions, effects, msg, own, schedule } from "./browser-shared.ts";
 
 // ── AIR hooks (signal-based) ────────────────────────────────────────
 export {

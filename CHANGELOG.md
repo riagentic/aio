@@ -52,10 +52,30 @@ Full audit + upgrade steps: `docs/specs/2026-07-04-public-surface-audit.md`,
 
 ### Fixed
 
+- **Browser `aio` surface exports `own`** — cell modules that `import { own }`
+  at module top (the documented `own.set` pattern, AIO-382) crashed the whole
+  browser graph with "does not provide an export named 'own'"; browser-air now
+  re-exports a pure effect-creator stub alongside the `schedule` stubs (AIO-402)
 - **`onMount` runs after the DOM subtree and refs are committed** — refs are
   populated and children attached when it fires (AIO-390)
 - **Pre-bind cell reads return declared state defaults** instead of undefined
   (AIO-391)
+- **Fragment-in-map keyed children keep DOM order across re-renders** — region
+  anchoring in the child differ, plus a reorder/add/remove stress suite
+  (AIO-395)
+- **Awaited methods no longer falsely time out** — ack registration is
+  idempotent per cid (AIO-396), and the AIR command router settles acks instead
+  of swallowing `__ack:` frames (AIO-399)
+- **Nested array state serializes as arrays** through the async live proxy
+  (AIO-397)
+- **Browser-side `cell()` honors `scope: "client"`** and rejects async client
+  methods at definition time (AIO-398)
+- **`onMount` fires exactly once** — re-renders that re-collect mount callbacks
+  (e.g. children changes) no longer remount wrappers/layouts (AIO-400)
+- **Perf guards no longer flood the console** — WARN-class codes log at warn
+  level and repetitive perf/vitals reports are throttled per (code, action) to
+  once per 10s with a coalesced count; every occurrence still counts and reaches
+  the diagnostic bus (AIO-401)
 - **Typed `t.send` senders** in the test harness; refactor-safe scheduling docs
 - **Clearer async-guard diagnostics**, type-only Deno refs, `testCell`
   self-dispatch

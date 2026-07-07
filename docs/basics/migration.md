@@ -30,9 +30,9 @@ all clients**
     "jsxImportSource": "aio"
   },
   "imports": {
-    "aio": "jsr:@riagentic/aio@^1.0.0-alpha13",
-    "aio/air": "jsr:@riagentic/aio@^1.0.0-alpha13/air",
-    "aio/jsx-runtime": "jsr:@riagentic/aio@^1.0.0-alpha13/jsx-runtime",
+    "aio": "jsr:@riagentic/aio@^1.0.0-alpha14",
+    "aio/air": "jsr:@riagentic/aio@^1.0.0-alpha14/air",
+    "aio/jsx-runtime": "jsr:@riagentic/aio@^1.0.0-alpha14/jsx-runtime",
     "esbuild": "npm:esbuild@^0.24"
   },
   "tasks": {

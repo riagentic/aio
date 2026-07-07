@@ -374,9 +374,11 @@ export function _createHooks(rootState: RootState): VDomHooks {
       // AIO-390: onMount must run AFTER the component's DOM subtree (and refs)
       // are committed. The subtree is built between afterComponent and
       // afterSubtree (createDom / diff of `rendered`), so firing is deferred to
-      // afterSubtree. Here we only mark mounted (re-render gating); the captured
-      // mountCallbacks stay on the instance until the subtree exists.
-      if (isFirstRender) inst.mounted = true;
+      // afterSubtree — which reads `inst.mounted` as the once-per-instance gate
+      // (AIO-400). We intentionally do NOT set `mounted` here: leaving it false
+      // until afterSubtree lets that hook distinguish a true first mount from a
+      // re-render that re-collected onMount, so onMount fires exactly once.
+      void isFirstRender;
     },
 
     afterSubtree(vnode: VNode): void {
@@ -397,18 +399,32 @@ export function _createHooks(rootState: RootState): VDomHooks {
       // already ran during subtree build, so they mount before their parent
       // (bottom-up, matching React). Instance is still on the stack, so onMount's
       // onCleanup routing (AIO-76) is unchanged.
+      //
+      // AIO-400: fire ONCE per instance. A re-render that re-executes the
+      // component body (any non-memoized render — e.g. children changed) calls
+      // onMount again and re-collects the callback; without the `!mounted` gate
+      // this hook re-fired it every re-render, remounting every wrapper/layout
+      // component that takes children (state loss, listener leaks, focus theft).
+      // On a re-render we discard the freshly-collected callbacks instead.
       const inst = vnode._instance as ComponentInstance | undefined;
       if (inst && inst.mountCallbacks.length > 0) {
-        const cbs = inst.mountCallbacks;
-        inst.mountCallbacks = [];
-        _setCurrentCollector(inst as unknown as LifecycleCollector);
-        _setInsideMount(true);
-        try {
-          for (const cb of cbs) cb();
-        } finally {
-          _setInsideMount(false);
-          _setCurrentCollector(null);
+        if (inst.mounted) {
+          inst.mountCallbacks = []; // re-render — onMount is once-per-instance
+        } else {
+          inst.mounted = true;
+          const cbs = inst.mountCallbacks;
+          inst.mountCallbacks = [];
+          _setCurrentCollector(inst as unknown as LifecycleCollector);
+          _setInsideMount(true);
+          try {
+            for (const cb of cbs) cb();
+          } finally {
+            _setInsideMount(false);
+            _setCurrentCollector(null);
+          }
         }
+      } else if (inst) {
+        inst.mounted = true;
       }
 
       _instanceStack.pop();
