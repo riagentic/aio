@@ -94,7 +94,8 @@ must stay exported for cross-module wiring move behind non-public paths or get
 
 ### `air/compat` — 6
 
-- [ ] **A5 decision applies** (permanent vs removed at beta1). If kept:
+- [x] **A5 decision applies** (permanent vs removed at beta1) — decided
+      2026-07-06: **permanent** (module doc records it). If kept:
 - [x] **fix-doc**: `useState`, `useEffect`, `useMemo`, `useCallback` (all
       NODOC).
 - [x] **hide**: `_resetHints` (test-only reset).
@@ -179,8 +180,9 @@ must stay exported for cross-module wiring move behind non-public paths or get
 - [x] **Duplication policy**: `.` re-exports `db`/`schedule`/`selectors`/
       `testing` symbols. Keep (convenience root) but the snapshot must treat
       each entry independently.
-- [ ] **After cuts land**: regenerate `deno doc --json` snapshot → this becomes
-      the A2 gate baseline. (→ done as part of A2.)
+- [x] **After cuts land**: regenerate `deno doc --json` snapshot → this becomes
+      the A2 gate baseline. (Done: `docs/api-snapshot.json`, CI-enforced via
+      `deno task api:check`.)
 
 ## Applied 2026-07-06 — deviations from the recommendations
 

@@ -8,6 +8,7 @@ import type { TableDef } from "./sql.ts";
 import { createAioError, reportError as reportAioError } from "./error.ts";
 import type { ReportErrorOpts } from "./error.ts";
 import type { Log } from "./logger.ts";
+import { PERSIST_SCHEMA_VERSION } from "./persist-schema.ts";
 
 /** Configuration for the persistence manager — KV/SQLite handles, debounce timing, and state accessors. */
 export interface PersistenceConfig {
@@ -63,6 +64,22 @@ export function createPersistenceManager(
     reportAioError(err, getReportOpts());
   }
 
+  // A4: stamp schema + cell versions AFTER a successful state write — never
+  // before, so a stamp can't describe state that was never saved. Closes the
+  // loop applyCellMigrations() reads from at boot (`<appId>:__versions`).
+  async function _stampVersions(): Promise<void> {
+    if (!kvDb || !cfg.appId) return;
+    try {
+      await kvDb.set(`${cfg.appId}:__schema`, PERSIST_SCHEMA_VERSION);
+      if (cfg.cellVersions) {
+        await kvDb.set(`${cfg.appId}:__versions`, cfg.cellVersions);
+      }
+    } catch (e) {
+      log.error(`persist: version stamp failed — ${e}`);
+      _reportPersistError(e);
+    }
+  }
+
   async function _syncSqlite(): Promise<void> {
     if (!asyncDb || !dbSchema) return;
     const stateSnapshot = structuredClone(getState());
@@ -102,6 +119,7 @@ export function createPersistenceManager(
             // B-7: only advance the persisted-key set and log "saved" when the
             // atomic commit actually succeeded.
             prevPersistedKeys = keys;
+            await _stampVersions();
             log.debug(`persist: saved multi (${keys.length} keys)`);
           } else {
             // B-7: a failed atomic commit is NOT success — report it and keep
@@ -139,6 +157,7 @@ export function createPersistenceManager(
         }
         try {
           await kvDb.set(persistKey, dbState);
+          await _stampVersions();
           log.debug(`persist: saved (${(bytes / 1024).toFixed(1)}KB)`);
         } catch (e) {
           log.error(`persist: failed to save — ${e}`);
@@ -231,6 +250,7 @@ export function createPersistenceManager(
                 );
                 if (result.ok) {
                   prevPersistedKeys = keys;
+                  await _stampVersions();
                 } else {
                   // B-7: failed atomic commit on the final flush — surface it
                   // rather than reporting "flushed".
@@ -242,6 +262,7 @@ export function createPersistenceManager(
                 }
               } else {
                 await kvDb.set(persistKey, dbState);
+                await _stampVersions();
               }
               log.debug("persist: flushed");
             } catch (e) {

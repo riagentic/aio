@@ -27,6 +27,12 @@ import { _rejectAck, _rejectAllPending, _resolveAck } from "./browser-ack.ts";
 import { handleStateMessage } from "./browser-transport-handler.ts";
 import { initVitals } from "./browser-transport-vitals.ts";
 import { connectIPC } from "./browser-transport-ipc.ts";
+import {
+  negotiateProtocol,
+  parseProtoHello,
+  PROTOCOL_MISMATCH_CLOSE_CODE,
+  protoHello,
+} from "./protocol-version.ts";
 
 /** Opens connection to server — UDS+IPC when available, WebSocket otherwise. */
 export function connect(): void {
@@ -47,6 +53,8 @@ export function connect(): void {
       close: () => ws.close(),
     });
     _ttSetSendFn((cmd: string) => ws.send(cmd));
+    // A3: announce our wire-protocol version before anything else.
+    ws.send("__proto:" + JSON.stringify(protoHello()));
     ws.send(
       "__type:" +
         (typeof navigator !== "undefined" &&
@@ -89,6 +97,31 @@ export function connect(): void {
       T.closed = true;
       ws.close();
       location.reload();
+      return;
+    }
+    // A3: wire-protocol version handshake (server speaks first).
+    if (typeof e.data === "string" && e.data.startsWith("__proto:")) {
+      const theirs = parseProtoHello(e.data.slice(8));
+      if (!theirs) return; // malformed — ignore, server will still enforce
+      const result = negotiateProtocol(protoHello(), theirs);
+      if (!result.ok) {
+        // Loud + terminal: retrying can't fix a version gap.
+        console.error(`[aio] protocol version mismatch: ${result.reason}`);
+        _showStatus("Protocol mismatch — reload/update the app", "#e25");
+        T.closed = true; // stop the reconnect loop
+        ws.close(PROTOCOL_MISMATCH_CLOSE_CODE, "protocol mismatch");
+        return;
+      }
+      T.protocolVersion = result.effective;
+      return;
+    }
+    // A3: server rejected our hello — terminal, do not reconnect-storm.
+    if (typeof e.data === "string" && e.data.startsWith("__proto-err:")) {
+      console.error(
+        `[aio] server rejected protocol version: ${e.data.slice(12)}`,
+      );
+      _showStatus("Protocol mismatch — reload/update the app", "#e25");
+      T.closed = true;
       return;
     }
     if (typeof e.data === "string" && handleControlMessage(e.data, T.bootId)) {

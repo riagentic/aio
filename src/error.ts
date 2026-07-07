@@ -24,6 +24,7 @@ export type AioErrorCode =
   | "BUDGET_REDUCE"
   | "BUDGET_EFFECT"
   | "PERSIST_ERROR"
+  | "PERSIST_SCHEMA"
   | "UI_FREEZE"
   | "TRANSPORT_STALL"
   | "LOOP_SATURATED";
@@ -102,6 +103,7 @@ const CODE_TO_SOURCE: Record<AioErrorCode, AioErrorSource> = {
   BUDGET_REDUCE: "reduce",
   BUDGET_EFFECT: "effect",
   PERSIST_ERROR: "persist",
+  PERSIST_SCHEMA: "persist",
   UI_FREEZE: "vitals",
   TRANSPORT_STALL: "vitals",
   LOOP_SATURATED: "vitals",
@@ -336,6 +338,8 @@ function generateTip(err: AioError): string | undefined {
       }ms). Return immediately and do work asynchronously.`;
     case "PERSIST_ERROR":
       return "Tip: State persist failed — changes are in memory but will be lost on restart. Check disk space and file permissions.";
+    case "PERSIST_SCHEMA":
+      return "Tip: Stored state and framework persistence-schema versions are incompatible. Upgrade aio (older store) or restore a backup (newer store); as a last resort clear the app's KV store.";
     default:
       return undefined;
   }

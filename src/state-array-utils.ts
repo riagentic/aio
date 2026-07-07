@@ -4,7 +4,10 @@
  * Zero dependencies — pure utility functions used by state-core internals.
  */
 
-/** Prototype pollution guard — keys blocked from proxy/patch traversal. */
+/**
+ * Prototype pollution guard — keys blocked from proxy/patch traversal.
+ * @internal Cross-module wiring — not public API, stripped from the snapshot.
+ */
 export const _BLOCKED_KEYS: Set<string> = new Set([
   "__proto__",
   "constructor",
@@ -13,7 +16,10 @@ export const _BLOCKED_KEYS: Set<string> = new Set([
 
 // ── Shallow equality ────────────────────────────────────────────────
 
-/** Shallow-equal comparison for one level of properties. Uses Object.is for NaN correctness. */
+/**
+ * Shallow-equal comparison for one level of properties. Uses Object.is for NaN correctness.
+ * @internal Cross-module wiring — not public API, stripped from the snapshot.
+ */
 export function _shallowEqual(a: unknown, b: unknown): boolean {
   if (Object.is(a, b)) return true;
   if (
@@ -47,16 +53,21 @@ let _arrayRefStats: ArrayRefStats = {
   cycles: 0,
 };
 
-/** Returns a snapshot of current array reference preservation stats. */
+/**
+ * Returns a snapshot of current array reference preservation stats.
+ * @internal Cross-module wiring — not public API, stripped from the snapshot.
+ */
 export function _getArrayRefStats(): ArrayRefStats {
   return { ..._arrayRefStats };
 }
 
+/** @internal Cross-module wiring — not public API, stripped from the snapshot. */
 export function _resetArrayRefStats(): void {
   _arrayRefStats = { preserved: 0, changed: 0, total: 0, cycles: 0 };
 }
 
 /** Check if wasted renders are likely based on arrayRefStats + render status.
+ * @internal Cross-module wiring — not public API, stripped from the snapshot.
  *  Returns a warning string or null. Resets stats after check. */
 export function _checkWastedRenders(status: string): string | null {
   const stats = _getArrayRefStats();
@@ -77,6 +88,7 @@ export function _checkWastedRenders(status: string): string | null {
 // ── Structural sharing for arrays ───────────────────────────────────
 
 /** Preserve element references for unchanged items.
+ * @internal Cross-module wiring — not public API, stripped from the snapshot.
  *  Returns the previous array reference if ALL elements are unchanged. */
 export function _preserveArrayRefs(
   newArr: unknown[],

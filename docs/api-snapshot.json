@@ -1,0 +1,1493 @@
+{
+  "$comment": "Public API surface lock (roadmap A2). Regenerate DELIBERATELY with `deno task api:update` — any diff here is a surface change and must be intentional. sig = digest of the normalized declaration; a changed sig means the symbol's signature changed.",
+  "entries": {
+    ".": {
+      "symbols": {
+        "actions": {
+          "kind": "function",
+          "sig": "d085c023579e9739"
+        },
+        "ActionsCellConfig": {
+          "kind": "typeAlias",
+          "sig": "e34b7392cce57e7d"
+        },
+        "ActionSource": {
+          "kind": "typeAlias",
+          "sig": "23ca71606f56ddd4"
+        },
+        "ActionUnion": {
+          "kind": "typeAlias",
+          "sig": "cf8e77ec098ce1b8"
+        },
+        "aio": {
+          "kind": "variable",
+          "sig": "6542b7deb3fd5239"
+        },
+        "AioApp": {
+          "kind": "typeAlias",
+          "sig": "46103a37ea9808b0"
+        },
+        "AioError": {
+          "kind": "class",
+          "sig": "1a356505261c707e"
+        },
+        "AioErrorCode": {
+          "kind": "typeAlias",
+          "sig": "d59fb2e6ef9f9d57"
+        },
+        "AioErrorContext": {
+          "kind": "typeAlias",
+          "sig": "0e2b8bca68244da5"
+        },
+        "AioErrorSource": {
+          "kind": "typeAlias",
+          "sig": "ba1bcbd49e1a80c8"
+        },
+        "AioMeta": {
+          "kind": "typeAlias",
+          "sig": "f25c85f1668488d9"
+        },
+        "AioUser": {
+          "kind": "typeAlias",
+          "sig": "c19ee2f6f38ee13b"
+        },
+        "AsyncMethod": {
+          "kind": "typeAlias",
+          "sig": "533f0ec6f06413cc"
+        },
+        "bindCell": {
+          "kind": "function",
+          "sig": "50ceb2b6ff5174c2"
+        },
+        "call": {
+          "kind": "function",
+          "sig": "b1d462c046f3c5f1"
+        },
+        "CallOptions": {
+          "kind": "typeAlias",
+          "sig": "2de060157c02959f"
+        },
+        "Catalog": {
+          "kind": "typeAlias",
+          "sig": "c35d068f9a9dec2a"
+        },
+        "cell": {
+          "kind": "function",
+          "sig": "10ad5466c2c09ebf"
+        },
+        "CellAio": {
+          "kind": "typeAlias",
+          "sig": "70aae061d2ac32a6"
+        },
+        "CellDef": {
+          "kind": "typeAlias",
+          "sig": "fd9aac3b158cdfde"
+        },
+        "CellEffect": {
+          "kind": "typeAlias",
+          "sig": "4d7e26aa0579de8f"
+        },
+        "CellEntry": {
+          "kind": "typeAlias",
+          "sig": "e1b265a9a71b203a"
+        },
+        "CellExecuteFn": {
+          "kind": "typeAlias",
+          "sig": "38f86e5aadb3a67b"
+        },
+        "CellMethods": {
+          "kind": "typeAlias",
+          "sig": "0fcc7cc312ab4ba1"
+        },
+        "CellReduceFn": {
+          "kind": "typeAlias",
+          "sig": "5333d0236992a1d8"
+        },
+        "CellsConfig": {
+          "kind": "typeAlias",
+          "sig": "9ec9702df130f158"
+        },
+        "CellStateSize": {
+          "kind": "typeAlias",
+          "sig": "30637abd8920251c"
+        },
+        "CellStatus": {
+          "kind": "typeAlias",
+          "sig": "45879ffe27ed5c32"
+        },
+        "CheckpointData": {
+          "kind": "typeAlias",
+          "sig": "af564f3e397a1901"
+        },
+        "CircuitBreakerConfig": {
+          "kind": "typeAlias",
+          "sig": "4e8699126298f2a5"
+        },
+        "CliApp": {
+          "kind": "typeAlias",
+          "sig": "7d3b502c5259602f"
+        },
+        "CliFlags": {
+          "kind": "typeAlias",
+          "sig": "b0ed65a4f1cb06d9"
+        },
+        "ColumnDef": {
+          "kind": "typeAlias",
+          "sig": "bc1aa830b9573c3f"
+        },
+        "ColumnOpts": {
+          "kind": "typeAlias",
+          "sig": "93466c61bc97388a"
+        },
+        "composeCells": {
+          "kind": "function",
+          "sig": "c001f1f70cdd0194"
+        },
+        "ComposedCells": {
+          "kind": "typeAlias",
+          "sig": "f28b3d0d06561a58"
+        },
+        "composeMiddleware": {
+          "kind": "function",
+          "sig": "32994176f56d140b"
+        },
+        "connectCli": {
+          "kind": "function",
+          "sig": "cf36c15f1890d562"
+        },
+        "connectCliUDS": {
+          "kind": "function",
+          "sig": "cf318c9c642ebf66"
+        },
+        "createDB": {
+          "kind": "function",
+          "sig": "905df9f1c29edd8c"
+        },
+        "createSelector": {
+          "kind": "function",
+          "sig": "750f3eefd5ec534c"
+        },
+        "createSliceSelector": {
+          "kind": "function",
+          "sig": "f2a9973661f27b24"
+        },
+        "Creators": {
+          "kind": "typeAlias",
+          "sig": "2f88112d9fcc6e74"
+        },
+        "DB": {
+          "kind": "interface",
+          "sig": "3338b3f8adb972c1"
+        },
+        "DBOpts": {
+          "kind": "typeAlias",
+          "sig": "cc0d8a775b0827b2"
+        },
+        "deepFreeze": {
+          "kind": "function",
+          "sig": "0b485dfebfbb2ebb"
+        },
+        "DEFAULT_PRAGMAS": {
+          "kind": "variable",
+          "sig": "68b3405a06dc5203"
+        },
+        "DiagEvent": {
+          "kind": "typeAlias",
+          "sig": "70e0a8ba11c6b06c"
+        },
+        "DiagEventDetail": {
+          "kind": "typeAlias",
+          "sig": "42022b5b0c34578c"
+        },
+        "DiagnosticsConfig": {
+          "kind": "typeAlias",
+          "sig": "df1b82060d7c6b3e"
+        },
+        "DiagnosticsOptions": {
+          "kind": "typeAlias",
+          "sig": "3095b23eef2be894"
+        },
+        "DirectCalling": {
+          "kind": "typeAlias",
+          "sig": "7620da829461e0ee"
+        },
+        "draft": {
+          "kind": "function",
+          "sig": "40f2dfdd1fb3446e"
+        },
+        "effects": {
+          "kind": "reference",
+          "sig": "8babb72579fe9fed"
+        },
+        "ExecuteHandlers": {
+          "kind": "typeAlias",
+          "sig": "f14633d31bcf26f7"
+        },
+        "ExtractState": {
+          "kind": "typeAlias",
+          "sig": "0dd54b78645f3c68"
+        },
+        "FactoryCreators": {
+          "kind": "typeAlias",
+          "sig": "ff4cf9df5d5d7fb3"
+        },
+        "FactoryResult": {
+          "kind": "typeAlias",
+          "sig": "ec69ce718ffb7656"
+        },
+        "FlatActions": {
+          "kind": "typeAlias",
+          "sig": "1bfa69bd353b3ffa"
+        },
+        "FlowDef": {
+          "kind": "typeAlias",
+          "sig": "318609dfed6e635b"
+        },
+        "FlowStep": {
+          "kind": "typeAlias",
+          "sig": "462ebf1244f2cbde"
+        },
+        "FlowStepRecord": {
+          "kind": "typeAlias",
+          "sig": "c53d514e4f60ce50"
+        },
+        "Gen": {
+          "kind": "typeAlias",
+          "sig": "fb7015fa847e7ec9"
+        },
+        "GenCtx": {
+          "kind": "typeAlias",
+          "sig": "f13b9052e2af5490"
+        },
+        "InstanceInfo": {
+          "kind": "typeAlias",
+          "sig": "cb879f199f25d585"
+        },
+        "instances": {
+          "kind": "function",
+          "sig": "74e480462c4ecf80"
+        },
+        "integer": {
+          "kind": "function",
+          "sig": "34ad7e96f8ac9696"
+        },
+        "LayerThreshold": {
+          "kind": "typeAlias",
+          "sig": "bb6112e42a87a8f0"
+        },
+        "lint": {
+          "kind": "function",
+          "sig": "e259b3353d405145"
+        },
+        "Lint": {
+          "kind": "typeAlias",
+          "sig": "d41a240243dc9182"
+        },
+        "LockData": {
+          "kind": "typeAlias",
+          "sig": "c7265bad774dff46"
+        },
+        "log": {
+          "kind": "variable",
+          "sig": "e3f864a5a3765e6b"
+        },
+        "Log": {
+          "kind": "interface",
+          "sig": "ffd7c0af1bc353aa"
+        },
+        "LogConfig": {
+          "kind": "typeAlias",
+          "sig": "a6f0613bbdbc7b8f"
+        },
+        "LogLevel": {
+          "kind": "typeAlias",
+          "sig": "2d194fddf92d9bd7"
+        },
+        "LowerFirst": {
+          "kind": "typeAlias",
+          "sig": "c9d46ab1236430e1"
+        },
+        "MachineConfig": {
+          "kind": "typeAlias",
+          "sig": "248d4d01ed4e04c0"
+        },
+        "markAsync": {
+          "kind": "function",
+          "sig": "4b209d9b928c999e"
+        },
+        "matchEffect": {
+          "kind": "function",
+          "sig": "6db8f7a915b1ea16"
+        },
+        "MemoryConfig": {
+          "kind": "typeAlias",
+          "sig": "a3099cec6195c83c"
+        },
+        "MemoryReport": {
+          "kind": "typeAlias",
+          "sig": "a2273daea93b0285"
+        },
+        "Method": {
+          "kind": "typeAlias",
+          "sig": "7e82fa22d93957ca"
+        },
+        "MethodsCellConfig": {
+          "kind": "typeAlias",
+          "sig": "9520ae125002d638"
+        },
+        "MiddlewareFn": {
+          "kind": "typeAlias",
+          "sig": "aec1deeea44b9f0d"
+        },
+        "Msg": {
+          "kind": "typeAlias",
+          "sig": "551d79662e8ff2df"
+        },
+        "own": {
+          "kind": "variable",
+          "sig": "c9fc6626a35e0b2c"
+        },
+        "OwnDisposer": {
+          "kind": "typeAlias",
+          "sig": "f90f75109eab2b71"
+        },
+        "OwnEffect": {
+          "kind": "typeAlias",
+          "sig": "a142d3509098eddc"
+        },
+        "OwnResource": {
+          "kind": "typeAlias",
+          "sig": "8dc34844b66acff0"
+        },
+        "parseCli": {
+          "kind": "function",
+          "sig": "b0cd741647a4efe7"
+        },
+        "PerfBudget": {
+          "kind": "typeAlias",
+          "sig": "17d4190c3d7ecf04"
+        },
+        "PerfCheck": {
+          "kind": "typeAlias",
+          "sig": "52e19c72c7d3b8dd"
+        },
+        "pk": {
+          "kind": "function",
+          "sig": "31d60dc050fc7c42"
+        },
+        "Prefixed": {
+          "kind": "typeAlias",
+          "sig": "6ab5bd2f5685417d"
+        },
+        "QueryOpts": {
+          "kind": "typeAlias",
+          "sig": "8c0b4041769e437c"
+        },
+        "QueryResult": {
+          "kind": "typeAlias",
+          "sig": "4d451b3b1c2af191"
+        },
+        "real": {
+          "kind": "function",
+          "sig": "34ad7e96f8ac9696"
+        },
+        "ReduceBreakdown": {
+          "kind": "typeAlias",
+          "sig": "79cf47368c05a016"
+        },
+        "ReduceHandlers": {
+          "kind": "typeAlias",
+          "sig": "6c8f75e33ae48e7d"
+        },
+        "ref": {
+          "kind": "function",
+          "sig": "bd2531935159dfa5"
+        },
+        "RenderBudget": {
+          "kind": "typeAlias",
+          "sig": "7294918a1caec834"
+        },
+        "resolveAppId": {
+          "kind": "function",
+          "sig": "7354b4667a9d14c9"
+        },
+        "ResolveUserFn": {
+          "kind": "typeAlias",
+          "sig": "76c4cc5d499af5de"
+        },
+        "schedule": {
+          "kind": "variable",
+          "sig": "7c859c6270242054"
+        },
+        "ScheduleDef": {
+          "kind": "typeAlias",
+          "sig": "d3e1bbfcb4bc240d"
+        },
+        "ScheduleEffect": {
+          "kind": "typeAlias",
+          "sig": "7a06b3b8b65e4b9e"
+        },
+        "ScopedApp": {
+          "kind": "typeAlias",
+          "sig": "8de11d17ac25dee6"
+        },
+        "Selector": {
+          "kind": "typeAlias",
+          "sig": "442cb03055401d58"
+        },
+        "SendOf": {
+          "kind": "typeAlias",
+          "sig": "9cfd03e42e51aeb5"
+        },
+        "SingleStepGen": {
+          "kind": "typeAlias",
+          "sig": "3a2042ec277502fe"
+        },
+        "SingletonMode": {
+          "kind": "typeAlias",
+          "sig": "b3159f1c4b221ecf"
+        },
+        "StateOf": {
+          "kind": "typeAlias",
+          "sig": "549a0ca05f80712c"
+        },
+        "SyncMethod": {
+          "kind": "typeAlias",
+          "sig": "0b7721692ee0a2f5"
+        },
+        "table": {
+          "kind": "function",
+          "sig": "937c8563f54e1fda"
+        },
+        "TableDef": {
+          "kind": "typeAlias",
+          "sig": "33459208ed39fce7"
+        },
+        "testCell": {
+          "kind": "function",
+          "sig": "7db41bc2572af29e"
+        },
+        "TestContext": {
+          "kind": "typeAlias",
+          "sig": "d5bb925674fcb156"
+        },
+        "text": {
+          "kind": "function",
+          "sig": "34ad7e96f8ac9696"
+        },
+        "Tx": {
+          "kind": "typeAlias",
+          "sig": "d6d59f832bb71a3e"
+        },
+        "TypedCreator": {
+          "kind": "typeAlias",
+          "sig": "2ed811f19afaa0d7"
+        },
+        "UiConfig": {
+          "kind": "typeAlias",
+          "sig": "59b68af1a84019cd"
+        },
+        "UnionOf": {
+          "kind": "typeAlias",
+          "sig": "ec6b08db52d21ba2"
+        },
+        "VERSION": {
+          "kind": "variable",
+          "sig": "666cf2f6c72520e5"
+        },
+        "VitalAlert": {
+          "kind": "typeAlias",
+          "sig": "f8dae19aead2eda0"
+        },
+        "VitalHint": {
+          "kind": "typeAlias",
+          "sig": "97a35bf0a287e37a"
+        },
+        "VitalLayer": {
+          "kind": "typeAlias",
+          "sig": "5d852b5beaf6d0d5"
+        },
+        "VitalsConfig": {
+          "kind": "typeAlias",
+          "sig": "5af12f7e87a960c2"
+        },
+        "VitalStatus": {
+          "kind": "typeAlias",
+          "sig": "88f4afc6b902226b"
+        },
+        "VitalThresholds": {
+          "kind": "typeAlias",
+          "sig": "0de3a59e3ede7160"
+        },
+        "WhereClause": {
+          "kind": "typeAlias",
+          "sig": "3b038cab896c0657"
+        },
+        "WhereOp": {
+          "kind": "typeAlias",
+          "sig": "4067766e51a5886e"
+        }
+      }
+    },
+    "./aiol": {
+      "symbols": {
+        "Issue": {
+          "kind": "typeAlias",
+          "sig": "d748c63317bc3c9f"
+        },
+        "lint": {
+          "kind": "function",
+          "sig": "f0e5fcec1b5e0548"
+        },
+        "Report": {
+          "kind": "typeAlias",
+          "sig": "885e5c14fd05a2f0"
+        },
+        "SafeFixFn": {
+          "kind": "typeAlias",
+          "sig": "f8dd9b5af167ddfc"
+        },
+        "Severity": {
+          "kind": "typeAlias",
+          "sig": "849c0f0fefdeea5f"
+        }
+      }
+    },
+    "./air": {
+      "symbols": {
+        "Action": {
+          "kind": "typeAlias",
+          "sig": "f2a4c206a9fba7c6"
+        },
+        "afterRender": {
+          "kind": "function",
+          "sig": "9cb67902b061b0ee"
+        },
+        "batch": {
+          "kind": "function",
+          "sig": "9cb67902b061b0ee"
+        },
+        "ComponentFn": {
+          "kind": "typeAlias",
+          "sig": "4fd91f7fe3436040"
+        },
+        "ComponentTreeNode": {
+          "kind": "interface",
+          "sig": "7987dff4d070bc91"
+        },
+        "computed": {
+          "kind": "function",
+          "sig": "1d2d84c510d9a7ca"
+        },
+        "Computed": {
+          "kind": "interface",
+          "sig": "4c847e396b9a978d"
+        },
+        "connectAioDevTools": {
+          "kind": "function",
+          "sig": "0f1c2b0496d8737a"
+        },
+        "connectDevTools": {
+          "kind": "function",
+          "sig": "ff0cb91d2aded3d3"
+        },
+        "Context": {
+          "kind": "interface",
+          "sig": "32d64e388da33385"
+        },
+        "createContext": {
+          "kind": "function",
+          "sig": "8973024a20beecf3"
+        },
+        "Defer": {
+          "kind": "function",
+          "sig": "b57232df05676dee"
+        },
+        "DeferProps": {
+          "kind": "interface",
+          "sig": "fd975cbef34bdb58"
+        },
+        "DeferTrigger": {
+          "kind": "typeAlias",
+          "sig": "26eee104f946b26a"
+        },
+        "DevToolsHandle": {
+          "kind": "interface",
+          "sig": "446880ae34185f1e"
+        },
+        "DimensionsState": {
+          "kind": "interface",
+          "sig": "7b91cfa4c37718f6"
+        },
+        "disconnectDevTools": {
+          "kind": "function",
+          "sig": "ff0cb91d2aded3d3"
+        },
+        "effect": {
+          "kind": "function",
+          "sig": "475384653d047765"
+        },
+        "ErrorBoundary": {
+          "kind": "variable",
+          "sig": "1588a0f075829371"
+        },
+        "fade": {
+          "kind": "function",
+          "sig": "b8a3fea194926bde"
+        },
+        "FieldArrayState": {
+          "kind": "interface",
+          "sig": "2dc3b5cc8500e463"
+        },
+        "FieldState": {
+          "kind": "interface",
+          "sig": "ca03bb9a12bf81d1"
+        },
+        "FormState": {
+          "kind": "interface",
+          "sig": "8e3015f4e4323c35"
+        },
+        "Fragment": {
+          "kind": "variable",
+          "sig": "1588a0f075829371"
+        },
+        "h": {
+          "kind": "function",
+          "sig": "6e6dd93641f15f01"
+        },
+        "hydrate": {
+          "kind": "function",
+          "sig": "ebe23b198c9d526b"
+        },
+        "island": {
+          "kind": "function",
+          "sig": "ef34abeb84d7a009"
+        },
+        "IslandConfig": {
+          "kind": "interface",
+          "sig": "f87d43ee8783236c"
+        },
+        "IslandHandle": {
+          "kind": "interface",
+          "sig": "92d45bf2eaa1d538"
+        },
+        "lazy": {
+          "kind": "function",
+          "sig": "a5e400129d8d291d"
+        },
+        "Link": {
+          "kind": "function",
+          "sig": "bdfc0ee2cdc0d8ca"
+        },
+        "LinkProps": {
+          "kind": "typeAlias",
+          "sig": "137a4baba4e717b1"
+        },
+        "memo": {
+          "kind": "function",
+          "sig": "99f832cc6bbc7c49"
+        },
+        "mount": {
+          "kind": "function",
+          "sig": "ebe23b198c9d526b"
+        },
+        "MountHandle": {
+          "kind": "interface",
+          "sig": "da446580845f1b00"
+        },
+        "navigate": {
+          "kind": "function",
+          "sig": "f991ae89a2d6c286"
+        },
+        "NavLink": {
+          "kind": "function",
+          "sig": "36e74017593fcdd9"
+        },
+        "on": {
+          "kind": "function",
+          "sig": "ad5f73cbc45b90c7"
+        },
+        "onCleanup": {
+          "kind": "function",
+          "sig": "9cb67902b061b0ee"
+        },
+        "onMount": {
+          "kind": "function",
+          "sig": "9cb67902b061b0ee"
+        },
+        "Outlet": {
+          "kind": "function",
+          "sig": "816444e7441d7951"
+        },
+        "page": {
+          "kind": "function",
+          "sig": "f0a3e0d50fb865e1"
+        },
+        "Portal": {
+          "kind": "variable",
+          "sig": "1588a0f075829371"
+        },
+        "Redirect": {
+          "kind": "function",
+          "sig": "8e8c12ef51063cb5"
+        },
+        "Ref": {
+          "kind": "typeAlias",
+          "sig": "215ad0a28c91f211"
+        },
+        "RenderEvent": {
+          "kind": "interface",
+          "sig": "b0af3a665a1747e2"
+        },
+        "renderToStream": {
+          "kind": "function",
+          "sig": "695ad4d4ebdf800c"
+        },
+        "renderToString": {
+          "kind": "function",
+          "sig": "663fbfd6a8446bce"
+        },
+        "resource": {
+          "kind": "function",
+          "sig": "22bc19387ffcf537"
+        },
+        "Resource": {
+          "kind": "interface",
+          "sig": "78ddff84515f7b68"
+        },
+        "Route": {
+          "kind": "function",
+          "sig": "dc8daa6edee6bae2"
+        },
+        "routePath": {
+          "kind": "variable",
+          "sig": "73033d8de8522d5a"
+        },
+        "RouteProps": {
+          "kind": "typeAlias",
+          "sig": "de879ba88eb9d25a"
+        },
+        "routeSearch": {
+          "kind": "variable",
+          "sig": "f6e29cd927f57fc1"
+        },
+        "RouteState": {
+          "kind": "typeAlias",
+          "sig": "740b5a8d2cf1df88"
+        },
+        "scale": {
+          "kind": "function",
+          "sig": "b8a3fea194926bde"
+        },
+        "setDocument": {
+          "kind": "function",
+          "sig": "84317e7760a7e7de"
+        },
+        "Show": {
+          "kind": "function",
+          "sig": "efd680c2bcb3be51"
+        },
+        "signal": {
+          "kind": "function",
+          "sig": "6876ec649591723d"
+        },
+        "Signal": {
+          "kind": "interface",
+          "sig": "a962066576a452b0"
+        },
+        "slide": {
+          "kind": "function",
+          "sig": "b8a3fea194926bde"
+        },
+        "SpringConfig": {
+          "kind": "interface",
+          "sig": "347557dc22127a0a"
+        },
+        "SpringValue": {
+          "kind": "interface",
+          "sig": "4e73e33d8a25f31c"
+        },
+        "Suspense": {
+          "kind": "variable",
+          "sig": "1588a0f075829371"
+        },
+        "testComponent": {
+          "kind": "function",
+          "sig": "551fdc59d0f6ba26"
+        },
+        "TestComponentHandle": {
+          "kind": "interface",
+          "sig": "d82bfd6f8f16ea8e"
+        },
+        "TestComponentOptions": {
+          "kind": "interface",
+          "sig": "9bcf8d9ec1fd4978"
+        },
+        "Transition": {
+          "kind": "function",
+          "sig": "749eeefbffd966c6"
+        },
+        "TransitionFn": {
+          "kind": "typeAlias",
+          "sig": "fbeb6a22523e7702"
+        },
+        "TransitionGroup": {
+          "kind": "function",
+          "sig": "f10006d454543760"
+        },
+        "TransitionGroupProps": {
+          "kind": "interface",
+          "sig": "61151ebc081169f0"
+        },
+        "TransitionOptions": {
+          "kind": "interface",
+          "sig": "73c015910ab27056"
+        },
+        "TransitionProps": {
+          "kind": "interface",
+          "sig": "d2b8945c90ed7e8b"
+        },
+        "TransitionResult": {
+          "kind": "interface",
+          "sig": "73cea33af42d94fd"
+        },
+        "untrack": {
+          "kind": "function",
+          "sig": "69850d683ddcd94f"
+        },
+        "useAio": {
+          "kind": "function",
+          "sig": "c82915ce358d200f"
+        },
+        "useConnected": {
+          "kind": "function",
+          "sig": "209ed045c0221c65"
+        },
+        "useContext": {
+          "kind": "function",
+          "sig": "e5291ff0a6c6b4fd"
+        },
+        "useContextSelector": {
+          "kind": "function",
+          "sig": "0a964490892ee847"
+        },
+        "useDimensions": {
+          "kind": "function",
+          "sig": "4d5f216237f82ce4"
+        },
+        "useFieldArray": {
+          "kind": "function",
+          "sig": "8469ceddd5ec903e"
+        },
+        "useForm": {
+          "kind": "function",
+          "sig": "b7dea01d0550efc1"
+        },
+        "useId": {
+          "kind": "function",
+          "sig": "6ef6486f1aff326f"
+        },
+        "useLocal": {
+          "kind": "function",
+          "sig": "fd120bffcf7d5c8d"
+        },
+        "useNavigate": {
+          "kind": "function",
+          "sig": "ff98f6f93acc5f30"
+        },
+        "useOptimistic": {
+          "kind": "function",
+          "sig": "597a822233ee49ce"
+        },
+        "useProjection": {
+          "kind": "function",
+          "sig": "b25926d1e9143715"
+        },
+        "useRaf": {
+          "kind": "function",
+          "sig": "9e30515cee214a67"
+        },
+        "useRef": {
+          "kind": "function",
+          "sig": "3d0a00aa030e0088"
+        },
+        "useRoute": {
+          "kind": "function",
+          "sig": "c4bcb6baae49e839"
+        },
+        "useSignal": {
+          "kind": "function",
+          "sig": "f882cf8675033075"
+        },
+        "useSpring": {
+          "kind": "function",
+          "sig": "b6e15ad26be39693"
+        },
+        "useTimeTravel": {
+          "kind": "function",
+          "sig": "d38328d64f55e879",
+          "experimental": true
+        },
+        "useVirtualList": {
+          "kind": "function",
+          "sig": "1c09d2921b6f9ed4"
+        },
+        "ValidationRule": {
+          "kind": "typeAlias",
+          "sig": "d6b57c53f8ad633a"
+        },
+        "VChild": {
+          "kind": "typeAlias",
+          "sig": "ee6d84d3ae547565"
+        },
+        "VirtualListConfig": {
+          "kind": "interface",
+          "sig": "cc485ae4de5a8aa1"
+        },
+        "VirtualListState": {
+          "kind": "interface",
+          "sig": "a969b690209cec93"
+        },
+        "VNode": {
+          "kind": "interface",
+          "sig": "6502d47aabdd8d8a"
+        },
+        "watch": {
+          "kind": "function",
+          "sig": "8ef84db874d8b944"
+        },
+        "WatchOptions": {
+          "kind": "interface",
+          "sig": "ea34dec8acbad2a6"
+        }
+      }
+    },
+    "./air/compat": {
+      "symbols": {
+        "useCallback": {
+          "kind": "function",
+          "sig": "d3eea642a484488d"
+        },
+        "useEffect": {
+          "kind": "function",
+          "sig": "dd19b6aa9973076f"
+        },
+        "useMemo": {
+          "kind": "function",
+          "sig": "bfa7fc6865d8fcc8"
+        },
+        "useRef": {
+          "kind": "variable",
+          "sig": "1588a0f075829371"
+        },
+        "useState": {
+          "kind": "function",
+          "sig": "491ba166ea06e7e2"
+        }
+      }
+    },
+    "./am": {
+      "symbols": {}
+    },
+    "./build": {
+      "symbols": {
+        "build": {
+          "kind": "function",
+          "sig": "4e6845f62a8b7146"
+        }
+      }
+    },
+    "./db": {
+      "symbols": {
+        "createDB": {
+          "kind": "function",
+          "sig": "905df9f1c29edd8c"
+        },
+        "DB": {
+          "kind": "interface",
+          "sig": "3338b3f8adb972c1"
+        },
+        "DBOpts": {
+          "kind": "typeAlias",
+          "sig": "cc0d8a775b0827b2"
+        },
+        "DEFAULT_PRAGMAS": {
+          "kind": "variable",
+          "sig": "68b3405a06dc5203"
+        },
+        "initSchema": {
+          "kind": "function",
+          "sig": "df322d2f519f4aa1"
+        },
+        "loadTables": {
+          "kind": "function",
+          "sig": "f55acaf1b06c00d7"
+        },
+        "QueryResult": {
+          "kind": "typeAlias",
+          "sig": "4d451b3b1c2af191"
+        },
+        "syncTables": {
+          "kind": "function",
+          "sig": "454873eae42b4d44"
+        },
+        "Tx": {
+          "kind": "typeAlias",
+          "sig": "d6d59f832bb71a3e"
+        }
+      }
+    },
+    "./jsx-runtime": {
+      "symbols": {
+        "AioAnchorAttributes": {
+          "kind": "typeAlias",
+          "sig": "cb63c21b730d6ddf"
+        },
+        "AioButtonAttributes": {
+          "kind": "typeAlias",
+          "sig": "b307430caacbf4b4"
+        },
+        "AioEventMap": {
+          "kind": "typeAlias",
+          "sig": "d0e3c41acd9dedc6"
+        },
+        "AioFormAttributes": {
+          "kind": "typeAlias",
+          "sig": "5a69d539e6b4ac9c"
+        },
+        "AioHTMLAttributes": {
+          "kind": "typeAlias",
+          "sig": "9469ee07e035b214"
+        },
+        "AioImgAttributes": {
+          "kind": "typeAlias",
+          "sig": "a7c51625dd8d456b"
+        },
+        "AioInputAttributes": {
+          "kind": "typeAlias",
+          "sig": "75daf7517ab8c8fe"
+        },
+        "AioLabelAttributes": {
+          "kind": "typeAlias",
+          "sig": "20cdb2697b1d16b3"
+        },
+        "AioMappedEventHandlers": {
+          "kind": "typeAlias",
+          "sig": "d47cd19afd56b873"
+        },
+        "AioOptionAttributes": {
+          "kind": "typeAlias",
+          "sig": "0b8834825640a706"
+        },
+        "AioSelectAttributes": {
+          "kind": "typeAlias",
+          "sig": "a605489b5b2c0e3e"
+        },
+        "AioSVGAttributes": {
+          "kind": "typeAlias",
+          "sig": "76efd3e9e54391f8"
+        },
+        "AioTextAreaAttributes": {
+          "kind": "typeAlias",
+          "sig": "c3278ae0be5b10aa"
+        },
+        "AirEvent": {
+          "kind": "typeAlias",
+          "sig": "8f42e0e209205a30"
+        },
+        "Fragment": {
+          "kind": "variable",
+          "sig": "1588a0f075829371"
+        },
+        "jsx": {
+          "kind": "function",
+          "sig": "07b3db004366aed9"
+        },
+        "JSX": {
+          "kind": "namespace",
+          "sig": "a54579100e7f0609"
+        },
+        "jsxs": {
+          "kind": "variable",
+          "sig": "1588a0f075829371"
+        }
+      }
+    },
+    "./schedule": {
+      "symbols": {
+        "CronFields": {
+          "kind": "typeAlias",
+          "sig": "d2f96b6bae1def14"
+        },
+        "isScheduleEffect": {
+          "kind": "function",
+          "sig": "d0dfbe85574db6a4"
+        },
+        "Log": {
+          "kind": "typeAlias",
+          "sig": "c5fd3b44b5b364e3"
+        },
+        "nextCronTime": {
+          "kind": "function",
+          "sig": "30c8feef92d8a842"
+        },
+        "parseCron": {
+          "kind": "function",
+          "sig": "df866f52cd48e3ed"
+        },
+        "schedule": {
+          "kind": "variable",
+          "sig": "7c859c6270242054"
+        },
+        "ScheduleDef": {
+          "kind": "typeAlias",
+          "sig": "d3e1bbfcb4bc240d"
+        },
+        "ScheduleEffect": {
+          "kind": "typeAlias",
+          "sig": "7a06b3b8b65e4b9e"
+        }
+      }
+    },
+    "./selectors": {
+      "symbols": {
+        "createSelector": {
+          "kind": "function",
+          "sig": "750f3eefd5ec534c"
+        },
+        "createSliceSelector": {
+          "kind": "function",
+          "sig": "f2a9973661f27b24"
+        },
+        "Selector": {
+          "kind": "typeAlias",
+          "sig": "442cb03055401d58"
+        }
+      }
+    },
+    "./state-core": {
+      "experimental": true,
+      "symbols": {
+        "AioIPC": {
+          "kind": "interface",
+          "sig": "874fe534857f2839",
+          "experimental": true
+        },
+        "ArrayRefStats": {
+          "kind": "interface",
+          "sig": "8103e5ed1c0439a6",
+          "experimental": true
+        },
+        "cancelSubsTimer": {
+          "kind": "function",
+          "sig": "ff0cb91d2aded3d3",
+          "experimental": true
+        },
+        "CellRef": {
+          "kind": "interface",
+          "sig": "ad415a137c39f3a3",
+          "experimental": true
+        },
+        "collapsePaths": {
+          "kind": "function",
+          "sig": "02240d2eefef802d",
+          "experimental": true
+        },
+        "createSendProxy": {
+          "kind": "function",
+          "sig": "8b49bf3199ba6b83",
+          "experimental": true
+        },
+        "flushOfflineQueue": {
+          "kind": "function",
+          "sig": "ff0cb91d2aded3d3",
+          "experimental": true
+        },
+        "getCellSignal": {
+          "kind": "function",
+          "sig": "02fef0b1b617ff54",
+          "experimental": true
+        },
+        "getConnectedSignal": {
+          "kind": "function",
+          "sig": "966295cb65a07da5",
+          "experimental": true
+        },
+        "getStateSignal": {
+          "kind": "function",
+          "sig": "73cc3c4f1d53bf3f",
+          "experimental": true
+        },
+        "handleMessage": {
+          "kind": "function",
+          "sig": "04817fd582165e1e",
+          "experimental": true
+        },
+        "HandleResult": {
+          "kind": "typeAlias",
+          "sig": "84acce82a8bda3f7",
+          "experimental": true
+        },
+        "isInitialStateReceived": {
+          "kind": "function",
+          "sig": "209ed045c0221c65",
+          "experimental": true
+        },
+        "ready": {
+          "kind": "function",
+          "sig": "d146c7a9b1c05fb1",
+          "experimental": true
+        },
+        "resendSubscriptions": {
+          "kind": "function",
+          "sig": "ff0cb91d2aded3d3",
+          "experimental": true
+        },
+        "send": {
+          "kind": "function",
+          "sig": "2ab6526003a801c3",
+          "experimental": true
+        },
+        "setConnected": {
+          "kind": "function",
+          "sig": "6ec4134858750042",
+          "experimental": true
+        },
+        "setSyncHandler": {
+          "kind": "function",
+          "sig": "5c66ae12ae5fb2bb",
+          "experimental": true
+        },
+        "setTransport": {
+          "kind": "function",
+          "sig": "a1803a51c7f6a409",
+          "experimental": true
+        },
+        "trackPath": {
+          "kind": "function",
+          "sig": "871f6a7c43ff8ab1",
+          "experimental": true
+        },
+        "Transport": {
+          "kind": "interface",
+          "sig": "b03ad48003facb26",
+          "experimental": true
+        }
+      }
+    },
+    "./sync": {
+      "symbols": {
+        "AckMessage": {
+          "kind": "interface",
+          "sig": "53c9a9a059649d2b",
+          "experimental": true
+        },
+        "CompactDeps": {
+          "kind": "interface",
+          "sig": "d3835fca6ffa099a",
+          "experimental": true
+        },
+        "compactSyncOps": {
+          "kind": "function",
+          "sig": "cfc51d802b9b7b99",
+          "experimental": true
+        },
+        "compareHLC": {
+          "kind": "function",
+          "sig": "72c3b1b435e80d74",
+          "experimental": true
+        },
+        "createHLC": {
+          "kind": "function",
+          "sig": "7dfeb0177eac71c5",
+          "experimental": true
+        },
+        "createOpBuffer": {
+          "kind": "function",
+          "sig": "bcb998a059cdbcb9",
+          "experimental": true
+        },
+        "createServerSyncHandler": {
+          "kind": "function",
+          "sig": "4c1b6e4de33775d1",
+          "experimental": true
+        },
+        "createSyncEngine": {
+          "kind": "function",
+          "sig": "0da042da2c3c6c76",
+          "experimental": true
+        },
+        "getLowWater": {
+          "kind": "function",
+          "sig": "a6889ea24f7b8887",
+          "experimental": true
+        },
+        "HLC": {
+          "kind": "typeAlias",
+          "sig": "ad43865540693aa7",
+          "experimental": true
+        },
+        "HLClock": {
+          "kind": "interface",
+          "sig": "531767fb101cca11",
+          "experimental": true
+        },
+        "isValidSyncOp": {
+          "kind": "function",
+          "sig": "7d6a1a879cb2fa47",
+          "experimental": true
+        },
+        "loadOpsSince": {
+          "kind": "function",
+          "sig": "16fd35f41d0181ed",
+          "experimental": true
+        },
+        "mergeField": {
+          "kind": "function",
+          "sig": "bc8c7172d99e8414",
+          "experimental": true
+        },
+        "MergeResult": {
+          "kind": "interface",
+          "sig": "a84e99fea82d1677",
+          "experimental": true
+        },
+        "MergeStrategy": {
+          "kind": "typeAlias",
+          "sig": "2ee8a419d0cf354e"
+        },
+        "normalizeSyncConfig": {
+          "kind": "function",
+          "sig": "49fa9a60be148f28",
+          "experimental": true
+        },
+        "OpBuffer": {
+          "kind": "interface",
+          "sig": "855568799ba2c09c",
+          "experimental": true
+        },
+        "OpBufferOptions": {
+          "kind": "interface",
+          "sig": "2ff2da0f9ac23673",
+          "experimental": true
+        },
+        "OpBufferStorage": {
+          "kind": "interface",
+          "sig": "938dcacf948792f0",
+          "experimental": true
+        },
+        "OpMessage": {
+          "kind": "interface",
+          "sig": "554b8f2475bb95c9",
+          "experimental": true
+        },
+        "persistOp": {
+          "kind": "function",
+          "sig": "128575f51bf32748",
+          "experimental": true
+        },
+        "rebase": {
+          "kind": "function",
+          "sig": "c8177659fa8af4f2",
+          "experimental": true
+        },
+        "RebaseResult": {
+          "kind": "interface",
+          "sig": "5fb51c5eefef8bd1",
+          "experimental": true
+        },
+        "ServerSyncHandler": {
+          "kind": "interface",
+          "sig": "a4cab09361f46a72",
+          "experimental": true
+        },
+        "SYNC_DEFAULTS": {
+          "kind": "variable",
+          "sig": "6feac054ea43abc7"
+        },
+        "SYNC_SCHEMA": {
+          "kind": "variable",
+          "sig": "68b3405a06dc5203",
+          "experimental": true
+        },
+        "SyncConfig": {
+          "kind": "interface",
+          "sig": "8febd02a84e270b0"
+        },
+        "SyncConflict": {
+          "kind": "interface",
+          "sig": "979b03ebd9130f0a"
+        },
+        "SyncEngine": {
+          "kind": "interface",
+          "sig": "5b9a4e96a4624b12",
+          "experimental": true
+        },
+        "SyncEngineDeps": {
+          "kind": "interface",
+          "sig": "efad1b7565b58ec4",
+          "experimental": true
+        },
+        "SyncHandlerDeps": {
+          "kind": "interface",
+          "sig": "7b6d4e7edf1b4cc6",
+          "experimental": true
+        },
+        "SyncOp": {
+          "kind": "interface",
+          "sig": "13187412f4756e72"
+        },
+        "SyncReducer": {
+          "kind": "typeAlias",
+          "sig": "8836153311b82c21"
+        },
+        "SyncRequest": {
+          "kind": "interface",
+          "sig": "92aa24f4ce287708",
+          "experimental": true
+        },
+        "SyncResponse": {
+          "kind": "interface",
+          "sig": "c9dd11434b388cc8",
+          "experimental": true
+        },
+        "SyncStats": {
+          "kind": "interface",
+          "sig": "f73312d75b3a8e36"
+        },
+        "SyncStatus": {
+          "kind": "interface",
+          "sig": "79dbcfd6191da752"
+        }
+      }
+    },
+    "./testing": {
+      "symbols": {
+        "setDocument": {
+          "kind": "function",
+          "sig": "84317e7760a7e7de"
+        },
+        "testCell": {
+          "kind": "function",
+          "sig": "7db41bc2572af29e"
+        },
+        "testComponent": {
+          "kind": "function",
+          "sig": "551fdc59d0f6ba26"
+        },
+        "TestComponentHandle": {
+          "kind": "interface",
+          "sig": "d82bfd6f8f16ea8e"
+        },
+        "TestComponentOptions": {
+          "kind": "interface",
+          "sig": "9bcf8d9ec1fd4978"
+        },
+        "TestContext": {
+          "kind": "typeAlias",
+          "sig": "d5bb925674fcb156"
+        }
+      }
+    }
+  }
+}

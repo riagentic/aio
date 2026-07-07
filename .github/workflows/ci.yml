@@ -34,6 +34,8 @@ jobs:
         run: deno task check
       - name: Docs check (every error code documented)
         run: deno task docs:check
+      - name: API snapshot (public surface locked — roadmap A2)
+        run: deno task api:check
 
   # Full test suite across the supported Deno range and a second OS, so
   # platform- or version-specific regressions can't merge silently.
