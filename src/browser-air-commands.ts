@@ -7,6 +7,7 @@ import { interact } from "./dom-interact.ts";
 import { snapshotDOM } from "./dom-snapshot.ts";
 import type { InteractCommand } from "./dom-inspector-types.ts";
 import { _w } from "./browser-protocol.ts";
+import { _rejectAck, _resolveAck } from "./browser-ack.ts";
 
 /** Route __-prefixed commands from server. Returns true if consumed. */
 export function routeCommand(
@@ -56,6 +57,22 @@ export function routeCommand(
       const ev = JSON.parse(line.slice(7));
       if (_w && typeof _w._aioDiag === "function") _w._aioDiag(ev);
     } catch { /* ignore malformed diag */ }
+    return true;
+  }
+
+  // AIO-2.2: per-action ack — `__ack:<cid>:<ok>`. Settles the Promise returned
+  // by an awaited cell method (registered in browser-ack). Without this, awaited
+  // dispatches never resolve and time out, because this router consumes every
+  // `__`-prefixed line (see the catch-all `return true` below), so the ack would
+  // otherwise be silently dropped before reaching the state handler.
+  if (line.startsWith("__ack:")) {
+    const rest = line.slice(6);
+    const sep = rest.indexOf(":");
+    if (sep > 0) {
+      const cid = rest.slice(0, sep);
+      if (rest.slice(sep + 1) === "1") _resolveAck(cid);
+      else _rejectAck(cid, new Error("server rejected action"));
+    }
     return true;
   }
 

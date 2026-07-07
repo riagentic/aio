@@ -13,6 +13,7 @@ import {
   memo,
   msg,
   navigate,
+  own,
   page,
   Redirect,
   Route,
@@ -105,6 +106,18 @@ Deno.test("browser-air: exports schedule", () => {
   const s = schedule.after("t1", 1000, { type: "TICK" });
   assertEquals(s.type, "__schedule");
   assertEquals(s.kind, "after");
+});
+
+Deno.test("browser-air: exports own (AIO-402 — cell modules import it at module top)", () => {
+  assertExists(own.set);
+  assertExists(own.dispose);
+  const s = own.set("w1", () => {});
+  assertEquals(s.type, "__own");
+  assertEquals(s.kind, "set");
+  assertEquals(s.id, "w1");
+  assertExists(s.token);
+  const d = own.dispose("w1");
+  assertEquals(d, { type: "__own", kind: "dispose", id: "w1" });
 });
 
 Deno.test("browser-air: exports matchPath", () => {
