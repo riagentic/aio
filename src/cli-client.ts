@@ -3,6 +3,12 @@
 // Same delta protocol as browser.ts but no DOM, no React — pure Deno runtime.
 
 import { applyPatches, enablePatches, type Patch } from "immer";
+import {
+  negotiateProtocol,
+  parseProtoHello,
+  PROTOCOL_MISMATCH_CLOSE_CODE,
+  protoHello,
+} from "./protocol-version.ts";
 
 enablePatches();
 
@@ -57,6 +63,8 @@ export function connectCli<S>(
     socket.onopen = () => {
       retry = 0;
       wasConnected = true;
+      // A3: announce our wire-protocol version before anything else.
+      socket.send("__proto:" + JSON.stringify(protoHello()));
       // Drain queued actions
       const q = [...queue];
       queue.length = 0;
@@ -70,6 +78,28 @@ export function connectCli<S>(
       // Skip browser-only signals
       if (raw === "__reload" || raw === "__css") return;
       if (raw.startsWith("__tt:") || raw.startsWith("__boot:")) return;
+
+      // A3: wire-protocol version handshake — terminal on mismatch.
+      if (raw.startsWith("__proto:")) {
+        const theirs = parseProtoHello(raw.slice(8));
+        if (!theirs) return;
+        const result = negotiateProtocol(protoHello(), theirs);
+        if (!result.ok) {
+          console.error(
+            `[aio:cli] protocol version mismatch: ${result.reason}`,
+          );
+          closed = true; // stop the reconnect loop — retrying can't fix it
+          socket.close(PROTOCOL_MISMATCH_CLOSE_CODE, "protocol mismatch");
+        }
+        return;
+      }
+      if (raw.startsWith("__proto-err:")) {
+        console.error(
+          `[aio:cli] server rejected protocol version: ${raw.slice(12)}`,
+        );
+        closed = true;
+        return;
+      }
 
       try {
         const data = JSON.parse(raw);
@@ -197,6 +227,11 @@ export function connectCliUDS<S>(socketPath: string): CliApp<S> {
         writer = c.writable.getWriter();
         retry = 0;
 
+        // A3: announce our wire-protocol version before anything else.
+        writer!.write(
+          encoder.encode("__proto:" + JSON.stringify(protoHello()) + "\n"),
+        ).catch(() => {});
+
         // Drain queued actions
         const q = [...queue];
         queue.length = 0;
@@ -222,6 +257,31 @@ export function connectCliUDS<S>(socketPath: string): CliApp<S> {
                 // Skip browser-only signals
                 if (line === "__reload" || line === "__css") continue;
                 if (line.startsWith("__tt:") || line.startsWith("__boot:")) {
+                  continue;
+                }
+                // A3: wire-protocol version handshake — terminal on mismatch.
+                if (line.startsWith("__proto:")) {
+                  const theirs = parseProtoHello(line.slice(8));
+                  if (!theirs) continue;
+                  const result = negotiateProtocol(protoHello(), theirs);
+                  if (!result.ok) {
+                    console.error(
+                      `[aio:cli] protocol version mismatch: ${result.reason}`,
+                    );
+                    closed = true; // stop the reconnect loop
+                    try {
+                      c.close();
+                    } catch { /* already closed */ }
+                  }
+                  continue;
+                }
+                if (line.startsWith("__proto-err:")) {
+                  console.error(
+                    `[aio:cli] server rejected protocol version: ${
+                      line.slice(12)
+                    }`,
+                  );
+                  closed = true;
                   continue;
                 }
                 try {

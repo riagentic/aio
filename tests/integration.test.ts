@@ -11,8 +11,12 @@ import { join } from "@std/path";
 
 const PORT = 19810;
 
-// Skip server protocol messages (boot ID, etc.) — only collect state/delta JSON
-const isProto = (d: string) => typeof d === "string" && d.startsWith("__boot:");
+// Skip server protocol messages (boot ID, version hello, etc.) — only collect
+// state/delta JSON
+const isProto = (d: string) =>
+  typeof d === "string" &&
+  (d.startsWith("__boot:") || d.startsWith("__proto:") ||
+    d.startsWith("__tt:"));
 
 // Wait until condition is true (polling with timeout)
 async function waitFor(fn: () => boolean, ms = 2000): Promise<void> {

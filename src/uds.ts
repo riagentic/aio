@@ -4,6 +4,11 @@
 import { compactPatches } from "./patch-compact.ts";
 import { writeClientLog } from "./client-log.ts";
 import { log } from "./logger.ts";
+import {
+  negotiateProtocol,
+  parseProtoHello,
+  protoHello,
+} from "./protocol-version.ts";
 
 export type UDSClient = {
   conn: Deno.Conn;
@@ -64,6 +69,8 @@ export function createUDSListener(
       clientMap.set(conn, client);
       debug(`uds: client connected #${client.index} (${connSet.size} total)`);
 
+      // A3: version handshake — server speaks first, before any state.
+      sendTo(conn, "__proto:" + JSON.stringify(protoHello()));
       // AIO-239: route initial write through sendTo() to use per-connection write queue
       const initial = JSON.stringify(getUIState());
       sendTo(conn, initial);
@@ -288,6 +295,27 @@ function _handleUDSConn(
         for (const line of lines) {
           if (!line) continue;
           if (line === "__ping") continue;
+
+          // A3: wire-protocol version handshake
+          if (line.startsWith("__proto:")) {
+            const theirs = parseProtoHello(line.slice(8));
+            if (!theirs) {
+              debug("uds: malformed __proto hello — ignored");
+              continue;
+            }
+            const result = negotiateProtocol(protoHello(), theirs);
+            if (!result.ok) {
+              log.error("uds", `protocol mismatch — ${result.reason}`);
+              sendTo(conn, "__proto-err:" + result.reason);
+              // Close after the error message flushes through the write queue.
+              sendTo(conn, "", () => {
+                try {
+                  conn.close();
+                } catch { /* already closed */ }
+              });
+            }
+            continue;
+          }
 
           if (line.startsWith("__clientState:")) {
             const client = clientMap.get(conn);

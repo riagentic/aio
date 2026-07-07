@@ -6,7 +6,10 @@
 
 // ── Module state ─────────────────────────────────────────────────────
 
-/** Tracked state paths accessed by the current client — used for server subscription filtering. */
+/**
+ * Tracked state paths accessed by the current client — used for server subscription filtering.
+ * @internal Cross-module wiring — not public API, stripped from the snapshot.
+ */
 export const _accessedPaths: Set<string> = new Set<string>();
 let _subsTimer: ReturnType<typeof setTimeout> | null = null;
 let _currentSubs: string[] = [];

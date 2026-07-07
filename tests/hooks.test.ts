@@ -232,8 +232,9 @@ Deno.test("hooks: onConnect error does not break WS", async () => {
     const ws = new WebSocket(`ws://127.0.0.1:${HOOK_PORT}/ws`);
     const msgs: string[] = [];
     ws.addEventListener("message", (e) => {
-      if (!(e.data as string).startsWith("__boot:")) {
-        msgs.push(e.data as string);
+      const d = e.data as string;
+      if (!d.startsWith("__boot:") && !d.startsWith("__proto:")) {
+        msgs.push(d);
       }
     });
     await new Promise<void>((r) => {

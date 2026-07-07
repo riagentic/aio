@@ -18,6 +18,8 @@ export const T = {
   bootId: { current: null as string | null },
   ipcConnected: false,
   ipcPingTimer: null as ReturnType<typeof setInterval> | null,
+  /** Negotiated wire-protocol version (A3); null until the server's hello. */
+  protocolVersion: null as number | null,
 };
 
 export const IPC_PING_INTERVAL = 60_000;

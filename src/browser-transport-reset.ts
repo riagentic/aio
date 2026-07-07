@@ -47,6 +47,7 @@ export function resetTransport(): void {
   T.bootId.current = null;
   T.offlineReady = false;
   T.offlineQueue = [];
+  T.protocolVersion = null;
   _resetIDB();
   T.lastAction = null;
   _resetDevTools();

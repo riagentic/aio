@@ -6,6 +6,12 @@ import { writeClientLog } from "./client-log.ts";
 import { log } from "./logger.ts";
 import type { ClientLogEntry } from "./dom-inspector-types.ts";
 import type { VitalsSystem } from "./vitals/mod.ts";
+import {
+  negotiateProtocol,
+  parseProtoHello,
+  PROTOCOL_MISMATCH_CLOSE_CODE,
+  protoHello,
+} from "./protocol-version.ts";
 
 /** Safety limits — prevent resource exhaustion */
 const WS_MAX_MESSAGE = 1_000_000; // 1MB — reject oversized WS messages
@@ -63,6 +69,9 @@ export type ClientMeta = {
   disconnected: boolean;
   /** Stable client key (usually remote IP) used for cross-connection abuse tracking. */
   clientKey?: string;
+  /** Negotiated wire-protocol version (A3). Undefined until the client's
+   *  `__proto:` hello arrives; legacy clients never send one. */
+  protocolVersion?: number;
 };
 
 /** Dependencies injected from server.ts closure */
@@ -282,6 +291,10 @@ export function createWsManager(deps: WsDeps): WsManager {
           deps.debug(`hook onConnect: ${e}`);
         }
       }
+      // A3: version handshake — server speaks first, before any state.
+      try {
+        socket.send("__proto:" + JSON.stringify(protoHello()));
+      } catch { /* socket closing during onopen (AIO-155) */ }
       try {
         const uiState = deps.getUIState(meta.user);
         const msg = JSON.stringify(uiState);
@@ -502,6 +515,36 @@ export function createWsManager(deps: WsDeps): WsManager {
     if (e.data.startsWith("__type:")) {
       const t = e.data.slice(7);
       if (t === "electron" || t === "browser") meta.clientType = t;
+      return;
+    }
+    // A3: wire-protocol version handshake
+    if (e.data.startsWith("__proto:")) {
+      const theirs = parseProtoHello(e.data.slice(8));
+      if (!theirs) {
+        deps.debug(
+          `ws: malformed __proto hello from ${meta.id.slice(0, 8)} — ignored`,
+        );
+        return;
+      }
+      const result = negotiateProtocol(protoHello(), theirs);
+      if (!result.ok) {
+        const msg = `ws: protocol mismatch with client ${
+          meta.id.slice(0, 8)
+        } — ${result.reason}`;
+        log.error("ws", msg);
+        writeClientLog(meta.index, {
+          level: "error",
+          msg,
+          ts: Date.now(),
+          source: "server-ws",
+        });
+        try {
+          socket.send("__proto-err:" + result.reason);
+          socket.close(PROTOCOL_MISMATCH_CLOSE_CODE, "protocol mismatch");
+        } catch { /* already closed */ }
+        return;
+      }
+      meta.protocolVersion = result.effective;
       return;
     }
     // Time-travel commands

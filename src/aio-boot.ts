@@ -10,7 +10,8 @@ import { createDB, type DB, initSchema, loadTables } from "./db/mod.ts";
 import type { TableDef } from "./sql.ts";
 import { deepMerge } from "./deep-merge.ts";
 import { resolveDbPath, resolveKvPath } from "./paths.ts";
-import type { ReportErrorOpts } from "./error.ts";
+import { AioError, type ReportErrorOpts } from "./error.ts";
+import { migrateSchema, PERSIST_SCHEMA_VERSION } from "./persist-schema.ts";
 import type { Log } from "./logger.ts";
 import type { CheckpointData, DiagnosticsHooks } from "./diagnostics/mod.ts";
 import type { ServerSyncHandler } from "./sync/server-handler.ts";
@@ -166,13 +167,17 @@ export async function bootStorage<S>(
       const kvPath = resolveKvPath(appId);
       kvDb = skv(await Deno.openKv(kvPath));
       if (kvPath) log.debug(`persist: KV at ${kvPath} mode=${persistMode}`);
-      const persisted = persistMode === "multi"
-        ? await kvDb.getMulti<Partial<S>>(persistKey)
-        : await kvDb.get<Partial<S>>(persistKey);
-      if (persisted) {
+      const migrated = await loadAndMigrateSnapshot(
+        kvDb,
+        appId,
+        persistKey,
+        persistMode,
+        log,
+      );
+      if (migrated) {
         state = deepMerge(
           initialState as Record<string, unknown>,
-          persisted as Record<string, unknown>,
+          migrated,
         ) as S;
         log.debug(
           `persist: loaded from KV key="${persistKey}" (${persistMode})`,
@@ -181,6 +186,7 @@ export async function bootStorage<S>(
         log.debug(`persist: no saved state, using initialState`);
       }
     } catch (e) {
+      if (e instanceof AioError) throw e; // schema mismatch — already precise
       throw new Error(
         `KV unavailable: ${e}\nFix permissions or set persist: false to disable persistence.`,
       );
@@ -269,6 +275,38 @@ export async function bootStorage<S>(
     syncHandler,
     syncBroadcastRef,
   };
+}
+
+/** Load the persisted snapshot and bring it to the current persistence
+ *  schema (A4). Alpha-era snapshots have no `<appId>:__schema` stamp and
+ *  read as version 0; snapshots from a NEWER schema throw `PERSIST_SCHEMA`
+ *  (loud downgrade refusal). The stamp itself is written by the persistence
+ *  manager AFTER successful state writes, so it can never be newer than the
+ *  state it describes. Returns null when nothing is stored. */
+export async function loadAndMigrateSnapshot(
+  kvDb: SkvInstance,
+  appId: string,
+  persistKey: string,
+  persistMode: "single" | "multi",
+  log: Log,
+): Promise<Record<string, unknown> | null> {
+  const persisted = persistMode === "multi"
+    ? await kvDb.getMulti<Record<string, unknown>>(persistKey)
+    : await kvDb.get<Record<string, unknown>>(persistKey);
+  if (!persisted) return null;
+
+  const storedSchema = await kvDb.get<number>(`${appId}:__schema`) ?? 0;
+  if (storedSchema === PERSIST_SCHEMA_VERSION) return persisted;
+
+  const result = migrateSchema(persisted, storedSchema); // throws on downgrade
+  if (result.applied.length) {
+    log.info(
+      `persist: schema migrated v${storedSchema} → v${PERSIST_SCHEMA_VERSION} (${result.applied.length} step${
+        result.applied.length === 1 ? "" : "s"
+      })`,
+    );
+  }
+  return result.state;
 }
 
 /** Apply cell migrations — pure logic, extracted for testability.

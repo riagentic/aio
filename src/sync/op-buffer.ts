@@ -24,7 +24,10 @@ function parseRetention(retention: string): number {
   }
 }
 
-/** Storage abstraction for op buffer persistence */
+/**
+ * Storage abstraction for op buffer persistence
+ * @experimental Excluded from the 1.0 stability guarantee.
+ */
 export interface OpBufferStorage {
   loadOps(cell: string): Promise<SyncOp[]>;
   saveOp(op: SyncOp): Promise<void>;
@@ -44,7 +47,10 @@ export interface OpBufferStorage {
   clear(cell: string): Promise<void>;
 }
 
-/** In-memory storage for testing and non-persistent use cases */
+/**
+ * In-memory storage for testing and non-persistent use cases
+ * @experimental Excluded from the 1.0 stability guarantee.
+ */
 export function createMemoryStorage(): OpBufferStorage {
   const ops = new Map<string, SyncOp[]>();
   const metas = new Map<string, { lastHlc: HLC | null }>();
@@ -143,7 +149,10 @@ export function createMemoryStorage(): OpBufferStorage {
   };
 }
 
-/** IndexedDB-backed storage for production browser use */
+/**
+ * IndexedDB-backed storage for production browser use
+ * @experimental Excluded from the 1.0 stability guarantee.
+ */
 export function createIndexedDBStorage(
   dbName = "aio-sync",
   storeName = "op-buffer",
@@ -422,7 +431,10 @@ export function createIndexedDBStorage(
   };
 }
 
-/** Client-side operation buffer that caps pending ops and delegates to storage. */
+/**
+ * Client-side operation buffer that caps pending ops and delegates to storage.
+ * @experimental Excluded from the 1.0 stability guarantee.
+ */
 export interface OpBuffer {
   add(op: SyncOp): Promise<boolean>;
   confirm(cell: string, opId: string, serverHlc: HLC): Promise<void>;
@@ -445,12 +457,18 @@ export interface OpBuffer {
   ): Promise<void>;
 }
 
-/** Callback invoked when an op is dropped due to buffer capacity limits. */
+/**
+ * Callback invoked when an op is dropped due to buffer capacity limits.
+ * @experimental Excluded from the 1.0 stability guarantee.
+ */
 export interface OpBufferDropCallback {
   (op: SyncOp, reason: "buffer-full" | "prune-failed"): void;
 }
 
-/** Configuration options for the op buffer. */
+/**
+ * Configuration options for the op buffer.
+ * @experimental Excluded from the 1.0 stability guarantee.
+ */
 export interface OpBufferOptions {
   pendingCap?: number;
   /** Called when an op is silently dropped due to capacity limits */
@@ -459,7 +477,10 @@ export interface OpBufferOptions {
   staleAfter?: number;
 }
 
-/** Create an op buffer backed by the given storage implementation. */
+/**
+ * Create an op buffer backed by the given storage implementation.
+ * @experimental Excluded from the 1.0 stability guarantee.
+ */
 export function createOpBuffer(
   storage: OpBufferStorage,
   opts?: OpBufferOptions,
