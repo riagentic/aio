@@ -35,7 +35,8 @@ async function connectAndRead(
         const parts = buf.split("\n");
         buf = parts.pop()!;
         for (const part of parts) {
-          if (part) lines.push(part);
+          // Skip the A3 version hello — these tests assert on state frames.
+          if (part && !part.startsWith("__proto:")) lines.push(part);
         }
       }
     } catch { /* closed */ }

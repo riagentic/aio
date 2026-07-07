@@ -77,6 +77,7 @@ In prod mode, errors are compact one-liners:
 | `BUDGET_REDUCE`      | Performance | Reducer exceeded time budget (default 100ms)                  |
 | `BUDGET_EFFECT`      | Performance | Effect exceeded time budget (default 5ms)                     |
 | `PERSIST_ERROR`      | Persistence | State persist to KV/SQLite failed -- in memory, lost on exit  |
+| `PERSIST_SCHEMA`     | Persistence | Stored state's persistence-schema version is incompatible     |
 | `UI_FREEZE`          | Vitals      | UI/main thread stalled past the freeze threshold (warn)       |
 | `TRANSPORT_STALL`    | Vitals      | WS transport made no progress under backpressure (warn)       |
 | `LOOP_SATURATED`     | Vitals      | Event loop saturated -- work queued faster than it drains     |

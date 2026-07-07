@@ -7,7 +7,10 @@ import { createHLC, type HLClock } from "./hlc.ts";
 import { compactSyncOps } from "./compact.ts";
 import { getLowWater, loadOpsSince, persistOp } from "./server-store.ts";
 
-/** Dependencies injected into the server-side sync handler. */
+/**
+ * Dependencies injected into the server-side sync handler.
+ * @experimental Excluded from the 1.0 stability guarantee.
+ */
 export interface SyncHandlerDeps {
   db: DB;
   syncCellIds: string[];
@@ -22,7 +25,10 @@ export interface SyncHandlerDeps {
   };
 }
 
-/** Server-side handler that persists ops, sends acks, and broadcasts to peers. */
+/**
+ * Server-side handler that persists ops, sends acks, and broadcasts to peers.
+ * @experimental Excluded from the 1.0 stability guarantee.
+ */
 export interface ServerSyncHandler {
   handleOp: (
     op: unknown,
@@ -38,7 +44,10 @@ export interface ServerSyncHandler {
 
 const FORBIDDEN = ["__proto__", "constructor", "prototype"];
 
-/** Validate a sync op has required fields and no proto-pollution vectors. */
+/**
+ * Validate a sync op has required fields and no proto-pollution vectors.
+ * @experimental Excluded from the 1.0 stability guarantee.
+ */
 export function isValidSyncOp(
   op: unknown,
 ): op is {
@@ -60,7 +69,10 @@ export function isValidSyncOp(
   );
 }
 
-/** Create a server-side sync handler that relays CRDT ops between clients. */
+/**
+ * Create a server-side sync handler that relays CRDT ops between clients.
+ * @experimental Excluded from the 1.0 stability guarantee.
+ */
 export function createServerSyncHandler(
   deps: SyncHandlerDeps,
 ): ServerSyncHandler {

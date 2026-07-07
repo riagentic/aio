@@ -5,7 +5,10 @@ import type { OpBuffer } from "./op-buffer.ts";
 import { compareHLC, createHLC, type HLClock } from "./hlc.ts";
 import { rebase, type SyncReducer } from "./rebase.ts";
 
-/** Dependencies injected into the client-side sync engine. */
+/**
+ * Dependencies injected into the client-side sync engine.
+ * @experimental Excluded from the 1.0 stability guarantee.
+ */
 export interface SyncEngineDeps {
   clientId: string;
   cells: Record<string, SyncConfig>;
@@ -21,7 +24,10 @@ export interface SyncEngineDeps {
   };
 }
 
-/** Client-side CRDT sync engine that buffers local ops, rebases on acks, and manages online/offline state. */
+/**
+ * Client-side CRDT sync engine that buffers local ops, rebases on acks, and manages online/offline state.
+ * @experimental Excluded from the 1.0 stability guarantee.
+ */
 export interface SyncEngine {
   handleLocalAction(
     cell: string,
@@ -44,7 +50,10 @@ export interface SyncEngine {
   isSyncCell(cellName: string): boolean;
 }
 
-/** Create a client-side sync engine that coordinates op buffering, HLC clocks, and rebase. */
+/**
+ * Create a client-side sync engine that coordinates op buffering, HLC clocks, and rebase.
+ * @experimental Excluded from the 1.0 stability guarantee.
+ */
 export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
   let _opCounter = 0;
   const clock: HLClock = createHLC(deps.clientId);

@@ -155,7 +155,10 @@ export function createSendProxy(
 
 // ── Tracking proxy ───────────────────────────────────────────────────
 
-/** Deep proxy that records accessed state paths for server subscription filtering. */
+/**
+ * Deep proxy that records accessed state paths for server subscription filtering.
+ * @internal Cross-module wiring — not public API, stripped from the snapshot.
+ */
 export function _trackingProxy(
   obj: unknown,
   parentPath = "",
@@ -185,6 +188,7 @@ export function _trackingProxy(
 }
 
 /** Resolve cell state with fallback/defaults (AIO-29 defense).
+ * @internal Cross-module wiring — not public API, stripped from the snapshot.
  *  Merges incomplete cell state with defaults to prevent undefined crashes. */
 export function _resolveWithFallback<S>(
   cellState: S | null | undefined,

@@ -26,7 +26,10 @@ function rowToOp(r: OpRow): SyncOp {
   };
 }
 
-/** Persist a sync op to the op-log (INSERT OR IGNORE — idempotent). */
+/**
+ * Persist a sync op to the op-log (INSERT OR IGNORE — idempotent).
+ * @experimental Excluded from the 1.0 stability guarantee.
+ */
 export async function persistOp(
   db: DB,
   op: { id: string; hlc: HLC; cell: string; action: string; payload: unknown },
@@ -48,7 +51,10 @@ export async function persistOp(
   );
 }
 
-/** Load all ops for a cell since the given cursor. Uses server_ts when available (strictly monotonic), falls back to HLC for backwards compat. */
+/**
+ * Load all ops for a cell since the given cursor. Uses server_ts when available (strictly monotonic), falls back to HLC for backwards compat.
+ * @experimental Excluded from the 1.0 stability guarantee.
+ */
 export async function loadOpsSince(
   db: DB,
   cell: string,
@@ -87,7 +93,10 @@ export async function loadOpsSince(
   return rows.map(rowToOp);
 }
 
-/** Read the compaction low_water mark for a cell, or null if none. */
+/**
+ * Read the compaction low_water mark for a cell, or null if none.
+ * @experimental Excluded from the 1.0 stability guarantee.
+ */
 export async function getLowWater(
   db: DB,
   cell: string,

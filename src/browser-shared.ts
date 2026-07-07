@@ -1,6 +1,12 @@
 // Shared browser utilities — used by both browser.ts (React) and browser-air.ts (AIR)
 // Extracted from duplicated inline copies (AIO-47)
 
+import {
+  negotiateProtocol,
+  parseProtoHello,
+  protoHello,
+} from "./protocol-version.ts";
+
 /** Creates { type, payload } action/effect objects */
 export function msg<T extends string>(
   type: T,
@@ -164,6 +170,22 @@ export function handleControlMessage(
       return true;
     }
     bootId.current = id;
+    return true;
+  }
+  // A3: version hellos on transports without their own handler (IPC — client
+  // and server ship in one bundle, so a real mismatch is a packaging bug).
+  if (line.startsWith("__proto:")) {
+    const theirs = parseProtoHello(line.slice(8));
+    if (theirs) {
+      const result = negotiateProtocol(protoHello(), theirs);
+      if (!result.ok) {
+        console.error(`[aio] protocol version mismatch: ${result.reason}`);
+      }
+    }
+    return true;
+  }
+  if (line.startsWith("__proto-err:")) {
+    console.error(`[aio] server rejected protocol version: ${line.slice(12)}`);
     return true;
   }
   return false;

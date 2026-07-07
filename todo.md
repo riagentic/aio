@@ -17,20 +17,43 @@ bugfix-only; 1.0.0 = boring. Commit per task as `rd(<task-id>): <summary>`.
       / delete / `@experimental`. Anything <90% sure → cut now, re-add post-1.0
       (additive = non-breaking). Output:
       `docs/specs/2026-07-04-public-surface-audit.md`.
-- [ ] **A2 — API-snapshot gate.** `deno doc --json` diff of the public surface,
+- [x] **A2 — API-snapshot gate.** `deno doc --json` diff of the public surface,
       snapshot committed, CI-enforced: any surface change fails the build unless
       the snapshot is deliberately regenerated. Mechanical
       no-accidental-breaking guarantee, kept forever.
-- [ ] **A3 — WS protocol version handshake.** cid/ack protocol gets a version
+      (`scripts/api-snapshot.ts`, `docs/api-snapshot.json` — 13 entries / 346
+      symbols; `deno task api:check|api:update`; also enforces the `_`-prefix ⇒
+      `@internal` rule.)
+- [x] **A3 — WS protocol version handshake.** cid/ack protocol gets a version
       field + negotiation so post-1.0 protocol evolution ≠ breaking old clients.
-- [ ] **A4 — Persistence schema versioning.** Stamp KV snapshots with a schema
+      (`src/protocol-version.ts`: `__proto:{v,min}` hello, server speaks first,
+      on WS + UDS + CLI clients; effective = min(v,v), mismatch → loud error +
+      close 4505, no reconnect storm; legacy clients without hello still work.
+      Tests: `tests/protocol-version.test.ts`.)
+- [x] **A4 — Persistence schema versioning.** Stamp KV snapshots with a schema
       version + migration hook; alpha-era stored state migrates or fails loudly.
-- [ ] **A5 — Deprecation decision.** `aio/air/compat` re-exports: commit to
+      (`src/persist-schema.ts`: `<appId>:__schema` stamp written AFTER
+      successful state writes; boot migrates v0 (alpha-era) → current via
+      `SCHEMA_MIGRATIONS`, refuses newer-schema stores with `PERSIST_SCHEMA`.
+      Also fixed: `__versions` cell stamps were read at boot but never written —
+      cell migrations re-ran on every restart.)
+- [x] **A5 — Deprecation decision.** `aio/air/compat` re-exports: commit to
       "permanent" or "removed at beta1". Nothing labeled "until post-1.0"
-      survives into beta.
+      survives into beta. (Decision 2026-07-06: **permanent** — migrations don't
+      finish on our schedule; 5 tiny shims, zero maintenance surface, protected
+      by the A2 snapshot. Recorded in the entry's module doc.)
 - [ ] **A6 — Field reports for untested app types.** Covered: TUI/desktop
       (risoto), AIR/canvas (risharp). Missing: `android`, `remote-*`,
       multi-client sync under concurrency. Build one real app per gap.
+  - [x] multi-client sync under concurrency — in-repo E2E:
+        `tests/sync/integration/multi-client-ws.test.ts` (two WS clients,
+        interleaved op storm → exact ack/relay counts, no echo, late-joiner
+        catch-up via `__sync`). A field-report app would still add value but the
+        concurrency mechanics are now pinned by test.
+  - [ ] `android` field report — needs a real device/emulator build
+        (out-of-repo; `aio create` an app, `compile:android`, run, report).
+  - [ ] `remote-*` field report — needs a deployed server + remote client
+        (out-of-repo; scaffold with `--remote` targets, deploy, report).
 
 ## Phase B — betas (freeze + prove)
 

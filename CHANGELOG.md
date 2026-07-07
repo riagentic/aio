@@ -7,6 +7,17 @@ component test harness (risharp session 1–2 feedback).
 
 ### Added
 
+- **Wire-protocol version handshake (roadmap A3)** — server and clients exchange
+  `__proto:{v,min}` hellos on connect (WS, UDS, CLI); mismatches close loudly
+  (code 4505) instead of failing mysteriously, and post-1.0 protocol evolution
+  can negotiate instead of breaking old clients. Legacy clients without a hello
+  still work.
+- **Persistence schema versioning (roadmap A4)** — KV snapshots are stamped with
+  the framework's schema version after each successful write; alpha-era
+  (unstamped) stores migrate transparently on boot, stores written by a newer
+  aio refuse to load with `PERSIST_SCHEMA` instead of being misread. Also fixes
+  cell `version`/`onMigrate` stamps never being written — migrations re-ran on
+  every restart.
 - **`useRaf` hook** — requestAnimationFrame loop with automatic cleanup
   (AIO-392)
 - **Public `testComponent`/`setDocument` harness** — render and drive AIR

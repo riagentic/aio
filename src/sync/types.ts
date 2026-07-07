@@ -1,6 +1,9 @@
 // src/sync/types.ts — Shared CRDT types
 
-/** Hybrid Logical Clock: [physical_ms, counter, nodeId] */
+/**
+ * Hybrid Logical Clock: [physical_ms, counter, nodeId]
+ * @experimental Excluded from the 1.0 stability guarantee.
+ */
 export type HLC = [physical: number, counter: number, nodeId: string];
 
 /** Merge strategy names */
@@ -54,7 +57,10 @@ export interface SyncOp {
   _clientTs?: number;
 }
 
-/** Wire message: client→server or server→client op */
+/**
+ * Wire message: client→server or server→client op
+ * @experimental Excluded from the 1.0 stability guarantee.
+ */
 export interface OpMessage {
   __op: {
     id: string;
@@ -65,12 +71,18 @@ export interface OpMessage {
   };
 }
 
-/** Wire message: server→client ack */
+/**
+ * Wire message: server→client ack
+ * @experimental Excluded from the 1.0 stability guarantee.
+ */
 export interface AckMessage {
   __ack: { opId: string; serverHlc: HLC };
 }
 
-/** Wire message: client→server sync request */
+/**
+ * Wire message: client→server sync request
+ * @experimental Excluded from the 1.0 stability guarantee.
+ */
 export interface SyncRequest {
   __sync: {
     clientId: string;
@@ -81,6 +93,9 @@ export interface SyncRequest {
 
 /** Wire message: server→client sync response.
  *  lowWater is per-cell map when server tracks multiple cells (see server-handler.ts). */
+/**
+ * @experimental Excluded from the 1.0 stability guarantee.
+ */
 export interface SyncResponse {
   __sync:
     | {
@@ -109,7 +124,10 @@ export const SYNC_DEFAULTS = {
   defaultRetention: "4h",
 } as const;
 
-/** Normalize sync: true | SyncConfig → SyncConfig */
+/**
+ * Normalize sync: true | SyncConfig → SyncConfig
+ * @experimental Excluded from the 1.0 stability guarantee.
+ */
 export function normalizeSyncConfig(
   raw: true | Partial<SyncConfig>,
 ): SyncConfig {

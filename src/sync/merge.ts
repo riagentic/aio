@@ -2,13 +2,19 @@
 import type { HLC, MergeStrategy } from "./types.ts";
 import { compareHLC } from "./hlc.ts";
 
-/** Outcome of merging a single field: resolved value and whether a conflict occurred. */
+/**
+ * Outcome of merging a single field: resolved value and whether a conflict occurred.
+ * @experimental Excluded from the 1.0 stability guarantee.
+ */
 export interface MergeResult {
   value: unknown;
   conflict: boolean;
 }
 
-/** Merge a field using the specified CRDT strategy, returning the resolved value. */
+/**
+ * Merge a field using the specified CRDT strategy, returning the resolved value.
+ * @experimental Excluded from the 1.0 stability guarantee.
+ */
 export function mergeField(
   strategy: MergeStrategy,
   local: unknown,
