@@ -37,10 +37,10 @@ all clients**
   },
   "tasks": {
     "dev": "deno run -A src/app.ts",
-    "am": "deno run -A jsr:@riagentic/aio@^1.0.0-alpha13/src/am",
+    "am": "deno run -A jsr:@riagentic/aio@^1.0.0-alpha14/am",
     "test": "deno test -A --unstable-kv tests/",
-    "compile:browser": "deno run -A jsr:@riagentic/aio@^1.0.0-alpha13/src/build --compile",
-    "compile:electron": "deno run -A jsr:@riagentic/aio@^1.0.0-alpha13/src/build --compile --electron"
+    "compile:browser": "deno run -A jsr:@riagentic/aio@^1.0.0-alpha14/build --compile",
+    "compile:electron": "deno run -A jsr:@riagentic/aio@^1.0.0-alpha14/build --compile --electron"
   }
 }
 ```

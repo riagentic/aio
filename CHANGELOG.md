@@ -18,6 +18,27 @@ component test harness (risharp session 1–2 feedback).
   (`git -C dep/aio pull` to update) with the vendored import map already correct
   (risharp follow-up)
 
+### Changed (BREAKING — public-surface audit, roadmap A1)
+
+Full audit + upgrade steps: `docs/specs/2026-07-04-public-surface-audit.md`,
+`docs/upgrade/from-alpha13-to-alpha14.md`.
+
+- **Entry renames**: `./src/build` → `./build` (now exports `build(cfg?)`
+  instead of building on import), `./src/am` → `./am` (pure CLI entry, zero
+  library exports). Update `deno task` definitions that use the jsr: paths.
+- **`aio/adapters/air` removed** — import `useAio`/`useLocal`/`useConnected`
+  from `aio/air`.
+- **`aio/air` trimmed 145 → 101 exports**: state re-exports (`aio`, `cell`,
+  `actions`, `effects`, `log`, `schedule`, `msg`) moved to `aio` only;
+  `_`-internals and protocol plumbing (`bridge`, `client`, `matchPath`,
+  `ensureConnected`) hidden; every remaining export documented; `useTimeTravel`
+  tagged `@experimental`.
+- **Stability tags**: `aio/state-core` entry and `aio/sync` engine internals are
+  `@experimental`; `aio/db` no longer exports the worker wire format;
+  `aio/air/compat` no longer exports test-only `_resetHints`.
+- **Additive**: `aio/testing` re-exports `testComponent`/`setDocument`; `mod.ts`
+  inference-only `_`-types tagged `@internal`.
+
 ### Fixed
 
 - **`onMount` runs after the DOM subtree and refs are committed** — refs are

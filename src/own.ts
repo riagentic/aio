@@ -44,6 +44,12 @@ export interface Own {
   dispose(id: string): OwnEffect;
 }
 
+/**
+ * Keyed disposer slots — own native resources (watchers, sockets) from
+ * reducers/methods with schedule-like replace semantics. Acquiring the same
+ * id again disposes the previous resource first; all slots are disposed on
+ * cell disable and app shutdown.
+ */
 export const own: Own = {
   set(id: string, factory: () => OwnResource): OwnEffect {
     const token = nextToken++;

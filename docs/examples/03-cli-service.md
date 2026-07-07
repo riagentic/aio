@@ -27,9 +27,9 @@ Create a new directory and `deno.json`:
   },
   "tasks": {
     "dev": "deno run -A src/app.ts --client=server-only",
-    "am": "deno run -A jsr:@riagentic/aio@^1.0.0-alpha13/src/am",
+    "am": "deno run -A jsr:@riagentic/aio@^1.0.0-alpha14/am",
     "test": "deno test -A --unstable-kv tests/",
-    "compile:service": "deno run -A jsr:@riagentic/aio@^1.0.0-alpha13/src/build --compile --service --headless"
+    "compile:service": "deno run -A jsr:@riagentic/aio@^1.0.0-alpha14/build --compile --service --headless"
   }
 }
 ```

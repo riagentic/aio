@@ -4,6 +4,7 @@
 import type { ComponentFn, RenderCtx, VNode } from "./vdom.ts";
 import type { Disposable } from "./signal.ts";
 
+/** Handle returned by {@linkcode mount} / {@linkcode hydrate}. */
 export interface MountHandle {
   /** Synchronously execute any pending re-render (for testing). */
   _flush(): void;

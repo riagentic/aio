@@ -37,12 +37,35 @@ Deno.test("air/compat: exports the React migration hooks", async () => {
   assertExists(compat.useRef);
 });
 
-Deno.test("air entry: exports browser-side protocol symbols", async () => {
-  const air = await import("../src/air.ts");
-  assertExists(air.cell); // client-side cell (protocol-cell.ts)
-  assertExists(air.aio); // client-side aio (protocol-cell.ts)
-  assertExists(air.log); // client-side log (protocol-cell.ts)
-  assertExists(air.msg); // client-side msg (browser-shared.ts)
+Deno.test("air entry: protocol plumbing is NOT on the public surface", async () => {
+  // A1 audit: state lives at "aio" (one obvious import path); protocol
+  // internals stay in browser-air.ts / browser-protocol.ts for src/* + tests.
+  const air = await import("../src/air.ts") as Record<string, unknown>;
+  for (
+    const hidden of [
+      "cell",
+      "aio",
+      "log",
+      "msg",
+      "actions",
+      "effects",
+      "schedule",
+      "bridge",
+      "client",
+      "matchPath",
+      "ensureConnected",
+      "setSyncMessageHandler",
+      "_coreGetState",
+      "_subscribe",
+      "_trackingProxy",
+    ]
+  ) {
+    assertEquals(air[hidden], undefined, `air must not export ${hidden}`);
+  }
+  // Documented user-facing survivors of the devtools/router groups.
+  assertExists(air.navigate);
+  assertExists(air.routePath);
+  assertExists(air.connectDevTools);
 });
 
 Deno.test("air entry: exports VDOM extras", async () => {

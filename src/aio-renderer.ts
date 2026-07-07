@@ -142,6 +142,16 @@ _setSsrStartHook(_resetSsrIdCounter);
 
 // -- Mount -------------------------------------------------------------
 
+/**
+ * Mount a component tree into a DOM element and start the reactive render
+ * loop. Returns a {@linkcode MountHandle} (mainly useful in tests).
+ *
+ * @example
+ * ```tsx
+ * import { mount } from "aio/air";
+ * mount(document.getElementById("app")!, App);
+ * ```
+ */
 // deno-lint-ignore no-explicit-any
 export function mount(root: any, App: ComponentFn): MountHandle {
   root.innerHTML = "";

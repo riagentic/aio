@@ -5,6 +5,7 @@ import { type Signal, signal } from "./signal.ts";
 
 // ── Types ───────────────────────────────────────────────────────────
 
+/** Synchronous field validator — returns an error message or `null` when valid. */
 export type ValidationRule<T> = (value: T) => string | null;
 
 export type AsyncValidationRule<T> = (value: T) => Promise<string | null>;
@@ -17,6 +18,7 @@ export interface FormOptions<T extends Record<string, unknown>> {
   validators?: CrossFieldValidator<T>[];
 }
 
+/** Per-field state returned by {@linkcode useForm} — value, validity, and mutators. */
 export interface FieldState<T> {
   /** Current field value (signal-tracked). */
   readonly value: T;
@@ -36,6 +38,7 @@ export interface FieldState<T> {
   reset(): void;
 }
 
+/** Form-level state returned by {@linkcode useForm} — fields, validity, and helpers. */
 export interface FormState<T extends Record<string, unknown>> {
   /** Individual field states. */
   fields: { [K in keyof T]: FieldState<T[K]> };
@@ -55,6 +58,7 @@ export interface FormState<T extends Record<string, unknown>> {
   ): { value: unknown; onInput: (e: Event) => void; onBlur: () => void };
 }
 
+/** Dynamic list-of-fields state returned by {@linkcode useFieldArray}. */
 export interface FieldArrayState<T> {
   /** Current items (signal-tracked). */
   readonly items: T[];

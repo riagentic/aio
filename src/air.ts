@@ -13,21 +13,126 @@
  * ```
  */
 
-// ── Full AIR runtime (hooks, routing, signals, rendering, protocol) ──
-export * from "./browser-air.ts";
+// Curated named surface (roadmap A1). Everything routed through
+// ./browser-air.ts so its transport side-effect import still runs.
+// Internals (`_`-prefixed, protocol plumbing) stay in ./browser-air.ts /
+// ./browser-protocol.ts for src/* and tests — they are not public API.
 
-// ── VDOM extras not in browser-air ───────────────────────────────────
+// ── Signals ──────────────────────────────────────────────────────────
 export {
+  batch,
+  type Computed,
+  computed,
+  effect,
+  memo,
+  type Signal,
+  signal,
+  untrack,
+} from "./browser-air.ts";
+
+// ── Rendering primitives + lifecycle ─────────────────────────────────
+export {
+  type Action,
+  afterRender,
+  type ComponentFn,
+  type Context,
+  createContext,
+  h,
+  hydrate,
+  mount,
+  type MountHandle,
+  onCleanup,
+  onMount,
+  type VChild,
+  type VNode,
+} from "./browser-air.ts";
+
+// ── Hooks ────────────────────────────────────────────────────────────
+export {
+  type DimensionsState,
+  useAio,
+  useConnected,
+  useContext,
+  useContextSelector,
+  useDimensions,
+  useId,
+  useLocal,
+  useOptimistic,
+  useProjection,
+  useRaf,
+  useRef,
+  useSignal,
+} from "./browser-air.ts";
+
+// ── Time travel (@experimental) ──────────────────────────────────────
+export { useTimeTravel } from "./browser-air.ts";
+
+// ── Components ───────────────────────────────────────────────────────
+export {
+  Defer,
+  type DeferProps,
+  type DeferTrigger,
   ErrorBoundary,
   Fragment,
   lazy,
   Portal,
-  renderToString,
+  Show,
   Suspense,
-} from "./vdom.ts";
-export type { Action, Ref } from "./vdom.ts";
+} from "./browser-air.ts";
 
-// ── AIR component utilities ──────────────────────────────────────────
+// ── Router ───────────────────────────────────────────────────────────
+export {
+  Link,
+  type LinkProps,
+  navigate,
+  NavLink,
+  Outlet,
+  Redirect,
+  Route,
+  routePath,
+  type RouteProps,
+  routeSearch,
+  type RouteState,
+  useNavigate,
+  useRoute,
+} from "./browser-air.ts";
+
+// ── SSR + islands ────────────────────────────────────────────────────
+export {
+  island,
+  type IslandConfig,
+  type IslandHandle,
+  page,
+  renderToStream,
+} from "./browser-air.ts";
+export { renderToString } from "./vdom.ts";
+export type { Ref } from "./vdom.ts";
+
+// ── Transitions and animation ────────────────────────────────────────
+export {
+  fade,
+  scale,
+  slide,
+  type SpringConfig,
+  type SpringValue,
+  Transition,
+  type TransitionFn,
+  TransitionGroup,
+  type TransitionGroupProps,
+  type TransitionOptions,
+  type TransitionProps,
+  useSpring,
+} from "./browser-air.ts";
+export type { TransitionResult } from "./transition.ts";
+
+// ── Async data as signals ────────────────────────────────────────────
+export { type Resource, resource } from "./browser-air.ts";
+
+// ── Signal utilities ─────────────────────────────────────────────────
+export { on, watch } from "./watch.ts";
+export type { WatchOptions } from "./watch.ts";
+
+// ── Forms ────────────────────────────────────────────────────────────
 export { useFieldArray, useForm } from "./form.ts";
 export type {
   FieldArrayState,
@@ -35,39 +140,28 @@ export type {
   FormState,
   ValidationRule,
 } from "./form.ts";
-export { useSpring } from "./animation.ts";
-export type { SpringConfig, SpringValue } from "./animation.ts";
-// ── Transitions ─────────────────────────────────────────────────────
-export { fade, scale, slide } from "./transition.ts";
-export type {
-  TransitionFn,
-  TransitionOptions,
-  TransitionResult,
-} from "./transition.ts";
-export { Transition } from "./transition-component.ts";
-export type { TransitionProps } from "./transition-component.ts";
-export { TransitionGroup } from "./transition-group.ts";
-export type { TransitionGroupProps } from "./transition-group.ts";
-export { Show } from "./show.ts";
+
+// ── Virtual scrolling ────────────────────────────────────────────────
 export { useVirtualList } from "./virtual-list.ts";
 export type { VirtualListConfig, VirtualListState } from "./virtual-list.ts";
+
+// ── DevTools ─────────────────────────────────────────────────────────
 export { connectAioDevTools } from "./devtools.ts";
 export type {
   ComponentTreeNode,
   DevToolsHandle,
   RenderEvent,
 } from "./devtools.ts";
+export { connectDevTools, disconnectDevTools } from "./browser-air.ts";
 
-// ── Island (external framework mounting) ────────────────────────────
-export { island, type IslandConfig, type IslandHandle } from "./island.ts";
-
-// ── Async data as signals ────────────────────────────────────────────
-export { type Resource, resource } from "./resource.ts";
-
-// ── Signal utilities ─────────────────────────────────────────────────
-export { on, watch } from "./watch.ts";
-export type { WatchOptions } from "./watch.ts";
+// ── Component test harness (symmetric with testCell) ─────────────────
+export {
+  setDocument,
+  testComponent,
+  type TestComponentHandle,
+  type TestComponentOptions,
+} from "./browser-air.ts";
 
 // React migration compat hooks (useState/useEffect/useMemo/useCallback) live
 // at "aio/air/compat" only — off the main surface. `useRef` is a native AIR
-// primitive and remains exported via ./browser-air.ts above.
+// primitive and remains exported above.

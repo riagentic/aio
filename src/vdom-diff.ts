@@ -36,8 +36,17 @@ function _diffChildren(
   oldChildren: (VNode | string | number)[],
   ctx: RenderCtx,
   isSvg: boolean,
+  startAnchor: Node | null = null,
 ): void {
-  _diffChildrenRaw(parent, nextChildren, oldChildren, ctx, isSvg, _diff);
+  _diffChildrenRaw(
+    parent,
+    nextChildren,
+    oldChildren,
+    ctx,
+    isSvg,
+    _diff,
+    startAnchor,
+  );
 }
 
 export function _diff(
@@ -150,7 +159,14 @@ export function _diff(
 
   // Fragment
   if (nv.tag === Fragment) {
-    _diffChildren(parent, nv.children, ov.children, ctx, isSvg);
+    // AIO-395: a Fragment shares `parent` with its siblings — anchor the
+    // children diff at the node preceding the fragment's current region so
+    // keyed moves stay inside the region instead of jumping to parent start.
+    const firstDom = getDom(ov);
+    const startAnchor = firstDom && firstDom.parentNode === parent
+      ? firstDom.previousSibling
+      : null;
+    _diffChildren(parent, nv.children, ov.children, ctx, isSvg, startAnchor);
     _updateContainerDom(parent, nv, ov, ctx);
     return;
   }

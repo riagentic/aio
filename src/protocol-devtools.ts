@@ -55,6 +55,10 @@ export function _sendDevTools(
   }
 }
 
+/**
+ * Connect state changes to the Redux DevTools browser extension (state tree,
+ * action history, diffs). No-op when the extension is not installed.
+ */
 export function connectDevTools(): void {
   _initDevTools();
   if (_devtools && _coreHasState()) {
@@ -64,6 +68,7 @@ export function connectDevTools(): void {
   }
 }
 
+/** Disconnect from the Redux DevTools extension. */
 export function disconnectDevTools(): void {
   if (_devtools) {
     try {
