@@ -1,6 +1,6 @@
 # Changelog
 
-## v1.0.0-alpha14 (in progress)
+## v1.0.0-alpha14
 
 **AIR test harness, lifecycle fixes + public-surface audit — BREAKING (entry
 renames, surface trims).** See
@@ -19,6 +19,11 @@ renames, surface trims).** See
 
 ### Added
 
+- Wire-protocol version handshake — `__proto:{v,min}` hellos on WS/UDS/CLI;
+  mismatches close loudly (code 4505); legacy clients still work (roadmap A3)
+- Persistence schema versioning — KV snapshots stamped after each write;
+  alpha-era stores migrate transparently, newer-schema stores refuse to load
+  with `PERSIST_SCHEMA` (roadmap A4)
 - `useRaf` hook — requestAnimationFrame loop with automatic cleanup (AIO-392)
 - Public `testComponent`/`setDocument` harness for AIR component tests (AIO-393)
 - `aio create --vendored` — clones the framework into `dep/aio/` with the import
@@ -30,6 +35,12 @@ renames, surface trims).** See
 
 ### Fixed
 
+- Browser `aio` surface exports `own` — module-top `import { own }` no longer
+  crashes the browser graph (AIO-402)
+- UDS server acks dispatches — awaited methods no longer hang over Electron
+  (AIO-402)
+- Cell `version`/`onMigrate` stamps are actually written — migrations no longer
+  re-run on every restart
 - `onMount` runs after the DOM subtree and refs are committed (AIO-390)
 - Pre-bind cell reads return declared state defaults (AIO-391)
 - Fragment-in-map keyed children keep DOM order across re-renders (AIO-395)

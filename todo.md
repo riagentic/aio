@@ -1,7 +1,7 @@
 # Road to 1.0.0-final
 
-Plan written 2026-07-04 (alpha14 in progress). Predecessor todo.md (DX overhaul,
-9 phases) shipped in alpha13 and was removed with that release.
+Plan written 2026-07-04 (alpha14 finalized 2026-07-07). Predecessor todo.md (DX
+overhaul, 9 phases) shipped in alpha13 and was removed with that release.
 
 **Core principle:** all breaking changes die in alpha; beta = frozen surface,
 bugfix-only; 1.0.0 = boring. Commit per task as `rd(<task-id>): <summary>`.

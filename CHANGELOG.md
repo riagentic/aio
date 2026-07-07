@@ -1,9 +1,11 @@
 # Changelog
 
-## 1.0.0-alpha14 — AIR test harness + lifecycle fixes (in progress)
+## 1.0.0-alpha14 — public-surface audit + AIR test harness (BREAKING for alpha users)
 
-Field-report-driven release: AIR renderer lifecycle correctness and a public
-component test harness (risharp session 1–2 feedback).
+Road-to-1.0 hardening plus field-report fixes: the public-surface audit (entry
+renames, export trims), wire-protocol and persistence versioning, AIR renderer
+lifecycle correctness, and a public component test harness (risharp session 1–2
+feedback).
 
 ### Added
 
