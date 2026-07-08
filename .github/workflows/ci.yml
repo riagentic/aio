@@ -42,6 +42,8 @@ jobs:
         run: deno task boundaries
       - name: Benchmarks (regression floors — roadmap B4)
         run: deno task bench
+      - name: Coverage ratchet (src/ line coverage floor)
+        run: deno task coverage:check
 
   # Full test suite across the supported Deno range and a second OS, so
   # platform- or version-specific regressions can't merge silently.
