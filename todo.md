@@ -50,10 +50,15 @@ bugfix-only; 1.0.0 = boring. Commit per task as `rd(<task-id>): <summary>`.
         interleaved op storm → exact ack/relay counts, no echo, late-joiner
         catch-up via `__sync`). A field-report app would still add value but the
         concurrency mechanics are now pinned by test.
-  - [ ] `android` field report — needs a real device/emulator build
-        (out-of-repo; `aio create` an app, `compile:android`, run, report).
-  - [ ] `remote-*` field report — needs a deployed server + remote client
-        (out-of-repo; scaffold with `--remote` targets, deploy, report).
+  - [x] `android` field report — DONE 2026-07-08 on a real emulator (Pixel 7 /
+        API 35, KVM). Scaffolded app → `compile:android` → 3.2 MB APK →
+        installed → counter increments on tap → localStorage survives
+        force-stop + relaunch. Found + fixed AIO-404 (registry boot, iife
+        format, reactive getters; bundle-path breakage from folderization).
+  - [ ] `remote-*` field report — internal validation done 2026-07-08: exposed
+        TLS+token server driven by remote-cli thin client over the network
+        (found+fixed AIO-403 wss-downgrade/token-drop). Remaining: a real
+        deployed (off-box) server + client session, report.
 
 ## Phase B — betas (freeze + prove)
 
@@ -71,8 +76,11 @@ bugfix-only; 1.0.0 = boring. Commit per task as `rd(<task-id>): <summary>`.
       floors: signal graph, batched writes, composed reduce, KV persist) and
       soak harness ✓ (`deno task soak` / `soak:72h`, heap-slope leak gate,
       30-min run clean, 2026-07-08). Remaining: the actual 72h run.
-- [ ] **B5 — Security pass.** WS auth, secret-state exclusion from persist/ui
-      (risoto's pattern → documented invariant), `scope:"client"` boundary.
+- [x] **B5 — Security pass.** Done 2026-07-08 (commit 73f7678): full audit — WS
+      auth/wsLimits/origin checks solid; fixed snapshot admin gate,
+      allowedOrigins plumbing (+own-host in expose), trojan auth in user mode,
+      symlink guard; secrets invariant (persist+ui exclude BOTH) documented in
+      docs/auth/auth.md; scope:"client" boundary verified solid.
 - [ ] **B6 — beta2+ = fixes only** + 2 more field-report apps on the frozen API.
 
 ## Phase C — 1.0.0 exit criteria (defined now, not negotiated later)

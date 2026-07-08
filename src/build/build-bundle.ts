@@ -72,8 +72,20 @@ async function isBundleFresh(cfg: BuildConfig): Promise<boolean> {
   }
 }
 
-/** Generate the esbuild entry point code */
-function makeEntryCode(): string {
+/** Generate the esbuild entry point code.
+ *  Android (standalone WebView) auto-mounts — the generated index.html loads
+ *  the bundle as a classic script, so there is no importer to call mount(). */
+function makeEntryCode(doAndroid: boolean): string {
+  if (doAndroid) {
+    return `\
+import { mount as _mount } from 'aio/renderer'
+import { ensureConnected } from 'aio/air'
+import App from './src/App.tsx'
+function boot() { ensureConnected(); _mount(document.getElementById('root'), App) }
+if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot)
+else boot()
+`;
+  }
   return `\
 import { mount as _mount } from 'aio/renderer'
 import { ensureConnected } from 'aio/air'
@@ -137,7 +149,7 @@ export async function runBundle(
 
     // Generate temp entry
     const buildEntryPath = join(root, "_build_entry.tsx");
-    const entryCode = makeEntryCode();
+    const entryCode = makeEntryCode(doAndroid);
     await Deno.writeTextFile(buildEntryPath, entryCode);
 
     // esbuild alias: skip npm:/jsr: specifiers (resolved via node_modules)
@@ -161,7 +173,8 @@ export async function runBundle(
       const result = await esbuild.build({
         entryPoints: [buildEntryPath],
         bundle: true,
-        format: "esm",
+        // classic <script> in the WebView HTML — ESM would throw on `export`
+        format: doAndroid ? "iife" : "esm",
         platform: "browser",
         target: "esnext",
         outfile: out,

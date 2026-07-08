@@ -26,6 +26,14 @@ The generated `deno.json` already declares the vendored import map (`aio`,
 
 ## Option B: JSR (manual setup)
 
+> **During the alpha, use Option A.** The JSR package
+> ([`@riagentic/aio`](https://jsr.io/@riagentic/aio)) tracks tagged releases and
+> is not continuously published while the surface is still moving — a `deno add`
+> may resolve an older version than this repo. The scaffolder (Option A) and
+> `--vendored` install always match the current framework.
+
+Once the version you want is on JSR:
+
 ```sh
 deno add jsr:@riagentic/aio
 ```

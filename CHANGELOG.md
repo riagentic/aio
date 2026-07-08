@@ -24,16 +24,34 @@
 
 ### Fixed
 
+- **Dev server serves the browser app again** — folderization moved
+  `server-static.ts` into `src/server/`, so its `/__aio/` framework-module
+  resolver (`new URL(".", import.meta.url)`) pointed at `src/server/` instead of
+  `src/`. Every framework module 404'd, the client's
+  `import('/__aio/…/aio-renderer.ts')` threw, and **every browser/dev app
+  rendered blank**. The `/__aio/` namespace now mirrors the `src/` folder
+  structure (base at `src/` root; the client mounts
+  `/__aio/air/
+  aio-renderer.ts`), so a module's own `../state/…` imports
+  resolve back inside `/__aio/`. Found by browser field validation, driven
+  end-to-end in real chromium (AIO-405)
 - **`compile:*` bundling works again** — folderization moved the build module,
   and its framework-path resolution (`frameworkSrcDir`, `frameworkBase`, the
   generated entry's `./src/App.tsx` import) still pointed at the old flat
   layout; all `compile:browser/electron/cli/android` targets bundle again
   (AIO-404)
-- **Android builds support cell-based apps** — `standalone-air` (the WebView
-  runtime) now exports `cell` and a standalone `aio.run()` that composes cells,
-  binds their methods to the local dispatch loop, and persists via localStorage
-  — the scaffolded android template bundles and runs instead of failing with "No
-  matching export for 'cell'" (AIO-404)
+- **Android builds run cell-based apps end-to-end** — verified on a real
+  emulator (Pixel 7 / API 35): scaffold → `compile:android` → APK → install →
+  interact → persist across restart. Fixes found in the process (AIO-404):
+  - `standalone-air` now exports `cell` and a standalone `aio.run()`; the
+    generated client bundle mounts `App.tsx` and never runs the user's `app.ts`,
+    so `ensureConnected()` boots the runtime from the **cell registry** and
+    binds methods before first render
+  - the android entry auto-mounts and bundles as `iife` (was `esm` — the WebView
+    loads it as a classic `<script>`, which threw on `export`)
+  - state getters are upgraded to reactive signals so `counter.count` reads
+    re-render the AIR tree after a local dispatch (verified: tap +, count
+    updates; localStorage survives a force-stop + relaunch)
 
 - **`connectCli` works against exposed (TLS + token) servers** — `wss://` URLs
   were silently downgraded to `ws:` and a `?token=` in the URL (the server's own
