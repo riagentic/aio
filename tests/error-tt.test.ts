@@ -4,7 +4,7 @@ import {
   markError,
   record,
   toBroadcast,
-} from "../src/time-travel.ts";
+} from "../src/diagnostics/time-travel.ts";
 
 Deno.test("TT — error entry has error field", () => {
   let tt = createTT<{ x: number }, { type: string }>();

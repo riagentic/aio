@@ -1,5 +1,5 @@
 import { assertEquals } from "@std/assert";
-import { matchPath } from "../src/browser-protocol.ts";
+import { matchPath } from "../src/browser/browser-protocol.ts";
 
 // ── matchPath ────────────────────────────────────────────────────────────
 
@@ -59,7 +59,7 @@ Deno.test("matchPath: no false positives on similar paths", () => {
 
 // ── SPA fallback (server.ts) ──────────────────────────────────────────────
 
-import { createServer } from "../src/server.ts";
+import { createServer } from "../src/server/server.ts";
 import { join } from "@std/path";
 
 const SPA_PORT = 19960;

@@ -3,12 +3,12 @@
 
 import { assertEquals } from "@std/assert";
 import { Window } from "happy-dom";
-import { signal } from "../src/signal.ts";
-import { h } from "../src/vdom.ts";
-import { _setDocument, _unmount, mount } from "../src/aio-renderer.ts";
-import { Transition } from "../src/transition-component.ts";
-import { TransitionGroup } from "../src/transition-group.ts";
-import { fade, scale, slide } from "../src/transition.ts";
+import { signal } from "../src/state/signal.ts";
+import { h } from "../src/air/vdom.ts";
+import { _setDocument, _unmount, mount } from "../src/air/aio-renderer.ts";
+import { Transition } from "../src/air/transition-component.ts";
+import { TransitionGroup } from "../src/air/transition-group.ts";
+import { fade, scale, slide } from "../src/air/transition.ts";
 
 // happy-dom timers drained via win.happyDOM.close() — sanitizers enabled
 

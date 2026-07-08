@@ -1,7 +1,7 @@
 import { assertEquals } from "@std/assert";
-import { type ComponentFn, Fragment, h } from "../src/vdom.ts";
-import { lazy, Suspense } from "../src/vdom.ts";
-import { renderToStream } from "../src/ssr-stream.ts";
+import { type ComponentFn, Fragment, h } from "../src/air/vdom.ts";
+import { lazy, Suspense } from "../src/air/vdom.ts";
+import { renderToStream } from "../src/air/ssr-stream.ts";
 
 async function collect(
   vnode: Parameters<typeof renderToStream>[0],

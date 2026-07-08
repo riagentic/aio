@@ -1,5 +1,5 @@
 import { assertEquals } from "@std/assert";
-import { skv } from "../src/skv.ts";
+import { skv } from "../src/server/skv.ts";
 
 Deno.test("skv: set, get, del cycle", async () => {
   const kv = await Deno.openKv(":memory:");

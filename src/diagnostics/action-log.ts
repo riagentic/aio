@@ -1,6 +1,6 @@
 // src/diagnostics/action-log.ts — Rolling JSONL action recorder
 
-import { log } from "../logger.ts";
+import { log } from "./logger.ts";
 
 const SKIP_SUFFIXES = [":__FlowState", ":__exec", ":__flow"];
 const SKIP_CONTAINS = [":__set"];

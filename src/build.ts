@@ -13,13 +13,13 @@
  * ```
  */
 import { join } from "@std/path";
-import { type BuildConfig, loadBuildConfig } from "./build-config.ts";
-import { runBundle } from "./build-bundle.ts";
-import { buildClient } from "./build-client.ts";
-import { buildCli } from "./build-cli.ts";
-import { buildAndroid } from "./build-android.ts";
-import { runDenoCompile, writeServiceFile } from "./build-compile.ts";
-import { buildElectron } from "./build-electron.ts";
+import { type BuildConfig, loadBuildConfig } from "./build/build-config.ts";
+import { runBundle } from "./build/build-bundle.ts";
+import { buildClient } from "./build/build-client.ts";
+import { buildCli } from "./build/build-cli.ts";
+import { buildAndroid } from "./build/build-android.ts";
+import { runDenoCompile, writeServiceFile } from "./build/build-compile.ts";
+import { buildElectron } from "./build/build-electron.ts";
 
 /**
  * Run the build pipeline. Without `cfg`, configuration is loaded from CLI

@@ -9,7 +9,7 @@
         },
         "ActionsCellConfig": {
           "kind": "typeAlias",
-          "sig": "e34b7392cce57e7d"
+          "sig": "e536b35031246deb"
         },
         "ActionSource": {
           "kind": "typeAlias",
@@ -25,7 +25,7 @@
         },
         "AioApp": {
           "kind": "typeAlias",
-          "sig": "46103a37ea9808b0"
+          "sig": "8f07bae5f1b324cc"
         },
         "AioError": {
           "kind": "class",
@@ -77,7 +77,7 @@
         },
         "CellAio": {
           "kind": "typeAlias",
-          "sig": "70aae061d2ac32a6"
+          "sig": "f47f574e1eeb0d0e"
         },
         "CellDef": {
           "kind": "typeAlias",
@@ -105,7 +105,7 @@
         },
         "CellsConfig": {
           "kind": "typeAlias",
-          "sig": "9ec9702df130f158"
+          "sig": "1d44c7cdad733293"
         },
         "CellStateSize": {
           "kind": "typeAlias",
@@ -141,11 +141,11 @@
         },
         "composeCells": {
           "kind": "function",
-          "sig": "c001f1f70cdd0194"
+          "sig": "461dc933f5c392a8"
         },
         "ComposedCells": {
           "kind": "typeAlias",
-          "sig": "f28b3d0d06561a58"
+          "sig": "25a8bcac81e3ae56"
         },
         "composeMiddleware": {
           "kind": "function",
@@ -205,7 +205,7 @@
         },
         "DiagnosticsOptions": {
           "kind": "typeAlias",
-          "sig": "3095b23eef2be894"
+          "sig": "4b75eba454b42ce1"
         },
         "DirectCalling": {
           "kind": "typeAlias",
@@ -217,7 +217,7 @@
         },
         "effects": {
           "kind": "reference",
-          "sig": "8babb72579fe9fed"
+          "sig": "f83af22cec026bc7"
         },
         "ExecuteHandlers": {
           "kind": "typeAlias",
@@ -333,7 +333,7 @@
         },
         "MethodsCellConfig": {
           "kind": "typeAlias",
-          "sig": "9520ae125002d638"
+          "sig": "f11f3b5e0130d61b"
         },
         "MiddlewareFn": {
           "kind": "typeAlias",
@@ -465,11 +465,11 @@
         },
         "testCell": {
           "kind": "function",
-          "sig": "7db41bc2572af29e"
+          "sig": "2e56cbe8e947e0fb"
         },
         "TestContext": {
           "kind": "typeAlias",
-          "sig": "d5bb925674fcb156"
+          "sig": "f6de16d6a8582d2b"
         },
         "text": {
           "kind": "function",
@@ -617,7 +617,7 @@
         },
         "DimensionsState": {
           "kind": "interface",
-          "sig": "7b91cfa4c37718f6"
+          "sig": "768cfb6ba362d7b6"
         },
         "disconnectDevTools": {
           "kind": "function",
@@ -753,7 +753,7 @@
         },
         "Resource": {
           "kind": "interface",
-          "sig": "78ddff84515f7b68"
+          "sig": "80d7d4ce1e797056"
         },
         "Route": {
           "kind": "function",
@@ -761,7 +761,7 @@
         },
         "routePath": {
           "kind": "variable",
-          "sig": "73033d8de8522d5a"
+          "sig": "25af382826e46704"
         },
         "RouteProps": {
           "kind": "typeAlias",
@@ -769,7 +769,7 @@
         },
         "routeSearch": {
           "kind": "variable",
-          "sig": "f6e29cd927f57fc1"
+          "sig": "facb01e23e9f64d1"
         },
         "RouteState": {
           "kind": "typeAlias",
@@ -813,7 +813,7 @@
         },
         "testComponent": {
           "kind": "function",
-          "sig": "551fdc59d0f6ba26"
+          "sig": "025fc7bc0b4ec67e"
         },
         "TestComponentHandle": {
           "kind": "interface",
@@ -917,7 +917,7 @@
         },
         "useSignal": {
           "kind": "function",
-          "sig": "f882cf8675033075"
+          "sig": "e93577f9f58f1882"
         },
         "useSpring": {
           "kind": "function",
@@ -942,7 +942,7 @@
         },
         "VirtualListConfig": {
           "kind": "interface",
-          "sig": "cc485ae4de5a8aa1"
+          "sig": "ee420f32be159820"
         },
         "VirtualListState": {
           "kind": "interface",
@@ -950,7 +950,7 @@
         },
         "VNode": {
           "kind": "interface",
-          "sig": "6502d47aabdd8d8a"
+          "sig": "62d894388e070612"
         },
         "watch": {
           "kind": "function",
@@ -993,7 +993,7 @@
       "symbols": {
         "build": {
           "kind": "function",
-          "sig": "4e6845f62a8b7146"
+          "sig": "a076baf5aa88fc4c"
         }
       }
     },
@@ -1017,11 +1017,11 @@
         },
         "initSchema": {
           "kind": "function",
-          "sig": "df322d2f519f4aa1"
+          "sig": "1f8a6574b6d74ca9"
         },
         "loadTables": {
           "kind": "function",
-          "sig": "f55acaf1b06c00d7"
+          "sig": "9e104c76a335fd51"
         },
         "QueryResult": {
           "kind": "typeAlias",
@@ -1029,7 +1029,7 @@
         },
         "syncTables": {
           "kind": "function",
-          "sig": "454873eae42b4d44"
+          "sig": "8dabef027d9a3a7a"
         },
         "Tx": {
           "kind": "typeAlias",
@@ -1105,7 +1105,7 @@
         },
         "JSX": {
           "kind": "namespace",
-          "sig": "a54579100e7f0609"
+          "sig": "e3e94eb1d079ef4d"
         },
         "jsxs": {
           "kind": "variable",
@@ -1122,10 +1122,6 @@
         "isScheduleEffect": {
           "kind": "function",
           "sig": "d0dfbe85574db6a4"
-        },
-        "Log": {
-          "kind": "typeAlias",
-          "sig": "c5fd3b44b5b364e3"
         },
         "nextCronTime": {
           "kind": "function",
@@ -1260,7 +1256,7 @@
         },
         "setTransport": {
           "kind": "function",
-          "sig": "a1803a51c7f6a409",
+          "sig": "ef67c3c4d431fc90",
           "experimental": true
         },
         "trackPath": {
@@ -1469,11 +1465,11 @@
         },
         "testCell": {
           "kind": "function",
-          "sig": "7db41bc2572af29e"
+          "sig": "2e56cbe8e947e0fb"
         },
         "testComponent": {
           "kind": "function",
-          "sig": "551fdc59d0f6ba26"
+          "sig": "025fc7bc0b4ec67e"
         },
         "TestComponentHandle": {
           "kind": "interface",
@@ -1485,7 +1481,7 @@
         },
         "TestContext": {
           "kind": "typeAlias",
-          "sig": "d5bb925674fcb156"
+          "sig": "f6de16d6a8582d2b"
         }
       }
     }

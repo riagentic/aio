@@ -7,14 +7,17 @@ import {
   resolvePath,
   resolvePort,
   writePid,
-} from "../src/am-utils.ts";
-import { formatUptime } from "../src/am-output.ts";
-import { resolveControlPort } from "../src/am-http.ts";
-import { isProcessAlive, lockPath } from "../src/single-instance-lock.ts";
-import type { LockData as PidFile } from "../src/single-instance-lock.ts";
-import { createServer } from "../src/server.ts";
+} from "../src/am/am-utils.ts";
+import { formatUptime } from "../src/am/am-output.ts";
+import { resolveControlPort } from "../src/am/am-http.ts";
+import {
+  isProcessAlive,
+  lockPath,
+} from "../src/server/single-instance-lock.ts";
+import type { LockData as PidFile } from "../src/server/single-instance-lock.ts";
+import { createServer } from "../src/server/server.ts";
 import { join } from "@std/path";
-import { VERSION } from "../src/aio.ts";
+import { VERSION } from "../src/server/aio.ts";
 
 // Test app ID — unique per test run
 const TEST_APP = "am-test-" + Deno.pid;

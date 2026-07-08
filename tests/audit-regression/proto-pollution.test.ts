@@ -14,8 +14,8 @@
 // to pollute every object on the server.
 
 import { assertEquals, assertThrows } from "jsr:@std/assert@1.0.19";
-import { applyMutations } from "../../src/cell-impl.ts";
-import { _isFrameworkInternalActionType } from "../../src/server-ws.ts";
+import { applyMutations } from "../../src/state/cell-impl.ts";
+import { _isFrameworkInternalActionType } from "../../src/server/server-ws.ts";
 
 Deno.test("F-1: applyMutations rejects __proto__ in path", () => {
   const state: Record<string, unknown> = { count: 0 };

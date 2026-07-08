@@ -1,6 +1,6 @@
 import { assertEquals } from "@std/assert";
-import { createDispatch, type DispatchDeps } from "../src/dispatch.ts";
-import type { AioError } from "../src/error.ts";
+import { createDispatch, type DispatchDeps } from "../src/state/dispatch.ts";
+import type { AioError } from "../src/diagnostics/error.ts";
 
 // ── Performance Budget Tests ─────────────────────────────────────────
 

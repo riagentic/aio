@@ -1,6 +1,6 @@
 // Tests for src/listeners.ts — shared listener registry
 import { assertEquals } from "@std/assert";
-import { Listeners } from "../src/listeners.ts";
+import { Listeners } from "../src/state/listeners.ts";
 
 Deno.test("listeners: add and notify", () => {
   const l = new Listeners<number>();

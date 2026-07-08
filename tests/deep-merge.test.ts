@@ -1,5 +1,5 @@
 import { assertEquals } from "@std/assert";
-import { deepMerge } from "../src/deep-merge.ts";
+import { deepMerge } from "../src/state/deep-merge.ts";
 
 Deno.test("deepMerge: persisted overrides matching types", () => {
   const initial = { count: 0, name: "default" };

@@ -1,6 +1,6 @@
 import { assertEquals } from "@std/assert";
-import { computed, effect, signal } from "../src/signal.ts";
-import { on, watch } from "../src/watch.ts";
+import { computed, effect, signal } from "../src/state/signal.ts";
+import { on, watch } from "../src/state/watch.ts";
 
 Deno.test("watch: calls callback with new and old values", () => {
   const s = signal(1);

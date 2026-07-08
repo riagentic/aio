@@ -3,9 +3,9 @@
 // Each mode: boot → connect client → exchange state → verify → shutdown
 
 import { assertEquals } from "@std/assert";
-import { createServer } from "../src/server.ts";
-import { createUDSListener } from "../src/aio.ts";
-import { connectCli, connectCliUDS } from "../src/cli-client.ts";
+import { createServer } from "../src/server/server.ts";
+import { createUDSListener } from "../src/server/aio.ts";
+import { connectCli, connectCliUDS } from "../src/server/cli-client.ts";
 import { join } from "@std/path";
 
 // ── Helpers ──────────────────────────────────────────────────────────

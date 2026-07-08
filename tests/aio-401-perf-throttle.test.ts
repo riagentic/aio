@@ -8,7 +8,7 @@ import {
   _resetPerfThrottle,
   createAioError,
   reportError,
-} from "../src/error.ts";
+} from "../src/diagnostics/error.ts";
 
 function capture() {
   const warns: string[] = [], errors: string[] = [];

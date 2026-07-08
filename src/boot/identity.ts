@@ -1,5 +1,5 @@
 // Boot step: app identity — appId, port, title resolution
-import { resolveAppId } from "../single-instance-lock.ts";
+import { resolveAppId } from "../server/single-instance-lock.ts";
 import { join } from "@std/path";
 
 export interface BootIdentity {

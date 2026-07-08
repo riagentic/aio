@@ -1,5 +1,5 @@
 import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
-import { FlowHistory } from "../src/flow.ts";
+import { FlowHistory } from "../src/state/flow.ts";
 
 Deno.test("FlowHistory — tracks steps with status", () => {
   const history = new FlowHistory(50);

@@ -1,5 +1,5 @@
 import { assertEquals, assertRejects } from "@std/assert";
-import { loadOrCreateCert } from "../src/tls.ts";
+import { loadOrCreateCert } from "../src/server/tls.ts";
 
 const PEM_CERT_PREFIX = "-----BEGIN CERTIFICATE-----";
 const PEM_KEY_PREFIX = "-----BEGIN";

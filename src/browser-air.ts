@@ -3,8 +3,8 @@
 // Thin barrel — delegates to focused modules.
 
 // ── Transport (side-effectful — must import to wire up WS/IPC) ──────
-import "./browser-air-transport.ts";
-export { setSyncMessageHandler } from "./browser-air-transport.ts";
+import "./browser/browser-air-transport.ts";
+export { setSyncMessageHandler } from "./browser/browser-air-transport.ts";
 
 // ── Protocol re-exports (public API surface) ────────────────────────
 export {
@@ -53,10 +53,10 @@ export {
   type RouteProps,
   routeSearch,
   type RouteState,
-} from "./browser-protocol.ts";
+} from "./browser/browser-protocol.ts";
 
 // ── Time travel ─────────────────────────────────────────────────────
-export { useTimeTravel } from "./time-travel-air.ts";
+export { useTimeTravel } from "./air/time-travel-air.ts";
 
 // ── AIR renderer primitives (AIO-70) ────────────────────────────────
 export {
@@ -74,14 +74,14 @@ export {
   useOptimistic,
   useRef,
   useSignal,
-} from "./aio-renderer.ts";
+} from "./air/aio-renderer.ts";
 export {
   type Action,
   type ComponentFn,
   h,
   type VChild,
   type VNode,
-} from "./vdom.ts";
+} from "./air/vdom.ts";
 export {
   batch,
   type Computed,
@@ -90,39 +90,46 @@ export {
   type Signal,
   signal,
   untrack,
-} from "./signal.ts";
-export { Show } from "./show.ts";
-export { ErrorBoundary, Fragment, lazy, Portal, Suspense } from "./vdom.ts";
+} from "./state/signal.ts";
+export { Show } from "./air/show.ts";
+export { ErrorBoundary, Fragment, lazy, Portal, Suspense } from "./air/vdom.ts";
 
 // ── Transitions and animations ──────────────────────────────────────
-export { Transition, type TransitionProps } from "./transition-component.ts";
+export {
+  Transition,
+  type TransitionProps,
+} from "./air/transition-component.ts";
 export {
   TransitionGroup,
   type TransitionGroupProps,
-} from "./transition-group.ts";
+} from "./air/transition-group.ts";
 export {
   fade,
   scale,
   slide,
   type TransitionFn,
   type TransitionOptions,
-} from "./transition.ts";
-export { type SpringConfig, type SpringValue, useSpring } from "./animation.ts";
+} from "./air/transition.ts";
+export {
+  type SpringConfig,
+  type SpringValue,
+  useSpring,
+} from "./air/animation.ts";
 
 // ── Island (external framework mounting) ────────────────────────────
-export { island, type IslandConfig, type IslandHandle } from "./island.ts";
+export { island, type IslandConfig, type IslandHandle } from "./air/island.ts";
 
 // ── Trigger-based lazy loading ──────────────────────────────────────
-export { Defer, type DeferProps, type DeferTrigger } from "./defer.ts";
+export { Defer, type DeferProps, type DeferTrigger } from "./air/defer.ts";
 
 // ── Async data as signals ────────────────────────────────────────────
-export { type Resource, resource } from "./resource.ts";
+export { type Resource, resource } from "./air/resource.ts";
 
 // ── Reactive element dimensions ──────────────────────────────────────
-export { type DimensionsState, useDimensions } from "./dimensions.ts";
+export { type DimensionsState, useDimensions } from "./air/dimensions.ts";
 
 // ── Managed requestAnimationFrame loop ───────────────────────────────
-export { useRaf } from "./raf.ts";
+export { useRaf } from "./air/raf.ts";
 
 // ── Component test harness (symmetric with testCell) ─────────────────
 export {
@@ -130,13 +137,19 @@ export {
   testComponent,
   type TestComponentHandle,
   type TestComponentOptions,
-} from "./test-component.ts";
+} from "./testing/test-component.ts";
 
 // ── Streaming SSR ──────────────────────────────────────────────────
-export { renderToStream } from "./ssr-stream.ts";
+export { renderToStream } from "./air/ssr-stream.ts";
 
 // ── Shared utilities (AIO-47) ──────────────────────────────────────
-export { actions, effects, msg, own, schedule } from "./browser-shared.ts";
+export {
+  actions,
+  effects,
+  msg,
+  own,
+  schedule,
+} from "./browser/browser-shared.ts";
 
 // ── AIR hooks (signal-based) ────────────────────────────────────────
 export {
@@ -145,7 +158,7 @@ export {
   useConnected,
   useLocal,
   useProjection,
-} from "./browser-air-hooks.ts";
+} from "./browser/browser-air-hooks.ts";
 
 // ── Router (AIR signal-based) ───────────────────────────────────────
 export {
@@ -157,4 +170,4 @@ export {
   Route,
   useNavigate,
   useRoute,
-} from "./browser-air-router.ts";
+} from "./browser/browser-air-router.ts";

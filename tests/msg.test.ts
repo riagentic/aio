@@ -1,5 +1,5 @@
 import { assertEquals } from "@std/assert";
-import { msg } from "../src/msg.ts";
+import { msg } from "../src/state/msg.ts";
 
 Deno.test("msg() without payload creates empty payload", () => {
   const m = msg("CLICK");

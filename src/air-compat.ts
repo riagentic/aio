@@ -12,4 +12,10 @@
  * Stability: **permanent** (A5 decision, 2026-07-06). This entry is part of
  * the stable 1.0 surface — React migrations don't finish on our schedule.
  */
-export { useCallback, useEffect, useMemo, useRef, useState } from "./compat.ts";
+export {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "./air/compat.ts";

@@ -1,8 +1,13 @@
 import { assertEquals, assertNotEquals } from "@std/assert";
 import { Window } from "happy-dom";
-import { signal } from "../src/signal.ts";
-import { ErrorBoundary, Fragment, h, renderToString } from "../src/vdom.ts";
-import { _setDocument, _unmount, hydrate, mount } from "../src/aio-renderer.ts";
+import { signal } from "../src/state/signal.ts";
+import { ErrorBoundary, Fragment, h, renderToString } from "../src/air/vdom.ts";
+import {
+  _setDocument,
+  _unmount,
+  hydrate,
+  mount,
+} from "../src/air/aio-renderer.ts";
 import {
   _getState,
   _injectState,

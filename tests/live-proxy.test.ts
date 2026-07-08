@@ -2,7 +2,7 @@
 // Tests for createLiveProxy traps: has, ownKeys, getOwnPropertyDescriptor
 
 import { assertEquals } from "@std/assert";
-import { createBatcher, createLiveProxy } from "../src/cell-impl.ts";
+import { createBatcher, createLiveProxy } from "../src/state/cell-impl.ts";
 
 function makeProxy<S extends Record<string, unknown>>(state: S) {
   let current = state;

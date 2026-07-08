@@ -3,8 +3,8 @@ import { assertEquals } from "@std/assert";
 import {
   applyCellMigrations,
   type CellMigrationInfo,
-} from "../src/aio-boot.ts";
-import { deepMerge } from "../src/deep-merge.ts";
+} from "../src/server/aio-boot.ts";
+import { deepMerge } from "../src/state/deep-merge.ts";
 
 type LogEntry = { level: string; msg: string };
 

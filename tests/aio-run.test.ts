@@ -4,7 +4,7 @@ import {
   buildOnPerf,
   buildReportOpts,
   createMemoizedUIState,
-} from "../src/aio-run-helpers.ts";
+} from "../src/server/aio-run-helpers.ts";
 
 // ── createMemoizedUIState ──────────────────────────────────────────
 

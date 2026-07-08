@@ -1,5 +1,5 @@
 import { assertEquals } from "@std/assert";
-import { _checkStateIntegrity } from "../src/browser-protocol.ts";
+import { _checkStateIntegrity } from "../src/browser/browser-protocol.ts";
 import { _reset } from "../src/state-core.ts";
 
 Deno.test("state integrity: captures initial shape on first call", () => {

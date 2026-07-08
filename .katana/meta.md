@@ -1,3 +1,4 @@
 # Meta kata for aio
 
-- current working version is v1.0.0-alpha14
+- deno.json `version`, the CHANGELOG's top released section, and the newest git
+  tag all name the same version

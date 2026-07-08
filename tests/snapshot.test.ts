@@ -1,6 +1,6 @@
 import { assertEquals, assertThrows } from "@std/assert";
-import { createDispatch } from "../src/dispatch.ts";
-import { createServer } from "../src/server.ts";
+import { createDispatch } from "../src/state/dispatch.ts";
+import { createServer } from "../src/server/server.ts";
 import { join } from "@std/path";
 
 const noop = { debug: () => {}, warn: () => {}, error: () => {} };

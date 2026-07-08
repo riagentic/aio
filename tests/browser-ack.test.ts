@@ -1,5 +1,5 @@
 import { assertEquals } from "@std/assert";
-import { cell } from "../src/cell-create.ts";
+import { cell } from "../src/state/cell-create.ts";
 import {
   _pendingAckCount,
   _registerAck,
@@ -7,9 +7,12 @@ import {
   _rejectAllPending,
   _resolveAck,
   _setAckTimeoutMs,
-} from "../src/browser-ack.ts";
-import { _resetCellRegistry, bindCellReactive } from "../src/cell-reactive.ts";
-import { _resetSignals } from "../src/state-signals.ts";
+} from "../src/protocol/browser-ack.ts";
+import {
+  _resetCellRegistry,
+  bindCellReactive,
+} from "../src/state/cell-reactive.ts";
+import { _resetSignals } from "../src/state/state-signals.ts";
 
 // Tests for 2.2: browser-side method calls return a Promise that resolves
 // when the server has acked the dispatch. The ack path is exercised via the

@@ -2,8 +2,8 @@ import {
   assertEquals,
   assertExists,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
-import { createDispatch } from "../src/dispatch.ts";
-import type { AioError } from "../src/error.ts";
+import { createDispatch } from "../src/state/dispatch.ts";
+import type { AioError } from "../src/diagnostics/error.ts";
 
 type Action = { type: string; payload?: unknown; _source?: string };
 type Effect = { type: string; payload?: unknown };

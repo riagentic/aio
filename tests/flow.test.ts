@@ -1,6 +1,6 @@
 import { assertEquals, assertExists } from "@std/assert";
-import { cell, composeCells } from "../src/cell.ts";
-import { _actionListeners, cancelFlow } from "../src/flow.ts";
+import { cell, composeCells } from "../src/state/cell.ts";
+import { _actionListeners, cancelFlow } from "../src/state/flow.ts";
 
 // ── Helpers ──────────────────────────────────────────────────────────
 

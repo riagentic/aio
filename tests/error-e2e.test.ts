@@ -2,14 +2,14 @@ import {
   assertEquals,
   assertExists,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
-import { createDispatch } from "../src/dispatch.ts";
-import { createTT, markError, record } from "../src/time-travel.ts";
+import { createDispatch } from "../src/state/dispatch.ts";
+import { createTT, markError, record } from "../src/diagnostics/time-travel.ts";
 import {
   type AioError,
   createAioError,
   reportError,
   type ReportErrorOpts,
-} from "../src/error.ts";
+} from "../src/diagnostics/error.ts";
 
 Deno.test("e2e — action → reduce throw → onError → TT flagged", async () => {
   const errors: AioError[] = [];

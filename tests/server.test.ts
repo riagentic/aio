@@ -4,7 +4,7 @@ import {
   buildBrowserImportMap,
   classifyBrowserError,
   createServer,
-} from "../src/server.ts";
+} from "../src/server/server.ts";
 import { join } from "@std/path";
 
 const TEST_PORT = 19800;

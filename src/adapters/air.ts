@@ -15,8 +15,8 @@
  * ```
  */
 
-import { signal } from "../signal.ts";
-import { useRef } from "../aio-renderer.ts";
+import { signal } from "../state/signal.ts";
+import { useRef } from "../air/aio-renderer.ts";
 import {
   type CellRef,
   createSendProxy,
@@ -31,7 +31,7 @@ import type {
   DirectCalling,
   ExtractState,
   SendOf,
-} from "../cell-types.ts";
+} from "../state/cell-types.ts";
 
 /** Subscribe to a cell — use direct cell access instead for new code. */
 export function useCell<

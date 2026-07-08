@@ -1,7 +1,7 @@
 import { assertEquals, assertThrows } from "@std/assert";
-import { cell } from "../src/cell-create.ts";
-import { composeCells } from "../src/cell-compose.ts";
-import { createLiveProxy } from "../src/cell-impl.ts";
+import { cell } from "../src/state/cell-create.ts";
+import { composeCells } from "../src/state/cell-compose.ts";
+import { createLiveProxy } from "../src/state/cell-impl.ts";
 
 // 4.1 — Characterize current behavior of draft read patterns. Each test
 // records what the runtime actually does — pass, fail, or throw — and

@@ -4,7 +4,7 @@ import {
   type PerfMetric,
   record,
   toBroadcast,
-} from "../src/time-travel.ts";
+} from "../src/diagnostics/time-travel.ts";
 
 Deno.test("PerfMetric with breakdown flows through record → toBroadcast", () => {
   let tt = createTT<Record<string, unknown>, { type: string }>();
@@ -22,7 +22,7 @@ Deno.test("PerfMetric with breakdown flows through record → toBroadcast", () =
   assertEquals(broadcast.entries[0]!.perf?.breakdown?.produce, 30);
 });
 
-import { createDispatch, type PerfTiming } from "../src/dispatch.ts";
+import { createDispatch, type PerfTiming } from "../src/state/dispatch.ts";
 
 Deno.test("PerfTiming accepts optional breakdown field", () => {
   const timing: PerfTiming = {
@@ -35,9 +35,9 @@ Deno.test("PerfTiming accepts optional breakdown field", () => {
   assertEquals(timing.breakdown?.produce, 35);
 });
 
-import { composeCells } from "../src/cell-compose.ts";
-import type { CellEntry } from "../src/cell-types.ts";
-import type { ReduceBreakdown } from "../src/time-travel.ts";
+import { composeCells } from "../src/state/cell-compose.ts";
+import type { CellEntry } from "../src/state/cell-types.ts";
+import type { ReduceBreakdown } from "../src/diagnostics/time-travel.ts";
 
 // framework internals test — __aio access intentional
 // Constructs raw cell internals to test compose wiring without cell() factory

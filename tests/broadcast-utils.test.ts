@@ -5,7 +5,7 @@ import {
   filterStateBySubs,
   parseSubs,
   type PatchEntry,
-} from "../src/broadcast-utils.ts";
+} from "../src/protocol/broadcast-utils.ts";
 
 // ── filterStateBySubs ──────────────────────────────────────────────
 

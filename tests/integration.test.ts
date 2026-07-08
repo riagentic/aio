@@ -1,12 +1,12 @@
 import { assertEquals, assertNotEquals } from "@std/assert";
-import { createServer } from "../src/server.ts";
-import { createDispatch } from "../src/dispatch.ts";
+import { createServer } from "../src/server/server.ts";
+import { createDispatch } from "../src/state/dispatch.ts";
 import {
   createScheduleManager,
   isScheduleEffect,
   schedule,
   type ScheduleEffect,
-} from "../src/schedule.ts";
+} from "../src/state/schedule.ts";
 import { join } from "@std/path";
 
 const PORT = 19810;
@@ -709,7 +709,7 @@ Deno.test("integration: schedule.after effect from reducer fires once", async ()
 // ── SQLite persistence integration ──────────────────────────────────
 
 import { createDB, initSchema, loadTables, syncTables } from "../src/db/mod.ts";
-import { integer, pk, table, text } from "../src/sql.ts";
+import { integer, pk, table, text } from "../src/server/sql.ts";
 
 Deno.test("integration: db arrays persist to SQLite and restore on restart", async () => {
   const path = Deno.makeTempFileSync({ suffix: ".db" });

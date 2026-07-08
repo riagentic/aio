@@ -3,7 +3,7 @@ import {
   _diagDedupSize,
   diagEmit,
   initDiagnosticBus,
-} from "../src/diagnostic-bus.ts";
+} from "../src/diagnostics/diagnostic-bus.ts";
 
 Deno.test("AIO-123: _dedup Map prunes stale entries after DEDUP_WINDOW_MS", () => {
   initDiagnosticBus(true);

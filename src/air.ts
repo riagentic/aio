@@ -105,8 +105,8 @@ export {
   page,
   renderToStream,
 } from "./browser-air.ts";
-export { renderToString } from "./vdom.ts";
-export type { Ref } from "./vdom.ts";
+export { renderToString } from "./air/vdom.ts";
+export type { Ref } from "./air/vdom.ts";
 
 // ── Transitions and animation ────────────────────────────────────────
 export {
@@ -123,35 +123,38 @@ export {
   type TransitionProps,
   useSpring,
 } from "./browser-air.ts";
-export type { TransitionResult } from "./transition.ts";
+export type { TransitionResult } from "./air/transition.ts";
 
 // ── Async data as signals ────────────────────────────────────────────
 export { type Resource, resource } from "./browser-air.ts";
 
 // ── Signal utilities ─────────────────────────────────────────────────
-export { on, watch } from "./watch.ts";
-export type { WatchOptions } from "./watch.ts";
+export { on, watch } from "./state/watch.ts";
+export type { WatchOptions } from "./state/watch.ts";
 
 // ── Forms ────────────────────────────────────────────────────────────
-export { useFieldArray, useForm } from "./form.ts";
+export { useFieldArray, useForm } from "./air/form.ts";
 export type {
   FieldArrayState,
   FieldState,
   FormState,
   ValidationRule,
-} from "./form.ts";
+} from "./air/form.ts";
 
 // ── Virtual scrolling ────────────────────────────────────────────────
-export { useVirtualList } from "./virtual-list.ts";
-export type { VirtualListConfig, VirtualListState } from "./virtual-list.ts";
+export { useVirtualList } from "./air/virtual-list.ts";
+export type {
+  VirtualListConfig,
+  VirtualListState,
+} from "./air/virtual-list.ts";
 
 // ── DevTools ─────────────────────────────────────────────────────────
-export { connectAioDevTools } from "./devtools.ts";
+export { connectAioDevTools } from "./diagnostics/devtools.ts";
 export type {
   ComponentTreeNode,
   DevToolsHandle,
   RenderEvent,
-} from "./devtools.ts";
+} from "./diagnostics/devtools.ts";
 export { connectDevTools, disconnectDevTools } from "./browser-air.ts";
 
 // ── Component test harness (symmetric with testCell) ─────────────────

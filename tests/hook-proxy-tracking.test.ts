@@ -18,7 +18,7 @@ import {
   _collapsePaths,
   _resetTracking,
   _trackingProxy,
-} from "../src/browser-protocol.ts";
+} from "../src/browser/browser-protocol.ts";
 
 // ── useAio() wiring: _trackingProxy(state) ─────────────────────────
 

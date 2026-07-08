@@ -1,9 +1,9 @@
 // AIO-393: public testComponent + setDocument harness (symmetry with testCell).
 import { assertEquals } from "@std/assert";
 import { Window } from "happy-dom";
-import { h } from "../src/vdom.ts";
-import { onMount, useRef } from "../src/renderer-lifecycle.ts";
-import { testComponent } from "../src/test-component.ts";
+import { h } from "../src/air/vdom.ts";
+import { onMount, useRef } from "../src/air/renderer-lifecycle.ts";
+import { testComponent } from "../src/testing/test-component.ts";
 
 Deno.test("testComponent: mounts, exposes html, unmounts", () => {
   const win = new Window({ url: "https://localhost" });

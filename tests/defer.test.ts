@@ -1,8 +1,8 @@
 import { assertEquals } from "@std/assert";
 import { Window } from "happy-dom";
-import { h } from "../src/vdom.ts";
-import { _setDocument, _unmount, mount } from "../src/aio-renderer.ts";
-import { Defer } from "../src/defer.ts";
+import { h } from "../src/air/vdom.ts";
+import { _setDocument, _unmount, mount } from "../src/air/aio-renderer.ts";
+import { Defer } from "../src/air/defer.ts";
 
 function createDOM() {
   const win = new Window({ url: "https://localhost" });

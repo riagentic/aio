@@ -7,7 +7,7 @@
 //   - State updates broadcast correct filtered view to each user
 
 import { assertEquals } from "@std/assert";
-import { createServer } from "../src/server.ts";
+import { createServer } from "../src/server/server.ts";
 import { join } from "@std/path";
 
 const PORT = 19840;

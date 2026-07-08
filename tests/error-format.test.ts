@@ -6,7 +6,7 @@ import {
   createAioError,
   formatErrorBox,
   formatErrorCompact,
-} from "../src/error.ts";
+} from "../src/diagnostics/error.ts";
 
 Deno.test("formatErrorBox — contains cell name and error code", () => {
   const err = createAioError("REDUCE_ERROR", new Error("kaboom"), {

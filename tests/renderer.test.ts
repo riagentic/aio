@@ -1,14 +1,14 @@
 import { assertEquals } from "@std/assert";
 import { Window } from "happy-dom";
-import { batch, computed, effect, signal } from "../src/signal.ts";
-import { Fragment, h } from "../src/vdom.ts";
+import { batch, computed, effect, signal } from "../src/state/signal.ts";
+import { Fragment, h } from "../src/air/vdom.ts";
 import {
   _setDocument,
   _unmount,
   afterRender,
   mount,
   type MountHandle,
-} from "../src/aio-renderer.ts";
+} from "../src/air/aio-renderer.ts";
 
 function createDOM(): {
   document: Document;

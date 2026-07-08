@@ -5,7 +5,7 @@ import {
   _collapsePaths,
   _resetTracking,
   _trackingProxy,
-} from "../src/browser-protocol.ts";
+} from "../src/browser/browser-protocol.ts";
 
 // NOTE: Every test MUST call _resetTracking() at END to clear dangling timers
 // from _scheduleSyncSubs, otherwise Deno's op sanitizer will fail.

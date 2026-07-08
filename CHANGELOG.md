@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased
+
+### Internal
+
+- **`src/` folderized into domain modules** — 199 flat files moved into
+  `state/ protocol/ air/ browser/ server/ build/ am/ electron/ diagnostics/
+  testing/`
+  (plus existing `db/ sync/ vitals/ boot/`); `src/` root now holds only the
+  public entry files. No export paths changed — vendored projects and jsr
+  consumers are unaffected.
+- **Module-boundary gate** — `deno task boundaries`
+  (`scripts/check-boundaries.ts`, CI-enforced) locks the folder dependency
+  matrix: `state/` stays isomorphic-light, `browser/`+`air/` can never import
+  `server/`, tooling can't leak into the runtime graph.
+- `src/*.test.ts` strays moved to `tests/`; `.gitignore` `build/` root-anchored
+  (was silently excluding `src/build/` from the JSR package graph).
+
 ## 1.0.0-alpha14 — public-surface audit + AIR test harness (BREAKING for alpha users)
 
 Road-to-1.0 hardening plus field-report fixes: the public-surface audit (entry

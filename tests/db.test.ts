@@ -11,7 +11,7 @@ import {
   ref,
   table,
   text,
-} from "../src/sql.ts";
+} from "../src/server/sql.ts";
 import { createDB, initSchema, loadTables, syncTables } from "../src/db/mod.ts";
 
 // ── Helpers ──────────────────────────────────────────────────────────

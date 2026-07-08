@@ -2,7 +2,7 @@ import { assertEquals } from "@std/assert";
 import { createLoopProbe } from "../../src/vitals/loop-probe.ts";
 import { DEFAULT_THRESHOLDS } from "../../src/vitals/types.ts";
 import type { VitalThresholds } from "../../src/vitals/types.ts";
-import type { PerfTiming } from "../../src/dispatch.ts";
+import type { PerfTiming } from "../../src/state/dispatch.ts";
 
 function makeTiming(actionType: string, reduce = 5): PerfTiming {
   return {

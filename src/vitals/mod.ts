@@ -17,8 +17,8 @@ import {
   type PressureMonitorAPI,
 } from "./pressure-monitor.ts";
 import { evaluateHints } from "./hints.ts";
-import { generateCorrelationId } from "../error.ts";
-import { diagEmit } from "../diagnostic-bus.ts";
+import { generateCorrelationId } from "../diagnostics/error.ts";
+import { diagEmit } from "../diagnostics/diagnostic-bus.ts";
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 

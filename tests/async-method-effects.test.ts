@@ -3,13 +3,13 @@
 // action so the effects flow down the standard reduce→effects path.
 
 import { assertEquals } from "@std/assert";
-import { cell } from "../src/cell.ts";
-import { testCell } from "../src/cell-test.ts";
+import { cell } from "../src/state/cell.ts";
+import { testCell } from "../src/testing/cell-test.ts";
 import {
   isScheduleEffect,
   schedule,
   type ScheduleEffect,
-} from "../src/schedule.ts";
+} from "../src/state/schedule.ts";
 
 const poller = cell("poller381", {
   state: { tries: 0, data: null as string | null },

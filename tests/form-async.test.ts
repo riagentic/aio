@@ -1,5 +1,5 @@
 import { assertEquals } from "@std/assert";
-import { useForm } from "../src/form.ts";
+import { useForm } from "../src/air/form.ts";
 
 function delay(ms: number) {
   return new Promise<void>((r) => setTimeout(r, ms));

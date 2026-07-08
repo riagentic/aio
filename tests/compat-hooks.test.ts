@@ -4,11 +4,11 @@
 
 import { assertEquals } from "@std/assert";
 import { Window } from "happy-dom";
-import { signal } from "../src/signal.ts";
-import { h } from "../src/vdom.ts";
-import { _setDocument, _unmount, mount } from "../src/aio-renderer.ts";
-import { _resetEventWarnings } from "../src/vdom-events.ts";
-import { _resetHints, useEffect } from "../src/compat.ts";
+import { signal } from "../src/state/signal.ts";
+import { h } from "../src/air/vdom.ts";
+import { _setDocument, _unmount, mount } from "../src/air/aio-renderer.ts";
+import { _resetEventWarnings } from "../src/air/vdom-events.ts";
+import { _resetHints, useEffect } from "../src/air/compat.ts";
 
 function createDOM(): {
   document: Document;
@@ -198,9 +198,9 @@ Deno.test({
 // ── AIO-8.2: async-misclassification guard ──────────────────────────
 
 Deno.test("8.2: sync-classified method returning a Promise throws in dev", async () => {
-  const { cell } = await import("../src/cell-create.ts");
-  const { composeCells } = await import("../src/cell-compose.ts");
-  const { _resetCellRegistry } = await import("../src/cell-reactive.ts");
+  const { cell } = await import("../src/state/cell-create.ts");
+  const { composeCells } = await import("../src/state/cell-compose.ts");
+  const { _resetCellRegistry } = await import("../src/state/cell-reactive.ts");
   _resetCellRegistry();
   (globalThis as Record<string, unknown>).__aioDev = true;
   try {
@@ -228,7 +228,7 @@ Deno.test("8.2: sync-classified method returning a Promise throws in dev", async
   } finally {
     delete (globalThis as Record<string, unknown>).__aioDev;
     const { _resetCellRegistry: reset } = await import(
-      "../src/cell-reactive.ts"
+      "../src/state/cell-reactive.ts"
     );
     reset();
   }
