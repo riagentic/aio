@@ -75,22 +75,35 @@ export function _ensureDelegation(root: Element, evt: string): void {
     // Walk composedPath to handle shadow DOM correctly. For each element in the
     // path (target→root), check if it has a handler for this event type.
     const path = e.composedPath();
-    for (const node of path) {
-      if (node === root) break; // Don't go above mount root
-      // Duck-type Element check (nodeType 1) — avoid instanceof which fails
-      // in test environments (happy-dom) where global Element is undefined.
-      if ((node as Node).nodeType !== 1) continue;
-      const handler = _wrappedListeners.get(node as Element)?.get(evt);
-      if (handler) {
-        // AIO-281: catch handler errors to prevent parent handlers from being skipped
-        try {
-          handler(e);
-        } catch (err) {
-          console.error("[aio] event handler error:", err);
+    try {
+      for (const node of path) {
+        if (node === root) break; // Don't go above mount root
+        // Duck-type Element check (nodeType 1) — avoid instanceof which fails
+        // in test environments (happy-dom) where global Element is undefined.
+        if ((node as Node).nodeType !== 1) continue;
+        const handler = _wrappedListeners.get(node as Element)?.get(evt);
+        if (handler) {
+          // The native currentTarget here is the delegation root — user code
+          // expects the handling element (`e.currentTarget.value`, per the
+          // jsx-runtime AioEvent contract). Shadow it for this handler.
+          Object.defineProperty(e, "currentTarget", {
+            configurable: true,
+            get: () => node,
+          });
+          // AIO-281: catch handler errors to prevent parent handlers from being skipped
+          try {
+            handler(e);
+          } catch (err) {
+            console.error("[aio] event handler error:", err);
+          }
+          // Respect stopPropagation — check if propagation was stopped
+          if (e.cancelBubble) break;
         }
-        // Respect stopPropagation — check if propagation was stopped
-        if (e.cancelBubble) break;
       }
+    } finally {
+      // Remove the shadow so the event object behaves natively afterwards.
+      // deno-lint-ignore no-explicit-any
+      delete (e as any).currentTarget;
     }
   };
   registered.set(evt, listener);

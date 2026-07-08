@@ -231,10 +231,14 @@ export function createWsManager(deps: WsDeps): WsManager {
       deps.debug(`ws: rejected — max connections (${maxConn})`);
       return new Response("Too Many Connections", { status: 503 });
     }
+    // Read headers BEFORE upgrading — upgradeWebSocket consumes the request,
+    // and header access afterwards throws "Request closed" (Deno ≥2.9),
+    // killing the serve callback on every WS connect.
+    const userAgent = req.headers.get("user-agent") ?? "";
     const { socket, response } = Deno.upgradeWebSocket(req);
     const clientId = crypto.randomUUID();
     const clientIndex = nextIndex();
-    const isElectron = /electron/i.test(req?.headers.get("user-agent") ?? "");
+    const isElectron = /electron/i.test(userAgent);
     const meta: ClientMeta = {
       id: clientId,
       index: clientIndex,
