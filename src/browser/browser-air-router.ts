@@ -1,7 +1,7 @@
 // browser-air-router: AIR signal-based router (Route, Outlet, Link, NavLink, Redirect, etc.)
 
 import { createContext, onMount, useContext } from "../air/aio-renderer.ts";
-import { type ComponentFn, h, type VChild } from "../air/vdom.ts";
+import { type ComponentFn, Fragment, h, type VChild } from "../air/vdom.ts";
 import {
   ensureConnected,
   type LinkProps,
@@ -103,7 +103,12 @@ export function Route(
 /** Renders the matching child route inside a parent Route's element. */
 export function Outlet(): unknown {
   const { outlet } = useContext(_RouteCtx);
-  return outlet ?? null;
+  if (outlet == null) return null;
+  // The renderer passes a component's children as an array; a bare array is
+  // not a renderable VNode — wrap it so nested <Route> children render.
+  return Array.isArray(outlet)
+    ? h(Fragment, null, ...(outlet as VChild[]))
+    : outlet;
 }
 
 /** Anchor that navigates without page reload. Adds activeClass when path matches. */

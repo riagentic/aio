@@ -66,8 +66,7 @@ export function cell<
 /** Implementation — dispatches on config shape (methods / actions / mixed). */
 // deno-lint-ignore no-explicit-any
 export function cell(name: string, config: any): any {
-  const hasMethods = config.methods &&
-    Object.keys(config.methods as Record<string, unknown>).length > 0;
+  const hasMethods = config.methods !== undefined;
   const hasGenerators = config.generators &&
     Object.keys(config.generators as Record<string, unknown>).length > 0;
   const hasActions = config.actions &&
@@ -121,8 +120,9 @@ export function cell(name: string, config: any): any {
     return def;
   }
 
-  // Methods present (with optional generators, actions, effects) → unified builder
-  if (hasMethods || (hasGenerators && !hasActions)) {
+  // Methods present (with optional generators, actions, effects) → unified builder.
+  // An empty or omitted methods map is valid — state-only cells (thin-client stubs).
+  if (hasMethods || !hasActions) {
     const def = createCellFromMethods(
       name,
       config as MethodsCellConfig<string, Record<string, unknown>>,

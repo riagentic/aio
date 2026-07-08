@@ -1213,3 +1213,15 @@ Deno.test("cell with explicit config is not overridden by cellDefaults", () => {
   assertEquals(f.__aio.persist, { include: ["count"] });
   assertEquals(f.__aio.ui, { exclude: ["secret"] });
 });
+
+Deno.test("cell with empty methods map is a valid state-only cell (thin-client stub)", () => {
+  // `aio create` remote-electron/android scaffolds: cell('app', { state: {}, methods: {} })
+  const stub = cell("stub-empty", { state: {}, methods: {} });
+  assertEquals(stub.__aio.id, "stub-empty");
+
+  // Omitting methods entirely is tolerated at runtime (state-only cell)
+  // deno-lint-ignore no-explicit-any
+  const stateOnly = (cell as any)("stub-state-only", { state: { label: "x" } });
+  assertEquals(stateOnly.__aio.id, "stub-state-only");
+  assertEquals(stateOnly.label, "x");
+});
