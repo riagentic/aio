@@ -3,6 +3,7 @@
 import type { LogLevel } from "./logger-types.ts";
 import { now } from "./logger-types.ts";
 import { printConsole } from "./logger-format.ts";
+import { DEFAULT_LOG_DIR } from "./logger-core.ts";
 import type { AioLogger } from "./logger-core.ts";
 
 // ── Public singleton ──────────────────────────────────────────────────
@@ -17,6 +18,12 @@ export function setLogger(l: AioLogger | null): void {
 /** Get the active logger instance (null if not configured) */
 export function getLogger(): AioLogger | null {
   return _active;
+}
+
+/** Resolved log directory — the active logger's dir, or the default dot-dir.
+ *  Single source of truth for the diagnostics + client-log sinks. */
+export function getLogDir(): string {
+  return _active?.logDir ?? DEFAULT_LOG_DIR;
 }
 
 /** Public log API — falls back to console when AioLogger is not active.

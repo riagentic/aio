@@ -1,6 +1,9 @@
 // logger-core.ts — AioLogger class: structured file logger
 
 import type { LogConfig, LogEntry, LogLevel } from "./logger-types.ts";
+
+/** Default log directory — dot-dir so project watchers/scanners skip it. */
+export const DEFAULT_LOG_DIR = ".aio/log";
 import {
   callerFile,
   fmtUptime,
@@ -16,6 +19,11 @@ import { logPerf, logVitals, logVitalsSummary } from "./logger-vitals.ts";
 export class AioLogger {
   private cfg: Required<LogConfig>;
   private dir: string;
+
+  /** Resolved log directory (public — client-log and diagnostics share it) */
+  get logDir(): string {
+    return this.dir;
+  }
   private appName: string;
 
   private lastStatus = new Map<string, string>(); // cell name → last status
@@ -25,8 +33,8 @@ export class AioLogger {
   private ready = false;
   constructor(config: LogConfig & { appName?: string }) {
     this.cfg = {
-      level: config.level ?? "trace",
-      dir: config.dir ?? "./log",
+      level: config.level ?? "info",
+      dir: config.dir ?? DEFAULT_LOG_DIR,
       console: config.console ?? isDevMode(),
       heartbeat: config.heartbeat ?? 3600,
       suppressTypes: config.suppressTypes ?? [],
@@ -204,32 +212,89 @@ export class AioLogger {
   }
 
   private _writeErrors = 0;
-  // Track in-flight writes so shutdown can flush them. Keeping promises in a
-  // Set instead of awaiting lets writes stay fire-and-forget on the hot path
-  // but still gives us a drain point on shutdown (F-3).
+  // Buffered sink (feedback/mdview.md #3): entries accumulate per file and
+  // flush on a short timer instead of one fs write per entry — during a
+  // dispatch storm the log writes themselves were the loop's fuel (~480KB/s).
+  private _buffers = new Map<string, string[]>();
+  private _flushTimer: ReturnType<typeof setTimeout> | null = null;
   private _pending = new Set<Promise<void>>();
+  // Repeat suppression: identical consecutive lines per file collapse into
+  // one line + "last message repeated N times".
+  private _lastLine = new Map<string, { key: string; count: number }>();
+  private static readonly FLUSH_MS = 250;
+  private static readonly MAX_BUFFERED = 512; // lines per file before forced flush
+
   private write(path: string, entry: LogEntry): void {
     if (!this.ready) return;
-    const p = Deno.writeTextFile(path, formatText(entry) + "\n", {
-      append: true,
-    }).then(
-      () => {
-        this._writeErrors = 0;
-      },
-      (e) => {
-        if (this._writeErrors < 3) {
-          this._writeErrors++;
-          console.error(`[logger] write failed for ${path}: ${e}`);
-        }
-      },
-    ).finally(() => {
-      this._pending.delete(p);
-    });
-    this._pending.add(p);
+    const line = formatText(entry);
+    const key = `${entry.lvl}|${entry.cat}|${entry.msg}|${
+      entry.data ? JSON.stringify(entry.data) : ""
+    }`;
+    const last = this._lastLine.get(path);
+    if (last && last.key === key) {
+      last.count++;
+      return; // suppressed — surfaced as a summary line on next change/flush
+    }
+    const buf = this._buffers.get(path) ?? [];
+    if (last && last.count > 1) {
+      buf.push(`  … last message repeated ${last.count - 1} times`);
+    }
+    this._lastLine.set(path, { key, count: 1 });
+    buf.push(line);
+    this._buffers.set(path, buf);
+    if (buf.length >= AioLogger.MAX_BUFFERED) {
+      this._flushBuffers();
+      return;
+    }
+    if (this._flushTimer === null) {
+      this._flushTimer = setTimeout(
+        () => this._flushBuffers(),
+        AioLogger.FLUSH_MS,
+      );
+      // Don't hold the process open just to flush logs
+      Deno.unrefTimer?.(this._flushTimer as unknown as number);
+    }
   }
 
-  /** Drain in-flight writes with a timeout. Safe to call multiple times. */
+  private _flushBuffers(): void {
+    if (this._flushTimer !== null) {
+      clearTimeout(this._flushTimer);
+      this._flushTimer = null;
+    }
+    for (const [path, lines] of this._buffers) {
+      if (lines.length === 0) continue;
+      this._buffers.set(path, []);
+      const p = Deno.writeTextFile(path, lines.join("\n") + "\n", {
+        append: true,
+      }).then(
+        () => {
+          this._writeErrors = 0;
+        },
+        (e) => {
+          if (this._writeErrors < 3) {
+            this._writeErrors++;
+            console.error(`[logger] write failed for ${path}: ${e}`);
+          }
+        },
+      ).finally(() => {
+        this._pending.delete(p);
+      });
+      this._pending.add(p);
+    }
+  }
+
+  /** Flush buffered lines + drain in-flight writes. Safe to call repeatedly. */
   async flush(timeoutMs = 500): Promise<void> {
+    // Surface trailing "repeated N times" summaries before the final write
+    for (const [path, last] of this._lastLine) {
+      if (last.count > 1) {
+        const buf = this._buffers.get(path) ?? [];
+        buf.push(`  … last message repeated ${last.count - 1} times`);
+        this._buffers.set(path, buf);
+        last.count = 1;
+      }
+    }
+    this._flushBuffers();
     if (this._pending.size === 0) return;
     const snapshot = [...this._pending];
     const timeout = new Promise<void>((r) => setTimeout(r, timeoutMs));

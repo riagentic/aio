@@ -105,7 +105,7 @@
         },
         "CellsConfig": {
           "kind": "typeAlias",
-          "sig": "1f8b7264607b9cb3"
+          "sig": "43d995cd8e549711"
         },
         "CellStateSize": {
           "kind": "typeAlias",
@@ -493,7 +493,7 @@
         },
         "VERSION": {
           "kind": "variable",
-          "sig": "666cf2f6c72520e5"
+          "sig": "4a5935ec674aa712"
         },
         "VitalAlert": {
           "kind": "typeAlias",

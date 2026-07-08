@@ -8,6 +8,7 @@ import {
   initDiagnosticBus,
 } from "../diagnostics/diagnostic-bus.ts";
 import { setDiagEmit } from "../diagnostics/error.ts";
+import { getLogDir, log } from "../diagnostics/logger-api.ts";
 import {
   disposeClientLog,
   initClientLog,
@@ -79,7 +80,7 @@ export function createServer(config: ServerConfig): ServerHandle {
   initDiagnosticBus(!prod);
   if (!prod) {
     setDiagEmit(diagEmit);
-    initClientLog("./log");
+    initClientLog(getLogDir());
   }
 
   // Unified user resolver — one code path for both static map and dynamic hook (AIO-171)
@@ -87,12 +88,25 @@ export function createServer(config: ServerConfig): ServerHandle {
 
   const absBaseDir = resolve(config.baseDir);
 
-  // Read deno.json imports for browser import map
+  // Read deno.json imports for browser import map. Scaffolded apps keep it at
+  // the project root (baseDir/..); flat apps (entry next to deno.json) and
+  // repo examples run from cwd — first readable config wins.
   let denoImports: Record<string, string> = {};
-  try {
-    const djText = Deno.readTextFileSync(join(absBaseDir, "..", "deno.json"));
-    denoImports = JSON.parse(djText).imports ?? {};
-  } catch { /* no deno.json or parse error — use defaults */ }
+  for (
+    const candidate of [
+      join(absBaseDir, "..", "deno.json"),
+      join(absBaseDir, "deno.json"),
+      join(Deno.cwd(), "deno.json"),
+    ]
+  ) {
+    try {
+      const djText = Deno.readTextFileSync(candidate);
+      denoImports = JSON.parse(djText).imports ?? {};
+      break;
+    } catch {
+      /* try next — missing/invalid config falls through to defaults */
+    }
+  }
   const importMapObj = buildBrowserImportMap(denoImports);
   const IMPORT_MAP = JSON.stringify({ imports: importMapObj });
 
@@ -402,6 +416,43 @@ export function createServer(config: ServerConfig): ServerHandle {
     );
   }
 
+  // ── Zombie-server guard (feedback/mdview.md #4) ──
+  // Event-loop starvation once killed the HTTP listener while the process kept
+  // spinning (alive-but-dead). Crash loudly instead so a supervisor restarts us.
+  let _shuttingDown = false;
+  httpServer.finished.then(() => {
+    if (_shuttingDown) return;
+    console.error(
+      "[aio] FATAL: HTTP listener died unexpectedly — exiting so a supervisor can restart (see feedback/mdview.md)",
+    );
+    Deno.exit(1);
+  });
+  // Event-loop stall detector: a 1s timer that arrives seconds late means the
+  // loop was blocked (sync-write storms, runaway reducers). Named diagnostic
+  // beats downstream symptoms.
+  let _lastTick = Date.now();
+  const _stallTimer = setInterval(() => {
+    const nowMs = Date.now();
+    const drift = nowMs - _lastTick - 1000;
+    _lastTick = nowMs;
+    if (drift > 3000) {
+      log.warn(
+        "loop",
+        `event-loop stalled ~${Math.round(drift / 1000)}s — a sync-blocking ` +
+          `storm or runaway reducer is starving the server`,
+      );
+      diagEmit({
+        type: "loop:stall",
+        severity: "warning",
+        source: "server",
+        message: `event loop blocked ~${Math.round(drift / 1000)}s`,
+        hint:
+          "look for a high-frequency dispatch loop or sync work in reducers/effects",
+      });
+    }
+  }, 1000);
+  Deno.unrefTimer?.(_stallTimer as unknown as number);
+
   return {
     broadcast: (patches) => broadcaster.broadcast(patches),
     broadcastRaw: (msg, exclude) => broadcaster.broadcastRaw(msg, exclude),
@@ -411,6 +462,8 @@ export function createServer(config: ServerConfig): ServerHandle {
     socketPath: udsPath,
     watcherActive: watcher?.active,
     shutdown: async () => {
+      _shuttingDown = true;
+      clearInterval(_stallTimer);
       watcher?.shutdown();
       broadcaster.shutdown();
       resetTrojanRateLimit();

@@ -16,17 +16,21 @@ function mkLogger(
     console?: boolean;
     suppressTypes?: string[];
     backupLogs?: boolean;
+    level?: "trace" | "debug" | "info" | "warn" | "error";
   },
 ): AioLogger {
   return new AioLogger({
     ...opts,
     heartbeat: 0,
     console: opts.console ?? false,
+    // Sink-routing tests below assert on debug/trace entries — opt into the
+    // verbose level (the production default is "info", pinned separately).
+    level: opts.level ?? "trace",
   });
 }
 
-/** Wait for async file writes to flush */
-const flush = () => new Promise((r) => setTimeout(r, 100));
+/** Wait for the buffered sink (250ms timer) to flush */
+const flush = () => new Promise((r) => setTimeout(r, 400));
 
 /** Read a log file and return lines (plain text) */
 async function readLines(path: string): Promise<string[]> {
@@ -259,22 +263,59 @@ Deno.test("logger: flow events tracked in app.log", async () => {
   assertStringIncludes(doneLine!, "flow:checkout");
 });
 
-Deno.test("logger: all errors logged without dedup", async () => {
+Deno.test("logger: identical consecutive errors collapse into a repeat summary", async () => {
   const dir = tmpDir();
   const l = mkLogger({ dir });
   await l.init();
-  // Simulate 7 identical errors — all should appear
+  // 7 identical errors — one line + "repeated 6 times" (mdview #3: repeated
+  // identical lines were storm fuel). Distinct errors still all appear.
   for (let i = 0; i < 7; i++) {
     l.observe({
       type: "counter:__error",
       payload: { _method: "save", error: "timeout" },
     }, { counter: {} });
   }
-  await flush();
-  const appLines = await readLines(`${dir}/app.log`);
-  assertEquals(appLines.length, 7);
+  await l.flush();
   const errorLines = await readLines(`${dir}/error.log`);
-  assertEquals(errorLines.length, 7);
+  assertEquals(errorLines.length, 2);
+  assertStringIncludes(errorLines[1]!, "repeated 6 times");
+});
+
+Deno.test("logger: distinct consecutive errors are never collapsed", async () => {
+  const dir = tmpDir();
+  const l = mkLogger({ dir });
+  await l.init();
+  for (let i = 0; i < 3; i++) {
+    l.observe({
+      type: "counter:__error",
+      payload: { _method: "save", error: `timeout ${i}` },
+    }, { counter: {} });
+  }
+  await l.flush();
+  const errorLines = await readLines(`${dir}/error.log`);
+  assertEquals(errorLines.length, 3);
+});
+
+Deno.test("logger: default file level is info — debug entries are opt-in (mdview #3)", async () => {
+  const dir = tmpDir();
+  const l = new AioLogger({ dir, heartbeat: 0, console: false });
+  await l.init();
+  l.pub("debug", "test", "verbose-detail");
+  l.pub("info", "test", "narrative-line");
+  await l.flush();
+  const debugLines = await readLines(`${dir}/debug.log`);
+  assertEquals(debugLines.some((x) => x.includes("verbose-detail")), false);
+  assertEquals(debugLines.some((x) => x.includes("narrative-line")), true);
+});
+
+Deno.test("logger: flush() writes buffered lines immediately", async () => {
+  const dir = tmpDir();
+  const l = mkLogger({ dir });
+  await l.init();
+  l.pub("info", "test", "buffered-line");
+  await l.flush(); // no 250ms timer wait
+  const lines = await readLines(`${dir}/app.log`);
+  assertEquals(lines.some((x) => x.includes("buffered-line")), true);
 });
 
 Deno.test("logger: write failure logs to console (first 3 only)", async () => {

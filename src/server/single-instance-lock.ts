@@ -231,6 +231,25 @@ export class AppLock {
         continue;
       }
 
+      // Owner's pid is alive but its listener may be dead (zombie: event-loop
+      // starvation killed the HTTP server while the process spun on, see
+      // feedback/mdview.md #5). Liveness = pid alive AND port responds.
+      // Grace: skip while the owner is still starting up; skip UDS-only
+      // instances (their port never listens).
+      const pastStartup = existing.status !== "starting" ||
+        Date.now() - existing.startedAt > 10_000;
+      if (
+        pastStartup && !existing.socketPath && existing.port > 0 &&
+        !(await isPortInUse(existing.port))
+      ) {
+        console.warn(
+          `[AIO] stale instance: pid ${existing.pid} is alive but port ${existing.port} refuses connections — reclaiming lock (zombie server)`,
+        );
+        removeLock(this.appId);
+        await delay(100);
+        continue;
+      }
+
       // Owner is alive — behavior depends on killExisting
       if (killExisting) {
         // Kill the old instance
