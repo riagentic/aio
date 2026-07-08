@@ -233,7 +233,7 @@ export class AppLock {
 
       // Owner's pid is alive but its listener may be dead (zombie: event-loop
       // starvation killed the HTTP server while the process spun on, see
-      // feedback/mdview.md #5). Liveness = pid alive AND port responds.
+      // watcher-loop field report #5). Liveness = pid alive AND port responds.
       // Grace: skip while the owner is still starting up; skip UDS-only
       // instances (their port never listens).
       const pastStartup = existing.status !== "starting" ||

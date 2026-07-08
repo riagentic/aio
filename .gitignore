@@ -65,3 +65,7 @@ target/
 vendor/
 *.log
 .cache/
+examples/**/deno.lock
+feedback/
+skills-lock.json
+.openclaude-profile.json

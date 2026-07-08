@@ -209,7 +209,7 @@ See [FAQ](docs/basics/faq.md#when-not-to-use-aio) for details.
 [Performance](docs/debugging/performance.md)
 
 **Reference:** [API](docs/basics/api-reference.md) · [FAQ](docs/basics/faq.md) ·
-[Upgrade](docs/upgrade/README.md) · [Changelog](docs/basics/changelog.md)
+[Upgrade](docs/upgrade/README.md) · [Changelog](CHANGELOG.md)
 
 ## Status
 

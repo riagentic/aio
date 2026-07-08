@@ -267,7 +267,7 @@ Deno.test("logger: identical consecutive errors collapse into a repeat summary",
   const dir = tmpDir();
   const l = mkLogger({ dir });
   await l.init();
-  // 7 identical errors — one line + "repeated 6 times" (mdview #3: repeated
+  // 7 identical errors — one line + "repeated 6 times" (field report #3: repeated
   // identical lines were storm fuel). Distinct errors still all appear.
   for (let i = 0; i < 7; i++) {
     l.observe({
@@ -296,7 +296,7 @@ Deno.test("logger: distinct consecutive errors are never collapsed", async () =>
   assertEquals(errorLines.length, 3);
 });
 
-Deno.test("logger: default file level is info — debug entries are opt-in (mdview #3)", async () => {
+Deno.test("logger: default file level is info — debug entries are opt-in (field report #3)", async () => {
   const dir = tmpDir();
   const l = new AioLogger({ dir, heartbeat: 0, console: false });
   await l.init();

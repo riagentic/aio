@@ -416,14 +416,14 @@ export function createServer(config: ServerConfig): ServerHandle {
     );
   }
 
-  // ── Zombie-server guard (feedback/mdview.md #4) ──
+  // ── Zombie-server guard (watcher-loop field report #4) ──
   // Event-loop starvation once killed the HTTP listener while the process kept
   // spinning (alive-but-dead). Crash loudly instead so a supervisor restarts us.
   let _shuttingDown = false;
   httpServer.finished.then(() => {
     if (_shuttingDown) return;
     console.error(
-      "[aio] FATAL: HTTP listener died unexpectedly — exiting so a supervisor can restart (see feedback/mdview.md)",
+      "[aio] FATAL: HTTP listener died unexpectedly — exiting so a supervisor can restart (zombie-server guard)",
     );
     Deno.exit(1);
   });

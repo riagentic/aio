@@ -212,7 +212,7 @@ export class AioLogger {
   }
 
   private _writeErrors = 0;
-  // Buffered sink (feedback/mdview.md #3): entries accumulate per file and
+  // Buffered sink (watcher-loop field report #3): entries accumulate per file and
   // flush on a short timer instead of one fs write per entry — during a
   // dispatch storm the log writes themselves were the loop's fuel (~480KB/s).
   private _buffers = new Map<string, string[]>();
