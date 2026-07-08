@@ -56,7 +56,7 @@ export function buildLegacyConfig(
     logger,
     appRef,
   } = input;
-  // Dispatch-storm guard (feedback/mdview.md #2) — every server dispatch
+  // Dispatch-storm guard (watcher-loop field report #2) — every server dispatch
   // flows through beforeReduce, so frequency is measured (and optionally
   // circuit-broken) before reducers/effects/logging amplify the loop.
   const storm = fc.dispatchStorm === false ? null : createStormDetector({

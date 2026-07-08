@@ -1,4 +1,4 @@
-// Dispatch-storm detector (feedback/mdview.md #2) — frequency guard.
+// Dispatch-storm detector (watcher-loop field report #2) — frequency guard.
 import { assert, assertEquals } from "@std/assert";
 import {
   createStormDetector,

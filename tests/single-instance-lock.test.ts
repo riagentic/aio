@@ -215,7 +215,7 @@ Deno.test("isProcessAlive: dead PID returns false", () => {
   assertEquals(isProcessAlive(999999), false);
 });
 
-Deno.test("zombie reclaim: pid alive but port dead → lock reclaimed (mdview #5)", async () => {
+Deno.test("zombie reclaim: pid alive but port dead → lock reclaimed (notes #5)", async () => {
   const appId = "zombie-test-" + crypto.randomUUID().slice(0, 8);
   // A port that is definitely closed: bind then release it
   const l = Deno.listen({ port: 0 });

@@ -7,7 +7,7 @@ export type LogLevel = "trace" | "debug" | "info" | "warn" | "error";
 export type LogConfig = {
   /** Minimum level written to debug.log (default: 'info' — set 'trace' or
    *  'debug' to opt into verbose file logging; every dispatch logged at debug
-   *  amplifies feedback loops, see feedback/mdview.md) */
+   *  amplifies watcher feedback loops — 2026-07-08 field report) */
   level?: LogLevel;
   /** Log directory (default: '.aio/log' — a dot-dir so file watchers and
    *  scanners skip framework logs inside the project) */
