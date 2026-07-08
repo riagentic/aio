@@ -1,6 +1,6 @@
 // UI — todo list with inline editing, filtering, keyboard support
 import { useLocal } from "aio/air";
-import { type Filter, type Todo, todo, view } from "./app.ts";
+import { type Filter, type Todo, todo, view } from "./cell.ts";
 
 const FILTERS: Filter[] = ["all", "active", "done"];
 

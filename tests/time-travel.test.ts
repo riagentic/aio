@@ -1,6 +1,8 @@
-import { assertEquals } from "@std/assert";
+import { assert, assertEquals, assertExists } from "@std/assert";
+import { Window } from "happy-dom";
 import {
   createTT,
+  markError,
   parseTTCommand,
   pause,
   record,
@@ -12,6 +14,17 @@ import {
   type TTState,
   undo,
 } from "../src/diagnostics/time-travel.ts";
+import {
+  getTTState,
+  handleTTMessage,
+  resetTT,
+  setSendFn,
+  subscribeTT,
+  type TTMeta,
+} from "../src/air/time-travel-panel.ts";
+import { useTimeTravel } from "../src/browser-air.ts";
+import { h } from "../src/air/vdom.ts";
+import { _setDocument, _unmount, mount } from "../src/air/aio-renderer.ts";
 import { createServer } from "../src/server/server.ts";
 import { join } from "@std/path";
 
@@ -254,8 +267,20 @@ Deno.test("tt integration: TT commands via WS protocol", async () => {
         received.push(e.data as string);
       }
     });
-    await new Promise<void>((r) => {
-      ws.onopen = () => r();
+    await new Promise<void>((resolve, reject) => {
+      // Fail fast instead of hanging forever if the upgrade never completes
+      const timer = setTimeout(
+        () => reject(new Error("ws connect timeout")),
+        5000,
+      );
+      ws.onopen = () => {
+        clearTimeout(timer);
+        resolve();
+      };
+      ws.onerror = () => {
+        clearTimeout(timer);
+        reject(new Error("ws connect failed"));
+      };
     });
     await waitFor(() => received.length >= 1); // initial state
 
@@ -366,4 +391,366 @@ Deno.test("tt integration: resume then record branches correctly", () => {
   assertEquals(tt.entries.length, 3); // [__init, A, D]
   assertEquals(stateAt(tt), { count: 10 });
   assertEquals(tt.entries[2]!.action, { type: "D" });
+});
+
+Deno.test("tt: markError tags current entry, error travels over broadcast", () => {
+  let tt = makeTT();
+  tt = record(tt, { type: "A" }, { count: 1 });
+  markError(tt, { code: "E_FX", message: "boom" });
+
+  const b = toBroadcast(tt);
+  assertEquals(b.entries[1]!.error, { code: "E_FX", message: "boom" });
+  assertEquals(b.entries[0]!.error, undefined); // only current entry tagged
+});
+
+// ═══════════════════════════════════════════════════════════════════
+// Browser side — useTimeTravel hook (src/air/time-travel-air.ts via
+// src/browser-air.ts) and panel (src/air/time-travel-panel.ts).
+//
+// Test ORDER matters for module-level state:
+//   - Hook tests run BEFORE any resetTT(): resetTT clears the panel
+//     Listeners set, which would sever the hook's one-time subscription
+//     (_ttSubbed latch never re-subscribes).
+//   - The "hook returns null" test runs before the first handleTTMessage
+//     call in this process.
+// ═══════════════════════════════════════════════════════════════════
+
+/** Build a wire-format __tt: payload like the server broadcasts. */
+function ttJSON(
+  entries: { id: number; type: string; ts?: number }[],
+  index: number,
+  paused = false,
+): string {
+  return JSON.stringify({
+    entries: entries.map((e) => ({ ...e, ts: e.ts ?? 1_000_000 })),
+    index,
+    paused,
+  });
+}
+
+/** happy-dom window installed as the global `document` (panel uses globals). */
+function setupDOM(): {
+  win: Window;
+  doc: Document;
+  root: HTMLElement;
+  cleanup: () => Promise<void>;
+} {
+  const win = new Window({ url: "https://localhost" });
+  const doc = win.document as unknown as Document;
+  const root = doc.createElement("div");
+  doc.body.appendChild(root);
+  // deno-lint-ignore no-explicit-any
+  (globalThis as any).document = doc;
+  return {
+    win,
+    doc,
+    root,
+    cleanup: async () => {
+      // deno-lint-ignore no-explicit-any
+      delete (globalThis as any).document;
+      await win.happyDOM.close();
+    },
+  };
+}
+
+function pressCtrlPeriod(win: Window, doc: Document): void {
+  const ev = new win.KeyboardEvent("keydown", {
+    ctrlKey: true,
+    code: "Period",
+    cancelable: true,
+  });
+  doc.dispatchEvent(ev as unknown as Event);
+}
+
+// ── useTimeTravel hook ───────────────────────────────────────────────
+
+Deno.test({
+  name: "useTimeTravel: returns null until time travel is active",
+  async fn() {
+    const { root, cleanup } = setupDOM();
+    _setDocument(root.ownerDocument);
+    const App = () => {
+      const tt = useTimeTravel();
+      return h("div", null, tt === null ? "tt-off" : "tt-on");
+    };
+    const handle = mount(root, App);
+    try {
+      assertEquals(root.innerHTML, "<div>tt-off</div>");
+    } finally {
+      _unmount(handle);
+      await cleanup();
+    }
+  },
+});
+
+Deno.test({
+  name:
+    "useTimeTravel: __tt: message activates hook and re-renders with entries/index/paused",
+  async fn() {
+    const { root, cleanup } = setupDOM();
+    _setDocument(root.ownerDocument);
+    const App = () => {
+      const tt = useTimeTravel();
+      if (!tt) return h("div", null, "tt-off");
+      return h(
+        "div",
+        null,
+        `n=${tt.entries.length} i=${tt.index} p=${tt.paused} ` +
+          tt.entries.map((e) => e.type).join(","),
+      );
+    };
+    const handle = mount(root, App);
+    try {
+      assertEquals(root.innerHTML, "<div>tt-off</div>");
+
+      // Server broadcasts history — hook goes live
+      handleTTMessage(ttJSON([
+        { id: 0, type: "__init" },
+        { id: 1, type: "INC" },
+      ], 1));
+      handle._flush();
+      assertEquals(root.innerHTML, "<div>n=2 i=1 p=false __init,INC</div>");
+
+      // Server broadcasts a travel-back (paused, earlier index) — hook updates
+      handleTTMessage(ttJSON(
+        [
+          { id: 0, type: "__init" },
+          { id: 1, type: "INC" },
+        ],
+        0,
+        true,
+      ));
+      handle._flush();
+      assertEquals(root.innerHTML, "<div>n=2 i=0 p=true __init,INC</div>");
+    } finally {
+      _unmount(handle);
+      await cleanup();
+    }
+  },
+});
+
+Deno.test({
+  name:
+    "useTimeTravel: undo/redo/goto/pause/resume send wire commands via transport send fn",
+  async fn() {
+    const { root, cleanup } = setupDOM();
+    _setDocument(root.ownerDocument);
+    const sent: string[] = [];
+    setSendFn((m) => sent.push(m));
+    handleTTMessage(ttJSON([
+      { id: 0, type: "__init" },
+      { id: 1, type: "INC" },
+      { id: 2, type: "INC" },
+    ], 2));
+
+    const App = () => {
+      const tt = useTimeTravel();
+      if (!tt) return h("div", null, "tt-off");
+      return h(
+        "div",
+        null,
+        h("button", { id: "undo", onClick: () => tt.undo() }, "u"),
+        h("button", { id: "redo", onClick: () => tt.redo() }, "r"),
+        h("button", { id: "goto", onClick: () => tt.goto(1) }, "g"),
+        h("button", { id: "pause", onClick: () => tt.pause() }, "p"),
+        h("button", { id: "resume", onClick: () => tt.resume() }, "s"),
+      );
+    };
+    const handle = mount(root, App);
+    try {
+      assertExists(root.querySelector("#undo"), "hook should be active");
+      (root.querySelector("#undo") as HTMLElement).click();
+      (root.querySelector("#redo") as HTMLElement).click();
+      (root.querySelector("#goto") as HTMLElement).click();
+      (root.querySelector("#pause") as HTMLElement).click();
+      (root.querySelector("#resume") as HTMLElement).click();
+      assertEquals(sent, [
+        "__tt:undo",
+        "__tt:redo",
+        "__tt:goto:1",
+        "__tt:pause",
+        "__tt:resume",
+      ]);
+    } finally {
+      setSendFn(null);
+      _unmount(handle);
+      await cleanup();
+    }
+  },
+});
+
+// ── Panel — wire protocol + DOM rendering ────────────────────────────
+
+Deno.test({
+  name:
+    "tt-panel: handleTTMessage stores state, notifies subscribers; bad JSON is swallowed",
+  async fn() {
+    const { doc, cleanup } = setupDOM();
+    resetTT(); // clear residue from hook tests
+    try {
+      const seen: TTMeta[] = [];
+      const unsub = subscribeTT((t) => seen.push(t));
+
+      handleTTMessage(ttJSON([{ id: 0, type: "__init" }], 0));
+      assertEquals(getTTState()?.entries.length, 1);
+      assertEquals(getTTState()?.index, 0);
+      assertEquals(seen.length, 1);
+      assertEquals(seen[0]!.entries[0]!.type, "__init");
+
+      // Malformed payload: warn, keep prior state, no throw
+      handleTTMessage("{not json");
+      assertEquals(getTTState()?.entries.length, 1);
+      assertEquals(seen.length, 1);
+
+      unsub();
+      handleTTMessage(ttJSON([{ id: 0, type: "__init" }], 0));
+      assertEquals(seen.length, 1); // unsubscribed — no more notifications
+      assertEquals(doc.getElementById("__aio-tt"), null); // hidden → no panel DOM
+    } finally {
+      resetTT();
+      await cleanup();
+    }
+  },
+});
+
+Deno.test({
+  name:
+    "tt-panel: Ctrl+. toggles the floating panel; shows position and history entries",
+  async fn() {
+    const { win, doc, cleanup } = setupDOM();
+    resetTT();
+    try {
+      handleTTMessage(ttJSON([
+        { id: 0, type: "__init" },
+        { id: 1, type: "ADD_TODO" },
+        { id: 2, type: "TOGGLE" },
+      ], 2));
+      assertEquals(doc.getElementById("__aio-tt"), null); // hidden by default
+
+      pressCtrlPeriod(win, doc);
+      const panel = doc.getElementById("__aio-tt");
+      assertExists(panel);
+      assertEquals(panel.style.display, "flex");
+      assert(panel.textContent!.includes("3/3"), "header shows index/total");
+      assert(panel.textContent!.includes("ADD_TODO"));
+      assert(panel.textContent!.includes("▸ TOGGLE"), "current entry marked");
+
+      pressCtrlPeriod(win, doc); // toggle off
+      assertEquals(doc.getElementById("__aio-tt")!.style.display, "none");
+    } finally {
+      resetTT();
+      await cleanup();
+    }
+  },
+});
+
+Deno.test({
+  name:
+    "tt-panel: buttons and history rows send wire commands (undo/redo/goto/pause→resume)",
+  async fn() {
+    const { win, doc, cleanup } = setupDOM();
+    resetTT();
+    const sent: string[] = [];
+    setSendFn((m) => sent.push(m));
+    try {
+      handleTTMessage(ttJSON([
+        { id: 0, type: "__init" },
+        { id: 1, type: "INC" },
+        { id: 2, type: "INC" },
+      ], 1));
+      pressCtrlPeriod(win, doc);
+      const panel = doc.getElementById("__aio-tt")!;
+
+      const buttons = () =>
+        Array.from(panel.querySelectorAll("button")) as HTMLButtonElement[];
+      let [undoBtn, redoBtn, lockBtn] = buttons();
+      assertEquals(undoBtn!.textContent, "◀ undo");
+      assertEquals(redoBtn!.textContent, "redo ▶");
+      assertEquals(lockBtn!.textContent, "🔒 lock");
+
+      undoBtn!.click();
+      redoBtn!.click();
+      lockBtn!.click();
+      assertEquals(sent, ["__tt:undo", "__tt:redo", "__tt:pause"]);
+
+      // Clicking a history row sends goto:<id> — rows render newest-first
+      const list = panel.children[2] as HTMLElement;
+      const rows = Array.from(list.children) as HTMLElement[];
+      assertEquals(rows.length, 3);
+      const initRow = rows.find((r) => r.textContent!.includes("__init"))!;
+      initRow.click();
+      assertEquals(sent[3], "__tt:goto:0");
+
+      // Server confirms pause — visible panel re-renders, lock → unlock → resume
+      handleTTMessage(ttJSON(
+        [
+          { id: 0, type: "__init" },
+          { id: 1, type: "INC" },
+          { id: 2, type: "INC" },
+        ],
+        1,
+        true,
+      ));
+      assert(panel.textContent!.includes("🔒"), "paused marker in header");
+      [undoBtn, redoBtn, lockBtn] = buttons();
+      assertEquals(lockBtn!.textContent, "🔓 unlock");
+      lockBtn!.click();
+      assertEquals(sent[4], "__tt:resume");
+    } finally {
+      setSendFn(null);
+      resetTT();
+      await cleanup();
+    }
+  },
+});
+
+Deno.test({
+  name:
+    "tt-panel: undo disabled at history start, redo disabled at end — clicks send nothing",
+  async fn() {
+    const { win, doc, cleanup } = setupDOM();
+    resetTT();
+    const sent: string[] = [];
+    setSendFn((m) => sent.push(m));
+    try {
+      // Single entry: index is both start and end → both nav buttons disabled
+      handleTTMessage(ttJSON([{ id: 0, type: "__init" }], 0));
+      pressCtrlPeriod(win, doc);
+      const panel = doc.getElementById("__aio-tt")!;
+      const [undoBtn, redoBtn] = Array.from(
+        panel.querySelectorAll("button"),
+      ) as HTMLButtonElement[];
+      undoBtn!.click();
+      redoBtn!.click();
+      assertEquals(sent, []); // disabled buttons have no handler
+    } finally {
+      setSendFn(null);
+      resetTT();
+      await cleanup();
+    }
+  },
+});
+
+Deno.test({
+  name: "tt-panel: resetTT removes panel, clears state and key binding",
+  async fn() {
+    const { win, doc, cleanup } = setupDOM();
+    resetTT();
+    try {
+      handleTTMessage(ttJSON([{ id: 0, type: "__init" }], 0));
+      pressCtrlPeriod(win, doc);
+      assertExists(doc.getElementById("__aio-tt"));
+
+      resetTT();
+      assertEquals(doc.getElementById("__aio-tt"), null); // panel removed
+      assertEquals(getTTState(), null); // state cleared
+
+      // Key handler unbound — Ctrl+. no longer creates a panel
+      pressCtrlPeriod(win, doc);
+      assertEquals(doc.getElementById("__aio-tt"), null);
+    } finally {
+      resetTT();
+      await cleanup();
+    }
+  },
 });
