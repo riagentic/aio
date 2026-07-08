@@ -18,12 +18,15 @@ import {
 } from "./server-transpile.ts";
 import { handleTrojan as _handleTrojanRoute } from "./server-trojan.ts";
 
-// browser-air.ts URL — works for both local (file://) and JSR/HTTP installs
-const BROWSER_AIR_TS_URL = new URL("browser-air.ts", import.meta.url);
-const AIR_TS_URL = new URL("air.ts", import.meta.url);
-const LISTENERS_TS_URL = new URL("listeners.ts", import.meta.url);
-// Base URL for resolving sub-module imports (e.g. vitals/*.ts) served under /__aio/
-const AIO_SRC_BASE_URL = new URL(".", import.meta.url);
+// Framework module URLs — this file lives in src/server/, so entry files at the
+// src/ root and folderized modules are one level up. The /__aio/ namespace
+// mirrors src/ folder structure so a served module's own relative imports
+// (`./vdom.ts`, `../state/signal.ts`) resolve back into /__aio/ unchanged.
+const BROWSER_AIR_TS_URL = new URL("../browser-air.ts", import.meta.url);
+const AIR_TS_URL = new URL("../air.ts", import.meta.url);
+const LISTENERS_TS_URL = new URL("../state/listeners.ts", import.meta.url);
+// Base for resolving sub-module imports served under /__aio/ (src/ root).
+const AIO_SRC_BASE_URL = new URL("../", import.meta.url);
 
 /** Safety limits — prevent resource exhaustion */
 const SNAPSHOT_MAX_SIZE = 10_000_000; // 10MB — reject oversized snapshot uploads

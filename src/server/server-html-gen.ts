@@ -100,7 +100,7 @@ ${head}
       document.getElementById('root').textContent = 'Loading\\u2026'
       await _aioMod._waitForState()
     }
-    const { mount: _mount } = await import('/__aio/aio-renderer.ts')
+    const { mount: _mount } = await import('/__aio/air/aio-renderer.ts')
     _mount(document.getElementById('root'), App)
   </script>
 </body>
