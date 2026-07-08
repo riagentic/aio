@@ -1,5 +1,5 @@
 import { assertEquals } from "@std/assert";
-import { useSpring } from "../src/animation.ts";
+import { useSpring } from "../src/air/animation.ts";
 
 // ── useSpring ──────────────────────────────────────────────────────
 

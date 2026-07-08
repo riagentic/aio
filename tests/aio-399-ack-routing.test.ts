@@ -3,13 +3,13 @@
 // the server's `__ack:<cid>:1` frames — so awaited cell methods never resolved
 // and timed out. routeCommand must settle the pending ack.
 import { assertEquals } from "@std/assert";
-import { routeCommand } from "../src/browser-air-commands.ts";
+import { routeCommand } from "../src/browser/browser-air-commands.ts";
 import {
   _pendingAckCount,
   _registerAck,
   _rejectAllPending,
   _setAckTimeoutMs,
-} from "../src/browser-ack.ts";
+} from "../src/protocol/browser-ack.ts";
 
 Deno.test("routeCommand: __ack:<cid>:1 resolves the pending ack", async () => {
   _setAckTimeoutMs(0);

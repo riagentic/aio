@@ -10,9 +10,9 @@
 // dirty and the throttle flushes the backlog.
 
 import { assertEquals } from "jsr:@std/assert@1.0.19";
-import { createBroadcaster } from "../../src/server-broadcast.ts";
-import type { PatchEntry } from "../../src/broadcast-utils.ts";
-import type { ClientMeta } from "../../src/server-ws.ts";
+import { createBroadcaster } from "../../src/server/server-broadcast.ts";
+import type { PatchEntry } from "../../src/protocol/broadcast-utils.ts";
+import type { ClientMeta } from "../../src/server/server-ws.ts";
 
 function makeFakeClient(): {
   ws: WebSocket;

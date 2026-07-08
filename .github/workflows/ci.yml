@@ -36,6 +36,8 @@ jobs:
         run: deno task docs:check
       - name: API snapshot (public surface locked — roadmap A2)
         run: deno task api:check
+      - name: Module boundaries (src/ folder dependency matrix)
+        run: deno task boundaries
 
   # Full test suite across the supported Deno range and a second OS, so
   # platform- or version-specific regressions can't merge silently.

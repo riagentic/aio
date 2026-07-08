@@ -6,10 +6,10 @@
 // again, remounting every wrapper/layout component that takes children.
 import { assertEquals } from "@std/assert";
 import { Window } from "happy-dom";
-import { h } from "../src/vdom.ts";
-import { signal } from "../src/signal.ts";
-import { onCleanup, onMount, useRef } from "../src/renderer-lifecycle.ts";
-import { testComponent } from "../src/test-component.ts";
+import { h } from "../src/air/vdom.ts";
+import { signal } from "../src/state/signal.ts";
+import { onCleanup, onMount, useRef } from "../src/air/renderer-lifecycle.ts";
+import { testComponent } from "../src/testing/test-component.ts";
 
 function harness() {
   const win = new Window({ url: "https://localhost" });

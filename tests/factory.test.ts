@@ -1,5 +1,5 @@
 import { assertEquals } from "@std/assert";
-import { actions, effects } from "../src/factory.ts";
+import { actions, effects } from "../src/state/factory.ts";
 import type { UnionOf } from "../mod.ts";
 
 const A = actions({

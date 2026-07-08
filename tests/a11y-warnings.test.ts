@@ -1,7 +1,7 @@
 import { assertEquals } from "@std/assert";
 import { Window } from "happy-dom";
-import { h } from "../src/vdom.ts";
-import { _setDocument, mount, setDevMode } from "../src/aio-renderer.ts";
+import { h } from "../src/air/vdom.ts";
+import { _setDocument, mount, setDevMode } from "../src/air/aio-renderer.ts";
 
 // happy-dom timers drained via win.happyDOM.close() — sanitizers re-enabled
 

@@ -4,7 +4,7 @@ import {
   formatMb,
   slugify,
   writePlaceholderIcon,
-} from "../src/build-helpers.ts";
+} from "../src/build/build-helpers.ts";
 import { join } from "@std/path";
 
 // ── slugify ──

@@ -5,7 +5,7 @@ import {
   formatMb,
   slugify,
   writePlaceholderIcon,
-} from "../src/build-helpers.ts";
+} from "../src/build/build-helpers.ts";
 
 const buildScript = join(import.meta.dirname ?? ".", "..", "src", "build.ts");
 

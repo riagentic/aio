@@ -1,9 +1,9 @@
 // deno-lint-ignore-file no-explicit-any
 import { assertEquals } from "@std/assert";
 import { Window } from "happy-dom";
-import { Fragment, h } from "../src/vdom.ts";
-import { signal } from "../src/signal.ts";
-import { testComponent } from "../src/test-component.ts";
+import { Fragment, h } from "../src/air/vdom.ts";
+import { signal } from "../src/state/signal.ts";
+import { testComponent } from "../src/testing/test-component.ts";
 
 function txt(doc: any) {
   return (doc.querySelector("#r") as any).textContent;

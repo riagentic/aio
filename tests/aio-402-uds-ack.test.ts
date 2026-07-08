@@ -3,7 +3,7 @@
 // transport (electron dev/prod) hung until the 15s ack timeout — calculations,
 // imports and progress appeared frozen. The UDS server must ack, mirroring WS.
 import { assertEquals, assertStringIncludes } from "@std/assert";
-import { createUDSListener } from "../src/aio.ts";
+import { createUDSListener } from "../src/server/aio.ts";
 import { join } from "@std/path";
 
 Deno.test("aio-402: UDS server acks a dispatch that carries a cid", async () => {

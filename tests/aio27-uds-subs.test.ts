@@ -9,7 +9,7 @@
 // 5. Per-client delta tracking works with subscriptions
 
 import { assertEquals } from "@std/assert";
-import { createUDSListener } from "../src/aio.ts";
+import { createUDSListener } from "../src/server/aio.ts";
 import { join } from "@std/path";
 
 const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));

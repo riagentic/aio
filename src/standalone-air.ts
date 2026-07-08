@@ -1,22 +1,26 @@
 // Standalone AIR runtime — signal-based client-side dispatch loop for Android WebView builds
 // Replaces standalone.ts when building with --android + renderer: "aio". Same API, no React.
 import { type Draft, produce } from "immer";
-import { msg } from "./msg.ts";
-import { actions, effects } from "./factory.ts";
-import { deepMerge } from "./deep-merge.ts";
-import { createDispatch, type PerfBudget, type PerfCheck } from "./dispatch.ts";
+import { msg } from "./state/msg.ts";
+import { actions, effects } from "./state/factory.ts";
+import { deepMerge } from "./state/deep-merge.ts";
+import {
+  createDispatch,
+  type PerfBudget,
+  type PerfCheck,
+} from "./state/dispatch.ts";
 import {
   createAioError,
   reportError as reportAioError,
   type ReportErrorOpts,
-} from "./error.ts";
-import type { AioApp } from "./aio.ts";
-import { isScheduleEffect, type ScheduleEffect } from "./schedule.ts";
-import { isOwnEffect, type OwnEffect } from "./own.ts";
-import { Listeners } from "./listeners.ts";
-import { signal } from "./signal.ts";
-import { useRef } from "./aio-renderer.ts";
-import { type ComponentFn, h } from "./vdom.ts";
+} from "./diagnostics/error.ts";
+import type { AioApp } from "./server/aio.ts";
+import { isScheduleEffect, type ScheduleEffect } from "./state/schedule.ts";
+import { isOwnEffect, type OwnEffect } from "./state/own.ts";
+import { Listeners } from "./state/listeners.ts";
+import { signal } from "./state/signal.ts";
+import { useRef } from "./air/aio-renderer.ts";
+import { type ComponentFn, h } from "./air/vdom.ts";
 
 // Re-exports for user code
 export { actions, effects, msg };

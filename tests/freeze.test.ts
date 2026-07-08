@@ -1,5 +1,5 @@
 import { assertEquals, assertThrows } from "@std/assert";
-import { deepFreeze } from "../src/dispatch.ts";
+import { deepFreeze } from "../src/state/dispatch.ts";
 
 Deno.test("deepFreeze: freezes object and nested objects", () => {
   const obj = { a: 1, b: { c: 2 } };

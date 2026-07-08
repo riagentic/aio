@@ -1,6 +1,12 @@
 import { assertEquals } from "@std/assert";
-import { batch, computed, effect, signal, untrack } from "../src/signal.ts";
-import { on, watch } from "../src/watch.ts";
+import {
+  batch,
+  computed,
+  effect,
+  signal,
+  untrack,
+} from "../src/state/signal.ts";
+import { on, watch } from "../src/state/watch.ts";
 
 Deno.test("integration: updater + batch + watch work together", () => {
   const count = signal(0);

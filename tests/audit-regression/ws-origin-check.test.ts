@@ -11,7 +11,7 @@
 // Origin-less requests (server-side tools, curl) are accepted.
 
 import { assertEquals } from "jsr:@std/assert@1.0.19";
-import { createWsManager } from "../../src/server-ws.ts";
+import { createWsManager } from "../../src/server/server-ws.ts";
 
 function makeDeps(extra: Partial<Parameters<typeof createWsManager>[0]> = {}) {
   return {

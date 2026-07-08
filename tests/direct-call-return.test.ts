@@ -1,5 +1,5 @@
 import { assertEquals } from "@std/assert";
-import { bindCell, cell, composeCells } from "../src/cell.ts";
+import { bindCell, cell, composeCells } from "../src/state/cell.ts";
 
 // Tests for 2.1: server-side bound methods all return a Promise that
 // resolves once dispatch is complete. Sync → Promise<void>; async → Promise<R>.

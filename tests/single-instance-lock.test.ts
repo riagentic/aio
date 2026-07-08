@@ -8,7 +8,7 @@ import {
   removeLock,
   resolveAppId,
   slugify,
-} from "../src/single-instance-lock.ts";
+} from "../src/server/single-instance-lock.ts";
 
 const TEST_APP = "aio-test-lock-" + Deno.pid; // unique per test run to avoid collisions
 
@@ -86,7 +86,7 @@ Deno.test("AppLock: release removes lock file", async () => {
 Deno.test("AppLock: acquire cleans dead process lock", async () => {
   await cleanup();
   // Write a lock file with a dead PID
-  const { writeLock } = await import("../src/single-instance-lock.ts");
+  const { writeLock } = await import("../src/server/single-instance-lock.ts");
   writeLock({
     appId: TEST_APP,
     pid: 999999,
@@ -146,7 +146,7 @@ Deno.test("AppLock: update modifies lock data", async () => {
 Deno.test("AppLock: release only removes own lock", async () => {
   await cleanup();
   // Write a lock with a different PID (simulating another process)
-  const { writeLock } = await import("../src/single-instance-lock.ts");
+  const { writeLock } = await import("../src/server/single-instance-lock.ts");
   writeLock({
     appId: TEST_APP,
     pid: 999999,
@@ -190,7 +190,7 @@ Deno.test("instances: finds running app", async () => {
 
 Deno.test("instances: cleans stale locks", async () => {
   const staleApp = TEST_APP + "-stale";
-  const { writeLock } = await import("../src/single-instance-lock.ts");
+  const { writeLock } = await import("../src/server/single-instance-lock.ts");
   writeLock({
     appId: staleApp,
     pid: 999999,

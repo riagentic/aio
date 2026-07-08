@@ -4,7 +4,7 @@ import {
   detectTrend,
   measureCellState,
   sizeof,
-} from "../src/memory-monitor.ts";
+} from "../src/diagnostics/memory-monitor.ts";
 
 // ── sizeof ─────────────────────────────────────────────────────────
 

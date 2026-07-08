@@ -1,8 +1,8 @@
 import { assertEquals, assertThrows } from "@std/assert";
-import { cell, composeCells, tagSource, testCell } from "../src/cell.ts";
-import type { CellEntry } from "../src/cell-types.ts";
-import { schedule } from "../src/schedule.ts";
-import { aio } from "../src/aio.ts";
+import { cell, composeCells, tagSource, testCell } from "../src/state/cell.ts";
+import type { CellEntry } from "../src/state/cell-types.ts";
+import { schedule } from "../src/state/schedule.ts";
+import { aio } from "../src/server/aio.ts";
 
 // ── cell() — catalog generation ─────────────────────────────────
 

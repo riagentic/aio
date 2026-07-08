@@ -10,7 +10,9 @@ _build_entry.tsx
 aio-counter
 .vscode/
 .gradle/
-build/
+/build/
+android-template/build/
+docs/build/
 
 # Secrets
 .env

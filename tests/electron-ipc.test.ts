@@ -12,9 +12,9 @@
 
 import { assertEquals } from "@std/assert";
 import { join } from "@std/path";
-import { createServer } from "../src/server.ts";
-import { electronMainScriptUDS } from "../src/electron.ts";
-import { createUDSListener } from "../src/aio.ts";
+import { createServer } from "../src/server/server.ts";
+import { electronMainScriptUDS } from "../src/electron/electron.ts";
+import { createUDSListener } from "../src/server/aio.ts";
 
 const ELECTRON_BIN = "node_modules/.bin/electron";
 const DEV_PORT = 19950;

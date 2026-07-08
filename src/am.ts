@@ -28,7 +28,7 @@ import {
   cmdStatus,
   cmdStop,
   cmdWatch,
-} from "./am-cmd-process.ts";
+} from "./am/am-cmd-process.ts";
 
 import {
   cmdClick,
@@ -43,9 +43,9 @@ import {
   cmdSchedules,
   cmdSql,
   cmdTables,
-} from "./am-cmd-inspect.ts";
+} from "./am/am-cmd-inspect.ts";
 
-import { cmdHelp, cmdNew, cmdVersion } from "./am-cmd-meta.ts";
+import { cmdHelp, cmdNew, cmdVersion } from "./am/am-cmd-meta.ts";
 
 import {
   cmdActions,
@@ -55,11 +55,11 @@ import {
   cmdState,
   cmdTT,
   cmdUi,
-} from "./am-cmd-state.ts";
+} from "./am/am-cmd-state.ts";
 
-import type { CmdHandler } from "./am-types.ts";
-import { detectMode, outError } from "./am-output.ts";
-import { parseGlobalFlags } from "./am-utils.ts";
+import type { CmdHandler } from "./am/am-types.ts";
+import { detectMode, outError } from "./am/am-output.ts";
+import { parseGlobalFlags } from "./am/am-utils.ts";
 
 // ── Command map ────────────────────────────────────────────
 

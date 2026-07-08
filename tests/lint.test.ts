@@ -1,5 +1,5 @@
 import { assertEquals } from "@std/assert";
-import { lint } from "../src/aio.ts";
+import { lint } from "../src/server/aio.ts";
 import { join } from "@std/path";
 
 async function withTmpDir(fn: (dir: string) => Promise<void>): Promise<void> {

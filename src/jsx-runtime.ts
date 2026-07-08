@@ -14,8 +14,8 @@
  * ```
  */
 
-import { Fragment, h } from "./vdom.ts";
-import type { VNode } from "./vdom.ts";
+import { Fragment, h } from "./air/vdom.ts";
+import type { VNode } from "./air/vdom.ts";
 
 /** VDOM fragment — groups children without a wrapper element. */
 export { Fragment };

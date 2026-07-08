@@ -79,6 +79,7 @@
     "lint:aio": "deno run -A aiol/mod.ts",
     "docs:check": "deno run --allow-read scripts/check-docs.ts",
     "api:check": "deno run --allow-read --allow-write --allow-run scripts/api-snapshot.ts --check",
+    "boundaries": "deno run --allow-read scripts/check-boundaries.ts",
     "api:update": "deno run --allow-read --allow-write --allow-run scripts/api-snapshot.ts",
     "example": "deno run -A examples/counter/app.ts",
     "am": "deno run -A src/am.ts",

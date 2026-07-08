@@ -2,9 +2,9 @@
 // Proves the component pattern works without React — same JSX, no memo wrapper.
 import { assertEquals } from "@std/assert";
 import { Window } from "happy-dom";
-import { computed, signal } from "../src/signal.ts";
-import { h } from "../src/vdom.ts";
-import { _setDocument, _unmount, mount } from "../src/aio-renderer.ts";
+import { computed, signal } from "../src/state/signal.ts";
+import { h } from "../src/air/vdom.ts";
+import { _setDocument, _unmount, mount } from "../src/air/aio-renderer.ts";
 
 // ── Mock types (mirrors bn-types.ts) ─────────────────────────────────
 

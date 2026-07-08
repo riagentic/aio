@@ -14,7 +14,7 @@ import {
   _setCleanupTimer,
   _subscribe,
   _useAioSubscribe,
-} from "../src/browser-protocol.ts";
+} from "../src/browser/browser-protocol.ts";
 
 // ── Stable reference tests ──────────────────────────────────────────
 

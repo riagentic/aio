@@ -9,7 +9,7 @@ import {
   createAioError,
   reportError,
   setCorrelationId,
-} from "../src/error.ts";
+} from "../src/diagnostics/error.ts";
 
 Deno.test("createAioError — preserves original Error stack", () => {
   const original = new Error("kaboom");

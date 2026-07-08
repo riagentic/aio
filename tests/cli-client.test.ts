@@ -1,6 +1,6 @@
 import { assertEquals } from "@std/assert";
-import { createServer } from "../src/server.ts";
-import { connectCli } from "../src/cli-client.ts";
+import { createServer } from "../src/server/server.ts";
+import { connectCli } from "../src/server/cli-client.ts";
 import { join } from "@std/path";
 
 const PORT = 19850;

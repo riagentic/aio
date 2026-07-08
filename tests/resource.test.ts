@@ -1,10 +1,10 @@
 import { assertEquals, assertExists } from "@std/assert";
 import { Window } from "happy-dom";
-import { signal } from "../src/signal.ts";
-import { h } from "../src/vdom.ts";
-import { _setDocument, _unmount, mount } from "../src/aio-renderer.ts";
-import type { MountHandle } from "../src/aio-renderer.ts";
-import { type Resource, resource } from "../src/resource.ts";
+import { signal } from "../src/state/signal.ts";
+import { h } from "../src/air/vdom.ts";
+import { _setDocument, _unmount, mount } from "../src/air/aio-renderer.ts";
+import type { MountHandle } from "../src/air/aio-renderer.ts";
+import { type Resource, resource } from "../src/air/resource.ts";
 
 function createDOM() {
   const win = new Window({ url: "https://localhost" });

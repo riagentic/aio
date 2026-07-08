@@ -1,9 +1,9 @@
 // AIO-392: useRaf — managed requestAnimationFrame loop with auto-cleanup.
 import { assertEquals } from "@std/assert";
 import { Window } from "happy-dom";
-import { h } from "../src/vdom.ts";
-import { _setDocument, _unmount, mount } from "../src/aio-renderer.ts";
-import { useRaf } from "../src/raf.ts";
+import { h } from "../src/air/vdom.ts";
+import { _setDocument, _unmount, mount } from "../src/air/aio-renderer.ts";
+import { useRaf } from "../src/air/raf.ts";
 
 function createDOM() {
   const win = new Window({ url: "https://localhost" });

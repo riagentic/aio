@@ -2,9 +2,9 @@
 // state and action args instead of being a static string.
 
 import { assertEquals } from "@std/assert";
-import { cell } from "../src/cell.ts";
-import { testCell } from "../src/cell-test.ts";
-import { validateMachine } from "../src/cell-machine.ts";
+import { cell } from "../src/state/cell.ts";
+import { testCell } from "../src/testing/cell-test.ts";
+import { validateMachine } from "../src/state/cell-machine.ts";
 
 // Sync methods: the transition fn runs AFTER the reducer — it sees post-method
 // state, so status can track what actually happened.

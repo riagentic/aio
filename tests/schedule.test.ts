@@ -6,7 +6,7 @@ import {
   parseCron,
   schedule,
   type ScheduleEffect,
-} from "../src/schedule.ts";
+} from "../src/state/schedule.ts";
 
 const noop = {
   info: () => {},
