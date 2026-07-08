@@ -10,16 +10,16 @@ import {
   migrateSchema,
   PERSIST_SCHEMA_VERSION,
   SCHEMA_MIGRATIONS,
-} from "../src/persist-schema.ts";
-import { AioError } from "../src/error.ts";
+} from "../src/server/persist-schema.ts";
+import { AioError } from "../src/diagnostics/error.ts";
 import {
   applyCellMigrations,
   type CellMigrationInfo,
   loadAndMigrateSnapshot,
-} from "../src/aio-boot.ts";
-import { createPersistenceManager } from "../src/persistence.ts";
-import { skv, type SkvInstance } from "../src/skv.ts";
-import type { Log } from "../src/logger.ts";
+} from "../src/server/aio-boot.ts";
+import { createPersistenceManager } from "../src/server/persistence.ts";
+import { skv, type SkvInstance } from "../src/server/skv.ts";
+import type { Log } from "../src/diagnostics/logger.ts";
 
 type LogEntry = { level: string; msg: string };
 function makeLog(entries: LogEntry[]): Log {

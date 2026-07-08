@@ -2,9 +2,9 @@
 // mix of keyed and unkeyed nodes (dialogs with a <select> + inputs).
 import { assertEquals } from "@std/assert";
 import { Window } from "happy-dom";
-import { h } from "../src/vdom.ts";
-import { signal } from "../src/signal.ts";
-import { testComponent } from "../src/test-component.ts";
+import { h } from "../src/air/vdom.ts";
+import { signal } from "../src/state/signal.ts";
+import { testComponent } from "../src/testing/test-component.ts";
 
 Deno.test("mixed keyed/unkeyed: input node identity survives re-render", () => {
   const win = new Window({ url: "https://localhost" });

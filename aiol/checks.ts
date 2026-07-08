@@ -3,7 +3,7 @@
 import type { CellInfo, Checker } from "./types.ts";
 import { join } from "@std/path";
 import * as fix from "./fixes.ts";
-import { RESERVED_KEYS } from "../src/cell-types.ts";
+import { RESERVED_KEYS } from "../src/state/cell-types.ts";
 
 // ══════════════════════════════════════════════════════════════════════
 // 1. PROJECT CONFIG (deno.json)

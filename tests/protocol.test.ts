@@ -1,6 +1,6 @@
 import { assertEquals, assertNotEquals } from "@std/assert";
-import { aio, bridge, cell } from "../src/protocol-cell.ts";
-import { matchPath } from "../src/protocol-router.ts";
+import { aio, bridge, cell } from "../src/protocol/protocol-cell.ts";
+import { matchPath } from "../src/protocol/protocol-router.ts";
 
 // ── protocol-cell: cell() — action catalog builder ─────────────────
 

@@ -1,0 +1,356 @@
+// Cell composition wiring — extracts composition logic from run()
+import {
+  type CellEntry,
+  type CircuitBreakerConfig,
+  composeCells,
+  type ComposedCells,
+} from "../state/cell.ts";
+import {
+  applyCellFieldFilter,
+  type CellPatchStrategy,
+  type PatchFilterFields,
+} from "../state/state-filter.ts";
+import type { CellFieldFilter, FilterUser } from "../state/cell-types.ts";
+import type { AioError, ReportErrorOpts } from "../diagnostics/error.ts";
+import { reportError as reportAioError } from "../diagnostics/error.ts";
+import { log } from "../diagnostics/logger.ts";
+import type { MiddlewareFn } from "./middleware.ts";
+
+/** User identity shape — matches AioUser without importing from aio.ts (avoids circular) */
+type User = { id: string; role: string };
+
+/** Inputs for cell composition — subset of CellsConfig relevant to wiring */
+export type ComposeCellsInput = {
+  cellEntries: CellEntry[];
+  cellDefaults?: { ui?: CellFieldFilter; persist?: CellFieldFilter };
+  circuitBreaker?: CircuitBreakerConfig;
+  perfCheck?: "on" | "off";
+  onError?: (error: AioError) => void;
+  middleware?: MiddlewareFn[];
+  beforeReduce?: (
+    action: unknown,
+    state: unknown,
+    user?: User,
+  ) => unknown | null;
+  onRestore?: (state: unknown) => unknown;
+};
+
+/** One row in the per-cell visibility report logged at startup. */
+export type VisibilityRow = {
+  cell: string;
+  ui: CellFieldFilter | "forUser";
+  persist: CellFieldFilter;
+};
+
+/** Everything produced by cell composition wiring */
+export type ComposeCellsResult = {
+  composed: ComposedCells;
+  autoGetDBState: (s: unknown) => unknown;
+  autoGetUIState: ((s: unknown, user?: unknown) => unknown) | undefined;
+  cellPatchStrategies: Map<string, CellPatchStrategy>;
+  cellFilterFields: Map<string, PatchFilterFields>;
+  beforeReduce:
+    | ((action: unknown, state: unknown, user?: User) => unknown | null)
+    | undefined;
+  onRestore: ((state: unknown) => unknown) | undefined;
+  cellReportOpts: ReportErrorOpts;
+  visibilityReport: VisibilityRow[];
+};
+
+/** Render a resolved filter as the short string used in the startup report. */
+function renderFilter(filter: CellFieldFilter): string {
+  if (filter === "all") return "all";
+  if (filter === "none") return "none";
+  if ("include" in filter) return `include(${filter.include.join(",")})`;
+  if ("exclude" in filter) return `exclude(${filter.exclude.join(",")})`;
+  return "all";
+}
+
+/** Compose cells, apply defaults, build state filters + middleware chain */
+export function composeCellsWiring(
+  input: ComposeCellsInput,
+): ComposeCellsResult {
+  const cellReportOpts: ReportErrorOpts = { onError: input.onError };
+  const perfEnabled = input.perfCheck !== "off";
+
+  // AIO-5.1: client-scoped cells never register with the server store — one
+  // `cells` array can hold both scopes; client cells are skipped here, not errored.
+  const serverEntries = input.cellEntries.filter((entry) => {
+    const def =
+      (entry as { cell?: { __aio?: { scope?: string; id?: string } } })
+        .cell ?? (entry as { __aio?: { scope?: string; id?: string } });
+    if (def.__aio?.scope === "client") {
+      log.debug(`skipping client-scoped cell '${def.__aio.id}' on server`);
+      return false;
+    }
+    return true;
+  });
+
+  const composed = composeCells(serverEntries, {
+    onCellError: (err) => reportAioError(err, cellReportOpts),
+    circuitBreaker: input.circuitBreaker,
+    perfCheck: perfEnabled,
+  });
+
+  applyCellDefaults(composed, input.cellDefaults);
+  // AIO-3.1: validate cross-cell selector deps against the known cell list.
+  // Throws here so the user gets a clear error at aio.run() time, not at
+  // first use.
+  for (const f of composed.cells) {
+    const deps = f.__aio.selectorDeps as Record<string, readonly string[]>;
+    for (const [key, depList] of Object.entries(deps)) {
+      for (const dep of depList) {
+        if (!composed.cellNames.includes(dep)) {
+          throw new Error(
+            `[${f.__aio.id}] selector '${key}' depends on unknown cell '${dep}' — known cells: ${
+              composed.cellNames.join(", ")
+            }`,
+          );
+        }
+      }
+    }
+  }
+  const autoGetDBState = buildDBStateGetter(composed);
+  const { autoGetUIState, cellPatchStrategies, cellFilterFields } =
+    buildUIStateGetter(composed);
+  const beforeReduce = buildBeforeReduce(input.middleware, input.beforeReduce);
+  const onRestore = input.onRestore as
+    | ((state: unknown) => unknown)
+    | undefined;
+
+  const visibilityReport = buildVisibilityReport(composed);
+  logComposition(composed, visibilityReport);
+
+  return {
+    composed,
+    autoGetDBState,
+    autoGetUIState,
+    cellPatchStrategies,
+    cellFilterFields,
+    beforeReduce,
+    onRestore,
+    cellReportOpts,
+    visibilityReport,
+  };
+}
+
+/** Apply cellDefaults to cells missing explicit persist/ui config */
+function applyCellDefaults(
+  composed: ComposedCells,
+  cellDefaults?: { ui?: CellFieldFilter; persist?: CellFieldFilter },
+): void {
+  if (!cellDefaults) return;
+  for (const f of composed.cells) {
+    if (!f.__aio.persist && cellDefaults.persist) {
+      f.__aio.persist = cellDefaults.persist;
+    }
+    if (!f.__aio.ui && cellDefaults.ui) {
+      f.__aio.ui = cellDefaults.ui;
+    }
+  }
+}
+
+/** Build getDBState from per-cell persist filters.
+ *  Default resolution: cell.persist > cellDefaults.persist > "all".
+ *  Every cell always gets an entry; "all" persists the full slice, "none" is filtered out. */
+function buildDBStateGetter(composed: ComposedCells): (s: unknown) => unknown {
+  const cellPersistFilters = new Map<string, CellFieldFilter>();
+  for (const f of composed.cells) {
+    const resolved: CellFieldFilter = f.__aio.persist ?? "all";
+    if (resolved !== "none") {
+      cellPersistFilters.set(f.__aio.id, resolved);
+    }
+  }
+  return (s: unknown) => {
+    const full = s as Record<string, unknown>;
+    const result: Record<string, unknown> = {};
+    for (const [cellName, filter] of cellPersistFilters) {
+      const cellState = full[cellName];
+      if (!cellState || typeof cellState !== "object") continue;
+      const filtered = applyCellFieldFilter(
+        filter,
+        cellState as Record<string, unknown>,
+      );
+      if (filtered) result[cellName] = filtered;
+    }
+    return result;
+  };
+}
+
+type UiEntry = {
+  filter: CellFieldFilter;
+  forUser?: (
+    exposed: Record<string, unknown>,
+    user?: FilterUser,
+  ) => Record<string, unknown>;
+};
+
+type UIStateResult = {
+  autoGetUIState: ((s: unknown, user?: unknown) => unknown) | undefined;
+  cellPatchStrategies: Map<string, CellPatchStrategy>;
+  cellFilterFields: Map<string, PatchFilterFields>;
+};
+
+/** Build getUIState from per-cell ui filters + patch strategy map (with memoization).
+ *  Default resolution: cell.ui > cellDefaults.ui > "all".
+ *  Every cell always gets a UiEntry; "all" exposes the full slice, "none" is filtered out. */
+function buildUIStateGetter(composed: ComposedCells): UIStateResult {
+  const cellPatchStrategies = new Map<string, CellPatchStrategy>();
+  const cellFilterFields = new Map<string, PatchFilterFields>();
+  const cellUiEntries = new Map<string, UiEntry>();
+
+  for (const f of composed.cells) {
+    const resolved: CellFieldFilter = f.__aio.ui ?? "all";
+    if (resolved === "all") {
+      cellPatchStrategies.set(f.__aio.id, "raw");
+    } else if (resolved === "none") {
+      cellPatchStrategies.set(f.__aio.id, "skip");
+    } else if (f.__aio.uiForUser) {
+      cellPatchStrategies.set(f.__aio.id, "full");
+    } else {
+      cellPatchStrategies.set(f.__aio.id, "filter");
+      if ("include" in resolved) {
+        cellFilterFields.set(f.__aio.id, {
+          mode: "include",
+          fields: new Set(resolved.include),
+        });
+      } else if ("exclude" in resolved) {
+        cellFilterFields.set(f.__aio.id, {
+          mode: "exclude",
+          fields: new Set(resolved.exclude),
+        });
+      }
+    }
+    cellUiEntries.set(f.__aio.id, {
+      filter: resolved,
+      forUser: f.__aio.uiForUser,
+    });
+  }
+
+  // Memoization state — closure-captured, preserved across calls
+  let _structCache: Record<string, unknown> | null = null;
+  let _structStateRef: unknown = null;
+
+  const getStructural = (s: unknown): Record<string, unknown> => {
+    if (s === _structStateRef && _structCache) return _structCache;
+    _structStateRef = s;
+    const full = s as Record<string, unknown>;
+    const result: Record<string, unknown> = {};
+    for (const [cellName, entry] of cellUiEntries) {
+      const cellState = full[cellName];
+      if (!cellState || typeof cellState !== "object") continue;
+      const filtered = applyCellFieldFilter(
+        entry.filter,
+        cellState as Record<string, unknown>,
+      );
+      if (filtered) result[cellName] = filtered;
+    }
+    _structCache = result;
+    return result;
+  };
+
+  const hasForUser = [...cellUiEntries.values()].some((e) => e.forUser);
+  let autoGetUIState: (s: unknown, user?: unknown) => unknown;
+
+  if (hasForUser) {
+    autoGetUIState = (s: unknown, user?: unknown) => {
+      const structural = getStructural(s);
+      const result: Record<string, unknown> = { ...structural };
+      for (const [cellName, entry] of cellUiEntries) {
+        if (!entry.forUser || !result[cellName]) continue;
+        try {
+          result[cellName] = entry.forUser(
+            structuredClone(result[cellName] as Record<string, unknown>),
+            user as Record<string, unknown> | undefined,
+          );
+        } catch (e) {
+          log.error(
+            `[${cellName}] ui.forUser threw — using structural filter: ${e}`,
+          );
+        }
+      }
+      return result;
+    };
+  } else {
+    autoGetUIState = (s: unknown) => getStructural(s);
+  }
+
+  return { autoGetUIState, cellPatchStrategies, cellFilterFields };
+}
+
+/** Build beforeReduce from middleware array + explicit beforeReduce */
+function buildBeforeReduce(
+  middleware?: MiddlewareFn[],
+  explicitBeforeReduce?: (
+    action: unknown,
+    state: unknown,
+    user?: User,
+  ) => unknown | null,
+):
+  | ((action: unknown, state: unknown, user?: User) => unknown | null)
+  | undefined {
+  let beforeReduce = explicitBeforeReduce;
+  if (middleware?.length) {
+    const mws = middleware;
+    const chainedMw = (
+      action: unknown,
+      state: unknown,
+      user?: User,
+    ): unknown | null => {
+      let result: unknown | null = action;
+      for (const mw of mws) {
+        if (result === null) return null;
+        result = mw(result, state, user);
+      }
+      return result;
+    };
+    if (beforeReduce) {
+      const prev = beforeReduce;
+      beforeReduce = (action, state, user?: User) => {
+        const r = chainedMw(action, state, user);
+        if (r === null) return null;
+        return prev(r, state, user);
+      };
+    } else {
+      beforeReduce = chainedMw;
+    }
+  }
+  return beforeReduce;
+}
+
+/** Build the per-cell visibility report — one row per cell with resolved ui/persist filters. */
+function buildVisibilityReport(composed: ComposedCells): VisibilityRow[] {
+  const rows: VisibilityRow[] = [];
+  for (const f of composed.cells) {
+    const uiResolved: CellFieldFilter | "forUser" = f.__aio.uiForUser
+      ? "forUser"
+      : (f.__aio.ui ?? "all");
+    rows.push({
+      cell: f.__aio.id,
+      ui: uiResolved,
+      persist: f.__aio.persist ?? "all",
+    });
+  }
+  return rows;
+}
+
+/** Log cell composition info */
+function logComposition(
+  composed: ComposedCells,
+  report: VisibilityRow[],
+): void {
+  log.info(`cells: ${composed.cellNames.join(", ")}`);
+  for (const row of report) {
+    const uiStr = row.ui === "forUser" ? "forUser" : renderFilter(row.ui);
+    log.info(
+      `cells: ${row.cell} ui=${uiStr} persist=${renderFilter(row.persist)}`,
+    );
+  }
+  for (const f of composed.cells) {
+    if (f.__aio.foreignActions.length) {
+      for (const fa of f.__aio.foreignActions) {
+        log.info(`${f.__aio.id}: listens to ${fa}`);
+      }
+    }
+  }
+}

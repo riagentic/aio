@@ -1,6 +1,6 @@
 import { assertEquals } from "@std/assert";
-import { createDispatch, deepFreeze } from "../src/dispatch.ts";
-import type { AioError } from "../src/error.ts";
+import { createDispatch, deepFreeze } from "../src/state/dispatch.ts";
+import type { AioError } from "../src/diagnostics/error.ts";
 
 const noop = { debug: () => {}, warn: () => {}, error: () => {} };
 

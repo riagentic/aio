@@ -1,6 +1,6 @@
 import { assertEquals, assertThrows } from "@std/assert";
-import { validateMachine } from "../src/cell-machine.ts";
-import { log } from "../src/logger.ts";
+import { validateMachine } from "../src/state/cell-machine.ts";
+import { log } from "../src/diagnostics/logger.ts";
 
 // ── helpers ─────────────────────────────────────────────────────────
 

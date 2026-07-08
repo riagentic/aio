@@ -1,6 +1,11 @@
 // logger.test.ts — isolated tests for AioLogger
 import { assertEquals, assertMatch, assertStringIncludes } from "@std/assert";
-import { AioLogger, getLogger, log, setLogger } from "../src/logger.ts";
+import {
+  AioLogger,
+  getLogger,
+  log,
+  setLogger,
+} from "../src/diagnostics/logger.ts";
 
 const tmpDir = () => Deno.makeTempDirSync();
 

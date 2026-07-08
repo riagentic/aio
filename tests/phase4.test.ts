@@ -3,7 +3,7 @@
 
 import { assert, assertEquals, assertExists } from "@std/assert";
 import { Window } from "happy-dom";
-import { batch, computed, signal } from "../src/signal.ts";
+import { batch, computed, signal } from "../src/state/signal.ts";
 import {
   _diff,
   _render,
@@ -15,8 +15,8 @@ import {
   renderToString,
   setDevMode,
   Suspense,
-} from "../src/vdom.ts";
-import type { VNode } from "../src/vdom.ts";
+} from "../src/air/vdom.ts";
+import type { VNode } from "../src/air/vdom.ts";
 import {
   _setDocument,
   _unmount,
@@ -31,16 +31,16 @@ import {
   useOptimistic,
   useRef,
   useSignal,
-} from "../src/aio-renderer.ts";
-import type { MountHandle } from "../src/aio-renderer.ts";
-import { useFieldArray, useForm } from "../src/form.ts";
-import { useSpring } from "../src/animation.ts";
-import { useVirtualList } from "../src/virtual-list.ts";
+} from "../src/air/aio-renderer.ts";
+import type { MountHandle } from "../src/air/aio-renderer.ts";
+import { useFieldArray, useForm } from "../src/air/form.ts";
+import { useSpring } from "../src/air/animation.ts";
+import { useVirtualList } from "../src/air/virtual-list.ts";
 import {
   _isDevToolsConnected,
   _recordRender,
   connectAioDevTools,
-} from "../src/devtools.ts";
+} from "../src/diagnostics/devtools.ts";
 
 // happy-dom timers drained via win.happyDOM.close() — sanitizers re-enabled
 

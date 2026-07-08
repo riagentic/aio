@@ -4,7 +4,7 @@ import {
   VALID_FEATURES_CONFIG_KEYS,
   VALID_UI_KEYS,
   validateConfig,
-} from "../src/aio.ts";
+} from "../src/server/aio.ts";
 
 // Test helper: inject fake exit that captures the code instead of killing the process
 function fakeExit(): {

@@ -9,8 +9,8 @@ import { computeDiffs, formatDiff } from "./state-diff.ts";
 import { createActionLog } from "./action-log.ts";
 import { createCheckpoint, readCheckpoint } from "./checkpoint.ts";
 import { installCrashHandler } from "./crash-handler.ts";
-import { log } from "../logger.ts";
-import { diagSubscribe } from "../diagnostic-bus.ts";
+import { log } from "./logger.ts";
+import { diagSubscribe } from "./diagnostic-bus.ts";
 
 /** Lifecycle hooks returned by initDiagnostics for the runtime to call */
 export type DiagnosticsHooks = {

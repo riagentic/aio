@@ -9,7 +9,7 @@ import {
   type Signal,
   signal,
   untrack,
-} from "../src/signal.ts";
+} from "../src/state/signal.ts";
 
 Deno.test("signal: read and write", () => {
   const s = signal(0);

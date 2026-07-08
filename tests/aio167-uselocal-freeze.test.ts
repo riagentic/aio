@@ -6,15 +6,15 @@
  */
 import { assertEquals, assertNotEquals } from "@std/assert";
 import { Window } from "happy-dom";
-import { signal } from "../src/signal.ts";
-import { h } from "../src/vdom.ts";
+import { signal } from "../src/state/signal.ts";
+import { h } from "../src/air/vdom.ts";
 import {
   _setDocument,
   _unmount,
   mount,
   type MountHandle,
   useRef,
-} from "../src/aio-renderer.ts";
+} from "../src/air/aio-renderer.ts";
 
 function createDOM(): {
   document: Document;

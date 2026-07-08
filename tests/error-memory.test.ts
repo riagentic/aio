@@ -3,7 +3,7 @@ import {
   createMemoryMonitor,
   type MemoryReport,
   sizeof,
-} from "../src/memory-monitor.ts";
+} from "../src/diagnostics/memory-monitor.ts";
 
 Deno.test("sizeof — strings counted as length * 2", () => {
   assertEquals(sizeof("hello"), 10);

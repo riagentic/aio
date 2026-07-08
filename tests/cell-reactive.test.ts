@@ -5,13 +5,13 @@ import {
   _resetCellRegistry,
   bindCellReactive,
   getRegisteredCells,
-} from "../src/cell-reactive.ts";
-import { _resetSignals, getCellSignal } from "../src/state-signals.ts";
+} from "../src/state/cell-reactive.ts";
+import { _resetSignals, getCellSignal } from "../src/state/state-signals.ts";
 import {
   _rejectAllPending,
   _resolveAck,
   _setAckTimeoutMs,
-} from "../src/browser-ack.ts";
+} from "../src/protocol/browser-ack.ts";
 
 // ── Registration ─────────────────────────────────────────────────────
 

@@ -9,9 +9,9 @@ import {
   slide,
   type TransitionFn,
   type TransitionResult,
-} from "../src/transition.ts";
-import { Transition } from "../src/transition-component.ts";
-import { TransitionGroup } from "../src/transition-group.ts";
+} from "../src/air/transition.ts";
+import { Transition } from "../src/air/transition-component.ts";
+import { TransitionGroup } from "../src/air/transition-group.ts";
 
 // happy-dom timers drained via win.happyDOM.close() — sanitizers re-enabled
 
@@ -241,8 +241,8 @@ Deno.test({
 
 // ── Deferred DOM removal (onBeforeRemove) ──────────────────────────
 
-import { _diff, _render, getDom, h } from "../src/vdom.ts";
-import type { RenderCtx } from "../src/vdom.ts";
+import { _diff, _render, getDom, h } from "../src/air/vdom.ts";
+import type { RenderCtx } from "../src/air/vdom.ts";
 
 Deno.test({
   name: "deferred removal: onBeforeRemove delays DOM removal",

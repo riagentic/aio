@@ -7,8 +7,8 @@
 //   - Completed generators don't leak into activeFlows
 
 import { assertEquals } from "@std/assert";
-import { cell, composeCells } from "../src/cell.ts";
-import { resetFlows } from "../src/flow.ts";
+import { cell, composeCells } from "../src/state/cell.ts";
+import { resetFlows } from "../src/state/flow.ts";
 
 // ── Helpers ──────────────────────────────────────────────────────────
 

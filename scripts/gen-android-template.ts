@@ -4,7 +4,7 @@
 import { join, relative, resolve } from "@std/path";
 
 const templateDir = resolve("android-template");
-const outputFile = resolve("src/android-template.ts");
+const outputFile = resolve("src/build/android-template.ts");
 const SKIP = new Set([".gradle", "build", ".idea"]);
 
 const entries: [string, string][] = [];
@@ -38,4 +38,4 @@ const lines = [
 ];
 
 await Deno.writeTextFile(outputFile, lines.join("\n"));
-console.log(`✓ src/android-template.ts — ${entries.length} files`);
+console.log(`✓ src/build/android-template.ts — ${entries.length} files`);

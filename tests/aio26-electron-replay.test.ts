@@ -7,7 +7,7 @@
 // 3. No else-if fallback that sends stale delta without full state base
 
 import { assertEquals } from "@std/assert";
-import { electronMainScriptUDS } from "../src/electron.ts";
+import { electronMainScriptUDS } from "../src/electron/electron.ts";
 
 const script = electronMainScriptUDS(
   "http://localhost:3000",

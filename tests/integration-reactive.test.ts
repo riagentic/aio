@@ -1,6 +1,6 @@
 // integration-reactive.test.ts — cell({ methods }) integration with compose pipeline
 import { assertEquals } from "@std/assert";
-import { cell, composeCells } from "../src/cell.ts";
+import { cell, composeCells } from "../src/state/cell.ts";
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));

@@ -4,7 +4,7 @@ import {
   _getOrCreateCellSignal,
   _resetSignals,
   getCellSignal,
-} from "../src/state-signals.ts";
+} from "../src/state/state-signals.ts";
 
 // Tests for 4.4: in dev, cell signal values are deep-frozen so component
 // mutations throw "Cannot assign to read only property". Skip slices

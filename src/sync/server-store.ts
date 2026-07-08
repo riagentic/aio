@@ -1,7 +1,7 @@
 // src/sync/server-store.ts — DB persistence layer for server-side sync
 import type { DB } from "../db/types.ts";
 import type { HLC, SyncOp } from "./types.ts";
-import { log } from "../logger.ts";
+import { log } from "../diagnostics/logger.ts";
 
 /** Row shape returned by sync_ops queries. */
 interface OpRow {

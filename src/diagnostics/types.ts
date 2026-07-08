@@ -1,6 +1,6 @@
 // src/diagnostics/types.ts — Shared types for the diagnostics module
 
-import type { MemoryConfig } from "../memory-monitor.ts";
+import type { MemoryConfig } from "./memory-monitor.ts";
 import type { VitalsConfig } from "../vitals/types.ts";
 
 /** Top-level diagnostics config — passed to aio.run({ diagnostics: ... }) */

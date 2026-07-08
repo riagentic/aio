@@ -1,6 +1,6 @@
 import { assertEquals } from "@std/assert";
-import { cell } from "../src/cell-create.ts";
-import { composeCellsWiring } from "../src/aio-composition.ts";
+import { cell } from "../src/state/cell-create.ts";
+import { composeCellsWiring } from "../src/server/aio-composition.ts";
 
 // Tests for 1.1: persist default is "all" — zero-config persists everything.
 

@@ -34,7 +34,7 @@ import {
   _resetStateVersion,
   _resetStatus,
   _resetTracking,
-} from "../src/browser-protocol.ts";
+} from "../src/browser/browser-protocol.ts";
 import { _reset as _coreReset } from "../src/state-core.ts";
 
 // Stub location for non-browser env

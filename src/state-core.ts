@@ -25,27 +25,27 @@ import {
   _applyFullState,
   _resetSignals,
   _stateSignal,
-} from "./state-signals.ts";
+} from "./state/state-signals.ts";
 import {
   _resetTransport,
   flushOfflineQueue,
   setTransport as _setTransport,
-} from "./state-transport.ts";
-import { _resetSubs } from "./state-subs.ts";
+} from "./state/state-transport.ts";
+import { _resetSubs } from "./state/state-subs.ts";
 import {
   _markInitialStateReceived,
   _resetInitialStateFlag,
   _resetMessageState,
-} from "./state-message.ts";
+} from "./state/state-message.ts";
 
 enablePatches();
 
 // ── Re-exports (public API) ──────────────────────────────────────────
 
 // Types
-export type { AioIPC, CellRef, Transport } from "./state-transport.ts";
-export type { HandleResult } from "./state-message.ts";
-export type { ArrayRefStats } from "./state-array-utils.ts";
+export type { AioIPC, CellRef, Transport } from "./state/state-transport.ts";
+export type { HandleResult } from "./state/state-message.ts";
+export type { ArrayRefStats } from "./state/state-array-utils.ts";
 
 // Array utilities
 /** @internal Cross-module wiring — not public API, stripped from the snapshot. */
@@ -56,7 +56,7 @@ export {
   _preserveArrayRefs,
   _resetArrayRefStats,
   _shallowEqual,
-} from "./state-array-utils.ts";
+} from "./state/state-array-utils.ts";
 
 // Signals
 export {
@@ -64,7 +64,7 @@ export {
   getConnectedSignal,
   getStateSignal,
   setConnected,
-} from "./state-signals.ts";
+} from "./state/state-signals.ts";
 
 // Subscriptions
 export {
@@ -72,9 +72,9 @@ export {
   collapsePaths,
   resendSubscriptions,
   trackPath,
-} from "./state-subs.ts";
+} from "./state/state-subs.ts";
 /** @internal Cross-module wiring — not public API, stripped from the snapshot. */
-export { _accessedPaths } from "./state-subs.ts";
+export { _accessedPaths } from "./state/state-subs.ts";
 
 // Transport & dispatch
 export {
@@ -82,16 +82,19 @@ export {
   flushOfflineQueue,
   send,
   setSyncHandler,
-} from "./state-transport.ts";
+} from "./state/state-transport.ts";
 /** @internal Cross-module wiring — not public API, stripped from the snapshot. */
-export { _resolveWithFallback, _trackingProxy } from "./state-transport.ts";
+export {
+  _resolveWithFallback,
+  _trackingProxy,
+} from "./state/state-transport.ts";
 
 // Message handling & lifecycle
 export {
   handleMessage,
   isInitialStateReceived,
   ready,
-} from "./state-message.ts";
+} from "./state/state-message.ts";
 
 // ── setTransport (orchestrates initialStateReceived reset + queue flush) ──
 
@@ -100,7 +103,7 @@ export {
  * Resets initial-state flag on reconnect so next message is treated as full state.
  */
 export function setTransport(
-  transport: import("./state-transport.ts").Transport | null,
+  transport: import("./state/state-transport.ts").Transport | null,
 ): void {
   _setTransport(
     transport,

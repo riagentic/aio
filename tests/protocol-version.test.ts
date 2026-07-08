@@ -10,8 +10,8 @@ import {
   PROTOCOL_MISMATCH_CLOSE_CODE,
   PROTOCOL_VERSION,
   protoHello,
-} from "../src/protocol-version.ts";
-import { createServer } from "../src/server.ts";
+} from "../src/protocol/protocol-version.ts";
+import { createServer } from "../src/server/server.ts";
 
 const PORT = 8965;
 

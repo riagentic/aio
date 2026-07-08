@@ -23,7 +23,12 @@ Deno.test("B-6: loaded esbuild version matches deno.json pin", async () => {
 });
 
 Deno.test("B-6: dynamic esbuild imports pin an exact version (no range)", () => {
-  for (const file of ["src/server-transpile.ts", "src/build-bundle.ts"]) {
+  for (
+    const file of [
+      "src/server/server-transpile.ts",
+      "src/build/build-bundle.ts",
+    ]
+  ) {
     const src = Deno.readTextFileSync(file);
     const imports = [
       ...src.matchAll(/import\(["']npm:esbuild@([^"']+)["']\)/g),

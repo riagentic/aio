@@ -1,9 +1,9 @@
 import { assertEquals, assertExists } from "@std/assert";
 import { Window } from "happy-dom";
-import { h } from "../src/vdom.ts";
-import { _setDocument, _unmount, mount } from "../src/aio-renderer.ts";
-import { useDimensions } from "../src/dimensions.ts";
-import type { DimensionsState } from "../src/dimensions.ts";
+import { h } from "../src/air/vdom.ts";
+import { _setDocument, _unmount, mount } from "../src/air/aio-renderer.ts";
+import { useDimensions } from "../src/air/dimensions.ts";
+import type { DimensionsState } from "../src/air/dimensions.ts";
 
 function createDOM() {
   const win = new Window({ url: "https://localhost" });

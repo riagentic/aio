@@ -5,7 +5,7 @@
 // leaving the effect permanently stale. These cover the original repro plus a
 // permutation matrix (write orders, chained computeds, outside-batch).
 import { assertEquals } from "@std/assert";
-import { batch, computed, effect, signal } from "../src/signal.ts";
+import { batch, computed, effect, signal } from "../src/state/signal.ts";
 
 Deno.test("B-2: effect sees fresh computed after batched writes (original repro)", () => {
   const a = signal(0);

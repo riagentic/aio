@@ -6,8 +6,8 @@
 // async method triggers to real completion instead of guessing microtasks.
 
 import { assertEquals, assertRejects } from "@std/assert";
-import { cell } from "../src/cell.ts";
-import { testCell } from "../src/cell-test.ts";
+import { cell } from "../src/state/cell.ts";
+import { testCell } from "../src/testing/cell-test.ts";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 

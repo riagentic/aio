@@ -4,7 +4,7 @@ import {
   electronClientScript,
   electronMainScript,
   electronMainScriptUDS,
-} from "../src/electron.ts";
+} from "../src/electron/electron.ts";
 
 // ── electronMainScript ──────────────────────────────────────────────
 

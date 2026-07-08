@@ -2,9 +2,9 @@
 // committed, so ref.current is the real node (not null) inside onMount.
 import { assertEquals } from "@std/assert";
 import { Window } from "happy-dom";
-import { h } from "../src/vdom.ts";
-import { _setDocument, _unmount, mount } from "../src/aio-renderer.ts";
-import { onMount, useRef } from "../src/renderer-lifecycle.ts";
+import { h } from "../src/air/vdom.ts";
+import { _setDocument, _unmount, mount } from "../src/air/aio-renderer.ts";
+import { onMount, useRef } from "../src/air/renderer-lifecycle.ts";
 
 function createDOM() {
   const win = new Window({ url: "https://localhost" });

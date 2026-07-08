@@ -1,10 +1,10 @@
 // reactive.test.ts — tests for cell({ methods }) reactive style
 // (formerly reactive() — removed in v0.8, cell({ methods }) is identical)
 import { assertEquals, assertThrows } from "@std/assert";
-import { bindCell, cell, composeCells, testCell } from "../src/cell.ts";
-import { schedule } from "../src/schedule.ts";
-import { call } from "../src/cell-impl.ts";
-import type { GenCtx } from "../src/flow.ts";
+import { bindCell, cell, composeCells, testCell } from "../src/state/cell.ts";
+import { schedule } from "../src/state/schedule.ts";
+import { call } from "../src/state/cell-impl.ts";
+import type { GenCtx } from "../src/state/flow.ts";
 
 // ── Helpers ──────────────────────────────────────────────────────────
 

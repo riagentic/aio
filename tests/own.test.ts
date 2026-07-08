@@ -2,14 +2,14 @@
 // schedule-like replace semantics, disposed on cell disable + app shutdown.
 
 import { assertEquals, assertThrows } from "@std/assert";
-import { cell } from "../src/cell.ts";
-import { testCell } from "../src/cell-test.ts";
+import { cell } from "../src/state/cell.ts";
+import { testCell } from "../src/testing/cell-test.ts";
 import {
   createOwnManager,
   isOwnEffect,
   own,
   type OwnEffect,
-} from "../src/own.ts";
+} from "../src/state/own.ts";
 
 const noop = {
   info: (_: string) => {},

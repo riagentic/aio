@@ -13,17 +13,17 @@
 import { assertEquals } from "@std/assert";
 import { Window } from "happy-dom";
 import { cell } from "aio";
-import { h } from "../src/vdom.ts";
-import { _setDocument, _unmount, mount } from "../src/aio-renderer.ts";
+import { h } from "../src/air/vdom.ts";
+import { _setDocument, _unmount, mount } from "../src/air/aio-renderer.ts";
 import {
   _resetCellRegistry,
   bindAllCellsReactive,
-} from "../src/cell-reactive.ts";
+} from "../src/state/cell-reactive.ts";
 import {
   _applyFullState,
   _resetSignals,
   getCellSignal,
-} from "../src/state-signals.ts";
+} from "../src/state/state-signals.ts";
 
 function setup() {
   _resetCellRegistry();

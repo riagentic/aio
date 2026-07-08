@@ -3,7 +3,7 @@
 // effect backlog, circuit breakers, and computes health status.
 
 import type { LoopVitals, VitalStatus, VitalThresholds } from "./types.ts";
-import type { PerfTiming } from "../dispatch.ts";
+import type { PerfTiming } from "../state/dispatch.ts";
 
 /** Public API returned by createLoopProbe */
 export type LoopProbeAPI = {

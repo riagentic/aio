@@ -1,5 +1,5 @@
 import { assertEquals, assertStringIncludes } from "@std/assert";
-import { aioBrowserPlugin } from "../src/esbuild-plugin.ts";
+import { aioBrowserPlugin } from "../src/build/esbuild-plugin.ts";
 
 type ResolveArgs = { path: string; kind?: string };
 type ResolveResult =

@@ -40,8 +40,8 @@
  */
 import { type Draft, produce } from "immer";
 /** Framework core — `aio.run()` starts the app, `lint` validates cells, `parseCli` reads CLI flags */
-export { aio, lint, parseCli, VERSION } from "./src/aio.ts";
-import type { AioApp } from "./src/aio.ts";
+export { aio, lint, parseCli, VERSION } from "./src/server/aio.ts";
+import type { AioApp } from "./src/server/aio.ts";
 /** The running app instance returned by `aio.run()` — provides state access, dispatch, db, and lifecycle */
 export type { AioApp };
 /** Core configuration, error, and middleware types for `aio.run()` */
@@ -56,24 +56,24 @@ export type {
   PerfCheck,
   ResolveUserFn,
   UiConfig,
-} from "./src/aio.ts";
+} from "./src/server/aio.ts";
 /** Structured error types — error codes, context, source tracking, and flow step records */
 export type {
   AioErrorCode,
   AioErrorContext,
   AioErrorSource,
   FlowStepRecord,
-} from "./src/error.ts";
+} from "./src/diagnostics/error.ts";
 /** Memory monitor configuration and heap usage report types */
 export type {
   CellStateSize,
   MemoryConfig,
   MemoryReport,
-} from "./src/memory-monitor.ts";
+} from "./src/diagnostics/memory-monitor.ts";
 /** Client-side render budget thresholds — staleness and pending patch count */
 export type { RenderBudget } from "./src/vitals/types.ts";
 /** Phase-level timing breakdown inside a single reduce cycle */
-export type { ReduceBreakdown } from "./src/time-travel.ts";
+export type { ReduceBreakdown } from "./src/diagnostics/time-travel.ts";
 /** Diagnostics configuration and checkpoint recovery types */
 export type {
   CheckpointData,
@@ -93,19 +93,19 @@ export type {
   VitalThresholds,
 } from "./src/vitals/types.ts";
 /** Structured logger — `log.info()`, `log.warn()`, `log.error()`, `log.debug()` */
-export { log } from "./src/logger.ts";
+export { log } from "./src/diagnostics/logger.ts";
 /** Logger configuration and level types */
-export type { Log, LogConfig, LogLevel } from "./src/logger.ts";
+export type { Log, LogConfig, LogLevel } from "./src/diagnostics/logger.ts";
 /** Electron app metadata injected into the renderer process */
-export type { AioMeta } from "./src/electron.ts";
+export type { AioMeta } from "./src/electron/electron.ts";
 /** Single-instance lock types — instance info, lock data, singleton mode */
 export type {
   InstanceInfo,
   LockData,
   SingletonMode,
-} from "./src/single-instance-lock.ts";
+} from "./src/server/single-instance-lock.ts";
 /** Single-instance lock — `instances()` lists running apps, `resolveAppId` normalizes IDs */
-export { instances, resolveAppId } from "./src/single-instance-lock.ts";
+export { instances, resolveAppId } from "./src/server/single-instance-lock.ts";
 // slugify — internal (used by build.ts, not app code)
 
 /**
@@ -114,11 +114,11 @@ export { instances, resolveAppId } from "./src/single-instance-lock.ts";
  * cell({ methods, generators }) — reactive + sequential workflows in one cell
  * cell({ actions, reduce })   — explicit style for full control (advanced)
  */
-export { bindCell, testCell } from "./src/cell.ts";
+export { bindCell, testCell } from "./src/state/cell.ts";
 /** Define a cell — methods, generators, actions/reduce, or mixed. The atomic unit of aio. */
-export { cell } from "./src/cell.ts";
+export { cell } from "./src/state/cell.ts";
 /** Compose cells into a single dispatch/reduce/execute pipeline with dependency resolution. */
-export { composeCells } from "./src/cell.ts";
+export { composeCells } from "./src/state/cell.ts";
 /** Cell definition types — actions, catalogs, machine config, compose, test context */
 export type {
   ActionsCellConfig,
@@ -146,7 +146,7 @@ export type {
   SendOf,
   StateOf,
   TestContext,
-} from "./src/cell.ts";
+} from "./src/state/cell.ts";
 
 /**
  * Inter-cell coordination — async methods return Promises with the correct type.
@@ -165,9 +165,9 @@ export type {
  * `markAsync` — rare: explicitly mark a method as async when minification strips constructor names.
  */
 /** Wrap an inter-cell call with timeout and/or retry — `call({ timeout: 5000 }, () => f.method())`. */
-export { call } from "./src/cell-impl.ts";
+export { call } from "./src/state/cell-impl.ts";
 /** Mark a method as async when minification strips constructor names — rare escape hatch. */
-export { markAsync } from "./src/cell-impl.ts";
+export { markAsync } from "./src/state/cell-impl.ts";
 /** Method types for cell definitions — sync, async, call options */
 export type {
   AsyncMethod,
@@ -175,7 +175,7 @@ export type {
   CellMethods,
   Method,
   SyncMethod,
-} from "./src/cell-impl.ts";
+} from "./src/state/cell-impl.ts";
 
 /**
  * Generator-based sequential workflows.
@@ -190,7 +190,7 @@ export type {
   GenCtx,
   SingleStepGen,
   TypedCreator,
-} from "./src/flow.ts";
+} from "./src/state/flow.ts";
 
 /**
  * Connect to a remote aio server from a CLI app.
@@ -198,51 +198,51 @@ export type {
  * @param url - WebSocket URL of the aio server (e.g., 'ws://localhost:8000/ws')
  * @param opts - Optional { token?: string } for auth
  */
-export { connectCli, connectCliUDS } from "./src/cli-client.ts";
+export { connectCli, connectCliUDS } from "./src/server/cli-client.ts";
 /** CLI client connection type — state, send, subscribe, close, ready */
-export type { CliApp } from "./src/cli-client.ts";
+export type { CliApp } from "./src/server/cli-client.ts";
 
 /**
  * Action/effect catalog factory — creates typed creators for explicit-style cells.
  * Used inside `cell({ actions, effects })` config or for standalone catalogs.
  */
 /** Create typed action creators — PascalCase labels + camelCase dispatch helpers. */
-export { actions } from "./src/factory.ts";
+export { actions } from "./src/state/factory.ts";
 /** Create typed effect creators — same API as `actions()` but for side-effect declarations. */
-export { effects } from "./src/factory.ts";
+export { effects } from "./src/state/factory.ts";
 /** Factory result and creator types for explicit-style action/effect catalogs */
 export type {
   Creators as FactoryCreators,
   FactoryResult,
   LowerFirst,
   Prefixed,
-} from "./src/factory.ts";
+} from "./src/state/factory.ts";
 
 /**
  * Declarative schedules — timers, intervals, cron jobs as effects.
  * @see {@link https://aio.dev/manual#scheduled-effects}
  */
-export { schedule } from "./src/schedule.ts";
+export { schedule } from "./src/state/schedule.ts";
 /** Schedule definition and effect types for timers, intervals, and cron */
-export type { ScheduleDef, ScheduleEffect } from "./src/schedule.ts";
+export type { ScheduleDef, ScheduleEffect } from "./src/state/schedule.ts";
 
 /**
  * Keyed disposer slots — own native resources (watchers, sockets) from
  * reducers/methods with schedule-like replace semantics. Disposed on cell
  * disable and app shutdown.
  */
-export { own } from "./src/own.ts";
+export { own } from "./src/state/own.ts";
 /** Own effect type for keyed resource slots */
-export type { OwnDisposer, OwnEffect, OwnResource } from "./src/own.ts";
+export type { OwnDisposer, OwnEffect, OwnResource } from "./src/state/own.ts";
 /** Union of everything a method may return as an effect — use as the return
  *  annotation when a method references its own cell (breaks TS7022/7023). */
-export type { CellEffect } from "./src/cell-impl.ts";
+export type { CellEffect } from "./src/state/cell-impl.ts";
 
 /**
  * SQLite column helpers for defining table schemas.
  * @see {@link https://aio.dev/manual#sqlite-persistence}
  */
-export { integer, pk, real, ref, table, text } from "./src/sql.ts";
+export { integer, pk, real, ref, table, text } from "./src/server/sql.ts";
 /** SQL schema and query types — column definitions, table schemas, where clauses */
 export type {
   ColumnDef,
@@ -251,7 +251,7 @@ export type {
   TableDef,
   WhereClause,
   WhereOp,
-} from "./src/sql.ts";
+} from "./src/server/sql.ts";
 
 /**
  * Async SQLite — Worker-backed, non-blocking.
@@ -290,12 +290,12 @@ export type { Selector } from "./src/selector.ts";
  * })
  * ```
  */
-export { composeMiddleware } from "./src/aio.ts";
+export { composeMiddleware } from "./src/server/aio.ts";
 
 /**
  * Deep freeze for dev-mode immutability checking.
  */
-export { deepFreeze } from "./src/dispatch.ts";
+export { deepFreeze } from "./src/state/dispatch.ts";
 
 /**
  * Immer-powered immutable state update.

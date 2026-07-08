@@ -1,7 +1,7 @@
 import { assertEquals } from "@std/assert";
 import { Window } from "happy-dom";
-import { Fragment, h, type VNode } from "../src/vdom.ts";
-import { _diff, _render } from "../src/vdom.ts";
+import { Fragment, h, type VNode } from "../src/air/vdom.ts";
+import { _diff, _render } from "../src/air/vdom.ts";
 
 // happy-dom timers drained via win.happyDOM.close() — sanitizers re-enabled
 

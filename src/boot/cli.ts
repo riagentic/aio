@@ -1,5 +1,5 @@
 // Boot step: CLI parsing, --help, --version
-import { VERSION } from "../aio-cli.ts";
+import { VERSION } from "../server/aio-cli.ts";
 
 export interface BootCli {
   help: boolean;

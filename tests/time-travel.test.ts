@@ -11,8 +11,8 @@ import {
   travelTo,
   type TTState,
   undo,
-} from "../src/time-travel.ts";
-import { createServer } from "../src/server.ts";
+} from "../src/diagnostics/time-travel.ts";
+import { createServer } from "../src/server/server.ts";
 import { join } from "@std/path";
 
 type S = { count: number };

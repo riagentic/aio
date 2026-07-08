@@ -1,12 +1,12 @@
 import { assertEquals } from "@std/assert";
 import { Window } from "happy-dom";
-import { h } from "../src/vdom.ts";
+import { h } from "../src/air/vdom.ts";
 import {
   _setDocument,
   _unmount,
   mount,
   setDevMode,
-} from "../src/aio-renderer.ts";
+} from "../src/air/aio-renderer.ts";
 
 function createDOM() {
   const win = new Window({ url: "https://localhost" });

@@ -1,8 +1,8 @@
 import { assertEquals, assertExists } from "@std/assert";
-import { cell } from "../src/cell-create.ts";
-import { composeCells } from "../src/cell-compose.ts";
-import type { Msg } from "../src/cell-types.ts";
-import type { CellStatus } from "../src/cell-compose.ts";
+import { cell } from "../src/state/cell-create.ts";
+import { composeCells } from "../src/state/cell-compose.ts";
+import type { Msg } from "../src/state/cell-types.ts";
+import type { CellStatus } from "../src/state/cell-compose.ts";
 
 // ── Helper cells ─────────────────────────────────────────────────
 

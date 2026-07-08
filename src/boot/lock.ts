@@ -1,5 +1,5 @@
 // Boot step: single-instance AppLock acquisition
-import { AppLock, lockDir } from "../single-instance-lock.ts";
+import { AppLock, lockDir } from "../server/single-instance-lock.ts";
 
 export interface BootLock {
   appLock: AppLock | null;

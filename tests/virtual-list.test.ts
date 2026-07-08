@@ -1,6 +1,6 @@
 import { assertEquals } from "@std/assert";
-import { signal } from "../src/signal.ts";
-import { useVirtualList } from "../src/virtual-list.ts";
+import { signal } from "../src/state/signal.ts";
+import { useVirtualList } from "../src/air/virtual-list.ts";
 
 // ── Basic visible range calculation ────────────────────────────────
 

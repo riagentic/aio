@@ -6,7 +6,7 @@ import {
   _preserveArrayRefs,
   _projectWithSharing,
   _resetArrayRefStats,
-} from "../src/browser-protocol.ts";
+} from "../src/browser/browser-protocol.ts";
 
 Deno.test("_preserveArrayRefs tracks preserved vs changed counts", () => {
   _resetArrayRefStats();

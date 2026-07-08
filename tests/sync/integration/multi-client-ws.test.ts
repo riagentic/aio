@@ -4,7 +4,7 @@
 // to the peer, and visible to a late-joining third client via __sync.
 import { assertEquals, assertExists } from "@std/assert";
 import { join } from "@std/path";
-import { createServer } from "../../../src/server.ts";
+import { createServer } from "../../../src/server/server.ts";
 import { createDB } from "../../../src/db/mod.ts";
 import { SYNC_SCHEMA } from "../../../src/sync/compact.ts";
 import { createServerSyncHandler } from "../../../src/sync/server-handler.ts";

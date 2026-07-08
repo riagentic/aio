@@ -10,10 +10,10 @@ import {
   _rejectAllPending,
   _resolveAck,
   _setAckTimeoutMs,
-} from "../src/browser-ack.ts";
-import { createBatcher, createLiveProxy } from "../src/cell-impl.ts";
-import { cell as browserCell } from "../src/protocol-cell.ts";
-import { _resetCellRegistry } from "../src/cell-reactive.ts";
+} from "../src/protocol/browser-ack.ts";
+import { createBatcher, createLiveProxy } from "../src/state/cell-impl.ts";
+import { cell as browserCell } from "../src/protocol/protocol-cell.ts";
+import { _resetCellRegistry } from "../src/state/cell-reactive.ts";
 
 // ── AIO-396: idempotent ack registration ──────────────────────────
 

@@ -8,7 +8,7 @@
 //   - Reducer throughput meets minimum bar
 
 import { assertEquals } from "@std/assert";
-import { cell, composeCells } from "../src/cell.ts";
+import { cell, composeCells } from "../src/state/cell.ts";
 
 // ── Helpers ──────────────────────────────────────────────────────────
 

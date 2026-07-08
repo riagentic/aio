@@ -97,7 +97,7 @@ async function main(): Promise<void> {
  *  docs/debugging/errors.md. Returns one message per undocumented code. */
 async function checkErrorCodes(): Promise<string[]> {
   const errorTs = await Deno.readTextFile(
-    new URL("../src/error.ts", import.meta.url).pathname,
+    new URL("../src/diagnostics/error.ts", import.meta.url).pathname,
   );
   const union = errorTs.match(/export type AioErrorCode =([\s\S]*?);/);
   if (!union) return ["  could not parse AioErrorCode union from src/error.ts"];

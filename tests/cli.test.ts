@@ -1,10 +1,10 @@
 import { assertEquals } from "@std/assert";
-import { parseCli, VERSION } from "../src/aio.ts";
+import { parseCli, VERSION } from "../src/server/aio.ts";
 import {
   electronClientScript,
   electronMainScript,
   electronMainScriptUDS,
-} from "../src/electron.ts";
+} from "../src/electron/electron.ts";
 
 Deno.test("parseCli: defaults — empty args", () => {
   const r = parseCli([]);

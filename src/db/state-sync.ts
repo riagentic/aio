@@ -1,7 +1,7 @@
 // Async versions of schema init, table loading, and incremental state sync
 
 import type { DB } from "./types.ts";
-import { assertIdent, createTableSQL, type TableDef } from "../sql.ts";
+import { assertIdent, createTableSQL, type TableDef } from "../server/sql.ts";
 
 /** CREATE TABLE IF NOT EXISTS for all tables — called on DB open */
 export async function initSchema(
