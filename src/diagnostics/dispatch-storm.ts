@@ -1,11 +1,11 @@
 /**
  * @module
- * Dispatch-storm detection (feedback/mdview.md #2) — names runaway dispatch
+ * Dispatch-storm detection (watcher-loop field report #2) — names runaway dispatch
  * feedback loops by *frequency* instead of letting them surface as downstream
  * symptoms (perf-budget noise, log churn, event-loop starvation).
  *
- * The mdview incident: a workspace watcher observed aio's own log writes →
- * `fsChanged` dispatched 500×/s sustained → 130% CPU, dead HTTP listener.
+ * The original incident: an app's workspace watcher observed aio's own log
+ * writes → `fsChanged` dispatched 500×/s sustained → 130% CPU, dead listener.
  * `BUDGET_EFFECT` guards duration only, so the storm itself went unnamed.
  */
 
@@ -24,7 +24,7 @@ export type StormConfig = {
 
 /** Storm notification passed to the `onStorm` callback. */
 export type StormInfo = {
-  /** Offending action type, e.g. "mdview:fsChanged" */
+  /** Offending action type, e.g. "workspace:fsChanged" */
   type: string;
   /** Measured rate in the last full second (dispatches/sec) */
   rate: number;

@@ -112,10 +112,12 @@ async function checkErrorCodes(): Promise<string[]> {
 
 async function detectVersion(): Promise<string | undefined> {
   try {
+    // Root CHANGELOG.md is the canonical changelog (see .katana/docs.md); its
+    // top heading names the current release, e.g. "## 1.0.0-alpha15 — …".
     const changelog = await Deno.readTextFile(
-      new URL("../docs/basics/changelog.md", import.meta.url).pathname,
+      new URL("../CHANGELOG.md", import.meta.url).pathname,
     );
-    const match = changelog.match(/^## v(\d+\.\d+\.\d+)/m);
+    const match = changelog.match(/^## v?(\d+\.\d+\.\d+)/m);
     return match?.[1];
   } catch {
     return undefined;
