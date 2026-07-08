@@ -281,6 +281,7 @@ export async function handleThinClient(
 }
 
 import { type DiagnosticsConfig, initDiagnostics } from "../diagnostics/mod.ts";
+import { getLogDir } from "../diagnostics/logger-api.ts";
 import {
   type DiagnosticsOptions,
   resolveOptions as resolveDiagOptions,
@@ -299,7 +300,7 @@ export function initDiagAndVitals(
 } {
   const diagHooks = diagConfig === false
     ? null
-    : initDiagnostics(diagConfig ?? {}, prod, "./log");
+    : initDiagnostics(diagConfig ?? {}, prod, getLogDir());
   if (diagHooks && cellNames) diagHooks.onStart(cellNames);
 
   const diagResolvedOpts = diagConfig === false

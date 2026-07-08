@@ -12,6 +12,7 @@ import type { TableDef } from "./sql.ts";
 import type { CellStatus, CircuitBreakerConfig } from "../state/cell.ts";
 import type { MemoryConfig } from "../diagnostics/memory-monitor.ts";
 import type { LogConfig } from "../diagnostics/logger.ts";
+import type { StormConfig } from "../diagnostics/dispatch-storm.ts";
 import type { CheckpointData, DiagnosticsConfig } from "../diagnostics/mod.ts";
 import type { RenderBudget } from "../vitals/types.ts";
 import type { ReduceBreakdown } from "../diagnostics/time-travel.ts";
@@ -235,6 +236,12 @@ export type CellsConfig = {
   /** Diagnostics module — state diffs, action log, checkpoint, crash handler.
    *  Default: dev=full visibility, prod=lean. Set `false` to disable entirely. */
   diagnostics?: DiagnosticsConfig;
+  /** Dispatch-storm guard — warns when one action type sustains a runaway
+   *  dispatch rate (default: >200/s for 5s), naming the feedback loop instead
+   *  of leaving downstream symptoms (log churn, perf noise, starved server).
+   *  `{ breaker: true }` also drops the offending action while the storm
+   *  lasts. Set `false` to disable. */
+  dispatchStorm?: StormConfig | false;
   /** Callback when a diagnostics checkpoint is found on startup.
    *  Receives full CheckpointData. Return state to restore, or null to start fresh. */
   onCheckpointRestore?: (

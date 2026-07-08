@@ -10,6 +10,8 @@ import {
   type ReportErrorOpts,
 } from "../diagnostics/error.ts";
 import { AioLogger, log, setLogger } from "../diagnostics/logger.ts";
+import { createStormDetector } from "../diagnostics/dispatch-storm.ts";
+import { diagEmit } from "../diagnostics/diagnostic-bus.ts";
 import { parseCli } from "./aio-cli.ts";
 import { resolveAppId } from "./single-instance-lock.ts";
 import type { AioApp, AioConfig, AioUser, CellsConfig } from "./aio-types.ts";
@@ -54,6 +56,40 @@ export function buildLegacyConfig(
     logger,
     appRef,
   } = input;
+  // Dispatch-storm guard (feedback/mdview.md #2) — every server dispatch
+  // flows through beforeReduce, so frequency is measured (and optionally
+  // circuit-broken) before reducers/effects/logging amplify the loop.
+  const storm = fc.dispatchStorm === false ? null : createStormDetector({
+    ...(fc.dispatchStorm ?? {}),
+    onStorm: (info) => {
+      if (info.rate === 0) {
+        log.info(
+          "storm",
+          `${info.type} storm ended after ${info.seconds}s above threshold`,
+        );
+        return;
+      }
+      log.warn(
+        "storm",
+        `DISPATCH_STORM: ${info.type} fired ${info.rate}×/s for ${info.seconds}s${
+          info.breaking ? " — circuit-breaking (dropping) it" : ""
+        } — look for a feedback loop (e.g. an fs watcher observing your own writes)`,
+      );
+      diagEmit({
+        type: "dispatch:storm",
+        severity: "warning",
+        source: "dispatch",
+        message: `${info.type} fired ${info.rate}×/s for ${info.seconds}s`,
+        detail: info,
+        hint:
+          "find the feedback loop; set dispatchStorm.breaker to drop it automatically",
+      });
+    },
+  });
+  const userBeforeReduce = beforeReduce as
+    | ((a: unknown, s: unknown, u?: unknown) => unknown)
+    | undefined;
+
   return {
     appId: fc.appId,
     reduce: composed.reduce as AioConfig<
@@ -96,7 +132,15 @@ export function buildLegacyConfig(
     transport: fc.transport,
     serverUrl: fc.serverUrl,
     ui: fc.ui,
-    beforeReduce: beforeReduce as AioConfig<
+    beforeReduce: ((action, state, user) => {
+      if (
+        storm &&
+        !storm.track((action as { type: string }).type ?? "unknown")
+      ) {
+        return null; // breaker active — drop mid-storm dispatches
+      }
+      return userBeforeReduce ? userBeforeReduce(action, state, user) : action;
+    }) as AioConfig<
       Record<string, unknown>,
       unknown,
       unknown
