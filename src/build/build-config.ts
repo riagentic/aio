@@ -2,7 +2,7 @@
  * @module
  * Build configuration — parses CLI flags, reads deno.json, derives all shared build state.
  */
-import { join, resolve } from "@std/path";
+import { dirname, join, resolve } from "@std/path";
 import { slugify } from "./build-helpers.ts";
 
 export interface BuildConfig {
@@ -46,9 +46,12 @@ export async function loadBuildConfig(): Promise<BuildConfig> {
   const dist = resolve(join(root, "dist"));
   const out = join(dist, "app.js");
 
-  const frameworkBase = new URL(".", import.meta.url);
+  // framework src/ root — this module lives in src/build/, entries live at src/
+  const frameworkBase = new URL("..", import.meta.url);
   const isRemote = frameworkBase.protocol !== "file:";
-  const frameworkSrcDir = isRemote ? "" : (import.meta.dirname ?? ".");
+  const frameworkSrcDir = isRemote
+    ? ""
+    : (import.meta.dirname ? dirname(import.meta.dirname) : ".");
 
   const doElectron = Deno.args.includes("--electron");
   const doAndroid = Deno.args.includes("--android");

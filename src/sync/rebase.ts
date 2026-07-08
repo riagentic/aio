@@ -21,6 +21,7 @@ export interface RebaseResult {
 /** Replay unconfirmed ops through reducer on top of confirmed state.
  *  Ops returning null are dropped (invalid after rebase). */
 /**
+ * Replay unconfirmed local ops on top of freshly confirmed server state.
  * @experimental Excluded from the 1.0 stability guarantee.
  */
 export function rebase(

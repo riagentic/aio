@@ -193,13 +193,14 @@ async function run(a: any, b?: any): Promise<AioApp<any, any>> {
       onRestore: fc.onRestore,
     });
 
-    if (parseCli().expose) {
+    if (parseCli().expose || fc.users || fc.resolveUser) {
       const allUi = visibilityReport
         .filter((r) => r.ui === "all")
         .map((r) => r.cell);
       if (allUi.length) {
+        const mode = parseCli().expose ? "--expose" : "multi-user auth";
         log.warn(
-          `--expose with ui="all" on cells: ${
+          `${mode} with ui="all" on cells: ${
             allUi.join(", ")
           } — every authenticated client sees this state. Narrow with ui:{include:[...]} if needed.`,
         );

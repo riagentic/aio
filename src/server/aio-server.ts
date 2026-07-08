@@ -56,6 +56,8 @@ export interface ServerSetupDeps<S, A> {
     fullStateThreshold?: number;
     maxConnections?: number;
     wsLimits?: import("./aio-types.ts").WsLimits;
+    allowedOrigins?: string[];
+    strictOrigin?: boolean;
     syncIntervalMs?: number;
     _cellPatchStrategies?: Map<string, CellPatchStrategy>;
     _cellFilterFields?: Map<string, PatchFilterFields>;
@@ -218,6 +220,8 @@ export async function setupTransport<S, A>(
       fullStateThreshold: config.fullStateThreshold,
       maxConnections: config.maxConnections,
       wsLimits: config.wsLimits,
+      allowedOrigins: config.allowedOrigins,
+      strictOrigin: config.strictOrigin,
       syncIntervalMs: config.syncIntervalMs,
       cellPatchStrategies: config._cellPatchStrategies,
       cellFilterFields: config._cellFilterFields,

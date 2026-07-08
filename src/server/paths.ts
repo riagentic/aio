@@ -83,5 +83,7 @@ export function findFreePort(): number {
       return port;
     } catch { /* taken — try another */ }
   }
-  throw new Error("no free port found in 49152–65535 after 50 attempts");
+  throw new Error(
+    "no free port found in 49152-65535 after 50 attempts — the ephemeral range looks exhausted. Set an explicit port via aio.run({ port }) or --port=N.",
+  );
 }

@@ -46,8 +46,12 @@ gets saved:
 
 ```ts
 cell("user", {
-  state: { name: "", token: "", tempCache: {} },
-  persist: { exclude: ["tempCache"] }, // token saved, tempCache not
+  state: { name: "", sessionToken: "", tempCache: {} },
+  // secrets and scratch state stay out of the KV store
+  persist: { exclude: ["sessionToken", "tempCache"] },
+  // and out of the browser: exclude secrets from ui too — see the security
+  // note in docs/auth/auth.md (a secret needs BOTH excludes)
+  ui: { exclude: ["sessionToken"] },
 });
 ```
 

@@ -197,15 +197,34 @@ A summary of aio's security posture and known limitations:
 | Reducer/effect crashes taking down server | All errors caught and logged, dispatch loop continues                                         |
 | XSS in error overlay                      | `escHtml()` sanitizes filenames, paths, and error text                                        |
 
+### Keeping secrets out of clients and disk
+
+A secret state field (API key, session token) needs **both** excludes — they are
+independent channels:
+
+```ts
+cell("settings", {
+  state: { theme: "dark", apiKey: "" },
+  persist: { exclude: ["apiKey"] }, // never written to the KV store
+  ui: { exclude: ["apiKey"] }, // never synced to browsers
+});
+```
+
+`/__aio/snapshot` (state export/import for tooling) returns **raw, unfiltered
+state**. In multi-user mode (`users`/`resolveUser`) it therefore requires
+`role: "admin"`; in single-token mode the token holder is the owner. Treat
+snapshot files like backups: they contain everything, including fields hidden
+from `ui`.
+
 ### Known limitations
 
-| Limitation                                   | Mitigation                                                                       |
-| -------------------------------------------- | -------------------------------------------------------------------------------- |
-| Self-signed cert warning in browsers         | One-time "trust" click; or use `--cert`/`--key` with a CA-signed cert            |
-| Token appears in URL (`?token=`)             | Use `Authorization: Bearer <token>` header instead; avoid sharing URLs in logs   |
-| Token regenerates on restart                 | Compile targets pin the token via env or config; `am` tooling doesn't capture it |
-| `users:` tokens are static secrets in source | Use environment variables: `'alice-token': Deno.env.get('ALICE_TOKEN')!`         |
-| `--expose` skips Origin check                | Token replaces origin as the auth signal — acceptable for LAN, not internet      |
+| Limitation                                   | Mitigation                                                                                                                                                           |
+| -------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Self-signed cert warning in browsers         | One-time "trust" click; or use `--cert`/`--key` with a CA-signed cert                                                                                                |
+| Token appears in URL (`?token=`)             | Use `Authorization: Bearer <token>` header instead; avoid sharing URLs in logs                                                                                       |
+| Token regenerates on restart                 | Compile targets pin the token via env or config; `am` tooling doesn't capture it                                                                                     |
+| `users:` tokens are static secrets in source | Use environment variables: `'alice-token': Deno.env.get('ALICE_TOKEN')!`                                                                                             |
+| `--expose` origin policy                     | Origin is always validated: localhost + the server's own host + `allowedOrigins` pass, everything else is 403; `strictOrigin: true` additionally requires the header |
 
 ### Intended deployment model
 

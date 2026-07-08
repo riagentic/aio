@@ -105,7 +105,7 @@
         },
         "CellsConfig": {
           "kind": "typeAlias",
-          "sig": "1d44c7cdad733293"
+          "sig": "1f8b7264607b9cb3"
         },
         "CellStateSize": {
           "kind": "typeAlias",
@@ -216,8 +216,8 @@
           "sig": "40f2dfdd1fb3446e"
         },
         "effects": {
-          "kind": "reference",
-          "sig": "f83af22cec026bc7"
+          "kind": "variable",
+          "sig": "ba6c8aeb5b07eac4"
         },
         "ExecuteHandlers": {
           "kind": "typeAlias",

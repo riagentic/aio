@@ -98,7 +98,7 @@ export function flattenOnto(
   for (const [key, value] of Object.entries(catalog)) {
     if (selectorKeys.has(key)) {
       throw new Error(
-        `[${cellName}] action '${key}' collides with selector of same name`,
+        `[${cellName}] action '${key}' collides with selector of same name. Rename one (e.g. action '${key}Action').`,
       );
     }
     // Pure factory passthrough — bindCell later wraps with dispatch.
@@ -117,7 +117,7 @@ export function bindCell(
 ): void {
   if (f.__aio.bound) {
     throw new Error(
-      `[${f.__aio.id}] already bound — cells can only bind to one app`,
+      `[${f.__aio.id}] already bound — cells can only bind to one app. Create cells per app (e.g. a factory returning cell(...)) instead of sharing one definition.`,
     );
   }
 

@@ -2,6 +2,7 @@
 // Replaces standalone.ts when building with --android + renderer: "aio". Same API, no React.
 import { type Draft, produce } from "immer";
 import { msg } from "./state/msg.ts";
+import type { Msg } from "./state/cell-types.ts";
 import { actions, effects } from "./state/factory.ts";
 import { deepMerge } from "./state/deep-merge.ts";
 import {
@@ -267,3 +268,60 @@ export function _reset(): void {
   _stateSignal.set(null);
   _listeners.clear();
 }
+
+// ── Cell-based standalone runtime (AIO-404) ─────────────────────────
+// The scaffolded app code (`cell()` + `aio.run()`) must work in Android
+// WebView builds too: compose the cells, run the composed reducer through
+// the local dispatch loop, bind cell methods to it. No server, no sync —
+// persistence is localStorage via initStandalone.
+
+/** No server in standalone builds — generated bundle entries call this before mount. */
+export function ensureConnected(): void {}
+
+type StandaloneRunConfig = {
+  appId: string;
+  appVersion?: string;
+  // deno-lint-ignore no-explicit-any
+  cells: any[];
+  persist?: boolean | string;
+  onRestore?: (state: Record<string, unknown>) => Record<string, unknown>;
+  // server-only options (ui, baseDir, port, schedules, …) are accepted and
+  // ignored so one app.ts can serve both server and standalone builds
+  [key: string]: unknown;
+};
+
+/** Standalone `aio.run()` — cell-based apps in WebView/Android builds.
+ *  Composes cells, wires the local dispatch loop, binds cell methods.
+ *  Server-only config (ui, port, schedules, db, sync) is ignored. */
+async function runStandalone(
+  cfg: StandaloneRunConfig,
+): Promise<AioApp<Record<string, unknown>, Msg>> {
+  const { composeCells } = await import("./state/cell-compose.ts");
+  const { bindCell } = await import("./state/cell.ts");
+  const composed = composeCells(cfg.cells);
+  const app = initStandalone<Record<string, unknown>, Msg, Msg>(
+    composed.initialState,
+    {
+      reduce: composed.reduce,
+      execute: composed.execute,
+      persist: cfg.persist !== false && cfg.persist !== "none",
+      persistKey: `aio:${cfg.appId}`,
+      onRestore: cfg.onRestore,
+    },
+  );
+  for (const f of cfg.cells) {
+    bindCell(
+      f,
+      (action) => Promise.resolve(app.dispatch(action)),
+      () => app.getState() as Record<string, unknown>,
+    );
+  }
+  return app;
+}
+
+/** Standalone counterpart of the server `aio` namespace. */
+export const aio: { run: typeof runStandalone } = { run: runStandalone };
+
+/** Define a cell — works identically in standalone builds; methods dispatch
+ *  through the local loop instead of a server connection. */
+export { cell } from "./state/cell.ts";

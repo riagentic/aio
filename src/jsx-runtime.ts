@@ -53,6 +53,7 @@ export type AirEvent<T extends EventTarget, E extends Event = Event> = E & {
   target: EventTarget;
 };
 
+/** Event-name → DOM event type map backing AIR's typed `on*` props. */
 type AioEventMap = {
   Click: MouseEvent;
   DblClick: MouseEvent;
@@ -109,12 +110,14 @@ type AioEventMap = {
   Error: Event;
 };
 
+/** All `on<Event>` handler props, element-typed via AirEvent<T>. */
 type AioMappedEventHandlers<T extends EventTarget = HTMLElement> = {
   [K in keyof AioEventMap as `on${K}`]?: (
     e: AirEvent<T, AioEventMap[K]>,
   ) => void;
 };
 
+/** Base JSX attributes for intrinsic elements (global attrs + typed events). */
 type AioHTMLAttributes<T extends EventTarget = HTMLElement> =
   & AioMappedEventHandlers<T>
   & {
@@ -143,6 +146,7 @@ type AioHTMLAttributes<T extends EventTarget = HTMLElement> =
     dangerouslySetInnerHTML?: { __html: string };
   };
 
+/** `<input>` JSX attributes. */
 type AioInputAttributes = AioHTMLAttributes<HTMLInputElement> & {
   type?: string;
   value?: string | number;
@@ -167,6 +171,7 @@ type AioInputAttributes = AioHTMLAttributes<HTMLInputElement> & {
   size?: number;
 };
 
+/** `<textarea>` JSX attributes. */
 type AioTextAreaAttributes = AioHTMLAttributes<HTMLTextAreaElement> & {
   value?: string;
   defaultValue?: string;
@@ -183,6 +188,7 @@ type AioTextAreaAttributes = AioHTMLAttributes<HTMLTextAreaElement> & {
   autoFocus?: boolean;
 };
 
+/** `<select>` JSX attributes. */
 type AioSelectAttributes = AioHTMLAttributes<HTMLSelectElement> & {
   value?: string | number;
   defaultValue?: string | number;
@@ -194,6 +200,7 @@ type AioSelectAttributes = AioHTMLAttributes<HTMLSelectElement> & {
   autoFocus?: boolean;
 };
 
+/** `<a>` JSX attributes. */
 type AioAnchorAttributes = AioHTMLAttributes<HTMLAnchorElement> & {
   href?: string;
   target?: string;
@@ -203,6 +210,7 @@ type AioAnchorAttributes = AioHTMLAttributes<HTMLAnchorElement> & {
   type?: string;
 };
 
+/** `<img>` JSX attributes. */
 type AioImgAttributes = AioHTMLAttributes<HTMLImageElement> & {
   src?: string;
   alt?: string;
@@ -215,6 +223,7 @@ type AioImgAttributes = AioHTMLAttributes<HTMLImageElement> & {
   sizes?: string;
 };
 
+/** `<form>` JSX attributes. */
 type AioFormAttributes = AioHTMLAttributes<HTMLFormElement> & {
   action?: string;
   method?: string;
@@ -225,6 +234,7 @@ type AioFormAttributes = AioHTMLAttributes<HTMLFormElement> & {
   name?: string;
 };
 
+/** `<button>` JSX attributes. */
 type AioButtonAttributes = AioHTMLAttributes<HTMLButtonElement> & {
   type?: "button" | "submit" | "reset";
   disabled?: boolean;
@@ -234,11 +244,13 @@ type AioButtonAttributes = AioHTMLAttributes<HTMLButtonElement> & {
   form?: string;
 };
 
+/** `<label>` JSX attributes. */
 type AioLabelAttributes = AioHTMLAttributes & {
   htmlFor?: string;
   for?: string;
 };
 
+/** `<option>` JSX attributes. */
 type AioOptionAttributes = AioHTMLAttributes & {
   value?: string | number;
   selected?: boolean;
@@ -246,6 +258,7 @@ type AioOptionAttributes = AioHTMLAttributes & {
   label?: string;
 };
 
+/** SVG element JSX attributes. */
 type AioSVGAttributes = AioHTMLAttributes & {
   viewBox?: string;
   xmlns?: string;

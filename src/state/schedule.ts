@@ -114,7 +114,9 @@ function parseField(field: string, min: number, max: number): number[] {
     } else if (trimmed.startsWith("*/")) {
       const step = Number(trimmed.slice(2));
       if (!Number.isInteger(step) || step < 1) {
-        throw new Error(`invalid cron step: ${trimmed}`);
+        throw new Error(
+          `invalid cron step: ${trimmed} — step must be a positive integer, e.g. "*/5"`,
+        );
       }
       for (let i = min; i <= max; i += step) values.push(i);
     } else if (trimmed.includes("-")) {
@@ -133,7 +135,9 @@ function parseField(field: string, min: number, max: number): number[] {
         throw new Error(`invalid cron range: ${trimmed} (${min}-${max})`);
       }
       if (!Number.isInteger(step) || step < 1) {
-        throw new Error(`invalid cron step: ${trimmed}`);
+        throw new Error(
+          `invalid cron step: ${trimmed} — step must be a positive integer, e.g. "1-5/2"`,
+        );
       }
       for (let i = start; i <= end; i += step) values.push(i);
     } else {
@@ -194,7 +198,9 @@ export function nextCronTime(fields: CronFields, after: Date): Date {
     }
     d.setUTCMinutes(d.getUTCMinutes() + 1);
   }
-  throw new Error("no matching cron time within 366 days");
+  throw new Error(
+    'no matching cron time within 366 days — check the day-of-month/month combination (e.g. "0 0 30 2 *" never fires: Feb 30 does not exist)',
+  );
 }
 
 // ── Schedule manager ────────────────────────────────────────────────
@@ -323,7 +329,11 @@ export function createScheduleManager(
   ): void {
     const target = new Date(time).getTime();
     if (Number.isNaN(target)) {
-      throw new Error(`invalid schedule.at time: ${JSON.stringify(time)}`);
+      throw new Error(
+        `invalid schedule.at time: ${
+          JSON.stringify(time)
+        } — use an ISO 8601 string (e.g. "2026-07-08T12:00:00Z") or a Date`,
+      );
     }
     // AIO-236: skip if target time is in the past
     if (target <= Date.now()) {

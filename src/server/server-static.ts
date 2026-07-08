@@ -251,7 +251,12 @@ export function createStaticHandler(deps: StaticDeps): {
     } catch (err) {
       debug(`transpile ${label} error: ${fmtEsbuildError(err, label)}`);
       return new Response(
-        `throw new Error(${JSON.stringify(label + " transpile failed")})`,
+        `throw new Error(${
+          JSON.stringify(
+            label + " transpile failed: " + fmtEsbuildError(err, label) +
+              " — fix the syntax error above; the dev server rebuilds on save",
+          )
+        })`,
         {
           headers: { "Content-Type": "application/javascript", ...noCache },
         },
@@ -400,6 +405,17 @@ export function createStaticHandler(deps: StaticDeps): {
     if (!filepath.startsWith(basePfx)) {
       return new Response("Forbidden", { status: 403 });
     }
+    // Symlinks inside baseDir must not escape it either
+    try {
+      const real = await Deno.realPath(filepath);
+      const realBase = await Deno.realPath(absBaseDir);
+      const realPfx = realBase.endsWith(SEPARATOR)
+        ? realBase
+        : realBase + SEPARATOR;
+      if (real !== realBase && !real.startsWith(realPfx)) {
+        return new Response("Forbidden", { status: 403 });
+      }
+    } catch { /* file doesn't exist — later handlers 404 */ }
     const ext = extname(filepath);
 
     // SPA fallback: extensionless paths (not internal /__* APIs)

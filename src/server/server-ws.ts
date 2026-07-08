@@ -214,7 +214,10 @@ export function createWsManager(deps: WsDeps): WsManager {
           h === "::1" || h === "[::1]";
         const allowed = deps.allowedOrigins ?? [];
         const isAllowed = allowed.includes(h) || allowed.includes("*");
-        if (!isLocal && !isAllowed) {
+        // a page this very server served has Origin === our Host header
+        const hostHeader = req.headers.get("host");
+        const isOwnHost = hostHeader !== null && u.host === hostHeader;
+        if (!isLocal && !isAllowed && !isOwnHost) {
           deps.debug(`ws: rejected origin ${origin}`);
           return new Response("Forbidden", { status: 403 });
         }

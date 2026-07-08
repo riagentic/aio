@@ -13,7 +13,9 @@ export function resolveCells(entries: CellEntry[]): CellDef[] {
       ? entry as CellDef
       : (entry as { cell: CellDef }).cell;
     if (seen.has(f.__aio.id)) {
-      throw new Error(`duplicate cell name: '${f.__aio.id}'`);
+      throw new Error(
+        `duplicate cell name: '${f.__aio.id}' — two cells passed to aio.run({ cells }) share this name. Rename one (e.g. '${f.__aio.id}2') or remove the duplicate entry.`,
+      );
     }
     seen.add(f.__aio.id);
     cells.push(f);
@@ -33,7 +35,9 @@ export function resolveCells(entries: CellEntry[]): CellDef[] {
     for (const dep of depList) {
       if (!names.has(dep)) {
         throw new Error(
-          `[cell:${name}] depends on unknown cell '${dep}'`,
+          `[cell:${name}] depends on unknown cell '${dep}'. Known cells: ${
+            [...names].join(", ") || "(none)"
+          }. Add it to aio.run({ cells }) or fix the name in deps.`,
         );
       }
     }

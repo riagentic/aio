@@ -368,7 +368,9 @@ class ComputedImpl<T> implements Computed<T> {
 
   private _recompute(): void {
     if (_computing.has(this as unknown as ComputedImpl<unknown>)) {
-      throw new Error("[aio:signal] Circular dependency detected in computed");
+      throw new Error(
+        "[aio:signal] Circular dependency in computed — it (directly or via other computeds) reads its own value. Break the cycle by deriving from source signals only.",
+      );
     }
     _computing.add(this as unknown as ComputedImpl<unknown>);
 
