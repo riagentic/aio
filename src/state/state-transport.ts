@@ -58,6 +58,7 @@ export function _getTransport(): Transport | null {
   return _transport;
 }
 
+/** Install (or clear with null) the CRDT sync intercept — returns true to claim an action before normal dispatch. */
 export function setSyncHandler(
   handler: ((action: { type: string; payload?: unknown }) => boolean) | null,
 ): void {

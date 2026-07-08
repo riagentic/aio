@@ -283,7 +283,16 @@ export function createServer(config: ServerConfig): ServerHandle {
       if (!token) return new Response("Unauthorized", { status: 401 });
       const user = await _userResolver(token);
       if (!user) return new Response("Unauthorized", { status: 401 });
+      if (url.searchParams.get("token")) _warnTokenInUrl();
       if (pathname === "/ws") return wsMgr.handleWs(req, user, clientKey);
+      // Snapshot dumps/overwrites RAW state — it bypasses ui include/exclude
+      // and forUser filtering, so only admins may touch it in per-user mode.
+      if (pathname === "/__aio/snapshot" && user.role !== "admin") {
+        return new Response(
+          'Forbidden — /__aio/snapshot exposes unfiltered state and requires role "admin"',
+          { status: 403 },
+        );
+      }
       debug(`http: ${req.method} ${pathname} user=${user.id}`);
       const resp = await staticHandler.serveStatic(pathname, req);
       resp.headers.set("X-Content-Type-Options", "nosniff");
@@ -355,8 +364,8 @@ export function createServer(config: ServerConfig): ServerHandle {
           trojanPort = addr.port;
         },
       },
-      (req) => {
-        // Authenticate trojan requests on localhost — same token as main server
+      async (req) => {
+        // Authenticate trojan requests on localhost — same rules as main server
         if (config.token) {
           const url = new URL(req.url);
           const qToken = url.searchParams.get("token");
@@ -368,6 +377,19 @@ export function createServer(config: ServerConfig): ServerHandle {
             _timingSafeEqual(hToken, config.token);
           if (!validQ && !validH) {
             return new Response("Unauthorized", { status: 401 });
+          }
+        } else if (_userResolver) {
+          // users/resolveUser mode: config.token is unset — still require a
+          // valid user token, and gate snapshot to admins like the main server
+          const url = new URL(req.url);
+          const token = _extractToken(url, req);
+          const user = token ? await _userResolver(token) : null;
+          if (!user) return new Response("Unauthorized", { status: 401 });
+          if (url.pathname === "/__aio/snapshot" && user.role !== "admin") {
+            return new Response(
+              'Forbidden — /__aio/snapshot exposes unfiltered state and requires role "admin"',
+              { status: 403 },
+            );
           }
         }
         const { pathname } = new URL(req.url);

@@ -117,7 +117,9 @@ export function buildAppObject<S, A>(refs: {
     loadSnapshot: (json: string) => {
       const parsed = JSON.parse(json);
       if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-        throw new Error("snapshot must be a JSON object");
+        throw new Error(
+          "loadSnapshot: snapshot must be a JSON object — pass the exact string returned by app.snapshot()",
+        );
       }
       const initKeys = new Set(
         Object.keys(refs.initialState as Record<string, unknown>),

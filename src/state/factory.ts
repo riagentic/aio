@@ -54,4 +54,7 @@ function factory(first: unknown, second?: unknown): unknown {
   return result;
 }
 
-export { factory as actions, factory as effects };
+/** Typed action-creator factory — PascalCase definitions become namespaced `{ type, payload }` creators. */
+export { factory as actions };
+/** Typed effect-creator factory — same shape as `actions()`, for side-effect declarations. */
+export const effects: typeof factory = factory;

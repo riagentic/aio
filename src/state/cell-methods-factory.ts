@@ -79,7 +79,7 @@ export function createCellFromMethods<
       throw new Error(
         `[cell:${name}] generator "${n}" collides with ${
           allNames.get(n)
-        } of same name`,
+        } of same name. Rename one (e.g. generator "${n}Flow").`,
       );
     }
     allNames.set(n, "generator");
@@ -89,7 +89,7 @@ export function createCellFromMethods<
       throw new Error(
         `[cell:${name}] action "${n}" collides with ${
           allNames.get(n)
-        } of same name`,
+        } of same name. Rename one (e.g. action "${n}Action").`,
       );
     }
     allNames.set(n, "action");
@@ -99,7 +99,9 @@ export function createCellFromMethods<
       throw new Error(
         `[cell:${name}] effect "${n}" collides with ${
           allNames.get(n)
-        } of same name`,
+        } of same name. Rename one (e.g. effect "on${
+          n.charAt(0).toUpperCase()
+        }${n.slice(1)}").`,
       );
     }
     allNames.set(n, "effect");
@@ -327,7 +329,9 @@ export function createCellFromMethods<
   for (const key of selectorKeys) {
     if (RESERVED_KEYS.has(key)) {
       throw new Error(
-        `[${name}] selector '${key}' collides with reserved property`,
+        `[${name}] selector '${key}' collides with a reserved cell property. Rename it (e.g. '${key}Value'). Reserved: ${
+          [...RESERVED_KEYS].join(", ")
+        }.`,
       );
     }
   }
@@ -335,7 +339,7 @@ export function createCellFromMethods<
     if (RESERVED_KEYS.has(key)) continue;
     if (selectorKeys.has(key)) {
       throw new Error(
-        `[${name}] method '${key}' collides with selector of same name`,
+        `[${name}] method '${key}' collides with selector of same name. Rename one (e.g. method '${key}Now' or selector '${key}Value').`,
       );
     }
     def[key] = makeUnboundGuard(name, key, value);

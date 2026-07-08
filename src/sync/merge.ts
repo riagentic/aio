@@ -139,7 +139,9 @@ function _getId(idField: string): (item: unknown) => string {
     const id = (item as Record<string, unknown>)[idField];
     if (id === undefined || id === null) {
       throw new Error(
-        `merge: set item missing required id field "${idField}"`,
+        `merge: set item missing required id field "${idField}" (item: ${
+          JSON.stringify(item).slice(0, 80)
+        }). Add the field to every item, or set merge: { strategy: "set", idField: "<your-key>" }.`,
       );
     }
     return String(id);

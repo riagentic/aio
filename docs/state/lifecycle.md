@@ -128,6 +128,8 @@ const health = app.cells!.health();
 ```
 
 Also available over HTTP: `GET /__aio/health` returns the same data as JSON.
+Like every `/__aio/*` endpoint it sits behind auth when `token`, `users`, or
+`resolveUser` is configured — health probes need the token too.
 
 ---
 

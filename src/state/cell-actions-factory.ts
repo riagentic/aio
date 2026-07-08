@@ -169,7 +169,9 @@ export function createCellFromActions<
   for (const key of selectorKeys) {
     if (RESERVED_KEYS.has(key)) {
       throw new Error(
-        `[${name}] selector '${key}' collides with reserved property`,
+        `[${name}] selector '${key}' collides with a reserved cell property. Rename it (e.g. '${key}Value'). Reserved: ${
+          [...RESERVED_KEYS].join(", ")
+        }.`,
       );
     }
   }

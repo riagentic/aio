@@ -229,7 +229,9 @@ export function startLifecycle<S, A>(deps: LifecycleDeps<S, A>): void {
   // Validate keepServer
   const keepServer = cli.keepServer ?? configKeepServer ?? false;
   if (keepServer && client !== "electron") {
-    throw new Error("keepServer only applies when client is electron");
+    throw new Error(
+      `keepServer only applies when client is electron (current client: "${client}"). Remove keepServer from aio.run(), or set client: "electron".`,
+    );
   }
 
   // Launch client
