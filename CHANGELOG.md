@@ -2,6 +2,45 @@
 
 ## Unreleased
 
+### Security (roadmap B5)
+
+- **`/__aio/snapshot` requires `role: "admin"` in multi-user mode** — it
+  returns/accepts raw, unfiltered state, so any authenticated user (e.g. a
+  viewer) could bypass `ui: { exclude, forUser }` filtering; now admin-only on
+  both the main server and the localhost trojan helper
+- **`allowedOrigins`/`strictOrigin` are real config** — they existed on the
+  internal server type but were never plumbed from `aio.run()` config (dead
+  code); additionally, pages served by the server itself (Origin = own Host) are
+  now accepted in `--expose` mode without manual allowlisting
+- **Trojan localhost helper authenticates in `users`/`resolveUser` mode**
+  (previously only token mode was checked)
+- `?token=` URL warning also fires on the per-user auth path; the `ui: "all"`
+  visibility warning also fires for multi-user (non-expose) setups
+- **Symlinks under `baseDir` can no longer escape it** — static file serving
+  re-checks the real path
+- Docs: secrets need BOTH `persist.exclude` and `ui.exclude` (invariant +
+  examples fixed in tutorial/persistence docs), snapshot semantics, health
+  endpoint auth note
+
+### Fixed
+
+- **`compile:*` bundling works again** — folderization moved the build module,
+  and its framework-path resolution (`frameworkSrcDir`, `frameworkBase`, the
+  generated entry's `./src/App.tsx` import) still pointed at the old flat
+  layout; all `compile:browser/electron/cli/android` targets bundle again
+  (AIO-404)
+- **Android builds support cell-based apps** — `standalone-air` (the WebView
+  runtime) now exports `cell` and a standalone `aio.run()` that composes cells,
+  binds their methods to the local dispatch loop, and persists via localStorage
+  — the scaffolded android template bundles and runs instead of failing with "No
+  matching export for 'cell'" (AIO-404)
+
+- **`connectCli` works against exposed (TLS + token) servers** — `wss://` URLs
+  were silently downgraded to `ws:` and a `?token=` in the URL (the server's own
+  share-link format) was dropped, so remote thin clients hung on `ready` forever
+  with no error; both fixed, and repeated connect failures now log an actionable
+  hint. Found by the remote field validation run (AIO-403)
+
 ### Internal
 
 - **`src/` folderized into domain modules** — 199 flat files moved into

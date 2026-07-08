@@ -18,6 +18,8 @@ export const VALID_AIO_CONFIG_KEYS = new Set<string>([
   "fullStateThreshold",
   "syncIntervalMs",
   "maxConnections",
+  "allowedOrigins",
+  "strictOrigin",
   "beforeReduce",
   "persistKey",
   "persistDebounceMs",
@@ -146,6 +148,8 @@ const CONFIG_DOCS: Record<string, [string, string]> = {
     "ratio of changed keys that triggers full state broadcast",
   ],
   maxConnections: ["100", "max concurrent WebSocket clients"],
+  allowedOrigins: ["", "extra allowed WS origins beyond localhost + own host"],
+  strictOrigin: ["false", "require Origin header on WS upgrade in expose mode"],
   beforeReduce: ["", "intercept actions before reduce — return null to drop"],
   users: ["", "static token→user map for auth"],
   resolveUser: [

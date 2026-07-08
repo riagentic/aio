@@ -110,7 +110,9 @@ export function makeHttpPlugin(cfg: BuildConfig): any {
         async (args: any) => {
           const r = await fetch(args.path);
           if (!r.ok) {
-            throw new Error(`[build] fetch ${args.path} → ${r.status}`);
+            throw new Error(
+              `[build] fetch ${args.path} -> HTTP ${r.status} — check the import URL is reachable (network/registry down?) and rebuild`,
+            );
           }
           const contents = await r.text();
           await verifyIntegrity(args.path, contents);

@@ -65,6 +65,8 @@ export type AioConfig<S, A, E> = {
   syncIntervalMs?: number; // default: 50 — max 1 state push per N ms (0 = microtask coalescing only)
   maxConnections?: number; // max concurrent WebSocket clients (default: 100)
   wsLimits?: WsLimits; // per-client WS rate/size limits (advanced; defaults hardened)
+  allowedOrigins?: string[]; // extra allowed WS origins beyond localhost + own host (reverse proxy, custom domains)
+  strictOrigin?: boolean; // --expose hardening: require an Origin header on WS upgrade
   beforeReduce?: (action: A, state: S, user?: AioUser) => A | null; // intercept actions before reduce — return null to drop
   persistKey?: string; // KV key prefix (default: "state")
   persistDebounceMs?: number; // ms between KV writes (default: 100)
@@ -202,6 +204,10 @@ export type CellsConfig = {
   maxConnections?: number;
   /** Per-client WebSocket safety limits (advanced; defaults are hardened). */
   wsLimits?: WsLimits;
+  /** Extra allowed WS origins beyond localhost + own host (reverse proxy, custom domains). */
+  allowedOrigins?: string[];
+  /** --expose hardening: require an Origin header on WS upgrade. */
+  strictOrigin?: boolean;
   schedules?: ScheduleDef[];
   /** v0.5 middleware array — applied in order as beforeReduce chain */
   middleware?: import("./middleware.ts").MiddlewareFn[];

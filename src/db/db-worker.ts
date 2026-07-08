@@ -39,7 +39,11 @@ self.onmessage = ({ data }: MessageEvent<WorkerRequest>) => {
         break;
       }
       case "query": {
-        if (!db) throw new Error("db not open");
+        if (!db) {
+          throw new Error(
+            "db not open — the worker received a query before open() or after close(). Await app.ready (or db.open()) before querying.",
+          );
+        }
         const rows = db.prepare(data.sql).all(..._p(data.params ?? []));
         respond({
           id,
@@ -53,7 +57,11 @@ self.onmessage = ({ data }: MessageEvent<WorkerRequest>) => {
         break;
       }
       case "execute": {
-        if (!db) throw new Error("db not open");
+        if (!db) {
+          throw new Error(
+            "db not open — the worker received a query before open() or after close(). Await app.ready (or db.open()) before querying.",
+          );
+        }
         const r = db.prepare(data.sql).run(..._p(data.params ?? []));
         respond({
           id,
@@ -67,7 +75,11 @@ self.onmessage = ({ data }: MessageEvent<WorkerRequest>) => {
         break;
       }
       case "transaction": {
-        if (!db) throw new Error("db not open");
+        if (!db) {
+          throw new Error(
+            "db not open — the worker received a query before open() or after close(). Await app.ready (or db.open()) before querying.",
+          );
+        }
         const results: QueryResult[] = [];
         db.exec("BEGIN");
         try {

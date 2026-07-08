@@ -94,7 +94,7 @@ export function cell(name: string, config: any): any {
     }
     if (hasGenerators) {
       throw new Error(
-        `[${name}] client-scoped cells do not support generators (v1 limitation)`,
+        `[${name}] client-scoped cells do not support generators (v1 limitation). Use sync methods and drive multi-step flows from the component, or move the cell to server scope.`,
       );
     }
     if (hasActions) {
@@ -104,7 +104,7 @@ export function cell(name: string, config: any): any {
     }
     if (config.machine) {
       throw new Error(
-        `[${name}] client-scoped cells do not support machine (v1 limitation)`,
+        `[${name}] client-scoped cells do not support machine (v1 limitation). Move the cell to server scope (remove scope: "client") to use a state machine.`,
       );
     }
     const def = createCellFromMethods(

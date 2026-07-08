@@ -48,10 +48,10 @@ async function isBundleFresh(cfg: BuildConfig): Promise<boolean> {
         const f of [
           join(root, "deno.json"),
           aioModule,
-          join(frameworkSrcDir, "msg.ts"),
-          join(frameworkSrcDir, "factory.ts"),
-          join(frameworkSrcDir, "deep-merge.ts"),
-          join(frameworkSrcDir, "dispatch.ts"),
+          join(frameworkSrcDir, "state/msg.ts"),
+          join(frameworkSrcDir, "state/factory.ts"),
+          join(frameworkSrcDir, "state/deep-merge.ts"),
+          join(frameworkSrcDir, "state/dispatch.ts"),
         ]
       ) {
         const s = await Deno.stat(f);
@@ -77,7 +77,7 @@ function makeEntryCode(): string {
   return `\
 import { mount as _mount } from 'aio/renderer'
 import { ensureConnected } from 'aio/air'
-import App from '../src/App.tsx'
+import App from './src/App.tsx'
 export function mount(el) { ensureConnected(); _mount(el, App) }
 `;
 }
@@ -118,7 +118,7 @@ export async function runBundle(
     const aioImports = frameworkSrcDir
       ? {
         "aio/jsx-runtime": join(frameworkSrcDir, "jsx-runtime.ts"),
-        "aio/renderer": join(frameworkSrcDir, "aio-renderer.ts"),
+        "aio/renderer": join(frameworkSrcDir, "air/aio-renderer.ts"),
       }
       : {};
     const buildConfig = {

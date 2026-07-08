@@ -57,17 +57,20 @@ bugfix-only; 1.0.0 = boring. Commit per task as `rd(<task-id>): <summary>`.
 
 ## Phase B — betas (freeze + prove)
 
-- [ ] **B1 — beta1 = feature freeze.** API snapshot locked; semver + deprecation
-      policy doc published (what counts as breaking, how long deprecations
-      live).
-- [ ] **B2 — Docs completeness gate.** Every public export documented; all
-      `examples/` + doc snippets type-checked in CI (extend
+- [ ] **B1 — beta1 = feature freeze.** API snapshot locked ✓ (A2); semver +
+      deprecation policy doc published ✓ (`docs/basics/semver-policy.md`,
+      2026-07-08). Remaining: the beta1 release itself (freeze decision).
+- [x] **B2 — Docs completeness gate.** Every public export documented (345/345)
+      + CI gate `deno task docs:coverage` (`scripts/check-doc-coverage.ts`,
+      2026-07-08). Examples type-check in CI via `deno task check` (extend
       `scripts/check-docs.ts`).
-- [ ] **B3 — Error-message audit.** Every throw: code + cause + fix suggestion
-      (extend existing error-code gate).
-- [ ] **B4 — Perf + soak.** Benchmarks (signal graph, WS fan-out, persist write
-      path) with CI regression thresholds; 72h soak of a scheduled service
-      (scheduler/subscription leaks).
+- [x] **B3 — Error-message audit.** Done 2026-07-08: 85 origin throw sites
+      classified, 27 user-reachable ones now carry cause + fix (rename
+      suggestions, known-cell lists, cron syntax examples, lifecycle hints).
+- [ ] **B4 — Perf + soak.** Benchmarks ✓ (`deno task bench`, CI regression
+      floors: signal graph, batched writes, composed reduce, KV persist) and
+      soak harness ✓ (`deno task soak` / `soak:72h`, heap-slope leak gate,
+      30-min run clean, 2026-07-08). Remaining: the actual 72h run.
 - [ ] **B5 — Security pass.** WS auth, secret-state exclusion from persist/ui
       (risoto's pattern → documented invariant), `scope:"client"` boundary.
 - [ ] **B6 — beta2+ = fixes only** + 2 more field-report apps on the frozen API.

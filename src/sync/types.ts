@@ -94,6 +94,7 @@ export interface SyncRequest {
 /** Wire message: server→client sync response.
  *  lowWater is per-cell map when server tracks multiple cells (see server-handler.ts). */
 /**
+ * Server reply to a `__sync` catch-up request: ops since the client's cursor.
  * @experimental Excluded from the 1.0 stability guarantee.
  */
 export interface SyncResponse {

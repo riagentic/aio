@@ -124,7 +124,9 @@ export function buildFlows(
   for (const [key, fn] of Object.entries(rawGenerators)) {
     if (argsStyle === "payload" && !actionKeySet.has(key)) {
       throw new Error(
-        `[cell:${name}] generator '${key}' must match an action key`,
+        `[cell:${name}] generator '${key}' must match an action key. Available actions: ${
+          [...actionKeySet].join(", ") || "(none)"
+        }. Add an action '${key}' or rename the generator.`,
       );
     }
     const triggers = config.cancelOn?.[key] ?? fn.cancelOn;

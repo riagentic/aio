@@ -175,10 +175,17 @@ Both `persist` and `ui` accept: `"all"` (default), `"none"`,
 ```ts
 const settings = cell("settings", {
   state: { theme: "dark", apiKey: "", cache: {} },
-  persist: "all", // persist entire state
-  ui: { exclude: ["apiKey"] }, // hide apiKey from clients
+  persist: { exclude: ["apiKey"] }, // don't write the secret to disk…
+  ui: { exclude: ["apiKey"] }, // …and don't sync it to clients
   methods: {/* ... */},
 });
+```
+
+> A secret needs **both** excludes: `persist` controls what reaches the KV
+> store, `ui` controls what reaches browsers. Excluding only one leaks it
+> through the other.
+
+```ts
 ```
 
 When state shape changes between app versions, add a migration:

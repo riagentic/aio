@@ -52,8 +52,12 @@ export function connectCli<S>(
   function connect(): void {
     if (ws || closed) return;
     const parsed = new URL(url);
-    const proto = parsed.protocol === "https:" ? "wss:" : "ws:";
-    const token = opts?.token;
+    // wss:/https: stay secure — a TLS server never answers plain ws:
+    const proto = parsed.protocol === "https:" || parsed.protocol === "wss:"
+      ? "wss:"
+      : "ws:";
+    // token: explicit option wins, else the ?token= from the share-link URL
+    const token = opts?.token ?? parsed.searchParams.get("token") ?? undefined;
     const wsUrl = `${proto}//${parsed.host}/ws${
       token ? `?token=${token}` : ""
     }`;
@@ -148,9 +152,16 @@ export function connectCli<S>(
 
     socket.onerror = () => {};
 
-    socket.onclose = () => {
+    socket.onclose = (ev) => {
       ws = null;
       if (closed) return;
+      if (!wasConnected && retry === 2) {
+        console.error(
+          `[aio:cli] cannot reach ${wsUrl}${
+            ev.code === 1008 ? ` (${ev.reason || "unauthorized"})` : ""
+          } — check the server is running and the URL/token match its share link (still retrying)`,
+        );
+      }
       // Exponential backoff: 1s → 2s → 4s → 8s max, ±20% jitter
       const base = Math.min(1000 * Math.pow(2, retry), 8000);
       retry++;

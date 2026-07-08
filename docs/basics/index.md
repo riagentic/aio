@@ -10,6 +10,8 @@
 - [Tutorial](tutorial.md) — step-by-step from zero to running app
 - [FAQ](faq.md) — design decisions and non-goals
 - [Changelog](changelog.md) — version history
+- [Versioning policy](semver-policy.md) — what counts as breaking, deprecation
+  lifecycle, release phases
 - [Migration Guide](migration.md) — adopting aio in an existing app
 
 ## State Management
