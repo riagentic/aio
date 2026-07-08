@@ -1,5 +1,5 @@
 // UI component — export default, framework mounts it
-import { counter } from "./app.ts";
+import { counter } from "./cell.ts";
 
 const btn: Record<string, string> = {
   padding: "0.75rem 1.5rem",

@@ -1,21 +1,8 @@
 // Entry point — define cell, wire to aio.run()
-import { aio, cell } from "aio";
+import { aio } from "aio";
+import { counter } from "./cell.ts";
 
-// persists by default — restart and count survives (persist: "all" is the default)
-export const counter = cell("counter", {
-  state: { count: 0 },
-  methods: {
-    increment(s, by = 1) {
-      s.count += by;
-    },
-    decrement(s, by = 1) {
-      s.count -= by;
-    },
-    reset(s) {
-      s.count = 0;
-    },
-  },
-});
+export { counter };
 
 await aio.run({
   appId: "counter",
