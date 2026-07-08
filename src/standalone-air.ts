@@ -22,6 +22,13 @@ import { Listeners } from "./state/listeners.ts";
 import { signal } from "./state/signal.ts";
 import { useRef } from "./air/aio-renderer.ts";
 import { type ComponentFn, h } from "./air/vdom.ts";
+import { bindCell, bindCellReactive, type CellDef } from "./state/cell.ts";
+import { composeCells } from "./state/cell-compose.ts";
+import {
+  _resetCellRegistry,
+  getRegisteredCells,
+} from "./state/cell-reactive.ts";
+import { _applyFullState, _resetSignals } from "./state/state-signals.ts";
 
 // Re-exports for user code
 export { actions, effects, msg };
@@ -79,6 +86,9 @@ type StandaloneConfig<S, A, E> = {
   perfBudget?: PerfBudget;
   freezeState?: boolean;
   onRestore?: (state: S) => S;
+  /** Fires after each committed state change (cell-based standalone uses it to
+   *  push the new state into per-cell reactive signals). */
+  onCommit?: (state: S) => void;
 };
 
 const STORAGE_KEY = "aio_state";
@@ -189,6 +199,7 @@ export function initStandalone<S, A, E>(
     onDone: () => {
       _state = getUIState(state);
       _notify();
+      config.onCommit?.(state);
       schedulePersist();
     },
     log: standaloneLog,
@@ -265,8 +276,11 @@ export function page<K extends string>(
 export function _reset(): void {
   _state = null;
   _app = null;
+  _cellApp = null;
   _stateSignal.set(null);
   _listeners.clear();
+  _resetCellRegistry();
+  _resetSignals();
 }
 
 // ── Cell-based standalone runtime (AIO-404) ─────────────────────────
@@ -274,15 +288,67 @@ export function _reset(): void {
 // WebView builds too: compose the cells, run the composed reducer through
 // the local dispatch loop, bind cell methods to it. No server, no sync —
 // persistence is localStorage via initStandalone.
+//
+// The generated client bundle mounts App.tsx directly and never executes the
+// user's app.ts (which calls the *server* aio.run()). So on standalone the
+// runtime boots from the cell registry — every `cell()` self-registers, and
+// ensureConnected()/aio.run() compose + bind whatever has been defined.
 
-/** No server in standalone builds — generated bundle entries call this before mount. */
-export function ensureConnected(): void {}
+let _cellApp: AioApp<Record<string, unknown>, Msg> | null = null;
+
+function bootStandalone(
+  cells: CellDef[],
+  opts: {
+    appId?: string;
+    persist?: boolean | string;
+    onRestore?: (s: Record<string, unknown>) => Record<string, unknown>;
+  } = {},
+): AioApp<Record<string, unknown>, Msg> {
+  if (_cellApp) return _cellApp; // idempotent — first caller wins
+  const composed = composeCells(cells);
+  const app = initStandalone<Record<string, unknown>, Msg, Msg>(
+    composed.initialState,
+    {
+      reduce: composed.reduce,
+      execute: composed.execute,
+      persist: opts.persist !== false && opts.persist !== "none",
+      persistKey: `aio:${opts.appId ?? "app"}`,
+      onRestore: opts.onRestore,
+      // push each committed state into per-cell signals so `counter.count`
+      // reads (upgraded to reactive below) re-render the AIR tree
+      onCommit: (s) => _applyFullState(s as Record<string, unknown>),
+    },
+  );
+  for (const f of cells) {
+    // bindCell: wrap methods to dispatch through the local loop
+    bindCell(
+      f,
+      (action) => Promise.resolve(app.dispatch(action)),
+      () => app.getState() as Record<string, unknown>,
+    );
+    // bindCellReactive (no sendFn): upgrade the state getters to read the
+    // per-cell signal — keeps the bound methods from bindCell intact
+    bindCellReactive(f);
+  }
+  // seed the cell signals with the restored/initial state
+  _applyFullState(app.getState() as Record<string, unknown>);
+  _cellApp = app;
+  return app;
+}
+
+/** Standalone builds have no server — instead, boot the local runtime from the
+ *  cell registry. Called by the generated bundle entry before mount, so cell
+ *  methods are bound by the time the first component renders. Idempotent. */
+export function ensureConnected(): void {
+  if (_cellApp) return;
+  const cells = [...getRegisteredCells().values()];
+  if (cells.length) bootStandalone(cells);
+}
 
 type StandaloneRunConfig = {
   appId: string;
   appVersion?: string;
-  // deno-lint-ignore no-explicit-any
-  cells: any[];
+  cells?: CellDef[];
   persist?: boolean | string;
   onRestore?: (state: Record<string, unknown>) => Record<string, unknown>;
   // server-only options (ui, baseDir, port, schedules, …) are accepted and
@@ -291,32 +357,22 @@ type StandaloneRunConfig = {
 };
 
 /** Standalone `aio.run()` — cell-based apps in WebView/Android builds.
- *  Composes cells, wires the local dispatch loop, binds cell methods.
- *  Server-only config (ui, port, schedules, db, sync) is ignored. */
-async function runStandalone(
+ *  Composes the given cells (or the whole registry) and binds their methods to
+ *  a local dispatch loop. Server-only config (ui, port, schedules, db) is
+ *  ignored. Idempotent with ensureConnected(). */
+function runStandalone(
   cfg: StandaloneRunConfig,
 ): Promise<AioApp<Record<string, unknown>, Msg>> {
-  const { composeCells } = await import("./state/cell-compose.ts");
-  const { bindCell } = await import("./state/cell.ts");
-  const composed = composeCells(cfg.cells);
-  const app = initStandalone<Record<string, unknown>, Msg, Msg>(
-    composed.initialState,
-    {
-      reduce: composed.reduce,
-      execute: composed.execute,
-      persist: cfg.persist !== false && cfg.persist !== "none",
-      persistKey: `aio:${cfg.appId}`,
+  const cells = cfg.cells && cfg.cells.length
+    ? cfg.cells
+    : [...getRegisteredCells().values()];
+  return Promise.resolve(
+    bootStandalone(cells, {
+      appId: cfg.appId,
+      persist: cfg.persist,
       onRestore: cfg.onRestore,
-    },
+    }),
   );
-  for (const f of cfg.cells) {
-    bindCell(
-      f,
-      (action) => Promise.resolve(app.dispatch(action)),
-      () => app.getState() as Record<string, unknown>,
-    );
-  }
-  return app;
 }
 
 /** Standalone counterpart of the server `aio` namespace. */

@@ -21,6 +21,26 @@ Object.defineProperty(globalThis, "localStorage", {
   configurable: true,
 });
 
+Deno.test("aio-404: ensureConnected auto-boots the cell registry (no aio.run in bundle)", async () => {
+  // The generated android bundle mounts App.tsx and calls ensureConnected() —
+  // it never runs the user's app.ts / aio.run(). ensureConnected() must bind
+  // the registered cells so a method call dispatches instead of warning
+  // "called before aio.run()".
+  _reset();
+  storage.clear();
+  const reg = cell("saauto", {
+    state: { n: 0 },
+    methods: {
+      bump(s: { n: number }) {
+        s.n += 1;
+      },
+    },
+  });
+  ensureConnected(); // must bind reg from the registry
+  await (reg as unknown as { bump(): Promise<void> }).bump();
+  assertEquals((reg as unknown as { n: number }).n, 1); // reactive getter reflects it
+});
+
 Deno.test("aio-404: standalone aio.run binds cells to the local loop", async () => {
   _reset();
   storage.clear();
@@ -33,7 +53,6 @@ Deno.test("aio-404: standalone aio.run binds cells to the local loop", async () 
     },
   });
 
-  ensureConnected(); // generated entry calls this — must be a no-op here
   const app = await aio.run({ appId: "aio404", cells: [counter] });
 
   await counter.increment(5);

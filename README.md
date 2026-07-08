@@ -62,11 +62,15 @@ await aio.run({ appId: "taste", appVersion: "0.1.0", cells: [counter] });
 ```
 
 ```sh
-# Option A: JSR (quick start)
-deno add jsr:@riagentic/aio
+# Option A: scaffolder — fastest, always matches the current framework
+sh -c "$(curl -fsSL https://raw.githubusercontent.com/riagentic/aio/main/init.sh)" -- my-app
 
-# Option B: Clone into project (full source access, bleeding edge)
+# Option B: vendor into your project (full source, bleeding edge)
 git clone https://github.com/riagentic/aio dep/aio
+
+# Option C: JSR — once the version you want is published
+#   (during the alpha the surface moves faster than JSR releases; prefer A/B)
+deno add jsr:@riagentic/aio
 ```
 
 Then in `deno.json`:
