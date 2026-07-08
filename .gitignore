@@ -22,6 +22,7 @@ log/
 coverage/
 
 # Runtime-generated — never commit
+.aio/
 .aio.pid
 .aio.log
 .aio-tls/

@@ -8,6 +8,7 @@ import {
   removeLock,
   resolveAppId,
   slugify,
+  writeLock,
 } from "../src/server/single-instance-lock.ts";
 
 const TEST_APP = "aio-test-lock-" + Deno.pid; // unique per test run to avoid collisions
@@ -212,4 +213,68 @@ Deno.test("isProcessAlive: current process is alive", () => {
 
 Deno.test("isProcessAlive: dead PID returns false", () => {
   assertEquals(isProcessAlive(999999), false);
+});
+
+Deno.test("zombie reclaim: pid alive but port dead → lock reclaimed (mdview #5)", async () => {
+  const appId = "zombie-test-" + crypto.randomUUID().slice(0, 8);
+  // A port that is definitely closed: bind then release it
+  const l = Deno.listen({ port: 0 });
+  const deadPort = (l.addr as Deno.NetAddr).port;
+  l.close();
+  // Lock owned by a live foreign process (a spawned sleeper) whose "server"
+  // port refuses connections, past the startup grace window.
+  const sleeper = new Deno.Command("sleep", { args: ["30"] }).spawn();
+  try {
+    writeLock({
+      appId,
+      pid: sleeper.pid,
+      port: deadPort,
+      startedAt: Date.now() - 60_000,
+      status: "started",
+      cwd: Deno.cwd(),
+    });
+
+    const lock = new AppLock(appId);
+    const result = await lock.acquire(4321);
+    assertEquals(
+      result.ok,
+      true,
+      "zombie lock (live pid, dead port) reclaimed",
+    );
+    lock.release();
+  } finally {
+    try {
+      sleeper.kill();
+    } catch { /* already gone */ }
+    await sleeper.status;
+  }
+});
+
+Deno.test("zombie reclaim: skipped for UDS instances and during startup grace", async () => {
+  const appId = "zombie-uds-" + crypto.randomUUID().slice(0, 8);
+  const l = Deno.listen({ port: 0 });
+  const deadPort = (l.addr as Deno.NetAddr).port;
+  l.close();
+  // UDS instance: port never listens — must NOT be treated as a zombie
+  const sleeper = new Deno.Command("sleep", { args: ["30"] }).spawn();
+  try {
+    writeLock({
+      appId,
+      pid: sleeper.pid,
+      port: deadPort,
+      startedAt: Date.now() - 60_000,
+      status: "started",
+      cwd: Deno.cwd(),
+      socketPath: "/tmp/aio/fake.sock",
+    });
+    const lock = new AppLock(appId);
+    const result = await lock.acquire(4322);
+    assertEquals(result.ok, false, "UDS instance not reclaimed by port check");
+    removeLock(appId);
+  } finally {
+    try {
+      sleeper.kill();
+    } catch { /* already gone */ }
+    await sleeper.status;
+  }
 });

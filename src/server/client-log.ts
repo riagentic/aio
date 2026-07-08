@@ -17,7 +17,7 @@ const LEVEL_PAD: Record<ClientLogEntry["level"], string> = {
 // Rate tracking: clientIndex → { count within current second, warned flag }
 const _rate = new Map<number, { count: number; warned: boolean }>();
 
-let _logDir = "./log";
+let _logDir = ".aio/log";
 let _resetTimer: ReturnType<typeof setTimeout> | null = null;
 let _writeErrors = 0;
 
