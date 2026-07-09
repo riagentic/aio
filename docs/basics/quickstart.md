@@ -64,9 +64,9 @@ import { aio, cell } from "aio";
     "jsxImportSource": "aio"
   },
   "imports": {
-    "aio": "jsr:@riagentic/aio@^1.0.0-alpha14",
-    "aio/air": "jsr:@riagentic/aio@^1.0.0-alpha14/air",
-    "aio/jsx-runtime": "jsr:@riagentic/aio@^1.0.0-alpha14/jsx-runtime",
+    "aio": "jsr:@riagentic/aio@^1.0.0-alpha15",
+    "aio/air": "jsr:@riagentic/aio@^1.0.0-alpha15/air",
+    "aio/jsx-runtime": "jsr:@riagentic/aio@^1.0.0-alpha15/jsx-runtime",
     "esbuild": "npm:esbuild@^0.24",
     "electron": "npm:electron"
   },
@@ -317,10 +317,11 @@ something and re-read state), see
 
 ## Troubleshooting
 
-- **First step, always:** `deno run -A jsr:@riagentic/aio/src/doctor` —
-  validates the 6 magic deno.json lines (jsx, jsxImportSource, import map
-  entries, kv, electron nodeModulesDir, Deno version) with a one-line fix per
-  failure.
+- **First step, always:** `deno task doctor` — emitted by every scaffold (or
+  `deno run -A dep/aio/src/server/doctor.ts` vendored,
+  `jsr:@riagentic/aio/doctor` once published). Validates the magic deno.json
+  lines (jsx, jsxImportSource, import map entries, kv, electron nodeModulesDir,
+  Deno version) with a one-line fix per failure.
 
 - **"Electron not found"** -- Run `deno task install:electron`, or use
   `--client=browser`
