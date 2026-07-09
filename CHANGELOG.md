@@ -1,5 +1,66 @@
 # Changelog
 
+## 1.0.0-alpha16 — deep-audit cleanup + field-report fixes (mdview, risoto)
+
+A full per-file audit (no correctness bugs found) plus the cleanup it turned up,
+and every open item from the mdview and risoto field reports. Non-breaking:
+additive API only (`deno task doctor` / `aio/doctor`, `schedule.backoff`), no
+changed semantics.
+
+### Added
+
+- **`deno task doctor`** (+ `./doctor` export) — config sanity checker for the
+  magic `deno.json` lines (jsx / jsxImportSource, `aio` import-map keys,
+  `unstable: ["kv"]`, vendored `immer`/`@std/path`, Deno ≥ 2.6). Wired in the
+  repo and emitted by every scaffold; covered by tests.
+- **`schedule.backoff(id, attempt, { base, max?, factor? }, action)`** — a
+  one-shot `after` whose delay grows exponentially with `attempt`, owning the
+  retry/backoff arithmetic so RPC pollers stop hand-rolling it.
+
+### Security
+
+- **Field-filter safety warnings** — `ui`/`persist` `include`/`exclude` only
+  match top-level state keys, so a nested key (e.g. `exclude: ["encSecKey"]`
+  under `accounts[]`) was a silent no-op that kept broadcasting the secret. Two
+  compose-time warnings now catch it: a non-top-level filter key, and a
+  secret-looking field (`enc/secret/priv/key/seed/mnemonic/passphrase`) left
+  exposed to the UI.
+- **`sql.ts` validates ORDER BY direction** instead of interpolating it raw
+  (injection guard); **dispatch overflow rejects** dropped actions
+  (`DISPATCH_MAX`) instead of silently resolving. Both with regression tests.
+
+### Removed (dead code found by the audit)
+
+- The `boot/` folder — a redundant parallel implementation of lock/identity/CLI
+  the live server path already does inline (0 importers).
+- `server-html-error-overlay.ts` — superseded by `server-html-scripts.ts`'s live
+  dev-error path since alpha12.
+- `browser-transport.ts` — the pre-split monolith, superseded by the
+  `browser-transport-{state,vitals,send,ws,ipc}.ts` family.
+
+### Fixed
+
+- **`.gitignore` wrongly ignored `docs/build/`** — 5 authored docs were on disk
+  but never tracked, so five files linking into the section had dead links in
+  the pushed repo. Un-ignored and tracked. Added `*.zip`/`*.exe`.
+- **Honest install path across all docs** — scaffolder/vendored first, JSR "once
+  published"; the stale `jsr:@…/src/doctor` quickstart path now points at
+  `deno task doctor`.
+- **A dynamic `schedule.every`/`after` reusing a static schedule id** (from
+  `aio.run({ schedules })`) warns instead of silently colliding.
+- **aiol false positives** — `db:` inside a comment no longer trips "SQLite
+  configured"; the table-import check is quote-agnostic; the `.env` warning
+  respects `.gitignore`.
+- Doc/test quality — corrected `useTimeTravel`'s signature, removed the internal
+  `setDevMode` from the public reference, updated the input example to
+  `e.currentTarget`, strengthened weak middleware/selector test assertions, and
+  made the `stress.test.ts` header honest.
+
+### Docs
+
+- `ui.forUser` typing workaround (a TS inference gap across sibling config
+  properties) and a copy-paste **Modal / focus-trap recipe**.
+
 ## 1.0.0-alpha15 — Deno 2.9 blank-app fix, kata test sweep, runtime hardening
 
 Every aio version ≤ alpha14 dies on Deno ≥ 2.9 the moment a UI connects (WS
