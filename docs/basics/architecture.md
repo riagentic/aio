@@ -37,7 +37,6 @@ folders. The folder dependency matrix is CI-enforced by `deno task boundaries`
 | `build/`       | Build system: bundling, compilation, targets (esbuild here) | `build-bundle.ts`, `build-electron.ts`          |
 | `electron/`    | Electron integration: scripts, IPC, spawning                | `electron.ts`, `electron-spawn.ts`              |
 | `am/`          | App Manager CLI: inspect, state, process mgmt               | `am-cmd-*.ts`, `am-http.ts`                     |
-| `boot/`        | Process identity, locking, CLI boot helpers                 | `identity.ts`, `lock.ts`                        |
 | `testing/`     | Test harnesses: cell tests, component tests                 | `cell-test.ts`, `test-component.ts`             |
 | `adapters/`    | Renderer adapters                                           | `air.ts`                                        |
 
