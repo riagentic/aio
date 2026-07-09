@@ -41,7 +41,7 @@ Deno.test("cell() replaces existing entry with same id (dedup)", () => {
   _resetCellRegistry();
 });
 
-// ── State key / method overlap — method wins, no crash ───────────────
+// ── State key / method-name collision — throws at cell() time ────────
 
 Deno.test("AIO-6.1: cell() throws when a state key collides with a method name", () => {
   _resetCellRegistry();

@@ -1,9 +1,7 @@
 // stress.test.ts — high-throughput dispatch, memory bounds, state consistency
 //
 // Verifies behavior under sustained load:
-//   - Dispatch queue doesn't back up or drop actions
 //   - State stays consistent after thousands of rapid mutations
-//   - Time-travel history stays bounded (200 cap)
 //   - Concurrent generators don't corrupt shared state
 //   - Reducer throughput meets minimum bar
 

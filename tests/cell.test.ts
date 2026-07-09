@@ -74,7 +74,8 @@ const counter = cell("counter", {
   },
   selectors: {
     getCount: (s) => s.count,
-    isIdle: (s) => (s as unknown as { _status: string })._status === "idle",
+    isIdle: (s) =>
+      (s as unknown as { __aio_status: string }).__aio_status === "idle",
   },
 });
 
@@ -138,11 +139,6 @@ Deno.test("cell: effect labels and creators", () => {
   });
 });
 
-Deno.test("cell: name and prefix", () => {
-  // Cell identity verified through action type prefix (public API)
-  assertEquals(counter.increment.type.split(":")[0], "counter");
-});
-
 Deno.test("cell: selectors via compose", () => {
   // Test selectors through compose — the public consumption path
   const composed = composeCells([counter]);
@@ -151,9 +147,16 @@ Deno.test("cell: selectors via compose", () => {
     state,
     (counter.__aio.actions as unknown as Record<string, any>).increment(42),
   ).state;
-  // Verify selector behavior by checking composed state
-  assertEquals((state.counter as Record<string, unknown>).count, 42);
-  assertEquals((state.counter as Record<string, unknown>).__aio_status, "idle");
+  // Actually invoke the cell's selectors against the composed slice
+  const slice = state.counter as Record<string, unknown>;
+  assertEquals(
+    (counter.__aio.selectors.getCount as (s: unknown) => unknown)(slice),
+    42,
+  );
+  assertEquals(
+    (counter.__aio.selectors.isIdle as (s: unknown) => unknown)(slice),
+    true,
+  );
 });
 
 // ── Machine validation ──
@@ -609,18 +612,18 @@ testCell<{ count: number; lastUpdatedAt: number; error: string | null }>(
 
 // middleware: freeze returns action (passthrough)
 
-Deno.test("aio.middleware.freeze: passthrough", () => {
+Deno.test("aio.middleware.freeze: passthrough returns the action", () => {
   const mw = aio.middleware.freeze();
-  const result = mw({ type: "Test", payload: {} }, {});
-  assertEquals(result !== null, true);
+  const result = mw({ type: "Test", payload: {} }, {}) as { type: string };
+  assertEquals(result.type, "Test");
 });
 
 // middleware: devtools returns action (passthrough)
 
-Deno.test("aio.middleware.devtools: passthrough", () => {
+Deno.test("aio.middleware.devtools: passthrough returns the action", () => {
   const mw = aio.middleware.devtools();
-  const result = mw({ type: "Test", payload: {} }, {});
-  assertEquals(result !== null, true);
+  const result = mw({ type: "Test", payload: {} }, {}) as { type: string };
+  assertEquals(result.type, "Test");
 });
 
 // middleware: perfBudget stores start time

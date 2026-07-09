@@ -168,7 +168,7 @@ Event handlers use `on` + event name (camelCase), same as React:
   Hover me
 </button>
 
-<input onInput={(e: Event) => name.set((e.target as HTMLInputElement).value)} />
+<input onInput={(e) => name.set(e.currentTarget.value)} />
 ```
 
 > **Note:** AIR uses native DOM events, not React synthetic events. Use

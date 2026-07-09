@@ -6,13 +6,14 @@ _build.json
 _build_entry.tsx
 *.AppImage
 *.apk
+*.zip
+*.exe
 *.service
 aio-counter
 .vscode/
 .gradle/
 /build/
 android-template/build/
-docs/build/
 
 # Secrets
 .env
