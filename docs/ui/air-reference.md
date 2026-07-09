@@ -196,7 +196,7 @@ h("ul", null, items.map((i) => h("li", { key: i.id }, i.name)));
 | `useLocal`      | `useLocal(init): { local, set, patch }` | Client-only state |
 | `useConnected`  | `useConnected(): boolean`               | Connection status |
 | `useProjection` | `useProjection(fn): T`                  | Derived state     |
-| `useTimeTravel` | `useTimeTravel(ref): TimeTravelState`   | Debug time travel |
+| `useTimeTravel` | `useTimeTravel(): TimeTravelState`      | Debug time travel |
 
 ## Routing
 
@@ -230,7 +230,6 @@ h("ul", null, items.map((i) => h("li", { key: i.id }, i.name)));
 | `useVirtualList`     | `useVirtualList<T>(config): VirtualListState<T>` | Windowed list            |
 | `island`             | `island<M>(config): ComponentFn`                 | External framework mount |
 | `connectAioDevTools` | `connectAioDevTools(): DevToolsHandle`           | Inspector + DevTools     |
-| `setDevMode`         | `setDevMode(enabled): void`                      | Enable a11y + warnings   |
 | `memo`               | `memo(Component): Component`                     | No-op (auto-memo)        |
 
 ## React Compat (migration)

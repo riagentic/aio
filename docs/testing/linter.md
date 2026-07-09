@@ -7,7 +7,7 @@ errors, warnings, and optimization hints — no runtime needed.
 
 ```sh
 # From your project root
-deno run -A jsr:@riagentic/aio@^1.0.0-alpha14/aiol
+deno run -A jsr:@riagentic/aio@^1.0.0-alpha15/aiol
 
 # Or point at a specific directory
 deno run -A aiol/mod.ts /path/to/my-app
@@ -18,7 +18,7 @@ deno run -A aiol/mod.ts --json
 # Add as a task in deno.json
 {
   "tasks": {
-    "lint:aio": "deno run -A jsr:@riagentic/aio@^1.0.0-alpha14/aiol"
+    "lint:aio": "deno run -A jsr:@riagentic/aio@^1.0.0-alpha15/aiol"
   }
 }
 ```
@@ -170,7 +170,7 @@ Static analysis of `cell()` calls:
 ## Example Output
 
 ```
-aiol v1.0.0-alpha14 — scanning project
+aiol v1.0.0-alpha15 — scanning project
 
   ✓ appId: my-app
   ✓ entry: src/app.ts

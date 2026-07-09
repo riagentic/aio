@@ -312,3 +312,117 @@ backoff (1s -> 30s max). On reconnect, server sends full state. Use
 
 Same code runs in Electron. AIO uses IPC instead of WebSocket -- transparent to
 components.
+
+## Modal / Dialog with focus trap (recipe)
+
+AIR ships `Portal` but no `<Dialog>` primitive — modal focus management is a
+recipe so you keep full control of markup and styling. This one handles the
+whole keyboard/a11y class that's easy to get wrong: focus moves into the dialog
+on open, `Tab`/`Shift+Tab` cycle **within** it, `Escape` closes, and focus
+returns to the trigger on close. The parent mounts it conditionally
+(`{open && <Modal…>}`) so hooks run in a stable order.
+
+```tsx
+import { onCleanup, onMount, useRef } from "aio/air";
+
+export function Modal(
+  { onClose, children }: { onClose: () => void; children: unknown },
+) {
+  const dialog = useRef<HTMLDivElement | null>(null);
+
+  onMount(() => {
+    const trigger = document.activeElement as HTMLElement | null;
+    const root = dialog.current;
+    if (!root) return;
+
+    const focusables = () =>
+      Array.from(
+        root.querySelectorAll<HTMLElement>(
+          "a[href],button:not([disabled]),textarea,input,select," +
+            '[tabindex]:not([tabindex="-1"])',
+        ),
+      ).filter((el) => el.offsetParent !== null);
+
+    (focusables()[0] ?? root).focus();
+
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        onClose();
+      } else if (e.key === "Tab") {
+        const els = focusables();
+        if (els.length === 0) return;
+        const first = els[0], last = els[els.length - 1];
+        if (e.shiftKey && document.activeElement === first) {
+          e.preventDefault();
+          last.focus();
+        } else if (!e.shiftKey && document.activeElement === last) {
+          e.preventDefault();
+          first.focus();
+        }
+      }
+    };
+    document.addEventListener("keydown", onKey, true);
+
+    onCleanup(() => {
+      document.removeEventListener("keydown", onKey, true);
+      trigger?.focus?.(); // restore focus to whatever opened the dialog
+    });
+  });
+
+  return (
+    <Portal target={document.body}>
+      <div
+        onClick={onClose} // backdrop click closes
+        style={{
+          position: "fixed",
+          inset: 0,
+          background: "rgba(0,0,0,.5)",
+          display: "grid",
+          placeItems: "center",
+        }}
+      >
+        <div
+          ref={dialog}
+          role="dialog"
+          aria-modal="true"
+          tabIndex={-1}
+          onClick={(e) => e.stopPropagation()} // clicks inside don't close
+          style={{ background: "#fff", padding: "1.5rem", borderRadius: 8 }}
+        >
+          {children}
+        </div>
+      </div>
+    </Portal>
+  );
+}
+```
+
+Usage — mount only while open, and wrap inputs in a `<form>` so **Enter
+submits**:
+
+```tsx
+{
+  open && (
+    <Modal onClose={() => ui.closeModal()}>
+      <form
+        onSubmit={(e) => {
+          e.preventDefault();
+          save(name);
+          ui.closeModal();
+        }}
+      >
+        <h2>Rename</h2>
+        <input value={name} onInput={(e) => setName(e.currentTarget.value)} />
+        <button type="submit">Save</button>
+        <button type="button" onClick={() => ui.closeModal()}>Cancel</button>
+      </form>
+    </Modal>
+  );
+}
+```
+
+Notes: the capture-phase `keydown` listener means the trap works even when focus
+is on the backdrop; `role="dialog"` + `aria-modal="true"` announce it to screen
+readers; and returning focus to the trigger on close keeps keyboard navigation
+coherent.

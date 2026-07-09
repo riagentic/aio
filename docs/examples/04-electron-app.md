@@ -14,10 +14,15 @@ cloud, no accounts — just your notes on your machine.
     "compile:electron": "deno run -A src/app.ts --compile"
   },
   "imports": {
-    "aio": "jsr:@riagentic/aio@^1.0.0-alpha14"
+    "aio": "jsr:@riagentic/aio@^1.0.0-alpha15"
   }
 }
 ```
+
+> **Install:** use the scaffolder or the vendored path (see
+> [Quickstart](../basics/quickstart.md)) — a scaffolded `deno.json` maps `aio`
+> to `./dep/aio/mod.ts`. The `jsr:` pins above apply once
+> [@riagentic/aio](https://jsr.io/@riagentic/aio) is published.
 
 File structure:
 
