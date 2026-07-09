@@ -1,6 +1,6 @@
 {
   "name": "@riagentic/aio",
-  "version": "1.0.0-alpha15",
+  "version": "1.0.0-alpha16",
   "appId": "aio",
   "exports": {
     ".": "./mod.ts",
@@ -15,6 +15,7 @@
     "./selectors": "./src/selector.ts",
     "./build": "./src/build.ts",
     "./am": "./src/am.ts",
+    "./doctor": "./src/server/doctor.ts",
     "./aiol": "./aiol/mod.ts"
   },
   "publish": {
@@ -88,6 +89,7 @@
     "api:update": "deno run --allow-read --allow-write --allow-run scripts/api-snapshot.ts",
     "example": "deno run -A examples/counter/app.ts",
     "am": "deno run -A src/am.ts",
+    "doctor": "deno run -A src/server/doctor.ts",
     "docs": "deno doc --html --name=aio --output=docs/api-ref mod.ts"
   }
 }

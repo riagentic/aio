@@ -417,7 +417,7 @@
         },
         "schedule": {
           "kind": "variable",
-          "sig": "7c859c6270242054"
+          "sig": "4578ace036bc4f41"
         },
         "ScheduleDef": {
           "kind": "typeAlias",
@@ -493,7 +493,7 @@
         },
         "VERSION": {
           "kind": "variable",
-          "sig": "4a5935ec674aa712"
+          "sig": "bf423864c696362f"
         },
         "VitalAlert": {
           "kind": "typeAlias",
@@ -1037,6 +1037,18 @@
         }
       }
     },
+    "./doctor": {
+      "symbols": {
+        "Check": {
+          "kind": "interface",
+          "sig": "ec6b92fb8d6d2607"
+        },
+        "runDoctor": {
+          "kind": "function",
+          "sig": "9602a72d80638807"
+        }
+      }
+    },
     "./jsx-runtime": {
       "symbols": {
         "AioAnchorAttributes": {
@@ -1133,7 +1145,7 @@
         },
         "schedule": {
           "kind": "variable",
-          "sig": "7c859c6270242054"
+          "sig": "4578ace036bc4f41"
         },
         "ScheduleDef": {
           "kind": "typeAlias",
