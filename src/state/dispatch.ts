@@ -131,7 +131,12 @@ export function createDispatch<S, A, E>(
   let depth = 0; // global re-entrant depth counter (survives across dispatch calls)
   let effectsInFlight = 0;
   const effectPromises = new Set<Promise<void>>();
-  const queue: { action: A; resolve: () => void; cid: string }[] = [];
+  const queue: {
+    action: A;
+    resolve: () => void;
+    reject: (e: AioError) => void;
+    cid: string;
+  }[] = [];
 
   const _reportOpts: ReportErrorOpts = {
     onError: deps.reportOpts?.onError,
@@ -198,11 +203,16 @@ export function createDispatch<S, A, E>(
       return rejectDropped(err);
     }
     let resolve!: () => void;
-    const promise = new Promise<void>((r) => {
+    let reject!: (e: AioError) => void;
+    const promise = new Promise<void>((r, rej) => {
       resolve = r;
+      reject = rej as (e: AioError) => void;
     });
+    // Swallow the unhandled-rejection that would otherwise surface for
+    // fire-and-forget callers (B-4: awaiters still receive the rejection).
+    promise.catch(() => {});
     const cid = generateCorrelationId();
-    queue.push({ action, resolve, cid });
+    queue.push({ action, resolve, reject, cid });
     if (dispatching) return promise;
     dispatching = true;
 
@@ -218,7 +228,12 @@ export function createDispatch<S, A, E>(
             { actionType: tag(queue[0]!.action) },
           );
           reportAioError(err, _reportOpts);
-          for (const entry of queue) entry.resolve();
+          // B-4: dropped actions must REJECT, not resolve — `await cell.method()`
+          // has to learn the state change was never applied. Same contract as
+          // close() and QUEUE_OVERFLOW above.
+          for (const entry of queue) {
+            entry.reject(err);
+          }
           queue.length = 0;
           try {
             onDone();

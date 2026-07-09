@@ -917,3 +917,45 @@ Deno.test("AIO-118: onDone called exactly once on DISPATCH_MAX overflow", () => 
     "onDone should be called exactly once on overflow, not twice",
   );
 });
+
+// ── B-4: dropped actions on DISPATCH_MAX overflow reject (not resolve) ──
+
+Deno.test("dispatch: DISPATCH_MAX overflow rejects dropped actions (B-4)", async () => {
+  let state = { n: 0 };
+  let dispatchRef: ((a: { type: string }) => Promise<void>) | null = null;
+  const rejections: AioError[] = [];
+
+  const dispatch = createDispatch<
+    typeof state,
+    { type: string },
+    { type: string }
+  >({
+    reduce: (s) => ({ state: { n: s.n + 1 }, effects: [{ type: "LOOP" }] }),
+    execute: () => {
+      // Re-entrant dispatch — each effect queues one more, exceeding DISPATCH_MAX.
+      dispatchRef!({ type: "LOOP" }).catch((e: AioError) => {
+        if (e.code === "DISPATCH_LOOP") rejections.push(e);
+      });
+    },
+    getState: () => state,
+    setState: (s) => {
+      state = s;
+    },
+    onDone: () => {},
+    log: noop,
+    debug: false,
+    reportOpts: { onError: () => {} },
+  });
+
+  dispatchRef = dispatch;
+  // The initial action resolves (it was processed before overflow). The
+  // re-entrant actions queued past DISPATCH_MAX must reject with DISPATCH_LOOP.
+  await dispatch({ type: "LOOP" });
+  // Allow microtasks for the queued re-entrant rejections to settle.
+  await Promise.resolve().then(() => Promise.resolve());
+  assertEquals(
+    rejections.length > 0,
+    true,
+    "actions dropped by DISPATCH_MAX overflow must reject with DISPATCH_LOOP (B-4)",
+  );
+});
