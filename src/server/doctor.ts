@@ -1,7 +1,13 @@
-// aio doctor — config sanity checks for the 6 magic deno.json lines (AIO-8.3).
-// Run: deno run -A jsr:@riagentic/aio/src/doctor   (or `deno task doctor`)
-// Each check prints PASS/FAIL with a one-line fix; exit 1 on any failure.
+/**
+ * @module
+ * aio doctor — config sanity checks for the magic deno.json lines (AIO-8.3).
+ * Run `deno task doctor` (wired in every scaffold), or explicitly
+ * `deno run -A dep/aio/src/server/doctor.ts [dir]` (vendored) /
+ * `jsr:@riagentic/aio/doctor` (once published). Each check prints PASS/FAIL
+ * with a one-line fix; exits 1 on any failure.
+ */
 
+/** One doctor check — a named config assertion with a one-line fix on failure. */
 interface Check {
   name: string;
   ok: boolean;
