@@ -14,10 +14,15 @@ all clients**
 
 ## Step 1: Add the framework
 
-**Option A: JSR (recommended)** -- `deno add jsr:@riagentic/aio`
+**Option A: Scaffolder (recommended)** -- interactive project creation that
+generates a correct `deno.json`. See [quickstart.md](quickstart.md).
 
-**Option B: Scaffolder** -- interactive project creation. See
-[quickstart.md](quickstart.md).
+**Option B: Vendored** -- `git clone https://github.com/riagentic/aio dep/aio`,
+then map `"aio": "./dep/aio/mod.ts"` (plus `immer`, `@std/path`).
+
+**Option C: JSR** -- `deno add jsr:@riagentic/aio`, once the version you want is
+published. During the alpha, prefer A/B — the surface moves faster than JSR
+releases, so the `jsr:` pins shown below assume the package is published.
 
 ## Step 2: Update deno.json
 
@@ -30,17 +35,17 @@ all clients**
     "jsxImportSource": "aio"
   },
   "imports": {
-    "aio": "jsr:@riagentic/aio@^1.0.0-alpha14",
-    "aio/air": "jsr:@riagentic/aio@^1.0.0-alpha14/air",
-    "aio/jsx-runtime": "jsr:@riagentic/aio@^1.0.0-alpha14/jsx-runtime",
+    "aio": "jsr:@riagentic/aio@^1.0.0-alpha15",
+    "aio/air": "jsr:@riagentic/aio@^1.0.0-alpha15/air",
+    "aio/jsx-runtime": "jsr:@riagentic/aio@^1.0.0-alpha15/jsx-runtime",
     "esbuild": "npm:esbuild@^0.24"
   },
   "tasks": {
     "dev": "deno run -A src/app.ts",
-    "am": "deno run -A jsr:@riagentic/aio@^1.0.0-alpha14/am",
+    "am": "deno run -A jsr:@riagentic/aio@^1.0.0-alpha15/am",
     "test": "deno test -A --unstable-kv tests/",
-    "compile:browser": "deno run -A jsr:@riagentic/aio@^1.0.0-alpha14/build --compile",
-    "compile:electron": "deno run -A jsr:@riagentic/aio@^1.0.0-alpha14/build --compile --electron"
+    "compile:browser": "deno run -A jsr:@riagentic/aio@^1.0.0-alpha15/build --compile",
+    "compile:electron": "deno run -A jsr:@riagentic/aio@^1.0.0-alpha15/build --compile --electron"
   }
 }
 ```
