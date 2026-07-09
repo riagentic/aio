@@ -223,15 +223,21 @@ dynamically — no clock state in the cell, no wasted ticks.
 // schedules: [{ id: 'prices:refresh', every: 30_000, action: prices.refresh.action() }]
 // if (Date.now() < s.backoffUntil) return  // guard every tick
 
-// ✅ self-scheduling after chain — the method picks its own next delay
+// ✅ schedule.backoff owns the exponential arithmetic — track `attempt` in state
 methods: {
   async refresh(s): Promise<ScheduleEffect> {
     try {
       s.byId = await call(() => api.prices())
+      s.attempt = 0 // success → reset the backoff
       return schedule.after('prices:refresh', 30_000, prices.refresh.action())
-    } catch (err) {
-      const backoff = isRateLimit(err) ? 60_000 : 5_000
-      return schedule.after('prices:refresh', backoff, prices.refresh.action())
+    } catch {
+      s.attempt = (s.attempt ?? 0) + 1 // failure → grow the delay
+      return schedule.backoff(
+        'prices:refresh',
+        s.attempt,
+        { base: 5_000, max: 60_000 },
+        prices.refresh.action(),
+      )
     }
   },
 }

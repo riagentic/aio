@@ -81,6 +81,36 @@ export const schedule = {
     pattern,
     action,
   }),
+  /** Exponential backoff (risoto #4) — a one-shot `after` whose delay grows
+   *  with `attempt`: `min(base * factor^attempt, max)` ms. Track `attempt` in
+   *  cell state (bump on failure, reset to 0 on success) and re-issue this each
+   *  cycle. Owns the retry arithmetic so pollers stop re-deriving the backoff
+   *  dance by hand.
+   * @example
+   * ```ts
+   * // reducer, on tick: poll; on failure bump attempt and reschedule
+   * return [schedule.backoff('rpc', s.attempt, { base: 1000, max: 60000 }, A.poll())]
+   * ``` */
+  backoff: (
+    id: string,
+    attempt: number,
+    opts: { base: number; max?: number; factor?: number },
+    action: { type: string; payload?: unknown },
+  ): ScheduleEffect => {
+    const factor = opts.factor ?? 2;
+    const max = opts.max ?? Number.MAX_SAFE_INTEGER;
+    const ms = Math.min(
+      opts.base * Math.pow(factor, Math.max(0, attempt)),
+      max,
+    );
+    return {
+      type: "__schedule",
+      kind: "after",
+      id,
+      ms: Math.max(1, Math.round(ms)),
+      action,
+    };
+  },
   cancel: (id: string): ScheduleEffect => ({
     type: "__schedule",
     kind: "cancel",
@@ -229,6 +259,8 @@ export function createScheduleManager(
   active: () => string[];
 } {
   const timers = new Map<string, TimerEntry>();
+  const staticIds = new Set<string>(); // ids from start() — aio.run({ schedules })
+  const warnedCollisions = new Set<string>();
   const VALID_ID = /^[\w\-:.]+$/;
 
   function validateId(id: string): void {
@@ -412,6 +444,18 @@ export function createScheduleManager(
 
   function handle(effect: ScheduleEffect): void {
     validateId(effect.id);
+    // risoto #5: a dynamic schedule reusing a static id silently replaces it
+    if (
+      effect.kind !== "cancel" && staticIds.has(effect.id) &&
+      !warnedCollisions.has(effect.id)
+    ) {
+      warnedCollisions.add(effect.id);
+      log.warn(
+        `schedule '${effect.id}' is registered both statically ` +
+          `(aio.run({ schedules })) and dynamically (schedule.${effect.kind}) — ` +
+          `same id, replace semantics; keep just one to avoid a confusing cadence.`,
+      );
+    }
     switch (effect.kind) {
       case "after":
         handleAfter(effect.id, effect.ms, effect.action);
@@ -437,6 +481,7 @@ export function createScheduleManager(
   function start(defs: ScheduleDef[]): void {
     for (const def of defs) {
       validateId(def.id); // AIO-251: validate config-level schedule IDs
+      staticIds.add(def.id);
       if ("every" in def) handleEvery(def.id, def.every, def.action);
       else if ("after" in def) handleAfter(def.id, def.after, def.action);
       else if ("at" in def) handleAt(def.id, def.at, def.action);

@@ -389,3 +389,47 @@ Deno.test("manager: start with at schedule creates active timer", () => {
   assertEquals(mgr.active().includes("timed"), true);
   mgr.cancelAll();
 });
+
+Deno.test("schedule #5: dynamic schedule reusing a static id warns once", () => {
+  const warnings: string[] = [];
+  const log = { ...noop, warn: (m: string) => warnings.push(m) };
+  // deno-lint-ignore no-explicit-any
+  const mgr = createScheduleManager(() => {}, log as any);
+  mgr.start([{ id: "poll", every: 1000, action: { type: "tick" } }]);
+  mgr.handle(schedule.every("poll", 1000, { type: "tick" })); // same id → collision
+  mgr.handle(schedule.every("poll", 1000, { type: "tick" })); // again → no dup warn
+  mgr.cancelAll();
+  assertEquals(
+    warnings.filter((w) => w.includes("both statically")).length,
+    1,
+  );
+  assertEquals(warnings[0]!.includes("poll"), true);
+});
+
+Deno.test("schedule #5: a fresh dynamic id does NOT warn", () => {
+  const warnings: string[] = [];
+  const log = { ...noop, warn: (m: string) => warnings.push(m) };
+  // deno-lint-ignore no-explicit-any
+  const mgr = createScheduleManager(() => {}, log as any);
+  mgr.start([{ id: "poll", every: 1000, action: { type: "tick" } }]);
+  mgr.handle(schedule.every("other", 1000, { type: "tick" }));
+  mgr.cancelAll();
+  assertEquals(warnings.length, 0);
+});
+
+Deno.test("schedule.backoff: exponential growth, capped at max (risoto #4)", () => {
+  const A = { type: "poll" };
+  const e0 = schedule.backoff("rpc", 0, { base: 1000, max: 60000 }, A);
+  const e1 = schedule.backoff("rpc", 1, { base: 1000, max: 60000 }, A);
+  const e2 = schedule.backoff("rpc", 2, { base: 1000, max: 60000 }, A);
+  const e9 = schedule.backoff("rpc", 9, { base: 1000, max: 60000 }, A);
+  assertEquals((e0 as { ms: number }).ms, 1000); // base * 2^0
+  assertEquals((e1 as { ms: number }).ms, 2000); // base * 2^1
+  assertEquals((e2 as { ms: number }).ms, 4000); // base * 2^2
+  assertEquals((e9 as { ms: number }).ms, 60000); // capped at max
+  assertEquals((e0 as { kind: string }).kind, "after");
+  assertEquals((e0 as { id: string }).id, "rpc");
+  // custom factor
+  const t = schedule.backoff("x", 2, { base: 100, factor: 3 }, A);
+  assertEquals((t as { ms: number }).ms, 900); // 100 * 3^2
+});
