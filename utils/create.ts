@@ -389,6 +389,7 @@ function denoJson(title: string, appType: AppType): string {
     tasks["install:electron"] = "deno install --allow-scripts=npm:electron";
   }
   tasks.test = "deno test -A --unstable-kv tests/";
+  tasks.doctor = "deno run -A dep/aio/src/server/doctor.ts";
   tasks.compile = `deno run -A dep/aio/src/build.ts ${compileFlags(appType)}`;
   tasks["compile:browser"] = "deno run -A dep/aio/src/build.ts --compile";
   tasks["compile:browser:remote"] =
