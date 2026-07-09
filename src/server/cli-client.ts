@@ -14,6 +14,54 @@ enablePatches();
 
 const WS_MAX_QUEUE = 100;
 
+/** Apply one server message (full state, Immer `$patches`, or legacy `$p`/`$d`
+ *  delta) to the current state. Returns the new state. On a patch that fails
+ *  to apply (desync), returns the prior state unchanged and calls `onResync`
+ *  so the caller can ask the server for a fresh snapshot. Shared by the WS
+ *  and UDS client paths so both transports apply deltas identically. */
+function applyServerMessage<S>(
+  prev: S | null,
+  data: Record<string, unknown>,
+  onResync?: () => void,
+): S | null {
+  // Immer patches — new format from server
+  if (data.$patches && Array.isArray(data.$patches)) {
+    if (prev != null) {
+      try {
+        return applyPatches(
+          prev as unknown as Record<string, unknown>,
+          data.$patches as Patch[],
+        ) as unknown as S;
+      } catch {
+        // desync — ask the server for a full snapshot
+        onResync?.();
+      }
+    }
+    return prev;
+  }
+  // Legacy delta patch
+  if (data.$p && typeof data.$p === "object") {
+    const p = data.$p as Record<string, unknown>;
+    const next: Record<string, unknown> =
+      prev != null && typeof prev === "object"
+        ? { ...(prev as Record<string, unknown>), ...p }
+        : { ...p };
+    if (Array.isArray(data.$d)) {
+      for (const k of data.$d) {
+        if (
+          typeof k === "string" && k !== "__proto__" &&
+          k !== "constructor" && k !== "prototype"
+        ) {
+          delete next[k];
+        }
+      }
+    }
+    return next as S;
+  }
+  // Full state
+  return data as S;
+}
+
 /** Reactive WS client handle — subscribe to state, send actions, close when done */
 export type CliApp<S> = {
   /** Current state (null until first message from server) */
@@ -108,44 +156,15 @@ export function connectCli<S>(
       try {
         const data = JSON.parse(raw);
         if (data === null || typeof data !== "object") return;
-
-        // Immer patches — new format from server
-        if (data.$patches && Array.isArray(data.$patches)) {
-          if (state != null) {
-            try {
-              state = applyPatches(state, data.$patches as Patch[]) as S;
-            } catch {
-              // desync — request full state from server
-              if (ws && ws.readyState === WebSocket.OPEN) ws.send("__resync");
-            }
-          }
-          // Legacy delta patch
-        } else if (data.$p && typeof data.$p === "object") {
-          const prev = state as Record<string, unknown> | null;
-          const next: Record<string, unknown> = prev
-            ? { ...prev, ...data.$p }
-            : { ...data.$p };
-          if (Array.isArray(data.$d)) {
-            for (const k of data.$d) {
-              if (
-                typeof k === "string" && k !== "__proto__" &&
-                k !== "constructor" && k !== "prototype"
-              ) {
-                delete next[k];
-              }
-            }
-          }
-          state = next as S;
-        } else {
-          state = data as S;
-        }
-
+        state = applyServerMessage(state, data, () => {
+          // desync — request full state from server
+          if (socket.readyState === WebSocket.OPEN) socket.send("__resync");
+        }) as S;
         // Resolve ready on first state
         if (state != null && _readyResolve) {
           _readyResolve(state);
           _readyResolve = null;
         }
-
         if (state != null) { for (const fn of listeners) fn(state); }
       } catch { /* bad JSON — skip */ }
     };
@@ -298,12 +317,12 @@ export function connectCliUDS<S>(socketPath: string): CliApp<S> {
                 try {
                   const data = JSON.parse(line);
                   if (data === null || typeof data !== "object") continue;
-                  state = data as S;
-                  if (_readyResolve) {
+                  state = applyServerMessage(state, data) as S;
+                  if (state != null && _readyResolve) {
                     _readyResolve(state);
                     _readyResolve = null;
                   }
-                  for (const fn of listeners) fn(state);
+                  if (state != null) { for (const fn of listeners) fn(state); }
                 } catch { /* bad JSON */ }
               }
             }
