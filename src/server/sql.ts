@@ -217,11 +217,18 @@ export function buildQuerySuffix<T>(opts?: QueryOpts<T>): string {
   if (!opts) return "";
   let s = "";
   if (opts.orderBy) {
-    const [col, dir] = Array.isArray(opts.orderBy)
+    const [col, dirRaw] = Array.isArray(opts.orderBy)
       ? [opts.orderBy[0] as string, opts.orderBy[1]]
       : [opts.orderBy as string, "asc" as const];
     assertIdent(col, "orderBy column");
-    s += ` ORDER BY ${col} ${dir.toUpperCase()}`;
+    // Validate direction — never interpolate raw into SQL (injection guard).
+    const dirLower = String(dirRaw ?? "").toLowerCase();
+    if (dirLower !== "asc" && dirLower !== "desc") {
+      throw new Error(
+        `invalid orderBy direction: "${dirRaw}" — must be "asc" or "desc"`,
+      );
+    }
+    s += ` ORDER BY ${col} ${dirLower.toUpperCase()}`;
   }
   if (opts.limit !== undefined) {
     s += ` LIMIT ${Math.max(0, Math.floor(opts.limit))}`;
