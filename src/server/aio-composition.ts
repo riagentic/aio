@@ -66,6 +66,70 @@ function renderFilter(filter: CellFieldFilter): string {
   return "all";
 }
 
+// Field names that usually hold secrets — used for the UI-exposure heuristic.
+const SECRET_FIELD_RE = /enc|secret|priv|key|seed|mnemonic|passphrase/i;
+
+/** Dev-safety warnings for field-level visibility config (risoto #1/#2):
+ *  #1 an include/exclude key that isn't a top-level state field is a silent
+ *     no-op — field filters only match top-level keys; nested/array fields need
+ *     `ui.forUser`. This turns a silent secret leak into a loud warning.
+ *  #2 a secret-looking top-level field left exposed to the UI is likely a leak. */
+function warnFieldFilters(composed: ComposedCells): void {
+  for (const f of composed.cells) {
+    const state = (f.__aio.state ?? {}) as Record<string, unknown>;
+    const topKeys = Object.keys(state);
+    const topSet = new Set(topKeys);
+
+    // #1 — filter keys that don't match any top-level field are ignored silently
+    for (
+      const [kind, filter] of [
+        ["ui", f.__aio.ui],
+        ["persist", f.__aio.persist],
+      ] as const
+    ) {
+      if (!filter || filter === "all" || filter === "none") continue;
+      const keys = "include" in filter
+        ? filter.include
+        : "exclude" in filter
+        ? filter.exclude
+        : [];
+      for (const key of keys) {
+        if (!topSet.has(key)) {
+          log.warn(
+            "visibility",
+            `[${f.__aio.id}] ${kind} filter key "${key}" is not a top-level ` +
+              `field of the cell — field filters only match top-level keys, so ` +
+              `this is silently ignored. For a nested/array field use ui.forUser ` +
+              `to transform the exposed shape.`,
+          );
+        }
+      }
+    }
+
+    // #2 — secret-looking field exposed to the UI (skip when forUser rewrites it)
+    if (!f.__aio.uiForUser) {
+      const ui = f.__aio.ui;
+      const isExposed = (key: string): boolean => {
+        if (ui === "none") return false;
+        if (!ui || ui === "all") return true;
+        if ("include" in ui) return ui.include.includes(key);
+        if ("exclude" in ui) return !ui.exclude.includes(key);
+        return true;
+      };
+      for (const key of topKeys) {
+        if (SECRET_FIELD_RE.test(key) && isExposed(key)) {
+          log.warn(
+            "visibility",
+            `[${f.__aio.id}] field "${key}" looks secret and is exposed to the ` +
+              `UI — it broadcasts to every connected client. Restrict it with ` +
+              `ui: { exclude: ["${key}"] }, ui.forUser, or ui: "none".`,
+          );
+        }
+      }
+    }
+  }
+}
+
 /** Compose cells, apply defaults, build state filters + middleware chain */
 export function composeCellsWiring(
   input: ComposeCellsInput,
@@ -93,6 +157,7 @@ export function composeCellsWiring(
   });
 
   applyCellDefaults(composed, input.cellDefaults);
+  warnFieldFilters(composed);
   // AIO-3.1: validate cross-cell selector deps against the known cell list.
   // Throws here so the user gets a clear error at aio.run() time, not at
   // first use.

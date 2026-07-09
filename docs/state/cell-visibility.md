@@ -85,6 +85,19 @@ const orders = cell("orders", {
 `forUser` **cannot** access fields removed by `include`/`exclude` — they're
 already stripped.
 
+> **Typing the callback.** TypeScript infers the cell's state from `state`, but
+> that inference doesn't always reach this sibling callback — so you may see
+> `Parameter 's' implicitly has an 'any' type`. Annotate the parameter with the
+> exposed shape (the `include`d fields):
+>
+> ```ts
+> ui: {
+>   include: ["accounts"],
+>   forUser: (s: { accounts: Account[] }) =>
+>     ({ ...s, accounts: s.accounts.map((a) => ({ ...a, encSecKey: "" })) }),
+> }
+> ```
+
 ## Broadcast Performance
 
 The framework picks the optimal broadcast strategy per cell automatically:
