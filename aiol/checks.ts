@@ -581,16 +581,40 @@ export const checkSecurity: Checker = (ctx) => {
     if (!hasExpose) pass("localhost-only (no --expose)");
   }
 
-  // .env files committed
+  // .env files committed — only warn if it isn't already gitignored (risoto #7)
   try {
     Deno.statSync(join(ctx.projectDir, ".env"));
-    report(
-      "warn",
-      "security",
-      ".env file found — make sure it's in .gitignore",
-    );
+    if (!isGitignored(ctx.projectDir, ".env")) {
+      report(
+        "warn",
+        "security",
+        ".env file found — make sure it's in .gitignore",
+      );
+    }
   } catch { /* good — no .env */ }
 };
+
+/** True if `path` is gitignored in `dir`. Uses `git check-ignore`, falling back
+ *  to a simple .gitignore scan when git isn't available. */
+function isGitignored(dir: string, path: string): boolean {
+  try {
+    const r = new Deno.Command("git", {
+      args: ["-C", dir, "check-ignore", "-q", path],
+      stdout: "null",
+      stderr: "null",
+    }).outputSync();
+    return r.code === 0;
+  } catch {
+    try {
+      const gi = Deno.readTextFileSync(join(dir, ".gitignore"));
+      return gi.split("\n").map((l) => l.trim()).some(
+        (l) => l === ".env" || l === "*.env" || l === ".env*" || l === ".env.*",
+      );
+    } catch {
+      return false;
+    }
+  }
+}
 
 // ══════════════════════════════════════════════════════════════════════
 // 6. PERSISTENCE & DATABASE
@@ -601,15 +625,20 @@ export const checkPersistence: Checker = (ctx) => {
 
   if (!appEntry) return;
 
-  const hasDb = appEntry.content.includes("db:") ||
-    appEntry.content.includes("db :");
-  const hasPersistFalse = /persist\s*:\s*false/.test(appEntry.content);
+  // Strip comments so a `db:` mention inside a comment doesn't false-positive
+  // (risoto #6).
+  const codeNoComments = appEntry.content
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/\/\/.*$/gm, "");
+  const hasDb = /\bdb\s*:/.test(codeNoComments);
+  const hasPersistFalse = /persist\s*:\s*false/.test(codeNoComments);
 
   if (hasDb) {
     pass("SQLite configured");
-    // Check for table() imports
+    // Check for table() imports — quote-agnostic (deno fmt emits double quotes)
     const hasTableImport = sourceFiles.some((f) =>
-      f.content.includes("from 'aio'") && f.content.includes("table")
+      /from\s+["']aio(?:\/db)?["']/.test(f.content) &&
+      f.content.includes("table")
     );
     if (!hasTableImport) {
       report(
