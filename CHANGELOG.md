@@ -1,5 +1,42 @@
 # Changelog
 
+## 1.0.0-alpha17 — external-audit hardening + experimental targets
+
+Bugfixes and hardening from an external code audit, plus honest labeling of the
+targets that aren't yet field-validated. Staying on the alpha track — beta is
+deferred until the remote targets are proven off-box.
+
+### Security
+
+- **`_safeUiEntry`** sanitizes the dev HTML shell's `ui.entry` interpolation
+  (self-XSS guard); the localhost trojan's read-only SQL guard now also allows
+  `WITH … SELECT` CTEs while staying read-only.
+
+### Fixed
+
+- **Deterministic CRDT ordering** — sync ops `ORDER BY … hlc_node` for a stable
+  total order across nodes.
+- **Memory** — renderer signal-binding cleanup on unmount; dispatch-storm evicts
+  quiet action types so its map can't grow unbounded on a long-running server.
+- **UDS zombie detection** (`isSocketAlive`) — the liveness check now covers the
+  Unix-socket transport (skipHttp / electron), matching the port check.
+- Renderer / transport / server refinements across ~30 files (all
+  additive/bugfix; full suite + security regression stay green).
+
+### Added
+
+- **Remote / thin-client targets marked experimental** — they build and run but
+  aren't yet field-validated off-box; flagged in `docs/build/targets.md`, the
+  scaffolder menu, and a build-time notice.
+- **`VirtualListConfig.containerRef`** — `scrollToIndex` now moves the actual
+  scrollbar (DOM `scrollTop` is the source of truth).
+
+### Docs
+
+- Honest JSR install wording — JSR trails the tagged releases (latest is an
+  alpha), so the scaffolder / `--vendored` paths are recommended; the `jsr:`
+  pins apply once the version is published.
+
 ## 1.0.0-alpha16 — deep-audit cleanup + field-report fixes (mdview, risoto)
 
 A full per-file audit (no correctness bugs found) plus the cleanup it turned up,
