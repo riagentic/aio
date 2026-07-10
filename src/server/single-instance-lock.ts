@@ -88,6 +88,19 @@ export async function isPortInUse(port: number): Promise<boolean> {
   }
 }
 
+/** Check if a Unix Domain Socket has something listening — used to detect
+ *  zombie UDS-only instances (prod/electron skipHttp) whose process is alive
+ *  but whose listener died. Mirrors isPortInUse for the socket transport. */
+export async function isSocketAlive(socketPath: string): Promise<boolean> {
+  try {
+    const conn = await Deno.connect({ transport: "unix", path: socketPath });
+    conn.close();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 // ── Lock File CRUD ───────────────────────────────────────────
 
 /** Read a lock file, return null if missing or corrupt */
@@ -233,17 +246,26 @@ export class AppLock {
 
       // Owner's pid is alive but its listener may be dead (zombie: event-loop
       // starvation killed the HTTP server while the process spun on, see
-      // watcher-loop field report #5). Liveness = pid alive AND port responds.
-      // Grace: skip while the owner is still starting up; skip UDS-only
-      // instances (their port never listens).
+      // watcher-loop field report #5). Liveness = pid alive AND listener
+      // responds. Probe whichever transport the owner advertises: TCP port
+      // for HTTP servers, UDS for socket-only (prod/electron skipHttp) ones.
+      // Grace: skip while the owner is still starting up.
       const pastStartup = existing.status !== "starting" ||
         Date.now() - existing.startedAt > 10_000;
-      if (
-        pastStartup && !existing.socketPath && existing.port > 0 &&
-        !(await isPortInUse(existing.port))
-      ) {
+      let listenerDead = false;
+      if (pastStartup) {
+        if (existing.socketPath) {
+          listenerDead = !(await isSocketAlive(existing.socketPath));
+        } else if (existing.port > 0) {
+          listenerDead = !(await isPortInUse(existing.port));
+        }
+      }
+      if (listenerDead) {
+        const where = existing.socketPath
+          ? `socket ${existing.socketPath}`
+          : `port ${existing.port}`;
         console.warn(
-          `[AIO] stale instance: pid ${existing.pid} is alive but port ${existing.port} refuses connections — reclaiming lock (zombie server)`,
+          `[AIO] stale instance: pid ${existing.pid} is alive but ${where} refuses connections — reclaiming lock (zombie server)`,
         );
         removeLock(this.appId);
         await delay(100);

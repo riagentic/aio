@@ -368,14 +368,23 @@ async function handlePost(
         return err("multi-statement queries not allowed", 403);
       }
       const normalized = query.trimStart().toUpperCase();
-      if (
-        !normalized.startsWith("SELECT ") &&
-        !normalized.startsWith("SELECT\n") &&
-        !normalized.startsWith("SELECT\t") && normalized !== "SELECT"
-      ) {
-        return err("trojan SQL is read-only — only SELECT allowed", 403);
+      const startsSelect = normalized.startsWith("SELECT ") ||
+        normalized.startsWith("SELECT\n") ||
+        normalized.startsWith("SELECT\t") || normalized === "SELECT";
+      // Allow `WITH ... SELECT` CTEs (read-only common table expressions).
+      const startsWith = normalized.startsWith("WITH ") ||
+        normalized.startsWith("WITH\n") || normalized.startsWith("WITH\t");
+      if (!startsSelect && !startsWith) {
+        return err(
+          "trojan SQL is read-only — only SELECT (or WITH ... SELECT) allowed",
+          403,
+        );
       }
-      const upper = query.toUpperCase();
+      // Strip single-quoted string literals before the keyword scan so a
+      // value like 'DROP TABLE instructions' doesn't trip a false positive.
+      // '' inside a literal is an escaped quote — collapse first, then mask.
+      const withoutLiterals = query.replace(/'(?:[^']|'')*'/g, "''");
+      const upper = withoutLiterals.toUpperCase();
       if (
         /\b(INSERT|UPDATE|DELETE|DROP|ALTER|CREATE|ATTACH|DETACH|LOAD_EXTENSION|REINDEX|VACUUM|REPLACE|PRAGMA|BEGIN|COMMIT|ROLLBACK|SAVEPOINT|RELEASE|MERGE)\b/
           .test(upper)

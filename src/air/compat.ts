@@ -5,6 +5,7 @@
 
 import { effect, type Signal, signal, untrack } from "../state/signal.ts";
 import {
+  afterRender,
   onCleanup,
   onMount,
   useRef as rendererUseRef,
@@ -121,7 +122,10 @@ export function useEffect(
       if (first) {
         onMount(run); // first run lands after the mount commit
       } else {
-        queueMicrotask(run); // re-runs land after the render commit
+        // Re-runs must land AFTER the diff/commit phase so the effect sees the
+        // committed DOM (React semantics). queueMicrotask would fire before
+        // the diff runs, reading stale layout and racing the impending patch.
+        afterRender(run);
       }
     }
     return;

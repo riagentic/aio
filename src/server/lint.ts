@@ -96,10 +96,12 @@ export async function lint(
   }
 
   // Specifiers available in the browser import map — everything else silently fails
-  // Keep in sync with IMPORT_MAP in server.ts
+  // Keep in sync with buildBrowserImportMap in server-html-importmap.ts.
   const BROWSER_IMPORTS = new Set([
     "aio",
     "aio/air",
+    "aio/browser",
+    "aio/jsx-runtime",
   ]);
 
   try {

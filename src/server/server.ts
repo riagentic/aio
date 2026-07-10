@@ -163,6 +163,7 @@ export function createServer(config: ServerConfig): ServerHandle {
     getUIState,
     debug,
     syncIntervalMs,
+    fullStateThreshold: config.fullStateThreshold,
     vitalsSystem: config.vitalsSystem,
     getTTBroadcast: config.getTTBroadcast,
   });

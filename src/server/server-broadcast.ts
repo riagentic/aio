@@ -23,6 +23,9 @@ export interface BroadcastDeps {
   getUIState: (user?: AioUser) => unknown;
   debug: (msg: string) => void;
   syncIntervalMs: number;
+  /** 0–1: send full state when the patch payload exceeds this fraction of the
+   *  full-state payload size. Default 0.5 (patch > 50% of full → send full). */
+  fullStateThreshold?: number;
   vitalsSystem?: VitalsSystem;
   getTTBroadcast?: () => unknown;
 }
@@ -46,6 +49,7 @@ export function createBroadcaster(deps: BroadcastDeps): Broadcaster {
     vitalsSystem,
     getTTBroadcast,
   } = deps;
+  const fullStateThreshold = deps.fullStateThreshold ?? 0.5;
 
   let broadcastQueued = false;
   let broadcastDirty = false;
@@ -118,12 +122,19 @@ export function createBroadcaster(deps: BroadcastDeps): Broadcaster {
             if (allOps.length > 0) {
               const patchJson = JSON.stringify({ $patches: allOps });
               fullJsonForTracking = _getFilteredFullJson(meta);
+              // Send full state when the patch payload exceeds the configured
+              // fraction of the full-state size (default 0.5 → patch > 50%).
+              // Previously this compared against 100% of full state, so the
+              // user-set `fullStateThreshold` had no effect.
               if (
                 fullJsonForTracking &&
-                patchJson.length > fullJsonForTracking.length
+                patchJson.length >
+                  fullJsonForTracking.length * fullStateThreshold
               ) {
                 debug?.(
-                  `broadcast: patch payload (${patchJson.length}B) > full state (${fullJsonForTracking.length}B) — sending full state`,
+                  `broadcast: patch payload (${patchJson.length}B) > ${
+                    fullStateThreshold * 100
+                  }% of full state (${fullJsonForTracking.length}B) — sending full state`,
                 );
                 if (fullJsonForTracking !== meta.lastFullJson) {
                   msgToSend = fullJsonForTracking;
@@ -135,7 +146,10 @@ export function createBroadcaster(deps: BroadcastDeps): Broadcaster {
           }
 
           if (!msgToSend) {
-            fullJsonForTracking = _getFilteredFullJson(meta);
+            // Reuse the full-json computed above when available instead of
+            // re-serializing per-client (N clients → N full serializations
+            // per broadcast otherwise).
+            fullJsonForTracking ??= _getFilteredFullJson(meta);
             if (!fullJsonForTracking) continue;
             if (fullJsonForTracking === meta.lastFullJson) continue;
             msgToSend = fullJsonForTracking;

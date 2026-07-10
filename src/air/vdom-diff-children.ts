@@ -180,7 +180,14 @@ function diffKeyed(
   const oldNonKeyed: (VNode | string | number)[] = [];
   const oldNonKeyedDoms: (Node | null)[] = [];
 
-  let cursor: ChildNode | null = parent.firstChild;
+  // Start walking the DOM from the Fragment's anchor (if any) so the
+  // DOM→vnode mapping is aligned for Fragments whose region sits mid-parent.
+  // Walking from parent.firstChild would assume the region starts at the
+  // parent's first child and misalign non-keyed DOM nodes for mid-parent
+  // Fragments, removing/moving the wrong nodes.
+  let cursor: ChildNode | null = startAnchor
+    ? startAnchor.nextSibling
+    : parent.firstChild;
   for (const oc of (oldChildren as (VNode | string | number)[])) {
     if (
       typeof oc === "object" && oc !== null && (oc as VNode).key !== undefined

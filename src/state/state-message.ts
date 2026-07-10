@@ -69,6 +69,22 @@ export function handleMessage(data: any): HandleResult {
     const patches: Patch[] = data.$patches;
     if (patches.length === 0) return "noop";
 
+    // Defense-in-depth: reject patches whose path segments target reserved
+    // prototype keys (__proto__, constructor, prototype). Immer 10 guards
+    // these internally (throws), but we drop malformed wire data early with a
+    // clear message rather than relying on Immer's throw + resync path — a
+    // compromised/buggy server should never be able to probe these keys.
+    for (const p of patches) {
+      for (const seg of p.path) {
+        if (typeof seg === "string" && _BLOCKED_KEYS.has(seg)) {
+          console.warn(
+            `[aio] dropped $patches with reserved path segment "${seg}"`,
+          );
+          return "dropped";
+        }
+      }
+    }
+
     try {
       const next = applyPatches(prev, patches);
       if (next === prev) return "noop";

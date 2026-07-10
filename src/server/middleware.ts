@@ -57,18 +57,12 @@ export const middleware = {
     return (action, _state) => action; // actual connection handled by connectDevTools() in browser
   },
 
-  /** Performance budget — warn/error if reduce takes too long */
-  perfBudget: (opts: { reduce?: number; effect?: number }): MiddlewareFn => {
-    return (action, _state) => {
-      // Perf budgets are already handled by createDispatch — this middleware
-      // allows overriding via the middleware array as well
-      const type = (action as { type: string }).type;
-      const start = performance.now(); // Store start time for post-reduce check (side-channel via global)
-      (globalThis as Record<string, unknown>).__aioMiddlewarePerfStart = start;
-      (globalThis as Record<string, unknown>).__aioMiddlewarePerfBudget = opts;
-      void type; // used for logging in perf violations
-      return action;
-    };
+  /** Performance budget — passthrough. Perf budgets are enforced by
+   *  `aio.run({ perfBudget })` / `perfCheck` in the dispatch loop; this
+   *  middleware exists for config-parity with the others and does not
+   *  re-measure (doing so in beforeReduce can't see reduce duration). */
+  perfBudget: (_opts: { reduce?: number; effect?: number }): MiddlewareFn => {
+    return (action) => action;
   },
 
   /** Validate action shapes — ensure type is string, payload is plain object */

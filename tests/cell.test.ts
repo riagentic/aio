@@ -628,16 +628,17 @@ Deno.test("aio.middleware.devtools: passthrough returns the action", () => {
 
 // middleware: perfBudget stores start time
 
-Deno.test("aio.middleware.perfBudget: stores perf start on globalThis", () => {
+Deno.test("aio.middleware.perfBudget: passthrough returns the action", () => {
   const mw = aio.middleware.perfBudget({ reduce: 10 });
-  mw({ type: "Test", payload: {} }, {});
+  const action = { type: "Test", payload: {} };
+  const result = mw(action, {});
+  assertEquals(result, action);
+  // perfBudget is a config-parity passthrough — it must NOT pollute globalThis
+  // (perf budgets are enforced by createDispatch, not by this middleware).
   assertEquals(
-    typeof (globalThis as Record<string, unknown>).__aioMiddlewarePerfStart,
-    "number",
+    (globalThis as Record<string, unknown>).__aioMiddlewarePerfStart,
+    undefined,
   );
-  // cleanup
-  delete (globalThis as Record<string, unknown>).__aioMiddlewarePerfStart;
-  delete (globalThis as Record<string, unknown>).__aioMiddlewarePerfBudget;
 });
 
 // middleware: validate warns on array payload
