@@ -189,7 +189,7 @@ async function groupedMenu(): Promise<AppType> {
     );
   }
   console.log(
-    `\n  ${c.magenta}Remote${c.reset} ${c.dim}— exposed server or thin client${c.reset}`,
+    `\n  ${c.magenta}Remote${c.reset} ${c.yellow}(experimental)${c.reset} ${c.dim}— exposed server or thin client; not yet field-validated off-box${c.reset}`,
   );
   for (let i = 5; i < APP_TYPES.length; i++) {
     const t = APP_TYPES[i]!;

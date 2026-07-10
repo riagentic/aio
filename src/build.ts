@@ -42,6 +42,15 @@ export async function build(cfg?: BuildConfig): Promise<void> {
     doService,
   } = cfg;
 
+  // Remote / thin-client targets are experimental: functional, but not yet
+  // field-validated off-box (see docs/build/targets.md). Warn so builders know.
+  if (cfg.doRemote || doClient) {
+    console.warn(
+      "[build] ⚠ remote/thin-client targets are experimental — functional " +
+        "but not yet field-validated off-box; behavior may change before 1.0.",
+    );
+  }
+
   // ── Step 1: Bundle dist/app.js ───────────────────────────────────────────
   // Skip for targets that don't need browser bundles
   if (!doCli && !cfg.doHeadless && !doClient && !(doAndroid && cfg.doRemote)) {
