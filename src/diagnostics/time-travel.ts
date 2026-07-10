@@ -64,6 +64,12 @@ export type TTCommand =
 
 const MAX_ENTRIES = 200;
 const MAX_STATE_BYTES = 100_000; // Skip clone above 100KB to protect dev-mode memory
+// Size estimation is O(state) — sampling it every action would serialize the
+// entire state on every dispatch in dev. Recompute at most every Nth record so
+// the hot path stays cheap while still catching a state that grew past the cap.
+const SIZE_SAMPLE_EVERY = 20;
+let _sizeSampleCounter = 0;
+let _lastEstimatedBytes = 0;
 
 /** Creates empty TT state */
 export function createTT<S, A>(): TTState<S, A> {
@@ -80,10 +86,19 @@ export function record<S, A>(
   // Truncate forward entries (standard undo/redo: branch, not tree)
   const entries = tt.entries.slice(0, tt.index + 1);
 
-  // Skip expensive clone for very large state to protect dev-mode memory
+  // Skip expensive clone for very large state to protect dev-mode memory.
+  // Size estimation serializes the whole state, so sample it at most every
+  // Nth action — between samples, reuse the last estimate. The cap is a
+  // memory guard, not a hard contract, so a slightly stale estimate is fine.
   let clonedState: S;
   try {
-    const estimated = JSON.stringify(state as Record<string, unknown>).length;
+    let estimated = _lastEstimatedBytes;
+    if (++_sizeSampleCounter >= SIZE_SAMPLE_EVERY) {
+      _sizeSampleCounter = 0;
+      estimated =
+        _lastEstimatedBytes =
+          JSON.stringify(state as Record<string, unknown>).length;
+    }
     if (estimated > MAX_STATE_BYTES) {
       console.warn(
         `[aio:tt] state is ${

@@ -135,7 +135,9 @@ export function connect(): void {
       try {
         ws.send("__clientState:" + JSON.stringify(getStateSnapshot()));
       } catch (err) {
-        ws.send('__clientState:{"error":"' + String(err) + '"}');
+        // JSON.stringify the error so a `"` in the message can't break the
+        // payload (the server's __clientState parser would otherwise throw).
+        ws.send("__clientState:" + JSON.stringify({ error: String(err) }));
       }
       return;
     }

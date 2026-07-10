@@ -917,7 +917,7 @@ Deno.test("trojan: POST /sql blocks INSERT", async () => {
     assertEquals(resp3.status, 403);
     await resp3.body?.cancel();
 
-    // WITH (CTE) should be blocked
+    // WITH (CTE) is read-only — should pass
     const resp4 = await fetch(
       `http://127.0.0.1:${TT_PORT + 1}/__aio/trojan/sql`,
       {
@@ -926,8 +926,22 @@ Deno.test("trojan: POST /sql blocks INSERT", async () => {
         body: JSON.stringify({ query: "WITH x AS (SELECT 1) SELECT * FROM x" }),
       },
     );
-    assertEquals(resp4.status, 403);
+    assertEquals(resp4.status, 200);
     await resp4.body?.cancel();
+
+    // A write keyword inside a string literal is NOT a write — should pass
+    const resp4b = await fetch(
+      `http://127.0.0.1:${TT_PORT + 1}/__aio/trojan/sql`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-AIO": "1" },
+        body: JSON.stringify({
+          query: "SELECT 'DROP TABLE instructions' AS note FROM users",
+        }),
+      },
+    );
+    assertEquals(resp4b.status, 200);
+    await resp4b.body?.cancel();
 
     // SELECT should pass
     const resp5 = await fetch(

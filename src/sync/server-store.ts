@@ -76,7 +76,7 @@ export async function loadOpsSince(
   if (!hlc) {
     const { rows } = await db.query<OpRow>(
       `SELECT id, cell, action, payload, hlc_phys, hlc_cnt, hlc_node
-       FROM sync_ops WHERE cell = ? ORDER BY hlc_phys, hlc_cnt`,
+       FROM sync_ops WHERE cell = ? ORDER BY hlc_phys, hlc_cnt, hlc_node`,
       [cell],
     );
     return rows.map(rowToOp);
@@ -87,7 +87,7 @@ export async function loadOpsSince(
     `SELECT id, cell, action, payload, hlc_phys, hlc_cnt, hlc_node
      FROM sync_ops WHERE cell = ?
      AND (hlc_phys > ? OR (hlc_phys = ? AND hlc_cnt > ?))
-     ORDER BY hlc_phys, hlc_cnt`,
+     ORDER BY hlc_phys, hlc_cnt, hlc_node`,
     [cell, phys, phys, cnt],
   );
   return rows.map(rowToOp);

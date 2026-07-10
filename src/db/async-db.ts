@@ -269,6 +269,7 @@ export function createDB(path: string, opts: DBOpts = {}): DB {
       writerWorker = null;
       readerWorkers = [];
       ready = null;
+      pending.clear(); // drop settled/stale entries so a respawn starts clean
     },
   };
 }

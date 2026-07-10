@@ -4,7 +4,11 @@
 import { join } from "@std/path";
 import type { GraphResult } from "./graph-validator.ts";
 import { validateGraph } from "./graph-validator.ts";
-import { normPath, transpile, transpileCache } from "./server-transpile.ts";
+import {
+  clearTranspileCaches,
+  normPath,
+  transpile,
+} from "./server-transpile.ts";
 import { lockDir } from "./single-instance-lock.ts";
 import { log } from "../diagnostics/logger.ts";
 
@@ -81,8 +85,10 @@ export function createFileWatcher(deps: WatcherDeps): FileWatcher {
     if (!RELOAD_EXT.has(ext)) return;
     debug(`watch: changed ${path}`);
     // Normalize to match cache keys — resolve symlinks (e.g. /var → /private/var on macOS)
+    // Clear both the transpile entry and the memoized realpath for this path.
+    clearTranspileCaches(path);
     path = normPath(path);
-    transpileCache.delete(path);
+    clearTranspileCaches(path);
     if (!path.endsWith(".css")) reloadIsFull = true;
     if (reloadTimer) clearTimeout(reloadTimer);
     // 100ms debounce — batch rapid file changes into single reload

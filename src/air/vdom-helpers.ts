@@ -13,6 +13,11 @@ export function _bindSignalTextChildren(
   el: Element,
   signalMap: Map<number, Signal<unknown>>,
 ): void {
+  // Dispose any prior bindings on this element before overwriting — a re-bind
+  // (e.g. hydration re-run, or a caller that doesn't go through the diff path
+  // which cleans up first) would otherwise leak the previous effects, leaving
+  // them to mutate detached text nodes.
+  _cleanupSignalTextChildren(el);
   const cleanups: (() => void)[] = [];
   for (const [idx, sig] of signalMap) {
     const textNode = el.childNodes[idx];
@@ -40,6 +45,10 @@ const _actionCleanups = new WeakMap<HTMLElement, (() => void)[]>();
 /** Run action functions and store cleanup handles. */
 export function _applyActions(el: HTMLElement, actions: unknown): void {
   if (!Array.isArray(actions)) return;
+  // Dispose any prior action cleanups before overwriting — defends against
+  // callers that re-apply actions without an explicit cleanup step (the diff
+  // path cleans up first, but hydration/re-render paths may not).
+  _cleanupActions(el);
   const cleanups: (() => void)[] = [];
   for (const action of actions) {
     if (typeof action !== "function") continue;

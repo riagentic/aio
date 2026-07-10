@@ -20,9 +20,9 @@ Create a directory and add `deno.json`:
     "jsxImportSource": "aio"
   },
   "imports": {
-    "aio": "jsr:@riagentic/aio@^1.0.0-alpha15",
-    "aio/air": "jsr:@riagentic/aio@^1.0.0-alpha15/air",
-    "aio/jsx-runtime": "jsr:@riagentic/aio@^1.0.0-alpha15/jsx-runtime",
+    "aio": "jsr:@riagentic/aio@^1.0.0-beta1",
+    "aio/air": "jsr:@riagentic/aio@^1.0.0-beta1/air",
+    "aio/jsx-runtime": "jsr:@riagentic/aio@^1.0.0-beta1/jsx-runtime",
     "esbuild": "npm:esbuild@^0.24"
   },
   "tasks": {
@@ -388,7 +388,7 @@ mocking needed.
 Compile to a standalone binary:
 
 ```sh
-deno run -A jsr:@riagentic/aio@^1.0.0-alpha15/build --compile --service
+deno run -A jsr:@riagentic/aio@^1.0.0-beta1/build --compile --service
 ```
 
 This produces two files: a binary and a systemd unit file. The binary is

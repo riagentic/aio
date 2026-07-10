@@ -23,13 +23,13 @@ Create a new directory and `deno.json`:
   "nodeModulesDir": "auto",
   "unstable": ["kv"],
   "imports": {
-    "aio": "jsr:@riagentic/aio@^1.0.0-alpha15"
+    "aio": "jsr:@riagentic/aio@^1.0.0-beta1"
   },
   "tasks": {
     "dev": "deno run -A src/app.ts --client=server-only",
-    "am": "deno run -A jsr:@riagentic/aio@^1.0.0-alpha15/am",
+    "am": "deno run -A jsr:@riagentic/aio@^1.0.0-beta1/am",
     "test": "deno test -A --unstable-kv tests/",
-    "compile:service": "deno run -A jsr:@riagentic/aio@^1.0.0-alpha15/build --compile --service --headless"
+    "compile:service": "deno run -A jsr:@riagentic/aio@^1.0.0-beta1/build --compile --service --headless"
   }
 }
 ```

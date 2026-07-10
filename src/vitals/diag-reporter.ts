@@ -127,8 +127,11 @@ export function createServerDiagReporter(config: ServerDiagReporterConfig) {
 
     return {
       kind,
-      severity: hint?.severity ??
-        (kind === "recovered" ? "speculative" : "possible"),
+      // Recovery events are always speculative — they must not inherit the
+      // original alert's severity (e.g. "likely") via the hint fallback.
+      severity: kind === "recovered"
+        ? "speculative"
+        : (hint?.severity ?? "possible"),
       summary: summaries[kind] ?? kind,
       detail,
       timestamp: alert.ts,

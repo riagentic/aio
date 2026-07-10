@@ -26,11 +26,11 @@ The generated `deno.json` already declares the vendored import map (`aio`,
 
 ## Option B: JSR (manual setup)
 
-> **During the alpha, use Option A.** The JSR package
-> ([`@riagentic/aio`](https://jsr.io/@riagentic/aio)) tracks tagged releases and
-> is not continuously published while the surface is still moving — a `deno add`
-> may resolve an older version than this repo. The scaffolder (Option A) and
-> `--vendored` install always match the current framework.
+> **During the alpha/beta, use Option A.** The JSR package
+> ([`@riagentic/aio`](https://jsr.io/@riagentic/aio)) currently trails the
+> tagged releases (latest on JSR is an alpha), so a `deno add` may resolve an
+> older version than this repo. The scaffolder (Option A) and `--vendored`
+> install always match the current framework.
 
 Once the version you want is on JSR:
 
@@ -64,9 +64,9 @@ import { aio, cell } from "aio";
     "jsxImportSource": "aio"
   },
   "imports": {
-    "aio": "jsr:@riagentic/aio@^1.0.0-alpha15",
-    "aio/air": "jsr:@riagentic/aio@^1.0.0-alpha15/air",
-    "aio/jsx-runtime": "jsr:@riagentic/aio@^1.0.0-alpha15/jsx-runtime",
+    "aio": "jsr:@riagentic/aio@^1.0.0-beta1",
+    "aio/air": "jsr:@riagentic/aio@^1.0.0-beta1/air",
+    "aio/jsx-runtime": "jsr:@riagentic/aio@^1.0.0-beta1/jsx-runtime",
     "esbuild": "npm:esbuild@^0.24",
     "electron": "npm:electron"
   },

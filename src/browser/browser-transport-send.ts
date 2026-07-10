@@ -8,7 +8,7 @@ import {
   WS_MAX_QUEUE,
 } from "./browser-protocol.ts";
 import { T } from "./browser-transport-state.ts";
-import { _registerAck } from "../protocol/browser-ack.ts";
+import { _registerAck, _rejectAck } from "../protocol/browser-ack.ts";
 
 /** Sends action via IPC or WS — queues to memory during initial connect, persists to IndexedDB when disconnected.
  *  Returns a Promise that resolves when the server has acknowledged the action
@@ -69,16 +69,20 @@ export function send(
       hint: "Server may be slow to respond. Check terminal for errors.",
     });
   }
-  // Action was dropped — fail the awaiting caller (if any) so they don't hang.
+  // Action was dropped — reject the awaiting caller (if any) immediately so
+  // they don't hang until ACK_TIMEOUT_MS. The "action-dropped" diag already
+  // fired above; this surfaces the failure to `await cell.method()` callers.
   if (action.cid) {
-    // Reject the ack so the caller's await surfaces the error.
-    // Done in a microtask so the thrower doesn't see this synchronously.
-    queueMicrotask(() => {
-      // We don't have direct access to the reject here — the ackPromise is
-      // already created. The transport-level drop will be visible via the
-      // "action-dropped" diag; the promise times out per ACK_TIMEOUT_MS.
-      // (Resolving the diagnostic is the contract.)
-    });
+    _rejectAck(
+      action.cid,
+      new Error(
+        `action '${action.type}' dropped — ${
+          T.wasConnected
+            ? `offline queue full (${OFFLINE_MAX_QUEUE})`
+            : `connect queue full (${WS_MAX_QUEUE})`
+        }`,
+      ),
+    );
   }
   return ackPromise;
 }

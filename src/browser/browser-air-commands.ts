@@ -6,7 +6,7 @@ import { handleTTMessage } from "../air/time-travel-panel.ts";
 import { interact } from "../air/dom-interact.ts";
 import { snapshotDOM } from "../air/dom-snapshot.ts";
 import type { InteractCommand } from "../air/dom-inspector-types.ts";
-import { _w } from "./browser-protocol.ts";
+import { _vitalsTransportProbe, _w } from "./browser-protocol.ts";
 import { _rejectAck, _resolveAck } from "../protocol/browser-ack.ts";
 
 /** Route __-prefixed commands from server. Returns true if consumed. */
@@ -76,6 +76,16 @@ export function routeCommand(
     return true;
   }
 
+  // Vitals pong — forward to the transport probe so RTT/staleness stays fresh.
+  // The catch-all `__vitals:` consumption below would otherwise drop pongs in
+  // AIR/IPC mode (the WS handler in browser-transport-ws.ts never sees them).
+  if (line.startsWith("__vitals:pong:")) {
+    try {
+      const pong = JSON.parse(line.slice("__vitals:pong:".length));
+      if (_vitalsTransportProbe) _vitalsTransportProbe.processPong(pong);
+    } catch { /* ignore malformed pong */ }
+    return true;
+  }
   if (line.startsWith("__vitals:")) return true;
   return true; // consumed but unrecognized
 }
