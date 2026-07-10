@@ -43,7 +43,10 @@ export function applyProps(
 
   // Remove old props not in next
   for (const k of Object.keys(prev)) {
-    if (k === "key" || k === "children" || k === "ref" || k === "use") continue;
+    if (
+      k === "key" || k === "children" || k === "ref" || k === "use" ||
+      k === "t"
+    ) continue;
     if (!(k in next)) {
       if (k.startsWith("on")) {
         const evt = _mapEventName(
@@ -80,7 +83,10 @@ export function applyProps(
 
   // Set new/changed props
   for (const [k, v] of Object.entries(next)) {
-    if (k === "key" || k === "children" || k === "ref" || k === "use") continue;
+    if (
+      k === "key" || k === "children" || k === "ref" || k === "use" ||
+      k === "t"
+    ) continue;
     const rv = resolveSignalProp(v);
     if (isSignal(v)) continue; // Signal binding handles ongoing updates via effect
     if (prev[k] === rv) continue;

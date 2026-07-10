@@ -38,6 +38,12 @@ export function _setActiveRoot(r: RootState | null): void {
 import type { MountHandle } from "./renderer-types.ts";
 
 export const _rootStateMap = new WeakMap<MountHandle, RootState>();
+
+/** Live (mounted, not disposed) roots — enumerable for the UI surface
+ *  (`testUI` / `am surface`). Entries are removed on unmount. */
+export const _liveRoots = new Set<RootState>();
+
 export function _registerRoot(handle: MountHandle, state: RootState): void {
   _rootStateMap.set(handle, state);
+  _liveRoots.add(state);
 }

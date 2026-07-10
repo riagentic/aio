@@ -1069,7 +1069,7 @@
         },
         "AioHTMLAttributes": {
           "kind": "typeAlias",
-          "sig": "9469ee07e035b214"
+          "sig": "4d2a68565a933660"
         },
         "AioImgAttributes": {
           "kind": "typeAlias",
@@ -1494,6 +1494,26 @@
         "TestContext": {
           "kind": "typeAlias",
           "sig": "f6de16d6a8582d2b"
+        },
+        "testUI": {
+          "kind": "function",
+          "sig": "83ea42d6ff78ea27"
+        },
+        "TestUI": {
+          "kind": "typeAlias",
+          "sig": "ffe7e7b5e80be096"
+        },
+        "TestUIOptions": {
+          "kind": "interface",
+          "sig": "e41c766dacc76e61"
+        },
+        "UIComponentHandle": {
+          "kind": "typeAlias",
+          "sig": "ac152a95b0130810"
+        },
+        "UIElementHandle": {
+          "kind": "interface",
+          "sig": "00b90ce356226b95"
         }
       }
     }

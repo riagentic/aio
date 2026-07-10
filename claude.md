@@ -60,6 +60,20 @@ timing-safe comparison. User flows through hooks and `getUIState()`.
 Per-client tracking. <50% changed keys → `$p` patch + `$d` deletes, else full
 state.
 
+## Testing UIs (agents: use this, not DOM scraping)
+
+Every TSX component is exposed as a semantic API — observe and drive the UI
+without selectors:
+
+- In tests: `testUI` from `aio/testing` — `await ui.TodoAdd.AddButton.click()`;
+  names are LABEL+ROLE from the TSX (`<div class="button">Submit</div>` →
+  `SubmitButton`); every action settles.
+- On a live app: `am surface 0 --json` (full perception: components, elements,
+  live text/value/checked) and `am trigger 0 "<path>" <action> [text]` — the
+  reply includes the fresh post-action surface, and misses list available paths.
+  Loop: observe → act → observe, one call per step.
+- Guide: docs/testing/ui-testing.md.
+
 ## Conventions
 
 - `factory` and `msg()` inlined in browser-shared.ts — must stay in sync
