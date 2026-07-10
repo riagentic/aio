@@ -142,6 +142,9 @@ type AioHTMLAttributes<T extends EventTarget = HTMLElement> =
     [key: `aria-${string}`]: string | number | boolean | undefined;
     ref?: ((el: HTMLElement | null) => void) | { current: HTMLElement | null };
     key?: string | number;
+    /** Semantic test handle — names this element in the UI surface
+     *  (`testUI`, `am ui`). Dev/test concept; stripped from the DOM. */
+    t?: string;
     children?: unknown;
     dangerouslySetInnerHTML?: { __html: string };
   };

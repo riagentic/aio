@@ -1,0 +1,121 @@
+/**
+ * @module
+ * Faithful UI-event trigger — the single implementation both `testUI`
+ * (in-process) and the live-client `__ui` protocol (`am ui`) use to simulate
+ * a user. Dispatches real DOM event sequences (pointer → mouse → click,
+ * per-character typing with input events, Enter-submits-the-form) so handlers,
+ * delegation, `useLocal`, and controlled inputs behave exactly as with a
+ * human — never calls handlers directly.
+ */
+
+// deno-lint-ignore no-explicit-any
+type AnyEl = any;
+
+/** Actions the trigger can perform on a surface element. */
+export type UITriggerAction =
+  | "click"
+  | "dblclick"
+  | "type"
+  | "press"
+  | "hover"
+  | "focus"
+  | "blur";
+
+function view(el: AnyEl): AnyEl {
+  return el.ownerDocument?.defaultView ?? globalThis;
+}
+
+function ev(el: AnyEl, name: string, init: Record<string, unknown> = {}) {
+  const w = view(el);
+  return new w.Event(name, { bubbles: true, cancelable: true, ...init });
+}
+
+function mouseEv(el: AnyEl, name: string) {
+  const w = view(el);
+  return w.MouseEvent
+    ? new w.MouseEvent(name, { bubbles: true, cancelable: true, button: 0 })
+    : ev(el, name);
+}
+
+function keyEv(el: AnyEl, name: string, key: string) {
+  const w = view(el);
+  return w.KeyboardEvent
+    ? new w.KeyboardEvent(name, { bubbles: true, cancelable: true, key })
+    : ev(el, name);
+}
+
+/** Full user-faithful click sequence. */
+export function triggerClick(el: AnyEl): void {
+  el.dispatchEvent(mouseEv(el, "pointerdown"));
+  el.dispatchEvent(mouseEv(el, "mousedown"));
+  el.dispatchEvent(mouseEv(el, "pointerup"));
+  el.dispatchEvent(mouseEv(el, "mouseup"));
+  if (typeof el.click === "function") el.click();
+  else el.dispatchEvent(mouseEv(el, "click"));
+}
+
+/** Type one character like a user: keydown → value += ch → input → keyup.
+ *  Callers loop characters (re-resolving controlled inputs between them). */
+export function triggerChar(el: AnyEl, ch: string): void {
+  el.dispatchEvent(keyEv(el, "keydown", ch));
+  el.value = String(el.value ?? "") + ch;
+  el.dispatchEvent(ev(el, "input"));
+  el.dispatchEvent(keyEv(el, "keyup", ch));
+}
+
+/** Press a key; Enter inside a form submits it (browser implicit submission). */
+export function triggerPress(el: AnyEl, key: string): void {
+  el.dispatchEvent(keyEv(el, "keydown", key));
+  el.dispatchEvent(keyEv(el, "keyup", key));
+  if (key === "Enter" && typeof el.closest === "function") {
+    const form = el.closest("form");
+    if (form) form.dispatchEvent(ev(el, "submit"));
+  }
+}
+
+/** Select an option on a <select> like a user (sets value, fires change+input). */
+export function triggerSelect(el: AnyEl, value: string): void {
+  el.focus?.();
+  el.value = value;
+  el.dispatchEvent(ev(el, "input"));
+  el.dispatchEvent(ev(el, "change"));
+}
+
+/** Clear an input's value like a user (select-all + delete): value = "", input. */
+export function triggerClear(el: AnyEl): void {
+  el.focus?.();
+  el.value = "";
+  el.dispatchEvent(ev(el, "input"));
+}
+
+/** Perform a non-typing action (typing is looped by callers via
+ *  {@linkcode triggerChar} for per-character fidelity). */
+export function triggerAction(
+  el: AnyEl,
+  action: Exclude<UITriggerAction, "type">,
+  key?: string,
+): void {
+  switch (action) {
+    case "click":
+      triggerClick(el);
+      break;
+    case "dblclick":
+      triggerClick(el);
+      el.dispatchEvent(mouseEv(el, "dblclick"));
+      break;
+    case "press":
+      triggerPress(el, key ?? "Enter");
+      break;
+    case "hover":
+      el.dispatchEvent(mouseEv(el, "mouseover"));
+      el.dispatchEvent(mouseEv(el, "mouseenter"));
+      break;
+    case "focus":
+      el.focus?.();
+      break;
+    case "blur":
+      el.blur?.();
+      el.dispatchEvent(ev(el, "blur", { bubbles: false }));
+      break;
+  }
+}

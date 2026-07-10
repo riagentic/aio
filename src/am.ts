@@ -42,7 +42,9 @@ import {
   cmdMetrics,
   cmdSchedules,
   cmdSql,
+  cmdSurface,
   cmdTables,
+  cmdTrigger,
 } from "./am/am-cmd-inspect.ts";
 
 import { cmdHelp, cmdNew, cmdVersion } from "./am/am-cmd-meta.ts";
@@ -85,6 +87,8 @@ const COMMANDS: Record<string, CmdHandler> = {
   client: cmdClient,
   click: cmdClick,
   interact: cmdInteract,
+  surface: cmdSurface,
+  trigger: cmdTrigger,
   sql: cmdSql,
   tables: cmdTables,
   schedules: cmdSchedules,

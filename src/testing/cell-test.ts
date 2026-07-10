@@ -289,3 +289,13 @@ export function testCell<
     await fn(ctx);
   });
 }
+
+// Semantic UI testing — first-class, selector-free (see
+// docs/specs/2026-07-10-semantic-ui-testing.md).
+export {
+  type TestUI,
+  testUI,
+  type TestUIOptions,
+  type UIComponentHandle,
+  type UIElementHandle,
+} from "./ui-test.ts";

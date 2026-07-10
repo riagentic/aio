@@ -5,6 +5,7 @@
 import { handleTTMessage } from "../air/time-travel-panel.ts";
 import { interact } from "../air/dom-interact.ts";
 import { snapshotDOM } from "../air/dom-snapshot.ts";
+import { getSerializedSurfaces, runUITrigger } from "../air/ui-remote.ts";
 import type { InteractCommand } from "../air/dom-inspector-types.ts";
 import { _vitalsTransportProbe, _w } from "./browser-protocol.ts";
 import { _rejectAck, _resolveAck } from "../protocol/browser-ack.ts";
@@ -24,6 +25,32 @@ export function routeCommand(
     } catch (e) {
       sendRaw("__ui:snapshot-result:" + JSON.stringify({ error: String(e) }));
     }
+    return true;
+  }
+
+  if (line === "__ui:surface") {
+    try {
+      sendRaw("__ui:surface-result:" + JSON.stringify(getSerializedSurfaces()));
+    } catch (e) {
+      sendRaw("__ui:surface-result:" + JSON.stringify({ error: String(e) }));
+    }
+    return true;
+  }
+
+  if (line.startsWith("__ui:trigger:")) {
+    // Reply async — the trigger settles the app before responding.
+    (async () => {
+      try {
+        const req = JSON.parse(line.slice("__ui:trigger:".length));
+        const result = await runUITrigger(req);
+        sendRaw("__ui:trigger-result:" + JSON.stringify(result));
+      } catch (e) {
+        sendRaw(
+          "__ui:trigger-result:" +
+            JSON.stringify({ ok: false, error: String(e) }),
+        );
+      }
+    })();
     return true;
   }
 

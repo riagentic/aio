@@ -177,6 +177,10 @@ export function createWsManager(deps: WsDeps): WsManager {
       ? "snapshot"
       : msg.startsWith("__ui:interact")
       ? "interact"
+      : msg.startsWith("__ui:surface")
+      ? "surface"
+      : msg.startsWith("__ui:trigger")
+      ? "trigger"
       : "clientState";
 
   function handleWs(
@@ -506,6 +510,24 @@ export function createWsManager(deps: WsDeps): WsManager {
         meta,
         "snapshot",
         e.data.slice("__ui:snapshot-result:".length),
+      );
+      return;
+    }
+    // UI semantic-surface result
+    if (e.data.startsWith("__ui:surface-result:")) {
+      _resolvePending(
+        meta,
+        "surface",
+        e.data.slice("__ui:surface-result:".length),
+      );
+      return;
+    }
+    // UI semantic-trigger result
+    if (e.data.startsWith("__ui:trigger-result:")) {
+      _resolvePending(
+        meta,
+        "trigger",
+        e.data.slice("__ui:trigger-result:".length),
       );
       return;
     }

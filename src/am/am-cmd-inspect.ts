@@ -469,3 +469,108 @@ export async function cmdConfig(
   }
   out(result.data, mode);
 }
+
+// ── Semantic UI surface (spec: docs/specs/2026-07-10-semantic-ui-testing.md) ──
+
+type SurfaceNode = {
+  component: string;
+  key?: string | number;
+  path: string;
+  text?: string;
+  elements: {
+    name: string;
+    tag: string;
+    events: string[];
+    text?: string;
+    value?: string;
+    checked?: boolean;
+    disabled?: boolean;
+  }[];
+  children: SurfaceNode[];
+};
+
+function renderSurface(node: SurfaceNode, indent = ""): string {
+  const keyStr = node.key !== undefined ? ` [key=${node.key}]` : "";
+  let out = `${indent}${node.component}${keyStr}\n`;
+  for (const el of node.elements) {
+    const bits: string[] = [];
+    if (el.text) bits.push(`"${el.text}"`);
+    if (el.value !== undefined) bits.push(`value=${JSON.stringify(el.value)}`);
+    if (el.checked !== undefined) bits.push(el.checked ? "☑" : "☐");
+    if (el.disabled) bits.push("disabled");
+    out += `${indent}  • ${el.name}  <${el.tag}> [${el.events.join(", ")}]${
+      bits.length ? "  " + bits.join("  ") : ""
+    }\n`;
+  }
+  for (const child of node.children) {
+    out += renderSurface(child, indent + "  ");
+  }
+  return out;
+}
+
+/** `am surface [clientIdx]` — print the client's semantic UI surface: every
+ *  component and its triggerable elements, named as the testUI API names them.
+ *  What you see here is exactly what `am trigger` (and tests) can drive. */
+export async function cmdSurface(
+  args: string[],
+  flags: GlobalFlags,
+): Promise<void> {
+  const mode = detectMode(flags);
+  const appId = resolveAmAppId(flags.app);
+  const port = resolvePort(flags.port, appId);
+  const idx = Number(args[0] ?? flags.client ?? 0);
+  const result = await trojanGet(port, `surface/${idx}`, appId, 10_000);
+  if (!result.ok) {
+    outError(result.error, mode);
+    Deno.exit(1);
+  }
+  if (mode === "json") {
+    out(result.data, mode);
+    return;
+  }
+  const roots = result.data as SurfaceNode[];
+  if (!Array.isArray(roots) || roots.length === 0) {
+    out("(no mounted UI surface)", mode);
+    return;
+  }
+  console.log(roots.map((r) => renderSurface(r)).join("\n"));
+  console.log(
+    `trigger with: am trigger ${idx} "<Component…:Element>" <action> [text]`,
+  );
+}
+
+/** `am trigger <clientIdx> <path> <action> [text]` — faithfully simulate a
+ *  user interaction on a live client via the semantic surface (same event
+ *  sequences as testUI). Actions: click, dblclick, type, press, hover,
+ *  focus, blur. */
+export async function cmdTrigger(
+  args: string[],
+  flags: GlobalFlags,
+): Promise<void> {
+  const mode = detectMode(flags);
+  const appId = resolveAmAppId(flags.app);
+  const port = resolvePort(flags.port, appId);
+  const [idxStr, path, action, text] = args;
+  const idx = Number(idxStr);
+  const actions = new Set(
+    ["click", "dblclick", "type", "press", "hover", "focus", "blur"],
+  );
+  if (!Number.isInteger(idx) || !path || !action || !actions.has(action)) {
+    outError(
+      'usage: am trigger <clientIdx> "<Component…:Element>" <action> [text]\n' +
+        "actions: click, dblclick, type, press, hover, focus, blur\n" +
+        "discover paths with: am surface <clientIdx>",
+      mode,
+    );
+    Deno.exit(1);
+  }
+  const body: Record<string, unknown> = { path, action };
+  if (action === "type") body.text = text ?? "";
+  if (action === "press") body.key = text ?? "Enter";
+  const result = await trojanPost(port, `trigger/${idx}`, body, appId);
+  if (!result.ok) {
+    outError(result.error, mode);
+    Deno.exit(1);
+  }
+  out(result.data, mode);
+}

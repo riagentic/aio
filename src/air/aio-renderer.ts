@@ -32,6 +32,7 @@ import {
 } from "./transition-group.ts";
 import type { MountHandle, RootState } from "./renderer-types.ts";
 import {
+  _liveRoots,
   _registerRoot,
   _rootStateMap,
   _setActiveRoot,
@@ -219,6 +220,7 @@ export function _unmount(handle: MountHandle): void {
   const state = _rootStateMap.get(handle);
   if (!state) return;
 
+  _liveRoots.delete(state);
   state.disposed = true;
   state.pendingComponents.clear();
   state._renderCounts.clear(); // AIO-278

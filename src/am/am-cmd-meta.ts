@@ -120,6 +120,8 @@ Inspect:
   click <idx> <Comp> [n]  Click component — by index or prop:value (dev mode)
   ui [--client=N] [--all] DOM snapshot from client (default: client 0, visible only)
   interact <action> <sel> Interact with UI element (click/type/select/focus/blur/scroll/hover)
+  surface [clientIdx]     Semantic UI surface — every component + triggerable element, by name
+  trigger <idx> <path> <action> [text]  Simulate a user on the live UI (click/type/press/hover…)
   sql <query>             Execute read-only SQL
   tables                  List SQLite tables
   schedules               Active scheduled effects
