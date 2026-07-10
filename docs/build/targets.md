@@ -30,6 +30,13 @@ Aliases: compile = compile:browser
 
 All 10 targets ship in a single binary.
 
+> **⚠️ Remote targets are experimental.** The five `remote` / thin-client
+> targets (`browser:remote`, `service:remote`, `electron:remote`, `cli:remote`,
+> `android:remote`) build and run, but are not yet field-validated off-box (a
+> deployed server + a client on a separate machine/device). Their behavior may
+> change before 1.0. The five **local** targets are the fully-validated, stable
+> set.
+
 ## Dev mode
 
 ```sh
