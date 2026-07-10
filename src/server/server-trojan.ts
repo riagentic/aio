@@ -187,6 +187,14 @@ function handleGet(
     return sendToClient(idx, "__getState");
   }
 
+  if (route.startsWith("surface/") && !prod) {
+    const idx = Number(route.slice(8));
+    if (!Number.isInteger(idx) || idx < 0) {
+      return err("invalid client index", 400);
+    }
+    return sendToClient(idx, "__ui:surface");
+  }
+
   if (route.startsWith("click/") && !prod) {
     const rest = route.slice(6);
     const slashIdx = rest.indexOf("/");
@@ -299,6 +307,22 @@ async function handlePost(
       delete action.user;
       deps.dispatch(action, undefined);
       return json({ ok: true });
+    } catch {
+      return err("invalid JSON");
+    }
+  }
+
+  if (route.startsWith("trigger/") && !prod) {
+    const idx = Number(route.slice(8));
+    if (!Number.isInteger(idx) || idx < 0) {
+      return err("invalid client index", 400);
+    }
+    try {
+      const body = JSON.parse(await req.text());
+      if (typeof body?.path !== "string" || typeof body?.action !== "string") {
+        return err("body must be { path, action, text?, key? }", 400);
+      }
+      return sendToClient(idx, "__ui:trigger:" + JSON.stringify(body));
     } catch {
       return err("invalid JSON");
     }

@@ -1,5 +1,31 @@
 # Changelog
 
+## Unreleased (alpha18)
+
+### Added
+
+- **First-class semantic UI testing** (spec:
+  `docs/specs/2026-07-10-semantic-ui-testing.md`) — every TSX component is
+  automatically exposed as an intuitive, deterministic API; tests and `am` drive
+  the UI the way a user would, with **no DOM/selector lookup**:
+  - `testUI()` (`aio/testing`): `await ui.Submit.SubmitButton.click()` — names
+    inferred from the TSX (label + role: `<div class="button">Submit</div>` →
+    `SubmitButton`), every action awaits quiescence (zero sleeps), real event
+    sequences via AIR's own delegation (client-only `useLocal` flows included),
+    keyed instances via `ui.find("Row", key)`, cell assertions via `expectCell`,
+    helpful listing errors, optional `t=` handle prop.
+  - `am surface <clientIdx>` — the live client's semantic surface as a friendly
+    tree; `am trigger <idx> <path> <action> [text]` — faithfully simulate a user
+    on a **running** app (browser/electron/android WebView) over aio's own
+    protocol; misses reply with available paths so humans/AI self-correct.
+  - One shared trigger implementation (`ui-trigger.ts`) guarantees tests and
+    `am` behave identically. Dev-tooling only — the surface walk is on-demand,
+    zero production overhead.
+  - **AI-natural by design**: the surface is a complete perception+action space
+    (live text/value/checked on every node), `am trigger` replies with the fresh
+    post-action surface (observe→act→observe in one call), and misses
+    self-describe. Guide: docs/testing/ui-testing.md ("For AI agents").
+
 ## 1.0.0-alpha17 — external-audit hardening + experimental targets
 
 Bugfixes and hardening from an external code audit, plus honest labeling of the
