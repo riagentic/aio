@@ -9,7 +9,7 @@
 - **Write reactive, use generators or atomic actions when needed.**
 - **Pick your target, compile and ship!**
 
-`v1.0.0-alpha14`
+`v1.0.0-alpha17`
 
 > Define state once. It persists, syncs to all clients, drives the UI.
 
@@ -213,16 +213,18 @@ See [FAQ](docs/basics/faq.md#when-not-to-use-aio) for details.
 
 ## Status
 
-**v1.0.0-alpha14** · [JSR](https://jsr.io/@riagentic/aio) · MIT
+**v1.0.0-alpha17** · [JSR](https://jsr.io/@riagentic/aio) · MIT
 
-2005+ tests · security hardened · 194+ bugs fixed across 11 nuclear audit waves
+2150+ tests · security hardened · CI-locked API snapshot + coverage ratchet
 
-New in alpha14: `useRaf` hook, public `testComponent`/`setDocument` test
-harness, `onMount` runs after the DOM subtree and refs are committed, pre-bind
-cell reads return declared state defaults, `CellEffect` type,
-`cell.method.action()` descriptor accessor. Alpha13 was the **DX overhaul**
-(honest `persist`/`ui` defaults, awaitable methods, React-compat hooks moved to
-`aio/air/compat`); alpha12 removed React — **AIR is the sole renderer** with
-direct reactive cell access as the primary UI pattern. Core (state, sync, cells,
-scheduling, renderer) is stable. Electron, Android, and build targets are
-functional but less battle-tested.
+New in alpha17: external-audit hardening (dev-shell XSS guard, deterministic
+CRDT ordering, memory fixes) and the five remote targets marked **experimental**
+until field-validated off-box. Alpha16 shipped the `deno task doctor` config
+checker, `schedule.backoff`, field-filter security warnings, and a deep-audit
+cleanup; alpha15 fixed the **Deno ≥ 2.9 blank-app bug** (WS upgrade) every
+earlier version hits. Alpha13 was the **DX overhaul** (honest `persist`/`ui`
+defaults, awaitable methods, React-compat hooks moved to `aio/air/compat`);
+alpha12 removed React — **AIR is the sole renderer** with direct reactive cell
+access as the primary UI pattern. Core (state, sync, cells, scheduling,
+renderer) is stable. Electron, Android, and build targets are functional but
+less battle-tested.

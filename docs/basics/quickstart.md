@@ -64,9 +64,9 @@ import { aio, cell } from "aio";
     "jsxImportSource": "aio"
   },
   "imports": {
-    "aio": "jsr:@riagentic/aio@^1.0.0-beta1",
-    "aio/air": "jsr:@riagentic/aio@^1.0.0-beta1/air",
-    "aio/jsx-runtime": "jsr:@riagentic/aio@^1.0.0-beta1/jsx-runtime",
+    "aio": "jsr:@riagentic/aio@^1.0.0-alpha17",
+    "aio/air": "jsr:@riagentic/aio@^1.0.0-alpha17/air",
+    "aio/jsx-runtime": "jsr:@riagentic/aio@^1.0.0-alpha17/jsx-runtime",
     "esbuild": "npm:esbuild@^0.24",
     "electron": "npm:electron"
   },

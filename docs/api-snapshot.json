@@ -493,7 +493,7 @@
         },
         "VERSION": {
           "kind": "variable",
-          "sig": "bf423864c696362f"
+          "sig": "0b2c0316d2c27738"
         },
         "VitalAlert": {
           "kind": "typeAlias",
@@ -942,11 +942,11 @@
         },
         "VirtualListConfig": {
           "kind": "interface",
-          "sig": "ee420f32be159820"
+          "sig": "3fe2e3c0c0fa554a"
         },
         "VirtualListState": {
           "kind": "interface",
-          "sig": "a969b690209cec93"
+          "sig": "d0656fead7d5c299"
         },
         "VNode": {
           "kind": "interface",
