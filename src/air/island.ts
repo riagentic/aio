@@ -105,9 +105,15 @@ export function island<M = unknown>(config: IslandConfig<M>): ComponentFn {
     const containerRef = useRef<HTMLElement | null>(null);
     const handleRef = useRef<IslandHandle | null>(null);
     const disposeRef = useRef<(() => void) | null>(null);
+    // Guard against unmount landing between loadModule() resolve and mount().
+    // Without this, a late-arriving load calls config.mount() on a detached
+    // container and assigns handleRef/disposeRef AFTER onCleanup already ran
+    // — leaking the external framework's mount (no unmount() ever fires).
+    const disposedRef = useRef(false);
 
     onMount(() => {
       loadModule().then((mod) => {
+        if (disposedRef.current) return; // unmounted while loading — bail
         const container = containerRef.current;
         if (!container) return;
 
@@ -142,6 +148,7 @@ export function island<M = unknown>(config: IslandConfig<M>): ComponentFn {
     });
 
     onCleanup(() => {
+      disposedRef.current = true;
       if (disposeRef.current) disposeRef.current();
       if (handleRef.current) handleRef.current.unmount();
       handleRef.current = null;

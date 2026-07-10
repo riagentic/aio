@@ -13,6 +13,7 @@
 
 import type { ComponentFn, RenderCtx, VNode } from "./vdom.ts";
 import {
+  _callRef,
   _cleanupSignalTextChildren,
   _render,
   _setDelegationRoot,
@@ -22,6 +23,7 @@ import {
   h,
   setDevMode as _setDevModeVdom,
 } from "./vdom.ts";
+import { _cleanupActions } from "./vdom-helpers.ts";
 import { cleanupSignalBindings } from "./signal-binding.ts";
 import { _getExitHandler, _setLifecycleHooks } from "./transition-component.ts";
 import {
@@ -242,9 +244,21 @@ function _unmountTree(
     _unmountTree(vnode._rendered ?? null, ctx);
   } else {
     if (vnode._dom && typeof (vnode._dom as Element).tagName === "string") {
+      const dom = vnode._dom as Element;
       // AIO-78: dispose signal binding effects on element
-      cleanupSignalBindings(vnode._dom as Element);
-      _cleanupSignalTextChildren(vnode._dom as Element);
+      cleanupSignalBindings(dom);
+      _cleanupSignalTextChildren(dom);
+      // Mirror _removeDomCleanup (vdom-remove.ts): run action cleanups so
+      // custom directives (window listeners, observers) release, and null out
+      // ref callbacks so callers see the element is gone. Without this the
+      // top-level unmount path (innerHTML="") leaked refs + action listeners.
+      // Duck-type the element (setInputElement etc. live on HTMLElement) so we
+      // don't depend on the HTMLElement global being defined (test envs may
+      // install it on a non-global realm).
+      if (typeof (dom as HTMLElement).setAttribute === "function") {
+        _cleanupActions(dom as HTMLElement);
+      }
+      _callRef(vnode.props.ref, null);
     }
     for (const child of vnode.children) {
       _unmountTree(child, ctx);

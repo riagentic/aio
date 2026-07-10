@@ -2,12 +2,13 @@
 // Provides: hydrate, _hydrateNode, _hydrateProps.
 
 import { batch } from "../state/signal.ts";
-import { bindSignalProps } from "./signal-binding.ts";
+import { bindSignalProps, cleanupSignalBindings } from "./signal-binding.ts";
 import type { ComponentFn, RenderCtx, VNode } from "./vdom.ts";
 import {
   _applyActions,
   _bindSignalTextChildren,
   _callRef,
+  _cleanupSignalTextChildren,
   _ensureDelegation,
   _isDelegated,
   _mapEventName,
@@ -18,6 +19,7 @@ import {
   h,
   SVG_TAGS,
 } from "./vdom.ts";
+import { _cleanupActions } from "./vdom-helpers.ts";
 import { _getExitHandler } from "./transition-component.ts";
 import { _getGroupExitHandler } from "./transition-group.ts";
 import type { MountHandle, RootState } from "./renderer-types.ts";
@@ -96,6 +98,22 @@ export function hydrate(root: any, App: ComponentFn): MountHandle {
     const vnode = h(App, null);
     const consumed = _hydrateNode(root, vnode, state.ctx, false, 0);
     if (consumed < 0) {
+      // Hydration mismatch — release the signal-binding effects, signal-text
+      // bindings, and action cleanups created for elements hydrated before the
+      // mismatch. Without this, those effects stay alive and keep mutating DOM
+      // nodes that innerHTML="" is about to detach (leak + stale writes).
+      cleanupSignalBindings(root);
+      _cleanupSignalTextChildren(root);
+      if (typeof (root as HTMLElement).setAttribute === "function") {
+        _cleanupActions(root as HTMLElement);
+      }
+      for (const el of root.querySelectorAll("*")) {
+        cleanupSignalBindings(el);
+        _cleanupSignalTextChildren(el);
+        if (typeof (el as HTMLElement).setAttribute === "function") {
+          _cleanupActions(el as HTMLElement);
+        }
+      }
       root.innerHTML = "";
       _render(root, vnode, null, state.ctx);
     }

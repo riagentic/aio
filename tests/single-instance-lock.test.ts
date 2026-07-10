@@ -250,12 +250,13 @@ Deno.test("zombie reclaim: pid alive but port dead → lock reclaimed (notes #5)
   }
 });
 
-Deno.test("zombie reclaim: skipped for UDS instances and during startup grace", async () => {
+Deno.test("zombie reclaim: UDS instance with dead socket is reclaimed", async () => {
   const appId = "zombie-uds-" + crypto.randomUUID().slice(0, 8);
   const l = Deno.listen({ port: 0 });
   const deadPort = (l.addr as Deno.NetAddr).port;
   l.close();
-  // UDS instance: port never listens — must NOT be treated as a zombie
+  // UDS instance whose socket path doesn't exist (listener died) — MUST be
+  // reclaimed now that the zombie check probes UDS liveness, not just TCP.
   const sleeper = new Deno.Command("sleep", { args: ["30"] }).spawn();
   try {
     writeLock({
@@ -265,11 +266,49 @@ Deno.test("zombie reclaim: skipped for UDS instances and during startup grace", 
       startedAt: Date.now() - 60_000,
       status: "started",
       cwd: Deno.cwd(),
-      socketPath: "/tmp/aio/fake.sock",
+      socketPath: "/tmp/aio/nonexistent-" + crypto.randomUUID().slice(0, 8) +
+        ".sock",
     });
     const lock = new AppLock(appId);
     const result = await lock.acquire(4322);
-    assertEquals(result.ok, false, "UDS instance not reclaimed by port check");
+    assertEquals(
+      result.ok,
+      true,
+      "UDS instance with dead socket must be reclaimed",
+    );
+    removeLock(appId);
+  } finally {
+    try {
+      sleeper.kill();
+    } catch { /* already gone */ }
+    await sleeper.status;
+  }
+});
+
+Deno.test("zombie reclaim: skipped during startup grace", async () => {
+  const appId = "zombie-grace-" + crypto.randomUUID().slice(0, 8);
+  const l = Deno.listen({ port: 0 });
+  const deadPort = (l.addr as Deno.NetAddr).port;
+  l.close();
+  // Owner is still within the 10s startup grace — must NOT be reclaimed even
+  // though its port refuses connections.
+  const sleeper = new Deno.Command("sleep", { args: ["30"] }).spawn();
+  try {
+    writeLock({
+      appId,
+      pid: sleeper.pid,
+      port: deadPort,
+      startedAt: Date.now(),
+      status: "starting",
+      cwd: Deno.cwd(),
+    });
+    const lock = new AppLock(appId);
+    const result = await lock.acquire(4323);
+    assertEquals(
+      result.ok,
+      false,
+      "instance within startup grace must not be reclaimed",
+    );
     removeLock(appId);
   } finally {
     try {

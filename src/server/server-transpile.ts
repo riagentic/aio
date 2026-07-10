@@ -51,12 +51,41 @@ export const transpileCache = new Map<
   { source: string; code: string }
 >();
 
-/** Normalize path — resolve symlinks when possible, fall back to resolve() */
+// Resolved-realpath cache — realPathSync is a syscall; memoizing it keeps the
+// per-request transpile path off the event loop after the first hit. Cleared
+// alongside transpileCache on file change/delete (watcher) and on eviction.
+const _realPathCache = new Map<string, string>();
+
+/** Normalize path — resolve symlinks when possible, fall back to resolve().
+ *  Results are memoized per input path so the dev-mode request path doesn't
+ *  issue a sync syscall on every transpile. */
 export function normPath(p: string): string {
+  const cached = _realPathCache.get(p);
+  if (cached) return cached;
+  let result: string;
   try {
-    return Deno.realPathSync(p);
+    result = Deno.realPathSync(p);
   } catch {
-    return resolve(p);
+    result = resolve(p);
+  }
+  // Cap the realpath cache to the same budget as the transpile cache so it
+  // can't grow unbounded; evict the oldest entry when saturated.
+  if (_realPathCache.size >= TRANSPILE_CACHE_MAX) {
+    const oldest = _realPathCache.keys().next().value;
+    if (oldest) _realPathCache.delete(oldest);
+  }
+  _realPathCache.set(p, result);
+  return result;
+}
+
+/** Clear the transpile + realpath caches (called by the watcher on delete). */
+export function clearTranspileCaches(filepath?: string): void {
+  if (filepath !== undefined) {
+    transpileCache.delete(filepath);
+    _realPathCache.delete(filepath);
+  } else {
+    transpileCache.clear();
+    _realPathCache.clear();
   }
 }
 

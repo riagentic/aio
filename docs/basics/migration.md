@@ -21,8 +21,9 @@ generates a correct `deno.json`. See [quickstart.md](quickstart.md).
 then map `"aio": "./dep/aio/mod.ts"` (plus `immer`, `@std/path`).
 
 **Option C: JSR** -- `deno add jsr:@riagentic/aio`, once the version you want is
-published. During the alpha, prefer A/B — the surface moves faster than JSR
-releases, so the `jsr:` pins shown below assume the package is published.
+published (JSR currently trails at alpha; the scaffolder (Option A) and
+`--vendored` install (Option B) always match the tagged framework). The `jsr:`
+pins below assume that version is already on JSR.
 
 ## Step 2: Update deno.json
 
@@ -35,17 +36,17 @@ releases, so the `jsr:` pins shown below assume the package is published.
     "jsxImportSource": "aio"
   },
   "imports": {
-    "aio": "jsr:@riagentic/aio@^1.0.0-alpha15",
-    "aio/air": "jsr:@riagentic/aio@^1.0.0-alpha15/air",
-    "aio/jsx-runtime": "jsr:@riagentic/aio@^1.0.0-alpha15/jsx-runtime",
+    "aio": "jsr:@riagentic/aio@^1.0.0-beta1",
+    "aio/air": "jsr:@riagentic/aio@^1.0.0-beta1/air",
+    "aio/jsx-runtime": "jsr:@riagentic/aio@^1.0.0-beta1/jsx-runtime",
     "esbuild": "npm:esbuild@^0.24"
   },
   "tasks": {
     "dev": "deno run -A src/app.ts",
-    "am": "deno run -A jsr:@riagentic/aio@^1.0.0-alpha15/am",
+    "am": "deno run -A jsr:@riagentic/aio@^1.0.0-beta1/am",
     "test": "deno test -A --unstable-kv tests/",
-    "compile:browser": "deno run -A jsr:@riagentic/aio@^1.0.0-alpha15/build --compile",
-    "compile:electron": "deno run -A jsr:@riagentic/aio@^1.0.0-alpha15/build --compile --electron"
+    "compile:browser": "deno run -A jsr:@riagentic/aio@^1.0.0-beta1/build --compile",
+    "compile:electron": "deno run -A jsr:@riagentic/aio@^1.0.0-beta1/build --compile --electron"
   }
 }
 ```

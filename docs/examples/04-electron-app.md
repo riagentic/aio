@@ -14,7 +14,7 @@ cloud, no accounts — just your notes on your machine.
     "compile:electron": "deno run -A src/app.ts --compile"
   },
   "imports": {
-    "aio": "jsr:@riagentic/aio@^1.0.0-alpha15"
+    "aio": "jsr:@riagentic/aio@^1.0.0-beta1"
   }
 }
 ```

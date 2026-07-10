@@ -95,6 +95,13 @@ export function createStormDetector(
       s.hotSeconds = 0;
       s.storming = false;
       s.dropped = 0;
+      // Evict quiet types so the map can't grow unbounded over a long-running
+      // server with many distinct action types. A type that went silent for
+      // >2s and isn't storming is re-created fresh on its next dispatch.
+      if (s.lastRate === 0 && elapsed >= 2000) {
+        types.delete(type);
+        return;
+      }
     }
     s.count = 0;
     s.bucketStart = nowMs;

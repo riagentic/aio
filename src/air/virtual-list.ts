@@ -20,6 +20,12 @@ export interface VirtualListConfig<T> {
   containerHeight: number;
   /** Number of extra items to render above/below viewport. Default 3. */
   overscan?: number;
+  /** Optional ref to the scrollable container. When provided, `scrollToIndex`
+   *  actually moves the scrollbar (the DOM scrollTop is the source of truth —
+   *  setting only the signal would leave the scrollbar in place and the next
+   *  user scroll would overwrite it). Attach the same ref to the container
+   *  element via `h("div", { ref: vlist.containerRef, ... })`. */
+  containerRef?: { current: HTMLElement | null };
 }
 
 /** Virtualized window state returned by {@linkcode useVirtualList}. */
@@ -34,6 +40,9 @@ export interface VirtualListState<T> {
   onScroll(e: Event): void;
   /** Scroll to a specific item index. */
   scrollToIndex(index: number): void;
+  /** The container ref passed in config (if any) — attach to the scrollable
+   *  container so `scrollToIndex` can move the scrollbar. */
+  readonly containerRef?: { current: HTMLElement | null };
   /** Container style — apply to the scrollable container. */
   readonly containerStyle: Record<string, string>;
   /** Inner style — apply to the inner wrapper that creates total height. */
@@ -127,7 +136,17 @@ export function useVirtualList<T>(
       scrollTopSig.set(el.scrollTop);
     },
     scrollToIndex(index: number) {
-      scrollTopSig.set(index * safeItemHeight);
+      const offset = Math.max(0, index) * safeItemHeight;
+      scrollTopSig.set(offset);
+      // The container's scrollTop is the source of truth — setting only the
+      // signal would leave the scrollbar in place, and the next user scroll
+      // would overwrite the signal with the unmoved scrollTop. If a container
+      // ref is wired, actually scroll it.
+      const el = config.containerRef?.current;
+      if (el) el.scrollTo({ top: offset });
+    },
+    get containerRef() {
+      return config.containerRef;
     },
     get containerStyle() {
       return {

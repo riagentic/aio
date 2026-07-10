@@ -17,7 +17,7 @@ export interface ShutdownRefs {
   appLock: { release: () => void } | null;
   scheduleManager: { cancelAll: () => void };
   ownManager: { disposeAll: () => void };
-  dispatch: { close: () => void };
+  dispatch: { close: () => void; drain: () => Promise<void> };
   getElectronProc: () => { kill: () => void } | null;
   clearElectronProc: () => void;
   getUdsThrottle: () => ReturnType<typeof setTimeout> | null;
@@ -44,15 +44,29 @@ export function createShutdownOrchestrator(
   async function _doShutdown(): Promise<void> {
     const { log } = refs;
 
-    // Phase 1: Persist — BEFORE onStop/destroyAll (destroyAll resets state)
+    // Phase 1: Stop accepting new dispatches and drain in-flight async effects
+    // BEFORE persisting. Previously dispatch.close() ran in Phase 6 (after
+    // persist), so connected clients could still dispatch actions between the
+    // final persist and the server close — those changes modified state that
+    // persistence had already written and would never re-persist (shuttingDown
+    // flag), silently losing them. Closing dispatch up front + draining ensures
+    // the final persist captures the true final state.
     refs.setShuttingDown();
+    refs.dispatch.close();
+    try {
+      await refs.dispatch.drain();
+    } catch (e) {
+      log.error(`shutdown: drain effects — ${e}`);
+    }
+
+    // Phase 2: Persist — the final snapshot reflects all pre-shutdown actions.
     try {
       await refs.flushPersist();
     } catch (e) {
       log.error(`shutdown: persist — ${e}`);
     }
 
-    // Phase 2: Diagnostics — flush action log, write final checkpoint
+    // Phase 3: Diagnostics — flush action log, write final checkpoint
     if (refs.diagHooks) {
       try {
         await refs.diagHooks.onStop();
@@ -64,13 +78,13 @@ export function createShutdownOrchestrator(
       }
     }
 
-    // Phase 3: Vitals cleanup
+    // Phase 4: Vitals cleanup
     const vTimer = refs.getVitalsCheckTimer();
     if (vTimer) clearInterval(vTimer);
     const vSys = refs.getVitalsSystem();
     if (vSys) vSys.destroy();
 
-    // Phase 4: User hooks — await so logger.flush() (wired inside bridge onStop)
+    // Phase 5: User hooks — await so logger.flush() (wired inside bridge onStop)
     // completes before we move on to releasing locks and closing subsystems (F-3).
     if (refs.onStop) {
       try {
@@ -80,16 +94,15 @@ export function createShutdownOrchestrator(
       }
     }
 
-    // Phase 5: Release single-instance lock
+    // Phase 6: Release single-instance lock
     if (refs.appLock) {
       refs.appLock.release();
       log.debug(`lock: released (PID ${Deno.pid})`);
     }
 
-    // Phase 6: Subsystem cleanup
+    // Phase 7: Subsystem cleanup
     refs.scheduleManager.cancelAll();
     refs.ownManager.disposeAll();
-    refs.dispatch.close();
 
     const ep = refs.getElectronProc();
     if (ep) {

@@ -4,6 +4,21 @@ import type { RenderBudget } from "../vitals/types.ts";
 import { escHtml } from "./server-html-constants.ts";
 import { devWsScript } from "./server-html-scripts.ts";
 
+/** Validate a UI entry filename before interpolating into the dev HTML shell's
+ *  `import('/${uiEntry}?v=...')`. The value comes from config (`ui.entry`) and
+ *  is interpolated raw — a value like `App.tsx');alert(1);//` would break out
+ *  of the import string literal (self-XSS in the dev shell). Allow only safe
+ *  path characters + .ts/.tsx extension. Throws on invalid input. */
+function _safeUiEntry(uiEntry: string): string {
+  if (!/^[\w./-]+\.(ts|tsx)$/.test(uiEntry)) {
+    throw new Error(
+      `invalid ui.entry "${uiEntry}" — must match /^[\w./-]+\.(ts|tsx)$/ (alphanumerics, ".", "/", "-", "_" + .ts/.tsx). ` +
+        `This is interpolated into the dev HTML import path and must be a safe filename.`,
+    );
+  }
+  return uiEntry;
+}
+
 /** Builds the common <head> content shared across all modes */
 function headContent(
   title: string,
@@ -81,6 +96,7 @@ function aioDevHTML(
   importMap: string,
   uiEntry = "App.tsx",
 ): string {
+  const entry = _safeUiEntry(uiEntry);
   return `<!DOCTYPE html>
 <html>
 <head>
@@ -93,7 +109,7 @@ ${head}
 
     // Mount AIO app — bind cells reactively, wait for server state, then render
     const _aioMod = await import('aio')
-    const _appMod = await import('/${uiEntry}?v=' + Date.now())
+    const _appMod = await import('/${entry}?v=' + Date.now())
     const App = _appMod.default
     if (_aioMod.ensureConnected) _aioMod.ensureConnected()
     if (_aioMod._waitForState) {
