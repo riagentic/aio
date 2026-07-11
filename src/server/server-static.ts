@@ -18,6 +18,7 @@ import {
   transpile,
 } from "./server-transpile.ts";
 import { handleTrojan as _handleTrojanRoute } from "./server-trojan.ts";
+import { loadVendorImmer } from "./server-vendor.ts";
 
 // Framework module URLs — this file lives in src/server/, so entry files at the
 // src/ root and folderized modules are one level up. The /__aio/ namespace
@@ -150,6 +151,16 @@ export function createStaticHandler(deps: StaticDeps): {
     }
 
     // ── AIO virtual JS modules ──
+    // Framework npm deps served locally — dev must not need the internet.
+    if (pathname === "/__aio/vendor/immer.js") {
+      const src = loadVendorImmer();
+      if (src) {
+        return new Response(src, {
+          headers: { "Content-Type": "text/javascript", ...noCache },
+        });
+      }
+      return new Response("// no local immer found", { status: 404 });
+    }
     if (pathname === "/__aio/ui.js") {
       return await serveAioModule(BROWSER_AIR_TS_URL, "browser-air.ts");
     }
