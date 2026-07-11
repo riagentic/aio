@@ -19,5 +19,10 @@ export function buildBrowserImportMap(
     const bare = specifier.slice(4); // strip 'npm:'
     imports[name] = `${CDN}/${bare}`;
   }
+  // The framework's own browser-side runtime deps must resolve even when the
+  // app's deno.json doesn't (or can't) list them — src/state-core.ts imports
+  // "immer", so a missing mapping is a BLANK SCREEN in dev/transpile mode.
+  // An app pin above still wins. Keep the version in sync with deno.json.
+  imports["immer"] ??= `${CDN}/immer@10.2.0`;
   return imports;
 }

@@ -102,6 +102,7 @@ export async function lint(
     "aio/air",
     "aio/browser",
     "aio/jsx-runtime",
+    "immer",
   ]);
 
   try {

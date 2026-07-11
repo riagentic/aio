@@ -299,3 +299,4 @@ export {
   type UIComponentHandle,
   type UIElementHandle,
 } from "./ui-test.ts";
+export { generateUITypes, testgen } from "./ui-testgen.ts";

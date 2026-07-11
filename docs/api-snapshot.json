@@ -1471,6 +1471,10 @@
     },
     "./testing": {
       "symbols": {
+        "generateUITypes": {
+          "kind": "function",
+          "sig": "8bc0a08a33112cf8"
+        },
         "setDocument": {
           "kind": "function",
           "sig": "84317e7760a7e7de"
@@ -1494,6 +1498,10 @@
         "TestContext": {
           "kind": "typeAlias",
           "sig": "f6de16d6a8582d2b"
+        },
+        "testgen": {
+          "kind": "function",
+          "sig": "165470dc07800697"
         },
         "testUI": {
           "kind": "function",

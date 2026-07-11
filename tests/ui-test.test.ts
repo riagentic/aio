@@ -5,7 +5,7 @@
 // stupid-proof errors.
 import { assert, assertEquals, assertThrows } from "@std/assert";
 import { Window } from "happy-dom";
-import { h } from "../src/air/vdom.ts";
+import { h, lazy, Portal, Suspense } from "../src/air/vdom.ts";
 import type { ComponentFn } from "../src/air/vdom.ts";
 import { useLocal } from "../src/browser-air.ts";
 import { cell } from "../src/state/cell-create.ts";
@@ -255,6 +255,147 @@ Deno.test("surface is a full observation space (AI-natural: see + act in one)", 
   const after = res.surface!.at(-1)!;
   const p3 = after.component === "Panel" ? after : after.children[0]!;
   assertEquals(p3.elements.find((e) => e.name === "status")!.text, "ON");
+  ui.unmount();
+  await win.happyDOM.close();
+});
+
+Deno.test("testgen: generated typed client compiles and matches the surface", async () => {
+  const { testgen } = await import("../src/testing/ui-testgen.ts");
+  function Row({ id }: { id: number }) {
+    return h("li", null, h("button", { onClick: () => void id }, "Remove"));
+  }
+  function App() {
+    return h(
+      "div",
+      null,
+      h("input", { placeholder: "Title", onChange: () => {} }),
+      h("div", { className: "button", onClick: () => {} }, "Submit"),
+      h("span", { t: "status-line" }, "ok"), // non-identifier name → quoted key
+      h(Row as ComponentFn, { key: 1, id: 1 }),
+      h(Row as ComponentFn, { key: 2, id: 2 }),
+    );
+  }
+  const win = new Window();
+  const src = await testgen(App as ComponentFn, {
+    document: win.document,
+    // point the generated import at the real repo path so deno check works
+    importFrom: new URL("../src/cell-test.ts", import.meta.url).href,
+  });
+  await win.happyDOM.close();
+
+  // structure: one interface per component, quoted non-identifier keys, root type
+  assert(src.includes("export interface AppUI extends UIComponentHandle"));
+  assert(src.includes("export interface RowUI"));
+  assert(src.includes("readonly TitleInput: UIElementHandle;"));
+  assert(src.includes("readonly SubmitButton: UIElementHandle;"));
+  assert(src.includes('readonly "status-line": UIElementHandle;'));
+  assert(src.includes("readonly Row: RowUI;"));
+  assert(src.includes("export type TypedTestUI = TestUI & {"));
+
+  // diamond check: the generated module actually type-checks
+  const tmp = await Deno.makeTempFile({ suffix: ".ts" });
+  await Deno.writeTextFile(tmp, src);
+  const out = await new Deno.Command(Deno.execPath(), {
+    args: ["check", "--no-lock", tmp],
+    stdout: "null",
+    stderr: "piped",
+  }).output();
+  const err = new TextDecoder().decode(out.stderr);
+  await Deno.remove(tmp);
+  assertEquals(out.code, 0, `generated types failed deno check:\n${err}`);
+});
+
+// ── Gestures: scroll + dragTo ─────────────────────────────────────────
+
+Deno.test("testUI: scroll and dragTo fire faithful gesture sequences", async () => {
+  const scrolls: number[] = [];
+  const dndLog: string[] = [];
+  function App() {
+    return h(
+      "div",
+      null,
+      h("div", {
+        t: "feed",
+        onScroll: (e: { target: { scrollTop: number } }) =>
+          scrolls.push(e.target.scrollTop),
+      }, "long list"),
+      h("div", {
+        t: "card",
+        draggable: true,
+        onDragStart: () => dndLog.push("start"),
+        onDragEnd: () => dndLog.push("end"),
+      }, "Card"),
+      h("div", {
+        t: "bin",
+        onDragOver: () => dndLog.push("over"),
+        onDrop: (e: { dataTransfer?: unknown }) =>
+          dndLog.push(e.dataTransfer ? "drop+dt" : "drop"),
+      }, "Bin"),
+    );
+  }
+  const win = new Window();
+  const ui = await testUI(App as ComponentFn, { document: win.document });
+
+  await ui.App.feed.scroll({ top: 250 });
+  assertEquals(scrolls, [250]);
+
+  await ui.App.card.dragTo(ui.App.bin);
+  // full HTML5 sequence: dragstart, dragover, drop (with a DataTransfer), dragend
+  assertEquals(dndLog, ["start", "over", "drop+dt", "end"]);
+
+  ui.unmount();
+  await win.happyDOM.close();
+});
+
+// ── Pins: Portal and Suspense content stay on the surface ────────────
+
+Deno.test("ui-surface pin: elements inside a Portal are on the surface and clickable", async () => {
+  let clicks = 0;
+  const win = new Window();
+  const target = win.document.createElement("div");
+  win.document.body.appendChild(target);
+  function App() {
+    return h(
+      "div",
+      null,
+      h(
+        Portal,
+        { target },
+        h("button", { onClick: () => clicks++ }, "Close"),
+      ),
+    );
+  }
+  const ui = await testUI(App as ComponentFn, { document: win.document });
+  await ui.App.CloseButton.click(); // portal content is addressable like any other
+  assertEquals(clicks, 1);
+  ui.unmount();
+  await win.happyDOM.close();
+});
+
+Deno.test("ui-surface pin: resolved lazy content under Suspense reaches the surface", async () => {
+  let clicks = 0;
+  function Loaded() {
+    return h("button", { onClick: () => clicks++ }, "Ready");
+  }
+  const LazyComp = lazy(() =>
+    Promise.resolve({ default: Loaded as ComponentFn })
+  );
+  function App() {
+    return h(
+      "div",
+      null,
+      h(
+        Suspense,
+        { fallback: h("span", null, "loading…") },
+        h(LazyComp, {}),
+      ),
+    );
+  }
+  const win = new Window();
+  const ui = await testUI(App as ComponentFn, { document: win.document });
+  await ui.waitFor(() => ui.html().includes("Ready"));
+  await ui.Loaded.ReadyButton.click();
+  assertEquals(clicks, 1);
   ui.unmount();
   await win.happyDOM.close();
 });

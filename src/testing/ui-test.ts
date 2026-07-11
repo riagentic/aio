@@ -26,6 +26,8 @@ import {
   triggerAction,
   triggerChar,
   triggerClear,
+  triggerDragTo,
+  triggerScroll,
   triggerSelect,
 } from "../air/ui-trigger.ts";
 
@@ -78,6 +80,12 @@ export interface UIElementHandle {
   uncheck(): Promise<void>;
   /** Clear an input's value (fires input). */
   clear(): Promise<void>;
+  /** Scroll the element: set scrollTop/scrollLeft, fire `scroll`. */
+  scroll(to?: { top?: number; left?: number }): Promise<void>;
+  /** HTML5 drag-and-drop this element onto another surface element —
+   *  dragstart → dragenter → dragover → drop → dragend with one shared
+   *  DataTransfer, exactly like a browser. */
+  dragTo(target: UIElementHandle): Promise<void>;
   /** The element's current text content. */
   readonly text: string;
   /** The element's current `value` (inputs). */
@@ -295,6 +303,13 @@ export async function testUI(
       },
       async clear() {
         await act((e) => triggerClear(e));
+      },
+      async scroll(to?: { top?: number; left?: number }) {
+        await act((e) => triggerScroll(e, to));
+      },
+      async dragTo(target: UIElementHandle) {
+        const dst = resolveElement(target.info.path)._el!;
+        await act((e) => triggerDragTo(e, dst));
       },
       get text() {
         return String(el().textContent ?? "");

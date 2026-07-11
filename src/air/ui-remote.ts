@@ -14,15 +14,38 @@ import {
   type UIElementInfo,
   type UISurfaceNode,
 } from "./ui-surface.ts";
-import { triggerAction, triggerChar } from "./ui-trigger.ts";
+import {
+  triggerAction,
+  triggerChar,
+  triggerClear,
+  triggerClick,
+  triggerDragTo,
+  triggerScroll,
+  triggerSelect,
+} from "./ui-trigger.ts";
 
 /** A trigger request from the server (`__ui:trigger:` payload). */
 export type UITriggerRequest = {
   /** Element path on the surface, e.g. "App/TodoAdd:AddButton" */
   path: string;
-  /** Action to perform */
-  action: "click" | "dblclick" | "type" | "press" | "hover" | "focus" | "blur";
-  /** Text for `type` */
+  /** Action to perform — the full `testUI` action set (both tiers behave
+   *  identically). */
+  action:
+    | "click"
+    | "dblclick"
+    | "type"
+    | "press"
+    | "hover"
+    | "focus"
+    | "blur"
+    | "select"
+    | "check"
+    | "uncheck"
+    | "clear"
+    | "scroll"
+    | "dragTo";
+  /** Text for `type`; value for `select`; target element path for `dragTo`;
+   *  offsets for `scroll` (e.g. "top=200" or "top=200 left=0") */
   text?: string;
   /** Key for `press` (default "Enter") */
   key?: string;
@@ -111,6 +134,30 @@ export async function runUITrigger(
         triggerChar(fresh._el, ch);
         await new Promise((r) => setTimeout(r, 0));
       }
+    } else if (req.action === "select") {
+      triggerSelect(info._el, req.text ?? "");
+    } else if (req.action === "clear") {
+      triggerClear(info._el);
+    } else if (req.action === "check" || req.action === "uncheck") {
+      const el = info._el as Element & { checked?: boolean };
+      if (el.checked !== (req.action === "check")) triggerClick(info._el);
+    } else if (req.action === "scroll") {
+      const to: { top?: number; left?: number } = {};
+      for (const m of (req.text ?? "").matchAll(/(top|left)\s*=\s*(-?\d+)/g)) {
+        to[m[1] as "top" | "left"] = Number(m[2]);
+      }
+      triggerScroll(info._el, to);
+    } else if (req.action === "dragTo") {
+      const dst = findByPath(req.text ?? "");
+      if (!dst || !dst._el) {
+        return {
+          ...base,
+          ok: false,
+          error: `dragTo target "${req.text}" not found on the live surface`,
+          available: allPaths(),
+        };
+      }
+      triggerDragTo(info._el, dst._el);
     } else {
       triggerAction(info._el, req.action, req.key);
     }
