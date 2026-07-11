@@ -68,6 +68,7 @@ export {
   type MountHandle,
   onCleanup,
   onMount,
+  setDevMode,
   useContext,
   useContextSelector,
   useId,

@@ -250,13 +250,9 @@ const orders = cell("orders", {
 
 ## Client log forwarding
 
-Forward browser console output to the server for centralized debugging:
-
-```ts
-import { installConsoleIntercept, uninstallConsoleIntercept } from "aio/air";
-
-installConsoleIntercept(); // call once at app startup
-```
+Browser console output is forwarded to the server **automatically** — the
+transport installs the intercept at startup, no imports or setup. Read the logs
+with `am logs` or in `.aio/log/`.
 
 Intercepts `console.log`, `info`, `warn`, `error`, `debug` plus global `error`
 and `unhandledrejection` events. Each log entry is sent as a `__log` wire
@@ -269,17 +265,19 @@ message:
 - Max 4KB message body, 2KB stack trace (truncated if larger)
 - Original console methods still work — intercept is additive
 - Fire-and-forget — no ack, no retry, no impact on app performance
-- Idempotent: calling `installConsoleIntercept()` twice is a no-op
-- Call `uninstallConsoleIntercept()` to restore original console
 
 ## DOM snapshot
 
-Capture a semantic snapshot of the current UI state from the server:
+> **Prefer the semantic surface** — `am surface <clientIdx>` gives every
+> component and element by NAME (what tests and AI agents use); the raw DOM
+> snapshot below is the low-level fallback. See
+> [UI testing](../testing/ui-testing.md).
 
-```ts
-import { snapshotDOM } from "aio/air";
+Capture a raw DOM snapshot of a live client from the CLI:
 
-const nodes: UINode[] = snapshotDOM();
+```sh
+am dom <clientIdx>          # semantic DOM snapshot of the connected client
+am dom <clientIdx> --all    # include collapsed wrapper nodes
 ```
 
 Walks the DOM tree (max 5000 nodes, depth 50) and builds a `UINode[]` array.
@@ -296,17 +294,17 @@ wrapper `<div>`s with no semantic content. Respects visibility (computed styles,
 
 ## DOM interaction
 
-Dispatch simulated user interactions from the server:
+> **Prefer `am trigger`** — it addresses elements by semantic name with faithful
+> event sequences and replies with the fresh post-action surface. The
+> selector-based interact below is the low-level fallback.
 
-```ts
-import { interact } from "aio/air";
+Dispatch simulated user interactions on a live client from the CLI:
 
-interact({ action: "click", selector: "#submit-btn" });
-interact({ action: "type", selector: "#name", value: "Alice" });
-interact({ action: "type", selector: "#email", value: "a@b.com", clear: true });
-interact({ action: "select", selector: "#role", value: "admin" });
-interact({ action: "focus", selector: "#search" });
-interact({ action: "scroll", selector: "#list", value: "500" }); // scrollTop
+```sh
+am interact click "#submit-btn"
+am interact type "#name" "Alice"
+am interact select "#role" "admin"
+am interact scroll "#list" 500     # scrollTop
 ```
 
 **Available actions:** `click`, `type`, `select`, `focus`, `blur`, `scroll`,
