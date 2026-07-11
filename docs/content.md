@@ -10,8 +10,9 @@
 - [Architecture](basics/architecture.md) — AIO is a full-stack Deno/TypeScript application framework built around cells
 - [Core Concepts](basics/concepts.md) — Everything you need to understand about how aio works.
 - [FAQ](basics/faq.md) — Common questions about what aio does, doesn't do, and why.
-- [AIO Documentation](basics/index.md) — lifecycle, release phases
+- [AIO Documentation](basics/index.md) — avoiding rule
 - [Migrating to AIO](basics/migration.md) — You have an existing Deno application and want to integrate AIO.
+- [Common Pitfalls](basics/pitfalls.md) — The traps people actually hit — each with the rule that avoids it.
 - [Positioning & non-goals](basics/positioning.md) — What aio is for, what it deliberately is not, and the trade-offs behind that —
 - [AIO -- Project Structure](basics/project-structure.md) — Six folders.
 - [AIO Quickstart](basics/quickstart.md) — Start a new aio app from scratch.
@@ -111,6 +112,7 @@
 - [Upgrading from alpha11 to alpha12](upgrade/from-alpha11-to-alpha12.md) — The useTransition() hook has been removed from aio/air.
 - [Upgrading from alpha12 to alpha13](upgrade/from-alpha12-to-alpha13.md) — alpha13 is the DX overhaul + production hardening release — the largest
 - [Upgrade: 1.0.0-alpha13 → 1.0.0-alpha14](upgrade/from-alpha13-to-alpha14.md) — Alpha14 applies the public-surface audit (roadmap A1,
+- [Upgrade: 1.0.0-alpha17 → 1.0.0-alpha18](upgrade/from-alpha17-to-alpha18.md) — Alpha18 is additive (no exports removed, no config renamed) — most apps upgrade
 - [Upgrade from v1.0.0-alpha2 to v1.0.0-alpha3](upgrade/from-alpha2-to-alpha3.md) — If you have tooling parsing JSON logs, update it.
 - [Upgrade from v1.0.0-alpha3 to v1.0.0-alpha4](upgrade/from-alpha3-to-alpha4.md) — If you rely on effects completing after timeout (e.g., fire-and-forget with a
 - [Upgrade from v1.0.0-alpha4 to v1.0.0-alpha5](upgrade/from-alpha4-to-alpha5.md) — None.
