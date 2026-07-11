@@ -11,6 +11,11 @@ import { useLocal } from "../src/browser-air.ts";
 import { cell } from "../src/state/cell-create.ts";
 import { testUI } from "../src/testing/ui-test.ts";
 
+// Coverage profiles from spawned deno processes go to a throwaway temp dir —
+// never into the repo (an empty DENO_COVERAGE_DIR means "cwd"), never into
+// the parent's coverage profile.
+const _childCovDir = Deno.makeTempDirSync({ prefix: "aio-child-cov-" });
+
 // ── Fixtures ──────────────────────────────────────────────────────────
 
 // The user's canonical example: a div with class "button" and text Submit
@@ -299,6 +304,7 @@ Deno.test("testgen: generated typed client compiles and matches the surface", as
   const tmp = await Deno.makeTempFile({ suffix: ".ts" });
   await Deno.writeTextFile(tmp, src);
   const out = await new Deno.Command(Deno.execPath(), {
+    env: { DENO_COVERAGE_DIR: _childCovDir },
     args: ["check", "--no-lock", tmp],
     stdout: "null",
     stderr: "piped",
@@ -532,4 +538,66 @@ Deno.test("queue: un-awaited failures surface at the next drain point", async ()
   assert(threw.includes("NopeButton"), `expected listing error, got: ${threw}`);
   await ui.dispose();
   await win.happyDOM.close();
+});
+
+// ── SPA submit default + useLocal tuple ───────────────────────────────
+
+Deno.test("forms: handled onSubmit auto-prevents navigation (SPA default)", async () => {
+  let prevented: boolean | null = null;
+  let submitted = 0;
+  function App() {
+    return h(
+      "form",
+      {
+        onSubmit: (e: Event) => {
+          submitted++;
+          prevented = e.defaultPrevented; // already prevented BEFORE the handler
+        },
+      },
+      h("input", { placeholder: "Name", onChange: () => {} }),
+    );
+  }
+  await using ui = await testUI(App as ComponentFn);
+  await ui.App.NameInput.press("Enter"); // implicit form submission
+  assertEquals(submitted, 1);
+  assertEquals(prevented, true);
+});
+
+Deno.test("forms: data-native-submit opts back into native submission", async () => {
+  let prevented: boolean | null = null;
+  function App() {
+    return h(
+      "form",
+      {
+        "data-native-submit": "",
+        onSubmit: (e: Event) => {
+          prevented = e.defaultPrevented;
+          e.preventDefault(); // the test still stops happy-dom navigation
+        },
+      },
+      h("input", { placeholder: "Name", onChange: () => {} }),
+    );
+  }
+  await using ui = await testUI(App as ComponentFn);
+  await ui.App.NameInput.press("Enter");
+  assertEquals(prevented, false);
+});
+
+Deno.test("useLocal: tuple AND object forms work from one call", async () => {
+  function App() {
+    const [text, setText] = useLocal("a"); //   tuple form
+    const obj = useLocal(0); //                  object form
+    return h("div", null, [
+      h("span", { t: "txt" }, text),
+      h("span", { t: "num" }, String(obj.local)),
+      h("button", { onClick: () => setText(text + "x") }, "Grow"),
+      h("button", { onClick: () => obj.set((n) => n + 1) }, "Bump"),
+    ]);
+  }
+  await using ui = await testUI(App as ComponentFn);
+  ui.App.GrowButton.click();
+  ui.App.BumpButton.click();
+  await ui.settle();
+  assertEquals(ui.App.txt.text, "ax");
+  assertEquals(ui.App.num.text, "1");
 });

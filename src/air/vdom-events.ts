@@ -83,6 +83,16 @@ export function _ensureDelegation(root: Element, evt: string): void {
         if ((node as Node).nodeType !== 1) continue;
         const handler = _wrappedListeners.get(node as Element)?.get(evt);
         if (handler) {
+          // SPA default: a handled form submit never navigates — no more
+          // `e.preventDefault()` boilerplate in every onSubmit. Opt back
+          // into native submission with <form nativeSubmit> (or call
+          // e.currentTarget.submit() yourself).
+          if (
+            evt === "submit" &&
+            !(node as Element).hasAttribute?.("data-native-submit")
+          ) {
+            e.preventDefault();
+          }
           // The native currentTarget here is the delegation root — user code
           // expects the handling element (`e.currentTarget.value`, per the
           // jsx-runtime AioEvent contract). Shadow it for this handler.
