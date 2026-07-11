@@ -2,7 +2,7 @@
 import { log } from "../diagnostics/logger.ts";
 
 /** Framework version — printed by --version, checked in tests */
-export const VERSION = "1.0.0-alpha18";
+export const VERSION = "1.0.0-alpha19";
 
 // ── CLI ─────────────────────────────────────────────────────────────
 
