@@ -179,6 +179,8 @@ See [FAQ](docs/basics/faq.md#when-not-to-use-aio) for details.
 
 ## Docs
 
+**[→ Full contents — every doc on one page](docs/content.md)**
+
 **Getting Started:** [Quickstart](docs/basics/quickstart.md) ·
 [Concepts](docs/basics/concepts.md) ·
 [Project Structure](docs/basics/project-structure.md) ·

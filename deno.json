@@ -35,11 +35,18 @@
       "telemetry-id"
     ]
   },
-  "unstable": ["kv"],
+  "unstable": [
+    "kv"
+  ],
   "compilerOptions": {
     "strict": true,
     "noUncheckedIndexedAccess": true,
-    "lib": ["deno.ns", "deno.unstable", "dom", "dom.iterable"],
+    "lib": [
+      "deno.ns",
+      "deno.unstable",
+      "dom",
+      "dom.iterable"
+    ],
     "jsx": "react-jsx",
     "jsxImportSource": "aio"
   },
@@ -70,7 +77,12 @@
     ]
   },
   "lint": {
-    "exclude": ["node_modules/", "tests/", "scripts/", "utils/"]
+    "exclude": [
+      "node_modules/",
+      "tests/",
+      "scripts/",
+      "utils/"
+    ]
   },
   "tasks": {
     "test": "deno test -A --unstable-kv tests/",
@@ -90,6 +102,7 @@
     "example": "deno run -A examples/counter/app.ts",
     "am": "deno run -A src/am.ts",
     "doctor": "deno run -A src/server/doctor.ts",
-    "docs": "deno doc --html --name=aio --output=docs/api-ref mod.ts"
+    "docs": "deno doc --html --name=aio --output=docs/api-ref mod.ts",
+    "docs:index": "deno run --allow-read --allow-write scripts/gen-doc-index.ts"
   }
 }
