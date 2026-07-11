@@ -85,11 +85,11 @@ export type MethodsCellConfig<
   validate?: (state: S) => true | string;
   /** Persistence filter — "all" (default) persists everything, "none" persists nothing.
    *  { include: [...] } or { exclude: [...] } for field-level control. */
-  persist?: CellFieldFilter<keyof S & string>;
+  persist?: CellFieldFilter<keyof NoInfer<S> & string>;
   /** UI visibility — "all" (default) exposes everything, "none" hides cell from clients.
    *  { include: [...] } or { exclude: [...] } for field-level control.
    *  Add forUser for per-user filtering on the already-filtered state. */
-  ui?: CellVisibility<keyof S & string, S>;
+  ui?: CellVisibility<keyof NoInfer<S> & string, NoInfer<S>>;
   /** CRDT sync — true for defaults, or partial config to override merge strategies, identity keys, retention */
   sync?: true | Partial<SyncConfig>;
   /** State version — increment when state shape changes. Default: 0. */
@@ -167,11 +167,11 @@ export type ActionsCellConfig<
   validate?: (state: S) => true | string;
   /** Persistence filter — "all" (default) persists everything, "none" persists nothing.
    *  { include: [...] } or { exclude: [...] } for field-level control. */
-  persist?: CellFieldFilter<keyof S & string>;
+  persist?: CellFieldFilter<keyof NoInfer<S> & string>;
   /** UI visibility — "all" (default) exposes everything, "none" hides cell from clients.
    *  { include: [...] } or { exclude: [...] } for field-level control.
    *  Add forUser for per-user filtering on the already-filtered state. */
-  ui?: CellVisibility<keyof S & string, S>;
+  ui?: CellVisibility<keyof NoInfer<S> & string, NoInfer<S>>;
   /** CRDT sync — true for defaults, or partial config to override merge strategies, identity keys, retention */
   sync?: true | Partial<SyncConfig>;
   /** State version — increment when state shape changes. Default: 0. */

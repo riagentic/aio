@@ -9,7 +9,7 @@
         },
         "ActionsCellConfig": {
           "kind": "typeAlias",
-          "sig": "e536b35031246deb"
+          "sig": "82272aac33ac9238"
         },
         "ActionSource": {
           "kind": "typeAlias",
@@ -333,7 +333,7 @@
         },
         "MethodsCellConfig": {
           "kind": "typeAlias",
-          "sig": "f11f3b5e0130d61b"
+          "sig": "2a19eade1792aa0c"
         },
         "MiddlewareFn": {
           "kind": "typeAlias",

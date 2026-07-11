@@ -77,30 +77,34 @@ export type ActionSource = "UI" | "Effect" | "System" | "Test";
 export type FilterUser = { id?: string; role?: string; [k: string]: unknown };
 
 /** Shared filter type — used by both persist and ui cell config.
- *  K generic enables autocomplete on state field names when used as keyof S. */
+ *  K generic enables autocomplete on state field names when used as keyof S.
+ *  `exclude` also accepts dot-paths ("accounts.encSecKey") — deep removal,
+ *  arrays traversed element-wise. */
 export type CellFieldFilter<K extends string = string> =
   | "all"
   | "none"
   | { include: K[] }
-  | { exclude: K[] };
+  | { exclude: (K | `${K}.${string}`)[] };
 
 /** Cell-level UI visibility — CellFieldFilter + optional per-user transform.
- *  S generic enables typed `forUser` callback — receives Pick/Omit of state based on include/exclude. */
+ *
+ *  One callback-bearing shape ON PURPOSE: a union with two `forUser` members
+ *  (the old Pick/Omit-precise design) breaks TypeScript's contextual typing —
+ *  `forUser: (s, user) => …` degraded to implicit-any and forced a manual
+ *  annotation. `exposed` is typed as the full state; at runtime it only
+ *  carries the fields the include/exclude filter kept. */
 export type CellVisibility<
   K extends string = string,
   S extends Record<string, unknown> = Record<string, unknown>,
 > = CellFieldFilter<K> | {
-  include: K[];
-  exclude?: never;
+  /** Top-level allowlist — only these fields are exposed. */
+  include?: K[];
+  /** Fields to remove; dot-paths ("accounts.encSecKey") remove deeply. */
+  exclude?: (K | `${K}.${string}`)[];
+  /** Per-user transform of the (already filtered) exposed state. Runs per
+   *  client per broadcast on a structuredClone — mutate freely. */
   forUser?: (
-    exposed: Pick<S, K & keyof S>,
-    user?: FilterUser,
-  ) => Record<string, unknown>;
-} | {
-  exclude: K[];
-  include?: never;
-  forUser?: (
-    exposed: Omit<S, K & keyof S>,
+    exposed: S,
     user?: FilterUser,
   ) => Record<string, unknown>;
 };

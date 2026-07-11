@@ -21,7 +21,10 @@ export function normalizePersistFilter(
 
 /** Extract forUser from CellVisibility if present */
 export function extractForUser(
-  ui: CellVisibility | undefined,
+  // `any` S: forUser's param is contravariant, so a concrete-state
+  // CellVisibility<K, S> is only assignable when exposed accepts anything.
+  // deno-lint-ignore no-explicit-any
+  ui: CellVisibility<string, any> | undefined,
 ):
   | ((
     exposed: Record<string, unknown>,
@@ -35,7 +38,8 @@ export function extractForUser(
 
 /** Normalize ui config into CellFieldFilter (strip forUser) */
 export function normalizeUiFilter(
-  ui: CellVisibility | undefined,
+  // deno-lint-ignore no-explicit-any
+  ui: CellVisibility<string, any> | undefined,
 ): CellFieldFilter | undefined {
   if (!ui) return undefined;
   if (ui === "all" || ui === "none") return ui;
