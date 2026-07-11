@@ -175,6 +175,8 @@ cli.subscribe((s) => console.log("state:", JSON.stringify(s)));
 For Android builds, aio uses a client-side dispatch loop instead of a server:
 
 ```ts
+// In android builds, the bundler resolves "aio" to the standalone runtime —
+// this import only exists inside a compile:android bundle.
 import { initStandalone } from "aio";
 
 const app = initStandalone(initialState, {

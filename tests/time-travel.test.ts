@@ -754,3 +754,25 @@ Deno.test({
     }
   },
 });
+
+Deno.test("markError via reportOpts getter tags the CURRENT entry, not the boot snapshot", async () => {
+  // Regression: record() replaces the TTState object per action; capturing the
+  // boot value pinned markError to the orphaned __init entry forever.
+  const { buildReportOpts } = await import("../src/server/aio-run-helpers.ts");
+  const { createTT, record } = await import(
+    "../src/diagnostics/time-travel.ts"
+  );
+  let tt = createTT<{ n: number }, { type: string }>();
+  tt = record(tt, { type: "__init" }, { n: 0 });
+  const reportOpts = buildReportOpts<{ n: number }>({
+    onError: undefined,
+    getTT: () => tt,
+    prod: false,
+  });
+  tt = record(tt, { type: "a" }, { n: 1 });
+  tt = record(tt, { type: "b" }, { n: 2 });
+  reportOpts.tt!.markError({ code: "REDUCE_ERROR", message: "boom" });
+  // the CURRENT entry (action b) carries the mark; __init does not
+  assertEquals(tt.entries[tt.index]!.error?.code, "REDUCE_ERROR");
+  assertEquals(tt.entries[0]!.error, undefined);
+});
