@@ -350,14 +350,16 @@ Deno.test("buildOnPerf: no-op when tt.entries is empty", () => {
 Deno.test("buildReportOpts: includes onError callback", () => {
   const onError = (_err: unknown) => {};
   // deno-lint-ignore no-explicit-any
-  const opts = buildReportOpts({ onError, tt: null, prod: false } as any);
+  const opts = buildReportOpts(
+    { onError, getTT: () => null, prod: false } as any,
+  );
   assertEquals(opts.onError, onError);
 });
 
 Deno.test("buildReportOpts: prod flag is passed through", () => {
   // deno-lint-ignore no-explicit-any
   const opts = buildReportOpts(
-    { onError: undefined, tt: null, prod: true } as any,
+    { onError: undefined, getTT: () => null, prod: true } as any,
   );
   assertEquals(opts.prod, true);
 });
@@ -365,7 +367,7 @@ Deno.test("buildReportOpts: prod flag is passed through", () => {
 Deno.test("buildReportOpts: tt is undefined when null passed", () => {
   // deno-lint-ignore no-explicit-any
   const opts = buildReportOpts(
-    { onError: undefined, tt: null, prod: false } as any,
+    { onError: undefined, getTT: () => null, prod: false } as any,
   );
   assertEquals(opts.tt, undefined);
 });
@@ -373,6 +375,8 @@ Deno.test("buildReportOpts: tt is undefined when null passed", () => {
 Deno.test("buildReportOpts: tt.markError is provided when tt passed", () => {
   const tt = { entries: [], index: -1, paused: false, nextId: 0 };
   // deno-lint-ignore no-explicit-any
-  const opts = buildReportOpts({ onError: undefined, tt, prod: false } as any);
+  const opts = buildReportOpts(
+    { onError: undefined, getTT: () => tt, prod: false } as any,
+  );
   assertEquals(typeof opts.tt?.markError, "function");
 });

@@ -33,10 +33,14 @@ export function createMemoizedUIState<S>(
   };
 }
 
-/** Build reportOpts for error reporting — wired after tt init */
+/** Build reportOpts for error reporting — wired after tt init.
+ *  Takes a GETTER for the time-travel state: `record()`/`undo()` replace the
+ *  TTState object on every action, so capturing the value would pin markError
+ *  to the stale boot snapshot and error marks would never reach the live
+ *  timeline. */
 export function buildReportOpts<S>(opts: {
   onError: AioConfig<S, unknown, unknown>["onError"];
-  tt: TTState<S, { type: string }> | null;
+  getTT: () => TTState<S, { type: string }> | null;
   prod: boolean;
 }): ReportErrorOpts {
   return {
@@ -47,7 +51,7 @@ export function buildReportOpts<S>(opts: {
           getLogger()!.pub("error", "aio", msg, data),
       }
       : undefined,
-    tt: opts.tt
+    tt: opts.getTT()
       ? {
         markError: (
           err: {
@@ -56,7 +60,10 @@ export function buildReportOpts<S>(opts: {
             cellName?: string;
             flowStep?: number;
           },
-        ) => markError(opts.tt!, err),
+        ) => {
+          const t = opts.getTT();
+          if (t) markError(t, err);
+        },
       }
       : undefined,
     prod: opts.prod,

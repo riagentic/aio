@@ -383,7 +383,7 @@ async function _run<S, A, E>(
     log.debug("time-travel: initialized");
   }
 
-  const _reportOpts = buildReportOpts({ onError, tt, prod });
+  const _reportOpts = buildReportOpts({ onError, getTT: () => tt, prod });
   if (config._onReportOptsReady) config._onReportOptsReady(_reportOpts);
 
   // --- Phase 3: wire dispatch ---

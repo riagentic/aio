@@ -14,7 +14,7 @@
   access
 - **`--version` / `--help` flags**
 - **`--url` thin client** — launch Electron connecting to a remote aio server.
-  See [electron.md — Thin client](electron.md#thin-client---url)
+  See [electron.md — Thin client](../clients/electron.md)
 - **`--width` / `--height` flags** — override Electron window dimensions from
   CLI
 - **Window config** — `ui: { width, height }` sets default Electron window size.
@@ -26,7 +26,7 @@
 - **Per-user `stateForUI(state, user?)`** — server-controlled per-user state
   filtering
 - **Multi-user auth** — `users: Record<string, AioUser>` token map with per-user
-  identity. See [auth.md — Multi-user auth](auth.md#multi-user-auth)
+  identity. See [auth.md — Multi-user auth](../auth/auth.md)
 - **camelCase factory creators** — `A.increment()` alongside `A.Increment` label
 - **Startup linter** — validates state, config, App.tsx, esbuild, electron on
   boot
@@ -36,23 +36,23 @@
 - **Lifecycle hooks** — 6 optional `on*` callbacks with `user?` parameter:
   `onAction`, `onEffect`, `onConnect`, `onDisconnect`, `onStart`, `onStop`.
   Observe-only, error-guarded. See
-  [core.md — Lifecycle hooks](core.md#lifecycle-hooks)
+  [core.md — Lifecycle hooks](../basics/concepts.md)
 - **Time-travel** — dev mode records action history with undo/redo/goto. Press
   Ctrl+. for browser panel, or use `am tt undo`. `useTimeTravel()` hook for
   programmatic control. 200-entry cap, zero cost in prod. See
-  [ui.md — Time-Travel](ui.md#time-travel)
+  [ui.md — Time-Travel](../ui/README.md)
 - **am — app manager** — CLI for process lifecycle, state inspection, dispatch,
   time-travel, log tailing. `deno task am help`. Output: pretty for terminals,
-  JSON for scripts/agents. See [cli.md — am](cli.md#am--app-manager)
+  JSON for scripts/agents. See [cli.md — am](../clients/app-manager.md)
 - **Connection status indicator** — shows "Reconnecting..." pill on disconnect
   and "Connected" briefly on reconnect. Pure DOM, no user code. Disable with
   `ui: { showStatus: false }`
 - **State snapshots** — `app.snapshot()` / `app.loadSnapshot(json)` + HTTP
   `GET/POST /__aio/snapshot`. See
-  [persistence.md — State snapshots](persistence.md#state-snapshots)
+  [persistence.md — State snapshots](../persistence/README.md)
 - **Scheduled effects** — `schedule.after/every/at/cron/cancel` — declarative
   timers, intervals, cron jobs as effects. See
-  [core.md — Scheduled effects](core.md#scheduled-effects)
+  [core.md — Scheduled effects](../basics/concepts.md)
 - **aio-client** — standalone Electron connect-page app
   (`compile:electron:remote`). Connects to any aio server without Deno
 - **One-liner init** — `sh -c "$(curl -fsSL .../init.sh)" -- my-app` scaffolds a
@@ -61,7 +61,7 @@
   `db: { orders: table({...}) }` in config. Level 1: auto-sync arrays to/from
   SQLite. Level 2: `app.db.orders.where(...)` ORM. Level 3: `app.db.query(...)`
   raw SQL. Uses `node:sqlite` (built into Deno 2.2+, zero deps). See
-  [persistence.md — SQLite](persistence.md#sqlite-persistence)
+  [persistence.md — SQLite](../persistence/README.md)
 
 ### Breaking changes
 

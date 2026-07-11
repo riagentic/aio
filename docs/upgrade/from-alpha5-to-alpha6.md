@@ -9,15 +9,15 @@ None. This release is fully backward compatible with alpha5.
 - **AIR native renderer (~8KB)** — signal-based VDOM engine with JSX, keyed
   reconciliation, auto-memo, SSR/hydration, lifecycle, context, portals,
   suspense, forms (`useForm`), animation (`useSpring`, `useTransition`), virtual
-  scrolling (`useVirtualList`), devtools. See [renderer.md](renderer.md)
+  scrolling (`useVirtualList`), devtools. See [renderer.md](../ui/README.md)
 - **Adapter architecture** — `state-core.ts` as framework-agnostic foundation.
   React and AIR adapters are thin consumers. New export paths: `aio/state-core`,
   `aio/adapters/react`, `aio/adapters/air`, `aio/jsx-runtime`. See
-  [api.md](api.md)
+  [api.md](../basics/api-reference.md)
 - **Delta protocol hardening (AIO-26..34)** — Electron replay fix, UDS
   per-client subscriptions, `$f` filtered merge protocol, `unflattenPatch`
   empty→identity array fix, periodic resync every ~5s, update-after-send,
-  ref-equality removal. See [changelog.md](changelog.md)
+  ref-equality removal. See [changelog.md](../../CHANGELOG.md)
 
 ### Upgrade steps
 

@@ -15,6 +15,10 @@ deno task check             # type-check (mod.ts, aiol, init)
 deno task lint              # lint src/
 deno task lint:aio          # aiol custom linter
 deno task am <cmd>          # app manager: start/stop/status/state/dispatch/tt/logs
+deno task doctor            # config sanity checks (deno.json magic lines)
+deno task coverage:check    # full suite + src/ line-coverage floor (CI gate)
+deno task api:check         # public-surface snapshot gate (api:update to regen)
+deno task boundaries        # src/ folder dependency matrix
 ```
 
 Single file: `deno test -A --unstable-kv tests/signal.test.ts`

@@ -88,12 +88,11 @@ appId, port, PID, uptime, and cwd.
 **Programmatic:**
 
 ```ts
-import { instances, resolveAppId, slugify } from "aio";
+import { instances, resolveAppId } from "aio";
 
 const running = await instances(); // all running apps
 const mine = await instances("my-app"); // specific app
-const id = resolveAppId({ appId: "foo" }); // canonical ID
-const slug = slugify("My Cool App!"); // 'my-cool-app'
+const id = resolveAppId("My Cool App!"); // canonical slug: 'my-cool-app'
 ```
 
 ## State inspection

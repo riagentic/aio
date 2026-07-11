@@ -13,4 +13,4 @@ Getting started with AIO — concepts, setup, and reference.
 
 - [API Reference](api-reference.md) — all exports
 - [FAQ](faq.md) — design decisions and non-goals
-- [Changelog](changelog.md) — version history
+- [Changelog](../../CHANGELOG.md) — version history
