@@ -1073,17 +1073,14 @@ testCell(alerts, 'raise → ack → clearAcked', (t) => {
 })
 `,
     // Semantic UI test — drives the real component tree through the
-    // auto-generated API (no selectors). Stripped for headless app types.
+    // auto-generated API. No selectors, no DOM setup, no teardown: testUI
+    // creates the window, boots the imported cells, and cleans up.
     "tests/ui.test.tsx": `import { assert, assertEquals } from '@std/assert'
-import { Window } from 'happy-dom'
 import { testUI } from 'aio/testing'
 import { alerts } from '../src/cell/alerts.ts'
 import App from '../src/App.tsx'
 
-Deno.test('dashboard: raise → ack → filter, through the semantic surface', async () => {
-  const win = new Window()
-  const ui = await testUI(App, { document: win.document, cells: [alerts] })
-
+testUI(App, 'dashboard: raise → ack → filter, through the semantic surface', async (ui) => {
   await alerts.raise('disk almost full', 'warn')
   await alerts.raise('service down', 'crit')
   await ui.settle()
@@ -1092,17 +1089,16 @@ Deno.test('dashboard: raise → ack → filter, through the semantic surface', a
   assert(ui.find('AlertRow', 1).text.includes('disk almost full'))
   assertEquals(ui.App['open-count'].text, '2')
 
-  // Ack the first alert with a real click — it leaves the "open" filter
-  await ui.find('AlertRow', 1).AckButton.click()
+  // Ack the first alert with a real click — it leaves the "open" filter.
+  // Actions queue in order; await only where you observe.
+  ui.find('AlertRow', 1).AckButton.click()
   await ui.expectCell(alerts, a => a.items[0]!.acked === true)
   assertEquals(ui.App['open-count'].text, '1')
 
   // Flip the filter to "acked" — only the acked row remains visible
-  await ui.App.AckedButton.click()
+  ui.App.AckedButton.click()
+  await ui.settle()
   assert(ui.find('AlertRow', 1).text.includes('disk almost full'))
-
-  ui.unmount()
-  await win.happyDOM.close()
 })
 `,
   };

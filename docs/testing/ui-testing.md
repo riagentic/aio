@@ -8,27 +8,30 @@ render/dispatch loop (no sleeps, no flake).
 
 ## In tests: `testUI`
 
+Zero boilerplate — one import, one call. The DOM is created for you, every
+`cell()` your App imports boots automatically, and teardown is handled:
+
 ```ts
-import { Window } from "happy-dom";
 import { testUI } from "aio/testing";
 import { todo } from "../src/cell/todo.ts";
 import App from "../src/App.tsx";
 
-Deno.test("add a todo end-to-end", async () => {
-  const win = new Window();
-  const ui = await testUI(App, { document: win.document, cells: [todo] });
-
-  await ui.TodoAdd.TitleInput.type("buy milk"); // client-only useLocal — real events
-  await ui.TodoAdd.AddButton.click(); // settles the whole loop
-  await ui.expectCell(todo, (t) => t.items.length === 1);
+testUI(App, "add a todo end-to-end", async (ui) => {
+  ui.TodoAdd.TitleInput.type("buy milk"); // actions queue — no await needed
+  ui.TodoAdd.AddButton.click(); //           runs after the typing, in order
+  await ui.expectCell(todo, (t) => t.items.length === 1); // observe = await
   assertEquals(ui.find("TodoRow", 1).text.includes("buy milk"), true);
-
-  ui.unmount();
-  await win.happyDOM.close();
 });
 ```
 
-- Every action is `await`ed and resolves after the app is quiescent.
+- **Actions need no `await`** — they run in order on an internal queue, each
+  settling the app before the next. You `await` only where you _observe_:
+  `expectCell`, `waitFor`, `settle` (each drains the queue first and surfaces
+  any queued failure — a typo'd name still fails the test, with the usual name
+  listing). Awaiting an action still works and is equivalent.
+- Acting on UI a previous action creates just works:
+  `ui.OpenButton.click(); ui.Modal.ConfirmButton.click()` — the modal is
+  resolved when its turn comes, not at access time.
 - Actions: `click`, `dblclick`, `type`, `press` (Enter submits forms), `hover`,
   `focus`, `blur`, `select(value)`, `check()`, `uncheck()`, `clear()`,
   `scroll({top, left})`, `dragTo(other)` (full HTML5 DnD sequence with a shared
@@ -36,8 +39,29 @@ Deno.test("add a todo end-to-end", async () => {
 - Reads: `.text`, `.value`, `ui.surface()`, `ui.html()`; waits:
   `ui.waitFor(pred)`.
 - Keyed list instances: `ui.find("TodoRow", key)`.
-- Cells run on the real local dispatch loop; omit `cells` for pure client-only
-  components. Hermetic by default (`persist: false`).
+- Cells run on the real local dispatch loop (the android runtime). Hermetic by
+  default (`persist: false`, unique key — no state leaks between tests).
+
+### Handle form — compose your own test
+
+When you want the handle inside your own `Deno.test` (multiple apps, custom
+setup), `await using` disposes it at scope end:
+
+```ts
+Deno.test("two flows", async () => {
+  await using ui = await testUI(App);
+  await ui.App.SaveButton.click();
+});
+```
+
+Options — only when you need control (all optional):
+
+| Option             | Default                        | Use when                  |
+| ------------------ | ------------------------------ | ------------------------- |
+| `document`         | auto happy-dom window          | jsdom / a shared window   |
+| `cells`            | all registered (App's imports) | restrict the booted set   |
+| `persist`          | `false` (hermetic)             | testing persistence flows |
+| `settleIterations` | `20`                           | very slow cascades        |
 
 ## How names are derived (deterministic)
 

@@ -1,5 +1,36 @@
 # Changelog
 
+## Unreleased (alpha19)
+
+### Changed
+
+- **UI tests: zero boilerplate, zero awaits on actions** —
+  - `testUI(App, "name", async (ui) => …)` wrapper form: auto happy-dom window,
+    auto-boots every `cell()` the App imports (same registry the android runtime
+    uses), full teardown. Handle form supports
+    `await using ui = await testUI(App)`.
+  - Actions run on an ordered internal queue — no `await` per action; `await`
+    only observations (`settle`/`expectCell`/`waitFor`), which drain the queue
+    and surface any queued failure (typo'd names still fail with the usual
+    listing). Acting on UI a prior action creates
+    (`ui.OpenButton.click(); ui.Modal.ConfirmButton.click()`) resolves lazily at
+    run time.
+  - Options (`document`, `cells`) are now only for taking control, not required
+    setup; Dashboard template + docs rewritten to the compact form.
+
+### Added
+
+- **docs/content.md** — generated master table of contents (every doc page,
+  grouped, with one-liners); `deno task docs:index` regenerates, CI gates
+  freshness.
+
+### Fixed
+
+- stress.test.ts header claimed memory-bounds coverage it didn't have
+  (heap-slope testing lives in `deno task soak`); patch-filter tests now
+  exercise the real `state-filter.ts` module instead of a local copy of the
+  logic.
+
 ## 1.0.0-alpha18 — first-class semantic UI testing + intuitiveness hardening (2026-07-11)
 
 ### Added

@@ -111,12 +111,15 @@ Deno.test("testUI: keyed instances + cell round-trip on the real loop", async ()
   await win.happyDOM.close();
 });
 
-Deno.test("testUI: unknown names fail with helpful, listing errors", async () => {
+Deno.test("testUI: unknown names fail with helpful, listing errors at use", async () => {
   const win = new Window();
   const ui = await testUI(makeApp(() => {}), { document: win.document });
-  const err = assertThrows(() => ui.Submit.NopeButton) as Error;
+  // Access alone returns a lazy handle (the name may be created by a queued
+  // action) — the helpful listing error fires at USE: sync for reads…
+  const err = assertThrows(() => ui.Submit.NopeButton.text) as Error;
   assert(err.message.includes("SubmitButton"), err.message);
   assert(err.message.includes("t prop"), err.message);
+  // …and at the next drain point for actions (covered by the queue tests).
   ui.unmount();
   await win.happyDOM.close();
 });
@@ -397,5 +400,136 @@ Deno.test("ui-surface pin: resolved lazy content under Suspense reaches the surf
   await ui.Loaded.ReadyButton.click();
   assertEquals(clicks, 1);
   ui.unmount();
+  await win.happyDOM.close();
+});
+
+// ── Compact forms: zero-boilerplate wrapper, await using, auto-everything ──
+
+// Wrapper form: no Window, no cells, no unmount — one call, all teardown.
+testUI(makeCompactApp(), "wrapper form: zero-boilerplate test", async (ui) => {
+  await ui.Compact.PingButton.click();
+  assertEquals(ui.Compact.PingButton.text, "Ping");
+});
+
+function makeCompactApp(): ComponentFn {
+  function Compact() {
+    return h("div", null, h("button", { onClick: () => {} }, "Ping"));
+  }
+  function App() {
+    return h("div", null, h(Compact as ComponentFn, {}));
+  }
+  return App as ComponentFn;
+}
+
+Deno.test("testUI: auto-DOM + auto-cells + await using — no options at all", async () => {
+  // This cell is in the registry purely by being defined — testUI boots it
+  // without a cells option, exactly like the android standalone runtime.
+  const auto = cell("testui-auto", {
+    state: { n: 0 },
+    methods: {
+      bump(s) {
+        s.n++;
+      },
+    },
+  });
+  function App() {
+    return h("div", null, [
+      h("span", { t: "n" }, String(auto.n)),
+      h("button", { onClick: () => auto.bump() }, "Bump"),
+    ]);
+  }
+  {
+    await using ui = await testUI(App as ComponentFn);
+    await ui.App.BumpButton.click();
+    await ui.expectCell(auto, (a) => a.n === 1);
+    assertEquals(ui.App.n.text, "1");
+  } // disposed here — window closed, runtime reset, nothing to clean up
+});
+
+// ── No-await actions: the FIFO queue ──────────────────────────────────
+
+testUI(
+  makeCompactApp(),
+  "queue: un-awaited actions run in order",
+  async (ui) => {
+    // zero awaits on actions — ordering comes from the internal queue
+    ui.Compact.PingButton.click();
+    ui.Compact.PingButton.click();
+    ui.Compact.PingButton.click();
+    await ui.settle(); // observation point — drains the queue
+    assertEquals(ui.Compact.PingButton.text, "Ping");
+  },
+);
+
+Deno.test("queue: type→click→assert with a cell, no per-action awaits", async () => {
+  const box = cell("testui-queue", {
+    state: { items: [] as string[], draft: "" },
+    methods: {
+      add(s, text: string) {
+        s.items.push(text);
+      },
+    },
+  });
+  function App() {
+    const { local: draft, set } = useLocal("");
+    return h("div", null, [
+      h("input", {
+        placeholder: "Item",
+        value: draft,
+        onInput: (e: { currentTarget: { value: string } }) =>
+          set(e.currentTarget.value),
+      }),
+      h("button", {
+        onClick: () => {
+          box.add(draft);
+          set("");
+        },
+      }, "Add"),
+    ]);
+  }
+  await using ui = await testUI(App as ComponentFn);
+  ui.App.ItemInput.type("milk"); // no await
+  ui.App.AddButton.click(); //       no await — queued after the typing
+  await ui.expectCell(box, (b) => b.items[0] === "milk");
+});
+
+Deno.test("queue: acting on UI a prior queued action creates (modal flow)", async () => {
+  let confirmed = 0;
+  function Modal() {
+    return h(
+      "div",
+      null,
+      h("button", { onClick: () => confirmed++ }, "Confirm"),
+    );
+  }
+  function App() {
+    const { local: open, set } = useLocal(false);
+    return h("div", null, [
+      h("button", { onClick: () => set(true) }, "Open"),
+      open ? h(Modal as ComponentFn, {}) : null,
+    ]);
+  }
+  await using ui = await testUI(App as ComponentFn);
+  // Modal does not exist yet at access time — the lazy handle resolves it
+  // inside the queue, after OpenButton's click has settled.
+  ui.App.OpenButton.click();
+  ui.Modal.ConfirmButton.click();
+  await ui.settle();
+  assertEquals(confirmed, 1);
+});
+
+Deno.test("queue: un-awaited failures surface at the next drain point", async () => {
+  const win = new Window();
+  const ui = await testUI(makeApp(() => {}), { document: win.document });
+  ui.Submit.SubmitButton.click(); // fine
+  (ui.Submit as { NopeButton: { click(): Promise<void> } }).NopeButton.click(); // no such element — NOT awaited
+  let threw = "";
+  try {
+    await ui.settle(); // drain rethrows the stashed failure
+  } catch (e) {
+    threw = String(e);
+  }
+  assert(threw.includes("NopeButton"), `expected listing error, got: ${threw}`);
+  await ui.dispose();
   await win.happyDOM.close();
 });

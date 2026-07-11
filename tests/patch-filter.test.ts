@@ -1,53 +1,17 @@
+// tests/patch-filter.test.ts — filterPatchesByStrategy + applyCellFieldFilter
+// against the REAL src/state/state-filter.ts module (an earlier version
+// tested a local copy of the logic — a drift hazard, removed).
 import { assertEquals } from "jsr:@std/assert@1";
+import {
+  applyCellFieldFilter,
+  filterPatchesByStrategy,
+} from "../src/state/state-filter.ts";
+import type { Patch } from "immer";
 
-// Self-contained types matching immer Patch shape
-type Patch = {
-  op: "replace" | "add" | "remove";
-  path: (string | number)[];
-  value?: unknown;
-};
 type PatchEntry = { cell: string; ops: Patch[] };
 type CellPatchStrategy = "raw" | "skip" | "filter" | "full";
-type FilterFields = { mode: "include" | "exclude"; fields: Set<string> };
-
-/** Filter patch entries per-cell based on strategy map.
- *  Returns undefined → full-state fallback needed,
- *  [] → nothing to send, PatchEntry[] → filtered patches. */
-function filterPatchesByStrategy(
-  patches: PatchEntry[],
-  strategies: Map<string, CellPatchStrategy>,
-  filterFields: Map<string, FilterFields>,
-): PatchEntry[] | undefined {
-  // Pass 1: any patch targeting a "full" strategy cell → full fallback
-  for (const entry of patches) {
-    if (strategies.get(entry.cell) === "full") return undefined;
-  }
-  // Pass 2: filter per-cell
-  const result: PatchEntry[] = [];
-  for (const entry of patches) {
-    const strategy = strategies.get(entry.cell);
-    if (strategy === undefined) return undefined; // unknown cell → safety fallback
-    if (strategy === "skip") continue;
-    if (strategy === "raw") {
-      result.push(entry);
-      continue;
-    }
-    // strategy === "filter"
-    const ff = filterFields.get(entry.cell);
-    if (!ff) return undefined; // filter strategy but no field config → safety
-    const kept: Patch[] = [];
-    for (const op of entry.ops) {
-      if (op.path.length === 0) return undefined; // root replacement → full fallback
-      const seg = String(op.path[0]);
-      if (ff.mode === "include" && ff.fields.has(seg)) kept.push(op);
-      if (ff.mode === "exclude" && !ff.fields.has(seg)) kept.push(op);
-    }
-    if (kept.length > 0) result.push({ cell: entry.cell, ops: kept });
-  }
-  return result;
-}
-
-// ── Tests ──────────────────────────────────────────────────────────
+type FilterFields = Parameters<typeof filterPatchesByStrategy>[2] extends
+  Map<string, infer V> ? V : never;
 
 Deno.test("raw strategy passes patches through", () => {
   const patches: PatchEntry[] = [
@@ -197,20 +161,8 @@ Deno.test("unknown cell (not in strategy map) → undefined", () => {
 // ── Deep-path excludes (the nested-secret footgun, fixed) ────────────
 // exclude: ["accounts.encSecKey"] removes the field EVERYWHERE under
 // accounts — full-state filtering and patch broadcasts both.
-// These import the REAL src module (the tests above exercise a local copy —
-// kept for shape documentation, but the gate below is the source of truth).
-import {
-  applyCellFieldFilter as realApplyFilter,
-  filterPatchesByStrategy as realFilterPatches,
-} from "../src/state/state-filter.ts";
-
-const filterMod = () => ({
-  applyCellFieldFilter: realApplyFilter,
-  filterPatchesByStrategy: realFilterPatches,
-});
 
 Deno.test("deep exclude: full-state filter strips nested secrets through arrays", () => {
-  const { applyCellFieldFilter } = filterMod();
   const state = {
     accounts: [
       { id: 1, name: "a", encSecKey: "s3cr3t-1" },
@@ -231,7 +183,6 @@ Deno.test("deep exclude: full-state filter strips nested secrets through arrays"
 });
 
 Deno.test("deep exclude: multi-level path through nested objects", () => {
-  const { applyCellFieldFilter } = filterMod();
   const out = applyCellFieldFilter(
     { exclude: ["wallet.keys.priv"] },
     { wallet: { keys: { pub: "P", priv: "S" }, label: "main" } },
@@ -240,7 +191,6 @@ Deno.test("deep exclude: multi-level path through nested objects", () => {
 });
 
 Deno.test("deep exclude: patch targeting the excluded field is dropped", () => {
-  const { filterPatchesByStrategy } = filterMod();
   const res = filterPatchesByStrategy(
     [{
       cell: "vault",
@@ -266,7 +216,6 @@ Deno.test("deep exclude: patch targeting the excluded field is dropped", () => {
 });
 
 Deno.test("deep exclude: ancestor-replacing patch has the secret stripped from its value", () => {
-  const { filterPatchesByStrategy } = filterMod();
   const res = filterPatchesByStrategy(
     [{
       cell: "vault",
@@ -290,7 +239,6 @@ Deno.test("deep exclude: ancestor-replacing patch has the secret stripped from i
 });
 
 Deno.test("deep exclude: patches below the excluded subtree are dropped too", () => {
-  const { filterPatchesByStrategy } = filterMod();
   const res = filterPatchesByStrategy(
     [{
       cell: "vault",

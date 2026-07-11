@@ -12,6 +12,7 @@
 // faithful to a user, never calling handlers directly.
 
 import { _setDocument, _unmount, mount } from "../air/aio-renderer.ts";
+import { getRegisteredCells } from "../state/cell-reactive.ts";
 import type { ComponentFn } from "../air/vdom-types.ts";
 import type { MountHandle, RootState } from "../air/renderer-types.ts";
 import { _rootStateMap } from "../air/renderer-state.ts";
@@ -36,12 +37,15 @@ type AnyDoc = any;
 
 /** Options for {@linkcode testUI}. */
 export interface TestUIOptions {
-  /** Document to render into — bring a happy-dom / jsdom document (keeps test
-   *  DOM deps out of the framework). Falls back to `globalThis.document`. */
+  /** Document to render into. Omit it — testUI creates (and disposes) a
+   *  happy-dom window for you. Pass one only to control the DOM yourself
+   *  (jsdom, a shared window, …). Falls back to `globalThis.document`. */
   document?: AnyDoc;
   /** Cells to run on the local (standalone) dispatch loop — the same runtime
    *  the android target uses, so method calls and reactive getters behave for
-   *  real. Omit for pure client-only components. */
+   *  real. Omit it — every `cell()` your App (transitively) imports has
+   *  self-registered and boots automatically. Pass a list only to restrict
+   *  the booted set. */
   // deno-lint-ignore no-explicit-any
   cells?: any[];
   /** Persist cell state to localStorage between runs. Default **false** —
@@ -53,8 +57,12 @@ export interface TestUIOptions {
   settleIterations?: number;
 }
 
-/** A triggerable element of the semantic UI surface. Every action is async and
- *  settles the app (renders flushed, dispatch drained) before resolving. */
+/** A triggerable element of the semantic UI surface. Actions run on an
+ *  ordered queue — **awaits are optional**: `ui.A.click(); ui.B.click();`
+ *  executes in order, and the next observation point (`settle`, `expectCell`,
+ *  `waitFor`, dispose) waits for everything and surfaces any failure. Each
+ *  action still returns a promise that settles the app (renders flushed,
+ *  dispatch drained) when you do want to await it. */
 export interface UIElementHandle {
   /** Full click sequence: pointerdown → mousedown → pointerup → mouseup → click. */
   click(): Promise<void>;
@@ -129,8 +137,13 @@ export type TestUI = {
   expectCell(cell: any, pred: (c: any) => boolean, msg?: string): Promise<void>;
   /** Find a component anywhere by name (and optionally AIR key). */
   find(component: string, key?: string | number): UIComponentHandle;
-  /** Unmount and reset the local runtime. */
+  /** Unmount and reset the local runtime (the auto-created window is closed
+   *  in the background). Prefer `await using ui = await testUI(App)` or the
+   *  `testUI(App, name, fn)` wrapper — both dispose for you. */
   unmount(): void;
+  /** Full async teardown: unmount + await window close. */
+  dispose(): Promise<void>;
+  [Symbol.asyncDispose](): Promise<void>;
 } & {
   /** Dynamic access to any component by name: `ui.App`, `ui.TodoRow`. Loosely
    *  typed in v1 — unknown names throw listing what exists. */
@@ -155,28 +168,84 @@ function fail(msg: string, available: string[]): never {
  * deterministic API; every interaction is a real event sequence; every action
  * awaits quiescence, so tests have zero sleeps and zero flake.
  *
- * ```ts
- * import { Window } from "happy-dom";
- * import { testUI } from "aio/testing";
+ * Zero boilerplate — the DOM is created for you, the cells your App imports
+ * boot automatically, and the wrapper form cleans everything up:
  *
- * const win = new Window();
- * const ui = await testUI(App, { document: win.document, cells: [todo] });
- * await ui.App.TitleInput.type("buy milk");
- * await ui.App.AddButton.click();
- * await ui.expectCell(todo, (t) => t.items.length === 1);
- * ui.unmount();
+ * ```ts
+ * import { testUI } from "aio/testing";
+ * import App from "../src/App.tsx";
+ *
+ * testUI(App, "add a todo", async (ui) => {
+ *   await ui.TodoAdd.TitleInput.type("buy milk");
+ *   await ui.TodoAdd.AddButton.click();
+ *   await ui.expectCell(todo, (t) => t.items.length === 1);
+ * });
  * ```
+ *
+ * Handle form (compose your own test): `await using ui = await testUI(App);`
+ * — disposed at scope end. Options only when you need control:
+ * `{ document, cells, persist, settleIterations }`.
  */
-export async function testUI(
+export function testUI(
   App: ComponentFn,
-  opts: TestUIOptions = {},
+  name: string,
+  fn: (ui: TestUI) => void | Promise<void>,
+): void;
+export function testUI(App: ComponentFn, opts?: TestUIOptions): Promise<TestUI>;
+export function testUI(
+  App: ComponentFn,
+  optsOrName?: TestUIOptions | string,
+  fn?: (ui: TestUI) => void | Promise<void>,
+): void | Promise<TestUI> {
+  // Wrapper form: testUI(App, "name", fn) — a Deno.test with auto-teardown.
+  if (typeof optsOrName === "string") {
+    if (typeof fn !== "function") {
+      throw new Error('testUI(App, "name", fn): missing test function');
+    }
+    Deno.test(optsOrName, async () => {
+      const ui = await _mountTestUI(App, {});
+      let bodyFailed = false;
+      try {
+        await fn(ui);
+      } catch (e) {
+        bodyFailed = true;
+        throw e;
+      } finally {
+        try {
+          // dispose drains the action queue — un-awaited action failures
+          // fail the test here.
+          await ui.dispose();
+        } catch (e) {
+          if (!bodyFailed) throw e;
+          // body already failed — don't mask its error with teardown's
+        }
+      }
+    });
+    return;
+  }
+  return _mountTestUI(App, optsOrName ?? {});
+}
+
+async function _mountTestUI(
+  App: ComponentFn,
+  opts: TestUIOptions,
 ): Promise<TestUI> {
-  const doc: AnyDoc = opts.document ?? (globalThis as AnyDoc).document;
+  let doc: AnyDoc = opts.document ?? (globalThis as AnyDoc).document;
+  // Auto-DOM: create a happy-dom window when none was provided — and own its
+  // lifecycle (closed on dispose). Lazy import keeps the DOM dep out of
+  // production code paths entirely.
+  let ownedWindow: AnyDoc = null;
   if (!doc) {
-    throw new Error(
-      "testUI: no document — pass { document } (e.g. new Window().document " +
-        "from happy-dom) or set globalThis.document",
-    );
+    try {
+      const hd = await import("happy-dom");
+      ownedWindow = new hd.Window();
+      doc = ownedWindow.document;
+    } catch {
+      throw new Error(
+        "testUI: no DOM available — add happy-dom to your deno.json imports " +
+          '("happy-dom": "npm:happy-dom@^17"), or pass { document } yourself',
+      );
+    }
   }
   const maxIter = opts.settleIterations ?? 20;
 
@@ -195,13 +264,16 @@ export async function testUI(
   }
 
   // Boot the cells on the local dispatch loop (the android/standalone runtime —
-  // real method binding, reactive getters, ack semantics).
+  // real method binding, reactive getters, ack semantics). Default: every
+  // `cell()` the App transitively imported has self-registered — boot them
+  // all; pass { cells } only to restrict the set.
   let resetRuntime: (() => void) | undefined;
-  if (opts.cells && opts.cells.length > 0) {
+  const cells = opts.cells ?? [...getRegisteredCells().values()];
+  if (cells.length > 0) {
     const standalone = await import("../standalone-air.ts");
     await standalone.aio.run({
       appId: "testui",
-      cells: opts.cells,
+      cells,
       // Hermetic by default: no cross-test state leaks through the (shared)
       // localStorage persist key. Opt in via { persist: true }.
       persist: opts.persist ?? false,
@@ -255,61 +327,106 @@ export async function testUI(
     return el;
   }
 
-  function elementHandle(info: UIElementInfo): UIElementHandle {
-    const path = info.path;
-    const el = () => resolveElement(path)._el! as AnyDoc;
-    const act = async (fn: (e: AnyDoc) => void) => {
-      fn(el());
-      await settle();
-    };
-    return {
-      info,
-      async click() {
-        await act((e) => triggerAction(e, "click"));
-      },
-      async dblclick() {
-        await act((e) => triggerAction(e, "dblclick"));
-      },
-      async type(text: string) {
-        el().focus?.();
-        for (const ch of text) {
-          triggerChar(el(), ch); // re-resolve — controlled inputs re-render
-          handle._flush();
-        }
+  // ── Action queue — awaits are optional ───────────────────────────────
+  // Every action chains onto one FIFO tail, so ordering is guaranteed
+  // WITHOUT an await per action: `ui.A.click(); ui.B.click();` runs in
+  // order. A failure from an un-awaited action is stashed and rethrown at
+  // the next observation point (settle / expectCell / waitFor / dispose) —
+  // nothing is silently lost. Awaiting an action still works and delivers
+  // its own failure immediately.
+  let _tail: Promise<void> = Promise.resolve();
+  let _queuedError: unknown = null;
+  let _hasQueuedError = false;
+  function enqueue<T>(fn: () => Promise<T>): Promise<T> {
+    const run = _tail.then(fn);
+    // The tail handler makes un-awaited rejections "handled" (no process
+    // unhandledrejection) while stashing the first failure for the drain.
+    _tail = run.then(() => {}, (e) => {
+      if (!_hasQueuedError) {
+        _hasQueuedError = true;
+        _queuedError = e;
+      }
+    });
+    return run;
+  }
+  async function drain(): Promise<void> {
+    let t: Promise<void>;
+    do {
+      t = _tail;
+      await t;
+    } while (_tail !== t); // actions queued while waiting — keep draining
+    if (_hasQueuedError) {
+      const e = _queuedError;
+      _hasQueuedError = false;
+      _queuedError = null;
+      throw e;
+    }
+  }
+
+  function elementHandle(resolveInfo: () => UIElementInfo): UIElementHandle {
+    const el = () => resolveInfo()._el! as AnyDoc;
+    const act = (fn: (e: AnyDoc) => void) =>
+      enqueue(async () => {
+        fn(el());
         await settle();
+      });
+    return {
+      get info() {
+        return resolveInfo();
       },
-      async press(key: string) {
-        await act((e) => triggerAction(e, "press", key));
+      click() {
+        return act((e) => triggerAction(e, "click"));
       },
-      async hover() {
-        await act((e) => triggerAction(e, "hover"));
+      dblclick() {
+        return act((e) => triggerAction(e, "dblclick"));
       },
-      async focus() {
-        await act((e) => triggerAction(e, "focus"));
+      type(text: string) {
+        return enqueue(async () => {
+          el().focus?.();
+          for (const ch of text) {
+            triggerChar(el(), ch); // re-resolve — controlled inputs re-render
+            handle._flush();
+          }
+          await settle();
+        });
       },
-      async blur() {
-        await act((e) => triggerAction(e, "blur"));
+      press(key: string) {
+        return act((e) => triggerAction(e, "press", key));
       },
-      async select(value: string) {
-        await act((e) => triggerSelect(e, value));
+      hover() {
+        return act((e) => triggerAction(e, "hover"));
       },
-      async check() {
-        const e = el();
-        if (!e.checked) await this.click();
+      focus() {
+        return act((e) => triggerAction(e, "focus"));
       },
-      async uncheck() {
-        const e = el();
-        if (e.checked) await this.click();
+      blur() {
+        return act((e) => triggerAction(e, "blur"));
       },
-      async clear() {
-        await act((e) => triggerClear(e));
+      select(value: string) {
+        return act((e) => triggerSelect(e, value));
       },
-      async scroll(to?: { top?: number; left?: number }) {
-        await act((e) => triggerScroll(e, to));
+      check() {
+        return act((e) => {
+          if (!e.checked) triggerAction(e, "click");
+        });
       },
-      async dragTo(target: UIElementHandle) {
-        const dst = resolveElement(target.info.path)._el!;
-        await act((e) => triggerDragTo(e, dst));
+      uncheck() {
+        return act((e) => {
+          if (e.checked) triggerAction(e, "click");
+        });
+      },
+      clear() {
+        return act((e) => triggerClear(e));
+      },
+      scroll(to?: { top?: number; left?: number }) {
+        return act((e) => triggerScroll(e, to));
+      },
+      dragTo(target: UIElementHandle) {
+        return enqueue(async () => {
+          const dst = target.info._el! as AnyDoc;
+          triggerDragTo(el(), dst);
+          await settle();
+        });
       },
       get text() {
         return String(el().textContent ?? "");
@@ -318,6 +435,50 @@ export async function testUI(
         return String(el().value ?? "");
       },
     };
+  }
+
+  /** Handle for a name that isn't on the surface YET — actions resolve it
+   *  inside the queue (after prior actions ran, e.g. a click that opens a
+   *  modal), so `ui.OpenButton.click(); ui.Modal.ConfirmButton.click()`
+   *  works without awaits. Unknown-forever names fail at the next drain
+   *  with the usual listing. Child access chains lazily. */
+  function lazyHandle(
+    selectParent: () => UISurfaceNode,
+    name: string,
+  ): UIElementHandle {
+    const resolveInfo = (): UIElementInfo => {
+      const node = selectParent();
+      const found = node.elements.find((e) => e.name === name);
+      if (found?._el) return found;
+      fail(
+        `testUI: "${name}" is not an element of ${node.path}`,
+        [
+          ...node.elements.map((e) => e.name),
+          ...node.children.map((c) => c.component),
+        ],
+      );
+    };
+    const eh = elementHandle(resolveInfo);
+    return new Proxy(eh as AnyDoc, {
+      get(target, prop: string | symbol) {
+        if (typeof prop === "symbol" || prop in target) {
+          return (target as AnyDoc)[prop];
+        }
+        // Treated as a component that will exist by the time it's used:
+        // ui.Modal.ConfirmButton — resolve "Modal" lazily, then chain.
+        return lazyHandle(() => {
+          const parent = selectParent();
+          const hit = findComponents(parent, name)[0];
+          if (!hit) {
+            fail(
+              `testUI: component "${name}" not found under ${parent.path}`,
+              parent.children.map((c) => c.component),
+            );
+          }
+          return hit;
+        }, prop as string);
+      },
+    }) as UIElementHandle;
   }
 
   function componentHandle(select: () => UISurfaceNode): UIComponentHandle {
@@ -350,9 +511,16 @@ export async function testUI(
         if (typeof prop === "symbol" || prop in target) {
           return (target as AnyDoc)[prop];
         }
-        const node = select();
+        let node: UISurfaceNode;
+        try {
+          node = select();
+        } catch {
+          // This component isn't on the surface yet (a queued action may be
+          // about to create it) — defer everything to use time.
+          return lazyHandle(select, prop as string);
+        }
         const elInfo = node.elements.find((e) => e.name === prop);
-        if (elInfo) return elementHandle(elInfo);
+        if (elInfo) return elementHandle(() => resolveElement(elInfo.path));
         const child = node.children.find((c) => c.component === prop);
         if (child) {
           return componentHandle(() => {
@@ -374,15 +542,9 @@ export async function testUI(
             return again;
           });
         }
-        fail(
-          `testUI: "${
-            String(prop)
-          }" is not an element or component of ${node.path}`,
-          [
-            ...node.elements.map((e) => e.name),
-            ...node.children.map((c) => c.component),
-          ],
-        );
+        // Not on the surface YET — hand back a lazy handle so un-awaited
+        // sequences can target UI a prior queued action will create.
+        return lazyHandle(select, prop as string);
       },
     }) as UIComponentHandle;
   }
@@ -391,13 +553,19 @@ export async function testUI(
 
   const api = {
     surface: () => serializeSurface(currentSurface()),
-    settle,
+    // Public settle is an observation point: drains the action queue first
+    // (surfacing failures from un-awaited actions), then waits quiescence.
+    settle: async () => {
+      await drain();
+      await settle();
+    },
     html: () => String(root.innerHTML),
     async expectCell(
       cell: AnyDoc,
       pred: (c: AnyDoc) => boolean,
       msg?: string,
     ) {
+      await drain();
       await settle();
       if (!pred(cell)) {
         throw new Error(
@@ -409,6 +577,7 @@ export async function testUI(
       pred: () => boolean,
       o?: { timeoutMs?: number },
     ): Promise<void> {
+      await drain();
       const deadline = Date.now() + (o?.timeoutMs ?? 3000);
       while (Date.now() < deadline) {
         await settle();
@@ -439,6 +608,27 @@ export async function testUI(
     unmount() {
       _unmount(handle);
       resetRuntime?.();
+      // Owned window: close in the background (fire-and-forget is safe for
+      // happy-dom; use dispose() when you need to await it).
+      ownedWindow?.happyDOM?.close()?.catch?.(() => {});
+      ownedWindow = null;
+    },
+    async dispose() {
+      // Drain first — a failure from an un-awaited action must fail the
+      // test, not vanish in teardown. Teardown runs regardless.
+      try {
+        await drain();
+      } finally {
+        _unmount(handle);
+        resetRuntime?.();
+        if (ownedWindow) {
+          await ownedWindow.happyDOM?.close();
+          ownedWindow = null;
+        }
+      }
+    },
+    [Symbol.asyncDispose]() {
+      return this.dispose();
     },
   };
 

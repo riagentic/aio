@@ -1,9 +1,12 @@
-// stress.test.ts — high-throughput dispatch, memory bounds, state consistency
+// stress.test.ts — high-throughput dispatch + state consistency
 //
 // Verifies behavior under sustained load:
 //   - State stays consistent after thousands of rapid mutations
 //   - Concurrent generators don't corrupt shared state
 //   - Reducer throughput meets minimum bar
+//
+// Memory bounds are NOT tested here — heap-slope leak detection under real
+// load lives in scripts/soak.ts (`deno task soak`).
 
 import { assertEquals } from "@std/assert";
 import { cell, composeCells } from "../src/state/cell.ts";
