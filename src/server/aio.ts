@@ -47,6 +47,7 @@ import {
   initLogger,
   wrapAppWithCells,
 } from "./aio-cells-bridge.ts";
+import { getRegisteredCells } from "../state/cell-reactive.ts";
 
 // CLI + path resolution
 import { parseCli, printHelp, VERSION } from "./aio-cli.ts";
@@ -127,13 +128,33 @@ validateVersion();
 
 // ── Entry point ───────────────────────────────────────────────────────
 
+function _denoJsonVersion(): string | undefined {
+  try {
+    const raw = Deno.readTextFileSync(join(Deno.cwd(), "deno.json"));
+    return (JSON.parse(raw) as { version?: string }).version;
+  } catch {
+    return undefined;
+  }
+}
+
+function _inferBaseDir(): string {
+  try {
+    const main = new URL(Deno.mainModule);
+    if (main.protocol === "file:" && !isCompiled()) {
+      const dir = main.pathname.split("/").slice(0, -1).join("/");
+      if (dir) return dir;
+    }
+  } catch { /* unusual entry — fall through */ }
+  return join(Deno.cwd(), "src");
+}
+
 /** Single entry point — boots KV, server, electron, wires everything. CLI args override config. */
 async function run<S, A, E>(
   initialState: S,
   config: AioConfig<S, A, E>,
 ): Promise<AioApp<S, A>>;
 // deno-lint-ignore no-explicit-any
-async function run(fc: CellsConfig): Promise<AioApp<any, any>>;
+async function run(fc?: CellsConfig): Promise<AioApp<any, any>>;
 // deno-lint-ignore no-explicit-any
 async function run(a: any, b?: any): Promise<AioApp<any, any>> {
   // Legacy API: aio.run(initialState, config)
@@ -150,8 +171,8 @@ async function run(a: any, b?: any): Promise<AioApp<any, any>> {
     }
   }
 
-  // Cells-based API: aio.run(cellsConfig)
-  const fc = a as CellsConfig;
+  // Cells-based API: aio.run(cellsConfig) — zero-config: aio.run()
+  const fc = (a ?? {}) as CellsConfig;
   validateConfig(
     fc as unknown as Record<string, unknown>,
     VALID_FEATURES_CONFIG_KEYS,
@@ -169,7 +190,18 @@ async function run(a: any, b?: any): Promise<AioApp<any, any>> {
     // Isolate filter
     const cliIsolate = parseCli().isolate;
     const isolate = fc.isolate ?? cliIsolate;
-    const cellEntries = filterCellsByIsolate(fc.cells, isolate);
+    // Zero-config cells: every cell() self-registers on definition — boot
+    // whatever the entry imported (same behavior as the standalone runtime).
+    const allCells = fc.cells && fc.cells.length > 0
+      ? fc.cells
+      : [...getRegisteredCells().values()];
+    if (allCells.length === 0) {
+      throw new Error(
+        "[aio] no cells — define at least one cell() (importing its module " +
+          "is enough) or pass cells: [...] to aio.run()",
+      );
+    }
+    const cellEntries = filterCellsByIsolate(allCells, isolate);
 
     // Compose cells + build state filters
     const {
@@ -282,7 +314,10 @@ async function _run<S, A, E>(
     })
   ) return null!;
 
-  const baseDir = resolve(config.baseDir ?? join(Deno.cwd(), "src"));
+  // Zero-config baseDir: the main module's directory — always right for
+  // `deno run src/app.ts` regardless of cwd. Compiled binaries embed their
+  // entry, so they keep the cwd/src fallback (build sets baseDir anyway).
+  const baseDir = resolve(config.baseDir ?? _inferBaseDir());
   const VERBOSE = cli.verbose;
 
   // Prod detection
@@ -628,7 +663,7 @@ async function _run<S, A, E>(
   // Lifecycle: globals, onStart, schedules, logging, client launch
   startLifecycle({
     appId,
-    appVersion: config.appVersion,
+    appVersion: config.appVersion ?? _denoJsonVersion() ?? "0.0.0",
     title,
     prod,
     distDir,

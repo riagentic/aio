@@ -55,7 +55,8 @@ export type WsLimits = {
  *  shape for `_run()`. Not exported from `aio` — internal to the runtime. */
 export type AioConfig<S, A, E> = {
   /** Unique app identity — used for lock file, UDS socket, KV/SQLite paths, TLS cert dir. Mandatory. */
-  appId: string;
+  /** App identity — inferred (deno.json / main-module dir) when omitted. */
+  appId?: string;
   reduce: (
     state: S,
     action: A,
@@ -86,7 +87,8 @@ export type AioConfig<S, A, E> = {
   transport?: "uds" | "ws" | "auto"; // default: 'auto' — UDS on linux/mac+electron, WS otherwise (moved from ui.transport)
   killExisting?: boolean; // default: false
   serverUrl?: string;
-  appVersion: string; // app version string — logged on startup, available at __aio.appVersion
+  /** App version — default: deno.json `version`. */
+  appVersion?: string; // app version string — logged on startup, available at __aio.appVersion
   schedules?: ScheduleDef[]; // static scheduled effects — started on boot
   db?: Record<string, TableDef>; // SQLite table definitions — arrays auto-sync
   perfCheck?: "on" | "off"; // default: 'on' — enable/disable performance violation reporting
@@ -174,9 +176,13 @@ export type AioApp<S = unknown, A = unknown> = {
 
 /** v0.5 cells-based config — pass to aio.run() instead of (initialState, config) */
 export type CellsConfig = {
-  /** Unique app identity — used for lock file, UDS socket, KV/SQLite paths, TLS cert dir. Mandatory. */
-  appId: string;
-  cells: import("../state/cell.ts").CellEntry[];
+  /** Unique app identity — used for lock file, UDS socket, KV/SQLite paths,
+   *  TLS cert dir. Default: deno.json `appId` > slug(`title`) > slug(`name`)
+   *  > the main module's directory name. */
+  appId?: string;
+  /** Cells to run. Default: every `cell()` the entry (transitively) imported
+   *  — they self-register, exactly like the standalone/android runtime. */
+  cells?: import("../state/cell.ts").CellEntry[];
   /** Default persist and ui config for all cells — individual cells override these */
   cellDefaults?: {
     ui?: import("../state/cell-types.ts").CellFieldFilter;
@@ -221,7 +227,8 @@ export type CellsConfig = {
   /** v0.5 middleware array — applied in order as beforeReduce chain */
   middleware?: import("./middleware.ts").MiddlewareFn[];
   /** Application version string — logged on startup, available at __aio.appVersion */
-  appVersion: string;
+  /** App version — default: deno.json `version`. */
+  appVersion?: string;
   /** Isolate cells — only these cells are active (dev mode convenience) */
   isolate?: string[];
   beforeReduce?: (

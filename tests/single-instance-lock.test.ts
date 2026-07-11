@@ -33,14 +33,14 @@ Deno.test("resolveAppId: slugifies explicit appId", () => {
   assertEquals(resolveAppId("My Custom App"), "my-custom-app");
 });
 
-Deno.test("resolveAppId: throws when no appId provided", () => {
-  let threw = false;
-  try {
-    resolveAppId();
-  } catch {
-    threw = true;
-  }
-  assertEquals(threw, true);
+Deno.test("resolveAppId: infers from deno.json when omitted (zero-config)", () => {
+  // Running inside the framework repo — its deno.json has appId: "aio".
+  assertEquals(resolveAppId(), "aio");
+});
+
+Deno.test("resolveAppId: inference is deterministic and slugified", () => {
+  assertEquals(resolveAppId(), resolveAppId());
+  assertEquals(/^[a-z0-9-]+$/.test(resolveAppId()), true);
 });
 
 // ── lockPath ──
