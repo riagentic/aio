@@ -1619,3 +1619,17 @@ Deno.test("server: reserved route namespaces throw at boot", async () => {
   assertStringIncludes(threw, "reserved");
   await Deno.remove(dir, { recursive: true });
 });
+
+Deno.test("buildBrowserImportMap: framework runtime dep immer always resolves", () => {
+  // Regression: an app dir without a deno.json (repo examples, ad-hoc apps)
+  // produced an import map with no "immer" → the transpiled framework's own
+  // `import "immer"` threw in the page → blank screen.
+  const bare = buildBrowserImportMap({});
+  const version = JSON.parse(Deno.readTextFileSync(
+    new URL("../deno.json", import.meta.url),
+  )).imports["immer"].slice("npm:".length);
+  assertEquals(bare["immer"], `https://esm.sh/${version}`);
+  // An app's own pin still wins.
+  const pinned = buildBrowserImportMap({ "immer": "npm:immer@10.9.9" });
+  assertEquals(pinned["immer"], "https://esm.sh/immer@10.9.9");
+});

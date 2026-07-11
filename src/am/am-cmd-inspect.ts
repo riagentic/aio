@@ -541,8 +541,8 @@ export async function cmdSurface(
 
 /** `am trigger <clientIdx> <path> <action> [text]` — faithfully simulate a
  *  user interaction on a live client via the semantic surface (same event
- *  sequences as testUI). Actions: click, dblclick, type, press, hover,
- *  focus, blur. */
+ *  sequences as testUI). Full testUI action set: click, dblclick, type,
+ *  press, hover, focus, blur, select, check, uncheck, clear, scroll, dragTo. */
 export async function cmdTrigger(
   args: string[],
   flags: GlobalFlags,
@@ -552,20 +552,37 @@ export async function cmdTrigger(
   const port = resolvePort(flags.port, appId);
   const [idxStr, path, action, text] = args;
   const idx = Number(idxStr);
-  const actions = new Set(
-    ["click", "dblclick", "type", "press", "hover", "focus", "blur"],
-  );
+  const actions = new Set([
+    "click",
+    "dblclick",
+    "type",
+    "press",
+    "hover",
+    "focus",
+    "blur",
+    "select",
+    "check",
+    "uncheck",
+    "clear",
+    "scroll",
+    "dragTo",
+  ]);
   if (!Number.isInteger(idx) || !path || !action || !actions.has(action)) {
     outError(
       'usage: am trigger <clientIdx> "<Component…:Element>" <action> [text]\n' +
-        "actions: click, dblclick, type, press, hover, focus, blur\n" +
+        "actions: click, dblclick, type, press, hover, focus, blur,\n" +
+        "         select <value>, check, uncheck, clear,\n" +
+        '         scroll "top=200 left=0", dragTo "<target path>"\n' +
         "discover paths with: am surface <clientIdx>",
       mode,
     );
     Deno.exit(1);
   }
   const body: Record<string, unknown> = { path, action };
-  if (action === "type") body.text = text ?? "";
+  if (
+    action === "type" || action === "select" || action === "scroll" ||
+    action === "dragTo"
+  ) body.text = text ?? "";
   if (action === "press") body.key = text ?? "Enter";
   const result = await trojanPost(port, `trigger/${idx}`, body, appId);
   if (!result.ok) {

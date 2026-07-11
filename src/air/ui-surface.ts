@@ -207,8 +207,10 @@ function walkOutput(
 }
 
 function walkComponent(v: VNode, parentPath: string): UISurfaceNode {
-  const fn = v.tag as { name?: string };
-  const name = fn.name && fn.name.length > 0 ? fn.name : "Anonymous";
+  const fn = v.tag as { name?: string; _lazyName?: string };
+  // A resolved lazy() wrapper reports the loaded component's name.
+  const name = fn._lazyName ??
+    (fn.name && fn.name.length > 0 ? fn.name : "Anonymous");
   const keyPart = v.key !== undefined ? `[${v.key}]` : "";
   const node: UISurfaceNode = {
     component: name,

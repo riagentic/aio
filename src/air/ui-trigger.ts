@@ -88,6 +88,65 @@ export function triggerClear(el: AnyEl): void {
   el.dispatchEvent(ev(el, "input"));
 }
 
+/** Scroll an element like a user: set scrollTop/scrollLeft, fire `scroll`
+ *  (scroll does not bubble from elements, matching browsers). */
+export function triggerScroll(
+  el: AnyEl,
+  to: { top?: number; left?: number } = {},
+): void {
+  if (to.top !== undefined) el.scrollTop = to.top;
+  if (to.left !== undefined) el.scrollLeft = to.left;
+  el.dispatchEvent(ev(el, "scroll", { bubbles: false }));
+}
+
+/** Minimal DataTransfer for DOMs without a constructable one (happy-dom). */
+function makeDataTransfer(w: AnyEl): AnyEl {
+  if (w.DataTransfer) {
+    try {
+      return new w.DataTransfer();
+    } catch { /* exposed but not constructable — fall through to the shim */ }
+  }
+  const data = new Map<string, string>();
+  return {
+    dropEffect: "move",
+    effectAllowed: "all",
+    get types() {
+      return [...data.keys()];
+    },
+    setData: (t: string, v: string) => void data.set(t, v),
+    getData: (t: string) => data.get(t) ?? "",
+    clearData: () => void data.clear(),
+    files: [],
+    items: [],
+    setDragImage: () => {},
+  };
+}
+
+function dragEv(el: AnyEl, name: string, dataTransfer: AnyEl) {
+  const w = view(el);
+  const e = w.DragEvent
+    ? new w.DragEvent(name, { bubbles: true, cancelable: true })
+    : mouseEv(el, name);
+  if (!e.dataTransfer) {
+    try {
+      Object.defineProperty(e, "dataTransfer", { value: dataTransfer });
+    } catch { /* readonly on some DOMs — handlers get a bare event */ }
+  }
+  return e;
+}
+
+/** Full user-faithful HTML5 drag-and-drop: dragstart on the source,
+ *  dragenter → dragover → drop on the target, dragend on the source — one
+ *  shared DataTransfer across the whole sequence, exactly like a browser. */
+export function triggerDragTo(source: AnyEl, target: AnyEl): void {
+  const dt = makeDataTransfer(view(source));
+  source.dispatchEvent(dragEv(source, "dragstart", dt));
+  target.dispatchEvent(dragEv(target, "dragenter", dt));
+  target.dispatchEvent(dragEv(target, "dragover", dt));
+  target.dispatchEvent(dragEv(target, "drop", dt));
+  source.dispatchEvent(dragEv(source, "dragend", dt));
+}
+
 /** Perform a non-typing action (typing is looped by callers via
  *  {@linkcode triggerChar} for per-character fidelity). */
 export function triggerAction(
