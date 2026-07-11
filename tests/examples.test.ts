@@ -4,6 +4,11 @@
 import { assert, assertEquals } from "@std/assert";
 import { connectCli } from "aio";
 
+// Coverage profiles from spawned deno processes go to a throwaway temp dir —
+// never into the repo (an empty DENO_COVERAGE_DIR means "cwd"), never into
+// the parent's coverage profile.
+const _childCovDir = Deno.makeTempDirSync({ prefix: "aio-child-cov-" });
+
 const ROOT = new URL("..", import.meta.url).pathname;
 const dir = (t: string) => `${ROOT}examples/${t}`;
 
@@ -35,6 +40,7 @@ function spawnExample(
   opts: { stdin?: "piped"; stdout?: "piped" } = {},
 ): Deno.ChildProcess {
   return new Deno.Command(Deno.execPath(), {
+    env: { DENO_COVERAGE_DIR: _childCovDir },
     args: ["run", "-A", "--unstable-kv", entry, ...args],
     cwd: dir(target),
     stdin: opts.stdin ?? "null",

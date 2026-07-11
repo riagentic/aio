@@ -352,7 +352,11 @@ async function writeFile(
 
 // ── deno.json ──
 
-function denoJson(title: string, appType: AppType): string {
+function denoJson(
+  title: string,
+  appType: AppType,
+  hasTests = true,
+): string {
   const isElectronApp = appType.id === "electron" ||
     appType.id === "remote-electron";
   const imports: Record<string, string> = {
@@ -391,26 +395,13 @@ function denoJson(title: string, appType: AppType): string {
   if (isElectronApp) {
     tasks["install:electron"] = "deno install --allow-scripts=npm:electron";
   }
-  tasks.test = "deno test -A --unstable-kv tests/";
+  // Only when the template ships tests — `deno task test` on an empty
+  // tests/ dir is a hard error.
+  if (hasTests) tasks.test = "deno test -A --unstable-kv tests/";
   tasks.doctor = "deno run -A dep/aio/src/server/doctor.ts";
+  // One compile task — this app's own target. Other targets: pass build.ts
+  // flags directly (docs/build/targets.md lists them all).
   tasks.compile = `deno run -A dep/aio/src/build.ts ${compileFlags(appType)}`;
-  tasks["compile:browser"] = "deno run -A dep/aio/src/build.ts --compile";
-  tasks["compile:browser:remote"] =
-    "deno run -A dep/aio/src/build.ts --compile --service --remote";
-  tasks["compile:electron"] =
-    "deno run -A dep/aio/src/build.ts --compile --electron";
-  tasks["compile:electron:remote"] =
-    "deno run -A dep/aio/src/build.ts --client";
-  tasks["compile:cli"] = "deno run -A dep/aio/src/build.ts --compile --cli";
-  tasks["compile:cli:remote"] =
-    "deno run -A dep/aio/src/build.ts --compile --cli --remote";
-  tasks["compile:android"] = "deno run -A dep/aio/src/build.ts --android";
-  tasks["compile:android:remote"] =
-    "deno run -A dep/aio/src/build.ts --android --remote";
-  tasks["compile:service"] =
-    "deno run -A dep/aio/src/build.ts --compile --service --headless";
-  tasks["compile:service:remote"] =
-    "deno run -A dep/aio/src/build.ts --compile --service --headless --remote";
 
   const obj: Record<string, unknown> = {
     title,
@@ -465,13 +456,9 @@ export const counter = cell('counter', {
   },
 })
 
-await aio.run({
-  appId: '${slug(title)}',
-  appVersion: '0.1.0',
-  cells: [counter],
-  ui: { title: '${title}' },
-  baseDir: import.meta.dirname!,
-})
+// Zero config — appId/title/version come from deno.json, the counter cell
+// self-registered above, baseDir is this file's directory.
+await aio.run()
 `,
     "src/App.tsx": `import { counter } from './app.ts'
 
@@ -493,15 +480,9 @@ export default function App() {
 function templateMinimal(title: string): Record<string, string> {
   return {
     "src/app.ts": `import { aio } from 'aio'
-import { counter } from './cell/counter.ts'
+import './cell/counter.ts' // defines + registers the cell
 
-await aio.run({
-  appId: '${slug(title)}',
-  appVersion: '0.1.0',
-  cells: [counter],
-  ui: { title: '${title}' },
-  baseDir: import.meta.dirname!,
-})
+await aio.run() // appId/title/version from deno.json, cells from the registry
 `,
     "src/cell/counter.ts": `import { cell } from 'aio'
 
@@ -538,15 +519,9 @@ export default function App() {
 function templateMedium(title: string): Record<string, string> {
   return {
     "src/app.ts": `import { aio } from 'aio'
-import { todo } from './cell/todo.ts'
+import './cell/todo.ts' // defines + registers the cell
 
-await aio.run({
-  appId: '${slug(title)}',
-  appVersion: '0.1.0',
-  cells: [todo],
-  ui: { title: '${title}' },
-  baseDir: import.meta.dirname!,
-})
+await aio.run() // appId/title/version from deno.json, cells from the registry
 `,
     "src/cell/todo.ts": `import { cell } from 'aio'
 
@@ -596,7 +571,7 @@ export function TodoList() {
 import { todo } from '../cell/todo.ts'
 
 export function AddTodo() {
-  const { local: text, set: setText } = useLocal('')
+  const [text, setText] = useLocal('')
 
   const add = () => {
     const trimmed = text.trim()
@@ -606,7 +581,7 @@ export function AddTodo() {
   }
 
   return (
-    <form onSubmit={e => { e.preventDefault(); add() }} style={{ display: 'flex', gap: '0.5rem' }}>
+    <form onSubmit={() => add()} style={{ display: 'flex', gap: '0.5rem' }}>
       <input
         value={text}
         onChange={e => setText(e.currentTarget.value)}
@@ -641,16 +616,10 @@ export default function App() {
 function templateLarge(title: string): Record<string, string> {
   return {
     "src/app.ts": `import { aio } from 'aio'
-import { todo } from './cell/todo/todo.ts'
-import { user } from './cell/user/user.ts'
+import './cell/todo/todo.ts'
+import './cell/user/user.ts'
 
-await aio.run({
-  appId: '${slug(title)}',
-  appVersion: '0.1.0',
-  cells: [todo, user],
-  ui: { title: '${title}' },
-  baseDir: import.meta.dirname!,
-})
+await aio.run() // appId/title/version from deno.json, cells from the registry
 `,
     "src/cell/todo/todo.ts": `import { cell } from 'aio'
 
@@ -731,7 +700,7 @@ export function TodoList() {
 import { todo } from '../../cell/todo/todo.ts'
 
 export function AddTodo() {
-  const { local: text, set: setText } = useLocal('')
+  const [text, setText] = useLocal('')
 
   const add = () => {
     const trimmed = text.trim()
@@ -741,7 +710,7 @@ export function AddTodo() {
   }
 
   return (
-    <form onSubmit={e => { e.preventDefault(); add() }} style={{ display: 'flex', gap: '0.5rem', marginBottom: '1rem' }}>
+    <form onSubmit={() => add()} style={{ display: 'flex', gap: '0.5rem', marginBottom: '1rem' }}>
       <input
         value={text}
         onChange={e => setText(e.currentTarget.value)}
@@ -757,8 +726,8 @@ export function AddTodo() {
 import { user } from '../../cell/user/user.ts'
 
 export function Settings() {
-  const { local: editing, set: setEditing } = useLocal(false)
-  const { local: name, set: setName } = useLocal('')
+  const [editing, setEditing] = useLocal(false)
+  const [name, setName] = useLocal('')
 
   const save = () => {
     const trimmed = name.trim()
@@ -770,7 +739,7 @@ export function Settings() {
     <div style={{ padding: '1rem', background: '#f9f9f9', borderRadius: '6px', marginTop: '1rem' }}>
       <h3 style={{ margin: '0 0 0.5rem' }}>Settings</h3>
       {editing ? (
-        <form onSubmit={e => { e.preventDefault(); save() }} style={{ display: 'flex', gap: '0.5rem' }}>
+        <form onSubmit={() => save()} style={{ display: 'flex', gap: '0.5rem' }}>
           <input value={name} onChange={e => setName(e.currentTarget.value)} placeholder="Your name" style={{ padding: '0.3rem' }} />
           <button type="submit">Save</button>
         </form>
@@ -824,23 +793,34 @@ function applyAppType(
     result[path] = content;
   }
 
-  // Inject client: 'server-only' for server types without UI
+  // Inject client: 'server-only' for server types without UI — handles both
+  // the config form (replaces the ui line) and the zero-arg form.
   if (!appType.hasUI && result["src/app.ts"]) {
-    result["src/app.ts"] = result["src/app.ts"].replace(
-      /ui:\s*\{[^}]*\},?\n/,
-      `client: 'server-only',\n`,
-    );
+    const src = result["src/app.ts"];
+    result["src/app.ts"] = /ui:\s*\{[^}]*\},?\n/.test(src)
+      ? src.replace(/ui:\s*\{[^}]*\},?\n/, `client: 'server-only',\n`)
+      : src.replace(
+        /await aio\.run\(\)( \/\/[^\n]*)?/,
+        "await aio.run({ client: 'server-only' }) // headless — no UI client",
+      );
   }
 
   // Browser types: dev task already uses --client=browser; no need to bake client:'browser' into app.ts
   // (keeps config clean and lets users switch to Electron by just removing --client=browser)
 
-  // Auth hint for remote server types — inside config object
+  // Auth hint for remote server types — config form appends inside the
+  // object; zero-arg form gets a commented example instead.
   if (appType.isRemote && appType.hasServer && result["src/app.ts"]) {
-    result["src/app.ts"] = result["src/app.ts"].replace(
-      /\n\}\)\n$/,
-      `\n  // users: { 'change-me-token': { id: 'admin', role: 'admin' } },\n})\n`,
-    );
+    const src = result["src/app.ts"];
+    result["src/app.ts"] = /\n\}\)\n$/.test(src)
+      ? src.replace(
+        /\n\}\)\n$/,
+        `\n  // users: { 'change-me-token': { id: 'admin', role: 'admin' } },\n})\n`,
+      )
+      : src.replace(
+        /await aio\.run\(([^)]*)\)/,
+        `await aio.run($1)\n// pin tokens: aio.run({ users: { 'change-me-token': { id: 'admin', role: 'admin' } } })`,
+      );
   }
 
   return result;
@@ -860,13 +840,7 @@ function clientOnlyFiles(
 // Build:   deno task compile                          (AppImage)
 
 const _stub = cell('app', { state: {}, methods: {} })
-await aio.run({
-  appId: '${slug(title)}',
-  appVersion: '0.1.0',
-  cells: [_stub],
-  ui: { title: '${title}' },
-  baseDir: import.meta.dirname!,
-})
+await aio.run({ cells: [_stub] }) // appId/title from deno.json
 `,
     };
   }
@@ -880,18 +854,12 @@ await aio.run({
 // Build: deno task compile    (APK)
 
 const _stub = cell('app', { state: {}, methods: {} })
-await aio.run({
-  appId: '${slug(title)}',
-  appVersion: '0.1.0',
-  cells: [_stub],
-  ui: { title: '${title}' },
-  baseDir: import.meta.dirname!,
-})
+await aio.run({ cells: [_stub] }) // appId/title from deno.json
 `,
     "src/App.tsx": `import { useLocal } from 'aio/air'
 
 export default function App() {
-  const { local: url, set: setUrl } = useLocal('')
+  const [url, setUrl] = useLocal('')
 
   const connect = () => {
     const target = url.trim()
@@ -930,12 +898,8 @@ function templateDashboard(title: string): Record<string, string> {
 import { metrics } from './cell/metrics.ts'
 import { alerts } from './cell/alerts.ts'
 
+// appId/title/version come from deno.json; imported cells self-register.
 await aio.run({
-  appId: '${slug(title)}',
-  appVersion: '0.1.0',
-  cells: [metrics, alerts],
-  ui: { title: '${title}' },
-  baseDir: import.meta.dirname!,
   // Self-driving poll loop — seeded once; poll() re-schedules itself
   // (success: steady 5s cadence, failure: exponential backoff).
   schedules: [
@@ -1034,7 +998,7 @@ function AlertRow({ alert }: { alert: Alert }) {
 }
 
 export default function App() {
-  const { local: filter, set: setFilter } = useLocal('open')
+  const [filter, setFilter] = useLocal('open')
   const visible = alerts.items.filter(a =>
     filter === 'all' ? true : filter === 'open' ? !a.acked : a.acked
   )
@@ -1062,7 +1026,6 @@ export default function App() {
 import { alerts } from '../src/cell/alerts.ts'
 
 testCell(alerts, 'raise → ack → clearAcked', (t) => {
-  t.init()
   t.send.raise('disk almost full', 'warn')
   t.send.raise('service down', 'crit')
   t.expect.state(s => s.items.length === 2)
@@ -1588,7 +1551,8 @@ export async function create(args: string[]): Promise<void> {
     await downloadFramework(projectDir);
   }
 
-  await writeFile(projectDir, "deno.json", denoJson(title, appType));
+  const hasTests = Object.keys(files).some((f) => f.startsWith("tests/"));
+  await writeFile(projectDir, "deno.json", denoJson(title, appType, hasTests));
 
   for (const [path, content] of Object.entries(files)) {
     await writeFile(projectDir, path, content);

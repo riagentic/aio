@@ -12,8 +12,14 @@ import {
   VALID_UI_KEYS,
 } from "../src/server/config.ts";
 
+// Coverage profiles from spawned deno processes go to a throwaway temp dir —
+// never into the repo (an empty DENO_COVERAGE_DIR means "cwd"), never into
+// the parent's coverage profile.
+const _childCovDir = Deno.makeTempDirSync({ prefix: "aio-child-cov-" });
+
 async function typedKeys(typeName: string): Promise<string[]> {
   const out = await new Deno.Command(Deno.execPath(), {
+    env: { DENO_COVERAGE_DIR: _childCovDir },
     args: ["doc", "--json", "src/server/aio-types.ts"],
     cwd: new URL("..", import.meta.url).pathname,
     stdout: "piped",

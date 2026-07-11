@@ -105,7 +105,7 @@
         },
         "CellsConfig": {
           "kind": "typeAlias",
-          "sig": "c60791286bda3116"
+          "sig": "97b88c201a71b023"
         },
         "CellStateSize": {
           "kind": "typeAlias",
@@ -125,7 +125,7 @@
         },
         "CliApp": {
           "kind": "typeAlias",
-          "sig": "7d3b502c5259602f"
+          "sig": "80eeda6bdc6fabdd"
         },
         "CliFlags": {
           "kind": "typeAlias",
@@ -893,7 +893,11 @@
         },
         "useLocal": {
           "kind": "function",
-          "sig": "fd120bffcf7d5c8d"
+          "sig": "386c67b42d10d9d6"
+        },
+        "UseLocalResult": {
+          "kind": "typeAlias",
+          "sig": "ac8423c036b6d8fd"
         },
         "useNavigate": {
           "kind": "function",
