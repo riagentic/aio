@@ -3,6 +3,7 @@
 // Same delta protocol as browser.ts but no DOM, no React — pure Deno runtime.
 
 import { applyPatches, enablePatches, type Patch } from "immer";
+import { bindCell } from "../state/cell-catalog.ts";
 import {
   negotiateProtocol,
   parseProtoHello,
@@ -68,6 +69,11 @@ export type CliApp<S> = {
   readonly state: S | null;
   /** Send an action to the server */
   send(action: { type: string; payload?: unknown }): void;
+  /** Bind cell definitions to this connection — after `cli.bind(counter)`,
+   *  `await counter.increment(1)` dispatches over the socket (resolves on
+   *  the server ack) and `counter.count` reads the latest server state. No
+   *  raw `{ type, payload }` wire actions needed. */
+  bind(...cells: import("../state/cell-types.ts").CellDef[]): void;
   /** Subscribe to state changes — returns unsubscribe function. Fires immediately if state exists. */
   subscribe(fn: (state: S) => void): () => void;
   /** Close the connection (no reconnect) */
@@ -91,6 +97,7 @@ export function connectCli<S>(
   let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
   const queue: Array<{ type: string; payload?: unknown }> = [];
   const listeners = new Set<(state: S) => void>();
+  const _pending = new Map<string, () => void>();
 
   let _readyResolve: ((s: S) => void) | null = null;
   const ready = new Promise<S>((r) => {
@@ -130,6 +137,14 @@ export function connectCli<S>(
       // Skip browser-only signals
       if (raw === "__reload" || raw === "__css") return;
       if (raw.startsWith("__tt:") || raw.startsWith("__boot:")) return;
+
+      // Per-action acks for bound-cell method calls: "__ack:<cid>:1"
+      if (raw.startsWith("__ack:")) {
+        const cid = raw.slice(6, raw.lastIndexOf(":"));
+        _pending.get(cid)?.();
+        _pending.delete(cid);
+        return;
+      }
 
       // A3: wire-protocol version handshake — terminal on mismatch.
       if (raw.startsWith("__proto:")) {
@@ -209,6 +224,25 @@ export function connectCli<S>(
       }
     },
 
+    bind(...cells: import("../state/cell-types.ts").CellDef[]): void {
+      for (const f of cells) {
+        bindCell(
+          f,
+          (action) => {
+            const cid = crypto.randomUUID();
+            const ackd = new Promise<void>((resolve) => {
+              _pending.set(cid, resolve);
+            });
+            this.send(
+              { ...action, cid } as { type: string; payload?: unknown },
+            );
+            return ackd;
+          },
+          () => (state ?? {}) as Record<string, unknown>,
+        );
+      }
+    },
+
     subscribe(fn: (state: S) => void): () => void {
       listeners.add(fn);
       if (state !== null) fn(state);
@@ -226,6 +260,9 @@ export function connectCli<S>(
       ws?.close();
       ws = null;
       listeners.clear();
+      // resolve outstanding method acks — bound calls must not hang forever
+      for (const resolve of _pending.values()) resolve();
+      _pending.clear();
     },
   };
 }
@@ -233,6 +270,7 @@ export function connectCli<S>(
 /** Connect to an aio server via Unix Domain Socket — same API as connectCli but over UDS/NDJSON.
  *  Uses Deno.connect({ transport: 'unix' }) — no TCP port needed. */
 export function connectCliUDS<S>(socketPath: string): CliApp<S> {
+  const _udsPending = new Map<string, () => void>();
   let state: S | null = null;
   let conn: Deno.Conn | null = null;
   let writer: WritableStreamDefaultWriter<Uint8Array> | null = null;
@@ -241,6 +279,7 @@ export function connectCliUDS<S>(socketPath: string): CliApp<S> {
   let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
   const queue: Array<{ type: string; payload?: unknown }> = [];
   const listeners = new Set<(state: S) => void>();
+  const _pending = new Map<string, () => void>();
   const encoder = new TextEncoder();
   const decoder = new TextDecoder();
 
@@ -287,6 +326,13 @@ export function connectCliUDS<S>(socketPath: string): CliApp<S> {
                 // Skip browser-only signals
                 if (line === "__reload" || line === "__css") continue;
                 if (line.startsWith("__tt:") || line.startsWith("__boot:")) {
+                  continue;
+                }
+                // Per-action acks for bound-cell method calls
+                if (line.startsWith("__ack:")) {
+                  const cid = line.slice(6, line.lastIndexOf(":"));
+                  _udsPending.get(cid)?.();
+                  _udsPending.delete(cid);
                   continue;
                 }
                 // A3: wire-protocol version handshake — terminal on mismatch.
@@ -372,6 +418,25 @@ export function connectCliUDS<S>(socketPath: string): CliApp<S> {
       }
     },
 
+    bind(...cells: import("../state/cell-types.ts").CellDef[]): void {
+      for (const f of cells) {
+        bindCell(
+          f,
+          (action) => {
+            const cid = crypto.randomUUID();
+            const ackd = new Promise<void>((resolve) => {
+              _udsPending.set(cid, resolve);
+            });
+            this.send(
+              { ...action, cid } as { type: string; payload?: unknown },
+            );
+            return ackd;
+          },
+          () => (state ?? {}) as Record<string, unknown>,
+        );
+      }
+    },
+
     subscribe(fn: (state: S) => void): () => void {
       listeners.add(fn);
       if (state !== null) fn(state);
@@ -392,6 +457,8 @@ export function connectCliUDS<S>(socketPath: string): CliApp<S> {
       conn = null;
       writer = null;
       listeners.clear();
+      for (const resolve of _udsPending.values()) resolve();
+      _udsPending.clear();
     },
   };
 }
