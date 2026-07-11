@@ -68,12 +68,12 @@ await aio.run({
 
 | Option                        | Type                                     | Description                                                                                                         |
 | ----------------------------- | ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
-| `cells`                       | `CellEntry[]`                            | Array of cells or `{ cell, dependsOn }` objects                                                                     |
+| `cells`                       | `CellEntry[]`                            | Cells to run — default: every imported `cell()` (they self-register)                                                |
 | `middleware`                  | `MiddlewareFn[]`                         | Middleware chain applied before reduce                                                                              |
-| `appVersion`                  | `string`                                 | App version — logged on startup                                                                                     |
+| `appVersion`                  | `string`                                 | App version — default: deno.json `version`                                                                          |
 | `isolate`                     | `string[]`                               | Only activate these cells (dev convenience)                                                                         |
 | `beforeReduce`                | `fn`                                     | Intercept actions before reduce — return null to drop                                                               |
-| `appId`                       | `string`                                 | Unique app identity for lock file, sockets, KV paths                                                                |
+| `appId`                       | `string`                                 | App identity (locks, sockets, KV) — default: deno.json `appId`/`title`/`name`, else the entry's directory name      |
 | `schedules`                   | `Schedule[]`                             | Static always-on schedules                                                                                          |
 | `routes`                      | `Record<string, fn>`                     | Custom HTTP routes — `/path` or `/prefix/*` (uploads, webhooks); see [Integrations](../examples/05-integrations.md) |
 | `dispatchStorm`               | `{ rate?, sustain?, breaker? } \| false` | Runaway-dispatch guard (default on: >200/s for 5s); `breaker` drops the storming action                             |

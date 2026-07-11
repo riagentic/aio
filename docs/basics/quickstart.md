@@ -153,7 +153,7 @@ map abstracts the source.
 ```
 deno.json
 src/
-  app.ts                       <- aio.run({ cells }) -- boot only
+  app.ts                       <- aio.run() -- boot only
   App.tsx                      <- root UI -- layout + routing only (convention; override with ui.entry)
   cell/counter/index.ts    <- cell() -- state + methods (or generators)
   style.css                    <- (optional)
@@ -209,15 +209,16 @@ export default function App() {
 ## Boot the app
 
 ```ts
+import "./cell/counter/index.ts"; // defines + registers the cell
 import { aio } from "aio";
-import { counter } from "./cell/counter/index.ts";
 
-await aio.run({
-  appId: "my-app",
-  appVersion: "1.0.0",
-  cells: [counter],
-});
+await aio.run(); // zero config
 ```
+
+Everything is inferred: `appId`/`title` from `deno.json` (or the entry's
+directory name), `version` from `deno.json`, cells from the registry (every
+imported `cell()` self-registers), `baseDir` from the entry module. Pass config
+only to override.
 
 ## Run
 
@@ -232,9 +233,7 @@ stay in sync. No Electron? Use `deno task dev --client=browser`.
 
 ```ts
 await aio.run({
-  appId: "my-app",
-  cells: [counter],
-  ui: { title: "My App", width: 1200, height: 800 },
+  ui: { width: 1200, height: 800 },
 });
 ```
 

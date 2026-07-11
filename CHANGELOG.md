@@ -4,6 +4,28 @@
 
 ### Changed
 
+- **Zero-config `aio.run()`** — every boot field is now inferred: `cells` from
+  the registry (every imported `cell()` self-registers — same mechanism the
+  android runtime always used), `appId` from deno.json `appId`/`title`/`name`
+  (else the entry's directory name), `appVersion` from deno.json `version`,
+  `baseDir` from the entry module, `title` from deno.json. A working app is
+  `import "./cell.ts"; await aio.run();`. Config remains for overrides; existing
+  apps unchanged.
+- **Forms never navigate** — AIR auto-prevents the default on handled form
+  submits (the SPA behavior every handler reimplemented with
+  `e.preventDefault()`); opt back into native submission with
+  `data-native-submit`.
+- **`useLocal` tuple form** — `const [text, setText] = useLocal("")` alongside
+  the object form (`{ local, set, patch }`); pick either.
+- **Bound remote cells** — `connectCli(url).bind(counter)` replaces raw
+  `{ type, payload }` wire actions: `await counter.increment(1)` dispatches over
+  the socket (resolving on the server's per-action ack — WS and UDS) and
+  `counter.count` reads live server state.
+- **Scaffolds slimmed** — app.ts is now 3 lines (zero-config), one `compile`
+  task instead of twelve, tuple `useLocal`, no `preventDefault` boilerplate, no
+  leading `t.init()` (state starts initialized — init is a reset); `test` task
+  only emitted when the template ships tests.
+
 - **UI tests: zero boilerplate, zero awaits on actions** —
   - `testUI(App, "name", async (ui) => …)` wrapper form: auto happy-dom window,
     auto-boots every `cell()` the App imports (same registry the android runtime

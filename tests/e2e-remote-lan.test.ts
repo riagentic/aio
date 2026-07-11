@@ -9,6 +9,11 @@
 // Skipped (visibly) when the box has no non-loopback IPv4 or AIO_E2E=0.
 import { assert, assertStringIncludes } from "@std/assert";
 
+// Coverage profiles from spawned deno processes go to a throwaway temp dir —
+// never into the repo (an empty DENO_COVERAGE_DIR means "cwd"), never into
+// the parent's coverage profile.
+const _childCovDir = Deno.makeTempDirSync({ prefix: "aio-child-cov-" });
+
 const ROOT = new URL("..", import.meta.url).pathname;
 
 function lanIP(): string | null {
@@ -40,6 +45,7 @@ Deno.test({
     const port = freePort();
     const dir = `${ROOT}examples/targets/browser-remote`;
     const proc = new Deno.Command(Deno.execPath(), {
+      env: { DENO_COVERAGE_DIR: _childCovDir },
       args: [
         "run",
         "-A",
