@@ -9,7 +9,7 @@
 - [API Reference](api-reference.md) — all exports, types, configs
 - [Tutorial](tutorial.md) — step-by-step from zero to running app
 - [FAQ](faq.md) — design decisions and non-goals
-- [Changelog](changelog.md) — version history
+- [Changelog](../../CHANGELOG.md) — version history
 - [Positioning & non-goals](positioning.md) — what aio is for, what it isn't
 - [Versioning policy](semver-policy.md) — what counts as breaking, deprecation
   lifecycle, release phases

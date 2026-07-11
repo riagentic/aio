@@ -55,4 +55,4 @@ const myFeature = feature("myFeature", {
 });
 ```
 
-See [generators.md](generators.md) for the full guide.
+See [generators.md](../state/generators.md) for the full guide.

@@ -264,10 +264,10 @@ log.error("db", "connection lost", { error: "ECONNREFUSED" });
 
 ## Utility
 
-| API                    | Description                         |
-| ---------------------- | ----------------------------------- |
-| `VERSION`              | Framework version string            |
-| `parseCli(args)`       | Parse CLI flags                     |
-| `lint(cells)`          | Validate cell definitions           |
-| `instances()`          | List running aio instances          |
-| `resolveAppId(appDir)` | Resolve app identity from directory |
+| API                   | Description                                                  |
+| --------------------- | ------------------------------------------------------------ |
+| `VERSION`             | Framework version string                                     |
+| `parseCli(args)`      | Parse CLI flags                                              |
+| `lint(cells)`         | Validate cell definitions                                    |
+| `instances()`         | List running aio instances                                   |
+| `resolveAppId(appId)` | Canonical app slug from the appId string (throws if missing) |

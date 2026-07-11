@@ -80,7 +80,7 @@ Client-only state hook — not synced to server, not persisted. For ephemeral UI
 concerns like "which item am I editing", form inputs, dropdown open/closed.
 
 ```tsx
-import { useAio, useLocal } from "aio";
+import { useAio, useLocal } from "aio/air";
 
 export default function App() {
   const { state, send } = useAio<AppState>();

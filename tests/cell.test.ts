@@ -1229,3 +1229,26 @@ Deno.test("cell with empty methods map is a valid state-only cell (thin-client s
   assertEquals(stateOnly.__aio.id, "stub-state-only");
   assertEquals(stateOnly.label, "x");
 });
+
+Deno.test("validateConfig: every typed UiConfig key is accepted (ui.entry regression)", async () => {
+  const { validateConfig, VALID_UI_KEYS } = await import(
+    "../src/server/config.ts"
+  );
+  // Every key the UiConfig type documents must validate — a typed option that
+  // exits the process at boot is the worst kind of bug.
+  const typedUiKeys = ["title", "width", "height", "showStatus", "entry"];
+  for (const k of typedUiKeys) {
+    let exited = false;
+    validateConfig(
+      { [k]: "x" },
+      VALID_UI_KEYS,
+      "ui",
+      ((_c: number) => {
+        exited = true;
+        throw new Error("exit");
+        // deno-lint-ignore no-explicit-any
+      }) as any,
+    );
+    assertEquals(exited, false, `typed ui key "${k}" was rejected`);
+  }
+});

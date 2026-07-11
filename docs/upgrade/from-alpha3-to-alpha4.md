@@ -25,9 +25,9 @@ generous timeout), this is a behavior change. Effects that exceed
 
 - **Vital signs** — three probes (loop, render, transport) + hint engine for
   detecting and diagnosing UI freezes. Enabled by default. Kill switch:
-  `vitals: false`. See [vitals.md](vitals.md)
+  `vitals: false`. See [vitals.md](../debugging/vitals.md)
 - **DiagReporter** — structured console diagnostics with `onDiagnostic` hook for
-  telemetry. See [diagnostics.md](diagnostics.md)
+  telemetry. See [diagnostics.md](../debugging/README.md)
 - **PressureMonitor** — payload size and broadcast rate warnings. Kill switch:
   `vitals: { pressure: false }`
 - **Subscription stability (AIO-3/4)** — `useAio()` no longer re-subscribes on
@@ -35,7 +35,7 @@ generous timeout), this is a behavior change. Effects that exceed
 - **Diagnostic bus & health overlay** — unified event channel for 18
   previously-silent failure points, visible via green/yellow/red dot overlay
 - **Flow cross-feature access** — `ctx.getFullState()` and `ctx.when(predicate)`
-  in generators. See [generators.md](generators.md)
+  in generators. See [generators.md](../state/generators.md)
 - **Reduce phase breakdown** — `PerfMetric.breakdown` field with phase timing
 - **Graph validator** — validates feature dependency graph at startup
 - **`structuredClone` dispatch fix** — reports `EFFECT_ERROR` instead of

@@ -8,6 +8,7 @@ export const VALID_UI_KEYS = new Set<string>([
   "height",
   "showStatus",
   "renderer",
+  "entry", // AIO-8.1: UI entry file override — typed on UiConfig, served by the dev server
 ]);
 
 export const VALID_AIO_CONFIG_KEYS = new Set<string>([
@@ -21,6 +22,9 @@ export const VALID_AIO_CONFIG_KEYS = new Set<string>([
   "maxConnections",
   "allowedOrigins",
   "strictOrigin",
+  "wsLimits",
+  "fatalOnStart",
+  "dispatchStorm",
   "beforeReduce",
   "persistKey",
   "persistDebounceMs",
@@ -103,6 +107,11 @@ export const VALID_FEATURES_CONFIG_KEYS = new Set<string>([
   "routes",
   "maxConnections",
   "schedules",
+  "wsLimits",
+  "allowedOrigins",
+  "strictOrigin",
+  "fatalOnStart",
+  "dispatchStorm",
   "middleware",
   "appVersion",
   "isolate",

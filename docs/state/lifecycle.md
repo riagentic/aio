@@ -58,22 +58,28 @@ await aio.run({
 ```ts
 await aio.run({
   cells: [counter, wallet, analytics],
-  ui: { title: "My App", width: 1200, height: 800, transport: "auto" },
+  ui: { title: "My App", width: 1200, height: 800 },
+  transport: "auto", // top-level: 'uds' | 'ws' | 'auto'
   appVersion: "1.2.0",
 });
 ```
 
 ### Key options
 
-| Option         | Type             | Description                                           |
-| -------------- | ---------------- | ----------------------------------------------------- |
-| `cells`        | `CellEntry[]`    | Array of cells or `{ cell, dependsOn }` objects       |
-| `middleware`   | `MiddlewareFn[]` | Middleware chain applied before reduce                |
-| `appVersion`   | `string`         | App version — logged on startup                       |
-| `isolate`      | `string[]`       | Only activate these cells (dev convenience)           |
-| `beforeReduce` | `fn`             | Intercept actions before reduce — return null to drop |
-| `appId`        | `string`         | Unique app identity for lock file, sockets, KV paths  |
-| `schedules`    | `Schedule[]`     | Static always-on schedules                            |
+| Option                        | Type                                     | Description                                                                                                         |
+| ----------------------------- | ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| `cells`                       | `CellEntry[]`                            | Array of cells or `{ cell, dependsOn }` objects                                                                     |
+| `middleware`                  | `MiddlewareFn[]`                         | Middleware chain applied before reduce                                                                              |
+| `appVersion`                  | `string`                                 | App version — logged on startup                                                                                     |
+| `isolate`                     | `string[]`                               | Only activate these cells (dev convenience)                                                                         |
+| `beforeReduce`                | `fn`                                     | Intercept actions before reduce — return null to drop                                                               |
+| `appId`                       | `string`                                 | Unique app identity for lock file, sockets, KV paths                                                                |
+| `schedules`                   | `Schedule[]`                             | Static always-on schedules                                                                                          |
+| `routes`                      | `Record<string, fn>`                     | Custom HTTP routes — `/path` or `/prefix/*` (uploads, webhooks); see [Integrations](../examples/05-integrations.md) |
+| `dispatchStorm`               | `{ rate?, sustain?, breaker? } \| false` | Runaway-dispatch guard (default on: >200/s for 5s); `breaker` drops the storming action                             |
+| `users` / `resolveUser`       | map / `fn`                               | Auth — static token map or dynamic provider hook; see [auth](../../docs/auth/auth.md)                               |
+| `logging`                     | `LogConfig \| false`                     | Structured file logs — level (default `info`), dir (default `.aio/log`)                                             |
+| `maxConnections` / `wsLimits` | `number` / obj                           | WS safety limits (hardened defaults)                                                                                |
 
 ### Cell isolation (dev)
 
