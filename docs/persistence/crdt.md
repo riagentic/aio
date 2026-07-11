@@ -37,9 +37,15 @@ const inventory = cell("inventory", {
     offline: { retention: "7d" },
     onConflict(conflicts) {
       // Fires when a remote op changes a field your unconfirmed local ops
-      // also changed. Engine semantics are rebase-LWW: your local value stays
-      // visible (replayed on top) until confirmed; `remote` is the confirmed
-      // value underneath. resolution is "lww".
+      // also changed. Default semantics are rebase-LWW: your local value
+      // stays visible (replayed on top) until confirmed; `remote` is the
+      // confirmed value underneath; resolution is "lww".
+      //
+      // Fields with a merge strategy get a CRDT merge applied to YOUR VIEW
+      // for the conflict window (e.g. quantity shows base + both deltas,
+      // items shows the union) and resolution names the strategy. The server
+      // remains the convergence authority — the next ack/snapshot rebase
+      // replaces the merged view with the confirmed outcome.
       console.log("conflicts:", conflicts);
     },
     onSync(stats) {
@@ -151,11 +157,13 @@ interface SyncStatus {
 
 ## Callbacks
 
-**onConflict** — called when LWW resolves different values:
+**onConflict** — called when a remote op collides with unconfirmed local ops:
 
 ```ts
 onConflict(conflicts) {
   // conflicts: Array<{ field, local, remote, resolution }>
+  // resolution: "lww" (default) or the field's configured merge strategy —
+  // that strategy was already applied to your client view.
 }
 ```
 
