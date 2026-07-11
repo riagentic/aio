@@ -193,3 +193,122 @@ Deno.test("unknown cell (not in strategy map) → undefined", () => {
   const result = filterPatchesByStrategy(patches, strategies, new Map());
   assertEquals(result, undefined);
 });
+
+// ── Deep-path excludes (the nested-secret footgun, fixed) ────────────
+// exclude: ["accounts.encSecKey"] removes the field EVERYWHERE under
+// accounts — full-state filtering and patch broadcasts both.
+// These import the REAL src module (the tests above exercise a local copy —
+// kept for shape documentation, but the gate below is the source of truth).
+import {
+  applyCellFieldFilter as realApplyFilter,
+  filterPatchesByStrategy as realFilterPatches,
+} from "../src/state/state-filter.ts";
+
+const filterMod = () => ({
+  applyCellFieldFilter: realApplyFilter,
+  filterPatchesByStrategy: realFilterPatches,
+});
+
+Deno.test("deep exclude: full-state filter strips nested secrets through arrays", () => {
+  const { applyCellFieldFilter } = filterMod();
+  const state = {
+    accounts: [
+      { id: 1, name: "a", encSecKey: "s3cr3t-1" },
+      { id: 2, name: "b", encSecKey: "s3cr3t-2" },
+    ],
+    total: 2,
+  };
+  const out = applyCellFieldFilter(
+    { exclude: ["accounts.encSecKey"] },
+    state,
+  )!;
+  assertEquals(out, {
+    accounts: [{ id: 1, name: "a" }, { id: 2, name: "b" }],
+    total: 2,
+  });
+  // source untouched (pure)
+  assertEquals(state.accounts[0]!.encSecKey, "s3cr3t-1");
+});
+
+Deno.test("deep exclude: multi-level path through nested objects", () => {
+  const { applyCellFieldFilter } = filterMod();
+  const out = applyCellFieldFilter(
+    { exclude: ["wallet.keys.priv"] },
+    { wallet: { keys: { pub: "P", priv: "S" }, label: "main" } },
+  )!;
+  assertEquals(out, { wallet: { keys: { pub: "P" }, label: "main" } });
+});
+
+Deno.test("deep exclude: patch targeting the excluded field is dropped", () => {
+  const { filterPatchesByStrategy } = filterMod();
+  const res = filterPatchesByStrategy(
+    [{
+      cell: "vault",
+      ops: [
+        { op: "replace", path: ["accounts", 0, "encSecKey"], value: "new" },
+        { op: "replace", path: ["accounts", 0, "name"], value: "renamed" },
+      ],
+    }],
+    new Map([["vault", "filter" as const]]),
+    new Map([[
+      "vault",
+      {
+        mode: "exclude" as const,
+        fields: new Set<string>(),
+        deepExcludes: [["accounts", "encSecKey"]],
+      },
+    ]]),
+  );
+  assertEquals(res, [{
+    cell: "vault",
+    ops: [{ op: "replace", path: ["accounts", 0, "name"], value: "renamed" }],
+  }]);
+});
+
+Deno.test("deep exclude: ancestor-replacing patch has the secret stripped from its value", () => {
+  const { filterPatchesByStrategy } = filterMod();
+  const res = filterPatchesByStrategy(
+    [{
+      cell: "vault",
+      ops: [{
+        op: "add",
+        path: ["accounts", 2],
+        value: { id: 3, name: "c", encSecKey: "s3cr3t-3" },
+      }],
+    }],
+    new Map([["vault", "filter" as const]]),
+    new Map([[
+      "vault",
+      {
+        mode: "exclude" as const,
+        fields: new Set<string>(),
+        deepExcludes: [["accounts", "encSecKey"]],
+      },
+    ]]),
+  )!;
+  assertEquals(res[0]!.ops[0]!.value, { id: 3, name: "c" });
+});
+
+Deno.test("deep exclude: patches below the excluded subtree are dropped too", () => {
+  const { filterPatchesByStrategy } = filterMod();
+  const res = filterPatchesByStrategy(
+    [{
+      cell: "vault",
+      ops: [{
+        op: "replace",
+        path: ["accounts", 1, "encSecKey", "rotatedAt"],
+        value: 123,
+      }],
+    }],
+    new Map([["vault", "filter" as const]]),
+    new Map([[
+      "vault",
+      {
+        mode: "exclude" as const,
+        fields: new Set<string>(),
+        deepExcludes: [["accounts", "encSecKey"]],
+      },
+    ]]),
+  );
+  assertEquals(res, []);
+});

@@ -25,21 +25,27 @@ sensitive or large data.
 
 Both `persist` and `ui` accept the same filter shapes:
 
-| Config                    | Effect                       |
-| ------------------------- | ---------------------------- |
-| `"all"`                   | Include everything (default) |
-| `"none"`                  | Include nothing              |
-| `{ include: ["a", "b"] }` | Only these fields            |
-| `{ exclude: ["cache"] }`  | Everything except these      |
+| Config                             | Effect                                                                                 |
+| ---------------------------------- | -------------------------------------------------------------------------------------- |
+| `"all"`                            | Include everything (default)                                                           |
+| `"none"`                           | Include nothing                                                                        |
+| `{ include: ["a", "b"] }`          | Only these top-level fields                                                            |
+| `{ exclude: ["cache"] }`           | Everything except these                                                                |
+| `{ exclude: ["accounts.secKey"] }` | **Deep**: remove the field everywhere under `accounts` (arrays traversed element-wise) |
 
 ```ts
 const trading = cell("trading", {
-  state: { orders: [], positions: [], riskModel: {}, cache: {} },
+  state: { orders: [], positions: [], riskModel: {}, cache: {}, accounts: [] },
   methods: {/* ... */},
   persist: { exclude: ["cache", "riskModel"] },
-  ui: { include: ["orders", "positions"] },
+  // secKey never reaches a client — stripped from full-state broadcasts AND
+  // from Immer patch payloads (including patches that replace whole rows).
+  ui: { include: ["orders", "positions"] }, // or exclude: ["accounts.secKey"]
 });
 ```
+
+`include` is a **top-level allowlist** — dot-paths are exclude-only (a dotted
+include warns at boot).
 
 ## Resolution Order
 
