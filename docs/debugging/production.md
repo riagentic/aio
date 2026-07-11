@@ -17,6 +17,10 @@ Work top to bottom — each item links to the details.
 - [ ] **Auth decided** — `users` map, `resolveUser` hook, or a conscious
       "public" ([auth](../auth/auth.md)). Exposed servers: `--expose` gives
       TLS + token; put a CA-signed cert on anything real.
+- [ ] **appId pinned** — zero-config inference follows the project
+      directory/title; renaming would orphan your data and locks. Set `appId` in
+      deno.json explicitly before shipping
+      ([pitfalls](../basics/pitfalls.md#state--cells)).
 - [ ] **Persistence location** — know where your KV/SQLite files live
       (`resolveDataDir`), and back them up; test a restore once.
 - [ ] **State versioning** — cells that will evolve have `version` + `onMigrate`
@@ -30,9 +34,10 @@ Work top to bottom — each item links to the details.
 - [ ] **Logs rotating** — `.aio/log/` grows; ship or rotate it.
 - [ ] **Soak once** — `deno task soak` (or the 72h variant) against a
       prod-shaped build; heap slope must stay flat.
-- [ ] **systemd unit** (service targets) — `Restart=on-failure` + `WatchdogSec`;
-      the server exits(1) on a dead listener by design, so restarts are the
-      recovery path.
+- [ ] **systemd unit** (service targets) — `Restart=on-failure`; the server
+      exits(1) on a dead listener by design, so restarts are the recovery path.
+      (No `WatchdogSec` — aio doesn't sd_notify; a watchdog would kill a healthy
+      service.)
 
 ## Prometheus metrics
 

@@ -91,3 +91,60 @@ Deno.test({
     }
   },
 });
+
+Deno.test({
+  name: "connectCli.bind: bound calls never hang across a dead connection",
+  sanitizeResources: false,
+  sanitizeOps: false,
+  async fn() {
+    const port = freePort();
+    const proc = new Deno.Command(Deno.execPath(), {
+      env: { DENO_COVERAGE_DIR: _childCovDir },
+      args: [
+        "run",
+        "-A",
+        "--unstable-kv",
+        "app.ts",
+        "--client=server-only",
+        `--port=${port}`,
+      ],
+      cwd: new URL("../examples/counter", import.meta.url).pathname,
+      stdin: "null",
+      stdout: "null",
+      stderr: "null",
+    }).spawn();
+
+    const c2 = cell("counter2-hang", {
+      state: { count: 0 },
+      methods: {
+        increment(s, by = 1) {
+          s.count += by;
+        },
+      },
+    });
+    const cli = connectCli<{ counter: { count: number } }>(
+      `http://localhost:${port}`,
+    );
+    try {
+      await waitFor(() => cli.connected ? true : null);
+      cli.bind(c2 as unknown as CellDef);
+
+      // Kill the server mid-session, then call a bound method — it must
+      // resolve (at-most-once delivery), not hang the caller forever.
+      proc.kill();
+      await proc.status;
+      await waitFor(() => !cli.connected ? true : null);
+
+      const raced = await Promise.race([
+        c2.increment(1).then(() => "resolved"),
+        new Promise((r) => setTimeout(() => r("hung"), 3000)),
+      ]);
+      assertEquals(raced, "resolved");
+    } finally {
+      cli.close();
+      try {
+        proc.kill();
+      } catch { /* already dead */ }
+    }
+  },
+});

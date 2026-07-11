@@ -86,8 +86,8 @@
   },
   "tasks": {
     "test": "deno test -A --unstable-kv tests/",
-    "coverage:check": "deno test -A --unstable-kv --coverage=coverage tests/ && deno cache --unstable-kv mod.ts src/cell-test.ts src/am.ts src/build.ts aiol/mod.ts && deno coverage coverage --lcov --output=coverage/lcov.info && deno run --allow-read scripts/check-coverage.ts",
-    "test:core": "deno test -A --unstable-kv --ignore=tests/am.test.ts,tests/build.test.ts,tests/server.test.ts,tests/tls.test.ts,tests/single-instance-lock.test.ts,tests/cli.test.ts,tests/cli-client.test.ts,tests/electron-ipc.test.ts,tests/app-modes.test.ts,tests/examples.test.ts tests/",
+    "coverage:check": "deno test -A --unstable-kv --coverage=coverage tests/ && deno cache --unstable-kv mod.ts src/air.ts src/browser-air.ts src/standalone-air.ts src/cell-test.ts src/am.ts src/build.ts aiol/mod.ts && deno coverage coverage --lcov --output=coverage/lcov.info && deno run --allow-read scripts/check-coverage.ts",
+    "test:core": "deno test -A --unstable-kv --ignore=tests/am.test.ts,tests/build.test.ts,tests/server.test.ts,tests/tls.test.ts,tests/single-instance-lock.test.ts,tests/cli.test.ts,tests/cli-client.test.ts,tests/electron-ipc.test.ts,tests/app-modes.test.ts,tests/examples.test.ts,tests/e2e-ui-chromium.test.ts,tests/e2e-remote-lan.test.ts,tests/zero-config.test.ts,tests/cli-bound-cells.test.ts tests/",
     "check": "deno check src/ mod.ts aiol/mod.ts init.ts examples/",
     "lint": "deno lint src/",
     "lint:aio": "deno run -A aiol/mod.ts",

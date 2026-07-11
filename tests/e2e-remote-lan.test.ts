@@ -44,6 +44,9 @@ Deno.test({
   async fn() {
     const port = freePort();
     const dir = `${ROOT}examples/targets/browser-remote`;
+    // Regenerate the self-signed cert — a cached one has stale SANs after
+    // the machine's LAN IP changes, failing hostname verification.
+    await Deno.remove(`${dir}/.aio-tls`, { recursive: true }).catch(() => {});
     const proc = new Deno.Command(Deno.execPath(), {
       env: { DENO_COVERAGE_DIR: _childCovDir },
       args: [

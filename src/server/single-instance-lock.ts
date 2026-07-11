@@ -35,12 +35,24 @@ export function slugify(s: string): string {
     "aio-app";
 }
 
-/** Resolve app ID — must be passed explicitly via aio.run({ appId }). Throws if missing.
- *  Compiled builds don't have deno.json, so appId must be hardcoded in the app. */
+/** Resolve app ID — explicit `appId` wins; otherwise inferred. */
 export function resolveAppId(appId?: string): string {
   if (appId) return slugify(appId);
-  // Zero-config inference: deno.json appId > title > name (unscoped) — then
-  // the main module's directory name (its parent when the entry sits in
+  // Compiled binaries: NEVER read the cwd's deno.json — the binary may be
+  // launched from an unrelated project and must not adopt ITS identity
+  // (locks, KV paths). The VFS path carries the binary name — stable per
+  // binary regardless of launch directory.
+  try {
+    const main = new URL(Deno.mainModule);
+    const compiledSeg = main.pathname.split("/").find((p) =>
+      p.startsWith("deno-compile-")
+    );
+    if (compiledSeg) {
+      return slugify(compiledSeg.slice("deno-compile-".length));
+    }
+  } catch { /* no main module — fall through */ }
+  // Zero-config inference (dev): deno.json appId > title > name (unscoped) —
+  // then the main module's directory name (its parent when the entry sits in
   // src/). Deterministic per project, so locks/KV/socket identity is stable.
   try {
     const cfg = JSON.parse(
@@ -58,7 +70,7 @@ export function resolveAppId(appId?: string): string {
       const name = dir === "src" ? parts.pop() : dir;
       if (name) return slugify(name);
     }
-  } catch { /* compiled/unusual entry */ }
+  } catch { /* unusual entry */ }
   throw new Error(
     '[aio] cannot infer an appId — add appId: "my-app" to aio.run() or ' +
       'an "appId"/"title" field to deno.json',

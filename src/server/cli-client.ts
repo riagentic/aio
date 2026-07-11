@@ -187,6 +187,16 @@ export function connectCli<S>(
     socket.onerror = () => {};
 
     socket.onclose = (ev) => {
+      // A dropped connection can never ack — resolve outstanding bound-method
+      // calls so they don't hang (delivery is at-most-once; the app's next
+      // state broadcast is the truth).
+      if (_pending.size > 0) {
+        console.warn(
+          `[aio:cli] connection lost with ${_pending.size} unacked action(s) — resolving; verify via state`,
+        );
+        for (const resolve of _pending.values()) resolve();
+        _pending.clear();
+      }
       ws = null;
       if (closed) return;
       if (!wasConnected && retry === 2) {
@@ -236,6 +246,12 @@ export function connectCli<S>(
             this.send(
               { ...action, cid } as { type: string; payload?: unknown },
             );
+            // Not connected → the send was queued or dropped and no ack can
+            // arrive; resolve now instead of hanging (at-most-once delivery).
+            if (!this.connected) {
+              _pending.delete(cid);
+              return Promise.resolve();
+            }
             return ackd;
           },
           () => (state ?? {}) as Record<string, unknown>,
@@ -373,6 +389,14 @@ export function connectCliUDS<S>(socketPath: string): CliApp<S> {
               }
             }
           } catch { /* connection closed */ }
+          // Dropped UDS connection can never ack — see the WS onclose note.
+          if (_udsPending.size > 0) {
+            console.warn(
+              `[aio:cli] UDS connection lost with ${_udsPending.size} unacked action(s) — resolving; verify via state`,
+            );
+            for (const resolve of _udsPending.values()) resolve();
+            _udsPending.clear();
+          }
           conn = null;
           writer = null;
           if (!closed) {
@@ -430,6 +454,10 @@ export function connectCliUDS<S>(socketPath: string): CliApp<S> {
             this.send(
               { ...action, cid } as { type: string; payload?: unknown },
             );
+            if (!this.connected) {
+              _udsPending.delete(cid);
+              return Promise.resolve();
+            }
             return ackd;
           },
           () => (state ?? {}) as Record<string, unknown>,
