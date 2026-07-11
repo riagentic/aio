@@ -391,9 +391,12 @@ export function applyMutations(
 // This means `s.count++` inside an async method does NOT dispatch immediately —
 // it dispatches at the next microtask boundary AFTER the async call resolves.
 //
-// Implication: concurrent async methods each see the state snapshot from when
-// they were called, not the latest state. To read fresh state mid-method,
-// call getState()[cellName] directly instead of using the `s` proxy.
+// READ-YOUR-WRITES: reads through the `s` proxy see committed state with this
+// invocation's pending (unflushed) mutations overlaid — `s.x = 5; use(s.x)`
+// behaves exactly like sync code. The overlay replays the pending batch
+// through applyMutations itself, so what you read is byte-for-byte what will
+// commit. Other cells / concurrent invocations stay invisible until they
+// actually commit (their batches are their own).
 //
 // This is intentional: all mutations stay observable (dispatched as actions)
 // and partial-state visibility during async gaps is prevented.
@@ -438,7 +441,12 @@ export function createBatcher(prefix: string, dispatch: (action: Msg) => void) {
     });
   }
 
-  return { add };
+  return {
+    add,
+    /** Unflushed mutations of the current batch — the live proxy overlays
+     *  these on reads (read-your-writes). */
+    pending: () => batch.mutations,
+  };
 }
 
 // ── Live Proxy for async methods ───────────────────────────────────
@@ -514,7 +522,18 @@ function throwLiveStateError(
   );
 }
 
-/** Create a proxy over cell state that intercepts writes and batches them as mutations. */
+/** Memoized read-your-writes view: committed state with the invocation's
+ *  pending mutations overlaid. Shared across the proxy tree of one method
+ *  invocation; recomputed only when the base state or batch length changes. */
+type OverlayBox = {
+  v: { base: unknown; count: number; root: unknown } | null;
+};
+
+/** Create a proxy over cell state that intercepts writes and batches them as
+ *  mutations. Reads are READ-YOUR-WRITES: they see committed state with this
+ *  batch's pending mutations overlaid (replayed via {@linkcode applyMutations},
+ *  the exact code path that commits them), so `s.x = 5; use(s.x)` behaves
+ *  like sync code. */
 export function createLiveProxy<S extends Record<string, unknown>>(
   cellName: string,
   prefix: string,
@@ -523,7 +542,29 @@ export function createLiveProxy<S extends Record<string, unknown>>(
   batcher: ReturnType<typeof createBatcher>,
   path: string[] = [],
   _proxyCache: Map<string, S> = new Map(),
+  _overlay: OverlayBox = { v: null },
 ): S {
+  /** Committed root state with pending writes overlaid (read-your-writes). */
+  function effectiveRoot(): S {
+    const committed = getState();
+    const pending = batcher.pending();
+    if (pending.length === 0) return committed;
+    const memo = _overlay.v;
+    if (memo && memo.base === committed && memo.count === pending.length) {
+      return memo.root as S;
+    }
+    const root = snapshotForRead(committed);
+    // Clone failed and returned the committed object itself — overlaying
+    // would mutate real state; degrade to committed reads instead.
+    if (root === committed || root === null || typeof root !== "object") {
+      return committed;
+    }
+    applyMutations(root as Record<string, unknown>, pending);
+    _overlay.v = { base: committed, count: pending.length, root };
+    return root as S;
+  }
+  const effectiveAt = (): unknown =>
+    path.length === 0 ? effectiveRoot() : getNestedValue(effectiveRoot(), path);
   // AIO-57: Target must stay extensible and mirror state's keys.
   // ES Proxy invariant: if target is non-extensible, ownKeys must return exactly
   // the target's own keys. If deepFreeze (dispatch.ts freezeState) reaches this
@@ -535,18 +576,14 @@ export function createLiveProxy<S extends Record<string, unknown>>(
   // JSON.stringify() inspect the proxy's target, so an array value behind an
   // object target serializes as {"0":...} instead of [...] — corrupting any
   // nested array read through the proxy.
-  const initialValue = path.length === 0
-    ? getState()
-    : getNestedValue(getState(), path);
+  const initialValue = effectiveAt();
   const target = (Array.isArray(initialValue) ? [] : {}) as unknown as S;
 
   const handler: ProxyHandler<S> = {
     get(_target, prop, _receiver) {
       if (typeof prop === "symbol") return undefined;
       const key = prop as string;
-      const fresh = path.length === 0
-        ? getState()
-        : getNestedValue(getState(), path);
+      const fresh = effectiveAt();
       const value = (fresh as Record<string, unknown>)[key];
 
       // Array method interception — read methods
@@ -591,6 +628,7 @@ export function createLiveProxy<S extends Record<string, unknown>>(
             batcher,
             [...path, key],
             _proxyCache,
+            _overlay,
           );
           _proxyCache.set(cacheKey, cached);
         }
@@ -626,17 +664,13 @@ export function createLiveProxy<S extends Record<string, unknown>>(
 
     has(_target, prop) {
       if (typeof prop === "symbol") return false;
-      const fresh = path.length === 0
-        ? getState()
-        : getNestedValue(getState(), path);
+      const fresh = effectiveAt();
       if (fresh === null || fresh === undefined) return false; // AIO-232
       return prop in (fresh as object);
     },
 
     ownKeys() {
-      const fresh = path.length === 0
-        ? getState()
-        : getNestedValue(getState(), path);
+      const fresh = effectiveAt();
       if (fresh === null || fresh === undefined) return []; // AIO-232
       const freshKeys = Reflect.ownKeys(fresh as object);
       // Sync target keys with fresh state to satisfy ES invariant:
@@ -667,9 +701,7 @@ export function createLiveProxy<S extends Record<string, unknown>>(
 
     getOwnPropertyDescriptor(_target, prop) {
       if (typeof prop === "symbol") return undefined;
-      const fresh = path.length === 0
-        ? getState()
-        : getNestedValue(getState(), path);
+      const fresh = effectiveAt();
       if (fresh === null || fresh === undefined) return undefined; // AIO-232
       // Check fresh state directly — target may be stale if state was replaced.
       const freshObj = fresh as Record<string, unknown>;

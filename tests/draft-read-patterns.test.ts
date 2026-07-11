@@ -271,7 +271,7 @@ Deno.test("4.1 mutating from outside a method is intercepted (proxy)", () => {
 
 Deno.test("4.3 live proxy: array read methods return plain data", () => {
   // deno-lint-ignore no-explicit-any
-  const batcher = { add: (_m: string, _op: any) => {} };
+  const batcher = { add: (_m: string, _op: any) => {}, pending: () => [] };
   let state = { items: [1, 2, 3, 4, 5] };
   const proxy = createLiveProxy("c", "c", "m", () => state, batcher);
 
@@ -316,6 +316,7 @@ Deno.test("4.3 live proxy: array read methods return plain data", () => {
   // deno-lint-ignore no-explicit-any
   let pushed: any = null;
   const batcher2 = {
+    pending: () => [],
     add: (_m: string, op: any) => {
       pushed = op;
     },
@@ -330,7 +331,7 @@ Deno.test(
   "4.3 live proxy: structuredClone read on item — plain object, not proxy",
   () => {
     // deno-lint-ignore no-explicit-any
-    const batcher = { add: (_m: string, _op: any) => {} };
+    const batcher = { add: (_m: string, _op: any) => {}, pending: () => [] };
     const state = {
       users: [
         { id: 1, name: "alpha" },
@@ -351,7 +352,7 @@ Deno.test(
   () => {
     // Spread on the live proxy — for object top-level.
     // deno-lint-ignore no-explicit-any
-    const batcher = { add: (_m: string, _op: any) => {} };
+    const batcher = { add: (_m: string, _op: any) => {}, pending: () => [] };
     const state = { a: 1, b: 2, c: 3 };
     // deno-lint-ignore no-explicit-any
     const proxy = createLiveProxy("c", "c", "m", () => state, batcher);
@@ -364,7 +365,7 @@ Deno.test(
   "4.3 live proxy: Object.keys / Object.entries return plain data",
   () => {
     // deno-lint-ignore no-explicit-any
-    const batcher = { add: (_m: string, _op: any) => {} };
+    const batcher = { add: (_m: string, _op: any) => {}, pending: () => [] };
     const state = { a: 1, b: 2 };
     // deno-lint-ignore no-explicit-any
     const proxy = createLiveProxy("c", "c", "m", () => state, batcher);
@@ -377,7 +378,7 @@ Deno.test(
   "4.3 live proxy: unsupported method on non-array throws canonical error",
   () => {
     // deno-lint-ignore no-explicit-any
-    const batcher = { add: (_m: string, _op: any) => {} };
+    const batcher = { add: (_m: string, _op: any) => {}, pending: () => [] };
     const state = {
       // Function-valued property on a non-array — must throw with the
       // exact message users will see in the wild.
