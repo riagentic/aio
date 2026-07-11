@@ -128,20 +128,37 @@ export function useAio<
 }
 
 /** Client-only reactive state — not synced to server. Returns `{ local, set, patch }`. */
+/** Result of {@linkcode useLocal} — object form (`{ local, set, patch }`)
+ *  AND tuple form (`const [value, set] = useLocal(init)`); pick either.
+ *  The tuple side is destructuring-only (backed by an iterator) — don't
+ *  index it (`result[0]`); use `.local` for direct reads. */
+export type UseLocalResult<T> =
+  & {
+    readonly local: T;
+    set: (next: T | ((prev: T) => T)) => void;
+    patch: T extends Record<string, unknown> ? (partial: Partial<T>) => void
+      : never;
+  }
+  & readonly [T, (next: T | ((prev: T) => T)) => void];
+
 export function useLocal<T>(
   initial: T,
-): {
-  readonly local: T;
-  set: (next: T | ((prev: T) => T)) => void;
-  patch: T extends Record<string, unknown> ? (partial: Partial<T>) => void
-    : never;
-} {
+): UseLocalResult<T> {
   const ref = useRef<ReturnType<typeof signal<T>> | null>(null);
   if (!ref.current) ref.current = signal(initial);
   const sig = ref.current;
-  return {
+  const result = {
     get local(): T {
       return sig.value;
+    },
+    // Tuple form: const [text, setText] = useLocal("") — reads the signal at
+    // destructure time (same reactivity as reading .local during render).
+    *[Symbol.iterator](): Iterator<unknown> {
+      yield sig.value;
+      yield (next: T | ((prev: T) => T)) => {
+        if (typeof next === "function") sig.update(next as (prev: T) => T);
+        else sig.set(next);
+      };
     },
     set: (next: T | ((prev: T) => T)) => {
       // AIO-66: Accept updater function like React's useState
@@ -160,6 +177,7 @@ export function useLocal<T>(
     }) as T extends Record<string, unknown> ? (partial: Partial<T>) => void
       : never,
   };
+  return result as unknown as UseLocalResult<T>;
 }
 
 /** Returns `true` when the WebSocket/IPC transport is connected to the server. */

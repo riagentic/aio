@@ -64,6 +64,7 @@ export {
   useRef,
   useSignal,
 } from "./browser-air.ts";
+export type { UseLocalResult } from "./browser-air.ts";
 
 // ── Time travel (@experimental) ──────────────────────────────────────
 export { useTimeTravel } from "./browser-air.ts";

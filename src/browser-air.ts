@@ -160,6 +160,7 @@ export {
   useLocal,
   useProjection,
 } from "./browser/browser-air-hooks.ts";
+export type { UseLocalResult } from "./adapters/air.ts";
 
 // ── Router (AIR signal-based) ───────────────────────────────────────
 export {

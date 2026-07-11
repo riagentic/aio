@@ -190,13 +190,13 @@ h("ul", null, items.map((i) => h("li", { key: i.id }, i.name)));
 
 ## Server State Hooks
 
-| Function        | Signature                               | Description       |
-| --------------- | --------------------------------------- | ----------------- |
-| `useAio`        | `useAio(): { state, send }`             | Subscribe to all  |
-| `useLocal`      | `useLocal(init): { local, set, patch }` | Client-only state |
-| `useConnected`  | `useConnected(): boolean`               | Connection status |
-| `useProjection` | `useProjection(fn): T`                  | Derived state     |
-| `useTimeTravel` | `useTimeTravel(): TimeTravelState`      | Debug time travel |
+| Function        | Signature                                                          | Description       |
+| --------------- | ------------------------------------------------------------------ | ----------------- |
+| `useAio`        | `useAio(): { state, send }`                                        | Subscribe to all  |
+| `useLocal`      | `useLocal(init)` → `{ local, set, patch }` or tuple `[value, set]` | Client-only state |
+| `useConnected`  | `useConnected(): boolean`                                          | Connection status |
+| `useProjection` | `useProjection(fn): T`                                             | Derived state     |
+| `useTimeTravel` | `useTimeTravel(): TimeTravelState`                                 | Debug time travel |
 
 ## Routing
 
