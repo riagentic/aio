@@ -9,7 +9,40 @@ export type CellPatchStrategy = "raw" | "skip" | "filter" | "full";
 export type PatchFilterFields = {
   mode: "include" | "exclude";
   fields: Set<string>;
+  /** Parsed dot-path excludes (`"accounts.encSecKey"` → ["accounts",
+   *  "encSecKey"]) — removed everywhere under the head field, traversing
+   *  arrays element-wise. Exclude mode only. */
+  deepExcludes?: string[][];
 };
+
+/** Deep-remove the field at `segs` under `value`. Arrays are traversed
+ *  element-wise — the intuitive reading of `"accounts.encSecKey"` when
+ *  `accounts` is a list. Clones only along the removal path; untouched
+ *  branches keep referential identity. */
+export function deepExclude(value: unknown, segs: string[]): unknown {
+  if (segs.length === 0 || value === null || typeof value !== "object") {
+    return value;
+  }
+  if (Array.isArray(value)) {
+    let changed = false;
+    const out = value.map((el) => {
+      const next = deepExclude(el, segs);
+      if (next !== el) changed = true;
+      return next;
+    });
+    return changed ? out : value;
+  }
+  const obj = value as Record<string, unknown>;
+  const head = segs[0]!;
+  if (!(head in obj)) return value;
+  if (segs.length === 1) {
+    const { [head]: _dropped, ...kept } = obj;
+    return kept;
+  }
+  const child = deepExclude(obj[head], segs.slice(1));
+  if (child === obj[head]) return value;
+  return { ...obj, [head]: child };
+}
 
 /** Apply a CellFieldFilter to a cell's state slice — returns filtered object or undefined if "none" */
 export function applyCellFieldFilter(
@@ -26,11 +59,45 @@ export function applyCellFieldFilter(
     return result;
   }
   if ("exclude" in filter) {
-    const result = { ...cellState };
-    for (const key of filter.exclude) delete result[key];
+    let result: Record<string, unknown> = { ...cellState };
+    for (const key of filter.exclude) {
+      if (key.includes(".")) {
+        result = deepExclude(result, key.split(".")) as Record<
+          string,
+          unknown
+        >;
+      } else {
+        delete result[key];
+      }
+    }
     return result;
   }
   return undefined;
+}
+
+/** Match an Immer patch path against a deep-exclude path. Numeric op-path
+ *  segments (array indices) are skipped — the exclude path names fields, not
+ *  positions. */
+function matchDeepPath(
+  opPath: (string | number)[],
+  segs: string[],
+):
+  | { kind: "within" } // op targets the excluded field or below → drop op
+  | { kind: "ancestor"; rest: string[] } // op value CONTAINS it → strip value
+  | { kind: "none" } {
+  let i = 0, j = 0;
+  while (i < opPath.length && j < segs.length) {
+    const seg = opPath[i]!;
+    if (typeof seg === "number" || /^\d+$/.test(String(seg))) {
+      i++;
+      continue;
+    }
+    if (String(seg) !== segs[j]) return { kind: "none" };
+    i++;
+    j++;
+  }
+  if (j === segs.length) return { kind: "within" };
+  return { kind: "ancestor", rest: segs.slice(j) };
 }
 
 /** Filter patch entries per-cell based on strategy map.
@@ -67,8 +134,27 @@ export function filterPatchesByStrategy(
     for (const op of entry.ops) {
       if (op.path.length === 0) return undefined; // root replacement -> full fallback
       const seg = String(op.path[0]);
-      if (ff.mode === "include" && ff.fields.has(seg)) kept.push(op);
-      if (ff.mode === "exclude" && !ff.fields.has(seg)) kept.push(op);
+      if (ff.mode === "include") {
+        if (ff.fields.has(seg)) kept.push(op);
+        continue;
+      }
+      // exclude mode: top-level drop, then deep-path handling
+      if (ff.fields.has(seg)) continue;
+      let out = op;
+      let dropped = false;
+      for (const segs of ff.deepExcludes ?? []) {
+        const m = matchDeepPath(out.path, segs);
+        if (m.kind === "within") {
+          dropped = true;
+          break;
+        }
+        if (m.kind === "ancestor" && "value" in out) {
+          // The op replaces an ancestor — its value carries the excluded
+          // field. Strip it from the payload before sending.
+          out = { ...out, value: deepExclude(out.value, m.rest) };
+        }
+      }
+      if (!dropped) kept.push(out);
     }
     if (kept.length > 0) result.push({ cell: entry.cell, ops: kept });
   }
