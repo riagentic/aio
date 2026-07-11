@@ -84,10 +84,14 @@ The binary name comes from deno.json `"title"` (lowercased, spaces to hyphens).
 ./my-app --port=3000           # custom port
 ```
 
+> Scaffolds ship **one** `compile` task — their own target. To build a different
+> target, invoke `build.ts` directly with the flags shown below (or add your own
+> task).
+
 ## compile:electron (desktop app)
 
 ```sh
-deno task compile:electron
+deno run -A dep/aio/src/build.ts --compile --electron
 ```
 
 Does everything `compile` does, plus packages the binary with Electron:
@@ -113,7 +117,7 @@ git tag vX.Y.Z && git push origin vX.Y.Z   # triggers build on all 3 platforms
 ## compile:electron:remote (thin client AppImage)
 
 ```sh
-deno task compile:electron:remote
+deno run -A dep/aio/src/build.ts --client
 ```
 
 Standalone Electron app with a connect page — no Deno runtime, no app code.
@@ -123,7 +127,7 @@ Users type a server address and connect. Linux only. Output:
 ## compile:cli (terminal binary)
 
 ```sh
-deno task compile:cli
+deno run -A dep/aio/src/build.ts --compile --cli
 ```
 
 Headless server + CLI client in a standalone binary. No browser bundle — skips
@@ -156,7 +160,7 @@ Options: `{ token?: string }` — auth token for `--expose` / multi-user servers
 ## compile:cli:remote (client-only binary)
 
 ```sh
-deno task compile:cli:remote
+deno run -A dep/aio/src/build.ts --compile --cli --remote
 ```
 
 Compiles `src/client.ts` into a standalone binary with no server — just a WS
@@ -196,7 +200,7 @@ in the browser. Persistence via `localStorage` instead of Deno.Kv.
 ## compile:android (standalone APK)
 
 ```sh
-deno task compile:android
+deno run -A dep/aio/src/build.ts --android
 ```
 
 Standalone Android APK running entirely in a WebView — no server, no Deno
@@ -220,7 +224,7 @@ execute: {
 ## compile:android:remote (client APK)
 
 ```sh
-deno task compile:android:remote
+deno run -A dep/aio/src/build.ts --android --remote
 ```
 
 Thin client APK — no local state, no reducer, no Deno runtime. Shows a connect
@@ -230,7 +234,7 @@ page where the user enters the server URL. The remote server must run with
 ## compile:browser:remote (exposed server + systemd)
 
 ```sh
-deno task compile:browser:remote
+deno run -A dep/aio/src/build.ts --compile --service --remote
 ```
 
 Standalone binary + systemd unit file with `--expose --port=3000`. Browsers on
@@ -246,7 +250,7 @@ journalctl -u aio-counter -f  # view logs + auth token
 ## compile:service:remote (headless exposed server)
 
 ```sh
-deno task compile:service:remote
+deno run -A dep/aio/src/build.ts --compile --service --headless --remote
 ```
 
 Same as `compile:browser:remote` but headless — no browser auto-open. **Systemd

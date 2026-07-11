@@ -139,7 +139,7 @@ deno task dev --server-url=http://192.168.1.100:8000
 **aio-client** — standalone Electron app with a connect page:
 
 ```sh
-deno task compile:electron:remote   # builds aio-client AppImage
+deno run -A dep/aio/src/build.ts --client   # builds aio-client AppImage
 ```
 
 The client app shows a minimal connect page where users type a server address

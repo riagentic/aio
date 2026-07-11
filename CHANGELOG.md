@@ -51,6 +51,34 @@
   grouped, with one-liners); `deno task docs:index` regenerates, CI gates
   freshness.
 
+### Fixed (multi-aspect audit)
+
+- Audit rounds B–C: production checklist recommended `WatchdogSec` (aio doesn't
+  sd_notify — it would kill healthy services); prod import maps no longer point
+  at the dev-only vendor route; coverage re-prime covers the air/browser graphs;
+  LAN e2e regenerates certs (stale SANs); appId-pinning guidance added
+  (inference follows the project name — renaming orphans data); architecture
+  diagrams machine-verified with mermaid-cli.
+
+- **Bound remote cells could hang forever** — a dropped connection never acks:
+  outstanding calls now resolve on disconnect (with a warning), and a call made
+  while already disconnected resolves immediately instead of waiting for an ack
+  that can't come (at-most-once delivery; verify via state). WS and UDS both.
+- **`am` broke on zero-config scaffolds** — `resolveAmAppId` now mirrors the
+  server's inference chain (deno.json appId > title > name > project dir).
+- **Compiled binaries could adopt a foreign identity** — a zero-config compiled
+  app launched from another project's directory would read THAT project's
+  deno.json for its appId (locks, KV paths). Compiled builds now derive identity
+  from the binary name and never read the cwd's deno.json.
+- **`am dom --all` never worked** — the flag is consumed by the global flag
+  parser; the command now reads it from flags.
+- **Docs instructed removed scaffold tasks** — targets.md/cli-service referenced
+  `deno task compile:<target>` (trimmed to one `compile` task); now show the
+  direct build.ts invocations.
+- `/__aio/vendor/immer.js` is dev-only now (prod serves bundles); stale
+  naming-priority comments updated for data-testid; remote scaffold transform no
+  longer glues comments onto one line.
+
 ### Fixed
 
 - stress.test.ts header claimed memory-bounds coverage it didn't have

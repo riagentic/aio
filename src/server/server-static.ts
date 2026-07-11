@@ -152,7 +152,7 @@ export function createStaticHandler(deps: StaticDeps): {
 
     // ── AIO virtual JS modules ──
     // Framework npm deps served locally — dev must not need the internet.
-    if (pathname === "/__aio/vendor/immer.js") {
+    if (!prod && pathname === "/__aio/vendor/immer.js") {
       const src = loadVendorImmer();
       if (src) {
         return new Response(src, {

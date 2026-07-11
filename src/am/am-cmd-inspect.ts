@@ -111,7 +111,8 @@ export async function cmdDom(
     outError("usage: am dom <clientIdx> [--all]", mode);
     Deno.exit(1);
   }
-  const all = args.includes("--all");
+  // --all is consumed by parseGlobalFlags — read it from flags, not args
+  const all = flags.all === true;
   const result = await trojanGet(
     port,
     `dom/${idx}${all ? "?all=true" : ""}`,

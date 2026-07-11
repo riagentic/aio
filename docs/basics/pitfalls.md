@@ -6,6 +6,12 @@ design: if something here bites you and isn't listed, that's a bug in this page
 
 ## State & cells
 
+**Inferred appId follows your project name.** Zero-config apps derive their
+identity (locks, KV/SQLite paths) from `deno.json` `appId`/`title`/`name` or the
+directory name — rename any of those and the app starts with FRESH state (the
+old data files still exist under the old id). Pin `appId` in `deno.json` (or
+`aio.run({ appId })`) before you have data you care about.
+
 **Cell names are wire/persistence identity.** `cell("counter", …)` — the string,
 not the variable, keys the persisted state, the action prefix
 (`counter:increment`), and the registry. Renaming it orphans persisted state
