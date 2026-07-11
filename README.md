@@ -68,16 +68,16 @@ sh -c "$(curl -fsSL https://raw.githubusercontent.com/riagentic/aio/main/init.sh
 # Option B: vendor into your project (full source, bleeding edge)
 git clone https://github.com/riagentic/aio dep/aio
 
-# Option C: JSR — once the version you want is published
-#   (during the alpha the surface moves faster than JSR releases; prefer A/B)
-deno add jsr:@riagentic/aio
+# Option C: JSR — pin the version explicitly (alphas are semver
+#   pre-releases, so a bare install would resolve to an old stable)
+deno add jsr:@riagentic/aio@1.0.0-alpha19
 ```
 
 Then in `deno.json`:
 
 ```jsonc
 // JSR
-"imports": { "aio": "jsr:@riagentic/aio" }
+"imports": { "aio": "jsr:@riagentic/aio@1.0.0-alpha19" }
 
 // Clone — also declare aio's deps (Deno can't fetch them transitively)
 "imports": {
