@@ -5,11 +5,50 @@ AIO is a full-stack Deno/TypeScript application framework built around **cells**
 reads cells, persistence saves cells, sync replicates cells, testing isolates
 cells.
 
+## The Big Picture
+
+```mermaid
+flowchart LR
+    subgraph clients [Clients]
+        B[Browser tab<br/>AIR renderer]
+        E[Electron window]
+        A[Android WebView]
+        C[CLI / bound cells]
+    end
+    subgraph server [Server — owns state]
+        CELLS[(Cells<br/>state + methods)]
+        WS[WS / UDS transport]
+        SCHED[Scheduler]
+        ROUTES[Custom routes]
+    end
+    subgraph storage [Persistence]
+        KV[(Deno.Kv)]
+        SQL[(SQLite)]
+    end
+    B & E & A & C <-- "actions ↑ / patches ↓" --> WS
+    WS --> CELLS
+    SCHED -- "timers/cron → actions" --> CELLS
+    CELLS -- "auto-persist" --> KV
+    CELLS -- "db: tables" --> SQL
+    ROUTES -.-> CELLS
+```
+
+One state, propagated everywhere: cells live on the server; every client
+receives patches and sends actions over aio's own protocol.
+
 ## Core Data Flow
 
-```
-User action → dispatch → reduce (Immer) → new state → subscribers notified
-                                       ↘ effects → execute (async side-effects)
+```mermaid
+flowchart LR
+    U[User action /<br/>method call] --> D[dispatch]
+    D --> M[beforeReduce<br/>middleware]
+    M --> R["reduce (Immer)"]
+    R --> S[new state]
+    R --> FX[effects]
+    FX --> X["execute<br/>(async side-effects)"]
+    X -- "batched writes<br/>(read-your-writes)" --> D
+    S --> P[persist]
+    S --> BC[broadcast patches<br/>to every client]
 ```
 
 Every state change follows this pipeline. Methods wrap it for ergonomics;
@@ -42,24 +81,22 @@ folders. The folder dependency matrix is CI-enforced by `deno task boundaries`
 
 ## Key Boundaries
 
-```
-┌──────────────────────────────────────────────────┐
-│                    SERVER                         │
-│  server/aio → cells → state/dispatch              │
-│           ↕              ↕                        │
-│  server/persistence  server/server-ws (broadcast) │
-│           ↕              ↕                        │
-│     db/async-db      sync/sync-engine             │
-└──────────────────────────────────────────────────┘
-            ↕ WebSocket / IPC (protocol/)
-┌──────────────────────────────────────────────────┐
-│                    CLIENT                         │
-│  browser/browser-transport → state/ → air/        │
-│       ↕                          ↕                │
-│  browser/browser-air-router  air/vdom, state/signal│
-│       ↕                          ↕                │
-│  browser-air.ts (entry)      direct cell / useAio  │
-└──────────────────────────────────────────────────┘
+```mermaid
+flowchart TB
+    subgraph SERVER
+        AIO[server/aio] --> DISPATCH[state/dispatch]
+        DISPATCH <--> PERSIST[server/persistence]
+        DISPATCH <--> WSS[server/server-ws<br/>broadcast]
+        PERSIST <--> DB[db/async-db]
+        WSS <--> SYNC[sync/sync-engine]
+    end
+    WSS <== "WebSocket / UDS<br/>(protocol/)" ==> TRANSPORT
+    subgraph CLIENT
+        TRANSPORT[browser/transport] --> CSTATE[state/signals]
+        CSTATE --> AIR[air/ renderer]
+        AIR --> DOM[DOM]
+        CELLREF["direct cell reads<br/>counter.count"] --> CSTATE
+    end
 ```
 
 **Server owns state.** Cells live server-side. The client receives state patches

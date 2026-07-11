@@ -42,6 +42,11 @@
 
 ### Added
 
+- **`data-testid` naming** — the industry-standard test handle now works on the
+  semantic surface exactly like `t` (verbatim name, puts handler-less elements
+  on the surface as assertion targets; `t` wins when both present).
+- **Docs**: Mermaid architecture diagrams (system, data flow, boundaries),
+  Common Pitfalls page, going-to-production checklist, alpha17→18 upgrade guide.
 - **docs/content.md** — generated master table of contents (every doc page,
   grouped, with one-liners); `deno task docs:index` regenerates, CI gates
   freshness.

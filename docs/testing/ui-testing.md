@@ -67,19 +67,20 @@ Options — only when you need control (all optional):
 
 `LABEL + ROLE`, both inferred from the TSX — a pure function of the render:
 
-| TSX                                          | Name                |
-| -------------------------------------------- | ------------------- |
-| `<button>Submit</button>`                    | `SubmitButton`      |
-| `<div class="button">Submit</div>`           | `SubmitButton`      |
-| `<input placeholder="Title">`                | `TitleInput`        |
-| `<input type="checkbox" aria-label="Agree">` | `AgreeCheckbox`     |
-| `<span t="status">…</span>`                  | `status` (verbatim) |
+| TSX                                          | Name                  |
+| -------------------------------------------- | --------------------- |
+| `<button>Submit</button>`                    | `SubmitButton`        |
+| `<div class="button">Submit</div>`           | `SubmitButton`        |
+| `<input placeholder="Title">`                | `TitleInput`          |
+| `<input type="checkbox" aria-label="Agree">` | `AgreeCheckbox`       |
+| `<span t="status">…</span>`                  | `status` (verbatim)   |
+| `<button data-testid="save-btn">…</button>`  | `save-btn` (verbatim) |
 
-Label priority: `t` prop > `aria-label` > visible text > placeholder > `name`
-attr. Role from the tag/type (a clickable `div.button` is a Button). The `t`
-prop also puts **non-interactive** elements on the surface (assertion targets)
-and is the stable handle to use where visible copy may change — it's typed and
-stripped from the DOM.
+Label priority: `t` prop > `data-testid` > `aria-label` > visible text >
+placeholder > `name` attr. Role from the tag/type (a clickable `div.button` is a
+Button). The `t` prop also puts **non-interactive** elements on the surface
+(assertion targets) and is the stable handle to use where visible copy may
+change — it's typed and stripped from the DOM.
 
 ## Typed clients: `testgen`
 

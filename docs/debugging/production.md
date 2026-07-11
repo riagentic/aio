@@ -3,6 +3,37 @@
 Memory monitoring, cell health, common error patterns, and production failure
 scenarios.
 
+## Going-to-production checklist
+
+Work top to bottom — each item links to the details.
+
+- [ ] **`deno task doctor`** passes — config, import map, Deno version.
+- [ ] **Compile the target** (`deno task compile`) and boot the binary once —
+      prod serving differs from dev transpile ([targets](../build/targets.md)).
+- [ ] **Secrets audited** — every cell reviewed for `ui`/`persist` exposure; no
+      boot-time visibility warnings left
+      ([cell visibility](../state/cell-visibility.md),
+      [pitfalls](../basics/pitfalls.md#persistence)).
+- [ ] **Auth decided** — `users` map, `resolveUser` hook, or a conscious
+      "public" ([auth](../auth/auth.md)). Exposed servers: `--expose` gives
+      TLS + token; put a CA-signed cert on anything real.
+- [ ] **Persistence location** — know where your KV/SQLite files live
+      (`resolveDataDir`), and back them up; test a restore once.
+- [ ] **State versioning** — cells that will evolve have `version` + `onMigrate`
+      ([pitfalls](../basics/pitfalls.md#persistence)).
+- [ ] **Monitoring wired** — scraper on `GET /__aio/metrics`, alert on
+      `aio_cell_enabled == 0` (circuit breaker tripped), `aio_cell_errors_total`
+      slope, and RSS growth (below).
+- [ ] **Health endpoint** — supervisor/loadbalancer checks `/__aio/health`.
+- [ ] **Limits reviewed** — `wsLimits` (message rate/size), `maxConnections`,
+      `dispatchStorm` left ON ([run config](../state/lifecycle.md)).
+- [ ] **Logs rotating** — `.aio/log/` grows; ship or rotate it.
+- [ ] **Soak once** — `deno task soak` (or the 72h variant) against a
+      prod-shaped build; heap slope must stay flat.
+- [ ] **systemd unit** (service targets) — `Restart=on-failure` + `WatchdogSec`;
+      the server exits(1) on a dead listener by design, so restarts are the
+      recovery path.
+
 ## Prometheus metrics
 
 `GET /__aio/metrics` serves Prometheus/OpenMetrics text — point your scraper at

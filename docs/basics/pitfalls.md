@@ -1,0 +1,96 @@
+# Common Pitfalls
+
+The traps people actually hit — each with the rule that avoids it. Honest by
+design: if something here bites you and isn't listed, that's a bug in this page
+— report it.
+
+## State & cells
+
+**Cell names are wire/persistence identity.** `cell("counter", …)` — the string,
+not the variable, keys the persisted state, the action prefix
+(`counter:increment`), and the registry. Renaming it orphans persisted state
+(bump `version` + `onMigrate` instead).
+
+**One cell definition binds to one app.** A `cell()` def can't be shared by two
+running apps in one process (tests boot/reset the runtime for you). Need the
+same shape twice? Use a factory returning `cell(name, …)`.
+
+**Sync methods mutate the draft; the return value is for effects.** Returning
+data from a sync method doesn't "set state" — mutate `s`. Return values are
+reserved for schedule/own effects (`return schedule.after(…)`).
+
+**Async methods batch writes — but reads are read-your-writes.** `s.count++`
+inside an async method dispatches at the next microtask, and reads through `s`
+see your pending writes (`s.history.push({cpu: s.cpu})` pushes the value you
+just set). What you read is exactly what commits.
+
+**Don't hold state snapshots across `await`.** `const items = s.items` then
+`await …` then `items.push(…)` mutates a stale copy. Re-read from `s` after
+every await — it's always current.
+
+**Machine guards silently drop actions.** With a `machine`, a method not listed
+in the current state's `on` is a no-op by design. If a method "randomly doesn't
+work", check `t.expect.status()` / the machine first.
+
+## Persistence
+
+**Everything persists by default.** `persist: "all"` is the default — caches,
+derived data, session junk included. Opt out per field
+(`persist: { exclude: ["cache"] }`) or per cell (`persist: "none"`).
+
+**Everything broadcasts by default.** Same for `ui: "all"` — every connected
+client sees the whole cell. Secrets need `ui: { exclude: […] }` (dot-paths reach
+into arrays: `"accounts.encSecKey"`), `forUser`, or `ui: "none"`. Boot warnings
+flag secret-looking exposed fields — don't ignore them.
+
+**`include` is top-level only.** `include: ["a.b"]` warns and matches nothing.
+Deep paths are for `exclude`.
+
+**Schema changes need a version bump.** Changed the state shape? Persisted state
+deep-merges with defaults, which covers additions — but renames and type changes
+need `version: N` + `onMigrate`.
+
+## Scheduling & effects
+
+**Schedule ids replace.** Two schedules with the same `id` — the later one wins.
+That's the feature (self-rescheduling pollers); it bites when you reuse an id
+accidentally. Boot warns on static/dynamic id collisions.
+
+**Self-referencing methods need a return annotation.**
+`poll(s): Promise<CellEffect>` when the method schedules itself
+(`metrics.poll.action()`) — otherwise TypeScript's self-inference guard (TS7022)
+fires.
+
+## Sync (`sync: true`, @experimental)
+
+**The server converges; the client view is provisional.** Merge strategies
+(`counter`, `set-add`, …) shape what the _local user sees during the conflict
+window_; the next ack/snapshot rebase replaces it with the server outcome.
+
+**Set items need stable ids.** `set-add`/`set-remove` throw on items missing the
+identity field (default `"id"`, per-field override via `identity`).
+
+## UI & testing
+
+**Content-derived names change with copy.** `SubmitButton` came from the text
+"Submit" — reword the button and long-lived `am` scripts break. Pin stable
+handles with `t="save"` or `data-testid`.
+
+**Actions queue; observations await.** In `testUI`, actions need no `await`
+(ordered queue), but reads (`.text`, `.value`) are instant snapshots — after
+un-awaited actions, observe through `await ui.settle()` / `expectCell` /
+`waitFor` first.
+
+**Forms don't navigate.** AIR auto-prevents the default on handled submits. If
+you _want_ native form submission, add `data-native-submit`.
+
+## Config
+
+**Unknown config keys are boot-fatal.** `validateConfig` exits with the full key
+table rather than silently ignoring typos — a misspelled key is a stopped app,
+not a mystery. (The allowlists are gate-tested against the typed config, so
+documented keys always validate.)
+
+**`deno.json` needs the magic lines.** `jsx`/`jsxImportSource`,
+`unstable: ["kv"]`, `nodeModulesDir: "auto"` — `deno task doctor` checks all of
+them; run it first when anything is weird.

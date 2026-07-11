@@ -113,13 +113,18 @@ function elementRole(v: VNode, events: string[]): string {
   return pascal(String(v.tag)) || "Element";
 }
 
-/** Infer the intuitive semantic name: `t` prop verbatim, else LABEL + ROLE —
+/** Infer the intuitive semantic name: `t` prop verbatim (then `data-testid`,
+ *  the industry-standard test handle), else LABEL + ROLE —
  *  e.g. <button>Submit</button> → "SubmitButton",
  *  <div class="button">Submit</div> → "SubmitButton",
  *  <input placeholder="Title"> → "TitleInput". */
 function elementName(v: VNode, events: string[], taken: Set<string>): string {
   const p = v.props;
-  const explicit = typeof p.t === "string" ? p.t : undefined;
+  const explicit = typeof p.t === "string"
+    ? p.t
+    : typeof p["data-testid"] === "string"
+    ? p["data-testid"] as string
+    : undefined;
   let base: string;
   if (explicit) {
     base = explicit;
@@ -168,9 +173,13 @@ function walkOutput(
   // Host element / fragment-like: collect interactivity, then descend
   if (typeof v.tag === "string") {
     const events = eventKinds(v);
-    // Interactive elements are always on the surface; a `t` prop puts ANY
-    // element on it (assertion targets — read text/value without handlers).
-    if (events.length > 0 || typeof v.props.t === "string") {
+    // Interactive elements are always on the surface; a `t` prop or a
+    // `data-testid` puts ANY element on it (assertion targets — read
+    // text/value without handlers).
+    if (
+      events.length > 0 || typeof v.props.t === "string" ||
+      typeof v.props["data-testid"] === "string"
+    ) {
       const name = elementName(v, events, taken);
       const el = v._dom && (v._dom as Node).nodeType === 1
         ? v._dom as Element & {
