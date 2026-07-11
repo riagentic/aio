@@ -9,7 +9,7 @@
 - **Write reactive, use generators or atomic actions when needed.**
 - **Pick your target, compile and ship!**
 
-`v1.0.0-alpha18`
+`v1.0.0-alpha19`
 
 > Define state once. It persists, syncs to all clients, drives the UI.
 
@@ -95,87 +95,162 @@ deno run -A src/app.ts             # run
 Fit check first? → [Positioning & non-goals](docs/basics/positioning.md). and
 all compile targets.
 
-## What's included
+## Features
 
-|                 |                                                                                                                                                   |
-| --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **State**       | reactive proxy (Immer) · state machines · generators · selectors · middleware · `call()` coordination · `draft()` · `useLocal` · `page()` routing |
-| **Renderer**    | AIR (~8KB) — signals, JSX, auto-memo, SSR/hydration, forms, animation, virtual-list · React-compat hooks (`aio/air/compat`) · custom adapter API  |
-| **SQLite**      | async Worker (non-blocking) · read replicas · ORM · schema migrations · WAL · transactions · custom pragmas                                       |
-| **Persistence** | auto-persist to Deno.Kv · cell-level `persist` config (`include`/`exclude`) per cell                                                              |
-| **Sync**        | WebSocket · delta patches · offline queue (IndexedDB, 24h TTL) · UDS/IPC · cell-level `ui` per-user filtering · periodic resync                   |
-| **Security**    | auto-TLS (`--expose`) · multi-user token auth · rate limiting · CSRF protection · `allowedOrigins`                                                |
-| **Scheduling**  | cron · intervals · one-shot timers · cancel by ID or prefix                                                                                       |
-| **DX**          | time-travel (Ctrl+.) · hot reload · `testCell` harness · Redux DevTools · perf budgets · freeze detection · AIR DevTools                          |
-| **Electron**    | desktop window · UDS+IPC (zero TCP in prod) · window persistence · DevTools toggle · `keepServer`                                                 |
-| **Deploy**      | browser · Electron · CLI · systemd service · Android APK (WebView) · single binary · remote (HTTPS)                                               |
+Everything below ships in the box — no plugins, no assembly.
 
-[Core Concepts](docs/basics/concepts.md) ·
-[Full API reference](docs/basics/api-reference.md)
+**State — cells**
 
-## How aio compares
+- `cell(name, { state, methods })` — one definition drives server, UI,
+  persistence, sync, and tests
+- Direct reactive reads in JSX (`counter.count`) and direct calls
+  (`counter.increment()`) — no dispatch ceremony
+- Sync methods mutate an Immer draft; async methods get read-your-writes
+  semantics and Promise-with-ack returns
+- Generators — sequential, cancellable, observable multi-step workflows
+- Actions/reduce tier for explicit control (time-travel-friendly, replayable)
+- State machines with transition guards · selectors (auto-scoped) · `validate`
+  invariants
+- Cross-cell composition: `call()` coordination, `waitFor`, own-effects,
+  `composeCells`
+- Middleware / `beforeReduce` interception · cell lifecycle
+  (`onInit`/`onDestroy`)
+- Client-scoped cells (`scope: "client"`) for per-tab state · `useLocal` (object
+  or tuple form)
+- State versioning + `onMigrate` · per-cell circuit breaker · `isolate` dev
+  filter
 
-|                          | **aio** | **Convex** | **Zero** | **ElectricSQL** | **Fresh** | **Next.js** | **Tauri** |
-| ------------------------ | :-----: | :--------: | :------: | :-------------: | :-------: | :---------: | :-------: |
-| **State & data**         |         |            |          |                 |           |             |           |
-| State management         |   ✅    |     ✅     |    ✅    |       🔧        |    🔧     |     🔧      |    🔧     |
-| Reactive proxy           |   ✅    |     ❌     |    ❌    |       ❌        |    🔧     |     ❌      |    ❌     |
-| State machines           |   ✅    |     ❌     |    ❌    |       ❌        |    ❌     |     ❌      |    ❌     |
-| Auto-persistence         |   ✅    |     ✅     |    ✅    |       ✅        |    ❌     |     ❌      |    🔧     |
-| Embedded DB (SQLite)     |   ✅    |     ❌     |    ❌    |       ✅        |    ❌     |     ❌      |    🔧     |
-| Built-in ORM             |   ✅    |     ✅     |    ✅    |       🔧        |    ❌     |     ❌      |    ❌     |
-| Schema migrations        |   ✅    |     ✅     |    🔧    |       ✅        |    ❌     |     🔧      |    ❌     |
-| **Sync & networking**    |         |            |          |                 |           |             |           |
-| Real-time sync           |   ✅    |     ✅     |    ✅    |       ✅        |    ❌     |     🔧      |    ❌     |
-| Offline-first            |   ✅    |     🔧     |    ✅    |       ✅        |    ❌     |     ❌      |    ❌     |
-| Delta patches            |   ✅    |     🔧     |    ✅    |       ✅        |    ❌     |     ❌      |    ❌     |
-| Built-in server          |   ✅    |     ✅     |    ❌    |       ❌        |    ✅     |     ✅      |    ❌     |
-| Auto-TLS                 |   ✅    |     ✅     |    ❌    |       ❌        |    ❌     |     ❌      |    ❌     |
-| Multi-user auth          |   ✅    |     ✅     |    ✅    |       🔧        |    🔧     |     🔧      |    ❌     |
-| **Architecture**         |         |            |          |                 |           |             |           |
-| Generator flows          |   ✅    |     ❌     |    ❌    |       ❌        |    ❌     |     ❌      |    ❌     |
-| Cell lifecycle           |   ✅    |     🔧     |    ❌    |       ❌        |    ❌     |     ❌      |    ❌     |
-| Cron / scheduled tasks   |   ✅    |     ✅     |    ❌    |       ❌        |    ❌     |     🔧      |    ❌     |
-| Middleware               |   ✅    |     ✅     |    ❌    |       ❌        |    ✅     |     ✅      |    ❌     |
-| **Developer experience** |         |            |          |                 |           |             |           |
-| Time-travel debug        |   ✅    |     ❌     |    ❌    |       ❌        |    ❌     |     🔧      |    ❌     |
-| Hot reload               |   ✅    |     ✅     |    ❌    |       ❌        |    ✅     |     ✅      |    🔧     |
-| Test harness             |   ✅    |     🔧     |    🔧    |       🔧        |    🔧     |     🔧      |    🔧     |
-| Process manager          |   ✅    |     ❌     |    ❌    |       ❌        |    ❌     |     ❌      |    ❌     |
-| Zero-config start        |   ✅    |     🔧     |    ❌    |       ❌        |    🔧     |     ❌      |    ❌     |
-| **Deployment**           |         |            |          |                 |           |             |           |
-| Desktop app              |   ✅    |     🔧     |    🔧    |       🔧        |    ❌     |     🔧      |    ✅     |
-| Android APK              |   ✅    |     🔧     |    🔧    |       🔧        |    ❌     |     ❌      |    🔧     |
-| CLI client               |   ✅    |     🔧     |    🔧    |       🔧        |    ❌     |     ❌      |    ❌     |
-| Single binary            |   ✅    |     ❌     |    ❌    |       ❌        |    ✅     |     ❌      |    ✅     |
-| systemd service          |   ✅    |     ❌     |    ❌    |       ❌        |    🔧     |     🔧      |    ❌     |
-| Self-hosted              |   ✅    |     🔧     |    ✅    |       ✅        |    ✅     |     ✅      |    ✅     |
-| **UI & rendering**       |         |            |          |                 |           |             |           |
-| Built-in renderer        |   ✅    |     ❌     |    ❌    |       ❌        |    ⚛️     |     ❌      |    ❌     |
-| React adapter            |   ❌    |     ✅     |    ✅    |       ✅        |    ⚛️     |     ✅      |    ✅     |
-| React-compat hooks       |   ✅    |     ❌     |    ❌    |       ❌        |    ⚛️     |     ❌      |    ❌     |
-| Custom adapter API       |   ✅    |     ❌     |    ❌    |       ❌        |    ❌     |     ❌      |    ❌     |
-| SSR / hydration          |   ✅    |     ❌     |    ❌    |       ❌        |    ✅     |     ✅      |    ❌     |
+**Zero-config runtime**
 
-✅ built-in · 🔧 manual setup · ⚛️ Preact · ❌ not included _Comparison is
-approximate — check each project for current capabilities._
+- `await aio.run()` — cells from the registry, appId/title/version from
+  deno.json, baseDir from the entry; config only to override
+- Boot-fatal config validation with the full key table (typo ≠ mystery) ·
+  single-instance lock with liveness self-heal
+- `deno task doctor` — config, import map, Deno version sanity
+
+**Persistence**
+
+- Auto-persist every cell to Deno.Kv (default on; opt out per cell/field, deep
+  dot-path excludes)
+- SQLite on a worker thread — non-blocking, WAL, transactions, read replicas,
+  `table()/pk()/text()` schema, automatic state↔table sync
+- Snapshots (save/load), persist debounce, single/multi KV modes, schema version
+  stamps
+
+**Sync & networking**
+
+- WebSocket state broadcast with Immer delta patches (+ full-state fallback,
+  per-cell strategies)
+- Per-action acks · offline queue · periodic resync · wire-protocol version
+  handshake
+- UDS/IPC transport — zero TCP ports for Electron in prod
+- Bound remote cells: `connectCli(url).bind(counter)` — typed method calls +
+  live state over the socket, no wire format
+- CRDT sync (experimental): HLC clocks, op-log, rebase, per-field merge
+  strategies (lww, counter, per-key, set-add/remove), `onConflict`/`onSync`
+
+**Server**
+
+- Custom HTTP routes (exact + `/prefix/*`) next to the state channel — uploads,
+  webhooks, APIs
+- Live TSX transpile in dev · offline-capable (framework deps served locally) ·
+  static/prod bundle serving
+- Auth: token map or `resolveUser` hook · per-user state filtering (`forUser`) ·
+  auto-TLS with `--expose`
+- Rate/size limits (`wsLimits`), `maxConnections`, origin checks, dispatch-storm
+  guard with breaker
+- Prometheus metrics (`/__aio/metrics`) · health endpoint · graceful shutdown ·
+  dead-listener exit
+
+**Scheduling**
+
+- `after` / `every` / `at` / cron · exponential `backoff` for pollers · cancel
+  by id
+- Config-level always-on schedules + dynamic effects returned from methods ·
+  collision warnings
+
+**UI — AIR renderer (~8KB)**
+
+- Signals + JSX automatic runtime, auto-memo, no virtual-DOM diffing of
+  untouched trees
+- Hooks: `useLocal`, `useAio`, `useCell`, `useConnected`, `useOptimistic`,
+  `useDimensions`, `useSignal`, `useRef`, contexts with selectors
+- Router (`Route`/`Outlet`, signal-based path/search) · forms with validation +
+  auto-`preventDefault` submits (opt-out attribute)
+- Transitions & springs · `Portal` · `Suspense` + `lazy` · `ErrorBoundary` ·
+  SSR/streaming + hydration · virtual list
+- Accessibility dev warnings (`setDevMode`) · React-compat hooks
+  (`aio/air/compat`) · custom adapter API (`aio/state-core`)
+
+**Testing — first-class**
+
+- `testCell` — typed send/expect harness, machine + effect assertions,
+  property-style random actions
+- Semantic UI testing: `testUI(App, "name", async (ui) => …)` — zero setup (auto
+  DOM, auto cells, full teardown)
+- No awaits on actions (ordered queue); deterministic names from the TSX
+  (`<div class="button">Submit</div>` → `SubmitButton`)
+- Stable handles via `t` / `data-testid` · keyed instances · `expectCell` /
+  `waitFor` · hermetic by default
+- `testgen` — generated fully-typed clients; renames break tests at compile time
+- Drive **live** apps: `am surface` / `am trigger` with the full action set
+  incl. gestures — browser, Electron, Android WebView
+- AI-native: the surface is a complete perception+action space; replies include
+  the fresh post-action state
+- Proven end-to-end against real Chromium, over aio's own protocol — no
+  webdriver
+
+**Debugging & DX**
+
+- Time-travel (Ctrl+. panel, `am tt`, error forensics) · Redux DevTools bridge ·
+  AIR devtools
+- Blank-screen guard: every dev boot failure = in-page diagnostic + terminal
+  cause (never a silent white page)
+- Dev graph validator (broken imports → explanatory page) · startup linter ·
+  error-code catalog (gate-tested)
+- Client console auto-forwarded to the server (`am logs`) · diagnostic bus +
+  health overlay
+- Vitals: freeze detection, memory-pressure monitor, render meter, perf budgets
+  · live reload (code + CSS)
+
+**`am` — app manager CLI**
+
+- Process: start/stop/restart/status/watch/instances · State:
+  state/ui/dispatch/actions/persist/snapshot/tt
+- Inspect:
+  clients/surface/trigger/dom/interact/sql/tables/schedules/log/errors/metrics/health/config
+- `--json` everywhere — scriptable by tools and AI agents
+
+**Build & deploy — 10 targets**
+
+- Browser, Electron, CLI, systemd service, Android APK — each local or remote
+  (remote: experimental)
+- Single-binary `deno compile` · esbuild bundling (ESM browser / IIFE WebView) ·
+  build integrity checks
+- Scaffolder: `aio create` — 5 templates × 10 app types, vendored or mirrored
+  framework delivery
+
+**Security**
+
+- Timing-safe token auth · localhost-only control API (CSRF header,
+  rate-limited, read-only SQL)
+- Secret-looking-field boot warnings · deep-path excludes stripped from
+  broadcasts AND patches
+- Prototype-pollution guards on the wire · URL-token usage warnings
+
+**Quality machinery**
+
+- 2260+ tests incl. real-browser e2e · coverage ratchet (floor-enforced)
+- CI drift gates: API snapshot, docs links/coverage/imports/index, module
+  boundaries, config allowlists, browser deps, bundle smoke
+- Symptom→cause→caught-by matrix for every failure class ever hit
+  ([troubleshooting](docs/debugging/troubleshooting.md))
 
 **aio's sweet spot:** apps where state is the product — dashboards, trading
 tools, control panels, internal tools, desktop utilities. One state, many
-clients, zero plumbing.
-
-### When NOT to use aio
-
-| If you need...                 | Use instead                    |
-| ------------------------------ | ------------------------------ |
-| SSR / server components        | Fresh, Next.js, Astro          |
-| Static sites / content pages   | Astro, Hugo, 11ty              |
-| Native mobile UI               | React Native, Flutter          |
-| Multi-region distributed state | ElectricSQL, CRDTs             |
-| High-traffic public APIs       | Hono, Fastify, bare Deno.serve |
-| Complex form-heavy CRUD        | Rails, Django, Laravel         |
-
-See [FAQ](docs/basics/faq.md#when-not-to-use-aio) for details.
+clients, zero plumbing. Fit questions:
+[Positioning & non-goals](docs/basics/positioning.md) ·
+[When not to use aio](docs/basics/faq.md#when-not-to-use-aio)
 
 ## Docs
 
@@ -192,7 +267,8 @@ See [FAQ](docs/basics/faq.md#when-not-to-use-aio) for details.
 [Scheduling](docs/state/scheduling.md)
 
 **UI:** [AIR Setup](docs/ui/air-setup.md) · [Signals](docs/ui/air-signals.md) ·
-[Components](docs/ui/air-components.md) · [AIR vs React](docs/ui/comparison.md)
+[Components](docs/ui/air-components.md) ·
+[For React developers](docs/ui/comparison.md)
 
 **Data:** [Auto-Persist](docs/persistence/auto-persist.md) ·
 [SQLite](docs/persistence/sqlite.md) · [CRDT Sync](docs/persistence/crdt.md) ·
@@ -216,20 +292,21 @@ See [FAQ](docs/basics/faq.md#when-not-to-use-aio) for details.
 
 ## Status
 
-**v1.0.0-alpha18** · [JSR](https://jsr.io/@riagentic/aio) · MIT
+**v1.0.0-alpha19** · [JSR](https://jsr.io/@riagentic/aio) · MIT
 
-2240+ tests · security hardened · CI-locked API snapshot + coverage ratchet
+2260+ tests · security hardened · CI-locked API snapshot + coverage ratchet
 
-New in alpha18: **first-class semantic UI testing** — every TSX component
-auto-exposed as an intuitive API (`ui.App.SubmitButton.click()`), typed clients
-via `testgen`, live-app driving via `am surface`/`am trigger`, proven against
-real chromium — plus **read-your-writes** async methods, fully-inferred
-`forUser`, deep-path excludes, offline-capable dev, custom routes, and
-Prometheus metrics. Alpha17 was external-audit hardening with the five remote
-targets marked **experimental**; alpha15 fixed the **Deno ≥ 2.9 blank-app bug**
-(WS upgrade) every earlier version hits. Alpha13 was the **DX overhaul** (honest
-`persist`/`ui` defaults, awaitable methods, React-compat hooks moved to
-`aio/air/compat`); alpha12 removed React — **AIR is the sole renderer** with
-direct reactive cell access as the primary UI pattern. Core (state, sync, cells,
-scheduling, renderer) is stable. Electron, Android, and build targets are
-functional but less battle-tested.
+New in alpha19: **zero-config everything** — a working app is
+`import "./cell.ts"; await aio.run();` (identity, cells, paths all inferred), UI
+tests with **no boilerplate and no awaits on actions**
+(`testUI(App, "name", async (ui) => { ui.AddButton.click(); … })`), bound remote
+cells (`cli.bind(counter)` — no raw wire actions), `useLocal` tuples, forms that
+never navigate, and a six-round audit that fixed 12 integration-seam flaws.
+Alpha18 shipped **semantic UI testing** + read-your-writes async methods;
+alpha15 fixed the **Deno ≥ 2.9 blank-app bug** (WS upgrade) every earlier
+version hits. Alpha13 was the **DX overhaul** (honest `persist`/`ui` defaults,
+awaitable methods, React-compat hooks moved to `aio/air/compat`); alpha12
+removed React — **AIR is the sole renderer** with direct reactive cell access as
+the primary UI pattern. Core (state, sync, cells, scheduling, renderer) is
+stable. Electron, Android, and build targets are functional but less
+battle-tested.

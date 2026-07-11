@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased (alpha19)
+## 1.0.0-alpha19 — zero-config DX + no-await UI tests (2026-07-11)
 
 ### Added (failure-class capture)
 
