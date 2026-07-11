@@ -93,7 +93,7 @@
 - [Errors](debugging/errors.md) — AioError format, error codes, correlation IDs, log files, and the onError hook.
 - [Performance](debugging/performance.md) — Performance budgets, slow reducer/effect diagnosis, and budget configuration.
 - [Production](debugging/production.md) — Memory monitoring, cell health, common error patterns, and production failure
-- [Troubleshooting](debugging/troubleshooting.md) — Symptom-based guide -- find what you're seeing, follow the fix path.
+- [Troubleshooting](debugging/troubleshooting.md) — Every failure class aio has actually hit in the field, and the guard that now
 - [Vitals](debugging/vitals.md) — Client diagnostic system for detecting and diagnosing UI freezes.
 
 ## Walkthroughs — complete apps, start to finish

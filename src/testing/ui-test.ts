@@ -237,7 +237,12 @@ async function _mountTestUI(
   let ownedWindow: AnyDoc = null;
   if (!doc) {
     try {
-      const hd = await import("happy-dom");
+      // Computed specifier ON PURPOSE: cell.ts re-exports testCell, so this
+      // module rides in every app bundle graph — a static "happy-dom" import
+      // makes esbuild try to bundle a Node-flavored test DOM into browser/
+      // android bundles (51 errors). Opaque = resolved only at test runtime.
+      const spec = "happy-dom";
+      const hd = await import(spec);
       ownedWindow = new hd.Window();
       doc = ownedWindow.document;
     } catch {
