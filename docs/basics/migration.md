@@ -20,10 +20,9 @@ generates a correct `deno.json`. See [quickstart.md](quickstart.md).
 **Option B: Vendored** -- `git clone https://github.com/riagentic/aio dep/aio`,
 then map `"aio": "./dep/aio/mod.ts"` (plus `immer`, `@std/path`).
 
-**Option C: JSR** -- `deno add jsr:@riagentic/aio`, once the version you want is
-published (JSR currently trails at alpha; the scaffolder (Option A) and
-`--vendored` install (Option B) always match the tagged framework). The `jsr:`
-pins below assume that version is already on JSR.
+**Option C: JSR** -- `deno add jsr:@riagentic/aio@1.0.0-alpha19` (pin the
+version explicitly: alphas are semver pre-releases, so an unpinned install
+resolves to an old stable).
 
 ## Step 2: Update deno.json
 
