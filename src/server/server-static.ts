@@ -2,6 +2,7 @@
 // Handles all HTTP requests (non-WS): HTML pages, transpilation, __aio/* endpoints, static files
 import { extname, join, resolve, SEPARATOR } from "@std/path";
 import { formatPrometheus } from "./server-metrics.ts";
+import { log } from "../diagnostics/logger-api.ts";
 import type { RenderBudget } from "../vitals/types.ts";
 import type { VitalsSystem } from "../vitals/mod.ts";
 import {
@@ -190,9 +191,29 @@ export function createStaticHandler(deps: StaticDeps): {
 
     if (!prod && pathname === "/__aio/client-error" && req?.method === "POST") {
       try {
-        const body = await req.json() as { message?: string; stack?: string };
-        debug(`client error: ${body.stack ?? body.message ?? "(no details)"}`);
+        const body = await req.json() as {
+          message?: string;
+          stack?: string;
+          blankScreen?: string;
+        };
         const classified = classifyBrowserError(body.message ?? "");
+        if (body.blankScreen) {
+          // The #1 historical failure class — make the terminal say WHY,
+          // loudly (debug-level was invisible at the default log level).
+          log.warn(
+            "client",
+            `BLANK SCREEN (${body.blankScreen}): ${
+              body.message ?? "(no details)"
+            }` + (classified.fix
+              ? `
+  fix: ${classified.fix}`
+              : ""),
+          );
+        } else {
+          debug(
+            `client error: ${body.stack ?? body.message ?? "(no details)"}`,
+          );
+        }
         return new Response(JSON.stringify(classified), {
           headers: { "Content-Type": "application/json" },
         });
