@@ -16,6 +16,7 @@ export const VALID_AIO_CONFIG_KEYS = new Set<string>([
   "execute",
   "persist",
   "fullStateThreshold",
+  "routes",
   "syncIntervalMs",
   "maxConnections",
   "allowedOrigins",
@@ -99,6 +100,7 @@ export const VALID_FEATURES_CONFIG_KEYS = new Set<string>([
   "singleton",
   "syncIntervalMs",
   "fullStateThreshold",
+  "routes",
   "maxConnections",
   "schedules",
   "middleware",
@@ -146,6 +148,10 @@ const CONFIG_DOCS: Record<string, [string, string]> = {
   fullStateThreshold: [
     "0.5",
     "ratio of changed keys that triggers full state broadcast",
+  ],
+  routes: [
+    "",
+    'custom HTTP routes — "/path" or "/prefix/*" → handler (uploads, webhooks)',
   ],
   maxConnections: ["100", "max concurrent WebSocket clients"],
   allowedOrigins: ["", "extra allowed WS origins beyond localhost + own host"],
@@ -210,6 +216,7 @@ const CONFIG_GROUPS: [string, string[]][] = [
     "users",
     "syncIntervalMs",
     "fullStateThreshold",
+    "routes",
     "maxConnections",
   ]],
   ["App logic", [

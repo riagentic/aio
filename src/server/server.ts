@@ -86,6 +86,16 @@ export function createServer(config: ServerConfig): ServerHandle {
   // Unified user resolver — one code path for both static map and dynamic hook (AIO-171)
   const _userResolver = _buildUserResolver(config);
 
+  // Custom routes: reserve the framework namespaces loudly at boot.
+  for (const key of Object.keys(config.routes ?? {})) {
+    if (!key.startsWith("/") || key.startsWith("/__aio") || key === "/ws") {
+      throw new Error(
+        `[aio] invalid custom route "${key}" — routes must start with "/" and ` +
+          `cannot use the reserved /__aio or /ws namespaces`,
+      );
+    }
+  }
+
   const absBaseDir = resolve(config.baseDir);
 
   // Read deno.json imports for browser import map. Scaffolded apps keep it at
@@ -329,6 +339,20 @@ export function createServer(config: ServerConfig): ServerHandle {
 
     if (pathname === "/ws") return wsMgr.handleWs(req, undefined, clientKey);
     debug(`http: ${req.method} ${pathname}`);
+    // ── Custom user routes (uploads, webhooks, API endpoints) ──
+    if (config.routes) {
+      const exact = config.routes[pathname];
+      if (exact) return await exact(req);
+      for (const [pattern, handler] of Object.entries(config.routes)) {
+        if (
+          pattern.endsWith("/*") &&
+          pathname.startsWith(pattern.slice(0, -1))
+        ) {
+          return await handler(req);
+        }
+      }
+    }
+
     const resp = await staticHandler.serveStatic(pathname, req);
     resp.headers.set("X-Content-Type-Options", "nosniff");
     return resp;

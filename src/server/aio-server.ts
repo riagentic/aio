@@ -54,6 +54,7 @@ export interface ServerSetupDeps<S, A> {
     transport?: "uds" | "ws" | "auto";
     renderBudget?: import("../vitals/types.ts").RenderBudget;
     fullStateThreshold?: number;
+    routes?: Record<string, (req: Request) => Response | Promise<Response>>;
     maxConnections?: number;
     wsLimits?: import("./aio-types.ts").WsLimits;
     allowedOrigins?: string[];
@@ -218,6 +219,7 @@ export async function setupTransport<S, A>(
       uiEntry: ui.entry,
       renderBudget: config.renderBudget,
       fullStateThreshold: config.fullStateThreshold,
+      routes: config.routes,
       maxConnections: config.maxConnections,
       wsLimits: config.wsLimits,
       allowedOrigins: config.allowedOrigins,

@@ -52,6 +52,14 @@ export interface ServerConfig {
   getTTBroadcast?: () => unknown;
   // Health endpoint — GET /__aio/health
   getHealth?: () => unknown;
+  /** Custom HTTP routes — exact path or "/prefix/*" wildcard → handler.
+   *  Matched after /ws and /__aio/* (which are reserved) and before static
+   *  serving. The escape hatch for uploads, webhooks, and API endpoints that
+   *  don't belong in the state channel. */
+  routes?: Record<
+    string,
+    (req: Request) => Response | Promise<Response>
+  >;
   // Trojan — control API at /__aio/trojan/* (localhost-only, CSRF-protected, rate-limited)
   trojan?: {
     getState: () => unknown; // raw unfiltered state

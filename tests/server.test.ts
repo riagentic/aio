@@ -1540,3 +1540,82 @@ Deno.test("classifyBrowserError: returns unknown for unrecognized errors", () =>
 });
 
 // _injectFilterFlag tests removed — function deleted in Immer patches migration
+
+Deno.test("server: /__aio/metrics serves Prometheus text", async () => {
+  await withServer(async (url) => {
+    const resp = await fetch(`${url}/__aio/metrics`);
+    assertEquals(resp.status, 200);
+    assertStringIncludes(resp.headers.get("content-type") ?? "", "text/plain");
+    const body = await resp.text();
+    assertStringIncludes(body, "aio_uptime_seconds");
+    assertStringIncludes(body, "aio_memory_heap_used_bytes");
+    assertStringIncludes(body, "aio_clients_connected");
+  });
+});
+
+Deno.test("server: custom routes — exact, wildcard, reserved namespaces", async () => {
+  const dir = await Deno.makeTempDir();
+  await Deno.mkdir(join(dir, "dist"), { recursive: true });
+  await Deno.writeTextFile(
+    join(dir, "dist", "app.js"),
+    "export function mount(){}",
+  );
+  const server = createServer({
+    port: TEST_PORT + 7,
+    title: "Routes",
+    getUIState: () => ({}),
+    dispatch: () => {},
+    baseDir: dir,
+    debug: () => {},
+    prod: true,
+    distDir: join(dir, "dist"),
+    routes: {
+      "/api/echo": async (req) =>
+        new Response(await req.text() || "empty", { status: 201 }),
+      "/files/*": (req) =>
+        new Response("file:" + new URL(req.url).pathname, { status: 200 }),
+    },
+  });
+  await new Promise((r) => setTimeout(r, 50));
+  try {
+    const base = `http://127.0.0.1:${TEST_PORT + 7}`;
+    // exact route (POST body round-trip — the upload shape)
+    const echo = await fetch(`${base}/api/echo`, {
+      method: "POST",
+      body: "hello",
+    });
+    assertEquals(echo.status, 201);
+    assertEquals(await echo.text(), "hello");
+    // wildcard
+    const f = await fetch(`${base}/files/a/b.png`);
+    assertEquals(await f.text(), "file:/files/a/b.png");
+    // framework endpoints still win
+    const h = await fetch(`${base}/__aio/metrics`);
+    assertEquals(h.status, 200);
+    await h.body?.cancel();
+  } finally {
+    await server.shutdown();
+  }
+  await Deno.remove(dir, { recursive: true });
+});
+
+Deno.test("server: reserved route namespaces throw at boot", async () => {
+  const dir = await Deno.makeTempDir();
+  let threw = "";
+  try {
+    createServer({
+      port: TEST_PORT + 8,
+      title: "Bad",
+      getUIState: () => ({}),
+      dispatch: () => {},
+      baseDir: dir,
+      debug: () => {},
+      prod: true,
+      routes: { "/__aio/hack": () => new Response("no") },
+    });
+  } catch (e) {
+    threw = String(e);
+  }
+  assertStringIncludes(threw, "reserved");
+  await Deno.remove(dir, { recursive: true });
+});
