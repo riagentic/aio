@@ -25,6 +25,20 @@
     (live text/value/checked on every node), `am trigger` replies with the fresh
     post-action surface (observe→act→observe in one call), and misses
     self-describe. Guide: docs/testing/ui-testing.md ("For AI agents").
+- **Custom HTTP routes** — `aio.run({ routes })`: exact paths or `/prefix/*`
+  wildcards for uploads, webhooks, and API endpoints outside the state channel
+  (`/__aio` and `/ws` reserved, validated at boot). Documented file-upload
+  pattern in the new integrations walkthrough.
+- **Prometheus metrics** — `GET /__aio/metrics` (uptime, memory, connected
+  clients, per-cell errors/enabled, broadcast bytes) for supervised production
+  deployments.
+- **`onConflict` is real** — the sync engine now fires the documented
+  `sync.onConflict` callback when a remote op changes a field your unconfirmed
+  local ops also changed (rebase-LWW semantics; it was typed + documented but
+  never invoked). Tested both ways (fires on overlap, silent otherwise).
+- **Docs**: integrations walkthrough (routes/uploads/backoff/auth providers),
+  positioning & non-goals, storage-backend interface design spec (pre-freeze
+  seam reservation), Prometheus section in production.md.
 
 ## 1.0.0-alpha17 — external-audit hardening + experimental targets
 

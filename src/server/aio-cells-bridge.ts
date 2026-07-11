@@ -126,6 +126,7 @@ export function buildLegacyConfig(
     keepServer: fc.keepServer,
     syncIntervalMs: fc.syncIntervalMs,
     fullStateThreshold: fc.fullStateThreshold,
+    routes: fc.routes,
     maxConnections: fc.maxConnections,
     schedules: fc.schedules,
     appVersion: fc.appVersion,

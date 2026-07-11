@@ -1,6 +1,7 @@
 // Static file serving & virtual route handler — extracted from server.ts
 // Handles all HTTP requests (non-WS): HTML pages, transpilation, __aio/* endpoints, static files
 import { extname, join, resolve, SEPARATOR } from "@std/path";
+import { formatPrometheus } from "./server-metrics.ts";
 import type { RenderBudget } from "../vitals/types.ts";
 import type { VitalsSystem } from "../vitals/mod.ts";
 import {
@@ -80,6 +81,8 @@ type ErrorEntry = {
 };
 
 /** Creates a static file handler bound to the given deps. Internal error tracking is module-private. */
+const _startedAt = Date.now();
+
 export function createStaticHandler(deps: StaticDeps): {
   serveStatic: (pathname: string, req?: Request) => Promise<Response>;
   getRecentErrors: () => Array<
@@ -204,6 +207,11 @@ export function createStaticHandler(deps: StaticDeps): {
       return handleVitals();
     }
 
+    // ── Prometheus metrics endpoint ──
+    if (pathname === "/__aio/metrics") {
+      return handleMetrics();
+    }
+
     // ── Trojan: control REST API (localhost-only) ──
     if (deps.trojan && pathname.startsWith("/__aio/trojan/")) {
       const trojanResp = await _handleTrojanRoute(
@@ -306,6 +314,35 @@ export function createStaticHandler(deps: StaticDeps): {
       })();
     }
     return new Response("Method Not Allowed", { status: 405 });
+  }
+
+  /** Handle GET /__aio/metrics — Prometheus text exposition. */
+  function handleMetrics(): Response {
+    try {
+      const extra = deps.getVitalsExtra();
+      const health = deps.getHealth?.() as
+        | { cells?: Record<string, { errors: number; enabled: boolean }> }
+        | Record<string, { errors: number; enabled: boolean }>
+        | undefined;
+      const cells = (health && "cells" in (health as Record<string, unknown>)
+        ? (health as {
+          cells?: Record<string, { errors: number; enabled: boolean }>;
+        }).cells
+        : health as Record<string, { errors: number; enabled: boolean }>) ??
+        undefined;
+      const body = formatPrometheus({
+        uptimeSeconds: Math.round((Date.now() - _startedAt) / 1000),
+        memory: Deno.memoryUsage(),
+        clients: Object.keys(extra.clientBackpressure ?? {}).length,
+        cells,
+        payloads: extra.payloadStats,
+      });
+      return new Response(body, {
+        headers: { "Content-Type": "text/plain; version=0.0.4" },
+      });
+    } catch (e) {
+      return new Response(`# metrics error: ${String(e)}\n`, { status: 503 });
+    }
   }
 
   /** Handle GET /__aio/health */
