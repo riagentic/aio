@@ -30,7 +30,9 @@ Deno.test("add a todo end-to-end", async () => {
 
 - Every action is `await`ed and resolves after the app is quiescent.
 - Actions: `click`, `dblclick`, `type`, `press` (Enter submits forms), `hover`,
-  `focus`, `blur`, `select(value)`, `check()`, `uncheck()`, `clear()`.
+  `focus`, `blur`, `select(value)`, `check()`, `uncheck()`, `clear()`,
+  `scroll({top, left})`, `dragTo(other)` (full HTML5 DnD sequence with a shared
+  DataTransfer).
 - Reads: `.text`, `.value`, `ui.surface()`, `ui.html()`; waits:
   `ui.waitFor(pred)`.
 - Keyed list instances: `ui.find("TodoRow", key)`.
@@ -57,9 +59,8 @@ stripped from the DOM.
 
 ## Typed clients: `testgen`
 
-Generate a fully-typed client from what actually renders — autocomplete on
-every component and element, and a renamed button breaks tests at **compile
-time**:
+Generate a fully-typed client from what actually renders — autocomplete on every
+component and element, and a renamed button breaks tests at **compile time**:
 
 ```ts
 // scripts/testgen.ts — run after UI changes
@@ -68,7 +69,10 @@ import { testgen } from "aio/testing";
 import App from "../src/App.tsx";
 import { todo } from "../src/cell/todo.ts";
 
-const src = await testgen(App, { document: new Window().document, cells: [todo] });
+const src = await testgen(App, {
+  document: new Window().document,
+  cells: [todo],
+});
 await Deno.writeTextFile("tests/ui.gen.ts", src);
 ```
 
@@ -92,8 +96,13 @@ am trigger 0 "App/TodoAdd:TitleInput" type "buy milk"
 
 Works against any connected client — browser tab, Electron window, **Android
 WebView** — over aio's own protocol; no driver install. Dev-mode only. Both
-tiers share one trigger implementation, so a test and an `am` session behave
-identically.
+tiers share one trigger implementation and the **full action set** (including
+`select`, `check`, `clear`, `scroll "top=200"`, `dragTo "<target path>"`), so a
+test and an `am` session behave identically.
+
+The whole stack is proven against a real browser:
+`tests/e2e-ui-chromium.test.ts` boots an app, opens it in headless chromium, and
+drives it purely through surface/trigger — no webdriver, no CDP.
 
 ## For AI agents
 
