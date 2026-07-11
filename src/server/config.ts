@@ -297,7 +297,11 @@ export function formatValidConfig(): string {
   lines.push("aio.run({");
   lines.push("");
   lines.push(
-    ...table("REQUIRED", ["appId", "appVersion", "cells"], CONFIG_DOCS),
+    ...table(
+      "IDENTITY (all inferred when omitted — deno.json / cell registry)",
+      ["appId", "appVersion", "cells"],
+      CONFIG_DOCS,
+    ),
   );
   for (const [group, keys] of CONFIG_GROUPS) {
     lines.push("");
