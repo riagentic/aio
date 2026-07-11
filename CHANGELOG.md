@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased (alpha18)
+## 1.0.0-alpha18 — first-class semantic UI testing + intuitiveness hardening (2026-07-11)
 
 ### Added
 

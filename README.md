@@ -9,7 +9,7 @@
 - **Write reactive, use generators or atomic actions when needed.**
 - **Pick your target, compile and ship!**
 
-`v1.0.0-alpha17`
+`v1.0.0-alpha18`
 
 > Define state once. It persists, syncs to all clients, drives the UI.
 
@@ -214,18 +214,20 @@ See [FAQ](docs/basics/faq.md#when-not-to-use-aio) for details.
 
 ## Status
 
-**v1.0.0-alpha17** · [JSR](https://jsr.io/@riagentic/aio) · MIT
+**v1.0.0-alpha18** · [JSR](https://jsr.io/@riagentic/aio) · MIT
 
-2150+ tests · security hardened · CI-locked API snapshot + coverage ratchet
+2240+ tests · security hardened · CI-locked API snapshot + coverage ratchet
 
-New in alpha17: external-audit hardening (dev-shell XSS guard, deterministic
-CRDT ordering, memory fixes) and the five remote targets marked **experimental**
-until field-validated off-box. Alpha16 shipped the `deno task doctor` config
-checker, `schedule.backoff`, field-filter security warnings, and a deep-audit
-cleanup; alpha15 fixed the **Deno ≥ 2.9 blank-app bug** (WS upgrade) every
-earlier version hits. Alpha13 was the **DX overhaul** (honest `persist`/`ui`
-defaults, awaitable methods, React-compat hooks moved to `aio/air/compat`);
-alpha12 removed React — **AIR is the sole renderer** with direct reactive cell
-access as the primary UI pattern. Core (state, sync, cells, scheduling,
-renderer) is stable. Electron, Android, and build targets are functional but
-less battle-tested.
+New in alpha18: **first-class semantic UI testing** — every TSX component
+auto-exposed as an intuitive API (`ui.App.SubmitButton.click()`), typed clients
+via `testgen`, live-app driving via `am surface`/`am trigger`, proven against
+real chromium — plus **read-your-writes** async methods, fully-inferred
+`forUser`, deep-path excludes, offline-capable dev, custom routes, and
+Prometheus metrics. Alpha17 was external-audit hardening with the five remote
+targets marked **experimental**; alpha15 fixed the **Deno ≥ 2.9 blank-app bug**
+(WS upgrade) every earlier version hits. Alpha13 was the **DX overhaul** (honest
+`persist`/`ui` defaults, awaitable methods, React-compat hooks moved to
+`aio/air/compat`); alpha12 removed React — **AIR is the sole renderer** with
+direct reactive cell access as the primary UI pattern. Core (state, sync, cells,
+scheduling, renderer) is stable. Electron, Android, and build targets are
+functional but less battle-tested.
