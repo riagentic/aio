@@ -63,6 +63,38 @@
   seam reservation), Prometheus section in production.md, testgen + gestures in
   ui-testing.md.
 
+### Changed
+
+- **Read-your-writes in async methods** — the worst intuitiveness footgun is
+  dead: reads through the `s` proxy now see committed state with the batch's
+  pending writes overlaid, so `s.cpu = 5; s.history.push({cpu: s.cpu})` pushes
+  5, exactly like sync code. What you read is byte-for-byte what commits (the
+  overlay replays `applyMutations` itself).
+- **`forUser` params fully infer** — `(s, user) => …` just works; the old
+  Pick/Omit union defeated TypeScript's contextual typing and forced manual
+  annotations. `exposed` is typed as the full state (runtime carries only
+  filtered fields).
+- **Deep-path excludes** — `ui/persist: { exclude: ["accounts.encSecKey"] }`
+  removes the field everywhere under `accounts` (arrays traversed element-wise),
+  in full-state filtering AND patch broadcasts (ancestor- replacing patches get
+  the secret stripped from their payload).
+- **Offline-capable dev** — the framework's own browser dep (`immer`) is now
+  served locally at `/__aio/vendor/immer.js`; esm.sh is only a fallback when no
+  local copy exists. Dev no longer requires the internet.
+
+### Gates (new permanent drift gates)
+
+- **browser-deps gate** — every bare npm import reachable from `/__aio/`-served
+  framework code must have a default import-map mapping (the
+  blank-screen-by-unresolvable-import class, closed).
+- **doc-imports gate** — every `import … from "aio…"` in doc code fences must
+  name a real exported symbol. First run caught 7 doc lies (fictional `aio/sql`
+  entry, four non-existent `aio/air` imports, unexported `setDevMode` → now
+  exported, android pseudo-import) — all fixed; `am` gained the missing `dom`
+  command.
+- **remote LAN smoke** — `--expose` verified over the real network interface:
+  0.0.0.0 binding, self-signed cert SANs, share token, TLS page serve.
+
 ### Fixed
 
 - **Blank screen for apps without a readable `deno.json`** — the dev import map
