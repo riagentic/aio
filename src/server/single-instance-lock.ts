@@ -39,8 +39,29 @@ export function slugify(s: string): string {
  *  Compiled builds don't have deno.json, so appId must be hardcoded in the app. */
 export function resolveAppId(appId?: string): string {
   if (appId) return slugify(appId);
+  // Zero-config inference: deno.json appId > title > name (unscoped) — then
+  // the main module's directory name (its parent when the entry sits in
+  // src/). Deterministic per project, so locks/KV/socket identity is stable.
+  try {
+    const cfg = JSON.parse(
+      Deno.readTextFileSync(join(Deno.cwd(), "deno.json")),
+    ) as { appId?: string; title?: string; name?: string };
+    const fromCfg = cfg.appId ?? cfg.title ?? cfg.name?.split("/").pop();
+    if (fromCfg) return slugify(fromCfg);
+  } catch { /* no deno.json — fall through */ }
+  try {
+    const main = new URL(Deno.mainModule);
+    if (main.protocol === "file:") {
+      const parts = main.pathname.split("/").filter(Boolean);
+      parts.pop(); // the entry file itself
+      const dir = parts.pop();
+      const name = dir === "src" ? parts.pop() : dir;
+      if (name) return slugify(name);
+    }
+  } catch { /* compiled/unusual entry */ }
   throw new Error(
-    '[aio] missing "appId" in aio.run() — add appId: "my-app" to your config',
+    '[aio] cannot infer an appId — add appId: "my-app" to aio.run() or ' +
+      'an "appId"/"title" field to deno.json',
   );
 }
 

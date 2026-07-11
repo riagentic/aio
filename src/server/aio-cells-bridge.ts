@@ -378,9 +378,9 @@ export async function wrapAppWithCells(
 
 /** Filter cell entries by --isolate flag */
 export function filterCellsByIsolate(
-  cellEntries: CellsConfig["cells"],
+  cellEntries: NonNullable<CellsConfig["cells"]>,
   isolate: string[] | undefined,
-): CellsConfig["cells"] {
+): NonNullable<CellsConfig["cells"]> {
   if (!isolate || isolate.length === 0) return cellEntries;
   const isolateSet = new Set(isolate);
   const filtered = cellEntries.filter((entry) => {
