@@ -127,3 +127,96 @@ Deno.test("batcher: same method batches into one action", async () => {
   assertEquals(actions.length, 1, "same method should batch into one action");
   assertEquals(actions[0]!.type, "feat:__setUpdate");
 });
+
+// ── Read-your-writes (the async-method stale-read footgun, fixed) ────
+// `s.x = 5; use(s.x)` inside an async method must behave like sync code:
+// reads see committed state with THIS batch's pending writes overlaid, and
+// what you read is exactly what commits (overlay replays applyMutations).
+
+Deno.test("liveProxy RYW: scalar read-after-write returns the new value", () => {
+  const { proxy } = makeProxy({ n: 0 as number, other: "x" });
+  proxy.n = 5;
+  assertEquals(proxy.n, 5);
+  proxy.n = proxy.n + 1; // increment through the proxy
+  assertEquals(proxy.n, 6);
+  assertEquals(proxy.other, "x"); // untouched fields still read committed
+});
+
+Deno.test("liveProxy RYW: the dashboard pattern — push reads freshly-set fields", () => {
+  const { proxy } = makeProxy({
+    cpu: 0 as number,
+    history: [] as { cpu: number }[],
+  });
+  proxy.cpu = 42;
+  proxy.history.push({ cpu: proxy.cpu });
+  assertEquals(proxy.history.length, 1);
+  assertEquals(proxy.history[0]!.cpu, 42);
+});
+
+Deno.test("liveProxy RYW: array mutator return values see pending state", () => {
+  const { proxy } = makeProxy({ items: [1, 2] as number[] });
+  proxy.items.push(3);
+  assertEquals(proxy.items.length, 3);
+  assertEquals(proxy.items.pop(), 3); // pops the value pushed a line ago
+  assertEquals(proxy.items.length, 2);
+});
+
+Deno.test("liveProxy RYW: read methods (map/filter/includes) see pending writes", () => {
+  const { proxy } = makeProxy({ items: [1] as number[] });
+  proxy.items.push(2);
+  assertEquals(proxy.items.includes(2), true);
+  assertEquals(proxy.items.map((x) => x * 10), [10, 20]);
+});
+
+Deno.test("liveProxy RYW: keys/in/spread/JSON see pending set + delete", () => {
+  const { proxy } = makeProxy(
+    { a: 1, b: 2 } as Record<string, number | undefined>,
+  );
+  proxy.c = 3;
+  delete proxy.b;
+  assertEquals("c" in proxy, true);
+  assertEquals("b" in proxy, false);
+  assertEquals(Object.keys(proxy).sort(), ["a", "c"]);
+  assertEquals(JSON.parse(JSON.stringify(proxy)), { a: 1, c: 3 });
+});
+
+Deno.test("liveProxy RYW: nested object writes are readable", () => {
+  const { proxy } = makeProxy({ obj: { a: 1, b: 2 } });
+  proxy.obj.a = 10;
+  assertEquals(proxy.obj.a, 10);
+  assertEquals(proxy.obj.b, 2);
+});
+
+Deno.test("liveProxy RYW: what you read is exactly what commits", async () => {
+  // Full loop: batched dispatch applies the same mutations the reads showed.
+  const committed: Record<string, unknown> = { cpu: 0, history: [] };
+  let dispatched: { mutations: unknown[] } | null = null;
+  const batcher = createBatcher("m", (a) => {
+    dispatched = a.payload as { mutations: unknown[] };
+  });
+  const proxy = createLiveProxy(
+    "m",
+    "m",
+    "poll",
+    () => committed as Record<string, unknown>,
+    batcher,
+  ) as { cpu: number; history: { cpu: number }[] };
+  proxy.cpu = 7;
+  proxy.history.push({ cpu: proxy.cpu });
+  const seen = JSON.parse(JSON.stringify(proxy));
+  await new Promise((r) => setTimeout(r, 0)); // let the microtask flush
+  const { applyMutations } = await import("../src/state/cell-impl.ts");
+  applyMutations(
+    committed,
+    (dispatched as unknown as { mutations: never[] }).mutations,
+  );
+  assertEquals(committed, seen); // read view === committed outcome
+});
+
+Deno.test("liveProxy RYW: external commits stay visible (still live)", () => {
+  const { proxy, setState } = makeProxy({ n: 0 as number, m: 0 as number });
+  proxy.n = 1;
+  setState({ n: 0, m: 99 }); // another dispatch commits mid-method
+  assertEquals(proxy.m, 99); // live read of the external change
+  assertEquals(proxy.n, 1); // my pending write still overlays
+});
