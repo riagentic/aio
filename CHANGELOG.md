@@ -2,6 +2,34 @@
 
 ## Unreleased (alpha19)
 
+### Added (failure-class capture)
+
+- **Blank-screen guard** — the #1 historical failure class, captured at runtime:
+  every dev boot failure (failed import, missing default export, state timeout,
+  mount error, empty render) now shows an in-page diagnostic overlay (XSS-safe,
+  with a classified fix hint) AND a loud `BLANK SCREEN (<stage>)` warning in the
+  server terminal. 10s watchdog covers silent hangs. Proven against real
+  chromium for all four failure stages + a healthy-app no-false-positive case.
+  Layered with the existing graph-validator page and startup linter.
+- **Bundle-smoke CI gate** — the AIO-404 class, captured in advance: the real
+  esbuild bundle step now runs in CI for both shapes (browser ESM with exported
+  mount, android IIFE with registry boot) and asserts the exact invariants that
+  broke twice historically. Caught its first ship-blocker on its first run (see
+  Fixed).
+- **Symptom → cause → caught-by matrix** in troubleshooting.md — every failure
+  class aio has actually hit, mapped to the guard that now catches it in
+  advance.
+
+### Fixed (failure-class capture)
+
+- `testUI`'s auto-DOM used a static `happy-dom` import — `cell.ts` re-exports
+  `testCell`, so the testing stack rides in every app bundle graph and
+  android/browser compiles broke with 51 esbuild errors (the new bundle gate
+  caught it before release). The specifier is now opaque to bundlers
+  (runtime-only resolution).
+- Blank-screen guard renders synchronously (never races its own report);
+  emptiness check sees through comment nodes (a `null` render).
+
 ### Changed
 
 - **Zero-config `aio.run()`** — every boot field is now inferred: `cells` from
