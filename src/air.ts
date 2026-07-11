@@ -43,6 +43,7 @@ export {
   type MountHandle,
   onCleanup,
   onMount,
+  setDevMode,
   type VChild,
   type VNode,
 } from "./browser-air.ts";
