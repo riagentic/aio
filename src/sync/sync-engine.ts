@@ -5,6 +5,7 @@ import type { OpBuffer } from "./op-buffer.ts";
 import { compareHLC, createHLC, type HLClock } from "./hlc.ts";
 import { rebase, type SyncReducer } from "./rebase.ts";
 import type { SyncConflict } from "./types.ts";
+import { mergeField } from "./merge.ts";
 
 /**
  * Dependencies injected into the client-side sync engine.
@@ -183,27 +184,62 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
         }
         const optimistic = await rebaseCell(op.cell);
 
-        // Conflict reporting: a field the remote op changed that surviving
-        // local (unconfirmed) ops still override. The engine's semantics are
+        // Conflict handling: a field the remote op changed that surviving
+        // local (unconfirmed) ops still override. Default semantics are
         // rebase-LWW — local replays on top — so `local` is what the user
-        // sees and `remote` is the confirmed value underneath.
-        const onConflict = deps.cells[op.cell]?.onConflict;
-        if (onConflict && next && next !== null) {
+        // sees and `remote` is the confirmed value underneath. Fields with a
+        // configured merge strategy get a CRDT merge applied to the CLIENT
+        // VIEW for the conflict window (the server stays the convergence
+        // authority — its next snapshot/ack rebase replaces the view).
+        const cfg = deps.cells[op.cell];
+        const mergeCfg = cfg?.merge ?? {};
+        const onConflict = cfg?.onConflict;
+        const wantsConflictWork = onConflict !== undefined ||
+          Object.keys(mergeCfg).length > 0;
+        if (wantsConflictWork && next != null) {
           const after = next as Record<string, unknown>;
           const conflicts: SyncConflict[] = [];
+          let mergedView: Record<string, unknown> | null = null;
+          // Local-side timestamp for merges: the newest surviving local op.
+          const unconfirmed = await deps.buffer.getUnconfirmed(op.cell);
+          const localHlc = unconfirmed.reduce(
+            (m: HLC | null, o) =>
+              m === null || compareHLC(o.hlc, m) > 0 ? o.hlc : m,
+            null,
+          ) ?? clock.now();
           for (const field of Object.keys(after)) {
             const remoteChanged = confirmed[field] !== after[field];
             const localOverrides = after[field] !== optimistic[field];
-            if (remoteChanged && localOverrides) {
-              conflicts.push({
-                field,
-                local: optimistic[field],
-                remote: after[field],
-                resolution: "lww",
-              });
+            if (!remoteChanged || !localOverrides) continue;
+            const strategy = mergeCfg[field] ?? "lww";
+            if (strategy !== "lww") {
+              try {
+                const m = mergeField(
+                  strategy,
+                  optimistic[field],
+                  localHlc,
+                  after[field],
+                  op.hlc,
+                  confirmed[field],
+                  cfg?.identity?.[field] ?? "id",
+                );
+                mergedView ??= { ...optimistic };
+                mergedView[field] = m.value;
+              } catch (e) {
+                deps.log?.warn(
+                  `[sync] ${op.cell}.${field}: ${strategy} merge failed (${e}) — keeping rebase-LWW view`,
+                );
+              }
             }
+            conflicts.push({
+              field,
+              local: optimistic[field],
+              remote: after[field],
+              resolution: strategy,
+            });
           }
-          if (conflicts.length > 0) {
+          if (mergedView) deps.onStateUpdate(op.cell, mergedView);
+          if (conflicts.length > 0 && onConflict) {
             try {
               onConflict(conflicts);
             } catch (e) {

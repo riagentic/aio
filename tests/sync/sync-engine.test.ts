@@ -277,3 +277,117 @@ describe("SyncEngine onConflict", () => {
     assertEquals(conflicts.length, 0);
   });
 });
+
+describe("SyncEngine per-field merge strategies", () => {
+  function mergeSetup(merge: Record<string, string>) {
+    let confirmedState: Record<string, unknown> = { n: 0, items: [] };
+    const conflicts: { field: string; resolution: string }[] = [];
+    const views: Record<string, unknown>[] = [];
+    const engine = createSyncEngine({
+      clientId: "c1",
+      cells: {
+        doc: {
+          ...normalizeSyncConfig(true),
+          merge: merge as Record<string, "lww" | "counter" | "set-add">,
+          onConflict: (c) => conflicts.push(...c),
+        },
+      },
+      buffer: createOpBuffer(createMemoryStorage()),
+      send: () => {},
+      reducer: (state, action, payload) => {
+        if (action === "set") return { ...state, ...(payload as object) };
+        return state;
+      },
+      getConfirmedState: () => ({ doc: confirmedState }),
+      setConfirmedState: (_cell, s) => {
+        confirmedState = s;
+      },
+      onStateUpdate: (_cell, s) => views.push(s),
+    });
+    return { engine, conflicts, views };
+  }
+
+  it("counter: client view merges both deltas during the conflict window", async () => {
+    const { engine, conflicts, views } = mergeSetup({ n: "counter" });
+    await engine.handleLocalAction("doc", "set", { n: 5 }); // local: 0 → 5
+    await engine.handleRemoteOp({
+      id: "r1",
+      cell: "doc",
+      action: "set",
+      payload: { n: 3 }, // remote: 0 → 3, concurrently
+      hlc: [Date.now(), 0, "c2"],
+      confirmed: true,
+    });
+    // base 0, local delta +5, remote delta +3 → merged client view 8
+    const last = views[views.length - 1]!;
+    assertEquals(last.n, 8);
+    assertEquals(conflicts.length, 1);
+    assertEquals(conflicts[0]!.field, "n");
+    assertEquals(conflicts[0]!.resolution, "counter");
+  });
+
+  it("set-add: client view is the union of concurrent adds", async () => {
+    const { engine, conflicts, views } = mergeSetup({ items: "set-add" });
+    await engine.handleLocalAction("doc", "set", { items: [{ id: "a" }] });
+    await engine.handleRemoteOp({
+      id: "r2",
+      cell: "doc",
+      action: "set",
+      payload: { items: [{ id: "b" }] },
+      hlc: [Date.now(), 0, "c2"],
+      confirmed: true,
+    });
+    const last = views[views.length - 1]!;
+    const ids = (last.items as { id: string }[]).map((i) => i.id).sort();
+    assertEquals(ids, ["a", "b"]);
+    assertEquals(conflicts[0]!.resolution, "set-add");
+  });
+
+  it("unconfigured fields keep rebase-LWW view and report resolution lww", async () => {
+    const { engine, conflicts, views } = mergeSetup({});
+    await engine.handleLocalAction("doc", "set", { n: 5 });
+    await engine.handleRemoteOp({
+      id: "r3",
+      cell: "doc",
+      action: "set",
+      payload: { n: 3 },
+      hlc: [Date.now(), 0, "c2"],
+      confirmed: true,
+    });
+    const last = views[views.length - 1]!;
+    assertEquals(last.n, 5); // local replays on top — unchanged semantics
+    assertEquals(conflicts[0]!.resolution, "lww");
+  });
+
+  it("merge applies even without an onConflict callback", async () => {
+    let confirmedState: Record<string, unknown> = { n: 0 };
+    const views: Record<string, unknown>[] = [];
+    const engine = createSyncEngine({
+      clientId: "c1",
+      cells: {
+        doc: { ...normalizeSyncConfig(true), merge: { n: "counter" } },
+      },
+      buffer: createOpBuffer(createMemoryStorage()),
+      send: () => {},
+      reducer: (state, action, payload) => {
+        if (action === "set") return { ...state, ...(payload as object) };
+        return state;
+      },
+      getConfirmedState: () => ({ doc: confirmedState }),
+      setConfirmedState: (_cell, s) => {
+        confirmedState = s;
+      },
+      onStateUpdate: (_cell, s) => views.push(s),
+    });
+    await engine.handleLocalAction("doc", "set", { n: 5 });
+    await engine.handleRemoteOp({
+      id: "r4",
+      cell: "doc",
+      action: "set",
+      payload: { n: 3 },
+      hlc: [Date.now(), 0, "c2"],
+      confirmed: true,
+    });
+    assertEquals(views[views.length - 1]!.n, 8);
+  });
+});
