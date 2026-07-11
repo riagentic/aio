@@ -3,9 +3,12 @@
 import { CDN } from "./server-html-constants.ts";
 
 /** Generates browser import map from framework defaults + deno.json npm packages.
- *  npm packages → esm.sh CDN URLs. jsr/local imports are skipped (handled differently). */
+ *  npm packages → esm.sh CDN URLs. jsr/local imports are skipped (handled differently).
+ *  `opts.vendorImmer` — the dev server found a local immer and serves it at
+ *  /__aio/vendor/immer.js (offline-capable dev; the CDN is only a fallback). */
 export function buildBrowserImportMap(
   denoImports: Record<string, string>,
+  opts: { vendorImmer?: boolean } = {},
 ): Record<string, string> {
   const imports: Record<string, string> = {
     "aio": "/__aio/ui.js",
@@ -22,7 +25,10 @@ export function buildBrowserImportMap(
   // The framework's own browser-side runtime deps must resolve even when the
   // app's deno.json doesn't (or can't) list them — src/state-core.ts imports
   // "immer", so a missing mapping is a BLANK SCREEN in dev/transpile mode.
-  // An app pin above still wins. Keep the version in sync with deno.json.
-  imports["immer"] ??= `${CDN}/immer@10.2.0`;
+  // A local copy wins even over an app CDN pin: it resolves app-node_modules
+  // first (so an app pin is honored via its own install) and works offline.
+  // esm.sh is the last resort only. Keep the CDN version in sync w/ deno.json.
+  if (opts.vendorImmer) imports["immer"] = "/__aio/vendor/immer.js";
+  else imports["immer"] ??= `${CDN}/immer@10.2.0`;
   return imports;
 }

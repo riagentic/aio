@@ -1,4 +1,4 @@
-import { assertEquals, assertStringIncludes } from "@std/assert";
+import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import {
   _timingSafeEqual,
   buildBrowserImportMap,
@@ -1632,4 +1632,29 @@ Deno.test("buildBrowserImportMap: framework runtime dep immer always resolves", 
   // An app's own pin still wins.
   const pinned = buildBrowserImportMap({ "immer": "npm:immer@10.9.9" });
   assertEquals(pinned["immer"], "https://esm.sh/immer@10.9.9");
+});
+
+Deno.test("buildBrowserImportMap: local vendor copy preferred — dev works offline", () => {
+  // With a local immer available the map points at the dev server's own
+  // /__aio/vendor route (no CDN, no internet needed), even over an app pin —
+  // the local copy IS the app's pin when the app pinned one (deno install
+  // materializes it in the app's node_modules, probed first).
+  const map = buildBrowserImportMap({ "immer": "npm:immer@10.9.9" }, {
+    vendorImmer: true,
+  });
+  assertEquals(map["immer"], "/__aio/vendor/immer.js");
+});
+
+Deno.test("vendor immer: resolves locally and is browser-safe ESM", async () => {
+  const { loadVendorImmer } = await import("../src/server/server-vendor.ts");
+  const src = loadVendorImmer();
+  // The framework repo always has a node_modules — this must resolve here.
+  assert(src !== null, "local immer must resolve in the framework repo");
+  assert(src.includes("produce"), "looks like immer");
+  // The standard bundler define must be applied — bare process.env in module
+  // scope is a ReferenceError in browsers.
+  assert(
+    !src.includes("process.env.NODE_ENV"),
+    "process.env must be substituted",
+  );
 });

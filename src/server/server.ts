@@ -24,6 +24,7 @@ export {
   MIME,
   TEXT_EXTENSIONS,
 } from "./server-html.ts";
+import { hasVendorImmer } from "./server-vendor.ts";
 export type { ServerConfig, ServerHandle } from "./server-types.ts";
 export { _timingSafeEqual } from "./server-auth.ts";
 
@@ -117,7 +118,9 @@ export function createServer(config: ServerConfig): ServerHandle {
       /* try next — missing/invalid config falls through to defaults */
     }
   }
-  const importMapObj = buildBrowserImportMap(denoImports);
+  const importMapObj = buildBrowserImportMap(denoImports, {
+    vendorImmer: hasVendorImmer(),
+  });
   const IMPORT_MAP = JSON.stringify({ imports: importMapObj });
 
   const absDistDir = distDir ? resolve(distDir) : null;
