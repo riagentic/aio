@@ -69,9 +69,15 @@ state.
 Every TSX component is exposed as a semantic API — observe and drive the UI
 without selectors:
 
-- In tests: `testUI` from `aio/testing` — `await ui.TodoAdd.AddButton.click()`;
-  names are LABEL+ROLE from the TSX (`<div class="button">Submit</div>` →
-  `SubmitButton`); every action settles.
+- In tests: `testUI(App, "name", async (ui) => { … })` from `aio/testing` — zero
+  setup (auto happy-dom window, auto-boots the cells App imports, full
+  teardown). Actions need no await
+  (`ui.TitleInput.type("x"); ui.AddButton
+  .click()` — ordered queue); await
+  only observations (`expectCell`, `waitFor`, `settle` — they drain the queue
+  and surface failures). Names are LABEL+ROLE from the TSX
+  (`<div class="button">Submit</div>` → `SubmitButton`). Handle form:
+  `await using ui = await testUI(App)`.
 - On a live app: `am surface 0 --json` (full perception: components, elements,
   live text/value/checked) and `am trigger 0 "<path>" <action> [text]` — the
   reply includes the fresh post-action surface, and misses list available paths.

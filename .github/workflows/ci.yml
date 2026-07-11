@@ -34,6 +34,8 @@ jobs:
         run: deno task check
       - name: Docs check (every error code documented)
         run: deno task docs:check
+      - name: Docs index (content.md matches the docs tree)
+        run: deno task docs:index -- --check
       - name: Docs coverage (every public export documented — roadmap B2)
         run: deno task docs:coverage
       - name: API snapshot (public surface locked — roadmap A2)

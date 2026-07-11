@@ -1509,11 +1509,11 @@
         },
         "testUI": {
           "kind": "function",
-          "sig": "83ea42d6ff78ea27"
+          "sig": "5a9942567bbf5a82"
         },
         "TestUI": {
           "kind": "typeAlias",
-          "sig": "ffe7e7b5e80be096"
+          "sig": "e03a03de9e3f291a"
         },
         "TestUIOptions": {
           "kind": "interface",
