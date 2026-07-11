@@ -318,7 +318,7 @@ something and re-read state), see
 
 - **First step, always:** `deno task doctor` — emitted by every scaffold (or
   `deno run -A dep/aio/src/server/doctor.ts` vendored,
-  `jsr:@riagentic/aio/doctor` once published). Validates the magic deno.json
+  `jsr:@riagentic/aio@1.0.0-alpha19/doctor`). Validates the magic deno.json
   lines (jsx, jsxImportSource, import map entries, kv, electron nodeModulesDir,
   Deno version) with a one-line fix per failure.
 
