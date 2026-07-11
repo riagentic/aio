@@ -779,6 +779,10 @@
           "kind": "function",
           "sig": "b8a3fea194926bde"
         },
+        "setDevMode": {
+          "kind": "function",
+          "sig": "ead8d395e242def0"
+        },
         "setDocument": {
           "kind": "function",
           "sig": "84317e7760a7e7de"

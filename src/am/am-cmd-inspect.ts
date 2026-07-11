@@ -96,6 +96,35 @@ export async function cmdClick(
   out(result.data, mode);
 }
 
+/** `am dom <clientIdx> [--all]` — raw semantic DOM snapshot of a live client
+ *  (low-level fallback; prefer `am surface` which names elements the way
+ *  tests address them). */
+export async function cmdDom(
+  args: string[],
+  flags: GlobalFlags,
+): Promise<void> {
+  const mode = detectMode(flags);
+  const appId = resolveAmAppId(flags.app);
+  const port = resolvePort(flags.port, appId);
+  const idx = Number(args[0] ?? flags.client ?? 0);
+  if (!Number.isInteger(idx) || idx < 0) {
+    outError("usage: am dom <clientIdx> [--all]", mode);
+    Deno.exit(1);
+  }
+  const all = args.includes("--all");
+  const result = await trojanGet(
+    port,
+    `dom/${idx}${all ? "?all=true" : ""}`,
+    appId,
+    10_000,
+  );
+  if (!result.ok) {
+    outError(result.error, mode);
+    Deno.exit(1);
+  }
+  out(result.data, mode);
+}
+
 export async function cmdInteract(
   args: string[],
   flags: GlobalFlags,

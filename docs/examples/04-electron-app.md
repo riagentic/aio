@@ -116,7 +116,7 @@ export const notes = cell("notes", {
 ```ts
 // src/app.ts
 import { aio } from "aio";
-import { integer, pk, table, text } from "aio/sql";
+import { integer, pk, table, text } from "aio";
 import { notes } from "./notes.ts";
 
 const app = await aio.run({
