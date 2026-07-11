@@ -6,6 +6,7 @@ import {
   useConnected as _airUseConnected,
   useLocal as _airUseLocal,
 } from "../adapters/air.ts";
+import type { UseLocalResult } from "../adapters/air.ts";
 import { useRef } from "../air/aio-renderer.ts";
 import { _projectWithSharing, ensureConnected } from "./browser-protocol.ts";
 import type { _CoreCellRef as CellRef } from "./browser-protocol.ts";
@@ -64,14 +65,7 @@ export function useAio<
 
 /** AIR useLocal -- signal-backed local state. No server connection needed.
  *  set() accepts value or updater function. patch() merges partial object updates. */
-export function useLocal<T>(
-  initial: T,
-): {
-  readonly local: T;
-  set: (next: T | ((prev: T) => T)) => void;
-  patch: T extends Record<string, unknown> ? (partial: Partial<T>) => void
-    : never;
-} {
+export function useLocal<T>(initial: T): UseLocalResult<T> {
   return _airUseLocal(initial);
 }
 

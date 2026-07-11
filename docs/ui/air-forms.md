@@ -31,8 +31,9 @@ const form = useForm({
 
 const LoginForm = () => (
   <form
-    onSubmit={(e: Event) => {
-      e.preventDefault();
+    onSubmit={() => {
+      // submit never navigates — AIR prevents the default for handled forms
+      // (opt back into native submission with data-native-submit)
       if (form.validate()) console.log(form.values());
     }}
   >
