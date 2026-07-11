@@ -359,9 +359,12 @@ function denoJson(title: string, appType: AppType): string {
     "aio": "./dep/aio/mod.ts",
     "aio/air": "./dep/aio/src/air.ts",
     "aio/jsx-runtime": "./dep/aio/src/jsx-runtime.ts",
+    "aio/testing": "./dep/aio/src/cell-test.ts",
     "esbuild": "npm:esbuild@^0.24",
     "immer": "npm:immer@^10",
     "@std/path": "jsr:@std/path@^1",
+    "@std/assert": "jsr:@std/assert@^1",
+    "happy-dom": "npm:happy-dom@^17",
   };
   if (isElectronApp) imports["electron"] = "npm:electron";
 
@@ -918,6 +921,193 @@ export default function App() {
   };
 }
 
+// Domain template: monitoring dashboard — showcases the aio feature set in
+// one small real app: two cells, a self-driving poll loop with backoff,
+// custom HTTP routes, filter UI, and built-in semantic UI + cell tests.
+function templateDashboard(title: string): Record<string, string> {
+  return {
+    "src/app.ts": `import { aio } from 'aio'
+import { metrics } from './cell/metrics.ts'
+import { alerts } from './cell/alerts.ts'
+
+await aio.run({
+  appId: '${slug(title)}',
+  appVersion: '0.1.0',
+  cells: [metrics, alerts],
+  ui: { title: '${title}' },
+  baseDir: import.meta.dirname!,
+  // Self-driving poll loop — seeded once; poll() re-schedules itself
+  // (success: steady 5s cadence, failure: exponential backoff).
+  schedules: [
+    { id: 'metrics:poll', after: 1, action: metrics.poll.action() },
+  ],
+  // Custom HTTP endpoints served next to the app (cells stay the state authority)
+  routes: {
+    '/api/health': () =>
+      Response.json({ ok: true, samples: metrics.history.length }),
+  },
+})
+`,
+    "src/cell/metrics.ts":
+      `import { cell, type CellEffect, schedule } from 'aio'
+
+export type Snapshot = { cpu: number; mem: number; ts: number }
+
+export const metrics = cell('metrics', {
+  state: { cpu: 0, mem: 0, attempt: 0, history: [] as Snapshot[] },
+  methods: {
+    // Poll system metrics and re-schedule — the loop owns its own cadence.
+    async poll(s): Promise<CellEffect> {
+      try {
+        const [load1] = Deno.loadavg()
+        const cpu = Math.min(Math.round(load1 * 100), 100)
+        const mem = Math.round(Deno.memoryUsage().rss / 1_048_576)
+        s.cpu = cpu
+        s.mem = mem
+        s.history.push({ cpu, mem, ts: Date.now() })
+        if (s.history.length > 60) s.history = s.history.slice(-60)
+        s.attempt = 0
+        return schedule.after('metrics:poll', 5_000, metrics.poll.action())
+      } catch {
+        s.attempt += 1
+        return schedule.backoff(
+          'metrics:poll',
+          s.attempt,
+          { base: 5_000, max: 300_000 },
+          metrics.poll.action(),
+        )
+      }
+    },
+  },
+})
+`,
+    "src/cell/alerts.ts": `import { cell } from 'aio'
+
+export type Alert = {
+  id: number
+  text: string
+  severity: 'info' | 'warn' | 'crit'
+  acked: boolean
+}
+
+export const alerts = cell('alerts', {
+  state: { items: [] as Alert[], nextId: 1 },
+  methods: {
+    raise(s, text: string, severity: Alert['severity'] = 'info') {
+      s.items.push({ id: s.nextId++, text, severity, acked: false })
+    },
+    ack(s, id: number) {
+      const a = s.items.find(i => i.id === id)
+      if (a) a.acked = true
+    },
+    clearAcked(s) {
+      s.items = s.items.filter(i => !i.acked)
+    },
+  },
+})
+`,
+    "src/App.tsx": `import { useLocal } from 'aio/air'
+import { metrics } from './cell/metrics.ts'
+import { type Alert, alerts } from './cell/alerts.ts'
+
+function MetricsPanel() {
+  return (
+    <div style={{ display: 'flex', gap: '2rem', margin: '1rem 0' }}>
+      <div>CPU <strong t="cpu">{metrics.cpu}%</strong></div>
+      <div>MEM <strong t="mem">{metrics.mem} MB</strong></div>
+      <div>samples <span t="samples">{metrics.history.length}</span></div>
+    </div>
+  )
+}
+
+function AlertRow({ alert }: { alert: Alert }) {
+  return (
+    <li style={{ display: 'flex', gap: '0.5rem', alignItems: 'center', margin: '0.3rem 0' }}>
+      <span t="text" style={{ flex: 1, opacity: alert.acked ? 0.5 : 1 }}>
+        [{alert.severity}] {alert.text}
+      </span>
+      {!alert.acked && (
+        <button type="button" onClick={() => alerts.ack(alert.id)}>Ack</button>
+      )}
+    </li>
+  )
+}
+
+export default function App() {
+  const { local: filter, set: setFilter } = useLocal('open')
+  const visible = alerts.items.filter(a =>
+    filter === 'all' ? true : filter === 'open' ? !a.acked : a.acked
+  )
+  return (
+    <div style={{ maxWidth: '600px', margin: '2rem auto', fontFamily: 'system-ui, sans-serif' }}>
+      <h1>${title}</h1>
+      <MetricsPanel />
+      <div style={{ display: 'flex', gap: '0.5rem' }}>
+        <button type="button" onClick={() => setFilter('all')}>All</button>
+        <button type="button" onClick={() => setFilter('open')}>Open</button>
+        <button type="button" onClick={() => setFilter('acked')}>Acked</button>
+        <button type="button" onClick={() => alerts.clearAcked()}>Clear acked</button>
+      </div>
+      <ul t="alert-list" style={{ listStyle: 'none', padding: 0 }}>
+        {visible.map(a => <AlertRow key={a.id} alert={a} />)}
+      </ul>
+      <p style={{ color: '#888', fontSize: '0.85rem' }}>
+        <span t="open-count">{alerts.items.filter(a => !a.acked).length}</span> open
+      </p>
+    </div>
+  )
+}
+`,
+    "tests/alerts.test.ts": `import { testCell } from 'aio/testing'
+import { alerts } from '../src/cell/alerts.ts'
+
+testCell(alerts, 'raise → ack → clearAcked', (t) => {
+  t.init()
+  t.send.raise('disk almost full', 'warn')
+  t.send.raise('service down', 'crit')
+  t.expect.state(s => s.items.length === 2)
+  t.send.ack(1)
+  t.expect.state(s => s.items[0]!.acked && !s.items[1]!.acked)
+  t.send.clearAcked()
+  t.expect.state(s => s.items.length === 1 && s.items[0]!.text === 'service down')
+})
+`,
+    // Semantic UI test — drives the real component tree through the
+    // auto-generated API (no selectors). Stripped for headless app types.
+    "tests/ui.test.tsx": `import { assert, assertEquals } from '@std/assert'
+import { Window } from 'happy-dom'
+import { testUI } from 'aio/testing'
+import { alerts } from '../src/cell/alerts.ts'
+import App from '../src/App.tsx'
+
+Deno.test('dashboard: raise → ack → filter, through the semantic surface', async () => {
+  const win = new Window()
+  const ui = await testUI(App, { document: win.document, cells: [alerts] })
+
+  await alerts.raise('disk almost full', 'warn')
+  await alerts.raise('service down', 'crit')
+  await ui.settle()
+
+  // Default filter is "open" — both alerts visible, addressable by key
+  assert(ui.find('AlertRow', 1).text.includes('disk almost full'))
+  assertEquals(ui.App['open-count'].text, '2')
+
+  // Ack the first alert with a real click — it leaves the "open" filter
+  await ui.find('AlertRow', 1).AckButton.click()
+  await ui.expectCell(alerts, a => a.items[0]!.acked === true)
+  assertEquals(ui.App['open-count'].text, '1')
+
+  // Flip the filter to "acked" — only the acked row remains visible
+  await ui.App.AckedButton.click()
+  assert(ui.find('AlertRow', 1).text.includes('disk almost full'))
+
+  ui.unmount()
+  await win.happyDOM.close()
+})
+`,
+  };
+}
+
 // ── CLI client templates (remote-cli) ──
 
 function cliTemplateEmpty(_title: string): Record<string, string> {
@@ -1253,6 +1443,13 @@ function getTemplates(appType: AppType): Template[] {
         ? "9 files — todo + user cells + UI hierarchy. Full architecture."
         : "3 files — todo + user cells + app entry. Full architecture.",
       fn: templateLarge,
+    },
+    {
+      label: "Dashboard",
+      desc: ui
+        ? "6 files — monitoring dashboard: poll loop w/ backoff, routes, filters, UI + cell tests."
+        : "4 files — monitoring cells: poll loop w/ backoff, routes, cell test.",
+      fn: templateDashboard,
     },
   ];
 }

@@ -36,9 +36,42 @@
   `sync.onConflict` callback when a remote op changes a field your unconfirmed
   local ops also changed (rebase-LWW semantics; it was typed + documented but
   never invoked). Tested both ways (fires on overlap, silent otherwise).
+- **`testgen` — fully-typed UI-test clients** (`aio/testing`): generates one
+  interface per component from the live surface (`generateUITypes` is pure —
+  works on any surface, including `am surface --json` output) plus
+  `TypedTestUI`; a renamed button breaks tests at **compile time**. The test
+  suite compiles the generated module with `deno check`.
+- **Gestures + full live-tier parity**: `scroll({top,left})` and `dragTo(other)`
+  (faithful HTML5 DnD sequence with one shared DataTransfer) in tests AND
+  `am trigger`; the live tier now accepts the complete testUI action set
+  (`select`, `check`, `uncheck`, `clear`, `scroll`, `dragTo`).
+- **Tier-3 e2e** — `tests/e2e-ui-chromium.test.ts` proves the whole stack
+  against a **real headless chromium**: boots examples/counter, drives it purely
+  over trojan surface/trigger, asserts server-state convergence. Auto-runs when
+  a chromium/chrome binary exists (`AIO_E2E=0` opts out).
+- **Per-field merge strategies applied on conflict** — fields configured in
+  `sync.merge` now get their CRDT merge (counter/set-add/lww-per-key/…) applied
+  to the client view for the conflict window; `onConflict` reports `resolution`
+  = the strategy. Unconfigured fields keep rebase-LWW. The server remains the
+  convergence authority.
+- **Dashboard scaffold template** — `aio create --template=Dashboard`: a
+  monitoring app showcasing two cells, a self-driving `schedule.backoff` poll
+  loop, custom routes, filter UI, and built-in semantic UI + cell tests.
+  Scaffolds now map `aio/testing`, `@std/assert`, `happy-dom`.
 - **Docs**: integrations walkthrough (routes/uploads/backoff/auth providers),
   positioning & non-goals, storage-backend interface design spec (pre-freeze
-  seam reservation), Prometheus section in production.md.
+  seam reservation), Prometheus section in production.md, testgen + gestures in
+  ui-testing.md.
+
+### Fixed
+
+- **Blank screen for apps without a readable `deno.json`** — the dev import map
+  now always maps the framework's own browser-side runtime deps (`immer`);
+  previously the transpiled framework's bare import threw in the page and
+  nothing mounted (repo examples, ad-hoc app dirs).
+- **Lazy components surfaced as colliding `LazyWrapper` names** — a resolved
+  `lazy()` wrapper now reports the loaded component's real name on the semantic
+  surface. Portal + Suspense surface coverage pinned with tests.
 
 ## 1.0.0-alpha17 — external-audit hardening + experimental targets
 
