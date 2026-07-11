@@ -175,7 +175,19 @@ one action. Each `await` boundary starts a new batch.
 (e.g., `__SetCheckout`). This enables machine guards: if `checkout` is allowed
 in a state, its writes are also allowed.
 
-**Every read = fresh state** from the store. No stale copies after `await`.
+**Every read = fresh state + your pending writes** (read-your-writes). Reads
+through `s` see the committed store with this method's unflushed writes
+overlaid, so straight-line code behaves exactly like sync code:
+
+```ts
+async poll(s) {
+  s.cpu = readCpu()
+  s.history.push({ cpu: s.cpu })   // pushes the value set one line up
+}
+```
+
+No stale copies after `await`, and no stale reads after your own writes — what
+you read is exactly what commits.
 
 ### Nested writes and arrays
 
@@ -210,8 +222,8 @@ The live proxy supports the read patterns you'd expect:
   `.flat`, `.flatMap`, `.forEach`, `.entries`, `.keys`, `.values`, `.join`,
   `.toSorted`, `.toReversed`, `.toSpliced`. These execute against a
   `structuredClone` snapshot of the array, so the result is plain data (not a
-  live proxy). They see the **current** state, fresh per call — re-read after an
-  `await` and you get the new state.
+  live proxy). They see the **current** state plus your pending writes, fresh
+  per call — re-read after an `await` and you get the new state.
 
 For anything that isn't covered (function-valued properties on the state,
 unusual array methods), the live proxy throws:
