@@ -119,7 +119,9 @@ export function createServer(config: ServerConfig): ServerHandle {
     }
   }
   const importMapObj = buildBrowserImportMap(denoImports, {
-    vendorImmer: hasVendorImmer(),
+    // prod serves bundles and the vendor route is dev-only — never point a
+    // prod import map at it.
+    vendorImmer: !prod && hasVendorImmer(),
   });
   const IMPORT_MAP = JSON.stringify({ imports: importMapObj });
 

@@ -6,8 +6,8 @@
 //   await ui.App.TitleInput.type("buy milk");   // client-only useLocal — real events
 //   await ui.App.AddButton.click();             // settles the full loop
 //
-// Naming is a pure function of the TSX (t > aria-label > text > placeholder >
-// name attr, + role from tag/class), so the API is predictable and stable.
+// Naming is a pure function of the TSX (t > data-testid > aria-label > text >
+// placeholder > name attr, + role from tag/class) — predictable and stable.
 // Interactions dispatch real DOM event sequences through AIR's own delegation —
 // faithful to a user, never calling handlers directly.
 
@@ -114,7 +114,7 @@ export type UIComponentHandle = {
 } & {
   /** Dynamic access to elements/child components by semantic name. Typed
    *  loosely in v1 (the proxy throws helpful errors for unknown names);
-   *  `deno task testgen` (planned) generates fully-typed clients. */
+   *  `testgen(App)` generates fully-typed clients — see ui-testgen.ts. */
   // deno-lint-ignore no-explicit-any
   [name: string]: any;
 };

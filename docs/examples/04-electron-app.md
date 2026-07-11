@@ -282,7 +282,7 @@ development).
 ## Step 7: Build to AppImage
 
 ```bash
-deno task compile:electron
+deno run -A dep/aio/src/build.ts --compile --electron
 ```
 
 This produces a self-contained binary. The Electron shell loads your UI from

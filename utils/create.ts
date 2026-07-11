@@ -818,8 +818,8 @@ function applyAppType(
         `\n  // users: { 'change-me-token': { id: 'admin', role: 'admin' } },\n})\n`,
       )
       : src.replace(
-        /await aio\.run\(([^)]*)\)/,
-        `await aio.run($1)\n// pin tokens: aio.run({ users: { 'change-me-token': { id: 'admin', role: 'admin' } } })`,
+        /await aio\.run\(([^)]*)\)( ?\/\/[^\n]*)?/,
+        `await aio.run($1)$2\n// pin tokens: aio.run({ users: { 'change-me-token': { id: 'admin', role: 'admin' } } })`,
       );
   }
 

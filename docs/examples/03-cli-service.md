@@ -266,7 +266,7 @@ deno task am stop
 Compile a standalone binary:
 
 ```sh
-deno task compile:service
+deno run -A dep/aio/src/build.ts --compile --service --headless
 ```
 
 This produces `task-queue` (binary) and `task-queue.service` (systemd unit) with

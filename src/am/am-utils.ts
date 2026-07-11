@@ -55,6 +55,17 @@ export function resolveAmAppId(flag?: string): string {
   } catch { /* no deno.json */ }
   const ec = readEntryConfig();
   if (ec.appId) return resolveAppId(ec.appId);
+  // Zero-config apps (aio.run() with no appId) — mirror the server's
+  // inference chain: deno.json title/name, then the project directory name.
+  try {
+    const cfg = JSON.parse(
+      Deno.readTextFileSync(join(Deno.cwd(), "deno.json")),
+    ) as { title?: string; name?: string };
+    const fromCfg = cfg.title ?? cfg.name?.split("/").pop();
+    if (fromCfg) return resolveAppId(fromCfg);
+  } catch { /* no deno.json */ }
+  const dir = Deno.cwd().split("/").filter(Boolean).pop();
+  if (dir) return resolveAppId(dir);
   throw new Error(
     '[am] missing appId — pass --app=X, add "appId" to deno.json, or set appId in aio.run()',
   );
