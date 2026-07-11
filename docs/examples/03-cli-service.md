@@ -186,12 +186,26 @@ if (task) {
 }
 ```
 
+### Bound cells — skip the wire format
+
+Instead of raw `{ type, payload }` actions, bind the shared cell definition to
+the connection — same import the server uses:
+
+````ts
+import { queue } from "./cell/queue/index.ts";
+
+cli.bind(queue);
+
+await queue.enqueue(task); // dispatches over the socket, resolves on ack
+console.log(queue.jobs.length); // reads live server state
+
+
 Run it in a second terminal while the server is up:
 
 ```sh
 deno run -A src/cli.ts                                     # connect and watch
 deno run -A src/cli.ts http://localhost:8000 "build v2.0"  # connect + enqueue
-```
+````
 
 `connectCli` uses the same WebSocket delta protocol as the browser. It
 auto-reconnects with exponential backoff and queues actions sent before the
