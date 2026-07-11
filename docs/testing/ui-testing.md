@@ -55,6 +55,33 @@ prop also puts **non-interactive** elements on the surface (assertion targets)
 and is the stable handle to use where visible copy may change — it's typed and
 stripped from the DOM.
 
+## Typed clients: `testgen`
+
+Generate a fully-typed client from what actually renders — autocomplete on
+every component and element, and a renamed button breaks tests at **compile
+time**:
+
+```ts
+// scripts/testgen.ts — run after UI changes
+import { Window } from "happy-dom";
+import { testgen } from "aio/testing";
+import App from "../src/App.tsx";
+import { todo } from "../src/cell/todo.ts";
+
+const src = await testgen(App, { document: new Window().document, cells: [todo] });
+await Deno.writeTextFile("tests/ui.gen.ts", src);
+```
+
+```ts
+// in a test
+import type { TypedTestUI } from "./ui.gen.ts";
+const ui = await testUI(App, { document, cells: [todo] }) as TypedTestUI;
+await ui.App.SubmitButton.click(); // autocompleted, compile-checked
+```
+
+`generateUITypes(surface)` is the pure core — feed it any surface, including a
+live client's `am surface --json`.
+
 ## On a live app: `am surface` / `am trigger`
 
 ```sh

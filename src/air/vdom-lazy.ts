@@ -33,6 +33,10 @@ export function lazy<P extends Record<string, unknown>>(
       loading = true;
       loader().then((mod) => {
         resolved = mod.default;
+        // Surface the real component name (semantic UI surface / devtools
+        // address lazy components by it, not by "LazyWrapper").
+        (LazyWrapper as unknown as { _lazyName?: string })._lazyName =
+          mod.default.name || undefined;
         // Notify all registered Suspense boundaries to re-render
         for (const fn of _listeners) fn();
         _listeners.clear();
