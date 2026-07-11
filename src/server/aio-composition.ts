@@ -88,19 +88,38 @@ function warnFieldFilters(composed: ComposedCells): void {
       ] as const
     ) {
       if (!filter || filter === "all" || filter === "none") continue;
-      const keys = "include" in filter
+      const isInclude = "include" in filter;
+      const keys = isInclude
         ? filter.include
         : "exclude" in filter
         ? filter.exclude
         : [];
       for (const key of keys) {
-        if (!topSet.has(key)) {
+        if (key.includes(".")) {
+          // Dot-paths: supported for exclude (deep removal, arrays traversed
+          // element-wise); include stays a top-level allowlist.
+          if (isInclude) {
+            log.warn(
+              "visibility",
+              `[${f.__aio.id}] ${kind} include key "${key}" — include filters ` +
+                `are top-level only (an allowlist). To hide a nested field, ` +
+                `use exclude: ["${key}"] (deep removal) or ui.forUser.`,
+            );
+          } else if (!topSet.has(key.split(".")[0]!)) {
+            log.warn(
+              "visibility",
+              `[${f.__aio.id}] ${kind} exclude path "${key}" — its head ` +
+                `segment "${key.split(".")[0]}" is not a top-level field of ` +
+                `the cell, so this excludes nothing. Typo?`,
+            );
+          }
+        } else if (!topSet.has(key)) {
           log.warn(
             "visibility",
             `[${f.__aio.id}] ${kind} filter key "${key}" is not a top-level ` +
-              `field of the cell — field filters only match top-level keys, so ` +
-              `this is silently ignored. For a nested/array field use ui.forUser ` +
-              `to transform the exposed shape.`,
+              `field of the cell, so this is silently ignored. For a nested ` +
+              `field use a dot-path exclude (e.g. "items.${key}") or ` +
+              `ui.forUser.`,
           );
         }
       }
@@ -280,9 +299,14 @@ function buildUIStateGetter(composed: ComposedCells): UIStateResult {
           fields: new Set(resolved.include),
         });
       } else if ("exclude" in resolved) {
+        const plain = resolved.exclude.filter((k) => !k.includes("."));
+        const deep = resolved.exclude
+          .filter((k) => k.includes("."))
+          .map((k) => k.split("."));
         cellFilterFields.set(f.__aio.id, {
           mode: "exclude",
-          fields: new Set(resolved.exclude),
+          fields: new Set(plain),
+          ...(deep.length > 0 ? { deepExcludes: deep } : {}),
         });
       }
     }
