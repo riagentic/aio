@@ -92,7 +92,8 @@ deno run -A src/app.ts             # run
 ```
 
 → [Quickstart](docs/basics/quickstart.md) for UI setup, Electron, scaffolder,
-and all compile targets.
+Fit check first? → [Positioning & non-goals](docs/basics/positioning.md). and
+all compile targets.
 
 ## What's included
 

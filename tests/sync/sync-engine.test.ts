@@ -189,3 +189,91 @@ describe("SyncEngine", () => {
     assertEquals(optimisticState, { items: [{ text: "from-peer" }] });
   });
 });
+
+describe("SyncEngine onConflict", () => {
+  it("fires when a remote op changes a field local unconfirmed ops override", async () => {
+    let confirmedState: Record<string, unknown> = { title: "base", n: 0 };
+    const conflicts: unknown[] = [];
+    const engine = createSyncEngine({
+      clientId: "c1",
+      cells: {
+        doc: {
+          ...normalizeSyncConfig(true),
+          onConflict: (c) => conflicts.push(...c),
+        },
+      },
+      buffer: createOpBuffer(createMemoryStorage()),
+      send: () => {},
+      reducer: (state, action, payload) => {
+        if (action === "set") return { ...state, ...(payload as object) };
+        return state;
+      },
+      getConfirmedState: () => ({ doc: confirmedState }),
+      setConfirmedState: (_cell, s) => {
+        confirmedState = s;
+      },
+      onStateUpdate: () => {},
+    });
+
+    // Local unconfirmed edit: title = "mine"
+    await engine.handleLocalAction("doc", "set", { title: "mine" });
+    // Concurrent remote edit lands: title = "theirs"
+    await engine.handleRemoteOp({
+      id: "r1",
+      cell: "doc",
+      action: "set",
+      payload: { title: "theirs" },
+      hlc: [Date.now(), 0, "c2"],
+      confirmed: true,
+    });
+
+    assertEquals(conflicts.length, 1);
+    const c = conflicts[0] as {
+      field: string;
+      local: unknown;
+      remote: unknown;
+      resolution: string;
+    };
+    assertEquals(c.field, "title");
+    assertEquals(c.local, "mine"); // rebase-LWW: local replays on top
+    assertEquals(c.remote, "theirs"); // confirmed value underneath
+    assertEquals(c.resolution, "lww");
+  });
+
+  it("does NOT fire for non-overlapping edits", async () => {
+    let confirmedState: Record<string, unknown> = { title: "base", n: 0 };
+    const conflicts: unknown[] = [];
+    const engine = createSyncEngine({
+      clientId: "c1",
+      cells: {
+        doc: {
+          ...normalizeSyncConfig(true),
+          onConflict: (c) => conflicts.push(...c),
+        },
+      },
+      buffer: createOpBuffer(createMemoryStorage()),
+      send: () => {},
+      reducer: (state, action, payload) => {
+        if (action === "set") return { ...state, ...(payload as object) };
+        return state;
+      },
+      getConfirmedState: () => ({ doc: confirmedState }),
+      setConfirmedState: (_cell, s) => {
+        confirmedState = s;
+      },
+      onStateUpdate: () => {},
+    });
+
+    await engine.handleLocalAction("doc", "set", { n: 5 }); // local touches n
+    await engine.handleRemoteOp({
+      id: "r2",
+      cell: "doc",
+      action: "set",
+      payload: { title: "theirs" }, // remote touches title — no overlap
+      hlc: [Date.now(), 0, "c2"],
+      confirmed: true,
+    });
+
+    assertEquals(conflicts.length, 0);
+  });
+});

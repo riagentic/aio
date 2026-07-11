@@ -589,6 +589,7 @@ async function _run<S, A, E>(
       transport: config.transport,
       renderBudget: config.renderBudget,
       fullStateThreshold: config.fullStateThreshold,
+      routes: config.routes,
       maxConnections: config.maxConnections,
       wsLimits: config.wsLimits,
       syncIntervalMs: config.syncIntervalMs,

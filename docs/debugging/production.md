@@ -3,6 +3,23 @@
 Memory monitoring, cell health, common error patterns, and production failure
 scenarios.
 
+## Prometheus metrics
+
+`GET /__aio/metrics` serves Prometheus/OpenMetrics text — point your scraper at
+it (no config needed):
+
+```
+aio_uptime_seconds            seconds since the server started
+aio_memory_rss_bytes          resident set size
+aio_memory_heap_used_bytes    V8 heap used (also heap_total)
+aio_clients_connected         connected WebSocket clients
+aio_cell_errors_total{cell}   errors observed per cell
+aio_cell_enabled{cell}        cell enabled flag (circuit breaker)
+aio_broadcast_bytes_total{kind} / aio_broadcast_messages_total{kind}
+```
+
+Pairs with `/__aio/health` (JSON, per-cell detail) and `am metrics` (CLI).
+
 ## Memory pressure monitor
 
 AIO monitors heap usage and alerts before OOM. Critical for long-running apps.

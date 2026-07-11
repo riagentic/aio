@@ -4,6 +4,7 @@ import { SYNC_DEFAULTS } from "./types.ts";
 import type { OpBuffer } from "./op-buffer.ts";
 import { compareHLC, createHLC, type HLClock } from "./hlc.ts";
 import { rebase, type SyncReducer } from "./rebase.ts";
+import type { SyncConflict } from "./types.ts";
 
 /**
  * Dependencies injected into the client-side sync engine.
@@ -87,12 +88,13 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
     return next;
   }
 
-  async function rebaseCell(cell: string) {
+  async function rebaseCell(cell: string): Promise<Record<string, unknown>> {
     const confirmedState = deps.getConfirmedState()[cell] ?? {};
     const unconfirmed = await deps.buffer.getUnconfirmed(cell);
     const result = rebase(confirmedState, unconfirmed, deps.reducer);
     deps.onStateUpdate(cell, result.optimistic);
     updateStatus(cell, { pending: result.surviving.length });
+    return result.optimistic;
   }
 
   return {
@@ -179,7 +181,36 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
         if (!meta?.lastHlc || compareHLC(op.hlc, meta.lastHlc) > 0) {
           await deps.buffer.saveMeta(op.cell, { lastHlc: op.hlc });
         }
-        await rebaseCell(op.cell);
+        const optimistic = await rebaseCell(op.cell);
+
+        // Conflict reporting: a field the remote op changed that surviving
+        // local (unconfirmed) ops still override. The engine's semantics are
+        // rebase-LWW — local replays on top — so `local` is what the user
+        // sees and `remote` is the confirmed value underneath.
+        const onConflict = deps.cells[op.cell]?.onConflict;
+        if (onConflict && next && next !== null) {
+          const after = next as Record<string, unknown>;
+          const conflicts: SyncConflict[] = [];
+          for (const field of Object.keys(after)) {
+            const remoteChanged = confirmed[field] !== after[field];
+            const localOverrides = after[field] !== optimistic[field];
+            if (remoteChanged && localOverrides) {
+              conflicts.push({
+                field,
+                local: optimistic[field],
+                remote: after[field],
+                resolution: "lww",
+              });
+            }
+          }
+          if (conflicts.length > 0) {
+            try {
+              onConflict(conflicts);
+            } catch (e) {
+              deps.log?.warn(`[sync] onConflict callback threw: ${e}`);
+            }
+          }
+        }
       });
     },
 

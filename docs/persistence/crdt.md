@@ -36,6 +36,10 @@ const inventory = cell("inventory", {
     identity: { items: "sku" },
     offline: { retention: "7d" },
     onConflict(conflicts) {
+      // Fires when a remote op changes a field your unconfirmed local ops
+      // also changed. Engine semantics are rebase-LWW: your local value stays
+      // visible (replayed on top) until confirmed; `remote` is the confirmed
+      // value underneath. resolution is "lww".
       console.log("conflicts:", conflicts);
     },
     onSync(stats) {
