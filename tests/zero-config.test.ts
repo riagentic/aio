@@ -5,6 +5,10 @@
 // baseDir from the main module. This test scaffolds that minimal app in a
 // temp dir and boots it for real.
 import { assert, assertEquals } from "@std/assert";
+// Coverage profiles from spawned deno processes go to a throwaway temp dir —
+// never into the repo (an empty DENO_COVERAGE_DIR means "cwd"), never into
+// the parent's coverage profile.
+const _childCovDir = Deno.makeTempDirSync({ prefix: "aio-child-cov-" });
 
 const ROOT = new URL("..", import.meta.url).pathname;
 
@@ -58,13 +62,14 @@ export const counter = cell("counter", {
       `${dir}/src/app.ts`,
       `import "./cell.ts";
 import { aio } from "aio";
+
+
 await aio.run(); // everything inferred`,
     );
 
     const port = freePort();
     const proc = new Deno.Command(Deno.execPath(), {
-      // don't flood the parent's coverage profile from child processes
-      env: { DENO_COVERAGE_DIR: "" },
+      env: { DENO_COVERAGE_DIR: _childCovDir },
       args: [
         "run",
         "-A",

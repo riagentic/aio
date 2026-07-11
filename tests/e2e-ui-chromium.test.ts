@@ -9,6 +9,11 @@
 // (visibly) otherwise. Opt out with AIO_E2E=0.
 import { assert, assertEquals } from "@std/assert";
 
+// Coverage profiles from spawned deno processes go to a throwaway temp dir —
+// never into the repo (an empty DENO_COVERAGE_DIR means "cwd"), never into
+// the parent's coverage profile.
+const _childCovDir = Deno.makeTempDirSync({ prefix: "aio-child-cov-" });
+
 const ROOT = new URL("..", import.meta.url).pathname;
 
 function findBrowser(): string | null {
@@ -90,6 +95,7 @@ Deno.test({
     const port = freePort();
     const base = `http://localhost:${port}`;
     const app = new Deno.Command(Deno.execPath(), {
+      env: { DENO_COVERAGE_DIR: _childCovDir },
       args: [
         "run",
         "-A",

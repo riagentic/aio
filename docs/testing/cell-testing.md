@@ -3,14 +3,14 @@
 ## `testCell(cell, name, fn)` — isolated cell testing
 
 Test harness that wraps `Deno.test` with typed helpers. Automatically resets all
-flows and pending async calls before each test — no teardown needed.
+flows and pending async calls before each test — no teardown needed. State
+starts initialized — `t.init()` is only needed to RESET mid-test.
 
 ```ts
 import { testCell } from "aio/testing"; // or from "aio"
 import { counter } from "./cell/counter/index.ts";
 
 testCell(counter, "increment from idle", (t) => {
-  t.init();
   t.send.increment(5);
   t.expect.state((s) => s.count === 5);
   t.expect.status("idle");
@@ -18,7 +18,6 @@ testCell(counter, "increment from idle", (t) => {
 });
 
 testCell(counter, "machine guards block invalid transitions", (t) => {
-  t.init();
   t.send.save(); // idle -> saving
   t.expect.status("saving");
   t.send.increment(1); // blocked! increment not in saving.on
@@ -26,7 +25,6 @@ testCell(counter, "machine guards block invalid transitions", (t) => {
 });
 
 testCell(counter, "save flow: idle -> saving -> error -> idle", (t) => {
-  t.init();
   t.send.save();
   t.expect.status("saving");
   t.send.saveFailed("network error");
@@ -73,7 +71,6 @@ for every triggered async method to actually finish:
 
 ```ts
 testCell(loader, "loads data", async (t) => {
-  t.init();
   t.send.load();
   await t.settle(); // tracks the async method to completion — no ms guessing
   t.expect.state((s) => s.data === "loaded");
@@ -91,7 +88,6 @@ outside the cell system, e.g. `setTimeout` chains.
 
 ```ts
 testCell(door, "cannot open when already open", (t) => {
-  t.init();
   t.send.open();
   t.expect.status("open");
 
@@ -125,7 +121,6 @@ The preferred pattern is direct import + call — test it like any cell method:
 
 ```ts
 testCell(inventory, "reserve: updates reserved list", async (t) => {
-  t.init();
   t.send.reserve(["widget"]); // dispatches as normal action
   await t.settle();
   t.expect.state((s) => s.reserved.includes("widget"));
