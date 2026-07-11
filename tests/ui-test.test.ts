@@ -601,3 +601,19 @@ Deno.test("useLocal: tuple AND object forms work from one call", async () => {
   assertEquals(ui.App.txt.text, "ax");
   assertEquals(ui.App.num.text, "1");
 });
+
+Deno.test("naming: data-testid is honored like t (verbatim, assertion target)", async () => {
+  let clicks = 0;
+  function App() {
+    return h("div", null, [
+      h("button", { "data-testid": "save-btn", onClick: () => clicks++ }, "OK"),
+      h("span", { "data-testid": "status" }, "ready"), // no handler — still on surface
+      h("span", { t: "wins", "data-testid": "loses" }, "x"), // t beats data-testid
+    ]);
+  }
+  await using ui = await testUI(App as ComponentFn);
+  await ui.App["save-btn"].click();
+  assertEquals(clicks, 1);
+  assertEquals(ui.App.status.text, "ready");
+  assertEquals(ui.App.wins.text, "x");
+});
