@@ -57,6 +57,25 @@ cell.persist > cellDefaults.persist > "all"
 cell.ui      > cellDefaults.ui      > "all"
 ```
 
+## Secret-exposure warnings & `publicFields`
+
+In dev, aio warns when a field whose **name** looks secret
+(`enc`/`secret`/`priv`/`key`/`seed`/`mnemonic`/`passphrase`) is exposed to the
+UI — it's a likely leak. Names with a public hint (`pubKey`, `publicKey`) or an
+identifier suffix (`seedId`, `seedPathType`) are already ignored, and a field
+whose secret sub-path you've **deep-excluded** (`exclude: ["seeds.encSeed"]`)
+won't warn either — the correct fix is never penalized.
+
+For a field that genuinely is public but trips the name heuristic, **declare it**
+instead of dancing around the regex or using a no-op `forUser`:
+
+```ts
+ui: { publicFields: ["masterKey", "seeds"] } // "I know these look secret; they're public"
+```
+
+`publicFields` names are validated against the cell's state at creation — a typo
+throws, so a misspelled opt-out can't silently fail to opt out.
+
 ## Per-User Filtering (`forUser`)
 
 For multi-user apps where different users see different data:
