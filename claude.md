@@ -88,6 +88,12 @@ without selectors:
 
 ## Conventions
 
+- **Fail loud, never silent.** The #1 lesson from every field report (risoto,
+  quant, mdview): the framework doing something implicitly and failing quietly is
+  worse than any missing feature. A misconfig, a dropped write, an unmet
+  invariant, an exposed-but-undiscoverable app → warn/throw at the site (dev), or
+  make it a red gate. Never swallow. Prefer a property-test that makes a whole
+  bug class un-shippable over a per-instance patch.
 - `factory` and `msg()` inlined in browser-shared.ts — must stay in sync
 - Tests in `tests/` (not next to source)
 - Lifecycle hooks: observe-only, error-guarded (never break dispatch)
