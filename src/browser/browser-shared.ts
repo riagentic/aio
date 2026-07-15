@@ -146,6 +146,9 @@ export type AioIPCBridge = {
   onOpen(fn: () => void): void;
   onClose(fn: () => void): void;
   ready(): void;
+  print?(): void;
+  /** Open an http/https link in the system browser (main-process allowlisted). */
+  openExternal?(url: string): void;
 };
 
 /** Detect Electron IPC bridge from window.__aioIPC */

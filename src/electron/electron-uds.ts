@@ -166,6 +166,17 @@ ${tmplBoundsTracking()}
     if (!win.isDestroyed()) win.webContents.print({ silent: false, printBackground: true });
   });
 
+  // mdview #7: open a link in the system browser. Allowlist http/https ONLY —
+  // a compromised renderer must not reach file:/ or custom shell handlers.
+  ipcMain.on('__aio:openExternal', (_event, url) => {
+    try {
+      const u = new URL(String(url));
+      if (u.protocol === 'http:' || u.protocol === 'https:') {
+        require('electron').shell.openExternal(u.href);
+      }
+    } catch { /* malformed url — ignore */ }
+  });
+
   ipcMain.on('__aio:send', (_event, json) => {
     const s = sock;
     if (s && !s.destroyed) {
