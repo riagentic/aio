@@ -171,6 +171,30 @@ methods: {
 **Writes are batched** — consecutive assignments in the same sync frame produce
 one action. Each `await` boundary starts a new batch.
 
+> ### ⚠️ Every `await` is a commit + render point
+>
+> This is the one async-method behavior to internalize. When your method hits an
+> `await`, aio **commits everything you've written so far** — it dispatches, the
+> store updates, and the UI **re-renders** before the awaited promise resolves.
+> That's what makes `s.loading = true; await fetch()` show a spinner *during* the
+> fetch — genuinely useful, and deliberate.
+>
+> Two consequences to hold in your head:
+>
+> 1. **Partial state is visible mid-method.** Everything before an `await` is
+>    live to the UI and to other cells while you're still awaiting. If three
+>    fields must change together, write them all **in one frame** (no `await`
+>    between them), or the UI can render a half-updated state.
+> 2. **State is not frozen across an `await`.** Reads after an `await` return the
+>    *current* store (with your pending writes overlaid) — another action may have
+>    landed while you were suspended. Don't assume `s.x` is unchanged just because
+>    you didn't touch it; re-read it after the `await` if it matters.
+>
+> Rule of thumb: **gather async results first, then do a contiguous block of
+> writes at the end.** Every write lands (writes after any await commit fine —
+> the framework guarantees this), but grouping them keeps the intermediate UI
+> honest.
+
 **Method-tagged actions** — async writes dispatch `__SetMethodName` actions
 (e.g., `__SetCheckout`). This enables machine guards: if `checkout` is allowed
 in a state, its writes are also allowed.

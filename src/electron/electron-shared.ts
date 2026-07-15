@@ -82,16 +82,36 @@ export function tmplKeyboardShortcuts(): string {
 /** will-navigate interception — blocks cross-origin nav, relays via IPC.
  *  @param originExpr JS expression that evaluates to the app origin string */
 export function tmplWillNavigate(originExpr: string): string {
-  return `  // AIO-54: Electron swallows <a> clicks before DOM dispatch — relay via IPC
+  return `  // AIO-54: Electron swallows <a> clicks before DOM dispatch — relay via IPC.
+  // mdview #6: only SAME-ORIGIN links are in-app navigation. A cross-origin
+  // (external) link must never be fed to navigate() — for a routerless app that
+  // pushState()s a bogus path and white-screens on reload. Send external
+  // http/https to the system browser instead; block everything else.
   win.webContents.on('will-navigate', (event, navUrl) => {
-    try {
-      const u = new URL(navUrl);
-      if (u.origin === ${originExpr} && (u.pathname === '/' || u.pathname === '')) return;
-    } catch {}
-    event.preventDefault();
-    win.webContents.send('__aio:navigate', navUrl);
+    let u;
+    try { u = new URL(navUrl); } catch { event.preventDefault(); return; }
+    if (u.origin === ${originExpr}) {
+      if (u.pathname === '/' || u.pathname === '') return; // full reload of root
+      event.preventDefault();
+      win.webContents.send('__aio:navigate', navUrl); // in-app route
+      return;
+    }
+    event.preventDefault(); // external — never route it into the app
+    if (u.protocol === 'http:' || u.protocol === 'https:') {
+      require('electron').shell.openExternal(navUrl);
+    }
   });
-  win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));`;
+  win.webContents.setWindowOpenHandler(({ url }) => {
+    // window.open / target=_blank to an external site → system browser, not a
+    // rogue Electron window.
+    try {
+      const u = new URL(url);
+      if (u.protocol === 'http:' || u.protocol === 'https:') {
+        require('electron').shell.openExternal(url);
+      }
+    } catch {}
+    return { action: 'deny' };
+  });`;
 }
 
 // ── Client connect page HTML (used by electronClientScript) ──
@@ -263,6 +283,9 @@ contextBridge.exposeInMainWorld('__aioIPC', {
   onClose:   (fn)   => ipcRenderer.on('__aio:close', () => fn()),
   // Renderer window.print() is a silent no-op on Electron 41 Linux — route through main
   print:     ()     => ipcRenderer.send('__aio:print'),
+  // mdview #7: open an http/https link in the system browser. The main process
+  // enforces the allowlist — a renderer can't reach arbitrary shell targets.
+  openExternal: (url) => ipcRenderer.send('__aio:openExternal', url),
 });
 // AIO-54: Relay intercepted <a> navigations back to renderer as CustomEvent
 ipcRenderer.on('__aio:navigate', (_e, url) => {

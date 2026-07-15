@@ -434,6 +434,13 @@ Deno.test("schedule.backoff: exponential growth, capped at max (risoto #4)", () 
   assertEquals((t as { ms: number }).ms, 900); // 100 * 3^2
 });
 
+Deno.test("schedule.next: defers to next tick (mdview 1ms-defer wart)", () => {
+  const e = schedule.next("rescan", { type: "rescan" }) as { kind: string; ms: number; id: string };
+  assertEquals(e.kind, "after");
+  assertEquals(e.ms, 1);
+  assertEquals(e.id, "rescan");
+});
+
 Deno.test("schedule.poll: constant while healthy, backs off on failure (risoto #6)", () => {
   const A = { type: "tick" };
   // healthy (attempt 0) → the base interval
