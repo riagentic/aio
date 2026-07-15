@@ -425,8 +425,14 @@ export function createServer(config: ServerConfig): ServerHandle {
       }, handleRequest);
     } catch (e) {
       if (e instanceof Deno.errors.AddrInUse) {
+        // Loud + fatal (quant Bad #4): a bind failure usually means another
+        // instance of this app is already running. Refuse to start rather than
+        // run a second cell runtime that could write to the same DB/journal.
         throw new Error(
-          `port ${port} already in use — pick another with --port=N`,
+          `port ${port} already in use — another instance is likely already ` +
+            `running. Refusing to start a second cell runtime (it could corrupt ` +
+            `shared persistence). Stop the other instance, or use --port=N for a ` +
+            `separate one.`,
         );
       }
       throw e;

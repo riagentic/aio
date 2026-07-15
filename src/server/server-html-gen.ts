@@ -153,6 +153,25 @@ ${head}
     // "empty" = no elements and no text — a null render still leaves a
     // comment node, so hasChildNodes() alone would miss it.
     const _empty = () => !_root.querySelector('*') && !(_root.textContent || '').trim()
+    // quant Ugly #3: right after a dev restart the server may still be
+    // transpiling, so a dynamic import fails transiently with "Failed to fetch
+    // dynamically imported module" — the SAME error as a real failure. Retry
+    // transient import errors (showing "Building\\u2026", not the scary card)
+    // before giving up; a genuine error still surfaces after the retries.
+    const _importRetry = async (specOrThunk, attempts) => {
+      attempts = attempts || 8
+      const load = typeof specOrThunk === 'function' ? specOrThunk : () => import(specOrThunk)
+      for (let i = 0; i < attempts; i++) {
+        try { return await load() }
+        catch (e) {
+          const msg = String(e && e.message || e)
+          const transient = /Failed to fetch|error loading|Importing a module|dynamically imported/i.test(msg)
+          if (!transient || i === attempts - 1) throw e
+          if (_empty()) _root.textContent = 'Building\\u2026'
+          await new Promise(r => setTimeout(r, 250))
+        }
+      }
+    }
     setTimeout(() => {
       if (_mounted) return
       if (_root.textContent === 'Loading\\u2026') {
@@ -164,8 +183,8 @@ ${head}
 
     // Mount AIO app — bind cells reactively, wait for server state, then render
     try {
-      const _aioMod = await import('aio')
-      const _appMod = await import('/${entry}?v=' + Date.now())
+      const _aioMod = await _importRetry('aio')
+      const _appMod = await _importRetry(() => import('/${entry}?v=' + Date.now()))
       const App = _appMod.default
       if (!App) throw new Error('${entry} has no default export \u2014 add: export default function App() { \u2026 }')
       if (_aioMod.ensureConnected) _aioMod.ensureConnected()
@@ -173,7 +192,7 @@ ${head}
         _root.textContent = 'Loading\\u2026'
         await _aioMod._waitForState()
       }
-      const { mount: _mount } = await import('/__aio/air/aio-renderer.ts')
+      const { mount: _mount } = await _importRetry('/__aio/air/aio-renderer.ts')
       _mount(_root, App)
       _mounted = true
       if (_empty()) {
