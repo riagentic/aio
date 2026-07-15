@@ -58,6 +58,7 @@ export function createFileWatcher(deps: WatcherDeps): FileWatcher {
   // --- Watcher state ---
   let fsWatcher: Deno.FsWatcher | null = null;
   let watcherActive = false;
+  const _warnedCellFiles = new Set<string>(); // quant Bad #2: warn once per cell file
   let _sentinelOk = false;
   let healthTimer: ReturnType<typeof setInterval> | null = null;
   // Sentinel lives in per-user lockDir ($XDG_RUNTIME_DIR/aio or /tmp/aio), not
@@ -84,6 +85,26 @@ export function createFileWatcher(deps: WatcherDeps): FileWatcher {
     const ext = dot >= 0 ? path.slice(dot) : "";
     if (!RELOAD_EXT.has(ext)) return;
     debug(`watch: changed ${path}`);
+    // quant Bad #2: a changed cell file does NOT hot-reload — cells run in the
+    // server process, so the client reload shows the NEW UI reading OLD cell
+    // logic. That silent mismatch sends people ghost-hunting. Warn loudly (once
+    // per file per session) with the fix.
+    if (!path.endsWith(".css") && !_warnedCellFiles.has(path)) {
+      try {
+        const src = Deno.readTextFileSync(path);
+        if (/\bcell\s*\(\s*["'`]/.test(src)) {
+          _warnedCellFiles.add(path);
+          log.warn(
+            "watch",
+            `cell file changed (${
+              path.split("/").pop()
+            }) — cells run in the server process and do NOT hot-reload. ` +
+              `Restart to apply: stop and re-run \`deno task dev\`. ` +
+              `(Client JSX hot-reloads, so you may be seeing new UI on old cell logic.)`,
+          );
+        }
+      } catch { /* unreadable — skip */ }
+    }
     // Normalize to match cache keys — resolve symlinks (e.g. /var → /private/var on macOS)
     // Clear both the transpile entry and the memoized realpath for this path.
     clearTranspileCaches(path);

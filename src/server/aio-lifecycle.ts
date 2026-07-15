@@ -262,7 +262,10 @@ export function startLifecycle<S, A>(deps: LifecycleDeps<S, A>): void {
             needsAuth: i.discovery!.needsAuth,
             tls: i.discovery!.tls,
           })),
-      (msg) => log.debug(msg),
+      // These notes only fire on a real problem (couldn't bind/create the UDP
+      // socket) — under --expose that means the app is exposed but NOT
+      // discoverable, which used to be invisible (quant Bad #1). Make it loud.
+      (msg) => log.warn(msg),
     );
     deps.setDiscoveryStop(responder.stop);
     if (discoverySupported()) {
