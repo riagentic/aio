@@ -101,6 +101,10 @@ export type CellVisibility<
   include?: K[];
   /** Fields to remove; dot-paths ("accounts.encSecKey") remove deeply. */
   exclude?: (K | `${K}.${string}`)[];
+  /** Fields that merely *look* secret (`pubKey`, `seeds`) but are intentionally
+   *  public — an explicit acknowledgement that silences the secret-exposure
+   *  heuristic, instead of a no-op `forUser`. */
+  publicFields?: K[];
   /** Per-user transform of the (already filtered) exposed state. Runs per
    *  client per broadcast on a structuredClone — mutate freely. */
   forUser?: (
@@ -216,6 +220,9 @@ export type CellAio<
     exposed: Record<string, unknown>,
     user?: FilterUser,
   ) => Record<string, unknown>;
+  /** Fields explicitly acknowledged as public — silences the "looks secret and
+   *  is exposed" heuristic for names that merely resemble a secret. */
+  uiPublicFields?: string[];
   /** CRDT sync configuration */
   syncConfig?: SyncConfig;
   /** State version — increment when state shape changes. Default: 0. */

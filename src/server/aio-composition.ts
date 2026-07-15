@@ -145,6 +145,15 @@ function warnFieldFilters(composed: ComposedCells): void {
     // #2 — secret-looking field exposed to the UI (skip when forUser rewrites it)
     if (!f.__aio.uiForUser) {
       const ui = f.__aio.ui;
+      const publicFields = new Set(f.__aio.uiPublicFields ?? []);
+      // A container whose secret sub-path is already deep-excluded is handled —
+      // warning about it would penalize the *correct* fix (risoto). Collect the
+      // heads that have any dot-path exclude under them.
+      const uiExcludes = ui && typeof ui === "object" && "exclude" in ui
+        ? ui.exclude
+        : [];
+      const deepExcludedHead = (key: string): boolean =>
+        uiExcludes.some((p) => p.startsWith(key + "."));
       const isExposed = (key: string): boolean => {
         if (ui === "none") return false;
         if (!ui || ui === "all") return true;
@@ -153,14 +162,17 @@ function warnFieldFilters(composed: ComposedCells): void {
         return true;
       };
       for (const key of topKeys) {
+        // Explicit "this is public" acknowledgement, or its secret sub-paths are
+        // already excluded → don't cry wolf at correctly-handled state.
+        if (publicFields.has(key) || deepExcludedHead(key)) continue;
         if (_looksSecret(key) && isExposed(key)) {
           log.warn(
             "visibility",
             `[${f.__aio.id}] field "${key}" looks secret and is exposed to the ` +
               `UI — it broadcasts to every connected client. Restrict it with ` +
-              `ui: { exclude: ["${key}"] }, ui.forUser, or ui: "none". ` +
-              `(If it's public, a "pub"/"public" name or an Id/Type/Name suffix ` +
-              `silences this.)`,
+              `ui: { exclude: ["${key}"] } / a nested ui: { exclude: ["${key}.<secret>"] }, ` +
+              `ui.forUser, or ui: "none". If it's genuinely public, declare it: ` +
+              `ui: { publicFields: ["${key}"] }.`,
           );
         }
       }

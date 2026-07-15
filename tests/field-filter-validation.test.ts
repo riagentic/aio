@@ -46,6 +46,18 @@ Deno.test("filter: valid top-level include/exclude accepted", () => {
   C("ff6", { state: { pub: 1, secret: "s" }, methods: {}, ui: { include: ["pub"] }, persist: { exclude: ["secret"] } });
 });
 
+Deno.test("filter: ui.publicFields naming a non-field throws (typo'd opt-out)", () => {
+  assertThrows(
+    () => C("ffp", { state: { a: 1 }, methods: {}, ui: { publicFields: ["notAField"] } }),
+    Error,
+    "not a state field",
+  );
+});
+
+Deno.test("filter: valid ui.publicFields is accepted", () => {
+  C("ffp2", { state: { pubKey: "", n: 0 }, methods: {}, ui: { publicFields: ["pubKey"] } });
+});
+
 Deno.test("filter: 'all'/'none' and no filter are fine", () => {
   C("ff7", { state: { a: 1 }, methods: {}, ui: "all", persist: "none" });
   C("ff8", { state: { a: 1 }, methods: {} });

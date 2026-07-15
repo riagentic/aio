@@ -84,6 +84,32 @@ Deno.test("visibility #4: real secrets are still flagged after the refinement", 
   }
 });
 
+Deno.test("visibility: a deep-excluded container no longer warns (risoto 10/10)", () => {
+  // The correct fix (deep-exclude the secret sub-path) must NOT re-arm the
+  // secret heuristic on the container field.
+  const c = cell("seedvault", {
+    state: { seeds: [] as { encSeed: string }[], seedNextId: 0 },
+    ui: { exclude: ["seeds.encSeed"] },
+    methods: { noop(_s) {} },
+  });
+  const w = warningsFor([c]);
+  assertEquals(
+    w.filter((l) => l.includes("looks secret")).length,
+    0,
+    `deep-excluded container should not warn; got: ${w.join(" | ")}`,
+  );
+});
+
+Deno.test("visibility: ui.publicFields explicitly silences the heuristic", () => {
+  const c = cell("navcell", {
+    state: { masterKey: "public-id", n: 0 },
+    ui: { publicFields: ["masterKey"] },
+    methods: { noop(_s) {} },
+  });
+  const w = warningsFor([c]);
+  assertEquals(w.filter((l) => l.includes("looks secret")).length, 0);
+});
+
 Deno.test("visibility #2: a secret-looking exposed field warns", () => {
   const c = cell("wallet3", {
     state: { encSecKey: "cipher", pub: "y" },
