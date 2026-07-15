@@ -141,6 +141,14 @@ export const schedule = {
       action,
     };
   },
+  /** Defer an action to the next tick — the honest primitive for "run this
+   *  right after the current method returns" (mdview: apps were writing
+   *  `schedule.after(id, 1, …)` as a sentinel because a 0ms delay is rejected).
+   *  Same-id replace still applies, so it dedups. */
+  next: (
+    id: string,
+    action: { type: string; payload?: unknown },
+  ): ScheduleEffect => ({ type: "__schedule", kind: "after", id, ms: 1, action }),
   cancel: (id: string): ScheduleEffect => ({
     type: "__schedule",
     kind: "cancel",

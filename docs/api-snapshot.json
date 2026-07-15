@@ -417,7 +417,7 @@
         },
         "schedule": {
           "kind": "variable",
-          "sig": "aefe64147bfebc1d"
+          "sig": "58f8bdfeb8fae90a"
         },
         "ScheduleDef": {
           "kind": "typeAlias",
@@ -1169,7 +1169,7 @@
         },
         "schedule": {
           "kind": "variable",
-          "sig": "aefe64147bfebc1d"
+          "sig": "58f8bdfeb8fae90a"
         },
         "ScheduleDef": {
           "kind": "typeAlias",
