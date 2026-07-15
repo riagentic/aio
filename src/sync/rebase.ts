@@ -6,6 +6,8 @@ export type SyncReducer = (
   state: Record<string, unknown>,
   action: string,
   payload: unknown,
+  /** Cell the op belongs to — lets one reducer serve many cells. */
+  cell?: string,
 ) => Record<string, unknown> | null;
 
 /**
@@ -39,7 +41,7 @@ export function rebase(
   const surviving: SyncOp[] = [];
 
   for (const op of unconfirmed) {
-    const next = reducer(state, op.action, op.payload);
+    const next = reducer(state, op.action, op.payload, op.cell);
     if (next === null) {
       dropped.push(op);
     } else {

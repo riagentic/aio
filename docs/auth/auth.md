@@ -15,14 +15,37 @@ deno task dev --expose
 2. A self-signed TLS cert is auto-generated (cached in `.aio-tls/`, regenerated
    if deleted)
 3. Main server listens on HTTPS — `wss://` WebSocket included
-4. A random access token is generated and printed to the console
-5. All HTTP and WebSocket requests require the token
+4. **No framework auth by default** — any device on the LAN can connect (the app
+   does its own user auth, or is deliberately open for a trusted network)
+
+**Choosing the key** — the `key` option, three modes plus the default:
+
+```ts
+await aio.run(); // default: NO framework auth (open on the LAN)
+await aio.run({ key: true }); // a key generated ONCE and persisted
+// (same across restarts — "one key, use forever")
+await aio.run({ key: "team-2024" }); // a fixed key you choose
+await aio.run({ key: false }); // explicit: no framework auth
+```
+
+`key: true` persists the key in the data dir, so it doesn't churn on every
+restart. `users` / `resolveUser` (below) still take precedence for multi-user
+auth.
+
+**Pairing the aio client** — when a key is set, `--expose` prints a **pair
+code** on startup. In the aio client, click the app under "Apps on your network"
+and type the 6-digit code; the client pulls the profile (cert + key) once and
+connects forever after. The code is attempt-limited and session-scoped —
+restart to issue a fresh one. (For headless/scripted setups, `am profile`
+exports a `.aioapp` file you import instead — see
+[the client](../clients/electron.md).)
 
 ```
 [12:00:00][INFO] tls: self-signed cert at .aio-tls/tls-cert.pem
 [12:00:00][WARNING] tls: self-signed — remote browsers will show a security warning. Trust the cert, or use --cert=/path.pem --key=/path.pem for a CA-signed cert
 [12:00:00][INFO] running at https://0.0.0.0:8000 (dev, browser)
 [12:00:00][INFO] share: https://0.0.0.0:8000?token=a1b2c3d4-...
+[12:00:00][INFO] pair code: 048583  (enter it in the aio client → Add app)
 ```
 
 Replace `0.0.0.0` with your machine's LAN IP when sharing. The token is passed
@@ -46,7 +69,8 @@ deno task dev --expose --cert=/etc/ssl/myapp.pem --key=/etc/ssl/myapp.key
 - Token auth is intended for trusted local networks (LAN demos, testing on
   phones, team tools) — not internet exposure
 - Origin validation is skipped when exposed (the token replaces it)
-- The token is a `crypto.randomUUID()` — regenerated on each restart
+- With `key: true` the token is a persisted `crypto.randomUUID()` (stable across
+  restarts); with `key: "..."` it's your fixed string
 - **Token-in-URL risk**: `?token=...` appears in server logs, browser history,
   and HTTPS `Referer` headers. For sensitive deployments use
   `Authorization: Bearer <token>` header instead. AIO logs a warning at startup
@@ -60,9 +84,10 @@ deno task dev --expose --cert=/etc/ssl/myapp.pem --key=/etc/ssl/myapp.key
 
 Four auth modes:
 
-1. **Public** (default) — no auth, all clients are anonymous
-2. **Single token** (`--expose`) — auto-generated UUID, all users are anonymous
-   but verified
+1. **Public** (default, incl. `--expose`) — no framework auth, all clients are
+   anonymous
+2. **Single key** (`key: true` / `key: "..."`) — persisted or fixed token, all
+   users are anonymous but verified; pair the aio client with the printed code
 3. **Per-user tokens** (`users` config) — static token -> user mapping with
    identity
 4. **Dynamic resolution** (`resolveUser` config) — custom hook for JWT, OAuth,

@@ -1,5 +1,132 @@
 # Changelog
 
+## 1.0.0-alpha20 — remote UX, a component kit, and a whole bug class killed (2026-07-15)
+
+### Added
+
+- **`aio/ui` — a basic component kit.** Button, Input, Textarea, Select,
+  Checkbox, Field, Table, Card, Stack/Row, Spinner, and **Modal** (backdrop,
+  Escape, ARIA). Native AIR components that bind to cells with no adapter, themed
+  through `--aio-*` CSS custom properties (light + dark), styles rendered through
+  AIR (SSR/test-safe). Deliberately basic — enough to build a dashboard without
+  importing anything.
+- **React components as islands — `reactIsland()`** (exported from `aio/air`).
+  Mount any React component with reactive props + clean teardown; aio stays 100%
+  React-free (you supply the react/react-dom loaders, so they resolve in your
+  build).
+- **`schedule.poll(id, attempt, { every, backoff?, max? }, action)`** — a
+  first-class self-pacing poller: constant while healthy, backs off on failure up
+  to `max`. Replaces the hand-rolled after-chain behind RPC-rate-limit foot-guns.
+- **Min Deno version enforced at boot.** aio uses ≥2.9 behavior directly, so it
+  now fails fast with a clear message on older Deno (and `doctor` checks the same
+  floor) instead of failing cryptically mid-run.
+- **No-auth default for `--expose` + PIN pairing for the aio client.** `--expose`
+  auth is now user-friendly and off by default:
+  - **No framework auth by default** — `--expose` binds the LAN with no key, for
+    apps that do their own user auth or are deliberately open on a trusted
+    network. The old always-on key surprised people; auth is now opt-in.
+  - `aio.run({ key: true })` opts into a **persisted** auto-generated key (same
+    across restarts — "one key, use forever"); `key: "secret"` sets a fixed key;
+    `key: false` is the explicit form of the open default.
+  - **PIN pairing.** A keyed `--expose` app prints a 6-digit **pair code** at
+    startup. In the aio client, click the app and type the code; it submits to
+    `/__aio/pair`, pulls the profile (cert + key), pins the cert, and connects —
+    forever after. No share link to copy, no file to hand over. The endpoint is
+    attempt-limited (8 tries) and the code is session-scoped.
+  - `am profile [--out=x.aioapp]` still exports a profile file (name, address,
+    TLS cert to pin, auth key) from local files — works offline, for headless or
+    scripted setups. The client imports it via `--profile=x.aioapp` or a
+    double-clicked `.aioapp` (pins the exact cert, connects immediately).
+- **LAN discovery for exposed apps + a unified aio client.** An app running with
+  `--expose` now answers UDP broadcast probes on a fixed port (`8099`,
+  `AIO_DISCOVERY_PORT` to override), advertising
+  `{ name, port, title,
+  needsAuth, tls }`. Consumers broadcast once and get
+  every app on the subnet — resolving the server IP from the datagram:
+  - `am discover` — lists exposed apps on the LAN (name, URL, auth flag).
+  - Scaffolds gain `deno task compile:client` ((re)build the standalone
+    client) + `deno task discover`; the repo has the same tasks.
+  - The standalone **aio-client** Electron app (`build --client`) gained a real
+    connect experience: a live "Apps on your network" list (click to connect, no
+    typing IPs), **recent servers** that persist across launches (click to
+    reconnect, ✕ to forget), and **"is this an aio app?"** validation before
+    loading. Manual entry and `--server-url` still work.
+  - **Multi-app-per-host solved via the lock registry**: each exposed app stamps
+    its discovery info into its lock file (the per-host registry `am ls` already
+    maintains), and a probe is answered with _every_ exposed app on the host —
+    so it's irrelevant which app's socket receives the broadcast. Apps also all
+    bind the port (SO_REUSEPORT); the client dedups.
+  - **No unstable flags** — discovery runs over `node:dgram` (stable in Deno),
+    so `deno task dev --expose` and `am discover` need **no `--unstable-net`**.
+    Best-effort still: manual entry is always the fallback where UDP is blocked
+    (corporate/guest networks). Discovery gives the address; auth stays separate.
+
+- **Offline/CRDT sync is real end-to-end** — the client engine (the
+  long-standing missing half of `sync: true`) now auto-wires on connect: local
+  method calls on sync cells become HLC ops queued in localStorage (survive
+  reloads, replay on reconnect), `__ack`/`__op`/`__sync` feed the engine, and
+  the optimistic view drives the UI. The server applies every accepted op
+  through its normal dispatch so state and op-log agree, and provisions the
+  op-log SQLite file even without a `db:` config. Proven by a two-tab
+  real-chromium convergence e2e. Still `@experimental`.
+- **`aio/create` JSR entry** — scaffold with one line, no curl:
+  `deno run -A jsr:@riagentic/aio/create my-app`.
+
+### Fixed
+
+- **State-leak / Immer-alias bug CLASS eliminated** (from a field report on a
+  complex wallet app). `testUI` wasn't hermetic — state added in one test leaked
+  into the next. Root cause was structural: live state aliased the declared
+  initial (shallow-spread seed), and reset swapped signal instances, orphaning
+  reactive getter closures with stale state. Fixed by construction: clone-on-seed
+  (no aliasing), a frozen declared initial (dev — mutation throws at the site),
+  stable signal identity (reset mutates values in place), and a state-only
+  runtime reset that re-binds cells per mount. A property-test harness
+  (`state-immutability.test.ts`) makes the whole class a red gate.
+- **Field filters fail loud instead of leaking.** A `ui`/`persist` filter key
+  that matches no state field (a typo, or a nested path in `include`) now throws
+  at cell creation — a filter that silently matches nothing used to expose the
+  secret you meant to hide.
+- **Lifecycle hooks can't collapse the surface.** An `onMount`/`afterRender`
+  hook reaching for a global `document` where there's none (testUI/SSR) used to
+  throw uncaught and blank the whole render. Now each hook is contained and
+  reported with an actionable DOM-safe hint; `_getDocument()` exposes AIR's
+  render document so components work under testUI/SSR.
+- **Secret-field heuristic stopped crying wolf** — a `pub`/`public` hint or an
+  Id/Type/Name/… suffix marks a field non-secret, so public keys and nav state
+  no longer trip the exposure warning; real secrets still do.
+- **`testUI` `t`-handle hoisting** — a `t`/testid element handle is now
+  addressable from the top level (`ui.watchPubkey`) regardless of nesting,
+  instead of a fragile positional `ui.find("Input", 1)[...]`.
+- **aio client couldn't connect to `--expose`'d apps** — the self-signed TLS
+  cert failed with "unable to verify the first certificate" in both the Node
+  metadata fetch and the Chromium page load. The dedicated client now trusts
+  self-signed certs, scoped to the specific host it fetched and validated as an
+  aio app (not globally). Connecting to an auth-required app without a token now
+  shows an actionable "add `?token=`" message instead of a raw 401.
+- **More per-hot-path log floods silenced** (same class as the time-travel fix):
+  dev a11y warnings (`<img>` missing alt, missing keyboard handler, missing
+  label) fired on **every render** of an offending element — now once per
+  distinct issue (re-armed when dev mode is re-toggled); the sync engine's
+  "reducer returned undefined" warning fired **per op** — now once per
+  `cell:action`; dispatch's "invalid effect" warning fired **per action** — now
+  once per action type.
+- **Time-travel large-state warning no longer spams** the console — the "state
+  is NNN KB — skipping snapshot" notice fired on every action while state stayed
+  above the cap. It now logs **once** per session (re-armed on a fresh session,
+  or if state drops back under the cap and grows again), with clearer wording
+  about what's affected and how to fix it.
+
+### Changed
+
+- **`--expose` is no-auth by default** (was: always-on key). Opt into auth with
+  `key: true`/`"..."`. Docs, scaffolder, and remote examples updated.
+- **Deno floor is 2.9+** — aio tracks the latest stable Deno; `--unstable-net`
+  is no longer needed (discovery moved to `node:dgram`).
+- `SyncReducer` gains an optional `cell` arg (one reducer can serve many sync
+  cells); `SyncHandlerDeps` gains `dispatch` (server applies ops to live state).
+  Both additive.
+
 ## 1.0.0-alpha19 — zero-config DX + no-await UI tests (2026-07-11)
 
 ### Added (failure-class capture)

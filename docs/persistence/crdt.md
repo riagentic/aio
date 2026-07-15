@@ -4,8 +4,20 @@ Offline-first collaborative state for AIO cells. Opt-in per cell,
 server-authoritative, hybrid op-log + snapshot architecture.
 
 Sync wraps the existing dispatch loop. Sync-enabled cells stamp mutations as
-operations with HLC timestamps, store them in an op-log (IndexedDB client,
-SQLite server), and merge on reconnect. Non-sync cells are unaffected.
+operations with HLC timestamps, store them in an op-log (localStorage on the
+client, SQLite on the server), and merge on reconnect. Non-sync cells are
+unaffected.
+
+**It just works.** Add `sync: true` to a cell and the client engine boots
+automatically on connect — local method calls become HLC ops (queued offline,
+replayed on reconnect), the server applies each accepted op through its normal
+dispatch and relays to peers, and the optimistic view drives your UI. The server
+op-log SQLite file is provisioned even without a `db:` config.
+
+> **Status: `@experimental`.** The end-to-end loop is proven (multi-tab
+> convergence e2e against real browsers), but the merge-strategy surface and
+> wire protocol are excluded from the 1.0 stability guarantee — pin behavior you
+> depend on.
 
 See also: [Wire protocol & internals](crdt-protocol.md)
 
@@ -191,5 +203,9 @@ src/sync/
   rebase.ts       — Confirmed/optimistic reconciliation
   compact.ts      — Server-side atomic compaction
   sync-engine.ts  — Client orchestrator
+  server-handler.ts — Server op/sync handler (persist, dispatch, relay)
+  browser-storage.ts — localStorage OpBufferStorage (offline durability)
   mod.ts          — Public API barrel export
+src/browser/
+  browser-sync.ts — Auto-wires the engine on connect (the missing half)
 ```

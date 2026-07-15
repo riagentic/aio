@@ -24,6 +24,8 @@ export interface ShutdownRefs {
   clearUdsThrottle: () => void;
   getUdsHandle: () => { shutdown: () => void } | null;
   getServer: () => { shutdown: () => Promise<void> };
+  /** Late-bound LAN-discovery responder stopper (null when not exposed). */
+  getDiscoveryStop?: () => (() => void) | null;
   asyncDb: { close: () => Promise<void> } | null;
   kvDb: { close: () => void } | null;
   setRunning: (v: boolean) => void;
@@ -103,6 +105,9 @@ export function createShutdownOrchestrator(
     // Phase 7: Subsystem cleanup
     refs.scheduleManager.cancelAll();
     refs.ownManager.disposeAll();
+    try {
+      refs.getDiscoveryStop?.()?.();
+    } catch { /* responder already gone */ }
 
     const ep = refs.getElectronProc();
     if (ep) {

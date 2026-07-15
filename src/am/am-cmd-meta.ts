@@ -130,6 +130,8 @@ Inspect:
   errors                  Last build error
   metrics                 Uptime, connections, schedules
   health                  HTTP health check
+  discover [--timeout=ms] Find exposed aio apps on the LAN (UDP broadcast)
+  profile [--out=file]    Export this app's .aioapp profile (cert + key) for the client
   config                  Server configuration
 
 Scaffold:

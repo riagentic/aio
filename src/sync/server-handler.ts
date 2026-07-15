@@ -12,6 +12,10 @@ import { getLowWater, loadOpsSince, persistOp } from "./server-store.ts";
  * @experimental Excluded from the 1.0 stability guarantee.
  */
 export interface SyncHandlerDeps {
+  /** Apply an accepted op to the live app state (normal dispatch path) —
+   *  without this the op-log and the server's own state diverge, and
+   *  compaction snapshots (built from live state) would drop client ops. */
+  dispatch: (action: { type: string; payload?: unknown }) => void;
   db: DB;
   syncCellIds: string[];
   getCellState: (cell: string) => Record<string, unknown>;
@@ -135,6 +139,17 @@ export function createServerSyncHandler(
           return; // Don't ack — client will retry
         }
 
+        // Apply to live server state BEFORE ack/compact — the op-log and
+        // the state must agree (compaction snapshots live state).
+        try {
+          deps.dispatch({
+            type: `${op.cell}:${op.action}`,
+            payload: op.payload,
+          });
+        } catch (e) {
+          deps.log.error(`[sync:server] dispatch of op ${op.id} failed: ${e}`);
+        }
+
         try {
           socket.send(JSON.stringify({
             __ack: { cell: op.cell, opId: op.id, serverHlc },
@@ -193,6 +208,18 @@ export function createServerSyncHandler(
           await withLock(pending.cell, async () => {
             clock.receive(pending.hlc);
             await persistOp(deps.db, pending);
+            // Reconnect-queued ops must reach live state too (same contract
+            // as handleOp).
+            try {
+              deps.dispatch({
+                type: `${pending.cell}:${pending.action}`,
+                payload: pending.payload,
+              });
+            } catch (e) {
+              deps.log.error(
+                `[sync:server] dispatch of pending op ${pending.id} failed: ${e}`,
+              );
+            }
           });
         }
 

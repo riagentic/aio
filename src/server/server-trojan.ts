@@ -26,6 +26,11 @@ export interface TrojanDeps {
   prod: boolean;
   port: number;
   title: string;
+  /** App identity + creds for the discovery profile endpoint. */
+  appId?: string;
+  token?: string;
+  certPem?: string;
+  expose?: boolean;
   /** Trojan capabilities from ServerConfig.trojan */
   trojan: {
     getState: () => unknown;
@@ -260,6 +265,22 @@ function handleGet(
       expose: deps.authInfo.expose,
       authMode: deps.authInfo.mode,
       prod: deps.prod,
+    });
+  }
+
+  // The app's discovery profile (.aioapp) — everything the aio client needs to
+  // connect forever: name, port, TLS cert to pin, and the auth key. Localhost
+  // only (the trojan is 127.0.0.1-bound), so serving the key here is safe —
+  // `am profile` fetches it, the operator hands the file to trusted users.
+  if (route === "profile") {
+    return json({
+      aio: 1,
+      name: deps.appId ?? deps.title,
+      title: deps.title,
+      port: deps.port,
+      tls: !!deps.certPem,
+      cert: deps.certPem ?? null,
+      key: deps.token ?? null, // null = no framework auth (app-level or open)
     });
   }
 

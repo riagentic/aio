@@ -107,6 +107,8 @@ export {
   page,
   renderToStream,
 } from "./browser-air.ts";
+// React (and other framework) components as islands — the blessed path.
+export { reactIsland, type ReactIslandConfig } from "./air/react-island.ts";
 export { renderToString } from "./air/vdom.ts";
 export type { Ref } from "./air/vdom.ts";
 

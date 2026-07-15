@@ -136,15 +136,77 @@ deno task dev --server-url=http://192.168.1.100:8000
 5. Resizes window to the server's configured dimensions, sets title
 6. Loads the remote URL — app runs as if it were local
 
-**aio-client** — standalone Electron app with a connect page:
+## Unified aio client + LAN discovery
+
+**aio-client** is a standalone Electron app — one install that connects to _any_
+remote aio app. No Deno runtime, no per-app build. Scaffolded projects get a
+task for it:
 
 ```sh
-deno run -A dep/aio/src/build.ts --client   # builds aio-client AppImage
+deno task install:electron   # once — the client needs Electron
+deno task compile:client     # (re)builds aio-client-<arch>.AppImage
 ```
 
-The client app shows a minimal connect page where users type a server address
-and hit Enter. No Deno runtime needed on the client machine — just a pure
-Electron app.
+Or invoke the builder directly (from the repo, or via JSR):
+
+```sh
+deno run -A dep/aio/src/build.ts --client            # vendored
+deno run -A jsr:@riagentic/aio/build --client        # from JSR
+```
+
+Its connect page does four things:
+
+- **Discovers apps on your network.** Every app running with `--expose` answers
+  a UDP broadcast probe on a fixed port (`8099`, override with
+  `AIO_DISCOVERY_PORT`). The client shows a live "Apps on your network" list —
+  name, address, and whether auth is needed — so you click instead of typing an
+  IP. Multiple apps on one host all show up.
+- **Pairs with keyed apps by PIN.** Click an app marked `⛿ auth` and type the
+  6-digit **pair code** the app printed on startup. The client submits it to the
+  app's `/__aio/pair` endpoint, receives the profile (cert + key), pins the cert,
+  saves it as a recent, and connects — once. Next launch it's one click, no code.
+- **Remembers where you've been.** Recent servers persist across launches; click
+  to reconnect, ✕ to forget.
+- **Validates the target.** Before loading, it checks the page actually looks
+  like an aio app — a friendly error beats a blank window on a wrong address.
+
+Manual entry always works too (type `192.168.1.100:8000`), and `--server-url`
+still connects directly for shortcuts.
+
+### Finding apps from the CLI
+
+```sh
+deno run -A jsr:@riagentic/aio/am discover
+# found 2 aio app(s) on the LAN:
+#   dashboard   http://192.168.1.50:8000
+#   trading     https://192.168.1.51:8010  ⛿ auth required
+```
+
+### How discovery works
+
+- Exposed apps (`--expose`) listen on the shared UDP discovery port and reply to
+  `AIO_DISCOVER?` probes; the client resolves each app's IP from the datagram.
+  LAN/subnet only (broadcast doesn't cross routers), and **best-effort** — UDP
+  runs over `node:dgram` (stable, no flags), but it's silently blocked on some
+  corporate/guest networks, so manual entry is always the fallback.
+- **Many apps on one host all show up.** Each exposed app stamps its discovery
+  info (`name, port, title, needsAuth, tls`) into its lock file — the same
+  per-host registry `am ls` uses. A probe is answered with _every_ exposed app
+  on the host, read live from that registry, so it doesn't matter which app's
+  socket the OS hands the broadcast to. (Apps also all bind the UDP port via
+  `SO_REUSEPORT`, so several can answer; the client dedups.)
+- Discovery advertises _existence + address_ only; the **auth key is separate**.
+  An app marked `needsAuth` is paired by **PIN**: click it, enter the code the
+  app printed at startup, and the client pulls the profile (cert + key) from
+  `/__aio/pair` — no share link to copy, no file to transfer. The endpoint is
+  attempt-limited and the code is session-scoped (restart to reissue). Headless
+  setups can still import a `.aioapp` from `am profile` instead.
+- **Self-signed certs are trusted** for validated aio apps. `--expose` serves a
+  self-signed TLS cert that a generic browser rejects ("unable to verify the
+  first certificate"); the dedicated aio client accepts it — but only for the
+  specific host it fetched and confirmed is an aio app, not the whole internet.
+- Only `--expose`'d apps advertise; a localhost-only app is invisible (it
+  wouldn't be reachable off-box anyway).
 
 ### Window metadata
 

@@ -70,9 +70,17 @@ const MAX_STATE_BYTES = 100_000; // Skip clone above 100KB to protect dev-mode m
 const SIZE_SAMPLE_EVERY = 20;
 let _sizeSampleCounter = 0;
 let _lastEstimatedBytes = 0;
+// The large-state warning is advisory and its cause persists across every
+// subsequent action — logging it each time is pure noise. Warn ONCE, and only
+// again if the estimate crosses back over the cap after dropping below it.
+let _warnedLargeState = false;
 
 /** Creates empty TT state */
 export function createTT<S, A>(): TTState<S, A> {
+  // Fresh session — re-arm the once-per-session large-state warning.
+  _warnedLargeState = false;
+  _sizeSampleCounter = 0;
+  _lastEstimatedBytes = 0;
   return { entries: [], index: -1, paused: false, nextId: 0 };
 }
 
@@ -100,13 +108,22 @@ export function record<S, A>(
           JSON.stringify(state as Record<string, unknown>).length;
     }
     if (estimated > MAX_STATE_BYTES) {
-      console.warn(
-        `[aio:tt] state is ${
-          (estimated / 1024).toFixed(1)
-        }KB — skipping time-travel snapshot for performance. Consider persistMode:'multi' or cell-level persist filters.`,
-      );
+      if (!_warnedLargeState) {
+        _warnedLargeState = true;
+        console.warn(
+          `[aio:tt] state is ${
+            (estimated / 1024).toFixed(1)
+          }KB — time-travel snapshots are skipped above ${
+            (MAX_STATE_BYTES / 1024).toFixed(0)
+          }KB to protect dev-mode memory (undo history is limited while state ` +
+            `stays this large). This is logged once. To restore full ` +
+            `time-travel, shrink synced state: persistMode:'multi' or ` +
+            `cell-level persist/ui filters.`,
+        );
+      }
       clonedState = state;
     } else {
+      _warnedLargeState = false; // re-arm — state dropped back under the cap
       clonedState = structuredClone(state);
     }
   } catch {

@@ -9,7 +9,7 @@
 - **Write reactive, use generators or atomic actions when needed.**
 - **Pick your target, compile and ship!**
 
-`v1.0.0-alpha19`
+`v1.0.0-alpha20`
 
 > Define state once. It persists, syncs to all clients, drives the UI.
 
@@ -21,25 +21,52 @@
 | **Sequential** | `cell({ generators })`      | Multi-step workflows, wizards, checkout flows |
 | **Explicit**   | `cell({ actions, reduce })` | Full control, complex cross-cell logic        |
 
-All three can be mixed in a single cell. Start reactive, add generators or
-actions when needed.
+All three can be mixed in a single cell.
+
+**Not sure which? Use this rule:**
+
+1. **Default to `methods`** (reactive) — reach for it 90% of the time. Mutate
+   state directly; sync and persistence are automatic.
+2. **Switch to `generators`** only when one user action is a **multi-step
+   sequence** with intermediate states you want to see (a wizard, a checkout).
+3. **Drop to `actions` + `reduce`** only when you need an **explicit action log**
+   or complex cross-cell logic that methods can't express cleanly.
+
+Start with `methods`. You'll know when you need the others — until then, you
+don't.
 
 ## Why aio?
 
 You're building a dashboard, trading tool, control panel, or internal app. You
-need state that persists, syncs to every client in real-time, and works offline.
-Today that means wiring together a state manager, a database, a WebSocket layer,
-a persistence layer, auth, and build tooling — six systems that don't know about
+need state that persists and syncs to every client in real-time. Today that
+means wiring together a state manager, a database, a WebSocket layer, a
+persistence layer, auth, and build tooling — six systems that don't know about
 each other.
 
 aio replaces all six. Define state once, it flows everywhere. One codebase
 compiles to browser, desktop, CLI, service, or mobile. No glue code, no sync
-bugs, no infrastructure decisions.
+bugs, no infrastructure decisions. (Offline-first CRDT sync is built in and
+currently `@experimental` — see [sync](docs/persistence/README.md).)
+
+## Is aio for you?
+
+Decide in 30 seconds:
+
+| aio is great for | aio is deliberately not for |
+| --- | --- |
+| Dashboards, trading & ops tooling, control panels | Content/marketing sites & SEO (client-rendered, no server components) |
+| Internal tools & admin panels | Planet-scale public APIs (embedded, one process — by design) |
+| Local-first desktop/mobile apps (one codebase → 5 targets) | Native iOS (Android ships via WebView) |
+| Teams on **Deno** who want batteries included | Node/Bun projects (aio is Deno-native) |
+
+The right users self-select in; the wrong ones leave happy. Full rationale:
+[positioning & non-goals](docs/basics/positioning.md).
 
 ## Taste
 
 **Prerequisites:**
-[Deno 2.6+](https://docs.deno.com/runtime/getting_started/installation/)
+[Deno 2.9+](https://docs.deno.com/runtime/getting_started/installation/) (aio
+tracks the latest stable Deno)
 
 ```ts
 import { aio, cell } from "aio";
@@ -62,22 +89,22 @@ await aio.run({ appId: "taste", appVersion: "0.1.0", cells: [counter] });
 ```
 
 ```sh
-# Option A: scaffolder — fastest, always matches the current framework
-sh -c "$(curl -fsSL https://raw.githubusercontent.com/riagentic/aio/main/init.sh)" -- my-app
+# Option A: scaffolder — one line, no curl
+deno run -A jsr:@riagentic/aio@1.0.0-alpha20/create my-app
 
 # Option B: vendor into your project (full source, bleeding edge)
 git clone https://github.com/riagentic/aio dep/aio
 
 # Option C: JSR — pin the version explicitly (alphas are semver
 #   pre-releases, so a bare install would resolve to an old stable)
-deno add jsr:@riagentic/aio@1.0.0-alpha19
+deno add jsr:@riagentic/aio@1.0.0-alpha20
 ```
 
 Then in `deno.json`:
 
 ```jsonc
 // JSR
-"imports": { "aio": "jsr:@riagentic/aio@1.0.0-alpha19" }
+"imports": { "aio": "jsr:@riagentic/aio@1.0.0-alpha20" }
 
 // Clone — also declare aio's deps (Deno can't fetch them transitively)
 "imports": {
@@ -292,11 +319,11 @@ clients, zero plumbing. Fit questions:
 
 ## Status
 
-**v1.0.0-alpha19** · [JSR](https://jsr.io/@riagentic/aio) · MIT
+**v1.0.0-alpha20** · [JSR](https://jsr.io/@riagentic/aio) · MIT
 
 2260+ tests · security hardened · CI-locked API snapshot + coverage ratchet
 
-New in alpha19: **zero-config everything** — a working app is
+New in alpha20: **zero-config everything** — a working app is
 `import "./cell.ts"; await aio.run();` (identity, cells, paths all inferred), UI
 tests with **no boilerplate and no awaits on actions**
 (`testUI(App, "name", async (ui) => { ui.AddButton.click(); … })`), bound remote

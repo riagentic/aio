@@ -6,6 +6,7 @@
  * `jsr:@riagentic/aio/doctor` (once published). Each check prints PASS/FAIL
  * with a one-line fix; exits 1 on any failure.
  */
+import { meetsMinDeno, MIN_DENO } from "./deno-version.ts";
 
 /** One doctor check — a named config assertion with a one-line fix on failure. */
 interface Check {
@@ -91,11 +92,10 @@ export async function runDoctor(
     }
   }
 
-  // Deno version ≥ 2.6
-  const [maj, min] = Deno.version.deno.split(".").map(Number);
+  // Deno version — aio's supported floor (uses ≥2.9 behavior directly)
   checks.push({
-    name: `Deno ≥ 2.6 (running ${Deno.version.deno})`,
-    ok: maj! > 2 || (maj === 2 && min! >= 6),
+    name: `Deno ≥ ${MIN_DENO} (running ${Deno.version.deno})`,
+    ok: meetsMinDeno(Deno.version.deno),
     fix: "upgrade: deno upgrade",
   });
 

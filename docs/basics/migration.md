@@ -20,7 +20,7 @@ generates a correct `deno.json`. See [quickstart.md](quickstart.md).
 **Option B: Vendored** -- `git clone https://github.com/riagentic/aio dep/aio`,
 then map `"aio": "./dep/aio/mod.ts"` (plus `immer`, `@std/path`).
 
-**Option C: JSR** -- `deno add jsr:@riagentic/aio@1.0.0-alpha19` (pin the
+**Option C: JSR** -- `deno add jsr:@riagentic/aio@1.0.0-alpha20` (pin the
 version explicitly: alphas are semver pre-releases, so an unpinned install
 resolves to an old stable).
 
