@@ -22,6 +22,8 @@ import type {
   ExecuteHandlers,
   MethodsCellConfig,
   ReduceHandlers,
+  SelectorAccessors,
+  SelectorDef,
 } from "./cell-config-types.ts";
 
 export type {
@@ -42,16 +44,22 @@ export function cell<
   S extends Record<string, unknown>,
   M extends Record<string, Method<S>>,
   States extends string = string,
+  // Captured from config.selectors (inside MethodsCellConfig — NOT an
+  // intersection, which would disrupt method `s` inference) so bound selector
+  // accessors surface on the return type instead of being inert config (risoto).
+  Sel extends Record<string, SelectorDef<S>> = Record<string, SelectorDef<S>>,
 >(
   name: N,
-  config: MethodsCellConfig<N, S, M, States>,
+  config: MethodsCellConfig<N, S, M, States, Sel>,
   // Actions carry a concrete creators map derived from the methods (not `any`)
   // so downstream tooling — notably testCell's `t.send` — recovers typed,
   // non-optional method senders instead of an index signature. (Capturing
   // generators/mixed actions here too was tried but degraded method `s`
-  // inference, so the typed surface stays scoped to methods.)
+  // inference, so the typed surface stays scoped to methods.) `Sel` is captured
+  // from `config.selectors` so bound selector accessors (`cell.total()`) are
+  // type-accessible instead of inert config (risoto).
   // deno-lint-ignore no-explicit-any
-): CellDef<N, MethodsToCreators<M>, any, S> & DirectCalling<N, M> & Readonly<S>;
+): CellDef<N, MethodsToCreators<M>, any, S> & DirectCalling<N, M> & SelectorAccessors<Sel> & Readonly<S>;
 /** Define a cell with explicit actions/reduce style — typed action creators + reducer handlers. */
 export function cell<
   N extends string,

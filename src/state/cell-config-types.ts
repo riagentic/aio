@@ -13,6 +13,19 @@ import type { Method } from "./cell-impl.ts";
 export type SelectorDef<S> =
   | ((s: S) => unknown)
   | { deps: readonly string[]; fn: (s: S, ...deps: unknown[]) => unknown };
+
+/** The value a bound selector accessor returns (the selector's own return). */
+export type SelectorReturn<D> = D extends (s: infer _S) => infer R ? R
+  // deno-lint-ignore no-explicit-any
+  : D extends { fn: (...args: any[]) => infer R } ? R
+  : unknown;
+
+/** Bound selectors surface on the cell as zero-arg accessors: `cell.total()`.
+ *  Threading this onto the return type is what makes `selectors:` a real,
+ *  type-accessible feature instead of inert config (risoto). */
+export type SelectorAccessors<Sel> = {
+  [K in keyof Sel]: () => SelectorReturn<Sel[K]>;
+};
 import type {
   ActionUnion,
   CellFieldFilter,
@@ -39,6 +52,7 @@ export type MethodsCellConfig<
   S extends Record<string, unknown>,
   M extends Record<string, Method<S>> = Record<string, Method<S>>,
   States extends string = string,
+  Sel extends Record<string, SelectorDef<S>> = Record<string, SelectorDef<S>>,
 > = {
   state: S;
   methods: M;
@@ -59,7 +73,7 @@ export type MethodsCellConfig<
    *  Deps form: `{ deps: readonly string[]; fn: (s, ...depSlices) => R }` — deps are
    *  other cells' current slices in the order listed. Dep names are validated at
    *  aio.run() (composition time); an unknown dep throws with a clear message. */
-  selectors?: Record<string, SelectorDef<S>>;
+  selectors?: Sel;
   machine?: MachineConfig<States> | false;
   /** Listen to foreign actions — auto-generates machine transitions.
    *  Accept strings or bound methods/actions with .type (e.g. `inventory.reserve.type`). */

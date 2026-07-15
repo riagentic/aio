@@ -255,12 +255,23 @@ Deno.test("bindCellReactive without sendFn leaves method as unbound guard", () =
     },
   });
 
-  // No sendFn — method is not wrapped, so calling it hits the unbound guard
+  // No sendFn — method is not wrapped, so calling it hits the unbound guard.
   bindCellReactive(c);
 
-  // Prod mode (no __aioDev) — guard warns and returns Promise<void>
-  const result = c.increment();
-  assertEquals(result instanceof Promise, true);
+  // The guard now THROWS (dev + prod) — a pre-boot dispatch has no runtime, so
+  // silently no-op'ing would lose the write (risoto).
+  let threw = false;
+  try {
+    c.increment();
+  } catch (e) {
+    threw = true;
+    assertEquals(
+      (e as Error).message.includes("before the cell's runtime is booted"),
+      true,
+    );
+  }
+  assertEquals(threw, true, "unbound method call must throw, not silently no-op");
+  // The action descriptor is still reachable for schedules/tests.
   // deno-lint-ignore no-explicit-any
   assertEquals(typeof (c.__aio.actions.increment as any).type, "string");
 

@@ -3,12 +3,10 @@
 import type { CellDef, Creators, Msg } from "./cell-types.ts";
 import { checkReservedKeys } from "./cell-types.ts";
 import { registerCall } from "./cell-impl.ts";
-import { log } from "../diagnostics/logger.ts";
 
-/** Wrap a raw action creator with a guard for the pre-binding state.
- *  In dev (__aioDev set): throws with a clear message so the user knows
- *  the cell hasn't been bound to aio.run() yet.
- *  In prod: logs a warning once per (cell, key) and returns Promise.resolve().
+/** Wrap a raw action creator with a guard for the pre-binding state. Calling a
+ *  method before the runtime is booted ALWAYS throws (dev + prod) — a pre-boot
+ *  dispatch has nowhere to go, so silently no-op'ing it would lose the write.
  *  The wrapper preserves the .type accessor and is replaced wholesale by
  *  bindCell / bindCellReactive — bound calls pay zero overhead. */
 export function makeUnboundGuard(
@@ -16,25 +14,19 @@ export function makeUnboundGuard(
   key: string,
   raw: unknown,
 ): (...args: unknown[]) => Promise<void> {
-  const isDev = (globalThis as Record<string, unknown>).__aioDev === true;
-  if (isDev) {
-    const guarded = (() => {
-      throw new Error(
-        `[${cellName}] ${key}() called before aio.run() — add this cell to aio.run({ cells: [...] })`,
-      );
-    }) as (...args: unknown[]) => Promise<void>;
-    attachMeta(guarded, raw);
-    return guarded;
-  }
-  let warned = false;
-  const guarded = ((..._args: unknown[]): Promise<void> => {
-    if (!warned) {
-      warned = true;
-      log.warn(
-        `[${cellName}] ${key}() called before aio.run() — add this cell to aio.run({ cells: [...] })`,
-      );
-    }
-    return Promise.resolve();
+  // Calling a cell method before its runtime is booted is ALWAYS a bug — there
+  // is no runtime to dispatch to, so the write would silently vanish (risoto:
+  // a plain `Deno.test` that called `network.setCluster(…)` read back stale
+  // state with no error). Silently losing a state mutation is the scariest
+  // failure mode, so throw loudly regardless of dev/prod. After bind, the real
+  // dispatching method replaces this guard, so only the never-legitimate
+  // pre-boot path is affected.
+  const guarded = (() => {
+    throw new Error(
+      `[${cellName}] ${key}() called before the cell's runtime is booted — ` +
+        `add this cell to aio.run({ cells: [...] }), or boot it in a test with ` +
+        `testCell/testUI/bootCells before calling its methods.`,
+    );
   }) as (...args: unknown[]) => Promise<void>;
   attachMeta(guarded, raw);
   return guarded;

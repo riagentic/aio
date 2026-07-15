@@ -73,7 +73,7 @@
         },
         "cell": {
           "kind": "function",
-          "sig": "10ad5466c2c09ebf"
+          "sig": "12c712488c10eb55"
         },
         "CellAio": {
           "kind": "typeAlias",
@@ -333,7 +333,7 @@
         },
         "MethodsCellConfig": {
           "kind": "typeAlias",
-          "sig": "2a19eade1792aa0c"
+          "sig": "c7dc85d1e5d8bf5f"
         },
         "MiddlewareFn": {
           "kind": "typeAlias",

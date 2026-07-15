@@ -62,6 +62,9 @@ export function draft<S, E>(
 const _listeners = new Listeners<unknown>();
 let _state: unknown = null;
 let _app: AioApp | null = null;
+// Once-per-process dedup for the "effect ignored in standalone" notices — a
+// toast that returns schedule.after otherwise floods every test (quant Bad #3).
+const _warnedStandalone = { schedule: false, own: false };
 
 // Signal for AIR reactivity — updated on every state change
 const _stateSignal = signal<unknown>(null);
@@ -177,18 +180,26 @@ export function initStandalone<S, A, E>(
   const dispatch = createDispatch<S, A, E>({
     reduce,
     execute: (effect) => {
+      // Warn ONCE per kind, not per effect — a toast that returns a
+      // schedule.after fires this on every push, flooding test output (quant).
       if (isScheduleEffect(effect)) {
-        console.warn(
-          "[aio] scheduled effects are not supported in standalone mode — ignoring",
-          effect,
-        );
+        if (!_warnedStandalone.schedule) {
+          _warnedStandalone.schedule = true;
+          console.warn(
+            "[aio] scheduled effects are ignored in standalone/test mode " +
+              "(no timer runtime) — this warns once. Toast auto-dismiss etc. " +
+              "won't fire here.",
+          );
+        }
         return;
       }
       if (isOwnEffect(effect)) {
-        console.warn(
-          "[aio] own effects are not supported in standalone mode — ignoring",
-          effect,
-        );
+        if (!_warnedStandalone.own) {
+          _warnedStandalone.own = true;
+          console.warn(
+            "[aio] own effects are ignored in standalone/test mode — this warns once.",
+          );
+        }
         return;
       }
       execute(app, effect as E);

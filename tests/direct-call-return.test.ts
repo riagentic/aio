@@ -140,51 +140,36 @@ Deno.test(
 // ── 2.3: Pre-binding behavior ─────────────────────────────────────────────
 
 Deno.test(
-  "2.3: in dev, calling a method before aio.run() throws with clear message",
+  "2.3: calling a method before boot ALWAYS throws (dev + prod) — risoto: no silent no-op",
   () => {
-    (globalThis as Record<string, unknown>).__aioDev = true;
-    try {
-      const counter = cell("counter", {
-        state: { count: 0 },
-        methods: {
-          increment(s) {
-            s.count++;
-          },
-        },
-      });
-      let caught: Error | null = null;
+    for (const dev of [true, false]) {
+      (globalThis as Record<string, unknown>).__aioDev = dev;
       try {
-        (counter as unknown as { increment: () => void }).increment();
-      } catch (e) {
-        caught = e as Error;
+        const counter = cell(`counter_${dev}`, {
+          state: { count: 0 },
+          methods: {
+            increment(s) {
+              s.count++;
+            },
+          },
+        });
+        let caught: Error | null = null;
+        try {
+          (counter as unknown as { increment: () => void }).increment();
+        } catch (e) {
+          caught = e as Error;
+        }
+        assertEquals(caught instanceof Error, true, `expected throw (dev=${dev})`);
+        // Loud + actionable, regardless of dev/prod — a pre-boot write must
+        // never silently vanish.
+        assertEquals(
+          (caught as Error).message.includes("before the cell's runtime is booted"),
+          true,
+        );
+      } finally {
+        (globalThis as Record<string, unknown>).__aioDev = false;
       }
-      assertEquals(caught instanceof Error, true);
-      assertEquals(
-        (caught as unknown as Error).message,
-        "[counter] increment() called before aio.run() — add this cell to aio.run({ cells: [...] })",
-      );
-    } finally {
-      (globalThis as Record<string, unknown>).__aioDev = false;
     }
-  },
-);
-
-Deno.test(
-  "2.3: in prod, calling a method before aio.run() returns Promise<void>",
-  async () => {
-    (globalThis as Record<string, unknown>).__aioDev = false;
-    const counter = cell("counter2", {
-      state: { count: 0 },
-      methods: {
-        increment(s) {
-          s.count++;
-        },
-      },
-    });
-    const ret = (counter as unknown as { increment: () => unknown })
-      .increment();
-    assertEquals(ret instanceof Promise, true);
-    await ret;
   },
 );
 
