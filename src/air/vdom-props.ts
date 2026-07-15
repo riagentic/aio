@@ -7,6 +7,7 @@ import {
   camelToKebab as _camelToKebab,
   resolveClassName as _resolveClassName,
   styleValue as _styleValue,
+  svgAttrName as _attrName,
 } from "./ssr-utils.ts";
 import { _DOM_PROPS } from "./vdom-types.ts";
 import {
@@ -30,6 +31,7 @@ function _attrNS(k: string): string | null {
   if (k.startsWith("xml:")) return _XML_NS;
   return null;
 }
+
 
 // ── applyProps ────────────────────────────────────────────────────────
 
@@ -172,11 +174,11 @@ export function applyProps(
     } else if (rv === false || rv == null) {
       const ns = _attrNS(k);
       if (ns) el.removeAttributeNS(ns, k.slice(k.indexOf(":") + 1));
-      else el.removeAttribute(k);
+      else el.removeAttribute(_attrName(k));
     } else {
       const ns = _attrNS(k);
       if (ns) el.setAttributeNS(ns, k, String(rv));
-      else el.setAttribute(k, String(rv));
+      else el.setAttribute(_attrName(k), String(rv));
     }
   }
 }

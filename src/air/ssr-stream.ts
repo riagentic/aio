@@ -11,6 +11,7 @@ import {
 import {
   camelToKebab as _camelToKebab,
   escapeAttr as _escapeAttr,
+  svgAttrName,
   escapeHtml as _escapeHtml,
   resolveClassName as _resolveClassName,
   styleValue as _styleValue,
@@ -51,7 +52,7 @@ function _renderProps(props: Record<string, unknown>): string {
       if (v) html += ` ${k}`;
     } else if (v !== false && v != null) {
       // AIO-187: render all non-boolean attrs with explicit value
-      html += ` ${k}="${_escapeAttr(String(v))}"`;
+      html += ` ${svgAttrName(k)}="${_escapeAttr(String(v))}"`;
     }
   }
   return html;

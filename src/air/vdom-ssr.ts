@@ -5,6 +5,7 @@ import { resolveSignalProp } from "./signal-binding.ts";
 import {
   camelToKebab as _camelToKebab,
   escapeAttr as _escapeAttr,
+  svgAttrName,
   escapeHtml as _escapeHtml,
   resolveClassName as _resolveClassName,
   styleValue as _styleValue,
@@ -137,7 +138,7 @@ export function renderToString(
       } else if (v !== false && v != null) {
         // AIO-187: render all non-boolean attrs with explicit value
         // (known boolean attrs like checked/disabled handled above)
-        html += ` ${k}="${_escapeAttr(String(v))}"`;
+        html += ` ${svgAttrName(k)}="${_escapeAttr(String(v))}"`;
       }
     }
 
