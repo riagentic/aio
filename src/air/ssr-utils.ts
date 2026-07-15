@@ -43,6 +43,58 @@ export function camelToKebab(s: string): string {
   return s.replace(/[A-Z]/g, (m) => "-" + m.toLowerCase());
 }
 
+// SVG attributes whose JSX camelCase name differs from the DOM attribute name
+// (quant Ugly #2). SVG is mixed-case: presentation/text attrs are kebab-case
+// (`stop-color`), but structural attrs like `viewBox`/`preserveAspectRatio`
+// stay camelCase — so a blanket camel→kebab is WRONG. This curated map converts
+// only the ones that need it; anything else passes through verbatim.
+const _SVG_ATTR: Readonly<Record<string, string>> = {
+  stopColor: "stop-color",
+  stopOpacity: "stop-opacity",
+  strokeWidth: "stroke-width",
+  strokeLinecap: "stroke-linecap",
+  strokeLinejoin: "stroke-linejoin",
+  strokeDasharray: "stroke-dasharray",
+  strokeDashoffset: "stroke-dashoffset",
+  strokeOpacity: "stroke-opacity",
+  strokeMiterlimit: "stroke-miterlimit",
+  fillOpacity: "fill-opacity",
+  fillRule: "fill-rule",
+  clipRule: "clip-rule",
+  clipPath: "clip-path",
+  floodColor: "flood-color",
+  floodOpacity: "flood-opacity",
+  fontFamily: "font-family",
+  fontSize: "font-size",
+  fontWeight: "font-weight",
+  fontStyle: "font-style",
+  textAnchor: "text-anchor",
+  textDecoration: "text-decoration",
+  dominantBaseline: "dominant-baseline",
+  alignmentBaseline: "alignment-baseline",
+  baselineShift: "baseline-shift",
+  letterSpacing: "letter-spacing",
+  wordSpacing: "word-spacing",
+  markerStart: "marker-start",
+  markerMid: "marker-mid",
+  markerEnd: "marker-end",
+  pointerEvents: "pointer-events",
+  shapeRendering: "shape-rendering",
+  colorInterpolation: "color-interpolation",
+  colorInterpolationFilters: "color-interpolation-filters",
+  vectorEffect: "vector-effect",
+  writingMode: "writing-mode",
+  paintOrder: "paint-order",
+};
+
+/** Map a JSX prop name to its DOM attribute name — converts the known
+ *  camelCase SVG attrs (stopColor → stop-color) so gradients/strokes render,
+ *  and leaves everything else (viewBox, data-*, aria-*) untouched. Shared by
+ *  the client patcher and both SSR emitters so all render paths agree. */
+export function svgAttrName(k: string): string {
+  return _SVG_ATTR[k] ?? k;
+}
+
 // CSS properties that accept unitless numeric values — all others get "px" auto-appended
 const UNITLESS_CSS = new Set([
   "animationIterationCount",
