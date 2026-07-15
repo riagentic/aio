@@ -36,6 +36,58 @@ export function extractForUser(
   return undefined;
 }
 
+/**
+ * Validate `ui`/`persist` field-filter keys against the declared state, at cell
+ * creation. A filter key that matches NO state field silently does nothing — a
+ * secret you meant to `exclude` stays exposed, with no error. That silent leak
+ * is the worst failure mode, so we make it loud: a non-matching key, or a
+ * nested path in `include` (unsupported), throws here instead.
+ *
+ * Nested `exclude` (dot-paths like `"accounts.encSecKey"`) IS supported — only
+ * the head field is validated (deeper segments may be dynamic / array items).
+ */
+export function validateFieldFilters(
+  name: string,
+  state: Record<string, unknown> | undefined,
+  // deno-lint-ignore no-explicit-any
+  ui: CellVisibility<string, any> | undefined,
+  persist: CellFieldFilter | undefined,
+): void {
+  const stateKeys = new Set(Object.keys(state ?? {}));
+  const check = (kind: "ui" | "persist", filter: unknown): void => {
+    if (!filter || typeof filter !== "object") return;
+    const f = filter as Record<string, unknown>;
+    for (const mode of ["include", "exclude"] as const) {
+      const keys = f[mode];
+      if (!Array.isArray(keys)) continue;
+      for (const key of keys) {
+        if (typeof key !== "string") continue;
+        const nested = key.includes(".");
+        if (nested && mode === "include") {
+          throw new Error(
+            `[cell:${name}] ${kind}.include does not support nested paths ("${key}"). ` +
+              `Include the top-level key "${key.split(".")[0]}", or use exclude for nested fields.`,
+          );
+        }
+        const head = nested ? key.split(".")[0]! : key;
+        // Framework-internal fields (__aio_*) are always allowed.
+        if (head.startsWith("__aio")) continue;
+        if (!stateKeys.has(head)) {
+          throw new Error(
+            `[cell:${name}] ${kind} ${mode} names "${key}", but "${head}" is not a ` +
+              `state field of this cell — so it filters nothing, silently exposing ` +
+              `what you meant to hide. Declared state: ${
+                [...stateKeys].join(", ") || "(none)"
+              }. Check the spelling.`,
+          );
+        }
+      }
+    }
+  };
+  check("ui", ui);
+  check("persist", persist);
+}
+
 /** Normalize ui config into CellFieldFilter (strip forUser) */
 export function normalizeUiFilter(
   // deno-lint-ignore no-explicit-any

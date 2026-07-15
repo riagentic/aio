@@ -68,6 +68,23 @@ function renderFilter(filter: CellFieldFilter): string {
 
 // Field names that usually hold secrets — used for the UI-exposure heuristic.
 const SECRET_FIELD_RE = /enc|secret|priv|key|seed|mnemonic|passphrase/i;
+// …but a "public" hint (pubKey, publicKey) means it's meant to be shared.
+const PUBLIC_HINT_RE = /pub(lic)?/i;
+// …and these suffixes mark identifiers/metadata, not the secret itself:
+// seedId, seedPathType, keyName, encMode — nav state, not a leaked secret
+// (risoto #4: the name heuristic over-fired on exactly these).
+const NONSECRET_SUFFIX_RE =
+  /(Id|Ids|Type|Name|Count|Index|Idx|At|Ref|Kind|Length|Len|Path|Mode|Status|Flag|Enabled|Visible|Label|Order|Version)$/;
+
+/** True when a field NAME looks like it holds a secret meant to stay private.
+ *  Skips public-key-style names and identifier/metadata suffixes to avoid the
+ *  false positives that made the old heuristic cry wolf (risoto #4). */
+function _looksSecret(key: string): boolean {
+  if (!SECRET_FIELD_RE.test(key)) return false;
+  if (PUBLIC_HINT_RE.test(key)) return false;
+  if (NONSECRET_SUFFIX_RE.test(key)) return false;
+  return true;
+}
 
 /** Dev-safety warnings for field-level visibility config (risoto #1/#2):
  *  #1 an include/exclude key that isn't a top-level state field is a silent
@@ -136,12 +153,14 @@ function warnFieldFilters(composed: ComposedCells): void {
         return true;
       };
       for (const key of topKeys) {
-        if (SECRET_FIELD_RE.test(key) && isExposed(key)) {
+        if (_looksSecret(key) && isExposed(key)) {
           log.warn(
             "visibility",
             `[${f.__aio.id}] field "${key}" looks secret and is exposed to the ` +
               `UI — it broadcasts to every connected client. Restrict it with ` +
-              `ui: { exclude: ["${key}"] }, ui.forUser, or ui: "none".`,
+              `ui: { exclude: ["${key}"] }, ui.forUser, or ui: "none". ` +
+              `(If it's public, a "pub"/"public" name or an Id/Type/Name suffix ` +
+              `silences this.)`,
           );
         }
       }

@@ -25,6 +25,7 @@ export {
   TEXT_EXTENSIONS,
 } from "./server-html.ts";
 import { hasVendorImmer } from "./server-vendor.ts";
+import { verifyPin } from "./pairing.ts";
 export type { ServerConfig, ServerHandle } from "./server-types.ts";
 export { _timingSafeEqual } from "./server-auth.ts";
 
@@ -262,6 +263,10 @@ export function createServer(config: ServerConfig): ServerHandle {
       prod,
       port,
       title,
+      appId: config.appId,
+      token: config.token,
+      certPem: config.cert,
+      expose: config.expose,
       trojan: config.trojan!,
       authInfo: {
         mode: _userResolver
@@ -306,6 +311,38 @@ export function createServer(config: ServerConfig): ServerHandle {
       addr && "hostname" in addr && typeof addr.hostname === "string"
         ? addr.hostname
         : undefined;
+
+    // Pairing endpoint — the ONE route that bypasses the key gate (the client
+    // is asking FOR the key, so it can't present it). PIN-gated instead:
+    // POST { pin } → the app profile (cert + key) when the PIN is valid.
+    if (pathname === "/__aio/pair" && req.method === "POST" && config.token) {
+      try {
+        const body = await req.json() as { pin?: unknown };
+        if (!verifyPin(body?.pin)) {
+          return new Response(
+            JSON.stringify({ error: "invalid or expired pairing code" }),
+            { status: 401, headers: { "Content-Type": "application/json" } },
+          );
+        }
+        return new Response(
+          JSON.stringify({
+            aio: 1,
+            name: config.appId ?? title,
+            title,
+            port,
+            tls: !!config.cert,
+            cert: config.cert ?? null,
+            key: config.token,
+          }),
+          { headers: { "Content-Type": "application/json" } },
+        );
+      } catch {
+        return new Response(JSON.stringify({ error: "invalid request" }), {
+          status: 400,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+    }
 
     // Auth path 1: per-user auth — resolveUser hook or static users map (AIO-171)
     if (_userResolver) {

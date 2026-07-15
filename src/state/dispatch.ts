@@ -58,6 +58,10 @@ const DISPATCH_MAX = 1000;
 /** Queue depth limit — prevents unbounded memory growth from burst dispatches */
 const QUEUE_MAX = 10_000;
 
+// A reducer that returns an invalid effect does so for every dispatch of that
+// action — warn once per action type instead of flooding the log.
+const _warnedInvalidEffect = new Set<string>();
+
 /** Dependencies injected into the dispatch loop by the host runtime */
 export type DispatchDeps<S, A, E> = {
   reduce: (
@@ -364,22 +368,24 @@ export function createDispatch<S, A, E>(
             !effect ||
             typeof (effect as Record<string, unknown>).type !== "string"
           ) {
-            log.warn(
-              `reducer returned invalid effect (missing .type string) — skipping. Action was: ${
-                tag(current)
-              }`,
-            );
-            diagEmit({
-              type: "effect-invalid",
-              severity: "warning",
-              source: "dispatch",
-              message: `Invalid effect skipped (missing .type) from action '${
-                tag(current)
-              }'`,
-              detail: { actionType: tag(current) },
-              hint:
-                "Effects must be plain objects with a .type string. Check your reducer return value.",
-            });
+            const actionType = tag(current);
+            if (!_warnedInvalidEffect.has(actionType)) {
+              _warnedInvalidEffect.add(actionType);
+              log.warn(
+                `reducer returned invalid effect (missing .type string) — ` +
+                  `skipping. Action was: ${actionType} (logged once per action)`,
+              );
+              diagEmit({
+                type: "effect-invalid",
+                severity: "warning",
+                source: "dispatch",
+                message:
+                  `Invalid effect skipped (missing .type) from action '${actionType}'`,
+                detail: { actionType },
+                hint:
+                  "Effects must be plain objects with a .type string. Check your reducer return value.",
+              });
+            }
             continue;
           }
           if (deps.debug) log.debug(`effect → execute: ${tag(effect)}`);

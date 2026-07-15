@@ -89,12 +89,31 @@ export function _setDocument(doc: AnyDoc): void {
   _setHydrateDoc(doc);
 }
 
+/** The document AIR is rendering into. Components that need document-level
+ *  access (listeners, focus) should use this instead of the global `document`,
+ *  so they work under testUI/SSR where there is no global document (risoto #3).
+ *  Returns null when there is no DOM at all — always guard the result. */
+export function _getDocument(): AnyDoc {
+  return _doc;
+}
+
 // -- Dev mode ----------------------------------------------------------
+
+// a11y checks run on EVERY element on EVERY render — a single offending
+// element in a component that re-renders would flood the console with the
+// same message. Warn once per distinct message (cleared when dev mode is
+// re-toggled, so a fresh session re-reports).
+const _warnedA11y = new Set<string>();
+function _warnA11yOnce(msg: string): void {
+  if (_warnedA11y.has(msg)) return;
+  _warnedA11y.add(msg);
+  console.warn(msg);
+}
 
 /** @internal Dev-mode a11y checks on element creation. */
 function _devA11yCheck(tag: string, props: Record<string, unknown>): void {
   if (tag === "img" && !("alt" in props)) {
-    console.warn(
+    _warnA11yOnce(
       '[aio-dev] <img> missing "alt" attribute. Add alt="" for decorative images or descriptive text for meaningful ones.',
     );
   }
@@ -109,7 +128,7 @@ function _devA11yCheck(tag: string, props: Record<string, unknown>): void {
     tag !== "select" &&
     tag !== "textarea"
   ) {
-    console.warn(
+    _warnA11yOnce(
       `[aio-dev] <${tag}> has onClick but no keyboard handler. Add onKeyDown for keyboard accessibility.`,
     );
   }
@@ -119,7 +138,7 @@ function _devA11yCheck(tag: string, props: Record<string, unknown>): void {
     !props["aria-labelledby"] &&
     !props.id
   ) {
-    console.warn(
+    _warnA11yOnce(
       `[aio-dev] <${tag}> has no label association. Add id (for <label htmlFor>), aria-label, or aria-labelledby.`,
     );
   }
@@ -131,6 +150,7 @@ export function setDevMode(enabled: boolean): void {
   _setDevModeVdom(enabled);
   _setSignalDevMode(enabled);
   _setLifecycleDevMode(enabled);
+  _warnedA11y.clear(); // re-arm a11y warnings for the (re)enabled session
   _setDevA11yCheck(enabled ? _devA11yCheck : null);
 }
 

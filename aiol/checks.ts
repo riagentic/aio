@@ -199,12 +199,14 @@ export const checkStructure: Checker = async (ctx) => {
     f.name !== "app.ts"
   );
   if (cellFiles.length > 3) {
-    const inCellDir = cellFiles.filter((f) => f.relative.includes("cells/"));
+    // A dedicated cell directory counts as organized whether it's named
+    // `cell/` or `cells/` — both are valid; don't nag about the choice (risoto).
+    const inCellDir = cellFiles.filter((f) => /(^|\/)cells?\//.test(f.relative));
     if (inCellDir.length < cellFiles.length / 2) {
       report(
         "hint",
         "structure",
-        `${cellFiles.length} cell files scattered — consider organizing in src/cells/`,
+        `${cellFiles.length} cell files scattered — consider organizing in a src/cells/ (or src/cell/) directory`,
         { fix: "See structure.md" },
       );
     }

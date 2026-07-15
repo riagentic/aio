@@ -32,7 +32,7 @@ import {
   _setCurrentCollector,
   _setInsideMount,
 } from "./renderer-state.ts";
-import { _flushPending } from "./renderer-flush.ts";
+import { _flushPending, _reportHookError } from "./renderer-flush.ts";
 
 // ── Schedule ──────────────────────────────────────────────────────────
 
@@ -420,7 +420,15 @@ export function _createHooks(rootState: RootState): VDomHooks {
           _setCurrentCollector(inst as unknown as LifecycleCollector);
           _setInsideMount(true);
           try {
-            for (const cb of cbs) cb();
+            // Guard each hook: one throwing onMount must not abort the mount
+            // flush of its siblings or collapse the surface (risoto #3).
+            for (const cb of cbs) {
+              try {
+                cb();
+              } catch (e) {
+                _reportHookError("onMount", e);
+              }
+            }
           } finally {
             _setInsideMount(false);
             _setCurrentCollector(null);

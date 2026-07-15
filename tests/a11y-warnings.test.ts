@@ -161,3 +161,45 @@ Deno.test({
     await cleanup();
   },
 });
+
+Deno.test({
+  name:
+    "a11y: repeated offending element warns once, not per render (flood fix)",
+  async fn() {
+    const { root, cleanup } = setup();
+    const warnings = captureWarnings(() => {
+      // Same offending <img> re-rendered many times — one warning, not N.
+      let bump = () => {};
+      const App = () => {
+        const s = useSignalLocal();
+        bump = s.bump;
+        return h("div", null, [
+          h("span", null, String(s.n)),
+          h("img", { src: "x.png" }), // no alt — the offender
+        ]);
+      };
+      mount(root, App);
+      for (let i = 0; i < 25; i++) bump(); // force 25 re-renders
+    });
+    assertEquals(
+      warnings.filter((w) => w.includes("alt")).length,
+      1,
+      "img-without-alt must warn once across many renders",
+    );
+    await cleanup();
+  },
+});
+
+// minimal signal-backed local state to force re-renders
+import { useSignal } from "../src/air/aio-renderer.ts";
+function useSignalLocal() {
+  const n = useSignal(0);
+  return {
+    get n() {
+      return n.value;
+    },
+    bump: () => {
+      n.set(n.value + 1);
+    },
+  };
+}

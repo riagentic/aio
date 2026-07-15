@@ -2,14 +2,14 @@
 
 ## What is aio
 
-Full-stack TypeScript framework on Deno 2.6+. State-driven apps with auto
+Full-stack TypeScript framework on Deno 2.9+ (latest stable). State-driven apps with auto
 persistence (Deno.Kv), CRDT sync, AIR renderer, optional Electron/Android.
-Elm-like: `(state, action) → { state, effects[] }`. v1.0.0-alpha19, 2250+ tests.
+Elm-like: `(state, action) → { state, effects[] }`. v1.0.0-alpha20, 2250+ tests.
 
 ## Commands
 
 ```sh
-deno task test              # all tests (-A --unstable-kv)
+deno task test              # all tests (no flags — kv via deno.json, udp via node:dgram)
 deno task test:core         # skip env-dependent tests (build, server, tls, electron)
 deno task check             # type-check (mod.ts, aiol, init)
 deno task lint              # lint src/
@@ -21,7 +21,7 @@ deno task api:check         # public-surface snapshot gate (api:update to regen)
 deno task boundaries        # src/ folder dependency matrix
 ```
 
-Single file: `deno test -A --unstable-kv tests/signal.test.ts`
+Single file: `deno test -A tests/signal.test.ts`
 
 ## Architecture
 
@@ -56,8 +56,10 @@ Example: `examples/counter/`. Docs: `docs/` (domain folders).
 
 ### Auth
 
-Public (default), single auto-token (`--expose`), or per-user tokens. Token via
-timing-safe comparison. User flows through hooks and `getUIState()`.
+Public (default, incl. `--expose`), single key (`key: true` persisted /
+`key: "..."` fixed, enforced only under `--expose`; aio client pairs by PIN), or
+per-user tokens (`users`/`resolveUser`). Token via timing-safe comparison. User
+flows through hooks and `getUIState()`.
 
 ### Delta broadcasting
 

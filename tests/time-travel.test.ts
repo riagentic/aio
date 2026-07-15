@@ -776,3 +776,36 @@ Deno.test("markError via reportOpts getter tags the CURRENT entry, not the boot 
   assertEquals(tt.entries[tt.index]!.error?.code, "REDUCE_ERROR");
   assertEquals(tt.entries[0]!.error, undefined);
 });
+
+Deno.test("time-travel: large-state warning logs once, not per action (spam fix)", () => {
+  const warnings: string[] = [];
+  const orig = console.warn;
+  console.warn = (...a: unknown[]) => void warnings.push(String(a[0]));
+  try {
+    // Fresh session re-arms the once-only warning.
+    let tt = createTT<{ blob: string }, { type: string }>();
+    // State well over the 100KB cap; SIZE_SAMPLE_EVERY=20 samples periodically,
+    // so drive enough actions to sample repeatedly.
+    const big = { blob: "x".repeat(200_000) };
+    for (let i = 0; i < 60; i++) {
+      tt = record(tt, { type: `a${i}` }, big);
+    }
+    const ttWarnings = warnings.filter((w) => w.includes("time-travel"));
+    assertEquals(
+      ttWarnings.length,
+      1,
+      "must warn exactly once, not per action",
+    );
+    assert(ttWarnings[0]!.includes("logged once"));
+
+    // A brand-new session may warn again (genuinely new context).
+    let tt2 = createTT<{ blob: string }, { type: string }>();
+    for (let i = 0; i < 30; i++) tt2 = record(tt2, { type: `b${i}` }, big);
+    assertEquals(
+      warnings.filter((w) => w.includes("time-travel")).length,
+      2,
+    );
+  } finally {
+    console.warn = orig;
+  }
+});

@@ -26,6 +26,7 @@ import { bindCell, bindCellReactive, type CellDef } from "./state/cell.ts";
 import { composeCells } from "./state/cell-compose.ts";
 import {
   _resetCellRegistry,
+  _resetCellBindings,
   getRegisteredCells,
 } from "./state/cell-reactive.ts";
 import { _applyFullState, _resetSignals } from "./state/state-signals.ts";
@@ -273,14 +274,27 @@ export function page<K extends string>(
 }
 
 /** Resets module state — for testing only */
-export function _reset(): void {
+/**
+ * Reset runtime STATE only (keeps the cell registry) — for hermetic testUI
+ * mounts. Nulls `_cellApp` so the next runStandalone() re-composes from the
+ * cells' pristine declared initials, and resets signal VALUES in place (stable
+ * identity, so reactive getter closures see the reset). This is what makes each
+ * mount start clean without dropping the module-singleton cells themselves.
+ */
+export function _resetState(): void {
   _state = null;
   _app = null;
   _cellApp = null;
   _stateSignal.set(null);
   _listeners.clear();
-  _resetCellRegistry();
   _resetSignals();
+  _resetCellBindings(); // release module-singleton cells so they re-bind
+}
+
+/** Full reset — state AND the cell registry. */
+export function _reset(): void {
+  _resetState();
+  _resetCellRegistry();
 }
 
 // ── Cell-based standalone runtime (AIO-404) ─────────────────────────

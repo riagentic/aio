@@ -110,6 +110,20 @@ Deno.test("electron: clientScript — redirect handling bounded", () => {
   assertStringIncludes(s, "Too many redirects");
 });
 
+Deno.test("electron: clientScript — PIN pairing flow wired", () => {
+  const s = electronClientScript();
+  // Main process: POST helper, pair handler, and the aio-pair: route.
+  assertStringIncludes(s, "function postJson");
+  assertStringIncludes(s, "/__aio/pair");
+  assertStringIncludes(s, "async function pairWith");
+  assertStringIncludes(s, "aio-pair:");
+  // A paired app's cert is pinned before the page loads.
+  assertStringIncludes(s, "pinCert(rec.host, rec.cert)");
+  // Connect page: auth apps prompt for a PIN instead of connecting blind.
+  assertStringIncludes(s, "promptPair");
+  assertStringIncludes(s, "onAppClick");
+});
+
 // ── electronMainScriptUDS ───────────────────────────────────────────
 
 Deno.test("electron: UDS script — socket path embedded", () => {

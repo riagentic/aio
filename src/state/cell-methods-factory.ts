@@ -1,6 +1,7 @@
 // cell-methods-factory.ts — createCellFromMethods: reactive/methods-based cell factory
 
 import type { CellMethods, Method, Mutation } from "./cell-impl.ts";
+import { freezeInitial } from "./immutable.ts";
 import { classifyMethods, setKey } from "./cell-impl.ts";
 import type {
   CellAio,
@@ -26,6 +27,7 @@ import {
   extractForUser,
   normalizePersistFilter,
   normalizeUiFilter,
+  validateFieldFilters,
   scopeSelectors,
 } from "./cell-helpers.ts";
 import {
@@ -122,6 +124,10 @@ export function createCellFromMethods<
       );
     }
   }
+
+  // Field-filter keys must resolve to real state — a non-matching filter
+  // silently leaks (risoto). Fail loud at creation.
+  validateFieldFilters(name, config.state as Record<string, unknown>, config.ui, config.persist);
 
   // Classify methods as sync or async (uses isAsyncFunction — symbol-based, minification-safe)
   const { syncMethods, asyncMethods } = classifyMethods(
@@ -247,7 +253,10 @@ export function createCellFromMethods<
     | "bound"
     | "selectorDeps"
   > = {
-    state: config.state as Record<string, unknown>,
+    // The declared initial is the pristine source of truth: a frozen (dev)
+    // deep clone, so it never aliases the caller's object and in-place
+    // mutation throws at the site. See immutable.ts.
+    state: freezeInitial(config.state) as Record<string, unknown>,
     machine,
     reduce,
     execute,

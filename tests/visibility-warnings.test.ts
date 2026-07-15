@@ -50,6 +50,40 @@ Deno.test("visibility #1: a valid top-level exclude does NOT warn", () => {
   );
 });
 
+Deno.test("visibility #4: public/id fields do NOT trip the secret heuristic", () => {
+  // risoto #4: the name heuristic over-fired on public keys and id/type fields.
+  const c = cell("wallet_pub", {
+    state: {
+      activeAccountPubKey: "", // public key — "pub" hint
+      publicKey: "",
+      seedId: 0, // identifier, not the seed
+      seedPathType: "", // metadata suffix
+      keyName: "", // Name suffix
+    },
+    methods: { noop(_s) {} },
+  });
+  const w = warningsFor([c]);
+  assertEquals(
+    w.filter((l) => l.includes("looks secret")).length,
+    0,
+    `no field here is a secret; got: ${w.join(" | ")}`,
+  );
+});
+
+Deno.test("visibility #4: real secrets are still flagged after the refinement", () => {
+  const c = cell("wallet_sec", {
+    state: { encSecKey: "cipher", privateKey: "x", mnemonic: "m", pub: "y" },
+    methods: { noop(_s) {} },
+  });
+  const w = warningsFor([c]);
+  for (const secret of ["encSecKey", "privateKey", "mnemonic"]) {
+    assert(
+      w.some((l) => l.includes(secret) && l.includes("looks secret")),
+      `expected ${secret} flagged; got: ${w.join(" | ")}`,
+    );
+  }
+});
+
 Deno.test("visibility #2: a secret-looking exposed field warns", () => {
   const c = cell("wallet3", {
     state: { encSecKey: "cipher", pub: "y" },

@@ -433,3 +433,21 @@ Deno.test("schedule.backoff: exponential growth, capped at max (risoto #4)", () 
   const t = schedule.backoff("x", 2, { base: 100, factor: 3 }, A);
   assertEquals((t as { ms: number }).ms, 900); // 100 * 3^2
 });
+
+Deno.test("schedule.poll: constant while healthy, backs off on failure (risoto #6)", () => {
+  const A = { type: "tick" };
+  // healthy (attempt 0) → the base interval
+  assertEquals(
+    (schedule.poll("rpc", 0, { every: 5000, backoff: 2, max: 60000 }, A) as { ms: number }).ms,
+    5000,
+  );
+  // failing → grows every * backoff^attempt, capped at max
+  assertEquals((schedule.poll("rpc", 1, { every: 5000, backoff: 2, max: 60000 }, A) as { ms: number }).ms, 10000);
+  assertEquals((schedule.poll("rpc", 3, { every: 5000, backoff: 2, max: 60000 }, A) as { ms: number }).ms, 40000);
+  assertEquals((schedule.poll("rpc", 5, { every: 5000, backoff: 2, max: 60000 }, A) as { ms: number }).ms, 60000); // capped
+  // default backoff = 1 → constant polling regardless of attempt
+  assertEquals((schedule.poll("rpc", 4, { every: 3000 }, A) as { ms: number }).ms, 3000);
+  const e = schedule.poll("rpc", 0, { every: 1000 }, A) as { kind: string; id: string };
+  assertEquals(e.kind, "after");
+  assertEquals(e.id, "rpc");
+});

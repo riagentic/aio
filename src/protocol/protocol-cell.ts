@@ -3,6 +3,7 @@
 
 import { registerCell } from "../state/cell-reactive.ts";
 import type { CellDef } from "../state/cell-types.ts";
+import { normalizeSyncConfig } from "../sync/types.ts";
 
 // deno-lint-ignore no-explicit-any
 type _Creators = Record<string, (...args: any[]) => any>;
@@ -13,6 +14,8 @@ export function cell(
   config: {
     state?: any;
     scope?: "client";
+    /** CRDT sync config — routed through the client engine when set. */
+    sync?: true | Record<string, unknown>;
     actions?: _Creators;
     methods?: Record<string, unknown>;
     generators?: Record<string, unknown>;
@@ -85,6 +88,34 @@ export function cell(
       }
       (def.__aio as Record<string, unknown>).scope = "client";
       (def.__aio as Record<string, unknown>).clientMethods = config.methods;
+    }
+    // sync: true cells need two extras for the client CRDT engine:
+    // the normalized config (which cells route through the engine) and a
+    // replayable reducer for optimistic rebase — built from the SYNC methods
+    // (CRDT ops must be deterministic; async methods can't replay and are
+    // skipped — their outcome arrives via the server's state broadcast).
+    if (config.sync) {
+      (def.__aio as Record<string, unknown>).syncConfig = normalizeSyncConfig(
+        config.sync as true | Record<string, unknown>,
+      );
+      const syncMethods: Record<string, unknown> = {};
+      for (const [key, fn] of Object.entries(config.methods)) {
+        if (
+          (fn as { constructor: { name: string } }).constructor.name !==
+            "AsyncFunction"
+        ) syncMethods[key] = fn;
+      }
+      (def.__aio as Record<string, unknown>).reduce = (
+        draft: Record<string, unknown>,
+        msg: { type: string; payload?: unknown },
+      ) => {
+        const key = String(msg.type).slice(prefix.length + 1);
+        const m = syncMethods[key];
+        if (typeof m === "function") {
+          const args = (msg.payload as { args?: unknown[] })?.args ?? [];
+          m(draft, ...args);
+        }
+      };
     }
     for (const [key, value] of Object.entries(cat)) {
       def[key] = value;

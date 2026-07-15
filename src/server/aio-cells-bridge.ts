@@ -116,6 +116,7 @@ export function buildLegacyConfig(
     client: fc.client,
     users: fc.users,
     resolveUser: fc.resolveUser,
+    key: fc.key,
     db: fc.db,
     perfCheck: fc.perfCheck,
     perfBudget: fc.perfBudget,

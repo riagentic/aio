@@ -19,6 +19,7 @@ import { _rootStateMap } from "../air/renderer-state.ts";
 import {
   buildUISurface,
   findComponents,
+  findElementsDeep,
   serializeSurface,
   type UIElementInfo,
   type UISurfaceNode,
@@ -204,22 +205,23 @@ export function testUI(
     }
     Deno.test(optsOrName, async () => {
       const ui = await _mountTestUI(App, {});
-      let bodyFailed = false;
+      let bodyErr: { e: unknown } | null = null;
       try {
         await fn(ui);
       } catch (e) {
-        bodyFailed = true;
-        throw e;
-      } finally {
-        try {
-          // dispose drains the action queue — un-awaited action failures
-          // fail the test here.
-          await ui.dispose();
-        } catch (e) {
-          if (!bodyFailed) throw e;
-          // body already failed — don't mask its error with teardown's
-        }
+        bodyErr = { e };
       }
+      // Always dispose. dispose drains the action queue — un-awaited action
+      // failures surface here. The body's error wins if there was one; a
+      // teardown-only failure surfaces on its own (never masking the body).
+      let teardownErr: { e: unknown } | null = null;
+      try {
+        await ui.dispose();
+      } catch (e) {
+        teardownErr = { e };
+      }
+      if (bodyErr) throw bodyErr.e;
+      if (teardownErr) throw teardownErr.e;
     });
     return;
   }
@@ -276,6 +278,12 @@ async function _mountTestUI(
   const cells = opts.cells ?? [...getRegisteredCells().values()];
   if (cells.length > 0) {
     const standalone = await import("../standalone-air.ts");
+    // Hermetic by default: cells are module singletons, so both their signal
+    // state AND the standalone dispatch store survive across mounts. Reset the
+    // runtime state (keeping the registry) so this mount re-composes from the
+    // cells' declared initials — no cross-test leaks. Skipped when the test
+    // opts into persistence (it wants continuity across runs).
+    if (!opts.persist) standalone._resetState();
     await standalone.aio.run({
       appId: "testui",
       cells,
@@ -284,7 +292,8 @@ async function _mountTestUI(
       persist: opts.persist ?? false,
       persistKey: `testui:${crypto.randomUUID().slice(0, 8)}`,
     });
-    resetRuntime = standalone._reset;
+    // Dispose does a state-only reset (keeps the registry so re-mounts boot).
+    resetRuntime = standalone._resetState;
   }
 
   _setDocument(doc);
@@ -642,8 +651,31 @@ async function _mountTestUI(
       if (typeof prop === "symbol" || prop in target) {
         return (target as AnyDoc)[prop];
       }
-      // ui.App / ui.AnyComponent → component handle (root or deep)
-      return api.find(prop as string);
+      const name = prop as string;
+      // A component by that name wins (ui.App / ui.TodoRow).
+      let surf: UISurfaceNode | undefined;
+      try {
+        surf = currentSurface();
+      } catch { /* nothing mounted yet — fall through to lazy component find */ }
+      if (surf && findComponents(surf, name).length > 0) return api.find(name);
+      // risoto #2: hoist a `t`/data-testid element handle to the top level,
+      // regardless of nesting — `ui.watchPubkey` instead of the positional
+      // `ui.find("Input", 1).watchPubkey`. Requires a UNIQUE match.
+      if (surf) {
+        const els = findElementsDeep(surf, name);
+        if (els.length === 1) {
+          return elementHandle(() => resolveElement(els[0]!.path));
+        }
+        if (els.length > 1) {
+          fail(
+            `testUI: "${name}" matches ${els.length} elements on the surface — ` +
+              `disambiguate with ui.find("Component", key).${name}`,
+            els.map((e) => e.path),
+          );
+        }
+      }
+      // ui.App / ui.AnyComponent → lazy component handle (may appear later)
+      return api.find(name);
     },
   }) as TestUI;
 }

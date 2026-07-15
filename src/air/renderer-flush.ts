@@ -28,8 +28,29 @@ export function _flushAfterRender(root: RootState): void {
     try {
       cb();
     } catch (e) {
-      console.error("[aio-renderer] afterRender callback error:", e);
+      _reportHookError("afterRender", e);
     }
+  }
+}
+
+/**
+ * Report an error thrown by a lifecycle hook (`onMount`/`afterRender`) without
+ * letting it abort the render — one bad hook must never collapse the surface
+ * (risoto #3). Adds an actionable hint when the cause is DOM access with no DOM
+ * (testUI/SSR), where the raw "document is not defined" lands far from its fix.
+ */
+export function _reportHookError(kind: string, e: unknown): void {
+  console.error(`[aio-renderer] ${kind} callback error:`, e);
+  const msg = String((e as { message?: unknown })?.message ?? e);
+  if (
+    /\b(document|window)\b[^]*?(is not defined|undefined)/.test(msg) &&
+    typeof document === "undefined"
+  ) {
+    console.error(
+      `[aio-renderer] ↑ this ${kind} ran without a DOM (testUI/SSR). ` +
+        "Guard DOM access — `if (typeof document !== 'undefined') { … }` — " +
+        "or use a `useRef` on the element instead of `document.getElementById`.",
+    );
   }
 }
 

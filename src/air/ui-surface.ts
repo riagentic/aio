@@ -56,6 +56,22 @@ export type UISurfaceNode = {
   _dom?: any;
 };
 
+/** Collect every interactive element named `name` anywhere in the subtree —
+ *  lets a `t`/data-testid handle be addressed from the top level regardless of
+ *  how deeply it's nested (risoto #2), instead of a positional component index. */
+export function findElementsDeep(
+  node: UISurfaceNode,
+  name: string,
+): UIElementInfo[] {
+  const out: UIElementInfo[] = [];
+  const walk = (n: UISurfaceNode): void => {
+    for (const el of n.elements) if (el.name === name) out.push(el);
+    for (const c of n.children) walk(c);
+  };
+  walk(node);
+  return out;
+}
+
 const isVNode = (c: unknown): c is VNode =>
   !!c && typeof c === "object" && "tag" in (c as Record<string, unknown>);
 

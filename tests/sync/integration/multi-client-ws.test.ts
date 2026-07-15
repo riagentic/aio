@@ -89,6 +89,7 @@ Deno.test("sync: two concurrent WS clients — every op acked and relayed exactl
     fn: (_msg: string, _exclude?: WebSocket) => {},
   };
   const syncHandler = createServerSyncHandler({
+    dispatch: () => {}, // this harness asserts the op-log/relay contract only
     db,
     syncCellIds: ["notes"],
     getCellState: () => cellState as Record<string, unknown>,

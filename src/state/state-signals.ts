@@ -71,8 +71,10 @@ const _cache = _global.__aioSignals as {
 
 // ── Module state ─────────────────────────────────────────────────────
 
-export let _stateSignal: Signal<Record<string, any>> = _cache.state;
-export let _connected: Signal<boolean> = _cache.connected;
+// Stable instances — reset mutates their VALUES in place (see _resetSignals),
+// never reassigns, so reactive getters that close over them see every reset.
+export const _stateSignal: Signal<Record<string, any>> = _cache.state;
+export const _connected: Signal<boolean> = _cache.connected;
 export const _cellSignals = _cache.cells;
 
 // ── Internal helpers ─────────────────────────────────────────────────
@@ -128,11 +130,19 @@ export function setConnected(v: boolean): void {
   _connected.set(v);
 }
 
-/** Reset all signal state (for test isolation). */
+/**
+ * Reset all signal state (for test isolation).
+ *
+ * Resets VALUES in place — it must NOT swap signal instances or clear the
+ * cell-signal map. Reactive getters installed on cell defs close over a
+ * specific Signal instance; swapping the instance (the old bug) orphaned those
+ * closures with stale state, so a value added in one test leaked into the next
+ * even after "reset". Keeping instance identity stable means every closure sees
+ * the reset. Cell signals reset to `undefined` so their getters fall back to
+ * the cell's pristine declared initial (see immutable.ts).
+ */
 export function _resetSignals(): void {
-  _stateSignal = signal({});
-  _connected = signal(false);
-  _cellSignals.clear();
-  _cache.state = _stateSignal;
-  _cache.connected = _connected;
+  _stateSignal.set({});
+  _connected.set(false);
+  for (const sig of _cellSignals.values()) sig.set(undefined);
 }

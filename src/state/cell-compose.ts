@@ -8,6 +8,7 @@ import type { ReduceBreakdown } from "../diagnostics/time-travel.ts";
 
 import { resolveCells } from "./cell-compose-resolve.ts";
 import { buildFlowsByPrefix, buildRootReducer } from "./cell-compose-reduce.ts";
+import { cloneState } from "./immutable.ts";
 import { buildRootExecutor } from "./cell-compose-execute.ts";
 import {
   buildRegistry,
@@ -64,9 +65,13 @@ export function composeCells(
   for (const f of cells) {
     const machine = f.__aio.machine;
     const status = machine === false ? undefined : machine.initial;
+    // Deep clone (not a shallow spread) so live state never aliases the
+    // declared initial — a shallow `{ ...state }` shares nested arrays/objects
+    // by reference, which is the classic in-place-mutation state-leak source.
+    const base = cloneState(f.__aio.state);
     initialState[f.__aio.id] = status != null
-      ? { ...f.__aio.state, __aio_status: status }
-      : { ...f.__aio.state };
+      ? { ...base, __aio_status: status }
+      : base;
   }
 
   // ── Shared mutable state (passed by reference into subsystems) ──

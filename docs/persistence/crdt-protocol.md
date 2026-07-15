@@ -154,7 +154,7 @@ CREATE TABLE sync_meta (
 
 ## Op Buffer
 
-Client-side op-log with pluggable storage (IndexedDB in browser, in-memory in
+Client-side op-log with pluggable storage (localStorage in browser, in-memory in
 tests).
 
 ```ts

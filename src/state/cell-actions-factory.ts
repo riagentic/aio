@@ -1,6 +1,7 @@
 // cell-actions-factory.ts — createCellFromActions: explicit actions/reduce-based cell factory
 
 import type { ScheduleEffect } from "./schedule.ts";
+import { freezeInitial } from "./immutable.ts";
 import type { OwnEffect } from "./own.ts";
 import type {
   CellAio,
@@ -29,6 +30,7 @@ import {
   extractForUser,
   normalizePersistFilter,
   normalizeUiFilter,
+  validateFieldFilters,
   scopeSelectors,
 } from "./cell-helpers.ts";
 import { createAioError } from "../diagnostics/error.ts";
@@ -72,6 +74,10 @@ export function createCellFromActions<
       );
     }
   }
+
+  // Field-filter keys must resolve to real state — a non-matching filter
+  // silently leaks (risoto). Fail loud at creation.
+  validateFieldFilters(name, config.state as Record<string, unknown>, config.ui, config.persist);
 
   const machine: MachineConfig | false =
     (config.machine === false || config.machine == null)
@@ -134,7 +140,8 @@ export function createCellFromActions<
     CellAio,
     "actions" | "effects" | "selectors" | "bound" | "selectorDeps"
   > = {
-    state: config.state,
+    // Pristine, frozen (dev) deep clone — see immutable.ts.
+    state: freezeInitial(config.state),
     machine,
     reduce: reduceFn,
     execute: executeFn,

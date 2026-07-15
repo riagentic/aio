@@ -68,6 +68,7 @@ export interface BootResult<S> {
   syncHandler: ServerSyncHandler | undefined;
   /** Mutable ref — caller wires broadcast after server creation */
   syncBroadcastRef: { fn: (msg: string, exclude?: WebSocket) => void };
+  syncDispatchRef: { fn: (a: { type: string; payload?: unknown }) => void };
 }
 
 /** Runs the full storage boot sequence — SQLite, CRDT sync, KV restore,
@@ -99,11 +100,15 @@ export async function bootStorage<S>(
   // ── 1. SQLite ─────────────────────────────────────────────────────
   const dbKeys = dbSchema ? Object.keys(dbSchema) : [];
   let asyncDb: DB | null = null;
-  if (dbSchema && Object.keys(dbSchema).length) {
+  // Sync cells need the SQLite op-log even without user tables — a
+  // `sync: true` cell must never silently degrade because `db:` is absent.
+  if ((dbSchema && Object.keys(dbSchema).length) || syncCellIds.length > 0) {
     try {
       const dbPath = resolveDbPath(appId);
       asyncDb = createDB(dbPath);
-      await initSchema(asyncDb, dbSchema);
+      if (dbSchema && Object.keys(dbSchema).length) {
+        await initSchema(asyncDb, dbSchema);
+      }
       log.info(`sqlite: ${dbKeys.length} table(s) at ${dbPath}`);
     } catch (e) {
       log.warn(`sqlite: unavailable — ${e}`);
@@ -118,6 +123,10 @@ export async function bootStorage<S>(
   const syncBroadcastRef: { fn: (msg: string, exclude?: WebSocket) => void } = {
     fn: () => {},
   };
+  // Late-bound like syncBroadcastRef — dispatch doesn't exist yet at boot.
+  const syncDispatchRef: {
+    fn: (a: { type: string; payload?: unknown }) => void;
+  } = { fn: () => {} };
   let syncHandler: ServerSyncHandler | undefined;
 
   if (syncCellIds.length > 0) {
@@ -130,6 +139,7 @@ export async function bootStorage<S>(
         "../sync/server-handler.ts"
       );
       syncHandler = createServerSyncHandler({
+        dispatch: (a) => syncDispatchRef.fn(a),
         db: asyncDb,
         syncCellIds,
         getCellState: (cell: string) =>
@@ -274,6 +284,7 @@ export async function bootStorage<S>(
     persistence,
     syncHandler,
     syncBroadcastRef,
+    syncDispatchRef,
   };
 }
 

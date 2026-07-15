@@ -78,6 +78,10 @@ export type AioConfig<S, A, E> = {
   persistDebounceMs?: number; // ms between KV writes (default: 100)
   persistMode?: "single" | "multi"; // 'single' (default): one blob ≤65KB. 'multi': one KV key per top-level state key — no 65KB limit
   users?: Record<string, AioUser>; // static token map — token is key, user is value
+  /** --expose auth. Default (omitted/`false`) = **no framework auth** (the
+   *  app does its own, or is open on a trusted LAN). `"secret"` = fixed key.
+   *  `true` = a stable key generated once and persisted in the data dir. */
+  key?: string | boolean;
   resolveUser?: ResolveUserFn<S>; // dynamic user resolution — overrides users if both set (AIO-171)
   ui?: UiConfig;
   port?: number; // default: 8000
@@ -201,6 +205,8 @@ export type CellsConfig = {
   killExisting?: boolean;
   serverUrl?: string;
   users?: Record<string, AioUser>;
+  /** --expose auth (see CellsConfig.key). */
+  key?: string | boolean;
   resolveUser?: ResolveUserFn;
   db?: Record<string, TableDef>;
   perfCheck?: "on" | "off";

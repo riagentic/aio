@@ -1,6 +1,6 @@
 // create-matrix.test.ts — verify template matrix: descriptions, file counts, types, stripping
 import { assert, assertEquals } from "@std/assert";
-import { _test } from "../utils/create.ts";
+import { _test } from "../src/create.ts";
 
 const {
   APP_TYPES,

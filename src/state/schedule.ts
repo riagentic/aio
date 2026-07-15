@@ -111,6 +111,36 @@ export const schedule = {
       action,
     };
   },
+  /** A self-pacing poller (risoto #6). Re-issue each cycle with the current
+   *  `attempt` — 0 while healthy, bumped on failure. It polls every `every` ms,
+   *  and on repeated failures backs off by `backoff`^attempt up to `max`. A
+   *  first-class replacement for the hand-rolled after-chain that RPC
+   *  rate-limit foot-guns come from. `backoff` defaults to 1 (constant polling).
+   * @example
+   * ```ts
+   * // on tick: do the poll; on success set attempt=0, on failure attempt+1,
+   * // then reschedule — the delay self-adjusts.
+   * return [schedule.poll('rpc', s.attempt, { every: 5000, backoff: 2, max: 60000 }, A.tick())]
+   * ``` */
+  poll: (
+    id: string,
+    attempt: number,
+    opts: { every: number; backoff?: number; max?: number },
+    action: { type: string; payload?: unknown },
+  ): ScheduleEffect => {
+    const factor = opts.backoff ?? 1;
+    const max = opts.max ?? Number.MAX_SAFE_INTEGER;
+    const ms = attempt <= 0
+      ? opts.every
+      : Math.min(opts.every * Math.pow(factor, attempt), max);
+    return {
+      type: "__schedule",
+      kind: "after",
+      id,
+      ms: Math.max(1, Math.round(ms)),
+      action,
+    };
+  },
   cancel: (id: string): ScheduleEffect => ({
     type: "__schedule",
     kind: "cancel",

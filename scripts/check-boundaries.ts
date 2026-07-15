@@ -8,7 +8,7 @@
 const ALLOWED: Record<string, string[]> = {
   // isomorphic core — must stay dependency-light
   state: ["diagnostics", "protocol", "sync"], // sync: type-only cell config
-  protocol: ["state", "diagnostics", "vitals"],
+  protocol: ["state", "diagnostics", "vitals", "sync"], // sync: cell sync-config normalization
   diagnostics: ["state", "protocol", "vitals"],
   // UI (browser + SSR) — never server
   air: ["state", "protocol", "diagnostics", "browser", "vitals", "testing"],
