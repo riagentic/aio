@@ -25,6 +25,7 @@ import {
   buildFlows,
   detectForeignActions,
   extractForUser,
+  extractPublicFields,
   normalizePersistFilter,
   normalizeUiFilter,
   validateFieldFilters,
@@ -279,6 +280,7 @@ export function createCellFromMethods<
     persist: normalizePersistFilter(config.persist),
     ui: normalizeUiFilter(config.ui),
     uiForUser: extractForUser(config.ui),
+    uiPublicFields: extractPublicFields(config.ui),
     syncConfig: config.sync ? normalizeSyncConfig(config.sync) : undefined,
     version: config.version ?? 0,
     onMigrate: config.onMigrate as

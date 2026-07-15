@@ -86,6 +86,29 @@ export function validateFieldFilters(
   };
   check("ui", ui);
   check("persist", persist);
+  // publicFields must name real fields too — a typo'd opt-out silently fails to
+  // opt out (the secret warning keeps firing, or worse, masks a rename).
+  for (const key of extractPublicFields(ui) ?? []) {
+    if (!stateKeys.has(key) && !key.startsWith("__aio")) {
+      throw new Error(
+        `[cell:${name}] ui.publicFields names "${key}", but it is not a state ` +
+          `field of this cell. Declared state: ${
+            [...stateKeys].join(", ") || "(none)"
+          }. Check the spelling.`,
+      );
+    }
+  }
+}
+
+/** Extract `publicFields` from a ui config — the explicit "these look secret
+ *  but are public" acknowledgement (silences the secret-exposure heuristic). */
+export function extractPublicFields(
+  // deno-lint-ignore no-explicit-any
+  ui: CellVisibility<string, any> | undefined,
+): string[] | undefined {
+  if (!ui || ui === "all" || ui === "none") return undefined;
+  const pf = (ui as { publicFields?: unknown }).publicFields;
+  return Array.isArray(pf) ? pf.filter((k): k is string => typeof k === "string") : undefined;
 }
 
 /** Normalize ui config into CellFieldFilter (strip forUser) */
