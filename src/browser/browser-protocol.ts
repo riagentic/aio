@@ -346,7 +346,10 @@ export const client: {
 
 // ── ensureConnected ─────────────────────────────────────────────────
 
-import { bindAllCellsReactive } from "../state/cell-reactive.ts";
+import {
+  bindAllCellsReactive,
+  getRegisteredCells,
+} from "../state/cell-reactive.ts";
 import { _installReadOnlyHint } from "../air/dev-readonly-hint.ts";
 
 let _ensured = false;
@@ -355,10 +358,59 @@ export function ensureConnected(): void {
   _ensured = true;
   // AIO-4.4: install the read-only dev hint on first connect.
   _installReadOnlyHint();
-  bindAllCellsReactive(
-    _clientSend ?? undefined,
-  );
+  // Sync cells route method calls through the CRDT engine (HLC op + offline
+  // queue) instead of the plain action path; everything else is unchanged.
+  // The engine boots lazily below — early calls fall through to plain send,
+  // which the server also accepts (normal dispatch).
+  const plainSend = _clientSend ?? undefined;
+  const send = plainSend
+    ? (action: { type: string; payload?: unknown }) => {
+      if (_syncRoute && _syncRoute(action)) return;
+      plainSend(action);
+    }
+    : undefined;
+  bindAllCellsReactive(send);
+  _initSyncIfNeeded();
   _callConnectFn();
+}
+
+// ── Sync engine wiring (lazy — only when a registered cell has sync) ──
+let _syncRoute: ((a: { type: string; payload?: unknown }) => boolean) | null =
+  null;
+function _initSyncIfNeeded(): void {
+  let hasSync = false;
+  for (const def of getRegisteredCells().values()) {
+    if (def.__aio.syncConfig) {
+      hasSync = true;
+      break;
+    }
+  }
+  if (!hasSync) return;
+  // Dynamic import keeps the engine out of apps that don't use sync.
+  import("./browser-sync.ts").then((mod) => {
+    const engine = mod.initBrowserSync((raw) => _sendRawViaTransport(raw));
+    if (!engine) return;
+    _syncRoute = mod.handleSyncLocalAction;
+    _setSyncWiring(mod.handleSyncMessage, mod.setSyncOnline);
+  }).catch((e) => console.warn(`[aio:sync] engine init failed: ${e}`));
+}
+
+// Late-bound transport hooks — browser-air-transport registers these so this
+// module stays transport-agnostic.
+let _sendRawViaTransport: (raw: string) => void = () => {};
+let _setSyncWiring: (
+  onMsg: (m: Record<string, unknown>) => void,
+  onOnline: (v: boolean) => void,
+) => void = () => {};
+export function _registerSyncTransport(
+  sendRaw: (raw: string) => void,
+  setWiring: (
+    onMsg: (m: Record<string, unknown>) => void,
+    onOnline: (v: boolean) => void,
+  ) => void,
+): void {
+  _sendRawViaTransport = sendRaw;
+  _setSyncWiring = setWiring;
 }
 export function _resetEnsured(): void {
   _ensured = false;

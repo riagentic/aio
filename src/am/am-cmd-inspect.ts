@@ -485,6 +485,76 @@ export async function cmdHealth(
   }
 }
 
+/** `am discover [--timeout=ms]` — list exposed aio apps on the LAN via UDP
+ *  broadcast discovery (node:dgram — no flags needed).
+ *  Shows each app's name, IP, port, ready URL, and whether auth is required. */
+export async function cmdDiscover(
+  args: string[],
+  flags: GlobalFlags,
+): Promise<void> {
+  const mode = detectMode(flags);
+  const { discoverAioApps } = await import("../server/discovery.ts");
+  const tArg = args.find((a) => a.startsWith("--timeout="));
+  const timeoutMs = tArg ? Number(tArg.slice(10)) : 1500;
+  const apps = await discoverAioApps({ timeoutMs });
+  if (mode === "json") {
+    out(apps, mode);
+    return;
+  }
+  if (apps.length === 0) {
+    out(
+      "no aio apps found on the LAN.\n" +
+        "  (apps must run with --expose; UDP is blocked on some networks — " +
+        "type the address manually if you know it)",
+      mode,
+    );
+    return;
+  }
+  const lines = apps.map((a) =>
+    `  ${a.name}${a.title && a.title !== a.name ? ` (${a.title})` : ""}\n` +
+    `    ${a.url}${a.needsAuth ? "  \u26bf auth required" : ""}`
+  );
+  const hint = apps.some((a) => a.needsAuth)
+    ? "\n\u26bf apps pair by the 6-digit code they print at startup \u2014 enter it in " +
+      "the aio client, or export a profile on the host with `am profile`."
+    : "";
+  console.log(
+    `found ${apps.length} aio app(s) on the LAN:\n${lines.join("\n")}${hint}`,
+  );
+}
+
+/** `am profile [--out=file]` — export the running app's discovery profile
+ *  (.aioapp): name, port, TLS cert to pin, and auth key. Hand the file to a
+ *  user; the aio client imports it once and connects forever. */
+export async function cmdProfile(
+  args: string[],
+  flags: GlobalFlags,
+): Promise<void> {
+  const mode = detectMode(flags);
+  const appId = resolveAmAppId(flags.app);
+  const { buildLocalProfile } = await import("../server/profile.ts");
+  const profile = buildLocalProfile(appId);
+  if (!profile) {
+    outError(
+      `no running app "${appId}" found — start it (with --expose) first, ` +
+        `or pass --app=<id>`,
+      mode,
+    );
+    Deno.exit(1);
+  }
+  const outArg = args.find((a) => a.startsWith("--out="));
+  if (outArg) {
+    const file = outArg.slice(6);
+    await Deno.writeTextFile(file, JSON.stringify(profile, null, 2));
+    out(
+      mode === "pretty" ? `wrote ${file}` : { ok: true, file },
+      mode,
+    );
+    return;
+  }
+  out(profile, mode);
+}
+
 export async function cmdConfig(
   _args: string[],
   flags: GlobalFlags,

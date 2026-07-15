@@ -9,6 +9,9 @@ await aio.run({
   cells: [counter],
   client: "server-only",
   baseDir: import.meta.dirname!,
-  // Exposed servers (--expose) authenticate — uncomment to pin tokens:
+  // A remote service, so it opts into auth: `key: true` = a persisted key
+  // (only enforced under `--expose`; inert on localhost). `--expose` prints a
+  // share token + a pair code the aio client enters once. For per-user tokens:
   // users: { "change-me-token": { id: "admin", role: "admin" } },
+  key: true,
 });

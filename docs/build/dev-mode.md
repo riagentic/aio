@@ -21,7 +21,7 @@ deno task dev --port=3000 --client=browser --no-persist --title="My App"
 | `--prod`           | Force prod mode — serve pre-built `dist/app.js` (auto-detected in compiled binaries)               |
 | `--width=N`        | Override Electron window width (default: 800)                                                      |
 | `--height=N`       | Override Electron window height (default: 600)                                                     |
-| `--expose`         | Bind `0.0.0.0` + auto-HTTPS + auth token — share app with other devices on LAN                     |
+| `--expose`         | Bind `0.0.0.0` + auto-HTTPS — share app with other devices on LAN (no auth by default; `key: true` opts in) |
 | `--cert=PATH`      | TLS certificate file (PEM) — used with `--expose` (auto-generated if omitted)                      |
 | `--key=PATH`       | TLS private key file (PEM) — used with `--expose` (auto-generated if omitted)                      |
 | `--transport=X`    | Transport mode: `uds`, `ws`, or `auto` (default: `auto`)                                           |

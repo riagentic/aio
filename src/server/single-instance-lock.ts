@@ -17,6 +17,10 @@ export type LockData = {
   cwd: string; // working directory (for am/instances display)
   socketPath?: string; // UDS socket path (when using UDS transport)
   trojanPort?: number; // plain-HTTP control port (when TLS active)
+  // LAN-discovery metadata — present only for --expose'd apps, so any
+  // discovery responder on the host can report EVERY exposed app (not just
+  // itself) by reading the lock dir. See src/server/discovery.ts.
+  discovery?: { title?: string; tls: boolean; needsAuth: boolean };
 };
 
 /** Instance info returned by instances() — lock data + liveness */

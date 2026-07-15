@@ -71,13 +71,16 @@ Deno.test({
       const decoder = new TextDecoder();
       let buf = "";
       let token: string | null = null;
+      let pin: string | null = null;
       const deadline = Date.now() + 30_000;
-      while (Date.now() < deadline && token === null) {
+      while (Date.now() < deadline && (token === null || pin === null)) {
         const { value, done } = await reader.read();
         if (done) break;
         buf += decoder.decode(value, { stream: true });
         const m = buf.match(/share:\s+\S+\?token=([\w-]+)/);
         if (m) token = m[1]!;
+        const pm = buf.match(/pair code:\s+(\d{6})/);
+        if (pm) pin = pm[1]!;
       }
       // Keep draining stdout so the child never blocks on a full pipe.
       (async () => {
@@ -86,11 +89,29 @@ Deno.test({
         } catch { /* closed */ }
       })();
       assert(token, `no share token in boot output:\n${buf.slice(-2000)}`);
+      assert(pin, `no pair code in boot output:\n${buf.slice(-2000)}`);
 
       // Trust the auto-generated self-signed cert — its SANs must include
       // the LAN IP or this fetch fails hostname verification.
       const certPem = await Deno.readTextFile(`${dir}/.aio-tls/tls-cert.pem`);
       client = Deno.createHttpClient({ caCerts: [certPem] });
+
+      // PIN pairing over the REAL interface — the client's exact flow: submit
+      // the code, get the profile (cert + key) back, and the key must be the
+      // same token the server authenticates with.
+      const pair = await fetch(`https://${LAN_IP}:${port}/__aio/pair`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ pin }),
+        client,
+      } as RequestInit & { client: Deno.HttpClient });
+      assert(pair.ok, `pair over LAN failed: ${pair.status}`);
+      const profile = await pair.json() as { key?: string; cert?: string };
+      assert(profile.key === token, "paired key must match the share token");
+      assert(
+        (profile.cert ?? "").includes("BEGIN CERTIFICATE"),
+        "profile must carry the cert to pin",
+      );
 
       // The page must serve over the REAL network interface, not loopback.
       const res = await fetch(

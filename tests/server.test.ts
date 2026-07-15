@@ -6,6 +6,7 @@ import {
   createServer,
 } from "../src/server/server.ts";
 import { join } from "@std/path";
+import { clearPairing, generatePin } from "../src/server/pairing.ts";
 
 const TEST_PORT = 19800;
 
@@ -217,6 +218,62 @@ Deno.test("server: expose rejects wrong token with 401", async () => {
     const resp = await fetch(`${url}?token=wrong-token-value`);
     assertEquals(resp.status, 401);
     await resp.body?.cancel();
+  });
+});
+
+Deno.test("server: /__aio/pair returns the profile for a valid PIN (bypasses key gate)", async () => {
+  await withExposedServer(async (url, token) => {
+    const pin = generatePin();
+    try {
+      // No token on the request — the whole point of pairing is to obtain it.
+      const resp = await fetch(`${url}/__aio/pair`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ pin }),
+      });
+      assertEquals(resp.status, 200);
+      const profile = await resp.json();
+      assertEquals(profile.aio, 1);
+      assertEquals(profile.key, token); // the key the server authenticates with
+      assertEquals(profile.tls, false); // this harness serves plain HTTP
+      assertEquals(typeof profile.port, "number");
+    } finally {
+      clearPairing();
+    }
+  });
+});
+
+Deno.test("server: /__aio/pair rejects a wrong PIN with 401", async () => {
+  await withExposedServer(async (url) => {
+    generatePin();
+    try {
+      const resp = await fetch(`${url}/__aio/pair`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ pin: "000000" }),
+      });
+      assertEquals(resp.status, 401);
+      await resp.body?.cancel();
+    } finally {
+      clearPairing();
+    }
+  });
+});
+
+Deno.test("server: /__aio/pair rejects a malformed body with 400", async () => {
+  await withExposedServer(async (url) => {
+    generatePin();
+    try {
+      const resp = await fetch(`${url}/__aio/pair`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: "not json",
+      });
+      assertEquals(resp.status, 400);
+      await resp.body?.cancel();
+    } finally {
+      clearPairing();
+    }
   });
 });
 

@@ -9,6 +9,9 @@ await aio.run({
   cells: [counter],
   ui: { title: "ex-browser-remote" },
   baseDir: import.meta.dirname!,
-  // Exposed servers (--expose) authenticate — uncomment to pin tokens:
+  // A remote example, so it opts into auth: `key: true` = a persisted key
+  // (stable across restarts). `--expose` prints a share token + a pair code
+  // the aio client enters once. For per-user tokens instead:
   // users: { "change-me-token": { id: "admin", role: "admin" } },
+  key: true,
 });

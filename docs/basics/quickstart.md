@@ -46,7 +46,7 @@ import { aio, cell } from "aio";
 
 ## Prerequisites
 
-- [Deno 2.6+](https://deno.land)
+- [Deno 2.9+](https://deno.land) (aio tracks the latest stable Deno)
 - Electron (optional): `deno task install:electron`
 
 ## deno.json
@@ -318,7 +318,7 @@ something and re-read state), see
 
 - **First step, always:** `deno task doctor` — emitted by every scaffold (or
   `deno run -A dep/aio/src/server/doctor.ts` vendored,
-  `jsr:@riagentic/aio@1.0.0-alpha19/doctor`). Validates the magic deno.json
+  `jsr:@riagentic/aio@1.0.0-alpha20/doctor`). Validates the magic deno.json
   lines (jsx, jsxImportSource, import map entries, kv, electron nodeModulesDir,
   Deno version) with a one-line fix per failure.
 

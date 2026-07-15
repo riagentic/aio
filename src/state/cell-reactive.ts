@@ -29,6 +29,19 @@ export function _resetCellRegistry(): void {
   _cellRegistry.clear();
 }
 
+/**
+ * Clear per-cell binding state so registered cells can re-bind to a fresh app
+ * on the next mount — WITHOUT dropping the registry. Cells are module
+ * singletons that bind once ("already bound" guard); a hermetic re-mount must
+ * release them so their methods/getters rewire to the new runtime.
+ */
+export function _resetCellBindings(): void {
+  for (const def of _cellRegistry.values()) {
+    (def.__aio as Record<string, unknown>).bound = false;
+    _reactivelyBound.delete(def);
+  }
+}
+
 // ── Reactive binding ─────────────────────────────────────────────────
 
 const _reactivelyBound = new WeakSet<CellDef>();

@@ -191,6 +191,7 @@ export async function setupTransport<S, A>(
     }
     : createServer({
       port,
+      appId,
       clientCounter,
       title,
       vitalsSystem,

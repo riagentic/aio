@@ -107,29 +107,52 @@ export const CONNECT_HTML = `<!DOCTYPE html>
     body {
       font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
       background: #1a1a2e; color: #e0e0e0;
-      display: flex; align-items: center; justify-content: center;
-      height: 100vh; user-select: none;
+      display: flex; align-items: flex-start; justify-content: center;
+      min-height: 100vh; user-select: none; padding: 3rem 1rem;
     }
-    .card { text-align: center; padding: 2rem 2.5rem; }
+    .card { width: 100%; max-width: 420px; }
     h1 {
       font-size: 1.8rem; font-weight: 300; letter-spacing: 0.1em;
-      color: #4a9eff; margin-bottom: 1.5rem;
+      color: #4a9eff; margin-bottom: 1.5rem; text-align: center;
     }
     form { display: flex; gap: 0.5rem; }
     input {
       flex: 1; padding: 0.6rem 1rem; font-size: 0.95rem;
       background: #16213e; border: 1px solid #333; border-radius: 6px;
-      color: #e0e0e0; outline: none; width: 260px;
+      color: #e0e0e0; outline: none; min-width: 0;
     }
     input:focus { border-color: #4a9eff; }
     input::placeholder { color: #666; }
     button {
       padding: 0.6rem 1.2rem; font-size: 0.95rem;
       background: #4a9eff; border: none; border-radius: 6px;
-      color: white; cursor: pointer;
+      color: white; cursor: pointer; white-space: nowrap;
     }
     button:hover { background: #3a8eef; }
-    #err { margin-top: 1rem; font-size: 0.85rem; color: #f44; min-height: 1.2em; }
+    #err { margin-top: 1rem; font-size: 0.85rem; color: #f44; min-height: 1.2em; text-align: center; }
+    .section { margin-top: 1.75rem; }
+    .section h2 {
+      font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.12em;
+      color: #6b7a99; margin-bottom: 0.6rem; display: flex; align-items: center; gap: 0.5rem;
+    }
+    .dot { width: 7px; height: 7px; border-radius: 50%; background: #3ecf8e; display: inline-block; }
+    .dot.scanning { background: #4a9eff; animation: pulse 1s infinite; }
+    @keyframes pulse { 0%,100% { opacity: 1 } 50% { opacity: 0.3 } }
+    .app {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 0.6rem 0.8rem; background: #16213e; border: 1px solid #26304d;
+      border-radius: 8px; margin-bottom: 0.4rem; cursor: pointer;
+    }
+    .app:hover { border-color: #4a9eff; background: #1b2947; }
+    .app .name { font-size: 0.95rem; color: #e0e0e0; }
+    .app .meta { font-size: 0.78rem; color: #6b7a99; margin-top: 0.15rem; }
+    .app .badge { font-size: 0.7rem; color: #d9a441; }
+    .empty { font-size: 0.82rem; color: #55617d; padding: 0.3rem 0; }
+    .row { display: flex; align-items: center; gap: 0.4rem; }
+    .del { color: #55617d; font-size: 0.8rem; padding: 0 0.3rem; }
+    .del:hover { color: #f44; }
+    .pairform { flex: 1; display: flex; gap: 0.4rem; }
+    .pairform input { padding: 0.5rem 0.7rem; letter-spacing: 0.25em; text-align: center; }
   </style>
 </head>
 <body>
@@ -140,16 +163,87 @@ export const CONNECT_HTML = `<!DOCTYPE html>
       <button type="submit">Connect</button>
     </form>
     <div id="err"></div>
+
+    <div class="section" id="discovered-section" style="display:none">
+      <h2><span class="dot scanning" id="scan-dot"></span> Apps on your network</h2>
+      <div id="discovered"></div>
+    </div>
+
+    <div class="section" id="recents-section" style="display:none">
+      <h2>Recent</h2>
+      <div id="recents"></div>
+    </div>
   </div>
   <script>
+    function go(url) {
+      if (!url) return;
+      if (!url.startsWith('http://') && !url.startsWith('https://')) url = 'http://' + url;
+      try { new URL(url); } catch { document.getElementById('err').textContent = 'Invalid URL'; return; }
+      document.getElementById('err').textContent = '';
+      location.href = url;
+    }
     document.getElementById('f').onsubmit = (e) => {
       e.preventDefault();
-      let val = document.getElementById('addr').value.trim();
-      if (!val) return;
-      if (!val.startsWith('http://') && !val.startsWith('https://')) val = 'http://' + val;
-      try { new URL(val); } catch { document.getElementById('err').textContent = 'Invalid URL'; return; }
-      document.getElementById('err').textContent = '';
-      location.href = val;
+      go(document.getElementById('addr').value.trim());
+    };
+    function esc(s) { const d = document.createElement('div'); d.textContent = s == null ? '' : String(s); return d.innerHTML; }
+
+    // Filled by the Electron main process (see electron-client-script). In a
+    // plain browser these stay empty and only the manual field shows.
+    function appRow(a, extra) {
+      const badge = a.needsAuth ? '<span class="badge">\\u26bf auth</span>' : '';
+      const sub = esc(a.url || a.host + ':' + a.port);
+      const data = 'data-url="' + esc(a.url) + '" data-host="' + esc(a.host || '') +
+        '" data-port="' + esc(a.port) + '" data-tls="' + (a.tls ? '1' : '') +
+        '" data-auth="' + (a.needsAuth ? '1' : '') + '"';
+      return '<div class="row"><div class="app" ' + data + ' style="flex:1">' +
+        '<div><div class="name">' + esc(a.title || a.name) + '</div><div class="meta">' + sub + '</div></div>' +
+        badge + '</div>' + (extra || '') + '</div>';
+    }
+    // Auth apps with no token yet → pair by PIN. Everything else connects directly.
+    function onAppClick(el) {
+      const url = el.getAttribute('data-url') || '';
+      if (el.getAttribute('data-auth') === '1' && !/[?&]token=/.test(url)) promptPair(el);
+      else go(url);
+    }
+    function promptPair(el) {
+      const host = el.getAttribute('data-host');
+      const port = Number(el.getAttribute('data-port'));
+      const tls = el.getAttribute('data-tls') === '1';
+      const row = el.closest('.row');
+      row.innerHTML = '<form class="pairform">' +
+        '<input class="pin" inputmode="numeric" maxlength="6" placeholder="pair code" spellcheck="false" />' +
+        '<button type="submit">Pair</button></form>';
+      const form = row.querySelector('.pairform');
+      form.onsubmit = (e) => {
+        e.preventDefault();
+        const pin = row.querySelector('.pin').value.trim();
+        if (!/^[0-9]{6}$/.test(pin)) { document.getElementById('err').textContent = 'Enter the 6-digit code shown by the app'; return; }
+        document.getElementById('err').textContent = 'Pairing\\u2026';
+        location.href = 'aio-pair:' + encodeURIComponent(JSON.stringify({ host, port, tls, pin }));
+      };
+      row.querySelector('.pin').focus();
+    }
+    window.__aioSetDiscovered = function(apps) {
+      const sec = document.getElementById('discovered-section');
+      const box = document.getElementById('discovered');
+      sec.style.display = 'block';
+      if (!apps || !apps.length) { box.innerHTML = '<div class="empty">searching\\u2026</div>'; return; }
+      box.innerHTML = apps.map((a) => appRow(a)).join('');
+      box.querySelectorAll('.app').forEach((el) => el.onclick = () => onAppClick(el));
+    };
+    window.__aioScanDone = function() { const d = document.getElementById('scan-dot'); if (d) d.classList.remove('scanning'); };
+    window.__aioSetRecents = function(items) {
+      const sec = document.getElementById('recents-section');
+      const box = document.getElementById('recents');
+      if (!items || !items.length) { sec.style.display = 'none'; return; }
+      sec.style.display = 'block';
+      box.innerHTML = items.map((a) => appRow(a, '<span class="del" data-del="' + esc(a.url) + '">\\u2715</span>')).join('');
+      box.querySelectorAll('.app').forEach((el) => el.onclick = () => onAppClick(el));
+      box.querySelectorAll('.del').forEach((el) => el.onclick = (e) => {
+        e.stopPropagation();
+        location.href = 'aio-forget:' + encodeURIComponent(el.getAttribute('data-del'));
+      });
     };
   </script>
 </body>

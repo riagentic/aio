@@ -4,7 +4,7 @@ Build targets follow `compile:<shell>:<topology>` — two axes: **shell** (what
 renders the UI) x **topology** (local or remote).
 
 - **Local** (default) — self-contained binary, 127.0.0.1 or client-locked
-- **Remote** — exposed server (0.0.0.0 + auth) or client-only binary
+- **Remote** — exposed server (0.0.0.0, optional `key` auth) or client-only binary
 
 ```
                     local (default)              remote

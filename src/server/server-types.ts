@@ -21,6 +21,7 @@ export interface ServerConfig {
   debug: (msg: string) => void;
   prod?: boolean; // serve pre-built dist/ instead of live-transpiling
   distDir?: string; // absolute path to dist/ (required when prod=true)
+  appId?: string; // app identity — for the discovery profile endpoint
   expose?: boolean; // bind 0.0.0.0 instead of 127.0.0.1
   token?: string; // access token required when expose=true (no users)
   cert?: string; // PEM cert string — enables HTTPS when set (auto-generated when --expose)

@@ -65,6 +65,18 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
   // Per-cell async mutex — serializes all state mutations (local, ack, remote, sync)
   const _locks = new Map<string, Promise<void>>();
 
+  // A buggy reducer that returns undefined does so for EVERY op of that
+  // action — warn once per cell:action instead of flooding on every ack/op.
+  const _warnedUndef = new Set<string>();
+  function _warnUndefReducer(cell: string, action: string): void {
+    const key = `${cell}:${action}`;
+    if (_warnedUndef.has(key)) return;
+    _warnedUndef.add(key);
+    console.warn(
+      `[aio:sync] reducer returned undefined for action "${action}" in cell "${cell}". Expected state object or null. (logged once)`,
+    );
+  }
+
   for (const cell of Object.keys(deps.cells)) {
     statuses.set(cell, { status: "online", pending: 0, lastSync: 0 });
   }
@@ -148,12 +160,15 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
         );
         if (pending) {
           const confirmed = deps.getConfirmedState()[cell] ?? {};
-          const next = deps.reducer(confirmed, pending.action, pending.payload);
+          const next = deps.reducer(
+            confirmed,
+            pending.action,
+            pending.payload,
+            cell,
+          );
           // Reducer contract: null = no-op. undefined is treated as a bug.
           if (next === undefined) {
-            console.warn(
-              `[aio:sync] reducer returned undefined for action "${pending.action}" in cell "${cell}". Expected state object or null.`,
-            );
+            _warnUndefReducer(cell, pending.action);
           } else if (next !== null) {
             deps.setConfirmedState(cell, next);
           }
@@ -169,11 +184,9 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
       return withLock(op.cell, async () => {
         clock.receive(op.hlc);
         const confirmed = deps.getConfirmedState()[op.cell] ?? {};
-        const next = deps.reducer(confirmed, op.action, op.payload);
+        const next = deps.reducer(confirmed, op.action, op.payload, op.cell);
         if (next === undefined) {
-          console.warn(
-            `[aio:sync] reducer returned undefined for action "${op.action}" in cell "${op.cell}". Expected state object or null.`,
-          );
+          _warnUndefReducer(op.cell, op.action);
         } else if (next !== null) {
           deps.setConfirmedState(op.cell, next);
         }
@@ -301,7 +314,12 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
           if (ops) {
             for (const op of ops) {
               const confirmed = deps.getConfirmedState()[cell] ?? {};
-              const next = deps.reducer(confirmed, op.action, op.payload);
+              const next = deps.reducer(
+                confirmed,
+                op.action,
+                op.payload,
+                op.cell,
+              );
               if (next !== null) deps.setConfirmedState(cell, next);
             }
             const firstHlc = ops[0]?.hlc;

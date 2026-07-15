@@ -15,6 +15,7 @@ function mockDeps(warnings: string[]): SyncHandlerDeps {
       transaction: async () => [],
       close: async () => {},
     },
+    dispatch: () => {},
     syncCellIds: ["todos"],
     getCellState: () => ({}),
     broadcastRaw: { fn: () => {} },

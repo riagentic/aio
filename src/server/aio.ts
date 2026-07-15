@@ -53,6 +53,8 @@ import { getRegisteredCells } from "../state/cell-reactive.ts";
 import { parseCli, printHelp, VERSION } from "./aio-cli.ts";
 import { findFreePort, isCompiled } from "./paths.ts";
 import { resolveAppId } from "./single-instance-lock.ts";
+import { resolveAppKey } from "./app-key.ts";
+import { assertDenoVersion } from "./deno-version.ts";
 import { dirname, join, resolve } from "@std/path";
 import { lint, printLint } from "./lint.ts";
 import { middleware } from "./middleware.ts";
@@ -157,6 +159,8 @@ async function run<S, A, E>(
 async function run(fc?: CellsConfig): Promise<AioApp<any, any>>;
 // deno-lint-ignore no-explicit-any
 async function run(a: any, b?: any): Promise<AioApp<any, any>> {
+  // Fail fast on an unsupported Deno — aio uses ≥2.9 behavior directly.
+  assertDenoVersion();
   // Legacy API: aio.run(initialState, config)
   if (b !== undefined) {
     if (_running) {
@@ -408,6 +412,7 @@ async function _run<S, A, E>(
   });
   state = boot.state as S;
   const { kvDb, asyncDb, persistence, syncHandler, syncBroadcastRef } = boot;
+  const _syncDispatchRef = boot.syncDispatchRef;
   const { schedulePersist } = persistence;
 
   // Time-travel — dev only
@@ -522,6 +527,8 @@ async function _run<S, A, E>(
     log,
     debug: VERBOSE,
   });
+  // Sync ops apply through the normal dispatch path (late-bound at boot).
+  _syncDispatchRef.fn = (a) => dispatch(a as unknown as A);
 
   const freezeEnabled = config.freezeState ?? !prod;
   log.info(
@@ -545,6 +552,10 @@ async function _run<S, A, E>(
     });
   }
 
+  // LAN discovery responder — late-bound (started in startLifecycle when
+  // exposed), stopped by the shutdown orchestrator.
+  const discoveryRef: { stop: (() => void) | null } = { stop: null };
+
   // Shutdown orchestrator
   const { shutdown } = createShutdownOrchestrator({
     flushPersist: persistence.flushPersist,
@@ -565,6 +576,7 @@ async function _run<S, A, E>(
     clearUdsThrottle: udsCtrl.clearThrottle,
     getUdsHandle: () => udsHandle,
     getServer: () => server,
+    getDiscoveryStop: () => discoveryRef.stop,
     asyncDb,
     kvDb,
     setRunning: (v: boolean) => {
@@ -599,9 +611,10 @@ async function _run<S, A, E>(
   const _resolveUser = config.resolveUser
     ? (tok: string) => config.resolveUser!(tok, state)
     : undefined;
-  const token = (expose && !users && !_resolveUser)
-    ? crypto.randomUUID()
-    : undefined;
+  const _keyRes = (expose && !users && !_resolveUser)
+    ? resolveAppKey(appId, (config as { key?: string | boolean }).key)
+    : { key: undefined, persisted: false, explicit: false };
+  const token = _keyRes.key;
   const clientCounter = { value: 0 };
   const udsRef = { current: null as UDSHandle | null };
 
@@ -699,6 +712,10 @@ async function _run<S, A, E>(
     setElectronProc: (proc) => {
       _electronProc = proc;
     },
+    setDiscoveryStop: (stop) => {
+      discoveryRef.stop = stop;
+    },
+    appLock,
     log,
   });
 

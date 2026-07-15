@@ -9,6 +9,9 @@ import type { TlsCert } from "./tls.ts";
 import type { AioUser } from "./aio.ts";
 import { VERSION } from "./aio-cli.ts";
 import { diagEmit } from "../diagnostics/diagnostic-bus.ts";
+import { discoverySupported, startDiscoveryResponder } from "./discovery.ts";
+import { instances } from "./single-instance-lock.ts";
+import { generatePin } from "./pairing.ts";
 import type { Log } from "../diagnostics/logger.ts";
 import type { DB } from "../db/mod.ts";
 import type { ScheduleDef } from "../state/schedule.ts";
@@ -69,6 +72,12 @@ export interface LifecycleDeps<S, A> {
   // Shutdown & electron
   shutdown: () => Promise<void>;
   setElectronProc: (proc: Deno.ChildProcess | null) => void;
+  /** Register the LAN-discovery responder stopper (called on shutdown). */
+  setDiscoveryStop: (stop: (() => void) | null) => void;
+  /** App lock — used to stamp discovery metadata for LAN discovery. */
+  appLock:
+    | { update?: (partial: Record<string, unknown>) => void }
+    | null;
   log: Log;
 }
 
@@ -221,9 +230,46 @@ export function startLifecycle<S, A>(deps: LifecycleDeps<S, A>): void {
     }
   } else if (expose && token) {
     log.warn(
-      `--expose: bound to 0.0.0.0 — token auth only, origin checks disabled, token changes on restart`,
+      `--expose: bound to 0.0.0.0 — key auth, origin checks disabled`,
     );
     log.info(`share: ${url}?token=${token}`);
+    // Friendly pairing: the aio client enters this code once to pull the
+    // profile (cert + key) and connect forever — no file to hand over.
+    const pin = generatePin();
+    log.info(`pair code: ${pin}  (enter it in the aio client → Add app)`);
+  }
+
+  // LAN discovery — exposed apps answer UDP broadcast probes so the aio
+  // client (and `am discover`) can find them without knowing the IP/port.
+  // UDP via node:dgram (stable — no flags); best-effort, degrades silently
+  // if the port can't bind or the network blocks broadcast.
+  if (expose && !skipHttp) {
+    // Stamp this app's discovery metadata into its lock file so ANY responder
+    // on the host can report it (the multi-app-per-host solution).
+    deps.appLock?.update?.({
+      discovery: { title, tls: useHttps, needsAuth: !!users || !!token },
+    });
+    // The responder reports EVERY exposed app on the host, read fresh from the
+    // lock registry each probe — see discovery.ts.
+    const responder = startDiscoveryResponder(
+      () =>
+        instances()
+          .filter((i) => i.alive && i.discovery && i.port)
+          .map((i) => ({
+            name: i.appId,
+            port: i.port,
+            title: i.discovery!.title,
+            needsAuth: i.discovery!.needsAuth,
+            tls: i.discovery!.tls,
+          })),
+      (msg) => log.debug(msg),
+    );
+    deps.setDiscoveryStop(responder.stop);
+    if (discoverySupported()) {
+      log.debug(`discovery: advertising ${appId} on LAN (:${port})`);
+    }
+  } else {
+    deps.setDiscoveryStop(null);
   }
 
   // Validate keepServer

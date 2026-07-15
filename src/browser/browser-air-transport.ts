@@ -21,6 +21,7 @@ import {
   _setSubscribeTriggers,
   _setTeardownFn,
 } from "./browser-protocol.ts";
+import { _registerSyncTransport } from "./browser-protocol.ts";
 import {
   type AioIPCBridge,
   buildWsUrl,
@@ -72,6 +73,17 @@ function _handleState(data: Record<string, unknown>) {
   _incStateVersion();
   if (_coreHasState()) _resolveStateReady();
 }
+
+// Register with the sync-engine seam: raw sends for __op/__sync envelopes,
+// and the wiring setter that plugs the engine into message + online events.
+_registerSyncTransport(
+  (raw) => _sendRaw(raw),
+  (onMsg, onOnline) => {
+    setSyncMessageHandler(onMsg);
+    _syncOnline = onOnline;
+  },
+);
+let _syncOnline: ((v: boolean) => void) | null = null;
 
 function _sendRaw(msg: string): void {
   if (_ws && _ws.readyState === WebSocket.OPEN) {
@@ -133,6 +145,7 @@ function _connectIPC() {
     _wasConnected = true;
     _coreSetTransport({ send: (d: string) => _ipc!.send(d), close: () => {} });
     _coreSetConnected(true);
+    _syncOnline?.(true);
     _coreResendSubs();
     _flushQueue((d) => _ipc!.send(d));
     if (!_ipcPingTimer) {
@@ -151,6 +164,7 @@ function _connectIPC() {
     _connecting = false;
     _coreSetTransport(null);
     _coreSetConnected(false);
+    _syncOnline?.(false);
     if (_ipcPingTimer) {
       clearInterval(_ipcPingTimer);
       _ipcPingTimer = null;
@@ -175,6 +189,7 @@ function _connect() {
     _retry = 0;
     _coreSetTransport({ send: (d) => ws.send(d), close: () => ws.close() });
     _coreSetConnected(true);
+    _syncOnline?.(true);
     const ua = typeof navigator !== "undefined" &&
       /electron/i.test(navigator.userAgent);
     ws.send("__type:" + (ua ? "electron" : "browser"));
@@ -194,6 +209,7 @@ function _connect() {
     _ws = null;
     _coreSetTransport(null);
     _coreSetConnected(false);
+    _syncOnline?.(false);
     if (_closed) return;
     _connecting = true;
     if (_wasConnected) _status("Reconnecting\u2026");
