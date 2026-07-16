@@ -435,7 +435,11 @@ Deno.test("schedule.backoff: exponential growth, capped at max (risoto #4)", () 
 });
 
 Deno.test("schedule.next: defers to next tick (mdview 1ms-defer wart)", () => {
-  const e = schedule.next("rescan", { type: "rescan" }) as { kind: string; ms: number; id: string };
+  const e = schedule.next("rescan", { type: "rescan" }) as {
+    kind: string;
+    ms: number;
+    id: string;
+  };
   assertEquals(e.kind, "after");
   assertEquals(e.ms, 1);
   assertEquals(e.id, "rescan");
@@ -445,16 +449,39 @@ Deno.test("schedule.poll: constant while healthy, backs off on failure (risoto #
   const A = { type: "tick" };
   // healthy (attempt 0) → the base interval
   assertEquals(
-    (schedule.poll("rpc", 0, { every: 5000, backoff: 2, max: 60000 }, A) as { ms: number }).ms,
+    (schedule.poll("rpc", 0, { every: 5000, backoff: 2, max: 60000 }, A) as {
+      ms: number;
+    }).ms,
     5000,
   );
   // failing → grows every * backoff^attempt, capped at max
-  assertEquals((schedule.poll("rpc", 1, { every: 5000, backoff: 2, max: 60000 }, A) as { ms: number }).ms, 10000);
-  assertEquals((schedule.poll("rpc", 3, { every: 5000, backoff: 2, max: 60000 }, A) as { ms: number }).ms, 40000);
-  assertEquals((schedule.poll("rpc", 5, { every: 5000, backoff: 2, max: 60000 }, A) as { ms: number }).ms, 60000); // capped
+  assertEquals(
+    (schedule.poll("rpc", 1, { every: 5000, backoff: 2, max: 60000 }, A) as {
+      ms: number;
+    }).ms,
+    10000,
+  );
+  assertEquals(
+    (schedule.poll("rpc", 3, { every: 5000, backoff: 2, max: 60000 }, A) as {
+      ms: number;
+    }).ms,
+    40000,
+  );
+  assertEquals(
+    (schedule.poll("rpc", 5, { every: 5000, backoff: 2, max: 60000 }, A) as {
+      ms: number;
+    }).ms,
+    60000,
+  ); // capped
   // default backoff = 1 → constant polling regardless of attempt
-  assertEquals((schedule.poll("rpc", 4, { every: 3000 }, A) as { ms: number }).ms, 3000);
-  const e = schedule.poll("rpc", 0, { every: 1000 }, A) as { kind: string; id: string };
+  assertEquals(
+    (schedule.poll("rpc", 4, { every: 3000 }, A) as { ms: number }).ms,
+    3000,
+  );
+  const e = schedule.poll("rpc", 0, { every: 1000 }, A) as {
+    kind: string;
+    id: string;
+  };
   assertEquals(e.kind, "after");
   assertEquals(e.id, "rpc");
 });

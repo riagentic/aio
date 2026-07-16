@@ -270,7 +270,11 @@ Deno.test("bindCellReactive without sendFn leaves method as unbound guard", () =
       true,
     );
   }
-  assertEquals(threw, true, "unbound method call must throw, not silently no-op");
+  assertEquals(
+    threw,
+    true,
+    "unbound method call must throw, not silently no-op",
+  );
   // The action descriptor is still reachable for schedules/tests.
   // deno-lint-ignore no-explicit-any
   assertEquals(typeof (c.__aio.actions.increment as any).type, "string");

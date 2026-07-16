@@ -28,8 +28,8 @@ import {
   extractPublicFields,
   normalizePersistFilter,
   normalizeUiFilter,
-  validateFieldFilters,
   scopeSelectors,
+  validateFieldFilters,
 } from "./cell-helpers.ts";
 import {
   buildMethodsExecutor,
@@ -128,7 +128,12 @@ export function createCellFromMethods<
 
   // Field-filter keys must resolve to real state — a non-matching filter
   // silently leaks (risoto). Fail loud at creation.
-  validateFieldFilters(name, config.state as Record<string, unknown>, config.ui, config.persist);
+  validateFieldFilters(
+    name,
+    config.state as Record<string, unknown>,
+    config.ui,
+    config.persist,
+  );
 
   // Classify methods as sync or async (uses isAsyncFunction — symbol-based, minification-safe)
   const { syncMethods, asyncMethods } = classifyMethods(

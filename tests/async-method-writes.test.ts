@@ -93,9 +93,19 @@ Deno.test("async: concurrent methods don't drop each other's writes", async () =
     state: { a: 0, b: 0 },
     methods: {
       // deno-lint-ignore no-explicit-any
-      async setA(s: any, v: number) { await sleep(3); s.a = v; await sleep(3); s.a = v * 10; },
+      async setA(s: any, v: number) {
+        await sleep(3);
+        s.a = v;
+        await sleep(3);
+        s.a = v * 10;
+      },
       // deno-lint-ignore no-explicit-any
-      async setB(s: any, v: number) { await sleep(3); s.b = v; await sleep(3); s.b = v * 10; },
+      async setB(s: any, v: number) {
+        await sleep(3);
+        s.b = v;
+        await sleep(3);
+        s.b = v * 10;
+      },
     },
   });
   const App = () => h("div", null, `${c.a}/${c.b}`);

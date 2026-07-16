@@ -32,6 +32,12 @@ tracks only what remains.
       leak gate); 30-min run clean. Remaining: the actual 72h run.
 - [ ] **B6 — beta2+ = fixes only** + 2 more field-report apps on the frozen API.
 
+## DX enhancements (P3 — nice-to-have, not gating)
+
+- [ ] **Cells-aware dev watch** (quant Bad #3): auto-restart the server process
+      when a _cell_ file changes (UI already hot-reloads; the dev watcher
+      already detects and warns on cell edits — `server-watcher.ts`).
+
 ## Phase C — 1.0.0 exit criteria (defined now, not negotiated later)
 
 - [ ] **C1** — API snapshot unchanged across ≥2 consecutive betas.

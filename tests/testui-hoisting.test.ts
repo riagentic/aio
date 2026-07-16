@@ -7,8 +7,12 @@ import { testUI } from "../src/testing/ui-test.ts";
 function Inner() {
   return h("div", null, h("input", { t: "watch-pubkey", value: "" }));
 }
-function Middle() { return h("div", null, h(Inner, null)); }
-function App() { return h("div", null, h("h1", null, "T"), h(Middle, null)); }
+function Middle() {
+  return h("div", null, h(Inner, null));
+}
+function App() {
+  return h("div", null, h("h1", null, "T"), h(Middle, null));
+}
 
 Deno.test("t-handle hoists to top level regardless of nesting (risoto #2)", async () => {
   // deno-lint-ignore no-explicit-any

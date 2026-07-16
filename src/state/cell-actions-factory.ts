@@ -31,8 +31,8 @@ import {
   extractPublicFields,
   normalizePersistFilter,
   normalizeUiFilter,
-  validateFieldFilters,
   scopeSelectors,
+  validateFieldFilters,
 } from "./cell-helpers.ts";
 import { createAioError } from "../diagnostics/error.ts";
 import { log } from "../diagnostics/logger.ts";
@@ -78,7 +78,12 @@ export function createCellFromActions<
 
   // Field-filter keys must resolve to real state — a non-matching filter
   // silently leaks (risoto). Fail loud at creation.
-  validateFieldFilters(name, config.state as Record<string, unknown>, config.ui, config.persist);
+  validateFieldFilters(
+    name,
+    config.state as Record<string, unknown>,
+    config.ui,
+    config.persist,
+  );
 
   const machine: MachineConfig | false =
     (config.machine === false || config.machine == null)

@@ -119,7 +119,10 @@ export function Textarea(props: TextareaProps): VNode {
   return h("textarea", {
     ...rest(props, ["invalid", "onInput", "class"]),
     rows: props.rows ?? 3,
-    class: cx(`aio-input aio-textarea${invalid ? " aio-input--invalid" : ""}`, cls),
+    class: cx(
+      `aio-input aio-textarea${invalid ? " aio-input--invalid" : ""}`,
+      cls,
+    ),
     onInput: onInput
       ? (e: Event) => onInput((e.target as HTMLTextAreaElement).value, e)
       : undefined,
@@ -153,7 +156,10 @@ export function Select(props: SelectProps): VNode {
   });
   return h("select", {
     ...rest(props, ["options", "value", "invalid", "onChange", "class"]),
-    class: cx(`aio-input aio-select${invalid ? " aio-input--invalid" : ""}`, cls),
+    class: cx(
+      `aio-input aio-select${invalid ? " aio-input--invalid" : ""}`,
+      cls,
+    ),
     onChange: onChange
       ? (e: Event) => onChange((e.target as HTMLSelectElement).value, e)
       : undefined,
@@ -180,7 +186,12 @@ export function Checkbox(props: CheckboxProps): VNode {
       : undefined,
   });
   if (label == null) return box;
-  return h("label", { class: cx("aio-checkbox-row", cls) }, box, h("span", null, label));
+  return h(
+    "label",
+    { class: cx("aio-checkbox-row", cls) },
+    box,
+    h("span", null, label),
+  );
 }
 
 // ── Field (label + control + error) ──────────────────────────────────
@@ -200,12 +211,29 @@ export function Field(props: FieldProps): VNode {
   const { label, hint, error, required, children, class: cls } = props;
   return h(
     "div",
-    { ...rest(props, ["label", "hint", "error", "required", "children", "class"]), class: cx("aio-field", cls) },
+    {
+      ...rest(props, [
+        "label",
+        "hint",
+        "error",
+        "required",
+        "children",
+        "class",
+      ]),
+      class: cx("aio-field", cls),
+    },
     label != null
-      ? h("label", { class: "aio-field__label" }, label, required ? h("span", { class: "aio-field__req" }, " *") : null)
+      ? h(
+        "label",
+        { class: "aio-field__label" },
+        label,
+        required ? h("span", { class: "aio-field__req" }, " *") : null,
+      )
       : null,
     children,
-    hint != null && !error ? h("div", { class: "aio-field__hint" }, hint) : null,
+    hint != null && !error
+      ? h("div", { class: "aio-field__hint" }, hint)
+      : null,
     error ? h("div", { class: "aio-field__error" }, error) : null,
   );
 }
@@ -251,11 +279,19 @@ export function Table<Row extends Record<string, unknown>>(
     ),
   );
   const body = rows.length === 0
-    ? h("tbody", null, h(
-      "tr",
+    ? h(
+      "tbody",
       null,
-      h("td", { colSpan: columns.length, class: "aio-td aio-table__empty" }, empty ?? "No rows"),
-    ))
+      h(
+        "tr",
+        null,
+        h(
+          "td",
+          { colSpan: columns.length, class: "aio-td aio-table__empty" },
+          empty ?? "No rows",
+        ),
+      ),
+    )
     : h(
       "tbody",
       null,
@@ -277,13 +313,30 @@ export function Table<Row extends Record<string, unknown>>(
         )
       ),
     );
-  return h("table", { ...rest(props, ["columns", "rows", "getKey", "empty", "onRowClick", "class"]), class: cx("aio-table", cls) }, head, body);
+  return h(
+    "table",
+    {
+      ...rest(props, [
+        "columns",
+        "rows",
+        "getKey",
+        "empty",
+        "onRowClick",
+        "class",
+      ]),
+      class: cx("aio-table", cls),
+    },
+    head,
+    body,
+  );
 }
 
 function colStyle<R>(c: Column<R>): Style {
   const s: Style = {};
   if (c.align) s.textAlign = c.align;
-  if (c.width != null) s.width = typeof c.width === "number" ? `${c.width}px` : c.width;
+  if (c.width != null) {
+    s.width = typeof c.width === "number" ? `${c.width}px` : c.width;
+  }
   return s;
 }
 
@@ -300,7 +353,10 @@ export function Card(props: CardProps): VNode {
   const { title, footer, children, class: cls } = props;
   return h(
     "div",
-    { ...rest(props, ["title", "footer", "children", "class"]), class: cx("aio-card", cls) },
+    {
+      ...rest(props, ["title", "footer", "children", "class"]),
+      class: cx("aio-card", cls),
+    },
     title != null ? h("div", { class: "aio-card__title" }, title) : null,
     h("div", { class: "aio-card__body" }, children),
     footer != null ? h("div", { class: "aio-card__footer" }, footer) : null,
@@ -361,7 +417,8 @@ export interface ModalProps extends Common {
  *  right ARIA — the modal/focus primitive apps otherwise re-roll per form. */
 export function Modal(props: ModalProps): VNode | null {
   if (!props.open) return null;
-  const { onClose, title, footer, children, dismissable = true, class: cls } = props;
+  const { onClose, title, footer, children, dismissable = true, class: cls } =
+    props;
 
   // Escape-to-close, DOM-safe (no-op without a document — SSR/tests).
   onMount(() => {
@@ -383,7 +440,15 @@ export function Modal(props: ModalProps): VNode | null {
   return h(
     "div",
     {
-      ...rest(props, ["open", "onClose", "title", "footer", "dismissable", "children", "class"]),
+      ...rest(props, [
+        "open",
+        "onClose",
+        "title",
+        "footer",
+        "dismissable",
+        "children",
+        "class",
+      ]),
       class: cx("aio-modal-backdrop", cls),
       role: "dialog",
       "aria-modal": "true",
@@ -413,7 +478,7 @@ export function Spinner(props: Common = {}): VNode {
 
 // ── Styles ───────────────────────────────────────────────────────────
 
-export { UiStyles, UI_CSS } from "./styles.ts";
+export { UI_CSS, UiStyles } from "./styles.ts";
 
 // Re-export Fragment so `aio/ui` is self-sufficient for grouping.
 export { Fragment };

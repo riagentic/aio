@@ -6,22 +6,23 @@
 
 - **`aio/ui` — a basic component kit.** Button, Input, Textarea, Select,
   Checkbox, Field, Table, Card, Stack/Row, Spinner, and **Modal** (backdrop,
-  Escape, ARIA). Native AIR components that bind to cells with no adapter, themed
-  through `--aio-*` CSS custom properties (light + dark), styles rendered through
-  AIR (SSR/test-safe). Deliberately basic — enough to build a dashboard without
-  importing anything.
+  Escape, ARIA). Native AIR components that bind to cells with no adapter,
+  themed through `--aio-*` CSS custom properties (light + dark), styles rendered
+  through AIR (SSR/test-safe). Deliberately basic — enough to build a dashboard
+  without importing anything.
 - **React components as islands — `reactIsland()`** (exported from `aio/air`).
   Mount any React component with reactive props + clean teardown; aio stays 100%
   React-free (you supply the react/react-dom loaders, so they resolve in your
   build).
 - **`schedule.poll(id, attempt, { every, backoff?, max? }, action)`** — a
-  first-class self-pacing poller: constant while healthy, backs off on failure up
-  to `max`. Replaces the hand-rolled after-chain behind RPC-rate-limit foot-guns.
+  first-class self-pacing poller: constant while healthy, backs off on failure
+  up to `max`. Replaces the hand-rolled after-chain behind RPC-rate-limit
+  foot-guns.
 - **Min Deno version enforced at boot.** aio uses ≥2.9 behavior directly, so it
-  now fails fast with a clear message on older Deno (and `doctor` checks the same
-  floor) instead of failing cryptically mid-run.
-- **No-auth default for `--expose` + PIN pairing for the aio client.** `--expose`
-  auth is now user-friendly and off by default:
+  now fails fast with a clear message on older Deno (and `doctor` checks the
+  same floor) instead of failing cryptically mid-run.
+- **No-auth default for `--expose` + PIN pairing for the aio client.**
+  `--expose` auth is now user-friendly and off by default:
   - **No framework auth by default** — `--expose` binds the LAN with no key, for
     apps that do their own user auth or are deliberately open on a trusted
     network. The old always-on key surprised people; auth is now opt-in.
@@ -59,7 +60,8 @@
   - **No unstable flags** — discovery runs over `node:dgram` (stable in Deno),
     so `deno task dev --expose` and `am discover` need **no `--unstable-net`**.
     Best-effort still: manual entry is always the fallback where UDP is blocked
-    (corporate/guest networks). Discovery gives the address; auth stays separate.
+    (corporate/guest networks). Discovery gives the address; auth stays
+    separate.
 
 - **Offline/CRDT sync is real end-to-end** — the client engine (the
   long-standing missing half of `sync: true`) now auto-wires on connect: local
@@ -78,11 +80,11 @@
   complex wallet app). `testUI` wasn't hermetic — state added in one test leaked
   into the next. Root cause was structural: live state aliased the declared
   initial (shallow-spread seed), and reset swapped signal instances, orphaning
-  reactive getter closures with stale state. Fixed by construction: clone-on-seed
-  (no aliasing), a frozen declared initial (dev — mutation throws at the site),
-  stable signal identity (reset mutates values in place), and a state-only
-  runtime reset that re-binds cells per mount. A property-test harness
-  (`state-immutability.test.ts`) makes the whole class a red gate.
+  reactive getter closures with stale state. Fixed by construction:
+  clone-on-seed (no aliasing), a frozen declared initial (dev — mutation throws
+  at the site), stable signal identity (reset mutates values in place), and a
+  state-only runtime reset that re-binds cells per mount. A property-test
+  harness (`state-immutability.test.ts`) makes the whole class a red gate.
 - **Field filters fail loud instead of leaking.** A `ui`/`persist` filter key
   that matches no state field (a typo, or a nested path in `include`) now throws
   at cell creation — a filter that silently matches nothing used to expose the

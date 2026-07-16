@@ -25,8 +25,8 @@ import { type ComponentFn, h } from "./air/vdom.ts";
 import { bindCell, bindCellReactive, type CellDef } from "./state/cell.ts";
 import { composeCells } from "./state/cell-compose.ts";
 import {
-  _resetCellRegistry,
   _resetCellBindings,
+  _resetCellRegistry,
   getRegisteredCells,
 } from "./state/cell-reactive.ts";
 import { _applyFullState, _resetSignals } from "./state/state-signals.ts";

@@ -1,17 +1,17 @@
 # Secrets & observability — what crosses the wire, what gets recorded
 
-aio's core promise is *"everything through a method is an observable, loggable
-action, and state syncs everywhere."* That's the feature — and, for anything
+aio's core promise is _"everything through a method is an observable, loggable
+action, and state syncs everywhere."_ That's the feature — and, for anything
 secret (keys, seeds, tokens, passwords), it's exactly what you must reason about
 hardest. This page makes the invisible explicit: **what leaves the server, what
 gets recorded, and the blessed patterns for handling secrets.**
 
 ## The two channels a value can escape through
 
-| Channel | What flows | Reaches |
-| --- | --- | --- |
-| **Sync (`ui`)** | Each cell's state slice, filtered by `ui: { include/exclude/forUser }` | **Every connected client** |
-| **Action log** | Every method call's **arguments** + the resulting state patches | Time-travel, dev tools, `am tt`, and any `onAction` hook |
+| Channel         | What flows                                                             | Reaches                                                  |
+| --------------- | ---------------------------------------------------------------------- | -------------------------------------------------------- |
+| **Sync (`ui`)** | Each cell's state slice, filtered by `ui: { include/exclude/forUser }` | **Every connected client**                               |
+| **Action log**  | Every method call's **arguments** + the resulting state patches        | Time-travel, dev tools, `am tt`, and any `onAction` hook |
 
 A field is safe only when it's out of **both**. They're independent:
 
@@ -19,7 +19,7 @@ A field is safe only when it's out of **both**. They're independent:
 cell("settings", {
   state: { theme: "dark", apiKey: "" },
   persist: { exclude: ["apiKey"] }, // not written to the KV store
-  ui: { exclude: ["apiKey"] },      // not synced to clients
+  ui: { exclude: ["apiKey"] }, // not synced to clients
 });
 ```
 
@@ -35,7 +35,7 @@ cell("settings", {
 - **Method arguments are recorded.** `wallet.unlock(passphrase)` puts the
   passphrase in the action log. Instead, take the secret in a **module-level
   function** (not a cell method), derive what you need, and only ever let a
-  *non-secret* result (a boolean, a public key, ciphertext) touch a method.
+  _non-secret_ result (a boolean, a public key, ciphertext) touch a method.
 - **Cell state is synced + persisted.** Keep the plaintext in a module-level
   vault holder (a closure variable), never in `state:`. Put only ciphertext or
   public material in the cell.
@@ -46,12 +46,12 @@ let _key: CryptoKey | null = null;
 
 export async function unlock(passphrase: string): Promise<boolean> {
   _key = await deriveKey(passphrase); // passphrase stays in this module
-  wallet.setUnlocked(true);           // only a boolean crosses the wire/log
+  wallet.setUnlocked(true); // only a boolean crosses the wire/log
   return true;
 }
 export function sign(tx: Tx): Signed {
   if (!_key) throw new Error("locked");
-  return signWith(_key, tx);          // _key never leaves this module
+  return signWith(_key, tx); // _key never leaves this module
 }
 ```
 

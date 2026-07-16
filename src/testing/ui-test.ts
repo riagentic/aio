@@ -670,8 +670,12 @@ async function _mountTestUI(
       let surf: UISurfaceNode | undefined;
       try {
         surf = currentSurface();
-      } catch { /* nothing mounted yet — fall through to lazy component find */ }
-      if (surf && findComponents(surf, name).length > 0) return api.find(name);
+      } catch {
+        /* nothing mounted yet — fall through to lazy component find */
+      }
+      if (surf && findComponents(surf, name).length > 0) {
+        return api.find(name);
+      }
       // risoto #2: hoist a `t`/data-testid element handle to the top level,
       // regardless of nesting — `ui.watchPubkey` instead of the positional
       // `ui.find("Input", 1).watchPubkey`. Requires a UNIQUE match.

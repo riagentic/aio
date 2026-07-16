@@ -7,14 +7,26 @@ import { h, renderToString } from "../src/air/vdom.ts";
 import { testUI } from "../src/testing/ui-test.ts";
 
 const Gradient = () =>
-  h("svg", { viewBox: "0 0 10 10" },
-    h("defs", null,
-      h("linearGradient", { id: "g" },
+  h(
+    "svg",
+    { viewBox: "0 0 10 10" },
+    h(
+      "defs",
+      null,
+      h(
+        "linearGradient",
+        { id: "g" },
         h("stop", { offset: "0%", stopColor: "red", stopOpacity: "0.5" }),
         h("stop", { offset: "100%", stopColor: "blue" }),
       ),
     ),
-    h("rect", { width: 10, height: 10, fill: "url(#g)", strokeWidth: 2, stroke: "black" }),
+    h("rect", {
+      width: 10,
+      height: 10,
+      fill: "url(#g)",
+      strokeWidth: 2,
+      stroke: "black",
+    }),
   );
 
 Deno.test("SVG: client render kebabs known attrs, preserves viewBox", async () => {

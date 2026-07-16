@@ -58,8 +58,11 @@ export function cell<
   // inference, so the typed surface stays scoped to methods.) `Sel` is captured
   // from `config.selectors` so bound selector accessors (`cell.total()`) are
   // type-accessible instead of inert config (risoto).
-  // deno-lint-ignore no-explicit-any
-): CellDef<N, MethodsToCreators<M>, any, S> & DirectCalling<N, M> & SelectorAccessors<Sel> & Readonly<S>;
+): // deno-lint-ignore no-explicit-any
+& CellDef<N, MethodsToCreators<M>, any, S>
+& DirectCalling<N, M>
+& SelectorAccessors<Sel>
+& Readonly<S>;
 /** Define a cell with explicit actions/reduce style — typed action creators + reducer handlers. */
 export function cell<
   N extends string,

@@ -6,7 +6,7 @@ export default function App() {
 
   const connect = () => {
     const target = url.trim();
-    if (target) window.location.href = target;
+    if (target) globalThis.location.href = target;
   };
 
   return (

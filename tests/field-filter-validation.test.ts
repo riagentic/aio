@@ -8,7 +8,12 @@ const C = cell as any;
 
 Deno.test("filter: exclude key not in state throws (would silently leak)", () => {
   assertThrows(
-    () => C("ff1", { state: { pub: 1, encSecretKey: "s" }, methods: {}, ui: { exclude: ["encSecKey"] } }),
+    () =>
+      C("ff1", {
+        state: { pub: 1, encSecretKey: "s" },
+        methods: {},
+        ui: { exclude: ["encSecKey"] },
+      }),
     Error,
     "silently exposing",
   );
@@ -24,7 +29,12 @@ Deno.test("filter: include key not in state throws", () => {
 
 Deno.test("filter: persist exclude typo throws", () => {
   assertThrows(
-    () => C("ff3", { state: { keep: 1, secret: "x" }, methods: {}, persist: { exclude: ["secrets"] } }),
+    () =>
+      C("ff3", {
+        state: { keep: 1, secret: "x" },
+        methods: {},
+        persist: { exclude: ["secrets"] },
+      }),
     Error,
     "silently exposing",
   );
@@ -32,30 +42,53 @@ Deno.test("filter: persist exclude typo throws", () => {
 
 Deno.test("filter: nested path in include throws (unsupported)", () => {
   assertThrows(
-    () => C("ff4", { state: { accounts: [] }, methods: {}, ui: { include: ["accounts.pubKey"] } }),
+    () =>
+      C("ff4", {
+        state: { accounts: [] },
+        methods: {},
+        ui: { include: ["accounts.pubKey"] },
+      }),
     Error,
     "does not support nested",
   );
 });
 
 Deno.test("filter: valid nested exclude is accepted (head resolves)", () => {
-  C("ff5", { state: { accounts: [] }, methods: {}, ui: { exclude: ["accounts.encSecKey"] } });
+  C("ff5", {
+    state: { accounts: [] },
+    methods: {},
+    ui: { exclude: ["accounts.encSecKey"] },
+  });
 });
 
 Deno.test("filter: valid top-level include/exclude accepted", () => {
-  C("ff6", { state: { pub: 1, secret: "s" }, methods: {}, ui: { include: ["pub"] }, persist: { exclude: ["secret"] } });
+  C("ff6", {
+    state: { pub: 1, secret: "s" },
+    methods: {},
+    ui: { include: ["pub"] },
+    persist: { exclude: ["secret"] },
+  });
 });
 
 Deno.test("filter: ui.publicFields naming a non-field throws (typo'd opt-out)", () => {
   assertThrows(
-    () => C("ffp", { state: { a: 1 }, methods: {}, ui: { publicFields: ["notAField"] } }),
+    () =>
+      C("ffp", {
+        state: { a: 1 },
+        methods: {},
+        ui: { publicFields: ["notAField"] },
+      }),
     Error,
     "not a state field",
   );
 });
 
 Deno.test("filter: valid ui.publicFields is accepted", () => {
-  C("ffp2", { state: { pubKey: "", n: 0 }, methods: {}, ui: { publicFields: ["pubKey"] } });
+  C("ffp2", {
+    state: { pubKey: "", n: 0 },
+    methods: {},
+    ui: { publicFields: ["pubKey"] },
+  });
 });
 
 Deno.test("filter: 'all'/'none' and no filter are fine", () => {

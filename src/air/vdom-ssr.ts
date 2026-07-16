@@ -5,10 +5,10 @@ import { resolveSignalProp } from "./signal-binding.ts";
 import {
   camelToKebab as _camelToKebab,
   escapeAttr as _escapeAttr,
-  svgAttrName,
   escapeHtml as _escapeHtml,
   resolveClassName as _resolveClassName,
   styleValue as _styleValue,
+  svgAttrName,
   VOID_ELEMENTS,
 } from "./ssr-utils.ts";
 import type { ComponentFn, VNode } from "./vdom-types.ts";
