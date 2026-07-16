@@ -67,6 +67,6 @@ export default function App() {
 For simple, aio-native UI, prefer [`aio/ui`](kit.md) and plain AIR components —
 islands add a bundle and a second renderer, so use them where they earn it.
 
-> Migrating React *code* (hooks like `useState`/`useEffect`) rather than mounting
-> React *components*? Those compat shims live at `aio/air/compat` — see
+> Migrating React _code_ (hooks like `useState`/`useEffect`) rather than
+> mounting React _components_? Those compat shims live at `aio/air/compat` — see
 > [AIR setup](air-setup.md).

@@ -40,8 +40,8 @@ Everything keys off `--aio-*` tokens with a light + dark default (follows
 
 ## Components
 
-Every component accepts `class`, `style`, and any extra DOM attribute
-(`id`, `aria-*`, `data-*`) as an escape hatch — they never fight your markup.
+Every component accepts `class`, `style`, and any extra DOM attribute (`id`,
+`aria-*`, `data-*`) as an escape hatch — they never fight your markup.
 
 ### Button
 
@@ -71,7 +71,7 @@ Wraps any control with a label, optional hint, and error message:
 ```tsx
 <Field label="Email" required error={errors.email} hint="We never share it">
   <Input value={form.email} onInput={form.setEmail} invalid={!!errors.email} />
-</Field>
+</Field>;
 ```
 
 ### Table
@@ -83,39 +83,58 @@ optional `render`:
 const columns = [
   { key: "name", header: "Name" },
   { key: "role", header: "Role" },
-  { key: "actions", header: "", render: (u) => <Button size="sm" onClick={() => users.remove(u.id)}>×</Button> },
+  {
+    key: "actions",
+    header: "",
+    render: (u) => (
+      <Button size="sm" onClick={() => users.remove(u.id)}>×</Button>
+    ),
+  },
 ];
 
-<Table columns={columns} rows={users.list} getKey={(u) => u.id} empty="No users yet" onRowClick={(u) => open(u)} />
+<Table
+  columns={columns}
+  rows={users.list}
+  getKey={(u) => u.id}
+  empty="No users yet"
+  onRowClick={(u) => open(u)}
+/>;
 ```
 
-For very large datasets, drive `rows` with
-[`useVirtualList`](air-advanced.md) and pass the visible window — the table
-itself stays deliberately simple.
+For very large datasets, drive `rows` with [`useVirtualList`](air-advanced.md)
+and pass the visible window — the table itself stays deliberately simple.
 
 ### Modal
 
-A dialog with backdrop, Escape-to-close, backdrop-click-to-close, and ARIA —
-the primitive apps otherwise re-roll per form. The Escape listener attaches to
-AIR's render document, so it works under `testUI`/SSR too.
+A dialog with backdrop, Escape-to-close, backdrop-click-to-close, and ARIA — the
+primitive apps otherwise re-roll per form. The Escape listener attaches to AIR's
+render document, so it works under `testUI`/SSR too.
 
 ```tsx
-<Modal open={ui.confirmOpen} onClose={() => ui.closeConfirm()} title="Delete?"
-  footer={<Button variant="danger" onClick={() => row.delete()}>Delete</Button>}>
+<Modal
+  open={ui.confirmOpen}
+  onClose={() => ui.closeConfirm()}
+  title="Delete?"
+  footer={<Button variant="danger" onClick={() => row.delete()}>Delete</Button>}
+>
   This can't be undone.
-</Modal>
+</Modal>;
 ```
 
-Pass `dismissable={false}` to require an explicit action (no Escape/backdrop close).
+Pass `dismissable={false}` to require an explicit action (no Escape/backdrop
+close).
 
 ### Card + layout — `Card`, `Stack`, `Row`, `Spinner`
 
 ```tsx
 <Card title="Revenue" footer="updated just now">
   <Stack gap={8}>
-    <Row gap={12} align="center"><b>$12,480</b><Spinner /></Row>
+    <Row gap={12} align="center">
+      <b>$12,480</b>
+      <Spinner />
+    </Row>
   </Stack>
-</Card>
+</Card>;
 ```
 
 ## Philosophy

@@ -192,12 +192,15 @@ Deno.test({
       "../examples/targets/android-remote/src/App.tsx"
     ) as CounterModule;
     const { win, root, cleanup } = createDOM();
-    const fakeWindow = { location: { href: "" } };
-    // deno-lint-ignore no-explicit-any
-    const g = globalThis as any;
-    const hadWindow = "window" in g;
-    const origWindow = g.window;
-    g.window = fakeWindow;
+    // App navigates via `globalThis.location.href` (no `window` in Deno) —
+    // swap in a fake location and restore the original descriptor after.
+    const fakeLocation = { href: "" };
+    const g = globalThis as Record<string, unknown>;
+    const origLocation = Object.getOwnPropertyDescriptor(g, "location");
+    Object.defineProperty(g, "location", {
+      value: fakeLocation,
+      configurable: true,
+    });
     try {
       // deno-lint-ignore no-explicit-any
       const handle = mount(root, App as any);
@@ -206,11 +209,11 @@ Deno.test({
       Array.from(root.querySelectorAll("button")).find(
         (b) => b.textContent === "Connect",
       )!.click();
-      assertEquals(fakeWindow.location.href, "http://server:8000");
+      assertEquals(fakeLocation.href, "http://server:8000");
       _unmount(handle);
     } finally {
-      if (hadWindow) g.window = origWindow;
-      else delete g.window;
+      if (origLocation) Object.defineProperty(g, "location", origLocation);
+      else delete g.location;
       await cleanup();
       _reset();
     }

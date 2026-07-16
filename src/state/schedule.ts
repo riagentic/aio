@@ -148,7 +148,13 @@ export const schedule = {
   next: (
     id: string,
     action: { type: string; payload?: unknown },
-  ): ScheduleEffect => ({ type: "__schedule", kind: "after", id, ms: 1, action }),
+  ): ScheduleEffect => ({
+    type: "__schedule",
+    kind: "after",
+    id,
+    ms: 1,
+    action,
+  }),
   cancel: (id: string): ScheduleEffect => ({
     type: "__schedule",
     kind: "cancel",

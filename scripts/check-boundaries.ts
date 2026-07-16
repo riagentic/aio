@@ -22,6 +22,7 @@ const ALLOWED: Record<string, string[]> = {
     "db",
     "adapters",
   ],
+  ui: ["air"], // component kit renders through air only
   vitals: ["state", "protocol", "diagnostics"],
   sync: ["state", "protocol", "diagnostics", "db"], // db: shared storage types
   db: ["state", "diagnostics", "server"],

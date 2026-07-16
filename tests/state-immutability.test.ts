@@ -19,10 +19,7 @@ import {
   deepFreeze,
   freezeInitial,
 } from "../src/state/immutable.ts";
-import {
-  getCellSignal,
-  _resetSignals,
-} from "../src/state/state-signals.ts";
+import { _resetSignals, getCellSignal } from "../src/state/state-signals.ts";
 
 // deno-lint-ignore no-explicit-any
 const doc = () => new Window().document as any;
@@ -32,7 +29,11 @@ const doc = () => new Window().document as any;
 Deno.test("invariant: testUI does NOT leak cell state between mounts", async () => {
   const accts = cell("inv_accts", {
     state: { list: [] as string[] },
-    methods: { add(s: { list: string[] }, n: string) { s.list.push(n); } },
+    methods: {
+      add(s: { list: string[] }, n: string) {
+        s.list.push(n);
+      },
+    },
   });
   const App = () => h("div", null, String(accts.list.length));
 
@@ -51,7 +52,11 @@ Deno.test("invariant: testUI does NOT leak cell state between mounts", async () 
 Deno.test("invariant: three sequential mounts each start pristine", async () => {
   const c = cell("inv_seq", {
     state: { n: 0 },
-    methods: { inc(s: { n: number }) { s.n += 1; } },
+    methods: {
+      inc(s: { n: number }) {
+        s.n += 1;
+      },
+    },
   });
   const App = () => h("div", null, String(c.n));
   for (let i = 0; i < 3; i++) {
@@ -68,7 +73,11 @@ Deno.test("invariant: three sequential mounts each start pristine", async () => 
 Deno.test("invariant: mutating live state never touches the declared initial", async () => {
   const c = cell("inv_alias", {
     state: { items: [] as number[] },
-    methods: { push(s: { items: number[] }, v: number) { s.items.push(v); } },
+    methods: {
+      push(s: { items: number[] }, v: number) {
+        s.items.push(v);
+      },
+    },
   });
   // deno-lint-ignore no-explicit-any
   const declared = (c as any).__aio.state;
@@ -77,7 +86,11 @@ Deno.test("invariant: mutating live state never touches the declared initial", a
   c.push(1);
   c.push(2);
   await ui.settle();
-  assertEquals((declared as { items: number[] }).items.length, 0, "declared initial was mutated in place");
+  assertEquals(
+    (declared as { items: number[] }).items.length,
+    0,
+    "declared initial was mutated in place",
+  );
   await ui.dispose();
 });
 
@@ -88,8 +101,15 @@ Deno.test("invariant: _resetSignals keeps the same signal instance", () => {
   sig.set({ a: 99 });
   _resetSignals();
   const sigAfter = getCellSignal("inv_identity");
-  assert(sig === sigAfter, "reset swapped the signal instance (orphans getter closures)");
-  assertEquals(sigAfter.value, undefined, "reset should clear the value in place");
+  assert(
+    sig === sigAfter,
+    "reset swapped the signal instance (orphans getter closures)",
+  );
+  assertEquals(
+    sigAfter.value,
+    undefined,
+    "reset should clear the value in place",
+  );
 });
 
 // ── Invariant 4: dev freeze makes initial mutation throw ──
@@ -116,7 +136,9 @@ Deno.test("invariant: freezeInitial always deep-clones (no caller aliasing)", ()
 // ── Invariant 5: Immer autoFreeze is on (a future default flip can't disarm) ──
 
 Deno.test("invariant: Immer autoFreeze is active (produced state is frozen)", () => {
-  const next = produce({ list: [] as string[] }, (d) => { d.list.push("a"); });
+  const next = produce({ list: [] as string[] }, (d) => {
+    d.list.push("a");
+  });
   assertThrows(
     () => (next.list as string[]).push("b"),
     TypeError,
