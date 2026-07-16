@@ -1495,6 +1495,14 @@
     },
     "./testing": {
       "symbols": {
+        "bootCells": {
+          "kind": "function",
+          "sig": "b1dd0d475b7f35e6"
+        },
+        "BootHandle": {
+          "kind": "interface",
+          "sig": "922612f74bd17778"
+        },
         "generateUITypes": {
           "kind": "function",
           "sig": "8bc0a08a33112cf8"
@@ -1533,7 +1541,7 @@
         },
         "TestUI": {
           "kind": "typeAlias",
-          "sig": "e03a03de9e3f291a"
+          "sig": "269267a32a99f239"
         },
         "TestUIOptions": {
           "kind": "interface",
