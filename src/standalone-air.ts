@@ -66,6 +66,48 @@ let _app: AioApp | null = null;
 // toast that returns schedule.after otherwise floods every test (quant Bad #3).
 const _warnedStandalone = { schedule: false, own: false };
 
+// ── Virtual-clock scheduler (test/standalone) ──────────────────────────
+// Schedule effects have no timer runtime in standalone/test mode, so instead of
+// firing on the wall clock (non-deterministic) or dropping them (untestable —
+// risoto), we hold `after`/`every` on a virtual clock. `_advanceSchedules(ms)`
+// fires everything now due — so a test can drive toast auto-dismiss, debounce,
+// backoff, poll, etc. deterministically.
+interface PendingSched {
+  id: string;
+  kind: "after" | "every";
+  ms: number;
+  action: Msg;
+  dueAt: number;
+}
+let _vclock = 0;
+const _pendingScheds = new Map<string, PendingSched>();
+
+/** Advance the virtual clock by `ms` and dispatch every schedule that comes
+ *  due, in order. `every` schedules re-arm; `after` schedules fire once. */
+export function _advanceSchedules(ms: number): void {
+  if (!_cellApp) return;
+  const target = _vclock + Math.max(0, ms);
+  let guard = 0;
+  while (guard++ < 1_000_000) {
+    let next: PendingSched | null = null;
+    for (const s of _pendingScheds.values()) {
+      if (s.dueAt <= target && (!next || s.dueAt < next.dueAt)) next = s;
+    }
+    if (!next) break;
+    _vclock = next.dueAt;
+    if (next.kind === "every") next.dueAt += Math.max(1, next.ms);
+    else _pendingScheds.delete(next.id);
+    _cellApp.dispatch(next.action as Msg);
+  }
+  _vclock = target;
+}
+
+/** Reset the virtual clock + pending schedules (per-mount test isolation). */
+export function _resetSchedules(): void {
+  _vclock = 0;
+  _pendingScheds.clear();
+}
+
 // Signal for AIR reactivity — updated on every state change
 const _stateSignal = signal<unknown>(null);
 
@@ -180,15 +222,26 @@ export function initStandalone<S, A, E>(
   const dispatch = createDispatch<S, A, E>({
     reduce,
     execute: (effect) => {
-      // Warn ONCE per kind, not per effect — a toast that returns a
-      // schedule.after fires this on every push, flooding test output (quant).
+      // Schedule effects: hold on the virtual clock so tests can fire them
+      // deterministically with ui.advance(ms) / handle.advance(ms) (risoto).
       if (isScheduleEffect(effect)) {
-        if (!_warnedStandalone.schedule) {
+        const e = effect as ScheduleEffect;
+        if (e.kind === "cancel") {
+          _pendingScheds.delete(e.id);
+        } else if (e.kind === "after" || e.kind === "every") {
+          _pendingScheds.set(e.id, {
+            id: e.id,
+            kind: e.kind,
+            ms: e.ms,
+            action: e.action as Msg,
+            dueAt: _vclock + Math.max(1, e.ms),
+          });
+        } else if (!_warnedStandalone.schedule) {
+          // at/cron have no virtual-clock analogue — warn once.
           _warnedStandalone.schedule = true;
           console.warn(
-            "[aio] scheduled effects are ignored in standalone/test mode " +
-              "(no timer runtime) — this warns once. Toast auto-dismiss etc. " +
-              "won't fire here.",
+            "[aio] schedule.at/cron are not supported in standalone/test mode " +
+              "(warns once); after/every are testable via .advance(ms).",
           );
         }
         return;
@@ -300,6 +353,7 @@ export function _resetState(): void {
   _listeners.clear();
   _resetSignals();
   _resetCellBindings(); // release module-singleton cells so they re-bind
+  _resetSchedules(); // reset the virtual clock + pending schedules
 }
 
 /** Full reset — state AND the cell registry. */

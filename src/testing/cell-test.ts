@@ -290,6 +290,59 @@ export function testCell<
   });
 }
 
+/** Handle returned by {@linkcode bootCells}. */
+export interface BootHandle {
+  /** Advance the virtual schedule clock by `ms` and fire everything now due
+   *  (`schedule.after`/`every`), then settle — deterministic effect testing. */
+  advance(ms: number): Promise<void>;
+  /** Wait for async method work (batched writes, executor) to settle. */
+  settle(): Promise<void>;
+  /** Reset the booted cells to their declared initials + clear schedules. */
+  dispose(): void;
+  [Symbol.dispose](): void;
+}
+
+/**
+ * Boot several cells on the local runtime for a pure-logic (no-DOM) test —
+ * the multi-cell counterpart to {@linkcode testCell}. Methods dispatch for
+ * real, reactive reads work, and `handle.advance(ms)` fires due schedules. Use
+ * it when you want to drive several cells' logic without a component + settle
+ * dance (risoto).
+ *
+ * @example
+ * ```ts
+ * const h = await bootCells([network, nav]);
+ * await network.setCluster("devnet");
+ * assertEquals(network.cluster, "devnet");
+ * await h.advance(3000);        // fire a scheduled auto-dismiss
+ * h.dispose();
+ * ```
+ */
+export async function bootCells(cells: CellDef[]): Promise<BootHandle> {
+  const standalone = await import("../standalone-air.ts");
+  // Hermetic: reset any prior runtime state so these cells start pristine.
+  standalone._resetState();
+  await standalone.aio.run({
+    appId: "bootcells",
+    // deno-lint-ignore no-explicit-any
+    cells: cells as any,
+    persist: false,
+  });
+  const settle = async () => {
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+  };
+  const dispose = () => standalone._resetState();
+  return {
+    async advance(ms: number) {
+      standalone._advanceSchedules(ms);
+      await settle();
+    },
+    settle,
+    dispose,
+    [Symbol.dispose]: dispose,
+  };
+}
+
 // Semantic UI testing — first-class, selector-free (see
 // docs/specs/2026-07-10-semantic-ui-testing.md).
 export {

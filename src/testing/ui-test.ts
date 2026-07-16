@@ -127,6 +127,10 @@ export type TestUI = {
   surface(): UISurfaceNode;
   /** Wait until the app is quiescent (renders flushed, no pending updates). */
   settle(): Promise<void>;
+  /** Advance the virtual schedule clock by `ms` and fire every `schedule.after`
+   *  / `schedule.every` now due, then settle — makes toast auto-dismiss,
+   *  debounce, backoff, and poll deterministically testable without real timers. */
+  advance(ms: number): Promise<void>;
   /** Wait until a predicate over the UI holds (polls between settles) — for
    *  async flows (effects, schedules) that update the UI later. Throws with
    *  the current surface on timeout. */
@@ -275,9 +279,11 @@ async function _mountTestUI(
   // `cell()` the App transitively imported has self-registered — boot them
   // all; pass { cells } only to restrict the set.
   let resetRuntime: (() => void) | undefined;
+  let advanceSchedules: ((ms: number) => void) | undefined;
   const cells = opts.cells ?? [...getRegisteredCells().values()];
   if (cells.length > 0) {
     const standalone = await import("../standalone-air.ts");
+    advanceSchedules = standalone._advanceSchedules;
     // Hermetic by default: cells are module singletons, so both their signal
     // state AND the standalone dispatch store survive across mounts. Reset the
     // runtime state (keeping the registry) so this mount re-composes from the
@@ -570,6 +576,14 @@ async function _mountTestUI(
     // Public settle is an observation point: drains the action queue first
     // (surfacing failures from un-awaited actions), then waits quiescence.
     settle: async () => {
+      await drain();
+      await settle();
+    },
+    // Advance the virtual schedule clock by `ms` and fire everything now due —
+    // drives toast auto-dismiss / debounce / backoff / poll deterministically
+    // in tests (risoto). Then settles so the UI reflects the fired actions.
+    advance: async (ms: number) => {
+      advanceSchedules?.(ms);
       await drain();
       await settle();
     },
