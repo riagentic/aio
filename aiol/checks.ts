@@ -201,7 +201,9 @@ export const checkStructure: Checker = async (ctx) => {
   if (cellFiles.length > 3) {
     // A dedicated cell directory counts as organized whether it's named
     // `cell/` or `cells/` — both are valid; don't nag about the choice (risoto).
-    const inCellDir = cellFiles.filter((f) => /(^|\/)cells?\//.test(f.relative));
+    const inCellDir = cellFiles.filter((f) =>
+      /(^|\/)cells?\//.test(f.relative)
+    );
     if (inCellDir.length < cellFiles.length / 2) {
       report(
         "hint",
@@ -900,6 +902,9 @@ export const checkUI: Checker = (ctx) => {
   for (const file of browserCheckedFiles) {
     for (const m of file.content.matchAll(STATIC_DYN_RE)) {
       const target = m[1]!;
+      // *.server.ts is the first-class convention (AIO-55): the build marks
+      // these dynamic imports external, so they never enter the browser bundle.
+      if (target.endsWith(".server.ts")) continue;
       // Resolve target file
       const dir = file.relative.replace(/[^/]+$/, "");
       const resolved = ctx.sourceFiles.find((f) => {
@@ -937,9 +942,11 @@ export const checkUI: Checker = (ctx) => {
         {
           file: file.relative,
           line: lineIdx,
-          fix: `Use string variable: const _p = '${
-            target.replace(/\.ts$/, "")
-          }'; import(\`\${_p}.ts\`)`,
+          fix: `Rename the target to *.server.ts (the build excludes it from ` +
+            `the browser bundle — see docs/build/imports.md), or use a ` +
+            `string variable: const _p = '${
+              target.replace(/\.ts$/, "")
+            }'; import(\`\${_p}.ts\`)`,
         },
       );
     }
@@ -1068,9 +1075,9 @@ export const checkPatterns: Checker = (ctx) => {
     }
 
     // Thrown exceptions in cell code (prefer Result pattern). Fires only on an
-    // actual `cell({ ... })` call — not on framework files that *define* cell
-    // (their throws are config-validation errors, by design).
-    if (/\bcell\s*\(\s*\{/.test(file.content)) {
+    // actual `cell('name', { ... })` call — not on framework files that
+    // *define* cell (their throws are config-validation errors, by design).
+    if (/\bcell\s*\(\s*['"]/.test(file.content)) {
       const throwLines = file.lines.filter((l) =>
         /\bthrow\s+new\s+/.test(l) && !l.trim().startsWith("//")
       );
@@ -1081,6 +1088,60 @@ export const checkPatterns: Checker = (ctx) => {
           `${file.relative}: throw in cell code — consider returning error state instead (machines handle error states well)`,
           { file: file.relative },
         );
+      }
+    }
+
+    // State read after an await in an async method (mdview). Every await is a
+    // commit + render point — another action may have committed while the
+    // method was suspended, so a post-await read can return a value the code
+    // above never saw. Deliberate re-reads are correct (reads overlay the
+    // method's own pending writes), so this is a hint, once per method, on the
+    // first post-await read. Writes and draft mutations (s.x = …, s.arr.push)
+    // are exempt — they always land.
+    if (/\bcell\s*\(\s*['"]/.test(file.content)) {
+      const METHOD_RE =
+        /\basync\s+(?!function\b)([A-Za-z_$][\w$]*)\s*\(\s*([A-Za-z_$][\w$]*)\s*[,)]|\b([A-Za-z_$][\w$]*)\s*:\s*async\s*\(\s*([A-Za-z_$][\w$]*)\s*[,)]/g;
+      for (const m of file.content.matchAll(METHOD_RE)) {
+        const method = m[1] ?? m[3]!;
+        const param = m[2] ?? m[4]!;
+        const startIdx = file.content.slice(0, m.index).split("\n").length - 1;
+        const readRe = new RegExp(`\\b${param}\\.[\\w$]`);
+        const writeRe = new RegExp(
+          `\\b${param}(\\.[\\w$]+|\\[[^\\]]+\\])+\\s*([+\\-*/%&|^]|\\*\\*|\\|\\||&&|\\?\\?)?=[^=]`,
+        );
+        const mutateRe = new RegExp(
+          `\\b${param}(\\.[\\w$]+|\\[[^\\]]+\\])+\\.(push|pop|shift|unshift|splice|sort|reverse|fill|copyWithin|set|add|delete|clear)\\s*\\(`,
+        );
+        let depth = 0;
+        let entered = false;
+        let sawAwait = false;
+        for (let i = startIdx; i < file.lines.length; i++) {
+          const code = file.lines[i]!.split("//")[0]!;
+          for (const ch of code) {
+            if (ch === "{") {
+              depth++;
+              entered = true;
+            } else if (ch === "}") depth--;
+          }
+          if (entered && depth <= 0) break; // method body ended
+          if (!sawAwait) {
+            if (/\bawait\b/.test(code)) sawAwait = true;
+            continue; // reads on the first await line happen pre-suspension
+          }
+          if (
+            readRe.test(code) && !writeRe.test(code) && !mutateRe.test(code)
+          ) {
+            report(
+              "hint",
+              "patterns",
+              `${file.relative}:${
+                i + 1
+              } — "${method}" reads ${param}.* after an await — every await is a commit point and other actions may have run while suspended; re-read deliberately or gather-then-write (docs/state/methods.md)`,
+              { file: file.relative, line: i + 1 },
+            );
+            break; // once per method
+          }
+        }
       }
     }
 

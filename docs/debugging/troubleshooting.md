@@ -10,6 +10,7 @@ catches it **before you debug**:
 | **Blank white page (dev)**          | failed import / no default export / mount error         | in-page diagnostic overlay + `BLANK SCREEN` warning in the terminal (automatic) |
 | Page stuck on "Loading…"            | state never arrives (WS blocked, auth, server error)    | 10s watchdog → overlay says "waiting for state"; check `am clients`             |
 | Broken import in App.tsx            | typo'd path, server-only import in client code          | dev graph validator serves a Module Errors page instead of the app              |
+| Deno/`@std/*` leaks into the bundle | plain import of a server helper from a cell file        | `aiol` lint + `*.server.ts` convention (docs/build/imports.md)                  |
 | App boots then dies on config       | typo'd `aio.run` key                                    | `validateConfig` exits with the full key table (allowlists are gate-tested)     |
 | Works in dev, blank when compiled   | bundling drift (ESM vs IIFE, module paths)              | bundle-smoke CI gate builds both shapes and asserts the invariants              |
 | Server dies when a client connects  | Deno version behavior change (headers after WS upgrade) | covered by every WS test incl. real-chromium e2e                                |
