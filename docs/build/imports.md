@@ -27,14 +27,38 @@ import { cell } from 'aio'
 export const notes = cell('notes', { ... })
 ```
 
-**2. Server-only code needs dynamic import with string concatenation.**
+**2. Server-only code: name it `*.server.ts` and dynamic-import it.**
 
-esbuild statically analyzes all imports — even dynamic ones. To prevent it from
-pulling server-only modules into the browser bundle, break the path with a
-variable:
+The `.server.ts` suffix is the first-class convention for server-only helper
+modules (Deno APIs, `@std/*`, filesystem, processes). The build marks
+`*.server.ts` **dynamic imports** as external — they never enter the browser
+bundle, no tricks required:
 
 ```ts
-// Correct — esbuild can't resolve this, skips it
+// helpers.server.ts — Deno APIs are fine here
+import { basename } from "@std/path";
+export const readNotes = (p: string) => Deno.readTextFile(p);
+
+// cell file — plain dynamic import, browser-safe
+methods: {
+  async open(s, path: string) {
+    const io = await import("./helpers.server.ts"); // dead code in the browser
+    s.text = await io.readNotes(path);
+  },
+}
+```
+
+Cell methods run server-side, so the import only ever executes on the server.
+The linter (`aiol`) recognizes the suffix and stays quiet; `@std/*` and `node:*`
+imports reached any other way are stubbed by the build with a clear "is
+server-only" runtime error instead of a cryptic bundling failure.
+
+For a file you can't rename, the fallback is a dynamic import with the path
+broken by a variable — esbuild statically resolves even plain dynamic imports,
+so only an opaque specifier keeps it out:
+
+```ts
+// Fallback — esbuild can't resolve this, skips it
 const _hp = "./helpers";
 const loadHelpers = () => import(`${_hp}.ts`);
 
@@ -76,7 +100,7 @@ import type { MdviewState } from "./helpers.ts";
 | What                                  | Rule                                                        |
 | ------------------------------------- | ----------------------------------------------------------- |
 | Cell `index.ts`                       | Browser-safe only — shared between server and UI            |
-| Server-only code (`@std/*`, `Deno.*`) | Dynamic import with string concat trick                     |
+| Server-only code (`@std/*`, `Deno.*`) | `*.server.ts` + dynamic import (string-concat as fallback)  |
 | Files loaded via dynamic import       | Must also have static import in `app.ts` for `deno compile` |
 | `import type`                         | Always safe — erased at compile time                        |
 
@@ -98,9 +122,11 @@ during dev mode.
 AIO checks for common import mistakes at three levels:
 
 1. **Lint time** (`aiol`): Flags `@std/*`, `node:*`, `Deno.*` in cell files and
-   `.tsx` files. Flags bare specifiers not in `deno.json`.
-2. **Build time**: esbuild plugin intercepts `@std/*` and `node:*` — returns
-   clear error messages instead of cryptic failures.
+   `.tsx` files. Flags bare specifiers not in `deno.json`. Flags plain dynamic
+   imports of server-only files — and recognizes `*.server.ts` as safe.
+2. **Build time**: esbuild plugin marks `*.server.ts` dynamic imports external
+   and intercepts `@std/*` and `node:*` — clear error messages instead of
+   cryptic failures.
 3. **Runtime**: Error overlay shows fix suggestions (e.g., "Add X to deno.json
    imports").
 
