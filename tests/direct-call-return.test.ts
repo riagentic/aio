@@ -159,11 +159,17 @@ Deno.test(
         } catch (e) {
           caught = e as Error;
         }
-        assertEquals(caught instanceof Error, true, `expected throw (dev=${dev})`);
+        assertEquals(
+          caught instanceof Error,
+          true,
+          `expected throw (dev=${dev})`,
+        );
         // Loud + actionable, regardless of dev/prod — a pre-boot write must
         // never silently vanish.
         assertEquals(
-          (caught as Error).message.includes("before the cell's runtime is booted"),
+          (caught as Error).message.includes(
+            "before the cell's runtime is booted",
+          ),
           true,
         );
       } finally {

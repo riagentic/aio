@@ -29,8 +29,8 @@ All three can be mixed in a single cell.
    state directly; sync and persistence are automatic.
 2. **Switch to `generators`** only when one user action is a **multi-step
    sequence** with intermediate states you want to see (a wizard, a checkout).
-3. **Drop to `actions` + `reduce`** only when you need an **explicit action log**
-   or complex cross-cell logic that methods can't express cleanly.
+3. **Drop to `actions` + `reduce`** only when you need an **explicit action
+   log** or complex cross-cell logic that methods can't express cleanly.
 
 Start with `methods`. You'll know when you need the others — until then, you
 don't.
@@ -52,12 +52,12 @@ currently `@experimental` — see [sync](docs/persistence/README.md).)
 
 Decide in 30 seconds:
 
-| aio is great for | aio is deliberately not for |
-| --- | --- |
-| Dashboards, trading & ops tooling, control panels | Content/marketing sites & SEO (client-rendered, no server components) |
-| Internal tools & admin panels | Planet-scale public APIs (embedded, one process — by design) |
-| Local-first desktop/mobile apps (one codebase → 5 targets) | Native iOS (Android ships via WebView) |
-| Teams on **Deno** who want batteries included | Node/Bun projects (aio is Deno-native) |
+| aio is great for                                           | aio is deliberately not for                                           |
+| ---------------------------------------------------------- | --------------------------------------------------------------------- |
+| Dashboards, trading & ops tooling, control panels          | Content/marketing sites & SEO (client-rendered, no server components) |
+| Internal tools & admin panels                              | Planet-scale public APIs (embedded, one process — by design)          |
+| Local-first desktop/mobile apps (one codebase → 5 targets) | Native iOS (Android ships via WebView)                                |
+| Teams on **Deno** who want batteries included              | Node/Bun projects (aio is Deno-native)                                |
 
 The right users self-select in; the wrong ones leave happy. Full rationale:
 [positioning & non-goals](docs/basics/positioning.md).

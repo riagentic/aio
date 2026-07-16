@@ -19,7 +19,13 @@ Deno.test("afterRender: a throwing hook does not collapse the surface", async ()
     return h("div", { class: "panel" }, "panel-content");
   }
   const App = () =>
-    h("div", null, h("h1", null, "Title"), h(Panel, null), h("footer", null, "foot"));
+    h(
+      "div",
+      null,
+      h("h1", null, "Title"),
+      h(Panel, null),
+      h("footer", null, "foot"),
+    );
 
   // deno-lint-ignore no-explicit-any
   const ui = await testUI(App, { document: win.document as any });

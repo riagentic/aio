@@ -42,12 +42,13 @@ testUI(App, "add a todo end-to-end", async (ui) => {
 - Cells run on the real local dispatch loop (the android runtime). Hermetic by
   default (`persist: false`, unique key — no state leaks between tests).
 - **Registered cells reset to their `state:` defaults on each mount** — you do
-  **not** need to hand-roll a `resetCells()`. Only *non-cell* module state (e.g.
-  a module-level vault holder, a `let` singleton) needs manual reset in your test.
+  **not** need to hand-roll a `resetCells()`. Only _non-cell_ module state (e.g.
+  a module-level vault holder, a `let` singleton) needs manual reset in your
+  test.
 - **Fire schedules deterministically with `await ui.advance(ms)`** — advances a
-  virtual clock and dispatches every `schedule.after`/`every` now due. This makes
-  toast auto-dismiss, debounce, `backoff`, and `poll` unit-testable without real
-  timers. (`schedule.at`/`cron` aren't fired by the virtual clock.)
+  virtual clock and dispatches every `schedule.after`/`every` now due. This
+  makes toast auto-dismiss, debounce, `backoff`, and `poll` unit-testable
+  without real timers. (`schedule.at`/`cron` aren't fired by the virtual clock.)
 
 For **multi-cell logic tests without a component**, `bootCells([a, b])` from
 `aio/testing` boots several cells on the same runtime and returns a handle with

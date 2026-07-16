@@ -32,7 +32,6 @@ function _attrNS(k: string): string | null {
   return null;
 }
 
-
 // ── applyProps ────────────────────────────────────────────────────────
 
 export function applyProps(

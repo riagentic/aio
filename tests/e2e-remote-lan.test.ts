@@ -99,12 +99,15 @@ Deno.test({
       // PIN pairing over the REAL interface — the client's exact flow: submit
       // the code, get the profile (cert + key) back, and the key must be the
       // same token the server authenticates with.
-      const pair = await fetch(`https://${LAN_IP}:${port}/__aio/pair`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ pin }),
-        client,
-      } as RequestInit & { client: Deno.HttpClient });
+      const pair = await fetch(
+        `https://${LAN_IP}:${port}/__aio/pair`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ pin }),
+          client,
+        } as RequestInit & { client: Deno.HttpClient },
+      );
       assert(pair.ok, `pair over LAN failed: ${pair.status}`);
       const profile = await pair.json() as { key?: string; cert?: string };
       assert(profile.key === token, "paired key must match the share token");

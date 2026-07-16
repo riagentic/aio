@@ -155,11 +155,12 @@ export default function App() {
     };
 
     try {
+      // cold deno child compile under full-suite CPU load can exceed 30s
       await waitFor("server up", async () => {
         const res = await fetch(`${base}/__aio/health`);
         await res.body?.cancel();
         return res.ok ? true : null;
-      });
+      }, 120_000);
       // the sync op-log must be provisioned even with no db: config
       assert(
         logBuf.includes("CRDT tables") || logBuf.includes("sqlite"),

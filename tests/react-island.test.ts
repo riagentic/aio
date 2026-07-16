@@ -13,7 +13,10 @@ Deno.test("reactIsland: loads, mounts, and renders the React component's output"
   const calls: string[] = [];
   // Fake React runtime — the user provides real import()s in their app.
   const fakeReact = {
-    createElement: (type: unknown, props: Record<string, unknown>) => ({ type, props }),
+    createElement: (type: unknown, props: Record<string, unknown>) => ({
+      type,
+      props,
+    }),
   };
   const fakeReactDom = {
     createRoot: (el: Element) => ({
@@ -33,7 +36,9 @@ Deno.test("reactIsland: loads, mounts, and renders the React component's output"
 
   const win = new Window();
   // deno-lint-ignore no-explicit-any
-  const ui = await testUI(() => h("div", null, h(Widget, null)), { document: win.document as any });
+  const ui = await testUI(() => h("div", null, h(Widget, null)), {
+    document: win.document as any,
+  });
   await tick(); // island load + mount resolve on a microtask after first render
   assertStringIncludes(ui.html(), "react:hi");
   assert(calls.includes("render"), "React root rendered");
@@ -44,18 +49,29 @@ Deno.test("reactIsland: component module can be the component itself (no default
   let rendered = "";
   const Widget = reactIsland<{ n: number }>({
     component: () => Promise.resolve((p: { n: number }) => p), // not wrapped in { default }
-    react: () => Promise.resolve({ createElement: (_t: unknown, p: Record<string, unknown>) => ({ props: p }) }),
-    reactDomClient: () => Promise.resolve({
-      createRoot: (el: Element) => ({
-        render: (node: { props: Record<string, unknown> }) => { rendered = `n=${node.props.n}`; el.textContent = rendered; },
-        unmount: () => {},
+    react: () =>
+      Promise.resolve({
+        createElement: (_t: unknown, p: Record<string, unknown>) => ({
+          props: p,
+        }),
       }),
-    }),
+    reactDomClient: () =>
+      Promise.resolve({
+        createRoot: (el: Element) => ({
+          render: (node: { props: Record<string, unknown> }) => {
+            rendered = `n=${node.props.n}`;
+            el.textContent = rendered;
+          },
+          unmount: () => {},
+        }),
+      }),
     props: () => ({ n: 42 }),
   });
   const win = new Window();
   // deno-lint-ignore no-explicit-any
-  const ui = await testUI(() => h("div", null, h(Widget, null)), { document: win.document as any });
+  const ui = await testUI(() => h("div", null, h(Widget, null)), {
+    document: win.document as any,
+  });
   await tick();
   assertEquals(rendered, "n=42");
   await ui.dispose();

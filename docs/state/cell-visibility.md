@@ -66,11 +66,13 @@ identifier suffix (`seedId`, `seedPathType`) are already ignored, and a field
 whose secret sub-path you've **deep-excluded** (`exclude: ["seeds.encSeed"]`)
 won't warn either — the correct fix is never penalized.
 
-For a field that genuinely is public but trips the name heuristic, **declare it**
-instead of dancing around the regex or using a no-op `forUser`:
+For a field that genuinely is public but trips the name heuristic, **declare
+it** instead of dancing around the regex or using a no-op `forUser`:
 
 ```ts
-ui: { publicFields: ["masterKey", "seeds"] } // "I know these look secret; they're public"
+ui: {
+  publicFields: ["masterKey", "seeds"];
+} // "I know these look secret; they're public"
 ```
 
 `publicFields` names are validated against the cell's state at creation — a typo

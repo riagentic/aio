@@ -163,8 +163,9 @@ Its connect page does four things:
   IP. Multiple apps on one host all show up.
 - **Pairs with keyed apps by PIN.** Click an app marked `⛿ auth` and type the
   6-digit **pair code** the app printed on startup. The client submits it to the
-  app's `/__aio/pair` endpoint, receives the profile (cert + key), pins the cert,
-  saves it as a recent, and connects — once. Next launch it's one click, no code.
+  app's `/__aio/pair` endpoint, receives the profile (cert + key), pins the
+  cert, saves it as a recent, and connects — once. Next launch it's one click,
+  no code.
 - **Remembers where you've been.** Recent servers persist across launches; click
   to reconnect, ✕ to forget.
 - **Validates the target.** Before loading, it checks the page actually looks

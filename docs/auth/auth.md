@@ -35,10 +35,9 @@ auth.
 **Pairing the aio client** — when a key is set, `--expose` prints a **pair
 code** on startup. In the aio client, click the app under "Apps on your network"
 and type the 6-digit code; the client pulls the profile (cert + key) once and
-connects forever after. The code is attempt-limited and session-scoped —
-restart to issue a fresh one. (For headless/scripted setups, `am profile`
-exports a `.aioapp` file you import instead — see
-[the client](../clients/electron.md).)
+connects forever after. The code is attempt-limited and session-scoped — restart
+to issue a fresh one. (For headless/scripted setups, `am profile` exports a
+`.aioapp` file you import instead — see [the client](../clients/electron.md).)
 
 ```
 [12:00:00][INFO] tls: self-signed cert at .aio-tls/tls-cert.pem

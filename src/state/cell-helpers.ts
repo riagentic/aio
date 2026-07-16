@@ -66,7 +66,9 @@ export function validateFieldFilters(
         if (nested && mode === "include") {
           throw new Error(
             `[cell:${name}] ${kind}.include does not support nested paths ("${key}"). ` +
-              `Include the top-level key "${key.split(".")[0]}", or use exclude for nested fields.`,
+              `Include the top-level key "${
+                key.split(".")[0]
+              }", or use exclude for nested fields.`,
           );
         }
         const head = nested ? key.split(".")[0]! : key;
@@ -108,7 +110,9 @@ export function extractPublicFields(
 ): string[] | undefined {
   if (!ui || ui === "all" || ui === "none") return undefined;
   const pf = (ui as { publicFields?: unknown }).publicFields;
-  return Array.isArray(pf) ? pf.filter((k): k is string => typeof k === "string") : undefined;
+  return Array.isArray(pf)
+    ? pf.filter((k): k is string => typeof k === "string")
+    : undefined;
 }
 
 /** Normalize ui config into CellFieldFilter (strip forUser) */

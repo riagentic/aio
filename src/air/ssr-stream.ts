@@ -11,10 +11,10 @@ import {
 import {
   camelToKebab as _camelToKebab,
   escapeAttr as _escapeAttr,
-  svgAttrName,
   escapeHtml as _escapeHtml,
   resolveClassName as _resolveClassName,
   styleValue as _styleValue,
+  svgAttrName,
   VOID_ELEMENTS,
 } from "./ssr-utils.ts";
 import { resolveSignalProp } from "./signal-binding.ts";
