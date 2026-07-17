@@ -5,3 +5,11 @@
 - documentation (.md files) has structure as docs/[domain]/[doc].md
 - documentation is correct, accurate and up-to-date
 - on project root, there is README.md and CHANGELOG.md, both up-to-date
+
+## Documentaiton quality
+
+- documentation is complete, no gaps
+- documentaiton is compact, complete and readable
+- documentation structure is intuitive
+- documentation up-to-date
+- documenatation is easy to navigate through
