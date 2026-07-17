@@ -3,7 +3,12 @@
 
 import { _LAZY_PENDING } from "./vdom-types.ts";
 import type { RenderCtx, VNode } from "./vdom-types.ts";
-import { _removeDomCleanup, getDom, removeDom } from "./vdom-remove.ts";
+import {
+  _removeDomCleanup,
+  getDom,
+  isChildOf,
+  removeDom,
+} from "./vdom-remove.ts";
 import { _render, createDom } from "./vdom-render.ts";
 import { _registerLazyListeners } from "./vdom-create.ts";
 import type { DiffFn } from "./vdom-diff-children.ts";
@@ -36,7 +41,7 @@ export function _updateContainerDom(
   if (foundDom) {
     // AIO-168: remove old comment anchor when content returns
     const ovDom = ov._dom;
-    if (ovDom && ovDom.nodeType === 8 && ovDom.parentNode === parent) {
+    if (ovDom && ovDom.nodeType === 8 && isChildOf(ovDom, parent)) {
       parent.removeChild(ovDom);
     }
   } else {
@@ -46,7 +51,7 @@ export function _updateContainerDom(
       nv._dom = ovDom;
     } else {
       const anchor = ctx.doc.createComment("");
-      if (ovDom && ovDom.parentNode === parent) {
+      if (ovDom && isChildOf(ovDom, parent)) {
         parent.insertBefore(anchor, ovDom);
       } else {
         parent.appendChild(anchor);

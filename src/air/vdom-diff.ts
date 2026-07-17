@@ -10,7 +10,7 @@ import {
 } from "./vdom-helpers.ts";
 import { _callRef, _staticEqual } from "./vdom-create.ts";
 import { _hasSignalPropChange, applyProps } from "./vdom-props.ts";
-import { getDom, removeDom } from "./vdom-remove.ts";
+import { getDom, isChildOf, removeDom } from "./vdom-remove.ts";
 import { _render, createDom } from "./vdom-render.ts";
 import { _getActiveDelegationRoot, _setDelegationRoot } from "./vdom-events.ts";
 import {
@@ -101,7 +101,7 @@ export function _diff(
   ) {
     const anchor = getDom(old);
     const newDom = createDom(next, ctx, isSvg, parent);
-    if (newDom && anchor && anchor.parentNode === parent) {
+    if (newDom && anchor && isChildOf(anchor, parent)) {
       parent.insertBefore(newDom, anchor);
     } else if (newDom) {
       parent.appendChild(newDom);
@@ -163,7 +163,7 @@ export function _diff(
     // children diff at the node preceding the fragment's current region so
     // keyed moves stay inside the region instead of jumping to parent start.
     const firstDom = getDom(ov);
-    const startAnchor = firstDom && firstDom.parentNode === parent
+    const startAnchor = firstDom && isChildOf(firstDom, parent)
       ? firstDom.previousSibling
       : null;
     _diffChildren(parent, nv.children, ov.children, ctx, isSvg, startAnchor);
