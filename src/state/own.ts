@@ -36,6 +36,14 @@ export type OwnEffect =
 const pendingFactories = new Map<number, () => OwnResource>();
 let nextToken = 1;
 
+/** Reset pending factories — for test isolation. A factory parked in
+ *  `pendingFactories` (because the own.set effect was created but never
+ *  dispatched, e.g. a reducer threw before returning the effect) would
+ *  otherwise leak for the process lifetime, capturing its closure scope. */
+export function _resetPendingFactories(): void {
+  pendingFactories.clear();
+}
+
 /** Keyed disposer-slot API for cell-owned native resources. */
 export interface Own {
   /** Acquire a resource under `id`. Same id ⇒ previous disposer runs first. */

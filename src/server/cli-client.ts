@@ -43,10 +43,22 @@ function applyServerMessage<S>(
   // Legacy delta patch
   if (data.$p && typeof data.$p === "object") {
     const p = data.$p as Record<string, unknown>;
+    // Filter BANNED_KEYS from the patch BEFORE spreading — a crafted $p with
+    // `__proto__`/`constructor`/`prototype` would otherwise be spread into
+    // `next` (the $d delete loop already filters them, but the $p merge path
+    // didn't). Modern engines don't pollute via spread, but `constructor`
+    // can be overwritten and the contract should be symmetric with $d.
+    const safeP: Record<string, unknown> = {};
+    for (const k of Object.keys(p)) {
+      if (k === "__proto__" || k === "constructor" || k === "prototype") {
+        continue;
+      }
+      safeP[k] = p[k];
+    }
     const next: Record<string, unknown> =
       prev != null && typeof prev === "object"
-        ? { ...(prev as Record<string, unknown>), ...p }
-        : { ...p };
+        ? { ...(prev as Record<string, unknown>), ...safeP }
+        : { ...safeP };
     if (Array.isArray(data.$d)) {
       for (const k of data.$d) {
         if (
