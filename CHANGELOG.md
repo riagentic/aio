@@ -1,5 +1,83 @@
 # Changelog
 
+## 1.0.0-alpha21 — field-report closeout: testable time, loud dev, the form fix (2026-07-17)
+
+Every open item from all three field reports (risoto, quant, mdview) closed —
+each countersigned or resolved with the fix cited in-code.
+
+### Added
+
+- **`bootCells` + virtual-clock schedules — every effect is now testable.**
+  `import { bootCells } from "aio/testing"` boots several cells on the real
+  dispatch loop with no component (the multi-cell `testCell`), and
+  `await ui.advance(ms)` (also on `bootCells`) runs a **virtual clock**: every
+  `schedule.after`/`every` captured and fired when due — toast auto-dismiss,
+  debounce, `backoff`, `poll` all get deterministic unit coverage with no real
+  timers. (`schedule.at`/`cron` stay wall-clock and warn once.) The one item
+  that blocked "test every use case" in the risoto report — countersigned 10/10.
+- **`schedule.next(id, action)`** — the honest "defer to the next tick"
+  primitive, replacing the `schedule.after(id, 1, …)` sentinel apps were
+  writing. Same-id replace still dedups.
+- **Electron: external links open in the system browser.** `will-navigate`
+  relays only **same-origin** URLs as in-app navigation — a cross-origin link
+  can no longer `pushState` a routerless app onto a dead path (white screen on
+  reload). Renderers get **`__aioIPC.openExternal(url)`**, with the main process
+  enforcing an http/https allowlist (mdview #6/#7).
+- **`.server.ts` is the first-class server/browser-split convention.** A plain
+  `import("./x.server.ts")` in a cell method stays out of the browser bundle —
+  documented as the primary rule in docs/build/imports.md (string-concat demoted
+  to fallback), recognized by the linter, recommended by its fix hints. The
+  mechanism existed since AIO-55; it was folklore with zero docs.
+- **aiol: state-read-after-await hint.** Every `await` in an async method is a
+  commit + render point — a post-await read can see other actions' commits. The
+  linter now hints on the first such read (once per method; writes and draft
+  mutations exempt — they always land), pairing the loud docs/state/methods.md
+  callout with tooling.
+
+### Fixed
+
+- **Conditional element bindings froze inside `<form>` (risoto 2026-07-16d).**
+  Under testUI, a conditional binding (or fragment-root component) anchored as a
+  direct `<form>` child never re-reconciled while sibling text bindings stayed
+  live. Root cause: happy-dom wraps `HTMLFormElement` in a Proxy, so the
+  reconciler's `.parentNode === parent` containment guards failed identity and
+  silently skipped removals/inserts. All guards now use a proxy-agnostic
+  `isChildOf()`; the report's full repro matrix is pinned as tests.
+- **SVG camelCase attrs render.** `stopColor` → `stop-color` (and the common
+  camelCase set) — gradients no longer render black (quant Ugly #2).
+- **Async multi-await write loss locked.** Writes after any `await` are
+  guaranteed to land (property-tested), and the await-commit model is documented
+  loudly: every `await` commits + renders (quant Ugly #1).
+- **Dev failures got loud (quant's thesis: no quiet failures).** Discovery bind
+  failures print a startup warning; editing a _cell_ file warns "cells do NOT
+  hot-reload — restart to apply"; port-in-use fails loudly; transient
+  post-restart imports show "Building…" and retry instead of the error card.
+- **Pre-boot method calls throw** with an actionable message (instead of
+  silently no-oping); bound **selector accessors are type-accessible**;
+  standalone-air effect spam silenced; the secret-field heuristic no longer
+  flags correctly-fixed public fields.
+
+### Changed
+
+- **Examples modernized to the alpha20 API**: every entry is zero-config
+  `aio.run()` (only behavioral config remains — `client: "server-only"`,
+  `key: true`), the cli/cli-remote clients use bound remote cells
+  (`app.bind(counter)` — raw wire actions and the hand-rolled state mirror
+  deleted), and the todo form drops `e.preventDefault()` (AIR auto-prevents).
+- **"Fail loud, never silent" codified as the #1 convention** (claude.md) — the
+  shared thesis of all three field reports, now policy.
+- **Coverage ratchet raised: floor 69 → 70** (actual 71.4%). The `am` CLI's
+  process + inspect commands gained direct tests (real spawned children, real
+  lock files, fake control-port server): `am-cmd-process` 9% → 44%,
+  `am-cmd-inspect` 25% → 56%.
+
+### Docs
+
+- `schedule.backoff` / `schedule.poll` / `schedule.next` reference sections
+  (poll shipped in alpha20 undocumented); JSDoc for all `aio/ui` props types
+  (docs:coverage 390/390); docs/content.md index regenerated and fmt-excluded
+  (the byte-exact index gate and fmt could never both pass on fresh output).
+
 ## 1.0.0-alpha20 — remote UX, a component kit, and a whole bug class killed (2026-07-15)
 
 ### Added
