@@ -9,3 +9,5 @@
 - `deno task docs:check` passes
 - `deno task boundaries` passes — src/ module dependency matrix respected
 - `deno publish --dry-run` succeeds
+- all tests and UI tests pass without isssues
+- all errors and warnings in logs are resolved (not hidden but trully resolved)
