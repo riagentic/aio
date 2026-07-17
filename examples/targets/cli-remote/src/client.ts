@@ -1,31 +1,33 @@
-// Thin CLI client — connects to a running aio server over WebSocket
+// Thin CLI client — bound remote cell: the same cell definition the server
+// uses, bound to the connection. `await counter.increment(1)` dispatches over
+// the socket (resolves on the server ack) and `counter.count` reads live
+// server state — no raw { type, payload } wire actions, no state mirror.
 import { connectCli } from "aio";
-import type { AppState } from "./state.ts";
-import { parseCommand, printHelp } from "./commands.ts";
+import { counter } from "./cell/counter.ts";
 
 const url = Deno.args[0] || "ws://localhost:8000/ws";
 console.log("Connecting to", url, "...");
 
-const app = connectCli<AppState>(url);
+const app = connectCli(url);
+app.bind(counter);
 await app.ready;
-console.log("Counter:", app.state?.counter.count);
 
-app.subscribe((state) => {
-  console.log("Counter:", state.counter.count);
-});
+console.log("Counter:", counter.count);
+app.subscribe(() => console.log("Counter:", counter.count));
+
+const HELP = "Commands: inc [n], dec [n], reset";
+console.log(HELP);
 
 const decoder = new TextDecoder();
 const buf = new Uint8Array(1024);
-printHelp();
-
 while (true) {
   const n = await Deno.stdin.read(buf);
   if (n === null) break;
-  const line = decoder.decode(buf.subarray(0, n)).trim();
-  if (!line) continue;
-  const action = parseCommand(line.split(/\s+/));
-  if (action) app.send(action);
-  else printHelp();
+  const [cmd, arg] = decoder.decode(buf.subarray(0, n)).trim().split(/\s+/);
+  if (cmd === "inc") await counter.increment(Number(arg) || 1);
+  else if (cmd === "dec") await counter.decrement(Number(arg) || 1);
+  else if (cmd === "reset") await counter.reset();
+  else if (cmd) console.log(HELP);
 }
 
 app.close();
