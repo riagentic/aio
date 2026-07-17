@@ -5,20 +5,21 @@
 Every failure class aio has actually hit in the field, and the guard that now
 catches it **before you debug**:
 
-| Symptom                             | Usual cause                                             | Caught by                                                                       |
-| ----------------------------------- | ------------------------------------------------------- | ------------------------------------------------------------------------------- |
-| **Blank white page (dev)**          | failed import / no default export / mount error         | in-page diagnostic overlay + `BLANK SCREEN` warning in the terminal (automatic) |
-| Page stuck on "Loading…"            | state never arrives (WS blocked, auth, server error)    | 10s watchdog → overlay says "waiting for state"; check `am clients`             |
-| Broken import in App.tsx            | typo'd path, server-only import in client code          | dev graph validator serves a Module Errors page instead of the app              |
-| Deno/`@std/*` leaks into the bundle | plain import of a server helper from a cell file        | `aiol` lint + `*.server.ts` convention (docs/build/imports.md)                  |
-| App boots then dies on config       | typo'd `aio.run` key                                    | `validateConfig` exits with the full key table (allowlists are gate-tested)     |
-| Works in dev, blank when compiled   | bundling drift (ESM vs IIFE, module paths)              | bundle-smoke CI gate builds both shapes and asserts the invariants              |
-| Server dies when a client connects  | Deno version behavior change (headers after WS upgrade) | covered by every WS test incl. real-chromium e2e                                |
-| App won't start / "already running" | stale lock from a crashed process                       | lock liveness (pid + port) self-heals; `am status` shows the holder             |
-| Doc example throws on paste         | docs drifted from the API                               | doc-imports gate: every `aio` import in docs must exist in the API snapshot     |
-| Secret visible in a client          | `ui: "all"` default on a sensitive cell                 | boot warnings (secret-looking fields, filter typos); deep-path `exclude`        |
-| Tests flake across files            | shared persisted state                                  | `testUI` is hermetic by default (persist off, unique key)                       |
-| `deno.json` mystery failures        | missing jsx / kv / nodeModulesDir lines                 | `deno task doctor`                                                              |
+| Symptom                             | Usual cause                                             | Caught by                                                                      |
+| ----------------------------------- | ------------------------------------------------------- | ------------------------------------------------------------------------------ |
+| **Blank white page (dev)**          | failed import / no default export / mount error         | diagnostic overlay + `BLANK SCREEN` warning — render errors name the component |
+| Feature dead, tests green           | cell imported by UI but missing from `cells[]`          | loud "dispatch to unregistered cell" warning (once per cell)                   |
+| Page stuck on "Loading…"            | state never arrives (WS blocked, auth, server error)    | 10s watchdog → overlay says "waiting for state"; check `am clients`            |
+| Broken import in App.tsx            | typo'd path, server-only import in client code          | dev graph validator serves a Module Errors page instead of the app             |
+| Deno/`@std/*` leaks into the bundle | plain import of a server helper from a cell file        | `aiol` lint + `*.server.ts` convention (docs/build/imports.md)                 |
+| App boots then dies on config       | typo'd `aio.run` key                                    | `validateConfig` exits with the full key table (allowlists are gate-tested)    |
+| Works in dev, blank when compiled   | bundling drift (ESM vs IIFE, module paths)              | bundle-smoke CI gate builds both shapes and asserts the invariants             |
+| Server dies when a client connects  | Deno version behavior change (headers after WS upgrade) | covered by every WS test incl. real-chromium e2e                               |
+| App won't start / "already running" | stale lock from a crashed process                       | lock liveness (pid + port) self-heals; `am status` shows the holder            |
+| Doc example throws on paste         | docs drifted from the API                               | doc-imports gate: every `aio` import in docs must exist in the API snapshot    |
+| Secret visible in a client          | `ui: "all"` default on a sensitive cell                 | boot warnings (secret-looking fields, filter typos); deep-path `exclude`       |
+| Tests flake across files            | shared persisted state                                  | `testUI` is hermetic by default (persist off, unique key)                      |
+| `deno.json` mystery failures        | missing jsx / kv / nodeModulesDir lines                 | `deno task doctor`                                                             |
 
 If a symptom you hit isn't here, that's a bug in this table — report it.
 

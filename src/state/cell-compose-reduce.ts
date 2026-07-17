@@ -352,6 +352,13 @@ export function buildRootReducer(
     }
   }
 
+  // risoto 2026-07-16e: a dispatch whose `cell:` prefix names NO booted cell
+  // and NO foreign-action listener used to vanish silently — the client (which
+  // imported the cell) exposed its methods while the server never booted it,
+  // so a whole feature shipped dead with green tests. Fail loud, once per
+  // unknown cell name.
+  const warnedUnknownCells = new Set<string>();
+
   return (
     state: Record<string, unknown>,
     action: Msg,
@@ -490,6 +497,27 @@ export function buildRootReducer(
     // Route to foreign action listeners
     const lt0 = _perfCheck ? performance.now() : 0;
     const listeners = listenersByType.get(action.type);
+
+    // Unmatched cell-prefixed action → loud warning (risoto 2026-07-16e).
+    // Internal (__-prefixed) types and lifecycle actions are exempt; a
+    // disabled cell still counts as booted (the breaker already logs).
+    if (!isLifecycle && !listeners) {
+      const t = action.type as string;
+      const ci = t.indexOf(":");
+      if (ci > 0 && !t.startsWith("__")) {
+        const prefix = t.slice(0, ci);
+        if (!ownByPrefix.has(prefix) && !warnedUnknownCells.has(prefix)) {
+          warnedUnknownCells.add(prefix);
+          log.warn(
+            `dispatch to unregistered cell '${prefix}' (action '${t}') does ` +
+              `NOTHING — no booted cell or listener handles it. Did you ` +
+              `forget it in aio.run({ cells: [...] })? The client can still ` +
+              `render and call an imported cell the server never booted. ` +
+              `(warned once per cell)`,
+          );
+        }
+      }
+    }
     if (listeners) {
       for (const listener of listeners) {
         if (disabledCells.has(listener.__aio.id)) continue;

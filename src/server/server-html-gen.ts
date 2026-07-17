@@ -139,13 +139,19 @@ ${head}
       _root.replaceChildren(box)
     }
     function _fail(stage, err) {
-      const msg = String(err && (err.stack || err.message) || err)
-      console.error('[aio] blank screen (' + stage + '):', err)
+      // risoto 2026-07-16f: a render error carries the component path it
+      // escaped from — name it, so "Cannot read properties of undefined"
+      // becomes bisect-free ("in <NetworkPanel> ← <App>").
+      const chain = err && Array.isArray(err.__aioComponents)
+        ? ' (in ' + err.__aioComponents.map(c => '<' + c + '>').join(' \\u2190 ') + ')'
+        : ''
+      const msg = String(err && (err.stack || err.message) || err) + chain
+      console.error('[aio] blank screen (' + stage + '):', err, chain)
       _overlay(stage, msg) // render immediately — never race the report
       fetch('/__aio/client-error', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ blankScreen: stage, message: String(err && err.message || err), stack: msg }),
+        body: JSON.stringify({ blankScreen: stage, message: String(err && err.message || err) + chain, stack: msg }),
       }).then(r => r.json())
         .then(c => { if (c && c.fix) _overlay(stage, msg, c.fix) })
         .catch(() => {})

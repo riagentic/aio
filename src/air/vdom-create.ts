@@ -202,3 +202,34 @@ export function _callRef(ref: unknown, value: Node | null): void {
     (ref as { current: Node | null }).current = value;
   }
 }
+
+// ── Render-error component tagging ────────────────────────────────────
+
+/** Annotate an error thrown during a component's render with the component
+ *  path (risoto 2026-07-16f): innermost first on `__aioComponents`, so
+ *  blank-screen overlays and logs can print "(in <NetworkPanel>)" instead of
+ *  forcing a manual bisect. Metadata only — `e.message` is never mutated
+ *  (ErrorBoundary fallbacks render it to users). Display sites format it via
+ *  {@link _componentChainOf}. */
+export function _tagComponentError(e: unknown, tag: unknown): void {
+  if (!(e instanceof Error)) return;
+  const name =
+    (typeof tag === "function" ? (tag as { name?: string }).name : "") ||
+    "Anonymous";
+  const carrier = e as Error & { __aioComponents?: string[] };
+  const chain = carrier.__aioComponents;
+  if (chain) {
+    if (chain.length < 10 && chain[chain.length - 1] !== name) {
+      chain.push(name);
+    }
+  } else {
+    carrier.__aioComponents = [name];
+  }
+}
+
+/** The component path a render error escaped from, innermost first — or null
+ *  when the error didn't come through a component render. */
+export function _componentChainOf(e: unknown): string[] | null {
+  const chain = (e as { __aioComponents?: string[] } | null)?.__aioComponents;
+  return Array.isArray(chain) && chain.length > 0 ? chain : null;
+}

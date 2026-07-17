@@ -131,6 +131,10 @@ export function createDispatch<S, A, E>(
   const effectBudget = perfBudget?.effect ?? DEFAULT_EFFECT_BUDGET;
   let dispatching = false;
   let closed = false;
+  // risoto 2026-07-17b: warn once per action TYPE after close — a shutdown
+  // used to emit one identical warn line per queued tick (hundreds/ms).
+  const closedWarnedTypes = new Set<string>();
+  let closedDropCount = 0;
   let errors = 0;
   let depth = 0; // global re-entrant depth counter (survives across dispatch calls)
   let effectsInFlight = 0;
@@ -190,7 +194,17 @@ export function createDispatch<S, A, E>(
 
   function dispatch(action: A): Promise<void> {
     if (closed) {
-      log.warn("dispatch after close() — ignored");
+      const t = String(
+        (action as Record<string, unknown>)?.type ?? "(unknown)",
+      );
+      closedDropCount++;
+      if (!closedWarnedTypes.has(t)) {
+        closedWarnedTypes.add(t);
+        log.warn(
+          `dispatch after close() — '${t}' ignored (further drops of this ` +
+            `type suppressed; ${closedDropCount} dropped so far)`,
+        );
+      }
       return rejectDropped(createAioError(
         "DISPATCH_CLOSED",
         "dispatch after close() — action dropped, not applied",
