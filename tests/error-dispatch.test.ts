@@ -1,6 +1,7 @@
 import {
   assertEquals,
   assertExists,
+  assertRejects,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import { createDispatch } from "../src/state/dispatch.ts";
 import type { AioError } from "../src/diagnostics/error.ts";
@@ -40,7 +41,12 @@ function makeDeps(overrides: Partial<{
 Deno.test("dispatch — reduce throw produces AioError with REDUCE_ERROR", async () => {
   const { deps, errors } = makeDeps();
   const dispatch = createDispatch(deps as never);
-  await dispatch({ type: "throw" } as never);
+  // B-4: reducer throw rejects the awaiter — state did not apply.
+  await assertRejects(
+    () => dispatch({ type: "throw" } as never),
+    Error,
+    "reduce boom",
+  );
   assertEquals(errors.length, 1);
   assertEquals(errors[0]!.code, "REDUCE_ERROR");
   assertEquals(errors[0]!.context.actionType, "throw");
@@ -80,7 +86,11 @@ Deno.test("dispatch — async effect rejection produces EFFECT_ASYNC_ERROR", asy
 Deno.test("dispatch — continues processing after error", async () => {
   const { deps, errors, getState } = makeDeps();
   const dispatch = createDispatch(deps as never);
-  await dispatch({ type: "throw" } as never);
+  await assertRejects(
+    () => dispatch({ type: "throw" } as never),
+    Error,
+    "reduce boom",
+  );
   await dispatch({ type: "ok" } as never);
   assertEquals(errors.length, 1);
   assertEquals(getState().count, 1);
@@ -90,14 +100,22 @@ Deno.test("dispatch — errorCount still works", async () => {
   const { deps } = makeDeps();
   const dispatch = createDispatch(deps as never);
   assertEquals(dispatch.errorCount(), 0);
-  await dispatch({ type: "throw" } as never);
+  await assertRejects(
+    () => dispatch({ type: "throw" } as never),
+    Error,
+    "reduce boom",
+  );
   assertEquals(dispatch.errorCount(), 1);
 });
 
 Deno.test("dispatch — correlationId is set on errors", async () => {
   const { deps, errors } = makeDeps();
   const dispatch = createDispatch(deps as never);
-  await dispatch({ type: "throw" } as never);
+  await assertRejects(
+    () => dispatch({ type: "throw" } as never),
+    Error,
+    "reduce boom",
+  );
   assertEquals(typeof errors[0]!.correlationId, "string");
   assertEquals(errors[0]!.correlationId !== "none", true);
 });

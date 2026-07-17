@@ -14,9 +14,31 @@ import { _registerAck } from "../protocol/browser-ack.ts";
 
 const _cellRegistry = new Map<string, CellDef>();
 
-/** Register a cell for reactive binding. Called by cell() at creation time. */
+/** Register a cell for reactive binding. Called by cell() at creation time.
+ *  Same-id re-registration is allowed (HMR re-imports the module and re-runs
+ *  cell()), but in dev mode a duplicate name warns loudly — two modules both
+ *  defining `cell("counter", …)` would otherwise silently kill the first
+ *  definition with no warning. The composeCells duplicate check only catches
+ *  the case where both are passed explicitly to `aio.run({ cells })`; this
+ *  catches the import-time registration overwrite. */
 export function registerCell(def: CellDef): void {
-  _cellRegistry.set(def.__aio.id, def);
+  const id = def.__aio.id;
+  if (
+    _cellRegistry.has(id) &&
+    (globalThis as Record<string, unknown>).__aioDev === true
+  ) {
+    // HMR re-import produces an identical def — only warn when the new def
+    // differs from the registered one (genuine conflict, not hot reload).
+    const existing = _cellRegistry.get(id);
+    if (existing !== def) {
+      console.warn(
+        `[aio] duplicate cell name '${id}' — cell() called twice with this ` +
+          `name. The previous definition is being replaced. If this is HMR, ` +
+          `ignore; if two modules define the same cell name, rename one.`,
+      );
+    }
+  }
+  _cellRegistry.set(id, def);
 }
 
 /** Get all registered cells. */

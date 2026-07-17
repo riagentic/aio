@@ -4,6 +4,7 @@
 import { compactPatches } from "../state/patch-compact.ts";
 import { writeClientLog } from "./client-log.ts";
 import { log } from "../diagnostics/logger.ts";
+import { _isFrameworkInternalActionType } from "./server-ws.ts";
 import {
   negotiateProtocol,
   parseProtoHello,
@@ -440,6 +441,23 @@ function _handleUDSConn(
           try {
             const action = JSON.parse(line);
             if (action && typeof action.type === "string") {
+              // Block framework-internal action types from UDS sources —
+              // parity with the WS server (server-ws.ts:621) and trojan
+              // (server-trojan.ts:315). Internal actions (cell:__setX,
+              // cell:__exec, cell:__flow, etc.) carry trusted payload shapes
+              // (e.g. mutation lists) that bypass cell method bodies.
+              // Accepting them from any UDS client is a remote-code-style
+              // vector — see audit F-1 (prototype pollution via __setMethod).
+              // UDS is typically local-only (Electron in-process), but this
+              // closes the defense-in-depth invariant for any UDS-exposing
+              // deployment (socket on a shared host, dev hot-reload).
+              if (_isFrameworkInternalActionType(action.type)) {
+                log.warn(
+                  "uds",
+                  `rejected framework-internal action type "${action.type}"`,
+                );
+                continue;
+              }
               onAction(action);
               // AIO-402: per-action ack — parity with the WS server
               // (server-ws.ts). Settles the Promise returned by an awaited

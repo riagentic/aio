@@ -788,7 +788,14 @@ export function createWsManager(deps: WsDeps): WsManager {
       !op || typeof op !== "object" || typeof op.id !== "string" ||
       typeof op.cell !== "string" || typeof op.action !== "string" ||
       !Array.isArray(op.hlc) ||
-      ["__proto__", "constructor", "prototype"].includes(op.cell as string)
+      ["__proto__", "constructor", "prototype"].includes(op.cell as string) ||
+      // Validate op.action against banned keys AND framework-internal action
+      // types — a malicious op.action like "cell:__setMethod" would bypass
+      // the _isFrameworkInternalActionType gate at line 621 because the sync
+      // path returns early here before reaching it. The sync handler routes
+      // op.action to dispatch, so the same gate must apply.
+      ["__proto__", "constructor", "prototype"].includes(op.action as string) ||
+      _isFrameworkInternalActionType(op.action as string)
     ) {
       log.warn("ws", "invalid __op — malformed or forbidden fields");
       return;
