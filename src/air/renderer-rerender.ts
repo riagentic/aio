@@ -126,7 +126,13 @@ export function _rerenderComponent(inst: ComponentInstance): void {
     // AIO-160: dispose orphaned computeds/effects from the failed render
     _computedDisposeAll(collected);
     _effectDisposeAll(effectCollected);
-    console.error("[aio-renderer] Component render error:", error);
+    const failedName = typeof vnode.tag === "function"
+      ? (vnode.tag.name || "Anonymous")
+      : "Component";
+    console.error(
+      `[aio-renderer] Component render error in <${failedName}>:`,
+      error,
+    );
     _subscribeComponentDeps(inst, deps);
     inst.deps = deps;
     return;
