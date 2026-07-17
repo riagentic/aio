@@ -493,7 +493,7 @@
         },
         "VERSION": {
           "kind": "variable",
-          "sig": "42da9a55e4b030d6"
+          "sig": "e9c971a8bcfbc99d"
         },
         "VitalAlert": {
           "kind": "typeAlias",

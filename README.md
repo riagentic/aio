@@ -9,7 +9,7 @@
 - **Write reactive, use generators or atomic actions when needed.**
 - **Pick your target, compile and ship!**
 
-`v1.0.0-alpha20`
+`v1.0.0-alpha21`
 
 > Define state once. It persists, syncs to all clients, drives the UI.
 
@@ -90,21 +90,21 @@ await aio.run({ appId: "taste", appVersion: "0.1.0", cells: [counter] });
 
 ```sh
 # Option A: scaffolder — one line, no curl
-deno run -A jsr:@riagentic/aio@1.0.0-alpha20/create my-app
+deno run -A jsr:@riagentic/aio@1.0.0-alpha21/create my-app
 
 # Option B: vendor into your project (full source, bleeding edge)
 git clone https://github.com/riagentic/aio dep/aio
 
 # Option C: JSR — pin the version explicitly (alphas are semver
 #   pre-releases, so a bare install would resolve to an old stable)
-deno add jsr:@riagentic/aio@1.0.0-alpha20
+deno add jsr:@riagentic/aio@1.0.0-alpha21
 ```
 
 Then in `deno.json`:
 
 ```jsonc
 // JSR
-"imports": { "aio": "jsr:@riagentic/aio@1.0.0-alpha20" }
+"imports": { "aio": "jsr:@riagentic/aio@1.0.0-alpha21" }
 
 // Clone — also declare aio's deps (Deno can't fetch them transitively)
 "imports": {
@@ -267,7 +267,7 @@ Everything below ships in the box — no plugins, no assembly.
 
 **Quality machinery**
 
-- 2260+ tests incl. real-browser e2e · coverage ratchet (floor-enforced)
+- 2370+ tests incl. real-browser e2e · coverage ratchet (floor-enforced)
 - CI drift gates: API snapshot, docs links/coverage/imports/index, module
   boundaries, config allowlists, browser deps, bundle smoke
 - Symptom→cause→caught-by matrix for every failure class ever hit
@@ -319,21 +319,22 @@ clients, zero plumbing. Fit questions:
 
 ## Status
 
-**v1.0.0-alpha20** · [JSR](https://jsr.io/@riagentic/aio) · MIT
+**v1.0.0-alpha21** · [JSR](https://jsr.io/@riagentic/aio) · MIT
 
-2260+ tests · security hardened · CI-locked API snapshot + coverage ratchet
+2370+ tests · security hardened · CI-locked API snapshot + coverage ratchet
 
-New in alpha20: **zero-config everything** — a working app is
-`import "./cell.ts"; await aio.run();` (identity, cells, paths all inferred), UI
-tests with **no boilerplate and no awaits on actions**
-(`testUI(App, "name", async (ui) => { ui.AddButton.click(); … })`), bound remote
-cells (`cli.bind(counter)` — no raw wire actions), `useLocal` tuples, forms that
-never navigate, and a six-round audit that fixed 12 integration-seam flaws.
-Alpha18 shipped **semantic UI testing** + read-your-writes async methods;
-alpha15 fixed the **Deno ≥ 2.9 blank-app bug** (WS upgrade) every earlier
-version hits. Alpha13 was the **DX overhaul** (honest `persist`/`ui` defaults,
-awaitable methods, React-compat hooks moved to `aio/air/compat`); alpha12
-removed React — **AIR is the sole renderer** with direct reactive cell access as
-the primary UI pattern. Core (state, sync, cells, scheduling, renderer) is
-stable. Electron, Android, and build targets are functional but less
-battle-tested.
+New in alpha21: **every effect is testable** — `bootCells` + a virtual clock
+(`await ui.advance(ms)`) fire `schedule.*` deterministically in tests, plus
+`schedule.next`, external links via the system browser (`openExternal`,
+same-origin-only navigation relay), the `.server.ts` convention for server-only
+code, and a reconciler fix for conditional bindings inside `<form>` — closing
+out all three external field reports. Alpha20 shipped **zero-config everything**
+(`import "./cell.ts"; await aio.run();`), no-await UI tests, bound remote cells,
+the `aio/ui` kit, and flag-free LAN discovery. Alpha18 shipped **semantic UI
+testing** + read-your-writes async methods; alpha15 fixed the **Deno ≥ 2.9
+blank-app bug** (WS upgrade) every earlier version hits. Alpha13 was the **DX
+overhaul** (honest `persist`/`ui` defaults, awaitable methods, React-compat
+hooks moved to `aio/air/compat`); alpha12 removed React — **AIR is the sole
+renderer** with direct reactive cell access as the primary UI pattern. Core
+(state, sync, cells, scheduling, renderer) is stable. Electron, Android, and
+build targets are functional but less battle-tested.
