@@ -8,3 +8,5 @@
 - examples in examples/ are tested
 - examples with ui are tested by ui functional tests proving that app is usable
   by a user
+- aio test coverage is 100% or whatever is realistically possible
+- aio has ui tests to cover all major use cases

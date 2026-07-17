@@ -27,3 +27,10 @@ other way. The rules below are the checkable expression of that vision.
   (loved-by-developers proxy)
 - every breaking change ships in an alpha; beta and final releases never break
   existing apps
+- aio framework contains no unfixed bugs or issues
+- aio frameworks never hide any errors or flaws, all is reported to developer
+- aio framework doesn't accept any unrported issues
+- aio framework never fails silently, when something fails or doesn't work
+  developer always knows
+- aio framwork is as compact and agile as possible while not harming
+  functionality and comfort
