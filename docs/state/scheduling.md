@@ -148,6 +148,53 @@ return schedule.cron("daily-report", "0 8 * * 1-5", reports.generate.action());
 > **Note:** cron fires against **UTC time**. `0 9 * * *` = 09:00 UTC. Offset the
 > hour field for local time zones.
 
+### `schedule.backoff(id, attempt, opts, action)` — exponential retry delay
+
+A one-shot `after` whose delay grows exponentially with `attempt`:
+`base * factor^attempt`, capped at `max` (`factor` defaults to 2). Track the
+attempt counter in state — reset it on success, bump it on failure.
+
+```ts
+return schedule.backoff(
+  "prices:refresh",
+  s.attempt, // 0 → base, 1 → base*2, 2 → base*4, … capped at max
+  { base: 5_000, max: 60_000 },
+  prices.refresh.action(),
+);
+```
+
+### `schedule.poll(id, attempt, opts, action)` — self-pacing poller
+
+The first-class polling loop: constant `every` interval while healthy (`attempt`
+= 0), backing off by `backoff^attempt` (capped at `max`) while failing. Re-issue
+it each cycle with the current attempt — the delay self-adjusts, no hand-rolled
+after-chain or backoff clock in state.
+
+```ts
+methods: {
+  async tick(s): Promise<ScheduleEffect> {
+    try {
+      s.data = await call(() => api.poll())
+      s.attempt = 0                       // healthy → constant cadence
+    } catch {
+      s.attempt += 1                      // failing → back off
+    }
+    return schedule.poll('rpc', s.attempt, { every: 5000, backoff: 2, max: 60000 }, rpc.tick.action())
+  },
+}
+```
+
+### `schedule.next(id, action)` — defer to the next tick
+
+Runs the action right after the current method returns — the honest primitive
+for "not now, but immediately after this commit" (replaces the
+`schedule.after(id, 1, …)` sentinel). Same-id replace applies, so repeated calls
+dedup.
+
+```ts
+return schedule.next("recalc", totals.recalc.action());
+```
+
 ### `schedule.cancel(id)` — cancel any timer
 
 ```ts

@@ -76,7 +76,8 @@
       "node_modules/",
       "coverage/",
       "dist/",
-      "android-template/"
+      "android-template/",
+      "docs/content.md"
     ]
   },
   "lint": {
