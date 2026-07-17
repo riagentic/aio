@@ -3,7 +3,7 @@
 
 import { _devMode, _devWarn, Fragment } from "./vdom-types.ts";
 import type { RenderCtx, VNode } from "./vdom-types.ts";
-import { getDom, removeDom } from "./vdom-remove.ts";
+import { getDom, isChildOf, removeDom } from "./vdom-remove.ts";
 import { createDom } from "./vdom-render.ts";
 
 /** Diff function signature — injected from vdom-diff.ts to break circular dep. */
@@ -137,7 +137,7 @@ function diffUnkeyed(
     if (nc == null && oc != null) {
       if (typeof oc === "string" || typeof oc === "number") {
         const textNode = oldDoms[i];
-        if (textNode?.parentNode === parent) parent.removeChild(textNode);
+        if (isChildOf(textNode, parent)) parent.removeChild(textNode!);
       } else {
         removeDom(parent, oc, ctx);
       }
@@ -153,7 +153,7 @@ function diffUnkeyed(
         if (String(nc) !== String(oc)) oldDom.textContent = String(nc);
       } else {
         const newText = ctx.doc.createTextNode(String(nc));
-        if (oldDom && oldDom.parentNode === parent) {
+        if (oldDom && isChildOf(oldDom, parent)) {
           parent.insertBefore(newText, oldDom);
           parent.removeChild(oldDom);
         } else {
@@ -257,7 +257,7 @@ function diffKeyed(
           if (String(nc) !== String(onk)) textDom.textContent = String(nc);
         } else {
           textDom = ctx.doc.createTextNode(String(nc));
-          if (onkDom?.parentNode === parent) parent.removeChild(onkDom);
+          if (isChildOf(onkDom, parent)) parent.removeChild(onkDom!);
         }
         if (textDom) {
           const a: Node | null = lastPlaced
@@ -271,8 +271,8 @@ function diffKeyed(
         if (onk != null) {
           if (typeof onk === "object") {
             removeDom(parent, onk as VNode, ctx);
-          } else if (onkDom?.parentNode === parent) {
-            parent.removeChild(onkDom);
+          } else if (isChildOf(onkDom, parent)) {
+            parent.removeChild(onkDom!);
           }
         }
         const newDom = createDom(
@@ -308,7 +308,7 @@ function diffKeyed(
         if (typeof nc === "object" && (nc as VNode).tag === Fragment) {
           for (const child of (nc as VNode).children) {
             const childDom = getDom(child);
-            if (childDom && childDom.parentNode === parent) {
+            if (childDom && isChildOf(childDom, parent)) {
               const a: Node | null = lastPlaced
                 ? lastPlaced.nextSibling
                 : parent.firstChild;
@@ -317,7 +317,7 @@ function diffKeyed(
             }
           }
           // Handle empty Fragment comment anchor
-          if (dom.nodeType === 8 && dom.parentNode === parent) {
+          if (dom.nodeType === 8 && isChildOf(dom, parent)) {
             const a: Node | null = lastPlaced
               ? lastPlaced.nextSibling
               : parent.firstChild;
@@ -369,8 +369,8 @@ function diffKeyed(
     const dom = oldNonKeyedDoms[i];
     if (typeof onk === "object") {
       removeDom(parent, onk as VNode, ctx);
-    } else if (dom?.parentNode === parent) {
-      parent.removeChild(dom);
+    } else if (isChildOf(dom, parent)) {
+      parent.removeChild(dom!);
     }
   }
 }
