@@ -15,6 +15,27 @@ export function getDom(vnode: VNode | string | number): Node | null {
   return null;
 }
 
+/** True when `node` is a live child of `parent`. A plain `.parentNode ===
+ *  parent` identity check breaks under happy-dom, which wraps <form> in a
+ *  Proxy (named-element access): a child's .parentNode may be the raw node or
+ *  the proxy depending on how it was inserted, while the reconciler holds the
+ *  proxy — identity fails even though the child IS inside the parent, so
+ *  conditional bindings froze inside <form> under testUI (risoto 2026-07-16d).
+ *  The fallback scans childNodes by identity (stable in both worlds); it only
+ *  runs when the fast path misses, i.e. proxy containers or true non-children. */
+export function isChildOf(
+  node: Node | null | undefined,
+  parent: Node,
+): boolean {
+  if (!node?.parentNode) return false;
+  if (node.parentNode === parent) return true;
+  const kids = parent.childNodes;
+  for (let i = 0; i < kids.length; i++) {
+    if (kids[i] === node) return true;
+  }
+  return false;
+}
+
 /** Cleanup component instances without removing DOM (for type-mismatch replacement). */
 export function _removeDomCleanup(
   vnode: VNode | string | number,
@@ -81,7 +102,7 @@ export function removeDom(
     // doesn't touch it because children is [] for empty containers.
     if (
       vnode._dom && vnode._dom.nodeType === 8 &&
-      vnode._dom.parentNode === parent
+      isChildOf(vnode._dom, parent)
     ) {
       parent.removeChild(vnode._dom);
     }
@@ -103,7 +124,7 @@ export function removeDom(
     _callRef(vnode.props.ref, null);
   }
   const dom = getDom(vnode);
-  if (dom && dom.parentNode === parent) {
+  if (dom && isChildOf(dom, parent)) {
     // Deferred removal for exit animations — cleanup AFTER animation completes
     const HtmlEl = ctx.doc?.defaultView?.HTMLElement ?? globalThis.HTMLElement;
     if (
@@ -125,7 +146,7 @@ export function removeDom(
               if (typeof child === "object") _removeDomCleanup(child, ctx);
             }
           }
-          if (dom.parentNode === parent) parent.removeChild(dom);
+          if (isChildOf(dom, parent)) parent.removeChild(dom);
         };
         const timeout = setTimeout(() => {
           if (removed) return;
