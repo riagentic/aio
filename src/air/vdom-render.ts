@@ -3,7 +3,11 @@
 
 import { bindSignalProps } from "./signal-binding.ts";
 import { _applyActions, _bindSignalTextChildren } from "./vdom-helpers.ts";
-import { _callRef, _registerLazyListeners } from "./vdom-create.ts";
+import {
+  _callRef,
+  _registerLazyListeners,
+  _tagComponentError,
+} from "./vdom-create.ts";
 import { applyProps } from "./vdom-props.ts";
 import { getDom } from "./vdom-remove.ts";
 import { _getActiveDelegationRoot, _setDelegationRoot } from "./vdom-events.ts";
@@ -69,13 +73,22 @@ export function createDom(
       });
     } catch (e) {
       ctx.hooks?.abortComponent?.(vnode, hookState);
+      if (e !== _LAZY_PENDING) _tagComponentError(e, vnode.tag);
       throw e;
     }
     vnode._rendered = rendered;
     try {
       ctx.hooks?.afterComponent(vnode, rendered, hookState);
       if (rendered == null) return null;
-      const dom = createDom(rendered, ctx, isSvg, parentDom);
+      let dom: Node | null;
+      try {
+        dom = createDom(rendered, ctx, isSvg, parentDom);
+      } catch (e) {
+        // A child's render failed — record this component on the error's
+        // component chain (the innermost already stamped the message).
+        if (e !== _LAZY_PENDING) _tagComponentError(e, vnode.tag);
+        throw e;
+      }
       // AIO-167: if rendered is a Fragment, dom is a DocumentFragment that becomes
       // empty after insertion. Store the first child DOM instead (via getDom on the
       // rendered VNode) so the component has a valid position anchor for future diffs.

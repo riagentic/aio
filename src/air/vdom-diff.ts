@@ -8,12 +8,13 @@ import {
   _cleanupActions,
   _cleanupSignalTextChildren,
 } from "./vdom-helpers.ts";
-import { _callRef, _staticEqual } from "./vdom-create.ts";
+import { _callRef, _staticEqual, _tagComponentError } from "./vdom-create.ts";
 import { _hasSignalPropChange, applyProps } from "./vdom-props.ts";
 import { getDom, isChildOf, removeDom } from "./vdom-remove.ts";
 import { _render, createDom } from "./vdom-render.ts";
 import { _getActiveDelegationRoot, _setDelegationRoot } from "./vdom-events.ts";
 import {
+  _LAZY_PENDING,
   _Null,
   ErrorBoundary,
   Fragment,
@@ -203,12 +204,19 @@ function _diffComponent(
     });
   } catch (e) {
     ctx.hooks?.abortComponent?.(nv, hookState);
+    if (e !== _LAZY_PENDING) _tagComponentError(e, nv.tag);
     throw e;
   }
   nv._rendered = rendered;
   try {
     ctx.hooks?.afterComponent(nv, rendered, hookState);
-    _diff(parent, rendered ?? null, ov._rendered ?? null, ctx, isSvg);
+    try {
+      _diff(parent, rendered ?? null, ov._rendered ?? null, ctx, isSvg);
+    } catch (e) {
+      // A child's render failed — record this component on the chain.
+      if (e !== _LAZY_PENDING) _tagComponentError(e, nv.tag);
+      throw e;
+    }
     nv._dom = rendered ? (getDom(rendered) ?? undefined) : undefined;
   } finally {
     ctx.hooks?.afterSubtree?.(nv);
