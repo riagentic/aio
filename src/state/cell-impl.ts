@@ -496,7 +496,9 @@ const ARRAY_READ_METHODS = new Set([
 
 /** Snapshot a value for read-method interception. structuredClone throws on
  *  functions/symbols, so we fall back to a JSON round trip for uncloneable
- *  values. */
+ *  values. Never returns the live value by reference — a fallback to identity
+ *  would let a `.map()`/`.find()` over the "snapshot" silently mutate real
+ *  state (the exact Immer-alias bug class immutable.ts warns about). */
 function snapshotForRead(value: unknown): unknown {
   if (value === null || value === undefined) return value;
   if (typeof value !== "object") return value;
@@ -506,7 +508,13 @@ function snapshotForRead(value: unknown): unknown {
     try {
       return JSON.parse(JSON.stringify(value));
     } catch {
-      return value;
+      // Circular / non-serializable — return a SHALLOW copy so callers can
+      // read top-level fields without mutating live state. Deeper mutation
+      // would still alias nested refs, but a thrown error here would crash
+      // every read in a degenerate state shape; shallow-copy is the safe
+      // middle ground and matches cloneState's "best effort" contract.
+      if (Array.isArray(value)) return [...(value as unknown[])];
+      return { ...(value as Record<string, unknown>) };
     }
   }
 }

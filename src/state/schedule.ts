@@ -331,6 +331,26 @@ export function createScheduleManager(
     kind: string,
     timerId: ReturnType<typeof setTimeout>,
   ): void {
+    // Warn on dynamic+dynamic same-id replacement — two reducers
+    // independently issuing `schedule.every('cleanup', …)` would otherwise
+    // race invisibly: one cancels the other with no log. Static+dynamic
+    // collisions are warned in handle(); this covers the dynamic+dynamic
+    // case. One-shot timers (after/at) legitimately re-use ids (re-schedule
+    // semantics), so only warn for repeating kinds (every/cron).
+    const existing = timers.get(id);
+    if (
+      existing && (existing.kind === "every" || existing.kind === "cron") &&
+      (kind === "every" || kind === "cron") &&
+      !warnedCollisions.has(id)
+    ) {
+      warnedCollisions.add(id);
+      log.warn(
+        `schedule '${id}' is set dynamically twice (existing ${existing.kind} ` +
+          `replaced by new ${kind}) — same id, replace semantics. If two ` +
+          `reducers independently schedule the same id, one will cancel the ` +
+          `other. Use unique ids per schedule source.`,
+      );
+    }
     cancelTimer(id); // re-schedule: cancel previous
     timers.set(id, { timerId, kind });
   }

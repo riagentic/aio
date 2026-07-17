@@ -1,4 +1,4 @@
-import { assertEquals } from "@std/assert";
+import { assertEquals, assertRejects } from "@std/assert";
 import { createDispatch, deepFreeze } from "../src/state/dispatch.ts";
 import type { AioError } from "../src/diagnostics/error.ts";
 
@@ -171,7 +171,7 @@ Deno.test("dispatch: dropped action rejects with QUEUE_OVERFLOW (B-4)", async ()
   assertEquals(overflowRejections.length > 0, true);
 });
 
-Deno.test("dispatch: bad reducer output is logged and skipped", () => {
+Deno.test("dispatch: bad reducer output is logged and skipped", async () => {
   let state = { n: 0 };
   const errors: AioError[] = [];
 
@@ -196,7 +196,12 @@ Deno.test("dispatch: bad reducer output is logged and skipped", () => {
     reportOpts: { onError: (err) => errors.push(err) },
   });
 
-  dispatch({ type: "BAD" });
+  // B-4: malformed reduce shape rejects the awaiter — state did not apply.
+  await assertRejects(
+    () => dispatch({ type: "BAD" }),
+    Error,
+    "reduce() must return",
+  );
   assertEquals(state.n, 0); // state unchanged
   assertEquals(
     errors.some((e) =>
@@ -206,11 +211,11 @@ Deno.test("dispatch: bad reducer output is logged and skipped", () => {
   );
 
   // Valid action still works after bad one
-  dispatch({ type: "GOOD" });
+  await dispatch({ type: "GOOD" });
   assertEquals(state.n, 1);
 });
 
-Deno.test("dispatch: reducer throw is caught and skipped", () => {
+Deno.test("dispatch: reducer throw is caught and skipped", async () => {
   let state = { n: 0 };
   const errors: AioError[] = [];
 
@@ -230,11 +235,13 @@ Deno.test("dispatch: reducer throw is caught and skipped", () => {
     reportOpts: { onError: (err) => errors.push(err) },
   });
 
-  dispatch({ type: "THROW" });
+  // B-4: reducer throw rejects the awaiter — state did not apply.
+  await assertRejects(() => dispatch({ type: "THROW" }), Error, "kaboom");
   assertEquals(state.n, 0);
   assertEquals(errors.some((e) => e.code === "REDUCE_ERROR"), true);
 
-  dispatch({ type: "OK" });
+  // Subsequent valid action still works — queue is not poisoned.
+  await dispatch({ type: "OK" });
   assertEquals(state.n, 1);
 });
 
@@ -429,7 +436,7 @@ Deno.test("dispatch: deepFreeze state when freezeState=true", () => {
   assertEquals(Object.isFrozen(state), true);
 });
 
-Deno.test("dispatch: reportOpts.onError callback receives reduce errors", () => {
+Deno.test("dispatch: reportOpts.onError callback receives reduce errors", async () => {
   let state = { n: 0 };
   const errors: AioError[] = [];
   const dispatch = createDispatch<typeof state, { type: string }, never>({
@@ -446,7 +453,7 @@ Deno.test("dispatch: reportOpts.onError callback receives reduce errors", () => 
     debug: false,
     reportOpts: { onError: (err) => errors.push(err) },
   });
-  dispatch({ type: "X" });
+  await assertRejects(() => dispatch({ type: "X" }), Error, "boom");
   assertEquals(errors.length, 1);
   assertEquals(errors[0]!.source, "reduce");
   assertEquals(errors[0]!.code, "REDUCE_ERROR");
@@ -736,7 +743,7 @@ Deno.test("dispatch: returns Promise<void> that resolves after reduce + effects"
   await promise;
 });
 
-Deno.test("dispatch: Promise resolves even on reduce error", async () => {
+Deno.test("dispatch: Promise rejects on reduce error (B-4 contract)", async () => {
   let state = { n: 0 };
   const dispatch = createDispatch<typeof state, { type: string }, never>({
     reduce: () => {
@@ -752,8 +759,9 @@ Deno.test("dispatch: Promise resolves even on reduce error", async () => {
     debug: false,
   });
 
-  // Should not hang — Promise resolves even on error
-  await dispatch({ type: "BAD" });
+  // B-4: a reducer throw means the state change never applied — awaiter must
+  // learn the action failed, not resolve as if it had succeeded.
+  await assertRejects(() => dispatch({ type: "BAD" }), Error, "boom");
   assertEquals(state.n, 0);
 });
 

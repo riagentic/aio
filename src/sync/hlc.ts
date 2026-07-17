@@ -37,7 +37,13 @@ export function createHLC(
   let counter = 0;
 
   return {
-    now: () => [physical, counter, nodeId] as HLC,
+    // `now()` ticks the counter so successive calls return strictly
+    // monotonic HLCs — required for uses as a tiebreaker (e.g. compaction
+    // snapshot HLC). Two `now()` calls in the same millisecond produce
+    // distinct HLCs, never identical timestamps.
+    now() {
+      return this.tick();
+    },
 
     tick() {
       const now = wallClock();
@@ -51,6 +57,13 @@ export function createHLC(
     },
 
     receive(remote: HLC) {
+      // Reject ops with wall-clock drift beyond maxDrift — a remote with a
+      // future clock would otherwise hijack the local HLC forward, poisoning
+      // causal ordering for all subsequent ops. `isDriftExceeded` was dead
+      // code; wiring it here closes the documented drift-tolerance contract.
+      if (this.isDriftExceeded(remote)) {
+        return;
+      }
       const now = wallClock();
       const remotePhys = remote[0];
       const remoteCnt = remote[1];

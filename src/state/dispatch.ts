@@ -58,10 +58,6 @@ const DISPATCH_MAX = 1000;
 /** Queue depth limit — prevents unbounded memory growth from burst dispatches */
 const QUEUE_MAX = 10_000;
 
-// A reducer that returns an invalid effect does so for every dispatch of that
-// action — warn once per action type instead of flooding the log.
-const _warnedInvalidEffect = new Set<string>();
-
 /** Dependencies injected into the dispatch loop by the host runtime */
 export type DispatchDeps<S, A, E> = {
   reduce: (
@@ -139,6 +135,12 @@ export function createDispatch<S, A, E>(
   let depth = 0; // global re-entrant depth counter (survives across dispatch calls)
   let effectsInFlight = 0;
   const effectPromises = new Set<Promise<void>>();
+  // Per-dispatch-instance set: a reducer that returns an invalid effect does
+  // so for every dispatch of that action — warn once per action type instead
+  // of flooding the log. Moved off the module level so a second aio.run() in
+  // the same process (or a subsequent test) doesn't silently suppress the
+  // warning for action types already seen.
+  const warnedInvalidEffect = new Set<string>();
   const queue: {
     action: A;
     resolve: () => void;
@@ -285,7 +287,25 @@ export function createDispatch<S, A, E>(
             actionType,
           }, getState() as Record<string, unknown>);
           reportAioError(err, _reportOpts);
-          entry.resolve();
+          // Emit a diag event so the health overlay / diagnostic bus
+          // subscribers see reduce failures — previously only EFFECT_ERROR
+          // paths emitted, so the blank-screen health card stayed silent
+          // while a reducer crashed on every dispatch.
+          diagEmit({
+            type: "reduce-error",
+            severity: "error",
+            source: "dispatch",
+            message: `Reduce threw for action '${actionType ?? "?"}': ${
+              e instanceof Error ? e.message : String(e)
+            }`,
+            detail: { actionType, cellName: actionType?.split(":")[0] },
+            hint:
+              "Check the cell method body — the reducer threw before producing a new state.",
+          });
+          // B-4: a reducer throw means the state change never applied —
+          // `await cell.method()` must learn the action failed, not resolve
+          // cleanly. Mirrors QUEUE_OVERFLOW / DISPATCH_CLOSED contract.
+          entry.reject(err);
           clearCorrelationId();
           continue;
         }
@@ -311,7 +331,10 @@ export function createDispatch<S, A, E>(
             { cellName: actionType?.split(":")[0], actionType },
           );
           reportAioError(err, _reportOpts);
-          entry.resolve();
+          // B-4: malformed reduce shape = action not applied — reject the
+          // awaiter so `await cell.method()` learns the failure rather than
+          // resolving as if the state had advanced.
+          entry.reject(err);
           clearCorrelationId();
           continue;
         }
@@ -383,8 +406,8 @@ export function createDispatch<S, A, E>(
             typeof (effect as Record<string, unknown>).type !== "string"
           ) {
             const actionType = tag(current);
-            if (!_warnedInvalidEffect.has(actionType)) {
-              _warnedInvalidEffect.add(actionType);
+            if (!warnedInvalidEffect.has(actionType)) {
+              warnedInvalidEffect.add(actionType);
               log.warn(
                 `reducer returned invalid effect (missing .type string) — ` +
                   `skipping. Action was: ${actionType} (logged once per action)`,

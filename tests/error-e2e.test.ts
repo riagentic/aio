@@ -1,6 +1,7 @@
 import {
   assertEquals,
   assertExists,
+  assertRejects,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import { createDispatch } from "../src/state/dispatch.ts";
 import { createTT, markError, record } from "../src/diagnostics/time-travel.ts";
@@ -39,8 +40,12 @@ Deno.test("e2e — action → reduce throw → onError → TT flagged", async ()
     reportOpts,
   } as never);
 
-  // Dispatch failing action
-  await dispatch({ type: "bomb" } as never);
+  // Dispatch failing action — B-4: reducer throw rejects the awaiter.
+  await assertRejects(
+    () => dispatch({ type: "bomb" } as never),
+    Error,
+    "e2e boom",
+  );
 
   // Verify onError received AioError
   assertEquals(errors.length, 1);
@@ -96,8 +101,16 @@ Deno.test("e2e — multiple errors get different correlationIds", async () => {
     reportOpts: { onError: (err: AioError) => errors.push(err) },
   } as never);
 
-  await dispatch({ type: "throw" } as never);
-  await dispatch({ type: "throw" } as never);
+  await assertRejects(
+    () => dispatch({ type: "throw" } as never),
+    Error,
+    "boom",
+  );
+  await assertRejects(
+    () => dispatch({ type: "throw" } as never),
+    Error,
+    "boom",
+  );
 
   assertEquals(errors.length, 2);
   // Each dispatch gets its own correlationId

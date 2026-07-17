@@ -4,6 +4,10 @@
 
 const _hinted = new Set<string>();
 
+// Track the installed listener so _uninstallReadOnlyHint can remove it.
+// deno-lint-ignore no-explicit-any
+let _installedListener: ((ev: any) => void) | null = null;
+
 /** Install a global onerror handler that, in dev, prints a hint when the
  *  user mutates frozen state. Idempotent — installs at most once. */
 export function _installReadOnlyHint(): void {
@@ -20,10 +24,15 @@ export function _installReadOnlyHint(): void {
       // deno-lint-ignore no-explicit-any
       listener: (ev: any) => void,
     ) => void;
+    removeEventListener?: (
+      type: string,
+      // deno-lint-ignore no-explicit-any
+      listener: (ev: any) => void,
+    ) => void;
   };
   if (typeof target.addEventListener !== "function") return;
 
-  target.addEventListener("error", (ev: {
+  const listener = (ev: {
     message?: string;
     error?: Error;
   }) => {
@@ -42,11 +51,30 @@ export function _installReadOnlyHint(): void {
       "[aio] state is read-only — call a cell method to change it (rule AIO2). " +
         "Mutations from components bypass the framework and silently desync.",
     );
-  });
+  };
+  _installedListener = listener;
+  target.addEventListener("error", listener);
+}
+
+/** Uninstall the global error listener — for teardown / hot-reload so the
+ *  listener doesn't accumulate across reconnects. */
+export function _uninstallReadOnlyHint(): void {
+  const target = globalThis as unknown as {
+    removeEventListener?: (
+      type: string,
+      // deno-lint-ignore no-explicit-any
+      listener: (ev: any) => void,
+    ) => void;
+  };
+  if (_installedListener && typeof target.removeEventListener === "function") {
+    target.removeEventListener("error", _installedListener);
+  }
+  _installedListener = null;
+  (globalThis as Record<string, unknown>).__aioReadOnlyHintInstalled = false;
 }
 
 /** Reset hint tracking — for tests. */
 export function _resetReadOnlyHint(): void {
   _hinted.clear();
-  (globalThis as Record<string, unknown>).__aioReadOnlyHintInstalled = false;
+  _uninstallReadOnlyHint();
 }

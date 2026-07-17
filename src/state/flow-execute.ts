@@ -168,6 +168,7 @@ export async function executeStep(
 
       // Hoist listener ref so timeout can delete the exact instance (not first match)
       let listener: ActionListener;
+      let settled = false; // guards against abort handler firing after timeout
       const actionPromise = new Promise<Msg>((resolve) => {
         listener = { actionType: step.actionType, resolve };
         _actionListeners.add(listener);
@@ -175,6 +176,7 @@ export async function executeStep(
 
         // Resolve immediately on flow cancellation — no 50ms poll needed
         controller.signal.addEventListener("abort", () => {
+          if (settled) return; // timeout already won — don't double-fire
           _actionListeners.delete(listener);
           waitForListeners?.delete(listener);
           resolve({ type: "__aborted", payload: {} });
@@ -191,6 +193,7 @@ export async function executeStep(
         ]);
         instance.abortController = undefined;
         if (result === timeoutSentinel) {
+          settled = true; // mark settled before deleting — abort handler may fire late
           _actionListeners.delete(listener!); // delete exact instance, not first match
           waitForListeners?.delete(listener!);
           throw new Error(

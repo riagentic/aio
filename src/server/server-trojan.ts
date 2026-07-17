@@ -409,9 +409,6 @@ async function handlePost(
       if (!query || typeof query !== "string") {
         return err("missing query field");
       }
-      if (query.includes(";")) {
-        return err("multi-statement queries not allowed", 403);
-      }
       const normalized = query.trimStart().toUpperCase();
       const startsSelect = normalized.startsWith("SELECT ") ||
         normalized.startsWith("SELECT\n") ||
@@ -429,6 +426,14 @@ async function handlePost(
       // value like 'DROP TABLE instructions' doesn't trip a false positive.
       // '' inside a literal is an escaped quote — collapse first, then mask.
       const withoutLiterals = query.replace(/'(?:[^']|'')*'/g, "''");
+      // Multi-statement guard: check for ';' AFTER literal-stripping so a
+      // semicolon inside a string literal (e.g. WHERE name='a;b') is not
+      // falsely rejected. The previous pre-strip check ran on raw literals.
+      // SQLite's prepare() only executes one statement anyway, but this is
+      // defense-in-depth against statement chaining.
+      if (withoutLiterals.includes(";")) {
+        return err("multi-statement queries not allowed", 403);
+      }
       const upper = withoutLiterals.toUpperCase();
       if (
         /\b(INSERT|UPDATE|DELETE|DROP|ALTER|CREATE|ATTACH|DETACH|LOAD_EXTENSION|REINDEX|VACUUM|REPLACE|PRAGMA|BEGIN|COMMIT|ROLLBACK|SAVEPOINT|RELEASE|MERGE)\b/

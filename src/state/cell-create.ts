@@ -77,6 +77,40 @@ export function cell<
 /** Implementation — dispatches on config shape (methods / actions / mixed). */
 // deno-lint-ignore no-explicit-any
 export function cell(name: string, config: any): any {
+  // Validate name at definition time — it becomes the cell id, action prefix
+  // (`${name}:action`), KV key prefix, and SQLite table key. An empty,
+  // non-string, or identifier-unsafe name would corrupt the registry, the
+  // wire protocol, and persistence with a cryptic error at first dispatch.
+  // Allows word chars + hyphens (matching existing cell names like
+  // "stub-empty", "flc-counter", "uitest-list") but rejects the prototype-
+  // pollution trinity explicitly.
+  const BANNED_NAMES = new Set(["__proto__", "constructor", "prototype"]);
+  if (
+    !name || typeof name !== "string" ||
+    !/^[A-Za-z_][\w\-]*$/.test(name) ||
+    BANNED_NAMES.has(name)
+  ) {
+    throw new Error(
+      `cell(): invalid name '${JSON.stringify(name)}' — must be a non-empty ` +
+        `string matching /^[A-Za-z_][\\w\\-]*$/ (identifier-safe, hyphens ok). ` +
+        `The name becomes the cell id, action prefix, and persistence key — ` +
+        `reserved words (__proto__, constructor, prototype) are rejected.`,
+    );
+  }
+  // Validate state shape at definition time — state must be a plain object so
+  // Immer can draft it and reducers can mutate fields. A primitive, null, or
+  // array would crash inside produce() at first dispatch with a cryptic error.
+  if (
+    config.state != null &&
+    (typeof config.state !== "object" || Array.isArray(config.state))
+  ) {
+    throw new Error(
+      `[${name}] cell state must be a plain object, got ${
+        Array.isArray(config.state) ? "array" : typeof config.state
+      } — reducers rely on Immer drafting an object shape.`,
+    );
+  }
+
   const hasMethods = config.methods !== undefined;
   const hasGenerators = config.generators &&
     Object.keys(config.generators as Record<string, unknown>).length > 0;
