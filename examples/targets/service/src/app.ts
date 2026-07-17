@@ -1,12 +1,7 @@
-// ex-service — `compile:service` target example
+// ex-service — `compile:service` target example — zero-config except the one
+// behavioral choice: this app has no UI (client: "server-only").
 // Dev: deno task dev   Build: deno task compile
+import "./cell/counter.ts";
 import { aio } from "aio";
-import { counter } from "./cell/counter.ts";
 
-await aio.run({
-  appId: "ex-service",
-  appVersion: "0.1.0",
-  cells: [counter],
-  client: "server-only",
-  baseDir: import.meta.dirname!,
-});
+await aio.run({ client: "server-only" });

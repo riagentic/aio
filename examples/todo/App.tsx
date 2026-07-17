@@ -25,9 +25,12 @@ export default function App() {
       <h1 style={{ textAlign: "center", color: "#c77" }}>todos</h1>
 
       {/* Add */}
+      {
+        /* AIR auto-prevents navigation on handled form submits — no
+          e.preventDefault() needed (opt back in with data-native-submit). */
+      }
       <form
-        onSubmit={(e) => {
-          e.preventDefault();
+        onSubmit={() => {
           if (input.trim()) {
             // await = applied: the Promise resolves on server ack, so state
             // read right after is fresh (AIO6). Unawaited = fire-and-forget.

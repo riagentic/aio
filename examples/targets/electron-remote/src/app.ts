@@ -1,13 +1,8 @@
-// ex-electron-remote — Electron thin client — connect page, no local server logic
+// ex-electron-remote — Electron thin client — connect page, no local server logic.
+// Zero-config: the stub cell self-registers; identity infers from deno.json.
 // Dev: deno task dev   Build: deno task compile
 import { aio, cell } from "aio";
 
-const _stub = cell("app", { state: {}, methods: {} });
+cell("app", { state: {}, methods: {} });
 
-await aio.run({
-  appId: "ex-electron-remote",
-  appVersion: "0.1.0",
-  cells: [_stub],
-  ui: { title: "ex-electron-remote" },
-  baseDir: import.meta.dirname!,
-});
+await aio.run();

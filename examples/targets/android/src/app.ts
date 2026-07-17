@@ -1,12 +1,7 @@
-// ex-android — `compile:android` target example
+// ex-android — `compile:android` target example — zero-config: cells self-register on
+// import; appId/title/version infer from deno.json, baseDir from the entry.
 // Dev: deno task dev   Build: deno task compile
+import "./cell/counter.ts";
 import { aio } from "aio";
-import { counter } from "./cell/counter.ts";
 
-await aio.run({
-  appId: "ex-android",
-  appVersion: "0.1.0",
-  cells: [counter],
-  ui: { title: "ex-android" },
-  baseDir: import.meta.dirname!,
-});
+await aio.run();
