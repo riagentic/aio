@@ -31,6 +31,7 @@ import type { VChild, VNode } from "../air/vdom.ts";
 
 // ── Shared prop helpers ──────────────────────────────────────────────
 
+/** Inline style object accepted by every kit component. */
 type Style = Record<string, string | number>;
 
 /** Props common to every component: escape hatches that never fight the kit. */
@@ -57,6 +58,7 @@ function rest(props: Record<string, unknown>, own: string[]): Common {
 
 // ── Button ───────────────────────────────────────────────────────────
 
+/** Props for {@link Button} — variant, size, and native button attributes. */
 export interface ButtonProps extends Common {
   variant?: "primary" | "secondary" | "ghost" | "danger";
   size?: "sm" | "md" | "lg";
@@ -78,6 +80,7 @@ export function Button(props: ButtonProps): VNode {
 
 // ── Text inputs ──────────────────────────────────────────────────────
 
+/** Props for {@link Input} — controlled value plus native input attributes. */
 export interface InputProps extends Common {
   value?: string | number;
   type?: string;
@@ -104,6 +107,7 @@ export function Input(props: InputProps): VNode {
   });
 }
 
+/** Props for {@link Textarea} — controlled value, placeholder, and rows. */
 export interface TextareaProps extends Common {
   value?: string;
   placeholder?: string;
@@ -129,12 +133,14 @@ export function Textarea(props: TextareaProps): VNode {
   }, props.value ?? "");
 }
 
+/** One option of a {@link Select} — value with optional label/disabled. */
 export interface SelectOption {
   value: string;
   label?: string;
   disabled?: boolean;
 }
 
+/** Props for {@link Select} — options (strings or {@link SelectOption}s) and controlled value. */
 export interface SelectProps extends Common {
   value?: string;
   options: (SelectOption | string)[];
@@ -166,6 +172,7 @@ export function Select(props: SelectProps): VNode {
   }, ...opts);
 }
 
+/** Props for {@link Checkbox} — checked state with an optional inline label. */
 export interface CheckboxProps extends Common {
   checked?: boolean;
   disabled?: boolean;
@@ -196,6 +203,7 @@ export function Checkbox(props: CheckboxProps): VNode {
 
 // ── Field (label + control + error) ──────────────────────────────────
 
+/** Props for {@link Field} — label, hint, and error wrapping for a control. */
 export interface FieldProps extends Common {
   label?: VChild;
   hint?: VChild;
@@ -240,6 +248,7 @@ export function Field(props: FieldProps): VNode {
 
 // ── Table ────────────────────────────────────────────────────────────
 
+/** Column definition for {@link Table} — key, header, and cell renderer. */
 export interface Column<Row> {
   /** Key into the row, or an id when using `render`. */
   key: string;
@@ -251,6 +260,7 @@ export interface Column<Row> {
   width?: string | number;
 }
 
+/** Props for {@link Table} — column definitions plus the row data. */
 export interface TableProps<Row> extends Common {
   columns: Column<Row>[];
   rows: Row[];
@@ -342,6 +352,7 @@ function colStyle<R>(c: Column<R>): Style {
 
 // ── Card + layout ────────────────────────────────────────────────────
 
+/** Props for {@link Card} — optional title and footer around the content. */
 export interface CardProps extends Common {
   title?: VChild;
   footer?: VChild;
@@ -363,6 +374,7 @@ export function Card(props: CardProps): VNode {
   );
 }
 
+/** Props for {@link Stack}/{@link Row} — gap, alignment, and children. */
 export interface StackProps extends Common {
   gap?: number | string;
   align?: string;
@@ -401,6 +413,7 @@ function layout(props: StackProps, direction: "row" | "column"): VNode {
 
 // ── Modal ────────────────────────────────────────────────────────────
 
+/** Props for {@link Modal} — open state, dismiss callback, and content. */
 export interface ModalProps extends Common {
   /** Whether the modal is shown. When false, nothing renders. */
   open: boolean;
