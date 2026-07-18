@@ -572,8 +572,7 @@ async function _run<S, A, E>(
     clearElectronProc: () => {
       _electronProc = null;
     },
-    getUdsThrottle: udsCtrl.getThrottle,
-    clearUdsThrottle: udsCtrl.clearThrottle,
+    disposeUds: udsCtrl.dispose,
     getUdsHandle: () => udsHandle,
     getServer: () => server,
     getDiscoveryStop: () => discoveryRef.stop,
