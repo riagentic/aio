@@ -65,6 +65,9 @@ export {
   useSignal,
 } from "./browser-air.ts";
 export type { UseLocalResult } from "./browser-air.ts";
+// useCell lives in the adapters layer; docs reference `import { useCell } from
+// "aio/air"`, so it must be reachable here (was missing — risoto 2026-07-18).
+export { useCell } from "./adapters/air.ts";
 
 // ── Time travel (@experimental) ──────────────────────────────────────
 export { useTimeTravel } from "./browser-air.ts";

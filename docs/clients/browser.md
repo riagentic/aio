@@ -8,10 +8,15 @@ thin client, see [electron.md](electron.md).
 
 ## Direct cell access (recommended)
 
-Import cells and use their properties directly — reactive and auto-tracked. For
-full-state access, `useAio()` is also available but re-renders on any change.
+Import cells and use their properties directly — reactive and auto-tracked.
+Reading `cell.field` does **two** things: it registers a re-render dependency
+(the component updates when the value changes) **and** it registers a server
+subscription for that cell (so its live deltas are broadcast back to this
+client). You do not need a `useAio`/`useCell` anchor for a directly-read cell to
+receive live updates — the read itself subscribes.
 
-For scoped re-render optimization, import and read from specific cells.
+For full-state access, `useAio()` is also available but re-renders on any
+change. For scoped re-render optimization, import and read from specific cells.
 
 ```tsx
 import { useAio } from "aio/air";
@@ -137,10 +142,10 @@ unmount from the old route before mounting on the new route.
 
 ### Avoiding unnecessary teardowns
 
-- Keep at least one `useAio` hook mounted at the layout/root level if your app
-  has routes that don't use state.
-- A simple `useAio()` in the root layout (reading e.g. `state.status`) prevents
-  connection churn.
+- Keep at least one connected component mounted at the layout/root level if your
+  app has routes that don't use state, to avoid connection churn. Any direct
+  cell read (`cell.field`) or `useAio`/`useCell` counts — a directly-read cell
+  in the root layout is enough; you don't need `useAio` specifically.
 
 Connection is cleaned up when the last connected component unmounts — with the
 300ms grace period to prevent transient teardown during component reconciliation

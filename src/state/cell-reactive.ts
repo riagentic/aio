@@ -8,6 +8,7 @@ import type { CellDef } from "./cell-types.ts";
 import { attachMeta } from "./cell-catalog.ts";
 import { getCellSignal } from "./state-signals.ts";
 import { _registerAck } from "../protocol/browser-ack.ts";
+import { trackPath } from "./state-subs.ts";
 
 // ── Cell registry ────────────────────────────────────────────────────
 // Every cell() call registers here. Browser binding iterates this set.
@@ -93,6 +94,17 @@ export function bindCellReactive(
 
     Object.defineProperty(def, key, {
       get() {
+        // Register a SERVER subscription for this cell (risoto 2026-07-18):
+        // reading a cell via direct access is documented as "reactive and
+        // auto-tracked", but it only tracked the AIR *re-render* signal — it
+        // never told the server to send this cell's deltas. So the moment the
+        // client's subscription was narrowed to a partial set (by useCell/
+        // useAio elsewhere), a directly-read cell silently stopped receiving
+        // live updates — its signal never changed, freezing the UI at the
+        // connect-time value. trackPath makes "auto-tracked" true for deltas
+        // too. No-op on the server (never bound reactively) and harmless in
+        // standalone/test (no transport → no __subs sent).
+        trackPath(cellName);
         const s = sig.value; // tracked read — auto-tracked by AIR renderer
         if (s == null) return initialState[key];
         return (s as Record<string, unknown>)[key];
