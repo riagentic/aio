@@ -871,6 +871,10 @@
           "kind": "function",
           "sig": "c82915ce358d200f"
         },
+        "useCell": {
+          "kind": "function",
+          "sig": "fdba0dc05040d48d"
+        },
         "useConnected": {
           "kind": "function",
           "sig": "209ed045c0221c65"
