@@ -49,6 +49,13 @@ export type UITriggerRequest = {
   text?: string;
   /** Key for `press` (default "Enter") */
   key?: string;
+  /** Modifier flags for `press` — Ctrl/Cmd/Alt/Shift chords (e.g. Ctrl+Enter). */
+  mods?: {
+    ctrlKey?: boolean;
+    metaKey?: boolean;
+    altKey?: boolean;
+    shiftKey?: boolean;
+  };
 };
 
 /** Result sent back for a trigger request. */
@@ -159,7 +166,7 @@ export async function runUITrigger(
       }
       triggerDragTo(info._el, dst._el);
     } else {
-      triggerAction(info._el, req.action, req.key);
+      triggerAction(info._el, req.action, req.key, req.mods);
     }
     await settle();
     return { ...base, ok: true, surface: getSerializedSurfaces() };
