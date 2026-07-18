@@ -617,3 +617,34 @@ Deno.test("naming: data-testid is honored like t (verbatim, assertion target)", 
   assertEquals(ui.App.status.text, "ready");
   assertEquals(ui.App.wins.text, "x");
 });
+
+// ── press() key modifiers (risoto 2026-07-18) ─────────────────────────
+
+Deno.test("press: modifiers reach the handler (Ctrl+Enter shortcut)", async () => {
+  const seen: { key: string; ctrl: boolean; shift: boolean }[] = [];
+  let submits = 0;
+  function App() {
+    return h(
+      "form",
+      { onSubmit: () => submits++ },
+      h("input", {
+        t: "editor",
+        onChange: () => {},
+        onKeyDown: (e: KeyboardEvent) =>
+          seen.push({ key: e.key, ctrl: e.ctrlKey, shift: e.shiftKey }),
+      }),
+    );
+  }
+  await using ui = await testUI(App as ComponentFn);
+
+  await ui.App.editor.press("Enter", { ctrlKey: true });
+  assertEquals(seen.at(-1), { key: "Enter", ctrl: true, shift: false });
+  // A MODIFIED Enter is a shortcut, not implicit form submission.
+  assertEquals(submits, 0, "Ctrl+Enter must not submit the form");
+
+  await ui.App.editor.press("Enter"); // bare Enter still submits
+  assertEquals(submits, 1);
+
+  await ui.App.editor.press("a", { shiftKey: true });
+  assertEquals(seen.at(-1), { key: "a", ctrl: false, shift: true });
+});

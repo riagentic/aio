@@ -24,6 +24,7 @@ import {
   type UIElementInfo,
   type UISurfaceNode,
 } from "../air/ui-surface.ts";
+import type { KeyModifiers } from "../air/ui-trigger.ts";
 import {
   triggerAction,
   triggerChar,
@@ -72,9 +73,12 @@ export interface UIElementHandle {
   /** Type into an input/textarea like a user: focus, then per-character
    *  keydown + value update + input event. */
   type(text: string): Promise<void>;
-  /** Press a key (keydown/keyup). `"Enter"` inside a form also submits it,
-   *  mirroring browser implicit submission. */
-  press(key: string): Promise<void>;
+  /** Press a key (keydown/keyup), optionally with modifiers
+   *  (`{ ctrlKey, metaKey, altKey, shiftKey }`) — lets you drive chords like
+   *  Ctrl+Enter. A bare `"Enter"` inside a form also submits it (browser
+   *  implicit submission); a modified Enter does not, so a Ctrl+Enter
+   *  shortcut handler is testable. */
+  press(key: string, mods?: KeyModifiers): Promise<void>;
   /** Hover: mouseover + mouseenter. */
   hover(): Promise<void>;
   /** Focus the element. */
@@ -202,6 +206,10 @@ export function testUI(
   optsOrName?: TestUIOptions | string,
   fn?: (ui: TestUI) => void | Promise<void>,
 ): void | Promise<TestUI> {
+  // Arm dev-strict checks: tests must be the strictest environment, so an
+  // illegal in-place state mutation throws in a test exactly as it does in
+  // dev + prod (risoto 2026-07-18). Inlined to avoid a cell-test.ts cycle.
+  (globalThis as Record<string, unknown>).__aioDev = true;
   // Wrapper form: testUI(App, "name", fn) — a Deno.test with auto-teardown.
   if (typeof optsOrName === "string") {
     if (typeof fn !== "function") {
@@ -410,8 +418,8 @@ async function _mountTestUI(
           await settle();
         });
       },
-      press(key: string) {
-        return act((e) => triggerAction(e, "press", key));
+      press(key: string, mods?: KeyModifiers) {
+        return act((e) => triggerAction(e, "press", key, mods));
       },
       hover() {
         return act((e) => triggerAction(e, "hover"));

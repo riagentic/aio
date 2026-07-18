@@ -32,6 +32,24 @@ tracks only what remains.
       leak gate); 30-min run clean. Remaining: the actual 72h run.
 - [ ] **B6 — beta2+ = fixes only** + 2 more field-report apps on the frozen API.
 
+## Harness fidelity — close the transport-boundary gap (risoto wish 1)
+
+The in-process harness now runs dev-strict, so illegal-mutation lies are closed.
+What remains: the harness runs client+server in ONE process, so
+transport-boundary behavior can't reproduce. A green `testUI` still can't catch
+these:
+
+- [ ] **Loopback transport / `deno task smoke`** — drive N scripted flows over
+      the REAL serialize→dispatch→sync path (in-memory loopback, or a booted
+      server + real client). Then `Promise<void>` browser returns and
+      unregistered-cell no-ops reproduce in a test. Highest-leverage remaining
+      reliability investment; generalize the existing `e2e-sync-browser` /
+      `e2e-ui-chromium` harnesses into a reusable, documented helper.
+- [ ] **Typed compile-error when `await`-ing a browser method's return** — the
+      cheap half of the same gap (browser methods are `Promise<void>`; the
+      server/harness returns the real value). A type-level guard would catch
+      `const sig = await unlock.signSol()` at author time.
+
 ## DX enhancements (P3 — nice-to-have, not gating)
 
 - [ ] **Cells-aware dev watch** (quant Bad #3): auto-restart the server process

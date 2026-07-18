@@ -17,6 +17,18 @@ import { attachMeta } from "../state/cell-catalog.ts";
 import type { Catalog, CellDef, Creators, Msg } from "../state/cell-types.ts";
 import { composeCells } from "../state/cell-compose.ts";
 
+/** Arm dev-strict checks for every test harness (risoto 2026-07-18). Tests
+ *  must be the STRICTEST environment, not the most permissive — the runtime
+ *  freezes committed state in dev + prod so an illegal in-place mutation
+ *  throws loudly, but the harness historically ran with `__aioDev` unset, so
+ *  the same mutation silently succeeded in a green test (harness lied). Arming
+ *  it here makes a passing test mean what production means. Idempotent; a test
+ *  that specifically needs prod-lenient behavior can set the flag false itself.
+ *  @internal */
+export function _armTestStrict(): void {
+  (globalThis as Record<string, unknown>).__aioDev = true;
+}
+
 /** Context object provided to testCell() callbacks */
 export type TestContext<
   S = Record<string, unknown>,
@@ -86,6 +98,7 @@ export function testCell<
   testName: string,
   fn: (t: TestContext<S, Catalog<N, A>>) => void | Promise<void>,
 ): void {
+  _armTestStrict();
   Deno.test(`[${f.__aio.id}] ${testName}`, async () => {
     // Reset shared runtime state for test isolation — prevents bleed from prior runs
     resetFlows();
@@ -319,6 +332,7 @@ export interface BootHandle {
  * ```
  */
 export async function bootCells(cells: CellDef[]): Promise<BootHandle> {
+  _armTestStrict();
   const standalone = await import("../standalone-air.ts");
   // Hermetic: reset any prior runtime state so these cells start pristine.
   standalone._resetState();
