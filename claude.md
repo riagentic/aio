@@ -95,6 +95,20 @@ without selectors:
   invariant, an exposed-but-undiscoverable app → warn/throw at the site (dev),
   or make it a red gate. Never swallow. Prefer a property-test that makes a
   whole bug class un-shippable over a per-instance patch.
+- **Dev == prod behavior. No forked code paths without a hard reason.** This is
+  a critical, load-bearing assumption: whatever runs in dev must run the same in
+  production and vice versa. State immutability proves the model — Immer
+  autoFreeze is NEVER disabled, so committed state is frozen identically in both
+  (verified live: an illegal mutation throws in dev AND prod). A dev/prod
+  difference is allowed ONLY when it is (a) observe-only — verbosity, log level,
+  a one-time hint, a dev warn-timer, an error overlay vs graceful degradation —
+  or (b) dev STRICTER than prod (dev throws where prod degrades), so dev/CI
+  catches the problem first. NEVER the reverse (dev more lenient than prod) and
+  NEVER a silent behavioral divergence. When you add an `__aioDev`/`isDev()`
+  gate, it must fall in (a) or (b); if it changes the outcome such that
+  something passes in one mode and fails in the other, that's a bug.
+  (`cell-methods-internals.ts` async-transpile guard is the one behavioral gate
+  — dev throws, prod logs+degrades: category (b), protective.)
 - **Tests are the STRICTEST environment, never the most permissive.** The
   harness (`testUI`/`testCell`/`bootCells`) runs dev-strict (`__aioDev`) so
   every tripwire that fires in dev + prod also fires in a test — an illegal
