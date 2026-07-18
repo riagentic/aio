@@ -102,6 +102,16 @@ Deno.test("denoJson: remote-cli has dev task running client.ts", () => {
   );
 });
 
+Deno.test("denoJson: every app gets a lint task (aiol antipattern linter)", () => {
+  for (const t of APP_TYPES) {
+    const json = JSON.parse(denoJson("T", t));
+    assert(
+      json.tasks.lint?.includes("aiol/mod.ts"),
+      `${t.id}: scaffold must expose 'deno task lint' so app devs can run the antipattern linter`,
+    );
+  }
+});
+
 Deno.test("denoJson: remote-electron dev uses --server-url", () => {
   const t = APP_TYPES.find((a) => a.id === "remote-electron")!;
   const json = JSON.parse(denoJson("T", t));

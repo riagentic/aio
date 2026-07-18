@@ -408,6 +408,10 @@ function denoJson(
   // tests/ dir is a hard error.
   if (hasTests) tasks.test = "deno test -A tests/";
   tasks.doctor = "deno run -A dep/aio/src/server/doctor.ts";
+  // aiol — the antipattern linter. Surfaces cross-cell coupling, useAio-vs-
+  // useCell, throw-in-cell, sync I/O in the loop, etc. Run it locally or wire
+  // into CI; definite bugs (illegal mutations) already throw at runtime.
+  tasks.lint = "deno run -A dep/aio/aiol/mod.ts";
   // One compile task — this app's own target. Other targets: pass build.ts
   // flags directly (docs/build/targets.md lists them all).
   tasks.compile = `deno run -A dep/aio/src/build.ts ${compileFlags(appType)}`;

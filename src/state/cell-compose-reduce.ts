@@ -244,8 +244,23 @@ export function reduceCell(
   } catch (e) {
     const methodName = ownKey ?? action.type;
     const orig = e instanceof Error ? e.message : String(e);
+    // Antipattern hint: mutating frozen state throws a cryptic engine message
+    // ("not extensible" / "read only property"). It means the method mutated
+    // something OTHER than its own `s` draft — almost always another cell's
+    // state (`otherCell.field.push(...)`) or a value captured from a read.
+    // Committed state is frozen (dev + prod), so this fails identically
+    // everywhere. Turn the cryptic throw into an actionable one.
+    const frozen =
+      /not extensible|read only|read-only|already been frozen|Cannot delete/i
+        .test(orig);
+    const hint = frozen
+      ? ` — this looks like an in-place mutation of frozen state. A method may ` +
+        `only mutate its own \`s\` draft. To change another cell, call its ` +
+        `method (e.g. \`otherCell.add(...)\`), never \`otherCell.field.push(...)\`; ` +
+        `don't mutate a value you read from state either.`
+      : "";
     throw new Error(
-      `Cell '${cellName}' method '${methodName}' threw: ${orig}`,
+      `Cell '${cellName}' method '${methodName}' threw: ${orig}${hint}`,
       { cause: e },
     );
   }

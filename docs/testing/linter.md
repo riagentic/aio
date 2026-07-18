@@ -5,7 +5,15 @@ errors, warnings, and optimization hints — no runtime needed.
 
 ## Usage
 
+Scaffolded apps already ship a `lint` task — just run `deno task lint`. Wire it
+into CI to catch antipatterns on every change. (Definite bugs — an illegal
+in-place state mutation — already throw loudly at runtime in dev, prod, and
+tests; the linter surfaces the _maybe-wrong_ style/coupling/perf patterns.)
+
 ```sh
+# Scaffolded app
+deno task lint
+
 # From your project root
 deno run -A jsr:@riagentic/aio@^1.0.0-alpha17/aiol
 
