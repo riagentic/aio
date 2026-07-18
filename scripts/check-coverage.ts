@@ -3,7 +3,7 @@
 // RATCHET RULE: when real coverage rises, raise FLOOR to just below it.
 // Never lower it — a drop below the floor means new code shipped untested.
 
-const FLOOR = 70; // % of src/ lines covered (deno coverage, full suite)
+const FLOOR = 73; // % of src/ lines covered (deno coverage, full suite)
 
 const LCOV = "coverage/lcov.info";
 

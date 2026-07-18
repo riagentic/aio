@@ -99,12 +99,17 @@ export function _applyFullState(state: Record<string, any>): void {
       // component-side mutations throw in dev.
       _getOrCreateCellSignal(key, _maybeFreezeInDev(value)).set(value);
     }
-    // AIO-189: remove cell signals for cells no longer in state
-    for (const key of _cellSignals.keys()) {
-      if (!(key in state)) {
-        _cellSignals.delete(key);
-      }
-    }
+    // NB: do NOT delete cell signals for keys absent from `state`. With
+    // subscription filtering, an incoming full-state message is FILTERED to the
+    // client's subscribed cells — an absent cell is merely unsubscribed, not
+    // gone. Cells are a static, bounded set, and the direct-access getter and
+    // component renders capture a cell's signal instance at bind time
+    // (cell-reactive.ts). Deleting it here orphaned that instance: on
+    // re-subscribe a NEW signal was created, so the getter/render stayed bound
+    // to the stale (deleted) one, frozen at the connect-time value — the risoto
+    // 2026-07-18 "read only after navigation never updates" bug. Signal
+    // instances must stay stable for the session (same invariant _resetSignals
+    // relies on: mutate values in place, never reassign).
   });
 }
 
