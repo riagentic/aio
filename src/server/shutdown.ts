@@ -20,8 +20,7 @@ export interface ShutdownRefs {
   dispatch: { close: () => void; drain: () => Promise<void> };
   getElectronProc: () => { kill: () => void } | null;
   clearElectronProc: () => void;
-  getUdsThrottle: () => ReturnType<typeof setTimeout> | null;
-  clearUdsThrottle: () => void;
+  disposeUds: () => void;
   getUdsHandle: () => { shutdown: () => void } | null;
   getServer: () => { shutdown: () => Promise<void> };
   /** Late-bound LAN-discovery responder stopper (null when not exposed). */
@@ -119,11 +118,7 @@ export function createShutdownOrchestrator(
       }
     }
 
-    const udsT = refs.getUdsThrottle();
-    if (udsT) {
-      clearTimeout(udsT);
-      refs.clearUdsThrottle();
-    }
+    refs.disposeUds();
     const udsH = refs.getUdsHandle();
     if (udsH) {
       try {

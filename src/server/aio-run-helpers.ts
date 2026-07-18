@@ -7,6 +7,7 @@ import {
   type ReduceBreakdown,
   type TTState,
 } from "../diagnostics/time-travel.ts";
+import { createCoalescer } from "./broadcast-coalescer.ts";
 import type { VitalsSystem } from "../vitals/mod.ts";
 import type { ComposedCells } from "../state/cell.ts";
 import type { ServerHandle } from "./server-types.ts";
@@ -194,9 +195,8 @@ export type UdsBroadcastController = {
   ) => void;
   /** Direct broadcast — for TT/snapshot state jumps (force-full) */
   broadcastFull: () => void;
-  /** Shutdown hooks — used by createShutdownOrchestrator */
-  getThrottle: () => ReturnType<typeof setTimeout> | null;
-  clearThrottle: () => void;
+  /** Cancel the pending throttle timer — used by createShutdownOrchestrator */
+  dispose: () => void;
 };
 
 /** Build UDS broadcast throttle callback for dispatch */
@@ -204,18 +204,6 @@ export function createUdsBroadcastController(refs: {
   getUdsHandle: () => UDSHandle | null;
   syncIntervalMs: number;
 }): UdsBroadcastController {
-  let udsQueued = false;
-  let udsThrottle: ReturnType<typeof setTimeout> | null = null;
-  // Buffer patches across the queue/throttle window so a coalesced broadcast
-  // NEVER drops a cell update (parity with the WS broadcaster's
-  // `_bufferedPatches`). The previous implementation early-returned without
-  // buffering `validPatches` when queued/throttled, then fell back to a
-  // no-arg full-state send — under UDS throttling a cell mutation (e.g. an
-  // optimistic SOL balance) was silently discarded, freezing the electron
-  // (UDS) client at its connect-time value until an unrelated dispatch
-  // happened to flush it. `_udsForce` preserves a pending force-full request.
-  let _udsBuffer: PatchEntry[] = [];
-  let _udsForce = false;
   const broadcastState = (
     forceOrPatches?: boolean | PatchEntry[],
   ) => {
@@ -223,40 +211,29 @@ export function createUdsBroadcastController(refs: {
     if (!handle) return;
     handle.broadcastState(forceOrPatches);
   };
-  // Drain the buffered patches (or a pending force-full) into a single
-  // broadcastState call. Empty + no force → no-arg full-state (trailing flush).
-  const _flushUds = (): void => {
-    const force = _udsForce;
-    const patches = _udsBuffer;
-    _udsForce = false;
-    _udsBuffer = [];
-    broadcastState(force ? true : (patches.length > 0 ? patches : undefined));
-  };
+  // The shared coalescer buffers patches (and a pending force-full) across the
+  // queue/throttle window and flushes them as ONE send — identical semantics
+  // to the WS broadcaster, because both now use the same primitive. This is
+  // what closes the risoto 2026-07-19 bug (UDS used to drop patches while WS
+  // buffered them) by construction: the two transports can no longer diverge.
+  const coalescer = createCoalescer<PatchEntry>(
+    refs.syncIntervalMs,
+    (patches, force) =>
+      broadcastState(force ? true : (patches.length > 0 ? patches : undefined)),
+  );
 
   return {
     onUdsBroadcast: (validPatches) => {
-      const handle = refs.getUdsHandle();
-      if (!handle) return;
-      if (validPatches === true) _udsForce = true;
-      else if (Array.isArray(validPatches)) _udsBuffer.push(...validPatches);
-      if (udsQueued || (refs.syncIntervalMs > 0 && udsThrottle)) return;
-      udsQueued = true;
-      queueMicrotask(() => {
-        udsQueued = false;
-        _flushUds();
-        if (refs.syncIntervalMs > 0) {
-          udsThrottle = setTimeout(() => {
-            udsThrottle = null;
-            if (_udsForce || _udsBuffer.length > 0) _flushUds();
-          }, refs.syncIntervalMs);
-        }
-      });
+      if (!refs.getUdsHandle()) return;
+      if (validPatches === true) coalescer.forceFull();
+      else {coalescer.add(
+          Array.isArray(validPatches) ? validPatches : undefined,
+        );}
     },
+    // A deliberate full-state jump (time-travel / snapshot) sends immediately —
+    // it is not part of the coalesced per-dispatch stream.
     broadcastFull: () => broadcastState(true),
-    getThrottle: () => udsThrottle,
-    clearThrottle: () => {
-      udsThrottle = null;
-    },
+    dispose: () => coalescer.dispose(),
   };
 }
 

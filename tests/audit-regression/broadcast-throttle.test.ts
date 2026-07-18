@@ -1,15 +1,17 @@
 // Regression: broadcast() must not drop patches that arrive between the
 // microtask schedule point and the microtask execution — audit F-6.
 //
-// Old behavior: dirty flag was reset INSIDE the microtask, after new patches
-// had already been accumulated (and their dirty=true signal already squashed).
-// The follow-up throttle callback then saw dirty=false and never flushed.
+// Original bug (hand-rolled throttle): the dirty flag was reset INSIDE the
+// microtask, after new patches had already been accumulated, so the follow-up
+// throttle callback saw dirty=false and never flushed the backlog.
 //
-// Correct behavior: dirty is reset BEFORE the microtask is scheduled, so any
-// re-entrant broadcast() between schedule and the throttle callback re-arms
-// dirty and the throttle flushes the backlog.
+// Now WS + UDS share createCoalescer, which drains its buffer AT flush time
+// (never snapshots at schedule time), so a re-entrant broadcast() in that gap
+// is either coalesced into the leading flush or carried by the throttle tail —
+// never dropped. This test pins the INVARIANT (both patches delivered), not the
+// exact send count, which legitimately differs between the two implementations.
 
-import { assertEquals } from "jsr:@std/assert@1.0.19";
+import { assert, assertEquals } from "jsr:@std/assert@1.0.19";
 import { createBroadcaster } from "../../src/server/server-broadcast.ts";
 import type { PatchEntry } from "../../src/protocol/broadcast-utils.ts";
 import type { ClientMeta } from "../../src/server/server-ws.ts";
@@ -54,7 +56,9 @@ Deno.test("F-6: patches added between schedule and microtask flush on next throt
   const broadcaster = createBroadcaster({
     connections,
     payloadStats: new Map(),
-    getUIState: () => ({ seq: ++seq }),
+    // Large full-state so patch payloads stay under the full-state threshold and
+    // are sent AS patches (we assert on the patch content).
+    getUIState: () => ({ seq: ++seq, pad: "z".repeat(500) }),
     debug: () => {},
     syncIntervalMs: 20,
   });
@@ -68,34 +72,21 @@ Deno.test("F-6: patches added between schedule and microtask flush on next throt
     ops: [{ op: "add", path: ["y"], value: 2 }],
   };
 
-  // First call — snapshots [p1], schedules microtask
+  // First call — schedules the leading flush.
   broadcaster.broadcast([p1]);
-  // Before the microtask runs (still sync), add p2. Old bug: this dirty=true
-  // was overwritten to false inside the microtask, so throttle skipped the flush.
+  // Before the microtask runs (still sync), add p2. The invariant: p2 must NOT
+  // be dropped — it must reach the client, whether coalesced into the leading
+  // flush (the shared coalescer drains at run time) or via the throttle tail.
   broadcaster.broadcast([p2]);
 
-  // Microtask runs → first send goes out.
-  await Promise.resolve();
-  assertEquals(
-    sent.length,
-    1,
-    `expected 1 send after microtask, got ${sent.length}: ${
-      JSON.stringify(sent)
-    }`,
-  );
-
-  // Wait long enough for throttle to expire AND its re-broadcast microtask to run.
+  // Let the leading flush AND any throttle tail settle.
   await new Promise((r) => setTimeout(r, 60));
 
-  // p2 must have triggered a second send via the throttle. With the bug,
-  // dirty was reset before the throttle saw it, so the second send never
-  // happened and clients sat on stale state.
-  assertEquals(
-    sent.length,
-    2,
-    `expected 2 sends (initial + throttle flush of p2), got ${sent.length}: ${
-      JSON.stringify(sent)
-    }`,
+  const all = sent.join("|");
+  assert(all.includes('"x"'), `p1 (x) must be delivered: ${all}`);
+  assert(
+    all.includes('"y"'),
+    `p2 (added in the schedule→flush gap) must be delivered — never dropped: ${all}`,
   );
 
   broadcaster.shutdown();
