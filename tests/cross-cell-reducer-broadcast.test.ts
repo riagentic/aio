@@ -86,12 +86,21 @@ Deno.test("cross-cell: DIRECT mutation of another cell's state fails loud in the
     // dev AND prod. The harness now runs dev-strict (_armTestStrict), so it
     // throws HERE too — a green test can no longer hide what production
     // rejects. Before the fix this silently corrupted committed state.
-    let threw = false;
-    await unlock.addDirectBroken("ghost").catch(() => {
-      threw = true;
+    let msg = "";
+    await unlock.addDirectBroken("ghost").catch((e) => {
+      msg = String(e?.message ?? e);
     });
     await hb.settle();
-    assert(threw, "the illegal mutation must reject, not silently succeed");
+    assert(
+      msg.length > 0,
+      "the illegal mutation must reject, not silently succeed",
+    );
+    // The cryptic engine error is turned into an actionable hint.
+    assert(
+      msg.includes("in-place mutation of frozen state") &&
+        msg.includes("call its method"),
+      `expected an actionable antipattern hint, got: ${msg}`,
+    );
     assertEquals(accounts.list, [], "and it must not have committed");
   } finally {
     hb.dispose();
