@@ -95,6 +95,15 @@ without selectors:
   invariant, an exposed-but-undiscoverable app → warn/throw at the site (dev),
   or make it a red gate. Never swallow. Prefer a property-test that makes a
   whole bug class un-shippable over a per-instance patch.
+- **Tests are the STRICTEST environment, never the most permissive.** The
+  harness (`testUI`/`testCell`/`bootCells`) runs dev-strict (`__aioDev`) so
+  every tripwire that fires in dev + prod also fires in a test — an illegal
+  in-place state mutation throws in the test exactly as it does live. A test env
+  more lenient than production manufactures green-test-broken-prod (the worst
+  failure mode). Never add a lenient-test shortcut. Corollary: the in-process
+  harness still can't reproduce transport-boundary behavior (`Promise<void>`
+  browser returns, unregistered-cell no-ops) — those need a loopback/smoke path,
+  tracked in todo.md.
 - `factory` and `msg()` inlined in browser-shared.ts — must stay in sync
 - Tests in `tests/` (not next to source)
 - Lifecycle hooks: observe-only, error-guarded (never break dispatch)

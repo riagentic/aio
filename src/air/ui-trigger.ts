@@ -37,11 +37,19 @@ function mouseEv(el: AnyEl, name: string) {
     : ev(el, name);
 }
 
-function keyEv(el: AnyEl, name: string, key: string) {
+/** Keyboard modifier flags for {@linkcode triggerPress} — lets tests express
+ *  Ctrl/Cmd/Alt/Shift chords (e.g. a Ctrl+Enter submit shortcut). */
+export interface KeyModifiers {
+  ctrlKey?: boolean;
+  metaKey?: boolean;
+  altKey?: boolean;
+  shiftKey?: boolean;
+}
+
+function keyEv(el: AnyEl, name: string, key: string, mods?: KeyModifiers) {
   const w = view(el);
-  return w.KeyboardEvent
-    ? new w.KeyboardEvent(name, { bubbles: true, cancelable: true, key })
-    : ev(el, name);
+  const init = { bubbles: true, cancelable: true, key, ...mods };
+  return w.KeyboardEvent ? new w.KeyboardEvent(name, init) : ev(el, name, init);
 }
 
 /** Full user-faithful click sequence. */
@@ -63,11 +71,21 @@ export function triggerChar(el: AnyEl, ch: string): void {
   el.dispatchEvent(keyEv(el, "keyup", ch));
 }
 
-/** Press a key; Enter inside a form submits it (browser implicit submission). */
-export function triggerPress(el: AnyEl, key: string): void {
-  el.dispatchEvent(keyEv(el, "keydown", key));
-  el.dispatchEvent(keyEv(el, "keyup", key));
-  if (key === "Enter" && typeof el.closest === "function") {
+/** Press a key, optionally with modifiers (Ctrl/Cmd/Alt/Shift). A bare Enter
+ *  inside a form submits it (browser implicit submission); a modified Enter
+ *  (e.g. Ctrl+Enter) does not — it's a shortcut the handler owns, matching
+ *  real browsers. */
+export function triggerPress(
+  el: AnyEl,
+  key: string,
+  mods?: KeyModifiers,
+): void {
+  el.dispatchEvent(keyEv(el, "keydown", key, mods));
+  el.dispatchEvent(keyEv(el, "keyup", key, mods));
+  const modified = mods
+    ? (mods.ctrlKey || mods.metaKey || mods.altKey || mods.shiftKey)
+    : false;
+  if (key === "Enter" && !modified && typeof el.closest === "function") {
     const form = el.closest("form");
     if (form) form.dispatchEvent(ev(el, "submit"));
   }
@@ -153,6 +171,7 @@ export function triggerAction(
   el: AnyEl,
   action: Exclude<UITriggerAction, "type">,
   key?: string,
+  mods?: KeyModifiers,
 ): void {
   switch (action) {
     case "click":
@@ -163,7 +182,7 @@ export function triggerAction(
       el.dispatchEvent(mouseEv(el, "dblclick"));
       break;
     case "press":
-      triggerPress(el, key ?? "Enter");
+      triggerPress(el, key ?? "Enter", mods);
       break;
     case "hover":
       el.dispatchEvent(mouseEv(el, "mouseover"));
