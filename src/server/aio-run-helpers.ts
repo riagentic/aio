@@ -205,8 +205,17 @@ export function createUdsBroadcastController(refs: {
   syncIntervalMs: number;
 }): UdsBroadcastController {
   let udsQueued = false;
-  let udsDirty = false;
   let udsThrottle: ReturnType<typeof setTimeout> | null = null;
+  // Buffer patches across the queue/throttle window so a coalesced broadcast
+  // NEVER drops a cell update (parity with the WS broadcaster's
+  // `_bufferedPatches`). The previous implementation early-returned without
+  // buffering `validPatches` when queued/throttled, then fell back to a
+  // no-arg full-state send — under UDS throttling a cell mutation (e.g. an
+  // optimistic SOL balance) was silently discarded, freezing the electron
+  // (UDS) client at its connect-time value until an unrelated dispatch
+  // happened to flush it. `_udsForce` preserves a pending force-full request.
+  let _udsBuffer: PatchEntry[] = [];
+  let _udsForce = false;
   const broadcastState = (
     forceOrPatches?: boolean | PatchEntry[],
   ) => {
@@ -214,25 +223,31 @@ export function createUdsBroadcastController(refs: {
     if (!handle) return;
     handle.broadcastState(forceOrPatches);
   };
+  // Drain the buffered patches (or a pending force-full) into a single
+  // broadcastState call. Empty + no force → no-arg full-state (trailing flush).
+  const _flushUds = (): void => {
+    const force = _udsForce;
+    const patches = _udsBuffer;
+    _udsForce = false;
+    _udsBuffer = [];
+    broadcastState(force ? true : (patches.length > 0 ? patches : undefined));
+  };
 
   return {
     onUdsBroadcast: (validPatches) => {
       const handle = refs.getUdsHandle();
       if (!handle) return;
-      udsDirty = true;
+      if (validPatches === true) _udsForce = true;
+      else if (Array.isArray(validPatches)) _udsBuffer.push(...validPatches);
       if (udsQueued || (refs.syncIntervalMs > 0 && udsThrottle)) return;
       udsQueued = true;
       queueMicrotask(() => {
         udsQueued = false;
-        udsDirty = false;
-        broadcastState(validPatches);
+        _flushUds();
         if (refs.syncIntervalMs > 0) {
           udsThrottle = setTimeout(() => {
             udsThrottle = null;
-            if (udsDirty) {
-              udsDirty = false;
-              broadcastState();
-            }
+            if (_udsForce || _udsBuffer.length > 0) _flushUds();
           }, refs.syncIntervalMs);
         }
       });
