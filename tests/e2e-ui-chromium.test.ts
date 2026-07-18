@@ -12,7 +12,8 @@ import { assert, assertEquals } from "@std/assert";
 // Coverage profiles from spawned deno processes go to a throwaway temp dir —
 // never into the repo (an empty DENO_COVERAGE_DIR means "cwd"), never into
 // the parent's coverage profile.
-const _childCovDir = Deno.makeTempDirSync({ prefix: "aio-child-cov-" });
+const _childCovDir = Deno.env.get("DENO_COVERAGE_DIR") ??
+  Deno.makeTempDirSync({ prefix: "aio-child-cov-" });
 
 const ROOT = new URL("..", import.meta.url).pathname;
 
