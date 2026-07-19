@@ -100,12 +100,22 @@ On `aio.run()`, state restores in this order:
 2. **SQLite init** — create workers, run `CREATE TABLE IF NOT EXISTS` for all
    tables
 3. **Table load** — `SELECT * FROM` each table, merge into state
-4. **CRDT restore** — if sync cells configured, restore op-log and pending ops
-5. **Persistence manager creation** — wire filters, register `schedulePersist()`
+4. **`onRestore` hook** — your transform runs on the merged state
+5. **CRDT restore** — for each `sync: true` cell, the committed op-log is replayed
+   through the reducer (HLC-ordered) so sync cells recover their state on a
+   headless restart, **before any client connects** (logged as
+   `sync: restored cell "x" from N op(s)`). Sync cells are excluded from KV — the
+   op-log is their durable store.
+6. **Persistence manager creation** — wire filters, register `schedulePersist()`
    callback
 
 KV values are merged over initial state, then SQLite values are merged over KV.
 This means SQLite always wins when both exist — it's the authoritative source.
+
+> **Dictionary state (`Record<K,V>` with `{}` initial):** the KV merge treats an
+> empty-object initial as a dictionary and keeps every persisted entry — it does
+> NOT drop them as "not in the schema template". Fixed-shape objects still use
+> the template rule (unknown keys dropped).
 
 ## Concurrency & Safety
 

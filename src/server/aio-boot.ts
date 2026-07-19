@@ -15,6 +15,51 @@ import { migrateSchema, PERSIST_SCHEMA_VERSION } from "./persist-schema.ts";
 import type { Log } from "../diagnostics/logger.ts";
 import type { CheckpointData, DiagnosticsHooks } from "../diagnostics/mod.ts";
 import type { ServerSyncHandler } from "../sync/server-handler.ts";
+import { loadOpsSince } from "../sync/server-store.ts";
+
+/** B1/AIO-416: replay each sync cell's committed op-log into state at boot.
+ *  `sync: true` cells are excluded from KV, and their op-log was only ever
+ *  replayed when a CLIENT connected — so a server restart with no client online
+ *  came back with EMPTY sync cells (silent data loss; the TBD non-admin-login
+ *  bug). This folds every committed op back through the composed reducer — the
+ *  same path a live op takes — after KV restore + onRestore and before the first
+ *  dispatch/broadcast. Pure fold: no broadcast, no effects, no server needed.
+ *  Loud by design (logs a per-cell count) so the restore is never invisible. */
+export async function replaySyncOps<S>(
+  db: DB,
+  syncCellIds: string[],
+  reduce: (state: S, action: { type: string; payload?: unknown }) => S,
+  state: S,
+  log: Pick<Log, "info" | "error">,
+): Promise<S> {
+  let next = state;
+  for (const cell of syncCellIds) {
+    let ops;
+    try {
+      ops = await loadOpsSince(db, cell, null, null); // null cursor → all ops, HLC-ordered
+    } catch (e) {
+      log.error(`sync: op-log replay failed for cell "${cell}" — ${e}`);
+      continue;
+    }
+    if (ops.length === 0) continue;
+    let applied = 0;
+    for (const op of ops) {
+      try {
+        next = reduce(next, {
+          type: `${op.cell}:${op.action}`,
+          payload: op.payload,
+        });
+        applied++;
+      } catch (e) {
+        log.error(
+          `sync: replay of op ${op.id} (${op.cell}:${op.action}) failed — ${e}`,
+        );
+      }
+    }
+    log.info(`sync: restored cell "${cell}" from ${applied} op(s)`);
+  }
+  return next;
+}
 
 /** Per-cell migration metadata — version + optional onMigrate hook */
 export interface CellMigrationInfo {

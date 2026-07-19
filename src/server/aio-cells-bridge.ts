@@ -123,6 +123,7 @@ export function buildLegacyConfig(
     effectTimeoutMs: fc.effectTimeoutMs,
     freezeState: fc.freezeState,
     singleton: fc.singleton,
+    libraryMode: fc.libraryMode,
     killExisting: fc.killExisting,
     keepServer: fc.keepServer,
     syncIntervalMs: fc.syncIntervalMs,
@@ -173,7 +174,10 @@ export function buildLegacyConfig(
         getState: () => app.getState(),
       });
       logger?.onStart(composed.cellNames, app.port);
-      if (fc.onStart) fc.onStart(app);
+      // AIO-418 (TBD B6): user `onStart` is fired by the cells runner AFTER
+      // wrapAppWithCells() binds the callable method surface — NOT here. Calling
+      // e.g. `members.seed()` in onStart threw ("cell runtime not booted")
+      // because the method binding happened after this hook. See aio.ts.
     }) as AioConfig<Record<string, unknown>, unknown, unknown>["onStart"],
     onStop: async () => {
       logger?.onStop();
