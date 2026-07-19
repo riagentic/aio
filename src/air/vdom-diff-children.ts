@@ -1,7 +1,7 @@
 // AIO VDOM child diffing — keyed and unkeyed reconciliation.
 // Accepts diffFn callback to avoid circular imports with vdom-diff.ts.
 
-import { _devMode, _devWarn, Fragment } from "./vdom-types.ts";
+import { _devMode, _devWarn, _domNodeCount, Fragment } from "./vdom-types.ts";
 import type { RenderCtx, VNode } from "./vdom-types.ts";
 import { getDom, isChildOf, removeDom } from "./vdom-remove.ts";
 import { createDom } from "./vdom-render.ts";
@@ -14,18 +14,6 @@ export type DiffFn = (
   ctx: RenderCtx,
   isSvg?: boolean,
 ) => void;
-
-/** Count the number of direct DOM nodes a vnode occupies (Fragments expand). */
-export function _domNodeCount(child: VNode | string | number): number {
-  if (typeof child !== "object") return 1; // text node
-  if (child.tag === Fragment) {
-    let n = 0;
-    for (const c of child.children) n += _domNodeCount(c);
-    // AIO-169: empty Fragment with comment anchor occupies 1 DOM node.
-    return n || (child._dom ? 1 : 0);
-  }
-  return 1; // element, component, _Null placeholder
-}
 
 export function diffChildren(
   parent: Node,
@@ -99,7 +87,15 @@ export function diffChildren(
       startAnchor,
     );
   } else {
-    diffUnkeyed(parent, nextChildren, oldChildren, ctx, isSvg, diffFn);
+    diffUnkeyed(
+      parent,
+      nextChildren,
+      oldChildren,
+      ctx,
+      isSvg,
+      diffFn,
+      startAnchor,
+    );
   }
 }
 
@@ -110,10 +106,24 @@ function diffUnkeyed(
   ctx: RenderCtx,
   isSvg: boolean,
   diffFn: DiffFn,
+  // AIO-414: an unkeyed Fragment shares `parent` with its siblings — its region
+  // starts AFTER this node, not at parent.firstChild. diffKeyed already honored
+  // this (AIO-395) but diffUnkeyed did not, so a text-only Fragment sitting after
+  // other children reconciled from parent.firstChild and clobbered those earlier
+  // siblings (the "component's nodes get overwritten by a following fragment's
+  // text" corruption). All positional walks + inserts are anchored to the region.
+  startAnchor: Node | null = null,
 ): void {
-  // Snapshot DOM nodes for old children BEFORE mutations.
+  const regionStart: ChildNode | null = startAnchor
+    ? startAnchor.nextSibling
+    : parent.firstChild;
+
+  // Snapshot DOM nodes for old children BEFORE mutations, walking from the
+  // region start. `cursor` ends at the node just past the region — a stable
+  // reference (outside the region) used as the insertion anchor for new nodes so
+  // growth lands inside the region instead of at the parent's end.
   const oldDoms: (Node | null)[] = [];
-  let cursor: ChildNode | null = parent.firstChild;
+  let cursor: ChildNode | null = regionStart;
   for (let i = 0; i < oldChildren.length; i++) {
     const child = oldChildren[i]!;
     const dom = getDom(child);
@@ -125,9 +135,17 @@ function diffUnkeyed(
       }
     } else {
       oldDoms.push(cursor);
-      cursor = cursor?.nextSibling ?? null;
+      // Advance by the child's realized span, not a hardcoded 1: a bare
+      // string is one node, but a Portal (renders elsewhere) or a component
+      // that rendered null occupies zero — advancing past the following
+      // sibling there duplicates/misplaces it (AIO-414 " tail" duplication).
+      const count = _domNodeCount(child);
+      for (let j = 0; j < count; j++) {
+        cursor = cursor?.nextSibling ?? null;
+      }
     }
   }
+  const regionEnd: Node | null = cursor; // node after the region (or null = end)
 
   const max = Math.max(nextChildren.length, oldChildren.length);
   for (let i = 0; i < max; i++) {
@@ -143,7 +161,7 @@ function diffUnkeyed(
       }
     } else if (nc != null && oc == null) {
       const newDom = createDom(nc, ctx, isSvg, parent);
-      if (newDom) parent.appendChild(newDom);
+      if (newDom) parent.insertBefore(newDom, regionEnd);
     } else if (
       (typeof nc === "string" || typeof nc === "number") &&
       (typeof oc === "string" || typeof oc === "number")
@@ -157,7 +175,7 @@ function diffUnkeyed(
           parent.insertBefore(newText, oldDom);
           parent.removeChild(oldDom);
         } else {
-          parent.appendChild(newText);
+          parent.insertBefore(newText, regionEnd);
         }
       }
     } else {
@@ -208,7 +226,12 @@ function diffKeyed(
         }
       } else {
         oldNonKeyedDoms.push(cursor);
-        cursor = cursor?.nextSibling ?? null;
+        // Advance by realized span (AIO-414): 0 for Portal / null-rendering
+        // component, 1 for bare text — a hardcoded 1 skips the next sibling.
+        const count = _domNodeCount(oc);
+        for (let j = 0; j < count; j++) {
+          cursor = cursor?.nextSibling ?? null;
+        }
       }
     }
   }

@@ -37,10 +37,33 @@ import { _flushPending, _reportHookError } from "./renderer-flush.ts";
 // ── Schedule ──────────────────────────────────────────────────────────
 
 export function _scheduleComponentRender(inst: ComponentInstance): void {
-  if (inst.disposed || inst.pendingRender) return;
-  inst.pendingRender = true;
-  inst.selfTriggered = true;
+  if (inst.disposed) return;
   const root = inst._root;
+  if (inst.pendingRender) {
+    // Already flagged pending. Normally it is also sitting in the queue (or is an
+    // in-flight batch item during an active flush) — nothing to do. But if it is
+    // pending, NOT in the queue, and no flush is running, a prior flush stranded
+    // it: without this it could never be re-queued (this early-return) and would
+    // silently ignore every future signal change (AIO-408/409 class). Both known
+    // causes are fixed at the source; this is a fail-safe that degrades any latent
+    // strand to a one-tick delay instead of a permanent invisible freeze, and
+    // makes it loud in dev so the real cause gets fixed.
+    if (root.flushing || root.pendingComponents.has(inst)) return;
+    if (_devMode) {
+      const name = typeof inst.vnode.tag === "function"
+        ? (inst.vnode.tag.name || "Anonymous")
+        : "Component";
+      console.error(
+        `[aio-dev] Recovered a stranded <${name}> (flagged pending but absent ` +
+          `from the render queue). This is an aio scheduler bug — please report; ` +
+          `re-queueing so the update is not lost.`,
+      );
+    }
+    // fall through to re-queue (pendingRender already true)
+  } else {
+    inst.pendingRender = true;
+  }
+  inst.selfTriggered = true;
   root.pendingComponents.add(inst);
   if (!root.flushScheduled) {
     root.flushScheduled = true;

@@ -1,7 +1,7 @@
 // AIO VDOM boundary diffing — ErrorBoundary and Suspense reconciliation.
 // Separated from vdom-diff.ts for size. Uses DiffFn + DiffChildrenFn callbacks.
 
-import { _LAZY_PENDING } from "./vdom-types.ts";
+import { _domNodeCount, _LAZY_PENDING } from "./vdom-types.ts";
 import type { RenderCtx, VNode } from "./vdom-types.ts";
 import {
   _removeDomCleanup,
@@ -29,21 +29,39 @@ export function _updateContainerDom(
   ov: VNode,
   ctx: RenderCtx,
 ): void {
-  let foundDom = false;
+  // AIO-413: decide emptiness by REALIZED node count, not getDom() alone. Bare
+  // text/number children carry no _dom, so a text-only container (a Fragment
+  // whose children are all strings — extremely common) looked "empty" to the old
+  // getDom scan: it injected a stray comment anchor on every re-render and set
+  // _dom to that comment, desyncing the parent's child cursor (frozen/duplicated
+  // nodes). Counting realized nodes classifies such containers correctly.
+  let count = 0;
+  let firstTracked: Node | null = null;
   for (const child of nv.children) {
-    const d = getDom(child);
-    if (d) {
-      nv._dom = d;
-      foundDom = true;
-      break;
+    const c = _domNodeCount(child);
+    count += c;
+    if (!firstTracked && c > 0) {
+      const d = getDom(child);
+      if (d) firstTracked = d; // element/component/nested-fragment first node
     }
   }
-  if (foundDom) {
-    // AIO-168: remove old comment anchor when content returns
+
+  if (count > 0) {
+    // Non-empty. Prefer the first tracked child node; otherwise the container
+    // leads with bare text whose node getDom can't see — the old first node
+    // (ov._dom) still points at it (text diffs in place), unless it was the
+    // stale comment anchor.
+    let first = firstTracked;
+    if (!first) {
+      const od = ov._dom;
+      if (od && od.nodeType !== 8 && isChildOf(od, parent)) first = od;
+    }
+    // AIO-168: remove the old comment anchor now that content is present.
     const ovDom = ov._dom;
     if (ovDom && ovDom.nodeType === 8 && isChildOf(ovDom, parent)) {
       parent.removeChild(ovDom);
     }
+    if (first) nv._dom = first;
   } else {
     // Empty container — comment anchor for positioning (AIO-162)
     const ovDom = ov._dom;
