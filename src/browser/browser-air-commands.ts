@@ -3,10 +3,7 @@
 // Routes __-prefixed control messages (snapshots, interact, time-travel, diag).
 
 import { handleTTMessage } from "../air/time-travel-panel.ts";
-import { interact } from "../air/dom-interact.ts";
-import { snapshotDOM } from "../air/dom-snapshot.ts";
 import { getSerializedSurfaces, runUITrigger } from "../air/ui-remote.ts";
-import type { InteractCommand } from "../air/dom-inspector-types.ts";
 import { _vitalsTransportProbe, _w } from "./browser-protocol.ts";
 import { _rejectAck, _resolveAck } from "../protocol/browser-ack.ts";
 
@@ -16,17 +13,6 @@ export function routeCommand(
   sendRaw: (msg: string) => void,
 ): boolean {
   if (!line.startsWith("__")) return false;
-
-  if (line === "__ui:snapshot" || line === "__ui:snapshot:all") {
-    const all = line.endsWith(":all");
-    try {
-      const tree = snapshotDOM(undefined, all);
-      sendRaw("__ui:snapshot-result:" + JSON.stringify(tree));
-    } catch (e) {
-      sendRaw("__ui:snapshot-result:" + JSON.stringify({ error: String(e) }));
-    }
-    return true;
-  }
 
   if (line === "__ui:surface") {
     try {
@@ -51,26 +37,6 @@ export function routeCommand(
         );
       }
     })();
-    return true;
-  }
-
-  if (line.startsWith("__ui:interact:")) {
-    try {
-      const cmd: InteractCommand = JSON.parse(
-        line.slice("__ui:interact:".length),
-      );
-      const result = interact(cmd);
-      sendRaw("__ui:interact-result:" + JSON.stringify(result));
-    } catch (e) {
-      sendRaw(
-        "__ui:interact-result:" + JSON.stringify({
-          ok: false,
-          selector: "",
-          action: "",
-          error: String(e),
-        }),
-      );
-    }
     return true;
   }
 

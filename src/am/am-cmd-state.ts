@@ -71,63 +71,21 @@ export async function cmdState(
   }
 }
 
+/** `am ui [user]` — server-side UI state (the projected state tree). For live
+ *  client inspection use `am surface` (semantic UI surface, the same facility
+ *  `testUI` drives). */
 export async function cmdUi(args: string[], flags: GlobalFlags): Promise<void> {
   const mode = detectMode(flags);
   const appId = resolveAmAppId(flags.app);
   const port = resolvePort(flags.port, appId);
-  const clientIdx = flags.client ?? 0;
-
-  // If first arg looks like a user ID (no --client flag), use server-state UI
   const user = args[0];
-  if (user && flags.client === undefined) {
-    const route = user ? `ui?user=${encodeURIComponent(user)}` : "ui";
-    const result = await trojanGet(port, route, appId);
-    if (!result.ok) {
-      outError(result.error, mode);
-      Deno.exit(1);
-    }
-    out(result.data, mode);
-    return;
-  }
-
-  // DOM snapshot from client
-  const allParam = flags.all ? "?all=true" : "";
-  const result = await trojanGet(
-    port,
-    `dom/${clientIdx}${allParam}`,
-    appId,
-    10_000,
-  );
+  const route = user ? `ui?user=${encodeURIComponent(user)}` : "ui";
+  const result = await trojanGet(port, route, appId);
   if (!result.ok) {
     outError(result.error, mode);
     Deno.exit(1);
   }
-
-  if (mode === "pretty" && Array.isArray(result.data)) {
-    _prettyPrintTree(result.data as Record<string, unknown>[], 0);
-  } else {
-    out(result.data, mode);
-  }
-}
-
-function _prettyPrintTree(
-  nodes: Record<string, unknown>[],
-  indent: number,
-): void {
-  for (const n of nodes) {
-    const tag = n.tag as string;
-    const id = n.id ? `#${n.id}` : "";
-    const cls = (n.classes as string[])?.map((c) => `.${c}`).join("") ?? "";
-    const comp = n.component ? ` [${n.component}]` : "";
-    const testId = n.testId ? ` [test:${n.testId}]` : "";
-    const text = n.text ? ` "${(n.text as string).slice(0, 60)}"` : "";
-    const disabled = n.disabled ? " (disabled)" : "";
-    const pad = "  ".repeat(indent);
-    console.log(`${pad}${tag}${id}${cls}${comp}${testId}${text}${disabled}`);
-    if (n.children && Array.isArray(n.children)) {
-      _prettyPrintTree(n.children as Record<string, unknown>[], indent + 1);
-    }
-  }
+  out(result.data, mode);
 }
 
 // ── Actions ─────────────────────────────────────────────────

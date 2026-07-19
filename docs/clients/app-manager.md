@@ -149,24 +149,24 @@ deno task am snapshot save backup.json      # save to file
 deno task am snapshot load backup.json      # restore from file
 ```
 
-## UI snapshot and interaction (dev mode)
+## UI inspection and interaction (dev mode)
 
-Read the live DOM tree or interact with UI elements from the CLI.
+Inspect and drive the live UI from the CLI through the **semantic UI surface** —
+the same facility `testUI` uses, so what you do here and what a test does behave
+identically. Elements are addressed by component/name, not CSS selectors.
 
 ```sh
-deno task am ui                            # DOM snapshot (client 0)
-deno task am ui --client 1                 # snapshot specific client
-deno task am ui --all                      # include invisible elements
-deno task am interact click "#submit"      # click element
-deno task am interact type "#email" "a@b"  # type into input
-deno task am interact select "#country" "US"
-deno task am interact scroll "#footer"
-deno task am interact focus "#search"
-deno task am interact hover ".menu-item"
+deno task am ui                              # server-side UI state
+deno task am surface                         # semantic surface (client 0): every component + triggerable element
+deno task am surface 1                       # surface for a specific client
+deno task am trigger 0 App:SubmitButton click        # click by component:name path
+deno task am trigger 0 App:Email type "a@b"          # type into an input
+deno task am trigger 0 App:Search focus               # focus / blur / hover / scroll / press
 ```
 
-**Targeting** — use any CSS selector: `#id`, `.class`, `[data-testid="x"]`,
-`[data-component="Dashboard"]`, or complex selectors.
+Run `am surface` first to see the addressable `Component:name` paths, then
+`am trigger` them. This is the one unified UI facility — the old CSS-selector
+`am interact`/`am click` and raw `am dom` snapshot were removed in favour of it.
 
 ## Monitoring
 
@@ -201,8 +201,8 @@ prod.
 | `/__aio/trojan/ui`            | UI state (cell-level ui filtered)          |
 | `/__aio/trojan/ui?user=alice` | UI state for specific user                 |
 | `/__aio/trojan/clients`       | Connected clients (type, transport, index) |
-| `/__aio/trojan/ui/<n>`        | DOM snapshot from client n (dev mode)      |
-| `/__aio/trojan/interact/<n>`  | POST: send InteractCommand (dev mode)      |
+| `/__aio/trojan/surface/<n>`   | Semantic UI surface from client n (dev)    |
+| `/__aio/trojan/trigger/<n>`   | POST: drive the UI ({path, action, text?}) |
 | `/__aio/trojan/history`       | Time-travel entries                        |
 | `/__aio/trojan/schedules`     | Active timer/cron IDs                      |
 | `/__aio/trojan/metrics`       | Uptime, connections, schedule count        |
@@ -258,8 +258,8 @@ curl -X POST localhost:8000/__aio/trojan/interact/0 \
 deno task am health && echo "up" || echo "down"
 deno task am state | jq '.fleet[0].stats'
 deno task am dispatch portfolio:buy symbol=AAPL qty=10
-deno task am ui --json | jq '.[] | select(.text == "Login")'
-deno task am interact click '[data-testid="login-btn"]'
+deno task am surface --json | jq '.[].elements[] | select(.text == "Login")'
+deno task am trigger 0 App:LoginButton click
 deno task am log --client --json | jq 'select(.level == "ERROR")'
 ```
 

@@ -99,7 +99,7 @@ Process (singleton — one instance per app identity):
 
 State:
   state [path] [--wait=N] State query (dot-path, [*] wildcard, {pick})
-  ui [user]               UI state (server) or DOM snapshot (--client=N)
+  ui [user]               Server-side UI state (for live client UI use: surface)
   dispatch <Type> [k=v]   Dispatch action (or --body='{"type":...}')
   actions                 Time-travel history
 
@@ -116,13 +116,9 @@ Persistence:
 
 Inspect:
   clients                 Connected WebSocket clients (with index)
-  client <index>          Request React component tree from client (dev mode)
-  click <idx> <Comp> [n]  Click component — by index or prop:value (dev mode)
-  ui [--client=N] [--all] DOM snapshot from client (default: client 0, visible only)
-  interact <action> <sel> Interact with UI element (click/type/select/focus/blur/scroll/hover)
-  dom [clientIdx] [--all]  Raw DOM snapshot of a live client (prefer: surface)
+  client <index>          Request component tree from client (dev mode)
   surface [clientIdx]     Semantic UI surface — every component + triggerable element, by name
-  trigger <idx> <path> <action> [text]  Simulate a user on the live UI (click/type/press/hover…)
+  trigger <idx> <path> <action> [text]  Drive the live UI (click/type/press/hover/focus/blur/scroll) — same engine as testUI
   sql <query>             Execute read-only SQL
   tables                  List SQLite tables
   schedules               Active scheduled effects

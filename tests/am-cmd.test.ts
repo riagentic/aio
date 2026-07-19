@@ -12,14 +12,11 @@ import {
   killProcess,
 } from "../src/am/am-cmd-process.ts";
 import {
-  cmdClick,
   cmdClient,
   cmdClients,
   cmdConfig,
-  cmdDom,
   cmdErrors,
   cmdHealth,
-  cmdInteract,
   cmdLog,
   cmdMetrics,
   cmdProfile,
@@ -121,9 +118,6 @@ function fakeControlServer(state: { errorsBody: string }) {
           return json([{ name: "aio_state" }, { name: "sync_ops" }]);
         }
         return json([{ n: 1 }]);
-      }
-      if (p === "/__aio/trojan/interact/0" && req.method === "POST") {
-        return json({ ok: true });
       }
       if (p === "/__aio/trojan/trigger/0" && req.method === "POST") {
         return json({ ok: true, action: "click" });
@@ -378,15 +372,6 @@ Deno.test("am: inspect commands answer over the control port", async () => {
     r = await capture(() => cmdTables([], flags));
     assertEquals(JSON.parse(r.logs[0]!), ["aio_state", "sync_ops"]);
 
-    r = await capture(() => cmdDom(["0"], flags));
-    assertEquals(JSON.parse(r.logs[0]!).tag, "div");
-
-    r = await capture(() => cmdClick(["0", "AddButton"], flags));
-    assertEquals(JSON.parse(r.logs[0]!).ok, true);
-
-    r = await capture(() => cmdInteract(["click", "button"], flags));
-    assertEquals(JSON.parse(r.logs[0]!).ok, true);
-
     r = await capture(() => cmdSurface(["0"], flags));
     assertEquals(JSON.parse(r.logs[0]!)[0].component, "App");
 
@@ -412,11 +397,7 @@ Deno.test("am: inspect usage errors exit 1 without touching the server", async (
   const flags = flagsFor(1, app); // nothing listens on port 1
   const cases: [string, () => Promise<void>][] = [
     ["client", () => cmdClient([], flags)],
-    ["click", () => cmdClick([], flags)],
-    ["interact-no-args", () => cmdInteract([], flags)],
-    ["interact-bad-action", () => cmdInteract(["explode", "sel"], flags)],
     ["sql-empty", () => cmdSql([], flags)],
-    ["dom-bad-idx", () => cmdDom(["-1"], flags)],
     ["trigger-bad", () => cmdTrigger(["x", "", "click"], flags)],
   ];
   for (const [name, fn] of cases) {
