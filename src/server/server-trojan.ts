@@ -200,42 +200,6 @@ function handleGet(
     return sendToClient(idx, "__ui:surface");
   }
 
-  if (route.startsWith("click/") && !prod) {
-    const rest = route.slice(6);
-    const slashIdx = rest.indexOf("/");
-    if (slashIdx === -1) {
-      return err(
-        "usage: click/<clientIndex>/<Component>:<index|prop:value>",
-        400,
-      );
-    }
-    const idx = Number(rest.slice(0, slashIdx));
-    let target: string;
-    try {
-      target = decodeURIComponent(rest.slice(slashIdx + 1));
-    } catch {
-      target = rest.slice(slashIdx + 1);
-    }
-    if (!Number.isInteger(idx) || idx < 0) {
-      return err("invalid client index", 400);
-    }
-    return sendToClient(idx, "__click:" + target);
-  }
-
-  if (route.startsWith("dom/") && !prod) {
-    const rest = route.slice(4);
-    const qIdx = rest.indexOf("?");
-    const idxStr = qIdx >= 0 ? rest.slice(0, qIdx) : rest;
-    const idx = Number(idxStr);
-    if (!Number.isInteger(idx) || idx < 0) {
-      return err("invalid client index", 400);
-    }
-    const url = new URL(req!.url);
-    const all = url.searchParams.get("all") === "true";
-    const cmd = all ? "__ui:snapshot:all" : "__ui:snapshot";
-    return sendToClient(idx, cmd);
-  }
-
   if (route === "history") {
     if (prod) return err("dev-only endpoint", 403);
     return json(
@@ -344,20 +308,6 @@ async function handlePost(
         return err("body must be { path, action, text?, key? }", 400);
       }
       return sendToClient(idx, "__ui:trigger:" + JSON.stringify(body));
-    } catch {
-      return err("invalid JSON");
-    }
-  }
-
-  if (route.startsWith("interact/") && !prod) {
-    const idx = Number(route.slice(9));
-    if (!Number.isInteger(idx) || idx < 0) {
-      return err("invalid client index", 400);
-    }
-    try {
-      const body = await req.text();
-      const cmd = JSON.parse(body);
-      return sendToClient(idx, "__ui:interact:" + JSON.stringify(cmd));
     } catch {
       return err("invalid JSON");
     }

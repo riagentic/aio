@@ -1,47 +1,7 @@
-// dom-inspector-types.ts — Shared types for DOM inspector and UI interaction.
-// Used by both client (dom-inspector.ts) and server (am.ts, server.ts).
-
-/** Semantic representation of a DOM element for UI snapshots. */
-export interface UINode {
-  tag: string;
-  id?: string;
-  testId?: string;
-  component?: string;
-  selector: string;
-  role?: string;
-  text?: string;
-  visible: boolean;
-  disabled?: boolean;
-  checked?: boolean;
-  value?: string;
-  href?: string;
-  src?: string;
-  placeholder?: string;
-  classes?: string[];
-  aria?: Record<string, string>;
-  dataset?: Record<string, string>;
-  children?: UINode[];
-}
-
-/** Command to interact with a UI element. */
-export interface InteractCommand {
-  action: "click" | "type" | "select" | "focus" | "blur" | "scroll" | "hover";
-  selector: string;
-  value?: string;
-  options?: {
-    clear?: boolean;
-    delay?: number;
-  };
-}
-
-/** Result of a UI interaction. */
-export interface InteractResult {
-  ok: boolean;
-  selector: string;
-  action: string;
-  element?: string;
-  error?: string;
-}
+// dom-inspector-types.ts — shared client/server diagnostic types.
+// (The old UINode/InteractCommand DOM-inspection types were removed with the
+//  selector/raw-DOM `am` path — the semantic UI surface in ui-surface.ts is now
+//  the single facility for both testUI and `am surface`/`am trigger`.)
 
 /** Client log entry forwarded from browser/Electron. */
 export interface ClientLogEntry {

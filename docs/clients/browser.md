@@ -271,55 +271,27 @@ message:
 - Original console methods still work — intercept is additive
 - Fire-and-forget — no ack, no retry, no impact on app performance
 
-## DOM snapshot
+## Inspecting & driving a live client
 
-> **Prefer the semantic surface** — `am surface <clientIdx>` gives every
-> component and element by NAME (what tests and AI agents use); the raw DOM
-> snapshot below is the low-level fallback. See
-> [UI testing](../testing/ui-testing.md).
-
-Capture a raw DOM snapshot of a live client from the CLI:
+aio has **one** UI facility for this — the semantic surface — used identically by
+`testUI` (in tests) and by `am surface`/`am trigger` (against a live client). It
+walks the live AIR vdom, so every component and interactive element is addressed
+by NAME, never a CSS selector. See [UI testing](../testing/ui-testing.md).
 
 ```sh
-am dom <clientIdx>          # semantic DOM snapshot of the connected client
-am dom <clientIdx> --all    # include collapsed wrapper nodes
+am surface <clientIdx>                      # every component + triggerable element, by name
+am trigger <clientIdx> App:SubmitButton click       # drive it: the Component:name path + action
+am trigger <clientIdx> App:Name type "Alice"
 ```
 
-Walks the DOM tree (max 5000 nodes, depth 50) and builds a `UINode[]` array.
-Each node captures: tag, text content, input value, classes, aria/data
-attributes, disabled/checked state, href, src, placeholder, and a unique CSS
-selector.
+**Actions:** `click`, `type`, `select`, `focus`, `blur`, `scroll`, `hover`,
+`press` — dispatched as faithful event sequences (e.g. click sends
+`pointerdown` > `mousedown` > `pointerup` > `mouseup` > `click`), then the app is
+settled and the fresh post-action surface is returned. Because a test and an `am`
+session run the exact same trigger engine, they behave identically.
 
-**Selector priority:** `#id` > `[data-testid]` > `[data-component]` >
-`tag:nth-of-type(n)` path.
-
-**Filtering:** Skips `<script>`, `<style>`, `<meta>`, `<link>`. Collapses pure
-wrapper `<div>`s with no semantic content. Respects visibility (computed styles,
-`offsetParent`, bounding rect).
-
-## DOM interaction
-
-> **Prefer `am trigger`** — it addresses elements by semantic name with faithful
-> event sequences and replies with the fresh post-action surface. The
-> selector-based interact below is the low-level fallback.
-
-Dispatch simulated user interactions on a live client from the CLI:
-
-```sh
-am interact click "#submit-btn"
-am interact type "#name" "Alice"
-am interact select "#role" "admin"
-am interact scroll "#list" 500     # scrollTop
-```
-
-**Available actions:** `click`, `type`, `select`, `focus`, `blur`, `scroll`,
-`hover`.
-
-**Validation:** Each action checks selector validity, element visibility, and
-disabled state before dispatching. Returns `{ ok: boolean, error?: string }`.
-
-**Event sequences:** Dispatches full event chains (e.g., click sends
-`pointerdown` > `mousedown` > `pointerup` > `mouseup` > `click`).
+> The older selector/index/raw-DOM commands (`am interact`, `am click`, `am dom`)
+> were removed — the semantic surface supersedes them.
 
 ## Delta sync and rendering
 

@@ -345,28 +345,32 @@ function _handleUDSConn(
             }
             continue;
           }
-          // UI snapshot/interact results — resolve pending
-          if (
-            line.startsWith("__ui:snapshot-result:") ||
-            line.startsWith("__ui:interact-result:")
-          ) {
-            const client = clientMap.get(conn);
-            if (client) {
-              const pending = pendingState.get(client.id);
-              if (pending) {
-                pendingState.delete(client.id);
-                clearTimeout(pending.timer);
-                const payload = line.startsWith("__ui:snapshot-result:")
-                  ? line.slice("__ui:snapshot-result:".length)
-                  : line.slice("__ui:interact-result:".length);
-                try {
-                  pending.resolve(JSON.parse(payload));
-                } catch {
-                  pending.resolve(null);
+          // Semantic UI-surface / trigger results — resolve pending. Gives the
+          // unified facility (am surface/trigger, sharing testUI's impl) parity
+          // over UDS/electron, matching the WS path. (The old snapshot/interact
+          // results were removed with the selector/raw-DOM path.)
+          {
+            const uiPfx = line.startsWith("__ui:surface-result:")
+              ? "__ui:surface-result:"
+              : line.startsWith("__ui:trigger-result:")
+              ? "__ui:trigger-result:"
+              : null;
+            if (uiPfx) {
+              const client = clientMap.get(conn);
+              if (client) {
+                const pending = pendingState.get(client.id);
+                if (pending) {
+                  pendingState.delete(client.id);
+                  clearTimeout(pending.timer);
+                  try {
+                    pending.resolve(JSON.parse(line.slice(uiPfx.length)));
+                  } catch {
+                    pending.resolve(null);
+                  }
                 }
               }
+              continue;
             }
-            continue;
           }
           if (line.startsWith("__subs:")) {
             const client = clientMap.get(conn);

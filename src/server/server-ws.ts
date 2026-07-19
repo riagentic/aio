@@ -173,11 +173,7 @@ export function createWsManager(deps: WsDeps): WsManager {
 
   // Derive request kind from WS command message for deduplication key
   const reqKind = (msg: string) =>
-    msg.startsWith("__ui:snapshot")
-      ? "snapshot"
-      : msg.startsWith("__ui:interact")
-      ? "interact"
-      : msg.startsWith("__ui:surface")
+    msg.startsWith("__ui:surface")
       ? "surface"
       : msg.startsWith("__ui:trigger")
       ? "trigger"
@@ -504,15 +500,6 @@ export function createWsManager(deps: WsDeps): WsManager {
       } catch { /* malformed */ }
       return;
     }
-    // UI snapshot result
-    if (e.data.startsWith("__ui:snapshot-result:")) {
-      _resolvePending(
-        meta,
-        "snapshot",
-        e.data.slice("__ui:snapshot-result:".length),
-      );
-      return;
-    }
     // UI semantic-surface result
     if (e.data.startsWith("__ui:surface-result:")) {
       _resolvePending(
@@ -528,15 +515,6 @@ export function createWsManager(deps: WsDeps): WsManager {
         meta,
         "trigger",
         e.data.slice("__ui:trigger-result:".length),
-      );
-      return;
-    }
-    // UI interact result
-    if (e.data.startsWith("__ui:interact-result:")) {
-      _resolvePending(
-        meta,
-        "interact",
-        e.data.slice("__ui:interact-result:".length),
       );
       return;
     }
