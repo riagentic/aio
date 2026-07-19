@@ -59,6 +59,7 @@ export const VALID_AIO_CONFIG_KEYS = new Set<string>([
   "onStart",
   "onStop",
   "onError",
+  "libraryMode",
   // internal keys (prefixed with _)
   "_onScheduleReady",
   "_diagnostics",
@@ -104,6 +105,7 @@ export const VALID_FEATURES_CONFIG_KEYS = new Set<string>([
   "memory",
   "circuitBreaker",
   "singleton",
+  "libraryMode",
   "syncIntervalMs",
   "fullStateThreshold",
   "routes",

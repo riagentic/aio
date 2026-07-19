@@ -46,14 +46,22 @@ export function initDiagnostics(
     if (recovered) {
       const age = Date.now() - recovered.ts;
       const ageSec = Math.round(age / 1000);
+      // AIO-417 (TBD U5): don't imply automatic recovery — a diagnostic
+      // checkpoint is only applied if the app provides an `onCheckpointRestore`
+      // hook. The old "found state from Xs ago" read as "state was recovered".
       if (age > 3600_000) {
         log.warn(
           "checkpoint",
-          `recovered state is ${
+          `diagnostic snapshot is ${
             Math.round(age / 60_000)
-          }m old — consider starting fresh`,
+          }m old — applied only via onCheckpointRestore; consider starting fresh`,
         );
-      } else log.info("checkpoint", `found state from ${ageSec}s ago`);
+      } else {
+        log.info(
+          "checkpoint",
+          `diagnostic snapshot from ${ageSec}s ago (applied only if onCheckpointRestore is set)`,
+        );
+      }
     }
     const debounce = typeof opts.checkpoint === "object"
       ? (opts.checkpoint.debounce ?? 5000)

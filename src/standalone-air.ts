@@ -385,6 +385,15 @@ function bootStandalone(
 ): AioApp<Record<string, unknown>, Msg> {
   if (_cellApp) return _cellApp; // idempotent — first caller wins
   const composed = composeCells(cells);
+  // Client-scoped cells own their signal state locally (bindCellReactive runs
+  // their methods against the signal directly, bypassing the dispatch loop).
+  // The composed reducer never updates their slice, so a blanket
+  // _applyFullState on every commit would overwrite the client signal with
+  // the stale initial slice — e.g. a `session` cell's signed-in member gets
+  // wiped the moment any server cell dispatches. Skip them on commit.
+  const clientCellIds = new Set(
+    cells.filter((f) => f.__aio.scope === "client").map((f) => f.__aio.id),
+  );
   const app = initStandalone<Record<string, unknown>, Msg, Msg>(
     composed.initialState,
     {
@@ -394,8 +403,19 @@ function bootStandalone(
       persistKey: `aio:${opts.appId ?? "app"}`,
       onRestore: opts.onRestore,
       // push each committed state into per-cell signals so `counter.count`
-      // reads (upgraded to reactive below) re-render the AIR tree
-      onCommit: (s) => _applyFullState(s as Record<string, unknown>),
+      // reads (upgraded to reactive below) re-render the AIR tree. Skip
+      // client-scoped cells — they own their signal state (see note above).
+      onCommit: (s) => {
+        if (clientCellIds.size === 0) {
+          _applyFullState(s as Record<string, unknown>);
+          return;
+        }
+        const filtered: Record<string, unknown> = {};
+        for (const [k, v] of Object.entries(s as Record<string, unknown>)) {
+          if (!clientCellIds.has(k)) filtered[k] = v;
+        }
+        _applyFullState(filtered);
+      },
     },
   );
   for (const f of cells) {
