@@ -1,5 +1,59 @@
 # Changelog
 
+## 1.0.0-alpha22 — reactivity hardening: no more silent freezes (2026-07-19)
+
+Root-caused the "value changes but the UI doesn't, with no error" class into six
+distinct renderer bugs and fixed each with a regression test proven to fail on
+revert. The common thread: reconciliation under geometry or load the suite never
+generated — multi-node siblings, zero-node Portals, budget overruns, a throw
+mid-flush. A new dev-mode invariant now makes this whole class loud at the source.
+
+### Fixed
+
+- **Scheduler could permanently, silently strand components under load.** When a
+  re-render burst overran the flush time budget mid-batch, the unprocessed tail
+  was dropped: its `pendingRender` stayed set, so it was never re-queued and every
+  future signal update to it was silently discarded (AIO-408). A throw while
+  re-rendering one component aborted the whole flush, stranding its siblings the
+  same way (AIO-409). Both fixed; a `flushing` self-heal in the scheduler now
+  degrades any future strand to a one-tick delay + loud dev error instead of a
+  permanent freeze. Only reachable under real bursts — why fast test flushes never
+  surfaced it.
+- **Child reconciliation corrupted/froze the DOM around multi-node siblings.** A
+  `Signal` used directly as a child froze when a Fragment sibling shifted its DOM
+  index (AIO-410); a component that renders a Fragment mis-counted as one node and
+  desynced the diff cursor (AIO-411); a text-only Fragment was judged "empty" and
+  injected a stray comment every re-render (AIO-413); `diffUnkeyed` ignored a
+  Fragment's region anchor and clobbered preceding siblings, and advanced its
+  cursor past zero-node Portals, duplicating the following text (AIO-414).
+  `_domNodeCount` is now the single source of truth for a node's realized DOM span
+  (Fragment/component/Portal/ErrorBoundary/Suspense).
+- **Direct cell access now reliably subscribes to server deltas** and cell signals
+  are no longer orphaned across re-renders (risoto CRITICAL) — with a real e2e
+  harness that reproduces it.
+- **UDS transport buffers patches across the throttle window** instead of dropping
+  the ones that arrive mid-window.
+- **14 verified bugs** from the GLM-5.2 multi-aspect audit, and three fail-loud
+  gaps from the risoto report (16e, 16f-b, 17b), each pinned by regression tests.
+
+### Added
+
+- **Dev child-alignment invariant.** In dev mode, after every element diff aio
+  asserts `childNodes.length === Σ _domNodeCount(child)` (skipping `ref`/`use`/
+  `dangerouslySetInnerHTML`); a mismatch means the child cursor desynced. It has
+  zero false positives and immediately caught two of the bugs above that were not
+  yet known (AIO-412).
+- **Actionable antipattern messages, with the linter surfaced to app devs** — the
+  same checks aio runs internally now guide application code.
+- Test-only `_setFlushBudget` makes the flush-budget yield path deterministically
+  testable; the WS+UDS coalescing paths are unified behind one shared primitive.
+
+### Changed
+
+- Docs codify **dev==prod equivalency** as a critical convention; the test harness
+  now runs dev-strict so the test environment can no longer be more lenient than
+  production, and `press()` gained keyboard-modifier support.
+
 ## 1.0.0-alpha21 — field-report closeout: testable time, loud dev, the form fix (2026-07-17)
 
 Every open item from all three field reports (risoto, quant, mdview) closed —

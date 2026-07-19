@@ -9,7 +9,7 @@
 - **Write reactive, use generators or atomic actions when needed.**
 - **Pick your target, compile and ship!**
 
-`v1.0.0-alpha21`
+`v1.0.0-alpha22`
 
 > Define state once. It persists, syncs to all clients, drives the UI.
 
@@ -90,21 +90,21 @@ await aio.run({ appId: "taste", appVersion: "0.1.0", cells: [counter] });
 
 ```sh
 # Option A: scaffolder — one line, no curl
-deno run -A jsr:@riagentic/aio@1.0.0-alpha21/create my-app
+deno run -A jsr:@riagentic/aio@1.0.0-alpha22/create my-app
 
 # Option B: vendor into your project (full source, bleeding edge)
 git clone https://github.com/riagentic/aio dep/aio
 
 # Option C: JSR — pin the version explicitly (alphas are semver
 #   pre-releases, so a bare install would resolve to an old stable)
-deno add jsr:@riagentic/aio@1.0.0-alpha21
+deno add jsr:@riagentic/aio@1.0.0-alpha22
 ```
 
 Then in `deno.json`:
 
 ```jsonc
 // JSR
-"imports": { "aio": "jsr:@riagentic/aio@1.0.0-alpha21" }
+"imports": { "aio": "jsr:@riagentic/aio@1.0.0-alpha22" }
 
 // Clone — also declare aio's deps (Deno can't fetch them transitively)
 "imports": {
@@ -319,7 +319,7 @@ clients, zero plumbing. Fit questions:
 
 ## Status
 
-**v1.0.0-alpha21** · [JSR](https://jsr.io/@riagentic/aio) · MIT
+**v1.0.0-alpha22** · [JSR](https://jsr.io/@riagentic/aio) · MIT
 
 2370+ tests · security hardened · CI-locked API snapshot + coverage ratchet
 
