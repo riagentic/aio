@@ -231,14 +231,26 @@ export default function App() {
       // 4) The DISCRIMINATOR: the click must have traveled as a CRDT op
       // (engine path), not a plain action — the op-log must contain it.
       // Without this, a fallback plain send would green-wash 1–3.
-      const rows = await (await fetch(`${base}/__aio/trojan/sql`, {
-        method: "POST",
-        headers: { "x-aio": "1", "content-type": "application/json" },
-        body: JSON.stringify({
-          query: "SELECT COUNT(*) AS n FROM sync_ops",
-        }),
-      })).json() as { n: number }[];
-      assertEquals(rows[0]?.n, 1, "exactly one op persisted in the op-log");
+      // Poll: the surface can converge (broadcast delivered) a beat before the
+      // op-log SQL write commits — under load (e.g. the coverage run) that race
+      // is wide enough to flake a single read. The op WILL land; wait for it.
+      const opCount = async (): Promise<number> => {
+        const rows = await (await fetch(`${base}/__aio/trojan/sql`, {
+          method: "POST",
+          headers: { "x-aio": "1", "content-type": "application/json" },
+          body: JSON.stringify({
+            query: "SELECT COUNT(*) AS n FROM sync_ops",
+          }),
+        })).json() as { n: number }[];
+        return rows[0]?.n ?? 0;
+      };
+      let n = 0;
+      for (let i = 0; i < 40 && n < 1; i++) {
+        n = await opCount();
+        if (n >= 1) break;
+        await new Promise((r) => setTimeout(r, 100));
+      }
+      assertEquals(n, 1, "exactly one op persisted in the op-log");
     } finally {
       for (const t of tabs) {
         try {
