@@ -114,6 +114,7 @@ ${tmplBoundsTracking()}
   // ── UDS connection — NDJSON over Unix socket ──
   const SOCK = ${JSON.stringify(socketPath)};
   let buf = '', retry = 0, lastFullState = null, lastState = null, pageReady = false;
+  let down = false, lastErrCode = null; // report a backend outage ONCE, not per retry
   const _ipcQueue = [], IPC_QUEUE_MAX = 100; // AIO-284: offline queue
   let closing = false;
   win.on('close', () => { closing = true; });
@@ -133,7 +134,8 @@ ${tmplBoundsTracking()}
     sock = connect(SOCK);
     sock.setEncoding('utf8');
     sock.on('connect', () => {
-      retry = 0; lastFullState = null; lastState = null;
+      if (down) { console.info("[aio:electron] backend connection restored (" + SOCK + ")"); down = false; }
+      retry = 0; lastErrCode = null; lastFullState = null; lastState = null;
       while (_ipcQueue.length > 0 && sock && !sock.destroyed) sock.write(_ipcQueue.shift() + '\\n');
       if (!closing && pageReady) win.webContents.send('__aio:open');
     });
@@ -150,11 +152,22 @@ ${tmplBoundsTracking()}
         if (pageReady) win.webContents.send('__aio:msg', line);
       }
     });
-    sock.on('error', (err) => { console.error("[aio:electron] UDS socket error:", err); });
+    // Capture the reason only — an 'error' is always followed by 'close', which
+    // reports the outage ONCE with the true cause. Prevents a Node stack-trace
+    // flood every retry (the "connection working, or visibly obvious why not"
+    // rule): a persistent outage should say what's wrong once, then stay quiet.
+    sock.on('error', (err) => { lastErrCode = (err && (err.code || err.message)) || 'error'; });
     sock.on('close', () => {
       sock = null;
       if (closing) return;
       if (pageReady) win.webContents.send('__aio:close');
+      if (!down) {
+        down = true;
+        const why = (lastErrCode === 'ECONNREFUSED' || lastErrCode === 'ENOENT')
+          ? "backend not reachable — is the aio server running?"
+          : ("backend connection lost" + (lastErrCode ? " (" + lastErrCode + ")" : ""));
+        console.warn("[aio:electron] " + why + " at " + SOCK + " — reconnecting (backoff up to 8s)…");
+      }
       const delay = Math.min(1000 * Math.pow(2, retry), 8000);
       retry++;
       reconnectTimer = setTimeout(connectUDS, delay);
