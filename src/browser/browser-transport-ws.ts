@@ -20,7 +20,6 @@ import {
 import { buildWsUrl, handleControlMessage } from "./browser-shared.ts";
 import {
   getStateSnapshot,
-  handleClickCmd,
   T,
 } from "./browser-transport-state.ts";
 import {
@@ -66,7 +65,10 @@ export function connect(): void {
           ? "electron"
           : "browser"),
     );
-    if (T.wasConnected) _showStatus("Connected", "#2a2", 2000);
+    if (T.wasConnected) {
+      _showStatus("Connected", "#2a2", 2000);
+      console.info("[aio] reconnected"); // recovery is logged once, matching the one-shot disconnect log
+    }
     T.wasConnected = true;
 
     // Load offline queue FIRST — before subscriptions trigger server broadcasts
@@ -141,11 +143,6 @@ export function connect(): void {
       }
       return;
     }
-    if (typeof e.data === "string" && e.data.startsWith("__click:")) {
-      const result = handleClickCmd(e.data.slice(8));
-      ws.send("__clientState:" + JSON.stringify(result));
-      return;
-    }
     if (typeof e.data === "string" && e.data.startsWith("__tt:")) {
       _handleTTMessage(e.data.slice(5));
       return;
@@ -186,8 +183,9 @@ export function connect(): void {
   };
 
   ws.onerror = () => {
+    // No log here — an error is always followed by onclose, which reports the
+    // outage exactly once. Logging both flooded the console on every retry.
     T.connecting = false;
-    console.warn("[aio] connection error");
   };
 
   ws.onclose = () => {
@@ -209,10 +207,12 @@ export function connect(): void {
     T.connecting = true;
     if (T.wasConnected) _showStatus("Reconnecting\u2026", "#e25");
     const base = Math.min(1000 * Math.pow(2, T.retry), 8000);
+    // Log the outage ONCE (first retry of this outage), not every attempt — the
+    // on-screen "Reconnecting…" status above is the live per-attempt indicator.
+    if (T.retry === 0) {
+      console.warn("[aio] disconnected — reconnecting (backoff up to 8s)…");
+    }
     T.retry++;
-    console.warn(
-      `[aio] disconnected, retrying in ${(base / 1000).toFixed(1)}s...`,
-    );
     setTimeout(() => {
       T.connecting = false;
       connect();

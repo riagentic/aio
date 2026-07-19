@@ -31,15 +31,12 @@ import {
 } from "./am/am-cmd-process.ts";
 
 import {
-  cmdClick,
   cmdClient,
   cmdClients,
   cmdConfig,
   cmdDiscover,
-  cmdDom,
   cmdErrors,
   cmdHealth,
-  cmdInteract,
   cmdLog,
   cmdMetrics,
   cmdProfile,
@@ -88,9 +85,6 @@ const COMMANDS: Record<string, CmdHandler> = {
   // Inspect
   clients: cmdClients,
   client: cmdClient,
-  click: cmdClick,
-  interact: cmdInteract,
-  dom: cmdDom,
   surface: cmdSurface,
   trigger: cmdTrigger,
   sql: cmdSql,

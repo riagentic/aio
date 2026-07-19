@@ -27,29 +27,11 @@ export const IPC_PING_INTERVAL = 60_000;
 // ── Fiber callbacks (injected from browser-fiber.ts to avoid circular deps) ──
 
 let _getStateSnapshot: () => unknown = () => [];
-let _handleClickCmd: (
-  cmd: string,
-) => { ok: boolean; error?: string; clicked?: string } = () => ({
-  ok: false,
-  error: "fiber not initialized",
-});
 
 export function getStateSnapshot(): unknown {
   return _getStateSnapshot();
 }
 
-export function handleClickCmd(
-  cmd: string,
-): { ok: boolean; error?: string; clicked?: string } {
-  return _handleClickCmd(cmd);
-}
-
-export function setFiberCallbacks(
-  getSnapshot: () => unknown,
-  handleClick: (
-    cmd: string,
-  ) => { ok: boolean; error?: string; clicked?: string },
-): void {
+export function setFiberCallbacks(getSnapshot: () => unknown): void {
   _getStateSnapshot = getSnapshot;
-  _handleClickCmd = handleClick;
 }

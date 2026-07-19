@@ -14,7 +14,6 @@ import {
 import { handleControlMessage } from "./browser-shared.ts";
 import {
   getStateSnapshot,
-  handleClickCmd,
   IPC_PING_INTERVAL,
   T,
 } from "./browser-transport-state.ts";
@@ -59,11 +58,6 @@ export function connectIPC(reconnect: () => void): void {
       } catch (err) {
         T.ipc!.send('__clientState:{"error":"' + String(err) + '"}');
       }
-      return;
-    }
-    if (line.startsWith("__click:")) {
-      const result = handleClickCmd(line.slice(8));
-      T.ipc!.send("__clientState:" + JSON.stringify(result));
       return;
     }
     if (line.startsWith("__tt:")) {
