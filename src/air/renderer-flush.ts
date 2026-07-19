@@ -58,7 +58,15 @@ export function _reportHookError(kind: string, e: unknown): void {
 
 // Budget per flush cycle: yield after 12ms so input stays responsive.
 // Leaves ~4ms for browser work within a 16ms frame budget.
-const _FLUSH_BUDGET_MS = 12;
+let _FLUSH_BUDGET_MS = 12;
+
+/** Override the per-flush time budget. Test-only: lets a regression pin the
+ *  mid-batch yield path (unreachable in fast test flushes) deterministically —
+ *  a budget of 0 forces a yield after every component. Pass a negative value or
+ *  omit to restore the production default. */
+export function _setFlushBudget(ms?: number): void {
+  _FLUSH_BUDGET_MS = ms == null || ms < 0 ? 12 : ms;
+}
 
 export function _flushPending(root: RootState): void {
   root.flushScheduled = false;
@@ -69,6 +77,7 @@ export function _flushPending(root: RootState): void {
   const _now = typeof performance !== "undefined"
     ? () => performance.now()
     : Date.now;
+  root.flushing = true;
   try {
     const deadline = _now() + _FLUSH_BUDGET_MS;
     // AIO-167: Cycle detection — per-component render count within a single flush.
@@ -79,7 +88,8 @@ export function _flushPending(root: RootState): void {
     while (root.pendingComponents.size > 0) {
       const batchItems = [...root.pendingComponents];
       root.pendingComponents.clear();
-      for (const inst of batchItems) {
+      for (let bi = 0; bi < batchItems.length; bi++) {
+        const inst = batchItems[bi]!;
         if (inst.disposed || !inst.pendingRender) continue;
         const count = (_renderCounts.get(inst) ?? 0) + 1;
         _renderCounts.set(inst, count);
@@ -95,20 +105,61 @@ export function _flushPending(root: RootState): void {
           continue;
         }
         inst.pendingRender = false;
-        _rerenderComponent(inst);
-        // Yield to browser if over budget — schedule continuation
-        if (_now() > deadline && root.pendingComponents.size > 0) {
-          _setActiveRoot(prevRoot);
-          _setDelegationRoot(null);
-          root.flushScheduled = true;
-          queueMicrotask(() => _flushPending(root));
-          return; // afterRender fires when continuation completes
+        // AIO-409: isolate each component's re-render. A throw here — an uncaught
+        // render error in this component or a descendant reached via _diff —
+        // otherwise escapes the whole flush loop, abandoning every not-yet-
+        // processed instance in the batch (pendingRender stuck true → permanently
+        // frozen, same strand as AIO-408). One broken component must never freeze
+        // its siblings. pendingRender was already cleared above, so the failed
+        // component stays re-schedulable; the error is surfaced, not swallowed.
+        try {
+          _rerenderComponent(inst);
+        } catch (e) {
+          const name = typeof inst.vnode.tag === "function"
+            ? (inst.vnode.tag.name || "Anonymous")
+            : "Component";
+          console.error(
+            `[aio-renderer] Uncaught error re-rendering <${name}> — ` +
+              `its siblings in this flush are unaffected:`,
+            e,
+          );
+        }
+        // Yield to browser if over budget — schedule continuation. `>=` (not
+        // `>`) so a budget of 0 deterministically yields after each component
+        // (the regression harness for AIO-408); at the 12ms production budget
+        // the boundary is immaterial. The check runs AFTER a render, so at least
+        // one component always makes progress per batch — no starvation.
+        if (_now() >= deadline) {
+          // AIO-408: re-queue the UNPROCESSED tail before yielding. batchItems is
+          // a snapshot and pendingComponents was cleared above; returning here
+          // without this strands every not-yet-rendered instance — its
+          // pendingRender stays true, so it's neither in the queue nor re-addable
+          // (_scheduleComponentRender early-returns on pendingRender), freezing it
+          // and silently dropping all its future signal updates. Only reachable
+          // under heavy bursts (>budget mid-batch), which is why fast test flushes
+          // never surfaced it — the risoto "rows freeze during an airdrop" class.
+          for (let j = bi + 1; j < batchItems.length; j++) {
+            const rest = batchItems[j]!;
+            if (!rest.disposed && rest.pendingRender) {
+              root.pendingComponents.add(rest);
+            }
+          }
+          if (root.pendingComponents.size > 0) {
+            _setActiveRoot(prevRoot);
+            _setDelegationRoot(null);
+            root.flushScheduled = true;
+            queueMicrotask(() => _flushPending(root));
+            return; // afterRender fires when continuation completes
+          }
         }
       }
     }
     root._renderCounts.clear(); // AIO-209: reset after full flush completes
     _flushAfterRender(root);
   } finally {
+    // Covers normal completion AND the mid-budget yield-return (which passes
+    // through here). The continuation microtask re-enters and re-arms the flag.
+    root.flushing = false;
     _setActiveRoot(prevRoot);
     _setDelegationRoot(null);
   }

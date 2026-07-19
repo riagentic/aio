@@ -11,8 +11,18 @@ function createDOM() {
   return { document: doc, ctx: { doc }, cleanup: () => win.happyDOM.close() };
 }
 
-Deno.test("h: marks fully-static element VNodes as _static", () => {
+// A text child may be a DYNAMIC value in AIR's direct-cell-access model
+// (`{sol.toFixed(9)}` is a plain evaluated string, not a signal binding), so a
+// text-bearing element must NOT be _static — otherwise the `_static` diff
+// short-circuit freezes the rendered text (risoto balance-freeze bug). Element
+// subtrees with no text stay static (see below).
+Deno.test("h: does NOT mark text-bearing element VNodes as _static", () => {
   const vn = h("div", { className: "box" }, "hello");
+  assertEquals(vn._static, undefined);
+});
+
+Deno.test("h: marks element-only (no text) VNodes as _static", () => {
+  const vn = h("div", { className: "box" }, h("br", null));
   assertEquals(vn._static, true);
 });
 
@@ -27,8 +37,16 @@ Deno.test("h: does NOT mark VNodes with non-static children as _static", () => {
   assertEquals(vn._static, undefined);
 });
 
-Deno.test("h: marks nested static elements as _static", () => {
+Deno.test("h: nested element with text is NOT static, cascades to parent", () => {
+  // The inner <span> has a text child → non-static → so does its parent, since
+  // _isStaticChildren requires every child to be a static VNode.
   const vn = h("div", null, h("span", { className: "a" }, "text"));
+  assertEquals(vn._static, undefined);
+  assertEquals((vn.children[0] as VNode)._static, undefined);
+});
+
+Deno.test("h: nested element-only subtree stays static", () => {
+  const vn = h("div", null, h("span", { className: "a" }, h("br", null)));
   assertEquals(vn._static, true);
   assertEquals((vn.children[0] as VNode)._static, true);
 });

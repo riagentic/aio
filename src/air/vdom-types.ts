@@ -120,6 +120,44 @@ export interface VNode {
   _signalChildren?: Map<number, Signal<unknown>>;
 }
 
+/** DOM nodes a realized child occupies among its siblings — the single source of
+ *  truth for cursor advancement in child reconciliation (vdom-diff-children) and
+ *  for locating signal text nodes (vdom-helpers). An inaccurate count desyncs the
+ *  cursor and corrupts/loses sibling nodes (AIO-411/414), so the tricky cases are
+ *  captured once, here, rather than duplicated per call site:
+ *   • Fragment / a component that renders a Fragment splat their nodes inline.
+ *   • Portal / a component that rendered null occupy zero nodes in this parent.
+ *   • element, text, and the _Null placeholder are exactly one node. */
+export function _domNodeCount(child: VNode | string | number): number {
+  if (typeof child !== "object") return 1; // text node
+  const tag = child.tag;
+  if (tag === Fragment) {
+    let n = 0;
+    for (const c of child.children) n += _domNodeCount(c);
+    // AIO-169: empty Fragment with comment anchor occupies 1 DOM node.
+    return n || (child._dom ? 1 : 0);
+  }
+  if (typeof tag === "function") {
+    // A component has no DOM of its own — it spans whatever it rendered.
+    return child._rendered != null ? _domNodeCount(child._rendered) : 0;
+  }
+  if (tag === ErrorBoundary || tag === Suspense) {
+    // Boundaries have no DOM of their own either. On the happy path they splat
+    // their children inline and leave `_rendered` undefined; while showing a
+    // fallback they set `_rendered` (null → nothing). Distinguish undefined
+    // (children) from null (empty fallback) so a multi-child boundary beside
+    // dynamic text doesn't desync the cursor (AIO-411 class).
+    if (child._rendered !== undefined) {
+      return child._rendered !== null ? _domNodeCount(child._rendered) : 0;
+    }
+    let n = 0;
+    for (const c of child.children) n += _domNodeCount(c);
+    return n || (child._dom ? 1 : 0);
+  }
+  if (tag === Portal) return 0; // renders into a different parent
+  return 1; // element or _Null placeholder
+}
+
 /** Hooks for per-component lifecycle — injected by the renderer, opaque to VDOM. */
 export interface VDomHooks {
   /** Called before a component function is invoked. Returns opaque state. */

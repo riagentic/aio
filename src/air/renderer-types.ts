@@ -66,6 +66,11 @@ export interface RootState {
   /** Per-mount pending component re-render queue (isolated from other mounts). */
   pendingComponents: Set<ComponentInstance>;
   flushScheduled: boolean;
+  /** True only while _flushPending is actively draining (not merely queued).
+   *  Lets the scheduler tell an in-flight batch item (legitimately flagged
+   *  pending but momentarily out of the live queue) apart from a component
+   *  stranded across flushes — the latter is a bug to surface + self-heal. */
+  flushing?: boolean;
   /** Root App component for full re-render (lazy resolve). */
   App: ComponentFn;
   /** Per-root afterRender callback queue. */

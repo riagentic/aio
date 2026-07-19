@@ -114,13 +114,29 @@ export function _isStaticProps(props: Record<string, unknown>): boolean {
   return true;
 }
 
-/** Returns true if all children are primitives or _static VNodes. */
+/** Returns true if every child is a _static VNode.
+ *
+ *  A bare string/number child does NOT qualify. In AIR's direct-cell-access
+ *  model a text child like `{sol.toFixed(9)}` is produced by evaluating the
+ *  component body and carries no signal binding (`_signalChildren`) to mark it
+ *  reactive — it is indistinguishable from a literal. Treating such text as
+ *  static let the `_static` diff short-circuit (vdom-diff.ts) skip real updates:
+ *  when a component re-rendered with a changed value, the whole subtree was
+ *  reconciled against a stale/emptied `_dom`, freezing the rendered text at its
+ *  mount-time value (the risoto "balance number never updates" bug — only
+ *  reproduced in a real browser under concurrent parent+child re-renders).
+ *  Elements whose children are all real static VNodes (icons, static markup
+ *  with no text) still qualify, preserving the optimization where it is sound. */
 export function _isStaticChildren(
   children: (VNode | string | number)[],
 ): boolean {
+  if (children.length === 0) return true;
   for (const c of children) {
     if (typeof c === "object") {
       if (!c._static) return false;
+    } else {
+      // Bare string/number — may be a dynamic value; never static.
+      return false;
     }
   }
   return true;
