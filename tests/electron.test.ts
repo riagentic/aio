@@ -257,3 +257,22 @@ Deno.test("electron: UDS script — buffers state until page ready", () => {
   assertStringIncludes(s, "lastState");
   assertStringIncludes(s, "pageReady");
 });
+
+Deno.test("electron: UDS script — reports a backend outage once, with the true reason", () => {
+  const s = electronMainScriptUDS("http://localhost:3000", "/tmp/test.sock", {});
+  // No raw per-error stack-trace flood anymore.
+  assertEquals(
+    s.includes('console.error("[aio:electron] UDS socket error:"'),
+    false,
+    "the raw per-retry socket-error log must be gone",
+  );
+  // Outage is reported once (guarded by the `down` flag) with an actionable reason.
+  assertStringIncludes(s, "let down = false");
+  assertStringIncludes(s, "if (!down)");
+  assertStringIncludes(s, "is the aio server running?");
+  // ECONNREFUSED/ENOENT get the "server not running" hint, not a generic dump.
+  assertStringIncludes(s, "ECONNREFUSED");
+  assertStringIncludes(s, "ENOENT");
+  // Recovery is announced once.
+  assertStringIncludes(s, "backend connection restored");
+});
