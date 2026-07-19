@@ -225,7 +225,7 @@ export function createDom(
 
   // Bind signal text children — direct text-node effects bypassing VDOM diff
   if (vnode._signalChildren) {
-    _bindSignalTextChildren(el, vnode._signalChildren);
+    _bindSignalTextChildren(el, vnode._signalChildren, vnode.children);
   }
 
   // Call ref after element + children are fully built

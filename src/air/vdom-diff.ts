@@ -14,6 +14,9 @@ import { getDom, isChildOf, removeDom } from "./vdom-remove.ts";
 import { _render, createDom } from "./vdom-render.ts";
 import { _getActiveDelegationRoot, _setDelegationRoot } from "./vdom-events.ts";
 import {
+  _devMode,
+  _devWarn,
+  _domNodeCount,
   _LAZY_PENDING,
   _Null,
   ErrorBoundary,
@@ -247,6 +250,35 @@ function _diffPortal(nv: VNode, ov: VNode, ctx: RenderCtx): void {
   }
 }
 
+/** Dev-only reactivity invariant (AIO-412): an element that exclusively owns its
+ *  children must, after a diff, hold exactly Σ _domNodeCount(child) DOM nodes. A
+ *  mismatch means the child-reconciliation cursor desynced — nodes lost, dupli-
+ *  cated, or dynamic text written to the wrong slot: the silent-corruption /
+ *  frozen-node class. Catching it here surfaces the defect at its source in dev
+ *  instead of via a user's "the value isn't updating" report.
+ *
+ *  Skipped when the element opts out of vnode-owned children — a `ref` or `use`
+ *  action may mutate the DOM imperatively, and dangerouslySetInnerHTML injects
+ *  untracked nodes — so the check never cries wolf on legitimate escape hatches. */
+function _assertChildAlignment(dom: Node, nv: VNode): void {
+  const p = nv.props;
+  if (p.ref || p.use || p.dangerouslySetInnerHTML) return;
+  let expected = 0;
+  for (const c of nv.children) expected += _domNodeCount(c);
+  const actual = dom.childNodes.length;
+  if (expected !== actual) {
+    _devWarn(
+      `child-desync-${String(nv.tag)}`,
+      `<${
+        String(nv.tag)
+      }> has ${actual} DOM children after diff but its vnode tree expects ` +
+        `${expected} — the child reconciler desynced (nodes lost/duplicated or ` +
+        `dynamic text mis-placed). This is an aio bug; please report the ` +
+        `component's child shape.`,
+    );
+  }
+}
+
 function _diffElement(
   _parent: Node,
   nv: VNode,
@@ -279,10 +311,12 @@ function _diffElement(
 
   _diffChildren(dom, nv.children, ov.children, ctx, nowSvg);
 
+  if (_devMode) _assertChildAlignment(dom, nv);
+
   if (nv._signalChildren || ov._signalChildren) {
     _cleanupSignalTextChildren(dom);
     if (nv._signalChildren) {
-      _bindSignalTextChildren(dom, nv._signalChildren);
+      _bindSignalTextChildren(dom, nv._signalChildren, nv.children);
     }
   }
 }
