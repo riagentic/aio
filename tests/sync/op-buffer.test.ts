@@ -96,4 +96,81 @@ describe("OpBuffer", () => {
     const result = await buf.add({ ...mkOp("new-op"), _clientTs: Date.now() });
     assertEquals(result, false);
   });
+
+  it("frees room by pruning CONFIRMED ops when the cap is hit", async () => {
+    const buf = createOpBuffer(createMemoryStorage(), { pendingCap: 2 });
+    await buf.add(mkOp("op1"));
+    await buf.add(mkOp("op2"));
+    // Server acks op1 — it's now confirmed but still occupying a slot.
+    await buf.confirm("todos", "op1", [2000, 0, "s"]);
+    // Cap is hit by raw count, but pruning the confirmed op frees a slot, so
+    // the new op is accepted (exercises the prune-confirmed-makes-room branch).
+    const result = await buf.add(mkOp("op3"));
+    assertEquals(result, true);
+    const unconfirmed = await buf.getUnconfirmed("todos");
+    assertEquals(unconfirmed.map((o) => o.id).sort(), ["op2", "op3"]);
+  });
+
+  it("invokes onDrop('prune-failed') when a full buffer has nothing to evict", async () => {
+    const dropped: { id: string; reason: string }[] = [];
+    const buf = createOpBuffer(createMemoryStorage(), {
+      pendingCap: 2,
+      onDrop: (op, reason) => dropped.push({ id: op.id, reason }),
+    });
+    // Two fresh, unconfirmed, non-stale ops → neither prunable nor evictable.
+    await buf.add(mkOp("keep1"));
+    await buf.add(mkOp("keep2"));
+    const result = await buf.add(mkOp("rejected"));
+    assertEquals(result, false);
+    assertEquals(dropped, [{ id: "rejected", reason: "prune-failed" }]);
+  });
+
+  it("round-trips a snapshot (save then load)", async () => {
+    const buf = createOpBuffer(createMemoryStorage());
+    assertEquals(await buf.loadSnapshot("todos"), undefined); // empty first
+    const snap = { state: { items: [1, 2, 3] }, hlc: [500, 2, "s"] as const };
+    await buf.saveSnapshot("todos", { state: snap.state, hlc: [500, 2, "s"] });
+    const loaded = await buf.loadSnapshot("todos");
+    assertEquals(loaded?.state, snap.state);
+    assertEquals(loaded?.hlc, [500, 2, "s"]);
+  });
+
+  it("saveMeta persists lastHlc + lastServerTs independently of confirm()", async () => {
+    const buf = createOpBuffer(createMemoryStorage());
+    assertEquals(await buf.getMeta("todos"), undefined);
+    await buf.saveMeta("todos", {
+      lastHlc: [900, 1, "s"],
+      lastServerTs: 12345,
+    });
+    const meta = await buf.getMeta("todos");
+    assertEquals(meta?.lastHlc, [900, 1, "s"]);
+    assertEquals(meta?.lastServerTs, 12345);
+  });
+
+  it("clear() also wipes snapshot + meta, not just ops", async () => {
+    const buf = createOpBuffer(createMemoryStorage());
+    await buf.add(mkOp("op1"));
+    await buf.saveSnapshot("todos", { state: { n: 1 }, hlc: [1, 0, "s"] });
+    await buf.saveMeta("todos", { lastHlc: [1, 0, "s"] });
+    await buf.clear("todos");
+    assertEquals(await buf.getUnconfirmed("todos"), []);
+    assertEquals(await buf.loadSnapshot("todos"), undefined);
+    assertEquals(await buf.getMeta("todos"), undefined);
+  });
+
+  it("isolates ops by cell", async () => {
+    const buf = createOpBuffer(createMemoryStorage());
+    await buf.add(mkOp("a1", "cellA"));
+    await buf.add(mkOp("b1", "cellB"));
+    await buf.add(mkOp("b2", "cellB"));
+    assertEquals((await buf.getUnconfirmed("cellA")).map((o) => o.id), ["a1"]);
+    assertEquals((await buf.getUnconfirmed("cellB")).map((o) => o.id), [
+      "b1",
+      "b2",
+    ]);
+    // Clearing one cell leaves the other intact.
+    await buf.clear("cellA");
+    assertEquals(await buf.getUnconfirmed("cellA"), []);
+    assertEquals((await buf.getUnconfirmed("cellB")).length, 2);
+  });
 });
