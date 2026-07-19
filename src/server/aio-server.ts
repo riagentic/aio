@@ -64,6 +64,7 @@ export interface ServerSetupDeps<S, A> {
     _cellFilterFields?: Map<string, PatchFilterFields>;
     onConnect?: (user?: AioUser) => void;
     onDisconnect?: (user?: AioUser) => void;
+    libraryMode?: boolean;
   };
   // Runtime refs — getState is a getter so closures always see the current value
   getState: () => S;
@@ -304,12 +305,18 @@ export async function setupTransport<S, A>(
 
   if (skipHttp) log.info("prod+UDS: HTTP server skipped (zero TCP ports)");
 
-  for (const sig of ["SIGINT", "SIGTERM"] as const) {
-    try {
-      Deno.addSignalListener(sig, () => {
-        shutdown().then(() => Deno.exit(0)).catch(() => Deno.exit(1));
-      });
-    } catch { /* signal not supported on this platform */ }
+  // libraryMode: don't register process-wide signal handlers. They call
+  // Deno.exit (killing an embedding host / test runner) and, unremoved, leak
+  // resources that fail Deno's test sanitizer — the reason a server couldn't be
+  // booted inside Deno.test before (TBD B5). app.close() drives shutdown instead.
+  if (!config.libraryMode) {
+    for (const sig of ["SIGINT", "SIGTERM"] as const) {
+      try {
+        Deno.addSignalListener(sig, () => {
+          shutdown().then(() => Deno.exit(0)).catch(() => Deno.exit(1));
+        });
+      } catch { /* signal not supported on this platform */ }
+    }
   }
 
   // UDS listener

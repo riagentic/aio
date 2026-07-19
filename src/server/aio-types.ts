@@ -104,6 +104,11 @@ export type AioConfig<S, A, E> = {
   circuitBreaker?: CircuitBreakerConfig; // auto-disable cells after N errors
   onRestore?: (state: S) => S; // transform state after restore, before server starts
   singleton?: boolean; // true (default)=refuse if running, false=allow multi
+  /** Library/test mode: no `Deno.exit`, no SIGINT/SIGTERM handlers, no singleton
+   *  lock. `app.close()` tears down and resolves, leaving the process alive so a
+   *  test runner (or an embedding host) survives. Use it to boot a real server
+   *  inside `Deno.test` — see `aio/testing` `testServer`. Default: false. */
+  libraryMode?: boolean;
   // Lifecycle hooks — observe-only, all optional, error-guarded
   onAction?: (action: A, state: S, user?: AioUser) => void;
   onEffect?: (effect: E, user?: AioUser) => void;
@@ -216,6 +221,7 @@ export type CellsConfig = {
   memory?: MemoryConfig; // memory pressure monitoring config
   circuitBreaker?: CircuitBreakerConfig; // auto-disable cells after N errors
   singleton?: boolean;
+  libraryMode?: boolean; // no exit/signals/lock; app.close() leaves process alive
   syncIntervalMs?: number;
   fullStateThreshold?: number;
   /** Custom HTTP routes — exact path or "/prefix/*" wildcard → handler. The

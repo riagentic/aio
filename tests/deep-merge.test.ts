@@ -187,3 +187,41 @@ Deno.test("deepMerge: __proto__ key is ignored", () => {
   assertEquals(result.safe, 2);
   assertEquals((result as any).polluted, undefined);
 });
+
+Deno.test("deepMerge: empty-object initial is a dictionary — keeps all persisted entries (AIO-415)", () => {
+  // The TBD `pins: Record<number,string>` data-loss bug: `{}` initial dropped every key.
+  const initial = { pins: {} as Record<string, unknown>, roster: [] as unknown[] };
+  const persisted = {
+    pins: { "1": "0000", "2": "1234" },
+    roster: [{ id: 1 }],
+  };
+  const result = deepMerge(initial, persisted);
+  assertEquals(result.pins, { "1": "0000", "2": "1234" }, "dict entries survive restore");
+  assertEquals(result.roster, [{ id: 1 }]);
+});
+
+Deno.test("deepMerge: nested empty-object dictionaries restore recursively", () => {
+  const initial = { byUser: {} as Record<string, unknown> };
+  const persisted = { byUser: { alice: { seen: 3 }, bob: { seen: 7 } } };
+  const result = deepMerge(initial, persisted);
+  assertEquals(result.byUser, { alice: { seen: 3 }, bob: { seen: 7 } });
+});
+
+Deno.test("deepMerge: non-empty initial still drops keys removed from schema", () => {
+  // The exception must NOT weaken the structural-template rule for shaped objects.
+  const initial = { a: 1 };
+  const persisted = { a: 2, removed: 99 };
+  const result = deepMerge(initial, persisted);
+  assertEquals(result, { a: 2 }, "unknown key dropped when initial has shape");
+});
+
+Deno.test("deepMerge: empty-dict entry drops prototype-pollution keys", () => {
+  const initial = { map: {} as Record<string, unknown> };
+  const persisted = { map: { good: 1, __proto__: { polluted: true } } };
+  const result = deepMerge(initial, persisted);
+  assertEquals((result.map as Record<string, unknown>).good, 1);
+  // deno-lint-ignore no-explicit-any
+  assertEquals((result as any).map.polluted, undefined);
+  // deno-lint-ignore no-explicit-any
+  assertEquals(({} as any).polluted, undefined, "global proto not polluted");
+});

@@ -87,6 +87,7 @@
 - [Build & Deploy](build/README.md) — Running, compiling, and shipping AIO apps.
 - [Dev Mode](build/dev-mode.md) — aio.run() reads Deno.args automatically — no parsing code needed in your
 - [Import Rules: Server vs Browser Bundle](build/imports.md) — aio apps have two separate bundles running simultaneously — code must
+- [Runtime differences](build/runtime-differences.md) — The same cell code runs in three places.
 - [Scaling](build/scaling.md) — aio runs as a single Deno process with SQLite and WebSocket broadcast.
 - [Compile Targets](build/targets.md) — Build targets follow compile:<shell>:<topology> — two axes: shell (what
 

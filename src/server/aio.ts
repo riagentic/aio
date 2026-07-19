@@ -22,7 +22,7 @@ import { createOwnManager } from "../state/own.ts";
 import { getLogger, log } from "../diagnostics/logger.ts";
 
 // Phase modules — extracted _run() logic
-import { bootStorage } from "./aio-boot.ts";
+import { bootStorage, replaySyncOps } from "./aio-boot.ts";
 import { setupDispatch } from "./aio-dispatch.ts";
 import { setupTransport } from "./aio-server.ts";
 import { startLifecycle } from "./aio-lifecycle.ts";
@@ -272,6 +272,18 @@ async function run(a: any, b?: any): Promise<AioApp<any, any>> {
 
     // Post-run: memory monitor, cells API, bindCell
     await wrapAppWithCells(app, composed, fc, cellReportOpts);
+
+    // AIO-418 (TBD B6): fire the user's onStart NOW — after the callable cell
+    // method surface is bound — so seeding via a cell method (members.seed())
+    // works instead of throwing "cell runtime not booted". Error-guarded: a
+    // throwing onStart must not abort a successful boot.
+    if (fc.onStart) {
+      try {
+        fc.onStart(app);
+      } catch (e) {
+        log.error(`onStart hook error: ${e}`);
+      }
+    }
     return app;
   } catch (e) {
     _running = false;
@@ -300,8 +312,8 @@ async function _run<S, A, E>(
   log.debug(`app-id: ${appId}`);
   const port = cli.port ?? config.port ?? await findFreePort();
 
-  // Singleton lock
-  const singletonMode = config.singleton ?? true;
+  // Singleton lock — libraryMode implies no lock (embeddable / testable).
+  const singletonMode = config.libraryMode ? false : (config.singleton ?? true);
   const killExisting = (config.killExisting ?? false) ||
     (cli.killExisting ?? false);
   const appLock = await acquireSingletonLock(
@@ -414,6 +426,22 @@ async function _run<S, A, E>(
   const { kvDb, asyncDb, persistence, syncHandler, syncBroadcastRef } = boot;
   const _syncDispatchRef = boot.syncDispatchRef;
   const { schedulePersist } = persistence;
+
+  // B1/AIO-416: recover sync cells from their op-log at boot (after KV restore +
+  // onRestore, before any dispatch/broadcast). Without this, sync cells came back
+  // empty on a server restart until a client reconnected — silent data loss.
+  if (asyncDb && syncCellIds.length > 0) {
+    state = await replaySyncOps(
+      asyncDb,
+      syncCellIds,
+      config.reduce as (
+        s: S,
+        a: { type: string; payload?: unknown },
+      ) => S,
+      state,
+      log,
+    );
+  }
 
   // Time-travel — dev only
   let tt: TTState<S, { type: string }> | null = null;
@@ -644,6 +672,7 @@ async function _run<S, A, E>(
       _cellFilterFields: config._cellFilterFields,
       onConnect: config.onConnect,
       onDisconnect: config.onDisconnect,
+      libraryMode: config.libraryMode,
     },
     getState: () => state,
     getUIState: (s, user?) => getUIState(s, user),
