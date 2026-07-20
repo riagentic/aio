@@ -9,7 +9,7 @@
 - **Write reactive, use generators or atomic actions when needed.**
 - **Pick your target, compile and ship!**
 
-`v1.0.0-alpha23`
+`v1.0.0-alpha24`
 
 > Define state once. It persists, syncs to all clients, drives the UI.
 
@@ -88,35 +88,20 @@ await aio.run({ appId: "taste", appVersion: "0.1.0", cells: [counter] });
 // (both default on — see docs/state/cell-visibility.md to narrow per cell)
 ```
 
-```sh
-# Option A: scaffolder — one line, no curl
-deno run -A jsr:@riagentic/aio@1.0.0-alpha23/create my-app
-
-# Option B: vendor into your project (full source, bleeding edge)
-git clone https://github.com/riagentic/aio dep/aio
-
-# Option C: JSR — pin the version explicitly (alphas are semver
-#   pre-releases, so a bare install would resolve to an old stable)
-deno add jsr:@riagentic/aio@1.0.0-alpha23
-```
-
-Then in `deno.json`:
-
-```jsonc
-// JSR
-"imports": { "aio": "jsr:@riagentic/aio@1.0.0-alpha23" }
-
-// Clone — also declare aio's deps (Deno can't fetch them transitively)
-"imports": {
-  "aio": "./dep/aio/mod.ts",
-  "immer": "npm:immer@^10",
-  "@std/path": "jsr:@std/path@^1"
-}
-```
+Get started with **`am`** (the aio manager) — install once, it does the rest:
 
 ```sh
-deno run -A src/app.ts             # run
+# 1. install am (installs Deno too if missing)
+curl -fsSL https://raw.githubusercontent.com/riagentic/aio/main/install.sh | sh
+
+# 2. scaffold + run
+am create my-app                   # or: --template=todo
+cd my-app
+deno task dev                      # run · deno task compile|electron|android to build
 ```
+
+`am update` keeps it current; `am uninstall` removes it (your apps stay put).
+Prefer no curl? `deno install -gA -n am jsr:@riagentic/aio/am` is the same thing.
 
 → [Quickstart](docs/basics/quickstart.md) for UI setup, Electron, scaffolder,
 Fit check first? → [Positioning & non-goals](docs/basics/positioning.md). and
@@ -319,7 +304,7 @@ clients, zero plumbing. Fit questions:
 
 ## Status
 
-**v1.0.0-alpha23** · [JSR](https://jsr.io/@riagentic/aio) · MIT
+**v1.0.0-alpha24** · [JSR](https://jsr.io/@riagentic/aio) · MIT
 
 2370+ tests · security hardened · CI-locked API snapshot + coverage ratchet
 

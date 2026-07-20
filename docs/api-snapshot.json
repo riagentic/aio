@@ -25,7 +25,7 @@
         },
         "AioApp": {
           "kind": "typeAlias",
-          "sig": "8f07bae5f1b324cc"
+          "sig": "ea04a37f88edb7ee"
         },
         "AioError": {
           "kind": "class",
@@ -57,7 +57,7 @@
         },
         "bindCell": {
           "kind": "function",
-          "sig": "50ceb2b6ff5174c2"
+          "sig": "1b3133f368c07b54"
         },
         "call": {
           "kind": "function",
@@ -101,7 +101,7 @@
         },
         "CellReduceFn": {
           "kind": "typeAlias",
-          "sig": "5333d0236992a1d8"
+          "sig": "bab2fd30f6297dbe"
         },
         "CellsConfig": {
           "kind": "typeAlias",
@@ -209,7 +209,7 @@
         },
         "DirectCalling": {
           "kind": "typeAlias",
-          "sig": "7620da829461e0ee"
+          "sig": "4c85168aa664ea92"
         },
         "draft": {
           "kind": "function",
@@ -453,7 +453,7 @@
         },
         "SyncMethod": {
           "kind": "typeAlias",
-          "sig": "0b7721692ee0a2f5"
+          "sig": "2ebae1844ee8b371"
         },
         "table": {
           "kind": "function",
@@ -469,7 +469,7 @@
         },
         "TestContext": {
           "kind": "typeAlias",
-          "sig": "f6de16d6a8582d2b"
+          "sig": "e14882ce7dea82a2"
         },
         "text": {
           "kind": "function",
@@ -493,7 +493,7 @@
         },
         "VERSION": {
           "kind": "variable",
-          "sig": "295f7812d1f5bc0b"
+          "sig": "7a2122b6e9a83458"
         },
         "VitalAlert": {
           "kind": "typeAlias",
@@ -1017,14 +1017,6 @@
         }
       }
     },
-    "./create": {
-      "symbols": {
-        "create": {
-          "kind": "function",
-          "sig": "c71f93e65c790e92"
-        }
-      }
-    },
     "./db": {
       "symbols": {
         "createDB": {
@@ -1533,7 +1525,7 @@
         },
         "TestContext": {
           "kind": "typeAlias",
-          "sig": "f6de16d6a8582d2b"
+          "sig": "e14882ce7dea82a2"
         },
         "testgen": {
           "kind": "function",
