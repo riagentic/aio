@@ -19,12 +19,16 @@ let transformFn:
 let esbuildStop: (() => Promise<void>) | null = null;
 async function getTransform() {
   if (!transformFn) {
-    // B-6: pin the EXACT version that deno.json pins (esbuild@0.24.2) — a `^0.24`
-    // range could resolve a different esbuild than the project tested. The npm:
-    // specifier (not the bare import-map "esbuild") is deliberate: a dynamic npm:
-    // import keeps `deno compile` from embedding the native binary.
-    // deno-lint-ignore no-import-prefix
-    const mod = await import("npm:esbuild@0.24.2");
+    // B-6: pin the EXACT version deno.json pins (esbuild@0.24.2) — a `^0.24`
+    // range could resolve a different esbuild than the project tested.
+    // The specifier is COMPUTED (`.join`), not a literal, on purpose: deno's
+    // static graph analysis (`deno install`/`cache`/`compile`) can't resolve it,
+    // so the heavy esbuild NATIVE BINARY is fetched only when the dev server
+    // actually transpiles — never when installing `am` (which never transpiles)
+    // or compiling an app. Prevents `deno install am` from pulling ~10MB of
+    // esbuild it doesn't use (and the ETXTBSY it hits under concurrent esbuild).
+    const esbuildPkg = ["npm:esbuild", "0.24.2"].join("@");
+    const mod = await import(esbuildPkg);
     transformFn = mod.transform as (
       input: string,
       opts: Record<string, unknown>,

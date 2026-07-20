@@ -1,5 +1,52 @@
 # Changelog
 
+## 1.0.0-alpha24 — magic onboarding (`am`) + sync method returns + correct server/client boundary (2026-07-20)
+
+Onboarding collapses to a single delightful path, sync methods can return values,
+and the server/client import guard becomes precise (eager blocks, deferred warns).
+
+### Added
+
+- **`am create <name> [--template=counter|todo]`** — one command scaffolds a
+  runnable, git-initialized app that ships a **passing** starter test and builds
+  to every target with one `deno task` line (`dev`/`test`/`compile`/`electron`/
+  `android`). Pinned to the exact aio version `am` was installed at, so app and
+  framework stay in lockstep. `am update` / `am uninstall` self-manage.
+- **One-line install** — `curl -fsSL …/install.sh | sh` (and `install.ps1` for
+  Windows) installs Deno if missing, then `am` onto PATH via `~/.deno/bin`. Uses
+  the `@^1.0.0-alpha` range (a **bare** `jsr:@riagentic/aio` mis-resolves to an
+  old stable during the alpha).
+- **Sync method return values (AIO-427).** A sync method may `return` a value and
+  `await cell.method()` resolves with it — no more `async`-just-to-return. Effects
+  (`schedule`/`own`) still route; a returned draft slice is snapshotted so it
+  survives the reducer. Types inferred via `DirectCalling`.
+- **`deno task check:graph`** — CI-friendly one-shot module-graph validator
+  (same engine as the dev server); exits non-zero on a guaranteed client break.
+
+### Changed
+
+- **Server/client boundary is now precise (eager vs deferred).** A **static**
+  import of a `node:` builtin or omitted `aio` server-symbol (`createDB`, …)
+  reachable from the UI entry **blocks** (it blank-screens the sandboxed
+  renderer — `deno task compile` fails the same, so dev==prod). A **dynamic**
+  `import()` of the same is the documented escape hatch — **deferred, a warning,
+  never a block**. `@std/*` + `Deno.*` usage stay warnings. Fixes false-positives
+  on apps that already lazy-load server-only modules.
+- **Onboarding is one path.** `am` replaces the old interactive scaffolder
+  (`src/create.ts`, `init.ts`, `utils/`) and the `./create` export — removed.
+  `examples/playground` removed; `counter`/`todo` are the `am create` templates,
+  `examples/targets/*` remain as CI build-smoke fixtures.
+
+### Fixed
+
+- `AioApp.dispatch` and bound sync methods resolve with the transported return
+  value (or `undefined`) instead of always `Promise<void>`.
+- **`am` installs lean.** `am` no longer drags the esbuild native binary (~10MB)
+  into its install graph — the transpiler's `import("npm:esbuild@…")` now uses a
+  computed specifier, so `deno install am` doesn't eagerly fetch (and fail on
+  `ETXTBSY` for) an esbuild it never uses. esbuild still loads at runtime when the
+  dev server transpiles.
+
 ## 1.0.0-alpha23 — field-report closeout: silent traps → loud, early, attributed (2026-07-20)
 
 Five field reports (tbd, risoto ×2, realitio, inews) worked end to end. The theme:

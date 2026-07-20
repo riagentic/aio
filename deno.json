@@ -1,6 +1,6 @@
 {
   "name": "@riagentic/aio",
-  "version": "1.0.0-alpha23",
+  "version": "1.0.0-alpha24",
   "appId": "aio",
   "exports": {
     ".": "./mod.ts",
@@ -17,8 +17,7 @@
     "./build": "./src/build.ts",
     "./am": "./src/am.ts",
     "./doctor": "./src/server/doctor.ts",
-    "./aiol": "./aiol/mod.ts",
-    "./create": "./src/create.ts"
+    "./aiol": "./aiol/mod.ts"
   },
   "publish": {
     "exclude": [
@@ -92,13 +91,14 @@
     "test": "deno test -A tests/",
     "coverage:check": "deno test -A --coverage=coverage tests/ && deno cache mod.ts src/air.ts src/browser-air.ts src/standalone-air.ts src/cell-test.ts src/am.ts src/build.ts aiol/mod.ts && deno coverage coverage --lcov --output=coverage/lcov.info && deno run --allow-read scripts/check-coverage.ts",
     "test:core": "deno test -A --ignore=tests/am.test.ts,tests/build.test.ts,tests/server.test.ts,tests/tls.test.ts,tests/single-instance-lock.test.ts,tests/cli.test.ts,tests/cli-client.test.ts,tests/electron-ipc.test.ts,tests/app-modes.test.ts,tests/examples.test.ts,tests/e2e-ui-chromium.test.ts,tests/e2e-remote-lan.test.ts,tests/zero-config.test.ts,tests/cli-bound-cells.test.ts,tests/e2e-blank-screen.test.ts,tests/e2e-bundle-smoke.test.ts,tests/e2e-sync-browser.test.ts tests/",
-    "check": "deno check src/ mod.ts aiol/mod.ts init.ts examples/",
+    "check": "deno check src/ mod.ts aiol/mod.ts examples/",
     "lint": "deno lint src/",
     "lint:aio": "deno run -A aiol/mod.ts",
     "docs:check": "deno run --allow-read scripts/check-docs.ts",
     "docs:coverage": "deno run --allow-read --allow-run scripts/check-doc-coverage.ts",
     "api:check": "deno run --allow-read --allow-write --allow-run scripts/api-snapshot.ts --check",
     "boundaries": "deno run --allow-read scripts/check-boundaries.ts",
+    "check:graph": "deno run -A scripts/check-graph.ts",
     "bench": "deno run -A scripts/bench.ts",
     "soak": "deno run -A scripts/soak.ts --minutes=10",
     "soak:72h": "deno run -A scripts/soak.ts --minutes=4320",

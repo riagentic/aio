@@ -201,8 +201,12 @@ export async function lint(
   // way the transpiler does; only warn if that genuinely fails.
   if (!prod) {
     try {
-      // deno-lint-ignore no-import-prefix
-      await import("npm:esbuild@0.24.2");
+      // COMPUTED specifier (not a literal) so `deno install`/`cache` don't
+      // eagerly fetch the esbuild native binary just to reach this probe — it
+      // resolves at runtime, the same way the transpiler loads it. Keeps `am`
+      // (which imports aio.ts → lint.ts for VERSION) esbuild-free at install.
+      const esbuildPkg = ["npm:esbuild", "0.24.2"].join("@");
+      await import(esbuildPkg);
     } catch {
       r.warn.push(
         "esbuild not installed — dev mode needs it for TSX transpilation. " +
