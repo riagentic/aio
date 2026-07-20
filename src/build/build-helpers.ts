@@ -71,59 +71,60 @@ export const GRADLE_MAX_JDK = 23;
 const PREFERRED_MAX_JDK = 21;
 
 export interface JdkResult {
-  /** JAVA_HOME of the chosen JDK (has javac, major ≤ GRADLE_MAX_JDK), or null. */
+  /** Primary JDK to hand Gradle (JAVA_HOME) — a canonical, compile-verified
+   *  path with major ≤ GRADLE_MAX_JDK. null when none is usable. */
   home: string | null;
-  /** Highest major of ANY JDK-with-javac found, even if too new (0 = none).
-   *  Lets the caller say "found JDK 25, too new" vs "no JDK at all". */
+  /** Major version of `home` (0 when home is null). */
+  major: number;
+  /** Highest major of ANY compiling JDK found, even too-new (0 = none).
+   *  Distinguishes "no JDK" from "only a too-new JDK" for diagnostics. */
   newestFound: number;
+  /** Every distinct in-range compiling JDK home — fed to Gradle as
+   *  `org.gradle.java.installations.paths` so its toolchain resolver can only
+   *  choose a real, compiler-capable JDK (never a JRE it mis-detected). */
+  all: string[];
 }
 
-/** Find a JDK to hand Gradle. A JRE is NOT enough (needs `javac`), and the JDK
- *  must be Gradle-runnable (major ≤ GRADLE_MAX_JDK) — the newest LTS in range
- *  wins. Scans JAVA_HOME, system JVM dirs, Android Studio's JBR, and PATH.
- *  An explicit, in-range JAVA_HOME always wins; a too-new JAVA_HOME is skipped
- *  in favour of a supported one found elsewhere. */
+/** Find a JDK to build Android with — robust to machine/packaging quirks:
+ *  - resolves `javac` symlinks (update-alternatives, JRE→JDK redirects) to the
+ *    REAL JDK dir Gradle will accept;
+ *  - proves each candidate by actually COMPILING a trivial program — a JRE or a
+ *    broken install fails here, which is exactly Gradle's JAVA_COMPILER test, so
+ *    "our probe passed but Gradle says no compiler" can no longer happen;
+ *  - keeps only Gradle-runnable versions (≤ GRADLE_MAX_JDK), preferring LTS.
+ *  Scans JAVA_HOME, system JVM dirs, Android Studio's JBR, Homebrew, SDKMAN and
+ *  PATH. An explicit, usable JAVA_HOME is honoured as the primary pick. */
 export function findJdk(): JdkResult {
   const home = Deno.env.get("HOME") ?? "/tmp";
   const exe = Deno.build.os === "windows" ? "javac.exe" : "javac";
-  const found: { home: string; major: number }[] = [];
-  const seen = new Set<string>();
-  const probe = (dir: string) => {
-    if (!dir || seen.has(dir)) return;
-    seen.add(dir);
-    const major = javacMajor(join(dir, "bin", exe));
-    if (major !== null) found.push({ home: dir, major });
+
+  // Gather candidate javac paths from everywhere a JDK tends to live.
+  const javacPaths = new Set<string>();
+  const addHome = (dir?: string | null) => {
+    if (dir) javacPaths.add(join(dir, "bin", exe));
   };
-
-  // Explicit JAVA_HOME: if it's a usable in-range JDK, respect it outright.
-  const javaHome = Deno.env.get("JAVA_HOME");
-  if (javaHome) {
-    probe(javaHome);
-    const pick = found.find((j) =>
-      j.home === javaHome && j.major <= GRADLE_MAX_JDK
-    );
-    if (pick) return { home: pick.home, newestFound: pick.major };
-  }
-
-  // System JVM dirs — scan one level deep for */bin/javac.
-  // macOS nests the JDK under <ver>/Contents/Home, so probe that layout too.
-  const jvmRoots = [
-    "/usr/lib/jvm",
-    "/usr/java",
-    "/Library/Java/JavaVirtualMachines",
-    `${home}/.sdkman/candidates/java`,
-  ];
-  for (const root of jvmRoots) {
+  addHome(Deno.env.get("JAVA_HOME"));
+  for (
+    const root of [
+      "/usr/lib/jvm",
+      "/usr/java",
+      "/Library/Java/JavaVirtualMachines",
+      "/opt/homebrew/opt",
+      "/usr/local/opt",
+      `${home}/.sdkman/candidates/java`,
+    ]
+  ) {
     try {
       for (const entry of Deno.readDirSync(root)) {
         if (!entry.isDirectory && !entry.isSymlink) continue;
-        probe(join(root, entry.name));
-        probe(join(root, entry.name, "Contents", "Home"));
+        addHome(join(root, entry.name));
+        addHome(join(root, entry.name, "Contents", "Home")); // macOS
+        addHome(
+          join(root, entry.name, "libexec", "openjdk.jdk", "Contents", "Home"),
+        ); // homebrew keg
       }
     } catch { /* root absent — skip */ }
   }
-
-  // Android Studio bundles a JBR that ships javac — ideal for android builds.
   for (
     const dir of [
       "/opt/android-studio/jbr",
@@ -131,26 +132,87 @@ export function findJdk(): JdkResult {
       "/Applications/Android Studio.app/Contents/jbr/Contents/Home",
       `${home}/.local/share/JetBrains/Toolbox/apps/AndroidStudio/ch-0/jbr`,
     ]
-  ) probe(dir);
+  ) addHome(dir);
+  const onPath = whichJavac();
+  if (onPath) javacPaths.add(onPath);
 
-  // Last resort: javac on PATH → derive JAVA_HOME as <dir>/.. (strip /bin/javac),
-  // resolving symlinks first (sdkman/alternatives shims point into the real JDK).
-  const onPath = javacOnPath();
-  if (onPath) probe(onPath);
+  // Canonicalize (follow symlinks to the true JDK) + compile-verify; dedupe.
+  const byHome = new Map<string, number>();
+  for (const javac of javacPaths) {
+    let real: string;
+    try {
+      real = Deno.realPathSync(javac); // resolve alternatives/JRE→JDK redirects
+    } catch {
+      continue; // no javac here
+    }
+    const jdkHome = dirname(dirname(real)); // <home>/bin/javac → <home>
+    if (byHome.has(jdkHome)) continue;
+    const major = jdkMajorIfCompiles(jdkHome, exe);
+    if (major !== null) byHome.set(jdkHome, major);
+  }
 
-  const newestFound = found.reduce((m, j) => Math.max(m, j.major), 0);
-  const usable = found.filter((j) => j.major <= GRADLE_MAX_JDK);
-  if (usable.length === 0) return { home: null, newestFound };
-  // Prefer the LTS sweet spot (≤21); fall back to any Gradle-runnable JDK.
+  const compiling = [...byHome].map(([h, major]) => ({ home: h, major }));
+  const newestFound = compiling.reduce((m, j) => Math.max(m, j.major), 0);
+  const usable = compiling.filter((j) => j.major <= GRADLE_MAX_JDK);
+  const all = usable.map((j) => j.home).sort();
+  if (usable.length === 0) return { home: null, major: 0, newestFound, all };
+
+  // Honour an explicit, usable JAVA_HOME (canonicalized) as the primary pick.
+  const jhRaw = Deno.env.get("JAVA_HOME");
+  if (jhRaw) {
+    try {
+      const jh = dirname(dirname(Deno.realPathSync(join(jhRaw, "bin", exe))));
+      const hit = usable.find((j) => j.home === jh);
+      if (hit) return { home: hit.home, major: hit.major, newestFound, all };
+    } catch { /* JAVA_HOME has no javac — fall through */ }
+  }
+
+  // Otherwise the newest LTS in range (≤21), else any Gradle-runnable JDK.
   const preferred = usable.filter((j) => j.major <= PREFERRED_MAX_JDK);
   const pool = preferred.length ? preferred : usable;
   const best = pool.reduce((a, b) => (b.major > a.major ? b : a));
-  return { home: best.home, newestFound };
+  return { home: best.home, major: best.major, newestFound, all };
 }
 
-/** Run `javac -version` at the given path → Java major version, or null if it
- *  doesn't exist / isn't runnable. Handles legacy `1.8` (→ 8) and modern `21`. */
-function javacMajor(javacPath: string): number | null {
+/** A JDK home's major version IFF it can actually compile — writes a trivial
+ *  program and runs `<home>/bin/javac` on it, requiring a `.class` out. This is
+ *  the ground truth for Gradle's JAVA_COMPILER capability (a JRE fails). Returns
+ *  null for JRE / broken / absent. Handles legacy `1.8` (→ 8) and modern `21`. */
+function jdkMajorIfCompiles(jdkHome: string, exe: string): number | null {
+  const javac = join(jdkHome, "bin", exe);
+  const major = parseJavacVersion(javac);
+  if (major === null) return null;
+  let tmp: string;
+  try {
+    tmp = Deno.makeTempDirSync({ prefix: "aio-jdk-" });
+  } catch {
+    return null;
+  }
+  try {
+    Deno.writeTextFileSync(
+      join(tmp, "AioJdkCheck.java"),
+      "class AioJdkCheck { public static void main(String[] a) {} }",
+    );
+    const r = new Deno.Command(javac, {
+      args: ["AioJdkCheck.java"],
+      cwd: tmp,
+      stdout: "null",
+      stderr: "null",
+    }).outputSync();
+    if (r.code !== 0) return null;
+    Deno.statSync(join(tmp, "AioJdkCheck.class")); // bytecode produced?
+    return major;
+  } catch {
+    return null;
+  } finally {
+    try {
+      Deno.removeSync(tmp, { recursive: true });
+    } catch { /* ignore */ }
+  }
+}
+
+/** Parse `javac -version` → Java major version (null if it won't run). */
+function parseJavacVersion(javacPath: string): number | null {
   try {
     const r = new Deno.Command(javacPath, {
       args: ["-version"],
@@ -170,8 +232,8 @@ function javacMajor(javacPath: string): number | null {
   }
 }
 
-/** Resolve `javac` on PATH to its JAVA_HOME (<dir>/.. after stripping /bin/javac). */
-function javacOnPath(): string | null {
+/** The first `javac` on PATH (its raw path — the caller canonicalizes). */
+function whichJavac(): string | null {
   try {
     const whichCmd = Deno.build.os === "windows" ? "where" : "which";
     const w = new Deno.Command(whichCmd, {
@@ -180,12 +242,8 @@ function javacOnPath(): string | null {
       stderr: "null",
     }).outputSync();
     if (w.code !== 0) return null;
-    let p = (new TextDecoder().decode(w.stdout).split(/\r?\n/)[0] ?? "").trim();
-    if (!p) return null;
-    try {
-      p = Deno.realPathSync(p);
-    } catch { /* keep unresolved path */ }
-    return dirname(dirname(p)); // <home>/bin/javac → <home>
+    const p = (new TextDecoder().decode(w.stdout).split(/\r?\n/)[0] ?? "").trim();
+    return p || null;
   } catch {
     return null;
   }

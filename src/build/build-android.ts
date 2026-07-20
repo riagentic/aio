@@ -3,7 +3,12 @@
  * Build Android — generates Android project from template, builds APK via Gradle.
  */
 import { dirname, join } from "@std/path";
-import { findGradle, findJdk, GRADLE_MAX_JDK } from "./build-helpers.ts";
+import {
+  findGradle,
+  findJdk,
+  GRADLE_MAX_JDK,
+  type JdkResult,
+} from "./build-helpers.ts";
 import { ANDROID_TEMPLATE } from "./android-template.ts";
 import type { BuildConfig } from "./build-config.ts";
 
@@ -18,6 +23,32 @@ export async function buildAndroid(cfg: BuildConfig): Promise<void> {
     );
     Deno.exit(1);
   }
+
+  // Resolve a JDK Gradle will actually accept: canonical path, compile-verified
+  // (a JRE fails), major <= GRADLE_MAX_JDK (Gradle can't run on a newer one).
+  // Fail loud, naming the reason, when the machine has none.
+  const jdk = findJdk();
+  if (!jdk.home) {
+    console.error(
+      "[android] ✗ no usable JDK found — Android builds need a real JDK " +
+        `(compiles Java), version 17-${GRADLE_MAX_JDK}`,
+    );
+    if (jdk.newestFound > GRADLE_MAX_JDK) {
+      console.error(
+        `  found JDK ${jdk.newestFound}, but the pinned Gradle (8.14.3) can't ` +
+          `run on JDK ${GRADLE_MAX_JDK + 1}+ yet - install a supported one:`,
+      );
+    } else {
+      console.error("  a JRE is not enough (no compiler). install a full JDK:");
+    }
+    console.error("    - Debian/Ubuntu: sudo apt install openjdk-21-jdk");
+    console.error("    - macOS:         brew install openjdk@21");
+    console.error(
+      `    - or set JAVA_HOME to a JDK 17-${GRADLE_MAX_JDK} that compiles`,
+    );
+    Deno.exit(1);
+  }
+  console.log(`[android] ✓ JDK ${jdk.home} (Java ${jdk.major})`);
 
   const androidDir = join(dist, "android");
   try {
@@ -83,6 +114,10 @@ export async function buildAndroid(cfg: BuildConfig): Promise<void> {
     await Deno.writeTextFile(path, content);
   }
 
+  // Pin Gradle to the resolved JDK so its toolchain resolver can't wander off to
+  // a JRE it mis-detected — the root of the "[JAVA_COMPILER]" toolchain error.
+  await _pinJdk(androidDir, jdk);
+
   console.log(`[android] app: ${appNameKotlin} (${applicationId})`);
 
   // Copy assets into android project
@@ -103,7 +138,14 @@ export async function buildAndroid(cfg: BuildConfig): Promise<void> {
     console.log("[android] \u2713 icon from src/icon.png");
   }
 
-  await _runGradle(cfg, androidDir, androidHome, appNameKotlin, doRelease);
+  await _runGradle(
+    cfg,
+    androidDir,
+    androidHome,
+    jdk.home,
+    appNameKotlin,
+    doRelease,
+  );
   Deno.exit(0);
 }
 
@@ -192,10 +234,39 @@ async function _writeLocalAssets(
   console.log("[android] \u2713 assets copied");
 }
 
+/** Force Gradle onto the resolved JDK(s) so its toolchain resolver can only pick
+ *  a real, compiler-capable JDK — never a JRE dir it mis-detects. Writes into the
+ *  generated gradle.properties (explicit installation paths + no auto-download)
+ *  and requests a toolchain of the chosen JDK's exact version in app/build.gradle. */
+async function _pinJdk(androidDir: string, jdk: JdkResult): Promise<void> {
+  const propsPath = join(androidDir, "gradle.properties");
+  // .properties values escape backslashes (Windows paths); commas separate.
+  const paths = jdk.all.map((p) => p.replace(/\\/g, "\\\\")).join(",");
+  const props = await Deno.readTextFile(propsPath);
+  await Deno.writeTextFile(
+    propsPath,
+    `${props}\n# aio: use only real, compiler-capable JDKs (see findJdk)\n` +
+      `org.gradle.java.installations.paths=${paths}\n` +
+      `org.gradle.java.installations.auto-download=false\n`,
+  );
+
+  // Bind the Java compile task to a toolchain of our JDK's version — matched
+  // from the installation paths above (auto-download off), so it's deterministic.
+  const gradlePath = join(androidDir, "app", "build.gradle.kts");
+  const gradle = await Deno.readTextFile(gradlePath);
+  await Deno.writeTextFile(
+    gradlePath,
+    `${gradle}\njava {\n    toolchain {\n` +
+      `        languageVersion = JavaLanguageVersion.of(${jdk.major})\n` +
+      `    }\n}\n`,
+  );
+}
+
 async function _runGradle(
   cfg: BuildConfig,
   androidDir: string,
   androidHome: string,
+  jdkHome: string,
   appNameKotlin: string,
   doRelease: boolean,
 ): Promise<void> {
@@ -211,43 +282,18 @@ async function _runGradle(
     Deno.exit(1);
   }
 
-  // Gradle compiles with (and its daemon runs on) the JVM that JAVA_HOME points
-  // to. A JRE has `java` but no `javac` (fails "… [JAVA_COMPILER]"); a too-new
-  // JDK crashes Gradle at startup ("* What went wrong: 25.0.3"). Pin JAVA_HOME
-  // to a Gradle-runnable JDK (with javac); fail loud, with the reason, otherwise.
-  const jdk = findJdk();
-  if (!jdk.home) {
-    console.error(
-      "[android] ✗ no compatible JDK found — Android builds need a JDK with " +
-        `javac, version 17–${GRADLE_MAX_JDK} (a JRE is not enough)`,
-    );
-    if (jdk.newestFound > GRADLE_MAX_JDK) {
-      console.error(
-        `  found JDK ${jdk.newestFound}, but the pinned Gradle (8.12.1) can't ` +
-          `run on JDK ${GRADLE_MAX_JDK + 1}+ yet — install a supported one:`,
-      );
-    } else {
-      console.error("  install one, then retry:");
-    }
-    console.error("    • Debian/Ubuntu: sudo apt install openjdk-21-jdk");
-    console.error("    • macOS:         brew install openjdk@21");
-    console.error(
-      `    • or set JAVA_HOME to a JDK 17–${GRADLE_MAX_JDK} (must contain bin/javac)`,
-    );
-    Deno.exit(1);
-  }
-  console.log(`[android] ✓ JDK ${jdk.home}`);
-
   const gradleEnv = {
     ...Deno.env.toObject(),
     ANDROID_HOME: androidHome,
-    JAVA_HOME: jdk.home,
+    JAVA_HOME: jdkHome, // resolved + compile-verified by findJdk()
   };
 
-  // Generate gradle wrapper — pins version for reproducible builds (AGP 8.7.x needs Gradle 8.9+)
+  // Generate gradle wrapper — pins version for reproducible builds. 8.14.3
+  // (AGP 8.7.x needs 8.9+): 8.12.1 mis-detected Ubuntu's OpenJDK as a JRE
+  // ("Is JDK: false" → "[JAVA_COMPILER]" toolchain error); fixed in 8.13+.
   console.log(`[android] generating gradle wrapper (using ${gradleBin})...`);
   const wrapperResult = await new Deno.Command(gradleBin, {
-    args: ["wrapper", "--gradle-version", "8.12.1"],
+    args: ["wrapper", "--gradle-version", "8.14.3"],
     cwd: androidDir,
     stdout: "piped",
     stderr: "inherit",
@@ -261,7 +307,7 @@ async function _runGradle(
 
   const gradlew = join(androidDir, "gradlew");
   await Deno.chmod(gradlew, 0o755);
-  console.log("[android] \u2713 gradle wrapper (pinned 8.12.1)");
+  console.log("[android] \u2713 gradle wrapper (pinned 8.14.3)");
 
   // Build APK using wrapper
   const gradleTask = doRelease ? "assembleRelease" : "assembleDebug";
