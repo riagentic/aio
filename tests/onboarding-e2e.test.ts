@@ -212,22 +212,22 @@ for (const tpl of ["counter", "todo"] as const) {
 }
 
 // ── 3. dev targets: the browser dev server really boots + serves ─────────────
-// dev / dev:browser / dev:android all resolve to the same browser command
-// (android-dev is the WebView previewed in the browser). We assert all three
-// are wired to it, then boot that exact command and hit it over HTTP. We run
-// the command directly (not via `deno task`) so killing the process cleanly
-// stops the server — a `deno task` wrapper would leave the real server orphaned.
+// dev / dev:browser resolve to the same browser command. We assert both are
+// wired to it, then boot that exact command and hit it over HTTP. We run the
+// command directly (not via `deno task`) so killing the process cleanly stops
+// the server — a `deno task` wrapper would leave the real server orphaned.
+// (dev:android is the emulator orchestrator — covered by its own test below.)
 
 Deno.test({
   name: "dev: browser dev command boots a server that serves the app " +
-    "(dev · dev:browser · dev:android)",
+    "(dev · dev:browser)",
   ignore: !GATE,
   fn: async () => {
     const dir = await makeApp();
     const dj = JSON.parse(await Deno.readTextFile(join(dir, "deno.json"))) as {
       tasks: Record<string, string>;
     };
-    for (const t of ["dev", "dev:browser", "dev:android"]) {
+    for (const t of ["dev", "dev:browser"]) {
       assertStringIncludes(
         dj.tasks[t] ?? "",
         "--client=browser",
@@ -327,6 +327,43 @@ Deno.test({
           `error should name the missing toolchain, got:\n${msg}`,
         );
       }
+    } finally {
+      await Deno.remove(dir, { recursive: true });
+    }
+  },
+});
+
+// ── 5b. dev:android — wired to the emulator orchestrator; fails loud w/o SDK ──
+// The real path (boot AVD → build dev APK → install → launch, WebView on the
+// live dev server) needs an emulator, so it's verified manually. Here we prove
+// the task runs the orchestrator and that it stops with clear guidance when the
+// Android SDK is absent (never a silent browser fallback).
+
+Deno.test({
+  name: "dev:android: wired to the emulator orchestrator, fails loud without SDK",
+  ignore: !GATE,
+  fn: async () => {
+    const dir = await makeApp();
+    try {
+      const dj = JSON.parse(await Deno.readTextFile(join(dir, "deno.json"))) as {
+        tasks: Record<string, string>;
+      };
+      assertStringIncludes(dj.tasks["dev:android"] ?? "", "dev-android.ts");
+
+      // With no Android SDK, it must exit non-zero naming ANDROID_HOME — not
+      // silently fall back to the browser.
+      const p = await new Deno.Command("deno", {
+        args: ["task", "dev:android"],
+        cwd: dir,
+        env: { ...Deno.env.toObject(), ANDROID_HOME: "", ANDROID_SDK_ROOT: "" },
+        stdout: "piped",
+        stderr: "piped",
+      }).output();
+      assert(p.code !== 0, "expected non-zero exit without the Android SDK");
+      assertStringIncludes(
+        dec.decode(p.stdout) + dec.decode(p.stderr),
+        "ANDROID_HOME",
+      );
     } finally {
       await Deno.remove(dir, { recursive: true });
     }

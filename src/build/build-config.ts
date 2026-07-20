@@ -24,6 +24,10 @@ export interface BuildConfig {
   doService: boolean;
   doHeadless: boolean;
 
+  /** dev:android — build a thin APK whose WebView loads this live dev-server URL
+   *  (e.g. http://10.0.2.2:PORT) instead of bundling assets. Enables cleartext. */
+  androidDevUrl: string | undefined;
+
   // App identity
   binaryName: string;
   appTitle: string | undefined;
@@ -92,6 +96,10 @@ export async function loadBuildConfig(): Promise<BuildConfig> {
   const rawName = Deno.args.find((a) => a.startsWith("--name="))?.slice(7);
   const binaryName = rawName ? slugify(rawName) : defaultName;
 
+  const androidDevUrl = Deno.args.find((a) =>
+    a.startsWith("--android-dev-url=")
+  )?.slice("--android-dev-url=".length);
+
   const os = Deno.build.os;
   const arch = Deno.build.arch === "aarch64" ? "aarch64" : "x86_64";
   const archStr = arch === "aarch64" ? "arm64" : "x64";
@@ -111,6 +119,7 @@ export async function loadBuildConfig(): Promise<BuildConfig> {
     doRelease,
     doService,
     doHeadless,
+    androidDevUrl,
     binaryName,
     appTitle,
     configEntry,

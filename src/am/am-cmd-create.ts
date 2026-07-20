@@ -54,6 +54,7 @@ export function parseCreateArgs(args: string[]): CreateOpts {
 export function frameworkSpecs(source: boolean): {
   imports: Record<string, string>;
   build: string;
+  devAndroid: string;
   am: string;
   doctor: string;
   aiol: string;
@@ -75,6 +76,7 @@ export function frameworkSpecs(source: boolean): {
         "@std/assert": "jsr:@std/assert@^1",
       },
       build: "./dep/aio/src/build.ts",
+      devAndroid: "./dep/aio/src/dev-android.ts",
       am: "./dep/aio/src/am.ts",
       doctor: "./dep/aio/src/server/doctor.ts",
       aiol: "./dep/aio/aiol/mod.ts",
@@ -90,6 +92,7 @@ export function frameworkSpecs(source: boolean): {
       "aio/testing": `${v}/testing`,
     },
     build: `${v}/build`,
+    devAndroid: `${v}/dev-android`,
     am: `${v}/am`,
     doctor: `${v}/doctor`,
     aiol: `${v}/aiol`,
@@ -122,8 +125,9 @@ export function denoJson(name: string, source: boolean): string {
       dev: "deno run -A src/app.ts --client=browser",
       "dev:browser": "deno run -A src/app.ts --client=browser",
       "dev:electron": `${electronInstall} && deno run -A src/app.ts --client=electron`,
-      // Android UI is a WebView — preview it in the browser; ship it via compile:android.
-      "dev:android": "deno run -A src/app.ts --client=browser",
+      // Runs the app in an Android emulator against the live dev server
+      // (boots an AVD, builds+installs+launches). Needs the Android SDK + an AVD.
+      "dev:android": `deno run -A ${fw.devAndroid}`,
       // ── compile: default is a single self-contained binary ──
       compile: `deno run -A ${fw.build} --compile`,
       "compile:browser": `deno run -A ${fw.build} --compile`,
