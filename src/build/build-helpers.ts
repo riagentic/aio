@@ -38,6 +38,35 @@ export async function copyDir(src: string, dst: string): Promise<void> {
   }
 }
 
+/** Resolve the Android SDK root — the dir that actually contains
+ *  `platform-tools/adb`. Robust to `ANDROID_HOME`/`ANDROID_SDK_ROOT` pointing at
+ *  the SDK OR its parent (a common setup is `~/Android` with the SDK in
+ *  `~/Android/Sdk`), and falls back to the platform's default install locations.
+ *  Returns null when no SDK is found. */
+export function resolveSdk(): string | null {
+  const home = Deno.env.get("HOME") ?? "";
+  const exe = Deno.build.os === "windows" ? ".exe" : "";
+  const candidates: string[] = [];
+  const add = (d?: string | null) => {
+    if (!d) return;
+    candidates.push(d, join(d, "Sdk"), join(d, "sdk")); // dir, or its Sdk subdir
+  };
+  add(Deno.env.get("ANDROID_HOME"));
+  add(Deno.env.get("ANDROID_SDK_ROOT"));
+  candidates.push(
+    join(home, "Android", "Sdk"),
+    join(home, "Android", "sdk"),
+    join(home, "Library", "Android", "sdk"), // macOS
+    join(home, "AppData", "Local", "Android", "Sdk"), // Windows
+  );
+  for (const c of candidates) {
+    try {
+      if (Deno.statSync(join(c, "platform-tools", `adb${exe}`)).isFile) return c;
+    } catch { /* not an SDK here — next */ }
+  }
+  return null;
+}
+
 /** Find gradle binary — checks PATH then common install locations */
 export function findGradle(): string | null {
   const home = Deno.env.get("HOME") ?? "/tmp";

@@ -3,10 +3,64 @@ import {
   copyDir,
   findJdk,
   formatMb,
+  resolveSdk,
   slugify,
   writePlaceholderIcon,
 } from "../src/build/build-helpers.ts";
 import { join } from "@std/path";
+
+// ── resolveSdk (ANDROID_HOME may point at the SDK OR its parent) ──
+
+/** Lay down a fake SDK (just platform-tools/adb) under `dir`. */
+async function fakeSdk(dir: string): Promise<void> {
+  await Deno.mkdir(join(dir, "platform-tools"), { recursive: true });
+  await Deno.writeTextFile(join(dir, "platform-tools", "adb"), "#!/bin/sh\n");
+}
+
+async function withEnv<T>(
+  vars: Record<string, string>,
+  fn: () => T | Promise<T>,
+): Promise<T> {
+  const prev = new Map<string, string | undefined>();
+  for (const [k, v] of Object.entries(vars)) {
+    prev.set(k, Deno.env.get(k));
+    Deno.env.set(k, v);
+  }
+  try {
+    return await fn();
+  } finally {
+    for (const [k, v] of prev) {
+      if (v === undefined) Deno.env.delete(k);
+      else Deno.env.set(k, v);
+    }
+  }
+}
+
+Deno.test("resolveSdk: ANDROID_HOME points at the SDK dir", async () => {
+  const root = await Deno.makeTempDir();
+  try {
+    await fakeSdk(root);
+    await withEnv({ ANDROID_HOME: root, ANDROID_SDK_ROOT: "" }, () => {
+      assertEquals(resolveSdk(), root);
+    });
+  } finally {
+    await Deno.remove(root, { recursive: true });
+  }
+});
+
+Deno.test("resolveSdk: ANDROID_HOME points at the PARENT (…/Sdk subdir)", async () => {
+  // The reported bug: ANDROID_HOME=~/Android, SDK actually in ~/Android/Sdk.
+  const root = await Deno.makeTempDir();
+  const sdk = join(root, "Sdk");
+  try {
+    await fakeSdk(sdk);
+    await withEnv({ ANDROID_HOME: root, ANDROID_SDK_ROOT: "" }, () => {
+      assertEquals(resolveSdk(), sdk);
+    });
+  } finally {
+    await Deno.remove(root, { recursive: true });
+  }
+});
 
 // ── findJdk (android build needs a Gradle-runnable JDK with javac) ──
 

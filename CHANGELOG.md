@@ -28,6 +28,10 @@ field-report only.
   so edits reflect live, no re-bundle. Verified end-to-end (app rendered in the
   emulator, aio reload-WS connected). Needs the Android SDK (adb + emulator) and
   an AVD; fails loud with steps otherwise (never a silent browser fallback).
+- **SDK auto-resolution.** `ANDROID_HOME` may point at the SDK **or its parent**
+  (a common `~/Android` → `~/Android/Sdk` setup), or be unset — the build finds
+  the SDK via `ANDROID_HOME`/`ANDROID_SDK_ROOT` (and their `Sdk` subdir) then the
+  platform defaults. Applies to both `compile:android` and `dev:android`.
 - **Android build now works out of the box across JDK/packaging quirks.** Three
   compounding failures fixed, verified by building a real APK end-to-end:
   - **Gradle 8.12.1 → 8.14.3.** 8.12.1 mis-detects Ubuntu's OpenJDK as a JRE

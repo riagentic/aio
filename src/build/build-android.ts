@@ -8,6 +8,7 @@ import {
   findJdk,
   GRADLE_MAX_JDK,
   type JdkResult,
+  resolveSdk,
 } from "./build-helpers.ts";
 import { ANDROID_TEMPLATE } from "./android-template.ts";
 import type { BuildConfig } from "./build-config.ts";
@@ -16,7 +17,7 @@ import type { BuildConfig } from "./build-config.ts";
 export async function buildAndroid(cfg: BuildConfig): Promise<void> {
   const { root, dist, binaryName, appTitle, doRemote, doRelease } = cfg;
 
-  const androidHome = Deno.env.get("ANDROID_HOME");
+  const androidHome = resolveSdk(); // ANDROID_HOME, its Sdk subdir, or defaults
   if (!androidHome) {
     console.error(
       "[android] \u2717 ANDROID_HOME not set — install Android SDK and set ANDROID_HOME",
