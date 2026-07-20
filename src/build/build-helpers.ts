@@ -1,5 +1,5 @@
 // Build helpers — pure/extractable utilities used by build.ts
-import { join } from "@std/path";
+import { dirname, join } from "@std/path";
 
 /** Known SHA-256 hashes for appimagetool builds (continuous release).
  *  Update when upgrading — run: `curl -sL <url> | sha256sum` */
@@ -60,6 +60,85 @@ export function findGradle(): string | null {
     } catch { /* not found — try next */ }
   }
   return null;
+}
+
+/** Find a JDK that provides `javac` — a JRE is NOT enough for Android builds
+ *  (Gradle's `compileDebugJavaWithJavac` needs the compiler). Checks JAVA_HOME,
+ *  common system JVM dirs, Android Studio's bundled JBR, and PATH. Returns the
+ *  JAVA_HOME (dir containing bin/javac) to hand Gradle, or null if none has javac. */
+export function findJdk(): string | null {
+  const home = Deno.env.get("HOME") ?? "/tmp";
+  const exe = Deno.build.os === "windows" ? "javac.exe" : "javac";
+  const candidates: string[] = [];
+
+  const javaHome = Deno.env.get("JAVA_HOME");
+  if (javaHome) candidates.push(javaHome);
+
+  // Directories that CONTAIN jvm installs — scan one level deep for */bin/javac.
+  // macOS nests the JDK under <ver>/Contents/Home, so probe that layout too.
+  const jvmRoots = [
+    "/usr/lib/jvm",
+    "/usr/java",
+    "/Library/Java/JavaVirtualMachines",
+    `${home}/.sdkman/candidates/java`,
+  ];
+  for (const root of jvmRoots) {
+    try {
+      for (const entry of Deno.readDirSync(root)) {
+        if (!entry.isDirectory && !entry.isSymlink) continue;
+        candidates.push(join(root, entry.name));
+        candidates.push(join(root, entry.name, "Contents", "Home"));
+      }
+    } catch { /* root absent — skip */ }
+  }
+
+  // Android Studio bundles a JBR that ships javac — ideal for android builds.
+  candidates.push(
+    "/opt/android-studio/jbr",
+    `${home}/android-studio/jbr`,
+    "/Applications/Android Studio.app/Contents/jbr/Contents/Home",
+    `${home}/.local/share/JetBrains/Toolbox/apps/AndroidStudio/ch-0/jbr`,
+  );
+
+  for (const dir of candidates) {
+    if (verifyJavac(join(dir, "bin", exe))) return dir;
+  }
+
+  // Last resort: javac on PATH → derive JAVA_HOME as <dir>/.. (strip /bin/javac),
+  // resolving symlinks first (sdkman/alternatives shims point into the real JDK).
+  try {
+    const whichCmd = Deno.build.os === "windows" ? "where" : "which";
+    const w = new Deno.Command(whichCmd, {
+      args: ["javac"],
+      stdout: "piped",
+      stderr: "null",
+    }).outputSync();
+    if (w.code === 0) {
+      let p = (new TextDecoder().decode(w.stdout).split(/\r?\n/)[0] ?? "").trim();
+      if (p) {
+        try {
+          p = Deno.realPathSync(p);
+        } catch { /* keep unresolved path */ }
+        return dirname(dirname(p)); // <home>/bin/javac → <home>
+      }
+    }
+  } catch { /* which/where absent — give up */ }
+
+  return null;
+}
+
+/** True if the given javac path exists and runs (`javac -version` exits 0). */
+function verifyJavac(javacPath: string): boolean {
+  try {
+    const r = new Deno.Command(javacPath, {
+      args: ["-version"],
+      stdout: "null",
+      stderr: "null",
+    }).outputSync();
+    return r.code === 0;
+  } catch {
+    return false;
+  }
 }
 
 /** Write a placeholder SVG icon */

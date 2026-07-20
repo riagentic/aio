@@ -1,11 +1,54 @@
 import { assertEquals } from "@std/assert";
 import {
   copyDir,
+  findJdk,
   formatMb,
   slugify,
   writePlaceholderIcon,
 } from "../src/build/build-helpers.ts";
 import { join } from "@std/path";
+
+// ── findJdk (android build needs a JDK with javac, not a JRE) ──
+
+Deno.test("findJdk: picks JAVA_HOME when its bin/javac runs", async () => {
+  if (Deno.build.os === "windows") return; // stub is a POSIX shell script
+  const home = await Deno.makeTempDir();
+  try {
+    await Deno.mkdir(join(home, "bin"));
+    const javac = join(home, "bin", "javac");
+    await Deno.writeTextFile(javac, "#!/bin/sh\necho 'javac 21.0.0' >&2\n");
+    await Deno.chmod(javac, 0o755);
+    const prev = Deno.env.get("JAVA_HOME");
+    Deno.env.set("JAVA_HOME", home);
+    try {
+      assertEquals(findJdk(), home); // JAVA_HOME wins — probed first
+    } finally {
+      if (prev === undefined) Deno.env.delete("JAVA_HOME");
+      else Deno.env.set("JAVA_HOME", prev);
+    }
+  } finally {
+    await Deno.remove(home, { recursive: true });
+  }
+});
+
+Deno.test("findJdk: ignores a JAVA_HOME whose javac is missing", async () => {
+  // A JRE-only JAVA_HOME (no bin/javac) must not be accepted as a JDK.
+  const home = await Deno.makeTempDir(); // empty — no bin/javac
+  try {
+    const prev = Deno.env.get("JAVA_HOME");
+    Deno.env.set("JAVA_HOME", home);
+    try {
+      // May still find a real system JDK, but never the javac-less temp dir.
+      const found = findJdk();
+      assertEquals(found === home, false);
+    } finally {
+      if (prev === undefined) Deno.env.delete("JAVA_HOME");
+      else Deno.env.set("JAVA_HOME", prev);
+    }
+  } finally {
+    await Deno.remove(home, { recursive: true });
+  }
+});
 
 // ── slugify ──
 
