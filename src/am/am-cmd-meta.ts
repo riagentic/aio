@@ -7,9 +7,79 @@ import { VERSION } from "../server/aio.ts";
 import type { GlobalFlags } from "./am-types.ts";
 import { detectMode, out, outError } from "./am-output.ts";
 
+const PKG = "@riagentic/aio";
+
 export function cmdVersion(_args: string[], flags: GlobalFlags): void {
   const mode = detectMode(flags);
   out(mode === "pretty" ? `am ${VERSION}` : { version: VERSION }, mode);
+}
+
+/** `deno` argv that (re)installs the latest `am` as a global — used by both the
+ *  curl installer and `am update`, so there is exactly one install recipe.
+ *  `--reload` bypasses the module cache so "latest" is really latest; `-f`
+ *  overwrites the existing `am`, making update idempotent. */
+export function updateArgv(): string[] {
+  // Prerelease range, not a bare spec: a bare `jsr:@riagentic/aio` resolves to
+  // the latest STABLE (an old 0.9.x with no ./am export). `^1.0.0-alpha` lands
+  // on the newest alpha and widens to 1.0.0 final automatically once it ships.
+  return [
+    "install",
+    "-gAf",
+    "--reload",
+    "-n",
+    "am",
+    `jsr:${PKG}@^1.0.0-alpha/am`,
+  ];
+}
+
+/** `deno` argv that removes the global `am`. Only touches the installed CLI —
+ *  aio apps on disk are never read or modified. */
+export function uninstallArgv(): string[] {
+  return ["uninstall", "-g", "am"];
+}
+
+async function runDeno(argv: string[]): Promise<number> {
+  const cmd = new Deno.Command("deno", {
+    args: argv,
+    stdout: "inherit",
+    stderr: "inherit",
+  });
+  const { code } = await cmd.output();
+  return code;
+}
+
+export async function cmdUpdate(
+  _args: string[],
+  flags: GlobalFlags,
+): Promise<void> {
+  const mode = detectMode(flags);
+  const code = await runDeno(updateArgv());
+  if (code !== 0) {
+    outError(`update failed (deno exit ${code})`, mode);
+    Deno.exit(code);
+  }
+  out(mode === "json" ? { updated: true } : "✓ am updated to the latest release", mode);
+}
+
+export async function cmdUninstall(
+  _args: string[],
+  flags: GlobalFlags,
+): Promise<void> {
+  const mode = detectMode(flags);
+  const code = await runDeno(uninstallArgv());
+  if (code !== 0) {
+    outError(
+      `uninstall failed (deno exit ${code}) — am may not be installed globally`,
+      mode,
+    );
+    Deno.exit(code);
+  }
+  out(
+    mode === "json"
+      ? { uninstalled: true }
+      : "✓ am removed — your aio apps are untouched",
+    mode,
+  );
 }
 
 export async function cmdNew(
@@ -88,6 +158,11 @@ export function cmdHelp(
     return;
   }
   console.log(`am ${VERSION} — aio manager
+
+Onboard:
+  create <name> [--template=counter|todo]  Scaffold a new aio app (runnable + buildable)
+  update                  Update am to the latest release
+  uninstall               Remove am (your aio apps are untouched)
 
 Process (singleton — one instance per app identity):
   start                   Start app (kills zombies, refuses if already running)
