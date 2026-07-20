@@ -3,7 +3,8 @@
  * `deno task dev:android` — run the app in an Android emulator against the LIVE
  * dev server (the mobile counterpart of `dev:browser`):
  *   1. ensure an emulator is running (boot an AVD if none),
- *   2. build a thin dev APK whose WebView loads http://10.0.2.2:PORT,
+ *   2. build a thin dev APK whose WebView loads http://localhost:PORT
+ *      (tunneled to the host via `adb reverse` — VPN/NAT-proof, real-device-ready),
  *   3. start the dev server, install + launch the app, keep the server running.
  *
  * Edits reflect live (reload in the WebView) — no re-bundle. Needs the Android
@@ -124,7 +125,11 @@ async function main(): Promise<void> {
   }
 
   const port = freePort();
-  const devUrl = `http://10.0.2.2:${port}`; // 10.0.2.2 = host loopback from AVD
+  // Load over localhost + `adb reverse` (below), NOT the emulator's 10.0.2.2 NAT
+  // alias: adb tunnels device localhost → host localhost over its own channel, so
+  // it's immune to VPNs / host firewalls that break the emulator NAT, works on
+  // real USB devices too, and http://localhost is a secure context.
+  const devUrl = `http://localhost:${port}`;
 
   // 1) Boot the emulator early (slow) unless one is already running.
   await run(adb, ["start-server"]);
@@ -159,7 +164,7 @@ async function main(): Promise<void> {
   if (!apk) fail("no .apk produced by the build");
   const appId = `app.aio.${apk.replace(/\.apk$/, "").replace(/[^a-z0-9]/g, "")}`;
 
-  // 3) Start the dev server (the app in the emulator loads it via 10.0.2.2).
+  // 3) Start the dev server (the app reaches it via localhost + adb reverse).
   console.log(`[dev:android] starting dev server on :${port}...`);
   const server = new Deno.Command("deno", {
     args: ["run", "-A", "src/app.ts", "--client=browser", `--port=${port}`],
@@ -191,6 +196,23 @@ async function main(): Promise<void> {
     }
     await new Promise((r) => setTimeout(r, 2000));
   }
+
+  // Tunnel device localhost:PORT → host localhost:PORT (VPN/NAT-proof, and the
+  // only thing that works on real USB devices). Retried once — the device is
+  // freshly booted.
+  let rev = await run(adb, ["reverse", `tcp:${port}`, `tcp:${port}`]);
+  if (rev.code !== 0) {
+    await new Promise((r) => setTimeout(r, 1000));
+    rev = await run(adb, ["reverse", `tcp:${port}`, `tcp:${port}`]);
+  }
+  if (rev.code !== 0) {
+    console.error(rev.out + rev.err);
+    try {
+      server.kill("SIGKILL");
+    } catch { /* gone */ }
+    fail(`adb reverse tcp:${port} failed — the app can't reach the dev server`);
+  }
+
   console.log(`[dev:android] installing ${apk}...`);
   const inst = await run(adb, ["install", "-r", join(Deno.cwd(), apk)]);
   if (inst.code !== 0) {

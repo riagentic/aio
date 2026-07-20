@@ -25,7 +25,8 @@ export interface BuildConfig {
   doHeadless: boolean;
 
   /** dev:android — build a thin APK whose WebView loads this live dev-server URL
-   *  (e.g. http://10.0.2.2:PORT) instead of bundling assets. Enables cleartext. */
+   *  (http://localhost:PORT, tunneled via `adb reverse`) instead of bundling
+   *  assets. Enables cleartext. */
   androidDevUrl: string | undefined;
 
   // App identity
