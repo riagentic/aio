@@ -24,16 +24,18 @@ if (Have 'deno') {
 }
 if (-not (Have 'git')) { throw "git is required — install git and re-run" }
 
-# ── Clone / update aio ──
+# ── Clone / update aio, then check out the LAST TAGGED release ──
 if (Test-Path (Join-Path $AioHome '.git')) {
   Write-Host "▸ updating aio in $AioHome"
-  git -C $AioHome fetch --depth 1 origin $AioBranch | Out-Null
-  git -C $AioHome reset --hard "origin/$AioBranch" | Out-Null
+  git -C $AioHome fetch --tags --force origin $AioBranch | Out-Null
 } else {
   Write-Host "▸ cloning aio → $AioHome"
-  git clone --depth 1 -b $AioBranch $AioRepo $AioHome | Out-Null
+  git clone $AioRepo $AioHome | Out-Null
 }
-Write-Host "✓ aio $(git -C $AioHome rev-parse --short HEAD)"
+$AioTag = (git -C $AioHome describe --tags --abbrev=0 "origin/$AioBranch" 2>$null)
+if (-not $AioTag) { $AioTag = (git -C $AioHome tag -l 'v*' --sort=-creatordate | Select-Object -First 1) }
+if ($AioTag) { git -C $AioHome checkout -q --force $AioTag; Write-Host "✓ aio $AioTag" }
+else { git -C $AioHome checkout -q --force $AioBranch; Write-Host "✓ aio $AioBranch (no tags yet)" }
 
 # ── Install am from the clone ──
 Write-Host "▸ installing am..."
