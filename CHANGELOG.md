@@ -21,7 +21,12 @@ field-report only.
   the **browser** (instant — no Electron download, no toolchain). Explicit
   `dev:browser` / `dev:electron` (auto-installs Electron) / `dev:android`, and
   `compile` (binary) / `compile:browser` / `compile:electron` (AppImage) /
-  `compile:android` (APK — needs `ANDROID_HOME` + Gradle) are all wired.
+  `compile:android` (APK — needs `ANDROID_HOME` + Gradle + a JDK) are all wired.
+- **Android build finds a real JDK.** Gradle compiles with the JVM it runs on,
+  so a JRE (no `javac`) failed cryptically as `Toolchain … [JAVA_COMPILER]`. The
+  build now locates a JDK **with `javac`** (`JAVA_HOME`, `/usr/lib/jvm/*`,
+  Android Studio's bundled JBR, PATH), pins `JAVA_HOME` to it, and — when the
+  machine only has a JRE — fails loud with the install command instead.
 - **README rewritten** to four onboarding lines + a one-row-per-feature table +
   a logo. "Batteries included: persistence + state + UI."
 
