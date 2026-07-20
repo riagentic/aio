@@ -1,5 +1,71 @@
 # Changelog
 
+## 1.0.0-alpha23 — field-report closeout: silent traps → loud, early, attributed (2026-07-20)
+
+Five field reports (tbd, risoto ×2, realitio, inews) worked end to end. The theme:
+every fix either **removes** a silent failure or makes it **loud, early, and
+attributed** — never silent, late, and anonymous. Each fix ships with a
+regression test proven to fail on revert.
+
+### Fixed
+
+- **Sync cells recover their state on a headless restart.** The committed op-log
+  is replayed through the reducer at boot (after KV restore + `onRestore`, before
+  any dispatch/broadcast) — previously a `sync: true` cell came back empty until a
+  client reconnected (silent data loss). Logged per cell.
+- **`deepMerge` keeps dictionary entries.** An empty-object initial
+  (`{} as Record<K,V>`) is now treated as a dictionary — persisted entries
+  survive restore instead of all being silently dropped.
+- **KV over-limit degrades instead of nuking everything.** A single >64KB cell no
+  longer fails the whole atomic commit; the healthy cells persist, the over-limit
+  cell keeps its last-saved value, and the offender is named. Single-key mode
+  names the largest cells.
+- **`db:` table named after a cell throws at boot** (was a silent slice
+  overwrite that broke the cell's methods), naming both.
+- **Selectors are callable in the browser** — they were server-only, so
+  `cell.count()` threw `is not a function` client-side with no warning. Now bound
+  the same both sides; deps-form selectors read other cells reactively.
+- **Router components type-check.** `Route`/`Link`/`NavLink`/`Outlet`/`page`
+  returned `unknown` (broke every JSX use); now `VNode | null` / `VNode`.
+- **Dev graph-validator no longer false-positives on English.** A bare `from "`
+  inside a JSX string literal (a title like "Recovering from Disaster") was
+  parsed as an import and returned a Module-Errors page for a valid app.
+- **`onStart` can seed via a cell method** — it now fires after the callable
+  method surface is bound.
+- **Connection loss is reported once, clearly** (UDS + WS) — "backend not
+  reachable — is the aio server running?" instead of a per-retry stack-trace/log
+  flood, plus one "reconnected" on recovery.
+
+### Added
+
+- **`libraryMode: true`** on `aio.run()` — no `Deno.exit`, no signal handlers, no
+  singleton lock; `app.close()` resolves clean. Boots a real server inside
+  `Deno.test` (sanitizers on) — the unlock for end-to-end persistence tests.
+- **Responsive `<meta viewport>` by default** + `ui.viewport` override / `false`
+  opt-out, and **`ui.head`** for verbatim `<head>` content (meta/OG/favicon/fonts).
+- **`createDB(":memory:")`** documented as the file-less test DB (single Worker,
+  `close()`); `readers` ignored for `:memory:`.
+- **Server-only import guard.** `aiol` flags a server-only `"aio"` symbol
+  (`createDB`, …) statically imported into a cell-shared file — `file:line` + fix;
+  the dev blank-screen classifier makes the runtime error teachable and points at
+  the linter.
+
+### Changed
+
+- **Unified UI facility.** One semantic surface (`ui-surface`/`ui-remote`/
+  `ui-trigger`) backs both `testUI` and `am surface`/`am trigger`. The legacy
+  selector/index/raw-DOM path — `am click`/`interact`/`dom`, `dom-interact.ts`,
+  `dom-snapshot.ts`, `__ui:snapshot`/`__ui:interact`/`__click:` — is removed. `am`
+  is a dev CLI; no public API change.
+
+### Security
+
+- **Exposed credential fields refuse to boot in dev.** A field named
+  `password`/`passphrase`/`mnemonic`/`privateKey`/`apiKey`/`secretKey`/
+  `accessToken`/`authToken` broadcast to the UI now fails the dev boot (prod logs
+  a loud error) unless excluded or declared `ui.publicFields`. The old heuristic
+  didn't even match `password`; ambiguous names (`seed`/`enc`/`key`) still warn.
+
 ## 1.0.0-alpha22 — reactivity hardening: no more silent freezes (2026-07-19)
 
 Root-caused the "value changes but the UI doesn't, with no error" class into six
