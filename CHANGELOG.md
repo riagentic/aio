@@ -30,6 +30,13 @@ field-report only.
   an AVD; fails loud with steps otherwise (never a silent browser fallback). If
   the emulator crashes or stalls on boot, its output is surfaced (no silent hang),
   and a dev-server bail (app already running) is reported clearly.
+- **Dispatch works over insecure `http://` (LAN / emulator).** `crypto.randomUUID()`
+  — used to tag every dispatch — only exists in a *secure context* (https or
+  localhost), so over `http://10.0.2.2` (emulator) or `http://192.168.x.x` (real
+  device) it was `undefined`: every action threw `randomUUID is not a function`
+  and the UI silently didn't update (e.g. the counter's `+` did nothing). All
+  client id generation now uses an insecure-context-safe `randomUuid()`
+  (`crypto.getRandomValues` fallback). Fixes `dev:android` interactivity + LAN dev.
 - **SDK auto-resolution.** `ANDROID_HOME` may point at the SDK **or its parent**
   (a common `~/Android` → `~/Android/Sdk` setup), or be unset — the build finds
   the SDK via `ANDROID_HOME`/`ANDROID_SDK_ROOT` (and their `Sdk` subdir) then the

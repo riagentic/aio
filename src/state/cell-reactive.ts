@@ -5,6 +5,7 @@
 // Called from ensureConnected() for all registered cells.
 
 import type { CellDef } from "./cell-types.ts";
+import { randomUuid } from "../rand.ts";
 import { attachMeta } from "./cell-catalog.ts";
 import { _cellSignals, getCellSignal } from "./state-signals.ts";
 import { _registerAck } from "../protocol/browser-ack.ts";
@@ -199,7 +200,7 @@ export function bindCellReactive(
           type: string;
           payload?: unknown;
         })(...args);
-        const cid = crypto.randomUUID();
+        const cid = randomUuid();
         const tagged = { ...action, cid };
         // AIO-2.2: register the ack BEFORE send so a fast server can't ack
         // before we listen. Then dispatch; the ack handler (wired in the

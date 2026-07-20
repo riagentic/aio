@@ -1,6 +1,7 @@
 // ─── AioError Core — Types, Factory, Formatter, Reporter ─────────────────────
 
 import type { DiagnosticEvent } from "./diagnostic-bus.ts";
+import { randomUuid } from "../rand.ts";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -194,7 +195,7 @@ export function getCorrelationId(): string {
   return _correlationId ?? "none";
 }
 export function generateCorrelationId(): string {
-  const id = crypto.randomUUID().slice(0, 8);
+  const id = randomUuid().slice(0, 8);
   _correlationId = id;
   return id;
 }
