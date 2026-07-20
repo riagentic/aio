@@ -53,6 +53,34 @@ The linter (`aiol`) recognizes the suffix and stays quiet; `@std/*` and `node:*`
 imports reached any other way are stubbed by the build with a clear "is
 server-only" runtime error instead of a cryptic bundling failure.
 
+**2b. Server-only *symbols* from `"aio"` — `createDB` and friends.**
+
+A few `"aio"` exports are server-only: **`createDB`**, `DEFAULT_PRAGMAS`
+(SQLite/Worker), and `connectCli` / `connectCliUDS`. The **browser build of
+`"aio"` omits them.** A *static* `import { createDB } from "aio"` in a cell (or
+any module a cell pulls in) therefore link-fails the whole client bundle at boot
+— a blank screen whose message names the symbol but not your file, and which
+every server-side check (`deno check` / `deno test` / `deno lint`) passes because
+the split doesn't exist until a real browser links the graph.
+
+Load them lazily in a server-only path instead — cell methods run on the server:
+
+```ts
+// ✅ server-only path — dynamic import, browser bundle never sees createDB
+let _db: import("aio").DB | null = null;
+async function db() {
+  if (!_db) { const { createDB } = await import("aio"); _db = createDB(".aio/cache.sqlite"); }
+  return _db;
+}
+// pure schema helpers ARE browser-safe — import them statically:
+import { table, pk, text } from "aio";
+```
+
+`deno task lint:aio` flags a static server-only symbol in a cell file with the
+exact `file:line` + fix, and the dev blank-screen guard now prints a teachable
+hint for the runtime error. (For a cleaner boundary, keep DB code in a
+`*.server.ts` module per rule 2.)
+
 For a file you can't rename, the fallback is a dynamic import with the path
 broken by a variable — esbuild statically resolves even plain dynamic imports,
 so only an opaque specifier keeps it out:
