@@ -52,17 +52,30 @@ async function deviceReady(adb: string): Promise<boolean> {
   return boot.out.trim() === "1";
 }
 
-async function waitFor(
-  check: () => Promise<boolean>,
-  timeoutMs: number,
-  what: string,
-): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (await check()) return;
-    await new Promise((r) => setTimeout(r, 2000));
-  }
-  fail(`timed out waiting for ${what} (${timeoutMs / 1000}s)`);
+/** Spawn the emulator, capturing its output so a boot failure is visible
+ *  (the GUI window still opens — piping the console stream doesn't affect it). */
+function spawnEmulator(
+  bin: string,
+  args: string[],
+): { proc: Deno.ChildProcess; log: () => string; exited: () => number | null } {
+  const proc = new Deno.Command(bin, {
+    args,
+    stdout: "piped",
+    stderr: "piped",
+  }).spawn();
+  let buf = "";
+  let exitCode: number | null = null;
+  const drain = async (s: ReadableStream<Uint8Array>) => {
+    try {
+      for await (const c of s) buf += dec.decode(c);
+    } catch { /* closed */ }
+  };
+  drain(proc.stdout);
+  drain(proc.stderr);
+  proc.status.then((s) => {
+    exitCode = s.code;
+  }).catch(() => {});
+  return { proc, log: () => buf, exited: () => exitCode };
 }
 
 async function main(): Promise<void> {
@@ -115,14 +128,12 @@ async function main(): Promise<void> {
 
   // 1) Boot the emulator early (slow) unless one is already running.
   await run(adb, ["start-server"]);
-  let emuProc: Deno.ChildProcess | undefined;
+  let emu: ReturnType<typeof spawnEmulator> | undefined;
   if (!(await deviceReady(adb))) {
-    console.log(`[dev:android] booting emulator "${avd}"...`);
-    emuProc = new Deno.Command(emulatorBin, {
-      args: ["-avd", avd, "-no-boot-anim", "-no-snapshot-save"],
-      stdout: "null",
-      stderr: "null",
-    }).spawn();
+    console.log(
+      `[dev:android] booting emulator "${avd}" — first boot can take a minute...`,
+    );
+    emu = spawnEmulator(emulatorBin, ["-avd", avd, "-no-boot-anim"]);
   } else {
     console.log("[dev:android] using the already-running emulator");
   }
@@ -156,8 +167,30 @@ async function main(): Promise<void> {
     stderr: "inherit",
   }).spawn();
 
-  // 4) Wait for the emulator, then install + launch.
-  await waitFor(() => deviceReady(adb), 180_000, "the emulator to finish booting");
+  // 4) Wait for the emulator, then install + launch. Surface a boot crash /
+  //    timeout with the emulator's own output — never hang silently.
+  console.log("[dev:android] waiting for the emulator to finish booting...");
+  const deadline = Date.now() + 180_000;
+  while (!(await deviceReady(adb))) {
+    if (emu?.exited() != null) {
+      console.error(emu.log());
+      try {
+        server.kill("SIGKILL");
+      } catch { /* gone */ }
+      fail(
+        `emulator "${avd}" exited during boot (code ${emu.exited()})`,
+        "see its output above — try launching this AVD once from Android Studio",
+      );
+    }
+    if (Date.now() > deadline) {
+      if (emu) console.error(emu.log().split(/\r?\n/).slice(-25).join("\n"));
+      try {
+        server.kill("SIGKILL");
+      } catch { /* gone */ }
+      fail("timed out (180s) waiting for the emulator to boot");
+    }
+    await new Promise((r) => setTimeout(r, 2000));
+  }
   console.log(`[dev:android] installing ${apk}...`);
   const inst = await run(adb, ["install", "-r", join(Deno.cwd(), apk)]);
   if (inst.code !== 0) {
@@ -190,7 +223,13 @@ async function main(): Promise<void> {
     Deno.exit(0);
   });
   const status = await server.status;
-  void emuProc; // left running for fast re-runs
+  if (status.code !== 0) {
+    console.error(
+      "[dev:android] dev server exited — is the app already running elsewhere? " +
+        "(each app is single-instance)",
+    );
+  }
+  void emu; // emulator left running for fast re-runs
   Deno.exit(status.code);
 }
 
