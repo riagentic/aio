@@ -47,7 +47,14 @@ import {
   cmdTrigger,
 } from "./am/am-cmd-inspect.ts";
 
-import { cmdHelp, cmdNew, cmdVersion } from "./am/am-cmd-meta.ts";
+import {
+  cmdHelp,
+  cmdNew,
+  cmdUninstall,
+  cmdUpdate,
+  cmdVersion,
+} from "./am/am-cmd-meta.ts";
+import { cmdCreate } from "./am/am-cmd-create.ts";
 
 import {
   cmdActions,
@@ -99,7 +106,10 @@ const COMMANDS: Record<string, CmdHandler> = {
   profile: cmdProfile,
   config: cmdConfig,
   // Meta
+  create: cmdCreate,
   new: cmdNew,
+  update: cmdUpdate,
+  uninstall: cmdUninstall,
   version: cmdVersion,
   help: (args, flags) => cmdHelp(args, flags, Object.keys(COMMANDS)),
 };

@@ -1,22 +1,22 @@
 # Examples
 
-Run any example: `cd <dir> && deno task dev`. Build it: `deno task compile`. All
-examples are runtime-tested (`tests/examples.test.ts`), UI-functionally tested
-(`tests/examples-ui.test.ts` — real clicks/typing via the AIR renderer), and
-type-checked (`deno task check`) in CI.
+New project? Don't copy these — run **`am create my-app`** (see the root
+README). The two apps below are exactly what `am create --template=…` scaffolds;
+they live here as the canonical template source + CI fixtures, all
+runtime-tested (`tests/examples.test.ts`), UI-tested (`tests/examples-ui.test.ts`),
+and type-checked in CI.
 
-## Apps
+## Templates (what `am create` scaffolds)
 
-| Dir           | What                                        |
-| ------------- | ------------------------------------------- |
-| `counter/`    | Smallest full app — one cell, one component |
-| `todo/`       | Todo list — list state, `useLocal` input    |
-| `playground/` | Browser playground page                     |
+| Dir        | `am create` flag       | What                                        |
+| ---------- | ---------------------- | ------------------------------------------- |
+| `counter/` | *(default)*            | Smallest full app — one cell, one component |
+| `todo/`    | `--template=todo`      | Todo list — list state, `useLocal` input    |
 
-## Compile targets
+## Target build smoke fixtures
 
-One working example per target (`examples/targets/<dir>`) — same counter app,
-wired per target exactly like `aio create` scaffolds it:
+`examples/targets/<dir>` — minimal per-target apps kept purely as **CI build/boot
+smoke fixtures** (not learn-from examples), so every compile target stays honest:
 
 | Target                    | Dir                | Interface                                 |
 | ------------------------- | ------------------ | ----------------------------------------- |
