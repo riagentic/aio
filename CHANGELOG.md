@@ -24,8 +24,10 @@ field-report only.
   `compile:android` (APK — needs `ANDROID_HOME` + Gradle + a JDK) are all wired.
 - **`dev:android` runs the app in an emulator** (the mobile `dev:browser`).
   It boots an AVD if none is running, builds a thin dev APK whose WebView loads
-  the **live dev server** via `10.0.2.2`, starts the server, installs + launches —
-  so edits reflect live, no re-bundle. Verified end-to-end (app rendered in the
+  the **live dev server** over `http://localhost:PORT` tunneled with `adb reverse`
+  (VPN/NAT-proof — unlike the emulator's `10.0.2.2` alias — and works on real USB
+  devices), starts the server, installs + launches — so edits reflect live, no
+  re-bundle. Verified end-to-end (app rendered in the
   emulator, aio reload-WS connected). Needs the Android SDK (adb + emulator) and
   an AVD; fails loud with steps otherwise (never a silent browser fallback). If
   the emulator crashes or stalls on boot, its output is surfaced (no silent hang),
