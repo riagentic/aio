@@ -173,7 +173,7 @@ export type AioConfig<S, A, E> = {
 
 /** Handle returned by aio.run() — dispatch actions, read state, or shut down */
 export type AioApp<S = unknown, A = unknown> = {
-  dispatch: (action: A) => Promise<void>;
+  dispatch: (action: A) => Promise<unknown>;
   getState: () => S;
   snapshot?: () => string; // server-only (undefined in standalone)
   loadSnapshot?: (json: string) => void; // server-only (undefined in standalone)

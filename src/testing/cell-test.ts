@@ -50,10 +50,14 @@ export type TestContext<
    *  await t.send.load()              // async method fully done here
    *  t.expect.state(s => s.data !== null)
    *  ```
+   *
+   *  AIO-427: the resolved value is the method's transported RETURN — awaiting
+   *  `t.send.create(...)` yields whatever the method returned (like production
+   *  `await cell.create(...)`), or `undefined` for a void/effect-only method.
    */
   send: {
     [K in keyof A & string]: A[K] extends (...args: infer P) => unknown
-      ? (...args: P) => Promise<void>
+      ? (...args: P) => Promise<unknown>
       : never;
   };
   /** Assertions */
@@ -123,15 +127,17 @@ export function testCell<
       getState: () => state,
     };
 
-    function dispatch(action: Msg): void {
+    function dispatch(action: Msg): unknown {
       const result = composed.reduce(state, action);
       state = { ...result.state };
       lastEffects = result.effects;
+      // AIO-427: surface the sync method's transported return value.
+      return (result as { ret?: unknown }).ret;
     }
 
     /** Execute an async-method trigger effect and return a promise that
      *  resolves when the method (and its batched writes) completed. */
-    function runExec(eff: Msg): Promise<void> {
+    function runExec(eff: Msg): Promise<unknown> {
       executed.add(eff);
       const payload = eff.payload as Record<string, unknown>;
       const callId = (payload._callId as string | undefined) ??
@@ -140,7 +146,8 @@ export function testCell<
       done.catch(() => {}); // mark handled — fire-and-forget callers must not surface unhandled rejections
       composed.execute(app, eff as { type: string; payload: unknown });
       // Propagate rejection to awaiters — matches production `await cell.method()`.
-      return done.then(() => {});
+      // AIO-427: resolve with the async method's transported return value.
+      return done;
     }
 
     async function drainMicrotasks(): Promise<void> {
@@ -153,13 +160,13 @@ export function testCell<
       const creator = (f.__aio.actions as Record<string, unknown>)[key];
       if (typeof creator !== "function") continue;
       // deno-lint-ignore no-explicit-any
-      (send as Record<string, (...args: any[]) => Promise<void>>)[key] = (
+      (send as Record<string, (...args: any[]) => Promise<unknown>>)[key] = (
         ...args: unknown[]
       ) => {
         const msg = (creator as (...a: unknown[]) => Msg)(...args);
         if (!asyncMethods.has(key)) {
-          dispatch(msg);
-          return Promise.resolve();
+          // Sync method: dispatch runs the reducer now; resolve with its return.
+          return Promise.resolve(dispatch(msg));
         }
         // Async method: tag the dispatch with a callId so completion is
         // observable, and capture this send's own trigger effects.
@@ -173,13 +180,18 @@ export function testCell<
         // Lazy completion: dispatching stays synchronous (legacy tests see the
         // exact old behavior — no timers, no executor runs). Awaiting the
         // promise executes the trigger and resolves on real method completion.
-        let started: Promise<void> | null = null;
-        const start = (): Promise<void> => {
+        let started: Promise<unknown> | null = null;
+        const start = (): Promise<unknown> => {
           if (started) return started;
           const pending = myExecs.filter((e) => !executed.has(e));
           started = pending.length === 0
-            ? Promise.resolve() // machine-blocked, or already run via settle()
-            : Promise.all(pending.map(runExec)).then(drainMicrotasks);
+            ? Promise.resolve(undefined) // machine-blocked, or already run via settle()
+            // AIO-427: resolve with the method's transported return value (the
+            // last trigger's, matching production single-method dispatch).
+            : Promise.all(pending.map(runExec)).then(async (vals) => {
+              await drainMicrotasks();
+              return vals[vals.length - 1];
+            });
           return started;
         };
         return {
@@ -187,7 +199,7 @@ export function testCell<
           catch: (onR) => start().catch(onR),
           finally: (onC) => start().finally(onC),
           [Symbol.toStringTag]: "Promise",
-        } as Promise<void>;
+        } as Promise<unknown>;
       };
     }
 
@@ -279,7 +291,7 @@ export function testCell<
         // separately). AIO-379: async method triggers are awaited to real
         // completion — settle() is deterministic regardless of how long the
         // method takes. Each effect runs at most once across awaits/settles.
-        const completions: Promise<void>[] = [];
+        const completions: Promise<unknown>[] = [];
         for (const eff of lastEffects) {
           if (executed.has(eff)) continue;
           if ((eff as Msg).type === execType) {

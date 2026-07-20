@@ -6,7 +6,7 @@
 import type { ScheduleEffect } from "./schedule.ts";
 import type { OwnEffect } from "./own.ts";
 import type { FlowDef } from "./flow.ts";
-import type { CellMethods } from "./cell-impl.ts";
+import type { CellEffect, CellMethods } from "./cell-impl.ts";
 import type { SyncConfig } from "../sync/types.ts";
 
 /** Map of named action/effect creator functions */
@@ -144,9 +144,30 @@ export type CellReduceFn = (
   state: unknown,
   action: Msg,
   ctx?: Record<string, unknown>,
-) => (Msg | ScheduleEffect | OwnEffect)[] | void;
+  // AIO-427: besides the historic `effects[] | void`, a reducer may return a
+  // sync method's transported VALUE — wrapped in a RETURN_TAG envelope so it is
+  // never confused with a `Msg[]` effects array (which is untagged by shape).
+) => (Msg | ScheduleEffect | OwnEffect)[] | void | ReturnEnvelope;
 /** Internal executor function signature */
 export type CellExecuteFn = (app: ScopedApp, effect: Msg) => void;
+
+/** AIO-427: envelope tagging a sync method's transported RETURN value.
+ *  A reducer's array return has always meant "effects" — and `Msg` effects
+ *  (async `__exec`, explicit-action re-dispatches) are plain `{type,payload}`,
+ *  indistinguishable from data by shape. So a returned VALUE is wrapped in this
+ *  symbol-keyed envelope at the one ambiguous source (the sync-method branch);
+ *  everything else keeps the "array = effects" contract untouched. */
+const RETURN_TAG: unique symbol = Symbol("aioReturn");
+export type ReturnEnvelope = { [RETURN_TAG]: unknown };
+export function markReturn(value: unknown): ReturnEnvelope {
+  return { [RETURN_TAG]: value };
+}
+export function isReturnEnvelope(r: unknown): r is ReturnEnvelope {
+  return typeof r === "object" && r !== null && RETURN_TAG in r;
+}
+export function readReturn(env: ReturnEnvelope): unknown {
+  return env[RETURN_TAG];
+}
 
 /** Framework internals — all stored under cell.__aio, not for user code */
 export type CellAio<
@@ -313,10 +334,18 @@ export type DirectCalling<N extends string = string, M = unknown> = {
     M[K] extends (s: any, ...args: infer P) => Promise<infer R>
       ? ((...args: P) => Promise<R>) & MethodMeta<N, K, P>
       // deno-lint-ignore no-explicit-any
-      : M[K] extends (s: any, ...args: infer P) => any
-        ? ((...args: P) => Promise<void>) & MethodMeta<N, K, P>
+      : M[K] extends (s: any, ...args: infer P) => infer R
+        ? ((...args: P) => Promise<SyncReturn<R>>) & MethodMeta<N, K, P>
       : never;
 };
+
+/** A sync method's transported return type. A returned value flows to the caller
+ *  (`await cell.method()`), the same as an async method; `void`/`CellEffect`
+ *  returns (the "no value" cases) resolve `Promise<void>`. AIO-427 (risoto/inews):
+ *  a create-and-return-id no longer forces `async` + a require-await ignore. */
+type SyncReturn<R> =
+  [Exclude<Awaited<R>, CellEffect | void | undefined>] extends [never] ? void
+    : Exclude<Awaited<R>, CellEffect | void | undefined>;
 
 /** Public accessors attached to every bound method: the refactor-safe `.type`
  *  constant and `.action(...args)` descriptor builder (`{ type, payload }`).

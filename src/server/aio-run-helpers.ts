@@ -102,7 +102,7 @@ export function startVitalsCheck(opts: {
 
 /** Build the AioApp object — dispatch, getState, snapshot/loadSnapshot, close */
 export function buildAppObject<S, A>(refs: {
-  dispatch: (action: A) => Promise<void>;
+  dispatch: (action: A) => Promise<unknown>;
   getState: () => S;
   setState: (s: S) => void;
   port: number;

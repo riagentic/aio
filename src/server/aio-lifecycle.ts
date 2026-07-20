@@ -45,7 +45,7 @@ export interface LifecycleDeps<S, A> {
   udsHandle: UDSHandle | null;
   // App
   app: {
-    dispatch: (action: A) => Promise<void>;
+    dispatch: (action: A) => Promise<unknown>;
     getState: () => S;
     port?: number;
   };

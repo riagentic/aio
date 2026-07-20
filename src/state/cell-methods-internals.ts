@@ -10,11 +10,12 @@ import {
   resolveCall,
   setKey,
 } from "./cell-impl.ts";
-import type {
-  CellExecuteFn,
-  CellReduceFn,
-  Msg,
-  ScopedApp,
+import {
+  type CellExecuteFn,
+  type CellReduceFn,
+  markReturn,
+  type Msg,
+  type ScopedApp,
 } from "./cell-types.ts";
 import { type AioError, createAioError } from "../diagnostics/error.ts";
 import { log } from "../diagnostics/logger.ts";
@@ -133,7 +134,7 @@ export function buildMethodsReducer(
   return (
     state: unknown,
     action: Msg,
-  ): (Msg | ScheduleEffect | OwnEffect)[] | void => {
+  ): ReturnType<CellReduceFn> => {
     const s = state as Record<string, unknown>;
     const ownKey = actionTypeToKey.get(action.type);
     if (!ownKey) return;
@@ -184,7 +185,21 @@ export function buildMethodsReducer(
           log.error("cell", msg);
           return;
         }
-        return result ? (Array.isArray(result) ? result : [result]) : undefined;
+        // AIO-427: classify the sync method's return at its one ambiguous
+        // source. A single tagged effect → wrapped to the reducer's effects
+        // array; an all-effect array → passed through as effects; anything else
+        // (primitive, plain object, data array, `[]`) is a transported VALUE,
+        // wrapped in a RETURN_TAG envelope so compose-reduce never mistakes it
+        // for a `Msg[]` effects array.
+        if (result == null) return undefined;
+        if (isScheduleEffect(result) || isOwnEffect(result)) return [result];
+        if (
+          Array.isArray(result) && result.length > 0 &&
+          (isScheduleEffect(result[0]) || isOwnEffect(result[0]))
+        ) {
+          return result as (Msg | ScheduleEffect | OwnEffect)[];
+        }
+        return markReturn(result);
       }
       if (asyncMethods.has(ownKey)) {
         const p = (action.payload ?? {}) as Record<string, unknown>;
