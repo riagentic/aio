@@ -96,11 +96,16 @@ export function frameworkSpecs(source: boolean): {
   };
 }
 
-/** Build the app's `deno.json` — one `deno task` line per target so the app is
- *  runnable (`dev`) and buildable to a binary (`compile`), Electron desktop
- *  (`electron`), Android APK (`android`), and headless service (`service`). */
+/** Build the app's `deno.json`. Every dev + build target has a task that works
+ *  OUT OF THE BOX: `dev` defaults to the browser (instant, no toolchain), and
+ *  the electron tasks auto-install Electron. Android needs the Android SDK +
+ *  Gradle (the one toolchain aio can't fetch for you). */
 export function denoJson(name: string, source: boolean): string {
   const fw = frameworkSpecs(source);
+  // Electron is downloaded on demand by the electron tasks; declaring it keeps
+  // `deno install --allow-scripts=npm:electron` resolvable. Browser dev/compile
+  // never touch it.
+  const electronInstall = "deno install --allow-scripts=npm:electron";
   const obj = {
     title: name,
     version: "0.1.0",
@@ -111,15 +116,20 @@ export function denoJson(name: string, source: boolean): string {
       jsx: "react-jsx",
       jsxImportSource: "aio",
     },
-    imports: fw.imports,
+    imports: { ...fw.imports, electron: "npm:electron" },
     tasks: {
-      dev: "deno run -A src/app.ts",
+      // ── dev: default is the browser (zero install, always works) ──
+      dev: "deno run -A src/app.ts --client=browser",
+      "dev:browser": "deno run -A src/app.ts --client=browser",
+      "dev:electron": `${electronInstall} && deno run -A src/app.ts --client=electron`,
+      // Android UI is a WebView — preview it in the browser; ship it via compile:android.
+      "dev:android": "deno run -A src/app.ts --client=browser",
+      // ── compile: default is a single self-contained binary ──
       compile: `deno run -A ${fw.build} --compile`,
-      electron: `deno run -A ${fw.build} --compile --electron`,
-      android: `deno run -A ${fw.build} --android`,
-      service: `deno run -A ${fw.build} --compile --service --headless`,
-      "compile:client": `deno run -A ${fw.build} --client`,
-      "install:electron": "deno install --allow-scripts=npm:electron",
+      "compile:browser": `deno run -A ${fw.build} --compile`,
+      "compile:electron": `${electronInstall} && deno run -A ${fw.build} --compile --electron`,
+      "compile:android": `deno run -A ${fw.build} --android`,
+      "install:electron": electronInstall,
       test: "deno test -A",
       am: `deno run -A ${fw.am}`,
       doctor: `deno run -A ${fw.doctor}`,
@@ -275,12 +285,12 @@ export async function cmdCreate(
       "",
       `  ${dim("run it")}`,
       `    cd ${opts.name}`,
-      `    ${cyan("deno task dev")}       ${dim("→ opens in your browser")}`,
+      `    ${cyan("deno task dev")}            ${dim("→ browser (· dev:electron · dev:android)")}`,
       "",
-      `  ${dim("ship it — one line each")}`,
-      `    ${cyan("deno task compile")}   ${dim("→ a single binary")}`,
-      `    ${cyan("deno task electron")}  ${dim("→ desktop app")}`,
-      `    ${cyan("deno task android")}   ${dim("→ APK")}`,
+      `  ${dim("ship it")}`,
+      `    ${cyan("deno task compile")}        ${dim("→ a single binary")}`,
+      `    ${cyan("deno task compile:electron")} ${dim("→ desktop AppImage")}`,
+      `    ${cyan("deno task compile:android")}  ${dim("→ Android APK")}`,
       "",
       `  ${dim("also:")} ${cyan("deno task test")} ${dim("·")} ${
         cyan("deno task am status")
@@ -336,11 +346,11 @@ function readme(name: string, template: Template): string {
 An [aio](https://github.com/riagentic/aio) app (${template} template).
 
 \`\`\`sh
-deno task dev          # run in the browser
-deno task test         # run the starter test
-deno task compile      # build a single binary
-deno task electron     # build a desktop app
-deno task android      # build an Android APK
+deno task dev              # run — browser (also dev:electron, dev:android)
+deno task test             # run the starter test
+deno task compile          # build a single binary (also compile:browser)
+deno task compile:electron # build a desktop AppImage
+deno task compile:android  # build an Android APK (needs ANDROID_HOME + Gradle)
 \`\`\`
 
 State lives in \`src/cell.ts\`, UI in \`src/App.tsx\`, entry in \`src/app.ts\`.

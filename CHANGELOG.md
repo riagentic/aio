@@ -17,6 +17,11 @@ field-report only.
   `dep/aio` **symlink** to the clone, so its `deno.json` stays relative and
   portable (only the symlink is machine-specific, gitignored). `--jsr` remains
   an opt-in for pinned JSR consumption.
+- **Every dev + build target works out of the box.** `deno task dev` defaults to
+  the **browser** (instant — no Electron download, no toolchain). Explicit
+  `dev:browser` / `dev:electron` (auto-installs Electron) / `dev:android`, and
+  `compile` (binary) / `compile:browser` / `compile:electron` (AppImage) /
+  `compile:android` (APK — needs `ANDROID_HOME` + Gradle) are all wired.
 - **README rewritten** to four onboarding lines + a one-row-per-feature table +
   a logo. "Batteries included: persistence + state + UI."
 
