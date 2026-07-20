@@ -29,12 +29,16 @@ export type CellEffect =
   | OwnEffect
   | (ScheduleEffect | OwnEffect)[];
 
-/** Synchronous cell method — mutates state, optionally returns effects */
+/** Synchronous cell method — mutates state; may return a `CellEffect` (to
+ *  schedule work) OR a plain VALUE that `await cell.method()` resolves with
+ *  (AIO-427). Effects are tagged (`type: "__schedule"/"__own"`), so a returned
+ *  value is unambiguous at runtime. `unknown` keeps the constraint permissive;
+ *  the caller-side return type is inferred precisely by DirectCalling. */
 export type SyncMethod<S> = (
   s: S,
   // deno-lint-ignore no-explicit-any
   ...args: any[]
-) => void | CellEffect;
+) => unknown;
 /** Async cell method — runs in executor, mutations batched via proxy */
 // deno-lint-ignore no-explicit-any
 export type AsyncMethod<S> = (s: S, ...args: any[]) => Promise<any>;

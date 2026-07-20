@@ -94,8 +94,9 @@ export type DispatchDeps<S, A, E> = {
 };
 
 /** Dispatch function with close() to reject further actions.
- *  Returns Promise<void> that resolves after action is fully processed (reduce + sync effects). */
-type DispatchFn<A> = ((action: A) => Promise<void>) & {
+ *  Resolves after the action is fully processed (reduce + sync effects) with
+ *  the method's transported return value, or undefined (AIO-427). */
+type DispatchFn<A> = ((action: A) => Promise<unknown>) & {
   close: () => void;
   drain: () => Promise<void>;
   errorCount: () => number;
@@ -143,7 +144,7 @@ export function createDispatch<S, A, E>(
   const warnedInvalidEffect = new Set<string>();
   const queue: {
     action: A;
-    resolve: () => void;
+    resolve: (value?: unknown) => void; // AIO-427: carries a method's return value
     reject: (e: AioError) => void;
     cid: string;
   }[] = [];
@@ -194,7 +195,7 @@ export function createDispatch<S, A, E>(
     return p;
   }
 
-  function dispatch(action: A): Promise<void> {
+  function dispatch(action: A): Promise<unknown> {
     if (closed) {
       const t = String(
         (action as Record<string, unknown>)?.type ?? "(unknown)",
@@ -222,9 +223,9 @@ export function createDispatch<S, A, E>(
       reportAioError(err, _reportOpts);
       return rejectDropped(err);
     }
-    let resolve!: () => void;
+    let resolve!: (value?: unknown) => void;
     let reject!: (e: AioError) => void;
-    const promise = new Promise<void>((r, rej) => {
+    const promise = new Promise<unknown>((r, rej) => {
       resolve = r;
       reject = rej as (e: AioError) => void;
     });
@@ -272,7 +273,11 @@ export function createDispatch<S, A, E>(
         const current = entry.action;
         if (deps.debug) log.debug(`action → reduce: ${tag(current)}`);
 
-        let reduced: { state: S; effects: (E | ScheduleEffect | OwnEffect)[] };
+        let reduced: {
+          state: S;
+          effects: (E | ScheduleEffect | OwnEffect)[];
+          ret?: unknown; // AIO-427: transported return value
+        };
         const actionType = (current as Record<string, unknown>)?.type as
           | string
           | undefined;
@@ -530,7 +535,7 @@ export function createDispatch<S, A, E>(
             breakdown: getBreakdown?.(),
           });
         }
-        entry.resolve();
+        entry.resolve(reduced.ret);
         clearCorrelationId();
       }
 
