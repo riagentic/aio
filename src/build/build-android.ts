@@ -3,7 +3,7 @@
  * Build Android — generates Android project from template, builds APK via Gradle.
  */
 import { dirname, join } from "@std/path";
-import { findGradle } from "./build-helpers.ts";
+import { findGradle, findJdk } from "./build-helpers.ts";
 import { ANDROID_TEMPLATE } from "./android-template.ts";
 import type { BuildConfig } from "./build-config.ts";
 
@@ -211,10 +211,29 @@ async function _runGradle(
     Deno.exit(1);
   }
 
+  // Gradle compiles with the JVM it runs on — a JRE has `java` but no `javac`,
+  // which fails as "Toolchain … does not provide … [JAVA_COMPILER]". Pin
+  // JAVA_HOME to a real JDK (with javac) so gradlew launches on it; fail loud
+  // with install steps when the machine only has a JRE.
+  const jdkHome = findJdk();
+  if (!jdkHome) {
+    console.error(
+      "[android] ✗ no JDK with javac found — Android builds need a full JDK (a JRE is not enough)",
+    );
+    console.error("  install one, then retry:");
+    console.error("    • Debian/Ubuntu: sudo apt install openjdk-21-jdk");
+    console.error("    • macOS:         brew install openjdk@21");
+    console.error(
+      "    • or set JAVA_HOME to an existing JDK (must contain bin/javac)",
+    );
+    Deno.exit(1);
+  }
+  console.log(`[android] ✓ JDK ${jdkHome}`);
+
   const gradleEnv = {
     ...Deno.env.toObject(),
     ANDROID_HOME: androidHome,
-    JAVA_HOME: Deno.env.get("JAVA_HOME") ?? "",
+    JAVA_HOME: jdkHome,
   };
 
   // Generate gradle wrapper — pins version for reproducible builds (AGP 8.7.x needs Gradle 8.9+)
