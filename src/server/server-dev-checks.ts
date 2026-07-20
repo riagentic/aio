@@ -95,14 +95,13 @@ export function startGraphValidation(
   const done = validateGraph(entrypoint, importMapObj, graphTranspile)
     .then((result) => {
       graphResult = result;
-      const warnings = result.errors.filter((e) =>
-        e.category === "server-only-api" ||
-        e.category === "circular-dependency"
-      );
-      const blocking = result.errors.filter((e) =>
-        e.category !== "server-only-api" &&
-        e.category !== "circular-dependency"
-      );
+      // server-only-import is a GUARANTEED client break (sandboxed renderer
+      // can't load node:/omitted-aio-symbols) → blocking. server-only-api
+      // (conditional Deno.* / maybe-safe @std) + circular imports are warnings.
+      const isWarning = (c: string) =>
+        c === "server-only-api" || c === "circular-dependency";
+      const warnings = result.errors.filter((e) => isWarning(e.category));
+      const blocking = result.errors.filter((e) => !isWarning(e.category));
       if (result.valid) {
         debug(
           `graph: ✓ ${result.modules.size} modules validated (${
