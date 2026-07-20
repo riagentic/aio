@@ -12,7 +12,12 @@
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { join, resolve } from "@std/path";
 import { scaffold } from "../src/am/am-cmd-create.ts";
-import { findJdk, findGradle, GRADLE_MAX_JDK } from "../src/build/build-helpers.ts";
+import {
+  findGradle,
+  findJdk,
+  GRADLE_MAX_JDK,
+  resolveSdk,
+} from "../src/build/build-helpers.ts";
 
 const REPO_ROOT = resolve(import.meta.dirname!, "..");
 const GATE = Deno.env.get("AIO_ONBOARD_E2E") === "1";
@@ -307,9 +312,7 @@ Deno.test({
   fn: async () => {
     const dir = await makeApp();
     try {
-      const hasSdk = !!(Deno.env.get("ANDROID_HOME") ??
-        Deno.env.get("ANDROID_SDK_ROOT"));
-      const capable = hasSdk && !!findGradle() && !!findJdk().home;
+      const capable = !!resolveSdk() && !!findGradle() && !!findJdk().home;
 
       const r = await task(dir, "compile:android");
       const msg = r.out + r.err;
@@ -348,22 +351,25 @@ Deno.test({
       const dj = JSON.parse(await Deno.readTextFile(join(dir, "deno.json"))) as {
         tasks: Record<string, string>;
       };
+      // Runs the emulator orchestrator — never a silent browser fallback.
       assertStringIncludes(dj.tasks["dev:android"] ?? "", "dev-android.ts");
 
-      // With no Android SDK, it must exit non-zero naming ANDROID_HOME — not
-      // silently fall back to the browser.
-      const p = await new Deno.Command("deno", {
-        args: ["task", "dev:android"],
-        cwd: dir,
-        env: { ...Deno.env.toObject(), ANDROID_HOME: "", ANDROID_SDK_ROOT: "" },
-        stdout: "piped",
-        stderr: "piped",
-      }).output();
-      assert(p.code !== 0, "expected non-zero exit without the Android SDK");
-      assertStringIncludes(
-        dec.decode(p.stdout) + dec.decode(p.stderr),
-        "ANDROID_HOME",
-      );
+      // On a machine with no SDK, it must exit non-zero with clear guidance.
+      // (When an SDK IS present, the full boot→build→install→launch flow needs a
+      // live emulator, so it's exercised manually rather than in the gate.)
+      if (!resolveSdk()) {
+        const p = await new Deno.Command("deno", {
+          args: ["task", "dev:android"],
+          cwd: dir,
+          stdout: "piped",
+          stderr: "piped",
+        }).output();
+        assert(p.code !== 0, "expected non-zero exit without the Android SDK");
+        assertStringIncludes(
+          dec.decode(p.stdout) + dec.decode(p.stderr),
+          "SDK",
+        );
+      }
     } finally {
       await Deno.remove(dir, { recursive: true });
     }
