@@ -22,11 +22,18 @@ field-report only.
   `dev:browser` / `dev:electron` (auto-installs Electron) / `dev:android`, and
   `compile` (binary) / `compile:browser` / `compile:electron` (AppImage) /
   `compile:android` (APK — needs `ANDROID_HOME` + Gradle + a JDK) are all wired.
-- **Android build finds a real JDK.** Gradle compiles with the JVM it runs on,
-  so a JRE (no `javac`) failed cryptically as `Toolchain … [JAVA_COMPILER]`. The
-  build now locates a JDK **with `javac`** (`JAVA_HOME`, `/usr/lib/jvm/*`,
-  Android Studio's bundled JBR, PATH), pins `JAVA_HOME` to it, and — when the
-  machine only has a JRE — fails loud with the install command instead.
+- **Android build finds a real, Gradle-runnable JDK.** Gradle compiles with (and
+  its daemon runs on) the JVM `JAVA_HOME` points to. A JRE (no `javac`) failed as
+  `Toolchain … [JAVA_COMPILER]`; a too-new JDK (e.g. 25) crashed Gradle at startup
+  (`* What went wrong: 25.0.3`). The build now selects a JDK **with `javac`** whose
+  major version Gradle 8.12.1 supports (≤ 23, preferring LTS 17/21) from
+  `JAVA_HOME`, `/usr/lib/jvm/*`, Android Studio's bundled JBR, and PATH — and
+  fails loud, naming the reason (JRE-only vs. too-new), otherwise.
+- **Onboarding is now gated by a real E2E suite** (`deno task test:onboard`):
+  runs `install.sh` (clone + `am`), scaffolds counter/todo, boots the browser dev
+  server and hits it over HTTP, compiles the binary and boots *it*, and drives
+  `compile:android` (builds the APK when the SDK+JDK are present, else asserts the
+  clear guidance) + `compile:electron`. No release ships unless it's green.
 - **README rewritten** to four onboarding lines + a one-row-per-feature table +
   a logo. "Batteries included: persistence + state + UI."
 

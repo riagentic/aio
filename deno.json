@@ -91,6 +91,7 @@
   },
   "tasks": {
     "test": "deno test -A tests/",
+    "test:onboard": "AIO_ONBOARD_E2E=1 deno test -A --no-check=remote tests/onboarding-e2e.test.ts",
     "coverage:check": "deno test -A --coverage=coverage tests/ && deno cache mod.ts src/air.ts src/browser-air.ts src/standalone-air.ts src/cell-test.ts src/am.ts src/build.ts aiol/mod.ts && deno coverage coverage --lcov --output=coverage/lcov.info && deno run --allow-read scripts/check-coverage.ts",
     "test:core": "deno test -A --ignore=tests/am.test.ts,tests/build.test.ts,tests/server.test.ts,tests/tls.test.ts,tests/single-instance-lock.test.ts,tests/cli.test.ts,tests/cli-client.test.ts,tests/electron-ipc.test.ts,tests/app-modes.test.ts,tests/examples.test.ts,tests/e2e-ui-chromium.test.ts,tests/e2e-remote-lan.test.ts,tests/zero-config.test.ts,tests/cli-bound-cells.test.ts,tests/e2e-blank-screen.test.ts,tests/e2e-bundle-smoke.test.ts,tests/e2e-sync-browser.test.ts tests/",
     "check": "deno check src/ mod.ts aiol/mod.ts examples/",
