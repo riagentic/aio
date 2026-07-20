@@ -73,6 +73,26 @@ actions, effects, machine guards, reducer, and executor.
 \* `methods` or `actions` required (or `generators` alone). All three styles can
 coexist — all callable names must be unique within the cell.
 
+> ### ⚠️ Two TypeScript traps to know first
+>
+> **Don't `satisfies` your `state`.** `state: {...} satisfies MyState` narrows
+> union fields to their literal type, so inside methods the Immer draft rejects
+> assignment (`Type 'ViewMode' is not assignable to type '"grid"'`) — and the
+> error points at the method body, not the annotation. Use `as` casts on the
+> union-typed initial values instead:
+>
+> ```ts
+> // ❌ narrows view to the literal "grid" — methods can't reassign it
+> state: { view: "grid", items: [] } satisfies UiState,
+> // ✅ keeps the union type
+> state: { view: "grid" as ViewMode, items: [] },
+> ```
+>
+> **Don't put generics on methods.** `setFilter<K extends keyof F>(s, k, v)`
+> breaks inference for `s` (it falls back to `any`, which strict mode rejects).
+> Keep methods non-generic; narrow inside the body, or take a concrete key type.
+> (Selectors are callable everywhere — server *and* browser: `cell.count()`.)
+
 ---
 
 ## What cell() generates
@@ -178,10 +198,14 @@ Every `yield*` creates a named action in time-travel history.
 
 ### Selectors
 
-Pure functions deriving values from cell state.
+Pure functions deriving values from cell state. Bound as zero-arg accessors on
+the cell (`cell.count()`), callable the same way **server-side and in the
+browser** (they run against the live client signal).
 
-**Can:** read full cell state, compose other selectors. **Cannot:** mutate,
-dispatch, async, access other cells' state.
+**Can:** read own cell state; read other cells via the **deps form**
+(`{ deps: ["other"], fn: (s, other) => … }`); compose. **Cannot:** mutate,
+dispatch, run async, or take runtime arguments (a selector is `(s) => T` — for
+parameterized derivations, inline the logic or use a method).
 
 ### Lifecycle hooks
 

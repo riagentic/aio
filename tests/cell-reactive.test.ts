@@ -307,3 +307,56 @@ Deno.test("AIO-6.1: actions cell throws when a state key collides with an action
   assertEquals(caught!.message.includes("collides with action 'error'"), true);
   _resetCellRegistry();
 });
+
+// AIO-422 (realitio): selectors must be callable on the BROWSER cell too — they
+// existed only server-side, so `cell.count()` threw `is not a function` in the
+// browser with no boot/typecheck warning (a "quiet lie" vs the docs).
+Deno.test("bindCellReactive binds selectors (own-slice) callable in browser", () => {
+  _resetCellRegistry();
+  _resetSignals();
+  const c = cell("sel", {
+    state: { items: [] as number[] },
+    methods: { add(s: { items: number[] }, n: number) { s.items.push(n); } },
+    selectors: {
+      count: (s: { items: number[] }) => s.items.length,
+      sum: (s: { items: number[] }) => s.items.reduce((a, b) => a + b, 0),
+    },
+  });
+  bindCellReactive(c);
+  // deno-lint-ignore no-explicit-any
+  const cc = c as any;
+  assertEquals(typeof cc.count, "function", "selector is callable in browser");
+  assertEquals(cc.count(), 0);
+  getCellSignal("sel").set({ items: [2, 3, 5] });
+  assertEquals(cc.count(), 3, "reflects signal update");
+  assertEquals(cc.sum(), 10);
+  _resetCellRegistry();
+  _resetSignals();
+});
+
+Deno.test("bindCellReactive: deps-form selector reads another cell in browser", () => {
+  _resetCellRegistry();
+  _resetSignals();
+  const users = cell("users", { state: { list: [] as string[] }, methods: {} });
+  const stats = cell("stats", {
+    state: { threshold: 1 },
+    methods: {},
+    selectors: {
+      // deps-form: reads the `users` cell's slice via full state
+      overThreshold: {
+        deps: ["users"],
+        fn: (s: { threshold: number }, u: unknown) =>
+          (u as { list: string[] }).list.length >= s.threshold,
+      },
+    },
+  });
+  bindCellReactive(users);
+  bindCellReactive(stats);
+  // deno-lint-ignore no-explicit-any
+  const ss = stats as any;
+  assertEquals(ss.overThreshold(), false, "0 users < threshold 1");
+  getCellSignal("users").set({ list: ["alice"] });
+  assertEquals(ss.overThreshold(), true, "cross-cell selector sees users update");
+  _resetCellRegistry();
+  _resetSignals();
+});

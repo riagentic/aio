@@ -30,6 +30,8 @@ export interface ServerConfig {
   resolveUser?: (token: string) => AioUser | null | Promise<AioUser | null>; // dynamic user resolution (AIO-171)
   showStatus?: boolean; // show reconnection indicator (default: true)
   uiEntry?: string; // AIO-8.1: UI entry file relative to baseDir (default: App.tsx)
+  viewport?: string | false; // AIO-423: <meta viewport> override (false = omit)
+  headExtra?: string; // AIO-423: verbatim extra <head> content
   renderBudget?: RenderBudget; // sent to browser for RenderMeter thresholds
   fullStateThreshold?: number; // 0-1: ratio of changed keys for delta vs full broadcast (default: 0.5)
   maxConnections?: number; // max concurrent WebSocket clients (default: 100)

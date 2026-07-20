@@ -6,7 +6,7 @@
 
 import type { CellDef } from "./cell-types.ts";
 import { attachMeta } from "./cell-catalog.ts";
-import { getCellSignal } from "./state-signals.ts";
+import { _cellSignals, getCellSignal } from "./state-signals.ts";
 import { _registerAck } from "../protocol/browser-ack.ts";
 import { trackPath } from "./state-subs.ts";
 
@@ -112,6 +112,45 @@ export function bindCellReactive(
       enumerable: false,
       configurable: true,
     });
+  }
+
+  // AIO-422 (realitio): bind selectors on the browser cell too — they're pure
+  // functions over state, so `cell.count()` must work client-side exactly as it
+  // does server-side. Before this they existed only on the server; the browser
+  // cell had no accessor and `listings.count()` threw `is not a function` at
+  // runtime with no boot warning — the "quiet lie" the docs promised against.
+  // Mirrors the server bind (cell-catalog.ts): zero-arg accessor,
+  // selectorFn(ownSlice, fullState). The `fullState` is a lazy Proxy so a
+  // deps-form selector reading another cell tracks ONLY the cells it touches
+  // (precise subscriptions), and a plain own-slice selector subscribes to just
+  // its own cell.
+  const selectors = def.__aio.selectors as
+    | Record<string, (s: unknown, fullState?: unknown) => unknown>
+    | undefined;
+  if (selectors) {
+    for (const [key, selectorFn] of Object.entries(selectors)) {
+      if (typeof (def as Record<string, unknown>)[key] === "function") continue;
+      Object.defineProperty(def, key, {
+        value: () => {
+          trackPath(cellName);
+          const own = (sig.value ?? initialState) as Record<string, unknown>;
+          const full = new Proxy({} as Record<string, unknown>, {
+            get(_t, prop) {
+              if (typeof prop !== "string") return undefined;
+              if (prop === cellName) return own;
+              const other = _cellSignals.get(prop);
+              if (!other) return undefined;
+              trackPath(prop);
+              return other.value;
+            },
+          });
+          return selectorFn(own, full);
+        },
+        enumerable: false,
+        configurable: true,
+        writable: true,
+      });
+    }
   }
 
   // AIO-5.1: client-scoped cells — methods run locally against the cell signal,

@@ -20,6 +20,13 @@ function _safeUiEntry(uiEntry: string): string {
 }
 
 /** Builds the common <head> content shared across all modes */
+/** Default viewport — responsive, mobile-correct. Overridable via ui.viewport.
+ *  AIO-423 (realitio): without this, mobile Chrome falls back to a 980px layout
+ *  viewport and every app renders shrunken by default ("mobile broken by
+ *  default"). This is mobile 101 and must be the out-of-the-box behaviour. */
+const DEFAULT_VIEWPORT =
+  "width=device-width, initial-scale=1, viewport-fit=cover";
+
 function headContent(
   title: string,
   hasCSS: boolean,
@@ -27,6 +34,8 @@ function headContent(
   width?: number,
   height?: number,
   renderBudget?: RenderBudget,
+  viewport?: string | false,
+  headExtra?: string,
 ): string {
   const cssLink = hasCSS ? '\n  <link rel="stylesheet" href="/style.css">' : "";
   const statusScript = showStatus === false
@@ -41,11 +50,20 @@ function headContent(
   const metaH = height
     ? `\n  <meta name="aio:height" content="${height}">`
     : "";
+  // ui.viewport === false opts out (rare fixed-width layouts); a string overrides.
+  const metaViewport = viewport === false
+    ? ""
+    : `\n  <meta name="viewport" content="${
+      escHtml(viewport || DEFAULT_VIEWPORT)
+    }">`;
+  // ui.head — verbatim <head> content (meta description, OG tags, favicon,
+  // fonts). Not escaped: it's trusted author config, like the CSS link.
+  const extra = headExtra ? `\n  ${headExtra}` : "";
   return `  <meta charset="UTF-8">
-  <meta name="referrer" content="no-referrer">
+  <meta name="referrer" content="no-referrer">${metaViewport}
   <title>${
     escHtml(title)
-  }</title>${metaW}${metaH}${cssLink}${statusScript}${configScript}`;
+  }</title>${metaW}${metaH}${cssLink}${statusScript}${configScript}${extra}`;
 }
 
 /** Generates the HTML shell — dev: CDN import map + live-transpiled App.tsx, prod: self-contained app.js */
@@ -59,6 +77,8 @@ export function generateHTML(
   height?: number,
   renderBudget?: RenderBudget,
   uiEntry = "App.tsx", // AIO-8.1: convention default, override via ui.entry
+  viewport?: string | false, // ui.viewport override (false = opt out)
+  headExtra?: string, // ui.head — verbatim <head> content
 ): string {
   const head = headContent(
     title,
@@ -67,6 +87,8 @@ export function generateHTML(
     width,
     height,
     renderBudget,
+    viewport,
+    headExtra,
   );
 
   if (prod) return prodHTML(head);
