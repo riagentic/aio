@@ -3,6 +3,7 @@
 import type { CellDef, Creators, Msg } from "./cell-types.ts";
 import { checkReservedKeys } from "./cell-types.ts";
 import { registerCall } from "./cell-impl.ts";
+import { randomUuid } from "../rand.ts";
 
 /** Wrap a raw action creator with a guard for the pre-binding state. Calling a
  *  method before the runtime is booted ALWAYS throws (dev + prod) — a pre-boot
@@ -122,7 +123,7 @@ export function bindCell(
     if (isAsync) {
       // Async methods: dispatch with _callId, return Promise that resolves with the method's return value
       const fn = (...args: unknown[]) => {
-        const callId = crypto.randomUUID();
+        const callId = randomUuid();
         const promise = registerCall(callId);
         const action = (creator as (...a: unknown[]) => Msg)(...args);
         dispatch({
