@@ -110,6 +110,32 @@ const orders = cell("orders", {
 Immer guarantees new array references on mutation. Framework detects via `!==`
 and syncs only affected tables.
 
+> **A `db:` table name must not collide with a cell.** A `db:` table maps to the
+> top-level state slice of the same name, which must **be an array**. If you name
+> a table after a cell (whose slice is an object, e.g. `{ nfts: [...] }`), the
+> table's rows would overwrite that object slice at boot and break the cell's
+> methods — so aio **throws at boot**, naming both. Rename the table
+> (`nft_rows`), or point it at a genuinely array-root slice. To persist a cell's
+> nested array field, use direct `createDB` (below) rather than `db:` auto-sync.
+
+## Testing with an in-memory DB
+
+`createDB(":memory:")` opens an ephemeral, file-less SQLite DB in a single
+Worker — ideal for unit tests: no temp file, deterministic, and closed with
+`await db.close()`. An in-memory DB can't be shared across Workers, so the
+`readers` option is ignored for `:memory:` (each reader would get its own empty
+DB); it stays writer-only.
+
+```ts
+const db = createDB(":memory:");
+try {
+  await db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)");
+  // …exercise the real query/execute/transaction paths…
+} finally {
+  await db.close();
+}
+```
+
 ## Direct SQL access (`app.db`)
 
 ```ts
