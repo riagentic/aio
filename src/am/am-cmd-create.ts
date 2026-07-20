@@ -24,8 +24,11 @@ export type CreateOpts = {
   name?: string;
   template: Template;
   force: boolean;
-  /** Framework-dev: import aio from a local repo copy instead of JSR. */
+  /** Explicit path to an aio checkout to import from (overrides the default,
+   *  which is the checkout `am` itself runs from). */
   mirror?: string;
+  /** Opt into JSR-pinned imports instead of the source default. */
+  jsr?: boolean;
 };
 
 /** Parse positional name + create-scoped flags out of the raw args. Unknown
@@ -34,6 +37,7 @@ export function parseCreateArgs(args: string[]): CreateOpts {
   const opts: CreateOpts = { template: "counter", force: false };
   for (const a of args) {
     if (a === "--force") opts.force = true;
+    else if (a === "--jsr") opts.jsr = true;
     else if (a === "--mirror" || a === "--dev") opts.mirror = "";
     else if (a.startsWith("--mirror=")) opts.mirror = a.slice(9);
     else if (a.startsWith("--template=")) {
@@ -43,34 +47,37 @@ export function parseCreateArgs(args: string[]): CreateOpts {
   return opts;
 }
 
-/** Framework import specifiers — JSR-pinned by default (version-locked to this
- *  am), or local-repo paths in mirror mode. */
-export function frameworkSpecs(mirrorRoot?: string): {
+/** Framework import specifiers. SOURCE mode (default) points at a `dep/aio`
+ *  SYMLINK → the aio checkout, so the app's deno.json is portable (relative);
+ *  the symlink is the only machine-specific bit. JSR mode (`--jsr`) pins to the
+ *  published version. `source=false` selects JSR. */
+export function frameworkSpecs(source: boolean): {
   imports: Record<string, string>;
   build: string;
   am: string;
   doctor: string;
   aiol: string;
 } {
-  if (mirrorRoot) {
-    // Consuming framework SOURCE — the app's map must also carry the source's
-    // own bare deps (esbuild/immer/…), which JSR would otherwise resolve.
+  if (source) {
+    // Consuming framework SOURCE via the `dep/aio` symlink — the app's map must
+    // also carry the source's own bare deps (esbuild/immer/@std), which JSR
+    // would otherwise resolve transitively (inews #10).
     return {
       imports: {
-        "aio": `${mirrorRoot}/mod.ts`,
-        "aio/air": `${mirrorRoot}/src/air.ts`,
-        "aio/jsx-runtime": `${mirrorRoot}/src/jsx-runtime.ts`,
-        "aio/testing": `${mirrorRoot}/src/cell-test.ts`,
+        "aio": "./dep/aio/mod.ts",
+        "aio/air": "./dep/aio/src/air.ts",
+        "aio/jsx-runtime": "./dep/aio/src/jsx-runtime.ts",
+        "aio/testing": "./dep/aio/src/cell-test.ts",
         "esbuild": "npm:esbuild@^0.24",
         "immer": "npm:immer@^10",
         "happy-dom": "npm:happy-dom@^17",
         "@std/path": "jsr:@std/path@^1",
         "@std/assert": "jsr:@std/assert@^1",
       },
-      build: `${mirrorRoot}/src/build.ts`,
-      am: `${mirrorRoot}/src/am.ts`,
-      doctor: `${mirrorRoot}/src/server/doctor.ts`,
-      aiol: `${mirrorRoot}/aiol/mod.ts`,
+      build: "./dep/aio/src/build.ts",
+      am: "./dep/aio/src/am.ts",
+      doctor: "./dep/aio/src/server/doctor.ts",
+      aiol: "./dep/aio/aiol/mod.ts",
     };
   }
   // JSR: the published package resolves its own deps, so the app map stays tiny.
@@ -92,8 +99,8 @@ export function frameworkSpecs(mirrorRoot?: string): {
 /** Build the app's `deno.json` — one `deno task` line per target so the app is
  *  runnable (`dev`) and buildable to a binary (`compile`), Electron desktop
  *  (`electron`), Android APK (`android`), and headless service (`service`). */
-export function denoJson(name: string, mirrorRoot?: string): string {
-  const fw = frameworkSpecs(mirrorRoot);
+export function denoJson(name: string, source: boolean): string {
+  const fw = frameworkSpecs(source);
   const obj = {
     title: name,
     version: "0.1.0",
@@ -125,20 +132,22 @@ export function denoJson(name: string, mirrorRoot?: string): string {
 const GITIGNORE = `.aio/
 dist/
 node_modules/
+dep/
 *.sqlite
 `;
 
-/** Full file set for a new project — pure (path → content), no disk I/O. */
+/** Full file set for a new project — pure (path → content), no disk I/O.
+ *  `source` selects the framework mode (dep/aio symlink vs JSR pins). */
 export function scaffold(
   name: string,
   template: Template,
-  mirrorRoot?: string,
+  source: boolean,
 ): Record<string, string> {
   // `src/`-based layout: aio infers baseDir from the entry (so `dev` finds
   // src/App.tsx), and the compile pipeline (build.ts) expects src/App.tsx too —
   // one layout that satisfies both `deno task dev` and `deno task compile`.
   const files: Record<string, string> = {
-    "deno.json": denoJson(name, mirrorRoot),
+    "deno.json": denoJson(name, source),
     ".gitignore": GITIGNORE,
     "src/app.ts": template === "todo" ? TODO_APP : COUNTER_APP,
     "src/cell.ts": template === "todo" ? TODO_CELL : COUNTER_CELL,
@@ -191,42 +200,52 @@ export async function cmdCreate(
     }
   } catch { /* doesn't exist — good */ }
 
-  // Mirror path resolves to the framework repo this am runs from (dev only).
-  let mirrorRoot: string | undefined;
-  if (opts.mirror !== undefined) {
-    const root = opts.mirror
-      ? resolve(Deno.cwd(), opts.mirror)
-      : repoRoot();
+  // DEFAULT is SOURCE mode: the app imports aio through a `dep/aio` SYMLINK to
+  // the checkout `am` runs from (the clone install.sh made, or this repo in
+  // dev) — no JSR, no publish. `--mirror=<path>` overrides the source location;
+  // `--jsr` opts into JSR pins.
+  const source = !opts.jsr;
+  let aioPath: string | undefined; // symlink target (source mode only)
+  if (source) {
+    const root = opts.mirror ? resolve(Deno.cwd(), opts.mirror) : repoRoot();
     if (!root) {
       outError(
-        "--mirror needs the framework repo — run am from the repo, or pass --mirror=<path-to-aio>",
+        "can't locate the aio source am runs from — reinstall via install.sh, " +
+          "pass --mirror=<path-to-aio>, or use --jsr to pin from JSR.",
         mode,
       );
       return;
     }
-    mirrorRoot = root;
-  }
-
-  // Dev footgun guard: an `am` running from the framework repo (not JSR-
-  // installed) pins the app to `jsr:@riagentic/aio@${VERSION}` — which may be
-  // an UNPUBLISHED dev version, so the app's `deno task dev` would fail to
-  // resolve. Real users (JSR-installed am) always report a published VERSION,
-  // so this only fires for framework devs — tell them to use --mirror.
-  if (!mirrorRoot && repoRoot() && !flags.json) {
+    aioPath = root;
+  } else if (repoRoot() && !flags.json) {
+    // --jsr from a source checkout: the pinned version must actually be on JSR.
     console.error(
-      `⚠ am is running from the framework source — the new app pins ` +
-        `jsr:${PKG}@${VERSION}, which may be unpublished.\n` +
-        `  For local framework work, re-run with --mirror to import aio from this repo.`,
+      `⚠ --jsr pins jsr:${PKG}@${VERSION} — make sure that version is published, ` +
+        `or the app's deno task dev won't resolve.`,
     );
   }
 
-  const files = scaffold(opts.name, opts.template, mirrorRoot);
+  const files = scaffold(opts.name, opts.template, source);
   await Deno.mkdir(dir, { recursive: true });
   for (const [rel, content] of Object.entries(files)) {
     const path = resolve(dir, rel);
     // Nested paths (src/app.ts) need their parent dir created first.
     await Deno.mkdir(resolve(path, ".."), { recursive: true });
     await Deno.writeTextFile(path, content);
+  }
+
+  // Source mode: link dep/aio → the aio checkout. The app's deno.json is
+  // relative (./dep/aio/…), so only this symlink is machine-specific (gitignored
+  // — re-created by `am link` or re-running create on another machine).
+  if (aioPath) {
+    await Deno.mkdir(resolve(dir, "dep"), { recursive: true });
+    await Deno.symlink(aioPath, resolve(dir, "dep/aio")).catch(async (e) => {
+      // Already exists (e.g. --force re-run): replace it.
+      if (e instanceof Deno.errors.AlreadyExists) {
+        await Deno.remove(resolve(dir, "dep/aio")).catch(() => {});
+        await Deno.symlink(aioPath!, resolve(dir, "dep/aio"));
+      } else throw e;
+    });
   }
 
   // Make it a real project from second one — best-effort, never fatal.
@@ -296,9 +315,9 @@ async function tryGitInit(dir: string): Promise<boolean> {
   }
 }
 
-/** The framework repo root when am runs from source (deno task am); undefined
- *  when am is a JSR-installed global. */
-function repoRoot(): string | undefined {
+/** The aio checkout `am` runs from (the clone install.sh made, or the repo in
+ *  dev); undefined when am is a JSR-installed global. */
+export function repoRoot(): string | undefined {
   // src/am/am-cmd-create.ts → repo root is three levels up.
   const dir = import.meta.dirname;
   if (!dir) return undefined;
@@ -314,7 +333,7 @@ function repoRoot(): string | undefined {
 function readme(name: string, template: Template): string {
   return `# ${name}
 
-An [aio](https://jsr.io/${PKG}) app (${template} template).
+An [aio](https://github.com/riagentic/aio) app (${template} template).
 
 \`\`\`sh
 deno task dev          # run in the browser

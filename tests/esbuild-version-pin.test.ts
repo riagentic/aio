@@ -22,23 +22,28 @@ Deno.test("B-6: loaded esbuild version matches deno.json pin", async () => {
   assertEquals(esbuild.version, expected);
 });
 
-Deno.test("B-6: dynamic esbuild imports pin an exact version (no range)", () => {
+Deno.test("B-6: esbuild imports pin the EXACT deno.json version (no range)", () => {
+  const pin = pinnedVersion();
   for (
     const file of [
-      "src/server/server-transpile.ts",
-      "src/build/build-bundle.ts",
+      "src/server/server-transpile.ts", // computed specifier (lean am install)
+      "src/server/lint.ts", // computed specifier
+      "src/build/build-bundle.ts", // literal (build needs esbuild eagerly)
     ]
   ) {
     const src = Deno.readTextFileSync(file);
-    const imports = [
-      ...src.matchAll(/import\(["']npm:esbuild@([^"']+)["']\)/g),
-    ];
-    assertEquals(imports.length > 0, true, `${file} should import npm:esbuild`);
-    for (const m of imports) {
-      const ver = m[1]!;
+    // Match a literal `import("npm:esbuild@X")` OR the COMPUTED form
+    // `["npm:esbuild", "X"]` — server-transpile/lint use the computed specifier
+    // so `deno install am` doesn't eagerly fetch the esbuild native binary.
+    const versions = [
+      ...src.matchAll(/import\(\s*["']npm:esbuild@([^"']+)["']\s*\)/g),
+      ...src.matchAll(/["']npm:esbuild["']\s*,\s*["']([^"']+)["']/g),
+    ].map((m) => m[1]!);
+    assertEquals(versions.length > 0, true, `${file} should reference npm:esbuild`);
+    for (const ver of versions) {
       // Exact version only — no `^`, `~`, `*`, or `x` ranges.
-      assertEquals(/^[\d.]+$/.test(ver), true, `${file} uses range "${ver}"`);
-      assertEquals(ver, pinnedVersion(), `${file} pin must match deno.json`);
+      assertEquals(/^[\d.]+$/.test(ver), true, `${file} uses a range "${ver}"`);
+      assertEquals(ver, pin, `${file} pin must match deno.json (${pin})`);
     }
   }
 });
