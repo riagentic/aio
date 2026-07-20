@@ -10,12 +10,20 @@ import { join } from "@std/path";
 
 // ── findJdk (android build needs a Gradle-runnable JDK with javac) ──
 
-/** Make a temp dir with a fake `bin/javac` that reports `javac <version>`. */
+/** Make a temp dir with a fake `bin/javac` that reports `javac <version>` AND
+ *  "compiles" (`javac Foo.java` → touches Foo.class) — findJdk compile-verifies. */
 async function stubJdk(version: string): Promise<string> {
   const home = await Deno.makeTempDir();
   await Deno.mkdir(join(home, "bin"));
   const javac = join(home, "bin", "javac");
-  await Deno.writeTextFile(javac, `#!/bin/sh\necho 'javac ${version}' >&2\n`);
+  await Deno.writeTextFile(
+    javac,
+    `#!/bin/sh\nfor a in "$@"; do\n` +
+      `  case "$a" in\n` +
+      `    -version) echo 'javac ${version}' >&2 ;;\n` +
+      `    *.java) touch "\${a%.java}.class" ;;\n` +
+      `  esac\ndone\nexit 0\n`,
+  );
   await Deno.chmod(javac, 0o755);
   return home;
 }

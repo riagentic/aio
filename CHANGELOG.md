@@ -22,13 +22,21 @@ field-report only.
   `dev:browser` / `dev:electron` (auto-installs Electron) / `dev:android`, and
   `compile` (binary) / `compile:browser` / `compile:electron` (AppImage) /
   `compile:android` (APK — needs `ANDROID_HOME` + Gradle + a JDK) are all wired.
-- **Android build finds a real, Gradle-runnable JDK.** Gradle compiles with (and
-  its daemon runs on) the JVM `JAVA_HOME` points to. A JRE (no `javac`) failed as
-  `Toolchain … [JAVA_COMPILER]`; a too-new JDK (e.g. 25) crashed Gradle at startup
-  (`* What went wrong: 25.0.3`). The build now selects a JDK **with `javac`** whose
-  major version Gradle 8.12.1 supports (≤ 23, preferring LTS 17/21) from
-  `JAVA_HOME`, `/usr/lib/jvm/*`, Android Studio's bundled JBR, and PATH — and
-  fails loud, naming the reason (JRE-only vs. too-new), otherwise.
+- **Android build now works out of the box across JDK/packaging quirks.** Three
+  compounding failures fixed, verified by building a real APK end-to-end:
+  - **Gradle 8.12.1 → 8.14.3.** 8.12.1 mis-detects Ubuntu's OpenJDK as a JRE
+    (`Is JDK: false` → `… does not provide … [JAVA_COMPILER]`), even for a
+    complete JDK. Fixed in Gradle 8.13+.
+  - **Robust JDK detection.** `findJdk` now resolves `javac` symlinks
+    (update-alternatives / JRE→JDK redirects) to the real JDK dir and **proves**
+    each candidate by actually compiling a program — so a JRE, a redirected
+    `javac`, or a broken install can never be chosen. It picks the newest
+    Gradle-runnable version (≤ 23, preferring LTS 17/21) from `JAVA_HOME`,
+    `/usr/lib/jvm/*`, Android Studio's JBR, Homebrew, SDKMAN and PATH.
+  - **Gradle is pinned to that JDK** (`org.gradle.java.installations.paths`,
+    auto-download off) so its toolchain resolver can't wander to a JRE.
+  When no usable JDK exists it fails loud, naming the reason (JRE-only vs.
+  too-new-for-Gradle) with the install command.
 - **Onboarding is now gated by a real E2E suite** (`deno task test:onboard`):
   runs `install.sh` (clone + `am`), scaffolds counter/todo, boots the browser dev
   server and hits it over HTTP, compiles the binary and boots *it*, and drives
