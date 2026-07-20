@@ -6,6 +6,7 @@ export type ErrorCategory =
   | "file-not-found"
   | "transpile-error"
   | "missing-import-map"
+  | "server-only-import"
   | "server-only-api"
   | "cdn-unreachable"
   | "circular-dependency"
@@ -148,24 +149,79 @@ export function resolveSpecifier(
   return { kind: "external", url: mapped };
 }
 
-/** Detect server-only APIs in browser-bound code. */
+/** Server-only SYMBOLS exported from the isomorphic "aio"/"aio/db" entry. The
+ *  browser build OMITS them, so a static import into a client-reachable module
+ *  is an eager ES link failure — a blank screen every boot (AIO-424, risoto).
+ *  Pure schema helpers (table/pk/text/…) are browser-safe and stay out.
+ *  Keep in sync with aiol/checks.ts `SERVER_ONLY_AIO_SYMBOLS`. */
+const SERVER_ONLY_AIO_SYMBOLS = new Set([
+  "createDB",
+  "DEFAULT_PRAGMAS",
+  "connectCli",
+  "connectCliUDS",
+]);
+
+/** Detect server-only APIs in browser-bound code.
+ *  AIO-427 (risoto 2026-07-20f): severity is split by CERTAINTY of breakage —
+ *  a *static import* of something the browser build can't provide (`node:*`
+ *  builtins, omitted `aio` server symbols) is a GUARANTEED link failure →
+ *  `server-only-import` (BLOCKING, shows the diagnostic page). `@std/*` (often
+ *  browser-safe) and `Deno.*` *usage* (only breaks if that path runs client-
+ *  side) are CONDITIONAL → `server-only-api` (warning). */
 export function checkPlatformSafety(code: string, file: string): GraphError[] {
   const errors: GraphError[] = [];
-  // Matches: import/export ... from "node:*"/"@std/*" including `export * from` and multiline
-  const SERVER_IMPORT_RE =
-    /(?:import|export)\s+(?!type[\s{])[\s\S]*?\s+from\s+['"]((?:@std\/|node:)[^'"]+)['"]/gm;
   let m;
-  while ((m = SERVER_IMPORT_RE.exec(code)) !== null) {
+  // (1) Server-only MODULE imports. `node:` builtins cannot resolve in the
+  //     browser (guaranteed break → blocking); `@std/*` is frequently
+  //     browser-safe (path/encoding/assert/…) so it stays a warning.
+  const MODULE_IMPORT_RE =
+    /(?:import|export)\s+(?!type[\s{])[\s\S]*?\s+from\s+['"]((?:@std\/|node:)[^'"]+)['"]/gm;
+  while ((m = MODULE_IMPORT_RE.exec(code)) !== null) {
+    const spec = m[1]!;
     const lineNum = code.slice(0, m.index).split("\n").length;
-    errors.push({
-      file,
-      line: lineNum,
-      category: "server-only-api",
-      message: `"${m[1]}" is server-only`,
-      fix: `${
-        m[1]
-      } is server-only and not available in browser. Move to a cell effect or use \`import type\`.`,
-    });
+    if (spec.startsWith("node:")) {
+      errors.push({
+        file,
+        line: lineNum,
+        category: "server-only-import",
+        message: `"${spec}" is a Node builtin — unavailable in the browser`,
+        fix:
+          `${spec} is absent from the browser build; this static import blank-screens the client at boot. Move it behind a dynamic import in a server-only path (or a *.server.ts module), or use \`import type\`.`,
+      });
+    } else {
+      errors.push({
+        file,
+        line: lineNum,
+        category: "server-only-api",
+        message: `"${spec}" may be server-only`,
+        fix:
+          `${spec} is not guaranteed to run in the browser. If this module is client-reachable and the import is server-only, move it behind a dynamic import or use \`import type\`.`,
+      });
+    }
+  }
+  // (2) Server-only SYMBOLS from the isomorphic "aio"/"aio/db" entry (createDB,
+  //     connectCli, …). Omitted from the browser build → guaranteed link
+  //     failure → blocking. `[^;]*?` keeps the match inside one statement.
+  const AIO_IMPORT_RE =
+    /(?:import|export)\s+(?!type[\s{])([^;]*?)\s+from\s+['"](aio|aio\/db)['"]/g;
+  while ((m = AIO_IMPORT_RE.exec(code)) !== null) {
+    const braces = m[1]!.match(/\{([^}]*)\}/);
+    if (!braces) continue;
+    const spec = m[2]!;
+    const lineNum = code.slice(0, m.index).split("\n").length;
+    for (const raw of braces[1]!.split(",")) {
+      const sym = raw.trim().split(/\s+as\s+/)[0]!.trim();
+      if (!SERVER_ONLY_AIO_SYMBOLS.has(sym)) continue;
+      errors.push({
+        file,
+        line: lineNum,
+        category: "server-only-import",
+        message:
+          `'${sym}' from "${spec}" is server-only (SQLite/Worker); the browser build omits it`,
+        fix:
+          `Load it lazily in a server-only path — \`const { ${sym} } = await import("${spec}")\` behind a server guard — or move it into a *.server.ts module. (Pure schema helpers like table/pk/text are browser-safe.)`,
+      });
+    }
   }
   // Deno.* usage — strip comments AND string literals to avoid false positives
   const stripped = code
@@ -219,6 +275,9 @@ export async function validateGraph(
   const errors: GraphError[] = [];
   const visited = new Set<string>();
   const stack = new Set<string>(); // recursion stack for cycle detection
+  // Static (eager) import edges only — used to decide whether a server-only
+  // import is eagerly linked (block) or reached only via dynamic import (defer).
+  const staticEdges = new Map<string, string[]>();
 
   async function walk(filePath: string, importerPath?: string): Promise<void> {
     if (visited.has(filePath)) {
@@ -308,7 +367,10 @@ export async function validateGraph(
     const platformErrors = checkPlatformSafety(source, filePath);
     errors.push(...platformErrors);
 
-    const specifiers = extractImports(transpiled);
+    const byKind = extractImportsByKind(transpiled);
+    const specifiers = [...byKind.static, ...byKind.dynamic];
+    const staticSpecs = new Set(byKind.static);
+    const staticDeps: string[] = [];
     const deps: string[] = [];
 
     const hashBuffer = await crypto.subtle.digest(
@@ -328,11 +390,13 @@ export async function validateGraph(
       );
       if (resolution.kind === "local") {
         deps.push(resolution.path);
+        if (staticSpecs.has(spec)) staticDeps.push(resolution.path);
         await walk(resolution.path, filePath);
       } else if (resolution.kind === "error") {
         errors.push(resolution.error);
       }
     }
+    staticEdges.set(filePath, staticDeps);
 
     modules.set(filePath, {
       path: filePath,
@@ -347,6 +411,38 @@ export async function validateGraph(
 
   await walk(entrypoint);
 
+  // Eager set: modules reachable from the entry through STATIC imports only.
+  // Everything else is reached solely via dynamic `import()` — a code-split
+  // boundary that is loaded on demand, so its server-only content is NOT
+  // eagerly linked into the client bundle.
+  const eager = new Set<string>();
+  const eagerStack = [entrypoint];
+  while (eagerStack.length) {
+    const p = eagerStack.pop()!;
+    if (eager.has(p)) continue;
+    eager.add(p);
+    for (const dep of staticEdges.get(p) ?? []) eagerStack.push(dep);
+  }
+  // Downgrade a server-only IMPORT found only in a deferred (dynamic-only)
+  // module: `await import("aio")` / `import("./x.server.ts")` is the documented
+  // escape hatch, so it must not block. It becomes a conditional warning
+  // (same class as `Deno.*` usage) — the code runs server-side, the browser
+  // never loads that chunk. A STATIC server-only import stays blocking.
+  for (const e of errors) {
+    if (e.category === "server-only-import" && !eager.has(e.file)) {
+      e.category = "server-only-api";
+      e.message += " (reached only via dynamic import — deferred, not blocking)";
+    } else if (e.category === "missing-import-map") {
+      // `@std/*` / `node:*` are absent from the BROWSER import map by design —
+      // they resolve server-side. That's a warning (server-only), not a hard
+      // "missing dep" block; a genuinely-missing package stays blocking.
+      const spec = e.message.match(/"([^"]+)"/)?.[1] ?? "";
+      if (spec.startsWith("@std/") || spec.startsWith("node:")) {
+        e.category = "server-only-api";
+      }
+    }
+  }
+
   // Post-walk: compute per-module valid/errors now that the full error list is finalized
   for (const [path, node] of modules) {
     const moduleErrors = errors.filter((e) => e.file === path);
@@ -356,40 +452,41 @@ export async function validateGraph(
 
   const durationMs = performance.now() - start;
 
-  // Only blocking categories prevent the app from loading.
-  // Server-only APIs and circular imports are warnings — they exist in server-side
-  // cell code that the browser imports but never executes those code paths.
+  // Only blocking categories prevent the app from loading (→ diagnostic page).
+  // `server-only-import` (a static `node:` builtin or omitted `aio` server
+  // symbol reachable from the UI entry) is a GUARANTEED client break: aio's
+  // Electron renderer is a sandboxed browser (`nodeIntegration:false`), same as
+  // a web browser, so the module can't resolve → blank screen every boot. We
+  // BLOCK it — loud + attributed (`file:line` + fix) — rather than serve a
+  // silent white void (risoto's ask; confirmed on quant, whose UI pages import
+  // server-only cells). `deno task compile` fails the same imports, so dev==prod.
+  // `server-only-api` (conditional `Deno.*` usage, browser-maybe-safe `@std/*`)
+  // and circular imports stay warnings.
   const BLOCKING: Set<ErrorCategory> = new Set([
     "file-not-found",
     "transpile-error",
     "missing-import-map",
+    "server-only-import",
   ]);
+  // @std/* and node:* missing-map + deferred server-only imports were already
+  // downgraded to warnings above, so this is the single source of truth.
   const blockingErrors = errors.filter((e) => BLOCKING.has(e.category));
 
-  // Don't block on missing-import-map for server-only modules (@std/*, node:*)
-  // — these are in cell code that runs server-side only
-  const realBlockingErrors = blockingErrors.filter((e) => {
-    if (e.category !== "missing-import-map") return true;
-    // If the specifier is a server-only module, it's a warning not a blocker
-    const specMatch = e.message.match(/"([^"]+)"/);
-    if (specMatch) {
-      const spec = specMatch[1];
-      if (spec?.startsWith("@std/") || spec?.startsWith("node:")) return false;
-    }
-    return true;
-  });
-
   return {
-    valid: realBlockingErrors.length === 0,
+    valid: blockingErrors.length === 0,
     errors,
     modules,
     durationMs,
   };
 }
 
-/** Extract all import specifiers from transpiled JS output.
- *  Works on esbuild output (clean ESM) — regex is reliable here. */
-export function extractImports(code: string): string[] {
+/** Extract import specifiers from transpiled JS, split by kind. STATIC imports
+ *  form the EAGER graph (linked at load — a server-only static import is a
+ *  guaranteed browser break). DYNAMIC `import()` is a code-split boundary —
+ *  deferred/conditional, the legitimate server-only escape hatch. */
+export function extractImportsByKind(
+  code: string,
+): { static: string[]; dynamic: string[] } {
   // Strip comments to avoid false positives (esbuild output is clean ESM)
   const cleaned = code
     .replace(/\/\/.*$/gm, "") // single-line comments
@@ -410,13 +507,20 @@ export function extractImports(code: string): string[] {
   // guard against any residual garbage capture (belt-and-suspenders).
   const isSpecifier = (s: string) => s.length > 0 && !/[\s,;(){}\[\]<>`]/.test(s);
 
-  const specifiers: string[] = [];
+  const staticSpecs: string[] = [];
+  const dynamicSpecs: string[] = [];
   let m;
   while ((m = STATIC_RE.exec(cleaned)) !== null) {
-    if (m[1] && isSpecifier(m[1])) specifiers.push(m[1]);
+    if (m[1] && isSpecifier(m[1])) staticSpecs.push(m[1]);
   }
   while ((m = DYNAMIC_RE.exec(cleaned)) !== null) {
-    if (m[1] && isSpecifier(m[1])) specifiers.push(m[1]);
+    if (m[1] && isSpecifier(m[1])) dynamicSpecs.push(m[1]);
   }
-  return specifiers;
+  return { static: staticSpecs, dynamic: dynamicSpecs };
+}
+
+/** All import specifiers (static + dynamic) from transpiled JS output. */
+export function extractImports(code: string): string[] {
+  const { static: s, dynamic: d } = extractImportsByKind(code);
+  return [...s, ...d];
 }

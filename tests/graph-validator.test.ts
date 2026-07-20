@@ -177,7 +177,45 @@ Deno.test("checkPlatformSafety detects export * from node:", () => {
   const code = `export * from "node:path";`;
   const errors = checkPlatformSafety(code, "./utils.ts");
   assertEquals(errors.length, 1);
+  // node: builtins are a GUARANTEED browser break → blocking category.
+  assertEquals(errors[0]!.category, "server-only-import");
+});
+
+Deno.test("checkPlatformSafety: node: import is a BLOCKING server-only-import", () => {
+  const errors = checkPlatformSafety(`import { readFile } from "node:fs";`, "./io.ts");
+  assertEquals(errors[0]!.category, "server-only-import");
+});
+
+Deno.test("checkPlatformSafety: @std/* import is a WARNING (often browser-safe)", () => {
+  const errors = checkPlatformSafety(`import { join } from "@std/path";`, "./p.ts");
+  assertEquals(errors.length, 1);
   assertEquals(errors[0]!.category, "server-only-api");
+});
+
+Deno.test("checkPlatformSafety: createDB from \"aio\" is a BLOCKING server-only-import", () => {
+  const errors = checkPlatformSafety(
+    `import { cell, createDB } from "aio";`,
+    "./nft-cache.ts",
+  );
+  assertEquals(errors.length, 1);
+  assertEquals(errors[0]!.category, "server-only-import");
+  assertStringIncludes(errors[0]!.message, "createDB");
+});
+
+Deno.test("checkPlatformSafety: browser-safe aio schema helpers are NOT flagged", () => {
+  const errors = checkPlatformSafety(
+    `import { cell, table, pk, text, integer } from "aio";`,
+    "./schema.ts",
+  );
+  assertEquals(errors.length, 0);
+});
+
+Deno.test("checkPlatformSafety: import type of a server-only aio symbol is NOT flagged", () => {
+  const errors = checkPlatformSafety(
+    `import type { createDB } from "aio";`,
+    "./types.ts",
+  );
+  assertEquals(errors.length, 0);
 });
 
 Deno.test("checkPlatformSafety skips Deno.* behind typeof guard", () => {
@@ -325,6 +363,94 @@ Deno.test("validateGraph detects server-only API as warning (non-blocking)", asy
     // Server-only APIs are warnings, not blocking errors — app still loads
     assertEquals(result.valid, true);
     assert(result.errors.some((e) => e.category === "server-only-api"));
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+Deno.test("validateGraph: a node: import in the client graph BLOCKS (sandboxed renderer can't load it)", async () => {
+  const dir = await Deno.makeTempDir();
+  try {
+    await Deno.writeTextFile(
+      dir + "/App.tsx",
+      `import { readFile } from "node:fs";\nexport default function App() { return null; }`,
+    );
+    const result = await validateGraph(dir + "/App.tsx", {}, mockTranspile);
+    // Guaranteed break → not valid → server renders the diagnostic page, not a
+    // silent blank screen (risoto's ask; confirmed against quant).
+    assertEquals(result.valid, false);
+    const err = result.errors.find((e) => e.category === "server-only-import");
+    assert(err, "node: import must be a blocking server-only-import");
+    assertStringIncludes(err!.fix, "dynamic import");
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+Deno.test("validateGraph: a static createDB-from-aio import BLOCKS (the original incident)", async () => {
+  const dir = await Deno.makeTempDir();
+  try {
+    await Deno.writeTextFile(
+      dir + "/App.tsx",
+      `import { cell, createDB } from "aio";\nexport default function App() { return null; }`,
+    );
+    const result = await validateGraph(
+      dir + "/App.tsx",
+      { aio: "jsr:@example/aio" },
+      mockTranspile,
+    );
+    assertEquals(result.valid, false);
+    const err = result.errors.find((e) => e.category === "server-only-import");
+    assert(err, "createDB import must be a blocking server-only-import");
+    assertStringIncludes(err!.fix, "await import");
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+Deno.test("validateGraph: a server-only module reached ONLY via dynamic import does NOT block (the escape hatch works — quant)", async () => {
+  const dir = await Deno.makeTempDir();
+  try {
+    // App statically imports a cell; the cell lazily imports the server-only
+    // module (the documented fix). That must NOT block — it's deferred.
+    await Deno.writeTextFile(
+      dir + "/App.tsx",
+      `import { cell } from "./cell.ts";\nexport default function App() { return null; }`,
+    );
+    await Deno.writeTextFile(
+      dir + "/cell.ts",
+      `export const cell = {};\nexport async function load() { const { DatabaseSync } = await import("./db.ts"); return DatabaseSync; }`,
+    );
+    await Deno.writeTextFile(
+      dir + "/db.ts",
+      `import { DatabaseSync } from "node:sqlite";\nexport { DatabaseSync };`,
+    );
+    const result = await validateGraph(dir + "/App.tsx", {}, mockTranspile);
+    // db.ts is reached only via dynamic import → deferred → boot is NOT blocked.
+    assertEquals(result.valid, true, "dynamic-imported server-only module must not block");
+    const dbErr = result.errors.find((e) => e.file.endsWith("db.ts"));
+    assert(dbErr, "still reported (as a deferred warning)");
+    assertEquals(dbErr!.category, "server-only-api");
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+Deno.test("validateGraph: a STATIC server-only import still BLOCKS (eagerly linked)", async () => {
+  const dir = await Deno.makeTempDir();
+  try {
+    await Deno.writeTextFile(
+      dir + "/App.tsx",
+      `import { cell } from "./cell.ts";\nexport default function App() { return null; }`,
+    );
+    // cell STATICALLY imports the server-only module → eager → blocks.
+    await Deno.writeTextFile(
+      dir + "/cell.ts",
+      `import { DatabaseSync } from "node:sqlite";\nexport const cell = DatabaseSync;`,
+    );
+    const result = await validateGraph(dir + "/App.tsx", {}, mockTranspile);
+    assertEquals(result.valid, false);
+    assert(result.errors.some((e) => e.category === "server-only-import"));
   } finally {
     await Deno.remove(dir, { recursive: true });
   }
