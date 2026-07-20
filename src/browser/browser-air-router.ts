@@ -1,7 +1,13 @@
 // browser-air-router: AIR signal-based router (Route, Outlet, Link, NavLink, Redirect, etc.)
 
 import { createContext, onMount, useContext } from "../air/aio-renderer.ts";
-import { type ComponentFn, Fragment, h, type VChild } from "../air/vdom.ts";
+import {
+  type ComponentFn,
+  Fragment,
+  h,
+  type VChild,
+  type VNode,
+} from "../air/vdom.ts";
 import {
   ensureConnected,
   type LinkProps,
@@ -19,7 +25,7 @@ import {
 export function page<K extends string>(
   current: K,
   routes: Record<K, (props: Record<string, never>) => unknown>,
-): unknown {
+): VNode | null {
   const Component = routes[current];
   return Component ? h(Component as ComponentFn, null) : null;
 }
@@ -60,7 +66,7 @@ const _RouteCtx = createContext<_RouteCtxType>({
 /** Renders element when path matches. Nest inside other Routes for layouts with Outlet. */
 export function Route(
   { path, index, element, children }: RouteProps,
-): unknown {
+): VNode | null {
   ensureConnected();
   const currentPath = routePath.value; // auto-tracked signal read
   const { basePath, params: parentParams } = useContext(_RouteCtx);
@@ -71,7 +77,7 @@ export function Route(
       currentPath === base.replace(/\/$/, "") ||
       base === "/" && currentPath === "/";
     if (!match) return null;
-    return element ?? null;
+    return (element ?? null) as VNode | null;
   }
 
   if (!path) return null;
@@ -101,21 +107,21 @@ export function Route(
 }
 
 /** Renders the matching child route inside a parent Route's element. */
-export function Outlet(): unknown {
+export function Outlet(): VNode | null {
   const { outlet } = useContext(_RouteCtx);
   if (outlet == null) return null;
   // The renderer passes a component's children as an array; a bare array is
   // not a renderable VNode — wrap it so nested <Route> children render.
   return Array.isArray(outlet)
     ? h(Fragment, null, ...(outlet as VChild[]))
-    : outlet;
+    : (outlet as VNode);
 }
 
 /** Anchor that navigates without page reload. Adds activeClass when path matches. */
 export function Link(
   { to, replace: rep, exact, activeClass, activeStyle, children, ...rest }:
     LinkProps,
-): unknown {
+): VNode {
   const path = routePath.value; // auto-tracked signal read
   const isActive = (exact || to === "/")
     ? path === to
@@ -148,7 +154,7 @@ export function NavLink(
   { activeClass = "active", ...rest }: Omit<LinkProps, "activeClass"> & {
     activeClass?: string;
   },
-): unknown {
+): VNode {
   return Link({ activeClass, ...rest } as LinkProps);
 }
 
