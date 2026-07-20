@@ -3,7 +3,7 @@
  * Build Android — generates Android project from template, builds APK via Gradle.
  */
 import { dirname, join } from "@std/path";
-import { findGradle, findJdk } from "./build-helpers.ts";
+import { findGradle, findJdk, GRADLE_MAX_JDK } from "./build-helpers.ts";
 import { ANDROID_TEMPLATE } from "./android-template.ts";
 import type { BuildConfig } from "./build-config.ts";
 
@@ -211,29 +211,37 @@ async function _runGradle(
     Deno.exit(1);
   }
 
-  // Gradle compiles with the JVM it runs on — a JRE has `java` but no `javac`,
-  // which fails as "Toolchain … does not provide … [JAVA_COMPILER]". Pin
-  // JAVA_HOME to a real JDK (with javac) so gradlew launches on it; fail loud
-  // with install steps when the machine only has a JRE.
-  const jdkHome = findJdk();
-  if (!jdkHome) {
+  // Gradle compiles with (and its daemon runs on) the JVM that JAVA_HOME points
+  // to. A JRE has `java` but no `javac` (fails "… [JAVA_COMPILER]"); a too-new
+  // JDK crashes Gradle at startup ("* What went wrong: 25.0.3"). Pin JAVA_HOME
+  // to a Gradle-runnable JDK (with javac); fail loud, with the reason, otherwise.
+  const jdk = findJdk();
+  if (!jdk.home) {
     console.error(
-      "[android] ✗ no JDK with javac found — Android builds need a full JDK (a JRE is not enough)",
+      "[android] ✗ no compatible JDK found — Android builds need a JDK with " +
+        `javac, version 17–${GRADLE_MAX_JDK} (a JRE is not enough)`,
     );
-    console.error("  install one, then retry:");
+    if (jdk.newestFound > GRADLE_MAX_JDK) {
+      console.error(
+        `  found JDK ${jdk.newestFound}, but the pinned Gradle (8.12.1) can't ` +
+          `run on JDK ${GRADLE_MAX_JDK + 1}+ yet — install a supported one:`,
+      );
+    } else {
+      console.error("  install one, then retry:");
+    }
     console.error("    • Debian/Ubuntu: sudo apt install openjdk-21-jdk");
     console.error("    • macOS:         brew install openjdk@21");
     console.error(
-      "    • or set JAVA_HOME to an existing JDK (must contain bin/javac)",
+      `    • or set JAVA_HOME to a JDK 17–${GRADLE_MAX_JDK} (must contain bin/javac)`,
     );
     Deno.exit(1);
   }
-  console.log(`[android] ✓ JDK ${jdkHome}`);
+  console.log(`[android] ✓ JDK ${jdk.home}`);
 
   const gradleEnv = {
     ...Deno.env.toObject(),
     ANDROID_HOME: androidHome,
-    JAVA_HOME: jdkHome,
+    JAVA_HOME: jdk.home,
   };
 
   // Generate gradle wrapper — pins version for reproducible builds (AGP 8.7.x needs Gradle 8.9+)

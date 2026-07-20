@@ -8,24 +8,48 @@ import {
 } from "../src/build/build-helpers.ts";
 import { join } from "@std/path";
 
-// ── findJdk (android build needs a JDK with javac, not a JRE) ──
+// ── findJdk (android build needs a Gradle-runnable JDK with javac) ──
 
-Deno.test("findJdk: picks JAVA_HOME when its bin/javac runs", async () => {
-  if (Deno.build.os === "windows") return; // stub is a POSIX shell script
+/** Make a temp dir with a fake `bin/javac` that reports `javac <version>`. */
+async function stubJdk(version: string): Promise<string> {
   const home = await Deno.makeTempDir();
+  await Deno.mkdir(join(home, "bin"));
+  const javac = join(home, "bin", "javac");
+  await Deno.writeTextFile(javac, `#!/bin/sh\necho 'javac ${version}' >&2\n`);
+  await Deno.chmod(javac, 0o755);
+  return home;
+}
+
+async function withJavaHome<T>(dir: string, fn: () => T): Promise<T> {
+  const prev = Deno.env.get("JAVA_HOME");
+  Deno.env.set("JAVA_HOME", dir);
   try {
-    await Deno.mkdir(join(home, "bin"));
-    const javac = join(home, "bin", "javac");
-    await Deno.writeTextFile(javac, "#!/bin/sh\necho 'javac 21.0.0' >&2\n");
-    await Deno.chmod(javac, 0o755);
-    const prev = Deno.env.get("JAVA_HOME");
-    Deno.env.set("JAVA_HOME", home);
-    try {
-      assertEquals(findJdk(), home); // JAVA_HOME wins — probed first
-    } finally {
-      if (prev === undefined) Deno.env.delete("JAVA_HOME");
-      else Deno.env.set("JAVA_HOME", prev);
-    }
+    return fn();
+  } finally {
+    if (prev === undefined) Deno.env.delete("JAVA_HOME");
+    else Deno.env.set("JAVA_HOME", prev);
+  }
+}
+
+Deno.test("findJdk: picks an in-range JAVA_HOME (javac 21)", async () => {
+  if (Deno.build.os === "windows") return; // stub is a POSIX shell script
+  const home = await stubJdk("21.0.0");
+  try {
+    await withJavaHome(home, () => assertEquals(findJdk().home, home));
+  } finally {
+    await Deno.remove(home, { recursive: true });
+  }
+});
+
+Deno.test("findJdk: never picks a too-new JDK (javac 25)", async () => {
+  if (Deno.build.os === "windows") return;
+  const home = await stubJdk("25.0.3");
+  try {
+    await withJavaHome(home, () => {
+      const r = findJdk();
+      assertEquals(r.home === home, false); // Gradle can't run on 25
+      assertEquals(r.newestFound >= 25, true); // but it was seen (diagnostic)
+    });
   } finally {
     await Deno.remove(home, { recursive: true });
   }
@@ -35,16 +59,10 @@ Deno.test("findJdk: ignores a JAVA_HOME whose javac is missing", async () => {
   // A JRE-only JAVA_HOME (no bin/javac) must not be accepted as a JDK.
   const home = await Deno.makeTempDir(); // empty — no bin/javac
   try {
-    const prev = Deno.env.get("JAVA_HOME");
-    Deno.env.set("JAVA_HOME", home);
-    try {
+    await withJavaHome(home, () => {
       // May still find a real system JDK, but never the javac-less temp dir.
-      const found = findJdk();
-      assertEquals(found === home, false);
-    } finally {
-      if (prev === undefined) Deno.env.delete("JAVA_HOME");
-      else Deno.env.set("JAVA_HOME", prev);
-    }
+      assertEquals(findJdk().home === home, false);
+    });
   } finally {
     await Deno.remove(home, { recursive: true });
   }
