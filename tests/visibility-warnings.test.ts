@@ -1,7 +1,7 @@
 // Dev-safety warnings for field-level visibility config (risoto #1/#2):
 // non-top-level filter keys are silent no-ops; secret-looking exposed fields
 // are likely leaks. Both must warn loudly at compose time.
-import { assert, assertEquals } from "@std/assert";
+import { assert, assertEquals, assertThrows } from "@std/assert";
 import { cell } from "../src/state/cell-create.ts";
 import { composeCellsWiring } from "../src/server/aio-composition.ts";
 import { setLogger } from "../src/diagnostics/logger-api.ts";
@@ -70,18 +70,51 @@ Deno.test("visibility #4: public/id fields do NOT trip the secret heuristic", ()
   );
 });
 
-Deno.test("visibility #4: real secrets are still flagged after the refinement", () => {
-  const c = cell("wallet_sec", {
-    state: { encSecKey: "cipher", privateKey: "x", mnemonic: "m", pub: "y" },
+Deno.test("visibility #4: soft-secret-looking fields still WARN (encSecKey)", () => {
+  // Ambiguous secret-ish names stay a warning, not a hard failure.
+  const c = cell("wallet_soft", {
+    state: { encSecKey: "cipher", pub: "y" },
     methods: { noop(_s) {} },
   });
   const w = warningsFor([c]);
-  for (const secret of ["encSecKey", "privateKey", "mnemonic"]) {
+  assert(
+    w.some((l) => l.includes("encSecKey") && l.includes("looks secret")),
+    `expected encSecKey warned; got: ${w.join(" | ")}`,
+  );
+});
+
+Deno.test("visibility (AIO-426): an exposed credential REFUSES to boot in dev", () => {
+  // inews Ugly #6: a warning is too soft for an unambiguous credential.
+  for (const field of ["privateKey", "mnemonic", "apiKey", "password"]) {
+    const c = cell("cred_" + field.toLowerCase(), {
+      state: { [field]: "leak", ok: 1 },
+      methods: { noop(_s: Record<string, unknown>) {} },
+    });
+    const err = assertThrows(
+      () => composeCellsWiring({ cellEntries: [c] as never }),
+      Error,
+    );
     assert(
-      w.some((l) => l.includes(secret) && l.includes("looks secret")),
-      `expected ${secret} flagged; got: ${w.join(" | ")}`,
+      /SECURITY/.test(err.message) && err.message.includes(field),
+      `expected a SECURITY refusal naming ${field}; got: ${err.message}`,
     );
   }
+});
+
+Deno.test("visibility (AIO-426): a credential that's excluded or declared public boots fine", () => {
+  const excluded = cell("cred_excl", {
+    state: { password: "x", ok: 1 },
+    ui: { exclude: ["password"] },
+    methods: { noop(_s) {} },
+  });
+  const publicOk = cell("cred_pub", {
+    state: { apiKey: "public-token", ok: 1 },
+    ui: { publicFields: ["apiKey"] },
+    methods: { noop(_s) {} },
+  });
+  // Neither should throw.
+  warningsFor([excluded]);
+  warningsFor([publicOk]);
 });
 
 Deno.test("visibility: a deep-excluded container no longer warns (risoto 10/10)", () => {

@@ -59,12 +59,24 @@ cell.ui      > cellDefaults.ui      > "all"
 
 ## Secret-exposure warnings & `publicFields`
 
-In dev, aio warns when a field whose **name** looks secret
-(`enc`/`secret`/`priv`/`key`/`seed`/`mnemonic`/`passphrase`) is exposed to the
-UI — it's a likely leak. Names with a public hint (`pubKey`, `publicKey`) or an
-identifier suffix (`seedId`, `seedPathType`) are already ignored, and a field
-whose secret sub-path you've **deep-excluded** (`exclude: ["seeds.encSeed"]`)
-won't warn either — the correct fix is never penalized.
+Two tiers, both on a field's **name**, checked at boot when the field is exposed
+to the UI (broadcast to every client):
+
+- **Ambiguous secret-ish names WARN** (`enc`/`secret`/`priv`/`key`/`seed`/
+  `mnemonic`/`passphrase`/`password`) — a likely leak, but could be legit
+  (`seeded`, `encoding`).
+- **Unambiguous credentials REFUSE to boot in dev** — `password`, `passphrase`,
+  `mnemonic`, and the compound forms `privateKey`/`apiKey`/`secretKey`/
+  `accessToken`/`authToken` (and `_`-separated variants). A warning is too soft
+  for a broadcast credential; dev fails fast. (In prod it logs a loud error
+  rather than crashing a live deployment.)
+
+Either way the fix is the same: **exclude it** (`ui: { exclude: ["password"] }`,
+`ui.forUser`, or `ui: "none"`), or if it genuinely is public, **declare it**
+(below). Names with a public hint (`pubKey`, `publicKey`) or an identifier suffix
+(`seedId`, `apiKeyName`) are ignored, and a field whose secret sub-path you've
+**deep-excluded** (`exclude: ["seeds.encSeed"]`) is not flagged — the correct fix
+is never penalized.
 
 For a field that genuinely is public but trips the name heuristic, **declare
 it** instead of dancing around the regex or using a no-op `forUser`:

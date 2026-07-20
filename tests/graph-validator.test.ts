@@ -356,3 +356,30 @@ Deno.test("validateGraph per-module valid computed after full walk", async () =>
     await Deno.remove(dir, { recursive: true });
   }
 });
+
+// AIO-425 (inews): a bare `from "` inside a STRING LITERAL (JSX text) must NOT be
+// mistaken for an import — it returned a "Module Errors" page for a valid app.
+Deno.test("extractImports ignores `from \"` inside string literals (JSX text)", () => {
+  // esbuild output shape for <h2>More from {x}</h2> plus real imports.
+  const code = [
+    `import { jsx, jsxs } from "aio/jsx-runtime";`,
+    `import { cell } from "aio";`,
+    `function C(){ return jsxs("h2", { children: ["More from ", cat?.name] }); }`,
+    `const s = "Recover from backup"; const t = "Import from './guide.md'";`,
+  ].join("\n");
+  const specs = extractImports(code);
+  assertEquals(specs, ["aio/jsx-runtime", "aio"], "only real imports; no garbage");
+  // Explicitly: none of the string-literal traps leaked through.
+  assert(!specs.some((s) => s.includes(",") || s.includes(" ") || s.includes("]")));
+  assert(!specs.includes("./guide.md"), "a specifier-shaped string inside a literal must not match");
+});
+
+Deno.test("extractImports still finds real static + dynamic + export-from", () => {
+  const code = [
+    `import a from "./a.ts";`,
+    `export { b } from "./b.ts";`,
+    `export * from "./c.ts";`,
+    `const m = await import("./d.ts");`,
+  ].join("\n");
+  assertEquals(extractImports(code).sort(), ["./a.ts", "./b.ts", "./c.ts", "./d.ts"]);
+});

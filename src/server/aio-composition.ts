@@ -14,6 +14,7 @@ import type { CellFieldFilter, FilterUser } from "../state/cell-types.ts";
 import type { AioError, ReportErrorOpts } from "../diagnostics/error.ts";
 import { reportError as reportAioError } from "../diagnostics/error.ts";
 import { log } from "../diagnostics/logger.ts";
+import { parseCli } from "./aio-cli.ts";
 import type { MiddlewareFn } from "./middleware.ts";
 
 /** User identity shape — matches AioUser without importing from aio.ts (avoids circular) */
@@ -67,7 +68,16 @@ function renderFilter(filter: CellFieldFilter): string {
 }
 
 // Field names that usually hold secrets — used for the UI-exposure heuristic.
-const SECRET_FIELD_RE = /enc|secret|priv|key|seed|mnemonic|passphrase/i;
+const SECRET_FIELD_RE = /enc|secret|priv|key|seed|mnemonic|passphrase|passwo?rd/i;
+// Unambiguous CREDENTIAL names — an exposed value is almost certainly a real
+// leak, so this is escalated from a warning to a boot REFUSAL in dev (inews Ugly
+// #6: "a warning is too soft"). Compound forms only (private_key, api_key,
+// secret_key, access_token…) so feature names like "secretSanta"/"tokenList"
+// don't false-fatal; bare `secret`/`key`/`token` stay soft warnings. `password`,
+// `passphrase`, `mnemonic` are unambiguous on their own. (SECRET_FIELD_RE missed
+// `password` entirely before this — a silent gap.)
+const HARD_SECRET_RE =
+  /passwo?rd|passphrase|mnemonic|private[_-]?key|api[_-]?key|secret[_-]?key|access[_-]?token|auth[_-]?token/i;
 // …but a "public" hint (pubKey, publicKey) means it's meant to be shared.
 const PUBLIC_HINT_RE = /pub(lic)?/i;
 // …and these suffixes mark identifiers/metadata, not the secret itself:
@@ -161,11 +171,36 @@ function warnFieldFilters(composed: ComposedCells): void {
         if ("exclude" in ui) return !ui.exclude.includes(key);
         return true;
       };
+      const isDev = !parseCli().prod;
       for (const key of topKeys) {
         // Explicit "this is public" acknowledgement, or its secret sub-paths are
         // already excluded → don't cry wolf at correctly-handled state.
         if (publicFields.has(key) || deepExcludedHead(key)) continue;
-        if (_looksSecret(key) && isExposed(key)) {
+        if (!isExposed(key)) continue;
+
+        // AIO-426 (inews Ugly #6): an unambiguous credential broadcast to every
+        // client is a real leak, not a maybe. REFUSE to boot in dev (a warning
+        // is too soft — you can ship it); in prod, log loud (don't crash a live
+        // deployment on a heuristic). Guards (public-hint / metadata-suffix) still
+        // apply so `apiKeyName`, `publicKey` don't trip it.
+        if (
+          HARD_SECRET_RE.test(key) && !PUBLIC_HINT_RE.test(key) &&
+          !NONSECRET_SUFFIX_RE.test(key)
+        ) {
+          const msg =
+            `[${f.__aio.id}] field "${key}" is a credential and is exposed to ` +
+            `the UI — it broadcasts to every connected client. ` +
+            `Exclude it: ui: { exclude: ["${key}"] } (or ui.forUser / ui: "none"). ` +
+            `If it's genuinely NOT a secret, declare it public: ` +
+            `ui: { publicFields: ["${key}"] }.`;
+          if (isDev) {
+            throw new Error(`[aio] SECURITY — refusing to start. ${msg}`);
+          }
+          log.error("visibility", `SECURITY: ${msg}`);
+          continue;
+        }
+
+        if (_looksSecret(key)) {
           log.warn(
             "visibility",
             `[${f.__aio.id}] field "${key}" looks secret and is exposed to the ` +

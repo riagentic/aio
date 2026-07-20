@@ -394,15 +394,29 @@ export function extractImports(code: string): string[] {
   const cleaned = code
     .replace(/\/\/.*$/gm, "") // single-line comments
     .replace(/\/\*[\s\S]*?\*\//g, ""); // multi-line comments
-  // Note: string literals containing `from "..."` are NOT stripped.
-  // Acceptable: esbuild's transpiled output doesn't produce such patterns.
 
-  // Match: from "spec", from 'spec', import("spec"), import('spec')
-  const IMPORT_RE = /(?:from\s+|import\s*\(\s*)["']([^"']+)["']/g;
+  // AIO-425 (inews): a BARE `from "..."` must NOT be matched — JSX text like
+  // `"More from "` transpiles to a string literal containing `from "`, and the
+  // old regex captured garbage from it, returning a "Module Errors" page for a
+  // perfectly valid app (any string with "from" before a quote — "Recover from
+  // backup", a blog title "Recovering from Disaster"…). Real ESM specifiers only
+  // appear (a) after an `import`/`export` keyword at a statement boundary, or
+  // (b) inside `import(...)`. Require that context.
+  const STATIC_RE =
+    /(?:^|[;\n}])\s*(?:import|export)\b[^;\n]*?\bfrom\s*["']([^"']+)["']/g;
+  const DYNAMIC_RE = /\bimport\s*\(\s*["']([^"']+)["']\s*\)/g;
+
+  // A module specifier never contains whitespace or JS punctuation — a final
+  // guard against any residual garbage capture (belt-and-suspenders).
+  const isSpecifier = (s: string) => s.length > 0 && !/[\s,;(){}\[\]<>`]/.test(s);
+
   const specifiers: string[] = [];
-  let match;
-  while ((match = IMPORT_RE.exec(cleaned)) !== null) {
-    if (match[1] !== undefined) specifiers.push(match[1]);
+  let m;
+  while ((m = STATIC_RE.exec(cleaned)) !== null) {
+    if (m[1] && isSpecifier(m[1])) specifiers.push(m[1]);
+  }
+  while ((m = DYNAMIC_RE.exec(cleaned)) !== null) {
+    if (m[1] && isSpecifier(m[1])) specifiers.push(m[1]);
   }
   return specifiers;
 }
