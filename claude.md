@@ -5,7 +5,7 @@
 Full-stack TypeScript framework on Deno 2.9+ (latest stable). State-driven apps
 with auto persistence (Deno.Kv), CRDT sync, AIR renderer, optional
 Electron/Android. Elm-like: `(state, action) → { state, effects[] }`.
-v1.0.0-alpha24, 2470+ tests.
+v1.0.0-alpha25, 2470+ tests.
 
 ## Commands
 
