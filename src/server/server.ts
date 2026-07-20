@@ -213,6 +213,8 @@ export function createServer(config: ServerConfig): ServerHandle {
     noCache,
     showStatus: config.showStatus,
     uiEntry: config.uiEntry,
+    viewport: config.viewport,
+    headExtra: config.headExtra,
     width: config.width,
     height: config.height,
     renderBudget: config.renderBudget,

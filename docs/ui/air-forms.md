@@ -114,3 +114,19 @@ const TagEditor = () => (
 | `move(from, to)`   | `void` | Reorder                |
 | `set(index, item)` | `void` | Replace at index       |
 | `reset()`          | `void` | Reset to initial array |
+
+## Testing form inputs
+
+AIR delegates DOM events on the root container, so a synthetic event **must
+bubble** to be handled. `testUI` does this for you (`ui.Form.Email.type("…")`).
+If you hand-roll a harness (raw CDP / dispatched events), set `bubbles: true` —
+otherwise the input handler never fires and the bound state stays empty:
+
+```js
+input.value = "alice@example.com";
+input.dispatchEvent(new Event("input", { bubbles: true })); // ← bubbles required
+```
+
+(You do **not** need React's native-setter trick — AIR reads `e.target.value`
+directly; the only requirement is a bubbling event. Prefer `testUI`, which
+handles this and re-resolves elements at action time.)

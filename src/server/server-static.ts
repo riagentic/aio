@@ -49,6 +49,8 @@ export interface StaticDeps {
   height?: number;
   renderBudget?: RenderBudget;
   uiEntry?: string; // AIO-8.1
+  viewport?: string | false; // AIO-423: ui.viewport override (false = opt out)
+  headExtra?: string; // AIO-423: ui.head — verbatim <head> content
   // Graph validation state — mutable ref from server.ts (dev only)
   getGraphResult: () => GraphResult | null;
   // Snapshot support
@@ -124,6 +126,8 @@ export function createStaticHandler(deps: StaticDeps): {
       height,
       renderBudget,
       uiEntry,
+      viewport,
+      headExtra,
     } = deps;
 
     // ── Root / SPA entry ──
@@ -146,6 +150,8 @@ export function createStaticHandler(deps: StaticDeps): {
           height,
           renderBudget,
           uiEntry,
+          viewport,
+          headExtra,
         ),
         { headers: { "Content-Type": "text/html", ...noCache } },
       );
@@ -466,6 +472,8 @@ export function createStaticHandler(deps: StaticDeps): {
       height,
       renderBudget,
       uiEntry,
+      viewport,
+      headExtra,
     } = deps;
 
     const filename = pathname.replace(/^\//, "");
@@ -516,6 +524,8 @@ export function createStaticHandler(deps: StaticDeps): {
             height,
             renderBudget,
             uiEntry,
+            viewport,
+            headExtra,
           ),
           { headers: { "Content-Type": "text/html", ...noCache } },
         );
