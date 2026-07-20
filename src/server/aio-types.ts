@@ -36,6 +36,14 @@ export type UiConfig = {
   /** AIO-8.1: UI entry file, relative to baseDir. Default: "App.tsx" (the
    *  filename convention). Set to serve/watch a different component file. */
   entry?: string;
+  /** AIO-423: override the `<meta viewport>` content string. Default is
+   *  responsive (`width=device-width, initial-scale=1, viewport-fit=cover`).
+   *  Set `false` to omit it entirely (rare fixed-width desktop layouts). */
+  viewport?: string | false;
+  /** AIO-423: verbatim extra `<head>` content — meta description, Open Graph
+   *  tags, `<link rel="icon">`, fonts, etc. Inserted trusted (not escaped),
+   *  like the stylesheet link. */
+  head?: string;
 };
 
 /** Per-client WebSocket safety limits for `--expose` deployments. All optional —

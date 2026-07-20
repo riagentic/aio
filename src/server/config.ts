@@ -9,6 +9,8 @@ export const VALID_UI_KEYS = new Set<string>([
   "showStatus",
   "renderer",
   "entry", // AIO-8.1: UI entry file override — typed on UiConfig, served by the dev server
+  "viewport", // AIO-423: override the <meta viewport> (string) or opt out (false)
+  "head", // AIO-423: verbatim extra <head> content (meta/OG/favicon/fonts)
 ]);
 
 export const VALID_AIO_CONFIG_KEYS = new Set<string>([
