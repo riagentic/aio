@@ -147,15 +147,35 @@ during dev mode.
 
 ## Browser import validation
 
-AIO checks for common import mistakes at three levels:
+AIO checks for common import mistakes at four levels:
 
 1. **Lint time** (`aiol`): Flags `@std/*`, `node:*`, `Deno.*` in cell files and
    `.tsx` files. Flags bare specifiers not in `deno.json`. Flags plain dynamic
    imports of server-only files — and recognizes `*.server.ts` as safe.
-2. **Build time**: esbuild plugin marks `*.server.ts` dynamic imports external
+2. **Graph validation** (dev server + `deno task check:graph`): walks the module
+   graph from your UI entry, severity split by certainty of breakage:
+   - **Blocking** (diagnostic page in dev, non-zero exit in `check:graph`) — a
+     *guaranteed* client break: a static `node:` builtin or an omitted `aio`
+     server symbol (`createDB`, `connectCli`, …) reachable from the UI entry.
+     aio's Electron renderer is a sandboxed browser (`nodeIntegration:false`),
+     so these can't resolve → a blank screen every boot. Fail loud + attributed
+     (`file:line` + fix) beats a silent white void, and `deno task compile`
+     fails the same imports (dev==prod). Fix: move the module behind
+     `await import(...)` in a server-only path, or a `*.server.ts` file.
+   - **Warning** — a *conditional* break: `Deno.*` usage (only fails if that path
+     runs client-side) or a maybe-safe `@std/*` module.
+
+   `check:graph` is the CI-friendly one-shot — add it to your test gate so a
+   boundary break can't reach a running server:
+
+   ```jsonc
+   // deno.json → tasks
+   "check:graph": "deno run -A jsr:@ria/aio/scripts/check-graph.ts"
+   ```
+3. **Build time**: esbuild plugin marks `*.server.ts` dynamic imports external
    and intercepts `@std/*` and `node:*` — clear error messages instead of
    cryptic failures.
-3. **Runtime**: Error overlay shows fix suggestions (e.g., "Add X to deno.json
+4. **Runtime**: Error overlay shows fix suggestions (e.g., "Add X to deno.json
    imports").
 
 ## CSS in builds
