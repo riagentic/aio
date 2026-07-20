@@ -6,6 +6,7 @@
 import { VERSION } from "../server/aio.ts";
 import type { GlobalFlags } from "./am-types.ts";
 import { detectMode, out, outError } from "./am-output.ts";
+import { repoRoot } from "./am-cmd-create.ts";
 
 const PKG = "@riagentic/aio";
 
@@ -53,12 +54,30 @@ export async function cmdUpdate(
   flags: GlobalFlags,
 ): Promise<void> {
   const mode = detectMode(flags);
+  // Source install (the default): am runs from a git checkout — update it in
+  // place with `git pull`. am points at the live files, so the next run picks
+  // up the change. JSR install: reinstall the newest alpha.
+  const root = repoRoot();
+  if (root) {
+    const git = new Deno.Command("git", {
+      args: ["-C", root, "pull", "--ff-only"],
+      stdout: "inherit",
+      stderr: "inherit",
+    });
+    const { code } = await git.output();
+    if (code !== 0) {
+      outError(`git pull failed in ${root} — resolve conflicts and retry`, mode);
+      Deno.exit(code);
+    }
+    out(mode === "json" ? { updated: true, via: "git" } : `✓ aio updated (${root})`, mode);
+    return;
+  }
   const code = await runDeno(updateArgv());
   if (code !== 0) {
     outError(`update failed (deno exit ${code})`, mode);
     Deno.exit(code);
   }
-  out(mode === "json" ? { updated: true } : "✓ am updated to the latest release", mode);
+  out(mode === "json" ? { updated: true, via: "jsr" } : "✓ am updated to the latest release", mode);
 }
 
 export async function cmdUninstall(

@@ -29,10 +29,15 @@ Deno.test("parseCreateArgs: --template + --force + --mirror", () => {
   assertEquals(o.mirror, "");
 });
 
+Deno.test("parseCreateArgs: --jsr opts into JSR (source is the default)", () => {
+  assertEquals(parseCreateArgs(["app"]).jsr, undefined); // default = source
+  assertEquals(parseCreateArgs(["app", "--jsr"]).jsr, true);
+});
+
 // ── framework specifiers ────────────────────────────────────────────────────
 
-Deno.test("frameworkSpecs: JSR mode pins to this am's version (lockstep)", () => {
-  const fw = frameworkSpecs();
+Deno.test("frameworkSpecs: JSR mode (--jsr) pins to this am's version (lockstep)", () => {
+  const fw = frameworkSpecs(false);
   assertEquals(fw.imports["aio"], `jsr:@riagentic/aio@${VERSION}`);
   assertEquals(fw.imports["aio/jsx-runtime"], `jsr:@riagentic/aio@${VERSION}/jsx-runtime`);
   assertStringIncludes(fw.build, `@${VERSION}/build`);
@@ -40,17 +45,17 @@ Deno.test("frameworkSpecs: JSR mode pins to this am's version (lockstep)", () =>
   assert(!("esbuild" in fw.imports));
 });
 
-Deno.test("frameworkSpecs: mirror mode points at local repo + carries source deps", () => {
-  const fw = frameworkSpecs("/x/aio");
-  assertEquals(fw.imports["aio"], "/x/aio/mod.ts");
+Deno.test("frameworkSpecs: source mode uses the dep/aio symlink + carries source deps", () => {
+  const fw = frameworkSpecs(true);
+  assertEquals(fw.imports["aio"], "./dep/aio/mod.ts");
   assertEquals(fw.imports["esbuild"], "npm:esbuild@^0.24");
-  assertStringIncludes(fw.build, "/x/aio/src/build.ts");
+  assertStringIncludes(fw.build, "./dep/aio/src/build.ts");
 });
 
 // ── generated deno.json: the target build tasks (onboard#4/#5) ──────────────
 
 Deno.test("denoJson: dev + one-line-per-target build tasks", () => {
-  const dj = JSON.parse(denoJson("demo")) as {
+  const dj = JSON.parse(denoJson("demo", true)) as {
     tasks: Record<string, string>;
     compilerOptions: Record<string, unknown>;
   };
@@ -70,7 +75,7 @@ Deno.test("denoJson: dev + one-line-per-target build tasks", () => {
 
 Deno.test("scaffold: counter + todo emit the expected src/-based files", () => {
   for (const tpl of ["counter", "todo"] as const) {
-    const files = scaffold("app", tpl);
+    const files = scaffold("app", tpl, true);
     for (
       const f of [
         "deno.json",
@@ -86,8 +91,8 @@ Deno.test("scaffold: counter + todo emit the expected src/-based files", () => {
     }
     assertStringIncludes(files["src/app.ts"]!, "aio.run()");
   }
-  assertStringIncludes(scaffold("app", "counter")["src/cell.ts"]!, 'cell("counter"');
-  assertStringIncludes(scaffold("app", "todo")["src/cell.ts"]!, 'cell("todo"');
+  assertStringIncludes(scaffold("app", "counter", true)["src/cell.ts"]!, 'cell("counter"');
+  assertStringIncludes(scaffold("app", "todo", true)["src/cell.ts"]!, 'cell("todo"');
 });
 
 // ── update / uninstall recipes ──────────────────────────────────────────────
@@ -115,11 +120,13 @@ Deno.test({
   fn: async () => {
     const dir = await Deno.makeTempDir({ prefix: "am-compile-" });
     try {
-      for (const [rel, content] of Object.entries(scaffold("app", "counter", REPO_ROOT))) {
+      for (const [rel, content] of Object.entries(scaffold("app", "counter", true))) {
         const path = resolve(dir, rel);
         await Deno.mkdir(resolve(path, ".."), { recursive: true });
         await Deno.writeTextFile(path, content);
       }
+      await Deno.mkdir(resolve(dir, "dep"), { recursive: true });
+      await Deno.symlink(REPO_ROOT, resolve(dir, "dep/aio")); // dep/aio → the repo
       const { code, stderr } = await new Deno.Command("deno", {
         args: ["task", "compile"],
         cwd: dir,
@@ -142,12 +149,14 @@ for (const tpl of ["counter", "todo"] as const) {
   Deno.test(`integration: generated ${tpl} app type-checks + starter test passes`, async () => {
     const dir = await Deno.makeTempDir({ prefix: `am-${tpl}-` });
     try {
-      const files = scaffold(tpl, tpl, REPO_ROOT);
+      const files = scaffold(tpl, tpl, true);
       for (const [rel, content] of Object.entries(files)) {
         const path = resolve(dir, rel);
         await Deno.mkdir(resolve(path, ".."), { recursive: true });
         await Deno.writeTextFile(path, content);
       }
+      await Deno.mkdir(resolve(dir, "dep"), { recursive: true });
+      await Deno.symlink(REPO_ROOT, resolve(dir, "dep/aio")); // dep/aio → the repo
       const dec = new TextDecoder();
       // Type-checks against the real framework (proves `deno task dev` is sound).
       const chk = await new Deno.Command("deno", {

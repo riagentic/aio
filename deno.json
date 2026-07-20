@@ -30,7 +30,9 @@
       "android-template/",
       "CHANGELOG.md",
       "init.*",
+      "install.*",
       ".claude/",
+      ".katana/",
       "*.md",
       "!README.md",
       "telemetry-id"
@@ -99,6 +101,7 @@
     "api:check": "deno run --allow-read --allow-write --allow-run scripts/api-snapshot.ts --check",
     "boundaries": "deno run --allow-read scripts/check-boundaries.ts",
     "check:graph": "deno run -A scripts/check-graph.ts",
+    "preflight": "deno run -A scripts/preflight.ts",
     "bench": "deno run -A scripts/bench.ts",
     "soak": "deno run -A scripts/soak.ts --minutes=10",
     "soak:72h": "deno run -A scripts/soak.ts --minutes=4320",

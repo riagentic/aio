@@ -1,16 +1,17 @@
 #!/bin/sh
-# aio — one-line installer for `am` (the aio manager).
+# aio — one-line installer for `am` (the aio manager). Source-based: clones the
+# framework from GitHub and installs `am` from it. No JSR, no publish, no login.
 #
 #   curl -fsSL https://raw.githubusercontent.com/riagentic/aio/main/install.sh | sh
 #
-# Installs Deno if missing, then installs `am` as a global command. Re-running
-# updates am in place (same as `am update`). Uninstall with `am uninstall`.
+# Re-running updates aio + am in place (same as `am update`). Uninstall with
+# `am uninstall`. Override the location with AIO_HOME, or a fork/branch with
+# AIO_REPO / AIO_BRANCH.
 set -e
 
-# Prerelease-pinned: aio is in 1.0.0-alpha, and a BARE jsr spec resolves to the
-# latest *stable* (an old 0.9.x with no ./am export) — so the range is required
-# to land on the newest alpha. Widens to 1.0.0 final automatically once it ships.
-PKG="jsr:@riagentic/aio@^1.0.0-alpha/am"
+AIO_HOME="${AIO_HOME:-$HOME/.local/lib/aio}"
+AIO_REPO="${AIO_REPO:-https://github.com/riagentic/aio}"
+AIO_BRANCH="${AIO_BRANCH:-main}"
 
 bold="\033[1m"; dim="\033[2m"; cyan="\033[36m"; green="\033[32m"; red="\033[31m"; reset="\033[0m"
 info() { printf "${cyan}▸${reset} %s\n" "$1"; }
@@ -24,8 +25,6 @@ else
   info "deno not found — installing..."
   curl -fsSL https://deno.land/install.sh | sh -s -- -y >/dev/null 2>&1 || \
     curl -fsSL https://deno.land/install.sh | sh
-  # Deno installs to ~/.deno/bin and wires PATH in your shell rc for next login;
-  # make it usable in THIS session too.
   export DENO_INSTALL="${DENO_INSTALL:-$HOME/.deno}"
   export PATH="$DENO_INSTALL/bin:$PATH"
   command -v deno >/dev/null 2>&1 \
@@ -33,11 +32,25 @@ else
     || fail "deno install failed — see https://docs.deno.com/runtime/getting_started/installation/"
 fi
 
-# ── am (into ~/.deno/bin — the same dir Deno already put on PATH) ──
-info "installing am..."
-deno install -gAf --reload -n am "$PKG"
+command -v git >/dev/null 2>&1 || fail "git is required — install git and re-run"
 
-# ── Verify / PATH hint ──
+# ── Clone / update aio ──
+if [ -d "$AIO_HOME/.git" ]; then
+  info "updating aio in $AIO_HOME"
+  git -C "$AIO_HOME" fetch --depth 1 origin "$AIO_BRANCH" >/dev/null 2>&1
+  git -C "$AIO_HOME" reset --hard "origin/$AIO_BRANCH" >/dev/null 2>&1
+  ok "aio updated ($(git -C "$AIO_HOME" rev-parse --short HEAD))"
+else
+  info "cloning aio → $AIO_HOME"
+  git clone --depth 1 -b "$AIO_BRANCH" "$AIO_REPO" "$AIO_HOME" >/dev/null 2>&1 \
+    || fail "git clone failed — check network / $AIO_REPO"
+  ok "aio cloned ($(git -C "$AIO_HOME" rev-parse --short HEAD))"
+fi
+
+# ── Install am from the clone (its deno.json supplies the import map) ──
+info "installing am..."
+deno install -gAf --config "$AIO_HOME/deno.json" -n am "$AIO_HOME/src/am.ts"
+
 export DENO_INSTALL="${DENO_INSTALL:-$HOME/.deno}"
 export PATH="$DENO_INSTALL/bin:$PATH"
 if command -v am >/dev/null 2>&1; then
@@ -48,5 +61,5 @@ else
 fi
 
 printf "\n${bold}Next:${reset}\n"
-printf "  am create my-app   ${dim}# scaffold a new aio app${reset}\n"
+printf "  am create my-app   ${dim}# scaffold a new aio app (points at %s)${reset}\n" "$AIO_HOME"
 printf "  cd my-app && deno task dev\n"
