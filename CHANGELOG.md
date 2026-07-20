@@ -19,9 +19,15 @@ field-report only.
   an opt-in for pinned JSR consumption.
 - **Every dev + build target works out of the box.** `deno task dev` defaults to
   the **browser** (instant — no Electron download, no toolchain). Explicit
-  `dev:browser` / `dev:electron` (auto-installs Electron) / `dev:android`, and
+  `dev:browser` / `dev:electron` (auto-installs Electron), and
   `compile` (binary) / `compile:browser` / `compile:electron` (AppImage) /
   `compile:android` (APK — needs `ANDROID_HOME` + Gradle + a JDK) are all wired.
+- **`dev:android` runs the app in an emulator** (the mobile `dev:browser`).
+  It boots an AVD if none is running, builds a thin dev APK whose WebView loads
+  the **live dev server** via `10.0.2.2`, starts the server, installs + launches —
+  so edits reflect live, no re-bundle. Verified end-to-end (app rendered in the
+  emulator, aio reload-WS connected). Needs the Android SDK (adb + emulator) and
+  an AVD; fails loud with steps otherwise (never a silent browser fallback).
 - **Android build now works out of the box across JDK/packaging quirks.** Three
   compounding failures fixed, verified by building a real APK end-to-end:
   - **Gradle 8.12.1 → 8.14.3.** 8.12.1 mis-detects Ubuntu's OpenJDK as a JRE

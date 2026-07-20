@@ -64,7 +64,7 @@ Deno.test("denoJson: dev defaults to browser + per-target dev/compile tasks", ()
   assertStringIncludes(dj.tasks["dev:browser"]!, "--client=browser");
   assertStringIncludes(dj.tasks["dev:electron"]!, "--client=electron");
   assertStringIncludes(dj.tasks["dev:electron"]!, "install --allow-scripts=npm:electron");
-  assertStringIncludes(dj.tasks["dev:android"]!, "src/app.ts");
+  assertStringIncludes(dj.tasks["dev:android"]!, "dev-android.ts");
   // compile: default binary + per-target
   assertStringIncludes(dj.tasks.compile!, "--compile");
   assertStringIncludes(dj.tasks["compile:browser"]!, "--compile");
