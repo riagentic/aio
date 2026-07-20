@@ -2,47 +2,43 @@
 
 Start a new aio app from scratch.
 
-## Option A: Scaffolder (fastest)
+## Install `am`, then create (the one path)
 
 ```sh
-sh -c "$(curl -fsSL https://raw.githubusercontent.com/riagentic/aio/main/init.sh)" -- my-app
+# installs Deno if missing, then puts `am` (the aio manager) on your PATH
+curl -fsSL https://raw.githubusercontent.com/riagentic/aio/main/install.sh | sh
 ```
 
-Installs Deno if missing, then shows an interactive menu for app type and
-template selection. Skip the menus with flags:
+Windows (PowerShell):
+
+```powershell
+irm https://raw.githubusercontent.com/riagentic/aio/main/install.ps1 | iex
+```
+
+Then scaffold and run — a full app in two commands:
 
 ```sh
-sh -c "$(curl -fsSL ...)" -- my-app --type=electron --template=minimal
+am create my-app                 # counter (default) · or --template=todo
+cd my-app
+deno task dev                    # opens in your browser
 ```
 
-App types: `browser`, `electron`, `android`, `cli`, `service`, `remote-browser`,
-`remote-service`, `remote-electron`, `remote-cli`, `remote-android`. Templates:
-`empty`, `minimal`, `medium`, `large`.
+The new project is git-initialized, ships a passing starter test
+(`deno task test`), and builds to every target with one line each —
+`deno task compile` (binary), `deno task electron`, `deno task android`. It's
+pinned to the exact aio version your `am` was installed at, so app and framework
+stay in lockstep.
 
-Add `--vendored` to git-clone the framework into `dep/aio/` (instead of the
-default tarball snapshot) — keeps `.git` so `git -C dep/aio pull` updates it.
-The generated `deno.json` already declares the vendored import map (`aio`,
-`immer`, `@std/path`), so no manual wiring is needed either way.
+Keep `am` current with `am update`; remove it with `am uninstall` (your apps are
+left untouched).
 
-## Option B: JSR (manual setup)
+> **Prefer no curl?** `deno install -gA -n am jsr:@riagentic/aio@^1.0.0-alpha/am`
+> is exactly what the installer runs. (A **bare** `jsr:@riagentic/aio` resolves
+> to an old stable during the alpha — always keep the `@^1.0.0-alpha` range.)
 
-> **During the alpha/beta, use Option A.** The JSR package
-> ([`@riagentic/aio`](https://jsr.io/@riagentic/aio)) currently trails the
-> tagged releases (latest on JSR is an alpha), so a `deno add` may resolve an
-> older version than this repo. The scaffolder (Option A) and `--vendored`
-> install always match the current framework.
+## Manual setup (what `am create` generates)
 
-Once the version you want is on JSR:
-
-```sh
-deno add jsr:@riagentic/aio
-```
-
-Then import:
-
-```ts
-import { aio, cell } from "aio";
-```
+If you're wiring a project by hand instead of `am create`, this is the shape:
 
 ## Prerequisites
 
