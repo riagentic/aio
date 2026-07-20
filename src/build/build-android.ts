@@ -120,14 +120,20 @@ export async function buildAndroid(cfg: BuildConfig): Promise<void> {
 
   console.log(`[android] app: ${appNameKotlin} (${applicationId})`);
 
-  // Copy assets into android project
-  const assetsDir = join(androidDir, "app/src/main/assets");
-  await Deno.mkdir(assetsDir, { recursive: true });
-
-  if (doRemote) {
-    await _writeConnectPage(assetsDir, appNameXml);
+  if (cfg.androidDevUrl) {
+    // dev:android — point the WebView at the LIVE dev server, no bundled assets.
+    await _applyDevUrl(androidDir, cfg.androidDevUrl);
+    console.log(`[android] ✓ dev build → ${cfg.androidDevUrl}`);
   } else {
-    await _writeLocalAssets(cfg, assetsDir, appNameXml);
+    // Copy assets into android project
+    const assetsDir = join(androidDir, "app/src/main/assets");
+    await Deno.mkdir(assetsDir, { recursive: true });
+
+    if (doRemote) {
+      await _writeConnectPage(assetsDir, appNameXml);
+    } else {
+      await _writeLocalAssets(cfg, assetsDir, appNameXml);
+    }
   }
 
   // Copy icon to mipmap resources
@@ -232,6 +238,35 @@ async function _writeLocalAssets(
     await Deno.copyFile(join(dist, "style.css"), join(assetsDir, "style.css"));
   }
   console.log("[android] \u2713 assets copied");
+}
+
+/** dev:android — retarget the WebView at a live dev-server URL (10.0.2.2:PORT
+ *  reaches the host loopback from the emulator) and allow cleartext http so the
+ *  app hot-loads from the running dev server, exactly like `dev:browser`. */
+async function _applyDevUrl(androidDir: string, devUrl: string): Promise<void> {
+  const actPath = join(
+    androidDir,
+    "app/src/main/java/aio/app/MainActivity.kt",
+  );
+  let act = await Deno.readTextFile(actPath);
+  act = act.replace(
+    'loadUrl("file:///android_asset/index.html")',
+    `loadUrl("${devUrl}")`,
+  );
+  // Keep every navigation inside the WebView (no external redirect handling).
+  act = act.replace(
+    'return !url.startsWith("file:///android_asset/")',
+    "return false",
+  );
+  await Deno.writeTextFile(actPath, act);
+
+  const manifestPath = join(androidDir, "app/src/main/AndroidManifest.xml");
+  let manifest = await Deno.readTextFile(manifestPath);
+  manifest = manifest.replace(
+    'android:allowBackup="false"',
+    'android:allowBackup="false"\n        android:usesCleartextTraffic="true"',
+  );
+  await Deno.writeTextFile(manifestPath, manifest);
 }
 
 /** Force Gradle onto the resolved JDK(s) so its toolchain resolver can only pick

@@ -15,6 +15,7 @@
     "./schedule": "./src/schedule.ts",
     "./selectors": "./src/selector.ts",
     "./build": "./src/build.ts",
+    "./dev-android": "./src/dev-android.ts",
     "./am": "./src/am.ts",
     "./doctor": "./src/server/doctor.ts",
     "./aiol": "./aiol/mod.ts"
