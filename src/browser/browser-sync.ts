@@ -14,6 +14,7 @@
  * stream agree.
  * @experimental Excluded from the 1.0 stability guarantee.
  */
+import { randomUuid } from "../rand.ts";
 import { createSyncEngine, type SyncEngine } from "../sync/sync-engine.ts";
 import { createOpBuffer } from "../sync/op-buffer.ts";
 import { createLocalStorageOpStorage } from "../sync/browser-storage.ts";
@@ -42,11 +43,11 @@ function clientId(): string {
   try {
     const existing = localStorage.getItem(KEY);
     if (existing) return existing;
-    const id = crypto.randomUUID().slice(0, 8);
+    const id = randomUuid().slice(0, 8);
     localStorage.setItem(KEY, id);
     return id;
   } catch {
-    return crypto.randomUUID().slice(0, 8);
+    return randomUuid().slice(0, 8);
   }
 }
 
