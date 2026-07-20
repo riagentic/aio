@@ -54,22 +54,36 @@ export async function cmdUpdate(
   flags: GlobalFlags,
 ): Promise<void> {
   const mode = detectMode(flags);
-  // Source install (the default): am runs from a git checkout — update it in
-  // place with `git pull`. am points at the live files, so the next run picks
-  // up the change. JSR install: reinstall the newest alpha.
+  // Source install (the default): am runs from a git checkout — fetch and check
+  // out the LAST TAGGED release (not the branch tip / WIP). am points at the
+  // live files, so the next run picks up the change. JSR install: reinstall.
   const root = repoRoot();
   if (root) {
-    const git = new Deno.Command("git", {
-      args: ["-C", root, "pull", "--ff-only"],
-      stdout: "inherit",
-      stderr: "inherit",
-    });
-    const { code } = await git.output();
-    if (code !== 0) {
-      outError(`git pull failed in ${root} — resolve conflicts and retry`, mode);
-      Deno.exit(code);
+    const git = async (args: string[], capture = false) => {
+      const o = await new Deno.Command("git", {
+        args: ["-C", root, ...args],
+        stdout: capture ? "piped" : "inherit",
+        stderr: capture ? "null" : "inherit",
+      }).output();
+      return { code: o.code, text: capture ? new TextDecoder().decode(o.stdout).trim() : "" };
+    };
+    if ((await git(["fetch", "--tags", "--force", "origin"])).code !== 0) {
+      outError(`git fetch failed in ${root} — check network`, mode);
+      Deno.exit(1);
     }
-    out(mode === "json" ? { updated: true, via: "git" } : `✓ aio updated (${root})`, mode);
+    // Latest tag reachable from origin/main (ancestry-based — robust to the
+    // alphaN naming that breaks semver/version sorts).
+    let tag = (await git(["describe", "--tags", "--abbrev=0", "origin/main"], true)).text;
+    if (!tag) {
+      tag = (await git(["tag", "-l", "v*", "--sort=-creatordate"], true)).text
+        .split("\n")[0] ?? "";
+    }
+    const target = tag || "origin/main";
+    if ((await git(["checkout", "--force", target])).code !== 0) {
+      outError(`git checkout ${target} failed in ${root}`, mode);
+      Deno.exit(1);
+    }
+    out(mode === "json" ? { updated: true, via: "git", tag: target } : `✓ aio updated → ${target}`, mode);
     return;
   }
   const code = await runDeno(updateArgv());

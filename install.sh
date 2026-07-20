@@ -34,17 +34,26 @@ fi
 
 command -v git >/dev/null 2>&1 || fail "git is required — install git and re-run"
 
-# ── Clone / update aio ──
+# ── Clone / update aio, then check out the LAST TAGGED release ──
+# (full clone so tags + history are present; users get the last release, not
+# whatever WIP happens to be on the branch tip)
 if [ -d "$AIO_HOME/.git" ]; then
   info "updating aio in $AIO_HOME"
-  git -C "$AIO_HOME" fetch --depth 1 origin "$AIO_BRANCH" >/dev/null 2>&1
-  git -C "$AIO_HOME" reset --hard "origin/$AIO_BRANCH" >/dev/null 2>&1
-  ok "aio updated ($(git -C "$AIO_HOME" rev-parse --short HEAD))"
+  git -C "$AIO_HOME" fetch --tags --force -q origin "$AIO_BRANCH" >/dev/null 2>&1
 else
   info "cloning aio → $AIO_HOME"
-  git clone --depth 1 -b "$AIO_BRANCH" "$AIO_REPO" "$AIO_HOME" >/dev/null 2>&1 \
+  git clone -q "$AIO_REPO" "$AIO_HOME" >/dev/null 2>&1 \
     || fail "git clone failed — check network / $AIO_REPO"
-  ok "aio cloned ($(git -C "$AIO_HOME" rev-parse --short HEAD))"
+fi
+# Latest tag reachable from the branch (ancestry-based — robust to version naming).
+AIO_TAG=$(git -C "$AIO_HOME" describe --tags --abbrev=0 "origin/$AIO_BRANCH" 2>/dev/null \
+  || git -C "$AIO_HOME" tag -l 'v*' --sort=-creatordate | head -1)
+if [ -n "$AIO_TAG" ]; then
+  git -C "$AIO_HOME" checkout -q --force "$AIO_TAG" 2>/dev/null
+  ok "aio $AIO_TAG"
+else
+  git -C "$AIO_HOME" checkout -q --force "$AIO_BRANCH" 2>/dev/null
+  ok "aio $AIO_BRANCH (no tags yet)"
 fi
 
 # ── Install am from the clone (its deno.json supplies the import map) ──

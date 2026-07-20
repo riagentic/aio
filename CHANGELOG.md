@@ -1,5 +1,32 @@
 # Changelog
 
+## 1.0.0-alpha25 — source-first onboarding, simplified README, feature freeze (2026-07-20)
+
+Onboarding is now pure source — no JSR, no publish, no version-resolution
+quirks. This is the last feature-adding release; from here it's fix / test /
+field-report only.
+
+### Changed
+
+- **Source-first install.** `curl … install.sh | sh` git-clones aio into
+  `~/.local/lib/aio`, checks out the **last tagged release** (not the branch
+  tip), and installs `am` from the clone (`deno install --config` supplies the
+  import map). No JSR, no publish, no login. `am update` = fetch + checkout the
+  latest tag. `install.ps1` for Windows.
+- **`am create` links `dep/aio`.** The scaffolded app imports aio through a
+  `dep/aio` **symlink** to the clone, so its `deno.json` stays relative and
+  portable (only the symlink is machine-specific, gitignored). `--jsr` remains
+  an opt-in for pinned JSR consumption.
+- **README rewritten** to four onboarding lines + a one-row-per-feature table +
+  a logo. "Batteries included: persistence + state + UI."
+
+### Why JSR is no longer the default
+
+`1.0.0-alphaN` prerelease versions sort **lexically**, so a `@^1.0.0-alpha`
+range resolves to `alpha9` (`'9' > '2'`), not the newest — and deno caches the
+mis-resolution. Cloning a git tag has no version resolution to get wrong. (If
+JSR returns at 1.0, it needs dotted prereleases: `1.0.0-alpha.25`.)
+
 ## 1.0.0-alpha24 — magic onboarding (`am`) + sync method returns + correct server/client boundary (2026-07-20)
 
 Onboarding collapses to a single delightful path, sync methods can return values,
