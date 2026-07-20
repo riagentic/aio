@@ -91,7 +91,7 @@ await aio.run({ appId: "taste", appVersion: "0.1.0", cells: [counter] });
 Get started with **`am`** (the aio manager) — install once, it does the rest:
 
 ```sh
-# 1. install am (installs Deno too if missing)
+# 1. install am (installs Deno if missing; clones aio → ~/.local/lib/aio)
 curl -fsSL https://raw.githubusercontent.com/riagentic/aio/main/install.sh | sh
 
 # 2. scaffold + run
@@ -100,8 +100,13 @@ cd my-app
 deno task dev                      # run · deno task compile|electron|android to build
 ```
 
-`am update` keeps it current; `am uninstall` removes it (your apps stay put).
-Prefer no curl? `deno install -gA -n am jsr:@riagentic/aio/am` is the same thing.
+`am create` links the app to your aio clone via a portable `dep/aio` symlink —
+no registry, no publish. `am update` = `git pull` on the clone; `am uninstall`
+removes `am` (your apps stay put).
+
+**Two ways to consume aio:** source (the default above — always works) or JSR
+(`am create my-app --jsr`, or `deno install -gA -n am jsr:@riagentic/aio/am`)
+once a version is published. Windows: `irm …/install.ps1 | iex`.
 
 → [Quickstart](docs/basics/quickstart.md) for UI setup, Electron, scaffolder,
 Fit check first? → [Positioning & non-goals](docs/basics/positioning.md). and
