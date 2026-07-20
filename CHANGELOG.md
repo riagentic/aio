@@ -27,7 +27,9 @@ field-report only.
   the **live dev server** via `10.0.2.2`, starts the server, installs + launches —
   so edits reflect live, no re-bundle. Verified end-to-end (app rendered in the
   emulator, aio reload-WS connected). Needs the Android SDK (adb + emulator) and
-  an AVD; fails loud with steps otherwise (never a silent browser fallback).
+  an AVD; fails loud with steps otherwise (never a silent browser fallback). If
+  the emulator crashes or stalls on boot, its output is surfaced (no silent hang),
+  and a dev-server bail (app already running) is reported clearly.
 - **SDK auto-resolution.** `ANDROID_HOME` may point at the SDK **or its parent**
   (a common `~/Android` → `~/Android/Sdk` setup), or be unset — the build finds
   the SDK via `ANDROID_HOME`/`ANDROID_SDK_ROOT` (and their `Sdk` subdir) then the
