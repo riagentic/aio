@@ -144,6 +144,31 @@ export async function bootStorage<S>(
 
   // ── 1. SQLite ─────────────────────────────────────────────────────
   const dbKeys = dbSchema ? Object.keys(dbSchema) : [];
+
+  // AIO-419 (risoto): a `db:` table named after a cell's OBJECT slice silently
+  // overwrites that slice with a raw row array at boot (loadTables does
+  // `state[name] = rows`), so the cell's methods explode — `s.nfts.filter(…)`
+  // when `s` is now the array. A table mapping to an ARRAY slice is the intended
+  // auto-sync store and stays allowed. Fail loud at boot, naming both, instead of
+  // leaving this trap to a code comment.
+  if (dbSchema) {
+    const init = initialState as Record<string, unknown>;
+    for (const name of dbKeys) {
+      const slice = init[name];
+      if (
+        name in init && slice !== null && typeof slice === "object" &&
+        !Array.isArray(slice)
+      ) {
+        throw new Error(
+          `[aio] db: table "${name}" collides with cell "${name}" — the table's ` +
+            `rows would overwrite the cell's state slice at boot and break its ` +
+            `methods. Rename the table (e.g. "${name}_rows"), or make the cell's ` +
+            `"${name}" slice an array to use it as that table's auto-synced store.`,
+        );
+      }
+    }
+  }
+
   let asyncDb: DB | null = null;
   // Sync cells need the SQLite op-log even without user tables — a
   // `sync: true` cell must never silently degrade because `db:` is absent.

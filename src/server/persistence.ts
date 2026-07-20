@@ -105,23 +105,65 @@ export function createPersistenceManager(
     }
     : getState;
 
+  // AIO-420 (risoto): per-cell KV sizes, largest first — so an over-limit warning
+  // can NAME the offending cell instead of failing anonymously (or, in single
+  // mode, nuking the whole persist with no clue which cell to move to SQLite).
+  const KV_LIMIT = 63_000; // Deno KV per-value hard limit is ~64KB; stay under.
+  const _cellSizes = (obj: Record<string, unknown>): { cell: string; bytes: number }[] =>
+    Object.entries(obj)
+      .map(([cell, v]) => ({
+        cell,
+        bytes: new TextEncoder().encode(JSON.stringify(v)).byteLength,
+      }))
+      .sort((a, b) => b.bytes - a.bytes);
+  const _fmt = (l: { cell: string; bytes: number }[]): string =>
+    l.map((x) => `${x.cell} (${(x.bytes / 1024).toFixed(1)}KB)`).join(", ");
+
   async function _syncKv(): Promise<void> {
     if (!kvDb) return;
     try {
       const dbState = getDBState(kvGetState());
       if (persistMode === "multi") {
         const obj = dbState as Record<string, unknown>;
-        const keys = Object.keys(obj);
+        // AIO-420: a single over-limit cell would fail the WHOLE atomic commit
+        // (nuking every cell's persistence). Degrade instead — persist the
+        // healthy cells, keep each over-limit cell's LAST-SAVED value (don't
+        // delete it), and name them loudly so the dev moves them to SQLite.
+        const over = new Set(
+          _cellSizes(obj).filter((c) => c.bytes > KV_LIMIT).map((c) => c.cell),
+        );
+        let toPersist = obj;
+        let prevForCommit = prevPersistedKeys;
+        if (over.size) {
+          log.error(
+            `persist: cell(s) exceed the ~64KB Deno KV limit and were NOT ` +
+              `updated (last-saved value kept): ${
+                _fmt(_cellSizes(obj).filter((c) => over.has(c.cell)))
+              } — move to db:{} (SQLite) or add a cell-level persist filter.`,
+          );
+          _reportPersistError(
+            new Error(`persist: KV over-limit cells: ${[...over].join(", ")}`),
+          );
+          toPersist = Object.fromEntries(
+            Object.entries(obj).filter(([k]) => !over.has(k)),
+          );
+          prevForCommit = prevPersistedKeys.filter((k) => !over.has(k));
+        }
+        const keys = Object.keys(toPersist);
         try {
           const result = await kvDb.setMulti(
             persistKey,
-            obj,
-            prevPersistedKeys,
+            toPersist,
+            prevForCommit,
           );
           if (result.ok) {
             // B-7: only advance the persisted-key set and log "saved" when the
-            // atomic commit actually succeeded.
-            prevPersistedKeys = keys;
+            // atomic commit actually succeeded. Preserve over-limit cells that
+            // still hold a prior KV value.
+            prevPersistedKeys = [
+              ...keys,
+              ...prevPersistedKeys.filter((k) => over.has(k)),
+            ];
             await _stampVersions();
             log.debug(`persist: saved multi (${keys.length} keys)`);
           } else {
@@ -144,10 +186,21 @@ export function createPersistenceManager(
         const serialized = JSON.stringify(dbState);
         const bytes = new TextEncoder().encode(serialized).byteLength;
         if (bytes > 63_000) {
+          // AIO-420: name the biggest cells — the whole single-key blob can't
+          // persist, so tell the dev exactly which cell(s) to move / filter,
+          // instead of dropping everything anonymously.
+          const top = _cellSizes(dbState as Record<string, unknown>).slice(0, 3);
           log.error(
             `persist: state is ${
               (bytes / 1024).toFixed(1)
-            }KB — exceeds Deno KV 65KB limit. Use persistMode:'multi', cell-level persist filters, or db:{} (SQLite)`,
+            }KB — exceeds the ~64KB Deno KV limit; NOTHING saved this cycle. ` +
+              `Largest cells: ${_fmt(top)}. Use persistMode:'multi' (isolates ` +
+              `cells), a cell-level persist filter, or db:{} (SQLite).`,
+          );
+          _reportPersistError(
+            new Error(
+              `persist: single-key state ${(bytes / 1024).toFixed(1)}KB over KV limit`,
+            ),
           );
           return;
         }

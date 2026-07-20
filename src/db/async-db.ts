@@ -111,7 +111,18 @@ export function createDB(path: string, opts: DBOpts = {}): DB {
   function ensureWorkers(): Promise<void> {
     if (ready) return ready;
 
-    const numReaders = opts.readers ?? 0;
+    let numReaders = opts.readers ?? 0;
+    // AIO-421 (risoto): an in-memory DB lives inside ONE Worker — reader Workers
+    // would each open a SEPARATE empty `:memory:` DB and silently return no rows.
+    // `createDB(":memory:")` is the intended ephemeral/test mode; keep it single-
+    // Worker rather than let a stray `readers` option produce empty reads.
+    if (numReaders > 0 && (path === ":memory:" || path === "")) {
+      console.warn(
+        `[aio:db] readers>0 ignored for an in-memory DB — each Worker gets its ` +
+          `own :memory: DB; using writer-only.`,
+      );
+      numReaders = 0;
+    }
     const { worker: w, opening: writerOpen } = spawnAndOpen(
       opts.readonly ?? false,
     );
