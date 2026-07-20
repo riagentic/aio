@@ -1,6 +1,12 @@
 // cell-compose-reduce.ts — per-cell reducer and root reduce function
 
-import { type Draft, type Patch, produceWithPatches } from "immer";
+import {
+  current,
+  type Draft,
+  isDraft,
+  type Patch,
+  produceWithPatches,
+} from "immer";
 import { log } from "../diagnostics/logger.ts";
 import type { ScheduleEffect } from "./schedule.ts";
 import type { OwnEffect } from "./own.ts";
@@ -14,7 +20,12 @@ import { resolveCall } from "./cell-impl.ts";
 import type { AioError } from "../diagnostics/error.ts";
 import { createAioError } from "../diagnostics/error.ts";
 import { diagEmit } from "../diagnostics/diagnostic-bus.ts";
-import type { CellDef, Msg } from "./cell-types.ts";
+import {
+  type CellDef,
+  isReturnEnvelope,
+  type Msg,
+  readReturn,
+} from "./cell-types.ts";
 import type { ReduceBreakdown } from "../diagnostics/time-travel.ts";
 
 type CellPatches = { cell: string; ops: Patch[] };
@@ -23,6 +34,10 @@ export type ReduceResult = {
   state: Record<string, unknown>;
   effects: (Msg | ScheduleEffect | OwnEffect)[];
   patches?: CellPatches | CellPatches[];
+  /** AIO-427: a sync method's transported return value (undefined when the
+   *  method returned void/effects). Threaded to `entry.resolve()` so
+   *  `await cell.method()` resolves with it, like an async method. */
+  ret?: unknown;
   _bd?: { produce: number; clone: number; spread: number };
 };
 
@@ -110,6 +125,7 @@ export function reduceCell(
 
     const targetSpec = transitions[lookupKey];
     let effects: (Msg | ScheduleEffect | OwnEffect)[] = [];
+    let methodReturn: unknown; // AIO-427: transported return value (or undefined)
     const t0 = _perfCheck ? performance.now() : 0;
     let nextSlice: Record<string, unknown>;
     let cellPatches: Patch[] = [];
@@ -121,8 +137,12 @@ export function reduceCell(
             A: f.__aio.actions,
             E: f.__aio.effects,
           });
-          // Clone effects NOW — while the draft is still alive.
-          if (Array.isArray(result)) {
+          // Clone effects NOW — while the draft is still alive. AIO-427: a
+          // RETURN_TAG envelope is the sync method's transported value; every
+          // other array is effects (the historic contract).
+          if (isReturnEnvelope(result)) {
+            methodReturn = snapshotReturn(readReturn(result));
+          } else if (Array.isArray(result)) {
             effects = cloneEffects(result, action.type);
           }
           // AIO-380: function targets resolve at dispatch time, after the
@@ -211,6 +231,7 @@ export function reduceCell(
       patches: cellPatches.length > 0
         ? { cell: cellName, ops: cellPatches }
         : undefined,
+      ret: methodReturn,
     };
     const tSpread = _perfCheck ? performance.now() - t2 : 0;
 
@@ -224,6 +245,7 @@ export function reduceCell(
 
   // Simple path — no machine guards
   let effects: (Msg | ScheduleEffect | OwnEffect)[] = [];
+  let methodReturn: unknown; // AIO-427: transported return value (or undefined)
   const st0 = _perfCheck ? performance.now() : 0;
   let nextSlice: Record<string, unknown>;
   let cellPatches: Patch[] = [];
@@ -237,8 +259,14 @@ export function reduceCell(
         });
         // Clone effects NOW — while the draft is still alive.
         // After produceWithPatches returns, Immer revokes the draft proxy,
-        // making any state refs in effect payloads unreadable.
-        if (Array.isArray(result)) effects = cloneEffects(result, action.type);
+        // making any state refs in effect payloads unreadable. AIO-427: a
+        // RETURN_TAG envelope is the sync method's transported value; every
+        // other array is effects (the historic contract).
+        if (isReturnEnvelope(result)) {
+          methodReturn = snapshotReturn(readReturn(result));
+        } else if (Array.isArray(result)) {
+          effects = cloneEffects(result, action.type);
+        }
       },
     );
   } catch (e) {
@@ -299,6 +327,7 @@ export function reduceCell(
     patches: cellPatches.length > 0
       ? { cell: cellName, ops: cellPatches }
       : undefined,
+    ret: methodReturn,
   };
   return _perfCheck
     ? {
@@ -306,6 +335,16 @@ export function reduceCell(
       _bd: { produce: stProduce, clone: stClone, spread: 0 },
     }
     : simpleReturn;
+}
+
+/** AIO-427: snapshot a sync method's return value so it survives the recipe.
+ *  A method that returns a slice of the draft (e.g. `return s.items[id]`) hands
+ *  back an Immer draft proxy that is REVOKED the instant produceWithPatches
+ *  returns — reading it later throws. `current()` deep-copies the draft into a
+ *  plain, detached value. Non-draft returns (primitives, freshly-built objects)
+ *  pass through untouched. */
+function snapshotReturn(r: unknown): unknown {
+  return isDraft(r) ? current(r as Draft<unknown>) : r;
 }
 
 /** Clone effects array to detach from Immer draft (AIO-146).
@@ -485,6 +524,8 @@ export function buildRootReducer(
     // Route to owning cell (by prefix) — skip for lifecycle actions
     const rt0 = _perfCheck ? performance.now() : 0;
     let ownerBd: { produce: number; clone: number; spread: number } | undefined;
+    // AIO-427: the owning cell's transported return value (the action's cell).
+    let ownerReturn: unknown;
     if (!isLifecycle) {
       const colonIdx = (action.type as string).indexOf(":");
       if (colonIdx !== -1) {
@@ -493,6 +534,7 @@ export function buildRootReducer(
         if (owner && !disabledCells.has(owner.__aio.id)) {
           const result = reduceCell(owner, currentState, action, ctx);
           currentState = result.state;
+          ownerReturn = result.ret;
           allEffects.push(...result.effects);
           if (result.patches) {
             if (Array.isArray(result.patches)) {
@@ -589,6 +631,7 @@ export function buildRootReducer(
       state: currentState,
       effects: allEffects,
       patches: allPatches.length > 0 ? allPatches : undefined,
+      ret: ownerReturn,
     };
   };
 }

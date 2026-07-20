@@ -74,6 +74,32 @@ becomes the action type: `increment` → `counter:increment`.
 
 **What you cannot do:** async operations, access other cells' state.
 
+### Returning a value
+
+A sync method can **return a value**, and `await cell.method()` resolves with it
+— no need to make the method `async` just to hand something back:
+
+```ts
+methods: {
+  addItem(s, item: Item): string {
+    const id = crypto.randomUUID()
+    s.items.push({ ...item, id })
+    return id                       // ← the new id
+  },
+}
+
+const id = await cart.addItem({ name: "Book", price: 12 })
+//    ^? string
+```
+
+- The type is inferred: `addItem` → `Promise<string>`, a void method →
+  `Promise<void>`. Annotate the return (`: string`) when TS can't infer it.
+- Returning a **schedule/own effect** (or an array of them) still schedules that
+  effect — it is *not* treated as a value, so `await` resolves `undefined`. A
+  method can't both schedule an effect and return a value in the same call.
+- Returning a slice of draft state (`return s.items[id]`) is safe — the value is
+  snapshotted, so it survives past the method (no revoked-proxy surprises).
+
 ### Returning schedule effects
 
 Methods — sync **and** async (AIO-381) — can return schedule effects:

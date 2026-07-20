@@ -139,7 +139,7 @@ Deno.test("dispatch: close() prevents further dispatching", () => {
 
 Deno.test("dispatch: dropped action rejects with QUEUE_OVERFLOW (B-4)", async () => {
   let state = { n: 0 };
-  let dispatchRef: ((a: { type: string }) => Promise<void>) | null = null;
+  let dispatchRef: ((a: { type: string }) => Promise<unknown>) | null = null;
   let flood = false;
   const overflowRejections: AioError[] = [];
 
@@ -767,7 +767,7 @@ Deno.test("dispatch: Promise rejects on reduce error (B-4 contract)", async () =
 
 Deno.test("dispatch: re-entrant dispatch returns Promise that resolves after processing", async () => {
   let state = { count: 0 };
-  let dispatchRef: ((a: { type: string }) => Promise<void>) | null = null;
+  let dispatchRef: ((a: { type: string }) => Promise<unknown>) | null = null;
 
   const dispatch = createDispatch<
     typeof state,
@@ -930,7 +930,7 @@ Deno.test("AIO-118: onDone called exactly once on DISPATCH_MAX overflow", () => 
 
 Deno.test("dispatch: DISPATCH_MAX overflow rejects dropped actions (B-4)", async () => {
   let state = { n: 0 };
-  let dispatchRef: ((a: { type: string }) => Promise<void>) | null = null;
+  let dispatchRef: ((a: { type: string }) => Promise<unknown>) | null = null;
   const rejections: AioError[] = [];
 
   const dispatch = createDispatch<

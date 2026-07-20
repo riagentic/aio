@@ -100,11 +100,11 @@ export function flattenOnto(
 
 /** Bind a cell to a live app — replaces action creators with dispatch wrappers,
  *  selectors with bound state readers. Called by aio.run() after compose.
- *  All bound methods return a Promise — sync methods return Promise<void> (dispatch completion),
- *  async methods return Promise<T> (method return value). */
+ *  All bound methods return a Promise — sync methods resolve with their
+ *  transported return value or undefined (AIO-427), async methods with T. */
 export function bindCell(
   f: CellDef,
-  dispatch: (action: Msg) => Promise<void>,
+  dispatch: (action: Msg) => Promise<unknown>,
   getState: () => Record<string, unknown>,
 ): void {
   if (f.__aio.bound) {
@@ -135,7 +135,9 @@ export function bindCell(
       attachMeta(fn, creator);
       (f as Record<string, unknown>)[key] = fn;
     } else {
-      // Sync methods: dispatch and return Promise<void> — resolves after reduce + effects
+      // Sync methods: dispatch and return a Promise that resolves after reduce
+      // + effects — with the method's transported return value (AIO-427), or
+      // undefined for a void/effect-only method.
       const fn = (...args: unknown[]) =>
         dispatch((creator as (...a: unknown[]) => Msg)(...args));
       attachMeta(fn, creator);
