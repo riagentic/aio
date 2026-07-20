@@ -33,6 +33,31 @@ export function classifyBrowserError(
         : `Add "${pkg}": "npm:${pkg}" to deno.json imports — AIO auto-aliases npm packages for the browser.`,
     };
   }
+  // "does not provide an export named X" — a STATIC import of a server-only
+  // symbol from the isomorphic "aio" entry poisons the client module graph and
+  // link-fails the whole bundle at boot (risoto 2026-07-20c: `createDB`). V8's
+  // message names the symbol but never the app file; make it teachable + point
+  // at the linter that DOES name the file.
+  const missingExport = message.match(
+    /module ['"]([^'"]+)['"] does not provide an export named ['"]([^'"]+)['"]/,
+  );
+  if (missingExport) {
+    const mod = missingExport[1]!;
+    const sym = missingExport[2]!;
+    const serverOnly = new Set([
+      "createDB",
+      "DEFAULT_PRAGMAS",
+      "connectCli",
+      "connectCliUDS",
+    ]);
+    return {
+      classification: "server-only-export",
+      label: "Server-Only Import",
+      fix: serverOnly.has(sym)
+        ? `'${sym}' is server-only (SQLite/Worker) — the browser build of "${mod}" omits it, so a cell (or a module it imports) statically importing it link-fails the whole client bundle. Search your cell-shared files for \`import { ${sym} }\`, and load it lazily in a server-only path (\`const { ${sym} } = await import("aio")\`) or from a *.server.ts module. \`deno task lint:aio\` now names the exact file:line.`
+        : `"${mod}" has no browser export named '${sym}'. If it's server-only, import it lazily behind a server guard or from a *.server.ts module; otherwise check the spelling. \`deno task lint:aio\` flags server-only imports in cell files.`,
+    };
+  }
   if (message.includes("is server-only") && message.includes("[aio]")) {
     return {
       classification: "server-only",

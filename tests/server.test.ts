@@ -1570,6 +1570,26 @@ Deno.test("classifyBrowserError: detects missing module specifier", () => {
   assertStringIncludes(result.fix, "xterm");
 });
 
+Deno.test("classifyBrowserError: server-only export (createDB) → teachable, points at the linter", () => {
+  // The risoto 2026-07-20c blank screen: a static `import { createDB } from "aio"`
+  // in a cell link-fails the client bundle at boot with this V8 message.
+  const result = classifyBrowserError(
+    "The requested module 'aio' does not provide an export named 'createDB'",
+  );
+  assertEquals(result.classification, "server-only-export");
+  assertStringIncludes(result.fix, "createDB");
+  assertStringIncludes(result.fix, "server-only");
+  assertStringIncludes(result.fix, "lint:aio"); // points at the tool that names the file
+});
+
+Deno.test("classifyBrowserError: unknown missing export → generic import guidance", () => {
+  const result = classifyBrowserError(
+    "The requested module 'aio' does not provide an export named 'wat'",
+  );
+  assertEquals(result.classification, "server-only-export");
+  assertStringIncludes(result.fix, "wat");
+});
+
 Deno.test("classifyBrowserError: detects @std server-only", () => {
   const result = classifyBrowserError(
     "Error: [aio] @std/fs.readFile is server-only",

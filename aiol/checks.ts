@@ -795,6 +795,18 @@ export const checkUI: Checker = (ctx) => {
 
   // Server-only imports in cell definition files (shared with browser)
   const SERVER_ONLY_PREFIXES = ["@std/", "node:"];
+  // AIO-424 (risoto): server-only SYMBOLS that live in the isomorphic "aio"
+  // entry — the browser build of "aio" omits them, so a STATIC import into a
+  // cell (shared with the browser bundle) link-fails at boot with an anonymous
+  // "does not provide an export named X" blank screen that every server-side
+  // check (check/test/lint) passes. Pure schema helpers (table/pk/text/…) stay
+  // out of this set — they're browser-safe.
+  const SERVER_ONLY_AIO_SYMBOLS = new Set([
+    "createDB",
+    "DEFAULT_PRAGMAS",
+    "connectCli",
+    "connectCliUDS",
+  ]);
   for (const file of cellFiles) {
     // Skip .tsx files — already checked above
     if (file.ext === ".tsx") continue;
@@ -809,20 +821,44 @@ export const checkUI: Checker = (ctx) => {
       if (
         m[0]!.startsWith("import type ") || m[0]!.startsWith("import type{")
       ) continue;
-      const isServerOnly = SERVER_ONLY_PREFIXES.some((p) => spec.startsWith(p));
-      if (!isServerOnly) continue;
       const lineIdx = file.content.slice(0, m.index).split("\n").length;
-      report(
-        "error",
-        "ui",
-        `${file.relative}:${lineIdx} — import "${spec}" is server-only but this file contains a cell() definition shared with the browser bundle`,
-        {
-          file: file.relative,
-          line: lineIdx,
-          fix:
-            "Move to a server-only file and use dynamic import, or use import type",
-        },
-      );
+
+      // (a) server-only module prefix
+      if (SERVER_ONLY_PREFIXES.some((p) => spec.startsWith(p))) {
+        report(
+          "error",
+          "ui",
+          `${file.relative}:${lineIdx} — import "${spec}" is server-only but this file contains a cell() definition shared with the browser bundle`,
+          {
+            file: file.relative,
+            line: lineIdx,
+            fix:
+              "Move to a server-only file and use dynamic import, or use import type",
+          },
+        );
+        continue;
+      }
+
+      // (b) server-only SYMBOL from the isomorphic "aio"/"aio/db" entry (AIO-424)
+      if (spec === "aio" || spec === "aio/db") {
+        const braces = m[0]!.match(/\{([^}]*)\}/);
+        if (!braces) continue;
+        for (const raw of braces[1]!.split(",")) {
+          const sym = raw.trim().split(/\s+as\s+/)[0]!.trim();
+          if (!SERVER_ONLY_AIO_SYMBOLS.has(sym)) continue;
+          report(
+            "error",
+            "ui",
+            `${file.relative}:${lineIdx} — '${sym}' from "${spec}" is server-only (SQLite/Worker) but this file has a cell() shared with the browser bundle; the browser build of "aio" omits it, so this static import blank-screens the client at boot`,
+            {
+              file: file.relative,
+              line: lineIdx,
+              fix:
+                `Load it lazily in a server-only path — \`const { ${sym} } = await import("aio")\` behind a server guard — or move it into a *.server.ts module. (Pure schema helpers like table/pk/text are browser-safe.)`,
+            },
+          );
+        }
+      }
     }
 
     // Deno.* usage

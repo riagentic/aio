@@ -327,3 +327,62 @@ export function loadData() { return join('a', 'b') }
     );
   });
 });
+
+// AIO-424 (risoto): a server-only SYMBOL from the isomorphic "aio" entry
+// (createDB) statically imported into a cell file blank-screens the client at
+// boot — every server-side check passes. The linter must catch it, attributed.
+Deno.test("aiol: flags server-only symbol (createDB) imported from aio in a cell file", async () => {
+  await withTmpDir(async (dir) => {
+    await Deno.mkdir(join(dir, "src"), { recursive: true });
+    await Deno.writeTextFile(
+      join(dir, "src", "App.tsx"),
+      "export default function App() { return <div/> }",
+    );
+    await Deno.writeTextFile(
+      join(dir, "deno.json"),
+      JSON.stringify({ imports: { "aio": "jsr:@riagentic/aio@1.0.0" }, unstable: ["kv"] }),
+    );
+    await Deno.writeTextFile(
+      join(dir, "src", "nfts.ts"),
+      `
+import { cell, createDB } from 'aio'
+export const nfts = cell('nfts', { state: { items: [] }, methods: {} })
+`,
+    );
+    const issues = await runCheckUI(dir);
+    assertEquals(
+      issues.some((i) =>
+        i.message.includes("createDB") && i.message.includes("server-only")
+      ),
+      true,
+      "createDB from aio in a cell file must be flagged",
+    );
+  });
+});
+
+Deno.test("aiol: does NOT flag pure schema helpers (table/pk) from aio in a cell file", async () => {
+  await withTmpDir(async (dir) => {
+    await Deno.mkdir(join(dir, "src"), { recursive: true });
+    await Deno.writeTextFile(
+      join(dir, "src", "App.tsx"),
+      "export default function App() { return <div/> }",
+    );
+    await Deno.writeTextFile(
+      join(dir, "deno.json"),
+      JSON.stringify({ imports: { "aio": "jsr:@riagentic/aio@1.0.0" }, unstable: ["kv"] }),
+    );
+    await Deno.writeTextFile(
+      join(dir, "src", "orders.ts"),
+      `
+import { cell, table, pk, text } from 'aio'
+export const orders = cell('orders', { state: { orders: [] }, methods: {} })
+`,
+    );
+    const issues = await runCheckUI(dir);
+    assertEquals(
+      issues.some((i) => i.message.includes("server-only")),
+      false,
+      "pure schema helpers are browser-safe — no false positive",
+    );
+  });
+});
