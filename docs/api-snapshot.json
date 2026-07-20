@@ -485,7 +485,7 @@
         },
         "UiConfig": {
           "kind": "typeAlias",
-          "sig": "59b68af1a84019cd"
+          "sig": "b9eb89ee5b56ec79"
         },
         "UnionOf": {
           "kind": "typeAlias",
@@ -493,7 +493,7 @@
         },
         "VERSION": {
           "kind": "variable",
-          "sig": "5a81f4aeb58655f7"
+          "sig": "295f7812d1f5bc0b"
         },
         "VitalAlert": {
           "kind": "typeAlias",
@@ -677,7 +677,7 @@
         },
         "Link": {
           "kind": "function",
-          "sig": "bdfc0ee2cdc0d8ca"
+          "sig": "25541a85b933ae3f"
         },
         "LinkProps": {
           "kind": "typeAlias",
@@ -701,7 +701,7 @@
         },
         "NavLink": {
           "kind": "function",
-          "sig": "36e74017593fcdd9"
+          "sig": "dbe2cd9dd4ecac0f"
         },
         "on": {
           "kind": "function",
@@ -717,11 +717,11 @@
         },
         "Outlet": {
           "kind": "function",
-          "sig": "816444e7441d7951"
+          "sig": "f156ec4e33ef6639"
         },
         "page": {
           "kind": "function",
-          "sig": "f0a3e0d50fb865e1"
+          "sig": "547fa2af65fc18ab"
         },
         "Portal": {
           "kind": "variable",
@@ -765,7 +765,7 @@
         },
         "Route": {
           "kind": "function",
-          "sig": "dc8daa6edee6bae2"
+          "sig": "af76b73c95b22bb6"
         },
         "routePath": {
           "kind": "variable",
