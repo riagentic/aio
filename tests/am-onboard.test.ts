@@ -54,19 +54,23 @@ Deno.test("frameworkSpecs: source mode uses the dep/aio symlink + carries source
 
 // ── generated deno.json: the target build tasks (onboard#4/#5) ──────────────
 
-Deno.test("denoJson: dev + one-line-per-target build tasks", () => {
+Deno.test("denoJson: dev defaults to browser + per-target dev/compile tasks", () => {
   const dj = JSON.parse(denoJson("demo", true)) as {
     tasks: Record<string, string>;
     compilerOptions: Record<string, unknown>;
   };
-  assertEquals(dj.tasks.dev, "deno run -A src/app.ts");
-  for (const t of ["compile", "electron", "android", "service"]) {
-    assert(dj.tasks[t], `missing task: ${t}`);
-    assertStringIncludes(dj.tasks[t]!, "/build");
-  }
+  // dev works out of the box (browser — no toolchain, no electron download).
+  assertEquals(dj.tasks.dev, "deno run -A src/app.ts --client=browser");
+  assertStringIncludes(dj.tasks["dev:browser"]!, "--client=browser");
+  assertStringIncludes(dj.tasks["dev:electron"]!, "--client=electron");
+  assertStringIncludes(dj.tasks["dev:electron"]!, "install --allow-scripts=npm:electron");
+  assertStringIncludes(dj.tasks["dev:android"]!, "src/app.ts");
+  // compile: default binary + per-target
   assertStringIncludes(dj.tasks.compile!, "--compile");
-  assertStringIncludes(dj.tasks.electron!, "--electron");
-  assertStringIncludes(dj.tasks.android!, "--android");
+  assertStringIncludes(dj.tasks["compile:browser"]!, "--compile");
+  assertStringIncludes(dj.tasks["compile:electron"]!, "--electron");
+  assertStringIncludes(dj.tasks["compile:electron"]!, "install --allow-scripts=npm:electron");
+  assertStringIncludes(dj.tasks["compile:android"]!, "--android");
   assertEquals(dj.tasks.test, "deno test -A");
   assertEquals(dj.compilerOptions.jsxImportSource, "aio");
 });
