@@ -10,13 +10,9 @@
  * SDK (adb + emulator) and at least one AVD; fails loud with steps otherwise.
  */
 import { join } from "@std/path";
+import { resolveSdk } from "./build/build-helpers.ts";
 
 const dec = new TextDecoder();
-
-function sdkRoot(): string | null {
-  return Deno.env.get("ANDROID_HOME") ?? Deno.env.get("ANDROID_SDK_ROOT") ??
-    null;
-}
 
 async function run(
   cmd: string,
@@ -70,11 +66,12 @@ async function waitFor(
 }
 
 async function main(): Promise<void> {
-  const sdk = sdkRoot();
+  const sdk = resolveSdk();
   if (!sdk) {
     fail(
-      "ANDROID_HOME not set — install the Android SDK and set ANDROID_HOME",
-      "then create an emulator (AVD) in Android Studio or via avdmanager",
+      "Android SDK not found — set ANDROID_HOME to your SDK dir (the one with " +
+        "platform-tools/), install the SDK, and create an emulator (AVD)",
+      "ANDROID_HOME may point at the SDK or its parent (e.g. ~/Android → ~/Android/Sdk)",
     );
   }
   const exe = Deno.build.os === "windows" ? ".exe" : "";
