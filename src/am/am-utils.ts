@@ -13,6 +13,8 @@ import {
 } from "../server/single-instance-lock.ts";
 import { join } from "@std/path";
 import type { GlobalFlags } from "./am-types.ts";
+import { detectMode, out, outError } from "./am-output.ts";
+import { trojanGet, trojanPost } from "./am-http.ts";
 
 // ── Entry config cache ──────────────────────────────────────
 
@@ -282,4 +284,55 @@ export function parsePayload(args: string[]): Record<string, unknown> {
     }
   }
   return result;
+}
+
+// ── Command context (complexity audit) ──────────────────────────────
+// The `mode/appId/port` preamble appeared 26× across am-cmd-* files, and the
+// `if (!result.ok) { outError; exit(1) }` guard 18× — every new command
+// re-typed both. One resolver + one guard.
+
+/** Everything a command needs to talk to a running app. */
+export type AmCtx = {
+  mode: ReturnType<typeof detectMode>;
+  appId: string;
+  port: number;
+};
+
+/** Resolve the standard command context from global flags. */
+export function amCtx(flags: GlobalFlags): AmCtx {
+  const appId = resolveAmAppId(flags.app);
+  return {
+    mode: detectMode(flags),
+    appId,
+    port: resolvePort(flags.port, appId),
+  };
+}
+
+/** GET a trojan route and print the result — exits(1) loudly on failure.
+ *  The one-call body of most read-only am commands. */
+export async function runTrojanGet(
+  ctx: AmCtx,
+  route: string,
+  timeoutMs?: number,
+): Promise<void> {
+  const result = await trojanGet(ctx.port, route, ctx.appId, timeoutMs);
+  if (!result.ok) {
+    outError(result.error, ctx.mode);
+    Deno.exit(1);
+  }
+  out(result.data, ctx.mode);
+}
+
+/** POST to a trojan route and print the result — exits(1) loudly on failure. */
+export async function runTrojanPost(
+  ctx: AmCtx,
+  route: string,
+  body: unknown,
+): Promise<void> {
+  const result = await trojanPost(ctx.port, route, body, ctx.appId);
+  if (!result.ok) {
+    outError(result.error, ctx.mode);
+    Deno.exit(1);
+  }
+  out(result.data, ctx.mode);
 }

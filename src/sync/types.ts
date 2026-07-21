@@ -2,7 +2,6 @@
 
 /**
  * Hybrid Logical Clock: [physical_ms, counter, nodeId]
- * @experimental Excluded from the 1.0 stability guarantee.
  */
 export type HLC = [physical: number, counter: number, nodeId: string];
 
@@ -62,7 +61,6 @@ export interface SyncOp {
 
 /**
  * Wire message: client→server or server→client op
- * @experimental Excluded from the 1.0 stability guarantee.
  */
 export interface OpMessage {
   __op: {
@@ -78,7 +76,6 @@ export interface OpMessage {
 
 /**
  * Wire message: server→client ack
- * @experimental Excluded from the 1.0 stability guarantee.
  */
 export interface AckMessage {
   __ack: { opId: string; serverHlc: HLC };
@@ -86,7 +83,6 @@ export interface AckMessage {
 
 /**
  * Wire message: client→server sync request
- * @experimental Excluded from the 1.0 stability guarantee.
  */
 export interface SyncRequest {
   __sync: {
@@ -100,7 +96,6 @@ export interface SyncRequest {
  *  lowWater is per-cell map when server tracks multiple cells (see server-handler.ts). */
 /**
  * Server reply to a `__sync` catch-up request: ops since the client's cursor.
- * @experimental Excluded from the 1.0 stability guarantee.
  */
 export interface SyncResponse {
   __sync:
@@ -135,7 +130,6 @@ export const SYNC_DEFAULTS = {
 
 /**
  * Normalize sync: true | SyncConfig → SyncConfig
- * @experimental Excluded from the 1.0 stability guarantee.
  */
 export function normalizeSyncConfig(
   raw: true | Partial<SyncConfig>,

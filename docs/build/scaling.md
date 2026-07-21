@@ -38,13 +38,13 @@ type State = { orders: Order[] }
 // Good — state holds current view, SQLite holds everything
 type State = { page: string; currentOrders: Order[]; filters: Filters }
 
-execute: {
-  async loadOrders(app, payload) {
+methods: {
+  async loadOrders(s) {
     const { rows } = await app.db!.query<Order>(
       'SELECT * FROM orders WHERE status = ? ORDER BY created_at DESC LIMIT 100',
       ['active']
     )
-    app.dispatch(myCell.ordersLoaded(rows))
+    s.currentOrders = rows
   },
 },
 ```
@@ -73,14 +73,14 @@ const orders = cell("orders", {
 **3. Use direct async SQL for heavy lifting**
 
 ```ts
-execute: {
-  async importCSV(app, payload) {
-    for (const batch of chunks(payload.parsedRows, 500)) {
+methods: {
+  async importCSV(s, parsedRows: Row[]) {
+    for (const batch of chunks(parsedRows, 500)) {
       const params = batch.flatMap(r => [r.id, r.customer, r.total])
       const placeholders = batch.map(() => '(?,?,?)').join(',')
       await app.db!.execute(`INSERT INTO orders(id,customer,total) VALUES ${placeholders}`, params)
     }
-    app.dispatch(myCell.importDone(payload.parsedRows.length))
+    s.imported = parsedRows.length
   },
 },
 ```
@@ -88,13 +88,13 @@ execute: {
 **4. Debounce high-frequency updates**
 
 ```ts
-execute: {
-  async sensorBatch(app, payload) {
-    const readings = collectReadings(payload.buffer)
+methods: {
+  async sensorBatch(s, buffer: Reading[]) {
+    const readings = collectReadings(buffer)
     const params = readings.flatMap(r => [r.ts, r.value])
     const placeholders = readings.map(() => '(?,?)').join(',')
     await app.db!.execute(`INSERT INTO readings(ts,value) VALUES ${placeholders}`, params)
-    app.dispatch(sensors.readingsUpdated(readings.length))  // one broadcast
+    s.readingCount = readings.length  // one broadcast
   },
 },
 ```
@@ -140,42 +140,38 @@ VPS.
 
 Every action is timed:
 
-- **reduce budget** (default: 100ms) — if `reduce()` takes longer, it's flagged
-- **effect budget** (default: 5ms) — if sync portion of `execute()` takes
+- **reduce budget** (default: 100ms) — if a sync method takes longer, it's
+  flagged
+- **effect budget** (default: 5ms) — if a sync stretch of the executor takes
   longer, it's flagged
 
 ```ts
-await aio.run(state, {
-  reduce,
-  execute,
+await aio.run({
+  cells: [myCell],
   perfCheck: "on", // or 'off'
   perfBudget: {
-    reduce: 50, // warn if reduce > 50ms
-    effect: 10, // warn if sync effect > 10ms
+    reduce: 50, // warn if a sync method > 50ms
+    effect: 10, // warn if a sync effect stretch > 10ms
   },
 });
 ```
 
-### Moving slow work out of reduce
+### Moving slow work off the sync path
 
 ```ts
-// BAD — reduce handler blocks 200ms
-reduce: {
-  analyze(state) {
-    state.results = analyzeEverything(state.data)  // blocks 200ms!
+// BAD — sync method blocks 200ms
+methods: {
+  analyze(s) {
+    s.results = analyzeEverything(s.data)  // blocks 200ms!
   },
 },
 
-// GOOD — reduce sets flag, execute does the heavy work
-reduce: {
-  analyze(state) {
-    state.analyzing = true
-  },
-},
-execute: {
-  runAnalysis(app, payload) {
-    const results = analyzeEverything(payload.data)  // still 200ms, but async
-    app.dispatch(myCell.analysisDone(results))
+// GOOD — async method: flag commits first, heavy work suspends
+methods: {
+  async analyze(s) {
+    s.analyzing = true
+    s.results = await analyzeEverythingAsync(s.data)
+    s.analyzing = false
   },
 },
 ```

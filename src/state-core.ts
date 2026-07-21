@@ -5,10 +5,8 @@
  * Owns: Immer patch application, subscription tracking, send logic,
  * transport abstraction. Delta generation uses Immer's produceWithPatches
  * in cell-compose.ts; patch application uses Immer's applyPatches here.
- * Both the React and AIR adapters consume this module.
- *
- * @experimental The whole `aio/state-core` entry is for custom-transport /
- * custom-client authors and is excluded from the 1.0 stability guarantee.
+ * Both the React and AIR adapters consume this module. The `aio/state-core`
+ * entry is for custom-transport / custom-client authors.
  *
  * @example
  * ```ts

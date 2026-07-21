@@ -63,20 +63,21 @@ export async function findElectronBin(log: Log): Promise<string | null> {
 /** One-shot `deno install --allow-scripts=npm:electron` in the app cwd so
  *  `dev:electron` / `compile:electron` work OUT OF THE BOX on a fresh app —
  *  no separate install step. Returns true when the install command succeeded.
- *  @experimental Excluded from the 1.0 stability guarantee. */
+ *  `run` is the command seam (injected in tests; real `deno install` here). */
 export async function autoInstallElectron(
   log: { info?: (m: string) => void; error: (m: string) => void },
+  run: () => Promise<{ success: boolean }> = () =>
+    new Deno.Command(Deno.execPath(), {
+      args: ["install", "--allow-scripts=npm:electron"],
+      stdout: "inherit",
+      stderr: "inherit",
+    }).output(),
 ): Promise<boolean> {
   (log.info ?? console.log)(
     "electron: not installed — auto-installing (deno install --allow-scripts=npm:electron)…",
   );
   try {
-    const out = await new Deno.Command(Deno.execPath(), {
-      args: ["install", "--allow-scripts=npm:electron"],
-      stdout: "inherit",
-      stderr: "inherit",
-    }).output();
-    return out.success;
+    return (await run()).success;
   } catch {
     return false;
   }

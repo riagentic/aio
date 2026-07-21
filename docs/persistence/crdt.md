@@ -14,10 +14,11 @@ replayed on reconnect), the server applies each accepted op through its normal
 dispatch and relays to peers, and the optimistic view drives your UI. The server
 op-log SQLite file is provisioned even without a `db:` config.
 
-> **Status: `@experimental`.** The end-to-end loop is proven (multi-tab
-> convergence e2e against real browsers), but the merge-strategy surface and
-> wire protocol are excluded from the 1.0 stability guarantee — pin behavior you
-> depend on.
+> **Status: stable, fully tested.** The end-to-end loop is proven by multi-tab
+> convergence e2e against real browsers, plus unit + property + integration
+> suites over the engine, HLC, op buffer, catch-up cursor, compaction, and
+> reconnect paths (`tests/sync/`, `tests/browser-sync.test.ts`,
+> `tests/e2e-sync-browser.test.ts`).
 
 See also: [Wire protocol & internals](crdt-protocol.md)
 

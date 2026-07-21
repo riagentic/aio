@@ -28,18 +28,23 @@ your app is primarily request/response with no shared state.
 
 ---
 
-### Why no nested machine substates (like XState)?
+### Why no state machines (like XState)?
 
-aio machines guard top-level status transitions:
-`{ idle: { start: 'running' } }`. For substates, use state fields:
+v2 removed the `machine:` config — a status guard is one line of plain code:
 
 ```ts
 { status: 'running', paused: true }
+
+methods: {
+  pause(s) {
+    if (s.status !== 'running') return  // the whole guard
+    s.paused = true
+  },
+}
 ```
 
-The machine enforces that `pause` can only fire when `status === 'running'`. The
-`paused` boolean is just state — no special machinery needed. For complex
-sequential workflows with branching, use [generators](../state/generators.md).
+`status` and `paused` are just state — no special machinery needed. See
+[guard lines](../state/methods.md#guard-lines--machine-states-without-a-machine).
 
 Building hierarchical statecharts (entry/exit actions, history states, parallel
 regions) would mean building a worse XState inside aio. If you genuinely need
@@ -48,22 +53,21 @@ through an aio cell.
 
 ---
 
-### Why no `ctx.retry()` or `ctx.withTimeout()`?
+### Why no `retry()` or `withTimeout()` helpers?
 
-`ctx.call()` already accepts `{ timeout?, retries? }`:
+`call()` already accepts `{ timeout?, retries? }`:
 
 ```ts
-yield * ctx.call("submit", () => submitOrder(), { timeout: 5000, retries: 2 });
+import { call } from "aio";
+const r = await call({ timeout: 5000, retries: 2 }, () => submitOrder());
 ```
 
-For custom timeout behavior, use `ctx.race` + `ctx.sleep`:
+For custom timeout behavior, use `race` (its `timeout: ms` sugar is built in):
 
 ```ts
-const result = yield * ctx.race({
-  data: ctx.call("fetch", () => fetchData()),
-  timeout: ctx.sleep("timeout", 5000),
-});
-if (result.timeout !== undefined) yield * ctx.fail("timed out");
+import { race } from "aio";
+const result = await race({ data: fetchData(), timeout: 5000 });
+if (result.winner === "timeout") s.status = "timed-out";
 ```
 
 No extra API surface needed.
@@ -76,13 +80,14 @@ aio state is a single JSON object broadcast to all clients via WebSocket.
 Pushing 50MB through that pipe would destroy every connected browser tab.
 
 Large data processing is a **side effect**, not state. Process it server-side in
-methods or generators, then update state with the result:
+an async method, then update state with the result:
 
 ```ts
-*importFile(ctx, path: string) {
-  yield* ctx.mutate('start', s => { s.importing = true })
-  const count = yield* ctx.call('process', () => processLargeFile(path))
-  yield* ctx.done(s => { s.importing = false; s.rowCount = count })
+async importFile(s, path: string) {
+  s.importing = true
+  const count = await processLargeFile(path)
+  s.importing = false
+  s.rowCount = count
 }
 ```
 
@@ -125,8 +130,9 @@ methods: {
 }
 ```
 
-No `cell({ validate })` needed — it would just be another place to look. See
-[Methods](../state/methods.md) for form state patterns.
+No dedicated form-validation hook needed — it would just be another place to
+look. (The cell-level `validate` config guards state invariants, not form UX.)
+See [Methods](../state/methods.md) for form state patterns.
 
 ---
 
@@ -137,8 +143,8 @@ broadcast to all clients. That's what makes it simple — no consensus, no
 conflict resolution, no eventual consistency.
 
 Adding a pub/sub adapter between instances would require conflict resolution
-(CRDTs? last-write-wins?), state merge logic, distributed machine guards, and
-cross-instance generator coordination. That's a fundamentally different product.
+(CRDTs? last-write-wins?), state merge logic, and cross-instance workflow
+coordination. That's a fundamentally different product.
 
 **What actually scales:** aio handles thousands of WebSocket connections on a
 single server. For multi-tenant apps, partition by workspace — each instance
@@ -177,10 +183,11 @@ Zustand, or Convex.
 
 ---
 
-### Why aren't generator step names validated?
+### Why aren't schedule/own effect ids validated beyond the pattern?
 
-Step names in `ctx.call('fetchPrice', fn)` are debug labels for time-travel
-visibility. They show up as `checkout:__flow:fetchPrice` in the action log.
-Enforcing naming rules (lint, template literal types) would add friction to the
-fast path for a cosmetic concern. Name them descriptively — your future self
-will thank you.
+Ids like `schedule.after('prices:refresh', …)` and
+`own.set('workspace:watcher',
+…)` are keyed replace slots plus debug labels.
+They must match `/^[\w\-:.]+$/`; beyond that, enforcing naming rules (lint,
+template literal types) would add friction to the fast path for a cosmetic
+concern. Prefix them with the cell name — your future self will thank you.

@@ -13,25 +13,24 @@ import { counter } from "./cell/counter/index.ts";
 testCell(counter, "increment from idle", (t) => {
   t.send.increment(5);
   t.expect.state((s) => s.count === 5);
-  t.expect.status("idle");
   t.expect.effects(["counter:log"]);
 });
 
-testCell(counter, "machine guards block invalid transitions", (t) => {
-  t.send.save(); // idle -> saving
-  t.expect.status("saving");
-  t.send.increment(1); // blocked! increment not in saving.on
+testCell(counter, "guard line blocks increment while saving", (t) => {
+  t.send.save(); // status -> 'saving'
+  t.expect.state((s) => s.status === "saving");
+  t.send.increment(1); // guard line returns early
   t.expect.state((s) => s.count === 0); // unchanged
 });
 
 testCell(counter, "save flow: idle -> saving -> error -> idle", (t) => {
   t.send.save();
-  t.expect.status("saving");
+  t.expect.state((s) => s.status === "saving");
   t.send.saveFailed("network error");
-  t.expect.status("error");
+  t.expect.state((s) => s.status === "error");
   t.expect.state((s) => s.error === "network error");
   t.send.dismiss();
-  t.expect.status("idle");
+  t.expect.state((s) => s.status === "idle");
 });
 ```
 
@@ -64,7 +63,7 @@ long the method takes (dynamic imports, file IO, slow fetches). If the method
 throws, the awaited promise rejects — assert with `assertRejects`.
 
 Not awaiting keeps the old fire-and-forget behavior: nothing executes until you
-`settle()`. Sends blocked by the machine resolve immediately.
+`settle()`.
 
 `await t.settle()` is the bulk alternative — run all pending effects and wait
 for every triggered async method to actually finish:
@@ -84,15 +83,15 @@ them never double-executes a method. `settle()` does not reject on method errors
 Reserve `await t.settle(100)` (timer-based) for code that uses **real timers**
 outside the cell system, e.g. `setTimeout` chains.
 
-### State machine transitions
+### Guard-line transitions
 
 ```ts
 testCell(door, "cannot open when already open", (t) => {
   t.send.open();
-  t.expect.status("open");
+  t.expect.state((s) => s.status === "open");
 
-  t.send.open(); // Should be dropped
-  t.expect.status("open"); // Still 'open'
+  t.send.open(); // guard line returns early
+  t.expect.state((s) => s.status === "open"); // still 'open'
   t.expect.noStateChange();
 });
 ```
@@ -104,12 +103,11 @@ testCell(door, "cannot open when already open", (t) => {
 | `t.init()`                   | Reset to initial state                                                                                  |
 | `t.destroy()`                | Reset + set status to 'uninitialized'                                                                   |
 | `t.send.<action>(...args)`   | Dispatch an action. Returns a promise — await it to run an async method to completion (AIO-379)         |
-| `t.expect.state(fn)`         | Assert on cell state slice                                                                              |
-| `t.expect.status(str)`       | Assert current machine status                                                                           |
+| `t.expect.state(fn)`         | Assert on cell state slice (incl. your `status` field)                                                  |
 | `t.expect.effects(['name'])` | Assert effect types from last action — use full `'cellName:effectKey'` format, e.g. `'counter:persist'` |
 | `t.expect.effectCount(n)`    | Assert number of effects from last action                                                               |
 | `t.expect.invariant(fn)`     | Assert a predicate holds                                                                                |
-| `t.getState()`               | Get cell state slice (use `t.expect.status()` for machine status)                                       |
+| `t.getState()`               | Get cell state slice                                                                                    |
 | `t.getEffects()`             | Get effects from last dispatched action                                                                 |
 | `t.randomActions(n)`         | Dispatch N random valid actions (property-based testing)                                                |
 | `t.runEffects()`             | Execute pending effects manually (deprecated — `settle()` now auto-runs effects)                        |

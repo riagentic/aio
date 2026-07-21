@@ -12,7 +12,6 @@ export type SyncReducer = (
 
 /**
  * Result of replaying unconfirmed ops: optimistic state, dropped and surviving ops.
- * @experimental Excluded from the 1.0 stability guarantee.
  */
 export interface RebaseResult {
   optimistic: Record<string, unknown>;
@@ -24,7 +23,6 @@ export interface RebaseResult {
  *  Ops returning null are dropped (invalid after rebase). */
 /**
  * Replay unconfirmed local ops on top of freshly confirmed server state.
- * @experimental Excluded from the 1.0 stability guarantee.
  */
 export function rebase(
   confirmed: Record<string, unknown>,

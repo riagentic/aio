@@ -285,18 +285,18 @@ Deno.test("bindCellReactive without sendFn leaves method as unbound guard", () =
 
 // ── Actions-based cell — overlapping state/action name ────────────────
 
-Deno.test("AIO-6.1: actions cell throws when a state key collides with an action name", () => {
+Deno.test("AIO-6.1: cell throws when a state key collides with a method name", () => {
+  // Ported from the actions-form variant (Style B deleted, perfect-aio D1) —
+  // the capability is the same: a state key shadowed by a callable must fail
+  // loudly at definition time.
   _resetCellRegistry();
   let caught: Error | null = null;
   try {
     cell("actoverlap", {
       state: { error: null as string | null },
-      actions: {
-        error: (msg: string) => ({ msg }),
-      },
-      reduce: {
-        error(s: { error: string | null }, p: { msg: string }) {
-          s.error = p.msg;
+      methods: {
+        error(s, msg: string) {
+          s.error = msg;
         },
       },
     });
@@ -304,7 +304,7 @@ Deno.test("AIO-6.1: actions cell throws when a state key collides with an action
     caught = e as Error;
   }
   assertEquals(caught instanceof Error, true);
-  assertEquals(caught!.message.includes("collides with action 'error'"), true);
+  assertEquals(caught!.message.includes("collides with method 'error'"), true);
   _resetCellRegistry();
 });
 

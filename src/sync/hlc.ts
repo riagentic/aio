@@ -4,7 +4,6 @@ import { SYNC_DEFAULTS } from "./types.ts";
 
 /**
  * Compare two HLCs. Returns <0, 0, or >0.
- * @experimental Excluded from the 1.0 stability guarantee.
  */
 export function compareHLC(a: HLC, b: HLC): number {
   if (a[0] !== b[0]) return a[0] - b[0];
@@ -14,7 +13,6 @@ export function compareHLC(a: HLC, b: HLC): number {
 
 /**
  * Mutable hybrid logical clock instance bound to a node ID.
- * @experimental Excluded from the 1.0 stability guarantee.
  */
 export interface HLClock {
   now(): HLC;
@@ -26,7 +24,6 @@ export interface HLClock {
 
 /**
  * Create a hybrid logical clock for the given node.
- * @experimental Excluded from the 1.0 stability guarantee.
  */
 export function createHLC(
   nodeId: string,

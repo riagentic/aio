@@ -74,83 +74,23 @@ Deno.test("integration: two cell(methods) cells compose independently", () => {
   assertEquals((app.state.todo as any).items, ["buy milk"]);
 });
 
-// ── Reactive + event-driven cross-cell ───────────────────────────
-
-Deno.test("integration: event-driven cell reacts to cell(methods) cell actions", () => {
-  const cart = cell("cart", {
-    state: { items: [] as string[] },
-    methods: {
-      addItem(s, item: string) {
-        s.items.push(item);
-      },
-      clear(s) {
-        s.items = [];
-      },
-    },
-  });
-
-  const stats = cell("stats", {
-    state: { addCount: 0, clearCount: 0 },
-    actions: { noop: () => ({}) },
-    machine: {
-      initial: "active",
-      states: {
-        active: {
-          noop: "active",
-          "cart:addItem": "active",
-          "cart:clear": "active",
-        },
-      },
-    },
-    reduce: {
-      ["cart:addItem"](state) {
-        state.addCount++;
-      },
-      ["cart:clear"](state) {
-        state.clearCount++;
-      },
-    },
-  });
-
-  const composed = composeCells([cart, stats]);
-  const app = createApp(composed);
-
-  app.dispatch(
-    (cart.__aio.actions as unknown as Record<string, any>).addItem("a"),
-  );
-  app.dispatch(
-    (cart.__aio.actions as unknown as Record<string, any>).addItem("b"),
-  );
-  app.dispatch((cart.__aio.actions as unknown as Record<string, any>).clear());
-  app.dispatch(
-    (cart.__aio.actions as unknown as Record<string, any>).addItem("c"),
-  );
-
-  assertEquals((app.state.cart as any).items, ["c"]);
-  assertEquals((app.state.stats as any).addCount, 3);
-  assertEquals((app.state.stats as any).clearCount, 1);
-});
-
 // ── Async reactive + sync reactive interaction ──────────────────────
 
-Deno.test("integration: async cell(methods) method with machine + sync methods", async () => {
+Deno.test("integration: async cell(methods) method with status guard + sync methods", async () => {
   const workflow = cell("workflow", {
-    state: { step: "none", data: null as string | null },
-    machine: {
-      initial: "idle",
-      states: {
-        idle: { start: "running" },
-        running: { complete: "idle" },
-      },
-    },
+    state: { step: "none", data: null as string | null, phase: "idle" },
     methods: {
       async start(s) {
+        if (s.phase !== "idle") return; // guard replaces the old machine gate
+        s.phase = "running";
         s.step = "fetching";
         const result = await Promise.resolve("fetched-data");
         s.data = result;
         s.step = "done";
       },
       complete(s) {
+        if (s.phase !== "running") return;
+        s.phase = "idle";
         s.step = "completed";
       },
     },
@@ -159,6 +99,13 @@ Deno.test("integration: async cell(methods) method with machine + sync methods",
   const composed = composeCells([workflow]);
   const app = createApp(composed);
 
+  // complete is ignored while idle (guard) — state untouched
+  app.dispatch(
+    (workflow.__aio.actions as unknown as Record<string, any>).complete(),
+  );
+  assertEquals((app.state.workflow as any).phase, "idle");
+  assertEquals((app.state.workflow as any).step, "none");
+
   app.dispatch(
     (workflow.__aio.actions as unknown as Record<string, any>).start() as any,
   );
@@ -166,13 +113,14 @@ Deno.test("integration: async cell(methods) method with machine + sync methods",
 
   assertEquals((app.state.workflow as any).data, "fetched-data");
   assertEquals((app.state.workflow as any).step, "done");
-  assertEquals((app.state.workflow as any).__aio_status, "running");
+  assertEquals((app.state.workflow as any).phase, "running");
 
   // Transition back to idle
   app.dispatch(
     (workflow.__aio.actions as unknown as Record<string, any>).complete(),
   );
-  assertEquals((app.state.workflow as any).__aio_status, "idle");
+  assertEquals((app.state.workflow as any).phase, "idle");
+  assertEquals((app.state.workflow as any).step, "completed");
 });
 
 // ── Lifecycle hooks with multiple reactive cells ─────────────────

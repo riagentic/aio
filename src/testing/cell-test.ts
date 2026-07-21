@@ -11,8 +11,8 @@ export {
 
 import type { ScheduleEffect } from "../state/schedule.ts";
 import type { OwnEffect } from "../state/own.ts";
-import { resetFlows } from "../state/flow.ts";
-import { registerCall, resetPending } from "../state/cell-impl.ts";
+import { registerCall } from "../state/cell-impl.ts";
+import { _resetAioRuntime } from "../state/runtime-reset.ts";
 import { attachMeta } from "../state/cell-catalog.ts";
 import type { Catalog, CellDef, Creators, Msg } from "../state/cell-types.ts";
 import { composeCells } from "../state/cell-compose.ts";
@@ -62,9 +62,9 @@ export type TestContext<
   };
   /** Assertions */
   expect: {
-    /** Assert on cell state slice */
+    /** Assert on cell state slice (typed — `s` is the cell's state, tbd B8) */
     // deno-lint-ignore no-explicit-any
-    state: (fn: (s: any, ...args: any[]) => boolean) => void;
+    state: (fn: (s: S, ...args: any[]) => boolean) => void;
     /** Assert current machine status */
     status: (expected: string) => void;
     /** Assert effect types returned by last action (full type strings, e.g. 'counter:persist') */
@@ -89,9 +89,64 @@ export type TestContext<
   settle: (ms?: number) => Promise<void>;
 };
 
-/** Test harness for isolated cell testing — wraps Deno.test with typed helpers */
+/** Typed senders derived from the cell's bound method surface (DirectCalling):
+ *  every promise-returning callable on the cell ref — i.e. its methods —
+ *  becomes a sender with the SAME args and resolved RETURN type, so
+ *  `await t.send.create(...)` yields what `await cell.create(...)` yields
+ *  (tbd B8 / inews #8). Selector accessors (plain returns) and actions-form
+ *  creators (action objects) don't return promises and are excluded. */
+type SendSurface<F> = {
+  [
+    K in keyof F & string as F[K] extends (...a: never[]) => Promise<unknown>
+      ? K
+      : never
+  ]: F[K] extends (...args: infer P) => Promise<infer R>
+    ? (...args: P) => Promise<R>
+    : never;
+};
+
+/** Extract a cell ref's state / name / actions from its CellDef part. */
+type CellStateOf<F> = F extends
+  CellDef<string, Creators, Creators, infer S extends Record<string, unknown>>
+  ? S
+  : Record<string, unknown>;
+type CellNameOf<F> = F extends
+  CellDef<infer N extends string, Creators, Creators, Record<string, unknown>>
+  ? N
+  : string;
+type CellActionsOf<F> = F extends
+  CellDef<string, infer A extends Creators, Creators, Record<string, unknown>>
+  ? A
+  : Creators;
+
+/** TestContext for a concrete cell ref: `send` is REPLACED by the cell's
+ *  typed method surface when one exists (methods-form) — sender args AND
+ *  resolved return types mirror production `await cell.method(...)` (tbd B8 /
+ *  inews #8). Actions-form cells (empty SendSurface) keep the loose senders.
+ *  (A plain intersection can't narrow: `Promise<unknown> & Promise<R>` awaits
+ *  to unknown.) */
+type TestCtxOf<F> = keyof SendSurface<F> extends never
+  ? TestContext<CellStateOf<F>, Catalog<CellNameOf<F>, CellActionsOf<F>>>
+  :
+    & Omit<
+      TestContext<CellStateOf<F>, Catalog<CellNameOf<F>, CellActionsOf<F>>>,
+      "send"
+    >
+    & { send: SendSurface<F> };
+
+/** Test harness for isolated cell testing — wraps Deno.test with typed
+ *  helpers. Everything is inferred from the cell ref: state (`t.getState()`,
+ *  `t.expect.state`), sender args, and sender RETURN types. */
 export function testCell<
-  S extends Record<string, unknown> = Record<string, unknown>,
+  F extends CellDef<string, Creators, Creators, Record<string, unknown>>,
+>(
+  f: F,
+  testName: string,
+  fn: (t: TestCtxOf<F>) => void | Promise<void>,
+): void;
+/** Legacy explicit-state form: `testCell<{ count: number }>(cell, …)`. */
+export function testCell<
+  S extends Record<string, unknown>,
   N extends string = string,
   // deno-lint-ignore no-explicit-any
   A extends Creators = any,
@@ -101,12 +156,19 @@ export function testCell<
   f: CellDef<N, A, E, S>,
   testName: string,
   fn: (t: TestContext<S, Catalog<N, A>>) => void | Promise<void>,
+): void;
+/** Implementation — loose; the overloads carry the public typing. */
+export function testCell(
+  // deno-lint-ignore no-explicit-any
+  f: CellDef<string, any, any, Record<string, unknown>>,
+  testName: string,
+  // deno-lint-ignore no-explicit-any
+  fn: (t: any) => void | Promise<void>,
 ): void {
   _armTestStrict();
   Deno.test(`[${f.__aio.id}] ${testName}`, async () => {
     // Reset shared runtime state for test isolation — prevents bleed from prior runs
-    resetFlows();
-    resetPending();
+    _resetAioRuntime();
 
     // Compose a single-cell system
     const composed = composeCells([f]);
@@ -155,7 +217,7 @@ export function testCell<
     }
 
     // Build send proxy from action creators (cast to typed form — runtime matches compile-time shape)
-    const send = {} as TestContext<S, Catalog<N, A>>["send"];
+    const send = {} as TestContext["send"];
     for (const key of f.__aio.actionKeys) {
       const creator = (f.__aio.actions as Record<string, unknown>)[key];
       if (typeof creator !== "function") continue;
@@ -220,7 +282,7 @@ export function testCell<
       (f as Record<string, unknown>)[key] = dispatcher;
     }
 
-    const ctx: TestContext<S, Catalog<N, A>> = {
+    const ctx: TestContext = {
       init: () => {
         state = { ...composed.initialState };
         lastEffects = [];
@@ -235,7 +297,7 @@ export function testCell<
       send,
       expect: {
         state: (check) => {
-          const fs = state[f.__aio.id] as S;
+          const fs = state[f.__aio.id] as Record<string, unknown>;
           if (!check(fs)) {
             throw new Error(`state assertion failed: ${JSON.stringify(fs)}`);
           }
@@ -260,13 +322,13 @@ export function testCell<
           }
         },
         invariant: (check) => {
-          const fs = state[f.__aio.id] as S;
+          const fs = state[f.__aio.id] as Record<string, unknown>;
           if (!check(fs)) {
             throw new Error(`invariant violation: ${JSON.stringify(fs)}`);
           }
         },
       },
-      getState: () => state[f.__aio.id] as S,
+      getState: () => state[f.__aio.id] as Record<string, unknown>,
       getEffects: () => lastEffects,
       randomActions: (n) => {
         const keys = f.__aio.actionKeys;

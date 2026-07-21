@@ -1,4 +1,7 @@
 import { assertEquals, assertExists } from "@std/assert";
+import { schedule } from "../src/state/schedule.ts";
+import { until } from "../src/state/async-helpers.ts";
+import type { CellEffect } from "../src/state/cell-impl.ts";
 import { cell } from "../src/state/cell-create.ts";
 import { composeCells } from "../src/state/cell-compose.ts";
 import type { Msg } from "../src/state/cell-types.ts";
@@ -52,28 +55,23 @@ Deno.test("compose basic: reduce works and returns updated state", () => {
 });
 
 Deno.test("compose basic: reduce returns effects array", () => {
-  // Cell with an effect returned from reduce
+  // Methods-style: a sync method returning a schedule effect surfaces it in
+  // composed.reduce's effects array (ported from Style-B effects, D1).
   const fx = cell("fx", {
     state: { x: 0 },
-    actions: {
-      go: () => ({}),
-    },
-    effects: {
-      sideEffect: () => ({}),
-    },
-    machine: false,
-    reduce: {
-      go(state) {
-        state.x = 1;
-        // __aio.effects access intentional — standard pattern for action-style cells
-        return [fx.__aio.effects.sideEffect()];
+    methods: {
+      // CellEffect annotation breaks the self-referential inference cycle
+      // (documented TS trap for `return schedule.after(..., self.x.action())`).
+      go(s): CellEffect {
+        s.x = 1;
+        return schedule.after("later", 1000, fx.go.action());
       },
     },
   });
   const composed = composeCells([fx]);
-  const result = composed.reduce(composed.initialState, fx.__aio.actions.go());
+  const result = composed.reduce(composed.initialState, fx.go.action());
   assertEquals(result.effects.length, 1);
-  assertEquals(result.effects[0]!.type, "fx:sideEffect");
+  assertEquals((result.effects[0] as { type: string }).type, "__schedule");
 });
 
 Deno.test("compose basic: cellNames populated", () => {
@@ -139,80 +137,62 @@ Deno.test("multi-cell: sequential actions accumulate", () => {
 
 // ── 3. Machine guards ──────────────────────────────────────────────
 
-Deno.test("machine guard: blocks action not allowed in current state", () => {
+Deno.test("state guard: method ignores calls in the wrong state", () => {
+  // Ported from the machine variant (D1): the CAPABILITY is "an action in the
+  // wrong state is a no-op" — a guard line at the method top.
   const door = cell("door", {
-    state: { opened: false },
-    actions: {
-      open: () => ({}),
-      close: () => ({}),
-      lock: () => ({}),
-    },
-    machine: {
-      initial: "closed",
-      states: {
-        closed: { open: "open", lock: "locked" },
-        open: { close: "closed" },
-        locked: { open: "closed" }, // unlock by opening → closed
+    state: { status: "closed", opened: false },
+    methods: {
+      open(s) {
+        if (s.status !== "closed" && s.status !== "locked") return;
+        s.status = "open";
+        s.opened = true;
       },
-    },
-    reduce: {
-      open(state) {
-        state.opened = true;
+      close(s) {
+        if (s.status !== "open") return;
+        s.status = "closed";
+        s.opened = false;
       },
-      close(state) {
-        state.opened = false;
+      lock(s) {
+        if (s.status !== "closed") return;
+        s.status = "locked";
       },
-      lock() {},
     },
   });
 
   const composed = composeCells([door]);
-  // closed state — 'close' is not allowed
-  const r1 = composed.reduce(composed.initialState, door.__aio.actions.close());
-  assertEquals(r1.effects.length, 0);
-  assertEquals((r1.state.door as { opened: boolean }).opened, false); // unchanged
+  // closed — 'close' is a no-op
+  const r1 = composed.reduce(composed.initialState, door.close.action());
+  assertEquals((r1.state.door as { opened: boolean }).opened, false);
 
   // closed → open works
-  const r2 = composed.reduce(composed.initialState, door.__aio.actions.open());
+  const r2 = composed.reduce(composed.initialState, door.open.action());
   assertEquals((r2.state.door as { opened: boolean }).opened, true);
-  assertEquals(
-    (r2.state.door as { __aio_status: string }).__aio_status,
-    "open",
-  );
+  assertEquals((r2.state.door as { status: string }).status, "open");
 
-  // open state — 'lock' is not allowed
-  const r3 = composed.reduce(r2.state, door.__aio.actions.lock());
-  assertEquals(r3.effects.length, 0);
-  assertEquals(
-    (r3.state.door as { __aio_status: string }).__aio_status,
-    "open",
-  ); // unchanged
+  // open — 'lock' is a no-op
+  const r3 = composed.reduce(r2.state, door.lock.action());
+  assertEquals((r3.state.door as { status: string }).status, "open");
 });
 
-Deno.test("machine guard: returns unchanged state reference", () => {
+Deno.test("state guard: no-op method keeps the same state reference", () => {
+  // Ported (D1): an ignored call must not produce a new state object —
+  // reference equality preserved so nothing downstream re-renders.
   const m = cell("m", {
-    state: { v: 0 },
-    actions: { go: () => ({}), blocked: () => ({}) },
-    machine: {
-      initial: "a",
-      states: {
-        a: { go: "b" },
-        b: { blocked: "a", go: "a" },
+    state: { v: 0, phase: "a" },
+    methods: {
+      go(s) {
+        s.phase = s.phase === "a" ? "b" : "a";
+        s.v = 1;
       },
-    },
-    reduce: {
-      go(state) {
-        state.v = 1;
+      blocked(s) {
+        if (s.phase !== "b") return; // no-op in phase a
+        s.v = 99;
       },
-      blocked() {},
     },
   });
   const composed = composeCells([m]);
-  // 'blocked' not valid from state 'a' (only valid in 'b')
-  const result = composed.reduce(
-    composed.initialState,
-    m.__aio.actions.blocked(),
-  );
+  const result = composed.reduce(composed.initialState, m.blocked.action());
   assertEquals(result.state, composed.initialState);
 });
 
@@ -261,17 +241,12 @@ Deno.test("validate: invalid state rejects — returns old state", () => {
   assertEquals(errors.length, 1);
 });
 
-Deno.test("validate: with machine — invalid state rejects", () => {
+Deno.test("validate: with method guard — invalid state rejects", () => {
   const guarded = cell("guarded", {
     state: { val: 10 },
-    actions: { set: (v: number) => ({ v }) },
-    machine: {
-      initial: "ready",
-      states: { ready: { set: "ready" } },
-    },
-    reduce: {
-      set(state, payload) {
-        state.val = payload.v;
+    methods: {
+      set(s, v: number) {
+        s.val = v;
       },
     },
     validate: (s) => s.val <= 100 ? true : "val must be <= 100",
@@ -282,36 +257,27 @@ Deno.test("validate: with machine — invalid state rejects", () => {
     onCellError: (err) => errors.push(err),
   });
   // Valid
-  const r1 = composed.reduce(
-    composed.initialState,
-    guarded.__aio.actions.set(50),
-  );
+  const r1 = composed.reduce(composed.initialState, guarded.set.action(50));
   assertEquals((r1.state.guarded as { val: number }).val, 50);
 
-  // Invalid — exceeds 100
-  const r2 = composed.reduce(r1.state, guarded.__aio.actions.set(200));
+  // Invalid — exceeds 100 → validate rejects, state unchanged
+  const r2 = composed.reduce(r1.state, guarded.set.action(200));
   assertEquals((r2.state.guarded as { val: number }).val, 50); // unchanged
   assertEquals(errors.length, 1);
 });
 
 // ── 5. Circuit breaker ─────────────────────────────────────────────
 
-Deno.test("circuit breaker: auto-disables cell after error threshold", () => {
+Deno.test("circuit breaker: auto-disables cell after error threshold", async () => {
+  // Ported (D1): errors now come from a THROWING ASYNC METHOD flowing through
+  // a real dispatch loop (reduce applies state, effects execute, the __error
+  // dispatch re-enters reduce, which counts it toward the breaker).
   const tripped: string[] = [];
 
   const buggy = cell("buggy", {
     state: { x: 0 },
-    actions: { go: () => ({}) },
-    effects: { crash: () => ({}) },
-    machine: false,
-    reduce: {
-      // __aio.effects access intentional — standard pattern for action-style cells
-      go() {
-        return [buggy.__aio.effects.crash()];
-      },
-    },
-    execute: {
-      crash() {
+    methods: {
+      async crash(_s) {
         throw new Error("boom");
       },
     },
@@ -326,39 +292,34 @@ Deno.test("circuit breaker: auto-disables cell after error threshold", () => {
     },
   });
 
-  const dispatched: Msg[] = [];
+  let state = composed.initialState;
   const app = {
-    dispatch: (a: Msg) => dispatched.push(a),
-    getState: () => composed.initialState,
+    dispatch: (a: Msg): void => {
+      const r = composed.reduce(state, a);
+      state = r.state;
+      for (const eff of r.effects) {
+        composed.execute(app, eff as Msg);
+      }
+    },
+    getState: () => state,
   };
-
-  // Wire circuit breaker dispatch via initAll
   composed.initAll(app);
 
-  // Trigger 3 errors
-  composed.execute(app, { type: "buggy:crash", payload: {} });
-  composed.execute(app, { type: "buggy:crash", payload: {} });
-  composed.execute(app, { type: "buggy:crash", payload: {} });
+  // Trigger 3 async failures through the real loop
+  app.dispatch({ type: "buggy:crash", payload: { args: [] } });
+  app.dispatch({ type: "buggy:crash", payload: { args: [] } });
+  app.dispatch({ type: "buggy:crash", payload: { args: [] } });
+  await until(() => tripped.length === 1, { timeoutMs: 2000, intervalMs: 5 });
 
-  assertEquals(tripped.length, 1);
   assertEquals(tripped[0], "buggy:3");
   assertEquals(composed.registry.isEnabled("buggy"), false);
 });
 
-Deno.test("circuit breaker: below threshold keeps cell enabled", () => {
+Deno.test("circuit breaker: below threshold keeps cell enabled", async () => {
   const buggy2 = cell("buggy2", {
-    state: {},
-    actions: { go: () => ({}) },
-    effects: { crash: () => ({}) },
-    machine: false,
-    reduce: {
-      // __aio.effects access intentional — standard pattern for action-style cells
-      go() {
-        return [buggy2.__aio.effects.crash()];
-      },
-    },
-    execute: {
-      crash() {
+    state: { n: 0 },
+    methods: {
+      async crash(_s) {
         throw new Error("boom");
       },
     },
@@ -369,15 +330,26 @@ Deno.test("circuit breaker: below threshold keeps cell enabled", () => {
     circuitBreaker: { maxErrors: 5 },
   });
 
+  let state = composed.initialState;
   const app = {
-    dispatch: (_a: Msg) => {},
-    getState: () => composed.initialState,
+    dispatch: (a: Msg): void => {
+      const r = composed.reduce(state, a);
+      state = r.state;
+      for (const eff of r.effects) composed.execute(app, eff as Msg);
+    },
+    getState: () => state,
   };
   composed.initAll(app);
 
   // Only 2 errors — below threshold of 5
-  composed.execute(app, { type: "buggy2:crash", payload: {} });
-  composed.execute(app, { type: "buggy2:crash", payload: {} });
+  app.dispatch({ type: "buggy2:crash", payload: { args: [] } });
+  app.dispatch({ type: "buggy2:crash", payload: { args: [] } });
+  await until(
+    () =>
+      composed.registry.health(state).find((h) => h.name === "buggy2")!
+        .errors === 2,
+    { timeoutMs: 2000, intervalMs: 5 },
+  );
 
   assertEquals(composed.registry.isEnabled("buggy2"), true);
 });
@@ -420,25 +392,9 @@ Deno.test("registry: disabled cell actions are dropped", () => {
   assertEquals((result.state.counter as { count: number }).count, 0); // unchanged
 });
 
-Deno.test("registry: status returns _status from machine", () => {
-  const stateful = cell("stateful", {
-    state: { v: 0 },
-    actions: { go: () => ({}) },
-    machine: {
-      initial: "idle",
-      states: { idle: { go: "active" }, active: { go: "idle" } },
-    },
-    reduce: { go() {} },
-  });
-  const composed = composeCells([stateful]);
-  assertEquals(
-    composed.registry.status("stateful", composed.initialState),
-    "idle",
-  );
-
-  const r = composed.reduce(composed.initialState, stateful.__aio.actions.go());
-  assertEquals(composed.registry.status("stateful", r.state), "active");
-});
+// DELETED (D1 machinery): "registry.status returns _status from machine" —
+// machine-driven __aio_status dies with Style B; app status is a plain state
+// field the app owns (see the door/state-guard tests above).
 
 Deno.test("registry: health returns all cells info", () => {
   const composed = composeCells([counter, flags]);
@@ -463,20 +419,11 @@ Deno.test("registry: list cells via cellNames", () => {
 
 // ── 7. Cell error counting ──────────────────────────────────────
 
-Deno.test("errors: increment on executor throw, visible in health()", () => {
+Deno.test("errors: increment on async method throw, visible in health()", async () => {
   const errFeat = cell("errFeat", {
-    state: {},
-    actions: { go: () => ({}) },
-    effects: { fail: () => ({}) },
-    machine: false,
-    reduce: {
-      // __aio.effects access intentional — standard pattern for action-style cells
-      go() {
-        return [errFeat.__aio.effects.fail()];
-      },
-    },
-    execute: {
-      fail() {
+    state: { n: 0 },
+    methods: {
+      async fail(_s) {
         throw new Error("test error");
       },
     },
@@ -485,35 +432,38 @@ Deno.test("errors: increment on executor throw, visible in health()", () => {
   const composed = composeCells([errFeat], {
     onCellError: () => {},
   });
+  let state = composed.initialState;
   const app = {
-    dispatch: (_a: Msg) => {},
-    getState: () => composed.initialState,
+    dispatch: (a: Msg): void => {
+      const r = composed.reduce(state, a);
+      state = r.state;
+      for (const eff of r.effects) composed.execute(app, eff as Msg);
+    },
+    getState: () => state,
   };
+  composed.initAll(app);
 
-  // Trigger errors
-  composed.execute(app, { type: "errFeat:fail", payload: {} });
-  composed.execute(app, { type: "errFeat:fail", payload: {} });
+  app.dispatch({ type: "errFeat:fail", payload: { args: [] } });
+  app.dispatch({ type: "errFeat:fail", payload: { args: [] } });
+  await until(
+    () =>
+      composed.registry.health(state).find((h) => h.name === "errFeat")!
+        .errors === 2,
+    { timeoutMs: 2000, intervalMs: 5 },
+  );
 
-  const health = composed.registry.health(composed.initialState);
-  const h = health.find((h: CellStatus) => h.name === "errFeat")!;
+  const h = composed.registry.health(state).find((h: CellStatus) =>
+    h.name === "errFeat"
+  )!;
   assertEquals(h.errors, 2);
   assertEquals(h.enabled, true);
 });
 
-Deno.test("errors: re-enable resets error counter", () => {
+Deno.test("errors: re-enable resets error counter", async () => {
   const errFeat2 = cell("errFeat2", {
-    state: {},
-    actions: { go: () => ({}) },
-    effects: { fail: () => ({}) },
-    machine: false,
-    reduce: {
-      // __aio.effects access intentional — standard pattern for action-style cells
-      go() {
-        return [errFeat2.__aio.effects.fail()];
-      },
-    },
-    execute: {
-      fail() {
+    state: { n: 0 },
+    methods: {
+      async fail(_s) {
         throw new Error("err");
       },
     },
@@ -522,24 +472,30 @@ Deno.test("errors: re-enable resets error counter", () => {
   const composed = composeCells([errFeat2], {
     onCellError: () => {},
   });
+  let state = composed.initialState;
   const app = {
-    dispatch: (_a: Msg) => {},
-    getState: () => composed.initialState,
+    dispatch: (a: Msg): void => {
+      const r = composed.reduce(state, a);
+      state = r.state;
+      for (const eff of r.effects) composed.execute(app, eff as Msg);
+    },
+    getState: () => state,
   };
+  composed.initAll(app);
 
-  composed.execute(app, { type: "errFeat2:fail", payload: {} });
-  assertEquals(
-    composed.registry.health(composed.initialState).find((h: CellStatus) =>
-      h.name === "errFeat2"
-    )!.errors,
-    1,
+  app.dispatch({ type: "errFeat2:fail", payload: { args: [] } });
+  await until(
+    () =>
+      composed.registry.health(state).find((h) => h.name === "errFeat2")!
+        .errors === 1,
+    { timeoutMs: 2000, intervalMs: 5 },
   );
 
   // Disable then re-enable resets errors
   composed.registry.disable("errFeat2", app);
   composed.registry.enable("errFeat2", app);
   assertEquals(
-    composed.registry.health(composed.initialState).find((h: CellStatus) =>
+    composed.registry.health(state).find((h: CellStatus) =>
       h.name === "errFeat2"
     )!.errors,
     0,
@@ -590,16 +546,9 @@ Deno.test("reduce error includes cell name and method name in message", () => {
   );
 });
 
-Deno.test("reduce error includes context for machine-guarded cells", () => {
-  const stateful = cell("door", {
+Deno.test("reduce error includes context for guarded cells", () => {
+  const stateful = cell("door2", {
     state: { locked: false },
-    machine: {
-      initial: "closed",
-      states: {
-        closed: { open: "open", lock: "closed" },
-        open: { close: "closed" },
-      },
-    },
     methods: {
       open(s) {
         if (s.locked) throw new Error("door is locked");
@@ -613,16 +562,14 @@ Deno.test("reduce error includes context for machine-guarded cells", () => {
 
   const composed = composeCells([stateful]);
   // Lock the door first
-  let state = composed.reduce(composed.initialState, {
-    type: "door:lock",
+  const state = composed.reduce(composed.initialState, {
+    type: "door2:lock",
     payload: {},
   }).state;
-  // Set locked=true on the state manually since lock method runs through Immer
-  // Actually lock method already sets s.locked = true, let's use the returned state
-  // Now open — the method will throw because locked=true
+  // Now open — the method throws because locked=true
   let caught: Error | undefined;
   try {
-    composed.reduce(state, { type: "door:open", payload: {} });
+    composed.reduce(state, { type: "door2:open", payload: {} });
   } catch (e) {
     caught = e as Error;
   }
@@ -630,9 +577,9 @@ Deno.test("reduce error includes context for machine-guarded cells", () => {
   assertExists(caught, "should have thrown");
   const msg = caught!.message;
   assertEquals(
-    msg.includes("door") && msg.includes("open"),
+    msg.includes("door2") && msg.includes("open"),
     true,
-    `error message should include cell 'door' and method 'open', got: "${msg}"`,
+    `error message should include cell 'door2' and method 'open', got: "${msg}"`,
   );
   assertEquals(
     msg.includes("door is locked"),

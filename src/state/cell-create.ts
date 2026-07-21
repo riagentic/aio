@@ -1,44 +1,31 @@
 // cell-create.ts — cell() dispatcher + public API re-exports
 //
 // Decomposed into focused modules:
-//   cell-config-types.ts    — MethodsCellConfig, ActionsCellConfig, ReduceHandlers, ExecuteHandlers
-//   cell-helpers.ts         — normalization, scopeSelectors, detectForeignActions, buildFlows
-//   cell-methods-factory.ts — createCellFromMethods (reactive/methods style)
-//   cell-actions-factory.ts — createCellFromActions (explicit actions/reduce style)
+//   cell-config-types.ts    — MethodsCellConfig
+//   cell-helpers.ts         — normalization, scopeSelectors, detectForeignActions
+//   cell-methods-factory.ts — createCellFromMethods (the ONE style — methods)
 
 import type {
   CellDef,
-  Creators,
   DirectCalling,
-  FlatActions,
   MethodsToCreators,
 } from "./cell-types.ts";
 import type { Method } from "./cell-impl.ts";
 import { createCellFromMethods } from "./cell-methods-factory.ts";
-import { createCellFromActions } from "./cell-actions-factory.ts";
 import { registerCell } from "./cell-reactive.ts";
 import type {
-  ActionsCellConfig,
-  ExecuteHandlers,
   MethodsCellConfig,
-  ReduceHandlers,
   SelectorAccessors,
   SelectorDef,
 } from "./cell-config-types.ts";
 
-export type {
-  ActionsCellConfig,
-  ExecuteHandlers,
-  MethodsCellConfig,
-  ReduceHandlers,
-};
+export type { MethodsCellConfig };
 
 // ── cell() ──────────────────────────────────────────────────────
 
-/** Define a cell — methods, actions, or mixed.
- *  Methods: reactive style with sync/async functions.
- *  Actions: explicit typed action creators + reduce handlers.
- *  Mixed: methods + actions/effects in one cell (names must not collide). */
+/** Define a cell — state + methods (+ selectors, sync, cancelOn, listensTo).
+ *  ONE style: methods mutate a draft; async methods batch writes and carry a
+ *  cancellation signal (`s.$signal`). See docs/state/cells.md. */
 export function cell<
   N extends string,
   S extends Record<string, unknown>,
@@ -47,7 +34,11 @@ export function cell<
   // Captured from config.selectors (inside MethodsCellConfig — NOT an
   // intersection, which would disrupt method `s` inference) so bound selector
   // accessors surface on the return type instead of being inert config (risoto).
-  Sel extends Record<string, SelectorDef<S>> = Record<string, SelectorDef<S>>,
+  // Default MUST be an empty record, not Record<string, …>: that default put
+  // a string INDEX SIGNATURE on every selector-less cell's type, which widened
+  // `keyof cellRef` to `string` and collapsed every mapped type over the cell
+  // ref (e.g. testCell's typed send surface) to {}. (tbd B8)
+  Sel extends Record<string, SelectorDef<S>> = Record<never, SelectorDef<S>>,
 >(
   name: N,
   config: MethodsCellConfig<N, S, M, States, Sel>,
@@ -63,18 +54,7 @@ export function cell<
 & DirectCalling<N, M>
 & SelectorAccessors<Sel>
 & Readonly<S>;
-/** Define a cell with explicit actions/reduce style — typed action creators + reducer handlers. */
-export function cell<
-  N extends string,
-  S extends Record<string, unknown>,
-  A extends Creators,
-  E extends Creators = Record<string, never>,
-  States extends string = string,
->(
-  name: N,
-  config: ActionsCellConfig<N, S, A, E, States>,
-): CellDef<N, A, E, S> & FlatActions<N, A> & Readonly<S>;
-/** Implementation — dispatches on config shape (methods / actions / mixed). */
+/** Implementation — validates, rejects removed Style-B keys, builds the cell. */
 // deno-lint-ignore no-explicit-any
 export function cell(name: string, config: any): any {
   // Validate name at definition time — it becomes the cell id, action prefix
@@ -111,11 +91,27 @@ export function cell(name: string, config: any): any {
     );
   }
 
-  const hasMethods = config.methods !== undefined;
-  const hasGenerators = config.generators &&
-    Object.keys(config.generators as Record<string, unknown>).length > 0;
-  const hasActions = config.actions &&
-    Object.keys(config.actions as Record<string, () => unknown>).length > 0;
+  // perfect-aio D1: methods is the ONE style. Every Style-B key fails loudly
+  // with the exact migration recipe (docs/upgrade/to-v2.md).
+  const STYLE_B: Record<string, string> = {
+    actions:
+      "actions:+reduce: pairs are one method now — `increment(s, by) { s.count += by }`",
+    reduce:
+      "reduce: handlers are method bodies now — mutate `s` directly in the method",
+    execute: "execute: side-effects run inside the (async) method itself",
+    machine:
+      'machine: guards are a guard line — `if (s.status !== "idle") return;`',
+    generators:
+      "generators are plain async methods — use until()/race()/sleep() from aio, cancelOn + s.$signal for cancellation",
+  };
+  for (const [key, hint] of Object.entries(STYLE_B)) {
+    if ((config as Record<string, unknown>)[key] !== undefined) {
+      throw new Error(
+        `[${name}] cell config key '${key}:' was removed in aio v2 — ${hint}. ` +
+          `Full migration guide: docs/upgrade/to-v2.md`,
+      );
+    }
+  }
 
   // AIO-5.1: client-scoped cells — browser-local state, sync methods only.
   // Validation happens at cell() time so misuse fails at definition, not at runtime.
@@ -136,21 +132,6 @@ export function cell(name: string, config: any): any {
         );
       }
     }
-    if (hasGenerators) {
-      throw new Error(
-        `[${name}] client-scoped cells do not support generators (v1 limitation). Use sync methods and drive multi-step flows from the component, or move the cell to server scope.`,
-      );
-    }
-    if (hasActions) {
-      throw new Error(
-        `[${name}] client-scoped cells do not support actions (v1 limitation) — use methods`,
-      );
-    }
-    if (config.machine) {
-      throw new Error(
-        `[${name}] client-scoped cells do not support machine (v1 limitation). Move the cell to server scope (remove scope: "client") to use a state machine.`,
-      );
-    }
     const def = createCellFromMethods(
       name,
       config as MethodsCellConfig<string, Record<string, unknown>>,
@@ -165,26 +146,11 @@ export function cell(name: string, config: any): any {
     return def;
   }
 
-  // Methods present (with optional generators, actions, effects) → unified builder.
-  // An empty or omitted methods map is valid — state-only cells (thin-client stubs).
-  if (hasMethods || !hasActions) {
-    const def = createCellFromMethods(
-      name,
-      config as MethodsCellConfig<string, Record<string, unknown>>,
-    );
-    registerCell(def);
-    return def;
-  }
-
-  // Actions-only (no methods) → explicit builder
-  const def = createCellFromActions(
+  // Methods style — the one style. An empty or omitted methods map is valid:
+  // state-only cells (thin-client stubs).
+  const def = createCellFromMethods(
     name,
-    config as ActionsCellConfig<
-      string,
-      Record<string, unknown>,
-      Creators,
-      Creators
-    >,
+    config as MethodsCellConfig<string, Record<string, unknown>>,
   );
   registerCell(def);
   return def;

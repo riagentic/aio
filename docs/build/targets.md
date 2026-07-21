@@ -31,12 +31,10 @@ Aliases: compile = compile:browser
 
 All 10 targets ship in a single binary.
 
-> **⚠️ Remote targets are experimental.** The five `remote` / thin-client
-> targets (`browser:remote`, `service:remote`, `electron:remote`, `cli:remote`,
-> `android:remote`) build and run, but are not yet field-validated off-box (a
-> deployed server + a client on a separate machine/device). Their behavior may
-> change before 1.0. The five **local** targets are the fully-validated, stable
-> set.
+> **Remote targets.** The five `remote` / thin-client targets (`browser:remote`,
+> `service:remote`, `electron:remote`, `cli:remote`, `android:remote`) build,
+> boot, and are exercised by CI (per-target boot + WS-increment smoke in
+> `tests/examples.test.ts`, LAN e2e in `tests/e2e-remote-lan.test.ts`).
 
 ## Dev mode
 
@@ -215,9 +213,10 @@ Same `src/` code works on both platforms. Use `app.mode === 'standalone'` to
 branch for Deno-only APIs:
 
 ```ts
-execute: {
-  readFile(app, _payload) {
+methods: {
+  async readFile(s) {
     if (app.mode === 'standalone') return  // skip on Android
+    s.content = await Deno.readTextFile('data.json')
   },
 },
 ```

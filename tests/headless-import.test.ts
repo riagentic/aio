@@ -7,14 +7,11 @@ Deno.test("headless: base aio import provides server symbols", async () => {
   assertExists(base.log);
   assertExists(base.lint);
   assertExists(base.parseCli);
-  assertExists(base.actions);
-  assertExists(base.effects);
   assertExists(base.schedule);
   assertExists(base.createDB);
   assertExists(base.call);
   assertExists(base.draft);
   assertExists(base.matchEffect);
-  assertExists(base.composeMiddleware);
   assertExists(base.deepFreeze);
   assertExists(base.createSelector);
 });

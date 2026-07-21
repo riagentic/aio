@@ -1,5 +1,6 @@
 // WebSocket connection logic for browser transport.
 
+import { backoffDelay, parseAck } from "../protocol/transport-shared.ts";
 import {
   handleTTMessage as _handleTTMessage,
   setSendFn as _ttSetSendFn,
@@ -155,12 +156,10 @@ export function connect(): void {
     }
     if (typeof e.data === "string" && e.data.startsWith("__ack:")) {
       // AIO-2.2: settle the pending ack for this cid.
-      // Format: __ack:<cid>:<ok>  (ok is "1" or "0")
-      const rest = e.data.slice(6);
-      const sep = rest.indexOf(":");
-      if (sep > 0) {
-        const cid = rest.slice(0, sep);
-        const ok = rest.slice(sep + 1) === "1";
+      // Format: __ack:<cid>:<ok>  (ok is "1" or "0") — shared parse.
+      const ack = parseAck(e.data);
+      if (ack) {
+        const { cid, ok } = ack;
         if (ok) {
           _resolveAck(cid);
         } else {
@@ -203,7 +202,7 @@ export function connect(): void {
     // AIO-246: keep _connecting=true during backoff to prevent connection storms
     T.connecting = true;
     if (T.wasConnected) _showStatus("Reconnecting\u2026", "#e25");
-    const base = Math.min(1000 * Math.pow(2, T.retry), 8000);
+    const delay = backoffDelay(T.retry);
     // Log the outage ONCE (first retry of this outage), not every attempt — the
     // on-screen "Reconnecting…" status above is the live per-attempt indicator.
     if (T.retry === 0) {
@@ -213,7 +212,7 @@ export function connect(): void {
     setTimeout(() => {
       T.connecting = false;
       connect();
-    }, base * (0.8 + Math.random() * 0.4));
+    }, delay);
   };
 
   T.ws = ws;

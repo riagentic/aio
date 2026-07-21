@@ -35,13 +35,7 @@ export {
 
 export { bindCell } from "./cell-catalog.ts";
 
-export {
-  type ActionsCellConfig,
-  cell,
-  type ExecuteHandlers,
-  type MethodsCellConfig,
-  type ReduceHandlers,
-} from "./cell-create.ts";
+export { cell, type MethodsCellConfig } from "./cell-create.ts";
 
 export {
   type CellStatus,

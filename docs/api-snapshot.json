@@ -3,14 +3,6 @@
   "entries": {
     ".": {
       "symbols": {
-        "actions": {
-          "kind": "function",
-          "sig": "d085c023579e9739"
-        },
-        "ActionsCellConfig": {
-          "kind": "typeAlias",
-          "sig": "82272aac33ac9238"
-        },
         "ActionSource": {
           "kind": "typeAlias",
           "sig": "23ca71606f56ddd4"
@@ -21,7 +13,7 @@
         },
         "aio": {
           "kind": "variable",
-          "sig": "6542b7deb3fd5239"
+          "sig": "e296a8e4aba60d9f"
         },
         "AioApp": {
           "kind": "typeAlias",
@@ -53,7 +45,7 @@
         },
         "AsyncMethod": {
           "kind": "typeAlias",
-          "sig": "533f0ec6f06413cc"
+          "sig": "e9f20c663ab7c949"
         },
         "bindCell": {
           "kind": "function",
@@ -73,11 +65,11 @@
         },
         "cell": {
           "kind": "function",
-          "sig": "12c712488c10eb55"
+          "sig": "bbb06d7db27f8b3f"
         },
         "CellAio": {
           "kind": "typeAlias",
-          "sig": "75d9ca409cfea745"
+          "sig": "f9f1df2abca85da6"
         },
         "CellDef": {
           "kind": "typeAlias",
@@ -105,7 +97,7 @@
         },
         "CellsConfig": {
           "kind": "typeAlias",
-          "sig": "0756ad067915d128"
+          "sig": "f3476e65e94d6f42"
         },
         "CellStateSize": {
           "kind": "typeAlias",
@@ -146,10 +138,6 @@
         "ComposedCells": {
           "kind": "typeAlias",
           "sig": "25a8bcac81e3ae56"
-        },
-        "composeMiddleware": {
-          "kind": "function",
-          "sig": "32994176f56d140b"
         },
         "connectCli": {
           "kind": "function",
@@ -215,49 +203,13 @@
           "kind": "function",
           "sig": "40f2dfdd1fb3446e"
         },
-        "effects": {
-          "kind": "variable",
-          "sig": "ba6c8aeb5b07eac4"
-        },
-        "ExecuteHandlers": {
-          "kind": "typeAlias",
-          "sig": "f14633d31bcf26f7"
-        },
         "ExtractState": {
           "kind": "typeAlias",
           "sig": "0dd54b78645f3c68"
         },
-        "FactoryCreators": {
-          "kind": "typeAlias",
-          "sig": "ff4cf9df5d5d7fb3"
-        },
-        "FactoryResult": {
-          "kind": "typeAlias",
-          "sig": "ec69ce718ffb7656"
-        },
-        "FlatActions": {
-          "kind": "typeAlias",
-          "sig": "1bfa69bd353b3ffa"
-        },
-        "FlowDef": {
-          "kind": "typeAlias",
-          "sig": "318609dfed6e635b"
-        },
-        "FlowStep": {
-          "kind": "typeAlias",
-          "sig": "462ebf1244f2cbde"
-        },
         "FlowStepRecord": {
           "kind": "typeAlias",
           "sig": "c53d514e4f60ce50"
-        },
-        "Gen": {
-          "kind": "typeAlias",
-          "sig": "fb7015fa847e7ec9"
-        },
-        "GenCtx": {
-          "kind": "typeAlias",
-          "sig": "f13b9052e2af5490"
         },
         "InstanceInfo": {
           "kind": "typeAlias",
@@ -303,14 +255,6 @@
           "kind": "typeAlias",
           "sig": "2d194fddf92d9bd7"
         },
-        "LowerFirst": {
-          "kind": "typeAlias",
-          "sig": "c9d46ab1236430e1"
-        },
-        "MachineConfig": {
-          "kind": "typeAlias",
-          "sig": "248d4d01ed4e04c0"
-        },
         "markAsync": {
           "kind": "function",
           "sig": "4b209d9b928c999e"
@@ -331,13 +275,13 @@
           "kind": "typeAlias",
           "sig": "7e82fa22d93957ca"
         },
+        "MethodDraftMeta": {
+          "kind": "typeAlias",
+          "sig": "ce1df9ec94a0084f"
+        },
         "MethodsCellConfig": {
           "kind": "typeAlias",
-          "sig": "c7dc85d1e5d8bf5f"
-        },
-        "MiddlewareFn": {
-          "kind": "typeAlias",
-          "sig": "aec1deeea44b9f0d"
+          "sig": "ae6637e6ee143ae4"
         },
         "Msg": {
           "kind": "typeAlias",
@@ -375,10 +319,6 @@
           "kind": "function",
           "sig": "31d60dc050fc7c42"
         },
-        "Prefixed": {
-          "kind": "typeAlias",
-          "sig": "6ab5bd2f5685417d"
-        },
         "QueryOpts": {
           "kind": "typeAlias",
           "sig": "8c0b4041769e437c"
@@ -387,6 +327,10 @@
           "kind": "typeAlias",
           "sig": "4d451b3b1c2af191"
         },
+        "race": {
+          "kind": "function",
+          "sig": "4d08998d34ae0cae"
+        },
         "real": {
           "kind": "function",
           "sig": "34ad7e96f8ac9696"
@@ -394,10 +338,6 @@
         "ReduceBreakdown": {
           "kind": "typeAlias",
           "sig": "79cf47368c05a016"
-        },
-        "ReduceHandlers": {
-          "kind": "typeAlias",
-          "sig": "6c8f75e33ae48e7d"
         },
         "ref": {
           "kind": "function",
@@ -439,13 +379,13 @@
           "kind": "typeAlias",
           "sig": "9cfd03e42e51aeb5"
         },
-        "SingleStepGen": {
-          "kind": "typeAlias",
-          "sig": "3a2042ec277502fe"
-        },
         "SingletonMode": {
           "kind": "typeAlias",
           "sig": "b3159f1c4b221ecf"
+        },
+        "sleep": {
+          "kind": "function",
+          "sig": "7bfaff75a24b1349"
         },
         "StateOf": {
           "kind": "typeAlias",
@@ -453,7 +393,7 @@
         },
         "SyncMethod": {
           "kind": "typeAlias",
-          "sig": "2ebae1844ee8b371"
+          "sig": "971f8f6db19f572f"
         },
         "table": {
           "kind": "function",
@@ -465,11 +405,11 @@
         },
         "testCell": {
           "kind": "function",
-          "sig": "2e56cbe8e947e0fb"
+          "sig": "bccc6199da4b6117"
         },
         "TestContext": {
           "kind": "typeAlias",
-          "sig": "e14882ce7dea82a2"
+          "sig": "2a7943e0502d1d28"
         },
         "text": {
           "kind": "function",
@@ -479,10 +419,6 @@
           "kind": "typeAlias",
           "sig": "d6d59f832bb71a3e"
         },
-        "TypedCreator": {
-          "kind": "typeAlias",
-          "sig": "2ed811f19afaa0d7"
-        },
         "UiConfig": {
           "kind": "typeAlias",
           "sig": "b9eb89ee5b56ec79"
@@ -490,6 +426,18 @@
         "UnionOf": {
           "kind": "typeAlias",
           "sig": "ec6b08db52d21ba2"
+        },
+        "until": {
+          "kind": "function",
+          "sig": "fe1d504cfb830d49"
+        },
+        "UntilOptions": {
+          "kind": "interface",
+          "sig": "c667e49d838a089e"
+        },
+        "UntilTimeoutError": {
+          "kind": "class",
+          "sig": "56d3fdd07cea962f"
         },
         "VERSION": {
           "kind": "variable",
@@ -945,8 +893,7 @@
         },
         "useTimeTravel": {
           "kind": "function",
-          "sig": "d38328d64f55e879",
-          "experimental": true
+          "sig": "d38328d64f55e879"
         },
         "useVirtualList": {
           "kind": "function",
@@ -1197,112 +1144,90 @@
       }
     },
     "./state-core": {
-      "experimental": true,
       "symbols": {
         "AioIPC": {
           "kind": "interface",
-          "sig": "874fe534857f2839",
-          "experimental": true
+          "sig": "874fe534857f2839"
         },
         "ArrayRefStats": {
           "kind": "interface",
-          "sig": "8103e5ed1c0439a6",
-          "experimental": true
+          "sig": "8103e5ed1c0439a6"
         },
         "cancelSubsTimer": {
           "kind": "function",
-          "sig": "ff0cb91d2aded3d3",
-          "experimental": true
+          "sig": "ff0cb91d2aded3d3"
         },
         "CellRef": {
           "kind": "interface",
-          "sig": "ad415a137c39f3a3",
-          "experimental": true
+          "sig": "ad415a137c39f3a3"
         },
         "collapsePaths": {
           "kind": "function",
-          "sig": "02240d2eefef802d",
-          "experimental": true
+          "sig": "02240d2eefef802d"
         },
         "createSendProxy": {
           "kind": "function",
-          "sig": "8b49bf3199ba6b83",
-          "experimental": true
+          "sig": "8b49bf3199ba6b83"
         },
         "flushOfflineQueue": {
           "kind": "function",
-          "sig": "ff0cb91d2aded3d3",
-          "experimental": true
+          "sig": "ff0cb91d2aded3d3"
         },
         "getCellSignal": {
           "kind": "function",
-          "sig": "02fef0b1b617ff54",
-          "experimental": true
+          "sig": "02fef0b1b617ff54"
         },
         "getConnectedSignal": {
           "kind": "function",
-          "sig": "966295cb65a07da5",
-          "experimental": true
+          "sig": "966295cb65a07da5"
         },
         "getStateSignal": {
           "kind": "function",
-          "sig": "73cc3c4f1d53bf3f",
-          "experimental": true
+          "sig": "73cc3c4f1d53bf3f"
         },
         "handleMessage": {
           "kind": "function",
-          "sig": "04817fd582165e1e",
-          "experimental": true
+          "sig": "04817fd582165e1e"
         },
         "HandleResult": {
           "kind": "typeAlias",
-          "sig": "84acce82a8bda3f7",
-          "experimental": true
+          "sig": "84acce82a8bda3f7"
         },
         "isInitialStateReceived": {
           "kind": "function",
-          "sig": "209ed045c0221c65",
-          "experimental": true
+          "sig": "209ed045c0221c65"
         },
         "ready": {
           "kind": "function",
-          "sig": "d146c7a9b1c05fb1",
-          "experimental": true
+          "sig": "d146c7a9b1c05fb1"
         },
         "resendSubscriptions": {
           "kind": "function",
-          "sig": "ff0cb91d2aded3d3",
-          "experimental": true
+          "sig": "ff0cb91d2aded3d3"
         },
         "send": {
           "kind": "function",
-          "sig": "2ab6526003a801c3",
-          "experimental": true
+          "sig": "2ab6526003a801c3"
         },
         "setConnected": {
           "kind": "function",
-          "sig": "6ec4134858750042",
-          "experimental": true
+          "sig": "6ec4134858750042"
         },
         "setSyncHandler": {
           "kind": "function",
-          "sig": "5c66ae12ae5fb2bb",
-          "experimental": true
+          "sig": "5c66ae12ae5fb2bb"
         },
         "setTransport": {
           "kind": "function",
-          "sig": "ef67c3c4d431fc90",
-          "experimental": true
+          "sig": "ef67c3c4d431fc90"
         },
         "trackPath": {
           "kind": "function",
-          "sig": "871f6a7c43ff8ab1",
-          "experimental": true
+          "sig": "871f6a7c43ff8ab1"
         },
         "Transport": {
           "kind": "interface",
-          "sig": "b03ad48003facb26",
-          "experimental": true
+          "sig": "b03ad48003facb26"
         }
       }
     },
@@ -1310,78 +1235,63 @@
       "symbols": {
         "AckMessage": {
           "kind": "interface",
-          "sig": "53c9a9a059649d2b",
-          "experimental": true
+          "sig": "53c9a9a059649d2b"
         },
         "CompactDeps": {
           "kind": "interface",
-          "sig": "d3835fca6ffa099a",
-          "experimental": true
+          "sig": "d3835fca6ffa099a"
         },
         "compactSyncOps": {
           "kind": "function",
-          "sig": "cfc51d802b9b7b99",
-          "experimental": true
+          "sig": "cfc51d802b9b7b99"
         },
         "compareHLC": {
           "kind": "function",
-          "sig": "72c3b1b435e80d74",
-          "experimental": true
+          "sig": "72c3b1b435e80d74"
         },
         "createHLC": {
           "kind": "function",
-          "sig": "7dfeb0177eac71c5",
-          "experimental": true
+          "sig": "7dfeb0177eac71c5"
         },
         "createOpBuffer": {
           "kind": "function",
-          "sig": "bcb998a059cdbcb9",
-          "experimental": true
+          "sig": "bcb998a059cdbcb9"
         },
         "createServerSyncHandler": {
           "kind": "function",
-          "sig": "4c1b6e4de33775d1",
-          "experimental": true
+          "sig": "4c1b6e4de33775d1"
         },
         "createSyncEngine": {
           "kind": "function",
-          "sig": "0da042da2c3c6c76",
-          "experimental": true
+          "sig": "0da042da2c3c6c76"
         },
         "getLowWater": {
           "kind": "function",
-          "sig": "a6889ea24f7b8887",
-          "experimental": true
+          "sig": "a6889ea24f7b8887"
         },
         "HLC": {
           "kind": "typeAlias",
-          "sig": "ad43865540693aa7",
-          "experimental": true
+          "sig": "ad43865540693aa7"
         },
         "HLClock": {
           "kind": "interface",
-          "sig": "531767fb101cca11",
-          "experimental": true
+          "sig": "531767fb101cca11"
         },
         "isValidSyncOp": {
           "kind": "function",
-          "sig": "7d6a1a879cb2fa47",
-          "experimental": true
+          "sig": "7d6a1a879cb2fa47"
         },
         "loadOpsSince": {
           "kind": "function",
-          "sig": "16fd35f41d0181ed",
-          "experimental": true
+          "sig": "16fd35f41d0181ed"
         },
         "mergeField": {
           "kind": "function",
-          "sig": "bc8c7172d99e8414",
-          "experimental": true
+          "sig": "bc8c7172d99e8414"
         },
         "MergeResult": {
           "kind": "interface",
-          "sig": "a84e99fea82d1677",
-          "experimental": true
+          "sig": "a84e99fea82d1677"
         },
         "MergeStrategy": {
           "kind": "typeAlias",
@@ -1389,48 +1299,39 @@
         },
         "normalizeSyncConfig": {
           "kind": "function",
-          "sig": "49fa9a60be148f28",
-          "experimental": true
+          "sig": "49fa9a60be148f28"
         },
         "OpBuffer": {
           "kind": "interface",
-          "sig": "855568799ba2c09c",
-          "experimental": true
+          "sig": "855568799ba2c09c"
         },
         "OpBufferOptions": {
           "kind": "interface",
-          "sig": "2ff2da0f9ac23673",
-          "experimental": true
+          "sig": "2ff2da0f9ac23673"
         },
         "OpBufferStorage": {
           "kind": "interface",
-          "sig": "ac1ac417b936f283",
-          "experimental": true
+          "sig": "ac1ac417b936f283"
         },
         "OpMessage": {
           "kind": "interface",
-          "sig": "ec3758d991bf1b53",
-          "experimental": true
+          "sig": "ec3758d991bf1b53"
         },
         "persistOp": {
           "kind": "function",
-          "sig": "6dc783af5d6434ce",
-          "experimental": true
+          "sig": "6dc783af5d6434ce"
         },
         "rebase": {
           "kind": "function",
-          "sig": "c8177659fa8af4f2",
-          "experimental": true
+          "sig": "c8177659fa8af4f2"
         },
         "RebaseResult": {
           "kind": "interface",
-          "sig": "5fb51c5eefef8bd1",
-          "experimental": true
+          "sig": "5fb51c5eefef8bd1"
         },
         "ServerSyncHandler": {
           "kind": "interface",
-          "sig": "a4cab09361f46a72",
-          "experimental": true
+          "sig": "a4cab09361f46a72"
         },
         "SYNC_DEFAULTS": {
           "kind": "variable",
@@ -1438,8 +1339,7 @@
         },
         "SYNC_SCHEMA": {
           "kind": "variable",
-          "sig": "68b3405a06dc5203",
-          "experimental": true
+          "sig": "68b3405a06dc5203"
         },
         "SyncConfig": {
           "kind": "interface",
@@ -1451,18 +1351,15 @@
         },
         "SyncEngine": {
           "kind": "interface",
-          "sig": "9b758da6d2f3b61f",
-          "experimental": true
+          "sig": "9b758da6d2f3b61f"
         },
         "SyncEngineDeps": {
           "kind": "interface",
-          "sig": "efad1b7565b58ec4",
-          "experimental": true
+          "sig": "efad1b7565b58ec4"
         },
         "SyncHandlerDeps": {
           "kind": "interface",
-          "sig": "6b3d730e1833b36e",
-          "experimental": true
+          "sig": "6b3d730e1833b36e"
         },
         "SyncOp": {
           "kind": "interface",
@@ -1474,13 +1371,11 @@
         },
         "SyncRequest": {
           "kind": "interface",
-          "sig": "92aa24f4ce287708",
-          "experimental": true
+          "sig": "92aa24f4ce287708"
         },
         "SyncResponse": {
           "kind": "interface",
-          "sig": "f2c153b80638f053",
-          "experimental": true
+          "sig": "f2c153b80638f053"
         },
         "SyncStats": {
           "kind": "interface",
@@ -1512,7 +1407,7 @@
         },
         "testCell": {
           "kind": "function",
-          "sig": "2e56cbe8e947e0fb"
+          "sig": "bccc6199da4b6117"
         },
         "testComponent": {
           "kind": "function",
@@ -1528,7 +1423,7 @@
         },
         "TestContext": {
           "kind": "typeAlias",
-          "sig": "e14882ce7dea82a2"
+          "sig": "2a7943e0502d1d28"
         },
         "testgen": {
           "kind": "function",

@@ -1,27 +1,17 @@
-// cell-compose-execute.ts — root executor: flow dispatch and effect routing
+// cell-compose-execute.ts — root executor: routes effects to the owning
+// cell's executor (async-method triggers, schedule/own bridges). Generator
+// flow dispatch died with Style B (perfect-aio D1).
 
 import { log } from "../diagnostics/logger.ts";
-import type { FlowDef } from "./flow.ts";
-import { runFlow } from "./flow.ts";
 import type { AioError } from "../diagnostics/error.ts";
 import { createAioError } from "../diagnostics/error.ts";
 import type { CellDef, Msg, ScopedApp } from "./cell-types.ts";
 import { tagSource } from "./cell-types.ts";
 import type { ReduceContext } from "./cell-compose-reduce.ts";
 
-type FlowsByPrefix = Map<
-  string,
-  {
-    cellName: string;
-    flows: Record<string, FlowDef>;
-    triggers: Map<string, string>;
-  }
->;
-
-/** Build the root execute function for dispatching effects and triggering flows */
+/** Build the root execute function for dispatching effects to cell executors. */
 export function buildRootExecutor(
   cells: CellDef[],
-  flowsByPrefix: FlowsByPrefix,
   ctx: ReduceContext,
   reportError: ((err: AioError) => void) | undefined,
   countCellError: (name: string) => void,
@@ -42,55 +32,6 @@ export function buildRootExecutor(
     if (colonIdx === -1) return;
 
     const prefix = (effect.type as string).slice(0, colonIdx);
-
-    // Handle __flow effects — start a generator flow
-    if ((effect.type as string).endsWith(":__flow")) {
-      const flowInfo = flowsByPrefix.get(prefix);
-      if (!flowInfo) return;
-      const payload = effect.payload as {
-        _flowName: string;
-        _triggerAction: Msg;
-      };
-      const flowDef = flowInfo.flows[payload._flowName];
-      if (!flowDef) return;
-
-      const flowApp = {
-        dispatch: (a: Msg) => app.dispatch(a),
-        getState: () => app.getState() as Record<string, unknown>,
-      };
-
-      runFlow(
-        flowDef,
-        payload._flowName,
-        flowInfo.cellName,
-        payload._triggerAction,
-        flowApp,
-        reportError
-          ? (raw, flowCtx) => {
-            reportError(createAioError("FLOW_UNCAUGHT", raw, flowCtx));
-          }
-          : undefined,
-      )
-        .catch((e) => {
-          if (reportError) {
-            reportError(
-              createAioError("FLOW_UNCAUGHT", e, {
-                cellName: flowInfo.cellName,
-                flowName: payload._flowName,
-              }),
-            );
-          } else {
-            log.error(
-              "cell",
-              `${flowInfo.cellName} flow '${payload._flowName}' error: ${e}`,
-            );
-          }
-        });
-      return;
-    }
-
-    // Skip internal flow state actions — handled by reducer
-    if ((effect.type as string).endsWith(":__FlowState")) return;
 
     const f = executorByPrefix.get(prefix);
     if (!f || !f.__aio.execute) return;

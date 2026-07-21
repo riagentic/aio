@@ -2,32 +2,32 @@
  * @module
  * Full-stack Deno framework — one state, propagated everywhere.
  *
- * v1.0: clean API, framework-agnostic client, cell.ts split, perf.log, am client inspection.
- * v0.9: async Worker-based SQLite, `log` public singleton, scaffolder via JSR.
- * Use `cell({ methods })` for reactive style (default),
- * `cell({ generators })` for sequential workflows,
- * `cell({ actions, reduce })` for explicit control (advanced).
+ * ONE style: `cell({ state, methods })` — methods mutate a draft; async
+ * methods do real work (await, until(), race()) and can be cancelled via
+ * `cancelOn` + `s.$signal`. (aio v2 / perfect-aio D1: the legacy
+ * actions/reduce/machine/generators layer was removed — see
+ * docs/upgrade/to-v2.md.)
  *
  * ```ts
- * import { cell, call, aio } from 'aio'
+ * import { aio, cell, race, until } from 'aio'
  *
- * // Reactive style — default
  * const counter = cell('counter', {
  *   state: { count: 0 },
  *   methods: {
  *     increment(s, by = 1) { s.count += by },
- *     async save(s) { await call({ timeout: 3000 }, () => persist(s.count)) },
  *   },
  * })
  *
- * // Sequential workflow — generator with typed state
  * const checkout = cell('checkout', {
- *   state: { orderId: null as string | null },
- *   methods: { reset(s) { s.orderId = null } },
- *   generators: {
- *     *place(ctx, item: string) {        // ctx is GenCtx<{ orderId: string | null }>
- *       const id = yield* ctx.call('submit', () => submitOrder(item))
- *       yield* ctx.done(s => { s.orderId = id })  // s typed — no cast needed
+ *   state: { status: 'idle', orderId: null as string | null },
+ *   cancelOn: { place: ['cart:clear'] },   // cart.clear aborts a running place()
+ *   methods: {
+ *     async place(s, item: string) {
+ *       s.status = 'placing'
+ *       const id = await submitOrder(item)
+ *       const r = await race({ ok: until(() => s.status === 'placing'), timeout: 30_000 })
+ *       s.orderId = id
+ *       s.status = 'placed'
  *     },
  *   },
  * })
@@ -35,7 +35,7 @@
  * await aio.run({ cells: [counter, checkout] })
  * counter.increment(5)       // direct call — dispatches through store
  * counter.count              // direct state read — reactive in components
- * checkout.place('widget')   // starts generator
+ * await checkout.place('widget')
  * ```
  */
 import { type Draft, produce } from "immer";
@@ -51,7 +51,6 @@ export type {
   CellsConfig,
   CliFlags,
   Lint,
-  MiddlewareFn,
   PerfBudget,
   PerfCheck,
   ResolveUserFn,
@@ -115,13 +114,12 @@ export { instances, resolveAppId } from "./src/server/single-instance-lock.ts";
  * cell({ actions, reduce })   — explicit style for full control (advanced)
  */
 export { bindCell, testCell } from "./src/state/cell.ts";
-/** Define a cell — methods, generators, actions/reduce, or mixed. The atomic unit of aio. */
+/** Define a cell — state + methods (+ selectors, sync, cancelOn). The atomic unit of aio. */
 export { cell } from "./src/state/cell.ts";
 /** Compose cells into a single dispatch/reduce/execute pipeline with dependency resolution. */
 export { composeCells } from "./src/state/cell.ts";
-/** Cell definition types — actions, catalogs, machine config, compose, test context */
+/** Cell definition types — catalogs, compose, test context */
 export type {
-  ActionsCellConfig,
   ActionSource,
   ActionUnion,
   Catalog,
@@ -135,13 +133,9 @@ export type {
   ComposedCells,
   Creators,
   DirectCalling,
-  ExecuteHandlers,
   ExtractState,
-  FlatActions,
-  MachineConfig,
   MethodsCellConfig,
   Msg,
-  ReduceHandlers,
   ScopedApp,
   SendOf,
   StateOf,
@@ -176,21 +170,9 @@ export type {
   Method,
   SyncMethod,
 } from "./src/state/cell-impl.ts";
-
-/**
- * Generator-based sequential workflows.
- * Write top-to-bottom async code; each yield point is observable.
- * Use cancelOn config key in cell() to declare cancellation triggers.
- */
-/** Generator workflow types — flow definitions, steps, context, and typed creators */
-export type {
-  FlowDef,
-  FlowStep,
-  Gen,
-  GenCtx,
-  SingleStepGen,
-  TypedCreator,
-} from "./src/state/flow.ts";
+/** Draft annotation for cancellation-aware async methods —
+ *  `async place(s: State & Partial<MethodDraftMeta>) { … s.$signal … }` */
+export type { MethodDraftMeta } from "./src/state/cell-impl.ts";
 
 /**
  * Connect to a remote aio server from a CLI app.
@@ -203,25 +185,18 @@ export { connectCli, connectCliUDS } from "./src/server/cli-client.ts";
 export type { CliApp } from "./src/server/cli-client.ts";
 
 /**
- * Action/effect catalog factory — creates typed creators for explicit-style cells.
- * Used inside `cell({ actions, effects })` config or for standalone catalogs.
- */
-/** Create typed action creators — PascalCase labels + camelCase dispatch helpers. */
-export { actions } from "./src/state/factory.ts";
-/** Create typed effect creators — same API as `actions()` but for side-effect declarations. */
-export { effects } from "./src/state/factory.ts";
-/** Factory result and creator types for explicit-style action/effect catalogs */
-export type {
-  Creators as FactoryCreators,
-  FactoryResult,
-  LowerFirst,
-  Prefixed,
-} from "./src/state/factory.ts";
-
-/**
  * Declarative schedules — timers, intervals, cron jobs as effects.
  * @see {@link https://aio.dev/manual#scheduled-effects}
  */
+// Async-method workflow helpers (perfect-aio D1 — the method-native
+// replacements for generator ctx.waitFor / ctx.race / ctx.sleep).
+export {
+  race,
+  sleep,
+  until,
+  type UntilOptions,
+  UntilTimeoutError,
+} from "./src/state/async-helpers.ts";
 export { schedule } from "./src/state/schedule.ts";
 /** Schedule definition and effect types for timers, intervals, and cron */
 export type { ScheduleDef, ScheduleEffect } from "./src/state/schedule.ts";
@@ -271,26 +246,6 @@ export { createSelector } from "./src/selector.ts";
 export { createSliceSelector } from "./src/selector.ts";
 /** Selector type — a function from state to derived value with memoization. */
 export type { Selector } from "./src/selector.ts";
-
-/**
- * Composes multiple beforeReduce functions into one.
- * Functions run in order, passing the action through. Return null to drop.
- *
- * @param fns - beforeReduce functions to compose
- * @returns Composed beforeReduce function
- *
- * @example
- * ```ts
- * const validate = (action, state) => action.type === 'Bad' ? null : action
- * const enrich = (action, state) => ({ ...action, timestamp: Date.now() })
- *
- * aio.run(state, {
- *   beforeReduce: composeMiddleware(validate, enrich),
- *   // ...
- * })
- * ```
- */
-export { composeMiddleware } from "./src/server/aio.ts";
 
 /**
  * Deep freeze for dev-mode immutability checking.

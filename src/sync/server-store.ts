@@ -67,7 +67,6 @@ export function _resetServerTsForTest(): void {
  * client hasn't seen can sit at or below the cursor. Seeded from the op-log
  * first: an unseeded reserve after a restart could echo a cursor BELOW
  * already-persisted (burst-inflated) ops → re-delivery → double-apply.
- * @experimental Excluded from the 1.0 stability guarantee.
  */
 export async function reserveServerTs(db: DB): Promise<number> {
   await seedServerTs(db);
@@ -80,7 +79,6 @@ export async function reserveServerTs(db: DB): Promise<number> {
  * Returns the issued server_ts when the row was newly inserted, or null for a
  * duplicate — callers must not re-dispatch/re-broadcast a duplicate, and must
  * stamp broadcasts with the returned ts so peers can advance their cursor.
- * @experimental Excluded from the 1.0 stability guarantee.
  */
 export async function persistOp(
   db: DB,
@@ -108,7 +106,6 @@ export async function persistOp(
 
 /**
  * Load all ops for a cell since the given cursor. Uses server_ts when available (strictly monotonic), falls back to HLC for backwards compat.
- * @experimental Excluded from the 1.0 stability guarantee.
  */
 export async function loadOpsSince(
   db: DB,
@@ -150,7 +147,6 @@ export async function loadOpsSince(
 
 /**
  * Read the compaction low_water mark for a cell, or null if none.
- * @experimental Excluded from the 1.0 stability guarantee.
  */
 export async function getLowWater(
   db: DB,

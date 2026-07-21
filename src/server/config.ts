@@ -118,7 +118,6 @@ export const VALID_FEATURES_CONFIG_KEYS = new Set<string>([
   "strictOrigin",
   "fatalOnStart",
   "dispatchStorm",
-  "middleware",
   "appVersion",
   "isolate",
   "beforeReduce",
@@ -202,7 +201,6 @@ const CONFIG_DOCS: Record<string, [string, string]> = {
   diagnostics: ["auto", "state diffs, action log, checkpoint, crash handler"],
   logging: ["true", "structured logging — false to disable"],
   schedules: ["", "static scheduled effects — started on boot"],
-  middleware: ["", "middleware array — applied in order as beforeReduce chain"],
   isolate: ["", "run only these cells (dev convenience)"],
   onAction: ["", "called after every action"],
   onEffect: ["", "called after every effect"],
@@ -242,7 +240,6 @@ const CONFIG_GROUPS: [string, string[]][] = [
   ]],
   ["App logic", [
     "beforeReduce",
-    "middleware",
     "isolate",
     "persist",
     "persistKey",

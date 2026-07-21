@@ -1,5 +1,6 @@
 // cell-compose-reduce.ts — per-cell reducer and root reduce function
 
+import { notifyMethodCancel } from "./method-cancel.ts";
 import {
   current,
   type Draft,
@@ -10,12 +11,6 @@ import {
 import { log } from "../diagnostics/logger.ts";
 import type { ScheduleEffect } from "./schedule.ts";
 import type { OwnEffect } from "./own.ts";
-import type { FlowDef } from "./flow.ts";
-import {
-  createFlowReducer,
-  notifyFlowListeners,
-  notifyStateListeners,
-} from "./flow.ts";
 import { resolveCall } from "./cell-impl.ts";
 import type { AioError } from "../diagnostics/error.ts";
 import { createAioError } from "../diagnostics/error.ts";
@@ -56,15 +51,12 @@ export function reduceCell(
   action: Msg,
   ctx: ReduceContext,
 ): ReduceResult {
-  const { machine, reduce, actionTypeToKey, flowTriggers } = f.__aio;
+  const { machine, reduce, actionTypeToKey } = f.__aio;
   const cellName = f.__aio.id;
   const cellState = fullState[cellName] as Record<string, unknown>;
   const { reportError: _reportError, perfCheck: _perfCheck } = ctx;
 
   const ownKey = actionTypeToKey.get(action.type);
-  const flowName = ownKey && flowTriggers
-    ? flowTriggers.get(ownKey)
-    : undefined;
 
   if (machine !== false) {
     const currentStatus = (cellState.__aio_status ?? machine.initial) as string;
@@ -196,13 +188,6 @@ export function reduceCell(
     // Effects already cloned inside produceWithPatches (before draft revocation)
     const tClone = _perfCheck ? performance.now() - t0 - tProduce : 0;
 
-    if (flowName) {
-      effects.push({
-        type: `${f.__aio.id}:__flow`,
-        payload: { _flowName: flowName, _triggerAction: action },
-      });
-    }
-
     if (f.__aio.validate) {
       const result = f.__aio.validate(nextSlice);
       if (result !== true) {
@@ -314,13 +299,6 @@ export function reduceCell(
     }
   }
 
-  if (flowName) {
-    effects.push({
-      type: `${f.__aio.id}:__flow`,
-      payload: { _flowName: flowName, _triggerAction: action },
-    });
-  }
-
   const simpleReturn: ReduceResult = {
     state: { ...fullState, [cellName]: nextSlice },
     effects,
@@ -399,13 +377,6 @@ export function buildRootReducer(
     }
   }
 
-  const flowReducers = new Map<string, ReturnType<typeof createFlowReducer>>();
-  for (const f of cells) {
-    if (f.__aio.flows && Object.keys(f.__aio.flows).length > 0) {
-      flowReducers.set(f.__aio.id, createFlowReducer(f.__aio.id));
-    }
-  }
-
   // risoto 2026-07-16e: a dispatch whose `cell:` prefix names NO booted cell
   // and NO foreign-action listener used to vanish silently — the client (which
   // imported the cell) exposed its methods while the server never booted it,
@@ -421,44 +392,6 @@ export function buildRootReducer(
     const allEffects: (Msg | ScheduleEffect | OwnEffect)[] = [];
     const allPatches: Array<{ cell: string; ops: Patch[] }> = [];
     const { disabledCells, cellLastAction, perfCheck: _perfCheck } = ctx;
-
-    // Handle flow state updates (__FlowState)
-    if (
-      typeof action.type === "string" && action.type.endsWith(":__FlowState")
-    ) {
-      const colonIdx = action.type.indexOf(":");
-      const prefix = action.type.slice(0, colonIdx);
-      const flowReducer = flowReducers.get(prefix);
-      if (flowReducer) {
-        const cellSlice = (currentState[prefix] ?? {}) as Record<
-          string,
-          unknown
-        >;
-        const payload = action.payload as { _slice: Record<string, unknown> };
-        const [nextSlice, flowPatches] = produceWithPatches(
-          cellSlice,
-          (draft: Draft<Record<string, unknown>>) => {
-            const incoming = payload._slice;
-            for (const key of Object.keys(incoming)) {
-              draft[key] = incoming[key];
-            }
-            for (const key of Object.keys(draft)) {
-              if (!(key in incoming)) delete draft[key];
-            }
-          },
-        );
-        const nextState = { ...currentState, [prefix]: nextSlice };
-        notifyStateListeners(nextState);
-        return {
-          state: nextState,
-          effects: [],
-          patches: flowPatches.length > 0
-            ? { cell: prefix, ops: flowPatches }
-            : undefined,
-        };
-      }
-      return { state: currentState, effects: [] };
-    }
 
     // Handle lifecycle actions (Init/Destroy)
     let isLifecycle = false;
@@ -603,8 +536,8 @@ export function buildRootReducer(
       });
     }
 
-    notifyFlowListeners(action);
-    notifyStateListeners(currentState);
+    // Abort in-flight async methods whose cancelOn lists this action (D1).
+    notifyMethodCancel(action.type);
 
     // Reject pending call() if action was blocked
     const callId = (action.payload as Record<string, unknown>)?._callId as
@@ -634,38 +567,4 @@ export function buildRootReducer(
       ret: ownerReturn,
     };
   };
-}
-
-/** Build map of flow definitions per cell prefix */
-export function buildFlowsByPrefix(
-  cells: CellDef[],
-): Map<
-  string,
-  {
-    cellName: string;
-    flows: Record<string, FlowDef>;
-    triggers: Map<string, string>;
-  }
-> {
-  const map = new Map<
-    string,
-    {
-      cellName: string;
-      flows: Record<string, FlowDef>;
-      triggers: Map<string, string>;
-    }
-  >();
-  for (const f of cells) {
-    if (
-      f.__aio.flows && f.__aio.flowTriggers &&
-      Object.keys(f.__aio.flows).length > 0
-    ) {
-      map.set(f.__aio.id, {
-        cellName: f.__aio.id,
-        flows: f.__aio.flows,
-        triggers: f.__aio.flowTriggers,
-      });
-    }
-  }
-  return map;
 }

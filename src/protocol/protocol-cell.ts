@@ -32,13 +32,18 @@ export function cell(
     const cat: Record<string, unknown> = {};
     for (const key of Object.keys(creators)) {
       const label = `${prefix}:${key}`;
-      cat[key] = Object.assign(
+      const fn = Object.assign(
         (...args: unknown[]) => ({
           type: label,
           payload: creators[key]!(...args) ?? {},
         }),
         { type: label },
       );
+      // `.action` self-reference — the server catalog guarantees it
+      // (cell-catalog.ts buildCatalog); the browser stub silently lacked it,
+      // so `someAction.action` was undefined only in the browser.
+      (fn as unknown as Record<string, unknown>).action = fn;
+      cat[key] = fn;
     }
     return cat;
   };
@@ -50,10 +55,13 @@ export function cell(
     const cat: Record<string, unknown> = {};
     for (const key of allKeys) {
       const label = `${prefix}:${key}`;
-      cat[key] = Object.assign(
+      const fn = Object.assign(
         (...args: unknown[]) => ({ type: label, payload: { args } }),
         { type: label },
       );
+      // `.action` self-reference — parity with the server catalog shape.
+      (fn as unknown as Record<string, unknown>).action = fn;
+      cat[key] = fn;
     }
     // deno-lint-ignore no-explicit-any
     const eCat = buildCat((config.effects ?? {}) as any);
@@ -168,14 +176,5 @@ export function bridge(name: string, config: any): Record<string, unknown> {
 export const aio: Record<string, any> = {
   run() {
     return Promise.resolve();
-  },
-  middleware: {
-    logger: () => () => null,
-    devtools: () => () => null,
-    perfBudget: () => () => null,
-    validate: () => () => null,
-    metrics: () => () => null,
-    freeze: () => () => null,
-    create: () => () => null,
   },
 };

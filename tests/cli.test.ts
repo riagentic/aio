@@ -225,9 +225,10 @@ Deno.test("electronMainScript: empty title defaults to aio-app", () => {
   assertEquals(script.includes('app.name = "aio-app"'), true);
 });
 
-Deno.test("electronMainScript: keyboard shortcuts F5 and F12 present", () => {
+Deno.test("electronMainScript: keyboard shortcuts Ctrl+F5 and F12 present", () => {
   const script = electronMainScript("http://localhost:3000");
-  assertEquals(script.includes("input.key === 'F5'"), true);
+  // Reload is Ctrl+F5 — plain F5 stays free for app-level custom shortcuts.
+  assertEquals(script.includes("(ctrl && input.key === 'F5')"), true);
   assertEquals(script.includes("input.key === 'F12'"), true);
   assertEquals(script.includes("reloadIgnoringCache"), true);
   assertEquals(script.includes("toggleDevTools"), true);
@@ -457,7 +458,8 @@ Deno.test("electronMainScriptUDS: contains keyboard shortcuts", () => {
     "/tmp/test.sock",
     {},
   );
-  assertEquals(script.includes("input.key === 'F5'"), true);
+  // Ctrl+F5 reload (plain F5 left to the app), F12 devtools.
+  assertEquals(script.includes("(ctrl && input.key === 'F5')"), true);
   assertEquals(script.includes("input.key === 'F12'"), true);
 });
 

@@ -1,5 +1,6 @@
 // esbuild transpilation — lazy-loaded transform with LRU cache for dev-mode .ts/.tsx serving
 import { resolve } from "@std/path";
+import { ESBUILD_JSX, ESBUILD_SPEC } from "../build/esbuild-shared.ts";
 
 export type EsbuildMessage = {
   text: string;
@@ -27,7 +28,7 @@ async function getTransform() {
     // actually transpiles — never when installing `am` (which never transpiles)
     // or compiling an app. Prevents `deno install am` from pulling ~10MB of
     // esbuild it doesn't use (and the ETXTBSY it hits under concurrent esbuild).
-    const esbuildPkg = ["npm:esbuild", "0.24.2"].join("@");
+    const esbuildPkg = ESBUILD_SPEC; // shared pin (build/esbuild-shared.ts)
     const mod = await import(esbuildPkg);
     transformFn = mod.transform as (
       input: string,
@@ -128,7 +129,7 @@ export async function transpile(
   }
   const transform = await getTransform();
   const loader = filepath.endsWith(".tsx") ? "tsx" as const : "ts" as const;
-  const jsxOpts = { jsx: "automatic", jsxImportSource: "aio" };
+  const jsxOpts = ESBUILD_JSX; // shared dev==prod JSX config
   const result = await transform(source, {
     loader,
     format: "esm",

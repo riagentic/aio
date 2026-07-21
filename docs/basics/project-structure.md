@@ -8,7 +8,7 @@
 src/
   app.ts              <- aio.run({ cells }) -- wiring only
   App.tsx             <- root layout + routing only
-  cell/               <- aio cell definitions (state + methods + machine)
+  cell/               <- aio cell definitions (state + methods)
   type/               <- all exported types, always
   lib/                <- pure functions, no aio imports
   ui/                 <- components
@@ -21,15 +21,15 @@ Six folders. Two root files. That is the entire app.
 
 ## Zero-Thought Placement Rules
 
-| What you wrote                       | Where it goes        | Rule                           |
-| ------------------------------------ | -------------------- | ------------------------------ |
-| `export type` / `export interface`   | `type/`              | Always. No exceptions.         |
-| `cell()` definition                  | `cell/`              | Always. One cell per file.     |
-| Extracted reducer/executor/generator | `cell/` next to cell | Imports aio = stays with cell. |
-| Pure function, no aio import         | `lib/`               | Always.                        |
-| Component / JSX                      | `ui/`                | Always.                        |
-| Test                                 | `test/`              | Mirrors source.                |
-| `aio.run()`                          | `app.ts`             | One file.                      |
+| What you wrote                     | Where it goes        | Rule                           |
+| ---------------------------------- | -------------------- | ------------------------------ |
+| `export type` / `export interface` | `type/`              | Always. No exceptions.         |
+| `cell()` definition                | `cell/`              | Always. One cell per file.     |
+| Extracted method helper            | `cell/` next to cell | Imports aio = stays with cell. |
+| Pure function, no aio import       | `lib/`               | Always.                        |
+| Component / JSX                    | `ui/`                | Always.                        |
+| Test                               | `test/`              | Mirrors source.                |
+| `aio.run()`                        | `app.ts`             | One file.                      |
 
 ---
 

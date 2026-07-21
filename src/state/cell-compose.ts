@@ -1,13 +1,14 @@
 // cell-compose.ts — composeCells orchestrator + public re-exports
 
 import { enablePatches } from "immer";
+import { registerCancelOn } from "./method-cancel.ts";
 import { log } from "../diagnostics/logger.ts";
 import type { AioError } from "../diagnostics/error.ts";
 import type { CellEntry, Msg } from "./cell-types.ts";
 import type { ReduceBreakdown } from "../diagnostics/time-travel.ts";
 
 import { resolveCells } from "./cell-compose-resolve.ts";
-import { buildFlowsByPrefix, buildRootReducer } from "./cell-compose-reduce.ts";
+import { buildRootReducer } from "./cell-compose-reduce.ts";
 import { cloneState } from "./immutable.ts";
 import { buildRootExecutor } from "./cell-compose-execute.ts";
 import {
@@ -105,16 +106,32 @@ export function composeCells(
     perfCheck: _perfCheck,
   };
 
-  // ── Root reducer ──
-  const rootReduce = buildRootReducer(cells, reduceCtx, perfTracker);
+  // ── Cancellation triggers (D1): rebuild the runtime registry from defs ──
+  for (const f of cells) {
+    if (f.__aio.cancelTriggers) {
+      for (const [m, triggers] of Object.entries(f.__aio.cancelTriggers)) {
+        registerCancelOn(f.__aio.id, m, triggers);
+      }
+    }
+  }
 
-  // ── Flow registry ──
-  const flowsByPrefix = buildFlowsByPrefix(cells);
+  // ── Root reducer ──
+  const _innerReduce = buildRootReducer(cells, reduceCtx, perfTracker);
+  // Async-method failures dispatch `cell:__error` — count them toward the
+  // cell's health/circuit-breaker stats, exactly like a sync execute throw.
+  // (perfect-aio D1 gate: error counting must not depend on the deleted
+  // Style-B execute path.)
+  const rootReduce: typeof _innerReduce = (state, action) => {
+    if (action.type.endsWith(":__error")) {
+      const cellId = action.type.slice(0, -"__error".length - 1);
+      if (cells.some((c) => c.__aio.id === cellId)) countCellError(cellId);
+    }
+    return _innerReduce(state, action);
+  };
 
   // ── Root executor ──
   const rootExecute = buildRootExecutor(
     cells,
-    flowsByPrefix,
     reduceCtx,
     _reportError,
     countCellError,

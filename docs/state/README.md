@@ -2,32 +2,21 @@
 
 Defining cells, managing state, and coordinating workflows.
 
-**Not sure which style to use?** See [Which Approach?](which-approach.md) for a
-decision tree.
+> v2: methods is the one style — see
+> [docs/upgrade/to-v2.md](../upgrade/to-v2.md) for migration from
+> `actions:`/`reduce:`/`machine:`/`generators:`.
 
-## L1 — Every App
+## Core
 
-Start here. Covers 90% of what you need.
+Start here. Covers what every app needs.
 
 - [Cells](cells.md) — cell() anatomy and config reference
-- [Methods](methods.md) — sync/async methods, selectors, Immer
+- [Methods](methods.md) — sync/async methods, workflows, cancellation,
+  selectors, Immer
 
-## L2 — Complex Apps
+## Going further
 
-Add when you need sequential workflows, state machines, or lifecycle hooks.
-
-- [Generators](generators.md) — sequential async workflows
-- [Generators API](generators-api.md) — GenCtx method reference
-- [State Machines](machines.md) — guards and transitions
-- [Lifecycle](lifecycle.md) — onInit, onDestroy, validate
+- [Lifecycle](lifecycle.md) — onInit, onDestroy, aio.run(), runtime control
 - [Composition](composition.md) — cross-cell communication
 - [Scheduling](scheduling.md) — timers, intervals, cron
-
-## L3 — Advanced: Explicit Pipeline
-
-> Most apps never need this tier. Methods + generators cover the same ground
-> with less boilerplate. Reach for L3 only when you need action replay, audit
-> trails, or strict pure/impure separation for compliance reasons.
-
-- [Actions & Reduce](actions-reduce.md) — explicit action/reduce/execute/effects
-  style
+- [Cell Visibility](cell-visibility.md) — per-cell ui/persist filters
