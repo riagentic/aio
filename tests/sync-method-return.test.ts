@@ -126,7 +126,11 @@ Deno.test("427: returning a slice of DRAFT state survives (no revoked proxy)", a
   const item = await (c as unknown as {
     add: (l: string) => Promise<{ id: number; label: string }>;
   }).add("hello");
-  assertEquals(item, { id: 1, label: "hello" }, "draft slice snapshotted intact");
+  assertEquals(
+    item,
+    { id: 1, label: "hello" },
+    "draft slice snapshotted intact",
+  );
 });
 
 Deno.test("427: returning a ScheduleEffect still schedules — value is undefined", async () => {

@@ -2,8 +2,8 @@
 
 import type { CellDef, Creators, Msg } from "./cell-types.ts";
 import { checkReservedKeys } from "./cell-types.ts";
-import { registerCall } from "./cell-impl.ts";
 import { randomUuid } from "../rand.ts";
+import { registerCall } from "./cell-impl.ts";
 
 /** Wrap a raw action creator with a guard for the pre-binding state. Calling a
  *  method before the runtime is booted ALWAYS throws (dev + prod) — a pre-boot
@@ -146,12 +146,16 @@ export function bindCell(
     }
   }
 
-  // Bind selectors: wrap with getState. Pass the full state as the second arg
-  // so deps-form selectors can read other cells' current slices.
+  // Bind selectors: wrap with getState. Called WITH args → parameterized
+  // selector (`cell.byId(id)`); called with NO args → pass full state as arg 2
+  // so deps-form / `(s, fullState)` selectors read other cells' slices.
   for (const [key, selectorFn] of Object.entries(f.__aio.selectors)) {
-    (f as Record<string, unknown>)[key] = () => {
+    (f as Record<string, unknown>)[key] = (...args: unknown[]) => {
       const state = getState();
-      return selectorFn(state[f.__aio.id], state);
+      const own = state[f.__aio.id];
+      return args.length > 0
+        ? (selectorFn as (s: unknown, ...a: unknown[]) => unknown)(own, ...args)
+        : selectorFn(own, state);
     };
   }
 

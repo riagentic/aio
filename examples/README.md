@@ -3,20 +3,21 @@
 New project? Don't copy these — run **`am create my-app`** (see the root
 README). The two apps below are exactly what `am create --template=…` scaffolds;
 they live here as the canonical template source + CI fixtures, all
-runtime-tested (`tests/examples.test.ts`), UI-tested (`tests/examples-ui.test.ts`),
-and type-checked in CI.
+runtime-tested (`tests/examples.test.ts`), UI-tested
+(`tests/examples-ui.test.ts`), and type-checked in CI.
 
 ## Templates (what `am create` scaffolds)
 
-| Dir        | `am create` flag       | What                                        |
-| ---------- | ---------------------- | ------------------------------------------- |
-| `counter/` | *(default)*            | Smallest full app — one cell, one component |
-| `todo/`    | `--template=todo`      | Todo list — list state, `useLocal` input    |
+| Dir        | `am create` flag  | What                                        |
+| ---------- | ----------------- | ------------------------------------------- |
+| `counter/` | _(default)_       | Smallest full app — one cell, one component |
+| `todo/`    | `--template=todo` | Todo list — list state, `useLocal` input    |
 
 ## Target build smoke fixtures
 
-`examples/targets/<dir>` — minimal per-target apps kept purely as **CI build/boot
-smoke fixtures** (not learn-from examples), so every compile target stays honest:
+`examples/targets/<dir>` — minimal per-target apps kept purely as **CI
+build/boot smoke fixtures** (not learn-from examples), so every compile target
+stays honest:
 
 | Target                    | Dir                | Interface                                 |
 | ------------------------- | ------------------ | ----------------------------------------- |

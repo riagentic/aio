@@ -41,7 +41,9 @@ export function deepMerge(
       if (initialIsEmptyDict) {
         const pv = persisted[key];
         // recurse into nested dicts so they restore too; leaves pass through
-        result[key] = isPlainObject(pv) ? deepMerge({}, pv, depth + 1, seen) : pv;
+        result[key] = isPlainObject(pv)
+          ? deepMerge({}, pv, depth + 1, seen)
+          : pv;
       }
       continue; // (non-empty initial) drop keys removed from schema
     }

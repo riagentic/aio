@@ -273,10 +273,11 @@ message:
 
 ## Inspecting & driving a live client
 
-aio has **one** UI facility for this — the semantic surface — used identically by
-`testUI` (in tests) and by `am surface`/`am trigger` (against a live client). It
-walks the live AIR vdom, so every component and interactive element is addressed
-by NAME, never a CSS selector. See [UI testing](../testing/ui-testing.md).
+aio has **one** UI facility for this — the semantic surface — used identically
+by `testUI` (in tests) and by `am surface`/`am trigger` (against a live client).
+It walks the live AIR vdom, so every component and interactive element is
+addressed by NAME, never a CSS selector. See
+[UI testing](../testing/ui-testing.md).
 
 ```sh
 am surface <clientIdx>                      # every component + triggerable element, by name
@@ -285,13 +286,14 @@ am trigger <clientIdx> App:Name type "Alice"
 ```
 
 **Actions:** `click`, `type`, `select`, `focus`, `blur`, `scroll`, `hover`,
-`press` — dispatched as faithful event sequences (e.g. click sends
-`pointerdown` > `mousedown` > `pointerup` > `mouseup` > `click`), then the app is
-settled and the fresh post-action surface is returned. Because a test and an `am`
-session run the exact same trigger engine, they behave identically.
+`press` — dispatched as faithful event sequences (e.g. click sends `pointerdown`
 
-> The older selector/index/raw-DOM commands (`am interact`, `am click`, `am dom`)
-> were removed — the semantic surface supersedes them.
+> `mousedown` > `pointerup` > `mouseup` > `click`), then the app is settled and
+> the fresh post-action surface is returned. Because a test and an `am` session
+> run the exact same trigger engine, they behave identically.
+
+> The older selector/index/raw-DOM commands (`am interact`, `am click`,
+> `am dom`) were removed — the semantic surface supersedes them.
 
 ## Delta sync and rendering
 

@@ -84,6 +84,13 @@ Client A                    Server                    Client B
 unconfirmed ops replayed through reducer). UI always reads optimistic for
 instant feedback.
 
+**Catch-up cursor:** the server stamps every persisted op with a strictly
+monotonic `server_ts` and echoes a per-cell `lastServerTs` cursor in each
+`__sync` response (reserved under the cell's lock — race-free). Clients send it
+back on the next catch-up, so re-delivery (and double-apply through the reducer)
+can't happen; broadcast `__op`s carry their `serverTs` so peers advance the
+cursor as they apply them. The HLC cursor remains as a legacy fallback only.
+
 ## Merge Strategies
 
 ### lww (Last-Write-Wins) — default

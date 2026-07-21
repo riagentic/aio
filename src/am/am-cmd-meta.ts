@@ -65,7 +65,10 @@ export async function cmdUpdate(
         stdout: capture ? "piped" : "inherit",
         stderr: capture ? "null" : "inherit",
       }).output();
-      return { code: o.code, text: capture ? new TextDecoder().decode(o.stdout).trim() : "" };
+      return {
+        code: o.code,
+        text: capture ? new TextDecoder().decode(o.stdout).trim() : "",
+      };
     };
     if ((await git(["fetch", "--tags", "--force", "origin"])).code !== 0) {
       outError(`git fetch failed in ${root} — check network`, mode);
@@ -73,7 +76,9 @@ export async function cmdUpdate(
     }
     // Latest tag reachable from origin/main (ancestry-based — robust to the
     // alphaN naming that breaks semver/version sorts).
-    let tag = (await git(["describe", "--tags", "--abbrev=0", "origin/main"], true)).text;
+    let tag =
+      (await git(["describe", "--tags", "--abbrev=0", "origin/main"], true))
+        .text;
     if (!tag) {
       tag = (await git(["tag", "-l", "v*", "--sort=-creatordate"], true)).text
         .split("\n")[0] ?? "";
@@ -83,7 +88,12 @@ export async function cmdUpdate(
       outError(`git checkout ${target} failed in ${root}`, mode);
       Deno.exit(1);
     }
-    out(mode === "json" ? { updated: true, via: "git", tag: target } : `✓ aio updated → ${target}`, mode);
+    out(
+      mode === "json"
+        ? { updated: true, via: "git", tag: target }
+        : `✓ aio updated → ${target}`,
+      mode,
+    );
     return;
   }
   const code = await runDeno(updateArgv());
@@ -91,7 +101,12 @@ export async function cmdUpdate(
     outError(`update failed (deno exit ${code})`, mode);
     Deno.exit(code);
   }
-  out(mode === "json" ? { updated: true, via: "jsr" } : "✓ am updated to the latest release", mode);
+  out(
+    mode === "json"
+      ? { updated: true, via: "jsr" }
+      : "✓ am updated to the latest release",
+    mode,
+  );
 }
 
 export async function cmdUninstall(

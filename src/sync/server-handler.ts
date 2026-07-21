@@ -5,7 +5,12 @@ import type { DB } from "../db/types.ts";
 import type { HLC, SyncOp } from "./types.ts";
 import { createHLC, type HLClock } from "./hlc.ts";
 import { compactSyncOps } from "./compact.ts";
-import { getLowWater, loadOpsSince, persistOp } from "./server-store.ts";
+import {
+  getLowWater,
+  loadOpsSince,
+  persistOp,
+  reserveServerTs,
+} from "./server-store.ts";
 
 /**
  * Dependencies injected into the server-side sync handler.
@@ -132,44 +137,60 @@ export function createServerSyncHandler(
         const serverHlc = clock.tick();
 
         // Persist → ack → broadcast (await persist before ack — AIO-audit3)
+        let serverTs: number | null = null;
         try {
-          await persistOp(deps.db, op);
+          serverTs = await persistOp(deps.db, op);
         } catch (e) {
           deps.log.error(`[sync:server] failed to persist op ${op.id}: ${e}`);
           return; // Don't ack — client will retry
         }
 
         // Apply to live server state BEFORE ack/compact — the op-log and
-        // the state must agree (compaction snapshots live state).
-        try {
-          deps.dispatch({
-            type: `${op.cell}:${op.action}`,
-            payload: op.payload,
-          });
-        } catch (e) {
-          deps.log.error(`[sync:server] dispatch of op ${op.id} failed: ${e}`);
+        // the state must agree (compaction snapshots live state). Duplicate
+        // delivery (client retry after a lost ack) must NOT re-dispatch:
+        // persistOp is INSERT OR IGNORE, so `serverTs === null` means the
+        // op's effect is already in live state — re-applying would double it.
+        if (serverTs !== null) {
+          try {
+            deps.dispatch({
+              type: `${op.cell}:${op.action}`,
+              payload: op.payload,
+            });
+          } catch (e) {
+            deps.log.error(
+              `[sync:server] dispatch of op ${op.id} failed: ${e}`,
+            );
+          }
         }
 
+        // Always ack — for a duplicate this is the retransmit of the ack the
+        // client lost, and it's what lets the client stop resending the op.
         try {
           socket.send(JSON.stringify({
             __ack: { cell: op.cell, opId: op.id, serverHlc },
           }));
         } catch { /* client disconnected */ }
 
-        deps.broadcastRaw.fn(
-          JSON.stringify({
-            __op: {
-              id: op.id,
-              hlc: op.hlc,
-              cell: op.cell,
-              action: op.action,
-              payload: op.payload,
-            },
-          }),
-          socket,
-        );
+        if (serverTs !== null) {
+          // Broadcast carries serverTs so peers advance their sync cursor as
+          // they apply it — otherwise the next catch-up re-delivers this op
+          // (it sits above their cursor) and they double-apply it.
+          deps.broadcastRaw.fn(
+            JSON.stringify({
+              __op: {
+                id: op.id,
+                hlc: op.hlc,
+                cell: op.cell,
+                action: op.action,
+                payload: op.payload,
+                serverTs,
+              },
+            }),
+            socket,
+          );
 
-        await tryCompact(op.cell);
+          await tryCompact(op.cell);
+        }
 
         deps.log.debug(
           `[sync:server] persisted op ${op.id} for ${op.cell}:${op.action}`,
@@ -207,19 +228,56 @@ export function createServerSyncHandler(
           if (!syncCells.has(pending.cell)) continue;
           await withLock(pending.cell, async () => {
             clock.receive(pending.hlc);
-            await persistOp(deps.db, pending);
-            // Reconnect-queued ops must reach live state too (same contract
-            // as handleOp).
+            const serverHlc = clock.tick();
+            let serverTs: number | null = null;
             try {
-              deps.dispatch({
-                type: `${pending.cell}:${pending.action}`,
-                payload: pending.payload,
-              });
+              serverTs = await persistOp(deps.db, pending);
             } catch (e) {
               deps.log.error(
-                `[sync:server] dispatch of pending op ${pending.id} failed: ${e}`,
+                `[sync:server] failed to persist pending op ${pending.id}: ${e}`,
+              );
+              return; // Don't ack — client keeps it pending and retries
+            }
+            // Reconnect-queued ops must reach live state too (same contract
+            // as handleOp) — but only ONCE. A pending op is re-sent on every
+            // sync round until acked; dispatching a duplicate would re-apply
+            // its effect to live state each round (counter drift). Peers get
+            // the same broadcast as the handleOp path (serverTs included so
+            // their cursor advances — see handleOp).
+            if (serverTs !== null) {
+              try {
+                deps.dispatch({
+                  type: `${pending.cell}:${pending.action}`,
+                  payload: pending.payload,
+                });
+              } catch (e) {
+                deps.log.error(
+                  `[sync:server] dispatch of pending op ${pending.id} failed: ${e}`,
+                );
+              }
+              deps.broadcastRaw.fn(
+                JSON.stringify({
+                  __op: {
+                    id: pending.id,
+                    hlc: pending.hlc,
+                    cell: pending.cell,
+                    action: pending.action,
+                    payload: pending.payload,
+                    serverTs,
+                  },
+                }),
+                socket,
               );
             }
+            // Ack ALWAYS (duplicate = retransmit of a lost ack). Without this
+            // the client never confirms reconnect-flushed ops: it re-sends
+            // them forever and keeps rebasing them on top of confirmed state
+            // that already includes them (permanent double-apply in the UI).
+            try {
+              socket.send(JSON.stringify({
+                __ack: { cell: pending.cell, opId: pending.id, serverHlc },
+              }));
+            } catch { /* client disconnected */ }
           });
         }
 
@@ -228,7 +286,7 @@ export function createServerSyncHandler(
         let useSnapshot = false;
         const snapshot: Record<string, Record<string, unknown>> = {};
         const lowWaterMap: Record<string, HLC> = {};
-        let maxServerTs: number | undefined;
+        const serverTsMap: Record<string, number> = {};
 
         for (
           const [cell, { lastHlc, lastServerTs }] of Object.entries(
@@ -238,11 +296,16 @@ export function createServerSyncHandler(
           if (!syncCells.has(cell)) continue;
 
           await withLock(cell, async () => {
+            // Reserve the cell's cursor FIRST, inside its lock: persists for
+            // this cell are serialized by the same lock, so every op already
+            // persisted is ≤ the reservation (and returned/snapshotted below)
+            // and every later op is strictly above it. That makes echoing this
+            // value race-free — the client can't be told a cursor that covers
+            // ops it was never sent.
+            serverTsMap[cell] = await reserveServerTs(deps.db);
+
             const cellLW = await getLowWater(deps.db, cell);
             if (cellLW) lowWaterMap[cell] = cellLW;
-
-            // Use server_ts cursor when available — strictly monotonic, no concurrency ambiguity
-            const effectiveServerTs = lastServerTs ?? undefined;
 
             // Client's lastHlc older than low_water → compacted, send snapshot
             if (
@@ -253,21 +316,20 @@ export function createServerSyncHandler(
               useSnapshot = true;
               snapshot[cell] = deps.getCellState(cell);
             } else {
+              // server_ts cursor when the client has one (strictly monotonic,
+              // no concurrency ambiguity); HLC cursor as legacy fallback.
               const ops = await loadOpsSince(
                 deps.db,
                 cell,
                 lastHlc,
-                effectiveServerTs,
+                lastServerTs ?? undefined,
               );
-              responseOps.push(...ops);
-            }
-
-            // Track max server_ts for echo-back to client
-            if (
-              effectiveServerTs != null &&
-              (!maxServerTs || effectiveServerTs > maxServerTs)
-            ) {
-              maxServerTs = effectiveServerTs;
+              // Don't echo the client's own ops back (hlc node = clientId):
+              // they reach its confirmed state via the __ack path, and a
+              // reducer re-apply here would double their effect.
+              responseOps.push(
+                ...ops.filter((o) => o.hlc[2] !== sync.clientId),
+              );
             }
           });
         }
@@ -279,7 +341,7 @@ export function createServerSyncHandler(
               snapshot,
               ops: responseOps,
               lowWater: lowWaterMap,
-              lastServerTs: maxServerTs,
+              lastServerTs: serverTsMap,
             },
           }
           : {
@@ -287,7 +349,7 @@ export function createServerSyncHandler(
               mode: "incremental" as const,
               ops: responseOps,
               lowWater: lowWaterMap,
-              lastServerTs: maxServerTs,
+              lastServerTs: serverTsMap,
             },
           };
 

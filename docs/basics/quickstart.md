@@ -32,9 +32,10 @@ stay in lockstep.
 Keep `am` current with `am update`; remove it with `am uninstall` (your apps are
 left untouched).
 
-> **Prefer no curl?** `deno install -gA -n am jsr:@riagentic/aio@^1.0.0-alpha/am`
-> is exactly what the installer runs. (A **bare** `jsr:@riagentic/aio` resolves
-> to an old stable during the alpha — always keep the `@^1.0.0-alpha` range.)
+> **Prefer no curl?**
+> `deno install -gA -n am jsr:@riagentic/aio@^1.0.0-alpha/am` is exactly what
+> the installer runs. (A **bare** `jsr:@riagentic/aio` resolves to an old stable
+> during the alpha — always keep the `@^1.0.0-alpha` range.)
 
 ## Manual setup (what `am create` generates)
 

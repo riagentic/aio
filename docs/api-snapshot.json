@@ -1057,6 +1057,9 @@
         }
       }
     },
+    "./dev-android": {
+      "symbols": {}
+    },
     "./doctor": {
       "symbols": {
         "Check": {
@@ -1401,17 +1404,17 @@
         },
         "OpBufferStorage": {
           "kind": "interface",
-          "sig": "938dcacf948792f0",
+          "sig": "ac1ac417b936f283",
           "experimental": true
         },
         "OpMessage": {
           "kind": "interface",
-          "sig": "554b8f2475bb95c9",
+          "sig": "ec3758d991bf1b53",
           "experimental": true
         },
         "persistOp": {
           "kind": "function",
-          "sig": "128575f51bf32748",
+          "sig": "6dc783af5d6434ce",
           "experimental": true
         },
         "rebase": {
@@ -1448,7 +1451,7 @@
         },
         "SyncEngine": {
           "kind": "interface",
-          "sig": "5b9a4e96a4624b12",
+          "sig": "9b758da6d2f3b61f",
           "experimental": true
         },
         "SyncEngineDeps": {
@@ -1463,7 +1466,7 @@
         },
         "SyncOp": {
           "kind": "interface",
-          "sig": "13187412f4756e72"
+          "sig": "d3978ac17d9a3b19"
         },
         "SyncReducer": {
           "kind": "typeAlias",
@@ -1476,7 +1479,7 @@
         },
         "SyncResponse": {
           "kind": "interface",
-          "sig": "c9dd11434b388cc8",
+          "sig": "f2c153b80638f053",
           "experimental": true
         },
         "SyncStats": {

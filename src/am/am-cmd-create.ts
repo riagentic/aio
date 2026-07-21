@@ -1,13 +1,15 @@
 /**
  * @module
  * `am create` — scaffold a new aio project (onboard kata). Non-interactive,
- * single command: `am create <name> [--template=counter|todo]`. Produces a
- * minimal, immediately runnable app pinned to this am's aio version (JSR), so
- * `am@X create` and the app's `aio@X` stay in lockstep.
+ * single command: `am create <name> [--template=counter|todo] [--target=…]`.
+ * Produces a minimal, immediately runnable app pinned to this am's aio
+ * version (JSR), so `am@X create` and the app's `aio@X` stay in lockstep.
  *
- *   am create my-app                 # counter (default)
- *   am create my-app --template=todo # todo list
- *   am create my-app --mirror        # framework-dev: import aio from the repo
+ *   am create my-app                          # counter, browser target
+ *   am create my-app --template=todo          # todo list
+ *   am create my-app --target=electron        # desktop app (electron auto-install)
+ *   am create my-app --target=android         # android (needs SDK + Gradle)
+ *   am create my-app --mirror                 # framework-dev: import aio from the repo
  */
 
 import { VERSION } from "../server/aio.ts";
@@ -19,10 +21,39 @@ const PKG = "@riagentic/aio";
 const TEMPLATES = ["counter", "todo"] as const;
 export type Template = (typeof TEMPLATES)[number];
 
+/** Build target — what `deno task dev` / `deno task compile` produce by default.
+ *  Every target is always available via the explicit `dev:<target>` /
+ *  `compile:<target>` task; `--target` only picks the default. `browser` is the
+ *  zero-toolchain default (instant, no download); `electron` auto-installs
+ *  Electron on first run; `android` needs the Android SDK + Gradle (the one
+ *  toolchain aio can't fetch for you); `cli`/`server` are headless. */
+export const TARGETS = [
+  "browser",
+  "electron",
+  "android",
+  "cli",
+  "server",
+] as const;
+export type Target = (typeof TARGETS)[number];
+
+const DEFAULT_TARGET: Target = "browser";
+
+/** CLI `--client=X` value for a target (the flag aio.run() reads). `server` →
+ *  `server-only` (aio's name for "no client UI"); the others map 1:1.
+ *  `android` is excluded: it has no client flag — its dev flow runs the
+ *  emulator orchestrator (see `dev:android`), not `src/app.ts`. */
+function clientFlagFor(
+  t: Exclude<Target, "android">,
+): "browser" | "electron" | "cli" | "server-only" {
+  return t === "server" ? "server-only" : t;
+}
+
 /** Parsed `am create` options. */
 export type CreateOpts = {
   name?: string;
   template: Template;
+  /** Default build target — `deno task dev` / `deno task compile` use it. */
+  target: Target;
   force: boolean;
   /** Explicit path to an aio checkout to import from (overrides the default,
    *  which is the checkout `am` itself runs from). */
@@ -34,7 +65,11 @@ export type CreateOpts = {
 /** Parse positional name + create-scoped flags out of the raw args. Unknown
  *  `--flags` are ignored (am's global parser already handled the shared ones). */
 export function parseCreateArgs(args: string[]): CreateOpts {
-  const opts: CreateOpts = { template: "counter", force: false };
+  const opts: CreateOpts = {
+    template: "counter",
+    target: DEFAULT_TARGET,
+    force: false,
+  };
   for (const a of args) {
     if (a === "--force") opts.force = true;
     else if (a === "--jsr") opts.jsr = true;
@@ -42,6 +77,16 @@ export function parseCreateArgs(args: string[]): CreateOpts {
     else if (a.startsWith("--mirror=")) opts.mirror = a.slice(9);
     else if (a.startsWith("--template=")) {
       opts.template = a.slice(11) as Template;
+    } else if (a.startsWith("--target=")) {
+      const v = a.slice(9) as Target;
+      // Loud on a typo — silently falling back to browser would ship the
+      // wrong default and the user wouldn't know until `deno task dev`.
+      if (!TARGETS.includes(v)) {
+        throw new Error(
+          `am create: unknown --target=${v} (valid: ${TARGETS.join(", ")})`,
+        );
+      }
+      opts.target = v;
     } else if (!a.startsWith("-") && opts.name === undefined) opts.name = a;
   }
   return opts;
@@ -99,19 +144,56 @@ export function frameworkSpecs(source: boolean): {
   };
 }
 
-/** Build the app's `deno.json`. Every dev + build target has a task that works
- *  OUT OF THE BOX: `dev` defaults to the browser (instant, no toolchain), and
- *  the electron tasks auto-install Electron. Android needs the Android SDK +
- *  Gradle (the one toolchain aio can't fetch for you). */
-export function denoJson(name: string, source: boolean): string {
+/** Build the app's `deno.json`. Every target works OUT OF THE BOX:
+ *  - `browser` (default): zero toolchain, instant.
+ *  - `electron`: auto-installs Electron on first `deno task dev` / `compile`
+ *    (the framework fetches it; no `install:electron` step required).
+ *  - `android`: needs the Android SDK + Gradle (the one toolchain aio can't
+ *    fetch for you — fails loud with guidance if absent).
+ *  - `cli`/`server`: headless.
+ *
+ *  `--target` picks the DEFAULT for `dev` / `compile`. Every target remains
+ *  reachable via the explicit `dev:<target>` / `compile:<target>` task.
+ *
+ *  The chosen `target` is also written to deno.json so `aio.run()` can read it
+ *  (the framework's own `client` default falls back to it). */
+export function denoJson(
+  name: string,
+  source: boolean,
+  target: Target = DEFAULT_TARGET,
+): string {
   const fw = frameworkSpecs(source);
-  // Electron is downloaded on demand by the electron tasks; declaring it keeps
-  // `deno install --allow-scripts=npm:electron` resolvable. Browser dev/compile
-  // never touch it.
-  const electronInstall = "deno install --allow-scripts=npm:electron";
+  // `electron` is declared in imports so the npm specifier resolves, but the
+  // Electron binary itself is fetched lazily by the framework (dev) or the
+  // build pipeline (compile) — no `install:electron` task needed.
+  // The `--client=X` arg is omitted for the default browser target (matches
+  // the framework default) and for headless targets (also framework defaults).
+  // Explicit `dev:<target>` / `compile:<target>` tasks always pass the flag so
+  // they remain target-accurate regardless of the configured default.
+  // `android` has no client flag — its dev default IS the emulator
+  // orchestrator (identical to the explicit `dev:android` task).
+  const devDefault = target === "android"
+    ? `deno run -A ${fw.devAndroid}`
+    : `deno run -A src/app.ts${
+      target === "browser" ? "" : ` --client=${clientFlagFor(target)}`
+    }`;
+  const compileArgs = target === "browser"
+    ? "--compile"
+    : target === "electron"
+    ? "--compile --electron"
+    : target === "android"
+    ? "--android"
+    : target === "cli"
+    ? "--compile --client=cli"
+    : "--compile --client=server-only";
+  const compileDefault = `deno run -A ${fw.build} ${compileArgs}`;
   const obj = {
     title: name,
     version: "0.1.0",
+    // `target` is read by aio.run() to pick the default client when no
+    // --client flag is passed. Editable by hand; `am` regenerates only on
+    // `am create` / `am update` (never silently).
+    target,
     nodeModulesDir: "auto",
     unstable: ["kv"],
     compilerOptions: {
@@ -121,19 +203,23 @@ export function denoJson(name: string, source: boolean): string {
     },
     imports: { ...fw.imports, electron: "npm:electron" },
     tasks: {
-      // ── dev: default is the browser (zero install, always works) ──
-      dev: "deno run -A src/app.ts --client=browser",
+      // ── dev: `deno task dev` runs the configured target. Explicit per-target
+      // tasks always pass --client so they work regardless of `target`. ──
+      dev: devDefault,
       "dev:browser": "deno run -A src/app.ts --client=browser",
-      "dev:electron": `${electronInstall} && deno run -A src/app.ts --client=electron`,
+      // Electron auto-installs on first run — no `install:electron` prefix.
+      "dev:electron": "deno run -A src/app.ts --client=electron",
       // Runs the app in an Android emulator against the live dev server
       // (boots an AVD, builds+installs+launches). Needs the Android SDK + an AVD.
       "dev:android": `deno run -A ${fw.devAndroid}`,
-      // ── compile: default is a single self-contained binary ──
-      compile: `deno run -A ${fw.build} --compile`,
+      // ── compile: `deno task compile` builds the configured target. ──
+      compile: compileDefault,
       "compile:browser": `deno run -A ${fw.build} --compile`,
-      "compile:electron": `${electronInstall} && deno run -A ${fw.build} --compile --electron`,
+      "compile:electron": `deno run -A ${fw.build} --compile --electron`,
       "compile:android": `deno run -A ${fw.build} --android`,
-      "install:electron": electronInstall,
+      // Convenience: pre-fetch the Electron binary without launching. Not
+      // required — `dev:electron` / `compile:electron` auto-install on demand.
+      "install:electron": "deno install --allow-scripts=npm:electron",
       test: "deno test -A",
       am: `deno run -A ${fw.am}`,
       doctor: `deno run -A ${fw.doctor}`,
@@ -151,23 +237,25 @@ dep/
 `;
 
 /** Full file set for a new project — pure (path → content), no disk I/O.
- *  `source` selects the framework mode (dep/aio symlink vs JSR pins). */
+ *  `source` selects the framework mode (dep/aio symlink vs JSR pins).
+ *  `target` selects the default for `deno task dev` / `deno task compile`. */
 export function scaffold(
   name: string,
   template: Template,
   source: boolean,
+  target: Target = DEFAULT_TARGET,
 ): Record<string, string> {
   // `src/`-based layout: aio infers baseDir from the entry (so `dev` finds
   // src/App.tsx), and the compile pipeline (build.ts) expects src/App.tsx too —
   // one layout that satisfies both `deno task dev` and `deno task compile`.
   const files: Record<string, string> = {
-    "deno.json": denoJson(name, source),
+    "deno.json": denoJson(name, source, target),
     ".gitignore": GITIGNORE,
     "src/app.ts": template === "todo" ? TODO_APP : COUNTER_APP,
     "src/cell.ts": template === "todo" ? TODO_CELL : COUNTER_CELL,
     "src/App.tsx": template === "todo" ? TODO_UI : COUNTER_UI,
     "src/cell.test.ts": template === "todo" ? TODO_TEST : COUNTER_TEST,
-    "README.md": readme(name, template),
+    "README.md": readme(name, template, target),
   };
   return files;
 }
@@ -181,7 +269,7 @@ export async function cmdCreate(
 
   if (!opts.name) {
     outError(
-      "usage: am create <name> [--template=counter|todo]",
+      "usage: am create <name> [--template=counter|todo] [--target=browser|electron|android|cli|server]",
       mode,
     );
     return;
@@ -269,6 +357,7 @@ export async function cmdCreate(
     out({
       created: opts.name,
       template: opts.template,
+      target: opts.target,
       files: Object.keys(files),
       git: gitInit,
     }, "json");
@@ -280,21 +369,32 @@ export async function cmdCreate(
   const dim = (s: string) => C ? `\x1b[2m${s}\x1b[0m` : s;
   const cyan = (s: string) => C ? `\x1b[36m${s}\x1b[0m` : s;
   const grn = (s: string) => C ? `\x1b[32m${s}\x1b[0m` : s;
+  // Show the chosen target's dev command + a hint about other targets.
+  const otherTargets = TARGETS.filter((t) => t !== opts.target);
+  const devHint = opts.target === "browser"
+    ? `→ ${opts.target} (· ${otherTargets.map((t) => `dev:${t}`).join(" · ")})`
+    : `→ ${opts.target}`;
   out(
     [
       "",
-      `  ${grn("✓")} ${b(opts.name)} ${dim(`— aio ${opts.template} app`)}${
-        gitInit ? dim("  ·  git initialized") : ""
-      }`,
+      `  ${grn("✓")} ${b(opts.name)} ${
+        dim(`— aio ${opts.template} app · target=${opts.target}`)
+      }${gitInit ? dim("  ·  git initialized") : ""}`,
       "",
       `  ${dim("run it")}`,
       `    cd ${opts.name}`,
-      `    ${cyan("deno task dev")}            ${dim("→ browser (· dev:electron · dev:android)")}`,
-      "",
-      `  ${dim("ship it")}`,
-      `    ${cyan("deno task compile")}        ${dim("→ a single binary")}`,
-      `    ${cyan("deno task compile:electron")} ${dim("→ desktop AppImage")}`,
-      `    ${cyan("deno task compile:android")}  ${dim("→ Android APK")}`,
+      `    ${cyan("deno task dev")}            ${dim(devHint)}`,
+      ...(opts.target === "browser"
+        ? [
+          "",
+          `  ${dim("ship it")}`,
+          `    ${cyan("deno task compile")}        ${dim("→ a single binary")}`,
+          `    ${cyan("deno task compile:electron")} ${
+            dim("→ desktop AppImage")
+          }`,
+          `    ${cyan("deno task compile:android")}  ${dim("→ Android APK")}`,
+        ]
+        : []),
       "",
       `  ${dim("also:")} ${cyan("deno task test")} ${dim("·")} ${
         cyan("deno task am status")
@@ -318,7 +418,12 @@ async function tryGitInit(dir: string): Promise<boolean> {
     }).output();
     if (inside.success) return false;
     const run = (args: string[]) =>
-      new Deno.Command("git", { args, cwd: dir, stdout: "null", stderr: "null" })
+      new Deno.Command("git", {
+        args,
+        cwd: dir,
+        stdout: "null",
+        stderr: "null",
+      })
         .output();
     if (!(await run(["init"])).success) return false;
     await run(["add", "-A"]);
@@ -344,13 +449,13 @@ export function repoRoot(): string | undefined {
   }
 }
 
-function readme(name: string, template: Template): string {
+function readme(name: string, template: Template, target: Target): string {
   return `# ${name}
 
 An [aio](https://github.com/riagentic/aio) app (${template} template).
 
 \`\`\`sh
-deno task dev              # run — browser (also dev:electron, dev:android)
+deno task dev              # run — ${target} (also dev:browser, dev:electron, dev:android)
 deno task test             # run the starter test
 deno task compile          # build a single binary (also compile:browser)
 deno task compile:electron # build a desktop AppImage
@@ -366,7 +471,8 @@ Manage a running app with \`deno task am\` (status, state, logs, …).
 // Kept in lockstep with examples/counter and examples/todo — the two apps aio
 // ships out of the box.
 
-const COUNTER_CELL = `// Cell — pure state + methods; UI and server both import from here.
+const COUNTER_CELL =
+  `// Cell — pure state + methods; UI and server both import from here.
 import { cell } from "aio";
 
 // Persists by default — restart and the count survives.
@@ -386,7 +492,8 @@ export const counter = cell("counter", {
 });
 `;
 
-const COUNTER_APP = `// Entry — zero-config: cells self-register on import; appId/version/baseDir
+const COUNTER_APP =
+  `// Entry — zero-config: cells self-register on import; appId/version/baseDir
 // are inferred from deno.json + this file's location.
 import "./cell.ts";
 import { aio } from "aio";
@@ -420,7 +527,8 @@ export default function App() {
 }
 `;
 
-const COUNTER_TEST = `// A starter test — \`deno task test\`. Cells are pure, so they test in isolation
+const COUNTER_TEST =
+  `// A starter test — \`deno task test\`. Cells are pure, so they test in isolation
 // (no server, no DOM) with the testCell harness.
 import { testCell } from "aio/testing";
 import { counter } from "./cell.ts";
@@ -434,7 +542,8 @@ testCell(counter, "increments, adds, and resets", (t) => {
 });
 `;
 
-const TODO_CELL = `// Cells — pure state + methods; UI and server both import from here.
+const TODO_CELL =
+  `// Cells — pure state + methods; UI and server both import from here.
 import { cell } from "aio";
 
 export type Todo = { id: number; text: string; done: boolean };
@@ -474,7 +583,8 @@ export const view = cell("view", {
 });
 `;
 
-const TODO_TEST = `// A starter test — \`deno task test\`. Cells are pure, so they test in isolation
+const TODO_TEST =
+  `// A starter test — \`deno task test\`. Cells are pure, so they test in isolation
 // (no server, no DOM) with the testCell harness.
 import { testCell } from "aio/testing";
 import { todo } from "./cell.ts";

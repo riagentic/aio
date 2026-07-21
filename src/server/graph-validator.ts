@@ -251,7 +251,9 @@ export function checkPlatformSafety(code: string, file: string): GraphError[] {
       line: lineNum,
       category: "server-only-api",
       message: `Deno.${m[1]} is server-only`,
-      fix: `Deno.${m[1]}() is not available in browser. Move to a cell effect.`,
+      fix: `Deno.${
+        m[1]
+      }() is not available in the browser. Move it into a *.server.ts module and dynamic-import it from the cell method, or use a cell effect (docs/build/imports.md).`,
     });
   }
   return errors;
@@ -431,7 +433,8 @@ export async function validateGraph(
   for (const e of errors) {
     if (e.category === "server-only-import" && !eager.has(e.file)) {
       e.category = "server-only-api";
-      e.message += " (reached only via dynamic import — deferred, not blocking)";
+      e.message +=
+        " (reached only via dynamic import — deferred, not blocking)";
     } else if (e.category === "missing-import-map") {
       // `@std/*` / `node:*` are absent from the BROWSER import map by design —
       // they resolve server-side. That's a warning (server-only), not a hard
@@ -505,7 +508,8 @@ export function extractImportsByKind(
 
   // A module specifier never contains whitespace or JS punctuation — a final
   // guard against any residual garbage capture (belt-and-suspenders).
-  const isSpecifier = (s: string) => s.length > 0 && !/[\s,;(){}\[\]<>`]/.test(s);
+  const isSpecifier = (s: string) =>
+    s.length > 0 && !/[\s,;(){}\[\]<>`]/.test(s);
 
   const staticSpecs: string[] = [];
   const dynamicSpecs: string[] = [];

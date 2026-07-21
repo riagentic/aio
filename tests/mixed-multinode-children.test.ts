@@ -12,7 +12,13 @@
 
 import { assertEquals } from "jsr:@std/assert";
 import { signal } from "../src/state/signal.ts";
-import { ErrorBoundary, Fragment, h, Portal, Suspense } from "../src/air/vdom.ts";
+import {
+  ErrorBoundary,
+  Fragment,
+  h,
+  Portal,
+  Suspense,
+} from "../src/air/vdom.ts";
 import { _setDocument, _unmount, mount } from "../src/air/aio-renderer.ts";
 import { Window } from "happy-dom";
 
@@ -48,7 +54,11 @@ Deno.test("component-fragment + dynamic text + text-fragment reconcile correctly
   n.set(5);
   await tick();
   await tick();
-  assertEquals(root.querySelector("#x")?.textContent, "PQn=5ab", "after update");
+  assertEquals(
+    root.querySelector("#x")?.textContent,
+    "PQn=5ab",
+    "after update",
+  );
   assertEquals(root.querySelectorAll("#x span").length, 2, "spans preserved");
   // no stray comment nodes injected
   const comments = [...root.querySelector("#x")!.childNodes].filter((n) =>
@@ -76,7 +86,11 @@ Deno.test("portal between fragment and trailing text does not duplicate the text
       " tail",
     );
   const handle = mount(root, App);
-  assertEquals(root.querySelector("#x")?.textContent, "PQn=0!ab tail", "initial");
+  assertEquals(
+    root.querySelector("#x")?.textContent,
+    "PQn=0!ab tail",
+    "initial",
+  );
 
   n.set(5);
   await tick();
@@ -141,8 +155,16 @@ Deno.test("multi-child ErrorBoundary beside dynamic text reconciles correctly", 
   n.set(5);
   await tick();
   await tick();
-  assertEquals(root.querySelector("#x")?.textContent, "ABn=5", "boundary span kept");
-  assertEquals(root.querySelectorAll("#x span").length, 2, "both children present");
+  assertEquals(
+    root.querySelector("#x")?.textContent,
+    "ABn=5",
+    "boundary span kept",
+  );
+  assertEquals(
+    root.querySelectorAll("#x span").length,
+    2,
+    "both children present",
+  );
   _unmount(handle);
   await cleanup();
 });
@@ -168,7 +190,11 @@ Deno.test("multi-child Suspense beside dynamic text reconciles correctly", async
   n.set(5);
   await tick();
   await tick();
-  assertEquals(root.querySelector("#x")?.textContent, "ABn=5", "suspense span kept");
+  assertEquals(
+    root.querySelector("#x")?.textContent,
+    "ABn=5",
+    "suspense span kept",
+  );
   _unmount(handle);
   await cleanup();
 });

@@ -6,7 +6,7 @@ import {
   parseCreateArgs,
   scaffold,
 } from "../src/am/am-cmd-create.ts";
-import { updateArgv, uninstallArgv } from "../src/am/am-cmd-meta.ts";
+import { uninstallArgv, updateArgv } from "../src/am/am-cmd-meta.ts";
 import { VERSION } from "../src/server/aio.ts";
 
 const REPO_ROOT = resolve(import.meta.dirname!, "..");
@@ -22,7 +22,12 @@ Deno.test("parseCreateArgs: name + default template", () => {
 });
 
 Deno.test("parseCreateArgs: --template + --force + --mirror", () => {
-  const o = parseCreateArgs(["todo-app", "--template=todo", "--force", "--mirror"]);
+  const o = parseCreateArgs([
+    "todo-app",
+    "--template=todo",
+    "--force",
+    "--mirror",
+  ]);
   assertEquals(o.name, "todo-app");
   assertEquals(o.template, "todo");
   assertEquals(o.force, true);
@@ -39,7 +44,10 @@ Deno.test("parseCreateArgs: --jsr opts into JSR (source is the default)", () => 
 Deno.test("frameworkSpecs: JSR mode (--jsr) pins to this am's version (lockstep)", () => {
   const fw = frameworkSpecs(false);
   assertEquals(fw.imports["aio"], `jsr:@riagentic/aio@${VERSION}`);
-  assertEquals(fw.imports["aio/jsx-runtime"], `jsr:@riagentic/aio@${VERSION}/jsx-runtime`);
+  assertEquals(
+    fw.imports["aio/jsx-runtime"],
+    `jsr:@riagentic/aio@${VERSION}/jsx-runtime`,
+  );
   assertStringIncludes(fw.build, `@${VERSION}/build`);
   // JSR map stays minimal — no vendored deps leak into the app.
   assert(!("esbuild" in fw.imports));
@@ -60,19 +68,43 @@ Deno.test("denoJson: dev defaults to browser + per-target dev/compile tasks", ()
     compilerOptions: Record<string, unknown>;
   };
   // dev works out of the box (browser — no toolchain, no electron download).
-  assertEquals(dj.tasks.dev, "deno run -A src/app.ts --client=browser");
+  // The --client flag is OMITTED for the default target: it matches the
+  // framework default, and per-target tasks stay accurate regardless.
+  assertEquals(dj.tasks.dev, "deno run -A src/app.ts");
   assertStringIncludes(dj.tasks["dev:browser"]!, "--client=browser");
+  // Electron auto-installs on first run — no install prefix chained into the
+  // task; `install:electron` exists as an optional pre-fetch convenience.
   assertStringIncludes(dj.tasks["dev:electron"]!, "--client=electron");
-  assertStringIncludes(dj.tasks["dev:electron"]!, "install --allow-scripts=npm:electron");
+  assertEquals(
+    dj.tasks["install:electron"],
+    "deno install --allow-scripts=npm:electron",
+  );
   assertStringIncludes(dj.tasks["dev:android"]!, "dev-android.ts");
   // compile: default binary + per-target
   assertStringIncludes(dj.tasks.compile!, "--compile");
   assertStringIncludes(dj.tasks["compile:browser"]!, "--compile");
   assertStringIncludes(dj.tasks["compile:electron"]!, "--electron");
-  assertStringIncludes(dj.tasks["compile:electron"]!, "install --allow-scripts=npm:electron");
   assertStringIncludes(dj.tasks["compile:android"]!, "--android");
   assertEquals(dj.tasks.test, "deno test -A");
   assertEquals(dj.compilerOptions.jsxImportSource, "aio");
+});
+
+Deno.test("denoJson: --target picks the dev/compile DEFAULT per target", () => {
+  const tasks = (t: "electron" | "android" | "cli" | "server") =>
+    (JSON.parse(denoJson("demo", true, t)) as {
+      tasks: Record<string, string>;
+    }).tasks;
+  // electron: explicit client flag; compile builds the desktop app.
+  assertStringIncludes(tasks("electron").dev!, "--client=electron");
+  assertStringIncludes(tasks("electron").compile!, "--electron");
+  // android has NO client flag — its dev default IS the emulator
+  // orchestrator (identical to the explicit dev:android task).
+  assertStringIncludes(tasks("android").dev!, "dev-android.ts");
+  assertStringIncludes(tasks("android").compile!, "--android");
+  // headless targets map cli → cli, server → server-only.
+  assertStringIncludes(tasks("cli").dev!, "--client=cli");
+  assertStringIncludes(tasks("server").dev!, "--client=server-only");
+  assertStringIncludes(tasks("server").compile!, "--client=server-only");
 });
 
 // ── scaffold file set ───────────────────────────────────────────────────────
@@ -95,15 +127,26 @@ Deno.test("scaffold: counter + todo emit the expected src/-based files", () => {
     }
     assertStringIncludes(files["src/app.ts"]!, "aio.run()");
   }
-  assertStringIncludes(scaffold("app", "counter", true)["src/cell.ts"]!, 'cell("counter"');
-  assertStringIncludes(scaffold("app", "todo", true)["src/cell.ts"]!, 'cell("todo"');
+  assertStringIncludes(
+    scaffold("app", "counter", true)["src/cell.ts"]!,
+    'cell("counter"',
+  );
+  assertStringIncludes(
+    scaffold("app", "todo", true)["src/cell.ts"]!,
+    'cell("todo"',
+  );
 });
 
 // ── update / uninstall recipes ──────────────────────────────────────────────
 
 Deno.test("updateArgv: idempotent global reinstall of newest alpha (not bare)", () => {
   assertEquals(updateArgv(), [
-    "install", "-gAf", "--reload", "-n", "am", "jsr:@riagentic/aio@^1.0.0-alpha/am",
+    "install",
+    "-gAf",
+    "--reload",
+    "-n",
+    "am",
+    "jsr:@riagentic/aio@^1.0.0-alpha/am",
   ]);
 });
 
@@ -124,7 +167,9 @@ Deno.test({
   fn: async () => {
     const dir = await Deno.makeTempDir({ prefix: "am-compile-" });
     try {
-      for (const [rel, content] of Object.entries(scaffold("app", "counter", true))) {
+      for (
+        const [rel, content] of Object.entries(scaffold("app", "counter", true))
+      ) {
         const path = resolve(dir, rel);
         await Deno.mkdir(resolve(path, ".."), { recursive: true });
         await Deno.writeTextFile(path, content);
@@ -137,7 +182,11 @@ Deno.test({
         stderr: "piped",
         stdout: "null",
       }).output();
-      assertEquals(code, 0, `compile failed:\n${new TextDecoder().decode(stderr)}`);
+      assertEquals(
+        code,
+        0,
+        `compile failed:\n${new TextDecoder().decode(stderr)}`,
+      );
       // A binary (not a .ts/.json) must exist.
       const bin = [...Deno.readDirSync(dir)].some((e) =>
         e.isFile && !e.name.includes(".")
@@ -169,7 +218,11 @@ for (const tpl of ["counter", "todo"] as const) {
         stderr: "piped",
         stdout: "null",
       }).output();
-      assertEquals(chk.code, 0, `deno check failed for ${tpl}:\n${dec.decode(chk.stderr)}`);
+      assertEquals(
+        chk.code,
+        0,
+        `deno check failed for ${tpl}:\n${dec.decode(chk.stderr)}`,
+      );
       // The starter test is GREEN out of the box (`deno task test`).
       const test = await new Deno.Command("deno", {
         args: ["test", "-A", "src/cell.test.ts"],
@@ -177,7 +230,11 @@ for (const tpl of ["counter", "todo"] as const) {
         stderr: "piped",
         stdout: "null",
       }).output();
-      assertEquals(test.code, 0, `starter test failed for ${tpl}:\n${dec.decode(test.stderr)}`);
+      assertEquals(
+        test.code,
+        0,
+        `starter test failed for ${tpl}:\n${dec.decode(test.stderr)}`,
+      );
     } finally {
       await Deno.remove(dir, { recursive: true });
     }

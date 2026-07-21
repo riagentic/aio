@@ -73,10 +73,10 @@ to the UI (broadcast to every client):
 
 Either way the fix is the same: **exclude it** (`ui: { exclude: ["password"] }`,
 `ui.forUser`, or `ui: "none"`), or if it genuinely is public, **declare it**
-(below). Names with a public hint (`pubKey`, `publicKey`) or an identifier suffix
-(`seedId`, `apiKeyName`) are ignored, and a field whose secret sub-path you've
-**deep-excluded** (`exclude: ["seeds.encSeed"]`) is not flagged — the correct fix
-is never penalized.
+(below). Names with a public hint (`pubKey`, `publicKey`) or an identifier
+suffix (`seedId`, `apiKeyName`) are ignored, and a field whose secret sub-path
+you've **deep-excluded** (`exclude: ["seeds.encSeed"]`) is not flagged — the
+correct fix is never penalized.
 
 For a field that genuinely is public but trips the name heuristic, **declare
 it** instead of dancing around the regex or using a no-op `forUser`:

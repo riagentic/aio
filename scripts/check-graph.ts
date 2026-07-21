@@ -23,7 +23,9 @@ function arg(name: string, fallback: string): string {
     (Deno.args.includes(`--${name}`)
       ? Deno.args[Deno.args.indexOf(`--${name}`) + 1]
       : undefined);
-  return hit?.includes("=") ? hit.split("=").slice(1).join("=") : (hit ?? fallback);
+  return hit?.includes("=")
+    ? hit.split("=").slice(1).join("=")
+    : (hit ?? fallback);
 }
 
 function fileExists(path: string): boolean {
@@ -41,8 +43,9 @@ const entry = resolve(cwd, arg("entry", "App.tsx"));
 // Import map from the app's deno.json (same source the dev server reads).
 let denoImports: Record<string, string> = {};
 try {
-  denoImports = JSON.parse(Deno.readTextFileSync(join(cwd, "deno.json"))).imports ??
-    {};
+  denoImports =
+    JSON.parse(Deno.readTextFileSync(join(cwd, "deno.json"))).imports ??
+      {};
 } catch { /* no/invalid deno.json — defaults suffice */ }
 const importMap = buildBrowserImportMap(denoImports, {
   vendorImmer: hasVendorImmer(),
@@ -67,7 +70,9 @@ const warnings = result.errors.filter((e) => isWarning(e.category));
 
 const rel = (f: string) => f.startsWith(cwd) ? f.slice(cwd.length + 1) : f;
 const fmt = (e: typeof result.errors[number]) =>
-  `${rel(e.file)}${e.line ? `:${e.line}` : ""} — ${e.message}\n    fix: ${e.fix}`;
+  `${rel(e.file)}${
+    e.line ? `:${e.line}` : ""
+  } — ${e.message}\n    fix: ${e.fix}`;
 
 for (const e of warnings) console.warn(`⚠ [${e.category}] ${fmt(e)}`);
 for (const e of blocking) console.error(`✗ [${e.category}] ${fmt(e)}`);

@@ -41,7 +41,7 @@ a returned draft slice is snapshotted so it survives the reducer.
 
 ### Precise server/client boundary (eager blocks, deferred warns)
 
-The import guard now keys off *how* a server-only thing is reached from the UI:
+The import guard now keys off _how_ a server-only thing is reached from the UI:
 
 - **Static** import of a `node:` builtin / omitted `aio` server-symbol
   (`createDB`, …) → **blocks** with the diagnostic page (it blank-screens the

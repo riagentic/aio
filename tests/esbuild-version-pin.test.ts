@@ -39,7 +39,11 @@ Deno.test("B-6: esbuild imports pin the EXACT deno.json version (no range)", () 
       ...src.matchAll(/import\(\s*["']npm:esbuild@([^"']+)["']\s*\)/g),
       ...src.matchAll(/["']npm:esbuild["']\s*,\s*["']([^"']+)["']/g),
     ].map((m) => m[1]!);
-    assertEquals(versions.length > 0, true, `${file} should reference npm:esbuild`);
+    assertEquals(
+      versions.length > 0,
+      true,
+      `${file} should reference npm:esbuild`,
+    );
     for (const ver of versions) {
       // Exact version only — no `^`, `~`, `*`, or `x` ranges.
       assertEquals(/^[\d.]+$/.test(ver), true, `${file} uses a range "${ver}"`);

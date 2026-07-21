@@ -340,7 +340,10 @@ Deno.test("aiol: flags server-only symbol (createDB) imported from aio in a cell
     );
     await Deno.writeTextFile(
       join(dir, "deno.json"),
-      JSON.stringify({ imports: { "aio": "jsr:@riagentic/aio@1.0.0" }, unstable: ["kv"] }),
+      JSON.stringify({
+        imports: { "aio": "jsr:@riagentic/aio@1.0.0" },
+        unstable: ["kv"],
+      }),
     );
     await Deno.writeTextFile(
       join(dir, "src", "nfts.ts"),
@@ -369,7 +372,10 @@ Deno.test("aiol: does NOT flag pure schema helpers (table/pk) from aio in a cell
     );
     await Deno.writeTextFile(
       join(dir, "deno.json"),
-      JSON.stringify({ imports: { "aio": "jsr:@riagentic/aio@1.0.0" }, unstable: ["kv"] }),
+      JSON.stringify({
+        imports: { "aio": "jsr:@riagentic/aio@1.0.0" },
+        unstable: ["kv"],
+      }),
     );
     await Deno.writeTextFile(
       join(dir, "src", "orders.ts"),

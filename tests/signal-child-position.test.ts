@@ -37,7 +37,11 @@ Deno.test("signal child after a fragment sibling stays reactive", async () => {
 
   count.set(999);
   await tick();
-  assertEquals(root.querySelector("#x")?.textContent, "AB999", "signal must reflect");
+  assertEquals(
+    root.querySelector("#x")?.textContent,
+    "AB999",
+    "signal must reflect",
+  );
 
   count.set(7);
   await tick();
@@ -63,7 +67,11 @@ Deno.test("signal child between fragment and trailing text stays reactive", asyn
   assertEquals(root.querySelector("#y")?.textContent, "xy0 end", "initial");
   n.set(42);
   await tick();
-  assertEquals(root.querySelector("#y")?.textContent, "xy42 end", "middle signal updates");
+  assertEquals(
+    root.querySelector("#y")?.textContent,
+    "xy42 end",
+    "middle signal updates",
+  );
   _unmount(handle);
   await cleanup();
 });

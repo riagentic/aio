@@ -8,7 +8,12 @@
 import { assert, assertEquals } from "jsr:@std/assert";
 import { signal } from "../src/state/signal.ts";
 import { Fragment, h, Portal } from "../src/air/vdom.ts";
-import { _setDocument, _unmount, mount, setDevMode } from "../src/air/aio-renderer.ts";
+import {
+  _setDocument,
+  _unmount,
+  mount,
+  setDevMode,
+} from "../src/air/aio-renderer.ts";
 import { Window } from "happy-dom";
 
 function dom() {
@@ -36,7 +41,8 @@ Deno.test("child-alignment invariant is silent on correct renders", async () => 
   try {
     const n = signal(0);
     const show = signal(true);
-    const Two = () => h(Fragment, null, h("span", null, "P"), h("span", null, "Q"));
+    const Two = () =>
+      h(Fragment, null, h("span", null, "P"), h("span", null, "Q"));
 
     const App = () =>
       h(
@@ -51,23 +57,39 @@ Deno.test("child-alignment invariant is silent on correct renders", async () => 
       );
 
     const handle = mount(root, App);
-    assertEquals(root.querySelector("#x")?.textContent, "PQn=0!ab tail", "initial");
+    assertEquals(
+      root.querySelector("#x")?.textContent,
+      "PQn=0!ab tail",
+      "initial",
+    );
 
     n.set(5);
     await tick();
     await tick();
-    assertEquals(root.querySelector("#x")?.textContent, "PQn=5!ab tail", "after n change");
+    assertEquals(
+      root.querySelector("#x")?.textContent,
+      "PQn=5!ab tail",
+      "after n change",
+    );
 
     show.set(false);
     await tick();
     await tick();
-    assertEquals(root.querySelector("#x")?.textContent, "PQn=5ab tail", "after hide");
+    assertEquals(
+      root.querySelector("#x")?.textContent,
+      "PQn=5ab tail",
+      "after hide",
+    );
 
     show.set(true);
     n.set(9);
     await tick();
     await tick();
-    assertEquals(root.querySelector("#x")?.textContent, "PQn=9!ab tail", "after show+change");
+    assertEquals(
+      root.querySelector("#x")?.textContent,
+      "PQn=9!ab tail",
+      "after show+change",
+    );
 
     assert(
       warnings.length === 0,

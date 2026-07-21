@@ -135,7 +135,11 @@ function parseCellConfig(source: string): {
   }
   let depth = 1;
   let end = -1;
-  for (let i = firstBrace + 1; i < Math.min(source.length, 10000); i++) {
+  // Scan bound guards against pathological files; 10_000 was too small — a large
+  // cell config (e.g. a vault cell with many signing methods) overran it, so the
+  // matcher returned end === -1 and the cell was falsely reported as having no
+  // state / no methods. 200_000 covers any realistic cell, still bounded.
+  for (let i = firstBrace + 1; i < Math.min(source.length, 200_000); i++) {
     if (source[i] === "{") depth++;
     else if (source[i] === "}") {
       depth--;

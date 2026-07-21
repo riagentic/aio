@@ -109,7 +109,9 @@ export function createPersistenceManager(
   // can NAME the offending cell instead of failing anonymously (or, in single
   // mode, nuking the whole persist with no clue which cell to move to SQLite).
   const KV_LIMIT = 63_000; // Deno KV per-value hard limit is ~64KB; stay under.
-  const _cellSizes = (obj: Record<string, unknown>): { cell: string; bytes: number }[] =>
+  const _cellSizes = (
+    obj: Record<string, unknown>,
+  ): { cell: string; bytes: number }[] =>
     Object.entries(obj)
       .map(([cell, v]) => ({
         cell,
@@ -189,17 +191,24 @@ export function createPersistenceManager(
           // AIO-420: name the biggest cells — the whole single-key blob can't
           // persist, so tell the dev exactly which cell(s) to move / filter,
           // instead of dropping everything anonymously.
-          const top = _cellSizes(dbState as Record<string, unknown>).slice(0, 3);
+          const top = _cellSizes(dbState as Record<string, unknown>).slice(
+            0,
+            3,
+          );
           log.error(
             `persist: state is ${
               (bytes / 1024).toFixed(1)
             }KB — exceeds the ~64KB Deno KV limit; NOTHING saved this cycle. ` +
-              `Largest cells: ${_fmt(top)}. Use persistMode:'multi' (isolates ` +
+              `Largest cells: ${
+                _fmt(top)
+              }. Use persistMode:'multi' (isolates ` +
               `cells), a cell-level persist filter, or db:{} (SQLite).`,
           );
           _reportPersistError(
             new Error(
-              `persist: single-key state ${(bytes / 1024).toFixed(1)}KB over KV limit`,
+              `persist: single-key state ${
+                (bytes / 1024).toFixed(1)
+              }KB over KV limit`,
             ),
           );
           return;

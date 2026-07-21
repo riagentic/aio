@@ -55,6 +55,9 @@ export interface SyncOp {
   confirmed: boolean;
   /** Client-side creation timestamp (ms) for TTL-based eviction during backpressure. */
   _clientTs?: number;
+  /** Server-issued monotonic timestamp — stamped on server broadcasts so
+   *  peers can advance their sync cursor as they apply the op. */
+  serverTs?: number;
 }
 
 /**
@@ -68,6 +71,8 @@ export interface OpMessage {
     cell: string;
     action: string;
     payload: unknown;
+    /** Server-issued cursor stamp (see SyncOp.serverTs). */
+    serverTs?: number;
   };
 }
 
@@ -104,14 +109,17 @@ export interface SyncResponse {
       ops: SyncOp[];
       rebase?: SyncOp[];
       lowWater: HLC | Record<string, HLC>;
-      lastServerTs?: number;
+      /** Per-cell server_ts cursor — reserved under each cell's lock, so ops
+       *  the client hasn't seen are strictly above it (no re-delivery). */
+      lastServerTs?: Record<string, number>;
     }
     | {
       mode: "snapshot";
       snapshot: Record<string, unknown>;
       ops: SyncOp[];
       lowWater: HLC | Record<string, HLC>;
-      lastServerTs?: number;
+      /** Per-cell server_ts cursor (see incremental). */
+      lastServerTs?: Record<string, number>;
     };
 }
 
