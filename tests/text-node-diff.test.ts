@@ -27,9 +27,19 @@ Deno.test("adjacent text children with leading empty string update on signal cha
   const pending = signal(false);
   // Exactly risoto's shape: {pending?"~":""}{number}" SOL"
   const App = () =>
-    h("div", { id: "bal" }, pending.value ? "~" : "", `${sol.value}.000000000`, " SOL");
+    h(
+      "div",
+      { id: "bal" },
+      pending.value ? "~" : "",
+      `${sol.value}.000000000`,
+      " SOL",
+    );
   const handle = mount(root, App);
-  assertEquals(root.querySelector("#bal")?.textContent, "61.000000000 SOL", "initial");
+  assertEquals(
+    root.querySelector("#bal")?.textContent,
+    "61.000000000 SOL",
+    "initial",
+  );
 
   sol.set(62); // pending stays false → leading child stays ""
   await tick();
@@ -43,7 +53,11 @@ Deno.test("adjacent text children with leading empty string update on signal cha
   sol.set(63);
   await tick();
   await tick();
-  assertEquals(root.querySelector("#bal")?.textContent, "63.000000000 SOL", "second update");
+  assertEquals(
+    root.querySelector("#bal")?.textContent,
+    "63.000000000 SOL",
+    "second update",
+  );
 
   _unmount(handle);
   await cleanup();
@@ -55,14 +69,24 @@ Deno.test("leading empty→nonempty transition keeps the number correct", async 
   const sol = signal(61);
   const pending = signal(false);
   const App = () =>
-    h("div", { id: "bal" }, pending.value ? "~" : "", `${sol.value}.000000000`, " SOL");
+    h(
+      "div",
+      { id: "bal" },
+      pending.value ? "~" : "",
+      `${sol.value}.000000000`,
+      " SOL",
+    );
   const handle = mount(root, App);
   // Optimistic: number bumps AND pending flips on (the airdrop moment)
   sol.set(62);
   pending.set(true);
   await tick();
   await tick();
-  assertEquals(root.querySelector("#bal")?.textContent, "~62.000000000 SOL", "optimistic pending");
+  assertEquals(
+    root.querySelector("#bal")?.textContent,
+    "~62.000000000 SOL",
+    "optimistic pending",
+  );
   _unmount(handle);
   await cleanup();
 });

@@ -35,8 +35,13 @@ export interface OpBufferStorage {
   pruneConfirmed(cell: string): Promise<void>;
   pruneStale(cell: string, opId: string): Promise<void>;
   countUnconfirmed(cell: string): Promise<number>;
-  loadMeta(cell: string): Promise<{ lastHlc: HLC | null } | undefined>;
-  saveMeta(cell: string, data: { lastHlc: HLC | null }): Promise<void>;
+  loadMeta(
+    cell: string,
+  ): Promise<{ lastHlc: HLC | null; lastServerTs?: number } | undefined>;
+  saveMeta(
+    cell: string,
+    data: { lastHlc: HLC | null; lastServerTs?: number },
+  ): Promise<void>;
   loadSnapshot(cell: string): Promise<
     { state: unknown; hlc: HLC } | undefined
   >;
@@ -53,7 +58,10 @@ export interface OpBufferStorage {
  */
 export function createMemoryStorage(): OpBufferStorage {
   const ops = new Map<string, SyncOp[]>();
-  const metas = new Map<string, { lastHlc: HLC | null }>();
+  const metas = new Map<
+    string,
+    { lastHlc: HLC | null; lastServerTs?: number }
+  >();
   const snapshots = new Map<
     string,
     { state: unknown; hlc: HLC }
@@ -531,7 +539,14 @@ export function createOpBuffer(
 
     async confirm(cell: string, opId: string, serverHlc: HLC) {
       await storage.confirmOp(opId);
-      await storage.saveMeta(cell, { lastHlc: serverHlc });
+      // Preserve the server_ts cursor — writing { lastHlc } alone would wipe
+      // it and regress the next catch-up to the ambiguous HLC cursor
+      // (re-delivery → double-apply through the reducer).
+      const meta = await storage.loadMeta(cell);
+      await storage.saveMeta(cell, {
+        lastHlc: serverHlc,
+        lastServerTs: meta?.lastServerTs,
+      });
     },
 
     async getUnconfirmed(cell: string) {

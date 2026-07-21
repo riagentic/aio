@@ -287,6 +287,16 @@ export function _createHooks(rootState: RootState): VDomHooks {
           _shallowEqual(vnode.props, inst.prevProps) &&
           _childrenEqual(vnode.children, inst.prevChildren)
         ) {
+          // Re-point the instance at the vnode that now lives in the TREE.
+          // A parent re-render hands the diff a FRESH vnode for this
+          // component; on skip, the tree keeps that fresh vnode while the
+          // instance kept the old one — so a later SELF re-render (own
+          // signal dep) wrote its new `_rendered` onto the detached old
+          // vnode, and every tree walk (ui.surface(), testUI resolution)
+          // kept seeing the skip-time snapshot: a structurally swapped
+          // branch (login form → header) never appeared, while stale
+          // elements stayed listed. (inews R4 🔴 surface-staleness)
+          inst.vnode = vnode;
           return {
             skip: true,
             deps: null,

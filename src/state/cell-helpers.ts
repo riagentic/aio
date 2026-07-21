@@ -152,9 +152,13 @@ export function scopeSelectors<S>(
   if (!selectors) return scoped;
   for (const [key, def] of Object.entries(selectors)) {
     if (typeof def === "function") {
-      // Plain form — unchanged from the original contract.
-      scoped[key] = (ownSlice: unknown) =>
-        (def as (s: S) => unknown)(ownSlice as S);
+      // Plain form. Extra args pass through, so a PARAMETERIZED selector
+      // (`byId: (s, id) => …`) receives them: `cell.byId(id)` → def(slice, id).
+      // A zero-extra-arg selector called `cell.count()` gets fullState as arg 2
+      // (harmlessly ignored, or used by an `(s, fullState)` cross-cell plain
+      // selector). realitio Bad#1.
+      scoped[key] = (ownSlice: unknown, ...rest: unknown[]) =>
+        (def as (s: S, ...a: unknown[]) => unknown)(ownSlice as S, ...rest);
       continue;
     }
     // Deps form — receive full state, return own slice + each dep slice in order.

@@ -182,17 +182,23 @@ Deno.test("checkPlatformSafety detects export * from node:", () => {
 });
 
 Deno.test("checkPlatformSafety: node: import is a BLOCKING server-only-import", () => {
-  const errors = checkPlatformSafety(`import { readFile } from "node:fs";`, "./io.ts");
+  const errors = checkPlatformSafety(
+    `import { readFile } from "node:fs";`,
+    "./io.ts",
+  );
   assertEquals(errors[0]!.category, "server-only-import");
 });
 
 Deno.test("checkPlatformSafety: @std/* import is a WARNING (often browser-safe)", () => {
-  const errors = checkPlatformSafety(`import { join } from "@std/path";`, "./p.ts");
+  const errors = checkPlatformSafety(
+    `import { join } from "@std/path";`,
+    "./p.ts",
+  );
   assertEquals(errors.length, 1);
   assertEquals(errors[0]!.category, "server-only-api");
 });
 
-Deno.test("checkPlatformSafety: createDB from \"aio\" is a BLOCKING server-only-import", () => {
+Deno.test('checkPlatformSafety: createDB from "aio" is a BLOCKING server-only-import', () => {
   const errors = checkPlatformSafety(
     `import { cell, createDB } from "aio";`,
     "./nft-cache.ts",
@@ -427,7 +433,11 @@ Deno.test("validateGraph: a server-only module reached ONLY via dynamic import d
     );
     const result = await validateGraph(dir + "/App.tsx", {}, mockTranspile);
     // db.ts is reached only via dynamic import → deferred → boot is NOT blocked.
-    assertEquals(result.valid, true, "dynamic-imported server-only module must not block");
+    assertEquals(
+      result.valid,
+      true,
+      "dynamic-imported server-only module must not block",
+    );
     const dbErr = result.errors.find((e) => e.file.endsWith("db.ts"));
     assert(dbErr, "still reported (as a deferred warning)");
     assertEquals(dbErr!.category, "server-only-api");
@@ -485,7 +495,7 @@ Deno.test("validateGraph per-module valid computed after full walk", async () =>
 
 // AIO-425 (inews): a bare `from "` inside a STRING LITERAL (JSX text) must NOT be
 // mistaken for an import — it returned a "Module Errors" page for a valid app.
-Deno.test("extractImports ignores `from \"` inside string literals (JSX text)", () => {
+Deno.test('extractImports ignores `from "` inside string literals (JSX text)', () => {
   // esbuild output shape for <h2>More from {x}</h2> plus real imports.
   const code = [
     `import { jsx, jsxs } from "aio/jsx-runtime";`,
@@ -494,10 +504,19 @@ Deno.test("extractImports ignores `from \"` inside string literals (JSX text)", 
     `const s = "Recover from backup"; const t = "Import from './guide.md'";`,
   ].join("\n");
   const specs = extractImports(code);
-  assertEquals(specs, ["aio/jsx-runtime", "aio"], "only real imports; no garbage");
+  assertEquals(
+    specs,
+    ["aio/jsx-runtime", "aio"],
+    "only real imports; no garbage",
+  );
   // Explicitly: none of the string-literal traps leaked through.
-  assert(!specs.some((s) => s.includes(",") || s.includes(" ") || s.includes("]")));
-  assert(!specs.includes("./guide.md"), "a specifier-shaped string inside a literal must not match");
+  assert(
+    !specs.some((s) => s.includes(",") || s.includes(" ") || s.includes("]")),
+  );
+  assert(
+    !specs.includes("./guide.md"),
+    "a specifier-shaped string inside a literal must not match",
+  );
 });
 
 Deno.test("extractImports still finds real static + dynamic + export-from", () => {
@@ -507,5 +526,10 @@ Deno.test("extractImports still finds real static + dynamic + export-from", () =
     `export * from "./c.ts";`,
     `const m = await import("./d.ts");`,
   ].join("\n");
-  assertEquals(extractImports(code).sort(), ["./a.ts", "./b.ts", "./c.ts", "./d.ts"]);
+  assertEquals(extractImports(code).sort(), [
+    "./a.ts",
+    "./b.ts",
+    "./c.ts",
+    "./d.ts",
+  ]);
 });

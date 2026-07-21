@@ -220,3 +220,50 @@ Deno.test("liveProxy RYW: external commits stay visible (still live)", () => {
   assertEquals(proxy.m, 99); // live read of the external change
   assertEquals(proxy.n, 1); // my pending write still overlays
 });
+
+// ── find() returns a LIVE element proxy (inews R4 P1) ─────────────
+// A held `find` result mutated after an await must batch the write exactly
+// like `s.users[i].field = x` — the detached-snapshot behavior silently
+// dropped it in prod while testCell's Immer draft applied it.
+
+Deno.test("liveProxy: find() result is live — post-await write batches", async () => {
+  const dispatched: { type: string; payload?: unknown }[] = [];
+  let current: Record<string, unknown> = {
+    users: [{ id: "a", salt: "" }, { id: "b", salt: "" }],
+  };
+  const batcher = createBatcher("test", (a) => dispatched.push(a));
+  const proxy = createLiveProxy<Record<string, unknown>>(
+    "test",
+    "test",
+    "testMethod",
+    () => current,
+    batcher,
+  );
+  // deno-lint-ignore no-explicit-any
+  const u = (proxy.users as any[]).find((x) => x.id === "b");
+  await new Promise((r) => setTimeout(r, 1)); // held across an await
+  u.salt = "s3cr3t";
+  await new Promise((r) => setTimeout(r, 1)); // let the microtask flush
+  assertEquals(dispatched.length, 1, "the write must dispatch a batch");
+  const payload = dispatched[0]!.payload as {
+    mutations: { path: string[]; value?: unknown }[];
+  };
+  assertEquals(payload.mutations[0]!.path, ["users", "1", "salt"]);
+  assertEquals(payload.mutations[0]!.value, "s3cr3t");
+});
+
+Deno.test("liveProxy: find() miss returns undefined; primitive element returned raw", () => {
+  let current: Record<string, unknown> = { nums: [1, 2, 3], users: [] };
+  const batcher = createBatcher("test", () => {});
+  const proxy = createLiveProxy<Record<string, unknown>>(
+    "test",
+    "test",
+    "m",
+    () => current,
+    batcher,
+  );
+  // deno-lint-ignore no-explicit-any
+  assertEquals((proxy.users as any[]).find((x) => x.id === "zzz"), undefined);
+  // deno-lint-ignore no-explicit-any
+  assertEquals((proxy.nums as any[]).find((n) => n === 2), 2);
+});

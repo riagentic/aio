@@ -68,7 +68,8 @@ function renderFilter(filter: CellFieldFilter): string {
 }
 
 // Field names that usually hold secrets — used for the UI-exposure heuristic.
-const SECRET_FIELD_RE = /enc|secret|priv|key|seed|mnemonic|passphrase|passwo?rd/i;
+const SECRET_FIELD_RE =
+  /enc|secret|priv|key|seed|mnemonic|passphrase|passwo?rd/i;
 // Unambiguous CREDENTIAL names — an exposed value is almost certainly a real
 // leak, so this is escalated from a warning to a boot REFUSAL in dev (inews Ugly
 // #6: "a warning is too soft"). Compound forms only (private_key, api_key,

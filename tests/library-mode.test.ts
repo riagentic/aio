@@ -50,7 +50,11 @@ Deno.test("libraryMode: same appId boots twice (no singleton lock)", async () =>
   const boot = async () => {
     const c = cell("counter", {
       state: { count: 0 },
-      methods: { increment(s: { count: number }, by = 1) { s.count += by; } },
+      methods: {
+        increment(s: { count: number }, by = 1) {
+          s.count += by;
+        },
+      },
     });
     return await aio.run({
       cells: [c],

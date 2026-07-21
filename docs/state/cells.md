@@ -91,7 +91,7 @@ coexist — all callable names must be unique within the cell.
 > **Don't put generics on methods.** `setFilter<K extends keyof F>(s, k, v)`
 > breaks inference for `s` (it falls back to `any`, which strict mode rejects).
 > Keep methods non-generic; narrow inside the body, or take a concrete key type.
-> (Selectors are callable everywhere — server *and* browser: `cell.count()`.)
+> (Selectors are callable everywhere — server _and_ browser: `cell.count()`.)
 
 ---
 
@@ -198,14 +198,22 @@ Every `yield*` creates a named action in time-travel history.
 
 ### Selectors
 
-Pure functions deriving values from cell state. Bound as zero-arg accessors on
-the cell (`cell.count()`), callable the same way **server-side and in the
-browser** (they run against the live client signal).
+Pure functions deriving values from cell state. Bound as accessors on the cell,
+callable the same way **server-side and in the browser** (they run against the
+live client signal). A plain selector's extra parameters (past the state slice)
+become the accessor's arguments:
 
-**Can:** read own cell state; read other cells via the **deps form**
-(`{ deps: ["other"], fn: (s, other) => … }`); compose. **Cannot:** mutate,
-dispatch, run async, or take runtime arguments (a selector is `(s) => T` — for
-parameterized derivations, inline the logic or use a method).
+```ts
+selectors: {
+  count: (s) => s.items.length,          // cell.count()
+  byId: (s, id: string) => s.items[id],  // cell.byId("a1") — parameterized
+},
+```
+
+**Can:** read own cell state; take runtime arguments (parameterized form above);
+read other cells via the **deps form**
+(`{ deps: ["other"], fn: (s, other) => … }` — always zero-arg); compose.
+**Cannot:** mutate, dispatch, or run async.
 
 ### Lifecycle hooks
 

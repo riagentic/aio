@@ -53,15 +53,15 @@ The linter (`aiol`) recognizes the suffix and stays quiet; `@std/*` and `node:*`
 imports reached any other way are stubbed by the build with a clear "is
 server-only" runtime error instead of a cryptic bundling failure.
 
-**2b. Server-only *symbols* from `"aio"` — `createDB` and friends.**
+**2b. Server-only _symbols_ from `"aio"` — `createDB` and friends.**
 
 A few `"aio"` exports are server-only: **`createDB`**, `DEFAULT_PRAGMAS`
 (SQLite/Worker), and `connectCli` / `connectCliUDS`. The **browser build of
-`"aio"` omits them.** A *static* `import { createDB } from "aio"` in a cell (or
+`"aio"` omits them.** A _static_ `import { createDB } from "aio"` in a cell (or
 any module a cell pulls in) therefore link-fails the whole client bundle at boot
 — a blank screen whose message names the symbol but not your file, and which
-every server-side check (`deno check` / `deno test` / `deno lint`) passes because
-the split doesn't exist until a real browser links the graph.
+every server-side check (`deno check` / `deno test` / `deno lint`) passes
+because the split doesn't exist until a real browser links the graph.
 
 Load them lazily in a server-only path instead — cell methods run on the server:
 
@@ -69,11 +69,14 @@ Load them lazily in a server-only path instead — cell methods run on the serve
 // ✅ server-only path — dynamic import, browser bundle never sees createDB
 let _db: import("aio").DB | null = null;
 async function db() {
-  if (!_db) { const { createDB } = await import("aio"); _db = createDB(".aio/cache.sqlite"); }
+  if (!_db) {
+    const { createDB } = await import("aio");
+    _db = createDB(".aio/cache.sqlite");
+  }
   return _db;
 }
 // pure schema helpers ARE browser-safe — import them statically:
-import { table, pk, text } from "aio";
+import { pk, table, text } from "aio";
 ```
 
 `deno task lint:aio` flags a static server-only symbol in a cell file with the
@@ -155,15 +158,15 @@ AIO checks for common import mistakes at four levels:
 2. **Graph validation** (dev server + `deno task check:graph`): walks the module
    graph from your UI entry, severity split by certainty of breakage:
    - **Blocking** (diagnostic page in dev, non-zero exit in `check:graph`) — a
-     *guaranteed* client break: a static `node:` builtin or an omitted `aio`
+     _guaranteed_ client break: a static `node:` builtin or an omitted `aio`
      server symbol (`createDB`, `connectCli`, …) reachable from the UI entry.
      aio's Electron renderer is a sandboxed browser (`nodeIntegration:false`),
      so these can't resolve → a blank screen every boot. Fail loud + attributed
      (`file:line` + fix) beats a silent white void, and `deno task compile`
      fails the same imports (dev==prod). Fix: move the module behind
      `await import(...)` in a server-only path, or a `*.server.ts` file.
-   - **Warning** — a *conditional* break: `Deno.*` usage (only fails if that path
-     runs client-side) or a maybe-safe `@std/*` module.
+   - **Warning** — a _conditional_ break: `Deno.*` usage (only fails if that
+     path runs client-side) or a maybe-safe `@std/*` module.
 
    `check:graph` is the CI-friendly one-shot — add it to your test gate so a
    boundary break can't reach a running server:

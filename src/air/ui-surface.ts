@@ -191,9 +191,14 @@ function walkOutput(
     const events = eventKinds(v);
     // Interactive elements are always on the surface; a `t` prop or a
     // `data-testid` puts ANY element on it (assertion targets — read
-    // text/value without handlers).
+    // text/value without handlers). Intrinsic form controls are on it even
+    // with zero handlers: a DISABLED button often has its onClick
+    // conditionally absent, but a user still sees it — tests must be able to
+    // resolve it and assert `disabled: true`. (inews R4 P1)
+    const intrinsic = v.tag === "button" || v.tag === "input" ||
+      v.tag === "select" || v.tag === "textarea";
     if (
-      events.length > 0 || typeof v.props.t === "string" ||
+      events.length > 0 || intrinsic || typeof v.props.t === "string" ||
       typeof v.props["data-testid"] === "string"
     ) {
       const name = elementName(v, events, taken);

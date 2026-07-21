@@ -138,7 +138,12 @@ export type TestUI = {
   /** Wait until a predicate over the UI holds (polls between settles) — for
    *  async flows (effects, schedules) that update the UI later. Throws with
    *  the current surface on timeout. */
-  waitFor(pred: () => boolean, opts?: { timeoutMs?: number }): Promise<void>;
+  /** Wait until `pred()` is true. Second arg: options or a description
+   *  string (like `expectCell`) shown on timeout. */
+  waitFor(
+    pred: () => boolean,
+    opts?: string | { timeoutMs?: number; msg?: string },
+  ): Promise<void>;
   /** Root innerHTML — convenience for assertions. */
   html(): string;
   /** Assert on a cell's reactive state: `await ui.expectCell(todo, t => …)`. */
@@ -249,6 +254,10 @@ async function _mountTestUI(
   // lifecycle (closed on dispose). Lazy import keeps the DOM dep out of
   // production code paths entirely.
   let ownedWindow: AnyDoc = null;
+  // Globals we installed from the owned window (restored on dispose).
+  // Local hotfix (realitio): was referenced but never declared — TS2304 +
+  // ReferenceError on the auto-DOM path. See dep/aio/feedback/realitio.md.
+  const _ownedGlobals: string[] = [];
   if (!doc) {
     try {
       // Computed specifier ON PURPOSE: cell.ts re-exports testCell, so this
@@ -257,8 +266,21 @@ async function _mountTestUI(
       // android bundles (51 errors). Opaque = resolved only at test runtime.
       const spec = "happy-dom";
       const hd = await import(spec);
-      ownedWindow = new hd.Window();
+      // Non-about:blank base URL so router code (navigate/Link) has a real
+      // origin to resolve against.
+      ownedWindow = new hd.Window({ url: "http://localhost/" });
       doc = ownedWindow.document;
+      // Router support: `navigate()` reads globalThis.location/history — put
+      // the owned window's (same-origin, in-memory) pair there so routed apps
+      // test with ZERO shim code. Restored on unmount. (inews R4 P4)
+      for (const key of ["location", "history"] as const) {
+        if ((globalThis as AnyDoc)[key]) continue;
+        Object.defineProperty(globalThis, key, {
+          get: () => ownedWindow?.[key],
+          configurable: true,
+        });
+        _ownedGlobals.push(key);
+      }
     } catch {
       throw new Error(
         "testUI: no DOM available — add happy-dom to your deno.json imports " +
@@ -478,8 +500,17 @@ async function _mountTestUI(
       const node = selectParent();
       const found = node.elements.find((e) => e.name === name);
       if (found?._el) return found;
+      // Component/element name SHADOWING: a component named like its own
+      // inner element makes `ui.X` resolve to the component, so `ui.X.type()`
+      // looks up an element "type" here and fails — say how to reach the
+      // shadowed element. (inews R4 P2)
+      const shadowed = node.elements.some((e) => e.name === node.component) ||
+        node.children.some((c) => c.component === node.component);
       fail(
-        `testUI: "${name}" is not an element of ${node.path}`,
+        `testUI: "${name}" is not an element of ${node.path}` +
+          (shadowed
+            ? `\n  hint: "${node.component}" names both this component and something inside it — use ui.${node.component}.${node.component}`
+            : ""),
         [
           ...node.elements.map((e) => e.name),
           ...node.children.map((c) => c.component),
@@ -487,10 +518,15 @@ async function _mountTestUI(
       );
     };
     const eh = elementHandle(resolveInfo);
-    return new Proxy(eh as AnyDoc, {
-      get(target, prop: string | symbol) {
-        if (typeof prop === "symbol" || prop in target) {
-          return (target as AnyDoc)[prop];
+    // Callable Proxy target: chaining past an unknown action and INVOKING it
+    // (e.g. `ui.PasswordInput.type()` when "PasswordInput" resolved to a
+    // component, or a typo'd action) must fail with the aio name listing —
+    // a bare `TypeError: … is not a function` names nothing. (inews R4 P1/P2)
+    const callable = function () {} as unknown as AnyDoc;
+    return new Proxy(callable, {
+      get(_target, prop: string | symbol) {
+        if (typeof prop === "symbol" || prop in eh) {
+          return (eh as AnyDoc)[prop];
         }
         // Treated as a component that will exist by the time it's used:
         // ui.Modal.ConfirmButton — resolve "Modal" lazily, then chain.
@@ -505,6 +541,15 @@ async function _mountTestUI(
           }
           return hit;
         }, prop as string);
+      },
+      apply() {
+        // Invoked as an action: either the name never resolves (throws the
+        // helpful listing) or it resolved but `name` isn't a real action.
+        resolveInfo();
+        return fail(
+          `testUI: "${name}" resolved but is not an element action`,
+          [],
+        );
       },
     }) as UIElementHandle;
   }
@@ -611,10 +656,13 @@ async function _mountTestUI(
     },
     async waitFor(
       pred: () => boolean,
-      o?: { timeoutMs?: number },
+      o?: string | { timeoutMs?: number; msg?: string },
     ): Promise<void> {
+      // Trailing description string mirrors expectCell's — the asymmetry
+      // (`waitFor(pred, "msg")` → TS2559) surprised the field. (inews R4 P3)
+      const opts = typeof o === "string" ? { msg: o } : o;
       await drain();
-      const deadline = Date.now() + (o?.timeoutMs ?? 3000);
+      const deadline = Date.now() + (opts?.timeoutMs ?? 3000);
       while (Date.now() < deadline) {
         await settle();
         try {
@@ -623,7 +671,8 @@ async function _mountTestUI(
         await tick(20);
       }
       throw new Error(
-        "testUI: waitFor timed out.\n  current surface: " +
+        `testUI: waitFor timed out${opts?.msg ? ` — ${opts.msg}` : ""}.\n` +
+          "  current surface: " +
           JSON.stringify(serializeSurface(currentSurface()), null, 2),
       );
     },
@@ -648,6 +697,9 @@ async function _mountTestUI(
       // happy-dom; use dispose() when you need to await it).
       ownedWindow?.happyDOM?.close()?.catch?.(() => {});
       ownedWindow = null;
+      for (const key of _ownedGlobals.splice(0)) {
+        delete (globalThis as AnyDoc)[key];
+      }
     },
     async dispose() {
       // Drain first — a failure from an un-awaited action must fail the
@@ -660,6 +712,9 @@ async function _mountTestUI(
         if (ownedWindow) {
           await ownedWindow.happyDOM?.close();
           ownedWindow = null;
+        }
+        for (const key of _ownedGlobals.splice(0)) {
+          delete (globalThis as AnyDoc)[key];
         }
       }
     },

@@ -139,6 +139,38 @@ function _denoJsonVersion(): string | undefined {
   }
 }
 
+/** The app's `target` from deno.json (written by `am create --target=…`) as a
+ *  client-mode default. Makes the scaffolded `deno task dev` (no --client
+ *  flag) run the CHOSEN target instead of the framework's electron fallback.
+ *  `server` → `server-only` (aio's name for "no client UI"); `android` → the
+ *  browser client (dev:android's emulator connects to the same dev server). */
+function _denoJsonTargetClient():
+  | "browser"
+  | "electron"
+  | "cli"
+  | "server-only"
+  | undefined {
+  try {
+    const raw = Deno.readTextFileSync(join(Deno.cwd(), "deno.json"));
+    const target = (JSON.parse(raw) as { target?: string }).target;
+    switch (target) {
+      case "browser":
+      case "android":
+        return "browser";
+      case "electron":
+        return "electron";
+      case "cli":
+        return "cli";
+      case "server":
+        return "server-only";
+      default:
+        return undefined;
+    }
+  } catch {
+    return undefined;
+  }
+}
+
 function _inferBaseDir(): string {
   try {
     const main = new URL(Deno.mainModule);
@@ -367,8 +399,11 @@ async function _run<S, A, E>(
     config._cellNames,
   );
 
-  // Client mode
-  const client = cli.client ?? config.client ?? "electron";
+  // Client mode: CLI flag > aio.run config > app deno.json `target` >
+  // electron. The deno.json step is what makes `am create --target=X` +
+  // `deno task dev` (no --client flag) actually run target X.
+  const client = cli.client ?? config.client ?? _denoJsonTargetClient() ??
+    "electron";
   const useElectron = client === "electron";
   const isHeadless = client === "server-only" || client === "cli";
   const { reduce, execute, onAction, onEffect, onStart, onStop, onError } =

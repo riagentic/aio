@@ -59,7 +59,11 @@ Deno.test("mid-batch scheduling under budget overrun strands no component", asyn
 
     const handle = mount(root, App);
     for (let i = 0; i < N; i++) {
-      assertEquals(root.querySelector("#r" + i)?.textContent, `v=${i}`, `init ${i}`);
+      assertEquals(
+        root.querySelector("#r" + i)?.textContent,
+        `v=${i}`,
+        `init ${i}`,
+      );
     }
 
     // The burst: every row cell changes at once → all Rows scheduled; Row 0's
@@ -74,7 +78,11 @@ Deno.test("mid-batch scheduling under budget overrun strands no component", asyn
         `row ${i} must update after a mid-batch budget overrun`,
       );
     }
-    assertEquals(root.querySelector("#mirror")?.textContent, `m=${100}`, "mirror");
+    assertEquals(
+      root.querySelector("#mirror")?.textContent,
+      `m=${100}`,
+      "mirror",
+    );
 
     // And every row must still be reactive afterwards (not left pendingRender).
     for (let i = 0; i < N; i++) cells[i]!.set(200 + i);

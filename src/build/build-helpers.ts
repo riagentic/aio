@@ -61,7 +61,9 @@ export function resolveSdk(): string | null {
   );
   for (const c of candidates) {
     try {
-      if (Deno.statSync(join(c, "platform-tools", `adb${exe}`)).isFile) return c;
+      if (Deno.statSync(join(c, "platform-tools", `adb${exe}`)).isFile) {
+        return c;
+      }
     } catch { /* not an SDK here — next */ }
   }
   return null;
@@ -271,7 +273,8 @@ function whichJavac(): string | null {
       stderr: "null",
     }).outputSync();
     if (w.code !== 0) return null;
-    const p = (new TextDecoder().decode(w.stdout).split(/\r?\n/)[0] ?? "").trim();
+    const p = (new TextDecoder().decode(w.stdout).split(/\r?\n/)[0] ?? "")
+      .trim();
     return p || null;
   } catch {
     return null;

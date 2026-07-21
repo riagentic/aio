@@ -101,11 +101,11 @@ On `aio.run()`, state restores in this order:
    tables
 3. **Table load** — `SELECT * FROM` each table, merge into state
 4. **`onRestore` hook** — your transform runs on the merged state
-5. **CRDT restore** — for each `sync: true` cell, the committed op-log is replayed
-   through the reducer (HLC-ordered) so sync cells recover their state on a
-   headless restart, **before any client connects** (logged as
-   `sync: restored cell "x" from N op(s)`). Sync cells are excluded from KV — the
-   op-log is their durable store.
+5. **CRDT restore** — for each `sync: true` cell, the committed op-log is
+   replayed through the reducer (HLC-ordered) so sync cells recover their state
+   on a headless restart, **before any client connects** (logged as
+   `sync: restored cell "x" from N op(s)`). Sync cells are excluded from KV —
+   the op-log is their durable store.
 6. **Persistence manager creation** — wire filters, register `schedulePersist()`
    callback
 

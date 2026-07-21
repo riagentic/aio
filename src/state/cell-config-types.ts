@@ -11,21 +11,34 @@ import type { Method } from "./cell-impl.ts";
  *  cells in the order listed. The cell slice is passed to the selector fresh
  *  on every read — `bindCell` re-evaluates whenever a dep cell changes. */
 export type SelectorDef<S> =
-  | ((s: S) => unknown)
+  // Plain form may take extra ARGS after the slice — a parameterized selector
+  // (`byId: (s, id) => …`) surfaces as `cell.byId(id)`.
+  // deno-lint-ignore no-explicit-any
+  | ((s: S, ...args: any[]) => unknown)
   | { deps: readonly string[]; fn: (s: S, ...deps: unknown[]) => unknown };
 
 /** The value a bound selector accessor returns (the selector's own return). */
-export type SelectorReturn<D> = D extends (s: infer _S) => infer R ? R
+// deno-lint-ignore no-explicit-any
+export type SelectorReturn<D> = D extends (s: infer _S, ...a: any[]) => infer R
+  ? R
   // deno-lint-ignore no-explicit-any
   : D extends { fn: (...args: any[]) => infer R } ? R
   : unknown;
 
-/** Bound selectors surface on the cell as zero-arg accessors: `cell.total()`.
- *  Threading this onto the return type is what makes `selectors:` a real,
- *  type-accessible feature instead of inert config (risoto). */
+/** Bound selectors surface on the cell as accessors. A plain selector's EXTRA
+ *  params (beyond the state slice) become the accessor's args —
+ *  `byId: (s, id: string) => T` → `cell.byId(id)`; `total: (s) => n` →
+ *  `cell.total()`. Deps-form selectors are always zero-arg. (risoto, realitio Bad#1) */
 export type SelectorAccessors<Sel> = {
-  [K in keyof Sel]: () => SelectorReturn<Sel[K]>;
+  [K in keyof Sel]: SelectorAccessorFn<Sel[K]>;
 };
+
+// deno-lint-ignore no-explicit-any
+type SelectorAccessorFn<D> = D extends (s: any, ...args: infer A) => infer R
+  ? (...args: A) => R
+  // deno-lint-ignore no-explicit-any
+  : D extends { fn: (...a: any[]) => infer R } ? () => R
+  : () => unknown;
 import type {
   ActionUnion,
   CellFieldFilter,

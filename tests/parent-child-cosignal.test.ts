@@ -36,32 +36,50 @@ Deno.test("child re-renders correctly when parent co-re-renders on another signa
     return h(
       "div",
       null,
-      items.map((k) => h("div", { key: k }, h(Row as never, { id: "row-" + k }))),
+      items.map((k) =>
+        h("div", { key: k }, h(Row as never, { id: "row-" + k }))
+      ),
     );
   };
 
   const handle = mount(root, Panel);
-  assertEquals(root.querySelector("#row-a")?.textContent, "58.000000000 SOL", "initial");
+  assertEquals(
+    root.querySelector("#row-a")?.textContent,
+    "58.000000000 SOL",
+    "initial",
+  );
 
   // The airdrop moment: BOTH cells change (child's signal + parent's signal).
   bal.set(59);
   navMsg.set("Requesting airdrop…");
   await tick();
   await tick();
-  assertEquals(root.querySelector("#row-a")?.textContent, "59.000000000 SOL", "after co-change 1");
+  assertEquals(
+    root.querySelector("#row-a")?.textContent,
+    "59.000000000 SOL",
+    "after co-change 1",
+  );
 
   // Again — confirms it's not a one-shot.
   bal.set(60);
   navMsg.set("ready");
   await tick();
   await tick();
-  assertEquals(root.querySelector("#row-a")?.textContent, "60.000000000 SOL", "after co-change 2");
+  assertEquals(
+    root.querySelector("#row-a")?.textContent,
+    "60.000000000 SOL",
+    "after co-change 2",
+  );
 
   // Child-only change (parent quiet).
   bal.set(61);
   await tick();
   await tick();
-  assertEquals(root.querySelector("#row-a")?.textContent, "61.000000000 SOL", "child-only change");
+  assertEquals(
+    root.querySelector("#row-a")?.textContent,
+    "61.000000000 SOL",
+    "child-only change",
+  );
 
   _unmount(handle);
   await cleanup();

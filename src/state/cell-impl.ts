@@ -603,6 +603,40 @@ export function createLiveProxy<S extends Record<string, unknown>>(
         Array.isArray(fresh) && ARRAY_READ_METHODS.has(key) &&
         typeof value === "function"
       ) {
+        // `find` returns an ELEMENT the caller may hold across an await and
+        // then MUTATE (`const u = s.users.find(…); u.salt = x`). A detached
+        // snapshot element silently dropped that write in prod while
+        // testCell's Immer draft applied it — the worst kind of divergence
+        // (inews R4). Resolve the element's INDEX instead and hand back the
+        // LIVE proxy at that path, so writes batch exactly like s.users[i].
+        if (key === "find") {
+          return (...args: unknown[]) => {
+            const snap = snapshotForRead(fresh) as unknown[];
+            const idx = snap.findIndex(
+              args[0] as (v: unknown, i: number, a: unknown[]) => boolean,
+              args[1],
+            );
+            if (idx === -1) return undefined;
+            const el = (fresh as unknown[])[idx];
+            if (el === null || typeof el !== "object") return el;
+            const cacheKey = [...path, String(idx)].join("\0");
+            let cached = _proxyCache.get(cacheKey);
+            if (!cached) {
+              cached = createLiveProxy(
+                cellName,
+                prefix,
+                methodName,
+                getState,
+                batcher,
+                [...path, String(idx)],
+                _proxyCache,
+                _overlay,
+              );
+              _proxyCache.set(cacheKey, cached);
+            }
+            return cached;
+          };
+        }
         return (...args: unknown[]) => {
           // Snapshot the array before running the read method so the result
           // is plain data, not a live-proxy-wrapped value.

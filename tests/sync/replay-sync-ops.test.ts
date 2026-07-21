@@ -39,10 +39,13 @@ function createTestDb(): DB {
   return {
     query,
     execute,
-    transaction: (async (a: unknown) =>
-      typeof a === "function" ? await (a as () => unknown)() : undefined) as DB[
-        "transaction"
-      ],
+    transaction:
+      (async (a: unknown) =>
+        typeof a === "function"
+          ? await (a as () => unknown)()
+          : undefined) as DB[
+          "transaction"
+        ],
     close: () => sqlite.close(),
   } as unknown as DB;
 }
@@ -53,7 +56,9 @@ const hlc = (phys: number, cnt: number, node = "n1"): HLC =>
 const silentLog = { info: () => {}, error: () => {} };
 
 // A tiny composed reducer over a `members` sync cell (add/remove by id).
-type S = { members: { roster: Array<{ id: number }>; pins: Record<string, string> } };
+type S = {
+  members: { roster: Array<{ id: number }>; pins: Record<string, string> };
+};
 const initial: S = { members: { roster: [], pins: {} } };
 function reduce(s: S, a: { type: string; payload?: unknown }): S {
   if (a.type === "members:add") {
@@ -70,25 +75,79 @@ function reduce(s: S, a: { type: string; payload?: unknown }): S {
 
 Deno.test("replaySyncOps: folds committed ops into state at boot", async () => {
   const db = createTestDb();
-  await persistOp(db, { id: "o1", hlc: hlc(1000, 0), cell: "members", action: "add", payload: { id: 1, pin: "0000" } });
-  await persistOp(db, { id: "o2", hlc: hlc(1001, 0), cell: "members", action: "add", payload: { id: 2, pin: "1234" } });
+  await persistOp(db, {
+    id: "o1",
+    hlc: hlc(1000, 0),
+    cell: "members",
+    action: "add",
+    payload: { id: 1, pin: "0000" },
+  });
+  await persistOp(db, {
+    id: "o2",
+    hlc: hlc(1001, 0),
+    cell: "members",
+    action: "add",
+    payload: { id: 2, pin: "1234" },
+  });
 
-  const restored = await replaySyncOps(db, ["members"], reduce, initial, silentLog);
-  assertEquals(restored.members.roster, [{ id: 1 }, { id: 2 }], "both members restored");
-  assertEquals(restored.members.pins, { "1": "0000", "2": "1234" }, "pins restored");
+  const restored = await replaySyncOps(
+    db,
+    ["members"],
+    reduce,
+    initial,
+    silentLog,
+  );
+  assertEquals(
+    restored.members.roster,
+    [{ id: 1 }, { id: 2 }],
+    "both members restored",
+  );
+  assertEquals(
+    restored.members.pins,
+    { "1": "0000", "2": "1234" },
+    "pins restored",
+  );
 });
 
 Deno.test("replaySyncOps: applies ops in HLC order regardless of insert order", async () => {
   const db = createTestDb();
   // Insert out of order; loadOpsSince returns HLC-ordered → deterministic fold.
-  await persistOp(db, { id: "b", hlc: hlc(2000, 0), cell: "members", action: "add", payload: { id: 2, pin: "b" } });
-  await persistOp(db, { id: "a", hlc: hlc(1000, 0), cell: "members", action: "add", payload: { id: 1, pin: "a" } });
-  const restored = await replaySyncOps(db, ["members"], reduce, initial, silentLog);
-  assertEquals(restored.members.roster.map((m) => m.id), [1, 2], "HLC order, not insert order");
+  await persistOp(db, {
+    id: "b",
+    hlc: hlc(2000, 0),
+    cell: "members",
+    action: "add",
+    payload: { id: 2, pin: "b" },
+  });
+  await persistOp(db, {
+    id: "a",
+    hlc: hlc(1000, 0),
+    cell: "members",
+    action: "add",
+    payload: { id: 1, pin: "a" },
+  });
+  const restored = await replaySyncOps(
+    db,
+    ["members"],
+    reduce,
+    initial,
+    silentLog,
+  );
+  assertEquals(
+    restored.members.roster.map((m) => m.id),
+    [1, 2],
+    "HLC order, not insert order",
+  );
 });
 
 Deno.test("replaySyncOps: no ops → state unchanged; unknown cell → no-op", async () => {
   const db = createTestDb();
-  const same = await replaySyncOps(db, ["members", "ghost"], reduce, initial, silentLog);
+  const same = await replaySyncOps(
+    db,
+    ["members", "ghost"],
+    reduce,
+    initial,
+    silentLog,
+  );
   assertEquals(same, initial);
 });

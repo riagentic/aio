@@ -259,7 +259,11 @@ Deno.test("electron: UDS script — buffers state until page ready", () => {
 });
 
 Deno.test("electron: UDS script — reports a backend outage once, with the true reason", () => {
-  const s = electronMainScriptUDS("http://localhost:3000", "/tmp/test.sock", {});
+  const s = electronMainScriptUDS(
+    "http://localhost:3000",
+    "/tmp/test.sock",
+    {},
+  );
   // No raw per-error stack-trace flood anymore.
   assertEquals(
     s.includes('console.error("[aio:electron] UDS socket error:"'),

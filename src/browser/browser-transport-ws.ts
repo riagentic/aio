@@ -18,10 +18,7 @@ import {
   _w,
 } from "./browser-protocol.ts";
 import { buildWsUrl, handleControlMessage } from "./browser-shared.ts";
-import {
-  getStateSnapshot,
-  T,
-} from "./browser-transport-state.ts";
+import { getStateSnapshot, T } from "./browser-transport-state.ts";
 import {
   _rejectAck,
   _rejectAllPending,

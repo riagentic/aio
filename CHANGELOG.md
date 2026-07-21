@@ -19,30 +19,31 @@ field-report only.
   an opt-in for pinned JSR consumption.
 - **Every dev + build target works out of the box.** `deno task dev` defaults to
   the **browser** (instant — no Electron download, no toolchain). Explicit
-  `dev:browser` / `dev:electron` (auto-installs Electron), and
-  `compile` (binary) / `compile:browser` / `compile:electron` (AppImage) /
+  `dev:browser` / `dev:electron` (auto-installs Electron), and `compile`
+  (binary) / `compile:browser` / `compile:electron` (AppImage) /
   `compile:android` (APK — needs `ANDROID_HOME` + Gradle + a JDK) are all wired.
-- **`dev:android` runs the app in an emulator** (the mobile `dev:browser`).
-  It boots an AVD if none is running, builds a thin dev APK whose WebView loads
-  the **live dev server** over `http://localhost:PORT` tunneled with `adb reverse`
-  (VPN/NAT-proof — unlike the emulator's `10.0.2.2` alias — and works on real USB
-  devices), starts the server, installs + launches — so edits reflect live, no
-  re-bundle. Verified end-to-end (app rendered in the
-  emulator, aio reload-WS connected). Needs the Android SDK (adb + emulator) and
-  an AVD; fails loud with steps otherwise (never a silent browser fallback). If
-  the emulator crashes or stalls on boot, its output is surfaced (no silent hang),
-  and a dev-server bail (app already running) is reported clearly.
-- **Dispatch works over insecure `http://` (LAN / emulator).** `crypto.randomUUID()`
-  — used to tag every dispatch — only exists in a *secure context* (https or
-  localhost), so over `http://10.0.2.2` (emulator) or `http://192.168.x.x` (real
-  device) it was `undefined`: every action threw `randomUUID is not a function`
-  and the UI silently didn't update (e.g. the counter's `+` did nothing). All
-  client id generation now uses an insecure-context-safe `randomUuid()`
-  (`crypto.getRandomValues` fallback). Fixes `dev:android` interactivity + LAN dev.
+- **`dev:android` runs the app in an emulator** (the mobile `dev:browser`). It
+  boots an AVD if none is running, builds a thin dev APK whose WebView loads the
+  **live dev server** over `http://localhost:PORT` tunneled with `adb reverse`
+  (VPN/NAT-proof — unlike the emulator's `10.0.2.2` alias — and works on real
+  USB devices), starts the server, installs + launches — so edits reflect live,
+  no re-bundle. Verified end-to-end (app rendered in the emulator, aio reload-WS
+  connected). Needs the Android SDK (adb + emulator) and an AVD; fails loud with
+  steps otherwise (never a silent browser fallback). If the emulator crashes or
+  stalls on boot, its output is surfaced (no silent hang), and a dev-server bail
+  (app already running) is reported clearly.
+- **Dispatch works over insecure `http://` (LAN / emulator).**
+  `crypto.randomUUID()` — used to tag every dispatch — only exists in a _secure
+  context_ (https or localhost), so over `http://10.0.2.2` (emulator) or
+  `http://192.168.x.x` (real device) it was `undefined`: every action threw
+  `randomUUID is not a function` and the UI silently didn't update (e.g. the
+  counter's `+` did nothing). All client id generation now uses an
+  insecure-context-safe `randomUuid()` (`crypto.getRandomValues` fallback).
+  Fixes `dev:android` interactivity + LAN dev.
 - **SDK auto-resolution.** `ANDROID_HOME` may point at the SDK **or its parent**
   (a common `~/Android` → `~/Android/Sdk` setup), or be unset — the build finds
-  the SDK via `ANDROID_HOME`/`ANDROID_SDK_ROOT` (and their `Sdk` subdir) then the
-  platform defaults. Applies to both `compile:android` and `dev:android`.
+  the SDK via `ANDROID_HOME`/`ANDROID_SDK_ROOT` (and their `Sdk` subdir) then
+  the platform defaults. Applies to both `compile:android` and `dev:android`.
 - **Android build now works out of the box across JDK/packaging quirks.** Three
   compounding failures fixed, verified by building a real APK end-to-end:
   - **Gradle 8.12.1 → 8.14.3.** 8.12.1 mis-detects Ubuntu's OpenJDK as a JRE
@@ -55,14 +56,15 @@ field-report only.
     Gradle-runnable version (≤ 23, preferring LTS 17/21) from `JAVA_HOME`,
     `/usr/lib/jvm/*`, Android Studio's JBR, Homebrew, SDKMAN and PATH.
   - **Gradle is pinned to that JDK** (`org.gradle.java.installations.paths`,
-    auto-download off) so its toolchain resolver can't wander to a JRE.
-  When no usable JDK exists it fails loud, naming the reason (JRE-only vs.
-  too-new-for-Gradle) with the install command.
+    auto-download off) so its toolchain resolver can't wander to a JRE. When no
+    usable JDK exists it fails loud, naming the reason (JRE-only vs.
+    too-new-for-Gradle) with the install command.
 - **Onboarding is now gated by a real E2E suite** (`deno task test:onboard`):
-  runs `install.sh` (clone + `am`), scaffolds counter/todo, boots the browser dev
-  server and hits it over HTTP, compiles the binary and boots *it*, and drives
-  `compile:android` (builds the APK when the SDK+JDK are present, else asserts the
-  clear guidance) + `compile:electron`. No release ships unless it's green.
+  runs `install.sh` (clone + `am`), scaffolds counter/todo, boots the browser
+  dev server and hits it over HTTP, compiles the binary and boots _it_, and
+  drives `compile:android` (builds the APK when the SDK+JDK are present, else
+  asserts the clear guidance) + `compile:electron`. No release ships unless it's
+  green.
 - **README rewritten** to four onboarding lines + a one-row-per-feature table +
   a logo. "Batteries included: persistence + state + UI."
 
@@ -75,8 +77,9 @@ JSR returns at 1.0, it needs dotted prereleases: `1.0.0-alpha.25`.)
 
 ## 1.0.0-alpha24 — magic onboarding (`am`) + sync method returns + correct server/client boundary (2026-07-20)
 
-Onboarding collapses to a single delightful path, sync methods can return values,
-and the server/client import guard becomes precise (eager blocks, deferred warns).
+Onboarding collapses to a single delightful path, sync methods can return
+values, and the server/client import guard becomes precise (eager blocks,
+deferred warns).
 
 ### Added
 
@@ -89,10 +92,10 @@ and the server/client import guard becomes precise (eager blocks, deferred warns
   Windows) installs Deno if missing, then `am` onto PATH via `~/.deno/bin`. Uses
   the `@^1.0.0-alpha` range (a **bare** `jsr:@riagentic/aio` mis-resolves to an
   old stable during the alpha).
-- **Sync method return values (AIO-427).** A sync method may `return` a value and
-  `await cell.method()` resolves with it — no more `async`-just-to-return. Effects
-  (`schedule`/`own`) still route; a returned draft slice is snapshotted so it
-  survives the reducer. Types inferred via `DirectCalling`.
+- **Sync method return values (AIO-427).** A sync method may `return` a value
+  and `await cell.method()` resolves with it — no more `async`-just-to-return.
+  Effects (`schedule`/`own`) still route; a returned draft slice is snapshotted
+  so it survives the reducer. Types inferred via `DirectCalling`.
 - **`deno task check:graph`** — CI-friendly one-shot module-graph validator
   (same engine as the dev server); exits non-zero on a guaranteed client break.
 
@@ -103,8 +106,8 @@ and the server/client import guard becomes precise (eager blocks, deferred warns
   reachable from the UI entry **blocks** (it blank-screens the sandboxed
   renderer — `deno task compile` fails the same, so dev==prod). A **dynamic**
   `import()` of the same is the documented escape hatch — **deferred, a warning,
-  never a block**. `@std/*` + `Deno.*` usage stay warnings. Fixes false-positives
-  on apps that already lazy-load server-only modules.
+  never a block**. `@std/*` + `Deno.*` usage stay warnings. Fixes
+  false-positives on apps that already lazy-load server-only modules.
 - **Onboarding is one path.** `am` replaces the old interactive scaffolder
   (`src/create.ts`, `init.ts`, `utils/`) and the `./create` export — removed.
   `examples/playground` removed; `counter`/`todo` are the `am create` templates,
@@ -117,34 +120,34 @@ and the server/client import guard becomes precise (eager blocks, deferred warns
 - **`am` installs lean.** `am` no longer drags the esbuild native binary (~10MB)
   into its install graph — the transpiler's `import("npm:esbuild@…")` now uses a
   computed specifier, so `deno install am` doesn't eagerly fetch (and fail on
-  `ETXTBSY` for) an esbuild it never uses. esbuild still loads at runtime when the
-  dev server transpiles.
+  `ETXTBSY` for) an esbuild it never uses. esbuild still loads at runtime when
+  the dev server transpiles.
 
 ## 1.0.0-alpha23 — field-report closeout: silent traps → loud, early, attributed (2026-07-20)
 
-Five field reports (tbd, risoto ×2, realitio, inews) worked end to end. The theme:
-every fix either **removes** a silent failure or makes it **loud, early, and
-attributed** — never silent, late, and anonymous. Each fix ships with a
+Five field reports (tbd, risoto ×2, realitio, inews) worked end to end. The
+theme: every fix either **removes** a silent failure or makes it **loud, early,
+and attributed** — never silent, late, and anonymous. Each fix ships with a
 regression test proven to fail on revert.
 
 ### Fixed
 
 - **Sync cells recover their state on a headless restart.** The committed op-log
-  is replayed through the reducer at boot (after KV restore + `onRestore`, before
-  any dispatch/broadcast) — previously a `sync: true` cell came back empty until a
-  client reconnected (silent data loss). Logged per cell.
+  is replayed through the reducer at boot (after KV restore + `onRestore`,
+  before any dispatch/broadcast) — previously a `sync: true` cell came back
+  empty until a client reconnected (silent data loss). Logged per cell.
 - **`deepMerge` keeps dictionary entries.** An empty-object initial
   (`{} as Record<K,V>`) is now treated as a dictionary — persisted entries
   survive restore instead of all being silently dropped.
-- **KV over-limit degrades instead of nuking everything.** A single >64KB cell no
-  longer fails the whole atomic commit; the healthy cells persist, the over-limit
-  cell keeps its last-saved value, and the offender is named. Single-key mode
-  names the largest cells.
+- **KV over-limit degrades instead of nuking everything.** A single >64KB cell
+  no longer fails the whole atomic commit; the healthy cells persist, the
+  over-limit cell keeps its last-saved value, and the offender is named.
+  Single-key mode names the largest cells.
 - **`db:` table named after a cell throws at boot** (was a silent slice
   overwrite that broke the cell's methods), naming both.
 - **Selectors are callable in the browser** — they were server-only, so
-  `cell.count()` threw `is not a function` client-side with no warning. Now bound
-  the same both sides; deps-form selectors read other cells reactively.
+  `cell.count()` threw `is not a function` client-side with no warning. Now
+  bound the same both sides; deps-form selectors read other cells reactively.
 - **Router components type-check.** `Route`/`Link`/`NavLink`/`Outlet`/`page`
   returned `unknown` (broke every JSX use); now `VNode | null` / `VNode`.
 - **Dev graph-validator no longer false-positives on English.** A bare `from "`
@@ -158,33 +161,35 @@ regression test proven to fail on revert.
 
 ### Added
 
-- **`libraryMode: true`** on `aio.run()` — no `Deno.exit`, no signal handlers, no
-  singleton lock; `app.close()` resolves clean. Boots a real server inside
+- **`libraryMode: true`** on `aio.run()` — no `Deno.exit`, no signal handlers,
+  no singleton lock; `app.close()` resolves clean. Boots a real server inside
   `Deno.test` (sanitizers on) — the unlock for end-to-end persistence tests.
 - **Responsive `<meta viewport>` by default** + `ui.viewport` override / `false`
-  opt-out, and **`ui.head`** for verbatim `<head>` content (meta/OG/favicon/fonts).
+  opt-out, and **`ui.head`** for verbatim `<head>` content
+  (meta/OG/favicon/fonts).
 - **`createDB(":memory:")`** documented as the file-less test DB (single Worker,
   `close()`); `readers` ignored for `:memory:`.
 - **Server-only import guard.** `aiol` flags a server-only `"aio"` symbol
-  (`createDB`, …) statically imported into a cell-shared file — `file:line` + fix;
-  the dev blank-screen classifier makes the runtime error teachable and points at
-  the linter.
+  (`createDB`, …) statically imported into a cell-shared file — `file:line` +
+  fix; the dev blank-screen classifier makes the runtime error teachable and
+  points at the linter.
 
 ### Changed
 
 - **Unified UI facility.** One semantic surface (`ui-surface`/`ui-remote`/
   `ui-trigger`) backs both `testUI` and `am surface`/`am trigger`. The legacy
   selector/index/raw-DOM path — `am click`/`interact`/`dom`, `dom-interact.ts`,
-  `dom-snapshot.ts`, `__ui:snapshot`/`__ui:interact`/`__click:` — is removed. `am`
-  is a dev CLI; no public API change.
+  `dom-snapshot.ts`, `__ui:snapshot`/`__ui:interact`/`__click:` — is removed.
+  `am` is a dev CLI; no public API change.
 
 ### Security
 
 - **Exposed credential fields refuse to boot in dev.** A field named
   `password`/`passphrase`/`mnemonic`/`privateKey`/`apiKey`/`secretKey`/
-  `accessToken`/`authToken` broadcast to the UI now fails the dev boot (prod logs
-  a loud error) unless excluded or declared `ui.publicFields`. The old heuristic
-  didn't even match `password`; ambiguous names (`seed`/`enc`/`key`) still warn.
+  `accessToken`/`authToken` broadcast to the UI now fails the dev boot (prod
+  logs a loud error) unless excluded or declared `ui.publicFields`. The old
+  heuristic didn't even match `password`; ambiguous names (`seed`/`enc`/`key`)
+  still warn.
 
 ## 1.0.0-alpha22 — reactivity hardening: no more silent freezes (2026-07-19)
 
@@ -192,53 +197,56 @@ Root-caused the "value changes but the UI doesn't, with no error" class into six
 distinct renderer bugs and fixed each with a regression test proven to fail on
 revert. The common thread: reconciliation under geometry or load the suite never
 generated — multi-node siblings, zero-node Portals, budget overruns, a throw
-mid-flush. A new dev-mode invariant now makes this whole class loud at the source.
+mid-flush. A new dev-mode invariant now makes this whole class loud at the
+source.
 
 ### Fixed
 
 - **Scheduler could permanently, silently strand components under load.** When a
   re-render burst overran the flush time budget mid-batch, the unprocessed tail
-  was dropped: its `pendingRender` stayed set, so it was never re-queued and every
-  future signal update to it was silently discarded (AIO-408). A throw while
-  re-rendering one component aborted the whole flush, stranding its siblings the
-  same way (AIO-409). Both fixed; a `flushing` self-heal in the scheduler now
-  degrades any future strand to a one-tick delay + loud dev error instead of a
-  permanent freeze. Only reachable under real bursts — why fast test flushes never
-  surfaced it.
+  was dropped: its `pendingRender` stayed set, so it was never re-queued and
+  every future signal update to it was silently discarded (AIO-408). A throw
+  while re-rendering one component aborted the whole flush, stranding its
+  siblings the same way (AIO-409). Both fixed; a `flushing` self-heal in the
+  scheduler now degrades any future strand to a one-tick delay + loud dev error
+  instead of a permanent freeze. Only reachable under real bursts — why fast
+  test flushes never surfaced it.
 - **Child reconciliation corrupted/froze the DOM around multi-node siblings.** A
-  `Signal` used directly as a child froze when a Fragment sibling shifted its DOM
-  index (AIO-410); a component that renders a Fragment mis-counted as one node and
-  desynced the diff cursor (AIO-411); a text-only Fragment was judged "empty" and
-  injected a stray comment every re-render (AIO-413); `diffUnkeyed` ignored a
-  Fragment's region anchor and clobbered preceding siblings, and advanced its
-  cursor past zero-node Portals, duplicating the following text (AIO-414).
-  `_domNodeCount` is now the single source of truth for a node's realized DOM span
-  (Fragment/component/Portal/ErrorBoundary/Suspense).
-- **Direct cell access now reliably subscribes to server deltas** and cell signals
-  are no longer orphaned across re-renders (risoto CRITICAL) — with a real e2e
-  harness that reproduces it.
-- **UDS transport buffers patches across the throttle window** instead of dropping
-  the ones that arrive mid-window.
+  `Signal` used directly as a child froze when a Fragment sibling shifted its
+  DOM index (AIO-410); a component that renders a Fragment mis-counted as one
+  node and desynced the diff cursor (AIO-411); a text-only Fragment was judged
+  "empty" and injected a stray comment every re-render (AIO-413); `diffUnkeyed`
+  ignored a Fragment's region anchor and clobbered preceding siblings, and
+  advanced its cursor past zero-node Portals, duplicating the following text
+  (AIO-414). `_domNodeCount` is now the single source of truth for a node's
+  realized DOM span (Fragment/component/Portal/ErrorBoundary/Suspense).
+- **Direct cell access now reliably subscribes to server deltas** and cell
+  signals are no longer orphaned across re-renders (risoto CRITICAL) — with a
+  real e2e harness that reproduces it.
+- **UDS transport buffers patches across the throttle window** instead of
+  dropping the ones that arrive mid-window.
 - **14 verified bugs** from the GLM-5.2 multi-aspect audit, and three fail-loud
-  gaps from the risoto report (16e, 16f-b, 17b), each pinned by regression tests.
+  gaps from the risoto report (16e, 16f-b, 17b), each pinned by regression
+  tests.
 
 ### Added
 
 - **Dev child-alignment invariant.** In dev mode, after every element diff aio
   asserts `childNodes.length === Σ _domNodeCount(child)` (skipping `ref`/`use`/
   `dangerouslySetInnerHTML`); a mismatch means the child cursor desynced. It has
-  zero false positives and immediately caught two of the bugs above that were not
-  yet known (AIO-412).
-- **Actionable antipattern messages, with the linter surfaced to app devs** — the
-  same checks aio runs internally now guide application code.
-- Test-only `_setFlushBudget` makes the flush-budget yield path deterministically
-  testable; the WS+UDS coalescing paths are unified behind one shared primitive.
+  zero false positives and immediately caught two of the bugs above that were
+  not yet known (AIO-412).
+- **Actionable antipattern messages, with the linter surfaced to app devs** —
+  the same checks aio runs internally now guide application code.
+- Test-only `_setFlushBudget` makes the flush-budget yield path
+  deterministically testable; the WS+UDS coalescing paths are unified behind one
+  shared primitive.
 
 ### Changed
 
-- Docs codify **dev==prod equivalency** as a critical convention; the test harness
-  now runs dev-strict so the test environment can no longer be more lenient than
-  production, and `press()` gained keyboard-modifier support.
+- Docs codify **dev==prod equivalency** as a critical convention; the test
+  harness now runs dev-strict so the test environment can no longer be more
+  lenient than production, and `press()` gained keyboard-modifier support.
 
 ## 1.0.0-alpha21 — field-report closeout: testable time, loud dev, the form fix (2026-07-17)
 
