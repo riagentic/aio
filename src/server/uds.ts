@@ -5,6 +5,7 @@ import { compactPatches } from "../state/patch-compact.ts";
 import { writeClientLog } from "./client-log.ts";
 import { log } from "../diagnostics/logger.ts";
 import { _isFrameworkInternalActionType } from "./server-ws.ts";
+import { unsupportedOnUds } from "../protocol/envelope.ts";
 import {
   negotiateProtocol,
   parseProtoHello,
@@ -438,6 +439,17 @@ function _handleUDSConn(
           }
           try {
             const action = JSON.parse(line);
+            // Sync/serverFn frames are WS-only — reject loudly instead of
+            // letting them fall through as malformed actions (a sync cell in
+            // an Electron/UDS client would otherwise hang silently).
+            const unsupported = unsupportedOnUds(action ?? {});
+            if (unsupported) {
+              log.warn(
+                "uds",
+                `${unsupported} frames are not supported over UDS/IPC — use the WS transport`,
+              );
+              continue;
+            }
             if (action && typeof action.type === "string") {
               // Block framework-internal action types from UDS sources —
               // parity with the WS server (server-ws.ts:621) and trojan

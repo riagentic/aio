@@ -189,9 +189,9 @@ const settings = cell("settings", {
 });
 ```
 
-> A secret needs **both** excludes: `persist` controls what reaches the KV
-> store, `ui` controls what reaches browsers. Excluding only one leaks it
-> through the other.
+> A secret needs **both** excludes: `persist` controls what reaches the
+> persisted snapshot on disk, `ui` controls what reaches browsers. Excluding
+> only one leaks it through the other.
 
 ```ts
 ```

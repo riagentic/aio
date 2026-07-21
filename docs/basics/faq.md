@@ -173,10 +173,10 @@ one process. See [Build Targets](../build/targets.md) for all compile targets.
 ### Why not support Node.js / Bun?
 
 Deno is the value proposition, not an implementation detail. `deno compile`
-(single binary), `Deno.Kv` (zero-config persistence), `deno task dev` (no build
-toolchain), JSR publishing — these are why aio can be "all in one." A Node port
-would mean maintaining two persistence backends, two server APIs, and losing
-single-binary compilation entirely. The result would be a worse aio.
+(single binary), embedded SQLite (zero-config persistence), `deno task dev` (no
+build toolchain), JSR publishing — these are why aio can be "all in one." A Node
+port would mean maintaining two persistence backends, two server APIs, and
+losing single-binary compilation entirely. The result would be a worse aio.
 
 If your team requires Node, aio isn't the right fit — use Next.js, Express +
 Zustand, or Convex.

@@ -3,8 +3,10 @@
 // Minimal WS transport (no React, no vitals) — just WS <-> state-core bridge.
 
 import { diagEmit } from "../diagnostics/diagnostic-bus.ts";
+import { _registerSfnTransport, handleSfnResult } from "./server-fns-client.ts";
 import { installConsoleIntercept } from "./console-intercept.ts";
 import { routeCommand } from "./browser-air-commands.ts";
+import { protoHello } from "../protocol/protocol-version.ts";
 import {
   _checkStateIntegrity,
   _coreGetState,
@@ -83,6 +85,8 @@ _registerSyncTransport(
     _syncOnline = onOnline;
   },
 );
+// serverFn client (B3): raw sends for __sfn calls.
+_registerSfnTransport((raw) => _sendRaw(raw));
 let _syncOnline: ((v: boolean) => void) | null = null;
 
 function _sendRaw(msg: string): void {
@@ -101,7 +105,11 @@ function _parseAndRoute(line: string): void {
   try {
     const data = JSON.parse(line);
     if (data === null || typeof data !== "object") return;
-    if (data.__ack || data.__op || data.__sync || data.__sync_error) {
+    if (data.__sfnr && handleSfnResult(data)) return;
+    if (
+      data.__ack || data.__op || data.__op_rejected || data.__sync ||
+      data.__sync_error
+    ) {
       if (typeof _onSyncMessage === "function") {
         _onSyncMessage(data);
       } else {
@@ -190,6 +198,9 @@ function _connect() {
     _coreSetTransport({ send: (d) => ws.send(d), close: () => ws.close() });
     _coreSetConnected(true);
     _syncOnline?.(true);
+    // Announce our wire-protocol version before anything else — without this
+    // hello the server's version gate never applies to AIR clients.
+    ws.send("__proto:" + JSON.stringify(protoHello()));
     const ua = typeof navigator !== "undefined" &&
       /electron/i.test(navigator.userAgent);
     ws.send("__type:" + (ua ? "electron" : "browser"));

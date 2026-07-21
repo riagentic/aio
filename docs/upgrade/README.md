@@ -2,6 +2,14 @@
 
 One guide per version migration. Find your current version and follow the steps.
 
+## restructure (alpha27+)
+
+- **[The aio restructure (alpha27+)](restructure.md)** — every restructure
+  breaking change with before → after recipes (methods-only cells, instances,
+  SQLite-only persistence, `aio/extras`, wire catalog)
+- [alpha27 → alpha28](from-alpha27-to-alpha28.md)
+- [alpha26 → alpha27](from-alpha26-to-alpha27.md)
+
 ## v1.0.0-alpha
 
 - [alpha17 → alpha18](from-alpha17-to-alpha18.md)

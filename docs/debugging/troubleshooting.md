@@ -19,7 +19,7 @@ catches it **before you debug**:
 | Doc example throws on paste         | docs drifted from the API                               | doc-imports gate: every `aio` import in docs must exist in the API snapshot    |
 | Secret visible in a client          | `ui: "all"` default on a sensitive cell                 | boot warnings (secret-looking fields, filter typos); deep-path `exclude`       |
 | Tests flake across files            | shared persisted state                                  | `testUI` is hermetic by default (persist off, unique key)                      |
-| `deno.json` mystery failures        | missing jsx / kv / nodeModulesDir lines                 | `deno task doctor`                                                             |
+| `deno.json` mystery failures        | missing jsx / nodeModulesDir lines                      | `deno task doctor`                                                             |
 
 If a symptom you hit isn't here, that's a bug in this table — report it.
 

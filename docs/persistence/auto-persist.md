@@ -1,7 +1,8 @@
 # Auto-Persist
 
-AIO auto-persists your entire state to Deno.Kv. On restart, persisted state is
-**deep-merged** with `initialState`:
+AIO auto-persists your entire state to SQLite — the `aio_kv` table in the app's
+single `data.db`. On restart, persisted state is **deep-merged** with
+`initialState`:
 
 ```ts
 // On first run:  state = initialState
@@ -45,8 +46,8 @@ await aio.run({
 
 ## Multi-key mode
 
-Default `'single'` mode stores all state in one Deno.Kv entry (65KB limit). For
-larger state, use `persistMode: 'multi'` — each top-level key is stored
+Default `'single'` mode stores all state in one `aio_kv` row. For per-cell
+granularity, use `persistMode: 'multi'` — each top-level key is stored
 separately:
 
 ```ts
@@ -57,7 +58,7 @@ await aio.run({
 ```
 
 Not compatible with an existing `'single'` store for the same `persistKey` — use
-a different `persistKey` or clear the KV store when switching.
+a different `persistKey` or clear the `aio_kv` rows when switching.
 
 ## Disabling persistence
 
@@ -107,19 +108,20 @@ curl -X POST http://localhost:8000/__aio/snapshot \
   -d '{"counter": 42}'
 ```
 
-`loadSnapshot` triggers persistence (debounced KV write), broadcasts the new
-state to all connected clients, and records a `__snapshot` entry in the
-time-travel history (dev mode).
+`loadSnapshot` triggers persistence (debounced write), broadcasts the new state
+to all connected clients, and records a `__snapshot` entry in the time-travel
+history (dev mode).
 
 ## SQLite integration
 
-For structured data (orders, products, users), aio supports SQLite alongside
-Deno.Kv. KV handles scalar UI state. SQLite handles arrays of records —
-queryable, indexed, relational.
+For structured data (orders, products, users), aio maps state to SQL tables in
+the same `data.db`. The `aio_kv` snapshot handles scalar UI state. User tables
+handle arrays of records — queryable, indexed, relational.
 
 See [sqlite.md](sqlite.md) for the full reference.
 
-Arrays under `db:` keys are automatically excluded from KV — no double-storing.
+Arrays under `db:` keys are automatically excluded from the snapshot — no
+double-storing.
 
 ### Auto-sync
 

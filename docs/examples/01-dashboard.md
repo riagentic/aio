@@ -14,7 +14,6 @@ Create a directory and add `deno.json`:
 {
   "title": "Metrics Dashboard",
   "nodeModulesDir": "auto",
-  "unstable": ["kv"],
   "compilerOptions": {
     "jsx": "react-jsx",
     "jsxImportSource": "aio"
@@ -27,7 +26,7 @@ Create a directory and add `deno.json`:
   },
   "tasks": {
     "dev": "deno run -A src/app.ts",
-    "test": "deno test -A --unstable-kv src/"
+    "test": "deno test -A src/"
   }
 }
 ```

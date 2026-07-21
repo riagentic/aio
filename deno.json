@@ -1,6 +1,6 @@
 {
   "name": "@riagentic/aio",
-  "version": "1.0.0-alpha27",
+  "version": "1.0.0-alpha28",
   "appId": "aio",
   "exports": {
     ".": "./mod.ts",
@@ -10,6 +10,7 @@
     "./jsx-runtime": "./src/jsx-runtime.ts",
     "./state-core": "./src/state-core.ts",
     "./db": "./src/db/mod.ts",
+    "./extras": "./src/extras/mod.ts",
     "./sync": "./src/sync/mod.ts",
     "./testing": "./src/cell-test.ts",
     "./schedule": "./src/schedule.ts",
@@ -39,9 +40,6 @@
       "telemetry-id"
     ]
   },
-  "unstable": [
-    "kv"
-  ],
   "compilerOptions": {
     "strict": true,
     "noUncheckedIndexedAccess": true,
@@ -114,6 +112,7 @@
     "discover": "deno run -A src/am.ts discover",
     "doctor": "deno run -A src/server/doctor.ts",
     "docs": "deno doc --html --name=aio --output=docs/api-ref mod.ts",
-    "docs:index": "deno run --allow-read --allow-write scripts/gen-doc-index.ts"
+    "docs:index": "deno run --allow-read --allow-write scripts/gen-doc-index.ts",
+    "validate:matrix": "deno test -A tests/examples.test.ts tests/examples-ui.test.ts && AIO_ONBOARD_E2E=1 deno test -A --no-check=remote tests/onboarding-e2e.test.ts && AIO_BUILD_SMOKE=1 deno test -A tests/am-onboard.test.ts"
   }
 }

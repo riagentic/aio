@@ -56,14 +56,6 @@ export function fixRemoveAppId(projectDir: string): Promise<boolean> {
   });
 }
 
-/** Add unstable: ["kv"] */
-export function fixAddUnstableKv(projectDir: string): Promise<boolean> {
-  return patchDenoJson(projectDir, (c) => {
-    if (!c.unstable) c.unstable = ["kv"];
-    else if (!c.unstable.includes("kv")) c.unstable.push("kv");
-  });
-}
-
 /** Add nodeModulesDir: "auto" */
 export function fixAddNodeModulesDir(projectDir: string): Promise<boolean> {
   return patchDenoJson(projectDir, (c) => {
@@ -111,7 +103,7 @@ export function fixAddDevTask(projectDir: string): Promise<boolean> {
 export function fixAddTestTask(projectDir: string): Promise<boolean> {
   return patchDenoJson(projectDir, (c) => {
     if (!c.tasks) c.tasks = {};
-    if (!c.tasks["test"]) c.tasks["test"] = "deno test -A --unstable-kv tests/";
+    if (!c.tasks["test"]) c.tasks["test"] = "deno test -A tests/";
   });
 }
 

@@ -5,7 +5,8 @@ import {
   createPersistenceManager,
   type PersistenceManager,
 } from "./persistence.ts";
-import { skv, type SkvInstance } from "./skv.ts";
+import type { SkvInstance } from "./skv.ts";
+import { migrateLegacyKv, SKV_SCHEMA, sqliteKv } from "./skv-sqlite.ts";
 import { createDB, type DB, initSchema, loadTables } from "../db/mod.ts";
 import type { TableDef } from "./sql.ts";
 import { deepMerge } from "../state/deep-merge.ts";
@@ -240,13 +241,24 @@ export async function bootStorage<S>(
     }
     : getDBState;
 
-  // ── 4. Open KV + restore persisted state ──────────────────────────
+  // ── 4. SQLite persistence + restore state (perfect-aio D4) ─────────
+  // ONE store: the app's data.db holds tables, sync op-log AND the aio_kv
+  // snapshot table (Deno.Kv retired — its local backend was SQLite anyway,
+  // minus a 64KiB value limit we hit in the field). Legacy KV data
+  // auto-migrates on first boot; the old file is left untouched.
   let kvDb: SkvInstance | null = null;
   if (shouldPersist) {
     try {
-      const kvPath = resolveKvPath(appId);
-      kvDb = skv(await Deno.openKv(kvPath));
-      if (kvPath) log.debug(`persist: KV at ${kvPath} mode=${persistMode}`);
+      if (!asyncDb) {
+        // Persistence needs the app db even without user tables/sync cells.
+        const dbPath = resolveDbPath(appId);
+        asyncDb = createDB(dbPath);
+        log.debug(`sqlite: opened for persistence at ${dbPath}`);
+      }
+      await asyncDb.execute(SKV_SCHEMA);
+      await migrateLegacyKv(asyncDb, resolveKvPath(appId), log);
+      kvDb = sqliteKv(asyncDb);
+      log.debug(`persist: SQLite aio_kv mode=${persistMode}`);
       const migrated = await loadAndMigrateSnapshot(
         kvDb,
         appId,
@@ -260,7 +272,7 @@ export async function bootStorage<S>(
           migrated,
         ) as S;
         log.debug(
-          `persist: loaded from KV key="${persistKey}" (${persistMode})`,
+          `persist: loaded key="${persistKey}" (${persistMode})`,
         );
       } else {
         log.debug(`persist: no saved state, using initialState`);
@@ -268,7 +280,7 @@ export async function bootStorage<S>(
     } catch (e) {
       if (e instanceof AioError) throw e; // schema mismatch — already precise
       throw new Error(
-        `KV unavailable: ${e}\nFix permissions or set persist: false to disable persistence.`,
+        `persistence unavailable: ${e}\nFix permissions or set persist: false to disable persistence.`,
       );
     }
   }

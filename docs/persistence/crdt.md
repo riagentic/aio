@@ -197,8 +197,9 @@ onSync(stats) {
 
 ## Persistence
 
-Sync cells are automatically excluded from KV. Their state lives in the SQLite
-op-log and snapshot tables. Non-sync cells use KV as before.
+Sync cells are automatically excluded from the `aio_kv` snapshot. Their state
+lives in the SQLite op-log and snapshot tables. Non-sync cells use `aio_kv` as
+before.
 
 ## Module Structure
 

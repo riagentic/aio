@@ -114,3 +114,20 @@ Deno.test({
     }
   },
 });
+
+// ── typed route params (inews #12) + Link children (inews #13) ────────
+import type { LinkProps, RouteState } from "../src/protocol/protocol-types.ts";
+
+Deno.test("types: RouteState params parameterize; LinkProps children typed", () => {
+  // Compile-time probes — fail `deno check` on regression.
+  const rs: RouteState<{ id: string }> = {
+    path: "/users/42",
+    params: { id: "42" },
+    search: new URLSearchParams(),
+    matched: true,
+  };
+  const _id: string = rs.params.id;
+  const lp: LinkProps = { to: "/x", children: ["text", 42, null] };
+  assertEquals(_id, "42");
+  assertEquals(lp.to, "/x");
+});

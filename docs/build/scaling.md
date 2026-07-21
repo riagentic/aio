@@ -8,8 +8,9 @@ right approach it handles far more than you'd expect.
 ```
 Client -> WebSocket -> aio server (single process)
                         ├── state (in-memory, small)
-                        ├── SQLite (on disk, WAL mode, fast)
-                        └── Deno.Kv (UI scalars only)
+                        └── SQLite data.db (on disk, WAL mode, fast)
+                              ├── db: tables (records)
+                              └── aio_kv snapshot (UI scalars)
 ```
 
 A single modern server can handle thousands of concurrent WebSocket connections.
@@ -216,7 +217,7 @@ Move large collections to SQLite and query on demand.
 
 | Setting                       | Value                      | Why                            |
 | ----------------------------- | -------------------------- | ------------------------------ |
-| `persist: { exclude: [...] }` | exclude UI-only fields     | Reduce Deno.Kv write frequency |
+| `persist: { exclude: [...] }` | exclude UI-only fields     | Reduce persist write frequency |
 | `perfCheck: 'on'`             | log violations to perf.log | Catch desktop-specific issues  |
 
 Time-travel history is capped at 200 entries (dev mode only, zero in prod).

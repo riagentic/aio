@@ -69,9 +69,9 @@ Keys must match the corresponding state array names:
 
 ```ts
 type AppState = {
-  page: string; // → KV (scalar UI state)
-  users: User[]; // → SQLite (arrays)
-  orders: Order[]; // → SQLite
+  page: string; // → aio_kv snapshot (scalar UI state)
+  users: User[]; // → SQL table (arrays)
+  orders: Order[]; // → SQL table
 };
 
 await aio.run({
@@ -80,7 +80,7 @@ await aio.run({
 });
 ```
 
-- Arrays under `db:` keys are **auto-excluded from KV**
+- Arrays under `db:` keys are **auto-excluded from the `aio_kv` snapshot**
 - On startup, rows load from SQLite into state
 - After each reducer run, changed arrays sync back (debounced, default 100ms)
 
@@ -238,9 +238,9 @@ await app.db!.transaction([
 aio.run()
   ├─ createDB(path)          // create DB handle (worker not spawned yet)
   ├─ initSchema(db, schema)  // worker spawns; CREATE TABLE IF NOT EXISTS
-  ├─ loadKV()                // restore scalar UI state from Deno.Kv
+  ├─ loadKV()                // restore scalar UI state from the aio_kv table
   ├─ onRestore(state)        // optional user hook
-  └─ loadTables(db, schema)  // SELECT * → populate state arrays (SQLite wins over KV)
+  └─ loadTables(db, schema)  // SELECT * → populate state arrays (tables win over the snapshot)
 ```
 
 ## Default pragmas
@@ -337,4 +337,5 @@ await app.db!.execute("PRAGMA wal_checkpoint(TRUNCATE)");
 ### Restore
 
 Stop the app, replace the `.db` file (delete `.db-wal`/`.db-shm`), restart.
-`aio.run()` loads restored data normally. KV state restores separately.
+`aio.run()` loads restored data normally. The `aio_kv` snapshot lives in the
+same file, so it restores with it.

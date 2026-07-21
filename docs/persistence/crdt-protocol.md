@@ -183,15 +183,15 @@ state changed).
 
 ## Framework Integration
 
-| File             | What it does                                                    |
-| ---------------- | --------------------------------------------------------------- |
-| `cell-create.ts` | Parses `sync` option, calls `normalizeSyncConfig()`             |
-| `cell-types.ts`  | Stores `syncConfig` on `CellAio`                                |
-| `state-core.ts`  | `setSyncHandler()` hook intercepts sync actions in `send()`     |
-| `server.ts`      | `syncHandler` in `ServerConfig` routes `__op`/`__sync` messages |
-| `persistence.ts` | `syncCells` set auto-excludes sync cells from KV                |
-| `aio.ts`         | Collects `_syncCellIds`, initializes sync SQLite tables         |
-| `config.ts`      | `_syncCellIds` registered in valid config keys                  |
+| File             | What it does                                                        |
+| ---------------- | ------------------------------------------------------------------- |
+| `cell-create.ts` | Parses `sync` option, calls `normalizeSyncConfig()`                 |
+| `cell-types.ts`  | Stores `syncConfig` on `CellAio`                                    |
+| `state-core.ts`  | `setSyncHandler()` hook intercepts sync actions in `send()`         |
+| `server.ts`      | `syncHandler` in `ServerConfig` routes `__op`/`__sync` messages     |
+| `persistence.ts` | `syncCells` set auto-excludes sync cells from the `aio_kv` snapshot |
+| `aio.ts`         | Collects `_syncCellIds`, initializes sync SQLite tables             |
+| `config.ts`      | `_syncCellIds` registered in valid config keys                      |
 
 ## Sync Engine Dependencies
 

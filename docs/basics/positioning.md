@@ -16,11 +16,11 @@ yours.
 
 - **Content/marketing sites & SEO** — AIR is client-rendered with basic SSR;
   there are no server components. Use a content framework.
-- **Planet-scale public APIs** — the embedded model (Deno.Kv/SQLite, one
-  process) is the point, not a limitation to engineer around. Multi-region
-  distributed state, horizontal fleets → use a distributed stack.
+- **Planet-scale public APIs** — the embedded model (SQLite, one process) is the
+  point, not a limitation to engineer around. Multi-region distributed state,
+  horizontal fleets → use a distributed stack.
 - **Native iOS** — Android ships via WebView; iOS is not targeted.
-- **Other runtimes** — aio is Deno-native (Kv, compile, workers). No Node/Bun.
+- **Other runtimes** — aio is Deno-native (compile, workers). No Node/Bun.
 - **Renderer pluralism** — AIR is the renderer. React compat exists as shims
   (`aio/air/compat`) for migration, not as a parallel first-class path.
 

@@ -1,0 +1,92 @@
+// server-fns.ts — the explicit server/client seam (perfect-aio D3/B3).
+//
+// Define real server functions in a *.server.ts file:
+//
+//   export const api = serverFns("api", {
+//     chargeCard: async (amount: number) => await stripe.charge(amount),
+//   });
+//
+// Use them ANYWHERE (cell methods, components) via the typed resolver:
+//
+//   import type { api } from "./api.server.ts";   // type-only — erased
+//   const fns = serverFn<typeof api>("api");
+//   const r = await fns.chargeCard(s.total);       // explicit server hop
+//
+// On the server, serverFn() resolves the registered real functions; in the
+// browser it resolves a WS proxy (cid-correlated request/response, 30s
+// fail-loud timeout). The hop is VISIBLE in code — the one seam.
+
+// deno-lint-ignore no-explicit-any
+type FnMap = Record<string, (...args: any[]) => any>;
+
+const _registry = new Map<string, FnMap>();
+
+/** Register a namespace of server functions (call in a *.server.ts file —
+ *  the browser bundle must never contain the bodies). Returns the map for
+ *  direct server-side use. Duplicate namespaces fail loudly. */
+export function serverFns<T extends FnMap>(ns: string, fns: T): T {
+  if (_registry.has(ns)) {
+    throw new Error(
+      `serverFns("${ns}") already registered — namespaces are unique per ` +
+        `process. Pick a different name or register once and share the ref.`,
+    );
+  }
+  _registry.set(ns, fns);
+  return fns;
+}
+
+/** Resolve a namespace to its typed callable map. Server-side impl: returns
+ *  the REAL functions (lazy proxy, so import order never matters); the
+ *  browser build swaps in the WS proxy with the same signature. */
+export function serverFn<T extends FnMap>(ns: string): T {
+  return new Proxy({} as T, {
+    get(_t, prop) {
+      if (typeof prop !== "string") return undefined;
+      return (...args: unknown[]) => {
+        const fns = _registry.get(ns);
+        if (!fns || typeof fns[prop] !== "function") {
+          return Promise.reject(
+            new Error(
+              `serverFn("${ns}").${prop} — namespace or function not ` +
+                `registered. Did the *.server.ts module with serverFns("${ns}", …) ` +
+                `get imported by the server entry?`,
+            ),
+          );
+        }
+        try {
+          return Promise.resolve(fns[prop]!(...args));
+        } catch (e) {
+          return Promise.reject(e);
+        }
+      };
+    },
+  });
+}
+
+/** Server WS route: run a client-requested fn, reply with the outcome.
+ *  Errors carry the server's message — fail loud on the client, never hang. */
+export async function invokeServerFn(
+  ns: string,
+  name: string,
+  args: unknown[],
+): Promise<{ ok: true; value: unknown } | { ok: false; error: string }> {
+  const fns = _registry.get(ns);
+  const fn = fns?.[name];
+  if (typeof fn !== "function") {
+    return {
+      ok: false,
+      error:
+        `serverFn "${ns}.${name}" is not registered on the server (check the *.server.ts module is imported by the entry)`,
+    };
+  }
+  try {
+    return { ok: true, value: await fn(...args) };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
+/** Test isolation. */
+export function _resetServerFns(): void {
+  _registry.clear();
+}

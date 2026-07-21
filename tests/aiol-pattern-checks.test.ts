@@ -192,7 +192,7 @@ export const counter = cell('counter', {
 // ── v2 Style-B detection (perfect-aio D10) ────────────────────────────
 import { checkCells } from "../aiol/checks.ts";
 
-Deno.test("aiol: removed v1 config keys report the migration mapping", async () => {
+Deno.test("aiol: removed legacy config keys report the migration mapping", async () => {
   await withTmpDir(async (dir) => {
     await project(
       dir,
@@ -209,9 +209,36 @@ export const legacy = cell("legacy", {
     const { ctx, report } = await buildContext(dir);
     checkCells({ ...ctx, ...report });
     const errors = report.issues.filter((i) =>
-      i.severity === "error" && i.message.includes("docs/upgrade/to-v2.md")
+      i.severity === "error" &&
+      i.message.includes("docs/upgrade/restructure.md")
     );
     // actions, generators, machine all detected
     assertEquals(errors.length >= 3, true, JSON.stringify(report.issues));
+  });
+});
+
+Deno.test("aiol: flags core imports of symbols moved to aio/extras (B4c)", async () => {
+  await withTmpDir(async (dir) => {
+    await project(
+      dir,
+      `
+import { cell, deepFreeze, instances } from 'aio'
+export const counter = cell('counter', {
+  state: { count: 0 },
+  methods: { inc(s) { s.count += 1 } },
+})
+`,
+    );
+    const { ctx, report } = await buildContext(dir);
+    const { checkCells } = await import("../aiol/checks.ts");
+    await checkCells(ctx);
+    const hits = report.issues.filter((i) =>
+      i.message.includes('moved to "aio/extras"')
+    );
+    assertEquals(hits.length, 1);
+    assertEquals(hits[0]!.severity, "error");
+    // names listed, cell itself NOT flagged
+    assertEquals(hits[0]!.message.includes("deepFreeze, instances"), true);
+    assertEquals(hits[0]!.message.includes("cell,"), false);
   });
 });

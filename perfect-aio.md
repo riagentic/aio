@@ -271,13 +271,14 @@ low-drama, and it leaves Bet 1's seam (our users' #1 pain) in place forever.
 
 **Brave (this doc):**
 
-| Step | What                                                   | Includes from v1                   |
-| ---- | ------------------------------------------------------ | ---------------------------------- |
-| B1   | Methods + patches only; delete the redux layer (Bet 2) | "patches as currency"              |
-| B2   | Instance-scoped runtime (Bet 3)                        | "one runtime core" — falls out     |
-| B3   | Local-first default + server functions (Bet 1)         | dev==prod, offline, kills the seam |
-| B4   | One wire envelope; SQLite-only store; surface diet     | v1's #3/#4 + trims                 |
-| B5   | Off-box remote validation; then beta gate              | —                                  |
+| Step | What                                                                                                                                                                                                        | Includes from v1 |
+| ---- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------- |
+| Step | Status                                                                                                                                                                                                      |                  |
+| B1   | ✅ alpha27 — Methods + patches only; redux layer deleted (Bet 2)                                                                                                                                            |                  |
+| B2   | ✅ alpha27 — Instance-scoped runtime (Bet 3)                                                                                                                                                                |                  |
+| B3   | ✅ phase 1 (alpha28) — D11 rejections + serverFns; `localFirst: true` deferred until field mileage (spec: docs/specs/2026-07-22-local-first.md)                                                             |                  |
+| B4   | ✅ alpha28 — SQLite-only store (B4a), surface diet → aio/extras (B4c), typed wire catalog + demux defect fixes (B4b phase 1; byte-level single-envelope encoding lands with the next PROTOCOL_VERSION bump) |                  |
+| B5   | ✅ automatable slice (alpha28) — `deno task validate:matrix` + docs/build/validation-runbook.md; physical runs (off-box remote, Win/macOS, real Android) await the user's machines                          |                  |
 
 **My recommendation: the brave path, in that order.** B1 and B2 are almost pure
 deletion + scoping (weeks, not months, with our gate suite). B3 is the big one —

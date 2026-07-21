@@ -21,9 +21,9 @@ flowchart LR
         SCHED[Scheduler]
         ROUTES[Custom routes]
     end
-    subgraph storage [Persistence]
-        KV[(Deno.Kv)]
-        SQL[(SQLite)]
+    subgraph storage [Persistence — one data.db]
+        KV[(aio_kv snapshot)]
+        SQL[(db: tables)]
     end
     B & E & A & C <-- "actions ↑ / patches ↓" --> WS
     WS --> CELLS
@@ -133,7 +133,7 @@ Folders may only import what the dependency matrix in
 
 ## Programming Model
 
-One style — methods (v2; see [to-v2.md](../upgrade/to-v2.md)):
+One style — methods (v2; see [restructure.md](../upgrade/restructure.md)):
 
 | Need              | Style                                              |
 | ----------------- | -------------------------------------------------- |

@@ -3,7 +3,7 @@
 Defining cells, managing state, and coordinating workflows.
 
 > v2: methods is the one style — see
-> [docs/upgrade/to-v2.md](../upgrade/to-v2.md) for migration from
+> [docs/upgrade/restructure.md](../upgrade/restructure.md) for migration from
 > `actions:`/`reduce:`/`machine:`/`generators:`.
 
 ## Core

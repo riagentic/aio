@@ -176,7 +176,10 @@ export function createDispatch<S, A, E>(
       : "BUDGET_EFFECT";
     const err = createAioError(
       code,
-      `${source} exceeded budget: ${duration.toFixed(1)}ms > ${budget}ms`,
+      `${source} exceeded budget: ${duration.toFixed(1)}ms > ${budget}ms` +
+        (source === "effect"
+          ? " (async method: only the SYNC prefix before the first await counts here — move heavy sync work off the dispatch path or into awaited chunks)"
+          : ""),
       { cellName: type?.split(":")[0], actionType: type, duration, budget },
     );
     reportAioError(err, _reportOpts);

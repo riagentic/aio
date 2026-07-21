@@ -22,9 +22,9 @@ await aio.run({
 ```
 
 This is the single source of truth for app identity — used for lock files, UDS
-sockets, KV/SQLite paths, and `am` commands. The value is slugified (lowercase
-alphanumeric + hyphens). **`appId` is mandatory** — the app will not start
-without it.
+sockets, the `data.db` path, and `am` commands. The value is slugified
+(lowercase alphanumeric + hyphens). **`appId` is mandatory** — the app will not
+start without it.
 
 For `am` commands, use `--app=X` to specify which app to manage, or add `appId`
 to `deno.json` as a dev convenience.
@@ -88,7 +88,7 @@ appId, port, PID, uptime, and cwd.
 **Programmatic:**
 
 ```ts
-import { instances, resolveAppId } from "aio";
+import { instances, resolveAppId } from "aio/extras";
 
 const running = await instances(); // all running apps
 const mine = await instances("my-app"); // specific app
@@ -143,7 +143,7 @@ action history with timestamps and performance metrics (`reduce:ms effects:ms`).
 ## Persistence and snapshots
 
 ```sh
-deno task am persist                        # force flush to KV/SQLite
+deno task am persist                        # force flush to SQLite
 deno task am snapshot                       # dump state to stdout
 deno task am snapshot save backup.json      # save to file
 deno task am snapshot load backup.json      # restore from file
@@ -271,6 +271,6 @@ deno task am log --client --json | jq 'select(.level == "ERROR")'
 | `am start` says "port in use"    | Non-aio process on port. Use `--port=N`                 |
 | `am` targets wrong app           | Check `appId` in `aio.run()` — use `--app=X`            |
 | Actions do nothing               | Check browser console + `--verbose` log for WS messages |
-| State resets on restart          | `persist: true` + `"unstable": ["kv"]` in deno.json     |
+| State resets on restart          | Ensure `persist` isn't `false`/`"none"`                 |
 | Port in use                      | Kill old process or use `--port=N`                      |
 | Server dies when Electron closes | Use `--keep-server` flag or `keepServer: true`          |

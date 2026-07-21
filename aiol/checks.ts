@@ -34,13 +34,14 @@ export const checkConfig: Checker = (ctx) => {
     );
   }
 
-  // unstable: ["kv"]
-  if (!dj.unstable?.includes("kv")) {
+  // unstable: ["kv"] — obsolete since the alpha28 restructure (persistence
+  // is SQLite-only; legacy Deno.Kv data migrates automatically on boot).
+  if (dj.unstable?.includes("kv")) {
     report(
-      "warn",
+      "hint",
       "config",
-      'missing "unstable": ["kv"] — required for state persistence',
-      { fix: 'Add "unstable": ["kv"]', safeFix: fix.fixAddUnstableKv },
+      '"unstable": ["kv"] is no longer needed — persistence is SQLite-only since alpha28 (legacy KV data auto-migrates)',
+      { fix: 'Remove "kv" from "unstable" in deno.json' },
     );
   }
 
@@ -110,7 +111,7 @@ export const checkConfig: Checker = (ctx) => {
     report(
       "hint",
       "config",
-      'no "test" task — add "test": "deno test -A --unstable-kv tests/"',
+      'no "test" task — add "test": "deno test -A tests/"',
       { safeFix: fix.fixAddTestTask },
     );
   }
@@ -279,7 +280,7 @@ export const checkCells: Checker = (ctx) => {
     `${cells.length} cell(s): ${cells.map((f) => f.name).join(", ")}`,
   );
 
-  // aio v2 (perfect-aio D1/D10): Style-B config keys were removed — detect
+  // the restructure (perfect-aio D1/D10): Style-B config keys were removed — detect
   // them STATICALLY and print the exact migration mapping, so an old app
   // learns the fix from `deno task lint` before it even boots.
   for (const f of cells) {
@@ -305,9 +306,47 @@ export const checkCells: Checker = (ctx) => {
         report(
           "error",
           "cells",
-          `cell "${f.name}" uses removed v1 config '${key}' — ${hint}. Migration: docs/upgrade/to-v2.md`,
+          `cell "${f.name}" uses removed legacy config '${key}' — ${hint}. Migration: docs/upgrade/restructure.md`,
         );
       }
+    }
+  }
+
+  // the restructure (perfect-aio D5/B4c): periphery moved off the core entry to
+  // aio/extras — detect old imports and print the one-line fix.
+  const EXTRAS_MOVED = new Set([
+    "lint",
+    "parseCli",
+    "draft",
+    "matchEffect",
+    "deepFreeze",
+    "markAsync",
+    "instances",
+    "resolveAppId",
+    "connectCliUDS",
+    "createSliceSelector",
+    "DEFAULT_PRAGMAS",
+    "UnionOf",
+  ]);
+  for (const file of ctx.sourceFiles) {
+    for (
+      const m of file.content.matchAll(
+        /import\s+(?:type\s+)?\{([^}]*)\}\s*from\s*['"]aio['"]/g,
+      )
+    ) {
+      const moved = m[1]!.split(",")
+        .map((n) => n.trim().replace(/^type\s+/, "").split(/\s+as\s+/)[0]!)
+        .filter((n) => EXTRAS_MOVED.has(n));
+      if (moved.length === 0) continue;
+      const lineIdx = file.content.slice(0, m.index).split("\n").length;
+      report(
+        "error",
+        "cells",
+        `${file.relative}:${lineIdx} — ${
+          moved.join(", ")
+        } moved to "aio/extras" (alpha28 core diet) — change the import specifier. Migration: docs/upgrade/restructure.md`,
+        { file: file.relative, line: lineIdx },
+      );
     }
   }
 
@@ -1091,7 +1130,7 @@ export const checkTesting: Checker = (ctx) => {
     report(
       "hint",
       "testing",
-      'no "test" task in deno.json — add "test": "deno test -A --unstable-kv tests/"',
+      'no "test" task in deno.json — add "test": "deno test -A tests/"',
       { safeFix: fix.fixAddTestTask },
     );
   }

@@ -6,7 +6,7 @@ You have an existing Deno application and want to integrate AIO.
 
 ```
 aio.run({ cells: [...] }) ->
-  Deno.Kv persistence + HTTP/WS server + UI (Electron or browser)
+  SQLite persistence + HTTP/WS server + UI (Electron or browser)
 ```
 
 Data flow: **UI -> method call -> state mutation -> persist -> broadcast -> sync
@@ -29,7 +29,6 @@ resolves to an old stable).
 ```jsonc
 {
   "title": "My App",
-  "unstable": ["kv"],
   "compilerOptions": {
     "jsx": "react-jsx",
     "jsxImportSource": "aio"
@@ -43,7 +42,7 @@ resolves to an old stable).
   "tasks": {
     "dev": "deno run -A src/app.ts",
     "am": "deno run -A jsr:@riagentic/aio@^1.0.0-alpha17/am",
-    "test": "deno test -A --unstable-kv tests/",
+    "test": "deno test -A tests/",
     "compile:browser": "deno run -A jsr:@riagentic/aio@^1.0.0-alpha17/build --compile",
     "compile:electron": "deno run -A jsr:@riagentic/aio@^1.0.0-alpha17/build --compile --electron"
   }
@@ -115,17 +114,17 @@ await aio.run({ cells: [counter] });
 | `useSelector(s => s.counter)`        | `counter.count` (direct) | Auto-scoped, selective re-renders        |
 | `useDispatch()` + `dispatch(action)` | `send.increment()`       | Typed, no raw dispatch                   |
 | `createAsyncThunk`                   | `async` methods          | No thunk boilerplate                     |
-| `persistReducer`                     | Automatic                | Deno.Kv persistence built-in             |
+| `persistReducer`                     | Automatic                | SQLite persistence built-in              |
 
 ### Zustand -> aio
 
-| Zustand                  | aio                                | Notes                     |
-| ------------------------ | ---------------------------------- | ------------------------- |
-| `create((set) => ...)`   | `cell('name', { state, methods })` | Similar Immer-style DX    |
-| `set({ count: 1 })`      | `s.count = 1` inside a method      | Same mutation style       |
-| `useStore(s => s.count)` | `counter.count` (direct)           | Auto-scoped               |
-| `persist` middleware     | Automatic                          | Built-in Deno.Kv + SQLite |
-| Multiple stores          | Multiple cells                     | One cell per domain       |
+| Zustand                  | aio                                | Notes                       |
+| ------------------------ | ---------------------------------- | --------------------------- |
+| `create((set) => ...)`   | `cell('name', { state, methods })` | Similar Immer-style DX      |
+| `set({ count: 1 })`      | `s.count = 1` inside a method      | Same mutation style         |
+| `useStore(s => s.count)` | `counter.count` (direct)           | Auto-scoped                 |
+| `persist` middleware     | Automatic                          | Built-in SQLite persistence |
+| Multiple stores          | Multiple cells                     | One cell per domain         |
 
 **Key difference:** Redux/Zustand state lives in the browser. aio state lives on
 the server -- the browser gets a synced view via WebSocket.
@@ -168,7 +167,7 @@ const counter = cell("counter", {
 | You have                          | AIO equivalent                                                 |
 | --------------------------------- | -------------------------------------------------------------- |
 | REST API endpoints                | Actions via WebSocket, no HTTP needed                          |
-| Database reads/writes             | Cell-level `persist`/`ui` config + auto Deno.Kv                |
+| Database reads/writes             | Cell-level `persist`/`ui` config + auto SQLite persistence     |
 | SQLite / raw SQL                  | Built-in `app.db` -- [3-tier SQLite](../persistence/sqlite.md) |
 | `setInterval` / `setTimeout`      | Declarative `schedule.every` / `schedule.after`                |
 | cron jobs                         | `schedule.cron` -- runs in-process                             |

@@ -193,7 +193,7 @@ const app = initStandalone(initialState, {
 ```
 
 **Differences from `aio.run()`:** no server, no WebSocket — dispatch loop runs
-in the browser. Persistence via `localStorage` instead of Deno.Kv.
+in the browser. Persistence via `localStorage` instead of SQLite.
 `app.mode === 'standalone'`.
 
 ## compile:android (standalone APK)

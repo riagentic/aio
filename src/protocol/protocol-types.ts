@@ -30,10 +30,13 @@ export type AioIPC = {
   onClose: (fn: () => void) => void;
 };
 
-/** Match state returned by {@linkcode useRoute}. */
-export type RouteState = {
+/** Match state returned by {@linkcode useRoute}. Parameterize for typed
+ *  route params: `useRoute<{ id: string }>("/users/:id").params.id`. */
+export type RouteState<
+  P extends Record<string, string> = Record<string, string>,
+> = {
   path: string;
-  params: Record<string, string>;
+  params: P;
   search: URLSearchParams;
   matched: boolean;
 };
@@ -42,9 +45,22 @@ export type RouteState = {
 export type RouteProps = {
   path?: string;
   index?: boolean;
-  element?: unknown;
-  children?: unknown;
+  element?: RenderableChild;
+  children?: RenderableChildren;
 };
+
+/** Renderable content — a VNode, text, or a list of them (inews #13:
+ *  `children: unknown` forced casts in strict apps). Structural, so it stays
+ *  renderer-agnostic at the protocol layer. */
+export type RenderableChild =
+  | { tag: unknown }
+  | string
+  | number
+  | boolean
+  | null
+  | undefined;
+/** Children prop shape for router components. */
+export type RenderableChildren = RenderableChild | RenderableChild[];
 
 /** Props for {@linkcode Link} / {@linkcode NavLink}. */
 export type LinkProps = {
@@ -53,7 +69,7 @@ export type LinkProps = {
   exact?: boolean;
   activeClass?: string;
   activeStyle?: Record<string, unknown>;
-  children?: unknown;
+  children?: RenderableChildren;
   className?: string;
   style?: Record<string, unknown>;
   [k: string]: unknown;

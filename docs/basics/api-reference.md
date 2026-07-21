@@ -1,7 +1,7 @@
 # API Reference
 
 > v2: methods is the one style — see
-> [docs/upgrade/to-v2.md](../upgrade/to-v2.md) for the removed
+> [docs/upgrade/restructure.md](../upgrade/restructure.md) for the removed
 > `actions`/`reduce`/`machine`/`generators`/middleware surface.
 
 Universal: `import { aio, cell, log } from "aio"` (state, lifecycle, logging)
@@ -91,7 +91,7 @@ Method-native workflow tools — see
 | `cancelOn`              | Abort triggers per async method -- `{ method: [actions] }` |
 | `listensTo`             | Observed foreign actions -- `[otherCell.action]`           |
 | `validate`              | State validator -- `(s) => true \| string`                 |
-| `persist`               | KV persistence config -- `{ exclude: ['tempCache'] }`      |
+| `persist`               | Persistence config -- `{ exclude: ['tempCache'] }`         |
 | `version` / `onMigrate` | State-shape versioning + migration hook                    |
 | `onInit`                | Init hook -- `(app) => { ... }` runs after aio.run()       |
 | `onDestroy`             | Destroy hook -- `(app) => { ... }` runs before shutdown    |
@@ -177,7 +177,7 @@ Method-native workflow tools — see
 
 | Config                                                   | Description                                    |
 | -------------------------------------------------------- | ---------------------------------------------- |
-| `persist: true`                                          | Auto-persist state to Deno.Kv                  |
+| `persist: true`                                          | Auto-persist state to SQLite (`data.db`)       |
 | `persist: "all" \| "none" \| { include } \| { exclude }` | Per-cell persistence filter                    |
 | `ui: "all" \| "none" \| { include } \| { exclude }`      | Per-cell UI visibility filter                  |
 | `ui: { include, forUser }`                               | Per-cell UI visibility with per-user transform |

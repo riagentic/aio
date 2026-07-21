@@ -8,7 +8,8 @@ How AIO stores, syncs, and transports state.
 
 ## Storage
 
-- [Auto-Persist](auto-persist.md) — Deno.Kv automatic state persistence
+- [Auto-Persist](auto-persist.md) — automatic state persistence to SQLite
+  (`aio_kv`)
 - [SQLite](sqlite.md) — schema, queries, transactions, WAL
 
 ## Sync
