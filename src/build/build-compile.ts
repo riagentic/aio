@@ -98,6 +98,15 @@ export async function withDevExcluded(
   return ok;
 }
 
+/** `--include` args embedding the SQLite worker. It's loaded via
+ *  `new Worker(new URL(...))` — deno compile can't trace that statically —
+ *  and EVERY compiled binary needs it since B4a (persistence always opens
+ *  the worker-thread DB for the aio_kv store). */
+export function dbWorkerInclude(): string[] {
+  const dbWorker = new URL("../db/db-worker.ts", import.meta.url);
+  return dbWorker.protocol === "file:" ? ["--include", dbWorker.pathname] : [];
+}
+
 /** Run deno compile. Returns true on success. */
 export async function runDenoCompile(cfg: BuildConfig): Promise<boolean> {
   const { root, dist, binaryName, configEntry, doElectron } = cfg;
@@ -113,12 +122,15 @@ export async function runDenoCompile(cfg: BuildConfig): Promise<boolean> {
     hasDist = (await Deno.stat(dist)).isDirectory;
   } catch { /* no dist */ }
 
+  const workerInclude = dbWorkerInclude();
+
   const ok = await withDevExcluded("compile", nmDir, async (excludes) => {
     const result = await new Deno.Command("deno", {
       args: [
         "compile",
         "-A",
         ...(hasDist ? ["--include", "dist/"] : []),
+        ...workerInclude,
         ...excludes.flatMap((e) => ["--exclude", e]),
         "-o",
         compileTarget,

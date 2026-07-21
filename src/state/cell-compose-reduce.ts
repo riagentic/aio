@@ -1,6 +1,7 @@
 // cell-compose-reduce.ts — per-cell reducer and root reduce function
 
 import { notifyMethodCancel } from "./method-cancel.ts";
+import { clearLastRejection, setLastRejection } from "./rejection-tracker.ts";
 import {
   current,
   type Draft,
@@ -205,6 +206,9 @@ export function reduceCell(
         } else {
           log.error("cell", `${cellName} state validation failed: ${result}`);
         }
+        // D11: explainable rejection — the sync handler reads this and tells
+        // the op's origin client WHY its optimistic change snapped back.
+        setLastRejection({ cell: cellName, reason: String(result) });
         return { state: fullState, effects: [] };
       }
     }
@@ -295,6 +299,8 @@ export function reduceCell(
       } else {
         log.error("cell", `${cellName} state validation failed: ${result}`);
       }
+      // D11: explainable rejection (see above).
+      setLastRejection({ cell: cellName, reason: String(result) });
       return { state: fullState, effects: [] };
     }
   }
@@ -388,6 +394,8 @@ export function buildRootReducer(
     state: Record<string, unknown>,
     action: Msg,
   ): ReduceResult => {
+    // D11: a rejection belongs to exactly one dispatch.
+    clearLastRejection();
     let currentState = state;
     const allEffects: (Msg | ScheduleEffect | OwnEffect)[] = [];
     const allPatches: Array<{ cell: string; ops: Patch[] }> = [];

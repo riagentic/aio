@@ -46,10 +46,10 @@
 - [`aio/ui` — the component kit](ui/kit.md) — A small, deliberately basic set of components for aio's core use case —
 - [React components in aio — islands](ui/react-islands.md) — aio's renderer is AIR, not React.
 
-## Persistence & sync — KV, SQLite, CRDT, offline
+## Persistence & sync — SQLite, CRDT, offline
 
 - [Persistence & Data](persistence/README.md) — How AIO stores, syncs, and transports state.
-- [Auto-Persist](persistence/auto-persist.md) — AIO auto-persists your entire state to Deno.Kv.
+- [Auto-Persist](persistence/auto-persist.md) — AIO auto-persists your entire state to SQLite — the aiokv table in the app's
 - [CRDT Internals](persistence/crdt-protocol.md) — Wire protocol, client-side flow, server compaction, and framework integration
 - [CRDT Sync Layer](persistence/crdt.md) — Offline-first collaborative state for AIO cells.
 - [Delta & Data Transport](persistence/delta.md) — How data flows from server to browser and how to optimize it.
@@ -85,6 +85,7 @@
 - [Runtime differences](build/runtime-differences.md) — The same cell code runs in three places.
 - [Scaling](build/scaling.md) — aio runs as a single Deno process with SQLite and WebSocket broadcast.
 - [Compile Targets](build/targets.md) — Build targets follow compile:<shell>:<topology> — two axes: shell (what
+- [Full-matrix validation runbook (perfect-aio D6/B5)](build/validation-runbook.md) — D6 promises FULL support: 5 local targets + 6 remote forms, on
 
 ## Debugging & production — errors, vitals, monitoring
 
@@ -113,6 +114,8 @@
 - [Upgrade: 1.0.0-alpha13 → 1.0.0-alpha14](upgrade/from-alpha13-to-alpha14.md) — Alpha14 applies the public-surface audit (roadmap A1,
 - [Upgrade: 1.0.0-alpha17 → 1.0.0-alpha18](upgrade/from-alpha17-to-alpha18.md) — Alpha18 is additive (no exports removed, no config renamed) — most apps upgrade
 - [Upgrade from v1.0.0-alpha2 to v1.0.0-alpha3](upgrade/from-alpha2-to-alpha3.md) — If you have tooling parsing JSON logs, update it.
+- [Upgrade: 1.0.0-alpha26 → 1.0.0-alpha27](upgrade/from-alpha26-to-alpha27.md) — alpha27 is the start of the restructure — the largest breaking change in aio's
+- [Upgrade: 1.0.0-alpha27 → 1.0.0-alpha28](upgrade/from-alpha27-to-alpha28.md) — alpha28 completes the restructure (B3–B5).
 - [Upgrade from v1.0.0-alpha3 to v1.0.0-alpha4](upgrade/from-alpha3-to-alpha4.md) — If you rely on effects completing after timeout (e.g., fire-and-forget with a
 - [Upgrade from v1.0.0-alpha4 to v1.0.0-alpha5](upgrade/from-alpha4-to-alpha5.md) — None.
 - [Upgrade from v1.0.0-alpha5 to v1.0.0-alpha6](upgrade/from-alpha5-to-alpha6.md) — None.
@@ -129,7 +132,7 @@
 - [Upgrade from v0.7 to v0.8](upgrade/from-v0.7-to-v0.8.md) — The function form with { A } / { E } context is removed from the default
 - [Upgrade from v0.8 to v0.9](upgrade/from-v0.8-to-v0.9.md) — All app.db calls must be awaited.
 - [Upgrade from v0.9 to v1.0.0-alpha](upgrade/from-v0.9-to-v1.0.0-alpha.md) — appId is no longer read from deno.json — it must be passed directly.
-- [Migrating to aio v2 (the perfect-aio restructure)](upgrade/to-v2.md) — This guide tracks every breaking change of the v2 restructure
+- [The aio restructure — alpha27/alpha28 breaking changes](upgrade/restructure.md) — This guide tracks every breaking change of the restructure
 
 ## Design specs — decision records — background, not manuals
 
@@ -137,3 +140,4 @@
 - [Public-surface audit (roadmap A1)](specs/2026-07-04-public-surface-audit.md) — Date: 2026-07-04 · Basis: deno doc --json over all 14 deno.json exports ·
 - [Semantic UI testing — first-class, selector-free (alpha18 foundation)](specs/2026-07-10-semantic-ui-testing.md) — automatically exposed as an intuitive, executable API — driven by tests
 - [Storage backend interface (design — pre-freeze reservation)](specs/2026-07-11-storage-backend-interface.md) — (3-tier db + sync op store).
+- [Local-first execution (perfect-aio D3) — design](specs/2026-07-22-local-first.md) — Status: design + prototype phase (the D3 gate: no mass migration before this

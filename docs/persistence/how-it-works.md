@@ -9,37 +9,40 @@ Action dispatched → reduce → new state → schedulePersist()
                                               ↓ (debounce 100ms)
                                          flushPersist()
                                         ↙            ↘
-                                   Deno.Kv          SQLite
-                                (auto-persist)    (db schema)
+                                 aio_kv snapshot   user tables
+                                 (auto-persist)    (db schema)
+                                        ↘            ↙
+                                     SQLite (data.db)
 ```
 
 Every dispatched action triggers `schedulePersist()`. The debounce timer
 (default 100ms, configurable via `persistDebounceMs`) coalesces rapid state
-changes into one write. When the timer fires, KV and SQLite sync run **in
-parallel**.
+changes into one write. When the timer fires, the table sync and the snapshot
+write run in one flush cycle — both land in the app's single `data.db`.
 
-## Two Storage Engines
+## One Database, Two Write Paths
 
-|                    | Deno.Kv (auto-persist)                    | SQLite (db schema)                      |
+Everything persists to **one SQLite file** (`data.db`). Inside it there are two
+write paths:
+
+|                    | `aio_kv` snapshot table (auto-persist)    | User tables (db schema)                 |
 | ------------------ | ----------------------------------------- | --------------------------------------- |
 | **Config**         | `persist: "all"` or `{ include/exclude }` | `dbSchema: { table(...) }`              |
-| **Size limit**     | 65KB per key (warns at 50KB)              | None                                    |
+| **Size limit**     | None                                      | None                                    |
 | **Write strategy** | Full state replacement                    | Incremental diff (INSERT/UPDATE/DELETE) |
-| **Worker**         | Main thread (async KV API)                | Dedicated worker thread (WAL mode)      |
-| **Use case**       | Simple state, small payloads              | Tables, queries, large datasets         |
+| **Use case**       | Simple state, scalar UI state             | Tables, queries, large datasets         |
 
-Cells with `sync: true` skip KV — their state flows through the CRDT op-log in
-SQLite instead.
+Cells with `sync: true` skip the snapshot — their state flows through the CRDT
+op-log in SQLite instead.
 
-## Deno.Kv Persistence
+## Snapshot Persistence (`aio_kv`)
 
-Two modes controlled by `persistMode`:
+Snapshots are JSON values in the `aio_kv` table — inspect them any time with
+`am sql "SELECT * FROM aio_kv"`. Two modes controlled by `persistMode`:
 
-- **`"single"`** (default) — entire filtered state stored as one KV entry. Fast
-  for small state, hits 65KB limit on larger apps.
-- **`"multi"`** — each top-level cell stored as a separate KV entry under
-  `[persistKey, cellName]`. Bypasses the 65KB limit by spreading state across
-  keys. Atomic via KV transactions.
+- **`"single"`** (default) — entire filtered state stored as one row.
+- **`"multi"`** — each top-level cell stored as a separate row under
+  `[persistKey, cellName]`. Atomic via a SQLite transaction.
 
 The state is filtered before writing. Each cell's `persist` config controls what
 gets saved:
@@ -47,7 +50,7 @@ gets saved:
 ```ts
 cell("user", {
   state: { name: "", sessionToken: "", tempCache: {} },
-  // secrets and scratch state stay out of the KV store
+  // secrets and scratch state stay out of the persisted snapshot
   persist: { exclude: ["sessionToken", "tempCache"] },
   // and out of the browser: exclude secrets from ui too — see the security
   // note in docs/auth/auth.md (a secret needs BOTH excludes)
@@ -96,26 +99,29 @@ SQLite runs in a dedicated worker thread (`db-worker.ts`):
 
 On `aio.run()`, state restores in this order:
 
-1. **KV restore** — load persisted state from Deno.Kv, merge with `initialState`
-2. **SQLite init** — create workers, run `CREATE TABLE IF NOT EXISTS` for all
-   tables
+1. **SQLite init** — create workers, run `CREATE TABLE IF NOT EXISTS` for all
+   tables (including `aio_kv`); legacy Deno.Kv data auto-migrates into `aio_kv`
+   on first boot
+2. **Snapshot restore** — load persisted state from `aio_kv`, merge with
+   `initialState`
 3. **Table load** — `SELECT * FROM` each table, merge into state
 4. **`onRestore` hook** — your transform runs on the merged state
 5. **CRDT restore** — for each `sync: true` cell, the committed op-log is
    replayed through the reducer (HLC-ordered) so sync cells recover their state
    on a headless restart, **before any client connects** (logged as
-   `sync: restored cell "x" from N op(s)`). Sync cells are excluded from KV —
-   the op-log is their durable store.
+   `sync: restored cell "x" from N op(s)`). Sync cells are excluded from the
+   snapshot — the op-log is their durable store.
 6. **Persistence manager creation** — wire filters, register `schedulePersist()`
    callback
 
-KV values are merged over initial state, then SQLite values are merged over KV.
-This means SQLite always wins when both exist — it's the authoritative source.
+Snapshot values are merged over initial state, then table values are merged over
+the snapshot. This means the tables always win when both exist — they're the
+authoritative source.
 
-> **Dictionary state (`Record<K,V>` with `{}` initial):** the KV merge treats an
-> empty-object initial as a dictionary and keeps every persisted entry — it does
-> NOT drop them as "not in the schema template". Fixed-shape objects still use
-> the template rule (unknown keys dropped).
+> **Dictionary state (`Record<K,V>` with `{}` initial):** the snapshot merge
+> treats an empty-object initial as a dictionary and keeps every persisted entry
+> — it does NOT drop them as "not in the schema template". Fixed-shape objects
+> still use the template rule (unknown keys dropped).
 
 ## Concurrency & Safety
 
@@ -133,13 +139,12 @@ This means SQLite always wins when both exist — it's the authoritative source.
 Persistence errors are reported as `PERSIST_ERROR` through the diagnostic bus.
 They never crash the app — state continues in memory even if disk writes fail.
 
-Size warnings fire at 50KB (approaching limit) and error at 63KB (exceeds KV
-limit). The error message suggests: switch to `persistMode: "multi"`, add
-persist field filters, or move to SQLite.
+There is no per-value size cap — SQLite has no 64KiB limit. Very large snapshot
+values are still a smell: prefer `db:` tables for arrays of records.
 
 ## See Also
 
-- [Auto-Persist](auto-persist.md) — KV configuration
+- [Auto-Persist](auto-persist.md) — snapshot configuration
 - [SQLite](sqlite.md) — schema, queries, transactions
 - [CRDT Protocol](crdt-protocol.md) — sync persistence layer
 - [Architecture](../basics/architecture.md) — full module map

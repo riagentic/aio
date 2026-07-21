@@ -1,6 +1,6 @@
-# Migrating to aio v2 (the perfect-aio restructure)
+# The aio restructure — alpha27/alpha28 breaking changes
 
-This guide tracks **every breaking change** of the v2 restructure
+This guide tracks **every breaking change** of the restructure
 ([perfect-aio.md](../../perfect-aio.md), decisions D1–D12), in the order they
 ship. Each section: what changed, why, and the exact before → after.
 
@@ -161,5 +161,94 @@ methods.
 
 ---
 
-_(Sections B2 — app instances, B3 — local-first, B4 — envelope/SQLite/extras
-will be appended here as they land.)_
+## B2 — Multiple apps per process (instances)
+
+**What changed.** The process-wide "aio.run() already called" gate is gone.
+Several apps can now coexist in one process — each with an explicit, disjoint
+`cells:` list:
+
+```ts
+const app1 = await aio.run({ cells: [a], appId: "one", libraryMode: true });
+const app2 = await aio.run({ cells: [b], appId: "two", libraryMode: true });
+```
+
+- A cell def binds to exactly ONE app — binding it twice throws a loud error
+  that explains the fix (factory pattern for shared shapes).
+- Zero-config `aio.run()` (no `cells:`) binds EVERY imported cell — only the
+  first app in a process can use it.
+- `aio.run(initialState, config)` — the legacy 2-arg form — was removed (zero
+  known callers). Use `cell()` + `aio.run({ cells })`.
+- Tests: `_resetAioRuntime()` (one call) resets the module-scoped runtime.
+
+## B3 (phase 1) — Explainable rejections + the server seam
+
+No breaking changes — two additions:
+
+- **`sync.onRejected`**: when the server refuses an optimistic op (validate
+  failed on re-execution), the client no longer drifts silently — the op is
+  pruned, state rebases, and your callback fires:
+
+  ```ts
+  sync: {
+    onRejected: (({ reason }) => toast(`server said no: ${reason}`));
+  }
+  ```
+
+- **`serverFns` / `serverFn`** — the explicit server/client seam. Define in a
+  `*.server.ts` module; call from anywhere (browser gets a typed WS proxy):
+
+  ```ts
+  // api.server.ts
+  export const api = serverFns("api", { hash: (s: string) => bcrypt(s) });
+  // anywhere
+  const fns = serverFn<typeof api>("api");
+  await fns.hash("secret");
+  ```
+
+## B4a — SQLite-only persistence (Deno.Kv removed)
+
+- Persisted cell state now lives in your app's single `data.db` (`aio_kv` table)
+  — inspect it with `am sql`.
+- **No code changes.** Legacy Deno.Kv data migrates automatically on first boot
+  (the old store is left untouched); the `unstable: ["kv"]` flag can be deleted
+  from your deno.json.
+- Value size is no longer capped at Deno.Kv's 64 KiB.
+
+## B4b — One typed wire catalog (D7, phase 1)
+
+No app-facing changes. Every frame on every transport (WS browser/cli, UDS,
+Electron IPC) is now catalogued and typed in ONE place —
+`src/protocol/envelope.ts` — and a CI test pins the catalog against the live
+transports: an undocumented frame fails the build. Defects fixed along the way:
+
+- AIR's ack parse diverged from the shared one (`indexOf` vs `lastIndexOf`) — a
+  cid containing `:` broke only on the AIR path. One parse now.
+- `__sync_error` was emitted by the server but silently dropped by the client
+  (which then hung in "syncing"). It now logs loudly and re-requests sync.
+- AIR clients never sent the `__proto` version hello, so the protocol gate
+  didn't apply to them. They do now.
+- UDS silently dropped CRDT-sync/serverFn frames (WS-only features) — it now
+  rejects them with a loud log naming the fix.
+- The dead legacy `$p`/`$d` delta parse (no sender since the Immer-patches
+  format) was removed from the CLI client.
+
+Byte-level unification into a single JSON envelope is deferred to the next
+`PROTOCOL_VERSION` bump — the catalog types the existing v1 bytes, so old and
+new peers stay compatible.
+
+## B4c — Core diet: periphery moved to `aio/extras`
+
+The main `aio` entry now carries only the measured core. If an import breaks,
+change the specifier — nothing was deleted:
+
+```ts
+// before                                   // after
+import { deepFreeze, instances } from "aio";
+import { deepFreeze, instances } from "aio/extras";
+```
+
+Moved: `lint`, `parseCli`, `draft`, `matchEffect`, `deepFreeze`, `markAsync`,
+`instances`, `resolveAppId`, `connectCliUDS`, `createSliceSelector`,
+`DEFAULT_PRAGMAS`, `UnionOf` + deep diagnostic/vitals detail types and the
+low-level action/reduce plumbing types. `deno task lint` (aiol) flags old
+imports with the exact fix.

@@ -1,8 +1,8 @@
 # Lifecycle — Init, Destroy, Runtime
 
 > v2: methods is the one style — see
-> [docs/upgrade/to-v2.md](../upgrade/to-v2.md) for migration (the `middleware`
-> chain is gone; `beforeReduce` remains).
+> [docs/upgrade/restructure.md](../upgrade/restructure.md) for migration (the
+> `middleware` chain is gone; `beforeReduce` remains).
 
 How cells boot, shut down, and how to intercept actions globally.
 
@@ -70,19 +70,19 @@ await aio.run({
 
 ### Key options
 
-| Option                        | Type                                     | Description                                                                                                         |
-| ----------------------------- | ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
-| `cells`                       | `CellEntry[]`                            | Cells to run — default: every imported `cell()` (they self-register)                                                |
-| `appVersion`                  | `string`                                 | App version — default: deno.json `version`                                                                          |
-| `isolate`                     | `string[]`                               | Only activate these cells (dev convenience)                                                                         |
-| `beforeReduce`                | `fn`                                     | Intercept actions before reduce — return null to drop                                                               |
-| `appId`                       | `string`                                 | App identity (locks, sockets, KV) — default: deno.json `appId`/`title`/`name`, else the entry's directory name      |
-| `schedules`                   | `Schedule[]`                             | Static always-on schedules                                                                                          |
-| `routes`                      | `Record<string, fn>`                     | Custom HTTP routes — `/path` or `/prefix/*` (uploads, webhooks); see [Integrations](../examples/05-integrations.md) |
-| `dispatchStorm`               | `{ rate?, sustain?, breaker? } \| false` | Runaway-dispatch guard (default on: >200/s for 5s); `breaker` drops the storming action                             |
-| `users` / `resolveUser`       | map / `fn`                               | Auth — static token map or dynamic provider hook; see [auth](../../docs/auth/auth.md)                               |
-| `logging`                     | `LogConfig \| false`                     | Structured file logs — level (default `info`), dir (default `.aio/log`)                                             |
-| `maxConnections` / `wsLimits` | `number` / obj                           | WS safety limits (hardened defaults)                                                                                |
+| Option                        | Type                                     | Description                                                                                                           |
+| ----------------------------- | ---------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| `cells`                       | `CellEntry[]`                            | Cells to run — default: every imported `cell()` (they self-register)                                                  |
+| `appVersion`                  | `string`                                 | App version — default: deno.json `version`                                                                            |
+| `isolate`                     | `string[]`                               | Only activate these cells (dev convenience)                                                                           |
+| `beforeReduce`                | `fn`                                     | Intercept actions before reduce — return null to drop                                                                 |
+| `appId`                       | `string`                                 | App identity (locks, sockets, `data.db`) — default: deno.json `appId`/`title`/`name`, else the entry's directory name |
+| `schedules`                   | `Schedule[]`                             | Static always-on schedules                                                                                            |
+| `routes`                      | `Record<string, fn>`                     | Custom HTTP routes — `/path` or `/prefix/*` (uploads, webhooks); see [Integrations](../examples/05-integrations.md)   |
+| `dispatchStorm`               | `{ rate?, sustain?, breaker? } \| false` | Runaway-dispatch guard (default on: >200/s for 5s); `breaker` drops the storming action                               |
+| `users` / `resolveUser`       | map / `fn`                               | Auth — static token map or dynamic provider hook; see [auth](../../docs/auth/auth.md)                                 |
+| `logging`                     | `LogConfig \| false`                     | Structured file logs — level (default `info`), dir (default `.aio/log`)                                               |
+| `maxConnections` / `wsLimits` | `number` / obj                           | WS safety limits (hardened defaults)                                                                                  |
 
 ### Cell isolation (dev)
 

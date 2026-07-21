@@ -12,7 +12,7 @@ const SECTIONS: [string, string, string][] = [
   ["basics", "Start here", "install, first app, concepts, architecture"],
   ["state", "State — cells", "the core: cells, methods, workflows, scheduling"],
   ["ui", "UI — AIR renderer", "components, signals, routing, forms"],
-  ["persistence", "Persistence & sync", "KV, SQLite, CRDT, offline"],
+  ["persistence", "Persistence & sync", "SQLite, CRDT, offline"],
   ["auth", "Auth", "users, tokens, per-user visibility"],
   ["testing", "Testing", "cell tests, semantic UI tests, linter"],
   ["clients", "Clients", "browser, electron, the am manager"],

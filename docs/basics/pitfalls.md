@@ -7,7 +7,7 @@ design: if something here bites you and isn't listed, that's a bug in this page
 ## State & cells
 
 **Inferred appId follows your project name.** Zero-config apps derive their
-identity (locks, KV/SQLite paths) from `deno.json` `appId`/`title`/`name` or the
+identity (locks, `data.db` path) from `deno.json` `appId`/`title`/`name` or the
 directory name — rename any of those and the app starts with FRESH state (the
 old data files still exist under the old id). Pin `appId` in `deno.json` (or
 `aio.run({ appId })`) before you have data you care about.
@@ -99,5 +99,5 @@ not a mystery. (The allowlists are gate-tested against the typed config, so
 documented keys always validate.)
 
 **`deno.json` needs the magic lines.** `jsx`/`jsxImportSource`,
-`unstable: ["kv"]`, `nodeModulesDir: "auto"` — `deno task doctor` checks all of
-them; run it first when anything is weird.
+`nodeModulesDir: "auto"` — `deno task doctor` checks all of them; run it first
+when anything is weird.

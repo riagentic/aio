@@ -163,6 +163,8 @@ export interface OpBuffer {
   confirm(cell: string, opId: string, serverHlc: HLC): Promise<void>;
   getUnconfirmed(cell: string): Promise<SyncOp[]>;
   pruneConfirmed(cell: string): Promise<void>;
+  /** Drop a single op (D11 rejection rollback). */
+  pruneStale(cell: string, opId: string): Promise<void>;
   getMeta(
     cell: string,
   ): Promise<{ lastHlc: HLC | null; lastServerTs?: number } | undefined>;
@@ -267,6 +269,7 @@ export function createOpBuffer(
     },
 
     pruneConfirmed: (cell) => storage.pruneConfirmed(cell),
+    pruneStale: (cell, opId) => storage.pruneStale(cell, opId),
     getMeta: (cell) => storage.loadMeta(cell),
     saveSnapshot: (cell, data) => storage.saveSnapshot(cell, data),
     loadSnapshot: (cell) => storage.loadSnapshot(cell),

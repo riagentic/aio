@@ -52,7 +52,6 @@ If you're wiring a project by hand instead of `am create`, this is the shape:
 {
   "title": "My App",
   "nodeModulesDir": "auto",
-  "unstable": ["kv"],
   "compilerOptions": {
     "strict": true,
     "noUncheckedIndexedAccess": true,
@@ -71,7 +70,7 @@ If you're wiring a project by hand instead of `am create`, this is the shape:
     "dev": "deno run -A src/app.ts",
     "install:electron": "deno install --allow-scripts=npm:electron",
     "am": "deno run -A jsr:@riagentic/aio/am",
-    "test": "deno test -A --unstable-kv tests/",
+    "test": "deno test -A tests/",
     "compile:browser": "deno run -A jsr:@riagentic/aio/build --compile",
     "compile:electron": "deno run -A jsr:@riagentic/aio/build --compile --electron",
     "compile:cli": "deno run -A jsr:@riagentic/aio/build --compile --cli",
@@ -99,7 +98,6 @@ fetch them transitively without a JSR manifest):
 {
   "title": "My App",
   "nodeModulesDir": "auto",
-  "unstable": ["kv"],
   "compilerOptions": {
     "strict": true,
     "noUncheckedIndexedAccess": true,
@@ -120,7 +118,7 @@ fetch them transitively without a JSR manifest):
     "dev": "deno run -A src/app.ts",
     "install:electron": "deno install --allow-scripts=npm:electron",
     "am": "deno run -A ./dep/aio/src/am.ts",
-    "test": "deno test -A --unstable-kv tests/",
+    "test": "deno test -A tests/",
     "compile:browser": "deno run -A ./dep/aio/src/build.ts --compile",
     "compile:electron": "deno run -A ./dep/aio/src/build.ts --compile --electron",
     "compile:cli": "deno run -A ./dep/aio/src/build.ts --compile --cli",
@@ -312,15 +310,15 @@ something and re-read state), see
 - **First step, always:** `deno task doctor` — emitted by every scaffold (or
   `deno run -A dep/aio/src/server/doctor.ts` vendored,
   `jsr:@riagentic/aio@1.0.0-alpha20/doctor`). Validates the magic deno.json
-  lines (jsx, jsxImportSource, import map entries, kv, electron nodeModulesDir,
-  Deno version) with a one-line fix per failure.
+  lines (jsx, jsxImportSource, import map entries, electron nodeModulesDir, Deno
+  version) with a one-line fix per failure.
 
 - **"Electron not found"** -- Run `deno task install:electron`, or use
   `--client=browser`
 - **"Module not found: aio"** -- Run `deno install`, check import map
 - **State resets on restart** -- Persistence is ON by default; a reset means the
   state shape changed (old keys deep-merge with new defaults — see
-  [cell versioning](../state/cells.md)) or `data.kv/` was deleted
+  [cell versioning](../state/cells.md)) or `data.db` was deleted
 - **Port 8000 in use** -- Use `deno task am stop` or `--port=9000`
 - **Hot reload not working** -- Ensure `prod: false` (default in dev)
 

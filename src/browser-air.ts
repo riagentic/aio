@@ -5,6 +5,8 @@
 // ── Transport (side-effectful — must import to wire up WS/IPC) ──────
 import "./browser/browser-air-transport.ts";
 export { setSyncMessageHandler } from "./browser/browser-air-transport.ts";
+/** serverFn seam (B3) — typed WS proxy to serverFns registered on the server. */
+export { serverFn, serverFns } from "./browser/server-fns-client.ts";
 
 // ── Protocol re-exports (public API surface) ────────────────────────
 export {

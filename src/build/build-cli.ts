@@ -3,7 +3,7 @@
  * Build CLI — compiles a headless Deno CLI binary (no browser bundle, no Electron).
  */
 import { join } from "@std/path";
-import { withDevExcluded } from "./build-compile.ts";
+import { dbWorkerInclude, withDevExcluded } from "./build-compile.ts";
 import type { BuildConfig } from "./build-config.ts";
 
 /** Compile a CLI binary. Exits process on completion or error. */
@@ -28,6 +28,7 @@ export async function buildCli(cfg: BuildConfig): Promise<void> {
       args: [
         "compile",
         "-A",
+        ...(doRemote ? [] : dbWorkerInclude()),
         ...excludes.flatMap((e) => ["--exclude", e]),
         "-o",
         cliTarget,

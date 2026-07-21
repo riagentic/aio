@@ -33,13 +33,20 @@ export function page<K extends string>(
 // ── Router hooks ──────────────────────────────────────────────────
 
 /** Current route state -- reads routePath/routeSearch signals (auto-tracked by AIR). */
-export function useRoute(pattern?: string): RouteState {
+export function useRoute<
+  P extends Record<string, string> = Record<string, string>,
+>(pattern?: string): RouteState<P> {
   ensureConnected();
   const path = routePath.value; // auto-tracked signal read
   const search = routeSearch.value;
-  if (!pattern) return { path, params: {}, search, matched: true };
+  if (!pattern) return { path, params: {} as P, search, matched: true };
   const params = matchPath(pattern, path);
-  return { path, params: params ?? {}, search, matched: params !== null };
+  return {
+    path,
+    params: (params ?? {}) as P,
+    search,
+    matched: params !== null,
+  };
 }
 
 /** Returns the navigate function. */

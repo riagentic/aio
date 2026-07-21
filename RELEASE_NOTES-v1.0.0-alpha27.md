@@ -1,4 +1,4 @@
-# v1.0.0-alpha27 — aio v2 begins: methods is the ONE style
+# v1.0.0-alpha27 — the restructure begins: methods is the ONE style
 
 The biggest breaking change in aio's history, and the biggest simplification:
 the redux-era layer (`actions:` / `reduce:` / `execute:` / `machine:` /
@@ -18,8 +18,8 @@ const counter = cell("counter", {
 
 ## Migrating
 
-- **Read docs/upgrade/to-v2.md** — before → after recipes for every removed
-  pattern.
+- **Read docs/upgrade/restructure.md** — before → after recipes for every
+  removed pattern.
 - **Run `deno task lint`** — aiol statically detects removed config keys in your
   app and prints the exact per-cell fix.
 - Booting an old cell fails loudly with the same guidance (never silently).

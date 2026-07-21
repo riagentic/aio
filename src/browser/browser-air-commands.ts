@@ -6,6 +6,7 @@ import { handleTTMessage } from "../air/time-travel-panel.ts";
 import { getSerializedSurfaces, runUITrigger } from "../air/ui-remote.ts";
 import { _vitalsTransportProbe, _w } from "./browser-protocol.ts";
 import { _rejectAck, _resolveAck } from "../protocol/browser-ack.ts";
+import { parseAck } from "../protocol/transport-shared.ts";
 
 /** Route __-prefixed commands from server. Returns true if consumed. */
 export function routeCommand(
@@ -59,12 +60,10 @@ export function routeCommand(
   // `__`-prefixed line (see the catch-all `return true` below), so the ack would
   // otherwise be silently dropped before reaching the state handler.
   if (line.startsWith("__ack:")) {
-    const rest = line.slice(6);
-    const sep = rest.indexOf(":");
-    if (sep > 0) {
-      const cid = rest.slice(0, sep);
-      if (rest.slice(sep + 1) === "1") _resolveAck(cid);
-      else _rejectAck(cid, new Error("server rejected action"));
+    const ack = parseAck(line);
+    if (ack) {
+      if (ack.ok) _resolveAck(ack.cid);
+      else _rejectAck(ack.cid, new Error("server rejected action"));
     }
     return true;
   }

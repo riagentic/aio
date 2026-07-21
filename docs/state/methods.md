@@ -1,7 +1,7 @@
 # Methods — Sync, Async, and Selectors
 
 > v2: methods is the one style — see
-> [docs/upgrade/to-v2.md](../upgrade/to-v2.md) for migration from
+> [docs/upgrade/restructure.md](../upgrade/restructure.md) for migration from
 > `actions:`/`reduce:`/`machine:`/`generators:`.
 
 The one way to build aio cells. No action catalogs, no effect catalogs, no

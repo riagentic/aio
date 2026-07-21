@@ -20,6 +20,9 @@ export interface SyncConfig {
   offline: { retention: string };
   onConflict?: (conflicts: SyncConflict[]) => void;
   onSync?: (stats: SyncStats) => void;
+  /** Called when the SERVER rejects one of this client's ops (D11) — show
+   *  real feedback; the optimistic view has already rolled back. */
+  onRejected?: (info: { opId: string; reason: string }) => void;
 }
 
 /** Conflict descriptor passed to onConflict callback */
@@ -72,6 +75,16 @@ export interface OpMessage {
     /** Server-issued cursor stamp (see SyncOp.serverTs). */
     serverTs?: number;
   };
+}
+
+/**
+ * Wire message: server→origin-client op rejection (perfect-aio D11 — every
+ * rejected change is explainable). Sent INSTEAD of an ack when the server's
+ * re-execution refused the op (validate hook / guard); the client drops the
+ * op, rebases (optimistic view snaps back), and surfaces the reason.
+ */
+export interface OpRejectedMessage {
+  __op_rejected: { opId: string; cell: string; reason: string };
 }
 
 /**
@@ -147,5 +160,6 @@ export function normalizeSyncConfig(
     offline: raw.offline ?? { retention: SYNC_DEFAULTS.defaultRetention },
     onConflict: raw.onConflict,
     onSync: raw.onSync,
+    onRejected: raw.onRejected,
   };
 }

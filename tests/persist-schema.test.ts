@@ -18,7 +18,10 @@ import {
   loadAndMigrateSnapshot,
 } from "../src/server/aio-boot.ts";
 import { createPersistenceManager } from "../src/server/persistence.ts";
-import { skv, type SkvInstance } from "../src/server/skv.ts";
+import { type SkvInstance } from "../src/server/skv.ts";
+import { SKV_SCHEMA, sqliteKv } from "../src/server/skv-sqlite.ts";
+import { createDB } from "../src/db/mod.ts";
+import type { DB } from "../src/db/types.ts";
 import type { Log } from "../src/diagnostics/logger.ts";
 
 type LogEntry = { level: string; msg: string };
@@ -36,17 +39,21 @@ async function withKv(
   fn: (kv: SkvInstance, reopen: () => Promise<SkvInstance>) => Promise<void>,
 ): Promise<void> {
   const dir = await Deno.makeTempDir();
-  const path = join(dir, "test.kv");
-  let kv = skv(await Deno.openKv(path));
+  const path = join(dir, "test.db");
+  let db: DB = createDB(path);
+  await db.execute(SKV_SCHEMA);
+  let kv = sqliteKv(db);
   const reopen = async () => {
-    kv.close();
-    kv = skv(await Deno.openKv(path));
+    await db.close();
+    db = createDB(path);
+    await db.execute(SKV_SCHEMA);
+    kv = sqliteKv(db);
     return kv;
   };
   try {
     await fn(kv, reopen);
   } finally {
-    kv.close();
+    await db.close();
     await Deno.remove(dir, { recursive: true });
   }
 }

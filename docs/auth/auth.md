@@ -219,7 +219,7 @@ independent channels:
 ```ts
 cell("settings", {
   state: { theme: "dark", apiKey: "" },
-  persist: { exclude: ["apiKey"] }, // never written to the KV store
+  persist: { exclude: ["apiKey"] }, // never written to disk
   ui: { exclude: ["apiKey"] }, // never synced to browsers
 });
 ```

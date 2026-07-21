@@ -1,5 +1,5 @@
 import { assertEquals } from "@std/assert";
-import { draft } from "../mod.ts";
+import { draft } from "../src/extras/mod.ts";
 
 Deno.test("draft() produces new state via immer", () => {
   const state = { count: 0, name: "test" };
