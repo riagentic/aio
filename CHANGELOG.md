@@ -1,5 +1,39 @@
 # Changelog
 
+## 1.0.0-alpha27 — aio v2 begins: methods is the ONE style (2026-07-21)
+
+**The biggest breaking change in aio's history — and the biggest
+simplification.** The redux-era Style B (`actions:`, `reduce:`, `execute:`,
+`machine:`, `generators:`, middleware) is deleted; `cell({ state, methods })` is
+the one style. ~3,000 LOC of framework left; ~15 concepts became ~8. Full
+migration recipes: docs/upgrade/to-v2.md — and `deno task lint` (aiol)
+statically detects removed keys and prints the per-cell fix.
+
+**Every capability survives, method-native:** workflows are plain async methods
+with new `until()` / `race()` / `sleep()` helpers; cancellation is
+`cancelOn: { method: [triggers] }` + `s.$signal` (AbortController per call);
+guards are one-line ifs; cross-cell reaction is the new `listensTo` OBJECT form
+that actually runs a handler (`listensTo: { onCleared: cart.clear }` — the old
+array form routed but ran nothing); side effects run inside the method, and
+async-method failures now feed the circuit breaker.
+
+**Deletion gate honored:** every Style-B test was ported to methods (or verified
+machinery-only) before deletion — ~200 triage decisions recorded in
+tests/_styleb-port-manifest.md.
+
+**Also:** headless `am surface` (works with zero connected clients — server
+renders against live cell state; `am surface` auto-falls back); testCell full
+inference (state, sender args AND return types — fixed the index-signature
+default that collapsed `keyof cellRef`); all 52 `@experimental` markers
+graduated with tests (browser-sync unit suite, electron auto-install seam);
+complexity batch (security config threading fix for strictOrigin/allowedOrigins,
+dead 281-LOC IndexedDB store deleted, transport/catalog/clone/esbuild dedup);
+electron reload is Ctrl+F5 (plain F5 free for app shortcuts); perfect-aio.md
+records the full v2 plan and decisions D1–D12.
+
+Gates: suite 2439/0 · onboard e2e 10/10 · preflight 7/7 · coverage 74.6% ·
+fmt/lint/check/api/docs/boundaries green.
+
 ## 1.0.0-alpha26 — sync cursor hardening + field-report P1 closure (2026-07-21)
 
 A deep randomized audit plus a full katana `--fix` pass. Every open field-report
