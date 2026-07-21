@@ -8,6 +8,7 @@
 // - Inter-cell call() — callback form only (typed, no raw strings)
 
 import type { Msg } from "./cell-types.ts";
+import { cloneState } from "./immutable.ts";
 import type { ScheduleEffect } from "./schedule.ts";
 import type { OwnEffect } from "./own.ts";
 import { diagEmit } from "../diagnostics/diagnostic-bus.ts";
@@ -35,13 +36,24 @@ export type CellEffect =
  *  value is unambiguous at runtime. `unknown` keeps the constraint permissive;
  *  the caller-side return type is inferred precisely by DirectCalling. */
 export type SyncMethod<S> = (
-  s: S,
+  s: S & Partial<MethodDraftMeta>,
   // deno-lint-ignore no-explicit-any
   ...args: any[]
 ) => unknown;
 /** Async cell method — runs in executor, mutations batched via proxy */
 // deno-lint-ignore no-explicit-any
-export type AsyncMethod<S> = (s: S, ...args: any[]) => Promise<any>;
+export type AsyncMethod<S> = (
+  s: S & Partial<MethodDraftMeta>,
+  ...args: any[]
+) => Promise<any>;
+
+/** Opt-in draft annotation for cancellation-aware methods (perfect-aio D1):
+ *  `async place(s: MyState & Partial<MethodDraftMeta>) { … s.$signal?.… }`.
+ *  At runtime `s.$signal` is ALWAYS served on async methods (live proxy);
+ *  the annotation is Partial because strict contravariance forbids a
+ *  required-extra param on Method<S> — use `s.$signal?.aborted` (or `!` when
+ *  you know the method is async). */
+export type MethodDraftMeta = { readonly $signal: AbortSignal };
 /** Cell method — sync or async */
 export type Method<S> = SyncMethod<S> | AsyncMethod<S>;
 
@@ -498,29 +510,15 @@ const ARRAY_READ_METHODS = new Set([
   "toSpliced",
 ]);
 
-/** Snapshot a value for read-method interception. structuredClone throws on
- *  functions/symbols, so we fall back to a JSON round trip for uncloneable
- *  values. Never returns the live value by reference — a fallback to identity
- *  would let a `.map()`/`.find()` over the "snapshot" silently mutate real
- *  state (the exact Immer-alias bug class immutable.ts warns about). */
+/** Snapshot a value for read-method interception — the shared cloneState
+ *  ladder with the `"shallow"` last rung: never returns the live value by
+ *  reference (an identity fallback would let a `.map()`/`.find()` over the
+ *  "snapshot" silently mutate real state — the Immer-alias bug class
+ *  immutable.ts exists to kill). */
 function snapshotForRead(value: unknown): unknown {
   if (value === null || value === undefined) return value;
   if (typeof value !== "object") return value;
-  try {
-    return structuredClone(value);
-  } catch {
-    try {
-      return JSON.parse(JSON.stringify(value));
-    } catch {
-      // Circular / non-serializable — return a SHALLOW copy so callers can
-      // read top-level fields without mutating live state. Deeper mutation
-      // would still alias nested refs, but a thrown error here would crash
-      // every read in a degenerate state shape; shallow-copy is the safe
-      // middle ground and matches cloneState's "best effort" contract.
-      if (Array.isArray(value)) return [...(value as unknown[])];
-      return { ...(value as Record<string, unknown>) };
-    }
-  }
+  return cloneState(value, "shallow");
 }
 
 /** Throw the canonical "live async state" error. */
@@ -546,6 +544,13 @@ type OverlayBox = {
  *  batch's pending mutations overlaid (replayed via {@linkcode applyMutations},
  *  the exact code path that commits them), so `s.x = 5; use(s.x)` behaves
  *  like sync code. */
+let _never: AbortSignal | null = null;
+/** Shared never-aborting signal — `s.$signal` outside a cancellable call. */
+function _neverSignal(): AbortSignal {
+  if (!_never) _never = new AbortController().signal;
+  return _never;
+}
+
 export function createLiveProxy<S extends Record<string, unknown>>(
   cellName: string,
   prefix: string,
@@ -555,6 +560,8 @@ export function createLiveProxy<S extends Record<string, unknown>>(
   path: string[] = [],
   _proxyCache: Map<string, S> = new Map(),
   _overlay: OverlayBox = { v: null },
+  // Cancellation signal for this call (cancelOn / s.$signal — perfect-aio D1).
+  _signal?: AbortSignal,
 ): S {
   /** Committed root state with pending writes overlaid (read-your-writes). */
   function effectiveRoot(): S {
@@ -595,6 +602,12 @@ export function createLiveProxy<S extends Record<string, unknown>>(
     get(_target, prop, _receiver) {
       if (typeof prop === "symbol") return undefined;
       const key = prop as string;
+      // `s.$signal` — the call's AbortSignal (aborts when a cancelOn trigger
+      // fires). A never-aborting fallback keeps `s.$signal.aborted` safe in
+      // sync methods / contexts without cancellation.
+      if (key === "$signal") {
+        return _signal ?? _neverSignal();
+      }
       const fresh = effectiveAt();
       const value = (fresh as Record<string, unknown>)[key];
 

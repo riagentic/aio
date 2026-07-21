@@ -81,59 +81,6 @@ Deno.test("5.1: client cell — async method throws at cell() time", () => {
   reset();
 });
 
-Deno.test("5.1: client cell — generators throw at cell() time", () => {
-  reset();
-  let caught: Error | null = null;
-  try {
-    cell("view", {
-      scope: "client" as const,
-      state: { x: 0 },
-      methods: {
-        // deno-lint-ignore no-explicit-any
-        noop(_s: any) {},
-      },
-      // deno-lint-ignore no-explicit-any
-      generators: {
-        noop: function* (_ctx: any) {
-          yield;
-        },
-      } as any,
-    });
-  } catch (e) {
-    caught = e as Error;
-  }
-  assertEquals(caught instanceof Error, true);
-  assertEquals(
-    (caught as unknown as Error).message.includes("client-scoped"),
-    true,
-  );
-  reset();
-});
-
-Deno.test(
-  "5.1: client cell — actions or machine on a client cell throw at cell() time",
-  () => {
-    reset();
-    let caught: Error | null = null;
-    try {
-      cell("view", {
-        scope: "client" as const,
-        state: { x: 0 },
-        methods: {
-          // deno-lint-ignore no-explicit-any
-          noop(_s: any) {},
-        },
-        // deno-lint-ignore no-explicit-any
-        actions: { noop: () => ({}) } as any,
-      });
-    } catch (e) {
-      caught = e as Error;
-    }
-    assertEquals(caught instanceof Error, true);
-    reset();
-  },
-);
-
 Deno.test(
   "5.1: client cell — composed alongside a server cell: server cell still works",
   () => {

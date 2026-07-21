@@ -240,7 +240,7 @@ Persistence:
 Inspect:
   clients                 Connected WebSocket clients (with index)
   client <index>          Request component tree from client (dev mode)
-  surface [clientIdx]     Semantic UI surface — every component + triggerable element, by name
+  surface [clientIdx|server]  Semantic UI surface — every component + element, by name (server = headless render, no client needed)
   trigger <idx> <path> <action> [text]  Drive the live UI (click/type/press/hover/focus/blur/scroll) — same engine as testUI
   sql <query>             Execute read-only SQL
   tables                  List SQLite tables

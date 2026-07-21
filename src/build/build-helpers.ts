@@ -93,7 +93,8 @@ export function findGradle(): string | null {
   return null;
 }
 
-/** Highest Java major version the pinned Gradle (8.12.1) can RUN on. Gradle's
+/** Highest Java major version the pinned Gradle (8.14.3 — see the wrapper pin
+ *  in build-android.ts) can RUN on. Gradle's
  *  own daemon JVM must be ≤ this — a newer JDK (e.g. 25) crashes Gradle at
  *  startup with a bare version string. (Bump alongside the wrapper version.) */
 export const GRADLE_MAX_JDK = 23;

@@ -1,6 +1,10 @@
 # Methods — Sync, Async, and Selectors
 
-The default way to build aio cells. No action catalogs, no effect catalogs, no
+> v2: methods is the one style — see
+> [docs/upgrade/to-v2.md](../upgrade/to-v2.md) for migration from
+> `actions:`/`reduce:`/`machine:`/`generators:`.
+
+The one way to build aio cells. No action catalogs, no effect catalogs, no
 switch/case. Just methods that mutate state.
 
 ## Quick example
@@ -223,8 +227,8 @@ one action. Each `await` boundary starts a new batch.
 > honest.
 
 **Method-tagged actions** — async writes dispatch `__SetMethodName` actions
-(e.g., `__SetCheckout`). This enables machine guards: if `checkout` is allowed
-in a state, its writes are also allowed.
+(e.g., `__SetCheckout`), so every batch in time-travel names the method that
+produced it.
 
 **Every read = fresh state + your pending writes** (read-your-writes). Reads
 through `s` see the committed store with this method's unflushed writes
@@ -316,7 +320,7 @@ and cancellation. The sanctioned tools:
 | You want…                           | Use                                                   |
 | ----------------------------------- | ----------------------------------------------------- |
 | "after this, dispatch X"            | `return schedule.after('id', 0, cell.other.action())` |
-| a multi-step sequential workflow    | a [generator](generators.md) with `ctx.dispatch()`    |
+| a multi-step sequential workflow    | an [async method](#workflows-in-async-methods)        |
 | debounce / retry / polling          | `schedule.after` / `schedule.every` (id = replace)    |
 | own a watcher / socket / subprocess | `return own.set('cell:id', factory)` (AIO-382)        |
 
@@ -381,6 +385,129 @@ async riskyOp(s) {
   }
 }
 ```
+
+---
+
+## Workflows in async methods
+
+Multi-step workflows are standard JavaScript: an async method plus three helpers
+from `aio` — `until`, `race`, `sleep`.
+
+| Helper               | Signature                                                     | Use                                                                                      |
+| -------------------- | ------------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
+| `until(pred, opts?)` | `(() => boolean, { timeoutMs?, intervalMs?, msg?, signal? })` | Wait for a state condition — throws `UntilTimeoutError` (default 30s) instead of hanging |
+| `race(branches)`     | `({ name: Promise \| ms }) → { winner, value }`               | First branch to settle wins; `timeout: ms` sugar adds a timeout branch                   |
+| `sleep(ms)`          | `(ms) → Promise<void>`                                        | Plain observable pause                                                                   |
+
+```ts
+import { cell, race, sleep, until } from "aio";
+
+const checkout = cell("checkout", {
+  state: { status: "idle", orderId: null as string | null, confirmed: false },
+  methods: {
+    async place(s, item: string) {
+      s.status = "placing";
+      const order = await api.placeOrder(item);
+      const r = await race({ ok: until(() => s.confirmed), timeout: 30_000 });
+      if (r.winner === "timeout") {
+        s.status = "expired";
+        return;
+      }
+      s.orderId = order.id;
+      s.status = "placed";
+    },
+  },
+});
+```
+
+Each `await` is a commit + render point (see above), so every step is visible in
+the UI and in time-travel — no special workflow syntax needed.
+
+### Patterns
+
+**Retry with backoff** — either inline:
+
+```ts
+async fetchData(s, url: string) {
+  for (let attempt = 0; attempt <= 3; attempt++) {
+    try {
+      s.data = await fetch(url).then((r) => r.json());
+      return;
+    } catch {
+      if (attempt === 3) { s.error = "failed after 4 attempts"; return; }
+      await sleep(1000 * 2 ** attempt);
+    }
+  }
+}
+```
+
+— or via the scheduler (survives across dispatches, replace-by-id):
+[`schedule.backoff` / `schedule.poll`](scheduling.md).
+
+**Polling** — don't `while (true)` inside a method; let the scheduler own the
+loop and re-arm each tick:
+[Backoff on rate-limit](scheduling.md#backoff-on-rate-limit-dynamic-polling).
+
+**Wait for another cell** — watch state, not actions:
+
+```ts
+async settle(s) {
+  await payment.charge(s.total);            // direct call, typed Promise
+  await until(() => payment.chargeId !== null, { timeoutMs: 10_000 });
+  s.status = "settled";
+}
+```
+
+## Cancellation — `cancelOn` + `s.$signal`
+
+Declare which foreign actions abort a running async method. The method observes
+the abort through `s.$signal` (an `AbortSignal`) — annotate the draft with
+`& Partial<MethodDraftMeta>` (from `aio`) to type it:
+
+```ts
+import { cell } from "aio";
+import type { MethodDraftMeta } from "aio";
+
+const checkout = cell("checkout", {
+  state: { status: "idle" as string },
+  cancelOn: { place: [cart.clear] }, // cart.clear aborts a running place()
+  methods: {
+    async place(s: CheckoutState & Partial<MethodDraftMeta>, item: Item) {
+      s.status = "placing";
+      const r = await fetch(url, { signal: s.$signal }); // abortable IO
+      if (s.$signal!.aborted) {
+        s.status = "cancelled";
+        return;
+      }
+      s.status = "placed";
+    },
+  },
+});
+```
+
+- `cancelOn: { methodKey: [triggers] }` — triggers are bound methods
+  (`cart.clear`, preferred) or `.type` strings.
+- `s.$signal` is always present at runtime in async methods; the annotation is
+  `Partial` for TS variance reasons, so use `s.$signal?.aborted` or `!`.
+- Pass it to every abortable API (`fetch`, `until({ signal })`) and check
+  `aborted` after each `await` before writing terminal state.
+
+## Guard lines — machine states without a machine
+
+A status guard is one line of plain code, with the same guarantee the old
+`machine:` config gave:
+
+```ts
+methods: {
+  start(s) {
+    if (s.status !== "idle") return;   // ignored in any other state
+    s.status = "running";
+  },
+},
+```
+
+`status` is a state field you own — render it directly (`{cell.status}`), assert
+it in tests with `t.expect.state((s) => s.status === "running")`.
 
 ---
 
@@ -544,11 +671,9 @@ captures state at each boundary.
 
 ## Generated actions
 
-| Source                  | Action type               | Time-travel |
-| ----------------------- | ------------------------- | ----------- |
-| `increment(s, by)`      | `counter:increment`       | Yes         |
-| `async save(s)`         | `counter:save` (trigger)  | Yes         |
-| (async write)           | `counter:__setSave`       | Hidden      |
-| (async error)           | `counter:__error`         | Hidden      |
-| `*place(ctx)` generator | `counter:place` (trigger) | Yes         |
-| (flow step)             | `counter:__flow:stepName` | Yes         |
+| Source             | Action type              | Time-travel |
+| ------------------ | ------------------------ | ----------- |
+| `increment(s, by)` | `counter:increment`      | Yes         |
+| `async save(s)`    | `counter:save` (trigger) | Yes         |
+| (async write)      | `counter:__setSave`      | Hidden      |
+| (async error)      | `counter:__error`        | Hidden      |

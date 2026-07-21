@@ -72,30 +72,27 @@ await aio.run({ appId: "tutorial", cells: [todos, filter] });
 
 **Selectors** -- read derived state: `todos.remaining()`.
 
-**listensTo** -- react when another cell acts:
+**Direct calling** -- call another cell's method (the coordination tool):
 
 ```ts
 const analytics = cell("analytics", {
   state: { events: [] as string[] },
-  listensTo: [todos.add, todos.remove],
-  reduce: {
-    [todos.add.type](s) {
-      s.events.push("item_added");
-    },
-    [todos.remove.type](s) {
-      s.events.push("item_removed");
+  methods: {
+    track(s, event: string) {
+      s.events.push(event);
     },
   },
 });
+
+// inside todos:
+async add(s, text: string) {
+  s.items.push({ text, done: false });
+  await analytics.track("item_added"); // real action, visible in time-travel
+},
 ```
 
-**Direct calling** -- call another cell's method (active coordination):
-
-```ts
-await todos.add("Buy milk"); // real action, visible in time-travel
-```
-
-Selectors to read, `listensTo` to observe, direct calls to coordinate.
+Selectors to read, direct calls to coordinate — one explicit arrow instead of a
+hidden listener table.
 
 ## 4. Async Methods
 
@@ -128,43 +125,54 @@ awaits the app keeps running -- other methods can fire. Set loading flags before
 your first await, use try/catch (pre-throw mutations are already dispatched),
 and don't assume state is unchanged after an await.
 
-## 5. Generators -- Multi-Step Workflows
+## 5. Multi-Step Workflows
 
-When you need named checkpoints, cancellation, or multi-step coordination.
+A workflow is an async method — plain JavaScript, with `cancelOn` + `s.$signal`
+for cancellation:
 
 ```ts
+import type { MethodDraftMeta } from "aio";
+
+type OrderState = {
+  status: string;
+  orderId: string | null;
+  error: string | null;
+};
+
 const order = cell("order", {
-  state: { status: "idle", orderId: null as string | null },
-  generators: {
-    *place(ctx, item: string) {
-      yield* ctx.mutate("processing", (s) => {
-        s.status = "processing";
-      });
-      const price = yield* ctx.call("fetchPrice", () => getPrice(item));
+  state: {
+    status: "idle" as string,
+    orderId: null as string | null,
+    error: null as string | null,
+  },
+  // reset aborts a running place() — string form avoids self-reference (TS7022)
+  cancelOn: { place: ["order:reset"] },
+  methods: {
+    async place(s: OrderState & Partial<MethodDraftMeta>, item: string) {
+      s.status = "processing";
+      const price = await getPrice(item);
       if (price > 1000) {
-        yield* ctx.fail("too expensive");
+        s.status = "failed";
+        s.error = "too expensive";
         return;
       }
-      const id = yield* ctx.call("submit", () => submitOrder(item, price));
-      yield* ctx.done((s) => {
-        s.orderId = id;
-        s.status = "done";
-      });
+      const id = await submitOrder(item, price);
+      if (s.$signal?.aborted) return; // reset fired mid-flight
+      s.orderId = id;
+      s.status = "done";
     },
-  },
-  cancelOn: { place: [order.reset] },
-  methods: {
     reset(s) {
       s.status = "idle";
       s.orderId = null;
+      s.error = null;
     },
   },
 });
 ```
 
-Every `yield*` step appears in time-travel. `ctx.call` runs async work,
-`ctx.mutate` changes state, `ctx.done`/`ctx.fail` end the flow. `cancelOn`
-cancels a running generator when a specified action dispatches.
+Every `await` boundary commits a batch that appears in time-travel. For waiting
+on conditions and timeouts, add `until`/`race`/`sleep` from `aio` — see
+[Workflows](../state/methods.md#workflows-in-async-methods).
 
 ## 6. Persistence and UI Visibility
 
@@ -206,53 +214,52 @@ const wallet = cell("wallet", {
 `onMigrate` runs when persisted version < current `version`, receiving old state
 (already deep-merged with defaults) and the old version number.
 
-## 7. State Machines
+## 7. Guard Lines
 
-Guard which methods are allowed in which state. Invalid actions are silently
-dropped.
+Guard which methods run in which state with plain code — a `status` field you
+own plus one `if` per method. Invalid calls return early, no state change.
 
 ```ts
+type UploadStatus = "idle" | "uploading" | "error";
+
 const upload = cell("upload", {
-  state: { progress: 0, error: null as string | null },
-  machine: {
-    initial: "idle",
-    states: {
-      idle: { start: "uploading" },
-      uploading: { complete: "idle", fail: "error" },
-      error: { retry: "uploading", dismiss: "idle" },
-    },
+  state: {
+    status: "idle" as UploadStatus,
+    progress: 0,
+    error: null as string | null,
   },
   methods: {
     async start(s, file: string) {
-      await uploadFile(file, (p) => {
-        s.progress = p;
-      });
-    },
-    complete(s) {
-      s.progress = 100;
-    },
-    fail(s, err: string) {
-      s.error = err;
+      if (s.status !== "idle") return; // no double-start
+      s.status = "uploading";
+      try {
+        await uploadFile(file, (p) => {
+          s.progress = p;
+        });
+        s.status = "idle";
+        s.progress = 100;
+      } catch (e) {
+        s.status = "error";
+        s.error = String(e);
+      }
     },
     retry(s) {
+      if (s.status !== "error") return;
+      s.status = "idle";
       s.progress = 0;
       s.error = null;
-    },
-    dismiss(s) {
-      s.error = null;
-      s.progress = 0;
     },
   },
 });
 ```
 
-Read it as: "when in X, only Y is allowed." Calling `upload.start()` while
-uploading is dropped. Check status in UI via `registry.status()`. No machine
-needed? Omit it -- all actions always run.
+Read it as: "unless in X, do nothing." Calling `upload.start()` while uploading
+is a no-op. Render the status directly in UI (`upload.status`), assert it in
+tests with `t.expect.state((s) => s.status === "uploading")`.
 
 ## Next Steps
 
 - [Core Concepts](concepts.md) -- the full mental model
 - [API Reference](api-reference.md) -- every export
-- [State Management](../state/README.md) -- generators, machines, composition
+- [State Management](../state/README.md) -- methods, workflows, composition
 - [Persistence](../persistence/README.md) -- SQLite, offline, delta sync

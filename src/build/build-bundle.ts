@@ -3,6 +3,7 @@
  * Build bundle — esbuild bundling step, freshness cache check, asset copying.
  */
 import { join } from "@std/path";
+import { ESBUILD_JSX } from "./esbuild-shared.ts";
 import { aioBrowserPlugin } from "./esbuild-plugin.ts";
 import { makeHttpPlugin } from "./build-integrity.ts";
 import type { BuildConfig } from "./build-config.ts";
@@ -168,7 +169,7 @@ export async function runBundle(
       // transpile and prod bundle never resolve a different esbuild than tested.
       // deno-lint-ignore no-import-prefix
       const esbuild = await import("npm:esbuild@0.24.2");
-      const jsxConfig = { jsx: "automatic" as const, jsxImportSource: "aio" };
+      const jsxConfig = ESBUILD_JSX; // shared dev==prod JSX config
 
       const result = await esbuild.build({
         entryPoints: [buildEntryPath],

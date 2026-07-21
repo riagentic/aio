@@ -4,7 +4,6 @@ import { assertEquals, assertThrows } from "@std/assert";
 import { bindCell, cell, composeCells, testCell } from "../src/state/cell.ts";
 import { schedule } from "../src/state/schedule.ts";
 import { call } from "../src/state/cell-impl.ts";
-import type { GenCtx } from "../src/state/flow.ts";
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
@@ -353,24 +352,21 @@ Deno.test("cell(methods): writes separated by await produce separate batches", a
   assertEquals(setActions.length, 2);
 });
 
-// ── Machine guard tests ─────────────────────────────────────────────
+// ── Status-guard tests (methods-native machine replacement) ─────────
 
-Deno.test("cell(methods): machine guards on sync methods", () => {
+Deno.test("cell(methods): status-guarded sync methods ignore wrong-state calls", () => {
   const door = cell("door", {
-    state: { opened: false },
-    machine: {
-      initial: "closed",
-      states: {
-        closed: { open: "open" },
-        open: { close: "closed" },
-      },
-    },
+    state: { opened: false, status: "closed" },
     methods: {
       open(s) {
+        if (s.status !== "closed") return;
         s.opened = true;
+        s.status = "open";
       },
       close(s) {
+        if (s.status !== "open") return;
         s.opened = false;
+        s.status = "closed";
       },
     },
   });
@@ -383,42 +379,37 @@ Deno.test("cell(methods): machine guards on sync methods", () => {
     (door.__aio.actions as unknown as Record<string, any>).open(),
   ).state;
   assertEquals((state.door as any).opened, true);
-  assertEquals((state.door as any).__aio_status, "open");
+  assertEquals((state.door as any).status, "open");
 
-  // Can't open again
-  const before = state;
+  // Can't open again — guard makes the call a no-op
   state = composed.reduce(
     state,
     (door.__aio.actions as unknown as Record<string, any>).open(),
   ).state;
-  assertEquals(state, before);
+  assertEquals((state.door as any).opened, true);
+  assertEquals((state.door as any).status, "open");
 
   state = composed.reduce(
     state,
     (door.__aio.actions as unknown as Record<string, any>).close(),
   ).state;
   assertEquals((state.door as any).opened, false);
-  assertEquals((state.door as any).__aio_status, "closed");
+  assertEquals((state.door as any).status, "closed");
 });
 
-Deno.test("cell(methods): async Proxy writes gated by machine", async () => {
+Deno.test("cell(methods): status-guarded async method stages writes", async () => {
   const fetcher = cell("fetcher", {
-    state: { data: null as string | null, loading: false },
-    machine: {
-      initial: "idle",
-      states: {
-        idle: { load: "loading" },
-        loading: { done: "idle" },
-      },
-    },
+    state: { data: null as string | null, loading: false, status: "idle" },
     methods: {
       async load(s) {
-        s.loading = true; // __set:load allowed (load→loading transition exists)
+        if (s.status !== "idle") return;
+        s.status = "loading";
+        s.loading = true;
         const data = await Promise.resolve("result");
         s.data = data;
         s.loading = false;
+        s.status = "idle";
       },
-      done(s) {/* transition back to idle */},
     },
   });
 
@@ -435,20 +426,18 @@ Deno.test("cell(methods): async Proxy writes gated by machine", async () => {
   assertEquals((app.state.fetcher as any).loading, false);
 });
 
-Deno.test("cell(methods): async writes blocked when method not in current machine state", async () => {
+Deno.test("cell(methods): async method guard ignores calls in wrong state", async () => {
   const gate = cell("gate", {
-    state: { value: "initial" },
-    machine: {
-      initial: "locked",
-      states: {
-        locked: { unlock: "unlocked" },
-        unlocked: { write: "unlocked", lock: "locked" },
-      },
-    },
+    state: { value: "initial", status: "locked" },
     methods: {
-      unlock(s) {/* just transition */},
-      lock(s) {/* just transition */},
+      unlock(s) {
+        if (s.status === "locked") s.status = "unlocked";
+      },
+      lock(s) {
+        if (s.status === "unlocked") s.status = "locked";
+      },
       async write(s) {
+        if (s.status !== "unlocked") return; // guard: no-op while locked
         s.value = "written";
       },
     },
@@ -457,7 +446,7 @@ Deno.test("cell(methods): async writes blocked when method not in current machin
   const composed = composeCells([gate]);
   const app = createApp(composed);
 
-  // Try to write while locked → should be blocked (write not in locked.on)
+  // Try to write while locked → guard returns early, state unchanged
   app.dispatch(
     (gate.__aio.actions as unknown as Record<string, any>).write() as any,
   );
@@ -473,23 +462,9 @@ Deno.test("cell(methods): async writes blocked when method not in current machin
   assertEquals((app.state.gate as any).value, "written");
 });
 
-Deno.test("cell(methods): machine validation rejects bad config", () => {
-  assertThrows(
-    () =>
-      // @ts-expect-error — intentionally invalid: "nonexistent" is not a declared state
-      cell("bad", {
-        state: {},
-        machine: { initial: "nonexistent", states: { idle: {} } },
-        methods: { noop() {} },
-      }),
-    Error,
-    "not in declared states",
-  );
-});
-
 // ── Integration tests ───────────────────────────────────────────────
 
-Deno.test("cell(methods): coexists with cell(actions) in composeCells", () => {
+Deno.test("cell(methods): multiple methods cells coexist in composeCells", () => {
   const counter = cell("counter", {
     state: { count: 0 },
     methods: {
@@ -501,10 +476,9 @@ Deno.test("cell(methods): coexists with cell(actions) in composeCells", () => {
 
   const logger = cell("logger", {
     state: { logs: [] as string[] },
-    actions: { log: (msg: string) => ({ msg }) },
-    reduce: {
-      log(state, payload) {
-        state.logs.push(payload.msg);
+    methods: {
+      log(s, msg: string) {
+        s.logs.push(msg);
       },
     },
   });
@@ -522,41 +496,6 @@ Deno.test("cell(methods): coexists with cell(actions) in composeCells", () => {
 
   assertEquals((state.counter as any).count, 1);
   assertEquals((state.logger as any).logs, ["hello"]);
-});
-
-Deno.test("cell(methods): foreign action listeners", () => {
-  const counter = cell("counter", {
-    state: { count: 0 },
-    methods: {
-      increment(s) {
-        s.count++;
-      },
-    },
-  });
-
-  const watcher = cell("watcher", {
-    state: { lastSeen: "" },
-    actions: { noop: () => ({}) },
-    machine: {
-      initial: "watching",
-      states: {
-        watching: { noop: "watching", "counter:increment": "watching" },
-      },
-    },
-    reduce: {
-      ["counter:increment"](state) {
-        state.lastSeen = "increment";
-      },
-    },
-  });
-
-  const composed = composeCells([counter, watcher]);
-  let state = composed.initialState;
-  state = composed.reduce(
-    state,
-    (counter.__aio.actions as unknown as Record<string, any>).increment(),
-  ).state;
-  assertEquals((state.watcher as any).lastSeen, "increment");
 });
 
 Deno.test("cell(methods): selectors scoped to cell", () => {
@@ -738,7 +677,7 @@ testCell(
   },
 );
 
-// Async error dispatches __error action (visible in time-travel, middleware)
+// Async error dispatches __error action (visible in time-travel)
 const _errorCell = cell("errorTest", {
   state: { status: "idle" },
   methods: {
@@ -757,40 +696,6 @@ testCell(
     await t.settle();
     // Verify __error action was dispatched (visible in time-travel)
     t.expect.state(() => true); // no crash = error was handled, not thrown
-  },
-);
-
-// Async error with machine — __error self-loop keeps machine in current state
-const _errorWithMachine = cell("errorMachine", {
-  state: { data: null as string | null },
-  machine: {
-    initial: "idle",
-    states: {
-      idle: { load: "loading" },
-      loading: { done: "idle" },
-    },
-  },
-  methods: {
-    async load(_s: { data: string | null }) {
-      throw new Error("network error");
-    },
-    done(s: { data: string | null }) {
-      s.data = "ok";
-    },
-  },
-});
-
-testCell(
-  _errorWithMachine,
-  "cell(methods): __error self-loop preserves machine state",
-  async (t) => {
-    t.init();
-    t.expect.status("idle");
-    t.send.load!();
-    t.expect.status("loading");
-    await t.settle();
-    // __error dispatched as self-loop in 'loading' — machine stays in loading
-    t.expect.status("loading");
   },
 );
 
@@ -846,79 +751,6 @@ Deno.test("cell(methods): sync method returns array of schedule effects", () => 
   assertEquals(result.effects.length, 2);
 });
 
-// ── listensTo without full machine ──────────────────────────────────
-
-Deno.test("cell(methods): listensTo auto-generates machine for foreign listeners", () => {
-  const counter = cell("counter", {
-    state: { count: 0 },
-    methods: {
-      increment(s) {
-        s.count++;
-      },
-    },
-  });
-
-  const watcher = cell("watcher", {
-    state: { seen: 0 },
-    listensTo: ["counter:increment"],
-    methods: {
-      onIncrement(s) {
-        s.seen++;
-      },
-    },
-  });
-
-  // Verify machine was auto-generated — watcher has __aio_status (only present with machine)
-  const composed = composeCells([counter, watcher]);
-  assertEquals(
-    (composed.initialState.watcher as Record<string, unknown>).__aio_status !==
-      undefined,
-    true,
-  );
-
-  // Integration: watcher receives counter's actions
-  let state = composed.initialState;
-  state = composed.reduce(
-    state,
-    (counter.__aio.actions as unknown as Record<string, any>).increment(),
-  ).state;
-  // Foreign action routed to watcher's reducer
-  assertEquals((state.watcher as any).seen, 0); // foreign actions don't auto-call methods — they're machine transitions
-});
-
-Deno.test("cell(methods): listensTo ignored when explicit machine provided", () => {
-  const f = cell("test", {
-    state: { v: 0 },
-    machine: {
-      initial: "active",
-      states: { active: { bump: "active" } },
-    },
-    listensTo: ["other:action"], // should be ignored since machine is explicit
-    methods: {
-      bump(s) {
-        s.v++;
-      },
-    },
-  });
-
-  // The explicit machine shouldn't include 'other:action' — verify by composing and dispatching
-  const other = cell("other", {
-    state: {},
-    methods: {
-      action(s: Record<string, unknown>) {
-        s.x = 1;
-      },
-    },
-  });
-  const composed = composeCells([f, other]);
-  // Dispatch other:action — f should NOT receive it (not in its machine)
-  const r = composed.reduce(
-    composed.initialState,
-    (other.__aio.actions as unknown as Record<string, any>).action(),
-  );
-  assertEquals((r.state.test as { v: number }).v, 0); // unchanged
-});
-
 // ── call() inter-cell coordination ────────────────────────────────
 
 Deno.test("call: dispatches observable action through store", async () => {
@@ -954,7 +786,6 @@ Deno.test("call: async method can call another cell", async () => {
         s.name = name;
       },
     },
-    machine: false,
   });
 
   const caller = cell("caller", {
@@ -965,7 +796,6 @@ Deno.test("call: async method can call another cell", async () => {
         s.called = true;
       },
     },
-    machine: false,
   });
 
   const composed = composeCells([caller, callee]);
@@ -985,40 +815,6 @@ Deno.test("call: async method can call another cell", async () => {
     (app.state.caller as { called: boolean }).called,
     true,
     "caller should have completed",
-  );
-});
-
-Deno.test("call: rejects immediately when machine blocks the target action", async () => {
-  const locked = cell("locked", {
-    state: { value: 0 },
-    machine: {
-      initial: "idle",
-      states: {
-        idle: {}, // no transitions — everything blocked
-      },
-    },
-    methods: {
-      async setValue(s, n: number) {
-        s.value = n;
-      },
-    },
-  });
-
-  const composed = composeCells([locked]);
-  const app = createApp(composed);
-  bindCell(locked, app.dispatch, app.getState);
-
-  let rejected = false;
-  try {
-    await locked.setValue(42);
-  } catch {
-    rejected = true;
-  }
-
-  assertEquals(
-    rejected,
-    true,
-    "call() should reject when machine blocks the action",
   );
 });
 
@@ -1049,7 +845,6 @@ Deno.test("call: timeout option rejects after specified ms", async () => {
         s.done = true;
       },
     },
-    machine: false,
   });
 
   const composed = composeCells([slow]);
@@ -1078,7 +873,6 @@ Deno.test("call: retries option retries on failure", async () => {
         s.result = "ok";
       },
     },
-    machine: false,
   });
 
   const composed = composeCells([flaky]);
@@ -1089,21 +883,16 @@ Deno.test("call: retries option retries on failure", async () => {
   assertEquals(attempts, 3, "should have retried until success");
 });
 
-// ── generators ─────────────────────────────────────────────────────
+// ── async-method workflows (the methods-native generator replacement) ──
 
-Deno.test("cell(generators): generator runs when action dispatched", async () => {
+Deno.test("cell(workflows): async method runs when action dispatched", async () => {
   let ran = false;
   const wf = cell("wf", {
     state: { result: "" as string },
-    methods: {},
-    generators: {
-      *doWork(ctx: GenCtx) {
-        yield* ctx.call("fetch", async () => {
-          await delay(10);
-          ran = true;
-          return "done";
-        });
-        yield* ctx.done();
+    methods: {
+      async doWork(_s) {
+        await delay(10);
+        ran = true;
       },
     },
   });
@@ -1116,21 +905,14 @@ Deno.test("cell(generators): generator runs when action dispatched", async () =>
   assertEquals(ran, true);
 });
 
-Deno.test("cell(generators): generator mutates state via ctx.mutate", async () => {
+Deno.test("cell(workflows): async method stages state writes across awaits", async () => {
   const order = cell("order", {
     state: { status: "idle" as string },
-    methods: {},
-    generators: {
-      *place(ctx: GenCtx) {
-        yield* ctx.mutate("set-processing", (draft) => {
-          draft.status = "processing";
-        });
-        yield* ctx.call("process", async () => {
-          await delay(10);
-        });
-        yield* ctx.done((draft) => {
-          draft.status = "done";
-        });
+    methods: {
+      async place(s) {
+        s.status = "processing";
+        await delay(10);
+        s.status = "done";
       },
     },
   });
@@ -1151,24 +933,18 @@ Deno.test("cell(generators): generator mutates state via ctx.mutate", async () =
   );
 });
 
-Deno.test("cell(generators): generator coexists with methods", async () => {
-  let genRan = false;
+Deno.test("cell(workflows): async workflow coexists with sync methods", async () => {
+  let wfRan = false;
   const shop = cell("shop", {
     state: { count: 0, submitted: false },
     methods: {
-      increment(s: { count: number; submitted: boolean }) {
+      increment(s) {
         s.count++;
       },
-    },
-    generators: {
-      *submit(ctx: GenCtx) {
-        yield* ctx.call("send", async () => {
-          await delay(10);
-          genRan = true;
-        });
-        yield* ctx.done((draft: Record<string, unknown>) => {
-          draft.submitted = true;
-        });
+      async submit(s) {
+        await delay(10);
+        wfRan = true;
+        s.submitted = true;
       },
     },
   });
@@ -1176,57 +952,50 @@ Deno.test("cell(generators): generator coexists with methods", async () => {
   const composed = composeCells([shop]);
   const app = createApp(composed);
 
-  // method works
+  // sync method works
   app.dispatch({ type: "shop:increment", payload: { args: [] } });
   assertEquals((app.getState().shop as Record<string, unknown>).count, 1);
 
-  // generator works
+  // async workflow works
   app.dispatch({ type: "shop:submit", payload: { args: [] } });
   await delay(50);
-  assertEquals(genRan, true);
+  assertEquals(wfRan, true);
   assertEquals(
     (app.getState().shop as Record<string, unknown>).submitted,
     true,
   );
 });
 
-Deno.test("cell(generators): A catalog includes generator action keys", () => {
+Deno.test("cell(workflows): catalog includes async method keys", () => {
   const proc = cell("proc", {
     state: {},
     methods: {
       reset(s: Record<string, unknown>) {
         s.x = 0;
       },
-    },
-    generators: {
-      *run(_ctx: GenCtx) {
-        yield* _ctx.done();
+      async run(_s) {
+        await Promise.resolve();
       },
     },
   });
 
-  // Generator action is flattened onto cell (public API)
+  // Async method is flattened onto cell (public API)
   assertEquals(typeof (proc as Record<string, unknown>).run, "function");
   assertEquals(
-    ((proc as Record<string, unknown>).run as { type: string }).type,
+    ((proc as Record<string, unknown>).run as unknown as { type: string }).type,
     "proc:run",
   );
 });
 
-Deno.test("cell(generators): generators-only (no methods) works", async () => {
+Deno.test("cell(workflows): async-methods-only cell (no sync methods) works", async () => {
   let called = false;
   const bg = cell("bg", {
     state: { done: false },
-    methods: {},
-    generators: {
-      *tick(ctx: GenCtx) {
-        yield* ctx.call("work", async () => {
-          await delay(10);
-          called = true;
-        });
-        yield* ctx.done((draft: Record<string, unknown>) => {
-          draft.done = true;
-        });
+    methods: {
+      async tick(s) {
+        await delay(10);
+        called = true;
+        s.done = true;
       },
     },
   });

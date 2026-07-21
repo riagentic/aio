@@ -3,6 +3,10 @@
 // Prod mode: page from disk via aio:// protocol, state via UDS+IPC
 
 import {
+  BACKOFF_BASE_MS,
+  BACKOFF_MAX_MS,
+} from "../protocol/transport-shared.ts";
+import {
   type AioMeta,
   tmplBounds,
   tmplBoundsTracking,
@@ -168,7 +172,7 @@ ${tmplBoundsTracking()}
           : ("backend connection lost" + (lastErrCode ? " (" + lastErrCode + ")" : ""));
         console.warn("[aio:electron] " + why + " at " + SOCK + " — reconnecting (backoff up to 8s)…");
       }
-      const delay = Math.min(1000 * Math.pow(2, retry), 8000);
+      const delay = Math.min(${BACKOFF_BASE_MS} * Math.pow(2, retry), ${BACKOFF_MAX_MS});
       retry++;
       reconnectTimer = setTimeout(connectUDS, delay);
     });

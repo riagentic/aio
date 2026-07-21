@@ -36,7 +36,7 @@ yours.
 
 ## Current maturity (alpha)
 
-The five local targets are validated end-to-end; the five `remote`/thin-client
-targets are **experimental** until field-validated off-box. The API surface is
-snapshot-locked in CI; breaking changes ship only in alphas. See
-[semver policy](semver-policy.md) and the [changelog](../../CHANGELOG.md).
+All ten targets (five local + five `remote`/thin-client) are exercised by CI
+end-to-end. The API surface is snapshot-locked in CI; breaking changes ship only
+in alphas. See [semver policy](semver-policy.md) and the
+[changelog](../../CHANGELOG.md).

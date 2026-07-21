@@ -1,4 +1,8 @@
-# Lifecycle — Init, Destroy, Middleware, Runtime
+# Lifecycle — Init, Destroy, Runtime
+
+> v2: methods is the one style — see
+> [docs/upgrade/to-v2.md](../upgrade/to-v2.md) for migration (the `middleware`
+> chain is gone; `beforeReduce` remains).
 
 How cells boot, shut down, and how to intercept actions globally.
 
@@ -23,11 +27,11 @@ const ws = cell("ws", {
 
 **`app.getState()` vs `app.getFullState()`:**
 
-|              | `app.getState()`             | `app.getFullState?.()`         |
-| ------------ | ---------------------------- | ------------------------------ |
-| Returns      | This cell's slice            | Entire app state               |
-| Available in | `init`, `destroy`, `execute` | `init`, `destroy`, `execute`   |
-| Use when     | Reading own state            | Coordinating with another cell |
+|              | `app.getState()`      | `app.getFullState?.()`         |
+| ------------ | --------------------- | ------------------------------ |
+| Returns      | This cell's slice     | Entire app state               |
+| Available in | `onInit`, `onDestroy` | `onInit`, `onDestroy`          |
+| Use when     | Reading own state     | Coordinating with another cell |
 
 ---
 
@@ -69,7 +73,6 @@ await aio.run({
 | Option                        | Type                                     | Description                                                                                                         |
 | ----------------------------- | ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
 | `cells`                       | `CellEntry[]`                            | Cells to run — default: every imported `cell()` (they self-register)                                                |
-| `middleware`                  | `MiddlewareFn[]`                         | Middleware chain applied before reduce                                                                              |
 | `appVersion`                  | `string`                                 | App version — default: deno.json `version`                                                                          |
 | `isolate`                     | `string[]`                               | Only activate these cells (dev convenience)                                                                         |
 | `beforeReduce`                | `fn`                                     | Intercept actions before reduce — return null to drop                                                               |
@@ -139,44 +142,25 @@ Like every `/__aio/*` endpoint it sits behind auth when `token`, `users`, or
 
 ---
 
-## Middleware
+## Intercepting actions — `beforeReduce`
 
-Middleware intercepts all actions before they reach any reducer:
+`beforeReduce` sees every action before it reaches any cell. Return the action
+(possibly modified) or `null` to drop it:
 
 ```ts
 await aio.run({
   cells: [counter, wallet],
-  middleware: [
-    aio.middleware.logger(),
-    aio.middleware.validate(),
-    aio.middleware.metrics(),
-  ],
+  beforeReduce: (action, state, user) => {
+    if (action.type.startsWith("admin:") && user?.role !== "admin") return null;
+    return action;
+  },
 });
 ```
 
-Middleware runs in order. Each receives `(action, state, user?)` and returns the
-action (possibly modified) or `null` to drop it.
-
-### Custom middleware
-
-```ts
-aio.middleware.create((action, state, next, user) => {
-  if (action.type.startsWith("Admin:") && user?.role !== "admin") return null;
-  const start = performance.now();
-  const result = next(action);
-  const elapsed = performance.now() - start;
-  if (elapsed > 50) {
-    console.warn(`Slow action: ${action.type} (${elapsed.toFixed(1)}ms)`);
-  }
-  return result;
-});
-```
-
-Built-in: `logger`, `validate`, `metrics`, `perfBudget`, `freeze`, `devtools`,
-`create` (custom).
-
-Middleware sees actions across all cells — the right place for cross-cutting
-concerns like auth, logging, rate limiting.
+The middleware chain of v1 is gone — its real uses are framework features now:
+logging → the structured logger + `am log`; perf budgets → vitals; storm
+protection → the `dispatchStorm` guard (on by default); validation → cell
+definition-time checks + `validate` on the cell.
 
 ---
 

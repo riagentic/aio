@@ -188,3 +188,30 @@ export const counter = cell('counter', {
     );
   });
 });
+
+// ── v2 Style-B detection (perfect-aio D10) ────────────────────────────
+import { checkCells } from "../aiol/checks.ts";
+
+Deno.test("aiol: removed v1 config keys report the migration mapping", async () => {
+  await withTmpDir(async (dir) => {
+    await project(
+      dir,
+      `import { cell } from "aio";
+export const legacy = cell("legacy", {
+  state: { x: 0 },
+  actions: { go: () => ({}) },
+  reduce: { go(s) { s.x = 1; } },
+  machine: { initial: "idle", states: { idle: { go: "idle" } } },
+  generators: { flow: function* (ctx) { yield* ctx.sleep("s", 1); } },
+});
+`,
+    );
+    const { ctx, report } = await buildContext(dir);
+    checkCells({ ...ctx, ...report });
+    const errors = report.issues.filter((i) =>
+      i.severity === "error" && i.message.includes("docs/upgrade/to-v2.md")
+    );
+    // actions, generators, machine all detected
+    assertEquals(errors.length >= 3, true, JSON.stringify(report.issues));
+  });
+});

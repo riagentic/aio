@@ -19,19 +19,15 @@
 
 ## State Management
 
-- [Which Approach?](../state/which-approach.md) — decision tree: methods vs
-  generators vs actions/reduce
 - [Cells](../state/cells.md) — cell() config and anatomy
 - [Cell Visibility](../state/cell-visibility.md) — per-cell ui/persist filters
-- [Methods](../state/methods.md) — sync/async methods, selectors
-- [State Machines](../state/machines.md) — guards and transitions
+- [Methods](../state/methods.md) — sync/async methods, workflows, cancellation,
+  selectors
 - [Composition](../state/composition.md) — cross-cell communication
-- [Generators](../state/generators.md) — sequential async workflows
-- [Generators API](../state/generators-api.md) — GenCtx method reference
 - [Scheduling](../state/scheduling.md) — timers, intervals, cron
-- [Lifecycle](../state/lifecycle.md) — hooks, middleware, aio.run()
-- [Actions & Reduce](../state/actions-reduce.md) — advanced: explicit
-  action/reduce pipeline
+- [Lifecycle](../state/lifecycle.md) — hooks, aio.run(), runtime control
+- [Migrating to v2](../upgrade/to-v2.md) — from
+  actions/reduce/machine/generators to methods
 
 ## Rendering
 

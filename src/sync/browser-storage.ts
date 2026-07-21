@@ -15,7 +15,6 @@ type CellDoc = {
  * OpBufferStorage persisted in `localStorage` — the browser counterpart of
  * {@linkcode createMemoryStorage}. Namespaced by `prefix` so several apps on
  * one origin don't collide.
- * @experimental Excluded from the 1.0 stability guarantee.
  */
 export function createLocalStorageOpStorage(
   prefix = "__aio_sync",

@@ -3,7 +3,6 @@
 import { type Draft, produce } from "immer";
 import { msg } from "./state/msg.ts";
 import type { Msg } from "./state/cell-types.ts";
-import { actions, effects } from "./state/factory.ts";
 import { deepMerge } from "./state/deep-merge.ts";
 import {
   createDispatch,
@@ -32,7 +31,7 @@ import {
 import { _applyFullState, _resetSignals } from "./state/state-signals.ts";
 
 // Re-exports for user code
-export { actions, effects, msg };
+export { msg };
 
 /** Extracts return types of all function members into a union */
 export type UnionOf<T> = {

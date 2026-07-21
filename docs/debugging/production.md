@@ -149,15 +149,13 @@ HTTP endpoint: `GET /__aio/health` returns JSON with per-cell status.
 
 ## Common error patterns
 
-### Machine-dropped actions
+### Guarded actions (no state change)
 
-```
-MACHINE_BLOCKED in cell 'counter'
-Action: counter:save -- machine is in 'error' state (allowed: retry, dismiss)
-```
-
-Causes: UI dispatched wrong action for current state, machine definition missing
-a transition, or race condition after state transition.
+A method with a
+[guard line](../state/methods.md#guard-lines--machine-states-without-a-machine)
+(`if (s.status !== "idle") return`) returns early on purpose — the dispatch
+lands, state doesn't change. If a click "does nothing", check the guard against
+the current `status` field before suspecting routing.
 
 ### "uses reserved key(s): _status"
 
@@ -168,11 +166,6 @@ The `_status` and `__aio_*` keys are reserved. Rename your field (e.g.,
 
 Same cell instance passed to `aio.run()` twice, or `aio.run()` called twice
 without creating new instances.
-
-### "machine initial state not found"
-
-The `initial` value in machine config doesn't match any key in `states`. Check
-for typos.
 
 ---
 
@@ -203,7 +196,7 @@ windows.
 Runs on `aio.run()` and reports config issues:
 
 ```
-[aio] check-mark state (3 keys) check-mark reduce check-mark execute check-mark App.tsx
+[aio] check-mark state (3 keys) check-mark methods check-mark App.tsx
       warning state has reserved key(s): $p -- rename
       info App.tsx has `import React` -- not needed, JSX transforms are automatic
 ```
@@ -226,15 +219,15 @@ Categories: check-mark ok, warning, info hint, fatal (prevents startup).
 Recovery: restart process. SQLite WAL recovery handles partial writes
 automatically.
 
-### WebSocket drops during a generator step
+### WebSocket drops during an async method
 
-Generators run server-side -- client disconnect doesn't affect them. Flow
-continues, state accumulates, client gets latest on reconnect via full-state
-sync.
+Async methods run server-side -- client disconnect doesn't affect them. The
+method continues, state accumulates, client gets latest on reconnect via
+full-state sync.
 
-If the _server_ crashes mid-generator: generator is lost (in-memory). On
-restart, cells reinitialize to persisted state. Design generators to be
-resumable -- check state in `onInit`.
+If the _server_ crashes mid-method: the in-flight method is lost (in-memory). On
+restart, cells reinitialize to persisted state. Design workflows to be resumable
+-- check state in `onInit`.
 
 ### Electron process killed during state flush
 
@@ -252,12 +245,11 @@ before compilation.
 Each server start generates a boot ID. Client reconnects with different boot ID
 triggers page reload for fresh code. Automatic.
 
-### Generator waitFor hangs forever
+### `until()` never resolves
 
-`ctx.waitFor(action)` with no timeout waits indefinitely. Dev mode warns after
-30s. Check `am health` -- flow shows as active.
-
-Fix: always pass a timeout: `ctx.waitFor(action, 30_000)`.
+`until(pred)` fails loud: it rejects with `UntilTimeoutError` after 30s by
+default instead of hanging. If a workflow seems stuck, check the error log for
+the timeout message and tune `{ timeoutMs }` (or fix the predicate).
 
 ### Offline queue overflow
 
@@ -277,7 +269,7 @@ Common causes:
 - **Unbounded state arrays**: memory monitor catches this -- look for
   `MEMORY_PRESSURE` with per-cell sizing
 - **Time-travel history**: capped at 200 entries (dev only, zero in prod)
-- **Stuck generators**: leak one `waitFor` listener each. 30s dev warning
-  catches this
+- **Stuck async methods**: an `until()` that can never become true holds its
+  method in-flight until the 30s default timeout rejects it
 - **WebSocket client state**: each client holds a delta cache. Disconnected
   clients cleaned up on close. Check `am status` for connection count

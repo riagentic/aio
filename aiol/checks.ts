@@ -279,6 +279,38 @@ export const checkCells: Checker = (ctx) => {
     `${cells.length} cell(s): ${cells.map((f) => f.name).join(", ")}`,
   );
 
+  // aio v2 (perfect-aio D1/D10): Style-B config keys were removed — detect
+  // them STATICALLY and print the exact migration mapping, so an old app
+  // learns the fix from `deno task lint` before it even boots.
+  for (const f of cells) {
+    const flags: [boolean, string, string][] = [
+      [
+        f.hasActions,
+        "actions:/reduce:",
+        "actions+reduce pairs are one method — `increment(s, by) { s.count += by }`",
+      ],
+      [
+        f.hasGenerators,
+        "generators:",
+        "plain async methods + until()/race()/sleep(); cancelOn + s.$signal for cancellation",
+      ],
+      [
+        f.hasMachine,
+        "machine:",
+        'guards are a guard line — `if (s.status !== "idle") return;`',
+      ],
+    ];
+    for (const [hit, key, hint] of flags) {
+      if (hit) {
+        report(
+          "error",
+          "cells",
+          `cell "${f.name}" uses removed v1 config '${key}' — ${hint}. Migration: docs/upgrade/to-v2.md`,
+        );
+      }
+    }
+  }
+
   // Duplicate names
   const names = new Map<string, CellInfo[]>();
   for (const f of cells) {

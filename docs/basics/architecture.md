@@ -41,19 +41,17 @@ receives patches and sends actions over aio's own protocol.
 ```mermaid
 flowchart LR
     U[User action /<br/>method call] --> D[dispatch]
-    D --> M[beforeReduce<br/>middleware]
-    M --> R["reduce (Immer)"]
+    D --> M[beforeReduce]
+    M --> R["method mutates draft<br/>(Immer)"]
     R --> S[new state]
-    R --> FX[effects]
-    FX --> X["execute<br/>(async side-effects)"]
-    X -- "batched writes<br/>(read-your-writes)" --> D
+    R --> FX["returned effects<br/>(schedule / own)"]
+    FX -- "batched writes<br/>(read-your-writes)" --> D
     S --> P[persist]
     S --> BC[broadcast patches<br/>to every client]
 ```
 
-Every state change follows this pipeline. Methods wrap it for ergonomics;
-generators extend it for sequential workflows; actions/reduce exposes it
-directly.
+Every state change follows this pipeline. Sync methods are the reducer; async
+methods run in the executor and commit batched writes at each `await` boundary.
 
 ## Module Map
 
@@ -64,7 +62,7 @@ folders. The folder dependency matrix is CI-enforced by `deno task boundaries`
 
 | Folder         | Purpose                                                     | Key files                                       |
 | -------------- | ----------------------------------------------------------- | ----------------------------------------------- |
-| `state/`       | Isomorphic core: cells, signals, dispatch, flow, schedule   | `cell-create.ts`, `signal.ts`, `dispatch.ts`    |
+| `state/`       | Isomorphic core: cells, signals, dispatch, schedule         | `cell-create.ts`, `signal.ts`, `dispatch.ts`    |
 | `protocol/`    | Wire protocol messages + cid/ack + version handshake        | `protocol-types.ts`, `browser-ack.ts`           |
 | `air/`         | AIR renderer: vdom, hooks, hydration, SSR, transitions      | `vdom.ts`, `renderer-flush.ts`, `ssr-stream.ts` |
 | `browser/`     | Browser client: transport, router, client boot              | `browser-transport.ts`, `browser-air-hooks.ts`  |
@@ -125,20 +123,23 @@ Folders may only import what the dependency matrix in
 
 ## Extension Points
 
-| Extension         | Mechanism                                              | Docs                                  |
-| ----------------- | ------------------------------------------------------ | ------------------------------------- |
-| Custom middleware | `beforeReduce` in aio.run config                       | [lifecycle.md](../state/lifecycle.md) |
-| Lifecycle hooks   | `onInit`, `onDestroy` per cell                         | [lifecycle.md](../state/lifecycle.md) |
-| Sync strategies   | `merge` config per field (lww, counter, set-add, etc.) | [crdt.md](../persistence/crdt.md)     |
-| Custom SQL schema | `table()` definitions in cell config                   | [sqlite.md](../persistence/sqlite.md) |
-| Client transport  | WebSocket (default) or UDS (Unix Domain Socket)        | [browser.md](../clients/browser.md)   |
+| Extension           | Mechanism                                              | Docs                                  |
+| ------------------- | ------------------------------------------------------ | ------------------------------------- |
+| Action interception | `beforeReduce` in aio.run config                       | [lifecycle.md](../state/lifecycle.md) |
+| Lifecycle hooks     | `onInit`, `onDestroy` per cell                         | [lifecycle.md](../state/lifecycle.md) |
+| Sync strategies     | `merge` config per field (lww, counter, set-add, etc.) | [crdt.md](../persistence/crdt.md)     |
+| Custom SQL schema   | `table()` definitions in cell config                   | [sqlite.md](../persistence/sqlite.md) |
+| Client transport    | WebSocket (default) or UDS (Unix Domain Socket)        | [browser.md](../clients/browser.md)   |
 
-## Programming Model Tiers
+## Programming Model
 
-| Tier                   | Style                                                  | When to use                                   |
-| ---------------------- | ------------------------------------------------------ | --------------------------------------------- |
-| **L1: Methods**        | `methods: { add(s, item) { s.items.push(item) } }`     | 90% of cells. Start here.                     |
-| **L2: Generators**     | `generators: { *fetch(ctx) { yield* ctx.call(...) } }` | Sequential multi-step workflows               |
-| **L3: Actions/Reduce** | `actions → reduce → execute → effects`                 | Time-travel, action replay, strict separation |
+One style — methods (v2; see [to-v2.md](../upgrade/to-v2.md)):
 
-See [State Management](../state/README.md) for the full decision guide.
+| Need              | Style                                              |
+| ----------------- | -------------------------------------------------- |
+| State changes     | `methods: { add(s, item) { s.items.push(item) } }` |
+| Async / workflows | `async` methods + `until`/`race`/`sleep`           |
+| Guards            | `if (s.status !== 'idle') return` — a guard line   |
+| Cancellation      | `cancelOn` + `s.$signal`                           |
+
+See [State Management](../state/README.md) for the full guide.

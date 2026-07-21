@@ -1,7 +1,11 @@
 # Cells — Config Shape and Anatomy
 
-Everything is a cell. A cell is a self-contained unit: its own state slice,
-actions, effects, machine guards, reducer, and executor.
+> v2: methods is the one style — see
+> [docs/upgrade/to-v2.md](../upgrade/to-v2.md) for migration from
+> `actions:`/`reduce:`/`machine:`/`generators:`.
+
+Everything is a cell. A cell is a self-contained unit: its own state slice plus
+the methods and selectors that operate on it.
 
 ## Architecture — Data Flow
 
@@ -18,24 +22,14 @@ actions, effects, machine guards, reducer, and executor.
                                      beforeReduce(action, state)
                                           │  (null → drop)
                                           ▼
-                                     ┌─────────────┐
-                                     │  Machine     │  state guard:
-                                     │  (optional)  │  is this action
-                                     │              │  allowed in the
-                                     └──────┬───────┘  current state?
-                                            │
-                                            ▼
-                                     reduce(state, action)
+                                     method(draft, ...args)
                                        │         │
                                        │         ▼
-                                       │    returns effects[]
-                                       ▼         │
-                                     new state    ▼
-                                       │    execute(app, effect)
-                                       │         │
-                                       │         ▼
-                                       │    side effects:
-                                       │    fetch, DB, dispatch
+                                       │    returned effects[]
+                                       ▼    (schedule / own)
+                                     new state    │
+                                       │          ▼
+                                       │    runtime performs them
                                        │
                                        ▼
                                      broadcast delta ── WebSocket ──▶  UI re-renders
@@ -45,33 +39,28 @@ actions, effects, machine guards, reducer, and executor.
                                      sync to SQLite
 ```
 
-**One-sentence summary:** UI sends actions → server reduces state → effects run
-→ deltas broadcast back.
+**One-sentence summary:** UI sends actions → methods mutate state → returned
+effects run → deltas broadcast back.
 
 ---
 
 ## cell() config
 
-| Key          | Type                                  | Required | Description                                                                       |
-| ------------ | ------------------------------------- | -------- | --------------------------------------------------------------------------------- |
-| `state`      | `Record<string, unknown>`             | Yes      | Initial state                                                                     |
-| `methods`    | `Record<string, Function>`            | Yes*     | Sync or async methods — `(s, ...args) => void`                                    |
-| `generators` | `Record<string, GeneratorFn>`         | No       | Sequential workflows — auto-creates trigger action per generator                  |
-| `actions`    | `Record<string, Function>`            | Yes*     | Action creators — `(arg) => ({ arg })`                                            |
-| `effects`    | `Record<string, Function>`            | No       | Effect creators — `(arg) => ({ arg })`                                            |
-| `reduce`     | `Record<string, Handler> \| Function` | No       | Named handlers or function form                                                   |
-| `execute`    | `Record<string, Handler> \| Function` | No       | Named effect handlers or function form                                            |
-| `selectors`  | `Record<string, (s) => T>`            | No       | Derived values, auto-scoped to cell state                                         |
-| `machine`    | `MachineConfig \| false`              | No       | State machine guards. `false` or omit = no guards                                 |
-| `listensTo`  | `(Function \| string)[]`              | No       | Foreign actions to listen to — pass bound methods                                 |
-| `sync`       | `true \| SyncConfig`                  | No       | Enable CRDT sync — see [CRDT docs](../persistence/crdt.md)                        |
-| `persist`    | `CellFieldFilter`                     | No       | `"all"`, `"none"`, `{ include: [...] }`, `{ exclude: [...] }` — default `"all"`   |
-| `ui`         | `CellVisibility`                      | No       | Same as persist, plus optional `forUser` for per-user filtering — default `"all"` |
-| `init`       | `(app) => void`                       | No       | Called when cell initializes                                                      |
-| `destroy`    | `(app) => void`                       | No       | Called when cell destroys                                                         |
-
-\* `methods` or `actions` required (or `generators` alone). All three styles can
-coexist — all callable names must be unique within the cell.
+| Key         | Type                       | Required | Description                                                                                                   |
+| ----------- | -------------------------- | -------- | ------------------------------------------------------------------------------------------------------------- |
+| `state`     | `Record<string, unknown>`  | Yes      | Initial state                                                                                                 |
+| `methods`   | `Record<string, Function>` | Yes      | Sync or async methods — `(s, ...args) => void`                                                                |
+| `selectors` | `Record<string, (s) => T>` | No       | Derived values, auto-scoped to cell state                                                                     |
+| `cancelOn`  | `{ method: [triggers] }`   | No       | Foreign actions that abort a running async method — see [Methods](methods.md#cancellation--cancelon--ssignal) |
+| `listensTo` | `(Function \| string)[]`   | No       | Declare foreign actions this cell observes — pass bound methods                                               |
+| `validate`  | `(s) => true \| string`    | No       | State validator, runs after every mutation — string = rejection message                                       |
+| `sync`      | `true \| SyncConfig`       | No       | Enable CRDT sync — see [CRDT docs](../persistence/crdt.md)                                                    |
+| `persist`   | `CellFieldFilter`          | No       | `"all"`, `"none"`, `{ include: [...] }`, `{ exclude: [...] }` — default `"all"`                               |
+| `ui`        | `CellVisibility`           | No       | Same as persist, plus optional `forUser` for per-user filtering — default `"all"`                             |
+| `version`   | `number`                   | No       | State-shape version — pairs with `onMigrate`                                                                  |
+| `onMigrate` | `(state, from) => state`   | No       | Migration hook when persisted version < `version`                                                             |
+| `onInit`    | `(app) => void`            | No       | Called when cell initializes                                                                                  |
+| `onDestroy` | `(app) => void`            | No       | Called when cell destroys                                                                                     |
 
 > ### ⚠️ Two TypeScript traps to know first
 >
@@ -97,14 +86,15 @@ coexist — all callable names must be unique within the cell.
 
 ## What cell() generates
 
-From the name `'counter'` and action `increment`, you get:
+From the name `'counter'` and method `increment`, you get:
 
-| Generated                | Value                                            | Use                          |
-| ------------------------ | ------------------------------------------------ | ---------------------------- |
-| `counter.increment(5)`   | dispatches `counter:increment` after `aio.run()` | Direct calling from app code |
-| `counter.increment.type` | `'counter:increment'`                            | Type string for matching     |
+| Generated                     | Value                                            | Use                           |
+| ----------------------------- | ------------------------------------------------ | ----------------------------- |
+| `counter.increment(5)`        | dispatches `counter:increment` after `aio.run()` | Direct calling from app code  |
+| `counter.increment.type`      | `'counter:increment'`                            | Type string for matching      |
+| `counter.increment.action(5)` | `{ type, payload }` descriptor                   | Schedules, tests, composition |
 
-**Action type format:** `cellName:actionKey` — all lowercase.
+**Action type format:** `cellName:methodKey` — all lowercase.
 
 ---
 
@@ -116,31 +106,25 @@ After `cell()` returns a cell ref, the outside world can access:
 | ----------------------- | ----------------------------- | ---------------------------------- |
 | Sync method             | Direct call                   | `counter.increment(5)`             |
 | Async method            | Direct call (returns Promise) | `await api.fetch('/users')`        |
-| Generator               | Direct call (starts workflow) | `checkout.place(item)`             |
-| Action (explicit style) | Direct call or dispatch       | `cart.start()`                     |
 | Selector                | Direct call (after bind)      | `counter.total()`                  |
-| `.type` on any callable | Read property                 | `cart.clear.type` → `"cart:clear"` |
-| `.fx` effect catalog    | Typed creators                | `counter.fx.persist(value)`        |
+| `.type` on any method   | Read property                 | `cart.clear.type` → `"cart:clear"` |
+| `.action` on any method | Action descriptor builder     | `cart.setQty.action(3)`            |
 
 ### What `.type` is for
 
-Every method, generator, and action has a `.type` string property for cross-cell
-wiring:
+Every method has a `.type` string property for cross-cell wiring:
 
 ```ts
-cancelOn: { place: [cart.clear] }              // cancel generator
-listensTo: [inventory.reserve]                 // react to foreign actions
-machine: {
-  states: {
-    processing: { [cart.clear.type]: 'cancelled' }  // foreign transitions
-  }
-}
+cancelOn: {
+  place: [cart.clear];
+} // abort a running async method
+listensTo: [inventory.reserve]; // observe foreign actions
 ```
 
 ### What you cannot access
 
 Everything under `__aio` is framework plumbing. You can inspect it for debugging
-(`counter.__aio.machine`, `counter.__aio.actionKeys`) but never need it in
+(`counter.__aio.actionKeys`, `counter.__aio.actions`) but never need it in
 normal code.
 
 ### Type helper: StateOf
@@ -168,9 +152,9 @@ Three tools, one decision: who needs to see the state?
 
 A `scope: "client"` cell never registers with the server store, never syncs,
 never persists to Deno.Kv. Methods run synchronously in the browser against the
-cell's signal; each tab has its own copy. Async methods, generators, actions,
-and machines throw at `cell()` time (v1 limitation) — do async work in the
-component, then call a sync method with the result.
+cell's signal; each tab has its own copy. Async methods throw at `cell()` time
+(v1 limitation) — do async work in the component, then call a sync method with
+the result.
 
 ## Internals by component
 
@@ -184,17 +168,12 @@ other cells' state, call own methods.
 ### Async methods
 
 Receives a live Proxy. Reads return fresh state. Writes auto-dispatch as
-batches.
+batches. Multi-step workflows live here — with `until`/`race`/`sleep` and
+`cancelOn` + `s.$signal` for cancellation
+([Methods](methods.md#workflows-in-async-methods)).
 
 **Can:** mutate state, await async work, call other cells' methods. **Cannot:**
 call own methods directly, access selectors.
-
-### Generators
-
-The most powerful context — top-to-bottom orchestration with full observability.
-Every `yield*` creates a named action in time-travel history.
-
-**Can:** everything — mutate, call, dispatch, wait, sleep, parallel, race.
 
 ### Selectors
 
@@ -222,25 +201,24 @@ onInit(app, initState) { app.dispatch(...) },
 onDestroy(app) { /* cleanup */ },
 ```
 
-Same capabilities as execute — dispatch and read state. One-time calls. The
-second argument `initState` is the cell's initial/default state object, provided
-because `app.getState()` may not yet reflect the `__init` dispatch at the time
-`onInit` runs.
+Scoped app access — dispatch and read state. One-time calls. The second argument
+`initState` is the cell's initial/default state object, provided because
+`app.getState()` may not yet reflect the `__init` dispatch at the time `onInit`
+runs.
 
 ---
 
-## Which style to use
+## One style
 
-| When to use                 | Style                                |
-| --------------------------- | ------------------------------------ |
-| CRUD, forms, simple state   | `cell({ methods })`                  |
-| Simple async (fetch, save)  | `cell({ methods })` with async       |
-| Multi-step orchestration    | `cell({ methods, generators })`      |
-| Complex reactive cross-cell | `cell({ actions, reduce, execute })` |
-| Machine guards on async     | `cell({ methods, machine })`         |
+`cell({ state, methods })` is the whole model:
 
-**Progression:** Start with `methods`. Add `generators` when a method becomes
-multi-step. Add `actions/reduce/execute` for fine-grained action control.
+| When you need             | Use                                                                                                          |
+| ------------------------- | ------------------------------------------------------------------------------------------------------------ |
+| CRUD, forms, simple state | sync methods                                                                                                 |
+| Async work (fetch, save)  | async methods                                                                                                |
+| Multi-step orchestration  | async methods + [`until`/`race`/`sleep`](methods.md#workflows-in-async-methods)                              |
+| State guards              | a [guard line](methods.md#guard-lines--machine-states-without-a-machine) — `if (s.status !== "idle") return` |
+| Cancellation              | [`cancelOn` + `s.$signal`](methods.md#cancellation--cancelon--ssignal)                                       |
 
 ### TypeScript inference
 
@@ -251,22 +229,21 @@ from method signatures, so `increment(s, by: number)` becomes
 
 ## Naming rules
 
-State keys, methods, actions, effects, and selectors share the cell's namespace.
-Every name must be unique — collisions throw at definition time.
+State keys, methods, and selectors share the cell's namespace. Every name must
+be unique — collisions throw at definition time.
 
 ### Not allowed — a state key sharing a name with any callable
 
 ```ts
 const gateway = cell("gateway", {
   state: { error: null as string | null },
-  actions: { error: (msg: string) => ({ msg }) }, // ❌ throws at cell() time
-  reduce: {
-    error(s, p) {
-      s.error = p.msg;
+  methods: {
+    error(s, msg: string) { // ❌ throws at cell() time
+      s.error = msg;
     },
   },
 });
-// Error: [cell:gateway] state key 'error' collides with action 'error' —
+// Error: [cell:gateway] state key 'error' collides with method 'error' —
 // reading gateway.error in a component would return the function, not the
 // state. Rename one (e.g. state key 'lastError').
 ```
@@ -277,10 +254,9 @@ from components — so this is a definition-time error. Rename the state key:
 ```ts
 const gateway = cell("gateway", {
   state: { lastError: null as string | null },
-  actions: { error: (msg: string) => ({ msg }) }, // ✅
-  reduce: {
-    error(s, p) {
-      s.lastError = p.msg;
+  methods: {
+    error(s, msg: string) { // ✅
+      s.lastError = msg;
     },
   },
 });
@@ -288,13 +264,10 @@ const gateway = cell("gateway", {
 
 | Collision                        | Allowed? | Reason                                  |
 | -------------------------------- | -------- | --------------------------------------- |
-| state ↔ method/action/effect     | ❌       | Callable wins, state unreachable (AIO4) |
+| state ↔ method                   | ❌       | Callable wins, state unreachable (AIO4) |
 | state ↔ selector                 | ❌       | Selector wins, state unreachable        |
 | method ↔ method                  | ❌       | Duplicate — which runs?                 |
-| method ↔ generator               | ❌       | Both dispatch, ambiguous                |
-| method ↔ action                  | ❌       | Both create `prefix:name` type          |
-| action ↔ effect                  | ❌       | Both use same type pattern              |
-| action ↔ selector                | ❌       | Both flatten onto cell                  |
+| method ↔ selector                | ❌       | Both flatten onto cell                  |
 | any ↔ `__aio`, `A`, `E`, `state` | ❌       | Reserved for framework                  |
 
 **Rule of thumb:** every name in a cell — state key or behavior — must be
@@ -307,10 +280,10 @@ unique. Collisions throw at `cell()` time with a rename suggestion.
 Symptom: every direct call (`counter.increment()`, `fleet.startAll()`, …)
 reports TS2722 under `noUncheckedIndexedAccess: true`.
 
-Cause: something in your code is widening the `methods` (or `actions`) object to
-an index-signature type like `Record<string, …>` **before** `cell()` sees it.
-When that happens, the typed return of `cell()` becomes an index signature, and
-under `noUncheckedIndexedAccess` every property access is `Fn | undefined` — so
+Cause: something in your code is widening the `methods` object to an
+index-signature type like `Record<string, …>` **before** `cell()` sees it. When
+that happens, the typed return of `cell()` becomes an index signature, and under
+`noUncheckedIndexedAccess` every property access is `Fn | undefined` — so
 TypeScript refuses the call.
 
 `cell()` relies on **literal inference** to produce named, callable properties.
@@ -353,9 +326,9 @@ core.navigate("about"); // OK
 
 **Rules of thumb:**
 
-- Don't extract `methods` (or `actions`) into a separate variable.
-- Don't annotate the cell config with `MethodsCellConfig<…>` /
-  `ActionsCellConfig<…>` — let inference flow from the literal.
+- Don't extract `methods` into a separate variable.
+- Don't annotate the cell config with `MethodsCellConfig<…>` — let inference
+  flow from the literal.
 - If you need to split a large cell across files, export the cell itself, not
   its methods object.
 

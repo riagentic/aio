@@ -4,7 +4,6 @@ import { compareHLC } from "./hlc.ts";
 
 /**
  * Outcome of merging a single field: resolved value and whether a conflict occurred.
- * @experimental Excluded from the 1.0 stability guarantee.
  */
 export interface MergeResult {
   value: unknown;
@@ -13,7 +12,6 @@ export interface MergeResult {
 
 /**
  * Merge a field using the specified CRDT strategy, returning the resolved value.
- * @experimental Excluded from the 1.0 stability guarantee.
  */
 export function mergeField(
   strategy: MergeStrategy,

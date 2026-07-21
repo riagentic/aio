@@ -70,18 +70,16 @@ const loader = cell("loader379", {
   },
 });
 
+// Guard at method top (methods-style replacement for the old machine gate):
+// run() is ignored until unlock() flips the status field.
 const gated = cell("gated379", {
-  state: { ran: false },
-  machine: {
-    initial: "locked",
-    states: {
-      locked: { unlock: "open" },
-      open: { run: "open", unlock: "open" },
-    },
-  },
+  state: { ran: false, gate: "locked" },
   methods: {
-    unlock(_s) {},
+    unlock(s) {
+      s.gate = "open";
+    },
     async run(s) {
+      if (s.gate !== "open") return;
       await sleep(5);
       s.ran = true;
     },
@@ -170,16 +168,16 @@ testCell(
 
 testCell(
   gated,
-  "awaiting a machine-blocked async send resolves immediately",
+  "awaiting a guard-blocked async send resolves without doing the work",
   async (t) => {
     t.init();
-    await t.send.run!(); // blocked in 'locked' — resolves, runs nothing
-    t.expect.status("locked");
+    await t.send.run!(); // guard rejects in 'locked' — resolves, no work done
+    t.expect.state((s) => s.gate === "locked");
     t.expect.state((s) => s.ran === false);
 
     t.send.unlock!();
     await t.send.run!();
-    t.expect.status("open");
+    t.expect.state((s) => s.gate === "open");
     t.expect.state((s) => s.ran === true);
   },
 );

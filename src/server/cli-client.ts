@@ -3,6 +3,7 @@
 // Same delta protocol as browser.ts but no DOM, no React — pure Deno runtime.
 
 import { applyPatches, enablePatches, type Patch } from "immer";
+import { backoffDelay, parseAck } from "../protocol/transport-shared.ts";
 import { bindCell } from "../state/cell-catalog.ts";
 import {
   negotiateProtocol,
@@ -150,11 +151,11 @@ export function connectCli<S>(
       if (raw === "__reload" || raw === "__css") return;
       if (raw.startsWith("__tt:") || raw.startsWith("__boot:")) return;
 
-      // Per-action acks for bound-cell method calls: "__ack:<cid>:1"
-      if (raw.startsWith("__ack:")) {
-        const cid = raw.slice(6, raw.lastIndexOf(":"));
-        _pending.get(cid)?.();
-        _pending.delete(cid);
+      // Per-action acks for bound-cell method calls: "__ack:<cid>:1" — shared parse.
+      const ack = parseAck(raw);
+      if (ack) {
+        _pending.get(ack.cid)?.();
+        _pending.delete(ack.cid);
         return;
       }
 
@@ -218,10 +219,9 @@ export function connectCli<S>(
           } — check the server is running and the URL/token match its share link (still retrying)`,
         );
       }
-      // Exponential backoff: 1s → 2s → 4s → 8s max, ±20% jitter
-      const base = Math.min(1000 * Math.pow(2, retry), 8000);
+      // Exponential backoff: 1s → 2s → 4s → 8s max, ±20% jitter (shared)
+      reconnectTimer = setTimeout(connect, backoffDelay(retry));
       retry++;
-      reconnectTimer = setTimeout(connect, base * (0.8 + Math.random() * 0.4));
     };
 
     ws = socket;
@@ -412,22 +412,16 @@ export function connectCliUDS<S>(socketPath: string): CliApp<S> {
           conn = null;
           writer = null;
           if (!closed) {
-            const base = Math.min(1000 * Math.pow(2, retry), 8000);
+            reconnectTimer = setTimeout(connect, backoffDelay(retry));
             retry++;
-            reconnectTimer = setTimeout(
-              connect,
-              base * (0.8 + Math.random() * 0.4),
-            );
           }
         })();
       })
       .catch(() => {
         if (!closed) {
-          const base = Math.min(1000 * Math.pow(2, retry), 8000);
-          retry++;
           reconnectTimer = setTimeout(
             connect,
-            base * (0.8 + Math.random() * 0.4),
+            backoffDelay(retry++),
           );
         }
       });

@@ -161,50 +161,36 @@ action (`cell:save`) appears in time-travel.
 
 ---
 
-## Concept 5: State Machines
+## Concept 5: Guard Lines
 
-Guard which actions are allowed in which states:
+> v2: methods is the one style — the `machine:` config is gone; see
+> [docs/upgrade/to-v2.md](../upgrade/to-v2.md).
+
+Guard which methods run in which states with plain code — a status field you own
+plus one `if` per method:
 
 ```ts
 const door = cell("door", {
-  state: { isOpen: false },
-  machine: {
-    initial: "closed",
-    states: {
-      closed: { open: "open" }, // only 'open' allowed when closed
-      open: { close: "closed" }, // only 'close' allowed when open
-    },
-  },
+  state: { status: "closed" as "closed" | "open" },
   methods: {
     open(s) {
-      s.isOpen = true;
+      if (s.status !== "closed") return; // ignored unless closed
+      s.status = "open";
     },
     close(s) {
-      s.isOpen = false;
+      if (s.status !== "open") return; // ignored unless open
+      s.status = "closed";
     },
   },
 });
 
-door.open(); // works -> machine moves to 'open'
-door.open(); // dropped! 'open' not allowed in 'open' state
-door.close(); // works -> machine moves to 'closed'
+door.open(); // works -> status 'open'
+door.open(); // no-op -- guard line returns early
+door.close(); // works -> status 'closed'
 ```
 
-### How to read the machine
-
-```ts
-machine: {
-  initial: 'closed',              // Start in 'closed' state
-  states: {
-    closed: { open: 'open' },     // When closed: 'open' -> move to 'open'
-    open: { close: 'closed' },    // When open: 'close' -> move to 'closed'
-  }
-}
-```
-
-Check status in UI: `door.__aio_status` or `registry.status()`.
-
-No machine needed? Omit it entirely, or use `machine: false`.
+Check status in UI by reading the field: `door.status`. Assert it in tests with
+`t.expect.state((s) => s.status === "open")`.
 
 ---
 
@@ -215,11 +201,10 @@ Mandatory rules for correct AIO framework usage.
 **AIO1** All app logic MUST live in cells created via `cell('name', {...})` --
 no loose state, no ad-hoc logic outside cells.
 
-**AIO2** State MUST only be mutated inside methods (sync/async) or reduce
-handlers — never directly from outside. In dev, cell signal values are
-deep-frozen so a stray `cell.x = …` from a component throws
-`TypeError: Cannot assign to read only property` and a dev hint explains the
-rule.
+**AIO2** State MUST only be mutated inside methods (sync/async) — never directly
+from outside. In dev, cell signal values are deep-frozen so a stray `cell.x = …`
+from a component throws `TypeError: Cannot assign to read only property` and a
+dev hint explains the rule.
 
 **AIO3** Single entry point: `aio.run({ appId, cells: [...] })` -- no manual
 store creation, no manual server setup.
@@ -237,4 +222,4 @@ are fire-and-forget.
 
 **AIO7** Sync methods (reducers) MUST NOT contain side effects -- only state
 mutations and fire-and-forget dispatches. No fetch, file I/O, or timers in sync
-methods -- use async methods or execute handlers for those.
+methods -- use async methods (or returned schedule/own effects) for those.

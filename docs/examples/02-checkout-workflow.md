@@ -1,8 +1,11 @@
 # Multi-Cell Checkout Workflow
 
+> v2: methods is the one style — see
+> [docs/upgrade/to-v2.md](../upgrade/to-v2.md) for migration.
+
 Build an e-commerce checkout: cart, inventory, payment -- three cells
-coordinating through generators, direct calling, and machine guards. Covers
-generators, cross-cell `call()`, `cancelOn`, machine guards, error recovery, and
+coordinating through async methods and direct calling. Covers workflow methods,
+cross-cell `call()`, `cancelOn` + `s.$signal`, guard lines, error recovery, and
 testing.
 
 Prerequisites: [Quickstart](../basics/quickstart.md) done, one cell under your
@@ -53,14 +56,14 @@ export const cart = cell("cart", {
 });
 ```
 
-No async, no machine. Methods mutate via Immer drafts. `clear` matters later --
-it becomes a cancellation trigger for the payment generator.
+No async. Methods mutate via Immer drafts. `clear` matters later -- it becomes a
+cancellation trigger for the payment workflow.
 
 ---
 
 ## Step 2: Inventory cell
 
-`reserve` is async (API call) and can fail. The payment generator needs to know
+`reserve` is async (API call) and can fail. The payment workflow needs to know
 when it does.
 
 ```ts
@@ -100,21 +103,22 @@ export const inventory = cell('inventory', {
 })
 ```
 
-Notice `reserve` throws on insufficient stock. The payment generator will catch
+Notice `reserve` throws on insufficient stock. The payment workflow will catch
 this. `release` exists for cleanup -- if payment fails after reservation, we
-return the stock. Both are single-step operations, so async methods are the
-right tool. Save generators for multi-step workflows.
+return the stock.
 
 ---
 
-## Step 3: Payment cell with generator
+## Step 3: Payment cell with a workflow method
 
-Payment is a multi-step workflow: reserve inventory, charge card, confirm. Each
-step is observable, cancellable, and recoverable.
+Payment is a multi-step workflow: reserve inventory, charge card, confirm. It is
+one async method — read it top to bottom, that is the checkout flow. A guard
+line prevents double-submit, `cancelOn` + `s.$signal` make it cancellable.
 
 ```ts
 // cell/payment/index.ts
 import { cell } from "aio";
+import type { MethodDraftMeta } from "aio";
 import { inventory } from "../inventory/index.ts";
 import { cart } from "../cart/index.ts";
 import type { CartItem } from "../cart/index.ts";
@@ -126,11 +130,20 @@ async function chargeCard(total: number): Promise<{ chargeId: string }> {
   return { chargeId: `ch_${Date.now()}` };
 }
 
+type PaymentState = {
+  status: "idle" | "processing" | "confirmed" | "failed";
+  chargeId: string | null;
+  error: string | null;
+};
+
 export const payment = cell("payment", {
   state: {
-    status: "idle" as "idle" | "processing" | "confirmed" | "failed",
+    status: "idle" as PaymentState["status"],
     chargeId: null as string | null,
     error: null as string | null,
+  },
+  cancelOn: {
+    process: [cart.clear], // clearing the cart aborts a running process()
   },
   methods: {
     reset(s) {
@@ -138,84 +151,69 @@ export const payment = cell("payment", {
       s.chargeId = null;
       s.error = null;
     },
-  },
-  generators: {
-    *process(ctx, items: CartItem[], total: number) {
-      yield* ctx.mutate("start", (s) => {
-        s.status = "processing";
-      });
+    async process(
+      s: PaymentState & Partial<MethodDraftMeta>,
+      items: CartItem[],
+      total: number,
+    ) {
+      if (s.status === "processing") return; // guard line: no double-submit
+      s.status = "processing";
 
       // Step 1: Reserve inventory
       try {
-        yield* ctx.call("reserve", () => inventory.reserve(items));
+        await inventory.reserve(items);
       } catch (e) {
-        yield* ctx.mutate("reserveFailed", (s) => {
-          s.status = "failed";
-          s.error = (e as Error).message;
-        });
-        yield* ctx.fail("inventory reservation failed");
+        s.status = "failed";
+        s.error = (e as Error).message;
         return;
       }
 
       // Step 2: Charge the card
       try {
-        const result = yield* ctx.call("charge", () => chargeCard(total));
-        const { chargeId } = result as { chargeId: string };
-
+        const { chargeId } = await chargeCard(total);
+        if (s.$signal?.aborted) {
+          // cart.clear fired mid-charge -- release and stop
+          await inventory.release(items);
+          s.status = "idle";
+          return;
+        }
         // Step 3: Confirm
-        yield* ctx.done((s) => {
-          s.status = "confirmed";
-          s.chargeId = chargeId;
-        });
+        s.status = "confirmed";
+        s.chargeId = chargeId;
       } catch (e) {
         // Charge failed -- release inventory before reporting failure
-        yield* ctx.call("releaseInventory", () => inventory.release(items));
-        yield* ctx.mutate("chargeFailed", (s) => {
-          s.status = "failed";
-          s.error = (e as Error).message;
-        });
-        yield* ctx.fail("payment charge failed");
+        await inventory.release(items);
+        s.status = "failed";
+        s.error = (e as Error).message;
       }
     },
-  },
-  cancelOn: {
-    process: [cart.clear],
   },
 });
 ```
 
-Read this top to bottom -- that is the checkout flow. Three steps, two failure
-paths, automatic cleanup.
+Three steps, two failure paths, automatic cleanup — in standard JavaScript.
 
-The framework auto-generates actions from each `yield*`: `payment:process`
-(trigger), `payment:__flow:reserve`, `payment:__flow:charge`,
-`payment:__flow:done` or `payment:__flow:failed`. Every step appears in
-time-travel.
+Each `await` boundary commits a batch: the trigger `payment:process` plus one
+`payment:__setProcess` batch per step, all visible in time-travel.
 
 > **`cancelOn: { process: [cart.clear] }`** -- if the user clears their cart
-> mid-payment, the generator is cancelled immediately. No charge, no stuck
-> state. Pass bound methods (not strings) for refactor safety.
+> mid-payment, the in-flight method's `s.$signal` aborts. Check
+> `s.$signal?.aborted` after awaits before writing terminal state (and pass the
+> signal to abortable IO like `fetch`). Pass bound methods (not strings) for
+> refactor safety. The `& Partial<MethodDraftMeta>` annotation (from `aio`)
+> types `s.$signal`.
 
 ---
 
 ## Step 4: Cross-cell coordination
 
-The payment generator calls inventory directly via
-`ctx.call('reserve', () => inventory.reserve(items))`. After `aio.run()`, this
-dispatches a real `inventory:reserve` action through the store -- typed,
-awaitable, visible in time-travel.
+The payment method calls inventory directly: `await inventory.reserve(items)`.
+After `aio.run()`, this dispatches a real `inventory:reserve` action through the
+store -- typed, awaitable, visible in time-travel.
 
-For resilience, add timeout and retries:
+For resilience, add timeout and retries with `call()`:
 
 ```ts
-// In generators:
-yield *
-  ctx.call("reserve", () => inventory.reserve(items), {
-    timeout: 5000,
-    retries: 2,
-  });
-
-// In async methods:
 import { call } from "aio";
 const reserved = await call(
   { timeout: 5000, retries: 2 },
@@ -224,47 +222,33 @@ const reserved = await call(
 ```
 
 > **Direct calling:** Request/response style — call a method, get a result.
-> Cross-cell communication uses direct method calls or effects.
+> Cross-cell communication uses direct method calls.
 
 ---
 
-## Step 5: Machine guards
+## Step 5: Guard lines
 
 Prevent double-submit. A user clicking "Pay" twice shouldn't trigger two
-charges. Add a machine:
+charges. The guard is already in the method — one line:
 
 ```ts
-// Add these keys to the payment cell from Step 3:
-export const payment = cell("payment", {
-  // ... state, methods, generators, cancelOn from Step 3, plus:
-  machine: {
-    initial: "idle",
-    states: {
-      idle: { process: "processing", reset: "idle" },
-      processing: { [cart.clear.type]: "idle" },
-      confirmed: { reset: "idle" },
-      failed: { process: "processing", reset: "idle" },
-    },
-  },
-  listensTo: [cart.clear],
-});
+async process(s, items: CartItem[], total: number) {
+  if (s.status === "processing") return; // second call is a no-op
+  s.status = "processing";
+  // ...
+},
 ```
 
-The machine controls what can happen when:
+The `status` field controls what can happen when:
 
-- **`idle`**: `process` allowed (start checkout), `reset` allowed
-- **`processing`**: only `cart.clear` allowed (cancel). Second `process` call is
-  silently dropped -- no double-submit
-- **`confirmed`**: only `reset` allowed (start over)
-- **`failed`**: `process` allowed (retry), `reset` allowed
+- **`idle`**: `process` runs (start checkout), `reset` allowed
+- **`processing`**: second `process` call returns early -- no double-submit;
+  `cart.clear` aborts via `cancelOn`
+- **`confirmed`** / **`failed`**: `process` may run again (retry) or `reset`
+  starts over
 
-Notice `[cart.clear.type]: 'idle'` in the `processing` state. This is a foreign
-action -- when `cart.clear` dispatches anywhere in the app, the payment machine
-transitions back to `idle`. Combined with `cancelOn`, this both cancels the
-generator and resets the machine state.
-
-`listensTo: [cart.clear]` tells the framework to route `cart:clear` actions to
-this cell. Without it, foreign actions are ignored.
+Server-side enforcement, plain code — the same `if` runs no matter which client
+dispatched.
 
 ---
 
@@ -305,7 +289,7 @@ export default function App() {
       </section>
 
       <section>
-        <h2>Payment</h2>
+        <h2>Payment ({payment.status})</h2>
         {payment.error && <p style={{ color: "red" }}>{payment.error}</p>}
         {payment.chargeId && <p>Charge ID: {payment.chargeId}</p>}
 
@@ -328,8 +312,8 @@ export default function App() {
 ```
 
 Direct cell access gives you typed state properties and typed methods. The
-machine status drives server-side action gating -- `process` in `processing`
-state is silently dropped. Defense in depth.
+`status` field drives both the UI (`{payment.status}`) and the server-side guard
+-- `process` while `processing` is a no-op. Defense in depth.
 
 Boot it:
 
@@ -358,7 +342,7 @@ testCell(payment, "happy path: reserve + charge + confirm", async (t) => {
   t.init();
   t.send.process(ITEMS, 25);
   await t.settle();
-  t.expect.status("confirmed");
+  t.expect.state((s) => s.status === "confirmed");
   t.expect.state((s) => s.chargeId !== null);
   t.expect.state((s) => s.error === null);
 });
@@ -367,23 +351,17 @@ testCell(payment, "charge failure releases inventory", async (t) => {
   t.init();
   t.send.process(ITEMS, 15000); // > 10000 triggers simulated card decline
   await t.settle();
-  t.expect.status("failed");
+  t.expect.state((s) => s.status === "failed");
   t.expect.state((s) => s.error === "Card declined");
 });
 
-testCell(payment, "cart clear cancels in-progress payment", async (t) => {
+testCell(payment, "guard line blocks double-submit", async (t) => {
   t.init();
   t.send.process(ITEMS, 25);
-  t.send.reset(); // cancel mid-flight (in full app, cart.clear() triggers cancelOn)
-  t.expect.status("idle");
-});
-
-testCell(payment, "machine blocks double-submit", (t) => {
-  t.init();
-  t.send.process(ITEMS, 25);
-  t.expect.status("processing");
-  t.send.process(ITEMS, 25); // silently dropped by machine
-  t.expect.status("processing"); // not restarted
+  t.expect.state((s) => s.status === "processing");
+  t.send.process(ITEMS, 25); // guard line returns early
+  t.expect.state((s) => s.status === "processing"); // not restarted
+  await t.settle();
 });
 ```
 
@@ -394,29 +372,25 @@ effects and drains async. No teardown.
 
 ## Step 8: Time-travel debugging
 
-Every generator step dispatches a named action. Open the time-travel panel
-(Ctrl+.) and you see the full checkout sequence:
+The trigger and every `await`-boundary batch dispatch a named action. Open the
+time-travel panel (Ctrl+.) and you see the checkout sequence:
 
 ```
-1. payment:process              -- trigger
-2. payment:__flow:start         -- status = 'processing'
-3. payment:__flow:reserve       -- inventory.reserve() called
-4. payment:__flow:charge        -- chargeCard() called
-5. payment:__flow:done          -- status = 'confirmed', chargeId set
+1. payment:process        -- trigger
+2. payment:__setProcess   -- status = 'processing'
+3. inventory:reserve      -- cross-cell call
+4. payment:__setProcess   -- status = 'confirmed', chargeId set
 ```
 
-Click any step to see the state at that point. Click step 3 to see state after
-reservation but before charge. This is the power of generators -- each `yield*`
-is a named, observable checkpoint.
+Click any step to see the state at that point — what items looked like before
+reservation, or what stock levels were before release.
 
-On failure, the trail tells the story: `payment:__flow:charge` (threw "Card
-declined"), then `payment:__flow:releaseInventory` (cleanup ran), then
-`payment:__flow:failed` (terminal). You see exactly where it failed and that
-cleanup happened. No log diving.
+On failure, the trail tells the story: `inventory:reserve` (threw "Insufficient
+stock"), then `payment:__setProcess` (status = 'failed', error set). You see
+exactly where it failed and that cleanup ran. No log diving.
 
 > **State snapshots.** Time-travel keeps the last 200 state snapshots in dev
-> mode. Jump back to any step to inspect what items looked like before
-> reservation, or what stock levels were before release.
+> mode.
 
 ---
 
@@ -424,26 +398,24 @@ cleanup happened. No log diving.
 
 Three cells, each self-contained, coordinating through typed method calls:
 
-| Concept            | Where it shows up                                     |
-| ------------------ | ----------------------------------------------------- |
-| Generators         | `payment.*process` -- multi-step async, top-to-bottom |
-| Cross-cell calling | `inventory.reserve(items)` inside `ctx.call`          |
-| `cancelOn`         | `cart.clear` cancels the payment generator            |
-| Machine guards     | `processing` state drops duplicate `process` calls    |
-| Foreign actions    | `[cart.clear.type]` transitions payment machine       |
-| Error recovery     | Charge failure triggers `inventory.release()` cleanup |
-| Time-travel        | Every `yield*` is a named action in history           |
+| Concept            | Where it shows up                                        |
+| ------------------ | -------------------------------------------------------- |
+| Workflow method    | `payment.process` -- multi-step async, top-to-bottom     |
+| Cross-cell calling | `await inventory.reserve(items)` inside the method       |
+| `cancelOn`         | `cart.clear` aborts the payment method via `s.$signal`   |
+| Guard line         | `if (s.status === "processing") return` -- no double-pay |
+| Error recovery     | Charge failure triggers `inventory.release()` cleanup    |
+| Time-travel        | Trigger + every `await` batch is a named action          |
 
-The generator replaced what would otherwise be scattered across actions,
-effects, executor cases, and machine states. Read the `*process` function and
-you know the entire checkout flow.
+The whole checkout flow is one async method. Read `process` top to bottom and
+you know everything that can happen.
 
 ---
 
 ## Next steps
 
-- [Generators](../state/generators.md) -- full GenCtx API, `ctx.all`,
-  `ctx.race`, reusable generators
+- [Methods](../state/methods.md) -- workflows (`until`/`race`/`sleep`),
+  cancellation, guard lines
 - [Cells](../state/cells.md) -- all inter-cell patterns (observe, read,
   coordinate)
 - [Testing](../testing/cell-testing.md) -- TestContext API, property-based

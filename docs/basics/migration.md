@@ -106,16 +106,16 @@ await aio.run({ cells: [counter] });
 
 ### Redux -> aio
 
-| Redux                                | aio                           | Notes                                              |
-| ------------------------------------ | ----------------------------- | -------------------------------------------------- |
-| `createSlice()`                      | `cell()`                      | One cell = one slice + effects + machine + persist |
-| `slice.reducer`                      | `methods` or `reduce`         | Mutate directly in methods style                   |
-| `slice.actions`                      | Auto-generated                | `counter.increment(5)` after `aio.run()`           |
-| `configureStore()`                   | `aio.run({ cells })`          | Composition, middleware, DevTools built-in         |
-| `useSelector(s => s.counter)`        | `counter.count` (direct)      | Auto-scoped, selective re-renders                  |
-| `useDispatch()` + `dispatch(action)` | `send.increment()`            | Typed, no raw dispatch                             |
-| `createAsyncThunk`                   | `async` methods or generators | No thunk boilerplate                               |
-| `persistReducer`                     | Automatic                     | Deno.Kv persistence built-in                       |
+| Redux                                | aio                      | Notes                                    |
+| ------------------------------------ | ------------------------ | ---------------------------------------- |
+| `createSlice()`                      | `cell()`                 | One cell = one slice + effects + persist |
+| `slice.reducer`                      | `methods`                | Mutate the draft directly                |
+| `slice.actions`                      | Auto-generated           | `counter.increment(5)` after `aio.run()` |
+| `configureStore()`                   | `aio.run({ cells })`     | Composition, DevTools built-in           |
+| `useSelector(s => s.counter)`        | `counter.count` (direct) | Auto-scoped, selective re-renders        |
+| `useDispatch()` + `dispatch(action)` | `send.increment()`       | Typed, no raw dispatch                   |
+| `createAsyncThunk`                   | `async` methods          | No thunk boilerplate                     |
+| `persistReducer`                     | Automatic                | Deno.Kv persistence built-in             |
 
 ### Zustand -> aio
 
@@ -178,8 +178,8 @@ const counter = cell("counter", {
 | createRoot / ReactDOM             | Delete it -- framework mounts `export default` from App        |
 | HMR / hot reload                  | Delete it -- built-in, no config                               |
 | State management (Redux, Zustand) | `cell()` replaces store + slices + selectors                   |
-| XState / state machines           | `machine:` config in `cell()`                                  |
-| Express middleware                | `aio.middleware.create(fn)`                                    |
+| XState / state machines           | `status` state field + guard lines in methods                  |
+| Express middleware                | `beforeReduce` in `aio.run()` config                           |
 | Health checks                     | `GET /__aio/health` -- auto-generated                          |
 | Cell flags                        | `app.cells.enable/disable()` -- runtime control                |
 
@@ -206,18 +206,23 @@ selectors: {
 }
 ```
 
-**2. Listening** -- react to another cell's actions:
+**2. Reacting** -- the acting cell calls the observer's method:
 
 ```ts
 const te = cell("te", {
   state: { lastPrice: 0 },
-  listensTo: [dc.priceUpdated],
   methods: {
     priceUpdated(s, price: number) {
       s.lastPrice = price;
     },
   },
 });
+
+// inside dc:
+async fetchPrice(s) {
+  s.price = await api.price("BTC");
+  await te.priceUpdated(s.price); // explicit, typed, in time-travel
+},
 ```
 
 **3. Coordinate** -- call another cell's method directly:
@@ -245,8 +250,8 @@ const { rows: orders } = await app.db!.query<Order>(
 );
 ```
 
-Remove `--allow-ffi` from run/compile commands. Any `execute` handler calling
-`app.db` must be `async`.
+Remove `--allow-ffi` from run/compile commands. Any method calling `app.db` must
+be `async`.
 
 ---
 

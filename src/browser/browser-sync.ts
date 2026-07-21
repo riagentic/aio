@@ -12,7 +12,6 @@
  * The server stays the convergence authority: it applies every accepted op
  * through its normal dispatch, so regular state broadcasts and the op
  * stream agree.
- * @experimental Excluded from the 1.0 stability guarantee.
  */
 import { randomUuid } from "../rand.ts";
 import { createSyncEngine, type SyncEngine } from "../sync/sync-engine.ts";

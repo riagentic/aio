@@ -1,13 +1,11 @@
-// cell-helpers.ts — shared cell-creation helpers: normalization, selectors, flows, foreign actions
+// cell-helpers.ts — shared cell-creation helpers: normalization, selectors, foreign actions
 
-import type { FlowDef } from "./flow.ts";
 import type {
   CellFieldFilter,
   CellVisibility,
   FilterUser,
   MachineConfig,
 } from "./cell-types.ts";
-import type { GeneratorEntry } from "./cell-config-types.ts";
 
 // ── Normalization helpers ────────────────────────────────────────────
 
@@ -197,37 +195,3 @@ export function detectForeignActions(
 }
 
 // ── Flow builder ──────────────────────────────────────────────────────
-
-/** Build flow definitions from generator entries */
-export function buildFlows(
-  rawGenerators: Record<string, GeneratorEntry>,
-  actionKeySet: Set<string>,
-  name: string,
-  config: { cancelOn?: Record<string, (string | { type: string })[]> },
-  argsStyle: "spread" | "payload",
-): { flows: Record<string, FlowDef>; flowTriggers: Map<string, string> } {
-  const flows: Record<string, FlowDef> = {};
-  const flowTriggers = new Map<string, string>();
-  for (const [key, fn] of Object.entries(rawGenerators)) {
-    if (argsStyle === "payload" && !actionKeySet.has(key)) {
-      throw new Error(
-        `[cell:${name}] generator '${key}' must match an action key. Available actions: ${
-          [...actionKeySet].join(", ") || "(none)"
-        }. Add an action '${key}' or rename the generator.`,
-      );
-    }
-    const triggers = config.cancelOn?.[key] ?? fn.cancelOn;
-    const cancelOnStrings = triggers?.map((t: string | { type: string }) =>
-      typeof t === "string" ? t : t.type
-    );
-    flows[key] = {
-      trigger: key,
-      generator: fn,
-      _stepNames: [],
-      cancelOn: cancelOnStrings,
-      argsStyle,
-    };
-    flowTriggers.set(key, key);
-  }
-  return { flows, flowTriggers };
-}

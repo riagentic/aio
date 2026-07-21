@@ -8,21 +8,20 @@ import type {
   CellDef,
   CellExecuteFn,
   CellReduceFn,
-  Creators,
   DirectCalling,
   ScopedApp,
 } from "./cell-types.ts";
 import { checkReservedKeys, RESERVED_KEYS } from "./cell-types.ts";
 import { normalizeSyncConfig } from "../sync/types.ts";
 import {
+  buildArgsCatalog,
   buildCatalog,
   installDefaultStateGetters,
   makeUnboundGuard,
 } from "./cell-catalog.ts";
 import { validateMachine } from "./cell-machine.ts";
-import type { GeneratorEntry, MethodsCellConfig } from "./cell-config-types.ts";
+import type { MethodsCellConfig } from "./cell-config-types.ts";
 import {
-  buildFlows,
   detectForeignActions,
   extractForUser,
   extractPublicFields,
@@ -50,65 +49,16 @@ export function createCellFromMethods<
   const prefix = name;
   const methods = (config.methods ?? {}) as Record<string, Method<S>>;
   const methodNames = Object.keys(methods);
-  const rawGenerators = (config.generators ?? {}) as Record<
-    string,
-    GeneratorEntry
-  >;
-  const generatorNames = Object.keys(rawGenerators);
   const selectorNames = Object.keys(config.selectors ?? {});
-  const explicitActions: Creators | undefined = config.actions;
-  const explicitActionNames = Object.keys(explicitActions ?? {});
-  const explicitEffects: Creators | undefined = config.effects;
-  const explicitEffectNames = Object.keys(explicitEffects ?? {});
-  const explicitReduce = config.reduce as
-    | Record<string, (state: unknown, payload: unknown) => void>
-    | undefined;
-  const explicitExecute = config.execute as
-    | Record<string, (app: ScopedApp, payload: unknown) => void | Promise<void>>
-    | undefined;
 
   // Validate names against reserved keys — fail fast with clear message
   checkReservedKeys(name, methodNames, "method");
-  checkReservedKeys(name, generatorNames, "generator");
-  checkReservedKeys(name, explicitActionNames, "action");
-  checkReservedKeys(name, explicitEffectNames, "effect");
   checkReservedKeys(name, selectorNames, "selector");
 
-  // Validate no name collisions across methods, generators, actions, effects
+  // Callable-name registry (methods only — the one style, D1); state-key
+  // collision check below reads it.
   const allNames = new Map<string, string>();
   for (const n of methodNames) allNames.set(n, "method");
-  for (const n of generatorNames) {
-    if (allNames.has(n)) {
-      throw new Error(
-        `[cell:${name}] generator "${n}" collides with ${
-          allNames.get(n)
-        } of same name. Rename one (e.g. generator "${n}Flow").`,
-      );
-    }
-    allNames.set(n, "generator");
-  }
-  for (const n of explicitActionNames) {
-    if (allNames.has(n)) {
-      throw new Error(
-        `[cell:${name}] action "${n}" collides with ${
-          allNames.get(n)
-        } of same name. Rename one (e.g. action "${n}Action").`,
-      );
-    }
-    allNames.set(n, "action");
-  }
-  for (const n of explicitEffectNames) {
-    if (allNames.has(n)) {
-      throw new Error(
-        `[cell:${name}] effect "${n}" collides with ${
-          allNames.get(n)
-        } of same name. Rename one (e.g. effect "on${
-          n.charAt(0).toUpperCase()
-        }${n.slice(1)}").`,
-      );
-    }
-    allNames.set(n, "effect");
-  }
 
   // AIO-6.1: a state key colliding with any callable is a definition-time error —
   // the callable wins on the cell object, so `cell.key` in a component would return
@@ -135,12 +85,44 @@ export function createCellFromMethods<
     config.persist,
   );
 
+  // listensTo (D1): normalize both forms. Object form maps a foreign action
+  // type → a SYNC method that handles it; array form only routes (status).
+  const foreignHandlers = new Map<string, string>();
+  const listensToTriggers: (string | { type: string })[] = [];
+  if (config.listensTo) {
+    if (Array.isArray(config.listensTo)) {
+      listensToTriggers.push(...config.listensTo);
+    } else {
+      for (const [methodKey, trigger] of Object.entries(config.listensTo)) {
+        const t = typeof trigger === "string" ? trigger : trigger.type;
+        if (!methods[methodKey]) {
+          throw new Error(
+            `[cell:${name}] listensTo: { ${methodKey}: "${t}" } — no method ` +
+              `named '${methodKey}'. The object form maps an EXISTING sync ` +
+              `method to the foreign action that triggers it.`,
+          );
+        }
+        foreignHandlers.set(t, methodKey);
+        listensToTriggers.push(t);
+      }
+    }
+  }
+
   // Classify methods as sync or async (uses isAsyncFunction — symbol-based, minification-safe)
   const { syncMethods, asyncMethods } = classifyMethods(
     methods as CellMethods<Record<string, unknown>>,
   );
+  for (const [t, mk] of foreignHandlers) {
+    if (asyncMethods.has(mk)) {
+      throw new Error(
+        `[cell:${name}] listensTo handler '${mk}' (for "${t}") must be a ` +
+          `SYNC method — reactions run inside the reduce; do async work by ` +
+          `having '${mk}' set state that an async method awaits on.`,
+      );
+    }
+  }
 
-  // Build action creators from methods + generators
+  // Build action creators from methods
   const actionCreators: Record<
     string,
     // deno-lint-ignore no-explicit-any
@@ -148,16 +130,6 @@ export function createCellFromMethods<
   > = {};
   for (const key of methodNames) {
     actionCreators[key] = (...args: unknown[]) => ({ args });
-  }
-  // Generator actions — same payload shape as methods (args array)
-  for (const key of generatorNames) {
-    actionCreators[key] = (...args: unknown[]) => ({ args });
-  }
-  // Explicit actions — custom payload shapes
-  if (explicitActions) {
-    for (const key of explicitActionNames) {
-      actionCreators[key] = explicitActions[key]!;
-    }
   }
   // Add __setMethod actions for async mutations
   for (const key of asyncMethods) {
@@ -178,37 +150,26 @@ export function createCellFromMethods<
 
   const { typeToKey: actionTypeToKey } = buildCatalog(prefix, actionCreators);
 
-  // Build effect creators
-  const effectCreators: Record<
-    string,
-    // deno-lint-ignore no-explicit-any
-    (...args: any[]) => Record<string, unknown>
-  > = {};
-  const effectKeys = Object.keys(config.effects ?? {});
-  for (const key of effectKeys) {
-    effectCreators[key] = (config.effects as Record<
-      string,
-      (...args: unknown[]) => Record<string, unknown>
-    >)[key]!;
-  }
-  const { catalog: eCatalog } = buildCatalog(prefix, effectCreators);
+  // Effect creators died with Style B (D1) — schedule/own effects returned
+  // from methods are the effect mechanism. Empty catalog keeps `.fx` shape.
+  const effectKeys: string[] = [];
+  const eCatalog: Record<string, unknown> = {};
 
-  // Build machine
+  // Build the internal machine (only source now: listensTo auto-routing —
+  // the public machine: config died with Style B, D1)
   const machine = buildMethodsMachine(
     name,
-    config,
+    { ...config, listensTo: listensToTriggers },
     methodNames,
     asyncMethods,
-    generatorNames,
-    explicitActionNames,
+    [],
+    [],
   );
 
   const foreignActions = detectForeignActions(machine, prefix);
 
   const allActionKeys = [
     ...methodNames,
-    ...generatorNames,
-    ...explicitActionNames,
     ...[...asyncMethods].map((k) => setKey(k)),
   ];
   if (asyncMethods.size > 0) allActionKeys.push("__error", "__effects");
@@ -225,30 +186,21 @@ export function createCellFromMethods<
     syncMethods,
     asyncMethods,
     prefix,
-    explicitReduce,
+    foreignHandlers,
   );
 
   // Build executor for async methods
-  const execute: CellExecuteFn | undefined =
-    asyncMethods.size > 0 || config.effects || explicitExecute
-      ? buildMethodsExecutor(
-        name,
-        prefix,
-        methods as Record<string, Method<Record<string, unknown>>>,
-        asyncMethods,
-        config,
-        effectKeys,
-        explicitExecute,
-      )
-      : undefined;
-
-  const { flows, flowTriggers } = buildFlows(
-    rawGenerators,
-    new Set(allActionKeys),
-    name,
-    config,
-    "spread",
-  );
+  const execute: CellExecuteFn | undefined = asyncMethods.size > 0
+    ? buildMethodsExecutor(
+      name,
+      prefix,
+      methods as Record<string, Method<Record<string, unknown>>>,
+      asyncMethods,
+      config,
+      effectKeys,
+      undefined,
+    )
+    : undefined;
 
   // Assemble internals — mirrored in cell-actions-factory.ts (CellAio type enforces field consistency)
   const internals: Omit<
@@ -277,10 +229,14 @@ export function createCellFromMethods<
     onDestroy: config.onDestroy as ((app: ScopedApp) => void) | undefined,
     scope: "server",
     asyncMethods,
-    // Mirrors cell-actions-factory.ts — dropping these here silently disables
-    // persist/ui filters, flows, validation and migrations for methods-style cells.
-    flows: Object.keys(flows).length > 0 ? flows : undefined,
-    flowTriggers: flowTriggers.size > 0 ? flowTriggers : undefined,
+    // Cancellation triggers (perfect-aio D1) — DEF data; the runtime registry
+    // is (re)built from this at compose time, so a runtime reset + fresh
+    // compose (the testCell pattern) re-registers naturally.
+    cancelTriggers: config.cancelOn as
+      | Record<string, (string | { type: string })[]>
+      | undefined,
+    // Dropping these silently disables persist/ui filters, validation and
+    // migrations for methods-style cells.
     validate: config.validate,
     persist: normalizePersistFilter(config.persist),
     ui: normalizeUiFilter(config.ui),
@@ -305,28 +261,13 @@ export function createCellFromMethods<
     }
   }
 
-  // Build public catalog — methods + generators (args-style) + explicit actions (custom payload)
-  const publicCatalog: Record<string, unknown> = {};
-  for (const key of [...methodNames, ...generatorNames]) {
-    const label = `${prefix}:${key}`;
-    publicCatalog[key] = Object.assign(
-      (...args: unknown[]) => ({ type: label, payload: { args } }),
-      { type: label },
-    );
-  }
-  // Explicit actions — custom payload shape
-  if (explicitActions) {
-    for (const key of explicitActionNames) {
-      const label = `${prefix}:${key}`;
-      publicCatalog[key] = Object.assign(
-        (...args: unknown[]) => ({
-          type: label,
-          payload: explicitActions[key]!(...args) ?? {},
-        }),
-        { type: label },
-      );
-    }
-  }
+  // Build public catalog — methods (args-style) via the SHARED builder in
+  // cell-catalog.ts so the callable shape (`.type` + `.action` self-ref)
+  // can't drift (complexity audit).
+  const publicCatalog: Record<string, unknown> = buildArgsCatalog(
+    prefix,
+    methodNames,
+  );
 
   const def: Record<string, unknown> = {
     __aio: {

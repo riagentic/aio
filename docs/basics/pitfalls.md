@@ -34,9 +34,10 @@ just set). What you read is exactly what commits.
 `await …` then `items.push(…)` mutates a stale copy. Re-read from `s` after
 every await — it's always current.
 
-**Machine guards silently drop actions.** With a `machine`, a method not listed
-in the current state's `on` is a no-op by design. If a method "randomly doesn't
-work", check `t.expect.status()` / the machine first.
+**Guard lines silently no-op.** A method starting with
+`if (s.status !== "idle") return` does nothing in any other state — by design.
+If a method "randomly doesn't work", check its guard against the current
+`status` field first (`t.expect.state((s) => s.status === …)`).
 
 ## Persistence
 
@@ -67,7 +68,7 @@ accidentally. Boot warns on static/dynamic id collisions.
 (`metrics.poll.action()`) — otherwise TypeScript's self-inference guard (TS7022)
 fires.
 
-## Sync (`sync: true`, @experimental)
+## Sync (`sync: true`)
 
 **The server converges; the client view is provisional.** Merge strategies
 (`counter`, `set-add`, …) shape what the _local user sees during the conflict

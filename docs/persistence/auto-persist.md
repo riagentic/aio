@@ -123,20 +123,20 @@ Arrays under `db:` keys are automatically excluded from KV — no double-storing
 
 ### Auto-sync
 
-Reducer mutates arrays as normal. Framework syncs to SQLite automatically:
+Methods mutate arrays as normal. Framework syncs to SQLite automatically:
 
 ```ts
-reduce: {
-  addOrder(state, payload) {
-    state.orders.push({ id: state.nextId++, customer: payload.customer, total: 0, userId: payload.userId })
+methods: {
+  addOrder(s, customer: string, userId: string) {
+    s.orders.push({ id: s.nextId++, customer, total: 0, userId })
   },
-  removeOrder(state, payload) {
-    state.orders = state.orders.filter(o => o.id !== payload.id)
+  removeOrder(s, id: number) {
+    s.orders = s.orders.filter(o => o.id !== id)
   },
 },
 ```
 
-On startup, SQLite data populates state arrays. After each reduce, changed
+On startup, SQLite data populates state arrays. After each mutation, changed
 arrays sync back. Reference equality (`!==`) determines which tables need
 writing.
 

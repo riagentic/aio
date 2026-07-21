@@ -130,6 +130,12 @@ export function buildLegacyConfig(
     fullStateThreshold: fc.fullStateThreshold,
     routes: fc.routes,
     maxConnections: fc.maxConnections,
+    // Security options — these MUST survive every hop: they were typed and
+    // validated but silently dropped here, so `aio.run({ strictOrigin: true })`
+    // never reached the WS origin check (complexity-audit finding).
+    wsLimits: fc.wsLimits,
+    allowedOrigins: fc.allowedOrigins,
+    strictOrigin: fc.strictOrigin,
     schedules: fc.schedules,
     appVersion: fc.appVersion,
     transport: fc.transport,

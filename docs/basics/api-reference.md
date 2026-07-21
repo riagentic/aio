@@ -1,5 +1,9 @@
 # API Reference
 
+> v2: methods is the one style — see
+> [docs/upgrade/to-v2.md](../upgrade/to-v2.md) for the removed
+> `actions`/`reduce`/`machine`/`generators`/middleware surface.
+
 Universal: `import { aio, cell, log } from "aio"` (state, lifecycle, logging)
 
 Rendering: `import { signal } from "aio/air"`
@@ -38,13 +42,11 @@ Everything below is the full reference, organized by category.
 
 ## Runtime
 
-| API                         | Description                                                                            |
-| --------------------------- | -------------------------------------------------------------------------------------- |
-| `aio.run(config)`           | Start the app — see [Lifecycle](../state/lifecycle.md) and [Cell Config](#cell-config) |
-| `aio.middleware.logger()`   | Log all actions to console (dev mode)                                                  |
-| `aio.middleware.validate()` | Validate action shapes before reduce                                                   |
-| `call(opts, fn)`            | Call with `{ timeout?, retries? }` -- wraps inter-cell calls                           |
-| `markAsync(fn)`             | Mark a method as async for minified bundles                                            |
+| API               | Description                                                                            |
+| ----------------- | -------------------------------------------------------------------------------------- |
+| `aio.run(config)` | Start the app — see [Lifecycle](../state/lifecycle.md) and [Cell Config](#cell-config) |
+| `call(opts, fn)`  | Call with `{ timeout?, retries? }` -- wraps inter-cell calls                           |
+| `markAsync(fn)`   | Mark a method as async for minified bundles                                            |
 
 ### Dispatch Introspection
 
@@ -55,55 +57,44 @@ Everything below is the full reference, organized by category.
 
 ## Advanced
 
-| API                                        | Description                                           |
-| ------------------------------------------ | ----------------------------------------------------- |
-| `composeCells(entries)`                    | Combine cells manually                                |
-| `bindCell(cell, dispatch, getState)`       | Wire a cell to a custom dispatch bus                  |
-| `composeMiddleware(...fns)`                | Compose beforeReduce functions -- return null to drop |
-| `draft(state, fn)`                         | Immer wrapper for actions/reduce style                |
-| `matchEffect(effect, handlers, fallback?)` | Typed effect dispatch -- alternative to switch/case   |
-| `deepFreeze(obj)`                          | Deep freeze for dev-mode immutability checks          |
+| API                                        | Description                                         |
+| ------------------------------------------ | --------------------------------------------------- |
+| `composeCells(entries)`                    | Combine cells manually                              |
+| `bindCell(cell, dispatch, getState)`       | Wire a cell to a custom dispatch bus                |
+| `draft(state, fn)`                         | Immer wrapper for custom reducers (bindCell setups) |
+| `matchEffect(effect, handlers, fallback?)` | Typed effect dispatch -- alternative to switch/case |
+| `deepFreeze(obj)`                          | Deep freeze for dev-mode immutability checks        |
 
 ---
 
-## Generators (GenCtx)
+## Async workflow helpers
 
-| API                                     | Description                                                  |
-| --------------------------------------- | ------------------------------------------------------------ |
-| `yield* ctx.call(name, fn, opts?)`      | Async call with optional `{ timeout?, retries? }`            |
-| `yield* ctx.mutate(name, fn)`           | State mutation via Immer draft                               |
-| `yield* ctx.done(fn?)`                  | Terminal success, optional final mutation                    |
-| `yield* ctx.fail(reason)`               | Terminal failure with reason                                 |
-| `yield* ctx.dispatch(action)`           | Dispatch arbitrary action to any cell                        |
-| `yield* ctx.send(creator, payload?)`    | Shorthand dispatch via bound method or type string           |
-| `yield* ctx.all(...gens)`               | Run multiple calls in parallel (spread or named object form) |
-| `yield* ctx.race({...gens})`            | Race multiple calls -- first to complete wins                |
-| `yield* ctx.sleep(name, ms)`            | Sleep for N ms with named action for visibility              |
-| `yield* ctx.waitFor(creator, timeout?)` | Wait for action, returns `{ type, payload }`                 |
-| `yield* ctx.when(predicate, opts?)`     | Wait until state condition is true                           |
-| `ctx.getState()`                        | Read current cell state (fresh after each step)              |
-| `ctx.getFullState()`                    | Read full app state tree                                     |
+Method-native workflow tools — see
+[Workflows](../state/methods.md#workflows-in-async-methods):
+
+| API                  | Description                                                                   |
+| -------------------- | ----------------------------------------------------------------------------- |
+| `until(pred, opts?)` | Wait for a state condition -- `{ timeoutMs?, intervalMs?, msg?, signal? }`    |
+| `race(branches)`     | First named branch to settle wins -- `{ winner, value }`; `timeout: ms` sugar |
+| `sleep(ms)`          | Promise pause                                                                 |
+| `UntilTimeoutError`  | Thrown when `until` exceeds its timeout (default 30s)                         |
 
 ---
 
 ## Cell Config
 
-| Key          | Description                                                    |
-| ------------ | -------------------------------------------------------------- |
-| `state`      | Initial state object                                           |
-| `methods`    | Sync/async methods -- `(s, ...args) => void \| Promise`        |
-| `generators` | Sequential workflows -- `*name(ctx, ...args) { yield* ... }`   |
-| `cancelOn`   | Cancellation triggers per generator -- `{ genKey: [actions] }` |
-| `selectors`  | Derived state -- `{ getName: s => s.name }` (auto-scoped)      |
-| `machine`    | State machine guards -- `{ initial, states }` or `false`       |
-| `listensTo`  | Foreign action listeners -- `[otherCell.action]`               |
-| `actions`    | Action creators (explicit style)                               |
-| `effects`    | Effect creators (explicit style)                               |
-| `reduce`     | Reducer handlers (explicit style)                              |
-| `execute`    | Effect handlers (explicit style)                               |
-| `persist`    | KV persistence config -- `{ exclude: ['tempCache'] }`          |
-| `onInit`     | Init hook -- `(app) => { ... }` runs after aio.run()           |
-| `onDestroy`  | Destroy hook -- `(app) => { ... }` runs before shutdown        |
+| Key                     | Description                                                |
+| ----------------------- | ---------------------------------------------------------- |
+| `state`                 | Initial state object                                       |
+| `methods`               | Sync/async methods -- `(s, ...args) => void \| Promise`    |
+| `selectors`             | Derived state -- `{ getName: s => s.name }` (auto-scoped)  |
+| `cancelOn`              | Abort triggers per async method -- `{ method: [actions] }` |
+| `listensTo`             | Observed foreign actions -- `[otherCell.action]`           |
+| `validate`              | State validator -- `(s) => true \| string`                 |
+| `persist`               | KV persistence config -- `{ exclude: ['tempCache'] }`      |
+| `version` / `onMigrate` | State-shape versioning + migration hook                    |
+| `onInit`                | Init hook -- `(app) => { ... }` runs after aio.run()       |
+| `onDestroy`             | Destroy hook -- `(app) => { ... }` runs before shutdown    |
 
 ---
 
@@ -192,7 +183,7 @@ Everything below is the full reference, organized by category.
 | `ui: { include, forUser }`                               | Per-cell UI visibility with per-user transform |
 | `cellDefaults: { ui, persist }`                          | App-level defaults for all cells               |
 
-## Middleware
+## Action Interception
 
 | API                                                      | Description                            |
 | -------------------------------------------------------- | -------------------------------------- |
@@ -202,25 +193,25 @@ Everything below is the full reference, organized by category.
 
 ## Types
 
-| Type              | Description                                                      |
-| ----------------- | ---------------------------------------------------------------- |
-| `CellDef`         | Return type of `cell()` -- callable methods at top level         |
-| `CellEntry`       | Cell or `{ cell, dependsOn? }`                                   |
-| `MachineConfig`   | `{ initial, states: { state: { action: target } } }`             |
-| `GenCtx<S>`       | Generator context -- S inferred from cell state                  |
-| `Gen<T>`          | Generator return type for flows                                  |
-| `TypedCreator<P>` | Action creator with `.type`                                      |
-| `CallOptions`     | `{ timeout?: number; retries?: number }`                         |
-| `ScopedApp<S>`    | App context for init/destroy/execute                             |
-| `TestContext`     | Test harness -- `{ dispatch, getState, expect, settle }`         |
-| `AioError`        | Error with `code`, `source`, `context`, `correlationId`          |
-| `AioErrorCode`    | 16 error codes -- see [Errors](../debugging/errors.md)           |
-| `LogConfig`       | Logging configuration                                            |
-| `LogLevel`        | `'trace' \| 'debug' \| 'info' \| 'warn' \| 'error'`              |
-| `VitalsConfig`    | Client diagnostic config -- see [Vitals](../debugging/vitals.md) |
-| `VitalAlert`      | `{ id, layer, status, duration, measured, threshold, hint, ts }` |
-| `MemoryConfig`    | Heap monitoring config                                           |
-| `ScheduleEffect`  | `{ _schedule: true, key, type, ... }` from sync methods          |
+| Type              | Description                                                       |
+| ----------------- | ----------------------------------------------------------------- |
+| `CellDef`         | Return type of `cell()` -- callable methods at top level          |
+| `CellEntry`       | Cell or `{ cell, dependsOn? }`                                    |
+| `CellEffect`      | Union of method-returnable effects -- self-reference annotation   |
+| `MethodDraftMeta` | `{ $signal: AbortSignal }` -- cancellation-aware draft annotation |
+| `UntilOptions`    | `{ timeoutMs?, intervalMs?, msg?, signal? }`                      |
+| `TypedCreator<P>` | Action creator with `.type`                                       |
+| `CallOptions`     | `{ timeout?: number; retries?: number }`                          |
+| `ScopedApp<S>`    | App context for init/destroy/execute                              |
+| `TestContext`     | Test harness -- `{ dispatch, getState, expect, settle }`          |
+| `AioError`        | Error with `code`, `source`, `context`, `correlationId`           |
+| `AioErrorCode`    | 16 error codes -- see [Errors](../debugging/errors.md)            |
+| `LogConfig`       | Logging configuration                                             |
+| `LogLevel`        | `'trace' \| 'debug' \| 'info' \| 'warn' \| 'error'`               |
+| `VitalsConfig`    | Client diagnostic config -- see [Vitals](../debugging/vitals.md)  |
+| `VitalAlert`      | `{ id, layer, status, duration, measured, threshold, hint, ts }`  |
+| `MemoryConfig`    | Heap monitoring config                                            |
+| `ScheduleEffect`  | `{ _schedule: true, key, type, ... }` from sync methods           |
 
 ---
 
@@ -233,7 +224,6 @@ Everything below is the full reference, organized by category.
 | `t.send[key](...args)`      | Dispatch typed action                      |
 | `t.getState()`              | Get current cell state                     |
 | `t.expect.state(fn)`        | Assert state via predicate                 |
-| `t.expect.status(expected)` | Assert machine status                      |
 | `t.expect.effects(types[])` | Assert exact effect types from last action |
 | `t.expect.effectCount(n)`   | Assert number of effects                   |
 | `t.expect.invariant(fn)`    | Assert predicate holds                     |

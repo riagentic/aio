@@ -15,14 +15,32 @@
 
 const FREEZE_SIZE_LIMIT = 100_000; // keep dev boot snappy on large slices
 
-/** Deep clone that never throws — structuredClone, then JSON, then identity. */
-export function cloneState<T>(value: T): T {
+/** Deep clone that never throws — structuredClone, then JSON, then a final
+ *  fallback chosen by the caller. The two callers of this ladder used to be
+ *  separate copies with OPPOSITE last rungs (complexity audit): seeding wants
+ *  `"identity"` (aliasing the declared initial is survivable and freeze
+ *  catches mutation); read-snapshots want `"shallow"` (returning the live
+ *  ref would let a `.map()` over the "snapshot" silently mutate real state —
+ *  the exact Immer-alias class this module exists to kill). One ladder, the
+ *  divergence is now an explicit, documented parameter. */
+export function cloneState<T>(
+  value: T,
+  onUncloneable: "identity" | "shallow" = "identity",
+): T {
   try {
     return structuredClone(value);
   } catch {
     try {
       return JSON.parse(JSON.stringify(value)) as T;
     } catch {
+      if (
+        onUncloneable === "shallow" && value !== null &&
+        typeof value === "object"
+      ) {
+        return (Array.isArray(value)
+          ? [...(value as unknown[])]
+          : { ...(value as Record<string, unknown>) }) as T;
+      }
       return value; // circular / non-serializable — best effort
     }
   }

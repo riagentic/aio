@@ -18,9 +18,9 @@ The public surface is exactly what the CI-enforced snapshot locks
 - documented CLI flags (`aio create`, `--expose`, `--port`, …) and the six
   scaffolded `deno.json` lines `aio doctor` validates
 
-**Not** public API: `_`-prefixed or `@internal` symbols, anything tagged
-`@experimental`, `src/` folder layout, log/error message wording (error _codes_
-are stable), and undocumented behavior of internal modules.
+**Not** public API: `_`-prefixed or `@internal` symbols, `src/` folder layout,
+log/error message wording (error _codes_ are stable), and undocumented behavior
+of internal modules.
 
 ## What counts as breaking (major bump after 1.0)
 
@@ -58,6 +58,7 @@ match documented behavior are patch — even when someone depended on the bug.
 
 ## Experimental surface
 
-`@experimental` symbols (`aio/state-core` entry, `aio/sync` engine internals,
-`useTimeTravel`) may change in any release. They graduate by removing the tag —
-a minor bump; they are never silently stabilized.
+There is none. Every exported symbol — including the `aio/state-core` entry, the
+`aio/sync` engine internals, and `useTimeTravel` — is tested and covered by this
+policy. (Historic `@experimental` tags graduated by test coverage, never by
+silent stabilization.)

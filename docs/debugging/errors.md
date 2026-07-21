@@ -63,12 +63,12 @@ In prod mode, errors are compact one-liners:
 | `EFFECT_ERROR`       | Effect      | Sync effect (executor) threw                                  |
 | `EFFECT_TIMEOUT`     | Effect      | Async effect exceeded timeout (default 30s)                   |
 | `EFFECT_ASYNC_ERROR` | Effect      | Async effect promise rejected                                 |
-| `FLOW_STEP_ERROR`    | Flow        | A flow generator step threw (fed back to generator)           |
-| `FLOW_UNCAUGHT`      | Flow        | Flow threw without user try/catch -- includes step history    |
+| `FLOW_STEP_ERROR`    | Flow        | A workflow step threw (legacy pre-v2 flows)                   |
+| `FLOW_UNCAUGHT`      | Flow        | Workflow threw without try/catch (legacy pre-v2 flows)        |
 | `HOOK_ERROR`         | Hook        | `beforeReduce`, `onAction`, or `onEffect` hook threw          |
 | `INIT_ERROR`         | Lifecycle   | Cell `onInit` callback threw                                  |
 | `DESTROY_ERROR`      | Lifecycle   | Cell `onDestroy` callback threw                               |
-| `MACHINE_BLOCKED`    | Machine     | Action blocked by state machine (warn-level)                  |
+| `MACHINE_BLOCKED`    | Routing     | Action blocked by internal routing guard (warn-level)         |
 | `QUEUE_OVERFLOW`     | Dispatch    | Dispatch queue exceeded 10,000 entries                        |
 | `DISPATCH_LOOP`      | Dispatch    | 1,000 iterations detected -- dispatch recovers after draining |
 | `DISPATCH_CLOSED`    | Dispatch    | Action dispatched after close() -- dropped, not applied       |
@@ -88,12 +88,12 @@ The error code prefix tells you which layer broke:
 
 | Prefix                   | Layer           | Where to look                          |
 | ------------------------ | --------------- | -------------------------------------- |
-| `REDUCE_*`               | Cell reducer    | Your `reduce` or `methods` code        |
-| `EFFECT_*`               | Cell executor   | Your `execute` handlers, async methods |
-| `FLOW_*`                 | Generator flow  | Your `generators` code                 |
+| `REDUCE_*`               | Cell reducer    | Your sync `methods` code               |
+| `EFFECT_*`               | Cell executor   | Your async methods                     |
+| `FLOW_*`                 | Workflow steps  | Legacy (pre-v2 generator flows)        |
 | `HOOK_*`                 | Lifecycle hooks | `beforeReduce`, `onAction`, `onEffect` |
 | `INIT_*` / `DESTROY_*`   | Cell lifecycle  | `onInit`, `onDestroy` callbacks        |
-| `MACHINE_*`              | State machine   | Machine config, transition guards      |
+| `MACHINE_*`              | Action routing  | Internal routing guard (warn-level)    |
 | `QUEUE_*` / `DISPATCH_*` | Dispatch loop   | Infinite dispatch cycles               |
 | `MEMORY_*`               | Runtime         | Unbounded state growth                 |
 | `BUDGET_*`               | Performance     | Slow reducer or effect                 |
@@ -230,20 +230,20 @@ stream.
 
 ## Diagnostic bus event types
 
-| Type                    | Severity | Meaning                                   |
-| ----------------------- | -------- | ----------------------------------------- |
-| `action-dropped`        | warning  | Action silently dropped (queue full)      |
-| `state-sync-error`      | error    | Failed to parse state from server         |
-| `state-key-stripped`    | warning  | Reserved key name removed from state      |
-| `state-no-listeners`    | warning  | State updating but no UI subscribers      |
-| `action-guarded`        | info     | Action blocked by machine state guard     |
-| `action-filtered`       | info     | Action dropped by beforeReduce middleware |
-| `effect-invalid`        | warning  | Effect missing .type string, skipped      |
-| `transport-error`       | warning  | UDS/IPC write failed                      |
-| `hook-start-failed`     | error    | onStart hook threw                        |
-| `persist-error`         | error    | State persistence failed                  |
-| `vitals-alert`          | varies   | Vital signs probe detected degradation    |
-| `offline-storage-error` | info     | IndexedDB operation failed                |
+| Type                    | Severity | Meaning                                  |
+| ----------------------- | -------- | ---------------------------------------- |
+| `action-dropped`        | warning  | Action silently dropped (queue full)     |
+| `state-sync-error`      | error    | Failed to parse state from server        |
+| `state-key-stripped`    | warning  | Reserved key name removed from state     |
+| `state-no-listeners`    | warning  | State updating but no UI subscribers     |
+| `action-guarded`        | info     | Action blocked by internal routing guard |
+| `action-filtered`       | info     | Action dropped by beforeReduce           |
+| `effect-invalid`        | warning  | Effect missing .type string, skipped     |
+| `transport-error`       | warning  | UDS/IPC write failed                     |
+| `hook-start-failed`     | error    | onStart hook threw                       |
+| `persist-error`         | error    | State persistence failed                 |
+| `vitals-alert`          | varies   | Vital signs probe detected degradation   |
+| `offline-storage-error` | info     | IndexedDB operation failed               |
 
 ## `TypeError: Cannot assign to read only property` in dev
 

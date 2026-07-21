@@ -71,7 +71,7 @@ disconnects don't pollute the console).
 
 Rejection happens on:
 
-- **Server reject** — the dispatch was refused (validation, machine guard,
+- **Server reject** — the dispatch was refused (validation, routing guard,
   etc.). The promise rejects with the server's error message.
 - **Timeout** — 15 seconds elapse without an ack. The promise rejects with
   `method not acknowledged in 15000ms — server overloaded or disconnected`.

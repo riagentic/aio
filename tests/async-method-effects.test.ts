@@ -51,18 +51,17 @@ const poller = cell("poller381", {
   },
 });
 
+// Guard at method top (methods-style replacement for the old machine gate):
+// fetchOnce only runs from 'idle' and moves the cell to 'busy'.
 const gated = cell("gated381", {
-  state: { ran: false },
-  machine: {
-    initial: "idle",
-    states: {
-      idle: { fetchOnce: "busy" },
-      busy: { done: "idle" },
-    },
-  },
+  state: { ran: false, phase: "idle" },
   methods: {
-    done(_s) {},
-    async fetchOnce(s): Promise<ScheduleEffect> {
+    done(s) {
+      s.phase = "idle";
+    },
+    async fetchOnce(s): Promise<ScheduleEffect | undefined> {
+      if (s.phase !== "idle") return;
+      s.phase = "busy";
       await Promise.resolve();
       s.ran = true;
       return schedule.after("gated.next", 100, {
@@ -111,11 +110,11 @@ testCell(poller, "plain data returns are not misread as effects", async (t) => {
 
 testCell(
   gated,
-  "machine-gated cell: returned effect passes the __effects self-loop",
+  "guarded cell: async-returned effect still emitted (__effects path)",
   async (t) => {
     t.init();
     await t.send.fetchOnce!();
-    t.expect.status("busy");
+    t.expect.state((s) => s.phase === "busy");
     t.expect.state((s) => s.ran === true);
     const effects = t.getEffects();
     assertEquals(effects.length, 1);
