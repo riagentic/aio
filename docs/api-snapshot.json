@@ -441,7 +441,7 @@
         },
         "VERSION": {
           "kind": "variable",
-          "sig": "864ec41b388b86ed"
+          "sig": "5f857200029cf502"
         },
         "VitalAlert": {
           "kind": "typeAlias",
