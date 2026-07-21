@@ -1,5 +1,49 @@
 # Changelog
 
+## 1.0.0-alpha26 — sync cursor hardening + field-report P1 closure (2026-07-21)
+
+A deep randomized audit plus a full katana `--fix` pass. Every open field-report
+P1 is closed; the CRDT catch-up cursor is rebuilt race-free.
+
+**Sync (CRDT) — silent-loss / double-apply chain fixed.** `server_ts` is now
+strictly monotonic (bare `Date.now()` ties + the strict `>` cursor silently LOST
+ops) and re-seeded from `MAX(server_ts)` after a restart. The echoed
+`lastServerTs` was computed from the client's own cursors — dead code; it is now
+a per-cell map reserved under each cell's lock. Reconnect-flushed pending ops
+are always acked and dispatched exactly once (they were never acked and
+re-dispatched every round — server counter drift + permanent client
+double-apply). Broadcast ops carry `serverTs` so peers advance their cursor; a
+client's own ops are filtered from catch-up echoes. `persistOp` returns the
+issued ts (api surface regenerated).
+
+**Field-report P1s (machine, inews R4).** The `Deno is not defined` blank-screen
+trap (machine U1): dev-boot graph findings are now LOUD — blocking client-breaks
+`console.error` with file:line, `Deno.*`-in-client- reachable-modules
+`console.warn` with the `*.server.ts` fix (was debug-only). `s.users.find(…)`
+returns a LIVE element proxy so a write held across an await batches instead of
+being silently dropped in prod (inews R4). `ui.surface()` staleness fixed at the
+root: the auto-memo skip now re-points the component instance at the tree vnode,
+so a structural branch swap driven by the child's own signal stays resolvable
+(inews R4 🔴).
+
+**testUI.** Disabled form controls are on the surface with `disabled: true`;
+invoking an unknown action fails with the aio name listing plus a
+component/element shadowing hint (never a bare TypeError);
+`waitFor(pred, "msg")`; `location`/`history` come from the owned happy-dom
+window automatically — `navigate()` tests need zero shims.
+
+**am / onboarding.** `am create --target=X` works end-to-end: `aio.run()` reads
+the scaffolded `target` from deno.json as the client default, so the flag-less
+`deno task dev` runs the chosen target (android → the emulator orchestrator;
+server → server-only). Electron auto-installs on first `dev:electron` /
+`compile:electron`. Invalid `--target` fails loud.
+
+**State.** Parameterized selectors: `byId: (s, id) => …` surfaces as
+`cell.byId(id)` — server and browser, fully typed.
+
+Gates: full suite 2497/0 · onboard e2e 10/10 · coverage 74.5% (floor 73) ·
+fmt/lint/check/api/docs/boundaries/publish-dry-run green.
+
 ## 1.0.0-alpha25 — source-first onboarding, simplified README, feature freeze (2026-07-20)
 
 Onboarding is now pure source — no JSR, no publish, no version-resolution

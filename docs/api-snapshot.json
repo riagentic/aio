@@ -493,7 +493,7 @@
         },
         "VERSION": {
           "kind": "variable",
-          "sig": "2a57a6dd8819dc4d"
+          "sig": "864ec41b388b86ed"
         },
         "VitalAlert": {
           "kind": "typeAlias",
@@ -1540,7 +1540,7 @@
         },
         "TestUI": {
           "kind": "typeAlias",
-          "sig": "269267a32a99f239"
+          "sig": "d171b3da2ae7b15d"
         },
         "TestUIOptions": {
           "kind": "interface",
