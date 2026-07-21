@@ -1,5 +1,22 @@
 # Changelog
 
+## 1.0.0-alpha29 — wire protocol v2: ONE envelope (2026-07-22)
+
+**B4b phase 2 lands.** Every message on every transport (WS browser/cli, UDS
+NDJSON, Electron IPC relay) is ONE JSON envelope `{v:2, t, d?}` — the v1 zoo
+(string prefixes, discriminator keys, bare-JSON-is-state) is deleted.
+Overloaded keys split (`ack` vs `sync-ack`; `sync-req` vs `sync-res`);
+PROTOCOL v/min = 2/2 with a loud, readable refusal (+ close 4505) for v1
+peers; UDS gains sync + serverFns parity; the wire-envelope CI pin now rejects
+any uncatalogued kind AND any v1 prefix. **Field-fix batch:** testUI
+collision/disabled cluster, `ui.exclude` enforced at every client read seam,
+CRDT op-id dedup + chaos suite (4 op-loss/double-apply bugs), 3 AIR renderer
+bugs via the conformance suite, `dbPath`/`--db-path`, loud electron→browser
+fallback, 2 aiol false positives. **New gates:** D12 bench suite,
+docs-truth (snippets type-check + stale-term denylist). Breaking: rebuild
+compiled binaries/CLI clients (protocol bump); no app-code changes —
+docs/upgrade/from-alpha28-to-alpha29.md.
+
 ## 1.0.0-alpha28 — restructure completes: B3–B5 (2026-07-21)
 
 The rest of the perfect-aio plan lands. **B3 phase 1:** `sync.onRejected`

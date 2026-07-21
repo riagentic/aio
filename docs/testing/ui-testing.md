@@ -12,6 +12,7 @@ Zero boilerplate — one import, one call. The DOM is created for you, every
 `cell()` your App imports boots automatically, and teardown is handled:
 
 ```ts
+import { assertEquals } from "@std/assert";
 import { testUI } from "aio/testing";
 import { todo } from "../src/cell/todo.ts";
 import App from "../src/App.tsx";
@@ -116,7 +117,13 @@ await Deno.writeTextFile("tests/ui.gen.ts", src);
 
 ```ts
 // in a test
+import { testUI } from "aio/testing";
 import type { TypedTestUI } from "./ui.gen.ts";
+import { todo } from "../src/cell/todo.ts";
+import App from "../src/App.tsx";
+import { Window } from "happy-dom";
+
+const document = new Window().document;
 const ui = await testUI(App, { document, cells: [todo] }) as TypedTestUI;
 await ui.App.SubmitButton.click(); // autocompleted, compile-checked
 ```

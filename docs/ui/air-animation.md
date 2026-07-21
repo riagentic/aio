@@ -40,7 +40,7 @@ const App = () => (
   <div>
     <button onClick={() => visible.set(!visible.peek())}>Toggle</button>
     <Transition enter={fade} exit={fade}>
-      {visible.value && <div className="card">Hello</div>}
+      {[visible.value ? <div className="card">Hello</div> : null]}
     </Transition>
   </div>
 );

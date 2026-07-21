@@ -8,6 +8,7 @@ import {
   WS_MAX_QUEUE,
 } from "./browser-protocol.ts";
 import { T } from "./browser-transport-state.ts";
+import { enc } from "../protocol/envelope.ts";
 import { _registerAck, _rejectAck } from "../protocol/browser-ack.ts";
 
 /** Sends action via IPC or WS — queues to memory during initial connect, persists to IndexedDB when disconnected.
@@ -31,11 +32,11 @@ export function send(
   const ackPromise = action.cid ? _registerAck(action.cid) : Promise.resolve();
 
   if (T.ipc && T.ipcConnected) {
-    T.ipc.send(JSON.stringify(action));
+    T.ipc.send(enc("action", action));
     return ackPromise;
   }
   if (T.ws && T.ws.readyState === WebSocket.OPEN) {
-    T.ws.send(JSON.stringify(action));
+    T.ws.send(enc("action", action));
     return ackPromise;
   }
   if (!T.wasConnected && T.queue.length < WS_MAX_QUEUE) {

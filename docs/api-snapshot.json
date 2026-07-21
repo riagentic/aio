@@ -73,7 +73,7 @@
         },
         "CellsConfig": {
           "kind": "typeAlias",
-          "sig": "f3476e65e94d6f42"
+          "sig": "c517c0d2b6e544fe"
         },
         "CellStatus": {
           "kind": "typeAlias",
@@ -229,7 +229,7 @@
         },
         "schedule": {
           "kind": "variable",
-          "sig": "58f8bdfeb8fae90a"
+          "sig": "d1bebdc28196c3d3"
         },
         "ScheduleDef": {
           "kind": "typeAlias",
@@ -907,7 +907,7 @@
         },
         "CliFlags": {
           "kind": "typeAlias",
-          "sig": "b0ed65a4f1cb06d9"
+          "sig": "0a73d9013488d15e"
         },
         "connectCliUDS": {
           "kind": "function",
@@ -1127,7 +1127,7 @@
         },
         "schedule": {
           "kind": "variable",
-          "sig": "58f8bdfeb8fae90a"
+          "sig": "d1bebdc28196c3d3"
         },
         "ScheduleDef": {
           "kind": "typeAlias",
@@ -1247,7 +1247,7 @@
       "symbols": {
         "AckMessage": {
           "kind": "interface",
-          "sig": "53c9a9a059649d2b"
+          "sig": "35773a1cdcce2df0"
         },
         "CompactDeps": {
           "kind": "interface",
@@ -1295,7 +1295,7 @@
         },
         "loadOpsSince": {
           "kind": "function",
-          "sig": "16fd35f41d0181ed"
+          "sig": "04eaf666be0acc62"
         },
         "mergeField": {
           "kind": "function",
@@ -1327,7 +1327,7 @@
         },
         "OpMessage": {
           "kind": "interface",
-          "sig": "ec3758d991bf1b53"
+          "sig": "3b1df58e45475d8c"
         },
         "persistOp": {
           "kind": "function",
@@ -1367,7 +1367,7 @@
         },
         "SyncEngineDeps": {
           "kind": "interface",
-          "sig": "efad1b7565b58ec4"
+          "sig": "e3df313bd7539022"
         },
         "SyncHandlerDeps": {
           "kind": "interface",
@@ -1383,11 +1383,11 @@
         },
         "SyncRequest": {
           "kind": "interface",
-          "sig": "92aa24f4ce287708"
+          "sig": "8d34b3e3a15c0028"
         },
         "SyncResponse": {
-          "kind": "interface",
-          "sig": "f2c153b80638f053"
+          "kind": "typeAlias",
+          "sig": "51d40dca920ab3fa"
         },
         "SyncStats": {
           "kind": "interface",
@@ -1443,7 +1443,7 @@
         },
         "testUI": {
           "kind": "function",
-          "sig": "5a9942567bbf5a82"
+          "sig": "93ef5ee9fb0bf868"
         },
         "TestUI": {
           "kind": "typeAlias",
@@ -1459,7 +1459,7 @@
         },
         "UIElementHandle": {
           "kind": "interface",
-          "sig": "878ac9985bb5e6a1"
+          "sig": "9bc77eabc3e23e5e"
         }
       }
     },

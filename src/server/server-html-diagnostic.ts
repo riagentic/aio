@@ -56,8 +56,9 @@ export function generateDiagnosticHTML(
     var wsUrl = proto + '//' + location.host + '/ws' + (tk ? '?token=' + encodeURIComponent(tk) : '');
     var ws = new WebSocket(wsUrl);
     ws.onmessage = function(ev) {
-      if (ev.data === '__reload' || ev.data === '__graph_clear') location.reload();
-      if (typeof ev.data === 'string' && ev.data.startsWith('__graph_error:')) location.reload();
+      var f; try { f = JSON.parse(ev.data); } catch (_) { return; }
+      if (!f || f.v !== 2) return;
+      if (f.t === 'reload' || f.t === 'graph-clear' || f.t === 'graph-error') location.reload();
     };
     ws.onclose = function() { setTimeout(function() { location.reload(); }, 2000); };
   </script>

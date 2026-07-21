@@ -7,6 +7,7 @@
 
 import { batch } from "./signal.ts";
 import { applyPatches, type Patch } from "immer";
+import { enc } from "../protocol/envelope.ts";
 import { _BLOCKED_KEYS } from "./state-array-utils.ts";
 import {
   _applyFullState,
@@ -33,7 +34,7 @@ export type HandleResult = "full" | "delta" | "noop" | "dropped";
 // ── Message handling ─────────────────────────────────────────────────
 
 /** Process a message from the server (full state, delta, or filtered).
- *  CALLER is responsible for filtering browser signals (__reload, __css, __boot, etc.)
+ *  CALLER is responsible for routing control frames (reload, css, boot, etc.)
  *  before calling this — state-core has no browser-specific protocol knowledge.
  *  Returns what happened so caller can react (notify listeners, devtools, etc). */
 export function handleMessage(data: any): HandleResult {
@@ -110,7 +111,7 @@ export function handleMessage(data: any): HandleResult {
       // applyPatches failed — client state desynced, request full state from server
       console.warn("[aio] applyPatches failed, requesting resync:", e);
       const transport = _getTransport();
-      if (transport) transport.send("__resync");
+      if (transport) transport.send(enc("resync"));
       return "noop";
     }
   }

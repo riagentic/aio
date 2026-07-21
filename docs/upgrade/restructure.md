@@ -19,10 +19,11 @@ examples and zero field apps.)
 **Kept:** `state`, `methods`, `selectors`, `cancelOn`, `sync`, `persist`, `ui`,
 `init`, `destroy`, schedule/own effects returned from methods. **Upgraded:**
 `listensTo` gains an object form that actually runs a handler —
-`listensTo: { onCleared: cart.clear }` runs the sync method
-`onCleared(s,
-payload)` whenever `cart:clear` dispatches (the array form only
-routes).
+`listensTo: { onCleared: cart.clear }` runs the sync method `onCleared` whenever
+`cart:clear` dispatches (the array form only routes). The foreign method's
+arguments arrive SPREAD, so the handler mirrors its parameter list:
+`listensTo: { onAdded: cart.add }` + `onAdded(s, item, qty) { … }` (alpha29: was
+the raw `{ args }` envelope before).
 
 ### actions + reduce → methods
 
@@ -252,3 +253,17 @@ Moved: `lint`, `parseCli`, `draft`, `matchEffect`, `deepFreeze`, `markAsync`,
 `DEFAULT_PRAGMAS`, `UnionOf` + deep diagnostic/vitals detail types and the
 low-level action/reduce plumbing types. `deno task lint` (aiol) flags old
 imports with the exact fix.
+
+## alpha29 — `ui.exclude` enforced at client read seams
+
+Client-context reads (browser, standalone/electron/android, testUI) of a
+ui-hidden field now return `undefined` with a one-time warning — previously
+standalone exposed the real value and browsers showed the bundled initial value.
+`ui: "none"` cells read `undefined` client-side; client selectors compute over
+the filtered slice. Server code (routes, effects) still sees everything. If
+client code legitimately needs a field, remove it from `ui.exclude`; if it's a
+secret, it now actually stays secret.
+
+Also alpha29: `listensTo` object-form handlers receive the foreign method's
+arguments spread (`onAdded(s, item, qty)`) instead of the raw `{ args }`
+envelope — update handlers that destructured the envelope by hand.

@@ -232,8 +232,9 @@ Deno.test("snapshot HTTP: clients receive broadcast after POST", async () => {
     const ws = new WebSocket(`ws://127.0.0.1:${PORT}/ws`);
     const msgs: string[] = [];
     ws.addEventListener("message", (e) => {
-      if (!(e.data as string).startsWith("__boot:")) {
-        msgs.push(e.data as string);
+      const d = e.data as string;
+      if (d.includes('"t":"state"') || d.includes('"t":"patches"')) {
+        msgs.push(d);
       }
     });
     await new Promise<void>((r) => {
@@ -252,8 +253,11 @@ Deno.test("snapshot HTTP: clients receive broadcast after POST", async () => {
 
     await waitFor(() => msgs.length >= 2);
     const update = JSON.parse(msgs[msgs.length - 1]!);
-    // Could be full or delta depending on change ratio
-    const count = update.$p ? update.$p.count : update.count;
+    // Could be a full "state" frame or a "patches" delta
+    const count = update.t === "patches"
+      ? (update.d as { path: unknown[]; value: unknown }[])
+        .find((op) => op.path[0] === "count")?.value
+      : update.d.count;
     assertEquals(count, 77);
 
     ws.close();

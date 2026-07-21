@@ -1,7 +1,8 @@
 // deno-lint-ignore-file
 // Browser-side time-travel panel — dev mode only.
-// Receives __tt: messages from server, renders a floating DOM panel.
+// Receives "tt-state" frames from the server, renders a floating DOM panel.
 // React/AIR hooks live in time-travel-react.ts and time-travel-air.ts.
+import { enc } from "../protocol/envelope.ts";
 import { Listeners } from "../state/listeners.ts";
 
 // ── Types ──────────────────────────────────────────────────────────────
@@ -137,12 +138,12 @@ function _renderTTPanel(): void {
     return b;
   };
 
-  bar.appendChild(mkBtn("◀ undo", () => _sendTTCmd("__tt:undo"), atStart));
-  bar.appendChild(mkBtn("redo ▶", () => _sendTTCmd("__tt:redo"), atEnd));
+  bar.appendChild(mkBtn("◀ undo", () => _sendTTCmd(enc("tt-cmd", { cmd: "undo" })), atStart));
+  bar.appendChild(mkBtn("redo ▶", () => _sendTTCmd(enc("tt-cmd", { cmd: "redo" })), atEnd));
   bar.appendChild(
     mkBtn(
       tt.paused ? "🔓 unlock" : "🔒 lock",
-      () => _sendTTCmd(tt.paused ? "__tt:resume" : "__tt:pause"),
+      () => _sendTTCmd(enc("tt-cmd", { cmd: tt.paused ? "resume" : "pause" })),
     ),
   );
   _ttPanel.appendChild(bar);
@@ -165,7 +166,7 @@ function _renderTTPanel(): void {
     row.onmouseleave = () => {
       if (!isCurrent) row.style.background = "transparent";
     };
-    row.onclick = () => _sendTTCmd("__tt:goto:" + e.id);
+    row.onclick = () => _sendTTCmd(enc("tt-cmd", { cmd: "goto:" + e.id }));
 
     const name = document.createElement("span");
     name.textContent = (isCurrent ? "▸ " : "  ") + e.type;
@@ -234,15 +235,15 @@ function _bindTTKey(): void {
 
 // ── Public API ─────────────────────────────────────────────────────────
 
-/** Process a `__tt:` message received from the server (payload = JSON after the prefix). */
-export function handleTTMessage(json: string): void {
+/** Process a "tt-state" payload from the server (decoded object, or a JSON string). */
+export function handleTTMessage(data: string | object): void {
   try {
-    _ttState = JSON.parse(json);
+    _ttState = (typeof data === "string" ? JSON.parse(data) : data) as TTMeta;
     _bindTTKey();
     _ttListeners.notify(_ttState!);
     if (_ttPanelVisible) _renderTTPanel();
   } catch (err) {
-    console.warn("[aio] bad __tt: data:", err);
+    console.warn("[aio] bad tt-state data:", err);
   }
 }
 

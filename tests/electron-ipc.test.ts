@@ -198,26 +198,15 @@ Deno.test({
       )
         .replace(
           // Inject broken behavior: replace __aio:ready handler with a 1ms did-finish-load timeout
-          `  // Track page readiness (data events need this to decide whether to forward or buffer)
-  win.webContents.on('did-start-navigation', () => { pageReady = false; }); // AIO-247: reset on F5/Ctrl+R
+          `  win.webContents.on('did-start-navigation', () => { pageReady = false; });
   win.webContents.on('did-finish-load', () => { pageReady = true; });
 
-  // Renderer signals it has registered IPC listeners — request fresh state from server
   ipcMain.on('__aio:ready', () => {
     if (closing) return;
     if (sock) {
       win.webContents.send('__aio:open');
-      // Request fresh full state from server via subscribe-all.
-      // This replaces relying on lastFullState which may be stale (captured on
-      // initial UDS connect before async cell initialization completed, and
-      // never updated because all subsequent states are $f-tagged or $p deltas).
-      // The server responds with current complete state — no $f because * = unfiltered.
-      sock.write('__subs:["*"]\\n');
-      // AIO-259: replay only when connected — without __aio:open the renderer
-      // would show stale data with no active connection for actions/updates
-      if (lastFullState) {
-        win.webContents.send('__aio:msg', lastFullState);
-      }
+      sock.write('{"v":2,"t":"subs","d":{"subs":["*"]}}\\n');
+      if (lastFullState) win.webContents.send('__aio:msg', lastFullState);
     }
   });`,
           `  win.webContents.on('did-finish-load', () => {

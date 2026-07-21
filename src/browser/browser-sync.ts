@@ -6,7 +6,7 @@
  *
  * - local method calls on sync cells become HLC-stamped ops (offline-queued
  *   in localStorage, replayed on reconnect) instead of plain actions,
- * - `__ack` / `__op` / `__sync` wire messages feed the engine,
+ * - sync-ack / op / sync-res / op-rejected / sync-err frames feed the engine,
  * - the engine's optimistic view drives the cell signals the UI reads.
  *
  * The server stays the convergence authority: it applies every accepted op
@@ -68,44 +68,42 @@ export function handleSyncLocalAction(
   return true;
 }
 
-/** Wire-message router — plugged into the transport's sync handler seam. */
-export function handleSyncMessage(msg: Record<string, unknown>): void {
+/** Wire-frame router — plugged into the transport's sync handler seam.
+ *  `t` is the envelope kind, `d` its already-decoded payload. */
+export function handleSyncMessage(t: string, d: unknown): void {
   if (!_engine) return;
-  if (msg.__ack) {
-    const a = msg.__ack as { cell: string; opId: string; serverHlc: unknown };
-    _engine.handleAck(a.cell, a.opId, a.serverHlc as [number, number, string])
-      .catch(() => {});
-    return;
-  }
-  if (msg.__op_rejected) {
-    const r = msg.__op_rejected as {
-      opId: string;
-      cell: string;
-      reason: string;
-    };
-    _engine.handleRejection(r.cell, r.opId, r.reason).catch(() => {});
-    return;
-  }
-  if (msg.__op) {
-    _engine.handleRemoteOp(
-      msg.__op as Parameters<SyncEngine["handleRemoteOp"]>[0],
-    )
-      .catch(() => {});
-    return;
-  }
-  if (msg.__sync) {
-    _engine.handleSyncResponse(
-      msg.__sync as Parameters<SyncEngine["handleSyncResponse"]>[0],
-    ).catch(() => {});
-    return;
-  }
-  if (msg.__sync_error) {
-    // Server-side sync failure — without this branch the client hangs in
-    // "syncing" forever. Log loudly, back off, re-request.
-    const reason = (msg.__sync_error as { reason?: string }).reason ?? "?";
-    console.error(`[aio:sync] server sync failed: ${reason} — retrying in 2s`);
-    const engine = _engine;
-    setTimeout(() => engine?.requestSync().catch(() => {}), 2000);
+  switch (t) {
+    case "sync-ack": {
+      const a = d as { cell: string; opId: string; serverHlc: unknown };
+      _engine.handleAck(a.cell, a.opId, a.serverHlc as [number, number, string])
+        .catch(() => {});
+      return;
+    }
+    case "op-rejected": {
+      const r = d as { opId: string; cell: string; reason: string };
+      _engine.handleRejection(r.cell, r.opId, r.reason).catch(() => {});
+      return;
+    }
+    case "op":
+      _engine.handleRemoteOp(d as Parameters<SyncEngine["handleRemoteOp"]>[0])
+        .catch(() => {});
+      return;
+    case "sync-res":
+      _engine.handleSyncResponse(
+        d as Parameters<SyncEngine["handleSyncResponse"]>[0],
+      ).catch(() => {});
+      return;
+    case "sync-err": {
+      // Server-side sync failure — without this branch the client hangs in
+      // "syncing" forever. Log loudly, back off, re-request.
+      const reason = (d as { reason?: string } | undefined)?.reason ?? "?";
+      console.error(
+        `[aio:sync] server sync failed: ${reason} — retrying in 2s`,
+      );
+      const engine = _engine;
+      setTimeout(() => engine?.requestSync().catch(() => {}), 2000);
+      return;
+    }
   }
 }
 
@@ -169,7 +167,7 @@ export function initBrowserSync(
       const def = cells.get(cell);
       if (def) getCellSignal(cell, def.__aio.state).set(optimistic);
     },
-    log: { warn: (m) => console.warn(m) },
+    log: { warn: (m) => console.warn(m), debug: (m) => console.debug(m) },
   });
 
   // Replay anything queued offline from a previous session.

@@ -11,7 +11,14 @@ import {
   _showStatus,
   _w,
 } from "./browser-protocol.ts";
-import { handleControlMessage } from "./browser-shared.ts";
+import {
+  type AckPayload,
+  dec,
+  enc,
+  v1PeerReason,
+} from "../protocol/envelope.ts";
+import { _rejectAck, _resolveAck } from "../protocol/browser-ack.ts";
+import { handleControlFrame } from "./browser-shared.ts";
 import {
   getStateSnapshot,
   IPC_PING_INTERVAL,
@@ -40,38 +47,58 @@ export function connectIPC(reconnect: () => void): void {
     _ttSetSendFn((cmd: string) => T.ipc!.send(cmd));
     const q = T.queue;
     T.queue = [];
-    for (const a of q) T.ipc!.send(JSON.stringify(a));
+    for (const a of q) T.ipc!.send(enc("action", a));
     if (!T.ipcPingTimer) {
       T.ipcPingTimer = setInterval(() => {
-        if (T.ipc && T.ipcConnected) T.ipc.send("__ping");
+        if (T.ipc && T.ipcConnected) T.ipc.send(enc("ping"));
       }, IPC_PING_INTERVAL);
     }
   });
 
   T.ipc.onMessage((line: string) => {
-    if (handleControlMessage(line, T.bootId)) return;
-    if (line === "__getState") {
-      try {
-        T.ipc!.send(
-          "__clientState:" + JSON.stringify(getStateSnapshot()),
-        );
-      } catch (err) {
-        T.ipc!.send('__clientState:{"error":"' + String(err) + '"}');
+    const frame = dec(line);
+    if (!frame) {
+      // The one v1 shim: a v1 server's hello/refusal is still readable.
+      const v1 = v1PeerReason(line);
+      if (v1) console.error(`[aio] protocol version mismatch: ${v1}`);
+      else console.warn("[aio] undecodable frame — dropped");
+      return;
+    }
+    if (handleControlFrame(frame, T.bootId)) return;
+    switch (frame.t) {
+      case "get-state":
+        try {
+          T.ipc!.send(enc("client-state", getStateSnapshot()));
+        } catch (err) {
+          T.ipc!.send(enc("client-state", { error: String(err) }));
+        }
+        return;
+      case "tt-state":
+        _handleTTMessage(frame.d as object);
+        return;
+      case "diag":
+        try {
+          if (_w && typeof _w._aioDiag === "function") {
+            _w._aioDiag(frame.d as Record<string, unknown>);
+          }
+        } catch { /* ignore malformed diag */ }
+        return;
+      case "ack": {
+        // AIO-402: per-action ack over UDS+IPC — settle the awaited method.
+        const { cid, ok } = (frame.d ?? {}) as AckPayload;
+        if (typeof cid !== "string") return;
+        if (ok) _resolveAck(cid);
+        else _rejectAck(cid, new Error("server rejected action"));
+        return;
       }
-      return;
+      case "state":
+      case "patches":
+        handleStateMessage(frame.t, frame.d, "IPC");
+        return;
+      default:
+        console.warn(`[aio] unexpected "${frame.t}" frame (IPC) — dropped`);
+        return;
     }
-    if (line.startsWith("__tt:")) {
-      _handleTTMessage(line.slice(5));
-      return;
-    }
-    if (line.startsWith("__diag:")) {
-      try {
-        const ev = JSON.parse(line.slice(7));
-        if (_w && typeof _w._aioDiag === "function") _w._aioDiag(ev);
-      } catch { /* ignore malformed diag */ }
-      return;
-    }
-    handleStateMessage(line, "IPC");
   });
 
   T.ipc.onClose(() => {

@@ -97,7 +97,7 @@ Deno.test("aio26: lastState reset to null on UDS reconnect", () => {
 
 // ── AIO-29: __aio:ready requests fresh state from server ─────────
 
-Deno.test("aio29: __aio:ready sends __subs:* to request fresh state from server", () => {
+Deno.test("aio29: __aio:ready sends subs:* to request fresh state from server", () => {
   const readyIdx = script.indexOf("ipcMain.on('__aio:ready'");
   assertEquals(
     readyIdx > -1,
@@ -105,24 +105,32 @@ Deno.test("aio29: __aio:ready sends __subs:* to request fresh state from server"
     "script must contain ipcMain.on __aio:ready handler",
   );
   const afterReady = script.slice(readyIdx, readyIdx + 600);
-  // Must send __subs:["*"] to request fresh unfiltered state from server
-  const requestsFresh = afterReady.includes('__subs:["*"]');
+  // Must send a wildcard "subs" frame to request fresh unfiltered state
+  const requestsFresh = afterReady.includes(
+    '{"v":2,"t":"subs","d":{"subs":["*"]}}',
+  );
   assertEquals(
     requestsFresh,
     true,
-    '__aio:ready must send __subs:["*"] to UDS server for fresh state',
+    '__aio:ready must send a subs:["*"] frame to the UDS server for fresh state',
   );
 });
 
 // ── AIO-26: full state detection still works ─────────────────────
 
-Deno.test("aio26: full state detected by absence of $p key", () => {
-  // Non-delta messages (no "$p" key) should update lastFullState
-  const hasFullStateDetection = script.includes('"$p"') &&
+Deno.test("aio26: full state detected by the v2 state frame kind", () => {
+  // Only "state" frames may become lastFullState — never "patches" deltas.
+  const hasFullStateDetection = script.includes('\'"t":"state"\'') &&
     script.includes("lastFullState = line");
   assertEquals(
     hasFullStateDetection,
     true,
-    "Data handler must detect full state by absence of $p and update lastFullState",
+    'Data handler must detect full state via the "state" frame kind',
+  );
+  const patchesNeverFull = script.includes('\'"t":"patches"\'');
+  assertEquals(
+    patchesNeverFull,
+    true,
+    '"patches" frames must be tracked as lastState only',
   );
 });

@@ -145,8 +145,10 @@ import { page, useAio } from "aio/air";
 import { TradePage } from "./ui/trading/TradePage.tsx";
 import { SettingsPage } from "./ui/SettingsPage.tsx";
 
+type AppState = { page: string };
+
 export default function App() {
-  const { state, send } = useAio();
+  const { state } = useAio<AppState>();
   if (!state) return <div>Connecting...</div>;
   return (
     <div>

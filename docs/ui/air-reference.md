@@ -21,8 +21,10 @@ framework stays free of test-only deps; `setDocument` points the renderer at it.
 | `setDocument`   | `setDocument(doc): void`                                       | Point the renderer at a DOM document            |
 
 ```ts
+import { assertEquals } from "@std/assert";
 import { Window } from "happy-dom";
 import { testComponent } from "aio/air";
+import App from "./App.tsx";
 
 const win = new Window();
 const t = testComponent(App, { document: win.document });
@@ -135,7 +137,10 @@ canvas), change its `key`.
 ## h() -- Non-TSX Usage
 
 ```ts
-import { Fragment, h, mount } from "aio/air";
+import { Fragment, h } from "aio/air";
+import { MyComponent } from "./MyComponent.tsx";
+
+const items = [{ id: "1", name: "Ada" }, { id: "2", name: "Grace" }];
 
 h("div", { className: "card" }, "Hello");
 h(MyComponent, { name: "Alice" });

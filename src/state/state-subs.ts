@@ -1,3 +1,4 @@
+import { enc } from "../protocol/envelope.ts";
 /**
  * @module
  * Subscription path tracking for server-side state filtering.
@@ -43,8 +44,7 @@ export function collapsePaths(paths: Set<string> | string[]): string[] {
 
 function _sendSubsMessage(subs: string[]): void {
   if (!_sendFn) return;
-  const msg = "__subs:" + JSON.stringify(subs);
-  _sendFn(msg);
+  _sendFn(enc("subs", { subs }));
 }
 
 function _scheduleSyncSubs(): void {

@@ -23,6 +23,7 @@ Subscribe to the current URL. Re-renders the component on navigation.
 
 ```tsx
 import { useRoute } from "aio/air";
+import { NotFound } from "./pages.tsx";
 
 // No pattern — track path and search params
 function Layout() {
@@ -56,6 +57,7 @@ Programmatic navigation. Use `<Link>` for user-initiated navigation; use
 
 ```tsx
 import { navigate, useNavigate } from "aio/air";
+import { save } from "./api.ts";
 
 // Direct call (outside components)
 navigate("/dashboard");
@@ -85,6 +87,7 @@ Declarative route matching. Routes can be flat or nested into layout trees.
 
 ```tsx
 import { Route } from "aio/air";
+import { Nav, NotFound, Settings, UserDetail, UserList } from "./pages.tsx";
 
 const App = () => (
   <div>
@@ -101,6 +104,7 @@ const App = () => (
 
 ```tsx
 import { Outlet, Route } from "aio/air";
+import { Overview, Settings, Sidebar, UserList } from "./pages.tsx";
 
 function DashboardLayout() {
   return (
@@ -141,16 +145,20 @@ Client-side navigation anchors. Both prevent full page reload.
 ```tsx
 import { Link, NavLink } from "aio/air";
 
-<Link to="/users">All users</Link>
-<Link to="/users" replace>Replace history entry</Link>
+export const nav = (
+  <>
+    <Link to="/users">All users</Link>
+    <Link to="/users" replace>Replace history entry</Link>
 
-// Active styling
-<Link to="/settings" activeClass="active">Settings</Link>
-<Link to="/" exact activeClass="selected">Home</Link>
+    {/* Active styling */}
+    <Link to="/settings" activeClass="active">Settings</Link>
+    <Link to="/" exact activeClass="selected">Home</Link>
 
-// NavLink — automatic 'active' class
-<NavLink to="/dashboard">Dashboard</NavLink>
-<NavLink to="/settings" activeClass="current-page">Settings</NavLink>
+    {/* NavLink — automatic 'active' class */}
+    <NavLink to="/dashboard">Dashboard</NavLink>
+    <NavLink to="/settings" activeClass="current-page">Settings</NavLink>
+  </>
+);
 ```
 
 **Active matching rules:**
@@ -178,7 +186,10 @@ All other props (`className`, `style`, `aria-*`) pass through to `<a>`.
 Navigate on mount — useful for auth guards. Does not render anything.
 
 ```tsx
-import { Redirect } from "aio/air";
+import { Redirect, useAio } from "aio/air";
+import { Dashboard } from "./pages.tsx";
+
+type AppState = { user: string | null };
 
 function ProtectedPage() {
   const { state } = useAio<AppState>();
@@ -213,6 +224,9 @@ leaf routes use exact matching.
 
 ```tsx
 import { Link, NavLink, Redirect, Route, useAio } from "aio/air";
+import { Home, Settings, UserDetail, UserList } from "./pages.tsx";
+
+type AppState = { user: string | null; users: unknown[] };
 
 export default function App() {
   const { state } = useAio<AppState>();
@@ -245,15 +259,20 @@ For Electron, kiosk, or single-tab apps where URL doesn't matter:
 
 ```tsx
 import { page, useAio } from "aio/air";
+import { Home, Settings } from "./pages.tsx";
+
+type AppState = { page: string };
 
 export default function App() {
   const { state, send } = useAio<AppState>();
   if (!state) return <div>Connecting...</div>;
 
+  const go = (p: string) => send({ type: "nav:go", payload: { args: [p] } });
+
   return (
     <div>
-      <button onClick={() => send(A.navigate("home"))}>Home</button>
-      <button onClick={() => send(A.navigate("settings"))}>Settings</button>
+      <button onClick={() => go("home")}>Home</button>
+      <button onClick={() => go("settings")}>Settings</button>
       {page(state.page, { home: Home, settings: Settings })}
     </div>
   );

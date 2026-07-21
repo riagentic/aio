@@ -149,6 +149,10 @@ recovery, normal delta mechanism handles catch-up.
 ```ts
 import { createSelector } from "aio/selectors";
 
+type Position = { qty: number; price: number };
+type Order = { status: string };
+type State = { positions: Position[]; orders: Order[]; orderFilter: string };
+
 const selectPortfolioValue = createSelector(
   (s: State) => s.positions,
   (positions) => positions.reduce((sum, p) => sum + p.qty * p.price, 0),
@@ -170,7 +174,7 @@ Returns a deep Proxy that tracks property access during render. Tracked paths
 sent to server as `__subs` — server only sends deltas for those paths.
 
 ```tsx
-const state = useAio();
+const { state } = useAio();
 return <div>{state.counter.count}</div>;
 ```
 
@@ -178,7 +182,10 @@ return <div>{state.counter.count}</div>;
 
 ```tsx
 import { counter } from "./app.ts";
-return <div>{counter.count}</div>;
+
+export function Count() {
+  return <div>{counter.count}</div>;
+}
 ```
 
 Reading `counter.count` auto-tracks via the cell signal. Only components that

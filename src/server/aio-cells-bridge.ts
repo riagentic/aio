@@ -109,6 +109,7 @@ export function buildLegacyConfig(
       }) as AioConfig<Record<string, unknown>, unknown, unknown>["execute"],
     persist: fc.persist,
     persistKey: fc.persistKey,
+    dbPath: fc.dbPath,
     persistDebounceMs: fc.persistDebounceMs,
     persistMode: fc.persistMode,
     port: fc.port,

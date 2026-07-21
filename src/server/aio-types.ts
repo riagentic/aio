@@ -70,7 +70,10 @@ export type AioConfig<S, A, E> = {
     action: A,
   ) => { state: S; effects: (E | ScheduleEffect | OwnEffect)[] };
   execute: (app: AioApp<S, A>, effect: E) => void;
-  persist?: boolean; // default: true — auto-opens Deno.Kv
+  persist?: boolean; // default: true — persists to SQLite (data.db, aio_kv table)
+  /** Override the SQLite file (":memory:" for hermetic tests, or an absolute
+   *  path). Default: ./data.db in dev, the app data dir when compiled. */
+  dbPath?: string;
   fullStateThreshold?: number; // 0-1: ratio of changed keys that triggers full state broadcast (default: 0.5)
   /** Custom HTTP routes — exact path or "/prefix/*" wildcard → handler. The
    *  escape hatch for uploads, webhooks, and API endpoints that don't belong
@@ -206,6 +209,8 @@ export type CellsConfig = {
     persist?: import("../state/cell-types.ts").CellFieldFilter;
   };
   port?: number;
+  /** Override the SQLite file (":memory:" for hermetic tests). */
+  dbPath?: string;
   persist?: boolean;
   persistKey?: string;
   persistDebounceMs?: number;

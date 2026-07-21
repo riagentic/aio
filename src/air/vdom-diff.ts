@@ -103,7 +103,24 @@ export function _diff(
     (typeof next === "object" && typeof old === "object" &&
       (next as VNode).tag !== (old as VNode).tag)
   ) {
-    const anchor = getDom(old);
+    let anchor = getDom(old);
+    // AIO-416: bare strings/numbers carry no _dom, so getDom() misses them —
+    // scan for the matching text node (same AIO-156 fallback the text→text
+    // branch uses). Without this, a text→vnode transition (e.g. "mid" → null
+    // placeholder) appended the replacement at the parent's END and left the
+    // stale text node in place (removeDom can't locate bare text either).
+    let bareTextDom: Node | null = null;
+    if (!anchor && (typeof old === "string" || typeof old === "number")) {
+      const oldStr = String(old);
+      for (let i = 0; i < parent.childNodes.length; i++) {
+        const cn = parent.childNodes[i]!;
+        if (cn.nodeType === 3 && cn.textContent === oldStr) {
+          bareTextDom = cn;
+          break;
+        }
+      }
+      anchor = bareTextDom;
+    }
     const newDom = createDom(next, ctx, isSvg, parent);
     if (newDom && anchor && isChildOf(anchor, parent)) {
       parent.insertBefore(newDom, anchor);
@@ -111,6 +128,9 @@ export function _diff(
       parent.appendChild(newDom);
     }
     removeDom(parent, old, ctx);
+    if (bareTextDom && isChildOf(bareTextDom, parent)) {
+      parent.removeChild(bareTextDom);
+    }
     return;
   }
 

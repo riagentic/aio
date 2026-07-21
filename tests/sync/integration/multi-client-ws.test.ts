@@ -1,7 +1,7 @@
 // A6 (in-repo slice) — multi-client CRDT sync under concurrency, end-to-end
 // over real WebSockets: two clients fire interleaved ops at a live server
 // (worker-backed SQLite op-log); every op must be acked, relayed exactly once
-// to the peer, and visible to a late-joining third client via __sync.
+// to the peer, and visible to a late-joining third client via sync-res.
 import { assertEquals, assertExists } from "@std/assert";
 import { join } from "@std/path";
 import { createServer } from "../../../src/server/server.ts";
@@ -48,13 +48,13 @@ function connect(port: number): Promise<{
     );
     ws.addEventListener("message", (e) => {
       const raw = e.data as string;
-      if (raw.startsWith("__")) return; // control frames (__proto:, __boot:)
       try {
-        const parsed = JSON.parse(raw);
-        if (parsed.__ack?.opId) acks.push(parsed.__ack.opId as string);
-        if (parsed.__op) relayed.push(parsed.__op as WireOp);
-        if (parsed.__sync) syncs.push(parsed.__sync);
-      } catch { /* state frames — ignore */ }
+        const f = JSON.parse(raw);
+        if (f?.v !== 2) return;
+        if (f.t === "sync-ack" && f.d?.opId) acks.push(f.d.opId as string);
+        if (f.t === "op") relayed.push(f.d as WireOp);
+        if (f.t === "sync-res") syncs.push(f.d);
+      } catch { /* not a frame — ignore */ }
     });
     ws.addEventListener(
       "open",
@@ -120,8 +120,8 @@ Deno.test("sync: two concurrent WS clients — every op acked and relayed exactl
 
     // Interleave 25 ops per client, no pacing — the concurrency storm.
     for (let i = 0; i < OPS_PER_CLIENT; i++) {
-      a.ws.send(JSON.stringify({ __op: makeOp("clientA", i) }));
-      b.ws.send(JSON.stringify({ __op: makeOp("clientB", i) }));
+      a.ws.send(JSON.stringify({ v: 2, t: "op", d: makeOp("clientA", i) }));
+      b.ws.send(JSON.stringify({ v: 2, t: "op", d: makeOp("clientB", i) }));
     }
 
     await waitFor(() =>
@@ -149,11 +149,13 @@ Deno.test("sync: two concurrent WS clients — every op acked and relayed exactl
       "B never receives its own ops",
     );
 
-    // Late joiner: full catch-up via __sync (snapshot or incremental —
+    // Late joiner: full catch-up via sync-req (snapshot or incremental —
     // compaction may have folded ops below the low-water mark).
     const c = await connect(PORT);
     c.ws.send(JSON.stringify({
-      __sync: {
+      v: 2,
+      t: "sync-req",
+      d: {
         clientId: "clientC",
         cells: { notes: { lastHlc: null } },
         pendingOps: [],

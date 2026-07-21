@@ -24,6 +24,8 @@ import {
   setDevMode as _setDevModeVdom,
 } from "./vdom.ts";
 import { _cleanupActions } from "./vdom-helpers.ts";
+import { removeDom } from "./vdom-remove.ts";
+import { Portal } from "./vdom-types.ts";
 import { cleanupSignalBindings } from "./signal-binding.ts";
 import { _getExitHandler, _setLifecycleHooks } from "./transition-component.ts";
 import {
@@ -264,6 +266,18 @@ function _unmountTree(
   if (typeof vnode.tag === "function") {
     ctx.hooks?.unmountComponent(vnode);
     _unmountTree(vnode._rendered ?? null, ctx);
+  } else if (vnode.tag === Portal) {
+    // AIO-418: Portal children live in props.target, NOT under the mount root —
+    // the final `root.innerHTML = ""` never touches them, so a full unmount
+    // leaked them in the target forever. removeDom runs the same cleanups
+    // (refs, actions, signal bindings, component unmount hooks) AND removes
+    // the nodes from the target.
+    const target = vnode.props.target as Node | undefined;
+    if (target) {
+      for (const child of vnode.children) removeDom(target, child, ctx);
+    } else {
+      for (const child of vnode.children) _unmountTree(child, ctx);
+    }
   } else {
     if (vnode._dom && typeof (vnode._dom as Element).tagName === "string") {
       const dom = vnode._dom as Element;

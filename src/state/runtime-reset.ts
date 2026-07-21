@@ -3,7 +3,11 @@
 // tests get hermeticity from a single call instead of remembering five
 // scattered _reset* functions (forgetting one = cross-test bleed).
 
-import { _resetCellBindings, _resetCellRegistry } from "./cell-reactive.ts";
+import {
+  _resetCellBindings,
+  _resetCellRegistry,
+  _resetUiReadWarnings,
+} from "./cell-reactive.ts";
 import { resetPending } from "./cell-impl.ts";
 import { _resetMethodCancel } from "./method-cancel.ts";
 import { _resetSubs } from "./state-subs.ts";
@@ -14,6 +18,7 @@ import { _resetSubs } from "./state-subs.ts";
 export function _resetAioRuntime(): void {
   _resetCellRegistry();
   _resetCellBindings();
+  _resetUiReadWarnings();
   resetPending();
   _resetMethodCancel();
   _resetSubs();

@@ -47,7 +47,7 @@ export interface ServerConfig {
   >; // field sets for "filter" cells
   onConnect?: (user?: AioUser) => void;
   onDisconnect?: (user?: AioUser) => void;
-  onReload?: (signal: "__reload" | "__css") => void; // called on live-reload — lets aio.ts forward to UDS
+  onReload?: (signal: "reload" | "css") => void; // called on live-reload — lets aio.ts forward to UDS
   // Vitals — latency monitoring & backpressure
   vitalsSystem?: VitalsSystem;
   // Time-travel (dev mode)
@@ -74,7 +74,7 @@ export interface ServerConfig {
     startedAt: number; // Date.now() at boot
     /** UDS clients (Electron IPC) — for am client command */
     udsClients?: () => { index: number; id: string }[];
-    /** Send a message to a UDS client and wait for __clientState: response */
+    /** Send a request to a UDS client and wait for its "client-state" reply */
     requestUdsClientState?: (index: number, msg?: string) => Promise<unknown>;
   };
   // CRDT sync handlers — set when any cell has sync: true

@@ -78,13 +78,13 @@ Deno.test("browser proxy: request/response over a fake transport, errors + parit
     },
   });
 
-  // Fake transport: client __sfn frames are served by the REAL server invoke.
+  // Fake transport: client "sfn" frames are served by the REAL server invoke.
   _registerSfnTransport((raw) => {
-    const { __sfn } = JSON.parse(raw) as {
-      __sfn: { cid: string; ns: string; name: string; args: unknown[] };
+    const { d } = JSON.parse(raw) as {
+      d: { cid: string; ns: string; name: string; args: unknown[] };
     };
-    invokeServerFn(__sfn.ns, __sfn.name, __sfn.args).then((result) => {
-      handleSfnResult({ __sfnr: { cid: __sfn.cid, ...result } });
+    invokeServerFn(d.ns, d.name, d.args).then((result) => {
+      handleSfnResult({ cid: d.cid, ...result });
     });
   });
 

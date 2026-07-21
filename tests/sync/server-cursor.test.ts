@@ -5,7 +5,7 @@
 //     cursor never advanced and the fast path was dead code
 //  C) reconnect-flushed pendingOps were never acked and re-dispatched every
 //     sync round (server-state drift + permanent client double-apply)
-//  D) __ack / remote-op meta writes clobbered the stored lastServerTs
+//  D) sync-ack / remote-op meta writes clobbered the stored lastServerTs
 import { assert, assertEquals, assertExists } from "@std/assert";
 import { describe, it } from "@std/testing/bdd";
 // @ts-ignore node:sqlite types unavailable when an old @types/node shadows them (see src/db/db-worker.ts)
@@ -94,16 +94,18 @@ function harness(db: DB) {
     syncCellIds: ["todos", "notes"],
     getCellState: () => ({ items: [] }),
     broadcastRaw: {
-      fn: (msg) => broadcasts.push(JSON.parse(msg).__op),
+      fn: (msg) => broadcasts.push(JSON.parse(msg).d),
     },
     log: { debug: () => {}, warn: () => {}, error: () => {} },
   });
   const socket = {
     send: (m: string) => sent.push(JSON.parse(m)),
   } as unknown as WebSocket;
-  const syncResponses = () => sent.filter((m) => m.__sync);
+  const syncResponses = () => sent.filter((m) => m.t === "sync-res");
   const acks = () =>
-    sent.filter((m) => m.__ack).map((m) => (m.__ack as { opId: string }).opId);
+    sent.filter((m) => m.t === "sync-ack").map((m) =>
+      (m.d as { opId: string }).opId
+    );
   const waitFor = async (cond: () => boolean, ms = 3000) => {
     const start = Date.now();
     while (!cond()) {
@@ -267,7 +269,7 @@ describe("catch-up cursor (audit B)", () => {
       h.socket,
     );
     await h.waitFor(() => h.syncResponses().length === 1);
-    const first = h.syncResponses()[0]!.__sync as {
+    const first = h.syncResponses()[0]!.d as {
       ops: { id: string }[];
       lastServerTs?: Record<string, number>;
     };
@@ -286,7 +288,7 @@ describe("catch-up cursor (audit B)", () => {
       h.socket,
     );
     await h.waitFor(() => h.syncResponses().length === 2);
-    const second = h.syncResponses()[1]!.__sync as { ops: unknown[] };
+    const second = h.syncResponses()[1]!.d as { ops: unknown[] };
     assertEquals(second.ops.length, 0, "cursor advanced — no re-delivery");
   });
 
@@ -313,29 +315,43 @@ describe("catch-up cursor (audit B)", () => {
       h.socket,
     );
     await h.waitFor(() => h.syncResponses().length === 1);
-    const resp = h.syncResponses()[0]!.__sync as { ops: { id: string }[] };
+    const resp = h.syncResponses()[0]!.d as { ops: { id: string }[] };
     assertEquals(
       resp.ops.map((o) => o.id),
       ["peer-1"],
-      "own ops arrive via __ack, not the catch-up echo",
+      "own ops arrive via sync-ack, not the catch-up echo",
     );
   });
 });
 
 describe("client cursor preservation (audit D)", () => {
-  it("op-buffer confirm() keeps lastServerTs", async () => {
+  it("op-buffer confirm() keeps lastServerTs (and no longer moves lastHlc)", async () => {
     const storage = createMemoryStorage();
     const buffer = createOpBuffer(storage);
     await buffer.saveMeta("todos", { lastHlc: hlc(1, 0), lastServerTs: 4321 });
     await buffer.confirm("todos", "op-x", hlc(2, 0, "server"));
     const meta = await buffer.getMeta("todos");
     assertEquals(meta?.lastServerTs, 4321, "confirm must not wipe the cursor");
-    assertEquals(meta?.lastHlc, hlc(2, 0, "server"));
+    // 2026-07-21 chaos-suite finding: an ack is not a delivery watermark —
+    // advancing lastHlc to the ack's serverHlc made the HLC-fallback catch-up
+    // skip peer ops persisted before the ack that this client never received.
+    // confirm() now leaves the cursor meta entirely untouched.
+    assertEquals(meta?.lastHlc, hlc(1, 0), "ack must not advance lastHlc");
   });
 
-  it("engine handleRemoteOp advances lastServerTs from the broadcast stamp", async () => {
+  it("engine handleRemoteOp never advances lastServerTs from broadcast stamps", async () => {
+    // 2026-07-21 chaos-suite finding (supersedes the original audit-D fix):
+    // on a fresh connection broadcasts arrive AHEAD of the client's coverage
+    // (ops persisted while it was offline are still undelivered), so letting
+    // a broadcast stamp jump the server_ts cursor sealed that gap — permanent
+    // silent op loss when the catch-up response was dropped. The cursor now
+    // advances ONLY via a processed sync response (reservation echo =
+    // self-contained coverage); re-delivered broadcasts are absorbed by the
+    // engine's op-id dedup, which is what the original audit-D stamp advance
+    // was protecting against.
     const storage = createMemoryStorage();
     const buffer = createOpBuffer(storage);
+    await buffer.saveMeta("todos", { lastHlc: null, lastServerTs: 1234 });
     const deps: SyncEngineDeps = {
       clientId: "c1",
       cells: { todos: normalizeSyncConfig(true) },
@@ -352,15 +368,13 @@ describe("client cursor preservation (audit D)", () => {
       confirmed: true,
       serverTs: 7777,
     });
-    assertEquals((await buffer.getMeta("todos"))?.lastServerTs, 7777);
-
-    // Never regress on an older/unstamped broadcast.
-    await engine.handleRemoteOp({
-      ...op("r-2", hlc(101, 0, "c2")),
-      confirmed: true,
-      serverTs: 5555,
-    });
-    assertEquals((await buffer.getMeta("todos"))?.lastServerTs, 7777);
+    const meta = await buffer.getMeta("todos");
+    assertEquals(meta?.lastServerTs, 1234, "stamp must not move the cursor");
+    assertEquals(
+      meta?.lastHlc,
+      hlc(100, 0, "c2"),
+      "compaction watermark advances",
+    );
   });
 });
 
@@ -368,7 +382,7 @@ describe("client cursor preservation (audit D)", () => {
 import { setLastRejection } from "../../src/state/rejection-tracker.ts";
 
 describe("op rejection (D11)", () => {
-  it("server: rejected op → __op_rejected, row deleted, no ack/broadcast", async () => {
+  it("server: rejected op → op-rejected frame, row deleted, no ack/broadcast", async () => {
     const db = createTestDb();
     const sent: Record<string, unknown>[] = [];
     const broadcasts: unknown[] = [];
@@ -389,13 +403,17 @@ describe("op rejection (D11)", () => {
 
     await handler.handleOp(op("rej-1", hlc(100, 0)), { id: "s1" }, socket);
 
-    const rejected = sent.find((m) => m.__op_rejected) as {
-      __op_rejected: { opId: string; reason: string };
+    const rejected = sent.find((m) => m.t === "op-rejected") as {
+      d: { opId: string; reason: string };
     };
     assertExists(rejected, "origin told WHY");
-    assertEquals(rejected.__op_rejected.opId, "rej-1");
-    assertEquals(rejected.__op_rejected.reason, "score must be >= 0");
-    assertEquals(sent.some((m) => m.__ack), false, "no ack for poison");
+    assertEquals(rejected.d.opId, "rej-1");
+    assertEquals(rejected.d.reason, "score must be >= 0");
+    assertEquals(
+      sent.some((m) => m.t === "sync-ack"),
+      false,
+      "no ack for poison",
+    );
     assertEquals(broadcasts.length, 0, "no broadcast for poison");
     const { rows } = await db.query(
       "SELECT id FROM sync_ops WHERE id = ?",

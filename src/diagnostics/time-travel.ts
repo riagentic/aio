@@ -230,10 +230,8 @@ export function toBroadcast<S, A>(tt: TTState<S, A>): TTBroadcast {
   };
 }
 
-/** Parses "__tt:undo" → { cmd:'undo' }, "__tt:goto:5" → { cmd:'goto', arg:5 } */
-export function parseTTCommand(raw: string): TTCommand | null {
-  if (!raw.startsWith("__tt:")) return null;
-  const body = raw.slice(5); // strip "__tt:"
+/** Parses a "tt-cmd" body: "undo" → { cmd:'undo' }, "goto:5" → { cmd:'goto', arg:5 } */
+export function parseTTCommand(body: string): TTCommand | null {
   if (body === "undo") return { cmd: "undo" };
   if (body === "redo") return { cmd: "redo" };
   if (body === "pause") return { cmd: "pause" };
@@ -242,7 +240,10 @@ export function parseTTCommand(raw: string): TTCommand | null {
     const s = body.slice(5);
     if (s === "") return null;
     const n = Number(s);
-    if (Number.isInteger(n) && n >= 0) return { cmd: "goto", arg: n };
+    // Upper bound: network-facing input; history ids never approach 1e6.
+    if (Number.isInteger(n) && n >= 0 && n < 1_000_000) {
+      return { cmd: "goto", arg: n };
+    }
   }
   return null;
 }

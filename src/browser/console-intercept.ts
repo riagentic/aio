@@ -1,6 +1,7 @@
 // console-intercept.ts — Wraps console.* and forwards output to server via send.
 // Original console methods still work. Fire-and-forget; drops silently on failure.
 
+import { enc } from "../protocol/envelope.ts";
 import type { ClientLogEntry } from "../air/dom-inspector-types.ts";
 
 export type SendFn = (msg: string) => void;
@@ -57,7 +58,7 @@ export function _forward(
       msg: _serialize(args),
       ts: Date.now(),
     };
-    _send("__log:" + JSON.stringify(entry));
+    _send(enc("log", entry));
   } catch {
     // Drop silently — transport may be down.
   } finally {

@@ -1,4 +1,5 @@
 // src/sync/sync-engine.ts — Client-side CRDT sync orchestrator
+import { enc } from "../protocol/envelope.ts";
 import type { HLC, SyncConfig, SyncOp, SyncStatus } from "./types.ts";
 import { SYNC_DEFAULTS } from "./types.ts";
 import type { OpBuffer } from "./op-buffer.ts";
@@ -22,6 +23,9 @@ export interface SyncEngineDeps {
   onStateUpdate: (cell: string, optimistic: Record<string, unknown>) => void;
   log?: {
     warn: (msg: string) => void;
+    /** Observe-only dedup visibility — a dropped duplicate hints at a cursor
+     *  bug upstream and must be visible in dev, never silent. */
+    debug?: (msg: string) => void;
   };
 }
 
@@ -65,6 +69,43 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
 
   // Per-cell async mutex — serializes all state mutations (local, ack, remote, sync)
   const _locks = new Map<string, Promise<void>>();
+
+  // ── Op-id dedup (defense-in-depth) ────────────────────────────────────
+  // The server_ts cursor is the PRIMARY re-delivery guard; this set catches
+  // what the cursor cannot: an op racing in via broadcast while a catch-up
+  // response that also contains it is already in flight, a duplicated sync
+  // request producing two overlapping responses, or re-ordered responses.
+  // BOUND: per-cell FIFO set capped at APPLIED_IDS_CAP ids (≈2048 × ~40 B ≈
+  // 80 KB per cell worst case; cells are limited to the app's sync cells).
+  // Eviction is safe: an id only needs to outlive the overlap window between
+  // a broadcast and the catch-up rounds that could re-deliver it (a few
+  // response batches, each ≤ pendingCap ops). Once evicted, cursor
+  // correctness governs again — the set never becomes load-bearing.
+  const APPLIED_IDS_CAP = 2048;
+  const _appliedIds = new Map<string, Set<string>>();
+  function alreadyApplied(cell: string, id: string): boolean {
+    return _appliedIds.get(cell)?.has(id) ?? false;
+  }
+  function markApplied(cell: string, id: string): void {
+    let set = _appliedIds.get(cell);
+    if (!set) {
+      set = new Set();
+      _appliedIds.set(cell, set);
+    }
+    set.add(id);
+    if (set.size > APPLIED_IDS_CAP) {
+      // Sets iterate in insertion order — evict the oldest id.
+      set.delete(set.values().next().value!);
+    }
+  }
+  // Observe-only (dev/prod-equivalency doctrine): dropping a duplicate is
+  // correct in prod AND worth seeing in dev — it means a duplicate got past
+  // the cursor. Never silent state damage.
+  function logDuplicate(cell: string, id: string, via: string): void {
+    deps.log?.debug?.(
+      `[sync] ${cell}: duplicate op ${id} dropped (${via}) — already applied`,
+    );
+  }
 
   // A buggy reducer that returns undefined does so for EVERY op of that
   // action — warn once per cell:action instead of flooding on every ack/op.
@@ -143,9 +184,7 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
         await rebaseCell(cell);
 
         if (online) {
-          deps.send(
-            JSON.stringify({ __op: { id, hlc, cell, action, payload } }),
-          );
+          deps.send(enc("op", { id, hlc, cell, action, payload }));
         }
       });
     },
@@ -197,30 +236,61 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
 
     handleRemoteOp(op) {
       if (!this.isSyncCell(op.cell)) return Promise.resolve();
+      // Self-origin guard (chaos-suite finding, 2026-07-21): a reconnect race
+      // can echo our OWN op back as a "remote" broadcast — the server excludes
+      // the socket the op arrived on, but after a reconnect we hold a NEW
+      // socket, so the exclusion misses. Applying the echo would double the
+      // op's effect: once here, once via the sync-ack path (the op is still
+      // pending locally). Own ops only ever enter confirmed state through
+      // handleAck.
+      if (op.hlc[2] === deps.clientId) {
+        logDuplicate(op.cell, op.id, "own-op echo");
+        return Promise.resolve();
+      }
       return withLock(op.cell, async () => {
         clock.receive(op.hlc);
-        const confirmed = deps.getConfirmedState()[op.cell] ?? {};
-        const next = deps.reducer(confirmed, op.action, op.payload, op.cell);
-        if (next === undefined) {
-          _warnUndefReducer(op.cell, op.action);
-        } else if (next !== null) {
-          deps.setConfirmedState(op.cell, next);
-        }
-        // Advance BOTH cursors for remote broadcasted ops. lastServerTs comes
-        // stamped on the broadcast (server-issued, monotonic per cell) — if we
-        // only advanced lastHlc, the next catch-up would re-deliver this op
-        // via the server_ts cursor and double-apply it. Never regress either.
         const meta = await deps.buffer.getMeta(op.cell);
+        // Op-id dedup: same op delivered twice (duplicated broadcast, or a
+        // broadcast racing a catch-up response that also contains it).
+        // Deliberately id-based, NOT `serverTs <= cursor` — a cursor
+        // advanced by a LATER op does not prove an earlier op was seen, so a
+        // cursor guard could drop a never-applied op under reordered
+        // delivery. The id set only skips provably-applied ops.
+        const isDup = alreadyApplied(op.cell, op.id);
+        const confirmed = deps.getConfirmedState()[op.cell] ?? {};
+        let next: Record<string, unknown> | null | undefined = null;
+        if (isDup) {
+          logDuplicate(op.cell, op.id, "broadcast");
+        } else {
+          markApplied(op.cell, op.id);
+          next = deps.reducer(confirmed, op.action, op.payload, op.cell);
+          if (next === undefined) {
+            _warnUndefReducer(op.cell, op.action);
+          } else if (next !== null) {
+            deps.setConfirmedState(op.cell, next);
+          }
+        }
+        // Advance the compaction watermark (lastHlc, never regressing) — the
+        // server uses it only to decide snapshot-vs-incremental. Deliberately
+        // do NOT advance lastServerTs from broadcast stamps (chaos-suite
+        // finding, 2026-07-21): on a fresh connection broadcasts arrive AHEAD
+        // of the client's coverage (ops persisted while it was offline are
+        // still undelivered), so a stamp jump seals that gap above the cursor
+        // — permanent silent loss if the catch-up response is then dropped.
+        // The server_ts cursor advances ONLY via a processed sync-res:
+        // its reservation echo is self-contained coverage (everything ≤ it
+        // was in that response, in a snapshot, or our own). Broadcasts the
+        // next catch-up re-delivers are absorbed by the op-id dedup above.
         const lastHlc = !meta?.lastHlc || compareHLC(op.hlc, meta.lastHlc) > 0
           ? op.hlc
           : meta.lastHlc;
-        const lastServerTs =
-          op.serverTs != null && op.serverTs > (meta?.lastServerTs ?? 0)
-            ? op.serverTs
-            : meta?.lastServerTs;
-        if (lastHlc !== meta?.lastHlc || lastServerTs !== meta?.lastServerTs) {
-          await deps.buffer.saveMeta(op.cell, { lastHlc, lastServerTs });
+        if (lastHlc !== meta?.lastHlc) {
+          await deps.buffer.saveMeta(op.cell, {
+            lastHlc,
+            lastServerTs: meta?.lastServerTs,
+          });
         }
+        if (isDup) return;
         const optimistic = await rebaseCell(op.cell);
 
         // Conflict handling: a field the remote op changed that surviving
@@ -339,6 +409,23 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
           const ops = opsByCell.get(cell);
           if (ops) {
             for (const op of ops) {
+              // Self-origin guard — the server filters our own ops from the
+              // catch-up echo, but keep the invariant local too: own ops only
+              // enter confirmed state via handleAck (see handleRemoteOp).
+              if (op.hlc[2] === deps.clientId) {
+                logDuplicate(cell, op.id, "own-op in catch-up");
+                continue;
+              }
+              // Dedup: the op may already have arrived via broadcast while
+              // our sync-req (sent with an older cursor) was in flight
+              // — the response then contains it a second time. Skipping the
+              // re-apply is the fix for that race; the cursor still advances
+              // below (the op IS covered).
+              if (alreadyApplied(cell, op.id)) {
+                logDuplicate(cell, op.id, "catch-up");
+                continue;
+              }
+              markApplied(cell, op.id);
               const confirmed = deps.getConfirmedState()[cell] ?? {};
               const next = deps.reducer(
                 confirmed,
@@ -363,13 +450,21 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
             // Per-cell cursor from the server; preserve the stored one when
             // the response doesn't cover this cell — overwriting with
             // undefined would regress to the ambiguous HLC cursor and cause
-            // re-delivery (double-apply through the reducer).
+            // re-delivery (double-apply through the reducer). NEVER regress
+            // either cursor: two in-flight sync responses delivered out of
+            // order would otherwise rewind lastServerTs and re-deliver every
+            // op between the two cursors on the next catch-up.
             const prev = await deps.buffer.getMeta(cell);
-            await deps.buffer.saveMeta(cell, {
-              lastHlc: newLastHlc,
-              lastServerTs: response.lastServerTs?.[cell] ??
-                prev?.lastServerTs,
-            });
+            const lastHlc =
+              prev?.lastHlc && compareHLC(prev.lastHlc, newLastHlc) > 0
+                ? prev.lastHlc
+                : newLastHlc;
+            const respTs = response.lastServerTs?.[cell];
+            const lastServerTs =
+              respTs != null && respTs > (prev?.lastServerTs ?? 0)
+                ? respTs
+                : prev?.lastServerTs;
+            await deps.buffer.saveMeta(cell, { lastHlc, lastServerTs });
           }
           const s = statuses.get(cell);
           if (s?.status === "blocked") return;
@@ -452,12 +547,10 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
       }
 
       try {
-        deps.send(JSON.stringify({
-          __sync: {
-            clientId: deps.clientId,
-            cells,
-            pendingOps: allPending,
-          },
+        deps.send(enc("sync-req", {
+          clientId: deps.clientId,
+          cells,
+          pendingOps: allPending,
         }));
       } catch {
         // Revert status on send failure

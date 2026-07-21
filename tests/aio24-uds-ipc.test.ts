@@ -7,7 +7,7 @@
 // 3. _ipcConnected set to false in onClose handler
 // 4. IPC keepalive ping timer created and cleaned up
 // 5. Electron bridge write has error handling
-// 6. Server ignores __ping keepalive messages
+// 6. Server ignores "ping" keepalive frames
 
 import { assertEquals, assertStringIncludes } from "@std/assert";
 import { createUDSListener } from "../src/server/aio.ts";
@@ -39,7 +39,7 @@ Deno.test("aio24: UDS conn closed after client disconnects (no ghost socket)", a
   // Send an action to prove connection works
   const encoder = new TextEncoder();
   await conn.writable.getWriter().write(
-    encoder.encode('{"type":"test"}\n'),
+    encoder.encode('{"v":2,"t":"action","d":{"type":"test"}}\n'),
   );
   await new Promise((r) => setTimeout(r, 50));
   assertEquals(actions.length, 1);
@@ -70,9 +70,9 @@ Deno.test("aio24: handleUDSConn has no idle timeout race", async () => {
   assertEquals(hasTimeoutRace, false, "Timeout race pattern should be removed");
 });
 
-// ── UDS: __ping ignored by server ──────────────────────────────────
+// ── UDS: ping ignored by server ────────────────────────────────────
 
-Deno.test("aio24: server ignores __ping keepalive (not dispatched as action)", async () => {
+Deno.test("aio24: server ignores ping keepalive (not dispatched as action)", async () => {
   const socketPath = join(
     await Deno.makeTempDir(),
     "aio24-ping.sock",
@@ -93,20 +93,22 @@ Deno.test("aio24: server ignores __ping keepalive (not dispatched as action)", a
   const encoder = new TextEncoder();
 
   // Send a ping followed by a real action
-  await writer.write(encoder.encode("__ping\n"));
-  await writer.write(encoder.encode('{"type":"real-action"}\n'));
+  await writer.write(encoder.encode('{"v":2,"t":"ping"}\n'));
+  await writer.write(
+    encoder.encode('{"v":2,"t":"action","d":{"type":"real-action"}}\n'),
+  );
   await new Promise((r) => setTimeout(r, 50));
 
-  // Only the real action should be dispatched — __ping is silently ignored
+  // Only the real action should be dispatched — ping is silently ignored
   assertEquals(actions.length, 1);
   assertEquals(actions[0]!.type, "real-action");
 
-  // __ping should NOT produce "malformed message" debug output
+  // ping should NOT produce "malformed message" debug output
   const malformedMsgs = debugMsgs.filter((m) => m.includes("malformed"));
   assertEquals(
     malformedMsgs.length,
     0,
-    "__ping should not trigger malformed warning",
+    "ping should not trigger malformed warning",
   );
 
   conn.close();
@@ -138,7 +140,7 @@ Deno.test("aio24: browser.ts has IPC keepalive ping", async () => {
     "ipcPingTimer",
     "IPC ping timer variable must exist",
   );
-  assertStringIncludes(src, '__ping"', "Must send __ping message");
+  assertStringIncludes(src, 'enc("ping")', "Must send ping frames");
   assertStringIncludes(
     src,
     "IPC_PING_INTERVAL",
