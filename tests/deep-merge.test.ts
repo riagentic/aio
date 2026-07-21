@@ -190,13 +190,20 @@ Deno.test("deepMerge: __proto__ key is ignored", () => {
 
 Deno.test("deepMerge: empty-object initial is a dictionary — keeps all persisted entries (AIO-415)", () => {
   // The TBD `pins: Record<number,string>` data-loss bug: `{}` initial dropped every key.
-  const initial = { pins: {} as Record<string, unknown>, roster: [] as unknown[] };
+  const initial = {
+    pins: {} as Record<string, unknown>,
+    roster: [] as unknown[],
+  };
   const persisted = {
     pins: { "1": "0000", "2": "1234" },
     roster: [{ id: 1 }],
   };
   const result = deepMerge(initial, persisted);
-  assertEquals(result.pins, { "1": "0000", "2": "1234" }, "dict entries survive restore");
+  assertEquals(
+    result.pins,
+    { "1": "0000", "2": "1234" },
+    "dict entries survive restore",
+  );
   assertEquals(result.roster, [{ id: 1 }]);
 });
 

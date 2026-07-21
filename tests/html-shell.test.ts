@@ -44,7 +44,8 @@ Deno.test("html shell: ui.viewport=false omits the tag (fixed-width opt-out)", (
 });
 
 Deno.test("html shell: ui.head injects verbatim <head> content", () => {
-  const head = '<meta name="description" content="hello"><link rel="icon" href="/f.ico">';
+  const head =
+    '<meta name="description" content="hello"><link rel="icon" href="/f.ico">';
   const html = gen({ head });
   assert(html.includes(head), "custom head content present verbatim");
 });

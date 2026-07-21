@@ -117,11 +117,13 @@ async function main(): Promise<void> {
   if (!avd) {
     fail(
       "no Android emulator (AVD) found — create one, then re-run",
-      'e.g. via Android Studio → Device Manager, or `avdmanager create avd`',
+      "e.g. via Android Studio → Device Manager, or `avdmanager create avd`",
     );
   }
   if (wantAvd && !avds.includes(wantAvd)) {
-    fail(`AVD "${wantAvd}" not found — available: ${avds.join(", ") || "(none)"}`);
+    fail(
+      `AVD "${wantAvd}" not found — available: ${avds.join(", ") || "(none)"}`,
+    );
   }
 
   const port = freePort();
@@ -138,7 +140,14 @@ async function main(): Promise<void> {
     console.log(
       `[dev:android] booting emulator "${avd}" — first boot can take a minute...`,
     );
-    emu = spawnEmulator(emulatorBin, ["-avd", avd, "-no-boot-anim"]);
+    // -no-snapshot-save: a dev emulator must boot fresh each run — persisted
+    // snapshots resurrect stale app/dev-server state across sessions.
+    emu = spawnEmulator(emulatorBin, [
+      "-avd",
+      avd,
+      "-no-boot-anim",
+      "-no-snapshot-save",
+    ]);
   } else {
     console.log("[dev:android] using the already-running emulator");
   }
@@ -159,10 +168,15 @@ async function main(): Promise<void> {
   }
   const apk = [...Deno.readDirSync(Deno.cwd())]
     .filter((e) => e.isFile && e.name.endsWith(".apk"))
-    .map((e) => ({ name: e.name, m: Deno.statSync(e.name).mtime?.getTime() ?? 0 }))
+    .map((e) => ({
+      name: e.name,
+      m: Deno.statSync(e.name).mtime?.getTime() ?? 0,
+    }))
     .sort((a, b) => b.m - a.m)[0]?.name;
   if (!apk) fail("no .apk produced by the build");
-  const appId = `app.aio.${apk.replace(/\.apk$/, "").replace(/[^a-z0-9]/g, "")}`;
+  const appId = `app.aio.${
+    apk.replace(/\.apk$/, "").replace(/[^a-z0-9]/g, "")
+  }`;
 
   // 3) Start the dev server (the app reaches it via localhost + adb reverse).
   console.log(`[dev:android] starting dev server on :${port}...`);

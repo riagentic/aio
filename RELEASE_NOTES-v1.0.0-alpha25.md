@@ -14,7 +14,8 @@ deno task compile        # · deno task electron · deno task android
 - `install.sh` git-clones aio → `~/.local/lib/aio`, checks out the **last tagged
   release**, and installs `am` from the clone. No JSR, no publish, no login.
 - `am create` links the app to that clone via a portable `dep/aio` symlink.
-- `am update` = fetch + checkout the latest tag. Windows: `irm …/install.ps1 | iex`.
+- `am update` = fetch + checkout the latest tag. Windows:
+  `irm …/install.ps1 | iex`.
 
 A working counter (or `--template=todo`) app — runnable and buildable to a
 binary, Electron desktop, or Android APK.

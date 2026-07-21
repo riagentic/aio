@@ -30,8 +30,14 @@ Deno.test("element with mixed text + element children is NOT static", () => {
 Deno.test("element with only static element children IS static (optimization preserved)", () => {
   const inner = h("path", { d: "M0 0" });
   const v = h("svg", { viewBox: "0 0 1 1" }, inner);
-  assert(inner._static, "leaf element with static props + no children is static");
-  assert(v._static, "element whose only children are static VNodes stays static");
+  assert(
+    inner._static,
+    "leaf element with static props + no children is static",
+  );
+  assert(
+    v._static,
+    "element whose only children are static VNodes stays static",
+  );
 });
 
 Deno.test("empty element IS static", () => {

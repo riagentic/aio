@@ -28,16 +28,30 @@ export async function buildElectron(cfg: BuildConfig): Promise<void> {
   }
   console.log("[electron] \u2713 dist/ assets copied to AppDir/dist/");
 
-  // Copy Electron runtime
+  // Copy Electron runtime — auto-install on first build (machine B5) so
+  // `compile:electron` works OUT OF THE BOX; loud manual fallback if it fails.
   const electronSrc = join(root, "node_modules", "electron", "dist");
   const electronDst = join(appDir, "electron");
   try {
     await Deno.stat(electronSrc);
   } catch {
-    console.error(
-      "[electron] \u2717 node_modules/electron/dist/ not found — run: deno task install:electron",
+    const { autoInstallElectron } = await import(
+      "../electron/electron-spawn.ts"
     );
-    Deno.exit(1);
+    const installed = await autoInstallElectron({ error: console.error });
+    let ok = false;
+    if (installed) {
+      try {
+        await Deno.stat(electronSrc);
+        ok = true;
+      } catch { /* still absent */ }
+    }
+    if (ok === false) {
+      console.error(
+        "[electron] \u2717 node_modules/electron/dist/ not found — run: deno task install:electron",
+      );
+      Deno.exit(1);
+    }
   }
   console.log("[electron] copying Electron runtime...");
   await copyDir(electronSrc, electronDst);

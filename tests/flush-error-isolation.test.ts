@@ -81,7 +81,11 @@ Deno.test("a throwing component does not strand its flush siblings", async () =>
   // And the sibling must stay reactive afterwards.
   sib.set(2);
   for (let t = 0; t < 4; t++) await tick();
-  assertEquals(root.querySelector("#sib")?.textContent, "s=2", "sibling still reactive");
+  assertEquals(
+    root.querySelector("#sib")?.textContent,
+    "s=2",
+    "sibling still reactive",
+  );
 
   _unmount(handle);
   await cleanup();

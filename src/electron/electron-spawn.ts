@@ -44,11 +44,42 @@ export async function findElectronBin(log: Log): Promise<string | null> {
   try {
     await Deno.stat(electronBin);
     return electronBin;
-  } catch {
-    log.error("Electron not found — run: deno task install:electron");
+  } catch { /* not installed yet — try auto-install below */ }
+
+  // 4. Auto-install on first run (machine B5): `deno install` with scripts
+  //    allowed for electron runs the postinstall that downloads the binary.
+  //    Loud progress; loud failure with the manual command.
+  if (await autoInstallElectron(log)) {
+    try {
+      await Deno.stat(electronBin);
+      return electronBin;
+    } catch { /* install ran but binary still absent — fall through */ }
   }
+  log.error("Electron not found — run: deno task install:electron");
 
   return null;
+}
+
+/** One-shot `deno install --allow-scripts=npm:electron` in the app cwd so
+ *  `dev:electron` / `compile:electron` work OUT OF THE BOX on a fresh app —
+ *  no separate install step. Returns true when the install command succeeded.
+ *  @experimental Excluded from the 1.0 stability guarantee. */
+export async function autoInstallElectron(
+  log: { info?: (m: string) => void; error: (m: string) => void },
+): Promise<boolean> {
+  (log.info ?? console.log)(
+    "electron: not installed — auto-installing (deno install --allow-scripts=npm:electron)…",
+  );
+  try {
+    const out = await new Deno.Command(Deno.execPath(), {
+      args: ["install", "--allow-scripts=npm:electron"],
+      stdout: "inherit",
+      stderr: "inherit",
+    }).output();
+    return out.success;
+  } catch {
+    return false;
+  }
 }
 
 /** Writes script to temp file, spawns Electron, cleans up after exit or process unload */

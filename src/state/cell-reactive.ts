@@ -132,9 +132,16 @@ export function bindCellReactive(
     for (const [key, selectorFn] of Object.entries(selectors)) {
       if (typeof (def as Record<string, unknown>)[key] === "function") continue;
       Object.defineProperty(def, key, {
-        value: () => {
+        value: (...args: unknown[]) => {
           trackPath(cellName);
           const own = (sig.value ?? initialState) as Record<string, unknown>;
+          // Called WITH args → parameterized selector (`cell.byId(id)`).
+          if (args.length > 0) {
+            return (selectorFn as (s: unknown, ...a: unknown[]) => unknown)(
+              own,
+              ...args,
+            );
+          }
           const full = new Proxy({} as Record<string, unknown>, {
             get(_t, prop) {
               if (typeof prop !== "string") return undefined;

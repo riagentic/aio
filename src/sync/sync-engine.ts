@@ -44,7 +44,8 @@ export interface SyncEngine {
     rebase?: SyncOp[];
     snapshot?: Record<string, Record<string, unknown>>;
     lowWater: HLC | Record<string, HLC>;
-    lastServerTs?: number;
+    /** Per-cell server_ts cursor echoed by the server. */
+    lastServerTs?: Record<string, number>;
   }): Promise<void>;
   setOnline(online: boolean): void;
   getStatus(cell: string): SyncStatus;
@@ -190,10 +191,20 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
         } else if (next !== null) {
           deps.setConfirmedState(op.cell, next);
         }
-        // Advance lastHlc cursor for remote broadcasted ops
+        // Advance BOTH cursors for remote broadcasted ops. lastServerTs comes
+        // stamped on the broadcast (server-issued, monotonic per cell) — if we
+        // only advanced lastHlc, the next catch-up would re-deliver this op
+        // via the server_ts cursor and double-apply it. Never regress either.
         const meta = await deps.buffer.getMeta(op.cell);
-        if (!meta?.lastHlc || compareHLC(op.hlc, meta.lastHlc) > 0) {
-          await deps.buffer.saveMeta(op.cell, { lastHlc: op.hlc });
+        const lastHlc = !meta?.lastHlc || compareHLC(op.hlc, meta.lastHlc) > 0
+          ? op.hlc
+          : meta.lastHlc;
+        const lastServerTs =
+          op.serverTs != null && op.serverTs > (meta?.lastServerTs ?? 0)
+            ? op.serverTs
+            : meta?.lastServerTs;
+        if (lastHlc !== meta?.lastHlc || lastServerTs !== meta?.lastServerTs) {
+          await deps.buffer.saveMeta(op.cell, { lastHlc, lastServerTs });
         }
         const optimistic = await rebaseCell(op.cell);
 
@@ -334,9 +345,15 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
             }
           }
           if (newLastHlc) {
+            // Per-cell cursor from the server; preserve the stored one when
+            // the response doesn't cover this cell — overwriting with
+            // undefined would regress to the ambiguous HLC cursor and cause
+            // re-delivery (double-apply through the reducer).
+            const prev = await deps.buffer.getMeta(cell);
             await deps.buffer.saveMeta(cell, {
               lastHlc: newLastHlc,
-              lastServerTs: response.lastServerTs,
+              lastServerTs: response.lastServerTs?.[cell] ??
+                prev?.lastServerTs,
             });
           }
           const s = statuses.get(cell);
@@ -347,6 +364,23 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
             status: online ? "online" : "offline",
             lastSync: Date.now(),
           });
+        });
+      }
+
+      // Cells the server echoed a cursor for but delivered nothing (e.g. the
+      // only above-cursor ops were our own, filtered from the echo): advance
+      // the stored cursor anyway — otherwise it stalls and the server
+      // re-loads + re-filters those ops every round. Never regress.
+      for (const [cell, ts] of Object.entries(response.lastServerTs ?? {})) {
+        if (affected.has(cell)) continue;
+        await withLock(cell, async () => {
+          const prev = await deps.buffer.getMeta(cell);
+          if (ts > (prev?.lastServerTs ?? 0)) {
+            await deps.buffer.saveMeta(cell, {
+              lastHlc: prev?.lastHlc ?? null,
+              lastServerTs: ts,
+            });
+          }
         });
       }
     },

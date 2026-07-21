@@ -109,14 +109,46 @@ export function startGraphValidation(
           }ms)${warnings.length ? ` (${warnings.length} warnings)` : ""}`,
         );
       } else {
+        // Blocking = guaranteed client break. The diagnostic page covers the
+        // browser; print loudly here too so the terminal names the file even
+        // if no browser is open. (machine U1)
+        console.error(
+          `[aio] graph: ${blocking.length} error(s) will break the browser client:`,
+        );
         for (const err of blocking) {
-          debug(
-            `graph: ✖ ${err.file}${
-              err.line ? `:${err.line}` : ""
-            } — ${err.message}`,
+          console.error(
+            `  ✖ ${err.file}${err.line ? `:${err.line}` : ""} — ${err.message}`,
           );
-          debug(`  FIX: ${err.fix}`);
+          console.error(`    FIX: ${err.fix}`);
         }
+      }
+      // server-only-api = CONDITIONAL break (Deno.* in a client-reachable
+      // module blank-screens only when that path runs in the browser). It was
+      // debug-only — invisible in a normal `deno task dev` terminal — which is
+      // exactly the "green locally, blank screen in the browser" trap from the
+      // machine field report (U1). Print a compact, always-visible warning
+      // block naming each file:line. Dev-stricter only; prod is untouched.
+      const apiWarnings = warnings.filter((e) =>
+        e.category === "server-only-api"
+      );
+      if (apiWarnings.length > 0) {
+        const MAX_SHOWN = 10;
+        console.warn(
+          `[aio] graph: server-only API reachable from the browser bundle ` +
+            `(blank-screens if it runs client-side):`,
+        );
+        for (const err of apiWarnings.slice(0, MAX_SHOWN)) {
+          console.warn(
+            `  ⚠ ${err.file}${err.line ? `:${err.line}` : ""} — ${err.message}`,
+          );
+        }
+        if (apiWarnings.length > MAX_SHOWN) {
+          console.warn(`  … and ${apiWarnings.length - MAX_SHOWN} more`);
+        }
+        console.warn(
+          `  Fix: move server-only I/O into a *.server.ts module and ` +
+            `dynamic-import it from the cell method (docs/build/imports.md).`,
+        );
       }
       if (result.durationMs > 1000) {
         debug(

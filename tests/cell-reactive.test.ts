@@ -316,7 +316,11 @@ Deno.test("bindCellReactive binds selectors (own-slice) callable in browser", ()
   _resetSignals();
   const c = cell("sel", {
     state: { items: [] as number[] },
-    methods: { add(s: { items: number[] }, n: number) { s.items.push(n); } },
+    methods: {
+      add(s: { items: number[] }, n: number) {
+        s.items.push(n);
+      },
+    },
     selectors: {
       count: (s: { items: number[] }) => s.items.length,
       sum: (s: { items: number[] }) => s.items.reduce((a, b) => a + b, 0),
@@ -356,7 +360,11 @@ Deno.test("bindCellReactive: deps-form selector reads another cell in browser", 
   const ss = stats as any;
   assertEquals(ss.overThreshold(), false, "0 users < threshold 1");
   getCellSignal("users").set({ list: ["alice"] });
-  assertEquals(ss.overThreshold(), true, "cross-cell selector sees users update");
+  assertEquals(
+    ss.overThreshold(),
+    true,
+    "cross-cell selector sees users update",
+  );
   _resetCellRegistry();
   _resetSignals();
 });

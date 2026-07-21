@@ -111,10 +111,10 @@ Immer guarantees new array references on mutation. Framework detects via `!==`
 and syncs only affected tables.
 
 > **A `db:` table name must not collide with a cell.** A `db:` table maps to the
-> top-level state slice of the same name, which must **be an array**. If you name
-> a table after a cell (whose slice is an object, e.g. `{ nfts: [...] }`), the
-> table's rows would overwrite that object slice at boot and break the cell's
-> methods — so aio **throws at boot**, naming both. Rename the table
+> top-level state slice of the same name, which must **be an array**. If you
+> name a table after a cell (whose slice is an object, e.g. `{ nfts: [...] }`),
+> the table's rows would overwrite that object slice at boot and break the
+> cell's methods — so aio **throws at boot**, naming both. Rename the table
 > (`nft_rows`), or point it at a genuinely array-root slice. To persist a cell's
 > nested array field, use direct `createDB` (below) rather than `db:` auto-sync.
 

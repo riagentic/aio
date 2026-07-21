@@ -106,7 +106,9 @@ async function waitForHttp(url: string, timeoutMs: number): Promise<string> {
     }
     await new Promise((r) => setTimeout(r, 300));
   }
-  throw new Error(`server never served ${url} within ${timeoutMs}ms (${lastErr})`);
+  throw new Error(
+    `server never served ${url} within ${timeoutMs}ms (${lastErr})`,
+  );
 }
 
 async function killAnd(
@@ -208,7 +210,11 @@ for (const tpl of ["counter", "todo"] as const) {
           stdout: "null",
           stderr: "piped",
         }).output();
-        assertEquals(t.code, 0, `starter test failed:\n${dec.decode(t.stderr)}`);
+        assertEquals(
+          t.code,
+          0,
+          `starter test failed:\n${dec.decode(t.stderr)}`,
+        );
       } finally {
         await Deno.remove(dir, { recursive: true });
       }
@@ -232,18 +238,28 @@ Deno.test({
     const dj = JSON.parse(await Deno.readTextFile(join(dir, "deno.json"))) as {
       tasks: Record<string, string>;
     };
-    for (const t of ["dev", "dev:browser"]) {
-      assertStringIncludes(
-        dj.tasks[t] ?? "",
-        "--client=browser",
-        `${t} should be a browser dev command`,
-      );
-    }
+    // `dev` omits --client for the default browser target (matches the
+    // framework default); `dev:browser` always passes the explicit flag.
+    assertEquals(
+      dj.tasks["dev"],
+      "deno run -A src/app.ts",
+      "dev should run the app with the framework's browser default",
+    );
+    assertStringIncludes(
+      dj.tasks["dev:browser"] ?? "",
+      "--client=browser",
+      "dev:browser should be an explicit browser dev command",
+    );
 
     const port = freePort();
+    // NO --client flag on purpose: this boots exactly what `deno task dev`
+    // resolves to. The browser default comes from the scaffolded `target`
+    // field in deno.json (read by aio.run) — a hardcoded --client=browser
+    // here would mask a broken default (it did: the framework fallback is
+    // electron).
     const { proc, log } = spawn(
       "deno",
-      ["run", "-A", "src/app.ts", "--client=browser", `--port=${port}`],
+      ["run", "-A", "src/app.ts", `--port=${port}`],
       dir,
     );
     try {
@@ -343,12 +359,15 @@ Deno.test({
 // Android SDK is absent (never a silent browser fallback).
 
 Deno.test({
-  name: "dev:android: wired to the emulator orchestrator, fails loud without SDK",
+  name:
+    "dev:android: wired to the emulator orchestrator, fails loud without SDK",
   ignore: !GATE,
   fn: async () => {
     const dir = await makeApp();
     try {
-      const dj = JSON.parse(await Deno.readTextFile(join(dir, "deno.json"))) as {
+      const dj = JSON.parse(
+        await Deno.readTextFile(join(dir, "deno.json")),
+      ) as {
         tasks: Record<string, string>;
       };
       // Runs the emulator orchestrator — never a silent browser fallback.
@@ -388,13 +407,18 @@ Deno.test({
   fn: async () => {
     const dir = await makeApp();
     try {
-      const dj = JSON.parse(await Deno.readTextFile(join(dir, "deno.json"))) as {
+      const dj = JSON.parse(
+        await Deno.readTextFile(join(dir, "deno.json")),
+      ) as {
         tasks: Record<string, string>;
       };
       assertStringIncludes(dj.tasks["compile:electron"] ?? "", "--electron");
-      assertStringIncludes(
-        dj.tasks["compile:electron"] ?? "",
-        "install --allow-scripts=npm:electron",
+      // Electron auto-installs inside the build pipeline (no install prefix
+      // chained into the task); `install:electron` stays as an optional
+      // pre-fetch so the wiring can never silently no-op.
+      assertEquals(
+        dj.tasks["install:electron"],
+        "deno install --allow-scripts=npm:electron",
       );
 
       if (ELECTRON) {
