@@ -129,7 +129,7 @@ ${tmplBoundsTracking()}
     if (closing) return;
     if (sock) {
       win.webContents.send('__aio:open');
-      sock.write('__subs:["*"]\\n');
+      sock.write('{"v":2,"t":"subs","d":{"subs":["*"]}}\\n');
       if (lastFullState) win.webContents.send('__aio:msg', lastFullState);
     }
   });
@@ -149,10 +149,9 @@ ${tmplBoundsTracking()}
       buf = lines.pop();
       for (const line of lines) {
         if (!line || closing) continue;
-        if (line[0] === '{') {
-          lastState = line;
-          if (line.indexOf('"$p"') === -1 && line.indexOf('"$f"') === -1) lastFullState = line;
-        }
+        // v2 envelope: cache the latest full-state frame for late renderers.
+        if (line.indexOf('"t":"state"') !== -1) { lastState = line; lastFullState = line; }
+        else if (line.indexOf('"t":"patches"') !== -1) lastState = line;
         if (pageReady) win.webContents.send('__aio:msg', line);
       }
     });

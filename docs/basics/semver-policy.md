@@ -13,7 +13,7 @@ The public surface is exactly what the CI-enforced snapshot locks
   `aio/air/compat`, `aio/jsx-runtime`, `aio/state-core`, `aio/db`, `aio/sync`,
   `aio/testing`, `aio/schedule`, `aio/selectors`, `aio/build`, `aio/am`,
   `aio/aiol`) — names, kinds, and signatures
-- the wire protocol as negotiated by the `__proto:{v,min}` handshake
+- the wire protocol as negotiated by the `proto` `{v,min}` handshake
 - the persistence schema as stamped by `<appId>:__schema`
 - documented CLI flags (`aio create`, `--expose`, `--port`, …) and the six
   scaffolded `deno.json` lines `aio doctor` validates

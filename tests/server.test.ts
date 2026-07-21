@@ -583,7 +583,7 @@ Deno.test("server: WS rate limiting drops messages over 100/sec", async () => {
     // Send 120 messages rapidly — first 100 should dispatch, rest dropped
     actionCount = 0;
     for (let i = 0; i < 120; i++) {
-      ws.send(JSON.stringify({ type: "TICK" }));
+      ws.send(JSON.stringify({ v: 2, t: "action", d: { type: "TICK" } }));
     }
     // Wait for all messages to process
     await new Promise((r) => setTimeout(r, 200));
@@ -642,7 +642,7 @@ Deno.test("server: wsLimits.messagesPerSec overrides the default rate cap", asyn
 
     actionCount = 0;
     for (let i = 0; i < 120; i++) {
-      ws.send(JSON.stringify({ type: "TICK" }));
+      ws.send(JSON.stringify({ v: 2, t: "action", d: { type: "TICK" } }));
     }
     await new Promise((r) => setTimeout(r, 200));
 
@@ -1058,9 +1058,9 @@ Deno.test("trojan: POST /shutdown returns ok and triggers callback", async () =>
   }
 });
 
-// ── WS __boot message and binary message handling ─────────────
+// ── WS boot frame and binary message handling ─────────────────
 
-Deno.test("server: WS __boot: message sent on connect", async () => {
+Deno.test("server: boot frame sent on connect", async () => {
   await withServer(async () => {
     const ws = new WebSocket(`ws://127.0.0.1:${TEST_PORT}/ws`);
     const messages: string[] = [];
@@ -1076,14 +1076,11 @@ Deno.test("server: WS __boot: message sent on connect", async () => {
       ws.onerror = () => reject(new Error("WS failed"));
     });
 
-    // Should have received __boot:<id> message
-    const bootMsg = messages.find((m) => m.startsWith("__boot:"));
-    assertEquals(bootMsg !== undefined, true, "should receive __boot message");
-    assertEquals(
-      bootMsg!.length > "__boot:".length,
-      true,
-      "boot ID should not be empty",
-    );
+    // Should have received a "boot" frame carrying the boot id
+    const bootMsg = messages.find((m) => m.includes('"t":"boot"'));
+    assertEquals(bootMsg !== undefined, true, "should receive boot frame");
+    const id = JSON.parse(bootMsg!).d?.id;
+    assertEquals(typeof id === "string" && id.length > 0, true, "non-empty id");
 
     ws.close();
   });
@@ -1106,7 +1103,7 @@ Deno.test("server: WS binary message dropped without crash", async () => {
     await new Promise((r) => setTimeout(r, 100));
 
     // Server should still be alive — send valid action
-    ws.send(JSON.stringify({ type: "Ping" }));
+    ws.send(JSON.stringify({ v: 2, t: "action", d: { type: "Ping" } }));
     await new Promise((r) => setTimeout(r, 50));
 
     // No crash — connection still open
@@ -1271,12 +1268,12 @@ Deno.test("server: WS invalid JSON dropped — dispatch not called", async () =>
     assertEquals(dispatched, false, "invalid JSON should not dispatch");
 
     // Send JSON without type field
-    ws.send(JSON.stringify({ payload: { by: 1 } }));
+    ws.send(JSON.stringify({ v: 2, t: "action", d: { payload: { by: 1 } } }));
     await new Promise((r) => setTimeout(r, 100));
     assertEquals(dispatched, false, "missing type should not dispatch");
 
     // Send valid action — should dispatch
-    ws.send(JSON.stringify({ type: "Ping" }));
+    ws.send(JSON.stringify({ v: 2, t: "action", d: { type: "Ping" } }));
     await new Promise((r) => setTimeout(r, 100));
     assertEquals(dispatched, true, "valid action should dispatch");
 

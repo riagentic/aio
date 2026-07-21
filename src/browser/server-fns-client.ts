@@ -1,7 +1,9 @@
 // server-fns-client.ts — browser side of the serverFns seam (perfect-aio B3).
 // `serverFn<T>(ns)` returns a typed proxy that calls the server over the live
-// transport: `{__sfn:{cid,ns,name,args}}` → `{__sfnr:{cid,ok,value|error}}`.
+// transport: an "sfn" envelope out, an "sfnr" envelope back (B4b v2).
 // Fail-loud: server errors reject with the server's message; 30s timeout.
+
+import { enc, type SfnrPayload } from "../protocol/envelope.ts";
 
 const SFN_TIMEOUT_MS = 30_000;
 
@@ -19,12 +21,10 @@ export function _registerSfnTransport(send: (raw: string) => void): void {
   _send = send;
 }
 
-/** Route an incoming `__sfnr` result. Returns true when consumed. */
-export function handleSfnResult(data: Record<string, unknown>): boolean {
-  const r = data.__sfnr as
-    | { cid: string; ok: boolean; value?: unknown; error?: string }
-    | undefined;
-  if (!r) return false;
+/** Route a decoded "sfnr" payload. Returns true when consumed. */
+export function handleSfnResult(data: unknown): boolean {
+  const r = data as SfnrPayload | undefined;
+  if (!r || typeof r.cid !== "string") return false;
   const p = _pending.get(r.cid);
   if (!p) return true; // late/duplicate — already settled
   _pending.delete(r.cid);
@@ -64,7 +64,7 @@ export function serverFn<T extends FnMap>(ns: string): T {
             );
           }, SFN_TIMEOUT_MS);
           _pending.set(cid, { resolve, reject, timer });
-          _send(JSON.stringify({ __sfn: { cid, ns, name: prop, args } }));
+          _send(enc("sfn", { cid, ns, name: prop, args }));
         });
     },
   });

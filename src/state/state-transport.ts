@@ -5,6 +5,7 @@
  * Owns: Transport interface, offline queue, send(), createSendProxy(), _trackingProxy().
  */
 
+import { enc } from "../protocol/envelope.ts";
 import { _BLOCKED_KEYS } from "./state-array-utils.ts";
 import { _setSubsSendFn, trackPath } from "./state-subs.ts";
 
@@ -86,7 +87,7 @@ export function setTransport(
 export function flushOfflineQueue(): void {
   if (!_transport) return;
   for (const action of _offlineQueue) {
-    _transport.send(JSON.stringify(action));
+    _transport.send(enc("action", action));
   }
   _offlineQueue.length = 0;
 }
@@ -100,10 +101,9 @@ export function send(action: { type: string; payload?: any }): boolean {
   if (_syncHandler && _syncHandler(action)) return true;
 
   const tagged = { ...action, _source: "UI" };
-  const json = JSON.stringify(tagged);
 
   if (_transport) {
-    _transport.send(json);
+    _transport.send(enc("action", tagged));
     return true;
   }
   // Queue for later

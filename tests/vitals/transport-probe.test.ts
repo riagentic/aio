@@ -26,7 +26,6 @@ Deno.test("client: createPing returns message with t1", () => {
   const before = Date.now();
   const ping = probe.createPing();
   const after = Date.now();
-  assertEquals(ping.type, "__vitals:ping");
   assertEquals(ping.t1 >= before && ping.t1 <= after, true);
   probe.destroy();
 });
@@ -38,7 +37,7 @@ Deno.test("client: processPong computes RTT", () => {
   });
   const t1 = Date.now() - 50; // simulate 50ms ago
   const t2 = t1 + 25; // server received 25ms later
-  probe.processPong({ type: "__vitals:pong", t1, t2, loop: null });
+  probe.processPong({ t1, t2, loop: null });
   const rtt = probe.getRTT();
   // RTT = now - t1, should be ~50ms (>= 50, with some margin)
   assertEquals(rtt >= 45, true, `RTT should be ~50ms, got ${rtt}`);
@@ -56,7 +55,7 @@ Deno.test("client: status degrades with high RTT (600ms > warning 500ms)", () =>
     },
   });
   const t1 = Date.now() - 600; // 600ms ago
-  probe.processPong({ type: "__vitals:pong", t1, t2: t1 + 10, loop: null });
+  probe.processPong({ t1, t2: t1 + 10, loop: null });
   assertEquals(probe.getStatus(), "warning");
   assertEquals(lastStatus, "warning");
   assertEquals(probe.getFirstDegradedAt() !== null, true);
@@ -76,7 +75,6 @@ Deno.test("client: frozen when no pong received (3000ms > frozen 2000ms)", () =>
   const ping = probe.createPing();
   // Manually set last ping time to 3000ms ago for testing
   probe.processPong({
-    type: "__vitals:pong",
     t1: Date.now() - 3100,
     t2: 0,
     loop: null,
@@ -104,7 +102,6 @@ Deno.test("client: getLastLoop returns loop from pong", () => {
     circuitBreakers: [],
   };
   probe.processPong({
-    type: "__vitals:pong",
     t1: Date.now() - 10,
     t2: Date.now() - 5,
     loop: loopData,

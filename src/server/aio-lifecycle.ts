@@ -312,11 +312,30 @@ export function startLifecycle<S, A>(deps: LifecycleDeps<S, A>): void {
     launchElectron(electronUrl, log, meta, udsConfig)
       .then((proc) => {
         if (!proc) {
+          // Electron unavailable (auto-install failed / offline) — fall back
+          // to the system browser LOUDLY instead of dying (machine B5): the
+          // app is identical over WS; the developer keeps working.
           log.error(
-            "Electron not installed — install with: deno task install:electron",
+            "Electron not installed and auto-install failed — falling back to the system browser",
           );
-          log.error("Or use --client=browser to open in system browser");
-          Deno.exit(1);
+          log.error(
+            `install manually with: deno install --allow-scripts=npm:electron (then re-run) — serving at ${electronUrl}`,
+          );
+          const cmd = Deno.build.os === "darwin"
+            ? "open"
+            : Deno.build.os === "windows"
+            ? "start"
+            : "xdg-open";
+          try {
+            new Deno.Command(cmd, {
+              args: [electronUrl],
+              stdout: "null",
+              stderr: "null",
+            }).spawn();
+          } catch {
+            log.info(`open ${electronUrl} in your browser`);
+          }
+          return;
         }
         setElectronProc(proc);
         proc.status

@@ -16,13 +16,18 @@ import {
 } from "./browser-protocol.ts";
 import { T } from "./browser-transport-state.ts";
 
-/** Parses and dispatches a state message from the server (shared WS/IPC path). */
+/** Dispatches a decoded state/patches frame from the server (shared WS/IPC
+ *  path). v2 (B4b): the transport already knows the kind — "patches" is
+ *  re-shaped to the `{$patches}` form the core message handler speaks. */
 export function handleStateMessage(
-  data: string,
+  kind: "state" | "patches",
+  payload: unknown,
   transport: "WS" | "IPC",
 ): void {
   try {
-    const parsed = JSON.parse(data);
+    const parsed = kind === "patches"
+      ? { $patches: payload }
+      : payload as Record<string, unknown>;
     if (parsed === null || typeof parsed !== "object") {
       if (transport === "WS") {
         console.warn("[aio] unexpected state type:", typeof parsed);

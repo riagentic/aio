@@ -84,8 +84,13 @@ Deno.test("setSyncHandler: declining handler lets the action flow to transport w
     assertEquals(calls, 1, "handler still sees every dispatched action");
     assertEquals(sent.length, 1, "declined action must reach transport");
     const wire = JSON.parse(sent[0]!);
-    assertEquals(wire.type, "counter:inc");
-    assertEquals(wire._source, "UI", "transport sends carry the UI source tag");
+    assertEquals(wire.t, "action");
+    assertEquals(wire.d.type, "counter:inc");
+    assertEquals(
+      wire.d._source,
+      "UI",
+      "transport sends carry the UI source tag",
+    );
   } finally {
     resetAll();
   }
@@ -108,7 +113,7 @@ Deno.test("setSyncHandler(null): clears the intercept so actions dispatch normal
 
     assertEquals(calls, 1, "cleared handler must not see later actions");
     assertEquals(sent.length, 1, "only the post-clear action hits transport");
-    assertEquals(JSON.parse(sent[0]!).type, "b");
+    assertEquals(JSON.parse(sent[0]!).d.type, "b");
   } finally {
     resetAll();
   }
@@ -152,7 +157,8 @@ Deno.test("resendSubscriptions: re-emits the current subscription paths through 
     time.tick(20); // fire the 16ms subs-sync debounce
 
     assertEquals(sent.length, 1, "tracked paths sync once after debounce");
-    const expected = '__subs:["counter.value","todos.items"]';
+    const expected =
+      '{"v":2,"t":"subs","d":{"subs":["counter.value","todos.items"]}}';
     assertEquals(sent[0], expected);
 
     sent.length = 0;
@@ -191,7 +197,9 @@ Deno.test("resendSubscriptions: after reconnect, subs go to the NEW transport (t
     setTransport(first.transport);
     trackPath("status.ok");
     time.tick(20);
-    assertEquals(first.sent, ['__subs:["status.ok"]']);
+    assertEquals(first.sent, [
+      '{"v":2,"t":"subs","d":{"subs":["status.ok"]}}',
+    ]);
 
     // Reconnect: swap transports, then resend (as the reconnect flow does).
     const second = fakeTransport();
@@ -200,7 +208,7 @@ Deno.test("resendSubscriptions: after reconnect, subs go to the NEW transport (t
 
     assertEquals(
       second.sent,
-      ['__subs:["status.ok"]'],
+      ['{"v":2,"t":"subs","d":{"subs":["status.ok"]}}'],
       "new transport gets the subs",
     );
     assertEquals(first.sent.length, 1, "old transport receives nothing more");

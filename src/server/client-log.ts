@@ -1,6 +1,6 @@
 // client-log.ts — Server-side receiver for client log messages.
 // Appends forwarded browser/Electron console entries to log/client.log.
-// Called from server.ts when a WS/IPC message has the __log: prefix.
+// Called from server.ts for incoming "log" frames (WS/IPC).
 
 import type { ClientLogEntry } from "../air/dom-inspector-types.ts";
 

@@ -79,13 +79,26 @@ export const metrics = cell("metrics", {
     async recordRequest(s) {
       s.requests += 1;
     },
+
+    async poll(s) {
+      // Deno built-in: loadavg for CPU approximation, memoryUsage for heap
+      const [load1] = Deno.loadavg(); // 1-minute load average
+      const mem = Deno.memoryUsage();
+      const cpuPct = Math.min(load1 * 100, 100);
+      const memMB = Math.round(mem.rss / 1_048_576);
+      s.cpu = cpuPct;
+      s.mem = memMB;
+      s.history.push({ cpu: cpuPct, mem: memMB, ts: Date.now() });
+      if (s.history.length > 100) s.history = s.history.slice(-100);
+    },
   },
 });
 ```
 
 `update` is synchronous -- it mutates the Immer draft directly. `recordRequest`
 is async, which means it goes through the full dispatch/effect pipeline and can
-be awaited from other cells.
+be awaited from other cells. `poll` reads real system data -- the scheduler will
+drive it in the next step.
 
 > **Tip:** Keep the history array bounded. SQLite handles the full archive; the
 > in-memory buffer is just for the sparkline.
@@ -93,25 +106,8 @@ be awaited from other cells.
 ## Step 3: Schedule polling
 
 The server needs to poll system metrics on an interval. aio's scheduler handles
-this declaratively -- no `setInterval` in your code. Add an async `poll` method
-that reads real system data:
-
-```ts
-// src/cell/metrics/index.ts — add this method
-    async poll(s) {
-      // Deno built-in: loadavg for CPU approximation, memoryUsage for heap
-      const [load1] = Deno.loadavg()  // 1-minute load average
-      const mem = Deno.memoryUsage()
-      const cpuPct = Math.min(load1 * 100, 100)
-      const memMB = Math.round(mem.rss / 1_048_576)
-      s.cpu = cpuPct
-      s.mem = memMB
-      s.history.push({ cpu: cpuPct, mem: memMB, ts: Date.now() })
-      if (s.history.length > 100) s.history = s.history.slice(-100)
-    },
-```
-
-Wire it up in `app.ts` with a static schedule:
+this declaratively -- no `setInterval` in your code. The async `poll` method
+from Step 2 does the reading; wire it up in `app.ts` with a static schedule:
 
 ```ts
 // src/app.ts
@@ -122,7 +118,7 @@ await aio.run({
   appId: "dash",
   cells: [metrics],
   schedules: [
-    { id: "poll-metrics", every: 5000, action: metrics.poll() },
+    { id: "poll-metrics", every: 5000, action: metrics.poll.action() },
   ],
 });
 ```
@@ -143,7 +139,7 @@ await aio.run({
   appId: "dash",
   cells: [metrics],
   schedules: [
-    { id: "poll-metrics", every: 5000, action: metrics.poll() },
+    { id: "poll-metrics", every: 5000, action: metrics.poll.action() },
   ],
   db: {
     history: table({
@@ -189,7 +185,8 @@ Two users: an admin who sees everything, and a viewer who sees only the summary.
 
 ```ts
 // src/app.ts
-import type { AioUser } from "aio";
+import { aio, type AioUser, integer, pk, real, table } from "aio";
+import { metrics } from "./cell/metrics/index.ts";
 
 const users: Record<string, AioUser> = {
   "admin-token-123": { id: "admin", role: "admin" },
@@ -201,7 +198,7 @@ await aio.run({
   cells: [metrics],
   users,
   schedules: [
-    { id: "poll-metrics", every: 5000, action: metrics.poll() },
+    { id: "poll-metrics", every: 5000, action: metrics.poll.action() },
   ],
   db: {
     history: table({

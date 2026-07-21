@@ -10,18 +10,19 @@ export function devWsScript(): string {
     let _bootId = null
     function _devWs() {
       const ws = new WebSocket(_wsUrl)
+      // v2 envelope (B4b): every frame is {v:2,t,d}
       ws.onmessage = ev => {
-        if (typeof ev.data === 'string' && ev.data.startsWith('__graph_error:')) {
-          ws.close(); location.reload(); return
-        }
-        if (ev.data === '__graph_clear') { ws.close(); location.reload(); return }
-        if (ev.data === '__reload') { ws.close(); location.reload() }
-        else if (ev.data === '__css') {
+        if (typeof ev.data !== 'string' || ev.data[0] !== '{') return
+        let f; try { f = JSON.parse(ev.data) } catch { return }
+        if (!f || f.v !== 2) return
+        if (f.t === 'graph-error' || f.t === 'graph-clear') { ws.close(); location.reload(); return }
+        if (f.t === 'reload') { ws.close(); location.reload() }
+        else if (f.t === 'css') {
           document.querySelectorAll('link[rel="stylesheet"]').forEach(link => {
             if (link.href.startsWith(location.origin)) link.href = link.href.split('?')[0] + '?t=' + Date.now()
           })
-        } else if (typeof ev.data === 'string' && ev.data.startsWith('__boot:')) {
-          const id = ev.data.slice(7)
+        } else if (f.t === 'boot') {
+          const id = f.d && f.d.id
           if (_bootId && _bootId !== id) { ws.close(); location.reload() }
           _bootId = id
         }

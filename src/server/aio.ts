@@ -429,6 +429,7 @@ async function _run<S, A, E>(
   let state = initialState;
   const boot = await bootStorage({
     appId,
+    dbPath: config.dbPath ?? cli.dbPath,
     initialState,
     shouldPersist,
     persistKey,

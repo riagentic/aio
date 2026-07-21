@@ -19,6 +19,15 @@ export interface CompactDeps {
   };
 }
 
+/** How long compacted op ids stay tombstoned for duplicate detection.
+ *  Compaction DELETEs op rows, which would silently void the INSERT OR IGNORE
+ *  dedup in persistOp — a client re-sending an op after a lost ack would then
+ *  be re-applied (server-side double-apply). Tombstoning the deleted ids keeps
+ *  dedup sound across compaction. 24h bounds the table: clients re-send only
+ *  until acked, and client-side stale eviction (default 4h) makes older
+ *  resends effectively impossible. */
+export const COMPACTED_ID_RETENTION_MS = 24 * 3600_000;
+
 /**
  * Compact sync_ops into a snapshot when op count exceeds threshold.
  */
@@ -41,6 +50,14 @@ export async function compactSyncOps(deps: CompactDeps): Promise<void> {
 
   await deps.db.transaction([
     {
+      // Tombstone the ids the DELETE below removes — op-id dedup (persistOp)
+      // must survive compaction, or a resend after a lost ack double-applies.
+      sql: `INSERT OR IGNORE INTO sync_compacted_ids (id, compacted_at)
+            SELECT id, ? FROM sync_ops
+            WHERE cell = ? AND (hlc_phys < ? OR (hlc_phys = ? AND hlc_cnt <= ?))`,
+      params: [now, deps.cell, hlcPhys, hlcPhys, hlcCnt],
+    },
+    {
       sql:
         `INSERT INTO sync_snapshots (cell, version, state, hlc_phys, hlc_cnt, hlc_node)
             VALUES (?, COALESCE((SELECT version FROM sync_snapshots WHERE cell = ?), 0) + 1, ?, ?, ?, ?)
@@ -54,6 +71,11 @@ export async function compactSyncOps(deps: CompactDeps): Promise<void> {
       sql:
         `DELETE FROM sync_ops WHERE cell = ? AND (hlc_phys < ? OR (hlc_phys = ? AND hlc_cnt <= ?))`,
       params: [deps.cell, hlcPhys, hlcPhys, hlcCnt],
+    },
+    {
+      // Bound the tombstone table (see COMPACTED_ID_RETENTION_MS).
+      sql: `DELETE FROM sync_compacted_ids WHERE compacted_at < ?`,
+      params: [now - COMPACTED_ID_RETENTION_MS],
     },
     {
       sql: `INSERT INTO sync_meta (cell, low_water, last_compact, op_count)
@@ -91,4 +113,8 @@ export const SYNC_SCHEMA: string[] = [
   `CREATE TABLE IF NOT EXISTS sync_meta (
     cell TEXT PRIMARY KEY, low_water TEXT NOT NULL,
     last_compact INTEGER NOT NULL, op_count INTEGER NOT NULL)`,
+  `CREATE TABLE IF NOT EXISTS sync_compacted_ids (
+    id TEXT PRIMARY KEY, compacted_at INTEGER NOT NULL)`,
+  `CREATE INDEX IF NOT EXISTS idx_sync_compacted_at
+    ON sync_compacted_ids(compacted_at)`,
 ];

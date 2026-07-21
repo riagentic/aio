@@ -59,6 +59,8 @@ through an aio cell.
 
 ```ts
 import { call } from "aio";
+import { submitOrder } from "./api.ts";
+
 const r = await call({ timeout: 5000, retries: 2 }, () => submitOrder());
 ```
 
@@ -66,8 +68,10 @@ For custom timeout behavior, use `race` (its `timeout: ms` sugar is built in):
 
 ```ts
 import { race } from "aio";
+import { fetchData } from "./api.ts";
+
 const result = await race({ data: fetchData(), timeout: 5000 });
-if (result.winner === "timeout") s.status = "timed-out";
+if (result.winner === "timeout") console.log("timed out"); // e.g. set s.status
 ```
 
 No extra API surface needed.

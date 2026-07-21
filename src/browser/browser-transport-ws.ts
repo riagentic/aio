@@ -1,6 +1,12 @@
 // WebSocket connection logic for browser transport.
 
-import { backoffDelay, parseAck } from "../protocol/transport-shared.ts";
+import { backoffDelay } from "../protocol/transport-shared.ts";
+import {
+  type AckPayload,
+  dec,
+  enc,
+  v1PeerReason,
+} from "../protocol/envelope.ts";
 import {
   handleTTMessage as _handleTTMessage,
   setSendFn as _ttSetSendFn,
@@ -18,7 +24,7 @@ import {
   _vitalsTransportProbe,
   _w,
 } from "./browser-protocol.ts";
-import { buildWsUrl, handleControlMessage } from "./browser-shared.ts";
+import { buildWsUrl, handleControlFrame } from "./browser-shared.ts";
 import { getStateSnapshot, T } from "./browser-transport-state.ts";
 import {
   _rejectAck,
@@ -55,14 +61,13 @@ export function connect(): void {
     });
     _ttSetSendFn((cmd: string) => ws.send(cmd));
     // A3: announce our wire-protocol version before anything else.
-    ws.send("__proto:" + JSON.stringify(protoHello()));
-    ws.send(
-      "__type:" +
-        (typeof navigator !== "undefined" &&
-            /electron/i.test(navigator.userAgent)
-          ? "electron"
-          : "browser"),
-    );
+    ws.send(enc("proto", protoHello()));
+    ws.send(enc("type", {
+      kind: typeof navigator !== "undefined" &&
+          /electron/i.test(navigator.userAgent)
+        ? "electron"
+        : "browser",
+    }));
     if (T.wasConnected) {
       _showStatus("Connected", "#2a2", 2000);
       console.info("[aio] reconnected"); // recovery is logged once, matching the one-shot disconnect log
@@ -82,13 +87,13 @@ export function connect(): void {
 
     const q = T.queue;
     T.queue = [];
-    for (const a of q) ws.send(JSON.stringify(a));
+    for (const a of q) ws.send(enc("action", a));
 
     if (T.offlineQueue.length) {
       console.debug(
         `[aio] replaying ${T.offlineQueue.length} offline actions`,
       );
-      for (const a of T.offlineQueue) ws.send(JSON.stringify(a));
+      for (const a of T.offlineQueue) ws.send(enc("action", a));
       T.offlineQueue = [];
       _clearOfflineQueue().catch(() => {});
     }
@@ -97,85 +102,91 @@ export function connect(): void {
   };
 
   ws.onmessage = (e) => {
-    if (e.data === "__reload") {
-      T.closed = true;
-      ws.close();
-      location.reload();
+    if (typeof e.data !== "string") return;
+    const _protoMismatch = (reason: string) => {
+      // Loud + terminal: retrying can't fix a version gap.
+      console.error(`[aio] protocol version mismatch: ${reason}`);
+      _showStatus("Protocol mismatch — reload/update the app", "#e25");
+      T.closed = true; // stop the reconnect loop
+      ws.close(PROTOCOL_MISMATCH_CLOSE_CODE, "protocol mismatch");
+    };
+    const frame = dec(e.data);
+    if (!frame) {
+      // The one v1 shim: a v1 server's hello/refusal is still readable.
+      const v1 = v1PeerReason(e.data);
+      if (v1) _protoMismatch(v1);
+      else console.warn("[aio] undecodable frame — dropped");
       return;
     }
-    // A3: wire-protocol version handshake (server speaks first).
-    if (typeof e.data === "string" && e.data.startsWith("__proto:")) {
-      const theirs = parseProtoHello(e.data.slice(8));
-      if (!theirs) return; // malformed — ignore, server will still enforce
-      const result = negotiateProtocol(protoHello(), theirs);
-      if (!result.ok) {
-        // Loud + terminal: retrying can't fix a version gap.
-        console.error(`[aio] protocol version mismatch: ${result.reason}`);
-        _showStatus("Protocol mismatch — reload/update the app", "#e25");
-        T.closed = true; // stop the reconnect loop
-        ws.close(PROTOCOL_MISMATCH_CLOSE_CODE, "protocol mismatch");
+    switch (frame.t) {
+      case "reload":
+        T.closed = true;
+        ws.close();
+        location.reload();
+        return;
+      // A3: wire-protocol version handshake (server speaks first).
+      case "proto": {
+        const theirs = parseProtoHello(frame.d);
+        if (!theirs) return; // malformed — ignore, server will still enforce
+        const result = negotiateProtocol(protoHello(), theirs);
+        if (!result.ok) {
+          _protoMismatch(result.reason);
+          return;
+        }
+        T.protocolVersion = result.effective;
         return;
       }
-      T.protocolVersion = result.effective;
-      return;
-    }
-    // A3: server rejected our hello — terminal, do not reconnect-storm.
-    if (typeof e.data === "string" && e.data.startsWith("__proto-err:")) {
-      console.error(
-        `[aio] server rejected protocol version: ${e.data.slice(12)}`,
-      );
-      _showStatus("Protocol mismatch — reload/update the app", "#e25");
-      T.closed = true;
-      return;
-    }
-    if (typeof e.data === "string" && handleControlMessage(e.data, T.bootId)) {
-      return;
-    }
-    if (e.data === "__getState") {
-      try {
-        ws.send("__clientState:" + JSON.stringify(getStateSnapshot()));
-      } catch (err) {
-        // JSON.stringify the error so a `"` in the message can't break the
-        // payload (the server's __clientState parser would otherwise throw).
-        ws.send("__clientState:" + JSON.stringify({ error: String(err) }));
-      }
-      return;
-    }
-    if (typeof e.data === "string" && e.data.startsWith("__tt:")) {
-      _handleTTMessage(e.data.slice(5));
-      return;
-    }
-    if (typeof e.data === "string" && e.data.startsWith("__vitals:pong:")) {
-      try {
-        const pong = JSON.parse(e.data.slice(14));
-        if (_vitalsTransportProbe) _vitalsTransportProbe.processPong(pong);
-      } catch (err) {
-        console.warn("[aio:vitals] bad pong:", err);
-      }
-      return;
-    }
-    if (typeof e.data === "string" && e.data.startsWith("__ack:")) {
-      // AIO-2.2: settle the pending ack for this cid.
-      // Format: __ack:<cid>:<ok>  (ok is "1" or "0") — shared parse.
-      const ack = parseAck(e.data);
-      if (ack) {
-        const { cid, ok } = ack;
-        if (ok) {
-          _resolveAck(cid);
-        } else {
-          _rejectAck(cid, new Error("server rejected action"));
+      // A3: server rejected our hello — terminal, do not reconnect-storm.
+      case "proto-err":
+        _protoMismatch(
+          (frame.d as { reason?: string } | undefined)?.reason ?? "?",
+        );
+        return;
+      case "get-state":
+        try {
+          ws.send(enc("client-state", getStateSnapshot()));
+        } catch (err) {
+          ws.send(enc("client-state", { error: String(err) }));
         }
+        return;
+      case "tt-state":
+        _handleTTMessage(frame.d as object);
+        return;
+      case "vitals-pong":
+        try {
+          if (_vitalsTransportProbe) {
+            _vitalsTransportProbe.processPong(
+              frame.d as import("../vitals/transport-probe.ts").VitalsPong,
+            );
+          }
+        } catch (err) {
+          console.warn("[aio:vitals] bad pong:", err);
+        }
+        return;
+      case "ack": {
+        // AIO-2.2: settle the pending ack for this cid.
+        const { cid, ok } = (frame.d ?? {}) as AckPayload;
+        if (typeof cid !== "string") return;
+        if (ok) _resolveAck(cid);
+        else _rejectAck(cid, new Error("server rejected action"));
+        return;
       }
-      return;
+      case "diag":
+        try {
+          if (_w && typeof _w._aioDiag === "function") {
+            _w._aioDiag(frame.d as Record<string, unknown>);
+          }
+        } catch { /* ignore malformed diag */ }
+        return;
+      case "state":
+      case "patches":
+        handleStateMessage(frame.t, frame.d, "WS");
+        return;
+      default:
+        if (handleControlFrame(frame, T.bootId)) return;
+        console.warn(`[aio] unexpected "${frame.t}" frame — dropped`);
+        return;
     }
-    if (typeof e.data === "string" && e.data.startsWith("__diag:")) {
-      try {
-        const ev = JSON.parse(e.data.slice(7));
-        if (_w && typeof _w._aioDiag === "function") _w._aioDiag(ev);
-      } catch { /* ignore malformed diag */ }
-      return;
-    }
-    handleStateMessage(e.data, "WS");
   };
 
   ws.onerror = () => {

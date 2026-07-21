@@ -37,7 +37,7 @@ export async function replaySyncOps<S>(
   for (const cell of syncCellIds) {
     let ops;
     try {
-      ops = await loadOpsSince(db, cell, null, null); // null cursor → all ops, HLC-ordered
+      ops = await loadOpsSince(db, cell, null, null); // null cursor → all ops, dispatch (server_ts) order
     } catch (e) {
       log.error(`sync: op-log replay failed for cell "${cell}" — ${e}`);
       continue;
@@ -75,6 +75,9 @@ export interface CellMigrationInfo {
 /** Inputs needed to run the boot/storage sequence */
 export interface BootConfig<S> {
   appId: string;
+  /** Override the SQLite file (":memory:" for hermetic tests). Default:
+   *  resolveDbPath(appId) — cwd/data.db in dev, data dir when compiled. */
+  dbPath?: string;
   initialState: S;
   shouldPersist: boolean;
   persistKey: string;
@@ -124,6 +127,7 @@ export async function bootStorage<S>(
 ): Promise<BootResult<S>> {
   const {
     appId,
+    dbPath: dbPathOverride,
     initialState,
     shouldPersist,
     persistKey,
@@ -175,7 +179,7 @@ export async function bootStorage<S>(
   // `sync: true` cell must never silently degrade because `db:` is absent.
   if ((dbSchema && Object.keys(dbSchema).length) || syncCellIds.length > 0) {
     try {
-      const dbPath = resolveDbPath(appId);
+      const dbPath = dbPathOverride ?? resolveDbPath(appId);
       asyncDb = createDB(dbPath);
       if (dbSchema && Object.keys(dbSchema).length) {
         await initSchema(asyncDb, dbSchema);
@@ -251,7 +255,7 @@ export async function bootStorage<S>(
     try {
       if (!asyncDb) {
         // Persistence needs the app db even without user tables/sync cells.
-        const dbPath = resolveDbPath(appId);
+        const dbPath = dbPathOverride ?? resolveDbPath(appId);
         asyncDb = createDB(dbPath);
         log.debug(`sqlite: opened for persistence at ${dbPath}`);
       }

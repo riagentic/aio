@@ -1,6 +1,7 @@
 // deno-lint-ignore-file
 // AIR-specific useTimeTravel hook — signal-based
 import { signal } from "../state/signal.ts";
+import { enc } from "../protocol/envelope.ts";
 import {
   _sendTTCmd,
   getTTState,
@@ -40,10 +41,10 @@ export function useTimeTravel(): {
     entries: tt.entries,
     index: tt.index,
     paused: tt.paused,
-    undo: () => _sendTTCmd("__tt:undo"),
-    redo: () => _sendTTCmd("__tt:redo"),
-    goto: (id: number) => _sendTTCmd("__tt:goto:" + id),
-    pause: () => _sendTTCmd("__tt:pause"),
-    resume: () => _sendTTCmd("__tt:resume"),
+    undo: () => _sendTTCmd(enc("tt-cmd", { cmd: "undo" })),
+    redo: () => _sendTTCmd(enc("tt-cmd", { cmd: "redo" })),
+    goto: (id: number) => _sendTTCmd(enc("tt-cmd", { cmd: "goto:" + id })),
+    pause: () => _sendTTCmd(enc("tt-cmd", { cmd: "pause" })),
+    resume: () => _sendTTCmd(enc("tt-cmd", { cmd: "resume" })),
   };
 }

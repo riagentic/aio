@@ -70,13 +70,14 @@ function connectWS(token: string): Promise<{ ws: WebSocket; state: unknown }> {
       reject(new Error("WS connect timeout"));
     }, 3000);
     ws.onmessage = (e) => {
-      clearTimeout(timeout);
       try {
         const data = JSON.parse(e.data);
-        resolve({ ws, state: data });
-      } catch {
-        // Skip non-JSON messages (__boot:, __tt:, etc.)
-      }
+        if (data?.v === 2 && data.t === "state") {
+          clearTimeout(timeout);
+          resolve({ ws, state: data.d });
+        }
+        // Other frames (proto, boot, tt-state, …) — keep waiting for state.
+      } catch { /* not a frame */ }
     };
     ws.onerror = () => {
       clearTimeout(timeout);
@@ -91,12 +92,12 @@ function nextMessage(ws: WebSocket, ms = 2000): Promise<unknown> {
     const timeout = setTimeout(() => reject(new Error("message timeout")), ms);
     const handler = (e: MessageEvent) => {
       if (typeof e.data !== "string") return;
-      // Skip control messages
-      if (e.data.startsWith("__")) return;
-      clearTimeout(timeout);
-      ws.removeEventListener("message", handler);
       try {
-        resolve(JSON.parse(e.data));
+        const f = JSON.parse(e.data);
+        if (f?.v !== 2 || f.t !== "state") return; // skip control frames
+        clearTimeout(timeout);
+        ws.removeEventListener("message", handler);
+        resolve(f.d);
       } catch { /* skip */ }
     };
     ws.addEventListener("message", handler);

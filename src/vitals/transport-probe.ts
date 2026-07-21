@@ -11,15 +11,14 @@ import type {
 
 // ─── Wire Protocol ───────────────────────────────────────────────────────────
 
-/** Client-to-server vitals ping message with departure timestamp. */
+/** "vitals-ping" payload — departure timestamp (v2: the envelope kind is
+ *  the discriminator; no type field on the wire). */
 export type VitalsPing = {
-  type: "__vitals:ping";
   t1: number;
 };
 
-/** Server-to-client vitals pong reply with timestamps and optional loop health. */
+/** "vitals-pong" payload — timestamps and optional loop health. */
 export type VitalsPong = {
-  type: "__vitals:pong";
   t1: number;
   t2: number;
   loop: LoopVitals | null;
@@ -68,7 +67,7 @@ export function createTransportProbeClient(config: TransportProbeClientConfig) {
 
   return {
     createPing(): VitalsPing {
-      return { type: "__vitals:ping", t1: Date.now() };
+      return { t1: Date.now() };
     },
 
     processPong(pong: VitalsPong) {

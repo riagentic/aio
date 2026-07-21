@@ -1,6 +1,7 @@
 // src/sync/server-handler.ts — Server-side CRDT sync relay
 // Receives ops from clients, persists to op-log, broadcasts to other clients, sends acks.
 
+import { enc } from "../protocol/envelope.ts";
 import type { DB } from "../db/types.ts";
 import { takeLastRejection } from "../state/rejection-tracker.ts";
 import type { HLC, SyncOp } from "./types.ts";
@@ -148,6 +149,13 @@ export function createServerSyncHandler(
         // persistOp is INSERT OR IGNORE, so `serverTs === null` means the
         // op's effect is already in live state — re-applying would double it.
         let rejectedReason: string | null = null;
+        if (serverTs === null) {
+          // Observe-only: a duplicate here is the client re-sending after a
+          // lost ack (normal) — or a cursor bug upstream (worth seeing).
+          deps.log.debug(
+            `[sync:server] duplicate op ${op.id} (${op.cell}:${op.action}) — re-acked, not re-applied`,
+          );
+        }
         if (serverTs !== null) {
           try {
             deps.dispatch({
@@ -174,12 +182,10 @@ export function createServerSyncHandler(
 
         if (rejectedReason !== null) {
           try {
-            socket.send(JSON.stringify({
-              __op_rejected: {
-                opId: op.id,
-                cell: op.cell,
-                reason: rejectedReason,
-              },
+            socket.send(enc("op-rejected", {
+              opId: op.id,
+              cell: op.cell,
+              reason: rejectedReason,
             }));
           } catch { /* client disconnected */ }
           deps.log.warn(
@@ -191,9 +197,9 @@ export function createServerSyncHandler(
         // Always ack — for a duplicate this is the retransmit of the ack the
         // client lost, and it's what lets the client stop resending the op.
         try {
-          socket.send(JSON.stringify({
-            __ack: { cell: op.cell, opId: op.id, serverHlc },
-          }));
+          socket.send(
+            enc("sync-ack", { cell: op.cell, opId: op.id, serverHlc }),
+          );
         } catch { /* client disconnected */ }
 
         if (serverTs !== null) {
@@ -201,15 +207,13 @@ export function createServerSyncHandler(
           // they apply it — otherwise the next catch-up re-delivers this op
           // (it sits above their cursor) and they double-apply it.
           deps.broadcastRaw.fn(
-            JSON.stringify({
-              __op: {
-                id: op.id,
-                hlc: op.hlc,
-                cell: op.cell,
-                action: op.action,
-                payload: op.payload,
-                serverTs,
-              },
+            enc("op", {
+              id: op.id,
+              hlc: op.hlc,
+              cell: op.cell,
+              action: op.action,
+              payload: op.payload,
+              serverTs,
             }),
             socket,
           );
@@ -269,6 +273,11 @@ export function createServerSyncHandler(
             // its effect to live state each round (counter drift). Peers get
             // the same broadcast as the handleOp path (serverTs included so
             // their cursor advances — see handleOp).
+            if (serverTs === null) {
+              deps.log.debug(
+                `[sync:server] duplicate pending op ${pending.id} (${pending.cell}:${pending.action}) — re-acked, not re-applied`,
+              );
+            }
             if (serverTs !== null) {
               try {
                 deps.dispatch({
@@ -281,15 +290,13 @@ export function createServerSyncHandler(
                 );
               }
               deps.broadcastRaw.fn(
-                JSON.stringify({
-                  __op: {
-                    id: pending.id,
-                    hlc: pending.hlc,
-                    cell: pending.cell,
-                    action: pending.action,
-                    payload: pending.payload,
-                    serverTs,
-                  },
+                enc("op", {
+                  id: pending.id,
+                  hlc: pending.hlc,
+                  cell: pending.cell,
+                  action: pending.action,
+                  payload: pending.payload,
+                  serverTs,
                 }),
                 socket,
               );
@@ -299,9 +306,13 @@ export function createServerSyncHandler(
             // them forever and keeps rebasing them on top of confirmed state
             // that already includes them (permanent double-apply in the UI).
             try {
-              socket.send(JSON.stringify({
-                __ack: { cell: pending.cell, opId: pending.id, serverHlc },
-              }));
+              socket.send(
+                enc("sync-ack", {
+                  cell: pending.cell,
+                  opId: pending.id,
+                  serverHlc,
+                }),
+              );
             } catch { /* client disconnected */ }
           });
         }
@@ -361,37 +372,31 @@ export function createServerSyncHandler(
 
         const response = useSnapshot
           ? {
-            __sync: {
-              mode: "snapshot" as const,
-              snapshot,
-              ops: responseOps,
-              lowWater: lowWaterMap,
-              lastServerTs: serverTsMap,
-            },
+            mode: "snapshot" as const,
+            snapshot,
+            ops: responseOps,
+            lowWater: lowWaterMap,
+            lastServerTs: serverTsMap,
           }
           : {
-            __sync: {
-              mode: "incremental" as const,
-              ops: responseOps,
-              lowWater: lowWaterMap,
-              lastServerTs: serverTsMap,
-            },
+            mode: "incremental" as const,
+            ops: responseOps,
+            lowWater: lowWaterMap,
+            lastServerTs: serverTsMap,
           };
 
         try {
-          socket.send(JSON.stringify(response));
+          socket.send(enc("sync-res", response));
         } catch { /* client disconnected */ }
 
         deps.log.debug(
-          `[sync:server] sync response: ${response.__sync.mode}, ${responseOps.length} ops`,
+          `[sync:server] sync response: ${response.mode}, ${responseOps.length} ops`,
         );
       })().catch((e) => {
         deps.log.error(`[sync:server] handleSync failed: ${e}`);
         // Notify client so it can back off and retry instead of hanging in "syncing"
         try {
-          socket.send(JSON.stringify({
-            __sync_error: { reason: String(e) },
-          }));
+          socket.send(enc("sync-err", { reason: String(e) }));
         } catch { /* client disconnected */ }
       });
     },

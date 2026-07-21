@@ -21,6 +21,7 @@ android-template/build/
 # Build / test artifacts
 log/
 coverage/
+bench-results.json
 
 # Runtime-generated — never commit
 .aio/

@@ -37,12 +37,20 @@ const LoginForm = () => (
       if (form.validate()) console.log(form.values());
     }}
   >
-    <input type="email" {...form.bind("email")} />
+    <input
+      type="email"
+      {...form.bind("email")}
+      value={form.fields.email.value}
+    />
     {form.fields.email.error && (
       <span className="err">{form.fields.email.error}</span>
     )}
 
-    <input type="password" {...form.bind("password")} />
+    <input
+      type="password"
+      {...form.bind("password")}
+      value={form.fields.password.value}
+    />
     {form.fields.password.error && (
       <span className="err">{form.fields.password.error}</span>
     )}

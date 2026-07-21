@@ -399,13 +399,13 @@ function _initSyncIfNeeded(): void {
 // module stays transport-agnostic.
 let _sendRawViaTransport: (raw: string) => void = () => {};
 let _setSyncWiring: (
-  onMsg: (m: Record<string, unknown>) => void,
+  onMsg: (t: string, d: unknown) => void,
   onOnline: (v: boolean) => void,
 ) => void = () => {};
 export function _registerSyncTransport(
   sendRaw: (raw: string) => void,
   setWiring: (
-    onMsg: (m: Record<string, unknown>) => void,
+    onMsg: (t: string, d: unknown) => void,
     onOnline: (v: boolean) => void,
   ) => void,
 ): void {

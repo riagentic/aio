@@ -91,13 +91,14 @@ Deno.test("mode: browser local — serve HTML + WS state sync", async () => {
       ws.onopen = () => resolve();
       ws.onerror = () => reject(new Error("WS failed"));
     });
-    await waitFor(() => messages.some((m) => !m.startsWith("__")));
-    const initial = JSON.parse(messages.find((m) => !m.startsWith("__"))!);
+    await waitFor(() => messages.some((m) => m.includes('"t":"state"')));
+    const initial =
+      JSON.parse(messages.find((m) => m.includes('"t":"state"'))!).d;
     assertEquals(initial.count, 0);
     assertEquals(initial.label, "browser-local");
 
     // Send action via WS
-    ws.send(JSON.stringify({ type: "INC" }));
+    ws.send(JSON.stringify({ v: 2, t: "action", d: { type: "INC" } }));
     await new Promise((r) => setTimeout(r, 100));
     assertEquals(app.getState().count, 1);
 
@@ -140,7 +141,9 @@ Deno.test({
       assertEquals(app.getState().count, 1);
 
       // Broadcast and verify client receives update
-      uds.broadcast(JSON.stringify(app.getState()));
+      uds.broadcast(
+        JSON.stringify({ v: 2, t: "state", d: app.getState() }),
+      );
       await waitFor(() => cli.state?.count === 1);
       assertEquals(cli.state?.count, 1);
 
@@ -320,8 +323,9 @@ Deno.test("mode: browser remote — expose + token auth", async () => {
       ws.onopen = () => resolve();
       ws.onerror = () => reject(new Error("WS auth failed"));
     });
-    await waitFor(() => messages.some((m) => !m.startsWith("__")));
-    const initial = JSON.parse(messages.find((m) => !m.startsWith("__"))!);
+    await waitFor(() => messages.some((m) => m.includes('"t":"state"')));
+    const initial =
+      JSON.parse(messages.find((m) => m.includes('"t":"state"'))!).d;
     assertEquals(initial.label, "browser-remote");
 
     ws.close();

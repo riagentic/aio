@@ -85,6 +85,15 @@ export async function persistOp(
   op: { id: string; hlc: HLC; cell: string; action: string; payload: unknown },
 ): Promise<number | null> {
   await seedServerTs(db);
+  // Compaction DELETEs op rows, so INSERT OR IGNORE alone forgets ids the log
+  // rolled over — a client re-sending such an op (ack lost → resend after
+  // compaction) would be re-inserted and re-dispatched (server double-apply).
+  // Tombstoned ids (see compact.ts) keep the dedup sound; PK lookup is cheap.
+  const { rows: tomb } = await db.query<{ id: string }>(
+    "SELECT id FROM sync_compacted_ids WHERE id = ? LIMIT 1",
+    [op.id],
+  );
+  if (tomb.length > 0) return null;
   const [hlcPhys, hlcCnt, hlcNode] = op.hlc;
   const serverTs = nextServerTs();
   const { changes } = await db.execute(
@@ -105,12 +114,24 @@ export async function persistOp(
 }
 
 /**
- * Load all ops for a cell since the given cursor. Uses server_ts when available (strictly monotonic), falls back to HLC for backwards compat.
+ * Load ops for a cell after the given server_ts cursor (strictly monotonic,
+ * matches dispatch order). Without a cursor the FULL op-log is returned, in
+ * server_ts (dispatch) order.
+ *
+ * There is deliberately NO HLC-based filtering (chaos-suite finding,
+ * 2026-07-21): HLC order ≠ persist order — same-ms ties and cross-node
+ * counters mean a client's HLC watermark can sit "above" concurrently
+ * stamped peer ops it never received, so filtering by it silently skipped
+ * ops (permanent divergence once the cursor echo sealed them). Re-delivery
+ * to a cursorless client that already applied some ops is absorbed by the
+ * client-side op-id dedup. `_hlc` is kept in the signature for call-site
+ * stability; it must never be used as a delivery filter again (it remains
+ * valid as a conservative compaction watermark — see server-handler).
  */
 export async function loadOpsSince(
   db: DB,
   cell: string,
-  hlc: HLC | null,
+  _hlc: HLC | null,
   lastServerTs?: number | null,
 ): Promise<SyncOp[]> {
   // Use server_ts cursor when available — strictly monotonic per-server, no concurrency ambiguity
@@ -124,23 +145,12 @@ export async function loadOpsSince(
     return rows.map(rowToOp);
   }
 
-  // Fallback to HLC cursor for backwards compat
-  if (!hlc) {
-    const { rows } = await db.query<OpRow>(
-      `SELECT id, cell, action, payload, hlc_phys, hlc_cnt, hlc_node
-       FROM sync_ops WHERE cell = ? ORDER BY hlc_phys, hlc_cnt, hlc_node`,
-      [cell],
-    );
-    return rows.map(rowToOp);
-  }
-
-  const [phys, cnt] = hlc;
+  // No cursor → full op-log in dispatch (server_ts) order, so a replay or a
+  // fresh client folds ops in exactly the order the live server applied them.
   const { rows } = await db.query<OpRow>(
     `SELECT id, cell, action, payload, hlc_phys, hlc_cnt, hlc_node
-     FROM sync_ops WHERE cell = ?
-     AND (hlc_phys > ? OR (hlc_phys = ? AND hlc_cnt > ?))
-     ORDER BY hlc_phys, hlc_cnt, hlc_node`,
-    [cell, phys, phys, cnt],
+     FROM sync_ops WHERE cell = ? ORDER BY server_ts`,
+    [cell],
   );
   return rows.map(rowToOp);
 }

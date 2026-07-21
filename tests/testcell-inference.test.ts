@@ -43,9 +43,31 @@ testCell(
     t.expect.state((st) => st.count === 0 && st.name === "start");
     t.expect.invariant((st) => st.count >= 0);
 
-    // Sender ARG inference — bump takes an optional number.
-    await t.send.bump(2);
+    // Sender ARG inference — bump takes an optional number; a void sync
+    // method resolves Promise<void> (SyncReturn), not Promise<unknown>.
+    const _voidRet: void = await t.send.bump(2);
+    void _voidRet;
     t.expect.state((st) => st.count === 2);
+
+    // Compile-time probes — fail `deno check` on regression (pattern:
+    // tests/router.test.ts). Never executed.
+    const _probes = () => {
+      // expect.state's param is the CELL's state — fields keep their types.
+      t.expect.state((st) => {
+        const n: number = st.count;
+        const nm: string = st.name;
+        return n >= 0 && nm.length >= 0;
+      });
+      // @ts-expect-error sender args are typed — a string where a number goes
+      t.send.bump("not-a-number");
+      // Sender RETURN types are precise (Promise<string>, not Promise<unknown>)…
+      const _ret: Promise<string> = t.send.label("p");
+      void _ret;
+      // @ts-expect-error …so a mistyped resolution is rejected
+      const _bad: Promise<number> = t.send.label("p");
+      void _bad;
+    };
+    void _probes;
 
     // Sender RETURN inference — sync method's transported return is a string.
     const label: string = await t.send.label("pre");

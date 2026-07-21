@@ -80,6 +80,7 @@
 ## Build & deploy — targets, dev mode, imports, scaling
 
 - [Build & Deploy](build/README.md) — Running, compiling, and shipping AIO apps.
+- [Benchmarks — the D12 perf gate](build/benchmarks.md) — Performance is CI infrastructure (perfect-aio D12): boot time, dispatch
 - [Dev Mode](build/dev-mode.md) — aio.run() reads Deno.args automatically — no parsing code needed in your
 - [Import Rules: Server vs Browser Bundle](build/imports.md) — aio apps have two separate bundles running simultaneously — code must
 - [Runtime differences](build/runtime-differences.md) — The same cell code runs in three places.
@@ -116,6 +117,7 @@
 - [Upgrade from v1.0.0-alpha2 to v1.0.0-alpha3](upgrade/from-alpha2-to-alpha3.md) — If you have tooling parsing JSON logs, update it.
 - [Upgrade: 1.0.0-alpha26 → 1.0.0-alpha27](upgrade/from-alpha26-to-alpha27.md) — alpha27 is the start of the restructure — the largest breaking change in aio's
 - [Upgrade: 1.0.0-alpha27 → 1.0.0-alpha28](upgrade/from-alpha27-to-alpha28.md) — alpha28 completes the restructure (B3–B5).
+- [Upgrade: 1.0.0-alpha28 → 1.0.0-alpha29](upgrade/from-alpha28-to-alpha29.md) — alpha29's headline is the wire-protocol v2 bump.
 - [Upgrade from v1.0.0-alpha3 to v1.0.0-alpha4](upgrade/from-alpha3-to-alpha4.md) — If you rely on effects completing after timeout (e.g., fire-and-forget with a
 - [Upgrade from v1.0.0-alpha4 to v1.0.0-alpha5](upgrade/from-alpha4-to-alpha5.md) — None.
 - [Upgrade from v1.0.0-alpha5 to v1.0.0-alpha6](upgrade/from-alpha5-to-alpha6.md) — None.

@@ -39,7 +39,6 @@ Deno.test("integration: transport probe client <-> server ping/pong flow", () =>
   sys.serverTransport.onClientPing("test_client", ping.t1);
 
   const pong = {
-    type: "__vitals:pong" as const,
     t1: ping.t1,
     t2: Date.now(),
     loop: sys.getLoopVitalsForPong() as ReturnType<

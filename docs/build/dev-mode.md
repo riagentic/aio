@@ -121,7 +121,7 @@ automatically reload.
 
 1. `Deno.watchFs` monitors `baseDir` recursively
 2. On file change, the transpile cache for that file is invalidated
-3. After a 100ms debounce (to batch rapid saves), a `__reload` signal is sent
+3. After a 100ms debounce (to batch rapid saves), a `"reload"` frame is sent
    over WebSocket
 4. Browser receives the signal and calls `location.reload()`
 5. Fresh page loads, `useAio()` reconnects, server sends current state
@@ -149,10 +149,10 @@ injects the updated stylesheet without losing React state.
 
 1. File watcher detects a change
 2. If only `.css` files changed in the debounce window, server sends `__css`
-   signal (not `__reload`)
+   frame (not `"reload"`)
 3. Browser finds the `<link>` tag for `style.css` and cache-busts it with
    `?t=<timestamp>`
 4. Browser downloads the new CSS — no React unmount/remount, no state loss
 
 If a CSS file and a TS/TSX file change in the same debounce window, a full
-`__reload` is sent instead (since the JS needs reloading anyway).
+`"reload"` is sent instead (since the JS needs reloading anyway).

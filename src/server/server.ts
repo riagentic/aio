@@ -1,5 +1,6 @@
 // HTTP + WebSocket server with live TSX transpilation (dev) or static serving (prod)
 // Thin orchestrator — delegates to server-*.ts modules
+import { enc } from "../protocol/envelope.ts";
 import { join, resolve } from "@std/path";
 import { DEFAULT_SYNC_INTERVAL_MS } from "./aio.ts";
 import {
@@ -187,7 +188,7 @@ export function createServer(config: ServerConfig): ServerHandle {
   // Forward diagnostic bus events to all connected dev clients via WS
   if (!prod) {
     diagSubscribe((ev) => {
-      broadcaster.broadcastRaw("__diag:" + JSON.stringify(ev));
+      broadcaster.broadcastRaw(enc("diag", ev));
       if (ev.severity === "error" || ev.severity === "warning") {
         for (const meta of wsMgr.connections.values()) {
           writeClientLog(meta.index, {

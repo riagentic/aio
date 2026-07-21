@@ -3,7 +3,14 @@
 // Same delta protocol as browser.ts but no DOM, no React — pure Deno runtime.
 
 import { applyPatches, enablePatches, type Patch } from "immer";
-import { backoffDelay, parseAck } from "../protocol/transport-shared.ts";
+import { backoffDelay } from "../protocol/transport-shared.ts";
+import {
+  type AckPayload,
+  dec,
+  enc,
+  type Frame,
+  v1PeerReason,
+} from "../protocol/envelope.ts";
 import { bindCell } from "../state/cell-catalog.ts";
 import {
   negotiateProtocol,
@@ -16,23 +23,22 @@ enablePatches();
 
 const WS_MAX_QUEUE = 100;
 
-/** Apply one server message (full state or Immer `$patches` delta) to the
- *  current state. Returns the new state. On a patch that fails to apply
+/** Apply one decoded state frame ("state" snapshot or "patches" delta) to
+ *  the current state. Returns the new state. On a patch that fails to apply
  *  (desync), returns the prior state unchanged and calls `onResync` so the
  *  caller can ask the server for a fresh snapshot. Shared by the WS and UDS
  *  client paths so both transports apply deltas identically. */
-function applyServerMessage<S>(
+function applyServerFrame<S>(
   prev: S | null,
-  data: Record<string, unknown>,
+  frame: Frame,
   onResync?: () => void,
 ): S | null {
-  // Immer patches — new format from server
-  if (data.$patches && Array.isArray(data.$patches)) {
-    if (prev != null) {
+  if (frame.t === "patches") {
+    if (prev != null && Array.isArray(frame.d)) {
       try {
         return applyPatches(
           prev as unknown as Record<string, unknown>,
-          data.$patches as Patch[],
+          frame.d as Patch[],
         ) as unknown as S;
       } catch {
         // desync — ask the server for a full snapshot
@@ -42,7 +48,7 @@ function applyServerMessage<S>(
     return prev;
   }
   // Full state
-  return data as S;
+  return frame.d as S;
 }
 
 /** Reactive WS client handle — subscribe to state, send actions, close when done */
@@ -105,65 +111,86 @@ export function connectCli<S>(
       retry = 0;
       wasConnected = true;
       // A3: announce our wire-protocol version before anything else.
-      socket.send("__proto:" + JSON.stringify(protoHello()));
+      socket.send(enc("proto", protoHello()));
       // Drain queued actions
       const q = [...queue];
       queue.length = 0;
-      for (const a of q) socket.send(JSON.stringify(a));
+      for (const a of q) socket.send(enc("action", a));
     };
 
     socket.onmessage = (e: MessageEvent) => {
       const raw = e.data;
       if (typeof raw !== "string") return;
 
-      // Skip browser-only signals
-      if (raw === "__reload" || raw === "__css") return;
-      if (raw.startsWith("__tt:") || raw.startsWith("__boot:")) return;
-
-      // Per-action acks for bound-cell method calls: "__ack:<cid>:1" — shared parse.
-      const ack = parseAck(raw);
-      if (ack) {
-        _pending.get(ack.cid)?.();
-        _pending.delete(ack.cid);
-        return;
-      }
-
-      // A3: wire-protocol version handshake — terminal on mismatch.
-      if (raw.startsWith("__proto:")) {
-        const theirs = parseProtoHello(raw.slice(8));
-        if (!theirs) return;
-        const result = negotiateProtocol(protoHello(), theirs);
-        if (!result.ok) {
-          console.error(
-            `[aio:cli] protocol version mismatch: ${result.reason}`,
-          );
-          closed = true; // stop the reconnect loop — retrying can't fix it
+      const frame = dec(raw);
+      if (!frame) {
+        // The one v1 shim: a v1 server's hello/refusal is still readable.
+        const v1 = v1PeerReason(raw);
+        if (v1) {
+          console.error(`[aio:cli] protocol version mismatch: ${v1}`);
+          closed = true;
           socket.close(PROTOCOL_MISMATCH_CLOSE_CODE, "protocol mismatch");
         }
         return;
       }
-      if (raw.startsWith("__proto-err:")) {
-        console.error(
-          `[aio:cli] server rejected protocol version: ${raw.slice(12)}`,
-        );
-        closed = true;
-        return;
-      }
-
-      try {
-        const data = JSON.parse(raw);
-        if (data === null || typeof data !== "object") return;
-        state = applyServerMessage(state, data, () => {
-          // desync — request full state from server
-          if (socket.readyState === WebSocket.OPEN) socket.send("__resync");
-        }) as S;
-        // Resolve ready on first state
-        if (state != null && _readyResolve) {
-          _readyResolve(state);
-          _readyResolve = null;
+      switch (frame.t) {
+        // Browser-only signals — irrelevant in a terminal.
+        case "reload":
+        case "css":
+        case "boot":
+        case "tt-state":
+        case "diag":
+          return;
+        // Per-action acks for bound-cell method calls.
+        case "ack": {
+          const { cid } = (frame.d ?? {}) as AckPayload;
+          if (typeof cid === "string") {
+            _pending.get(cid)?.();
+            _pending.delete(cid);
+          }
+          return;
         }
-        if (state != null) { for (const fn of listeners) fn(state); }
-      } catch { /* bad JSON — skip */ }
+        // A3: wire-protocol version handshake — terminal on mismatch.
+        case "proto": {
+          const theirs = parseProtoHello(frame.d);
+          if (!theirs) return;
+          const result = negotiateProtocol(protoHello(), theirs);
+          if (!result.ok) {
+            console.error(
+              `[aio:cli] protocol version mismatch: ${result.reason}`,
+            );
+            closed = true; // stop the reconnect loop — retrying can't fix it
+            socket.close(PROTOCOL_MISMATCH_CLOSE_CODE, "protocol mismatch");
+          }
+          return;
+        }
+        case "proto-err":
+          console.error(
+            `[aio:cli] server rejected protocol version: ${
+              (frame.d as { reason?: string } | undefined)?.reason ?? "?"
+            }`,
+          );
+          closed = true;
+          return;
+        case "state":
+        case "patches": {
+          state = applyServerFrame(state, frame, () => {
+            // desync — request full state from server
+            if (socket.readyState === WebSocket.OPEN) {
+              socket.send(enc("resync"));
+            }
+          }) as S;
+          // Resolve ready on first state
+          if (state != null && _readyResolve) {
+            _readyResolve(state);
+            _readyResolve = null;
+          }
+          if (state != null) { for (const fn of listeners) fn(state); }
+          return;
+        }
+        default:
+          return; // other diagnostics — irrelevant in a terminal
+      }
     };
 
     socket.onerror = () => {};
@@ -209,7 +236,7 @@ export function connectCli<S>(
 
     send(action: { type: string; payload?: unknown }): void {
       if (ws && ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify(action));
+        ws.send(enc("action", action));
       } else if (!wasConnected && queue.length < WS_MAX_QUEUE) {
         queue.push(action);
       }
@@ -295,14 +322,14 @@ export function connectCliUDS<S>(socketPath: string): CliApp<S> {
 
         // A3: announce our wire-protocol version before anything else.
         writer!.write(
-          encoder.encode("__proto:" + JSON.stringify(protoHello()) + "\n"),
+          encoder.encode(enc("proto", protoHello()) + "\n"),
         ).catch(() => {});
 
         // Drain queued actions
         const q = [...queue];
         queue.length = 0;
         for (const a of q) {
-          writer!.write(encoder.encode(JSON.stringify(a) + "\n")).catch(
+          writer!.write(encoder.encode(enc("action", a) + "\n")).catch(
             () => {},
           );
         }
@@ -320,53 +347,69 @@ export function connectCliUDS<S>(socketPath: string): CliApp<S> {
               buf = lines.pop()!;
               for (const line of lines) {
                 if (!line) continue;
-                // Skip browser-only signals
-                if (line === "__reload" || line === "__css") continue;
-                if (line.startsWith("__tt:") || line.startsWith("__boot:")) {
-                  continue;
-                }
-                // Per-action acks for bound-cell method calls
-                if (line.startsWith("__ack:")) {
-                  const cid = line.slice(6, line.lastIndexOf(":"));
-                  _udsPending.get(cid)?.();
-                  _udsPending.delete(cid);
-                  continue;
-                }
-                // A3: wire-protocol version handshake — terminal on mismatch.
-                if (line.startsWith("__proto:")) {
-                  const theirs = parseProtoHello(line.slice(8));
-                  if (!theirs) continue;
-                  const result = negotiateProtocol(protoHello(), theirs);
-                  if (!result.ok) {
-                    console.error(
-                      `[aio:cli] protocol version mismatch: ${result.reason}`,
-                    );
-                    closed = true; // stop the reconnect loop
+                const frame = dec(line);
+                if (!frame) {
+                  // v1 shim: a v1 server's hello/refusal is still readable.
+                  const v1 = v1PeerReason(line);
+                  if (v1) {
+                    console.error(`[aio:cli] protocol version mismatch: ${v1}`);
+                    closed = true;
                     try {
                       c.close();
                     } catch { /* already closed */ }
                   }
                   continue;
                 }
-                if (line.startsWith("__proto-err:")) {
-                  console.error(
-                    `[aio:cli] server rejected protocol version: ${
-                      line.slice(12)
-                    }`,
-                  );
-                  closed = true;
-                  continue;
-                }
-                try {
-                  const data = JSON.parse(line);
-                  if (data === null || typeof data !== "object") continue;
-                  state = applyServerMessage(state, data) as S;
-                  if (state != null && _readyResolve) {
-                    _readyResolve(state);
-                    _readyResolve = null;
+                switch (frame.t) {
+                  // Per-action acks for bound-cell method calls
+                  case "ack": {
+                    const { cid } = (frame.d ?? {}) as AckPayload;
+                    if (typeof cid === "string") {
+                      _udsPending.get(cid)?.();
+                      _udsPending.delete(cid);
+                    }
+                    continue;
                   }
-                  if (state != null) { for (const fn of listeners) fn(state); }
-                } catch { /* bad JSON */ }
+                  // A3: version handshake — terminal on mismatch.
+                  case "proto": {
+                    const theirs = parseProtoHello(frame.d);
+                    if (!theirs) continue;
+                    const result = negotiateProtocol(protoHello(), theirs);
+                    if (!result.ok) {
+                      console.error(
+                        `[aio:cli] protocol version mismatch: ${result.reason}`,
+                      );
+                      closed = true; // stop the reconnect loop
+                      try {
+                        c.close();
+                      } catch { /* already closed */ }
+                    }
+                    continue;
+                  }
+                  case "proto-err":
+                    console.error(
+                      `[aio:cli] server rejected protocol version: ${
+                        (frame.d as { reason?: string } | undefined)?.reason ??
+                          "?"
+                      }`,
+                    );
+                    closed = true;
+                    continue;
+                  case "state":
+                  case "patches": {
+                    state = applyServerFrame(state, frame) as S;
+                    if (state != null && _readyResolve) {
+                      _readyResolve(state);
+                      _readyResolve = null;
+                    }
+                    if (state != null) {
+                      for (const fn of listeners) fn(state);
+                    }
+                    continue;
+                  }
+                  default:
+                    continue; // browser-only signals — irrelevant here
+                }
               }
             }
           } catch { /* connection closed */ }
@@ -409,7 +452,7 @@ export function connectCliUDS<S>(socketPath: string): CliApp<S> {
 
     send(action: { type: string; payload?: unknown }): void {
       if (writer) {
-        writer.write(encoder.encode(JSON.stringify(action) + "\n")).catch(
+        writer.write(encoder.encode(enc("action", action) + "\n")).catch(
           () => {},
         );
       } else if (queue.length < WS_MAX_QUEUE) {

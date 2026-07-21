@@ -1,6 +1,7 @@
 // Server & transport setup — TLS, HTTP server, UDS listener, signal handlers
 // Extracted from aio.ts _run() to keep the orchestrator lean.
 
+import { enc } from "../protocol/envelope.ts";
 import { join } from "@std/path";
 import { loadOrCreateCert, type TlsCert } from "./tls.ts";
 import { createServer } from "./server.ts";
@@ -236,7 +237,7 @@ export async function setupTransport<S, A>(
       onConnect: config.onConnect,
       onDisconnect: config.onDisconnect,
       onReload: (signal) => {
-        if (udsRef.current) udsRef.current.broadcast(signal);
+        if (udsRef.current) udsRef.current.broadcast(enc(signal));
       },
       getHealth: () => {
         const composed = (globalThis as Record<string, unknown>)
@@ -304,8 +305,15 @@ export async function setupTransport<S, A>(
       },
     });
 
-  // Wire sync broadcast now that server handle is available
-  if (syncHandler) syncBroadcastRef.fn = server.broadcastRaw;
+  // Wire sync broadcast now that server handle is available. v2 parity:
+  // UDS peers receive op broadcasts too (no per-conn exclude there — the
+  // client engine's self-origin guard absorbs own-op echoes).
+  if (syncHandler) {
+    syncBroadcastRef.fn = (msg, exclude) => {
+      server.broadcastRaw(msg, exclude);
+      udsRef.current?.broadcast(msg);
+    };
+  }
 
   if (skipHttp) log.info("prod+UDS: HTTP server skipped (zero TCP ports)");
 
@@ -335,6 +343,7 @@ export async function setupTransport<S, A>(
       },
       (msg: string) => log.debug(msg),
       clientCounter,
+      syncHandler,
     );
     udsRef.current = uds;
     log.info(`transport: UDS at ${socketPath}`);

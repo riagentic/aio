@@ -16,7 +16,9 @@ Deno.test("aio-403: connectCli preserves ?token= from the share-link URL", async
     }
     const { socket, response } = Deno.upgradeWebSocket(req);
     socket.onopen = () =>
-      socket.send(JSON.stringify({ counter: { count: 3 } }));
+      socket.send(
+        JSON.stringify({ v: 2, t: "state", d: { counter: { count: 3 } } }),
+      );
     return response;
   });
 
@@ -46,7 +48,8 @@ Deno.test("aio-403: connectCli opts.token wins over URL token", async () => {
   const server = Deno.serve({ hostname: "127.0.0.1", port: 0 }, (req) => {
     seenToken = new URL(req.url).searchParams.get("token");
     const { socket, response } = Deno.upgradeWebSocket(req);
-    socket.onopen = () => socket.send(JSON.stringify({ ok: true }));
+    socket.onopen = () =>
+      socket.send(JSON.stringify({ v: 2, t: "state", d: { ok: true } }));
     return response;
   });
 

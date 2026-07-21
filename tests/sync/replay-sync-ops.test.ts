@@ -109,9 +109,12 @@ Deno.test("replaySyncOps: folds committed ops into state at boot", async () => {
   );
 });
 
-Deno.test("replaySyncOps: applies ops in HLC order regardless of insert order", async () => {
+Deno.test("replaySyncOps: applies ops in dispatch (server_ts) order", async () => {
   const db = createTestDb();
-  // Insert out of order; loadOpsSince returns HLC-ordered → deterministic fold.
+  // 2026-07-21: replay folds in server_ts (persist = dispatch) order, NOT HLC
+  // order — the replayed state must equal what the live server built, and the
+  // live server dispatched in persist order. (HLC order can differ: client
+  // clocks stamp ops before the server sequences them.)
   await persistOp(db, {
     id: "b",
     hlc: hlc(2000, 0),
@@ -135,8 +138,8 @@ Deno.test("replaySyncOps: applies ops in HLC order regardless of insert order", 
   );
   assertEquals(
     restored.members.roster.map((m) => m.id),
-    [1, 2],
-    "HLC order, not insert order",
+    [2, 1],
+    "dispatch (persist) order, not HLC order",
   );
 });
 

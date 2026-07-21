@@ -1,6 +1,7 @@
 // Dev-only file watcher — debounced live reload on src/ changes
 // Extracted from createServer() closure to keep server.ts focused on HTTP/WS
 
+import { enc } from "../protocol/envelope.ts";
 import { join } from "@std/path";
 import type { GraphResult } from "./graph-validator.ts";
 import { validateGraph } from "./graph-validator.ts";
@@ -25,7 +26,7 @@ export interface WatcherDeps {
   /** Broadcast a string message to all open WS connections */
   broadcastWs: (msg: string) => void;
   /** Called on reload signal — lets aio.ts forward to UDS */
-  onReload?: (signal: "__reload" | "__css") => void;
+  onReload?: (signal: "reload" | "css") => void;
   /** Called when graph validation produces a new result — server uses this for diagnostic HTML */
   onGraphResult?: (result: GraphResult) => void;
 }
@@ -147,8 +148,7 @@ export function createFileWatcher(deps: WatcherDeps): FileWatcher {
 
         if (graphResult && !graphResult.valid) {
           // Graph is red — send error info to clients, suppress normal reload
-          const errJson = JSON.stringify(graphResult.errors);
-          deps.broadcastWs("__graph_error:" + errJson);
+          deps.broadcastWs(enc("graph-error", graphResult.errors));
           for (const err of graphResult.errors) {
             log.error(
               "graph",
@@ -156,20 +156,20 @@ export function createFileWatcher(deps: WatcherDeps): FileWatcher {
             );
             log.warn("graph", `FIX: ${err.fix}`);
           }
-          deps.onReload?.("__reload");
+          deps.onReload?.("reload");
           graphWasRed = true;
         } else if (graphWasRed) {
           // Was red, now green — tell clients to reload
           graphWasRed = false;
           debug("graph: ✓ all errors fixed — reloading");
-          deps.broadcastWs("__graph_clear");
-          deps.onReload?.("__reload");
+          deps.broadcastWs(enc("graph-clear"));
+          deps.onReload?.("reload");
         } else {
           // Normal reload (no graph issues)
-          const signal = wasFullReload ? "__reload" : "__css";
+          const signal = wasFullReload ? "reload" : "css";
           debug(`${signal} → broadcasting to clients`);
-          deps.broadcastWs(signal);
-          deps.onReload?.(signal as "__reload" | "__css");
+          deps.broadcastWs(enc(signal));
+          deps.onReload?.(signal);
         }
       })().catch((err) => debug(`graph: unexpected error — ${err}`));
     }, 100);

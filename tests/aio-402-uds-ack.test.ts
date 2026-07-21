@@ -1,7 +1,8 @@
-// AIO-402: the UDS server dispatched actions but never sent an `__ack:<cid>:1`
+// AIO-402: the UDS server dispatched actions but never sent a per-action ack
 // back (unlike the WS server). Every awaited `cell.method()` over the UDS+IPC
 // transport (electron dev/prod) hung until the 15s ack timeout — calculations,
 // imports and progress appeared frozen. The UDS server must ack, mirroring WS.
+// v2 (B4b): actions and acks are envelopes.
 import { assertEquals, assertStringIncludes } from "@std/assert";
 import { createUDSListener } from "../src/server/aio.ts";
 import { join } from "@std/path";
@@ -21,19 +22,21 @@ Deno.test("aio-402: UDS server acks a dispatch that carries a cid", async () => 
   const dec = new TextDecoder();
   const writer = conn.writable.getWriter();
   await writer.write(
-    enc.encode('{"type":"doc:add","payload":{},"cid":"abc-123"}\n'),
+    enc.encode(
+      '{"v":2,"t":"action","d":{"type":"doc:add","payload":{},"cid":"abc-123"}}\n',
+    ),
   );
 
   // read the server's reply
   const reader = conn.readable.getReader();
   let got = "";
   const deadline = Date.now() + 2000;
-  while (Date.now() < deadline && !got.includes("__ack:")) {
+  while (Date.now() < deadline && !got.includes('"t":"ack"')) {
     const { value, done } = await reader.read();
     if (done) break;
     got += dec.decode(value);
   }
-  assertStringIncludes(got, "__ack:abc-123:1");
+  assertStringIncludes(got, '{"v":2,"t":"ack","d":{"cid":"abc-123","ok":true}}');
 
   reader.releaseLock();
   writer.releaseLock();
@@ -54,7 +57,9 @@ Deno.test("aio-402: UDS dispatch without a cid produces no ack (no noise)", asyn
   const enc = new TextEncoder();
   const dec = new TextDecoder();
   const writer = conn.writable.getWriter();
-  await writer.write(enc.encode('{"type":"doc:add","payload":{}}\n'));
+  await writer.write(
+    enc.encode('{"v":2,"t":"action","d":{"type":"doc:add","payload":{}}}\n'),
+  );
 
   const reader = conn.readable.getReader();
   let got = "";
@@ -70,7 +75,7 @@ Deno.test("aio-402: UDS dispatch without a cid produces no ack (no noise)", asyn
     if (race.done) break;
     got += dec.decode(race.value);
   }
-  assertEquals(got.includes("__ack:"), false);
+  assertEquals(got.includes('"t":"ack"'), false);
 
   reader.releaseLock();
   writer.releaseLock();

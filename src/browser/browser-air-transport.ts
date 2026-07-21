@@ -28,8 +28,9 @@ import {
   type AioIPCBridge,
   buildWsUrl,
   detectIPC,
-  handleControlMessage,
+  handleControlFrame,
 } from "./browser-shared.ts";
+import { dec, enc, v1PeerReason } from "../protocol/envelope.ts";
 
 let _ws: WebSocket | null = null;
 let _closed = false;
@@ -50,11 +51,11 @@ function _updateDegraded(): void {
 export function isConnectionDegraded(): boolean {
   return _connectionDegraded;
 }
-let _onSyncMessage: ((msg: Record<string, unknown>) => void) | null = null;
+let _onSyncMessage: ((t: string, d: unknown) => void) | null = null;
 
-/** Register a sync message handler for __ack/__op/__sync messages from server */
+/** Register a handler for sync frames (op / sync-ack / sync-res / …). */
 export function setSyncMessageHandler(
-  handler: ((msg: Record<string, unknown>) => void) | null,
+  handler: ((t: string, d: unknown) => void) | null,
 ): void {
   _onSyncMessage = handler;
 }
@@ -76,7 +77,7 @@ function _handleState(data: Record<string, unknown>) {
   if (_coreHasState()) _resolveStateReady();
 }
 
-// Register with the sync-engine seam: raw sends for __op/__sync envelopes,
+// Register with the sync-engine seam: raw sends for op/sync-req envelopes,
 // and the wiring setter that plugs the engine into message + online events.
 _registerSyncTransport(
   (raw) => _sendRaw(raw),
@@ -85,7 +86,7 @@ _registerSyncTransport(
     _syncOnline = onOnline;
   },
 );
-// serverFn client (B3): raw sends for __sfn calls.
+// serverFn client (B3): raw sends for sfn calls.
 _registerSfnTransport((raw) => _sendRaw(raw));
 let _syncOnline: ((v: boolean) => void) | null = null;
 
@@ -97,33 +98,44 @@ function _sendRaw(msg: string): void {
   } else if (_ipc && _ipcConnected) _ipc.send(msg);
 }
 
-function _routeCmd(line: string): boolean {
-  return routeCommand(line, _sendRaw);
-}
-
-function _parseAndRoute(line: string): void {
-  try {
-    const data = JSON.parse(line);
-    if (data === null || typeof data !== "object") return;
-    if (data.__sfnr && handleSfnResult(data)) return;
-    if (
-      data.__ack || data.__op || data.__op_rejected || data.__sync ||
-      data.__sync_error
-    ) {
+/** One demux for both AIR transports (WS + IPC): decode once, route. */
+function _route(line: string): void {
+  const f = dec(line);
+  if (!f) {
+    // The one v1 shim: a v1 server's hello/refusal is still readable.
+    const v1 = v1PeerReason(line);
+    if (v1) console.error(`[aio:air] protocol version mismatch: ${v1}`);
+    else console.warn("[aio:air] undecodable frame — dropped");
+    return;
+  }
+  if (handleControlFrame(f, _bootId)) return;
+  if (routeCommand(f, _sendRaw)) return;
+  switch (f.t) {
+    case "sfnr":
+      handleSfnResult(f.d);
+      return;
+    case "op":
+    case "op-rejected":
+    case "sync-ack":
+    case "sync-res":
+    case "sync-err":
       if (typeof _onSyncMessage === "function") {
-        _onSyncMessage(data);
+        _onSyncMessage(f.t, f.d);
       } else {
         console.warn(
-          `[aio:air] sync message (${
-            Object.keys(data).filter((k) => k.startsWith("__")).join(", ")
-          }) but no handler — discarding`,
+          `[aio:air] sync frame "${f.t}" but no handler — discarding`,
         );
       }
       return;
-    }
-    _handleState(data);
-  } catch (err) {
-    console.warn("[aio:air] bad state message:", err);
+    case "state":
+      _handleState(f.d as Record<string, unknown>);
+      return;
+    case "patches":
+      _handleState({ $patches: f.d });
+      return;
+    default:
+      console.warn(`[aio:air] unexpected "${f.t}" frame — dropped`);
+      return;
   }
 }
 
@@ -131,7 +143,7 @@ function _flushQueue(send: (d: string) => void) {
   const q = _queue;
   _queue = [];
   _connectionDegraded = false;
-  for (const a of q) send(JSON.stringify(a));
+  for (const a of q) send(enc("action", a));
 }
 
 function _scheduleReconnect() {
@@ -158,15 +170,11 @@ function _connectIPC() {
     _flushQueue((d) => _ipc!.send(d));
     if (!_ipcPingTimer) {
       _ipcPingTimer = setInterval(() => {
-        if (_ipc && _ipcConnected) _ipc.send("__ping");
+        if (_ipc && _ipcConnected) _ipc.send(enc("ping"));
       }, 60_000);
     }
   });
-  _ipc.onMessage((line: string) => {
-    if (handleControlMessage(line, _bootId)) return;
-    if (_routeCmd(line)) return;
-    _parseAndRoute(line);
-  });
+  _ipc.onMessage(_route);
   _ipc.onClose(() => {
     _ipcConnected = false;
     _connecting = false;
@@ -200,21 +208,18 @@ function _connect() {
     _syncOnline?.(true);
     // Announce our wire-protocol version before anything else — without this
     // hello the server's version gate never applies to AIR clients.
-    ws.send("__proto:" + JSON.stringify(protoHello()));
+    ws.send(enc("proto", protoHello()));
     const ua = typeof navigator !== "undefined" &&
       /electron/i.test(navigator.userAgent);
-    ws.send("__type:" + (ua ? "electron" : "browser"));
+    ws.send(enc("type", { kind: ua ? "electron" : "browser" }));
     if (_wasConnected) _status("Connected");
     _wasConnected = true;
     _coreResendSubs();
     _flushQueue((d) => ws.send(d));
   };
   ws.onmessage = (e) => {
-    if (typeof e.data === "string" && handleControlMessage(e.data, _bootId)) {
-      return;
-    }
-    if (typeof e.data === "string" && _routeCmd(e.data)) return;
-    _parseAndRoute(e.data);
+    if (typeof e.data !== "string") return;
+    _route(e.data);
   };
   ws.onclose = () => {
     _ws = null;
@@ -232,7 +237,7 @@ function _connect() {
 
 function _send(action: { type: string; payload?: unknown }) {
   const tagged = { ...action, _source: "UI" };
-  const json = JSON.stringify(tagged);
+  const json = enc("action", tagged);
   if (_ws && _ws.readyState === WebSocket.OPEN) {
     try {
       _ws.send(json);

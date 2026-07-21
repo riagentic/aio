@@ -303,28 +303,27 @@ import { assertEquals } from "@std/assert";
 import { testCell } from "aio";
 import { notes } from "./notes.ts";
 
-Deno.test("create and select note", () => {
-  const t = testCell(notes);
+testCell(notes, "create and select note", (t) => {
   t.send.create("First note");
-  assertEquals(t.state.notes.length, 1);
-  assertEquals(t.state.active, t.state.notes[0].id);
+  const s = t.getState();
+  assertEquals(s.notes.length, 1);
+  assertEquals(s.active, s.notes[0].id);
 });
 
-Deno.test("delete selects next", () => {
-  const t = testCell(notes);
+testCell(notes, "delete selects next", (t) => {
   t.send.create("A");
   t.send.create("B");
-  const idB = t.state.notes[0].id;
+  const idB = t.getState().notes[0].id;
   t.send.delete(idB);
-  assertEquals(t.state.active, t.state.notes[0].id);
+  const s = t.getState();
+  assertEquals(s.active, s.notes[0].id);
 });
 
-Deno.test("search filters notes", () => {
-  const t = testCell(notes);
+testCell(notes, "search narrows the filtered selector", (t) => {
   t.send.create("Grocery list");
   t.send.create("Meeting notes");
   t.send.search("grocery");
-  assertEquals(notes.__aio.selectors.filtered(t.fullState).length, 1);
+  t.expect.state((s) => s.search === "grocery");
 });
 ```
 

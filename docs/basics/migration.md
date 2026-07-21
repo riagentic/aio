@@ -228,6 +228,8 @@ async fetchPrice(s) {
 
 ```ts
 import { call } from "aio";
+import { dc } from "./cell/dc/index.ts";
+
 const price = await call({ timeout: 5000 }, () => dc.getPrice("BTC"));
 ```
 
