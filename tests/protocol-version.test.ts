@@ -1,9 +1,11 @@
-// A3 — WS wire-protocol version handshake.
+// A3 — wire-protocol version handshake (v2 envelopes since B4b).
 // Unit: negotiateProtocol/parseProtoHello. Integration: server hello is the
 // first frame, compatible clients proceed, incompatible clients are closed
-// loudly with 4505, and legacy clients (no hello) still work.
+// loudly with 4505 (the refusal reason stays v1-readable — the one shim),
+// and hello-less receive-only clients still get state.
 import { assertEquals, assertExists } from "@std/assert";
 import { join } from "@std/path";
+import { dec, enc } from "../src/protocol/envelope.ts";
 import {
   negotiateProtocol,
   parseProtoHello,
@@ -103,8 +105,9 @@ Deno.test("proto: server hello is the first WS frame", async () => {
       const check = () => frames.length >= 2 ? r() : setTimeout(check, 10);
       check();
     });
-    assertEquals(frames[0]!.startsWith("__proto:"), true);
-    const hello = parseProtoHello(frames[0]!.slice(8));
+    const f = dec(frames[0]!);
+    assertEquals(f?.t, "proto");
+    const hello = parseProtoHello(f!.d);
     assertExists(hello);
     assertEquals(hello.v, PROTOCOL_VERSION);
     ws.close();
@@ -122,7 +125,7 @@ Deno.test("proto: compatible client hello is accepted (connection stays open)", 
     await new Promise<void>((r) => {
       ws.onopen = () => r();
     });
-    ws.send("__proto:" + JSON.stringify(protoHello()));
+    ws.send(enc("proto", protoHello()));
     await new Promise((r) => setTimeout(r, 100));
     assertEquals(closed, false);
     ws.close();
@@ -149,27 +152,52 @@ Deno.test("proto: incompatible client is closed with 4505 and __proto-err", asyn
       ws.onopen = () => r();
     });
     // A future client that requires a protocol this server can't speak.
-    ws.send('__proto:{"v":99,"min":99}');
+    ws.send('{"v":2,"t":"proto","d":{"v":99,"min":99}}');
     await closedP;
     assertEquals(closeCode, PROTOCOL_MISMATCH_CLOSE_CODE);
     assertEquals(protoErr.length > 0, true);
   });
 });
 
-Deno.test("proto: legacy client (no hello) still receives state and dispatches", async () => {
+Deno.test("proto: hello-less client still receives state (server speaks first)", async () => {
   await withServer(async (port) => {
     const ws = new WebSocket(`ws://127.0.0.1:${port}/ws`);
-    const stateFrames: string[] = [];
+    const stateFrames: unknown[] = [];
     ws.addEventListener("message", (e) => {
-      const d = e.data as string;
-      if (!d.startsWith("__")) stateFrames.push(d);
+      const f = dec(e.data as string);
+      if (f?.t === "state") stateFrames.push(f.d);
     });
     await new Promise<void>((r) => {
       const check = () => stateFrames.length >= 1 ? r() : setTimeout(check, 10);
       check();
     });
-    assertEquals(JSON.parse(stateFrames[0]!).ok, true);
+    assertEquals((stateFrames[0] as { ok: boolean }).ok, true);
     ws.close();
     await new Promise((r) => setTimeout(r, 20));
+  });
+});
+
+Deno.test("proto: v1 hello is refused with a v1-readable reason + 4505", async () => {
+  await withServer(async (port) => {
+    const ws = new WebSocket(`ws://127.0.0.1:${port}/ws`);
+    let closeCode = 0;
+    let protoErr = "";
+    ws.addEventListener("message", (e) => {
+      const d = e.data as string;
+      if (d.startsWith("__proto-err:")) protoErr = d.slice(12);
+    });
+    const closedP = new Promise<void>((r) => {
+      ws.addEventListener("close", (e) => {
+        closeCode = e.code;
+        r();
+      });
+    });
+    await new Promise<void>((r) => {
+      ws.onopen = () => r();
+    });
+    ws.send('__proto:{"v":1,"min":1}'); // a v1 client's string-form hello
+    await closedP;
+    assertEquals(closeCode, PROTOCOL_MISMATCH_CLOSE_CODE);
+    assertEquals(protoErr.includes("v2"), true);
   });
 });

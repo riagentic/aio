@@ -154,7 +154,7 @@ no longer infers it from the body. Use `CellEffect` (exported from `aio`), the
 union of every effect a method may return:
 
 ```ts
-import type { CellEffect } from "aio";
+import { cell, type CellEffect, schedule } from "aio";
 
 const cycle = cell("cycle", {
   state: { phase: "work", n: 0 },
@@ -333,6 +333,7 @@ timers, extended to disposables:
 
 ```ts
 import { cell, own } from "aio";
+import { onChange, watchDir } from "./watcher.ts";
 
 const workspace = cell("workspace", {
   state: { dir: "" },
@@ -400,7 +401,8 @@ from `aio` — `until`, `race`, `sleep`.
 | `sleep(ms)`          | `(ms) → Promise<void>`                                        | Plain observable pause                                                                   |
 
 ```ts
-import { cell, race, sleep, until } from "aio";
+import { cell, race, until } from "aio";
+import { api } from "./api.ts";
 
 const checkout = cell("checkout", {
   state: { status: "idle", orderId: null as string | null, confirmed: false },
@@ -465,8 +467,12 @@ the abort through `s.$signal` (an `AbortSignal`) — annotate the draft with
 `& Partial<MethodDraftMeta>` (from `aio`) to type it:
 
 ```ts
-import { cell } from "aio";
-import type { MethodDraftMeta } from "aio";
+import { cell, type MethodDraftMeta } from "aio";
+import { cart } from "./cell/cart/index.ts";
+
+type CheckoutState = { status: string };
+type Item = { id: string };
+const url = "https://api.example.com/orders";
 
 const checkout = cell("checkout", {
   state: { status: "idle" as string },

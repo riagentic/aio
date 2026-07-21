@@ -119,8 +119,11 @@ export default function Dashboard() {
 Import any cell and call its methods directly:
 
 ```ts
-import { inventory } from "../inventory";
-import { pricing } from "../pricing";
+import { cell } from "aio";
+import { inventory } from "../inventory/index.ts";
+import { pricing } from "../pricing/index.ts";
+
+type Item = { id: string; qty: number };
 
 const orders = cell("orders", {
   state: { orderId: null as string | null, total: 0 },
@@ -141,15 +144,23 @@ time-travel, interceptable by `beforeReduce`. TypeScript infers return types.
 ### call() with timeout and retries
 
 ```ts
-import { call } from "aio";
+import { call, cell } from "aio";
+import { inventory } from "./cell/inventory/index.ts";
 
-async placeOrder(s, items: Item[]) {
-  const reserved = await call(
-    { timeout: 5000, retries: 2 },
-    () => inventory.reserve(items)
-  );
-  s.orderId = reserved.orderId;
-}
+type Item = { id: string; qty: number };
+
+export const orders = cell("orders", {
+  state: { orderId: null as string | null },
+  methods: {
+    async placeOrder(s, items: Item[]) {
+      const reserved = await call(
+        { timeout: 5000, retries: 2 },
+        (): Promise<{ orderId: string }> => inventory.reserve(items),
+      );
+      s.orderId = reserved.orderId;
+    },
+  },
+});
 ```
 
 | Option    | Type          | Effect                                     |
@@ -162,7 +173,8 @@ async placeOrder(s, items: Item[]) {
 Watch state, not actions — it doesn't matter which action caused the change:
 
 ```ts
-import { race, until } from "aio";
+import { cell, race, until } from "aio";
+import { payment } from "./cell/payment/index.ts";
 
 const checkout = cell("checkout", {
   state: { paid: false, status: "idle" },

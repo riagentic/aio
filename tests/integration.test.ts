@@ -11,12 +11,21 @@ import { join } from "@std/path";
 
 const PORT = 19810;
 
-// Skip server protocol messages (boot ID, version hello, etc.) — only collect
-// state/delta JSON
+// Skip server protocol frames (boot ID, version hello, time-travel, etc.) —
+// only collect state/patches frames
 const isProto = (d: string) =>
-  typeof d === "string" &&
-  (d.startsWith("__boot:") || d.startsWith("__proto:") ||
-    d.startsWith("__tt:"));
+  typeof d === "string" && !d.includes('"t":"state"') &&
+  !d.includes('"t":"patches"');
+
+// Read a top-level field from a "state" or "patches" frame.
+const frameField = (raw: string, key: string): unknown => {
+  const f = JSON.parse(raw);
+  if (f.t === "patches") {
+    return (f.d as { path: unknown[]; value: unknown }[])
+      .find((op) => op.path[0] === key)?.value;
+  }
+  return (f.d as Record<string, unknown>)[key];
+};
 
 // Wait until condition is true (polling with timeout)
 async function waitFor(fn: () => boolean, ms = 2000): Promise<void> {
@@ -77,24 +86,24 @@ Deno.test("integration: WS connect → initial state → action → delta broadc
 
     // 1. Initial full state
     await waitFor(() => received.length >= 1);
-    assertEquals(JSON.parse(received[0]!), {
+    assertEquals(JSON.parse(received[0]!).d, {
       counter: 0,
       name: "test",
       flag: true,
     });
 
     // 2. First action → full state (no patches provided, fallback sends full state)
-    ws.send(JSON.stringify({ type: "INCREMENT", payload: { by: 5 } }));
+    ws.send(JSON.stringify({ v: 2, t: "action", d: { type: "INCREMENT", payload: { by: 5 } } }));
     await waitFor(() => received.length >= 2);
 
-    const state1 = JSON.parse(received[1]!);
+    const state1 = JSON.parse(received[1]!).d;
     assertEquals(state1, { counter: 5, name: "test", flag: true });
 
     // 3. Second action → full state again
-    ws.send(JSON.stringify({ type: "INCREMENT", payload: { by: 3 } }));
+    ws.send(JSON.stringify({ v: 2, t: "action", d: { type: "INCREMENT", payload: { by: 3 } } }));
     await waitFor(() => received.length >= 3);
 
-    const state2 = JSON.parse(received[2]!);
+    const state2 = JSON.parse(received[2]!).d;
     assertEquals(state2, { counter: 8, name: "test", flag: true });
 
     ws.close();
@@ -135,7 +144,7 @@ Deno.test("integration: invalid actions are rejected gracefully", async () => {
     });
 
     // Missing type field — should NOT dispatch
-    ws.send(JSON.stringify({ payload: "no type" }));
+    ws.send(JSON.stringify({ v: 2, t: "action", d: { payload: "no type" } }));
     await new Promise((r) => setTimeout(r, 50));
     assertEquals(dispatched, false);
 
@@ -145,7 +154,7 @@ Deno.test("integration: invalid actions are rejected gracefully", async () => {
     assertEquals(dispatched, false);
 
     // Valid action — SHOULD dispatch
-    ws.send(JSON.stringify({ type: "PING" }));
+    ws.send(JSON.stringify({ v: 2, t: "action", d: { type: "PING" } }));
     await new Promise((r) => setTimeout(r, 50));
     assertEquals(dispatched, true);
 
@@ -212,15 +221,11 @@ Deno.test("integration: multiple clients receive broadcasts", async () => {
     await waitFor(() => msgs1.length >= 1 && msgs2.length >= 1);
 
     // One client sends action → both receive update
-    ws1.send(JSON.stringify({ type: "BUMP" }));
+    ws1.send(JSON.stringify({ v: 2, t: "action", d: { type: "BUMP" } }));
     await waitFor(() => msgs1.length >= 2 && msgs2.length >= 2);
 
-    const u1 = JSON.parse(msgs1[1]!);
-    const u2 = JSON.parse(msgs2[1]!);
-    const v1 = u1.$p ? u1.$p.v : u1.v;
-    const v2 = u2.$p ? u2.$p.v : u2.v;
-    assertEquals(v1, 1);
-    assertEquals(v2, 1);
+    assertEquals(frameField(msgs1[1]!, "v"), 1);
+    assertEquals(frameField(msgs2[1]!, "v"), 1);
 
     ws1.close();
     ws2.close();
@@ -297,29 +302,26 @@ Deno.test("integration: per-user getUIState returns different state per user", a
     await waitFor(() => msgs2.length >= 1);
 
     // Admin gets full state (including secret)
-    const init1 = JSON.parse(msgs1[0]!);
+    const init1 = JSON.parse(msgs1[0]!).d;
     assertEquals(init1.counter, 0);
     assertEquals(init1.secret, "admin-only");
 
     // Viewer gets filtered state (no secret)
-    const init2 = JSON.parse(msgs2[0]!);
+    const init2 = JSON.parse(msgs2[0]!).d;
     assertEquals(init2.counter, 0);
     assertEquals(init2.secret, undefined);
 
     // Bump state — both get their filtered view
-    ws1.send(JSON.stringify({ type: "INC" }));
+    ws1.send(JSON.stringify({ v: 2, t: "action", d: { type: "INC" } }));
     await waitFor(() => msgs1.length >= 2 && msgs2.length >= 2);
 
-    const u1 = JSON.parse(msgs1[msgs1.length - 1]!);
-    const c1 = u1.$p ? u1.$p.counter : u1.counter;
-    assertEquals(c1, 1);
-
-    const u2 = JSON.parse(msgs2[msgs2.length - 1]!);
-    const c2 = u2.$p ? u2.$p.counter : u2.counter;
-    assertEquals(c2, 1);
+    assertEquals(frameField(msgs1[msgs1.length - 1]!, "counter"), 1);
+    assertEquals(frameField(msgs2[msgs2.length - 1]!, "counter"), 1);
     // Viewer should still not have secret in broadcast
-    assertEquals(u2.secret, undefined);
-    if (u2.$p) assertEquals(u2.$p.secret, undefined);
+    assertEquals(
+      frameField(msgs2[msgs2.length - 1]!, "secret"),
+      undefined,
+    );
 
     ws1.close();
     ws2.close();
@@ -399,12 +401,9 @@ Deno.test("integration: CSS-only change sends __css signal, not __reload", async
     const ws = new WebSocket(`ws://127.0.0.1:${PORT}/ws`);
     const received: string[] = [];
     ws.addEventListener("message", (e) => {
-      if (
-        typeof e.data === "string" &&
-        (e.data === "__css" || e.data === "__reload")
-      ) {
-        received.push(e.data as string);
-      }
+      if (typeof e.data !== "string") return;
+      const f = JSON.parse(e.data);
+      if (f?.t === "css" || f?.t === "reload") received.push(f.t as string);
     });
 
     await new Promise<void>((r) => {
@@ -412,15 +411,15 @@ Deno.test("integration: CSS-only change sends __css signal, not __reload", async
     });
     await new Promise((r) => setTimeout(r, 100));
 
-    // Modify CSS only → should get __css
+    // Modify CSS only → should get a "css" frame
     await Deno.writeTextFile(join(dir, "style.css"), "body { color: blue }");
     await waitFor(() => received.length >= 1, 3000);
-    assertEquals(received[0], "__css");
+    assertEquals(received[0], "css");
 
-    // Modify TS file → should get __reload
+    // Modify TS file → should get a "reload" frame
     await Deno.writeTextFile(join(dir, "app.ts"), 'console.log("changed")');
     await waitFor(() => received.length >= 2, 3000);
-    assertEquals(received[1], "__reload");
+    assertEquals(received[1], "reload");
 
     ws.close();
   } finally {
@@ -525,15 +524,14 @@ Deno.test("guardrail: reducer bad shape → server survives, valid actions still
     },
     async (ws, received) => {
       // Send bad action — reducer returns wrong shape, server should survive
-      ws.send(JSON.stringify({ type: "BAD" }));
+      ws.send(JSON.stringify({ v: 2, t: "action", d: { type: "BAD" } }));
       await new Promise((r) => setTimeout(r, 100));
 
       // Send valid action — should still process and broadcast
-      ws.send(JSON.stringify({ type: "INC" }));
+      ws.send(JSON.stringify({ v: 2, t: "action", d: { type: "INC" } }));
       await waitFor(() => received.length >= 2);
 
-      const last = JSON.parse(received[received.length - 1]!);
-      const counter = last.$p ? last.$p.counter : last.counter;
+      const counter = frameField(received[received.length - 1]!, "counter");
       assertEquals(counter, 1);
     },
   );
@@ -551,11 +549,10 @@ Deno.test("guardrail: effect missing .type → skipped, state still updates", as
       return { state, effects: [] };
     },
     async (ws, received) => {
-      ws.send(JSON.stringify({ type: "WITH_BAD_EFFECT" }));
+      ws.send(JSON.stringify({ v: 2, t: "action", d: { type: "WITH_BAD_EFFECT" } }));
       await waitFor(() => received.length >= 2);
 
-      const last = JSON.parse(received[received.length - 1]!);
-      const counter = last.$p ? last.$p.counter : last.counter;
+      const counter = frameField(received[received.length - 1]!, "counter");
       assertEquals(counter, 1); // state updated despite bad effects
     },
   );
@@ -572,15 +569,14 @@ Deno.test("guardrail: reducer throw → recovery, subsequent actions still work"
     },
     async (ws, received) => {
       // Throw — server should catch and continue
-      ws.send(JSON.stringify({ type: "EXPLODE" }));
+      ws.send(JSON.stringify({ v: 2, t: "action", d: { type: "EXPLODE" } }));
       await new Promise((r) => setTimeout(r, 100));
 
       // Valid action after throw — should work fine
-      ws.send(JSON.stringify({ type: "INC" }));
+      ws.send(JSON.stringify({ v: 2, t: "action", d: { type: "INC" } }));
       await waitFor(() => received.length >= 2);
 
-      const last = JSON.parse(received[received.length - 1]!);
-      const counter = last.$p ? last.$p.counter : last.counter;
+      const counter = frameField(received[received.length - 1]!, "counter");
       assertEquals(counter, 1);
     },
   );

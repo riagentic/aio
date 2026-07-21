@@ -1,121 +1,207 @@
-// envelope.ts — THE wire-frame catalog (perfect-aio D7/B4b).
+// envelope.ts — THE wire envelope (perfect-aio D7/B4b, v2).
 //
-// Every message that crosses a transport (WS browser/cli, UDS, Electron IPC)
-// is listed here, typed, with its direction and carrier. New frames MUST be
-// added here first — tests/wire-envelope.test.ts pins this catalog against
-// the live encoders/decoders, so an undocumented frame fails CI.
+// Every message on every transport (WS browser/cli, UDS NDJSON, Electron
+// IPC relay) is ONE JSON envelope: `{ v: 2, t: "<kind>", d?: payload }`.
+// New frames MUST be added to the Kind union + FRAME_KINDS here first —
+// tests/wire-envelope.test.ts pins the catalog against the live code in
+// both directions, so an undocumented kind fails CI.
 //
-// Wire encoding (v1, unchanged): control frames are string-prefixed
-// (`__x:` + payload), data frames are JSON keyed by a discriminator
-// (`__op`, `__sync`, `__sfn`, …), state frames are bare JSON. The catalog
-// types the existing bytes — byte-level unification into a single JSON
-// envelope is deferred to the next PROTOCOL_VERSION bump (see
-// docs/upgrade/restructure.md § B4b).
+// v2 replaced the v1 zoo (string prefixes + discriminator keys + bare-JSON
+// state) and split the keys the survey found overloaded:
+//   __tt:            → "tt-state" (S→C) / "tt-cmd" (C→S)
+//   __ack:<cid>:<ok> → "ack"      — distinct from the CRDT "sync-ack"
+//   {__sync}         → "sync-req" (C→S) / "sync-res" (S→C)
+//   bare JSON        → "state" / "patches" — no more "anything without a
+//                      discriminator is state" hazard.
+// The ONE deliberate v1 shim: a version-mismatch reply is still sent as the
+// legacy `__proto-err:<reason>` string (a v1 peer must be able to READ why
+// it was refused before the 4505 close).
 
 import type { Patch } from "immer";
 
-// ── String-prefix control frames ─────────────────────────────────────────
-/** Every string-prefix a demux chain may see, in one place. */
-export const WIRE = {
-  proto: "__proto:", // both dirs — version hello {v,min}
-  protoErr: "__proto-err:", // S→C — version mismatch, then close 4505
-  type: "__type:", // C→S — client kind: electron|browser
-  boot: "__boot:", // S→C — boot id (reload token)
-  reload: "__reload", // S→C — dev: full reload
-  css: "__css", // S→C — dev: css-only reload
-  ping: "__ping", // C→S — UDS/IPC keepalive
-  subs: "__subs:", // C→S — subscription list (JSON string[])
-  resync: "__resync", // C→S — request full snapshot
-  getState: "__getState", // S→C — request client-side state
-  clientState: "__clientState:", // C→S — reply to getState (JSON)
-  log: "__log:", // C→S — dev: forwarded console entry
-  diag: "__diag:", // S→C — diagnostic event (JSON)
-  tt: "__tt:", // S→C: panel state (JSON) / C→S: command string
-  uiSurface: "__ui:surface", // S→C — semantic-surface request
-  uiSurfaceResult: "__ui:surface-result:", // C→S — surface reply (JSON)
-  uiTrigger: "__ui:trigger:", // S→C — trigger request (JSON)
-  uiTriggerResult: "__ui:trigger-result:", // C→S — trigger reply (JSON)
-  vitalsPing: "__vitals:ping:", // C→S — RTT probe {t1,ms}
-  vitalsPong: "__vitals:pong:", // S→C — RTT reply {t1,t2,loop}
-  ack: "__ack:", // S→C — per-action ack `__ack:<cid>:<0|1>`
-} as const;
+/** Every wire-frame kind, with direction (C→S / S→C / both). */
+export type Kind =
+  | "proto" // both — version hello {v,min}
+  | "proto-err" // S→C — mismatch reason, then close 4505
+  | "type" // C→S — client kind {kind:"electron"|"browser"}
+  | "boot" // S→C — boot id (reload token) {id}
+  | "reload" // S→C — dev: full reload
+  | "css" // S→C — dev: css-only reload
+  | "ping" // C→S — UDS/IPC keepalive
+  | "subs" // C→S — subscription list {subs}
+  | "resync" // C→S — request full snapshot
+  | "get-state" // S→C — request client-side state
+  | "client-state" // C→S — reply to get-state {state}
+  | "log" // C→S — dev: forwarded console entry
+  | "diag" // S→C — diagnostic event
+  | "graph-error" // S→C — dev: graph-validator errors (overlay)
+  | "graph-clear" // S→C — dev: graph errors fixed
+  | "tt-state" // S→C — time-travel panel state
+  | "tt-cmd" // C→S — time-travel command {cmd}
+  | "ui-surface" // S→C — semantic-surface request
+  | "ui-surface-result" // C→S — surface reply
+  | "ui-trigger" // S→C — trigger request
+  | "ui-trigger-result" // C→S — trigger reply
+  | "vitals-ping" // C→S — RTT probe {t1,ms}
+  | "vitals-pong" // S→C — RTT reply {t1,t2,loop}
+  | "ack" // S→C — per-action ack {cid,ok}
+  | "action" // C→S — dispatch {type,payload?,cid?,_source?}
+  | "state" // S→C — full-state snapshot
+  | "patches" // S→C — Immer patch delta
+  | "op" // both — CRDT op (C→S local / S→C broadcast)
+  | "sync-req" // C→S — sync request
+  | "sync-res" // S→C — sync response
+  | "sync-ack" // S→C — per-op CRDT ack
+  | "op-rejected" // S→C — server refused an optimistic op (D11)
+  | "sync-err" // S→C — sync failure, client backs off + re-requests
+  | "sfn" // C→S — server-function invocation
+  | "sfnr"; // S→C — server-function result
 
-// ── JSON data frames (discriminator-keyed) ───────────────────────────────
-/** C→S action dispatch (also what UDS/NDJSON lines carry). */
-export type ActionFrame = {
+/** Runtime list of every kind — the test pins this against the union. */
+export const FRAME_KINDS: readonly Kind[] = [
+  "proto",
+  "proto-err",
+  "type",
+  "boot",
+  "reload",
+  "css",
+  "ping",
+  "subs",
+  "resync",
+  "get-state",
+  "client-state",
+  "log",
+  "diag",
+  "graph-error",
+  "graph-clear",
+  "tt-state",
+  "tt-cmd",
+  "ui-surface",
+  "ui-surface-result",
+  "ui-trigger",
+  "ui-trigger-result",
+  "vitals-ping",
+  "vitals-pong",
+  "ack",
+  "action",
+  "state",
+  "patches",
+  "op",
+  "sync-req",
+  "sync-res",
+  "sync-ack",
+  "op-rejected",
+  "sync-err",
+  "sfn",
+  "sfnr",
+] as const;
+
+const KIND_SET: ReadonlySet<string> = new Set(FRAME_KINDS);
+
+/** One decoded wire frame. `d` is kind-specific (see payload types below). */
+export type Frame = { v: 2; t: Kind; d?: unknown };
+
+/** Encode a frame for the wire (WS message body / one NDJSON line). */
+export function enc(t: Kind, d?: unknown): string {
+  return d === undefined
+    ? JSON.stringify({ v: 2, t })
+    : JSON.stringify({ v: 2, t, d });
+}
+
+/** Encode around an ALREADY-STRINGIFIED payload — the broadcast hot path
+ *  serializes big state once and must not pay for it twice. */
+export function encRaw(t: Kind, dJson: string): string {
+  return `{"v":2,"t":"${t}","d":${dJson}}`;
+}
+
+/** Decode one wire message. Null for anything that is not a well-formed v2
+ *  envelope — callers treat null as a protocol violation, never as state
+ *  (the v1 bare-JSON fallthrough is gone by design). */
+export function dec(raw: string): Frame | null {
+  if (raw.length === 0 || raw[0] !== "{") return null;
+  try {
+    const p = JSON.parse(raw) as { v?: unknown; t?: unknown; d?: unknown };
+    if (p && p.v === 2 && typeof p.t === "string" && KIND_SET.has(p.t)) {
+      return p as Frame;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+// ── Kind-specific payload shapes ─────────────────────────────────────────
+export type ActionPayload = {
   type: string;
   payload?: unknown;
   cid?: string;
   _source?: string;
 };
-/** S→C full-state snapshot: any JSON object without a discriminator key. */
-export type StateFrame = Record<string, unknown>;
-/** S→C state delta. */
-export type PatchesFrame = { $patches: Patch[] };
-/** CRDT op — C→S (local) and S→C (broadcast). */
-export type OpFrame = {
-  __op: {
-    id: string;
-    hlc: [number, number, string];
-    cell: string;
-    action: string;
-    payload?: unknown;
-    serverTs?: number;
-  };
+export type AckPayload = { cid: string; ok: boolean };
+export type PatchesPayload = Patch[];
+export type OpPayload = {
+  id: string;
+  hlc: [number, number, string];
+  cell: string;
+  action: string;
+  payload?: unknown;
+  serverTs?: number;
 };
-/** C→S sync request. */
-export type SyncRequestFrame = {
-  __sync: { clientId: string; cells: unknown; pendingOps?: unknown };
+export type SyncReqPayload = {
+  clientId: string;
+  cells: unknown;
+  pendingOps?: unknown;
 };
-/** S→C sync response (same key as the request — shape differs by direction). */
-export type SyncResponseFrame = {
-  __sync: {
-    mode: "snapshot" | "incremental";
-    ops: unknown[];
-    snapshot?: unknown;
-    lowWater?: unknown;
-    lastServerTs?: number;
-  };
+export type SyncResPayload = {
+  mode: "snapshot" | "incremental";
+  ops: unknown[];
+  snapshot?: unknown;
+  lowWater?: unknown;
+  lastServerTs?: number;
 };
-/** S→C per-op sync ack (JSON form — distinct from the string `__ack:` frame). */
-export type SyncAckFrame = {
-  __ack: { cell: string; opId: string; serverHlc: [number, number, string] };
+export type SyncAckPayload = {
+  cell: string;
+  opId: string;
+  serverHlc: [number, number, string];
 };
-/** S→C op rejection (D11 — server refused an optimistic op). */
-export type OpRejectedFrame = {
-  __op_rejected: { opId: string; cell: string; reason: string };
+export type OpRejectedPayload = { opId: string; cell: string; reason: string };
+export type SyncErrPayload = { reason: string };
+export type SfnPayload = {
+  cid: string;
+  ns: string;
+  name: string;
+  args: unknown[];
 };
-/** S→C sync failure — client must back off and re-request. */
-export type SyncErrorFrame = { __sync_error: { reason: string } };
-/** C→S server-function invocation. */
-export type SfnFrame = {
-  __sfn: { cid: string; ns: string; name: string; args: unknown[] };
-};
-/** S→C server-function result. */
-export type SfnResultFrame = {
-  __sfnr: { cid: string; ok: boolean; value?: unknown; error?: string };
+export type SfnrPayload = {
+  cid: string;
+  ok: boolean;
+  value?: unknown;
+  error?: string;
 };
 
-export type JsonFrame =
-  | ActionFrame
-  | PatchesFrame
-  | OpFrame
-  | SyncRequestFrame
-  | SyncResponseFrame
-  | SyncAckFrame
-  | OpRejectedFrame
-  | SyncErrorFrame
-  | SfnFrame
-  | SfnResultFrame
-  | StateFrame;
+/** Kinds a UDS/NDJSON endpoint does NOT serve (vitals + time-travel are
+ *  WS-only diagnostics) — rejected LOUDLY, never dropped (dev/prod
+ *  equivalency: no silent forks). Sync + serverFns ARE served on UDS since
+ *  v2 (the alpha28 transport-capability skew is gone). */
+export function unsupportedOnUds(t: Kind): boolean {
+  return t === "vitals-ping" || t === "vitals-pong" || t === "tt-cmd" ||
+    t === "tt-state";
+}
 
-/** Frames a UDS/NDJSON server endpoint does NOT implement (CRDT sync,
- *  serverFn, vitals, time-travel) — receivers must reject these LOUDLY
- *  instead of dropping them (dev/prod-equivalency: no silent forks). */
-export function unsupportedOnUds(
-  parsed: Record<string, unknown>,
-): string | null {
-  if (parsed.__op || parsed.__sync) return "CRDT sync";
-  if (parsed.__sfn) return "serverFns";
+/** @deprecated v1 string prefixes — kept ONLY for the version-mismatch shim
+ *  (`__proto-err:`) and historical tests. New code speaks `enc`/`dec`. */
+export const WIRE = {
+  proto: "__proto:",
+  protoErr: "__proto-err:",
+} as const;
+
+/** The receive side of the v1 shim: when an undecodable line is a v1 peer's
+ *  hello or refusal, returns the human-readable mismatch reason so the caller
+ *  can go terminal LOUDLY. Null for anything else (plain garbage). */
+export function v1PeerReason(line: string): string | null {
+  if (line.startsWith(WIRE.protoErr)) return line.slice(WIRE.protoErr.length);
+  if (line.startsWith(WIRE.proto)) {
+    return "peer speaks wire protocol v1 — rebuild/update it";
+  }
   return null;
 }

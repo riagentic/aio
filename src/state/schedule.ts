@@ -47,6 +47,18 @@ export type ScheduleDef =
 
 // ── Effect creators (pure) ──────────────────────────────────────────
 
+/** The action a schedule fires — a plain `{ type, payload }` object.
+ *  `SA<A>` rejects the RESULT of calling a method (a Promise) at compile
+ *  time with a teaching message (quant, alpha28 migration): writing
+ *  `schedule.after('t', 5000, cell.tick())` calls the method NOW and passes
+ *  its Promise; the fix is `{ type: "cell:tick" }`. */
+type ScheduleAction = { type: string; payload?: unknown };
+type SA<A> = A extends PromiseLike<unknown> ? {
+    "⚠️ you CALLED the method — schedule takes an action OBJECT":
+      "use cell.method.action(...) (or { type: 'cell:method', payload }) instead of cell.method()";
+  }
+  : ScheduleAction;
+
 /** Effect creators for declarative scheduling — use in reducers to schedule/cancel timers.
  * @example
  * ```ts
@@ -55,31 +67,49 @@ export type ScheduleDef =
  * return [schedule.cancel('save-timeout')]
  * ``` */
 export const schedule = {
-  after: (
+  after: <A>(
     id: string,
     ms: number,
-    action: { type: string; payload?: unknown },
-  ): ScheduleEffect => ({ type: "__schedule", kind: "after", id, ms, action }),
-  every: (
+    action: ScheduleAction & SA<A> | A & SA<A>,
+  ): ScheduleEffect => ({
+    type: "__schedule",
+    kind: "after",
+    id,
+    ms,
+    action: action as ScheduleAction,
+  }),
+  every: <A>(
     id: string,
     ms: number,
-    action: { type: string; payload?: unknown },
-  ): ScheduleEffect => ({ type: "__schedule", kind: "every", id, ms, action }),
-  at: (
+    action: ScheduleAction & SA<A> | A & SA<A>,
+  ): ScheduleEffect => ({
+    type: "__schedule",
+    kind: "every",
+    id,
+    ms,
+    action: action as ScheduleAction,
+  }),
+  at: <A>(
     id: string,
     time: string,
-    action: { type: string; payload?: unknown },
-  ): ScheduleEffect => ({ type: "__schedule", kind: "at", id, time, action }),
-  cron: (
+    action: ScheduleAction & SA<A> | A & SA<A>,
+  ): ScheduleEffect => ({
+    type: "__schedule",
+    kind: "at",
+    id,
+    time,
+    action: action as ScheduleAction,
+  }),
+  cron: <A>(
     id: string,
     pattern: string,
-    action: { type: string; payload?: unknown },
+    action: ScheduleAction & SA<A> | A & SA<A>,
   ): ScheduleEffect => ({
     type: "__schedule",
     kind: "cron",
     id,
     pattern,
-    action,
+    action: action as ScheduleAction,
   }),
   /** Exponential backoff (risoto #4) — a one-shot `after` whose delay grows
    *  with `attempt`: `min(base * factor^attempt, max)` ms. Track `attempt` in
@@ -95,7 +125,7 @@ export const schedule = {
     id: string,
     attempt: number,
     opts: { base: number; max?: number; factor?: number },
-    action: { type: string; payload?: unknown },
+    action: ScheduleAction,
   ): ScheduleEffect => {
     const factor = opts.factor ?? 2;
     const max = opts.max ?? Number.MAX_SAFE_INTEGER;

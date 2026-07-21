@@ -1,6 +1,7 @@
 // Shared browser utilities — used by both browser.ts (React) and browser-air.ts (AIR)
 // Extracted from duplicated inline copies (AIO-47)
 
+import type { Frame } from "../protocol/envelope.ts";
 import {
   negotiateProtocol,
   parseProtoHello,
@@ -178,45 +179,57 @@ export function refreshCSS(): void {
 }
 
 /**
- * Handle control messages common to both WS and IPC transports.
- * Returns true if the message was handled (caller should return early).
+ * Handle control frames common to both WS and IPC transports (v2 envelope).
+ * Returns true if the frame was handled (caller should return early).
+ * The caller decodes — one `dec()` per line, at the transport's front door.
  */
-export function handleControlMessage(
-  line: string,
+export function handleControlFrame(
+  f: Frame,
   bootId: { current: string | null },
 ): boolean {
-  if (line === "__reload") {
-    location.reload();
-    return true;
-  }
-  if (line === "__css") {
-    refreshCSS();
-    return true;
-  }
-  if (line.startsWith("__boot:")) {
-    const id = line.slice(7);
-    if (bootId.current && bootId.current !== id) {
+  switch (f.t) {
+    case "reload":
       location.reload();
       return true;
-    }
-    bootId.current = id;
-    return true;
-  }
-  // A3: version hellos on transports without their own handler (IPC — client
-  // and server ship in one bundle, so a real mismatch is a packaging bug).
-  if (line.startsWith("__proto:")) {
-    const theirs = parseProtoHello(line.slice(8));
-    if (theirs) {
-      const result = negotiateProtocol(protoHello(), theirs);
-      if (!result.ok) {
-        console.error(`[aio] protocol version mismatch: ${result.reason}`);
+    case "css":
+      refreshCSS();
+      return true;
+    case "boot": {
+      const id = (f.d as { id?: string } | undefined)?.id ?? "";
+      if (bootId.current && bootId.current !== id) {
+        location.reload();
+        return true;
       }
+      bootId.current = id;
+      return true;
     }
-    return true;
+    case "graph-error":
+    case "graph-clear":
+      // Dev overlay owns these; a bundle without the overlay reloads to
+      // pick up the corrected build.
+      location.reload();
+      return true;
+    // A3: version hellos on transports without their own handler (IPC —
+    // client and server ship in one bundle, a real mismatch is a packaging
+    // bug).
+    case "proto": {
+      const theirs = parseProtoHello(f.d);
+      if (theirs) {
+        const result = negotiateProtocol(protoHello(), theirs);
+        if (!result.ok) {
+          console.error(`[aio] protocol version mismatch: ${result.reason}`);
+        }
+      }
+      return true;
+    }
+    case "proto-err":
+      console.error(
+        `[aio] server rejected protocol version: ${
+          (f.d as { reason?: string } | undefined)?.reason ?? "?"
+        }`,
+      );
+      return true;
+    default:
+      return false;
   }
-  if (line.startsWith("__proto-err:")) {
-    console.error(`[aio] server rejected protocol version: ${line.slice(12)}`);
-    return true;
-  }
-  return false;
 }

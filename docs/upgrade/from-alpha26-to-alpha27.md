@@ -21,3 +21,8 @@ Quick orientation:
 | `generators:` workflows | plain async methods + `until()` / `race()` / `sleep()`  |
 | generator cancellation  | `cancelOn: { method: [triggers] }` + `s.$signal`        |
 | middleware              | built-ins (logger, vitals, storm detector, cell checks) |
+
+> ⚠️ **`_status` readers migrate too** (quant): machine cells auto-exposed a
+> `_status` field; with `machine:` gone, `status` is a state field **you**
+> declare — and any UI/selector reading the old `_status` must switch to your
+> new field. `_status` itself is reserved and throws at compose time.

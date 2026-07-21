@@ -103,6 +103,9 @@ export interface UIElementHandle {
   readonly text: string;
   /** The element's current `value` (inputs). */
   readonly value: string;
+  /** True while the element is disabled — resolvable and assertable without
+   *  interacting (interactions on a disabled element fail loud). */
+  readonly disabled: boolean;
   /** Structured info (tag, events, path) from the surface. */
   readonly info: UIElementInfo;
 }
@@ -176,6 +179,43 @@ function fail(msg: string, available: string[]): never {
   );
 }
 
+/** List a node's addressable names for error messages, annotating same-named
+ *  sibling components with their count and the ordinal escape hatch:
+ *  `Button ×2 — use Button2 for the 2nd`. */
+function listNames(node: UISurfaceNode): string[] {
+  const out = node.elements.map((e) => e.name);
+  const counts = new Map<string, number>();
+  for (const c of node.children) {
+    counts.set(c.component, (counts.get(c.component) ?? 0) + 1);
+  }
+  for (const [name, n] of counts) {
+    out.push(
+      n > 1
+        ? `${name} ×${n} — use ${name}2${
+          n > 2 ? `…${name}${n}` : ""
+        } for the later instance${n > 2 ? "s" : ""}`
+        : name,
+    );
+  }
+  return out;
+}
+
+/** Resolve the ordinal component form: `Button2` → the 2nd `Button` instance
+ *  in tree (depth-first) order, 2-based to mirror element name de-duping
+ *  (`Input`, `Input2`, …). Only kicks in when no exact name matched, so a
+ *  component genuinely named `Button2` always wins. (risoto 2026-07-21) */
+function ordinalComponent(
+  scope: UISurfaceNode,
+  prop: string,
+): UISurfaceNode | undefined {
+  const m = /^(.*[^\d])(\d+)$/.exec(prop);
+  if (!m) return undefined;
+  const n = Number(m[2]);
+  if (n < 2) return undefined;
+  const hits = findComponents(scope, m[1]!);
+  return hits.length >= n ? hits[n - 1] : undefined;
+}
+
 /**
  * Mount an AIR app and drive it through its semantic surface — first-class UI
  * testing without DOM/selector lookup. Every TSX component becomes a readable,
@@ -200,14 +240,24 @@ function fail(msg: string, available: string[]): never {
  * — disposed at scope end. Options only when you need control:
  * `{ document, cells, persist, settleIterations }`.
  */
+/** Any function component. Wider than ComponentFn on purpose: components
+ *  typed via `jsxImportSource: "aio"` return jsx-runtime's JSX.Element —
+ *  the same VNode shape under a different declaration — and forcing callers
+ *  to cast was a real papercut (quant). The one cast lives here instead. */
+// deno-lint-ignore no-explicit-any
+export type TestableComponent = (props?: any) => unknown;
+
 export function testUI(
-  App: ComponentFn,
+  App: TestableComponent,
   name: string,
   fn: (ui: TestUI) => void | Promise<void>,
 ): void;
-export function testUI(App: ComponentFn, opts?: TestUIOptions): Promise<TestUI>;
 export function testUI(
-  App: ComponentFn,
+  App: TestableComponent,
+  opts?: TestUIOptions,
+): Promise<TestUI>;
+export function testUI(
+  App: TestableComponent,
   optsOrName?: TestUIOptions | string,
   fn?: (ui: TestUI) => void | Promise<void>,
 ): void | Promise<TestUI> {
@@ -221,7 +271,7 @@ export function testUI(
       throw new Error('testUI(App, "name", fn): missing test function');
     }
     Deno.test(optsOrName, async () => {
-      const ui = await _mountTestUI(App, {});
+      const ui = await _mountTestUI(App as ComponentFn, {});
       let bodyErr: { e: unknown } | null = null;
       try {
         await fn(ui);
@@ -242,7 +292,7 @@ export function testUI(
     });
     return;
   }
-  return _mountTestUI(App, optsOrName ?? {});
+  return _mountTestUI(App as ComponentFn, optsOrName ?? {});
 }
 
 async function _mountTestUI(
@@ -289,6 +339,31 @@ async function _mountTestUI(
     }
   }
   const maxIter = opts.settleIterations ?? 20;
+
+  // Components using media queries must boot under testUI (inews audit #7):
+  // forward the owned window's real matchMedia when it has one, else a minimal
+  // always-false stub. Legacy addListener/removeListener included — older
+  // libraries still call them. Removed on unmount/dispose.
+  if (!(globalThis as AnyDoc).matchMedia) {
+    const stub = (query: string) => ({
+      matches: false,
+      media: query,
+      onchange: null,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+      addListener: () => {},
+      removeListener: () => {},
+      dispatchEvent: () => false,
+    });
+    Object.defineProperty(globalThis, "matchMedia", {
+      get: () =>
+        ownedWindow?.matchMedia
+          ? ownedWindow.matchMedia.bind(ownedWindow)
+          : stub,
+      configurable: true,
+    });
+    _ownedGlobals.push("matchMedia");
+  }
 
   // Standalone runtime needs localStorage — shim an in-memory one if absent
   // so tests need zero extra setup (persistence still behaves).
@@ -389,15 +464,30 @@ async function _mountTestUI(
   let _hasQueuedError = false;
   function enqueue<T>(fn: () => Promise<T>): Promise<T> {
     const run = _tail.then(fn);
+    // A failure the caller AWAITED (attached a rejection handler to) is
+    // delivered there and must NOT resurface at the next drain point — else
+    // an `assertRejects(() => ui.X.click())` test re-fails at dispose.
+    let delivered = false;
     // The tail handler makes un-awaited rejections "handled" (no process
     // unhandledrejection) while stashing the first failure for the drain.
     _tail = run.then(() => {}, (e) => {
-      if (!_hasQueuedError) {
+      if (!delivered && !_hasQueuedError) {
         _hasQueuedError = true;
         _queuedError = e;
       }
     });
-    return run;
+    return {
+      then: (onF, onR) => {
+        if (onR) delivered = true;
+        return run.then(onF, onR);
+      },
+      catch: (onR) => {
+        delivered = true;
+        return run.catch(onR);
+      },
+      finally: (onC) => run.finally(onC),
+      [Symbol.toStringTag]: "Promise",
+    } as Promise<T>;
   }
   async function drain(): Promise<void> {
     let t: Promise<void>;
@@ -415,8 +505,23 @@ async function _mountTestUI(
 
   function elementHandle(resolveInfo: () => UIElementInfo): UIElementHandle {
     const el = () => resolveInfo()._el! as AnyDoc;
-    const act = (fn: (e: AnyDoc) => void) =>
+    // A real user cannot operate a disabled control — interacting with one
+    // fails loud with its state instead of firing a dead event or a bare
+    // "not a function" TypeError. Assert `ui.….X.disabled` instead. (inews P1)
+    const assertEnabled = (verb: string) => {
+      const i = resolveInfo();
+      if (i.disabled) {
+        throw new Error(
+          `testUI: cannot ${verb} "${i.name}" — the ${i.tag} is disabled\n` +
+            `  assert it instead: ui.….${i.name}.disabled === true (or enable it first)`,
+        );
+      }
+    };
+    // verb: user-gesture actions guard against disabled at action time
+    // (queue-time, so un-awaited sequences fail at the next drain point).
+    const act = (verb: string | null, fn: (e: AnyDoc) => void) =>
       enqueue(async () => {
+        if (verb) assertEnabled(verb);
         fn(el());
         await settle();
       });
@@ -425,13 +530,14 @@ async function _mountTestUI(
         return resolveInfo();
       },
       click() {
-        return act((e) => triggerAction(e, "click"));
+        return act("click", (e) => triggerAction(e, "click"));
       },
       dblclick() {
-        return act((e) => triggerAction(e, "dblclick"));
+        return act("dblclick", (e) => triggerAction(e, "dblclick"));
       },
       type(text: string) {
         return enqueue(async () => {
+          assertEnabled("type into");
           el().focus?.();
           for (const ch of text) {
             triggerChar(el(), ch); // re-resolve — controlled inputs re-render
@@ -441,35 +547,38 @@ async function _mountTestUI(
         });
       },
       press(key: string, mods?: KeyModifiers) {
-        return act((e) => triggerAction(e, "press", key, mods));
+        return act(
+          "press a key on",
+          (e) => triggerAction(e, "press", key, mods),
+        );
       },
       hover() {
-        return act((e) => triggerAction(e, "hover"));
+        return act(null, (e) => triggerAction(e, "hover"));
       },
       focus() {
-        return act((e) => triggerAction(e, "focus"));
+        return act(null, (e) => triggerAction(e, "focus"));
       },
       blur() {
-        return act((e) => triggerAction(e, "blur"));
+        return act(null, (e) => triggerAction(e, "blur"));
       },
       select(value: string) {
-        return act((e) => triggerSelect(e, value));
+        return act("select on", (e) => triggerSelect(e, value));
       },
       check() {
-        return act((e) => {
+        return act("check", (e) => {
           if (!e.checked) triggerAction(e, "click");
         });
       },
       uncheck() {
-        return act((e) => {
+        return act("uncheck", (e) => {
           if (e.checked) triggerAction(e, "click");
         });
       },
       clear() {
-        return act((e) => triggerClear(e));
+        return act("clear", (e) => triggerClear(e));
       },
       scroll(to?: { top?: number; left?: number }) {
-        return act((e) => triggerScroll(e, to));
+        return act(null, (e) => triggerScroll(e, to));
       },
       dragTo(target: UIElementHandle) {
         return enqueue(async () => {
@@ -483,6 +592,9 @@ async function _mountTestUI(
       },
       get value() {
         return String(el().value ?? "");
+      },
+      get disabled() {
+        return resolveInfo().disabled === true;
       },
     };
   }
@@ -506,15 +618,24 @@ async function _mountTestUI(
       // shadowed element. (inews R4 P2)
       const shadowed = node.elements.some((e) => e.name === node.component) ||
         node.children.some((c) => c.component === node.component);
+      // The name may exist on a DIFFERENT branch — typically inside a
+      // same-type SIBLING instance that shares this one's semantic name.
+      // Point at every live location instead of a dead end. (risoto)
+      let elsewhere: UIElementInfo[] = [];
+      try {
+        elsewhere = findElementsDeep(currentSurface(), name);
+      } catch { /* unmounted — plain listing below */ }
       fail(
         `testUI: "${name}" is not an element of ${node.path}` +
           (shadowed
             ? `\n  hint: "${node.component}" names both this component and something inside it — use ui.${node.component}.${node.component}`
+            : "") +
+          (elsewhere.length > 0
+            ? `\n  found elsewhere: ${elsewhere.map((e) => e.path).join(", ")}${
+              elsewhere.length === 1 ? ` — reachable as ui.${name}` : ""
+            }`
             : ""),
-        [
-          ...node.elements.map((e) => e.name),
-          ...node.children.map((c) => c.component),
-        ],
+        listNames(node),
       );
     };
     const eh = elementHandle(resolveInfo);
@@ -532,11 +653,12 @@ async function _mountTestUI(
         // ui.Modal.ConfirmButton — resolve "Modal" lazily, then chain.
         return lazyHandle(() => {
           const parent = selectParent();
-          const hit = findComponents(parent, name)[0];
+          const hit = findComponents(parent, name)[0] ??
+            ordinalComponent(parent, name);
           if (!hit) {
             fail(
               `testUI: component "${name}" not found under ${parent.path}`,
-              parent.children.map((c) => c.component),
+              listNames(parent),
             );
           }
           return hit;
@@ -552,6 +674,42 @@ async function _mountTestUI(
         );
       },
     }) as UIElementHandle;
+  }
+
+  /** Component/element name SHADOWING (inews R4 P2): when `name` addresses a
+   *  component AND exactly one interactive element in `scope`, the INTERACTABLE
+   *  thing wins for element concerns (`click`, `type`, `value`, `disabled`, …)
+   *  while unknown properties still navigate the component (children, `find`,
+   *  `surface`). Ambiguous element matches (≥2) keep the plain component. */
+  function shadowHybrid(
+    selectScope: () => UISurfaceNode,
+    name: string,
+    comp: UIComponentHandle,
+  ): UIComponentHandle {
+    let unique = false;
+    try {
+      unique = findElementsDeep(selectScope(), name).length === 1;
+    } catch { /* not mounted yet — component semantics only */ }
+    if (!unique) return comp;
+    const eh = elementHandle(() => {
+      const els = findElementsDeep(selectScope(), name);
+      if (els.length === 1 && els[0]!._el) return els[0]!;
+      fail(
+        `testUI: element "${name}" is not on the current surface`,
+        els.map((e) => e.path),
+      );
+    });
+    return new Proxy(eh as AnyDoc, {
+      get(target, prop: string | symbol) {
+        if (typeof prop !== "symbol" && prop in (target as object)) {
+          return (target as AnyDoc)[prop];
+        }
+        return (comp as AnyDoc)[prop];
+      },
+      has(target, prop) {
+        return prop in (target as object) || prop in (comp as object);
+      },
+    }) as UIComponentHandle;
   }
 
   function componentHandle(select: () => UISurfaceNode): UIComponentHandle {
@@ -572,7 +730,7 @@ async function _mountTestUI(
               `testUI: component "${component}"${
                 key !== undefined ? ` [key=${key}]` : ""
               } not found under ${select().path}`,
-              select().children.map((c) => c.component),
+              listNames(select()),
             );
           }
           return hits[0]!;
@@ -594,26 +752,48 @@ async function _mountTestUI(
         }
         const elInfo = node.elements.find((e) => e.name === prop);
         if (elInfo) return elementHandle(() => resolveElement(elInfo.path));
-        const child = node.children.find((c) => c.component === prop);
+        // Component by exact name — direct child first, then deep search.
+        const child = node.children.find((c) => c.component === prop) ??
+          findComponents(node, prop as string)[0];
         if (child) {
-          return componentHandle(() => {
+          const comp = componentHandle(() => {
             const again = findComponents(select(), prop as string)[0];
+            if (!again) {
+              fail(`testUI: component "${String(prop)}" disappeared`, []);
+            }
+            return again;
+          });
+          return shadowHybrid(select, prop as string, comp);
+        }
+        // Element anywhere below this node — same hoist the top level does
+        // (risoto #2), so `ui.ToolBar.Settings` reaches a `t`-handle inside a
+        // child component without positional navigation.
+        const els = findElementsDeep(node, prop as string);
+        if (els.length === 1) {
+          return elementHandle(() => resolveElement(els[0]!.path));
+        }
+        // Ordinal instance access for same-type siblings: `Button2` → 2nd
+        // `Button` in tree order (only when nothing exact matched).
+        const ord = ordinalComponent(node, prop as string);
+        if (ord) {
+          return componentHandle(() => {
+            const again = ordinalComponent(select(), prop as string);
             if (!again) {
               fail(`testUI: component "${String(prop)}" disappeared`, []);
             }
             return again;
           });
         }
-        // deep search below this node
-        const deep = findComponents(node, prop as string)[0];
-        if (deep) {
-          return componentHandle(() => {
-            const again = findComponents(select(), prop as string)[0];
-            if (!again) {
-              fail(`testUI: component "${String(prop)}" disappeared`, []);
-            }
-            return again;
-          });
+        if (els.length > 1) {
+          fail(
+            `testUI: "${
+              String(prop)
+            }" matches ${els.length} elements under ${node.path} — ` +
+              `address the instance: ui.….<Component>2.${
+                String(prop)
+              } (ordinal, tree order)`,
+            els.map((e) => e.path),
+          );
         }
         // Not on the surface YET — hand back a lazy handle so un-awaited
         // sequences can target UI a prior queued action will create.
@@ -737,7 +917,10 @@ async function _mountTestUI(
         /* nothing mounted yet — fall through to lazy component find */
       }
       if (surf && findComponents(surf, name).length > 0) {
-        return api.find(name);
+        // Shadow rule (inews R4 P2): if the name ALSO uniquely addresses an
+        // interactive element, the returned handle acts as the ELEMENT
+        // (click/type/value) while still navigating the component.
+        return shadowHybrid(currentSurface, name, api.find(name));
       }
       // risoto #2: hoist a `t`/data-testid element handle to the top level,
       // regardless of nesting — `ui.watchPubkey` instead of the positional
@@ -747,10 +930,20 @@ async function _mountTestUI(
         if (els.length === 1) {
           return elementHandle(() => resolveElement(els[0]!.path));
         }
+        // Ordinal instance access: ui.Button2 → 2nd Button in tree order.
+        const ord = ordinalComponent(surf, name);
+        if (ord) {
+          return componentHandle(() => {
+            const again = ordinalComponent(currentSurface(), name);
+            if (!again) fail(`testUI: component "${name}" disappeared`, []);
+            return again;
+          });
+        }
         if (els.length > 1) {
           fail(
             `testUI: "${name}" matches ${els.length} elements on the surface — ` +
-              `disambiguate with ui.find("Component", key).${name}`,
+              `disambiguate with ui.<Component>2.${name} (ordinal, tree order) ` +
+              `or ui.find("Component", key).${name}`,
             els.map((e) => e.path),
           );
         }

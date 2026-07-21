@@ -44,9 +44,10 @@ describe("SyncEngine", () => {
     const { engine, sent } = setup();
     await engine.handleLocalAction("todos", "add", { text: "hello" });
     assertEquals(sent.length, 1);
-    const msg = sent[0] as { __op: { cell: string; action: string } };
-    assertEquals(msg.__op.cell, "todos");
-    assertEquals(msg.__op.action, "add");
+    const msg = sent[0] as { t: string; d: { cell: string; action: string } };
+    assertEquals(msg.t, "op");
+    assertEquals(msg.d.cell, "todos");
+    assertEquals(msg.d.action, "add");
   });
 
   it("queues ops when offline", async () => {
@@ -75,8 +76,8 @@ describe("SyncEngine", () => {
     await engine.handleLocalAction("todos", "add", { text: "test" });
     assertEquals(engine.getStatus("todos").pending, 1);
 
-    const msg = sent[0] as { __op: { id: string } };
-    await engine.handleAck("todos", msg.__op.id, [2000, 0, "s"]);
+    const msg = sent[0] as { d: { id: string } };
+    await engine.handleAck("todos", msg.d.id, [2000, 0, "s"]);
     assertEquals(engine.getStatus("todos").pending, 0);
   });
 
@@ -105,23 +106,25 @@ describe("SyncEngine", () => {
     assertEquals(engine.getStatus("todos").status, "offline");
   });
 
-  it("requestSync sends __sync with lastHlc and pending ops", async () => {
+  it("requestSync sends sync-req with lastHlc and pending ops", async () => {
     const { engine, sent } = setup();
     await engine.handleLocalAction("todos", "add", { text: "pending" });
-    sent.length = 0; // clear the __op message
+    sent.length = 0; // clear the op frame
 
     await engine.requestSync();
     assertEquals(sent.length, 1);
     const msg = sent[0] as {
-      __sync: {
+      t: string;
+      d: {
         clientId: string;
         cells: Record<string, unknown>;
         pendingOps: unknown[];
       };
     };
-    assertEquals(msg.__sync.clientId, "c1");
-    assertEquals("todos" in msg.__sync.cells, true);
-    assertEquals(msg.__sync.pendingOps.length, 1);
+    assertEquals(msg.t, "sync-req");
+    assertEquals(msg.d.clientId, "c1");
+    assertEquals("todos" in msg.d.cells, true);
+    assertEquals(msg.d.pendingOps.length, 1);
   });
 
   it("handleSyncResponse with snapshot updates confirmed state", async () => {

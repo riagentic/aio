@@ -36,12 +36,13 @@ export function filterPatchesBySubs(
 }
 
 /**
- * Parse a __subs: message payload into a subscriptions Set (or null for wildcard).
- * Returns undefined if the payload is invalid.
+ * Parse a "subs" frame payload (string[] — already decoded from the
+ * envelope; a JSON string is still accepted for internal callers) into a
+ * subscriptions Set (or null for wildcard). Undefined = invalid.
  */
-export function parseSubs(raw: string): Set<string> | null | undefined {
+export function parseSubs(raw: unknown): Set<string> | null | undefined {
   try {
-    const paths = JSON.parse(raw);
+    const paths = typeof raw === "string" ? JSON.parse(raw) : raw;
     if (!Array.isArray(paths)) return undefined;
     if (paths.includes("*")) return null;
     return new Set(paths.filter((p: unknown) => typeof p === "string"));

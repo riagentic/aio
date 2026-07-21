@@ -142,9 +142,15 @@ export function buildMethodsReducer(
     if (foreignKey) {
       const handler = methods[foreignKey];
       if (handler) {
+        // Method actions carry the positional `{ args }` envelope — spread it
+        // so the handler is written with the foreign method's own parameter
+        // list (`onAdded(s, item, qty)`), not a hand-destructured envelope
+        // (quant, alpha28 migration). Non-method triggers pass payload as-is.
+        const p = action.payload as { args?: unknown[] } | undefined;
+        const args = p && Array.isArray(p.args) ? p.args : [action.payload];
         return (handler as SyncMethod<Record<string, unknown>>)(
           s,
-          action.payload,
+          ...args,
         ) as ReturnType<CellReduceFn>;
       }
     }

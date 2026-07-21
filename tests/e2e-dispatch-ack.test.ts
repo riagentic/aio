@@ -1,6 +1,6 @@
 // Transport-faithful coverage of the per-action ACK round-trip — the contract
 // behind `await cell.method()` in a browser. A real component awaits a cell
-// method; the promise only settles when the server sends `__ack:<cid>:1` back
+// method; the promise only settles when the server sends an ack frame back
 // over the socket. This exercises the whole wire path that the in-process
 // harness can't see: cid minting (cell-reactive), the pending-ack registry
 // (browser-ack), the send pipeline (browser-transport-send), the server's

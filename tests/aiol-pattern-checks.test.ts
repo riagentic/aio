@@ -242,3 +242,45 @@ export const counter = cell('counter', {
     assertEquals(hits[0]!.message.includes("cell,"), false);
   });
 });
+
+Deno.test("aiol: setTimeout hint skips delay-0 yield + aiol-ok; await-read honors aiol-ok", async () => {
+  await withTmpDir(async (dir) => {
+    await project(
+      dir,
+      `
+import { cell } from 'aio'
+export const c = cell('c', {
+  state: { n: 0, mode: 'x' },
+  methods: {
+    async tick(s) {
+      await new Promise((r) => setTimeout(r, 0))
+      s.n += 1
+    },
+    async poll(s) {
+      s.mode = 'polling'
+      await fetch('/x')
+      if (s.mode === 'cancelled') return // aiol-ok — deliberate re-read
+      s.n += 1
+    },
+    slow(s) {
+      setTimeout(() => { s.n = 9 }, 500) // aiol-ok
+      s.n += 1
+    },
+  },
+})
+`,
+    );
+    const { ctx, report } = await buildContext(dir);
+    await checkPatterns(ctx);
+    const { checkPerformance } = await import("../aiol/checks.ts");
+    if (typeof checkPerformance === "function") await checkPerformance(ctx);
+    const timerHints = report.issues.filter((i) =>
+      i.message.includes("setTimeout/setInterval")
+    );
+    const awaitHints = report.issues.filter((i) =>
+      i.message.includes("after an await")
+    );
+    assertEquals(timerHints.length, 0, JSON.stringify(timerHints));
+    assertEquals(awaitHints.length, 0, JSON.stringify(awaitHints));
+  });
+});

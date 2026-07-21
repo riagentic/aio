@@ -251,16 +251,17 @@ export function createOpBuffer(
       return true;
     },
 
-    async confirm(cell: string, opId: string, serverHlc: HLC) {
+    async confirm(_cell: string, opId: string, _serverHlc: HLC) {
+      // An ack confirms OUR op — it is NOT a delivery watermark, so it must
+      // not touch the catch-up cursor (chaos-suite finding, 2026-07-21). The
+      // ack's serverHlc is ≥ every peer op persisted before it, so advancing
+      // lastHlc here made the next HLC-fallback catch-up SKIP peer ops the
+      // client never received (the response's cursor echo then sealed them
+      // above the server_ts cursor — permanent, silent op loss). The cursor
+      // advances only on actually delivered data: handleRemoteOp (broadcast
+      // stamps) and handleSyncResponse (response ops / reserved-cursor echo,
+      // which establishes lastServerTs on the very first sync round).
       await storage.confirmOp(opId);
-      // Preserve the server_ts cursor — writing { lastHlc } alone would wipe
-      // it and regress the next catch-up to the ambiguous HLC cursor
-      // (re-delivery → double-apply through the reducer).
-      const meta = await storage.loadMeta(cell);
-      await storage.saveMeta(cell, {
-        lastHlc: serverHlc,
-        lastServerTs: meta?.lastServerTs,
-      });
     },
 
     async getUnconfirmed(cell: string) {

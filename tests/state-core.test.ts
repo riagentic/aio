@@ -87,10 +87,11 @@ Deno.test("state-core: send via transport", () => {
     send({ type: "counter:increment", payload: { amount: 1 } });
 
     assertEquals(sent.length, 1);
-    const parsed = JSON.parse(sent[0]!);
-    assertEquals(parsed.type, "counter:increment");
-    assertEquals(parsed.payload, { amount: 1 });
-    assertEquals(parsed._source, "UI");
+    const frame = JSON.parse(sent[0]!);
+    assertEquals(frame.t, "action");
+    assertEquals(frame.d.type, "counter:increment");
+    assertEquals(frame.d.payload, { amount: 1 });
+    assertEquals(frame.d._source, "UI");
   } finally {
     _reset();
   }
@@ -107,8 +108,8 @@ Deno.test("state-core: offline queue when no transport", () => {
     flushOfflineQueue();
 
     assertEquals(sent.length, 2);
-    assertEquals(JSON.parse(sent[0]!).type, "counter:increment");
-    assertEquals(JSON.parse(sent[1]!).type, "counter:decrement");
+    assertEquals(JSON.parse(sent[0]!).d.type, "counter:increment");
+    assertEquals(JSON.parse(sent[1]!).d.type, "counter:decrement");
   } finally {
     _reset();
   }
@@ -219,11 +220,11 @@ Deno.test("state-core: createSendProxy creates typed methods", () => {
     proxy.decrement!(1);
 
     assertEquals(sent.length, 2);
-    const msg1 = JSON.parse(sent[0]!);
+    const msg1 = JSON.parse(sent[0]!).d;
     assertEquals(msg1.type, "counter:increment");
     assertEquals(msg1.payload, { args: [5] });
 
-    const msg2 = JSON.parse(sent[1]!);
+    const msg2 = JSON.parse(sent[1]!).d;
     assertEquals(msg2.type, "counter:decrement");
     assertEquals(msg2.payload, { args: [1] });
   } finally {
@@ -256,11 +257,11 @@ Deno.test("state-core: createSendProxy uses action creators when available", () 
     proxy.reset!();
 
     assertEquals(sent.length, 2);
-    const msg1 = JSON.parse(sent[0]!);
+    const msg1 = JSON.parse(sent[0]!).d;
     assertEquals(msg1.type, "counter:increment");
     assertEquals(msg1.payload, { amount: 5 });
 
-    const msg2 = JSON.parse(sent[1]!);
+    const msg2 = JSON.parse(sent[1]!).d;
     assertEquals(msg2.type, "counter:reset");
     assertEquals(msg2.payload, {});
   } finally {

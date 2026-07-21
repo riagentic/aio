@@ -19,6 +19,7 @@ parents (bottom-up, like React).
 
 ```tsx
 import { onCleanup, onMount, signal, useRef } from "aio/air";
+import { draw } from "./draw.ts";
 
 const Chart = () => {
   const ref = useRef<HTMLCanvasElement>(null!);
@@ -102,6 +103,8 @@ re-renders. The loop cancels on unmount. Pass `active: false` to not start it.
 
 ```tsx
 import { useRaf, useRef } from "aio/air";
+import { draw } from "./draw.ts";
+import { cycle } from "./cell/cycle.ts";
 
 const Canvas = () => {
   const ref = useRef<HTMLCanvasElement>(null!);
@@ -245,17 +248,19 @@ const ThemedBox = () => {
 Catches render errors in children. One line — no class component needed.
 
 ```tsx
-import { ErrorBoundary } from "aio/air";
+import { ErrorBoundary, h } from "aio/air";
+import { RiskyComponent } from "./RiskyComponent.tsx";
 
-const App = () => (
-  <ErrorBoundary
-    fallback={(error: Error) => (
-      <div className="error">Oops: {error.message}</div>
-    )}
-  >
-    <RiskyComponent />
-  </ErrorBoundary>
-);
+const App = () =>
+  h(
+    ErrorBoundary,
+    {
+      fallback: (error: Error) => (
+        <div className="error">Oops: {error.message}</div>
+      ),
+    },
+    <RiskyComponent />,
+  );
 ```
 
 | Prop       | Type                      | Description                                  |
@@ -304,8 +309,10 @@ For custom UIs, use the hook instead of the built-in panel:
 ```tsx
 import { useAio, useTimeTravel } from "aio/air";
 
+type AppState = { counter: number };
+
 export default function App() {
-  const { state, send } = useAio<AppState>();
+  const { state } = useAio<AppState>();
   const tt = useTimeTravel();
 
   if (!state) return <div>Connecting...</div>;

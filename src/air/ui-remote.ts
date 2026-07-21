@@ -2,7 +2,7 @@
  * @module
  * Live-client UI surface executor — serves the semantic UI surface and runs
  * faithful triggers inside a running app (browser / electron / android
- * WebView), on request from the server over the existing `__ui:` command
+ * WebView), on request from the server over the "ui-surface"/"ui-trigger"
  * channel. This is what `am surface` / `am trigger` talk to; it shares the
  * exact trigger implementation with `testUI`, so a test and an `am` session
  * behave identically. Dev-tooling: routed only in dev/authorized channels.
@@ -24,7 +24,7 @@ import {
   triggerSelect,
 } from "./ui-trigger.ts";
 
-/** A trigger request from the server (`__ui:trigger:` payload). */
+/** A trigger request from the server (a "ui-trigger" frame payload). */
 export type UITriggerRequest = {
   /** Element path on the surface, e.g. "App/TodoAdd:AddButton" */
   path: string;
@@ -85,7 +85,7 @@ export function getLiveSurfaces(): UISurfaceNode[] {
   return out;
 }
 
-/** Wire-safe serialized surfaces (for `__ui:surface-result:`). */
+/** Wire-safe serialized surfaces (the "ui-surface-result" payload). */
 export function getSerializedSurfaces(): UISurfaceNode[] {
   return getLiveSurfaces().map(serializeSurface);
 }

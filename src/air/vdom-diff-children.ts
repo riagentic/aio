@@ -197,6 +197,11 @@ function diffKeyed(
   const oldMap = new Map<string | number, VNode>();
   const oldNonKeyed: (VNode | string | number)[] = [];
   const oldNonKeyedDoms: (Node | null)[] = [];
+  // AIO-417: duplicate keys are an app bug (dev warns above), but they must
+  // degrade gracefully. Old duplicates shadowed in oldMap were never removed
+  // (orphan DOM nodes), and next duplicates re-matched the same old vnode,
+  // stealing its single DOM node. Track shadowed old dups for removal.
+  const oldShadowedDups: VNode[] = [];
 
   // Start walking the DOM from the Fragment's anchor (if any) so the
   // DOM→vnode mapping is aligned for Fragments whose region sits mid-parent.
@@ -210,6 +215,8 @@ function diffKeyed(
     if (
       typeof oc === "object" && oc !== null && (oc as VNode).key !== undefined
     ) {
+      const prevDup = oldMap.get((oc as VNode).key!);
+      if (prevDup) oldShadowedDups.push(prevDup); // AIO-417: last-wins, remove shadowed
       oldMap.set((oc as VNode).key!, oc as VNode);
       const count = _domNodeCount(oc);
       for (let j = 0; j < count; j++) {
@@ -315,8 +322,11 @@ function diffKeyed(
       continue;
     }
     const key = (nc as VNode).key!;
+    // AIO-417: a duplicate key in nextChildren must NOT re-match the old vnode
+    // its first occurrence already consumed — that would move the same DOM node
+    // twice (one position ends up empty). Treat later occurrences as new.
+    const oc = usedKeys.has(key) ? undefined : oldMap.get(key);
     usedKeys.add(key);
-    const oc = oldMap.get(key);
 
     if (oc) {
       // Existing node — diff in place
@@ -385,6 +395,12 @@ function diffKeyed(
     if (oc.key !== undefined && !usedKeys.has(oc.key)) {
       removeDom(parent, oc, ctx);
     }
+  }
+  // AIO-417: shadowed old duplicates whose key WAS used are matched by nothing —
+  // remove them or they orphan. (Unused keys are already handled just above,
+  // which iterates oldChildren and thus removes every dup of an unused key.)
+  for (const oc of oldShadowedDups) {
+    if (usedKeys.has(oc.key!)) removeDom(parent, oc, ctx);
   }
   // Remove excess old non-keyed children not matched above (AIO-114)
   for (let i = nkIdx; i < oldNonKeyed.length; i++) {

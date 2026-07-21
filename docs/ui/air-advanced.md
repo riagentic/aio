@@ -8,15 +8,17 @@ loading, accessibility, custom adapters, and framework integration.
 ## Code Splitting
 
 ```tsx
-import { lazy, Suspense } from "aio/air";
+import { h, lazy, Suspense } from "aio/air";
+import { chartData } from "./chart-data.ts";
 
 const HeavyChart = lazy(() => import("./heavy-chart.ts"));
 
-const App = () => (
-  <Suspense fallback={<span>Loading chart...</span>}>
-    <HeavyChart data={chartData} />
-  </Suspense>
-);
+const App = () =>
+  h(
+    Suspense,
+    { fallback: <span>Loading chart...</span> },
+    <HeavyChart data={chartData.value} />,
+  );
 ```
 
 If the import rejects, the error propagates to the nearest `ErrorBoundary`.
@@ -75,6 +77,8 @@ Mount external framework components (React, Vue, Solid) into AIR pages:
 
 ```tsx
 import { island } from "aio/air";
+import ReactDOM from "react-dom/client"; // islands need the host framework
+import { chartData } from "./chart-data.ts";
 
 const ReactChart = island({
   load: () => import("./react-chart.tsx"),
@@ -99,13 +103,14 @@ Signal changes in `props()` automatically call `handle.update()`.
 Render children into a DOM node outside the component hierarchy:
 
 ```tsx
-import { Portal } from "aio/air";
+import { h, Portal } from "aio/air";
 
-const Modal = () => (
-  <Portal target={document.getElementById("modal-root")!}>
-    <div className="modal">I'm rendered in #modal-root!</div>
-  </Portal>
-);
+const Modal = () =>
+  h(
+    Portal,
+    { target: document.getElementById("modal-root")! },
+    <div className="modal">I'm rendered in #modal-root!</div>,
+  );
 ```
 
 Portals are skipped during SSR.
@@ -132,6 +137,7 @@ Streaming SSR -- yields HTML chunks as an async generator:
 
 ```tsx
 import { renderToStream } from "aio/air";
+import App from "./App.tsx";
 
 Deno.serve(async () => {
   const stream = new ReadableStream({
@@ -153,6 +159,8 @@ Deno.serve(async () => {
 
 ```tsx
 import { hydrate } from "aio/air";
+import App from "./App.tsx";
+
 hydrate(document.getElementById("root")!, App);
 ```
 
@@ -222,11 +230,22 @@ unmount.
 ```tsx
 import { Defer } from "aio/air";
 
-<Defer trigger="viewport" load={() => import("./heavy-chart.ts")}
-  placeholder={<div>Chart placeholder</div>} loading={<div>Loading...</div>} />
-<Defer trigger={2000} load={() => import("./analytics.ts")} />
-<Defer trigger="hover" load={() => import("./preview.ts")}
-  placeholder={<div>Hover to preview</div>} />
+export const demos = (
+  <>
+    <Defer
+      trigger="viewport"
+      load={() => import("./heavy-chart.ts")}
+      placeholder={<div>Chart placeholder</div>}
+      loading={<div>Loading...</div>}
+    />
+    <Defer trigger={2000} load={() => import("./analytics.ts")} />
+    <Defer
+      trigger="hover"
+      load={() => import("./preview.ts")}
+      placeholder={<div>Hover to preview</div>}
+    />
+  </>
+);
 ```
 
 Triggers: `"viewport"` (IntersectionObserver), `"idle"` (requestIdleCallback),
@@ -271,7 +290,7 @@ full state, `useLocal(initial)` as framework-local state, `useConnected()` via
 
 ```svelte
 <script>
-  import { getStateSignal } from '@riagentic/aio/state-core'
+  import { getStateSignal } from 'aio/state-core'
   const sig = getStateSignal()
   let state = $state(sig.peek())
   $effect(() => { return sig.subscribe(() => { state = sig.peek() }) })
@@ -323,7 +342,7 @@ returns to the trigger on close. The parent mounts it conditionally
 (`{open && <Modal…>}`) so hooks run in a stable order.
 
 ```tsx
-import { onCleanup, onMount, useRef } from "aio/air";
+import { h, onCleanup, onMount, Portal, useRef } from "aio/air";
 
 export function Modal(
   { onClose, children }: { onClose: () => void; children: unknown },
@@ -370,30 +389,30 @@ export function Modal(
     });
   });
 
-  return (
-    <Portal target={document.body}>
+  return h(
+    Portal,
+    { target: document.body },
+    <div
+      onClick={onClose} // backdrop click closes
+      style={{
+        position: "fixed",
+        inset: 0,
+        background: "rgba(0,0,0,.5)",
+        display: "grid",
+        placeItems: "center",
+      }}
+    >
       <div
-        onClick={onClose} // backdrop click closes
-        style={{
-          position: "fixed",
-          inset: 0,
-          background: "rgba(0,0,0,.5)",
-          display: "grid",
-          placeItems: "center",
-        }}
+        ref={dialog}
+        role="dialog"
+        aria-modal="true"
+        tabIndex={-1}
+        onClick={(e) => e.stopPropagation()} // clicks inside don't close
+        style={{ background: "#fff", padding: "1.5rem", borderRadius: 8 }}
       >
-        <div
-          ref={dialog}
-          role="dialog"
-          aria-modal="true"
-          tabIndex={-1}
-          onClick={(e) => e.stopPropagation()} // clicks inside don't close
-          style={{ background: "#fff", padding: "1.5rem", borderRadius: 8 }}
-        >
-          {children}
-        </div>
+        {children}
       </div>
-    </Portal>
+    </div>,
   );
 }
 ```

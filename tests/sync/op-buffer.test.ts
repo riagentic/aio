@@ -51,12 +51,16 @@ describe("OpBuffer", () => {
     assertEquals(all[0]!.id, "op2");
   });
 
-  it("tracks last confirmed HLC", async () => {
+  it("confirm() marks the op without touching cursor meta", async () => {
+    // 2026-07-21 chaos-suite finding: an ack is NOT a delivery watermark —
+    // advancing lastHlc to the ack's serverHlc made catch-up skip peer ops
+    // persisted before the ack that this client never received. confirm()
+    // now only marks the op; cursors move on actually delivered data.
     const buf = createOpBuffer(createMemoryStorage());
     await buf.add(mkOp("op1"));
     await buf.confirm("todos", "op1", [2000, 5, "s"]);
-    const meta = await buf.getMeta("todos");
-    assertEquals(meta?.lastHlc, [2000, 5, "s"]);
+    assertEquals(await buf.getMeta("todos"), undefined);
+    assertEquals((await buf.getUnconfirmed("todos")).length, 0, "confirmed");
   });
 
   it("clears all data for a cell", async () => {

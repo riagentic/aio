@@ -183,7 +183,7 @@ function walkOutput(
   if (out == null || typeof out !== "object") return;
   const v = out;
   if (typeof v.tag === "function") {
-    owner.children.push(walkComponent(v, owner.path));
+    owner.children.push(walkComponent(v, owner.path, owner.children));
     return;
   }
   // Host element / fragment-like: collect interactivity, then descend
@@ -236,16 +236,33 @@ function walkOutput(
   }
 }
 
-function walkComponent(v: VNode, parentPath: string): UISurfaceNode {
+function walkComponent(
+  v: VNode,
+  parentPath: string,
+  siblings: UISurfaceNode[] = [],
+): UISurfaceNode {
   const fn = v.tag as { name?: string; _lazyName?: string };
   // A resolved lazy() wrapper reports the loaded component's name.
   const name = fn._lazyName ??
     (fn.name && fn.name.length > 0 ? fn.name : "Anonymous");
   const keyPart = v.key !== undefined ? `[${v.key}]` : "";
+  let path = parentPath
+    ? `${parentPath}/${name}${keyPart}`
+    : `${name}${keyPart}`;
+  // Same-type siblings without keys would otherwise share ONE address — every
+  // path-based lookup (resolveElement, runUITrigger) could only ever reach the
+  // FIRST instance, so per component type only one `t` handle survived
+  // (risoto 2026-07-21). Deterministic dedupe: 2nd+ instances get #2, #3 …
+  // in tree order, keeping every instance's elements addressable.
+  if (siblings.some((s) => s.path === path)) {
+    let i = 2;
+    while (siblings.some((s) => s.path === `${path}#${i}`)) i++;
+    path = `${path}#${i}`;
+  }
   const node: UISurfaceNode = {
     component: name,
     ...(v.key !== undefined ? { key: v.key } : {}),
-    path: parentPath ? `${parentPath}/${name}${keyPart}` : `${name}${keyPart}`,
+    path,
     elements: [],
     children: [],
   };
@@ -276,7 +293,7 @@ export function buildUISurface(
 }
 
 /** Wire-safe copy of a surface node — live vnode/element refs stripped.
- *  This is what `__ui:surface` sends and what AI/`am` consumers read. */
+ *  This is what a "ui-surface" request returns and what AI/`am` consumers read. */
 export function serializeSurface(node: UISurfaceNode): UISurfaceNode {
   return {
     component: node.component,

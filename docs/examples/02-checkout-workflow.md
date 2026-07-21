@@ -68,39 +68,42 @@ when it does.
 
 ```ts
 // cell/inventory/index.ts
-import { cell } from 'aio'
-import type { CartItem } from '../cart/index.ts'
+import { cell } from "aio";
+import type { CartItem } from "../cart/index.ts";
 
-type StockMap = Record<string, number>
+type StockMap = Record<string, number>;
 
-export const inventory = cell('inventory', {
+export const inventory = cell("inventory", {
   state: { stock: {} as StockMap, reserved: {} as StockMap },
   methods: {
     check(s, itemId: string): number {
-      return (s.stock as StockMap)[itemId] ?? 0
+      return (s.stock as StockMap)[itemId] ?? 0;
     },
     async reserve(s, items: CartItem[]) {
-      await new Promise(r => setTimeout(r, 300)) // simulate API
+      await new Promise((r) => setTimeout(r, 300)); // simulate API
       for (const item of items) {
-        const available = (s.stock as StockMap)[item.id] ?? 0
+        const available = (s.stock as StockMap)[item.id] ?? 0;
         if (available < item.qty) {
-          throw new Error(`Insufficient stock for ${item.name}`)
+          throw new Error(`Insufficient stock for ${item.name}`);
         }
       }
       for (const item of items) {
-        (s.stock as StockMap)[item.id] -= item.qty
-        (s.reserved as StockMap)[item.id] = ((s.reserved as StockMap)[item.id] ?? 0) + item.qty
+        (s.stock as StockMap)[item.id] -= item.qty;
+        (s.reserved as StockMap)[item.id] =
+          ((s.reserved as StockMap)[item.id] ?? 0) + item.qty;
       }
     },
     async release(s, items: CartItem[]) {
-      await new Promise(r => setTimeout(r, 100))
+      await new Promise((r) => setTimeout(r, 100));
       for (const item of items) {
-        (s.stock as StockMap)[item.id] = ((s.stock as StockMap)[item.id] ?? 0) + item.qty
-        (s.reserved as StockMap)[item.id] = ((s.reserved as StockMap)[item.id] ?? 0) - item.qty
+        (s.stock as StockMap)[item.id] = ((s.stock as StockMap)[item.id] ?? 0) +
+          item.qty;
+        (s.reserved as StockMap)[item.id] =
+          ((s.reserved as StockMap)[item.id] ?? 0) - item.qty;
       }
     },
   },
-})
+});
 ```
 
 Notice `reserve` throws on insufficient stock. The payment workflow will catch
@@ -215,6 +218,10 @@ For resilience, add timeout and retries with `call()`:
 
 ```ts
 import { call } from "aio";
+import { inventory } from "./cell/inventory/index.ts";
+import type { CartItem } from "./cell/cart/index.ts";
+
+const items: CartItem[] = [{ id: "w1", name: "Widget", price: 9.99, qty: 2 }];
 const reserved = await call(
   { timeout: 5000, retries: 2 },
   () => inventory.reserve(items),

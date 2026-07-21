@@ -1,8 +1,8 @@
 // Unit tests for the browser sync wiring (src/browser/browser-sync.ts) — the
 // glue between transport, registered cells, and the CRDT engine. Covers: boot
 // (idempotence, sync-cell discovery, no-op without sync cells), local-action
-// routing (sync vs plain vs framework-internal), wire-message routing
-// (__ack/__op/__sync), optimistic signal push, and reset.
+// routing (sync vs plain vs framework-internal), wire-frame routing
+// (sync-ack/op/sync-res), optimistic signal push, and reset.
 import { assert, assertEquals } from "@std/assert";
 import {
   _resetBrowserSync,
@@ -102,7 +102,7 @@ Deno.test("browser-sync: boot discovers sync cells only, is idempotent", async (
     assertEquals(initBrowserSync(() => {}), engine);
     // Boot fires an initial catch-up request for offline-queued ops.
     assert(
-      sent.some((r) => r.includes("__sync")),
+      sent.some((r) => r.includes('"t":"sync-req"')),
       "boot requests catch-up",
     );
   } finally {
@@ -122,8 +122,10 @@ Deno.test("browser-sync: no engine when no cell has sync config", () => {
     assertEquals(syncCellNames(), new Set());
     // All routing is a safe no-op without an engine.
     assertEquals(handleSyncLocalAction({ type: "bs-only-plain:x" }), false);
-    handleSyncMessage({
-      __ack: { cell: "x", opId: "1", serverHlc: [1, 0, "s"] },
+    handleSyncMessage("sync-ack", {
+      cell: "x",
+      opId: "1",
+      serverHlc: [1, 0, "s"],
     });
     setSyncOnline(false);
   } finally {
@@ -135,7 +137,7 @@ Deno.test("browser-sync: no engine when no cell has sync config", () => {
 Deno.test("browser-sync: local actions route sync cells through the engine", async () => {
   const { sent } = setup();
   try {
-    // Sync cell → handled (op goes over the wire as __op).
+    // Sync cell → handled (op goes over the wire as an "op" frame).
     assertEquals(
       handleSyncLocalAction({
         type: "bs-todos:add",
@@ -144,7 +146,7 @@ Deno.test("browser-sync: local actions route sync cells through the engine", asy
       true,
     );
     await new Promise((r) => setTimeout(r, 10));
-    assert(sent.some((r) => r.includes("__op")), "op sent on the wire");
+    assert(sent.some((r) => r.includes('"t":"op"')), "op sent on the wire");
 
     // Plain cell → NOT handled (falls through to the normal dispatch path).
     assertEquals(handleSyncLocalAction({ type: "bs-plain:doIt" }), false);
@@ -172,18 +174,16 @@ Deno.test("browser-sync: optimistic view lands in the cell signal (UI reads it)"
   }
 });
 
-Deno.test("browser-sync: remote __op applies through the cell's own reducer", async () => {
+Deno.test("browser-sync: remote op applies through the cell's own reducer", async () => {
   setup();
   try {
-    handleSyncMessage({
-      __op: {
-        id: "remote-1",
-        hlc: [Date.now(), 0, "peer"],
-        cell: "bs-todos",
-        action: "add",
-        payload: { args: ["from-peer"] },
-        serverTs: 1234,
-      },
+    handleSyncMessage("op", {
+      id: "remote-1",
+      hlc: [Date.now(), 0, "peer"],
+      cell: "bs-todos",
+      action: "add",
+      payload: { args: ["from-peer"] },
+      serverTs: 1234,
     });
     await new Promise((r) => setTimeout(r, 10));
     const sig = getCellSignal("bs-todos", { items: [] });
@@ -209,8 +209,10 @@ Deno.test("browser-sync: clientId is stable across engine resets (HLC identity)"
   await new Promise((r) => setTimeout(r, 10));
   try {
     const id = (raws: string[]) => {
-      const req = raws.map((r) => JSON.parse(r)).find((m) => m.__sync);
-      return req?.__sync?.clientId;
+      const req = raws.map((r) => JSON.parse(r)).find((m) =>
+        m.t === "sync-req"
+      );
+      return req?.d?.clientId;
     };
     assert(id(sent1), "first boot sends a clientId");
     assertEquals(id(sent1), id(sent2), "clientId survives engine restarts");

@@ -38,17 +38,17 @@ describe("Reconnection", () => {
     };
   }
 
-  it("sends __sync request on reconnect", async () => {
+  it("sends sync-req on reconnect", async () => {
     const { engine, sent } = setup();
     engine.setOnline(false);
     await engine.handleLocalAction("counter", "increment", {});
     engine.setOnline(true);
 
     await engine.requestSync();
-    const syncMsg = sent.find((m: any) => m.__sync) as any;
+    const syncMsg = sent.find((m: any) => m.t === "sync-req") as any;
     assertEquals(!!syncMsg, true);
-    assertEquals(syncMsg.__sync.clientId, "c1");
-    assertEquals("counter" in syncMsg.__sync.cells, true);
+    assertEquals(syncMsg.d.clientId, "c1");
+    assertEquals("counter" in syncMsg.d.cells, true);
   });
 
   it("handles incremental sync response", async () => {

@@ -2,7 +2,7 @@
 import { log } from "../diagnostics/logger.ts";
 
 /** Framework version — printed by --version, checked in tests */
-export const VERSION = "1.0.0-alpha28";
+export const VERSION = "1.0.0-alpha29";
 
 // ── CLI ─────────────────────────────────────────────────────────────
 
@@ -26,6 +26,7 @@ export type CliFlags = {
   isolate?: string[];
   transport?: "uds" | "ws";
   killExisting?: boolean;
+  dbPath?: string;
   backupLogs?: boolean;
 };
 
@@ -52,6 +53,7 @@ export function parseCli(args: readonly string[] = Deno.args): CliFlags {
     "--transport=",
     "--kill-existing",
     "--backup-logs",
+    "--db-path=",
   ];
   for (const arg of args) {
     if (arg.startsWith("--port=")) {
@@ -78,6 +80,7 @@ export function parseCli(args: readonly string[] = Deno.args): CliFlags {
     else if (arg === "--server-url") r.serverUrl = "";
     else if (arg.startsWith("--server-url=")) r.serverUrl = arg.slice(13);
     else if (arg === "--kill-existing") r.killExisting = true;
+    else if (arg.startsWith("--db-path=")) r.dbPath = arg.slice(10);
     else if (arg === "--backup-logs") r.backupLogs = true;
     else if (arg.startsWith("--cert=")) r.cert = arg.slice(7);
     else if (arg.startsWith("--key=")) r.key = arg.slice(6);
@@ -111,7 +114,7 @@ Usage: deno run -A src/app.ts [flags]
 
 Flags:
   --port=N         Server port (default: 8000)
-  --no-persist     Disable Deno.Kv persistence
+  --no-persist     Disable persistence (SQLite data.db)
   --client=X       Client mode: electron|browser|cli|server-only (default: electron)
   --keep-server    Server survives Electron close (electron only)
   --title=X        Override window/page title
@@ -122,6 +125,7 @@ Flags:
   --key=PATH       TLS private key file (PEM) — used with --expose (auto-generated if omitted)
   --server-url[=X] Connect to remote aio server (Electron thin client)
   --kill-existing  Kill running instance and take over
+  --db-path=PATH   Override the SQLite file (":memory:" for throwaway runs)
   --backup-logs    Keep previous logs on restart (rotate to .1, .2, etc.)
   --width=N        Initial window width (default: 800)
   --height=N       Initial window height (default: 600)

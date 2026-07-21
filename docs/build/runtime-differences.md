@@ -1,48 +1,34 @@
 # Runtime differences
 
 The same cell code runs in three places. Most behaviour is identical — these are
-the differences that have bitten real apps. When in doubt, prefer the pattern in
-the **Server** column for server code and treat `ui.exclude` as a broadcast
-filter, not access control.
+the differences that have bitten real apps.
 
-| Concern            | Server (Deno, `aio.run`)                                                                                      | Browser client                                | Standalone (testUI / electron / android)                                  |
-| ------------------ | ------------------------------------------------------------------------------------------------------------- | --------------------------------------------- | ------------------------------------------------------------------------- |
-| Read cell state    | **In a route: `app.getState().<cell>`** — the cell _object_ reads its initial slice on the server (see below) | the cell object is reactive (`counter.count`) | the cell object is reactive                                               |
-| `ui.exclude`       | filters fields OUT of the client broadcast                                                                    | never sees excluded fields                    | **excluded fields ARE readable locally** — there's no broadcast to filter |
-| Persistence        | SQLite (aio_kv snapshot + tables + sync op-log)                                                               | server-driven (patches)                       | `localStorage` (`persist`)                                                |
-| Sync cells restore | op-log replayed at boot (headless)                                                                            | on (re)connect                                | via bundled server                                                        |
-| `onRestore`        | runs after snapshot restore                                                                                   | n/a                                           | n/a (use `onStart` seeding)                                               |
-| `onStart`          | runs **after** cell methods are bound — safe to seed via a cell method                                        | n/a                                           | runs after bind                                                           |
+| Concern            | Server (Deno, `aio.run`)                                               | Browser client                                | Standalone (testUI / electron / android)      |
+| ------------------ | ---------------------------------------------------------------------- | --------------------------------------------- | --------------------------------------------- |
+| Read cell state    | the bound cell object reads LIVE state (`app.getState()` equivalent)   | the cell object is reactive (`counter.count`) | the cell object is reactive                   |
+| `ui.exclude`       | server code sees everything (routes, effects)                          | hidden — never broadcast                      | hidden — reads `undefined` + one-time warning |
+| Persistence        | SQLite (aio_kv snapshot + tables + sync op-log)                        | server-driven (patches)                       | `localStorage` (`persist`)                    |
+| Sync cells restore | op-log replayed at boot (headless)                                     | on (re)connect                                | via bundled server                            |
+| `onRestore`        | runs after snapshot restore                                            | n/a                                           | n/a (use `onStart` seeding)                   |
+| `onStart`          | runs **after** cell methods are bound — safe to seed via a cell method | n/a                                           | runs after bind                               |
 
-## Reading state in a server route → use `app.getState()`
+## Reading state in a server route
 
-The reactive cell object (`members.roster`) is a **browser/standalone**
-convenience. On the server, a custom route that reads the cell object directly
-gets the cell's **initial** slice, not the live dispatched state — a silent
-staleness trap. Read the composed live state instead:
+A bound cell object reads LIVE state everywhere — a custom route can read
+`members.roster` directly and gets the current dispatched value
+(`tests/server-cell-reads.test.ts` pins this). `app.getState()` remains
+equivalent and fine. Only an UNBOUND cell (before `aio.run`) reads its declared
+initial state.
 
-```ts
-const app = await aio.run({
-  cells: [members],
-  routes: {
-    "/api/login": (req) => {
-      const { roster, pins } = app.getState().members; // ✅ live state
-      // const { roster } = members;                    // ❌ initial slice only
-      // …
-    },
-  },
-});
-```
+## `ui.exclude` is enforced at every client read seam
 
-## `ui.exclude` is a broadcast filter, not access control
-
-`ui.exclude` keeps fields out of the **server→client broadcast**. It is a
-visibility filter for networked clients — not a local access guard. In
-standalone (testUI / electron / android) the client and state live in one
-process with no broadcast, so excluded fields (e.g. `pins`) are readable on the
-cell object. Keep true secrets server-side (a `sync:false`/server-only cell, or
-never in cell state at all); don't rely on `ui.exclude` to hide them from local
-client code.
+`ui.exclude` hides fields from CLIENT code everywhere — including standalone
+(testUI / electron / android), where there is no broadcast: a client-context
+read of an excluded field returns `undefined` and logs a one-time warning naming
+the field. Selectors compute over the filtered slice too, so a computed read
+can't leak an excluded value. Server code (routes, effects) always sees
+everything. Keep true secrets out of cell state entirely when possible;
+`ui.exclude` now behaves like the access boundary it looks like.
 
 ## Seeding across runtimes
 

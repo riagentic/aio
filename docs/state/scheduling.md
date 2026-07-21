@@ -330,7 +330,10 @@ dispatches, `t.getEffects()` returns what it emitted. (testCell does not run a
 live scheduler, so it checks the _effect_, not the eventual timer fire.)
 
 ```ts
+import { assertEquals } from "@std/assert";
+import { testCell } from "aio/testing";
 import { isScheduleEffect } from "aio/schedule";
+import { notifications } from "./cell/notifications/index.ts";
 
 testCell(notifications, "queues autosave", (t) => {
   t.init();

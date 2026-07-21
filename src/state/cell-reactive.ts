@@ -4,12 +4,17 @@
 // counter.count in a component auto-tracks and re-renders.
 // Called from ensureConnected() for all registered cells.
 
-import type { CellDef } from "./cell-types.ts";
+import type { CellDef, CellFieldFilter } from "./cell-types.ts";
 import { randomUuid } from "../rand.ts";
 import { attachMeta } from "./cell-catalog.ts";
 import { _cellSignals, getCellSignal } from "./state-signals.ts";
 import { _registerAck } from "../protocol/browser-ack.ts";
 import { trackPath } from "./state-subs.ts";
+import {
+  applyCellFieldFilter,
+  deepExclude,
+  uiKeyVisibility,
+} from "./state-filter.ts";
 
 // ── Cell registry ────────────────────────────────────────────────────
 // Every cell() call registers here. Browser binding iterates this set.
@@ -70,6 +75,51 @@ export function _resetCellBindings(): void {
 
 const _reactivelyBound = new WeakSet<CellDef>();
 
+// ── Client-side ui visibility (TBD B7) ───────────────────────────────
+// bindCellReactive IS the client read surface — it runs only in browser /
+// standalone (electron, android, testUI) contexts, never on a pure server.
+// Enforcing `ui:` visibility here gives ONE seam for both runtimes: over WS
+// the server already filters at broadcast time; locally (standalone) there is
+// no broadcast, so without this every "secret" was fully readable on the cell
+// object. Reads of a hidden field return undefined AND warn once — loud, not
+// silent. Server-side reads (routes/effects — bound via bindCell) see
+// everything, by design.
+
+const _uiReadWarned = new Set<string>();
+
+/** Test isolation — clear the one-time hidden-read warning dedup. */
+export function _resetUiReadWarnings(): void {
+  _uiReadWarned.clear();
+}
+
+function warnHiddenRead(cellName: string, key: string, reason: string): void {
+  const id = `${cellName}.${key}`;
+  if (_uiReadWarned.has(id)) return;
+  _uiReadWarned.add(id);
+  console.warn(
+    `[aio] ${id} read from client context → undefined — ${reason}. ` +
+      `ui visibility is enforced on ALL client reads (browser and ` +
+      `standalone/electron alike); keep secrets server-side and read them ` +
+      `in server code (routes, effects, methods) instead.`,
+  );
+}
+
+/** The ui filter that applies to CLIENT reads of a cell. Client-scoped cells
+ *  are exempt: their state lives only in this client (never broadcast), so a
+ *  ui filter has nothing to protect. */
+function clientUiFilter(def: CellDef): CellFieldFilter | undefined {
+  return def.__aio.scope === "client" ? undefined : def.__aio.ui;
+}
+
+/** Filter a full cell slice for client visibility ("none" → empty slice). */
+function filterSlice(
+  filter: CellFieldFilter | undefined,
+  slice: Record<string, unknown>,
+): Record<string, unknown> {
+  if (!filter || filter === "all") return slice;
+  return applyCellFieldFilter(filter, slice) ?? {};
+}
+
 /** Install signal-backed getters on a cell for each state key, and wrap
  *  action creators with dispatch so `counter.increment()` sends to server.
  *  After this, `counter.count` reads from the cell signal (auto-tracked). */
@@ -90,11 +140,20 @@ export function bindCellReactive(
   // getter (installDefaultStateGetters); skip only if a method/selector owns the
   // name (impossible per AIO-6.1, but defensive — a default getter reads as a
   // non-function and is correctly overridden).
+  const uiFilter = clientUiFilter(def);
   for (const key of Object.keys(initialState)) {
     if (typeof (def as Record<string, unknown>)[key] === "function") continue;
 
+    // TBD B7: ui visibility is enforced at THIS seam for client reads — a
+    // hidden field reads as undefined (+ one-time loud warn), a dot-path
+    // exclude strips the nested value, exactly like the broadcast filter.
+    const vis = uiKeyVisibility(uiFilter, key);
     Object.defineProperty(def, key, {
       get() {
+        if (vis.hidden) {
+          warnHiddenRead(cellName, key, vis.reason!);
+          return undefined;
+        }
         // Register a SERVER subscription for this cell (risoto 2026-07-18):
         // reading a cell via direct access is documented as "reactive and
         // auto-tracked", but it only tracked the AIR *re-render* signal — it
@@ -107,8 +166,13 @@ export function bindCellReactive(
         // standalone/test (no transport → no __subs sent).
         trackPath(cellName);
         const s = sig.value; // tracked read — auto-tracked by AIR renderer
-        if (s == null) return initialState[key];
-        return (s as Record<string, unknown>)[key];
+        const v = s == null
+          ? initialState[key]
+          : (s as Record<string, unknown>)[key];
+        if (vis.deepSegs) {
+          return vis.deepSegs.reduce((acc, segs) => deepExclude(acc, segs), v);
+        }
+        return v;
       },
       enumerable: false,
       configurable: true,
@@ -134,7 +198,13 @@ export function bindCellReactive(
       Object.defineProperty(def, key, {
         value: (...args: unknown[]) => {
           trackPath(cellName);
-          const own = (sig.value ?? initialState) as Record<string, unknown>;
+          // TBD B7: selectors in client context see the ui-FILTERED slice —
+          // same data a browser client would hold after a broadcast, so a
+          // selector can't leak a ui-excluded secret in standalone/electron.
+          const own = filterSlice(
+            uiFilter,
+            (sig.value ?? initialState) as Record<string, unknown>,
+          );
           // Called WITH args → parameterized selector (`cell.byId(id)`).
           if (args.length > 0) {
             return (selectorFn as (s: unknown, ...a: unknown[]) => unknown)(
@@ -149,7 +219,13 @@ export function bindCellReactive(
               const other = _cellSignals.get(prop);
               if (!other) return undefined;
               trackPath(prop);
-              return other.value;
+              // Cross-cell reads honor the OTHER cell's ui filter too.
+              const otherDef = _cellRegistry.get(prop);
+              const otherSlice = (other.value ?? otherDef?.__aio.state ??
+                {}) as Record<string, unknown>;
+              return otherDef
+                ? filterSlice(clientUiFilter(otherDef), otherSlice)
+                : otherSlice;
             },
           });
           return selectorFn(own, full);

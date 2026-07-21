@@ -1,5 +1,6 @@
 // Vitals probe initialization and diagnostic event logging for browser transport.
 
+import { enc } from "../protocol/envelope.ts";
 import {
   _checkWastedRenders,
   _notify,
@@ -89,7 +90,7 @@ export function initVitals(_ws: WebSocket): void {
         const ms = _vitalsRenderMeter
           ? Math.round(_vitalsRenderMeter.getStaleness())
           : 0;
-        T.ws.send("__vitals:ping:" + JSON.stringify({ t1: ping.t1, ms }));
+        T.ws.send(enc("vitals-ping", { t1: ping.t1, ms }));
       }
     }, DEFAULT_HEARTBEAT_INTERVAL));
   }

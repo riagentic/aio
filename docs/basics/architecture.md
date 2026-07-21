@@ -108,6 +108,16 @@ conflict resolution.
 **AIR is the renderer.** AIR (`browser-air.ts` entry, `air/`) uses the state
 subscription API. Custom adapters can be built on `state-core.ts`.
 
+**Instance model (deliberate).** Cell DEFINITIONS live in one module-scoped
+registry — `cell()` self-registers on import; that's what makes zero-config
+`aio.run()` and "import and use" possible. All RUNTIME state (store, dispatch,
+persistence, locks) is per-app: several `aio.run()` calls coexist in one
+process, each with a disjoint `cells:` list, and binding one def to two apps
+throws. Embedding = `libraryMode: true` (no singleton lock) + explicit cells +
+`dbPath` for storage isolation; `tests/multi-instance.test.ts` and
+`tests/torture-app.test.ts` pin this. The global registry is a design decision,
+not a leftover.
+
 ## Module Boundaries (CI-enforced)
 
 Folders may only import what the dependency matrix in

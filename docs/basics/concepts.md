@@ -49,6 +49,8 @@ const counter = cell("counter", {
 
 ```ts
 import { aio } from "aio";
+import { counter } from "./counter.ts";
+
 await aio.run({ appId: "my-app", cells: [counter] });
 
 counter.increment(5); // { count: 5 }

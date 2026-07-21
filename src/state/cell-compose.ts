@@ -57,7 +57,10 @@ export function composeCells(
       );
     }
     if (f.__aio.actionKeys.length === 0) {
-      log.warn("cell", `${f.__aio.id} has no actions — is this intentional?`);
+      // debug, not warn: state-only cells (shared data, read via selectors)
+      // are a legitimate pattern — quant flagged the warn as boot noise on
+      // every testUI run.
+      log.debug("cell", `${f.__aio.id} has no methods (state-only cell)`);
     }
   }
 

@@ -165,13 +165,18 @@ const cart2 = cell("wf-cart", {
 });
 
 const stats2 = cell("wf-stats", {
-  state: { clears: 0, lastCleared: "" },
-  listensTo: { onCartCleared: cart2.clear },
+  state: { clears: 0, lastCleared: "", lastAdded: "" },
+  listensTo: { onCartCleared: cart2.clear, onAdded: cart2.add },
   methods: {
     onCartCleared(s) {
       // Runs when wf-cart:clear dispatches — the cart never imports us.
       s.clears += 1;
       s.lastCleared = "yes";
+    },
+    // Foreign method args arrive SPREAD — the handler mirrors the foreign
+    // method's own parameter list (quant, alpha28 migration).
+    onAdded(s, item: string) {
+      s.lastAdded = item;
     },
   },
 });
@@ -193,6 +198,7 @@ Deno.test("listensTo object form: handler runs on the foreign action", () => {
     (state["wf-stats"] as { lastCleared: string }).lastCleared,
     "yes",
   );
+  assertEquals((state["wf-stats"] as { lastAdded: string }).lastAdded, "milk");
 });
 
 Deno.test("listensTo object form: unknown method fails loud at definition", () => {

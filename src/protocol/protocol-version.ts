@@ -1,22 +1,25 @@
-// protocol-version.ts — WS wire-protocol version handshake (roadmap A3).
+// protocol-version.ts — wire-protocol version handshake (roadmap A3).
 //
-// Both sides announce `{ v, min }` on connect (`__proto:` control message,
-// server speaks first). The effective version is `min(ours.v, theirs.v)`;
-// the connection is compatible iff each side's `min` is satisfied by it.
+// Both sides announce `{ v, min }` on connect (a "proto" envelope, server
+// speaks first). The effective version is `min(ours.v, theirs.v)`; the
+// connection is compatible iff each side's `min` is satisfied by it.
 // A mismatch closes the socket with code 4505 — loudly, never silently.
+// v2 (B4b): ONE JSON envelope for every frame; v1 peers are refused (the
+// mismatch reason is still sent in v1's `__proto-err:` string form so the
+// old peer can read it).
 //
 // Browser-safe: pure constants + a pure function, zero imports.
 
 /** Highest wire-protocol version this build speaks. */
-export const PROTOCOL_VERSION = 1;
+export const PROTOCOL_VERSION = 2;
 
 /** Lowest wire-protocol version this build still accepts. */
-export const PROTOCOL_MIN_SUPPORTED = 1;
+export const PROTOCOL_MIN_SUPPORTED = 2;
 
 /** WebSocket close code used for protocol-version mismatches. */
 export const PROTOCOL_MISMATCH_CLOSE_CODE = 4505;
 
-/** Version announcement exchanged as `__proto:<json>` on connect. */
+/** Version announcement exchanged in the "proto" envelope on connect. */
 export type ProtoHello = { v: number; min: number };
 
 /** This build's announcement. */
@@ -24,10 +27,13 @@ export function protoHello(): ProtoHello {
   return { v: PROTOCOL_VERSION, min: PROTOCOL_MIN_SUPPORTED };
 }
 
-/** Parse a `__proto:<json>` payload; null when malformed. */
-export function parseProtoHello(json: string): ProtoHello | null {
+/** Validate a hello payload — a decoded envelope `d`, or a JSON string for
+ *  the legacy `__proto:` body. Null when malformed. */
+export function parseProtoHello(input: unknown): ProtoHello | null {
   try {
-    const p = JSON.parse(json) as Partial<ProtoHello> | null;
+    const p = (typeof input === "string" ? JSON.parse(input) : input) as
+      | Partial<ProtoHello>
+      | null;
     if (
       p && typeof p.v === "number" && Number.isInteger(p.v) && p.v >= 1 &&
       typeof p.min === "number" && Number.isInteger(p.min) && p.min >= 1 &&

@@ -119,33 +119,38 @@ describe("persistOp + loadOpsSince", () => {
       assertEquals(ops[0]?.hlc, [100, 0, "n1"]);
     }));
 
-  it("null cursor returns all ops for the cell ordered by (phys, cnt)", () =>
+  it("null cursor returns all ops for the cell in dispatch (server_ts) order", () =>
     withDb(async (db) => {
       await persistOp(db, op("c", hlc(102, 0)));
       await persistOp(db, op("b", hlc(100, 1)));
       await persistOp(db, op("a", hlc(100, 0)));
       await persistOp(db, op("d", hlc(101, 5)));
 
+      // Persist order, NOT HLC order — a replay/fresh client must fold ops in
+      // exactly the order the live server dispatched them.
       const ops = await loadOpsSince(db, "todos", null);
-      assertEquals(ids(ops), ["a", "b", "d", "c"]);
+      assertEquals(ids(ops), ["c", "b", "a", "d"]);
     }));
 
-  it("HLC cursor is strictly-after: equal HLC is excluded", () =>
+  it("the HLC watermark is NEVER a delivery filter (chaos finding)", () =>
     withDb(async (db) => {
+      // HLC order ≠ persist order: a client's HLC watermark can sit "above"
+      // concurrently stamped peer ops it never received, so filtering by it
+      // silently lost ops. Without a server_ts cursor the full log comes back.
       await persistOp(db, op("a", hlc(100, 0)));
       await persistOp(db, op("b", hlc(100, 1)));
       await persistOp(db, op("c", hlc(101, 0)));
 
-      // Same phys, higher cnt AND higher phys both pass; the cursor itself does not
-      assertEquals(ids(await loadOpsSince(db, "todos", hlc(100, 0))), [
+      assertEquals(ids(await loadOpsSince(db, "todos", hlc(100, 1))), [
+        "a",
         "b",
         "c",
       ]);
-      assertEquals(ids(await loadOpsSince(db, "todos", hlc(100, 1))), ["c"]);
-      // Cursor at the newest op → nothing
-      assertEquals(await loadOpsSince(db, "todos", hlc(101, 0)), []);
-      // Higher cnt on an older phys must NOT mask newer phys ops
-      assertEquals(ids(await loadOpsSince(db, "todos", hlc(100, 99))), ["c"]);
+      assertEquals(ids(await loadOpsSince(db, "todos", hlc(101, 0))), [
+        "a",
+        "b",
+        "c",
+      ]);
     }));
 
   it("filters by cell — other cells' ops never leak", () =>
@@ -156,7 +161,6 @@ describe("persistOp + loadOpsSince", () => {
 
       assertEquals(ids(await loadOpsSince(db, "todos", null)), ["t1", "t2"]);
       assertEquals(ids(await loadOpsSince(db, "notes", null)), ["n1"]);
-      assertEquals(ids(await loadOpsSince(db, "todos", hlc(100, 0))), ["t2"]);
     }));
 
   it("server_ts cursor wins over HLC cursor and orders by server_ts", () =>
@@ -192,16 +196,20 @@ describe("persistOp + loadOpsSince", () => {
       ]);
     }));
 
-  it("lastServerTs of 0 or null falls back to the HLC cursor", () =>
+  it("lastServerTs of 0 or null means no cursor → full log", () =>
     withDb(async (db) => {
       await persistOp(db, op("a", hlc(100, 0)));
       await persistOp(db, op("b", hlc(101, 0)));
 
-      // 0 is "no cursor" — a naive `server_ts > 0` would return both ops
+      // 0 is "no cursor" — never treated as a `server_ts > 0` filter, and the
+      // HLC watermark must not filter either (client op-id dedup absorbs the
+      // re-delivery; an HLC filter silently LOSES ops — see chaos suite).
       assertEquals(ids(await loadOpsSince(db, "todos", hlc(100, 0), 0)), [
+        "a",
         "b",
       ]);
       assertEquals(ids(await loadOpsSince(db, "todos", hlc(100, 0), null)), [
+        "a",
         "b",
       ]);
     }));

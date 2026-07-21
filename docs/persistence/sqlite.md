@@ -291,10 +291,10 @@ deno compile --allow-read --allow-write \
 For scripts, CLI tools, tests outside `aio.run()`:
 
 ```ts
-import { createDB, DEFAULT_PRAGMAS } from "jsr:@riagentic/aio/db";
+import { createDB, DEFAULT_PRAGMAS } from "aio/db";
 
-const db = createDB("./myapp.db");
-const db = createDB("./myapp.db", {
+const db = createDB("./myapp.db"); // zero-config
+const tuned = createDB("./myapp.db", {
   pragmas: [...DEFAULT_PRAGMAS, "PRAGMA temp_store = MEMORY"],
   readers: 2,
 });

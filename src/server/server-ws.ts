@@ -2,9 +2,17 @@
 // Manages WS upgrades, per-client state, message routing, rate limiting, backpressure
 import type { AioUser } from "./aio.ts";
 import { invokeServerFn } from "./server-fns.ts";
+import {
+  type ActionPayload,
+  dec,
+  enc,
+  encRaw,
+  type SfnPayload,
+} from "../protocol/envelope.ts";
 import { filterStateBySubs, parseSubs } from "../protocol/broadcast-utils.ts";
 import { writeClientLog } from "./client-log.ts";
 import { log } from "../diagnostics/logger.ts";
+import { parseTTCommand } from "../diagnostics/time-travel.ts";
 import type { ClientLogEntry } from "../air/dom-inspector-types.ts";
 import type { VitalsSystem } from "../vitals/mod.ts";
 import {
@@ -71,7 +79,7 @@ export type ClientMeta = {
   /** Stable client key (usually remote IP) used for cross-connection abuse tracking. */
   clientKey?: string;
   /** Negotiated wire-protocol version (A3). Undefined until the client's
-   *  `__proto:` hello arrives; legacy clients never send one. */
+   *  "proto" hello arrives. */
   protocolVersion?: number;
 };
 
@@ -172,13 +180,15 @@ export function createWsManager(deps: WsDeps): WsManager {
     abuseDenylist.set(key, Date.now() + ABUSE_DENYLIST_MS);
   }
 
-  // Derive request kind from WS command message for deduplication key
-  const reqKind = (msg: string) =>
-    msg.startsWith("__ui:surface")
+  // Derive request kind from the outgoing command envelope for the dedup key
+  const reqKind = (msg: string) => {
+    const t = dec(msg)?.t;
+    return t === "ui-surface"
       ? "surface"
-      : msg.startsWith("__ui:trigger")
+      : t === "ui-trigger"
       ? "trigger"
       : "clientState";
+  };
 
   function handleWs(
     req: Request,
@@ -301,25 +311,25 @@ export function createWsManager(deps: WsDeps): WsManager {
       }
       // A3: version handshake — server speaks first, before any state.
       try {
-        socket.send("__proto:" + JSON.stringify(protoHello()));
+        socket.send(enc("proto", protoHello()));
       } catch { /* socket closing during onopen (AIO-155) */ }
       try {
         const uiState = deps.getUIState(meta.user);
         const msg = JSON.stringify(uiState);
-        socket.send(msg);
+        socket.send(encRaw("state", msg));
         meta.lastFullJson = msg;
       } catch (e) {
         deps.debug(`ws: getUIState error on connect — ${e}`);
       }
       if (deps.getTTBroadcast) {
         try {
-          socket.send("__tt:" + JSON.stringify(deps.getTTBroadcast()));
+          socket.send(enc("tt-state", deps.getTTBroadcast()));
         } catch (e) {
           deps.debug(`ws: getTTBroadcast error on connect — ${e}`);
         }
       }
       try {
-        socket.send("__boot:" + deps.bootId);
+        socket.send(enc("boot", { id: deps.bootId }));
       } catch { /* socket closing during onopen (AIO-155) */ }
     };
 
@@ -486,128 +496,128 @@ export function createWsManager(deps: WsDeps): WsManager {
       return;
     }
 
-    // Client state response (dev mode) — resolves pending am request
-    if (e.data.startsWith("__clientState:")) {
-      _resolvePending(meta, "clientState", e.data.slice(14));
-      return;
-    }
-    // Client log forwarding (dev mode)
-    if (!deps.prod && e.data.startsWith("__log:")) {
-      try {
-        writeClientLog(
-          meta.index,
-          JSON.parse(e.data.slice(6)) as ClientLogEntry,
-        );
-      } catch { /* malformed */ }
-      return;
-    }
-    // UI semantic-surface result
-    if (e.data.startsWith("__ui:surface-result:")) {
-      _resolvePending(
-        meta,
-        "surface",
-        e.data.slice("__ui:surface-result:".length),
-      );
-      return;
-    }
-    // UI semantic-trigger result
-    if (e.data.startsWith("__ui:trigger-result:")) {
-      _resolvePending(
-        meta,
-        "trigger",
-        e.data.slice("__ui:trigger-result:".length),
-      );
-      return;
-    }
-    // Client type identification
-    if (e.data.startsWith("__type:")) {
-      const t = e.data.slice(7);
-      if (t === "electron" || t === "browser") meta.clientType = t;
-      return;
-    }
-    // A3: wire-protocol version handshake
+    // v2 envelope demux (B4b): every frame is {v:2, t, d} — one decode,
+    // one switch. A legacy v1 hello (`__proto:{...}`) is answered with the
+    // v1 `__proto-err:` string + 4505 so the old peer can read WHY.
     if (e.data.startsWith("__proto:")) {
-      const theirs = parseProtoHello(e.data.slice(8));
-      if (!theirs) {
-        deps.debug(
-          `ws: malformed __proto hello from ${meta.id.slice(0, 8)} — ignored`,
+      const msg = `ws: v1 client ${
+        meta.id.slice(0, 8)
+      } refused — this server speaks wire protocol v2+ (rebuild the client)`;
+      log.error("ws", msg);
+      try {
+        socket.send(
+          "__proto-err:this server speaks wire protocol v2+ — rebuild/update the client",
+        );
+        socket.close(PROTOCOL_MISMATCH_CLOSE_CODE, "protocol mismatch");
+      } catch { /* already closed */ }
+      return;
+    }
+    const frame = dec(e.data);
+    if (!frame) {
+      log.warn("ws", `ws: undecodable frame from ${meta.id.slice(0, 8)} — dropped`);
+      return;
+    }
+    switch (frame.t) {
+      case "client-state":
+        _resolvePending(meta, "clientState", frame.d);
+        return;
+      case "log":
+        if (!deps.prod) {
+          try {
+            writeClientLog(meta.index, frame.d as ClientLogEntry);
+          } catch { /* malformed */ }
+        }
+        return;
+      case "ui-surface-result":
+        _resolvePending(meta, "surface", frame.d);
+        return;
+      case "ui-trigger-result":
+        _resolvePending(meta, "trigger", frame.d);
+        return;
+      case "type": {
+        const t = (frame.d as { kind?: string } | undefined)?.kind;
+        if (t === "electron" || t === "browser") meta.clientType = t;
+        return;
+      }
+      case "proto": {
+        const theirs = parseProtoHello(frame.d);
+        if (!theirs) {
+          deps.debug(
+            `ws: malformed proto hello from ${meta.id.slice(0, 8)} — ignored`,
+          );
+          return;
+        }
+        const result = negotiateProtocol(protoHello(), theirs);
+        if (!result.ok) {
+          const msg = `ws: protocol mismatch with client ${
+            meta.id.slice(0, 8)
+          } — ${result.reason}`;
+          log.error("ws", msg);
+          writeClientLog(meta.index, {
+            level: "error",
+            msg,
+            ts: Date.now(),
+            source: "server-ws",
+          });
+          try {
+            socket.send("__proto-err:" + result.reason);
+            socket.close(PROTOCOL_MISMATCH_CLOSE_CODE, "protocol mismatch");
+          } catch { /* already closed */ }
+          return;
+        }
+        meta.protocolVersion = result.effective;
+        return;
+      }
+      case "tt-cmd":
+        if (deps.onTTCommand) {
+          _handleTTCommand((frame.d as { cmd?: string } | undefined)?.cmd ?? "");
+        }
+        return;
+      case "vitals-ping":
+        _handleVitalsPing(socket, meta, frame.d);
+        return;
+      case "subs":
+        _handleSubs(socket, meta, (frame.d as { subs?: unknown })?.subs);
+        return;
+      case "resync":
+        _handleResync(socket, meta);
+        return;
+      case "op":
+        _handleSyncOp(frame.d as Record<string, unknown>, meta, socket);
+        return;
+      case "sync-req":
+        _handleSyncMsg(frame.d as Record<string, unknown>, meta, socket);
+        return;
+      case "sfn": {
+        const { cid, ns, name, args } = (frame.d ?? {}) as SfnPayload;
+        if (
+          typeof cid !== "string" || typeof ns !== "string" ||
+          typeof name !== "string" || !Array.isArray(args)
+        ) {
+          log.warn("ws", "invalid sfn frame — dropping");
+          return;
+        }
+        invokeServerFn(ns, name, args).then((result) => {
+          try {
+            socket.send(enc("sfnr", { cid, ...result }));
+          } catch { /* client disconnected */ }
+        });
+        return;
+      }
+      case "action":
+        break; // falls through to the dispatch path below
+      default:
+        // S→C-only kinds arriving C→S, or future kinds — loud, never silent.
+        log.warn(
+          "ws",
+          `ws: unexpected "${frame.t}" frame from client ${
+            meta.id.slice(0, 8)
+          } — dropped`,
         );
         return;
-      }
-      const result = negotiateProtocol(protoHello(), theirs);
-      if (!result.ok) {
-        const msg = `ws: protocol mismatch with client ${
-          meta.id.slice(0, 8)
-        } — ${result.reason}`;
-        log.error("ws", msg);
-        writeClientLog(meta.index, {
-          level: "error",
-          msg,
-          ts: Date.now(),
-          source: "server-ws",
-        });
-        try {
-          socket.send("__proto-err:" + result.reason);
-          socket.close(PROTOCOL_MISMATCH_CLOSE_CODE, "protocol mismatch");
-        } catch { /* already closed */ }
-        return;
-      }
-      meta.protocolVersion = result.effective;
-      return;
-    }
-    // Time-travel commands
-    if (e.data.startsWith("__tt:") && deps.onTTCommand) {
-      _handleTTCommand(e.data);
-      return;
-    }
-    // Vitals ping
-    if (e.data.startsWith("__vitals:ping:")) {
-      _handleVitalsPing(socket, meta, e.data);
-      return;
-    }
-    // Subscription update
-    if (e.data.startsWith("__subs:")) {
-      _handleSubs(socket, meta, e.data.slice(7));
-      return;
-    }
-    // Resync request
-    if (e.data === "__resync") {
-      _handleResync(socket, meta);
-      return;
     }
 
-    // JSON action dispatch
-    const parsed = JSON.parse(e.data);
-    if (parsed.__op) {
-      _handleSyncOp(parsed, meta, socket);
-      return;
-    }
-    if (parsed.__sync) {
-      _handleSyncMsg(parsed, meta, socket);
-      return;
-    }
-    // serverFn call (perfect-aio B3): run the registered fn, reply w/ outcome.
-    if (parsed.__sfn) {
-      const { cid, ns, name, args } = parsed.__sfn as {
-        cid: string;
-        ns: string;
-        name: string;
-        args: unknown[];
-      };
-      if (
-        typeof cid !== "string" || typeof ns !== "string" ||
-        typeof name !== "string" || !Array.isArray(args)
-      ) {
-        log.warn("ws", "invalid __sfn envelope — dropping");
-        return;
-      }
-      invokeServerFn(ns, name, args).then((result) => {
-        try {
-          socket.send(JSON.stringify({ __sfnr: { cid, ...result } }));
-        } catch { /* client disconnected */ }
-      });
-      return;
-    }
+    const parsed = (frame.d ?? {}) as ActionPayload;
     if (!parsed || typeof parsed.type !== "string") {
       const msg = "ws: invalid action — missing type field";
       log.warn("ws", msg);
@@ -648,7 +658,7 @@ export function createWsManager(deps: WsDeps): WsManager {
       queueMicrotask(() => {
         try {
           if (socket.readyState === WebSocket.OPEN) {
-            socket.send(`__ack:${cid}:1`);
+            socket.send(enc("ack", { cid, ok: true }));
           }
         } catch { /* client gone */ }
       });
@@ -658,7 +668,7 @@ export function createWsManager(deps: WsDeps): WsManager {
   function _resolvePending(
     meta: ClientMeta,
     kind: string,
-    rawData: string,
+    data: unknown,
   ): void {
     const key = `${meta.id}:${kind}`;
     const pending = pendingClientState.get(key);
@@ -666,33 +676,27 @@ export function createWsManager(deps: WsDeps): WsManager {
       pendingClientState.delete(key);
       clearTimeout(pending.timer);
       try {
-        pending.resolve(JSON.parse(rawData));
+        pending.resolve(data);
       } catch {
         pending.resolve(null);
       }
     }
   }
 
-  function _handleTTCommand(data: string): void {
-    deps.debug(`ws: tt command ${data}`);
-    const body = data.slice(5);
-    if (body.startsWith("goto:")) {
-      const n = Number(body.slice(5));
-      if (Number.isInteger(n) && n >= 0 && n < 1_000_000) {
-        deps.onTTCommand?.("goto", n);
-      }
-    } else {
-      deps.onTTCommand?.(body);
-    }
+  function _handleTTCommand(body: string): void {
+    deps.debug(`ws: tt command ${body}`);
+    const c = parseTTCommand(body);
+    if (c) deps.onTTCommand?.(c.cmd, c.cmd === "goto" ? c.arg : undefined);
   }
 
   function _handleVitalsPing(
     socket: WebSocket,
     _meta: ClientMeta,
-    data: string,
+    data: unknown,
   ): void {
     try {
-      const ping = JSON.parse(data.slice(14));
+      const ping = data as { t1: number; ms?: number };
+      if (!ping || typeof ping.t1 !== "number") throw new Error("malformed");
       const vmeta = connections.get(socket);
       if (vmeta && deps.vitalsSystem) {
         deps.vitalsSystem.serverTransport.onClientPing(vmeta.id, ping.t1);
@@ -735,17 +739,21 @@ export function createWsManager(deps: WsDeps): WsManager {
           t2: Date.now(),
           loop: deps.vitalsSystem.getLoopVitalsForPong(),
         };
-        socket.send("__vitals:pong:" + JSON.stringify(pong));
+        socket.send(enc("vitals-pong", pong));
       }
     } catch (err) {
       log.warn("vitals", `bad ping: ${err}`);
     }
   }
 
-  function _handleSubs(socket: WebSocket, meta: ClientMeta, raw: string): void {
-    const subs = parseSubs(raw);
+  function _handleSubs(
+    socket: WebSocket,
+    meta: ClientMeta,
+    rawSubs: unknown,
+  ): void {
+    const subs = parseSubs(rawSubs);
     if (subs === undefined) {
-      log.warn("ws", "bad __subs message");
+      log.warn("ws", "bad subs frame");
       return;
     }
     meta.subscriptions = subs;
@@ -753,7 +761,7 @@ export function createWsManager(deps: WsDeps): WsManager {
       const msg = JSON.stringify(
         filterStateBySubs(deps.getUIState(meta.user), meta.subscriptions),
       );
-      socket.send(msg);
+      socket.send(encRaw("state", msg));
       meta.lastFullJson = msg;
       meta.bpLastSentAt = Date.now();
     } catch (err) {
@@ -767,7 +775,7 @@ export function createWsManager(deps: WsDeps): WsManager {
       const msg = JSON.stringify(
         filterStateBySubs(deps.getUIState(meta.user), meta.subscriptions),
       );
-      socket.send(msg);
+      socket.send(encRaw("state", msg));
       meta.lastFullJson = msg;
       meta.bpLastSentAt = Date.now();
     } catch (err) {
@@ -776,15 +784,14 @@ export function createWsManager(deps: WsDeps): WsManager {
   }
 
   function _handleSyncOp(
-    parsed: Record<string, unknown>,
+    op: Record<string, unknown>,
     meta: ClientMeta,
     socket: WebSocket,
   ): void {
     if (!deps.syncHandler) {
-      log.warn("ws", "__op received but no syncHandler configured — dropping");
+      log.warn("ws", "op received but no syncHandler configured — dropping");
       return;
     }
-    const op = parsed.__op as Record<string, unknown>;
     if (
       !op || typeof op !== "object" || typeof op.id !== "string" ||
       typeof op.cell !== "string" || typeof op.action !== "string" ||
@@ -798,29 +805,28 @@ export function createWsManager(deps: WsDeps): WsManager {
       ["__proto__", "constructor", "prototype"].includes(op.action as string) ||
       _isFrameworkInternalActionType(op.action as string)
     ) {
-      log.warn("ws", "invalid __op — malformed or forbidden fields");
+      log.warn("ws", "invalid op — malformed or forbidden fields");
       return;
     }
     deps.syncHandler.handleOp(op, { id: meta.id, user: meta.user }, socket);
   }
 
   function _handleSyncMsg(
-    parsed: Record<string, unknown>,
+    sync: Record<string, unknown>,
     meta: ClientMeta,
     socket: WebSocket,
   ): void {
     if (!deps.syncHandler) {
       log.warn(
         "ws",
-        "__sync received but no syncHandler configured — dropping",
+        "sync-req received but no syncHandler configured — dropping",
       );
       return;
     }
-    const sync = parsed.__sync as Record<string, unknown>;
     if (
       !sync || typeof sync !== "object" || typeof sync.clientId !== "string"
     ) {
-      log.warn("ws", "invalid __sync — malformed");
+      log.warn("ws", "invalid sync-req — malformed");
       return;
     }
     deps.syncHandler.handleSync(sync, { id: meta.id, user: meta.user }, socket);

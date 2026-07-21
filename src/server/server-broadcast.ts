@@ -1,5 +1,6 @@
 // Broadcast subsystem — sends state updates to all connected WS clients
 // Handles throttling, patch compaction, backpressure, full-state fallback
+import { enc, encRaw } from "../protocol/envelope.ts";
 import { compactPatches } from "../state/patch-compact.ts";
 import { createCoalescer } from "./broadcast-coalescer.ts";
 import {
@@ -105,7 +106,7 @@ export function createBroadcaster(deps: BroadcastDeps): Broadcaster {
             ),
           );
           if (allOps.length > 0) {
-            const patchJson = JSON.stringify({ $patches: allOps });
+            const patchJson = JSON.stringify(allOps);
             fullJsonForTracking = _getFilteredFullJson(meta);
             // Send full state when the patch payload exceeds the configured
             // fraction of the full-state size (default 0.5 → patch > 50%).
@@ -122,10 +123,10 @@ export function createBroadcaster(deps: BroadcastDeps): Broadcaster {
                 }% of full state (${fullJsonForTracking.length}B) — sending full state`,
               );
               if (fullJsonForTracking !== meta.lastFullJson) {
-                msgToSend = fullJsonForTracking;
+                msgToSend = encRaw("state", fullJsonForTracking);
               }
             } else {
-              msgToSend = patchJson;
+              msgToSend = encRaw("patches", patchJson);
             }
           }
         }
@@ -137,7 +138,7 @@ export function createBroadcaster(deps: BroadcastDeps): Broadcaster {
           fullJsonForTracking ??= _getFilteredFullJson(meta);
           if (!fullJsonForTracking) continue;
           if (fullJsonForTracking === meta.lastFullJson) continue;
-          msgToSend = fullJsonForTracking;
+          msgToSend = encRaw("state", fullJsonForTracking);
         }
 
         if (!msgToSend) continue;
@@ -182,7 +183,7 @@ export function createBroadcaster(deps: BroadcastDeps): Broadcaster {
   function broadcastTT(): void {
     if (!getTTBroadcast) return;
     try {
-      const ttData = "__tt:" + JSON.stringify(getTTBroadcast());
+      const ttData = enc("tt-state", getTTBroadcast());
       for (const [ws] of connections) {
         if (ws.readyState === WebSocket.OPEN) {
           try {

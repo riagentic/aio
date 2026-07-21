@@ -1,5 +1,6 @@
 // Trojan admin API — extracted from server.ts serveStatic()
 // Control REST API at /__aio/trojan/* (localhost-only, CSRF-protected, rate-limited)
+import { enc } from "../protocol/envelope.ts";
 import type { AioUser } from "./aio.ts";
 import { _isFrameworkInternalActionType } from "./server-ws.ts";
 
@@ -194,7 +195,7 @@ function handleGet(
     if (!Number.isInteger(idx) || idx < 0) {
       return err("invalid client index", 400);
     }
-    return sendToClient(idx, "__getState");
+    return sendToClient(idx, enc("get-state"));
   }
 
   if (route.startsWith("surface/") && !prod) {
@@ -212,7 +213,7 @@ function handleGet(
     if (!Number.isInteger(idx) || idx < 0) {
       return err("invalid client index", 400);
     }
-    return sendToClient(idx, "__ui:surface");
+    return sendToClient(idx, enc("ui-surface"));
   }
 
   if (route === "history") {
@@ -322,7 +323,7 @@ async function handlePost(
       if (typeof body?.path !== "string" || typeof body?.action !== "string") {
         return err("body must be { path, action, text?, key? }", 400);
       }
-      return sendToClient(idx, "__ui:trigger:" + JSON.stringify(body));
+      return sendToClient(idx, enc("ui-trigger", body));
     } catch {
       return err("invalid JSON");
     }

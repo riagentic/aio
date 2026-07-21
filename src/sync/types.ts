@@ -63,73 +63,72 @@ export interface SyncOp {
 }
 
 /**
- * Wire message: client→server or server→client op
+ * "op" frame payload: client→server or server→client op (v2: the envelope
+ * kind is the discriminator — no wrapper key).
  */
 export interface OpMessage {
-  __op: {
-    id: string;
-    hlc: HLC;
-    cell: string;
-    action: string;
-    payload: unknown;
-    /** Server-issued cursor stamp (see SyncOp.serverTs). */
-    serverTs?: number;
-  };
+  id: string;
+  hlc: HLC;
+  cell: string;
+  action: string;
+  payload: unknown;
+  /** Server-issued cursor stamp (see SyncOp.serverTs). */
+  serverTs?: number;
 }
 
 /**
- * Wire message: server→origin-client op rejection (perfect-aio D11 — every
- * rejected change is explainable). Sent INSTEAD of an ack when the server's
- * re-execution refused the op (validate hook / guard); the client drops the
- * op, rebases (optimistic view snaps back), and surfaces the reason.
+ * "op-rejected" frame payload: server→origin-client op rejection (perfect-aio
+ * D11 — every rejected change is explainable). Sent INSTEAD of an ack when
+ * the server's re-execution refused the op (validate hook / guard); the
+ * client drops the op, rebases (optimistic view snaps back), and surfaces
+ * the reason.
  */
 export interface OpRejectedMessage {
-  __op_rejected: { opId: string; cell: string; reason: string };
+  opId: string;
+  cell: string;
+  reason: string;
 }
 
 /**
- * Wire message: server→client ack
+ * "sync-ack" frame payload: server→client per-op CRDT ack.
  */
 export interface AckMessage {
-  __ack: { opId: string; serverHlc: HLC };
+  cell: string;
+  opId: string;
+  serverHlc: HLC;
 }
 
 /**
- * Wire message: client→server sync request
+ * "sync-req" frame payload: client→server sync request.
  */
 export interface SyncRequest {
-  __sync: {
-    clientId: string;
-    cells: Record<string, { lastHlc: HLC | null; lastServerTs?: number }>;
-    pendingOps: SyncOp[];
-  };
+  clientId: string;
+  cells: Record<string, { lastHlc: HLC | null; lastServerTs?: number }>;
+  pendingOps: SyncOp[];
 }
 
-/** Wire message: server→client sync response.
- *  lowWater is per-cell map when server tracks multiple cells (see server-handler.ts). */
 /**
- * Server reply to a `__sync` catch-up request: ops since the client's cursor.
+ * "sync-res" frame payload: ops since the client's cursor. lowWater is a
+ * per-cell map when the server tracks multiple cells (see server-handler.ts).
  */
-export interface SyncResponse {
-  __sync:
-    | {
-      mode: "incremental";
-      ops: SyncOp[];
-      rebase?: SyncOp[];
-      lowWater: HLC | Record<string, HLC>;
-      /** Per-cell server_ts cursor — reserved under each cell's lock, so ops
-       *  the client hasn't seen are strictly above it (no re-delivery). */
-      lastServerTs?: Record<string, number>;
-    }
-    | {
-      mode: "snapshot";
-      snapshot: Record<string, unknown>;
-      ops: SyncOp[];
-      lowWater: HLC | Record<string, HLC>;
-      /** Per-cell server_ts cursor (see incremental). */
-      lastServerTs?: Record<string, number>;
-    };
-}
+export type SyncResponse =
+  | {
+    mode: "incremental";
+    ops: SyncOp[];
+    rebase?: SyncOp[];
+    lowWater: HLC | Record<string, HLC>;
+    /** Per-cell server_ts cursor — reserved under each cell's lock, so ops
+     *  the client hasn't seen are strictly above it (no re-delivery). */
+    lastServerTs?: Record<string, number>;
+  }
+  | {
+    mode: "snapshot";
+    snapshot: Record<string, unknown>;
+    ops: SyncOp[];
+    lowWater: HLC | Record<string, HLC>;
+    /** Per-cell server_ts cursor (see incremental). */
+    lastServerTs?: Record<string, number>;
+  };
 
 /** Default sync config values */
 export const SYNC_DEFAULTS = {

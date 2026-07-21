@@ -95,7 +95,7 @@ Four auth modes:
 ### Per-user tokens
 
 ```ts
-import type { AioUser } from "aio";
+import { aio, type AioUser, cell } from "aio";
 
 const users: Record<string, AioUser> = {
   "alice-secret-123": { id: "alice", role: "admin" },
@@ -137,7 +137,11 @@ For apps that need JWT verification, database lookups, or external auth
 providers, use the `resolveUser` hook instead of static tokens:
 
 ```ts
-import type { ResolveUserFn } from "aio";
+import { aio, type ResolveUserFn } from "aio";
+import { myCell } from "./cell/my-cell.ts";
+import { verifyJwt } from "./jwt.ts";
+
+const JWT_SECRET = Deno.env.get("JWT_SECRET")!;
 
 const resolveUser: ResolveUserFn = async (token, state) => {
   // Example: verify JWT and return user

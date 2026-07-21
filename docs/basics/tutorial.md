@@ -131,7 +131,8 @@ A workflow is an async method — plain JavaScript, with `cancelOn` + `s.$signal
 for cancellation:
 
 ```ts
-import type { MethodDraftMeta } from "aio";
+import { cell, type MethodDraftMeta } from "aio";
+import { getPrice, submitOrder } from "./api.ts";
 
 type OrderState = {
   status: string;

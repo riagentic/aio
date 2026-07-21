@@ -167,6 +167,8 @@ client that connects to a remote aio server. Same `connectCli()` API.
 
 ```ts
 import { connectCli } from "aio";
+import type { AppState } from "./state.ts";
+
 const url = Deno.args[0] ?? "http://localhost:8000";
 const cli = connectCli<AppState>(url);
 await cli.ready;

@@ -133,6 +133,7 @@ Extract a cell's state type without casts:
 
 ```ts
 import type { StateOf } from "aio";
+import { counter } from "./counter.ts";
 
 type CounterState = StateOf<typeof counter>;
 // { count: number }

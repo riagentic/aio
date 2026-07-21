@@ -22,7 +22,7 @@ Client (Browser/Electron)              Server
 |                            |    |  correlates all layers     |
 |                            |    |  produces root-cause hint  |
 +----------------------------+    +----------------------------+
-           __vitals:ping/pong
+           vitals-ping/pong frames
 ```
 
 ## Severity model
@@ -123,7 +123,7 @@ aio.run({
 
 ### TransportProbe (client + server)
 
-Measures RTT via `__vitals:ping/pong` over WebSocket. Client sends ping with
+Measures RTT via `vitals-ping`/`vitals-pong` frames over WebSocket. Client sends ping with
 `t1`, server responds with `t2` and loop vitals. Server-side watchdog tracks
 `lastPing` per client, detects frozen clients.
 
@@ -144,7 +144,7 @@ Server                              Client
 |     queueDepth      |    | TransportProbe (client)  |
 |     drainRate       |    |   ping -> measure RTT    |
 |          |          |    |         |                |
-| __vitals:pong ------+--->| VitalsSnapshot assembled |
+| vitals-pong --------+--->| VitalsSnapshot assembled |
 |                     |    |         |                |
 | DiagReporter        |    | HintEngine               |
 |  (server console)   |    |   correlate all probes   |

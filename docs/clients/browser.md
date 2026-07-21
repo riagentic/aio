@@ -27,7 +27,7 @@ export default function App() {
 
   if (!state) return <div>Connecting...</div>;
 
-  return <button onClick={() => send(A.increment())}>+</button>;
+  return <button onClick={() => send({ type: "counter:increment" })}>+</button>;
 }
 ```
 
@@ -35,7 +35,7 @@ export default function App() {
 
 - `state: S | null` — `null` until WebSocket connects and server sends initial
   state. The returned object is a **Proxy** — property accesses are tracked
-  automatically and sent to the server as `__subs:["path1","path2",...]` so only
+  automatically and sent to the server as a `subs` frame (`{"subs":["path1",…]}`) so only
   relevant deltas are broadcast back
 - `send(action)` — sends action to server via WebSocket. Actions sent before the
   initial connect are queued and flushed. Actions sent while disconnected are
@@ -86,16 +86,17 @@ concerns like "which item am I editing", form inputs, dropdown open/closed.
 
 ```tsx
 import { useAio, useLocal } from "aio/air";
+import type { AppState, Todo } from "./state.ts";
 
 export default function App() {
-  const { state, send } = useAio<AppState>();
+  const { state } = useAio<AppState>();
   const { local, set } = useLocal({ editing: null as string | null });
 
   if (!state) return <div>Connecting...</div>;
 
   return (
     <ul>
-      {state.todos.map((t) => (
+      {state.todos.map((t: Todo) => (
         <li
           key={t.id}
           onClick={() => set({ editing: t.id })}

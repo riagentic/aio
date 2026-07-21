@@ -161,7 +161,12 @@ const Counter = () => <span>{counter.count}</span>;
 
 - `counter.count` is reactive — reading it in JSX auto-tracks the signal.
 - `counter.increment(5)` dispatches to the server with typed args.
-- **Only this component re-renders** when `counter.count` changes.
+- **Only components that read this CELL re-render** when it changes. Granularity
+  is per-cell, not per-field: a component reading `counter.count` re-executes
+  when any `counter` field changes (the re-render is a cheap function call; the
+  vdom diff keeps DOM updates minimal). Components reading only OTHER cells
+  never re-render. For expensive derivations over a hot cell, memoize with
+  `createSelector` or split the hot field into its own cell.
 - No hooks, no destructuring, no loading guards. Just import and use.
 - Map-shaped state (`balances.sol[key]`): declare the `?? default` guard once as
   an accessor — see
@@ -183,6 +188,7 @@ updates.
 
 ```tsx
 import { useLocal } from "aio/air";
+import { Details, Overview } from "./pages.tsx";
 
 const Tabs = () => {
   const { local: tab, set: setTab } = useLocal("overview");
@@ -225,7 +231,7 @@ const SearchBar = () => (
   <div>
     <input
       value={searchQuery.value}
-      onInput={(e) => searchQuery.set(e.target.value)}
+      onInput={(e) => searchQuery.set((e.target as HTMLInputElement).value)}
     />
     <span>{queryLength.value} characters</span>
   </div>

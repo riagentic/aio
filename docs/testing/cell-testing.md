@@ -129,7 +129,9 @@ For testing `call()` with timeout/retry in isolation — call it in a Deno.test
 after binding the app:
 
 ```ts
-import { call } from "aio";
+import { assertEquals } from "@std/assert";
+import { aio, call } from "aio";
+import { inventory } from "./cell/inventory/index.ts";
 
 Deno.test("call resolves with return value", async () => {
   await aio.run({ appId: "my-app", cells: [inventory] });

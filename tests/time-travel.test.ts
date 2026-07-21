@@ -195,21 +195,21 @@ Deno.test("tt: toBroadcast omits state, includes action type", () => {
 });
 
 Deno.test("tt: parseTTCommand parses all commands", () => {
-  assertEquals(parseTTCommand("__tt:undo"), { cmd: "undo" });
-  assertEquals(parseTTCommand("__tt:redo"), { cmd: "redo" });
-  assertEquals(parseTTCommand("__tt:pause"), { cmd: "pause" });
-  assertEquals(parseTTCommand("__tt:resume"), { cmd: "resume" });
-  assertEquals(parseTTCommand("__tt:goto:5"), { cmd: "goto", arg: 5 });
-  assertEquals(parseTTCommand("__tt:goto:0"), { cmd: "goto", arg: 0 });
+  assertEquals(parseTTCommand("undo"), { cmd: "undo" });
+  assertEquals(parseTTCommand("redo"), { cmd: "redo" });
+  assertEquals(parseTTCommand("pause"), { cmd: "pause" });
+  assertEquals(parseTTCommand("resume"), { cmd: "resume" });
+  assertEquals(parseTTCommand("goto:5"), { cmd: "goto", arg: 5 });
+  assertEquals(parseTTCommand("goto:0"), { cmd: "goto", arg: 0 });
 });
 
 Deno.test("tt: parseTTCommand rejects garbage", () => {
   assertEquals(parseTTCommand("hello"), null);
-  assertEquals(parseTTCommand("__tt:"), null);
-  assertEquals(parseTTCommand("__tt:fly"), null);
-  assertEquals(parseTTCommand("__tt:goto:"), null);
-  assertEquals(parseTTCommand("__tt:goto:-1"), null);
-  assertEquals(parseTTCommand("__tt:goto:abc"), null);
+  assertEquals(parseTTCommand("fly"), null);
+  assertEquals(parseTTCommand("goto:"), null);
+  assertEquals(parseTTCommand("goto:-1"), null);
+  assertEquals(parseTTCommand("goto:abc"), null);
+  assertEquals(parseTTCommand("goto:9999999"), null); // network-facing bound
   assertEquals(parseTTCommand(""), null);
 });
 
@@ -263,9 +263,7 @@ Deno.test("tt integration: TT commands via WS protocol", async () => {
     const ws = new WebSocket(`ws://127.0.0.1:${TT_PORT}/ws`);
     const received: string[] = [];
     ws.addEventListener("message", (e) => {
-      if (!(e.data as string).startsWith("__boot:")) {
-        received.push(e.data as string);
-      }
+      received.push(e.data as string);
     });
     await new Promise<void>((resolve, reject) => {
       // Fail fast instead of hanging forever if the upgrade never completes
@@ -285,23 +283,27 @@ Deno.test("tt integration: TT commands via WS protocol", async () => {
     await waitFor(() => received.length >= 1); // initial state
 
     // Should receive TT metadata on connect
-    await waitFor(() => received.some((m) => m.startsWith("__tt:")));
-    const ttMsg = received.find((m) => m.startsWith("__tt:"))!;
-    const ttData = JSON.parse(ttMsg.slice(5));
+    await waitFor(() => received.some((m) => m.includes('"t":"tt-state"')));
+    const ttMsg = received.find((m) => m.includes('"t":"tt-state"'))!;
+    const ttData = JSON.parse(ttMsg).d;
     assertEquals(ttData.paused, false);
 
     // Send TT commands
-    ws.send("__tt:undo");
-    ws.send("__tt:redo");
-    ws.send("__tt:goto:3");
-    ws.send("__tt:pause");
-    ws.send("__tt:resume");
+    for (const cmd of ["undo", "redo", "goto:3", "pause", "resume"]) {
+      ws.send(JSON.stringify({ v: 2, t: "tt-cmd", d: { cmd } }));
+    }
 
     await waitFor(() => ttCommands.length >= 5);
     assertEquals(ttCommands, ["undo", "redo", "goto:3", "pause", "resume"]);
 
     // Regular action should still work
-    ws.send(JSON.stringify({ type: "INC", payload: { by: 5 } }));
+    ws.send(
+      JSON.stringify({
+        v: 2,
+        t: "action",
+        d: { type: "INC", payload: { by: 5 } },
+      }),
+    );
     await waitFor(() => state.count === 5);
 
     ws.close();
@@ -565,11 +567,11 @@ Deno.test({
       (root.querySelector("#pause") as HTMLElement).click();
       (root.querySelector("#resume") as HTMLElement).click();
       assertEquals(sent, [
-        "__tt:undo",
-        "__tt:redo",
-        "__tt:goto:1",
-        "__tt:pause",
-        "__tt:resume",
+        '{"v":2,"t":"tt-cmd","d":{"cmd":"undo"}}',
+        '{"v":2,"t":"tt-cmd","d":{"cmd":"redo"}}',
+        '{"v":2,"t":"tt-cmd","d":{"cmd":"goto:1"}}',
+        '{"v":2,"t":"tt-cmd","d":{"cmd":"pause"}}',
+        '{"v":2,"t":"tt-cmd","d":{"cmd":"resume"}}',
       ]);
     } finally {
       setSendFn(null);
@@ -671,7 +673,11 @@ Deno.test({
       undoBtn!.click();
       redoBtn!.click();
       lockBtn!.click();
-      assertEquals(sent, ["__tt:undo", "__tt:redo", "__tt:pause"]);
+      assertEquals(sent, [
+        '{"v":2,"t":"tt-cmd","d":{"cmd":"undo"}}',
+        '{"v":2,"t":"tt-cmd","d":{"cmd":"redo"}}',
+        '{"v":2,"t":"tt-cmd","d":{"cmd":"pause"}}',
+      ]);
 
       // Clicking a history row sends goto:<id> — rows render newest-first
       const list = panel.children[2] as HTMLElement;
@@ -679,7 +685,7 @@ Deno.test({
       assertEquals(rows.length, 3);
       const initRow = rows.find((r) => r.textContent!.includes("__init"))!;
       initRow.click();
-      assertEquals(sent[3], "__tt:goto:0");
+      assertEquals(sent[3], '{"v":2,"t":"tt-cmd","d":{"cmd":"goto:0"}}');
 
       // Server confirms pause — visible panel re-renders, lock → unlock → resume
       handleTTMessage(ttJSON(
@@ -695,7 +701,7 @@ Deno.test({
       [undoBtn, redoBtn, lockBtn] = buttons();
       assertEquals(lockBtn!.textContent, "🔓 unlock");
       lockBtn!.click();
-      assertEquals(sent[4], "__tt:resume");
+      assertEquals(sent[4], '{"v":2,"t":"tt-cmd","d":{"cmd":"resume"}}');
     } finally {
       setSendFn(null);
       resetTT();

@@ -48,6 +48,7 @@ Run `deno install` to pull the framework.
 Create `src/cell/queue/index.ts`:
 
 ```ts
+// src/cell/queue/index.ts
 import { cell } from "aio";
 
 export type Job = {
@@ -116,6 +117,7 @@ automatically.
 Create `src/app.ts`:
 
 ```ts
+// src/app.ts
 import { aio } from "aio";
 import { queue } from "./cell/queue/index.ts";
 
@@ -124,7 +126,7 @@ await aio.run({
   cells: [queue],
   client: "server-only",
   schedules: [
-    { id: "process-queue", every: 1000, action: queue.process() },
+    { id: "process-queue", every: 1000, action: queue.process.action() },
   ],
 });
 ```
@@ -147,10 +149,11 @@ The server starts. No window opens -- that is the point. You will see the
 Create `src/cli.ts` -- a separate process that connects to the running server:
 
 ```ts
+// src/cli.ts
 import { connectCli } from "aio";
 import type { Job } from "./cell/queue/index.ts";
 
-type QueueState = {
+export type QueueState = {
   queue: {
     jobs: Job[];
     processing: string | null;
@@ -190,21 +193,26 @@ if (task) {
 Instead of raw `{ type, payload }` actions, bind the shared cell definition to
 the connection — same import the server uses:
 
-````ts
+```ts
+// src/cli.ts
+import { connectCli } from "aio";
 import { queue } from "./cell/queue/index.ts";
+
+const cli = connectCli("http://localhost:8000");
+const task = Deno.args[1] ?? "build v2.0";
 
 cli.bind(queue);
 
 await queue.enqueue(task); // dispatches over the socket, resolves on ack
 console.log(queue.jobs.length); // reads live server state
-
+```
 
 Run it in a second terminal while the server is up:
 
 ```sh
 deno run -A src/cli.ts                                     # connect and watch
 deno run -A src/cli.ts http://localhost:8000 "build v2.0"  # connect + enqueue
-````
+```
 
 `connectCli` uses the same WebSocket delta protocol as the browser. It
 auto-reconnects with exponential backoff and queues actions sent before the
@@ -287,7 +295,9 @@ token (printed in the journal on first boot).
 Once the service runs with `--expose`, connect from anywhere:
 
 ```ts
+// src/remote.ts
 import { connectCli } from "aio";
+import type { QueueState } from "./cli.ts";
 
 const cli = connectCli<QueueState>("https://server.example.com:3000", {
   token: "your-auth-token-from-journal",
@@ -306,6 +316,7 @@ too: `deno task am state --port=3000 --app=task-queue`.
 Create `tests/queue.test.ts`:
 
 ```ts
+// tests/queue.test.ts
 import { testCell } from "aio";
 import { queue } from "../src/cell/queue/index.ts";
 

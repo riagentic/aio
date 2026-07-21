@@ -233,9 +233,7 @@ Deno.test("hooks: onConnect error does not break WS", async () => {
     const msgs: string[] = [];
     ws.addEventListener("message", (e) => {
       const d = e.data as string;
-      if (!d.startsWith("__boot:") && !d.startsWith("__proto:")) {
-        msgs.push(d);
-      }
+      if (d.includes('"t":"state"')) msgs.push(d);
     });
     await new Promise<void>((r) => {
       ws.onopen = () => r();
@@ -243,7 +241,7 @@ Deno.test("hooks: onConnect error does not break WS", async () => {
 
     // Should still receive initial state despite hook error
     await waitFor(() => msgs.length >= 1);
-    assertEquals(JSON.parse(msgs[0]!).ok, true);
+    assertEquals(JSON.parse(msgs[0]!).d.ok, true);
 
     ws.close();
   } finally {

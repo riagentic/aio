@@ -509,20 +509,27 @@ export const checkPerformance: Checker = (ctx) => {
     }
   }
 
-  // Check for setTimeout/setInterval in cell files (should use schedule)
+  // Check for setTimeout/setInterval in cell files (should use schedule).
+  // Skips (risoto false-positives): the delay-0 yield idiom
+  // `new Promise((r) => setTimeout(r, 0))` — that's a microtask hop, not a
+  // timer schedule would replace — and any line carrying `aiol-ok`.
   for (const file of sourceFiles) {
     if (file.name.endsWith(".test.ts") || file.name === "app.ts") continue;
     if (!file.content.includes("cell(")) continue;
-    if (
-      file.content.includes("setTimeout") ||
-      file.content.includes("setInterval")
-    ) {
+    for (let i = 0; i < file.lines.length; i++) {
+      const line = file.lines[i]!;
+      if (!/set(Timeout|Interval)\(/.test(line)) continue;
+      if (line.includes("aiol-ok")) continue;
+      if (/setTimeout\([^,)]*,\s*0\s*\)/.test(line)) continue; // delay-0 yield
       report(
         "hint",
         "perf",
-        `${file.relative}: setTimeout/setInterval in cell code — use schedule.after/every for observable, cancellable timers`,
-        { file: file.relative },
+        `${file.relative}:${
+          i + 1
+        }: setTimeout/setInterval in cell code — use schedule.after/every for observable, cancellable timers (suppress: // aiol-ok)`,
+        { file: file.relative, line: i + 1 },
       );
+      break; // once per file is enough
     }
   }
 
@@ -1236,14 +1243,15 @@ export const checkPatterns: Checker = (ctx) => {
             continue; // reads on the first await line happen pre-suspension
           }
           if (
-            readRe.test(code) && !writeRe.test(code) && !mutateRe.test(code)
+            readRe.test(code) && !writeRe.test(code) && !mutateRe.test(code) &&
+            !file.lines[i]!.includes("aiol-ok")
           ) {
             report(
               "hint",
               "patterns",
               `${file.relative}:${
                 i + 1
-              } — "${method}" reads ${param}.* after an await — every await is a commit point and other actions may have run while suspended; re-read deliberately or gather-then-write (docs/state/methods.md)`,
+              } — "${method}" reads ${param}.* after an await — every await is a commit point and other actions may have run while suspended; re-read deliberately or gather-then-write (docs/state/methods.md); suppress a deliberate read with // aiol-ok`,
               { file: file.relative, line: i + 1 },
             );
             break; // once per method

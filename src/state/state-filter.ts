@@ -75,6 +75,39 @@ export function applyCellFieldFilter(
   return undefined;
 }
 
+/** Client-read visibility of ONE state key under a cell's ui filter (TBD B7).
+ *  Used by the client read seam (bindCellReactive) so `ui:` visibility holds
+ *  on the cell object itself — not just at broadcast time. In standalone/
+ *  electron there is no broadcast to filter, so without this the "secret"
+ *  guarantee silently didn't exist there.
+ *   - hidden        → reads must return undefined (with a loud one-time warn)
+ *   - deepSegs      → sub-paths to strip from the read value (dot-path
+ *                     excludes like "accounts.encSecKey"), relative to key */
+export function uiKeyVisibility(
+  filter: CellFieldFilter | undefined,
+  key: string,
+): { hidden: boolean; reason?: string; deepSegs?: string[][] } {
+  if (!filter || filter === "all") return { hidden: false };
+  if (filter === "none") {
+    return { hidden: true, reason: 'the cell has ui: "none"' };
+  }
+  if ("include" in filter) {
+    return filter.include.includes(key)
+      ? { hidden: false }
+      : { hidden: true, reason: "the field is not in ui.include" };
+  }
+  if ("exclude" in filter) {
+    if (filter.exclude.includes(key)) {
+      return { hidden: true, reason: "the field is listed in ui.exclude" };
+    }
+    const deepSegs = filter.exclude
+      .filter((p) => p.includes(".") && p.split(".")[0] === key)
+      .map((p) => p.split(".").slice(1));
+    if (deepSegs.length > 0) return { hidden: false, deepSegs };
+  }
+  return { hidden: false };
+}
+
 /** Match an Immer patch path against a deep-exclude path. Numeric op-path
  *  segments (array indices) are skipped — the exclude path names fields, not
  *  positions. */

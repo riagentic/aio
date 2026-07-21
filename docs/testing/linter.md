@@ -128,7 +128,7 @@ Static analysis of `cell()` calls:
 ### 6. Persistence & Database
 
 - `version` set without `migrations` array
-- Direct `Deno.Kv` usage (aio handles persistence)
+- Direct `Deno.Kv` usage (legacy API — aio persistence is SQLite-only)
 - `persist: false` warning (state won't survive restarts)
 - `db` config without table schema definitions
 
