@@ -6,6 +6,20 @@
 // Run: deno task boundaries
 
 const ALLOWED: Record<string, string[]> = {
+  // periphery entry (aio/extras) — re-exports across the whole surface
+  extras: [
+    "server",
+    "state",
+    "db",
+    "diagnostics",
+    "vitals",
+    "protocol",
+    "sync",
+    "electron",
+    "air",
+    "build",
+    "adapters",
+  ],
   // isomorphic core — must stay dependency-light
   state: ["diagnostics", "protocol", "sync"], // sync: type-only cell config
   protocol: ["state", "diagnostics", "vitals", "sync"], // sync: cell sync-config normalization

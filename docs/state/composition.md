@@ -1,7 +1,7 @@
 # Composition — Cross-Cell Communication
 
 > v2: methods is the one style — see
-> [docs/upgrade/to-v2.md](../upgrade/to-v2.md) for migration from
+> [docs/upgrade/restructure.md](../upgrade/restructure.md) for migration from
 > `machine:`/`generators:` foreign-action patterns.
 
 Cells don't share state — they communicate through three interaction patterns.

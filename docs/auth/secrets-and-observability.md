@@ -18,7 +18,7 @@ A field is safe only when it's out of **both**. They're independent:
 ```ts
 cell("settings", {
   state: { theme: "dark", apiKey: "" },
-  persist: { exclude: ["apiKey"] }, // not written to the KV store
+  persist: { exclude: ["apiKey"] }, // not written to disk
   ui: { exclude: ["apiKey"] }, // not synced to clients
 });
 ```

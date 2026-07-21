@@ -21,8 +21,8 @@ Work top to bottom — each item links to the details.
       directory/title; renaming would orphan your data and locks. Set `appId` in
       deno.json explicitly before shipping
       ([pitfalls](../basics/pitfalls.md#state--cells)).
-- [ ] **Persistence location** — know where your KV/SQLite files live
-      (`resolveDataDir`), and back them up; test a restore once.
+- [ ] **Persistence location** — know where your `data.db` lives
+      (`resolveDataDir`), and back it up; test a restore once.
 - [ ] **State versioning** — cells that will evolve have `version` + `onMigrate`
       ([pitfalls](../basics/pitfalls.md#persistence)).
 - [ ] **Monitoring wired** — scraper on `GET /__aio/metrics`, alert on
@@ -213,8 +213,8 @@ Categories: check-mark ok, warning, info hint, fatal (prevents startup).
   released, memory state unaffected.
 - **Batch transactions** (`db.transaction([stmts])`): atomic failure, nothing
   committed.
-- **Auto-persist (Deno.Kv)**: fire-and-forget with error logging. Failed write
-  means state restores from last successful write on restart.
+- **Auto-persist (`aio_kv` snapshot)**: fire-and-forget with error logging.
+  Failed write means state restores from last successful write on restart.
 
 Recovery: restart process. SQLite WAL recovery handles partial writes
 automatically.
@@ -231,7 +231,7 @@ restart, cells reinitialize to persisted state. Design workflows to be resumable
 
 ### Electron process killed during state flush
 
-Deno.Kv is crash-safe (SQLite internally). Kill during write either commits
+Persistence is crash-safe (SQLite, WAL mode). Kill during write either commits
 fully or not at all.
 
 ### `deno compile` binary can't find assets

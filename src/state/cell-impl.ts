@@ -41,10 +41,11 @@ export type SyncMethod<S> = (
   ...args: any[]
 ) => unknown;
 /** Async cell method — runs in executor, mutations batched via proxy */
-// deno-lint-ignore no-explicit-any
 export type AsyncMethod<S> = (
   s: S & Partial<MethodDraftMeta>,
+  // deno-lint-ignore no-explicit-any
   ...args: any[]
+  // deno-lint-ignore no-explicit-any
 ) => Promise<any>;
 
 /** Opt-in draft annotation for cancellation-aware methods (perfect-aio D1):

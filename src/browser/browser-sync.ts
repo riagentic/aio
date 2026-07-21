@@ -77,6 +77,15 @@ export function handleSyncMessage(msg: Record<string, unknown>): void {
       .catch(() => {});
     return;
   }
+  if (msg.__op_rejected) {
+    const r = msg.__op_rejected as {
+      opId: string;
+      cell: string;
+      reason: string;
+    };
+    _engine.handleRejection(r.cell, r.opId, r.reason).catch(() => {});
+    return;
+  }
   if (msg.__op) {
     _engine.handleRemoteOp(
       msg.__op as Parameters<SyncEngine["handleRemoteOp"]>[0],
@@ -88,6 +97,15 @@ export function handleSyncMessage(msg: Record<string, unknown>): void {
     _engine.handleSyncResponse(
       msg.__sync as Parameters<SyncEngine["handleSyncResponse"]>[0],
     ).catch(() => {});
+    return;
+  }
+  if (msg.__sync_error) {
+    // Server-side sync failure — without this branch the client hangs in
+    // "syncing" forever. Log loudly, back off, re-request.
+    const reason = (msg.__sync_error as { reason?: string }).reason ?? "?";
+    console.error(`[aio:sync] server sync failed: ${reason} — retrying in 2s`);
+    const engine = _engine;
+    setTimeout(() => engine?.requestSync().catch(() => {}), 2000);
   }
 }
 

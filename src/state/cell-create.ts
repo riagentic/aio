@@ -92,7 +92,7 @@ export function cell(name: string, config: any): any {
   }
 
   // perfect-aio D1: methods is the ONE style. Every Style-B key fails loudly
-  // with the exact migration recipe (docs/upgrade/to-v2.md).
+  // with the exact migration recipe (docs/upgrade/restructure.md).
   const STYLE_B: Record<string, string> = {
     actions:
       "actions:+reduce: pairs are one method now — `increment(s, by) { s.count += by }`",
@@ -107,8 +107,8 @@ export function cell(name: string, config: any): any {
   for (const [key, hint] of Object.entries(STYLE_B)) {
     if ((config as Record<string, unknown>)[key] !== undefined) {
       throw new Error(
-        `[${name}] cell config key '${key}:' was removed in aio v2 — ${hint}. ` +
-          `Full migration guide: docs/upgrade/to-v2.md`,
+        `[${name}] cell config key '${key}:' was removed in the alpha27 restructure — ${hint}. ` +
+          `Full migration guide: docs/upgrade/restructure.md`,
       );
     }
   }

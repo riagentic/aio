@@ -195,7 +195,6 @@ export function denoJson(
     // `am create` / `am update` (never silently).
     target,
     nodeModulesDir: "auto",
-    unstable: ["kv"],
     compilerOptions: {
       lib: ["deno.ns", "deno.unstable", "dom", "dom.iterable"],
       jsx: "react-jsx",

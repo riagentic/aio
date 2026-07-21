@@ -1,7 +1,7 @@
 # Cells — Config Shape and Anatomy
 
 > v2: methods is the one style — see
-> [docs/upgrade/to-v2.md](../upgrade/to-v2.md) for migration from
+> [docs/upgrade/restructure.md](../upgrade/restructure.md) for migration from
 > `actions:`/`reduce:`/`machine:`/`generators:`.
 
 Everything is a cell. A cell is a self-contained unit: its own state slice plus
@@ -35,8 +35,8 @@ the methods and selectors that operate on it.
                                      broadcast delta ── WebSocket ──▶  UI re-renders
                                        │
                                        ▼
-                                     persist to KV
-                                     sync to SQLite
+                                     persist to SQLite
+                                     (snapshot + tables)
 ```
 
 **One-sentence summary:** UI sends actions → methods mutate state → returned
@@ -151,7 +151,7 @@ Three tools, one decision: who needs to see the state?
 | `useLocal`                               | one component instance                            | ephemeral interaction state: open/closed, hover, in-progress text                                |
 
 A `scope: "client"` cell never registers with the server store, never syncs,
-never persists to Deno.Kv. Methods run synchronously in the browser against the
+never persists to SQLite. Methods run synchronously in the browser against the
 cell's signal; each tab has its own copy. Async methods throw at `cell()` time
 (v1 limitation) — do async work in the component, then call a sync method with
 the result.

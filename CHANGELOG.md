@@ -1,12 +1,30 @@
 # Changelog
 
-## 1.0.0-alpha27 — aio v2 begins: methods is the ONE style (2026-07-21)
+## 1.0.0-alpha28 — restructure completes: B3–B5 (2026-07-21)
+
+The rest of the perfect-aio plan lands. **B3 phase 1:** `sync.onRejected`
+(explainable rejections — no more silent optimistic-op drift) + `serverFns`/
+`serverFn`, the typed server/client seam. **B4a:** SQLite-only persistence —
+Deno.Kv removed, auto-migration on first boot, writes 27× faster, no 64 KiB cap,
+no unstable flag. **B4b phase 1:** ONE typed wire catalog
+(src/protocol/envelope.ts) pinned by CI against the live transports; fixed AIR's
+divergent ack parse, the silently-dropped `__sync_error`, AIR's missing
+`__proto` hello, and UDS's silent drop of WS-only frames. **B4c:** core diet —
+main entry 120 → 82 symbols, periphery moved unchanged to `aio/extras`, aiol
+flags old imports with the fix. **B5:** `deno task validate:matrix` +
+docs/build/validation-runbook.md (off-box remote / Windows / macOS / real
+Android checklists). **Papercuts:** typed route params
+(`useRoute<{id:string}>`), typed `Link`/`Route` children, honest async-method
+dispatch-budget message. Breaking: only the `aio/extras` import moves — recipes
+in docs/upgrade/restructure.md.
+
+## 1.0.0-alpha27 — the restructure begins: methods is the ONE style (2026-07-21)
 
 **The biggest breaking change in aio's history — and the biggest
 simplification.** The redux-era Style B (`actions:`, `reduce:`, `execute:`,
 `machine:`, `generators:`, middleware) is deleted; `cell({ state, methods })` is
 the one style. ~3,000 LOC of framework left; ~15 concepts became ~8. Full
-migration recipes: docs/upgrade/to-v2.md — and `deno task lint` (aiol)
+migration recipes: docs/upgrade/restructure.md — and `deno task lint` (aiol)
 statically detects removed keys and prints the per-cell fix.
 
 **Every capability survives, method-native:** workflows are plain async methods

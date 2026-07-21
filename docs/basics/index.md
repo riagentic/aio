@@ -26,7 +26,7 @@
 - [Composition](../state/composition.md) — cross-cell communication
 - [Scheduling](../state/scheduling.md) — timers, intervals, cron
 - [Lifecycle](../state/lifecycle.md) — hooks, aio.run(), runtime control
-- [Migrating to v2](../upgrade/to-v2.md) — from
+- [Migrating to v2](../upgrade/restructure.md) — from
   actions/reduce/machine/generators to methods
 
 ## Rendering
@@ -48,7 +48,7 @@
 
 - [How It Works](../persistence/how-it-works.md) — end-to-end persistence
   architecture
-- [Auto-Persist](../persistence/auto-persist.md) — Deno.Kv state persistence
+- [Auto-Persist](../persistence/auto-persist.md) — SQLite state persistence
 - [SQLite](../persistence/sqlite.md) — schema, queries, transactions
 - [CRDT](../persistence/crdt.md) — conflict-free sync
 - [CRDT Protocol](../persistence/crdt-protocol.md) — wire protocol

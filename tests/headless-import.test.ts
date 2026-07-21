@@ -5,15 +5,32 @@ Deno.test("headless: base aio import provides server symbols", async () => {
   assertExists(base.aio);
   assertExists(base.cell);
   assertExists(base.log);
-  assertExists(base.lint);
-  assertExists(base.parseCli);
   assertExists(base.schedule);
   assertExists(base.createDB);
   assertExists(base.call);
-  assertExists(base.draft);
-  assertExists(base.matchEffect);
-  assertExists(base.deepFreeze);
   assertExists(base.createSelector);
+});
+
+Deno.test("headless: periphery moved to aio/extras (B4c) — off core, on extras", async () => {
+  const base = await import("../mod.ts");
+  const extras = await import("../src/extras/mod.ts");
+  for (
+    const name of [
+      "lint",
+      "parseCli",
+      "draft",
+      "matchEffect",
+      "deepFreeze",
+      "markAsync",
+      "instances",
+      "connectCliUDS",
+      "createSliceSelector",
+      "DEFAULT_PRAGMAS",
+    ]
+  ) {
+    assertEquals((base as any)[name], undefined, `${name} should be off core`);
+    assertExists((extras as any)[name], `${name} should be on aio/extras`);
+  }
 });
 
 Deno.test("headless: base aio import does NOT provide renderer symbols", async () => {

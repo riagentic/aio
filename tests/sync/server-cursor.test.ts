@@ -363,3 +363,70 @@ describe("client cursor preservation (audit D)", () => {
     assertEquals((await buffer.getMeta("todos"))?.lastServerTs, 7777);
   });
 });
+
+// ── D11: explainable rejections (perfect-aio) ─────────────────────────
+import { setLastRejection } from "../../src/state/rejection-tracker.ts";
+
+describe("op rejection (D11)", () => {
+  it("server: rejected op → __op_rejected, row deleted, no ack/broadcast", async () => {
+    const db = createTestDb();
+    const sent: Record<string, unknown>[] = [];
+    const broadcasts: unknown[] = [];
+    const handler = createServerSyncHandler({
+      dispatch: () => {
+        // Simulate the composed reduce refusing the op (validate hook).
+        setLastRejection({ cell: "todos", reason: "score must be >= 0" });
+      },
+      db,
+      syncCellIds: ["todos"],
+      getCellState: () => ({}),
+      broadcastRaw: { fn: (m) => broadcasts.push(m) },
+      log: { debug: () => {}, warn: () => {}, error: () => {} },
+    });
+    const socket = {
+      send: (m: string) => sent.push(JSON.parse(m)),
+    } as unknown as WebSocket;
+
+    await handler.handleOp(op("rej-1", hlc(100, 0)), { id: "s1" }, socket);
+
+    const rejected = sent.find((m) => m.__op_rejected) as {
+      __op_rejected: { opId: string; reason: string };
+    };
+    assertExists(rejected, "origin told WHY");
+    assertEquals(rejected.__op_rejected.opId, "rej-1");
+    assertEquals(rejected.__op_rejected.reason, "score must be >= 0");
+    assertEquals(sent.some((m) => m.__ack), false, "no ack for poison");
+    assertEquals(broadcasts.length, 0, "no broadcast for poison");
+    const { rows } = await db.query(
+      "SELECT id FROM sync_ops WHERE id = ?",
+      ["rej-1"],
+    );
+    assertEquals(rows.length, 0, "poisoned op deleted from the log");
+  });
+
+  it("engine: handleRejection drops the op, rebases, fires onRejected", async () => {
+    const storage = createMemoryStorage();
+    const buffer = createOpBuffer(storage);
+    const rejections: { opId: string; reason: string }[] = [];
+    const cfg = normalizeSyncConfig({
+      onRejected: (info) => rejections.push(info),
+    });
+    const engine = createSyncEngine({
+      clientId: "c1",
+      cells: { todos: cfg },
+      buffer,
+      send: () => {},
+      reducer: (s) => s,
+      getConfirmedState: () => ({ todos: {} }),
+      setConfirmedState: () => {},
+      onStateUpdate: () => {},
+    });
+    await engine.handleLocalAction("todos", "add", { args: ["x"] });
+    const pending = await buffer.getUnconfirmed("todos");
+    assertEquals(pending.length, 1);
+
+    await engine.handleRejection("todos", pending[0]!.id, "not allowed");
+    assertEquals((await buffer.getUnconfirmed("todos")).length, 0, "dropped");
+    assertEquals(rejections, [{ opId: pending[0]!.id, reason: "not allowed" }]);
+  });
+});

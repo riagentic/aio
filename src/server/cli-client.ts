@@ -16,11 +16,11 @@ enablePatches();
 
 const WS_MAX_QUEUE = 100;
 
-/** Apply one server message (full state, Immer `$patches`, or legacy `$p`/`$d`
- *  delta) to the current state. Returns the new state. On a patch that fails
- *  to apply (desync), returns the prior state unchanged and calls `onResync`
- *  so the caller can ask the server for a fresh snapshot. Shared by the WS
- *  and UDS client paths so both transports apply deltas identically. */
+/** Apply one server message (full state or Immer `$patches` delta) to the
+ *  current state. Returns the new state. On a patch that fails to apply
+ *  (desync), returns the prior state unchanged and calls `onResync` so the
+ *  caller can ask the server for a fresh snapshot. Shared by the WS and UDS
+ *  client paths so both transports apply deltas identically. */
 function applyServerMessage<S>(
   prev: S | null,
   data: Record<string, unknown>,
@@ -40,37 +40,6 @@ function applyServerMessage<S>(
       }
     }
     return prev;
-  }
-  // Legacy delta patch
-  if (data.$p && typeof data.$p === "object") {
-    const p = data.$p as Record<string, unknown>;
-    // Filter BANNED_KEYS from the patch BEFORE spreading — a crafted $p with
-    // `__proto__`/`constructor`/`prototype` would otherwise be spread into
-    // `next` (the $d delete loop already filters them, but the $p merge path
-    // didn't). Modern engines don't pollute via spread, but `constructor`
-    // can be overwritten and the contract should be symmetric with $d.
-    const safeP: Record<string, unknown> = {};
-    for (const k of Object.keys(p)) {
-      if (k === "__proto__" || k === "constructor" || k === "prototype") {
-        continue;
-      }
-      safeP[k] = p[k];
-    }
-    const next: Record<string, unknown> =
-      prev != null && typeof prev === "object"
-        ? { ...(prev as Record<string, unknown>), ...safeP }
-        : { ...safeP };
-    if (Array.isArray(data.$d)) {
-      for (const k of data.$d) {
-        if (
-          typeof k === "string" && k !== "__proto__" &&
-          k !== "constructor" && k !== "prototype"
-        ) {
-          delete next[k];
-        }
-      }
-    }
-    return next as S;
   }
   // Full state
   return data as S;

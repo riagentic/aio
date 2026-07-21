@@ -76,7 +76,7 @@ In prod mode, errors are compact one-liners:
 | `MEMORY_CRITICAL`    | Memory      | Heap above critical threshold (default 90%)                   |
 | `BUDGET_REDUCE`      | Performance | Reducer exceeded time budget (default 100ms)                  |
 | `BUDGET_EFFECT`      | Performance | Effect exceeded time budget (default 5ms)                     |
-| `PERSIST_ERROR`      | Persistence | State persist to KV/SQLite failed -- in memory, lost on exit  |
+| `PERSIST_ERROR`      | Persistence | State persist to SQLite failed -- in memory, lost on exit     |
 | `PERSIST_SCHEMA`     | Persistence | Stored state's persistence-schema version is incompatible     |
 | `UI_FREEZE`          | Vitals      | UI/main thread stalled past the freeze threshold (warn)       |
 | `TRANSPORT_STALL`    | Vitals      | WS transport made no progress under backpressure (warn)       |
@@ -97,7 +97,7 @@ The error code prefix tells you which layer broke:
 | `QUEUE_*` / `DISPATCH_*` | Dispatch loop   | Infinite dispatch cycles               |
 | `MEMORY_*`               | Runtime         | Unbounded state growth                 |
 | `BUDGET_*`               | Performance     | Slow reducer or effect                 |
-| `PERSIST_*`              | Persistence     | KV/SQLite write failures               |
+| `PERSIST_*`              | Persistence     | SQLite write failures                  |
 
 ### Action type prefix
 

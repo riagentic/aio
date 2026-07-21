@@ -107,7 +107,6 @@ import {
 export const DEFAULT_SYNC_INTERVAL_MS = 50;
 
 // ── Module-level state ────────────────────────────────────────────────
-let _running = false;
 let _electronProc: Deno.ChildProcess | null = null;
 
 /** Validates that framework version matches deno.json version at build time */
@@ -180,29 +179,22 @@ function _inferBaseDir(): string {
   return join(Deno.cwd(), "src");
 }
 
-/** Single entry point — boots KV, server, electron, wires everything. CLI args override config. */
-async function run<S, A, E>(
-  initialState: S,
-  config: AioConfig<S, A, E>,
-): Promise<AioApp<S, A>>;
+/** Single entry point — boots KV, server, electron, wires everything. CLI
+ *  args override config. (perfect-aio D9: the legacy 2-arg
+ *  `aio.run(initialState, config)` overload was removed — zero callers
+ *  existed; `aio.run({ cells })` / zero-config `aio.run()` is the API.) */
 // deno-lint-ignore no-explicit-any
 async function run(fc?: CellsConfig): Promise<AioApp<any, any>>;
 // deno-lint-ignore no-explicit-any
-async function run(a: any, b?: any): Promise<AioApp<any, any>> {
+async function run(a?: any, b?: any): Promise<AioApp<any, any>> {
   // Fail fast on an unsupported Deno — aio uses ≥2.9 behavior directly.
   assertDenoVersion();
-  // Legacy API: aio.run(initialState, config)
   if (b !== undefined) {
-    if (_running) {
-      throw new Error("aio.run() already called — one instance per process");
-    }
-    _running = true;
-    try {
-      return await _run(a, b);
-    } catch (e) {
-      _running = false;
-      throw e;
-    }
+    throw new Error(
+      "aio.run(initialState, config) was removed in the alpha27 restructure (perfect-aio D9) — " +
+        "define cells with cell() and call aio.run({ cells: [...] }) (or " +
+        "zero-config aio.run()). Migration: docs/upgrade/restructure.md",
+    );
   }
 
   // Cells-based API: aio.run(cellsConfig) — zero-config: aio.run()
@@ -215,10 +207,11 @@ async function run(a: any, b?: any): Promise<AioApp<any, any>> {
   if (fc.ui) {
     validateConfig(fc.ui as Record<string, unknown>, VALID_UI_KEYS, "ui");
   }
-  if (_running) {
-    throw new Error("aio.run() already called — one instance per process");
-  }
-  _running = true;
+  // Multi-instance (perfect-aio D2): several aio.run() calls may coexist in
+  // one process — each app's cells bind exclusively (bindCell throws on a
+  // def already bound to another app), each appId takes its own singleton
+  // lock, and zero-config auto-cells only work for the FIRST app (later apps
+  // must pass explicit disjoint `cells:` lists — the bind error says so).
 
   try {
     // Isolate filter
@@ -315,7 +308,6 @@ async function run(a: any, b?: any): Promise<AioApp<any, any>> {
     }
     return app;
   } catch (e) {
-    _running = false;
     throw e;
   }
 }
@@ -354,8 +346,8 @@ async function _run<S, A, E>(
 
   // Thin client mode
   if (
-    await handleThinClient(cli.serverUrl ?? config.serverUrl, (v) => {
-      _running = v;
+    await handleThinClient(cli.serverUrl ?? config.serverUrl, (_v) => {
+      /* multi-instance (D2): no process-wide running flag */
     })
   ) return null!;
 
@@ -638,8 +630,8 @@ async function _run<S, A, E>(
     getDiscoveryStop: () => discoveryRef.stop,
     asyncDb,
     kvDb,
-    setRunning: (v: boolean) => {
-      _running = v;
+    setRunning: (_v: boolean) => {
+      /* multi-instance (D2): no process-wide running flag */
     },
     log,
   });

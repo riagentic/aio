@@ -1,6 +1,7 @@
 // WebSocket connection handler — extracted from server.ts
 // Manages WS upgrades, per-client state, message routing, rate limiting, backpressure
 import type { AioUser } from "./aio.ts";
+import { invokeServerFn } from "./server-fns.ts";
 import { filterStateBySubs, parseSubs } from "../protocol/broadcast-utils.ts";
 import { writeClientLog } from "./client-log.ts";
 import { log } from "../diagnostics/logger.ts";
@@ -583,6 +584,28 @@ export function createWsManager(deps: WsDeps): WsManager {
     }
     if (parsed.__sync) {
       _handleSyncMsg(parsed, meta, socket);
+      return;
+    }
+    // serverFn call (perfect-aio B3): run the registered fn, reply w/ outcome.
+    if (parsed.__sfn) {
+      const { cid, ns, name, args } = parsed.__sfn as {
+        cid: string;
+        ns: string;
+        name: string;
+        args: unknown[];
+      };
+      if (
+        typeof cid !== "string" || typeof ns !== "string" ||
+        typeof name !== "string" || !Array.isArray(args)
+      ) {
+        log.warn("ws", "invalid __sfn envelope — dropping");
+        return;
+      }
+      invokeServerFn(ns, name, args).then((result) => {
+        try {
+          socket.send(JSON.stringify({ __sfnr: { cid, ...result } }));
+        } catch { /* client disconnected */ }
+      });
       return;
     }
     if (!parsed || typeof parsed.type !== "string") {

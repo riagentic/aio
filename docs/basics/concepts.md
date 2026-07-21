@@ -164,7 +164,7 @@ action (`cell:save`) appears in time-travel.
 ## Concept 5: Guard Lines
 
 > v2: methods is the one style — the `machine:` config is gone; see
-> [docs/upgrade/to-v2.md](../upgrade/to-v2.md).
+> [docs/upgrade/restructure.md](../upgrade/restructure.md).
 
 Guard which methods run in which states with plain code — a status field you own
 plus one `if` per method:

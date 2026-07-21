@@ -35,6 +35,9 @@ export interface SyncEngine {
     payload: unknown,
   ): Promise<void>;
   handleAck(cell: string, opId: string, serverHlc: HLC): Promise<void>;
+  /** D11: the server refused this op — drop it, rebase (optimistic view
+   *  snaps back), log loudly, surface via the cell's sync.onRejected. */
+  handleRejection(cell: string, opId: string, reason: string): Promise<void>;
   handleRemoteOp(op: SyncOp): Promise<void>;
   handleSyncResponse(response: {
     mode: string;
@@ -173,6 +176,21 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
         }
         await deps.buffer.confirm(cell, opId, serverHlc);
         await rebaseCell(cell);
+        updateStatus(cell, { lastSync: Date.now() });
+      });
+    },
+
+    handleRejection(cell, opId, reason) {
+      return withLock(cell, async () => {
+        // Drop the rejected op — it will never be confirmed.
+        await deps.buffer.pruneStale(cell, opId);
+        await rebaseCell(cell);
+        // D11: silent rejection is a blank-screen-class bug — always loud.
+        console.error(
+          `[aio:sync] ${cell}: change rejected by the server — ${reason} ` +
+            `(op ${opId}; optimistic view rolled back)`,
+        );
+        deps.cells[cell]?.onRejected?.({ opId, reason });
         updateStatus(cell, { lastSync: Date.now() });
       });
     },

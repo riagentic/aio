@@ -13,7 +13,7 @@ deno task dev --port=3000 --client=browser --no-persist --title="My App"
 | ------------------ | ----------------------------------------------------------------------------------------------------------- |
 | `--port=N`         | Override server port                                                                                        |
 | `--client=X`       | Client mode: `electron`, `browser`, `cli`, `server-only` (replaces `--no-electron` / `--headless`)          |
-| `--no-persist`     | Disable Deno.Kv state persistence                                                                           |
+| `--no-persist`     | Disable SQLite state persistence                                                                            |
 | `--keep-server`    | Keep server running after Electron window closes                                                            |
 | `--kill-existing`  | Kill existing instance before starting (use with `singleton: true`)                                         |
 | `--title=X`        | Override window/page title                                                                                  |
@@ -47,7 +47,7 @@ Active flags are logged on startup:
 
 ```
 [12:00:00][DEBUG] config: port=52341 persist=true electron=false title="My App" baseDir=./src
-[12:00:00][DEBUG] persist: loaded from KV key="state"
+[12:00:00][DEBUG] persist: SQLite aio_kv mode=single
 [12:00:00][DEBUG] state: 1 keys
 [12:00:01][DEBUG] http: GET /
 [12:00:01][DEBUG] http: GET /App.tsx

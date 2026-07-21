@@ -1,7 +1,7 @@
 # Multi-Cell Checkout Workflow
 
 > v2: methods is the one style — see
-> [docs/upgrade/to-v2.md](../upgrade/to-v2.md) for migration.
+> [docs/upgrade/restructure.md](../upgrade/restructure.md) for migration.
 
 Build an e-commerce checkout: cart, inventory, payment -- three cells
 coordinating through async methods and direct calling. Covers workflow methods,

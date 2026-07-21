@@ -2,6 +2,7 @@
 // Receives ops from clients, persists to op-log, broadcasts to other clients, sends acks.
 
 import type { DB } from "../db/types.ts";
+import { takeLastRejection } from "../state/rejection-tracker.ts";
 import type { HLC, SyncOp } from "./types.ts";
 import { createHLC, type HLClock } from "./hlc.ts";
 import { compactSyncOps } from "./compact.ts";
@@ -146,17 +147,45 @@ export function createServerSyncHandler(
         // delivery (client retry after a lost ack) must NOT re-dispatch:
         // persistOp is INSERT OR IGNORE, so `serverTs === null` means the
         // op's effect is already in live state — re-applying would double it.
+        let rejectedReason: string | null = null;
         if (serverTs !== null) {
           try {
             deps.dispatch({
               type: `${op.cell}:${op.action}`,
               payload: op.payload,
             });
+            // D11: the server's re-execution is the authority — if the
+            // validate hook refused this op, the op is POISON: delete it
+            // from the log (state and log must agree) and tell the origin
+            // WHY instead of acking.
+            const rejection = takeLastRejection();
+            if (rejection && rejection.cell === op.cell) {
+              rejectedReason = rejection.reason;
+              await deps.db.execute("DELETE FROM sync_ops WHERE id = ?", [
+                op.id,
+              ]);
+            }
           } catch (e) {
             deps.log.error(
               `[sync:server] dispatch of op ${op.id} failed: ${e}`,
             );
           }
+        }
+
+        if (rejectedReason !== null) {
+          try {
+            socket.send(JSON.stringify({
+              __op_rejected: {
+                opId: op.id,
+                cell: op.cell,
+                reason: rejectedReason,
+              },
+            }));
+          } catch { /* client disconnected */ }
+          deps.log.warn(
+            `[sync:server] op ${op.id} (${op.cell}:${op.action}) rejected: ${rejectedReason}`,
+          );
+          return;
         }
 
         // Always ack — for a duplicate this is the retransmit of the ack the

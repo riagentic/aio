@@ -52,13 +52,12 @@ Issues that can be auto-fixed are marked `[fixable]` in the output.
 | ---------------------------------- | ---------------------------------------------- |
 | Remove `appId` from deno.json      | appId belongs in aio.run(), not deno.json      |
 | Add `appId` to aio.run()           | Derives from deno.json appId or directory name |
-| Add `unstable: ["kv"]`             | Required for state persistence                 |
 | Add `nodeModulesDir: "auto"`       | npm package resolution                         |
 | Add `@types/react` import          | JSX type checking (intrinsic element types)    |
 | Add `esbuild` import               | Dev mode transpilation                         |
 | Add `compilerOptions` (jsx config) | JSX transform settings                         |
 | Add `dev` task                     | `deno run -A src/app.ts`                       |
-| Add `test` task                    | `deno test -A --unstable-kv tests/`            |
+| Add `test` task                    | `deno test -A tests/`                          |
 
 **Source file cleanup:**
 
@@ -86,7 +85,6 @@ Validates `deno.json` for common mistakes:
 - `appId` in deno.json (should be in `aio.run()`)
 - Missing `appId` in `aio.run()`
 - Missing required imports (`aio`, `esbuild`)
-- Missing `unstable: ["kv"]` for persistence
 - Missing `compilerOptions.jsx` for JSX
 - Missing `nodeModulesDir`
 - No `dev`, `test`, or `compile:*` tasks

@@ -132,7 +132,11 @@ export function bindCell(
 ): void {
   if (f.__aio.bound) {
     throw new Error(
-      `[${f.__aio.id}] already bound — cells can only bind to one app. Create cells per app (e.g. a factory returning cell(...)) instead of sharing one definition.`,
+      `[${f.__aio.id}] already bound — a cell def binds to exactly ONE app ` +
+        `(perfect-aio D2). Running multiple apps in one process? Give each ` +
+        `aio.run({ cells: [...] }) an explicit, disjoint cell list (zero-` +
+        `config auto-binds EVERY imported cell to the first app). Sharing a ` +
+        `definition across apps: use a factory returning cell(...).`,
     );
   }
 

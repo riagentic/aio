@@ -21,14 +21,13 @@ Create a new directory and `deno.json`:
 {
   "title": "Task Queue",
   "nodeModulesDir": "auto",
-  "unstable": ["kv"],
   "imports": {
     "aio": "jsr:@riagentic/aio@^1.0.0-alpha17"
   },
   "tasks": {
     "dev": "deno run -A src/app.ts --client=server-only",
     "am": "deno run -A jsr:@riagentic/aio@^1.0.0-alpha17/am",
-    "test": "deno test -A --unstable-kv tests/",
+    "test": "deno test -A tests/",
     "compile:service": "deno run -A jsr:@riagentic/aio@^1.0.0-alpha17/build --compile --service --headless"
   }
 }
