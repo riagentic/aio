@@ -296,6 +296,17 @@ export function createServer(config: ServerConfig): ServerHandle {
       findUserById: config.users
         ? (id) => Object.values(config.users!).find((u) => u.id === id)
         : undefined,
+      // Headless `am surface` (machine M2): render the UI entry in-process
+      // against live cell state — works with zero connected clients. Lazy:
+      // happy-dom + the renderer load only when the route is hit.
+      renderServerSurface: !prod
+        ? async () => {
+          const { renderHeadlessSurface } = await import(
+            "./server-surface.ts"
+          );
+          return renderHeadlessSurface(join(absBaseDir, uiEntry));
+        }
+        : undefined,
     };
   }
 

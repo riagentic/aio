@@ -1,16 +1,21 @@
 // memory.test.ts — leak detection for long-running processes
 //
 // Verifies:
-//   - Listener/subscription counts stay stable after many actions
 //   - Memory growth is bounded after high-volume dispatch
-//   - Flow action listeners are cleaned up after completion
-//   - Completed generators don't leak into activeFlows
+//   - Repeated async-method cycles don't accumulate state
+//   - until()-based waits clean up after signal and after timeout
+//   - Rapid fill/clear cycles let old state be GC'd
 
 import { assertEquals } from "@std/assert";
 import { cell, composeCells } from "../src/state/cell.ts";
-import { resetFlows } from "../src/state/flow.ts";
+import { until } from "../src/state/async-helpers.ts";
 
 // ── Helpers ──────────────────────────────────────────────────────────
+
+type Cat = Record<
+  string,
+  (...a: unknown[]) => { type: string; payload: unknown }
+>;
 
 function createTestApp(entries: Parameters<typeof composeCells>[0]) {
   const composed = composeCells(entries);
@@ -44,13 +49,9 @@ function forceGC(): Promise<void> {
 
 const counter = cell("counter", {
   state: { count: 0 },
-  actions: {
-    increment: (by = 1) => ({ by }),
-    reset: () => ({}),
-  },
-  reduce: {
-    increment(s, p) {
-      s.count += p.by;
+  methods: {
+    increment(s, by = 1) {
+      s.count += by;
     },
     reset(s) {
       s.count = 0;
@@ -60,29 +61,28 @@ const counter = cell("counter", {
 
 const flowCell = cell("flow", {
   state: { completed: 0 },
-  actions: { start: () => ({}) },
-  generators: {
-    start: function* (ctx) {
-      yield* ctx.call("work", () => Promise.resolve(42));
-      yield* ctx.done((s) => {
-        s.completed++;
-      });
+  methods: {
+    async start(s) {
+      await Promise.resolve(42);
+      s.completed++;
     },
   },
 });
 
 const waitCell = cell("waiter", {
-  state: { received: 0 },
-  actions: {
-    begin: () => ({}),
-    signal: () => ({}),
-  },
-  generators: {
-    begin: function* (ctx) {
-      yield* ctx.waitFor("waiter:signal", 500);
-      yield* ctx.done((s) => {
+  state: { received: 0, flag: false },
+  methods: {
+    signal(s) {
+      s.flag = true;
+    },
+    async begin(s) {
+      try {
+        await until(() => s.flag, { timeoutMs: 500, intervalMs: 5 });
         s.received++;
-      });
+        s.flag = false;
+      } catch {
+        // timed out — cycle abandoned
+      }
     },
   },
 });
@@ -90,15 +90,15 @@ const waitCell = cell("waiter", {
 // ── Tests ────────────────────────────────────────────────────────────
 
 Deno.test("memory: 10k dispatches — heap growth < 20MB", async () => {
-  resetFlows();
   const app = createTestApp([counter]);
+  const cat = counter.__aio.actions as Cat;
   const N = 10_000;
 
   await forceGC();
   const before = Deno.memoryUsage().heapUsed;
 
   for (let i = 0; i < N; i++) {
-    app.dispatch(counter.__aio.actions.increment(1));
+    app.dispatch(cat.increment!(1));
   }
 
   await forceGC();
@@ -120,24 +120,23 @@ Deno.test("memory: 10k dispatches — heap growth < 20MB", async () => {
 });
 
 Deno.test({
-  name: "memory: 100 generator cycles — no listener leak",
-  // sanitizers disabled: fire-and-forget generators with internal timers that outlive test
+  name: "memory: 100 async method cycles — no listener leak",
+  // sanitizers disabled: fire-and-forget async methods with internal timers that outlive test
   sanitizeOps: false,
   sanitizeResources: false,
 }, async () => {
-  resetFlows();
   const app = createTestApp([flowCell]);
+  const cat = flowCell.__aio.actions as Cat;
   const N = 100;
 
   for (let i = 0; i < N; i++) {
-    app.dispatch(flowCell.__aio.actions.start());
+    app.dispatch(cat.start!());
     await new Promise((r) => setTimeout(r, 10));
   }
 
   await new Promise((r) => setTimeout(r, 200));
 
   const s = app.getState().flow as { completed: number };
-  // Last generator should have completed (previous ones cancelled)
   assertEquals(
     s.completed >= 1,
     true,
@@ -146,56 +145,51 @@ Deno.test({
 });
 
 Deno.test({
-  name: "memory: waitFor listeners cleaned up after signal",
-  // sanitizers disabled: generator waitFor + dispatch cycle leaves pending async ops
+  name: "memory: until() waits cleaned up after signal",
+  // sanitizers disabled: until() poll timers + dispatch cycle leave pending async ops
   sanitizeOps: false,
   sanitizeResources: false,
 }, async () => {
-  resetFlows();
   const app = createTestApp([waitCell]);
+  const cat = waitCell.__aio.actions as Cat;
 
-  // Start 20 wait cycles — each begins a waitFor, then gets signalled
+  // Start 20 wait cycles — each begins an until() wait, then gets signalled
   for (let i = 0; i < 20; i++) {
-    app.dispatch(waitCell.__aio.actions.begin());
+    app.dispatch(cat.begin!());
     await new Promise((r) => setTimeout(r, 10));
-    app.dispatch(waitCell.__aio.actions.signal());
+    app.dispatch(cat.signal!());
     await new Promise((r) => setTimeout(r, 20));
   }
 
-  // The last cycle should complete (previous ones cancelled by restart)
   const s = app.getState().waiter as { received: number };
   assertEquals(s.received >= 1, true);
 });
 
 Deno.test({
-  name: "memory: waitFor listeners cleaned up on timeout",
-  // sanitizers disabled: 50 generators with 20ms timeouts — some timers outlive test
+  name: "memory: until() waits cleaned up on timeout",
+  // sanitizers disabled: 50 async methods with 20ms timeouts — some timers outlive test
   sanitizeOps: false,
   sanitizeResources: false,
 }, async () => {
-  resetFlows();
-
   const shortWait = cell("shortWait", {
     state: { timedOut: 0 },
-    actions: { go: () => ({}) },
-    generators: {
-      go: function* (ctx) {
+    methods: {
+      async go(s) {
         try {
-          yield* ctx.waitFor("Never:Happens", 20);
+          await until(() => false, { timeoutMs: 20, intervalMs: 5 });
         } catch {
-          yield* ctx.done((s) => {
-            s.timedOut++;
-          });
+          s.timedOut++;
         }
       },
     },
   });
 
   const app = createTestApp([shortWait]);
+  const cat = shortWait.__aio.actions as Cat;
 
-  // Fire 50 generators that all time out after 20ms
+  // Fire 50 waits that all time out after 20ms
   for (let i = 0; i < 50; i++) {
-    app.dispatch(shortWait.__aio.actions.go());
+    app.dispatch(cat.go!());
     await new Promise((r) => setTimeout(r, 5));
   }
 
@@ -207,15 +201,9 @@ Deno.test({
 });
 
 Deno.test("memory: rapid state reset prevents unbounded growth", async () => {
-  resetFlows();
-
   const bigState = cell("big", {
     state: { items: [] as string[] },
-    actions: {
-      fill: () => ({}),
-      clear: () => ({}),
-    },
-    reduce: {
+    methods: {
       fill(s) {
         s.items = Array.from({ length: 1000 }, (_, i) => `item-${i}`);
       },
@@ -226,14 +214,15 @@ Deno.test("memory: rapid state reset prevents unbounded growth", async () => {
   });
 
   const app = createTestApp([bigState]);
+  const cat = bigState.__aio.actions as Cat;
 
   await forceGC();
   const before = Deno.memoryUsage().heapUsed;
 
   // Fill and clear 100 times — old arrays should be GC'd
   for (let i = 0; i < 100; i++) {
-    app.dispatch(bigState.__aio.actions.fill());
-    app.dispatch(bigState.__aio.actions.clear());
+    app.dispatch(cat.fill!());
+    app.dispatch(cat.clear!());
   }
 
   await forceGC();

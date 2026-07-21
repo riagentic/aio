@@ -6,10 +6,12 @@
 import type { GlobalFlags } from "./am-types.ts";
 import { detectMode, out, outError } from "./am-output.ts";
 import {
+  amCtx,
   parsePayload,
   resolveAmAppId,
   resolvePath,
   resolvePort,
+  runTrojanGet,
 } from "./am-utils.ts";
 import { httpGet, trojanGet, trojanPost } from "./am-http.ts";
 
@@ -150,15 +152,7 @@ export async function cmdActions(
   _args: string[],
   flags: GlobalFlags,
 ): Promise<void> {
-  const mode = detectMode(flags);
-  const appId = resolveAmAppId(flags.app);
-  const port = resolvePort(flags.port, appId);
-  const result = await trojanGet(port, "history", appId);
-  if (!result.ok) {
-    outError(result.error, mode);
-    Deno.exit(1);
-  }
-  out(result.data, mode);
+  await runTrojanGet(amCtx(flags), "history");
 }
 
 // ── Time-travel ─────────────────────────────────────────────

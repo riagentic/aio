@@ -10,7 +10,7 @@ const OUT = `${ROOT}docs/content.md`;
 /** Section order + display names. Directories not listed sort last. */
 const SECTIONS: [string, string, string][] = [
   ["basics", "Start here", "install, first app, concepts, architecture"],
-  ["state", "State — cells", "the core: cells, methods, machines, scheduling"],
+  ["state", "State — cells", "the core: cells, methods, workflows, scheduling"],
   ["ui", "UI — AIR renderer", "components, signals, routing, forms"],
   ["persistence", "Persistence & sync", "KV, SQLite, CRDT, offline"],
   ["auth", "Auth", "users, tokens, per-user visibility"],

@@ -152,7 +152,7 @@ deno.json
 src/
   app.ts                       <- aio.run() -- boot only
   App.tsx                      <- root UI -- layout + routing only (convention; override with ui.entry)
-  cell/counter/index.ts    <- cell() -- state + methods (or generators)
+  cell/counter/index.ts    <- cell() -- state + methods
   style.css                    <- (optional)
 ```
 
@@ -179,12 +179,10 @@ export const counter = cell("counter", {
 
 ## Programming style
 
-**Start with `methods`.** They handle state changes, async work, and side
-effects in one place. This covers the vast majority of apps.
-
-When you outgrow methods, aio has generators for sequential async workflows and
-an explicit actions/reduce pipeline for strict state machines — see the
-[State Management](../state/README.md) guide for L2 and L3 patterns.
+**Methods are the one style.** They handle state changes, async work, and side
+effects in one place — multi-step workflows are async methods with
+`until`/`race`/`sleep`, cancellation is `cancelOn` + `s.$signal`. See the
+[State Management](../state/README.md) guide.
 
 ## Create the UI
 
@@ -246,7 +244,6 @@ testCell(counter, "increment from idle", (t) => {
   t.init();
   t.send.increment(5);
   t.expect.state((s) => s.count === 5);
-  t.expect.status("idle");
 });
 
 testCell(counter, "async settle", async (t) => {
@@ -303,9 +300,8 @@ methods: {
 ```
 
 Mutations to the draft are batched and produce a state diff. Reads on the draft
-see the current (mutated) state. Values returned or passed to
-`return [cell.fx.persist(s)]` are snapshots of the current draft — they are not
-reactive.
+see the current (mutated) state. Values returned (or put into a returned
+schedule/own effect) are snapshots of the current draft — they are not reactive.
 
 For the live-proxy read semantics inside `async` methods (where you `await`
 something and re-read state), see

@@ -60,6 +60,11 @@ export interface TrojanDeps {
   getRecentErrors: () => unknown[];
   /** Find user by ID (trojan ui endpoint) — returns AioUser from users map, or undefined */
   findUserById?: (id: string) => AioUser | undefined;
+  /** Headless server-side surface render (`surface/server`) — lets
+   *  `am surface` work with NO connected client (server-only apps, CI). */
+  renderServerSurface?: () => Promise<
+    { ok: true; roots: unknown[] } | { ok: false; error: string }
+  >;
 }
 
 const TROJAN_RATE_LIMIT = 100;
@@ -193,6 +198,16 @@ function handleGet(
   }
 
   if (route.startsWith("surface/") && !prod) {
+    // Headless: render the UI on the server against live cell state — no
+    // client required (machine M2: `--client=server-only` / CI).
+    if (route === "surface/server") {
+      if (!deps.renderServerSurface) {
+        return err("server-side surface unavailable (no UI entry)", 404);
+      }
+      return deps.renderServerSurface().then((r) =>
+        r.ok ? json(r.roots) : err(r.error, 500)
+      );
+    }
     const idx = Number(route.slice(8));
     if (!Number.isInteger(idx) || idx < 0) {
       return err("invalid client index", 400);

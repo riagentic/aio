@@ -156,12 +156,12 @@ type QueryResult<T = Record<string, unknown>> = {
 ```
 
 ```ts
-execute: {
-  async revenueReport(app) {
+methods: {
+  async revenueReport(s) {
     const { rows } = await app.db!.query<{ customer: string; revenue: number }>(
       'SELECT customer, SUM(total) as revenue FROM orders GROUP BY customer ORDER BY revenue DESC'
     )
-    app.dispatch(myCell.reportLoaded(rows))
+    s.report = rows
   },
 },
 ```
@@ -320,9 +320,10 @@ await app.db!.execute("VACUUM INTO '/backups/myapp-2026-03-17.db'");
 ### Scheduled backup
 
 ```ts
-execute: {
-  async runBackup(app, { ts }) {
+methods: {
+  async runBackup(s, ts: string) {
     await app.db!.execute(`VACUUM INTO '/backups/myapp-${ts}.db'`)
+    s.lastBackup = ts
   },
 },
 ```

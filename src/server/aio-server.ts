@@ -335,9 +335,6 @@ export async function setupTransport<S, A>(
       },
       (msg: string) => log.debug(msg),
       clientCounter,
-      config.fullStateThreshold ?? 0.5,
-      config._cellPatchStrategies,
-      config._cellFilterFields,
     );
     udsRef.current = uds;
     log.info(`transport: UDS at ${socketPath}`);

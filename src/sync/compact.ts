@@ -5,7 +5,6 @@ import { SYNC_DEFAULTS } from "./types.ts";
 
 /**
  * Dependencies for server-side op-log compaction.
- * @experimental Excluded from the 1.0 stability guarantee.
  */
 export interface CompactDeps {
   db: DB;
@@ -22,7 +21,6 @@ export interface CompactDeps {
 
 /**
  * Compact sync_ops into a snapshot when op count exceeds threshold.
- * @experimental Excluded from the 1.0 stability guarantee.
  */
 export async function compactSyncOps(deps: CompactDeps): Promise<void> {
   const threshold = deps.compactOps ?? SYNC_DEFAULTS.compactOps;
@@ -79,7 +77,6 @@ export async function compactSyncOps(deps: CompactDeps): Promise<void> {
 
 /**
  * SQL to initialize sync tables. Run once during aio.run().
- * @experimental Excluded from the 1.0 stability guarantee.
  */
 export const SYNC_SCHEMA: string[] = [
   `CREATE TABLE IF NOT EXISTS sync_ops (

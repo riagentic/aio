@@ -52,9 +52,9 @@ Something wrong?
 | `EFFECT_ERROR`       | Sync effect threw               | Move I/O to async, return promises          |
 | `EFFECT_TIMEOUT`     | Async effect exceeded 30s       | Optimize or increase `effectTimeoutMs`      |
 | `EFFECT_ASYNC_ERROR` | Promise rejected                | Add error handling in `execute`             |
-| `FLOW_STEP_ERROR`    | Flow generator step threw       | Wrap steps in try/catch                     |
+| `FLOW_STEP_ERROR`    | Workflow step threw (legacy)    | Wrap steps in try/catch                     |
 | `FLOW_UNCAUGHT`      | Flow threw without catch        | Add try/catch, check step history in error  |
-| `MACHINE_BLOCKED`    | Action blocked by state machine | Check transitions, verify machine state     |
+| `MACHINE_BLOCKED`    | Action blocked by routing guard | Check the cell's `status` field and guards  |
 | `QUEUE_OVERFLOW`     | Queue exceeded 10,000           | Find dispatch loop -- see S4                |
 | `DISPATCH_LOOP`      | 1000+ iterations detected       | Effect dispatching to itself -- break cycle |
 | `MEMORY_PRESSURE`    | Heap above 75%                  | See S5                                      |
@@ -86,16 +86,16 @@ grep 'a1b2c3d4' .aio/log/debug.log   # full action chain
 DiagReporter shows `trigger: <cell>.<action> reduce took Xms`.
 
 ```ts
-// WRONG -- heavy work in reducer
-reduce: { analyze(s) { s.results = heavyComputation(s.data) } }
+// WRONG -- heavy sync work in a sync method
+methods: { analyze(s) { s.results = heavyComputation(s.data) } }
 
-// RIGHT -- move to async effect
-reduce: { analyze(s) { s.analyzing = true } },
-execute: {
-  async runAnalysis(app, payload) {
-    const results = await heavyComputation(payload.data)
-    app.dispatch(myCell.analysisDone(results))
-  }
+// RIGHT -- async method: flag, then work off the sync path
+methods: {
+  async analyze(s) {
+    s.analyzing = true
+    s.results = await heavyComputationAsync(s.data)
+    s.analyzing = false
+  },
 }
 ```
 
@@ -183,9 +183,9 @@ Top cells: 1. barHistory 847 MB  2. orderer 12 MB
 **Cap array growth:**
 
 ```ts
-reduce: {
-  addCandle(s, payload) {
-    s.candles.push(payload.candle)
+methods: {
+  addCandle(s, candle: Candle) {
+    s.candles.push(candle)
     if (s.candles.length > 10_000) s.candles = s.candles.slice(-10_000)
   }
 }

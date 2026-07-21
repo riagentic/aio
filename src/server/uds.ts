@@ -36,12 +36,6 @@ export function createUDSListener(
   onAction: (action: { type: string; payload?: unknown }) => void,
   debug: (msg: string) => void,
   clientCounter?: { value: number },
-  _fullStateThreshold = 0.5, // deprecated: kept for API compat, no longer used
-  _cellPatchStrategies?: Map<string, "raw" | "skip" | "filter" | "full">, // unused — patches pre-filtered by aio.ts
-  _cellFilterFields?: Map<
-    string,
-    { mode: "include" | "exclude"; fields: Set<string> }
-  >, // unused — patches pre-filtered by aio.ts
 ): UDSHandle {
   try {
     Deno.removeSync(socketPath);

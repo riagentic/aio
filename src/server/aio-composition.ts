@@ -15,7 +15,6 @@ import type { AioError, ReportErrorOpts } from "../diagnostics/error.ts";
 import { reportError as reportAioError } from "../diagnostics/error.ts";
 import { log } from "../diagnostics/logger.ts";
 import { parseCli } from "./aio-cli.ts";
-import type { MiddlewareFn } from "./middleware.ts";
 
 /** User identity shape — matches AioUser without importing from aio.ts (avoids circular) */
 type User = { id: string; role: string };
@@ -27,7 +26,6 @@ export type ComposeCellsInput = {
   circuitBreaker?: CircuitBreakerConfig;
   perfCheck?: "on" | "off";
   onError?: (error: AioError) => void;
-  middleware?: MiddlewareFn[];
   beforeReduce?: (
     action: unknown,
     state: unknown,
@@ -264,7 +262,7 @@ export function composeCellsWiring(
   const autoGetDBState = buildDBStateGetter(composed);
   const { autoGetUIState, cellPatchStrategies, cellFilterFields } =
     buildUIStateGetter(composed);
-  const beforeReduce = buildBeforeReduce(input.middleware, input.beforeReduce);
+  const beforeReduce = input.beforeReduce;
   const onRestore = input.onRestore as
     | ((state: unknown) => unknown)
     | undefined;
@@ -432,46 +430,6 @@ function buildUIStateGetter(composed: ComposedCells): UIStateResult {
   }
 
   return { autoGetUIState, cellPatchStrategies, cellFilterFields };
-}
-
-/** Build beforeReduce from middleware array + explicit beforeReduce */
-function buildBeforeReduce(
-  middleware?: MiddlewareFn[],
-  explicitBeforeReduce?: (
-    action: unknown,
-    state: unknown,
-    user?: User,
-  ) => unknown | null,
-):
-  | ((action: unknown, state: unknown, user?: User) => unknown | null)
-  | undefined {
-  let beforeReduce = explicitBeforeReduce;
-  if (middleware?.length) {
-    const mws = middleware;
-    const chainedMw = (
-      action: unknown,
-      state: unknown,
-      user?: User,
-    ): unknown | null => {
-      let result: unknown | null = action;
-      for (const mw of mws) {
-        if (result === null) return null;
-        result = mw(result, state, user);
-      }
-      return result;
-    };
-    if (beforeReduce) {
-      const prev = beforeReduce;
-      beforeReduce = (action, state, user?: User) => {
-        const r = chainedMw(action, state, user);
-        if (r === null) return null;
-        return prev(r, state, user);
-      };
-    } else {
-      beforeReduce = chainedMw;
-    }
-  }
-  return beforeReduce;
 }
 
 /** Build the per-cell visibility report — one row per cell with resolved ui/persist filters. */

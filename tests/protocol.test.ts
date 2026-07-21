@@ -2,43 +2,12 @@ import { assertEquals, assertNotEquals } from "@std/assert";
 import { aio, bridge, cell } from "../src/protocol/protocol-cell.ts";
 import { matchPath } from "../src/protocol/protocol-router.ts";
 
-// ── protocol-cell: cell() — action catalog builder ─────────────────
-
-Deno.test("protocol-cell: action type has cellName:actionKey format", () => {
-  const c = cell("counter", {
-    actions: { increment: (n: number) => ({ n }), reset: () => ({}) },
-  });
-  const inc = c.increment as { type: string };
-  const rst = c.reset as { type: string };
-  assertEquals(inc.type, "counter:increment");
-  assertEquals(rst.type, "counter:reset");
-});
-
-Deno.test("protocol-cell: action creator returns { type, payload }", () => {
-  const c = cell("counter", {
-    actions: { increment: (n: number) => ({ n }) },
-  });
-  const inc = c.increment as (
-    n: number,
-  ) => { type: string; payload: { n: number } };
-  assertEquals(inc(5), { type: "counter:increment", payload: { n: 5 } });
-});
-
-Deno.test("protocol-cell: action with no-arg returns empty payload", () => {
-  const c = cell("counter", {
-    actions: { reset: () => ({}) },
-  });
-  const rst = c.reset as () => {
-    type: string;
-    payload: Record<string, unknown>;
-  };
-  assertEquals(rst(), { type: "counter:reset", payload: {} });
-});
+// ── protocol-cell: cell() — method catalog builder ─────────────────
 
 Deno.test("protocol-cell: __aio internals contain state, id, action/effect keys", () => {
   const c = cell("app", {
     state: { count: 0 },
-    actions: { inc: () => ({}) },
+    methods: { inc: () => {} },
     effects: { log: (msg: string) => ({ msg }) },
   });
   const aioMeta = c.__aio as {
@@ -56,7 +25,7 @@ Deno.test("protocol-cell: __aio internals contain state, id, action/effect keys"
 Deno.test("protocol-cell: effects catalog has correct types", () => {
   const c = cell("app", {
     state: {},
-    actions: { go: () => ({}) },
+    methods: { go: () => {} },
     effects: { persist: (v: number) => ({ v }), notify: () => ({}) },
   });
   const aioMeta = c.__aio as {
@@ -103,56 +72,38 @@ Deno.test("protocol-cell: methods with no args produces empty args array", () =>
   assertEquals(toggle(), { type: "clock:toggle", payload: { args: [] } });
 });
 
-Deno.test("protocol-cell: generators appear as action creators in methods mode", () => {
-  const c = cell("gen", {
-    state: {},
-    methods: { noop: () => {} },
-    generators: {
-      *flow(): Generator {
-        yield 1;
-      },
-    },
-  });
-  const flow = c.flow as { type: string } & ((...args: unknown[]) => unknown);
-  assertEquals(flow.type, "gen:flow");
-  assertEquals(flow("arg1"), {
-    type: "gen:flow",
-    payload: { args: ["arg1"] },
-  });
-});
-
 Deno.test("protocol-cell: missing state defaults to empty object", () => {
-  const c = cell("bare", { actions: { go: () => ({}) } });
+  const c = cell("bare", { methods: { go: () => {} } });
   const aioMeta = c.__aio as { state: Record<string, unknown> };
   assertEquals(aioMeta.state, {});
 });
 
 Deno.test("protocol-cell: missing effects defaults to empty", () => {
-  const c = cell("noeff", { actions: { go: () => ({}) } });
+  const c = cell("noeff", { methods: { go: () => {} } });
   const aioMeta = c.__aio as { effectKeys: string[] };
   assertEquals(aioMeta.effectKeys, []);
 });
 
 Deno.test("protocol-cell: bound flag starts false", () => {
-  const c = cell("test", { actions: { x: () => ({}) } });
+  const c = cell("test", { methods: { x: () => {} } });
   const aioMeta = c.__aio as { bound: boolean };
   assertEquals(aioMeta.bound, false);
 });
 
-Deno.test("protocol-cell: multiple actions each get unique types", () => {
+Deno.test("protocol-cell: multiple methods each get unique types", () => {
   const c = cell("multi", {
-    actions: {
-      a: () => ({}),
-      b: (x: number) => ({ x }),
-      c: (s: string, n: number) => ({ s, n }),
+    methods: {
+      a: () => {},
+      b: (_s: Record<string, unknown>, _x: number) => {},
+      c: (_s: Record<string, unknown>, _t: string, _n: number) => {},
     },
   });
   const a = c.a as { type: string };
   const b = c.b as { type: string };
-  const cAction = c.c as { type: string };
+  const cMethod = c.c as { type: string };
   assertEquals(a.type, "multi:a");
   assertEquals(b.type, "multi:b");
-  assertEquals(cAction.type, "multi:c");
+  assertEquals(cMethod.type, "multi:c");
 });
 
 // ── protocol-cell: bridge() — channel catalog ──────────────────────
@@ -243,13 +194,7 @@ Deno.test("bridge: multiple channels each get their own types", () => {
   );
 });
 
-// ── protocol-cell: aio stub — middleware passthrough ────────────────
-
-Deno.test("aio stub: middleware.logger returns noop function", () => {
-  const mw = aio.middleware.logger();
-  assertEquals(typeof mw, "function");
-  assertEquals(mw(), null);
-});
+// ── protocol-cell: aio stub ─────────────────────────────────────────
 
 Deno.test("aio stub: run returns resolved promise", async () => {
   const result = await aio.run();

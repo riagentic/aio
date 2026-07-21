@@ -1,9 +1,9 @@
 # Scheduling
 
 aio has a built-in scheduler for timers, intervals, daily triggers, and cron
-jobs. Schedules are **pure effects** — returned from reducers or methods (sync
-or async, AIO-381), handled by the runtime. No side effects in reducers, no
-external cron daemons.
+jobs. Schedules are **pure effects** — returned from methods (sync or async,
+AIO-381), handled by the runtime. No side effects in sync methods, no external
+cron daemons.
 
 > Timers are one kind of owned resource. For disposables — file watchers,
 > sockets, subprocesses — the same keyed replace semantics exist as
@@ -11,9 +11,9 @@ external cron daemons.
 
 ## Two ways to schedule
 
-### 1. Dynamic — from a reducer or method
+### 1. Dynamic — from a method
 
-Return a `ScheduleEffect` from any reducer or method (sync or async):
+Return a `ScheduleEffect` from any method (sync or async):
 
 ```ts
 import { cell, schedule } from "aio";
@@ -317,23 +317,6 @@ methods: {
   activity(s): ScheduleEffect {
     s.lastActive = Date.now()
     return schedule.after('session.timeout', 30 * 60_000, auth.logout.action())
-  },
-}
-```
-
----
-
-## With generators
-
-Schedules work inside generators too — yield them like any other effect:
-
-```ts
-generators: {
-  *processOrder(ctx, orderId: string) {
-    yield* ctx.dispatch(schedule.after('order.timeout', 60_000, orders.timeout.action(orderId)))
-    const result = yield* ctx.call('submit', () => submitOrder(orderId))
-    yield* ctx.dispatch(schedule.cancel('order.timeout'))
-    yield* ctx.done(s => { s.status = 'submitted' })
   },
 }
 ```

@@ -244,8 +244,6 @@ export type CellsConfig = {
   /** --expose hardening: require an Origin header on WS upgrade. */
   strictOrigin?: boolean;
   schedules?: ScheduleDef[];
-  /** v0.5 middleware array — applied in order as beforeReduce chain */
-  middleware?: import("./middleware.ts").MiddlewareFn[];
   /** Application version string — logged on startup, available at __aio.appVersion */
   /** App version — default: deno.json `version`. */
   appVersion?: string;

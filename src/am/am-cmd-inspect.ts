@@ -5,7 +5,12 @@
 
 import type { GlobalFlags } from "./am-types.ts";
 import { detectMode, formatUptime, out, outError } from "./am-output.ts";
-import { resolveAmAppId, resolvePort } from "./am-utils.ts";
+import {
+  amCtx,
+  resolveAmAppId,
+  resolvePort,
+  runTrojanGet,
+} from "./am-utils.ts";
 import {
   FETCH_TIMEOUT,
   httpGet,
@@ -24,15 +29,7 @@ export async function cmdClients(
   _args: string[],
   flags: GlobalFlags,
 ): Promise<void> {
-  const mode = detectMode(flags);
-  const appId = resolveAmAppId(flags.app);
-  const port = resolvePort(flags.port, appId);
-  const result = await trojanGet(port, "clients", appId);
-  if (!result.ok) {
-    outError(result.error, mode);
-    Deno.exit(1);
-  }
-  out(result.data, mode);
+  await runTrojanGet(amCtx(flags), "clients");
 }
 
 export async function cmdClient(
@@ -109,15 +106,7 @@ export async function cmdSchedules(
   _args: string[],
   flags: GlobalFlags,
 ): Promise<void> {
-  const mode = detectMode(flags);
-  const appId = resolveAmAppId(flags.app);
-  const port = resolvePort(flags.port, appId);
-  const result = await trojanGet(port, "schedules", appId);
-  if (!result.ok) {
-    outError(result.error, mode);
-    Deno.exit(1);
-  }
-  out(result.data, mode);
+  await runTrojanGet(amCtx(flags), "schedules");
 }
 
 export async function cmdLog(
@@ -446,15 +435,7 @@ export async function cmdConfig(
   _args: string[],
   flags: GlobalFlags,
 ): Promise<void> {
-  const mode = detectMode(flags);
-  const appId = resolveAmAppId(flags.app);
-  const port = resolvePort(flags.port, appId);
-  const result = await trojanGet(port, "config", appId);
-  if (!result.ok) {
-    outError(result.error, mode);
-    Deno.exit(1);
-  }
-  out(result.data, mode);
+  await runTrojanGet(amCtx(flags), "config");
 }
 
 // ── Semantic UI surface (spec: docs/specs/2026-07-10-semantic-ui-testing.md) ──
@@ -505,8 +486,21 @@ export async function cmdSurface(
   const mode = detectMode(flags);
   const appId = resolveAmAppId(flags.app);
   const port = resolvePort(flags.port, appId);
-  const idx = Number(args[0] ?? flags.client ?? 0);
-  const result = await trojanGet(port, `surface/${idx}`, appId, 10_000);
+  // `am surface server` renders headlessly ON the server (no client needed).
+  const explicit = args[0] ?? flags.client;
+  const target = explicit === "server" ? "server" : Number(explicit ?? 0);
+  let result = await trojanGet(port, `surface/${target}`, appId, 10_000);
+  if (!result.ok && explicit === undefined) {
+    // No client connected and none requested → fall back to the headless
+    // server-side render (machine M2: server-only apps, CI). Loud about it.
+    const headless = await trojanGet(port, "surface/server", appId, 10_000);
+    if (headless.ok) {
+      if (mode !== "json") {
+        console.error("(no client connected — server-side render)");
+      }
+      result = headless;
+    }
+  }
   if (!result.ok) {
     outError(result.error, mode);
     Deno.exit(1);
@@ -522,7 +516,9 @@ export async function cmdSurface(
   }
   console.log(roots.map((r) => renderSurface(r)).join("\n"));
   console.log(
-    `trigger with: am trigger ${idx} "<Component…:Element>" <action> [text]`,
+    `trigger with: am trigger ${
+      target === "server" ? 0 : target
+    } "<Component…:Element>" <action> [text]`,
   );
 }
 

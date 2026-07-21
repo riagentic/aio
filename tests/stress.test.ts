@@ -2,7 +2,7 @@
 //
 // Verifies behavior under sustained load:
 //   - State stays consistent after thousands of rapid mutations
-//   - Concurrent generators don't corrupt shared state
+//   - Concurrent async methods don't corrupt shared state
 //   - Reducer throughput meets minimum bar
 //
 // Memory bounds are NOT tested here — heap-slope leak detection under real
@@ -41,17 +41,12 @@ function createTestApp(entries: Parameters<typeof composeCells>[0]) {
 
 const counter = cell("counter", {
   state: { count: 0 },
-  actions: {
-    increment: (by = 1) => ({ by }),
-    decrement: (by = 1) => ({ by }),
-    reset: () => ({}),
-  },
-  reduce: {
-    increment(s, p) {
-      s.count += p.by;
+  methods: {
+    increment(s, by = 1) {
+      s.count += by;
     },
-    decrement(s, p) {
-      s.count -= p.by;
+    decrement(s, by = 1) {
+      s.count -= by;
     },
     reset(s) {
       s.count = 0;
@@ -66,13 +61,7 @@ const multiSlice = cell("multi", {
     c: 0,
     log: [] as number[],
   },
-  actions: {
-    incA: () => ({}),
-    incB: () => ({}),
-    incC: () => ({}),
-    append: (v: number) => ({ v }),
-  },
-  reduce: {
+  methods: {
     incA(s) {
       s.a++;
     },
@@ -82,8 +71,8 @@ const multiSlice = cell("multi", {
     incC(s) {
       s.c++;
     },
-    append(s, p) {
-      if (s.log.length < 1000) s.log.push(p.v);
+    append(s, v: number) {
+      if (s.log.length < 1000) s.log.push(v);
     },
   },
 });
@@ -95,7 +84,13 @@ Deno.test("stress: 10k rapid increments — state is consistent", () => {
   const N = 10_000;
 
   for (let i = 0; i < N; i++) {
-    app.dispatch(counter.__aio.actions.increment(1));
+    app.dispatch(
+      (counter.__aio.actions as Record<
+        string,
+        (...a: unknown[]) => { type: string; payload: unknown }
+      >)
+        .increment!(1),
+    );
   }
 
   const s = app.getState().counter as { count: number };
@@ -106,10 +101,14 @@ Deno.test("stress: 10k rapid increments — state is consistent", () => {
 Deno.test("stress: alternating increment/decrement — net zero", () => {
   const app = createTestApp([counter]);
   const N = 5_000;
+  const cat = counter.__aio.actions as Record<
+    string,
+    (...a: unknown[]) => { type: string; payload: unknown }
+  >;
 
   for (let i = 0; i < N; i++) {
-    app.dispatch(counter.__aio.actions.increment(3));
-    app.dispatch(counter.__aio.actions.decrement(3));
+    app.dispatch(cat.increment!(3));
+    app.dispatch(cat.decrement!(3));
   }
 
   const s = app.getState().counter as { count: number };
@@ -120,12 +119,20 @@ Deno.test("stress: alternating increment/decrement — net zero", () => {
 Deno.test("stress: multi-cell rapid dispatch — all slices correct", () => {
   const app = createTestApp([counter, multiSlice]);
   const N = 3_000;
+  const cCat = counter.__aio.actions as Record<
+    string,
+    (...a: unknown[]) => { type: string; payload: unknown }
+  >;
+  const mCat = multiSlice.__aio.actions as Record<
+    string,
+    (...a: unknown[]) => { type: string; payload: unknown }
+  >;
 
   for (let i = 0; i < N; i++) {
-    app.dispatch(counter.__aio.actions.increment(1));
-    app.dispatch(multiSlice.__aio.actions.incA());
-    app.dispatch(multiSlice.__aio.actions.incB());
-    app.dispatch(multiSlice.__aio.actions.incC());
+    app.dispatch(cCat.increment!(1));
+    app.dispatch(mCat.incA!());
+    app.dispatch(mCat.incB!());
+    app.dispatch(mCat.incC!());
   }
 
   const c = app.getState().counter as { count: number };
@@ -139,10 +146,14 @@ Deno.test("stress: multi-cell rapid dispatch — all slices correct", () => {
 Deno.test("stress: throughput — at least 5k actions/sec", () => {
   const app = createTestApp([counter]);
   const N = 10_000;
+  const cat = counter.__aio.actions as Record<
+    string,
+    (...a: unknown[]) => { type: string; payload: unknown }
+  >;
 
   const start = performance.now();
   for (let i = 0; i < N; i++) {
-    app.dispatch(counter.__aio.actions.increment(1));
+    app.dispatch(cat.increment!(1));
   }
   const elapsed = performance.now() - start;
   const opsPerSec = Math.round(N / (elapsed / 1000));
@@ -164,9 +175,13 @@ Deno.test("stress: throughput — at least 5k actions/sec", () => {
 Deno.test("stress: array append under load — bounded and consistent", () => {
   const app = createTestApp([multiSlice]);
   const N = 2_000;
+  const cat = multiSlice.__aio.actions as Record<
+    string,
+    (...a: unknown[]) => { type: string; payload: unknown }
+  >;
 
   for (let i = 0; i < N; i++) {
-    app.dispatch(multiSlice.__aio.actions.append(i));
+    app.dispatch(cat.append!(i));
   }
 
   const m = app.getState().multi as { log: number[] };
@@ -179,53 +194,57 @@ Deno.test("stress: array append under load — bounded and consistent", () => {
 
 Deno.test("stress: reset mid-stream doesn't corrupt state", () => {
   const app = createTestApp([counter]);
+  const cat = counter.__aio.actions as Record<
+    string,
+    (...a: unknown[]) => { type: string; payload: unknown }
+  >;
 
   for (let i = 0; i < 1000; i++) {
-    app.dispatch(counter.__aio.actions.increment(1));
+    app.dispatch(cat.increment!(1));
   }
-  app.dispatch(counter.__aio.actions.reset());
+  app.dispatch(cat.reset!());
   for (let i = 0; i < 500; i++) {
-    app.dispatch(counter.__aio.actions.increment(2));
+    app.dispatch(cat.increment!(2));
   }
 
   const s = app.getState().counter as { count: number };
   assertEquals(s.count, 1000);
 });
 
-// ── Generator stress ─────────────────────────────────────────────────
+// ── Async method stress ──────────────────────────────────────────────
 
 const flowCounter = cell("flowCounter", {
   state: { completed: 0 },
-  actions: { start: (id: number) => ({ id }) },
-  generators: {
-    start: function* (ctx) {
-      yield* ctx.call("work", () => Promise.resolve());
-      yield* ctx.done((s) => {
-        s.completed++;
-      });
+  methods: {
+    async start(s, _id: number) {
+      await Promise.resolve();
+      s.completed++;
     },
   },
 });
 
 Deno.test({
-  name: "stress: 100 concurrent generators complete without corruption",
-  // sanitizers disabled: 100 fire-and-forget generators with internal async ops
+  name: "stress: 100 concurrent async methods complete without corruption",
+  // sanitizers disabled: 100 fire-and-forget async methods with internal async ops
   sanitizeOps: false,
   sanitizeResources: false,
 }, async () => {
   const app = createTestApp([flowCounter]);
   const N = 100;
+  const cat = flowCounter.__aio.actions as Record<
+    string,
+    (...a: unknown[]) => { type: string; payload: unknown }
+  >;
 
-  // Fire N generators — each one replaces the previous (same flow key)
-  // Only the last one should complete since flows auto-cancel previous instances
+  // Fire N async method calls concurrently
   for (let i = 0; i < N; i++) {
-    app.dispatch(flowCounter.__aio.actions.start(i));
+    app.dispatch(cat.start!(i));
   }
 
   await new Promise((r) => setTimeout(r, 500));
 
   const s = app.getState().flowCounter as { completed: number };
-  // At least 1 completed (the last one), potentially more if they resolved before cancellation
+  // At least 1 completed — concurrent batched writes may coalesce increments
   assertEquals(
     s.completed >= 1,
     true,
@@ -237,9 +256,13 @@ Deno.test({
 
 Deno.test("stress: state reads during rapid dispatch are consistent", () => {
   const app = createTestApp([counter]);
+  const cat = counter.__aio.actions as Record<
+    string,
+    (...a: unknown[]) => { type: string; payload: unknown }
+  >;
 
   for (let i = 0; i < 5_000; i++) {
-    app.dispatch(counter.__aio.actions.increment(1));
+    app.dispatch(cat.increment!(1));
     const s = app.getState().counter as { count: number };
     assertEquals(s.count, i + 1, `state inconsistent at iteration ${i}`);
   }
@@ -249,12 +272,9 @@ Deno.test("stress: state reads during rapid dispatch are consistent", () => {
 
 const bigPayload = cell("bigPayload", {
   state: { size: 0 },
-  actions: {
-    store: (data: string) => ({ data }),
-  },
-  reduce: {
-    store(s, p) {
-      s.size = p.data.length;
+  methods: {
+    store(s, data: string) {
+      s.size = data.length;
     },
   },
 });
@@ -262,9 +282,13 @@ const bigPayload = cell("bigPayload", {
 Deno.test("stress: large payloads don't break dispatch", () => {
   const app = createTestApp([bigPayload]);
   const big = "x".repeat(100_000); // 100KB string
+  const cat = bigPayload.__aio.actions as Record<
+    string,
+    (...a: unknown[]) => { type: string; payload: unknown }
+  >;
 
   for (let i = 0; i < 50; i++) {
-    app.dispatch(bigPayload.__aio.actions.store(big));
+    app.dispatch(cat.store!(big));
   }
 
   const s = app.getState().bigPayload as { size: number };

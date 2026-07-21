@@ -57,7 +57,6 @@ import { resolveAppKey } from "./app-key.ts";
 import { assertDenoVersion } from "./deno-version.ts";
 import { dirname, join, resolve } from "@std/path";
 import { lint, printLint } from "./lint.ts";
-import { middleware } from "./middleware.ts";
 
 // ── Re-exports: public API surface ────────────────────────────────────
 export { VERSION } from "./aio-cli.ts";
@@ -66,7 +65,6 @@ export type { CliFlags } from "./aio-cli.ts";
 export { createUDSListener, type UDSHandle } from "./uds.ts";
 export type { AioError } from "../diagnostics/error.ts";
 export type { PerfBudget, PerfCheck } from "../state/dispatch.ts";
-export { composeMiddleware, type MiddlewareFn } from "./middleware.ts";
 export { type Lint, lint } from "./lint.ts";
 export {
   type CellDef,
@@ -256,7 +254,6 @@ async function run(a: any, b?: any): Promise<AioApp<any, any>> {
       circuitBreaker: fc.circuitBreaker,
       perfCheck: fc.perfCheck,
       onError: fc.onError,
-      middleware: fc.middleware,
       beforeReduce: fc.beforeReduce,
       onRestore: fc.onRestore,
     });
@@ -702,6 +699,8 @@ async function _run<S, A, E>(
       routes: config.routes,
       maxConnections: config.maxConnections,
       wsLimits: config.wsLimits,
+      allowedOrigins: config.allowedOrigins,
+      strictOrigin: config.strictOrigin,
       syncIntervalMs: config.syncIntervalMs,
       _cellPatchStrategies: config._cellPatchStrategies,
       _cellFilterFields: config._cellFilterFields,
@@ -785,5 +784,5 @@ async function _run<S, A, E>(
   return app;
 }
 
-/** Main aio namespace — `aio.run(config)` starts the server, `aio.middleware` has built-in middleware factories */
-export const aio = { run, middleware };
+/** Main aio namespace — `aio.run(config)` starts the server. */
+export const aio = { run };

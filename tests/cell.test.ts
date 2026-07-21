@@ -1,87 +1,61 @@
+// cell.test.ts — methods-style cell() + composeCells() + testCell() coverage.
+// perfect-aio D1: ported from the redux-era Style-B config (actions/reduce/
+// execute/machine) to methods-style. Machine guards became status-field guards
+// inside methods; effect creators became schedule-effect returns.
 import { assertEquals, assertThrows } from "@std/assert";
-import { cell, composeCells, tagSource, testCell } from "../src/state/cell.ts";
+import { cell, composeCells, testCell } from "../src/state/cell.ts";
 import type { CellEntry } from "../src/state/cell-types.ts";
 import { schedule } from "../src/state/schedule.ts";
-import { aio } from "../src/server/aio.ts";
 
-// ── cell() — catalog generation ─────────────────────────────────
+// ── cell() — methods-style catalog ──────────────────────────────
 
 const counter = cell("counter", {
-  state: { count: 0, lastUpdatedAt: 0, error: null as string | null },
-  actions: {
-    increment: (by = 1) => ({ by }),
-    decrement: (by = 1) => ({ by }),
-    reset: () => ({}),
-    save: () => ({}),
-    saved: () => ({}),
-    saveFailed: (error: string) => ({ error }),
-    retry: () => ({}),
-    dismiss: () => ({}),
-  },
-  effects: {
-    persist: (value: number) => ({ value }),
-    log: (message: string) => ({ message }),
-  },
-  machine: {
-    initial: "idle",
-    states: {
-      idle: {
-        increment: "idle",
-        decrement: "idle",
-        reset: "idle",
-        save: "saving",
-      },
-      saving: { saved: "idle", saveFailed: "error" },
-      error: { retry: "saving", dismiss: "idle" },
+  state: { count: 0, error: null as string | null, status: "idle" },
+  methods: {
+    increment(s, by = 1) {
+      s.count += by;
     },
-  },
-  reduce: {
-    // __aio.effects access intentional — standard pattern for action-style cells (no public accessor)
-    increment(state, payload) {
-      state.count += payload.by;
-      state.lastUpdatedAt = Date.now();
-      return [counter.__aio.effects.log(`incremented to ${state.count}`)];
+    decrement(s, by = 1) {
+      s.count -= by;
     },
-    decrement(state, payload) {
-      state.count -= payload.by;
-      state.lastUpdatedAt = Date.now();
+    reset(s) {
+      s.count = 0;
     },
-    reset(state) {
-      state.count = 0;
+    // Save lifecycle — guard at method top replaces the old machine table:
+    // an action fired in the wrong state is IGNORED (state untouched).
+    save(s) {
+      if (s.status !== "idle") return;
+      s.status = "saving";
     },
-    save(state) {
-      return [counter.__aio.effects.persist(state.count)];
+    saved(s) {
+      if (s.status !== "saving") return;
+      s.status = "idle";
     },
-    saved() {},
-    saveFailed(state, payload) {
-      state.error = payload.error;
+    saveFailed(s, error: string) {
+      if (s.status !== "saving") return;
+      s.status = "error";
+      s.error = error;
     },
-    retry(state) {
-      state.error = null;
-      return [counter.__aio.effects.persist(state.count)];
+    retry(s) {
+      if (s.status !== "error") return;
+      s.error = null;
+      s.status = "saving";
     },
-    dismiss(state) {
-      state.error = null;
+    dismiss(s) {
+      if (s.status !== "error") return;
+      s.error = null;
+      s.status = "idle";
     },
-  },
-  execute: {
-    persist(app) {
-      app.dispatch(
-        (counter.__aio.actions as unknown as Record<string, any>).saved(),
-      );
-    },
-    log() {/* noop in tests */},
   },
   selectors: {
     getCount: (s) => s.count,
-    isIdle: (s) =>
-      (s as unknown as { __aio_status: string }).__aio_status === "idle",
+    isIdle: (s) => s.status === "idle",
   },
 });
 
-// ── A catalog ──
+// ── Catalog ──
 
-Deno.test("cell: action labels are cellName:actionKey format", () => {
+Deno.test("cell: method labels are cellName:methodKey format", () => {
   assertEquals(counter.increment.type, "counter:increment");
   assertEquals(counter.decrement.type, "counter:decrement");
   assertEquals(counter.reset.type, "counter:reset");
@@ -90,63 +64,23 @@ Deno.test("cell: action labels are cellName:actionKey format", () => {
   assertEquals(counter.saveFailed.type, "counter:saveFailed");
 });
 
-Deno.test("cell: action creators produce { type, payload }", () => {
-  assertEquals(
-    (counter.__aio.actions as unknown as Record<string, any>).increment(5),
-    {
-      type: "counter:increment",
-      payload: { by: 5 },
-    },
-  );
-  assertEquals(
-    (counter.__aio.actions as unknown as Record<string, any>).decrement(3),
-    {
-      type: "counter:decrement",
-      payload: { by: 3 },
-    },
-  );
-  assertEquals(
-    (counter.__aio.actions as unknown as Record<string, any>).reset(),
-    { type: "counter:reset", payload: {} },
-  );
-  assertEquals(
-    (counter.__aio.actions as unknown as Record<string, any>).save(),
-    { type: "counter:save", payload: {} },
-  );
-});
-
-Deno.test("cell: default params preserved", () => {
-  assertEquals(
-    (counter.__aio.actions as unknown as Record<string, any>).increment(),
-    {
-      type: "counter:increment",
-      payload: { by: 1 },
-    },
-  );
-});
-
-Deno.test("cell: effect labels and creators", () => {
-  // framework internals test — __aio access intentional (effects have no public accessor)
-  assertEquals(counter.__aio.effects.persist.type, "counter:persist");
-  assertEquals(counter.__aio.effects.log.type, "counter:log");
-  assertEquals(counter.__aio.effects.persist(42), {
-    type: "counter:persist",
-    payload: { value: 42 },
+Deno.test("cell: method default params preserved", () => {
+  const composed = composeCells([counter]);
+  // No args → `by` defaults to 1 inside the method.
+  const r = composed.reduce(composed.initialState, {
+    type: "counter:increment",
+    payload: { args: [] },
   });
-  assertEquals(counter.__aio.effects.log("hi"), {
-    type: "counter:log",
-    payload: { message: "hi" },
-  });
+  assertEquals((r.state.counter as { count: number }).count, 1);
 });
 
 Deno.test("cell: selectors via compose", () => {
   // Test selectors through compose — the public consumption path
   const composed = composeCells([counter]);
-  let state = composed.initialState;
-  state = composed.reduce(
-    state,
-    (counter.__aio.actions as unknown as Record<string, any>).increment(42),
-  ).state;
+  const state = composed.reduce(composed.initialState, {
+    type: "counter:increment",
+    payload: { args: [42] },
+  }).state;
   // Actually invoke the cell's selectors against the composed slice
   const slice = state.counter as Record<string, unknown>;
   assertEquals(
@@ -159,316 +93,107 @@ Deno.test("cell: selectors via compose", () => {
   );
 });
 
-// ── Machine validation ──
-
-Deno.test("cell: machine validates action keys", () => {
-  assertThrows(
-    () =>
-      cell("bad", {
-        state: {},
-        actions: { go: () => ({}) },
-        machine: { initial: "a", states: { a: { typo: "a" } } },
-        reduce() {},
-      }),
-    Error,
-    "unknown action",
-  );
-});
-
-Deno.test("cell: machine validates target states", () => {
-  assertThrows(
-    () =>
-      cell("bad", {
-        state: {},
-        actions: { go: () => ({}) },
-        // @ts-expect-error — intentionally invalid: "nonexistent" is not a declared state
-        machine: { initial: "a", states: { a: { go: "nonexistent" } } },
-        reduce() {},
-      }),
-    Error,
-    "unknown target",
-  );
-});
-
-Deno.test("cell: machine validates initial state exists", () => {
-  assertThrows(
-    () =>
-      cell("bad", {
-        state: {},
-        actions: { go: () => ({}) },
-        // @ts-expect-error — intentionally invalid: "nope" is not a declared state
-        machine: { initial: "nope", states: { a: { go: "a" } } },
-        reduce() {},
-      }),
-    Error,
-    "not in declared states",
-  );
-});
-
-Deno.test("cell: machine validates reachability", () => {
-  assertThrows(
-    () =>
-      cell("bad", {
-        state: {},
-        actions: { go: () => ({}) },
-        machine: {
-          initial: "a",
-          states: { a: { go: "a" }, orphan: { go: "a" } },
-        },
-        reduce() {},
-      }),
-    Error,
-    "unreachable",
-  );
-});
-
-Deno.test("cell: simple machine accepted", () => {
-  const f = cell("simple", {
-    state: { x: 0 },
-    actions: { set: (x: number) => ({ x }) },
-    machine: false,
-    reduce: {
-      set(state, payload) {
-        state.x = payload.x;
-      },
-    },
-  });
-  // Cell identity verified via action type prefix (public API)
-  assertEquals(f.set.type, "simple:set");
-});
-
-Deno.test("cell: foreign actions in machine allowed", () => {
-  // Should not throw — foreign actions have ':' and are allowed
-  const dc = cell("dc", {
-    state: {},
-    actions: { priceUpdated: (price: number) => ({ price }) },
-    machine: { initial: "idle", states: { idle: { priceUpdated: "idle" } } },
-    reduce() {},
-  });
-
-  const te = cell("te", {
-    state: { price: 0 },
-    actions: { placeOrder: () => ({}) },
-    machine: {
-      initial: "idle",
-      states: {
-        idle: { placeOrder: "waiting", [dc.priceUpdated.type]: "idle" },
-        waiting: { [dc.priceUpdated.type]: "idle" },
-      },
-    },
-    reduce: {
-      ["dc:priceUpdated"](state, payload) {
-        state.price = payload.price;
-      },
-    },
-  });
-
-  // Verify foreign action routing works via compose (behavioral test)
-  const composed = composeCells([dc, te]);
-  const r = composed.reduce(
-    composed.initialState,
-    (dc.__aio.actions as unknown as Record<string, any>).priceUpdated(42000),
-  );
-  assertEquals((r.state.te as Record<string, unknown>).price, 42000);
-});
-
 // ── composeCells() ──
-
-Deno.test("compose: initialState includes __aio_status", () => {
-  const composed = composeCells([counter]);
-  const state = composed.initialState as Record<
-    string,
-    Record<string, unknown>
-  >;
-  assertEquals(state.counter!.__aio_status, "idle");
-  assertEquals(state.counter!.count, 0);
-});
-
-Deno.test("compose: simple machine has no _status", () => {
-  const f = cell("noop", {
-    state: { x: 1 },
-    actions: { set: () => ({}) },
-    machine: false,
-    reduce() {},
-  });
-  const composed = composeCells([f]);
-  assertEquals(
-    (composed.initialState.noop as Record<string, unknown>)._status,
-    undefined,
-  );
-});
 
 Deno.test("compose: reduce routes action to correct cell", () => {
   const composed = composeCells([counter]);
-  const result = composed.reduce(
-    composed.initialState,
-    (counter.__aio.actions as unknown as Record<string, any>).increment(5),
-  );
+  const result = composed.reduce(composed.initialState, {
+    type: "counter:increment",
+    payload: { args: [5] },
+  });
   const s = result.state.counter as Record<string, unknown>;
   assertEquals(s.count, 5);
-  assertEquals(s.__aio_status, "idle");
-  assertEquals(result.effects.length, 1);
-  assertEquals(result.effects[0]!.type, "counter:log");
+  assertEquals(s.status, "idle");
 });
 
-Deno.test("compose: machine guard blocks invalid transitions", () => {
+Deno.test("compose: guard ignores action in wrong state", () => {
   const composed = composeCells([counter]);
-  // Can't 'saved' from idle — only valid in 'saving'
-  const result = composed.reduce(
-    composed.initialState,
-    (counter.__aio.actions as unknown as Record<string, any>).saved(),
-  );
+  // Can't 'saved' from idle — the guard only accepts it in 'saving'
+  const result = composed.reduce(composed.initialState, {
+    type: "counter:saved",
+    payload: { args: [] },
+  });
   assertEquals(result.effects.length, 0);
-  assertEquals((result.state.counter as Record<string, unknown>).count, 0); // unchanged
+  const s = result.state.counter as Record<string, unknown>;
+  assertEquals(s.count, 0); // unchanged
+  assertEquals(s.status, "idle"); // unchanged
 });
 
-Deno.test("compose: state machine transitions correctly", () => {
+Deno.test("compose: status lifecycle transitions correctly", () => {
   const composed = composeCells([counter]);
+  const dispatch = (
+    state: Record<string, unknown>,
+    type: string,
+    args: unknown[] = [],
+  ) => composed.reduce(state, { type, payload: { args } });
 
   // idle → save → saving
-  const r1 = composed.reduce(
-    composed.initialState,
-    (counter.__aio.actions as unknown as Record<string, any>).save(),
-  );
-  assertEquals(
-    (r1.state.counter as Record<string, unknown>).__aio_status,
-    "saving",
-  );
-  assertEquals(r1.effects.length, 1); // persist effect
+  const r1 = dispatch(composed.initialState, "counter:save");
+  assertEquals((r1.state.counter as { status: string }).status, "saving");
 
   // saving → saved → idle
-  const r2 = composed.reduce(
-    r1.state,
-    (counter.__aio.actions as unknown as Record<string, any>).saved(),
-  );
-  assertEquals(
-    (r2.state.counter as Record<string, unknown>).__aio_status,
-    "idle",
-  );
+  const r2 = dispatch(r1.state, "counter:saved");
+  assertEquals((r2.state.counter as { status: string }).status, "idle");
 
   // saving → saveFailed → error
-  const r3 = composed.reduce(
-    r1.state,
-    (counter.__aio.actions as unknown as Record<string, any>).saveFailed(
-      "disk full",
-    ),
-  );
-  assertEquals(
-    (r3.state.counter as Record<string, unknown>).__aio_status,
-    "error",
-  );
-  assertEquals(
-    (r3.state.counter as Record<string, unknown>).error,
-    "disk full",
-  );
+  const r3 = dispatch(r1.state, "counter:saveFailed", ["disk full"]);
+  assertEquals((r3.state.counter as { status: string }).status, "error");
+  assertEquals((r3.state.counter as { error: string }).error, "disk full");
 
   // error → retry → saving
-  const r4 = composed.reduce(
-    r3.state,
-    (counter.__aio.actions as unknown as Record<string, any>).retry(),
-  );
-  assertEquals(
-    (r4.state.counter as Record<string, unknown>).__aio_status,
-    "saving",
-  );
-  assertEquals((r4.state.counter as Record<string, unknown>).error, null); // cleared
+  const r4 = dispatch(r3.state, "counter:retry");
+  assertEquals((r4.state.counter as { status: string }).status, "saving");
+  assertEquals((r4.state.counter as { error: null }).error, null); // cleared
 
   // error → dismiss → idle
-  const r5 = composed.reduce(
-    r3.state,
-    (counter.__aio.actions as unknown as Record<string, any>).dismiss(),
-  );
-  assertEquals(
-    (r5.state.counter as Record<string, unknown>).__aio_status,
-    "idle",
-  );
+  const r5 = dispatch(r3.state, "counter:dismiss");
+  assertEquals((r5.state.counter as { status: string }).status, "idle");
 });
 
 Deno.test("compose: multiple cells isolated", () => {
   const a = cell("alpha", {
     state: { x: 0 },
-    actions: { inc: () => ({}) },
-    machine: false,
-    reduce(state) {
-      state.x += 1;
+    methods: {
+      inc(s) {
+        s.x += 1;
+      },
     },
   });
   const b = cell("beta", {
     state: { y: 0 },
-    actions: { inc: () => ({}) },
-    machine: false,
-    reduce(state) {
-      state.y += 1;
+    methods: {
+      inc(s) {
+        s.y += 1;
+      },
     },
   });
 
   const composed = composeCells([a, b]);
-  const r = composed.reduce(
-    composed.initialState,
-    (a.__aio.actions as unknown as Record<string, any>).inc(),
-  );
+  const r = composed.reduce(composed.initialState, {
+    type: "alpha:inc",
+    payload: { args: [] },
+  });
   assertEquals((r.state.alpha as Record<string, number>).x, 1);
   assertEquals((r.state.beta as Record<string, number>).y, 0);
-});
-
-Deno.test("compose: foreign action routing", () => {
-  const dc = cell("dc", {
-    state: { price: 0 },
-    actions: { priceUpdated: (price: number) => ({ price }) },
-    machine: { initial: "idle", states: { idle: { priceUpdated: "idle" } } },
-    reduce: {
-      priceUpdated(state, payload) {
-        state.price = payload.price;
-      },
-    },
-  });
-
-  const te = cell("te", {
-    state: { lastPrice: 0 },
-    actions: { noop: () => ({}) },
-    machine: {
-      initial: "idle",
-      states: { idle: { noop: "idle", [dc.priceUpdated.type]: "idle" } },
-    },
-    reduce: {
-      ["dc:priceUpdated"](state, payload) {
-        state.lastPrice = payload.price;
-      },
-    },
-  });
-
-  const composed = composeCells([dc, te]);
-  const r = composed.reduce(
-    composed.initialState,
-    (dc.__aio.actions as unknown as Record<string, any>).priceUpdated(42000),
-  );
-
-  // DC updates its own state
-  assertEquals((r.state.dc as Record<string, unknown>).price, 42000);
-  // TE listens and updates too
-  assertEquals((r.state.te as Record<string, unknown>).lastPrice, 42000);
 });
 
 // ── Dependency resolution ──
 
 Deno.test("compose: dependency order respected", () => {
-  const order: string[] = [];
   const a = cell("a", {
     state: { v: "a" },
-    actions: { ping: () => ({}) },
-    machine: false,
-    reduce(state) {
-      order.push("a");
-      state.v = "a-done";
+    methods: {
+      ping(s) {
+        s.v = "a-done";
+      },
     },
   });
   const b = cell("b", {
     state: { v: "b" },
-    actions: { ping: () => ({}) },
-    machine: false,
-    reduce(state) {
-      order.push("b");
-      state.v = "b-done";
+    methods: {
+      ping(s) {
+        s.v = "b-done";
+      },
     },
   });
 
@@ -483,15 +208,11 @@ Deno.test("compose: dependency order respected", () => {
 Deno.test("compose: cycle detection", () => {
   const a = cell("a", {
     state: {},
-    actions: { x: () => ({}) },
-    machine: false,
-    reduce() {},
+    methods: { x(_s) {} },
   });
   const b = cell("b", {
     state: {},
-    actions: { x: () => ({}) },
-    machine: false,
-    reduce() {},
+    methods: { x(_s) {} },
   });
 
   assertThrows(
@@ -508,9 +229,7 @@ Deno.test("compose: cycle detection", () => {
 Deno.test("compose: unknown dependency", () => {
   const a = cell("a", {
     state: {},
-    actions: { x: () => ({}) },
-    machine: false,
-    reduce() {},
+    methods: { x(_s) {} },
   });
 
   assertThrows(
@@ -523,15 +242,11 @@ Deno.test("compose: unknown dependency", () => {
 Deno.test("compose: duplicate cell name", () => {
   const a1 = cell("dup", {
     state: {},
-    actions: { x: () => ({}) },
-    machine: false,
-    reduce() {},
+    methods: { x(_s) {} },
   });
   const a2 = cell("dup", {
     state: {},
-    actions: { y: () => ({}) },
-    machine: false,
-    reduce() {},
+    methods: { y(_s) {} },
   });
 
   assertThrows(
@@ -543,234 +258,66 @@ Deno.test("compose: duplicate cell name", () => {
 
 // ── testCell() harness ──
 
-testCell<{ count: number; lastUpdatedAt: number; error: string | null }>(
-  counter,
-  "increment from idle",
-  (t) => {
-    t.init();
-    t.send.increment!(5);
-    t.expect.state((s) => s.count === 5);
-    t.expect.effects(["counter:log"]);
-    t.expect.status("idle");
-  },
-);
-
-testCell<{ count: number; lastUpdatedAt: number; error: string | null }>(
-  counter,
-  "save triggers persist effect",
-  (t) => {
-    t.init();
-    t.send.save!();
-    t.expect.status("saving");
-    t.expect.effects(["counter:persist"]);
-    t.expect.effectCount(1);
-  },
-);
-
-testCell<{ count: number; lastUpdatedAt: number; error: string | null }>(
-  counter,
-  "machine blocks invalid transition",
-  (t) => {
-    t.init();
-    // Can't save twice — first save goes to 'saving', second is blocked
-    t.send.save!();
-    t.expect.status("saving");
-    t.send.save!(); // blocked by machine
-    t.expect.effectCount(0); // no new effects
-    t.expect.status("saving"); // still saving
-  },
-);
-
-testCell<{ count: number; lastUpdatedAt: number; error: string | null }>(
-  counter,
-  "count is always a number (property-based)",
-  (t) => {
-    t.init();
-    t.randomActions(200);
-    t.expect.invariant((s) => typeof s.count === "number");
-    t.expect.invariant((s) => !isNaN(s.count));
-  },
-);
-
-testCell<{ count: number; lastUpdatedAt: number; error: string | null }>(
-  counter,
-  "full lifecycle",
-  (t) => {
-    t.init();
-    t.send.increment!(10);
-    t.expect.state((s) => s.count === 10);
-    t.expect.status("idle");
-
-    t.destroy();
-    t.expect.state((s) => s.count === 0);
-
-    t.init();
-    t.expect.state((s) => s.count === 0);
-    t.expect.status("idle");
-  },
-);
-
-// middleware: freeze returns action (passthrough)
-
-Deno.test("aio.middleware.freeze: passthrough returns the action", () => {
-  const mw = aio.middleware.freeze();
-  const result = mw({ type: "Test", payload: {} }, {}) as { type: string };
-  assertEquals(result.type, "Test");
+testCell(counter, "increment from idle", (t) => {
+  t.init();
+  t.send.increment(5);
+  t.expect.state((s) => s.count === 5);
+  t.expect.state((s) => s.status === "idle");
 });
 
-// middleware: devtools returns action (passthrough)
-
-Deno.test("aio.middleware.devtools: passthrough returns the action", () => {
-  const mw = aio.middleware.devtools();
-  const result = mw({ type: "Test", payload: {} }, {}) as { type: string };
-  assertEquals(result.type, "Test");
+testCell(counter, "guard blocks save while already saving", (t) => {
+  t.init();
+  // Can't save twice — first save goes to 'saving', second is ignored
+  t.send.save();
+  t.expect.state((s) => s.status === "saving");
+  t.send.save(); // ignored by the guard
+  t.expect.state((s) => s.status === "saving"); // still saving, no corruption
 });
 
-// middleware: perfBudget stores start time
-
-Deno.test("aio.middleware.perfBudget: passthrough returns the action", () => {
-  const mw = aio.middleware.perfBudget({ reduce: 10 });
-  const action = { type: "Test", payload: {} };
-  const result = mw(action, {});
-  assertEquals(result, action);
-  // perfBudget is a config-parity passthrough — it must NOT pollute globalThis
-  // (perf budgets are enforced by createDispatch, not by this middleware).
-  assertEquals(
-    (globalThis as Record<string, unknown>).__aioMiddlewarePerfStart,
-    undefined,
-  );
+testCell(counter, "count is always a number (property-based)", (t) => {
+  t.init();
+  t.randomActions(200);
+  t.expect.invariant((s) => typeof s.count === "number");
+  t.expect.invariant((s) => !isNaN(s.count as number));
 });
 
-// middleware: validate warns on array payload
+testCell(counter, "full lifecycle", (t) => {
+  t.init();
+  t.send.increment(10);
+  t.expect.state((s) => s.count === 10);
+  t.expect.state((s) => s.status === "idle");
 
-Deno.test("aio.middleware.validate: warns on array payload", () => {
-  const logs: string[] = [];
-  const origLog = console.log;
-  console.log = (...args: unknown[]) => logs.push(args.join(" "));
-  const mw = aio.middleware.validate();
-  const result = mw({ type: "Test", payload: [1, 2, 3] }, {});
-  console.log = origLog;
-  assertEquals(result !== null, true); // not dropped, just warned
-  assertEquals(logs.some((l) => l.includes("plain object")), true);
+  t.destroy();
+  t.expect.state((s) => s.count === 0);
+
+  t.init();
+  t.expect.state((s) => s.count === 0);
+  t.expect.state((s) => s.status === "idle");
 });
 
-// middleware: validate allows undefined payload
+// ── Fix A: ScheduleEffect returned from a sync method ──
 
-Deno.test("aio.middleware.validate: allows undefined payload", () => {
-  const mw = aio.middleware.validate();
-  const result = mw({ type: "Test" }, {});
-  assertEquals(result !== null, true);
-});
-
-// middleware: metrics tracks multiple cells
-
-Deno.test("aio.middleware.metrics: tracks errors field initialized to 0", () => {
-  const mw = aio.middleware.metrics();
-  mw({ type: "Foo:Bar", payload: {} }, {});
-  const counters = (globalThis as Record<string, unknown>).__aioMetrics as Map<
-    string,
-    { count: number; errors: number }
-  >;
-  assertEquals(counters.get("Foo")?.errors, 0);
-  delete (globalThis as Record<string, unknown>).__aioMetrics;
-});
-
-// ── Fix A: ScheduleEffect in reduce return ──
-
-Deno.test("reduce: accepts ScheduleEffect in effects array", () => {
+Deno.test("methods: sync method returning a ScheduleEffect surfaces it", () => {
   const f = cell("sched", {
     state: { count: 0 },
-    actions: { tick: () => ({}) },
-    effects: { log: (msg: string) => ({ msg }) },
-    machine: false,
-    reduce: {
-      tick() {
-        // __aio.effects access intentional — standard pattern for action-style cells
-        return [
-          f.__aio.effects.log("hello"),
-          schedule.after("sched:retry", 1000, {
-            type: "sched:tick",
-            payload: {},
-          }),
-        ];
+    methods: {
+      tick(s) {
+        s.count += 1;
+        return schedule.after("sched:retry", 1000, {
+          type: "sched:tick",
+          payload: { args: [] },
+        });
       },
     },
   });
   const composed = composeCells([f]);
-  const result = composed.reduce(
-    composed.initialState,
-    (f.__aio.actions as unknown as Record<string, any>).tick(),
-  );
-  assertEquals(result.effects.length, 2);
-  assertEquals(result.effects[0]!.type, "sched:log");
-  assertEquals(result.effects[1]!.type, "__schedule");
-});
-
-// ── Verify: machine: false does NOT receive foreign actions ──
-
-Deno.test("compose: machine: false does not receive foreign actions", () => {
-  let betaReduced = false;
-  const alpha = cell("alpha", {
-    state: {},
-    actions: { fire: () => ({}) },
-    machine: false,
-    reduce() {},
+  const result = composed.reduce(composed.initialState, {
+    type: "sched:tick",
+    payload: { args: [] },
   });
-  const beta = cell("beta", {
-    state: { heard: false },
-    actions: { update: () => ({}) },
-    machine: false,
-    reduce(state, action) {
-      // foreign action — cast to Msg for cross-cell access
-      const msg = action as { type: string };
-      if (msg.type === "alpha:fire") {
-        betaReduced = true;
-        state.heard = true;
-      }
-    },
-  });
-  const composed = composeCells([alpha, beta]);
-  const result = composed.reduce(
-    composed.initialState,
-    (alpha.__aio.actions as unknown as Record<string, any>).fire(),
-  );
-  // beta should NOT have received the action — machine: false can't declare foreign listeners
-  assertEquals(betaReduced, false);
-  assertEquals((result.state.beta as Record<string, unknown>).heard, false);
-});
-
-Deno.test("compose: machine with foreign action declaration DOES receive foreign actions", () => {
-  let betaReduced = false;
-  const alpha = cell("alpha", {
-    state: {},
-    actions: { fire: () => ({}) },
-    machine: false,
-    reduce() {},
-  });
-  const beta = cell("beta", {
-    state: { heard: false },
-    actions: { update: () => ({}) },
-    machine: {
-      initial: "idle",
-      states: {
-        idle: { update: "idle", [alpha.fire.type]: "idle" },
-      },
-    },
-    reduce: {
-      update() {},
-      ["alpha:fire"](state) {
-        betaReduced = true;
-        state.heard = true;
-      },
-    },
-  });
-  const composed = composeCells([alpha, beta]);
-  const result = composed.reduce(
-    composed.initialState,
-    (alpha.__aio.actions as unknown as Record<string, any>).fire(),
-  );
-  assertEquals(betaReduced, true);
-  assertEquals((result.state.beta as Record<string, unknown>).heard, true);
+  assertEquals(result.effects.length, 1);
+  assertEquals(result.effects[0]!.type, "__schedule");
+  assertEquals((result.state.sched as { count: number }).count, 1);
 });
 
 // ── ScopedApp.getFullState ──────────────────────────────────────────
@@ -780,8 +327,7 @@ Deno.test("onInit: getFullState returns full app state", () => {
 
   const a = cell("alpha", {
     state: { x: 1 },
-    actions: { noop: () => ({}) },
-    machine: false,
+    methods: { noop(_s) {} },
     onInit(app) {
       fullStateInInit = app.getFullState?.() ?? null;
     },
@@ -789,8 +335,7 @@ Deno.test("onInit: getFullState returns full app state", () => {
 
   const b = cell("beta", {
     state: { y: 2 },
-    actions: { noop: () => ({}) },
-    machine: false,
+    methods: { noop(_s) {} },
   });
 
   const composed = composeCells([a, b]);
@@ -829,8 +374,7 @@ Deno.test("onInit: getState still returns own slice only", () => {
 
   const f = cell("myf", {
     state: { val: 42 },
-    actions: { noop: () => ({}) },
-    machine: false,
+    methods: { noop(_s) {} },
     onInit(app) {
       ownState = app.getState();
     },
@@ -854,8 +398,11 @@ Deno.test("onInit: getState still returns own slice only", () => {
 Deno.test("cell persist: 'all' sets persist on internals", () => {
   const f = cell("rich", {
     state: { name: "", htmlCache: "" },
-    actions: { noop: () => ({}) },
-    machine: false,
+    methods: {
+      setName(s, n: string) {
+        s.name = n;
+      },
+    },
     persist: "all",
   });
   assertEquals(f.__aio.persist, "all");
@@ -890,8 +437,11 @@ Deno.test("cell persist: { include } sets persist on internals", () => {
 Deno.test("cell persist: absent defaults to undefined (none)", () => {
   const f = cell("plain", {
     state: { x: 0 },
-    actions: { inc: () => ({}) },
-    machine: false,
+    methods: {
+      inc(s) {
+        s.x++;
+      },
+    },
   });
   assertEquals(f.__aio.persist, undefined);
 });
@@ -961,158 +511,6 @@ Deno.test("cell ui: absent defaults to undefined (none)", () => {
   });
   assertEquals(f.__aio.ui, undefined);
   assertEquals(f.__aio.uiForUser, undefined);
-});
-
-// ── Mixed mode: methods + actions + effects in one cell ──
-
-Deno.test("mixed: methods + actions coexist in one cell", () => {
-  const f = cell("mixed", {
-    state: { count: 0, label: "" },
-    methods: {
-      increment(s: { count: number }, by = 1) {
-        s.count += by;
-      },
-    },
-    actions: {
-      SetLabel: (label: string) => ({ label }),
-    },
-    reduce: {
-      SetLabel(state: { label: string }, payload: { label: string }) {
-        state.label = payload.label;
-      },
-    },
-  });
-
-  // Method works
-  assertEquals(
-    (f.__aio.actions as unknown as Record<string, any>).increment(),
-    {
-      type: "mixed:increment",
-      payload: { args: [] },
-    },
-  );
-  assertEquals(
-    (f.__aio.actions as unknown as Record<string, any>).increment(5),
-    {
-      type: "mixed:increment",
-      payload: { args: [5] },
-    },
-  );
-
-  // Action works (explicit actions are flattened at runtime)
-  assertEquals(
-    (f.__aio.actions as unknown as Record<string, any>).SetLabel("hello"),
-    { type: "mixed:SetLabel", payload: { label: "hello" } },
-  );
-});
-
-Deno.test("mixed: methods + actions + effects compose correctly", () => {
-  const effectsRun: string[] = [];
-  const f = cell("shop", {
-    state: { items: [] as string[], synced: false },
-    methods: {
-      add(s: { items: string[] }, item: string) {
-        s.items.push(item);
-      },
-      clear(s: { items: string[] }) {
-        s.items = [];
-      },
-    },
-    actions: {
-      MarkSynced: () => ({}),
-    },
-    effects: {
-      SyncToServer: (items: string[]) => ({ items }),
-    },
-    reduce: {
-      MarkSynced(state: { synced: boolean }) {
-        state.synced = true;
-      },
-    },
-    execute: {
-      SyncToServer(_app: unknown, payload: { items: string[] }) {
-        effectsRun.push(`sync:${payload.items.join(",")}`);
-      },
-    },
-  });
-
-  const composed = composeCells([f]);
-  let state = composed.initialState;
-
-  // Method dispatch works
-  state = composed.reduce(
-    state,
-    (f.__aio.actions as unknown as Record<string, any>).add("apple"),
-  ).state;
-  assertEquals((state.shop as { items: string[] }).items, ["apple"]);
-
-  // Action dispatch works (explicit actions flattened at runtime)
-  state = composed.reduce(
-    state,
-    (f.__aio.actions as unknown as Record<string, any>).MarkSynced(),
-  ).state;
-  assertEquals((state.shop as { synced: boolean }).synced, true);
-
-  // framework internals test — __aio access intentional (effects have no public accessor)
-  assertEquals(
-    (f.__aio.effects as unknown as Record<string, { type: string }>)
-      .SyncToServer!.type,
-    "shop:SyncToServer",
-  );
-});
-
-Deno.test("mixed: name collision between method and action throws", () => {
-  assertThrows(
-    () =>
-      cell("bad", {
-        state: {},
-        methods: {
-          save(s: Record<string, unknown>) {
-            s.saved = true;
-          },
-        },
-        actions: { save: () => ({}) },
-      }),
-    Error,
-    "collides with method",
-  );
-});
-
-Deno.test("mixed: name collision between method and effect throws", () => {
-  assertThrows(
-    () =>
-      cell("bad", {
-        state: {},
-        methods: {
-          sync(s: Record<string, unknown>) {
-            s.synced = true;
-          },
-        },
-        effects: { sync: () => ({}) },
-      }),
-    Error,
-    "collides with method",
-  );
-});
-
-Deno.test("mixed: name collision between generator and action throws", () => {
-  assertThrows(
-    // deno-lint-ignore no-explicit-any
-    () =>
-      cell("bad" as any, {
-        state: {},
-        methods: { noop() {} },
-        // deno-lint-ignore no-explicit-any
-        generators: {
-          *process(_ctx: any): any {
-            yield 1;
-          },
-        },
-        actions: { process: () => ({}) },
-      } as any),
-    Error,
-    "collides with generator",
-  );
 });
 
 // ── Persist filter in composition ──────────────────────────────

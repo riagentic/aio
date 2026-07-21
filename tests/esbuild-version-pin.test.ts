@@ -26,8 +26,8 @@ Deno.test("B-6: esbuild imports pin the EXACT deno.json version (no range)", () 
   const pin = pinnedVersion();
   for (
     const file of [
-      "src/server/server-transpile.ts", // computed specifier (lean am install)
-      "src/server/lint.ts", // computed specifier
+      // The computed specifier now lives in ONE place (complexity audit):
+      "src/build/esbuild-shared.ts", // ESBUILD_VERSION + computed ESBUILD_SPEC
       "src/build/build-bundle.ts", // literal (build needs esbuild eagerly)
     ]
   ) {
@@ -38,6 +38,8 @@ Deno.test("B-6: esbuild imports pin the EXACT deno.json version (no range)", () 
     const versions = [
       ...src.matchAll(/import\(\s*["']npm:esbuild@([^"']+)["']\s*\)/g),
       ...src.matchAll(/["']npm:esbuild["']\s*,\s*["']([^"']+)["']/g),
+      // The shared authority: `export const ESBUILD_VERSION = "X"`.
+      ...src.matchAll(/ESBUILD_VERSION = ["']([^"']+)["']/g),
     ].map((m) => m[1]!);
     assertEquals(
       versions.length > 0,
@@ -50,4 +52,30 @@ Deno.test("B-6: esbuild imports pin the EXACT deno.json version (no range)", () 
       assertEquals(ver, pin, `${file} pin must match deno.json (${pin})`);
     }
   }
+});
+
+// ── shared-constant drift guard (complexity audit) ────────────────────
+// build-bundle.ts must keep a LITERAL `npm:esbuild@X` (static prefetch);
+// everything else derives from ESBUILD_VERSION. This pins literal == constant.
+import { ESBUILD_VERSION } from "../src/build/esbuild-shared.ts";
+
+Deno.test("esbuild pin: build-bundle literal + deno.json both match ESBUILD_VERSION", async () => {
+  const bundleSrc = await Deno.readTextFile(
+    new URL("../src/build/build-bundle.ts", import.meta.url),
+  );
+  const literal = bundleSrc.match(/npm:esbuild@(\d+\.\d+\.\d+)/)?.[1];
+  assertEquals(
+    literal,
+    ESBUILD_VERSION,
+    "build-bundle.ts literal drifted from esbuild-shared.ts",
+  );
+  const denoJson = JSON.parse(
+    await Deno.readTextFile(new URL("../deno.json", import.meta.url)),
+  ) as { imports: Record<string, string> };
+  const pin = denoJson.imports["esbuild"];
+  assertEquals(
+    pin?.includes(ESBUILD_VERSION.split(".").slice(0, 2).join(".")),
+    true,
+    `deno.json esbuild pin (${pin}) drifted from ESBUILD_VERSION major.minor`,
+  );
 });

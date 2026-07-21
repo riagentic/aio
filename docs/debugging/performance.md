@@ -9,23 +9,24 @@ budget. This catches blocking work that makes the UI unresponsive.
 
 Every action is timed:
 
-- **reduce budget** (default: 100ms) -- if `reduce()` takes longer, it's flagged
-  as `BUDGET_REDUCE`
-- **effect budget** (default: 5ms) -- if sync portion of `execute()` takes
-  longer, it's flagged as `BUDGET_EFFECT`
+- **reduce budget** (default: 100ms) -- if a sync method takes longer, it's
+  flagged as `BUDGET_REDUCE`
+- **effect budget** (default: 5ms) -- if the sync portion of the executor
+  (async-method trigger, effect handling) takes longer, it's flagged as
+  `BUDGET_EFFECT`
 
-Async effects (promises) return immediately -- only the sync part is measured.
+Async methods suspend at `await` -- only sync stretches are measured.
 
 ```ts
-execute: {
-  // GOOD -- async, returns in < 1ms
-  fetch(app, payload) {
-    fetch(payload.url).then(r => app.dispatch(myCell.loaded(r)))
+methods: {
+  // GOOD -- awaits, each sync stretch returns in < 1ms
+  async load(s, url: string) {
+    s.data = await fetch(url).then((r) => r.json())
   },
 
   // BAD -- sync work blocks
-  process(_app, payload) {
-    const data = heavyComputation(payload)  // 500ms sync -- blocks!
+  process(s, payload: Data) {
+    s.result = heavyComputation(payload)  // 500ms sync -- blocks!
   },
 },
 ```
@@ -51,18 +52,18 @@ Duration: 250.0ms (budget: 100ms)
 | `routing`   | Owner cell lookup + reduce dispatch                  | Shouldn't be slow             |
 | `listeners` | Foreign action listener fan-out                      | Too many cross-cell listeners |
 
-If `produce` dominates, your reducer is doing too much work:
+If `produce` dominates, your sync method is doing too much work:
 
 ```ts
 // BAD -- blocks for 250ms
 methods: { analyze(s) { s.results = heavyComputation(s.data) } }
 
-// GOOD -- reducer sets flag, execute does work async
-reduce: { analyze(state) { state.analyzing = true } },
-execute: {
-  async runAnalysis(app, payload) {
-    const results = await heavyComputation(payload.data)
-    app.dispatch(myCell.analysisDone(results))
+// GOOD -- async method: flag first, then work off the sync path
+methods: {
+  async analyze(s) {
+    s.analyzing = true                            // commits immediately
+    s.results = await heavyComputationAsync(s.data)
+    s.analyzing = false
   },
 },
 ```
@@ -71,24 +72,19 @@ execute: {
 
 ## Slow effect diagnosis
 
-The _synchronous_ part of your effect is too slow. Return immediately and do
-work asynchronously:
+A _synchronous_ stretch of an async method is too slow. Use async APIs so the
+method suspends instead of blocking:
 
 ```ts
-// BAD -- blocking file read
-execute: {
-  load(app) {
-    const data = JSON.parse(Deno.readTextFileSync('big.json'))
-    app.dispatch(myCell.done(data))
-  },
+// BAD -- blocking file read inside an async method
+async load(s) {
+  s.data = JSON.parse(Deno.readTextFileSync('big.json'))  // sync block
 }
 
-// GOOD -- async
-execute: {
-  load(app) {
-    Deno.readTextFile('big.json')
-      .then(text => app.dispatch(myCell.done(JSON.parse(text))))
-  },
+// GOOD -- async API, event loop stays free
+async load(s) {
+  const text = await Deno.readTextFile('big.json')
+  s.data = JSON.parse(text)
 }
 ```
 

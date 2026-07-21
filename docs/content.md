@@ -19,20 +19,15 @@
 - [Versioning & Deprecation Policy](basics/semver-policy.md) — aio follows semver from 1.0.0 on.
 - [Tutorial -- Building with AIO Step by Step](basics/tutorial.md) — Each section builds on the previous, but you can stop at any point.
 
-## State — cells — the core: cells, methods, machines, scheduling
+## State — cells — the core: cells, methods, workflows, scheduling
 
 - [State Management](state/README.md) — Defining cells, managing state, and coordinating workflows.
-- [Actions & Reduce — Explicit Control Style](state/actions-reduce.md) — The object form: one method per action key, payload typed from the action
 - [Cell-Level Visibility & Persistence](state/cell-visibility.md) — Control what state each cell exposes to clients (ui) and persists to disk
 - [Cells — Config Shape and Anatomy](state/cells.md) — Everything is a cell.
 - [Composition — Cross-Cell Communication](state/composition.md) — Cells don't share state — they communicate through three interaction patterns.
-- [Generators API — GenCtx Reference](state/generators-api.md) — All methods are called with yield (delegating yield) unless noted otherwise.
-- [Generators — Sequential Async Workflows](state/generators.md) — Write top-to-bottom code — each step is observable, cancellable, and appears in
-- [Lifecycle — Init, Destroy, Middleware, Runtime](state/lifecycle.md) — How cells boot, shut down, and how to intercept actions globally.
-- [State Machines — Guards and Transitions](state/machines.md) — A state machine guards actions.
-- [Methods — Sync, Async, and Selectors](state/methods.md) — The default way to build aio cells.
+- [Lifecycle — Init, Destroy, Runtime](state/lifecycle.md) — How cells boot, shut down, and how to intercept actions globally.
+- [Methods — Sync, Async, and Selectors](state/methods.md) — The one way to build aio cells.
 - [Scheduling](state/scheduling.md) — aio has a built-in scheduler for timers, intervals, daily triggers, and cron
-- [Which Approach?](state/which-approach.md) — Pick the simplest style that fits your needs.
 
 ## UI — AIR renderer — components, signals, routing, forms
 
@@ -134,6 +129,7 @@
 - [Upgrade from v0.7 to v0.8](upgrade/from-v0.7-to-v0.8.md) — The function form with { A } / { E } context is removed from the default
 - [Upgrade from v0.8 to v0.9](upgrade/from-v0.8-to-v0.9.md) — All app.db calls must be awaited.
 - [Upgrade from v0.9 to v1.0.0-alpha](upgrade/from-v0.9-to-v1.0.0-alpha.md) — appId is no longer read from deno.json — it must be passed directly.
+- [Migrating to aio v2 (the perfect-aio restructure)](upgrade/to-v2.md) — This guide tracks every breaking change of the v2 restructure
 
 ## Design specs — decision records — background, not manuals
 

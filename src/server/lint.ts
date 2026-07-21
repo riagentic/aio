@@ -1,5 +1,6 @@
 // Startup linter — validates config and src/ before running
 // Extracted from aio.ts. Checks state, config, App.tsx, imports, dependencies.
+import { ESBUILD_SPEC } from "../build/esbuild-shared.ts";
 
 import { join } from "@std/path";
 import { log } from "../diagnostics/logger.ts";
@@ -205,7 +206,7 @@ export async function lint(
       // eagerly fetch the esbuild native binary just to reach this probe — it
       // resolves at runtime, the same way the transpiler loads it. Keeps `am`
       // (which imports aio.ts → lint.ts for VERSION) esbuild-free at install.
-      const esbuildPkg = ["npm:esbuild", "0.24.2"].join("@");
+      const esbuildPkg = ESBUILD_SPEC; // shared pin (build/esbuild-shared.ts)
       await import(esbuildPkg);
     } catch {
       r.warn.push(

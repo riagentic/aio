@@ -180,24 +180,14 @@ type AioUser = { id: string; role: string };
 
 ### Per-user action authorization
 
-Middleware and `beforeReduce` receive the `AioUser` from the WebSocket
-connection as an optional third parameter. Use this for per-user action
-authorization:
-
-```ts
-aio.middleware.create((action, state, next, user) => {
-  if (action.type.startsWith("admin:") && user?.role !== "admin") return null;
-  return next(action);
-});
-```
-
-Or via `beforeReduce`:
+`beforeReduce` receives the `AioUser` from the WebSocket connection as an
+optional third parameter. Use this for per-user action authorization:
 
 ```ts
 await aio.run({
   cells: [myCell],
   beforeReduce: (action, state, user?) => {
-    if (action.type === "Admin" && user?.role !== "admin") return null;
+    if (action.type.startsWith("admin:") && user?.role !== "admin") return null;
     return action;
   },
 });

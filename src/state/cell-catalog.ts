@@ -46,6 +46,28 @@ export function attachMeta(fn: unknown, raw: unknown): void {
   f.action = raw;
 }
 
+/** Build a prefixed catalog for ARGS-style callables (methods/generators):
+ *  payload is the positional `{ args }` envelope. Same shape guarantees as
+ *  {@linkcode buildCatalog} — `.type` constant + `.action` self-reference —
+ *  so the two payload styles can never drift apart again (complexity audit:
+ *  this loop existed hand-rolled in cell-methods-factory, minus `.action`). */
+export function buildArgsCatalog(
+  prefix: string,
+  keys: readonly string[],
+): Record<string, unknown> {
+  const catalog: Record<string, unknown> = {};
+  for (const key of keys) {
+    const label = `${prefix}:${key}`;
+    const fn = Object.assign(
+      (...args: unknown[]) => ({ type: label, payload: { args } }),
+      { type: label },
+    );
+    (fn as unknown as Record<string, unknown>).action = fn;
+    catalog[key] = fn;
+  }
+  return catalog;
+}
+
 /** Build a prefixed action/effect catalog from creator functions — maps keys to typed dispatchers. */
 export function buildCatalog(
   prefix: string,

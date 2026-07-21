@@ -3,7 +3,6 @@
 import { log } from "../diagnostics/logger.ts";
 import type { AioError } from "../diagnostics/error.ts";
 import { createAioError } from "../diagnostics/error.ts";
-import { cancelCellFlows } from "./flow.ts";
 import type { CellDef, Msg, ScopedApp } from "./cell-types.ts";
 import { tagSource } from "./cell-types.ts";
 import type { CellStatus, CircuitBreakerConfig } from "./cell-compose-types.ts";
@@ -138,7 +137,6 @@ export function buildRegistry(
       disabledCells.add(name);
       try {
         if (f) {
-          cancelCellFlows(f.__aio.id);
           if (f.__aio.onDestroy) {
             const scopedApp = makeScopedApp(f, app, reportError);
             f.__aio.onDestroy(scopedApp);
@@ -251,7 +249,6 @@ export function destroyAll(
 ): void {
   for (let i = cells.length - 1; i >= 0; i--) {
     const f = cells[i]!;
-    cancelCellFlows(f.__aio.id);
     if (f.__aio.onDestroy) {
       const scopedApp: ScopedApp & { _onError?: (err: AioError) => void } = {
         _onError: reportError,

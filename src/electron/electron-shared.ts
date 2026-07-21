@@ -46,14 +46,17 @@ export function tmplBoundsTracking(): string {
   win.on('close', () => saveBounds(win));`;
 }
 
-/** Local keyboard shortcuts (F5/Ctrl+R reload, F12 devtools, Ctrl+Shift+Del clear cache) */
+/** Local keyboard shortcuts (Ctrl+F5/Ctrl+R reload, F12 devtools,
+ *  Ctrl+Shift+Del clear cache). Plain F5 is deliberately NOT bound — it stays
+ *  free for aio apps' own custom shortcuts. */
 export function tmplKeyboardShortcuts(): string {
   return `  // Local keyboard shortcuts (only when window has focus)
   win.webContents.on('before-input-event', (event, input) => {
     if (input.type !== 'keyDown') return;
     const ctrl = input.control || input.meta;
-    // F5 / Ctrl+R / Ctrl+Shift+R — hard reload (bypasses cache)
-    if (input.key === 'F5' || (ctrl && input.key.toLowerCase() === 'r')) {
+    // Ctrl+F5 / Ctrl+R / Ctrl+Shift+R — hard reload (bypasses cache).
+    // Plain F5 is left to the app (custom in-app shortcuts).
+    if ((ctrl && input.key === 'F5') || (ctrl && input.key.toLowerCase() === 'r')) {
       event.preventDefault();
       win.webContents.reloadIgnoringCache();
     }

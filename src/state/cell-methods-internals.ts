@@ -1,6 +1,7 @@
 // cell-methods-internals.ts — machine, reducer, and executor builders for methods-based cells
 
 import { isScheduleEffect, type ScheduleEffect } from "./schedule.ts";
+import { trackCall } from "./method-cancel.ts";
 import { isOwnEffect, type OwnEffect } from "./own.ts";
 import type { AsyncMethod, Method, Mutation, SyncMethod } from "./cell-impl.ts";
 import {
@@ -127,15 +128,26 @@ export function buildMethodsReducer(
   syncMethods: Set<string>,
   asyncMethods: Set<string>,
   prefix: string,
-  explicitReduce:
-    | Record<string, (state: unknown, payload: unknown) => void>
-    | undefined,
+  // Foreign action type → SYNC method that reacts to it (listensTo object
+  // form, D1). Runs with the FOREIGN action's payload as the single arg.
+  foreignHandlers: Map<string, string> | undefined,
 ): CellReduceFn {
   return (
     state: unknown,
     action: Msg,
   ): ReturnType<CellReduceFn> => {
     const s = state as Record<string, unknown>;
+    // listensTo reaction — a foreign action with a mapped handler method.
+    const foreignKey = foreignHandlers?.get(action.type);
+    if (foreignKey) {
+      const handler = methods[foreignKey];
+      if (handler) {
+        return (handler as SyncMethod<Record<string, unknown>>)(
+          s,
+          action.payload,
+        ) as ReturnType<CellReduceFn>;
+      }
+    }
     const ownKey = actionTypeToKey.get(action.type);
     if (!ownKey) return;
 
@@ -212,16 +224,6 @@ export function buildMethodsReducer(
       }
       return;
     }
-
-    // Explicit action-style: call reduce handler with custom payload
-    if (explicitReduce) {
-      const h = explicitReduce[ownKey];
-      if (h) {
-        return h(s, (action as { payload: unknown }).payload) as
-          | (Msg | ScheduleEffect | OwnEffect)[]
-          | void;
-      }
-    }
   };
 }
 
@@ -252,17 +254,27 @@ export function buildMethodsExecutor(
       if (!method || !asyncMethods.has(_method)) return;
 
       const batcher = createBatcher(prefix, (a) => app.dispatch(a));
+      // Cancellation (perfect-aio D1): every async call gets an
+      // AbortController; cancelOn triggers abort it, the method observes it
+      // via `s.$signal`. Untracked on settle either way.
+      const controller = new AbortController();
+      const untrack = trackCall(prefix, _method, controller);
       const proxy = createLiveProxy(
         name,
         prefix,
         _method,
         () => app.getState() as Record<string, unknown>,
         batcher,
+        [],
+        new Map(),
+        { v: null },
+        controller.signal,
       );
       (method as AsyncMethod<Record<string, unknown>>)(
         proxy as Record<string, unknown>,
         ..._args,
       )
+        .finally(() => untrack())
         .then((value) => {
           // AIO-381/382: async methods can return schedule + own effects,
           // same as sync methods. Detection is conservative — only

@@ -5,7 +5,6 @@
 
 import type { ScheduleEffect } from "./schedule.ts";
 import type { OwnEffect } from "./own.ts";
-import type { FlowDef } from "./flow.ts";
 import type { CellEffect, CellMethods } from "./cell-impl.ts";
 import type { SyncConfig } from "../sync/types.ts";
 
@@ -220,14 +219,12 @@ export type CellAio<
   onInit?: (app: ScopedApp<unknown>, initState?: unknown) => void;
   /** Custom destroy handler */
   onDestroy?: (app: ScopedApp<unknown>) => void;
-  /** Generator-based flows */
-  flows?: Record<string, FlowDef>;
-  /** Map: trigger action key → flow name */
-  flowTriggers?: Map<string, string>;
   /** Sync/async method implementations */
   methods?: CellMethods<Record<string, unknown>>;
   syncMethods?: Set<string>;
   asyncMethods?: Set<string>;
+  /** cancelOn config — method → trigger actions (registered at compose time). */
+  cancelTriggers?: Record<string, (string | { type: string })[]>;
   /** Optional state validator — called after reduce, throw or return string to reject.
    *  `any` required: user provides (state: S) => ... but CellAio stores it unparameterized (contravariance). */
   // deno-lint-ignore no-explicit-any
