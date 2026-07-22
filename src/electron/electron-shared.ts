@@ -13,6 +13,29 @@ export function toSlug(s: string): string {
 
 // ── Reusable CJS template fragments (embedded in generated Electron main.cjs) ──
 
+/** Main-process crash guard. Without a listener, ANY uncaught exception in the
+ *  Electron main process pops the native "A JavaScript error occurred in the
+ *  main process" dialog — intrusive, uncopyable, and meaningless to end users.
+ *  Installing a handler suppresses that dialog; we log the error prominently to
+ *  stderr instead (visible in the dev console and app log). During quit a late
+ *  socket/window callback must never dialog or crash — it just exits clean.
+ *  Expects `app` to be in scope. Set `__aioQuitting = true` on window close. */
+export function tmplCrashGuard(): string {
+  return `
+let __aioQuitting = false;
+app.on('before-quit', () => { __aioQuitting = true; });
+app.on('will-quit', () => { __aioQuitting = true; });
+process.on('uncaughtException', (err) => {
+  const info = (err && err.stack) || String(err);
+  if (__aioQuitting) { console.error('[aio:electron] exception during quit (ignored): ' + info); return; }
+  console.error('[aio:electron] uncaught exception in main process: ' + info);
+  try { app.quit(); } catch { process.exit(1); }
+});
+process.on('unhandledRejection', (reason) => {
+  console.error('[aio:electron] unhandled promise rejection in main process: ' + ((reason && reason.stack) || String(reason)));
+});`;
+}
+
 /** Window bounds persistence: stateFile, loadBounds, saveBounds.
  *  @param async Use async fs/promises variant (UDS) vs sync writeFileSync (standard) */
 export function tmplBounds(async = false): string {

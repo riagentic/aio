@@ -4,6 +4,7 @@ import {
   type AioMeta,
   tmplBounds,
   tmplBoundsTracking,
+  tmplCrashGuard,
   tmplKeyboardShortcuts,
   tmplWillNavigate,
   toSlug,
@@ -20,6 +21,7 @@ const path = require('path');
 const fs = require('fs');
 Menu.setApplicationMenu(null);
 app.name = ${JSON.stringify(slug)};
+${tmplCrashGuard()}
 
 // ── Window state persistence ──
 ${tmplBounds()}

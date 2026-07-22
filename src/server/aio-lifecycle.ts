@@ -319,7 +319,7 @@ export function startLifecycle<S, A>(deps: LifecycleDeps<S, A>): void {
             "Electron not installed and auto-install failed — falling back to the system browser",
           );
           log.error(
-            `install manually with: deno install --allow-scripts=npm:electron (then re-run) — serving at ${electronUrl}`,
+            `install manually with: deno install --allow-scripts=npm:electron npm:electron (then re-run) — serving at ${electronUrl}`,
           );
           const cmd = Deno.build.os === "darwin"
             ? "open"

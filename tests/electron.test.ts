@@ -303,3 +303,38 @@ Deno.test("autoInstallElectron: reports success, failure, and throw — always l
   assertEquals(infos.length, 3);
   assertEquals(infos[0]!.includes("--allow-scripts=npm:electron"), true);
 });
+
+// ── Main-process crash guard (no native error dialog on close) ──────
+
+Deno.test("electron: all templates install a main-process crash guard", () => {
+  // Without an uncaughtException listener, ANY stray exception in the Electron
+  // main process pops the native "A JavaScript error occurred" dialog — the
+  // "javascript error popup on close" users report. Every template must install
+  // the guard so the dialog can never appear.
+  const scripts = [
+    electronMainScript("http://localhost:3000"),
+    electronMainScriptUDS("http://localhost:3000", "/tmp/t.sock", {}),
+    electronClientScript(),
+  ];
+  for (const s of scripts) {
+    assertStringIncludes(s, "process.on('uncaughtException'");
+    assertStringIncludes(s, "process.on('unhandledRejection'");
+  }
+});
+
+Deno.test("electron: generated main.cjs is syntactically valid JS", () => {
+  // new Function(body) PARSES the whole script (regex literals included) without
+  // executing it — catches a malformed regex range or any syntax breakage that
+  // would otherwise only surface when Electron loads the generated main.cjs.
+  const scripts = [
+    electronMainScript("http://localhost:3000", { title: "App" }),
+    electronMainScriptUDS("http://localhost:3000", "/tmp/t.sock", {
+      title: "App",
+    }),
+    electronClientScript(),
+  ];
+  for (const s of scripts) {
+    // Throws SyntaxError on any parse error (e.g. an out-of-order regex range).
+    new Function(s);
+  }
+});

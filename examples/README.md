@@ -13,6 +13,15 @@ runtime-tested (`tests/examples.test.ts`), UI-tested
 | `counter/` | _(default)_       | Smallest full app — one cell, one component |
 | `todo/`    | `--template=todo` | Todo list — list state, `useLocal` input    |
 
+## Showcase apps
+
+Real applications built on aio (not templates — study them, don't scaffold from
+them):
+
+| Dir     | What                                                              |
+| ------- | ---------------------------------------------------------------- |
+| `aui/`  | The aio app manager — a visual GUI for discovering, inspecting, and controlling every aio app on your machine (the counterpart to the `am` CLI). See [`aui/README.md`](aui/README.md). |
+
 ## Target build smoke fixtures
 
 `examples/targets/<dir>` — minimal per-target apps kept purely as **CI

@@ -111,7 +111,7 @@ export type AioConfig<S, A, E> = {
   beforeReduce?: (action: A, state: S, user?: AioUser) => A | null; // intercept actions before reduce — return null to drop
   persistKey?: string; // KV key prefix (default: "state")
   persistDebounceMs?: number; // ms between KV writes (default: 100)
-  persistMode?: "single" | "multi"; // 'single' (default): one blob ≤65KB. 'multi': one KV key per top-level state key — no 65KB limit
+  persistMode?: "single" | "multi"; // 'single' (default): one JSON blob. 'multi': one SQLite row per top-level cell — rewrites only changed cells. No size cap either way (SQLite backend).
   users?: Record<string, AioUser>; // static token map — token is key, user is value
   /** --expose auth. Default (omitted/`false`) = **no framework auth** (the
    *  app does its own, or is open on a trusted LAN). `"secret"` = fixed key.
@@ -206,6 +206,7 @@ export type AioConfig<S, A, E> = {
   _cellFilterFields?: Map<string, PatchFilterFields>;
   /** Internal: per-cell declarative network-access rules (AUTH-1) */
   _cellAccess?: Map<string, import("../state/cell-types.ts").CellAccess>;
+  _cellMethods?: Record<string, string[]>;
 };
 
 /** Handle returned by aio.run() — dispatch actions, read state, or shut down */
