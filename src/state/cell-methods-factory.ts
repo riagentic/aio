@@ -238,6 +238,7 @@ export function createCellFromMethods<
     // Dropping these silently disables persist/ui filters, validation and
     // migrations for methods-style cells.
     validate: config.validate,
+    access: config.access,
     persist: normalizePersistFilter(config.persist),
     ui: normalizeUiFilter(config.ui),
     uiForUser: extractForUser(config.ui),

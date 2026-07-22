@@ -115,11 +115,15 @@ export function buildAppObject<S, A>(refs: {
   getServer: () => ServerHandle;
   udsBroadcastFull: () => void;
   shutdown: () => Promise<void>;
+  sessionStore?: import("./sessions.ts").SessionStore | null;
+  userStore?: import("./auth-users.ts").UserStore | null;
 }): AioApp<S, A> {
   return {
     dispatch: refs.dispatch,
     getState: refs.getState,
     port: refs.port,
+    sessions: refs.sessionStore ?? undefined,
+    auth: refs.userStore ?? undefined,
     db: (refs.asyncDb ?? undefined) as AioApp<S, A>["db"],
     snapshot: () => JSON.stringify(refs.getState()),
     loadSnapshot: (json: string) => {

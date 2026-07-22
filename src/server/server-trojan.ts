@@ -1,5 +1,8 @@
 // Trojan admin API — extracted from server.ts serveStatic()
-// Control REST API at /__aio/trojan/* (localhost-only, CSRF-protected, rate-limited)
+// Control REST API at /__aio/trojan/* — DEV-ONLY (never mounted in prod; see
+// the gate in server-static.ts). In dev it is localhost-bound unless --expose,
+// in which case it sits behind the same app auth as every other route.
+// CSRF-protected (X-AIO header on POST), rate-limited.
 import { enc } from "../protocol/envelope.ts";
 import type { AioUser } from "./aio.ts";
 import { _isFrameworkInternalActionType } from "./server-ws.ts";
@@ -109,6 +112,11 @@ export function handleTrojan(
       headers: { "Content-Type": "application/json" },
     });
 
+  // Defense-in-depth: the trojan is dev-only. server-static gates it off in
+  // prod (single source of truth); this backstop refuses even if it is ever
+  // reached directly, so no per-route prod check is load-bearing.
+  if (deps.prod) return err("trojan is disabled in production", 404);
+
   // Rate limiting — 100 requests/sec across all trojan endpoints
   _trojanReqCount++;
   if (!_trojanResetTimer) {
@@ -156,7 +164,7 @@ function handleGet(
   err: (m: string, s?: number) => Response,
   sendToClient: (idx: number, msg: string) => Promise<Response>,
 ): Response | Promise<Response> {
-  const { trojan, prod } = deps;
+  const { trojan } = deps;
 
   if (route === "state") return json(trojan.getState());
 
@@ -190,7 +198,7 @@ function handleGet(
     return json([...wsClients, ...udsClients]);
   }
 
-  if (route.startsWith("client/") && !prod) {
+  if (route.startsWith("client/")) {
     const idx = Number(route.slice(7));
     if (!Number.isInteger(idx) || idx < 0) {
       return err("invalid client index", 400);
@@ -198,7 +206,7 @@ function handleGet(
     return sendToClient(idx, enc("get-state"));
   }
 
-  if (route.startsWith("surface/") && !prod) {
+  if (route.startsWith("surface/")) {
     // Headless: render the UI on the server against live cell state — no
     // client required (machine M2: `--client=server-only` / CI).
     if (route === "surface/server") {
@@ -217,14 +225,12 @@ function handleGet(
   }
 
   if (route === "history") {
-    if (prod) return err("dev-only endpoint", 403);
     return json(
       trojan.getTTHistory?.() ?? { entries: [], index: 0, paused: false },
     );
   }
 
   if (route === "errors") {
-    if (prod) return err("dev-only endpoint", 403);
     return json({ errors: deps.getRecentErrors() });
   }
 
@@ -281,7 +287,7 @@ async function handlePost(
     return err("Missing X-AIO header", 403);
   }
   deps.debug(`[trojan] POST ${route}`);
-  const { trojan, prod } = deps;
+  const { trojan } = deps;
 
   if (route === "dispatch") {
     try {
@@ -305,7 +311,11 @@ async function handlePost(
       ) {
         return err("invalid payload — must be a plain object");
       }
+      // Strip client-set identity provenance. The field dispatch actually
+      // consumes is `_user` (not `user`) — deleting the wrong key left the
+      // spoof open. Drop both to be safe; the server owns the real identity.
       delete action.user;
+      delete (action as Record<string, unknown>)._user;
       deps.dispatch(action, undefined);
       return json({ ok: true });
     } catch {
@@ -313,7 +323,7 @@ async function handlePost(
     }
   }
 
-  if (route.startsWith("trigger/") && !prod) {
+  if (route.startsWith("trigger/")) {
     const idx = Number(route.slice(8));
     if (!Number.isInteger(idx) || idx < 0) {
       return err("invalid client index", 400);
@@ -352,7 +362,6 @@ async function handlePost(
   }
 
   if (route === "tt") {
-    if (prod) return err("dev-only endpoint", 403);
     if (!deps.onTTCommand) return err("time-travel not active", 501);
     try {
       const body = await req.text();
@@ -388,19 +397,26 @@ async function handlePost(
           403,
         );
       }
-      // Strip single-quoted string literals before the keyword scan so a
-      // value like 'DROP TABLE instructions' doesn't trip a false positive.
-      // '' inside a literal is an escaped quote — collapse first, then mask.
-      const withoutLiterals = query.replace(/'(?:[^']|'')*'/g, "''");
-      // Multi-statement guard: check for ';' AFTER literal-stripping so a
-      // semicolon inside a string literal (e.g. WHERE name='a;b') is not
-      // falsely rejected. The previous pre-strip check ran on raw literals.
-      // SQLite's prepare() only executes one statement anyway, but this is
-      // defense-in-depth against statement chaining.
-      if (withoutLiterals.includes(";")) {
+      // Build a scan copy for the guards. Order matters: strip COMMENTS FIRST
+      // (line `-- …`, block `/* … */`), THEN mask string literals. Doing it the
+      // other way let an unbalanced quote inside a comment make the literal-mask
+      // swallow a following `;DROP…` (the quote-run spanned the newline). This
+      // copy is only for the guards; the real query still runs verbatim, so
+      // over-stripping can at worst cause a conservative rejection, never a
+      // bypass. (Guards are defense-in-depth over SQLite's single-statement
+      // prepare + the SELECT-only allowlist.)
+      const scrubbed = query
+        .replace(/--[^\n]*/g, "")
+        .replace(/\/\*[\s\S]*?\*\//g, "")
+        .replace(/'(?:[^']|'')*'/g, "''");
+      // Multi-statement guard: check for ';' AFTER literal+comment stripping so
+      // a semicolon inside a string literal (WHERE name='a;b') isn't falsely
+      // rejected while a chained ';DROP…' can't hide. SQLite's prepare() runs
+      // only one statement anyway; this is defense-in-depth.
+      if (scrubbed.includes(";")) {
         return err("multi-statement queries not allowed", 403);
       }
-      const upper = withoutLiterals.toUpperCase();
+      const upper = scrubbed.toUpperCase();
       if (
         /\b(INSERT|UPDATE|DELETE|DROP|ALTER|CREATE|ATTACH|DETACH|LOAD_EXTENSION|REINDEX|VACUUM|REPLACE|PRAGMA|BEGIN|COMMIT|ROLLBACK|SAVEPOINT|RELEASE|MERGE)\b/
           .test(upper)
@@ -412,10 +428,13 @@ async function handlePost(
       }
       // Audit F-9: enforce row + byte caps so a wide/unbounded SELECT cannot
       // block the SQLite worker or OOM the server.
+      // `hasLimit` is scanned on the comment-stripped copy so a LIMIT hidden
+      // in a comment can't suppress the cap. The LIMIT is appended on a FRESH
+      // line so a trailing `-- comment` in the raw query can't swallow it.
       const hasLimit = /\bLIMIT\b/.test(upper);
       const effectiveQuery = hasLimit
         ? query
-        : `${query.trimEnd()} LIMIT ${TROJAN_SQL_DEFAULT_LIMIT}`;
+        : `${query.trimEnd()}\nLIMIT ${TROJAN_SQL_DEFAULT_LIMIT}`;
       const rows = await trojan.sqlQuery(effectiveQuery);
       const serialized = JSON.stringify(rows, null, 2);
       if (serialized.length > TROJAN_SQL_MAX_RESULT_BYTES) {

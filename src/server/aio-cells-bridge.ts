@@ -117,6 +117,8 @@ export function buildLegacyConfig(
     client: fc.client,
     users: fc.users,
     resolveUser: fc.resolveUser,
+    sessions: fc.sessions,
+    auth: fc.auth,
     key: fc.key,
     db: fc.db,
     perfCheck: fc.perfCheck,
@@ -219,6 +221,12 @@ export function buildLegacyConfig(
     >["_getDBState"],
     _cellPatchStrategies: cellPatchStrategies,
     _cellFilterFields: cellFilterFieldsMap,
+    // AUTH-1: cell → declarative network-access rule (absent = open).
+    _cellAccess: new Map(
+      composed.cells
+        .filter((c) => c.__aio.access !== undefined)
+        .map((c) => [c.__aio.id, c.__aio.access!]),
+    ),
     _onScheduleReady: (cancelByPrefix) =>
       composed.registry.setOnDisable(cancelByPrefix),
     _onReportOptsReady: (opts) => {

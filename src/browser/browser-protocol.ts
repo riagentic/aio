@@ -360,12 +360,22 @@ export function ensureConnected(): void {
   _installReadOnlyHint();
   // Sync cells route method calls through the CRDT engine (HLC op + offline
   // queue) instead of the plain action path; everything else is unchanged.
-  // The engine boots lazily below — early calls fall through to plain send,
-  // which the server also accepts (normal dispatch).
+  // The engine boots lazily (dynamic import) below. A sync-cell method called
+  // in that boot window is BUFFERED — never leaked to a plain send, which would
+  // skip HLC stamping + the offline queue and silently diverge the op-log.
   const plainSend = _clientSend ?? undefined;
   const send = plainSend
     ? (action: { type: string; payload?: unknown }) => {
-      if (_syncRoute && _syncRoute(action)) return;
+      if (_syncRoute) {
+        if (_syncRoute(action)) return;
+        plainSend(action);
+        return;
+      }
+      // Engine not ready yet: hold sync-cell actions until it boots.
+      if (_isSyncCellAction(action)) {
+        _syncPending.push(action);
+        return;
+      }
       plainSend(action);
     }
     : undefined;
@@ -377,22 +387,75 @@ export function ensureConnected(): void {
 // ── Sync engine wiring (lazy — only when a registered cell has sync) ──
 let _syncRoute: ((a: { type: string; payload?: unknown }) => boolean) | null =
   null;
-function _initSyncIfNeeded(): void {
-  let hasSync = false;
-  for (const def of getRegisteredCells().values()) {
-    if (def.__aio.syncConfig) {
-      hasSync = true;
-      break;
-    }
+/** Cell ids that route through the CRDT engine — known SYNCHRONOUSLY (before
+ *  the engine's async import resolves) so the send wrapper can buffer their
+ *  actions during the boot window instead of racing the import. */
+let _syncCellIds: Set<string> | null = null;
+/** Sync-cell actions dispatched before the engine finished booting; replayed
+ *  through the engine once ready (or as plain sends if boot fails). */
+const _syncPending: Array<{ type: string; payload?: unknown }> = [];
+
+/** True when `action` targets a sync cell's real (non-framework) method — the
+ *  exact set `handleSyncLocalAction` will route, so buffering matches routing.
+ *  `cell:__method` framework-internal calls stay on the plain path. */
+function _isSyncCellAction(action: { type: string }): boolean {
+  if (!_syncCellIds) return false;
+  const i = action.type.indexOf(":");
+  if (i <= 0 || action.type.startsWith("__", i + 1)) return false;
+  return _syncCellIds.has(action.type.slice(0, i));
+}
+
+/** Drain the boot-window buffer in dispatch order. With a route, real sync
+ *  methods become ops; without one (boot failed / no engine) everything falls
+ *  back to a plain send so no queued action is ever dropped. */
+function _flushSyncPending(
+  route: ((a: { type: string; payload?: unknown }) => boolean) | null,
+): void {
+  const pending = _syncPending.splice(0);
+  for (const a of pending) {
+    if (route && route(a)) continue;
+    _clientSend?.(a);
   }
-  if (!hasSync) return;
+}
+
+/** The engine loader — the real dynamic import, injectable so a test can hold
+ *  the boot open and prove the buffer window deterministically. */
+let _syncLoader: () => Promise<typeof import("./browser-sync.ts")> = () =>
+  import("./browser-sync.ts");
+/** Test seam: override (or reset with null) the sync-engine loader. */
+export function _setSyncLoaderForTest(
+  fn: (() => Promise<typeof import("./browser-sync.ts")>) | null,
+): void {
+  _syncLoader = fn ?? (() => import("./browser-sync.ts"));
+}
+
+function _initSyncIfNeeded(): void {
+  const ids = new Set<string>();
+  for (const def of getRegisteredCells().values()) {
+    if (def.__aio.syncConfig) ids.add(def.__aio.id);
+  }
+  if (ids.size === 0) return;
+  // Known synchronously so the send wrapper buffers from the FIRST dispatch —
+  // this is what closes the boot-window race.
+  _syncCellIds = ids;
   // Dynamic import keeps the engine out of apps that don't use sync.
-  import("./browser-sync.ts").then((mod) => {
+  _syncLoader().then((mod) => {
     const engine = mod.initBrowserSync((raw) => _sendRawViaTransport(raw));
-    if (!engine) return;
+    if (!engine) {
+      // No engine after all — don't strand buffered actions.
+      _syncCellIds = null;
+      _flushSyncPending(null);
+      return;
+    }
     _syncRoute = mod.handleSyncLocalAction;
     _setSyncWiring(mod.handleSyncMessage, mod.setSyncOnline);
-  }).catch((e) => console.warn(`[aio:sync] engine init failed: ${e}`));
+    _flushSyncPending(_syncRoute);
+  }).catch((e) => {
+    console.warn(`[aio:sync] engine init failed: ${e}`);
+    // Boot failed — flush as plain sends so nothing is lost, then stop buffering.
+    _syncCellIds = null;
+    _flushSyncPending(null);
+  });
 }
 
 // Late-bound transport hooks — browser-air-transport registers these so this
@@ -414,6 +477,9 @@ export function _registerSyncTransport(
 }
 export function _resetEnsured(): void {
   _ensured = false;
+  _syncRoute = null;
+  _syncCellIds = null;
+  _syncPending.length = 0;
 }
 
 // ── Visibility guard ────────────────────────────────────────────────

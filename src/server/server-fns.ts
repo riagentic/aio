@@ -16,15 +16,31 @@
 // browser it resolves a WS proxy (cid-correlated request/response, 30s
 // fail-loud timeout). The hop is VISIBLE in code — the one seam.
 
+import type { AioUser } from "./aio-types.ts";
+
 // deno-lint-ignore no-explicit-any
 type FnMap = Record<string, (...args: any[]) => any>;
 
+/** Access rule for NETWORK invocations of a namespace:
+ *  `true` = any authenticated user, `"role"` = that exact role,
+ *  predicate = custom check. Absent = connection-level auth only (as before).
+ *  Direct server-side calls (via serverFn()/the returned map) never pass
+ *  through this gate — the server trusts its own code. */
+export type ServerFnAccess = boolean | string | ((user?: AioUser) => boolean);
+
 const _registry = new Map<string, FnMap>();
+const _access = new Map<string, ServerFnAccess>();
 
 /** Register a namespace of server functions (call in a *.server.ts file —
  *  the browser bundle must never contain the bodies). Returns the map for
- *  direct server-side use. Duplicate namespaces fail loudly. */
-export function serverFns<T extends FnMap>(ns: string, fns: T): T {
+ *  direct server-side use. Duplicate namespaces fail loudly.
+ *  `opts.access` gates network calls; inside a fn, `serverUser()` (from
+ *  "aio") answers who is calling. */
+export function serverFns<T extends FnMap>(
+  ns: string,
+  fns: T,
+  opts?: { access?: ServerFnAccess },
+): T {
   if (_registry.has(ns)) {
     throw new Error(
       `serverFns("${ns}") already registered — namespaces are unique per ` +
@@ -32,7 +48,18 @@ export function serverFns<T extends FnMap>(ns: string, fns: T): T {
     );
   }
   _registry.set(ns, fns);
+  if (opts?.access !== undefined) _access.set(ns, opts.access);
   return fns;
+}
+
+/** Evaluate a namespace's access rule for a network caller. */
+export function serverFnAllowed(ns: string, user?: AioUser): boolean {
+  const rule = _access.get(ns);
+  if (rule === undefined) return true; // no rule — connection auth only
+  if (rule === true) return user !== undefined;
+  if (typeof rule === "string") return user?.role === rule;
+  if (typeof rule === "function") return rule(user);
+  return false; // rule === false: namespace is server-side only
 }
 
 /** Resolve a namespace to its typed callable map. Server-side impl: returns
@@ -44,7 +71,11 @@ export function serverFn<T extends FnMap>(ns: string): T {
       if (typeof prop !== "string") return undefined;
       return (...args: unknown[]) => {
         const fns = _registry.get(ns);
-        if (!fns || typeof fns[prop] !== "function") {
+        // Own-property only — never resolve inherited Object.prototype members
+        // (constructor, valueOf, hasOwnProperty…) as if they were registered fns.
+        if (
+          !fns || !Object.hasOwn(fns, prop) || typeof fns[prop] !== "function"
+        ) {
           return Promise.reject(
             new Error(
               `serverFn("${ns}").${prop} — namespace or function not ` +
@@ -64,14 +95,32 @@ export function serverFn<T extends FnMap>(ns: string): T {
 }
 
 /** Server WS route: run a client-requested fn, reply with the outcome.
- *  Errors carry the server's message — fail loud on the client, never hang. */
+ *  Errors carry the server's message — fail loud on the client, never hang.
+ *  `user` is the connection's resolved identity — checked against the
+ *  namespace's access rule; the caller wraps this in runWithUser so
+ *  serverUser() works inside the fn body. */
 export async function invokeServerFn(
   ns: string,
   name: string,
   args: unknown[],
+  user?: AioUser,
 ): Promise<{ ok: true; value: unknown } | { ok: false; error: string }> {
+  if (!serverFnAllowed(ns, user)) {
+    console.warn(
+      `[aio] auth: serverFn "${ns}.${name}" denied for ${
+        user ? `user=${user.id} role=${user.role}` : "anonymous client"
+      }`,
+    );
+    return {
+      ok: false,
+      error: `serverFn "${ns}.${name}" — access denied`,
+    };
+  }
   const fns = _registry.get(ns);
-  const fn = fns?.[name];
+  // Own-property only — a client-supplied `name` must not reach inherited
+  // Object.prototype builtins (constructor, valueOf, …); those are not
+  // registered server functions and must fail loud like any unknown name.
+  const fn = fns && Object.hasOwn(fns, name) ? fns[name] : undefined;
   if (typeof fn !== "function") {
     return {
       ok: false,
@@ -89,4 +138,5 @@ export async function invokeServerFn(
 /** Test isolation. */
 export function _resetServerFns(): void {
   _registry.clear();
+  _access.clear();
 }

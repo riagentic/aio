@@ -200,6 +200,242 @@ await aio.run({
 The `user` parameter is `undefined` for server-side dispatches (effects,
 schedules, etc.).
 
+### Declarative cell access (`access`)
+
+Instead of string-matching action types in `beforeReduce`, declare who may act
+on a cell over the network directly on the cell:
+
+```ts
+cell("orders", {
+  state: { items: [] },
+  access: true, // any authenticated user ("admin" = that role; predicate = custom)
+  methods: {/* … */},
+});
+
+cell("billing", {
+  state: { invoices: [] },
+  // predicate sees (user, method): read for everyone logged in, writes admin-only
+  access: (user, method) => method.startsWith("get") || user?.role === "admin",
+  methods: {/* … */},
+});
+```
+
+A denied network action is dropped before dispatch and audit-logged
+(`[aio] auth: …`). Server-side code (effects, schedules, your own calls) always
+bypasses `access` — the server trusts its own code.
+
+### Who is calling? (`serverUser`)
+
+Anywhere on the server — cell methods, serverFns, effects — `serverUser()`
+returns the authenticated caller of the current execution (survives `await`):
+
+```ts
+import { cell, serverUser } from "aio";
+
+cell("cart", {
+  state: { items: {} as Record<string, string[]> },
+  access: true,
+  methods: {
+    addItem(s: { items: Record<string, string[]> }, sku: string) {
+      const me = serverUser()!; // access:true guarantees a user
+      (s.items[me.id] ??= []).push(sku);
+    },
+  },
+});
+```
+
+`undefined` means anonymous client (public/shared-key mode) or server-origin
+execution.
+
+### serverFn access
+
+Server functions accept the same rule vocabulary; inside the body,
+`serverUser()` identifies the caller:
+
+```ts
+export const api = serverFns("api", {
+  refund: async (orderId: string) => {/* … */},
+}, { access: "admin" });
+```
+
+### Sessions (`sessions: true`)
+
+Static tokens never expire and can't be revoked. The built-in session store
+(SQLite in the data dir, tokens hashed at rest) adds the missing lifecycle:
+
+```ts
+const app = await aio.run({ cells: [/* … */], sessions: true }); // 30-day TTL
+
+// login (e.g. in a serverFn after verifying credentials):
+const token = app.sessions!.issue({ id: "alice", role: "user" });
+// the client then connects with ?token= / Authorization: Bearer
+
+app.sessions!.refresh(token); // sliding expiry
+app.sessions!.revoke(token); // logout — cuts access immediately
+app.sessions!.revokeUser("alice"); // kick every session (breach response)
+```
+
+Session tokens resolve ahead of `users`/`resolveUser` and compose with both.
+`sessions: { ttlMs: 3_600_000 }` overrides the default TTL.
+
+### Built-in password auth (`auth: true`)
+
+The full login system — no external identity provider required:
+
+```ts
+const app = await aio.run({ cells: [/* … */], auth: true });
+// endpoints now live:
+//   POST /__aio/auth/signup { id, password } → 201 { user, token } (+cookie)
+//   POST /__aio/auth/login  { id, password } → 200 { user, token } (+cookie)
+//   POST /__aio/auth/logout                  → revokes + clears cookie
+//   GET  /__aio/auth/me                      → { user | null }
+```
+
+- Passwords: PBKDF2-HMAC-SHA-256 (WebCrypto, OWASP iteration count), per-user
+  salt, timing-safe verify, no account enumeration (unknown ids burn a real
+  hash). 8-character NIST minimum enforced.
+- Sessions: issued from the AUTH-1 store on signup/login; the token doubles as
+  an `HttpOnly; SameSite=Strict` cookie (+ `Secure` under TLS) so browsers
+  authenticate the WS handshake without tokens in URLs.
+- CSRF: SameSite=Strict cookie + an Origin same-host check on every POST.
+- The app **shell is public** in auth mode (a browser must load the login UI
+  before it has a session); `/ws` and `/__aio/snapshot` stay gated — state never
+  flows unauthenticated.
+- `auth: { signup: false }` disables open registration — seed accounts with
+  `app.auth.create("root", password, "admin")`.
+- Failed logins burn the per-IP budget below.
+
+Client side, the typed wrapper drives the same endpoints:
+
+```ts
+import { authClient } from "aio"; // same-origin; createAuthClient(base) for CLI
+
+const r = await authClient.login("alice", "password123");
+if ("totpRequired" in r) await authClient.totp(r.pending, "123456"); // 2FA step
+await authClient.logout();
+```
+
+### Drop-in login UI (`<SignIn/>` + `useUser()`)
+
+The browser side is two imports — no auth UI to build:
+
+```tsx
+// snippet: fragment
+import { SignIn, signOut, useUser } from "aio/air";
+
+export default function App() {
+  const user = useUser(); // reactive: undefined = resolving, null = anonymous
+  if (user === undefined) return <p>…</p>;
+  if (user === null) return <SignIn />; // login + signup + TOTP step built in
+  return (
+    <div>
+      Hello {user.id}! <button type="button" onClick={signOut}>Sign out</button>
+    </div>
+  );
+}
+```
+
+`<SignIn/>` handles login, signup (with optional email), friendly error text,
+and the TOTP second-factor step; on success the page reloads and the session
+cookie authenticates the WebSocket. It also **adapts to the server config
+automatically** (via `/me` features): the signup toggle disappears when
+`signup: false`, and a "Continue with SSO" button appears when OIDC is
+configured — carrying the current page as the post-login return path. Props:
+`title`, `signup: false`, `sso: false`, `ssoLabel`, `email: false`, `style`.
+
+### Email verification & password reset
+
+Plug in any mail transport — the framework does the tokens:
+
+```ts
+await aio.run({
+  cells: [/* … */],
+  auth: {
+    requireVerified: true, // no login until the email is proven
+    sendMail: ({ to, subject, text }) => sendWithSesOrSmtp(to, subject, text),
+  },
+});
+```
+
+- Signup (with `requireVerified`) mails a 24h one-shot verification token and
+  issues **no session** until `POST /__aio/auth/verify { token }` proves the
+  mailbox.
+- `POST /__aio/auth/reset/request { id }` **always returns 200** (no account
+  enumeration) and mails a 15-minute one-shot reset token when the account has
+  an email. `POST /__aio/auth/reset { token, password }` sets the new password
+  and **revokes every session**.
+- `POST /__aio/auth/password { old, new }` (authenticated) rotates the password
+  and all other sessions.
+- Tokens are stored hashed and are strictly one-shot.
+
+### TOTP two-factor (RFC 6238)
+
+Any authenticator app (Google Authenticator, Aegis, 1Password…):
+
+```ts
+const { secret, uri } = await authClient.totpSetup(); // uri → QR code
+await authClient.totpEnable("123456"); // code from the app confirms enrollment
+```
+
+After enrollment, `login` returns `{ totpRequired, pending }` — complete with
+`authClient.totp(pending, code)` (5-minute window, one attempt per pending
+token; a wrong code sends the user back to login). Disable requires the
+password. `auth: { totp: false }` turns enrollment off app-wide.
+
+### OIDC / social login (authorization code + PKCE)
+
+Config-only — discovery, PKCE, and RS256 JWKS verification are built in:
+
+```ts
+await aio.run({
+  cells: [/* … */],
+  auth: {
+    oidc: {
+      issuer: "https://accounts.google.com",
+      clientId: Deno.env.get("OIDC_CLIENT_ID")!,
+      clientSecret: Deno.env.get("OIDC_CLIENT_SECRET"), // omit for pure PKCE
+      role: (claims) => claims.email === "boss@corp.com" ? "admin" : "user",
+    },
+  },
+});
+// Point a "Continue with …" button at /__aio/auth/oidc/start — done.
+```
+
+The callback verifies the ID token (issuer, audience, expiry, signature via the
+provider's JWKS), upserts the user by `sub` (existing users keep their
+server-assigned role), issues a session cookie, and redirects to `/`. The state
+parameter is a stored one-shot token carrying the PKCE verifier — replay is dead
+on arrival.
+
+### Account lockout
+
+Independent of the per-IP budget: **5 consecutive wrong passwords lock the
+account for 15 minutes** (login answers `423`), and even the correct password is
+refused while locked. A successful login resets the counter. Timing is uniform
+across unknown/locked/wrong paths — one PBKDF2 each, no enumeration.
+
+### Operator console (`am auth`)
+
+Direct auth.db access — no running server needed. This is how you seed the first
+admin, or get back in when you're locked out:
+
+```sh
+am auth users                      # list accounts (role, email, 2FA, locked)
+am auth create root --role=admin   # no --password → generates + prints one
+am auth passwd alice               # reset a password (also clears lockout)
+am auth unlock alice               # clear a lockout
+am auth role alice editor
+am auth revoke alice               # kill every session of a user
+am auth verify alice               # mark email verified by hand
+am auth rm alice
+```
+
+### Brute-force protection
+
+Failed auth attempts are budgeted per client IP (10 per 5-minute sliding window
+→ `429`), and every failure is audit-logged. Successful requests never consume
+budget.
+
 ## Security model
 
 A summary of aio's security posture and known limitations:

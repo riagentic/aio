@@ -24,6 +24,8 @@ import {
   resolveTransport,
 } from "./paths.ts";
 import type { Log } from "../diagnostics/logger.ts";
+import { cellAccessAllowed } from "./server-auth.ts";
+import type { CellAccess } from "../state/cell-types.ts";
 
 /** Inputs needed for server & transport setup */
 export interface ServerSetupDeps<S, A> {
@@ -39,6 +41,11 @@ export interface ServerSetupDeps<S, A> {
   resolveUser:
     | ((tok: string) => AioUser | null | Promise<AioUser | null>)
     | undefined;
+  /** AUTH-1: session-token resolver — consulted before users/resolveUser. */
+  sessionResolver?: (tok: string) => AioUser | null;
+  /** AUTH-2: login-flow deps (users/sessions stores + policy) — the TLS-aware
+   *  `secure` cookie flag is added here, where the cert is resolved. */
+  authFlows?: Omit<import("./auth-flows.ts").AuthFlows, "secure">;
   cliCert?: string;
   cliKey?: string;
   cliTransport?: "uds" | "ws" | "auto";
@@ -65,6 +72,7 @@ export interface ServerSetupDeps<S, A> {
     syncIntervalMs?: number;
     _cellPatchStrategies?: Map<string, CellPatchStrategy>;
     _cellFilterFields?: Map<string, PatchFilterFields>;
+    _cellAccess?: Map<string, CellAccess>;
     onConnect?: (user?: AioUser) => void;
     onDisconnect?: (user?: AioUser) => void;
     libraryMode?: boolean;
@@ -127,6 +135,8 @@ export async function setupTransport<S, A>(
     token,
     users,
     resolveUser,
+    sessionResolver,
+    authFlows,
     cliCert,
     cliKey,
     cliTransport,
@@ -185,6 +195,20 @@ export async function setupTransport<S, A>(
 
   // Prod + UDS + electron: skip HTTP server entirely (zero TCP ports — all via UDS+IPC)
   const skipHttp = prod && transport === "uds" && useElectron && !expose;
+  // Doctrine: no silent dev/prod divergence. Custom `routes` are served by the
+  // HTTP server; skipping it in prod would let a webhook/callback endpoint work
+  // all through development and then silently connection-refuse in production.
+  // Refuse loudly at boot with the fix instead of dropping them unseen.
+  if (skipHttp && config.routes && Object.keys(config.routes).length > 0) {
+    throw new Error(
+      `[aio] ${Object.keys(config.routes).length} custom HTTP route(s) are ` +
+        `configured, but in prod + electron + UDS the app runs with NO TCP ` +
+        `HTTP server (zero ports) — they cannot be served and would silently ` +
+        `404 in production while working in dev. Serve them another way: set ` +
+        `client:"ws" (or "server-only"), pass --expose, or move the endpoint ` +
+        `into a serverFn.`,
+    );
+  }
   const server: ServerHandle = skipHttp
     ? {
       broadcast: () => {},
@@ -203,6 +227,35 @@ export async function setupTransport<S, A>(
       height: ui.height,
       getUIState: (user?: AioUser) => getUIState(getState(), user),
       dispatch: (action, user?) => {
+        // AUTH-1: declarative cell access — every network-borne action is
+        // checked against its cell's rule BEFORE dispatch. Server-origin
+        // dispatches never pass through here, so server code always bypasses.
+        const a = action as Record<string, unknown>;
+        const type = typeof a?.type === "string" ? a.type as string : "";
+        const cellAccess = config._cellAccess;
+        if (cellAccess && cellAccess.size > 0 && type.includes(":")) {
+          const cellName = type.slice(0, type.indexOf(":"));
+          const rule = cellAccess.get(cellName);
+          if (rule !== undefined) {
+            // Method = the originating method name (async batches carry it in
+            // payload._origin); fall back to the action-type suffix.
+            const origin = (a.payload as Record<string, unknown> | undefined)
+              ?._origin;
+            const method = typeof origin === "string"
+              ? origin
+              : type.slice(cellName.length + 1);
+            if (!cellAccessAllowed(rule, user, method)) {
+              log.warn(
+                `[aio] auth: cell "${cellName}" action "${type}" denied for ${
+                  user
+                    ? `user=${user.id} role=${user.role}`
+                    : "anonymous client"
+                }`,
+              );
+              return; // drop — network caller lacks access
+            }
+          }
+        }
         const tagged = user
           ? { ...(action as Record<string, unknown>), _user: user }
           : action;
@@ -218,6 +271,10 @@ export async function setupTransport<S, A>(
       token,
       users,
       resolveUser,
+      sessionResolver,
+      authFlows: authFlows
+        ? { ...authFlows, secure: !!tlsCert?.cert }
+        : undefined,
       cert: tlsCert?.cert,
       key: tlsCert?.key,
       showStatus: ui.showStatus,

@@ -175,3 +175,12 @@ export {
   useNavigate,
   useRoute,
 } from "./browser/browser-air-router.ts";
+
+// ── Auth UI (AUTH-2) — drop-in login/signup form + reactive identity ──
+export {
+  authUser,
+  SignIn,
+  type SignInProps,
+  signOut,
+  useUser,
+} from "./browser/browser-auth-ui.ts";
