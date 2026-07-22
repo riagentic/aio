@@ -49,7 +49,7 @@
         },
         "CallOptions": {
           "kind": "typeAlias",
-          "sig": "2de060157c02959f"
+          "sig": "d57957dd0afc2024"
         },
         "Catalog": {
           "kind": "typeAlias",
@@ -85,7 +85,7 @@
         },
         "CellsConfig": {
           "kind": "typeAlias",
-          "sig": "6725b511bcd45520"
+          "sig": "b840d7913a9ceb62"
         },
         "CellStatus": {
           "kind": "typeAlias",
@@ -141,7 +141,7 @@
         },
         "DiagnosticsConfig": {
           "kind": "typeAlias",
-          "sig": "df1b82060d7c6b3e"
+          "sig": "d8e61ef60e86436c"
         },
         "DiagnosticsOptions": {
           "kind": "typeAlias",
@@ -349,7 +349,7 @@
         },
         "VERSION": {
           "kind": "variable",
-          "sig": "ec98557f8e91e785"
+          "sig": "951167172720cad0"
         },
         "VitalsConfig": {
           "kind": "typeAlias",
@@ -1427,7 +1427,7 @@
         },
         "SyncHandlerDeps": {
           "kind": "interface",
-          "sig": "6b3d730e1833b36e"
+          "sig": "23a50c2191b29e6c"
         },
         "SyncOp": {
           "kind": "interface",

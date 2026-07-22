@@ -41,6 +41,7 @@ export interface ServerConfig {
   syncIntervalMs?: number; // throttle state broadcasts: max 1 push per N ms (default: 50)
   allowedOrigins?: string[]; // extra allowed origins beyond localhost (e.g. Docker, reverse proxy)
   strictOrigin?: boolean; // require Origin header on WS upgrade when expose=true (defense-in-depth vs CSWSH from origin-stripping intermediaries)
+  trustProxyHeader?: string; // take client IP from this header's first hop (behind a trusted reverse proxy) for abuse/auth-fail bucketing
   clientCounter?: { value: number }; // shared index counter — WS and UDS get unique indices
   cellPatchStrategies?: Map<string, "raw" | "skip" | "filter" | "full">; // per-cell patch strategy
   cellFilterFields?: Map<

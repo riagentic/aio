@@ -1,5 +1,39 @@
 # Changelog
 
+## 1.0.0-alpha31 — sanity & cleanup: auth hardening, consistency, coverage (2026-07-22)
+
+A stabilization release — no new features, everything is hardening, correctness,
+and polish on top of alpha30's enterprise auth.
+
+**Auth hardened to a clean bill.** Three independent adversarial security passes
+were run over the auth stack; findings converged 7 → 2 → 0 and every one is
+fixed with a pinned regression test. Closed: two open-redirect vectors (the
+second a browser tab-strip bypass), a **sync-op access bypass** (the cell
+`access` rule was enforced on the action-dispatch path but not the CRDT sync-op
+path — a `sync:true` + `access`-gated cell was mutable by any connected client),
+login/signup account enumeration, a password-reset timing oracle, OIDC login
+CSRF / session fixation, and a reverse-proxy IP-bucket DoS (new opt-in
+`trustProxyHeader`). The cell `access` value is now validated at definition
+(`access:"none"` — a role named "none" — throws instead of silently granting).
+
+**Parameter consistency (pre-beta cleanup, minor breaking).**
+`call({ timeoutMs })` is canonical (matches `until`; bare `timeout` kept as a
+deprecated alias so nothing silently loses its timeout);
+`onEffect(effect,
+state, user)` gains the `state` arg for parity with
+`onAction`; `diagnostics` and `dispatchStorm` accept `boolean` like the other
+toggle-or-configure fields; TLS flags are now `--tls-cert` / `--tls-key` (bare
+`--cert`/`--key` kept as aliases).
+
+**Coverage + two bugs it caught.** ~25 new tests on previously-untested
+data-loss / security / sync-corruption surfaces (HLC restore, build-integrity,
+crash-handler, console-intercept, auth-client, KV over-limit persistence, sync
+access gate). Writing them surfaced two real bugs, both fixed: `flushPersist`
+lost **all** persisted data on shutdown when a single cell exceeded the ~64KB KV
+limit (the shutdown path lacked the degrade logic the scheduled path had), and
+`console.error(someError)` forwarded `"{}"` to the dev console. Core suite 2216
+→ 2241.
+
 ## 1.0.0-alpha30 — enterprise auth + full target matrix (2026-07-22)
 
 **`auth: true` is a complete login system.** Primitives: ambient `serverUser()`

@@ -134,13 +134,51 @@ export interface OidcDeps {
   sessions: SessionStore;
   ttlMs?: number;
   cookie: (token: string) => string;
+  /** TLS active — mark the binder cookie Secure. */
+  secure?: boolean;
 }
 
 /** GET /__aio/auth/oidc/start — redirect to the provider. */
+const OIDC_BINDER_COOKIE = "aio_oidc";
+
+/** Hex SHA-256 of a string (browser-binder hash). */
+async function sha256hex(s: string): Promise<string> {
+  const buf = await crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(s),
+  );
+  return Array.from(new Uint8Array(buf), (b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+/** Read the one-shot OIDC binder cookie from the callback request. */
+function oidcBinderFromCookie(req: Request): string | null {
+  const cookies = req.headers.get("cookie");
+  if (!cookies) return null;
+  for (const part of cookies.split(";")) {
+    const [k, ...v] = part.trim().split("=");
+    if (k === OIDC_BINDER_COOKIE) return v.join("=") || null;
+  }
+  return null;
+}
+
 /** Same-site path only ("/orders/7") — anything else (absolute URLs,
  *  protocol-relative "//evil") would be an open redirect. */
-const safePath = (p: string | null): string =>
-  p && p.startsWith("/") && !p.startsWith("//") ? p : "/";
+const safePath = (p: string | null): string => {
+  // Same-site absolute path only. A browser's URL parser STRIPS ASCII control
+  // chars (tab/newline/etc.) and rewrites "\"→"/" BEFORE resolving a Location
+  // header, so "/\evil", "//evil", AND "/\t/evil" all normalize to a
+  // protocol-relative URL → https://evil (open redirect). Require: starts with
+  // "/", second char is not "/" or "\", and NO control char anywhere (which a
+  // browser could delete to expose "//"). Anything else → "/".
+  if (!p || p[0] !== "/") return "/";
+  if (p[1] === "/" || p[1] === "\\") return "/";
+  for (let i = 0; i < p.length; i++) {
+    const code = p.charCodeAt(i);
+    if (code <= 0x1f || code === 0x7f) return "/"; // C0 controls + DEL
+  }
+  return p;
+};
 
 export async function oidcStart(
   req: Request,
@@ -157,8 +195,16 @@ export async function oidcStart(
     ),
   );
   const self = new URL(req.url);
-  // `?redirect=/path` (same-site only) rides inside the state token, so the
-  // user lands back on the page they wanted, not "/".
+  // CSRF / session-fixation defense: bind this login attempt to THIS browser.
+  // A random binder is set as a cookie; only its hash rides in the server-side
+  // state. The callback requires the cookie to hash-match — so an attacker
+  // can't start their own flow and feed the resulting (code,state) to a
+  // victim (which would log the victim into the ATTACKER's account). SameSite
+  // is Lax (not Strict): the provider redirect back is a cross-site top-level
+  // navigation, and Strict would drop the cookie. `nonce` binds the ID token
+  // to this request, defeating token replay.
+  const binder = b64url(crypto.getRandomValues(new Uint8Array(32)));
+  const nonce = b64url(crypto.getRandomValues(new Uint8Array(16)));
   const state = deps.users.issueToken(
     "oidc",
     "state",
@@ -166,6 +212,8 @@ export async function oidcStart(
     JSON.stringify({
       v: verifier,
       r: safePath(self.searchParams.get("redirect")),
+      b: await sha256hex(binder),
+      n: nonce,
     }),
   );
   const redirectUri = `${self.origin}/__aio/auth/oidc/callback`;
@@ -175,11 +223,16 @@ export async function oidcStart(
   auth.searchParams.set("redirect_uri", redirectUri);
   auth.searchParams.set("scope", "openid profile email");
   auth.searchParams.set("state", state);
+  auth.searchParams.set("nonce", nonce);
   auth.searchParams.set("code_challenge", challenge);
   auth.searchParams.set("code_challenge_method", "S256");
   return new Response(null, {
     status: 302,
-    headers: { Location: auth.toString() },
+    headers: {
+      Location: auth.toString(),
+      "Set-Cookie": `${OIDC_BINDER_COOKIE}=${binder}; Path=/__aio/auth/oidc` +
+        `; HttpOnly; SameSite=Lax; Max-Age=600${deps.secure ? "; Secure" : ""}`,
+    },
   });
 }
 
@@ -198,10 +251,15 @@ export async function oidcCallback(
   }
   const stored = deps.users.consumeToken("oidc", state);
   if (!stored) return new Response("invalid or expired state", { status: 400 });
-  const { v: verifier, r: returnTo } = JSON.parse(stored.payload!) as {
-    v: string;
-    r: string;
-  };
+  const { v: verifier, r: returnTo, b: binderHash, n: nonce } = JSON.parse(
+    stored.payload!,
+  ) as { v: string; r: string; b?: string; n?: string };
+  // The browser must present the binder cookie that hash-matches this state —
+  // otherwise this callback was started by someone else (login CSRF).
+  const binder = oidcBinderFromCookie(req);
+  if (!binderHash || !binder || (await sha256hex(binder)) !== binderHash) {
+    return new Response("state not bound to this browser", { status: 400 });
+  }
 
   const d = await discover(deps.cfg.issuer);
   const redirectUri = `${url.origin}/__aio/auth/oidc/callback`;
@@ -234,6 +292,12 @@ export async function oidcCallback(
     console.warn(`[aio] auth: oidc id_token rejected — ${e}`);
     return new Response("invalid id_token", { status: 401 });
   }
+  // Nonce binds the token to THIS /start (anti-replay). Providers echo it;
+  // require a match when we sent one.
+  if (nonce && claims.nonce !== nonce) {
+    console.warn(`[aio] auth: oidc nonce mismatch`);
+    return new Response("invalid id_token", { status: 401 });
+  }
 
   // Stable identity = sub. Existing users keep their stored role (server-side
   // promotions survive re-login); new users get cfg.role(claims) ?? "user".
@@ -253,11 +317,12 @@ export async function oidcCallback(
     user = { id: rec.id, role: rec.role };
   }
   const token = deps.sessions.issue(user, { ttlMs: deps.ttlMs });
-  return new Response(null, {
-    status: 302,
-    headers: {
-      Location: safePath(returnTo),
-      "Set-Cookie": deps.cookie(token),
-    },
-  });
+  const headers = new Headers({ Location: safePath(returnTo) });
+  headers.append("Set-Cookie", deps.cookie(token));
+  // Clear the one-shot binder cookie.
+  headers.append(
+    "Set-Cookie",
+    `${OIDC_BINDER_COOKIE}=; Path=/__aio/auth/oidc; HttpOnly; SameSite=Lax; Max-Age=0`,
+  );
+  return new Response(null, { status: 302, headers });
 }

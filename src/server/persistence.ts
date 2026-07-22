@@ -302,48 +302,12 @@ export function createPersistenceManager(
               log.error(`persist: sqlite flush failed — ${e}`);
             }
           }
-          if (kvDb) {
-            try {
-              const dbState = getDBState(kvGetState());
-              if (persistMode === "multi") {
-                const obj = dbState as Record<string, unknown>;
-                const keys = Object.keys(obj);
-                const result = await kvDb.setMulti(
-                  persistKey,
-                  obj,
-                  prevPersistedKeys,
-                );
-                if (result.ok) {
-                  prevPersistedKeys = keys;
-                  await _stampVersions();
-                } else {
-                  // B-7: failed atomic commit on the final flush — surface it
-                  // rather than reporting "flushed".
-                  const err = new Error(
-                    "persist: multi-key atomic commit returned ok:false on flush — state not saved",
-                  );
-                  log.error(err.message);
-                  _reportPersistError(err);
-                }
-              } else {
-                await kvDb.set(persistKey, dbState);
-                await _stampVersions();
-              }
-              log.debug("persist: flushed");
-            } catch (e) {
-              const msg = String(e);
-              if (
-                msg.includes("too large") || msg.includes("65536") ||
-                msg.includes("value too")
-              ) {
-                log.warn(
-                  `persist: state exceeds Deno KV 65KB limit — set persistMode:'multi', cell-level persist filters, or db:{} (SQLite)`,
-                );
-              }
-              log.error(`persist: flush failed — ${e}`);
-              _reportPersistError(e);
-            }
-          }
+          // ONE code path with the scheduled persist: _syncKv carries the
+          // AIO-420 over-limit degrade (multi mode) and the single-key size
+          // guard. The flush previously had its OWN simpler KV write with
+          // NEITHER — so an over-limit cell on shutdown failed the whole atomic
+          // commit and lost EVERY cell's data (not just the oversized one).
+          if (kvDb) await _syncKv();
         } finally {
           inFlight = null;
         }

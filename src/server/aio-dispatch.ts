@@ -37,7 +37,7 @@ export type DispatchSetupDeps<S, A, E, App = any> = {
   execute: (app: App, effect: E) => void;
   beforeReduce?: (action: A, state: S, user?: User) => A | null;
   onAction?: (action: A, state: S, user?: User) => void;
-  onEffect?: (effect: E, user?: User) => void;
+  onEffect?: (effect: E, state: S, user?: User) => void;
   getState: () => S;
   setState: (s: S) => void;
   /** Late-bound app ref — called in execute, set after dispatch is created */
@@ -101,7 +101,7 @@ function isInternalAction(type: string): boolean {
  *    1. beforeReduce(action, state, user) — intercept: transform, filter, or drop (return null)
  *    2. onAction(action, state, user)     — observe action before reduce runs
  *    3. reduce(state, action)             — pure state transformation → new state + effects
- *    4. onEffect(effect, user)            — observe each effect before execution
+ *    4. onEffect(effect, state, user)     — observe each effect before execution
  *    5. execute(app, effect)              — run side effect
  *  After the batch drains (all queued actions processed):
  *    6. onDone()                          — persist state + broadcast patches to clients
@@ -196,7 +196,8 @@ export function setupDispatch<S, A, E, App = any>(
   const hookedExecute = onEffect
     ? (app: App, e: E) => {
       try {
-        onEffect(e, _currentActionUser);
+        // (effect, state, user) — positional parity with onAction.
+        onEffect(e, getState(), _currentActionUser);
       } catch (err) {
         const effectType = (e as Record<string, unknown>)?.type as
           | string

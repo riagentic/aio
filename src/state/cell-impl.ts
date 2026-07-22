@@ -73,8 +73,16 @@ const _pending = new Map<
   { resolve: (value: unknown) => void; reject: (e: Error) => void }
 >();
 
-/** Options for call() — timeout in ms, retries on failure */
-export type CallOptions = { timeout?: number; retries?: number };
+/** Options for call() — `timeoutMs` (the `...Ms` suffix every other duration
+ *  in the API uses, matching `until({ timeoutMs })`), retries on failure.
+ *  `timeout` is a deprecated alias kept working so old code doesn't silently
+ *  lose its timeout, but only `timeoutMs` is documented. */
+export type CallOptions = {
+  timeoutMs?: number;
+  /** @deprecated use `timeoutMs` */
+  timeout?: number;
+  retries?: number;
+};
 
 /**
  * Wrap an inter-cell async call with timeout and/or retry.
@@ -86,7 +94,7 @@ export type CallOptions = { timeout?: number; retries?: number };
  * const reserved = await inventory.reserve(items)
  *
  * // With timeout/retry
- * const reserved = await call({ timeout: 5000, retries: 2 }, () => inventory.reserve(items))
+ * const reserved = await call({ timeoutMs: 5000, retries: 2 }, () => inventory.reserve(items))
  */
 export function call<T>(opts: CallOptions, fn: () => Promise<T>): Promise<T>;
 /** Implementation — see the documented overload above. */
@@ -102,6 +110,7 @@ export function callWithOpts(
   fn: () => unknown | Promise<unknown>,
   opts: CallOptions,
 ): Promise<unknown> {
+  const timeoutMs = opts.timeoutMs ?? opts.timeout; // deprecated alias
   const attempt = (): Promise<unknown> => {
     let p: Promise<unknown>;
     try {
@@ -109,11 +118,11 @@ export function callWithOpts(
     } catch (e) {
       p = Promise.reject(e);
     }
-    if (!opts.timeout) return p;
+    if (!timeoutMs) return p;
     return new Promise((resolve, reject) => {
       const timer = setTimeout(
-        () => reject(new Error(`call(): timeout after ${opts.timeout}ms`)),
-        opts.timeout,
+        () => reject(new Error(`call(): timeout after ${timeoutMs}ms`)),
+        timeoutMs,
       );
       p.then((v) => {
         clearTimeout(timer);

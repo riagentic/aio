@@ -2,7 +2,7 @@
 import { log } from "../diagnostics/logger.ts";
 
 /** Framework version — printed by --version, checked in tests */
-export const VERSION = "1.0.0-alpha30";
+export const VERSION = "1.0.0-alpha31";
 
 // ── CLI ─────────────────────────────────────────────────────────────
 
@@ -47,6 +47,8 @@ export function parseCli(args: readonly string[] = Deno.args): CliFlags {
     "--server-url",
     "--width=",
     "--height=",
+    "--tls-cert=",
+    "--tls-key=",
     "--cert=",
     "--key=",
     "--isolate=",
@@ -82,6 +84,11 @@ export function parseCli(args: readonly string[] = Deno.args): CliFlags {
     else if (arg === "--kill-existing") r.killExisting = true;
     else if (arg.startsWith("--db-path=")) r.dbPath = arg.slice(10);
     else if (arg === "--backup-logs") r.backupLogs = true;
+    // TLS cert/key. `--tls-cert`/`--tls-key` are canonical (the bare
+    // `--cert`/`--key` collided with the auth `key` config concept); the old
+    // names stay as deprecated aliases so existing deploy scripts don't break.
+    else if (arg.startsWith("--tls-cert=")) r.cert = arg.slice(11);
+    else if (arg.startsWith("--tls-key=")) r.key = arg.slice(10);
     else if (arg.startsWith("--cert=")) r.cert = arg.slice(7);
     else if (arg.startsWith("--key=")) r.key = arg.slice(6);
     else if (arg.startsWith("--width=")) {
@@ -121,8 +128,9 @@ Flags:
   --verbose        Verbose logging (actions, state, effects, WS, HTTP)
   --prod           Serve pre-built dist/app.js
   --expose         Bind 0.0.0.0 + HTTPS + generate auth token for LAN access
-  --cert=PATH      TLS certificate file (PEM) — used with --expose (auto-generated if omitted)
-  --key=PATH       TLS private key file (PEM) — used with --expose (auto-generated if omitted)
+  --tls-cert=PATH  TLS certificate file (PEM) — used with --expose (auto-generated if omitted)
+  --tls-key=PATH   TLS private key file (PEM) — used with --expose (auto-generated if omitted)
+                   (--cert / --key are accepted as deprecated aliases)
   --server-url[=X] Connect to remote aio server (Electron thin client)
   --kill-existing  Kill running instance and take over
   --db-path=PATH   Override the SQLite file (":memory:" for throwaway runs)

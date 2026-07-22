@@ -69,6 +69,7 @@ export interface ServerSetupDeps<S, A> {
     wsLimits?: import("./aio-types.ts").WsLimits;
     allowedOrigins?: string[];
     strictOrigin?: boolean;
+    trustProxyHeader?: string;
     syncIntervalMs?: number;
     _cellPatchStrategies?: Map<string, CellPatchStrategy>;
     _cellFilterFields?: Map<string, PatchFilterFields>;
@@ -288,6 +289,7 @@ export async function setupTransport<S, A>(
       wsLimits: config.wsLimits,
       allowedOrigins: config.allowedOrigins,
       strictOrigin: config.strictOrigin,
+      trustProxyHeader: config.trustProxyHeader,
       syncIntervalMs: config.syncIntervalMs,
       cellPatchStrategies: config._cellPatchStrategies,
       cellFilterFields: config._cellFilterFields,

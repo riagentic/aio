@@ -106,6 +106,8 @@ export type AioConfig<S, A, E> = {
   wsLimits?: WsLimits; // per-client WS rate/size limits (advanced; defaults hardened)
   allowedOrigins?: string[]; // extra allowed WS origins beyond localhost + own host (reverse proxy, custom domains)
   strictOrigin?: boolean; // --expose hardening: require an Origin header on WS upgrade
+  /** Behind a trusted reverse proxy, read the real client IP from this header's first hop for abuse/auth-fail/lockout bucketing (e.g. "x-forwarded-for"). Opt-in — only set it when a proxy actually fronts the app. */
+  trustProxyHeader?: string;
   beforeReduce?: (action: A, state: S, user?: AioUser) => A | null; // intercept actions before reduce — return null to drop
   persistKey?: string; // KV key prefix (default: "state")
   persistDebounceMs?: number; // ms between KV writes (default: 100)
@@ -152,7 +154,7 @@ export type AioConfig<S, A, E> = {
   libraryMode?: boolean;
   // Lifecycle hooks — observe-only, all optional, error-guarded
   onAction?: (action: A, state: S, user?: AioUser) => void;
-  onEffect?: (effect: E, user?: AioUser) => void;
+  onEffect?: (effect: E, state: S, user?: AioUser) => void;
   onConnect?: (user?: AioUser) => void;
   onDisconnect?: (user?: AioUser) => void;
   onStart?: (app: AioApp<S, A>) => void;
@@ -291,6 +293,7 @@ export type CellsConfig = {
   allowedOrigins?: string[];
   /** --expose hardening: require an Origin header on WS upgrade. */
   strictOrigin?: boolean;
+  trustProxyHeader?: string;
   schedules?: ScheduleDef[];
   /** Application version string — logged on startup, available at __aio.appVersion */
   /** App version — default: deno.json `version`. */
@@ -303,7 +306,7 @@ export type CellsConfig = {
     user?: AioUser,
   ) => unknown | null;
   onAction?: (action: unknown, state: unknown, user?: AioUser) => void;
-  onEffect?: (effect: unknown, user?: AioUser) => void;
+  onEffect?: (effect: unknown, state: unknown, user?: AioUser) => void;
   onConnect?: (user?: AioUser) => void;
   onDisconnect?: (user?: AioUser) => void;
   onStart?: (app: AioApp) => void;
@@ -322,7 +325,7 @@ export type CellsConfig = {
    *  of leaving downstream symptoms (log churn, perf noise, starved server).
    *  `{ breaker: true }` also drops the offending action while the storm
    *  lasts. Set `false` to disable. */
-  dispatchStorm?: StormConfig | false;
+  dispatchStorm?: boolean | StormConfig;
   /** Callback when a diagnostics checkpoint is found on startup.
    *  Receives full CheckpointData. Return state to restore, or null to start fresh. */
   onCheckpointRestore?: (

@@ -5,14 +5,15 @@
  *
  * Thin facade — delegates to split command modules:
  * - am-cmd-process.ts: start, stop, restart, watch, status, instances
- * - am-cmd-inspect.ts: clients, click, sql, log, errors, metrics, health, config
+ * - am-cmd-inspect.ts: clients, sql, log, errors, metrics, health, config
  * - am-cmd-meta.ts:    version, new, help
  * - am-cmd-state.ts:   state, ui, dispatch, actions, tt, persist, snapshot
+ * - am-cmd-auth.ts:    auth (users, create, unlock, revoke, …)
  *
  * ```sh
  * deno task am status
  * deno task am state --app counter
- * deno task am click "#submit"
+ * deno task am surface --app counter
  * ```
  */
 

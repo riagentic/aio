@@ -348,13 +348,26 @@ export function createServer(config: ServerConfig): ServerHandle {
   ): Promise<Response> => {
     const url = new URL(req.url);
     const { pathname } = url;
-    // F-4: derive a stable client key for cross-connection abuse tracking.
+    // F-4: derive a stable client key for cross-connection abuse tracking
+    // (denylist, per-IP auth-fail budget, lockout bucketing).
     // TCP: remote hostname (IP). UDS: no key — in-process trust, skip denylist.
+    // Behind a trusted reverse proxy the TCP peer is the proxy — every client
+    // would collapse into ONE bucket (shared auth budget = trivial global
+    // login DoS). When `trustProxyHeader` is set, take the CLIENT ip from the
+    // FIRST hop of that header instead. Opt-in: honoring a client-settable
+    // header without a proxy in front would let an attacker forge a fresh key
+    // per request and evade the budget entirely.
     const addr = info?.remoteAddr;
-    const clientKey =
-      addr && "hostname" in addr && typeof addr.hostname === "string"
-        ? addr.hostname
-        : undefined;
+    const peerKey = addr && "hostname" in addr &&
+        typeof addr.hostname === "string"
+      ? addr.hostname
+      : undefined;
+    let clientKey = peerKey;
+    if (config.trustProxyHeader && peerKey) {
+      const fwd = req.headers.get(config.trustProxyHeader);
+      const first = fwd?.split(",")[0]?.trim();
+      if (first) clientKey = first;
+    }
 
     // The trojan control plane is same-machine-ONLY — never reachable over the
     // network, even under --expose (its localhost binding is not load-bearing).

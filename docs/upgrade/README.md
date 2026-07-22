@@ -7,6 +7,8 @@ One guide per version migration. Find your current version and follow the steps.
 - **[The aio restructure (alpha27+)](restructure.md)** — every restructure
   breaking change with before → after recipes (methods-only cells, instances,
   SQLite-only persistence, `aio/extras`, wire catalog)
+- [alpha30 → alpha31](from-alpha30-to-alpha31.md) — sanity & cleanup: auth
+  hardening, parameter consistency, persistence fix
 - [alpha29 → alpha30](from-alpha29-to-alpha30.md) — built-in auth (opt-in),
   snapshot/trojan hardening
 - [alpha28 → alpha29](from-alpha28-to-alpha29.md) — wire protocol v2
