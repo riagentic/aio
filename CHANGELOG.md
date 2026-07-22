@@ -1,21 +1,43 @@
 # Changelog
 
+## 1.0.0-alpha30 — enterprise auth + full target matrix (2026-07-22)
+
+**`auth: true` is a complete login system.** Primitives: ambient `serverUser()`
+(survives await — cell methods, serverFns, effects), declarative `access` rules
+on cells + serverFns enforced at the network entry, SQLite sessions (hashed at
+rest, TTL/refresh/revoke), per-IP failed-auth budget with audit lines. Flows:
+`/__aio/auth/*` signup/login/logout/me, PBKDF2-600k passwords (no account
+enumeration), HttpOnly SameSite=Strict session cookie that authenticates the WS
+handshake, CSRF origin floor, public app shell in auth mode (state stays gated).
+UI: drop-in `<SignIn/>` + `useUser()`/`signOut()` from `aio/air` — auto-adapts
+to the server (SSO button only when OIDC is on, signup toggle only when open).
+Enterprise: email verify + password reset (one-shot hashed tokens, reset revokes
+all sessions), TOTP 2FA (RFC 6238), config-only OIDC (discovery + PKCE S256 +
+RS256 JWKS verify, deep-link return, open-redirect sanitizer), per-account
+lockout (5 fails → 15 min → 423), `am auth` operator console (seed the first
+admin, unlock yourself — no server needed). **Targets:** scaffolds emit the full
+dev/compile matrix (cli, service, client,
+`remote:{browser,electron,android,cli,service}`) + `src/client.ts` thin CLI
+client. **Also:** security batch (trojan 4-gate lockdown, snapshot same-machine
+gating, `_user` spoof strip, pairing one-shot/TTL/budget), sync-cell boot-window
+race fixed, 4 dev/prod equivalency divergences closed. Opt-in throughout — apps
+upgrade with no code changes ([guide](docs/upgrade/from-alpha29-to-alpha30.md)).
+
 ## 1.0.0-alpha29 — wire protocol v2: ONE envelope (2026-07-22)
 
 **B4b phase 2 lands.** Every message on every transport (WS browser/cli, UDS
 NDJSON, Electron IPC relay) is ONE JSON envelope `{v:2, t, d?}` — the v1 zoo
-(string prefixes, discriminator keys, bare-JSON-is-state) is deleted.
-Overloaded keys split (`ack` vs `sync-ack`; `sync-req` vs `sync-res`);
-PROTOCOL v/min = 2/2 with a loud, readable refusal (+ close 4505) for v1
-peers; UDS gains sync + serverFns parity; the wire-envelope CI pin now rejects
-any uncatalogued kind AND any v1 prefix. **Field-fix batch:** testUI
-collision/disabled cluster, `ui.exclude` enforced at every client read seam,
-CRDT op-id dedup + chaos suite (4 op-loss/double-apply bugs), 3 AIR renderer
-bugs via the conformance suite, `dbPath`/`--db-path`, loud electron→browser
-fallback, 2 aiol false positives. **New gates:** D12 bench suite,
-docs-truth (snippets type-check + stale-term denylist). Breaking: rebuild
-compiled binaries/CLI clients (protocol bump); no app-code changes —
-docs/upgrade/from-alpha28-to-alpha29.md.
+(string prefixes, discriminator keys, bare-JSON-is-state) is deleted. Overloaded
+keys split (`ack` vs `sync-ack`; `sync-req` vs `sync-res`); PROTOCOL v/min = 2/2
+with a loud, readable refusal (+ close 4505) for v1 peers; UDS gains sync +
+serverFns parity; the wire-envelope CI pin now rejects any uncatalogued kind AND
+any v1 prefix. **Field-fix batch:** testUI collision/disabled cluster,
+`ui.exclude` enforced at every client read seam, CRDT op-id dedup + chaos suite
+(4 op-loss/double-apply bugs), 3 AIR renderer bugs via the conformance suite,
+`dbPath`/`--db-path`, loud electron→browser fallback, 2 aiol false positives.
+**New gates:** D12 bench suite, docs-truth (snippets type-check + stale-term
+denylist). Breaking: rebuild compiled binaries/CLI clients (protocol bump); no
+app-code changes — docs/upgrade/from-alpha28-to-alpha29.md.
 
 ## 1.0.0-alpha28 — restructure completes: B3–B5 (2026-07-21)
 
