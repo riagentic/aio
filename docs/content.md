@@ -118,6 +118,7 @@
 - [Upgrade: 1.0.0-alpha26 → 1.0.0-alpha27](upgrade/from-alpha26-to-alpha27.md) — alpha27 is the start of the restructure — the largest breaking change in aio's
 - [Upgrade: 1.0.0-alpha27 → 1.0.0-alpha28](upgrade/from-alpha27-to-alpha28.md) — alpha28 completes the restructure (B3–B5).
 - [Upgrade: 1.0.0-alpha28 → 1.0.0-alpha29](upgrade/from-alpha28-to-alpha29.md) — alpha29's headline is the wire-protocol v2 bump.
+- [Upgrade: 1.0.0-alpha29 → 1.0.0-alpha30](upgrade/from-alpha29-to-alpha30.md) — alpha30's headline is built-in enterprise auth — everything is opt-in, so
 - [Upgrade from v1.0.0-alpha3 to v1.0.0-alpha4](upgrade/from-alpha3-to-alpha4.md) — If you rely on effects completing after timeout (e.g., fire-and-forget with a
 - [Upgrade from v1.0.0-alpha4 to v1.0.0-alpha5](upgrade/from-alpha4-to-alpha5.md) — None.
 - [Upgrade from v1.0.0-alpha5 to v1.0.0-alpha6](upgrade/from-alpha5-to-alpha6.md) — None.
