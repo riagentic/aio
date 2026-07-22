@@ -1,5 +1,6 @@
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import {
+  _isLocalRequest,
   _timingSafeEqual,
   buildBrowserImportMap,
   classifyBrowserError,
@@ -42,6 +43,9 @@ Deno.test("server: index returns HTML with title", async () => {
   await withServer(async (url) => {
     const resp = await fetch(url);
     assertEquals(resp.status, 200);
+    // Prod caching is EXPLICIT (revalidate) — not left empty for a proxy to
+    // serve stale after redeploy (a bug that would reproduce only in prod).
+    assertEquals(resp.headers.get("cache-control"), "no-cache");
     const body = await resp.text();
     assertEquals(body.includes("<!DOCTYPE html>"), true);
     assertEquals(body.includes("Test"), true);
@@ -715,6 +719,83 @@ Deno.test("trojan: GET /state returns raw state", async () => {
   });
 });
 
+Deno.test("trojan: same-machine guard — loopback + UDS local, everything else remote", () => {
+  // Local: the trojan may answer.
+  assertEquals(_isLocalRequest({ transport: "tcp", hostname: "127.0.0.1", port: 1 }), true);
+  assertEquals(_isLocalRequest({ transport: "tcp", hostname: "::1", port: 1 }), true);
+  assertEquals(_isLocalRequest({ transport: "tcp", hostname: "localhost", port: 1 }), true);
+  assertEquals(_isLocalRequest({ transport: "unix", path: "/tmp/x.sock" }), true);
+  // Remote (LAN, public, spoofed host): never.
+  assertEquals(_isLocalRequest({ transport: "tcp", hostname: "192.168.1.5", port: 1 }), false);
+  assertEquals(_isLocalRequest({ transport: "tcp", hostname: "10.0.0.2", port: 1 }), false);
+  assertEquals(_isLocalRequest({ transport: "tcp", hostname: "203.0.113.9", port: 1 }), false);
+  // Unknown origin fails CLOSED.
+  assertEquals(_isLocalRequest(undefined), false);
+});
+
+Deno.test("trojan: DEV-ONLY — prod build serves no trojan route even when wired", async () => {
+  // The trojan reads full state, runs SQL, and loads snapshots. A release
+  // build must not expose it, regardless of `trojan:` being configured.
+  const dir = await Deno.makeTempDir();
+  await Deno.writeTextFile(join(dir, "App.tsx"), "export default () => null");
+  await Deno.mkdir(join(dir, "dist"), { recursive: true });
+  await Deno.writeTextFile(join(dir, "dist", "app.js"), "export function mount(){}");
+  const server = createServer({
+    port: TROJAN_PORT,
+    title: "ProdTrojan",
+    getUIState: () => ({ count: 1 }),
+    dispatch: () => {},
+    getSnapshot: () => "{}",
+    loadSnapshot: () => {},
+    baseDir: dir,
+    debug: () => {},
+    prod: true, // release build
+    distDir: join(dir, "dist"),
+    trojan: {
+      getState: () => ({ secret: "should-never-leak" }),
+      getSchedules: () => [],
+      startedAt: Date.now(),
+    },
+  });
+  await new Promise((r) => setTimeout(r, 50));
+  try {
+    const base = `http://127.0.0.1:${TROJAN_PORT}`;
+    // Every trojan route — read, control, and SQL — is 404 in prod.
+    for (
+      const [method, route] of [
+        ["GET", "state"],
+        ["GET", "ui"],
+        ["GET", "clients"],
+        ["POST", "sql"],
+        ["POST", "snapshot"],
+        ["POST", "dispatch"],
+      ] as const
+    ) {
+      const resp = await fetch(`${base}/__aio/trojan/${route}`, {
+        method,
+        headers: method === "POST"
+          ? { "x-aio": "1", "content-type": "application/json" }
+          : undefined,
+        body: method === "POST" ? "{}" : undefined,
+      });
+      const body = await resp.text();
+      assertEquals(
+        resp.status,
+        404,
+        `${method} /trojan/${route} must be 404 in prod (got ${resp.status})`,
+      );
+      assertEquals(
+        body.includes("should-never-leak"),
+        false,
+        `${route} must not leak state in prod`,
+      );
+    }
+  } finally {
+    await server.shutdown();
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
 Deno.test("trojan: GET /ui returns filtered UI state", async () => {
   await withTrojanServer(async (url) => {
     const resp = await fetch(`${url}/__aio/trojan/ui`);
@@ -1011,6 +1092,92 @@ Deno.test("trojan: POST /sql blocks INSERT", async () => {
     );
     assertEquals(resp5.status, 200);
     await resp5.body?.cancel();
+
+    // A comment must not hide a chained statement from the multi-statement
+    // guard: unbalanced quotes inside `--` comments used to make the literal
+    // mask swallow a following `;DROP…`. Now comments are stripped first.
+    const respChain = await fetch(
+      `http://127.0.0.1:${TT_PORT + 1}/__aio/trojan/sql`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-AIO": "1" },
+        body: JSON.stringify({ query: "SELECT 1 --'\n; DROP TABLE t --'" }),
+      },
+    );
+    assertEquals(respChain.status, 403);
+    const chainErr = await respChain.json();
+    assertEquals(
+      String(chainErr.error).includes("multi-statement"),
+      true,
+      `comment-hidden ';' must be caught: ${chainErr.error}`,
+    );
+
+    // A write keyword hidden only by a comment must still be caught.
+    const respHidden = await fetch(
+      `http://127.0.0.1:${TT_PORT + 1}/__aio/trojan/sql`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-AIO": "1" },
+        body: JSON.stringify({ query: "SELECT 1 /* */ ; DELETE FROM users" }),
+      },
+    );
+    assertEquals(respHidden.status, 403);
+    await respHidden.body?.cancel();
+  } finally {
+    await server.shutdown();
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+// ── Identity provenance: network actions can't spoof _user ────
+
+Deno.test("security: a network action cannot spoof the _user identity", async () => {
+  const dir = await Deno.makeTempDir();
+  await Deno.writeTextFile(join(dir, "App.tsx"), "export default () => null");
+  await Deno.mkdir(join(dir, "dist"), { recursive: true });
+  await Deno.writeTextFile(
+    join(dir, "dist", "app.js"),
+    "export function mount(){}",
+  );
+  const seen: Array<Record<string, unknown>> = [];
+  const server = createServer({
+    port: TT_PORT + 5,
+    title: "SpoofTest",
+    getUIState: () => ({ ok: true }),
+    dispatch: (a) => seen.push(a as Record<string, unknown>),
+    baseDir: dir,
+    debug: () => {},
+    prod: true,
+    distDir: join(dir, "dist"),
+  });
+  await new Promise((r) => setTimeout(r, 50));
+  try {
+    const ws = new WebSocket(`ws://127.0.0.1:${TT_PORT + 5}/ws`);
+    await new Promise<void>((res, rej) => {
+      ws.onopen = () => res();
+      ws.onerror = () => rej(new Error("ws failed"));
+    });
+    // Attacker tries to dispatch as an admin by setting _user on the wire.
+    ws.send(JSON.stringify({
+      v: 2,
+      t: "action",
+      d: {
+        type: "todo:add",
+        _user: { id: "root", role: "admin" },
+        _source: "UI",
+      },
+    }));
+    for (let i = 0; i < 100 && seen.length === 0; i++) {
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    ws.close();
+    const action = seen.find((a) => a.type === "todo:add");
+    assert(action, "action reached dispatch");
+    assertEquals(
+      action!._user,
+      undefined,
+      "_user must be stripped from network-sourced actions (no identity spoof)",
+    );
   } finally {
     await server.shutdown();
     await Deno.remove(dir, { recursive: true });

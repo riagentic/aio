@@ -203,7 +203,7 @@ Deno.test("mode: cli local — headless server + connectCli state sync", async (
 // MODE 4: Service Local — headless, trojan API
 // =====================================================================
 
-Deno.test("mode: service local — headless server + trojan API", async () => {
+Deno.test("mode: service local — headless server, trojan control OFF in prod", async () => {
   const dir = await makeTempBase();
   const app = createApp({ count: 10, label: "service-local" });
 
@@ -226,39 +226,26 @@ Deno.test("mode: service local — headless server + trojan API", async () => {
   await new Promise((r) => setTimeout(r, 50));
 
   try {
-    const stateResp = await fetch(
-      `http://127.0.0.1:${P + 4}/__aio/trojan/state`,
-    );
-    assertEquals(stateResp.status, 200);
-    const state = await stateResp.json();
-    assertEquals(state.count, 10);
+    // The trojan control plane is DEV-ONLY — a prod service exposes none of it,
+    // even from localhost. Read, control, and config routes all 404.
+    for (const route of ["state", "config", "metrics", "dispatch"]) {
+      const r = await fetch(`http://127.0.0.1:${P + 4}/__aio/trojan/${route}`);
+      assertEquals(r.status, 404, `trojan/${route} must be 404 in prod`);
+      await r.body?.cancel();
+    }
 
-    const dispatchResp = await fetch(
-      `http://127.0.0.1:${P + 4}/__aio/trojan/dispatch`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "X-AIO": "1" },
-        body: JSON.stringify({ type: "INC" }),
-      },
+    // The headless service still serves its app over the NORMAL client
+    // protocol — control is a WS dispatch, not a debug backdoor.
+    const cli = connectCli<{ count: number; label: string }>(
+      `http://127.0.0.1:${P + 4}`,
     );
-    assertEquals(dispatchResp.status, 200);
-    await dispatchResp.text(); // consume body
+    const s = await cli.ready;
+    assertEquals(s.count, 10);
+    assertEquals(s.label, "service-local");
+    cli.send({ type: "INC" });
+    await new Promise((r) => setTimeout(r, 50));
     assertEquals(app.getState().count, 11);
-
-    const configResp = await fetch(
-      `http://127.0.0.1:${P + 4}/__aio/trojan/config`,
-    );
-    assertEquals(configResp.status, 200);
-    const config = await configResp.json();
-    assertEquals(config.port, P + 4);
-    assertEquals(config.title, "Service Local");
-
-    const metricsResp = await fetch(
-      `http://127.0.0.1:${P + 4}/__aio/trojan/metrics`,
-    );
-    assertEquals(metricsResp.status, 200);
-    const metrics = await metricsResp.json();
-    assertEquals(typeof metrics.uptime, "number");
+    cli.close();
   } finally {
     await server.shutdown();
     await Deno.remove(dir, { recursive: true });
@@ -433,7 +420,7 @@ Deno.test("mode: cli remote — expose + token auth + connectCli", async () => {
 // MODE 8: Service Remote — expose + token + trojan API
 // =====================================================================
 
-Deno.test("mode: service remote — expose + token + trojan API", async () => {
+Deno.test("mode: service remote — expose + token; app reachable, trojan control OFF", async () => {
   const dir = await makeTempBase();
   const token = "test-service-remote";
   const app = createApp({ count: 42, label: "service-remote" });
@@ -459,46 +446,27 @@ Deno.test("mode: service remote — expose + token + trojan API", async () => {
   await new Promise((r) => setTimeout(r, 50));
 
   try {
-    // Trojan through main server requires token when exposed
-    const stateResp = await fetch(
-      `http://127.0.0.1:${P + 8}/__aio/trojan/state?token=${token}`,
-    );
-    assertEquals(stateResp.status, 200);
-    const state = await stateResp.json();
-    assertEquals(state.count, 42);
-
-    // Main HTTP requires auth
+    // Main HTTP requires auth.
     const noAuth = await fetch(`http://127.0.0.1:${P + 8}`);
     assertEquals(noAuth.status, 401);
     await noAuth.body?.cancel();
 
-    // Dispatch via trojan (with token)
-    const dispatchResp = await fetch(
-      `http://127.0.0.1:${P + 8}/__aio/trojan/dispatch?token=${token}`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "X-AIO": "1" },
-        body: JSON.stringify({ type: "INC" }),
-      },
+    // The trojan is dev-only AND same-machine-only — 404 even locally WITH the
+    // token. A control plane that reads raw state / dispatches is never exposed
+    // by a prod service, token or not.
+    const troj = await fetch(
+      `http://127.0.0.1:${P + 8}/__aio/trojan/state?token=${token}`,
     );
-    assertEquals(dispatchResp.status, 200);
-    await dispatchResp.text();
-    assertEquals(app.getState().count, 43);
+    assertEquals(troj.status, 404);
+    await troj.body?.cancel();
 
-    // Schedules (with token)
-    const schedResp = await fetch(
-      `http://127.0.0.1:${P + 8}/__aio/trojan/schedules?token=${token}`,
-    );
-    assertEquals(schedResp.status, 200);
-    const schedules = await schedResp.json();
-    assertEquals(schedules, ["heartbeat"]);
-
-    // WS client with token
+    // The APP itself is reachable remotely with the token (that is the point of
+    // --expose) — the client protocol is the supported control surface.
     const cli = connectCli<{ count: number }>(`http://127.0.0.1:${P + 8}`, {
       token,
     });
     const s = await cli.ready;
-    assertEquals(s.count, 43);
+    assertEquals(s.count, 42);
     cli.close();
   } finally {
     await server.shutdown();

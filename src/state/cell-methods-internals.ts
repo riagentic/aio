@@ -189,19 +189,22 @@ export function buildMethodsReducer(
         );
         // AIO-8.2: a sync-classified method returning a thenable means the
         // build transpiled async functions (constructor.name check defeated).
-        // Dev: throw before the half-applied state dispatches. Prod: log on.
+        // The method's synchronous prefix has already mutated the draft `s`;
+        // returning here would let Immer FINALIZE that half-applied mutation
+        // and broadcast corrupt state. THROW in both dev and prod (dispatch
+        // converts a reducer throw into a reported REDUCE_ERROR + rejected
+        // action without crashing) so the partial draft is discarded either
+        // way — never commit it. Doctrine: no silent dev/prod divergence, and
+        // this trigger is build-dependent (more likely in the compiled build,
+        // exactly where a silent prod-only corruption would hide).
         if (
           result && typeof (result as { then?: unknown }).then === "function"
         ) {
-          const msg =
+          throw new Error(
             `[${name}] method '${ownKey}' returned a Promise but was classified sync — ` +
-            `your build transpiled async functions. Wrap it: ` +
-            `${ownKey}: markAsync(async (s) => {...})`;
-          if ((globalThis as Record<string, unknown>).__aioDev) {
-            throw new Error(msg);
-          }
-          log.error("cell", msg);
-          return;
+              `your build transpiled async functions. Wrap it: ` +
+              `${ownKey}: markAsync(async (s) => {...})`,
+          );
         }
         // AIO-427: classify the sync method's return at its one ambiguous
         // source. A single tagged effect → wrapped to the reducer's effects

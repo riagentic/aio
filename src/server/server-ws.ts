@@ -2,6 +2,7 @@
 // Manages WS upgrades, per-client state, message routing, rate limiting, backpressure
 import type { AioUser } from "./aio.ts";
 import { invokeServerFn } from "./server-fns.ts";
+import { runWithUser } from "./auth-context.ts";
 import {
   type ActionPayload,
   dec,
@@ -597,11 +598,14 @@ export function createWsManager(deps: WsDeps): WsManager {
           log.warn("ws", "invalid sfn frame — dropping");
           return;
         }
-        invokeServerFn(ns, name, args).then((result) => {
-          try {
-            socket.send(enc("sfnr", { cid, ...result }));
-          } catch { /* client disconnected */ }
-        });
+        // Ambient identity: the fn body (and everything it awaits) can ask
+        // serverUser() who is calling; access rules check meta.user directly.
+        runWithUser(meta.user, () => invokeServerFn(ns, name, args, meta.user))
+          .then((result) => {
+            try {
+              socket.send(enc("sfnr", { cid, ...result }));
+            } catch { /* client disconnected */ }
+          });
         return;
       }
       case "action":
@@ -645,6 +649,12 @@ export function createWsManager(deps: WsDeps): WsManager {
       deps.debug(`ws: invalid action — payload must be a plain object`);
       return;
     }
+    // Strip client-set identity provenance. `_user` is the SERVER-side caller
+    // identity consumed by dispatch hooks (beforeReduce/onAction/onEffect). A
+    // network client must never set it: in open/shared-token mode meta.user is
+    // undefined, so a spoofed `_user:{role:"admin"}` would otherwise become the
+    // trusted identity. The server sets the real `_user` itself downstream.
+    delete (parsed as Record<string, unknown>)._user;
     deps.debug(
       `ws: recv ${JSON.stringify(parsed)} user=${meta.user?.id ?? "anon"}`,
     );

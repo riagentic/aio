@@ -144,6 +144,24 @@ export type { CliApp } from "./src/server/cli-client.ts";
  *  a *.server.ts module with serverFns(ns, fns); resolve them anywhere with
  *  serverFn<typeof def>(ns) (browser gets a typed WS proxy). */
 export { serverFn, serverFns } from "./src/server/server-fns.ts";
+export type { ServerFnAccess } from "./src/server/server-fns.ts";
+export type { CellAccess } from "./src/state/cell-types.ts";
+export type {
+  SessionInfo,
+  SessionStore,
+} from "./src/server/sessions.ts";
+export type {
+  AuthUserRecord,
+  UserStore,
+} from "./src/server/auth-users.ts";
+/** Client-side auth API — login/signup/logout/me against /__aio/auth/*. */
+export {
+  authClient,
+  createAuthClient,
+} from "./src/browser/auth-client.ts";
+/** Ambient caller identity — who is invoking the current cell method /
+ *  serverFn / effect. undefined = anonymous or server-origin. */
+export { serverUser } from "./src/server/auth-context.ts";
 export {
   race,
   sleep,

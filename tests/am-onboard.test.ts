@@ -89,6 +89,39 @@ Deno.test("denoJson: dev defaults to browser + per-target dev/compile tasks", ()
   assertEquals(dj.compilerOptions.jsxImportSource, "aio");
 });
 
+// The FULL target matrix (katana targets kata): every dev/compile task for
+// every target — local, remote, and the unified client — must be scaffolded.
+Deno.test("denoJson: full dev/compile task matrix is scaffolded", () => {
+  const dj = JSON.parse(denoJson("demo", true)) as {
+    tasks: Record<string, string>;
+  };
+  const expect: Record<string, string[]> = {
+    "dev:cli": ["--client=cli"],
+    "dev:service": ["--client=server-only"],
+    "dev:client": ["--server-url"],
+    "dev:remote:browser": ["--client=browser", "--expose"],
+    "dev:remote:electron": ["--server-url"],
+    "dev:remote:android": ["--client=browser", "--expose"],
+    "dev:remote:cli": ["src/client.ts"],
+    "dev:remote:service": ["--client=server-only", "--expose"],
+    "compile:cli": ["--compile", "--cli"],
+    "compile:service": ["--compile", "--service", "--headless"],
+    "compile:client": ["--client"],
+    "compile:remote:browser": ["--compile", "--service", "--remote"],
+    // Two-artifact targets build the server FIRST (its dist/ clean would
+    // delete a client artifact built before it), then the client.
+    "compile:remote:electron": ["--service --remote &&", "--client"],
+    "compile:remote:android": ["--service --remote &&", "--android --remote"],
+    "compile:remote:cli": ["--headless --remote &&", "--cli --remote"],
+    "compile:remote:service": ["--service", "--headless", "--remote"],
+  };
+  for (const [task, frags] of Object.entries(expect)) {
+    const cmd = dj.tasks[task];
+    assert(cmd, `missing scaffolded task ${task}`);
+    for (const f of frags) assertStringIncludes(cmd, f, `task ${task}`);
+  }
+});
+
 Deno.test("denoJson: --target picks the dev/compile DEFAULT per target", () => {
   const tasks = (t: "electron" | "android" | "cli" | "server") =>
     (JSON.parse(denoJson("demo", true, t)) as {
@@ -118,6 +151,7 @@ Deno.test("scaffold: counter + todo emit the expected src/-based files", () => {
         "src/app.ts",
         "src/cell.ts",
         "src/App.tsx",
+        "src/client.ts", // thin CLI client — dev:remote:cli / compile:remote:cli entry
         "src/cell.test.ts",
         ".gitignore",
         "README.md",
@@ -198,6 +232,54 @@ Deno.test({
   },
 });
 
+// Matrix build smoke — the new task-matrix targets yield real binaries from a
+// scaffold: cli (local), service (headless), remote cli client (src/client.ts).
+// Same opt-in as the counter smoke: three deno compiles, minutes not seconds.
+Deno.test({
+  name: "build smoke: compile:cli, compile:service, remote cli client",
+  ignore: Deno.env.get("AIO_BUILD_SMOKE") !== "1",
+  fn: async () => {
+    const dir = await Deno.makeTempDir({ prefix: "am-matrix-" });
+    try {
+      for (
+        const [rel, content] of Object.entries(scaffold("app", "counter", true))
+      ) {
+        const path = resolve(dir, rel);
+        await Deno.mkdir(resolve(path, ".."), { recursive: true });
+        await Deno.writeTextFile(path, content);
+      }
+      await Deno.mkdir(resolve(dir, "dep"), { recursive: true });
+      await Deno.symlink(REPO_ROOT, resolve(dir, "dep/aio"));
+      const build = async (args: string[]): Promise<void> => {
+        const { code, stderr } = await new Deno.Command("deno", {
+          args: ["run", "-A", "dep/aio/src/build.ts", ...args],
+          cwd: dir,
+          stderr: "piped",
+          stdout: "null",
+        }).output();
+        assertEquals(
+          code,
+          0,
+          `build ${args.join(" ")} failed:\n${
+            new TextDecoder().decode(stderr)
+          }`,
+        );
+      };
+      await build(["--compile", "--cli"]); // compile:cli → ./app
+      await build(["--compile", "--service", "--headless"]); // compile:service
+      await build(["--compile", "--cli", "--remote"]); // remote cli client → ./app-client
+      const names = [...Deno.readDirSync(dir)].map((e) => e.name);
+      assert(names.includes("app"), `no cli/service binary in ${names}`);
+      assert(
+        names.includes("app-client"),
+        `no remote client binary in ${names}`,
+      );
+    } finally {
+      await Deno.remove(dir, { recursive: true });
+    }
+  },
+});
+
 for (const tpl of ["counter", "todo"] as const) {
   Deno.test(`integration: generated ${tpl} app type-checks + starter test passes`, async () => {
     const dir = await Deno.makeTempDir({ prefix: `am-${tpl}-` });
@@ -213,7 +295,13 @@ for (const tpl of ["counter", "todo"] as const) {
       const dec = new TextDecoder();
       // Type-checks against the real framework (proves `deno task dev` is sound).
       const chk = await new Deno.Command("deno", {
-        args: ["check", "src/app.ts", "src/App.tsx", "src/cell.test.ts"],
+        args: [
+          "check",
+          "src/app.ts",
+          "src/App.tsx",
+          "src/client.ts",
+          "src/cell.test.ts",
+        ],
         cwd: dir,
         stderr: "piped",
         stdout: "null",

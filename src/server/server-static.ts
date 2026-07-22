@@ -250,8 +250,11 @@ export function createStaticHandler(deps: StaticDeps): {
       return handleMetrics();
     }
 
-    // ── Trojan: control REST API (localhost-only) ──
-    if (deps.trojan && pathname.startsWith("/__aio/trojan/")) {
+    // ── Trojan: control REST API — DEV-ONLY, never mounted in prod ──
+    // The trojan reads full state, runs SQL, triggers UI, and loads snapshots.
+    // It exists to make development productive; a release build has no business
+    // exposing it, so it is gated off entirely here (single source of truth).
+    if (!prod && deps.trojan && pathname.startsWith("/__aio/trojan/")) {
       const trojanResp = await _handleTrojanRoute(
         pathname,
         req,

@@ -233,3 +233,45 @@ Deno.test("8.2: sync-classified method returning a Promise throws in dev", async
     reset();
   }
 });
+
+Deno.test("8.2: in PROD it ALSO throws — never commits the half-applied draft", async () => {
+  const { cell } = await import("../src/state/cell-create.ts");
+  const { composeCells } = await import("../src/state/cell-compose.ts");
+  const { _resetCellRegistry } = await import("../src/state/cell-reactive.ts");
+  _resetCellRegistry();
+  // PROD path: __aioDev unset. Before the fix, prod log.error'd and returned
+  // undefined, so Immer FINALIZED the partial mutation (n=1) and broadcast
+  // corrupt state — a silent prod-only divergence. Now it throws in both modes
+  // so dispatch discards the draft either way.
+  delete (globalThis as Record<string, unknown>).__aioDev;
+  try {
+    const sneaky = cell("sneaky", {
+      state: { n: 0 },
+      methods: {
+        save(s: { n: number }) {
+          s.n = 1; // synchronous prefix mutates the draft…
+          return Promise.resolve() as unknown as void; // …then returns a thenable
+        },
+      },
+    });
+    const composed = composeCells([sneaky]);
+    let threw = "";
+    let returned: unknown;
+    try {
+      returned = composed.reduce({ sneaky: { n: 0 } } as never, {
+        type: "sneaky:save",
+        payload: { args: [] },
+      } as never);
+    } catch (e) {
+      threw = (e as Error).message;
+    }
+    assertEquals(
+      threw.includes("classified sync"),
+      true,
+      `prod must throw and discard the partial draft, got: ${threw ||
+        JSON.stringify(returned)}`,
+    );
+  } finally {
+    _resetCellRegistry();
+  }
+});

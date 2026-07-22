@@ -37,7 +37,10 @@ import {
   _buildUserResolver,
   _extractToken,
   _timingSafeEqual,
+  authFailBudgetExceeded,
+  recordAuthFail,
 } from "./server-auth.ts";
+import { handleAuthFlow } from "./auth-flows.ts";
 import { stopEsbuild } from "./server-transpile.ts";
 import { createWsManager } from "./server-ws.ts";
 import { createBroadcaster } from "./server-broadcast.ts";
@@ -74,6 +77,21 @@ function _warnTokenInUrl(): void {
   );
 }
 
+/** True when a request originates from the SAME MACHINE — loopback TCP or a
+ *  Unix socket. The trojan control plane uses this to stay off the network
+ *  entirely: it is never reachable remotely, even under `--expose`. Unknown or
+ *  absent origin fails CLOSED (treated as non-local). */
+export function _isLocalRequest(addr: Deno.Addr | undefined): boolean {
+  if (!addr) return false;
+  if (addr.transport === "unix") return true; // same-machine by construction
+  if ("hostname" in addr) {
+    const h = addr.hostname;
+    return h === "127.0.0.1" || h === "::1" || h === "localhost" ||
+      h === "[::1]";
+  }
+  return false;
+}
+
 /** Starts HTTP + WS server, returns broadcast handle for state pushes and shutdown */
 export function createServer(config: ServerConfig): ServerHandle {
   const { port, title, getUIState, dispatch, debug, prod = false, distDir } =
@@ -87,7 +105,15 @@ export function createServer(config: ServerConfig): ServerHandle {
   }
 
   // Unified user resolver — one code path for both static map and dynamic hook (AIO-171)
-  const _userResolver = _buildUserResolver(config);
+  // AUTH-1: session tokens resolve FIRST (cheap indexed lookup, revocable),
+  // then fall through to users/resolveUser. Sessions alone activate per-user
+  // auth mode — an app with only `sessions: true` is a per-user app.
+  const _baseResolver = _buildUserResolver(config);
+  const _sessionResolver = config.sessionResolver;
+  const _userResolver = _sessionResolver
+    ? async (tok: string) =>
+      _sessionResolver(tok) ?? (_baseResolver ? await _baseResolver(tok) : null)
+    : _baseResolver;
 
   // Custom routes: reserve the framework namespaces loudly at boot.
   for (const key of Object.keys(config.routes ?? {})) {
@@ -132,8 +158,12 @@ export function createServer(config: ServerConfig): ServerHandle {
     (absDistDir ? fileExists(join(absDistDir, "style.css")) : false);
   if (hasCSS) debug("style.css detected — injecting <link>");
 
+  // Explicit in BOTH modes so prod caching isn't left to proxy heuristics — an
+  // empty header lets an intermediary serve a stale asset after redeploy, a bug
+  // that reproduces only in prod. Dev never caches (instant edits); prod may
+  // cache but MUST revalidate, so a redeploy is always picked up.
   const noCache = prod
-    ? {}
+    ? { "Cache-Control": "no-cache" } as Record<string, string>
     : { "Cache-Control": "no-store" } as Record<string, string>;
   const bootId = crypto.randomUUID().slice(0, 8);
   const syncIntervalMs = config.syncIntervalMs ?? DEFAULT_SYNC_INTERVAL_MS;
@@ -326,13 +356,38 @@ export function createServer(config: ServerConfig): ServerHandle {
         ? addr.hostname
         : undefined;
 
+    // The trojan control plane is same-machine-ONLY — never reachable over the
+    // network, even under --expose (its localhost binding is not load-bearing).
+    // A remote caller gets a plain 404 so the endpoint's existence isn't even
+    // revealed to a network scanner. This composes with the dev-only mount gate
+    // in server-static: the trojan answers only when the request is BOTH local
+    // AND the build is dev.
+    if (
+      pathname.startsWith("/__aio/trojan/") && !_isLocalRequest(addr)
+    ) {
+      return new Response("Not Found", { status: 404 });
+    }
+
+    // AUTH-2 login flows — mounted BEFORE the auth gates for the same reason
+    // as pairing: the caller is asking FOR credentials, so it can't present
+    // them. Each route does its own gating (origin check, fail budget).
+    if (config.authFlows) {
+      const authResp = await handleAuthFlow(
+        req,
+        url,
+        config.authFlows,
+        clientKey,
+      );
+      if (authResp) return authResp;
+    }
+
     // Pairing endpoint — the ONE route that bypasses the key gate (the client
     // is asking FOR the key, so it can't present it). PIN-gated instead:
     // POST { pin } → the app profile (cert + key) when the PIN is valid.
     if (pathname === "/__aio/pair" && req.method === "POST" && config.token) {
       try {
         const body = await req.json() as { pin?: unknown };
-        if (!verifyPin(body?.pin)) {
+        if (!verifyPin(body?.pin, clientKey)) {
           return new Response(
             JSON.stringify({ error: "invalid or expired pairing code" }),
             { status: 401, headers: { "Content-Type": "application/json" } },
@@ -360,10 +415,36 @@ export function createServer(config: ServerConfig): ServerHandle {
 
     // Auth path 1: per-user auth — resolveUser hook or static users map (AIO-171)
     if (_userResolver) {
+      // Brute-force budget: a key with too many recent failures is refused
+      // BEFORE the resolver runs (resolveUser may hit a JWKS/DB — don't let
+      // an attacker drive that). 429, not 401: "back off", not "wrong token".
+      if (authFailBudgetExceeded(clientKey)) {
+        return new Response("Too Many Requests", { status: 429 });
+      }
       const token = _extractToken(url, req);
-      if (!token) return new Response("Unauthorized", { status: 401 });
-      const user = await _userResolver(token);
-      if (!user) return new Response("Unauthorized", { status: 401 });
+      // AUTH-2: with the login flows enabled, the app SHELL is public — a
+      // browser must load the UI (code, not state) to show SignIn before it
+      // has a session. Everything stateful stays gated: /ws requires a valid
+      // session, /__aio/snapshot requires admin. Without authFlows the
+      // classic behavior is untouched: no token, no bytes.
+      const shellIsPublic = config.authFlows !== undefined;
+      if (!token && !shellIsPublic) {
+        return new Response("Unauthorized", { status: 401 });
+      }
+      const user = token ? await _userResolver(token) : null;
+      if (!user) {
+        if (token) recordAuthFail(clientKey, "invalid token (per-user mode)");
+        if (!shellIsPublic || pathname === "/ws") {
+          return new Response("Unauthorized", { status: 401 });
+        }
+        // public shell: fall through to static serving as anonymous
+        if (pathname === "/__aio/snapshot") {
+          return new Response("Unauthorized", { status: 401 });
+        }
+        const anonResp = await staticHandler.serveStatic(pathname, req);
+        anonResp.headers.set("X-Content-Type-Options", "nosniff");
+        return anonResp;
+      }
       if (url.searchParams.get("token")) _warnTokenInUrl();
       if (pathname === "/ws") return wsMgr.handleWs(req, user, clientKey);
       // Snapshot dumps/overwrites RAW state — it bypasses ui include/exclude
@@ -382,15 +463,35 @@ export function createServer(config: ServerConfig): ServerHandle {
 
     // Auth path 2: single shared token (--expose without users)
     if (config.token) {
+      if (authFailBudgetExceeded(clientKey)) {
+        return new Response("Too Many Requests", { status: 429 });
+      }
       const qToken = url.searchParams.get("token");
       const auth = req.headers.get("authorization");
       const hToken = auth?.startsWith("Bearer ") ? auth.slice(7) : null;
       const validQ = qToken !== null && _timingSafeEqual(qToken, config.token);
       const validH = hToken !== null && _timingSafeEqual(hToken, config.token);
       if (!validQ && !validH) {
+        // Only PRESENTED-and-wrong tokens burn budget — a tokenless probe
+        // (health check, crawler) is a plain 401, not an attack signal.
+        if (qToken !== null || hToken !== null) {
+          recordAuthFail(clientKey, "invalid token (shared-key mode)");
+        }
         return new Response("Unauthorized", { status: 401 });
       }
       if (validQ && !validH) _warnTokenInUrl();
+    }
+
+    // Snapshot dumps/overwrites RAW unfiltered state (bypasses ui.exclude /
+    // ui.include / forUser). Per-user mode admin-gates it above (auth path 1,
+    // where an admin may act remotely); in shared-token and public modes there
+    // is no role boundary, so it is same-machine-only — a shared token must not
+    // grant a network client a raw-state read or a full-state overwrite.
+    if (pathname === "/__aio/snapshot" && !_isLocalRequest(addr)) {
+      return new Response(
+        "Forbidden — /__aio/snapshot exposes unfiltered state; localhost or an authenticated admin only",
+        { status: 403 },
+      );
     }
 
     if (pathname === "/ws") return wsMgr.handleWs(req, undefined, clientKey);

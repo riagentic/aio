@@ -191,6 +191,14 @@ function loadProfileFile(file) {
   try {
     const pr = JSON.parse(fs.readFileSync(file, 'utf8'));
     if (!pr || pr.aio !== 1 || typeof pr.port !== 'number') return null;
+    // Defense-in-depth: a .aioapp is an untrusted file the user may open. The
+    // host builds a URL and is rendered into the connect page — reject anything
+    // that isn't a plain hostname / IPv4 / bracketed-IPv6 so it can't smuggle
+    // markup or a credential-bearing authority. (esc() also escapes quotes.)
+    if (pr.host != null && !/^[A-Za-z0-9.:_\-\[\]]+$/.test(String(pr.host))) {
+      return null;
+    }
+    if (!Number.isInteger(pr.port) || pr.port < 1 || pr.port > 65535) return null;
     return pr;
   } catch { return null; }
 }

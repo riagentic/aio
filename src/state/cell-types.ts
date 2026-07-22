@@ -231,6 +231,8 @@ export type CellAio<
   validate?: (state: any) => true | string;
   /** Persistence filter — matches user-facing `persist` config key */
   persist?: CellFieldFilter;
+  /** Network access rule — matches user-facing `access` config key (AUTH-1) */
+  access?: CellAccess;
   /** UI visibility filter — matches user-facing `ui` config key */
   ui?: CellFieldFilter;
   /** Optional per-user UI transform — receives structuredClone of filtered state */
@@ -283,6 +285,16 @@ export function checkReservedKeys(
 
 /** Cell definition returned by cell() — public surface is methods/generators/selectors only.
  *  Framework internals live under __aio. */
+/** Declarative cell access rule (AUTH-1) — who may act on this cell over the
+ *  NETWORK. `true` = any authenticated user, `"role"` = that exact role,
+ *  predicate = custom check per (user, method). Absent = open (as before).
+ *  Server-origin dispatches (effects, schedules, server code) always bypass —
+ *  the server trusts its own code. */
+export type CellAccess =
+  | boolean
+  | string
+  | ((user: FilterUser | undefined, method: string) => boolean);
+
 export type CellDef<
   Name extends string = string,
   Actions extends Creators = Creators,

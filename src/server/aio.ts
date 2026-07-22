@@ -51,7 +51,9 @@ import { getRegisteredCells } from "../state/cell-reactive.ts";
 
 // CLI + path resolution
 import { parseCli, printHelp, VERSION } from "./aio-cli.ts";
-import { findFreePort, isCompiled } from "./paths.ts";
+import { findFreePort, isCompiled, resolveDataDir } from "./paths.ts";
+import { openSessionStore } from "./sessions.ts";
+import { openUserStore } from "./auth-users.ts";
 import { resolveAppId } from "./single-instance-lock.ts";
 import { resolveAppKey } from "./app-key.ts";
 import { assertDenoVersion } from "./deno-version.ts";
@@ -609,8 +611,27 @@ async function _run<S, A, E>(
   // exposed), stopped by the shutdown orchestrator.
   const discoveryRef: { stop: (() => void) | null } = { stop: null };
 
+  // AUTH-1/2: session + password-user stores — one auth.db in the data dir,
+  // closed by the shutdown orchestrator. `auth: true` implies sessions (the
+  // login flow issues them); `sessions: true` alone is just the token store.
+  const authEnabled = !!config.auth;
+  const authOpts = typeof config.auth === "object" ? config.auth : {};
+  const sessionStore = (config.sessions || authEnabled)
+    ? openSessionStore(
+      join(resolveDataDir(appId), "auth.db"),
+      typeof config.sessions === "object"
+        ? config.sessions.ttlMs
+        : authOpts.ttlMs,
+    )
+    : null;
+  const userStore = authEnabled
+    ? openUserStore(join(resolveDataDir(appId), "auth.db"))
+    : null;
+
   // Shutdown orchestrator
   const { shutdown } = createShutdownOrchestrator({
+    sessionStore,
+    userStore,
     flushPersist: persistence.flushPersist,
     setShuttingDown: persistence.setShuttingDown,
     diagHooks,
@@ -655,6 +676,8 @@ async function _run<S, A, E>(
     getServer: () => server,
     udsBroadcastFull: () => udsCtrl.broadcastFull(),
     shutdown,
+    sessionStore,
+    userStore,
   });
 
   // --- Phase 4: start transport + lifecycle ---
@@ -662,6 +685,9 @@ async function _run<S, A, E>(
   const users = config.users;
   const _resolveUser = config.resolveUser
     ? (tok: string) => config.resolveUser!(tok, state)
+    : undefined;
+  const sessionResolver = sessionStore
+    ? (tok: string) => sessionStore.get(tok)
     : undefined;
   const _keyRes = (expose && !users && !_resolveUser)
     ? resolveAppKey(appId, (config as { key?: string | boolean }).key)
@@ -680,6 +706,22 @@ async function _run<S, A, E>(
     token,
     users,
     resolveUser: _resolveUser,
+    sessionResolver,
+    // AUTH-2/3: login-flow deps — aio-server adds the TLS-aware `secure` flag.
+    authFlows: userStore && sessionStore
+      ? {
+        users: userStore,
+        sessions: sessionStore,
+        signup: authOpts.signup !== false,
+        cookie: authOpts.cookie !== false,
+        ttlMs: authOpts.ttlMs,
+        appTitle: title,
+        sendMail: authOpts.sendMail,
+        requireVerified: authOpts.requireVerified,
+        totp: authOpts.totp,
+        oidc: authOpts.oidc,
+      }
+      : undefined,
     cliCert: cli.cert,
     cliKey: cli.key,
     cliTransport: cli.transport,
@@ -697,6 +739,7 @@ async function _run<S, A, E>(
       syncIntervalMs: config.syncIntervalMs,
       _cellPatchStrategies: config._cellPatchStrategies,
       _cellFilterFields: config._cellFilterFields,
+      _cellAccess: config._cellAccess,
       onConnect: config.onConnect,
       onDisconnect: config.onDisconnect,
       libraryMode: config.libraryMode,
@@ -730,6 +773,17 @@ async function _run<S, A, E>(
 
   // Lifecycle: globals, onStart, schedules, logging, client launch
   startLifecycle({
+    // Boot-report auth label — "password+totp+oidc", "sessions", or fallback.
+    authMode: authEnabled
+      ? [
+        "password",
+        authOpts.totp !== false ? "totp" : "",
+        authOpts.oidc ? "oidc" : "",
+        authOpts.requireVerified ? "verified-email" : "",
+      ].filter(Boolean).join("+")
+      : sessionStore
+      ? "sessions"
+      : undefined,
     appId,
     appVersion: config.appVersion ?? _denoJsonVersion() ?? "0.0.0",
     title,

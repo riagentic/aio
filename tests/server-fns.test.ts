@@ -68,6 +68,32 @@ Deno.test("invokeServerFn: outcome envelope — value, error, unknown", async ()
   _resetServerFns();
 });
 
+Deno.test("invokeServerFn: inherited Object.prototype members are NOT callable", async () => {
+  _resetServerFns();
+  serverFns("t-proto", { greet: () => "hi" });
+  // A client-controlled `name` must not resolve inherited builtins as if they
+  // were registered server functions (constructor, valueOf, hasOwnProperty…).
+  for (const name of ["constructor", "valueOf", "toString", "hasOwnProperty"]) {
+    const r = await invokeServerFn("t-proto", name, []);
+    assert(!r.ok, `${name} must not be invocable`);
+    assert(r.error.includes("not registered"), `${name}: ${r.error}`);
+  }
+  // The real own function still works.
+  assertEquals(await invokeServerFn("t-proto", "greet", []), {
+    ok: true,
+    value: "hi",
+  });
+  // Same guard on the lazy resolver proxy.
+  const fns = serverFn<{ greet: () => Promise<string> }>("t-proto");
+  await assertRejects(
+    () => (fns as unknown as { constructor: () => Promise<unknown> })
+      .constructor(),
+    Error,
+    "not",
+  );
+  _resetServerFns();
+});
+
 Deno.test("browser proxy: request/response over a fake transport, errors + parity", async () => {
   _resetSfnClient();
   _resetServerFns();

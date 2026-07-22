@@ -36,6 +36,7 @@ type SelectorAccessorFn<D> = D extends (s: any, ...args: infer A) => infer R
   : D extends { fn: (...a: any[]) => infer R } ? () => R
   : () => unknown;
 import type {
+  CellAccess,
   CellFieldFilter,
   CellVisibility,
   ScopedApp,
@@ -86,6 +87,11 @@ export type MethodsCellConfig<
   /** Persistence filter — "all" (default) persists everything, "none" persists nothing.
    *  { include: [...] } or { exclude: [...] } for field-level control. */
   persist?: CellFieldFilter<keyof NoInfer<S> & string>;
+  /** Network access rule (AUTH-1): who may call this cell's methods over the
+   *  network. `true` = any authenticated user, `"admin"` = that exact role,
+   *  `(user, method) => boolean` = custom. Absent = open (connection-level
+   *  auth only). Server-side code always bypasses. */
+  access?: CellAccess;
   /** UI visibility — "all" (default) exposes everything, "none" hides cell from clients.
    *  { include: [...] } or { exclude: [...] } for field-level control.
    *  Add forUser for per-user filtering on the already-filtered state. */

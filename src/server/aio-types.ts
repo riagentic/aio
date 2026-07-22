@@ -20,6 +20,28 @@ import type { ReduceBreakdown } from "../diagnostics/time-travel.ts";
 /** User identity — resolved from static token map or dynamic resolveUser hook */
 export type AioUser = { id: string; role: string };
 
+/** AUTH-2/3 options for `auth: {...}` (auth: true = all defaults). */
+export type AuthOptions = {
+  /** Open self-signup (default true; false = admin-seeded users only). */
+  signup?: boolean;
+  /** Session TTL in ms (default 30 days). */
+  ttlMs?: number;
+  /** Set the HttpOnly session cookie on login (default true). */
+  cookie?: boolean;
+  /** Email transport for verify/reset flows (SMTP/SES/console — yours). */
+  sendMail?: (msg: {
+    to: string;
+    subject: string;
+    text: string;
+  }) => Promise<void> | void;
+  /** Block login until the account's email is verified (needs sendMail). */
+  requireVerified?: boolean;
+  /** Allow TOTP 2FA enrollment (default true). */
+  totp?: boolean;
+  /** OIDC provider (authorization code + PKCE) — social/enterprise login. */
+  oidc?: import("./auth-oidc.ts").OidcConfig;
+};
+
 /** Dynamic user resolution hook — called with extracted token + current state.
  *  Return AioUser to authenticate, null to reject. Supports async (e.g. JWT verification). */
 export type ResolveUserFn<S = unknown> = (
@@ -94,6 +116,14 @@ export type AioConfig<S, A, E> = {
    *  `true` = a stable key generated once and persisted in the data dir. */
   key?: string | boolean;
   resolveUser?: ResolveUserFn<S>; // dynamic user resolution — overrides users if both set (AIO-171)
+  /** AUTH-1: enable the SQLite session store — `app.sessions.issue(user)`
+   *  returns a bearer token that authenticates like any users/resolveUser
+   *  token, with TTL + revocation. `true` = 30-day default TTL. */
+  sessions?: boolean | { ttlMs?: number };
+  /** AUTH-2/3: built-in password auth — signup/login/logout + email verify,
+   *  password reset, TOTP 2FA, OIDC (/__aio/auth/*), PBKDF2 user store,
+   *  HttpOnly session cookie. Implies `sessions`. */
+  auth?: boolean | AuthOptions;
   ui?: UiConfig;
   port?: number; // default: 8000
   baseDir?: string; // default: ./src
@@ -172,6 +202,8 @@ export type AioConfig<S, A, E> = {
   _cellPatchStrategies?: Map<string, CellPatchStrategy>;
   /** Internal: field sets for "filter" strategy cells */
   _cellFilterFields?: Map<string, PatchFilterFields>;
+  /** Internal: per-cell declarative network-access rules (AUTH-1) */
+  _cellAccess?: Map<string, import("../state/cell-types.ts").CellAccess>;
 };
 
 /** Handle returned by aio.run() — dispatch actions, read state, or shut down */
@@ -181,6 +213,13 @@ export type AioApp<S = unknown, A = unknown> = {
   snapshot?: () => string; // server-only (undefined in standalone)
   loadSnapshot?: (json: string) => void; // server-only (undefined in standalone)
   db?: DB; // async SQLite — query/execute/transaction (undefined in standalone)
+  /** AUTH-1 session API — present when `sessions:` is enabled in aio.run().
+   *  issue/get/refresh/revoke/revokeUser bearer-token sessions (SQLite). */
+  sessions?: import("./sessions.ts").SessionStore;
+  /** AUTH-2 user API — present when `auth:` is enabled. create/verify/
+   *  setPassword/setRole password users (PBKDF2, SQLite). Use for seeding
+   *  admins: `app.auth.create("root", pw, "admin")`. */
+  auth?: import("./auth-users.ts").UserStore;
   close: () => Promise<void>;
   mode?: string; // 'standalone' in Android WebView builds — branch effects accordingly
   port?: number; // server port — available after aio.run(), useful for connectCli()
@@ -226,6 +265,10 @@ export type CellsConfig = {
   /** --expose auth (see CellsConfig.key). */
   key?: string | boolean;
   resolveUser?: ResolveUserFn;
+  /** AUTH-1: enable the SQLite session store (see AioConfig.sessions). */
+  sessions?: boolean | { ttlMs?: number };
+  /** AUTH-2/3: built-in password auth (see AioConfig.auth). */
+  auth?: boolean | AuthOptions;
   db?: Record<string, TableDef>;
   perfCheck?: "on" | "off";
   perfBudget?: PerfBudget;
