@@ -163,6 +163,7 @@ export async function handleAuthFlow(
       sessions: cfg.sessions,
       ttlMs: cfg.ttlMs,
       cookie: sessionCookie,
+      secure: cfg.secure,
     });
   }
   if (cfg.oidc && route === "GET oidc/callback") {
@@ -172,6 +173,7 @@ export async function handleAuthFlow(
       sessions: cfg.sessions,
       ttlMs: cfg.ttlMs,
       cookie: sessionCookie,
+      secure: cfg.secure,
     });
   }
 
@@ -201,6 +203,13 @@ export async function handleAuthFlow(
         user = await cfg.users.create(id, password, { email });
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
+        // A 409 is a direct "this id exists" oracle. It can't be hidden (a
+        // legit signer-up must learn the name is taken), but feeding the
+        // per-IP budget means scripted enumeration hits 429 fast — the guard
+        // at the top of this case only helps if failures actually record.
+        if (msg === "user_exists") {
+          recordAuthFail(clientKey, `signup collision for id=${id}`);
+        }
         return json(msg === "user_exists" ? 409 : 400, { error: msg });
       }
       if (email && cfg.sendMail) {
@@ -334,19 +343,39 @@ export async function handleAuthFlow(
 
     case "reset/request": {
       if (!cfg.sendMail) return MAIL_OFF();
+      // Rate-cap the mail trigger (per-IP budget) so a known-id attacker can't
+      // mail-bomb an inbox / run up send costs. Still ALWAYS 200 below.
+      if (authFailBudgetExceeded(clientKey)) {
+        return json(200, { ok: true }); // silent — reveal nothing
+      }
       const b = await body();
       const id = str(b?.id);
-      // ALWAYS 200 — a reset probe must not reveal whether the account exists.
+      // ALWAYS 200 at the SAME latency — a reset probe must reveal nothing
+      // about whether the account exists. Two guards make the timing uniform
+      // for existing vs missing ids: (1) issue a one-shot token on BOTH paths
+      // (a decoy on the miss), so the SQLite write happens either way; (2) the
+      // mail send is fire-and-forget (not awaited), so the SMTP round-trip is
+      // never on the response path.
       if (id) {
+        recordAuthFail(clientKey, `reset request for id=${id}`); // budget the trigger
         const rec = cfg.users.get(id);
+        // Always issue a token (decoy for the miss) → identical write cost.
+        const token = cfg.users.issueToken(
+          "reset",
+          rec ? id : ` decoy`,
+          RESET_TTL_MS,
+        );
         if (rec?.email) {
-          const token = cfg.users.issueToken("reset", id, RESET_TTL_MS);
-          await cfg.sendMail({
-            to: rec.email,
-            subject: `Reset your ${cfg.appTitle} password`,
-            text:
-              `Your password reset token (valid 15 minutes): ${token}\n\nPOST { token, password } to /__aio/auth/reset.`,
-          });
+          void Promise.resolve(
+            cfg.sendMail({
+              to: rec.email,
+              subject: `Reset your ${cfg.appTitle} password`,
+              text:
+                `Your password reset token (valid 15 minutes): ${token}\n\nPOST { token, password } to /__aio/auth/reset.`,
+            }),
+          ).catch((e) =>
+            console.warn(`[aio] auth: reset mail send failed — ${e}`)
+          );
         }
       }
       return json(200, { ok: true });

@@ -3,8 +3,11 @@
 import type { MemoryConfig } from "./memory-monitor.ts";
 import type { VitalsConfig } from "../vitals/types.ts";
 
-/** Top-level diagnostics config — passed to aio.run({ diagnostics: ... }) */
-export type DiagnosticsConfig = false | {
+/** Top-level diagnostics config — passed to aio.run({ diagnostics: ... }).
+ *  `true` (or omitted) = defaults on; `false` = off; object = tuned. The
+ *  `boolean | Config` shape matches every other toggle-or-configure field
+ *  (sessions, auth, logging, dispatchStorm). */
+export type DiagnosticsConfig = boolean | {
   dev?: DiagnosticsOptions;
   prod?: DiagnosticsOptions;
   onDiagnostic?: (event: import("../vitals/types.ts").DiagEvent) => void;
@@ -64,7 +67,10 @@ export function resolveOptions(
 ): DiagnosticsOptions | false {
   if (config === false) return false;
   const defaults = isProd ? PROD_DEFAULTS : DEV_DEFAULTS;
-  const overrides = isProd ? config.prod : config.dev;
+  // `true` = defaults on, no overrides.
+  const overrides = config === true
+    ? undefined
+    : (isProd ? config.prod : config.dev);
   if (!overrides) return { ...defaults };
   return { ...defaults, ...overrides };
 }

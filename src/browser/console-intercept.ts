@@ -22,6 +22,10 @@ export function setConsoleSend(send: SendFn | null): void {
 export function _serialize(args: unknown[]): string {
   const parts = args.map((a) => {
     if (typeof a === "string") return a;
+    // Errors JSON-stringify to "{}" (no enumerable props) WITHOUT throwing, so
+    // the catch below never ran — a forwarded `console.error(err)` showed "{}".
+    // Render them readably up front.
+    if (a instanceof Error) return `${a.name}: ${a.message}`;
     try {
       return JSON.stringify(a);
     } catch {

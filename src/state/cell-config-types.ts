@@ -54,9 +54,9 @@ export type MethodsCellConfig<
   state: S;
   methods: M;
   /** Cell scope. `"client"` cells live in the browser only — never registered
-   *  with the server, never synced, never persisted (unless `persist: "local"`).
-   *  Methods are bound locally against a signal-backed slice; each tab has its
-   *  own copy. Sync methods only in v1 — async methods throw at `cell()` time. */
+   *  with the server, never synced, never server-persisted. Methods are bound
+   *  locally against a signal-backed slice; each tab has its own copy. Sync
+   *  methods only in v1 — async methods throw at `cell()` time. */
   scope?: "client";
   /** Cancellation triggers per ASYNC METHOD — { methodKey: [actionsOrTypes] }.
    *  A trigger action aborts the method's in-flight calls; the method observes

@@ -21,10 +21,18 @@ export interface SyncHandlerDeps {
   /** Apply an accepted op to the live app state (normal dispatch path) —
    *  without this the op-log and the server's own state diverge, and
    *  compaction snapshots (built from live state) would drop client ops. */
-  dispatch: (action: { type: string; payload?: unknown }) => void;
+  dispatch: (
+    action: { type: string; payload?: unknown; _user?: unknown },
+  ) => void;
   db: DB;
   syncCellIds: string[];
   getCellState: (cell: string) => Record<string, unknown>;
+  /** AUTH-1 parity for the sync path: may `user` mutate `cell` via a sync op?
+   *  Undefined = no access rules (open). The `action` dispatch path is gated in
+   *  aio-server.ts; sync ops route through a different dispatch, so the SAME
+   *  rule must be enforced here or an `access`-gated cell that is also
+   *  `sync: true` would be freely mutable by any connected client. */
+  accessCheck?: (cell: string, user: unknown) => boolean;
   /** Send raw message to all connected clients except the given socket.
    *  Mutable ref: set after server creation to break circular dependency. */
   broadcastRaw: { fn: (msg: string, exclude?: WebSocket) => void };
@@ -129,6 +137,25 @@ export function createServerSyncHandler(
         );
         return;
       }
+      // AUTH-1: enforce the cell's declarative `access` rule on the sync path
+      // too. Without this, a client that passes /ws (any authed user in
+      // per-user mode) could mutate an `access:"admin"` cell via an op frame,
+      // bypassing the gate the `action` path enforces. Reject before persist.
+      if (deps.accessCheck && !deps.accessCheck(op.cell, meta.user)) {
+        deps.log.warn(
+          `[sync:server] op for access-gated cell "${op.cell}" denied for ${
+            (meta.user as { id?: string })?.id ?? "anonymous client"
+          } — dropping`,
+        );
+        try {
+          socket.send(enc("op-rejected", {
+            opId: op.id,
+            cell: op.cell,
+            reason: "access denied",
+          }));
+        } catch { /* client gone */ }
+        return;
+      }
 
       await withLock(op.cell, async () => {
         clock.receive(op.hlc);
@@ -161,6 +188,7 @@ export function createServerSyncHandler(
             deps.dispatch({
               type: `${op.cell}:${op.action}`,
               payload: op.payload,
+              _user: meta.user, // trusted connection identity (server-resolved)
             });
             // D11: the server's re-execution is the authority — if the
             // validate hook refused this op, the op is POISON: delete it
@@ -227,7 +255,7 @@ export function createServerSyncHandler(
       });
     },
 
-    handleSync(raw, _meta, socket) {
+    handleSync(raw, meta, socket) {
       const r = raw as Record<string, unknown>;
       if (
         !r || typeof r !== "object" ||
@@ -255,6 +283,13 @@ export function createServerSyncHandler(
             continue;
           }
           if (!syncCells.has(pending.cell)) continue;
+          // Same access gate as handleOp — pending ops are client-submitted.
+          if (deps.accessCheck && !deps.accessCheck(pending.cell, meta.user)) {
+            deps.log.warn(
+              `[sync:server] pending op for access-gated cell "${pending.cell}" denied — dropping`,
+            );
+            continue;
+          }
           await withLock(pending.cell, async () => {
             clock.receive(pending.hlc);
             const serverHlc = clock.tick();
@@ -283,6 +318,7 @@ export function createServerSyncHandler(
                 deps.dispatch({
                   type: `${pending.cell}:${pending.action}`,
                   payload: pending.payload,
+                  _user: meta.user,
                 });
               } catch (e) {
                 deps.log.error(

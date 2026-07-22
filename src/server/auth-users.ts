@@ -99,9 +99,16 @@ export interface AuthUserRecord extends AioUser {
 /** One-shot token kinds — each namespace is independent. */
 export type TokenKind = "verify" | "reset" | "totp" | "oidc";
 
+// Convention for this interface: methods THROW only on invalid INPUT a
+// programmer must fix (a policy violation — "user_exists", "invalid_id",
+// "password_too_short"), and RETURN a boolean/null for the normal "not found"
+// outcome. So `create`/`setPassword` can throw a policy error; every mutator
+// returns `false` when the id simply doesn't exist. Thrown codes are
+// snake_case (they double as the HTTP wire error); catch and map for
+// programmatic callers (`app.auth.create`).
 export interface UserStore {
-  /** Create a user (throws "user_exists" / "invalid_id" /
-   *  "password_too_short"). Role defaults to "user". */
+  /** Create a user. THROWS "user_exists" / "invalid_id" /
+   *  "password_too_short" (policy). Role defaults to "user". */
   create(
     id: string,
     password: string,
@@ -111,7 +118,8 @@ export interface UserStore {
    *  Unknown ids burn a real PBKDF2 so timing doesn't reveal existence.
    *  LOCK_AFTER consecutive failures lock the account for 15 minutes. */
   verify(id: string, password: string): Promise<AioUser | "locked" | null>;
-  /** Change password (false when the user doesn't exist). */
+  /** Change password. THROWS "password_too_short" (policy); returns false
+   *  when the user doesn't exist. */
   setPassword(id: string, newPassword: string): Promise<boolean>;
   setRole(id: string, role: string): boolean;
   setEmail(id: string, email: string): boolean;
@@ -258,8 +266,14 @@ export function openUserStore(path: string): UserStore {
       // paths all cost one PBKDF2, so timing reveals nothing.
       const ok = await verifyPassword(password, row?.pw ?? DECOY);
       if (!row) return null;
-      if (row.locked_until > now) return "locked";
+      // Wrong password (or unknown user) ALWAYS returns a generic null — the
+      // "locked" signal is never handed to a caller who can't prove they know
+      // the password, so a wrong-guessing attacker can't distinguish
+      // exists/locked/absent by the response (no account enumeration, no
+      // lock-state oracle). Only the correct-password branch below can reveal
+      // a lock — to the legitimate account owner.
       if (!ok) {
+        if (row.locked_until > now) return null; // already locked — don't extend
         const fails = row.fails + 1;
         if (fails >= LOCK_AFTER) {
           updFails.run(0, now + LOCK_MS, id);
@@ -273,6 +287,9 @@ export function openUserStore(path: string): UserStore {
         }
         return null;
       }
+      // Password is correct. If the account is under an active lockout, tell
+      // the owner (they can wait it out) — but only now, past the password gate.
+      if (row.locked_until > now) return "locked";
       if (row.fails > 0 || row.locked_until > 0) updFails.run(0, 0, id);
       return { id: row.id, role: row.role };
     },
