@@ -55,6 +55,31 @@ export function createCellFromMethods<
   checkReservedKeys(name, methodNames, "method");
   checkReservedKeys(name, selectorNames, "selector");
 
+  // AUTH-1 footgun guard: `access` is boolean | role-string | predicate, so a
+  // string is read as a ROLE NAME. `access: "none"` would silently grant only
+  // the (nonexistent) role "none" — the opposite of the intended "deny". The
+  // words that look like sentinels are almost always a mistake; fail loud with
+  // the fix. (Unlike ui/persist, access has no "all"/"none" filter vocabulary.)
+  if (typeof config.access === "string") {
+    const reserved = new Set([
+      "none",
+      "all",
+      "true",
+      "false",
+      "public",
+      "private",
+      "any",
+    ]);
+    if (reserved.has(config.access.toLowerCase())) {
+      throw new Error(
+        `cell("${name}"): access: "${config.access}" is read as a ROLE name, ` +
+          `not a sentinel. Use access: true (any authenticated user), ` +
+          `access: false (deny all network access — server-side only), or a ` +
+          `real role like access: "admin".`,
+      );
+    }
+  }
+
   // Callable-name registry (methods only — the one style, D1); state-key
   // collision check below reads it.
   const allNames = new Map<string, string>();

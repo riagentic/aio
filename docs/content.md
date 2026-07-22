@@ -120,6 +120,7 @@
 - [Upgrade: 1.0.0-alpha28 → 1.0.0-alpha29](upgrade/from-alpha28-to-alpha29.md) — alpha29's headline is the wire-protocol v2 bump.
 - [Upgrade: 1.0.0-alpha29 → 1.0.0-alpha30](upgrade/from-alpha29-to-alpha30.md) — alpha30's headline is built-in enterprise auth — everything is opt-in, so
 - [Upgrade from v1.0.0-alpha3 to v1.0.0-alpha4](upgrade/from-alpha3-to-alpha4.md) — If you rely on effects completing after timeout (e.g., fire-and-forget with a
+- [Upgrade: 1.0.0-alpha30 → 1.0.0-alpha31](upgrade/from-alpha30-to-alpha31.md) — A sanity & cleanup release — no new features.
 - [Upgrade from v1.0.0-alpha4 to v1.0.0-alpha5](upgrade/from-alpha4-to-alpha5.md) — None.
 - [Upgrade from v1.0.0-alpha5 to v1.0.0-alpha6](upgrade/from-alpha5-to-alpha6.md) — None.
 - [Upgrade from v1.0.0-alpha6 to v1.0.0-alpha7](upgrade/from-alpha6-to-alpha7.md) — mod.ts no longer re-exports renderer primitives.

@@ -437,7 +437,10 @@ function _handleUDSConn(
             case "op": {
               const client = clientMap.get(conn);
               if (!syncHandler) {
-                log.warn("uds", "op received but sync is not configured — dropping");
+                log.warn(
+                  "uds",
+                  "op received but sync is not configured — dropping",
+                );
                 continue;
               }
               const op = frame.d as Record<string, unknown> | undefined;
@@ -518,8 +521,13 @@ function _handleUDSConn(
               }
               // Strip client-set identity provenance — parity with the WS
               // server; a network-sourced `_user` must never become the
-              // trusted dispatch identity.
+              // trusted dispatch identity, and a forged `payload._origin` must
+              // not steer the cell `access` method check (see server-ws.ts).
               delete (action as Record<string, unknown>)._user;
+              const _pl = (action as { payload?: unknown }).payload;
+              if (_pl && typeof _pl === "object") {
+                delete (_pl as Record<string, unknown>)._origin;
+              }
               onAction(action);
               // AIO-402: per-action ack — parity with the WS server. Settles
               // the Promise of an awaited method call over UDS+IPC.

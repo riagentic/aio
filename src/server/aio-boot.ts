@@ -85,6 +85,9 @@ export interface BootConfig<S> {
   persistDebounceMs: number;
   dbSchema: Record<string, TableDef> | undefined;
   syncCellIds: string[];
+  /** Per-cell declarative access rules — enforced on the sync-op path (AUTH-1
+   *  parity with the action-dispatch gate in aio-server.ts). */
+  cellAccess?: Map<string, import("../state/cell-types.ts").CellAccess>;
   /** Per-cell version + migration hooks — keyed by cell id */
   cellMigrations?: Map<string, CellMigrationInfo>;
   /** User hook — transform state after restore */
@@ -213,10 +216,26 @@ export async function bootStorage<S>(
       const { createServerSyncHandler } = await import(
         "../sync/server-handler.ts"
       );
+      // AUTH-1 parity: build the sync-path access checker from the same
+      // per-cell rules the action path uses. A cell with no rule → open.
+      const { cellAccessAllowed } = await import("./server-auth.ts");
+      const cellAccess = cfg.cellAccess;
+      const accessCheck = cellAccess && cellAccess.size > 0
+        ? (cell: string, user: unknown) => {
+          const rule = cellAccess.get(cell);
+          return rule === undefined ||
+            cellAccessAllowed(
+              rule,
+              user as import("./aio-types.ts").AioUser | undefined,
+              "sync",
+            );
+        }
+        : undefined;
       syncHandler = createServerSyncHandler({
         dispatch: (a) => syncDispatchRef.fn(a),
         db: asyncDb,
         syncCellIds,
+        accessCheck,
         getCellState: (cell: string) =>
           (getState() as Record<string, Record<string, unknown>>)[cell] ?? {},
         broadcastRaw: syncBroadcastRef,

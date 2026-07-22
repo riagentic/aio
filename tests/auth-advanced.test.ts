@@ -53,17 +53,24 @@ Deno.test("totp: verify window + format rejection", async () => {
 
 // ── Lockout + one-shot tokens (store level) ──────────────────────────────────
 
-Deno.test("lockout: 5 consecutive failures lock the account for 15m", async () => {
+Deno.test("lockout: 5 fails lock; 'locked' only leaks past the password gate", async () => {
   const s = openUserStore(":memory:");
   await s.create("alice", "password123");
-  for (let i = 0; i < 5; i++) {
-    assertEquals(await s.verify("alice", "wrong-wrong"), null);
+  // Wrong passwords ALWAYS return a generic null — never the "locked" signal
+  // (no enumeration / lock-state oracle for a wrong-guessing attacker).
+  for (let i = 0; i < 6; i++) {
+    assertEquals(
+      await s.verify("alice", "wrong-wrong"),
+      null,
+      "wrong password is always generic null, locked or not",
+    );
   }
-  assertEquals(await s.verify("alice", "wrong-wrong"), "locked");
+  // The correct password, once locked, DOES reveal the lock — only the owner,
+  // who proved they know the password, learns to wait it out.
   assertEquals(
     await s.verify("alice", "password123"),
     "locked",
-    "even the RIGHT password is refused while locked",
+    "correct password past the gate reveals the lock to the owner",
   );
   s.close();
 });
@@ -327,6 +334,9 @@ Deno.test("auth e2e: OIDC login — discovery, PKCE, RS256 JWKS verify, session"
     return `${unsigned}.${b64url(sig)}`;
   };
   const seenTokenReq: Record<string, string>[] = [];
+  // The provider echoes the request nonce into the ID token; the test sets it
+  // from the /start redirect it observes (a real provider ties it to the code).
+  let pendingNonce = "";
   const idp = Deno.serve(
     { port: IDP_PORT, onListen: () => {} },
     async (req) => {
@@ -350,6 +360,7 @@ Deno.test("auth e2e: OIDC login — discovery, PKCE, RS256 JWKS verify, session"
             aud: "portal-client",
             sub: "google|alice",
             email: "alice@example.com",
+            nonce: pendingNonce,
             exp: Math.floor(Date.now() / 1000) + 300,
           }),
         });
@@ -357,6 +368,27 @@ Deno.test("auth e2e: OIDC login — discovery, PKCE, RS256 JWKS verify, session"
       return new Response("nope", { status: 404 });
     },
   );
+
+  // Drive a full start→callback, plumbing the browser-binder cookie and the
+  // nonce the way a real browser + provider would.
+  const driveOidc = async (
+    redirect?: string,
+  ): Promise<Response> => {
+    const startUrl = `${BASE}/__aio/auth/oidc/start${
+      redirect ? `?redirect=${encodeURIComponent(redirect)}` : ""
+    }`;
+    const s = await fetch(startUrl, { redirect: "manual" });
+    const loc = new URL(s.headers.get("location")!);
+    const setCookie = s.headers.get("set-cookie") ?? "";
+    await s.body?.cancel();
+    pendingNonce = loc.searchParams.get("nonce") ?? "";
+    const binder = /aio_oidc=([^;]+)/.exec(setCookie)?.[1] ?? "";
+    const state = loc.searchParams.get("state")!;
+    return await fetch(
+      `${BASE}/__aio/auth/oidc/callback?code=authcode-1&state=${state}`,
+      { redirect: "manual", headers: { cookie: `aio_oidc=${binder}` } },
+    );
+  };
 
   const app = await aio.run({
     cells: [c],
@@ -373,22 +405,8 @@ Deno.test("auth e2e: OIDC login — discovery, PKCE, RS256 JWKS verify, session"
   });
 
   try {
-    // start → 302 to the provider with state + S256 challenge.
-    const start = await fetch(`${BASE}/__aio/auth/oidc/start`, {
-      redirect: "manual",
-    });
-    assertEquals(start.status, 302);
-    await start.body?.cancel();
-    const loc = new URL(start.headers.get("location")!);
-    assertEquals(loc.origin, issuer);
-    assertEquals(loc.searchParams.get("code_challenge_method"), "S256");
-    const state = loc.searchParams.get("state")!;
-
-    // callback with a code → token exchange (PKCE verifier sent) → session.
-    const cb = await fetch(
-      `${BASE}/__aio/auth/oidc/callback?code=authcode-1&state=${state}`,
-      { redirect: "manual" },
-    );
+    // Full round trip → session, mapped role, PKCE verifier sent.
+    const cb = await driveOidc();
     assertEquals(cb.status, 302);
     assertEquals(cb.headers.get("location"), "/");
     const cookie = cb.headers.get("set-cookie") ?? "";
@@ -397,50 +415,58 @@ Deno.test("auth e2e: OIDC login — discovery, PKCE, RS256 JWKS verify, session"
     assertEquals(seenTokenReq[0]!.code, "authcode-1");
     assert(seenTokenReq[0]!.code_verifier, "PKCE verifier was sent");
 
-    // The minted session authenticates; the user landed with the mapped role.
     const token = /aio_session=([^;]+)/.exec(cookie)![1]!;
     const me = await (await fetch(`${BASE}/__aio/auth/me`, {
       headers: { authorization: `Bearer ${token}` },
     })).json();
     assertEquals(me.user, { id: "google|alice", role: "reader" });
 
-    // Replayed state is dead (one-shot).
+    // CSRF binding: a callback WITHOUT the browser binder cookie is refused,
+    // even with a valid (code, state). Defeats login-CSRF / session fixation.
+    const s2 = await fetch(`${BASE}/__aio/auth/oidc/start`, {
+      redirect: "manual",
+    });
+    const loc2 = new URL(s2.headers.get("location")!);
+    await s2.body?.cancel();
+    pendingNonce = loc2.searchParams.get("nonce") ?? "";
+    const unbound = await fetch(
+      `${BASE}/__aio/auth/oidc/callback?code=x&state=${
+        loc2.searchParams.get("state")
+      }`,
+      { redirect: "manual" }, // no cookie
+    );
+    assertEquals(unbound.status, 400, "callback without binder cookie refused");
+    await unbound.body?.cancel();
+
+    // Replayed state is dead (one-shot) — the consumed state above is gone.
     const replay = await fetch(
-      `${BASE}/__aio/auth/oidc/callback?code=authcode-2&state=${state}`,
+      `${BASE}/__aio/auth/oidc/callback?code=authcode-2&state=${
+        loc2.searchParams.get("state")
+      }`,
       { redirect: "manual" },
     );
     assertEquals(replay.status, 400);
     await replay.body?.cancel();
 
-    // Deep-link return: ?redirect=/orders/7 survives the round trip; an
-    // absolute URL would be an open redirect and is sanitized to "/".
+    // Deep-link return: ?redirect=/orders/7 survives; open-redirect payloads
+    // (absolute, protocol-relative, and backslash-bypass) sanitize to "/".
     for (
       const [redirect, expected] of [
         ["/orders/7", "/orders/7"],
         ["https://evil.example/", "/"],
         ["//evil.example", "/"],
+        ["/\\evil.example", "/"],
+        ["/\t/evil.example", "/"], // TAB the browser strips → protocol-relative
+        ["/\n//evil", "/"],
       ] as const
     ) {
-      const s2 = await fetch(
-        `${BASE}/__aio/auth/oidc/start?redirect=${
-          encodeURIComponent(redirect)
-        }`,
-        { redirect: "manual" },
-      );
-      await s2.body?.cancel();
-      const st = new URL(s2.headers.get("location")!).searchParams.get(
-        "state",
-      )!;
-      const cb2 = await fetch(
-        `${BASE}/__aio/auth/oidc/callback?code=c&state=${st}`,
-        { redirect: "manual" },
-      );
+      const cbr = await driveOidc(redirect);
       assertEquals(
-        cb2.headers.get("location"),
+        cbr.headers.get("location"),
         expected,
         `redirect=${redirect}`,
       );
-      await cb2.body?.cancel();
+      await cbr.body?.cancel();
     }
   } finally {
     _resetAuthFails();

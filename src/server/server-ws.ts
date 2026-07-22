@@ -515,7 +515,10 @@ export function createWsManager(deps: WsDeps): WsManager {
     }
     const frame = dec(e.data);
     if (!frame) {
-      log.warn("ws", `ws: undecodable frame from ${meta.id.slice(0, 8)} — dropped`);
+      log.warn(
+        "ws",
+        `ws: undecodable frame from ${meta.id.slice(0, 8)} — dropped`,
+      );
       return;
     }
     switch (frame.t) {
@@ -571,7 +574,9 @@ export function createWsManager(deps: WsDeps): WsManager {
       }
       case "tt-cmd":
         if (deps.onTTCommand) {
-          _handleTTCommand((frame.d as { cmd?: string } | undefined)?.cmd ?? "");
+          _handleTTCommand(
+            (frame.d as { cmd?: string } | undefined)?.cmd ?? "",
+          );
         }
         return;
       case "vitals-ping":
@@ -655,6 +660,17 @@ export function createWsManager(deps: WsDeps): WsManager {
     // undefined, so a spoofed `_user:{role:"admin"}` would otherwise become the
     // trusted identity. The server sets the real `_user` itself downstream.
     delete (parsed as Record<string, unknown>)._user;
+    // Same for `payload._origin` — the async-batcher sets it SERVER-side to the
+    // originating method name, and the cell `access` gate reads it to pick the
+    // method for a method-discriminating predicate. A network client could
+    // forge `payload:{_origin:"read"}` on a `cell:delete` action to be checked
+    // as "read" while the reducer still runs delete. Network actions carry no
+    // legitimate _origin (batching is server-side) → strip it, forcing the
+    // gate to fall back to the trustworthy action-type suffix.
+    const _pl = (parsed as { payload?: unknown }).payload;
+    if (_pl && typeof _pl === "object") {
+      delete (_pl as Record<string, unknown>)._origin;
+    }
     deps.debug(
       `ws: recv ${JSON.stringify(parsed)} user=${meta.user?.id ?? "anon"}`,
     );

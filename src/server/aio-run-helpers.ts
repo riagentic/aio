@@ -301,14 +301,15 @@ export function initDiagAndVitals(
   vitalsSystem: VitalsSystem | undefined;
   diagResolvedOpts: DiagnosticsOptions | false;
 } {
-  const diagHooks = diagConfig === false
+  // `true`/omitted → defaults on ({}); `false` → off; object → tuned.
+  const diagOn = diagConfig !== false;
+  const diagCfg = (diagConfig === true || diagConfig == null) ? {} : diagConfig;
+  const diagHooks = !diagOn
     ? null
-    : initDiagnostics(diagConfig ?? {}, prod, getLogDir());
+    : initDiagnostics(diagCfg, prod, getLogDir());
   if (diagHooks && cellNames) diagHooks.onStart(cellNames);
 
-  const diagResolvedOpts = diagConfig === false
-    ? false
-    : resolveDiagOptions(diagConfig ?? {}, prod);
+  const diagResolvedOpts = !diagOn ? false : resolveDiagOptions(diagCfg, prod);
   let vitalsSystem: VitalsSystem | undefined;
   if (diagResolvedOpts && diagResolvedOpts.vitals !== false) {
     const vitalsConfig = typeof diagResolvedOpts.vitals === "object"

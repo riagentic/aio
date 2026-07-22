@@ -8,6 +8,26 @@ import { enc } from "../src/protocol/envelope.ts";
 
 const PORT = 9530 + (Deno.pid % 200);
 
+Deno.test("cell access: sentinel-looking role strings fail loud at definition", async () => {
+  const { cell } = await import("../mod.ts");
+  // access is boolean | role | predicate — a string is a ROLE. The words that
+  // look like sentinels ("none"/"all"/…) are almost always a mistake (a dev
+  // meaning access: false), so they throw with the fix instead of silently
+  // granting the nonexistent role.
+  for (const bad of ["none", "None", "all", "true", "false", "public"]) {
+    let threw = false;
+    try {
+      cell(`vault-${bad}`, { state: { x: 0 }, access: bad, methods: {} });
+    } catch (e) {
+      threw = true;
+      assert((e as Error).message.includes("ROLE name"), (e as Error).message);
+    }
+    assert(threw, `access: "${bad}" must throw`);
+  }
+  // A real role name is fine.
+  cell("vault-ok", { state: { x: 0 }, access: "admin", methods: {} });
+});
+
 Deno.test("cellAccessAllowed: rule matrix", () => {
   const admin = { id: "a", role: "admin" };
   const viewer = { id: "v", role: "viewer" };

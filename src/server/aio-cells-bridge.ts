@@ -60,7 +60,8 @@ export function buildLegacyConfig(
   // flows through beforeReduce, so frequency is measured (and optionally
   // circuit-broken) before reducers/effects/logging amplify the loop.
   const storm = fc.dispatchStorm === false ? null : createStormDetector({
-    ...(fc.dispatchStorm ?? {}),
+    // `true`/omitted → defaults; object → tuned; false → disabled (above).
+    ...(typeof fc.dispatchStorm === "object" ? fc.dispatchStorm : {}),
     onStorm: (info) => {
       if (info.rate === 0) {
         log.info(
@@ -139,6 +140,7 @@ export function buildLegacyConfig(
     wsLimits: fc.wsLimits,
     allowedOrigins: fc.allowedOrigins,
     strictOrigin: fc.strictOrigin,
+    trustProxyHeader: fc.trustProxyHeader,
     schedules: fc.schedules,
     appVersion: fc.appVersion,
     transport: fc.transport,
