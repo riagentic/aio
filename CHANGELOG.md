@@ -1,5 +1,48 @@
 # Changelog
 
+## 1.0.0-alpha32 — aui, the aio app manager (2026-07-23)
+
+The headline is a new example that is really a product: **aui**, a visual
+manager for every aio app on your machine — the GUI counterpart to the `am` CLI.
+Discover apps (running or on disk), inspect each one (cells, live state,
+metrics, config, errors, schedules), browse its source tree, run its tasks, and
+start/stop/restart it. aui is itself an aio app (one server-side `manager`
+cell + an AIR/JSX UI), so it doubles as the framework's most complete dogfood.
+
+**What aui does.** A searchable sidebar of projects (running ●/stopped ○) with a
+button to scaffold new apps; a tabbed detail panel — Overview · Cells · State ·
+Metrics · Tasks · Files. Discovery walks up from the launch dir (plus
+`~/aio-apps` and `$AUI_ROOTS`) so it finds your apps with zero config. Per-app
+data comes from each app's trojan API; CPU/memory from `ps`. The live-state tree
+loads on demand and is size-capped, the task runner is cancellable with a
+5-minute cap (so `dev`/`watch` can't wedge it), and the file browser shows the
+whole source tree minus deps/build junk. See `examples/aui/README.md`.
+
+**Framework changes it needed.** A new trojan `cells` route exposes each cell's
+public method names (internal `__set*`/`__error`/`__effects` keys filtered out)
+so a manager UI can list and invoke methods.
+
+**Persistence: the phantom ~64KB "KV limit" is gone for good.** aio has been
+SQLite-only for a while, but a stale KV-era size guard survived and could
+degrade/refuse large cell state. Removed at the source (not just renamed) with a
+new `persist-large-cell` test proving multi-hundred-KB cell state round-trips.
+
+**Electron: `deno task dev` just works.** The electron shell auto-installs the
+runtime on first run (hardened
+`deno install --allow-scripts=npm:electron
+npm:electron` + a bin-ready check),
+so a fresh clone boots without a manual install step. The generated `main.cjs`
+now installs a **main-process crash guard**: an uncaught exception no longer
+pops the intrusive native "A JavaScript error occurred" dialog — it's logged to
+stderr and the app exits clean (silent during quit). Connect-page host
+validation regex hardened.
+
+**Shutdown no longer drops cell teardown.** `close()` rejects late input before
+the final persist, but cell destroy is dispatched afterward from `onStop`. A
+System-sourced `:__destroy` is lifecycle, not client input, so it now passes the
+closed-dispatch gate — cell state resets cleanly on stop instead of being left
+un-reset (and warned about) on every shutdown.
+
 ## 1.0.0-alpha31 — sanity & cleanup: auth hardening, consistency, coverage (2026-07-22)
 
 A stabilization release — no new features, everything is hardening, correctness,

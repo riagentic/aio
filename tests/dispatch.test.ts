@@ -137,6 +137,55 @@ Deno.test("dispatch: close() prevents further dispatching", () => {
   });
 });
 
+Deno.test("dispatch: System ':__destroy' teardown still runs after close()", () => {
+  // Shutdown closes dispatch up front (reject late client input before the
+  // final persist), but cell teardown is dispatched afterwards from
+  // destroyAll(). That lifecycle action must still apply — and must NOT warn.
+  let state = { n: 0 };
+  let warned = false;
+
+  const dispatch = createDispatch<
+    typeof state,
+    { type: string; _source?: string },
+    never
+  >({
+    reduce: (s) => ({ state: { n: s.n + 1 }, effects: [] }),
+    execute: () => {},
+    getState: () => state,
+    setState: (s) => {
+      state = s;
+    },
+    onDone: () => {},
+    log: {
+      ...noop,
+      warn: () => {
+        warned = true;
+      },
+    },
+    debug: false,
+  });
+
+  dispatch.close();
+
+  // System-sourced teardown → applied, no warning.
+  dispatch({ type: "doc:__destroy", _source: "System" });
+  assertEquals(state.n, 1);
+  assertEquals(warned, false);
+
+  // A client ':__destroy' (no System source) is NOT lifecycle → still dropped.
+  let rejected: AioError | null = null;
+  dispatch({ type: "doc:__destroy" }).catch((e) => {
+    rejected = e as AioError;
+  });
+  // A non-teardown System action is also still dropped.
+  dispatch({ type: "doc:tick", _source: "System" }).catch(() => {});
+  assertEquals(state.n, 1); // unchanged by the dropped actions
+  assertEquals(warned, true);
+  return Promise.resolve().then(() => {
+    assertEquals((rejected as unknown as AioError)?.code, "DISPATCH_CLOSED");
+  });
+});
+
 Deno.test("dispatch: dropped action rejects with QUEUE_OVERFLOW (B-4)", async () => {
   let state = { n: 0 };
   let dispatchRef: ((a: { type: string }) => Promise<unknown>) | null = null;

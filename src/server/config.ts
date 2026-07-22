@@ -80,6 +80,7 @@ export const VALID_AIO_CONFIG_KEYS = new Set<string>([
   "_cellPatchStrategies",
   "_cellFilterFields",
   "_cellAccess",
+  "_cellMethods",
   "_cellMigrations",
   "_cellVersions",
 ]);
@@ -155,7 +156,7 @@ const CONFIG_DOCS: Record<string, [string, string]> = {
   persistDebounceMs: ["100", "ms between KV writes"],
   persistMode: [
     '"single"',
-    '"single" (one blob ≤64KB) or "multi" (one key per top-level state key)',
+    '"single" (one JSON blob) or "multi" (one SQLite row per top-level cell — rewrites only changed cells)',
   ],
   port: ["8000", "HTTP/WS server port"],
   baseDir: ['"./src"', "source directory for transpilation"],

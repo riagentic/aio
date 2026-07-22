@@ -41,40 +41,85 @@ export async function findElectronBin(log: Log): Promise<string | null> {
   const electronBin = Deno.build.os === "windows"
     ? "node_modules\\.bin\\electron.cmd"
     : "node_modules/.bin/electron";
-  try {
-    await Deno.stat(electronBin);
-    return electronBin;
-  } catch { /* not installed yet — try auto-install below */ }
+  if (await electronBinReady(electronBin)) return electronBin;
 
-  // 4. Auto-install on first run (machine B5): `deno install` with scripts
-  //    allowed for electron runs the postinstall that downloads the binary.
-  //    Loud progress; loud failure with the manual command.
+  // 4. Auto-install on first run: `deno install` FORCE-adds electron (positional
+  //    `npm:electron`) so `deno task dev` works no matter what — even if the
+  //    app never declared electron as a dep. `--allow-scripts=npm:electron`
+  //    runs the postinstall that downloads the real binary. Loud progress.
   if (await autoInstallElectron(log)) {
-    try {
-      await Deno.stat(electronBin);
-      return electronBin;
-    } catch { /* install ran but binary still absent — fall through */ }
+    if (await electronBinReady(electronBin)) return electronBin;
   }
-  log.error("Electron not found — run: deno task install:electron");
+  log.error(
+    "Electron could not be installed automatically. Check your network, then " +
+      "retry `deno task dev` — or install manually: deno install --allow-scripts=npm:electron npm:electron",
+  );
 
   return null;
 }
 
-/** One-shot `deno install --allow-scripts=npm:electron` in the app cwd so
- *  `dev:electron` / `compile:electron` work OUT OF THE BOX on a fresh app —
- *  no separate install step. Returns true when the install command succeeded.
+/** True when the electron launcher exists AND its real binary is downloaded.
+ *  `.bin/electron` is created by `deno install` BEFORE the postinstall
+ *  downloads the ~100MB binary, so the launcher can exist while the binary is
+ *  still missing (a broken launch). We check the launcher resolves to a real
+ *  electron dist binary via its `path.txt`. */
+async function electronBinReady(launcher: string): Promise<boolean> {
+  try {
+    await Deno.stat(launcher);
+  } catch {
+    return false;
+  }
+  // Find the electron package dir the launcher points into and confirm the
+  // downloaded binary exists (path.txt names it, inside dist/).
+  try {
+    for (
+      const base of [
+        "node_modules/electron",
+        ...(await denoElectronDirs()),
+      ]
+    ) {
+      try {
+        const rel = (await Deno.readTextFile(`${base}/path.txt`)).trim();
+        await Deno.stat(`${base}/dist/${rel}`);
+        return true; // real binary present
+      } catch { /* try next candidate */ }
+    }
+  } catch { /* fall through */ }
+  // No path.txt found (older layout) — trust the launcher's existence.
+  return true;
+}
+
+/** Electron package dirs under Deno's `.deno` npm cache (node_modules/.deno/
+ *  electron@<ver>/node_modules/electron). */
+async function denoElectronDirs(): Promise<string[]> {
+  const dirs: string[] = [];
+  try {
+    for await (const e of Deno.readDir("node_modules/.deno")) {
+      if (e.isDirectory && e.name.startsWith("electron@")) {
+        dirs.push(`node_modules/.deno/${e.name}/node_modules/electron`);
+      }
+    }
+  } catch { /* no .deno dir */ }
+  return dirs;
+}
+
+/** Force-install electron in the app cwd so `dev:electron` / `compile:electron`
+ *  work OUT OF THE BOX — even when the app didn't declare electron as a dep.
+ *  The positional `npm:electron` adds + installs it; `--allow-scripts` runs its
+ *  postinstall (downloads the binary). Returns true when the command succeeded.
  *  `run` is the command seam (injected in tests; real `deno install` here). */
 export async function autoInstallElectron(
   log: { info?: (m: string) => void; error: (m: string) => void },
   run: () => Promise<{ success: boolean }> = () =>
     new Deno.Command(Deno.execPath(), {
-      args: ["install", "--allow-scripts=npm:electron"],
+      args: ["install", "--allow-scripts=npm:electron", "npm:electron"],
       stdout: "inherit",
       stderr: "inherit",
     }).output(),
 ): Promise<boolean> {
   (log.info ?? console.log)(
-    "electron: not installed — auto-installing (deno install --allow-scripts=npm:electron)…",
+    "electron: not installed — auto-installing (deno install --allow-scripts=npm:electron npm:electron)… " +
+      "first run downloads the Electron binary (~100MB), this can take a minute.",
   );
   try {
     return (await run()).success;

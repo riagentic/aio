@@ -103,6 +103,8 @@ export interface ServerSetupDeps<S, A> {
   shouldPersist: boolean;
   // Schedule + DB
   scheduleManager: { active: () => string[] };
+  /** Cell id → method names — for the trojan `cells` route (aui method buttons). */
+  cellMethods?: Record<string, string[]>;
   asyncDb: { query: (sql: string) => Promise<{ rows: unknown[] }> } | null;
   // Lock
   appLock: AppLock | null;
@@ -341,6 +343,7 @@ export async function setupTransport<S, A>(
       trojan: {
         getState: () => getState(),
         getSchedules: () => scheduleManager.active(),
+        cellMethods: () => deps.cellMethods ?? {},
         ...(tt ? { getTTHistory: tt.getTTBroadcast } : {}),
         ...(shouldPersist ? { forcePersist: () => schedulePersist() } : {}),
         ...(asyncDb

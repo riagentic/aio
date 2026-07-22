@@ -7,6 +7,10 @@ agents alike.
 deno task am <command> [args] [--flags]
 ```
 
+> Prefer a GUI? **aui** is the visual app manager — discover, inspect (cells,
+> state, metrics, files), and start/stop every aio app on your machine. See
+> [`examples/aui`](../../examples/aui/README.md).
+
 Output auto-detects: terminal -> pretty text, piped -> JSON. Override with
 `--json` or `--quiet`.
 

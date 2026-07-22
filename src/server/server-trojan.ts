@@ -44,6 +44,8 @@ export interface TrojanDeps {
     sqlQuery?: (sql: string) => Promise<unknown[]>;
     shutdown?: () => Promise<void>;
     startedAt: number;
+    /** Cell id → its method (action) names — powers `am`/aui method buttons. */
+    cellMethods?: () => Record<string, string[]>;
     udsClients?: () => { index: number; id: string }[];
     requestUdsClientState?: (index: number, msg?: string) => Promise<unknown>;
   };
@@ -235,6 +237,9 @@ function handleGet(
   }
 
   if (route === "schedules") return json(trojan.getSchedules());
+
+  // Cell id → method names — the surface for "run a method" buttons.
+  if (route === "cells") return json(trojan.cellMethods?.() ?? {});
 
   if (route === "metrics") {
     return json({

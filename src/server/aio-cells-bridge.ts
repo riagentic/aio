@@ -229,6 +229,14 @@ export function buildLegacyConfig(
         .filter((c) => c.__aio.access !== undefined)
         .map((c) => [c.__aio.id, c.__aio.access!]),
     ),
+    // Cell id → public method names — trojan `cells` route (aui run-method
+    // buttons). Internal keys (__set* reducer synonyms, __error, __effects) are
+    // dropped: they're framework plumbing, not user-dispatchable actions.
+    _cellMethods: Object.fromEntries(
+      composed.cells.map((
+        c,
+      ) => [c.__aio.id, c.__aio.actionKeys.filter((k) => !k.startsWith("__"))]),
+    ),
     _onScheduleReady: (cancelByPrefix) =>
       composed.registry.setOnDisable(cancelByPrefix),
     _onReportOptsReady: (opts) => {
