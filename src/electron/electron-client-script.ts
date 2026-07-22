@@ -1,6 +1,6 @@
 // Electron main.cjs generator — self-contained client with connect page
 
-import { CONNECT_HTML, tmplBounds } from "./electron-shared.ts";
+import { CONNECT_HTML, tmplBounds, tmplCrashGuard } from "./electron-shared.ts";
 
 /** Generates a self-contained Electron main.cjs with a connect page for aio-client */
 export function electronClientScript(): string {
@@ -13,6 +13,7 @@ const fs = require('fs');
 
 Menu.setApplicationMenu(null);
 app.name = 'aio-client';
+${tmplCrashGuard()}
 
 // ── Window state persistence ──
 ${tmplBounds()}
@@ -195,7 +196,7 @@ function loadProfileFile(file) {
     // host builds a URL and is rendered into the connect page — reject anything
     // that isn't a plain hostname / IPv4 / bracketed-IPv6 so it can't smuggle
     // markup or a credential-bearing authority. (esc() also escapes quotes.)
-    if (pr.host != null && !/^[A-Za-z0-9.:_\-\[\]]+$/.test(String(pr.host))) {
+    if (pr.host != null && !/^[A-Za-z0-9.:_\\-\\[\\]]+$/.test(String(pr.host))) {
       return null;
     }
     if (!Number.isInteger(pr.port) || pr.port < 1 || pr.port > 65535) return null;

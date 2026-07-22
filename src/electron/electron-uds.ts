@@ -10,6 +10,7 @@ import {
   type AioMeta,
   tmplBounds,
   tmplBoundsTracking,
+  tmplCrashGuard,
   tmplKeyboardShortcuts,
   tmplWillNavigate,
   toSlug,
@@ -38,6 +39,7 @@ const fs = require('fs');
 app.commandLine.appendSwitch('disable-features', 'CloudPrintEnable');
 Menu.setApplicationMenu(null);
 app.name = ${JSON.stringify(slug)};
+${tmplCrashGuard()}
 
 // ── Auto-detect: serve from disk (prod) or HTTP (dev) ──
 const BASE_DIR = ${JSON.stringify(opts.baseDir ?? "")};
@@ -121,7 +123,7 @@ ${tmplBoundsTracking()}
   let down = false, lastErrCode = null; // report a backend outage ONCE, not per retry
   const _ipcQueue = [], IPC_QUEUE_MAX = 100; // AIO-284: offline queue
   let closing = false;
-  win.on('close', () => { closing = true; });
+  win.on('close', () => { closing = true; __aioQuitting = true; });
   win.webContents.on('did-start-navigation', () => { pageReady = false; });
   win.webContents.on('did-finish-load', () => { pageReady = true; });
 

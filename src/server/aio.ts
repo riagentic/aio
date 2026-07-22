@@ -763,6 +763,8 @@ async function _run<S, A, E>(
     schedulePersist: () => schedulePersist(),
     shouldPersist,
     scheduleManager,
+    // Cell id → method names — trojan `cells` route (aui run-method buttons).
+    cellMethods: config._cellMethods ?? {},
     asyncDb,
     appLock,
     clientCounter,

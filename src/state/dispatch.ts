@@ -203,19 +203,30 @@ export function createDispatch<S, A, E>(
       const t = String(
         (action as Record<string, unknown>)?.type ?? "(unknown)",
       );
-      closedDropCount++;
-      if (!closedWarnedTypes.has(t)) {
-        closedWarnedTypes.add(t);
-        log.warn(
-          `dispatch after close() — '${t}' ignored (further drops of this ` +
-            `type suppressed; ${closedDropCount} dropped so far)`,
-        );
+      // Framework teardown must still run after close(). Shutdown closes
+      // dispatch up front (to reject late CLIENT input before the final
+      // persist), but cell destroy is dispatched later, from onStop's
+      // destroyAll(). Dropping it left cell state un-reset AND logged a warning
+      // on every shutdown. A System-sourced ':__destroy' is lifecycle, not
+      // client input — let it through; everything else still drops.
+      const isTeardown =
+        (action as Record<string, unknown>)?._source === "System" &&
+        t.endsWith(":__destroy");
+      if (!isTeardown) {
+        closedDropCount++;
+        if (!closedWarnedTypes.has(t)) {
+          closedWarnedTypes.add(t);
+          log.warn(
+            `dispatch after close() — '${t}' ignored (further drops of this ` +
+              `type suppressed; ${closedDropCount} dropped so far)`,
+          );
+        }
+        return rejectDropped(createAioError(
+          "DISPATCH_CLOSED",
+          "dispatch after close() — action dropped, not applied",
+          { actionType: (action as Record<string, unknown>)?.type as string },
+        ));
       }
-      return rejectDropped(createAioError(
-        "DISPATCH_CLOSED",
-        "dispatch after close() — action dropped, not applied",
-        { actionType: (action as Record<string, unknown>)?.type as string },
-      ));
     }
     if (queue.length >= QUEUE_MAX) {
       const err = createAioError(
