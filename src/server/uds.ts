@@ -516,6 +516,10 @@ function _handleUDSConn(
                 );
                 continue;
               }
+              // Strip client-set identity provenance — parity with the WS
+              // server; a network-sourced `_user` must never become the
+              // trusted dispatch identity.
+              delete (action as Record<string, unknown>)._user;
               onAction(action);
               // AIO-402: per-action ack — parity with the WS server. Settles
               // the Promise of an awaited method call over UDS+IPC.

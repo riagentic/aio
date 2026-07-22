@@ -28,6 +28,8 @@ export interface ServerConfig {
   key?: string; // PEM key string — required when cert is set
   users?: Record<string, AioUser>; // per-user token map (overrides token)
   resolveUser?: (token: string) => AioUser | null | Promise<AioUser | null>; // dynamic user resolution (AIO-171)
+  sessionResolver?: (token: string) => AioUser | null; // AUTH-1 session tokens — consulted first
+  authFlows?: import("./auth-flows.ts").AuthFlows; // AUTH-2 login endpoints (/__aio/auth/*)
   showStatus?: boolean; // show reconnection indicator (default: true)
   uiEntry?: string; // AIO-8.1: UI entry file relative to baseDir (default: App.tsx)
   viewport?: string | false; // AIO-423: <meta viewport> override (false = omit)

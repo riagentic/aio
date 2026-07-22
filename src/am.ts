@@ -55,6 +55,7 @@ import {
   cmdVersion,
 } from "./am/am-cmd-meta.ts";
 import { cmdCreate } from "./am/am-cmd-create.ts";
+import { cmdAuth } from "./am/am-cmd-auth.ts";
 
 import {
   cmdActions,
@@ -105,6 +106,8 @@ const COMMANDS: Record<string, CmdHandler> = {
   discover: cmdDiscover,
   profile: cmdProfile,
   config: cmdConfig,
+  // Auth — operator console for auth: true (users, lockouts, sessions)
+  auth: cmdAuth,
   // Meta
   create: cmdCreate,
   new: cmdNew,

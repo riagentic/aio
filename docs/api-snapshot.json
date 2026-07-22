@@ -9,7 +9,7 @@
         },
         "AioApp": {
           "kind": "typeAlias",
-          "sig": "ea04a37f88edb7ee"
+          "sig": "b9db52073b4d17ef"
         },
         "AioError": {
           "kind": "class",
@@ -31,6 +31,14 @@
           "kind": "typeAlias",
           "sig": "e9f20c663ab7c949"
         },
+        "authClient": {
+          "kind": "variable",
+          "sig": "b778e51ff0b2684e"
+        },
+        "AuthUserRecord": {
+          "kind": "interface",
+          "sig": "60d486d14ce02d44"
+        },
         "bindCell": {
           "kind": "function",
           "sig": "1b3133f368c07b54"
@@ -51,9 +59,13 @@
           "kind": "function",
           "sig": "bbb06d7db27f8b3f"
         },
+        "CellAccess": {
+          "kind": "typeAlias",
+          "sig": "d24c2d5d242cefec"
+        },
         "CellAio": {
           "kind": "typeAlias",
-          "sig": "f9f1df2abca85da6"
+          "sig": "f5a1b3809bf93ff5"
         },
         "CellDef": {
           "kind": "typeAlias",
@@ -73,7 +85,7 @@
         },
         "CellsConfig": {
           "kind": "typeAlias",
-          "sig": "c517c0d2b6e544fe"
+          "sig": "6725b511bcd45520"
         },
         "CellStatus": {
           "kind": "typeAlias",
@@ -106,6 +118,10 @@
         "connectCli": {
           "kind": "function",
           "sig": "cf36c15f1890d562"
+        },
+        "createAuthClient": {
+          "kind": "function",
+          "sig": "cce91fc8249611ca"
         },
         "createDB": {
           "kind": "function",
@@ -173,7 +189,7 @@
         },
         "MethodsCellConfig": {
           "kind": "typeAlias",
-          "sig": "ae6637e6ee143ae4"
+          "sig": "2fa9e77b48c24ac5"
         },
         "Msg": {
           "kind": "typeAlias",
@@ -255,9 +271,25 @@
           "kind": "function",
           "sig": "6f636ae25631fe54"
         },
+        "ServerFnAccess": {
+          "kind": "typeAlias",
+          "sig": "0173b61a93a717b7"
+        },
         "serverFns": {
           "kind": "function",
-          "sig": "86a7dc1c4238cb58"
+          "sig": "4e0945f075359d8d"
+        },
+        "serverUser": {
+          "kind": "function",
+          "sig": "38ecba1f841a979e"
+        },
+        "SessionInfo": {
+          "kind": "interface",
+          "sig": "588ed930e3ad95c9"
+        },
+        "SessionStore": {
+          "kind": "interface",
+          "sig": "23ffc8e6214f58ef"
         },
         "sleep": {
           "kind": "function",
@@ -311,9 +343,13 @@
           "kind": "class",
           "sig": "56d3fdd07cea962f"
         },
+        "UserStore": {
+          "kind": "interface",
+          "sig": "f405f1dee3cbec00"
+        },
         "VERSION": {
           "kind": "variable",
-          "sig": "b214fa75dc34a379"
+          "sig": "ec98557f8e91e785"
         },
         "VitalsConfig": {
           "kind": "typeAlias",
@@ -362,6 +398,10 @@
         "afterRender": {
           "kind": "function",
           "sig": "9cb67902b061b0ee"
+        },
+        "authUser": {
+          "kind": "variable",
+          "sig": "3d6e4700d94bd681"
         },
         "batch": {
           "kind": "function",
@@ -607,6 +647,18 @@
           "kind": "interface",
           "sig": "a962066576a452b0"
         },
+        "SignIn": {
+          "kind": "function",
+          "sig": "ee4781c9192af09a"
+        },
+        "SignInProps": {
+          "kind": "interface",
+          "sig": "dde78772f5628522"
+        },
+        "signOut": {
+          "kind": "function",
+          "sig": "f770770ab082dc0c"
+        },
         "slide": {
           "kind": "function",
           "sig": "b8a3fea194926bde"
@@ -746,6 +798,10 @@
         "useTimeTravel": {
           "kind": "function",
           "sig": "d38328d64f55e879"
+        },
+        "useUser": {
+          "kind": "function",
+          "sig": "946bef7f89fd5afe"
         },
         "useVirtualList": {
           "kind": "function",

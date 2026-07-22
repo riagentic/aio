@@ -15,6 +15,7 @@ import type { AioError, ReportErrorOpts } from "../diagnostics/error.ts";
 import { reportError as reportAioError } from "../diagnostics/error.ts";
 import { log } from "../diagnostics/logger.ts";
 import { parseCli } from "./aio-cli.ts";
+import { isCompiled } from "./paths.ts";
 
 /** User identity shape — matches AioUser without importing from aio.ts (avoids circular) */
 type User = { id: string; role: string };
@@ -170,7 +171,13 @@ function warnFieldFilters(composed: ComposedCells): void {
         if ("exclude" in ui) return !ui.exclude.includes(key);
         return true;
       };
-      const isDev = !parseCli().prod;
+      // Use the SAME prod signal the rest of boot resolves to, not just the
+      // raw `--prod` flag: a compiled binary auto-detects prod (aio.ts), so a
+      // shipped release must take the prod path (log-and-continue) here too —
+      // otherwise it would REFUSE to boot on this heuristic even though the
+      // developer's `--prod` smoke test passed. `isCompiled()` covers the
+      // shipped-binary case; a source run stays dev (dev-stricter is allowed).
+      const isDev = !parseCli().prod && !isCompiled();
       for (const key of topKeys) {
         // Explicit "this is public" acknowledgement, or its secret sub-paths are
         // already excluded → don't cry wolf at correctly-handled state.

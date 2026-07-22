@@ -211,11 +211,42 @@ export function denoJson(
       // Runs the app in an Android emulator against the live dev server
       // (boots an AVD, builds+installs+launches). Needs the Android SDK + an AVD.
       "dev:android": `deno run -A ${fw.devAndroid}`,
+      "dev:cli": "deno run -A src/app.ts --client=cli",
+      "dev:service": "deno run -A src/app.ts --client=server-only",
+      // Unified aio client: Electron connect page (enter any server URL).
+      "dev:client": "deno run -A src/app.ts --server-url",
+      // ── dev:remote — the same app, split across the network: the server
+      // side runs --expose (share token + pair code); the client side is a
+      // thin client (connect page / src/client.ts) pointed at that server. ──
+      "dev:remote:browser": "deno run -A src/app.ts --client=browser --expose",
+      "dev:remote:electron": "deno run -A src/app.ts --server-url",
+      "dev:remote:android": "deno run -A src/app.ts --client=browser --expose",
+      "dev:remote:cli": "deno run -A src/client.ts",
+      "dev:remote:service":
+        "deno run -A src/app.ts --client=server-only --expose",
       // ── compile: `deno task compile` builds the configured target. ──
       compile: compileDefault,
       "compile:browser": `deno run -A ${fw.build} --compile`,
       "compile:electron": `deno run -A ${fw.build} --compile --electron`,
       "compile:android": `deno run -A ${fw.build} --android`,
+      "compile:cli": `deno run -A ${fw.build} --compile --cli`,
+      "compile:service":
+        `deno run -A ${fw.build} --compile --service --headless`,
+      // Unified aio client: standalone Electron connect-page AppImage.
+      "compile:client": `deno run -A ${fw.build} --client`,
+      // ── compile:remote — server binary (+ systemd unit) and, where the
+      // client is a separate artifact, that too (server FIRST: its dist clean
+      // would delete a client artifact built before it). ──
+      "compile:remote:browser":
+        `deno run -A ${fw.build} --compile --service --remote`,
+      "compile:remote:electron":
+        `deno run -A ${fw.build} --compile --service --remote && deno run -A ${fw.build} --client`,
+      "compile:remote:android":
+        `deno run -A ${fw.build} --compile --service --remote && deno run -A ${fw.build} --android --remote`,
+      "compile:remote:cli":
+        `deno run -A ${fw.build} --compile --service --headless --remote && deno run -A ${fw.build} --compile --cli --remote`,
+      "compile:remote:service":
+        `deno run -A ${fw.build} --compile --service --headless --remote`,
       // Convenience: pre-fetch the Electron binary without launching. Not
       // required — `dev:electron` / `compile:electron` auto-install on demand.
       "install:electron": "deno install --allow-scripts=npm:electron",
@@ -253,6 +284,9 @@ export function scaffold(
     "src/app.ts": template === "todo" ? TODO_APP : COUNTER_APP,
     "src/cell.ts": template === "todo" ? TODO_CELL : COUNTER_CELL,
     "src/App.tsx": template === "todo" ? TODO_UI : COUNTER_UI,
+    // Thin CLI client — dev:remote:cli runs it; compile:remote:cli compiles it
+    // (build-cli.ts hard-codes src/client.ts as the --cli --remote entry).
+    "src/client.ts": CLIENT_TS,
     "src/cell.test.ts": template === "todo" ? TODO_TEST : COUNTER_TEST,
     "README.md": readme(name, template, target),
   };
@@ -498,6 +532,20 @@ import "./cell.ts";
 import { aio } from "aio";
 
 await aio.run();
+`;
+
+const CLIENT_TS =
+  `// Thin CLI client — live view of a running server's state over WebSocket.
+// Used by \`deno task dev:remote:cli\` (against a dev server) and compiled by
+// \`compile:remote:cli\` into a standalone client binary. No local server.
+import { connectCli } from "aio";
+
+const url = Deno.args[0] || "ws://localhost:8000/ws";
+console.log(\`connecting to \${url} ...\`);
+const app = connectCli(url);
+await app.ready;
+console.log("state:", JSON.stringify(app.state, null, 2));
+app.subscribe(() => console.log("state:", JSON.stringify(app.state)));
 `;
 
 const COUNTER_UI = `// UI — export default; the framework mounts it.

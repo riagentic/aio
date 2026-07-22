@@ -15,12 +15,29 @@ export function _timingSafeEqual(a: string, b: string): boolean {
   return result === 0;
 }
 
-/** Extract token from query param or Authorization header */
+/** Session cookie name (AUTH-2 browser flow). */
+export const SESSION_COOKIE = "aio_session";
+
+/** Read the session token from the Cookie header (browser flow). */
+export function sessionTokenFromCookie(req: Request): string | null {
+  const cookies = req.headers.get("cookie");
+  if (!cookies) return null;
+  for (const part of cookies.split(";")) {
+    const [k, ...v] = part.trim().split("=");
+    if (k === SESSION_COOKIE) return v.join("=") || null;
+  }
+  return null;
+}
+
+/** Extract token from query param, Authorization header, or session cookie.
+ *  Cookie last: it only exists when the AUTH-2 login flow set it, and an
+ *  explicit token always wins over ambient cookie state. */
 export function _extractToken(url: URL, req: Request): string | null {
   const qToken = url.searchParams.get("token");
   if (qToken) return qToken;
   const auth = req.headers.get("authorization");
-  return auth?.startsWith("Bearer ") ? auth.slice(7) : null;
+  if (auth?.startsWith("Bearer ")) return auth.slice(7);
+  return sessionTokenFromCookie(req);
 }
 
 /** User resolver function — built once from resolveUser hook or static users map */
@@ -45,4 +62,68 @@ export function _buildUserResolver(config: {
     };
   }
   return null;
+}
+
+// ── Cell access evaluation (AUTH-1) ──────────────────────────────────────────
+
+import type { CellAccess } from "../state/cell-types.ts";
+
+/** Evaluate a cell's declarative access rule for a network caller.
+ *  Same vocabulary as ServerFnAccess: true = any authenticated user,
+ *  string = exact role, predicate = custom (also sees the method name).
+ *  `false` = server-side only. */
+export function cellAccessAllowed(
+  rule: CellAccess,
+  user: AioUser | undefined,
+  method: string,
+): boolean {
+  if (rule === true) return user !== undefined;
+  if (typeof rule === "string") return user?.role === rule;
+  if (typeof rule === "function") return rule(user, method);
+  return false; // rule === false
+}
+
+// ── Failed-auth budget (AUTH-1) ──────────────────────────────────────────────
+// Brute-forcing tokens must get expensive: after MAX failed auths inside the
+// sliding window, that client key (IP) gets 429 until the window drains. Same
+// per-key philosophy as pairing — an attacker locks only themselves. Success
+// never counts, so a legitimate browser is unaffected. Keyless callers (no
+// remoteAddr) share one bucket.
+
+const AUTH_FAIL_MAX = 10;
+const AUTH_FAIL_WINDOW_MS = 5 * 60_000;
+const _authFails = new Map<string, number[]>();
+
+/** True when this client key has exhausted its failed-auth budget. */
+export function authFailBudgetExceeded(
+  clientKey: string | undefined,
+  now = Date.now(),
+): boolean {
+  const key = clientKey ?? "*";
+  const fails = _authFails.get(key);
+  if (!fails) return false;
+  const fresh = fails.filter((t) => now - t < AUTH_FAIL_WINDOW_MS);
+  if (fresh.length === 0) _authFails.delete(key);
+  else _authFails.set(key, fresh);
+  return fresh.length >= AUTH_FAIL_MAX;
+}
+
+/** Record one failed auth for this client key + audit line. */
+export function recordAuthFail(
+  clientKey: string | undefined,
+  detail: string,
+  now = Date.now(),
+): void {
+  const key = clientKey ?? "*";
+  const fails = _authFails.get(key) ?? [];
+  fails.push(now);
+  _authFails.set(key, fails);
+  console.warn(
+    `[aio] auth: failed auth from ${key} (${detail}) — ${fails.length}/${AUTH_FAIL_MAX} in window`,
+  );
+}
+
+/** Test isolation. */
+export function _resetAuthFails(): void {
+  _authFails.clear();
 }

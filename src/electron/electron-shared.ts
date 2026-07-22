@@ -209,7 +209,7 @@ export const CONNECT_HTML = `<!DOCTYPE html>
       e.preventDefault();
       go(document.getElementById('addr').value.trim());
     };
-    function esc(s) { const d = document.createElement('div'); d.textContent = s == null ? '' : String(s); return d.innerHTML; }
+    function esc(s) { const d = document.createElement('div'); d.textContent = s == null ? '' : String(s); return d.innerHTML.replace(/"/g, '&quot;').replace(/'/g, '&#39;'); }
 
     // Filled by the Electron main process (see electron-client-script). In a
     // plain browser these stay empty and only the manual field shows.

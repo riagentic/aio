@@ -37,6 +37,9 @@ export interface LifecycleDeps<S, A> {
   port: number;
   token: string | undefined;
   users: Record<string, AioUser> | undefined;
+  /** AUTH-2/3: pre-built auth-mode label ("password+totp+oidc") for the boot
+   *  report — undefined falls back to users/token detection. */
+  authMode?: string;
   tlsCert: TlsCert | null;
   shareUrl: string;
   localUrl: string;
@@ -207,11 +210,8 @@ export function startLifecycle<S, A>(deps: LifecycleDeps<S, A>): void {
     );
   }
   log.info(`${p("expose")}${expose}`);
-  const authLabel = users
-    ? `${Object.keys(users).length} user(s)`
-    : token
-    ? "token"
-    : "none";
+  const authLabel = deps.authMode ??
+    (users ? `${Object.keys(users).length} user(s)` : token ? "token" : "none");
   log.info(`${p("auth")}${authLabel}`);
   if (schedules?.length) {
     log.info(`${p("schedules")}${schedules.length}`);

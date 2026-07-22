@@ -27,6 +27,10 @@ export interface ShutdownRefs {
   getDiscoveryStop?: () => (() => void) | null;
   asyncDb: { close: () => Promise<void> } | null;
   kvDb: { close: () => void } | null;
+  /** AUTH-1 session store — closed with the other databases. */
+  sessionStore?: { close: () => void } | null;
+  /** AUTH-2 password-user store — closed with the other databases. */
+  userStore?: { close: () => void } | null;
   setRunning: (v: boolean) => void;
   log: Log;
 }
@@ -143,6 +147,16 @@ export function createShutdownOrchestrator(
       refs.kvDb?.close();
     } catch (e) {
       log.error(`shutdown: kv — ${e}`);
+    }
+    try {
+      refs.sessionStore?.close();
+    } catch (e) {
+      log.error(`shutdown: sessions — ${e}`);
+    }
+    try {
+      refs.userStore?.close();
+    } catch (e) {
+      log.error(`shutdown: users — ${e}`);
     }
 
     refs.setRunning(false);

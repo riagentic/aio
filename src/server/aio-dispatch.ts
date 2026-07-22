@@ -18,6 +18,7 @@ import {
 import { isScheduleEffect, type ScheduleEffect } from "../state/schedule.ts";
 import { isOwnEffect, type OwnEffect } from "../state/own.ts";
 import { diagEmit } from "../diagnostics/diagnostic-bus.ts";
+import { runWithUser } from "./auth-context.ts";
 
 /** User identity — mirrors AioUser from aio.ts without circular import */
 type User = { id: string; role: string };
@@ -186,7 +187,10 @@ export function setupDispatch<S, A, E, App = any>(
         reportAioError(err, reportOpts);
       }
     }
-    return reduce(s, a);
+    // Ambient identity: reduce (cell methods) runs inside runWithUser so
+    // serverUser() answers the caller anywhere downstream — including code the
+    // method awaits. Server-origin actions carry no _user → undefined.
+    return runWithUser(user, () => reduce(s, a));
   };
 
   const hookedExecute = onEffect
@@ -203,7 +207,8 @@ export function setupDispatch<S, A, E, App = any>(
         });
         reportAioError(aioErr, reportOpts);
       }
-      deps.execute(app, e);
+      // Effects triggered by a user's action execute as that user.
+      runWithUser(_currentActionUser, () => deps.execute(app, e));
     }
     : deps.execute;
 

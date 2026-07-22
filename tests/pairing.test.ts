@@ -1,6 +1,7 @@
 // pairing — the PIN state machine behind the friendly "type this code" flow
-// for keyed --expose apps. Attempt-limited and session-scoped (anti-brute).
+// for keyed --expose apps. One-shot, TTL-bounded, per-client-key attempt budget.
 import { assert, assertEquals } from "@std/assert";
+import { FakeTime } from "@std/testing/time";
 import {
   clearPairing,
   currentPin,
@@ -23,6 +24,26 @@ Deno.test("pairing: correct PIN verifies, wrong PIN does not", () => {
   clearPairing();
 });
 
+Deno.test("pairing: correct PIN is ONE-SHOT — consumed on success, no replay", () => {
+  const pin = generatePin();
+  assertEquals(verifyPin(pin), true); // pairs
+  // The same code cannot be replayed later in the session.
+  assertEquals(verifyPin(pin), false);
+  assertEquals(currentPin(), null, "PIN is consumed after a successful pair");
+  clearPairing();
+});
+
+Deno.test("pairing: PIN self-expires after its TTL", () => {
+  using time = new FakeTime();
+  const pin = generatePin();
+  time.tick(2 * 60_000); // within TTL (3 min)
+  assertEquals(currentPin(), pin);
+  time.tick(2 * 60_000); // now past TTL
+  assertEquals(currentPin(), null, "expired PIN is cleared");
+  assertEquals(verifyPin(pin), false, "expired PIN can't pair");
+  clearPairing();
+});
+
 Deno.test("pairing: no active PIN → everything fails", () => {
   clearPairing();
   assertEquals(currentPin(), null);
@@ -37,13 +58,18 @@ Deno.test("pairing: non-string submissions are rejected", () => {
   clearPairing();
 });
 
-Deno.test("pairing: too many wrong tries locks the PIN (anti-brute-force)", () => {
+Deno.test("pairing: wrong tries lock the OFFENDING client key, not the PIN globally", () => {
   const pin = generatePin();
-  // 8 attempts allowed; exhaust them all with a wrong code
-  for (let i = 0; i < 8; i++) assertEquals(verifyPin("999999"), false);
-  // now locked — even the correct PIN no longer works
-  assertEquals(currentPin(), null);
-  assertEquals(verifyPin(pin), false);
+  // An attacker at one IP exhausts its budget with wrong guesses.
+  for (let i = 0; i < 8; i++) {
+    assertEquals(verifyPin("999999", "10.0.0.9"), false);
+  }
+  // That attacker is now refused even with the correct code…
+  assertEquals(verifyPin(pin, "10.0.0.9"), false);
+  // …but the PIN is NOT globally locked (no DoS): it's still active, and the
+  // legitimate device at a different key can still pair.
+  assertEquals(currentPin(), pin, "PIN stays active — attacker can't DoS it");
+  assertEquals(verifyPin(pin, "192.168.1.50"), true);
   clearPairing();
 });
 

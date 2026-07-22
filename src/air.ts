@@ -102,6 +102,15 @@ export {
   useRoute,
 } from "./browser-air.ts";
 
+// ── Auth UI — drop-in <SignIn/> + reactive useUser() (AUTH-2) ────────
+export {
+  authUser,
+  SignIn,
+  type SignInProps,
+  signOut,
+  useUser,
+} from "./browser-air.ts";
+
 // ── SSR + islands ────────────────────────────────────────────────────
 export {
   island,

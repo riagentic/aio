@@ -35,6 +35,8 @@ export const VALID_AIO_CONFIG_KEYS = new Set<string>([
   "users",
   "key",
   "resolveUser",
+  "sessions",
+  "auth",
   "ui",
   "port",
   "baseDir",
@@ -76,6 +78,7 @@ export const VALID_AIO_CONFIG_KEYS = new Set<string>([
   "_getUIState",
   "_cellPatchStrategies",
   "_cellFilterFields",
+  "_cellAccess",
   "_cellMigrations",
   "_cellVersions",
 ]);
@@ -100,6 +103,8 @@ export const VALID_FEATURES_CONFIG_KEYS = new Set<string>([
   "users",
   "key",
   "resolveUser",
+  "sessions",
+  "auth",
   "db",
   "perfCheck",
   "perfBudget",
@@ -182,6 +187,14 @@ const CONFIG_DOCS: Record<string, [string, string]> = {
   resolveUser: [
     "",
     "dynamic (token,state)→user hook for runtime auth (AIO-171)",
+  ],
+  sessions: [
+    "",
+    "SQLite session store — app.sessions.issue/revoke bearer tokens with TTL",
+  ],
+  auth: [
+    "",
+    "built-in password auth — /__aio/auth/* signup/login/logout, PBKDF2 users, session cookie",
   ],
   db: ["", "SQLite table definitions — arrays auto-sync"],
   perfCheck: ['"on"', "enable/disable performance violation reporting"],
