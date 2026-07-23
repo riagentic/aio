@@ -92,8 +92,9 @@ Deno.test("mode: browser local — serve HTML + WS state sync", async () => {
       ws.onerror = () => reject(new Error("WS failed"));
     });
     await waitFor(() => messages.some((m) => m.includes('"t":"state"')));
-    const initial =
-      JSON.parse(messages.find((m) => m.includes('"t":"state"'))!).d;
+    const initial = JSON.parse(
+      messages.find((m) => m.includes('"t":"state"'))!,
+    ).d;
     assertEquals(initial.count, 0);
     assertEquals(initial.label, "browser-local");
 
@@ -311,8 +312,9 @@ Deno.test("mode: browser remote — expose + token auth", async () => {
       ws.onerror = () => reject(new Error("WS auth failed"));
     });
     await waitFor(() => messages.some((m) => m.includes('"t":"state"')));
-    const initial =
-      JSON.parse(messages.find((m) => m.includes('"t":"state"'))!).d;
+    const initial = JSON.parse(
+      messages.find((m) => m.includes('"t":"state"'))!,
+    ).d;
     assertEquals(initial.label, "browser-remote");
 
     ws.close();

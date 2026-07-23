@@ -39,6 +39,7 @@ import {
   parseProtoHello,
   PROTOCOL_MISMATCH_CLOSE_CODE,
   protoHello,
+  stampedVersion,
 } from "../protocol/protocol-version.ts";
 
 /** Opens connection to server — UDS+IPC when available, WebSocket otherwise. */
@@ -61,7 +62,7 @@ export function connect(): void {
     });
     _ttSetSendFn((cmd: string) => ws.send(cmd));
     // A3: announce our wire-protocol version before anything else.
-    ws.send(enc("proto", protoHello()));
+    ws.send(enc("proto", protoHello(stampedVersion())));
     ws.send(enc("type", {
       kind: typeof navigator !== "undefined" &&
           /electron/i.test(navigator.userAgent)
@@ -128,7 +129,7 @@ export function connect(): void {
       case "proto": {
         const theirs = parseProtoHello(frame.d);
         if (!theirs) return; // malformed — ignore, server will still enforce
-        const result = negotiateProtocol(protoHello(), theirs);
+        const result = negotiateProtocol(protoHello(stampedVersion()), theirs);
         if (!result.ok) {
           _protoMismatch(result.reason);
           return;

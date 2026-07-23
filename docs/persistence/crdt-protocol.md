@@ -18,15 +18,20 @@ tiebreaker.
 
 ## Wire Protocol
 
-Three message types over WebSocket:
+Every frame is a v2 envelope — `{ v: 2, t: <kind>, d: <payload> }` — since
+alpha29 (`src/protocol/envelope.ts`). The CRDT kinds are `op`, `sync-ack`,
+`sync-req`, `sync-res` and `op-rejected`. (The v1 `__op` / `__ack` / `__sync`
+string-prefixed frames are gone; a v1 peer is refused at the version handshake.)
 
-### __op (Operation)
+### op (Operation)
 
 Client→server (local action) or server→client (broadcast):
 
 ```json
 {
-  "__op": {
+  "v": 2,
+  "t": "op",
+  "d": {
     "id": "c1-00a7",
     "hlc": [1712345678901, 3, "c1"],
     "cell": "todos",
@@ -36,21 +41,36 @@ Client→server (local action) or server→client (broadcast):
 }
 ```
 
-### __ack (Acknowledgment)
+### sync-ack (Acknowledgment)
 
 Server→client after persisting an op:
 
 ```json
-{ "__ack": { "opId": "c1-00a7", "serverHlc": [1712345678950, 0, "s"] } }
+{
+  "v": 2,
+  "t": "sync-ack",
+  "d": { "opId": "c1-00a7", "serverHlc": [1712345678950, 0, "s"] }
+}
 ```
 
-### __sync (Reconnection)
+### op-rejected
 
-Client→server request (includes unconfirmed ops and last known HLC):
+Server→client when an optimistic op is refused (access denied, invalid shape).
+The client rolls the op back out of its optimistic state:
+
+```json
+{ "v": 2, "t": "op-rejected", "d": { "opId": "c1-00a7", "reason": "denied" } }
+```
+
+### sync-req / sync-res (Reconnection)
+
+Client→server request (unconfirmed ops + last known HLC per cell):
 
 ```json
 {
-  "__sync": {
+  "v": 2,
+  "t": "sync-req",
+  "d": {
     "clientId": "c1",
     "cells": { "todos": { "lastHlc": [1712345600000, 1, "c1"] } },
     "pendingOps": []
@@ -62,7 +82,9 @@ Server→client incremental response:
 
 ```json
 {
-  "__sync": {
+  "v": 2,
+  "t": "sync-res",
+  "d": {
     "mode": "incremental",
     "ops": [],
     "rebase": [],
@@ -75,7 +97,9 @@ Server→client snapshot fallback (when ops have been compacted away):
 
 ```json
 {
-  "__sync": {
+  "v": 2,
+  "t": "sync-res",
+  "d": {
     "mode": "snapshot",
     "snapshot": { "todos": { "items": [], "filter": "all" } },
     "ops": [],
@@ -93,7 +117,7 @@ Server→client snapshot fallback (when ops have been compacted away):
 3. Add to op-buffer (rejected if >= 500 pending → status "blocked")
 4. Rebase: replay all unconfirmed ops on confirmed state
 5. Update optimistic state (UI sees instant result)
-6. Send `__op` to server if online
+6. Send an `op` frame to the server if online
 
 **Server ack:**
 
@@ -110,7 +134,7 @@ Server→client snapshot fallback (when ops have been compacted away):
 
 **Reconnect:**
 
-1. Send `__sync` with `lastHlc` per cell + unconfirmed ops
+1. Send a `sync-req` frame with `lastHlc` per cell + unconfirmed ops
 2. Server responds incremental (ops since lastHlc) or snapshot (full state)
 3. Apply to confirmed state, rebase, update optimistic
 
@@ -188,7 +212,7 @@ state changed).
 | `cell-create.ts` | Parses `sync` option, calls `normalizeSyncConfig()`                 |
 | `cell-types.ts`  | Stores `syncConfig` on `CellAio`                                    |
 | `state-core.ts`  | `setSyncHandler()` hook intercepts sync actions in `send()`         |
-| `server.ts`      | `syncHandler` in `ServerConfig` routes `__op`/`__sync` messages     |
+| `server.ts`      | `syncHandler` in `ServerConfig` routes `op`/`sync-req` frames       |
 | `persistence.ts` | `syncCells` set auto-excludes sync cells from the `aio_kv` snapshot |
 | `aio.ts`         | Collects `_syncCellIds`, initializes sync SQLite tables             |
 | `config.ts`      | `_syncCellIds` registered in valid config keys                      |

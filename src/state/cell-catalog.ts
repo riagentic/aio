@@ -157,6 +157,12 @@ export function bindCell(
           payload: { args, _callId: callId },
           _source: "Effect" as const,
         });
+        // Attach a no-op catch so a fire-and-forget server-side call
+        // (`cell.asyncMethod()` without await) whose body throws can't escape as
+        // an unhandled rejection and kill the Deno process — the executor still
+        // logs + dispatches `__error`, and any awaiter still sees the rejection.
+        // Mirrors the browser twin in cell-reactive.ts.
+        promise.catch(() => {});
         return promise;
       };
       attachMeta(fn, creator);

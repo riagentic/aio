@@ -77,6 +77,7 @@ export interface ServerConfig {
     startedAt: number; // Date.now() at boot
     /** Cell id → method (action) names — powers "run a method" buttons. */
     cellMethods?: () => Record<string, string[]>;
+    cellFields?: () => import("./aio-types.ts").CellFieldFlags;
     /** UDS clients (Electron IPC) — for am client command */
     udsClients?: () => { index: number; id: string }[];
     /** Send a request to a UDS client and wait for its "client-state" reply */

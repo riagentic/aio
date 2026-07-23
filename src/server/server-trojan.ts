@@ -44,8 +44,9 @@ export interface TrojanDeps {
     sqlQuery?: (sql: string) => Promise<unknown[]>;
     shutdown?: () => Promise<void>;
     startedAt: number;
-    /** Cell id → its method (action) names — powers `am`/aui method buttons. */
+    /** Cell id → its method (action) names — powers `am`/amui method buttons. */
     cellMethods?: () => Record<string, string[]>;
+    cellFields?: () => import("./aio-types.ts").CellFieldFlags;
     udsClients?: () => { index: number; id: string }[];
     requestUdsClientState?: (index: number, msg?: string) => Promise<unknown>;
   };
@@ -240,6 +241,7 @@ function handleGet(
 
   // Cell id → method names — the surface for "run a method" buttons.
   if (route === "cells") return json(trojan.cellMethods?.() ?? {});
+  if (route === "fields") return json(trojan.cellFields?.() ?? {});
 
   if (route === "metrics") {
     return json({

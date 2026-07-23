@@ -599,3 +599,36 @@ Deno.test({
     await cleanup();
   },
 });
+
+// Audit 2026-07-24 (HIGH, DOM corruption): the static-VNode short-circuit
+// carried `_dom` only one level down, so in an element-only (`_static`) subtree
+// the GRANDCHILDREN lost their DOM handles. A later render could no longer find
+// those nodes: the removal silently no-oped and the replacement was appended,
+// leaving both the old and the new element in the DOM.
+Deno.test({
+  name: "diff: static short-circuit carries _dom to every depth",
+  async fn() {
+    const { document, ctx, cleanup } = createDOM();
+    const root = document.createElement("div");
+
+    const tree = () => h("div", null, h("span", null, h("b", null)));
+    const r1 = tree();
+    _render(root, r1, null, ctx);
+    assertEquals(root.innerHTML, "<div><span><b></b></span></div>");
+
+    // Identical render → the short-circuit fires and must hand the whole
+    // subtree's DOM handles to the new vnodes.
+    const r2 = tree();
+    _diff(root, r2, r1, ctx);
+    const span = r2.children[0] as VNode;
+    const bold = span.children[0] as VNode;
+    assertExists(span._dom, "child keeps its DOM handle");
+    assertExists(bold._dom, "GRANDchild keeps its DOM handle");
+
+    // Now swap the deep leaf: it must be replaced, not duplicated.
+    const r3 = h("div", null, h("span", null, h("i", null)));
+    _diff(root, r3, r2, ctx);
+    assertEquals(root.innerHTML, "<div><span><i></i></span></div>");
+    await cleanup();
+  },
+});

@@ -155,6 +155,42 @@ export async function loadOpsSince(
   return rows.map(rowToOp);
 }
 
+/** The compacted base state for a cell, or null when it was never compacted.
+ *
+ *  Compaction folds every op at/below an HLC boundary into `sync_snapshots` and
+ *  DELETEs those ops — so after the first compaction the op log alone no longer
+ *  describes the cell. Anything that rebuilds state from the log (boot replay)
+ *  MUST start from this snapshot, or it silently resurrects the cell as it was
+ *  at the last compaction boundary… which is to say, empty. */
+export async function loadSnapshot(
+  db: DB,
+  cell: string,
+): Promise<{ state: Record<string, unknown>; hlc: HLC } | null> {
+  const { rows } = await db.query<{
+    state: string;
+    hlc_phys: number;
+    hlc_cnt: number;
+    hlc_node: string;
+  }>(
+    `SELECT state, hlc_phys, hlc_cnt, hlc_node FROM sync_snapshots WHERE cell = ?`,
+    [cell],
+  );
+  const row = rows[0];
+  if (!row) return null;
+  try {
+    return {
+      state: JSON.parse(row.state) as Record<string, unknown>,
+      hlc: [row.hlc_phys, row.hlc_cnt, row.hlc_node],
+    };
+  } catch (e) {
+    log.error(
+      "sync",
+      `snapshot for "${cell}" is corrupt (${e}) — cannot restore compacted state`,
+    );
+    return null;
+  }
+}
+
 /**
  * Read the compaction low_water mark for a cell, or null if none.
  */

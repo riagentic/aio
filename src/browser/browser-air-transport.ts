@@ -6,7 +6,7 @@ import { diagEmit } from "../diagnostics/diagnostic-bus.ts";
 import { _registerSfnTransport, handleSfnResult } from "./server-fns-client.ts";
 import { installConsoleIntercept } from "./console-intercept.ts";
 import { routeCommand } from "./browser-air-commands.ts";
-import { protoHello } from "../protocol/protocol-version.ts";
+import { protoHello, stampedVersion } from "../protocol/protocol-version.ts";
 import {
   _checkStateIntegrity,
   _coreGetState,
@@ -63,6 +63,9 @@ export function setSyncMessageHandler(
 const _bootId: { current: string | null } = { current: null };
 const _ipc: AioIPCBridge | null = detectIPC();
 let _ipcConnected = false;
+/** The IPC bridge's onOpen/onMessage/onClose are registered once per page —
+ *  the bridge has no unbind, so re-registering on reconnect duplicates frames. */
+let _ipcBound = false;
 let _ipcPingTimer: ReturnType<typeof setInterval> | null = null;
 
 function _status(text: string) {
@@ -158,6 +161,18 @@ function _connectIPC() {
     return;
   }
   _ipcConnected = true;
+  // Bind the bridge callbacks EXACTLY once. The preload bridge registers with
+  // `ipcRenderer.on` (additive, and it exposes no `off`), while _connectIPC
+  // runs again on every reconnect — so each server restart added another
+  // handler and every later frame was routed N+1 times. Patch frames are not
+  // idempotent (an Immer array `add` applied twice inserts twice), so a single
+  // reconnect was enough to duplicate items in the UI. Reconnection only needs
+  // to flip the flag and re-arm the bridge.
+  if (_ipcBound) {
+    _ipc.ready();
+    return;
+  }
+  _ipcBound = true;
   _ipc.onOpen(() => {
     _connecting = false;
     _retry = 0;
@@ -208,7 +223,7 @@ function _connect() {
     _syncOnline?.(true);
     // Announce our wire-protocol version before anything else — without this
     // hello the server's version gate never applies to AIR clients.
-    ws.send(enc("proto", protoHello()));
+    ws.send(enc("proto", protoHello(stampedVersion())));
     const ua = typeof navigator !== "undefined" &&
       /electron/i.test(navigator.userAgent);
     ws.send(enc("type", { kind: ua ? "electron" : "browser" }));

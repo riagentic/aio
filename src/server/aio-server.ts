@@ -34,6 +34,9 @@ export interface ServerSetupDeps<S, A> {
   port: number;
   prod: boolean;
   distDir: string;
+  /** Real-filesystem `dist/` Electron can read from its own process, if any —
+   *  the precondition for running with zero TCP ports. See skipHttp below. */
+  electronDistDir: string | undefined;
   baseDir: string;
   expose: boolean;
   token: string | undefined;
@@ -103,8 +106,10 @@ export interface ServerSetupDeps<S, A> {
   shouldPersist: boolean;
   // Schedule + DB
   scheduleManager: { active: () => string[] };
-  /** Cell id → method names — for the trojan `cells` route (aui method buttons). */
+  /** Cell id → method names — for the trojan `cells` route (amui method buttons). */
   cellMethods?: Record<string, string[]>;
+  /** Cell id → per-field persist/ui flags — for the trojan `fields` route. */
+  cellFields?: import("./aio-types.ts").CellFieldFlags;
   asyncDb: { query: (sql: string) => Promise<{ rows: unknown[] }> } | null;
   // Lock
   appLock: AppLock | null;
@@ -133,6 +138,7 @@ export async function setupTransport<S, A>(
     port,
     prod,
     distDir,
+    electronDistDir,
     baseDir,
     expose,
     token,
@@ -196,8 +202,20 @@ export async function setupTransport<S, A>(
     expose,
   );
 
-  // Prod + UDS + electron: skip HTTP server entirely (zero TCP ports — all via UDS+IPC)
-  const skipHttp = prod && transport === "uds" && useElectron && !expose;
+  // Prod + UDS + electron: skip HTTP server entirely (zero TCP ports — all via
+  // UDS+IPC). Conditional on `electronDistDir`: without a dist/ Electron can
+  // open itself it loads the page over HTTP, and skipping the server would
+  // hand it a refused connection — a blank window (the AppImage bug).
+  const canServeFromDisk = !!electronDistDir;
+  const skipHttp = prod && transport === "uds" && useElectron && !expose &&
+    canServeFromDisk;
+  if (prod && transport === "uds" && useElectron && !expose && !skipHttp) {
+    log.warn(
+      "prod+electron: no dist/ readable outside the binary (embedded VFS " +
+        "only) — keeping the HTTP server so the window can load. Ship dist/ " +
+        "next to the binary (the AppImage/AppDir layout) for zero TCP ports.",
+    );
+  }
   // Doctrine: no silent dev/prod divergence. Custom `routes` are served by the
   // HTTP server; skipping it in prod would let a webhook/callback endpoint work
   // all through development and then silently connection-refuse in production.
@@ -344,6 +362,7 @@ export async function setupTransport<S, A>(
         getState: () => getState(),
         getSchedules: () => scheduleManager.active(),
         cellMethods: () => deps.cellMethods ?? {},
+        cellFields: () => deps.cellFields ?? {},
         ...(tt ? { getTTHistory: tt.getTTBroadcast } : {}),
         ...(shouldPersist ? { forcePersist: () => schedulePersist() } : {}),
         ...(asyncDb
@@ -351,7 +370,11 @@ export async function setupTransport<S, A>(
             sqlQuery: async (sql: string) => (await asyncDb!.query(sql)).rows,
           }
           : {}),
-        shutdown: () => shutdown().then(() => Deno.exit(0)),
+        // libraryMode means aio is embedded (a test, a host process): tearing
+        // down is ours to do, exiting the process is not — the same rule the
+        // signal handlers below already follow.
+        shutdown: () =>
+          config.libraryMode ? shutdown() : shutdown().then(() => Deno.exit(0)),
         startedAt: Date.now(),
         udsClients: () =>
           udsRef.current

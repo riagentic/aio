@@ -52,7 +52,11 @@ export function trackCall(
   set.add(controller);
   return () => {
     set!.delete(controller);
-    if (set!.size === 0) _inflight.delete(key);
+    // Identity check: notifyMethodCancel DELETES the map entry, so a later call
+    // installs a NEW set under the same key. Without `=== set`, the older call
+    // settling afterwards deleted that newer set — and the newer call silently
+    // stopped being cancellable (cancelOn quietly stopped working).
+    if (set!.size === 0 && _inflight.get(key) === set) _inflight.delete(key);
   };
 }
 

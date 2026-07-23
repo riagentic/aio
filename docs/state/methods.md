@@ -103,6 +103,13 @@ const id = await cart.addItem({ name: "Book", price: 12 })
   method can't both schedule an effect and return a value in the same call.
 - Returning a slice of draft state (`return s.items[id]`) is safe — the value is
   snapshotted, so it survives past the method (no revoked-proxy surprises).
+- **⚠️ Return values resolve in-process only — NOT across the network bridge.**
+  Same-process callers (server code, tests, the CLI) get the value. But when a
+  **browser or Electron client** calls a method that runs on the **server**,
+  only an acknowledgement crosses the wire — the client's `await` resolves
+  `undefined`, never the return. Across that boundary, **read the resulting
+  state reactively** (it syncs to the client anyway); don't design a client flow
+  around a method's return value.
 
 ### Returning schedule effects
 
@@ -272,6 +279,9 @@ The live proxy supports the read patterns you'd expect:
 - **`Object.keys(s)` / `Object.entries(s)`** — returns plain key/value arrays
 - **`JSON.stringify(s)`** — works (ownKeys + getOwnPropertyDescriptor give a
   plain snapshot)
+- **Spread & iteration on arrays** — `[...s.items]`, `Array.from(s.items)`, and
+  `for (const x of s.items)` all work; each element is the same live value as
+  `s.items[i]` (a nested proxy for objects, so writes through it still batch).
 - **Array read methods** — `s.items.map`, `.filter`, `.find`, `.findIndex`,
   `.some`, `.every`, `.reduce`, `.slice`, `.concat`, `.includes`, `.indexOf`,
   `.flat`, `.flatMap`, `.forEach`, `.entries`, `.keys`, `.values`, `.join`,

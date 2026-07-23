@@ -128,9 +128,13 @@ export function startGraphValidation(
       // exactly the "green locally, blank screen in the browser" trap from the
       // machine field report (U1). Print a compact, always-visible warning
       // block naming each file:line. Dev-stricter only; prod is untouched.
-      const apiWarnings = warnings.filter((e) =>
-        e.category === "server-only-api"
-      );
+      // Only EAGER (statically-reachable) server-only usage can blank-screen —
+      // that's the always-visible warning. `deferred` findings live behind a
+      // dynamic import (the escape hatch), so the browser never loads them:
+      // report those quietly at debug level, not in the loud block.
+      const allApi = warnings.filter((e) => e.category === "server-only-api");
+      const apiWarnings = allApi.filter((e) => !e.deferred);
+      const deferredCount = allApi.length - apiWarnings.length;
       if (apiWarnings.length > 0) {
         const MAX_SHOWN = 10;
         console.warn(
@@ -148,6 +152,12 @@ export function startGraphValidation(
         console.warn(
           `  Fix: move server-only I/O into a *.server.ts module and ` +
             `dynamic-import it from the cell method (docs/build/imports.md).`,
+        );
+      }
+      if (deferredCount > 0) {
+        debug(
+          `graph: ${deferredCount} server-only symbol(s) behind dynamic ` +
+            `imports (server-only path — not in the browser bundle)`,
         );
       }
       if (result.durationMs > 1000) {

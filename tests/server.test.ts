@@ -721,14 +721,35 @@ Deno.test("trojan: GET /state returns raw state", async () => {
 
 Deno.test("trojan: same-machine guard — loopback + UDS local, everything else remote", () => {
   // Local: the trojan may answer.
-  assertEquals(_isLocalRequest({ transport: "tcp", hostname: "127.0.0.1", port: 1 }), true);
-  assertEquals(_isLocalRequest({ transport: "tcp", hostname: "::1", port: 1 }), true);
-  assertEquals(_isLocalRequest({ transport: "tcp", hostname: "localhost", port: 1 }), true);
-  assertEquals(_isLocalRequest({ transport: "unix", path: "/tmp/x.sock" }), true);
+  assertEquals(
+    _isLocalRequest({ transport: "tcp", hostname: "127.0.0.1", port: 1 }),
+    true,
+  );
+  assertEquals(
+    _isLocalRequest({ transport: "tcp", hostname: "::1", port: 1 }),
+    true,
+  );
+  assertEquals(
+    _isLocalRequest({ transport: "tcp", hostname: "localhost", port: 1 }),
+    true,
+  );
+  assertEquals(
+    _isLocalRequest({ transport: "unix", path: "/tmp/x.sock" }),
+    true,
+  );
   // Remote (LAN, public, spoofed host): never.
-  assertEquals(_isLocalRequest({ transport: "tcp", hostname: "192.168.1.5", port: 1 }), false);
-  assertEquals(_isLocalRequest({ transport: "tcp", hostname: "10.0.0.2", port: 1 }), false);
-  assertEquals(_isLocalRequest({ transport: "tcp", hostname: "203.0.113.9", port: 1 }), false);
+  assertEquals(
+    _isLocalRequest({ transport: "tcp", hostname: "192.168.1.5", port: 1 }),
+    false,
+  );
+  assertEquals(
+    _isLocalRequest({ transport: "tcp", hostname: "10.0.0.2", port: 1 }),
+    false,
+  );
+  assertEquals(
+    _isLocalRequest({ transport: "tcp", hostname: "203.0.113.9", port: 1 }),
+    false,
+  );
   // Unknown origin fails CLOSED.
   assertEquals(_isLocalRequest(undefined), false);
 });
@@ -739,7 +760,10 @@ Deno.test("trojan: DEV-ONLY — prod build serves no trojan route even when wire
   const dir = await Deno.makeTempDir();
   await Deno.writeTextFile(join(dir, "App.tsx"), "export default () => null");
   await Deno.mkdir(join(dir, "dist"), { recursive: true });
-  await Deno.writeTextFile(join(dir, "dist", "app.js"), "export function mount(){}");
+  await Deno.writeTextFile(
+    join(dir, "dist", "app.js"),
+    "export function mount(){}",
+  );
   const server = createServer({
     port: TROJAN_PORT,
     title: "ProdTrojan",

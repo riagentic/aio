@@ -4,7 +4,11 @@
 import type { Signal } from "../state/signal.ts";
 
 // ── SVG tag set ────────────────────────────────────────────────────
-export const SVG_TAGS = new Set([
+// The runtime namespace switch. jsx-runtime.ts lists these same tags in
+// `JSX.IntrinsicElements` so each is typed as SVG (not HTML) — keep the two in
+// sync when adding a tag (a missing type entry falls through to the HTML
+// catch-all and rejects SVG attributes).
+export const SVG_TAG_LIST = [
   "svg",
   "circle",
   "ellipse",
@@ -50,7 +54,9 @@ export const SVG_TAGS = new Set([
   "animate",
   "animateTransform",
   "set",
-]);
+] as const;
+
+export const SVG_TAGS: Set<string> = new Set(SVG_TAG_LIST);
 
 // ── DOM property set ───────────────────────────────────────────────
 // Props that must be set as DOM properties (not attributes) for correct behavior

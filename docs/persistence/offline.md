@@ -24,10 +24,15 @@ reconnect.
 
 | Parameter          | Value                           |
 | ------------------ | ------------------------------- |
-| Max queued actions | 1000                            |
+| Max queued actions | 100                             |
 | TTL per action     | 24 hours                        |
 | Storage            | IndexedDB (`aio-offline-queue`) |
 | Replay             | Automatic on reconnect          |
+
+Past 100 queued actions the oldest are dropped — the cap is `OFFLINE_MAX_QUEUE`
+in `src/protocol/protocol-types.ts`. (The AIR transport keeps its own in-memory
+queue, capped at 1000, and reports `isConnectionDegraded()` once it passes 80%
+full.)
 
 On reconnect, all pending actions flush at once. Microtask coalescing ensures
 this produces at most a few broadcasts, not N.
@@ -173,7 +178,7 @@ Localhost is always allowed. Additional hostnames via `allowedOrigins`.
 | Backpressure: heavy        | >300ms → 4x    | `server.ts:259`              |
 | Backpressure: recovery     | 3 healthy → /2 | `server.ts:261`              |
 | Subscription grace period  | 300ms          | `browser.ts:744`             |
-| Offline queue max          | 1000           | `browser.ts`                 |
+| Offline queue max          | 100            | `protocol/protocol-types.ts` |
 | Offline queue TTL          | 24 hours       | `browser.ts`                 |
 | Render staleness threshold | 300ms          | `vitals/render-meter.ts`     |
 | Pressure: payload size     | 500 KB         | `vitals/pressure-monitor.ts` |

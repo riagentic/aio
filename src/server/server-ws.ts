@@ -16,6 +16,7 @@ import { log } from "../diagnostics/logger.ts";
 import { parseTTCommand } from "../diagnostics/time-travel.ts";
 import type { ClientLogEntry } from "../air/dom-inspector-types.ts";
 import type { VitalsSystem } from "../vitals/mod.ts";
+import { VERSION } from "./aio-cli.ts";
 import {
   negotiateProtocol,
   parseProtoHello,
@@ -312,7 +313,7 @@ export function createWsManager(deps: WsDeps): WsManager {
       }
       // A3: version handshake — server speaks first, before any state.
       try {
-        socket.send(enc("proto", protoHello()));
+        socket.send(enc("proto", protoHello(VERSION)));
       } catch { /* socket closing during onopen (AIO-155) */ }
       try {
         const uiState = deps.getUIState(meta.user);
@@ -551,7 +552,7 @@ export function createWsManager(deps: WsDeps): WsManager {
           );
           return;
         }
-        const result = negotiateProtocol(protoHello(), theirs);
+        const result = negotiateProtocol(protoHello(VERSION), theirs);
         if (!result.ok) {
           const msg = `ws: protocol mismatch with client ${
             meta.id.slice(0, 8)
@@ -609,6 +610,14 @@ export function createWsManager(deps: WsDeps): WsManager {
           .then((result) => {
             try {
               socket.send(enc("sfnr", { cid, ...result }));
+            } catch { /* client disconnected */ }
+          })
+          // No .catch here meant a rejecting serverFn (or a throwing access
+          // predicate) surfaced as an unhandled rejection — process death.
+          .catch((e) => {
+            log.error("ws", `sfn ${ns}.${name} failed — ${e}`);
+            try {
+              socket.send(enc("sfnr", { cid, ok: false, error: String(e) }));
             } catch { /* client disconnected */ }
           });
         return;
@@ -928,7 +937,15 @@ export function createWsManager(deps: WsDeps): WsManager {
       } catch { /* already closing */ }
     }
     connections.clear();
-    for (const [, pending] of pendingClientState) clearTimeout(pending.timer);
+    // SETTLE, don't just drop: each entry owns an unresolved promise that a
+    // caller (the trojan client-state route) is awaiting. Clearing the timer
+    // and deleting the entry left that promise pending forever, so a shutdown
+    // racing an in-flight request never completed — every timeout path was
+    // gone with the timer.
+    for (const [, pending] of pendingClientState) {
+      clearTimeout(pending.timer);
+      pending.resolve({ error: "server shutting down" });
+    }
     pendingClientState.clear();
   }
 

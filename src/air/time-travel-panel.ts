@@ -138,8 +138,12 @@ function _renderTTPanel(): void {
     return b;
   };
 
-  bar.appendChild(mkBtn("◀ undo", () => _sendTTCmd(enc("tt-cmd", { cmd: "undo" })), atStart));
-  bar.appendChild(mkBtn("redo ▶", () => _sendTTCmd(enc("tt-cmd", { cmd: "redo" })), atEnd));
+  bar.appendChild(
+    mkBtn("◀ undo", () => _sendTTCmd(enc("tt-cmd", { cmd: "undo" })), atStart),
+  );
+  bar.appendChild(
+    mkBtn("redo ▶", () => _sendTTCmd(enc("tt-cmd", { cmd: "redo" })), atEnd),
+  );
   bar.appendChild(
     mkBtn(
       tt.paused ? "🔓 unlock" : "🔒 lock",

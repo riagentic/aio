@@ -123,9 +123,9 @@ aio.run({
 
 ### TransportProbe (client + server)
 
-Measures RTT via `vitals-ping`/`vitals-pong` frames over WebSocket. Client sends ping with
-`t1`, server responds with `t2` and loop vitals. Server-side watchdog tracks
-`lastPing` per client, detects frozen clients.
+Measures RTT via `vitals-ping`/`vitals-pong` frames over WebSocket. Client sends
+ping with `t1`, server responds with `t2` and loop vitals. Server-side watchdog
+tracks `lastPing` per client, detects frozen clients.
 
 IPC keepalive (UDS mode): lightweight `__ping` every 60s over IPC bridge. Full
 vitals protocol runs over WebSocket only.

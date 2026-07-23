@@ -30,6 +30,8 @@ bench-results.json
 .aio-tls/
 data.kv
 data.db
+data.db-shm
+data.db-wal
 window-state.json
 telemetry-id
 

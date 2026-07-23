@@ -1,5 +1,109 @@
 # Changelog
 
+## 1.0.0-alpha33 — build a fleet, see everything (2026-07-24)
+
+Two headline features.
+
+**`deno task build` — one command builds a whole target fleet.** Declare the set
+once in `deno.json`
+(`"build": { "targets": ["server", "electron-client",
+"android-client"], "out": "dist" }`)
+and build them all with a single command into a predictable `dist/` + a
+`manifest.json`. Eight targets (`server`, `browser`, `electron`, `android`,
+`cli`, `electron-client`, `android-client`, `cli-client`;
+`deno task build --list`). It orchestrates the existing single-target builds as
+subprocesses — purely additive, so every `compile:*` task keeps working
+unchanged — and collects every artifact into one flat `dist/`, disambiguating
+name collisions rather than overwriting. Ideal for a LAN app: one server plus
+the clients that connect to it, built together. See
+[build/targets](docs/build/targets.md#build-a-fleet--deno-task-build).
+
+**amui, leveled up.** The manager UI now mines everything aio's diagnostic
+surface exposes. The two file tabs merged into one source-aware **Codebase**
+tab; a new **Logs** tab tails the app's `.aio/log` (framework + app lines) or
+the combined stdout capture, with source/level/text filters and live-follow.
+**Overview** gained a process card (pid, port, work dir, exe, runtime kind),
+app + **aio framework** versions, and live per-cell health. **Metrics** is now
+the full picture: CPU/RSS/heap/reduce-p95/queue charts, the dispatch loop (queue
+depth, drain rate, effect backlog, circuit breakers), per-client transport +
+backpressure, per-cell state sizes, and the **live action stream** with
+per-action reduce timing. See [clients/amui](docs/clients/amui.md).
+
+Also: closed a two-reviewer audit on amui + `am fix` (a same-path Refresh wedge,
+a proxy re-read race, stale config after stop, a sibling-vendoring
+misclassification, and more).
+
+### 30-audit sweep — six serious bugs, found and fixed
+
+Thirty randomized audits (a random subsystem paired with a random defect lens),
+each finding then put to two independent reviewers who had to actively try to
+refute it. 74 survived. The six most serious are fixed, each with a regression
+test that was verified by reintroducing the bug:
+
+- **Sync compaction destroyed state.** `sync_snapshots` was written by
+  compaction and read by nothing — so the first restart after a cell passed 1000
+  ops brought it back EMPTY and broadcast that to clients as authoritative. Boot
+  replay now seeds from the snapshot and folds the surviving ops on top.
+- **`db:` tables stopped persisting after the first restart.** The table
+  baseline was captured before restored rows were loaded, so the next flush
+  re-inserted every existing row, hit a UNIQUE violation, and rolled back —
+  losing that flush's real writes, permanently.
+- **`/__aio/…` served any file and any URL.** `new URL(rel, base)` ignores the
+  base when `rel` is absolute, so `/__aio/file:///…` read arbitrary files and
+  `/__aio/http://internal/…` proxied internal hosts back as executable
+  JavaScript — in prod too. Module paths are now validated and re-checked
+  against the framework source root.
+- **Deep static subtrees corrupted the DOM.** The unchanged-subtree fast path
+  handed down DOM handles only two levels deep, so a deep leaf was appended next
+  to its predecessor instead of replacing it.
+- **One Electron reconnect duplicated your data.** The IPC bridge callbacks were
+  re-registered on every reconnect (the bridge has no unbind), so each frame was
+  applied twice — and patch frames are not idempotent.
+- **Async methods could read their own writes back stale**, committing a value
+  computed from pre-write state.
+
+Also fixed: `.env`, dotfiles and `*.server.ts` were served over HTTP; a
+`serverFn` that threw or returned something unserializable killed the process
+(both transports); vitals alerts were silent under the default config and a
+throwing vitals hook took the server down; shutdown could hang on an in-flight
+trojan request, and the trojan shutdown route called `Deno.exit` even in
+`libraryMode`; `cancelOn` silently stopped working after two overlapping calls;
+cell `onMigrate` ran on brand-new installs; `am create --target=X` was ignored;
+`am auth` ignored `--app`; amui kept showing an externally-killed app as
+healthy; and the CRDT/offline docs described a wire format and a queue size that
+no longer exist.
+
+### Builds you can trust
+
+A build that "succeeds" while shipping a broken artifact is the worst failure a
+framework can have, so artifacts are now tested as artifacts:
+`deno task test:build` (new, a release gate) scaffolds a real app, builds every
+compile target for real, and requires each one to **boot from a foreign
+directory and serve** — plus a real fleet build whose `dist/` + `manifest.json`
+must describe files that exist and run, and a `.wasm` app that must actually
+instantiate its module inside the compiled binary.
+
+It immediately caught two shipped bugs, both fixed:
+
+- **`compile:service` produced a binary that crashed anywhere but its build
+  directory.** A headless build never bundles, so there is no `dist/app.js` to
+  detect — the binary fell through to _dev_ mode, ran the dev lint, demanded
+  `src/App.tsx` at the current directory and died. A compiled binary is now prod
+  by definition.
+- **The generated systemd unit couldn't start the service.** It passed
+  `--headless`, a _build_ flag with no runtime counterpart, so the unit users
+  copy into `/etc/systemd/system` started the app in the default (Electron)
+  client mode. The unit now emits `--client=server-only`, and its flags are
+  verified against the real CLI parser.
+
+Version skew is handled at the root as well. The browser bundle is **stamped
+with the aio version that built it**: the stamp invalidates a `dist/app.js` left
+behind by a framework upgrade (an mtime check kept stale bundles, leaving an old
+client speaking the old wire protocol to a new server), and each peer announces
+its build in the protocol handshake — so a mismatch now reads _"THIS side is the
+older build (here: aio 1.0.0-alpha28, peer: aio 1.0.0-alpha33); rebuild it"_
+instead of only naming protocol numbers.
+
 ## 1.0.0-alpha32 — aui, the aio app manager (2026-07-23)
 
 The headline is a new example that is really a product: **aui**, a visual

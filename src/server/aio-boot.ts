@@ -16,7 +16,11 @@ import { migrateSchema, PERSIST_SCHEMA_VERSION } from "./persist-schema.ts";
 import type { Log } from "../diagnostics/logger.ts";
 import type { CheckpointData, DiagnosticsHooks } from "../diagnostics/mod.ts";
 import type { ServerSyncHandler } from "../sync/server-handler.ts";
-import { loadOpsSince } from "../sync/server-store.ts";
+import {
+  getLowWater,
+  loadOpsSince,
+  loadSnapshot,
+} from "../sync/server-store.ts";
 
 /** B1/AIO-416: replay each sync cell's committed op-log into state at boot.
  *  `sync: true` cells are excluded from KV, and their op-log was only ever
@@ -42,7 +46,35 @@ export async function replaySyncOps<S>(
       log.error(`sync: op-log replay failed for cell "${cell}" — ${e}`);
       continue;
     }
-    if (ops.length === 0) continue;
+
+    // Seed from the compaction snapshot FIRST. Compaction folds ops into
+    // sync_snapshots and deletes them, so the surviving log is only the tail —
+    // replaying it alone restored the cell to its initialState and then
+    // broadcast that emptiness to clients as authoritative (silent data loss
+    // on the first restart after 1000 ops).
+    let seeded = false;
+    try {
+      const snap = await loadSnapshot(db, cell);
+      if (snap) {
+        (next as Record<string, unknown>)[cell] = snap.state;
+        seeded = true;
+        log.info(`sync: seeded cell "${cell}" from compaction snapshot`);
+      } else if (await getLowWater(db, cell)) {
+        // Compacted, but the snapshot is gone/unreadable: the pre-compaction
+        // history is unrecoverable. Never pretend this is a clean start.
+        log.error(
+          `sync: cell "${cell}" was compacted but has no readable snapshot — ` +
+            `state before the last compaction cannot be restored`,
+        );
+      }
+    } catch (e) {
+      log.error(`sync: snapshot restore failed for cell "${cell}" — ${e}`);
+    }
+
+    if (ops.length === 0) {
+      if (seeded) log.info(`sync: restored cell "${cell}" from snapshot only`);
+      continue;
+    }
     let applied = 0;
     for (const op of ops) {
       try {
@@ -270,6 +302,9 @@ export async function bootStorage<S>(
   // minus a 64KiB value limit we hit in the field). Legacy KV data
   // auto-migrates on first boot; the old file is left untouched.
   let kvDb: SkvInstance | null = null;
+  // Whether this boot actually restored a persisted snapshot. A brand-new
+  // install has none — and must not be "migrated".
+  let hadPersistedState = false;
   if (shouldPersist) {
     try {
       if (!asyncDb) {
@@ -290,6 +325,7 @@ export async function bootStorage<S>(
         log,
       );
       if (migrated) {
+        hadPersistedState = true;
         state = deepMerge(
           initialState as Record<string, unknown>,
           migrated,
@@ -309,7 +345,12 @@ export async function bootStorage<S>(
   }
 
   // ── 4b. State migration — check persisted versions vs current ────
-  if (shouldPersist && kvDb && cfg.cellMigrations?.size) {
+  // ONLY when something was actually restored. On a fresh install there is no
+  // old shape to migrate: running onMigrate against pristine initialState let
+  // a hook rewrite defaults it was never meant to see (a v0→v1 rename turning
+  // the app's own defaults into garbage on first launch). The first successful
+  // persist stamps the current versions, so the next boot is a no-op anyway.
+  if (shouldPersist && kvDb && cfg.cellMigrations?.size && hadPersistedState) {
     const VERSIONS_KEY = `${appId}:__versions`;
     const persistedVersions =
       await kvDb.get<Record<string, number>>(VERSIONS_KEY) ?? {};

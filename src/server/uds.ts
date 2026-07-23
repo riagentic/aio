@@ -17,6 +17,7 @@ import {
   type SfnPayload,
   unsupportedOnUds,
 } from "../protocol/envelope.ts";
+import { VERSION } from "./aio-cli.ts";
 import {
   negotiateProtocol,
   parseProtoHello,
@@ -79,7 +80,7 @@ export function createUDSListener(
       debug(`uds: client connected #${client.index} (${connSet.size} total)`);
 
       // A3: version handshake — server speaks first, before any state.
-      sendTo(conn, enc("proto", protoHello()));
+      sendTo(conn, enc("proto", protoHello(VERSION)));
       // AIO-239: route initial write through sendTo() to use per-connection write queue
       sendTo(conn, encRaw("state", JSON.stringify(getUIState())));
 
@@ -374,7 +375,7 @@ function _handleUDSConn(
                 debug("uds: malformed proto hello — ignored");
                 continue;
               }
-              const result = negotiateProtocol(protoHello(), theirs);
+              const result = negotiateProtocol(protoHello(VERSION), theirs);
               if (!result.ok) {
                 log.error("uds", `protocol mismatch — ${result.reason}`);
                 sendTo(conn, "__proto-err:" + result.reason);
@@ -498,9 +499,35 @@ function _handleUDSConn(
                 log.warn("uds", "invalid sfn frame — dropping");
                 continue;
               }
-              invokeServerFn(ns, name, args).then((result) => {
-                sendTo(conn, enc("sfnr", { cid, ...result }));
-              });
+              // Fire-and-forget: BOTH the call and the reply encode must be
+              // guarded. An unserializable return value (or a throwing access
+              // predicate) escaped as an unhandled rejection, and aio's crash
+              // handler is a last-words logger, not a survival net — one bad
+              // serverFn took the whole server down.
+              invokeServerFn(ns, name, args)
+                .then((result) => {
+                  try {
+                    sendTo(conn, enc("sfnr", { cid, ...result }));
+                  } catch (e) {
+                    sendTo(
+                      conn,
+                      enc("sfnr", {
+                        cid,
+                        ok: false,
+                        error: `serverFn result is not serializable: ${e}`,
+                      }),
+                    );
+                  }
+                })
+                .catch((e) => {
+                  log.error("uds", `sfn ${ns}.${name} failed — ${e}`);
+                  try {
+                    sendTo(
+                      conn,
+                      enc("sfnr", { cid, ok: false, error: String(e) }),
+                    );
+                  } catch { /* peer gone */ }
+                });
               continue;
             }
             case "action": {

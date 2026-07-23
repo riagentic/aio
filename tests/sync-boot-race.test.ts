@@ -47,7 +47,8 @@ function shimLocalStorage(): void {
 const tick = () => new Promise((r) => setTimeout(r, 30));
 
 Deno.test({
-  name: "sync boot race: a sync-cell method before engine boot is buffered, never plain-sent",
+  name:
+    "sync boot race: a sync-cell method before engine boot is buffered, never plain-sent",
   sanitizeResources: false,
   sanitizeOps: false,
   async fn() {

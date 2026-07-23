@@ -73,6 +73,7 @@
 ## Clients — browser, electron, the am manager
 
 - [Clients](clients/README.md) — How browsers, Electron, and CLI tools connect to AIO.
+- [amui — Aio Manager UI](clients/amui.md) — A visual manager for every aio app on your machine — the GUI counterpart to the
 - [App Manager](clients/app-manager.md) — Manage your aio app without ps, kill, or curl.
 - [Browser](clients/browser.md) — WebSocket client API, connection lifecycle, and UI state management for browser
 - [Electron](clients/electron.md) — Desktop app packaging, thin client, and window management.
@@ -121,6 +122,8 @@
 - [Upgrade: 1.0.0-alpha29 → 1.0.0-alpha30](upgrade/from-alpha29-to-alpha30.md) — alpha30's headline is built-in enterprise auth — everything is opt-in, so
 - [Upgrade from v1.0.0-alpha3 to v1.0.0-alpha4](upgrade/from-alpha3-to-alpha4.md) — If you rely on effects completing after timeout (e.g., fire-and-forget with a
 - [Upgrade: 1.0.0-alpha30 → 1.0.0-alpha31](upgrade/from-alpha30-to-alpha31.md) — A sanity & cleanup release — no new features.
+- [Upgrade: 1.0.0-alpha31 → 1.0.0-alpha32](upgrade/from-alpha31-to-alpha32.md) — A feature release — the headline is aui, a visual app manager (new example),
+- [Upgrade: 1.0.0-alpha32 → 1.0.0-alpha33](upgrade/from-alpha32-to-alpha33.md) — A feature + hardening release.
 - [Upgrade from v1.0.0-alpha4 to v1.0.0-alpha5](upgrade/from-alpha4-to-alpha5.md) — None.
 - [Upgrade from v1.0.0-alpha5 to v1.0.0-alpha6](upgrade/from-alpha5-to-alpha6.md) — None.
 - [Upgrade from v1.0.0-alpha6 to v1.0.0-alpha7](upgrade/from-alpha6-to-alpha7.md) — mod.ts no longer re-exports renderer primitives.

@@ -16,6 +16,19 @@ UI functional tests, the full onboarding e2e (install → create → dev → com
 android APK), and the build smoke (scaffold → compile → binary). Green = the
 in-repo bar.
 
+```sh
+deno task test:build       # + AIO_BUILD_ELECTRON=1 for the real AppImage
+```
+
+Artifact reliability — the gate for "the thing we ship actually runs". Every
+compile target is built for real and its binary must **boot from a foreign
+working directory** and serve; the generated systemd unit's own `ExecStart`
+flags must boot it; a fleet build's `dist/` + `manifest.json` must describe
+files that exist, match their recorded sizes and run; and an app with a `.wasm`
+must instantiate it inside the compiled binary. Running artifacts from their
+build directory is what hid two shipped bugs (a non-portable binary and a
+service unit that could not start), so the foreign cwd is the point.
+
 ## 2. Off-box remote (two machines, ~30 min)
 
 On machine A (the server):

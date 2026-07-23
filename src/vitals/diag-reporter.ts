@@ -157,8 +157,13 @@ export function createServerDiagReporter(config: ServerDiagReporterConfig) {
 
       const event = buildEvent(kind, alert, loop, transport);
 
-      // Always fire hook (no throttling)
-      config.onDiagnostic?.(event);
+      // Always fire hook (no throttling). Guarded: this runs from a timer,
+      // so a throwing user hook would otherwise take the process down.
+      try {
+        config.onDiagnostic?.(event);
+      } catch (e) {
+        console.error(`[aio:vitals] onDiagnostic hook threw — ${e}`);
+      }
 
       // Console throttling
       const throttleKey = `${kind}:${event.detail.trigger ?? ""}`;

@@ -18,7 +18,7 @@
 import { h, type VNode } from "../air/vdom.ts";
 import { type Signal, signal } from "../state/signal.ts";
 import { authClient } from "./auth-client.ts";
-import type { AioUser } from "../server/aio-types.ts";
+import type { AioUser } from "../protocol/protocol-types.ts";
 
 /** Current identity — undefined: not yet resolved, null: anonymous. */
 export const authUser: Signal<AioUser | null | undefined> = signal<

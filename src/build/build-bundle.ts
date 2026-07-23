@@ -7,6 +7,8 @@ import { ESBUILD_JSX } from "./esbuild-shared.ts";
 import { aioBrowserPlugin } from "./esbuild-plugin.ts";
 import { makeHttpPlugin } from "./build-integrity.ts";
 import type { BuildConfig } from "./build-config.ts";
+import { VERSION } from "../server/aio-cli.ts";
+import { VERSION_STAMP } from "../protocol/protocol-version.ts";
 
 /** Recursively yields .ts/.tsx/.css mtimes under a directory */
 async function* walkSrcFiles(dir: string): AsyncGenerator<number> {
@@ -34,6 +36,10 @@ async function isBundleFresh(cfg: BuildConfig): Promise<boolean> {
     root,
   } = cfg;
   if (doForce) return false;
+  // Framework identity beats every mtime heuristic: a bundle built by another
+  // aio version is stale no matter how new it looks (remote/JSR builds pin the
+  // version, so the stamp is checked there too).
+  if (!await bundleMatchesFramework(out)) return false;
   try {
     const outStat = await Deno.stat(out);
     if (!outStat.mtime) return false; // AIO-227: can't verify freshness → rebuild
@@ -73,12 +79,22 @@ async function isBundleFresh(cfg: BuildConfig): Promise<boolean> {
   }
 }
 
+/** The aio version stamp the bundle carries. It makes the artifact
+ *  self-describing: the client announces it in the protocol handshake (so a
+ *  version mismatch names which side is stale instead of "protocol v1 vs v2"),
+ *  and `isBundleFresh` reads it back to invalidate a bundle built by a
+ *  different aio — the mtime heuristic alone silently kept a stale dist/app.js
+ *  after a framework upgrade, leaving a v1 client talking to a v2 server. */
+export function versionStamp(version: string): string {
+  return `globalThis.${VERSION_STAMP} = ${JSON.stringify(version)};\n`;
+}
+
 /** Generate the esbuild entry point code.
  *  Android (standalone WebView) auto-mounts — the generated index.html loads
  *  the bundle as a classic script, so there is no importer to call mount(). */
 function makeEntryCode(doAndroid: boolean): string {
   if (doAndroid) {
-    return `\
+    return versionStamp(VERSION) + `\
 import { mount as _mount } from 'aio/renderer'
 import { ensureConnected } from 'aio/air'
 import App from './src/App.tsx'
@@ -87,12 +103,25 @@ if (document.readyState === 'loading') document.addEventListener('DOMContentLoad
 else boot()
 `;
   }
-  return `\
+  return versionStamp(VERSION) + `\
 import { mount as _mount } from 'aio/renderer'
 import { ensureConnected } from 'aio/air'
 import App from './src/App.tsx'
 export function mount(el) { ensureConnected(); _mount(el, App) }
 `;
+}
+
+/** True when dist/app.js was built by THIS aio version (reads the stamp back).
+ *  A framework upgrade must invalidate the bundle even when every mtime says
+ *  it's fresh — otherwise the shipped client keeps speaking the old wire
+ *  protocol against a new server. */
+async function bundleMatchesFramework(out: string): Promise<boolean> {
+  try {
+    const js = await Deno.readTextFile(out);
+    return js.includes(versionStamp(VERSION).trim());
+  } catch {
+    return false;
+  }
 }
 
 /** Run the esbuild bundle step. Exits process on failure. */
