@@ -210,3 +210,39 @@ Deno.test(
     }
   },
 );
+
+Deno.test(
+  "fire-and-forget async method that throws does NOT leak an unhandled rejection",
+  async () => {
+    // The server-side twin used to return the call promise without a safety
+    // .catch(), so `cell.asyncMethod()` (no await) whose body threw escaped as
+    // an unhandled rejection and killed the Deno process. Deno's test runner
+    // fails a test on an unhandled rejection, so this reproduces the crash.
+    const realError = console.error;
+    console.error = () => {}; // silence the expected executor error log
+    try {
+      const boom = cell("boom", {
+        state: { n: 0 },
+        methods: {
+          // deno-lint-ignore require-await
+          async explode(_s) {
+            throw new Error("kaboom");
+          },
+        },
+      });
+      const composed = composeCells([boom]);
+      const app = createApp(composed);
+      bindCell(
+        boom,
+        (a) => app.dispatch(a as never),
+        () => app.state as Record<string, unknown>,
+      );
+      // Fire-and-forget — no await. Must not produce an unhandled rejection.
+      (boom as unknown as { explode: () => void }).explode();
+      // Let the microtask/timer queue drain so any rejection would surface.
+      await new Promise((r) => setTimeout(r, 20));
+    } finally {
+      console.error = realError;
+    }
+  },
+);

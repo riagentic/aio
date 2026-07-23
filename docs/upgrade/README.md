@@ -7,6 +7,12 @@ One guide per version migration. Find your current version and follow the steps.
 - **[The aio restructure (alpha27+)](restructure.md)** — every restructure
   breaking change with before → after recipes (methods-only cells, instances,
   SQLite-only persistence, `aio/extras`, wire catalog)
+- [alpha32 → alpha33](from-alpha32-to-alpha33.md) — `deno task build` (fleet
+  builds), amui levelled up; portable binaries, embedded `.wasm`, a working
+  systemd unit, sync-compaction + `db:`-table data-loss fixes
+- [alpha31 → alpha32](from-alpha31-to-alpha32.md) — aui (visual app manager);
+  transparent fixes: persist KV-limit removed, clean shutdown teardown, electron
+  crash guard
 - [alpha30 → alpha31](from-alpha30-to-alpha31.md) — sanity & cleanup: auth
   hardening, parameter consistency, persistence fix
 - [alpha29 → alpha30](from-alpha29-to-alpha30.md) — built-in auth (opt-in),

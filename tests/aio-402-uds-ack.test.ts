@@ -36,7 +36,10 @@ Deno.test("aio-402: UDS server acks a dispatch that carries a cid", async () => 
     if (done) break;
     got += dec.decode(value);
   }
-  assertStringIncludes(got, '{"v":2,"t":"ack","d":{"cid":"abc-123","ok":true}}');
+  assertStringIncludes(
+    got,
+    '{"v":2,"t":"ack","d":{"cid":"abc-123","ok":true}}',
+  );
 
   reader.releaseLock();
   writer.releaseLock();

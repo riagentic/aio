@@ -62,11 +62,9 @@ export async function runDoctor(
     });
   }
 
-  checks.push({
-    name: 'unstable includes "kv"',
-    ok: (cfg.unstable ?? []).includes("kv"),
-    fix: 'add "unstable": ["kv"] — persistence needs Deno KV',
-  });
+  // (aio is SQLite-only — Deno KV is no longer required; the old
+  // `unstable: ["kv"]` check was removed. Deno.openKv is only touched as a
+  // soft legacy-migration probe and degrades to a no-op without the flag.)
 
   // Electron needs nodeModulesDir
   const usesElectron = Object.values(imports).some((v) =>

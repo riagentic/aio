@@ -9,7 +9,7 @@
 //   const user = await authClient.login("alice", "password123");
 //   await authClient.logout();
 
-import type { AioUser } from "../server/aio-types.ts";
+import type { AioUser } from "../protocol/protocol-types.ts";
 
 export interface AuthClientResult {
   user: AioUser;

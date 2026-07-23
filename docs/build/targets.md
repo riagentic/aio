@@ -36,6 +36,61 @@ All 10 targets ship in a single binary.
 > boot, and are exercised by CI (per-target boot + WS-increment smoke in
 > `tests/examples.test.ts`, LAN e2e in `tests/e2e-remote-lan.test.ts`).
 
+## Build a fleet — `deno task build`
+
+The `compile:*` tasks build **one** target at a time. When you ship more than
+one — a LAN server plus the clients that connect to it, say — declare the set
+once and build it all with a single command:
+
+```jsonc
+// deno.json
+"build": {
+  "targets": ["server", "electron-client", "android-client"],
+  "out": "dist",
+  "server": "192.168.1.50:8000" // recorded in the manifest (clients connect here)
+}
+```
+
+```sh
+deno task build                 # builds every target in build.targets → dist/
+deno task build --targets=server,electron-client   # override the list
+deno task build --release       # release builds (e.g. Android assembleRelease)
+deno task build --list          # show all target names
+```
+
+Every artifact lands in **`dist/`** (flat) alongside a **`dist/manifest.json`**:
+
+```
+dist/
+  myapp                    server binary
+  myapp.service            systemd unit (server, with --expose baked in)
+  aio-client-x86_64.AppImage   electron client
+  myapp-client.apk         android client
+  manifest.json            { app, title, builtAt, server, targets:[…] }
+```
+
+On a name collision (e.g. both `browser` and `server`, which each emit the bare
+binary) the second is suffixed with its target (`myapp-server`) — nothing is
+silently overwritten.
+
+### Target names
+
+| Name              | Role   | Produces                                      |
+| ----------------- | ------ | --------------------------------------------- |
+| `server`          | server | headless binary + systemd unit (`--expose`)   |
+| `browser`         | app    | self-contained binary serving the browser app |
+| `electron`        | app    | Electron desktop app (AppImage / zip)         |
+| `android`         | app    | Android APK (bundled assets)                  |
+| `cli`             | app    | headless CLI binary                           |
+| `electron-client` | client | standalone Electron connect-page AppImage     |
+| `android-client`  | client | Android client APK (connects to a server)     |
+| `cli-client`      | client | CLI client binary (connects to a server)      |
+
+Each target maps to the same single-target flags as its `compile:*` task, run as
+a subprocess — so `build` is purely additive: the individual `compile:*` tasks
+keep working unchanged. A failed target is reported in the summary and marked
+`ok: false` in the manifest; the exit code is non-zero if any target failed.
+
 ## Dev mode
 
 ```sh
@@ -86,6 +141,33 @@ The binary name comes from deno.json `"title"` (lowercased, spaces to hyphens).
 > Scaffolds ship **one** `compile` task — their own target. To build a different
 > target, invoke `build.ts` directly with the flags shown below (or add your own
 > task).
+
+### Data assets (WASM, etc.) are embedded
+
+`deno compile` embeds the module graph, but **not** data files you read at
+runtime via `import.meta.url` — e.g. WASM loaded server-side:
+
+```ts
+const bytes = await Deno.readFile(new URL("./syscalls.wasm", import.meta.url));
+```
+
+aio handles this for you:
+
+- **Every `.wasm` in the project is embedded automatically** — zero config. A
+  WASM app compiles and runs identically to dev (no "wasm not available").
+- **Any other asset** (data files, models, fixtures) — list it in `deno.json` →
+  `"compile": { "include": [...] }` (files or dirs, relative to the project
+  root):
+
+  ```jsonc
+  // deno.json
+  "compile": { "include": ["assets/model.bin", "data/"] }
+  ```
+
+The compile log prints what it embedded (`[compile] embedding N data asset(s)`).
+Compiled binaries are **fully portable** — they serve the embedded `dist/` and
+run their WASM from any directory (an AppImage mount included); they never need
+their source tree at runtime.
 
 ## compile:electron (desktop app)
 

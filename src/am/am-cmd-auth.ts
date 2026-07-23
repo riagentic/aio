@@ -14,7 +14,7 @@
 // out or seeding the first admin before the app ever boots.
 
 import { join } from "@std/path";
-import { resolveAppId } from "../server/single-instance-lock.ts";
+import { resolveAmAppId } from "./am-utils.ts";
 import { resolveDataDir } from "../server/paths.ts";
 import { openUserStore, type UserStore } from "../server/auth-users.ts";
 import { openSessionStore } from "../server/sessions.ts";
@@ -58,7 +58,11 @@ export async function cmdAuth(
     return;
   }
 
-  const appId = resolveAppId();
+  // `--app` is a GLOBAL am flag; ignoring it here meant `am --app=other auth
+  // add …` silently edited the CWD-inferred app's auth.db instead — writing
+  // users into the wrong database. resolveAmAppId honours the flag and falls
+  // back to the same inference chain every other command uses.
+  const appId = resolveAmAppId(flags.app);
   const dbPath = join(resolveDataDir(appId), "auth.db");
   try {
     Deno.statSync(dbPath);

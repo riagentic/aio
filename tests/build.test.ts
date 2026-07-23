@@ -1,4 +1,4 @@
-import { assertEquals } from "@std/assert";
+import { assertEquals, assertStringIncludes } from "@std/assert";
 import { join } from "@std/path";
 import {
   copyDir,
@@ -367,4 +367,461 @@ Deno.test("build: --remote sets expose=true in server config", async () => {
   // The actual behavior: --remote enables token generation and 0.0.0.0 binding
   // Integration test coverage is in server.test.ts for auth
   assertEquals(true, true); // placeholder - actual auth tested in integration.test.ts
+});
+
+// ── build-all (multi-target orchestrator) ─────────────────────────
+
+import {
+  buildAll,
+  isArtifactName,
+  placedName,
+  TARGETS,
+  unsafeOutDir,
+} from "../src/build-all.ts";
+import { assert } from "@std/assert";
+
+Deno.test("build-all: unsafeOutDir rejects root/ancestor/.aio/src, allows a subdir", () => {
+  const root = "/proj";
+  // destructive → rejected (these would wipe the project, parent, staging, src)
+  assert(unsafeOutDir("/proj", root), "root itself");
+  assert(unsafeOutDir("/", root), "filesystem root (out: '../..')");
+  assert(unsafeOutDir("/other", root), "outside the project");
+  assert(unsafeOutDir("/proj/.aio", root), "staging parent");
+  assert(unsafeOutDir("/proj/src", root), "source dir");
+  assert(unsafeOutDir("/proj/.git", root), "git dir");
+  // dedicated subdirs → allowed
+  assert(!unsafeOutDir("/proj/dist", root), "dist");
+  assert(!unsafeOutDir("/proj/build/out", root), "nested out");
+  assert(!unsafeOutDir("/proj/release", root), "release");
+});
+
+Deno.test("build-all: isArtifactName recognizes artifacts, rejects source", () => {
+  const bin = "myapp";
+  // artifacts
+  assert(isArtifactName("myapp", bin), "bare binary");
+  assert(isArtifactName("myapp-client", bin), "cli client binary");
+  assert(isArtifactName("myapp-x86_64.AppImage", bin), "electron AppImage");
+  assert(isArtifactName("myapp.apk", bin), "android apk");
+  assert(isArtifactName("myapp-client.apk", bin), "android client apk");
+  assert(isArtifactName("myapp.service", bin), "systemd unit");
+  assert(isArtifactName("myapp-win-x64.zip", bin), "windows zip");
+  assert(isArtifactName("aio-client-x86_64.AppImage", bin), "electron client");
+  // NOT artifacts
+  assert(!isArtifactName("deno.json", bin), "config");
+  assert(!isArtifactName("app.ts", bin), "source");
+  assert(!isArtifactName("README.md", bin), "doc");
+  assert(!isArtifactName("other", bin), "unrelated bare file");
+  assert(!isArtifactName("myapp.ts", bin), "source sharing the name");
+});
+
+Deno.test("build-all: placedName disambiguates only on collision", () => {
+  const used = new Set<string>();
+  assertEquals(placedName("myapp", used, "browser"), "myapp");
+  used.add("myapp");
+  // bare binary collision → suffix
+  assertEquals(placedName("myapp", used, "server"), "myapp-server");
+  // extension collision → suffix before ext
+  const u2 = new Set(["myapp.apk"]);
+  assertEquals(
+    placedName("myapp.apk", u2, "android-client"),
+    "myapp-android-client.apk",
+  );
+});
+
+Deno.test("build-all: every target has a valid, non-conflicting flag set", () => {
+  // build-config.ts rejects >1 of these "shell target" flags per invocation, so
+  // each build-all target must map to at most one of them or it can never build.
+  const SHELL = ["--electron", "--android", "--cli", "--client"];
+  for (const [name, spec] of Object.entries(TARGETS)) {
+    const shellFlags = spec.flags.filter((f) => SHELL.includes(f));
+    assert(
+      shellFlags.length <= 1,
+      `target ${name} has conflicting shell flags: ${shellFlags.join(", ")}`,
+    );
+    assert(spec.flags.length > 0, `target ${name} has no flags`);
+    assert(
+      ["server", "client", "app"].includes(spec.role),
+      `target ${name} role`,
+    );
+  }
+});
+
+Deno.test("build-all: --list exits 0 without building", async () => {
+  const orig = Deno.args;
+  // buildAll reads Deno.args; --list short-circuits before any fs/subprocess work.
+  Object.defineProperty(Deno, "args", {
+    value: ["--list"],
+    configurable: true,
+  });
+  try {
+    assertEquals(await buildAll(), 0);
+  } finally {
+    Object.defineProperty(Deno, "args", { value: orig, configurable: true });
+  }
+});
+
+// ── compile: app data assets (.wasm) are embedded (WASM AppImage bug) ──────
+
+import { assetIncludes } from "../src/build/build-compile.ts";
+
+Deno.test("assetIncludes: auto-discovers .wasm, honors compile.include, skips deps/build dirs", async () => {
+  const dir = await Deno.makeTempDir();
+  try {
+    await Deno.mkdir(join(dir, "src"), { recursive: true });
+    await Deno.mkdir(join(dir, "node_modules", "pkg"), { recursive: true });
+    await Deno.mkdir(join(dir, "dist"), { recursive: true });
+    await Deno.mkdir(join(dir, "rust", "target"), { recursive: true });
+    await Deno.mkdir(join(dir, "assets"), { recursive: true });
+    const wasm = new Uint8Array([0, 0x61, 0x73, 0x6d]);
+    await Deno.writeFile(join(dir, "src", "syscalls.wasm"), wasm); // ← included
+    await Deno.writeFile(join(dir, "node_modules", "pkg", "d.wasm"), wasm); // skip
+    await Deno.writeFile(join(dir, "dist", "b.wasm"), wasm); // skip
+    await Deno.writeFile(join(dir, "rust", "target", "t.wasm"), wasm); // skip
+    await Deno.writeTextFile(join(dir, "assets", "model.bin"), "x"); // via include
+    await Deno.writeTextFile(
+      join(dir, "deno.json"),
+      JSON.stringify({
+        title: "x",
+        // 2nd entry escapes the project → must be rejected (no traversal)
+        compile: { include: ["assets/model.bin", "../../../etc/passwd"] },
+      }),
+    );
+    const inc = await assetIncludes(dir);
+    const files = inc.filter((a) => a !== "--include");
+    // shape: alternating --include <rel>
+    assertEquals(inc.filter((a) => a === "--include").length, files.length);
+    assert(files.includes("src/syscalls.wasm"), "auto .wasm included");
+    assert(files.includes("assets/model.bin"), "declared asset included");
+    assert(
+      !files.some((f) => f.includes("node_modules")),
+      "node_modules skipped",
+    );
+    assert(!files.some((f) => f.includes("dist")), "dist skipped");
+    assert(!files.some((f) => f.includes("target")), "rust/target skipped");
+    assert(
+      !files.some((f) => f.includes("..")),
+      "no path traversal out of project",
+    );
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+Deno.test("compile: WASM read via import.meta.url works ONLY when embedded (regression)", async () => {
+  const dir = await Deno.makeTempDir();
+  const runDir = await Deno.makeTempDir(); // run from a different cwd
+  try {
+    await Deno.mkdir(join(dir, "src"), { recursive: true });
+    // minimal valid wasm module: magic ("\0asm") + version (1)
+    await Deno.writeFile(
+      join(dir, "src", "m.wasm"),
+      new Uint8Array([0, 0x61, 0x73, 0x6d, 1, 0, 0, 0]),
+    );
+    await Deno.writeTextFile(
+      join(dir, "src", "entry.ts"),
+      `const b = await Deno.readFile(new URL("./m.wasm", import.meta.url));\n` +
+        `await WebAssembly.compile(b);\nconsole.log("WASM_OK");\n`,
+    );
+    await Deno.writeTextFile(
+      join(dir, "deno.json"),
+      JSON.stringify({ title: "wa" }),
+    );
+
+    const includes = await assetIncludes(dir);
+    assert(includes.includes("src/m.wasm"), "the wasm is discovered");
+
+    const compile = async (extra: string[], out: string): Promise<boolean> => {
+      const r = await new Deno.Command(Deno.execPath(), {
+        args: ["compile", ...extra, "-o", join(runDir, out), "src/entry.ts"],
+        cwd: dir,
+        stdout: "null",
+        stderr: "null",
+      }).output();
+      return r.code === 0;
+    };
+    const run = async (bin: string): Promise<string> => {
+      const r = await new Deno.Command(join(runDir, bin), {
+        cwd: runDir,
+        stdout: "piped",
+        stderr: "piped",
+      }).output();
+      return new TextDecoder().decode(r.stdout) +
+        new TextDecoder().decode(r.stderr);
+    };
+
+    // Without the includes → the .wasm isn't in the binary → NotFound (the bug).
+    assert(await compile([], "nofix"), "nofix compiled");
+    assertStringIncludes(await run("nofix"), "NotFound");
+
+    // With assetIncludes → the .wasm is embedded → WASM loads.
+    assert(await compile(includes, "fixed"), "fixed compiled");
+    assertStringIncludes(await run("fixed"), "WASM_OK");
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+    await Deno.remove(runDir, { recursive: true });
+  }
+});
+
+// ── build wiring guards ─────────────────────────────────────────────────────
+// Each of these covers a shipped bug whose fix was previously verified only by
+// hand. They're pure-function asserts (no toolchain, milliseconds) so they run
+// in EVERY `deno task test` — a broken build must fail here, not in a user's
+// AppImage.
+
+import { appimageEnv } from "../src/build/build-helpers.ts";
+import { compileArgs } from "../src/build/build-compile.ts";
+import { distCandidates, realDistCandidates } from "../src/server/paths.ts";
+
+Deno.test("appimageEnv: extract-and-run is always set (FUSE-less hosts)", () => {
+  const env = appimageEnv("x86_64");
+  // Without this, appimagetool (itself an AppImage) can't mount on Ubuntu
+  // 22.04+/containers/WSL/CI and the packaging step dies.
+  assertEquals(env.APPIMAGE_EXTRACT_AND_RUN, "1");
+  assertEquals(env.ARCH, "x86_64");
+  // The host environment is inherited, not replaced (PATH etc. must survive).
+  assertEquals(env.PATH, Deno.env.get("PATH"));
+});
+
+Deno.test("appimageEnv: every appimagetool invocation uses it", async () => {
+  // A second packaging site that hand-rolled its env would silently lose the
+  // flag — and only break on a FUSE-less machine. Assert the shared helper is
+  // the ONLY way appimagetool is spawned.
+  for (const f of ["build-electron.ts", "build-client.ts"]) {
+    const src = await Deno.readTextFile(
+      join(import.meta.dirname ?? ".", "..", "src", "build", f),
+    );
+    assertStringIncludes(src, "appimageEnv(arch)", `${f} uses the shared env`);
+    assert(
+      !/APPIMAGE_EXTRACT_AND_RUN/.test(src),
+      `${f} must not hand-roll the appimage env`,
+    );
+  }
+});
+
+Deno.test("compileArgs: embeds dist, db worker, and app data assets", () => {
+  const args = compileArgs({
+    hasDist: true,
+    workerInclude: ["--include", "/fw/db-worker.ts"],
+    assets: ["--include", "src/syscalls.wasm"],
+    excludes: ["/nm/.deno/esbuild@1"],
+    out: "myapp",
+    entry: "src/app.ts",
+  });
+  const pairs = args.flatMap((a, i) => a === "--include" ? [args[i + 1]] : []);
+  assert(pairs.includes("dist/"), "embedded dist/ (prod assets + detection)");
+  assert(pairs.includes("/fw/db-worker.ts"), "SQLite worker (untraceable)");
+  // The WASM bug: assets discovered but never passed → binary builds, app
+  // reports "wasm not available" at runtime.
+  assert(pairs.includes("src/syscalls.wasm"), "app data assets");
+  // Dev-only deps are excluded, and `-o <out> <entry>` closes the argv.
+  assertEquals(args.slice(-5), [
+    "--exclude",
+    "/nm/.deno/esbuild@1",
+    "-o",
+    "myapp",
+    "src/app.ts",
+  ]);
+});
+
+Deno.test("compileArgs: output + entry are last, dist omitted when absent", () => {
+  const args = compileArgs({
+    hasDist: false,
+    workerInclude: [],
+    assets: [],
+    excludes: [],
+    out: "bin",
+    entry: "src/app.ts",
+  });
+  assertEquals(args, ["compile", "-A", "-o", "bin", "src/app.ts"]);
+});
+
+Deno.test("distCandidates: entry-relative BEFORE the filesystem (portability)", () => {
+  const c = distCandidates({
+    mainModule: "file:///tmp/deno-compile-myapp/app/src/app.ts",
+    cwd: "/somewhere/else",
+    execDir: "/usr/local/bin",
+    moduleDir: "/proj/dep/aio/src/server",
+  });
+  // The embedded dist/ (next to the entry in the VFS) must win: it's the only
+  // candidate that holds when the binary is run from an arbitrary cwd.
+  assertEquals(c[0], "/tmp/deno-compile-myapp/app/dist");
+  assertEquals(c[1], "/tmp/deno-compile-myapp/app/src/dist");
+  // …filesystem probes stay as fallbacks (Electron AppDir ships a real dist/).
+  assert(c.includes("/somewhere/else/dist"), "cwd fallback kept");
+  assert(c.includes("/usr/local/bin/dist"), "exec dir fallback kept");
+  const cwdIdx = c.indexOf("/somewhere/else/dist");
+  assert(cwdIdx > 1, "cwd must NOT be probed before the embedded dist");
+});
+
+Deno.test("realDistCandidates: never the compile VFS (Electron blank window)", () => {
+  const opts = {
+    mainModule: "file:///tmp/deno-compile-myapp/app/src/app.ts",
+    cwd: "/mnt/appimage",
+    execDir: "/mnt/appimage",
+    moduleDir: "/proj/dep/aio/src/server",
+  };
+  const real = realDistCandidates(opts);
+  // The embedded VFS path resolves fine via Deno.stat but does NOT exist for
+  // Electron — passing it as the aio:// base silently fell back to a localhost
+  // URL that prod had already refused to bind. It must never appear here.
+  assert(
+    real.every((d) => !d.includes("deno-compile-")),
+    `no VFS path may reach a foreign process; got: ${real.join(", ")}`,
+  );
+  assertEquals(real[0], "/mnt/appimage/dist");
+  // …and prod-detection keeps the VFS candidates, first, as before.
+  assertEquals(distCandidates(opts)[0], "/tmp/deno-compile-myapp/app/dist");
+  assertEquals(distCandidates(opts).slice(-real.length), real);
+});
+
+Deno.test("distCandidates: survives a non-file mainModule, no dupes", () => {
+  const c = distCandidates({
+    mainModule: "https://example.com/app.ts",
+    cwd: "/app",
+    execDir: "/app",
+    moduleDir: null,
+  });
+  // No entry-relative candidates, but the fallbacks must still be produced —
+  // never an empty list (that would make prod undetectable).
+  assert(c.length > 0, "fallbacks survive an unparseable entry");
+  assert(c.includes("/app/dist"));
+});
+
+// ── the generated systemd unit's flags must be REAL runtime flags ────────────
+// `compile:service` writes a unit users copy verbatim into
+// /etc/systemd/system. It shipped `--headless` — a BUILD flag the binary does
+// not parse — so the service silently started in the default (electron) client
+// mode and crashed. Feeding the unit's flags through the real CLI parser is the
+// cheap proof that never happens again.
+
+import { serviceExecFlags } from "../src/build/build-compile.ts";
+import { parseCli } from "../src/server/aio-cli.ts";
+
+Deno.test("serviceExecFlags: headless service parses as a server-only server", () => {
+  const flags = serviceExecFlags({ doRemote: false, doHeadless: true });
+  const cli = parseCli(flags);
+  assertEquals(cli.client, "server-only", "unit must select server-only mode");
+  assertEquals(cli.port, 3000);
+  assert(!flags.includes("--headless"), "--headless is not a runtime flag");
+});
+
+Deno.test("serviceExecFlags: remote service exposes the server", () => {
+  const cli = parseCli(serviceExecFlags({ doRemote: true, doHeadless: true }));
+  assertEquals(cli.expose, true);
+  assertEquals(cli.client, "server-only");
+});
+
+Deno.test("serviceExecFlags: a UI service stays on the default client", () => {
+  const cli = parseCli(
+    serviceExecFlags({ doRemote: false, doHeadless: false }),
+  );
+  assertEquals(cli.client, undefined, "non-headless keeps the app's default");
+  assertEquals(cli.expose, undefined);
+});
+
+Deno.test("serviceExecFlags: every emitted flag is understood by the CLI", () => {
+  // parseCli warns and IGNORES unknown flags, so an unparsed flag is invisible
+  // at runtime — assert each one actually lands in the parsed result.
+  for (const doRemote of [false, true]) {
+    for (const doHeadless of [false, true]) {
+      const flags = serviceExecFlags({ doRemote, doHeadless, port: 8080 });
+      const cli = parseCli(flags);
+      assertEquals(cli.port, 8080, `--port ignored for ${flags}`);
+      assertEquals(cli.expose, doRemote || undefined);
+      assertEquals(cli.client, doHeadless ? "server-only" : undefined);
+    }
+  }
+});
+
+// ── the bundle carries (and is invalidated by) its aio version ───────────────
+// A framework upgrade that leaves dist/app.js in place ships a client speaking
+// the OLD wire protocol against a NEW server — the "some parts speak v2, some
+// v1" failure. The bundle is stamped with the aio version that built it, so the
+// artifact is self-describing and the cache can't outlive its framework.
+
+import { versionStamp } from "../src/build/build-bundle.ts";
+import { VERSION } from "../src/server/aio-cli.ts";
+import {
+  negotiateProtocol,
+  parseProtoHello,
+  protoHello,
+  stampedVersion,
+  VERSION_STAMP,
+} from "../src/protocol/protocol-version.ts";
+
+Deno.test("versionStamp: assigns the building aio version to the shared global", () => {
+  const stamp = versionStamp("9.9.9-test");
+  assertStringIncludes(stamp, VERSION_STAMP);
+  assertStringIncludes(stamp, '"9.9.9-test"');
+  // The stamp must be executable JS that the runtime reader picks up.
+  const g = globalThis as Record<string, unknown>;
+  const prev = g[VERSION_STAMP];
+  try {
+    new Function(stamp)();
+    assertEquals(stampedVersion(), "9.9.9-test");
+  } finally {
+    if (prev === undefined) delete g[VERSION_STAMP];
+    else g[VERSION_STAMP] = prev;
+  }
+});
+
+Deno.test("versionStamp: a bundle from another aio version is not a match", () => {
+  // What isBundleFresh greps for: this build's stamp, present verbatim.
+  const current = versionStamp(VERSION).trim();
+  const older = `globalThis.${VERSION_STAMP} = "1.0.0-alpha1";`;
+  assert(!older.includes(current), "an older bundle must not look current");
+  assert(
+    `${older}\nconsole.log(1)\n${current}\n`.includes(current),
+    "a current bundle is recognized wherever the stamp sits",
+  );
+});
+
+// ── a protocol mismatch must name the stale ARTIFACT, not just the numbers ───
+
+Deno.test("proto: hello carries the aio build version (round-trips)", () => {
+  const hello = protoHello("1.0.0-alpha33");
+  assertEquals(hello.ver, "1.0.0-alpha33");
+  assertEquals(parseProtoHello(JSON.stringify(hello))?.ver, "1.0.0-alpha33");
+  // Omitted by peers built before the field existed — never fabricated.
+  assertEquals(protoHello().ver, undefined);
+  assertEquals(parseProtoHello('{"v":2,"min":2}')?.ver, undefined);
+});
+
+Deno.test("proto: a hostile `ver` can't flood the logs", () => {
+  const long = "x".repeat(500);
+  assertEquals(
+    parseProtoHello(`{"v":2,"min":2,"ver":"${long}"}`)?.ver,
+    undefined,
+  );
+  assertEquals(parseProtoHello('{"v":2,"min":2,"ver":123}')?.ver, undefined);
+});
+
+Deno.test("proto: mismatch reason names which side is old and its version", () => {
+  // An old server (v1) meeting a new client that requires v2 — the exact
+  // report from the field: the message must say THIS side is the stale one.
+  const oldServer = negotiateProtocol(
+    { v: 1, min: 1, ver: "1.0.0-alpha28" },
+    { v: 2, min: 2, ver: "1.0.0-alpha33" },
+  );
+  assertEquals(oldServer.ok, false);
+  if (!oldServer.ok) {
+    assertStringIncludes(oldServer.reason, "THIS side is the older build");
+    assertStringIncludes(oldServer.reason, "aio 1.0.0-alpha28");
+    assertStringIncludes(oldServer.reason, "aio 1.0.0-alpha33");
+  }
+  // …and the mirror case blames the peer.
+  const oldPeer = negotiateProtocol(
+    { v: 2, min: 2, ver: "1.0.0-alpha33" },
+    { v: 1, min: 1, ver: "1.0.0-alpha28" },
+  );
+  assertEquals(oldPeer.ok, false);
+  if (!oldPeer.ok) {
+    assertStringIncludes(oldPeer.reason, "PEER is the older build");
+  }
+  // A peer that doesn't announce a version still yields a readable reason.
+  const unknown = negotiateProtocol({ v: 2, min: 2 }, { v: 1, min: 1 });
+  assertEquals(unknown.ok, false);
+  if (!unknown.ok) {
+    assertStringIncludes(unknown.reason, "an unknown aio version");
+  }
 });

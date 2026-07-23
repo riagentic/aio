@@ -211,6 +211,7 @@ type AioAnchorAttributes = AioHTMLAttributes<HTMLAnchorElement> & {
   download?: string | boolean;
   hreflang?: string;
   type?: string;
+  referrerPolicy?: string;
 };
 
 /** `<img>` JSX attributes. */
@@ -224,6 +225,25 @@ type AioImgAttributes = AioHTMLAttributes<HTMLImageElement> & {
   crossOrigin?: string;
   srcSet?: string;
   sizes?: string;
+  referrerPolicy?: string;
+  fetchPriority?: "high" | "low" | "auto";
+  useMap?: string;
+  isMap?: boolean;
+};
+
+/** `<iframe>` JSX attributes. */
+type AioIframeAttributes = AioHTMLAttributes<HTMLIFrameElement> & {
+  src?: string;
+  srcDoc?: string;
+  width?: string | number;
+  height?: string | number;
+  name?: string;
+  title?: string;
+  allow?: string;
+  allowFullScreen?: boolean;
+  loading?: "lazy" | "eager";
+  referrerPolicy?: string;
+  sandbox?: string;
 };
 
 /** `<form>` JSX attributes. */
@@ -302,20 +322,57 @@ export namespace JSX {
 
     a: AioAnchorAttributes;
     img: AioImgAttributes;
+    iframe: AioIframeAttributes;
 
+    // SVG — must mirror SVG_TAG_LIST in air/vdom-types.ts. AioSVGAttributes
+    // carries a `[key: string]: unknown` index, so element-specific attrs
+    // (x1, offset, gradientTransform, stdDeviation, …) are admitted without
+    // per-element enumeration.
     svg: AioSVGAttributes;
-    path: AioSVGAttributes;
     circle: AioSVGAttributes;
-    rect: AioSVGAttributes;
+    ellipse: AioSVGAttributes;
     line: AioSVGAttributes;
-    polyline: AioSVGAttributes;
+    path: AioSVGAttributes;
     polygon: AioSVGAttributes;
-    text: AioSVGAttributes;
+    polyline: AioSVGAttributes;
+    rect: AioSVGAttributes;
     g: AioSVGAttributes;
     defs: AioSVGAttributes;
+    symbol: AioSVGAttributes;
     use: AioSVGAttributes;
+    text: AioSVGAttributes;
+    tspan: AioSVGAttributes;
+    textPath: AioSVGAttributes;
+    image: AioSVGAttributes;
     clipPath: AioSVGAttributes;
     mask: AioSVGAttributes;
+    pattern: AioSVGAttributes;
+    marker: AioSVGAttributes;
+    linearGradient: AioSVGAttributes;
+    radialGradient: AioSVGAttributes;
+    stop: AioSVGAttributes;
+    filter: AioSVGAttributes;
+    feBlend: AioSVGAttributes;
+    feColorMatrix: AioSVGAttributes;
+    feComponentTransfer: AioSVGAttributes;
+    feComposite: AioSVGAttributes;
+    feConvolveMatrix: AioSVGAttributes;
+    feDiffuseLighting: AioSVGAttributes;
+    feDisplacementMap: AioSVGAttributes;
+    feFlood: AioSVGAttributes;
+    feGaussianBlur: AioSVGAttributes;
+    feImage: AioSVGAttributes;
+    feMerge: AioSVGAttributes;
+    feMergeNode: AioSVGAttributes;
+    feMorphology: AioSVGAttributes;
+    feOffset: AioSVGAttributes;
+    feSpecularLighting: AioSVGAttributes;
+    feTile: AioSVGAttributes;
+    feTurbulence: AioSVGAttributes;
+    foreignObject: AioSVGAttributes;
+    animate: AioSVGAttributes;
+    animateTransform: AioSVGAttributes;
+    set: AioSVGAttributes;
 
     // deno-lint-ignore no-explicit-any -- index must admit element-specific handler types (AIO-7.3)
     [tag: string]: AioHTMLAttributes<any>;

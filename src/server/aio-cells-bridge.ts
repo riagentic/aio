@@ -15,6 +15,25 @@ import { diagEmit } from "../diagnostics/diagnostic-bus.ts";
 import { parseCli } from "./aio-cli.ts";
 import { resolveAppId } from "./single-instance-lock.ts";
 import type { AioApp, AioConfig, AioUser, CellsConfig } from "./aio-types.ts";
+import type { CellFieldFilter } from "../state/cell-types.ts";
+
+/** Whether a top-level state key survives a `persist`/`ui` field filter.
+ *  Mirrors the runtime filter semantics ("all"/"none"/include/exclude; default
+ *  = "all"). Powers the trojan `fields` route (amui State overview). */
+function fieldIncluded(
+  key: string,
+  filter: CellFieldFilter | undefined,
+): boolean {
+  if (filter === undefined || filter === "all") return true;
+  if (filter === "none") return false;
+  if ("include" in filter) return filter.include.includes(key);
+  if ("exclude" in filter) {
+    // exclude entries may be dot-paths ("a.b"); a top-level key is excluded only
+    // by an exact match (a nested exclude still persists/exposes the parent key).
+    return !filter.exclude.includes(key);
+  }
+  return true;
+}
 
 /** Inputs for buildLegacyConfig — avoids 12-param function signature */
 export type BuildLegacyConfigInput = {
@@ -229,13 +248,27 @@ export function buildLegacyConfig(
         .filter((c) => c.__aio.access !== undefined)
         .map((c) => [c.__aio.id, c.__aio.access!]),
     ),
-    // Cell id → public method names — trojan `cells` route (aui run-method
+    // Cell id → public method names — trojan `cells` route (amui run-method
     // buttons). Internal keys (__set* reducer synonyms, __error, __effects) are
     // dropped: they're framework plumbing, not user-dispatchable actions.
     _cellMethods: Object.fromEntries(
       composed.cells.map((
         c,
       ) => [c.__aio.id, c.__aio.actionKeys.filter((k) => !k.startsWith("__"))]),
+    ),
+    // Cell id → per-field { persisted, ui } flags — trojan `fields` route (amui
+    // State overview). Answers "what survives a restart" (persist) and "what
+    // ships to the browser" (ui) for every top-level state key.
+    _cellFields: Object.fromEntries(
+      composed.cells.map((c) => [
+        c.__aio.id,
+        Object.fromEntries(
+          Object.keys(c.__aio.state ?? {}).map((k) => [k, {
+            persisted: fieldIncluded(k, c.__aio.persist),
+            ui: fieldIncluded(k, c.__aio.ui),
+          }]),
+        ),
+      ]),
     ),
     _onScheduleReady: (cancelByPrefix) =>
       composed.registry.setOnDisable(cancelByPrefix),

@@ -24,7 +24,8 @@ export interface LifecycleDeps<S, A> {
   title: string;
   // Mode flags
   prod: boolean;
-  distDir: string;
+  /** dist/ Electron can open from its own process (never the compile VFS). */
+  electronDistDir: string | undefined;
   expose: boolean;
   singletonMode: boolean;
   // Client / transport
@@ -91,7 +92,7 @@ export function startLifecycle<S, A>(deps: LifecycleDeps<S, A>): void {
     appVersion,
     title,
     prod,
-    distDir,
+    electronDistDir,
     expose,
     singletonMode,
     client,
@@ -293,7 +294,10 @@ export function startLifecycle<S, A>(deps: LifecycleDeps<S, A>): void {
       height: cli.height ?? ui.height,
     };
     const electronUrl = token ? `${localUrl}?token=${token}` : localUrl;
-    const udsBaseDir = prod ? distDir : undefined;
+    // NOT distDir — that can be the binary's embedded VFS copy, which this
+    // (foreign) Electron process cannot open. Undefined ⇒ it loads over HTTP,
+    // which aio-server kept alive for exactly this case.
+    const udsBaseDir = prod ? electronDistDir : undefined;
     let udsHasCSS = false;
     if (udsBaseDir) {
       try {

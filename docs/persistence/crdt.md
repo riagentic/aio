@@ -73,12 +73,12 @@ const inventory = cell("inventory", {
 
 ```
 Client A                    Server                    Client B
-   |--- __op {hlc, action} -->|--- __op (broadcast) ---->|
-   |<-- __ack {serverHlc} ---|                          |
+   |--- op {hlc, action} ---->|--- op (broadcast) ------->|
+   |<-- sync-ack {serverHlc} -|                          |
    |  (goes offline)          |                          |
    |  (queues ops locally)    |                          |
-   |--- __sync {lastHlc} --->|                          |
-   |<-- __sync {ops|snap} ---|                          |
+   |--- sync-req {lastHlc} -->|                          |
+   |<-- sync-res {ops|snap} --|                          |
 ```
 
 **Dual-layer state:** Confirmed (server-acked) + Optimistic (confirmed +
@@ -87,10 +87,11 @@ instant feedback.
 
 **Catch-up cursor:** the server stamps every persisted op with a strictly
 monotonic `server_ts` and echoes a per-cell `lastServerTs` cursor in each
-`__sync` response (reserved under the cell's lock — race-free). Clients send it
-back on the next catch-up, so re-delivery (and double-apply through the reducer)
-can't happen; broadcast `__op`s carry their `serverTs` so peers advance the
-cursor as they apply them. The HLC cursor remains as a legacy fallback only.
+`sync-res` response (reserved under the cell's lock — race-free). Clients send
+it back on the next catch-up, so re-delivery (and double-apply through the
+reducer) can't happen; broadcast `op` frames carry their `serverTs` so peers
+advance the cursor as they apply them. The HLC cursor remains as a legacy
+fallback only.
 
 ## Merge Strategies
 

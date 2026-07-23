@@ -153,6 +153,33 @@ Callback refs receive `null` when the element is removed.
 
 Style diffing is incremental — only changed properties are updated.
 
+### Reactive styles
+
+An object style updates reactively **as long as the signal read happens inside
+the component's render** — the read is what subscribes the component:
+
+```tsx
+// ✅ reactive — `.value` read during render subscribes this component
+<div style={{ color: theme.value === "dark" ? "#eee" : "#111" }} />
+
+// ✅ reactive — a raw signal in the style object is auto-bound per-property
+<div style={{ color: colorSignal }} />
+```
+
+The one way a style "freezes at mount" is if the value is computed **outside**
+the tracked render — from module scope, a helper that ran once, or under
+`untrack` — so no subscription is registered:
+
+```tsx
+// ⚠️ frozen — style built once, outside any tracked read
+const frozen = { color: colorSignal.value }; // read at module load
+export default () => <div style={frozen} />; // never re-tracked
+```
+
+Keep the signal read (or the raw signal) **in the JSX**, or drive dynamic
+appearance with `className` + CSS. (This is purely about _where_ the read
+happens; the diff/patch path itself is fully reactive.)
+
 ---
 
 ## Events

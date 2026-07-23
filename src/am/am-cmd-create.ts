@@ -99,6 +99,7 @@ export function parseCreateArgs(args: string[]): CreateOpts {
 export function frameworkSpecs(source: boolean): {
   imports: Record<string, string>;
   build: string;
+  buildAll: string;
   devAndroid: string;
   am: string;
   doctor: string;
@@ -121,6 +122,7 @@ export function frameworkSpecs(source: boolean): {
         "@std/assert": "jsr:@std/assert@^1",
       },
       build: "./dep/aio/src/build.ts",
+      buildAll: "./dep/aio/src/build-all.ts",
       devAndroid: "./dep/aio/src/dev-android.ts",
       am: "./dep/aio/src/am.ts",
       doctor: "./dep/aio/src/server/doctor.ts",
@@ -137,6 +139,7 @@ export function frameworkSpecs(source: boolean): {
       "aio/testing": `${v}/testing`,
     },
     build: `${v}/build`,
+    buildAll: `${v}/build-all`,
     devAndroid: `${v}/dev-android`,
     am: `${v}/am`,
     doctor: `${v}/doctor`,
@@ -194,6 +197,13 @@ export function denoJson(
     // --client flag is passed. Editable by hand; `am` regenerates only on
     // `am create` / `am update` (never silently).
     target,
+    // `deno task build` builds every target listed here into `out`/ (with a
+    // manifest.json). Edit `targets` to fan out — e.g. for a LAN app:
+    //   "targets": ["server", "electron-client", "android-client"],
+    //   "server": "192.168.1.50:8000"
+    // Target names: server · browser · electron · android · cli ·
+    // electron-client · android-client · cli-client (run `deno task build --list`).
+    build: { targets: [target], out: "dist" },
     nodeModulesDir: "auto",
     compilerOptions: {
       lib: ["deno.ns", "deno.unstable", "dom", "dom.iterable"],
@@ -224,6 +234,10 @@ export function denoJson(
       "dev:remote:cli": "deno run -A src/client.ts",
       "dev:remote:service":
         "deno run -A src/app.ts --client=server-only --expose",
+      // ── build: one command builds every target in deno.json `build.targets`
+      // into dist/ (+ manifest.json). The `compile:*` tasks below build one
+      // target at a time; `build` fans out over the fleet. ──
+      build: `deno run -A ${fw.buildAll} --build-spec=${fw.build}`,
       // ── compile: `deno task compile` builds the configured target. ──
       compile: compileDefault,
       "compile:browser": `deno run -A ${fw.build} --compile`,
@@ -360,7 +374,9 @@ export async function cmdCreate(
     );
   }
 
-  const files = scaffold(opts.name, opts.template, source);
+  // opts.target was parsed, validated and echoed — but never passed, so every
+  // app scaffolded as the DEFAULT target regardless of --target=X.
+  const files = scaffold(opts.name, opts.template, source, opts.target);
   await Deno.mkdir(dir, { recursive: true });
   for (const [rel, content] of Object.entries(files)) {
     const path = resolve(dir, rel);
@@ -486,6 +502,10 @@ function readme(name: string, template: Template, target: Target): string {
   return `# ${name}
 
 An [aio](https://github.com/riagentic/aio) app (${template} template).
+
+> **Cloned this repo?** The framework link, \`.env\`, and \`node_modules\` are
+> gitignored — run \`am fix\` once (after installing \`am\` via the aio install
+> script) to repair them, then \`deno task dev\` works.
 
 \`\`\`sh
 deno task dev              # run — ${target} (also dev:browser, dev:electron, dev:android)

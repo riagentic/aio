@@ -18,6 +18,7 @@ export function AreaChart(
   const n = values.length;
   const cur = n ? values[n - 1]! : 0;
   const peak = n ? Math.max(...values) : 0;
+  const avg = n ? values.reduce((a, b) => a + b, 0) / n : 0;
   const ceil = Math.max(peak * 1.15, unit === "%" ? 10 : 1);
   const toX = (i: number) => n <= 1 ? W - P : P + (i / (n - 1)) * (W - 2 * P);
   const toY = (v: number) => H - P - (v / ceil) * (H - 2 * P);
@@ -29,6 +30,9 @@ export function AreaChart(
       H - P
     } Z`
     : "";
+  const fmt = (v: number) => v.toFixed(unit === "%" ? 1 : 0);
+  // 3 horizontal gridlines (25/50/75% of the ceiling) for scale.
+  const grid = [0.25, 0.5, 0.75].map((f) => toY(ceil * f));
 
   return (
     <div
@@ -65,6 +69,20 @@ export function AreaChart(
           display: "block",
         }}
       >
+        {grid.map((y, i) => (
+          <line
+            key={i}
+            {...svgAttrs({
+              x1: P,
+              y1: y,
+              x2: W - P,
+              y2: y,
+              stroke: C.border,
+              "stroke-width": "0.5",
+              "stroke-dasharray": "2 3",
+            })}
+          />
+        ))}
         {area && (
           <path
             {...svgAttrs({ d: area, fill: color, "fill-opacity": "0.16" })}
@@ -81,9 +99,19 @@ export function AreaChart(
             })}
           />
         )}
+        {n > 0 && (
+          <circle
+            {...svgAttrs({
+              cx: toX(n - 1),
+              cy: toY(cur),
+              r: 2.4,
+              fill: color,
+            })}
+          />
+        )}
       </svg>
       <div style={{ fontSize: "10px", color: C.dim, fontFamily: mono }}>
-        peak {n ? peak.toFixed(unit === "%" ? 1 : 0) : "—"} {unit} · {n} samples
+        {n ? `peak ${fmt(peak)} · avg ${fmt(avg)} ${unit} · ${n} samples` : "—"}
       </div>
     </div>
   );

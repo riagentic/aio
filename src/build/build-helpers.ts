@@ -300,6 +300,24 @@ export function formatMb(bytes: number): string {
   return (bytes / 1024 / 1024).toFixed(1);
 }
 
+/** Environment for an `appimagetool` invocation.
+ *
+ *  `APPIMAGE_EXTRACT_AND_RUN=1` is load-bearing: appimagetool is ITSELF an
+ *  AppImage, so running it normally needs FUSE — which modern Ubuntu (22.04+
+ *  dropped libfuse2), containers, WSL and CI routinely lack, giving "cannot
+ *  mount AppImage" and a dead build. Extract-and-run unpacks the tool to a temp
+ *  dir instead, so packaging works with OR without FUSE on the host.
+ *
+ *  Pure + shared by every packaging site so the flag can't be lost from one of
+ *  them (that regression only shows up on a FUSE-less machine — i.e. a user's). */
+export function appimageEnv(arch: string): Record<string, string> {
+  return {
+    ...Deno.env.toObject(),
+    ARCH: arch,
+    APPIMAGE_EXTRACT_AND_RUN: "1",
+  };
+}
+
 /** Download + cache appimagetool for the given arch. Returns the cached binary path. */
 export async function ensureAppimagetool(
   arch: string,

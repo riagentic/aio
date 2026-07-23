@@ -1,6 +1,12 @@
 // deno-lint-ignore-file
 // Types and constants for browser-protocol.
 
+/** User identity — resolved from a static token map or the resolveUser hook.
+ *  Lives in protocol/ because it crosses the wire: the server authenticates it
+ *  and the browser renders it (`useUser()`), so neither layer owns it. Server
+ *  code keeps importing it from `server/aio-types.ts`, which re-exports it. */
+export type AioUser = { id: string; role: string };
+
 export const WS_MAX_QUEUE = 100;
 export const OFFLINE_MAX_QUEUE = 100;
 export const OFFLINE_MAX_AGE = 24 * 60 * 60 * 1000; // 24 hours

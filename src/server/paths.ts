@@ -1,7 +1,7 @@
 // Path resolution utilities — extracted from aio.ts (AIO-52)
 // Pure functions for resolving KV, SQLite, UDS, and data directory paths.
 
-import { join } from "@std/path";
+import { fromFileUrl, join, resolve } from "@std/path";
 import { lockDir } from "./single-instance-lock.ts";
 import { log } from "../diagnostics/logger.ts";
 
@@ -11,6 +11,56 @@ export function isCompiled(): boolean {
   // Deno compile VFS: modules embedded at file:///tmp/deno-compile-<app>/...
   if (import.meta.url.includes("/deno-compile-")) return true;
   return !import.meta.url.startsWith("file://");
+}
+
+/** Ordered `dist/` candidates for prod-detection in a COMPILED binary, most
+ *  authoritative first. Pure (every input injected) so the ORDER — the part
+ *  that broke — is unit-testable without compiling.
+ *
+ *  A compiled binary embeds `dist/` (via `--include dist/`) into the VFS next
+ *  to the entry module, so entry-relative paths are the only candidates that
+ *  hold regardless of cwd, exec location, or `dep/aio` nesting depth. They MUST
+ *  come first: probing the real filesystem first (cwd, exec dir, module root)
+ *  means a binary run from any directory without a real `dist/` beside it fails
+ *  to detect prod, falls back to the dev lint (which needs `src/App.tsx` at
+ *  cwd) and crashes — e.g. from an AppImage mount or a moved binary. */
+export function distCandidates(opts: {
+  mainModule: string;
+  cwd: string;
+  execDir: string;
+  moduleDir: string | null;
+}): string[] {
+  const entryDist: string[] = [];
+  try {
+    for (const rel of ["../dist", "./dist"]) {
+      entryDist.push(fromFileUrl(new URL(rel, opts.mainModule)));
+    }
+  } catch { /* mainModule not a file: URL — skip */ }
+  return [...entryDist, ...realDistCandidates(opts)];
+}
+
+/** The subset of `distCandidates` that lives on the REAL filesystem — i.e. the
+ *  ones a FOREIGN process can open.
+ *
+ *  Entry-relative candidates are deliberately excluded: in a compiled binary
+ *  they point into Deno's virtual FS (`/tmp/deno-compile-<app>/…`), which only
+ *  the Deno process can read. `Deno.stat` happily resolves it, so handing that
+ *  path to Electron produced a path that exists for us and not for it — the
+ *  AppImage blank-window bug: Electron's `fs.existsSync` said no, it fell back
+ *  to `http://localhost:<port>`, and prod had already skipped the TCP server. */
+export function realDistCandidates(opts: {
+  cwd: string;
+  execDir: string;
+  moduleDir: string | null;
+}): string[] {
+  const moduleRoot = opts.moduleDir
+    ? resolve(opts.moduleDir, "..", "..", "..")
+    : null;
+  return [
+    resolve(join(opts.cwd, "dist")),
+    resolve(join(opts.execDir, "dist")),
+    ...(moduleRoot ? [resolve(join(moduleRoot, "dist"))] : []),
+  ];
 }
 
 /** Returns user home directory — $HOME or $USERPROFILE, throws if neither set */

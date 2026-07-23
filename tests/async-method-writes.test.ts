@@ -117,3 +117,33 @@ Deno.test("async: concurrent methods don't drop each other's writes", async () =
   assertEquals([c.a, c.b], [10, 20]);
   await ui.dispose();
 });
+
+// Audit 2026-07-24 (HIGH, silent wrong reads): the read-your-writes overlay was
+// memoized on (committed identity, pending COUNT). A no-op write (assigning the
+// value a field already has) makes Immer commit the SAME slice identity, and
+// flush() then starts a fresh batch — so the next single write reproduced the
+// exact key of the previous batch and the stale overlay was served. The method
+// read back its own write as the pre-write value and committed a wrong result.
+Deno.test("async: read-your-writes survives a no-op write + flush (stale overlay)", async () => {
+  const c = cell("aw-overlay", {
+    state: { loading: false, count: 5 },
+    methods: {
+      // deno-lint-ignore no-explicit-any
+      async tick(s: any) {
+        s.loading = false; // no-op write: same value → committed identity unchanged
+        if (s.loading) s.count = -1; // read populates the overlay memo
+        await sleep(5); // flush happens here: fresh pending array
+        s.count = 6; // pending length is 1 again → same (base, count) key
+        s.count = s.count + 1; // must read 6, not the stale 5
+      },
+    },
+  });
+  const App = () => h("div", null, `${c.count}`);
+  const ui = await testUI(App, { document: doc() });
+  // deno-lint-ignore no-explicit-any
+  await (c as any).tick();
+  await ui.settle();
+  await sleep(20);
+  assertEquals(c.count, 7, "s.count + 1 must see the write from this batch");
+  await ui.dispose();
+});

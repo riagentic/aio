@@ -269,6 +269,56 @@ Deno.test("validateGraph walks import tree — happy path", async () => {
   }
 });
 
+Deno.test("validateGraph: Deno.* in a dynamic-only module is deferred (quiet)", async () => {
+  const dir = await Deno.makeTempDir();
+  try {
+    // App → cell (static); cell → server (dynamic import — the escape hatch).
+    await Deno.writeTextFile(
+      dir + "/App.tsx",
+      `import { cell } from "./cell.ts";\nexport default function App() { return null; }`,
+    );
+    await Deno.writeTextFile(
+      dir + "/cell.ts",
+      `export const cell = { run: async () => (await import("./server.ts")).read() };`,
+    );
+    await Deno.writeTextFile(
+      dir + "/server.ts",
+      `export async function read() { return await Deno.readTextFile("x"); }`,
+    );
+    const result = await validateGraph(dir + "/App.tsx", {}, mockTranspile);
+    assertEquals(result.valid, true); // never blocks
+    const e = result.errors.find((e) =>
+      e.file.endsWith("/server.ts") && e.category === "server-only-api"
+    );
+    assert(e, "server.ts Deno usage detected");
+    assertEquals(e!.deferred, true, "dynamic-only Deno usage is deferred");
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+Deno.test("validateGraph: Deno.* in a statically-reachable module stays loud", async () => {
+  const dir = await Deno.makeTempDir();
+  try {
+    await Deno.writeTextFile(
+      dir + "/App.tsx",
+      `import { read } from "./server.ts";\nexport default function App() { return null; }`,
+    );
+    await Deno.writeTextFile(
+      dir + "/server.ts",
+      `export async function read() { return await Deno.readTextFile("x"); }`,
+    );
+    const result = await validateGraph(dir + "/App.tsx", {}, mockTranspile);
+    const e = result.errors.find((e) =>
+      e.file.endsWith("/server.ts") && e.category === "server-only-api"
+    );
+    assert(e, "server.ts Deno usage detected");
+    assert(!e!.deferred, "eager Deno usage is NOT deferred (stays loud)");
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
 Deno.test("validateGraph detects missing import", async () => {
   const dir = await Deno.makeTempDir();
   try {

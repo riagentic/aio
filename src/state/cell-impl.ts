@@ -544,9 +544,22 @@ function throwLiveStateError(
 
 /** Memoized read-your-writes view: committed state with the invocation's
  *  pending mutations overlaid. Shared across the proxy tree of one method
- *  invocation; recomputed only when the base state or batch length changes. */
+ *  invocation.
+ *
+ *  The key includes the pending array's IDENTITY, not just its length. A flush
+ *  swaps in a fresh mutations array; when Immer commits a no-op write (same
+ *  value) the committed slice keeps its identity too, so (base, length) could
+ *  repeat across two different batches — the memo then served the PREVIOUS
+ *  batch's overlay and a method read its own write back as the pre-write value.
+ *  Within one batch the array is stable and only grows, so identity + length is
+ *  exact. */
 type OverlayBox = {
-  v: { base: unknown; count: number; root: unknown } | null;
+  v: {
+    base: unknown;
+    arr: readonly unknown[];
+    count: number;
+    root: unknown;
+  } | null;
 };
 
 /** Create a proxy over cell state that intercepts writes and batches them as
@@ -579,7 +592,10 @@ export function createLiveProxy<S extends Record<string, unknown>>(
     const pending = batcher.pending();
     if (pending.length === 0) return committed;
     const memo = _overlay.v;
-    if (memo && memo.base === committed && memo.count === pending.length) {
+    if (
+      memo && memo.base === committed && memo.arr === pending &&
+      memo.count === pending.length
+    ) {
       return memo.root as S;
     }
     const root = snapshotForRead(committed);
@@ -589,7 +605,7 @@ export function createLiveProxy<S extends Record<string, unknown>>(
       return committed;
     }
     applyMutations(root as Record<string, unknown>, pending);
-    _overlay.v = { base: committed, count: pending.length, root };
+    _overlay.v = { base: committed, arr: pending, count: pending.length, root };
     return root as S;
   }
   const effectiveAt = (): unknown =>
@@ -609,8 +625,30 @@ export function createLiveProxy<S extends Record<string, unknown>>(
   const target = (Array.isArray(initialValue) ? [] : {}) as unknown as S;
 
   const handler: ProxyHandler<S> = {
-    get(_target, prop, _receiver) {
-      if (typeof prop === "symbol") return undefined;
+    get(_target, prop, receiver) {
+      if (typeof prop === "symbol") {
+        // Make arrays spreadable + iterable: `[...s.items]` and
+        // `for (const x of s.items)`. The blanket symbol→undefined return used
+        // to make `s.items[Symbol.iterator]` undefined → "not iterable" — which
+        // contradicted our own guidance ("snapshot first: const items =
+        // [...s.items]"). Delegate to indexed access THROUGH the proxy so each
+        // element has exactly the same semantics as `s.items[i]` (a nested live
+        // proxy for objects → writes still batch; primitives as-is). This
+        // matches testCell's Immer draft (also iterable + mutable) — no
+        // dev/prod fork.
+        if (prop === Symbol.iterator) {
+          const fresh = effectiveAt();
+          if (Array.isArray(fresh)) {
+            const len = fresh.length;
+            return function* () {
+              for (let i = 0; i < len; i++) {
+                yield (receiver as Record<number, unknown>)[i];
+              }
+            };
+          }
+        }
+        return undefined;
+      }
       const key = prop as string;
       // `s.$signal` — the call's AbortSignal (aborts when a cancelOn trigger
       // fires). A never-aborting fallback keeps `s.$signal.aborted` safe in

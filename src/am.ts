@@ -56,6 +56,8 @@ import {
   cmdVersion,
 } from "./am/am-cmd-meta.ts";
 import { cmdCreate } from "./am/am-cmd-create.ts";
+import { cmdLink } from "./am/am-cmd-link.ts";
+import { cmdFix } from "./am/am-cmd-fix.ts";
 import { cmdAuth } from "./am/am-cmd-auth.ts";
 
 import {
@@ -112,6 +114,8 @@ const COMMANDS: Record<string, CmdHandler> = {
   // Meta
   create: cmdCreate,
   new: cmdNew,
+  link: cmdLink, // just the dep/aio symlink
+  fix: cmdFix, // full clone repair (symlink + env + electron + config + …)
   update: cmdUpdate,
   uninstall: cmdUninstall,
   version: cmdVersion,

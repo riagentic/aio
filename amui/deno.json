@@ -1,5 +1,5 @@
 {
-  "title": "aui",
+  "title": "amui",
   "version": "0.1.0",
   "nodeModulesDir": "auto",
   "unstable": ["kv"],
@@ -9,9 +9,9 @@
     "jsxImportSource": "aio"
   },
   "imports": {
-    "aio": "../../mod.ts",
-    "aio/air": "../../src/air.ts",
-    "aio/jsx-runtime": "../../src/jsx-runtime.ts",
+    "aio": "../mod.ts",
+    "aio/air": "../src/air.ts",
+    "aio/jsx-runtime": "../src/jsx-runtime.ts",
     "electron": "npm:electron",
     "esbuild": "npm:esbuild@0.24.2",
     "immer": "npm:immer@10.2.0",
@@ -24,7 +24,7 @@
     "dev": "deno run -A src/app.ts --client=browser",
     "dev:electron": "deno run -A src/app.ts --client=electron",
     "install:electron": "deno install --allow-scripts=npm:electron npm:electron",
-    "compile": "deno run -A ../../src/build.ts --compile --electron",
+    "compile": "deno run -A ../src/build.ts --compile --electron",
     "test": "deno test -A"
   }
 }

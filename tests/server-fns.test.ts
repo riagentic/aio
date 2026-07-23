@@ -86,8 +86,9 @@ Deno.test("invokeServerFn: inherited Object.prototype members are NOT callable",
   // Same guard on the lazy resolver proxy.
   const fns = serverFn<{ greet: () => Promise<string> }>("t-proto");
   await assertRejects(
-    () => (fns as unknown as { constructor: () => Promise<unknown> })
-      .constructor(),
+    () =>
+      (fns as unknown as { constructor: () => Promise<unknown> })
+        .constructor(),
     Error,
     "not",
   );

@@ -127,7 +127,10 @@ export function createVitalsSystem(config: VitalsConfig): VitalsSystem {
     measured: number,
     threshold: number,
   ) {
-    if (!onAlert && !reporter) return;
+    // NOTE: no early return on "no user callbacks". The diagnostic-bus emit
+    // below is what feeds the logger, amui and `am`, so bailing out here made
+    // every vitals alert invisible under the DEFAULT config (no onVitalAlert,
+    // no reporter) — the exact setup where a freeze most needs to be seen.
     const snap = buildSnapshot();
     const hint = hintsEnabled ? evaluateHints(snap, thresholds) : null;
     const alert: VitalAlert = {
@@ -140,8 +143,19 @@ export function createVitalsSystem(config: VitalsConfig): VitalsSystem {
       hint,
       ts: Date.now(),
     };
-    onAlert?.(alert);
-    reporter?.onAlert(alert);
+    // User callbacks run on the heartbeat timer: a throwing hook here was an
+    // unhandled exception in a bare timer callback → server down. Report and
+    // keep the heartbeat alive; a broken hook must not take the app with it.
+    try {
+      onAlert?.(alert);
+    } catch (e) {
+      console.error(`[aio:vitals] onVitalAlert hook threw — ${e}`);
+    }
+    try {
+      reporter?.onAlert(alert);
+    } catch (e) {
+      console.error(`[aio:vitals] reporter.onAlert threw — ${e}`);
+    }
     diagEmit({
       type: "vitals-alert",
       severity: status === "frozen" ? "error" : "warning",

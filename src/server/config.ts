@@ -81,6 +81,7 @@ export const VALID_AIO_CONFIG_KEYS = new Set<string>([
   "_cellFilterFields",
   "_cellAccess",
   "_cellMethods",
+  "_cellFields",
   "_cellMigrations",
   "_cellVersions",
 ]);

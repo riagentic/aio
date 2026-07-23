@@ -51,7 +51,13 @@ import { getRegisteredCells } from "../state/cell-reactive.ts";
 
 // CLI + path resolution
 import { parseCli, printHelp, VERSION } from "./aio-cli.ts";
-import { findFreePort, isCompiled, resolveDataDir } from "./paths.ts";
+import {
+  distCandidates,
+  findFreePort,
+  isCompiled,
+  realDistCandidates,
+  resolveDataDir,
+} from "./paths.ts";
 import { openSessionStore } from "./sessions.ts";
 import { openUserStore } from "./auth-users.ts";
 import { resolveAppId } from "./single-instance-lock.ts";
@@ -363,21 +369,52 @@ async function _run<S, A, E>(
   let distDir = resolve(join(Deno.cwd(), "dist"));
   let prod = cli.prod ?? false;
   if (!prod && isCompiled()) {
-    const moduleRoot = import.meta.dirname
-      ? resolve(import.meta.dirname, "..", "..", "..")
-      : null;
-    const execDir = resolve(dirname(Deno.execPath()));
-    const candidates = [
-      distDir,
-      resolve(join(execDir, "dist")),
-      ...(moduleRoot ? [resolve(join(moduleRoot, "dist"))] : []),
-    ];
+    // Entry-relative (the binary's EMBEDDED dist/) first, real filesystem after
+    // — so a compiled binary detects prod from ANY cwd. See distCandidates.
+    const candidates = distCandidates({
+      mainModule: Deno.mainModule,
+      cwd: Deno.cwd(),
+      execDir: dirname(Deno.execPath()),
+      moduleDir: import.meta.dirname ?? null,
+    });
     for (const dir of candidates) {
       try {
         await Deno.stat(join(dir, "app.js"));
         distDir = dir;
         prod = true;
         log.info("auto-detected dist/app.js → prod mode");
+        break;
+      } catch { /* not found */ }
+    }
+    // A HEADLESS build (`--service`/`--cli`) never bundles, so there is no
+    // dist/app.js to find — but a compiled binary is prod by definition (dev
+    // mode means running from source). Without this the service binary fell
+    // through to dev: it emitted the "esbuild not installed" warning and ran
+    // the dev lint, which demands src/App.tsx at cwd → crash on any real
+    // server. `deno task compile:service` shipped exactly that.
+    if (!prod) {
+      prod = true;
+      log.info("compiled binary without a bundle → prod mode (headless)");
+    }
+  }
+
+  // Electron loads the page off disk via the aio:// protocol — from ITS OWN
+  // process. `distDir` may be the binary's embedded VFS copy, which Electron
+  // cannot open, so resolve a real-filesystem dist/ separately. Undefined here
+  // means "Electron must load over HTTP" — and skipHttp below honors that
+  // rather than leaving it with a dead localhost URL (blank window).
+  let electronDistDir: string | undefined;
+  if (prod) {
+    for (
+      const dir of realDistCandidates({
+        cwd: Deno.cwd(),
+        execDir: dirname(Deno.execPath()),
+        moduleDir: import.meta.dirname ?? null,
+      })
+    ) {
+      try {
+        await Deno.stat(join(dir, "app.js"));
+        electronDistDir = dir;
         break;
       } catch { /* not found */ }
     }
@@ -470,6 +507,15 @@ async function _run<S, A, E>(
       log,
     );
   }
+
+  // The persistence manager captured its `db:` table baseline while `state`
+  // was still initialState — restored rows only land here. Left stale, the
+  // first flush after a restart diffs restored-rows-vs-nothing, re-INSERTs
+  // every existing row, hits a UNIQUE violation, and rolls back the whole
+  // transaction: every write after the first restart was lost, permanently
+  // (the baseline only advances on success, so it never recovered). Re-seed
+  // it now that `state` is what the database actually holds.
+  persistence.resetPrevState();
 
   // Time-travel — dev only
   let tt: TTState<S, { type: string }> | null = null;
@@ -702,6 +748,7 @@ async function _run<S, A, E>(
     port,
     prod,
     distDir,
+    electronDistDir,
     baseDir,
     expose,
     token,
@@ -763,8 +810,9 @@ async function _run<S, A, E>(
     schedulePersist: () => schedulePersist(),
     shouldPersist,
     scheduleManager,
-    // Cell id → method names — trojan `cells` route (aui run-method buttons).
+    // Cell id → method names — trojan `cells` route (amui run-method buttons).
     cellMethods: config._cellMethods ?? {},
+    cellFields: config._cellFields ?? {},
     asyncDb,
     appLock,
     clientCounter,
@@ -792,7 +840,7 @@ async function _run<S, A, E>(
     appVersion: config.appVersion ?? _denoJsonVersion() ?? "0.0.0",
     title,
     prod,
-    distDir,
+    electronDistDir,
     expose,
     singletonMode,
     client,

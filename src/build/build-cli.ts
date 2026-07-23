@@ -3,7 +3,11 @@
  * Build CLI — compiles a headless Deno CLI binary (no browser bundle, no Electron).
  */
 import { join } from "@std/path";
-import { dbWorkerInclude, withDevExcluded } from "./build-compile.ts";
+import {
+  assetIncludes,
+  dbWorkerInclude,
+  withDevExcluded,
+} from "./build-compile.ts";
 import type { BuildConfig } from "./build-config.ts";
 
 /** Compile a CLI binary. Exits process on completion or error. */
@@ -23,12 +27,17 @@ export async function buildCli(cfg: BuildConfig): Promise<void> {
   const cliTarget = doRemote ? `${binaryName}-client` : binaryName;
   console.log(`[cli] compiling ${cliEntry} → ${cliTarget}`);
 
+  // Embed app data assets (.wasm + declared compile.include) — a CLI app can
+  // load WASM server-side too, and deno compile can't trace those reads.
+  const assets = await assetIncludes(root);
+
   const ok = await withDevExcluded("cli", nmDir, async (excludes) => {
     const result = await new Deno.Command("deno", {
       args: [
         "compile",
         "-A",
         ...(doRemote ? [] : dbWorkerInclude()),
+        ...assets,
         ...excludes.flatMap((e) => ["--exclude", e]),
         "-o",
         cliTarget,
