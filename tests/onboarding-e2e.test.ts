@@ -10,127 +10,28 @@
 // So the suite is green on a bare box AND genuinely builds on a full one.
 
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
-import { join, resolve } from "@std/path";
-import { scaffold } from "../src/am/am-cmd-create.ts";
+import { join } from "@std/path";
 import {
   findGradle,
   findJdk,
   GRADLE_MAX_JDK,
   resolveSdk,
 } from "../src/build/build-helpers.ts";
+import {
+  assertServesApp,
+  freePort,
+  kill,
+  killAnd,
+  makeApp,
+  REPO_ROOT,
+  spawn,
+  task,
+  waitForHttp,
+} from "./e2e-app-harness.ts";
 
-const REPO_ROOT = resolve(import.meta.dirname!, "..");
 const GATE = Deno.env.get("AIO_ONBOARD_E2E") === "1";
 const ELECTRON = Deno.env.get("AIO_ONBOARD_ELECTRON") === "1";
 const dec = new TextDecoder();
-
-// ── helpers ─────────────────────────────────────────────────────────────────
-
-/** Scaffold a template app into a fresh temp dir with dep/aio → the repo. Each
- *  app gets a UNIQUE name so its appId (deno.json name → single-instance lock,
- *  compiled-binary identity) never collides with a sibling test's server. */
-async function makeApp(
-  tpl: "counter" | "todo" = "counter",
-): Promise<string> {
-  const name = `app-${crypto.randomUUID().slice(0, 8)}`;
-  const dir = await Deno.makeTempDir({ prefix: "onboard-" });
-  for (const [rel, content] of Object.entries(scaffold(name, tpl, true))) {
-    const path = resolve(dir, rel);
-    await Deno.mkdir(resolve(path, ".."), { recursive: true });
-    await Deno.writeTextFile(path, content);
-  }
-  await Deno.mkdir(resolve(dir, "dep"), { recursive: true });
-  await Deno.symlink(REPO_ROOT, resolve(dir, "dep/aio"));
-  return dir;
-}
-
-/** Run `deno task <name> [args…]` in dir, capture output. */
-async function task(
-  dir: string,
-  name: string,
-  ...extra: string[]
-): Promise<{ code: number; out: string; err: string }> {
-  const p = await new Deno.Command("deno", {
-    args: ["task", name, ...extra],
-    cwd: dir,
-    stdout: "piped",
-    stderr: "piped",
-  }).output();
-  return {
-    code: p.code,
-    out: dec.decode(p.stdout),
-    err: dec.decode(p.stderr),
-  };
-}
-
-/** An OS-assigned free TCP port. */
-function freePort(): number {
-  const l = Deno.listen({ port: 0, hostname: "127.0.0.1" });
-  const port = (l.addr as Deno.NetAddr).port;
-  l.close();
-  return port;
-}
-
-/** Spawn a long-running process; drain stderr in the background so it can't
- *  block, and expose the accumulated log for failure messages. */
-function spawn(
-  cmd: string,
-  args: string[],
-  cwd: string,
-): { proc: Deno.ChildProcess; log: () => string } {
-  const proc = new Deno.Command(cmd, {
-    args,
-    cwd,
-    stdout: "null",
-    stderr: "piped",
-  }).spawn();
-  let log = "";
-  (async () => {
-    for await (const c of proc.stderr) log += dec.decode(c);
-  })().catch(() => {});
-  return { proc, log: () => log };
-}
-
-/** Poll a URL until it answers 200 (returns the body) or the deadline passes. */
-async function waitForHttp(url: string, timeoutMs: number): Promise<string> {
-  const deadline = Date.now() + timeoutMs;
-  let lastErr = "";
-  while (Date.now() < deadline) {
-    try {
-      const res = await fetch(url);
-      const body = await res.text();
-      if (res.ok) return body;
-      lastErr = `HTTP ${res.status}`;
-    } catch (e) {
-      lastErr = String(e);
-    }
-    await new Promise((r) => setTimeout(r, 300));
-  }
-  throw new Error(
-    `server never served ${url} within ${timeoutMs}ms (${lastErr})`,
-  );
-}
-
-async function killAnd(
-  proc: Deno.ChildProcess,
-  dir: string,
-): Promise<void> {
-  try {
-    proc.kill("SIGKILL");
-    await proc.status;
-  } catch { /* already gone */ }
-  await Deno.remove(dir, { recursive: true });
-}
-
-/** Assert an HTTP body is real served markup from an aio app. */
-function assertServesApp(body: string): void {
-  const lc = body.toLowerCase();
-  assert(body.length > 20, "empty response body");
-  assert(
-    lc.includes("<!doctype") || lc.includes("<html") || lc.includes("<script"),
-    `response is not HTML markup:\n${body.slice(0, 200)}`,
-  );
-}
 
 // ── 1. install.sh: clone aio + install a working `am` (sandboxed) ────────────
 
@@ -293,12 +194,18 @@ for (const compileTask of ["compile", "compile:browser"] as const) {
         const binPath = join(dir, binEntry.name);
         await Deno.chmod(binPath, 0o755);
 
-        // The binary is self-contained — run it in browser mode and hit it.
+        // Run the binary from a DIFFERENT directory — a compiled binary must be
+        // portable (it embeds dist/), so prod-detection must NOT depend on a
+        // real dist/ next to cwd. Running from the app dir (where dist/ exists)
+        // hid a bug where the binary fell back to dev mode + the dev lint
+        // (needs src/App.tsx at cwd) and crashed anywhere else — e.g. an
+        // AppImage mount. This guards that regression.
+        const runCwd = await Deno.makeTempDir();
         const port = freePort();
         const { proc, log } = spawn(
           binPath,
           ["--client=browser", `--port=${port}`],
-          dir,
+          runCwd,
         );
         try {
           const body = await waitForHttp(`http://127.0.0.1:${port}/`, 30_000)
@@ -311,6 +218,7 @@ for (const compileTask of ["compile", "compile:browser"] as const) {
             proc.kill("SIGKILL");
             await proc.status;
           } catch { /* gone */ }
+          await Deno.remove(runCwd, { recursive: true }).catch(() => {});
         }
       } finally {
         await Deno.remove(dir, { recursive: true });

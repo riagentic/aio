@@ -93,14 +93,26 @@ Deno.test("integration: WS connect → initial state → action → delta broadc
     });
 
     // 2. First action → full state (no patches provided, fallback sends full state)
-    ws.send(JSON.stringify({ v: 2, t: "action", d: { type: "INCREMENT", payload: { by: 5 } } }));
+    ws.send(
+      JSON.stringify({
+        v: 2,
+        t: "action",
+        d: { type: "INCREMENT", payload: { by: 5 } },
+      }),
+    );
     await waitFor(() => received.length >= 2);
 
     const state1 = JSON.parse(received[1]!).d;
     assertEquals(state1, { counter: 5, name: "test", flag: true });
 
     // 3. Second action → full state again
-    ws.send(JSON.stringify({ v: 2, t: "action", d: { type: "INCREMENT", payload: { by: 3 } } }));
+    ws.send(
+      JSON.stringify({
+        v: 2,
+        t: "action",
+        d: { type: "INCREMENT", payload: { by: 3 } },
+      }),
+    );
     await waitFor(() => received.length >= 3);
 
     const state2 = JSON.parse(received[2]!).d;
@@ -549,7 +561,9 @@ Deno.test("guardrail: effect missing .type → skipped, state still updates", as
       return { state, effects: [] };
     },
     async (ws, received) => {
-      ws.send(JSON.stringify({ v: 2, t: "action", d: { type: "WITH_BAD_EFFECT" } }));
+      ws.send(
+        JSON.stringify({ v: 2, t: "action", d: { type: "WITH_BAD_EFFECT" } }),
+      );
       await waitFor(() => received.length >= 2);
 
       const counter = frameField(received[received.length - 1]!, "counter");

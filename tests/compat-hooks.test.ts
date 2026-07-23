@@ -268,8 +268,10 @@ Deno.test("8.2: in PROD it ALSO throws — never commits the half-applied draft"
     assertEquals(
       threw.includes("classified sync"),
       true,
-      `prod must throw and discard the partial draft, got: ${threw ||
-        JSON.stringify(returned)}`,
+      `prod must throw and discard the partial draft, got: ${
+        threw ||
+        JSON.stringify(returned)
+      }`,
     );
   } finally {
     _resetCellRegistry();

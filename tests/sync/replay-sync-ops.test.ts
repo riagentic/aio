@@ -8,7 +8,7 @@ import { assertEquals } from "@std/assert";
 // @ts-ignore node:sqlite types unavailable when an old @types/node shadows them
 import { DatabaseSync } from "node:sqlite";
 import type { DB, QueryResult } from "../../src/db/types.ts";
-import { SYNC_SCHEMA } from "../../src/sync/compact.ts";
+import { compactSyncOps, SYNC_SCHEMA } from "../../src/sync/compact.ts";
 import { persistOp } from "../../src/sync/server-store.ts";
 import type { HLC } from "../../src/sync/types.ts";
 import { replaySyncOps } from "../../src/server/aio-boot.ts";
@@ -39,13 +39,15 @@ function createTestDb(): DB {
   return {
     query,
     execute,
-    transaction:
-      (async (a: unknown) =>
-        typeof a === "function"
-          ? await (a as () => unknown)()
-          : undefined) as DB[
-          "transaction"
-        ],
+    // Both call shapes: a callback, or the array-of-statements form that
+    // compaction uses (an array-blind stub made compaction a silent no-op).
+    transaction: (async (a: unknown) => {
+      if (typeof a === "function") return await (a as () => unknown)();
+      for (const st of a as Array<{ sql: string; params?: unknown[] }>) {
+        sqlite.prepare(st.sql).run(..._p(st.params ?? []));
+      }
+      return undefined;
+    }) as DB["transaction"],
     close: () => sqlite.close(),
   } as unknown as DB;
 }
@@ -153,4 +155,100 @@ Deno.test("replaySyncOps: no ops → state unchanged; unknown cell → no-op", a
     silentLog,
   );
   assertEquals(same, initial);
+});
+
+// ── compaction survival (audit 2026-07-24, HIGH: silent total data loss) ─────
+// Compaction folds every op at/below an HLC boundary into `sync_snapshots` and
+// DELETEs those ops. Boot replay only ever read `sync_ops`, so the first
+// restart after a cell crossed the 1000-op threshold resurrected it as EMPTY —
+// and then broadcast that emptiness to reconnecting clients as authoritative.
+
+Deno.test("replaySyncOps: restores state that compaction moved into a snapshot", async () => {
+  const db = createTestDb();
+  // Two ops committed, then compaction folds BOTH into the snapshot.
+  await persistOp(db, {
+    id: "o1",
+    hlc: hlc(1000, 0),
+    cell: "members",
+    action: "add",
+    payload: { id: 1, pin: "0000" },
+  });
+  await persistOp(db, {
+    id: "o2",
+    hlc: hlc(1001, 0),
+    cell: "members",
+    action: "add",
+    payload: { id: 2, pin: "1234" },
+  });
+  const live = await replaySyncOps(db, ["members"], reduce, initial, silentLog);
+
+  await compactSyncOps({
+    db,
+    cell: "members",
+    getState: () => live.members as unknown as Record<string, unknown>,
+    serverHlc: hlc(2000, 0),
+    compactOps: 2, // threshold: compact these two
+    log: { debug: () => {}, warn: () => {}, error: () => {} },
+  });
+  const { rows } = await db.query<{ n: number }>(
+    "SELECT COUNT(*) as n FROM sync_ops WHERE cell = ?",
+    ["members"],
+  );
+  assertEquals(rows[0]?.n, 0, "compaction deleted the ops it folded");
+
+  // Restart: nothing in memory, only the DB. State must come back in full.
+  const restored = await replaySyncOps(
+    db,
+    ["members"],
+    reduce,
+    structuredClone(initial),
+    silentLog,
+  );
+  assertEquals(
+    restored.members.roster,
+    [{ id: 1 }, { id: 2 }],
+    "compacted members survive the restart",
+  );
+  assertEquals(restored.members.pins, { "1": "0000", "2": "1234" });
+});
+
+Deno.test("replaySyncOps: folds post-compaction ops on top of the snapshot", async () => {
+  const db = createTestDb();
+  await persistOp(db, {
+    id: "o1",
+    hlc: hlc(1000, 0),
+    cell: "members",
+    action: "add",
+    payload: { id: 1, pin: "0000" },
+  });
+  const live = await replaySyncOps(db, ["members"], reduce, initial, silentLog);
+  await compactSyncOps({
+    db,
+    cell: "members",
+    getState: () => live.members as unknown as Record<string, unknown>,
+    serverHlc: hlc(1500, 0),
+    compactOps: 1,
+    log: { debug: () => {}, warn: () => {}, error: () => {} },
+  });
+  // An op that arrives AFTER the compaction boundary survives in the log.
+  await persistOp(db, {
+    id: "o2",
+    hlc: hlc(2000, 0),
+    cell: "members",
+    action: "add",
+    payload: { id: 2, pin: "1234" },
+  });
+
+  const restored = await replaySyncOps(
+    db,
+    ["members"],
+    reduce,
+    structuredClone(initial),
+    silentLog,
+  );
+  assertEquals(
+    restored.members.roster,
+    [{ id: 1 }, { id: 2 }],
+    "snapshot + surviving ops, each exactly once",
+  );
 });

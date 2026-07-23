@@ -8,7 +8,7 @@
   One codebase → browser, Electron, and Android.
 </p>
 
-<p align="center"><code>v1.0.0-alpha31</code> · <a href="LICENSE">MIT</a></p>
+<p align="center"><code>v1.0.0-alpha33</code> · <a href="LICENSE">MIT</a></p>
 
 ## Get started — four lines
 
@@ -88,21 +88,21 @@ and Android.
 
 Everything below ships in the box — no plugins, no assembly.
 
-| Feature                       | What                                                                            | Docs                                        |
-| ----------------------------- | ------------------------------------------------------------------------------- | ------------------------------------------- |
-| **State — cells**             | One `cell({ state, methods })` drives server, UI, persistence, sync, and tests  | [cells](docs/state/cells.md)                |
-| **Reactive UI — AIR (~8 KB)** | Signals + JSX; direct reads (`counter.count`) and calls (`counter.increment()`) | [air](docs/ui/air-setup.md)                 |
-| **Persistence**               | Auto worker-thread SQLite (one `data.db`) — zero config, opt out per cell/field | [persist](docs/persistence/auto-persist.md) |
-| **Sync**                      | WebSocket delta patches, per-action acks, offline queue, CRDT merge             | [sync](docs/persistence/crdt.md)            |
-| **Async workflows**           | Plain async methods + `until`/`race`/`sleep`, cancellable via `cancelOn`        | [methods](docs/state/methods.md)            |
-| **Scheduling**                | `after` / `every` / `at` / cron / exponential `backoff`                         | [scheduling](docs/state/scheduling.md)      |
-| **Server**                    | Custom HTTP routes, per-user filtering, auto-TLS                                | [auth](docs/auth/auth.md)                   |
-| **Auth**                      | `auth: true` = full login: signup, sessions, `<SignIn/>`, TOTP 2FA, OIDC, roles | [auth](docs/auth/auth.md)                   |
-| **Testing**                   | `testCell` harness + semantic `testUI` — zero setup, hermetic                   | [testing](docs/testing/cell-testing.md)     |
-| **Build — 5 targets**         | Browser · Electron · Android · CLI · service, single-binary `deno compile`      | [targets](docs/build/targets.md)            |
-| **`am` CLI**                  | Manage + inspect running apps: state, SQL, logs, trigger UI, metrics            | [am](docs/clients/app-manager.md)           |
-| **Debug & DX**                | Time-travel, blank-screen guard, dev graph validator, vitals, live reload       | [debug](docs/debugging/troubleshooting.md)  |
-| **Security**                  | PBKDF2 passwords, lockout + rate limits, CSRF floor, secret-field boot guards   | [auth](docs/auth/auth.md)                   |
+| Feature                       | What                                                                                                                                               | Docs                                        |
+| ----------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------- |
+| **State — cells**             | One `cell({ state, methods })` drives server, UI, persistence, sync, and tests                                                                     | [cells](docs/state/cells.md)                |
+| **Reactive UI — AIR (~8 KB)** | Signals + JSX; direct reads (`counter.count`) and calls (`counter.increment()`)                                                                    | [air](docs/ui/air-setup.md)                 |
+| **Persistence**               | Auto worker-thread SQLite (one `data.db`) — zero config, opt out per cell/field                                                                    | [persist](docs/persistence/auto-persist.md) |
+| **Sync**                      | WebSocket delta patches, per-action acks, offline queue, CRDT merge                                                                                | [sync](docs/persistence/crdt.md)            |
+| **Async workflows**           | Plain async methods + `until`/`race`/`sleep`, cancellable via `cancelOn`                                                                           | [methods](docs/state/methods.md)            |
+| **Scheduling**                | `after` / `every` / `at` / cron / exponential `backoff`                                                                                            | [scheduling](docs/state/scheduling.md)      |
+| **Server**                    | Custom HTTP routes, per-user filtering, auto-TLS                                                                                                   | [auth](docs/auth/auth.md)                   |
+| **Auth**                      | `auth: true` = full login: signup, sessions, `<SignIn/>`, TOTP 2FA, OIDC, roles                                                                    | [auth](docs/auth/auth.md)                   |
+| **Testing**                   | `testCell` harness + semantic `testUI` — zero setup, hermetic                                                                                      | [testing](docs/testing/cell-testing.md)     |
+| **Build — 5 targets**         | Browser · Electron · Android · CLI · service, single-binary `deno compile`; `deno task build` builds a whole fleet (server + clients) into `dist/` | [targets](docs/build/targets.md)            |
+| **`am` CLI + amui GUI**       | Manage + inspect running apps: state, SQL, logs, trigger UI, metrics — CLI, or the visual [amui](docs/clients/amui.md) app manager                 | [am](docs/clients/app-manager.md)           |
+| **Debug & DX**                | Time-travel, blank-screen guard, dev graph validator, vitals, live reload                                                                          | [debug](docs/debugging/troubleshooting.md)  |
+| **Security**                  | PBKDF2 passwords, lockout + rate limits, CSRF floor, secret-field boot guards                                                                      | [auth](docs/auth/auth.md)                   |
 
 **[→ Every doc on one page](docs/content.md)** ·
 [Quickstart](docs/basics/quickstart.md) · [Concepts](docs/basics/concepts.md) ·

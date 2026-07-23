@@ -31,6 +31,45 @@ const LISTENERS_TS_URL = new URL("../state/listeners.ts", import.meta.url);
 // Base for resolving sub-module imports served under /__aio/ (src/ root).
 const AIO_SRC_BASE_URL = new URL("../", import.meta.url);
 
+/** True when a baseDir-relative request path must never be served over HTTP.
+ *
+ *  `*.server.ts` is aio's documented server-ONLY seam (it holds the code and
+ *  secrets that must not reach a client), and dotfiles cover `.env`, `.git/`,
+ *  `.aio/` and friends — all of which sat under baseDir and were served
+ *  verbatim as text. `.well-known/` stays reachable: it is a public-by-design
+ *  path (ACME challenges, app-site association). Pure, so the deny list is
+ *  unit-testable without a server. */
+export function isProtectedPath(pathname: string): boolean {
+  const rel = pathname.replace(/^\/+/, "");
+  if (!rel) return false;
+  const segments = rel.split("/");
+  for (const seg of segments) {
+    if (seg === ".well-known") continue;
+    if (seg.startsWith(".")) return true;
+  }
+  return /\.server\.tsx?$/.test(segments[segments.length - 1] ?? "");
+}
+
+/** Resolve a `/__aio/<rel>` request to a framework source file, or null.
+ *
+ *  Fails CLOSED. The route exists to serve aio's own `src/**` modules to the
+ *  dev client, and nothing else: `new URL(rel, base)` silently ignores the base
+ *  when `rel` is absolute, so an unvalidated segment turned this route into an
+ *  arbitrary-file reader (`file:///…`) and an SSRF proxy (`http://internal/…`)
+ *  whose response was reflected back as executable JavaScript — in prod too.
+ *  Pure, so both the allowed and the rejected shapes are unit-testable. */
+export function aioModuleUrl(
+  relPath: string,
+  base: URL = AIO_SRC_BASE_URL,
+): URL | null {
+  // Relative, no scheme, no authority, no traversal, no absolute path.
+  if (!/^[A-Za-z0-9_][A-Za-z0-9_./-]*\.tsx?$/.test(relPath)) return null;
+  if (relPath.includes("..") || relPath.includes("//")) return null;
+  const url = new URL(relPath, base);
+  // Re-check after resolution: the file must live under the framework src/.
+  return url.href.startsWith(base.href) ? url : null;
+}
+
 /** Safety limits — prevent resource exhaustion */
 const SNAPSHOT_MAX_SIZE = 10_000_000; // 10MB — reject oversized snapshot uploads
 
@@ -185,7 +224,14 @@ export function createStaticHandler(deps: StaticDeps): {
       !pathname.includes("..")
     ) {
       const relPath = pathname.slice("/__aio/".length);
-      return await serveAioModule(new URL(relPath, AIO_SRC_BASE_URL), relPath);
+      const target = aioModuleUrl(relPath);
+      // Unresolvable → 404, never a fetch. `new URL(rel, base)` IGNORES the
+      // base when rel is absolute, so an unchecked path let a request name any
+      // file (`/__aio/file:///etc/x.ts`) or any host
+      // (`/__aio/http://10.0.0.7/x.ts` — SSRF, reflected as JS). See
+      // aioModuleUrl: it fails closed on anything outside the framework src.
+      if (!target) return new Response("not found", { status: 404 });
+      return await serveAioModule(target, relPath);
     }
 
     // ── Dev-only error endpoints ──
@@ -480,6 +526,12 @@ export function createStaticHandler(deps: StaticDeps): {
     } = deps;
 
     const filename = pathname.replace(/^\//, "");
+    // Server-only files and dotfiles are never served, at any depth — see
+    // isProtectedPath. (Checked before the file is even resolved, so the reply
+    // is identical whether or not it exists.)
+    if (isProtectedPath(pathname)) {
+      return new Response("Not found", { status: 404 });
+    }
     const filepath = resolve(absBaseDir, filename);
     // Path traversal protection
     const basePfx = absBaseDir.endsWith(SEPARATOR)

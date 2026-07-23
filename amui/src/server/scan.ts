@@ -32,6 +32,40 @@ export interface DiscoveredProject {
   } | null;
   /** true when a `.git` dir is present. */
   git: boolean;
+  /** true for amui itself. amui is an aio app like any other, so it appears in
+   *  its own list and every monitoring surface works on it — but it must never
+   *  offer to start/stop/restart itself (that would spawn a second manager or
+   *  kill the one you're looking at), so the UI and the lifecycle methods both
+   *  refuse. */
+  self?: boolean;
+}
+
+/** amui's own project directory, from the module path. Correct while running
+ *  from source; inside a compiled binary this points into the compile VFS, so
+ *  it is only ONE of the signals `selfPaths()` uses. */
+export function selfDir(): string {
+  return decodeURIComponent(new URL("../..", import.meta.url).pathname).replace(
+    /\/$/,
+    "",
+  );
+}
+
+/** Every path that IS this amui process. The authoritative signal is the lock
+ *  registry entry whose pid is ours — that holds in every mode (source, compiled
+ *  binary, AppImage), where the module path does not. Getting this wrong is not
+ *  cosmetic: an unmarked self entry offers a Stop button that kills the manager
+ *  you are clicking in. */
+export async function selfPaths(): Promise<Set<string>> {
+  const paths = new Set<string>([selfDir()]);
+  try {
+    const { instances } = await import(
+      "../../../src/server/single-instance-lock.ts"
+    );
+    for (const i of instances()) {
+      if (i.pid === Deno.pid && i.cwd) paths.add(i.cwd);
+    }
+  } catch { /* registry unreadable — fall back to the module path */ }
+  return paths;
 }
 
 const EMPTY_META: ProjectMeta = {
@@ -129,7 +163,7 @@ const seg = (p: string) => p.split("/").filter(Boolean).length;
  *  - ~/aio-apps (where `create` scaffolds)
  *  - the launch dir and a few parents (bounded to $HOME) — projects usually sit
  *    as siblings under a shared parent, so walking up finds them without config
- *    (e.g. examples/aui → examples → repo → repo-parent where sibling apps live)
+ *    (e.g. examples/amui → examples → repo → repo-parent where sibling apps live)
  *  - the parent dir of any running app (siblings of what's live) */
 function defaultRoots(runningCwds: string[]): string[] {
   const home = Deno.env.get("HOME") ?? ".";
@@ -169,23 +203,42 @@ export async function discoverProjects(): Promise<
   { projects: DiscoveredProject[]; roots: string[] }
 > {
   const { instances } = await import(
-    "../../../../src/server/single-instance-lock.ts"
+    "../../../src/server/single-instance-lock.ts"
   );
-  const running = instances().filter((i) => i.alive && i.appId !== "aui");
+  // amui is itself an aio app — it stays in the list so it can monitor its own
+  // cells, state, metrics and logs like any other app. Only its LIFECYCLE is
+  // special (no start/stop/restart on yourself), which `self` marks below.
+  const running = instances().filter((i) => i.alive);
   const roots = defaultRoots(running.map((i) => i.cwd));
   const byPath = await scanDisk(roots, 2);
 
-  // Drop aui's own project dir (it manages OTHER apps — self-listing it as a
-  // stopped app is confusing, and Start would spawn a second aui) and the aio
-  // framework repo root (aui lives at <repo>/examples/aui). decodeURIComponent
-  // so a path with spaces still matches the decoded disk-path keys.
+  // Drop the aio framework repo root (amui lives inside it) — the framework is
+  // not an app. decodeURIComponent so a path with spaces still matches the
+  // decoded disk-path keys.
   const dirOf = (rel: string) =>
     decodeURIComponent(new URL(rel, import.meta.url).pathname).replace(
       /\/$/,
       "",
     );
-  byPath.delete(dirOf("../..")); // examples/aui — aui itself
-  byPath.delete(dirOf("../../../..")); // repo root — the framework
+  const self = await selfPaths();
+  byPath.delete(dirOf("../../..")); // repo root — the framework
+
+  // amui's own project dir is never reached by the disk walk: the framework
+  // repo root is itself an aio project, and the walk deliberately does not
+  // descend into a project's subdirs. Add it explicitly so amui lists itself
+  // whether or not the registry happens to know about this process.
+  for (const p of self) {
+    if (byPath.has(p)) continue;
+    const meta = await readProjectMeta(p);
+    if (!meta.isAio) continue;
+    byPath.set(p, {
+      path: p,
+      name: meta.name || p.split("/").filter(Boolean).pop() || p,
+      meta,
+      running: null,
+      git: await isDir(join(p, ".git")),
+    });
+  }
 
   // Overlay running instances (authoritative for their path).
   for (const i of running) {
@@ -198,6 +251,11 @@ export async function discoverProjects(): Promise<
       running: { appId: i.appId, pid: i.pid, port: i.port, status: i.status },
       git: existing?.git ?? await isDir(join(i.cwd, ".git")),
     });
+  }
+
+  for (const p of self) {
+    const entry = byPath.get(p);
+    if (entry) entry.self = true;
   }
 
   const projects = [...byPath.values()].sort((a, b) => {

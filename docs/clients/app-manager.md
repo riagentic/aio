@@ -7,12 +7,61 @@ agents alike.
 deno task am <command> [args] [--flags]
 ```
 
-> Prefer a GUI? **aui** is the visual app manager — discover, inspect (cells,
-> state, metrics, files), and start/stop every aio app on your machine. See
-> [`examples/aui`](../../examples/aui/README.md).
+> Prefer a GUI? **amui** (Aio Manager UI) is the visual app manager — discover,
+> inspect (cells, merged state with persist/UI flags, metrics, files), and
+> start/stop every aio app on your machine. See [amui](amui.md).
 
 Output auto-detects: terminal -> pretty text, piped -> JSON. Override with
 `--json` or `--quiet`.
+
+## Building a cloned aio app (`am fix`)
+
+A freshly cloned aio app usually **won't build yet** — the framework link,
+`.env`, electron runtime and `node_modules` are all gitignored, so they're not
+in the clone. `am fix` analyzes the repo and repairs the common breakages in one
+go:
+
+```sh
+# 1 — install am + the framework (once per machine)
+curl -fsSL https://raw.githubusercontent.com/riagentic/aio/main/install.sh | sh
+# 2 — in the cloned app
+cd my-app
+am fix             # repair everything it can; then run: deno task dev
+am fix --dry-run   # (alias --check) show what it WOULD do, change nothing
+# 3 — build/run
+deno task dev
+```
+
+`am fix` **only auto-applies safe, reversible, machine-specific repairs** — the
+gitignored/uncommitted bits a fresh clone lacks. Anything that touches your
+committed source or config it **advises** rather than changes.
+
+Auto-fixed (safe):
+
+| Fix                        | When                                                   |
+| -------------------------- | ------------------------------------------------------ |
+| `dep/aio` framework link   | source-layout app; symlink missing/broken (gitignored) |
+| `.env` from `.env.example` | example present, `.env` missing                        |
+| electron runtime           | app imports electron; `node_modules/electron` missing  |
+| git submodules             | `.gitmodules` present but not initialized              |
+| shell scripts executable   | a task runs a `.sh` that lost its `+x` bit             |
+| dependency cache           | warms `deno cache` — surfaces any resolution error     |
+
+Advised, never changed for you: `deno.json` config (`jsx`/`jsxImportSource`/
+`nodeModulesDir`), a missing `appId` in `aio.run()`, a Deno version below the
+floor. For code-level issues (deprecated APIs, older-version patterns) `am fix`
+points you at the linter — `deno task lint:aio` (aiol) — it won't rewrite
+source.
+
+It recognizes **how the app consumes aio** and acts accordingly: a `dep/aio`
+symlink is created/repaired; a **JSR/npm pin** needs no link (skipped); a **real
+vendored `dep/aio` copy** (a committed directory, not a symlink) is **never
+touched** — `am fix` only ever creates or repairs a symlink, it will not delete
+deliberately-vendored framework code.
+
+**Related:** `am doctor` diagnoses deno.json config only (read-only, PASS/FAIL);
+`am link` is the narrow primitive that only (re)creates the `dep/aio` symlink
+(`--aio=<path>` / `$AIO_HOME` to point it elsewhere). `am fix` includes both.
 
 ## App identity
 

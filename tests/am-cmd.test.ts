@@ -523,3 +523,221 @@ Deno.test("am: cmdStop — without --wait returns immediately as stopping", asyn
     await child.status;
   }
 });
+
+// ── cmdLink (am link / am fix) — make a cloned dep/aio app buildable ─────────
+import { cmdLink } from "../src/am/am-cmd-link.ts";
+import { join as joinPath } from "@std/path";
+
+Deno.test("cmdLink: links a fresh dep/aio clone, idempotent, skips JSR apps", async () => {
+  const orig = Deno.cwd();
+  const logs: string[] = [];
+  const realLog = console.log;
+  console.log = (...a: unknown[]) => logs.push(a.map(String).join(" "));
+  const dir = await Deno.makeTempDir();
+  const jsrDir = await Deno.makeTempDir();
+  try {
+    // A cloned dep/aio app with NO dep/ (the broken state).
+    await Deno.writeTextFile(
+      joinPath(dir, "deno.json"),
+      JSON.stringify({ imports: { aio: "./dep/aio/mod.ts" } }),
+    );
+    Deno.chdir(dir);
+
+    // Fresh link → creates the symlink.
+    logs.length = 0;
+    await cmdLink([], { json: true } as never);
+    const r1 = JSON.parse(logs[0]!);
+    assertEquals(r1.linked, true);
+    assertEquals(r1.changed, true);
+    const target = await Deno.readLink(joinPath(dir, "dep", "aio"));
+    assert(target.length > 0, "dep/aio symlink created");
+
+    // Idempotent — second run detects it's already linked.
+    logs.length = 0;
+    await cmdLink([], { json: true } as never);
+    assertEquals(JSON.parse(logs[0]!).changed, false);
+
+    // A JSR-pinned app has no dep/aio to link.
+    await Deno.writeTextFile(
+      joinPath(jsrDir, "deno.json"),
+      JSON.stringify({ imports: { aio: "jsr:@riagentic/aio" } }),
+    );
+    Deno.chdir(jsrDir);
+    logs.length = 0;
+    await cmdLink([], { json: true } as never);
+    assertEquals(JSON.parse(logs[0]!).linked, false);
+  } finally {
+    console.log = realLog;
+    Deno.chdir(orig);
+    await Deno.remove(dir, { recursive: true });
+    await Deno.remove(jsrDir, { recursive: true });
+  }
+});
+
+// ── cmdFix (am fix) — repair a cloned app: symlink, .env, chmod, config ──────
+import { cmdFix } from "../src/am/am-cmd-fix.ts";
+
+Deno.test("cmdFix: fixes dep/aio link, .env, and non-exec scripts", async () => {
+  const orig = Deno.cwd();
+  const logs: string[] = [];
+  const realLog = console.log;
+  console.log = (...a: unknown[]) => logs.push(a.map(String).join(" "));
+  const dir = await Deno.makeTempDir();
+  try {
+    await Deno.writeTextFile(
+      joinPath(dir, "deno.json"),
+      JSON.stringify({
+        imports: { aio: "./dep/aio/mod.ts" },
+        tasks: { seed: "bash scripts/seed.sh" },
+        unstable: ["kv"],
+      }),
+    );
+    await Deno.mkdir(joinPath(dir, "scripts"));
+    await Deno.writeTextFile(
+      joinPath(dir, "scripts", "seed.sh"),
+      "#!/bin/bash",
+    );
+    await Deno.chmod(joinPath(dir, "scripts", "seed.sh"), 0o644); // not exec
+    await Deno.writeTextFile(joinPath(dir, ".env.example"), "K=v"); // .env missing
+    Deno.chdir(dir);
+
+    // dry-run: reports fixable, changes nothing
+    logs.length = 0;
+    await cmdFix(["--dry-run"], { json: true } as never);
+    const dr = JSON.parse(logs[0]!);
+    assert(dr.wouldFix >= 3, `dry-run finds fixable issues (${dr.wouldFix})`);
+    assert(
+      !(await Deno.stat(joinPath(dir, ".env")).catch(() => null)),
+      "dry-run made no .env",
+    );
+
+    // apply
+    logs.length = 0;
+    await cmdFix([], { json: true } as never);
+    const r = JSON.parse(logs[0]!);
+    assert(r.fixed >= 3, `applied fixes (${r.fixed})`);
+    assert(
+      (await Deno.readLink(joinPath(dir, "dep", "aio"))).length > 0,
+      "dep/aio linked",
+    );
+    assert(
+      await Deno.stat(joinPath(dir, ".env")).then(() => true),
+      ".env created",
+    );
+    const mode = (await Deno.stat(joinPath(dir, "scripts", "seed.sh"))).mode ??
+      0;
+    assert((mode & 0o111) !== 0, "script made executable");
+  } finally {
+    console.log = realLog;
+    Deno.chdir(orig);
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+Deno.test("cmdFix: never destroys a vendored dep/aio; skips JSR apps", async () => {
+  const orig = Deno.cwd();
+  const logs: string[] = [];
+  const realLog = console.log;
+  console.log = (...a: unknown[]) => logs.push(a.map(String).join(" "));
+  const vend = await Deno.makeTempDir();
+  const jsr = await Deno.makeTempDir();
+  try {
+    // A committed vendored copy — a real dep/aio DIRECTORY with mod.ts.
+    await Deno.mkdir(joinPath(vend, "dep", "aio"), { recursive: true });
+    await Deno.writeTextFile(
+      joinPath(vend, "dep", "aio", "mod.ts"),
+      "export const x=1;",
+    );
+    await Deno.writeTextFile(
+      joinPath(vend, "deno.json"),
+      JSON.stringify({ imports: { aio: "./dep/aio/mod.ts" } }),
+    );
+    Deno.chdir(vend);
+    logs.length = 0;
+    await cmdFix([], { json: true } as never);
+    const r = JSON.parse(logs[0]!);
+    const link = r.results.find((x: { name: string }) =>
+      x.name === "dep/aio framework link"
+    );
+    assertEquals(link.outcome, "ok"); // vendored → untouched, not "fixed"
+    const st = await Deno.lstat(joinPath(vend, "dep", "aio"));
+    assert(
+      st.isDirectory && !st.isSymlink,
+      "vendored dir preserved (not replaced by a symlink)",
+    );
+    assert(
+      await Deno.stat(joinPath(vend, "dep", "aio", "mod.ts")).then(() => true),
+      "vendored mod.ts intact",
+    );
+
+    // A JSR-pinned app → no dep/aio link action at all.
+    await Deno.writeTextFile(
+      joinPath(jsr, "deno.json"),
+      JSON.stringify({ imports: { aio: "jsr:@riagentic/aio@^1.0.0-alpha" } }),
+    );
+    Deno.chdir(jsr);
+    logs.length = 0;
+    await cmdFix([], { json: true } as never);
+    const r2 = JSON.parse(logs[0]!);
+    assert(
+      !r2.results.some((x: { name: string }) =>
+        x.name === "dep/aio framework link"
+      ),
+      "JSR app: no link action",
+    );
+    assert(
+      r2.results.some((x: { name: string; note: string }) =>
+        x.name === "aio consumption mode" && x.note.includes("registry")
+      ),
+      "recognizes registry mode",
+    );
+  } finally {
+    console.log = realLog;
+    Deno.chdir(orig);
+    await Deno.remove(vend, { recursive: true });
+    await Deno.remove(jsr, { recursive: true });
+  }
+});
+
+Deno.test("cmdFix: sibling vendoring is 'custom', not a dep/aio symlink", async () => {
+  // Regression: a substring test read "../vendor-dep/aio-core/mod.ts" as the
+  // dep/aio layout and littered a stray, unused dep/aio symlink. The mode probe
+  // is now anchored to a real path segment.
+  const orig = Deno.cwd();
+  const logs: string[] = [];
+  const realLog = console.log;
+  console.log = (...a: unknown[]) => logs.push(a.map(String).join(" "));
+  const app = await Deno.makeTempDir();
+  try {
+    await Deno.writeTextFile(
+      joinPath(app, "deno.json"),
+      JSON.stringify({ imports: { aio: "../vendor-dep/aio-core/mod.ts" } }),
+    );
+    Deno.chdir(app);
+    await cmdFix([], { json: true } as never);
+    const r = JSON.parse(logs[0]!);
+    assert(
+      r.results.some((x: { name: string; note: string }) =>
+        x.name === "aio consumption mode" && x.note.includes("custom")
+      ),
+      "sibling vendoring recognized as custom",
+    );
+    assert(
+      !r.results.some((x: { name: string }) =>
+        x.name === "dep/aio framework link"
+      ),
+      "no dep/aio link action for a custom path",
+    );
+    assertEquals(
+      await Deno.lstat(joinPath(app, "dep")).then(() => true).catch(() =>
+        false
+      ),
+      false,
+      "no stray dep/ dir created",
+    );
+  } finally {
+    console.log = realLog;
+    Deno.chdir(orig);
+    await Deno.remove(app, { recursive: true });
+  }
+});

@@ -12,6 +12,7 @@ import {
   v1PeerReason,
 } from "../protocol/envelope.ts";
 import { bindCell } from "../state/cell-catalog.ts";
+import { VERSION } from "./aio-cli.ts";
 import {
   negotiateProtocol,
   parseProtoHello,
@@ -111,7 +112,7 @@ export function connectCli<S>(
       retry = 0;
       wasConnected = true;
       // A3: announce our wire-protocol version before anything else.
-      socket.send(enc("proto", protoHello()));
+      socket.send(enc("proto", protoHello(VERSION)));
       // Drain queued actions
       const q = [...queue];
       queue.length = 0;
@@ -154,7 +155,7 @@ export function connectCli<S>(
         case "proto": {
           const theirs = parseProtoHello(frame.d);
           if (!theirs) return;
-          const result = negotiateProtocol(protoHello(), theirs);
+          const result = negotiateProtocol(protoHello(VERSION), theirs);
           if (!result.ok) {
             console.error(
               `[aio:cli] protocol version mismatch: ${result.reason}`,
@@ -322,7 +323,7 @@ export function connectCliUDS<S>(socketPath: string): CliApp<S> {
 
         // A3: announce our wire-protocol version before anything else.
         writer!.write(
-          encoder.encode(enc("proto", protoHello()) + "\n"),
+          encoder.encode(enc("proto", protoHello(VERSION)) + "\n"),
         ).catch(() => {});
 
         // Drain queued actions
@@ -374,7 +375,10 @@ export function connectCliUDS<S>(socketPath: string): CliApp<S> {
                   case "proto": {
                     const theirs = parseProtoHello(frame.d);
                     if (!theirs) continue;
-                    const result = negotiateProtocol(protoHello(), theirs);
+                    const result = negotiateProtocol(
+                      protoHello(VERSION),
+                      theirs,
+                    );
                     if (!result.ok) {
                       console.error(
                         `[aio:cli] protocol version mismatch: ${result.reason}`,

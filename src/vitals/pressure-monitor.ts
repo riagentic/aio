@@ -54,7 +54,12 @@ export function createPressureMonitor(
   });
 
   function emit(event: DiagEvent, throttleKey: string): void {
-    config.onDiagnostic?.(event);
+    // Timer-driven: a throwing user hook must not kill the process.
+    try {
+      config.onDiagnostic?.(event);
+    } catch (e) {
+      console.error(`[aio:vitals] onDiagnostic hook threw — ${e}`);
+    }
 
     const now = Date.now();
     const lastEmit = lastConsoleEmit.get(throttleKey) ?? 0;

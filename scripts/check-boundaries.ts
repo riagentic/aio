@@ -55,7 +55,10 @@ const ALLOWED: Record<string, string[]> = {
     "testing",
   ],
   electron: ["server", "state", "protocol", "diagnostics"],
-  build: ["server", "state", "diagnostics", "electron"],
+  // protocol: the build stamps the wire-protocol identity (version stamp) into
+  // the browser bundle, so a client artifact can name the aio build it came
+  // from and a stale bundle is detectable.
+  build: ["server", "state", "diagnostics", "electron", "protocol"],
   am: ["server", "state", "protocol", "diagnostics", "db"],
   testing: ["state", "air", "protocol", "diagnostics", "browser"],
   adapters: ["air", "state", "browser", "diagnostics"],

@@ -33,6 +33,31 @@ import {
   _updateContainerDom,
 } from "./vdom-diff-boundary.ts";
 
+/** Carry `_dom` across an unchanged static subtree, at every depth.
+ *
+ *  The static short-circuit skips diffing because `_staticEqual` proved the two
+ *  trees identical — but the NEW vnodes then own the DOM, so each must inherit
+ *  its node's handle. Copying only the top two levels left grandchildren with
+ *  `_dom: undefined`: the next render could not find their nodes, so removals
+ *  silently no-oped and replacements were appended instead of swapped
+ *  (duplicated/stale DOM in element-only subtrees like `div > span > b`).
+ *  Recursion mirrors `_staticEqual`'s traversal, so exactly what was compared
+ *  is what gets transferred. */
+function _copyStaticDom(nv: VNode, ov: VNode): void {
+  nv._dom = ov._dom;
+  const n = Math.min(nv.children.length, ov.children.length);
+  for (let i = 0; i < n; i++) {
+    const nc = nv.children[i];
+    const oc = ov.children[i];
+    if (
+      nc !== null && oc !== null && typeof nc === "object" &&
+      typeof oc === "object"
+    ) {
+      _copyStaticDom(nc as VNode, oc as VNode);
+    }
+  }
+}
+
 /** Wrapper that binds _diff into diffChildren (breaks circular dep). */
 function _diffChildren(
   parent: Node,
@@ -140,14 +165,7 @@ export function _diff(
 
   // Static VNode short-circuit
   if (nv._static && ov._static && nv.tag === ov.tag && _staticEqual(nv, ov)) {
-    nv._dom = ov._dom;
-    for (let i = 0; i < nv.children.length && i < ov.children.length; i++) {
-      const nc = nv.children[i];
-      const oc = ov.children[i];
-      if (typeof nc === "object" && typeof oc === "object") {
-        nc._dom = oc._dom;
-      }
-    }
+    _copyStaticDom(nv, ov);
     return;
   }
 

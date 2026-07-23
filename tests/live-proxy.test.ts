@@ -35,6 +35,48 @@ Deno.test("liveProxy: spread operator copies all properties", () => {
   assertEquals(copy, { x: 10, y: 20 });
 });
 
+// ── array iteration (AIO: `[...s.arr]` / for-of were "not iterable") ───────
+
+Deno.test("liveProxy: [...s.arr] spreads a primitive array", () => {
+  const { proxy } = makeProxy({ tags: ["a", "b", "c"] });
+  const p = proxy as unknown as { tags: string[] };
+  assertEquals([...p.tags], ["a", "b", "c"]);
+});
+
+Deno.test("liveProxy: for-of iterates an array", () => {
+  const { proxy } = makeProxy({ nums: [1, 2, 3] });
+  const p = proxy as unknown as { nums: number[] };
+  const out: number[] = [];
+  for (const n of p.nums) out.push(n);
+  assertEquals(out, [1, 2, 3]);
+});
+
+Deno.test("liveProxy: Array.from + spread over objects yields readable elements", () => {
+  const { proxy } = makeProxy({ users: [{ id: 1 }, { id: 2 }] });
+  const p = proxy as unknown as { users: { id: number }[] };
+  assertEquals([...p.users].map((u) => u.id), [1, 2]);
+  assertEquals(Array.from(p.users).length, 2);
+});
+
+Deno.test("liveProxy: iteration delegates to indexed access (same live elements)", () => {
+  // Each iterated element IS `s.users[i]` (the same cached nested proxy), so a
+  // write through a spread element batches exactly like s.users[i] would — no
+  // detached-snapshot divergence.
+  const { proxy } = makeProxy({ users: [{ id: 1 }, { id: 2 }] });
+  const p = proxy as unknown as { users: { id: number }[] };
+  const spread = [...p.users];
+  assertEquals(spread[0] === p.users[0], true);
+  assertEquals(spread[1] === p.users[1], true);
+});
+
+Deno.test("liveProxy: non-iterator symbols still return undefined", () => {
+  const { proxy } = makeProxy({ a: 1 });
+  assertEquals(
+    (proxy as Record<symbol, unknown>)[Symbol.for("nope")],
+    undefined,
+  );
+});
+
 // ── has / in operator ─────────────────────────────────────────────
 
 Deno.test("liveProxy: 'in' operator detects existing key", () => {

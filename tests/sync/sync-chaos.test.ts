@@ -256,8 +256,9 @@ async function runEpisode(seed: number, stats: Stats): Promise<void> {
     // ── network primitives ─────────────────────────────────────────────
     const deliverC2S = async (c: Client, msg: string) => {
       const m = JSON.parse(msg);
-      if (m.t === "op") await handler.handleOp(m.d, { id: `s${c.i}` }, c.socket);
-      else if (m.t === "sync-req") {
+      if (m.t === "op") {
+        await handler.handleOp(m.d, { id: `s${c.i}` }, c.socket);
+      } else if (m.t === "sync-req") {
         handler.handleSync(m.d, { id: `s${c.i}` }, c.socket);
       }
     };

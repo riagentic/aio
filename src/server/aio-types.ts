@@ -17,8 +17,12 @@ import type { CheckpointData, DiagnosticsConfig } from "../diagnostics/mod.ts";
 import type { RenderBudget } from "../vitals/types.ts";
 import type { ReduceBreakdown } from "../diagnostics/time-travel.ts";
 
-/** User identity — resolved from static token map or dynamic resolveUser hook */
-export type AioUser = { id: string; role: string };
+/** User identity — resolved from static token map or dynamic resolveUser hook.
+ *  Defined in protocol/ (it crosses the wire; the browser's auth UI needs it
+ *  too) and re-exported here, which is where server code and the public API
+ *  have always imported it from. */
+import type { AioUser } from "../protocol/protocol-types.ts";
+export type { AioUser };
 
 /** AUTH-2/3 options for `auth: {...}` (auth: true = all defaults). */
 export type AuthOptions = {
@@ -207,7 +211,15 @@ export type AioConfig<S, A, E> = {
   /** Internal: per-cell declarative network-access rules (AUTH-1) */
   _cellAccess?: Map<string, import("../state/cell-types.ts").CellAccess>;
   _cellMethods?: Record<string, string[]>;
+  /** Internal: per-cell, per-field { persisted, ui } flags — trojan `fields`. */
+  _cellFields?: CellFieldFlags;
 };
+
+/** Cell id → state key → whether the field is persisted / exposed to the UI. */
+export type CellFieldFlags = Record<
+  string,
+  Record<string, { persisted: boolean; ui: boolean }>
+>;
 
 /** Handle returned by aio.run() — dispatch actions, read state, or shut down */
 export type AioApp<S = unknown, A = unknown> = {

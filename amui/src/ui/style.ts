@@ -27,6 +27,7 @@ export const card: Record<string, string | number> = {
   background: C.panel,
   border: `1px solid ${C.border}`,
   borderRadius: "10px",
+  boxShadow: "0 1px 2px rgba(0,0,0,0.28)",
 };
 
 export const btn: Record<string, string | number> = {
@@ -71,4 +72,15 @@ export function fmtUptime(sec: number | null): string {
   const h = Math.floor(m / 60);
   if (h < 24) return `${h}h ${m % 60}m`;
   return `${Math.floor(h / 24)}d ${h % 24}h`;
+}
+
+/** Human byte size (B / KB / MB / GB, base-1024). */
+export function fmtBytes(n: number | null | undefined): string {
+  if (n === null || n === undefined || !Number.isFinite(n)) return "—";
+  if (n < 1024) return `${n} B`;
+  const kb = n / 1024;
+  if (kb < 1024) return `${kb.toFixed(kb < 10 ? 1 : 0)} KB`;
+  const mb = kb / 1024;
+  if (mb < 1024) return `${mb.toFixed(mb < 10 ? 1 : 0)} MB`;
+  return `${(mb / 1024).toFixed(1)} GB`;
 }

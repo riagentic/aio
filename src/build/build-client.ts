@@ -5,6 +5,7 @@
  */
 import { join } from "@std/path";
 import {
+  appimageEnv,
   copyDir,
   ensureAppimagetool,
   formatMb,
@@ -92,7 +93,7 @@ Categories=Utility;
     args: [appDir, appImageOut],
     stdout: "inherit",
     stderr: "inherit",
-    env: { ...Deno.env.toObject(), ARCH: arch },
+    env: appimageEnv(arch), // FUSE-less hosts — see appimageEnv
   }).output();
 
   if (appimageResult.code !== 0) {

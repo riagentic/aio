@@ -79,10 +79,12 @@ Deno.test("doctor: missing import-map keys are caught", async () => {
   );
 });
 
-Deno.test("doctor: missing unstable kv is caught", async () => {
+Deno.test("doctor: no longer requires unstable kv (aio is SQLite-only)", async () => {
   await withConfig({ ...GOOD, unstable: [] }, async (dir) => {
-    const { checks } = await runDoctor(dir);
-    assertEquals(named(checks, 'unstable includes "kv"')!.ok, false);
+    const { checks, ok } = await runDoctor(dir);
+    // The stale `unstable includes "kv"` check is gone — an app without it is ok.
+    assertEquals(named(checks, 'unstable includes "kv"'), undefined);
+    assert(ok, "a kv-less config still passes");
   });
 });
 

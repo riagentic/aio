@@ -24,6 +24,11 @@ export type GraphError = {
   category: ErrorCategory;
   message: string;
   fix: string;
+  /** True when the error is in a module reached ONLY via dynamic import (the
+   *  documented server-only escape hatch) — the browser never loads that chunk,
+   *  so it can't blank-screen. Reported quietly (debug), never in the loud
+   *  "reachable from the browser bundle" block. */
+  deferred?: boolean;
 };
 
 /** Cached module node in the import graph */
@@ -425,16 +430,21 @@ export async function validateGraph(
     eager.add(p);
     for (const dep of staticEdges.get(p) ?? []) eagerStack.push(dep);
   }
-  // Downgrade a server-only IMPORT found only in a deferred (dynamic-only)
-  // module: `await import("aio")` / `import("./x.server.ts")` is the documented
-  // escape hatch, so it must not block. It becomes a conditional warning
-  // (same class as `Deno.*` usage) — the code runs server-side, the browser
-  // never loads that chunk. A STATIC server-only import stays blocking.
+  // A module reached ONLY via dynamic import (`await import("aio")` /
+  // `import("./x.server.ts")`) is the documented server-only escape hatch: the
+  // browser never loads that chunk, so NOTHING in it can blank-screen — not a
+  // server-only import, and not `Deno.*`/`@std` usage either. Mark every such
+  // finding `deferred` so it's reported quietly, consistently. A STATIC
+  // server-only import (eager) stays blocking.
   for (const e of errors) {
-    if (e.category === "server-only-import" && !eager.has(e.file)) {
-      e.category = "server-only-api";
-      e.message +=
-        " (reached only via dynamic import — deferred, not blocking)";
+    const isDeferred = !eager.has(e.file);
+    if (e.category === "server-only-import") {
+      if (isDeferred) {
+        e.category = "server-only-api";
+        e.deferred = true;
+        e.message +=
+          " (reached only via dynamic import — deferred, not blocking)";
+      }
     } else if (e.category === "missing-import-map") {
       // `@std/*` / `node:*` are absent from the BROWSER import map by design —
       // they resolve server-side. That's a warning (server-only), not a hard
@@ -442,7 +452,13 @@ export async function validateGraph(
       const spec = e.message.match(/"([^"]+)"/)?.[1] ?? "";
       if (spec.startsWith("@std/") || spec.startsWith("node:")) {
         e.category = "server-only-api";
+        if (isDeferred) e.deferred = true;
       }
+    } else if (e.category === "server-only-api" && isDeferred) {
+      // `Deno.*`/`@std` USAGE inside a dynamic-only module — same escape hatch,
+      // same safety. Was inconsistently left loud while deferred imports were
+      // quieted; defer it too.
+      e.deferred = true;
     }
   }
 

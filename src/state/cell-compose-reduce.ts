@@ -268,13 +268,16 @@ export function reduceCell(
     // Committed state is frozen (dev + prod), so this fails identically
     // everywhere. Turn the cryptic throw into an actionable one.
     const frozen =
-      /not extensible|read only|read-only|already been frozen|Cannot delete/i
+      /not extensible|read only|read-only|already been frozen|Cannot delete|preventExtensions|not iterable/i
         .test(orig);
     const hint = frozen
-      ? ` — this looks like an in-place mutation of frozen state. A method may ` +
-        `only mutate its own \`s\` draft. To change another cell, call its ` +
-        `method (e.g. \`otherCell.add(...)\`), never \`otherCell.field.push(...)\`; ` +
-        `don't mutate a value you read from state either.`
+      ? ` — this looks like an in-place mutation of frozen state, or assigning a ` +
+        `draft-derived value back into state. A method may only mutate its own ` +
+        `\`s\` draft. To change another cell, call its method (e.g. ` +
+        `\`otherCell.add(...)\`), never \`otherCell.field.push(...)\`. When ` +
+        `composing new state from what you read (\`s.x = {...s.y}\`, spreading ` +
+        `\`s.arr\`), snapshot it to a plain copy first: ` +
+        `\`const y = JSON.parse(JSON.stringify(s.y))\`.`
       : "";
     throw new Error(
       `Cell '${cellName}' method '${methodName}' threw: ${orig}${hint}`,

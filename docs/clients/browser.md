@@ -35,8 +35,8 @@ export default function App() {
 
 - `state: S | null` — `null` until WebSocket connects and server sends initial
   state. The returned object is a **Proxy** — property accesses are tracked
-  automatically and sent to the server as a `subs` frame (`{"subs":["path1",…]}`) so only
-  relevant deltas are broadcast back
+  automatically and sent to the server as a `subs` frame
+  (`{"subs":["path1",…]}`) so only relevant deltas are broadcast back
 - `send(action)` — sends action to server via WebSocket. Actions sent before the
   initial connect are queued and flushed. Actions sent while disconnected are
   **dropped** — a "Reconnecting..." indicator tells the user why
