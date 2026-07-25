@@ -37,6 +37,9 @@ export interface Broadcaster {
   broadcast: (patches?: PatchEntry[]) => void;
   broadcastTT: () => void;
   broadcastRaw: (msg: string, exclude?: WebSocket) => void;
+  /** Interactive priority: drain the coalescer NOW (client-action latency —
+   *  see Coalescer.flushUrgent). */
+  flushUrgent: () => void;
   shutdown: () => void;
 }
 
@@ -210,5 +213,11 @@ export function createBroadcaster(deps: BroadcastDeps): Broadcaster {
     coalescer.dispose();
   }
 
-  return { broadcast, broadcastTT, broadcastRaw, shutdown };
+  return {
+    broadcast,
+    broadcastTT,
+    broadcastRaw,
+    flushUrgent: () => coalescer.flushUrgent(),
+    shutdown,
+  };
 }

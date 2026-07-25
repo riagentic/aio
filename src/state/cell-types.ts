@@ -245,6 +245,8 @@ export type CellAio<
   uiPublicFields?: string[];
   /** CRDT sync configuration */
   syncConfig?: SyncConfig;
+  /** This cell's methods run in their own worker (cell-workers). */
+  worker?: boolean;
   /** State version — increment when state shape changes. Default: 0. */
   version: number;
   /** Migration hook — called when persisted version < current version.

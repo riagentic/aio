@@ -1,6 +1,6 @@
 {
   "name": "@riagentic/aio",
-  "version": "1.0.0-alpha35",
+  "version": "1.0.0-alpha36",
   "appId": "aio",
   "exports": {
     ".": "./mod.ts",
@@ -8,6 +8,7 @@
     "./air/compat": "./src/air-compat.ts",
     "./ui": "./src/ui/mod.ts",
     "./jsx-runtime": "./src/jsx-runtime.ts",
+    "./server": "./src/server-entry.ts",
     "./state-core": "./src/state-core.ts",
     "./db": "./src/db/mod.ts",
     "./extras": "./src/extras/mod.ts",

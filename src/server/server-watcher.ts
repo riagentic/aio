@@ -29,6 +29,10 @@ export interface WatcherDeps {
   onReload?: (signal: "reload" | "css") => void;
   /** Called when graph validation produces a new result — server uses this for diagnostic HTML */
   onGraphResult?: (result: GraphResult) => void;
+  /** Called when an edited file declares a cell. Cells run in the server
+   *  process and cannot hot-reload, so dev restarts the process; without a
+   *  handler the watcher falls back to warning once per file. */
+  onCellChange?: (path: string) => void;
 }
 
 /** Handle returned by createFileWatcher */
@@ -80,7 +84,35 @@ export function createFileWatcher(deps: WatcherDeps): FileWatcher {
     }
   }
 
+  /** The project config next to the app (baseDir) and one level up — the
+   *  scaffold keeps deno.json at the project root, flat apps next to the entry. */
+  function _denoJsonPaths(): string[] {
+    const up = absBaseDir.slice(0, absBaseDir.lastIndexOf("/"));
+    return [
+      join(absBaseDir, "deno.json"),
+      join(absBaseDir, "deno.jsonc"),
+      join(up, "deno.json"),
+      join(up, "deno.jsonc"),
+    ];
+  }
+
+  let _warnedImportMap = false;
+
   function scheduleReload(path: string): void {
+    // A changed deno.json can't take effect in this process.
+    if (path.endsWith("deno.json") || path.endsWith("deno.jsonc")) {
+      if (!_warnedImportMap) {
+        _warnedImportMap = true;
+        log.warn(
+          "watch",
+          `deno.json changed — the import map was read at boot, so a NEW ` +
+            `dependency will not resolve until you restart. (Edits to tasks ` +
+            `or unrelated keys are harmless.) Restart: stop and re-run ` +
+            `\`deno task dev\`.`,
+        );
+      }
+      return; // never a browser reload — nothing in the served graph changed
+    }
     // Skip editor temp files, swap files, lockfiles, etc.
     const dot = path.lastIndexOf(".");
     const ext = dot >= 0 ? path.slice(dot) : "";
@@ -90,19 +122,25 @@ export function createFileWatcher(deps: WatcherDeps): FileWatcher {
     // server process, so the client reload shows the NEW UI reading OLD cell
     // logic. That silent mismatch sends people ghost-hunting. Warn loudly (once
     // per file per session) with the fix.
-    if (!path.endsWith(".css") && !_warnedCellFiles.has(path)) {
+    if (!path.endsWith(".css")) {
       try {
         const src = Deno.readTextFileSync(path);
         if (/\bcell\s*\(\s*["'`]/.test(src)) {
-          _warnedCellFiles.add(path);
-          log.warn(
-            "watch",
-            `cell file changed (${
-              path.split("/").pop()
-            }) — cells run in the server process and do NOT hot-reload. ` +
-              `Restart to apply: stop and re-run \`deno task dev\`. ` +
-              `(Client JSX hot-reloads, so you may be seeing new UI on old cell logic.)`,
-          );
+          if (deps.onCellChange) {
+            // Dev restarts the process itself (quant Bad #3) — the handler
+            // warns instead when it can't (prod-ish permissions, opt-out).
+            deps.onCellChange(path);
+          } else if (!_warnedCellFiles.has(path)) {
+            _warnedCellFiles.add(path);
+            log.warn(
+              "watch",
+              `cell file changed (${
+                path.split("/").pop()
+              }) — cells run in the server process and do NOT hot-reload. ` +
+                `Restart to apply: stop and re-run \`deno task dev\`. ` +
+                `(Client JSX hot-reloads, so you may be seeing new UI on old cell logic.)`,
+            );
+          }
         }
       } catch { /* unreadable — skip */ }
     }
@@ -177,7 +215,16 @@ export function createFileWatcher(deps: WatcherDeps): FileWatcher {
 
   function startWatcher(): boolean {
     try {
+      // Also watch the project's deno.json: the import map is read ONCE at
+      // boot, so adding a dependency while the server runs makes the watcher
+      // rescan against a STALE map — the new import "doesn't exist", and the
+      // module-errors page blames your code (risoto 2026-07-26). We can't
+      // hot-swap the map (it is baked into the served import map and the
+      // transpile cache), so say so, loudly and once.
       const paths = _sentinelOk ? [absBaseDir, SENTINEL] : [absBaseDir];
+      for (const dj of _denoJsonPaths()) {
+        if (fileExists(dj)) paths.push(dj);
+      }
       fsWatcher = Deno.watchFs(paths, { recursive: true });
       watcherActive = true;
       (async () => {

@@ -23,6 +23,7 @@
 
 - [State Management](state/README.md) — Defining cells, managing state, and coordinating workflows.
 - [Cell-Level Visibility & Persistence](state/cell-visibility.md) — Control what state each cell exposes to clients (ui) and persists to disk
+- [Cell workers (`worker: true`)](state/cell-workers.md) — A cell can run its methods in its own Deno worker — a separate isolate on a
 - [Cells — Config Shape and Anatomy](state/cells.md) — Everything is a cell.
 - [Composition — Cross-Cell Communication](state/composition.md) — Cells don't share state — they communicate through three interaction patterns.
 - [Lifecycle — Init, Destroy, Runtime](state/lifecycle.md) — How cells boot, shut down, and how to intercept actions globally.
@@ -128,6 +129,7 @@
 - [Upgrade: 1.0.0-alpha32 → 1.0.0-alpha33](upgrade/from-alpha32-to-alpha33.md) — A feature + hardening release.
 - [Upgrade: 1.0.0-alpha33 → 1.0.0-alpha34](upgrade/from-alpha33-to-alpha34.md) — The dream-list release — a large batch of new capabilities, all opt-in or purely
 - [Upgrade: 1.0.0-alpha34 → 1.0.0-alpha35](upgrade/from-alpha34-to-alpha35.md) — Purely additive.
+- [Upgrade: 1.0.0-alpha35 → 1.0.0-alpha36](upgrade/from-alpha35-to-alpha36.md) — Purely additive.
 - [Upgrade from v1.0.0-alpha4 to v1.0.0-alpha5](upgrade/from-alpha4-to-alpha5.md) — None.
 - [Upgrade from v1.0.0-alpha5 to v1.0.0-alpha6](upgrade/from-alpha5-to-alpha6.md) — None.
 - [Upgrade from v1.0.0-alpha6 to v1.0.0-alpha7](upgrade/from-alpha6-to-alpha7.md) — mod.ts no longer re-exports renderer primitives.
@@ -152,3 +154,4 @@
 - [Semantic UI testing — first-class, selector-free (alpha18 foundation)](specs/2026-07-10-semantic-ui-testing.md) — automatically exposed as an intuitive, executable API — driven by tests
 - [Storage backend interface (design — pre-freeze reservation)](specs/2026-07-11-storage-backend-interface.md) — (3-tier db + sync op store).
 - [Local-first execution (perfect-aio D3) — design](specs/2026-07-22-local-first.md) — Status: design + prototype phase (the D3 gate: no mass migration before this
+- [Cell workers (`worker: true`) — design](specs/2026-07-25-cell-workers.md) — Status: design (nothing built).

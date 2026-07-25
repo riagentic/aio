@@ -114,6 +114,9 @@ export function buildAppObject<S, A>(refs: {
   setTT: (tt: TTState<S, { type: string }>) => void;
   getServer: () => ServerHandle;
   udsBroadcastFull: () => void;
+  /** Called after state is replaced wholesale (snapshot load) — worker cells
+   *  hold their own copy and must be re-seeded. */
+  onStateReplaced?: () => void;
   shutdown: () => Promise<void>;
   sessionStore?: import("./sessions.ts").SessionStore | null;
   userStore?: import("./auth-users.ts").UserStore | null;
@@ -142,6 +145,9 @@ export function buildAppObject<S, A>(refs: {
         log.warn(`snapshot: unknown keys present: ${unknown.join(", ")}`);
       }
       refs.setState(parsed as S);
+      // Worker cells hold their own copy of their slice — a wholesale swap has
+      // to reach them, or they'd keep mutating the state we just replaced.
+      refs.onStateReplaced?.();
       refs.persistence.resetPrevState();
       const tt = refs.getTT();
       if (tt) {
@@ -199,6 +205,8 @@ export type UdsBroadcastController = {
   ) => void;
   /** Direct broadcast — for TT/snapshot state jumps (force-full) */
   broadcastFull: () => void;
+  /** Interactive priority: drain the coalescer NOW (client-action latency). */
+  flushUrgent: () => void;
   /** Cancel the pending throttle timer — used by createShutdownOrchestrator */
   dispose: () => void;
 };
@@ -237,6 +245,9 @@ export function createUdsBroadcastController(refs: {
     // A deliberate full-state jump (time-travel / snapshot) sends immediately —
     // it is not part of the coalesced per-dispatch stream.
     broadcastFull: () => broadcastState(true),
+    // Interactive priority (see Coalescer.flushUrgent): client actions call
+    // this so their patches never wait out the background throttle window.
+    flushUrgent: () => coalescer.flushUrgent(),
     dispose: () => coalescer.dispose(),
   };
 }

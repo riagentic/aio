@@ -23,8 +23,27 @@ export interface Coalescer<T> {
   add(items?: T[]): void;
   /** Request a full-state flush on the next tick. */
   forceFull(): void;
+  /** INTERACTIVE priority: flush whatever is buffered RIGHT NOW and close the
+   *  throttle window, so the next mutation goes leading-edge again. For
+   *  client-originated actions — the throttle exists to pace background
+   *  churn, not to add up to `throttleMs` of latency to a user's keystroke
+   *  (risoto 2026-07-25: every navigation key paid ~50ms here). No-op when
+   *  nothing is buffered. */
+  flushUrgent(): void;
   /** Cancel any pending throttle timer (for shutdown). */
   dispose(): void;
+}
+
+// Interactive-priority registry: every live coalescer registers its urgent
+// flush here, so the dispatch layer can flush ALL transports after a
+// client-originated action without threading handles through every
+// composition layer (WS broadcaster and UDS controller live far apart).
+const urgentRegistry = new Set<() => void>();
+
+/** Flush every live coalescer NOW — called after a client action commits so
+ *  its patches never wait out the background throttle window. */
+export function flushAllUrgent(): void {
+  for (const f of urgentRegistry) f();
 }
 
 /** Create a coalescer. `flush(buffered, force)` performs the transport-specific
@@ -56,7 +75,9 @@ export function createCoalescer<T>(
     queued = true;
     queueMicrotask(() => {
       queued = false;
-      drain(); // leading edge
+      // Leading edge — unless an urgent flush already drained the buffer
+      // (an empty, unforced drain would read as the full-state signal).
+      if (force || buffer.length > 0) drain();
       if (throttleMs > 0) {
         throttle = setTimeout(() => {
           throttle = null;
@@ -65,6 +86,19 @@ export function createCoalescer<T>(
       }
     });
   };
+
+  const flushUrgentImpl = (): void => {
+    // Nothing buffered and no pending full → nothing to accelerate. (An
+    // empty drain is NOT free: transports treat "flush with no patches" as
+    // the full-state signal.)
+    if (buffer.length === 0 && !force) return;
+    if (throttle) {
+      clearTimeout(throttle);
+      throttle = null;
+    }
+    drain();
+  };
+  urgentRegistry.add(flushUrgentImpl);
 
   return {
     add(items?: T[]) {
@@ -76,7 +110,9 @@ export function createCoalescer<T>(
       force = true;
       schedule();
     },
+    flushUrgent: flushUrgentImpl,
     dispose() {
+      urgentRegistry.delete(flushUrgentImpl);
       if (throttle) {
         clearTimeout(throttle);
         throttle = null;

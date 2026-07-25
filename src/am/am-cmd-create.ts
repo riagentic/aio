@@ -111,9 +111,23 @@ export function frameworkSpecs(source: boolean): {
     // would otherwise resolve transitively (inews #10).
     return {
       imports: {
+        // EVERY public entry point, not just the ones the template happens to
+        // use: the docs tell people to `import { createDB } from "aio/db"` (or
+        // aio/ui, aio/server, …), and a specifier the app can't resolve is the
+        // "docs lie" class of failure — the app author has no way to know the
+        // mapping was simply missing from their deno.json.
         "aio": "./dep/aio/mod.ts",
         "aio/air": "./dep/aio/src/air.ts",
+        "aio/air/compat": "./dep/aio/src/air-compat.ts",
+        "aio/ui": "./dep/aio/src/ui/mod.ts",
         "aio/jsx-runtime": "./dep/aio/src/jsx-runtime.ts",
+        "aio/server": "./dep/aio/src/server-entry.ts",
+        "aio/db": "./dep/aio/src/db/mod.ts",
+        "aio/sync": "./dep/aio/src/sync/mod.ts",
+        "aio/schedule": "./dep/aio/src/schedule.ts",
+        "aio/selectors": "./dep/aio/src/selector.ts",
+        "aio/extras": "./dep/aio/src/extras/mod.ts",
+        "aio/state-core": "./dep/aio/src/state-core.ts",
         "aio/testing": "./dep/aio/src/cell-test.ts",
         "esbuild": "npm:esbuild@^0.24",
         "immer": "npm:immer@^10",
@@ -135,7 +149,16 @@ export function frameworkSpecs(source: boolean): {
     imports: {
       "aio": v,
       "aio/air": `${v}/air`,
+      "aio/air/compat": `${v}/air/compat`,
+      "aio/ui": `${v}/ui`,
       "aio/jsx-runtime": `${v}/jsx-runtime`,
+      "aio/server": `${v}/server`,
+      "aio/db": `${v}/db`,
+      "aio/sync": `${v}/sync`,
+      "aio/schedule": `${v}/schedule`,
+      "aio/selectors": `${v}/selectors`,
+      "aio/extras": `${v}/extras`,
+      "aio/state-core": `${v}/state-core`,
       "aio/testing": `${v}/testing`,
     },
     build: `${v}/build`,

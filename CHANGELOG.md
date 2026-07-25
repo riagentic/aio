@@ -1,5 +1,144 @@
 # Changelog
 
+## 1.0.0-alpha36 — a thread of its own (2026-07-25)
+
+A responsiveness release. The through-line: a user's action should feel instant,
+and one slow piece of code should never be able to freeze the rest of the app.
+Purely additive — no public API removed, wire protocol unchanged (alpha35 and
+alpha36 interoperate).
+
+**Cell workers — `worker: true`.** A cell can now run its methods in its own
+Deno worker: a separate isolate on a separate OS thread. Work that blocks — a
+parse, a crunch, an FFI call, a sync-only API — then stalls **only that cell**.
+Every other cell, every other client, and the socket loop that acks them keep
+running. Measured in the e2e suite: five round trips to another cell during a
+1.5s burn finish in milliseconds with the flag; **1403ms without it**.
+
+```ts
+cell("reports", {
+  worker: true, // ← the entire opt-in
+  state: { status: "idle", rows: [] as Row[] },
+  methods: {
+    async build(s, raw: number[]) {
+      s.status = "building"; // commits + reaches clients immediately
+      s.rows = crunch(raw); // seconds of CPU, on its own thread
+    },
+  },
+});
+```
+
+`crunch` is a normal import: unlike `schedule.blocking` (which serializes one
+self-contained function), the worker loads your app's real module graph. State
+stays authoritative on the main isolate — the worker streams its Immer patches
+home — so persistence, broadcast, `ui`/`persist` filters, time-travel and the
+wire protocol are unchanged. `serverUser()`/`serverRequest()` answer inside the
+worker, per-cell ordering holds, return values and thrown errors cross back, and
+shutdown terminates the thread instead of waiting for it. Boot refuses what a
+thread boundary can't honour (`scope: "client"`, `sync`, `listensTo`, `machine`,
+`selectors`) with the reason and the fix; `libraryMode` and compiled binaries
+degrade to in-isolate with one log line. **Flag the cell that does dangerous
+work — never a counter.** See [state/cell-workers](docs/state/cell-workers.md).
+
+**Interactive priority.** A broadcast caused by a _client action_ now skips the
+coalescer's throttle window instead of waiting it out — every keystroke used to
+pay up to `syncIntervalMs` (a constant ~66ms per navigation key at the 50ms
+default). Background churn still coalesces exactly as before, so this costs no
+extra broadcasts; it moves the ones a user is waiting on to the front. Raising
+`syncIntervalMs` now throttles background updates without dulling the app.
+
+**Dev holds a reduce to one frame.** The default reduce budget is 16ms in dev
+(100ms in prod). A reduce runs on the server's single dispatch path, so its
+duration is what every connected client's next action waits — dev now tells you
+at one frame, throttled to one report per action type per 10s. Every budget tip
+was also wrong for CPU work: "move it to an async effect" doesn't help, because
+awaiting a 200ms computation blocks the isolate for 200ms. The tips (and the
+performance guide) now name the real fix — `schedule.blocking()` for a function,
+`worker: true` for a whole cell — and a test pins the trap so the guidance can't
+rot.
+
+**`schedule.blocking` is documented at last.** The worker pool that existed
+precisely so compute can't freeze rendering appeared in zero docs. There is now
+a "move it off-thread" section with the contract, cancellation, pool sizing, the
+self-contained-fn rule, the browser story, and a which-tool-for-which-work
+table.
+
+**The upgrade tax, paid mechanically.** `aiol` reports every deprecated spelling
+your app still uses and `--safe-fix` rewrites the pure renames:
+`call({ timeout })` → `timeoutMs`, `--cert`/`--key` → `--tls-cert`/`--tls-key`,
+and a build-only `--headless` on a task that RUNS the app →
+`--client=server-only` (the bug that made a generated systemd unit crash-loop).
+Upgrading is a command, not a diff review.
+
+**A cell edit restarts the app.** Cells run in the server process, so JSX
+hot-reload used to show new UI on old cell logic. Dev now restarts the app
+itself: teardown, fresh process on the same port, tabs reload on the new boot
+id. It steps aside — warning as before — when it can't relaunch faithfully (no
+`-A`, `libraryMode`, prod, or `AIO_NO_DEV_RESTART=1`).
+
+### From the field (risoto, day one on cell workers)
+
+The first real app to adopt `worker: true` reported 2-second freezes becoming a
+flat ~58ms loop with a hardware wallet on its own thread — and nine friction
+points, six of which are fixed here.
+
+- **A worker cell reading a peer cell silently returned that peer's declared
+  default, forever.** Boot validation caught config-level misuse but not a read
+  in a method body, so interconnected cells couldn't be flagged at all. Peer
+  reads inside a worker now throw, naming the cell, the field and the way out.
+  The pattern that emerged in the field — **one designated heavy cell**, plain
+  args in, cloneable values out — is now the documented idiom.
+- **The "cell-dependent inline `style={{}}` freezes at mount" warning was
+  stale.** It is reactive, on both the server-store and the browser's
+  signal-backed read path; the advice it produced ("convert it to a class") kept
+  costing real debugging sessions long after the fix. The behavior is now pinned
+  by tests on both paths, the false `checkInlineStyle` lint is retired, and the
+  doc that repeated the myth is corrected.
+- **`t` markers leaked from SSR but never appeared in the live DOM**, so every
+  DOM-probing tool found them in the served HTML and nothing after hydration.
+  Both renderers now agree: the semantic marker is never a DOM attribute.
+- **Editing `deno.json` under a running dev server** left the boot-time import
+  map in place, so the watcher rescanned against a stale map and blamed your
+  code. The config is now watched, with one loud "restart to pick this up".
+- **The module-errors page counted standing warnings as errors** — "30 module
+  errors" where 29 were never-fatal and exactly 1 was real. The header now
+  counts fatals; warnings are collapsed beneath them, labelled "not blocking".
+- **New lint:** reading `cell.field` right after `await cell.method()` — on a
+  browser client the patch may not have landed, so it can read the previous
+  value. The method's return value is the answer (it crosses the bridge).
+- **Documented:** `s.list.push(x)` emits one `add` patch while
+  `s.list = [...s.list, x]` re-ships the whole array every commit — the usual
+  cause of a PRESSURE warning on an otherwise small cell.
+
+Three reported items were already fixed and are now verified: browser clients DO
+receive method return values (alpha34's ack transport), the 64KB KV ceiling is
+gone (SQLite values hold ~1GB), and `am restart` replays the original launch
+flags when the app was started by `am start`.
+
+### Fixed
+
+- **A scaffolded app couldn't import most documented entry points.** `am create`
+  mapped four specifiers while the docs advertise a dozen, so
+  `import { createDB } from "aio/db"` failed with "not in import map" — which
+  reads like the entry doesn't exist. The scaffold now maps every public entry,
+  `aio/server` is a real export, and `aiol --safe-fix` repairs apps created
+  before this.
+- **Two structures grew with uptime.** The client-log rate map kept one entry
+  per client index forever _and_ walked all of them every second; the pressure
+  monitor kept one throttle key per client UUID. Both are bounded now.
+- **Vitals taxed what it measured** — p95 sorted a 100-sample window on every
+  dispatch. Computed on read now: dispatch-sync 0.083 → 0.071 ms/op,
+  dispatch-async 0.103 → 0.082.
+- **`aiol` invented cells.** A `cell("x")` in a doc comment or a scaffolder's
+  template literal was extracted as declared, producing phantom cells and an
+  unfixable `duplicate cell name` error. Extraction (and the legacy-import and
+  Node-API checks) now read real code only.
+- **`route()` hardening:** `decodeURIComponent` on attacker-controlled cookies
+  and path segments raised `URIError` on a malformed escape — and
+  `serverRequest()` parses cookies on every request, so one bad header could 500
+  a route or break a WS upgrade. Cookie _names_ were also taken verbatim, so an
+  untrusted name could append its own attributes.
+- Every public symbol now carries API documentation (449/449).
+
 ## 1.0.0-alpha35 — the edges (2026-07-25)
 
 Everything in this release is at an edge: where the app meets HTTP, where a call

@@ -65,7 +65,7 @@
         },
         "CellAio": {
           "kind": "typeAlias",
-          "sig": "f5a1b3809bf93ff5"
+          "sig": "4f7ad761cfdc2426"
         },
         "CellDef": {
           "kind": "typeAlias",
@@ -197,7 +197,7 @@
         },
         "MethodsCellConfig": {
           "kind": "typeAlias",
-          "sig": "957e20e5a39f66ae"
+          "sig": "57fed761a5536450"
         },
         "Msg": {
           "kind": "typeAlias",
@@ -385,7 +385,7 @@
         },
         "VERSION": {
           "kind": "variable",
-          "sig": "b34e197b02558bf4"
+          "sig": "ec782c37a8373027"
         },
         "VitalsConfig": {
           "kind": "typeAlias",
@@ -1343,6 +1343,66 @@
         "Selector": {
           "kind": "typeAlias",
           "sig": "442cb03055401d58"
+        }
+      }
+    },
+    "./server": {
+      "symbols": {
+        "buildShipManifest": {
+          "kind": "function",
+          "sig": "94e6b09336ed2227"
+        },
+        "connectCli": {
+          "kind": "function",
+          "sig": "cf36c15f1890d562"
+        },
+        "connectCliUDS": {
+          "kind": "function",
+          "sig": "cf318c9c642ebf66"
+        },
+        "createDB": {
+          "kind": "function",
+          "sig": "905df9f1c29edd8c"
+        },
+        "DB": {
+          "kind": "interface",
+          "sig": "3338b3f8adb972c1"
+        },
+        "DBOpts": {
+          "kind": "typeAlias",
+          "sig": "cc0d8a775b0827b2"
+        },
+        "DEFAULT_PRAGMAS": {
+          "kind": "variable",
+          "sig": "68b3405a06dc5203"
+        },
+        "generateSigningKey": {
+          "kind": "function",
+          "sig": "3fa468fe7e07a2c0"
+        },
+        "QueryResult": {
+          "kind": "typeAlias",
+          "sig": "4d451b3b1c2af191"
+        },
+        "sha256Hex": {
+          "kind": "function",
+          "sig": "2196aabb6f87489b"
+        },
+        "shipApp": {
+          "kind": "function",
+          "sig": "7ab005fe7e0e8cdf"
+        },
+        "ShipManifest": {
+          "kind": "typeAlias",
+          "sig": "06e1cfa2ba365682"
+        },
+        "Tx": {
+          "kind": "typeAlias",
+          "sig": "d6d59f832bb71a3e"
+        },
+        "verifyShipManifest": {
+          "kind": "function",
+          "sig": "e88c8d5105fd8249"
         }
       }
     },

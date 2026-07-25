@@ -58,15 +58,21 @@ If `produce` dominates, your sync method is doing too much work:
 // BAD -- blocks for 250ms
 methods: { analyze(s) { s.results = heavyComputation(s.data) } }
 
-// GOOD -- async method: flag first, then work off the sync path
+// GOOD -- flag first, then hand the COMPUTE to a worker thread
 methods: {
   async analyze(s) {
-    s.analyzing = true                            // commits immediately
-    s.results = await heavyComputationAsync(s.data)
+    s.analyzing = true                      // commits immediately, UI updates now
+    s.results = await schedule.blocking("analyze", heavyComputation, s.data)
     s.analyzing = false
   },
 },
 ```
+
+> ⚠️ `await` is not an escape hatch for CPU work. Awaiting a function that
+> computes for 250ms still blocks the isolate for 250ms — the `await` only
+> yields once the work is already done. `await` helps for **I/O** (the runtime
+> does the waiting elsewhere); for **compute** you need another thread — see
+> [Move it off-thread](#move-it-off-thread).
 
 ---
 
@@ -90,6 +96,96 @@ async load(s) {
 
 ---
 
+## Move it off-thread
+
+`schedule.blocking(id, fn, arg)` runs a function on a **worker pool** — a real
+OS thread, not a promise — so it cannot block rendering, the dispatch loop, or
+anyone else's actions. It is the answer whenever the work is CPU-bound, FFI, or
+a sync API you can't avoid.
+
+```ts
+import { cell, schedule } from "aio";
+
+type Row = { id: number; score: number };
+
+export const report = cell("report", {
+  state: { status: "idle", rows: [] as Row[] },
+  methods: {
+    async build(s, raw: number[]) {
+      s.status = "building"; // instant — the UI reflects this immediately
+
+      // Off-thread: the isolate stays free, other clients keep dispatching.
+      // The function is SELF-CONTAINED — everything it needs is inside it or
+      // arrives as `arg`. It cannot see `raw`, `s`, or any import up here.
+      s.rows = await schedule.blocking("report:build", (input) => {
+        const nums = input as number[];
+        const out: { id: number; score: number }[] = [];
+        for (const n of nums) out.push({ id: n, score: Math.sqrt(n) * n }); // seconds of CPU
+        return out.sort((a, b) => b.score - a.score);
+      }, raw);
+
+      s.status = "done";
+    },
+    cancel() {
+      schedule.blocking.cancel("report:build"); // terminates the worker
+    },
+  },
+});
+```
+
+Need one of your own modules in there? Import it **inside** the function —
+`const { crunch } = await import("./crunch.ts")` — the worker resolves it
+itself. Closing over an outer `crunch` cannot work: only the function's source
+crosses the thread boundary.
+
+**The contract** (the price of a real thread):
+
+- the function is **self-contained** — it is serialized to source and rebuilt in
+  the worker, so it cannot close over outer variables; pass what it needs as
+  `arg`
+- `arg` and the result must be **structured-cloneable** (plain data)
+- do FFI setup (`Deno.dlopen`) **inside** the function
+- the pool is sized to `hardwareConcurrency - 1` and queues beyond that, so a
+  burst backpressures instead of spawning unbounded threads
+- `schedule.blocking.cancel(id)` drops a queued task or terminates a running one
+  — the only way to stop a busy thread; `dispose()` tears the pool down
+
+### In the browser
+
+Cell methods run on the server, so most compute never touches the UI thread at
+all. What can: work you do _inside a component_ (sorting a big list, parsing a
+large document, chart math) and client-scoped cell methods.
+
+- **Render is already frame-budgeted.** AIR renders until a 12ms deadline of the
+  16ms frame, then yields and re-queues the rest — a burst of updates degrades
+  into more frames, never into a frozen tab.
+- **Derive once, not per render:** `useProjection(fn, deps)` keeps derived data
+  structurally shared instead of rebuilt on every pass.
+- **Genuinely heavy client compute belongs in a `Worker`** — the same rule as
+  the server, without a framework wrapper (aio doesn't bundle one for you yet):
+
+```ts
+// worker.ts is bundled by your app; postMessage in, onmessage out.
+const worker = new Worker(new URL("./worker.ts", import.meta.url), {
+  type: "module",
+});
+```
+
+aio tells you when the UI thread stalls: the render meter measures staleness and
+frame time on every frame, and a stall surfaces as `UI_FREEZE` in the console
+and at `/__aio/vitals`.
+
+**Which tool for which work:**
+
+| Work                                   | Do this                                                               |
+| -------------------------------------- | --------------------------------------------------------------------- |
+| I/O (fetch, file, DB)                  | `async` method + `await` — the runtime waits, not you                 |
+| CPU (parse, crunch, encode, hash loop) | `schedule.blocking(...)`                                              |
+| Blocking FFI / sync-only API           | `schedule.blocking(...)`                                              |
+| A whole CELL that does dangerous work  | `worker: true` on the cell ([cell workers](../state/cell-workers.md)) |
+| Slow work on a timer                   | `schedule.every(...)` whose action does the above                     |
+| Big state clients don't need           | `ui: { exclude: [...] }` — don't ship it at all                       |
+
 ## Budget configuration
 
 ### Modes
@@ -98,6 +194,13 @@ async load(s) {
 | ---------------- | ---------------------------------- |
 | `'on'` (default) | Logs perf violations to `perf.log` |
 | `'off'`          | Disables perf measurement entirely |
+
+**Dev is stricter on purpose.** The default reduce budget is **16ms (one frame)
+in dev** and 100ms in prod. A reduce runs on the server's single dispatch path,
+so the time it takes is time every connected client's next action waits — dev
+tells you at one frame, while the app is small enough to fix cheaply. Reports
+are throttled to one per action type per 10s, so a hot path won't spam. Override
+either side with `perfBudget`.
 
 ### Custom budgets
 
@@ -131,8 +234,8 @@ await aio.run({
 
 ## Best practices
 
-1. **Keep reduce fast** -- state updates should be instant. Move heavy
-   computation to effects.
+1. **Keep reduce fast** -- state updates should be instant. Heavy computation
+   goes off-thread (`schedule.blocking`), not into an effect on the same thread.
 2. **Effects should return immediately** -- kick off async work, don't block.
 3. **Use `perfCheck: 'on'` (default)** -- logs violations to `perf.log`
    automatically.

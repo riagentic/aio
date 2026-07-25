@@ -97,13 +97,17 @@ const id = await todos.add({ title });
 const count = todos.items.length; // reactive; re-renders when it changes
 ```
 
-## What freezes: cell-dependent inline `style={{}}`
+## Inline `style={{}}` is reactive (this used to be a trap)
 
-Unrelated to the network hop but the same "looks reactive, isn't" trap: a
-cell-dependent inline `style={{ width: bar.pct + "%" }}` is captured **once at
-mount** and never updates, while `class=` stays reactive. aiol flags this as a
-`[boundary]` warning (`checkInlineStyle`). Drive dynamic style through classes,
-or a CSS variable set from state, rather than an inline object literal.
+A cell-dependent inline `style={{ width: bar.pct + "%" }}` updates like any
+other read — on both read paths (the server store and the browser's
+signal-backed binding), pinned by regression tests. An older version froze it at
+mount, and that warning outlived the fix long enough to become folklore: apps
+kept converting working styles to classes "just in case".
+
+The one genuine freeze is a value computed **outside** the tracked render — at
+module scope, in a helper that ran once, or under `untrack` — where no
+subscription is ever registered. See [air-components](../ui/air-components.md).
 
 ## See also
 

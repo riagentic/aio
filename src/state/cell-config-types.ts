@@ -98,6 +98,19 @@ export type MethodsCellConfig<
   ui?: CellVisibility<keyof NoInfer<S> & string, NoInfer<S>>;
   /** CRDT sync — true for defaults, or partial config to override merge strategies, identity keys, retention */
   sync?: true | Partial<SyncConfig>;
+  /** Run this cell's methods in their OWN Deno worker (its own isolate and OS
+   *  thread), so work that blocks — a parse, a crunch, an FFI call — can only
+   *  stall THIS cell. Every other cell, every other client, and the socket loop
+   *  keep running. State stays authoritative here: the worker owns the slice and
+   *  streams its Immer patches back, so persistence, broadcast and time-travel
+   *  are unchanged.
+   *
+   *  The price: a postMessage + structured clone per dispatch (noise next to
+   *  heavy work, ~10× a direct call for a trivial one), module singletons are
+   *  per-worker, and args/returns must be structured-cloneable. Flag the cell
+   *  that does dangerous work — never a counter.
+   *  See docs/state/cell-workers.md. */
+  worker?: boolean;
   /** Transactional async methods (risoto #2): reads see a STABLE snapshot taken
    *  at method entry (an `await` never changes them), and writes commit
    *  ATOMICALLY at return — one batch, all-or-nothing (a throw/cancel discards).

@@ -50,6 +50,7 @@ export function createLoopProbe(thresholds: VitalThresholds): LoopProbeAPI {
   let lastReduceAction = "";
   let lastReduceCell = "";
   let p95ReduceTime = 0;
+  let p95Dirty = false; // window changed since p95ReduceTime was computed
   let circuitBreakers: string[] = [];
   let firstDegradedAt: number | null = null;
 
@@ -91,13 +92,15 @@ export function createLoopProbe(thresholds: VitalThresholds): LoopProbeAPI {
     lastReduceAction = timing.actionType;
     lastReduceCell = extractCell(timing.actionType);
 
-    // Update p95 sliding window
+    // Update the p95 sliding window. The percentile itself is computed when
+    // it's READ (once a second, by whoever polls vitals) — not here. This runs
+    // on EVERY dispatch, and a copy+sort of the window per action made the
+    // measurement a tax on the thing it measures.
     reduceTimes.push(timing.reduce);
     if (reduceTimes.length > P95_WINDOW) {
       reduceTimes = reduceTimes.slice(-P95_WINDOW);
     }
-    const sorted = [...reduceTimes].sort((a, b) => a - b);
-    p95ReduceTime = computeP95(sorted);
+    p95Dirty = true;
 
     // Track action timestamp for drain rate
     actionTimestamps.push(Date.now());
@@ -126,6 +129,15 @@ export function createLoopProbe(thresholds: VitalThresholds): LoopProbeAPI {
     circuitBreakers = names;
   }
 
+  /** The percentile, computed on demand and memoized until the window moves. */
+  function p95(): number {
+    if (p95Dirty) {
+      p95ReduceTime = computeP95([...reduceTimes].sort((a, b) => a - b));
+      p95Dirty = false;
+    }
+    return p95ReduceTime;
+  }
+
   function getVitals(): LoopVitals {
     return {
       queueDepth,
@@ -133,7 +145,7 @@ export function createLoopProbe(thresholds: VitalThresholds): LoopProbeAPI {
       lastReduceTime,
       lastReduceAction,
       lastReduceCell,
-      p95ReduceTime,
+      p95ReduceTime: p95(),
       effectBacklog,
       circuitBreakers: [...circuitBreakers],
     };
@@ -156,6 +168,7 @@ export function createLoopProbe(thresholds: VitalThresholds): LoopProbeAPI {
     lastReduceAction = "";
     lastReduceCell = "";
     p95ReduceTime = 0;
+    p95Dirty = false;
     circuitBreakers = [];
     firstDegradedAt = null;
   }

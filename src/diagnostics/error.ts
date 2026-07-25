@@ -402,19 +402,23 @@ function generateTip(err: AioError): string | undefined {
         err.context.duration?.toFixed(0) ?? "?"
       }ms (budget: ${
         err.context.budget ?? 100
-      }ms). Move heavy computation to an async effect.`;
+      }ms) — every client's actions waited that long. If it's I/O, make the ` +
+        `method async so it suspends at the await; if it's COMPUTE, an await ` +
+        `doesn't help (the isolate is still blocked) — move it off-thread with ` +
+        `schedule.blocking("id", fn, arg). See docs/debugging/performance.md.`;
     case "BUDGET_EFFECT":
       return `Tip: Sync effect took ${
         err.context.duration?.toFixed(0) ?? "?"
       }ms (budget: ${
         err.context.budget ?? 5
-      }ms). Return immediately and do work asynchronously.`;
+      }ms). Return immediately: kick off async I/O, or hand CPU work to ` +
+        `schedule.blocking("id", fn, arg).`;
     case "PERSIST_ERROR":
       return "Tip: State persist failed — changes are in memory but will be lost on restart. Check disk space and file permissions.";
     case "PERSIST_SCHEMA":
       return "Tip: Stored state and framework persistence-schema versions are incompatible. Upgrade aio (older store) or restore a backup (newer store); as a last resort clear the app's KV store.";
     case "UI_FREEZE":
-      return "Tip: The UI thread stalled — look for synchronous heavy work in render paths or event handlers. Move computation into an async effect or split it with useRaf/setTimeout batches.";
+      return "Tip: The UI thread stalled — look for synchronous heavy work in render paths or event handlers. Compute-bound work belongs off-thread (schedule.blocking on the server, a Worker in the browser); splitting it across frames only hides it.";
     case "TRANSPORT_STALL":
       return "Tip: The WebSocket made no progress under backpressure — the client can't keep up with broadcast volume. Reduce update frequency (debounce state writes), narrow `ui` filters so less state syncs, or check for a saturated network link.";
     case "LOOP_SATURATED":

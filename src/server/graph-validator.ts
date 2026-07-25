@@ -271,6 +271,17 @@ const MAX_FILE_SIZE = 1_000_000; // 1MB — skip likely vendor bundles
 
 /** Validate the full import graph starting from entrypoint.
  *  Returns errors with actionable fix instructions for every broken module. */
+/** Categories that BLOCK the app (a guaranteed blank screen), as opposed to
+ *  standing warnings. The diagnostic page reads this too, so "N module errors —
+ *  fix to continue" can never count warnings the developer is expected to live
+ *  with (risoto 2026-07-26: one real fatal buried under 29 old warnings). */
+export const BLOCKING_CATEGORIES: ReadonlySet<ErrorCategory> = new Set([
+  "file-not-found",
+  "transpile-error",
+  "missing-import-map",
+  "server-only-import",
+]);
+
 export async function validateGraph(
   entrypoint: string,
   importMap: Record<string, string>,
@@ -481,12 +492,7 @@ export async function validateGraph(
   // server-only cells). `deno task compile` fails the same imports, so dev==prod.
   // `server-only-api` (conditional `Deno.*` usage, browser-maybe-safe `@std/*`)
   // and circular imports stay warnings.
-  const BLOCKING: Set<ErrorCategory> = new Set([
-    "file-not-found",
-    "transpile-error",
-    "missing-import-map",
-    "server-only-import",
-  ]);
+  const BLOCKING = BLOCKING_CATEGORIES;
   // @std/* and node:* missing-map + deferred server-only imports were already
   // downgraded to warnings above, so this is the single source of truth.
   const blockingErrors = errors.filter((e) => BLOCKING.has(e.category));

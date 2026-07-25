@@ -41,7 +41,7 @@ to issue a fresh one. (For headless/scripted setups, `am profile` exports a
 
 ```
 [12:00:00][INFO] tls: self-signed cert at .aio-tls/tls-cert.pem
-[12:00:00][WARNING] tls: self-signed — remote browsers will show a security warning. Trust the cert, or use --cert=/path.pem --key=/path.pem for a CA-signed cert
+[12:00:00][WARNING] tls: self-signed — remote browsers will show a security warning. Trust the cert, or use --tls-cert=/path.pem --tls-key=/path.pem for a CA-signed cert
 [12:00:00][INFO] running at https://0.0.0.0:8000 (dev, browser)
 [12:00:00][INFO] share: https://0.0.0.0:8000?token=a1b2c3d4-...
 [12:00:00][INFO] pair code: 048583  (enter it in the aio client → Add app)
@@ -60,7 +60,7 @@ via `?token=` query parameter or `Authorization: Bearer` header.
 **Bring your own cert (CA-signed, no browser warning):**
 
 ```sh
-deno task dev --expose --cert=/etc/ssl/myapp.pem --key=/etc/ssl/myapp.key
+deno task dev --expose --tls-cert=/etc/ssl/myapp.pem --tls-key=/etc/ssl/myapp.key
 ```
 
 **Security notes:**

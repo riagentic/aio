@@ -2,6 +2,7 @@
 // Extracted from aio.ts _run() to keep the orchestrator lean.
 
 import { enc } from "../protocol/envelope.ts";
+import { restartForCellChange } from "./dev-restart.ts";
 import { join } from "@std/path";
 import { loadOrCreateCert, type TlsCert } from "./tls.ts";
 import { createServer } from "./server.ts";
@@ -9,6 +10,7 @@ import { VERSION } from "./aio-cli.ts";
 import type { ServerHandle } from "./server-types.ts";
 import { registerCall } from "../state/cell-impl.ts";
 import { createUDSListener, type UDSHandle } from "./uds.ts";
+import { flushAllUrgent } from "./broadcast-coalescer.ts";
 import type {
   CellPatchStrategy,
   PatchFilterFields,
@@ -191,7 +193,7 @@ export async function setupTransport<S, A>(
       if (tlsCert.selfSigned) {
         log.info(`tls: self-signed cert at ${tlsCert.certPath}`);
         log.warn(
-          `tls: self-signed — remote browsers will show a security warning. Trust the cert, or use --cert=/path.pem --key=/path.pem for a CA-signed cert`,
+          `tls: self-signed — remote browsers will show a security warning. Trust the cert, or use --tls-cert=/path.pem --tls-key=/path.pem for a CA-signed cert`,
         );
       } else {
         log.info(`tls: using cert ${tlsCert.certPath}`);
@@ -288,12 +290,28 @@ export async function setupTransport<S, A>(
     // resolves with their value (or undefined), so return it directly.
     const callId = (tagged as { payload?: { _callId?: string } }).payload
       ?._callId;
+    // Interactive priority: a client action's patches flush IMMEDIATELY
+    // (after the sync commit, and again when an async method settles) —
+    // the coalescer throttle paces background churn, and made every user
+    // keystroke pay up to syncIntervalMs of latency (risoto 2026-07-25:
+    // navigation measured a constant ~66ms; ~50ms of it was this window).
     if (typeof callId === "string" && callId.length > 0) {
       const done = registerCall(callId);
       void Promise.resolve(dispatch(tagged as A)).catch(() => {});
+      queueMicrotask(flushAllUrgent);
+      void done.then(
+        () => flushAllUrgent(),
+        () => flushAllUrgent(),
+      );
       return done;
     }
-    return dispatch(tagged as A);
+    const result = dispatch(tagged as A);
+    queueMicrotask(flushAllUrgent);
+    void Promise.resolve(result).then(
+      () => flushAllUrgent(),
+      () => flushAllUrgent(),
+    );
+    return result;
   };
 
   const server: ServerHandle = skipHttp
@@ -350,6 +368,15 @@ export async function setupTransport<S, A>(
       onReload: (signal) => {
         if (udsRef.current) udsRef.current.broadcast(enc(signal));
       },
+      // Cells run in THIS process, so an edited cell can't hot-reload — dev
+      // restarts the app instead of asking the developer to (quant Bad #3).
+      // Never in prod (no watcher) and never in libraryMode, where the host
+      // process is not ours to replace.
+      ...(prod || config.libraryMode ? {} : {
+        onCellChange: (path: string) => {
+          void restartForCellChange(path, shutdown);
+        },
+      }),
       getHealth: () => {
         const composed = (globalThis as Record<string, unknown>)
           .__aioCells as ComposedCells | undefined;

@@ -4,7 +4,7 @@ import type { CellInfo, Checker } from "./types.ts";
 import { join } from "@std/path";
 import * as fix from "./fixes.ts";
 import { RESERVED_KEYS } from "../src/state/cell-types.ts";
-import { codeText } from "./scan.ts";
+import { codeMatches, codeText } from "./scan.ts";
 
 // ══════════════════════════════════════════════════════════════════════
 // 1. PROJECT CONFIG (deno.json)
@@ -497,13 +497,17 @@ export const checkPerformance: Checker = (ctx) => {
   for (const file of sourceFiles) {
     if (file.name.endsWith(".test.ts")) continue;
     for (const api of syncApis) {
-      if (file.content.includes(api)) {
+      // Code only — the API named in a comment or a string isn't a call.
+      if (codeText(file.content).includes(api)) {
         // Find line number
         const lineIdx = file.lines.findIndex((l) => l.includes(api));
         report(
           "warn",
           "perf",
-          `${file.relative}: sync I/O (${api}) blocks the event loop — use async version`,
+          `${file.relative}: sync I/O (${api}) blocks the event loop — every ` +
+            `client's next action waits behind it. Use the async version; if ` +
+            `the work is CPU-bound or a sync-only API, move it off-thread with ` +
+            `schedule.blocking("id", fn, arg)`,
           { file: file.relative, line: lineIdx + 1 },
         );
       }
@@ -1578,8 +1582,62 @@ function importHeader(content: string): string {
   return out.join("\n");
 }
 
+/** Every public `aio/*` entry point an app may import. A specifier missing from
+ *  the app's import map is unresolvable — and the error ("not a dependency and
+ *  not in import map") never says the mapping is simply absent, so the app
+ *  author reads it as "that entry doesn't exist". */
+const AIO_ENTRIES: Record<string, string> = {
+  "aio/air": "src/air.ts",
+  "aio/air/compat": "src/air-compat.ts",
+  "aio/ui": "src/ui/mod.ts",
+  "aio/jsx-runtime": "src/jsx-runtime.ts",
+  "aio/server": "src/server-entry.ts",
+  "aio/db": "src/db/mod.ts",
+  "aio/sync": "src/sync/mod.ts",
+  "aio/schedule": "src/schedule.ts",
+  "aio/selectors": "src/selector.ts",
+  "aio/extras": "src/extras/mod.ts",
+  "aio/state-core": "src/state-core.ts",
+  "aio/testing": "src/cell-test.ts",
+};
+
 export const checkImports: Checker = (ctx) => {
-  const { sourceFiles, report } = ctx;
+  const { sourceFiles, denoJson, report } = ctx;
+
+  // An `aio/x` import with no mapping in deno.json — the app followed the docs
+  // and the specifier simply doesn't resolve.
+  const map = denoJson?.imports ?? {};
+  const base = map["aio"];
+  const missing = new Map<string, { file: string; line: number }>();
+  for (const file of sourceFiles) {
+    for (
+      const m of codeMatches(file.content, /from\s*['"](aio\/[\w./-]+)['"]/g)
+    ) {
+      const spec = m[1]!;
+      if (map[spec] || !AIO_ENTRIES[spec] || missing.has(spec)) continue;
+      missing.set(spec, {
+        file: file.relative,
+        line: file.content.slice(0, m.index).split("\n").length,
+      });
+    }
+  }
+  for (const [spec, where] of missing) {
+    report(
+      "error",
+      "imports",
+      `${where.file}:${where.line} — "${spec}" is imported but not mapped in ` +
+        `deno.json, so it cannot resolve. Add it to "imports".`,
+      {
+        file: where.file,
+        line: where.line,
+        fix: `"${spec}": "<same base as \"aio\">/${AIO_ENTRIES[spec]}"`,
+        ...(base
+          ? { safeFix: fix.fixAddAioEntry(spec, base, AIO_ENTRIES[spec]!) }
+          : {}),
+      },
+    );
+  }
+
   for (const file of sourceFiles) {
     const code = importHeader(file.content);
     const seen = new Map<string, number>(); // binding → first line it appeared
@@ -1612,51 +1670,125 @@ export const checkImports: Checker = (ctx) => {
 };
 
 // ══════════════════════════════════════════════════════════════════════
-// 15. CELL-DEPENDENT INLINE STYLE FREEZE (risoto #1 — the style={{}} case)
+// 16. UPGRADE — deprecated aliases still in use
 // ══════════════════════════════════════════════════════════════════════
+//
+// aio never removes a renamed option inside a major (semver-policy.md), so
+// nothing here is broken — but every one of these is a mechanical rewrite, and
+// an app carrying old spellings drifts further from the docs with each release.
+// `am fix` deliberately points code-level upgrades here; `--safe-fix` applies
+// them.
 
-function escapeRe(s: string): string {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
+export const checkUpgrade: Checker = (ctx) => {
+  const { denoJson, tsFiles, tsxFiles, appEntry, report, pass } = ctx;
+  let found = 0;
 
-/** An inline `style={{…}}` object is evaluated ONCE at mount — unlike `class=`,
- *  which re-renders — so a style object that reads cell state FREEZES at its
- *  mount value (risoto #1: "cell-dependent inline style freezing at mount while
- *  class= stays reactive"). One of the five boundary bug classes, now
- *  machine-checked: flag a `style={{…}}` whose body reads a known cell. */
-export const checkInlineStyle: Checker = (ctx) => {
-  const { tsxFiles, cells, report } = ctx;
-  const names = cells.map((c) => c.name).filter((n) => /^[A-Za-z_$]/.test(n));
-  if (names.length === 0) return;
-  const cellRef = new RegExp(`\\b(?:${names.map(escapeRe).join("|")})\\s*\\.`);
-  for (const file of tsxFiles) {
-    if (file.name.endsWith(".test.tsx")) continue;
-    const code = file.content
-      .replace(/\/\*[\s\S]*?\*\//g, "")
-      .replace(/\/\/.*$/gm, "");
-    for (const m of code.matchAll(/style\s*=\s*\{\{/g)) {
-      // Brace-match the OBJECT literal (the inner `{`, last char of the match).
-      const start = m.index! + m[0].length - 1;
-      let depth = 0, end = start;
-      for (let i = start; i < code.length; i++) {
-        if (code[i] === "{") depth++;
-        else if (code[i] === "}" && --depth === 0) {
-          end = i;
-          break;
-        }
-      }
-      if (cellRef.test(code.slice(start, end + 1))) {
-        const line = code.slice(0, m.index).split("\n").length;
-        report(
-          "warn",
-          "boundary",
-          `${file.relative}:${line} — cell-dependent inline style={{…}} freezes ` +
-            `at mount (the object is evaluated once, unlike class= which ` +
-            `re-renders). Bind a class instead, or move the value into a JSX ` +
-            `expression that re-renders.`,
-          { file: file.relative, line },
-        );
-      }
+  // call({ timeout }) → call({ timeoutMs }) — the alias still works.
+  for (const file of [...tsFiles, ...tsxFiles]) {
+    // Code only: `timeout:` in a comment or a string is not a call option.
+    const code = codeText(file.content);
+    const m = /\bcall\s*\(\s*\{[^}]*\btimeout\s*:/.exec(code);
+    if (!m) continue;
+    found++;
+    report(
+      "warn",
+      "upgrade",
+      `${file.relative}: \`call({ timeout })\` is a deprecated alias — use \`timeoutMs\``,
+      {
+        file: file.relative,
+        line: code.slice(0, m.index).split("\n").length,
+        fix: "call({ timeoutMs: 5000 }, () => other.method())",
+        safeFix: fix.fixCallTimeoutMs(file.path),
+      },
+    );
+  }
+
+  // deno.json tasks: renamed TLS flags, and a build-only flag on a run task.
+  const entry = appEntry?.relative ?? null;
+  for (const [name, cmd] of Object.entries(denoJson?.tasks ?? {})) {
+    if (typeof cmd !== "string") continue;
+    if (/(?<![\w-])--(cert|key)=/.test(cmd)) {
+      found++;
+      report(
+        "warn",
+        "upgrade",
+        `deno.json task "${name}": \`--cert\`/\`--key\` were renamed to ` +
+          `\`--tls-cert\`/\`--tls-key\` (the bare names collided with the auth \`key\` config)`,
+        {
+          file: "deno.json",
+          fix: "--tls-cert=/path/cert.pem --tls-key=/path/key.pem",
+          safeFix: fix.fixTaskFlags(entry),
+        },
+      );
+    }
+    if (
+      entry && cmd.includes(entry) && /(?<![\w-])--headless(?![\w=-])/.test(cmd)
+    ) {
+      found++;
+      report(
+        "warn",
+        "upgrade",
+        `deno.json task "${name}": \`--headless\` is a BUILD flag — at runtime it ` +
+          `is ignored (with a warning) and the app still starts a client. Use ` +
+          `\`--client=server-only\``,
+        {
+          file: "deno.json",
+          fix: "--client=server-only",
+          safeFix: fix.fixTaskFlags(entry),
+        },
+      );
+    }
+  }
+
+  if (found === 0) pass("no deprecated aio spellings in use");
+};
+
+// ══════════════════════════════════════════════════════════════════════
+// 17. CALLER-SIDE POST-AWAIT READS (risoto 2026-07-26)
+// ══════════════════════════════════════════════════════════════════════
+//
+// `await cart.checkout(); const id = cart.orderId;` reads the LOCAL replica
+// right after the call resolved. On the server that read is fine; from a
+// browser client the patch may not have landed yet, so it returns the previous
+// value — the class of bug that gets "fixed" with a setTimeout. The method's
+// return value is the answer: it crosses the bridge (alpha34), so use it.
+
+export const checkPostAwaitRead: Checker = (ctx) => {
+  const { tsFiles, tsxFiles, cells, report } = ctx;
+  const cellNames = new Set(cells.map((c) => c.name));
+  if (cellNames.size === 0) return;
+  // `await <cell>.<method>(` … then `<cell>.<field>` within a few lines.
+  const callRe = /\bawait\s+(\w+)\s*\.\s*(\w+)\s*\(/g;
+  for (const file of [...tsFiles, ...tsxFiles]) {
+    if (file.name.endsWith(".test.ts") || file.name.endsWith(".test.tsx")) {
+      continue;
+    }
+    const code = codeText(file.content);
+    for (const m of code.matchAll(callRe)) {
+      const cellVar = m[1]!;
+      if (!cellNames.has(cellVar)) continue;
+      const line = code.slice(0, m.index).split("\n").length;
+      // Look at the next few lines only — same logical step.
+      const after = code.split("\n").slice(line, line + 4).join("\n");
+      const read = new RegExp(`\\b${cellVar}\\s*\\.\\s*(\\w+)(?!\\s*\\()`).exec(
+        after,
+      );
+      if (!read) continue;
+      report(
+        "hint",
+        "patterns",
+        `${file.relative}:${line} — reads \`${cellVar}.${
+          read[1]
+        }\` right after ` +
+          `\`await ${cellVar}.${
+            m[2]
+          }()\`. On a browser client the patch may not ` +
+          `have arrived yet, so this can read the PREVIOUS value. Use the ` +
+          `method's return value (it crosses the bridge), or re-read after the ` +
+          `next render.`,
+        { file: file.relative, line },
+      );
+      break; // one hint per file — the pattern repeats
     }
   }
 };
@@ -1676,5 +1808,6 @@ export const ALL_CHECKS: Checker[] = [
   checkScheduling,
   checkMemoUsage,
   checkImports,
-  checkInlineStyle,
+  checkUpgrade,
+  checkPostAwaitRead,
 ];

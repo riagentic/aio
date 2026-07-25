@@ -111,9 +111,12 @@ export async function lint(
       if (!entry.isFile) continue;
       if (!entry.name.endsWith(".ts") && !entry.name.endsWith(".tsx")) continue;
       const content = await Deno.readTextFile(join(baseDir, entry.name));
+      // Anchored to a real import/export STATEMENT: a file that merely mentions
+      // the legacy path in a string (a lint rule, a test fixture) is not
+      // importing from it. Same "a mention is not a use" rule aiol follows.
       if (
-        content.includes("from '../dep/aio/") ||
-        content.includes('from "../dep/aio/')
+        /(?:^|\n)\s*(?:import|export)\b[^\n]*from\s*['"]\.\.\/dep\/aio\//
+          .test(content)
       ) {
         r.hint.push(
           `${entry.name}: import from 'aio' instead of '../dep/aio/...'`,

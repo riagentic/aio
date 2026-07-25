@@ -104,6 +104,26 @@ A 160-element array with 10 changes per tick: **120KB → ~7.5KB** per broadcast
 **Non-identity arrays** use `_preserveArrayRefs`: same length + shallow-equal
 elements → old reference kept.
 
+## Append in place, don't replace
+
+Immer patches describe _what changed_. Mutating an array in place produces one
+`add` patch; replacing the binding produces a `replace` patch carrying the whole
+array — which then goes over the wire, into persistence, and through every
+client's diff, on every commit.
+
+```ts
+// ⚠️ re-ships the ENTIRE array every time it grows
+s.candidates = [...s.candidates, ...batch];
+
+// ✅ one `add` patch per element — the wire carries only the new items
+for (const c of batch) s.candidates.push(c);
+```
+
+The same holds for objects (`s.map[id] = v` beats
+`s.map = { ...s.map, [id]: v }`) and for removals (`splice` beats `filter` into
+a new array). A growing list built by replacement is the usual cause of a
+`PRESSURE` vitals warning on an otherwise small cell.
+
 ## Broadcast throttling
 
 ```
@@ -117,6 +137,15 @@ dispatch(C) ─┘
 1. **Microtask coalescing**: synchronous dispatches → one broadcast
 2. **Throttle window**: next broadcast delayed by `syncIntervalMs`
 3. **Leading edge**: first broadcast fires immediately
+4. **Interactive priority**: a broadcast caused by a **client action** skips the
+   window entirely — it flushes immediately and reopens the leading edge
+
+Point 4 is what keeps typing and navigation feeling instant. The throttle exists
+to pace _background_ churn (a poll loop, a schedule, a sync replay); without the
+exception, every keystroke paid up to `syncIntervalMs` of latency before its own
+patch came back — measured as a constant ~66ms per navigation key at the 50ms
+default. Server-origin churn still coalesces exactly as before, so this costs no
+extra broadcasts: it moves the ones a user is waiting on to the front.
 
 ```ts
 await aio.run({ syncIntervalMs: 50 }); // default: max 20 broadcasts/sec
@@ -128,6 +157,9 @@ await aio.run({ syncIntervalMs: 50 }); // default: max 20 broadcasts/sec
 | `16`  | ~60/sec (60fps) | Gaming          |
 | `50`  | Default         | Most apps       |
 | `500` | ~2/sec          | Slow dashboards |
+
+Raising `syncIntervalMs` therefore throttles background updates without dulling
+the app: a user's own action is never delayed by it.
 
 ## Backpressure
 

@@ -122,6 +122,12 @@ export async function rotateClientLog(
 }
 
 /** Cleanup resources on shutdown — clears rate timer and tracking map. */
+/** Test hook: how many per-client rate slots are live right now. A long-running
+ *  server must not accumulate one per connection ever made. */
+export function _rateSlotCount(): number {
+  return _rate.size;
+}
+
 export function disposeClientLog(): void {
   if (_resetTimer !== null) {
     clearTimeout(_resetTimer);
@@ -149,9 +155,10 @@ function _ensureResetTimer(): void {
   if (_resetTimer !== null) return;
   _resetTimer = setTimeout(() => {
     _resetTimer = null;
-    for (const slot of _rate.values()) {
-      slot.count = 0;
-      slot.warned = false;
-    }
+    // Clear, don't walk-and-reset: an absent slot is identical to a zeroed one,
+    // and the map is keyed by a monotonic client index — every browser reload
+    // adds one. Resetting in place kept every client that ever connected alive
+    // for the process's lifetime AND made this timer's work grow with uptime.
+    _rate.clear();
   }, 1000);
 }

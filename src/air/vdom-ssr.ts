@@ -111,7 +111,13 @@ export function renderToString(
     for (const [k, rawV] of Object.entries(vnode.props)) {
       if (
         k === "key" || k === "children" || k === "ref" ||
-        k === "dangerouslySetInnerHTML" || k === "use"
+        k === "dangerouslySetInnerHTML" || k === "use" ||
+        // `t` is the SEMANTIC marker (testUI / `am surface` read it from the
+        // component tree, never from the DOM). The client renderer already
+        // skips it; SSR used to emit it, so server HTML and the live DOM
+        // disagreed — and every DOM-probing tool that looked for it found
+        // nothing once hydration replaced the markup (risoto 2026-07-26).
+        k === "t"
       ) continue;
       if (k.startsWith("on")) continue; // Skip event handlers in SSR
       // AIO-109: resolve signals to current value for SSR
