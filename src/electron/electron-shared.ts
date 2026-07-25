@@ -3,7 +3,13 @@
 export type Log = { info: (msg: string) => void; error: (msg: string) => void };
 
 /** Window metadata extracted from config or HTML meta tags */
-export type AioMeta = { title?: string; width?: number; height?: number };
+export type AioMeta = {
+  title?: string;
+  width?: number;
+  height?: number;
+  /** Allow openWindow child windows (off by default — see AioRunOptions). */
+  childWindows?: boolean;
+};
 
 /** Slugifies a title for use as Electron app name (stable userData path) */
 export function toSlug(s: string): string {
@@ -312,6 +318,13 @@ contextBridge.exposeInMainWorld('__aioIPC', {
   // mdview #7: open an http/https link in the system browser. The main process
   // enforces the allowlist — a renderer can't reach arbitrary shell targets.
   openExternal: (url) => ipcRenderer.send('__aio:openExternal', url),
+  // Child window: open an http/https page in a CHILD BrowserWindow whose
+  // preload (a file the app ships inside its own directory) can inject a
+  // provider — e.g. a wallet provider speaking to the app's local bridge.
+  // Gated by aio.run({ childWindows: true }); the main process validates the
+  // URL and the preload path. opts: { preload, sandbox } — sandbox stays ON
+  // unless the app EXPLICITLY passes sandbox: false (logged).
+  openWindow: (url, opts) => ipcRenderer.send('__aio:openWindow', { url, ...(opts || {}) }),
 });
 // AIO-54: Relay intercepted <a> navigations back to renderer as CustomEvent
 ipcRenderer.on('__aio:navigate', (_e, url) => {

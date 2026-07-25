@@ -28,6 +28,8 @@
 - [Lifecycle — Init, Destroy, Runtime](state/lifecycle.md) — How cells boot, shut down, and how to intercept actions globally.
 - [Methods — Sync, Async, and Selectors](state/methods.md) — The one way to build aio cells.
 - [Scheduling](state/scheduling.md) — aio has a built-in scheduler for timers, intervals, daily triggers, and cron
+- [The bridge — what crosses, what doesn't, what freezes](state/the-bridge.md) — A shared cell's methods run on the server; the browser holds a live,
+- [Spec: Transactional cell methods (risoto #2)](state/transactional-methods.md) — Status: DRAFT / design · Owner: framework · Target: opt-in
 
 ## UI — AIR renderer — components, signals, routing, forms
 
@@ -124,6 +126,7 @@
 - [Upgrade: 1.0.0-alpha30 → 1.0.0-alpha31](upgrade/from-alpha30-to-alpha31.md) — A sanity & cleanup release — no new features.
 - [Upgrade: 1.0.0-alpha31 → 1.0.0-alpha32](upgrade/from-alpha31-to-alpha32.md) — A feature release — the headline is aui, a visual app manager (new example),
 - [Upgrade: 1.0.0-alpha32 → 1.0.0-alpha33](upgrade/from-alpha32-to-alpha33.md) — A feature + hardening release.
+- [Upgrade: 1.0.0-alpha33 → 1.0.0-alpha34](upgrade/from-alpha33-to-alpha34.md) — The dream-list release — a large batch of new capabilities, all opt-in or purely
 - [Upgrade from v1.0.0-alpha4 to v1.0.0-alpha5](upgrade/from-alpha4-to-alpha5.md) — None.
 - [Upgrade from v1.0.0-alpha5 to v1.0.0-alpha6](upgrade/from-alpha5-to-alpha6.md) — None.
 - [Upgrade from v1.0.0-alpha6 to v1.0.0-alpha7](upgrade/from-alpha6-to-alpha7.md) — mod.ts no longer re-exports renderer primitives.

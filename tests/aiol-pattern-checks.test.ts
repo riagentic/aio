@@ -63,6 +63,30 @@ export const counter = cell('counter', {
   });
 });
 
+Deno.test("aiol: a transaction:true cell suppresses the read-after-await hint (risoto #2)", async () => {
+  await withTmpDir(async (dir) => {
+    await project(
+      dir,
+      `
+import { cell } from 'aio'
+export const counter = cell('counter', {
+  transaction: true,
+  state: { count: 0, status: 'idle' },
+  methods: {
+    async load(s) {
+      const data = await fetch('/x')
+      if (s.status === 'cancelled') return
+      s.count = s.count + 1
+    },
+  },
+})
+`,
+    );
+    // Reads see a stable snapshot across the await — the hint would be wrong.
+    assertEquals(awaitReadIssues(await runCheckPatterns(dir)).length, 0);
+  });
+});
+
 Deno.test("aiol: no hint when async method only writes after await", async () => {
   await withTmpDir(async (dir) => {
     await project(

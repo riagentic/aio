@@ -17,6 +17,7 @@ import {
   type SfnPayload,
   unsupportedOnUds,
 } from "../protocol/envelope.ts";
+import { serializeReturn } from "../protocol/return-value.ts";
 import { VERSION } from "./aio-cli.ts";
 import {
   negotiateProtocol,
@@ -47,7 +48,9 @@ export type UDSHandle = {
 export function createUDSListener(
   socketPath: string,
   getUIState: () => unknown,
-  onAction: (action: { type: string; payload?: unknown }) => void,
+  onAction: (
+    action: { type: string; payload?: unknown },
+  ) => Promise<unknown> | void,
   debug: (msg: string) => void,
   clientCounter?: { value: number },
   syncHandler?: ServerSyncHandler | null,
@@ -278,7 +281,9 @@ function _handleUDSConn(
     string,
     { resolve: (v: unknown) => void; timer: ReturnType<typeof setTimeout> }
   >,
-  onAction: (action: { type: string; payload?: unknown }) => void,
+  onAction: (
+    action: { type: string; payload?: unknown },
+  ) => Promise<unknown> | void,
   debug: (msg: string) => void,
   getUIState: () => unknown,
   sendTo: (conn: Deno.Conn, msg: string, onSent?: () => void) => void,
@@ -555,18 +560,41 @@ function _handleUDSConn(
               if (_pl && typeof _pl === "object") {
                 delete (_pl as Record<string, unknown>)._origin;
               }
-              onAction(action);
-              // AIO-402: per-action ack — parity with the WS server. Settles
-              // the Promise of an awaited method call over UDS+IPC.
-              // queueMicrotask so the ack follows any broadcast the dispatch
-              // triggered.
+              const result = onAction(action);
+              // AIO-402 + return-value transport: per-action ack — parity with
+              // the WS server. Settles the Promise of an awaited method call
+              // over UDS+IPC, carrying the method's RETURN value. We wait for
+              // the dispatch promise (async → completion; sync/void → next
+              // microtask, after any broadcast the dispatch triggered).
               if (typeof action.cid === "string" && action.cid.length > 0) {
                 const cid = action.cid;
-                queueMicrotask(() => {
-                  try {
-                    sendTo(conn, enc("ack", { cid, ok: true }));
-                  } catch { /* client gone */ }
-                });
+                const actionType = typeof action.type === "string"
+                  ? action.type
+                  : "?";
+                Promise.resolve(result).then(
+                  (value) => {
+                    const { value: safe, dropped } = serializeReturn(value);
+                    if (dropped) {
+                      log.warn(
+                        "uds",
+                        `method "${actionType}" returned a non-serializable ` +
+                          `value — caller resolves with undefined. Return ` +
+                          `JSON-safe data to transport a value.`,
+                      );
+                    }
+                    try {
+                      sendTo(conn, enc("ack", { cid, ok: true, value: safe }));
+                    } catch { /* client gone */ }
+                  },
+                  (err) => {
+                    try {
+                      sendTo(
+                        conn,
+                        enc("ack", { cid, ok: false, error: String(err) }),
+                      );
+                    } catch { /* client gone */ }
+                  },
+                );
               }
               continue;
             }

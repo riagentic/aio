@@ -143,6 +143,31 @@ Deno.test("visibility: ui.publicFields explicitly silences the heuristic", () =>
   assertEquals(w.filter((l) => l.includes("looks secret")).length, 0);
 });
 
+Deno.test("visibility (risoto Ugly #7): all offending fields in ONE paste-ready message", () => {
+  // We used to throw on the FIRST credential field, forcing a fix-one-rerun loop
+  // (risoto listed six publicFields one crash at a time). Now one boot names them
+  // all, with a single paste-ready ui.publicFields array.
+  const c = cell("multicred", {
+    state: { privateKey: "a", mnemonic: "b", apiKey: "c", ok: 1 },
+    methods: { noop(_s: Record<string, unknown>) {} },
+  });
+  const err = assertThrows(
+    () => composeCellsWiring({ cellEntries: [c] as never }),
+    Error,
+  );
+  // Every offending field named, in one message, as a paste-ready array.
+  for (const f of ["privateKey", "mnemonic", "apiKey"]) {
+    assert(err.message.includes(f), `expected ${f} in the message`);
+  }
+  assert(
+    /publicFields:\s*\["privateKey",\s*"mnemonic",\s*"apiKey"\]/.test(
+      err.message,
+    ),
+    `expected a single paste-ready array of all fields; got: ${err.message}`,
+  );
+  assert(!err.message.includes("ok"), "non-secret field must not be listed");
+});
+
 Deno.test("visibility #2: a secret-looking exposed field warns", () => {
   const c = cell("wallet3", {
     state: { encSecKey: "cipher", pub: "y" },

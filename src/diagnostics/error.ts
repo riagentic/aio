@@ -254,6 +254,28 @@ export class AioError extends Error {
   }
 }
 
+// ─── Teachable errors (risoto #9) ────────────────────────────────────────────
+
+/** A framework error that TEACHES: what happened, the one-line fix, and
+ *  (optionally) a doc link — the shape the credential refusal proved out,
+ *  generalized so every boot/compose/config error follows one format:
+ *
+ *      [aio] <what>
+ *        → fix: <fix>
+ *        → docs: <doc>
+ *
+ *  Use for developer-facing framework errors (not user-facing app errors). */
+export function teachMessage(what: string, fix: string, doc?: string): string {
+  const lines = [`[aio] ${what}`, `  → fix: ${fix}`];
+  if (doc) lines.push(`  → docs: ${doc}`);
+  return lines.join("\n");
+}
+
+/** {@link teachMessage} as a throwable Error. */
+export function teachableError(what: string, fix: string, doc?: string): Error {
+  return new Error(teachMessage(what, fix, doc));
+}
+
 // ─── Factory ─────────────────────────────────────────────────────────────────
 
 export function createAioError(

@@ -872,7 +872,10 @@ export const checkUI: Checker = (ctx) => {
   }
 
   // Server-only imports in cell definition files (shared with browser)
-  const SERVER_ONLY_PREFIXES = ["@std/", "node:"];
+  // "aio/server" is the explicit server-only entry (risoto #1): the whole module
+  // is server-only, so a STATIC import into a cell-shared file is the boundary
+  // violation — flag it like @std/ / node:.
+  const SERVER_ONLY_PREFIXES = ["@std/", "node:", "aio/server"];
   // AIO-424 (risoto): server-only SYMBOLS that live in the isomorphic "aio"
   // entry — the browser build of "aio" omits them, so a STATIC import into a
   // cell (shared with the browser bundle) link-fails at boot with an anonymous
@@ -932,7 +935,7 @@ export const checkUI: Checker = (ctx) => {
               file: file.relative,
               line: lineIdx,
               fix:
-                `Load it lazily in a server-only path — \`const { ${sym} } = await import("aio")\` behind a server guard — or move it into a *.server.ts module. (Pure schema helpers like table/pk/text are browser-safe.)`,
+                `Load it lazily in a server-only path — \`const { ${sym} } = await import("aio/server")\` behind a server guard — or move it into a *.server.ts module. (Pure schema helpers like table/pk/text are browser-safe.)`,
             },
           );
         }
@@ -1212,7 +1215,13 @@ export const checkPatterns: Checker = (ctx) => {
     // method's own pending writes), so this is a hint, once per method, on the
     // first post-await read. Writes and draft mutations (s.x = …, s.arr.push)
     // are exempt — they always land.
-    if (/\bcell\s*\(\s*['"]/.test(file.content)) {
+    // A `transaction: true` cell (risoto #2) reads a STABLE snapshot across
+    // awaits — the post-await read is intended and safe — so skip the hint for
+    // files that opt in. See docs/state/transactional-methods.md.
+    const isTransactional = /\btransaction\s*:\s*(?:true|\{)/.test(
+      file.content,
+    );
+    if (!isTransactional && /\bcell\s*\(\s*['"]/.test(file.content)) {
       const METHOD_RE =
         /\basync\s+(?!function\b)([A-Za-z_$][\w$]*)\s*\(\s*([A-Za-z_$][\w$]*)\s*[,)]|\b([A-Za-z_$][\w$]*)\s*:\s*async\s*\(\s*([A-Za-z_$][\w$]*)\s*[,)]/g;
       for (const m of file.content.matchAll(METHOD_RE)) {
@@ -1487,6 +1496,164 @@ export const checkMemoUsage: Checker = (ctx) => {
 // ALL CHECKS
 // ══════════════════════════════════════════════════════════════════════
 
+// ══════════════════════════════════════════════════════════════════════
+// 14. DUPLICATE IMPORTS (risoto 2026-07-24)
+// ══════════════════════════════════════════════════════════════════════
+
+/** Local binding names introduced by one import clause (the text between
+ *  `import` and `from`): default, `* as NS`, and `{ named as alias }`. Aliases
+ *  bind the alias; `type` qualifiers are stripped. */
+function importedBindings(clause: string): string[] {
+  const names: string[] = [];
+  // `import type { … }` / `import type Foo` — drop the leading type qualifier so
+  // the bare `type` keyword isn't mistaken for a default binding.
+  const c = clause.trim().replace(/^type\s+/, "");
+  const braced = c.match(/\{([\s\S]*?)\}/);
+  const outside = braced ? c.replace(braced[0], "") : c;
+  for (const part of outside.split(",")) {
+    const s = part.trim().replace(/^type\s+/, "");
+    if (!s || s === "type") continue;
+    const ns = s.match(/^\*\s+as\s+([$\w]+)$/);
+    if (ns) names.push(ns[1]!);
+    else if (/^[$\w]+$/.test(s)) names.push(s); // default binding
+  }
+  if (braced) {
+    for (const spec of braced[1]!.split(",")) {
+      const s = spec.trim().replace(/^type\s+/, "");
+      if (!s) continue;
+      const as = s.match(/\bas\s+([$\w]+)$/);
+      names.push(as ? as[1]! : s);
+    }
+  }
+  return names;
+}
+
+/** The contiguous import header — the run of import statements (and comments)
+ *  at the top of a module, up to the first real code line. Restricting to this
+ *  makes the scan immune to `import … from` text buried in template literals of
+ *  code-GENERATING files (am scaffolds, the bundler entry, testgen). */
+function importHeader(content: string): string {
+  const out: string[] = [];
+  let inBlock = false, openImport = false;
+  const hasSpecifier = (t: string) => /['"][^'"]+['"]\s*;?\s*$/.test(t);
+  for (const raw of content.split("\n")) {
+    let line = raw;
+    if (inBlock) {
+      const e = line.indexOf("*/");
+      if (e === -1) continue;
+      line = line.slice(e + 2);
+      inBlock = false;
+    }
+    line = line.replace(/\/\*[\s\S]*?\*\//g, "");
+    const o = line.indexOf("/*");
+    if (o !== -1) {
+      inBlock = true;
+      line = line.slice(0, o);
+    }
+    line = line.replace(/\/\/.*$/, "");
+    const t = line.trim();
+    if (t === "") {
+      out.push("");
+      continue;
+    }
+    if (openImport) {
+      out.push(line);
+      if (hasSpecifier(t)) openImport = false;
+      continue;
+    }
+    if (/^import\b/.test(t) && !/^import\s*\(/.test(t)) {
+      out.push(line);
+      openImport = !hasSpecifier(t); // multi-line import still open
+      continue;
+    }
+    break; // first real code line → header ends
+  }
+  return out.join("\n");
+}
+
+export const checkImports: Checker = (ctx) => {
+  const { sourceFiles, report } = ctx;
+  for (const file of sourceFiles) {
+    const code = importHeader(file.content);
+    const seen = new Map<string, number>(); // binding → first line it appeared
+    for (
+      const m of code.matchAll(
+        /\bimport\s+([\s\S]*?)\s+from\s*['"][^'"]+['"]/g,
+      )
+    ) {
+      const line = code.slice(0, m.index).split("\n").length;
+      for (const name of importedBindings(m[1]!)) {
+        const first = seen.get(name);
+        if (first === undefined) {
+          seen.set(name, line);
+        } else {
+          // A second binding of the same name is a hard redeclaration —
+          // `deno check` can miss it across separate import statements, but it's
+          // a runtime SyntaxError when the module loads.
+          report(
+            "error",
+            "imports",
+            `${file.relative}:${line} — "${name}" is imported again (first at ` +
+              `line ${first}); duplicate import bindings are a SyntaxError at ` +
+              `module load. Remove or rename one.`,
+            { file: file.relative, line },
+          );
+        }
+      }
+    }
+  }
+};
+
+// ══════════════════════════════════════════════════════════════════════
+// 15. CELL-DEPENDENT INLINE STYLE FREEZE (risoto #1 — the style={{}} case)
+// ══════════════════════════════════════════════════════════════════════
+
+function escapeRe(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/** An inline `style={{…}}` object is evaluated ONCE at mount — unlike `class=`,
+ *  which re-renders — so a style object that reads cell state FREEZES at its
+ *  mount value (risoto #1: "cell-dependent inline style freezing at mount while
+ *  class= stays reactive"). One of the five boundary bug classes, now
+ *  machine-checked: flag a `style={{…}}` whose body reads a known cell. */
+export const checkInlineStyle: Checker = (ctx) => {
+  const { tsxFiles, cells, report } = ctx;
+  const names = cells.map((c) => c.name).filter((n) => /^[A-Za-z_$]/.test(n));
+  if (names.length === 0) return;
+  const cellRef = new RegExp(`\\b(?:${names.map(escapeRe).join("|")})\\s*\\.`);
+  for (const file of tsxFiles) {
+    if (file.name.endsWith(".test.tsx")) continue;
+    const code = file.content
+      .replace(/\/\*[\s\S]*?\*\//g, "")
+      .replace(/\/\/.*$/gm, "");
+    for (const m of code.matchAll(/style\s*=\s*\{\{/g)) {
+      // Brace-match the OBJECT literal (the inner `{`, last char of the match).
+      const start = m.index! + m[0].length - 1;
+      let depth = 0, end = start;
+      for (let i = start; i < code.length; i++) {
+        if (code[i] === "{") depth++;
+        else if (code[i] === "}" && --depth === 0) {
+          end = i;
+          break;
+        }
+      }
+      if (cellRef.test(code.slice(start, end + 1))) {
+        const line = code.slice(0, m.index).split("\n").length;
+        report(
+          "warn",
+          "boundary",
+          `${file.relative}:${line} — cell-dependent inline style={{…}} freezes ` +
+            `at mount (the object is evaluated once, unlike class= which ` +
+            `re-renders). Bind a class instead, or move the value into a JSX ` +
+            `expression that re-renders.`,
+          { file: file.relative, line },
+        );
+      }
+    }
+  }
+};
+
 export const ALL_CHECKS: Checker[] = [
   checkConfig,
   checkStructure,
@@ -1501,4 +1668,6 @@ export const ALL_CHECKS: Checker[] = [
   checkInterCell,
   checkScheduling,
   checkMemoUsage,
+  checkImports,
+  checkInlineStyle,
 ];

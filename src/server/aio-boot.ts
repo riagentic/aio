@@ -5,6 +5,7 @@ import {
   createPersistenceManager,
   type PersistenceManager,
 } from "./persistence.ts";
+import { createJournal, type Journal } from "./journal.ts";
 import type { SkvInstance } from "./skv.ts";
 import { migrateLegacyKv, SKV_SCHEMA, sqliteKv } from "./skv-sqlite.ts";
 import { createDB, type DB, initSchema, loadTables } from "../db/mod.ts";
@@ -140,6 +141,10 @@ export interface BootConfig<S> {
   getState: () => Record<string, unknown>;
   /** Late-bound reportOpts getter for persistence manager */
   getReportOpts: () => ReportErrorOpts;
+  /** Opt-in durable action journal (risoto #3) — SIGKILL/power-cut recovery of
+   *  the debounce-window tail. bootStorage creates it, the persistence manager
+   *  advances its watermark, _run appends + replays. Undefined/false ⇒ off. */
+  journal?: boolean;
   log: Log;
 }
 
@@ -149,6 +154,11 @@ export interface BootResult<S> {
   kvDb: SkvInstance | null;
   asyncDb: DB | null;
   persistence: PersistenceManager;
+  /** Durable action journal (risoto #3) — null unless `journal: true`. */
+  journal: Journal | null;
+  /** Boot migration + shape-drift picture (risoto #1) — undefined when nothing
+   *  was restored. Surfaced live via `am migrations`. */
+  migrations: MigrationSummary | undefined;
   syncHandler: ServerSyncHandler | undefined;
   /** Mutable ref — caller wires broadcast after server creation */
   syncBroadcastRef: { fn: (msg: string, exclude?: WebSocket) => void };
@@ -305,6 +315,11 @@ export async function bootStorage<S>(
   // Whether this boot actually restored a persisted snapshot. A brand-new
   // install has none — and must not be "migrated".
   let hadPersistedState = false;
+  // Raw stored snapshot (pre-deepMerge) — kept for boot-time shape-drift
+  // detection against the declared `initialState`.
+  let persistedSnapshot: Record<string, unknown> | null = null;
+  // Migration + shape-drift summary, surfaced live via `am migrations`.
+  let migrations: MigrationSummary | undefined;
   if (shouldPersist) {
     try {
       if (!asyncDb) {
@@ -326,6 +341,7 @@ export async function bootStorage<S>(
       );
       if (migrated) {
         hadPersistedState = true;
+        persistedSnapshot = migrated; // raw stored shape — for drift detection
         state = deepMerge(
           initialState as Record<string, unknown>,
           migrated,
@@ -350,12 +366,35 @@ export async function bootStorage<S>(
   // a hook rewrite defaults it was never meant to see (a v0→v1 rename turning
   // the app's own defaults into garbage on first launch). The first successful
   // persist stamps the current versions, so the next boot is a no-op anyway.
-  if (shouldPersist && kvDb && cfg.cellMigrations?.size && hadPersistedState) {
+  if (shouldPersist && kvDb && hadPersistedState && persistedSnapshot) {
     const VERSIONS_KEY = `${appId}:__versions`;
     const persistedVersions =
       await kvDb.get<Record<string, number>>(VERSIONS_KEY) ?? {};
     const stateObj = state as Record<string, unknown>;
-    applyCellMigrations(stateObj, cfg.cellMigrations, persistedVersions, log);
+    const report = cfg.cellMigrations?.size
+      ? applyCellMigrations(
+        stateObj,
+        cfg.cellMigrations,
+        persistedVersions,
+        log,
+      )
+      : [];
+    // Shape drift (risoto #1): the RAW stored snapshot vs the declared
+    // `initialState`. Cells a migration already handled this boot are skipped;
+    // the rest reveal a stored field the current shape no longer declares —
+    // the silent stale-shape load a rename/removal without a version bump
+    // leaves behind. Warned once (summarized), and kept for `am migrations`.
+    const drift = detectShapeDrift(
+      initialState as Record<string, unknown>,
+      persistedSnapshot,
+      { skip: new Set(report.map((r) => r.cell)) },
+    );
+    if (drift.length > 0) log.warn(shapeDriftSummary(drift));
+    const declared: Record<string, number> = {};
+    for (const [id, info] of cfg.cellMigrations ?? []) {
+      declared[id] = info.version;
+    }
+    migrations = { declared, stored: persistedVersions, report, drift };
   }
 
   // ── 5. onRestore hook ─────────────────────────────────────────────
@@ -407,6 +446,14 @@ export async function bootStorage<S>(
       })()
       : undefined;
 
+  // Durable journal (risoto #3) — opt-in, and only where there's a real file to
+  // recover from (persisting, not :memory:). The persistence manager advances
+  // its watermark after each committed snapshot; _run appends + replays.
+  const journal: Journal | null =
+    cfg.journal && shouldPersist && dbPathOverride !== ":memory:"
+      ? createJournal((dbPathOverride ?? resolveDbPath(appId)) + ".journal")
+      : null;
+
   const persistence = createPersistenceManager({
     kvDb,
     asyncDb,
@@ -421,6 +468,8 @@ export async function bootStorage<S>(
     syncCells: syncCellIds.length > 0 ? new Set(syncCellIds) : undefined,
     cellVersions,
     appId,
+    getJournalSeq: journal ? () => journal.currentSeq() : undefined,
+    onPersisted: journal ? (seq) => journal.setWatermark(seq) : undefined,
   });
 
   return {
@@ -428,6 +477,8 @@ export async function bootStorage<S>(
     kvDb,
     asyncDb,
     persistence,
+    journal,
+    migrations,
     syncHandler,
     syncBroadcastRef,
     syncDispatchRef,
@@ -468,33 +519,221 @@ export async function loadAndMigrateSnapshot(
 
 /** Apply cell migrations — pure logic, extracted for testability.
  *  Mutates stateObj in place for cells that need migration. */
+/** One stored field whose shape no longer matches the declared `initialState`. */
+export type ShapeDriftEntry = {
+  cell: string;
+  /** Dotted path within the cell ("" = the cell itself). */
+  path: string;
+  issue: "unknown-field" | "type-changed" | "unknown-cell";
+  storedType: string;
+  /** Declared type — present for "type-changed". */
+  declaredType?: string;
+};
+
+const MAX_DRIFT = 100;
+const DRIFT_MAX_DEPTH = 8;
+
+const kindOf = (v: unknown): string =>
+  v === null ? "null" : Array.isArray(v) ? "array" : typeof v;
+
+/** Diff persisted cell data against the declared shape (`initialState`) and
+ *  report structural drift: a stored field the current shape no longer declares
+ *  (a rename/removal that `deepMerge` would silently keep → stale-shape load),
+ *  or a field whose type changed. This is "declared vs stored shape" using
+ *  `initialState` as the schema — no separate schema declaration to drift from
+ *  the code. Data-level differences (array lengths, values) are NOT drift; only
+ *  structure is — and a declared EMPTY object is an open record (dynamic-key
+ *  map), so its stored keys are data too, not drift. `skip` suppresses cells a
+ *  migration already accounted for.
+ *
+ *  Pure + capped (MAX_DRIFT entries, DRIFT_MAX_DEPTH deep) so a large stored
+ *  blob can't produce an unbounded or runaway report. */
+export function detectShapeDrift(
+  initial: Record<string, unknown>,
+  stored: Record<string, unknown>,
+  opts: { skip?: Set<string> } = {},
+): ShapeDriftEntry[] {
+  const out: ShapeDriftEntry[] = [];
+  const skip = opts.skip ?? new Set<string>();
+
+  const isPlainObj = (v: unknown): v is Record<string, unknown> =>
+    kindOf(v) === "object";
+
+  const walk = (
+    cell: string,
+    decl: unknown,
+    stor: unknown,
+    path: string,
+    depth: number,
+  ): void => {
+    if (out.length >= MAX_DRIFT) return;
+    const dk = kindOf(decl);
+    const sk = kindOf(stor);
+    if (dk !== sk) {
+      out.push({
+        cell,
+        path,
+        issue: "type-changed",
+        storedType: sk,
+        declaredType: dk,
+      });
+      return;
+    }
+    // Same kind. Recurse into plain objects only — arrays/primitives are data.
+    if (isPlainObj(decl) && isPlainObj(stor) && depth < DRIFT_MAX_DEPTH) {
+      // An EMPTY declared object is an open record (`{} as Record<K,V>` — a
+      // dynamic-key map whose keys are DATA, not schema, e.g. balances keyed by
+      // pubkey). Its stored keys are all legitimate, so don't flag them and
+      // don't recurse — exactly how an array's elements are treated as data
+      // (risoto 2026-07-25 field report: this was a 70-warning wall on boot).
+      if (Object.keys(decl).length === 0) return;
+      for (const key of Object.keys(stor)) {
+        if (out.length >= MAX_DRIFT) return;
+        const child = path ? `${path}.${key}` : key;
+        if (!(key in decl)) {
+          out.push({
+            cell,
+            path: child,
+            issue: "unknown-field",
+            storedType: kindOf(stor[key]),
+          });
+          continue;
+        }
+        walk(cell, decl[key], stor[key], child, depth + 1);
+      }
+    }
+  };
+
+  for (const cell of Object.keys(stored)) {
+    if (out.length >= MAX_DRIFT) break;
+    if (skip.has(cell)) continue;
+    if (!(cell in initial)) {
+      out.push({
+        cell,
+        path: "",
+        issue: "unknown-cell",
+        storedType: kindOf(stored[cell]),
+      });
+      continue;
+    }
+    walk(cell, initial[cell], stored[cell], "", 0);
+  }
+  return out;
+}
+
+/** Per-cell outcome of the boot migration pass — inspectable + testable. */
+export type CellMigrationOutcome =
+  | "migrated" // onMigrate ran, version advanced
+  | "reset" // onMigrate threw → state reset to initial
+  | "stale" // version bumped but no onMigrate — kept as-is, may be stale
+  | "downgrade"; // stored version NEWER than code — running old code on new data
+
+/** Structured report of what the migration pass did — one entry per cell that
+ *  was NOT a clean no-op. Returned for inspection (`am`/tests); also logged. */
+export type MigrationReport = {
+  cell: string;
+  from: number;
+  to: number;
+  outcome: CellMigrationOutcome;
+}[];
+
+/** The boot migration picture, surfaced live via the trojan `migrations` route
+ *  and `am migrations`: declared vs stored per-cell versions, what the pass did,
+ *  and any unaccounted shape drift. */
+export type MigrationSummary = {
+  declared: Record<string, number>;
+  stored: Record<string, number>;
+  report: MigrationReport;
+  drift: ShapeDriftEntry[];
+};
+
+/** One teachable line summarizing all shape drift found at boot. */
+export function shapeDriftSummary(drift: ShapeDriftEntry[]): string {
+  const show = drift.slice(0, 5).map((d) => {
+    const where = d.path ? `${d.cell}.${d.path}` : d.cell;
+    if (d.issue === "unknown-cell") {
+      return `${where} (stored, no longer declared)`;
+    }
+    if (d.issue === "type-changed") {
+      return `${where} (${d.storedType}≠declared ${d.declaredType})`;
+    }
+    return `${where} (${d.storedType}, not in initialState)`;
+  });
+  const more = drift.length > show.length
+    ? ` …and ${drift.length - show.length} more`
+    : "";
+  return `shape drift: ${drift.length} stored field(s) no longer match the ` +
+    `declared shape — ${show.join(", ")}${more}. A rename/removal without a ` +
+    `version bump keeps the stale value (deepMerge preserves it). Bump the ` +
+    `cell's version + add onMigrate to transform it, or clear the stored data.`;
+}
+
 export function applyCellMigrations(
   stateObj: Record<string, unknown>,
   cellMigrations: Map<string, CellMigrationInfo>,
   persistedVersions: Record<string, number>,
   log: Log,
-): void {
+): MigrationReport {
+  const report: MigrationReport = [];
   for (const [cellId, info] of cellMigrations) {
     if (info.version === 0) continue; // default — no migration needed
     const persisted = persistedVersions[cellId] ?? 0;
+    const cellState = stateObj[cellId] as Record<string, unknown> | undefined;
+    if (persisted > info.version) {
+      // Downgrade: the DB was written by NEWER code than is now running. The
+      // stored shape can be ahead of what this build understands, so proceeding
+      // silently risks reading fields that moved or vanished. Loud + explicit —
+      // mirrors the framework-schema downgrade guard, dev/prod alike.
+      log.warn(
+        `migrate: ${cellId} stored v${persisted} is NEWER than code v${info.version} — ` +
+          `running an older build against newer data. Re-deploy the build that ` +
+          `wrote it, or bump ${cellId}'s version and add an onMigrate that ` +
+          `down-converts. State kept as-is; fields may be misread.`,
+      );
+      report.push({
+        cell: cellId,
+        from: persisted,
+        to: info.version,
+        outcome: "downgrade",
+      });
+      continue;
+    }
     if (persisted < info.version) {
-      const cellState = stateObj[cellId] as Record<string, unknown> | undefined;
       if (cellState && info.onMigrate) {
         try {
           stateObj[cellId] = info.onMigrate(cellState, persisted);
           log.info(`migrate: ${cellId} v${persisted} → v${info.version}`);
+          report.push({
+            cell: cellId,
+            from: persisted,
+            to: info.version,
+            outcome: "migrated",
+          });
         } catch (e) {
           // Reset to initial state — stale persisted state can't be migrated
           log.error(
             `migrate: ${cellId} onMigrate threw — resetting to initial state: ${e}`,
           );
           stateObj[cellId] = info.initialState;
+          report.push({
+            cell: cellId,
+            from: persisted,
+            to: info.version,
+            outcome: "reset",
+          });
         }
       } else if (cellState && !info.onMigrate) {
         log.warn(
           `migrate: ${cellId} version ${persisted} → ${info.version} but no onMigrate hook — state may be stale`,
         );
+        report.push({
+          cell: cellId,
+          from: persisted,
+          to: info.version,
+          outcome: "stale",
+        });
       }
     }
   }
+  return report;
 }

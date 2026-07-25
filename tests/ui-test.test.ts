@@ -71,6 +71,12 @@ Deno.test("testUI: client-only typing via useLocal — no cells involved", async
   await ui.Form.TitleInput.type("buy milk");
   assertEquals(ui.Form.TitleInput.value, "buy milk");
   assertEquals(ui.Form.echo.text, "buy milk"); // t= handle, verbatim
+  // type() APPENDS (risoto 2026-07-24 wishlist)…
+  await ui.Form.TitleInput.type(" and eggs");
+  assertEquals(ui.Form.TitleInput.value, "buy milk and eggs");
+  // …setValue() REPLACES (clear + type) so you don't clear() first.
+  await ui.Form.TitleInput.setValue("bread");
+  assertEquals(ui.Form.TitleInput.value, "bread");
   ui.unmount();
   await win.happyDOM.close();
 });

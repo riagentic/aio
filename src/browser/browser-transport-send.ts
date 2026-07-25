@@ -17,7 +17,7 @@ import { _registerAck, _rejectAck } from "../protocol/browser-ack.ts";
  *  the returned promise resolves immediately. */
 export function send(
   action: { type: string; payload?: unknown; cid?: string },
-): Promise<void> {
+): Promise<unknown> {
   T.lastAction = action;
   if (_vitalsRenderMeter) {
     const actionType = typeof action === "object" && action !== null

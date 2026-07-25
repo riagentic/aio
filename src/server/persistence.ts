@@ -30,6 +30,13 @@ export interface PersistenceConfig {
   cellVersions?: Record<string, number>;
   /** App ID — used as prefix for version key in KV */
   appId?: string;
+  /** Opt-in journal (risoto #3): the current journal seq — captured at
+   *  state-read time, so the persisted snapshot reflects actions up to it. */
+  getJournalSeq?: () => number;
+  /** Opt-in journal: called with that seq AFTER a successful state write, so the
+   *  journal can advance its watermark + compact the persisted prefix. Undefined
+   *  (journal off) ⇒ the persist path is byte-identical to before. */
+  onPersisted?: (seq: number) => void;
 }
 
 /** Persistence manager API — debounced state persistence to KV and/or SQLite. */
@@ -107,6 +114,10 @@ export function createPersistenceManager(
 
   async function _syncKv(): Promise<void> {
     if (!kvDb) return;
+    // Journal watermark (risoto #3): the seq the ABOUT-TO-BE-WRITTEN snapshot
+    // reflects. Captured before the (synchronous) state read so no action can
+    // slip between; advanced only AFTER the write commits. No-op when off.
+    const seq = cfg.getJournalSeq?.() ?? 0;
     try {
       const dbState = getDBState(kvGetState());
       if (persistMode === "multi") {
@@ -126,6 +137,7 @@ export function createPersistenceManager(
           if (result.ok) {
             prevPersistedKeys = keys;
             await _stampVersions();
+            cfg.onPersisted?.(seq); // watermark advances only on a committed write
             log.debug(`persist: saved multi (${keys.length} keys)`);
           } else {
             // B-7: a failed atomic commit is NOT success — report and retry
@@ -146,6 +158,7 @@ export function createPersistenceManager(
         try {
           await kvDb.set(persistKey, dbState);
           await _stampVersions();
+          cfg.onPersisted?.(seq); // watermark advances only on a committed write
           log.debug("persist: saved single");
         } catch (e) {
           log.error(`persist: failed to save — ${e}`);

@@ -24,7 +24,7 @@ type PendingEntry = {
 
 /** Dependencies injected by server.ts — keeps trojan module decoupled */
 export interface TrojanDeps {
-  dispatch: (event: unknown, user?: AioUser) => void;
+  dispatch: (event: unknown, user?: AioUser) => Promise<unknown> | void;
   getUIState: (user?: AioUser) => unknown;
   debug: (msg: string) => void;
   prod: boolean;
@@ -40,6 +40,15 @@ export interface TrojanDeps {
     getState: () => unknown;
     getSchedules: () => string[];
     getTTHistory?: () => unknown;
+    /** Recent dispatches + their state diffs (risoto #4 — `am timeline`). */
+    getTimeline?: (
+      after?: number,
+      limit?: number,
+    ) => import("./timeline.ts").TimelineEntry[];
+    /** Boot migration + shape-drift picture (risoto #1 — `am migrations`). */
+    getMigrations?: () =>
+      | import("./aio-boot.ts").MigrationSummary
+      | undefined;
     forcePersist?: () => void;
     sqlQuery?: (sql: string) => Promise<unknown[]>;
     shutdown?: () => Promise<void>;
@@ -233,8 +242,31 @@ function handleGet(
     );
   }
 
+  // Recent dispatches + their state diffs (risoto #4 — `am timeline`). Optional
+  // ?after=<seq> (only newer) and ?limit=<n> (last n) query params.
+  if (route === "timeline") {
+    const q = new URL(req!.url).searchParams;
+    const after = q.has("after") ? Number(q.get("after")) : undefined;
+    const limit = q.has("limit") ? Number(q.get("limit")) : undefined;
+    return json({
+      entries: trojan.getTimeline?.(
+        Number.isFinite(after) ? after : undefined,
+        Number.isFinite(limit) ? limit : undefined,
+      ) ?? [],
+    });
+  }
+
   if (route === "errors") {
     return json({ errors: deps.getRecentErrors() });
+  }
+
+  // Boot migration + shape-drift picture (risoto #1 — `am migrations`). Empty
+  // when nothing was restored (fresh install / persistence off).
+  if (route === "migrations") {
+    return json(
+      trojan.getMigrations?.() ??
+        { declared: {}, stored: {}, report: [], drift: [] },
+    );
   }
 
   if (route === "schedules") return json(trojan.getSchedules());
@@ -244,10 +276,24 @@ function handleGet(
   if (route === "fields") return json(trojan.cellFields?.() ?? {});
 
   if (route === "metrics") {
+    // Per-cell serialized state size — the "why is it slow / heavy" signal
+    // `am top` renders. Cheap: one JSON pass over the authoritative store.
+    const cellSizes: Record<string, number> = {};
+    const state = trojan.getState();
+    if (state && typeof state === "object") {
+      for (const [name, slice] of Object.entries(state)) {
+        try {
+          cellSizes[name] = JSON.stringify(slice)?.length ?? 0;
+        } catch {
+          cellSizes[name] = -1; // unserializable (cyclic) — flag, don't throw
+        }
+      }
+    }
     return json({
       uptime: Math.round((Date.now() - trojan.startedAt) / 1000),
       connections: deps.getWsClients().length,
       schedules: trojan.getSchedules().length,
+      cells: cellSizes,
     });
   }
 
@@ -318,12 +364,50 @@ async function handlePost(
       ) {
         return err("invalid payload — must be a plain object");
       }
+      // risoto CRITICAL #0: `ok:true` must mean EXECUTED, and an unknown method
+      // must be an ERROR — the route used to ack ANY type (real or bogus) and
+      // fire-and-forget, so a typo or the `cell.method` (dot) form the reducer's
+      // `cell:method` (colon) form never matches silently no-op'd under a green
+      // "ok". Validate a method-form type against the booted cells, normalize the
+      // separator, then AWAIT so a rejecting method surfaces as an error.
+      const methods = trojan.cellMethods?.() ?? {};
+      const sepIdx = action.type.search(/[:.]/);
+      if (sepIdx > 0 && Object.keys(methods).length > 0) {
+        const cell = action.type.slice(0, sepIdx);
+        const method = action.type.slice(sepIdx + 1);
+        const known = methods[cell];
+        if (!known) {
+          return err(
+            `unknown cell "${cell}" — not booted (cells: ${
+              Object.keys(methods).join(", ") || "none"
+            }). Dispatch does nothing.`,
+            404,
+          );
+        }
+        if (!known.includes(method)) {
+          return err(
+            `cell "${cell}" has no method "${method}" (has: ${
+              known.join(", ") || "none"
+            }). Dispatch does nothing.`,
+            404,
+          );
+        }
+        action.type = `${cell}:${method}`; // normalize dot → colon
+      }
       // Strip client-set identity provenance. The field dispatch actually
       // consumes is `_user` (not `user`) — deleting the wrong key left the
       // spoof open. Drop both to be safe; the server owns the real identity.
       delete action.user;
       delete (action as Record<string, unknown>)._user;
-      deps.dispatch(action, undefined);
+      try {
+        await deps.dispatch(action, undefined);
+      } catch (e) {
+        return err(
+          `dispatch of "${action.type}" failed: ${
+            e instanceof Error ? e.message : String(e)
+          }`,
+        );
+      }
       return json({ ok: true });
     } catch {
       return err("invalid JSON");

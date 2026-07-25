@@ -8,11 +8,19 @@ export type CrashHandlerDeps = {
     cells: Record<string, { errors: number; enabled: boolean }>;
   };
   writeEmergencyCheckpoint: () => void;
+  /** Supervised mode (AioConfig.guardDispatches): after logging + emergency
+   *  checkpoint, PREVENT an unhandled promise rejection from killing the process
+   *  — a fire-and-forget cell dispatch that rejects becomes a loud log line, not
+   *  a crash (risoto 2026-07-24 Bad #3). Scoped to rejections only: a synchronous
+   *  uncaught error is a genuine hard fault and still terminates. Never silent —
+   *  the error is always logged first. */
+  guardRejections?: boolean;
 };
 
 /** Install global unhandledrejection + error handlers. Returns uninstall function. */
 export function installCrashHandler(deps: CrashHandlerDeps): () => void {
-  const { log, getHealthData, writeEmergencyCheckpoint } = deps;
+  const { log, getHealthData, writeEmergencyCheckpoint, guardRejections } =
+    deps;
 
   let _handling = false;
 
@@ -44,6 +52,9 @@ export function installCrashHandler(deps: CrashHandlerDeps): () => void {
 
   const onRejection = (e: PromiseRejectionEvent) => {
     handle("unhandledrejection", e.reason);
+    // Supervised: log-then-survive. Always AFTER handle() logs, so the failure
+    // is never hidden — the process just doesn't die from a stray rejection.
+    if (guardRejections) e.preventDefault();
   };
   const onError = (e: ErrorEvent) => {
     handle("uncaughtException", e.error ?? e.message);

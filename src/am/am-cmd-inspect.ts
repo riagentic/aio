@@ -336,6 +336,87 @@ export async function cmdMetrics(
   }
 }
 
+// ── am top: live runtime observability (risoto #9) ──────────────────────────
+
+export type TopMetrics = {
+  uptime: number;
+  connections: number;
+  schedules: number;
+  cells: Record<string, number>;
+};
+
+/** Human-readable bytes; -1 = an unserializable (cyclic) cell slice. */
+export function fmtBytes(n: number): string {
+  if (n < 0) return "(cyclic)";
+  if (n < 1024) return `${n} B`;
+  if (n < 1_048_576) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / 1_048_576).toFixed(1)} MB`;
+}
+
+/** Render ONE `am top` frame — pure (no I/O), so it's unit-testable. Cells are
+ *  sorted by serialized state size, descending (the "what's heavy" signal). */
+export function renderTopFrame(m: TopMetrics, stamp = ""): string {
+  const cells = Object.entries(m.cells ?? {}).sort((a, z) => z[1] - a[1]);
+  const total = cells.reduce((s, [, n]) => s + Math.max(0, n), 0);
+  return [
+    `aio top${stamp ? `   ${stamp}` : ""}`,
+    `  uptime ${formatUptime(m.uptime)}   clients ${m.connections}   ` +
+    `schedules ${m.schedules}   cells ${cells.length}   state ${
+      fmtBytes(total)
+    }`,
+    "",
+    "  " + "CELL".padEnd(24) + "STATE".padStart(10),
+    ...cells.map(([name, size]) =>
+      "  " + name.padEnd(24) + fmtBytes(size).padStart(10)
+    ),
+  ].join("\n");
+}
+
+/** `am top` — live runtime view (pretty: refresh until Ctrl-C; json/quiet: one
+ *  snapshot for scripting). Poll interval in seconds via the first arg. */
+export async function cmdTop(
+  args: string[],
+  flags: GlobalFlags,
+): Promise<void> {
+  const mode = detectMode(flags);
+  const appId = resolveAmAppId(flags.app);
+  const port = resolvePort(flags.port, appId);
+  const fetchOnce = async (): Promise<TopMetrics | null> => {
+    const r = await trojanGet(port, "metrics", appId);
+    return r.ok ? (r.data as TopMetrics) : null;
+  };
+
+  if (mode !== "pretty") {
+    const m = await fetchOnce();
+    if (!m) {
+      outError(`app not running on port ${port}`, mode);
+      Deno.exit(1);
+    }
+    out(m, mode);
+    return;
+  }
+
+  const intervalMs = Math.max(250, (Number(args[0]) || 1) * 1000);
+  const enc = new TextEncoder();
+  let running = true;
+  const stop = () => (running = false);
+  Deno.addSignalListener("SIGINT", stop);
+  try {
+    while (running) {
+      const m = await fetchOnce();
+      const frame = m
+        ? renderTopFrame(m, new Date().toLocaleTimeString())
+        : `aio top — app not running on port ${port} (retrying…)`;
+      await Deno.stdout.write(enc.encode("\x1b[2J\x1b[H" + frame + "\n"));
+      if (!running) break;
+      await new Promise((r) => setTimeout(r, intervalMs));
+    }
+  } finally {
+    Deno.removeSignalListener("SIGINT", stop);
+    await Deno.stdout.write(enc.encode("\n"));
+  }
+}
+
 export async function cmdHealth(
   _args: string[],
   flags: GlobalFlags,

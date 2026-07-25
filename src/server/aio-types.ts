@@ -172,6 +172,16 @@ export type AioConfig<S, A, E> = {
   _onReportOptsReady?: (opts: ReportErrorOpts) => void;
   /** Internal: diagnostics config passed from CellsConfig */
   _diagnostics?: DiagnosticsConfig;
+  /** Supervised runtime — survive unhandled promise rejections (see CellsConfig). */
+  guardDispatches?: boolean;
+  /** Durable action journal — replay the debounce-window tail after a
+   *  SIGKILL/power-cut (see CellsConfig). */
+  journal?: boolean;
+  /** Allow the electron client to open CHILD windows to arbitrary http(s) URLs
+   *  via `__aioIPC.openWindow(url, { preload, sandbox })`. OFF by default —
+   *  child-window-to-arbitrary-URL is real attack surface no app should carry
+   *  unless it asked for it (maintainer decision, risoto openWindow thread). */
+  childWindows?: boolean;
   /** Internal: checkpoint restore callback passed from CellsConfig */
   _onCheckpointRestore?: (
     checkpoint: CheckpointData,
@@ -292,6 +302,27 @@ export type CellsConfig = {
   memory?: MemoryConfig; // memory pressure monitoring config
   circuitBreaker?: CircuitBreakerConfig; // auto-disable cells after N errors
   singleton?: boolean;
+  /** Fail boot loudly if a cell was defined (imported → cell() ran) but not
+   *  passed to `aio.run({ cells })` — its dispatches would be silent no-ops
+   *  (green tests, dead feature). Opt-in because the global cell registry
+   *  accumulates across a process, so a default-on check would false-fire on the
+   *  supported disjoint-multi-app pattern. risoto 2026-07-24 Bad #2. */
+  strictCells?: boolean;
+  /** Supervised runtime: an unhandled promise rejection (a fire-and-forget cell
+   *  dispatch that rejects) is logged loudly and the process SURVIVES instead of
+   *  dying — no hand-written `.catch(() => {})` per dispatch. Opt-in; scoped to
+   *  rejections (a synchronous uncaught throw is still fatal). risoto Bad #3. */
+  guardDispatches?: boolean;
+  /** Durable action journal (risoto #3): every committed action is appended to
+   *  a durable log; on the next boot the actions after the last snapshot are
+   *  replayed on top of it, so a SIGKILL / power cut in the persist debounce
+   *  window loses NOTHING. Opt-in. */
+  journal?: boolean;
+  /** Allow the electron client to open CHILD windows to arbitrary http(s) URLs
+   *  via `__aioIPC.openWindow(url, { preload, sandbox })`. OFF by default —
+   *  child-window-to-arbitrary-URL is real attack surface no app should carry
+   *  unless it asked for it (maintainer decision, risoto openWindow thread). */
+  childWindows?: boolean;
   libraryMode?: boolean; // no exit/signals/lock; app.close() leaves process alive
   syncIntervalMs?: number;
   fullStateThreshold?: number;

@@ -54,7 +54,12 @@ export type AsyncMethod<S> = (
  *  the annotation is Partial because strict contravariance forbids a
  *  required-extra param on Method<S> — use `s.$signal?.aborted` (or `!` when
  *  you know the method is async). */
-export type MethodDraftMeta = { readonly $signal: AbortSignal };
+export type MethodDraftMeta = {
+  readonly $signal: AbortSignal;
+  /** Transactional cells (risoto #2): publish the buffered write-set atomically
+   *  mid-method, then continue against a fresh snapshot. No-op off `transaction`. */
+  readonly $commit: () => void;
+};
 /** Cell method — sync or async */
 export type Method<S> = SyncMethod<S> | AsyncMethod<S>;
 
@@ -434,18 +439,27 @@ type BatchState = {
 };
 
 /** Create a microtask batcher that groups async method mutations into single dispatched actions. */
-export function createBatcher(prefix: string, dispatch: (action: Msg) => void) {
+export function createBatcher(
+  prefix: string,
+  dispatch: (action: Msg) => void,
+  // Transactional methods (risoto #2): buffer every mutation across the whole
+  // method — no microtask/method-change auto-flush — and commit ONCE via an
+  // explicit flush() at method return. This is what makes an `await` NOT a
+  // commit point: nothing is dispatched until the transaction settles.
+  opts: { deferred?: boolean } = {},
+) {
   const batch: BatchState = { mutations: [], scheduled: false, method: "" };
+  const deferred = opts.deferred === true;
 
   function add(method: string, mutation: Mutation): void {
     // Different method → flush previous batch immediately so mutations
-    // are never misattributed (AIO-77)
-    if (batch.mutations.length > 0 && batch.method !== method) {
+    // are never misattributed (AIO-77). Deferred: keep accumulating.
+    if (!deferred && batch.mutations.length > 0 && batch.method !== method) {
       flush();
     }
     batch.mutations.push(mutation);
     batch.method = method;
-    if (!batch.scheduled) {
+    if (!deferred && !batch.scheduled) {
       batch.scheduled = true;
       queueMicrotask(flush);
     }
@@ -467,11 +481,22 @@ export function createBatcher(prefix: string, dispatch: (action: Msg) => void) {
     });
   }
 
+  /** Drop the buffered write-set without dispatching (transaction abort). */
+  function discard(): void {
+    batch.mutations = [];
+    batch.scheduled = false;
+    batch.method = "";
+  }
+
   return {
     add,
     /** Unflushed mutations of the current batch — the live proxy overlays
      *  these on reads (read-your-writes). */
     pending: () => batch.mutations,
+    /** Commit the buffered write-set as one atomic `__set` (transactional). */
+    flush,
+    /** Discard the buffered write-set (transactional abort). */
+    discard,
   };
 }
 
@@ -525,7 +550,7 @@ const ARRAY_READ_METHODS = new Set([
  *  reference (an identity fallback would let a `.map()`/`.find()` over the
  *  "snapshot" silently mutate real state — the Immer-alias bug class
  *  immutable.ts exists to kill). */
-function snapshotForRead(value: unknown): unknown {
+export function snapshotForRead(value: unknown): unknown {
   if (value === null || value === undefined) return value;
   if (typeof value !== "object") return value;
   return cloneState(value, "shallow");
@@ -579,12 +604,19 @@ export function createLiveProxy<S extends Record<string, unknown>>(
   prefix: string,
   methodName: string,
   getState: () => S,
-  batcher: ReturnType<typeof createBatcher>,
+  // The proxy only reads pending writes + records new ones — flush/discard are
+  // the executor's concern, so keep the param structural (test mocks + the
+  // transactional path both satisfy it).
+  batcher: Pick<ReturnType<typeof createBatcher>, "add" | "pending">,
   path: string[] = [],
   _proxyCache: Map<string, S> = new Map(),
   _overlay: OverlayBox = { v: null },
   // Cancellation signal for this call (cancelOn / s.$signal — perfect-aio D1).
   _signal?: AbortSignal,
+  // Transactional mid-method publish (risoto #2): `s.$commit()` flushes the
+  // buffered write-set atomically and re-snapshots. Root-level only; undefined
+  // for non-transactional methods.
+  _commit?: () => void,
 ): S {
   /** Committed root state with pending writes overlaid (read-your-writes). */
   function effectiveRoot(): S {
@@ -655,6 +687,10 @@ export function createLiveProxy<S extends Record<string, unknown>>(
       // sync methods / contexts without cancellation.
       if (key === "$signal") {
         return _signal ?? _neverSignal();
+      }
+      // Transactional mid-method publish (root-level; no-op off the flag).
+      if (key === "$commit" && path.length === 0) {
+        return _commit ?? (() => {});
       }
       const fresh = effectiveAt();
       const value = (fresh as Record<string, unknown>)[key];

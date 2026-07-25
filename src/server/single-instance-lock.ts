@@ -102,6 +102,45 @@ export function lockPath(appId: string): string {
   return join(lockDir(), `${appId}.lock`);
 }
 
+// ── Launch-info sidecar (am restart flag preservation) ───────
+// The running app can't recover deno-runtime flags (e.g. --env-file) from its
+// own Deno.args — only the launcher (am) knows them. am records them here at
+// start so `am restart` can replay the exact launch; am-owned, the app's _run()
+// never touches it. (risoto 2026-07-24 Bad #4: restart dropped --env-file, so
+// the vault silently stopped auto-unlocking.)
+export type LaunchInfo = { flags: string[]; entry?: string; cwd?: string };
+
+/** Path to am's launch-info sidecar for an app. */
+export function launchInfoPath(appId: string): string {
+  return join(lockDir(), `${appId}.launch.json`);
+}
+
+/** Record the flags am launched an app with (best-effort). */
+export function writeLaunchInfo(appId: string, info: LaunchInfo): void {
+  try {
+    Deno.writeTextFileSync(launchInfoPath(appId), JSON.stringify(info));
+  } catch { /* best-effort — restart falls back to a warning */ }
+}
+
+/** Read the recorded launch info, or null if none/corrupt. */
+export function readLaunchInfo(appId: string): LaunchInfo | null {
+  try {
+    const info = JSON.parse(
+      Deno.readTextFileSync(launchInfoPath(appId)),
+    ) as LaunchInfo;
+    return Array.isArray(info.flags) ? info : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Remove the launch sidecar (on a clean stop). */
+export function removeLaunchInfo(appId: string): void {
+  try {
+    Deno.removeSync(launchInfoPath(appId));
+  } catch { /* already gone */ }
+}
+
 // ── Process Liveness ─────────────────────────────────────────
 
 /** Check if a process is alive via signal 0 */

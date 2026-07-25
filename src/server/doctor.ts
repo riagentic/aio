@@ -7,12 +7,67 @@
  * with a one-line fix; exits 1 on any failure.
  */
 import { meetsMinDeno, MIN_DENO } from "./deno-version.ts";
+import { buildContext } from "../../aiol/context.ts";
+import {
+  checkCells,
+  checkImports,
+  checkPersistence,
+  checkUI,
+} from "../../aiol/checks.ts";
+import { manifestReport, scanCapabilities } from "../build/capabilities.ts";
 
 /** One doctor check — a named config assertion with a one-line fix on failure. */
 interface Check {
   name: string;
   ok: boolean;
   fix: string;
+}
+
+/** Code-integrity sweep (risoto 2026-07-24 #3): the "green-tests-dead-feature /
+ *  silent-corruption" class — reserved cell keys, duplicate imports, orphaned
+ *  persistence, and the client/server boundary (risoto #1 defect d: a
+ *  server-only import — `@std/`, `node:`, `aio/server`, `createDB`, `Deno.*` —
+ *  reaching a browser-bundle module). Reuses aiol's error-level checks so
+ *  there's ONE source of truth, surfaced here as doctor FAILs. Best-effort:
+ *  never crashes the config doctor. */
+async function integritySweep(dir: string): Promise<Check[]> {
+  let ctx, report;
+  try {
+    ({ ctx, report } = await buildContext(dir));
+    for (const check of [checkCells, checkImports, checkPersistence, checkUI]) {
+      await check(ctx);
+    }
+  } catch (e) {
+    return [{
+      name: "code integrity sweep",
+      ok: false,
+      fix: `sweep could not run: ${e instanceof Error ? e.message : String(e)}`,
+    }];
+  }
+  const errors = report.issues.filter((i) => i.severity === "error");
+  if (errors.length === 0) {
+    return [{
+      name: "code integrity (cells · imports · persistence · boundary)",
+      ok: true,
+      fix: "",
+    }];
+  }
+  return errors.map((e) => ({
+    name: `integrity [${e.area}]${e.file ? ` ${e.file}` : ""}`,
+    ok: false,
+    fix: e.message,
+  }));
+}
+
+/** Least-privilege capability manifest for the project (risoto #9) — the
+ *  `--allow-*` set the source actually needs, instead of `-A`. Informational. */
+export async function capabilityManifest(dir: string): Promise<string | null> {
+  try {
+    const { ctx } = await buildContext(dir);
+    return manifestReport(scanCapabilities(ctx.sourceFiles));
+  } catch {
+    return null;
+  }
 }
 
 interface DenoJson {
@@ -97,6 +152,9 @@ export async function runDoctor(
     fix: "upgrade: deno upgrade",
   });
 
+  // Code-integrity sweep — structural problems no config check catches.
+  checks.push(...await integritySweep(dir));
+
   return { checks, ok: checks.every((c) => c.ok) };
 }
 
@@ -113,5 +171,7 @@ if (import.meta.main) {
     }
   }
   console.log(`\n${checks.length - failed} checks passed, ${failed} failed`);
+  const manifest = await capabilityManifest(dir);
+  if (manifest) console.log(`\n${manifest}`);
   if (!ok) Deno.exit(1);
 }

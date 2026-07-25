@@ -21,7 +21,7 @@
         },
         "AioMeta": {
           "kind": "typeAlias",
-          "sig": "f25c85f1668488d9"
+          "sig": "d6f10249ef499cb8"
         },
         "AioUser": {
           "kind": "typeAlias",
@@ -85,7 +85,7 @@
         },
         "CellsConfig": {
           "kind": "typeAlias",
-          "sig": "06daaedf91ff3be9"
+          "sig": "32d561c58f173101"
         },
         "CellStatus": {
           "kind": "typeAlias",
@@ -185,11 +185,11 @@
         },
         "MethodDraftMeta": {
           "kind": "typeAlias",
-          "sig": "ce1df9ec94a0084f"
+          "sig": "12004ecfc136f8ce"
         },
         "MethodsCellConfig": {
           "kind": "typeAlias",
-          "sig": "2fa9e77b48c24ac5"
+          "sig": "957e20e5a39f66ae"
         },
         "Msg": {
           "kind": "typeAlias",
@@ -245,7 +245,7 @@
         },
         "schedule": {
           "kind": "variable",
-          "sig": "d1bebdc28196c3d3"
+          "sig": "1eacd8ab2cb48fe3"
         },
         "ScheduleDef": {
           "kind": "typeAlias",
@@ -349,7 +349,7 @@
         },
         "VERSION": {
           "kind": "variable",
-          "sig": "584bd0702f32149d"
+          "sig": "b0ecfecb2ea0b901"
         },
         "VitalsConfig": {
           "kind": "typeAlias",
@@ -872,6 +872,46 @@
         "build": {
           "kind": "function",
           "sig": "a076baf5aa88fc4c"
+        },
+        "buildShipManifest": {
+          "kind": "function",
+          "sig": "94e6b09336ed2227"
+        },
+        "Capabilities": {
+          "kind": "typeAlias",
+          "sig": "42d003b7d0eff5cb"
+        },
+        "generateSigningKey": {
+          "kind": "function",
+          "sig": "3fa468fe7e07a2c0"
+        },
+        "manifestReport": {
+          "kind": "function",
+          "sig": "edd4e18ded025693"
+        },
+        "permissionFlags": {
+          "kind": "function",
+          "sig": "ba2c727bdf555d1d"
+        },
+        "scanCapabilities": {
+          "kind": "function",
+          "sig": "079e26fb85b7fe5c"
+        },
+        "sha256Hex": {
+          "kind": "function",
+          "sig": "2196aabb6f87489b"
+        },
+        "shipApp": {
+          "kind": "function",
+          "sig": "7ab005fe7e0e8cdf"
+        },
+        "ShipManifest": {
+          "kind": "typeAlias",
+          "sig": "06e1cfa2ba365682"
+        },
+        "verifyShipManifest": {
+          "kind": "function",
+          "sig": "e88c8d5105fd8249"
         }
       }
     },
@@ -933,6 +973,18 @@
           "kind": "typeAlias",
           "sig": "4d451b3b1c2af191"
         },
+        "reactiveDB": {
+          "kind": "function",
+          "sig": "22415cb7814bd71b"
+        },
+        "ReactiveDB": {
+          "kind": "typeAlias",
+          "sig": "ca20e1cc4562491d"
+        },
+        "ReactiveQuery": {
+          "kind": "typeAlias",
+          "sig": "f6c36923a5dd3ea4"
+        },
         "syncTables": {
           "kind": "function",
           "sig": "8dabef027d9a3a7a"
@@ -948,6 +1000,10 @@
     },
     "./doctor": {
       "symbols": {
+        "capabilityManifest": {
+          "kind": "function",
+          "sig": "24e63d4ff3bb26bc"
+        },
         "Check": {
           "kind": "interface",
           "sig": "ec6b92fb8d6d2607"
@@ -1218,7 +1274,7 @@
         },
         "schedule": {
           "kind": "variable",
-          "sig": "d1bebdc28196c3d3"
+          "sig": "1eacd8ab2cb48fe3"
         },
         "ScheduleDef": {
           "kind": "typeAlias",
@@ -1500,9 +1556,29 @@
           "kind": "interface",
           "sig": "922612f74bd17778"
         },
+        "Cassette": {
+          "kind": "typeAlias",
+          "sig": "f1fb98bdbb5998e7"
+        },
+        "CassetteFrame": {
+          "kind": "typeAlias",
+          "sig": "5e1befb6216d58ef"
+        },
+        "CassetteMode": {
+          "kind": "typeAlias",
+          "sig": "1023dc9f0cb35c9d"
+        },
+        "createCassette": {
+          "kind": "function",
+          "sig": "c28816d34136e846"
+        },
         "generateUITypes": {
           "kind": "function",
           "sig": "8bc0a08a33112cf8"
+        },
+        "openCassette": {
+          "kind": "function",
+          "sig": "062f704e4b606a65"
         },
         "setDocument": {
           "kind": "function",
@@ -1550,7 +1626,7 @@
         },
         "UIElementHandle": {
           "kind": "interface",
-          "sig": "9bc77eabc3e23e5e"
+          "sig": "8f01015cf89b5d33"
         }
       }
     },

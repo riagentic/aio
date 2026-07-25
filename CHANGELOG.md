@@ -1,5 +1,54 @@
 # Changelog
 
+## 1.0.0-alpha34 — cross the bridge (2026-07-25)
+
+The dream-list release: a real wallet (risoto, ~650 tests) drove its whole
+backlog to zero on this framework. Every item below is framework-general —
+capabilities, not one-app policy.
+
+**Return values cross the bridge.** `await cell.method()` in a browser now
+resolves with the method's real return value — sync and async (settles on
+completion), transported in the action's ack frame. No `server`/`client`
+annotations: a JSON-serializable return crosses; a non-serializable one resolves
+`undefined` with a loud dev warning, never a hang. See
+[state/the-bridge](docs/state/the-bridge.md).
+
+**Transactional methods** (`transaction: true`). A method body becomes a
+transaction — reads see a stable snapshot across every `await`, writes buffer
+and commit atomically at return, `s.$commit()` publishes mid-flight. Kills the
+read-after-await class; a per-cell serialize mutex prevents lost read-modify-
+write updates. See
+[state/transactional-methods](docs/state/transactional-methods.md).
+
+**Crash-only durability** (`journal: true`). A durable action journal replays
+the un-persisted tail at boot, so a SIGKILL or power cut in the debounce window
+loses nothing. Migrations hardened: a **downgrade guard** (stored version newer
+than code → loud warn, state kept) and **shape drift** detection — a stored
+field the cell's `initialState` no longer declares (a rename/removal without a
+`version` bump) is surfaced at boot and via `am migrations`, with an open-record
+rule so dynamic-key maps (`{} as Record<K,V>`) aren't false-flagged.
+
+**Time travel.** `am timeline` (every dispatch + payload + the state diff it
+produced, from an always-on ring), `am replay <range>` (deterministically
+re-dispatch a journal range for repro), and `am record` (journal → a runnable
+`bootCells` test). See [clients/app-manager](docs/clients/app-manager.md).
+
+**Testing & shipping.** `deno task test:e2e` blesses the real-client e2e path
+and `am expect` asserts over live state; **transport cassettes** record/replay
+device + network I/O for CI; **reactive SQL views** (`select()` re-emitting when
+rows change) drop the full-array-in-RAM cost. `aio ship` produces a reproducible
+signed single-binary build with a least-privilege capability manifest generated
+from what cells declare (USB / net / fs) instead of `-A`.
+
+**DX.** `aio/server` gives server-only imports an explicit surface; the aiol
+boundary lint (server-only import reaching the browser bundle, cell-dependent
+inline `style={{}}` freeze) now also runs in `aio doctor`; `teachableError`
+generalizes the what-happened / one-line-fix / doc-link pattern; `am top` adds
+live runtime observability; gated `openWindow` child windows + `webviewTag`.
+
+Two breaking-safe notes: no public API removed; `onMigrate(state, fromVersion)`
+is unchanged. Full suite 2767 green.
+
 ## 1.0.0-alpha33 — build a fleet, see everything (2026-07-24)
 
 Two headline features.

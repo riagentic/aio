@@ -1,8 +1,10 @@
 // tests/migration.test.ts — state migration system tests
-import { assertEquals } from "@std/assert";
+import { assert, assertEquals } from "@std/assert";
 import {
   applyCellMigrations,
   type CellMigrationInfo,
+  detectShapeDrift,
+  shapeDriftSummary,
 } from "../src/server/aio-boot.ts";
 import { deepMerge } from "../src/state/deep-merge.ts";
 
@@ -217,6 +219,88 @@ Deno.test("migration: same version — no migration", () => {
   assertEquals((state.counter as Record<string, unknown>).count, 50);
 });
 
+// ── Test: DOWNGRADE — stored version newer than code → loud warn, kept ──
+Deno.test("migration: stored version NEWER than code — downgrade warned, state kept", () => {
+  let migrateCalled = false;
+  const migrations = new Map<string, CellMigrationInfo>();
+  migrations.set("counter", {
+    version: 1, // running old code
+    initialState: { count: 0 },
+    onMigrate: (s) => {
+      migrateCalled = true;
+      return s;
+    },
+  });
+
+  const { state, logs } = simulateRestore({
+    initial: { counter: { count: 0 } },
+    persisted: { counter: { count: 77 } },
+    persistedVersions: { counter: 3 }, // DB written by newer code (v3)
+    cellMigrations: migrations,
+  });
+
+  assertEquals(migrateCalled, false, "onMigrate must NOT run on a downgrade");
+  assertEquals(
+    (state.counter as Record<string, unknown>).count,
+    77,
+    "state is kept as-is (not reset)",
+  );
+  assertEquals(
+    logs.some((l) => l.level === "warn" && l.msg.includes("NEWER than code")),
+    true,
+    "a loud downgrade warning is logged",
+  );
+});
+
+// ── Test: the structured MigrationReport reflects each outcome ──────────
+Deno.test("migration: report enumerates migrated / stale / downgrade / reset", () => {
+  const migrations = new Map<string, CellMigrationInfo>();
+  migrations.set("up", {
+    version: 2,
+    initialState: { v: 0 },
+    onMigrate: (s) => s,
+  });
+  migrations.set("stale", { version: 2, initialState: { v: 0 } }); // no onMigrate
+  migrations.set("down", {
+    version: 1,
+    initialState: { v: 0 },
+    onMigrate: (s) => s,
+  });
+  migrations.set("boom", {
+    version: 2,
+    initialState: { v: 0 },
+    onMigrate: () => {
+      throw new Error("x");
+    },
+  });
+  migrations.set("noop", {
+    version: 1,
+    initialState: { v: 0 },
+    onMigrate: (s) => s,
+  }); // same version → absent from report
+
+  const state = {
+    up: { v: 1 },
+    stale: { v: 1 },
+    down: { v: 1 },
+    boom: { v: 1 },
+    noop: { v: 1 },
+  };
+  const logs: LogEntry[] = [];
+  const report = applyCellMigrations(
+    state,
+    migrations,
+    { up: 1, stale: 1, down: 3, boom: 1, noop: 1 },
+    makeLog(logs),
+  );
+  const byCell = Object.fromEntries(report.map((r) => [r.cell, r.outcome]));
+  assertEquals(byCell.up, "migrated");
+  assertEquals(byCell.stale, "stale");
+  assertEquals(byCell.down, "downgrade");
+  assertEquals(byCell.boom, "reset");
+  assertEquals("noop" in byCell, false, "a same-version no-op is not reported");
+});
+
 // ── Test: multiple cells, only some need migration ──────────────
 Deno.test("migration: multiple cells — only stale cells migrated", () => {
   const migrated: string[] = [];
@@ -248,4 +332,143 @@ Deno.test("migration: multiple cells — only stale cells migrated", () => {
   assertEquals(migrated, ["alpha"]); // only alpha migrated
   assertEquals((state.alpha as Record<string, unknown>).upgraded, true);
   assertEquals((state.beta as Record<string, unknown>).y, 2);
+});
+
+// ── Shape drift (risoto #1) — stored shape vs declared initialState ──────────
+
+Deno.test("detectShapeDrift: a stored field absent from initialState → unknown-field", () => {
+  const drift = detectShapeDrift(
+    { wallet: { balance: 0 } }, // declared
+    { wallet: { balance: 5, seedPhrase: "x" } }, // stored (renamed/removed field)
+  );
+  assertEquals(drift, [{
+    cell: "wallet",
+    path: "seedPhrase",
+    issue: "unknown-field",
+    storedType: "string",
+  }]);
+});
+
+Deno.test("detectShapeDrift: a type change on a shared field → type-changed", () => {
+  const drift = detectShapeDrift(
+    { c: { amount: 0 } }, // declared number
+    { c: { amount: "0" } }, // stored string
+  );
+  assertEquals(drift, [{
+    cell: "c",
+    path: "amount",
+    issue: "type-changed",
+    storedType: "string",
+    declaredType: "number",
+  }]);
+});
+
+Deno.test("detectShapeDrift: a stored cell no longer declared → unknown-cell", () => {
+  const drift = detectShapeDrift({ keep: {} }, { keep: {}, gone: { x: 1 } });
+  assertEquals(drift, [{
+    cell: "gone",
+    path: "",
+    issue: "unknown-cell",
+    storedType: "object",
+  }]);
+});
+
+Deno.test("detectShapeDrift: nested objects recurse; dotted path", () => {
+  const drift = detectShapeDrift(
+    { c: { ui: { theme: "dark" } } },
+    { c: { ui: { theme: "dark", legacyZoom: 2 } } },
+  );
+  assertEquals(drift.map((d) => d.path), ["ui.legacyZoom"]);
+});
+
+Deno.test("detectShapeDrift: stored SUBSET of declared → no drift (deepMerge adds defaults)", () => {
+  // initialState declares more than storage holds — that's an ADD, not drift.
+  assertEquals(
+    detectShapeDrift({ c: { a: 1, b: 2 } }, { c: { a: 9 } }),
+    [],
+  );
+});
+
+Deno.test("detectShapeDrift: arrays are data, not shape — length change is NOT drift", () => {
+  assertEquals(
+    detectShapeDrift({ c: { xs: [] } }, { c: { xs: [1, 2, 3] } }),
+    [],
+  );
+});
+
+Deno.test("detectShapeDrift: array ↔ object IS a type change", () => {
+  const drift = detectShapeDrift({ c: { v: {} } }, { c: { v: [] } });
+  assertEquals(drift[0]!.issue, "type-changed");
+  assertEquals(drift[0]!.storedType, "array");
+  assertEquals(drift[0]!.declaredType, "object");
+});
+
+Deno.test("detectShapeDrift: a declared EMPTY object is an open record — stored keys are NOT drift", () => {
+  // risoto field report 2026-07-25: `balances.sol = {} as Record<pubkey, number>`.
+  // Runtime keys are DATA, not schema — must not warn (was a 70-item WARN wall).
+  const drift = detectShapeDrift(
+    { wallet: { balances: {} } }, // declared: open record
+    {
+      wallet: {
+        balances: { "cluster:AAA": 1, "cluster:BBB": 2, "cluster:CCC": 3 },
+      },
+    },
+  );
+  assertEquals(drift, []);
+});
+
+Deno.test("detectShapeDrift: a declared NON-empty object still enforces its shape", () => {
+  // Only an EMPTY declaration is open; a fixed shape keeps flagging strays.
+  const drift = detectShapeDrift(
+    { c: { ui: { theme: "dark" } } },
+    { c: { ui: { theme: "dark", stray: 1 } } },
+  );
+  assertEquals(drift.map((d) => d.path), ["ui.stray"]);
+});
+
+Deno.test("detectShapeDrift: open record nested under a fixed shape is respected", () => {
+  const drift = detectShapeDrift(
+    { c: { cfg: { maps: {} } } }, // maps is an open record inside fixed cfg
+    { c: { cfg: { maps: { a: 1, b: 2 } } } },
+  );
+  assertEquals(drift, []);
+});
+
+Deno.test("detectShapeDrift: skip set suppresses a migrated cell", () => {
+  const drift = detectShapeDrift(
+    { a: { x: 0 }, b: { y: 0 } },
+    { a: { x: 0, stale: 1 }, b: { y: 0, stale: 1 } },
+    { skip: new Set(["a"]) },
+  );
+  assertEquals(drift.map((d) => d.cell), ["b"]);
+});
+
+Deno.test("detectShapeDrift: null vs object is a type change, not a recurse", () => {
+  const drift = detectShapeDrift({ c: { v: { a: 1 } } }, { c: { v: null } });
+  assertEquals(drift[0]!.issue, "type-changed");
+  assertEquals(drift[0]!.storedType, "null");
+});
+
+Deno.test("detectShapeDrift: capped at 100 entries, never unbounded", () => {
+  // Declared shape is NON-empty (a fixed shape, not an open record) so every
+  // stray stored key is real drift — exercising the cap.
+  const initial: Record<string, unknown> = { c: { known: 0 } };
+  const storedCell: Record<string, number> = { known: 0 };
+  for (let i = 0; i < 300; i++) storedCell[`k${i}`] = i;
+  const drift = detectShapeDrift(initial, { c: storedCell });
+  assert(drift.length <= 100, `capped, got ${drift.length}`);
+  assert(drift.length > 0, "non-empty declared shape must still flag strays");
+});
+
+Deno.test("shapeDriftSummary: teachable, names the fields + a fix", () => {
+  const msg = shapeDriftSummary([
+    {
+      cell: "wallet",
+      path: "seedPhrase",
+      issue: "unknown-field",
+      storedType: "string",
+    },
+  ]);
+  assert(msg.includes("wallet.seedPhrase"));
+  assert(msg.includes("version"), "points at the version-bump fix");
 });

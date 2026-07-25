@@ -20,9 +20,12 @@ import {
 import { createScheduleManager } from "../state/schedule.ts";
 import { createOwnManager } from "../state/own.ts";
 import { getLogger, log } from "../diagnostics/logger.ts";
+import { teachableError } from "../diagnostics/error.ts";
 
 // Phase modules — extracted _run() logic
 import { bootStorage, replaySyncOps } from "./aio-boot.ts";
+import { replayJournal } from "./journal.ts";
+import { createTimeline } from "./timeline.ts";
 import { setupDispatch } from "./aio-dispatch.ts";
 import { setupTransport } from "./aio-server.ts";
 import { startLifecycle } from "./aio-lifecycle.ts";
@@ -231,12 +234,48 @@ async function run(a?: any, b?: any): Promise<AioApp<any, any>> {
       ? fc.cells
       : [...getRegisteredCells().values()];
     if (allCells.length === 0) {
-      throw new Error(
-        "[aio] no cells — define at least one cell() (importing its module " +
-          "is enough) or pass cells: [...] to aio.run()",
+      throw teachableError(
+        "no cells to run",
+        "define at least one cell() (importing its module is enough), or pass " +
+          "cells: [...] to aio.run()",
+        "docs/quickstart.md",
       );
     }
     const cellEntries = filterCellsByIsolate(allCells, isolate);
+
+    // Imported-but-unregistered cells (opt-in `strictCells`): a cell() that ran
+    // (its module was imported) but was left out of aio.run({ cells }) dispatches
+    // into the void — no error, dead feature, green tests (risoto 2026-07-24
+    // Bad #2). Opt-in because the global registry accumulates across a process
+    // (the supported disjoint-multi-app pattern, tests), so a default-on check
+    // would false-fire. Compared within the same isolate on both sides.
+    if (fc.strictCells && fc.cells && fc.cells.length > 0) {
+      // CellEntry is `CellDef | { cell, dependsOn }` — normalize to the def id.
+      const idOf = (e: typeof cellEntries[number]): string =>
+        ("__aio" in e ? e : e.cell).__aio.id;
+      const passed = new Set(cellEntries.map(idOf));
+      const orphaned = filterCellsByIsolate(
+        [...getRegisteredCells().values()],
+        isolate,
+      )
+        .map(idOf)
+        .filter((id) => !passed.has(id));
+      if (orphaned.length > 0) {
+        const one = orphaned.length === 1;
+        const q = orphaned.map((n) => `"${n}"`).join(", ");
+        throw new Error(
+          `[aio] strictCells: ${one ? "cell" : "cells"} ${q} ${
+            one ? "was" : "were"
+          } defined (imported) but not passed to aio.run({ cells: [...] }) — ` +
+            `${
+              one ? "its" : "their"
+            } dispatches would be SILENT NO-OPS (a dead ` +
+            `feature with green tests). Add ${
+              one ? "it" : "them"
+            } to cells[], or remove the import.`,
+        );
+      }
+    }
 
     // Compose cells + build state filters
     const {
@@ -425,6 +464,7 @@ async function _run<S, A, E>(
     config._diagnostics,
     prod,
     config._cellNames,
+    config.guardDispatches,
   );
 
   // Client mode: CLI flag > aio.run config > app deno.json `target` >
@@ -485,10 +525,13 @@ async function _run<S, A, E>(
     getDBState: getDBState as (s: S) => unknown,
     getState: () => state as Record<string, unknown>,
     getReportOpts: () => _reportOpts,
+    journal: config.journal,
     log,
   });
   state = boot.state as S;
-  const { kvDb, asyncDb, persistence, syncHandler, syncBroadcastRef } = boot;
+  const { kvDb, asyncDb, persistence, journal, syncHandler, syncBroadcastRef } =
+    boot;
+  const migrationSummary = boot.migrations;
   const _syncDispatchRef = boot.syncDispatchRef;
   const { schedulePersist } = persistence;
 
@@ -506,6 +549,24 @@ async function _run<S, A, E>(
       state,
       log,
     );
+  }
+
+  // Journal recovery (risoto #3): replay the actions committed AFTER the last
+  // snapshot (the debounce window a SIGKILL/power-cut would otherwise lose) on
+  // top of the restored state — after sync-ops so cross-cell reads see recovered
+  // sync state. State transitions only; effects are never re-run.
+  if (journal) {
+    const tail = journal.readSince(journal.watermark());
+    if (tail.length > 0) {
+      state = replayJournal(
+        state,
+        tail,
+        config.reduce as (s: S, a: A) => { state: S },
+      );
+      log.info(
+        `journal: recovered ${tail.length} action(s) past the last snapshot`,
+      );
+    }
   }
 
   // The persistence manager captured its `db:` table baseline while `state`
@@ -589,6 +650,35 @@ async function _run<S, A, E>(
     udsCtrl.broadcastFull();
   }
 
+  // Every committed, state-changing, non-sync action feeds two sinks:
+  //  • the durable journal (risoto #3) — the crash-recovery tail (actions only),
+  //    present only when `journal: true`; sync cells recover via their op-log.
+  //  • the in-memory timeline (risoto #4) — always on, bounded, carries the diff
+  //    each action produced; the live view behind `am timeline`.
+  // Both share the same seq (the journal's when journaling, else the timeline's
+  // own counter) so a timeline entry and its journal line line up for replay.
+  const _diagAfterAction = diagHooks?.afterAction as
+    | ((prev: S, next: S, action: A) => void)
+    | undefined;
+  const _syncCellSet = new Set(syncCellIds);
+  const timeline = createTimeline();
+  const afterActionHook = (prev: S, next: S, action: A): void => {
+    _diagAfterAction?.(prev, next, action);
+    if (prev === next) return; // no-op action — nothing to record
+    const t = (action as { type?: string }).type ?? "";
+    const ci = t.indexOf(":");
+    const cell = ci >= 0 ? t.slice(0, ci) : "";
+    const method = ci >= 0 ? t.slice(ci + 1) : t;
+    if (method.startsWith("__")) return; // framework-internal (init/destroy)
+    if (_syncCellSet.has(cell)) return; // sync cell → op-log handles it
+    const payload = (action as { payload?: unknown }).payload;
+    const ts = Date.now();
+    const seq = journal
+      ? journal.append({ type: t, payload }, ts)
+      : timeline.lastSeq() + 1;
+    timeline.record(seq, t, payload, prev, next, ts);
+  };
+
   const dispatch = setupDispatch<S, A, E>({
     reduce,
     execute,
@@ -623,9 +713,7 @@ async function _run<S, A, E>(
     freezeState: config.freezeState ?? !prod,
     effectTimeout: config.effectTimeoutMs,
     reduceBreakdown: config._reduceBreakdown,
-    afterAction: diagHooks?.afterAction as
-      | ((prev: S, next: S, action: A) => void)
-      | undefined,
+    afterAction: afterActionHook,
     log,
     debug: VERBOSE,
   });
@@ -814,6 +902,11 @@ async function _run<S, A, E>(
     cellMethods: config._cellMethods ?? {},
     cellFields: config._cellFields ?? {},
     asyncDb,
+    // In-memory dispatch timeline (risoto #4) — the trojan `timeline` route.
+    getTimeline: (after?: number, limit?: number) =>
+      timeline.entries(after, limit),
+    // Boot migration + shape-drift picture (risoto #1) — trojan `migrations`.
+    migrations: migrationSummary,
     appLock,
     clientCounter,
     log,
@@ -843,6 +936,7 @@ async function _run<S, A, E>(
     electronDistDir,
     expose,
     singletonMode,
+    childWindows: !!config.childWindows,
     client,
     useElectron,
     isHeadless,

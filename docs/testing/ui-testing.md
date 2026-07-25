@@ -168,3 +168,24 @@ The same loop works in-process: `ui.surface()` →
 
 Spec: `docs/specs/2026-07-10-semantic-ui-testing.md`. Cell-level testing:
 [cell-testing.md](cell-testing.md).
+
+## e2e — test the REAL client (`deno task test:e2e`)
+
+`testUI` runs in-process; some bugs only surface at the transport boundary or in
+a real renderer (the `_static` vnode freeze class). `deno task test:e2e` is the
+blessed "test the real thing" path: it boots a real server and drives it over
+the real wire — a headless **Chromium** client (auto-detected; the suite skips
+where no browser is present) plus transport-faithful subscription/dispatch
+checks — asserting on the client DOM and the authoritative server state.
+
+- Headless UI + DOM: `tests/e2e-ui-chromium.test.ts` (real Chromium surface +
+  clicks), `tests/e2e-blank-screen.test.ts`, `tests/e2e-sync-browser.test.ts`.
+- Transport boundary: `tests/e2e-direct-subscription.test.ts`,
+  `tests/e2e-dispatch-ack.test.ts` — a passing assertion means the client↔server
+  boundary actually worked, which in-process `testUI` can't cover.
+- Assertions over live server state from a script: `am expect <path> <op> [v]`
+  (`--wait=N` polls until it settles).
+
+Three fidelity levels, one mental model: `testUI` (pure vdom, fast) → `test:e2e`
+(real browser + real transport) — use the first for units, the second to prove
+"green" means "works".

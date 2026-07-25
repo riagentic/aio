@@ -7,6 +7,7 @@ import { loadOrCreateCert, type TlsCert } from "./tls.ts";
 import { createServer } from "./server.ts";
 import { VERSION } from "./aio-cli.ts";
 import type { ServerHandle } from "./server-types.ts";
+import { registerCall } from "../state/cell-impl.ts";
 import { createUDSListener, type UDSHandle } from "./uds.ts";
 import type {
   CellPatchStrategy,
@@ -84,7 +85,7 @@ export interface ServerSetupDeps<S, A> {
   // Runtime refs — getState is a getter so closures always see the current value
   getState: () => S;
   getUIState: (s: S, user?: AioUser) => unknown;
-  dispatch: (action: A) => void;
+  dispatch: (action: A) => Promise<unknown> | void;
   app: { snapshot: () => string; loadSnapshot: (json: string) => void };
   // Server features
   vitalsSystem?: VitalsSystem;
@@ -111,6 +112,13 @@ export interface ServerSetupDeps<S, A> {
   /** Cell id → per-field persist/ui flags — for the trojan `fields` route. */
   cellFields?: import("./aio-types.ts").CellFieldFlags;
   asyncDb: { query: (sql: string) => Promise<{ rows: unknown[] }> } | null;
+  /** In-memory dispatch timeline (risoto #4) — the trojan `timeline` route. */
+  getTimeline?: (
+    after?: number,
+    limit?: number,
+  ) => import("./timeline.ts").TimelineEntry[];
+  /** Boot migration + shape-drift picture (risoto #1) — trojan `migrations`. */
+  migrations?: import("./aio-boot.ts").MigrationSummary;
   // Lock
   appLock: AppLock | null;
   // Client counter
@@ -230,6 +238,60 @@ export async function setupTransport<S, A>(
         `into a serverFn.`,
     );
   }
+  // Network-borne dispatch: auth-gate → dispatch → resolve with the method's
+  // RETURN value. Shared by the WS server and the UDS listener so both give an
+  // awaiting caller (browser ack, trojan, CLI) the real value, and both enforce
+  // the same declarative cell-access gate.
+  const dispatchNetwork = (
+    action: unknown,
+    user?: AioUser,
+  ): Promise<unknown> | void => {
+    // AUTH-1: declarative cell access — every network-borne action is
+    // checked against its cell's rule BEFORE dispatch. Server-origin
+    // dispatches never pass through here, so server code always bypasses.
+    const a = action as Record<string, unknown>;
+    const type = typeof a?.type === "string" ? a.type as string : "";
+    const cellAccess = config._cellAccess;
+    if (cellAccess && cellAccess.size > 0 && type.includes(":")) {
+      const cellName = type.slice(0, type.indexOf(":"));
+      const rule = cellAccess.get(cellName);
+      if (rule !== undefined) {
+        // Method = the originating method name (async batches carry it in
+        // payload._origin); fall back to the action-type suffix.
+        const origin = (a.payload as Record<string, unknown> | undefined)
+          ?._origin;
+        const method = typeof origin === "string"
+          ? origin
+          : type.slice(cellName.length + 1);
+        if (!cellAccessAllowed(rule, user, method)) {
+          log.warn(
+            `[aio] auth: cell "${cellName}" action "${type}" denied for ${
+              user ? `user=${user.id} role=${user.role}` : "anonymous client"
+            }`,
+          );
+          return; // drop — network caller lacks access
+        }
+      }
+    }
+    const tagged = user
+      ? { ...(action as Record<string, unknown>), _user: user }
+      : action;
+    // Return-value transport: an ASYNC method carries `_callId`; the executor
+    // resolves that id with the method's RETURN value when it completes.
+    // Register the call and return THAT promise, so an awaiting caller
+    // (browser ack / trojan / CLI) resolves with the value — not the early
+    // reduce result. SYNC/void methods have no `_callId`; `dispatch()` already
+    // resolves with their value (or undefined), so return it directly.
+    const callId = (tagged as { payload?: { _callId?: string } }).payload
+      ?._callId;
+    if (typeof callId === "string" && callId.length > 0) {
+      const done = registerCall(callId);
+      void Promise.resolve(dispatch(tagged as A)).catch(() => {});
+      return done;
+    }
+    return dispatch(tagged as A);
+  };
+
   const server: ServerHandle = skipHttp
     ? {
       broadcast: () => {},
@@ -247,41 +309,7 @@ export async function setupTransport<S, A>(
       width: ui.width,
       height: ui.height,
       getUIState: (user?: AioUser) => getUIState(getState(), user),
-      dispatch: (action, user?) => {
-        // AUTH-1: declarative cell access — every network-borne action is
-        // checked against its cell's rule BEFORE dispatch. Server-origin
-        // dispatches never pass through here, so server code always bypasses.
-        const a = action as Record<string, unknown>;
-        const type = typeof a?.type === "string" ? a.type as string : "";
-        const cellAccess = config._cellAccess;
-        if (cellAccess && cellAccess.size > 0 && type.includes(":")) {
-          const cellName = type.slice(0, type.indexOf(":"));
-          const rule = cellAccess.get(cellName);
-          if (rule !== undefined) {
-            // Method = the originating method name (async batches carry it in
-            // payload._origin); fall back to the action-type suffix.
-            const origin = (a.payload as Record<string, unknown> | undefined)
-              ?._origin;
-            const method = typeof origin === "string"
-              ? origin
-              : type.slice(cellName.length + 1);
-            if (!cellAccessAllowed(rule, user, method)) {
-              log.warn(
-                `[aio] auth: cell "${cellName}" action "${type}" denied for ${
-                  user
-                    ? `user=${user.id} role=${user.role}`
-                    : "anonymous client"
-                }`,
-              );
-              return; // drop — network caller lacks access
-            }
-          }
-        }
-        const tagged = user
-          ? { ...(action as Record<string, unknown>), _user: user }
-          : action;
-        dispatch(tagged as A);
-      },
+      dispatch: dispatchNetwork,
       getSnapshot: () => app.snapshot(),
       loadSnapshot: (json: string) => app.loadSnapshot(json),
       baseDir,
@@ -363,6 +391,8 @@ export async function setupTransport<S, A>(
         getSchedules: () => scheduleManager.active(),
         cellMethods: () => deps.cellMethods ?? {},
         cellFields: () => deps.cellFields ?? {},
+        ...(deps.getTimeline ? { getTimeline: deps.getTimeline } : {}),
+        ...(deps.migrations ? { getMigrations: () => deps.migrations } : {}),
         ...(tt ? { getTTHistory: tt.getTTBroadcast } : {}),
         ...(shouldPersist ? { forcePersist: () => schedulePersist() } : {}),
         ...(asyncDb
@@ -423,9 +453,7 @@ export async function setupTransport<S, A>(
     uds = createUDSListener(
       socketPath,
       () => getUIState(getState()),
-      (action) => {
-        dispatch(action as A);
-      },
+      (action) => dispatchNetwork(action),
       (msg: string) => log.debug(msg),
       clientCounter,
       syncHandler,

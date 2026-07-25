@@ -178,44 +178,65 @@ function warnFieldFilters(composed: ComposedCells): void {
       // developer's `--prod` smoke test passed. `isCompiled()` covers the
       // shipped-binary case; a source run stays dev (dev-stricter is allowed).
       const isDev = !parseCli().prod && !isCompiled();
+      // Collect ALL offending fields, then emit ONE paste-ready message per cell
+      // — risoto (2026-07-24 Ugly #7) had to add six `publicFields` one
+      // boot-refusal at a time because we threw on the first field. The snippets
+      // below list every offending field so a single edit clears the whole cell.
+      const hardKeys: string[] = []; // unambiguous credentials
+      const softKeys: string[] = []; // secret-looking, ambiguous
       for (const key of topKeys) {
         // Explicit "this is public" acknowledgement, or its secret sub-paths are
         // already excluded → don't cry wolf at correctly-handled state.
         if (publicFields.has(key) || deepExcludedHead(key)) continue;
         if (!isExposed(key)) continue;
-
         // AIO-426 (inews Ugly #6): an unambiguous credential broadcast to every
-        // client is a real leak, not a maybe. REFUSE to boot in dev (a warning
-        // is too soft — you can ship it); in prod, log loud (don't crash a live
-        // deployment on a heuristic). Guards (public-hint / metadata-suffix) still
-        // apply so `apiKeyName`, `publicKey` don't trip it.
+        // client is a real leak, not a maybe. Guards (public-hint / metadata
+        // suffix) still apply so `apiKeyName`, `publicKey` don't trip it.
         if (
           HARD_SECRET_RE.test(key) && !PUBLIC_HINT_RE.test(key) &&
           !NONSECRET_SUFFIX_RE.test(key)
-        ) {
-          const msg =
-            `[${f.__aio.id}] field "${key}" is a credential and is exposed to ` +
-            `the UI — it broadcasts to every connected client. ` +
-            `Exclude it: ui: { exclude: ["${key}"] } (or ui.forUser / ui: "none"). ` +
-            `If it's genuinely NOT a secret, declare it public: ` +
-            `ui: { publicFields: ["${key}"] }.`;
-          if (isDev) {
-            throw new Error(`[aio] SECURITY — refusing to start. ${msg}`);
-          }
-          log.error("visibility", `SECURITY: ${msg}`);
-          continue;
+        ) hardKeys.push(key);
+        else if (_looksSecret(key)) softKeys.push(key);
+      }
+      const list = (ks: string[]) => `[${ks.map((k) => `"${k}"`).join(", ")}]`;
+      // Soft warnings first (non-blocking) so they're still visible if the hard
+      // refusal below aborts boot.
+      if (softKeys.length) {
+        const one = softKeys.length === 1;
+        log.warn(
+          "visibility",
+          `[${f.__aio.id}] ${one ? "field" : "fields"} ${list(softKeys)} ${
+            one ? "looks" : "look"
+          } secret and ${
+            one ? "is" : "are"
+          } exposed to the UI — broadcast to every connected client. Restrict ` +
+            `${one ? "it" : "them"}: ui: { exclude: ${
+              list(softKeys)
+            } } (or a ` +
+            `nested ui.exclude of the secret sub-path, ui.forUser, or ui: "none"). ` +
+            `If genuinely public, declare ${one ? "it" : "them"}: ` +
+            `ui: { publicFields: ${list(softKeys)} }.`,
+        );
+      }
+      if (hardKeys.length) {
+        const one = hardKeys.length === 1;
+        const msg =
+          `[${f.__aio.id}] ${one ? "field" : "fields"} ${list(hardKeys)} ${
+            one ? "is a credential" : "are credentials"
+          } exposed to the UI — broadcast to every connected client. Hide ${
+            one ? "it" : "them"
+          }: ui: { exclude: ${
+            list(hardKeys)
+          } } (or ui.forUser / ui: "none"). ` +
+          `If genuinely NOT ${one ? "a secret" : "secrets"}, declare ${
+            one ? "it" : "them"
+          } public: ui: { publicFields: ${list(hardKeys)} }.`;
+        // REFUSE to boot in dev (a warning is too soft — you can ship it); in
+        // prod, log loud (don't crash a live deployment on a heuristic).
+        if (isDev) {
+          throw new Error(`[aio] SECURITY — refusing to start. ${msg}`);
         }
-
-        if (_looksSecret(key)) {
-          log.warn(
-            "visibility",
-            `[${f.__aio.id}] field "${key}" looks secret and is exposed to the ` +
-              `UI — it broadcasts to every connected client. Restrict it with ` +
-              `ui: { exclude: ["${key}"] } / a nested ui: { exclude: ["${key}.<secret>"] }, ` +
-              `ui.forUser, or ui: "none". If it's genuinely public, declare it: ` +
-              `ui: { publicFields: ["${key}"] }.`,
-          );
-        }
+        log.error("visibility", `SECURITY: ${msg}`);
       }
     }
   }

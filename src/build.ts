@@ -100,4 +100,22 @@ export async function build(cfg?: BuildConfig): Promise<void> {
   await buildElectron(cfg);
 }
 
+// `aio ship` core (risoto #9): verifiable release manifest — SHA-256 +
+// least-privilege capabilities + optional Ed25519 signature over the digest.
+export {
+  buildShipManifest,
+  generateSigningKey,
+  sha256Hex,
+  shipApp,
+  type ShipManifest,
+  verifyShipManifest,
+} from "./build/ship.ts";
+// Least-privilege capability scanner (also used by `aio doctor`).
+export {
+  type Capabilities,
+  manifestReport,
+  permissionFlags,
+  scanCapabilities,
+} from "./build/capabilities.ts";
+
 if (import.meta.main) await build();

@@ -15,6 +15,155 @@ import {
 } from "./am-utils.ts";
 import { httpGet, trojanGet, trojanPost } from "./am-http.ts";
 
+// ── am expect: e2e assertion over server state (risoto #5) ──────────────────
+
+const EXPECT_OPS = [
+  "eq",
+  "ne",
+  "gt",
+  "gte",
+  "lt",
+  "lte",
+  "contains",
+  "exists",
+  "absent",
+] as const;
+
+/** Compare a resolved state value against an operator + expected value — pure,
+ *  so the e2e assertion is unit-testable. `found` distinguishes a missing path
+ *  (for exists/absent) from a present null/undefined. */
+export function compareValue(
+  actual: unknown,
+  op: string,
+  expected: unknown,
+  found: boolean,
+): { ok: boolean; reason: string } {
+  const j = (v: unknown) => JSON.stringify(v);
+  const num = (v: unknown) => Number(v);
+  switch (op) {
+    case "exists":
+      return { ok: found, reason: found ? "present" : "path not found" };
+    case "absent":
+      return {
+        ok: !found,
+        reason: found ? `present (${j(actual)})` : "absent",
+      };
+    case "eq":
+      return {
+        ok: j(actual) === j(expected),
+        reason: `${j(actual)} vs ${j(expected)}`,
+      };
+    case "ne":
+      return {
+        ok: j(actual) !== j(expected),
+        reason: `${j(actual)} vs ${j(expected)}`,
+      };
+    case "gt":
+      return {
+        ok: num(actual) > num(expected),
+        reason: `${j(actual)} > ${j(expected)}`,
+      };
+    case "gte":
+      return {
+        ok: num(actual) >= num(expected),
+        reason: `${j(actual)} >= ${j(expected)}`,
+      };
+    case "lt":
+      return {
+        ok: num(actual) < num(expected),
+        reason: `${j(actual)} < ${j(expected)}`,
+      };
+    case "lte":
+      return {
+        ok: num(actual) <= num(expected),
+        reason: `${j(actual)} <= ${j(expected)}`,
+      };
+    case "contains":
+      if (typeof actual === "string") {
+        return {
+          ok: actual.includes(String(expected)),
+          reason: `"${actual}" ⊇ ${j(expected)}`,
+        };
+      }
+      if (Array.isArray(actual)) {
+        return {
+          ok: actual.some((x) => j(x) === j(expected)),
+          reason: `${j(actual)} ∋ ${j(expected)}`,
+        };
+      }
+      return { ok: false, reason: `${j(actual)} is not a string/array` };
+    default:
+      return {
+        ok: false,
+        reason: `unknown op "${op}" (use: ${EXPECT_OPS.join(" ")})`,
+      };
+  }
+}
+
+/** `am expect <path> <op> [value]` — assert on live server state; exit 1 on
+ *  mismatch. `--wait=<s>` polls until it passes (state settles async in e2e).
+ *  The building block for a scripted `deno task test:e2e` over the real socket. */
+export async function cmdExpect(
+  args: string[],
+  flags: GlobalFlags,
+): Promise<void> {
+  const mode = detectMode(flags);
+  const appId = resolveAmAppId(flags.app);
+  const port = resolvePort(flags.port, appId);
+  const [path, op, rawValue] = args;
+  if (!path || !op) {
+    outError(
+      `usage: am expect <path> <op> [value] — ops: ${EXPECT_OPS.join(" ")}`,
+      mode,
+    );
+    Deno.exit(1);
+  }
+  const expected = rawValue === undefined ? undefined : parseScalar(rawValue);
+
+  const evaluate = async (): Promise<{ ok: boolean; reason: string }> => {
+    const result = await trojanGet(port, "state", appId);
+    if (!result.ok) return { ok: false, reason: result.error };
+    const r = resolvePath(result.data, path);
+    return compareValue(r.found ? r.value : undefined, op, expected, r.found);
+  };
+
+  const deadline = flags.wait !== undefined
+    ? Date.now() + flags.wait * 1000
+    : 0;
+  let outcome = await evaluate();
+  while (!outcome.ok && Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 100));
+    outcome = await evaluate();
+  }
+
+  if (outcome.ok) {
+    out(
+      mode === "pretty"
+        ? `PASS  ${path} ${op}${rawValue !== undefined ? ` ${rawValue}` : ""}`
+        : { ok: true, path, op },
+      mode,
+    );
+    return;
+  }
+  outError(
+    `FAIL  ${path} ${op}${
+      rawValue !== undefined ? ` ${rawValue}` : ""
+    } — ${outcome.reason}`,
+    mode,
+  );
+  Deno.exit(1);
+}
+
+/** Parse a CLI value as JSON when possible (numbers, booleans, quoted strings,
+ *  arrays), else keep it a bare string. */
+function parseScalar(raw: string): unknown {
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return raw;
+  }
+}
+
 // ── State ───────────────────────────────────────────────────
 
 export async function cmdState(
@@ -185,6 +334,64 @@ export async function cmdTT(args: string[], flags: GlobalFlags): Promise<void> {
 }
 
 // ── Persistence ─────────────────────────────────────────────
+
+/** `am migrations` — declared vs stored per-cell versions, what the last boot's
+ *  migration pass did, and any unaccounted shape drift (risoto #1). */
+export async function cmdMigrations(
+  _args: string[],
+  flags: GlobalFlags,
+): Promise<void> {
+  const ctx = amCtx(flags);
+  const r = await trojanGet(ctx.port, "migrations", ctx.appId);
+  if (!r.ok) {
+    outError(r.error, ctx.mode);
+    Deno.exit(1);
+  }
+  if (ctx.mode !== "pretty") {
+    out(r.data, ctx.mode);
+    return;
+  }
+  const m = r.data as {
+    declared: Record<string, number>;
+    stored: Record<string, number>;
+    report: { cell: string; from: number; to: number; outcome: string }[];
+    drift: {
+      cell: string;
+      path: string;
+      issue: string;
+      storedType: string;
+      declaredType?: string;
+    }[];
+  };
+  const lines: string[] = [];
+  const cells = [
+    ...new Set([...Object.keys(m.declared), ...Object.keys(m.stored)]),
+  ].sort();
+  lines.push("versions (declared → stored):");
+  if (cells.length === 0) lines.push("  (none tracked)");
+  for (const c of cells) {
+    const d = m.declared[c] ?? 0;
+    const s = m.stored[c] ?? 0;
+    lines.push(`  ${c}: v${d}${s !== d ? ` (stored v${s})` : ""}`);
+  }
+  if (m.report.length > 0) {
+    lines.push("", "last boot migration:");
+    for (const r of m.report) {
+      lines.push(`  ${r.cell}: v${r.from}→v${r.to} [${r.outcome}]`);
+    }
+  }
+  lines.push("", `shape drift: ${m.drift.length}`);
+  for (const d of m.drift) {
+    const where = d.path ? `${d.cell}.${d.path}` : d.cell;
+    const detail = d.issue === "type-changed"
+      ? `${d.storedType} ≠ declared ${d.declaredType}`
+      : d.issue === "unknown-cell"
+      ? "stored, no longer declared"
+      : `${d.storedType}, not in initialState`;
+    lines.push(`  ⚠ ${where} — ${detail}`);
+  }
+  out(lines.join("\n"), ctx.mode);
+}
 
 export async function cmdPersist(
   _args: string[],

@@ -194,3 +194,22 @@ The build script temporarily removes dev-only symlinks from `node_modules/` and
 passes `--exclude` flags to `deno compile` for the big directories (electron
 ~254MB, esbuild ~11MB, react ~5MB). Symlinks are restored after compile, even on
 failure.
+
+## `aio/server` — the explicit server-only surface (risoto #1)
+
+Server-only symbols (SQLite `createDB`/`DEFAULT_PRAGMAS`, CLI/UDS `connectCli`/
+`connectCliUDS`, `aio ship` signing) live behind **`aio/server`**. The whole
+entry is server-only, so importing from it in an isomorphic module (a cell, or a
+lib a cell pulls in) is the boundary violation — `aiol` flags a static
+`aio/server` import in a cell-shared file as an error, and a client build can
+map the entry to a stub.
+
+- **Right:** `import { createDB } from "aio/server"` in a `*.server.ts` module,
+  or `const { createDB } = await import("aio/server")` behind a server guard.
+- **Wrong:** a static `import { createDB } from "aio/server"` (or from `"aio"`)
+  in a file that also defines a `cell()` — it poisons the client graph and
+  blank-screens the app at boot.
+
+Additive today (these are still re-exported from `aio` for back-compat);
+`aio/server` is the recommended path, and a future major moves them behind it
+exclusively.

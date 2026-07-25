@@ -282,12 +282,12 @@ export const log: {
 let _clientSend:
   | ((
     action: { type: string; payload?: unknown; cid?: string },
-  ) => void | Promise<void>)
+  ) => void | Promise<unknown>)
   | null = null;
 export function _setClientSend(
   fn: (
     action: { type: string; payload?: unknown; cid?: string },
-  ) => void | Promise<void>,
+  ) => void | Promise<unknown>,
 ): void {
   _clientSend = fn;
 }

@@ -98,6 +98,14 @@ export type MethodsCellConfig<
   ui?: CellVisibility<keyof NoInfer<S> & string, NoInfer<S>>;
   /** CRDT sync — true for defaults, or partial config to override merge strategies, identity keys, retention */
   sync?: true | Partial<SyncConfig>;
+  /** Transactional async methods (risoto #2): reads see a STABLE snapshot taken
+   *  at method entry (an `await` never changes them), and writes commit
+   *  ATOMICALLY at return — one batch, all-or-nothing (a throw/cancel discards).
+   *  Kills the read-after-await class. Opt-in; sync methods are already atomic.
+   *  `{ serialize: true }` runs this cell's transactional methods one at a time
+   *  (a per-cell mutex) when read-modify-write correctness matters.
+   *  See docs/state/transactional-methods.md. */
+  transaction?: boolean | { serialize?: boolean };
   /** State version — increment when state shape changes. Default: 0. */
   version?: number;
   /** Migration hook — called when persisted version < current version.

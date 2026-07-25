@@ -9,6 +9,8 @@ import {
   instances,
   isProcessAlive,
   type LockData,
+  readLaunchInfo,
+  writeLaunchInfo,
   writeLock,
 } from "../server/single-instance-lock.ts";
 import { detectMode, formatUptime, out, outError } from "./am-output.ts";
@@ -23,6 +25,22 @@ import {
 import { resolveControlPort, trojanGet, trojanPost } from "./am-http.ts";
 
 // ── Constants ───────────────────────────────────────────────
+
+// Flags Deno consumes itself (must sit BEFORE the entry script), as opposed to
+// app flags that follow it. Only `--`-prefixed forms are ever seen here (`am`
+// keeps only those); short forms like -c/-r are filtered upstream.
+const DENO_RUNTIME_FLAG =
+  /^(--env-file|--env|--config|--no-config|--import-map|--importmap|--reload|--no-remote|--cached-only|--lock|--no-lock|--frozen|--cert|--unstable|--unstable-[\w-]+|--v8-flags|--seed|--location|--inspect|--inspect-brk|--inspect-wait|--allow-[\w-]+|--deny-[\w-]+|--no-npm|--node-modules-dir|--vendor)(=|$)/;
+const isDenoRuntimeFlag = (a: string): boolean => DENO_RUNTIME_FLAG.test(a);
+
+/** Assemble the `deno run` argv: runtime flags (--env-file, …) BEFORE the entry
+ *  script, app flags (--port, …) after it — placement Deno requires. Exported
+ *  so the ordering contract is unit-tested (risoto 2026-07-24 Bad #4). */
+export function buildDenoArgs(entry: string, passthrough: string[]): string[] {
+  const denoFlags = passthrough.filter(isDenoRuntimeFlag);
+  const appFlags = passthrough.filter((a) => !isDenoRuntimeFlag(a));
+  return ["run", "-A", "--unstable-kv", ...denoFlags, entry, ...appFlags];
+}
 
 const LOG_FILE = ".aio.log";
 const KILL_GRACE_MS = 2000;
@@ -226,7 +244,13 @@ export async function cmdStart(
   ) {
     passthrough.push(`--transport=${flags.transport}`);
   }
-  const denoArgs = ["run", "-A", "--unstable-kv", entry, ...passthrough];
+  // Deno-runtime flags before the entry script; app flags after it (see
+  // buildDenoArgs) — a misplaced --env-file is silently ignored by Deno.
+  const denoArgs = buildDenoArgs(entry, passthrough);
+
+  // Record the launch so `am restart` can replay it — the running app can't
+  // recover deno-runtime flags (esp. --env-file) from its own Deno.args.
+  writeLaunchInfo(appId, { flags: passthrough, entry, cwd: Deno.cwd() });
 
   // nohup + background: child survives parent exit (immune to SIGHUP).
   // `exec` alone keeps child in parent session — gets killed when am exits.
@@ -409,8 +433,37 @@ export async function cmdRestart(
   args: string[],
   flags: GlobalFlags,
 ): Promise<void> {
+  const mode = detectMode(flags);
   const appId = resolveAmAppId(flags.app);
   const pf = readPid(appId);
+
+  // Preserve the original launch across restart (risoto 2026-07-24 Bad #4:
+  // restart dropped --env-file → the vault stopped auto-unlocking). Explicit
+  // flags on THIS `am restart` win; otherwise replay what start recorded.
+  const explicit = args.filter((a) => a.startsWith("--"));
+  const recorded = readLaunchInfo(appId);
+  let launchArgs = args;
+  if (explicit.length === 0) {
+    if (recorded && recorded.flags.length > 0) {
+      launchArgs = recorded.flags;
+      out(
+        mode === "pretty"
+          ? `restart: replaying original flags — ${recorded.flags.join(" ")}`
+          : { restart: "replay", flags: recorded.flags },
+        mode,
+      );
+    } else if (!recorded) {
+      // Started outside am (e.g. `deno task dev`) → we never captured its flags.
+      outError(
+        `restart can't recover the original launch flags (e.g. --env-file) — ` +
+          `this instance wasn't started by \`am start\`. Relaunching with ` +
+          `defaults; re-run your original command, or pass the flags to ` +
+          `\`am restart …\` to record them.`,
+        mode,
+      );
+    }
+  }
+
   if (pf && isProcessAlive(pf.pid)) {
     const port = pf.port;
     // Stop must complete before start — force --wait internally
@@ -431,7 +484,7 @@ export async function cmdRestart(
       } // connection refused = port free
     }
   }
-  await cmdStart(args, flags);
+  await cmdStart(launchArgs, flags);
 }
 
 export async function cmdWatch(

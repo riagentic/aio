@@ -99,7 +99,13 @@ app.on('ready', () => {
   }
 
   const b = loadBounds(${w}, ${h});
-  b.webPreferences = { nodeIntegration: false, contextIsolation: true, preload: preloadFile };
+  // webviewTag rides the same childWindows opt-in as openWindow: both are
+  // "render remote content inside the app" capabilities (risoto RIB — the
+  // in-panel dApp browser). Off by default; a <webview> without the gate
+  // simply doesn't render.
+  b.webPreferences = { nodeIntegration: false, contextIsolation: true, preload: preloadFile, webviewTag: ${
+    JSON.stringify(!!opts.meta?.childWindows)
+  } };
   const win = new BrowserWindow(b);
   if (b.x == null) win.center();
 
@@ -193,6 +199,51 @@ ${tmplBoundsTracking()}
         require('electron').shell.openExternal(u.href);
       }
     } catch { /* malformed url — ignore */ }
+  });
+
+  // Child windows (openWindow): an http/https page in a CHILD BrowserWindow
+  // with an app-supplied preload. Guardrails (maintainer decision):
+  //   • gated: only when aio.run({ childWindows: true }) — off by default;
+  //   • http/https only;
+  //   • the preload must resolve INSIDE the app dir, and its REALPATH must
+  //     too (a symlink escaping the dir is rejected);
+  //   • Chromium sandbox stays ON unless the caller EXPLICITLY passes
+  //     sandbox:false (needed only for page-world injection past strict CSPs)
+  //     — logged loudly per window either way.
+  const CHILD_WINDOWS = ${JSON.stringify(!!opts.meta?.childWindows)};
+  const dappWindows = new Set();
+  ipcMain.on('__aio:openWindow', (_event, payload) => {
+    try {
+      if (!CHILD_WINDOWS) {
+        console.warn('[aio:electron] openWindow denied — enable with aio.run({ childWindows: true })');
+        return;
+      }
+      const { url, preload } = payload || {};
+      const u = new URL(String(url));
+      if (u.protocol !== 'http:' && u.protocol !== 'https:') return;
+      const root = fs.realpathSync(BASE_DIR || process.cwd());
+      const pfx = root.endsWith(path.sep) ? root : root + path.sep;
+      const p = path.resolve(String(preload || ''));
+      if (!p.startsWith(pfx) || !fs.existsSync(p)) return;
+      // Symlink escape: judge the REAL file, not the link's address.
+      if (!fs.realpathSync(p).startsWith(pfx)) return;
+      const sandbox = payload.sandbox === false ? false : true;
+      console.warn('[aio:electron] openWindow → ' + u.href + (sandbox ? '' : ' (sandbox DISABLED by app request)'));
+      const child = new BrowserWindow({
+        width: 1100,
+        height: 800,
+        webPreferences: {
+          nodeIntegration: false,
+          contextIsolation: true,
+          sandbox,
+          preload: p,
+        },
+      });
+      dappWindows.add(child);
+      child.on('closed', () => dappWindows.delete(child));
+      child.setMenuBarVisibility(false);
+      child.loadURL(u.href);
+    } catch { /* malformed request — ignore */ }
   });
 
   ipcMain.on('__aio:send', (_event, json) => {

@@ -1,6 +1,8 @@
 // schedule.ts — declarative timers/delays/cron as effects
 // Two use cases: config-level always-on schedules, dynamic effects from reducer
 
+import { blocking } from "./blocking.ts";
+
 // ── Types ────────────────────────────────────────────────────────────
 
 /** Effect union for scheduled actions — returned from reducers, handled by the runtime */
@@ -190,6 +192,14 @@ export const schedule = {
     kind: "cancel",
     id,
   }),
+  /** Run a SELF-CONTAINED function OFF the main isolate on a named, cancellable,
+   *  backpressured worker pool — for FFI/CPU/sync work that would otherwise
+   *  freeze rendering (risoto #7). Imperative (returns a Promise), unlike the
+   *  effect creators above. The fn is serialized to source: no closures; `arg`
+   *  and the result must be structured-cloneable; do `Deno.dlopen` inside it.
+   *  `schedule.blocking.cancel(id)` stops it; `schedule.blocking.dispose()`
+   *  tears the pool down. See src/state/blocking.ts. */
+  blocking,
 };
 
 /** Type guard — returns true if the value is a ScheduleEffect (type === "__schedule"). */
