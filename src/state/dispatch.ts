@@ -38,6 +38,12 @@ export type PerfTiming = {
 const DEFAULT_REDUCE_BUDGET = 100;
 const DEFAULT_EFFECT_BUDGET = 5;
 
+/** One animation frame. Dev uses this as the reduce budget (aio.ts) — the
+ *  server's dispatch path is shared by every client, so a reduce that takes
+ *  longer than a frame is a delay everyone feels. Prod keeps the 100ms
+ *  "feels instant" budget. */
+export const DEV_FRAME_BUDGET_MS = 16;
+
 /** Deep freeze for dev mode immutability checking */
 export function deepFreeze<T>(obj: T, _seen?: WeakSet<object>): T {
   if (obj === null || typeof obj !== "object") return obj;

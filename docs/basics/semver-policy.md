@@ -41,6 +41,11 @@ match documented behavior are patch — even when someone depended on the bug.
 1. Mark: `@deprecated` JSDoc + a one-time dev-mode runtime warning naming the
    replacement.
 2. Document: CHANGELOG entry + upgrade note with a mechanical migration.
+   Mechanical means mechanical: `deno task lint:aio` reports every deprecated
+   spelling your app still uses, and `aiol --safe-fix` rewrites the ones that
+   are pure renames (`call({ timeout })` → `timeoutMs`, `--cert`/`--key` →
+   `--tls-cert`/`--tls-key`, a build-only `--headless` on a run task →
+   `--client=server-only`). Upgrading is a command, not a diff review.
 3. Keep: deprecated APIs stay functional for at least the rest of the current
    major — removal happens at the next major, never in a minor/patch.
 4. Exception: `aio/air/compat` is **permanent** (decision 2026-07-06) — the

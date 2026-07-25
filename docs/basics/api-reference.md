@@ -85,29 +85,31 @@ See [routes](../examples/05-integrations.md) and [auth](../auth/auth.md).
 Method-native workflow tools — see
 [Workflows](../state/methods.md#workflows-in-async-methods):
 
-| API                  | Description                                                                   |
-| -------------------- | ----------------------------------------------------------------------------- |
-| `until(pred, opts?)` | Wait for a state condition -- `{ timeoutMs?, intervalMs?, msg?, signal? }`    |
-| `race(branches)`     | First named branch to settle wins -- `{ winner, value }`; `timeout: ms` sugar |
-| `sleep(ms)`          | Promise pause                                                                 |
-| `UntilTimeoutError`  | Thrown when `until` exceeds its timeout (default 30s)                         |
+| API                               | Description                                                                                                      |
+| --------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| `until(pred, opts?)`              | Wait for a state condition -- `{ timeoutMs?, intervalMs?, msg?, signal? }`                                       |
+| `race(branches)`                  | First named branch to settle wins -- `{ winner, value }`; `timeout: ms` sugar                                    |
+| `sleep(ms)`                       | Promise pause                                                                                                    |
+| `schedule.blocking(id, fn, arg?)` | Run CPU/FFI work on a worker pool — off the main thread ([perf](../debugging/performance.md#move-it-off-thread)) |
+| `UntilTimeoutError`               | Thrown when `until` exceeds its timeout (default 30s)                                                            |
 
 ---
 
 ## Cell Config
 
-| Key                     | Description                                                |
-| ----------------------- | ---------------------------------------------------------- |
-| `state`                 | Initial state object                                       |
-| `methods`               | Sync/async methods -- `(s, ...args) => void \| Promise`    |
-| `selectors`             | Derived state -- `{ getName: s => s.name }` (auto-scoped)  |
-| `cancelOn`              | Abort triggers per async method -- `{ method: [actions] }` |
-| `listensTo`             | Observed foreign actions -- `[otherCell.action]`           |
-| `validate`              | State validator -- `(s) => true \| string`                 |
-| `persist`               | Persistence config -- `{ exclude: ['tempCache'] }`         |
-| `version` / `onMigrate` | State-shape versioning + migration hook                    |
-| `onInit`                | Init hook -- `(app) => { ... }` runs after aio.run()       |
-| `onDestroy`             | Destroy hook -- `(app) => { ... }` runs before shutdown    |
+| Key                     | Description                                                                                                |
+| ----------------------- | ---------------------------------------------------------------------------------------------------------- |
+| `state`                 | Initial state object                                                                                       |
+| `methods`               | Sync/async methods -- `(s, ...args) => void \| Promise`                                                    |
+| `selectors`             | Derived state -- `{ getName: s => s.name }` (auto-scoped)                                                  |
+| `cancelOn`              | Abort triggers per async method -- `{ method: [actions] }`                                                 |
+| `listensTo`             | Observed foreign actions -- `[otherCell.action]`                                                           |
+| `validate`              | State validator -- `(s) => true \| string`                                                                 |
+| `persist`               | Persistence config -- `{ exclude: ['tempCache'] }`                                                         |
+| `version` / `onMigrate` | State-shape versioning + migration hook                                                                    |
+| `worker`                | `true` runs this cell's methods on their own Deno worker thread ([cell workers](../state/cell-workers.md)) |
+| `onInit`                | Init hook -- `(app) => { ... }` runs after aio.run()                                                       |
+| `onDestroy`             | Destroy hook -- `(app) => { ... }` runs before shutdown                                                    |
 
 ---
 

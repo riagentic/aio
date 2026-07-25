@@ -6,6 +6,9 @@ import type { DiagEvent } from "./types.ts";
 import { formatDiagEvent } from "./diag-formatter.ts";
 
 const THROTTLE_MS = 2000;
+/** Above this many live throttle keys, sweep the expired ones (they are
+ *  keyed per client, so the set grows with connections, not with code). */
+const THROTTLE_KEYS_MAX = 256;
 const DEFAULT_PAYLOAD_THRESHOLD = 512_000; // 500KB
 const DEFAULT_RATE_THRESHOLD = 30; // broadcasts/sec
 const DEFAULT_BANDWIDTH_THRESHOLD = 1_048_576; // 1MB/s
@@ -65,6 +68,16 @@ export function createPressureMonitor(
     const lastEmit = lastConsoleEmit.get(throttleKey) ?? 0;
     if (now - lastEmit >= THROTTLE_MS) {
       lastConsoleEmit.set(throttleKey, now);
+      // Throttle keys are per-CLIENT (`payload:<uuid>`), so on a long-running
+      // server this map would otherwise keep one entry per client that ever
+      // tripped a threshold. An entry older than the window can never suppress
+      // anything again — drop it. Swept only when the map is large, so the
+      // common case costs nothing.
+      if (lastConsoleEmit.size > THROTTLE_KEYS_MAX) {
+        for (const [k, at] of lastConsoleEmit) {
+          if (now - at >= THROTTLE_MS) lastConsoleEmit.delete(k);
+        }
+      }
       log(formatDiagEvent(event));
     }
   }

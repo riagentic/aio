@@ -162,3 +162,77 @@ export function fixRemoveCreateRootImport(
       /^\s*import\s+\{[^}]*createRoot[^}]*\}\s+from\s+['"]react-dom\/client['"]/,
     );
 }
+
+// ── Upgrade fixes (deprecated aliases → canonical) ──────────────────
+//
+// aio keeps every renamed option working as a deprecated alias for the rest of
+// the major (docs/basics/semver-policy.md), so these are ergonomics, never
+// emergencies — but they're mechanical, so the linter can just do them.
+
+/** `call({ timeout: N }, fn)` → `call({ timeoutMs: N }, fn)`. Scoped to the
+ *  options object of a `call(` — a `timeout:` key anywhere else is untouched. */
+export function fixCallTimeoutMs(filePath: string): () => Promise<boolean> {
+  return async () => {
+    try {
+      const content = await Deno.readTextFile(filePath);
+      const patched = content.replace(
+        /\bcall\s*\(\s*\{[^}]*\}/g,
+        (opts) => opts.replace(/\btimeout(\s*:)/g, "timeoutMs$1"),
+      );
+      if (patched === content) return false;
+      await Deno.writeTextFile(filePath, patched);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+}
+
+/** Rewrite deprecated flags inside `deno.json` tasks. `--cert=`/`--key=` became
+ *  `--tls-cert=`/`--tls-key=` (the bare names collided with the auth `key`
+ *  concept); `--headless` is a BUILD flag that a run task must not pass — the
+ *  runtime equivalent is `--client=server-only`. `entry` scopes the second
+ *  rewrite to tasks that actually run the app. */
+export function fixTaskFlags(
+  entry: string | null,
+): (projectDir: string) => Promise<boolean> {
+  return (projectDir: string) =>
+    patchDenoJson(projectDir, (config) => {
+      const tasks = config.tasks;
+      if (!tasks) return;
+      for (const [name, cmd] of Object.entries(tasks)) {
+        if (typeof cmd !== "string") continue;
+        let next = cmd
+          .replace(/(?<![\w-])--cert=/g, "--tls-cert=")
+          .replace(/(?<![\w-])--key=/g, "--tls-key=");
+        if (entry && next.includes(entry)) {
+          next = next.replace(
+            /(?<![\w-])--headless(?![\w=-])/g,
+            "--client=server-only",
+          );
+        }
+        tasks[name] = next;
+      }
+    });
+}
+
+/** Add a missing `aio/<entry>` mapping to deno.json, derived from how the app
+ *  already maps bare `aio` — so it works for a source checkout
+ *  (`./dep/aio/mod.ts` → `./dep/aio/<path>`) and for a JSR pin
+ *  (`jsr:@riagentic/aio@X` → `jsr:@riagentic/aio@X/<entry-suffix>`) alike. */
+export function fixAddAioEntry(
+  spec: string,
+  base: string,
+  entryPath: string,
+): (projectDir: string) => Promise<boolean> {
+  return (projectDir: string) =>
+    patchDenoJson(projectDir, (config) => {
+      const imports = config.imports ??= {};
+      if (imports[spec]) return;
+      imports[spec] = base.startsWith("jsr:") || base.startsWith("npm:")
+        // A package pin: the entry is a sub-path export of the same package.
+        ? `${base}${spec.slice("aio".length)}`
+        // A source path: swap the root module for the entry's module.
+        : base.replace(/mod\.ts$/, "") + entryPath;
+    });
+}

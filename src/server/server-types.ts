@@ -51,6 +51,9 @@ export interface ServerConfig {
   onConnect?: (user?: AioUser) => void;
   onDisconnect?: (user?: AioUser) => void;
   onReload?: (signal: "reload" | "css") => void; // called on live-reload — lets aio.ts forward to UDS
+  /** Dev only: an edited file declares a cell — cells can't hot-reload, so
+   *  aio.ts restarts the process. Absent ⇒ the watcher just warns. */
+  onCellChange?: (path: string) => void;
   // Vitals — latency monitoring & backpressure
   vitalsSystem?: VitalsSystem;
   // Time-travel (dev mode)

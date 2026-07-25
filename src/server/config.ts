@@ -75,6 +75,7 @@ export const VALID_AIO_CONFIG_KEYS = new Set<string>([
   "_diagnostics",
   "_onCheckpointRestore",
   "_cellNames",
+  "_workerCells",
   "_healthGetter",
   "_reduceBreakdown",
   "_onReportOptsReady",
