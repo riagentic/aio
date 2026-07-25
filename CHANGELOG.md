@@ -1,5 +1,63 @@
 # Changelog
 
+## 1.0.0-alpha37 — say it at boot (2026-07-26)
+
+One **BREAKING** change (the last one the alpha window allows for this seam) and
+two fixes: the half of a guarantee that was still missing, and one false alarm
+removed. Purely additive; alpha36 ↔ alpha37 interoperate, no code changes
+required.
+
+**BREAKING — server-only symbols now live only on `aio/server`.** `createDB`,
+`DEFAULT_PRAGMAS`, `connectCli` and `connectCliUDS` are no longer re-exported
+from the `aio` entry:
+
+```ts
+import { createDB } from "aio/server"; // was: from "aio"
+```
+
+They pull in SQLite (a Worker) or CLI/UDS transport and don't exist in a browser
+bundle, so a static `import { createDB } from "aio"` inside a cell — or anything
+a cell imports — link-failed the whole client bundle at boot. That blank screen
+names the symbol but not your file, and every server-side check passes, because
+the split doesn't exist until a real browser links the graph. Keeping the
+convenience re-export made that a one-character mistake; now the boundary is the
+import path itself. **`aiol --safe-fix` rewrites it for you**, splitting a mixed
+import into one statement per entry. The TYPES (`DB`, `DBOpts`, `QueryResult`,
+`Tx`, `CliApp`) stay on `aio` — they're erased at build time and can't poison a
+bundle.
+
+Breaking changes only happen in alpha, and this seam had a standing "a future
+major moves them behind it exclusively" note. That future is now, while the cost
+is one command.
+
+**A worker cell's peer read now fails at BOOT, not only when it runs.** alpha36
+made reading another cell from inside a `worker: true` cell throw — but a throw
+is a runtime event: you learn when that line executes, which for a rare branch
+can be much later. The field report that drove cell workers set the bar
+explicitly ("fails loudly at boot instead of quietly reading nothing"), and this
+closes it:
+
+```
+✗ ERROR [cells] src/heavy.ts:12 — cell "heavy" has worker: true and reads
+  "accounts.active". A worker cell has ONLY its own state, so this read cannot
+  see accounts' live value (the runtime throws when it executes). Pass the value
+  in as a method argument, or keep the heavy work in one self-contained cell —
+  the designated-thread idiom.
+```
+
+It runs inside **`aio doctor`** alongside the other integrity checks, so it
+fires without anyone remembering to run the linter, and in `aiol`. Deliberately
+conservative: property _reads_ only (a peer method **call** already throws via
+the unbound-runtime guard), and only inside the worker cell's own file. The
+runtime throw remains the guarantee; this is the early warning.
+
+**The boot linter stopped advising about test files.** A `.test.tsx` never
+reaches the browser bundle, so "this import won't work in the browser" about one
+is pure noise — it fired on this repo's own suite the moment a test file landed
+next to a booted app's `baseDir`. Same class as the inline-style lint retired in
+alpha36: a warning that costs attention and buys nothing is a bug, not a
+feature.
+
 ## 1.0.0-alpha36 — a thread of its own (2026-07-25)
 
 A responsiveness release. The through-line: a user's action should feel instant,

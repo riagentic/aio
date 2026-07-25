@@ -248,7 +248,7 @@ Compiles `src/client.ts` into a standalone binary with no server — just a WS
 client that connects to a remote aio server. Same `connectCli()` API.
 
 ```ts
-import { connectCli } from "aio";
+import { connectCli } from "aio/server";
 import type { AppState } from "./state.ts";
 
 const url = Deno.args[0] ?? "http://localhost:8000";

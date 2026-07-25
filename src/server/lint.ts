@@ -110,6 +110,10 @@ export async function lint(
     for await (const entry of Deno.readDir(baseDir)) {
       if (!entry.isFile) continue;
       if (!entry.name.endsWith(".ts") && !entry.name.endsWith(".tsx")) continue;
+      // A test file is never part of the browser bundle, so browser-import and
+      // legacy-path advice about it is pure noise (it fired on this repo's own
+      // suite the moment a .test.tsx landed next to a booted app).
+      if (/\.test\.tsx?$/.test(entry.name)) continue;
       const content = await Deno.readTextFile(join(baseDir, entry.name));
       // Anchored to a real import/export STATEMENT: a file that merely mentions
       // the legacy path in a string (a lint rule, a test fixture) is not
