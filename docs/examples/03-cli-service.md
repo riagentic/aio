@@ -150,7 +150,7 @@ Create `src/cli.ts` -- a separate process that connects to the running server:
 
 ```ts
 // src/cli.ts
-import { connectCli } from "aio";
+import { connectCli } from "aio/server";
 import type { Job } from "./cell/queue/index.ts";
 
 export type QueueState = {
@@ -195,7 +195,7 @@ the connection — same import the server uses:
 
 ```ts
 // src/cli.ts
-import { connectCli } from "aio";
+import { connectCli } from "aio/server";
 import { queue } from "./cell/queue/index.ts";
 
 const cli = connectCli("http://localhost:8000");
@@ -296,7 +296,7 @@ Once the service runs with `--expose`, connect from anywhere:
 
 ```ts
 // src/remote.ts
-import { connectCli } from "aio";
+import { connectCli } from "aio/server";
 import type { QueueState } from "./cli.ts";
 
 const cli = connectCli<QueueState>("https://server.example.com:3000", {

@@ -14,6 +14,7 @@ import {
   checkImports,
   checkPersistence,
   checkUI,
+  checkWorkerPeerReads,
 } from "../../aiol/checks.ts";
 import { manifestReport, scanCapabilities } from "../build/capabilities.ts";
 
@@ -35,7 +36,17 @@ async function integritySweep(dir: string): Promise<Check[]> {
   let ctx, report;
   try {
     ({ ctx, report } = await buildContext(dir));
-    for (const check of [checkCells, checkImports, checkPersistence, checkUI]) {
+    for (
+      const check of [
+        checkCells,
+        checkImports,
+        checkPersistence,
+        checkUI,
+        // A worker cell reading a peer cell can only ever read staleness —
+        // the runtime throws when that line executes, doctor says it first.
+        checkWorkerPeerReads,
+      ]
+    ) {
       await check(ctx);
     }
   } catch (e) {

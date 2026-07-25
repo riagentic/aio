@@ -291,3 +291,27 @@ Deno.test("lint: browser import check skipped in prod mode", async () => {
     );
   });
 });
+
+Deno.test("boot lint: test files are not linted for browser imports", async () => {
+  // They never reach the browser bundle, so advice about their imports is
+  // noise — it fired on this repo's own suite when a .test.tsx landed next to
+  // a booted app's baseDir.
+  const dir = await Deno.makeTempDir();
+  try {
+    await Deno.writeTextFile(
+      `${dir}/App.tsx`,
+      "export default function App() { return null }\n",
+    );
+    await Deno.writeTextFile(
+      `${dir}/thing.test.tsx`,
+      `import { assertEquals } from "@std/assert";\nassertEquals(1, 1);\n`,
+    );
+    const r = await lint({ n: 0 }, {}, dir);
+    const noise = [...r.warn, ...r.hint].filter((m) =>
+      m.includes("thing.test.tsx")
+    );
+    assertEquals(noise, [], `test files must be ignored: ${noise.join(" | ")}`);
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});

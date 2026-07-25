@@ -1703,6 +1703,32 @@ export const checkUpgrade: Checker = (ctx) => {
     );
   }
 
+  // Server-only symbols moved to the `aio/server` entry (alpha37). A static
+  // import of one from `"aio"` in a cell-shared file was the classic
+  // blank-screen: it link-fails only when a real browser links the graph.
+  const SERVER_ONLY = /\b(createDB|DEFAULT_PRAGMAS|connectCli|connectCliUDS)\b/;
+  for (const file of [...tsFiles, ...tsxFiles]) {
+    // NOT codeText() here: it blanks string bodies, and the module specifier
+    // IS a string — the check would match nothing. Anchored to a real import
+    // statement instead, same as the legacy-path rule.
+    const code = file.content;
+    const m = /(?:^|\n)\s*import\s*\{([^}]*)\}\s*from\s*["']aio["']/.exec(code);
+    if (!m || !SERVER_ONLY.test(m[1]!)) continue;
+    found++;
+    report(
+      "warn",
+      "upgrade",
+      `${file.relative}: server-only symbols moved to the \`aio/server\` entry ` +
+        `(alpha37) — importing them from "aio" no longer resolves`,
+      {
+        file: file.relative,
+        line: code.slice(0, m.index).split("\n").length,
+        fix: 'import { createDB } from "aio/server"',
+        safeFix: fix.fixServerEntryImport(file.path),
+      },
+    );
+  }
+
   // deno.json tasks: renamed TLS flags, and a build-only flag on a run task.
   const entry = appEntry?.relative ?? null;
   for (const [name, cmd] of Object.entries(denoJson?.tasks ?? {})) {
@@ -1793,6 +1819,59 @@ export const checkPostAwaitRead: Checker = (ctx) => {
   }
 };
 
+// ══════════════════════════════════════════════════════════════════════
+// 18. WORKER CELLS READING PEER CELLS (risoto 2026-07-26 — the line in the sand)
+// ══════════════════════════════════════════════════════════════════════
+//
+// A `worker: true` cell holds ONLY its own slice. Reading another cell from
+// inside it used to return that peer's declared default forever; the runtime
+// now throws, but a throw is a runtime event — you learn when the code path
+// runs, which for a rare branch can be much later. This is the STATIC half:
+// the same mistake reported at lint/boot time, with file:line, before anything
+// runs.
+//
+// Detection is deliberately conservative: only a read of a KNOWN cell name
+// (`other.field`, never `other.method(...)`) inside the file that declares the
+// worker cell counts. The runtime guard remains the guarantee; this is the
+// early warning.
+
+export const checkWorkerPeerReads: Checker = (ctx) => {
+  const { cells, report } = ctx;
+  const workerCells = cells.filter((c) => c.isWorker);
+  if (workerCells.length === 0) return;
+  const peerNames = new Set(cells.map((c) => c.name));
+
+  for (const wc of workerCells) {
+    peerNames.delete(wc.name);
+    const code = codeText(wc.file.content);
+    for (const peer of peerNames) {
+      // `peer.field` — a property READ. A call (`peer.method(`) already throws
+      // loudly at runtime (unbound-runtime guard), so it isn't this trap.
+      const re = new RegExp(`\\b${peer}\\s*\\.\\s*(\\w+)\\s*(?!\\()`, "g");
+      const m = re.exec(code);
+      if (!m) continue;
+      const line = code.slice(0, m.index).split("\n").length;
+      report(
+        "error",
+        "cells",
+        `${wc.file.relative}:${line} — cell "${wc.name}" has worker: true and ` +
+          `reads "${peer}.${m[1]}". A worker cell has ONLY its own state, so ` +
+          `this read cannot see ${peer}'s live value (the runtime throws when ` +
+          `it executes). Pass the value in as a method argument, or keep the ` +
+          `heavy work in one self-contained cell — the designated-thread idiom.`,
+        {
+          file: wc.file.relative,
+          line,
+          fix:
+            `${wc.name}.method(${peer}Value) — hand the value in from the caller`,
+        },
+      );
+      break; // one per worker cell: the fix is structural, not per-line
+    }
+    peerNames.add(wc.name);
+  }
+};
+
 export const ALL_CHECKS: Checker[] = [
   checkConfig,
   checkStructure,
@@ -1810,4 +1889,5 @@ export const ALL_CHECKS: Checker[] = [
   checkImports,
   checkUpgrade,
   checkPostAwaitRead,
+  checkWorkerPeerReads,
 ];

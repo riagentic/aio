@@ -6,9 +6,19 @@ Deno.test("headless: base aio import provides server symbols", async () => {
   assertExists(base.cell);
   assertExists(base.log);
   assertExists(base.schedule);
-  assertExists(base.createDB);
   assertExists(base.call);
   assertExists(base.createSelector);
+  // createDB / connectCli moved to `aio/server` in alpha37 — a server-only
+  // symbol on the root entry made a blank-screening import one character away
+  // from correct code.
+  assertEquals(
+    (base as Record<string, unknown>).createDB,
+    undefined,
+    "server-only values must NOT be on the root entry",
+  );
+  const server = await import("../src/server-entry.ts");
+  assertExists(server.createDB);
+  assertExists(server.connectCli);
 });
 
 Deno.test("headless: periphery moved to aio/extras (B4c) — off core, on extras", async () => {
