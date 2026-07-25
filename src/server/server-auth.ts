@@ -76,10 +76,11 @@ export function cellAccessAllowed(
   rule: CellAccess,
   user: AioUser | undefined,
   method: string,
+  args: unknown[] = [],
 ): boolean {
   if (rule === true) return user !== undefined;
   if (typeof rule === "string") return user?.role === rule;
-  if (typeof rule === "function") return rule(user, method);
+  if (typeof rule === "function") return rule(user, method, ...args);
   return false; // rule === false
 }
 

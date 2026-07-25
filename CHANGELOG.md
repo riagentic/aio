@@ -1,5 +1,93 @@
 # Changelog
 
+## 1.0.0-alpha35 — the edges (2026-07-25)
+
+Everything in this release is at an edge: where the app meets HTTP, where a call
+meets its caller, where a test meets a real server, where the linter meets your
+comments. Purely additive — no public API removed, wire protocol unchanged
+(alpha34 and alpha35 interoperate). **Most apps upgrade with no code changes.**
+
+**`route()` — HTTP routes that stop being boilerplate.** `routes: {}` already
+handed you a raw `Request`, so cookies, status and multipart always worked; what
+every app re-rolled on top was `:id` params, a method guard, cookie
+parse/serialize and a JSON reply. `route()` adds exactly that, on the same
+`routes` record — raw `(req) => Response` handlers keep working untouched.
+
+```ts
+routes: {
+  "/users/:id": route((ctx) => ctx.json({ id: ctx.params.id, ip: ctx.ip })),
+  "/login": route(async (ctx) => {
+    ctx.setCookie("sid", await mkSession(await ctx.req.json()), { httpOnly: true, path: "/" });
+    return ctx.json({ ok: true });
+  }, { method: "POST" }),
+}
+```
+
+Custom routes now also run inside the resolved-user path, so an authenticated
+app's own routes see `ctx.user`. See
+[examples/integrations](docs/examples/05-integrations.md).
+
+**`serverRequest()` — where the call came from.** The companion to
+`serverUser()`: an ambient, read-only view of the transport facts a caller can't
+forge — client IP, headers, cookies, url, and whether the call arrived over HTTP
+or the socket. Available in cell methods, serverFns and effects, across
+`await`s, with nothing threaded through your signatures.
+
+```ts
+methods: {
+  attempt(s, user: string, pw: string) {
+    const ip = serverRequest()?.ip ?? "unknown"; // a rate-limit key the client can't set
+    const locale = serverRequest()?.headers.get("accept-language");
+  },
+}
+```
+
+It is deliberately read-only: setting a cookie, status or header is `route()`'s
+job — one write path, not two. Server-origin work (schedules, boot, internal
+dispatch) sees `undefined`, never a stale request. See
+[auth](docs/auth/auth.md).
+
+**UI kit: Avatar, Pagination, Confirm, Toast — and safe Markdown.** The
+components every content/CRUD app re-rolled, now native AIR components with the
+kit's tokens: `<Avatar/>`, `<Pagination/>`, `<Confirm/>`/`<ConfirmButton/>`, and
+`toast()` + `<ToastHost/>`. Plus `<Markdown/>`, which is XSS-safe _by
+construction_ — it parses to AIR VNodes rather than an HTML string, so there is
+no raw-HTML passthrough at all, and link/image hrefs are scheme-checked. See
+[ui/kit](docs/ui/kit.md).
+
+**Real e2e without the harness tax.** `testServer()` boots a library-mode app on
+a free port with a throwaway data dir; `testBrowser()` launches headless
+Chromium and kills it even if the test crashes. Both are `await using`-ready and
+self-cleaning. `freePort()` is exported too — a test port taken from the OS
+instead of a constant is one fewer flake class (it removed a real one from this
+repo's own suite). See [testing/ui-testing](docs/testing/ui-testing.md).
+
+**Row-level authorization.** A cell's `access` predicate and a serverFn's
+`access` predicate now receive the invoked method/function _and its arguments_,
+so "edit only your own row" is expressible where it belongs:
+`access: (user, method, id) => ownsListing(user, id)`. Backwards compatible —
+existing predicates ignore the extra parameters.
+
+**Testing + diagnostics polish.** `testUI` now isolates `localStorage` between
+mounts (Deno's native storage was bleeding state test-to-test) and exposes
+`ui.serverState()` / `ui.fullState(cell)` for fields the client filter hides. A
+`--headless` build that still serves the UI shell now answers with a clear 503
+diagnostic instead of a blank page. `aio doctor` flags an aio-version pin that
+has drifted from the running framework.
+
+**`aiol` stopped inventing cells.** The linter extracted `cell()` calls from raw
+text, so an example in a JSDoc block — or a scaffolder's template literal —
+became a _declared_ cell, complete with an unfixable `duplicate cell name`
+error. Cell extraction now runs over real code only (comments, strings, template
+literals and regex bodies are masked out). `aiol --no-hints` gives a zero-noise
+run for a project that has consciously accepted its hints.
+
+Also: TOTP primitives (`generateTotpSecret`, `totpUri`, `verifyTotp`) are
+re-exported from `aio` for hand-rolled 2FA flows; `JSX.Node`/`JSX.Children`
+aliases; an Electron protocol-fallback warning that used to be silent; and every
+public symbol now carries API documentation (447/447 — `testUI`'s own doc block
+had been attached to the wrong symbol).
+
 ## 1.0.0-alpha34 — cross the bridge (2026-07-25)
 
 The dream-list release: a real wallet (risoto, ~650 tests) drove its whole

@@ -4,6 +4,7 @@ import type { CellInfo, Checker } from "./types.ts";
 import { join } from "@std/path";
 import * as fix from "./fixes.ts";
 import { RESERVED_KEYS } from "../src/state/cell-types.ts";
+import { codeText } from "./scan.ts";
 
 // ══════════════════════════════════════════════════════════════════════
 // 1. PROJECT CONFIG (deno.json)
@@ -1269,10 +1270,13 @@ export const checkPatterns: Checker = (ctx) => {
       }
     }
 
-    // Old dep/aio import paths
+    // Old dep/aio import paths. Anchored to a real import/export STATEMENT —
+    // a lint rule (or a doc line) that merely mentions the old path inside a
+    // string is not importing from it.
     if (
-      file.content.includes("from '../dep/aio/") ||
-      file.content.includes('from "../dep/aio/')
+      /(?:^|\n)\s*(?:import|export)\b[^\n]*from\s*['"]\.\.\/dep\/aio\//.test(
+        file.content,
+      )
     ) {
       report(
         "warn",
@@ -1290,9 +1294,12 @@ export const checkPatterns: Checker = (ctx) => {
       "__dirname",
       "__filename",
     ];
+    // Same rule: `"process.env"` inside a string or a comment is a mention, not
+    // a use — only real code counts.
+    const codeOnly = codeText(file.content);
     for (const api of nodeApis) {
       if (
-        file.content.includes(api) && !file.content.includes("// node") &&
+        codeOnly.includes(api) && !file.content.includes("// node") &&
         !file.name.includes("electron")
       ) {
         const lineIdx = file.lines.findIndex((l) => l.includes(api));

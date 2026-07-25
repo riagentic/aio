@@ -32,6 +32,13 @@ export { _timingSafeEqual } from "./server-auth.ts";
 
 // ── Internal imports ──
 import type { ServerConfig, ServerHandle } from "./server-types.ts";
+import { matchRoute } from "./route.ts";
+import {
+  makeServerRequest,
+  runWithRequest,
+  runWithUser,
+} from "./auth-context.ts";
+import type { AioUser } from "./aio-types.ts";
 import { buildBrowserImportMap } from "./server-html.ts";
 import {
   _buildUserResolver,
@@ -469,6 +476,10 @@ export function createServer(config: ServerConfig): ServerHandle {
         );
       }
       debug(`http: ${req.method} ${pathname} user=${user.id}`);
+      // Custom routes run authenticated in per-user mode too — the handler's
+      // ctx.user is this resolved user.
+      const routed = await tryRoutes(req, pathname, user, addr);
+      if (routed) return routed;
       const resp = await staticHandler.serveStatic(pathname, req);
       resp.headers.set("X-Content-Type-Options", "nosniff");
       return resp;
@@ -510,23 +521,42 @@ export function createServer(config: ServerConfig): ServerHandle {
     if (pathname === "/ws") return wsMgr.handleWs(req, undefined, clientKey);
     debug(`http: ${req.method} ${pathname}`);
     // ── Custom user routes (uploads, webhooks, API endpoints) ──
-    if (config.routes) {
-      const exact = config.routes[pathname];
-      if (exact) return await exact(req);
-      for (const [pattern, handler] of Object.entries(config.routes)) {
-        if (
-          pattern.endsWith("/*") &&
-          pathname.startsWith(pattern.slice(0, -1))
-        ) {
-          return await handler(req);
-        }
-      }
-    }
+    const routed = await tryRoutes(req, pathname, undefined, addr);
+    if (routed) return routed;
 
     const resp = await staticHandler.serveStatic(pathname, req);
     resp.headers.set("X-Content-Type-Options", "nosniff");
     return resp;
   };
+
+  /** Match config.routes and invoke the handler with a route match (params +
+   *  the resolved user + client ip). `:param`/`*` patterns supported; a literal
+   *  exact match is tried first. Returns null when no route matches. Shared by
+   *  every auth path so custom routes work authenticated too. */
+  async function tryRoutes(
+    req: Request,
+    pathname: string,
+    user: AioUser | undefined,
+    addr: Deno.Addr | undefined,
+  ): Promise<Response | null> {
+    if (!config.routes) return null;
+    const ip = addr && "hostname" in addr ? addr.hostname : undefined;
+    // Ambient request + identity: a handler (and every cell method / serverFn
+    // it calls, across awaits) can ask serverRequest() for the client IP,
+    // headers and cookies without the route threading them down by hand.
+    const rc = makeServerRequest(req, ip, "http");
+    const run = <T>(fn: () => T): T =>
+      runWithRequest(rc, () => runWithUser(user, fn));
+    // Exact literal match first (fast + unambiguous).
+    const exact = config.routes[pathname];
+    if (exact) return await run(() => exact(req, { params: {}, user, ip }));
+    for (const [pattern, handler] of Object.entries(config.routes)) {
+      if (!pattern.includes(":") && !pattern.includes("*")) continue;
+      const params = matchRoute(pattern, pathname);
+      if (params) return await run(() => handler(req, { params, user, ip }));
+    }
+    return null;
+  }
 
   // ── Start HTTP server ──
   let httpServer: Deno.HttpServer;

@@ -306,6 +306,18 @@ type AioSVGAttributes = AioHTMLAttributes & {
 // deno-lint-ignore no-namespace
 export namespace JSX {
   export type Element = VNode;
+  /** Anything renderable in JSX — the type for a `children` prop. Gives
+   *  React-refugees a name (`children: JSX.Node`) instead of reaching for
+   *  React's `ReactNode`. `Children` is an alias. (machine U2) */
+  export type Node =
+    | VNode
+    | string
+    | number
+    | boolean
+    | null
+    | undefined
+    | Node[];
+  export type Children = Node;
   /** Attributes valid on every JSX element, including function components.
    *  `key` is extracted by `jsx()` before props reach the component. */
   export interface IntrinsicAttributes {

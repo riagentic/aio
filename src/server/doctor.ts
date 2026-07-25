@@ -7,6 +7,7 @@
  * with a one-line fix; exits 1 on any failure.
  */
 import { meetsMinDeno, MIN_DENO } from "./deno-version.ts";
+import { VERSION } from "./aio-cli.ts";
 import { buildContext } from "../../aiol/context.ts";
 import {
   checkCells,
@@ -75,6 +76,14 @@ interface DenoJson {
   imports?: Record<string, string>;
   unstable?: string[];
   nodeModulesDir?: string | boolean;
+}
+
+/** Pull the pinned aio version out of an import-map spec, or null. Handles
+ *  `jsr:@riagentic/aio@^1.0.0-alpha33`, `npm:…@1.2.3`, bare `…/aio@1.2.3`.
+ *  A vendored path (`./`, `../`) or an unpinned spec has no version → null. */
+export function extractAioVersion(spec: string): string | null {
+  const m = spec.match(/\baio@[~^>=<]*([0-9][^\s"'/]*)/);
+  return m ? m[1]! : null;
 }
 
 /** Run all doctor checks against a directory containing deno.json. */
@@ -150,6 +159,20 @@ export async function runDoctor(
     name: `Deno ≥ ${MIN_DENO} (running ${Deno.version.deno})`,
     ok: meetsMinDeno(Deno.version.deno),
     fix: "upgrade: deno upgrade",
+  });
+
+  // aio version drift (inews) — the app's import-map pin vs the framework
+  // actually running (this doctor's VERSION). Informational, never fails: a
+  // pin behind the running build isn't broken, but behavior may have changed,
+  // so point at the upgrade guide. A stale pin is how an app silently rots
+  // against a fast-moving dep.
+  const pinned = extractAioVersion(aioTarget);
+  checks.push({
+    name: pinned && pinned !== VERSION
+      ? `aio version — app pins ${pinned}, running ${VERSION} · review docs/upgrade if you skipped releases`
+      : `aio version ${VERSION}`,
+    ok: true, // advisory only
+    fix: "",
   });
 
   // Code-integrity sweep — structural problems no config check catches.

@@ -9,8 +9,9 @@
 import { assertEquals } from "@std/assert";
 import { createServer } from "../src/server/server.ts";
 import { join } from "@std/path";
+import { freePort } from "../src/testing/server-test.ts";
 
-const PORT = 19840;
+const PORT = freePort();
 
 type State = {
   orders: { id: number; userId: string; total: number }[];

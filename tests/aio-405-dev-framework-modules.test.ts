@@ -10,6 +10,7 @@
 // the real assertion, not just status 200.
 import { assert, assertStringIncludes } from "@std/assert";
 import { createServer } from "../src/server/server.ts";
+import { freePort } from "../src/testing/server-test.ts";
 
 const BASE = new URL("../src/server/", import.meta.url);
 
@@ -67,7 +68,7 @@ Deno.test("aio-405: the mounted renderer + a cross-folder dep resolve under /__a
 });
 
 Deno.test("aio-405: booted dev server serves /__aio/ modules as real JS (not throw-stubs)", async () => {
-  const PORT = 47251;
+  const PORT = freePort();
   const dir = await Deno.makeTempDir({ prefix: "aio-405-" });
   const server = createServer(
     {

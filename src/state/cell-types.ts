@@ -287,14 +287,23 @@ export function checkReservedKeys(
  *  Framework internals live under __aio. */
 /** Declarative cell access rule (AUTH-1) — who may act on this cell over the
  *  NETWORK. `true` = any authenticated user, `"role"` = that exact role,
- *  predicate = custom check per (user, method). Absent = open (as before).
- *  Server-origin dispatches (effects, schedules, server code) always bypass —
- *  the server trusts its own code. */
+ *  predicate = custom check per (user, method, ...args). The method's call
+ *  args are forwarded so a predicate can do ROW-LEVEL authz — e.g.
+ *  `(u, m, id) => isOwner(u, id)` — instead of re-checking ownership inside
+ *  every method (realitio). Absent = open (as before). Server-origin dispatches
+ *  (effects, schedules, server code) always bypass — the server trusts itself. */
 export type CellAccess =
   | boolean
   | string
-  | ((user: FilterUser | undefined, method: string) => boolean);
+  | ((
+    user: FilterUser | undefined,
+    method: string,
+    ...args: unknown[]
+  ) => boolean);
 
+/** What `cell()` returns: the callable cell handle — its typed method proxy,
+ *  effect creators (`fx`), selectors, and the framework plumbing under
+ *  `__aio`. Pass it to `aio.run({ cells: [...] })` and import it anywhere. */
 export type CellDef<
   Name extends string = string,
   Actions extends Creators = Creators,

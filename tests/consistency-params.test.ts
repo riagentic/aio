@@ -3,6 +3,7 @@
 import { assert, assertEquals } from "@std/assert";
 import { call } from "../src/state/cell-impl.ts";
 import { resolveOptions } from "../src/diagnostics/types.ts";
+import { freePort } from "../src/testing/server-test.ts";
 
 Deno.test("call: timeoutMs is the canonical key; bare timeout still works", async () => {
   // timeoutMs fires the timeout.
@@ -52,7 +53,7 @@ Deno.test("boot smoke: diagnostics:true + dispatchStorm:true + onEffect(e,state,
     onEffect: (_e: unknown, state: unknown) => {
       sawState = state;
     },
-    port: 9700 + (Deno.pid % 100),
+    port: freePort(),
     baseDir: await Deno.makeTempDir(),
   });
   try {

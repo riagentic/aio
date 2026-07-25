@@ -263,7 +263,11 @@ export async function setupTransport<S, A>(
         const method = typeof origin === "string"
           ? origin
           : type.slice(cellName.length + 1);
-        if (!cellAccessAllowed(rule, user, method)) {
+        // Forward the method's call args so a predicate can do row-level authz
+        // (realitio). Method dispatches carry `payload.args: [...]`.
+        const argv = (a.payload as { args?: unknown } | undefined)?.args;
+        const args = Array.isArray(argv) ? argv : [];
+        if (!cellAccessAllowed(rule, user, method, args)) {
           log.warn(
             `[aio] auth: cell "${cellName}" action "${type}" denied for ${
               user ? `user=${user.id} role=${user.role}` : "anonymous client"

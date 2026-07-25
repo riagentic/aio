@@ -104,7 +104,7 @@ export type AioConfig<S, A, E> = {
   /** Custom HTTP routes — exact path or "/prefix/*" wildcard → handler. The
    *  escape hatch for uploads, webhooks, and API endpoints that don't belong
    *  in the state channel. Reserved: /__aio and /ws. */
-  routes?: Record<string, (req: Request) => Response | Promise<Response>>;
+  routes?: Record<string, import("./route.ts").RawRouteHandler>;
   syncIntervalMs?: number; // default: 50 — max 1 state push per N ms (0 = microtask coalescing only)
   maxConnections?: number; // max concurrent WebSocket clients (default: 100)
   wsLimits?: WsLimits; // per-client WS rate/size limits (advanced; defaults hardened)
@@ -329,7 +329,7 @@ export type CellsConfig = {
   /** Custom HTTP routes — exact path or "/prefix/*" wildcard → handler. The
    *  escape hatch for uploads, webhooks, and API endpoints that don't belong
    *  in the state channel. Reserved: /__aio and /ws. */
-  routes?: Record<string, (req: Request) => Response | Promise<Response>>;
+  routes?: Record<string, import("./route.ts").RawRouteHandler>;
   maxConnections?: number;
   /** Per-client WebSocket safety limits (advanced; defaults are hardened). */
   wsLimits?: WsLimits;

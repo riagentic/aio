@@ -441,3 +441,11 @@ export {
   type UIElementHandle,
 } from "./ui-test.ts";
 export { generateUITypes, testgen } from "./ui-testgen.ts";
+export {
+  findChromium,
+  freePort,
+  type TestBrowser,
+  testBrowser,
+  type TestServer,
+  testServer,
+} from "./server-test.ts";

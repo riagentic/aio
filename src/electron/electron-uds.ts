@@ -44,6 +44,11 @@ ${tmplCrashGuard()}
 // ── Auto-detect: serve from disk (prod) or HTTP (dev) ──
 const BASE_DIR = ${JSON.stringify(opts.baseDir ?? "")};
 const USE_PROTOCOL = BASE_DIR && fs.existsSync(path.join(BASE_DIR, 'app.js'));
+// machine U11 — never silent: when a dist dir was given but its app.js is
+// missing, the window silently falls back from disk (aio://) to HTTP. Say so.
+if (BASE_DIR && !USE_PROTOCOL) {
+  console.warn('[aio:electron] baseDir set but ' + path.join(BASE_DIR, 'app.js') + ' not found — falling back to the HTTP server (no on-disk bundle)');
+}
 
 // AIO-56: Register aio:// scheme as privileged BEFORE app.on('ready').
 if (USE_PROTOCOL) {
@@ -130,7 +135,17 @@ ${tmplBoundsTracking()}
   const _ipcQueue = [], IPC_QUEUE_MAX = 100; // AIO-284: offline queue
   let closing = false;
   win.on('close', () => { closing = true; __aioQuitting = true; });
-  win.webContents.on('did-start-navigation', () => { pageReady = false; });
+  // MAIN-FRAME navigations only: a <webview> guest attaching/navigating also
+  // fires did-start-navigation on the embedder's webContents — gating on that
+  // flipped pageReady false forever (did-finish-load never re-fires for the
+  // main frame), silently freezing every server→renderer state message the
+  // moment a webview attached (risoto RIB field report 2026-07-25). Handles
+  // both Electron signatures: new (event-details object with isMainFrame) and
+  // legacy positional (4th arg).
+  win.webContents.on('did-start-navigation', (e, _url, _inPlace, isMainFrame) => {
+    const main = (e && typeof e.isMainFrame === 'boolean') ? e.isMainFrame : isMainFrame;
+    if (main !== false) pageReady = false;
+  });
   win.webContents.on('did-finish-load', () => { pageReady = true; });
 
   ipcMain.on('__aio:ready', () => {

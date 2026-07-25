@@ -153,6 +153,13 @@ export type TestUI = {
   ): Promise<void>;
   /** Root innerHTML — convenience for assertions. */
   html(): string;
+  /** Unfiltered server-authoritative state — what a server route sees via
+   *  `app.getState()`, INCLUDING `ui.exclude`d fields the client hides. Use to
+   *  test a server flow that reads a hidden field (tbd#3). */
+  serverState(): Record<string, unknown>;
+  /** One cell's unfiltered slice from the server-authoritative state. */
+  // deno-lint-ignore no-explicit-any
+  fullState(cell: any): unknown;
   /** Assert on a cell's reactive state: `await ui.expectCell(todo, t => …)`. */
   // deno-lint-ignore no-explicit-any
   expectCell(cell: any, pred: (c: any) => boolean, msg?: string): Promise<void>;
@@ -220,6 +227,13 @@ function ordinalComponent(
   return hits.length >= n ? hits[n - 1] : undefined;
 }
 
+/** Any function component. Wider than ComponentFn on purpose: components
+ *  typed via `jsxImportSource: "aio"` return jsx-runtime's JSX.Element —
+ *  the same VNode shape under a different declaration — and forcing callers
+ *  to cast was a real papercut (quant). The one cast lives here instead. */
+// deno-lint-ignore no-explicit-any
+export type TestableComponent = (props?: any) => unknown;
+
 /**
  * Mount an AIR app and drive it through its semantic surface — first-class UI
  * testing without DOM/selector lookup. Every TSX component becomes a readable,
@@ -244,13 +258,6 @@ function ordinalComponent(
  * — disposed at scope end. Options only when you need control:
  * `{ document, cells, persist, settleIterations }`.
  */
-/** Any function component. Wider than ComponentFn on purpose: components
- *  typed via `jsxImportSource: "aio"` return jsx-runtime's JSX.Element —
- *  the same VNode shape under a different declaration — and forcing callers
- *  to cast was a real papercut (quant). The one cast lives here instead. */
-// deno-lint-ignore no-explicit-any
-export type TestableComponent = (props?: any) => unknown;
-
 export function testUI(
   App: TestableComponent,
   name: string,
@@ -369,18 +376,33 @@ async function _mountTestUI(
     _ownedGlobals.push("matchMedia");
   }
 
-  // Standalone runtime needs localStorage — shim an in-memory one if absent
-  // so tests need zero extra setup (persistence still behaves).
-  if (!(globalThis as AnyDoc).localStorage) {
+  // localStorage isolation (tbd#1). The standalone runtime needs localStorage;
+  // some hosts (Deno test) already expose a PERSISTENT one. Either way, an
+  // un-isolated store bleeds writes test→test while signals get correctly
+  // reset. So: install a fresh in-memory shim when absent (owned → torn down →
+  // fresh next mount), or CLEAR the existing one per mount for a hermetic
+  // start. `{ persist: true }` opts into continuity and skips the clear.
+  const _existingLS = (globalThis as AnyDoc).localStorage;
+  if (!_existingLS) {
     const store = new Map<string, string>();
     Object.defineProperty(globalThis, "localStorage", {
       value: {
         getItem: (k: string) => store.get(k) ?? null,
-        setItem: (k: string, v: string) => void store.set(k, v),
+        setItem: (k: string, v: string) => void store.set(k, String(v)),
         removeItem: (k: string) => void store.delete(k),
+        clear: () => store.clear(),
+        key: (i: number) => [...store.keys()][i] ?? null,
+        get length() {
+          return store.size;
+        },
       },
       configurable: true,
     });
+    _ownedGlobals.push("localStorage");
+  } else if (!opts.persist) {
+    try {
+      _existingLS.clear();
+    } catch { /* read-only host storage — best effort */ }
   }
 
   // Boot the cells on the local dispatch loop (the android/standalone runtime —
@@ -389,6 +411,10 @@ async function _mountTestUI(
   // all; pass { cells } only to restrict the set.
   let resetRuntime: (() => void) | undefined;
   let advanceSchedules: ((ms: number) => void) | undefined;
+  // The standalone (server-authoritative) app handle — exposed via
+  // ui.serverState()/ui.fullState() so a test can read UNFILTERED state,
+  // including `ui.exclude`d fields a server route legitimately reads (tbd#3).
+  let standaloneApp: { getState: () => Record<string, unknown> } | undefined;
   const cells = opts.cells ?? [...getRegisteredCells().values()];
   if (cells.length > 0) {
     const standalone = await import("../standalone-air.ts");
@@ -399,14 +425,14 @@ async function _mountTestUI(
     // cells' declared initials — no cross-test leaks. Skipped when the test
     // opts into persistence (it wants continuity across runs).
     if (!opts.persist) standalone._resetState();
-    await standalone.aio.run({
+    standaloneApp = await standalone.aio.run({
       appId: "testui",
       cells,
       // Hermetic by default: no cross-test state leaks through the (shared)
       // localStorage persist key. Opt in via { persist: true }.
       persist: opts.persist ?? false,
       persistKey: `testui:${crypto.randomUUID().slice(0, 8)}`,
-    });
+    }) as unknown as { getState: () => Record<string, unknown> };
     // Dispose does a state-only reset (keeps the registry so re-mounts boot).
     resetRuntime = standalone._resetState;
   }
@@ -823,6 +849,12 @@ async function _mountTestUI(
 
   const api = {
     surface: () => serializeSurface(currentSurface()),
+    // Unfiltered server-authoritative state (tbd#3) — what a server route sees
+    // via app.getState(), including `ui.exclude`d fields the client proxy hides.
+    // `serverState()` = whole store; `fullState(cell)` = one cell's slice.
+    serverState: (): Record<string, unknown> => standaloneApp?.getState() ?? {},
+    fullState: (cell: AnyDoc): unknown =>
+      standaloneApp?.getState()?.[cell?.__aio?.id as string],
     // Public settle is an observation point: drains the action queue first
     // (surfacing failures from un-awaited actions), then waits quiescence.
     settle: async () => {

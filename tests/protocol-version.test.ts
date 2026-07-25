@@ -14,8 +14,9 @@ import {
   protoHello,
 } from "../src/protocol/protocol-version.ts";
 import { createServer } from "../src/server/server.ts";
+import { freePort } from "../src/testing/server-test.ts";
 
-const PORT = 8965;
+const PORT = freePort();
 
 // ── Unit: parse ──────────────────────────────────────────────────────
 

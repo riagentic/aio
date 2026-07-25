@@ -62,7 +62,7 @@ Deno.test("matchPath: no false positives on similar paths", () => {
 import { createServer } from "../src/server/server.ts";
 import { join } from "@std/path";
 
-const SPA_PORT = 19960;
+const SPA_PORT = freePort();
 
 Deno.test({
   name: "server: SPA fallback — unknown extensionless path returns HTML",
@@ -117,6 +117,7 @@ Deno.test({
 
 // ── typed route params (inews #12) + Link children (inews #13) ────────
 import type { LinkProps, RouteState } from "../src/protocol/protocol-types.ts";
+import { freePort } from "../src/testing/server-test.ts";
 
 Deno.test("types: RouteState params parameterize; LinkProps children typed", () => {
   // Compile-time probes — fail `deno check` on regression.

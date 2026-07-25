@@ -145,6 +145,14 @@ export type { CliApp } from "./src/server/cli-client.ts";
  *  serverFn<typeof def>(ns) (browser gets a typed WS proxy). */
 export { serverFn, serverFns } from "./src/server/server-fns.ts";
 export type { ServerFnAccess } from "./src/server/server-fns.ts";
+/** Ergonomic HTTP routes: `:id` params, a method guard, cookies, and a JSON
+ *  helper on top of the `routes: {}` config. `route((ctx) => ctx.json(...))`. */
+export { route } from "./src/server/route.ts";
+export type {
+  CookieOptions,
+  RouteContext,
+  RouteOptions,
+} from "./src/server/route.ts";
 export type { CellAccess } from "./src/state/cell-types.ts";
 export type { SessionInfo, SessionStore } from "./src/server/sessions.ts";
 export type { AuthUserRecord, UserStore } from "./src/server/auth-users.ts";
@@ -153,6 +161,19 @@ export { authClient, createAuthClient } from "./src/browser/auth-client.ts";
 /** Ambient caller identity — who is invoking the current cell method /
  *  serverFn / effect. undefined = anonymous or server-origin. */
 export { serverUser } from "./src/server/auth-context.ts";
+/** Ambient request context — WHERE the current call came from (client IP,
+ *  headers, cookies). Read-only: to SET a cookie/status/header use `route()`.
+ *  undefined = server-origin work (schedules, boot, internal dispatch). */
+export { serverRequest } from "./src/server/auth-context.ts";
+export type { ServerRequest } from "./src/server/auth-context.ts";
+/** TOTP (2FA) primitives — for a fully hand-rolled 2FA UI/flow when the
+ *  built-in <SignIn/> isn't enough (realitio). Enrollment: `generateTotpSecret`
+ *  + `totpUri` (→ QR); verification: `verifyTotp`. */
+export {
+  generateTotpSecret,
+  totpUri,
+  verifyTotp,
+} from "./src/server/auth-totp.ts";
 export {
   race,
   sleep,

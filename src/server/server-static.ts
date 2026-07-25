@@ -140,6 +140,11 @@ export function createStaticHandler(deps: StaticDeps): {
 } {
   let lastError = ""; // last transpile error
   const errorMap = new Map<string, ErrorEntry>();
+  // Memoized: in prod, is the browser bundle (dist/app.js) actually present?
+  // A `--headless` build skips it, but the server still serves the UI shell —
+  // which then 404s on /app.js and shows a broken page. We detect that and
+  // serve a clear diagnostic at `/` instead (tbd#2).
+  let _uiBundlePresent: boolean | undefined;
 
   /** Returns errors from the last 30 seconds */
   function getRecentErrors() {
@@ -177,6 +182,39 @@ export function createStaticHandler(deps: StaticDeps): {
           generateDiagnosticHTML(graphResult.errors, title),
           { headers: { "Content-Type": "text/html", ...noCache } },
         );
+      }
+      // Headless-build footgun (tbd#2): prod is serving the UI shell but the
+      // browser bundle was never built (a `--headless` build), so /app.js will
+      // 404 and the page breaks blank. Say so plainly instead.
+      if (prod && absDistDir) {
+        if (_uiBundlePresent === undefined) {
+          try {
+            await Deno.stat(join(absDistDir, "app.js"));
+            _uiBundlePresent = true;
+          } catch {
+            _uiBundlePresent = false;
+          }
+        }
+        if (!_uiBundlePresent) {
+          deps.debug(
+            "headless build has no browser bundle (dist/app.js) — the UI is " +
+              "unavailable; serve a UI target or use the app headlessly (API/CLI)",
+          );
+          const body =
+            `<!doctype html><meta charset=utf-8><title>${title} — headless` +
+            `</title><body style="font:15px/1.6 system-ui;max-width:38rem;` +
+            `margin:12vh auto;padding:0 1.25rem;color:#ddd;background:#0d1117">` +
+            `<h1 style="font-size:1.15rem">Headless build — no browser UI</h1>` +
+            `<p>This server was built <code>--headless</code>, so no web UI ` +
+            `bundle (<code>/app.js</code>) exists. The server, cells, API ` +
+            `routes and serverFns all work — only the page here is unavailable.` +
+            `</p><p style="color:#8b949e">Build a UI target (browser / electron` +
+            ` / android) to serve a page, or use the app headlessly.</p>`;
+          return new Response(body, {
+            status: 503,
+            headers: { "Content-Type": "text/html", ...noCache },
+          });
+        }
       }
       return new Response(
         generateHTML(

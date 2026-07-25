@@ -224,6 +224,21 @@ A denied network action is dropped before dispatch and audit-logged
 (`[aio] auth: …`). Server-side code (effects, schedules, your own calls) always
 bypasses `access` — the server trusts its own code.
 
+**Row-level access.** The predicate also receives the method's call args, so
+"edit only your own row" is one line — no per-method owner re-check:
+
+```ts
+cell("docs", {
+  state: { byId: {} as Record<string, Doc> },
+  // (user, method, ...args) — args are the method's arguments
+  access: (user, _method, docId) =>
+    docs.byId[docId as string]?.owner === user?.id,
+  methods: {
+    rename(s, docId: string, title: string) {/* … */},
+  },
+});
+```
+
 ### Who is calling? (`serverUser`)
 
 Anywhere on the server — cell methods, serverFns, effects — `serverUser()`
@@ -247,6 +262,45 @@ cell("cart", {
 `undefined` means anonymous client (public/shared-key mode) or server-origin
 execution.
 
+### Where from? (`serverRequest`)
+
+The companion ambient: `serverRequest()` reports the transport facts of the call
+in flight — the things a caller can't forge — in cell methods, serverFns and
+effects, across `await`s, with no parameter threading:
+
+```ts
+import { cell, serverRequest } from "aio";
+
+cell("login", {
+  state: { tries: {} as Record<string, number> },
+  methods: {
+    attempt(s: { tries: Record<string, number> }, user: string, pw: string) {
+      const req = serverRequest();
+      const ip = req?.ip ?? "unknown"; // rate-limit key the client can't set
+      if ((s.tries[ip] = (s.tries[ip] ?? 0) + 1) > 5) {
+        throw new Error("slow_down");
+      }
+      const locale = req?.headers.get("accept-language") ?? "en";
+      const sid = req?.cookies.sid; // parsed for you
+    },
+  },
+});
+```
+
+| Field                | Notes                                                                   |
+| -------------------- | ----------------------------------------------------------------------- |
+| `ip`                 | Remote IP as the server sees it (`undefined` on transports without one) |
+| `headers`, `cookies` | Request headers + parsed cookies                                        |
+| `url`, `method`      | Full URL; `"GET"` for a WS upgrade                                      |
+| `via`                | `"http"` (route) or `"ws"` (frame on a live socket)                     |
+
+Over WS the facts are the **connection's** (the upgrade request), not the
+individual frame's. `undefined` means nothing requested this execution —
+schedules, boot, internal dispatch.
+
+It is deliberately **read-only**. To _set_ a cookie, status or header, use
+[`route()`](../examples/05-integrations.md) — one write path, not two.
+
 ### serverFn access
 
 Server functions accept the same rule vocabulary; inside the body,
@@ -257,6 +311,9 @@ export const api = serverFns("api", {
   refund: async (orderId: string) => {/* … */},
 }, { access: "admin" });
 ```
+
+The predicate form receives the invoked function name and its args too —
+`(user, fn, ...args) => boolean` — for per-function or row-level checks.
 
 ### Sessions (`sessions: true`)
 

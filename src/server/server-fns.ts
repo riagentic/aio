@@ -26,7 +26,10 @@ type FnMap = Record<string, (...args: any[]) => any>;
  *  predicate = custom check. Absent = connection-level auth only (as before).
  *  Direct server-side calls (via serverFn()/the returned map) never pass
  *  through this gate — the server trusts its own code. */
-export type ServerFnAccess = boolean | string | ((user?: AioUser) => boolean);
+export type ServerFnAccess =
+  | boolean
+  | string
+  | ((user: AioUser | undefined, fn: string, ...args: unknown[]) => boolean);
 
 const _registry = new Map<string, FnMap>();
 const _access = new Map<string, ServerFnAccess>();
@@ -52,13 +55,21 @@ export function serverFns<T extends FnMap>(
   return fns;
 }
 
-/** Evaluate a namespace's access rule for a network caller. */
-export function serverFnAllowed(ns: string, user?: AioUser): boolean {
+/** Evaluate a namespace's access rule for a network caller. The predicate form
+ *  also receives the invoked `fn` name and its `args`, so a namespace can do
+ *  per-function or row-level authz (realitio); existing `(user)` predicates
+ *  ignore the extra params, so this is backwards-compatible. */
+export function serverFnAllowed(
+  ns: string,
+  user?: AioUser,
+  fn = "",
+  args: unknown[] = [],
+): boolean {
   const rule = _access.get(ns);
   if (rule === undefined) return true; // no rule — connection auth only
   if (rule === true) return user !== undefined;
   if (typeof rule === "string") return user?.role === rule;
-  if (typeof rule === "function") return rule(user);
+  if (typeof rule === "function") return rule(user, fn, ...args);
   return false; // rule === false: namespace is server-side only
 }
 
@@ -105,7 +116,7 @@ export async function invokeServerFn(
   args: unknown[],
   user?: AioUser,
 ): Promise<{ ok: true; value: unknown } | { ok: false; error: string }> {
-  if (!serverFnAllowed(ns, user)) {
+  if (!serverFnAllowed(ns, user, name, args)) {
     console.warn(
       `[aio] auth: serverFn "${ns}.${name}" denied for ${
         user ? `user=${user.id} role=${user.role}` : "anonymous client"
