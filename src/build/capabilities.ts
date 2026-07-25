@@ -8,6 +8,8 @@
 // hole). Static + heuristic: it can't see permissions reached only through
 // fully-dynamic indirection, so it's a STARTING manifest to review, not a proof.
 
+/** The permission categories an app's source shows signs of needing — the input
+ *  to its least-privilege run flags. Conservative: any sign of use ⇒ true. */
 export type Capabilities = {
   net: boolean; // fetch / Deno.connect / Deno.listen
   read: boolean; // file reads, SQLite/KV, import of data

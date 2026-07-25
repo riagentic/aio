@@ -9,7 +9,7 @@ import {
 } from "../src/state/schedule.ts";
 import { join } from "@std/path";
 
-const PORT = 19810;
+const PORT = freePort();
 
 // Skip server protocol frames (boot ID, version hello, time-travel, etc.) —
 // only collect state/patches frames
@@ -720,6 +720,7 @@ Deno.test("integration: schedule.after effect from reducer fires once", async ()
 
 import { createDB, initSchema, loadTables, syncTables } from "../src/db/mod.ts";
 import { integer, pk, table, text } from "../src/server/sql.ts";
+import { freePort } from "../src/testing/server-test.ts";
 
 Deno.test("integration: db arrays persist to SQLite and restore on restart", async () => {
   const path = Deno.makeTempFileSync({ suffix: ".db" });

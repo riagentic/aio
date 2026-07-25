@@ -195,6 +195,8 @@ const S = {
   notice: { color: "#30a46c", fontSize: "0.9rem", margin: 0 },
 } as const;
 
+/** Props for the drop-in `<SignIn/>` — labels, which fields to show, and the
+ *  hooks to run after a successful sign-in. */
 export interface SignInProps {
   /** Heading above the form (default: app-neutral labels). */
   title?: string;

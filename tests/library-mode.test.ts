@@ -5,8 +5,11 @@
 // end-to-end server tests, the gap that let the TBD persistence bugs ship.
 
 import { assertEquals } from "jsr:@std/assert";
+import { freePort } from "../src/testing/server-test.ts";
 
-const PORT = 9330 + (Deno.pid % 200);
+const PORT = freePort();
+const PORT2 = freePort();
+const PORT3 = freePort();
 
 // Sanitizers ON: this is the whole point — libraryMode must not leak the signal
 // handlers / exit the process. If B5 regresses, this test fails or hangs.
@@ -63,7 +66,7 @@ Deno.test("libraryMode: same appId boots twice (no singleton lock)", async () =>
       client: "server-only",
       persist: false,
       libraryMode: true,
-      port: PORT + 1,
+      port: PORT2,
       baseDir: await Deno.makeTempDir(),
     });
   };
@@ -97,7 +100,7 @@ Deno.test("onStart can call a cell method (B6) — seeding works", async () => {
     client: "server-only",
     persist: false,
     libraryMode: true,
-    port: PORT + 2,
+    port: PORT3,
     baseDir: await Deno.makeTempDir(),
     onStart: () => {
       try {

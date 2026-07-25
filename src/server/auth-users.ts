@@ -89,6 +89,8 @@ export async function verifyPassword(
   return _timingSafeEqual(h, hashHex);
 }
 
+/** A stored user as the auth subsystem sees it — identity plus the flags that
+ *  gate a login (verified, TOTP). Never carries the password hash. */
 export interface AuthUserRecord extends AioUser {
   createdAt: number;
   email: string | null;
@@ -99,6 +101,11 @@ export interface AuthUserRecord extends AioUser {
 /** One-shot token kinds — each namespace is independent. */
 export type TokenKind = "verify" | "reset" | "totp" | "oidc";
 
+/** Password + TOTP user storage behind `auth: true` — create/verify users,
+ *  rotate passwords, and mint one-shot verify/reset/totp tokens. Usable
+ *  headless (`app.auth`) when an app brings its own login UI.
+ *
+ *  Convention: policy errors THROW, "not found" RETURNS false/null (below). */
 // Convention for this interface: methods THROW only on invalid INPUT a
 // programmer must fix (a policy violation — "user_exists", "invalid_id",
 // "password_too_short"), and RETURN a boolean/null for the normal "not found"

@@ -5,8 +5,10 @@
 // to an ARRAY slice (the intended auto-sync store) is still allowed.
 
 import { assert, assertRejects } from "jsr:@std/assert";
+import { freePort } from "../src/testing/server-test.ts";
 
-const PORT = 9360 + (Deno.pid % 150);
+const PORT = freePort();
+const PORT2 = freePort();
 
 Deno.test("db: table named after an object-slice cell throws at boot", async () => {
   const { cell, aio, table, pk, text } = await import("../mod.ts");
@@ -55,7 +57,7 @@ Deno.test("db: table with a non-colliding name boots fine", async () => {
     client: "server-only",
     persist: false,
     libraryMode: true,
-    port: PORT + 1,
+    port: PORT2,
     baseDir: Deno.makeTempDirSync(),
     db: { nft_rows: table({ mint: pk(), image: text() }) }, // distinct name → ok
   });

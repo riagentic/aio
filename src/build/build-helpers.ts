@@ -1,11 +1,15 @@
 // Build helpers — pure/extractable utilities used by build.ts
 import { dirname, join } from "@std/path";
 
-/** Known SHA-256 hashes for appimagetool builds (continuous release).
- *  Update when upgrading — run: `curl -sL <url> | sha256sum` */
+/** Known SHA-256 hashes for appimagetool builds (continuous release). Empty by
+ *  default — the download is checked for a valid ELF header, and integrity
+ *  verification is SKIPPED unless a hash is pinned here (the `continuous` tag
+ *  rolls, so a pin would need updating each roll). To pin, use RAW lowercase
+ *  hex with NO `sha256:` prefix — it is compared against `sha256sum`'s output
+ *  directly (`hashHex !== expected`). Get it with: `curl -sL <url> | sha256sum`. */
 const APPIMAGETOOL_HASHES: Record<string, string> = {
-  // x86_64: "sha256:<hash>", // Uncomment and fill when pinning a specific build
-  // aarch64: "sha256:<hash>",
+  // x86_64: "1a2b3c…",  // raw hex, no prefix — uncomment to pin a build
+  // aarch64: "4d5e6f…",
 };
 
 /** Slugify a string for use as binary/app name */

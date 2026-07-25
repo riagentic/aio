@@ -7,8 +7,9 @@
 import { assert } from "@std/assert";
 import { join } from "@std/path";
 import { aio, cell } from "../mod.ts";
+import { freePort } from "../src/testing/server-test.ts";
 
-const PORT = 9560 + (Deno.pid % 120);
+const PORT = freePort();
 const APP_ID = "shape-drift-boot";
 
 Deno.test("boot shape-drift: a stored field dropped from initialState surfaces on `migrations`", async () => {

@@ -2,8 +2,9 @@ import { assertEquals } from "@std/assert";
 import { createServer } from "../src/server/server.ts";
 import { connectCli } from "../src/server/cli-client.ts";
 import { join } from "@std/path";
+import { freePort } from "../src/testing/server-test.ts";
 
-const PORT = 19850;
+const PORT = freePort();
 
 // Wait until condition is true (polling with timeout)
 async function waitFor(fn: () => boolean, ms = 2000): Promise<void> {

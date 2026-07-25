@@ -2,7 +2,12 @@
 // Manages WS upgrades, per-client state, message routing, rate limiting, backpressure
 import type { AioUser } from "./aio.ts";
 import { invokeServerFn } from "./server-fns.ts";
-import { runWithUser } from "./auth-context.ts";
+import {
+  makeServerRequest,
+  runWithRequest,
+  runWithUser,
+  type ServerRequest,
+} from "./auth-context.ts";
 import {
   type ActionPayload,
   dec,
@@ -81,6 +86,9 @@ export type ClientMeta = {
   disconnected: boolean;
   /** Stable client key (usually remote IP) used for cross-connection abuse tracking. */
   clientKey?: string;
+  /** The upgrade request's transport facts — what `serverRequest()` answers for
+   *  every action / serverFn frame arriving on this socket. */
+  request?: ServerRequest;
   /** Negotiated wire-protocol version (A3). Undefined until the client's
    *  "proto" hello arrives. */
   protocolVersion?: number;
@@ -249,6 +257,9 @@ export function createWsManager(deps: WsDeps): WsManager {
     // and header access afterwards throws "Request closed" (Deno ≥2.9),
     // killing the serve callback on every WS connect.
     const userAgent = req.headers.get("user-agent") ?? "";
+    // Same reason: snapshot the request for serverRequest() BEFORE the upgrade
+    // consumes it. Every frame on this socket carries the connection's facts.
+    const request = makeServerRequest(req, clientKey, "ws");
     const { socket, response } = Deno.upgradeWebSocket(req);
     const clientId = crypto.randomUUID();
     const clientIndex = nextIndex();
@@ -268,6 +279,7 @@ export function createWsManager(deps: WsDeps): WsManager {
       disconnected: false,
       consecutiveDrops: 0,
       clientKey,
+      request,
     };
 
     socket.onerror = (e) => {
@@ -605,9 +617,17 @@ export function createWsManager(deps: WsDeps): WsManager {
           log.warn("ws", "invalid sfn frame — dropping");
           return;
         }
-        // Ambient identity: the fn body (and everything it awaits) can ask
-        // serverUser() who is calling; access rules check meta.user directly.
-        runWithUser(meta.user, () => invokeServerFn(ns, name, args, meta.user))
+        // Ambient identity + transport: the fn body (and everything it awaits)
+        // can ask serverUser() who is calling and serverRequest() from where;
+        // access rules check meta.user directly.
+        runWithRequest(
+          meta.request,
+          () =>
+            runWithUser(
+              meta.user,
+              () => invokeServerFn(ns, name, args, meta.user),
+            ),
+        )
           .then((result) => {
             try {
               socket.send(enc("sfnr", { cid, ...result }));
@@ -684,7 +704,12 @@ export function createWsManager(deps: WsDeps): WsManager {
     deps.debug(
       `ws: recv ${JSON.stringify(parsed)} user=${meta.user?.id ?? "anon"}`,
     );
-    const result = deps.dispatch(parsed, meta.user);
+    // The cell method (and everything it awaits) sees this socket's transport
+    // facts via serverRequest(); dispatch itself wraps runWithUser downstream.
+    const result = runWithRequest(
+      meta.request,
+      () => deps.dispatch(parsed, meta.user),
+    );
     // AIO-2.2 + return-value transport: emit a per-action ack carrying the
     // method's RETURN value if the client supplied a cid. We settle only AFTER
     // the dispatch promise resolves — for an async method that's on completion,

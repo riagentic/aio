@@ -39,6 +39,9 @@ testUI(App, "add a todo end-to-end", async (ui) => {
   DataTransfer).
 - Reads: `.text`, `.value`, `ui.surface()`, `ui.html()`; waits:
   `ui.waitFor(pred)`.
+- Server-authoritative reads: `ui.serverState()` / `ui.fullState(cell)` return
+  the UNFILTERED store — including `ui.exclude`d fields the client hides — so
+  you can assert on state a server route reads but the browser can't see.
 - Keyed list instances: `ui.find("TodoRow", key)`.
 - Cells run on the real local dispatch loop (the android runtime). Hermetic by
   default (`persist: false`, unique key — no state leaks between tests).
@@ -189,3 +192,40 @@ checks — asserting on the client DOM and the authoritative server state.
 Three fidelity levels, one mental model: `testUI` (pure vdom, fast) → `test:e2e`
 (real browser + real transport) — use the first for units, the second to prove
 "green" means "works".
+
+### Building your own e2e — `testServer` + `testBrowser`
+
+Rolling a custom e2e (a route, an auth flow, a real browser)? Two `aio/testing`
+helpers replace the boot + browser boilerplate apps used to hand-roll — both
+`await using`-ready, both self-cleaning:
+
+```ts
+import { testBrowser, testServer } from "aio/testing";
+
+Deno.test("checkout over the wire", async () => {
+  await using srv = await testServer({ cells: [cart], routes: {/* … */} });
+  // srv.url, srv.port, srv.app, srv.fetch(path), srv.state()
+  const res = await srv.fetch("/api/health");
+  assertEquals(res.status, 200);
+
+  await using browser = await testBrowser(`${srv.url}/`); // headless Chromium
+  // drive it via `am surface`/trigger over the trojan channel, then assert on
+  // srv.state(). The browser process is killed + its profile removed on dispose
+  // (and via an unload backstop, so a crashed test never leaks chrome).
+});
+```
+
+`testServer` boots in libraryMode on a free port with a throwaway data dir and
+`persist: false` (all overridable). `testBrowser` throws a clear error when no
+browser is found (set `$CHROMIUM_BIN` or pass `{ browserPath }`);
+`findChromium()` is exported if you want to gate a test on availability.
+
+Booting a server yourself instead? Take the port from `freePort()`, never from a
+constant or a pid formula — two test files that derive ports arithmetically
+eventually pick the same one and the suite flakes on whichever ran second:
+
+```ts
+import { freePort } from "aio/testing";
+
+const PORT = freePort(); // verified free at call time; one per server
+```

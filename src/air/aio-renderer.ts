@@ -54,6 +54,9 @@ import {
 } from "./renderer-flush.ts";
 import { _createHooks, _setFlushDevMode } from "./renderer-rerender.ts";
 import { _setSignalDevMode } from "../state/signal.ts";
+/** Re-export the reactive `signal` primitive so air consumers (e.g. the ui kit)
+ *  get it through the air surface without reaching into `state` directly. */
+export { signal } from "../state/signal.ts";
 import { _setHydrateDoc } from "./renderer-hydrate.ts";
 
 // -- Re-exports (public API -- all importers use aio-renderer.ts) ------

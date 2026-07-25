@@ -10,6 +10,9 @@ import {
   scanCapabilities,
 } from "./capabilities.ts";
 
+/** What `ship` publishes next to a binary: identity, integrity (hash +
+ *  signature), the capabilities scanned from source, and the least-privilege
+ *  flags to run it with. */
 export type ShipManifest = {
   name: string;
   version: string;

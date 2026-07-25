@@ -55,6 +55,19 @@ Everything below is the full reference, organized by category.
 | `dispatch.getQueueDepth()`    | Current number of pending actions in dispatch queue |
 | `dispatch.getEffectBacklog()` | Number of async effects currently in-flight         |
 
+## Server (HTTP + caller context)
+
+| API                                     | Description                                                                               |
+| --------------------------------------- | ----------------------------------------------------------------------------------------- |
+| `route(handler, opts?)`                 | A `routes: {}` handler with `:id` params, method guard, cookies, `ctx.json/text/redirect` |
+| `serverUser()`                          | Ambient caller identity — `undefined` = anonymous or server-origin                        |
+| `serverRequest()`                       | Ambient request facts — `{ ip, headers, cookies, url, method, via }`, read-only           |
+| `serverFn(def, ns)` / `serverFns(...)`  | Server-only functions callable from the client (typed WS proxy)                           |
+| `generateTotpSecret()` / `totpUri(...)` | TOTP enrollment primitives for a hand-rolled 2FA UI                                       |
+| `verifyTotp(secret, code)`              | Verify a TOTP code                                                                        |
+
+See [routes](../examples/05-integrations.md) and [auth](../auth/auth.md).
+
 ## Advanced
 
 | API                                        | Description                                         |
@@ -100,17 +113,17 @@ Method-native workflow tools — see
 
 ## AIR Hooks
 
-| Hook                        | Description                                        |
-| --------------------------- | -------------------------------------------------- |
-| `useAio<S>()`               | Proxy-tracked state access                         |
-| Direct cell access          | Scoped state + typed methods, selective re-renders |
-| `useProjection(fn, deps)`   | Structural sharing for derived data                |
-| `memo(Component, compare?)` | No-op (auto-memo via shallow prop compare)         |
-| `useLocal(initial)`         | Client-only state (not synced) -- `{ local, set }` |
-| `useTimeTravel()`           | Dev-mode time-travel controls                      |
-| `connectDevTools()`         | Connect to Redux DevTools browser extension        |
-| `disconnectDevTools()`      | Disconnect from Redux DevTools                     |
-| `page(current, routes)`     | State-based routing                                |
+| Hook                        | Description                                                                                                             |
+| --------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| `useAio<S>()`               | Proxy-tracked state access                                                                                              |
+| Direct cell access          | Scoped state + typed methods, selective re-renders                                                                      |
+| `useProjection(fn, deps)`   | Structural sharing for derived data                                                                                     |
+| `memo(Component, compare?)` | No-op (auto-memo via shallow prop compare)                                                                              |
+| `useLocal(initial)`         | Client-only state (not synced) — `const [v, setV] = useLocal(0)` (tuple, preferred; `{ local, set, patch }` also works) |
+| `useTimeTravel()`           | Dev-mode time-travel controls                                                                                           |
+| `connectDevTools()`         | Connect to Redux DevTools browser extension                                                                             |
+| `disconnectDevTools()`      | Disconnect from Redux DevTools                                                                                          |
+| `page(current, routes)`     | State-based routing                                                                                                     |
 
 ## Framework-agnostic Client
 
@@ -232,6 +245,16 @@ Method-native workflow tools — see
 | `t.randomActions(n)`        | Dispatch N random valid actions            |
 | `t.init()`                  | Reset to initial state                     |
 | `t.destroy()`               | Destroy cell                               |
+
+Beyond a single cell — all from `aio/testing`:
+
+| API                       | Description                                                                     |
+| ------------------------- | ------------------------------------------------------------------------------- |
+| `testUI(App, name, fn)`   | Mount an app and drive it through its semantic surface (no DOM selectors)       |
+| `testServer(config)`      | Boot a library-mode app on a free port + temp dir — `await using`, self-closing |
+| `testBrowser(url, opts?)` | Managed headless Chromium — killed on dispose, even if the test crashes         |
+| `findChromium()`          | Locate a browser binary (`$CHROMIUM_BIN` or the usual paths), or `null`         |
+| `freePort()`              | A port the OS says is free — never hardcode or derive one                       |
 
 ---
 

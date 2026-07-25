@@ -2,8 +2,9 @@
 // concrete exploit closed, so a refactor can't silently reopen it.
 import { assert, assertEquals } from "@std/assert";
 import { _resetAuthFails } from "../src/server/server-auth.ts";
+import { freePort } from "../src/testing/server-test.ts";
 
-const PORT = 9990 + (Deno.pid % 50);
+const PORT = freePort();
 const BASE = `http://127.0.0.1:${PORT}`;
 
 /** Boot a library-mode app with a cell whose access predicate discriminates

@@ -27,6 +27,7 @@ import { h } from "../src/air/vdom.ts";
 import { _setDocument, _unmount, mount } from "../src/air/aio-renderer.ts";
 import { createServer } from "../src/server/server.ts";
 import { join } from "@std/path";
+import { freePort } from "../src/testing/server-test.ts";
 
 type S = { count: number };
 type A = { type: string };
@@ -215,7 +216,7 @@ Deno.test("tt: parseTTCommand rejects garbage", () => {
 
 // ── Integration tests ────────────────────────────────────────────
 
-const TT_PORT = 19840;
+const TT_PORT = freePort();
 
 async function waitFor(fn: () => boolean, ms = 2000): Promise<void> {
   const start = Date.now();

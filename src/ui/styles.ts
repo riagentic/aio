@@ -99,6 +99,40 @@ export const UI_CSS: string = `
 .aio-spinner { display: inline-block; width: 1em; height: 1em; border: 2px solid var(--aio-line); border-top-color: var(--aio-accent); border-radius: 50%; animation: aio-spin .6s linear infinite; vertical-align: -0.15em; }
 @keyframes aio-spin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) { .aio-spinner { animation-duration: 1.6s; } }
+
+.aio-avatar { display: inline-flex; align-items: center; justify-content: center; border-radius: 50%; color: #fff; font-family: var(--aio-font); font-weight: 600; overflow: hidden; flex: none; user-select: none; }
+.aio-avatar__img { width: 100%; height: 100%; object-fit: cover; display: block; }
+
+.aio-confirm__msg { color: var(--aio-ink); font-family: var(--aio-font); line-height: 1.5; }
+
+.aio-page { display: inline-flex; gap: .25em; font-family: var(--aio-font); }
+.aio-page__btn { min-width: 2em; padding: .35em .55em; border: 1px solid var(--aio-line); background: var(--aio-bg); color: var(--aio-ink); border-radius: var(--aio-radius); cursor: pointer; font: inherit; }
+.aio-page__btn:hover:not(:disabled) { background: var(--aio-surface); }
+.aio-page__btn:disabled { opacity: .45; cursor: default; }
+.aio-page__btn--current { background: var(--aio-accent); border-color: var(--aio-accent); color: var(--aio-accent-ink); }
+
+.aio-toasts { position: fixed; bottom: 1rem; right: 1rem; display: flex; flex-direction: column; gap: .5em; z-index: 1100; max-width: min(24rem, 90vw); }
+.aio-toast { display: flex; align-items: center; gap: .6em; padding: .7em .9em; border-radius: var(--aio-radius); background: var(--aio-bg); color: var(--aio-ink); border: 1px solid var(--aio-line); border-left: 3px solid var(--aio-ink-soft); box-shadow: 0 6px 20px rgba(0,0,0,.18); font-family: var(--aio-font); animation: aio-toast-in .18s ease-out; }
+.aio-toast--success { border-left-color: #2f9e5e; }
+.aio-toast--warn { border-left-color: #d99117; }
+.aio-toast--error { border-left-color: var(--aio-danger); }
+.aio-toast__msg { flex: 1; line-height: 1.4; }
+.aio-toast__x { border: none; background: none; color: var(--aio-ink-soft); cursor: pointer; font-size: 1.2em; line-height: 1; padding: 0 .1em; }
+.aio-toast__x:hover { color: var(--aio-ink); }
+@keyframes aio-toast-in { from { opacity: 0; transform: translateY(6px); } }
+@media (prefers-reduced-motion: reduce) { .aio-toast { animation: none; } }
+
+.aio-md { color: var(--aio-ink); font-family: var(--aio-font); line-height: 1.6; }
+.aio-md__p { margin: 0 0 .8em; }
+.aio-md h1, .aio-md h2, .aio-md h3, .aio-md h4, .aio-md h5, .aio-md h6 { margin: 1.2em 0 .5em; line-height: 1.25; }
+.aio-md__a { color: var(--aio-accent); }
+.aio-md__code { background: var(--aio-surface); border: 1px solid var(--aio-line); border-radius: 4px; padding: .1em .35em; font-size: .9em; }
+.aio-md__pre { background: var(--aio-surface); border: 1px solid var(--aio-line); border-radius: var(--aio-radius); padding: .8em 1em; overflow-x: auto; margin: 0 0 .8em; }
+.aio-md__pre code { background: none; border: none; padding: 0; font-size: .9em; }
+.aio-md__list { margin: 0 0 .8em; padding-left: 1.4em; }
+.aio-md__quote { margin: 0 0 .8em; padding: .2em 0 .2em 1em; border-left: 3px solid var(--aio-line); color: var(--aio-ink-soft); }
+.aio-md__hr { border: none; border-top: 1px solid var(--aio-line); margin: 1.2em 0; }
+.aio-md__img { max-width: 100%; border-radius: var(--aio-radius); }
 `.trim();
 
 /** Renders the `aio/ui` base stylesheet. Place once, near your app root.

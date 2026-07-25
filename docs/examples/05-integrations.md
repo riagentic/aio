@@ -27,6 +27,50 @@ await aio.run({
 });
 ```
 
+### `route()` — params, method guard, cookies, JSON
+
+Raw `(req) => Response` handlers always work, but for typical API/auth endpoints
+`route()` adds `:id` params, a method guard, cookie parse/serialize, and a JSON
+helper — no library, same `routes` record:
+
+```ts
+import { aio, route } from "aio";
+
+await aio.run({
+  appId: "api",
+  cells: [],
+  routes: {
+    "/api/users/:id": route((ctx) =>
+      ctx.json({ id: ctx.params.id, ip: ctx.ip })
+    ),
+
+    "/login": route(async (ctx) => {
+      const { user } = await ctx.req.json();
+      ctx.setCookie("sid", `sess-${user}`, {
+        httpOnly: true,
+        sameSite: "Lax",
+        path: "/",
+      });
+      return ctx.json({ ok: true });
+    }, { method: "POST" }),
+
+    "/upload": route(async (ctx) => {
+      const file = (await ctx.req.formData()).get("file"); // multipart just works
+      return ctx.json({ received: (file as File)?.name });
+    }, { method: "POST" }),
+  },
+});
+```
+
+`ctx` gives you `req`, `url`, `params`, `query`, `cookies`, `setCookie()`,
+`json()`/`text()`/`redirect()`, plus `user` (the resolved caller, in per-user /
+token modes) and `ip`. A `:param` route (`/x/:id`) matches like the existing
+`/prefix/*`; queued `setCookie()`s are applied to whatever Response you return.
+
+Cell methods and serverFns the handler calls don't need those threaded down —
+they can read the same request from [`serverRequest()`](../auth/auth.md), which
+also answers for calls arriving over the WebSocket.
+
 ## File uploads (outside the state channel)
 
 Files don't belong in cell state (they'd be persisted, diffed, and broadcast).

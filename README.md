@@ -8,7 +8,7 @@
   One codebase → browser, Electron, and Android.
 </p>
 
-<p align="center"><code>v1.0.0-alpha34</code> · <a href="LICENSE">MIT</a></p>
+<p align="center"><code>v1.0.0-alpha35</code> · <a href="LICENSE">MIT</a></p>
 
 ## Get started — four lines
 
@@ -96,9 +96,9 @@ Everything below ships in the box — no plugins, no assembly.
 | **Sync**                      | WebSocket delta patches, per-action acks, offline queue, CRDT merge                                                                                | [sync](docs/persistence/crdt.md)            |
 | **Async workflows**           | Plain async methods + `until`/`race`/`sleep`, cancellable via `cancelOn`                                                                           | [methods](docs/state/methods.md)            |
 | **Scheduling**                | `after` / `every` / `at` / cron / exponential `backoff`                                                                                            | [scheduling](docs/state/scheduling.md)      |
-| **Server**                    | Custom HTTP routes, per-user filtering, auto-TLS                                                                                                   | [auth](docs/auth/auth.md)                   |
+| **Server**                    | HTTP routes with `:id` params, cookies + JSON (`route()`), ambient `serverRequest()`, per-user filtering, auto-TLS                                 | [routes](docs/examples/05-integrations.md)  |
 | **Auth**                      | `auth: true` = full login: signup, sessions, `<SignIn/>`, TOTP 2FA, OIDC, roles                                                                    | [auth](docs/auth/auth.md)                   |
-| **Testing**                   | `testCell` harness + semantic `testUI` — zero setup, hermetic                                                                                      | [testing](docs/testing/cell-testing.md)     |
+| **Testing**                   | `testCell` + semantic `testUI`, plus `testServer`/`testBrowser` for real e2e — zero setup, hermetic                                                | [testing](docs/testing/cell-testing.md)     |
 | **Build — 5 targets**         | Browser · Electron · Android · CLI · service, single-binary `deno compile`; `deno task build` builds a whole fleet (server + clients) into `dist/` | [targets](docs/build/targets.md)            |
 | **`am` CLI + amui GUI**       | Manage + inspect running apps: state, SQL, logs, trigger UI, metrics — CLI, or the visual [amui](docs/clients/amui.md) app manager                 | [am](docs/clients/app-manager.md)           |
 | **Debug & DX**                | Time-travel, blank-screen guard, dev graph validator, vitals, live reload                                                                          | [debug](docs/debugging/troubleshooting.md)  |
