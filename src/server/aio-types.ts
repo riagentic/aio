@@ -188,6 +188,8 @@ export type AioConfig<S, A, E> = {
   ) => Record<string, unknown> | null;
   /** Internal: composed cell names — passed from CellsConfig for diagnostics */
   _cellNames?: string[];
+  /** Internal: cell defs flagged `worker: true` (see src/server/cell-worker.ts). */
+  _workerCells?: import("../state/cell-types.ts").CellDef[];
   /** Internal: health getter factory — passed from CellsConfig for diagnostics */
   _healthGetter?: (
     state: unknown,

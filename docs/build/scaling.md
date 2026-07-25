@@ -190,11 +190,11 @@ Move large collections to SQLite and query on demand.
 
 ### Many concurrent clients (>100)
 
-| Setting              | Value              | Why                                               |
-| -------------------- | ------------------ | ------------------------------------------------- |
-| `ui.forUser`         | per-user filtering | Less data per broadcast                           |
-| `syncIntervalMs`     | raise to 100-200ms | Batches rapid state changes into fewer broadcasts |
-| `fullStateThreshold` | raise to 512-1024  | Sends full state when delta is almost as large    |
+| Setting              | Value              | Why                                                                                                                                                                                     |
+| -------------------- | ------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ui.forUser`         | per-user filtering | Less data per broadcast                                                                                                                                                                 |
+| `syncIntervalMs`     | raise to 100-200ms | Batches rapid _background_ state changes into fewer broadcasts — a client's own action still flushes immediately ([interactive priority](../persistence/delta.md#broadcast-throttling)) |
+| `fullStateThreshold` | raise to 512-1024  | Sends full state when delta is almost as large                                                                                                                                          |
 
 ### High-frequency actions (>10/sec)
 

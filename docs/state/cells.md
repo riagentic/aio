@@ -55,6 +55,7 @@ effects run → deltas broadcast back.
 | `listensTo` | `(Function \| string)[]`   | No       | Declare foreign actions this cell observes — pass bound methods                                               |
 | `validate`  | `(s) => true \| string`    | No       | State validator, runs after every mutation — string = rejection message                                       |
 | `sync`      | `true \| SyncConfig`       | No       | Enable CRDT sync — see [CRDT docs](../persistence/crdt.md)                                                    |
+| `worker`    | `boolean`                  | No       | Run this cell's methods on their own thread — see [cell workers](cell-workers.md)                             |
 | `persist`   | `CellFieldFilter`          | No       | `"all"`, `"none"`, `{ include: [...] }`, `{ exclude: [...] }` — default `"all"`                               |
 | `ui`        | `CellVisibility`           | No       | Same as persist, plus optional `forUser` for per-user filtering — default `"all"`                             |
 | `version`   | `number`                   | No       | State-shape version — pairs with `onMigrate`                                                                  |

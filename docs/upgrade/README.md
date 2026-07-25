@@ -7,6 +7,10 @@ One guide per version migration. Find your current version and follow the steps.
 - **[The aio restructure (alpha27+)](restructure.md)** — every restructure
   breaking change with before → after recipes (methods-only cells, instances,
   SQLite-only persistence, `aio/extras`, wire catalog)
+- [alpha35 → alpha36](from-alpha35-to-alpha36.md) — a thread of its own: cell
+  workers (`worker: true`), interactive-priority broadcasts, a one-frame dev
+  reduce budget, `aiol --safe-fix` upgrade rewrites, cell-edit dev restart; all
+  additive, no code changes required
 - [alpha34 → alpha35](from-alpha34-to-alpha35.md) — the edges: `route()`
   (params, method guard, cookies, JSON), ambient `serverRequest()`, row-level
   `access`, UI kit + safe `<Markdown/>`, `testServer`/`testBrowser`/`freePort`;

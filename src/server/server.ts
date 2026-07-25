@@ -289,6 +289,7 @@ export function createServer(config: ServerConfig): ServerHandle {
       debug,
       broadcastWs: (msg) => broadcaster.broadcastRaw(msg),
       onReload: config.onReload,
+      onCellChange: config.onCellChange,
       onGraphResult: (result) => graphValidation?.setResult(result),
     });
     watcher.start();

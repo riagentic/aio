@@ -217,6 +217,27 @@ methods: {
 **Writes are batched** — consecutive assignments in the same sync frame produce
 one action. Each `await` boundary starts a new batch.
 
+> ### Keep a method prompt — the one rule that decides UI feel
+>
+> A method body runs on the server's single dispatch path, so the time it spends
+> is time **every** connected client's next action waits. Three cases:
+>
+> | The work is…                     | Do this                                                                       |
+> | -------------------------------- | ----------------------------------------------------------------------------- |
+> | fast (a few ms of state shaping) | just write it — this is the common case                                       |
+> | I/O (fetch, file, DB)            | `async` + `await` — the runtime waits, your thread doesn't                    |
+> | CPU-bound or a sync-only API     | `await schedule.blocking(id, fn, arg)` — a real worker thread                 |
+> | every method here can be heavy   | `worker: true` on the cell — its own thread ([cell workers](cell-workers.md)) |
+>
+> Same idea for big arrays: `s.list.push(x)` emits one `add` patch, while
+> `s.list = [...s.list, x]` re-ships the whole list on every commit
+> ([delta](../persistence/delta.md#append-in-place-dont-replace)).
+>
+> `await` alone does **not** rescue CPU work: awaiting a function that computes
+> for 200ms blocks the isolate for 200ms. In dev, aio holds a reduce to one
+> frame (16ms) and tells you which action broke it. See
+> [performance](../debugging/performance.md#move-it-off-thread).
+
 > ### ⚠️ Every `await` is a commit + render point
 >
 > This is the one async-method behavior to internalize. When your method hits an

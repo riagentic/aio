@@ -3,6 +3,7 @@
 import { notifyMethodCancel } from "./method-cancel.ts";
 import { clearLastRejection, setLastRejection } from "./rejection-tracker.ts";
 import {
+  applyPatches,
   current,
   type Draft,
   isDraft,
@@ -25,6 +26,10 @@ import {
 import type { ReduceBreakdown } from "../diagnostics/time-travel.ts";
 
 type CellPatches = { cell: string; ops: Patch[] };
+
+/** Internal action carrying a worker cell's committed patches into the main
+ *  isolate's state. See src/server/cell-worker.ts. */
+export const WORKER_PATCH_ACTION = "__aioWorkerPatch";
 
 export type ReduceResult = {
   state: Record<string, unknown>;
@@ -403,6 +408,30 @@ export function buildRootReducer(
     const allEffects: (Msg | ScheduleEffect | OwnEffect)[] = [];
     const allPatches: Array<{ cell: string; ops: Patch[] }> = [];
     const { disabledCells, cellLastAction, perfCheck: _perfCheck } = ctx;
+
+    // A `worker: true` cell's state lives in its worker; it streams the patches
+    // each commit produced and the main isolate applies them HERE — through the
+    // normal dispatch path, so persistence, broadcast and time-travel see the
+    // change exactly as they see a local one. Internal type (`__`-prefixed), so
+    // the network can never inject it (_isFrameworkInternalActionType).
+    if (action.type === WORKER_PATCH_ACTION) {
+      const { cell, ops } = (action.payload ?? {}) as {
+        cell?: string;
+        ops?: Patch[];
+      };
+      const owner = cell ? ownByPrefix.get(cell) : undefined;
+      if (!owner || !ops || ops.length === 0) {
+        return { state: currentState, effects: [] };
+      }
+      const slice = (currentState[cell!] ?? {}) as Record<string, unknown>;
+      const next = applyPatches(slice, ops);
+      currentState = { ...currentState, [cell!]: next };
+      return {
+        state: currentState,
+        effects: [],
+        patches: [{ cell: cell!, ops }],
+      };
+    }
 
     // Handle lifecycle actions (Init/Destroy)
     let isLifecycle = false;

@@ -1,0 +1,120 @@
+// An `aio/<entry>` import that the app's deno.json doesn't map cannot resolve —
+// and Deno's message ("not a dependency and not in import map") reads like the
+// entry doesn't exist, so the app author blames the docs. The scaffold now maps
+// every public entry, and aiol catches (and fixes) the apps scaffolded before.
+import { assert, assertEquals } from "@std/assert";
+import { join } from "@std/path";
+import { buildContext } from "../aiol/context.ts";
+import { checkImports } from "../aiol/checks.ts";
+
+async function project(
+  imports: Record<string, string>,
+  source: string,
+): Promise<string> {
+  const dir = await Deno.makeTempDir();
+  await Deno.mkdir(join(dir, "src"), { recursive: true });
+  await Deno.writeTextFile(join(dir, "deno.json"), JSON.stringify({ imports }));
+  await Deno.writeTextFile(join(dir, "src", "cell.ts"), source);
+  return dir;
+}
+
+async function importIssues(dir: string) {
+  const { ctx, report } = await buildContext(dir);
+  await checkImports(ctx);
+  return report.issues.filter((i) => i.area === "imports");
+}
+
+const SCAFFOLD_4 = {
+  "aio": "./dep/aio/mod.ts",
+  "aio/air": "./dep/aio/src/air.ts",
+  "aio/jsx-runtime": "./dep/aio/src/jsx-runtime.ts",
+  "aio/testing": "./dep/aio/src/cell-test.ts",
+};
+
+Deno.test("aiol imports: an unmapped aio entry is an ERROR, with the mapping as the fix", async () => {
+  const dir = await project(
+    SCAFFOLD_4,
+    `import { Markdown } from "aio/ui";\nexport const M = Markdown;\n`,
+  );
+  try {
+    const issues = await importIssues(dir);
+    assertEquals(issues.length, 1);
+    assertEquals(
+      issues[0]!.severity,
+      "error",
+      "an unresolvable import is fatal",
+    );
+    assert(issues[0]!.message.includes("aio/ui"), issues[0]!.message);
+
+    assertEquals(await issues[0]!.safeFix!(dir), true);
+    const dj = JSON.parse(await Deno.readTextFile(join(dir, "deno.json")));
+    assertEquals(
+      dj.imports["aio/ui"],
+      "./dep/aio/src/ui/mod.ts",
+      "the fix derives the path from how the app already maps bare `aio`",
+    );
+    assertEquals(await importIssues(dir), [], "and the project lints clean");
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+Deno.test("aiol imports: a JSR-pinned app gets a sub-path export, not a file path", async () => {
+  const dir = await project(
+    { "aio": "jsr:@riagentic/aio@1.0.0-alpha35" },
+    `import { createDB } from "aio/db";\nexport const d = createDB;\n`,
+  );
+  try {
+    const issues = await importIssues(dir);
+    assertEquals(issues.length, 1);
+    assertEquals(await issues[0]!.safeFix!(dir), true);
+    const dj = JSON.parse(await Deno.readTextFile(join(dir, "deno.json")));
+    assertEquals(dj.imports["aio/db"], "jsr:@riagentic/aio@1.0.0-alpha35/db");
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+Deno.test("aiol imports: a mapped entry, and a non-aio specifier, are left alone", async () => {
+  const dir = await project(
+    { ...SCAFFOLD_4, "aio/ui": "./dep/aio/src/ui/mod.ts" },
+    `import { Markdown } from "aio/ui";
+import { assertEquals } from "@std/assert";
+// "aio/db" in a comment is not an import
+export const M = [Markdown, assertEquals];
+`,
+  );
+  try {
+    assertEquals(await importIssues(dir), []);
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+Deno.test("scaffold: `am create` maps every public aio entry point", async () => {
+  // The generated deno.json must cover the whole documented surface — this is
+  // the regression that made `import { createDB } from "aio/db"` fail in an app
+  // scaffolded straight from `am create`.
+  const create = await Deno.readTextFile("src/am/am-cmd-create.ts");
+  const deno = JSON.parse(await Deno.readTextFile("deno.json")) as {
+    exports: Record<string, string>;
+  };
+  const entries = Object.keys(deno.exports)
+    .filter((k) => k !== ".")
+    .map((k) => `aio${k.slice(1)}`)
+    // Tooling entries an app runs as a task, not imports.
+    .filter((s) =>
+      ![
+        "aio/build",
+        "aio/build-all",
+        "aio/dev-android",
+        "aio/am",
+        "aio/amui",
+        "aio/doctor",
+        "aio/aiol",
+      ]
+        .includes(s)
+    );
+  const missing = entries.filter((s) => !create.includes(`"${s}"`));
+  assertEquals(missing, [], "scaffolded apps must be able to import these");
+});

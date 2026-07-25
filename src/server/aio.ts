@@ -27,6 +27,10 @@ import { bootStorage, replaySyncOps } from "./aio-boot.ts";
 import { replayJournal } from "./journal.ts";
 import { createTimeline } from "./timeline.ts";
 import { setupDispatch } from "./aio-dispatch.ts";
+import { hostedCellName, startCellWorkerHost } from "./cell-worker-host.ts";
+import { createCellWorkerPool } from "./cell-worker-pool.ts";
+import { isScheduleEffect } from "../state/schedule.ts";
+import { DEV_FRAME_BUDGET_MS } from "../state/dispatch.ts";
 import { setupTransport } from "./aio-server.ts";
 import { startLifecycle } from "./aio-lifecycle.ts";
 import {
@@ -242,6 +246,27 @@ async function run(a?: any, b?: any): Promise<AioApp<any, any>> {
       );
     }
     const cellEntries = filterCellsByIsolate(allCells, isolate);
+
+    // ── Cell-worker host mode ──
+    // A `worker: true` cell is hosted by a worker whose entry is THIS module,
+    // so aio.run() runs again in that thread. Bind only the hosted cell and
+    // serve calls — no server, no persistence, no client, no second app.
+    const hostedCell = hostedCellName();
+    if (hostedCell) {
+      const defs = cellEntries.map((e) => "__aio" in e ? e : e.cell);
+      const hosted = defs.find((f) => f.__aio.id === hostedCell);
+      if (!hosted) {
+        throw new Error(
+          `[aio] cell worker for "${hostedCell}": the app entry booted without ` +
+            `that cell (cells: ${
+              defs.map((f) => f.__aio.id).join(", ") || "none"
+            }). A worker cell must be in the same aio.run({ cells }) list as ` +
+            `on the main isolate.`,
+        );
+      }
+      // Never resolves — the worker lives as long as its owner.
+      return await startCellWorkerHost(hosted) as never;
+    }
 
     // Imported-but-unregistered cells (opt-in `strictCells`): a cell() that ran
     // (its module was imported) but was left out of aio.run({ cells }) dispatches
@@ -614,6 +639,10 @@ async function _run<S, A, E>(
   });
   const onPerf = buildOnPerf(tt, vitalsSystem);
 
+  // Set once the worker pool exists (below); a jump before that has nothing
+  // to re-seed.
+  let _reseedWorkerCells: () => void = () => {};
+
   function handleTTCommand(cmd: string, arg?: number): void {
     if (!tt) return;
     const prev = tt;
@@ -639,7 +668,12 @@ async function _run<S, A, E>(
     }
     if (tt === prev) return;
     const restored = stateAt(tt);
-    if (restored !== null) state = restored;
+    if (restored !== null) {
+      state = restored;
+      // A worker cell's copy would otherwise keep mutating the state we just
+      // discarded — re-seed it from the restored slice.
+      _reseedWorkerCells();
+    }
     log.debug(
       `time-travel: ${cmd}${
         arg !== undefined ? ":" + arg : ""
@@ -707,7 +741,15 @@ async function _run<S, A, E>(
     onUdsBroadcast: udsCtrl.onUdsBroadcast,
     onPerf,
     perfCheck: config.perfCheck,
-    perfBudget: config.perfBudget,
+    // Dev holds reduce to ONE FRAME (16ms) instead of the 100ms prod budget:
+    // a reduce is on the server's single dispatch path, so every millisecond it
+    // takes is a millisecond every client's next action waits. Dev-stricter is
+    // the allowed direction (observe-only, throttled to one report per action
+    // type per 10s) — it teaches the "keep actions instant, move compute
+    // off-thread" habit while the app is still small. Prod keeps 100ms so a
+    // deployed app doesn't chatter. Override either with `perfBudget`.
+    perfBudget: config.perfBudget ??
+      (prod ? undefined : { reduce: DEV_FRAME_BUDGET_MS }),
     perfLog: (source, type, duration, budget, breakdown) =>
       getLogger()?.perf(source, type, duration, budget, breakdown),
     freezeState: config.freezeState ?? !prod,
@@ -764,7 +806,64 @@ async function _run<S, A, E>(
     : null;
 
   // Shutdown orchestrator
-  const { shutdown } = createShutdownOrchestrator({
+  // ── Cell workers ──
+  // Actions for a `worker: true` cell bypass the main queue entirely; only the
+  // patches they commit come back through `dispatch`. Inert (identity routing)
+  // when no cell is flagged.
+  const workerPool = createCellWorkerPool({
+    // libraryMode means the entry module is a TEST (or a host app), not this
+    // app — spawning a worker on it would re-run the test file in another
+    // thread. Worker cells then run in-isolate, exactly like testCell: same
+    // behavior, no isolation, and it says so once.
+    cells: (config.libraryMode
+      ? []
+      : config._workerCells ?? []) as unknown as Parameters<
+        typeof createCellWorkerPool
+      >[0]["cells"],
+    entry: Deno.mainModule,
+    prod,
+    getSlice: (cell) =>
+      ((state as Record<string, unknown>)[cell] ?? {}) as Record<
+        string,
+        unknown
+      >,
+    dispatch: (a) =>
+      dispatch(a as unknown as A),
+    // An effect handed back by a worker executes HERE, where the runtime lives.
+    // A schedule effect is NOT an action — dispatching it would do nothing at
+    // all, and the schedule would silently never fire.
+    runEffect: (effect) => {
+      if (isScheduleEffect(effect)) {
+        scheduleManager.handle(effect);
+        return;
+      }
+      void dispatch(effect as unknown as A); // cross-cell action
+    },
+  });
+  if (
+    config.libraryMode && (config._workerCells ?? []).length > 0 && !prod
+  ) {
+    log.info(
+      "aio",
+      `libraryMode: worker cells (${
+        (config._workerCells ?? []).map((f) => f.__aio.id).join(", ")
+      }) run in-isolate — a test owns the entry module, so there is nothing to ` +
+        `host them from. Behavior is identical; isolation is not.`,
+    );
+  }
+  _reseedWorkerCells = () => workerPool.reseed();
+  const appDispatch = workerPool.size > 0
+    ? (workerPool.route(
+      (a) => dispatch(a as unknown as A),
+    ) as unknown as typeof dispatch)
+    : dispatch;
+  if (workerPool.size > 0) {
+    // Boot fails loudly if a host can't bind — a silently missing worker cell
+    // would answer every call with a hang.
+    await workerPool.ready();
+  }
+
+  const { shutdown: _shutdownRuntime } = createShutdownOrchestrator({
     sessionStore,
     userStore,
     flushPersist: persistence.flushPersist,
@@ -793,8 +892,16 @@ async function _run<S, A, E>(
     log,
   });
 
+  /** Stop the worker threads before the rest of the runtime: their state is
+   *  already replicated here, so this can only cut an in-flight method short —
+   *  never lose a committed write. */
+  const shutdown = async (): Promise<void> => {
+    await workerPool.close();
+    await _shutdownRuntime();
+  };
+
   const app = buildAppObject<S, A>({
-    dispatch,
+    dispatch: appDispatch,
     getState: () => state,
     setState: (s) => {
       state = s;
@@ -810,6 +917,7 @@ async function _run<S, A, E>(
     },
     getServer: () => server,
     udsBroadcastFull: () => udsCtrl.broadcastFull(),
+    onStateReplaced: () => workerPool.reseed(),
     shutdown,
     sessionStore,
     userStore,
@@ -883,7 +991,11 @@ async function _run<S, A, E>(
     },
     getState: () => state,
     getUIState: (s, user?) => getUIState(s, user),
-    dispatch: (action) => dispatch(action as A),
+    // ROUTED dispatch: a network-borne action for a `worker: true` cell must
+    // reach its worker, not be reduced here. The raw dispatcher would have run
+    // the method on the main isolate — no isolation at all, and the worker's
+    // copy of the slice would drift out of sync with ours.
+    dispatch: (action) => appDispatch(action as A),
     app: {
       snapshot: () => app.snapshot!(),
       loadSnapshot: (json) => app.loadSnapshot!(json),

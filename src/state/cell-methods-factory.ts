@@ -269,6 +269,7 @@ export function createCellFromMethods<
     uiForUser: extractForUser(config.ui),
     uiPublicFields: extractPublicFields(config.ui),
     syncConfig: config.sync ? normalizeSyncConfig(config.sync) : undefined,
+    worker: config.worker === true,
     version: config.version ?? 0,
     onMigrate: config.onMigrate as
       | ((

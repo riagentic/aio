@@ -210,6 +210,33 @@ methods: {
 }
 ```
 
+### `schedule.blocking(id, fn, arg?)` — run it off the main thread
+
+The odd one out: imperative (returns a Promise) because it moves **work**, not
+an action. The function runs on a worker pool — a real thread — so CPU-bound or
+FFI work can't freeze rendering, the dispatch loop, or anyone else's actions.
+
+```ts
+methods: {
+  async build(s, raw: number[]) {
+    s.status = "building"; // instant
+    s.rows = await schedule.blocking("report:build", (input) => {
+      // Self-contained: no closures — everything arrives as `arg`.
+      return (input as number[]).map((n) => ({ id: n, score: Math.sqrt(n) * n }));
+    }, raw); // seconds of CPU, off-thread
+    s.status = "done";
+  },
+  stop() {
+    schedule.blocking.cancel("report:build"); // terminates the worker
+  },
+}
+```
+
+The function is serialized to source, so it must be **self-contained** (no
+closures — pass data as `arg`), and `arg`/result must be structured-cloneable.
+Full contract and the "which tool for which work" table:
+[performance → move it off-thread](../debugging/performance.md#move-it-off-thread).
+
 ---
 
 ## ID rules

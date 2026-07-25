@@ -9,25 +9,25 @@ app. CLI flags override config values:
 deno task dev --port=3000 --client=browser --no-persist --title="My App"
 ```
 
-| Flag               | Effect                                                                                                      |
-| ------------------ | ----------------------------------------------------------------------------------------------------------- |
-| `--port=N`         | Override server port                                                                                        |
-| `--client=X`       | Client mode: `electron`, `browser`, `cli`, `server-only` (replaces `--no-electron` / `--headless`)          |
-| `--no-persist`     | Disable SQLite state persistence                                                                            |
-| `--keep-server`    | Keep server running after Electron window closes                                                            |
-| `--kill-existing`  | Kill existing instance before starting (use with `singleton: true`)                                         |
-| `--title=X`        | Override window/page title                                                                                  |
-| `--verbose`        | Verbose logging — actions, state, effects, WS, HTTP, persistence                                            |
-| `--prod`           | Force prod mode — serve pre-built `dist/app.js` (auto-detected in compiled binaries)                        |
-| `--width=N`        | Override Electron window width (default: 800)                                                               |
-| `--height=N`       | Override Electron window height (default: 600)                                                              |
-| `--expose`         | Bind `0.0.0.0` + auto-HTTPS — share app with other devices on LAN (no auth by default; `key: true` opts in) |
-| `--cert=PATH`      | TLS certificate file (PEM) — used with `--expose` (auto-generated if omitted)                               |
-| `--key=PATH`       | TLS private key file (PEM) — used with `--expose` (auto-generated if omitted)                               |
-| `--transport=X`    | Transport mode: `uds`, `ws`, or `auto` (default: `auto`)                                                    |
-| `--server-url=URL` | Thin client mode — launch Electron connecting to remote aio server (no local server)                        |
-| `--version`        | Print aio version and exit                                                                                  |
-| `--help`           | Show available CLI flags and exit                                                                           |
+| Flag               | Effect                                                                                                        |
+| ------------------ | ------------------------------------------------------------------------------------------------------------- |
+| `--port=N`         | Override server port                                                                                          |
+| `--client=X`       | Client mode: `electron`, `browser`, `cli`, `server-only` (replaces `--no-electron` / `--headless`)            |
+| `--no-persist`     | Disable SQLite state persistence                                                                              |
+| `--keep-server`    | Keep server running after Electron window closes                                                              |
+| `--kill-existing`  | Kill existing instance before starting (use with `singleton: true`)                                           |
+| `--title=X`        | Override window/page title                                                                                    |
+| `--verbose`        | Verbose logging — actions, state, effects, WS, HTTP, persistence                                              |
+| `--prod`           | Force prod mode — serve pre-built `dist/app.js` (auto-detected in compiled binaries)                          |
+| `--width=N`        | Override Electron window width (default: 800)                                                                 |
+| `--height=N`       | Override Electron window height (default: 600)                                                                |
+| `--expose`         | Bind `0.0.0.0` + auto-HTTPS — share app with other devices on LAN (no auth by default; `key: true` opts in)   |
+| `--tls-cert=PATH`  | TLS certificate file (PEM) — used with `--expose` (auto-generated if omitted; `--cert` is a deprecated alias) |
+| `--tls-key=PATH`   | TLS private key file (PEM) — used with `--expose` (auto-generated if omitted; `--key` is a deprecated alias)  |
+| `--transport=X`    | Transport mode: `uds`, `ws`, or `auto` (default: `auto`)                                                      |
+| `--server-url=URL` | Thin client mode — launch Electron connecting to remote aio server (no local server)                          |
+| `--version`        | Print aio version and exit                                                                                    |
+| `--help`           | Show available CLI flags and exit                                                                             |
 
 **Precedence:** CLI flags > config object > defaults
 
@@ -128,6 +128,31 @@ automatically reload.
 
 **No state is lost** — state lives on the server, so reloading the browser is
 free. The UI picks up exactly where it left off.
+
+### Cell edits restart the app
+
+A browser reload can't help a cell: cells run **in the server process**, so new
+UI reading old cell logic is the same bug wearing a disguise. When a changed
+file declares a `cell(...)`, dev restarts the app for you:
+
+```
+INFO  watch  cell file changed (cart.ts) — restarting the app
+```
+
+The app tears down first (port released, persistence flushed), then comes back
+on the same port; open tabs notice the new boot ID and reload themselves. The
+process that started the app becomes a thin supervisor and re-launches it, so
+the process depth stays at two no matter how many times you save.
+
+It steps aside — warning as before, telling you to restart by hand — when it
+can't relaunch faithfully:
+
+- **not started with `-A`.** A narrower grant (`--allow-read=/x`) can't be read
+  back from `Deno.permissions`, and relaunching with `-A` would silently hand
+  the app more permission than you gave it.
+- **`libraryMode`** (a test or host process owns the lifecycle) or **prod** (no
+  watcher at all).
+- **`AIO_NO_DEV_RESTART=1`** — the opt-out, when you'd rather restart yourself.
 
 ### Server restart detection
 

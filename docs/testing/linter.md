@@ -65,6 +65,15 @@ Issues that can be auto-fixed are marked `[fixable]` in the output.
 | --------------------- | ---------------------------------------------------------------------------- |
 | Remove `import React` | Unnecessary with `jsx: "react-jsx"` — the transform injects it automatically |
 
+**Upgrade rewrites** (renamed options — the old spellings still work, see
+[semver policy](../basics/semver-policy.md)):
+
+| Fix                                                 | What it does                                                               |
+| --------------------------------------------------- | -------------------------------------------------------------------------- |
+| `call({ timeout })` → `timeoutMs`                   | Only inside a `call(...)` options object; your own fields untouched        |
+| `--cert=` / `--key=` → `--tls-cert=` / `--tls-key=` | In `deno.json` tasks — the bare names collided with the auth `key` concept |
+| `--headless` → `--client=server-only`               | Only on a task that RUNS the app; a build task keeps `--headless`          |
+
 Run `--safe-fix`, then re-run without it to see remaining issues that need
 manual attention.
 
@@ -172,6 +181,19 @@ Static analysis of `cell()` calls:
   no-op for migration compat)
 - `.map()` rendering `memo()` components without `useProjection()` — derived
   arrays create new refs every render, defeating memo. Wrap in `useProjection()`
+
+### 14. Upgrade (deprecated spellings)
+
+- `call({ timeout })` — renamed to `timeoutMs`
+- `--cert` / `--key` in a task — renamed to `--tls-cert` / `--tls-key`
+- `--headless` on a task that runs the app — it is a BUILD flag; at runtime it
+  is ignored with a warning and the app still starts a client. Use
+  `--client=server-only` (this is the bug that made a generated systemd unit
+  crash-loop)
+
+All three are `[fixable]` — `--safe-fix` performs the rename. aio never removes
+a renamed option inside a major version, so these are ergonomics, not
+emergencies.
 
 ## Example Output
 
