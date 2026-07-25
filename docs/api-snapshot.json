@@ -61,7 +61,7 @@
         },
         "CellAccess": {
           "kind": "typeAlias",
-          "sig": "d24c2d5d242cefec"
+          "sig": "8c1aff61be6dcd36"
         },
         "CellAio": {
           "kind": "typeAlias",
@@ -85,7 +85,7 @@
         },
         "CellsConfig": {
           "kind": "typeAlias",
-          "sig": "32d561c58f173101"
+          "sig": "94c6dec2ec689e11"
         },
         "CellStatus": {
           "kind": "typeAlias",
@@ -118,6 +118,10 @@
         "connectCli": {
           "kind": "function",
           "sig": "cf36c15f1890d562"
+        },
+        "CookieOptions": {
+          "kind": "interface",
+          "sig": "fca122a526af8b9a"
         },
         "createAuthClient": {
           "kind": "function",
@@ -154,6 +158,10 @@
         "ExtractState": {
           "kind": "typeAlias",
           "sig": "0dd54b78645f3c68"
+        },
+        "generateTotpSecret": {
+          "kind": "function",
+          "sig": "6ef6486f1aff326f"
         },
         "integer": {
           "kind": "function",
@@ -243,6 +251,18 @@
           "kind": "typeAlias",
           "sig": "ef2280406b96879a"
         },
+        "route": {
+          "kind": "function",
+          "sig": "a3c0d8d3a76a575d"
+        },
+        "RouteContext": {
+          "kind": "interface",
+          "sig": "ac3f6f417a920c84"
+        },
+        "RouteOptions": {
+          "kind": "interface",
+          "sig": "0f8471883432965c"
+        },
         "schedule": {
           "kind": "variable",
           "sig": "1eacd8ab2cb48fe3"
@@ -273,11 +293,19 @@
         },
         "ServerFnAccess": {
           "kind": "typeAlias",
-          "sig": "0173b61a93a717b7"
+          "sig": "92fa5d9d806507f9"
         },
         "serverFns": {
           "kind": "function",
           "sig": "4e0945f075359d8d"
+        },
+        "serverRequest": {
+          "kind": "function",
+          "sig": "f003cb725b4bb51f"
+        },
+        "ServerRequest": {
+          "kind": "interface",
+          "sig": "5b415051fe4713fb"
         },
         "serverUser": {
           "kind": "function",
@@ -323,6 +351,10 @@
           "kind": "function",
           "sig": "34ad7e96f8ac9696"
         },
+        "totpUri": {
+          "kind": "function",
+          "sig": "2f88f6dcc69522f8"
+        },
         "Tx": {
           "kind": "typeAlias",
           "sig": "d6d59f832bb71a3e"
@@ -347,9 +379,13 @@
           "kind": "interface",
           "sig": "f405f1dee3cbec00"
         },
+        "verifyTotp": {
+          "kind": "function",
+          "sig": "42e031f792f269ac"
+        },
         "VERSION": {
           "kind": "variable",
-          "sig": "b0ecfecb2ea0b901"
+          "sig": "b34e197b02558bf4"
         },
         "VitalsConfig": {
           "kind": "typeAlias",
@@ -374,6 +410,10 @@
         "lint": {
           "kind": "function",
           "sig": "f0e5fcec1b5e0548"
+        },
+        "printReport": {
+          "kind": "function",
+          "sig": "05554c6895a90094"
         },
         "Report": {
           "kind": "typeAlias",
@@ -1008,6 +1048,10 @@
           "kind": "interface",
           "sig": "ec6b92fb8d6d2607"
         },
+        "extractAioVersion": {
+          "kind": "function",
+          "sig": "753450496c9fd1fa"
+        },
         "runDoctor": {
           "kind": "function",
           "sig": "9602a72d80638807"
@@ -1246,7 +1290,7 @@
         },
         "JSX": {
           "kind": "namespace",
-          "sig": "478bae5b042cf4ce"
+          "sig": "2aac2c809bc72699"
         },
         "jsxs": {
           "kind": "variable",
@@ -1572,6 +1616,14 @@
           "kind": "function",
           "sig": "c28816d34136e846"
         },
+        "findChromium": {
+          "kind": "function",
+          "sig": "3140c463ae84346b"
+        },
+        "freePort": {
+          "kind": "function",
+          "sig": "326f2828fc16dd8d"
+        },
         "generateUITypes": {
           "kind": "function",
           "sig": "8bc0a08a33112cf8"
@@ -1583,6 +1635,14 @@
         "setDocument": {
           "kind": "function",
           "sig": "84317e7760a7e7de"
+        },
+        "testBrowser": {
+          "kind": "function",
+          "sig": "a81d22fad5a58330"
+        },
+        "TestBrowser": {
+          "kind": "interface",
+          "sig": "e55f937371bb2fc0"
         },
         "testCell": {
           "kind": "function",
@@ -1608,13 +1668,21 @@
           "kind": "function",
           "sig": "165470dc07800697"
         },
+        "testServer": {
+          "kind": "function",
+          "sig": "52ea2a0e7aa93003"
+        },
+        "TestServer": {
+          "kind": "interface",
+          "sig": "5f3bf9056626145f"
+        },
         "testUI": {
           "kind": "function",
           "sig": "93ef5ee9fb0bf868"
         },
         "TestUI": {
           "kind": "typeAlias",
-          "sig": "d171b3da2ae7b15d"
+          "sig": "d4234a4fa0729b62"
         },
         "TestUIOptions": {
           "kind": "interface",
@@ -1632,6 +1700,14 @@
     },
     "./ui": {
       "symbols": {
+        "Avatar": {
+          "kind": "function",
+          "sig": "f59f02304d854b5f"
+        },
+        "AvatarProps": {
+          "kind": "interface",
+          "sig": "25280ab4ca02754d"
+        },
         "Button": {
           "kind": "function",
           "sig": "55f4b81d43105eab"
@@ -1664,6 +1740,22 @@
           "kind": "interface",
           "sig": "7bddaaa4575934a8"
         },
+        "Confirm": {
+          "kind": "function",
+          "sig": "37b0a0538b87c190"
+        },
+        "ConfirmButton": {
+          "kind": "function",
+          "sig": "09acc31ee43d8da8"
+        },
+        "ConfirmButtonProps": {
+          "kind": "interface",
+          "sig": "d6acf453101fecac"
+        },
+        "ConfirmProps": {
+          "kind": "interface",
+          "sig": "9c10e9161954d813"
+        },
         "Field": {
           "kind": "function",
           "sig": "dee80ef09a232bf2"
@@ -1684,6 +1776,14 @@
           "kind": "interface",
           "sig": "03b64e10f1e8821e"
         },
+        "Markdown": {
+          "kind": "function",
+          "sig": "8d29aa5b2ab64f07"
+        },
+        "MarkdownProps": {
+          "kind": "interface",
+          "sig": "f71d4f22bcf79326"
+        },
         "Modal": {
           "kind": "function",
           "sig": "b22adac97df99bc5"
@@ -1691,6 +1791,14 @@
         "ModalProps": {
           "kind": "interface",
           "sig": "47982a987b1f79c2"
+        },
+        "Pagination": {
+          "kind": "function",
+          "sig": "7043c16a7e71e91a"
+        },
+        "PaginationProps": {
+          "kind": "interface",
+          "sig": "dfdbae098279860d"
         },
         "Row": {
           "kind": "function",
@@ -1739,6 +1847,18 @@
         "TextareaProps": {
           "kind": "interface",
           "sig": "045e1f633dcbc52e"
+        },
+        "toast": {
+          "kind": "function",
+          "sig": "a7ba5c70321130f9"
+        },
+        "ToastHost": {
+          "kind": "function",
+          "sig": "d312cf60267ca5d5"
+        },
+        "ToastVariant": {
+          "kind": "typeAlias",
+          "sig": "43818e0b16d772be"
         },
         "UI_CSS": {
           "kind": "variable",

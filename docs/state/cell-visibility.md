@@ -57,6 +57,32 @@ cell.persist > cellDefaults.persist > "all"
 cell.ui      > cellDefaults.ui      > "all"
 ```
 
+## Private (server-only) fields — scratch state
+
+Need a field that lives in `state` (so methods read/write it) but is **never
+broadcast to the browser and never persisted** — a delta-staging sample, a
+re-entrancy guard, a cached derivation? Exclude it from **both** filters:
+
+```ts
+cell("net", {
+  state: { rxMbps: 0, prevBytes: 0 }, // prevBytes = private sample
+  ui: { exclude: ["prevBytes"] }, //      not sent to clients
+  persist: { exclude: ["prevBytes"] }, // not written to disk
+  methods: {
+    tick(s, bytes: number) {
+      s.rxMbps = (bytes - s.prevBytes) / 1e6; // read/write freely, server-side
+      s.prevBytes = bytes;
+    },
+  },
+});
+```
+
+That's "scratch" state — private, non-broadcast, non-persisted — with no new
+concept: it's just a state field on both exclude lists. It stays in the
+server-authoritative `getState()` (and `ui.fullState()` in tests), so methods,
+effects and server routes use it normally; only the client and the DB never see
+it.
+
 ## Secret-exposure warnings & `publicFields`
 
 Two tiers, both on a field's **name**, checked at boot when the field is exposed

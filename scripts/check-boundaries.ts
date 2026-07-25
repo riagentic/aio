@@ -60,7 +60,10 @@ const ALLOWED: Record<string, string[]> = {
   // from and a stale bundle is detectable.
   build: ["server", "state", "diagnostics", "electron", "protocol"],
   am: ["server", "state", "protocol", "diagnostics", "db"],
-  testing: ["state", "air", "protocol", "diagnostics", "browser"],
+  // testing may boot a real server — `testServer()`/`testBrowser()` (aio/testing)
+  // run in Deno test processes, never in a browser bundle, so the server import
+  // is safe here (it is the whole point of a server test helper).
+  testing: ["state", "air", "protocol", "diagnostics", "browser", "server"],
   adapters: ["air", "state", "browser", "diagnostics"],
 };
 

@@ -8,8 +8,11 @@ import {
 } from "../src/server/server.ts";
 import { join } from "@std/path";
 import { clearPairing, generatePin } from "../src/server/pairing.ts";
+import { freePort } from "../src/testing/server-test.ts";
 
-const TEST_PORT = 19800;
+const TEST_PORT = freePort();
+const TEST_PORT_7 = freePort();
+const TEST_PORT_8 = freePort();
 
 // Use prod: true to skip file watcher (avoids resource leaks in tests)
 async function withServer(fn: (url: string) => Promise<void>): Promise<void> {
@@ -103,7 +106,7 @@ Deno.test("server: path traversal normalized by URL parser returns app shell", a
 
 // ── Width/height meta tags ──────────────────────────────────
 
-const META_PORT = 19801;
+const META_PORT = freePort();
 
 Deno.test("server: HTML includes aio:width meta tag when configured", async () => {
   const dir = await Deno.makeTempDir();
@@ -139,7 +142,7 @@ Deno.test("server: HTML includes aio:width meta tag when configured", async () =
 
 // ── Expose / token auth tests ──────────────────────────────────
 
-const EXPOSE_PORT = 19802;
+const EXPOSE_PORT = freePort();
 
 async function withExposedServer(
   fn: (url: string, token: string) => Promise<void>,
@@ -327,7 +330,7 @@ Deno.test("server: WS rejects non-localhost origin", async () => {
 
 // ── allowedOrigins tests ──────────────────────────────────────
 
-const ORIGINS_PORT = 19803;
+const ORIGINS_PORT = freePort();
 
 Deno.test("server: allowedOrigins accepts custom origin", async () => {
   const dir = await Deno.makeTempDir();
@@ -382,7 +385,7 @@ Deno.test("server: allowedOrigins accepts custom origin", async () => {
 
 // ── Users (multi-user) auth tests ──────────────────────────────────
 
-const USERS_PORT = 19804;
+const USERS_PORT = freePort();
 
 const TEST_USERS: Record<string, { id: string; role: string }> = {
   "alice-token-123": { id: "alice", role: "admin" },
@@ -504,7 +507,7 @@ Deno.test("timingSafeEqual: different lengths return false", () => {
 
 // ── CSRF rejection test ──────────────────────────────────────
 
-const CSRF_PORT = 19805;
+const CSRF_PORT = freePort();
 
 Deno.test("server: POST /__aio/snapshot without X-AIO header returns 403", async () => {
   const dir = await Deno.makeTempDir();
@@ -553,7 +556,7 @@ Deno.test("server: POST /__aio/snapshot without X-AIO header returns 403", async
 
 // ── WS rate limiting test ────────────────────────────────────
 
-const RATE_PORT = 19806;
+const RATE_PORT = freePort();
 
 Deno.test("server: WS rate limiting drops messages over 100/sec", async () => {
   const dir = await Deno.makeTempDir();
@@ -613,7 +616,7 @@ Deno.test("server: WS rate limiting drops messages over 100/sec", async () => {
 
 // ── W6.6: configurable WS rate limit ─────────────────────────────────
 
-const CUSTOM_RATE_PORT = 19819;
+const CUSTOM_RATE_PORT = freePort();
 
 Deno.test("server: wsLimits.messagesPerSec overrides the default rate cap", async () => {
   const dir = await Deno.makeTempDir();
@@ -665,7 +668,7 @@ Deno.test("server: wsLimits.messagesPerSec overrides the default rate cap", asyn
 
 // ── Trojan API tests ────────────────────────────────────────────────
 
-const TROJAN_PORT = 19807;
+const TROJAN_PORT = freePort();
 
 async function withTrojanServer(
   fn: (url: string) => Promise<void>,
@@ -955,7 +958,10 @@ Deno.test("trojan: POST without X-AIO header returns 403", async () => {
 
 // ── POST /tt time-travel tests ──────────────────────────────────
 
-const TT_PORT = 19808;
+const TT_PORT = freePort();
+const TT_PORT_1 = freePort();
+const TT_PORT_2 = freePort();
+const TT_PORT_5 = freePort();
 
 Deno.test("trojan: POST /tt routes undo command to onTTCommand", async () => {
   const dir = await Deno.makeTempDir();
@@ -1026,7 +1032,7 @@ Deno.test("trojan: POST /sql blocks INSERT", async () => {
   const dir = await Deno.makeTempDir();
   await Deno.writeTextFile(join(dir, "App.tsx"), "export default () => null");
   const server = createServer({
-    port: TT_PORT + 1,
+    port: TT_PORT_1,
     title: "SQLTest",
     getUIState: () => ({}),
     dispatch: () => {},
@@ -1044,7 +1050,7 @@ Deno.test("trojan: POST /sql blocks INSERT", async () => {
   try {
     // INSERT should be blocked
     const resp = await fetch(
-      `http://127.0.0.1:${TT_PORT + 1}/__aio/trojan/sql`,
+      `http://127.0.0.1:${TT_PORT_1}/__aio/trojan/sql`,
       {
         method: "POST",
         headers: { "Content-Type": "application/json", "X-AIO": "1" },
@@ -1057,7 +1063,7 @@ Deno.test("trojan: POST /sql blocks INSERT", async () => {
 
     // DELETE should be blocked
     const resp2 = await fetch(
-      `http://127.0.0.1:${TT_PORT + 1}/__aio/trojan/sql`,
+      `http://127.0.0.1:${TT_PORT_1}/__aio/trojan/sql`,
       {
         method: "POST",
         headers: { "Content-Type": "application/json", "X-AIO": "1" },
@@ -1069,7 +1075,7 @@ Deno.test("trojan: POST /sql blocks INSERT", async () => {
 
     // PRAGMA should be blocked (allow-list: SELECT only)
     const resp3 = await fetch(
-      `http://127.0.0.1:${TT_PORT + 1}/__aio/trojan/sql`,
+      `http://127.0.0.1:${TT_PORT_1}/__aio/trojan/sql`,
       {
         method: "POST",
         headers: { "Content-Type": "application/json", "X-AIO": "1" },
@@ -1081,7 +1087,7 @@ Deno.test("trojan: POST /sql blocks INSERT", async () => {
 
     // WITH (CTE) is read-only — should pass
     const resp4 = await fetch(
-      `http://127.0.0.1:${TT_PORT + 1}/__aio/trojan/sql`,
+      `http://127.0.0.1:${TT_PORT_1}/__aio/trojan/sql`,
       {
         method: "POST",
         headers: { "Content-Type": "application/json", "X-AIO": "1" },
@@ -1093,7 +1099,7 @@ Deno.test("trojan: POST /sql blocks INSERT", async () => {
 
     // A write keyword inside a string literal is NOT a write — should pass
     const resp4b = await fetch(
-      `http://127.0.0.1:${TT_PORT + 1}/__aio/trojan/sql`,
+      `http://127.0.0.1:${TT_PORT_1}/__aio/trojan/sql`,
       {
         method: "POST",
         headers: { "Content-Type": "application/json", "X-AIO": "1" },
@@ -1107,7 +1113,7 @@ Deno.test("trojan: POST /sql blocks INSERT", async () => {
 
     // SELECT should pass
     const resp5 = await fetch(
-      `http://127.0.0.1:${TT_PORT + 1}/__aio/trojan/sql`,
+      `http://127.0.0.1:${TT_PORT_1}/__aio/trojan/sql`,
       {
         method: "POST",
         headers: { "Content-Type": "application/json", "X-AIO": "1" },
@@ -1121,7 +1127,7 @@ Deno.test("trojan: POST /sql blocks INSERT", async () => {
     // guard: unbalanced quotes inside `--` comments used to make the literal
     // mask swallow a following `;DROP…`. Now comments are stripped first.
     const respChain = await fetch(
-      `http://127.0.0.1:${TT_PORT + 1}/__aio/trojan/sql`,
+      `http://127.0.0.1:${TT_PORT_1}/__aio/trojan/sql`,
       {
         method: "POST",
         headers: { "Content-Type": "application/json", "X-AIO": "1" },
@@ -1138,7 +1144,7 @@ Deno.test("trojan: POST /sql blocks INSERT", async () => {
 
     // A write keyword hidden only by a comment must still be caught.
     const respHidden = await fetch(
-      `http://127.0.0.1:${TT_PORT + 1}/__aio/trojan/sql`,
+      `http://127.0.0.1:${TT_PORT_1}/__aio/trojan/sql`,
       {
         method: "POST",
         headers: { "Content-Type": "application/json", "X-AIO": "1" },
@@ -1165,7 +1171,7 @@ Deno.test("security: a network action cannot spoof the _user identity", async ()
   );
   const seen: Array<Record<string, unknown>> = [];
   const server = createServer({
-    port: TT_PORT + 5,
+    port: TT_PORT_5,
     title: "SpoofTest",
     getUIState: () => ({ ok: true }),
     dispatch: (a) => seen.push(a as Record<string, unknown>),
@@ -1176,7 +1182,7 @@ Deno.test("security: a network action cannot spoof the _user identity", async ()
   });
   await new Promise((r) => setTimeout(r, 50));
   try {
-    const ws = new WebSocket(`ws://127.0.0.1:${TT_PORT + 5}/ws`);
+    const ws = new WebSocket(`ws://127.0.0.1:${TT_PORT_5}/ws`);
     await new Promise<void>((res, rej) => {
       ws.onopen = () => res();
       ws.onerror = () => rej(new Error("ws failed"));
@@ -1215,7 +1221,7 @@ Deno.test("trojan: POST /shutdown returns ok and triggers callback", async () =>
   await Deno.writeTextFile(join(dir, "App.tsx"), "export default () => null");
   let shutdownCalled = false;
   const server = createServer({
-    port: TT_PORT + 2,
+    port: TT_PORT_2,
     title: "ShutdownTest",
     getUIState: () => ({}),
     dispatch: () => {},
@@ -1234,7 +1240,7 @@ Deno.test("trojan: POST /shutdown returns ok and triggers callback", async () =>
   await new Promise((r) => setTimeout(r, 50));
   try {
     const resp = await fetch(
-      `http://127.0.0.1:${TT_PORT + 2}/__aio/trojan/shutdown`,
+      `http://127.0.0.1:${TT_PORT_2}/__aio/trojan/shutdown`,
       { method: "POST", headers: { "X-AIO": "1" } },
     );
     assertEquals(resp.status, 200);
@@ -1305,7 +1311,9 @@ Deno.test("server: WS binary message dropped without crash", async () => {
 
 // ── maxConnections — 503 when limit exceeded ─────────────────
 
-const MAX_CONN_PORT = 19810;
+const MAX_CONN_PORT = freePort();
+const MAX_CONN_PORT_1 = freePort();
+const MAX_CONN_PORT_2 = freePort();
 
 Deno.test("server: maxConnections — 503 when limit exceeded", async () => {
   const dir = await Deno.makeTempDir();
@@ -1364,7 +1372,7 @@ Deno.test("server: clientCount is 0 before any connection", async () => {
     "export function mount(){}",
   );
   const server = createServer({
-    port: MAX_CONN_PORT + 1,
+    port: MAX_CONN_PORT_1,
     title: "CountTest",
     getUIState: () => ({}),
     dispatch: () => {},
@@ -1376,7 +1384,7 @@ Deno.test("server: clientCount is 0 before any connection", async () => {
   await new Promise((r) => setTimeout(r, 50));
   try {
     assertEquals(server.clientCount(), 0);
-    const ws = new WebSocket(`ws://127.0.0.1:${MAX_CONN_PORT + 1}/ws`);
+    const ws = new WebSocket(`ws://127.0.0.1:${MAX_CONN_PORT_1}/ws`);
     await new Promise<void>((r) => {
       ws.onopen = () => r();
     });
@@ -1433,7 +1441,7 @@ Deno.test("server: WS invalid JSON dropped — dispatch not called", async () =>
     "export function mount(){}",
   );
   const server = createServer({
-    port: MAX_CONN_PORT + 2,
+    port: MAX_CONN_PORT_2,
     title: "InvalidJSON",
     getUIState: () => ({}),
     dispatch: () => {
@@ -1446,7 +1454,7 @@ Deno.test("server: WS invalid JSON dropped — dispatch not called", async () =>
   });
   await new Promise((r) => setTimeout(r, 50));
   try {
-    const ws = new WebSocket(`ws://127.0.0.1:${MAX_CONN_PORT + 2}/ws`);
+    const ws = new WebSocket(`ws://127.0.0.1:${MAX_CONN_PORT_2}/ws`);
     await new Promise<void>((r) => {
       ws.onopen = () => r();
     });
@@ -1503,7 +1511,7 @@ Deno.test("_timingSafeEqual: unicode strings", () => {
 // The most common failure: esbuild rewrites bare imports to Deno specifiers
 // (e.g. 'react' → 'npm:react@^18') which browsers cannot fetch as URLs.
 
-const DEV_UI_PORT = 19815;
+const DEV_UI_PORT = freePort();
 
 async function withDevServer(
   fn: (url: string) => Promise<void>,
@@ -1826,7 +1834,7 @@ Deno.test("server: custom routes — exact, wildcard, reserved namespaces", asyn
     "export function mount(){}",
   );
   const server = createServer({
-    port: TEST_PORT + 7,
+    port: TEST_PORT_7,
     title: "Routes",
     getUIState: () => ({}),
     dispatch: () => {},
@@ -1843,7 +1851,7 @@ Deno.test("server: custom routes — exact, wildcard, reserved namespaces", asyn
   });
   await new Promise((r) => setTimeout(r, 50));
   try {
-    const base = `http://127.0.0.1:${TEST_PORT + 7}`;
+    const base = `http://127.0.0.1:${TEST_PORT_7}`;
     // exact route (POST body round-trip — the upload shape)
     const echo = await fetch(`${base}/api/echo`, {
       method: "POST",
@@ -1869,7 +1877,7 @@ Deno.test("server: reserved route namespaces throw at boot", async () => {
   let threw = "";
   try {
     createServer({
-      port: TEST_PORT + 8,
+      port: TEST_PORT_8,
       title: "Bad",
       getUIState: () => ({}),
       dispatch: () => {},

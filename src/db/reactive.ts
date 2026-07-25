@@ -21,6 +21,8 @@ export function tablesIn(sql: string, re: RegExp): Set<string> {
   return out;
 }
 
+/** A live SQL query — its rows stay current as writes land, and subscribers are
+ *  notified on every refresh. Dispose it when the view goes away. */
 export type ReactiveQuery<T = Record<string, unknown>> = {
   /** Latest rows — refreshed in place after each invalidating write. */
   readonly rows: T[];
@@ -34,6 +36,7 @@ export type ReactiveQuery<T = Record<string, unknown>> = {
   dispose(): void;
 };
 
+/** A `DB` whose `select()` returns live queries instead of a one-shot snapshot. */
 export type ReactiveDB = DB & {
   /** A live query: re-runs + notifies whenever a write touches its tables. */
   select<T = Record<string, unknown>>(
@@ -44,6 +47,8 @@ export type ReactiveDB = DB & {
 
 type Entry = { tables: Set<string>; rerun: () => Promise<void> };
 
+/** Wrap a `DB` so `select()` yields live queries — every write invalidates the
+ *  queries that read the written tables and re-runs exactly those. */
 export function reactiveDB(db: DB): ReactiveDB {
   const entries = new Set<Entry>();
 

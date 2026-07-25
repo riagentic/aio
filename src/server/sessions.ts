@@ -21,10 +21,13 @@ import type { AioUser } from "./aio-types.ts";
 
 const DEFAULT_TTL_MS = 30 * 24 * 3_600_000; // 30 days
 
+/** A live session's user plus when its token expires (epoch ms). */
 export interface SessionInfo extends AioUser {
   expiresAt: number;
 }
 
+/** Server-side session storage — issue, resolve, refresh and revoke bearer
+ *  tokens. Only token hashes are kept, so a leaked store can't be replayed. */
 export interface SessionStore {
   /** Create a session for `user`; returns the bearer token (shown ONCE —
    *  only its hash is stored). */

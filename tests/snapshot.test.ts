@@ -2,6 +2,7 @@ import { assertEquals, assertThrows } from "@std/assert";
 import { createDispatch } from "../src/state/dispatch.ts";
 import { createServer } from "../src/server/server.ts";
 import { join } from "@std/path";
+import { freePort } from "../src/testing/server-test.ts";
 
 const noop = { debug: () => {}, warn: () => {}, error: () => {} };
 
@@ -65,7 +66,7 @@ Deno.test("loadSnapshot: invalid JSON throws", () => {
 
 // ── Integration: HTTP endpoints ─────────────────────────────────────
 
-const PORT = 19830;
+const PORT = freePort();
 
 async function waitFor(fn: () => boolean, ms = 2000): Promise<void> {
   const start = Date.now();

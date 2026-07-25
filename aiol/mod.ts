@@ -78,7 +78,15 @@ function formatIssue(issue: Issue, showFixable = false): string {
 
 // ── Output ──────────────────────────────────────────────────────────
 
-function printReport(report: Report, json: boolean, showFixable = false): void {
+/** Print a lint report — human-readable by default, machine-readable with
+ *  `json` (which always keeps every issue, including hints). `hideHints`
+ *  silences hint-severity lines in the human report only. */
+export function printReport(
+  report: Report,
+  json: boolean,
+  showFixable = false,
+  hideHints = false,
+): void {
   if (json) {
     console.log(JSON.stringify(
       {
@@ -121,7 +129,10 @@ function printReport(report: Report, json: boolean, showFixable = false): void {
     for (const issue of warns) console.log(formatIssue(issue, showFixable));
     console.log();
   }
-  if (hints.length) {
+  // Hints are "sub-optimal but works" — suppressible with --no-hints so a
+  // project that has consciously accepted them can have a 0-noise run (hints
+  // never affect the exit code, only errors do).
+  if (hints.length && !hideHints) {
     for (const issue of hints) console.log(formatIssue(issue, showFixable));
     console.log();
   }
@@ -143,16 +154,27 @@ function printReport(report: Report, json: boolean, showFixable = false): void {
 
   const fixable = report.issues.filter((i) => i.safeFix).length;
 
+  // With --no-hints, hint-only projects read as clean; the count is still noted
+  // (dimmed) so nothing is hidden silently — you know they're there, muted.
+  const hintNote = hideHints && h
+    ? `  ${
+      c(C.dim, `(${h} hint${h > 1 ? "s" : ""} hidden — drop --no-hints to see)`)
+    }`
+    : "";
   if (total === 0) {
     console.log(
       `  ${c(C.green + C.bold, "✓ No issues found — clean project!")}`,
+    );
+  } else if (hideHints && e === 0 && w === 0) {
+    console.log(
+      `  ${c(C.green + C.bold, "✓ No errors or warnings")}${hintNote}`,
     );
   } else {
     const parts: string[] = [];
     if (e) parts.push(c(C.red, `${e} error${e > 1 ? "s" : ""}`));
     if (w) parts.push(c(C.yellow, `${w} warning${w > 1 ? "s" : ""}`));
-    if (h) parts.push(c(C.cyan, `${h} hint${h > 1 ? "s" : ""}`));
-    console.log(`  ${parts.join(" · ")}`);
+    if (h && !hideHints) parts.push(c(C.cyan, `${h} hint${h > 1 ? "s" : ""}`));
+    console.log(`  ${parts.join(" · ")}${hintNote}`);
     if (fixable > 0 && !showFixable) {
       console.log(
         `  ${c(C.green, `${fixable} auto-fixable`)} — run with ${
@@ -213,6 +235,7 @@ if (import.meta.main) {
   const flags = new Set(Deno.args.filter((a) => a.startsWith("-")));
   const json = flags.has("--json");
   const safeFix = flags.has("--safe-fix");
+  const hideHints = flags.has("--no-hints") || flags.has("--quiet-hints");
 
   if (flags.has("--help") || flags.has("-h")) {
     console.log(`aiol v${VERSION} — aio project linter
@@ -220,10 +243,12 @@ if (import.meta.main) {
 Usage: deno run -A aiol/mod.ts [project-dir] [flags]
 
 Flags:
-  --safe-fix   Auto-fix safe issues (config additions, dead code removal)
-  --json       Output as JSON
-  --no-color   Disable color output
-  --help       Show this help
+  --safe-fix     Auto-fix safe issues (config additions, dead code removal)
+  --no-hints     Hide "hint" issues for a 0-noise run (count still noted; exit
+                 code is unaffected — only errors fail)
+  --json         Output as JSON (always includes hints)
+  --no-color     Disable color output
+  --help         Show this help
 
 Scans an aio project directory and reports:
   ✗ errors   — will break at runtime
@@ -255,7 +280,7 @@ Only harmless changes: missing config, unused imports. Never changes behavior.
   if (safeFix) {
     const fixable = report.issues.filter((i) => i.safeFix).length;
     if (fixable === 0) {
-      printReport(report, json, true);
+      printReport(report, json, true, hideHints);
       console.log(`  ${c(C.dim, "No auto-fixable issues found.")}\n`);
     } else {
       console.log(`\n${c(C.bold, `aiol v${VERSION}`)} — applying safe fixes\n`);
@@ -270,7 +295,7 @@ Only harmless changes: missing config, unused imports. Never changes behavior.
       );
     }
   } else {
-    printReport(report, json, true);
+    printReport(report, json, true, hideHints);
   }
 
   // Exit code: 1 if errors, 0 otherwise

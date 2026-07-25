@@ -308,3 +308,70 @@ export const c = cell('c', {
     assertEquals(awaitHints.length, 0, JSON.stringify(awaitHints));
   });
 });
+
+// ── A mention is not a use (same class as the phantom-cell fix) ──
+
+Deno.test("aiol: a legacy import path quoted in a string is not an import", async () => {
+  await withTmpDir(async (dir) => {
+    // A project's OWN lint rule may name the legacy path as data. Only a real
+    // import/export statement should warn.
+    await project(
+      dir,
+      `
+const LEGACY = "from '../dep/aio/";
+export function usesLegacy(src: string): boolean {
+  return src.includes(LEGACY); // detection code, not an import
+}
+`,
+    );
+    const issues = await runCheckPatterns(dir);
+    assertEquals(
+      issues.filter((i) => i.message.includes("legacy import path")),
+      [],
+      "a quoted mention must not be reported as a legacy import",
+    );
+  });
+});
+
+Deno.test("aiol: a REAL legacy import still warns", async () => {
+  await withTmpDir(async (dir) => {
+    await project(dir, `import { cell } from "../dep/aio/mod.ts";\n`);
+    const issues = await runCheckPatterns(dir);
+    assertEquals(
+      issues.filter((i) => i.message.includes("legacy import path")).length,
+      1,
+      "a real legacy import must still warn",
+    );
+  });
+});
+
+Deno.test("aiol: a Node API named in a comment or string is not a Node API use", async () => {
+  await withTmpDir(async (dir) => {
+    await project(
+      dir,
+      `
+// process.env is substituted by the bundler in the vendored source below.
+const SHIM = "module.exports = {}";
+export const shim = SHIM;
+`,
+    );
+    const issues = await runCheckPatterns(dir);
+    assertEquals(
+      issues.filter((i) => i.message.includes("Node.js API")),
+      [],
+      "mentions in comments/strings must not be flagged",
+    );
+  });
+});
+
+Deno.test("aiol: a REAL Node API use is still flagged", async () => {
+  await withTmpDir(async (dir) => {
+    await project(dir, `export const home = process.env.HOME;\n`);
+    const issues = await runCheckPatterns(dir);
+    assertEquals(
+      issues.filter((i) => i.message.includes("Node.js API")).length >= 1,
+      true,
+      "real process.env use must still be flagged",
+    );
+  });
+});

@@ -18,6 +18,7 @@ import type { LockData as PidFile } from "../src/server/single-instance-lock.ts"
 import { createServer } from "../src/server/server.ts";
 import { join } from "@std/path";
 import { VERSION } from "../src/server/aio.ts";
+import { freePort } from "../src/testing/server-test.ts";
 
 // Test app ID — unique per test run
 const TEST_APP = "am-test-" + Deno.pid;
@@ -408,7 +409,7 @@ Deno.test("am: parseGlobalFlags — state --wait=5 parsed", () => {
 
 // ── Integration: trojan endpoints via live server ────────────
 
-const AM_TEST_PORT = 19860;
+const AM_TEST_PORT = freePort();
 
 async function withTrojanServer(
   fn: (url: string) => Promise<void>,
@@ -836,7 +837,7 @@ Deno.test("am-cli: snapshot load — error on missing file", async () => {
 
 // ── am tt — time-travel commands ─────────────────────────────
 
-const AM_TT_PORT = 19861;
+const AM_TT_PORT = freePort();
 
 async function withTTServer(fn: (url: string) => Promise<void>): Promise<void> {
   const dir = await Deno.makeTempDir();

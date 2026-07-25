@@ -33,6 +33,8 @@ interface TargetSpec {
   role: "server" | "client" | "app";
   desc: string;
 }
+/** Every buildable target of the fleet, keyed by the name you pass to
+ *  `deno task build` — its build flags, role, and one-line description. */
 export const TARGETS: Record<string, TargetSpec> = {
   server: {
     flags: ["--compile", "--service", "--headless", "--remote"],

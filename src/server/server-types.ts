@@ -62,10 +62,7 @@ export interface ServerConfig {
    *  Matched after /ws and /__aio/* (which are reserved) and before static
    *  serving. The escape hatch for uploads, webhooks, and API endpoints that
    *  don't belong in the state channel. */
-  routes?: Record<
-    string,
-    (req: Request) => Response | Promise<Response>
-  >;
+  routes?: Record<string, import("./route.ts").RawRouteHandler>;
   // Trojan — control API at /__aio/trojan/* (localhost-only, CSRF-protected, rate-limited)
   trojan?: {
     getState: () => unknown; // raw unfiltered state

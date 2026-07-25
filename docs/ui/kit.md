@@ -137,6 +137,86 @@ close).
 </Card>;
 ```
 
+### Avatar
+
+Initials + a deterministic color from the name (same name → same color), or an
+image via `src`.
+
+```tsx
+<Avatar name="Ada Lovelace" size={40} /> // "AL" on a stable color
+<Avatar name={u.name} src={u.photo} />    // photo when available
+```
+
+### Pagination
+
+Windowed pager — you own the data slice; it only reports the page the user
+wants.
+
+```tsx
+<Pagination page={p} pages={Math.ceil(total / perPage)} onPage={setP} />;
+```
+
+### Confirm + `ConfirmButton`
+
+The "are you sure?" for destructive actions — built on `Modal`, so focus /
+Escape / ARIA come for free. `ConfirmButton` bundles the whole pattern into one
+element (its `onConfirm` fires only after the user agrees):
+
+```tsx
+<ConfirmButton
+  variant="danger" // makes the confirm button destructive too
+  confirm="Delete this listing? This can't be undone."
+  onConfirm={() => listings.remove(id)}
+>
+  Delete
+</ConfirmButton>;
+
+// or drive a Confirm yourself with your own open state:
+<Confirm
+  open={open}
+  message="Discard changes?"
+  onConfirm={discard}
+  onCancel={close}
+/>;
+```
+
+### Toast — `toast()` + `<ToastHost/>`
+
+Render `<ToastHost/>` once at your app root, then call `toast(...)` from
+anywhere — an event handler, an effect, after a method resolves. Auto-dismisses;
+returns a manual dismiss fn.
+
+```tsx
+import { toast, ToastHost } from "aio/ui";
+
+export default function App() {
+  return (
+    <div>
+      <ToastHost /> {/* … */}
+    </div>
+  );
+}
+
+// anywhere:
+await cart.checkout();
+toast("Order placed", { variant: "success" });
+toast("Network error", { variant: "error", duration: 0 }); // sticky until dismissed
+```
+
+### Markdown
+
+A safe, common-subset renderer (headings, bold/italic, code, links, images,
+lists, blockquote, hr). It renders to AIR nodes — **not** an HTML string — so
+text is auto-escaped and there's no raw-HTML/XSS passthrough; link and image
+URLs are scheme-checked (`javascript:`/`data:` are dropped).
+
+```tsx
+<Markdown source={post.body} />;
+```
+
+For full CommonMark (tables, footnotes, syntax highlighting), mount a library as
+a [React island](react-islands.md) — this covers the 90% content apps re-roll.
+
 ## Philosophy
 
 This kit is intentionally minimal — enough to build a real dashboard without

@@ -127,6 +127,7 @@
 - [Upgrade: 1.0.0-alpha31 → 1.0.0-alpha32](upgrade/from-alpha31-to-alpha32.md) — A feature release — the headline is aui, a visual app manager (new example),
 - [Upgrade: 1.0.0-alpha32 → 1.0.0-alpha33](upgrade/from-alpha32-to-alpha33.md) — A feature + hardening release.
 - [Upgrade: 1.0.0-alpha33 → 1.0.0-alpha34](upgrade/from-alpha33-to-alpha34.md) — The dream-list release — a large batch of new capabilities, all opt-in or purely
+- [Upgrade: 1.0.0-alpha34 → 1.0.0-alpha35](upgrade/from-alpha34-to-alpha35.md) — Purely additive.
 - [Upgrade from v1.0.0-alpha4 to v1.0.0-alpha5](upgrade/from-alpha4-to-alpha5.md) — None.
 - [Upgrade from v1.0.0-alpha5 to v1.0.0-alpha6](upgrade/from-alpha5-to-alpha6.md) — None.
 - [Upgrade from v1.0.0-alpha6 to v1.0.0-alpha7](upgrade/from-alpha6-to-alpha7.md) — mod.ts no longer re-exports renderer primitives.

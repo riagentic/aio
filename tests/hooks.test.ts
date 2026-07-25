@@ -2,6 +2,7 @@ import { assertEquals } from "@std/assert";
 import { createDispatch } from "../src/state/dispatch.ts";
 import { createServer } from "../src/server/server.ts";
 import { join } from "@std/path";
+import { freePort } from "../src/testing/server-test.ts";
 
 const noop = { debug: () => {}, warn: () => {}, error: () => {} };
 
@@ -147,7 +148,7 @@ Deno.test("hooks: onEffect error does not prevent execute", () => {
 
 // ── onConnect / onDisconnect hooks (via server) ──────────────────
 
-const HOOK_PORT = 19820;
+const HOOK_PORT = freePort();
 
 async function waitFor(fn: () => boolean, ms = 2000): Promise<void> {
   const start = Date.now();

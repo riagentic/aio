@@ -26,7 +26,13 @@
  * ```
  */
 import { Fragment, h } from "../air/vdom.ts";
-import { _getDocument, onCleanup, onMount } from "../air/aio-renderer.ts";
+import {
+  _getDocument,
+  onCleanup,
+  onMount,
+  signal,
+  useSignal,
+} from "../air/aio-renderer.ts";
 import type { VChild, VNode } from "../air/vdom.ts";
 
 // ── Shared prop helpers ──────────────────────────────────────────────
@@ -488,6 +494,336 @@ export function Spinner(props: Common = {}): VNode {
     "aria-label": "Loading",
   });
 }
+
+// ── Avatar ───────────────────────────────────────────────────────────
+
+/** Props for {@link Avatar} — a name (initials + deterministic color) or an
+ *  image. `size` is a pixel diameter. */
+export interface AvatarProps extends Common {
+  /** Display name — first letters become the initials, and seed the color. */
+  name: string;
+  /** Image URL. When set, shown instead of initials. */
+  src?: string;
+  /** Diameter in px. Default 32. */
+  size?: number;
+  /** Override the derived background color (any CSS color). */
+  color?: string;
+}
+
+const AVATAR_HUES = [210, 12, 145, 275, 32, 190, 330, 95];
+
+/** Up to two initials from a name ("Ada Lovelace" → "AL", "root" → "R"). */
+function initials(name: string): string {
+  const parts = name.trim().split(/\s+/).filter(Boolean);
+  if (parts.length === 0) return "?";
+  const first = parts[0]![0] ?? "";
+  const last = parts.length > 1 ? parts[parts.length - 1]![0] ?? "" : "";
+  return (first + last).toUpperCase();
+}
+
+/** Stable hue from a string, so the same name always gets the same color. */
+function hueFor(s: string): number {
+  let h = 0;
+  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0;
+  return AVATAR_HUES[h % AVATAR_HUES.length]!;
+}
+
+/** A circular avatar — an image, or deterministic initials + color from the
+ *  name. The one every app with users otherwise re-rolls. */
+export function Avatar(props: AvatarProps): VNode {
+  const { name, src, size = 32, color, class: cls } = props;
+  const style: Style = {
+    width: `${size}px`,
+    height: `${size}px`,
+    "font-size": `${Math.round(size * 0.4)}px`,
+    ...(color
+      ? { background: color }
+      : { background: `hsl(${hueFor(name)}, 55%, 45%)` }),
+    ...(props.style ?? {}),
+  };
+  const common = rest(props, [
+    "name",
+    "src",
+    "size",
+    "color",
+    "class",
+    "style",
+  ]);
+  return h(
+    "span",
+    {
+      ...common,
+      class: cx("aio-avatar", cls),
+      style,
+      role: "img",
+      "aria-label": name,
+      title: name,
+    },
+    src
+      ? h("img", {
+        src,
+        alt: name,
+        class: "aio-avatar__img",
+        width: size,
+        height: size,
+      })
+      : initials(name),
+  );
+}
+
+// ── Pagination ───────────────────────────────────────────────────────
+
+/** Props for {@link Pagination} — 1-based current page, total pages, and a
+ *  change handler. */
+export interface PaginationProps extends Common {
+  /** Current page, 1-based. */
+  page: number;
+  /** Total number of pages. */
+  pages: number;
+  /** Called with the target page when the user navigates. */
+  onPage: (page: number) => void;
+  /** Max numbered buttons to show around the current page. Default 5. */
+  window?: number;
+}
+
+/** Windowed page range around `page` (with clamping at the ends). */
+function pageWindow(page: number, pages: number, win: number): number[] {
+  if (pages <= win) return Array.from({ length: pages }, (_, i) => i + 1);
+  const half = Math.floor(win / 2);
+  let lo = Math.max(1, page - half);
+  const hi = Math.min(pages, lo + win - 1);
+  lo = Math.max(1, hi - win + 1);
+  return Array.from({ length: hi - lo + 1 }, (_, i) => lo + i);
+}
+
+/** A pager: prev / windowed page numbers / next. Pure — you own the data
+ *  slice; this only reports the page the user wants. */
+export function Pagination(props: PaginationProps): VNode {
+  const { page, pages, onPage, window: win = 5, class: cls } = props;
+  const go = (p: number) => {
+    if (p >= 1 && p <= pages && p !== page) onPage(p);
+  };
+  const btn = (label: VChild, target: number, opts?: {
+    disabled?: boolean;
+    current?: boolean;
+  }) =>
+    h("button", {
+      type: "button",
+      class: cx(
+        "aio-page__btn",
+        opts?.current ? "aio-page__btn--current" : undefined,
+      ),
+      disabled: opts?.disabled,
+      "aria-current": opts?.current ? "page" : undefined,
+      onClick: () => go(target),
+    }, label);
+  return h(
+    "nav",
+    {
+      ...rest(props, ["page", "pages", "onPage", "window", "class"]),
+      class: cx("aio-page", cls),
+      "aria-label": "Pagination",
+    },
+    btn("‹", page - 1, { disabled: page <= 1 }),
+    ...pageWindow(page, pages, win).map((p) =>
+      btn(String(p), p, { current: p === page })
+    ),
+    btn("›", page + 1, { disabled: page >= pages }),
+  );
+}
+
+// ── Confirm ──────────────────────────────────────────────────────────
+
+/** Props for {@link Confirm} — a controlled confirmation dialog on top of
+ *  {@link Modal}. */
+export interface ConfirmProps extends Common {
+  /** Whether the dialog is shown. */
+  open: boolean;
+  /** Fired when the user confirms. */
+  onConfirm: () => void;
+  /** Fired on cancel / Escape / backdrop. */
+  onCancel: () => void;
+  title?: VChild;
+  /** The question / consequence text. */
+  message?: VChild;
+  /** Confirm button label. Default "Confirm". */
+  confirmLabel?: string;
+  /** Cancel button label. Default "Cancel". */
+  cancelLabel?: string;
+  /** Style the confirm button as destructive (red). */
+  danger?: boolean;
+}
+
+/** A confirm dialog — the "are you sure?" every destructive action needs,
+ *  built on Modal so focus/Escape/ARIA come for free. */
+export function Confirm(props: ConfirmProps): VNode | null {
+  const {
+    open,
+    onConfirm,
+    onCancel,
+    title,
+    message,
+    confirmLabel = "Confirm",
+    cancelLabel = "Cancel",
+    danger,
+  } = props;
+  return Modal({
+    open,
+    onClose: onCancel,
+    title,
+    class: props.class,
+    children: message != null
+      ? h("div", { class: "aio-confirm__msg" }, message)
+      : null,
+    footer: h(
+      Fragment,
+      null,
+      Button({ variant: "ghost", onClick: onCancel, children: cancelLabel }),
+      Button({
+        variant: danger ? "danger" : "primary",
+        onClick: onConfirm,
+        children: confirmLabel,
+      }),
+    ),
+  });
+}
+
+/** Props for {@link ConfirmButton} — a Button that confirms before acting. */
+export interface ConfirmButtonProps extends ButtonProps {
+  /** The confirmation message shown in the dialog. */
+  confirm: VChild;
+  /** Fired only after the user confirms. */
+  onConfirm: () => void;
+  confirmTitle?: VChild;
+  confirmLabel?: string;
+  cancelLabel?: string;
+}
+
+/** A button that pops a {@link Confirm} dialog and only fires `onConfirm` when
+ *  the user agrees — the whole destructive-action pattern in one element.
+ *  `variant="danger"` also makes the confirm button destructive. */
+export function ConfirmButton(props: ConfirmButtonProps): VNode {
+  const openS = useSignal(false);
+  const {
+    confirm,
+    onConfirm,
+    confirmTitle,
+    confirmLabel,
+    cancelLabel,
+    children,
+    variant,
+  } = props;
+  const btnProps = rest(props, [
+    "confirm",
+    "onConfirm",
+    "confirmTitle",
+    "confirmLabel",
+    "cancelLabel",
+    "children",
+    "onClick",
+  ]) as ButtonProps;
+  return h(
+    Fragment,
+    null,
+    Button({
+      ...btnProps,
+      children,
+      onClick: () => openS.set(true),
+    }),
+    Confirm({
+      open: openS.value,
+      title: confirmTitle,
+      message: confirm,
+      confirmLabel,
+      cancelLabel,
+      danger: variant === "danger",
+      onCancel: () => openS.set(false),
+      onConfirm: () => {
+        openS.set(false);
+        onConfirm();
+      },
+    }),
+  );
+}
+
+// ── Toast ────────────────────────────────────────────────────────────
+
+/** Toast intent. */
+export type ToastVariant = "info" | "success" | "warn" | "error";
+
+interface ToastItem {
+  id: number;
+  message: VChild;
+  variant: ToastVariant;
+}
+
+// Module-level reactive queue — one host renders it; `toast()` pushes to it.
+const _toasts = signal<ToastItem[]>([]);
+let _toastSeq = 0;
+
+/** Show a toast. Returns a dismiss function; auto-dismisses after `duration`
+ *  ms (default 4000; pass 0 to keep it until dismissed). Call from anywhere —
+ *  event handlers, effects, after a method resolves. Render {@link ToastHost}
+ *  once at your app root. */
+export function toast(
+  message: VChild,
+  opts?: { variant?: ToastVariant; duration?: number },
+): () => void {
+  const id = ++_toastSeq;
+  const variant = opts?.variant ?? "info";
+  _toasts.set([..._toasts.peek(), { id, message, variant }]);
+  const dismiss = () => _toasts.set(_toasts.peek().filter((t) => t.id !== id));
+  const duration = opts?.duration ?? 4000;
+  if (duration > 0 && typeof setTimeout !== "undefined") {
+    setTimeout(dismiss, duration);
+  }
+  return dismiss;
+}
+
+/** The container that renders active toasts — place once at your app root
+ *  (a fixed-position ARIA live region). Reactive: reads the module toast
+ *  queue, so `toast(...)` anywhere updates it. */
+export function ToastHost(props: Common = {}): VNode {
+  const items = _toasts.value; // reactive read → re-renders on toast()/dismiss
+  return h(
+    "div",
+    {
+      ...rest(props, ["class"]),
+      class: cx("aio-toasts", props.class as string | undefined),
+      role: "status",
+      "aria-live": "polite",
+    },
+    ...items.map((t) =>
+      h(
+        "div",
+        {
+          key: t.id,
+          class: `aio-toast aio-toast--${t.variant}`,
+          role: t.variant === "error" ? "alert" : undefined,
+        },
+        h("span", { class: "aio-toast__msg" }, t.message),
+        h("button", {
+          type: "button",
+          class: "aio-toast__x",
+          "aria-label": "Dismiss",
+          onClick: () =>
+            _toasts.set(_toasts.peek().filter((x) => x.id !== t.id)),
+        }, "×"),
+      )
+    ),
+  );
+}
+
+/** Test/reset hook — clear the toast queue between tests.
+ *  @internal */
+export function _resetToasts(): void {
+  _toasts.set([]);
+  _toastSeq = 0;
+}
+
+// ── Markdown ─────────────────────────────────────────────────────────
+
+export { Markdown, type MarkdownProps } from "./markdown.ts";
 
 // ── Styles ───────────────────────────────────────────────────────────
 

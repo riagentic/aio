@@ -13,10 +13,11 @@ import {
 import { openUserStore } from "../src/server/auth-users.ts";
 import { _resetAuthFails } from "../src/server/server-auth.ts";
 import { _resetOidcCaches } from "../src/server/auth-oidc.ts";
+import { freePort } from "../src/testing/server-test.ts";
 
-const PORT = 9930 + (Deno.pid % 60);
+const PORT = freePort();
 const BASE = `http://127.0.0.1:${PORT}`;
-const IDP_PORT = PORT + 60;
+const IDP_PORT = freePort();
 
 // ── TOTP unit ────────────────────────────────────────────────────────────────
 

@@ -3,8 +3,9 @@
 // cuts access; sessions alone activate per-user auth mode).
 import { assert, assertEquals } from "@std/assert";
 import { openSessionStore } from "../src/server/sessions.ts";
+import { freePort } from "../src/testing/server-test.ts";
 
-const PORT = 9730 + (Deno.pid % 200);
+const PORT = freePort();
 
 Deno.test("sessions: issue → get → refresh → revoke lifecycle", () => {
   const s = openSessionStore(":memory:");

@@ -12,8 +12,9 @@ import { assert, assertEquals } from "@std/assert";
 import { DatabaseSync } from "node:sqlite";
 import { join } from "@std/path";
 import { aio, cell, pk, table, text } from "../mod.ts";
+import { freePort } from "../src/testing/server-test.ts";
 
-const PORT = 9540 + (Deno.pid % 120);
+const PORT = freePort();
 
 Deno.test("db: a restart with existing rows flushes cleanly (no duplicate INSERT)", async () => {
   const dir = await Deno.makeTempDir({ prefix: "db-restart-" });

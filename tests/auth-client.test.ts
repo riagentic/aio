@@ -4,8 +4,10 @@
 // doesn't: signup, changePassword, verify, me, and error mapping.
 import { assert, assertEquals } from "@std/assert";
 import { _resetAuthFails } from "../src/server/server-auth.ts";
+import { freePort } from "../src/testing/server-test.ts";
 
-const PORT = 9870 + (Deno.pid % 60);
+const PORT = freePort();
+const PORT2 = freePort();
 const BASE = `http://127.0.0.1:${PORT}`;
 
 Deno.test("authClient: signup → me → changePassword → login lifecycle", async () => {
@@ -78,10 +80,10 @@ Deno.test("authClient: requestReset never throws / never enumerates", async () =
     persist: false,
     libraryMode: true,
     auth: { sendMail: () => {} }, // mail configured so the route is live
-    port: PORT + 1,
+    port: PORT2,
     baseDir: await Deno.makeTempDir(),
   });
-  const ac = createAuthClient(`http://127.0.0.1:${PORT + 1}`);
+  const ac = createAuthClient(`http://127.0.0.1:${PORT2}`);
   try {
     // Unknown id resolves (no throw, no enumeration signal).
     await ac.requestReset("ghost-user");

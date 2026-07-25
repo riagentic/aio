@@ -15,10 +15,11 @@ import { join } from "@std/path";
 import { createServer } from "../src/server/server.ts";
 import { electronMainScriptUDS } from "../src/electron/electron.ts";
 import { createUDSListener } from "../src/server/aio.ts";
+import { freePort } from "../src/testing/server-test.ts";
 
 const ELECTRON_BIN = "node_modules/.bin/electron";
-const DEV_PORT = 19950;
-const CDP_PORT = 19951;
+const DEV_PORT = freePort();
+const CDP_PORT = freePort();
 
 // App that takes >100ms to "load" by busy-waiting before calling useAio.
 // This forces did-finish-load to fire well before IPC listeners are registered,

@@ -1,6 +1,7 @@
 // aiol — project scanner: reads files, extracts cells, builds LintContext
 
 import { basename, extname, join, relative } from "@std/path";
+import { codeMatches } from "./scan.ts";
 import type {
   CellInfo,
   DenoJsonConfig,
@@ -79,7 +80,10 @@ function extractCells(files: SourceFile[]): CellInfo[] {
   const cellRe = /\bcell\s*\(\s*(['"`])(\w[\w-]*)\1/g;
 
   for (const file of files) {
-    for (const match of file.content.matchAll(cellRe)) {
+    // Only real code declares a cell — a `cell("x")` in a doc comment or in a
+    // code-generator's template literal is an example, not this project's cell
+    // (it used to produce phantom cells + unfixable duplicate-name errors).
+    for (const match of codeMatches(file.content, cellRe)) {
       const name = match[2]!;
       const lineIdx = file.content.slice(0, match.index).split("\n").length;
       // Scan forward from match to find the config object

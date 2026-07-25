@@ -8,8 +8,9 @@ import {
   verifyPassword,
 } from "../src/server/auth-users.ts";
 import { _resetAuthFails } from "../src/server/server-auth.ts";
+import { freePort } from "../src/testing/server-test.ts";
 
-const PORT = 9830 + (Deno.pid % 200);
+const PORT = freePort();
 const BASE = `http://127.0.0.1:${PORT}`;
 
 Deno.test("password hash: roundtrip, rejection, malformed", async () => {
