@@ -55,7 +55,19 @@ Deep paths are for `exclude`.
 
 **Schema changes need a version bump.** Changed the state shape? Persisted state
 deep-merges with defaults, which covers additions — but renames and type changes
-need `version: N` + `onMigrate`.
+need `version: N` + `onMigrate`. Bumping `version` without an `onMigrate` boots
+with a loud warning (the old shape is kept as-is). Running an **older** build
+against data a **newer** build wrote (stored version > code version) is a
+downgrade: boot warns loudly and keeps the state untouched rather than silently
+misreading moved/renamed fields — re-deploy the newer build, or add an
+`onMigrate` that down-converts.
+
+Boot also detects **shape drift** without any version machinery: if stored data
+holds a field your cell's `initialState` no longer declares (a rename/removal
+you forgot to bump `version` for), boot warns and `deno task am migrations`
+lists it — `deepMerge` would otherwise keep the stale value and you'd read it
+forever. `initialState` is the declared shape; the drift check diffs storage
+against it.
 
 ## Scheduling & effects
 

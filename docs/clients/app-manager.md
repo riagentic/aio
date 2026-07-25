@@ -193,6 +193,31 @@ booleans, `null`, JSON arrays/objects, strings.
 In browser (dev mode): press **Ctrl+.** to toggle the time-travel panel. Shows
 action history with timestamps and performance metrics (`reduce:ms effects:ms`).
 
+From the CLI, three commands expose the dispatch history — every state change,
+what triggered it, and what it changed:
+
+```sh
+deno task am timeline                       # recent dispatches + payload + state diff (live)
+deno task am timeline --lines=50            # last 50
+deno task am timeline --from=data.db.journal  # offline, from a durable journal file
+deno task am replay 5..12                   # re-dispatch journal seq 5..12 for repro
+deno task am replay 5..12 --dry             # show what would replay, dispatch nothing
+deno task am record flow.test.ts --from=J   # turn a journal into a bootCells test
+```
+
+- **`am timeline`** reads a live, always-on in-memory ring on the running app —
+  each entry carries the compact state diff the dispatch produced
+  (`counter.n: 0 → 1`). With `--from=<journal>` it reads a durable journal file
+  instead (payloads only — the on-disk journal, `journal: true`, stores actions,
+  not diffs).
+- **`am replay <range>`** re-dispatches a journal range against the running app,
+  in order, stopping at the first failure — deterministic repro for the "froze
+  in the client but the test passed" class. Point it at a fresh instance to
+  reproduce a captured session. `--dry` lists the range without dispatching.
+
+Range forms: `N` (one seq), `N..M` (inclusive), or omit for all. Both read
+`data.db.journal` by default; override with `--from=<path>`.
+
 ## Persistence and snapshots
 
 ```sh
@@ -200,7 +225,15 @@ deno task am persist                        # force flush to SQLite
 deno task am snapshot                       # dump state to stdout
 deno task am snapshot save backup.json      # save to file
 deno task am snapshot load backup.json      # restore from file
+deno task am migrations                     # cell versions + shape drift
 ```
+
+**`am migrations`** shows each cell's declared vs stored `version`, what the
+last boot's migration pass did, and any **shape drift** — a field still in
+storage that the cell's current `initialState` no longer declares (a
+rename/removal without a `version` bump, which `deepMerge` would silently keep).
+Boot also warns about drift; this is the on-demand view. A cell shape change is
+covered by bumping `version` + adding an `onMigrate(state, from)` hook.
 
 ## UI inspection and interaction (dev mode)
 
@@ -248,19 +281,21 @@ prod.
 
 ### Inspect (GET)
 
-| Endpoint                      | Returns                                    |
-| ----------------------------- | ------------------------------------------ |
-| `/__aio/trojan/state`         | Raw full state (unfiltered)                |
-| `/__aio/trojan/ui`            | UI state (cell-level ui filtered)          |
-| `/__aio/trojan/ui?user=alice` | UI state for specific user                 |
-| `/__aio/trojan/clients`       | Connected clients (type, transport, index) |
-| `/__aio/trojan/surface/<n>`   | Semantic UI surface from client n (dev)    |
-| `/__aio/trojan/trigger/<n>`   | POST: drive the UI ({path, action, text?}) |
-| `/__aio/trojan/history`       | Time-travel entries                        |
-| `/__aio/trojan/schedules`     | Active timer/cron IDs                      |
-| `/__aio/trojan/metrics`       | Uptime, connections, schedule count        |
-| `/__aio/trojan/config`        | Port, title, expose, authMode, prod        |
-| `/__aio/trojan/health`        | Cell health: status, enabled, errors       |
+| Endpoint                      | Returns                                                         |
+| ----------------------------- | --------------------------------------------------------------- |
+| `/__aio/trojan/state`         | Raw full state (unfiltered)                                     |
+| `/__aio/trojan/ui`            | UI state (cell-level ui filtered)                               |
+| `/__aio/trojan/ui?user=alice` | UI state for specific user                                      |
+| `/__aio/trojan/clients`       | Connected clients (type, transport, index)                      |
+| `/__aio/trojan/surface/<n>`   | Semantic UI surface from client n (dev)                         |
+| `/__aio/trojan/trigger/<n>`   | POST: drive the UI ({path, action, text?})                      |
+| `/__aio/trojan/history`       | Time-travel entries                                             |
+| `/__aio/trojan/timeline`      | Recent dispatches + payload + state diff (`?after=`, `?limit=`) |
+| `/__aio/trojan/migrations`    | Cell versions (declared vs stored) + shape drift                |
+| `/__aio/trojan/schedules`     | Active timer/cron IDs                                           |
+| `/__aio/trojan/metrics`       | Uptime, connections, schedule count                             |
+| `/__aio/trojan/config`        | Port, title, expose, authMode, prod                             |
+| `/__aio/trojan/health`        | Cell health: status, enabled, errors                            |
 
 ### Control (POST)
 

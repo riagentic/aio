@@ -166,10 +166,10 @@ export function connect(): void {
         return;
       case "ack": {
         // AIO-2.2: settle the pending ack for this cid.
-        const { cid, ok } = (frame.d ?? {}) as AckPayload;
+        const { cid, ok, value, error } = (frame.d ?? {}) as AckPayload;
         if (typeof cid !== "string") return;
-        if (ok) _resolveAck(cid);
-        else _rejectAck(cid, new Error("server rejected action"));
+        if (ok) _resolveAck(cid, value);
+        else _rejectAck(cid, new Error(error ?? "server rejected action"));
         return;
       }
       case "diag":

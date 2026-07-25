@@ -296,6 +296,7 @@ export function initDiagAndVitals(
   diagConfig: DiagnosticsConfig | false | undefined,
   prod: boolean,
   cellNames?: string[],
+  guardDispatches?: boolean,
 ): {
   diagHooks: ReturnType<typeof initDiagnostics> | null;
   vitalsSystem: VitalsSystem | undefined;
@@ -306,7 +307,7 @@ export function initDiagAndVitals(
   const diagCfg = (diagConfig === true || diagConfig == null) ? {} : diagConfig;
   const diagHooks = !diagOn
     ? null
-    : initDiagnostics(diagCfg, prod, getLogDir());
+    : initDiagnostics(diagCfg, prod, getLogDir(), guardDispatches);
   if (diagHooks && cellNames) diagHooks.onStart(cellNames);
 
   const diagResolvedOpts = !diagOn ? false : resolveDiagOptions(diagCfg, prod);

@@ -222,11 +222,15 @@ Process (singleton — one instance per app identity):
 
 State:
   state [path] [--wait=N] State query (dot-path, [*] wildcard, {pick})
+  expect <path> <op> [v]  Assert on state (eq/ne/gt/lt/contains/exists…); e2e; --wait=N
+  record [out] --from=J  Generate a bootCells replay test from a journal
   ui [user]               Server-side UI state (for live client UI use: surface)
   dispatch <Type> [k=v]   Dispatch action (or --body='{"type":...}')
   actions                 Time-travel history
 
 Time-travel:
+  timeline [--from=J]     Recent dispatches + payload + state diff (--lines=N)
+  replay [N..M] [--dry]   Re-dispatch a journal range for repro (--from=J)
   tt undo|redo            Step back/forward
   tt goto <N>             Jump to index
   tt pause|resume         Freeze/unfreeze state
@@ -236,6 +240,7 @@ Persistence:
   snapshot                Dump state JSON to stdout
   snapshot save [file]    Save snapshot to file
   snapshot load <file>    Load snapshot from file
+  migrations              Cell versions (declared vs stored) + shape drift
 
 Inspect:
   clients                 Connected WebSocket clients (with index)
@@ -248,6 +253,7 @@ Inspect:
   log [filter]            Tail app log (--client for client.log) (--filter --lines --follow)
   errors                  Last build error
   metrics                 Uptime, connections, schedules
+  top [secs]              Live runtime view (per-cell state sizes); --json = one shot
   health                  HTTP health check
   discover [--timeout=ms] Find exposed aio apps on the LAN (UDP broadcast)
   profile [--out=file]    Export this app's .aioapp profile (cert + key) for the client

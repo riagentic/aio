@@ -13,6 +13,8 @@ Start here. Covers what every app needs.
 - [Cells](cells.md) — cell() anatomy and config reference
 - [Methods](methods.md) — sync/async methods, workflows, cancellation,
   selectors, Immer
+- [The bridge](the-bridge.md) — what crosses client↔server, what doesn't, what
+  freezes
 
 ## Going further
 

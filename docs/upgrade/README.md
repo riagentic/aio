@@ -7,6 +7,10 @@ One guide per version migration. Find your current version and follow the steps.
 - **[The aio restructure (alpha27+)](restructure.md)** — every restructure
   breaking change with before → after recipes (methods-only cells, instances,
   SQLite-only persistence, `aio/extras`, wire catalog)
+- [alpha33 → alpha34](from-alpha33-to-alpha34.md) — the dream list: return
+  values cross the bridge, transactional methods, durable journal + time travel
+  (`am timeline`/`replay`/`record`), migration shape-drift + `am migrations`,
+  reactive SQL, transport cassettes, `aio ship`; all opt-in/additive
 - [alpha32 → alpha33](from-alpha32-to-alpha33.md) — `deno task build` (fleet
   builds), amui levelled up; portable binaries, embedded `.wasm`, a working
   systemd unit, sync-compaction + `db:`-table data-loss fixes

@@ -163,7 +163,12 @@ function parseCellConfig(source: string): {
     };
   }
 
-  const block = source.slice(firstBrace, end);
+  // Strip comments so a phrase inside a `//` or `/* */` comment (e.g. "lives in
+  // state (error…)") can't be mis-parsed as a real state key, method or action
+  // and trip a phantom reserved-key error — same naive strip checkPersistence uses.
+  const block = source.slice(firstBrace, end)
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/\/\/.*$/gm, "");
   const hasState = /\bstate\s*:/.test(block);
   const hasMethods = /\bmethods\s*:/.test(block);
   const hasActions = /\bactions\s*:/.test(block);

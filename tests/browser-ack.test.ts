@@ -136,7 +136,7 @@ Deno.test("2.2: _rejectAllPending rejects all in-flight acks", async () => {
   reset();
   _setAckTimeoutMs(0);
 
-  const promises: Promise<void>[] = [];
+  const promises: Promise<unknown>[] = [];
   promises.push(_registerAck("a"));
   promises.push(_registerAck("b"));
   promises.push(_registerAck("c"));
