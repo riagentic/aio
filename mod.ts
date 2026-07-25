@@ -130,7 +130,7 @@ export type { MethodDraftMeta } from "./src/state/cell-impl.ts";
  * @param url - WebSocket URL of the aio server (e.g., 'ws://localhost:8000/ws')
  * @param opts - Optional { token?: string } for auth
  */
-export { connectCli } from "./src/server/cli-client.ts";
+// `connectCli` moved to `aio/server` (alpha37) — see the note on createDB below.
 /** CLI client connection type — state, send, subscribe, close, ready */
 export type { CliApp } from "./src/server/cli-client.ts";
 
@@ -216,7 +216,21 @@ export type {
  * Async SQLite — Worker-backed, non-blocking.
  * `createDB` is for direct use; `app.db` is the instance managed by the framework.
  */
-export { createDB } from "./src/db/mod.ts";
+// SERVER-ONLY VALUES LIVE ON `aio/server` (alpha37).
+//
+// `createDB` opens SQLite in a Worker and `connectCli` pulls in CLI/UDS
+// transport — neither exists in a browser bundle, and a static import of either
+// from an isomorphic module (a cell, or a lib a cell imports) poisons the client
+// graph and blank-screens the app at boot. Re-exporting them here made that
+// mistake a one-character difference from correct code, so the boundary is now
+// where the docs always said it would be:
+//
+//   import { createDB } from "aio/server";
+//   import { connectCli } from "aio/server";
+//
+// `aiol --safe-fix` rewrites the old imports. The TYPES stay on this entry —
+// they are erased at build time, so they can't poison anything, and keeping
+// them spares every `DB`-typed signature a needless import change.
 /** Database types — DB instance, options, query results, transaction handle */
 export type { DB, DBOpts, QueryResult, Tx } from "./src/db/mod.ts";
 

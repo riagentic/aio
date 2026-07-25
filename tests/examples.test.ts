@@ -2,7 +2,7 @@
 // boots from source and answers over its real interface (WS state or HTTP).
 // Kept out of test:core (spawns real servers); runs in `deno task test` + CI.
 import { assert, assertEquals } from "@std/assert";
-import { connectCli } from "aio";
+import { connectCli } from "aio/server";
 
 // Coverage profiles from spawned deno processes go to a throwaway temp dir —
 // never into the repo (an empty DENO_COVERAGE_DIR means "cwd"), never into

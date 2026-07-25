@@ -100,6 +100,7 @@ function extractCells(files: SourceFile[]): CellInfo[] {
         hasGenerators: info.hasGenerators,
         hasMachine: info.hasMachine,
         hasSelectors: info.hasSelectors,
+        isWorker: info.isWorker,
         stateKeys: info.stateKeys,
         methodNames: info.methodNames,
         actionNames: info.actionNames,
@@ -117,6 +118,7 @@ function parseCellConfig(source: string): {
   hasGenerators: boolean;
   hasMachine: boolean;
   hasSelectors: boolean;
+  isWorker: boolean;
   stateKeys: string[];
   methodNames: string[];
   actionNames: string[];
@@ -132,6 +134,7 @@ function parseCellConfig(source: string): {
       hasGenerators: false,
       hasMachine: false,
       hasSelectors: false,
+      isWorker: false,
       stateKeys: [],
       methodNames: [],
       actionNames: [],
@@ -161,6 +164,7 @@ function parseCellConfig(source: string): {
       hasGenerators: false,
       hasMachine: false,
       hasSelectors: false,
+      isWorker: false,
       stateKeys: [],
       methodNames: [],
       actionNames: [],
@@ -179,6 +183,7 @@ function parseCellConfig(source: string): {
   const hasGenerators = /\bgenerators\s*:/.test(block);
   const hasMachine = /\bmachine\s*:/.test(block);
   const hasSelectors = /\bselectors\s*:/.test(block);
+  const isWorker = /\bworker\s*:\s*true\b/.test(block);
 
   // Extract state keys from state: { key1: ..., key2: ... }
   // Use brace matching instead of [^}] to handle nested objects/arrays
@@ -258,6 +263,7 @@ function parseCellConfig(source: string): {
     hasGenerators,
     hasMachine,
     hasSelectors,
+    isWorker,
     stateKeys,
     methodNames,
     actionNames,

@@ -236,3 +236,46 @@ export function fixAddAioEntry(
         : base.replace(/mod\.ts$/, "") + entryPath;
     });
 }
+
+/** Move server-only symbols to the `aio/server` entry (alpha37). Splits a mixed
+ *  import — `import { cell, createDB } from "aio"` becomes two statements, one
+ *  per entry — so the boundary is explicit without losing anything. */
+export function fixServerEntryImport(
+  filePath: string,
+): () => Promise<boolean> {
+  const SERVER_ONLY = new Set([
+    "createDB",
+    "DEFAULT_PRAGMAS",
+    "connectCli",
+    "connectCliUDS",
+  ]);
+  return async () => {
+    try {
+      const src = await Deno.readTextFile(filePath);
+      let changed = false;
+      const out = src.replace(
+        /import\s*\{([^}]*)\}\s*from\s*["']aio["'];?/g,
+        (whole, inner: string) => {
+          const names = inner.split(",").map((s) => s.trim()).filter(Boolean);
+          const server = names.filter((n) =>
+            SERVER_ONLY.has(n.replace(/^type\s+/, "").split(/\s+as\s+/)[0]!)
+          );
+          if (server.length === 0) return whole;
+          changed = true;
+          const rest = names.filter((n) => !server.includes(n));
+          const serverLine = `import { ${
+            server.join(", ")
+          } } from "aio/server";`;
+          return rest.length > 0
+            ? `import { ${rest.join(", ")} } from "aio";\n${serverLine}`
+            : serverLine;
+        },
+      );
+      if (!changed) return false;
+      await Deno.writeTextFile(filePath, out);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+}

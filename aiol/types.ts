@@ -62,6 +62,8 @@ export type CellInfo = {
   hasGenerators: boolean;
   hasMachine: boolean;
   hasSelectors: boolean;
+  /** `worker: true` — this cell's methods run on their own thread. */
+  isWorker: boolean;
   stateKeys: string[];
   methodNames: string[];
   actionNames: string[];

@@ -2,7 +2,7 @@
 // uses, bound to the connection. `await counter.increment(1)` dispatches over
 // the socket (resolves on the server ack) and `counter.count` reads live
 // server state — no raw { type, payload } wire actions, no state mirror.
-import { connectCli } from "aio";
+import { connectCli } from "aio/server";
 import { counter } from "./cell/counter.ts";
 
 const url = Deno.args[0] || "ws://localhost:8000/ws";

@@ -185,3 +185,63 @@ export const c = cell("c", {
     },
   );
 });
+
+Deno.test('aiol upgrade: a server-only symbol imported from "aio" is flagged and split', async () => {
+  // alpha37 moved createDB/connectCli to the `aio/server` entry. The old form
+  // was the classic blank-screen: it link-fails only when a real browser links
+  // the graph, long after every server-side check passed.
+  await withProject(
+    {
+      "src/app.ts": APP,
+      "src/store.server.ts": `import { cell, createDB } from "aio";
+export const db = createDB(":memory:");
+export const c = cell("c", { state: { n: 0 }, methods: {} });
+`,
+    },
+    {},
+    async (dir) => {
+      const issues = await upgradeIssues(dir);
+      const hit = issues.filter((i) => i.message.includes("aio/server"));
+      assertEquals(hit.length, 1, JSON.stringify(issues));
+      assertEquals(await hit[0]!.safeFix!(dir), true);
+
+      const after = await Deno.readTextFile(
+        join(dir, "src", "store.server.ts"),
+      );
+      assert(
+        after.includes('import { createDB } from "aio/server";'),
+        `server symbol moved: ${after}`,
+      );
+      assert(
+        after.includes('import { cell } from "aio";'),
+        `the rest stays on "aio": ${after}`,
+      );
+      assertEquals(
+        (await upgradeIssues(dir)).filter((i) =>
+          i.message.includes("aio/server")
+        ),
+        [],
+        "and the project lints clean afterwards",
+      );
+    },
+  );
+});
+
+Deno.test("aiol upgrade: an app already on aio/server is untouched", async () => {
+  await withProject(
+    {
+      "src/app.ts": APP,
+      "src/store.server.ts":
+        `import { createDB } from "aio/server";\nexport const db = createDB(":memory:");\n`,
+    },
+    {},
+    async (dir) => {
+      assertEquals(
+        (await upgradeIssues(dir)).filter((i) =>
+          i.message.includes("aio/server")
+        ),
+        [],
+      );
+    },
+  );
+});

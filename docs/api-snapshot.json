@@ -115,10 +115,6 @@
           "kind": "typeAlias",
           "sig": "25a8bcac81e3ae56"
         },
-        "connectCli": {
-          "kind": "function",
-          "sig": "cf36c15f1890d562"
-        },
         "CookieOptions": {
           "kind": "interface",
           "sig": "fca122a526af8b9a"
@@ -126,10 +122,6 @@
         "createAuthClient": {
           "kind": "function",
           "sig": "4edd7a0d35275fb0"
-        },
-        "createDB": {
-          "kind": "function",
-          "sig": "905df9f1c29edd8c"
         },
         "createSelector": {
           "kind": "function",
@@ -385,7 +377,7 @@
         },
         "VERSION": {
           "kind": "variable",
-          "sig": "ec782c37a8373027"
+          "sig": "e6ef92f3585dfb52"
         },
         "VitalsConfig": {
           "kind": "typeAlias",

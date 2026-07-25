@@ -53,15 +53,23 @@ The linter (`aiol`) recognizes the suffix and stays quiet; `@std/*` and `node:*`
 imports reached any other way are stubbed by the build with a clear "is
 server-only" runtime error instead of a cryptic bundling failure.
 
-**2b. Server-only _symbols_ from `"aio"` — `createDB` and friends.**
+**2b. Server-only _symbols_ live on `"aio/server"`.**
 
-A few `"aio"` exports are server-only: **`createDB`**, `DEFAULT_PRAGMAS`
-(SQLite/Worker), and `connectCli` / `connectCliUDS`. The **browser build of
-`"aio"` omits them.** A _static_ `import { createDB } from "aio"` in a cell (or
-any module a cell pulls in) therefore link-fails the whole client bundle at boot
-— a blank screen whose message names the symbol but not your file, and which
-every server-side check (`deno check` / `deno test` / `deno lint`) passes
-because the split doesn't exist until a real browser links the graph.
+`createDB` / `DEFAULT_PRAGMAS` (SQLite in a Worker) and `connectCli` /
+`connectCliUDS` (CLI/UDS transport) are **not on the `"aio"` entry** — as of
+alpha37 they are only on `"aio/server"`.
+
+They used to be re-exported from `"aio"` for convenience, which made the blank
+screen a one-character mistake: a _static_ `import { createDB } from "aio"` in a
+cell (or any module a cell pulls in) link-failed the whole client bundle at boot
+— a message naming the symbol but not your file, passing every server-side check
+(`deno check` / `deno test` / `deno lint`) because the split doesn't exist until
+a real browser links the graph. Importing from `aio/server` makes the boundary
+explicit, and `aiol --safe-fix` rewrites the old form for you.
+
+(The TYPES — `DB`, `DBOpts`, `QueryResult`, `Tx`, `CliApp` — stay on `"aio"`.
+They are erased at build time, so they cannot poison a bundle, and keeping them
+spares every `DB`-typed signature an import change.)
 
 Load them lazily in a server-only path instead — cell methods run on the server:
 
@@ -70,7 +78,7 @@ Load them lazily in a server-only path instead — cell methods run on the serve
 let _db: import("aio").DB | null = null;
 async function db() {
   if (!_db) {
-    const { createDB } = await import("aio");
+    const { createDB } = await import("aio/server");
     _db = createDB(".aio/cache.sqlite");
   }
   return _db;
@@ -210,6 +218,6 @@ map the entry to a stub.
   in a file that also defines a `cell()` — it poisons the client graph and
   blank-screens the app at boot.
 
-Additive today (these are still re-exported from `aio` for back-compat);
-`aio/server` is the recommended path, and a future major moves them behind it
-exclusively.
+As of **alpha37 this is the only path** — the convenience re-exports on `"aio"`
+are gone, so the boundary can't be crossed by accident. `aiol --safe-fix`
+rewrites `import { createDB } from "aio"` to `"aio/server"`.
