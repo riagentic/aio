@@ -25,7 +25,9 @@ Deno.test("aio24: UDS conn closed after client disconnects (no ghost socket)", a
   const uds = createUDSListener(
     socketPath,
     () => ({ ok: true }),
-    (a) => actions.push(a as { type: string }),
+    (a) => {
+      actions.push(a as { type: string });
+    },
     () => {},
   );
 
@@ -82,7 +84,9 @@ Deno.test("aio24: server ignores ping keepalive (not dispatched as action)", asy
   const uds = createUDSListener(
     socketPath,
     () => ({ ok: true }),
-    (a) => actions.push(a as { type: string }),
+    (a) => {
+      actions.push(a as { type: string });
+    },
     (msg) => debugMsgs.push(msg),
   );
 

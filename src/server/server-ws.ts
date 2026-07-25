@@ -11,6 +11,7 @@ import {
   type SfnPayload,
 } from "../protocol/envelope.ts";
 import { filterStateBySubs, parseSubs } from "../protocol/broadcast-utils.ts";
+import { serializeReturn } from "../protocol/return-value.ts";
 import { writeClientLog } from "./client-log.ts";
 import { log } from "../diagnostics/logger.ts";
 import { parseTTCommand } from "../diagnostics/time-travel.ts";
@@ -87,7 +88,7 @@ export type ClientMeta = {
 
 /** Dependencies injected from server.ts closure */
 export interface WsDeps {
-  dispatch: (event: unknown, user?: AioUser) => void;
+  dispatch: (event: unknown, user?: AioUser) => Promise<unknown> | void;
   getUIState: (user?: AioUser) => unknown;
   debug: (msg: string) => void;
   prod: boolean;
@@ -683,21 +684,51 @@ export function createWsManager(deps: WsDeps): WsManager {
     deps.debug(
       `ws: recv ${JSON.stringify(parsed)} user=${meta.user?.id ?? "anon"}`,
     );
-    deps.dispatch(parsed, meta.user);
-    // AIO-2.2: emit per-action ack if the client supplied a cid. Schedules a
-    // microtask so the ack goes out AFTER any synchronous broadcast that the
-    // dispatch triggered (broadcast itself uses queueMicrotask — by queuing
-    // ours after dispatch returns, we run after the broadcast's send).
+    const result = deps.dispatch(parsed, meta.user);
+    // AIO-2.2 + return-value transport: emit a per-action ack carrying the
+    // method's RETURN value if the client supplied a cid. We settle only AFTER
+    // the dispatch promise resolves — for an async method that's on completion,
+    // for a sync/void method that's the next microtask (after any synchronous
+    // broadcast the dispatch triggered, so ordering is preserved).
     if (typeof parsed.cid === "string" && parsed.cid.length > 0) {
       const cid = parsed.cid;
-      queueMicrotask(() => {
-        try {
-          if (socket.readyState === WebSocket.OPEN) {
-            socket.send(enc("ack", { cid, ok: true }));
-          }
-        } catch { /* client gone */ }
-      });
+      const actionType = typeof parsed.type === "string" ? parsed.type : "?";
+      Promise.resolve(result).then(
+        (value) => _sendAck(socket, cid, actionType, value),
+        (err) => _sendAckErr(socket, cid, err),
+      );
     }
+  }
+
+  /** Send a success ack carrying the (JSON-vetted) return value. */
+  function _sendAck(
+    socket: WebSocket,
+    cid: string,
+    actionType: string,
+    value: unknown,
+  ): void {
+    const { value: safe, dropped } = serializeReturn(value);
+    if (dropped && !deps.prod) {
+      console.warn(
+        `[aio] method "${actionType}" returned a non-serializable value — ` +
+          `the caller resolves with undefined. Return JSON-safe data ` +
+          `(plain objects/arrays/primitives) to transport a value.`,
+      );
+    }
+    try {
+      if (socket.readyState === WebSocket.OPEN) {
+        socket.send(enc("ack", { cid, ok: true, value: safe }));
+      }
+    } catch { /* client gone */ }
+  }
+
+  /** Send a failure ack — the awaited method rejected server-side. */
+  function _sendAckErr(socket: WebSocket, cid: string, err: unknown): void {
+    try {
+      if (socket.readyState === WebSocket.OPEN) {
+        socket.send(enc("ack", { cid, ok: false, error: String(err) }));
+      }
+    } catch { /* client gone */ }
   }
 
   function _resolvePending(

@@ -278,13 +278,27 @@ export function bindCellReactive(
       const creator = (def.__aio.actions as Record<string, unknown>)[key];
       if (typeof creator !== "function") continue;
 
+      // Async methods carry `_callId` so the server correlates the completion
+      // (its return value) back to this call over the wire (return-value
+      // transport) — mirroring bindCell's direct-call path. Sync/void methods
+      // get their value from the dispatch result on the server side.
+      const isAsync = def.__aio.asyncMethods?.has(key) === true;
       const fn = (...args: unknown[]) => {
         const action = (creator as (...a: unknown[]) => {
           type: string;
           payload?: unknown;
         })(...args);
         const cid = randomUuid();
-        const tagged = { ...action, cid };
+        const tagged = isAsync
+          ? {
+            ...action,
+            cid,
+            payload: {
+              ...(action.payload as Record<string, unknown> ?? {}),
+              _callId: cid,
+            },
+          }
+          : { ...action, cid };
         // AIO-2.2: register the ack BEFORE send so a fast server can't ack
         // before we listen. Then dispatch; the ack handler (wired in the
         // browser transport) will settle the registered promise.
@@ -309,7 +323,7 @@ function _registerAndSend(
     action: { type: string; payload?: unknown; cid?: string },
   ) => void | Promise<void>,
   tagged: { type: string; payload?: unknown; cid: string },
-): Promise<void> {
+): Promise<unknown> {
   const promise = _registerAck(tagged.cid);
   // Send in a microtask so a fast synchronous sendFn doesn't have its return
   // value clobbered by the pending map. The ack can come back as soon as

@@ -103,13 +103,22 @@ const id = await cart.addItem({ name: "Book", price: 12 })
   method can't both schedule an effect and return a value in the same call.
 - Returning a slice of draft state (`return s.items[id]`) is safe — the value is
   snapshotted, so it survives past the method (no revoked-proxy surprises).
-- **⚠️ Return values resolve in-process only — NOT across the network bridge.**
-  Same-process callers (server code, tests, the CLI) get the value. But when a
-  **browser or Electron client** calls a method that runs on the **server**,
-  only an acknowledgement crosses the wire — the client's `await` resolves
-  `undefined`, never the return. Across that boundary, **read the resulting
-  state reactively** (it syncs to the client anyway); don't design a client flow
-  around a method's return value.
+- **Return values cross the network bridge.** When a **browser or Electron
+  client** calls a method that runs on the **server**, the return value is
+  transported back in the action's ack frame — the client's `await` resolves
+  with the real value (same as in-process callers get). Async methods work too:
+  the value settles when the method _completes_, not when it starts.
+  ```ts
+  // In a browser component — resolves with the server method's return:
+  const id = await cart.addItem({ name: "Book", price: 12 }); // ← "a1b2-…"
+  ```
+- **The value must be JSON-serializable to cross the wire.** Plain
+  objects/arrays/primitives transport fine. A non-serializable return (a
+  function, class instance, `BigInt`, or circular structure) can't — the client
+  `await` resolves `undefined` and dev logs a warning. In-process callers still
+  get the raw value; only the network boundary requires JSON. (Reading the
+  resulting **state reactively** remains the idiomatic choice when what you need
+  is already synced to the client.)
 
 ### Returning schedule effects
 

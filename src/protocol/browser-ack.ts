@@ -3,10 +3,12 @@
 
 import { ACK_TIMEOUT_MS } from "./protocol-types.ts";
 
-/** Single pending ack: the shared promise, its resolve/reject + a timeout. */
+/** Single pending ack: the shared promise, its resolve/reject + a timeout. The
+ *  promise resolves with the method's transported RETURN value (undefined for
+ *  void methods / older servers) — `await cell.method()` yields it. */
 type PendingEntry = {
-  promise: Promise<void>;
-  resolve: () => void;
+  promise: Promise<unknown>;
+  resolve: (value?: unknown) => void;
   reject: (err: Error) => void;
   timer: ReturnType<typeof setTimeout> | undefined;
 };
@@ -27,13 +29,13 @@ export function _setAckTimeoutMs(ms: number): void {
  *  MUST return the same shared promise instead of overwriting the pending
  *  entry, otherwise the first caller's promise is orphaned and times out
  *  even though the server acked (AIO-2.2 regression). */
-export function _registerAck(cid: string): Promise<void> {
+export function _registerAck(cid: string): Promise<unknown> {
   const existing = _pending.get(cid);
   if (existing) return existing.promise;
 
-  let resolve!: () => void;
+  let resolve!: (value?: unknown) => void;
   let reject!: (err: Error) => void;
-  const promise = new Promise<void>((res, rej) => {
+  const promise = new Promise<unknown>((res, rej) => {
     resolve = res;
     reject = rej;
   });
@@ -51,13 +53,14 @@ export function _registerAck(cid: string): Promise<void> {
   return promise;
 }
 
-/** Settle a pending ack. Returns true if a pending entry was found. */
-export function _resolveAck(cid: string): boolean {
+/** Settle a pending ack with the method's transported return value (undefined
+ *  for void). Returns true if a pending entry was found. */
+export function _resolveAck(cid: string, value?: unknown): boolean {
   const entry = _pending.get(cid);
   if (!entry) return false;
   _pending.delete(cid);
   if (entry.timer) clearTimeout(entry.timer);
-  entry.resolve();
+  entry.resolve(value);
   return true;
 }
 

@@ -53,10 +53,10 @@ export function routeCommand(
     // AIO-2.2: per-action ack — settles the Promise returned by an awaited
     // cell method (registered in browser-ack).
     case "ack": {
-      const { cid, ok } = (f.d ?? {}) as AckPayload;
+      const { cid, ok, value, error } = (f.d ?? {}) as AckPayload;
       if (typeof cid === "string") {
-        if (ok) _resolveAck(cid);
-        else _rejectAck(cid, new Error("server rejected action"));
+        if (ok) _resolveAck(cid, value);
+        else _rejectAck(cid, new Error(error ?? "server rejected action"));
       }
       return true;
     }

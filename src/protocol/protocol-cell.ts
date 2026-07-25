@@ -65,6 +65,20 @@ export function cell(
     }
     // deno-lint-ignore no-explicit-any
     const eCat = buildCat((config.effects ?? {}) as any);
+    // Return-value transport: the browser must know which methods are async so
+    // bindCellReactive tags their dispatch with `_callId` — the correlation id
+    // the server resolves with the method's RETURN value. The server-side cell()
+    // classifies these; the browser stub must mirror it (same AsyncFunction test
+    // used for the client-scope guard below).
+    const asyncMethods = new Set<string>();
+    for (const [key, fn] of Object.entries(config.methods)) {
+      if (
+        (fn as { constructor?: { name?: string } })?.constructor?.name ===
+          "AsyncFunction"
+      ) {
+        asyncMethods.add(key);
+      }
+    }
     const def: Record<string, unknown> = {
       __aio: {
         state: config.state ?? {},
@@ -75,6 +89,7 @@ export function cell(
         id: prefix,
         actions: cat,
         effects: eCat,
+        asyncMethods,
         bound: false,
       },
     };

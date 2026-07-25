@@ -45,6 +45,7 @@ import {
   cmdSql,
   cmdSurface,
   cmdTables,
+  cmdTop,
   cmdTrigger,
 } from "./am/am-cmd-inspect.ts";
 
@@ -60,9 +61,13 @@ import { cmdLink } from "./am/am-cmd-link.ts";
 import { cmdFix } from "./am/am-cmd-fix.ts";
 import { cmdAuth } from "./am/am-cmd-auth.ts";
 
+import { cmdRecord } from "./am/record.ts";
+import { cmdReplay, cmdTimeline } from "./am/am-cmd-timeline.ts";
 import {
   cmdActions,
   cmdDispatch,
+  cmdExpect,
+  cmdMigrations,
   cmdPersist,
   cmdSnapshot,
   cmdState,
@@ -87,12 +92,17 @@ const COMMANDS: Record<string, CmdHandler> = {
   ls: cmdInstances,
   // State
   state: cmdState,
+  expect: cmdExpect,
+  record: cmdRecord,
+  timeline: cmdTimeline,
+  replay: cmdReplay,
   ui: cmdUi,
   dispatch: cmdDispatch,
   actions: cmdActions,
   tt: cmdTT,
   persist: cmdPersist,
   snapshot: cmdSnapshot,
+  migrations: cmdMigrations,
   // Inspect
   clients: cmdClients,
   client: cmdClient,
@@ -105,6 +115,7 @@ const COMMANDS: Record<string, CmdHandler> = {
   logs: cmdLog,
   errors: cmdErrors,
   metrics: cmdMetrics,
+  top: cmdTop,
   health: cmdHealth,
   discover: cmdDiscover,
   profile: cmdProfile,

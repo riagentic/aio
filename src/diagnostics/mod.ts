@@ -34,6 +34,7 @@ export function initDiagnostics(
   config: DiagnosticsConfig,
   isProd: boolean,
   logDir: string,
+  guardDispatches?: boolean,
 ): DiagnosticsHooks | null {
   const opts = resolveOptions(config, isProd);
   if (opts === false) return null;
@@ -110,6 +111,7 @@ export function initDiagnostics(
   let uninstallCrash: (() => void) | undefined;
   if (opts.crashHandler) {
     uninstallCrash = installCrashHandler({
+      guardRejections: guardDispatches,
       log: { error: (msg, data) => log.error("crash", msg, data) },
       getHealthData: () => ({ cells: getHealthSnapshot() }),
       writeEmergencyCheckpoint: () => {

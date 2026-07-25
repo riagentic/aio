@@ -1,5 +1,10 @@
 # Targets
 
+> Scope: these are the tasks a **scaffolded aio app** exposes (what `am create`
+> generates into the app's `deno.json` — see `src/am/am-cmd-create.ts`), NOT the
+> framework repo's own `deno.json` (which has no app to build). Test the task
+> list against the scaffold generator's task map.
+
 - you can build server application
 - you can build electron application
 - you can build browser application

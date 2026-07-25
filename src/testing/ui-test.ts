@@ -71,8 +71,12 @@ export interface UIElementHandle {
   /** Double click (after a full click sequence). */
   dblclick(): Promise<void>;
   /** Type into an input/textarea like a user: focus, then per-character
-   *  keydown + value update + input event. */
+   *  keydown + value update + input event. Note: `type` APPENDS to the current
+   *  value (it does not clear first) — use {@link setValue} to replace. */
   type(text: string): Promise<void>;
+  /** Replace an input's value: clears, then types `text` — the "set this field
+   *  to X" shortcut, so you don't have to `clear()` before `type()`. */
+  setValue(text: string): Promise<void>;
   /** Press a key (keydown/keyup), optionally with modifiers
    *  (`{ ctrlKey, metaKey, altKey, shiftKey }`) — lets you drive chords like
    *  Ctrl+Enter. A bare `"Enter"` inside a form also submits it (browser
@@ -576,6 +580,19 @@ async function _mountTestUI(
       },
       clear() {
         return act("clear", (e) => triggerClear(e));
+      },
+      setValue(text: string) {
+        return enqueue(async () => {
+          assertEnabled("set value on");
+          triggerClear(el()); // replace, don't append
+          handle._flush();
+          el().focus?.();
+          for (const ch of text) {
+            triggerChar(el(), ch); // re-resolve — controlled inputs re-render
+            handle._flush();
+          }
+          await settle();
+        });
       },
       scroll(to?: { top?: number; left?: number }) {
         return act(null, (e) => triggerScroll(e, to));

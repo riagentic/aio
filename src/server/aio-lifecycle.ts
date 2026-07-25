@@ -28,6 +28,8 @@ export interface LifecycleDeps<S, A> {
   electronDistDir: string | undefined;
   expose: boolean;
   singletonMode: boolean;
+  /** Gate for electron child windows (openWindow) — see AioRunOptions. */
+  childWindows: boolean;
   // Client / transport
   client: string;
   useElectron: boolean;
@@ -95,6 +97,7 @@ export function startLifecycle<S, A>(deps: LifecycleDeps<S, A>): void {
     electronDistDir,
     expose,
     singletonMode,
+    childWindows,
     client,
     useElectron,
     isHeadless,
@@ -292,6 +295,7 @@ export function startLifecycle<S, A>(deps: LifecycleDeps<S, A>): void {
       title,
       width: cli.width ?? ui.width,
       height: cli.height ?? ui.height,
+      childWindows,
     };
     const electronUrl = token ? `${localUrl}?token=${token}` : localUrl;
     // NOT distDir — that can be the binary's embedded VFS copy, which this

@@ -137,7 +137,16 @@ export type ActionPayload = {
   cid?: string;
   _source?: string;
 };
-export type AckPayload = { cid: string; ok: boolean };
+export type AckPayload = {
+  cid: string;
+  ok: boolean;
+  /** The method's transported RETURN value — resolves `await cell.method()` on
+   *  the caller (serializable results only; non-serializable → omitted + a dev
+   *  warning). Absent for void methods / older servers → resolves undefined. */
+  value?: unknown;
+  /** Error message when ok:false — rejects the awaiting caller. */
+  error?: string;
+};
 export type PatchesPayload = Patch[];
 export type OpPayload = {
   id: string;

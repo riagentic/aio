@@ -1,6 +1,6 @@
 {
   "name": "@riagentic/aio",
-  "version": "1.0.0-alpha33",
+  "version": "1.0.0-alpha34",
   "appId": "aio",
   "exports": {
     ".": "./mod.ts",
@@ -62,6 +62,7 @@
     "aio/ui": "./src/ui/mod.ts",
     "aio/jsx-runtime": "./src/jsx-runtime.ts",
     "aio/db": "./src/db/mod.ts",
+    "aio/server": "./src/server-entry.ts",
     "aio/sync": "./src/sync/mod.ts",
     "aio/testing": "./src/cell-test.ts",
     "aio/schedule": "./src/schedule.ts",
@@ -95,6 +96,8 @@
     "test": "deno test -A tests/",
     "test:onboard": "AIO_ONBOARD_E2E=1 deno test -A --no-check=remote tests/onboarding-e2e.test.ts",
     "test:build": "AIO_BUILD_E2E=1 deno test -A --no-check=remote tests/build-e2e.test.ts",
+    "ship": "deno run -A src/build/ship.ts",
+    "test:e2e": "deno test -A --no-check=remote tests/e2e-direct-subscription.test.ts tests/e2e-subscription.test.ts tests/e2e-dispatch-ack.test.ts tests/e2e-ui-chromium.test.ts tests/e2e-blank-screen.test.ts tests/e2e-sync-browser.test.ts",
     "coverage:check": "deno test -A --coverage=coverage tests/ && deno cache mod.ts src/air.ts src/browser-air.ts src/standalone-air.ts src/cell-test.ts src/am.ts src/build.ts aiol/mod.ts && deno coverage coverage --lcov --output=coverage/lcov.info && deno run --allow-read scripts/check-coverage.ts",
     "test:core": "deno test -A --ignore=tests/am.test.ts,tests/build.test.ts,tests/server.test.ts,tests/tls.test.ts,tests/single-instance-lock.test.ts,tests/cli.test.ts,tests/cli-client.test.ts,tests/electron-ipc.test.ts,tests/app-modes.test.ts,tests/examples.test.ts,tests/e2e-ui-chromium.test.ts,tests/e2e-remote-lan.test.ts,tests/zero-config.test.ts,tests/cli-bound-cells.test.ts,tests/e2e-blank-screen.test.ts,tests/e2e-bundle-smoke.test.ts,tests/e2e-sync-browser.test.ts tests/",
     "check": "deno check src/ mod.ts aiol/mod.ts examples/ && deno check -c amui/deno.json amui/src/",
