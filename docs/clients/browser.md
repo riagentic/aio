@@ -258,7 +258,7 @@ const orders = cell("orders", {
 
 Browser console output is forwarded to the server **automatically** — the
 transport installs the intercept at startup, no imports or setup. Read the logs
-with `am logs` or in `.aio/log/`.
+with `am logs` or in `~/.<appId>/logs/`.
 
 Intercepts `console.log`, `info`, `warn`, `error`, `debug` plus global `error`
 and `unhandledrejection` events. Each log entry is sent as a `__log` wire

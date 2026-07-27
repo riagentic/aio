@@ -8,7 +8,7 @@
   One codebase → browser, Electron, and Android.
 </p>
 
-<p align="center"><code>v1.0.0-alpha37</code> · <a href="LICENSE">MIT</a></p>
+<p align="center"><code>v1.0.0-alpha38</code> · <a href="LICENSE">MIT</a></p>
 
 ## Get started — four lines
 
@@ -92,7 +92,7 @@ Everything below ships in the box — no plugins, no assembly.
 | ----------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------- |
 | **State — cells**             | One `cell({ state, methods })` drives server, UI, persistence, sync, and tests; `worker: true` gives a heavy cell its own thread                   | [cells](docs/state/cells.md)                |
 | **Reactive UI — AIR (~8 KB)** | Signals + JSX; direct reads (`counter.count`) and calls (`counter.increment()`)                                                                    | [air](docs/ui/air-setup.md)                 |
-| **Persistence**               | Auto worker-thread SQLite (one `data.db`) — zero config, opt out per cell/field                                                                    | [persist](docs/persistence/auto-persist.md) |
+| **Persistence**               | Auto worker-thread SQLite (one `state.db`) — zero config, opt out per cell/field; one app = one directory (`~/.<app>/data` is the whole backup)    | [persist](docs/persistence/auto-persist.md) |
 | **Sync**                      | WebSocket delta patches, per-action acks, offline queue, CRDT merge                                                                                | [sync](docs/persistence/crdt.md)            |
 | **Async workflows**           | Plain async methods + `until`/`race`/`sleep`, cancellable via `cancelOn`                                                                           | [methods](docs/state/methods.md)            |
 | **Scheduling**                | `after` / `every` / `at` / cron / exponential `backoff`                                                                                            | [scheduling](docs/state/scheduling.md)      |

@@ -3,6 +3,8 @@
  * Inspection commands for am — clients, click, sql, log, errors, metrics, health, etc.
  */
 
+import { join } from "@std/path";
+import { appDirs } from "../server/app-dirs.ts";
 import type { GlobalFlags } from "./am-types.ts";
 import { detectMode, formatUptime, out, outError } from "./am-output.ts";
 import {
@@ -21,7 +23,18 @@ import {
 
 // ── Constants ───────────────────────────────────────────────
 
-const LOG_FILE = ".aio.log";
+/** Raw stdout+stderr of the app `am` launched — `~/.<appId>/logs/stdout.log`
+ *  since alpha38 (it was `<project>/.aio.log`, which put half of one app's
+ *  output in the project and half in the app dir). The old path is still read so
+ *  `am log` works against an app that is still running from before the move. */
+function stdoutLogPath(flags: GlobalFlags): string {
+  const current = join(appDirs(resolveAmAppId(flags.app)).logs, "stdout.log");
+  try {
+    Deno.statSync(current);
+    return current;
+  } catch { /* not there — fall back to the pre-alpha38 project file */ }
+  return ".aio.log";
+}
 
 // ── Client commands ─────────────────────────────────────────
 
@@ -115,11 +128,13 @@ export async function cmdLog(
 ): Promise<void> {
   const mode = detectMode(flags);
 
-  // --client flag: tail log/client.log instead of .aio.log
+  // --client flag: tail logs/client.log instead of the stdout capture
   if (flags.client !== undefined) {
     await _tailClientLog(flags);
     return;
   }
+
+  const LOG_FILE = stdoutLogPath(flags);
 
   const filter = args[0] ?? flags.filter;
   const n = flags.lines ?? 50;
@@ -568,13 +583,22 @@ export async function cmdSurface(
   const appId = resolveAmAppId(flags.app);
   const port = resolvePort(flags.port, appId);
   // `am surface server` renders headlessly ON the server (no client needed).
-  const explicit = args[0] ?? flags.client;
+  const explicit = args.find((a) => !a.startsWith("--")) ?? flags.client;
   const target = explicit === "server" ? "server" : Number(explicit ?? 0);
-  let result = await trojanGet(port, `surface/${target}`, appId, 10_000);
+  // `--full` lifts the text cap: element/component text is capped so a surface
+  // stays scannable, and a cut is now marked with "…" — but a generated command
+  // line has to be readable in full (llama.md #10).
+  const q = args.includes("--full") ? "?full=1" : "";
+  let result = await trojanGet(port, `surface/${target}${q}`, appId, 10_000);
   if (!result.ok && explicit === undefined) {
     // No client connected and none requested → fall back to the headless
     // server-side render (machine M2: server-only apps, CI). Loud about it.
-    const headless = await trojanGet(port, "surface/server", appId, 10_000);
+    const headless = await trojanGet(
+      port,
+      `surface/server${q}`,
+      appId,
+      10_000,
+    );
     if (headless.ok) {
       if (mode !== "json") {
         console.error("(no client connected — server-side render)");

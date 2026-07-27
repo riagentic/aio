@@ -192,7 +192,7 @@ Method-native workflow tools — see
 
 | Config                                                   | Description                                    |
 | -------------------------------------------------------- | ---------------------------------------------- |
-| `persist: true`                                          | Auto-persist state to SQLite (`data.db`)       |
+| `persist: true`                                          | Auto-persist state to SQLite (`state.db`)      |
 | `persist: "all" \| "none" \| { include } \| { exclude }` | Per-cell persistence filter                    |
 | `ui: "all" \| "none" \| { include } \| { exclude }`      | Per-cell UI visibility filter                  |
 | `ui: { include, forUser }`                               | Per-cell UI visibility with per-user transform |

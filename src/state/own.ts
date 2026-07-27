@@ -94,6 +94,9 @@ export function createOwnManager(log: Log): {
   active: () => string[];
 } {
   const disposers = new Map<string, OwnDisposer>();
+  const warnedReplace = new Set<string>();
+  const isDevEnv = () =>
+    (globalThis as Record<string, unknown>).__aioDev === true;
 
   function validateId(id: string): void {
     if (!id || !VALID_ID.test(id)) {
@@ -152,6 +155,24 @@ export function createOwnManager(log: Log): {
         `own: no pending factory for '${effect.id}' — skipped (replay?)`,
       );
       return;
+    }
+    // Same id ⇒ REPLACE: the resource already under this key is disposed first.
+    // That is the design (schedule.after has the same semantics), but it is
+    // invisible at the call site, and the disposer runs arbitrary teardown — one
+    // field report had `close()` stop a server process, so re-registering the key
+    // after a crash SIGTERMed the freshly started server a second later and the
+    // app looked like it could not start at all. Nothing warned. In dev we say
+    // so, once per key, naming the id.
+    if (disposers.has(effect.id) && isDevEnv()) {
+      if (!warnedReplace.has(effect.id)) {
+        warnedReplace.add(effect.id);
+        log.warn(
+          `own: '${effect.id}' was already held — disposing the previous ` +
+            `resource before acquiring the new one (own.set replaces by key). ` +
+            `If that disposer tears down something the new resource needs, use ` +
+            `a distinct id per resource. Warns once per id, dev only.`,
+        );
+      }
     }
     runDisposer(effect.id); // same id ⇒ replace
     try {

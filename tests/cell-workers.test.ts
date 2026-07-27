@@ -431,7 +431,10 @@ Deno.test({
       join(dir, "app.ts"),
       src.replace(
         "persist: false,",
-        `persist: true,\n  baseDir: ${JSON.stringify(data)},`,
+        // `appDir` keeps this app's state in the test's temp dir. A persisting
+        // app otherwise writes to `~/.<appId>`, which would carry state between
+        // runs and make the counts below meaningless (it did: 7 instead of 2).
+        `persist: true,\n  appDir: ${JSON.stringify(data)},`,
       ),
     );
 

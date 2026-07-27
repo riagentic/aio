@@ -2,7 +2,7 @@
 import { log } from "../diagnostics/logger.ts";
 
 /** Framework version — printed by --version, checked in tests */
-export const VERSION = "1.0.0-alpha37";
+export const VERSION = "1.0.0-alpha38";
 
 // ── CLI ─────────────────────────────────────────────────────────────
 
@@ -28,12 +28,15 @@ export type CliFlags = {
   killExisting?: boolean;
   dbPath?: string;
   backupLogs?: boolean;
+  /** Skip the legacy→`~/.<appId>` data move (app-dirs-migrate.ts). */
+  noDataMigrate?: boolean;
 };
 
 /** Parses CLI flags from Deno.args (or custom array for testing) */
 export function parseCli(args: readonly string[] = Deno.args): CliFlags {
   const r: CliFlags = { verbose: false };
   const known = [
+    "--no-data-migrate",
     "--port=",
     "--no-persist",
     "--client=",
@@ -84,6 +87,8 @@ export function parseCli(args: readonly string[] = Deno.args): CliFlags {
     else if (arg === "--kill-existing") r.killExisting = true;
     else if (arg.startsWith("--db-path=")) r.dbPath = arg.slice(10);
     else if (arg === "--backup-logs") r.backupLogs = true;
+    // Opt out of the one-time move to ~/.<appId> (app-dirs-migrate.ts).
+    else if (arg === "--no-data-migrate") r.noDataMigrate = true;
     // TLS cert/key. `--tls-cert`/`--tls-key` are canonical (the bare
     // `--cert`/`--key` collided with the auth `key` config concept); the old
     // names stay as deprecated aliases so existing deploy scripts don't break.
@@ -121,7 +126,7 @@ Usage: deno run -A src/app.ts [flags]
 
 Flags:
   --port=N         Server port (default: 8000)
-  --no-persist     Disable persistence (SQLite data.db)
+  --no-persist     Disable persistence (SQLite <data>/state.db)
   --client=X       Client mode: electron|browser|cli|server-only (default: electron)
   --keep-server    Server survives Electron close (electron only)
   --title=X        Override window/page title
@@ -135,6 +140,7 @@ Flags:
   --kill-existing  Kill running instance and take over
   --db-path=PATH   Override the SQLite file (":memory:" for throwaway runs)
   --backup-logs    Keep previous logs on restart (rotate to .1, .2, etc.)
+  --no-data-migrate Skip moving a legacy data layout into ~/.<appId>
   --width=N        Initial window width (default: 800)
   --height=N       Initial window height (default: 600)
   --transport=X    Transport: 'uds' or 'ws' (default: auto — UDS for electron on linux/mac)

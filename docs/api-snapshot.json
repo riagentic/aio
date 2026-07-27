@@ -85,7 +85,7 @@
         },
         "CellsConfig": {
           "kind": "typeAlias",
-          "sig": "94c6dec2ec689e11"
+          "sig": "9e5e9edce0dfc3df"
         },
         "CellStatus": {
           "kind": "typeAlias",
@@ -158,6 +158,10 @@
         "integer": {
           "kind": "function",
           "sig": "34ad7e96f8ac9696"
+        },
+        "isCellWorker": {
+          "kind": "function",
+          "sig": "209ed045c0221c65"
         },
         "log": {
           "kind": "variable",
@@ -269,7 +273,7 @@
         },
         "ScopedApp": {
           "kind": "typeAlias",
-          "sig": "8de11d17ac25dee6"
+          "sig": "f072feaddc6adb61"
         },
         "Selector": {
           "kind": "typeAlias",
@@ -377,7 +381,7 @@
         },
         "VERSION": {
           "kind": "variable",
-          "sig": "e6ef92f3585dfb52"
+          "sig": "5cbf368cdbc0b572"
         },
         "VitalsConfig": {
           "kind": "typeAlias",
@@ -1086,7 +1090,7 @@
         },
         "CliFlags": {
           "kind": "typeAlias",
-          "sig": "0a73d9013488d15e"
+          "sig": "b0781e6cf4f8b401"
         },
         "connectCliUDS": {
           "kind": "function",
@@ -1340,6 +1344,18 @@
     },
     "./server": {
       "symbols": {
+        "appDirs": {
+          "kind": "function",
+          "sig": "2ab9d9a497913b22"
+        },
+        "AppDirs": {
+          "kind": "typeAlias",
+          "sig": "2521595f7a2b8452"
+        },
+        "AppMeta": {
+          "kind": "typeAlias",
+          "sig": "fa302fc2d813d586"
+        },
         "buildShipManifest": {
           "kind": "function",
           "sig": "94e6b09336ed2227"
@@ -1644,6 +1660,14 @@
     },
     "./testing": {
       "symbols": {
+        "appDirs": {
+          "kind": "function",
+          "sig": "2ab9d9a497913b22"
+        },
+        "AppDirs": {
+          "kind": "typeAlias",
+          "sig": "2521595f7a2b8452"
+        },
         "bootCells": {
           "kind": "function",
           "sig": "b1dd0d475b7f35e6"
@@ -1668,6 +1692,10 @@
           "kind": "function",
           "sig": "c28816d34136e846"
         },
+        "ensureAppDirs": {
+          "kind": "function",
+          "sig": "644d828dd257a782"
+        },
         "findChromium": {
           "kind": "function",
           "sig": "3140c463ae84346b"
@@ -1683,6 +1711,10 @@
         "openCassette": {
           "kind": "function",
           "sig": "062f704e4b606a65"
+        },
+        "registerAppDirs": {
+          "kind": "function",
+          "sig": "2dad7d201045d810"
         },
         "setDocument": {
           "kind": "function",

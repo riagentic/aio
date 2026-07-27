@@ -1,7 +1,7 @@
 # Auto-Persist
 
 AIO auto-persists your entire state to SQLite — the `aio_kv` table in the app's
-single `data.db`. On restart, persisted state is **deep-merged** with
+single `state.db`. On restart, persisted state is **deep-merged** with
 `initialState`:
 
 ```ts
@@ -115,7 +115,7 @@ history (dev mode).
 ## SQLite integration
 
 For structured data (orders, products, users), aio maps state to SQL tables in
-the same `data.db`. The `aio_kv` snapshot handles scalar UI state. User tables
+the same `state.db`. The `aio_kv` snapshot handles scalar UI state. User tables
 handle arrays of records — queryable, indexed, relational.
 
 See [sqlite.md](sqlite.md) for the full reference.

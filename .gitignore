@@ -73,3 +73,4 @@ examples/**/deno.lock
 feedback/
 skills-lock.json
 .openclaude-profile.json
+.aio-test-home/

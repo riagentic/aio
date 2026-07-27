@@ -12,17 +12,17 @@ Action dispatched → reduce → new state → schedulePersist()
                                  aio_kv snapshot   user tables
                                  (auto-persist)    (db schema)
                                         ↘            ↙
-                                     SQLite (data.db)
+                                     SQLite (state.db)
 ```
 
 Every dispatched action triggers `schedulePersist()`. The debounce timer
 (default 100ms, configurable via `persistDebounceMs`) coalesces rapid state
 changes into one write. When the timer fires, the table sync and the snapshot
-write run in one flush cycle — both land in the app's single `data.db`.
+write run in one flush cycle — both land in the app's single `state.db`.
 
 ## One Database, Two Write Paths
 
-Everything persists to **one SQLite file** (`data.db`). Inside it there are two
+Everything persists to **one SQLite file** (`state.db`). Inside it there are two
 write paths:
 
 |                    | `aio_kv` snapshot table (auto-persist)    | User tables (db schema)                 |

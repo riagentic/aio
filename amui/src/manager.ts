@@ -490,7 +490,7 @@ export const manager = cell("manager", {
     history: null as ActionEntry[] | null,
     mem: null as MemInfo | null,
     aioVersion: null as string | null, // framework version the app runs
-    // logs (tailed from the app's .aio/log — no streaming endpoint exists)
+    // logs (tailed from the app's ~/.<appId>/logs — no streaming endpoint)
     logs: null as LogLine[] | null,
     logPath: null as string | null,
     logSource: "combined" as LogSource,
@@ -778,7 +778,8 @@ export const manager = cell("manager", {
       s.logError = null;
       try {
         const { readLogs } = await import("./server/proc.ts");
-        const r = await readLogs(path, src, 500);
+        // appId unlocks the app's own `~/.<appId>/logs/` (alpha38 layout).
+        const r = await readLogs(path, src, 500, proj.running?.appId ?? null);
         if (s.selectedPath !== path) return;
         s.logPath = r.path;
         s.logTruncated = r.truncated;

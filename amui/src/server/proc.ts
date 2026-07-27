@@ -1,7 +1,8 @@
 // Process + filesystem control for a project — server-side, dynamic-imported.
 // Every path operation is confined to the project dir (no traversal), spawns
 // are detached so a started app survives amui, and outputs are size-capped.
-import { join, normalize, relative } from "@std/path";
+import { isAbsolute, join, normalize, relative } from "@std/path";
+import { appDirs } from "aio/server";
 
 const LOG_MAX = 200_000; // cap captured task output
 const VIEW_MAX = 2_000_000; // 2 MB — files larger than this show a size notice
@@ -33,6 +34,12 @@ export async function startApp(
 ): Promise<{ ok: boolean; pid?: number; error?: string }> {
   const entry = await resolveEntry(dir);
   if (!entry) return { ok: false, error: "no entry (src/app.ts) found" };
+  // amui's OWN launcher artifact, deliberately still project-local: writing it
+  // to `~/.<appId>/logs/stdout.log` (where `am start` now writes) would mean
+  // inferring the appId from deno.json here, and a second copy of that rule
+  // silently puts the log in the wrong directory when the two disagree. `am`
+  // does it because `resolveAmAppId()` is right there; amui has no such handle.
+  // It is read back below, and only until the app writes its own logs.
   const logFile = join(dir, ".aio-amui-start.log");
   const esc = (s: string) => "'" + s.replace(/'/g, "'\\''") + "'";
   const inner = `deno run -A --unstable-kv ${esc(entry)} --client=${client}`;
@@ -450,10 +457,13 @@ export async function findCellSource(
 }
 
 // ── logs ─────────────────────────────────────────────────────────────────────
-// aio writes plain-text logs to <cwd>/.aio/log/{app,error,warning,client}.log
-// (framework + log.* app lines). The single <cwd>/.aio.log (or amui's own
-// .aio-amui-start.log) additionally captures raw stdout+stderr — cell
-// console.log + stack traces — but only when the launcher redirected output.
+// aio writes plain-text logs to `~/.<appId>/logs/{app,error,warning,client}.log`
+// (framework + log.* app lines) — one place per app, whatever directory it was
+// launched from. The single <cwd>/.aio.log (or amui's own .aio-amui-start.log)
+// additionally captures raw stdout+stderr — cell console.log + stack traces —
+// but only when the launcher redirected output, so it stays cwd-relative.
+// The pre-alpha38 `<cwd>/.aio/log/` is still searched, so amui can read the logs
+// of an app that hasn't been restarted onto the new layout yet.
 // No streaming endpoint exists, so we tail the file (offset-free: read the last
 // LOG_TAIL_MAX bytes and keep the final N lines).
 export type LogSource = "combined" | "app" | "error" | "client";
@@ -467,31 +477,44 @@ export interface RawLog {
 
 const LOG_TAIL_MAX = 512 * 1024; // read at most the last 512 KB of a log
 
-/** Candidate files for a source, richest-first. "combined" prefers the merged
- *  stdout capture, falling back to the always-present framework log. */
-function logCandidates(source: LogSource): string[] {
+/** Absolute candidates first (the app's own `~/.<appId>/logs/`), then the
+ *  cwd-relative ones (the stdout capture, and the pre-alpha38 layout). */
+function logCandidates(source: LogSource, appId: string | null): string[] {
+  const file = source === "combined" ? "app.log" : `${source}.log`;
+  const own = appId ? [join(appDirs(appId).logs, file)] : [];
   switch (source) {
     case "app":
-      return [".aio/log/app.log"];
     case "error":
-      return [".aio/log/error.log"];
     case "client":
-      return [".aio/log/client.log"];
-    default: // combined
-      return [".aio.log", ".aio-amui-start.log", ".aio/log/app.log"];
+      return [...own, `.aio/log/${file}`];
+    default: // combined — the merged stdout capture is richer when it exists
+      // Richest first: the stdout capture (cell console.log + pre-logger
+      // stack traces), then the framework log. The two cwd-relative names are
+      // the pre-alpha38 locations, kept so an app still running from before the
+      // move is readable.
+      return [
+        ...(appId ? [join(appDirs(appId).logs, "stdout.log")] : []),
+        ...own,
+        ".aio.log",
+        ".aio-amui-start.log",
+        ".aio/log/app.log",
+      ];
   }
 }
 
 /** Tail an app's logs. `cwd` is the app's working dir (== project path for a
- *  dev app; the lock cwd for a running instance). Reads the last LOG_TAIL_MAX
+ *  dev app; the lock cwd for a running instance); `appId` (when known) unlocks
+ *  the app's own log directory. Reads the last LOG_TAIL_MAX
  *  bytes, strips ANSI, and returns the final `tailLines` non-empty lines. */
 export async function readLogs(
   cwd: string,
   source: LogSource = "combined",
   tailLines = 500,
+  appId: string | null = null,
 ): Promise<RawLog> {
-  for (const rel of logCandidates(source)) {
-    const p = join(cwd, rel);
+  for (const rel of logCandidates(source, appId)) {
+    // `own` candidates are already absolute; join() leaves those untouched.
+    const p = isAbsolute(rel) ? rel : join(cwd, rel);
     let stat: Deno.FileInfo;
     try {
       stat = await Deno.stat(p);

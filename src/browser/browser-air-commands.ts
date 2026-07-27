@@ -18,7 +18,13 @@ export function routeCommand(
   switch (f.t) {
     case "ui-surface":
       try {
-        sendRaw(enc("ui-surface-result", getSerializedSurfaces()));
+        // `full` lifts the text cap (`am surface --full`).
+        sendRaw(enc(
+          "ui-surface-result",
+          getSerializedSurfaces(
+            (f.d as { full?: boolean } | undefined)?.full === true,
+          ),
+        ));
       } catch (e) {
         sendRaw(enc("ui-surface-result", { error: String(e) }));
       }

@@ -142,7 +142,9 @@ async function scanDisk(
       for await (const e of Deno.readDir(dir)) {
         if (!e.isDirectory) continue;
         if (e.name === "node_modules" || e.name.startsWith(".")) continue;
-        await walk(join(dir, e.name), left - 1);
+        const child = join(dir, e.name);
+        if (NEVER_WALK.has(child)) continue;
+        await walk(child, left - 1);
       }
     } catch { /* unreadable dir */ }
   }
@@ -158,35 +160,56 @@ async function scanDisk(
 
 const seg = (p: string) => p.split("/").filter(Boolean).length;
 
+/** Directories a project can never live in, skipped during traversal however we
+ *  got there. Pseudo-filesystems (`/proc`, `/sys`, `/dev`) are infinite or
+ *  meaningless to walk; `/run`, `/tmp`, `/var` are machine state; `/mnt` and
+ *  `/media` can be network mounts whose readDir blocks for seconds.
+ *
+ *  This is a TRAVERSAL filter, not a veto on configuration: an explicit
+ *  `AMUI_ROOTS=/mnt/projects` is honoured exactly as given. */
+const NEVER_WALK = new Set([
+  "/proc",
+  "/sys",
+  "/dev",
+  "/run",
+  "/boot",
+  "/tmp",
+  "/var",
+  "/etc",
+  "/usr",
+  "/lib",
+  "/lib64",
+  "/bin",
+  "/sbin",
+  "/snap",
+  "/mnt",
+  "/media",
+  "/lost+found",
+]);
+
 /** Default scan roots, most-specific first:
- *  - $AUI_ROOTS (colon-separated, explicit override)
- *  - ~/aio-apps (where `create` scaffolds)
- *  - the launch dir and a few parents (bounded to $HOME) — projects usually sit
- *    as siblings under a shared parent, so walking up finds them without config
- *    (e.g. examples/amui → examples → repo → repo-parent where sibling apps live)
- *  - the parent dir of any running app (siblings of what's live) */
+ *  - $AMUI_ROOTS (colon-separated, explicit override — used verbatim)
+ *  - ~/aio-apps (where `am create` scaffolds)
+ *  - $HOME itself, so a project is found wherever the developer actually keeps
+ *    it (`~/code/gen/wallet`, `~/work/clients/x`) without any configuration.
+ *    That is affordable because the walk stops at the first `deno.json`, skips
+ *    dot-dirs and `node_modules`, is depth-capped, and never enters the
+ *    system paths above — not because the tree is small.
+ *  - the parent dir of any running app (its siblings are usually projects too)
+ *
+ *  Running apps themselves are never scanned for: their lock files carry pid,
+ *  port and cwd, so they are found instantly wherever they live. The scan only
+ *  exists to list projects that are NOT currently running. */
 function defaultRoots(runningCwds: string[]): string[] {
   const home = Deno.env.get("HOME") ?? ".";
   const roots = new Set<string>();
 
-  for (const r of (Deno.env.get("AUI_ROOTS") ?? "").split(":")) {
+  for (const r of (Deno.env.get("AMUI_ROOTS") ?? "").split(":")) {
     if (r.trim()) roots.add(r.trim());
   }
   roots.add(`${home}/aio-apps`);
+  roots.add(home);
 
-  // Walk up from the launch dir. Stay inside $HOME and never add a shallow
-  // system root (≥3 path segments) — scanning "/" or "$HOME" would be ruinous.
-  let dir = Deno.cwd();
-  for (let i = 0; i < 4; i++) {
-    if (dir.startsWith(home) && seg(dir) >= 3) roots.add(dir);
-    const parent = dir.split("/").slice(0, -1).join("/");
-    if (!parent || parent === dir || !parent.startsWith(home)) break;
-    dir = parent;
-  }
-
-  // Parents of running apps — but under the SAME guard as the walk-up: an app
-  // living at $HOME/myapp must not turn its parent ($HOME) into a scan root
-  // (scanning all of $HOME every rescan would be ruinous).
   for (const cwd of runningCwds) {
     const parent = cwd.split("/").slice(0, -1).join("/");
     if (parent && parent.startsWith(home) && seg(parent) >= 3) {
@@ -210,7 +233,10 @@ export async function discoverProjects(): Promise<
   // special (no start/stop/restart on yourself), which `self` marks below.
   const running = instances().filter((i) => i.alive);
   const roots = defaultRoots(running.map((i) => i.cwd));
-  const byPath = await scanDisk(roots, 2);
+  // Depth 3 from each root: `~/code/gen/wallet` is three levels under $HOME,
+  // which is where projects actually sit. The walk stops at the first project it
+  // finds, so depth buys reach without multiplying work inside a monorepo.
+  const byPath = await scanDisk(roots, 3);
 
   // Drop the aio framework repo root (amui lives inside it) — the framework is
   // not an app. decodeURIComponent so a path with spaces still matches the
@@ -265,3 +291,7 @@ export async function discoverProjects(): Promise<
   });
   return { projects, roots };
 }
+
+/** Exported for tests — the root set and the traversal denylist are the two
+ *  things that decide whether discovery is both complete and cheap. */
+export const _internals = { defaultRoots, NEVER_WALK } as const;

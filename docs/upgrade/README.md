@@ -7,6 +7,9 @@ One guide per version migration. Find your current version and follow the steps.
 - **[The aio restructure (alpha27+)](restructure.md)** — every restructure
   breaking change with before → after recipes (methods-only cells, instances,
   SQLite-only persistence, `aio/extras`, wire catalog)
+- [alpha37 → alpha38](from-alpha37-to-alpha38.md) — one directory: everything an
+  app writes moves to `~/.<appId>/`, migrated automatically on first boot;
+  `am data` / `am backup` / `am restore`
 - [alpha36 → alpha37](from-alpha36-to-alpha37.md) — say it at boot: a worker
   cell's peer read is reported by `aio doctor` with file:line instead of only
   throwing when it runs; one fewer false alarm from the boot linter

@@ -212,8 +212,8 @@ const analytics = cell("analytics", {
 Both default to `"all"` but serve different purposes:
 
 - **`persist`**: Controls what's saved to disk (the `aio_kv` snapshot in
-  `data.db`). Default-on means restart safety. Opt out per cell for ephemeral or
-  sensitive data.
+  `state.db`). Default-on means restart safety. Opt out per cell for ephemeral
+  or sensitive data.
 - **`ui`**: Controls what's sent to browser clients. Default-on means
   zero-config client sync. Opt out (or narrow with `include`/`exclude`) for
   fields a client shouldn't see.

@@ -4,6 +4,7 @@
 // emits a test skeleton that re-dispatches the flow, ready for assertions.
 import type { GlobalFlags } from "./am-types.ts";
 import { detectMode, out, outError } from "./am-output.ts";
+import { defaultJournalPath, resolveAmAppId } from "./am-utils.ts";
 
 type Action = { type: string; payload?: unknown };
 
@@ -88,7 +89,7 @@ export function parseJournalActions(text: string): Action[] {
 }
 
 /** `am record [out.test.ts] --from <journal>` — generate a replay test from a
- *  recorded journal. `--from` defaults to ./data.db.journal (the dev default).
+ *  recorded journal. `--from` defaults to the app's `<data>/journal`.
  *  Writes to the output path, or prints to stdout. */
 export async function cmdRecord(
   args: string[],
@@ -99,7 +100,7 @@ export async function cmdRecord(
   const fromFlag = args.find((a) => a.startsWith("--from="));
   const journalPath = fromFlag
     ? fromFlag.slice("--from=".length)
-    : "data.db.journal";
+    : defaultJournalPath(resolveAmAppId(flags.app));
   let text: string;
   try {
     text = await Deno.readTextFile(journalPath);

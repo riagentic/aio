@@ -2,8 +2,8 @@
 // survives restarts ("one key, use forever"); overridable with a fixed key,
 // or disabled explicitly. This is the sugar over the `users` map for the
 // common "one shared key" case.
-import { join } from "@std/path";
-import { resolveDataDir } from "./paths.ts";
+import { appDirs } from "./app-dirs.ts";
+import { dirname } from "@std/path";
 
 /** Outcome of resolving the app key. */
 export interface KeyResolution {
@@ -27,7 +27,12 @@ export function resolveAppKey(
   appId: string,
   configKey: string | boolean | undefined,
 ): KeyResolution {
-  const path = join(resolveDataDir(appId), "app.key");
+  const path = appDirs(appId).appKey;
+  // A direct caller (a test, `am`) may reach this before aio.run() created the
+  // tree — the key is tier ① data, so make its home rather than fail.
+  try {
+    Deno.mkdirSync(dirname(path), { recursive: true });
+  } catch { /* exists, or unwritable — the write below reports it */ }
   // Default (undefined) and explicit `false` → no framework auth (open).
   if (configKey === undefined || configKey === false) {
     // Clear any stale key file so tooling reports "open".
@@ -65,5 +70,5 @@ export function resolveAppKey(
 
 /** Path to the persisted key file (for tooling like `am profile`). */
 export function appKeyPath(appId: string): string {
-  return join(resolveDataDir(appId), "app.key");
+  return appDirs(appId).appKey;
 }
