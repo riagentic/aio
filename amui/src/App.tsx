@@ -257,7 +257,7 @@ function Sidebar() {
                       <div style={{ marginTop: "8px", lineHeight: "1.5" }}>
                         add more with{" "}
                         <span style={{ fontFamily: mono, color: C.text2 }}>
-                          AUI_ROOTS=/path:/path2
+                          AMUI_ROOTS=/path:/path2
                         </span>
                       </div>
                     </>

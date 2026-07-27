@@ -13,13 +13,12 @@
 // which is the whole point: this is how you get back in when you're locked
 // out or seeding the first admin before the app ever boots.
 
-import { join } from "@std/path";
 import { resolveAmAppId } from "./am-utils.ts";
-import { resolveDataDir } from "../server/paths.ts";
 import { openUserStore, type UserStore } from "../server/auth-users.ts";
 import { openSessionStore } from "../server/sessions.ts";
 import type { GlobalFlags } from "./am-types.ts";
 import { detectMode, out, outError } from "./am-output.ts";
+import { appDirs } from "../server/app-dirs.ts";
 
 const USAGE = `am auth — manage the built-in auth (auth: true) of this app
 
@@ -63,7 +62,7 @@ export async function cmdAuth(
   // users into the wrong database. resolveAmAppId honours the flag and falls
   // back to the same inference chain every other command uses.
   const appId = resolveAmAppId(flags.app);
-  const dbPath = join(resolveDataDir(appId), "auth.db");
+  const dbPath = appDirs(appId).authDb;
   try {
     Deno.statSync(dbPath);
   } catch {

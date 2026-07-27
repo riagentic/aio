@@ -78,7 +78,7 @@ export interface TrojanDeps {
   findUserById?: (id: string) => AioUser | undefined;
   /** Headless server-side surface render (`surface/server`) — lets
    *  `am surface` work with NO connected client (server-only apps, CI). */
-  renderServerSurface?: () => Promise<
+  renderServerSurface?: (full?: boolean) => Promise<
     { ok: true; roots: unknown[] } | { ok: false; error: string }
   >;
 }
@@ -221,11 +221,14 @@ function handleGet(
   if (route.startsWith("surface/")) {
     // Headless: render the UI on the server against live cell state — no
     // client required (machine M2: `--client=server-only` / CI).
+    // `?full=1` lifts the surface's text cap — `am surface --full`, for reading
+    // a long generated string the scannable default would cut.
+    const full = req ? new URL(req.url).searchParams.has("full") : false;
     if (route === "surface/server") {
       if (!deps.renderServerSurface) {
         return err("server-side surface unavailable (no UI entry)", 404);
       }
-      return deps.renderServerSurface().then((r) =>
+      return deps.renderServerSurface(full).then((r) =>
         r.ok ? json(r.roots) : err(r.error, 500)
       );
     }
@@ -233,7 +236,10 @@ function handleGet(
     if (!Number.isInteger(idx) || idx < 0) {
       return err("invalid client index", 400);
     }
-    return sendToClient(idx, enc("ui-surface"));
+    return sendToClient(
+      idx,
+      enc("ui-surface", full ? { full: true } : undefined),
+    );
   }
 
   if (route === "history") {

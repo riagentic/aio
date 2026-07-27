@@ -4,16 +4,18 @@ import { assert, assertEquals } from "@std/assert";
 import { join } from "@std/path";
 import { appKeyPath, resolveAppKey } from "../src/server/app-key.ts";
 
-// Isolate the data dir so tests don't touch the real ~/.local/share.
+// Isolate the data dir so tests never touch the real `~/.<appId>`. AIO_APPS_DIR
+// is the supported knob for "put every app's data under this root" — the same
+// one a developer uses to group their apps.
 function withDataDir<T>(fn: () => T): T {
   const tmp = Deno.makeTempDirSync({ prefix: "aio-key-" });
-  const prev = Deno.env.get("XDG_DATA_HOME");
-  Deno.env.set("XDG_DATA_HOME", tmp);
+  const prev = Deno.env.get("AIO_APPS_DIR");
+  Deno.env.set("AIO_APPS_DIR", tmp);
   try {
     return fn();
   } finally {
-    if (prev === undefined) Deno.env.delete("XDG_DATA_HOME");
-    else Deno.env.set("XDG_DATA_HOME", prev);
+    if (prev === undefined) Deno.env.delete("AIO_APPS_DIR");
+    else Deno.env.set("AIO_APPS_DIR", prev);
     Deno.removeSync(tmp, { recursive: true });
   }
 }

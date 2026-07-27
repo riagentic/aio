@@ -5,6 +5,8 @@ How AIO stores, syncs, and transports state.
 ## Overview
 
 - [How It Works](how-it-works.md) — end-to-end: state change → disk → restore
+- [Where Files Live](where-files-live.md) — `~/.<app>/data` is the whole backup;
+  `am data` / `am backup` / `am restore`
 
 ## Storage
 

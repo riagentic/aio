@@ -23,6 +23,8 @@ export type HeadlessSurfaceResult =
  *  a server that never uses this pays nothing. */
 export async function renderHeadlessSurface(
   entryPath: string,
+  /** Lift the text cap (`am surface --full`) — see buildUISurface. */
+  full = false,
 ): Promise<HeadlessSurfaceResult> {
   // 1. The app's UI entry. Module cache shares already-imported cell modules,
   //    so the components read the SERVER's live cell instances.
@@ -77,7 +79,10 @@ export async function renderHeadlessSurface(
     try {
       const rootVnode = rstate._rootStateMap.get(handle)?.vnode ?? null;
       // deno-lint-ignore no-explicit-any
-      const node = surf.buildUISurface(rootVnode as any);
+      const node = surf.buildUISurface(
+        rootVnode as any,
+        full ? { maxText: Number.MAX_SAFE_INTEGER } : undefined,
+      );
       const serialized = node ? [surf.serializeSurface(node)] : [];
       return { ok: true, roots: serialized };
     } finally {

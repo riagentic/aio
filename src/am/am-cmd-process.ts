@@ -3,6 +3,8 @@
  * Process management commands for am — start, stop, restart, watch, status, instances.
  */
 
+import { dirname, join } from "@std/path";
+import { appDirs } from "../server/app-dirs.ts";
 import type { GlobalFlags } from "./am-types.ts";
 import {
   AppLock,
@@ -42,7 +44,20 @@ export function buildDenoArgs(entry: string, passthrough: string[]): string[] {
   return ["run", "-A", "--unstable-kv", ...denoFlags, entry, ...appFlags];
 }
 
-const LOG_FILE = ".aio.log";
+/** Raw stdout+stderr of an app `am` launched: `~/.<appId>/logs/stdout.log`.
+ *
+ *  It used to be `<project>/.aio.log`, which split one app's output across two
+ *  directories (the framework's own logs already went to the app dir) and left a
+ *  stray file in every project. It has to exist because the framework logger
+ *  can't capture what it doesn't route: a bare `console.log` in a cell, and the
+ *  stack trace of a crash before the logger is up. */
+function stdoutLogPath(appId: string): string {
+  const path = join(appDirs(appId).logs, "stdout.log");
+  try {
+    Deno.mkdirSync(dirname(path), { recursive: true });
+  } catch { /* exists, or unwritable — the redirect will report it */ }
+  return path;
+}
 const KILL_GRACE_MS = 2000;
 const KILL_POLL_MS = 100;
 const KILL_REAP_MS = 300;
@@ -256,8 +271,9 @@ export async function cmdStart(
   // `exec` alone keeps child in parent session — gets killed when am exits.
   // Capture real PID via $! on stdout.
   const esc = (s: string) => "'" + s.replace(/'/g, "'\\''") + "'";
+  const logFile = stdoutLogPath(appId);
   const cmd = `nohup deno ${denoArgs.map(esc).join(" ")} >${
-    esc(LOG_FILE)
+    esc(logFile)
   } 2>&1 & echo $!`;
   const proc = new Deno.Command("sh", {
     args: ["-c", cmd],
@@ -331,7 +347,7 @@ export async function cmdStart(
     removePid(appId);
     let reason = "";
     try {
-      const log = Deno.readTextFileSync(LOG_FILE);
+      const log = Deno.readTextFileSync(stdoutLogPath(appId));
       const lines = log.split("\n");
       const errLine = lines.findLast((l) =>
         l.includes("Error:") || l.includes("[ERROR]")
@@ -344,7 +360,10 @@ export async function cmdStart(
           .trim();
       }
     } catch { /* no log */ }
-    outError(reason || `process crashed — check ${LOG_FILE}`, mode);
+    outError(
+      reason || `process crashed — check ${stdoutLogPath(appId)}`,
+      mode,
+    );
     Deno.exit(1);
   } else {
     // Timed out but process alive — leave lock at 'starting'

@@ -5,7 +5,7 @@
 import { join } from "@std/path";
 import { readLock } from "./single-instance-lock.ts";
 import { appKeyPath } from "./app-key.ts";
-import { resolveDataDir } from "./paths.ts";
+import { appDirs } from "./app-dirs.ts";
 
 /** The `.aioapp` profile shape. */
 export interface AioProfile {
@@ -42,7 +42,8 @@ function readFirst(paths: string[]): string | null {
 
 /**
  * Build the profile for `appId` from local files. Returns null when the app
- * isn't running (no lock). `cwd` locates the dev cert dir (`.aio-tls/`).
+ * isn't running (no lock). `cwd` only locates the PRE-alpha38 cert dir
+ * (`./.aio-tls/`), consulted after the current `<data>/tls/`.
  */
 export function buildLocalProfile(
   appId: string,
@@ -52,9 +53,12 @@ export function buildLocalProfile(
   if (!lock) return null;
   const tls = !!lock.discovery?.tls;
   const cert = tls
+    // Current location first: a leftover `./.aio-tls/` from an older version
+    // would otherwise shadow the cert the server is actually serving, and the
+    // client would fail hostname verification against a stale SAN list.
     ? readFirst([
+      join(appDirs(appId).tls, "tls-cert.pem"),
       join(cwd, ".aio-tls", "tls-cert.pem"),
-      join(resolveDataDir(appId), "tls-cert.pem"),
     ])
     : null;
   const key = readFirst([appKeyPath(appId)]);

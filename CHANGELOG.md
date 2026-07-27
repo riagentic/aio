@@ -1,5 +1,247 @@
 # Changelog
 
+## 1.0.0-alpha38 — one directory (2026-07-28)
+
+Everything an app writes now lives under **`~/.<appId>/`**, and the one part you
+have to back up is **`~/.<appId>/data/`**. Migrated automatically on the first
+boot; the wire protocol is untouched, so alpha37 ↔ alpha38 interoperate.
+
+Before this, one app scattered its durable state across four locations, and two
+of them changed when you compiled it:
+
+| Before                            | After                      |
+| --------------------------------- | -------------------------- |
+| `./data.db` (next to the project) | `~/.<appId>/data/state.db` |
+| `~/.local/share/<appId>/auth.db`  | `~/.<appId>/data/auth.db`  |
+| `./.aio-tls/`                     | `~/.<appId>/data/tls/`     |
+| `./.aio/log/`                     | `~/.<appId>/logs/`         |
+
+Copying either half alone lost the other, and "where is my data" had a different
+answer in dev than in production. Now there are three tiers and the boundary
+between them is exactly "what a backup contains": ① `data/` — critical, `0700`,
+nothing here is recreatable; ② `logs/` + `launch.json` — regenerable, delete
+freely; ③ `$XDG_RUNTIME_DIR/aio/` — socket, pid and lock, which must NOT survive
+a reboot. `data/meta.json` stamps the appId and versions, so an archive is
+self-describing.
+
+**Migration** runs before anything opens a database, moves each SQLite file with
+its `-wal`/`-shm` sidecars as one set, never overwrites an existing target, and
+refuses outright while the app is running. Cross-filesystem moves copy → verify
+size → unlink, so an interruption leaves the original intact. It prints every
+move once. `--no-data-migrate` skips it.
+
+**Where it goes** — two knobs, one rule each: the author names one app's folder
+(`aio.run({ appDir })`), whoever runs it names the root all apps sit under
+(`AIO_APPS_DIR=/srv/aio` → `/srv/aio/<appId>`), and with neither it is
+`~/.<appId>`. The environment variable earns its place because the person moving
+the data usually can't edit the code, and because a test suite spawns apps whose
+ids it doesn't control. Dev and production resolve identically — compiling no
+longer moves your data. `dbPath` still overrides the state database alone.
+
+**Three new `am` commands** — the payoff of consolidation:
+
+```sh
+am data                 # every path, by tier, with sizes
+am backup [dest]        # copy data/ (stop the app first, or --force)
+am restore <dir>        # put it back
+```
+
+`am snapshot` (cell state as JSON, from the running app) is unchanged and still
+different: this is the files, including `auth.db`, the app key and the TLS
+material, none of which are cell state. What the commands add over `cp -r` is
+two refusals: **backup refuses while the app runs** (a `-wal` file holds
+committed pages the `.db` doesn't have yet, so a live copy can be internally
+inconsistent — `--force` overrides and marks the result `tornRisk`), and
+**restore refuses another app's archive** (`meta.json` records the appId) as
+well as any restore into a running app, which would write its in-memory pages
+straight back over the restored file. A restore **moves** the data it replaces
+to `data.replaced-<stamp>` rather than deleting it.
+
+**`am restart` now survives a reboot.** The launch record that lets `am restart`
+replay an app's original flags (`--env-file` and friends) moved from
+`$XDG_RUNTIME_DIR/aio/` to **`~/.<appId>/launch.json`**. The runtime directory
+is cleared on logout _by design_ — right for the lock and socket, exactly wrong
+for a record whose whole job is to outlive the machine. It sits with the app
+rather than in a shared toolchain directory because those are _this_ app's
+flags: "delete the app" stays one `rm -rf`, there is no second root to relocate
+when sandboxing, and `AIO_HOME` keeps its one existing meaning (the framework
+checkout `am link` binds to). Records written by an older `am` are still read.
+
+**Two fewer places to look.** `am start`'s raw stdout+stderr capture moved from
+`<project>/.aio.log` to `~/.<appId>/logs/stdout.log` — it was splitting one
+app's output across two directories and leaving a stray file in every project
+(`am log` still reads the old path for an app running from before the move). And
+`cache/` is gone: it was created under every app on every boot and nothing ever
+wrote to it.
+
+**Tests: pin the data home.** An app that persists writes to `~/.<appId>`, and a
+test that spawns a real app process inherits that — one suite run left 57 stray
+dot-directories in a home directory, and the state inside them carried between
+runs (a worker-persistence test started asserting 7 where it had written 2). One
+variable in the task fixes it for every spawned child:
+
+```jsonc
+{ "tasks": { "test": "AIO_APPS_DIR=$INIT_CWD/.test-home deno test -A" } }
+```
+
+aio's own suite does this, and a test now fails if a `deno test` task forgets
+it. `libraryMode` (what `testCell()` / `bootCells()` use) was already hermetic.
+
+`appDirs` is now exported from **`aio/server`**, so an app that writes its own
+files can put them at `appDirs(appId).files` — inside the one directory the user
+backs up — instead of inventing a fifth location.
+
+Also fixed while sweeping the seam:
+
+- **A `libraryMode` app wrote its logs to `~/.<appId>/logs`** — the one place
+  `libraryMode` exists to avoid. The logger resolves its directory in the outer
+  boot, before the inner boot registered the app's dirs, so it saw the plain
+  default. That rule now lives in one function (`resolveAppDirs`) which both
+  entries call. It hit any embedded/host use of aio, not only tests.
+- `am record` / `am timeline --from` / `am replay` resolved the journal as
+  `./data.db.journal` in the cwd; they now ask the app dirs, with the old path
+  as a fallback.
+- `buildLocalProfile` preferred a leftover `./.aio-tls/` over the cert the
+  server is actually serving — which fails hostname verification against stale
+  SANs.
+- `resolveDataDir()` **created** `~/.local/share/<appId>/` merely to look for
+  the legacy layout there, re-creating on every boot the directory the move
+  exists to retire. It is now a pure path function; the dead `resolveDbPath`
+  went with it.
+- amui tails an app's logs from `~/.<appId>/logs/` (the project-relative path is
+  still searched, so it can still read an app that hasn't been restarted).
+
+### A dispatch with no patches no longer broadcasts the whole state
+
+`onDone` passed `undefined` to `broadcast()` when a dispatch produced no
+patches, and the broadcaster reads "no patches" as "send the full state". The
+`lastFullJson` guard hides that in a static app — but any app with a ticking
+field always differs from the last full send, so **every idempotent dispatch
+cost a complete state frame**.
+
+Measured with a WS probe in a real app: 28 full-state frames of 438 KB in 20
+seconds (12 MB) against under 700 KB of genuine patch traffic. That app had just
+made its hardware-poll setters idempotent — a strict improvement — and its
+bandwidth got _worse_, because those polls turned from small patches into full
+states. A framework must not punish a reducer for avoiding a pointless write.
+**800 KB/s → 85 KB/s**, and the pressure warnings went away.
+
+Patches that exist but are filtered out by a cell's strategy still fall through
+to the full-state path — that is what `"full"`-strategy cells depend on.
+
+### From the llama.master field report — six silences made loud
+
+A full app (8 cells, Rust→WASM core, 239 tests, real hardware) shipped on aio,
+and its retrospective was blunt: _"several of aio's sharpest edges are silent.
+Not hard to use — silent. Every multi-hour loss in this project came from that
+category."_ Every item below was a violation of one of aio's own two rules —
+**fail loud, never silent**, and **tests are the strictest environment**.
+
+- **A selector read in a component subscribed to nothing.** `models.items`
+  (property) re-rendered; `models.current()` (selector) returned correct, fresh
+  data and registered no dependency, so a component whose only read was a
+  selector rendered once and froze — right data, dead screen, no warning. Cause:
+  standalone/Electron binds a cell twice, and the reactive pass skipped any name
+  that was already a function, which by then is every selector. It cost that
+  project an afternoon and a whole `derive.ts` layer re-exposing selectors as
+  properties; **that workaround is now unnecessary**.
+- **A write the store refused was reported as success.** In an async method
+  `s.job = { ...s.job, step }` hands back a proxy-derived object, which the
+  store must refuse — it logged and dropped the write while the method RESOLVED.
+  A build panel froze at step 0 with an empty log, no error, and 239 green
+  tests. The batcher now keeps the store's promise for every write-set and the
+  method awaits it, so a refused write **rejects the method that made it**,
+  identically in dev, prod and all four harnesses. `aiol` flags the pattern
+  statically too.
+- **`own.set` on a live key silently disposed the previous resource.** That is
+  the design (same as `schedule.after`), but the disposer runs arbitrary
+  teardown: one app's `close()` stopped a server process, so re-registering
+  after a crash SIGTERMed the freshly started one and the app looked like it
+  could not start at all. Dev now warns, once per key, naming the id.
+- **The in-process harnesses ignored `own` effects entirely** — one warning,
+  then silence. So the one place a test boots and disposes cells could not see a
+  leaked or misfiring resource, which turned a whole class of bug into a
+  production-only bug. They now acquire and dispose for real, and teardown
+  releases them.
+- **A harness could write into the user's home.** App code asks `appDirs(appId)`
+  where its files live; under a test that resolved to the real `~/.<appId>`, and
+  the pollution then HID a second bug by making two tests pass against an
+  artefact that existed only on that machine. Every harness now redirects app
+  directories into a temp sandbox, and `registerAppDirs` / `ensureAppDirs` /
+  `_resetAppDirs` are exported from `aio/testing` for a test that wants a
+  fixture directory of its own.
+- **A cell stayed bound after its app closed**, so two `testServer()` blocks in
+  one file failed with "already bound" even with `await using` — the second test
+  had to move to its own file for no visible reason. A closed app now releases
+  its own cells.
+
+Also from the same report: `// aiol-ok` is accepted on the **preceding comment
+line** (where the justification goes, and where `deno fmt` cannot move it — a
+marker on a long line got reflowed and the hint came back elsewhere), and both
+messages now say where it goes. `am surface` marks truncated text with `…`
+instead of cutting silently at 80 characters, and **`am surface --full`**
+returns it untruncated.
+
+Not reproduced, and said so rather than guessed at: a `testUI` rehydration flake
+(the harness is hermetic by default — `persist: false`, a fresh persist key and
+a state reset per mount) and a controlled `<select>` losing its value when
+options re-render (a regression test now pins the correct behaviour). Both need
+a reproduction against current HEAD.
+
+### Naming, settled once
+
+Three variables all read as flavours of each other (`AIO_HOME`, `AIO_DATA_DIR`,
+`AIO_DATA_HOME`), and two of them said "data" while setting the folder that
+merely _contains_ `data/`. The rule now is: **`AIO_` = framework-wide, one
+meaning each; per-app settings live in code, not the environment.**
+
+| Was             | Is             | Means                                   |
+| --------------- | -------------- | --------------------------------------- |
+| `dataDir:`      | `appDir:`      | one app's folder (the author's choice)  |
+| `AIO_DATA_HOME` | `AIO_APPS_DIR` | where every app's folder lives          |
+| `AIO_DATA_DIR`  | _deleted_      | `AIO_APPS_DIR=/var/lib` already gave it |
+| `AIO_HOME`      | unchanged      | the aio checkout `am link` binds to     |
+| `AUI_ROOTS`     | `AMUI_ROOTS`   | amui's project search path (stale name) |
+
+There are deliberately **no `AIO_APP_*` variables**: every per-app knob
+(`appDir`, `dbPath`, `logging.dir`, `port`, `appId`) belongs to the app's own
+code, because the author owns those decisions. The environment only answers
+framework-wide questions — where aio is installed, and where apps are kept.
+
+**amui finds your projects wherever you keep them.** Running apps were always
+located from their lock files; the on-disk scan for _stopped_ projects now
+starts at `$HOME` (depth-capped, stopping at the first `deno.json`, skipping
+dot-dirs and `node_modules`) instead of only walking up from the launch
+directory. It never traverses `/proc`, `/sys`, `/dev`, `/var`, `/etc`, `/tmp`,
+`/run` or the network mount points under `/mnt` and `/media` — a `readDir` on a
+network mount blocks for seconds and none of them can hold a project. An
+explicit `AMUI_ROOTS` is still honoured verbatim, network mount or not.
+Measured: 46ms for 18 projects on a real home directory.
+
+### Also in alpha38
+
+- **`dbPragmas`** — the app db was opened with WAL + `synchronous = NORMAL` and
+  the app had no say. That's right for a cache and wrong for a wallet: `NORMAL`
+  can lose the last committed transactions on power loss, and that transaction
+  may be a freshly imported seed. `aio.run({ dbPragmas: [...] })` now sets them
+  verbatim ([sqlite](docs/persistence/sqlite.md#choosing-your-own-durability)).
+- **`isCellWorker()`** — a `worker: true` cell re-imports the app entry, so any
+  top-level side effect there (mkdir, migrations, opening a db, starting a
+  listener) runs once per worker cell, and anything slow stalls the ready
+  handshake into a 30s timeout. `if (!isCellWorker()) { … }` is now the
+  one-liner instead of hardcoding the internal `aio-cell:` prefix.
+- **One fewer false alarm at dev boot:** a dynamic `await import("aio/server")`
+  inside a cell method — the documented way to reach `createDB` — was reported
+  on every boot as "not in the import map", under a blank-screen headline that
+  cannot happen, with a suggested fix that doesn't exist. The graph validator
+  now knows that entry is deliberately server-only. `aiol` also gained the
+  dynamic form of the server-only import check, which `--safe-fix` previously
+  couldn't see (a lazy `await import("aio")` of `createDB` failed only at
+  runtime).
+
+See **[Where Files Live](docs/persistence/where-files-live.md)** and the
+[alpha37 → alpha38 guide](docs/upgrade/from-alpha37-to-alpha38.md).
+
 ## 1.0.0-alpha37 — say it at boot (2026-07-26)
 
 One **BREAKING** change (the last one the alpha window allows for this seam) and

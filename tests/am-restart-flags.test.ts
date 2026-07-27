@@ -4,7 +4,11 @@
 // Deno actually honors them, and (2) the launch is recorded so restart replays.
 import { assert, assertEquals } from "@std/assert";
 import { buildDenoArgs } from "../src/am/am-cmd-process.ts";
+import { join } from "@std/path";
+import { appDirs } from "../src/server/app-dirs.ts";
 import {
+  launchInfoPath,
+  lockDir,
   readLaunchInfo,
   removeLaunchInfo,
   writeLaunchInfo,
@@ -37,20 +41,93 @@ Deno.test("buildDenoArgs: no flags → just run the entry", () => {
   ]);
 });
 
-Deno.test("launch-info sidecar: round-trips the recorded flags for restart", () => {
-  const appId = "test-restart-flags-" + Deno.pid;
+// These tests write real files at real resolved paths, so they pin the app root
+// themselves — `deno task test` pins it for the whole suite, but a developer
+// running this ONE file directly must not scatter dot-dirs in their home either.
+function withAppRoot<T>(fn: (root: string) => T): T {
+  const prev = Deno.env.get("AIO_APPS_DIR");
+  const root = Deno.makeTempDirSync({ prefix: "aio-launch-" });
+  Deno.env.set("AIO_APPS_DIR", root);
   try {
-    assertEquals(readLaunchInfo(appId), null); // nothing recorded yet
-    writeLaunchInfo(appId, {
-      flags: ["--env-file=.env", "--port=8000"],
-      entry: "src/app.ts",
-    });
-    const got = readLaunchInfo(appId);
-    assertEquals(got?.flags, ["--env-file=.env", "--port=8000"]);
-    assertEquals(got?.entry, "src/app.ts");
-    removeLaunchInfo(appId);
-    assertEquals(readLaunchInfo(appId), null); // cleaned on stop
+    return fn(root);
   } finally {
-    removeLaunchInfo(appId);
+    if (prev === undefined) Deno.env.delete("AIO_APPS_DIR");
+    else Deno.env.set("AIO_APPS_DIR", prev);
+    try {
+      Deno.removeSync(root, { recursive: true });
+    } catch { /* best effort */ }
   }
+}
+
+Deno.test("launch-info sidecar: round-trips the recorded flags for restart", () => {
+  withAppRoot(() => {
+    const appId = "test-restart-flags-" + Deno.pid;
+    try {
+      assertEquals(readLaunchInfo(appId), null); // nothing recorded yet
+      writeLaunchInfo(appId, {
+        flags: ["--env-file=.env", "--port=8000"],
+        entry: "src/app.ts",
+      });
+      const got = readLaunchInfo(appId);
+      assertEquals(got?.flags, ["--env-file=.env", "--port=8000"]);
+      assertEquals(got?.entry, "src/app.ts");
+      removeLaunchInfo(appId);
+      assertEquals(readLaunchInfo(appId), null); // cleaned on stop
+    } finally {
+      removeLaunchInfo(appId);
+    }
+  });
+});
+
+// The record must live WITH the app (`~/.<appId>/launch.json`), not in a shared
+// toolchain dir and not in the runtime dir. The runtime dir is cleared on logout
+// by design — right for the lock and socket, and precisely wrong for a record
+// whose only job is to survive until the next `am restart`. Keeping it per-app
+// also means "delete the app" is one `rm -rf` and a sandbox needs one variable.
+Deno.test("launch-info sidecar: lives in the app's own directory", () => {
+  withAppRoot(() => {
+    const appId = "test-launch-loc-" + Deno.pid;
+    const path = launchInfoPath(appId);
+    assertEquals(path, join(appDirs(appId).home, "launch.json"));
+    assert(
+      !path.includes(lockDir()),
+      `must not be in the runtime dir (cleared on logout): ${path}`,
+    );
+    assert(
+      !path.includes(`${appDirs(appId).data}/`),
+      `must not be inside the backup unit — it is regenerable: ${path}`,
+    );
+    try {
+      writeLaunchInfo(appId, { flags: ["--env-file=.env"] });
+      // Written where it says it is, and readable from there.
+      assertEquals(JSON.parse(Deno.readTextFileSync(path)).flags, [
+        "--env-file=.env",
+      ]);
+      assertEquals(readLaunchInfo(appId)?.flags, ["--env-file=.env"]);
+    } finally {
+      removeLaunchInfo(appId);
+    }
+  });
+});
+
+// An app that was already running when aio was upgraded recorded its flags in
+// the old runtime-dir location; `am restart` still has to replay them.
+Deno.test("launch-info sidecar: still reads the pre-alpha38 location", () => {
+  withAppRoot(() => {
+    const appId = "test-launch-legacy-" + Deno.pid;
+    const legacy = join(lockDir(), `${appId}.launch.json`);
+    try {
+      Deno.writeTextFileSync(
+        legacy,
+        JSON.stringify({ flags: ["--env-file=x"] }),
+      );
+      assertEquals(readLaunchInfo(appId)?.flags, ["--env-file=x"]);
+      removeLaunchInfo(appId); // must clean BOTH locations
+      assertEquals(readLaunchInfo(appId), null);
+    } finally {
+      try {
+        Deno.removeSync(legacy);
+      } catch { /* already gone */ }
+    }
+  });
 });

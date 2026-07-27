@@ -332,11 +332,24 @@ export function buildMethodsExecutor(
           ..._args,
         )
           .finally(() => untrack())
-          .then((value) => {
+          .then(async (value) => {
             // Transactional commit (risoto #2): apply the whole method's buffered
             // write-set as ONE atomic `__set`, before resolving the caller — so an
             // awaiter sees committed state, and other clients saw no intermediate.
-            if (transactional) batcher.flush();
+            // A non-transactional batcher flushes on a microtask, which can land
+            // AFTER the check below — so flush here either way. For a
+            // non-transactional method this only commits the remainder a beat
+            // sooner (the queued flush then finds an empty batch).
+            batcher.flush();
+            // …then find out whether the store ACCEPTED it. A refused write-set
+            // (classically `s.x = { ...s.x, y }` — a proxy-derived value assigned
+            // back into state) used to be logged and dropped while this method
+            // resolved normally, so the caller was told a change had landed that
+            // never did: a build panel frozen at step 0 with an empty log and a
+            // green test suite (llama.md #2). Rethrowing here routes it into the
+            // .catch below, which rejects the caller and reports the error —
+            // identical in dev, prod and every test harness.
+            await batcher.settled();
             // AIO-381/382: async methods can return schedule + own effects,
             // same as sync methods. Detection is conservative — only
             // `__schedule`/`__own`-typed values count, so data returns to

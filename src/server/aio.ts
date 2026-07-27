@@ -30,6 +30,15 @@ import { setupDispatch } from "./aio-dispatch.ts";
 import { hostedCellName, startCellWorkerHost } from "./cell-worker-host.ts";
 import { createCellWorkerPool } from "./cell-worker-pool.ts";
 import { isScheduleEffect } from "../state/schedule.ts";
+import {
+  appDirs,
+  ensureAppDirs,
+  registerAppDirs,
+  resolveAppDirs,
+  writeAppMeta,
+} from "./app-dirs.ts";
+import { resolveDataDirLegacy } from "./paths.ts";
+import { describeMigration, migrateLegacyLayout } from "./app-dirs-migrate.ts";
 import { DEV_FRAME_BUDGET_MS } from "../state/dispatch.ts";
 import { setupTransport } from "./aio-server.ts";
 import { startLifecycle } from "./aio-lifecycle.ts";
@@ -63,7 +72,6 @@ import {
   findFreePort,
   isCompiled,
   realDistCandidates,
-  resolveDataDir,
 } from "./paths.ts";
 import { openSessionStore } from "./sessions.ts";
 import { openUserStore } from "./auth-users.ts";
@@ -337,6 +345,20 @@ async function run(a?: any, b?: any): Promise<AioApp<any, any>> {
       }
     }
 
+    // Data directories FIRST: initLogger() resolves `~/.<appId>/logs` through
+    // the same registry, so registering after it would send a libraryMode app's
+    // logs into the user's home (the inner _run() registers again, harmlessly).
+    const _earlyAppId = resolveAppId(fc.appId);
+    registerAppDirs(
+      _earlyAppId,
+      resolveAppDirs({
+        appId: _earlyAppId,
+        appDir: fc.appDir,
+        libraryMode: fc.libraryMode,
+        baseDir: fc.baseDir,
+      }),
+    );
+
     // Logger
     const logger = await initLogger(fc);
     (globalThis as Record<string, unknown>).__aioCells = composed;
@@ -403,6 +425,45 @@ async function _run<S, A, E>(
 
   const appId = resolveAppId(config.appId);
   log.debug(`app-id: ${appId}`);
+
+  // ── One data directory ──
+  // Everything this app owns lives under `~/.<appId>` (overridable). Migrate a
+  // legacy scattered layout FIRST — before anything opens a database — then
+  // stamp meta.json so a backup of `data/` is self-describing. Skipped in
+  // libraryMode (a test's cwd is not an app) and with --no-data-migrate.
+  // libraryMode means a TEST or a host app owns the process — it must not write
+  // into the user's home, so its data dir defaults under baseDir (which tests
+  // already point at a temp dir). Everything else resolves to `~/.<appId>`.
+  const _dirs = resolveAppDirs({
+    appId,
+    appDir: config.appDir,
+    libraryMode: config.libraryMode,
+    baseDir: config.baseDir,
+  });
+  // Register BEFORE anything else resolves a path, so every module in this
+  // process (auth store, app key, profile export) agrees with this decision.
+  registerAppDirs(appId, _dirs);
+  // Always create them: auth.db / app.key / state.db all open files inside.
+  ensureAppDirs(_dirs);
+  if (!config.libraryMode) {
+    if (!cli.noDataMigrate) {
+      const _m = migrateLegacyLayout({
+        appId,
+        dirs: _dirs,
+        cwd: Deno.cwd(),
+        legacyXdgDir: resolveDataDirLegacy(appId),
+      });
+      for (const line of describeMigration(_m, _dirs)) {
+        if (line.includes("FAILED") || _m.refused) log.warn("data", line);
+        else log.info("data", line);
+      }
+    }
+    writeAppMeta(_dirs, {
+      appId,
+      aio: VERSION,
+      app: (config as { appVersion?: string }).appVersion,
+    });
+  }
   const port = cli.port ?? config.port ?? await findFreePort();
 
   // Singleton lock — libraryMode implies no lock (embeddable / testable).
@@ -534,6 +595,7 @@ async function _run<S, A, E>(
   const boot = await bootStorage({
     appId,
     dbPath: config.dbPath ?? cli.dbPath,
+    dbPragmas: config.dbPragmas,
     initialState,
     shouldPersist,
     persistKey,
@@ -795,14 +857,14 @@ async function _run<S, A, E>(
   const authOpts = typeof config.auth === "object" ? config.auth : {};
   const sessionStore = (config.sessions || authEnabled)
     ? openSessionStore(
-      join(resolveDataDir(appId), "auth.db"),
+      appDirs(appId, config.appDir).authDb,
       typeof config.sessions === "object"
         ? config.sessions.ttlMs
         : authOpts.ttlMs,
     )
     : null;
   const userStore = authEnabled
-    ? openUserStore(join(resolveDataDir(appId), "auth.db"))
+    ? openUserStore(appDirs(appId, config.appDir).authDb)
     : null;
 
   // Shutdown orchestrator
@@ -898,6 +960,16 @@ async function _run<S, A, E>(
   const shutdown = async (): Promise<void> => {
     await workerPool.close();
     await _shutdownRuntime();
+    // A closed app owns nothing: release THIS app's cells so they can bind
+    // again. Without it a cell def stayed claimed for the life of the process,
+    // so two `testServer()` blocks in one file failed with "already bound" even
+    // with `await using` — the second test had to move to its own file for no
+    // visible reason (llama.md #8). Scoped to our own cells, so a second app in
+    // the same process is untouched.
+    const release = (app as Record<string, unknown>)._releaseCells as
+      | (() => void)
+      | undefined;
+    release?.();
   };
 
   const app = buildAppObject<S, A>({

@@ -11,7 +11,8 @@ import { migrateLegacyKv, SKV_SCHEMA, sqliteKv } from "./skv-sqlite.ts";
 import { createDB, type DB, initSchema, loadTables } from "../db/mod.ts";
 import type { TableDef } from "./sql.ts";
 import { deepMerge } from "../state/deep-merge.ts";
-import { resolveDbPath, resolveKvPath } from "./paths.ts";
+import { resolveKvPath } from "./paths.ts";
+import { appDirs } from "./app-dirs.ts";
 import { AioError, type ReportErrorOpts } from "../diagnostics/error.ts";
 import { migrateSchema, PERSIST_SCHEMA_VERSION } from "./persist-schema.ts";
 import type { Log } from "../diagnostics/logger.ts";
@@ -108,9 +109,20 @@ export interface CellMigrationInfo {
 /** Inputs needed to run the boot/storage sequence */
 export interface BootConfig<S> {
   appId: string;
+  /** Where this app keeps everything it owns. Default `~/.<appId>` — `data/`
+   *  inside it is the whole backup; `logs/` and `launch.json` are disposable.
+   *  This is the AUTHOR's choice; whoever runs the app can move every app at
+   *  once with `AIO_APPS_DIR=<root>` (→ `<root>/<appId>`).
+   *  See docs/persistence/where-files-live.md. */
+  appDir?: string;
+
   /** Override the SQLite file (":memory:" for hermetic tests). Default:
-   *  resolveDbPath(appId) — cwd/data.db in dev, data dir when compiled. */
+   *  `~/.<appId>/data/state.db` (see app-dirs.ts) unless overridden. */
   dbPath?: string;
+  /** Override the PRAGMAs the app db opens with (default: DEFAULT_PRAGMAS,
+   *  WAL + synchronous=NORMAL). An app whose data is expensive to lose — a
+   *  wallet, a ledger — wants `synchronous = FULL`; a cache does not. */
+  dbPragmas?: string[];
   initialState: S;
   shouldPersist: boolean;
   persistKey: string;
@@ -173,6 +185,7 @@ export async function bootStorage<S>(
   const {
     appId,
     dbPath: dbPathOverride,
+    dbPragmas,
     initialState,
     shouldPersist,
     persistKey,
@@ -224,8 +237,8 @@ export async function bootStorage<S>(
   // `sync: true` cell must never silently degrade because `db:` is absent.
   if ((dbSchema && Object.keys(dbSchema).length) || syncCellIds.length > 0) {
     try {
-      const dbPath = dbPathOverride ?? resolveDbPath(appId);
-      asyncDb = createDB(dbPath);
+      const dbPath = dbPathOverride ?? appDirs(appId, cfg.appDir).stateDb;
+      asyncDb = createDB(dbPath, dbPragmas ? { pragmas: dbPragmas } : {});
       if (dbSchema && Object.keys(dbSchema).length) {
         await initSchema(asyncDb, dbSchema);
       }
@@ -324,8 +337,8 @@ export async function bootStorage<S>(
     try {
       if (!asyncDb) {
         // Persistence needs the app db even without user tables/sync cells.
-        const dbPath = dbPathOverride ?? resolveDbPath(appId);
-        asyncDb = createDB(dbPath);
+        const dbPath = dbPathOverride ?? appDirs(appId, cfg.appDir).stateDb;
+        asyncDb = createDB(dbPath, dbPragmas ? { pragmas: dbPragmas } : {});
         log.debug(`sqlite: opened for persistence at ${dbPath}`);
       }
       await asyncDb.execute(SKV_SCHEMA);
@@ -451,7 +464,11 @@ export async function bootStorage<S>(
   // its watermark after each committed snapshot; _run appends + replays.
   const journal: Journal | null =
     cfg.journal && shouldPersist && dbPathOverride !== ":memory:"
-      ? createJournal((dbPathOverride ?? resolveDbPath(appId)) + ".journal")
+      ? createJournal(
+        dbPathOverride
+          ? dbPathOverride + ".journal"
+          : appDirs(appId, cfg.appDir).journal,
+      )
       : null;
 
   const persistence = createPersistenceManager({

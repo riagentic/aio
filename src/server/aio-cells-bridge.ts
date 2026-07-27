@@ -2,6 +2,7 @@
 // Also wraps the returned AioApp with memory monitor, cells API, and bindCell.
 
 import type { CellDef, ComposedCells } from "../state/cell.ts";
+import { _releaseCellBindings } from "../state/cell-reactive.ts";
 import { bindCell } from "../state/cell.ts";
 import { createMemoryMonitor } from "../diagnostics/memory-monitor.ts";
 import {
@@ -14,6 +15,7 @@ import { createStormDetector } from "../diagnostics/dispatch-storm.ts";
 import { diagEmit } from "../diagnostics/diagnostic-bus.ts";
 import { parseCli } from "./aio-cli.ts";
 import { resolveAppId } from "./single-instance-lock.ts";
+import { appDirs } from "./app-dirs.ts";
 import type { AioApp, AioConfig, AioUser, CellsConfig } from "./aio-types.ts";
 import type { CellFieldFilter } from "../state/cell-types.ts";
 
@@ -130,6 +132,7 @@ export function buildLegacyConfig(
     persist: fc.persist,
     persistKey: fc.persistKey,
     dbPath: fc.dbPath,
+    dbPragmas: fc.dbPragmas,
     persistDebounceMs: fc.persistDebounceMs,
     persistMode: fc.persistMode,
     port: fc.port,
@@ -346,8 +349,15 @@ export async function initLogger(
   const logCfg = fc.logging === false
     ? null
     : (fc.logging === true || fc.logging === undefined ? {} : fc.logging);
+  // Logs are tier ② — regenerable, excluded from a backup — but they live in the
+  // app's own directory so there is ONE place to look for everything an app
+  // writes (`~/.<appId>/logs`, was `./.aio/log` relative to cwd, which meant a
+  // service started from `/` wrote to `/.aio/log`). An explicit `logging.dir`
+  // still wins.
+  const dirs = appDirs(appId, fc.appDir);
   const logger = logCfg
     ? new AioLogger({
+      dir: dirs.logs,
       ...logCfg,
       ...(cliBackup ? { backupLogs: true } : {}),
       appName: appId,
@@ -443,6 +453,13 @@ export async function wrapAppWithCells(
       () => app.getState() as Record<string, unknown>,
     );
   }
+  // …and record how to give them back. A cell def binds to exactly one app, and
+  // that claim used to outlive the app: a second `testServer()` in the same file
+  // failed with "already bound" even after `await using` closed the first
+  // (llama.md #8). Shutdown calls this; scoped to OUR cells, so a second app in
+  // the same process keeps its own bindings.
+  (app as Record<string, unknown>)._releaseCells = () =>
+    _releaseCellBindings(composed.cells);
 }
 
 /** Filter cell entries by --isolate flag */

@@ -583,3 +583,25 @@ Deno.test("extractImports still finds real static + dynamic + export-from", () =
     "./d.ts",
   ]);
 });
+
+// risoto 2026-07-26: `await import("aio/server")` inside a cell method — the
+// documented way to reach SQLite/createDB — was reported as a missing
+// import-map entry on every dev boot, with a "fix" (npm:aio/server) that does
+// not exist. The browser import map must NOT carry that entry; the validator
+// simply has to know the specifier is server-only.
+Deno.test("resolveSpecifier: aio/server is external, never a missing-map error", () => {
+  const r = resolveSpecifier("aio/server", "/app/src/cache.ts", {
+    "aio": "/__aio/ui.js",
+  }, () => false);
+  assertEquals(r.kind, "external");
+});
+
+Deno.test("resolveSpecifier: an unknown bare specifier is still an error", () => {
+  const r = resolveSpecifier(
+    "totally-unknown-pkg",
+    "/app/src/x.ts",
+    {},
+    () => false,
+  );
+  assertEquals(r.kind, "error");
+});

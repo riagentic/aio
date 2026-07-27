@@ -27,6 +27,36 @@ import { composeCells } from "../state/cell-compose.ts";
  *  @internal */
 export function _armTestStrict(): void {
   (globalThis as Record<string, unknown>).__aioDev = true;
+  _sandboxAppDirs();
+}
+
+// A harness must not be able to write into the user's home — not by design, and
+// not by accident. App code legitimately asks `appDirs(appId)` where its files
+// live (`<data>/files`, `<data>/tls`, …), and under a test that resolved to the
+// developer's REAL `~/.<appId>`: one field report's server tests installed a
+// fixture binary into the real install for the whole project, and the pollution
+// then HID a second bug by making two tests pass against an artefact that only
+// existed on that machine ("not a footgun — a loaded gun pointed at data the
+// developer cares about", llama.md).
+//
+// So the first harness use of the process pins every app directory into a temp
+// sandbox, unless the runner already pinned one (aio's own suite does, in its
+// `deno test` task). An explicit `registerAppDirs()` still wins per app — that is
+// the escape hatch for a test that wants a specific fixture directory.
+let _sandboxed = false;
+function _sandboxAppDirs(): void {
+  if (_sandboxed) return;
+  _sandboxed = true;
+  try {
+    if (Deno.env.get("AIO_APPS_DIR")) return; // runner already pinned it
+    const dir = Deno.makeTempDirSync({ prefix: "aio-test-apps-" });
+    Deno.env.set("AIO_APPS_DIR", dir);
+    globalThis.addEventListener("unload", () => {
+      try {
+        Deno.removeSync(dir, { recursive: true });
+      } catch { /* best effort — it is a temp dir */ }
+    });
+  } catch { /* no env/tmp permission: leave resolution as-is */ }
 }
 
 /** Context object provided to testCell() callbacks */

@@ -45,11 +45,13 @@ Deno.test({
   async fn() {
     const port = freePort();
     const dir = `${ROOT}examples/targets/browser-remote`;
-    // Regenerate the self-signed cert — a cached one has stale SANs after
-    // the machine's LAN IP changes, failing hostname verification.
-    await Deno.remove(`${dir}/.aio-tls`, { recursive: true }).catch(() => {});
+    // Pin the app's data dir into a temp dir: the cert lives at
+    // `<data>/tls/` now, and a per-run home also means a cached cert can
+    // never have stale SANs after the machine's LAN IP changes (which failed
+    // hostname verification for the fetch below).
+    const home = await Deno.makeTempDir({ prefix: "aio-lan-e2e-" });
     const proc = new Deno.Command(Deno.execPath(), {
-      env: { DENO_COVERAGE_DIR: _childCovDir },
+      env: { DENO_COVERAGE_DIR: _childCovDir, AIO_APPS_DIR: home },
       args: [
         "run",
         "-A",
@@ -94,7 +96,11 @@ Deno.test({
 
       // Trust the auto-generated self-signed cert — its SANs must include
       // the LAN IP or this fetch fails hostname verification.
-      const certPem = await Deno.readTextFile(`${dir}/.aio-tls/tls-cert.pem`);
+      // AIO_APPS_DIR gives `<root>/<appId>`; this example's appId comes from
+      // its deno.json `title`.
+      const certPem = await Deno.readTextFile(
+        `${home}/ex-browser-remote/data/tls/tls-cert.pem`,
+      );
       client = Deno.createHttpClient({ caCerts: [certPem] });
 
       // PIN pairing over the REAL interface — the client's exact flow: submit
@@ -133,6 +139,7 @@ Deno.test({
       } catch { /* already dead */ }
       await proc.status;
       await proc.stderr.cancel();
+      await Deno.remove(home, { recursive: true }).catch(() => {});
     }
   },
 });

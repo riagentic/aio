@@ -72,13 +72,16 @@ export type UITriggerResult = {
   surface?: UISurfaceNode[];
 };
 
-/** Build the live semantic surface of every mounted root. */
-export function getLiveSurfaces(): UISurfaceNode[] {
+/** Build the live semantic surface of every mounted root. `full` lifts the text
+ *  cap — `am surface --full`, for reading a long generated string that the
+ *  scannable default would (visibly) cut. */
+export function getLiveSurfaces(full = false): UISurfaceNode[] {
   const out: UISurfaceNode[] = [];
   for (const state of _liveRoots) {
     if (state.disposed) continue;
     const s = buildUISurface(
       state.vnode as Parameters<typeof buildUISurface>[0],
+      full ? { maxText: Number.MAX_SAFE_INTEGER } : undefined,
     );
     if (s) out.push(s);
   }
@@ -86,8 +89,8 @@ export function getLiveSurfaces(): UISurfaceNode[] {
 }
 
 /** Wire-safe serialized surfaces (the "ui-surface-result" payload). */
-export function getSerializedSurfaces(): UISurfaceNode[] {
-  return getLiveSurfaces().map(serializeSurface);
+export function getSerializedSurfaces(full = false): UISurfaceNode[] {
+  return getLiveSurfaces(full).map(serializeSurface);
 }
 
 function findByPath(path: string): UIElementInfo | undefined {

@@ -23,11 +23,18 @@ Or from anywhere via the export:
 deno run -A jsr:@riagentic/aio/amui   # (once published)
 ```
 
-amui auto-discovers aio projects by walking up from where you launch it, plus
-`~/aio-apps`. Point it elsewhere with `AUI_ROOTS` (colon-separated):
+amui finds your projects without configuration: **running** apps come from their
+lock files (pid + port + cwd), so they're found wherever they live; **stopped**
+projects come from a depth-capped scan of `$HOME` plus `~/aio-apps`, which stops
+at the first `deno.json`, skips dot-dirs and `node_modules`, and never walks
+system paths (`/proc`, `/sys`, `/var`, network mounts under `/mnt`, `/media`,
+…).
+
+Point it somewhere specific with `AMUI_ROOTS` (colon-separated, used verbatim —
+an explicit root is honoured even if it's a network mount):
 
 ```sh
-AUI_ROOTS=/work/apps:/experiments deno task amui
+AMUI_ROOTS=/work/apps:/experiments deno task amui
 ```
 
 ## What it does
@@ -62,10 +69,10 @@ it.
   stream** — every processed action with its reduce time (and errors) — so you
   can see how state is actually being processed.
 - **Logs** — the app's live logs: the framework + app lines from
-  `.aio/log/app.log`, or the **combined** stdout capture (`.aio.log`, which also
-  carries cell `console.log` and stack traces). Pick a source (combined /
-  framework / errors / client), filter by level or text, and toggle live-follow.
-  (aio has no log-streaming endpoint, so amui tails the files.)
+  `~/.<appId>/logs/app.log`, or the **combined** stdout capture (`.aio.log`,
+  which also carries cell `console.log` and stack traces). Pick a source
+  (combined / framework / errors / client), filter by level or text, and toggle
+  live-follow. (aio has no log-streaming endpoint, so amui tails the files.)
 - **Tasks** — run any `deno task`; output is captured and every run is
   cancellable with a hard 5-minute cap.
 - **Codebase** — the app's files. Defaults to the **runtime** dir (what's
@@ -91,8 +98,9 @@ confirm guards; the list refreshes itself after each action.
   `/__aio/health` (cell health + framework version) and `/__aio/vitals` (the
   dispatch loop, per-cell payload + sizes, client health). Process CPU/memory
   come from `ps`; the app's own RSS/heap from its Prometheus `/__aio/metrics`.
-  Logs are tailed from the app's `.aio/log` (there is no streaming endpoint).
-  All of this is localhost-only and dev-only, exactly as the trojan gates it.
+  Logs are tailed from the app's `~/.<appId>/logs` (there is no streaming
+  endpoint). All of this is localhost-only and dev-only, exactly as the trojan
+  gates it.
 
 See also: [`am` CLI](app-manager.md) · [browser client](browser.md) ·
 [electron client](electron.md).

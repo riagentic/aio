@@ -8,7 +8,7 @@ right approach it handles far more than you'd expect.
 ```
 Client -> WebSocket -> aio server (single process)
                         ├── state (in-memory, small)
-                        └── SQLite data.db (on disk, WAL mode, fast)
+                        └── SQLite state.db (on disk, WAL mode, fast)
                               ├── db: tables (records)
                               └── aio_kv snapshot (UI scalars)
 ```

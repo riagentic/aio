@@ -9,8 +9,9 @@ export type LogConfig = {
    *  'debug' to opt into verbose file logging; every dispatch logged at debug
    *  amplifies watcher feedback loops — 2026-07-08 field report) */
   level?: LogLevel;
-  /** Log directory (default: '.aio/log' — a dot-dir so file watchers and
-   *  scanners skip framework logs inside the project) */
+  /** Log directory. An app defaults to `~/.<appId>/logs` (tier ② — regenerable,
+   *  outside the backup); a standalone logger with no app falls back to
+   *  `.aio/log` in the cwd. */
   dir?: string;
   /** Pretty console output in dev (default: auto-detected) */
   console?: boolean;

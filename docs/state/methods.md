@@ -391,6 +391,14 @@ const workspace = cell("workspace", {
 });
 ```
 
+**Read `own.set` as "register, replacing and disposing anything already under
+this key".** Re-using a key is not an error and not a no-op: the previous
+resource's disposer runs first. That is what makes it safe to call on every
+change — but if the disposer tears down something the new resource needs (one
+app's `close()` stopped a server process, so re-registering after a crash
+SIGTERMed the freshly started one), give each resource its own id. Dev warns,
+once per key, when a `set` displaces a live resource.
+
 The factory runs in the runtime (not in the reducer) and may return a disposer
 function or a closeable object (`{ close() }` / `{ dispose() }`). The effect
 itself is plain data — the factory travels out-of-band, so on time-travel replay
@@ -657,6 +665,49 @@ methods: {
 a string snapshot at that moment. If you need an object snapshot to pass to a
 reducer, use `structuredClone(s)` — Immer drafts aren't structured- cloneable,
 so this throws; use the `[...s.items]` / `{...s}` patterns above for cloning.
+
+### In an ASYNC method, don't spread state back into itself
+
+This is the one write the store refuses, and it is the natural shape for
+progress reporting — a long job whose callback writes into state:
+
+```ts
+async build(s, onProgress) {
+  await run("cmake", ["--build", "."], (p) => {
+    s.job = { ...s.job, step: p.step };   // ❌ refused — the method rejects
+  });
+}
+```
+
+Why only async: a **sync** method mutates an Immer draft, whose spread produces
+plain values — legal, and it always has been. An **async** method writes through
+a _live proxy_ so reads stay correct across awaits, and spreading that proxy
+copies any nested object or array as a proxy. Handing one back to the store is a
+write it cannot accept.
+
+Snapshot to a plain value first, mutate that, assign it:
+
+```ts
+async build(s, onProgress) {
+  await run("cmake", ["--build", "."], (p) => {
+    const job = JSON.parse(JSON.stringify(s.job)); // plain copy
+    job.step = p.step;
+    job.log.push(p.line);
+    s.job = job;                                    // ✅ accepted
+  });
+}
+```
+
+Or — usually better — write the fields directly, which needs no copy at all:
+
+```ts
+s.job.step = p.step;
+s.job.log.push(p.line);
+```
+
+The refusal is **loud**: the method's promise rejects with the cell, the method
+and this fix in the message, so `await builds.build()` learns the write never
+landed. `aiol` also flags the pattern statically, before it runs.
 
 ### Mutations on returned snapshots are ignored
 

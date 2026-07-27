@@ -280,13 +280,27 @@ export function setupDispatch<S, A, E, App = any>(
       if (!processed) return;
       const tt = getTT();
       if (!tt?.paused) schedulePersist();
-      const validPatches = patches.length > 0 && cellPatchStrategies
+      // NOTHING CHANGED → NOTHING TO SEND. A dispatch that produces no patches
+      // (an idempotent reducer: "the device is still absent", "the poll found
+      // the same value") used to fall through to the full-state branch, which
+      // resends the ENTIRE state whenever any other field has moved since the
+      // last full send. With a 1s clock cell that condition is always true, so
+      // every no-op poll cost a full-state broadcast: risoto measured a 438 KB
+      // frame every ~2s — 12 MB in 20 seconds — for state that had not
+      // meaningfully changed. Writing reducers that avoid pointless writes is
+      // the RIGHT thing for an app to do; the framework must not punish it.
+      //
+      // Patches that exist but are all filtered out by cell strategy still
+      // fall through to full state below — that fallback is what "full"
+      // strategy cells depend on.
+      if (patches.length === 0) return;
+      const validPatches = cellPatchStrategies
         ? filterPatchesByStrategy(
           patches,
           cellPatchStrategies,
           cellFilterFields ?? new Map(),
         )
-        : (patches.length > 0 ? patches : undefined);
+        : patches;
       getServer().broadcast(validPatches);
       if (onUdsBroadcast) onUdsBroadcast(validPatches);
     },

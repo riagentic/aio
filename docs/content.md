@@ -59,6 +59,7 @@
 - [How Persistence Works](persistence/how-it-works.md) — End-to-end: how cell state gets from memory to disk and back.
 - [Offline & Transport](persistence/offline.md) — Connection lifecycle, offline queue, transport selection, and monitoring.
 - [SQLite](persistence/sqlite.md) — Full reference for aio's async SQLite layer.
+- [Where Files Live](persistence/where-files-live.md) — One app, one directory.
 
 ## Auth — users, tokens, per-user visibility
 
@@ -131,6 +132,7 @@
 - [Upgrade: 1.0.0-alpha34 → 1.0.0-alpha35](upgrade/from-alpha34-to-alpha35.md) — Purely additive.
 - [Upgrade: 1.0.0-alpha35 → 1.0.0-alpha36](upgrade/from-alpha35-to-alpha36.md) — Purely additive.
 - [Upgrade: 1.0.0-alpha36 → 1.0.0-alpha37](upgrade/from-alpha36-to-alpha37.md) — DEFAULTPRAGMAS, connectCli or connectCliUDS from "aio" — one command
+- [Upgrade: 1.0.0-alpha37 → 1.0.0-alpha38](upgrade/from-alpha37-to-alpha38.md) — automatically, on the first boot.
 - [Upgrade from v1.0.0-alpha4 to v1.0.0-alpha5](upgrade/from-alpha4-to-alpha5.md) — None.
 - [Upgrade from v1.0.0-alpha5 to v1.0.0-alpha6](upgrade/from-alpha5-to-alpha6.md) — None.
 - [Upgrade from v1.0.0-alpha6 to v1.0.0-alpha7](upgrade/from-alpha6-to-alpha7.md) — mod.ts no longer re-exports renderer primitives.
@@ -156,3 +158,4 @@
 - [Storage backend interface (design — pre-freeze reservation)](specs/2026-07-11-storage-backend-interface.md) — (3-tier db + sync op store).
 - [Local-first execution (perfect-aio D3) — design](specs/2026-07-22-local-first.md) — Status: design + prototype phase (the D3 gate: no mass migration before this
 - [Cell workers (`worker: true`) — design](specs/2026-07-25-cell-workers.md) — Status: design (nothing built).
+- [One data directory, and updating a deployed app — design](specs/2026-07-26-data-dir-and-updates.md) — Status: Part 1 SHIPPED in 1.0.0-alpha38 (see

@@ -208,8 +208,8 @@ No breaking changes — two additions:
 
 ## B4a — SQLite-only persistence (Deno.Kv removed)
 
-- Persisted cell state now lives in your app's single `data.db` (`aio_kv` table)
-  — inspect it with `am sql`.
+- Persisted cell state now lives in your app's single `state.db` (`aio_kv`
+  table) — inspect it with `am sql`.
 - **No code changes.** Legacy Deno.Kv data migrates automatically on first boot
   (the old store is left untouched); the `unstable: ["kv"]` flag can be deleted
   from your deno.json.

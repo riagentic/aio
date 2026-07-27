@@ -10,6 +10,23 @@ import { codeMatches, codeText } from "./scan.ts";
 // 1. PROJECT CONFIG (deno.json)
 // ══════════════════════════════════════════════════════════════════════
 
+/** Is this finding suppressed?
+ *
+ *  `// aiol-ok` counts on the flagged line OR on the comment line immediately
+ *  above it — which is where a justification naturally goes, where every other
+ *  linter accepts it, and (decisively) where `deno fmt` cannot move it. A marker
+ *  parked at the end of a long line gets reflowed onto a continuation, and the
+ *  hint reappeared somewhere else: one field report spent four passes clearing
+ *  eight hints for exactly this reason (llama.md #7).
+ *
+ *  A blank line between the comment and the code breaks the association, so an
+ *  unrelated `aiol-ok` further up can't silently cover code below it. */
+export function isSuppressed(lines: string[], idx: number): boolean {
+  if (lines[idx]?.includes("aiol-ok")) return true;
+  const prev = lines[idx - 1]?.trim() ?? "";
+  return prev.startsWith("//") && prev.includes("aiol-ok");
+}
+
 export const checkConfig: Checker = (ctx) => {
   const { denoJson: dj, report, pass } = ctx;
   if (!dj) {
@@ -524,14 +541,14 @@ export const checkPerformance: Checker = (ctx) => {
     for (let i = 0; i < file.lines.length; i++) {
       const line = file.lines[i]!;
       if (!/set(Timeout|Interval)\(/.test(line)) continue;
-      if (line.includes("aiol-ok")) continue;
+      if (isSuppressed(file.lines, i)) continue;
       if (/setTimeout\([^,)]*,\s*0\s*\)/.test(line)) continue; // delay-0 yield
       report(
         "hint",
         "perf",
         `${file.relative}:${
           i + 1
-        }: setTimeout/setInterval in cell code — use schedule.after/every for observable, cancellable timers (suppress: // aiol-ok)`,
+        }: setTimeout/setInterval in cell code — use schedule.after/every for observable, cancellable timers (suppress with \`// aiol-ok\` on this line or the comment line above)`,
         { file: file.relative, line: i + 1 },
       );
       break; // once per file is enough
@@ -1258,14 +1275,14 @@ export const checkPatterns: Checker = (ctx) => {
           }
           if (
             readRe.test(code) && !writeRe.test(code) && !mutateRe.test(code) &&
-            !file.lines[i]!.includes("aiol-ok")
+            !isSuppressed(file.lines, i)
           ) {
             report(
               "hint",
               "patterns",
               `${file.relative}:${
                 i + 1
-              } — "${method}" reads ${param}.* after an await — every await is a commit point and other actions may have run while suspended; re-read deliberately or gather-then-write (docs/state/methods.md); suppress a deliberate read with // aiol-ok`,
+              } — "${method}" reads ${param}.* after an await — every await is a commit point and other actions may have run while suspended; re-read deliberately or gather-then-write (docs/state/methods.md); suppress a deliberate read with \`// aiol-ok\` on this line or the comment line above`,
               { file: file.relative, line: i + 1 },
             );
             break; // once per method
@@ -1729,6 +1746,40 @@ export const checkUpgrade: Checker = (ctx) => {
     );
   }
 
+  // The DYNAMIC variant of the same migration (risoto 2026-07-26): the lazy
+  // server-only pattern the docs themselves recommend —
+  //   const { createDB } = await import("aio")
+  // — is invisible to the static rule above and fails only at runtime, as
+  // "createDB is not a function" (risoto's nft-cache silently stopped
+  // persisting for hours). Same symbols, same fix, dynamic spelling.
+  const DYN =
+    /(?:\{([^}]*)\}\s*=\s*await\s+import\(\s*["']aio["']\s*\))|(?:\(\s*await\s+import\(\s*["']aio["']\s*\)\s*\)\s*\.\s*(\w+))/g;
+  for (const file of [...tsFiles, ...tsxFiles]) {
+    const code = file.content; // real strings needed — specifiers ARE strings
+    let dm: RegExpExecArray | null;
+    DYN.lastIndex = 0;
+    while ((dm = DYN.exec(code)) !== null) {
+      const names = dm[1] ?? dm[2] ?? "";
+      if (!SERVER_ONLY.test(names)) continue;
+      found++;
+      report(
+        "warn",
+        "upgrade",
+        `${file.relative}: dynamic \`import("aio")\` destructures a ` +
+          `server-only symbol — those moved to the \`aio/server\` entry ` +
+          `(alpha37), so this resolves to undefined at RUNTIME ` +
+          `("createDB is not a function")`,
+        {
+          file: file.relative,
+          line: code.slice(0, dm.index).split("\n").length,
+          fix: 'const { createDB } = await import("aio/server")',
+          safeFix: fix.fixDynamicServerEntryImport(file.path),
+        },
+      );
+      break; // one report per file; the safe-fix rewrites every occurrence
+    }
+  }
+
   // deno.json tasks: renamed TLS flags, and a build-only flag on a run task.
   const entry = appEntry?.relative ?? null;
   for (const [name, cmd] of Object.entries(denoJson?.tasks ?? {})) {
@@ -1872,6 +1923,61 @@ export const checkWorkerPeerReads: Checker = (ctx) => {
   }
 };
 
+// ══════════════════════════════════════════════════════════════════════
+// 19. SPREADING THE LIVE PROXY BACK INTO STATE (llama.md #2)
+// ══════════════════════════════════════════════════════════════════════
+//
+// An ASYNC method writes through a live proxy so reads stay fresh across
+// awaits. Spreading that proxy copies nested values as proxies, so assigning the
+// result back hands the store an object it must refuse:
+//
+//     async update(s) { … s.job = { ...s.job, step: p.step } }   // refused
+//
+// The runtime now rejects the method that made the write (it used to log and
+// resolve, which is how a build panel froze at step 0 with a green test suite).
+// This is the static half — the same mistake named at lint time, before it runs.
+//
+// SYNC methods are NOT flagged: they mutate an Immer draft, whose spread yields
+// plain values, and that has always been legal. Flagging both would be the kind
+// of false positive that teaches developers to ignore the linter.
+export const checkProxySpreadBack: Checker = (ctx) => {
+  const { tsFiles, tsxFiles, report } = ctx;
+  // `async <name>(s…) {` … then `s.X = { ...s.X` / `[ ...s.X` inside it.
+  const asyncMethod = /\basync\s+(\w+)\s*\(\s*(\w+)\b[^)]*\)\s*\{/g;
+  for (const file of [...tsFiles, ...tsxFiles]) {
+    const code = codeText(file.content);
+    for (const m of code.matchAll(asyncMethod)) {
+      const draft = m[2]!;
+      // Body slice: from the opening brace to the end of the balanced block,
+      // bounded so a runaway regex can't scan the rest of the file.
+      const body = code.slice(
+        m.index + m[0].length,
+        m.index + m[0].length + 4000,
+      );
+      const spread = new RegExp(
+        `\\b${draft}\\s*\\.\\s*(\\w+)\\s*=\\s*[\\{\\[]\\s*\\.\\.\\.\\s*${draft}\\s*\\.\\s*\\1\\b`,
+      ).exec(body);
+      if (!spread) continue;
+      const line = code.slice(0, m.index).split("\n").length;
+      report(
+        "warn",
+        "patterns",
+        `${file.relative}:${line} — \`${draft}.${spread[1]}\` is spread and ` +
+          `assigned back inside async \`${m[1]}()\`. In an async method ` +
+          `\`${draft}\` is a live proxy, so the spread carries proxies for any ` +
+          `nested object/array and the store REFUSES the write (the method ` +
+          `rejects). Snapshot to a plain value first: ` +
+          `\`const x = JSON.parse(JSON.stringify(${draft}.${
+            spread[1]
+          })); x.k = v; ` +
+          `${draft}.${spread[1]} = x\`.`,
+        { file: file.relative, line },
+      );
+      break; // one per file — the pattern repeats
+    }
+  }
+};
+
 export const ALL_CHECKS: Checker[] = [
   checkConfig,
   checkStructure,
@@ -1890,4 +1996,5 @@ export const ALL_CHECKS: Checker[] = [
   checkUpgrade,
   checkPostAwaitRead,
   checkWorkerPeerReads,
+  checkProxySpreadBack,
 ];

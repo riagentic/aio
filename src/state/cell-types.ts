@@ -121,7 +121,13 @@ export type Msg<P = unknown> = {
 
 /** Scoped app handle passed to execute() — dispatch actions or read state from within a cell */
 export type ScopedApp<S = unknown> = {
-  dispatch: (action: Msg) => void;
+  /** Returns whatever the store's dispatch returns — a promise that REJECTS if
+   *  the action was refused. Callers may ignore it (most effects are
+   *  fire-and-forget), but an async method's write path MUST observe it: a
+   *  dropped rejection is a write the caller believes landed and didn't
+   *  (llama.md #2). Typed `unknown` rather than `Promise` because
+   *  standalone/worker scoped apps dispatch synchronously. */
+  dispatch: (action: Msg) => unknown;
   /** Returns this cell's own state slice */
   getState: () => S;
   /** Returns the full app state — use when init() needs to read another cell's state.

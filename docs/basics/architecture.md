@@ -21,7 +21,7 @@ flowchart LR
         SCHED[Scheduler]
         ROUTES[Custom routes]
     end
-    subgraph storage [Persistence — one data.db]
+    subgraph storage [Persistence — one state.db]
         KV[(aio_kv snapshot)]
         SQL[(db: tables)]
     end

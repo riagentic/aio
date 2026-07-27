@@ -53,6 +53,9 @@ export type Resolution =
   | { kind: "external"; url: string }
   | { kind: "error"; error: GraphError };
 
+/** aio entries that exist only on the server side — see resolveSpecifier. */
+const SERVER_ONLY_SPECS = new Set(["aio/server"]);
+
 const EXTENSIONS = [".ts", ".tsx", ".js", ".jsx"];
 const INDEX_FILES = ["index.ts", "index.tsx"];
 
@@ -99,6 +102,17 @@ export function resolveSpecifier(
   // JSX runtime specifiers are injected by the compiler (jsxImportSource),
   // not explicit imports — treat as external even without an import map entry.
   if (spec.endsWith("/jsx-runtime") || spec.endsWith("/jsx-dev-runtime")) {
+    return { kind: "external", url: spec };
+  }
+
+  // The framework's own SERVER entry is deliberately absent from the browser
+  // import map (loading SQLite/Worker code in a browser is the bug this map
+  // prevents). An app reaches it the documented way — a dynamic
+  // `await import("aio/server")` inside a cell method — so flagging it as a
+  // missing mapping was pure noise, and the suggested "fix" (npm:aio/server)
+  // does not exist. Treat it as external: never walked, never an error.
+  // (risoto, 2026-07-26)
+  if (SERVER_ONLY_SPECS.has(spec)) {
     return { kind: "external", url: spec };
   }
 
@@ -457,11 +471,24 @@ export async function validateGraph(
           " (reached only via dynamic import — deferred, not blocking)";
       }
     } else if (e.category === "missing-import-map") {
-      // `@std/*` / `node:*` are absent from the BROWSER import map by design —
-      // they resolve server-side. That's a warning (server-only), not a hard
-      // "missing dep" block; a genuinely-missing package stays blocking.
+      // `@std/*` / `node:*` / `aio/server` are absent from the BROWSER import
+      // map by design — they resolve server-side. That's a warning
+      // (server-only), not a hard "missing dep" block; a genuinely-missing
+      // package stays blocking.
+      //
+      // `aio/server` joined this list in alpha37: buildBrowserImportMap
+      // deliberately omits it (server-only symbols must never enter a browser
+      // bundle), so the very import path the alpha37 migration TELLS apps to
+      // adopt — and that docs/build/imports.md demonstrates with
+      // `const { createDB } = await import("aio/server")` — was reported as a
+      // blocking missing-dep. Following the guide correctly produced an
+      // unfixable boot error with no app-side remedy. Same by-design absence as
+      // @std//node:, so same downgrade.
       const spec = e.message.match(/"([^"]+)"/)?.[1] ?? "";
-      if (spec.startsWith("@std/") || spec.startsWith("node:")) {
+      if (
+        spec.startsWith("@std/") || spec.startsWith("node:") ||
+        spec === "aio/server"
+      ) {
         e.category = "server-only-api";
         if (isDeferred) e.deferred = true;
       }

@@ -441,7 +441,10 @@ type BatchState = {
 /** Create a microtask batcher that groups async method mutations into single dispatched actions. */
 export function createBatcher(
   prefix: string,
-  dispatch: (action: Msg) => void,
+  // Returns whatever `app.dispatch` returns: a promise that REJECTS when the
+  // write-set was refused (see `settled()` — dropping that rejection is how a
+  // discarded write became invisible to the method that made it).
+  dispatch: (action: Msg) => unknown,
   // Transactional methods (risoto #2): buffer every mutation across the whole
   // method — no microtask/method-change auto-flush — and commit ONCE via an
   // explicit flush() at method return. This is what makes an `await` NOT a
@@ -450,6 +453,13 @@ export function createBatcher(
 ) {
   const batch: BatchState = { mutations: [], scheduled: false, method: "" };
   const deferred = opts.deferred === true;
+  // Every dispatched write-set, and the first refusal among them. A write the
+  // store rejects (most often `s.x = {...s.x}` — a proxy-derived value assigned
+  // back into state) makes `app.dispatch` reject; without this the rejection was
+  // dropped on the floor and the async method that made the write RESOLVED, so
+  // the caller was told a change had been applied that never was (llama.md #2).
+  const inflight: Promise<unknown>[] = [];
+  let firstError: unknown = null;
 
   function add(method: string, mutation: Mutation): void {
     // Different method → flush previous batch immediately so mutations
@@ -475,10 +485,17 @@ export function createBatcher(
     batch.mutations = [];
     batch.scheduled = false;
     batch.method = "";
-    dispatch({
+    const r = dispatch({
       type: `${prefix}:${setKey(method)}`,
       payload: { mutations, _origin: method },
     });
+    if (r && typeof (r as Promise<unknown>).then === "function") {
+      inflight.push(
+        (r as Promise<unknown>).catch((e) => {
+          if (firstError === null) firstError = e;
+        }),
+      );
+    }
   }
 
   /** Drop the buffered write-set without dispatching (transaction abort). */
@@ -497,6 +514,19 @@ export function createBatcher(
     flush,
     /** Discard the buffered write-set (transactional abort). */
     discard,
+    /** Await every write-set this batcher dispatched and rethrow the first one
+     *  the store refused. Called at async-method return, so a refused write
+     *  fails the method that made it instead of resolving as if it had landed.
+     *  Dev, prod and every test harness alike — silence here was the single
+     *  costliest bug in the llama.master field report. */
+    async settled(): Promise<void> {
+      while (inflight.length > 0) await Promise.all(inflight.splice(0));
+      if (firstError !== null) {
+        const e = firstError;
+        firstError = null;
+        throw e;
+      }
+    },
   };
 }
 

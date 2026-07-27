@@ -75,7 +75,7 @@ await aio.run({
 ```
 
 This is the single source of truth for app identity — used for lock files, UDS
-sockets, the `data.db` path, and `am` commands. The value is slugified
+sockets, the `state.db` path, and `am` commands. The value is slugified
 (lowercase alphanumeric + hyphens). **`appId` is mandatory** — the app will not
 start without it.
 
@@ -199,7 +199,7 @@ what triggered it, and what it changed:
 ```sh
 deno task am timeline                       # recent dispatches + payload + state diff (live)
 deno task am timeline --lines=50            # last 50
-deno task am timeline --from=data.db.journal  # offline, from a durable journal file
+deno task am timeline --from=<data>/journal  # offline, from a durable journal file
 deno task am replay 5..12                   # re-dispatch journal seq 5..12 for repro
 deno task am replay 5..12 --dry             # show what would replay, dispatch nothing
 deno task am record flow.test.ts --from=J   # turn a journal into a bootCells test
@@ -216,7 +216,7 @@ deno task am record flow.test.ts --from=J   # turn a journal into a bootCells te
   reproduce a captured session. `--dry` lists the range without dispatching.
 
 Range forms: `N` (one seq), `N..M` (inclusive), or omit for all. Both read
-`data.db.journal` by default; override with `--from=<path>`.
+`<data>/journal` by default; override with `--from=<path>`.
 
 ## Persistence and snapshots
 
@@ -234,6 +234,37 @@ storage that the cell's current `initialState` no longer declares (a
 rename/removal without a `version` bump, which `deepMerge` would silently keep).
 Boot also warns about drift; this is the on-demand view. A cell shape change is
 covered by bumping `version` + adding an `onMigrate(state, from)` hook.
+
+## Files, backup, restore
+
+`am snapshot` is cell **state**, as JSON, from the running app. These are the
+**files** — including `auth.db`, the app key and the TLS material, which are not
+cell state and which a state snapshot therefore doesn't contain.
+
+```sh
+am data                      # every path this app uses + sizes, by tier
+am data --json               # machine-readable
+
+am stop wallet               # a live SQLite file can copy mid-write
+am backup                    # → ./wallet-backup-<stamp>/  (a copy of data/)
+am backup /mnt/usb/w1        # …or anywhere
+am restore /mnt/usb/w1       # put it back
+```
+
+Everything durable lives in `~/.<appId>/data/`, so backup is a directory copy —
+see [Where Files Live](../persistence/where-files-live.md) for the layout. What
+the commands add over `cp -r` is two refusals:
+
+- **`am backup` refuses while the app is running.** A SQLite `-wal` file holds
+  committed pages the `.db` doesn't have yet, so a copy taken mid-write can be
+  internally inconsistent. `--force` overrides and marks the result
+  `tornRisk: true`.
+- **`am restore` refuses another app's archive** (`meta.json` records the appId)
+  and refuses outright while the app runs — a running app would write its
+  in-memory pages back over what you restored. There is no `--force` for that.
+
+A restore **moves** the data it replaces to `data.replaced-<stamp>` rather than
+deleting it, so restoring the wrong archive is recoverable.
 
 ## UI inspection and interaction (dev mode)
 

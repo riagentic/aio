@@ -14,6 +14,22 @@ import type { Msg } from "../state/cell-types.ts";
  *  which cell it hosts. `self.name` is set by the main side at spawn. */
 export const CELL_WORKER_PREFIX = "aio-cell:";
 
+/** True inside a `worker: true` cell's worker, which re-imports the app's OWN
+ *  entry module. Boot-time work in that entry (creating directories, migrating
+ *  files, opening databases, starting servers) then runs TWICE — and anything
+ *  slow there delays the worker's ready handshake, which aio fails after
+ *  30s with "did not become ready". Guard such work with this:
+ *
+ *      if (!isCellWorker()) await prepareDataDirectories();
+ *      await aio.run({ ... });
+ *
+ *  (risoto, 2026-07-26 — found the hard way: a 20ms mkdir+copy before
+ *  aio.run() was enough to stall the handshake.) */
+export function isCellWorker(): boolean {
+  const name = (globalThis as { name?: string }).name;
+  return typeof name === "string" && name.startsWith(CELL_WORKER_PREFIX);
+}
+
 /** Plain-data view of the ambient caller context (auth-context.ts), forwarded
  *  with every call so `serverUser()` / `serverRequest()` answer inside the
  *  worker exactly as they do on the main isolate. Headers travel as entries —

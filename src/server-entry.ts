@@ -23,3 +23,10 @@ export {
   type ShipManifest,
   verifyShipManifest,
 } from "./build/ship.ts";
+
+// Where this app keeps its files (docs/persistence/where-files-live.md). An app
+// that writes its own files needs `appDirs(appId).files` to land inside the one
+// directory a user backs up — otherwise it invents a fifth location, which is
+// the problem the layout exists to end. Server-only: it reads $HOME and the
+// process environment.
+export { type AppDirs, appDirs, type AppMeta } from "./server/app-dirs.ts";

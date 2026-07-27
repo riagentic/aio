@@ -318,7 +318,7 @@ something and re-read state), see
 - **"Module not found: aio"** -- Run `deno install`, check import map
 - **State resets on restart** -- Persistence is ON by default; a reset means the
   state shape changed (old keys deep-merge with new defaults — see
-  [cell versioning](../state/cells.md)) or `data.db` was deleted
+  [cell versioning](../state/cells.md)) or `state.db` was deleted
 - **Port 8000 in use** -- Use `deno task am stop` or `--port=9000`
 - **Hot reload not working** -- Ensure `prod: false` (default in dev)
 

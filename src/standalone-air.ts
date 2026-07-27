@@ -16,7 +16,8 @@ import {
 } from "./diagnostics/error.ts";
 import type { AioApp } from "./server/aio.ts";
 import { isScheduleEffect, type ScheduleEffect } from "./state/schedule.ts";
-import { isOwnEffect, type OwnEffect } from "./state/own.ts";
+import { log } from "./diagnostics/logger-api.ts";
+import { createOwnManager, isOwnEffect, type OwnEffect } from "./state/own.ts";
 import { Listeners } from "./state/listeners.ts";
 import { signal } from "./state/signal.ts";
 import { useRef } from "./air/aio-renderer.ts";
@@ -63,7 +64,16 @@ let _state: unknown = null;
 let _app: AioApp | null = null;
 // Once-per-process dedup for the "effect ignored in standalone" notices — a
 // toast that returns schedule.after otherwise floods every test (quant Bad #3).
-const _warnedStandalone = { schedule: false, own: false };
+const _warnedStandalone = { schedule: false };
+
+// Owned resources (`own.set`) acquired in this runtime. Lazily created so the
+// module stays side-effect-free, and disposed by _resetState() so a test that
+// boots cells and disposes the handle leaves nothing running.
+let _own: ReturnType<typeof createOwnManager> | null = null;
+function _ownManager(): ReturnType<typeof createOwnManager> {
+  if (!_own) _own = createOwnManager(log);
+  return _own;
+}
 
 // ── Virtual-clock scheduler (test/standalone) ──────────────────────────
 // Schedule effects have no timer runtime in standalone/test mode, so instead of
@@ -246,12 +256,13 @@ export function initStandalone<S, A, E>(
         return;
       }
       if (isOwnEffect(effect)) {
-        if (!_warnedStandalone.own) {
-          _warnedStandalone.own = true;
-          console.warn(
-            "[aio] own effects are ignored in standalone/test mode — this warns once.",
-          );
-        }
+        // Really acquire and dispose. Ignoring `own` here made the in-process
+        // harnesses (testCell / testUI / bootCells) more permissive than
+        // production — a leaked or misfiring resource could not surface in the
+        // one place a test boots and disposes cells, converting a whole class of
+        // bug into a production-only bug (llama.md #4). Tests are the strictest
+        // environment; a warning that says "ignored" is not strictness.
+        _ownManager().handle(effect);
         return;
       }
       execute(app, effect as E);
@@ -353,6 +364,13 @@ export function _resetState(): void {
   _resetSignals();
   _resetCellBindings(); // release module-singleton cells so they re-bind
   _resetSchedules(); // reset the virtual clock + pending schedules
+  // Dispose every owned resource this runtime acquired. `await using ui` /
+  // `h.dispose()` must leave no watcher, socket or child process behind — and a
+  // disposer that throws is exactly the defect a test should catch.
+  if (_own) {
+    _own.disposeAll();
+    _own = null;
+  }
 }
 
 /** Full reset — state AND the cell registry. */
