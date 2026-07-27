@@ -3,7 +3,8 @@
 // Cross-platform: works on Linux, macOS, Windows
 // Prevents multiple instances from corrupting shared resources
 
-import { join } from "@std/path";
+import { dirname, join } from "@std/path";
+import { appDirs } from "./app-dirs.ts";
 
 // ── Types ────────────────────────────────────────────────────
 
@@ -110,35 +111,55 @@ export function lockPath(appId: string): string {
 // the vault silently stopped auto-unlocking.)
 export type LaunchInfo = { flags: string[]; entry?: string; cwd?: string };
 
-/** Path to am's launch-info sidecar for an app. */
+/** Path to am's launch-info sidecar: `~/.<appId>/launch.json`.
+ *
+ *  Two things this is NOT, both learned the hard way:
+ *
+ *  • not the runtime dir — a launch record has to outlive the machine (`am start`
+ *    in the morning, reboot, `am restart` in the afternoon must still replay
+ *    `--env-file`). `$XDG_RUNTIME_DIR` is cleared on logout BY DESIGN, which is
+ *    exactly right for the lock and socket and exactly wrong for this.
+ *  • not a shared toolchain directory — these are THIS app's flags, so keeping
+ *    them with the app means "delete the app" is one `rm -rf` and there is no
+ *    second root to relocate when sandboxing. */
 export function launchInfoPath(appId: string): string {
+  return appDirs(appId).launch;
+}
+
+/** Pre-alpha38: the record lived in the runtime dir, so it vanished on logout. */
+function legacyLaunchPath(appId: string): string {
   return join(lockDir(), `${appId}.launch.json`);
 }
 
 /** Record the flags am launched an app with (best-effort). */
 export function writeLaunchInfo(appId: string, info: LaunchInfo): void {
   try {
-    Deno.writeTextFileSync(launchInfoPath(appId), JSON.stringify(info));
+    const path = launchInfoPath(appId);
+    Deno.mkdirSync(dirname(path), { recursive: true });
+    Deno.writeTextFileSync(path, JSON.stringify(info));
   } catch { /* best-effort — restart falls back to a warning */ }
 }
 
 /** Read the recorded launch info, or null if none/corrupt. */
 export function readLaunchInfo(appId: string): LaunchInfo | null {
-  try {
-    const info = JSON.parse(
-      Deno.readTextFileSync(launchInfoPath(appId)),
-    ) as LaunchInfo;
-    return Array.isArray(info.flags) ? info : null;
-  } catch {
-    return null;
+  // The pre-alpha38 runtime-dir location is still read, so an app already
+  // running when aio was upgraded can still be restarted with its flags.
+  for (const path of [launchInfoPath(appId), legacyLaunchPath(appId)]) {
+    try {
+      const info = JSON.parse(Deno.readTextFileSync(path)) as LaunchInfo;
+      if (Array.isArray(info.flags)) return info;
+    } catch { /* next */ }
   }
+  return null;
 }
 
-/** Remove the launch sidecar (on a clean stop). */
+/** Remove the launch sidecar (on a clean stop) — both locations. */
 export function removeLaunchInfo(appId: string): void {
-  try {
-    Deno.removeSync(launchInfoPath(appId));
-  } catch { /* already gone */ }
+  for (const path of [launchInfoPath(appId), legacyLaunchPath(appId)]) {
+    try {
+      Deno.removeSync(path);
+    } catch { /* already gone */ }
+  }
 }
 
 // ── Process Liveness ─────────────────────────────────────────

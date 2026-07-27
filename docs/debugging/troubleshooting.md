@@ -65,8 +65,8 @@ Something wrong?
 **Tracing:** Every error has a correlation ID. Grep logs:
 
 ```bash
-grep 'a1b2c3d4' .aio/log/error.log   # all errors in this dispatch
-grep 'a1b2c3d4' .aio/log/debug.log   # full action chain
+grep 'a1b2c3d4' ~/.<appId>/logs/error.log   # all errors in this dispatch
+grep 'a1b2c3d4' ~/.<appId>/logs/debug.log   # full action chain
 ```
 
 ---
@@ -136,7 +136,7 @@ UI shows old values. Data arrived on server but browser didn't update.
 3. **Delta issue?** If state changed but delta was `skip`, check
    `fullStateThreshold`.
 4. **Reducer not mutating?** Verify with `[state-diff]` entries in
-   `.aio/log/debug.log`. No diff = no change.
+   `~/.<appId>/logs/debug.log`. No diff = no change.
 5. **Reference issue?** Use direct cell access for scoped updates if component
    depends on parent object reference.
 6. **Visibility?** Check the `cells: <name> ui=… persist=…` line printed at
@@ -147,7 +147,7 @@ UI shows old values. Data arrived on server but browser didn't update.
 
 ## S4 -- Slow actions
 
-App works but feels sluggish. Check `.aio/log/perf.log`:
+App works but feels sluggish. Check `~/.<appId>/logs/perf.log`:
 
 ```
 [BUDGET] wallet:transfer 450ms > 100ms budget
@@ -258,12 +258,12 @@ expand diagnostic bus events.
 
 **Check log files:**
 
-| File                   | Look for                               |
-| ---------------------- | -------------------------------------- |
-| `.aio/log/error.log`   | Errors missed in console               |
-| `.aio/log/warning.log` | Stripped keys, dropped actions         |
-| `.aio/log/debug.log`   | Full action trace, unexpected patterns |
-| `.aio/log/perf.log`    | Budget violations                      |
+| File                          | Look for                               |
+| ----------------------------- | -------------------------------------- |
+| `~/.<appId>/logs/error.log`   | Errors missed in console               |
+| `~/.<appId>/logs/warning.log` | Stripped keys, dropped actions         |
+| `~/.<appId>/logs/debug.log`   | Full action trace, unexpected patterns |
+| `~/.<appId>/logs/perf.log`    | Budget violations                      |
 
 **Common silent issues:**
 
@@ -304,11 +304,11 @@ diagnostics: {
 
 ## Forensics workflow
 
-1. `.aio/log/error.log` -- find the first error
-2. Grep `.aio/log/debug.log` for the `cid` -- full action chain
-3. `.aio/log/perf.log` -- budget violations around the same time
-4. `.aio/log/actions.jsonl` -- replay the action sequence
-5. `.aio/log/checkpoint.json` -- state snapshot at last checkpoint
+1. `~/.<appId>/logs/error.log` -- find the first error
+2. Grep `~/.<appId>/logs/debug.log` for the `cid` -- full action chain
+3. `~/.<appId>/logs/perf.log` -- budget violations around the same time
+4. `~/.<appId>/logs/actions.jsonl` -- replay the action sequence
+5. `~/.<appId>/logs/checkpoint.json` -- state snapshot at last checkpoint
 6. Time-travel (Ctrl+.) -- step through actions visually
 
 ## Useful commands
@@ -316,7 +316,7 @@ diagnostics: {
 ```bash
 curl localhost:3000/__aio/vitals | jq .     # live vitals
 curl localhost:3000/__aio/health | jq .     # cell health
-grep 'a1b2c3d4' .aio/log/debug.log              # trace by correlation ID
-tail -f .aio/log/perf.log                        # watch budget violations
-grep -c 'cell:wallet' .aio/log/error.log      # count errors per cell
+grep 'a1b2c3d4' ~/.<appId>/logs/debug.log              # trace by correlation ID
+tail -f ~/.<appId>/logs/perf.log                        # watch budget violations
+grep -c 'cell:wallet' ~/.<appId>/logs/error.log      # count errors per cell
 ```

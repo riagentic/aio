@@ -96,10 +96,20 @@ export type AioConfig<S, A, E> = {
     action: A,
   ) => { state: S; effects: (E | ScheduleEffect | OwnEffect)[] };
   execute: (app: AioApp<S, A>, effect: E) => void;
-  persist?: boolean; // default: true — persists to SQLite (data.db, aio_kv table)
+  persist?: boolean; // default: true — persists to SQLite (state.db, aio_kv table)
+  /** Where this app keeps everything it owns. Default `~/.<appId>` — `data/`
+   *  inside it is the whole backup; `logs/` and `launch.json` are disposable.
+   *  This is the AUTHOR's choice; whoever runs the app can move every app at
+   *  once with `AIO_APPS_DIR=<root>` (→ `<root>/<appId>`).
+   *  See docs/persistence/where-files-live.md. */
+  appDir?: string;
   /** Override the SQLite file (":memory:" for hermetic tests, or an absolute
-   *  path). Default: ./data.db in dev, the app data dir when compiled. */
+   *  path). Default: `<appDir>/data/state.db`. */
   dbPath?: string;
+  /** PRAGMAs for the app db (default: WAL + synchronous=NORMAL). Set
+   *  `["PRAGMA journal_mode = WAL", "PRAGMA synchronous = FULL", …]` when the
+   *  data is expensive to lose. */
+  dbPragmas?: string[];
   fullStateThreshold?: number; // 0-1: ratio of changed keys that triggers full state broadcast (default: 0.5)
   /** Custom HTTP routes — exact path or "/prefix/*" wildcard → handler. The
    *  escape hatch for uploads, webhooks, and API endpoints that don't belong
@@ -275,8 +285,17 @@ export type CellsConfig = {
     persist?: import("../state/cell-types.ts").CellFieldFilter;
   };
   port?: number;
+  /** Where this app keeps everything it owns. Default `~/.<appId>` — `data/`
+   *  inside it is the whole backup; `logs/` and `launch.json` are disposable.
+   *  This is the AUTHOR's choice; whoever runs the app can move every app at
+   *  once with `AIO_APPS_DIR=<root>` (→ `<root>/<appId>`).
+   *  See docs/persistence/where-files-live.md. */
+  appDir?: string;
   /** Override the SQLite file (":memory:" for hermetic tests). */
   dbPath?: string;
+  /** PRAGMAs for the app db (default: WAL + synchronous=NORMAL). A wallet or
+   *  ledger wants `PRAGMA synchronous = FULL`; a cache does not. */
+  dbPragmas?: string[];
   persist?: boolean;
   persistKey?: string;
   persistDebounceMs?: number;

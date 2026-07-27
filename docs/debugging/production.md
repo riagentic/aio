@@ -21,8 +21,9 @@ Work top to bottom — each item links to the details.
       directory/title; renaming would orphan your data and locks. Set `appId` in
       deno.json explicitly before shipping
       ([pitfalls](../basics/pitfalls.md#state--cells)).
-- [ ] **Persistence location** — know where your `data.db` lives
-      (`resolveDataDir`), and back it up; test a restore once.
+- [ ] **Backups** — `am data` shows every path; back up `~/.<appId>/data/` (the
+      whole of it, nothing else) and test a restore once with `am restore`
+      ([where files live](../persistence/where-files-live.md)).
 - [ ] **State versioning** — cells that will evolve have `version` + `onMigrate`
       ([pitfalls](../basics/pitfalls.md#persistence)).
 - [ ] **Monitoring wired** — scraper on `GET /__aio/metrics`, alert on
@@ -31,7 +32,7 @@ Work top to bottom — each item links to the details.
 - [ ] **Health endpoint** — supervisor/loadbalancer checks `/__aio/health`.
 - [ ] **Limits reviewed** — `wsLimits` (message rate/size), `maxConnections`,
       `dispatchStorm` left ON ([run config](../state/lifecycle.md)).
-- [ ] **Logs rotating** — `.aio/log/` grows; ship or rotate it.
+- [ ] **Logs rotating** — `~/.<appId>/logs/` grows; ship or rotate it.
 - [ ] **Soak once** — `deno task soak` (or the 72h variant) against a
       prod-shaped build; heap slope must stay flat.
 - [ ] **systemd unit** (service targets) — `Restart=on-failure`; the server

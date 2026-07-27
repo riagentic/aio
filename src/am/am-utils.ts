@@ -12,6 +12,7 @@ import {
   writeLock,
 } from "../server/single-instance-lock.ts";
 import { join } from "@std/path";
+import { appDirs } from "../server/app-dirs.ts";
 import type { GlobalFlags } from "./am-types.ts";
 import { detectMode, out, outError } from "./am-output.ts";
 import { trojanGet, trojanPost } from "./am-http.ts";
@@ -299,6 +300,27 @@ export type AmCtx = {
 };
 
 /** Resolve the standard command context from global flags. */
+/** Where an app's durable journal lives, for the commands that read one
+ *  without being told (`am record`, `am timeline --from`, `am replay`).
+ *
+ *  `<data>/journal` is the answer for any app on the current layout. The legacy
+ *  `./data.db.journal` is still accepted as a fallback so a developer sitting in
+ *  an un-migrated project directory gets their file rather than a "no journal"
+ *  error — the app itself migrates it on its next boot. */
+export function defaultJournalPath(appId: string): string {
+  const current = appDirs(appId).journal;
+  try {
+    Deno.statSync(current);
+    return current;
+  } catch { /* not there — try the pre-alpha38 location */ }
+  const legacy = join(Deno.cwd(), "data.db.journal");
+  try {
+    Deno.statSync(legacy);
+    return legacy;
+  } catch { /* neither exists — report the current path in the error */ }
+  return current;
+}
+
 export function amCtx(flags: GlobalFlags): AmCtx {
   const appId = resolveAmAppId(flags.app);
   return {

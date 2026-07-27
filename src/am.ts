@@ -77,6 +77,7 @@ import {
 
 import type { CmdHandler } from "./am/am-types.ts";
 import { detectMode, outError } from "./am/am-output.ts";
+import { cmdBackup, cmdData, cmdRestore } from "./am/am-cmd-data.ts";
 import { parseGlobalFlags } from "./am/am-utils.ts";
 
 // ── Command map ────────────────────────────────────────────
@@ -102,6 +103,10 @@ const COMMANDS: Record<string, CmdHandler> = {
   tt: cmdTT,
   persist: cmdPersist,
   snapshot: cmdSnapshot,
+  // Data — the files, not the state (see am-cmd-data.ts)
+  data: cmdData,
+  backup: cmdBackup,
+  restore: cmdRestore,
   migrations: cmdMigrations,
   // Inspect
   clients: cmdClients,

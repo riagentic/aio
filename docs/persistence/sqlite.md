@@ -12,7 +12,7 @@ main event loop non-blocking. The Worker spawns **lazily** on first use.
 ```
 main thread        Writer Worker      Reader Workers (optional)
 ──────────         ─────────────      ─────────────────────────
-execute()  ──▶     node:sqlite   ──▶  data.db (WAL)
+execute()  ──▶     node:sqlite   ──▶  state.db (WAL)
 query()    ──────────────────────────▶ node:sqlite (readonly)
 ```
 
@@ -253,14 +253,37 @@ PRAGMA busy_timeout = 5000        -- wait up to 5s on lock
 PRAGMA foreign_keys = ON          -- enforce ref() constraints
 ```
 
+### Choosing your own durability
+
+`synchronous = NORMAL` is the right default for a cache and the wrong one for a
+wallet: on power loss it can lose the last committed transactions. Replace the
+list per app — the array you pass is used verbatim, so include the pragmas you
+still want:
+
+```ts
+await aio.run({
+  cells: [ledger],
+  dbPragmas: [
+    "PRAGMA journal_mode = WAL",
+    "PRAGMA synchronous = FULL", // survive power loss, pay an fsync per commit
+    "PRAGMA cache_size = -64000",
+    "PRAGMA busy_timeout = 5000",
+    "PRAGMA foreign_keys = ON",
+  ],
+});
+```
+
+`FULL` costs one fsync per commit — worth it when the last transaction is a
+freshly imported seed or a payment, not worth it for a UI cache.
+
 ## Permissions
 
 ```sh
 deno run --allow-read --allow-write src/main.ts
 ```
 
-No `--allow-ffi` needed. DB path: `./data/<appId>.db` (dev) or
-`~/.local/share/<appId>/data.db` (compiled).
+No `--allow-ffi` needed. DB path: `~/.<appId>/data/state.db` — the same in dev
+and compiled (see [Where Files Live](where-files-live.md)).
 
 ## Standalone / Android
 

@@ -64,6 +64,21 @@ export function _resetCellRegistry(): void {
  * singletons that bind once ("already bound" guard); a hermetic re-mount must
  * release them so their methods/getters rewire to the new runtime.
  */
+/** Release ONE app's cells so they can bind again — what `app.close()` calls.
+ *
+ *  A cell def binds to exactly one app (perfect-aio D2), and that guard used to
+ *  outlive the app: two `testServer()` blocks in one test file failed with
+ *  "[cell] already bound" even with `await using`, forcing the second test into
+ *  a file of its own for no reason a reader could see (llama.md #8). A closed app
+ *  owns nothing, so its claim ends with it. Scoped to the given cells, so a
+ *  second app running in the same process keeps its own bindings. */
+export function _releaseCellBindings(defs: Iterable<CellDef>): void {
+  for (const def of defs) {
+    (def.__aio as Record<string, unknown>).bound = false;
+    _reactivelyBound.delete(def);
+  }
+}
+
 export function _resetCellBindings(): void {
   for (const def of _cellRegistry.values()) {
     (def.__aio as Record<string, unknown>).bound = false;
@@ -193,8 +208,21 @@ export function bindCellReactive(
     | Record<string, (s: unknown, fullState?: unknown) => unknown>
     | undefined;
   if (selectors) {
+    // Deliberately NO "already a function, skip" guard here.
+    //
+    // standalone/Electron binds a cell twice: bindCell() first (methods +
+    // selectors over `app.getState()`), then bindCellReactive(). A skip-if-
+    // function guard therefore skipped EVERY selector — the catalog version had
+    // just installed one — leaving the non-signal-backed selector in place. It
+    // returned correct, fresh data and subscribed to nothing, so a component
+    // whose only read was a selector rendered once and froze: right data, dead
+    // screen, no warning (llama.md #1, the costliest bug in that report).
+    // testUI binds reactively ONLY, which is why no test could ever see it.
+    //
+    // Selector names cannot collide with method names (AIO-6.1 enforces it), so
+    // overwriting unconditionally can only ever replace a selector with the same
+    // selector — reading the signal instead of a snapshot.
     for (const [key, selectorFn] of Object.entries(selectors)) {
-      if (typeof (def as Record<string, unknown>)[key] === "function") continue;
       Object.defineProperty(def, key, {
         value: (...args: unknown[]) => {
           trackPath(cellName);

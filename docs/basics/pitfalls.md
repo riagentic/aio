@@ -7,7 +7,7 @@ design: if something here bites you and isn't listed, that's a bug in this page
 ## State & cells
 
 **Inferred appId follows your project name.** Zero-config apps derive their
-identity (locks, `data.db` path) from `deno.json` `appId`/`title`/`name` or the
+identity (locks, `state.db` path) from `deno.json` `appId`/`title`/`name` or the
 directory name — rename any of those and the app starts with FRESH state (the
 old data files still exist under the old id). Pin `appId` in `deno.json` (or
 `aio.run({ appId })`) before you have data you care about.
@@ -90,6 +90,14 @@ window_; the next ack/snapshot rebase replaces it with the server outcome.
 identity field (default `"id"`, per-field override via `identity`).
 
 ## UI & testing
+
+**The harnesses are as strict as production, deliberately.** `testCell`,
+`testUI`, `bootCells` and `testServer` all run dev-strict: an illegal in-place
+mutation throws, a refused write rejects the method that made it, `own` effects
+really acquire and dispose, and app directories are redirected into a temp
+sandbox so no test can write into your real `~/.<appId>`. A green test means
+what production means. If you find a case where a harness is more permissive
+than `deno task dev`, that is a bug — report it.
 
 **Content-derived names change with copy.** `SubmitButton` came from the text
 "Submit" — reword the button and long-lived `am` scripts break. Pin stable

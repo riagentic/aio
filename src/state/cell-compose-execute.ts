@@ -16,7 +16,7 @@ export function buildRootExecutor(
   reportError: ((err: AioError) => void) | undefined,
   countCellError: (name: string) => void,
 ): (
-  app: { dispatch: (a: Msg) => void; getState: () => unknown },
+  app: { dispatch: (a: Msg) => unknown; getState: () => unknown },
   effect: Msg,
 ) => void {
   const executorByPrefix = new Map<string, CellDef>();
@@ -25,7 +25,7 @@ export function buildRootExecutor(
   }
 
   return (
-    app: { dispatch: (a: Msg) => void; getState: () => unknown },
+    app: { dispatch: (a: Msg) => unknown; getState: () => unknown },
     effect: Msg,
   ): void => {
     const colonIdx = (effect.type as string).indexOf(":");
@@ -46,7 +46,10 @@ export function buildRootExecutor(
       _onError: reportError,
       dispatch: (a: Msg) => {
         if (typeof a?.type !== "string") return;
-        app.dispatch(tagSource(a, "Effect"));
+        // Hand the store's promise back: an async method's batcher awaits it to
+        // learn whether its write-set was accepted. Swallowing it here is what
+        // let a refused write resolve as success.
+        return app.dispatch(tagSource(a, "Effect"));
       },
       getState: () =>
         (app.getState() as Record<string, unknown>)[f.__aio.id] as unknown,

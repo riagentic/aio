@@ -3,7 +3,7 @@
 // importing symbols from the wrong entry (useAio from "aio", isScheduleEffect
 // from the wrong module, a PRIVATE helper, …) — copy-pasting the docs threw
 // at import time. This test extracts every `import … from "aio…"` inside
-// fenced code blocks across docs/, README.md, and claude.md and asserts each
+// fenced code blocks across docs/, README.md, and CLAUDE.md and asserts each
 // named symbol exists in that entry's API snapshot (the same source of truth
 // the api:check gate uses).
 import { assert } from "@std/assert";
@@ -54,7 +54,7 @@ Deno.test("every aio import in doc code blocks names a real exported symbol", as
 
   const files: URL[] = [
     new URL("README.md", ROOT),
-    new URL("claude.md", ROOT),
+    new URL("CLAUDE.md", ROOT),
   ];
   for await (const f of markdownFiles(new URL("docs/", ROOT))) files.push(f);
   assert(files.length > 30, "doc walk found too few files — walker broke?");

@@ -339,11 +339,11 @@ export function createServer(config: ServerConfig): ServerHandle {
       // against live cell state — works with zero connected clients. Lazy:
       // happy-dom + the renderer load only when the route is hit.
       renderServerSurface: !prod
-        ? async () => {
+        ? async (full?: boolean) => {
           const { renderHeadlessSurface } = await import(
             "./server-surface.ts"
           );
-          return renderHeadlessSurface(join(absBaseDir, uiEntry));
+          return renderHeadlessSurface(join(absBaseDir, uiEntry), full);
         }
         : undefined,
     };

@@ -3,6 +3,9 @@
 import type { LogConfig, LogEntry, LogLevel } from "./logger-types.ts";
 
 /** Default log directory — dot-dir so project watchers/scanners skip it. */
+// Only reached by a logger created WITHOUT an app (a standalone script, or a
+// log call before boot wires `dir: <appDirs>.logs`). An app's logs live in
+// `~/.<appId>/logs` — see src/server/app-dirs.ts.
 export const DEFAULT_LOG_DIR = ".aio/log";
 import {
   callerFile,

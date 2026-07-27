@@ -363,7 +363,7 @@ Deno.test("parseLogLine: framework, client, and raw lines", async () => {
   assertStringIncludes(raw.raw, "at foo");
 });
 
-Deno.test("readLogs: tails .aio/log/app.log, strips ANSI; missing → missing", async () => {
+Deno.test("readLogs: prefers the app's own log dir, falls back to the old one", async () => {
   const { readLogs } = await import("./server/proc.ts");
   const dir = await Deno.makeTempDir();
   try {
@@ -383,6 +383,23 @@ Deno.test("readLogs: tails .aio/log/app.log, strips ANSI; missing → missing", 
     assertEquals(r.lines.length, 2);
     assert(!r.lines[0]!.includes("\x1b"), "ANSI stripped");
     assertStringIncludes(r.lines[0]!, "started");
+
+    // With an appId, the app's OWN log dir (`~/.<appId>/logs`, alpha38) wins —
+    // amui must not show a stale project-relative log for a running app.
+    const { appDirs } = await import("aio/server");
+    const prevHome = Deno.env.get("AIO_DATA_HOME");
+    Deno.env.set("AIO_DATA_HOME", dir);
+    try {
+      const own = appDirs("logapp");
+      await Deno.mkdir(own.logs, { recursive: true });
+      await Deno.writeTextFile(`${own.logs}/app.log`, "from the app dir\n");
+      const r2 = await readLogs(dir, "app", 500, "logapp");
+      assertEquals(r2.path, `${own.logs}/app.log`);
+      assertStringIncludes(r2.lines[0]!, "from the app dir");
+    } finally {
+      if (prevHome === undefined) Deno.env.delete("AIO_DATA_HOME");
+      else Deno.env.set("AIO_DATA_HOME", prevHome);
+    }
   } finally {
     await Deno.remove(dir, { recursive: true });
   }
@@ -665,5 +682,37 @@ Deno.test("findCellSource: locates the cell definition, not references", async (
     assertEquals(await findCellSource(dir, "a.b*c"), null);
   } finally {
     await Deno.remove(dir, { recursive: true });
+  }
+});
+
+// The scan has to find a project wherever the developer actually keeps it, while
+// never walking pseudo-filesystems or network mounts — cheap reach, no nonsense.
+// (`AMUI_ROOTS` was `AUI_ROOTS` until the aui→amui rename caught up with it.)
+Deno.test("scan: explicit AMUI_ROOTS is honoured verbatim", async () => {
+  const { _internals } = await import("./server/scan.ts");
+  const prev = Deno.env.get("AMUI_ROOTS");
+  Deno.env.set("AMUI_ROOTS", "/work/apps:/mnt/projects");
+  try {
+    const roots = _internals.defaultRoots([]);
+    assert(roots.includes("/work/apps"), roots.join(","));
+    // A network mount is not walked into by accident, but IS honoured when the
+    // user names it — configuration beats the traversal filter.
+    assert(roots.includes("/mnt/projects"), roots.join(","));
+    // $HOME is always a root, so an unconfigured install still finds projects.
+    assert(roots.includes(Deno.env.get("HOME")!), roots.join(","));
+  } finally {
+    if (prev === undefined) Deno.env.delete("AMUI_ROOTS");
+    else Deno.env.set("AMUI_ROOTS", prev);
+  }
+});
+
+Deno.test("scan: never walks pseudo-filesystems or machine state", async () => {
+  const { _internals } = await import("./server/scan.ts");
+  for (const p of ["/proc", "/sys", "/dev", "/var", "/etc", "/mnt", "/media"]) {
+    assert(
+      _internals.NEVER_WALK.has(p),
+      `${p} must never be traversed — it cannot hold a project and readDir on a
+       network mount blocks for seconds`,
+    );
   }
 });

@@ -215,7 +215,7 @@ function walkOutput(
         tag: v.tag,
         events,
         ...(liveText
-          ? { text: liveText.slice(0, 80) }
+          ? { text: capText(liveText) }
           : staticText(v)
           ? { text: staticText(v) }
           : {}),
@@ -269,16 +269,36 @@ function walkComponent(
   if (v._dom) {
     node._dom = v._dom;
     const t = (v._dom as { textContent?: string }).textContent?.trim();
-    if (t) node.text = t.length > 160 ? t.slice(0, 160) + "…" : t;
+    if (t) node.text = capText(t);
   }
   walkOutput(v._rendered ?? null, node, new Set());
   return node;
 }
 
 /** Build the semantic UI surface from a mounted root vnode (on demand). */
+// How much of an element's / component's text the surface carries.
+//
+// A surface is meant to be scannable, so it caps text — but it used to cut
+// element text at 80 characters with NO marker, so a generated command line read
+// as a complete (wrong) string and there was no way to tell (llama.md #10). Two
+// changes: truncation is always marked with "…", and the cap is liftable
+// (`am surface --full`, `buildUISurface(root, { maxText: Infinity })`).
+//
+// Module-scoped because the walk is a synchronous, single-threaded recursion —
+// threading a parameter through every internal node function buys nothing.
+const TEXT_CAP = 80;
+let _maxText = TEXT_CAP;
+
+/** Cap `s`, marking the cut so a truncated value can never read as complete. */
+function capText(s: string): string {
+  return s.length > _maxText ? s.slice(0, _maxText) + "…" : s;
+}
+
 export function buildUISurface(
   root: VNode | string | number | null,
+  opts?: { maxText?: number },
 ): UISurfaceNode | null {
+  _maxText = opts?.maxText ?? TEXT_CAP;
   if (!isVNode(root)) return null;
   if (typeof root.tag === "function") return walkComponent(root, "");
   // Root that isn't a component (rare): wrap in a synthetic node

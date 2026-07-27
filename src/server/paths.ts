@@ -74,25 +74,23 @@ export function homedir(): string {
   return home;
 }
 
-/** Resolves persistent data dir — ~/.local/share/<appId>/ */
-export function resolveDataDir(appId: string): string {
+/** LEGACY layout only — `~/.local/share/<appId>/`, where auth.db / app.key /
+ *  data.kv lived before the one-directory move. Both remaining callers only
+ *  LOOK for files here (the migration, and the old-KV import), so this must not
+ *  create the directory: doing so re-created the very location the move exists
+ *  to retire, on every boot, for every app that had never used it.
+ *  New code uses `appDirs()` — see src/server/app-dirs.ts. */
+export function resolveDataDirLegacy(appId: string): string {
   const dataHome = Deno.env.get("XDG_DATA_HOME") ??
     join(homedir(), ".local", "share");
-  const dir = join(dataHome, appId);
-  Deno.mkdirSync(dir, { recursive: true });
-  return dir;
+  return join(dataHome, appId);
 }
 
-/** Resolves KV path — compiled: ~/.local/share/<appId>/data.kv, dev: Deno default */
+/** LEGACY KV path — compiled apps only (dev let Deno pick its own location).
+ *  Read to import an old `Deno.Kv` store into SQLite, nothing more. */
 export function resolveKvPath(appId: string): string | undefined {
-  if (!isCompiled()) return undefined; // dev mode — let Deno pick
-  return join(resolveDataDir(appId), "data.kv");
-}
-
-/** Resolves SQLite path — compiled: ~/.local/share/<appId>/data.db, dev: ./data.db */
-export function resolveDbPath(appId: string): string {
-  if (!isCompiled()) return join(Deno.cwd(), "data.db");
-  return join(resolveDataDir(appId), "data.db");
+  if (!isCompiled()) return undefined;
+  return join(resolveDataDirLegacy(appId), "data.kv");
 }
 
 /** Resolves transport: UDS on linux/mac with electron, WS otherwise */

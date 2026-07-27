@@ -3,7 +3,6 @@
 
 import { enc } from "../protocol/envelope.ts";
 import { restartForCellChange } from "./dev-restart.ts";
-import { join } from "@std/path";
 import { loadOrCreateCert, type TlsCert } from "./tls.ts";
 import { createServer } from "./server.ts";
 import { VERSION } from "./aio-cli.ts";
@@ -11,6 +10,7 @@ import type { ServerHandle } from "./server-types.ts";
 import { registerCall } from "../state/cell-impl.ts";
 import { createUDSListener, type UDSHandle } from "./uds.ts";
 import { flushAllUrgent } from "./broadcast-coalescer.ts";
+import { appDirs } from "./app-dirs.ts";
 import type {
   CellPatchStrategy,
   PatchFilterFields,
@@ -20,12 +20,7 @@ import type { ServerSyncHandler } from "../sync/server-handler.ts";
 import type { ComposedCells } from "../state/cell.ts";
 import type { VitalsSystem } from "../vitals/mod.ts";
 import type { AppLock } from "./single-instance-lock.ts";
-import {
-  isCompiled,
-  resolveDataDir,
-  resolveSocketPath,
-  resolveTransport,
-} from "./paths.ts";
+import { resolveSocketPath, resolveTransport } from "./paths.ts";
 import type { Log } from "../diagnostics/logger.ts";
 import { cellAccessAllowed } from "./server-auth.ts";
 import type { CellAccess } from "../state/cell-types.ts";
@@ -185,9 +180,10 @@ export async function setupTransport<S, A>(
   // TLS: auto-generate self-signed cert when --expose (or use user-provided --cert/--key)
   let tlsCert: TlsCert | null = null;
   if (expose) {
-    const certDir = isCompiled()
-      ? resolveDataDir(appId)
-      : join(Deno.cwd(), ".aio-tls");
+    // Tier ① — a private key belongs in the backup unit, and in ONE place
+    // whether or not this is a compiled binary (it used to be ./.aio-tls in dev
+    // and the XDG data dir when compiled).
+    const certDir = appDirs(appId, (config as { appDir?: string }).appDir).tls;
     try {
       tlsCert = await loadOrCreateCert(certDir, cliCert, cliKey);
       if (tlsCert.selfSigned) {

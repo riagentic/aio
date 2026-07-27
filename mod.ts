@@ -73,6 +73,9 @@ export type { AioMeta } from "./src/electron/electron.ts";
 
 /** Bind a cell to an app instance; test a cell in isolation with testCell. */
 export { bindCell, testCell } from "./src/state/cell.ts";
+/** True inside a `worker: true` cell's worker (the app entry is re-imported
+ *  there) — guard boot-time work in the entry with it. */
+export { isCellWorker } from "./src/server/cell-worker-protocol.ts";
 /** Define a cell — state + methods (+ selectors, sync, cancelOn). The atomic unit of aio. */
 export { cell } from "./src/state/cell.ts";
 /** Compose cells into a single dispatch/reduce/execute pipeline with dependency resolution. */

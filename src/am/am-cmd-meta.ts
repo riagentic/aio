@@ -242,10 +242,16 @@ Persistence:
   snapshot load <file>    Load snapshot from file
   migrations              Cell versions (declared vs stored) + shape drift
 
+Files (~/.<app>/ — data/ is the whole backup):
+  data                    Where this app keeps everything, and what to back up
+  backup [dest]           Copy data/ to dest (stop the app first, or --force)
+  restore <dir>           Put a backup back (keeps the data it replaces)
+
 Inspect:
   clients                 Connected WebSocket clients (with index)
   client <index>          Request component tree from client (dev mode)
   surface [clientIdx|server]  Semantic UI surface — every component + element, by name (server = headless render, no client needed)
+  surface --full          …with untruncated element text (default caps at 80, marked with …)
   trigger <idx> <path> <action> [text]  Drive the live UI (click/type/press/hover/focus/blur/scroll) — same engine as testUI
   sql <query>             Execute read-only SQL
   tables                  List SQLite tables

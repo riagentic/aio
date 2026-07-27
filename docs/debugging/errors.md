@@ -13,7 +13,7 @@ AioError format, error codes, correlation IDs, log files, and the onError hook.
 | **Log files**               | 5 plain text logs (app, debug, error, warning, perf)        | Post-incident forensics                   |
 | **Memory pressure monitor** | Alerts before OOM with per-cell sizing                      | Long-running apps, memory leaks           |
 | **Cell health audit**       | Per-cell error count, status, last action                   | Runtime inspection, ops dashboards        |
-| **Client log forwarding**   | All client console output in `.aio/log/client.log`          | Client-side errors without devtools       |
+| **Client log forwarding**   | All client console output in `~/.<appId>/logs/client.log`   | Client-side errors without devtools       |
 | **Browser error overlay**   | Build Error / Runtime Error overlay with fix suggestions    | UI development                            |
 | **DiagReporter**            | Structured console output for freeze/stale/slow + hints     | UI freezes, stale data, slow dispatch     |
 | **Performance budgets**     | Warns when reducers/effects exceed time budgets             | Finding slow code                         |
@@ -120,7 +120,7 @@ same ID.
 Grep by correlation ID to see the full chain:
 
 ```bash
-grep 'a1b2c3d4' .aio/log/error.log
+grep 'a1b2c3d4' ~/.<appId>/logs/error.log
 ```
 
 ---
@@ -164,8 +164,8 @@ await aio.run({
 
 ## Log files
 
-AIO writes 5 plain text log files to `.aio/log/` (configurable). Logging is
-enabled by default.
+AIO writes 5 plain text log files to `~/.<appId>/logs/` (configurable). Logging
+is enabled by default.
 
 | File          | Content                                                                         | When to use                      |
 | ------------- | ------------------------------------------------------------------------------- | -------------------------------- |
@@ -191,7 +191,7 @@ Columns: timestamp, level (padded to 5), category (padded to 10), message, data
 await aio.run({
   logging: {
     level: "info", // 'trace'|'debug'|'info'|'warn'|'error' — default 'info'; 'trace' logs every dispatch
-    dir: ".aio/log", // output directory — dot-dir default so file watchers skip it
+    dir: "/var/log/wallet", // override; default is `~/.<appId>/logs`
     console: true, // pretty-print to dev console (ANSI colors)
     heartbeat: 3600, // uptime summary every N seconds
     suppressTypes: ["timer:tick"], // hide noisy actions from debug.log
@@ -204,8 +204,8 @@ await aio.run({
 ### Client log (`client.log`)
 
 All `console.log/warn/error/info/debug` output from connected AIR clients is
-forwarded to `.aio/log/client.log`. Uncaught errors and unhandled rejections are
-also captured.
+forwarded to `~/.<appId>/logs/client.log`. Uncaught errors and unhandled
+rejections are also captured.
 
 ```
 [2026-04-03T14:22:01.123Z] [ERROR] [client:0] TypeError: Cannot read 'x' of null

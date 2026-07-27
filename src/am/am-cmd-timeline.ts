@@ -9,12 +9,10 @@
 //    passed" class becomes replay-and-look). `--dry` lists without dispatching.
 import type { GlobalFlags } from "./am-types.ts";
 import { detectMode, out, outError } from "./am-output.ts";
-import { amCtx } from "./am-utils.ts";
+import { amCtx, defaultJournalPath, resolveAmAppId } from "./am-utils.ts";
 import { trojanGet, trojanPost } from "./am-http.ts";
 import { type JournalRow, parseJournalEntries } from "./record.ts";
 import type { DiffEntry, TimelineEntry } from "../server/timeline.ts";
-
-const DEFAULT_JOURNAL = "data.db.journal";
 
 /** hh:mm:ss for a ms timestamp (local time). */
 function clock(ts: number): string {
@@ -84,7 +82,8 @@ export async function cmdTimeline(
 
   // Offline: read a durable journal file (payloads only — no diffs).
   if (fromFlag) {
-    const path = fromFlag.slice("--from=".length) || DEFAULT_JOURNAL;
+    const path = fromFlag.slice("--from=".length) ||
+      defaultJournalPath(resolveAmAppId(flags.app));
     let text: string;
     try {
       text = await Deno.readTextFile(path);
@@ -134,7 +133,9 @@ export async function cmdReplay(
   const fromFlag = args.find((a) => a.startsWith("--from="));
   const dry = args.includes("--dry");
   const rangeSpec = args.find((a) => !a.startsWith("--"));
-  const path = fromFlag ? fromFlag.slice("--from=".length) : DEFAULT_JOURNAL;
+  const path = fromFlag
+    ? fromFlag.slice("--from=".length)
+    : defaultJournalPath(resolveAmAppId(flags.app));
 
   const { lo, hi } = parseRange(rangeSpec);
   if (Number.isNaN(lo)) {

@@ -12,8 +12,8 @@ deno task dev --expose
 **What happens:**
 
 1. Server binds to `0.0.0.0` (all network interfaces)
-2. A self-signed TLS cert is auto-generated (cached in `.aio-tls/`, regenerated
-   if deleted)
+2. A self-signed TLS cert is auto-generated (cached in `~/.<appId>/data/tls/`,
+   regenerated if deleted)
 3. Main server listens on HTTPS — `wss://` WebSocket included
 4. **No framework auth by default** — any device on the LAN can connect (the app
    does its own user auth, or is deliberately open for a trusted network)
@@ -40,7 +40,7 @@ to issue a fresh one. (For headless/scripted setups, `am profile` exports a
 `.aioapp` file you import instead — see [the client](../clients/electron.md).)
 
 ```
-[12:00:00][INFO] tls: self-signed cert at .aio-tls/tls-cert.pem
+[12:00:00][INFO] tls: self-signed cert at ~/.<appId>/data/tls/tls-cert.pem
 [12:00:00][WARNING] tls: self-signed — remote browsers will show a security warning. Trust the cert, or use --tls-cert=/path.pem --tls-key=/path.pem for a CA-signed cert
 [12:00:00][INFO] running at https://0.0.0.0:8000 (dev, browser)
 [12:00:00][INFO] share: https://0.0.0.0:8000?token=a1b2c3d4-...

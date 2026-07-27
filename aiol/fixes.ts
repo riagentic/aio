@@ -240,6 +240,43 @@ export function fixAddAioEntry(
 /** Move server-only symbols to the `aio/server` entry (alpha37). Splits a mixed
  *  import — `import { cell, createDB } from "aio"` becomes two statements, one
  *  per entry — so the boundary is explicit without losing anything. */
+/** Rewrite dynamic `import("aio")` to `import("aio/server")` in statements
+ *  that destructure (or property-access) a server-only symbol — the lazy
+ *  variant of fixServerEntryImport. Only touches the matched statements,
+ *  never a bare `import("aio")` used for browser-safe symbols. */
+export function fixDynamicServerEntryImport(
+  filePath: string,
+): () => Promise<boolean> {
+  const SERVER_ONLY = /\b(createDB|DEFAULT_PRAGMAS|connectCli|connectCliUDS)\b/;
+  return async () => {
+    try {
+      const src = await Deno.readTextFile(filePath);
+      let changed = false;
+      let out = src.replace(
+        /\{([^}]*)\}\s*=\s*await\s+import\(\s*(["'])aio\2\s*\)/g,
+        (whole, inner: string) => {
+          if (!SERVER_ONLY.test(inner)) return whole;
+          changed = true;
+          return whole.replace(/(["'])aio\1/, "$1aio/server$1");
+        },
+      );
+      out = out.replace(
+        /\(\s*await\s+import\(\s*(["'])aio\1\s*\)\s*\)\s*\.\s*(\w+)/g,
+        (whole, _q: string, prop: string) => {
+          if (!SERVER_ONLY.test(prop)) return whole;
+          changed = true;
+          return whole.replace(/(["'])aio\1/, "$1aio/server$1");
+        },
+      );
+      if (!changed) return false;
+      await Deno.writeTextFile(filePath, out);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+}
+
 export function fixServerEntryImport(
   filePath: string,
 ): () => Promise<boolean> {
