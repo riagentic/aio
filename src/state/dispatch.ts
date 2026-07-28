@@ -20,9 +20,43 @@ export type { AioError } from "../diagnostics/error.ts";
 export type PerfCheck = "on" | "off";
 
 /** Performance budgets in milliseconds */
+
+/** `"cell:method"` for an async-method exec effect, else null.
+ *  Async methods all arrive as `<cell>:__exec`, so the method name has to come
+ *  from the payload for a per-method budget to be addressable. */
+function methodBudgetKey(effect: unknown): string | null {
+  const e = effect as { type?: string; payload?: { _method?: unknown } };
+  if (typeof e?.type !== "string" || !e.type.endsWith(":__exec")) return null;
+  const method = e.payload?._method;
+  if (typeof method !== "string") return null;
+  return `${e.type.slice(0, -":__exec".length)}:${method}`;
+}
+
 export type PerfBudget = {
   reduce?: number; // default: 100 — "feels instant" threshold
   effect?: number; // default: 5 — sync portion only, async by definition doesn't block
+  /** Per-method overrides, keyed `"cell:method"`.
+   *
+   *  The global budget answers "did this block the loop", and for most methods
+   *  that is the whole story. But a method whose job IS to take minutes — spawn
+   *  cmake, read a 2 MB header, drain a subprocess — makes the app choose between
+   *  a stream of violations on every poll tick and raising the budget globally,
+   *  which blinds every tight reducer at once. One app ended up at
+   *  `{ reduce: 100, effect: 1000 }` + `effectTimeoutMs: 30_000` "and lost the
+   *  signal everywhere to silence one poller" (llama-master #9).
+   *
+   *  ```ts
+   *  perfBudget: {
+   *    effect: 5,                                   // everything stays strict…
+   *    methods: {
+   *      "builds:compile": { effect: 5_000, timeout: 600_000 }, // …except this
+   *      "hw:poll": { effect: 250 },
+   *    },
+   *  }
+   *  ```
+   *  `timeout` also raises the hard abandon-the-effect deadline for that method
+   *  only, so a four-minute build no longer needs a four-minute global timeout. */
+  methods?: Record<string, { effect?: number; timeout?: number }>;
 };
 
 /** Per-action performance timing */
@@ -455,6 +489,15 @@ export function createDispatch<S, A, E>(
           const effectType = (effect as Record<string, unknown>)?.type as
             | string
             | undefined;
+          // `cell:__exec` carries the method name in its payload — that is what a
+          // per-method budget is keyed by, since the effect TYPE is the same for
+          // every async method of a cell.
+          const methodKey = methodBudgetKey(effect);
+          const perMethod = methodKey
+            ? perfBudget?.methods?.[methodKey]
+            : undefined;
+          const thisEffectBudget = perMethod?.effect ?? effectBudget;
+          const thisEffectTimeout = perMethod?.timeout ?? effectTimeout;
           const effectStart = performance.now();
 
           try {
@@ -464,8 +507,13 @@ export function createDispatch<S, A, E>(
 
             // Check effect performance budget (sync portion only)
             // Async effects return promises immediately — we measure sync time
-            if (effectDuration > effectBudget) {
-              reportPerf("effect", effectDuration, effectBudget, effectType);
+            if (effectDuration > thisEffectBudget) {
+              reportPerf(
+                "effect",
+                effectDuration,
+                thisEffectBudget,
+                methodKey ?? effectType,
+              );
             }
 
             // catch rejected promises from async effects + hard timeout
@@ -478,7 +526,7 @@ export function createDispatch<S, A, E>(
               // The underlying promise may still complete, but the framework
               // considers the effect failed after effectTimeout ms.
               let settled = false;
-              const tid = effectTimeout > 0
+              const tid = thisEffectTimeout > 0
                 ? setTimeout(() => {
                   if (settled) return;
                   effectsInFlight--;
@@ -487,18 +535,18 @@ export function createDispatch<S, A, E>(
                     "EFFECT_TIMEOUT",
                     `async effect hard-timeout: ${
                       effectType ?? "?"
-                    } exceeded ${effectTimeout}ms — effect abandoned`,
+                    } exceeded ${thisEffectTimeout}ms — effect abandoned`,
                     {
                       cellName: effectType?.split(":")[0],
                       effectType,
-                      duration: effectTimeout,
-                      budget: effectTimeout,
+                      duration: thisEffectTimeout,
+                      budget: thisEffectTimeout,
                     },
                     undefined,
                     asyncCid,
                   );
                   reportAioError(err, _reportOpts);
-                }, effectTimeout)
+                }, thisEffectTimeout)
                 : null;
               const tracked = promise
                 .then(() => {

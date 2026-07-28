@@ -297,3 +297,54 @@ const App = () => {
 
 Useful for DOM measurements, scroll positioning, or third-party library
 initialization that needs the real DOM.
+
+### Re-deriving when inputs change (`afterRender` + `useRef`)
+
+The pattern every non-trivial UI eventually needs: _when these inputs change,
+recompute this derived state_ — without an effect system, and without looping.
+One field report called it "the most load-bearing hook in my app" and found it
+by reading AIR's source, which is a docs failure, not a discovery.
+
+```tsx
+import { afterRender, useRef } from "aio/air";
+import { cell } from "aio";
+
+const cfg = cell("cfg", {
+  state: { modelId: "7b", ctxSize: 4096, summary: "" },
+  methods: {
+    // The derived output — written by the reaction, never read by the key.
+    retune(s: { modelId: string; ctxSize: number; summary: string }) {
+      s.summary = `${s.modelId} @ ${s.ctxSize}`;
+    },
+  },
+});
+
+function Settings() {
+  // Everything the derivation depends on, in one key.
+  const key = `${cfg.modelId}|${cfg.ctxSize}`;
+  const last = useRef("");
+
+  afterRender(() => {
+    if (last.current === key) return; // inputs unchanged — nothing to do
+    last.current = key;
+    cfg.retune();
+  });
+
+  return <div>{cfg.summary}</div>;
+}
+```
+
+**Why it settles in one extra pass, and doesn't loop:** the reaction writes
+state that the component reads, so it renders again — but the second pass
+computes the _same_ key, the guard returns early, and it stops. The rule is
+therefore:
+
+> the reaction must not change anything the key is derived from.
+
+If it does, you get an infinite render loop, and it is your key that's wrong,
+not the hook. Keep the key from _inputs_ (ids, sizes, settings) and let the
+reaction write only _outputs_ (the derived summary).
+
+`useRef` is the right store for `last` because a ref survives re-renders without
+being reactive — reading it never subscribes the component, so the guard itself
+can't trigger the render it is trying to prevent.

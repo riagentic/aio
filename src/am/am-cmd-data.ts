@@ -128,12 +128,14 @@ export function cmdData(args: string[], flags: GlobalFlags): void {
     home: d.home,
     data: d.data,
     logs: d.logs,
+    cache: d.cache,
     launch: d.launch,
     runtime: lockDir(),
     backup: d.data,
     sizes: {
       data: dirSize(d.data),
       logs: dirSize(d.logs),
+      cache: dirSize(d.cache),
     },
   };
   out(mode === "pretty" ? renderData(info) : info, mode);
@@ -146,10 +148,11 @@ export type DataInfo = {
   home: string;
   data: string;
   logs: string;
+  cache: string;
   launch: string;
   runtime: string;
   backup: string;
-  sizes: { data: number; logs: number };
+  sizes: { data: number; logs: number; cache: number };
 };
 
 /** The pretty rendering, pure so it is testable without a terminal (`am` falls
@@ -159,6 +162,7 @@ export function renderData(info: DataInfo): string {
     ["home", info.home, ""],
     ["data ①", info.data, human(info.sizes.data)],
     ["logs ②", info.logs, human(info.sizes.logs)],
+    ["cache ②", info.cache, human(info.sizes.cache)],
     ["launch ②", info.launch, ""],
     ["runtime ③", info.runtime, ""],
   ];

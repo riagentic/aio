@@ -575,6 +575,65 @@ function renderSurface(node: SurfaceNode, indent = ""): string {
 /** `am surface [clientIdx]` — print the client's semantic UI surface: every
  *  component and its triggerable elements, named as the testUI API names them.
  *  What you see here is exactly what `am trigger` (and tests) can drive. */
+
+/** Exported for tests — the scoping rules are the interesting part. @internal */
+export const _scope = (
+  data: unknown,
+  opts: { component?: string; path?: string; depth?: number },
+): SurfaceNode[] => scopeSurface(data, opts);
+
+/** Every component name in a surface — for a "no match" message that helps. */
+function componentNames(data: unknown): string[] {
+  const out = new Set<string>();
+  const visit = (n: SurfaceNode) => {
+    if (n?.component) out.add(n.component);
+    (n?.children ?? []).forEach(visit);
+  };
+  (Array.isArray(data) ? data as SurfaceNode[] : []).forEach(visit);
+  return [...out].sort();
+}
+
+/** Narrow a surface to what was asked for: a named component (every instance),
+ *  a path prefix, and/or a depth cap. Client-side so it works identically for a
+ *  live client and the headless render. */
+function scopeSurface(
+  data: unknown,
+  opts: { component?: string; path?: string; depth?: number },
+): SurfaceNode[] {
+  let roots = Array.isArray(data) ? data as SurfaceNode[] : [];
+  if (opts.component) {
+    const hits: SurfaceNode[] = [];
+    const visit = (n: SurfaceNode) => {
+      if (n?.component === opts.component) hits.push(n);
+      (n?.children ?? []).forEach(visit);
+    };
+    roots.forEach(visit);
+    roots = hits;
+  }
+  if (opts.path) {
+    const hits: SurfaceNode[] = [];
+    const visit = (n: SurfaceNode) => {
+      if (typeof n?.path === "string" && n.path.startsWith(opts.path!)) {
+        hits.push(n);
+        return; // the subtree comes with it — don't also add its children
+      }
+      (n?.children ?? []).forEach(visit);
+    };
+    roots.forEach(visit);
+    roots = hits;
+  }
+  if (opts.depth !== undefined) {
+    const prune = (n: SurfaceNode, left: number): SurfaceNode => ({
+      ...n,
+      children: left <= 0
+        ? []
+        : (n.children ?? []).map((c) => prune(c, left - 1)),
+    });
+    roots = roots.map((r) => prune(r, opts.depth!));
+  }
+  return roots;
+}
+
 export async function cmdSurface(
   args: string[],
   flags: GlobalFlags,
@@ -589,6 +648,24 @@ export async function cmdSurface(
   // stays scannable, and a cut is now marked with "…" — but a generated command
   // line has to be readable in full (llama.md #10).
   const q = args.includes("--full") ? "?full=1" : "";
+  // Scope the tree client-side: one page in a real app serialised to a 32 KB
+  // single-line blob, and reading one component out of it meant piping into
+  // Python — the same "am made me write a script" shape as the --json one
+  // (llama.md, second update #2). Applied to the reply, so it works for a live
+  // client and the headless render alike.
+  const wantComponent = args.find((a) => a.startsWith("--component="))?.slice(
+    12,
+  );
+  const wantPath = args.find((a) => a.startsWith("--path="))?.slice(7);
+  const depthArg = args.find((a) => a.startsWith("--depth="))?.slice(8);
+  const maxDepth = depthArg === undefined ? undefined : Number(depthArg);
+  if (maxDepth !== undefined && (!Number.isInteger(maxDepth) || maxDepth < 0)) {
+    outError(
+      `--depth must be a non-negative integer (got "${depthArg}")`,
+      mode,
+    );
+    Deno.exit(1);
+  }
   let result = await trojanGet(port, `surface/${target}${q}`, appId, 10_000);
   if (!result.ok && explicit === undefined) {
     // No client connected and none requested → fall back to the headless
@@ -610,11 +687,29 @@ export async function cmdSurface(
     outError(result.error, mode);
     Deno.exit(1);
   }
+  const scoped = scopeSurface(result.data, {
+    component: wantComponent,
+    path: wantPath,
+    depth: maxDepth,
+  });
+  if (scoped.length === 0 && (wantComponent || wantPath)) {
+    // Loud, and useful: an empty result from a filter is usually a typo, so say
+    // what IS there rather than printing nothing.
+    outError(
+      `no match for ${
+        wantComponent ? `--component=${wantComponent}` : `--path=${wantPath}`
+      } — components in this surface: ${
+        componentNames(result.data).join(", ") || "(none)"
+      }`,
+      mode,
+    );
+    Deno.exit(1);
+  }
   if (mode === "json") {
-    out(result.data, mode);
+    out(scoped, mode);
     return;
   }
-  const roots = result.data as SurfaceNode[];
+  const roots = scoped;
   if (!Array.isArray(roots) || roots.length === 0) {
     out("(no mounted UI surface)", mode);
     return;

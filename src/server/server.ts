@@ -203,6 +203,7 @@ export function createServer(config: ServerConfig): ServerHandle {
     clientCounter: config.clientCounter ?? { value: 0 },
     bootId,
     vitalsSystem: config.vitalsSystem,
+    costMeter: config.costMeter,
     onConnect: config.onConnect,
     onDisconnect: config.onDisconnect,
     onTTCommand: config.onTTCommand,
@@ -219,6 +220,7 @@ export function createServer(config: ServerConfig): ServerHandle {
     syncIntervalMs,
     fullStateThreshold: config.fullStateThreshold,
     vitalsSystem: config.vitalsSystem,
+    costMeter: config.costMeter,
     getTTBroadcast: config.getTTBroadcast,
   });
 
@@ -319,6 +321,7 @@ export function createServer(config: ServerConfig): ServerHandle {
       },
       loadSnapshot: config.loadSnapshot,
       onTTCommand: config.onTTCommand,
+      costMeter: config.costMeter,
       getWsClients: () =>
         [...wsMgr.connections.entries()].map(([ws, m]) => ({
           ws,

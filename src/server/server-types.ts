@@ -56,6 +56,8 @@ export interface ServerConfig {
   onCellChange?: (path: string) => void;
   // Vitals — latency monitoring & backpressure
   vitalsSystem?: VitalsSystem;
+  /** Cost meter (`am cost`) — see src/vitals/cost-meter.ts. */
+  costMeter?: import("../vitals/cost-meter.ts").CostMeter;
   // Time-travel (dev mode)
   onTTCommand?: (cmd: string, arg?: number) => void;
   getTTBroadcast?: () => unknown;

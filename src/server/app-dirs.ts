@@ -4,7 +4,7 @@
 // should contain:
 //
 //   ① critical   ~/.<appId>/data/     state, users, journal, keys, user files
-//   ② expendable ~/.<appId>/logs/ + launch.json  regenerable — delete freely
+//   ② expendable ~/.<appId>/logs|cache/ + launch.json  regenerable — delete freely
 //   ③ temporary  $XDG_RUNTIME_DIR/aio/    socket, pid, lock — must NOT survive a
 //                                          reboot (see single-instance-lock.ts)
 //
@@ -54,6 +54,16 @@ export type AppDirs = {
   home: string;
   /** ① `<home>/data` — THE backup unit. Critical + secret, mode 0700. */
   data: string;
+  /** ② `<home>/cache` — regenerable bulk the APP writes: downloads, extracted
+   *  sources, build trees, thumbnails. Deletable at any time; never in a backup.
+   *
+   *  Removed once, on the reasoning that the framework itself never writes here
+   *  — the wrong question. The three-tier layout PROMISES an app somewhere to put
+   *  regenerable bulk, and one app had 20 GB of it: without this field it either
+   *  hand-computes `join(home, "cache")` (which it did) or, worse, puts the bulk
+   *  in `data/` and doubles the size of every backup. The framework not writing a
+   *  directory is not a reason to stop offering it. */
+  cache: string;
   /** ② `<home>/logs` — rotation-capped; excluded from a backup by default.
    *  Includes `stdout.log`, the raw stdout+stderr capture when `am`/`amui`
    *  launched the app (it used to be `<project>/.aio.log`, which split an app's
@@ -119,6 +129,7 @@ export function appDirs(appId: string, configured?: string): AppDirs {
   return {
     home,
     data,
+    cache: join(home, "cache"),
     logs: join(home, "logs"),
     stateDb: join(data, "state.db"),
     authDb: join(data, "auth.db"),

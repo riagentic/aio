@@ -59,9 +59,14 @@ Deno.test({
   async fn() {
     const dir = await Deno.makeTempDir({ prefix: "aio-sync-e2e-" });
     await Deno.mkdir(`${dir}/src`);
+    // A unique identity per run, belt and braces with the isolated app home
+    // below — for the same reason test servers take their port from
+    // freePort(): a fixed one is shared state.
+    const appId = `sync-probe-${crypto.randomUUID().slice(0, 8)}`;
     await Deno.writeTextFile(
       `${dir}/deno.json`,
       JSON.stringify({
+        appId,
         title: "Sync Probe",
         nodeModulesDir: "auto",
         unstable: ["kv"],
@@ -113,7 +118,15 @@ export default function App() {
     const port = freePort();
     const base = `http://localhost:${port}`;
     const proc = new Deno.Command(Deno.execPath(), {
-      env: { DENO_COVERAGE_DIR: _childCovDir },
+      // The app's HOME goes inside this run's temp dir. `persist: false` does
+      // NOT cover the CRDT op-log — an offline-first log must be durable, so
+      // it is written to `appDirs(appId).stateDb`. With a fixed appId and a
+      // shared home, the op-log ACCUMULATED one row per run in the developer's
+      // real home, so the count assertion below passed exactly once on a virgin
+      // machine and was red forever after — while CI, always a fresh checkout,
+      // stayed green. That read as a flake for a long time; it is not one, and
+      // no amount of polling could have fixed it.
+      env: { DENO_COVERAGE_DIR: _childCovDir, AIO_APPS_DIR: `${dir}/home` },
       args: [
         "run",
         "-A",
@@ -251,6 +264,13 @@ export default function App() {
         await new Promise((r) => setTimeout(r, 100));
       }
       assertEquals(n, 1, "exactly one op persisted in the op-log");
+      // …and it STAYS one. Breaking out of the poll on the first row would
+      // miss the failure this assertion exists to catch: an op re-sent because
+      // an ack was missed persists a second row a moment later, while state
+      // still converges to 1 (the op-log dedups by id on apply). The log grows,
+      // nothing else looks wrong. Settle, then re-read.
+      await new Promise((r) => setTimeout(r, 500));
+      assertEquals(await opCount(), 1, "and no duplicate arrives after it");
     } finally {
       for (const t of tabs) {
         try {
@@ -265,6 +285,7 @@ export default function App() {
         proc.kill();
       } catch { /* exited */ }
       await proc.status;
+      // Takes the child's app home with it — it lives at `${dir}/home`.
       await Deno.remove(dir, { recursive: true }).catch(() => {});
     }
   },

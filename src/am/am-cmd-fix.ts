@@ -8,6 +8,7 @@ import { parse as parseJsonc } from "@std/jsonc";
 import type { GlobalFlags } from "./am-types.ts";
 import { detectMode, out, outError } from "./am-output.ts";
 import { linkDepAio, probeDepAio, resolveAioRoot } from "./am-cmd-link.ts";
+import { ensureVersion, readPin, versionPath } from "./am-versions.ts";
 import { meetsMinDeno, MIN_DENO } from "../server/deno-version.ts";
 
 // fixed/would-fix/ok = safe auto-repairs; advise = a suggestion we DON'T apply
@@ -133,7 +134,34 @@ export async function cmdFix(
   // 1 — dep/aio framework link — ONLY for the dep/aio layout, and only ever
   //     creates/repairs a symlink; a real vendored copy is never touched.
   if (aioMode === "dep") {
-    const root = resolveAioRoot(args);
+    const install = resolveAioRoot(args);
+    // The app's `aioVersion` pin decides WHICH framework this links to — that is
+    // what makes a fresh clone build against the version the app was written
+    // for. `--aio=<path>` overrides it (framework development).
+    let root = install;
+    let pin: string | null = null;
+    if (install && !args.some((a) => a.startsWith("--aio="))) {
+      pin = await readPin(dir);
+      if (pin && !dry) {
+        const res = await ensureVersion(install, pin);
+        if (res.ok) root = res.path;
+        else {
+          add("aio version pin", "manual", res.error);
+          pin = null;
+        }
+      } else if (pin) {
+        root = versionPath(pin); // dry run: report, provision nothing
+      }
+    }
+    if (pin) add("aio version pin", "ok", `${pin} (deno.json aioVersion)`);
+    else if (install) {
+      add(
+        "aio version pin",
+        "advise",
+        "unpinned — a clone builds against whatever aio is installed; " +
+          "`am pin --latest` fixes that",
+      );
+    }
     if (!root) {
       add(
         "dep/aio framework link",

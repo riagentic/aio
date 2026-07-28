@@ -74,3 +74,23 @@ export function resolveOptions(
   if (!overrides) return { ...defaults };
   return { ...defaults, ...overrides };
 }
+
+/** Is time-travel on, given the mode and the RESOLVED diagnostics options?
+ *
+ *  Extracted and exported so the rule is testable without booting an app —
+ *  and because it used not to exist at all: `diagnostics.dev.timeTravel` was
+ *  declared, defaulted and documented while TT was created purely on `!prod`,
+ *  so an app that turned it off still kept a full state history in memory and
+ *  broadcast it on every dispatch.
+ *
+ *  `false` means diagnostics are off wholesale, which historically still ran
+ *  TT in dev; that is preserved, so only an explicit `timeTravel: false`
+ *  turns it off. */
+export function timeTravelEnabled(
+  prod: boolean,
+  resolved: DiagnosticsOptions | false,
+): boolean {
+  if (prod) return false;
+  if (typeof resolved !== "object") return true;
+  return resolved.timeTravel !== false;
+}

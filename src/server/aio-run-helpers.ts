@@ -1,4 +1,5 @@
 // Runtime helpers extracted from _run() — config resolution, memoization, vitals, app object
+import { join } from "@std/path";
 import type { AioApp, AioConfig, AioUser } from "./aio-types.ts";
 import type { ReportErrorOpts } from "../diagnostics/error.ts";
 import {
@@ -169,6 +170,9 @@ export function buildAppObject<S, A>(refs: {
 export function buildOnPerf<S>(
   tt: TTState<S, { type: string }> | null,
   vitalsSystem: VitalsSystem | undefined,
+  /** Cost meter — reduce time per cell for `am cost`. Reuses the timings the
+   *  dispatch loop already produces; no new measurement on the hot path. */
+  costMeter?: { recordReduce(cell: string, ms: number): void },
 ):
   | ((timing: {
     actionType: string;
@@ -178,8 +182,15 @@ export function buildOnPerf<S>(
     breakdown?: ReduceBreakdown;
   }) => void)
   | undefined {
-  if (!tt && !vitalsSystem) return undefined;
+  if (!tt && !vitalsSystem && !costMeter) return undefined;
   return (timing) => {
+    if (costMeter) {
+      // "cell:method" / "cell/ACTION" → cell. An action with no separator is
+      // its own bucket rather than being dropped.
+      const at = timing.actionType ?? "";
+      const cut = at.indexOf(":") >= 0 ? at.indexOf(":") : at.indexOf("/");
+      costMeter.recordReduce(cut > 0 ? at.slice(0, cut) : at, timing.reduce);
+    }
     if (tt && tt.entries.length > 0) {
       tt.entries[tt.index]!.perf = {
         reduce: timing.reduce,
@@ -294,7 +305,12 @@ export async function handleThinClient(
   Deno.exit(0);
 }
 
-import { type DiagnosticsConfig, initDiagnostics } from "../diagnostics/mod.ts";
+import {
+  type DiagnosticsConfig,
+  initDiagnostics,
+  purgeDisabledArtifacts,
+} from "../diagnostics/mod.ts";
+import type { Redactor } from "../diagnostics/redact.ts";
 import { getLogDir } from "../diagnostics/logger-api.ts";
 import {
   type DiagnosticsOptions,
@@ -308,6 +324,7 @@ export function initDiagAndVitals(
   prod: boolean,
   cellNames?: string[],
   guardDispatches?: boolean,
+  redact?: Redactor,
 ): {
   diagHooks: ReturnType<typeof initDiagnostics> | null;
   vitalsSystem: VitalsSystem | undefined;
@@ -316,9 +333,17 @@ export function initDiagAndVitals(
   // `true`/omitted → defaults on ({}); `false` → off; object → tuned.
   const diagOn = diagConfig !== false;
   const diagCfg = (diagConfig === true || diagConfig == null) ? {} : diagConfig;
+  // Diagnostics off wholesale still has to clean up after itself — that is the
+  // very case where an old `actions.jsonl` sits forgotten in the log directory.
+  if (!diagOn) {
+    purgeDisabledArtifacts(getLogDir(), {
+      actionLog: false,
+      checkpoint: false,
+    });
+  }
   const diagHooks = !diagOn
     ? null
-    : initDiagnostics(diagCfg, prod, getLogDir(), guardDispatches);
+    : initDiagnostics(diagCfg, prod, getLogDir(), guardDispatches, redact);
   if (diagHooks && cellNames) diagHooks.onStart(cellNames);
 
   const diagResolvedOpts = !diagOn ? false : resolveDiagOptions(diagCfg, prod);
@@ -341,7 +366,13 @@ export async function resolveTitle(
   if (cliTitle) return cliTitle;
   if (uiTitle) return uiTitle;
   try {
-    const { join } = await import("@std/path");
+    // STATIC import (above), deliberately. `await import("@std/path")` is a
+    // bare specifier `deno compile` cannot trace, so it is not embedded and
+    // rejects inside a compiled binary — silently, because the catch below
+    // swallows it, and the app would take the "AIO App" fallback title while
+    // looking like it had simply found no `title` field. The laziness bought
+    // nothing: @std/path is already a static dependency of this module's own
+    // logger.
     const raw = await Deno.readTextFile(join(Deno.cwd(), "deno.json"));
     const denoJsonTitle = JSON.parse(raw).title;
     if (denoJsonTitle) return denoJsonTitle;

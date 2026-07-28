@@ -16,6 +16,13 @@ import { VERSION } from "../server/aio.ts";
 import type { GlobalFlags } from "./am-types.ts";
 import { detectMode, out, outError } from "./am-output.ts";
 import { resolve } from "@std/path";
+import {
+  ensureVersion,
+  latestTag,
+  MAIN,
+  syncFrameworkDeps,
+  writePin,
+} from "./am-versions.ts";
 
 const PKG = "@riagentic/aio";
 const TEMPLATES = ["counter", "todo"] as const;
@@ -60,6 +67,10 @@ export type CreateOpts = {
   mirror?: string;
   /** Opt into JSR-pinned imports instead of the source default. */
   jsr?: boolean;
+  /** Which framework version the app is pinned to: a release tag, or "main" for
+   *  the branch tip. Default: the newest release the install knows. The app
+   *  records it in its own deno.json so a clone builds against the same aio. */
+  aioVersion?: string;
 };
 
 /** Parse positional name + create-scoped flags out of the raw args. Unknown
@@ -75,6 +86,7 @@ export function parseCreateArgs(args: string[]): CreateOpts {
     else if (a === "--jsr") opts.jsr = true;
     else if (a === "--mirror" || a === "--dev") opts.mirror = "";
     else if (a.startsWith("--mirror=")) opts.mirror = a.slice(9);
+    else if (a.startsWith("--aio-version=")) opts.aioVersion = a.slice(14);
     else if (a.startsWith("--template=")) {
       opts.template = a.slice(11) as Template;
     } else if (a.startsWith("--target=")) {
@@ -378,6 +390,7 @@ export async function cmdCreate(
   // `--jsr` opts into JSR pins.
   const source = !opts.jsr;
   let aioPath: string | undefined; // symlink target (source mode only)
+  let pinnedVersion: string | undefined; // recorded in the app's deno.json
   if (source) {
     const root = opts.mirror ? resolve(Deno.cwd(), opts.mirror) : repoRoot();
     if (!root) {
@@ -388,7 +401,27 @@ export async function cmdCreate(
       );
       return;
     }
-    aioPath = root;
+    // Pin a VERSION, not "whatever is installed". `dep/aio` points at a
+    // provisioned worktree of the requested release, and the app records which
+    // one in its deno.json — so `git clone && am fix && deno task dev` builds
+    // against the same framework next month, on another machine. Default: the
+    // newest release (never the branch tip, which is WIP by definition).
+    // `--aio-version=main` opts into the moving target; `--mirror=<path>` still
+    // wins for framework development, where the whole point is the live tree.
+    if (!opts.mirror) {
+      const want = opts.aioVersion ?? await latestTag(root) ?? MAIN;
+      const res = await ensureVersion(root, want);
+      if (!res.ok) {
+        outError(res.error, mode);
+        return;
+      }
+      aioPath = res.path;
+      // The RESOLVED ref: `--aio-version=main` records `main-<sha>`, so the pin
+      // committed with the app is always exact (see am-versions.ts).
+      pinnedVersion = res.ref;
+    } else {
+      aioPath = root;
+    }
   } else if (repoRoot() && !flags.json) {
     // --jsr from a source checkout: the pinned version must actually be on JSR.
     console.error(
@@ -422,6 +455,17 @@ export async function cmdCreate(
     });
   }
 
+  // Record the pin IN the app, committed with the code — the whole point.
+  if (pinnedVersion) {
+    await writePin(dir, pinnedVersion);
+    // …and pin the framework's OWN dependencies to what that version declares.
+    // The scaffold writes ranges (`immer@^10`); the framework pins exact
+    // (`immer@10.2.0`), and `dep/aio/**` resolves through THIS map — so without
+    // this a brand-new app would be half-pinned from birth (see
+    // syncFrameworkDeps in am-versions.ts).
+    if (aioPath) await syncFrameworkDeps(dir, aioPath);
+  }
+
   // Make it a real project from second one — best-effort, never fatal.
   const gitInit = await tryGitInit(dir);
 
@@ -430,6 +474,7 @@ export async function cmdCreate(
       created: opts.name,
       template: opts.template,
       target: opts.target,
+      aioVersion: pinnedVersion ?? null,
       files: Object.keys(files),
       git: gitInit,
     }, "json");

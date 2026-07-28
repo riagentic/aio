@@ -24,6 +24,8 @@ type PendingEntry = {
 
 /** Dependencies injected by server.ts — keeps trojan module decoupled */
 export interface TrojanDeps {
+  /** Cost meter for the `cost` route (`am cost`). */
+  costMeter?: import("../vitals/cost-meter.ts").CostMeter;
   dispatch: (event: unknown, user?: AioUser) => Promise<unknown> | void;
   getUIState: (user?: AioUser) => unknown;
   debug: (msg: string) => void;
@@ -301,6 +303,44 @@ function handleGet(
       schedules: trojan.getSchedules().length,
       cells: cellSizes,
     });
+  }
+
+  if (route === "cost") {
+    // `am cost` — what aio moves on this app's behalf, and where it comes from.
+    // The meter is always on (bounded rings in the broadcast path), so this
+    // route is a pure read: no sampling to start, nothing to enable, and the
+    // answer is already there when someone asks it after the fact.
+    if (!deps.costMeter) {
+      return err("cost metering unavailable in this build", 404);
+    }
+    const url = req ? new URL(req.url) : undefined;
+    const windowSec = Number(url?.searchParams.get("window") ?? "60");
+    const cell = url?.searchParams.get("cell") ?? undefined;
+    if (!Number.isFinite(windowSec) || windowSec <= 0) {
+      return err(
+        `invalid window (got "${url?.searchParams.get("window")}")`,
+        400,
+      );
+    }
+    // State size per cell is the other half of "should I act on aiol's hint":
+    // the push cost says what MOVES, this says what is THERE.
+    const sizes: Record<string, number> = {};
+    const state = trojan.getState();
+    if (state && typeof state === "object") {
+      for (const [name, slice] of Object.entries(state)) {
+        try {
+          sizes[name] = JSON.stringify(slice)?.length ?? 0;
+        } catch {
+          sizes[name] = -1;
+        }
+      }
+    }
+    // The live state's own keys ARE the cells — a more reliable roster than a
+    // list captured at boot, and it makes "this cell did nothing" reportable
+    // rather than indistinguishable from "this cell does not exist".
+    deps.costMeter.setKnownCells(Object.keys(sizes));
+    const report = deps.costMeter.report({ windowSec, cell });
+    return json({ ...report, stateBytes: sizes });
   }
 
   if (route === "config") {

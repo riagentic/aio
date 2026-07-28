@@ -128,6 +128,39 @@ export async function runDoctor(
     fix: 'set compilerOptions.jsxImportSource to "aio"',
   });
 
+  // Framework version pin. A source-layout app imports aio through a gitignored
+  // `dep/aio` symlink, so without `aioVersion` in deno.json a clone of this repo
+  // builds against whatever aio the machine happens to have — and "it compiled
+  // last month" stops being reproducible. Self-contained on purpose: doctor lives
+  // in server/, which may not import am/ (see scripts/check-boundaries.ts).
+  const usesDepAio = Object.values(cfg.imports ?? {}).some((v) =>
+    typeof v === "string" && v.includes("dep/aio")
+  );
+  if (usesDepAio) {
+    const pin = typeof (cfg as { aioVersion?: unknown }).aioVersion === "string"
+      ? (cfg as { aioVersion: string }).aioVersion
+      : null;
+    checks.push({
+      name: "framework pin (deno.json aioVersion)",
+      ok: pin !== null,
+      fix: "run `am pin --latest` and commit deno.json — otherwise a clone " +
+        "builds against whatever aio is installed",
+    });
+    if (pin) {
+      let linked: string | null = null;
+      try {
+        const target = await Deno.readLink(`${dir}/dep/aio`);
+        linked = target.split("/").filter(Boolean).pop() ?? null;
+      } catch { /* not linked yet — `am fix` handles that */ }
+      checks.push({
+        name: `framework pin matches dep/aio (${pin})`,
+        // Unlinked is not drift; it's a fresh clone, and `am fix` is the answer.
+        ok: linked === null || linked === pin,
+        fix: `dep/aio points at ${linked}, not ${pin} — run \`am fix\``,
+      });
+    }
+  }
+
   const imports = cfg.imports ?? {};
   for (const key of ["aio", "aio/air", "aio/jsx-runtime"]) {
     checks.push({

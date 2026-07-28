@@ -209,7 +209,9 @@ deno task am record flow.test.ts --from=J   # turn a journal into a bootCells te
   each entry carries the compact state diff the dispatch produced
   (`counter.n: 0 → 1`). With `--from=<journal>` it reads a durable journal file
   instead (payloads only — the on-disk journal, `journal: true`, stores actions,
-  not diffs).
+  not diffs). It prints **payloads**, so an action called with a secret shows
+  that secret here: list it in `redactActions`
+  ([where files live](../persistence/where-files-live.md#secrets-in-recorded-actions)).
 - **`am replay <range>`** re-dispatches a journal range against the running app,
   in order, stopping at the first failure — deterministic repro for the "froze
   in the client but the test passed" class. Point it at a fresh instance to
@@ -234,6 +236,64 @@ storage that the cell's current `initialState` no longer declares (a
 rename/removal without a `version` bump, which `deepMerge` would silently keep).
 Boot also warns about drift; this is the on-demand view. A cell shape change is
 covered by bumping `version` + adding an `onMigrate(state, from)` hook.
+
+## Which aio version an app builds against
+
+An app scaffolded by `am create` imports the framework through a gitignored
+`dep/aio` symlink. That keeps `deno.json` portable, but on its own it says
+nothing about WHICH aio the app was written for — so a clone a month later would
+build against whatever version happened to be installed. The pin fixes that:
+
+```jsonc
+// deno.json — committed with your code
+{ "aioVersion": "v1.0.0-alpha38", … }
+```
+
+```sh
+am pin                    # what this app asks for, what it's linked to, what's available
+am pin v1.0.0-alpha38     # switch: provision that version, relink, record it
+am pin main               # follow the branch tip (a moving target, re-synced on every `am fix`)
+am pin --latest           # newest release
+```
+
+`am create` pins the **newest release** by default;
+`am create app --aio-version=main` opts into the tip. The clone → build path is
+then:
+
+```sh
+git clone <your-app> && cd <your-app>
+am fix          # reads aioVersion, provisions that exact version, links it
+deno task dev
+```
+
+**How versions are provided.** `install.sh` clones aio with full history, so any
+tag is available as a **git worktree** under `~/.local/lib/aio-versions/<tag>/`
+— about 8 MB of source per version, with the git objects shared, not
+re-downloaded. Several apps on one machine can pin several versions at once.
+`AIO_VERSIONS_DIR` moves the store (containers, CI).
+
+**Drift is a failure, not a note.** If `dep/aio` points somewhere other than the
+pin, `am pin` says so and exits non-zero (usable as a CI check), and
+`aio doctor` fails the `framework pin matches dep/aio` line. `am fix` corrects
+it.
+
+Two escape hatches, both deliberate: `--aio=<path>` (and `am create --mirror`)
+link a live checkout for framework development, and a real directory at
+`dep/aio` is treated as a vendored copy and never touched.
+
+## What aio costs you (`am cost`)
+
+```sh
+am cost                # bytes/s per cell, which keys, reduce p95, per client
+am cost --keys         # every key, not just the top three
+am cost --cell=hw --window=5m
+am cost --json
+```
+
+The one command that makes `aiol`'s state-size hints triageable: it reports the
+exact bytes crossing sockets, attributed to the cell and key they came from. See
+[performance](../debugging/performance.md#am-cost--what-aio-moves-on-your-behalf)
+for how to read each column.
 
 ## Files, backup, restore
 
@@ -284,6 +344,18 @@ deno task am trigger 0 App:Search focus               # focus / blur / hover / s
 Run `am surface` first to see the addressable `Component:name` paths, then
 `am trigger` them. This is the one unified UI facility — the old CSS-selector
 `am interact`/`am click` and raw `am dom` snapshot were removed in favour of it.
+
+Scope a big surface instead of piping it into a script:
+
+```sh
+am surface --component=CtxControls   # every instance, with its subtree
+am surface --path=App/Main           # one subtree by path prefix
+am surface --depth=1                 # top level only
+am surface --full                    # untruncated element text
+```
+
+A filter that matches nothing exits non-zero and lists the components that ARE
+in the surface — an empty result is nearly always a typo.
 
 ## Monitoring
 

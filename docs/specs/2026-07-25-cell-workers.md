@@ -71,6 +71,18 @@ decides; the framework does the noticing and makes the fix one word.
 - **Module singletons** — the worker gets its own copy (a module-scope DB
   connection becomes two). Document it; `aio doctor` can warn when a worker
   cell's module graph opens a connection at import time.
+- **Entry side effects run once per worker cell** — the sharper consequence of
+  the above, and the one that actually broke a boot. A worker is
+  `new Worker(<app entry>)`, so **everything the entry does at the top level
+  runs again inside the worker, before the handshake**: `mkdir -p`, opening a
+  database, starting a listener. ~20 ms of file I/O was enough to trip the 30 s
+  ready timeout, and the old error text ("does the app entry call aio.run()?")
+  pointed at the one thing that was true. Guard such work:
+
+  ```ts
+  import { isCellWorker } from "aio";
+  if (!isCellWorker()) await ensureDataDirs();
+  ```
 - **Return values** — must be structured-cloneable, exactly like the existing
   ack-frame contract for browser calls.
 - **Testing** — `testCell` should run a worker cell **in-process** by default
