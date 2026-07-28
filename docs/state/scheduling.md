@@ -111,6 +111,33 @@ return schedule.every("sync", 30_000, data.sync.action());
 > chain instead — see
 > [Backoff on rate-limit](#backoff-on-rate-limit-dynamic-polling).
 
+**Don't stack a slow poll on itself:**
+
+```ts
+// A tick is dropped while the previous one is still in flight.
+return schedule.every("hw", 1000, hw.poll.action(), { skipIfRunning: true });
+```
+
+Without it, a poll that takes longer than its interval runs concurrently with
+itself. The usual hand-rolled fix is a state flag:
+
+```ts
+async poll(s) {
+  if (s.refreshing) return;   // ← the guard this replaces
+  s.refreshing = true;
+  try { … } finally { s.refreshing = false; }
+}
+```
+
+That needs a field, a reset in a `finally`, and if the work throws between the
+two the flag stays `true` and the poll is dead until a restart. The scheduler
+already knows when a dispatch settles, so it clears on rejection as well.
+
+It is **opt-in**: silently dropping a tick that used to fire would change
+behaviour under existing apps, and some schedules overlap deliberately (each
+tick is independent one-shot work). Sync ticks are never skipped — there is
+nothing to overlap.
+
 ### `schedule.at(id, isoTime, action)` — one-shot at absolute time
 
 Fires once at a specific UTC datetime. `isoTime` is any string parseable by

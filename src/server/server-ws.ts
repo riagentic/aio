@@ -96,6 +96,8 @@ export type ClientMeta = {
 
 /** Dependencies injected from server.ts closure */
 export interface WsDeps {
+  /** Cost meter — sees every frame handed to a socket (`am cost`). */
+  costMeter?: import("../vitals/cost-meter.ts").CostMeter;
   dispatch: (event: unknown, user?: AioUser) => Promise<unknown> | void;
   getUIState: (user?: AioUser) => unknown;
   debug: (msg: string) => void;
@@ -262,6 +264,45 @@ export function createWsManager(deps: WsDeps): WsManager {
     const request = makeServerRequest(req, clientKey, "ws");
     const { socket, response } = Deno.upgradeWebSocket(req);
     const clientId = crypto.randomUUID();
+    // Meter the SOCKET, not the callers. Frames reach a client from several
+    // places — the broadcaster, the handshake's first state, per-action acks,
+    // diagnostics — and instrumenting each one guarantees the count drifts the
+    // day a new sender is added. `am cost` promises "the bytes that crossed the
+    // wire", and a correctness test holds it to a real client's own count
+    // (tests/cost-wire-accuracy.test.ts), so the measurement belongs at the one
+    // place every frame passes through.
+    if (deps.costMeter) {
+      const meter = deps.costMeter;
+      const rawSend = socket.send.bind(socket);
+      socket.send = (
+        data: string | ArrayBufferLike | Blob | ArrayBufferView,
+      ) => {
+        try {
+          const bytes = typeof data === "string"
+            ? new TextEncoder().encode(data).byteLength
+            : ((data as ArrayBufferView).byteLength ?? 0);
+          // Read the envelope's kind EXACTLY — `{"v":2,"t":"<kind>",…}` — never
+          // by substring: a patch payload can contain the literal `"t":"state"`
+          // in its own data. And acks / diagnostics / time-travel frames are
+          // `other`, not full resends: counting a wall of 40-byte acks as
+          // "the whole state went out" is a plausible headline that is wrong,
+          // and this feature was accepted on the condition that it never
+          // produces one.
+          const text = typeof data === "string" ? data : "";
+          const envKind = /^\{"v":\d+,"t":"([^"]+)"/.exec(text)?.[1];
+          const kind: "patch" | "full" | "other" = envKind === "patches"
+            ? "patch"
+            : envKind === "state"
+            ? "full"
+            : "other";
+          meter.recordSend(bytes, clientId, kind);
+        } catch { /* metering must never break a send */ }
+        // The wrapper's parameter type is the DOM union (which includes
+        // SharedArrayBuffer); the underlying send accepts the narrower one.
+        // Nothing is transformed — the exact value goes through.
+        (rawSend as (d: unknown) => void)(data);
+      };
+    }
     const clientIndex = nextIndex();
     const isElectron = /electron/i.test(userAgent);
     const meta: ClientMeta = {

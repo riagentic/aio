@@ -1,5 +1,6 @@
 // logger-core.ts — AioLogger class: structured file logger
 
+import { dirname } from "@std/path";
 import type { LogConfig, LogEntry, LogLevel } from "./logger-types.ts";
 
 /** Default log directory — dot-dir so project watchers/scanners skip it. */
@@ -273,7 +274,23 @@ export class AioLogger {
         () => {
           this._writeErrors = 0;
         },
-        (e) => {
+        async (e) => {
+          // The log directory vanished under a running app: someone cleaned up
+          // `/tmp`, a deploy replaced the tree, a test removed its sandbox. The
+          // right response is to put it back and carry on — an app must not
+          // start emitting an endless error stream because LOGGING broke, and
+          // an operator who deletes a log directory expects it to reappear, not
+          // to lose the app's voice until restart. Recreate once, then retry.
+          if (e instanceof Deno.errors.NotFound) {
+            try {
+              await Deno.mkdir(dirname(path), { recursive: true });
+              await Deno.writeTextFile(path, lines.join("\n") + "\n", {
+                append: true,
+              });
+              this._writeErrors = 0;
+              return;
+            } catch { /* still unwritable — fall through and report */ }
+          }
           if (this._writeErrors < 3) {
             this._writeErrors++;
             console.error(`[logger] write failed for ${path}: ${e}`);

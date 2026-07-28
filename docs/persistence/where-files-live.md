@@ -14,6 +14,7 @@ the part you back up is one subdirectory of it.
     files/          whatever your app writes
     app.key         the persisted access token (key: true)  🔒 secret
   logs/     ← ② regenerable: app.log, error.log, client.log, stdout.log …
+  cache/    ← ② regenerable BULK your app writes: downloads, build trees, thumbnails
   launch.json ← ② the flags `am` started it with, so `am restart` replays them
 
 $XDG_RUNTIME_DIR/aio/   ← ③ must NOT survive a reboot
@@ -23,11 +24,11 @@ $XDG_RUNTIME_DIR/aio/   ← ③ must NOT survive a reboot
 Three tiers, and the only question that separates them is **what a backup
 contains**:
 
-| Tier         | Lose it and…                        | Where                             |
-| ------------ | ----------------------------------- | --------------------------------- |
-| ① critical   | the data is gone                    | `~/.<appId>/data/`                |
-| ② expendable | the app recreates it                | `~/.<appId>/logs/`, `launch.json` |
-| ③ temporary  | it must not survive a reboot at all | `$XDG_RUNTIME_DIR/aio/`           |
+| Tier         | Lose it and…                        | Where                                   |
+| ------------ | ----------------------------------- | --------------------------------------- |
+| ① critical   | the data is gone                    | `~/.<appId>/data/`                      |
+| ② expendable | the app recreates it                | `~/.<appId>/logs⎪cache/`, `launch.json` |
+| ③ temporary  | it must not survive a reboot at all | `$XDG_RUNTIME_DIR/aio/`                 |
 
 **Why tier ③ isn't in the app directory** — it's the one deliberate split, and
 it buys three things: a `.sock`/`.lock` must NOT survive a reboot (in `$HOME`
@@ -39,9 +40,43 @@ to remember it.
 `data/` is created `0700` — it holds the auth store and a TLS private key, so
 the mode assumes the worst file in the tree.
 
+`cache/` is where an app puts regenerable bulk — a 20 GB source tree, extracted
+downloads, generated thumbnails. It is deliberately OUTSIDE `data/` so it never
+enters a backup: `am backup` copies `data/` only, and losing `cache/` costs
+time, not information. Reach it with `appDirs(appId).cache` (`aio/server`).
+
 `logs/stdout.log` is the raw stdout+stderr of an app that `am start` launched —
 where a bare `console.log` in a cell and the stack trace of a crash _before the
 logger is up_ end up. The framework's own structured logs are the other files.
+
+## Secrets in recorded actions
+
+An action's payload is its arguments. `vault.unlockWith(passphrase)` therefore
+records the passphrase — in the journal (`journal: true`, a file in `data/`,
+right beside the database it opens and inside every backup of it), in the
+in-memory ring `am timeline` prints, and in `logs/actions.jsonl` if the action
+log is on. This is not hypothetical: it shipped in a real wallet.
+
+`redactActions` names the actions whose recorded values are kept nowhere:
+
+```ts
+await aio.run({
+  cells: [vault],
+  journal: true,
+  redactActions: ["vault:*"], // or an exact "vault:unlockWith"
+});
+```
+
+A listed action keeps its type, sequence, timestamp and the state **paths** it
+changed — replay ordering and "what did it touch" both still work — while its
+payload and the before/after values it wrote become `"[redacted]"`. One list
+governs all three sinks; they cannot disagree. A trailing `*` matches by prefix,
+because a list of individual method names is the list that goes stale the day
+someone adds another unlock method — and a stale redaction list fails open.
+
+The journal file is created `0600`. Turning the action log or checkpoint **off**
+also deletes what it already wrote — a flag that only stops new writes leaves
+the old secret sitting there.
 
 ## Ask the app
 

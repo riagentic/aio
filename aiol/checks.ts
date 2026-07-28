@@ -39,15 +39,29 @@ export const checkConfig: Checker = (ctx) => {
     return;
   }
 
-  // appId — must be in aio.run(), NOT deno.json (compiled builds don't have deno.json)
+  // appId — must reach aio.run(), because a compiled build can't read deno.json.
+  //
+  // Only warn when the MOVE HAS NOT HAPPENED. Warning "move to aio.run({ appId })"
+  // at an app that already passes it there describes a move already made, and a
+  // linter that reports work you've done is a linter people stop reading
+  // (llama-master #6). A deno.json `appId` alongside an explicit one is
+  // redundant, not broken — `am` reads it to find the app — so that case is a
+  // hint about the duplication, not a warning about a missing move.
   if (dj.appId) {
+    const passesAppId = /\bappId\s*:/.test(ctx.appEntry?.content ?? "");
     report(
-      "warn",
+      passesAppId ? "hint" : "warn",
       "config",
-      `appId "${dj.appId}" in deno.json — move to aio.run({ appId: "${dj.appId}" }) (compiled builds can't read deno.json)`,
+      passesAppId
+        ? `appId "${dj.appId}" is in deno.json AND aio.run() — the aio.run() one wins; the deno.json key only helps \`am\` find the app`
+        : `appId "${dj.appId}" in deno.json — move to aio.run({ appId: "${dj.appId}" }) (compiled builds can't read deno.json)`,
       {
-        fix: 'Remove "appId" from deno.json and add appId to aio.run()',
-        safeFix: fix.fixRemoveAppId,
+        fix: passesAppId
+          ? 'Optional: remove "appId" from deno.json (aio.run() already sets it)'
+          : 'Remove "appId" from deno.json and add appId to aio.run()',
+        // Only offer the codemod when the value isn't already in the entry —
+        // otherwise --safe-fix would "fix" a correct app.
+        ...(passesAppId ? {} : { safeFix: fix.fixRemoveAppId }),
       },
     );
   }

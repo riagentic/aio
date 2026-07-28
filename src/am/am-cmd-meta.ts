@@ -242,6 +242,12 @@ Persistence:
   snapshot load <file>    Load snapshot from file
   migrations              Cell versions (declared vs stored) + shape drift
 
+Framework version:
+  pin                     Which aio version this app builds against
+  pin <version>           Switch to it (provisions + relinks + records it)
+  pin main                Follow the branch tip (a moving target)
+  pin --latest            Pin the newest release
+
 Files (~/.<app>/ — data/ is the whole backup):
   data                    Where this app keeps everything, and what to back up
   backup [dest]           Copy data/ to dest (stop the app first, or --force)
@@ -252,6 +258,9 @@ Inspect:
   client <index>          Request component tree from client (dev mode)
   surface [clientIdx|server]  Semantic UI surface — every component + element, by name (server = headless render, no client needed)
   surface --full          …with untruncated element text (default caps at 80, marked with …)
+  surface --component=X   only that component (every instance), with its subtree
+  surface --path=A/B      only that subtree, by path prefix
+  surface --depth=N       cap the tree depth (0 = the component alone)
   trigger <idx> <path> <action> [text]  Drive the live UI (click/type/press/hover/focus/blur/scroll) — same engine as testUI
   sql <query>             Execute read-only SQL
   tables                  List SQLite tables
@@ -259,6 +268,10 @@ Inspect:
   log [filter]            Tail app log (--client for client.log) (--filter --lines --follow)
   errors                  Last build error
   metrics                 Uptime, connections, schedules
+  cost                    Bytes pushed/s, per cell and per key, + reduce p95
+  cost --keys             …every key, not just the top three
+  cost --cell=X           …one cell
+  cost --window=5m        …over a different window (default 60s)
   top [secs]              Live runtime view (per-cell state sizes); --json = one shot
   health                  HTTP health check
   discover [--timeout=ms] Find exposed aio apps on the LAN (UDP broadcast)

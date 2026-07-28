@@ -128,6 +128,68 @@ export async function autoInstallElectron(
   }
 }
 
+/** Lines Electron's graphics stack emits while ENUMERATING devices, which say
+ *  nothing about the app.
+ *
+ *  On a multi-GPU Linux box Mesa walks every DRM device it can see. A GPU
+ *  driven by a proprietary module (NVIDIA) exposes no Mesa/DRI driver, so the
+ *  probe reports `driver (null)` and then falls back to allocating a KMS dumb
+ *  buffer on that card node — an ioctl reserved for the DRM master, which is
+ *  the X server, never us. The kernel answers EACCES, Chromium moves on to a
+ *  GPU that works, and the app renders normally. What the user is left with is
+ *  dozens of "Permission denied" lines in a WALLET's log, which reads like
+ *  something is wrong with the wallet.
+ *
+ *  Only these exact probe shapes are dropped, and the count is reported once,
+ *  so nothing is hidden — a real Electron error still reaches the log. */
+const GPU_PROBE_NOISE = [
+  /^KMS: DRM_IOCTL_MODE_CREATE_DUMB failed/,
+  /^pci id for fd \d+:/,
+  /^MESA-LOADER: failed to (open|retrieve)/,
+  /^failed to load driver: \w+$/,
+];
+
+/** Pipe Electron's stderr through, minus the device-probe noise. */
+function forwardStderr(proc: Deno.ChildProcess): void {
+  let dropped = 0;
+  let reported = false;
+  void (async () => {
+    const enc = new TextEncoder();
+    let carry = "";
+    try {
+      for await (
+        const chunk of proc.stderr.pipeThrough(new TextDecoderStream())
+      ) {
+        const lines = (carry + chunk).split("\n");
+        carry = lines.pop() ?? "";
+        for (const line of lines) {
+          if (GPU_PROBE_NOISE.some((re) => re.test(line.trim()))) {
+            dropped++;
+            // Say it once, so the lines are accounted for rather than vanished.
+            if (!reported) {
+              reported = true;
+              await Deno.stderr.write(enc.encode(
+                "[aio] suppressing GPU device-probe messages from Electron " +
+                  "(harmless: a GPU with no Mesa driver, probed and skipped)\n",
+              )).catch(() => {});
+            }
+            continue;
+          }
+          await Deno.stderr.write(enc.encode(line + "\n")).catch(() => {});
+        }
+      }
+      if (carry !== "") {
+        await Deno.stderr.write(enc.encode(carry)).catch(() => {});
+      }
+    } catch { /* child gone — nothing left to forward */ }
+    if (dropped > 0) {
+      await Deno.stderr.write(enc.encode(
+        `[aio] suppressed ${dropped} GPU device-probe line(s)\n`,
+      )).catch(() => {});
+    }
+  })();
+}
+
 /** Writes script to temp file, spawns Electron, cleans up after exit or process unload */
 async function spawnElectron(
   bin: string,
@@ -136,7 +198,14 @@ async function spawnElectron(
 ): Promise<Deno.ChildProcess> {
   const tmpFile = await Deno.makeTempFile({ suffix: ".cjs" });
   await Deno.writeTextFile(tmpFile, script);
-  const proc = new Deno.Command(bin, { args: [tmpFile, ...extraArgs] }).spawn();
+  const proc = new Deno.Command(bin, {
+    args: [tmpFile, ...extraArgs],
+    // stderr is PIPED so the graphics-stack probe noise can be kept out of the
+    // app's own log (see forwardStderr). stdout stays inherited — that is the
+    // app's own console output and must pass through untouched.
+    stderr: "piped",
+  }).spawn();
+  forwardStderr(proc);
   const cleanup = () => Deno.remove(tmpFile).catch(() => {});
   // Primary cleanup: after Electron exits normally
   proc.status.then(cleanup);

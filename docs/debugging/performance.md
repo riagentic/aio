@@ -215,6 +215,101 @@ await aio.run({
 Both modes apply the action -- state changes normally. This keeps your app
 functional while surfacing issues.
 
+## `am cost` — what aio moves on your behalf
+
+aio warns that your state may be too big in three places (`aiol`'s typed-array
+hint, its state-key count, and the pressure monitor) and ships three remedies
+(`ui:` filters, `cellDefaults`, `syncIntervalMs`). This is how you find out
+whether any of it applies to you.
+
+```sh
+am cost                     # last 60s, top 3 keys per cell
+am cost --keys              # every key
+am cost --cell=hw           # one cell
+am cost --window=5m         # a longer window
+am cost --json              # for scripts
+```
+
+```
+cell  pushes/s    bytes/s     mean  p95 reduce   state  top keys by bytes
+hw         1.0   7.7 KB/s   7.7 KB      0.4 ms  7.9 KB  cpuHistory 2.1 KB · coresUtil 1.8 KB · gpus 1.4 KB
+chat       0.0          —        —      3.1 ms    15 B  (idle)
+──────────────────────────────────────────────────────────────────────────────
+per client             8.1 KB/s
+clients connected         3  24.3 KB/s   (all surfaces)
+frames       3.0/s   243.2 KB total
+full resends       10%  2 of 20 state pushes (+5 acks/diagnostics)
+
+window  last 60s
+```
+
+**What each number is, exactly**
+
+| column         | meaning                                                             |
+| -------------- | ------------------------------------------------------------------- |
+| `pushes/s`     | broadcast rounds that carried a change from this cell               |
+| `bytes/s`      | serialized size of that cell's changed values (payload **content**) |
+| `mean`         | content bytes per push                                              |
+| `p95 reduce`   | this cell's reduce time, 95th percentile, over the window           |
+| `state`        | the cell's whole slice, serialized — what is THERE, not what moves  |
+| `top keys`     | which keys those bytes came from, biggest first                     |
+| `per client`   | **wire** bytes per second for ONE surface — the unit price of a tab |
+| `full resends` | share of state pushes that sent the whole state instead of a diff   |
+
+The wire totals are the exact byte length of every frame handed to a socket —
+handshake, patches, full states, acks and diagnostics alike. A test holds them
+against a real WebSocket client counting its own inbound bytes, and they must be
+equal (`tests/cost-wire-accuracy.test.ts`). Per-cell `bytes/s` counts payload
+**content**, which is smaller than the wire total because the envelope and the
+JSON-Patch paths are not attributed to any one key. The two are reported
+separately and never added.
+
+**Reading it**
+
+- `full resends` above ~50% means diffs are not being used: a `"full"`-strategy
+  cell, or patches exceeding `fullStateThreshold` (default: patch > 50% of
+  full). A small state often resends fully — that is cheaper, not a bug.
+- A big `state` with a small `bytes/s` is fine: it is _there_, not moving.
+- A big `bytes/s` from one key is the case `ui:` filters exist for.
+- `(idle)` means the cell pushed nothing. A cell can burn reduce time and cost
+  the wire nothing — "busy but free" is a real and useful answer.
+
+It is always on (bounded rings on a path that already serializes), reports and
+does not advise, and keeps no history — the journal and time-travel own "what
+happened then".
+
+### Per-method budgets — for the method that is MEANT to be slow
+
+A budget is a claim about what should be fast. Some methods aren't: spawning
+cmake, reading a 2 MB header, draining a subprocess pipe. Raising the global
+budget to silence one of them blinds every tight reducer at the same time — one
+app ended up at `{ reduce: 100, effect: 1000 }` plus a 30 s timeout "and lost
+the signal everywhere to silence one poller".
+
+Say it per method instead, keyed `"cell:method"`:
+
+```ts
+await aio.run({
+  cells: [builds, hw],
+  perfBudget: {
+    effect: 5, // everything stays strict…
+    methods: {
+      "builds:compile": { effect: 5_000, timeout: 600_000 }, // …except this one
+      "hw:poll": { effect: 250 },
+    },
+  },
+});
+```
+
+`timeout` raises the hard "abandon this effect" deadline for that method alone,
+so a four-minute build doesn't need a four-minute global timeout. A violation
+report names the method (`builds:compile`), not the shared `builds:__exec`
+effect type, so the log says which one to look at.
+
+Reach for this when a method awaits I/O by design. If a method is slow because
+it computes, the budget is telling you the truth — move the work with
+`schedule.blocking` instead (see above).
+
 ### Catching performance errors
 
 ```ts

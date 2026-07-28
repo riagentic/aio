@@ -151,6 +151,7 @@ export function buildLegacyConfig(
     singleton: fc.singleton,
     guardDispatches: fc.guardDispatches,
     journal: fc.journal,
+    redactActions: fc.redactActions,
     childWindows: fc.childWindows,
     libraryMode: fc.libraryMode,
     killExisting: fc.killExisting,

@@ -187,6 +187,19 @@ export type AioConfig<S, A, E> = {
   /** Durable action journal — replay the debounce-window tail after a
    *  SIGKILL/power-cut (see CellsConfig). */
   journal?: boolean;
+  /** Action types whose recorded VALUES must never be retained anywhere: the
+   *  durable journal, the in-memory timeline (`am timeline`) and the optional
+   *  action log all honour this one list. An action's payload is its arguments,
+   *  so for a method like `vault:unlockWith(passphrase)` the payload IS the
+   *  secret protecting everything beside it.
+   *
+   *  A listed action still occupies its slot — type, sequence, timestamp and
+   *  the state paths it changed are kept, so ordering and replay structure are
+   *  unaffected — but its payload and the before/after of what it wrote are
+   *  replaced with `"[redacted]"`. A trailing `*` matches by prefix
+   *  (`vault:*`), because a list of individual method names is the list that
+   *  goes stale the day someone adds another one. */
+  redactActions?: readonly string[];
   /** Allow the electron client to open CHILD windows to arbitrary http(s) URLs
    *  via `__aioIPC.openWindow(url, { preload, sandbox })`. OFF by default —
    *  child-window-to-arbitrary-URL is real attack surface no app should carry
@@ -339,6 +352,19 @@ export type CellsConfig = {
    *  replayed on top of it, so a SIGKILL / power cut in the persist debounce
    *  window loses NOTHING. Opt-in. */
   journal?: boolean;
+  /** Action types whose recorded VALUES must never be retained anywhere: the
+   *  durable journal, the in-memory timeline (`am timeline`) and the optional
+   *  action log all honour this one list. An action's payload is its arguments,
+   *  so for a method like `vault:unlockWith(passphrase)` the payload IS the
+   *  secret protecting everything beside it.
+   *
+   *  A listed action still occupies its slot — type, sequence, timestamp and
+   *  the state paths it changed are kept, so ordering and replay structure are
+   *  unaffected — but its payload and the before/after of what it wrote are
+   *  replaced with `"[redacted]"`. A trailing `*` matches by prefix
+   *  (`vault:*`), because a list of individual method names is the list that
+   *  goes stale the day someone adds another one. */
+  redactActions?: readonly string[];
   /** Allow the electron client to open CHILD windows to arbitrary http(s) URLs
    *  via `__aioIPC.openWindow(url, { preload, sandbox })`. OFF by default —
    *  child-window-to-arbitrary-URL is real attack surface no app should carry

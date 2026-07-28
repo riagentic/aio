@@ -399,6 +399,33 @@ app's `close()` stopped a server process, so re-registering after a crash
 SIGTERMed the freshly started one), give each resource its own id. Dev warns,
 once per key, when a `set` displaces a live resource.
 
+**Getting a value back out of the factory** (a pid, a port, a handle the UI must
+show): the factory's return value is the DISPOSER — it does not flow into state,
+and it deliberately can't. An effect that wrote state directly would be a hole
+in `(state, action) → (state, effects)`: the write would be invisible to the
+reducer, untracked by patches, and unreplayable. The factory runs in the
+runtime, so it calls a method with what it learned:
+
+```ts
+methods: {
+  start(s: { pid: number | null }) {
+    s.pid = null;
+    return own.set("srv:proc", () => {
+      const proc = spawnServer();
+      srv.started(proc.pid); // ← a normal method call: tracked, patched, replayable
+      return () => proc.kill();
+    });
+  },
+  started(s: { pid: number | null }, pid: number) {
+    s.pid = pid;
+  },
+}
+```
+
+That keeps the handle in exactly one place (the `own` slot) and the _fact_ about
+it in state, instead of splitting the two across a module-scope variable and an
+effect.
+
 The factory runs in the runtime (not in the reducer) and may return a disposer
 function or a closeable object (`{ close() }` / `{ dispose() }`). The effect
 itself is plain data — the factory travels out-of-band, so on time-travel replay

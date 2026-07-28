@@ -9,6 +9,7 @@ import { join, resolve } from "@std/path";
 import type { GlobalFlags } from "./am-types.ts";
 import { detectMode, out, outError } from "./am-output.ts";
 import { repoRoot } from "./am-cmd-create.ts";
+import { ensureVersion, readPin } from "./am-versions.ts";
 
 /** Resolve the framework checkout to link against: --aio flag › $AIO_HOME ›
  *  the checkout am itself runs from › the default install location. Verified to
@@ -126,8 +127,8 @@ export async function cmdLink(
     return;
   }
 
-  const root = resolveAioRoot(args);
-  if (!root) {
+  const install = resolveAioRoot(args);
+  if (!install) {
     outError(
       "can't find the aio framework to link against. Install it with\n" +
         "  curl -fsSL https://raw.githubusercontent.com/riagentic/aio/main/install.sh | sh\n" +
@@ -137,8 +138,31 @@ export async function cmdLink(
     Deno.exit(1);
   }
 
+  // THE PIN IS AUTHORITATIVE. An app that recorded `aioVersion` in its deno.json
+  // gets exactly that version — provisioned on demand — which is what makes
+  // `git clone && am fix && deno task dev` reproduce a build a month later on a
+  // different machine. Without this, a clone silently linked to whatever aio the
+  // machine happened to have, and "it compiled last month" was unverifiable.
+  //
+  // An explicit `--aio=<path>` still wins: that is the framework-development
+  // escape hatch, and it says so in the output so nobody is misled.
+  let root = install;
+  let pin: string | null = null;
+  const explicitRoot = args.some((a) => a.startsWith("--aio="));
+  if (!explicitRoot) {
+    pin = await readPin(dir);
+    if (pin) {
+      const res = await ensureVersion(install, pin);
+      if (!res.ok) {
+        outError(res.error, mode);
+        Deno.exit(1);
+      }
+      root = res.path;
+    }
+  }
+
   // `am link` is explicit intent — force a re-link of a stale symlink to the
-  // installed framework (but still never deletes a real vendored dir).
+  // resolved framework (but still never deletes a real vendored dir).
   const r = await linkDepAio(dir, root, true);
   if (r === "vendored") {
     out(
@@ -157,12 +181,23 @@ export async function cmdLink(
     );
     Deno.exit(1);
   }
+  const how = pin
+    ? `aio ${pin} (pinned in deno.json)`
+    : explicitRoot
+    ? `${root} (--aio override)`
+    : `${root}\n  ⚠ this app has no aioVersion pin, so a clone builds against ` +
+      `whatever aio is installed. Pin it: \`am pin --latest\``;
   out(
     mode === "pretty"
       ? (r === "ok"
-        ? `✓ already linked: dep/aio → ${root}`
-        : `✓ linked dep/aio → ${root}\n  now run: deno task dev`)
-      : { linked: true, target: root, changed: r === "linked" },
+        ? `✓ already linked: dep/aio → ${how}`
+        : `✓ linked dep/aio → ${how}\n  now run: deno task dev`)
+      : {
+        linked: true,
+        target: root,
+        aioVersion: pin,
+        changed: r === "linked",
+      },
     mode,
   );
 }

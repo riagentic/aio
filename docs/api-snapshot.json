@@ -85,7 +85,7 @@
         },
         "CellsConfig": {
           "kind": "typeAlias",
-          "sig": "9e5e9edce0dfc3df"
+          "sig": "1db2ed108160f70b"
         },
         "CellStatus": {
           "kind": "typeAlias",
@@ -217,7 +217,7 @@
         },
         "PerfBudget": {
           "kind": "typeAlias",
-          "sig": "17d4190c3d7ecf04"
+          "sig": "f20e82aff508b9f7"
         },
         "pk": {
           "kind": "function",
@@ -261,15 +261,15 @@
         },
         "schedule": {
           "kind": "variable",
-          "sig": "1eacd8ab2cb48fe3"
+          "sig": "50d9745ee9dc44ea"
         },
         "ScheduleDef": {
           "kind": "typeAlias",
-          "sig": "d3e1bbfcb4bc240d"
+          "sig": "f2a698a107fdc291"
         },
         "ScheduleEffect": {
           "kind": "typeAlias",
-          "sig": "7a06b3b8b65e4b9e"
+          "sig": "22abfd1632d227e0"
         },
         "ScopedApp": {
           "kind": "typeAlias",
@@ -381,7 +381,7 @@
         },
         "VERSION": {
           "kind": "variable",
-          "sig": "5cbf368cdbc0b572"
+          "sig": "5fb2dc500b591f1c"
         },
         "VitalsConfig": {
           "kind": "typeAlias",
@@ -1224,9 +1224,25 @@
           "kind": "typeAlias",
           "sig": "b307430caacbf4b4"
         },
+        "AioCanvasAttributes": {
+          "kind": "typeAlias",
+          "sig": "8206179f26a3017d"
+        },
+        "AioDetailsAttributes": {
+          "kind": "typeAlias",
+          "sig": "7e2cdefd26ba93de"
+        },
+        "AioDialogAttributes": {
+          "kind": "typeAlias",
+          "sig": "95606a24b2d87372"
+        },
         "AioEventMap": {
           "kind": "typeAlias",
           "sig": "d0e3c41acd9dedc6"
+        },
+        "AioFieldSetAttributes": {
+          "kind": "typeAlias",
+          "sig": "6264e2c11c19c16b"
         },
         "AioFormAttributes": {
           "kind": "typeAlias",
@@ -1256,9 +1272,25 @@
           "kind": "typeAlias",
           "sig": "d47cd19afd56b873"
         },
+        "AioMediaAttributes": {
+          "kind": "typeAlias",
+          "sig": "87ee3fa96de2e8ac"
+        },
+        "AioMeterAttributes": {
+          "kind": "typeAlias",
+          "sig": "39c3b9d2bb13138a"
+        },
+        "AioOptGroupAttributes": {
+          "kind": "typeAlias",
+          "sig": "a83c727c9f563506"
+        },
         "AioOptionAttributes": {
           "kind": "typeAlias",
           "sig": "0b8834825640a706"
+        },
+        "AioProgressAttributes": {
+          "kind": "typeAlias",
+          "sig": "818d522a91f50a02"
         },
         "AioSelectAttributes": {
           "kind": "typeAlias",
@@ -1267,6 +1299,10 @@
         "AioSVGAttributes": {
           "kind": "typeAlias",
           "sig": "76efd3e9e54391f8"
+        },
+        "AioTableCellAttributes": {
+          "kind": "typeAlias",
+          "sig": "5437f5003890feab"
         },
         "AioTextAreaAttributes": {
           "kind": "typeAlias",
@@ -1286,7 +1322,7 @@
         },
         "JSX": {
           "kind": "namespace",
-          "sig": "2aac2c809bc72699"
+          "sig": "73a9546856b5cceb"
         },
         "jsxs": {
           "kind": "variable",
@@ -1314,15 +1350,15 @@
         },
         "schedule": {
           "kind": "variable",
-          "sig": "1eacd8ab2cb48fe3"
+          "sig": "50d9745ee9dc44ea"
         },
         "ScheduleDef": {
           "kind": "typeAlias",
-          "sig": "d3e1bbfcb4bc240d"
+          "sig": "f2a698a107fdc291"
         },
         "ScheduleEffect": {
           "kind": "typeAlias",
-          "sig": "7a06b3b8b65e4b9e"
+          "sig": "22abfd1632d227e0"
         }
       }
     },
@@ -1350,7 +1386,7 @@
         },
         "AppDirs": {
           "kind": "typeAlias",
-          "sig": "2521595f7a2b8452"
+          "sig": "ff4dc10a4e683e51"
         },
         "AppMeta": {
           "kind": "typeAlias",
@@ -1666,7 +1702,7 @@
         },
         "AppDirs": {
           "kind": "typeAlias",
-          "sig": "2521595f7a2b8452"
+          "sig": "ff4dc10a4e683e51"
         },
         "bootCells": {
           "kind": "function",
@@ -1732,6 +1768,10 @@
           "kind": "function",
           "sig": "bccc6199da4b6117"
         },
+        "TestClient": {
+          "kind": "interface",
+          "sig": "d31a740943cf7833"
+        },
         "testComponent": {
           "kind": "function",
           "sig": "025fc7bc0b4ec67e"
@@ -1752,6 +1792,14 @@
           "kind": "function",
           "sig": "165470dc07800697"
         },
+        "testMultiClient": {
+          "kind": "function",
+          "sig": "a149f2ffc2c55402"
+        },
+        "TestMultiClient": {
+          "kind": "interface",
+          "sig": "872593272c5ececf"
+        },
         "testServer": {
           "kind": "function",
           "sig": "52ea2a0e7aa93003"
@@ -1762,15 +1810,15 @@
         },
         "testUI": {
           "kind": "function",
-          "sig": "93ef5ee9fb0bf868"
+          "sig": "77ede55ef46b6732"
         },
         "TestUI": {
           "kind": "typeAlias",
-          "sig": "d4234a4fa0729b62"
+          "sig": "09438c4c065a0f80"
         },
         "TestUIOptions": {
           "kind": "interface",
-          "sig": "e41c766dacc76e61"
+          "sig": "ccb9454786cb26fa"
         },
         "UIComponentHandle": {
           "kind": "typeAlias",

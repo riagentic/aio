@@ -57,6 +57,16 @@ export interface TestUIOptions {
   persist?: boolean;
   /** Max settle iterations per action (each ≈ flush + 5ms). Default 20. */
   settleIterations?: number;
+  /** Starting state for booted cells, installed BEFORE the first render:
+   *  `{ hw: { gpus: [...] } }`. Per cell it is a shallow merge over that cell's
+   *  declared initial state, so you pin only the fields under test.
+   *
+   *  For any cell whose state comes from the machine — telemetry, a device, the
+   *  clock — this is what lets a test assert a branch instead of observing
+   *  whichever one the developer's box happened to take (llama.md wishlist #1).
+   *  An unknown cell name throws, listing what booted: a silently-ignored seed
+   *  would look like a pinned fixture while testing nothing. */
+  seed?: Record<string, Record<string, unknown>>;
 }
 
 /** A triggerable element of the semantic UI surface. Actions run on an
@@ -157,6 +167,10 @@ export type TestUI = {
    *  `app.getState()`, INCLUDING `ui.exclude`d fields the client hides. Use to
    *  test a server flow that reads a hidden field (tbd#3). */
   serverState(): Record<string, unknown>;
+  /** Install state into booted cells mid-test — the same shallow-merge-per-cell
+   *  as the `seed` option, for when a flow must react to a machine-dependent
+   *  value CHANGING rather than starting at one. Unknown cell names throw. */
+  seed(partial: Record<string, Record<string, unknown>>): void;
   /** One cell's unfiltered slice from the server-authoritative state. */
   // deno-lint-ignore no-explicit-any
   fullState(cell: any): unknown;
@@ -165,6 +179,18 @@ export type TestUI = {
   expectCell(cell: any, pred: (c: any) => boolean, msg?: string): Promise<void>;
   /** Find a component anywhere by name (and optionally AIR key). */
   find(component: string, key?: string | number): UIComponentHandle;
+  /** True when nothing named `name` is SHOWING — no element with that handle,
+   *  and no component of that name that put anything on screen. A component
+   *  which rendered `null` counts as absent: it has a surface node (it ran), but
+   *  it produced nothing, and "did it render anything" is the question being
+   *  asked. The negative assertion the surface was missing: a test for "the
+   *  advice panel is gone" was otherwise written as
+   *  `assert(!ui.html().includes("placement-advice"))`, which is stringly-typed
+   *  and keeps passing for the wrong reason after a class rename (llama.md
+   *  wishlist #5). Composes with waitFor: `await ui.waitFor(() => ui.absent("Toast"))`. */
+  absent(name: string): boolean;
+  /** Inverse of {@linkcode absent} — reads better in a positive assertion. */
+  present(name: string): boolean;
   /** Unmount and reset the local runtime (the auto-created window is closed
    *  in the background). Prefer `await using ui = await testUI(App)` or the
    *  `testUI(App, name, fn)` wrapper — both dispose for you. */
@@ -180,6 +206,54 @@ export type TestUI = {
 };
 
 const tick = (ms = 5) => new Promise((r) => setTimeout(r, ms));
+
+/** Does this component instance put anything on screen?
+ *
+ *  A component that returned `null` still HAS a node in the surface — it was
+ *  rendered, it just produced nothing. Counting that as "present" made
+ *  `absent("PlacementAdvice")` false while the screen showed no advice at all,
+ *  which is the exact case the docstring used as its example (llama-master, and
+ *  re-probed unchanged a round later). "Present" has to mean *showing*, or the
+ *  assertion answers a question nobody asked.
+ *
+ *  Showing = it contributes an element, a child that shows something, or text.
+ *  A component that renders only non-interactive, textless markup is therefore
+ *  absent from the SEMANTIC surface — which is the right answer for an API whose
+ *  whole premise is "what can be seen and done here". */
+function showsSomething(n: UISurfaceNode): boolean {
+  if (n.elements.length > 0) return true;
+  if (typeof n.text === "string" && n.text.trim().length > 0) return true;
+  return n.children.some(showsSomething);
+}
+
+/** A failure message you can actually read.
+ *
+ *  A timeout used to stringify the WHOLE serialized surface, pretty-printed and
+ *  uncapped: on one real page that is tens of KB per failure, and the assertion
+ *  itself scrolls off the screen (llama-master #13). `am surface` grew a text cap
+ *  and --component/--path/--depth for exactly this problem; the harness's own
+ *  output had not. Same idea here: names first (what you assert against), then a
+ *  capped pretty tree, and the full JSON only when it is small enough to help. */
+function surfaceDigest(node: UISurfaceNode, maxChars = 2000): string {
+  const names: string[] = [];
+  const walk = (n: UISurfaceNode, depth: number) => {
+    if (depth > 3) return;
+    names.push(
+      `${"  ".repeat(depth + 1)}${n.component}${
+        n.handle ? ` (t=${n.handle})` : ""
+      }${
+        n.elements.length ? `: ${n.elements.map((e) => e.name).join(", ")}` : ""
+      }`,
+    );
+    n.children.forEach((c) => walk(c, depth + 1));
+  };
+  walk(node, 0);
+  const tree = names.join("\n");
+  const full = JSON.stringify(serializeSurface(node), null, 2);
+  if (full.length <= maxChars) return `\n${tree}\n\n${full}`;
+  return `\n${tree}\n\n  (surface JSON omitted — ${full.length} chars; ` +
+    `print it with JSON.stringify(ui.surface()) if you need the detail)`;
+}
 
 function fail(msg: string, available: string[]): never {
   throw new Error(
@@ -263,6 +337,16 @@ export function testUI(
   name: string,
   fn: (ui: TestUI) => void | Promise<void>,
 ): void;
+/** Named form WITH options — `testUI(App, "name", { seed }, async (ui) => …)`.
+ *  Without it, adopting `seed` (the feature that makes machine-dependent UI
+ *  testable at all) meant rewriting a one-line test into the handle form by
+ *  hand, for every test that needed it (llama-master #12). */
+export function testUI(
+  App: TestableComponent,
+  name: string,
+  opts: TestUIOptions,
+  fn: (ui: TestUI) => void | Promise<void>,
+): void;
 export function testUI(
   App: TestableComponent,
   opts?: TestUIOptions,
@@ -270,8 +354,14 @@ export function testUI(
 export function testUI(
   App: TestableComponent,
   optsOrName?: TestUIOptions | string,
-  fn?: (ui: TestUI) => void | Promise<void>,
+  fnOrOpts?: ((ui: TestUI) => void | Promise<void>) | TestUIOptions,
+  maybeFn?: (ui: TestUI) => void | Promise<void>,
 ): void | Promise<TestUI> {
+  // Named form: the 3rd arg is either the body or the options.
+  const fn = typeof fnOrOpts === "function" ? fnOrOpts : maybeFn;
+  const namedOpts = typeof fnOrOpts === "function"
+    ? {}
+    : (fnOrOpts as TestUIOptions | undefined) ?? {};
   // Arm dev-strict checks: tests must be the strictest environment, so an
   // illegal in-place state mutation throws in a test exactly as it does in
   // dev + prod (risoto 2026-07-18). Inlined to avoid a cell-test.ts cycle.
@@ -282,7 +372,7 @@ export function testUI(
       throw new Error('testUI(App, "name", fn): missing test function');
     }
     Deno.test(optsOrName, async () => {
-      const ui = await _mountTestUI(App as ComponentFn, {});
+      const ui = await _mountTestUI(App as ComponentFn, namedOpts);
       let bodyErr: { e: unknown } | null = null;
       try {
         await fn(ui);
@@ -415,6 +505,9 @@ async function _mountTestUI(
   // ui.serverState()/ui.fullState() so a test can read UNFILTERED state,
   // including `ui.exclude`d fields a server route legitimately reads (tbd#3).
   let standaloneApp: { getState: () => Record<string, unknown> } | undefined;
+  let seedState:
+    | ((p: Record<string, Record<string, unknown>>) => void)
+    | undefined;
   const cells = opts.cells ?? [...getRegisteredCells().values()];
   if (cells.length > 0) {
     const standalone = await import("../standalone-air.ts");
@@ -433,6 +526,11 @@ async function _mountTestUI(
       persist: opts.persist ?? false,
       persistKey: `testui:${crypto.randomUUID().slice(0, 8)}`,
     }) as unknown as { getState: () => Record<string, unknown> };
+    // Seed BEFORE the first render, so the component's very first pass already
+    // sees the fixture (a seed applied after mount would test the re-render path
+    // instead of the initial one, which is rarely what a test means).
+    if (opts.seed) standalone._seedState(opts.seed);
+    seedState = standalone._seedState;
     // Dispose does a state-only reset (keeps the registry so re-mounts boot).
     resetRuntime = standalone._resetState;
   }
@@ -853,6 +951,18 @@ async function _mountTestUI(
     // via app.getState(), including `ui.exclude`d fields the client proxy hides.
     // `serverState()` = whole store; `fullState(cell)` = one cell's slice.
     serverState: (): Record<string, unknown> => standaloneApp?.getState() ?? {},
+    // Mid-test seeding, for a flow that must react to a machine-dependent value
+    // CHANGING (a device appearing, telemetry moving) rather than starting at
+    // one. `{ seed }` at mount covers the common case.
+    seed: (partial: Record<string, Record<string, unknown>>) => {
+      if (!seedState) {
+        throw new Error(
+          "[aio] ui.seed(): no cells are booted in this mount — pass { cells } " +
+            "or import the cells your App uses",
+        );
+      }
+      seedState(partial);
+    },
     fullState: (cell: AnyDoc): unknown =>
       standaloneApp?.getState()?.[cell?.__aio?.id as string],
     // Public settle is an observation point: drains the action queue first
@@ -870,6 +980,16 @@ async function _mountTestUI(
       await settle();
     },
     html: () => String(root.innerHTML),
+    present: (name: string): boolean => {
+      const scope = currentSurface();
+      return findComponents(scope, name).some(showsSomething) ||
+        findElementsDeep(scope, name).length > 0;
+    },
+    absent: (name: string): boolean => {
+      const scope = currentSurface();
+      return !findComponents(scope, name).some(showsSomething) &&
+        findElementsDeep(scope, name).length === 0;
+    },
     async expectCell(
       cell: AnyDoc,
       pred: (c: AnyDoc) => boolean,
@@ -901,8 +1021,7 @@ async function _mountTestUI(
       }
       throw new Error(
         `testUI: waitFor timed out${opts?.msg ? ` — ${opts.msg}` : ""}.\n` +
-          "  current surface: " +
-          JSON.stringify(serializeSurface(currentSurface()), null, 2),
+          "  current surface: " + surfaceDigest(currentSurface()),
       );
     },
     find(component: string, key?: string | number): UIComponentHandle {

@@ -1,5 +1,13 @@
 // Public entry — implementation lives in testing/cell-test.ts
 export * from "./testing/cell-test.ts";
+// One state, many surfaces — aio's central claim, made testable (llama-master
+// #16). Real server, real WebSocket clients, real broadcast.
+export {
+  type TestClient,
+  type TestMultiClient,
+  testMultiClient,
+} from "./testing/multi-client-test.ts";
+
 // Transport cassettes (risoto #6): record a real device/network session once,
 // replay it in CI forever. Record in prod against the real device; replay in tests.
 export {

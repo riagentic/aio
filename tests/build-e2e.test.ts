@@ -452,3 +452,90 @@ Deno.test("build-e2e: the electron target is wired to AppImage packaging", async
   assertStringIncludes(src, "ensureAppimagetool");
   assertStringIncludes(src, "appimageEnv(arch)");
 });
+
+// ── worker cells survive compilation ─────────────────────────────────────────
+// `worker: true` runs a cell's methods on their own Deno worker, and the worker
+// boots by RE-IMPORTING the app entry. That was believed impossible in a
+// compiled binary — the pool's fallback still says "Compiled binaries don't
+// support cell workers yet" — so the constraint went into the roadmap and was
+// never re-checked. It is checkable: Deno embeds the entry in the binary, and
+// the entry is exactly the module a cell worker needs.
+//
+// The property is ISOLATION, so the test measures it rather than trusting a log
+// line: a method that blocks its thread for over a second must not stop the
+// main isolate's timer from firing. In-isolate execution cannot pass this.
+Deno.test({
+  name:
+    "artifact: a `worker: true` cell still runs off-isolate in a compiled binary",
+  ignore: !GATE,
+  fn: async () => {
+    const dir = await makeApp("counter", "build-e2e-worker-");
+    try {
+      await Deno.writeTextFile(
+        `${dir}/src/app.ts`,
+        `import { aio, cell } from "aio";
+
+export const heavy = cell("heavy", {
+  worker: true,
+  state: { runs: 0 },
+  methods: {
+    burn(s: { runs: number }, ms: number) {
+      const end = performance.now() + ms;
+      while (performance.now() < end) { /* busy */ }
+      s.runs++;
+      return "burned";
+    },
+  },
+});
+
+const app = await aio.run({
+  appId: "worker-compiled-probe",
+  client: "server-only",
+  persist: false,
+});
+let ticks = 0;
+const t = setInterval(() => ticks++, 20);
+await heavy.burn(1200);
+clearInterval(t);
+// >20 ticks means the main isolate kept running while the cell burned.
+console.log("PROBE ticks=" + ticks + " runs=" + heavy.runs);
+await app.close();
+Deno.exit(0);
+`,
+      );
+
+      const r = await task(dir, "compile:cli");
+      assertEquals(r.code, 0, `compile:cli failed:\n${r.out}\n${r.err}`);
+      const bin = findBinary(dir);
+      await Deno.chmod(bin, 0o755);
+
+      const runCwd = await Deno.makeTempDir({ prefix: "foreign-cwd-" });
+      try {
+        const p = await new Deno.Command(bin, {
+          args: ["--client=server-only"],
+          cwd: runCwd,
+          stdout: "piped",
+          stderr: "piped",
+        }).output();
+        const out = new TextDecoder().decode(p.stdout) +
+          new TextDecoder().decode(p.stderr);
+        const m = out.match(/PROBE ticks=(\d+) runs=(\d+)/);
+        assert(m, `probe never reported:\n${out}`);
+        assertEquals(m[2], "1", "the worker cell committed its state home");
+        assert(
+          Number(m[1]) > 20,
+          `main isolate stalled during the burn (${m[1]} ticks) — the cell ` +
+            `ran in-isolate:\n${out}`,
+        );
+        assert(
+          !out.includes("cannot host worker cells"),
+          `the pool refused to host the worker:\n${out}`,
+        );
+      } finally {
+        await Deno.remove(runCwd, { recursive: true }).catch(() => {});
+      }
+    } finally {
+      await Deno.remove(dir, { recursive: true }).catch(() => {});
+    }
+  },
+});

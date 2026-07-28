@@ -12,6 +12,9 @@
 // diff is retained, so `prev`/`next` are free to GC — memory stays bounded to
 // the ring capacity regardless of state size.
 
+import { noRedaction, REDACTED } from "../diagnostics/redact.ts";
+import type { Redactor } from "../diagnostics/redact.ts";
+
 /** One changed leaf: a dotted path and its before/after values. */
 export type DiffEntry = { path: string; before: unknown; after: unknown };
 
@@ -105,15 +108,41 @@ export type Timeline = {
   size(): number;
 };
 
-/** Create a ring-buffer timeline holding the last `cap` dispatches. */
-export function createTimeline(cap = 500): Timeline {
+/** Create a ring-buffer timeline holding the last `cap` dispatches.
+ *
+ *  `redact` is the SAME predicate the journal and action log use (built once at
+ *  boot by `makeRedactor`). A redacted action still occupies its slot — seq,
+ *  type, timestamp and the *paths* it changed are all kept, so the timeline
+ *  still answers "what happened and what did it touch" — but no value it
+ *  carried is retained: not the payload, and not the before/after of the state
+ *  it wrote. Redacting the payload alone would have been theatre here: an
+ *  `unlock` that stores its passphrase leaves the same secret in the diff, in
+ *  the same ring, reachable by the same `am timeline`. */
+export function createTimeline(
+  cap = 500,
+  redact: Redactor = noRedaction,
+): Timeline {
   let ring: TimelineEntry[] = [];
   let last = 0;
 
   return {
     record(seq, type, payload, prev, next, ts) {
       last = Math.max(last, seq);
-      ring.push({ seq, ts, type, payload, diff: diffState(prev, next) });
+      const hide = redact(type);
+      const diff = diffState(prev, next);
+      ring.push({
+        seq,
+        ts,
+        type,
+        payload: hide ? REDACTED : payload,
+        diff: hide
+          ? diff.map((d) => ({
+            path: d.path,
+            before: REDACTED,
+            after: REDACTED,
+          }))
+          : diff,
+      });
       if (ring.length > cap) ring = ring.slice(ring.length - cap);
     },
     entries(after = -Infinity, limit = Infinity) {

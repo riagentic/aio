@@ -105,8 +105,21 @@ export function createCellWorker(
   const readyTimer = setTimeout(() => {
     readyReject?.(
       new Error(
+        // The old text ("does the app entry call aio.run()?") named the one
+        // thing that is almost always TRUE, and cost a bisect to rule out
+        // (risoto, 2026-07-26). A worker cell re-imports the app entry, so
+        // every top-level side effect in it runs again inside the worker,
+        // before the handshake — ~20ms of file I/O was enough to stall boot.
+        // Lead with that, and name the guard.
         `[aio] cell worker "${name}" did not become ready within ` +
-          `${READY_TIMEOUT_MS}ms — does the app entry call aio.run()?`,
+          `${READY_TIMEOUT_MS}ms.\n` +
+          `  A worker cell re-imports the app entry, so anything that entry ` +
+          `does at the top level (mkdir, open a database, start a listener) ` +
+          `runs a second time INSIDE the worker before it can hand shake — ` +
+          `and slow or throwing setup stalls it here.\n` +
+          `  Fix: guard that work with \`if (!isCellWorker()) …\` ` +
+          `(exported from "aio").\n` +
+          `  Less commonly: the entry never reaches aio.run() at all.`,
       ),
     );
   }, READY_TIMEOUT_MS);

@@ -59,6 +59,18 @@ export async function testServer<S = unknown>(
   const close = async () => {
     await app.close();
     if (madeDir) {
+      // The logger is a process-wide singleton pointed at THIS app's baseDir.
+      // Deleting the directory under it leaves every later write failing into a
+      // hole — visible as a stream of "[logger] write failed for …/.aio/logs"
+      // during unrelated tests, which is noise that trains people to ignore log
+      // output. Flush what is pending, then detach before the directory goes.
+      try {
+        const { getLogger, setLogger } = await import(
+          "../diagnostics/logger-api.ts"
+        );
+        await getLogger()?.flush(200);
+        setLogger(null);
+      } catch { /* no logger configured — nothing to detach */ }
       await Deno.remove(baseDir, { recursive: true }).catch(() => {});
     }
   };

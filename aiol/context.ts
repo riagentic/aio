@@ -335,14 +335,36 @@ export async function buildContext(
     } catch { /* not found */ }
   }
 
+  // Tests live in `tests/` by aio's own convention ("tests all live in tests/,
+  // never beside their source" — CLAUDE.md), and that directory was never
+  // scanned. So a project with 271 passing tests was told `Tests: 0` and "cell X
+  // has no test file" for every cell: the framework's linter was blind to the
+  // framework's own layout, and 8 of 14 hints in one real app were this. A
+  // linter confidently wrong about half its output trains you to skim the rest.
+  //
+  // Collected SEPARATELY from app sources: `tsFiles`/`tsxFiles` drive the
+  // app-code checks, and sweeping tests into them would trade one class of false
+  // positive for another.
+  const testSources: SourceFile[] = [];
+  for (const dir of ["tests", "test"]) {
+    try {
+      const path = join(projectDir, dir);
+      if ((await Deno.stat(path)).isDirectory) {
+        await collectFiles(path, projectDir, testSources);
+      }
+    } catch { /* no such directory */ }
+  }
+  const isTest = (f: SourceFile) =>
+    f.name.endsWith(".test.ts") || f.name.endsWith(".test.tsx");
   const tsxFiles = sourceFiles.filter((f) => f.ext === ".tsx");
   const tsFiles = sourceFiles.filter((f) => f.ext === ".ts");
-  const testFiles = sourceFiles.filter((f) =>
-    f.name.endsWith(".test.ts") || f.name.endsWith(".test.tsx")
-  );
-  const cells = extractCells(
-    sourceFiles.filter((f) => !f.name.endsWith(".test.ts")),
-  );
+  const testFiles = [
+    ...sourceFiles.filter(isTest), // co-located tests, if an app keeps them there
+    ...testSources.filter(isTest),
+  ];
+  // A cell defined inside a test is a FIXTURE, not app surface — counting it
+  // would then report it as untested. (`.test.tsx` was missed here too.)
+  const cells = extractCells(sourceFiles.filter((f) => !isTest(f)));
 
   // Find app entry and App.tsx
   const appEntry =

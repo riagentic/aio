@@ -231,7 +231,31 @@ export function parseGlobalFlags(
   const flags: GlobalFlags = {};
   const rest: string[] = [];
 
-  for (const a of raw) {
+  // Flags that REQUIRE a value accept both `--k=v` and `--k v`. Only the
+  // equals form used to be understood, so `am dispatch … --body '{"a":1}'`
+  // silently passed the literal "--body" and the JSON as positional args —
+  // the method then received "--body" as its first argument and failed inside
+  // Immer, which reads like a bug in the app rather than a mistyped command.
+  // Flags whose value is OPTIONAL (--wait, --client) are deliberately absent:
+  // there, `--wait 5` cannot be told apart from `--wait` plus an argument.
+  const takesValue = new Set([
+    "--port",
+    "--body",
+    "--filter",
+    "--lines",
+    "--entry",
+    "--transport",
+    "--app",
+  ]);
+  const expanded: string[] = [];
+  for (let i = 0; i < raw.length; i++) {
+    const a = raw[i]!;
+    if (takesValue.has(a) && i + 1 < raw.length) {
+      expanded.push(`${a}=${raw[++i]}`);
+    } else expanded.push(a);
+  }
+
+  for (const a of expanded) {
     if (a === "--json") flags.json = true;
     else if (a === "--quiet") flags.quiet = true;
     else if (a.startsWith("--port=")) {

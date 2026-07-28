@@ -120,6 +120,23 @@ shows **Build Error** or **Runtime Error**. Opens Electron or browser.
 | `--force`                                 | Skip bundle cache — always rebuild `dist/app.js`                                     |
 | `--release`                               | Android release build (default: debug)                                               |
 
+### Which "title" names what
+
+Both exist, both matter, and `deno.json`'s does double duty — which is why it
+reads ambiguously:
+
+| Setting                      | Names                                                                              |
+| ---------------------------- | ---------------------------------------------------------------------------------- |
+| `deno.json` `"title"`        | the **binary/APK name** (slugified), and the window title if nothing else sets one |
+| `aio.run({ ui: { title } })` | the **window / browser tab title** only — never the binary                         |
+| `--name=X` (build)           | the binary name for this build, overriding `deno.json` `"title"`                   |
+| `--title=X` (runtime)        | the window title for this run, overriding `ui.title`                               |
+
+Window-title resolution is `--title` › `ui.title` › `deno.json "title"` ›
+`"AIO App"`. So setting only `deno.json "title"` gives you a matching binary
+name and window title; add `ui.title` when you want a spaced, human-readable
+window title over a slugged binary (`"Llama Master"` vs `llama-master`).
+
 ## compile:browser (standalone binary)
 
 ```sh

@@ -12,8 +12,10 @@ import { createDB, type DB, initSchema, loadTables } from "../db/mod.ts";
 import type { TableDef } from "./sql.ts";
 import { deepMerge } from "../state/deep-merge.ts";
 import { resolveKvPath } from "./paths.ts";
+import { resolve } from "@std/path";
 import { appDirs } from "./app-dirs.ts";
 import { AioError, type ReportErrorOpts } from "../diagnostics/error.ts";
+import { makeRedactor } from "../diagnostics/redact.ts";
 import { migrateSchema, PERSIST_SCHEMA_VERSION } from "./persist-schema.ts";
 import type { Log } from "../diagnostics/logger.ts";
 import type { CheckpointData, DiagnosticsHooks } from "../diagnostics/mod.ts";
@@ -123,6 +125,9 @@ export interface BootConfig<S> {
    *  WAL + synchronous=NORMAL). An app whose data is expensive to lose — a
    *  wallet, a ledger — wants `synchronous = FULL`; a cache does not. */
   dbPragmas?: string[];
+  /** Action types whose payload the journal must NOT record — forwarded from
+   *  the app config (a passphrase argument must not land in a recovery file). */
+  redactActions?: readonly string[];
   initialState: S;
   shouldPersist: boolean;
   persistKey: string;
@@ -204,6 +209,25 @@ export async function bootStorage<S>(
   } = cfg;
 
   let state = initialState;
+
+  // Two homes are a trap, and a silent one. `dbPath` moves ONLY the database:
+  // `auth.db`, `tls/`, `meta.json`, the journal and any previously-written
+  // `state.db` stay under the app home — so an app that resolves its own data
+  // root ends up with its files split across two places, one of which it is no
+  // longer looking at. Risoto found a complete, stale, unguarded wallet
+  // database that way (2026-07-28). `appDir` is the knob that moves everything;
+  // say so once, at the moment the split is created.
+  if (dbPathOverride && dbPathOverride !== ":memory:" && !cfg.appDir) {
+    const home = appDirs(appId, cfg.appDir).home;
+    if (!resolve(dbPathOverride).startsWith(resolve(home) + "/")) {
+      log.warn(
+        `dbPath puts the database at ${dbPathOverride}, but everything else ` +
+          `(auth.db, tls/, meta.json, the journal) stays under ${home} — two ` +
+          `homes, and files already written to the old one are still there. ` +
+          `Pass appDir to move the whole app directory instead.`,
+      );
+    }
+  }
 
   // ── 1. SQLite ─────────────────────────────────────────────────────
   const dbKeys = dbSchema ? Object.keys(dbSchema) : [];
@@ -468,6 +492,7 @@ export async function bootStorage<S>(
         dbPathOverride
           ? dbPathOverride + ".journal"
           : appDirs(appId, cfg.appDir).journal,
+        { redact: makeRedactor(cfg.redactActions) },
       )
       : null;
 

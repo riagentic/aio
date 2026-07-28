@@ -1,5 +1,419 @@
 # Changelog
 
+## 1.0.0-alpha39 — pin it, price it, redact it (2026-07-28)
+
+### A list that grows no longer re-ships itself
+
+`s.items.push(x)` already travelled as one `add`, but the equally idiomatic
+`s.items = [...s.items, ...batch]` is a `replace` carrying the whole array — so
+a list growing to 10k items re-sent all 10k on every commit, quadratic over a
+scan. A hardware-wallet scan had to hand-throttle its own state writes to stay
+under vitals PRESSURE because of it.
+
+Whole-array replacements are now rewritten as their appends, at the seam where
+patches are born (the composed reducer) — the last place the PREVIOUS slice is
+still in hand, since by broadcast time only the new state is left and the prefix
+can no longer be proven. Only the unambiguous case is touched: the old array is
+a prefix of the new one **by identity**, and the tail is cheaper than the array
+it replaces. A reorder, an in-place edit, a shrink, or a fresh array of
+equal-looking objects all fall through as the original `replace` — a wrong guess
+here corrupts state rather than merely costing bytes.
+
+### Worker cells work in compiled binaries — and always did
+
+`cell-worker-pool` warned that "compiled binaries don't support cell workers
+yet", and it was wrong: Deno embeds the entry and reports it as `file:///…`, so
+a compiled app takes the normal path and its worker cells really do run
+off-isolate. The claim outlived the constraint by a long way, and it was in the
+docs and the roadmap as a known limitation. `test:build` now measures the
+isolation in a real compiled binary rather than trusting a log line.
+
+Also compiled-binary-only: `deno compile` cannot trace a bare specifier behind
+`await import()`, so the lazy `@std/path` in the title resolver was not embedded
+and threw inside the binary — swallowed by a catch, leaving the app with the
+"AIO App" fallback title as though it had simply found no `title` field. Now a
+static import.
+
+### `am` accepts `--flag value`, not only `--flag=value`
+
+`am dispatch … --body '{"a":1}'` silently passed the literal `--body` as the
+method's first argument, which then failed inside Immer — reading like a bug in
+the app rather than a mistyped command. Flags that require a value now accept
+both forms. Flags whose value is optional (`--wait`, `--client`) deliberately do
+not: there, `--wait 5` cannot be told apart from `--wait` plus an argument.
+
+### The suite gets a fresh app home every run
+
+Tests spawn real apps, and a real app writes durable files — `state.db`, the
+CRDT op-log, `launch.json`. The suite pointed those at `.aio-test-home` and
+never cleaned it, so they accumulated across runs while `appId` stayed fixed.
+That is a wrong-answer machine, not untidiness: `e2e-sync-browser` asserted
+"exactly one op in the op-log", gained a row per run, and therefore passed
+exactly once on a virgin machine and was red forever after — while staying green
+on CI, which always has a fresh checkout. It was read as a flake for a long time
+and "fixed" with polling, which could not have helped. One reset before each run
+removes the class; within a run tests still share the home, since some
+deliberately hand state to each other.
+
+### `redactActions` — one list, every place an action is recorded
+
+`journalRedact` is now **`redactActions`**, and it covers all three sinks: the
+durable journal, the in-memory timeline `am timeline` prints, and
+`logs/actions.jsonl`. The old name shipped in no release; a config key that says
+"journal" while governing three recorders would be a lie in an API whose whole
+job is a security guarantee.
+
+The reason is the more interesting part. Redaction was added because a wallet's
+`journal: true` wrote its unlock passphrase to `vault.db.journal` in cleartext,
+next to the AES-GCM vault it opens. That fix covered the journal — and the same
+passphrase stayed in the timeline ring, where `am timeline` prints it and no
+lock-and-wipe can reach it. **A redaction that covers only the sink you thought
+of is worse than none, because it is believed.** So the predicate is now built
+once at boot and handed to all three; they cannot diverge.
+
+Also fixed while testing it: **the option never worked at all.** `redactActions`
+was typed, validated, documented and read by the journal — and the CellsConfig →
+AioConfig bridge never copied it, so
+`aio.run({ journal: true,
+redactActions: [...] })` wrote the passphrase to disk
+regardless. The unit tests passed because they tested `createJournal` directly
+instead of a booted app.
+
+This is the second option lost at that bridge (`strictOrigin` was the first), so
+it is now a gate rather than another one-line patch:
+`tests/config-bridge-completeness.test.ts` fails when a `CellsConfig` key is
+neither carried across the bridge nor recorded — with the consumer that reads it
+— as deliberately exempt, and fails again when an exemption names a reader that
+no longer exists. A silently dead config option is not shippable.
+
+Details: a redacted action keeps its type, seq, timestamp and the state
+**paths** it changed (replay ordering and `am timeline`'s "what did it touch"
+are unaffected); its payload and the before/after values it wrote become
+`"[redacted]"`. A trailing `*` matches by prefix (`vault:*`) — a list of
+individual method names is the list that goes stale the day someone adds
+`unlockWithFile`, and a stale redaction list fails open.
+
+### Diagnostic artifacts have a lifecycle
+
+Turning `actionLog` or `checkpoint` off stopped new writes and left everything
+already written — in one real case a passphrase, world-readable, indefinitely.
+Off now means the artifact does not exist: aio removes its own
+`actions.jsonl`/`checkpoint.json` at boot when the writer that owns them is
+disabled, including when diagnostics are off wholesale, and says so at info
+level rather than deleting quietly.
+
+### Three things that were harder to diagnose than they should have been
+
+- **Every full-state broadcast now says why** at debug level. The size-threshold
+  path already did; the fallback did not — which made the expensive case the
+  invisible one (438 KB frames, 28 of them in 20 s, nothing in the log pointing
+  at them). It now names the reason: a `"full"`-strategy cell, a round with no
+  patches, or no patch matching that client's subscriptions.
+- **"cell worker did not become ready"** no longer leads with "does the app
+  entry call `aio.run()`?" — the one thing that is almost always true, and a
+  bisect to rule out. A worker cell re-imports the app entry, so every top-level
+  side effect in it runs again inside the worker before the handshake; ~20 ms of
+  file I/O was enough to stall boot. The message says that, and names the guard
+  (`isCellWorker()`).
+- **`dbPath` outside the app home warns once.** It moves only the database:
+  `auth.db`, `tls/`, `meta.json` and the journal stay where they were, so an app
+  that resolves its own data root ends up with two homes and a complete, stale,
+  unguarded copy of its database in the one it stopped looking at. `appDir`
+  moves everything; the warning says so at the moment the split is created.
+
+### `am cost` — the number behind aio's own warnings
+
+aio tells every app its state might be too big, in three subsystems — `aiol`'s
+typed-array hint, its "N state keys across M cells" summary, the pressure
+monitor's "reduce state size, raise syncIntervalMs, or use cell-level ui
+filters" — and ships all three remedies. It gave nobody a way to find out
+whether they had the condition. The consequence, reported honestly: _"I have
+been told about my 91 state keys on every `aiol` run for four rounds and have
+ignored it every time, because acting means a refactor and I could not tell
+whether the warning applied to me."_ A hint that cannot be triaged trains people
+to skim — the same argument that got `aiol`'s `tests/` blindness fixed.
+
+```
+$ am cost
+cell  pushes/s    bytes/s     mean  p95 reduce   state  top keys by bytes
+hw         1.0   7.7 KB/s   7.7 KB      0.4 ms  7.9 KB  cpuHistory 2.1 KB · coresUtil 1.8 KB · gpus 1.4 KB
+chat       0.0          —        —      3.1 ms    15 B  (idle)
+──────────────────────────────────────────────────────────────────────────────
+per client             8.1 KB/s
+clients connected         3  24.3 KB/s   (all surfaces)
+full resends       10%  2 of 20 state pushes (+5 acks/diagnostics)
+```
+
+`--json`, `--cell=X`, `--window=5m`, `--keys`. Always on: bounded rings on a
+path that already serializes, because this question gets asked _after_ something
+feels slow, and an opt-in diagnostic is never enabled then.
+
+**Why it is in the framework at all.** Total bytes an app could measure itself
+(attach a socket, count). Per-cell, per-key attribution it cannot: which cell
+caused a push and which keys were in the diff exists only inside the broadcast
+path. "You push 24 KB/s" makes you worry; "19 KB of it is `hw.cpuHistory`" tells
+you what to do. That narrower claim is the one that clears the bar.
+
+**Correct, or not shipped.** The acceptance condition was explicit — _"a cost
+number that is plausible but wrong is worse than no number, because people act
+on it"_ — so the wire totals are the exact byte length of every frame handed to
+a socket, and a test holds them against a real WebSocket client counting its own
+inbound bytes: **they must be equal, not close**. Building it to that standard
+caught two bugs in the measurement itself:
+
+- Metering the broadcaster missed the handshake, acks and diagnostics — 686 B
+  reported against 9805 B actually received. The meter moved to the socket,
+  which is the one place every frame passes through.
+- Classifying every non-patch frame as a "full resend" turned a wall of 40-byte
+  acks into the headline _"71% — most frames send the WHOLE state"_. It is 9%.
+  Acks and diagnostics are now their own category: real wire bytes, not state
+  pushes. Both mutations are covered by tests.
+
+Per-cell attribution counts payload **content**; wire totals include the
+envelope and JSON-Patch paths. They are reported separately and never added,
+because the sum would be a number that looks right and is not.
+
+### Round four — the three open defects, plus the harness for aio's own claim
+
+- **`skipIfRunning` reached the wrong API.** It shipped on the imperative
+  `schedule.every(id, ms, action, opts)` and was absent from **`ScheduleDef`** —
+  the declarative shape `aio.run({ schedules: [...] })` takes, which is what
+  `am create` scaffolds, what the docs show, and what every long-lived poller
+  uses. Not types-only: `start()` never forwarded it either. So the feature
+  written to delete the hand-rolled `if (s.refreshing) return` landed where
+  nobody could reach it. Now on both.
+
+- **A `perfBudget.methods` key naming a method that doesn't exist is reported.**
+  One app declared 17 per-method budgets adopting the feature; one named no
+  method at all and had never applied to anything. Nothing would ever have said
+  so — the symptom is a violation naming the METHOD, which sends you to read the
+  method instead of the config. Same class as `strictCells` one layer up: it
+  throws under `strictCells`, warns otherwise, and lists the cell's real
+  methods.
+
+- **`absent()` called a component that rendered `null` "present".** It has a
+  surface node (it ran) but put nothing on screen, and "did it render anything"
+  is the question being asked — the docstring's own example was the failing
+  case. Now: showing = an element, a child that shows something, or text.
+
+- **`testMultiClient` — aio's central claim, made testable.** The promise that
+  sells the framework is that an Electron window, a browser tab and `am` all
+  read the same state with no transport code. A shipped app with two of those
+  clients reported: _"I have never tested two of them at once, because there is
+  nothing to test them with… so the claim I lean on hardest is the one my
+  281-test suite says nothing about."_ Now: N real WebSocket clients over one
+  real server, with `converged()`, `dispatchAll()` for the same-action-same-tick
+  case, and per-client views. Nothing simulated — a harness that faked the
+  transport would report success for the one thing it exists to check.
+
+  Building it caught two bugs in itself, which is the point of writing tests
+  against real transport: `converged()` could pass **trivially** in the window
+  between a send leaving a socket and the server seeing it (every client still
+  agrees — because nothing has happened yet), and `dispatchAll` used a fixed
+  sleep that made correct behaviour look like a lost update at 20ms and correct
+  at 60ms. Both now wait for the work, not the clock.
+
+- **A vanished log directory heals itself.** Delete an app's log directory —
+  `/tmp` cleaned, a deploy replacing the tree, a test removing its sandbox — and
+  every subsequent line failed with `[logger] write failed`, so the app lost its
+  voice until restart. It now recreates the directory and retries once; a
+  genuinely unwritable path is still reported.
+
+- **Persisted-state schema evolution is documented.** The behaviour was defined
+  all along, in the restore merge, and never written down: a removed field is
+  dropped, a retyped one keeps the schema's default, a rename is a remove plus
+  an add (carry it with `version` + `onMigrate`), and an empty-object schema
+  means "dictionary — keep every key". Now a table in
+  [auto-persist](docs/persistence/auto-persist.md), pinned by tests so the docs
+  cannot drift from the merge.
+
+### llama-master's open list — closed, with two refusals
+
+Working the incremental report's remaining items. Rule of thumb applied
+throughout: an item is accepted when it makes the FRAMEWORK more correct, and
+refused when it would only make one app shorter.
+
+- **Selectors work under `testCell`.** `models.visible()` threw "not a function"
+  in the tool that presents itself as the unit-level one, while working in
+  testUI, bootCells and production — an inconsistency, not a design, and it
+  pushed any test touching a selector out to `bootCells` for no visible reason.
+  The binding is restored on teardown, so a later harness in the same file
+  re-binds for real.
+
+- **`AppDirs.cache` is back.** Removing it asked "does the framework write
+  here?" when the right question is "does the layout PROMISE apps a place for
+  regenerable bulk?" It does — that's what tier ② means — and one app had 20 GB
+  of it, so the choice was hand-computing the path (which it did) or putting the
+  bulk in `data/` and doubling every backup. The docs described the field the
+  whole time; the code was the thing that was wrong.
+
+- **`aiol` no longer warns about an `appId` you already moved.** It reported
+  "move to aio.run({ appId })" at apps that pass it there — describing work
+  already done. Now that case is a hint about the harmless duplication, and the
+  `--safe-fix` codemod is only offered when the move genuinely hasn't happened.
+
+- **Per-method perf budgets.** The effect budget couldn't tell "slow because it
+  awaits cmake for four minutes" from "slow because it blocks the loop", so an
+  I/O-heavy app raised both budgets globally and "lost the signal everywhere to
+  silence one poller". `perfBudget.methods["cell:method"] = { effect, timeout }`
+  keeps every other method strict, and a violation now names the method rather
+  than the shared `cell:__exec` effect type.
+
+- **`schedule.every(id, ms, action, { skipIfRunning: true })`.** Every polling
+  cell opened with `if (s.refreshing) return`. Hand-rolled, that guard needs a
+  state field and a reset in a `finally` — and if the tick throws in between,
+  the flag stays `true` and the poll is dead until a restart. The scheduler
+  already knows when a dispatch settles, so it owns the whole thing, clearing on
+  rejection too. Opt-in: silently dropping a tick that used to fire would be a
+  behaviour change, and some schedules overlap on purpose.
+
+- **`testUI(App, "name", opts, fn)`.** Adopting `seed` meant rewriting one-line
+  tests into the handle form by hand.
+
+- **A `waitFor` timeout is readable again.** It stringified the entire surface,
+  uncapped — tens of KB per failure, with the assertion scrolled away. Now: a
+  named tree first, the JSON only when it's small enough to help.
+
+**Refused, with reasons.** `own.set` returning a value into state would punch a
+hole in `(state, action) → (state, effects)` — the factory can call a cell
+method with what it learned, and that pattern is now documented instead. A
+`progress` primitive stays out: three features needing the same shape _inside
+one app_ is an app-level helper, and the danger that made it feel urgent (the
+silent proxy write) is already gone.
+
+### llama.master, round two — the friction found by building 1000 more lines
+
+The same app came back after another ~1000 lines, four kata audits and a suite
+grown 208 → 271 tests. Its verdict on the previous batch: **7 → 9.2**, every one
+of the eight items verified fixed in their own app, three of its own claims
+withdrawn with evidence. What follows is the new list.
+
+- **`aiol` was blind to `tests/`.** It scanned `src/`, `cells/` and the project
+  root — never the directory aio's OWN convention mandates ("tests all live in
+  `tests/`, never beside their source"). So an app with 271 passing tests was
+  told `Tests: 0` and "cell X has no test file" for every cell: 8 of its 14
+  hints were this one false positive. The cost isn't the wrong number — _"a
+  linter which is confidently wrong about 8 items trains you to skim the
+  other 6. I nearly missed a genuine post-await hint in the noise."_ Tests are
+  now collected (separately from app sources, so app-code checks don't start
+  flagging fixtures), and a cell defined inside a test counts as a fixture, not
+  app surface.
+
+- **`testUI({ seed })` — state a cell would otherwise get from the machine.**
+  The biggest ask, and it "bit me three times today": a cell populated from real
+  telemetry made its UI untestable, because "does a stranded CPU-only placement
+  get called out" either ran against whatever the developer's GPU was doing that
+  second, or didn't run. That report ended up deriving the expectation at
+  runtime and asserting whichever branch the hardware chose. `seed` installs
+  state before the first render (per-cell shallow merge over the declared
+  initial state); `ui.seed()` moves it mid-test. An unknown cell name throws,
+  listing what booted — a silently-ignored seed looks like a pinned fixture
+  while testing nothing.
+
+- **`ui.absent(name)` / `ui.present(name)`.** "This component is not rendered"
+  was `assert(!ui.html().includes("placement-advice"))` — stringly-typed, and it
+  keeps passing for the wrong reason after a class rename. Composes with
+  `waitFor`.
+
+- **A component can carry a `t` handle.** Renaming `CtxPresets` → `CtxControls`
+  broke a test that addressed the component by its identifier — a refactor, not
+  a behaviour change. `t` was already the recommended handle for elements. It is
+  **additive**: the function name stays authoritative, because `t` is also a
+  legitimate data prop that components forward to inner elements (this repo's
+  own toolbar fixture does exactly that, and overriding the name broke sibling
+  de-duplication — caught by the existing tests).
+
+- **`am surface --component=X / --path=A/B / --depth=N`.** One page serialised
+  to a 32 KB single-line blob and reading one component out of it meant piping
+  into Python — the one place `am`, "the best debugging tool I have used in a
+  framework", still forced a script. A filter that matches nothing exits
+  non-zero and lists the components that ARE there.
+
+- **`<fieldset disabled>` and friends are typed.** `disabled` on a fieldset is
+  _the_ way to lock a form section, and it wasn't in the attribute map. Fixed
+  with a bounded audit of the elements whose attributes change behaviour:
+  `fieldset`, `optgroup`, `details`, `dialog`, `progress`, `meter`, `td`/`th`,
+  `video`, `audio`, `canvas`.
+
+- **`afterRender` + `useRef` is documented** as the "re-derive when inputs
+  change" pattern, including why it settles in one extra pass and the rule that
+  keeps it from looping (the reaction must not change anything the key is
+  derived from). It was found by reading AIR's source, which is a docs failure.
+
+### An app pins the aio version it was written against
+
+`am create` scaffolds an app that imports the framework through a gitignored
+`dep/aio` symlink. Portable `deno.json`, but the repo said **nothing** about
+which aio it was written for — so a clone a month later linked to whatever
+version happened to be installed, and "it compiled last month" was not a fact
+anyone could reproduce.
+
+Now the version is recorded in the app, committed with the code:
+
+```jsonc
+{ "aioVersion": "v1.0.0-alpha38", … }
+```
+
+```sh
+am create my-app                          # pins the newest RELEASE (not the tip)
+am create my-app --aio-version=main       # …or follow the branch tip
+am pin                                    # what this app uses, and what's available
+am pin v1.0.0-alpha38                      # switch: provision, relink, record
+am pin --latest
+```
+
+The clone path is now reproducible on a machine that has never seen the app:
+`git clone && am fix && deno task dev` reads the pin, provisions that exact
+version, and links it.
+
+**Multiple versions coexist.** `install.sh` clones aio with full history, so any
+tag is provided as a **git worktree** under `~/.local/lib/aio-versions/<tag>/` —
+~8 MB of source per version, git objects shared rather than re-downloaded, and
+several apps on one machine can pin different versions simultaneously.
+`AIO_VERSIONS_DIR` moves the store (containers, CI).
+
+**Built to survive aio's own majors.** Three rules, each of which a naive
+"latest tag" implementation gets wrong: a committed pin is always **exact**
+(`am pin main` records `main-<commit>`, so "follow main" is an action you
+re-run, not a stored state that mutates an app's framework behind its back);
+`--latest` means newest **within the app's major**, with `--major` to cross
+deliberately; and versions are ordered by **semver, not tag date** — this repo
+already contains an abandoned `v1.0.0-beta1` tagged before `v1.0.0-alpha38`, and
+post-1.0 a maintenance release can be tagged after a new major.
+
+**The pin covers the framework's dependencies too.** A source-layout app's
+import map supplies the bare deps aio needs (`immer`, `esbuild`, `@std/*`)
+because `dep/aio/**` resolves through the _app's_ map. aio pins `immer@10.2.0`
+while a scaffolded app said `^10` — so the day aio needs `immer@^11`, that app
+would break at runtime while claiming to be pinned. `am pin` now copies the
+exact versions the pinned release declares, and prints each change; deps the app
+never declared are never added.
+
+**Only releases that actually happened are pinnable.** A version tag has to be
+reachable from `origin/main`; a tag on an orphaned commit names a release that
+was abandoned. This is not hypothetical — the first live run of `am create`
+after the ordering fix pinned `v1.0.0-beta1`, an abandoned local feature-freeze
+tag from three weeks earlier that out-ranked the real latest release by semver.
+The ordering was right; the data wasn't. (The stale tag is deleted; it was never
+pushed.)
+
+**A created app is pinned all the way down.** The scaffold writes dep ranges
+(`immer@^10`) while the framework pins exact versions, so `am create` now syncs
+them at scaffold time too — otherwise a brand-new app was half-pinned from birth
+and only `am pin` fixed it.
+
+**Drift is a failure, not a note.** `am pin` exits non-zero when `dep/aio`
+points somewhere other than the pin (usable as a CI check), and `aio doctor`
+fails the `framework pin matches dep/aio` line. `am fix` corrects it, and
+reports an unpinned app as something to fix rather than staying quiet about it.
+
+Two escape hatches stay: `--aio=<path>` / `am create --mirror` link a live
+checkout for framework development, and a real directory at `dep/aio` is treated
+as a vendored copy and never replaced.
+
+Also: `journalRedact` (from the same cycle) is now in the API snapshot — it had
+landed in `CellsConfig` without regenerating it, which the gate caught.
+
 ## 1.0.0-alpha38 — one directory (2026-07-28)
 
 Everything an app writes now lives under **`~/.<appId>/`**, and the one part you

@@ -296,6 +296,27 @@ export function initStandalone<S, A, E>(
     mode: "standalone",
   };
 
+  // Test-harness seam: install a starting state before the first render, so a
+  // test can pin the state a cell would otherwise get from the machine it runs
+  // on (real telemetry, a device, the clock). Without it, a test of "what does
+  // the UI do when there are two GPUs" either runs against whatever the
+  // developer's box reports that second, or doesn't run — one field report
+  // ended up asserting whichever branch the hardware chose (llama.md wishlist
+  // #1). Not part of the app surface: `_seedState` is only reachable from the
+  // harness, and it is a plain state install, not a dispatch, precisely because
+  // it must look like "the app started this way".
+  _seed = (partial: Record<string, unknown>): void => {
+    const merged = { ...(state as Record<string, unknown>) };
+    for (const [cellName, slice] of Object.entries(partial)) {
+      merged[cellName] = {
+        ...(merged[cellName] as Record<string, unknown> ?? {}),
+        ...(slice as Record<string, unknown>),
+      };
+    }
+    state = merged as S;
+    _applyFullState(merged);
+  };
+
   _app = app as AioApp;
   return app;
 }
@@ -363,6 +384,7 @@ export function _resetState(): void {
   _listeners.clear();
   _resetSignals();
   _resetCellBindings(); // release module-singleton cells so they re-bind
+  _seed = null;
   _resetSchedules(); // reset the virtual clock + pending schedules
   // Dispose every owned resource this runtime acquired. `await using ui` /
   // `h.dispose()` must leave no watcher, socket or child process behind — and a
@@ -391,6 +413,36 @@ export function _reset(): void {
 // ensureConnected()/aio.run() compose + bind whatever has been defined.
 
 let _cellApp: AioApp<Record<string, unknown>, Msg> | null = null;
+
+// Set by the running standalone app (see `_seed` above); cleared on reset.
+let _seed: ((partial: Record<string, unknown>) => void) | null = null;
+
+/** Install a starting state for the booted cells — harness only.
+ *
+ *  Throws when a key names no booted cell: a silently-ignored seed is a test
+ *  that asserts against the developer's machine while looking like it pins a
+ *  fixture, which is worse than no seeding at all.
+ *  @internal */
+export function _seedState(partial: Record<string, unknown>): void {
+  if (!_seed) {
+    throw new Error(
+      "[aio] seed: no standalone app is running — seed after the cells boot",
+    );
+  }
+  const known = Object.keys(
+    (_cellApp?.getState() ?? {}) as Record<string, unknown>,
+  );
+  const unknown = Object.keys(partial).filter((k) => !known.includes(k));
+  if (unknown.length > 0) {
+    throw new Error(
+      `[aio] seed: no booted cell named ${
+        unknown.map((u) => `"${u}"`).join(", ")
+      }` +
+        ` — booted cells: ${known.join(", ") || "(none)"}`,
+    );
+  }
+  _seed(partial);
+}
 
 function bootStandalone(
   cells: CellDef[],

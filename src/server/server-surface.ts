@@ -78,8 +78,8 @@ export async function renderHeadlessSurface(
     const handle = renderer.mount(container, App as any);
     try {
       const rootVnode = rstate._rootStateMap.get(handle)?.vnode ?? null;
-      // deno-lint-ignore no-explicit-any
       const node = surf.buildUISurface(
+        // deno-lint-ignore no-explicit-any
         rootVnode as any,
         full ? { maxText: Number.MAX_SAFE_INTEGER } : undefined,
       );

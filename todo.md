@@ -1,6 +1,6 @@
 # Road to 1.0.0-final
 
-Plan written 2026-07-04, current as of **v1.0.0-alpha38** (2026-07-26). **Core
+Plan written 2026-07-04, current as of **v1.0.0-alpha39** (2026-07-28). **Core
 principle:** all breaking changes die in alpha; beta = frozen surface,
 bugfix-only; 1.0.0 = boring. Shipped work lives in `CHANGELOG.md` — this file
 tracks only what remains.
@@ -45,7 +45,7 @@ Ten consecutive alpha releases with **no major/critical/blocker bug and no
 compat break**. A corruption-class bug found during an alpha resets the count —
 that is the gate working, not a setback.
 
-- Streak: **5** (alpha34 … alpha38). The alpha34 audit found six data-loss /
+- Streak: **6** (alpha34 … alpha39). The alpha34 audit found six data-loss /
   security HIGHs, which reset it; nothing since has been corruption-class in a
   RELEASED alpha. (Bugs caught while building an alpha — the alpha38 libraryMode
   log misplacement, the app-key split-brain — don't reset it: they never
@@ -105,13 +105,57 @@ the 64KB KV ceiling (gone with the SQLite move), `am restart` flag replay.
       cell holding megabytes still round-trips as one JSON blob per flush. A
       first-class "this slice lives in SQLite rows" strategy is the real fix;
       every app with a large cell currently hand-rolls it via `createDB`.
-- [ ] **Array patch granularity.** `push` emits an `add` patch (now documented),
-      but a _replacing_ mutation still ships the whole array. A
-      `pushPatch`-style helper — or Immer-level array diffing — would remove the
-      footgun instead of documenting around it.
-- [ ] **Worker cells in compiled binaries.** Currently they degrade to
-      in-isolate, and production is exactly where a wedged FFI call hurts most.
-      Needs the entry to be re-importable from inside the binary.
+- [x] **Array patch granularity.** DONE (alpha39) — a whole-array `replace`
+      whose old contents survive by identity is rewritten as its appends, at
+      patch-generation time. Only the provable case; anything else falls through
+      as a replace.
+- [x] **Worker cells in compiled binaries.** DONE (alpha39) — they already
+      worked; the "not supported yet" warning was stale (Deno embeds the entry
+      and reports it as `file:///…`). `test:build` now measures the isolation in
+      a real binary instead of trusting the log line.
+
+### The 2026-07-28 round (journal secrets, electron stderr, `am cost`)
+
+Closed: `redactActions` covers all three action sinks (and the bridge finally
+carries it — it had never reached a booted app); diagnostic artifacts are
+removed when their writer is off; every full-state broadcast says why; the
+"worker did not become ready" error leads with the real cause and the spec says
+it too; `dbPath` outside the app home warns about the split. Fixed by the
+reporter in-tree: journal `0600`, electron stderr filtering, `timeTravel`
+honoured, `broadcastTT` coalesced, `am cost` weighing unattributed bytes.
+
+- [ ] **Profile integrity.** `quick_check` at boot → restore from a rolling
+      `VACUUM INTO` snapshot → quarantine the damaged file. ~150 lines every app
+      that persists user data eventually wants; risoto wrote its own. Would be
+      `db.snapshot(path)` + `checkIntegrityOnBoot: true`. Feature-sized, so it
+      waits for a second app to ask — but it is the strongest remaining ask.
+- [ ] **A "degraded" escalation hook.** Best-effort subsystems (a cache that
+      refetches on failure) can fail forever while only writing stderr. After N
+      consecutive failures of the same guarded op, one structured event to the
+      app's log — not per-occurrence spam. Every app has these corners; each
+      currently invents its own escalation or has none.
+- [ ] **Time-travel subscribe-on-open.** Coalescing + the no-client gate cover
+      the realistic cases; the honest fix is that a client which never opens the
+      panel should receive nothing at all. Needs a `tt-subscribe` frame and a
+      touch of every transport — a protocol change, so not on a whim.
+
+Refused this round, with reasons:
+
+- **Redact by default, using the cell-visibility secret-name heuristic.**
+  Tempting, and it would have missed the exact case that leaked: the action was
+  `unlock:unlockWith`, and no part of that name matches `secret|key|passphrase`.
+  A heuristic that silently covers the easy names would replace an explicit list
+  with false confidence — the worst outcome for a security default. The list is
+  explicit, and `vault:*` makes whole cells the natural unit.
+- **Deriving the app directory from `dbPath`.** `dbPath` is a FILE path; a
+  framework inferring "and therefore your auth store, TLS key and journal live
+  in its parent" is exactly the implicit magic that fails quietly. `appDir`
+  already moves everything as one knob, so `dbPath` alone now warns about the
+  split it creates instead of guessing what was meant.
+- **`electronStderrFilter?: RegExp[]`.** The filter itself shipped (every aio
+  app on a hybrid-GPU Linux box hits the Mesa probe noise). The escape hatch is
+  speculative surface for one app; if a second app needs a different filter,
+  that is the moment to add it.
 
 ## Next, from the data-directory work
 
@@ -122,7 +166,71 @@ the 64KB KV ceiling (gone with the SQLite move), `am restart` flag replay.
       prerequisite: "swap the binary, keep the data" is only honest now that the
       data is in one place the binary never touches.
 
-## From the llama.master field report (2026-07-27) — what's left
+## From the llama.master field report — what's left
+
+Round one (alpha38) closed all eight ranked items; the reporter verified each in
+their own app and moved 7 → 9.2. Round two (after ~1000 more lines) is closed
+too: `aiol` sees `tests/`, `testUI({ seed })` pins machine-dependent state,
+`ui.absent()`/`present()`, a `t` handle on components,
+`am surface
+--component/--path/--depth`, the `<fieldset disabled>` typing gap,
+and the `afterRender` + `useRef` pattern is documented.
+
+Withdrawn by the reporter with evidence (do not re-open without a repro): the
+`testUI` rehydration flake (their own cross-test contamination — cells are
+process-wide singletons and one test's click landed a tab another test read),
+the live `am dispatch ui:go` revert (6/6 and 3/3 clean on re-test), the
+`<select>` bug (theirs, not aio's), and "no `am --json`" (it exists, and is in
+`am help` — a discoverability miss).
+
+Round three (llama-master's open list) closed: selectors bind under `testCell`,
+`AppDirs.cache` restored, the false `appId` warning, per-method perf budgets,
+`schedule.every({ skipIfRunning })`, `testUI(App, name, opts, fn)`, and a
+readable `waitFor` timeout.
+
+Refused, with the reason recorded so it isn't re-litigated:
+
+- **`own.set` returning a value into state** — it would punch a hole in
+  `(state, action) → (state, effects)`: an effect writing state directly is
+  invisible to the reducer, untracked by patches and unreplayable. The factory
+  calls a cell method with what it learned; documented in
+  `docs/state/methods.md`.
+- **A `progress` primitive** — three features needing the same shape inside ONE
+  app is an app-level helper. Both reports now agree it is "nice, not urgent"
+  since the danger it wrapped (the silent proxy write) is gone.
+
+Round five: `am cost` shipped — the last un-actioned item on their list. Their
+kill criterion deserves an answer on the record: _"If the diff is already
+granular enough that the honest answer is always 'a few hundred bytes', then
+this tool would confirm a non-problem forever — and the correct action is to
+delete the `aiol` hints instead."_ First measurements say **neither**: on a
+small state, patches routinely exceed `fullStateThreshold` and the whole state
+goes out (a 4.7 KB cell measured 29 KB/s to one client at ~12 pushes/s, 1 full
+resend in 11 pushes plus 23 acks). So the cost is real, it is often framing and
+full resends rather than the diff, and the hints stay — now with a number behind
+them.
+
+Still open:
+
+- [ ] **Per-method perf budgets, or an `io: true` marker.** Every method in that
+      app shells out or reads megabytes, so the global budgets had to be raised
+      to `{ reduce: 100, effect: 1000 }` + `effectTimeoutMs: 30_000` — which
+      loses the signal everywhere to silence one poller. A budget on the method
+      that runs cmake for four minutes would let the tight reducers keep a
+      strict one. Ranked #2 on their wishlist; the design question is whether it
+      hangs off the method (`{ io: true }`) or a per-method budget map.
+- [ ] **A `progress` primitive.** Both reports raised it; both now agree it is
+      "still nice, still not urgent" — the danger it wrapped (the silent proxy
+      write) is gone, so what remains is boilerplate.
+- [ ] **`am eval '<expr over cells>'`.** `am state`, `am sql` and `--json` cover
+      most of it; a general evaluator on a dev-only route is a real security
+      surface and needs a design, not a quick add.
+- [ ] **`schedule.every` with "skip if still running"** (llama-master #3) —
+      every polling cell hand-rolls an `inFlight` guard.
+- [ ] **Discoverability, twice over.** `pitfalls.md` existed and they didn't
+      find it; `am --json` was documented and they didn't find it. Both were
+      read-the- docs failures, and two in one report is a signal about the docs'
+      entry points rather than about one reader.
 
 Closed in alpha38: selector reads are reactive everywhere (the report's #1,
 which had cost it a whole `derive.ts` layer — now unnecessary), a refused write
