@@ -219,6 +219,37 @@ export function testCell(
       getState: () => state,
     };
 
+    // Bind SELECTORS against this harness's state. A selector is a pure function
+    // of the cell's own slice — exactly what `t.getState()` already exposes — so
+    // `models.visible()` throwing "not a function" here while working in every
+    // other harness was an inconsistency, not a design (llama-master #4). It
+    // pushed any test that touched a selector out of the unit-level tool and into
+    // `bootCells`, for no reason a reader of that test could see.
+    const selectors = f.__aio.selectors as
+      | Record<string, (s: unknown, full?: unknown) => unknown>
+      | undefined;
+    const restoreSelectors: (() => void)[] = [];
+    if (selectors) {
+      for (const [key, fn] of Object.entries(selectors)) {
+        const had = Object.getOwnPropertyDescriptor(f, key);
+        Object.defineProperty(f, key, {
+          value: (...args: unknown[]) => {
+            const own = (state as Record<string, unknown>)[prefix];
+            return args.length > 0
+              ? (fn as (s: unknown, ...a: unknown[]) => unknown)(own, ...args)
+              : fn(own, state as unknown);
+          },
+          enumerable: false,
+          configurable: true,
+          writable: true,
+        });
+        restoreSelectors.push(() => {
+          if (had) Object.defineProperty(f, key, had);
+          else delete (f as Record<string, unknown>)[key];
+        });
+      }
+    }
+
     function dispatch(action: Msg): unknown {
       const result = composed.reduce(state, action);
       state = { ...result.state };
@@ -403,7 +434,13 @@ export function testCell(
       },
     };
 
-    await fn(ctx);
+    try {
+      await fn(ctx);
+    } finally {
+      // Cells are module singletons: leave the def exactly as it was found, so
+      // a later `bootCells`/`testUI` in the same file binds its own selectors.
+      for (const restore of restoreSelectors) restore();
+    }
   });
 }
 

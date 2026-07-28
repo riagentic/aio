@@ -39,6 +39,11 @@ export type UIElementInfo = {
 export type UISurfaceNode = {
   /** Component function name (or "Anonymous") */
   component: string;
+  /** Stable alias from a `t` prop on the component — address it by this and a
+   *  later rename of the function is a refactor, not a broken test. Additive:
+   *  `component` stays authoritative, because `t` is also a legitimate data prop
+   *  that components forward to inner elements. */
+  handle?: string;
   /** AIR list key, when the instance was rendered with one */
   key?: string | number;
   /** Path from the root, e.g. "App/TodoList/TodoRow[42]" */
@@ -245,6 +250,19 @@ function walkComponent(
   // A resolved lazy() wrapper reports the loaded component's name.
   const name = fn._lazyName ??
     (fn.name && fn.name.length > 0 ? fn.name : "Anonymous");
+  // An ADDITIONAL stable handle when the component was given `t`. Addressing a
+  // component by its identifier couples a test to a rename — one report broke a
+  // test by renaming `CtxPresets` → `CtxControls`, a refactor rather than a
+  // behaviour change (llama.md, second update #4).
+  //
+  // Additive, never a replacement: `t` on a component is ambiguous — it is also
+  // a perfectly good DATA prop that a component forwards to an inner element
+  // (this repo's own toolbar fixture does exactly that). Overriding the name
+  // broke sibling de-duplication and ordinal access, so the function name stays
+  // authoritative and the handle is an alias you can also address.
+  const handle = typeof v.props?.t === "string" && v.props.t
+    ? v.props.t
+    : undefined;
   const keyPart = v.key !== undefined ? `[${v.key}]` : "";
   let path = parentPath
     ? `${parentPath}/${name}${keyPart}`
@@ -261,6 +279,7 @@ function walkComponent(
   }
   const node: UISurfaceNode = {
     component: name,
+    ...(handle ? { handle } : {}),
     ...(v.key !== undefined ? { key: v.key } : {}),
     path,
     elements: [],
@@ -317,6 +336,9 @@ export function buildUISurface(
 export function serializeSurface(node: UISurfaceNode): UISurfaceNode {
   return {
     component: node.component,
+    // The handle must survive the wire: `am surface --component=<handle>` and a
+    // remote testUI address it exactly as an in-process test does.
+    ...(node.handle !== undefined ? { handle: node.handle } : {}),
     ...(node.key !== undefined ? { key: node.key } : {}),
     path: node.path,
     ...(node.text !== undefined ? { text: node.text } : {}),
@@ -337,7 +359,8 @@ export function findComponents(
   const hits: UISurfaceNode[] = [];
   const visit = (n: UISurfaceNode) => {
     if (
-      n.component === component && (key === undefined || n.key === key)
+      (n.component === component || n.handle === component) &&
+      (key === undefined || n.key === key)
     ) hits.push(n);
     n.children.forEach(visit);
   };

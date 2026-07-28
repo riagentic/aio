@@ -241,6 +241,29 @@ export async function cmdUi(args: string[], flags: GlobalFlags): Promise<void> {
 
 // ── Actions ─────────────────────────────────────────────────
 
+/**
+ * Shape a named payload for the action type it is going to.
+ *
+ * Two protocols share one command. A plain redux-style action carries its
+ * payload directly (`{by: 1}`), but a CELL METHOD is called with positional
+ * arguments and the wire form is `{args: [...]}` — so `am dispatch
+ * nav:setPanelType panel=0 type=x` sent `{panel: 0, type: "x"}` to a method
+ * expecting `payload.args`, and failed with "Cannot read properties of
+ * undefined". That reads like a bug in the cell, and cost a real detour
+ * chasing one. `cell:method` is unambiguous in the type, so use it: named
+ * pairs become the method's single object argument, which is what a method
+ * taking named options wants anyway.
+ *
+ * Pure — exported for the test that pins both protocols.
+ */
+export function envelopePayload(
+  type: string,
+  named: Record<string, unknown>,
+): Record<string, unknown> {
+  const isCellMethod = type.includes(":");
+  return isCellMethod ? { args: [named] } : named;
+}
+
 export async function cmdDispatch(
   args: string[],
   flags: GlobalFlags,
@@ -258,9 +281,28 @@ export async function cmdDispatch(
       outError("invalid --body JSON", mode);
       Deno.exit(1);
     }
+    // `--body` wants the whole ENVELOPE, but the natural guess is that it wants
+    // the payload — and that guess used to fail deep inside Immer, with an
+    // error that read like a bug in the app's cell rather than a wrong command.
+    //
+    // The type itself decides, not the body's shape: if the caller already
+    // NAMED the action positionally (`am dispatch nav:setPanelType --body …`),
+    // the body cannot be the envelope, because the envelope would have to
+    // carry that same type. Sniffing for a `type` key instead would be wrong
+    // exactly where it matters — `{"panel":0,"type":"nfts"}` is a payload whose
+    // own field is called `type`, which is how this was first hit.
+    const body = action as Record<string, unknown> | null;
+    if (
+      body !== null && typeof body === "object" && !Array.isArray(body) &&
+      args.length > 0
+    ) {
+      action = { type: args[0], payload: envelopePayload(args[0]!, body) };
+    }
   } else if (args.length === 0) {
     outError(
-      "usage: am dispatch <Type> [key=val ...] or am dispatch --body='{\"type\":...}'",
+      "usage: am dispatch <cell:method> [key=val ...] " +
+        "(a cell method takes ONE object argument, or positional JSON values) " +
+        'or am dispatch <Type> --body=\'{"type":...,"payload":...}\'',
       mode,
     );
     Deno.exit(1);
@@ -274,7 +316,7 @@ export async function cmdDispatch(
       // Otherwise → method-style positional args: { args: [...] }
       const hasNamedArgs = rest.some((a) => a.includes("="));
       if (hasNamedArgs) {
-        action = { type, payload: parsePayload(rest) };
+        action = { type, payload: envelopePayload(type!, parsePayload(rest)) };
       } else {
         // Parse each positional arg as JSON if possible, else string
         const parsed = rest.map((a) => {

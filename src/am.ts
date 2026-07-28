@@ -78,6 +78,8 @@ import {
 import type { CmdHandler } from "./am/am-types.ts";
 import { detectMode, outError } from "./am/am-output.ts";
 import { cmdBackup, cmdData, cmdRestore } from "./am/am-cmd-data.ts";
+import { cmdPin } from "./am/am-cmd-pin.ts";
+import { cmdCost } from "./am/am-cmd-cost.ts";
 import { parseGlobalFlags } from "./am/am-utils.ts";
 
 // ── Command map ────────────────────────────────────────────
@@ -120,6 +122,7 @@ const COMMANDS: Record<string, CmdHandler> = {
   logs: cmdLog,
   errors: cmdErrors,
   metrics: cmdMetrics,
+  cost: cmdCost, // what aio moves on your behalf, and where it comes from
   top: cmdTop,
   health: cmdHealth,
   discover: cmdDiscover,
@@ -130,6 +133,7 @@ const COMMANDS: Record<string, CmdHandler> = {
   // Meta
   create: cmdCreate,
   new: cmdNew,
+  pin: cmdPin, // which aio version this app builds against
   link: cmdLink, // just the dep/aio symlink
   fix: cmdFix, // full clone repair (symlink + env + electron + config + …)
   update: cmdUpdate,

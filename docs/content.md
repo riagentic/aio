@@ -133,6 +133,7 @@
 - [Upgrade: 1.0.0-alpha35 → 1.0.0-alpha36](upgrade/from-alpha35-to-alpha36.md) — Purely additive.
 - [Upgrade: 1.0.0-alpha36 → 1.0.0-alpha37](upgrade/from-alpha36-to-alpha37.md) — DEFAULTPRAGMAS, connectCli or connectCliUDS from "aio" — one command
 - [Upgrade: 1.0.0-alpha37 → 1.0.0-alpha38](upgrade/from-alpha37-to-alpha38.md) — automatically, on the first boot.
+- [Upgrade: 1.0.0-alpha38 → 1.0.0-alpha39](upgrade/from-alpha38-to-alpha39.md) — ever shipped in a release, and everything else is additive.
 - [Upgrade from v1.0.0-alpha4 to v1.0.0-alpha5](upgrade/from-alpha4-to-alpha5.md) — None.
 - [Upgrade from v1.0.0-alpha5 to v1.0.0-alpha6](upgrade/from-alpha5-to-alpha6.md) — None.
 - [Upgrade from v1.0.0-alpha6 to v1.0.0-alpha7](upgrade/from-alpha6-to-alpha7.md) — mod.ts no longer re-exports renderer primitives.

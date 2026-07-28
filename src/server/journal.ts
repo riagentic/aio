@@ -8,6 +8,9 @@
 // (SIGKILL). Set `sync: true` to fsync every append for power-cut durability
 // (slower). Replay is by re-reducing — state transitions only, effects dropped —
 // so it never re-runs I/O.
+import { noRedaction, REDACTED } from "../diagnostics/redact.ts";
+import type { Redactor } from "../diagnostics/redact.ts";
+
 export type JournalEntry = {
   seq: number;
   type: string;
@@ -64,8 +67,23 @@ export function parseJournal(text: string): JournalEntry[] {
 
 export function createJournal(
   path: string,
-  opts: { sync?: boolean } = {},
+  opts: {
+    sync?: boolean;
+    /** Action types whose PAYLOAD must never be written to disk.
+     *
+     *  The journal exists to replay the debounce-window tail after a hard
+     *  kill, and to do that it only needs to know that the action happened —
+     *  but it records the arguments too, and for an action like a wallet's
+     *  `unlock:unlockWith` those arguments ARE the secret that protects
+     *  everything else in the same directory. Listed types keep their
+     *  sequence and timestamp; the payload is replaced.
+     *
+     *  Built once at boot (`makeRedactor`) and shared with the timeline and
+     *  action log, so the three sinks cannot disagree about what is secret. */
+    redact?: Redactor;
+  } = {},
 ): Journal {
+  const redacted = opts.redact ?? noRedaction;
   const wmPath = path + ".wm";
   let seq = 0;
   let wm = 0;
@@ -80,7 +98,13 @@ export function createJournal(
   if (wm > seq) seq = wm;
 
   const enc = new TextEncoder();
-  const mode: Deno.WriteFileOptions = { append: true, create: true };
+  // Owner-only: the journal sits next to the database it recovers, and a
+  // world-readable copy of recent action payloads is a leak in its own right.
+  const mode: Deno.WriteFileOptions = {
+    append: true,
+    create: true,
+    mode: 0o600,
+  };
 
   function writeLine(line: string): void {
     if (opts.sync) {
@@ -103,7 +127,7 @@ export function createJournal(
         JSON.stringify({
           seq: s,
           type: action.type,
-          payload: action.payload,
+          payload: redacted(action.type) ? REDACTED : action.payload,
           ts,
         }) +
           "\n",

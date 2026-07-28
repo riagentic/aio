@@ -302,6 +302,86 @@ type AioSVGAttributes = AioHTMLAttributes & {
   [key: string]: unknown;
 };
 
+/** `<fieldset>` — `disabled` locks every control in the group at once, which is
+ *  THE standard way to lock a form section. It was missing, and the workarounds
+ *  (don't render the group, or disable each control by hand) are worse markup for
+ *  the same intent (llama.md, second update #1). */
+type AioFieldSetAttributes = AioHTMLAttributes<HTMLFieldSetElement> & {
+  disabled?: boolean;
+  form?: string;
+  name?: string;
+};
+
+/** `<optgroup>` — same `disabled` story, one level up from `<option>`. */
+type AioOptGroupAttributes = AioHTMLAttributes<HTMLOptGroupElement> & {
+  disabled?: boolean;
+  label?: string;
+};
+
+/** `<details>` / `<dialog>` — `open` IS the state of these elements. */
+type AioDetailsAttributes = AioHTMLAttributes<HTMLDetailsElement> & {
+  open?: boolean;
+  name?: string;
+};
+type AioDialogAttributes = AioHTMLAttributes<HTMLDialogElement> & {
+  open?: boolean;
+};
+
+/** `<progress>` / `<meter>` — a UI that reports progress needs these typed. */
+type AioProgressAttributes = AioHTMLAttributes<HTMLProgressElement> & {
+  value?: number | string;
+  max?: number | string;
+};
+type AioMeterAttributes = AioHTMLAttributes<HTMLMeterElement> & {
+  value?: number | string;
+  min?: number | string;
+  max?: number | string;
+  low?: number | string;
+  high?: number | string;
+  optimum?: number | string;
+};
+
+/** Table cells — `colSpan`/`rowSpan`/`headers`/`scope` are structural. */
+type AioTableCellAttributes = AioHTMLAttributes<HTMLTableCellElement> & {
+  colSpan?: number;
+  rowSpan?: number;
+  headers?: string;
+  scope?: "row" | "col" | "rowgroup" | "colgroup";
+  abbr?: string;
+};
+
+/** Media elements — the attributes that decide playback behaviour. */
+type AioMediaAttributes<T extends EventTarget = HTMLMediaElement> =
+  & AioHTMLAttributes<T>
+  & {
+    src?: string;
+    autoplay?: boolean;
+    controls?: boolean;
+    loop?: boolean;
+    muted?: boolean;
+    playsInline?: boolean;
+    preload?: "none" | "metadata" | "auto";
+    poster?: string;
+    width?: number | string;
+    height?: number | string;
+    crossOrigin?: "anonymous" | "use-credentials";
+    /** Media readiness events. Without these a <video> has no way to report
+     *  that it started playing or failed, so a UI cannot swap a placeholder
+     *  for it — the same job `onLoad` does for <img>. */
+    onLoadedData?: (e: Event) => void;
+    onLoadedMetadata?: (e: Event) => void;
+    onCanPlay?: (e: Event) => void;
+    onPlaying?: (e: Event) => void;
+    onEnded?: (e: Event) => void;
+    onStalled?: (e: Event) => void;
+  };
+
+/** `<canvas>` — width/height are attributes, not just CSS. */
+type AioCanvasAttributes = AioHTMLAttributes<HTMLCanvasElement> & {
+  width?: number | string;
+  height?: number | string;
+};
+
 /** JSX namespace — resolved by `jsxImportSource: "aio"` */
 // deno-lint-ignore no-namespace
 export namespace JSX {
@@ -322,6 +402,11 @@ export namespace JSX {
    *  `key` is extracted by `jsx()` before props reach the component. */
   export interface IntrinsicAttributes {
     key?: string | number;
+    /** Semantic test handle for a COMPONENT — names it in the UI surface, so a
+     *  test addresses the handle you chose instead of the function's identifier.
+     *  Renaming the function is then a refactor, not a broken test (llama.md,
+     *  second update #4). Elements have carried `t` all along. */
+    t?: string;
   }
   export interface IntrinsicElements {
     input: AioInputAttributes;
@@ -335,6 +420,17 @@ export namespace JSX {
     a: AioAnchorAttributes;
     img: AioImgAttributes;
     iframe: AioIframeAttributes;
+    fieldset: AioFieldSetAttributes;
+    optgroup: AioOptGroupAttributes;
+    details: AioDetailsAttributes;
+    dialog: AioDialogAttributes;
+    progress: AioProgressAttributes;
+    meter: AioMeterAttributes;
+    td: AioTableCellAttributes;
+    th: AioTableCellAttributes;
+    video: AioMediaAttributes<HTMLVideoElement>;
+    audio: AioMediaAttributes<HTMLAudioElement>;
+    canvas: AioCanvasAttributes;
 
     // SVG — must mirror SVG_TAG_LIST in air/vdom-types.ts. AioSVGAttributes
     // carries a `[key: string]: unknown` index, so element-specific attrs

@@ -25,9 +25,22 @@ deno task dev                    # opens in your browser
 
 The new project is git-initialized, ships a passing starter test
 (`deno task test`), and builds to every target with one line each —
-`deno task compile` (binary), `deno task electron`, `deno task android`. It's
-pinned to the exact aio version your `am` was installed at, so app and framework
-stay in lockstep.
+`deno task compile` (binary), `deno task electron`, `deno task android`.
+
+It is also **pinned to an exact aio version**, recorded in its own `deno.json`
+(`"aioVersion": "v1.0.0-alpha38"`) and committed with your code. So the app you
+push is the app your colleague builds:
+
+```sh
+git clone <your-app> && cd <your-app>
+am fix            # provisions exactly that aio version and links it
+deno task dev
+```
+
+`am pin` shows what an app uses; `am pin <version>` switches it; `am pin main`
+follows the branch tip. `am create --aio-version=…` picks the version up front.
+See
+[app manager](../clients/app-manager.md#which-aio-version-an-app-builds-against).
 
 Keep `am` current with `am update`; remove it with `am uninstall` (your apps are
 left untouched).

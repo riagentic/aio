@@ -69,6 +69,47 @@ await aio.run({
 });
 ```
 
+## Changing a cell's shape after it has shipped
+
+Your users have rows written by an older version of your app. Restore merges the
+persisted state over the cell's **declared** `state`, and the declaration always
+wins a disagreement — so an upgrade cannot resurrect a field you deleted or put
+a value of the wrong type into your state.
+
+| You did this to a persisted field  | On the next boot                                               |
+| ---------------------------------- | -------------------------------------------------------------- |
+| **added** it                       | it gets its declared default; other fields restore             |
+| **removed** it                     | the stored value is **dropped**, not carried forever           |
+| **retyped** it (`number`→`string`) | the stored value is ignored; the **default** is used           |
+| **renamed** it                     | remove + add — the old value is **lost** unless you migrate it |
+| nested object                      | same rules, field by field, at every depth                     |
+| `state: { byId: {} }`              | an empty object means "dictionary" — every stored key is kept  |
+
+Nothing is guessed: a rename is indistinguishable from a delete-plus-add, so aio
+does not try to match them up. Carry the value across yourself with `version` +
+`onMigrate`:
+
+```ts
+const hw = cell("hw", {
+  version: 2, // bump when the shape changes
+  state: { memBps: 0 }, // was: ramBps
+  onMigrate(state, from) {
+    // `from` is the version that wrote the data.
+    if (from < 2) {
+      const old = state as unknown as { ramBps?: number };
+      if (typeof old.ramBps === "number") state.memBps = old.ramBps;
+    }
+    return state;
+  },
+  methods: {/* … */},
+});
+```
+
+`am migrations` shows each cell's declared vs stored version, what the last
+boot's migration pass did, and any **shape drift** — a field still in storage
+that the current `state` no longer declares. Boot warns about drift too, so a
+rename you forgot to migrate is visible before a user reports it.
+
 ## State recovery (offline queue)
 
 When the WebSocket disconnects, actions are persisted to IndexedDB and replayed

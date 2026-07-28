@@ -103,14 +103,22 @@ export function createCellWorkerPool(opts: {
   validateWorkerCells(cells);
 
   if (!entry || !entry.startsWith("file:")) {
-    // A compiled binary or a remote entry can't be re-imported as a worker.
+    // An entry that is not a local module can't be re-imported as a worker.
     // Degrade LOUDLY to in-isolate execution rather than failing the app: the
     // cell still works, it just isn't isolated.
+    //
+    // This does NOT cover compiled binaries, though it once said so: Deno
+    // embeds the entry and reports it as `file:///…`, so a compiled app takes
+    // the normal path above and its worker cells really do run off-isolate —
+    // proven in build-e2e ("a `worker: true` cell still runs off-isolate in a
+    // compiled binary"), which measures the isolation rather than trusting
+    // this message. The claim outlived the constraint by a long way; do not
+    // re-add it without a failing test.
     log.warn(
       "cell-worker",
       `cannot host worker cells from entry "${entry}" (not a local module) — ` +
         `${cells.map((c) => c.__aio.id).join(", ")} will run on the main ` +
-        `isolate this run. Compiled binaries don't support cell workers yet.`,
+        `isolate this run.`,
     );
     return EMPTY_POOL;
   }

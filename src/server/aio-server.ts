@@ -27,6 +27,9 @@ import type { CellAccess } from "../state/cell-types.ts";
 
 /** Inputs needed for server & transport setup */
 export interface ServerSetupDeps<S, A> {
+  /** Cost meter (`am cost`) — recorded in the broadcast path, read by the
+   *  trojan `cost` route. */
+  costMeter?: import("../vitals/cost-meter.ts").CostMeter;
   // Identity & network
   appId: string;
   port: number;
@@ -162,6 +165,7 @@ export async function setupTransport<S, A>(
     dispatch,
     app,
     vitalsSystem,
+    costMeter,
     useElectron,
     tt,
     syncHandler,
@@ -324,6 +328,7 @@ export async function setupTransport<S, A>(
       clientCounter,
       title,
       vitalsSystem,
+      costMeter,
       width: ui.width,
       height: ui.height,
       getUIState: (user?: AioUser) => getUIState(getState(), user),

@@ -20,12 +20,14 @@ import {
 import { createScheduleManager } from "../state/schedule.ts";
 import { createOwnManager } from "../state/own.ts";
 import { getLogger, log } from "../diagnostics/logger.ts";
+import { timeTravelEnabled } from "../diagnostics/types.ts";
 import { teachableError } from "../diagnostics/error.ts";
 
 // Phase modules — extracted _run() logic
 import { bootStorage, replaySyncOps } from "./aio-boot.ts";
 import { replayJournal } from "./journal.ts";
 import { createTimeline } from "./timeline.ts";
+import { makeRedactor } from "../diagnostics/redact.ts";
 import { setupDispatch } from "./aio-dispatch.ts";
 import { hostedCellName, startCellWorkerHost } from "./cell-worker-host.ts";
 import { createCellWorkerPool } from "./cell-worker-pool.ts";
@@ -64,6 +66,7 @@ import {
   wrapAppWithCells,
 } from "./aio-cells-bridge.ts";
 import { getRegisteredCells } from "../state/cell-reactive.ts";
+import { createCostMeter } from "../vitals/cost-meter.ts";
 
 // CLI + path resolution
 import { parseCli, printHelp, VERSION } from "./aio-cli.ts";
@@ -274,6 +277,49 @@ async function run(a?: any, b?: any): Promise<AioApp<any, any>> {
       }
       // Never resolves — the worker lives as long as its owner.
       return await startCellWorkerHost(hosted) as never;
+    }
+
+    // A perf budget naming a method that does not exist never applies, and
+    // nothing ever says so. One app declared 17 per-method budgets adopting the
+    // feature and one of them — `builds:installRelease` — named no method at
+    // all; the failure mode is a perf violation naming the METHOD, which sends
+    // you to read the method instead of the config (llama-master #15).
+    //
+    // Same class as `strictCells` one layer up: config that silently governs
+    // nothing. The cells and their method names are all in hand here, so the
+    // check is cheap. Throws under `strictCells` (the app asked for strict),
+    // warns otherwise — a budget is an optimisation hint, not a correctness
+    // requirement, so a stale key must not break someone's boot by default.
+    const budgetMethods = fc.perfBudget?.methods;
+    if (budgetMethods && cellEntries.length > 0) {
+      const known = new Set<string>();
+      for (const e of cellEntries) {
+        const def = ("__aio" in e ? e : e.cell) as {
+          __aio: { id: string; methodKeys?: string[]; actionKeys?: string[] };
+        };
+        const id = def.__aio.id;
+        for (
+          const m of def.__aio.methodKeys ?? def.__aio.actionKeys ?? []
+        ) known.add(`${id}:${m}`);
+      }
+      const unknown = Object.keys(budgetMethods).filter((k) => !known.has(k));
+      if (unknown.length > 0) {
+        const q = unknown.map((k) => `"${k}"`).join(", ");
+        const near = (k: string) => {
+          const [cellId] = k.split(":");
+          const sibs = [...known].filter((n) => n.startsWith(`${cellId}:`));
+          return sibs.length > 0 ? ` (${cellId} has: ${sibs.join(", ")})` : "";
+        };
+        const msg = `perfBudget.methods names ${
+          unknown.length === 1 ? "a method" : "methods"
+        } that do not exist: ${q}${
+          unknown.length === 1 ? near(unknown[0]!) : ""
+        } — ${
+          unknown.length === 1 ? "that budget" : "those budgets"
+        } never applies to anything. Keys are exact "cell:method".`;
+        if (fc.strictCells) throw new Error(`[aio] ${msg}`);
+        log.warn(msg);
+      }
     }
 
     // Imported-but-unregistered cells (opt-in `strictCells`): a cell() that ran
@@ -545,12 +591,18 @@ async function _run<S, A, E>(
     }
   }
 
+  // One redaction predicate for every place an action is recorded — the
+  // journal (disk), the timeline (`am timeline`) and the action log. Built
+  // here, before any of them exists, so none can be created without it.
+  const redact = makeRedactor(config.redactActions);
+
   // Diagnostics + vitals
   const { diagHooks, vitalsSystem, diagResolvedOpts } = initDiagAndVitals(
     config._diagnostics,
     prod,
     config._cellNames,
     config.guardDispatches,
+    redact,
   );
 
   // Client mode: CLI flag > aio.run config > app deno.json `target` >
@@ -613,6 +665,7 @@ async function _run<S, A, E>(
     getState: () => state as Record<string, unknown>,
     getReportOpts: () => _reportOpts,
     journal: config.journal,
+    redactActions: config.redactActions,
     log,
   });
   state = boot.state as S;
@@ -665,12 +718,22 @@ async function _run<S, A, E>(
   // it now that `state` is what the database actually holds.
   persistence.resetPrevState();
 
-  // Time-travel — dev only
+  // Time-travel — dev only, AND only when diagnostics leave it on.
+  //
+  // `diagnostics.dev.timeTravel` was a declared option with no reader: it was
+  // resolved, defaulted and documented, and then TT was created purely on
+  // `!prod`. An app that turned it off — a wallet, say, whose reason is that
+  // time-travel holds a full state history in memory — kept every action's
+  // state anyway, and paid a `tt-state` broadcast on every dispatch for it.
+  // The option now decides, and its dev default is still `true`.
+  const ttEnabled = timeTravelEnabled(prod, diagResolvedOpts);
   let tt: TTState<S, { type: string }> | null = null;
-  if (!prod) {
+  if (ttEnabled) {
     tt = createTT<S, { type: string }>();
     tt = record(tt, { type: "__init" }, state);
     log.debug("time-travel: initialized");
+  } else if (!prod) {
+    log.debug("time-travel: disabled by diagnostics config");
   }
 
   const _reportOpts = buildReportOpts({ onError, getTT: () => tt, prod });
@@ -699,7 +762,13 @@ async function _run<S, A, E>(
     getUdsHandle: () => udsHandle,
     syncIntervalMs: udsSyncIntervalMs,
   });
-  const onPerf = buildOnPerf(tt, vitalsSystem);
+  // Cost meter (`am cost`): always on, bounded rings, zero configuration. The
+  // question it answers — "what does aio move on my behalf, and where does it
+  // come from" — is asked AFTER something feels slow, which is exactly when an
+  // opt-in diagnostic is not enabled. See src/vitals/cost-meter.ts.
+  const costMeter = createCostMeter();
+  costMeter.setKnownCells(config._cellNames ?? []);
+  const onPerf = buildOnPerf(tt, vitalsSystem, costMeter);
 
   // Set once the worker pool exists (below); a jump before that has nothing
   // to re-seed.
@@ -757,7 +826,7 @@ async function _run<S, A, E>(
     | ((prev: S, next: S, action: A) => void)
     | undefined;
   const _syncCellSet = new Set(syncCellIds);
-  const timeline = createTimeline();
+  const timeline = createTimeline(500, redact);
   const afterActionHook = (prev: S, next: S, action: A): void => {
     _diagAfterAction?.(prev, next, action);
     if (prev === next) return; // no-op action — nothing to record
@@ -1073,6 +1142,7 @@ async function _run<S, A, E>(
       loadSnapshot: (json) => app.loadSnapshot!(json),
     },
     vitalsSystem,
+    costMeter,
     useElectron,
     tt: tt ? { handleTTCommand, getTTBroadcast: () => toBroadcast(tt!) } : null,
     syncHandler: syncHandler ?? null,

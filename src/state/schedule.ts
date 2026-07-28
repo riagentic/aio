@@ -20,6 +20,8 @@ export type ScheduleEffect =
     id: string;
     ms: number;
     action: { type: string; payload?: unknown };
+    /** Skip a tick while the previous one is still running. */
+    skipIfRunning?: boolean;
   }
   | {
     type: "__schedule";
@@ -40,6 +42,17 @@ export type ScheduleEffect =
 /** Config-level schedule definition — passed to aio.run({ schedules: [...] }) */
 export type ScheduleDef =
   & { id: string; action: { type: string; payload?: unknown } }
+  & {
+    /** Skip a tick while the previous one is still running (`every` only).
+     *
+     *  Declared here as well as on `schedule.every()` because THIS is the shape
+     *  apps actually use: `aio.run({ schedules: [...] })` is what `am create`
+     *  scaffolds and what the docs show. Shipping the option only on the
+     *  imperative form meant every declarative poller kept the hand-rolled
+     *  `if (s.refreshing) return` the feature exists to delete — the fix landed
+     *  on the API nobody was using (llama-master #14). */
+    skipIfRunning?: boolean;
+  }
   & (
     | { every: number }
     | { after: number }
@@ -80,16 +93,31 @@ export const schedule = {
     ms,
     action: action as ScheduleAction,
   }),
+  /** Repeat `action` every `ms`.
+   *
+   *  `{ skipIfRunning: true }` drops a tick while the previous one is still in
+   *  flight — the guard every polling cell otherwise opens with
+   *  (`if (s.refreshing) return`). Hand-rolled, that guard needs a state field,
+   *  a reset in a `finally`, and it leaks a stuck `true` if the method throws
+   *  between them; the scheduler already knows when the dispatch settles, so it
+   *  can own the whole thing (llama-master, "things that would have made this
+   *  app easier to write" #3).
+   *
+   *  Opt-in, not the default: silently skipping a tick that used to fire would
+   *  be a behaviour change for existing apps, and a schedule that overlaps ON
+   *  PURPOSE (independent one-shot work per tick) is legitimate. */
   every: <A>(
     id: string,
     ms: number,
     action: ScheduleAction & SA<A> | A & SA<A>,
+    opts?: { skipIfRunning?: boolean },
   ): ScheduleEffect => ({
     type: "__schedule",
     kind: "every",
     id,
     ms,
     action: action as ScheduleAction,
+    ...(opts?.skipIfRunning ? { skipIfRunning: true } : {}),
   }),
   at: <A>(
     id: string,
@@ -345,6 +373,8 @@ export function createScheduleManager(
   const timers = new Map<string, TimerEntry>();
   const staticIds = new Set<string>(); // ids from start() — aio.run({ schedules })
   const warnedCollisions = new Set<string>();
+  // Schedules whose latest tick has not settled — see `skipIfRunning`.
+  const inFlight = new Set<string>();
   const VALID_ID = /^[\w\-:.]+$/;
 
   function validateId(id: string): void {
@@ -403,9 +433,10 @@ export function createScheduleManager(
     action: { type: string; payload?: unknown },
     kind: "after" | "every" | "at" | "cron",
     retryCount = 0,
-  ): void {
+  ): unknown {
     try {
-      dispatch(action);
+      // Returned so `skipIfRunning` can await the tick it just started.
+      return dispatch(action);
     } catch (e) {
       log.error(`schedule: dispatch '${id}' failed: ${e}`);
       if (kind === "every" || kind === "cron") {
@@ -446,13 +477,36 @@ export function createScheduleManager(
     id: string,
     ms: number,
     action: { type: string; payload?: unknown },
+    skipIfRunning = false,
   ): void {
     if (ms < 10) {
       throw new Error(`schedule.every '${id}': ms must be >= 10, got ${ms}`); // AIO-252
     }
     const timerId = setInterval(() => {
+      // The previous tick is still working: drop this one rather than stacking
+      // a second copy of the same poll on top of it. `inFlight` is cleared in a
+      // `finally`, so a tick that THROWS cannot wedge the schedule off — the
+      // failure mode of the hand-rolled `s.refreshing` guard.
+      if (skipIfRunning && inFlight.has(id)) {
+        log.debug(
+          `schedule: every '${id}' skipped — previous tick still running`,
+        );
+        return;
+      }
       log.debug(`schedule: every '${id}' fired`);
-      safeDispatch(id, action, "every");
+      const r = safeDispatch(id, action, "every");
+      if (
+        skipIfRunning && r && typeof (r as Promise<unknown>).then === "function"
+      ) {
+        inFlight.add(id);
+        // Settle on BOTH outcomes, and swallow here: a rejected tick is already
+        // reported by the dispatch layer, and attaching a bare `.finally()` to
+        // someone else's promise re-raises it as an unhandled rejection that
+        // kills the process. Clearing the guard is this code's only job.
+        (r as Promise<unknown>)
+          .then(() => {}, () => {})
+          .finally(() => inFlight.delete(id));
+      }
     }, ms);
     setTimer(id, "every", timerId);
     log.debug(`schedule: every '${id}' set for ${ms}ms`);
@@ -565,7 +619,12 @@ export function createScheduleManager(
         handleAfter(effect.id, effect.ms, effect.action);
         break;
       case "every":
-        handleEvery(effect.id, effect.ms, effect.action);
+        handleEvery(
+          effect.id,
+          effect.ms,
+          effect.action,
+          effect.skipIfRunning === true,
+        );
         break;
       case "at":
         handleAt(effect.id, effect.time, effect.action);
@@ -586,8 +645,9 @@ export function createScheduleManager(
     for (const def of defs) {
       validateId(def.id); // AIO-251: validate config-level schedule IDs
       staticIds.add(def.id);
-      if ("every" in def) handleEvery(def.id, def.every, def.action);
-      else if ("after" in def) handleAfter(def.id, def.after, def.action);
+      if ("every" in def) {
+        handleEvery(def.id, def.every, def.action, def.skipIfRunning === true);
+      } else if ("after" in def) handleAfter(def.id, def.after, def.action);
       else if ("at" in def) handleAt(def.id, def.at, def.action);
       else if ("cron" in def) handleCron(def.id, def.cron, def.action);
     }

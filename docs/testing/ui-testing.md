@@ -172,6 +172,58 @@ The same loop works in-process: `ui.surface()` →
 Spec: `docs/specs/2026-07-10-semantic-ui-testing.md`. Cell-level testing:
 [cell-testing.md](cell-testing.md).
 
+## Two surfaces at once: `testMultiClient`
+
+aio's central promise is that an Electron window, a browser tab and `am` all
+read the same state with no transport code. `testMultiClient` is how you verify
+that for YOUR app — real server, real WebSocket clients, real broadcast:
+
+```ts
+import { assertEquals } from "@std/assert";
+import { cell } from "aio";
+import { testMultiClient } from "aio/testing";
+
+type S = { items: string[] };
+
+const orders = cell("orders", {
+  state: { items: [] } as S,
+  methods: {
+    add(s: S, name: string) {
+      s.items.push(name);
+    },
+  },
+});
+
+Deno.test("both windows see the same order", async () => {
+  await using m = await testMultiClient({ cells: [orders] }, 2);
+
+  await m.clients[0].dispatch(orders.add.action("widget"));
+  await m.converged(); // waits for the work, not a sleep
+
+  assertEquals(m.clients[1].state<S>("orders").items.length, 1);
+});
+```
+
+- `m.clients[i].state(cell)` — what THAT client received, not the server's copy
+- `m.serverState(cell)` — the truth every client should converge on
+- `m.converged({ timeoutMs, settleMs })` — throws naming the divergent client
+  and cell, so a failure says which surface fell behind
+- `m.dispatchAll(action)` — the same action from every client at once, which is
+  the concurrency case you cannot reason about from the outside:
+
+```ts
+// Same action from every client, in the same tick:
+await m.dispatchAll(orders.add.action("widget"));
+await m.converged();
+assertEquals(m.serverState<S>("orders").items.length, 2); // no lost update
+```
+
+**`converged()` waits for the work, not for equality.** Right after a send every
+client still agrees with the server — because the action hasn't arrived yet — so
+a naive comparison would pass at the moment it knows least. It requires a quiet
+period after the last send and a stable server before it answers; raise
+`settleMs` on a loaded CI box.
+
 ## e2e — test the REAL client (`deno task test:e2e`)
 
 `testUI` runs in-process; some bugs only surface at the transport boundary or in
