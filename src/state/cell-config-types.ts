@@ -96,8 +96,15 @@ export type MethodsCellConfig<
    *  { include: [...] } or { exclude: [...] } for field-level control.
    *  Add forUser for per-user filtering on the already-filtered state. */
   ui?: CellVisibility<keyof NoInfer<S> & string, NoInfer<S>>;
-  /** CRDT sync — true for defaults, or partial config to override merge strategies, identity keys, retention */
-  sync?: true | Partial<SyncConfig>;
+  /** CRDT sync — true for defaults, or partial config to override merge
+   *  strategies, identity keys, retention.
+   *
+   *  `false` is the explicit opt-OUT, and only means something under
+   *  `aio.run({ localFirst: true })`, where every server cell syncs by default:
+   *  it marks a cell that must keep round-tripping through the server (an
+   *  auth cell, a ledger, anything whose optimistic preview would be a lie).
+   *  Absent ≠ false — that distinction is the whole point. */
+  sync?: true | false | Partial<SyncConfig>;
   /** Run this cell's methods in their OWN Deno worker (its own isolate and OS
    *  thread), so work that blocks — a parse, a crunch, an FFI call — can only
    *  stall THIS cell. Every other cell, every other client, and the socket loop
@@ -115,10 +122,21 @@ export type MethodsCellConfig<
    *  at method entry (an `await` never changes them), and writes commit
    *  ATOMICALLY at return — one batch, all-or-nothing (a throw/cancel discards).
    *  Kills the read-after-await class. Opt-in; sync methods are already atomic.
-   *  `{ serialize: true }` runs this cell's transactional methods one at a time
-   *  (a per-cell mutex) when read-modify-write correctness matters.
+   *  `{ serialize: true }` runs this cell's transactional ASYNC methods one at a
+   *  time (a per-cell mutex) when read-modify-write correctness matters — it
+   *  does NOT hold off sync methods, which are reducers and commit whenever
+   *  they are dispatched.
+   *
+   *  Because reads are pinned, a field a SYNC method writes mid-await is
+   *  invisible to the running async one. That is checked, not hoped for: every
+   *  commit validates the method's read-set against live state, and
+   *  `conflict` decides the outcome — `"abort"` (default: reject the call,
+   *  commit nothing) or `"warn"` (report loudly, commit anyway). Use `s.$live`
+   *  to read current state on purpose.
    *  See docs/state/transactional-methods.md. */
-  transaction?: boolean | { serialize?: boolean };
+  transaction?:
+    | boolean
+    | { serialize?: boolean; conflict?: "abort" | "warn" };
   /** State version — increment when state shape changes. Default: 0. */
   version?: number;
   /** Migration hook — called when persisted version < current version.

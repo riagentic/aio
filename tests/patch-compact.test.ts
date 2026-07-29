@@ -3,7 +3,7 @@ import type { Patch } from "immer";
 import { applyPatches, enablePatches } from "immer";
 import {
   compactPatches,
-  narrowArrayAppends,
+  narrowArrayPatches,
 } from "../src/state/patch-compact.ts";
 
 // Helper to build a patch
@@ -125,17 +125,17 @@ Deno.test("compactPatches: large object values collapsed correctly", () => {
   assertEquals(result[0]!.value, big2);
 });
 
-// ── narrowArrayAppends ──────────────────────────────────────────────────────
+// ── narrowArrayPatches ──────────────────────────────────────────────────────
 // `s.items = [...s.items, ...batch]` is as idiomatic as `push`, but Immer can
 // only describe it as "replace the whole array" — so a growing list re-shipped
 // itself on every commit. These pin the rewrite AND, more importantly, that it
 // declines every case where the prefix is not provably intact: getting this
 // wrong loses state rather than bytes.
 
-Deno.test("narrowArrayAppends: a grown array travels as its appends", () => {
+Deno.test("narrowArrayPatches: a grown array travels as its appends", () => {
   const a = { x: 1 }, b = { x: 2 }, c = { x: 3 };
   const prev = { items: [a, b], n: 2 };
-  const ops = narrowArrayAppends(prev, [
+  const ops = narrowArrayPatches(prev, [
     replace(["items"], [a, b, c]),
     replace(["n"], 3),
   ]);
@@ -145,7 +145,7 @@ Deno.test("narrowArrayAppends: a grown array travels as its appends", () => {
   ]);
 });
 
-Deno.test("narrowArrayAppends: applying the rewrite equals applying the original", () => {
+Deno.test("narrowArrayPatches: applying the rewrite equals applying the original", () => {
   // The only property that really matters. Immer's own applyPatches is the
   // judge, on the shapes an app actually produces.
   const cases: Array<[unknown[], unknown[]]> = [
@@ -160,7 +160,7 @@ Deno.test("narrowArrayAppends: applying the rewrite equals applying the original
   for (const [before, after] of cases) {
     const prev = { items: before };
     const original = [replace(["items"], after)];
-    const narrowed = narrowArrayAppends(prev, original);
+    const narrowed = narrowArrayPatches(prev, original);
     assertEquals(
       applyPatches(prev, narrowed),
       applyPatches(prev, original),
@@ -169,39 +169,212 @@ Deno.test("narrowArrayAppends: applying the rewrite equals applying the original
   }
 });
 
-Deno.test("narrowArrayAppends: identity, not equality, decides", () => {
+Deno.test("narrowArrayPatches: identity, not equality, decides", () => {
   // Objects that merely LOOK like the old ones are a fresh array, and a fresh
   // array may have been rebuilt from anything. Only `===` proves the prefix
   // survived, and that is exactly what spreading preserves.
   const prev = { items: [{ x: 1 }] };
   const ops = [replace(["items"], [{ x: 1 }, { x: 2 }])];
-  assertEquals(narrowArrayAppends(prev, ops), ops, "left alone");
+  assertEquals(narrowArrayPatches(prev, ops), ops, "left alone");
 });
 
-Deno.test("narrowArrayAppends: nested paths and non-arrays are handled", () => {
+Deno.test("narrowArrayPatches: nested paths and non-arrays are handled", () => {
   const a = { x: 1 }, b = { x: 2 };
   const prev = { deep: { list: [a] }, obj: { k: 1 } };
   // A path that no longer resolves, and a replace whose value is not an array,
   // must both pass through untouched rather than throw.
   assertEquals(
-    narrowArrayAppends(prev, [replace(["missing", "gone"], [1, 2])]),
+    narrowArrayPatches(prev, [replace(["missing", "gone"], [1, 2])]),
     [replace(["missing", "gone"], [1, 2])],
   );
   assertEquals(
-    narrowArrayAppends(prev, [replace(["obj"], { k: 2 })]),
+    narrowArrayPatches(prev, [replace(["obj"], { k: 2 })]),
     [replace(["obj"], { k: 2 })],
   );
   // Nested list still narrows, with the full path preserved.
   const grown = [a, b, { x: 3 }];
   assertEquals(
-    narrowArrayAppends({ deep: { list: [a, b] } }, [
+    narrowArrayPatches({ deep: { list: [a, b] } }, [
       replace(["deep", "list"], grown),
     ]),
     [{ op: "add", path: ["deep", "list", 2], value: grown[2] }],
   );
 });
 
-Deno.test("narrowArrayAppends: untouched patch lists are returned as-is", () => {
+Deno.test("narrowArrayPatches: untouched patch lists are returned as-is", () => {
   const ops = [replace(["a"], 1), add(["b", 0], 2)];
-  assertEquals(narrowArrayAppends({ a: 0, b: [] }, ops) === ops, true);
+  assertEquals(narrowArrayPatches({ a: 0, b: [] }, ops) === ops, true);
+});
+
+// Shrinks and middle edits are the other half of the same shape: `filter` and
+// `slice` keep most of a list, and describing them as "here is the whole list
+// again" is what made a growing cell expensive in the first place.
+
+Deno.test("narrowArrayPatches: a filtered list travels as its removals", () => {
+  const [a, b, c, d] = [{ n: 1 }, { n: 2 }, { n: 3 }, { n: 4 }];
+  const prev = { items: [a, b, c, d] };
+  // Dropping ONE from the middle — identity is preserved for the rest.
+  assertEquals(
+    narrowArrayPatches(prev, [replace(["items"], [a, b, d])]),
+    [{ op: "remove", path: ["items", 2] }],
+  );
+  // Truncation from the end (`slice`). Indices are against the array AS THE
+  // OPS APPLY: dropping c then d is "remove 2" twice, because d slides down
+  // into the slot c vacated. Equivalence is the contract, not index shape —
+  // the randomized check below is what enforces it.
+  assertEquals(
+    narrowArrayPatches(prev, [replace(["items"], [a, b])]),
+    [{ op: "remove", path: ["items", 2] }, {
+      op: "remove",
+      path: ["items", 2],
+    }],
+  );
+  // Scattered removals — the shape a real `filter` produces, and the one the
+  // earlier prefix/suffix-only version had to give up on.
+  assertEquals(
+    narrowArrayPatches(prev, [replace(["items"], [b, d])]),
+    [
+      { op: "remove", path: ["items", 0] },
+      { op: "remove", path: ["items", 1] },
+    ],
+  );
+  // An insertion in the middle.
+  const e = { n: 9 };
+  assertEquals(
+    narrowArrayPatches(prev, [replace(["items"], [a, b, e, c, d])]),
+    [{ op: "add", path: ["items", 2], value: e }],
+  );
+});
+
+Deno.test("narrowArrayPatches: randomized edits always apply to the same array", () => {
+  // The property that matters, over shapes nobody thinks to write by hand.
+  // Deterministic PRNG so a failure is reproducible from the seed alone.
+  let seed = 0x2f6e2b1;
+  const rnd = () =>
+    (seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff;
+  const pick = (n: number) => Math.floor(rnd() * n);
+
+  for (let round = 0; round < 400; round++) {
+    const len = pick(12);
+    const before = Array.from({ length: len }, (_, i) => ({ id: i }));
+    // Build `next` by a random sequence of keeps, drops and inserts — keeps
+    // reuse the SAME object, which is what identity-based diffing relies on.
+    const next: unknown[] = [];
+    for (const item of before) {
+      const r = rnd();
+      if (r < 0.15) continue; // drop
+      if (r < 0.25) next.push({ id: 1000 + pick(50) }); // replace with a new object
+      else next.push(item); // keep
+      if (rnd() < 0.15) next.push({ id: 2000 + pick(50) }); // insert after
+    }
+    if (rnd() < 0.3) next.push({ id: 3000 + pick(50) }); // append
+
+    const prev = { items: before };
+    const original = [replace(["items"], next)];
+    const narrowed = narrowArrayPatches(prev, original);
+    assertEquals(
+      applyPatches(prev, narrowed),
+      applyPatches(prev, original),
+      `round ${round}: ${JSON.stringify(before.map((x) => x.id))} → ${
+        JSON.stringify(next.map((x) => (x as { id: number }).id))
+      }`,
+    );
+  }
+});
+
+Deno.test("narrowArrayPatches: the cost model prefers whichever is smaller", () => {
+  const big = Array.from({ length: 10_000 }, (_, i) => ({ id: i }));
+  // Truncating 10k to one item: 9,999 removes would be a far bigger message
+  // than the one-element array — keep the replacement.
+  assertEquals(
+    narrowArrayPatches({ items: big }, [replace(["items"], [big[0]])]),
+    [replace(["items"], [big[0]])],
+  );
+  // Dropping ONE of 10k is the opposite case — one index, not 9,999 elements.
+  const minusOne = big.filter((_, i) => i !== 5000);
+  assertEquals(
+    narrowArrayPatches({ items: big }, [replace(["items"], minusOne)]),
+    [{ op: "remove", path: ["items", 5000] }],
+  );
+  // Rebuilding a list from all-new objects saves nothing — every element ships
+  // either way, so the replacement stays.
+  const fresh = big.slice(0, 5).map((x) => ({ ...x }));
+  assertEquals(
+    narrowArrayPatches({ items: big.slice(0, 5) }, [replace(["items"], fresh)]),
+    [replace(["items"], fresh)],
+  );
+});
+
+Deno.test("narrowArrayPatches: a reorder is left as a replacement", () => {
+  // Immer's patch format has no `move`, so a permutation costs a remove plus
+  // an add per element — never cheaper than the array. Bailing keeps the
+  // rewrite from turning a cheap message into an expensive one.
+  const [a, b, c] = [{ n: 1 }, { n: 2 }, { n: 3 }];
+  const ops = [replace(["items"], [c, b, a])];
+  assertEquals(narrowArrayPatches({ items: [a, b, c] }, ops), ops);
+  // A rotation is the same story.
+  const rot = [replace(["items"], [b, c, a])];
+  assertEquals(narrowArrayPatches({ items: [a, b, c] }, rot), rot);
+});
+
+Deno.test("narrowArrayPatches: repeated identities are not reasoned about", () => {
+  // With the same element twice, "is this one still needed later" has no single
+  // answer, so the whole-array replacement stands. Primitives repeat often.
+  const ops = [replace(["items"], [1, 1, 2, 3])];
+  assertEquals(narrowArrayPatches({ items: [1, 1, 2] }, ops), ops);
+  const x = { n: 1 };
+  const dup = [replace(["items"], [x, x])];
+  assertEquals(narrowArrayPatches({ items: [x] }, dup), dup);
+});
+
+// A batch can carry more than one op for the same path, and every op after the
+// first is relative to its PREDECESSOR'S result. Diffing them all against the
+// original state appended the same element twice and left the array corrupt —
+// found by attacking the narrowing rather than by any caller hitting it, since
+// Immer emits one op per path per commit. The contract has to hold anyway: a
+// merged or replayed patch list is an obvious thing to hand this function.
+Deno.test("narrowArrayPatches: later ops on a path see the earlier ones", () => {
+  const [a, b, c, d] = [{ n: 1 }, { n: 2 }, { n: 3 }, { n: 4 }];
+  const prev = { items: [a, b] };
+
+  const twoReplaces = [
+    replace(["items"], [a, b, c]),
+    replace(["items"], [a, b, c, d]),
+  ];
+  assertEquals(
+    applyPatches(prev, narrowArrayPatches(prev, twoReplaces)),
+    applyPatches(prev, twoReplaces),
+  );
+
+  // A replacement AFTER a hand-written add: the add moved the array, so the
+  // replacement can no longer be diffed against anything known.
+  const addThenReplace = [
+    add(["items", 2], c),
+    replace(["items"], [a, b, c, d]),
+  ];
+  assertEquals(
+    applyPatches(prev, narrowArrayPatches(prev, addThenReplace)),
+    applyPatches(prev, addThenReplace),
+  );
+
+  // …and a write INSIDE an element invalidates the array that holds it.
+  const innerThenReplace = [
+    replace(["items", 0, "n"], 99),
+    replace(["items"], [a, b, c]),
+  ];
+  assertEquals(
+    applyPatches(prev, narrowArrayPatches(prev, innerThenReplace)),
+    applyPatches(prev, innerThenReplace),
+  );
+
+  // Nested paths track independently of their parents.
+  const deep = { deep: { list: [a] } };
+  const nested = [
+    replace(["deep", "list"], [a, b]),
+    replace(["deep", "list"], [a, b, c]),
+  ];
+  assertEquals(
+    applyPatches(deep, narrowArrayPatches(deep, nested)),
+    applyPatches(deep, nested),
+  );
 });

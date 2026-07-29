@@ -539,3 +539,58 @@ Deno.exit(0);
     }
   },
 });
+
+// ── the compiled binary can still read its own deno.json ─────────────────────
+// `resolveTitle` reads deno.json from the cwd, inside a catch-all `try` that
+// turns ANY failure into the "AIO App" fallback — a title that silently
+// degrades looks identical to a deno.json with no `title` field, so nothing
+// about it would ever be noticed.
+//
+// This started as a regression test for a suspected compiled-binary failure
+// (`resolveTitle` used to reach for `join` via `await import("@std/path")`, a
+// bare specifier `deno compile` cannot trace). The suspicion was WRONG, and
+// this test is what proved it: the binary resolves that import fine, because
+// @std/path is in the graph via other static imports. It earns its place
+// anyway — the swallowing catch is real, and this is the only check that the
+// title survives compilation at all. Run the binary WHERE ITS deno.json IS,
+// which is what a user compiling in their own project does, and read the title
+// off the page it serves.
+Deno.test({
+  name: "artifact: a compiled binary reads `title` from deno.json beside it",
+  ignore: !GATE,
+  fn: async () => {
+    const dir = await makeApp("counter", "build-e2e-title-");
+    try {
+      const declared = JSON.parse(
+        await Deno.readTextFile(`${dir}/deno.json`),
+      ).title as string;
+      assert(declared, "the scaffold declares a title");
+
+      const r = await task(dir, "compile:browser");
+      assertEquals(r.code, 0, `compile:browser failed:\n${r.out}\n${r.err}`);
+      const bin = findBinary(dir);
+      await Deno.chmod(bin, 0o755);
+
+      const port = freePort();
+      // cwd is the APP dir — the case a foreign-cwd boot cannot cover, since
+      // there is no deno.json there to read at all.
+      const { proc, log } = spawn(bin, [`--port=${port}`], dir);
+      try {
+        const body = await waitForHttp(`http://127.0.0.1:${port}/`, 45_000)
+          .catch((e) => {
+            throw new Error(`${e}\n--- artifact log ---\n${log()}`);
+          });
+        const title = body.match(/<title>([^<]*)<\/title>/)?.[1];
+        assertEquals(
+          title,
+          declared,
+          `served title should come from deno.json, not the fallback:\n${log()}`,
+        );
+      } finally {
+        await kill(proc);
+      }
+    } finally {
+      await Deno.remove(dir, { recursive: true }).catch(() => {});
+    }
+  },
+});

@@ -1,5 +1,141 @@
 # Changelog
 
+## 1.0.0-alpha40 — silence is the bug (2026-07-29)
+
+### Silence is the bug — the `errors` kata pass
+
+`.katana/errors.md` says it plainly: aio fails loudly, never hides an error, and
+checks that it is working rather than assuming it. This pass took the one
+pattern a field report kept naming — "aio degrades quietly where it should fail
+loudly" — and closed it case by case.
+
+**A transactional method can no longer lose an update quietly.** `transaction`
+pins reads at method entry; that is the feature, and it made a whole bug class
+invisible: a guard on a field a SYNC method writes during the `await` could
+never fire, and a read-modify-write committed over the newer value with nothing
+said. A wallet shipped exactly that — a balance refresh overwrote a transfer and
+stamped it confirmed. So the write-set is now validated at every commit, using
+the model databases already agreed on: `transaction: true` is snapshot isolation
+and checks read-modify-writes (a blind `s.loading = false` is last-writer-wins
+by intent and never conflicts); `transaction: { serialize:
+true }` is
+serializable and checks every read. A conflict aborts the call with a message
+naming the path — `conflict: "warn"` commits anyway, loudly, and there is no
+option to do neither. `s.$live` is the sanctioned way to read current state on
+purpose; writes through it still join the atomic commit. The old "documented
+lost update" test now asserts the refusal.
+
+**A restore that erases seeded state says so.** A persisted array replaces the
+declared one wholesale, so a profile that once stored an empty list booted with
+a curated token registry gone and every holding rendered as a raw mint. The
+boot-time shape-drift detector — same facility, one more issue — now reports a
+declared non-empty list replaced by an empty stored one, names the fix, and
+stays quiet for the cases where nothing is lost (shorter lists, empty declared
+lists, objects, which merge key-by-key).
+
+**Reading a `ui.exclude`d field from the client throws in dev.** It used to warn
+once and hand back `undefined`, which type-checks as the field's declared type —
+a lock screen asked "does a vault exist?", got `undefined` forever, and behaved.
+Dev and every test harness now throw at the read; production still degrades to
+`undefined` with the same one-time warning.
+
+**The dev browser is no longer aio's most permissive environment.** Every
+`__aioDev` tripwire in the isomorphic core — frozen state so a component
+mutation throws at the site, the readonly hint, the hidden-field guard — was set
+only by the test harnesses. The dev page shell sets it now (never production),
+so those bugs surface in the browser you develop in instead of later.
+
+**Best-effort subsystems can't fail forever in private.** `degraded(name)` (also
+`degradedReport()`) counts consecutive failures of a named operation and
+escalates exactly once — one structured event, not per-occurrence spam, which is
+what made the original invisible — plus one on recovery. `/__aio/health` reports
+`status: "degraded"` and names them, because an app claiming to be healthy while
+a feature is dead is the failure the endpoint invites. aio's own worst
+swallow-cluster is the first user: every browser CRDT sync frame was a
+`.catch(() => {})`, so the sync layer could fail continuously behind a clean
+console. Offline-queue writes now report when an action will not survive a
+reload, and a queue that replays but fails to clear says that it will replay
+again.
+
+**A guard that fires on the framework's own code is a false alarm.** The first
+field result of the hidden-read throw was aio tripping it: all three binding
+paths asked "does a method own this name?" with `typeof def[key] === "function"`
+— which READS the property, invoking whatever accessor is installed. By the
+second bind of a cell that accessor is the reactive getter from the first, so
+the framework read the app's `ui.exclude`d field and threw, naming the app for
+something aio did. It took an entire UI suite offline (512 passed / 298 failed →
+785 / 25 once the probe was fixed). The question is about SHAPE, so it is
+answered from the property descriptor and never touches a value — which also
+ends a quieter bug: reading through the getter called `trackPath()`, so binding
+a cell subscribed whatever reactive context happened to be current.
+
+**`await cell.method()` no longer invents a cause or hides the outcome.** The
+30-second wait was hardcoded, and its error said "the effect executor may have
+crashed or never resolved this call" — almost never true. The method was simply
+still running, and it kept running: its writes committed later, unannounced, on
+top of whatever the caller did next (a production incident: an NFT queue
+starting new work on top of live work). The message now states what is true —
+the CALL gave up, the METHOD did not, its writes will still commit, only the
+return value is lost — and names the knob.
+
+There is also only one knob now. `effectTimeoutMs` bounded the effect tracker
+while a second, hardcoded 30s bounded the caller, so raising it left the caller
+giving up on schedule: a setting that looks like it worked. Both sides resolve
+from `effectTimeoutMs` and `perfBudget.methods["cell:method"].timeout`, and `0`
+waits indefinitely.
+
+### Local-first, opt-in
+
+`aio.run({ localFirst: true })` makes every server cell run its methods where
+the caller is and travel as CRDT ops; the server re-runs each op and stays the
+authority, so guards, `access` and `validate:` decide exactly what they decide
+today. `sync: false` is the per-cell opt-out for anything whose optimistic
+preview would be a lie. Boot logs which cells were adopted — a switch that
+silently relocates every method in the app is not a decision to make invisibly.
+
+The client half is where this kind of feature usually half-lands: the decision
+is resolved on the SERVER at compose time, so the browser is told in the page
+shell, and adopts through the cell def's own `enableSync`, which sets the sync
+config and the replay reducer together or not at all. Both client-side callers
+that decide "does this cell sync" — the transport gate that loads the engine and
+the engine's own boot — now go through one resolver; they disagreed at first,
+and the result was a server logging "1 cell runs locally" while every method
+kept round-tripping. Measured, not claimed: a real chromium click on an adopted
+cell lands in the op-log, and the same app without the switch produces no ops at
+all.
+
+### The cell-binding triple is gated
+
+A cell has three bindings and the browser's `cell()` is a separate
+implementation, so a per-cell fact the client branches on has twice been added
+to two of the three and shipped broken (`asyncMethods` → `await` resolving
+`undefined` in a browser; sync config without its reducer). Any `__aio` key
+client code reads must now be produced by the browser stub or carry a written
+exemption, and the two catalogs are pinned to the same async classification and
+public action keys.
+
+### A list that SHRINKS no longer re-ships itself either
+
+alpha39 narrowed a whole-array `replace` to its appends. The same shape covers
+the rest of how lists are rebuilt, and the case most worth winning was missing:
+a `filter` dropping three items from a 500-item list matched no common prefix or
+suffix, so all 500 shipped again. `diffArray` now walks both arrays once,
+matching by identity — 3 ops instead of 500 items — and `slice`, an insert, and
+a removal in the middle all narrow too. A REORDER and DUPLICATE identities still
+ship the whole replacement on purpose: Immer's patch format has no `move`, and
+"is this element needed later" has no single answer when it appears twice. The
+cost model was fixed rather than extended (an `add` carries an element, a
+`remove` only an index), so truncating 10k items to one sends the one, not 9,999
+removes. A 400-round randomized equivalence check with Immer's own
+`applyPatches` as judge backs the whole path.
+
+One latent bug came out of attacking that change rather than from a caller:
+narrowing diffed every op against the ORIGINAL state, so two ops on the same
+array path in one batch — the second relative to the first's result — appended
+the same element twice. Immer emits one op per path per commit, so neither
+caller could reach it; the function is exported and a merged or replayed patch
+list is an obvious thing to hand it, so it is fixed rather than documented.
+
 ## 1.0.0-alpha39 — pin it, price it, redact it (2026-07-28)
 
 ### A list that grows no longer re-ships itself

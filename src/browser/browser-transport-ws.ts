@@ -96,7 +96,14 @@ export function connect(): void {
       );
       for (const a of T.offlineQueue) ws.send(enc("action", a));
       T.offlineQueue = [];
-      _clearOfflineQueue().catch(() => {});
+      // A failed clear is not cosmetic: the same actions replay again on the
+      // next reload, so a silent failure here spends the user's money twice.
+      _clearOfflineQueue().catch((e) =>
+        console.error(
+          `[aio] offline queue replayed but could not be cleared — these ` +
+            `actions will replay AGAIN after a reload: ${e}`,
+        )
+      );
     }
 
     initVitals(ws);
