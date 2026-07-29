@@ -15,7 +15,7 @@ export function cell(
     state?: any;
     scope?: "client";
     /** CRDT sync config — routed through the client engine when set. */
-    sync?: true | Record<string, unknown>;
+    sync?: true | false | Record<string, unknown>;
     actions?: _Creators;
     methods?: Record<string, unknown>;
     generators?: Record<string, unknown>;
@@ -112,17 +112,27 @@ export function cell(
       (def.__aio as Record<string, unknown>).scope = "client";
       (def.__aio as Record<string, unknown>).clientMethods = config.methods;
     }
-    // sync: true cells need two extras for the client CRDT engine:
-    // the normalized config (which cells route through the engine) and a
-    // replayable reducer for optimistic rebase — built from the SYNC methods
-    // (CRDT ops must be deterministic; async methods can't replay and are
-    // skipped — their outcome arrives via the server's state broadcast).
-    if (config.sync) {
+    // A sync cell needs two extras for the client CRDT engine: the normalized
+    // config (which cells route through the engine) and a replayable reducer
+    // for optimistic rebase — built from the SYNC methods (CRDT ops must be
+    // deterministic; async methods can't replay and are skipped — their outcome
+    // arrives via the server's state broadcast).
+    //
+    // This is exposed as a closure, not run inline, because `localFirst` decides
+    // on the SERVER at compose time: the browser learns which cells run locally
+    // only after this def exists. Handing the engine a `syncConfig` without the
+    // matching reducer would give it a cell it can stamp ops for but never
+    // replay — the failure would look like "my optimistic updates vanish", from
+    // a place nobody would think to look. One function, one place, both callers.
+    (def.__aio as Record<string, unknown>).enableSync = (
+      sync: true | Record<string, unknown>,
+    ): void => {
+      if ((def.__aio as Record<string, unknown>).syncConfig) return;
       (def.__aio as Record<string, unknown>).syncConfig = normalizeSyncConfig(
-        config.sync as true | Record<string, unknown>,
+        sync as true | Record<string, unknown>,
       );
       const syncMethods: Record<string, unknown> = {};
-      for (const [key, fn] of Object.entries(config.methods)) {
+      for (const [key, fn] of Object.entries(config.methods!)) {
         if (
           (fn as { constructor: { name: string } }).constructor.name !==
             "AsyncFunction"
@@ -139,6 +149,13 @@ export function cell(
           m(draft, ...args);
         }
       };
+    };
+    if (config.sync === false) {
+      (def.__aio as Record<string, unknown>).syncOptOut = true;
+    } else if (config.sync) {
+      ((def.__aio as Record<string, unknown>).enableSync as (
+        s: true | Record<string, unknown>,
+      ) => void)(config.sync as true | Record<string, unknown>);
     }
     for (const [key, value] of Object.entries(cat)) {
       def[key] = value;

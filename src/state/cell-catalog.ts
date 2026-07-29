@@ -4,6 +4,7 @@ import type { CellDef, Creators, Msg } from "./cell-types.ts";
 import { checkReservedKeys } from "./cell-types.ts";
 import { randomUuid } from "../rand.ts";
 import { registerCall } from "./cell-impl.ts";
+import { nameIsTaken } from "./cell-helpers.ts";
 
 /** Wrap a raw action creator with a guard for the pre-binding state. Calling a
  *  method before the runtime is booted ALWAYS throws (dev + prod) — a pre-boot
@@ -150,7 +151,7 @@ export function bindCell(
       // Async methods: dispatch with _callId, return Promise that resolves with the method's return value
       const fn = (...args: unknown[]) => {
         const callId = randomUuid();
-        const promise = registerCall(callId);
+        const promise = registerCall(callId, `${f.__aio.id}:${key}`);
         const action = (creator as (...a: unknown[]) => Msg)(...args);
         dispatch({
           ...action,
@@ -198,7 +199,7 @@ export function bindCell(
   // non-function, so it is correctly overridden).
   const cellName = f.__aio.id;
   for (const key of Object.keys(f.__aio.state)) {
-    if (typeof (f as Record<string, unknown>)[key] === "function") continue;
+    if (nameIsTaken(f, key)) continue;
     Object.defineProperty(f, key, {
       get() {
         const s = getState()[cellName] as Record<string, unknown> | undefined;

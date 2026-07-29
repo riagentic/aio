@@ -36,14 +36,22 @@ function headContent(
   renderBudget?: RenderBudget,
   viewport?: string | false,
   headExtra?: string,
+  syncCells?: string[],
 ): string {
   const cssLink = hasCSS ? '\n  <link rel="stylesheet" href="/style.css">' : "";
   const statusScript = showStatus === false
     ? "\n  <script>window.__aioShowStatus=false</script>"
     : "";
-  const configScript = renderBudget
+  // Client-side config the page needs BEFORE any module runs. `syncCells` is
+  // the localFirst decision: it is made on the server at compose time, so the
+  // browser has no other way to learn that a cell's methods run locally.
+  const clientConfig = {
+    ...(renderBudget ? { renderBudget } : {}),
+    ...(syncCells && syncCells.length ? { syncCells } : {}),
+  };
+  const configScript = Object.keys(clientConfig).length > 0
     ? `\n  <script>window.__aioConfig=${
-      JSON.stringify({ renderBudget })
+      JSON.stringify(clientConfig).replace(/</g, "\\u003c")
     }</script>`
     : "";
   const metaW = width ? `\n  <meta name="aio:width" content="${width}">` : "";
@@ -79,6 +87,7 @@ export function generateHTML(
   uiEntry = "App.tsx", // AIO-8.1: convention default, override via ui.entry
   viewport?: string | false, // ui.viewport override (false = opt out)
   headExtra?: string, // ui.head — verbatim <head> content
+  syncCells?: string[], // localFirst: cells the client runs locally + syncs
 ): string {
   const head = headContent(
     title,
@@ -89,6 +98,7 @@ export function generateHTML(
     renderBudget,
     viewport,
     headExtra,
+    syncCells,
   );
 
   if (prod) return prodHTML(head);
@@ -119,6 +129,12 @@ function aioDevHTML(
   uiEntry = "App.tsx",
 ): string {
   const entry = _safeUiEntry(uiEntry);
+  // The client's dev flag. Every dev-only tripwire in the isomorphic core —
+  // frozen state so a component mutation throws at the site, the readonly hint,
+  // the hidden-field read guard — reads `__aioDev`, and until now only the TEST
+  // harnesses ever set it. So the browser you actually develop in was the most
+  // PERMISSIVE environment aio has, and its bugs surfaced later, in a test or
+  // in production. It is set before any module loads, and never in prod.
   return `<!DOCTYPE html>
 <html>
 <head>
@@ -126,6 +142,7 @@ ${head}
 </head>
 <body>
   <div id="root"></div>
+  <script>window.__aioDev=true</script>
   <script type="importmap">${importMap.replace(/</g, "\\u003c")}</script>
   <script type="module">${devWsScript()}
 

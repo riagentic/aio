@@ -134,10 +134,53 @@ Three-way merge against base. Concurrent add + remove removes the item.
 | `set-add`     | Yes            | Collaborative lists (keep all)      |
 | `set-remove`  | Yes            | Collaborative lists (honor deletes) |
 
+## Local-first: `sync` for the whole app
+
+`sync: true` is per cell. `aio.run({ localFirst: true })` makes it the default
+for **every server cell** — methods run where the caller is, instantly and
+optimistically, and travel as CRDT ops. The server is unchanged as the
+authority: it re-runs each op through normal dispatch, so guards, `access` and
+`validate:` hooks decide exactly what they decide today, and a refused op comes
+back explained (`sync.onRejected`).
+
+```ts
+await aio.run({ localFirst: true });
+```
+
+Per-cell resolution, in order:
+
+| the cell says        | what happens                                     |
+| -------------------- | ------------------------------------------------ |
+| `sync: {...}`/`true` | its own config wins — localFirst never overrides |
+| `sync: false`        | opt-out: keeps round-tripping through the server |
+| nothing              | adopted — runs locally, syncs                    |
+| `scope: "client"`    | never adopted (its state never leaves the tab)   |
+
+Use `sync: false` wherever an optimistic preview would be a lie — an auth cell,
+a payment, a ledger balance the user must not see move until the server agrees.
+
+Boot says exactly which cells were adopted; a switch that silently relocates
+every method in the app would be the worst kind of quiet decision:
+
+```
+localFirst: 3 cell(s) run locally and sync — todos, prefs, board;
+server-only by opt-out: auth
+```
+
+The browser learns the decision from the page shell (it is resolved on the
+server at compose time, so it cannot be read off the cell definition the way
+`sync: true` can). Proven by measurement, not by config: an adopted cell's click
+lands in the server op-log, and the same app without the switch produces no ops
+at all (`tests/e2e-local-first.test.ts`).
+
+**Status: opt-in.** It changes WHERE your methods run, so the default flips only
+after a real local-first app reports back
+([spec](../specs/2026-07-22-local-first.md)).
+
 ## Configuration
 
 ```ts
-sync?: true | Partial<SyncConfig>
+sync?: true | false | Partial<SyncConfig>   // false = opt out under localFirst
 
 interface SyncConfig {
   merge: Record<string, MergeStrategy>;    // field → strategy

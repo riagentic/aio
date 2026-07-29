@@ -18,13 +18,29 @@ import { createSyncEngine, type SyncEngine } from "../sync/sync-engine.ts";
 import { createOpBuffer } from "../sync/op-buffer.ts";
 import { createLocalStorageOpStorage } from "../sync/browser-storage.ts";
 import type { SyncConfig } from "../sync/types.ts";
+import { resolveSyncCells } from "./sync-cells.ts";
 import { getRegisteredCells } from "../state/cell-reactive.ts";
 import { getCellSignal } from "../state/state-signals.ts";
 import type { CellDef, Msg } from "../state/cell-types.ts";
 import { produce } from "immer";
+import { degraded } from "../diagnostics/degraded.ts";
 
 let _engine: SyncEngine | null = null;
 let _syncCells: Map<string, CellDef> | null = null;
+
+/** Every sync frame the engine handles is fire-and-forget, and each one used to
+ *  end in `.catch(() => {})`. Individually defensible — a dropped ack is
+ *  retried, a bad remote op is the server's problem — but together they meant
+ *  the CRDT layer could fail continuously while the app showed a clean console
+ *  and stale data. Now a failure is always logged, and a REPEATING failure
+ *  escalates once through the degraded tracker, which health output can see. */
+function watch(op: string, p: Promise<unknown>): void {
+  const d = degraded(op);
+  p.then(() => d.ok(), (e) => {
+    console.warn(`[aio:sync] ${op} failed: ${e}`);
+    d.fail(e);
+  });
+}
 
 /** Cells (by id) that route through the sync engine. Empty until init. */
 export function syncCellNames(): Set<string> {
@@ -75,23 +91,39 @@ export function handleSyncMessage(t: string, d: unknown): void {
   switch (t) {
     case "sync-ack": {
       const a = d as { cell: string; opId: string; serverHlc: unknown };
-      _engine.handleAck(a.cell, a.opId, a.serverHlc as [number, number, string])
-        .catch(() => {});
+      watch(
+        "sync:ack",
+        _engine.handleAck(
+          a.cell,
+          a.opId,
+          a.serverHlc as [number, number, string],
+        ),
+      );
       return;
     }
     case "op-rejected": {
       const r = d as { opId: string; cell: string; reason: string };
-      _engine.handleRejection(r.cell, r.opId, r.reason).catch(() => {});
+      watch(
+        "sync:rejection",
+        _engine.handleRejection(r.cell, r.opId, r.reason),
+      );
       return;
     }
     case "op":
-      _engine.handleRemoteOp(d as Parameters<SyncEngine["handleRemoteOp"]>[0])
-        .catch(() => {});
+      watch(
+        "sync:remote-op",
+        _engine.handleRemoteOp(
+          d as Parameters<SyncEngine["handleRemoteOp"]>[0],
+        ),
+      );
       return;
     case "sync-res":
-      _engine.handleSyncResponse(
-        d as Parameters<SyncEngine["handleSyncResponse"]>[0],
-      ).catch(() => {});
+      watch(
+        "sync:response",
+        _engine.handleSyncResponse(
+          d as Parameters<SyncEngine["handleSyncResponse"]>[0],
+        ),
+      );
       return;
     case "sync-err": {
       // Server-side sync failure — without this branch the client hangs in
@@ -101,7 +133,9 @@ export function handleSyncMessage(t: string, d: unknown): void {
         `[aio:sync] server sync failed: ${reason} — retrying in 2s`,
       );
       const engine = _engine;
-      setTimeout(() => engine?.requestSync().catch(() => {}), 2000);
+      setTimeout(() => {
+        if (engine) watch("sync:request", engine.requestSync());
+      }, 2000);
       return;
     }
   }
@@ -112,10 +146,16 @@ export function initBrowserSync(
   send: (raw: string) => void,
 ): SyncEngine | null {
   if (_engine) return _engine;
-  const cells = new Map<string, CellDef>();
-  for (const def of getRegisteredCells().values()) {
-    if (def.__aio.syncConfig) cells.set(def.__aio.id, def);
-  }
+  // One resolver, shared with the transport's load gate (sync-cells.ts).
+  const cells = resolveSyncCells(
+    getRegisteredCells().values(),
+    (id) =>
+      console.warn(
+        `[aio:sync] localFirst adopted '${id}' but this cell cannot replay ops ` +
+          `locally — it keeps round-tripping through the server. (Only ` +
+          `methods-style cells can run local-first.)`,
+      ),
+  );
   if (cells.size === 0) return null;
   _syncCells = cells;
 
@@ -171,7 +211,7 @@ export function initBrowserSync(
   });
 
   // Replay anything queued offline from a previous session.
-  _engine.requestSync().catch(() => {});
+  watch("sync:request", _engine.requestSync());
   return _engine;
 }
 

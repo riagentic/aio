@@ -462,6 +462,31 @@ async riskyOp(s) {
 }
 ```
 
+### How long may an async method run?
+
+`effectTimeoutMs` (default `30000`, `0` = forever) is the ceiling, and it bounds
+**both** sides of the same call: the framework stops tracking the effect, and
+`await cell.method()` rejects. Per method:
+`perfBudget: { methods: { "wallet:refresh": { timeout: 300_000 } } }`.
+
+Neither side **cancels** anything — the method keeps running, and if it
+finishes, its writes still commit. What you lose is the return value and the
+framework's attention:
+
+```
+wallet:refresh: stopped waiting after 30000ms. The call gave up; the METHOD
+did not — it may still be running, and if it finishes its writes will still
+commit, without a return value reaching this caller.
+```
+
+That matters for what you do next: starting the work again on timeout can leave
+two runs writing the same state. Either raise the ceiling for genuinely long
+work, or make the method itself the guard (a `running` flag, `cancelOn` + a
+`s.$signal` check) rather than treating the timeout as a cancellation.
+
+If a method is routinely near the ceiling, it usually wants to be a job with a
+progress field rather than a call somebody awaits.
+
 ---
 
 ## Workflows in async methods

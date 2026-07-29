@@ -251,6 +251,12 @@ export type CellAio<
   uiPublicFields?: string[];
   /** CRDT sync configuration */
   syncConfig?: SyncConfig;
+  /** The cell said `sync: false` — never adopt it into `localFirst`. */
+  syncOptOut?: boolean;
+  /** Browser only: make this cell sync-capable after the fact (localFirst is
+   *  decided server-side, after the def exists). Sets `syncConfig` AND the
+   *  replay reducer the optimistic rebase needs — see protocol-cell.ts. */
+  enableSync?: (sync: true | Record<string, unknown>) => void;
   /** This cell's methods run in their own worker (cell-workers). */
   worker?: boolean;
   /** State version — increment when state shape changes. Default: 0. */

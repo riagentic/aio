@@ -7,6 +7,25 @@ import type {
   MachineConfig,
 } from "./cell-types.ts";
 
+/** Does a method or selector already own this name on the cell object?
+ *
+ *  Answered from the DESCRIPTOR, never by reading the property. Every one of
+ *  the three binding paths used to probe `typeof obj[key] === "function"`,
+ *  which INVOKES whatever accessor is installed — and by the second bind of a
+ *  cell the accessor is the reactive state getter from the first. So the
+ *  framework read the app's own state to ask a question about its own shape:
+ *  it subscribed the current reactive context as a side effect, and once a
+ *  `ui.exclude`d field started throwing on client reads (as it must), aio
+ *  tripped its own guard and reported it as the app leaking a secret. It took
+ *  an app's entire UI suite offline, and the error named the wrong culprit.
+ *
+ *  A method is assigned as a data property; a state getter is an accessor. The
+ *  descriptor tells them apart without touching a value. */
+export function nameIsTaken(obj: object, key: string): boolean {
+  const d = Object.getOwnPropertyDescriptor(obj, key);
+  return !!d && typeof d.value === "function";
+}
+
 // ── Normalization helpers ────────────────────────────────────────────
 
 /** Normalize persist config into CellFieldFilter for CellAio internals */

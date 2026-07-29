@@ -208,25 +208,25 @@ Method-native workflow tools — see
 
 ## Types
 
-| Type              | Description                                                       |
-| ----------------- | ----------------------------------------------------------------- |
-| `CellDef`         | Return type of `cell()` -- callable methods at top level          |
-| `CellEntry`       | Cell or `{ cell, dependsOn? }`                                    |
-| `CellEffect`      | Union of method-returnable effects -- self-reference annotation   |
-| `MethodDraftMeta` | `{ $signal: AbortSignal }` -- cancellation-aware draft annotation |
-| `UntilOptions`    | `{ timeoutMs?, intervalMs?, msg?, signal? }`                      |
-| `TypedCreator<P>` | Action creator with `.type`                                       |
-| `CallOptions`     | `{ timeout?: number; retries?: number }`                          |
-| `ScopedApp<S>`    | App context for init/destroy/execute                              |
-| `TestContext`     | Test harness -- `{ dispatch, getState, expect, settle }`          |
-| `AioError`        | Error with `code`, `source`, `context`, `correlationId`           |
-| `AioErrorCode`    | 16 error codes -- see [Errors](../debugging/errors.md)            |
-| `LogConfig`       | Logging configuration                                             |
-| `LogLevel`        | `'trace' \| 'debug' \| 'info' \| 'warn' \| 'error'`               |
-| `VitalsConfig`    | Client diagnostic config -- see [Vitals](../debugging/vitals.md)  |
-| `VitalAlert`      | `{ id, layer, status, duration, measured, threshold, hint, ts }`  |
-| `MemoryConfig`    | Heap monitoring config                                            |
-| `ScheduleEffect`  | `{ _schedule: true, key, type, ... }` from sync methods           |
+| Type              | Description                                                                |
+| ----------------- | -------------------------------------------------------------------------- |
+| `CellDef`         | Return type of `cell()` -- callable methods at top level                   |
+| `CellEntry`       | Cell or `{ cell, dependsOn? }`                                             |
+| `CellEffect`      | Union of method-returnable effects -- self-reference annotation            |
+| `MethodDraftMeta` | `{ $signal, $commit, $live }` -- draft extras (cancellation, transactions) |
+| `UntilOptions`    | `{ timeoutMs?, intervalMs?, msg?, signal? }`                               |
+| `TypedCreator<P>` | Action creator with `.type`                                                |
+| `CallOptions`     | `{ timeout?: number; retries?: number }`                                   |
+| `ScopedApp<S>`    | App context for init/destroy/execute                                       |
+| `TestContext`     | Test harness -- `{ dispatch, getState, expect, settle }`                   |
+| `AioError`        | Error with `code`, `source`, `context`, `correlationId`                    |
+| `AioErrorCode`    | 16 error codes -- see [Errors](../debugging/errors.md)                     |
+| `LogConfig`       | Logging configuration                                                      |
+| `LogLevel`        | `'trace' \| 'debug' \| 'info' \| 'warn' \| 'error'`                        |
+| `VitalsConfig`    | Client diagnostic config -- see [Vitals](../debugging/vitals.md)           |
+| `VitalAlert`      | `{ id, layer, status, duration, measured, threshold, hint, ts }`           |
+| `MemoryConfig`    | Heap monitoring config                                                     |
+| `ScheduleEffect`  | `{ _schedule: true, key, type, ... }` from sync methods                    |
 
 ---
 
