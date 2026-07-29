@@ -265,7 +265,12 @@ export function testCell(
       const payload = eff.payload as Record<string, unknown>;
       const callId = (payload._callId as string | undefined) ??
         (payload._callId = crypto.randomUUID()) as string;
-      const done = registerCall(callId);
+      // `eff.type` is the internal "<cell>:__exec" trigger — the ceiling is
+      // keyed by the METHOD the app wrote.
+      const method = `${eff.type.split(":")[0]}:${
+        String(payload._method ?? "")
+      }`;
+      const done = registerCall(callId, method);
       done.catch(() => {}); // mark handled — fire-and-forget callers must not surface unhandled rejections
       composed.execute(app, eff as { type: string; payload: unknown });
       // Propagate rejection to awaiters — matches production `await cell.method()`.

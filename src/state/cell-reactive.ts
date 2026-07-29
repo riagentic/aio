@@ -10,6 +10,7 @@ import { attachMeta } from "./cell-catalog.ts";
 import { _cellSignals, getCellSignal } from "./state-signals.ts";
 import { _registerAck } from "../protocol/browser-ack.ts";
 import { trackPath } from "./state-subs.ts";
+import { nameIsTaken } from "./cell-helpers.ts";
 import {
   applyCellFieldFilter,
   deepExclude,
@@ -107,16 +108,30 @@ export function _resetUiReadWarnings(): void {
   _uiReadWarned.clear();
 }
 
-function warnHiddenRead(cellName: string, key: string, reason: string): void {
+/** A client read of a field the cell hides. Dev/test THROWS, prod returns
+ *  undefined and warns once.
+ *
+ *  It used to only warn, everywhere — and a warning does not stop the read from
+ *  type-checking as the field's declared type, so client code went on branching
+ *  on `undefined` as though it were data (risoto 2026-07-28 #3: a lock screen
+ *  asked "does a vault exist?", got `undefined` forever, and behaved). A hidden
+ *  field is never readable here, so ANY such read is a bug; dev is where a bug
+ *  should be unmissable, prod is where an app should still render. The fix is
+ *  always the same shape: expose the non-secret FACT (`hasVault: boolean`)
+ *  beside the secret and read that. */
+function reportHiddenRead(cellName: string, key: string, reason: string): void {
   const id = `${cellName}.${key}`;
+  const msg = `[aio] ${id} read from client context → undefined — ${reason}. ` +
+    `ui visibility is enforced on ALL client reads (browser and ` +
+    `standalone/electron alike). Keep the secret server-side and read it in ` +
+    `server code (routes, effects, methods); if the client needs to know ` +
+    `something ABOUT it, publish that fact as its own non-secret field.`;
+  if ((globalThis as Record<string, unknown>).__aioDev === true) {
+    throw new Error(msg);
+  }
   if (_uiReadWarned.has(id)) return;
   _uiReadWarned.add(id);
-  console.warn(
-    `[aio] ${id} read from client context → undefined — ${reason}. ` +
-      `ui visibility is enforced on ALL client reads (browser and ` +
-      `standalone/electron alike); keep secrets server-side and read them ` +
-      `in server code (routes, effects, methods) instead.`,
-  );
+  console.warn(msg);
 }
 
 /** The ui filter that applies to CLIENT reads of a cell. Client-scoped cells
@@ -157,16 +172,17 @@ export function bindCellReactive(
   // non-function and is correctly overridden).
   const uiFilter = clientUiFilter(def);
   for (const key of Object.keys(initialState)) {
-    if (typeof (def as Record<string, unknown>)[key] === "function") continue;
+    if (nameIsTaken(def, key)) continue;
 
     // TBD B7: ui visibility is enforced at THIS seam for client reads — a
-    // hidden field reads as undefined (+ one-time loud warn), a dot-path
-    // exclude strips the nested value, exactly like the broadcast filter.
+    // hidden field throws in dev and reads as undefined (+ one-time loud warn)
+    // in prod, a dot-path exclude strips the nested value, exactly like the
+    // broadcast filter.
     const vis = uiKeyVisibility(uiFilter, key);
     Object.defineProperty(def, key, {
       get() {
         if (vis.hidden) {
-          warnHiddenRead(cellName, key, vis.reason!);
+          reportHiddenRead(cellName, key, vis.reason!);
           return undefined;
         }
         // Register a SERVER subscription for this cell (risoto 2026-07-18):

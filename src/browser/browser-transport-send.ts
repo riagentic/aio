@@ -46,7 +46,17 @@ export function send(
   if (T.wasConnected) {
     if (T.offlineQueue.length < OFFLINE_MAX_QUEUE) {
       T.offlineQueue.push(action);
-      _saveOfflineAction(action).catch(() => {});
+      // The in-memory queue survives the disconnect; only this write makes the
+      // action survive a RELOAD. `_saveOfflineAction` reports its own storage
+      // failures (offline-storage-error / offline-queue-full); a REJECTION is
+      // the case it cannot report from the inside, and losing it silently means
+      // the user's edit is gone with no trace anywhere.
+      _saveOfflineAction(action).catch((e) =>
+        console.error(
+          `[aio] offline queue write failed — '${action.type}' is queued in ` +
+            `memory but will be lost on reload: ${e}`,
+        )
+      );
       return ackPromise;
     }
     _diagEmit({

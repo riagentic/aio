@@ -1,6 +1,6 @@
 # Road to 1.0.0-final
 
-Plan written 2026-07-04, current as of **v1.0.0-alpha39** (2026-07-28). **Core
+Plan written 2026-07-04, current as of **v1.0.0-alpha40** (2026-07-29). **Core
 principle:** all breaking changes die in alpha; beta = frozen surface,
 bugfix-only; 1.0.0 = boring. Shipped work lives in `CHANGELOG.md` — this file
 tracks only what remains.
@@ -45,7 +45,7 @@ Ten consecutive alpha releases with **no major/critical/blocker bug and no
 compat break**. A corruption-class bug found during an alpha resets the count —
 that is the gate working, not a setback.
 
-- Streak: **6** (alpha34 … alpha39). The alpha34 audit found six data-loss /
+- Streak: **7** (alpha34 … alpha40). The alpha34 audit found six data-loss /
   security HIGHs, which reset it; nothing since has been corruption-class in a
   RELEASED alpha. (Bugs caught while building an alpha — the alpha38 libraryMode
   log misplacement, the app-key split-brain — don't reset it: they never
@@ -53,17 +53,31 @@ that is the gate working, not a setback.
 
 ## Remaining before beta
 
-- [ ] **Decide `localFirst`.** The spec and the machinery exist
-      (`docs/specs/2026-07-22-local-first.md`; local execution, HLC ops, offline
-      queue, rejection path, `serverFns` all shipped) — the switch does not. Two
-      steps: ship `aio.run({ localFirst: true })` as opt-in, then decide the
-      default once a real app reports back. It changes WHERE methods run, so it
-      cannot land after the freeze.
-- [ ] **Structural trio** (alpha-only, each behind its own full gate run) —
-      unify the cell-binding triple (server catalog / reactive proxy / protocol
-      stub, the proven fix-one-forget-the-others offender), collapse the
-      `AioConfig` intermediate (~420 LOC, one producer + one consumer), split
-      the 1016-line `server-ws.ts` factory (abuse / backpressure / routing).
+- [x] **`localFirst` opt-in — SHIPPED.** `aio.run({ localFirst: true })` makes
+      every server cell run its methods where the caller is and travel as CRDT
+      ops; `sync: false` is the per-cell opt-out; boot logs exactly which cells
+      were adopted. The browser learns the decision from the page shell (it is
+      resolved server-side at compose time) and adopts through the def's own
+      `enableSync`, so config and replay reducer can never come apart. Measured,
+      not claimed: `tests/e2e-local-first.test.ts` asserts a real chromium click
+      lands in the op-log with the switch on, and that the same app without it
+      produces no ops at all.
+- [ ] **Decide the `localFirst` DEFAULT.** Needs a real local-first app to
+      report back — same bar every foundational flip in this repo has met.
+      Flipping it changes WHERE methods run, so it cannot land after the freeze.
+- [ ] **Structural trio** (alpha-only, each behind its own full gate run).
+  - [x] **Cell-binding triple** — the fix-one-forget-the-others offender is now
+        GATED rather than merged: `tests/cell-binding-parity.test.ts` fails if
+        client code reads an `__aio` key the browser stub does not produce, and
+        pins the server/browser catalogs to the same async classification and
+        public action keys. That is what the two shipped bugs (`asyncMethods`,
+        `syncConfig`-without-reducer) needed; a physical merge of three surfaces
+        with different lifetimes buys little on top and risks a lot. Revisit
+        only if the gate starts accumulating exemptions.
+  - [ ] Collapse the `AioConfig` intermediate (~420 LOC, one producer + one
+        consumer).
+  - [ ] Split the 1016-line `server-ws.ts` factory (abuse / backpressure /
+        routing).
 - [ ] **B1 — the beta1 release itself.** API snapshot locked ✓, semver +
       deprecation policy ✓, codemod ✓. Remaining: the freeze decision.
 
@@ -105,10 +119,11 @@ the 64KB KV ceiling (gone with the SQLite move), `am restart` flag replay.
       cell holding megabytes still round-trips as one JSON blob per flush. A
       first-class "this slice lives in SQLite rows" strategy is the real fix;
       every app with a large cell currently hand-rolls it via `createDB`.
-- [x] **Array patch granularity.** DONE (alpha39) — a whole-array `replace`
-      whose old contents survive by identity is rewritten as its appends, at
-      patch-generation time. Only the provable case; anything else falls through
-      as a replace.
+- [x] **Array patch granularity.** DONE (alpha39, completed in alpha40) — a
+      whole-array `replace` is rewritten as the ops that produce it, at
+      patch-generation time: appends first, then any identity-matched shrink,
+      insert or scattered `filter`. Only the provable cases; a reorder or
+      duplicate identities still fall through as a replace.
 - [x] **Worker cells in compiled binaries.** DONE (alpha39) — they already
       worked; the "not supported yet" warning was stale (Deno embeds the entry
       and reports it as `file:///…`). `test:build` now measures the isolation in
@@ -129,11 +144,12 @@ honoured, `broadcastTT` coalesced, `am cost` weighing unattributed bytes.
       that persists user data eventually wants; risoto wrote its own. Would be
       `db.snapshot(path)` + `checkIntegrityOnBoot: true`. Feature-sized, so it
       waits for a second app to ask — but it is the strongest remaining ask.
-- [ ] **A "degraded" escalation hook.** Best-effort subsystems (a cache that
-      refetches on failure) can fail forever while only writing stderr. After N
-      consecutive failures of the same guarded op, one structured event to the
-      app's log — not per-occurrence spam. Every app has these corners; each
-      currently invents its own escalation or has none.
+- [x] **A "degraded" escalation hook.** DONE (alpha40) — `degraded(name)` /
+      `degradedReport()`: N consecutive failures of a named best-effort op
+      escalate exactly once (one structured event, not per-occurrence spam) plus
+      one on recovery, and `/__aio/health` reports `status: "degraded"` and
+      names them. aio's own browser sync frames — a wall of `.catch(() => {})` —
+      were the first user.
 - [ ] **Time-travel subscribe-on-open.** Coalescing + the no-client gate cover
       the realistic cases; the honest fix is that a client which never opens the
       panel should receive nothing at all. Needs a `tt-subscribe` frame and a

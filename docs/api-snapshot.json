@@ -29,7 +29,7 @@
         },
         "AsyncMethod": {
           "kind": "typeAlias",
-          "sig": "e9f20c663ab7c949"
+          "sig": "804ef9b69025525f"
         },
         "authClient": {
           "kind": "variable",
@@ -65,7 +65,7 @@
         },
         "CellAio": {
           "kind": "typeAlias",
-          "sig": "4f7ad761cfdc2426"
+          "sig": "ec971958926993ba"
         },
         "CellDef": {
           "kind": "typeAlias",
@@ -85,7 +85,7 @@
         },
         "CellsConfig": {
           "kind": "typeAlias",
-          "sig": "1db2ed108160f70b"
+          "sig": "72e2911c2dc8006b"
         },
         "CellStatus": {
           "kind": "typeAlias",
@@ -134,6 +134,18 @@
         "DBOpts": {
           "kind": "typeAlias",
           "sig": "cc0d8a775b0827b2"
+        },
+        "degraded": {
+          "kind": "function",
+          "sig": "4c8dae37ae7e14f4"
+        },
+        "Degraded": {
+          "kind": "typeAlias",
+          "sig": "1faaad3e09281f6f"
+        },
+        "degradedReport": {
+          "kind": "function",
+          "sig": "c1de0073ea60bc2e"
         },
         "DiagnosticsConfig": {
           "kind": "typeAlias",
@@ -189,11 +201,11 @@
         },
         "MethodDraftMeta": {
           "kind": "typeAlias",
-          "sig": "12004ecfc136f8ce"
+          "sig": "363c4400bce44182"
         },
         "MethodsCellConfig": {
           "kind": "typeAlias",
-          "sig": "57fed761a5536450"
+          "sig": "4512601cab4037d8"
         },
         "Msg": {
           "kind": "typeAlias",
@@ -325,7 +337,7 @@
         },
         "SyncMethod": {
           "kind": "typeAlias",
-          "sig": "971f8f6db19f572f"
+          "sig": "501a5830e6052eaf"
         },
         "table": {
           "kind": "function",
@@ -381,7 +393,7 @@
         },
         "VERSION": {
           "kind": "variable",
-          "sig": "5fb2dc500b591f1c"
+          "sig": "4f956c08ea270ac2"
         },
         "VitalsConfig": {
           "kind": "typeAlias",

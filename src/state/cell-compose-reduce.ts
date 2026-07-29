@@ -11,7 +11,7 @@ import {
   produceWithPatches,
 } from "immer";
 import { log } from "../diagnostics/logger.ts";
-import { narrowArrayAppends } from "./patch-compact.ts";
+import { narrowArrayPatches } from "./patch-compact.ts";
 import type { ScheduleEffect } from "./schedule.ts";
 import type { OwnEffect } from "./own.ts";
 import { resolveCall } from "./cell-impl.ts";
@@ -191,10 +191,10 @@ export function reduceCell(
       );
     }
     // A list the method appended to travels as its appends, not as the whole
-    // list again (see narrowArrayAppends). Done HERE, at generation, because
+    // list again (see narrowArrayPatches). Done HERE, at generation, because
     // this is the last place the PREVIOUS slice is in hand — by broadcast time
     // only the new state is left, and the prefix can no longer be proven.
-    cellPatches = narrowArrayAppends(cellState, cellPatches);
+    cellPatches = narrowArrayPatches(cellState, cellPatches);
     const tProduce = _perfCheck ? performance.now() - t0 : 0;
 
     // Effects already cloned inside produceWithPatches (before draft revocation)
@@ -298,7 +298,7 @@ export function reduceCell(
   // Same narrowing as the guarded path above — both paths produce patches, so
   // both must, or the optimisation would apply only to cells that happen to
   // declare a state machine.
-  cellPatches = narrowArrayAppends(cellState, cellPatches);
+  cellPatches = narrowArrayPatches(cellState, cellPatches);
   const stProduce = _perfCheck ? performance.now() - st0 : 0;
 
   // Effects already cloned inside produceWithPatches (before draft revocation)

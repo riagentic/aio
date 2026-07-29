@@ -9,7 +9,11 @@
 import { assert, assertEquals } from "@std/assert";
 import { cell } from "../src/state/cell-create.ts";
 import { bindCell } from "../src/state/cell-catalog.ts";
-import { bindCellReactive } from "../src/state/cell-reactive.ts";
+import {
+  _resetCellBindings,
+  bindCellReactive,
+} from "../src/state/cell-reactive.ts";
+import { nameIsTaken } from "../src/state/cell-helpers.ts";
 import { getCellSignal } from "../src/state/state-signals.ts";
 import { _resetAioRuntime } from "../src/state/runtime-reset.ts";
 import { _resetSignals } from "../src/state/state-signals.ts";
@@ -267,5 +271,110 @@ Deno.test("B7: client-scoped cells are exempt (state never leaves the client)", 
     { id: "m1" },
     "client-cell state stays readable — there is no server to keep it on",
   );
+  reset();
+});
+
+// risoto 2026-07-28 #3 — the warning was the ONLY signal, and a warning does not
+// stop the read from type-checking as the field's declared type: a lock screen
+// asked "does a vault exist?", got `undefined` from a ui.exclude'd verifier, and
+// branched on it as data. Dev/test now throws at the read; prod still degrades.
+Deno.test("B7: a hidden read THROWS in dev, degrades in prod", () => {
+  reset();
+  const seeds = cell("b7-dev-seeds", {
+    state: { hasVault: true, vaultCheck: "secret" },
+    methods: {},
+    ui: { exclude: ["vaultCheck"] },
+  });
+  bindCellReactive(seeds);
+  const s = seeds as unknown as { hasVault: boolean; vaultCheck?: unknown };
+  const dev = (globalThis as Record<string, unknown>).__aioDev;
+  try {
+    (globalThis as Record<string, unknown>).__aioDev = true;
+    let threw = "";
+    try {
+      s.vaultCheck;
+    } catch (e) {
+      threw = String(e);
+    }
+    assert(
+      threw.includes("b7-dev-seeds.vaultCheck"),
+      `dev must throw at the read, got: ${threw || "no throw"}`,
+    );
+    assert(threw.includes("read from client context"), threw);
+    assertEquals(s.hasVault, true, "the mirrored non-secret fact still reads");
+
+    // Prod: the app keeps rendering — undefined + one warning, as before.
+    (globalThis as Record<string, unknown>).__aioDev = false;
+    const { warnings } = withWarnCapture(() => {
+      assertEquals(s.vaultCheck, undefined);
+      assertEquals(s.vaultCheck, undefined);
+    });
+    assertEquals(
+      warnings.filter((w) => w.includes("b7-dev-seeds.vaultCheck")).length,
+      1,
+    );
+  } finally {
+    (globalThis as Record<string, unknown>).__aioDev = dev;
+    reset();
+  }
+});
+
+// risoto, first field result of the dev-throw: aio tripped its OWN guard.
+//
+// All three binding paths probed `typeof def[key] === "function"` to ask "does
+// a method own this name?" — which READS the property, invoking whatever
+// accessor is installed. By the second bind of a cell, that accessor is the
+// reactive getter from the first (a re-bind clears `bound`, not the getters),
+// so the framework read the app's hidden field and threw. It reported the app
+// leaking a secret for something aio did, and took an entire UI suite offline
+// (512/298 → 785/25 with the probe fixed). The question is about SHAPE, so it
+// is answered from the descriptor and never touches a value.
+Deno.test("B7: re-binding a cell with ui.exclude does not trip its own guard", () => {
+  reset();
+  const vault = cell("b7-rebind", {
+    state: { hasVault: true, vaultCheck: "secret" },
+    methods: { noop(_s: Record<string, unknown>) {} },
+    ui: { exclude: ["vaultCheck"] },
+  });
+  const dev = (globalThis as Record<string, unknown>).__aioDev;
+  try {
+    (globalThis as Record<string, unknown>).__aioDev = true; // as every harness runs
+    bindCellReactive(vault); // mount 1 — installs the hidden-field getter
+    _resetCellBindings(); // app.close(): bindings released, getters remain
+    // Mount 2 must not read through those getters just to inspect the shape.
+    bindCellReactive(vault);
+    bindCell(
+      vault as never,
+      () => Promise.resolve(undefined),
+      () => ({ "b7-rebind": { hasVault: true, vaultCheck: "secret" } }),
+    );
+    assertEquals(
+      (vault as unknown as { hasVault?: boolean }).hasVault,
+      true,
+      "the visible field still binds after a re-mount",
+    );
+  } finally {
+    (globalThis as Record<string, unknown>).__aioDev = dev;
+    reset();
+  }
+});
+
+Deno.test("B7: the shape probe never invokes a getter (no reads, no tracking)", () => {
+  // Beyond the throw: reading through the getter also called trackPath() and
+  // the signal, so BINDING subscribed whatever reactive context was current.
+  reset();
+  let reads = 0;
+  const def = { __aio: { id: "probe", state: { a: 1, m: 2 } } } as never;
+  Object.defineProperty(def, "a", {
+    get() {
+      reads++;
+      return 1;
+    },
+    configurable: true,
+  });
+  (def as Record<string, unknown>).m = () => {};
+  assertEquals(nameIsTaken(def, "a"), false, "an accessor is not a method");
+  assertEquals(nameIsTaken(def, "m"), true, "a function data property is");
+  assertEquals(reads, 0, "the probe read nothing");
   reset();
 });

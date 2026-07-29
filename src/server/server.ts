@@ -258,6 +258,7 @@ export function createServer(config: ServerConfig): ServerHandle {
     width: config.width,
     height: config.height,
     renderBudget: config.renderBudget,
+    syncCells: config.syncCells,
     getGraphResult: () => graphValidation?.getResult() ?? null,
     getSnapshot: config.getSnapshot,
     loadSnapshot: config.loadSnapshot,

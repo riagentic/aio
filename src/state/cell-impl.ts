@@ -36,13 +36,13 @@ export type CellEffect =
  *  value is unambiguous at runtime. `unknown` keeps the constraint permissive;
  *  the caller-side return type is inferred precisely by DirectCalling. */
 export type SyncMethod<S> = (
-  s: S & Partial<MethodDraftMeta>,
+  s: S & Partial<MethodDraftMeta<S>>,
   // deno-lint-ignore no-explicit-any
   ...args: any[]
 ) => unknown;
 /** Async cell method — runs in executor, mutations batched via proxy */
 export type AsyncMethod<S> = (
-  s: S & Partial<MethodDraftMeta>,
+  s: S & Partial<MethodDraftMeta<S>>,
   // deno-lint-ignore no-explicit-any
   ...args: any[]
   // deno-lint-ignore no-explicit-any
@@ -54,11 +54,16 @@ export type AsyncMethod<S> = (
  *  the annotation is Partial because strict contravariance forbids a
  *  required-extra param on Method<S> — use `s.$signal?.aborted` (or `!` when
  *  you know the method is async). */
-export type MethodDraftMeta = {
+export type MethodDraftMeta<S = Record<string, unknown>> = {
   readonly $signal: AbortSignal;
   /** Transactional cells (risoto #2): publish the buffered write-set atomically
    *  mid-method, then continue against a fresh snapshot. No-op off `transaction`. */
   readonly $commit: () => void;
+  /** The state as it is NOW, not as it was when this method entered — the one
+   *  sanctioned way out of snapshot isolation. Writes through it still join the
+   *  transaction's atomic commit; reads through it are deliberately fresh, so
+   *  they never trip conflict detection. Off `transaction` it is just `s`. */
+  readonly $live: S;
 };
 /** Cell method — sync or async */
 export type Method<S> = SyncMethod<S> | AsyncMethod<S>;
@@ -148,25 +153,81 @@ export function callWithOpts(
   return retry();
 }
 
-/** Default timeout for await cell.method() — prevents silent hangs if executor never resolves */
-const CALL_TIMEOUT = 30_000;
+// How long `await cell.method()` waits before it stops waiting.
+//
+// This was a hardcoded 30s whose error blamed a crashed executor — and that was
+// almost never what happened. A method doing legitimately long work (an NFT
+// scan, a chain query) blew the ceiling, the caller got told the executor had
+// died, and the method KEPT RUNNING: its writes committed later, unannounced,
+// on top of whatever the caller did next. Reporting a false cause while hiding
+// the true state is the exact failure `.katana/errors.md` names, and it cost a
+// production incident.
+//
+// It is also no longer a SECOND ceiling. `effectTimeoutMs` (and per-method
+// `perfBudget.methods["cell:method"].timeout`) already governs how long an
+// async effect may run; the caller-side wait now resolves from the same
+// numbers, so raising the limit raises it everywhere — previously it raised the
+// effect's and left this one at 30s, which is precisely the trap of a knob that
+// looks like it worked.
+const DEFAULT_CALL_TIMEOUT_MS = 30_000;
+let _callTimeoutMs = DEFAULT_CALL_TIMEOUT_MS;
+let _callTimeoutByMethod: Record<string, number> | undefined;
 
-/** Register a pending call — returns Promise that resolves when resolveCall() is called.
- *  Times out after 30s by default to prevent silent deadlocks. */
-export function registerCall(callId: string): Promise<unknown> {
+/** Point the caller-side wait at the app's configured effect timeouts.
+ *  `0` (or a negative) means wait indefinitely. Called at boot. */
+export function _setCallTimeouts(
+  defaultMs?: number,
+  perMethod?: Record<string, number>,
+): void {
+  _callTimeoutMs = defaultMs ?? DEFAULT_CALL_TIMEOUT_MS;
+  _callTimeoutByMethod = perMethod;
+}
+
+/** Restore the built-in default — test isolation. */
+export function _resetCallTimeouts(): void {
+  _callTimeoutMs = DEFAULT_CALL_TIMEOUT_MS;
+  _callTimeoutByMethod = undefined;
+}
+
+/** The ceiling for one call, in ms. `<= 0` ⇒ no ceiling. */
+export function callTimeoutFor(method?: string): number {
+  const perMethod = method ? _callTimeoutByMethod?.[method] : undefined;
+  return perMethod ?? _callTimeoutMs;
+}
+
+/** Register a pending call — returns a Promise that resolves when resolveCall()
+ *  is called. `method` ("cell:name") picks up any per-method override. */
+export function registerCall(
+  callId: string,
+  method?: string,
+): Promise<unknown> {
+  const timeoutMs = callTimeoutFor(method);
+  if (timeoutMs <= 0) {
+    // Explicitly unbounded — the app said so.
+    return new Promise((resolve, reject) => {
+      _pending.set(callId, { resolve, reject });
+    });
+  }
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
       if (_pending.has(callId)) {
         _pending.delete(callId);
         reject(
           new Error(
-            `await cell.method() timed out after ${
-              CALL_TIMEOUT / 1000
-            }s — the effect executor may have crashed or never resolved this call`,
+            `${
+              method ?? "await cell.method()"
+            }: stopped waiting after ${timeoutMs}ms. The call gave up; the ` +
+              `METHOD did not — it may still be running, and if it finishes ` +
+              `its writes will still commit, without a return value reaching ` +
+              `this caller. Raise the ceiling with effectTimeoutMs (or ` +
+              `perfBudget.methods[${
+                JSON.stringify(method ?? "cell:method")
+              }].timeout), set effectTimeoutMs: 0 to wait indefinitely, or ` +
+              `move the long work off the call path.`,
           ),
         );
       }
-    }, CALL_TIMEOUT);
+    }, timeoutMs);
     _pending.set(callId, {
       resolve: (v) => {
         clearTimeout(timer);
@@ -302,6 +363,100 @@ function _warnDroppedMutation(reason: string, m: Mutation): void {
       "Initialize the parent object/array, or guard the access in the method.",
   });
   console.warn(msg);
+}
+
+// ── Transactional conflict detection ───────────────────────────────────
+//
+// A transactional method reads a snapshot pinned at entry, so anything another
+// method writes DURING an await is invisible to it. That is the feature (reads
+// don't shift under you) and, unvalidated, also the bug: a read-modify-write
+// commits over the newer value and nothing says so — risoto 2026-07-28 #1, where
+// a balance refresh committed pre-send numbers and stamped them "confirmed".
+//
+// Databases solved this long ago, so we use their model rather than invent one:
+//
+//   transaction: true              → snapshot isolation. A write DERIVED from a
+//                                    read of the same place (read-modify-write)
+//                                    is validated at commit; if that path moved
+//                                    since entry, the update would be lost.
+//                                    Blind writes (`s.loading = false`) are
+//                                    last-writer-wins by intent, never conflict.
+//   transaction: {serialize: true} → serializable. Every read is validated too,
+//                                    so a guard reading a field a SYNC method
+//                                    writes mid-await can no longer be inert.
+//
+// Identity is the comparator: Immer's structural sharing keeps untouched
+// subtrees referentially equal, so writes elsewhere cost nothing and a real
+// change on a watched path is always caught.
+
+const PATH_SEP = "\u0000";
+
+/** Paths touched by one transactional method invocation. */
+export type ReadWatch = {
+  /** Paths read against the pinned snapshot. */
+  reads: Set<string>;
+  /** Paths written into the transaction's buffer. */
+  writes: Set<string>;
+  /** Writes already published by an `s.$commit()` — this method IS their last
+   *  writer, so they are not evidence of anyone else's. */
+  flushed: Set<string>;
+};
+
+export const createReadWatch = (): ReadWatch => ({
+  reads: new Set(),
+  writes: new Set(),
+  flushed: new Set(),
+});
+
+/** Path array → watch key. The one place the separator is spelled. */
+export const watchKey = (path: readonly string[]): string =>
+  path.join(PATH_SEP);
+
+/** Same path, an ancestor, or a descendant of one in `set`. */
+function overlaps(path: string, set: Set<string>): boolean {
+  if (set.has(path)) return true;
+  for (const q of set) {
+    if (path.startsWith(q + PATH_SEP) || q.startsWith(path + PATH_SEP)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+const readPath = (key: string): string[] =>
+  key.length === 0 ? [] : key.split(PATH_SEP);
+
+/** The first path whose value moved between the method's entry snapshot and
+ *  live state in a way that makes committing unsound — dotted, `""` for the
+ *  cell root — or null while the transaction is still valid. Pure.
+ *
+ *  `strictReads` promotes snapshot isolation to serializable: every read is
+ *  validated, not only the ones a write was derived from. */
+export function conflictPath(
+  origin: unknown,
+  live: unknown,
+  watch: ReadWatch,
+  strictReads: boolean,
+): string | null {
+  if (origin === live) return null; // nothing committed since entry
+  const moved = (key: string) =>
+    !Object.is(
+      getNestedValue(origin, readPath(key)),
+      getNestedValue(live, readPath(key)),
+    );
+  // Lost updates: a write whose value came from a read of the same place.
+  for (const w of watch.writes) {
+    if (watch.flushed.has(w)) continue;
+    if (!overlaps(w, watch.reads)) continue;
+    if (moved(w)) return readPath(w).join(".");
+  }
+  if (!strictReads) return null;
+  // Serializable: a read that fed no write still decided something.
+  for (const r of watch.reads) {
+    if (overlaps(r, watch.writes)) continue;
+    if (moved(r)) return readPath(r).join(".");
+  }
+  return null;
 }
 
 function getNestedValue(obj: unknown, path: string[]): unknown {
@@ -647,7 +802,18 @@ export function createLiveProxy<S extends Record<string, unknown>>(
   // buffered write-set atomically and re-snapshots. Root-level only; undefined
   // for non-transactional methods.
   _commit?: () => void,
+  // Read/write recorder for snapshot-isolation conflict detection. Set only for
+  // transactional methods (whose reads are pinned and therefore go stale);
+  // undefined ⇒ zero overhead on the live path.
+  _watch?: ReadWatch,
+  // `s.$live` — a sibling proxy whose reads resolve CURRENT state instead of the
+  // pinned snapshot, sharing this batcher so writes still commit atomically.
+  // Root-level only; its reads are deliberately fresh, so they are not watched.
+  _live?: () => S,
 ): S {
+  const pathKey = path.join(PATH_SEP);
+  const noteRead = _watch ? (k: string) => _watch.reads.add(k) : undefined;
+  const noteWrite = _watch ? (k: string) => _watch.writes.add(k) : undefined;
   /** Committed root state with pending writes overlaid (read-your-writes). */
   function effectiveRoot(): S {
     const committed = getState();
@@ -701,6 +867,7 @@ export function createLiveProxy<S extends Record<string, unknown>>(
         if (prop === Symbol.iterator) {
           const fresh = effectiveAt();
           if (Array.isArray(fresh)) {
+            noteRead?.(pathKey);
             const len = fresh.length;
             return function* () {
               for (let i = 0; i < len; i++) {
@@ -721,6 +888,12 @@ export function createLiveProxy<S extends Record<string, unknown>>(
       // Transactional mid-method publish (root-level; no-op off the flag).
       if (key === "$commit" && path.length === 0) {
         return _commit ?? (() => {});
+      }
+      // `s.$live` — escape hatch out of snapshot isolation: read the world as it
+      // is NOW (after an await), deliberately and visibly. Outside a
+      // transactional method it is the same proxy, so the spelling is portable.
+      if (key === "$live" && path.length === 0) {
+        return _live ? _live() : receiver;
       }
       const fresh = effectiveAt();
       const value = (fresh as Record<string, unknown>)[key];
@@ -758,6 +931,9 @@ export function createLiveProxy<S extends Record<string, unknown>>(
                 [...path, String(idx)],
                 _proxyCache,
                 _overlay,
+                undefined,
+                undefined,
+                _watch,
               );
               _proxyCache.set(cacheKey, cached);
             }
@@ -765,6 +941,8 @@ export function createLiveProxy<S extends Record<string, unknown>>(
           };
         }
         return (...args: unknown[]) => {
+          // The whole array feeds the result — watch it as one read.
+          noteRead?.(pathKey);
           // Snapshot the array before running the read method so the result
           // is plain data, not a live-proxy-wrapped value.
           const snap = snapshotForRead(fresh);
@@ -783,6 +961,7 @@ export function createLiveProxy<S extends Record<string, unknown>>(
           const copy = [...fresh as unknown[]];
           // deno-lint-ignore no-explicit-any
           const result = (copy as any)[key](...args);
+          noteWrite?.(pathKey);
           batcher.add(methodName, { path: [...path], op: key, args });
           return result;
         };
@@ -802,6 +981,9 @@ export function createLiveProxy<S extends Record<string, unknown>>(
             [...path, key],
             _proxyCache,
             _overlay,
+            undefined,
+            undefined,
+            _watch,
           );
           _proxyCache.set(cacheKey, cached);
         }
@@ -815,11 +997,14 @@ export function createLiveProxy<S extends Record<string, unknown>>(
         throwLiveStateError(cellName, methodName, `${key}()`);
       }
 
+      // A leaf read — the value the method actually reasons about.
+      noteRead?.(path.length === 0 ? key : pathKey + PATH_SEP + key);
       return value;
     },
 
     set(_target, prop, value) {
       if (typeof prop === "symbol") return false;
+      noteWrite?.(path.length === 0 ? prop : pathKey + PATH_SEP + prop);
       batcher.add(methodName, { path: [...path, prop as string], value });
       return true;
     },
@@ -827,6 +1012,7 @@ export function createLiveProxy<S extends Record<string, unknown>>(
     // AIO-240: intercept `delete` so property removal is batched as a mutation
     deleteProperty(_target, prop) {
       if (typeof prop === "symbol") return false;
+      noteWrite?.(path.length === 0 ? prop : pathKey + PATH_SEP + prop);
       batcher.add(methodName, {
         path: [...path, prop as string],
         value: undefined,
@@ -837,12 +1023,14 @@ export function createLiveProxy<S extends Record<string, unknown>>(
 
     has(_target, prop) {
       if (typeof prop === "symbol") return false;
+      noteRead?.(pathKey);
       const fresh = effectiveAt();
       if (fresh === null || fresh === undefined) return false; // AIO-232
       return prop in (fresh as object);
     },
 
     ownKeys() {
+      noteRead?.(pathKey);
       const fresh = effectiveAt();
       if (fresh === null || fresh === undefined) return []; // AIO-232
       const freshKeys = Reflect.ownKeys(fresh as object);

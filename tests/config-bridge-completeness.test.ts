@@ -26,6 +26,7 @@ const BRIDGE = "src/server/aio-cells-bridge.ts";
 const CONSUMED_ELSEWHERE: Record<string, string> = {
   cells: "composeCellsWiring — the cells themselves, not a passthrough option",
   cellDefaults: "aio-composition.ts, applied per cell at composition time",
+  localFirst: "aio-composition.ts — applyLocalFirst, per cell at compose time",
   appDir: "aio-cells-bridge.ts + aio-boot.ts — resolved into the app directory",
   renderBudget: "aio-server.ts — a client-side budget, sent to the browser",
   memory: "aio-cells-bridge.ts — wired into the memory guard directly",

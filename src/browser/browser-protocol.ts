@@ -44,6 +44,7 @@ import {
   type RenderMeterAPI,
 } from "../vitals/render-meter.ts";
 import { createTransportProbeClient } from "../vitals/transport-probe.ts";
+import { resolveSyncCells } from "./sync-cells.ts";
 import {
   DEFAULT_HEARTBEAT_INTERVAL,
   DEFAULT_THRESHOLDS,
@@ -430,10 +431,15 @@ export function _setSyncLoaderForTest(
 }
 
 function _initSyncIfNeeded(): void {
-  const ids = new Set<string>();
-  for (const def of getRegisteredCells().values()) {
-    if (def.__aio.syncConfig) ids.add(def.__aio.id);
-  }
+  // Same resolver the engine uses — see sync-cells.ts for why this is not two
+  // independent walks over the registry.
+  const ids = new Set(
+    resolveSyncCells(getRegisteredCells().values(), (id) =>
+      console.warn(
+        `[aio:sync] localFirst adopted '${id}' but this cell cannot replay ops ` +
+          `locally — it keeps round-tripping through the server`,
+      )).keys(),
+  );
   if (ids.size === 0) return;
   // Known synchronously so the send wrapper buffers from the FIRST dispatch —
   // this is what closes the boot-window race.

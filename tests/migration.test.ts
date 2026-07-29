@@ -472,3 +472,49 @@ Deno.test("shapeDriftSummary: teachable, names the fields + a fix", () => {
   assert(msg.includes("wallet.seedPhrase"));
   assert(msg.includes("version"), "points at the version-bump fix");
 });
+
+// risoto 2026-07-28 #2 — a restored snapshot replaces a seeded list wholesale.
+// A curated token registry declared in `state:` vanished after the first
+// restore of a profile that had once persisted an empty list; every holding
+// then rendered as a truncated mint, and nothing warned. deepMerge is right to
+// let stored data win; being quiet about erasing a seed is what was wrong.
+Deno.test("detectShapeDrift: a stored EMPTY array erasing a declared seed is reported", () => {
+  const drift = detectShapeDrift(
+    { wallet: { tokens: [{ mint: "usdc" }, { mint: "usdt" }], balance: 0 } },
+    { wallet: { tokens: [], balance: 5 } },
+  );
+  assertEquals(drift.length, 1);
+  const d = drift[0]!;
+  assertEquals(d.issue, "seed-erased");
+  assertEquals(d.cell, "wallet");
+  assertEquals(d.path, "tokens");
+  assertEquals(d.declaredCount, 2);
+  const msg = shapeDriftSummary(drift);
+  assert(msg.includes("wallet.tokens"), msg);
+  assert(msg.includes("2 declared"), msg);
+  assert(msg.includes("persist:"), `names the fix: ${msg}`);
+});
+
+Deno.test("detectShapeDrift: seed erasure only fires where data is actually lost", () => {
+  // An empty DECLARED list can lose nothing; a shorter stored list is the user
+  // deleting rows; an empty stored OBJECT merges key-by-key and erases nothing.
+  assertEquals(
+    detectShapeDrift({ c: { xs: [] } }, { c: { xs: [] } }).length,
+    0,
+  );
+  assertEquals(
+    detectShapeDrift({ c: { xs: [1, 2, 3] } }, { c: { xs: [1] } }).length,
+    0,
+  );
+  assertEquals(
+    detectShapeDrift({ c: { m: { a: 1 } } }, { c: { m: {} } }).length,
+    0,
+  );
+  // …and the erasure it does report is real: deepMerge confirms the loss.
+  const merged = deepMerge({ xs: [1, 2] }, { xs: [] });
+  assertEquals(merged.xs, []);
+  assertEquals(
+    detectShapeDrift({ c: { xs: [1, 2] } }, { c: { xs: [] } })[0]!.issue,
+    "seed-erased",
+  );
+});

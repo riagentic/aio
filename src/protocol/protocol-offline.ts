@@ -92,12 +92,36 @@ export const MAX_OFFLINE_ACTIONS = 1000;
 // B-8: warn once per session when the offline queue is full and actions start
 // being dropped — otherwise edits made offline vanish without any trace.
 let _offlineQueueFullWarned = false;
+/** One report per session when there is no offline storage at all. */
+let _noStorageWarned = false;
 
 export async function _saveOfflineAction(
   action: { type: string; payload?: unknown },
 ): Promise<void> {
   const db = await _openIDB();
-  if (!db) return;
+  if (!db) {
+    // No IndexedDB (private mode, a blocked origin, a quota refusal). This
+    // used to be a bare `return`: the action stayed in memory, nothing was
+    // written, and nothing said so — the user's offline edits simply did not
+    // survive the next reload. Report once per session; the in-memory queue
+    // still replays on reconnect, so this degrades rather than fails.
+    if (!_noStorageWarned) {
+      _noStorageWarned = true;
+      _diagEmit({
+        type: "offline-storage-unavailable",
+        severity: "warning",
+        source: "browser",
+        message:
+          "Offline storage is unavailable — queued actions live in memory " +
+          "only and are lost on reload",
+        detail: { firstAction: action.type },
+        hint:
+          "Private browsing, a blocked origin, or a refused quota. Actions " +
+          "still replay on reconnect within this page's lifetime.",
+      });
+    }
+    return;
+  }
   try {
     await new Promise<void>((resolve, reject) => {
       const tx = db.transaction(_offlineStore, "readwrite");

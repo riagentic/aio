@@ -6,11 +6,14 @@ import { isOwnEffect, type OwnEffect } from "./own.ts";
 import type { AsyncMethod, Method, Mutation, SyncMethod } from "./cell-impl.ts";
 import {
   applyMutations,
+  conflictPath,
   createBatcher,
   createLiveProxy,
+  createReadWatch,
   resolveCall,
   setKey,
   snapshotForRead,
+  watchKey,
 } from "./cell-impl.ts";
 import {
   type CellExecuteFn,
@@ -253,12 +256,24 @@ export function buildMethodsExecutor(
     | undefined,
 ): CellExecuteFn {
   // Per-cell serialize mutex (risoto #2, `transaction: { serialize: true }`):
-  // transactional methods on this cell run one at a time so a read-modify-write
-  // can't lose a concurrent update. A promise chain; the NEXT method captures
-  // its snapshot only after the previous has committed.
-  const serialize =
-    !!(config as { transaction?: { serialize?: boolean } } | undefined)
-      ?.transaction?.serialize;
+  // this cell's transactional ASYNC methods run one at a time, so two of them
+  // can't interleave a read-modify-write. A promise chain; the NEXT method
+  // captures its snapshot only after the previous has committed.
+  //
+  // What it does NOT do — and the file used to claim otherwise, which cost the
+  // reporter a shipped data bug (risoto 2026-07-28 #1): serialize a SYNC method
+  // against a running async one. Sync methods are reducers; they commit
+  // whenever they are dispatched, including mid-await. That hole is closed by
+  // conflict detection below, not by the mutex.
+  const txConfig = (config as {
+    transaction?: boolean | { serialize?: boolean; conflict?: string };
+  } | undefined)?.transaction;
+  const serialize = typeof txConfig === "object" && !!txConfig?.serialize;
+  // What to do when a read the method made has been overwritten by someone else
+  // before it commits: "abort" (default — reject the call, commit nothing) or
+  // "warn" (report loudly, commit anyway). There is no silent third option.
+  const onConflict =
+    (typeof txConfig === "object" ? txConfig?.conflict : undefined) ?? "abort";
   let serializeTail: Promise<unknown> = Promise.resolve();
 
   return (app: ScopedApp, effect: Msg): void => {
@@ -291,16 +306,49 @@ export function buildMethodsExecutor(
         const snap: { s: Record<string, unknown> | null } = {
           s: transactional ? (app.getState() as Record<string, unknown>) : null,
         };
+        // The state this method's reads are pinned to. Conflict detection asks
+        // one question of it: has anything the method READ changed since?
+        const origin = snap.s;
+        const watch = transactional ? createReadWatch() : undefined;
+        // Snapshot isolation is only sound while nothing the method read has
+        // moved underneath it. Validate at every commit point — the moment a
+        // stale read stops being harmless and becomes the state we write.
+        const guardCommit = (): void => {
+          if (!watch) return;
+          const stale = conflictPath(
+            origin,
+            app.getState() as Record<string, unknown>,
+            watch,
+            serialize,
+          );
+          if (stale === null) return;
+          const where = stale === "" ? "this cell's shape" : `s.${stale}`;
+          const msg = `[${name}] ${_method}(): ${where} was changed by ` +
+            `another action while this transactional method awaited, and its ` +
+            `reads are pinned to entry — committing would overwrite that ` +
+            `change with a value computed from stale state. ` +
+            `Read through s.$live to work from current state, retry the ` +
+            `call, or set transaction: { conflict: "warn" } to commit anyway.`;
+          if (onConflict === "abort") {
+            batcher.discard();
+            throw new Error(msg);
+          }
+          log.error("cell", msg);
+        };
         // Mid-method atomic publish: flush the buffer, then re-snapshot so reads
         // after $commit() see the just-committed state.
         const commit = transactional
           ? () => {
+            guardCommit();
             // Capture the write-set before flush clears it, dispatch the real
             // atomic commit, then advance the LOCAL snapshot by the same
             // mutations — reads after $commit see them immediately, without
             // waiting for the (async) dispatch to round-trip through getState().
             const muts = batcher.pending().slice();
             batcher.flush();
+            // These are published now, so a later validation must not read
+            // them back as somebody else's change.
+            for (const m of muts) watch?.flushed.add(watchKey(m.path));
             if (muts.length > 0 && snap.s) {
               const next = snapshotForRead(snap.s) as Record<string, unknown>;
               applyMutations(next, muts);
@@ -313,19 +361,36 @@ export function buildMethodsExecutor(
         // via `s.$signal`. Untracked on settle either way.
         const controller = new AbortController();
         const untrack = trackCall(prefix, _method, controller);
+        const live = () => app.getState() as Record<string, unknown>;
+        // `s.$live` — the sanctioned way out of snapshot isolation: same
+        // batcher (so writes still commit atomically), unwatched reads (they
+        // are current by construction), built only if the method asks for it.
+        let liveProxy: Record<string, unknown> | undefined;
+        const liveView = () =>
+          liveProxy ??= createLiveProxy(
+            name,
+            prefix,
+            _method,
+            live,
+            batcher,
+            [],
+            new Map(),
+            { v: null },
+            controller.signal,
+          );
         const proxy = createLiveProxy(
           name,
           prefix,
           _method,
-          transactional
-            ? () => snap.s as Record<string, unknown>
-            : () => app.getState() as Record<string, unknown>,
+          transactional ? () => snap.s as Record<string, unknown> : live,
           batcher,
           [],
           new Map(),
           { v: null },
           controller.signal,
           commit,
+          watch,
+          transactional ? liveView : undefined,
         );
         return (method as AsyncMethod<Record<string, unknown>>)(
           proxy as Record<string, unknown>,
@@ -340,6 +405,11 @@ export function buildMethodsExecutor(
             // AFTER the check below — so flush here either way. For a
             // non-transactional method this only commits the remainder a beat
             // sooner (the queued flush then finds an empty batch).
+            // …but first: is what we are about to write still based on state
+            // that is current? A throw here lands in the .catch below, which
+            // discards the write-set and rejects the caller — the whole point
+            // is that a lost update can never be the quiet outcome.
+            guardCommit();
             batcher.flush();
             // …then find out whether the store ACCEPTED it. A refused write-set
             // (classically `s.x = { ...s.x, y }` — a proxy-derived value assigned

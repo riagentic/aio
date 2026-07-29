@@ -22,6 +22,7 @@ import type { VitalsSystem } from "../vitals/mod.ts";
 import type { AppLock } from "./single-instance-lock.ts";
 import { resolveSocketPath, resolveTransport } from "./paths.ts";
 import type { Log } from "../diagnostics/logger.ts";
+import { degradedReport } from "../diagnostics/degraded.ts";
 import { cellAccessAllowed } from "./server-auth.ts";
 import type { CellAccess } from "../state/cell-types.ts";
 
@@ -75,6 +76,9 @@ export interface ServerSetupDeps<S, A> {
     strictOrigin?: boolean;
     trustProxyHeader?: string;
     syncIntervalMs?: number;
+    /** Cell ids that sync (own `sync:` config, or adopted by localFirst) —
+     *  handed to the browser in the page shell. */
+    _syncCellIds?: string[];
     _cellPatchStrategies?: Map<string, CellPatchStrategy>;
     _cellFilterFields?: Map<string, PatchFilterFields>;
     _cellAccess?: Map<string, CellAccess>;
@@ -296,7 +300,9 @@ export async function setupTransport<S, A>(
     // keystroke pay up to syncIntervalMs of latency (risoto 2026-07-25:
     // navigation measured a constant ~66ms; ~50ms of it was this window).
     if (typeof callId === "string" && callId.length > 0) {
-      const done = registerCall(callId);
+      // The action type IS "cell:method" — so a network-dispatched call picks
+      // up the same per-method ceiling a direct call does.
+      const done = registerCall(callId, (tagged as { type?: string }).type);
       void Promise.resolve(dispatch(tagged as A)).catch(() => {});
       queueMicrotask(flushAllUrgent);
       void done.then(
@@ -354,6 +360,7 @@ export async function setupTransport<S, A>(
       viewport: ui.viewport,
       headExtra: ui.head,
       renderBudget: config.renderBudget,
+      syncCells: config._syncCellIds,
       fullStateThreshold: config.fullStateThreshold,
       routes: config.routes,
       maxConnections: config.maxConnections,
@@ -402,14 +409,25 @@ export async function setupTransport<S, A>(
           }
           // W4.1: include the framework version so operators can confirm which
           // build is live (deploy verification, rolling-restart checks).
+          // "healthy" is a claim, so anything that has been failing on repeat
+          // has to appear here — an app reporting healthy while a subsystem is
+          // permanently dead is precisely the failure this endpoint invites.
+          const dead = degradedReport();
           return {
-            status: "healthy",
+            status: dead.length > 0 ? "degraded" : "healthy",
             version: VERSION,
             uptime,
             cells: cellsHealth,
+            ...(dead.length > 0 ? { degraded: dead } : {}),
           };
         }
-        return { status: "healthy", version: VERSION, uptime };
+        const dead = degradedReport();
+        return {
+          status: dead.length > 0 ? "degraded" : "healthy",
+          version: VERSION,
+          uptime,
+          ...(dead.length > 0 ? { degraded: dead } : {}),
+        };
       },
       ...(tt
         ? {

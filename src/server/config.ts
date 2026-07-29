@@ -98,6 +98,7 @@ export const VALID_FEATURES_CONFIG_KEYS = new Set<string>([
   "appId",
   "cells",
   "cellDefaults",
+  "localFirst",
   "port",
   "persist",
   "persistKey",
@@ -164,6 +165,10 @@ const CONFIG_DOCS: Record<string, [string, string]> = {
   appId: ["", "unique app identity — lock file, UDS socket, KV/SQLite paths"],
   appVersion: ["", "app version string — logged on startup"],
   cells: ["", "cell definitions array"],
+  localFirst: [
+    "false",
+    "run every server cell's methods locally + sync as CRDT ops (per-cell opt-out with sync:false)",
+  ],
   reduce: ["", "state reducer (legacy API)"],
   execute: ["", "effect executor (legacy API)"],
   persist: ["true", "persist state to SQLite (data.db)"],
@@ -226,7 +231,10 @@ const CONFIG_DOCS: Record<string, [string, string]> = {
     "10",
     "max pending patches before warning (sent to browser)",
   ],
-  effectTimeoutMs: ["30000", "warn for slow async effects (ms)"],
+  effectTimeoutMs: [
+    "30000",
+    "how long an async method may run before the framework stops waiting (ms; 0 = forever). Bounds the effect AND `await cell.method()`; never cancels the method",
+  ],
   freezeState: [
     "dev:true",
     "deep freeze state after reduce to catch mutations",

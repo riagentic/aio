@@ -566,10 +566,13 @@ export type ShapeDriftEntry = {
   cell: string;
   /** Dotted path within the cell ("" = the cell itself). */
   path: string;
-  issue: "unknown-field" | "type-changed" | "unknown-cell";
+  issue: "unknown-field" | "type-changed" | "unknown-cell" | "seed-erased";
   storedType: string;
   /** Declared type — present for "type-changed". */
   declaredType?: string;
+  /** How many declared entries the stored empty collection erases —
+   *  present for "seed-erased". */
+  declaredCount?: number;
 };
 
 const MAX_DRIFT = 100;
@@ -618,6 +621,28 @@ export function detectShapeDrift(
         issue: "type-changed",
         storedType: sk,
         declaredType: dk,
+      });
+      return;
+    }
+    // A declared collection with entries, stored empty: the restore wipes
+    // whatever `state:` seeded (risoto 2026-07-28 #2 — a curated token registry
+    // vanished, every holding rendered as a raw mint, nothing said). `state:`
+    // reads like a default and behaves like a first-run value; both are
+    // legitimate, so this is reported rather than overruled — unless the cell
+    // says which it meant with `persist: { seed: [...] }`.
+    // Arrays only: they are the one shape `deepMerge` replaces wholesale, so an
+    // empty stored array is the only value that can delete declared entries (an
+    // empty stored OBJECT merges key-by-key and erases nothing).
+    if (
+      Array.isArray(decl) && decl.length > 0 && Array.isArray(stor) &&
+      stor.length === 0
+    ) {
+      out.push({
+        cell,
+        path,
+        issue: "seed-erased",
+        storedType: sk,
+        declaredCount: decl.length,
       });
       return;
     }
@@ -689,8 +714,34 @@ export type MigrationSummary = {
   drift: ShapeDriftEntry[];
 };
 
-/** One teachable line summarizing all shape drift found at boot. */
+/** One teachable line summarizing all shape drift found at boot.
+ *  Seed erasure is reported separately — same detector, different remedy. */
 export function shapeDriftSummary(drift: ShapeDriftEntry[]): string {
+  const erased = drift.filter((d) => d.issue === "seed-erased");
+  const structural = drift.filter((d) => d.issue !== "seed-erased");
+  const lines: string[] = [];
+  if (erased.length > 0) {
+    const show = erased.slice(0, 5).map((d) =>
+      `${
+        d.path ? `${d.cell}.${d.path}` : d.cell
+      } (${d.declaredCount} declared ` +
+      `→ stored empty)`
+    );
+    const more = erased.length > show.length
+      ? ` …and ${erased.length - show.length} more`
+      : "";
+    lines.push(
+      `restore erased seeded data: ${erased.length} declared list(s) were ` +
+        `replaced by an empty stored value — ${show.join(", ")}${more}. ` +
+        `A persisted array replaces the declared one wholesale, so whatever ` +
+        `\`state:\` seeded is gone. If the list is a fixed seed, keep it out ` +
+        `of persistence (\`persist: { exclude: [...] }\`); if it is a cache ` +
+        `that may legitimately empty, this is expected; if it must be merged, ` +
+        `bump the cell version and re-seed it in \`onMigrate\`.`,
+    );
+  }
+  if (structural.length === 0) return lines.join("\n");
+  drift = structural;
   const show = drift.slice(0, 5).map((d) => {
     const where = d.path ? `${d.cell}.${d.path}` : d.cell;
     if (d.issue === "unknown-cell") {
@@ -704,10 +755,15 @@ export function shapeDriftSummary(drift: ShapeDriftEntry[]): string {
   const more = drift.length > show.length
     ? ` …and ${drift.length - show.length} more`
     : "";
-  return `shape drift: ${drift.length} stored field(s) no longer match the ` +
-    `declared shape — ${show.join(", ")}${more}. A rename/removal without a ` +
-    `version bump keeps the stale value (deepMerge preserves it). Bump the ` +
-    `cell's version + add onMigrate to transform it, or clear the stored data.`;
+  lines.push(
+    `shape drift: ${drift.length} stored field(s) no longer match the ` +
+      `declared shape — ${
+        show.join(", ")
+      }${more}. A rename/removal without a ` +
+      `version bump keeps the stale value (deepMerge preserves it). Bump the ` +
+      `cell's version + add onMigrate to transform it, or clear the stored data.`,
+  );
+  return lines.join("\n");
 }
 
 export function applyCellMigrations(

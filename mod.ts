@@ -67,6 +67,11 @@ export type { VitalsConfig } from "./src/vitals/types.ts";
 export { log } from "./src/diagnostics/logger.ts";
 /** Logger configuration and level types */
 export type { Log, LogConfig, LogLevel } from "./src/diagnostics/logger.ts";
+/** Escalation for best-effort subsystems — `degraded("nft-cache").guard(fn)`
+ *  reports once when an allowed-to-fail operation starts failing forever */
+export { degraded, degradedReport } from "./src/diagnostics/degraded.ts";
+/** Degraded-subsystem tracker type */
+export type { Degraded } from "./src/diagnostics/degraded.ts";
 /** Electron app metadata injected into the renderer process */
 export type { AioMeta } from "./src/electron/electron.ts";
 // slugify — internal (used by build.ts, not app code)

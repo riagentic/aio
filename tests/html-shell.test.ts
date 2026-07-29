@@ -49,3 +49,19 @@ Deno.test("html shell: ui.head injects verbatim <head> content", () => {
   const html = gen({ head });
   assert(html.includes(head), "custom head content present verbatim");
 });
+
+// The dev browser was aio's most PERMISSIVE environment: every `__aioDev`
+// tripwire in the isomorphic core (frozen state, readonly hints, hidden-field
+// reads) was set only by the test harnesses, so a mutation that throws in a
+// test quietly corrupted state in the browser you develop in. Dev sets it; prod
+// must never, or a shipped app pays for dev-only checks.
+Deno.test("html shell: dev sets __aioDev before any module, prod never does", () => {
+  const dev = generateHTML("t", false, false, "{}");
+  const prod = generateHTML("t", true, false, "{}");
+  assert(dev.includes("window.__aioDev=true"), "dev shell arms the tripwires");
+  assert(
+    dev.indexOf("window.__aioDev=true") < dev.indexOf('<script type="module">'),
+    "must run before the first module import",
+  );
+  assert(!prod.includes("__aioDev"), "prod shell stays clean");
+});

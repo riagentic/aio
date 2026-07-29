@@ -30,7 +30,7 @@
 - [Methods — Sync, Async, and Selectors](state/methods.md) — The one way to build aio cells.
 - [Scheduling](state/scheduling.md) — aio has a built-in scheduler for timers, intervals, daily triggers, and cron
 - [The bridge — what crosses, what doesn't, what freezes](state/the-bridge.md) — A shared cell's methods run on the server; the browser holds a live,
-- [Spec: Transactional cell methods (risoto #2)](state/transactional-methods.md) — Status: DRAFT / design · Owner: framework · Target: opt-in
+- [Spec: Transactional cell methods (risoto #2)](state/transactional-methods.md) — Status: SHIPPED — opt-in transaction: true; this page is the contract, not
 
 ## UI — AIR renderer — components, signals, routing, forms
 
@@ -134,6 +134,7 @@
 - [Upgrade: 1.0.0-alpha36 → 1.0.0-alpha37](upgrade/from-alpha36-to-alpha37.md) — DEFAULTPRAGMAS, connectCli or connectCliUDS from "aio" — one command
 - [Upgrade: 1.0.0-alpha37 → 1.0.0-alpha38](upgrade/from-alpha37-to-alpha38.md) — automatically, on the first boot.
 - [Upgrade: 1.0.0-alpha38 → 1.0.0-alpha39](upgrade/from-alpha38-to-alpha39.md) — ever shipped in a release, and everything else is additive.
+- [Upgrade: 1.0.0-alpha39 → 1.0.0-alpha40](upgrade/from-alpha39-to-alpha40.md) — situations loud.
 - [Upgrade from v1.0.0-alpha4 to v1.0.0-alpha5](upgrade/from-alpha4-to-alpha5.md) — None.
 - [Upgrade from v1.0.0-alpha5 to v1.0.0-alpha6](upgrade/from-alpha5-to-alpha6.md) — None.
 - [Upgrade from v1.0.0-alpha6 to v1.0.0-alpha7](upgrade/from-alpha6-to-alpha7.md) — mod.ts no longer re-exports renderer primitives.

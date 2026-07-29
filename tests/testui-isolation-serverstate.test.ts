@@ -74,9 +74,20 @@ Deno.test("testUI: serverState()/fullState() expose ui.exclude'd fields (tbd#3)"
   // …and serverState() returns the whole store.
   const whole = ui.serverState() as { acct: { secret: string } };
   assertEquals(whole.acct.secret, "hunter2");
-  // The client-facing cell proxy still hides it.
+  // The client-facing cell proxy still hides it — and under the test harness
+  // (dev-strict) it THROWS rather than handing back `undefined`, so a component
+  // reading a hidden field fails the test instead of quietly branching on
+  // nothing (risoto 2026-07-28 #3).
+  let threw = "";
+  try {
+    void (acct as unknown as { secret?: string }).secret;
+  } catch (e) {
+    threw = String(e);
+  }
   assert(
-    (acct as unknown as { secret?: string }).secret === undefined,
-    "client proxy still hides the excluded field",
+    threw.includes("acct.secret"),
+    `client read of a hidden field must fail loudly, got: ${
+      threw || "no throw"
+    }`,
   );
 });

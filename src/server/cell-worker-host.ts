@@ -19,6 +19,7 @@
 //     where the scheduler, the resource registry and the other cells live
 
 import type { Patch } from "immer";
+import { nameIsTaken } from "../state/cell-helpers.ts";
 import { composeCells } from "../state/cell-compose.ts";
 import { getRegisteredCells } from "../state/cell-reactive.ts";
 import { createDispatch } from "../state/dispatch.ts";
@@ -85,7 +86,7 @@ function isolatePeerCells(hosted: string): void {
     if (name === hosted || def.__aio.bound) continue;
     for (const key of Object.keys(def.__aio.state)) {
       // Only replace a plain state getter — never a method/selector callable.
-      if (typeof (def as Record<string, unknown>)[key] === "function") continue;
+      if (nameIsTaken(def, key)) continue;
       try {
         Object.defineProperty(def, key, {
           get() {

@@ -16,6 +16,7 @@ import { reportError as reportAioError } from "../diagnostics/error.ts";
 import { log } from "../diagnostics/logger.ts";
 import { parseCli } from "./aio-cli.ts";
 import { isCompiled } from "./paths.ts";
+import { normalizeSyncConfig } from "../sync/types.ts";
 
 /** User identity shape — matches AioUser without importing from aio.ts (avoids circular) */
 type User = { id: string; role: string };
@@ -24,6 +25,8 @@ type User = { id: string; role: string };
 export type ComposeCellsInput = {
   cellEntries: CellEntry[];
   cellDefaults?: { ui?: CellFieldFilter; persist?: CellFieldFilter };
+  /** Local-first execution (perfect-aio D3) — see applyLocalFirst. */
+  localFirst?: boolean;
   circuitBreaker?: CircuitBreakerConfig;
   perfCheck?: "on" | "off";
   onError?: (error: AioError) => void;
@@ -269,6 +272,7 @@ export function composeCellsWiring(
   });
 
   applyCellDefaults(composed, input.cellDefaults);
+  applyLocalFirst(composed, input.localFirst === true);
   warnFieldFilters(composed);
   // AIO-3.1: validate cross-cell selector deps against the known cell list.
   // Throws here so the user gets a clear error at aio.run() time, not at
@@ -325,6 +329,40 @@ function applyCellDefaults(
       f.__aio.ui = cellDefaults.ui;
     }
   }
+}
+
+/** `localFirst: true` — every SERVER cell syncs unless it said otherwise, which
+ *  is what moves method execution to the caller (perfect-aio D3,
+ *  docs/specs/2026-07-22-local-first.md). Per-cell resolution:
+ *
+ *    cell.sync = anything   → the cell decided; never touched here
+ *    cell.sync = false      → explicit opt-out; keeps round-tripping
+ *    (absent)               → adopted into local-first
+ *
+ *  Client-scoped cells never reach this function (they are filtered out of the
+ *  server entries above) and have nothing to sync anyway.
+ *
+ *  Adoption is LOGGED per cell, not assumed: a flag that silently changes where
+ *  every method in the app runs is exactly the kind of quiet, load-bearing
+ *  decision this framework refuses to make invisibly. */
+function applyLocalFirst(composed: ComposedCells, enabled: boolean): void {
+  if (!enabled) return;
+  const adopted: string[] = [];
+  const kept: string[] = [];
+  for (const f of composed.cells) {
+    if (f.__aio.syncConfig) continue; // the cell already asked for sync
+    if (f.__aio.syncOptOut) {
+      kept.push(f.__aio.id);
+      continue;
+    }
+    f.__aio.syncConfig = normalizeSyncConfig(true);
+    adopted.push(f.__aio.id);
+  }
+  log.info(
+    `localFirst: ${adopted.length} cell(s) run locally and sync — ` +
+      `${adopted.join(", ") || "none"}` +
+      (kept.length ? `; server-only by opt-out: ${kept.join(", ")}` : ""),
+  );
 }
 
 /** Build getDBState from per-cell persist filters.

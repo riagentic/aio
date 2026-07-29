@@ -87,6 +87,7 @@ export interface StaticDeps {
   width?: number;
   height?: number;
   renderBudget?: RenderBudget;
+  syncCells?: string[];
   uiEntry?: string; // AIO-8.1
   viewport?: string | false; // AIO-423: ui.viewport override (false = opt out)
   headExtra?: string; // AIO-423: ui.head — verbatim <head> content
@@ -172,6 +173,7 @@ export function createStaticHandler(deps: StaticDeps): {
       uiEntry,
       viewport,
       headExtra,
+      syncCells,
     } = deps;
 
     // ── Root / SPA entry ──
@@ -229,6 +231,7 @@ export function createStaticHandler(deps: StaticDeps): {
           uiEntry,
           viewport,
           headExtra,
+          syncCells,
         ),
         { headers: { "Content-Type": "text/html", ...noCache } },
       );

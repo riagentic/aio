@@ -59,6 +59,7 @@ import {
 
 // Cells-based API modules
 import { composeCellsWiring } from "./aio-composition.ts";
+import { _setCallTimeouts } from "../state/cell-impl.ts";
 import {
   buildLegacyConfig,
   filterCellsByIsolate,
@@ -370,6 +371,7 @@ async function run(a?: any, b?: any): Promise<AioApp<any, any>> {
     } = composeCellsWiring({
       cellEntries,
       cellDefaults: fc.cellDefaults,
+      localFirst: fc.localFirst,
       circuitBreaker: fc.circuitBreaker,
       perfCheck: fc.perfCheck,
       onError: fc.onError,
@@ -890,6 +892,21 @@ async function _run<S, A, E>(
     log,
     debug: VERBOSE,
   });
+  // ONE ceiling for "how long may this async method run" — the effect side and
+  // the `await cell.method()` side resolve from the same numbers. They used to
+  // be two 30s timers with opposite semantics, so raising effectTimeoutMs left
+  // the caller still giving up at 30s and blaming a crashed executor.
+  _setCallTimeouts(
+    config.effectTimeoutMs,
+    config.perfBudget?.methods
+      ? Object.fromEntries(
+        Object.entries(config.perfBudget.methods)
+          .filter(([, v]) => typeof v?.timeout === "number")
+          .map(([k, v]) => [k, v!.timeout as number]),
+      )
+      : undefined,
+  );
+
   // Sync ops apply through the normal dispatch path (late-bound at boot).
   _syncDispatchRef.fn = (a) => dispatch(a as unknown as A);
 
@@ -1123,6 +1140,7 @@ async function _run<S, A, E>(
       strictOrigin: config.strictOrigin,
       trustProxyHeader: config.trustProxyHeader,
       syncIntervalMs: config.syncIntervalMs,
+      _syncCellIds: config._syncCellIds,
       _cellPatchStrategies: config._cellPatchStrategies,
       _cellFilterFields: config._cellFilterFields,
       _cellAccess: config._cellAccess,

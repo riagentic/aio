@@ -269,6 +269,10 @@ export function createCellFromMethods<
     uiForUser: extractForUser(config.ui),
     uiPublicFields: extractPublicFields(config.ui),
     syncConfig: config.sync ? normalizeSyncConfig(config.sync) : undefined,
+    // `sync: false` is a DECISION, not the absence of one — under localFirst it
+    // is the only thing standing between a cell and optimistic local execution,
+    // so it has to survive as more than a falsy value.
+    syncOptOut: config.sync === false,
     worker: config.worker === true,
     version: config.version ?? 0,
     onMigrate: config.onMigrate as

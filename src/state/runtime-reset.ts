@@ -8,7 +8,7 @@ import {
   _resetCellRegistry,
   _resetUiReadWarnings,
 } from "./cell-reactive.ts";
-import { resetPending } from "./cell-impl.ts";
+import { _resetCallTimeouts, resetPending } from "./cell-impl.ts";
 import { _resetMethodCancel } from "./method-cancel.ts";
 import { _resetSubs } from "./state-subs.ts";
 
@@ -20,6 +20,7 @@ export function _resetAioRuntime(): void {
   _resetCellBindings();
   _resetUiReadWarnings();
   resetPending();
+  _resetCallTimeouts();
   _resetMethodCancel();
   _resetSubs();
 }

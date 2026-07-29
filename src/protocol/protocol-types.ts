@@ -24,6 +24,10 @@ export interface AioWindow {
   _aioDiag?: (ev: Record<string, unknown>) => void;
   __aioConfig?: {
     renderBudget?: { staleness?: number; pendingPatches?: number };
+    /** Cells whose methods run locally and propagate as CRDT ops — the
+     *  server's `localFirst` decision, which the browser cannot derive from
+     *  the cell definitions alone. */
+    syncCells?: string[];
   };
 }
 

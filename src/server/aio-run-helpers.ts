@@ -366,13 +366,17 @@ export async function resolveTitle(
   if (cliTitle) return cliTitle;
   if (uiTitle) return uiTitle;
   try {
-    // STATIC import (above), deliberately. `await import("@std/path")` is a
-    // bare specifier `deno compile` cannot trace, so it is not embedded and
-    // rejects inside a compiled binary — silently, because the catch below
-    // swallows it, and the app would take the "AIO App" fallback title while
-    // looking like it had simply found no `title` field. The laziness bought
-    // nothing: @std/path is already a static dependency of this module's own
-    // logger.
+    // STATIC import (above). This was `await import("@std/path")`, and the
+    // laziness bought nothing — @std/path is already a static dependency of
+    // this module's own logger, so it is loaded either way.
+    //
+    // It is worth being precise about what this did NOT fix, because the
+    // opposite was assumed and then measured: a lazy BARE specifier is exactly
+    // the shape `deno compile` cannot trace, but this one still resolved in a
+    // compiled binary — the module is in the graph via those other static
+    // imports, so the dynamic form found it. The compiled-title test in
+    // build-e2e passes with either version. Static is simply the honest way to
+    // spell a dependency that is not optional.
     const raw = await Deno.readTextFile(join(Deno.cwd(), "deno.json"));
     const denoJsonTitle = JSON.parse(raw).title;
     if (denoJsonTitle) return denoJsonTitle;

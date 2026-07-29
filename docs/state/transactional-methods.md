@@ -1,7 +1,8 @@
 # Spec: Transactional cell methods (risoto #2)
 
-Status: **DRAFT / design** · Owner: framework · Target: opt-in
-`transaction: true`
+Status: **SHIPPED** — opt-in `transaction: true`; this page is the contract, not
+a proposal. Conflict detection (§4) is the part that makes it safe rather than
+merely stable. Tests: `tests/transactional-methods.test.ts`.
 
 ## 1. The problem
 
@@ -73,12 +74,63 @@ _read_ from `Σ`. Rules:
   mutations to current state, like today's `__set`), so disjoint writes from two
   concurrent methods both land.
 - A method that computes a new value **from a snapshot read** and writes it back
-  (read-modify-write) can lose a concurrent update (classic lost-update). For
-  correctness-critical RMW, the method uses **`s.$commit()` checkpoints** or the
-  cell serializes its transactional methods (see §5, `serialize` option).
+  (read-modify-write) would lose a concurrent update — the classic lost update.
+  **It is detected at commit and refused** (see below), never applied quietly.
 - Default: **no implicit serialization** (keeps throughput); opt in per cell
   with `transaction: { serialize: true }` to run this cell's transactional
-  methods one at a time (a per-cell mutex) when RMW correctness matters.
+  **async** methods one at a time (a per-cell mutex) when RMW correctness
+  matters. The mutex does **not** hold off sync methods — those are reducers and
+  commit whenever they are dispatched, including mid-`await`.
+
+### Conflict detection — what makes the isolation honest
+
+Pinned reads are the feature; committing a value _derived_ from a pinned read
+that someone else has since changed is a bug. So the write-set is validated
+against live state at every commit point, exactly as an optimistic-concurrency
+store does. Two levels, matching what the cell asked for:
+
+| config                             | isolation          | validated at commit                                                                 |
+| ---------------------------------- | ------------------ | ----------------------------------------------------------------------------------- |
+| `transaction: true`                | snapshot isolation | **read-modify-writes**: a write whose path was also read, and has moved since entry |
+| `transaction: { serialize: true }` | serializable       | the above **plus every read** — so a guard can never be silently inert              |
+
+A **blind write** (`s.loading = false` — written, never read) is
+last-writer-wins by intent and never conflicts.
+
+On conflict the whole write-set is discarded and the call **rejects** with a
+message naming the path. Set `transaction: { conflict: "warn" }` to report and
+commit anyway; there is no option to do neither.
+
+```
+[wallet] refresh(): s.adjustedAt was changed by another action while this
+transactional method awaited, and its reads are pinned to entry — committing
+would overwrite that change with a value computed from stale state. Read
+through s.$live to work from current state, retry the call, or set
+transaction: { conflict: "warn" } to commit anyway.
+```
+
+This is the risoto 2026-07-28 bug, verbatim: a balance `refresh()` guarded on a
+field that the synchronous `adjust()` writes during the fetch. The guard read a
+pinned value, so it could never fire; the refresh committed pre-send balances
+over the user's transfer and stamped them confirmed. Same code today rejects the
+refresh and leaves the transfer intact.
+
+### `s.$live` — reading current state on purpose
+
+The one sanctioned way out of the snapshot. `s.$live.balance` reads state as it
+is **now**; writes through it still join the transaction's atomic commit, and
+its reads never count as stale (they are current by construction).
+
+```ts
+async refresh(s) {
+  const quote = await fetchQuote();
+  if (s.$live.adjustedAt !== s.adjustedAt) return; // a transfer landed — stand down
+  s.balances = quote.balances;
+}
+```
+
+Use it for a deliberate re-read after an `await`. If you find yourself reaching
+for it everywhere, the cell probably wants `transaction` off.
 
 ## 5. API surface
 
@@ -88,7 +140,7 @@ cell("wallet", {
   // (a) whole-cell opt-in — all async methods are transactional:
   transaction: true,
   // (b) or tuned:
-  transaction: { serialize: true },
+  transaction: { serialize: true, conflict: "abort" }, // conflict defaults to "abort"
   methods: {
     async transfer(s, to, amount) {
       const from = s.balances[me];      // reads Σ
@@ -102,7 +154,8 @@ cell("wallet", {
 });
 ```
 
-`s.$commit()` is available on the method state proxy in a transactional cell.
+`s.$commit()` and `s.$live` are available on the method state proxy in a
+transactional cell.
 
 ## 6. Implementation plan (phased, each independently shippable + tested)
 
@@ -142,6 +195,11 @@ cell("wallet", {
   committed change.
 - **`s.$commit()`:** intermediate publish is visible; post-commit reads see Σ'.
 - **`serialize`:** two concurrent RMW increments → no lost update.
+- **Conflict:** without `serialize`, two concurrent RMW increments → exactly one
+  rejects and the winner's value stands (never a quiet `n === 1`); a blind write
+  from two overlapping calls never conflicts; under `serialize`, a guard reading
+  a field a sync method wrote mid-`await` rejects the transaction; `s.$live`
+  reads are exempt; `conflict: "warn"` commits and logs.
 - **Compat:** a non-transactional async method is byte-identical to today (the
   full existing suite stays green — the whole feature is behind the flag).
 - **Journal (#3):** a transactional commit is exactly one journalled action;

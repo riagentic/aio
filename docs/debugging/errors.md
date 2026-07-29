@@ -230,20 +230,66 @@ stream.
 
 ## Diagnostic bus event types
 
-| Type                    | Severity | Meaning                                  |
-| ----------------------- | -------- | ---------------------------------------- |
-| `action-dropped`        | warning  | Action silently dropped (queue full)     |
-| `state-sync-error`      | error    | Failed to parse state from server        |
-| `state-key-stripped`    | warning  | Reserved key name removed from state     |
-| `state-no-listeners`    | warning  | State updating but no UI subscribers     |
-| `action-guarded`        | info     | Action blocked by internal routing guard |
-| `action-filtered`       | info     | Action dropped by beforeReduce           |
-| `effect-invalid`        | warning  | Effect missing .type string, skipped     |
-| `transport-error`       | warning  | UDS/IPC write failed                     |
-| `hook-start-failed`     | error    | onStart hook threw                       |
-| `persist-error`         | error    | State persistence failed                 |
-| `vitals-alert`          | varies   | Vital signs probe detected degradation   |
-| `offline-storage-error` | info     | IndexedDB operation failed               |
+| Type                           | Severity | Meaning                                             |
+| ------------------------------ | -------- | --------------------------------------------------- |
+| `action-dropped`               | warning  | Action silently dropped (queue full)                |
+| `state-sync-error`             | error    | Failed to parse state from server                   |
+| `state-key-stripped`           | warning  | Reserved key name removed from state                |
+| `state-no-listeners`           | warning  | State updating but no UI subscribers                |
+| `action-guarded`               | info     | Action blocked by internal routing guard            |
+| `action-filtered`              | info     | Action dropped by beforeReduce                      |
+| `effect-invalid`               | warning  | Effect missing .type string, skipped                |
+| `transport-error`              | warning  | UDS/IPC write failed                                |
+| `hook-start-failed`            | error    | onStart hook threw                                  |
+| `persist-error`                | error    | State persistence failed                            |
+| `vitals-alert`                 | varies   | Vital signs probe detected degradation              |
+| `offline-storage-error`        | info     | IndexedDB operation failed                          |
+| `offline-storage-unavailable`  | warning  | No offline storage — queued actions are memory-only |
+| `offline-action-not-persisted` | warning  | Action queued in memory only — lost on reload       |
+| `degraded:<name>`              | error    | A best-effort operation has failed N times in a row |
+| `degraded-recovered:<name>`    | info     | …and started working again                          |
+
+## Subsystems that are allowed to fail
+
+Every app has corners that degrade by design: a cache that refetches, a
+best-effort write, a frame that will be retried. The failure nobody plans for is
+the one where such a corner fails **forever** — each occurrence is individually
+harmless, so it is logged or swallowed, and the app reports itself healthy while
+a whole feature is dead.
+
+`degraded()` makes that transition an event:
+
+```ts
+import { degraded } from "aio";
+
+const cache = degraded("nft-cache"); // escalates after 5 in a row (default)
+
+// Either wrap the call…
+const rows = await cache.guard(() => db.query(sql)); // undefined on failure
+// …or record the outcome yourself:
+try {
+  await refresh();
+  cache.ok();
+} catch (e) {
+  cache.fail(e);
+}
+```
+
+One structured event on the way down, one on the way back up, and nothing in
+between — per-occurrence spam is what made the original invisible. While an
+operation is degraded it appears in `degradedReport()` and in `/__aio/health`,
+which reports `status: "degraded"` and names it:
+
+```json
+{
+  "status": "degraded",
+  "degraded": [{ "name": "nft-cache", "failures": 41, "lastError": "..." }]
+}
+```
+
+The counter is CONSECUTIVE: one success ends the episode. An intermittent
+failure never escalates, which is the point — you want to hear about the ones
+that stopped recovering.
 
 ## `TypeError: Cannot assign to read only property` in dev
 

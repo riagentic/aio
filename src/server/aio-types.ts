@@ -155,7 +155,13 @@ export type AioConfig<S, A, E> = {
   perfCheck?: "on" | "off"; // default: 'on' — enable/disable performance violation reporting
   perfBudget?: PerfBudget; // override default budgets (reduce: 100, effect: 5)
   renderBudget?: RenderBudget; // override render staleness/patch thresholds (sent to browser)
-  effectTimeoutMs?: number; // ms before logging a warning for slow async effects — warning only, does not cancel (default: 30000 = 30s)
+  /** How long an async method may run before the framework stops waiting for
+   *  it (default 30000). It bounds BOTH sides of the same call: the effect
+   *  tracker abandons the effect, and `await cell.method()` rejects. Neither
+   *  CANCELS the method — it keeps running, and if it finishes its writes still
+   *  commit; only the return value is lost. `0` waits indefinitely. Per method:
+   *  `perfBudget.methods["cell:method"].timeout`. */
+  effectTimeoutMs?: number;
   freezeState?: boolean; // default: false in prod, true in dev — deep freeze state after reduce to catch mutations
   memory?: MemoryConfig; // memory pressure monitoring config
   circuitBreaker?: CircuitBreakerConfig; // auto-disable cells after N errors
@@ -219,7 +225,10 @@ export type AioConfig<S, A, E> = {
   ) => Record<string, { errors: number; enabled: boolean }>;
   /** Internal: reduce breakdown getter — passed from CellsConfig via composeCells */
   _reduceBreakdown?: () => ReduceBreakdown | undefined;
-  /** Internal: cell IDs with sync: true — for CRDT table init & KV exclusion */
+  /** Internal: cell IDs that sync — `sync:` on the cell, or adopted by
+   *  `localFirst` at compose time. Drives CRDT table init, KV exclusion, and
+   *  the list the page shell hands the browser (which cannot derive a
+   *  compose-time decision from the cell definitions). */
   _syncCellIds?: string[];
   /** Internal: per-cell version + migration hooks — for state migration on KV restore */
   _cellMigrations?: Map<
@@ -292,6 +301,19 @@ export type CellsConfig = {
   /** Cells to run. Default: every `cell()` the entry (transitively) imported
    *  — they self-register, exactly like the standalone/android runtime. */
   cells?: import("../state/cell.ts").CellEntry[];
+  /** Local-first execution (perfect-aio D3): every server cell runs its methods
+   *  where the CALLER is — instantly, optimistically — and propagates the change
+   *  as a CRDT op. The server stays the authority: it re-runs the same method
+   *  against its own state and is the arbiter of truth, so guards and `validate`
+   *  hooks are unchanged, and a refused op comes back explained (D11).
+   *
+   *  Mechanically it makes `sync: true` the default for every server cell; a
+   *  cell opts out with `sync: false`, which is the right call for anything
+   *  whose optimistic preview would be a lie (auth, payments, a ledger).
+   *
+   *  Opt-in while it earns field mileage — it changes WHERE your methods run.
+   *  See docs/specs/2026-07-22-local-first.md. */
+  localFirst?: boolean;
   /** Default persist and ui config for all cells — individual cells override these */
   cellDefaults?: {
     ui?: import("../state/cell-types.ts").CellFieldFilter;
