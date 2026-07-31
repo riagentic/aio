@@ -231,6 +231,7 @@ export function createServer(config: ServerConfig): ServerHandle {
     vitalsSystem: config.vitalsSystem,
     costMeter: config.costMeter,
     getTTBroadcast: config.getTTBroadcast,
+    udsBroadcastRef: config.udsBroadcastRef,
   });
 
   // Forward diagnostic bus events to all connected dev clients via WS
