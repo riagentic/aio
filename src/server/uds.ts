@@ -1,8 +1,9 @@
 // UDS (Unix Domain Socket) transport — NDJSON listener for Electron IPC bridge (AIO-52 Phase 3)
 // Extracted from aio.ts. Speaks the same v2 envelope as WS (B4b) — one
 // decoded line = one frame. Since v2, UDS serves sync + serverFns too
-// (the alpha28 transport-capability skew is gone); vitals/time-travel stay
-// WS-only diagnostics and are rejected loudly.
+// (the alpha28 transport-capability skew is gone); time travel flows here too
+// (tt-state out, tt-cmd in — the Electron panel needs it); vitals stay
+// WS-only and are rejected loudly.
 
 import { compactPatches } from "../state/patch-compact.ts";
 import { writeClientLog } from "./client-log.ts";
@@ -19,6 +20,7 @@ import {
 } from "../protocol/envelope.ts";
 import { serializeReturn } from "../protocol/return-value.ts";
 import { VERSION } from "./aio-cli.ts";
+import { parseTTCommand } from "../diagnostics/time-travel.ts";
 import {
   negotiateProtocol,
   parseProtoHello,
@@ -57,6 +59,13 @@ export function createUDSListener(
   /** Resolved client config — sent as an early "cfg" frame (the electron UDS
    *  shell is templated at build time and embeds no `__aioConfig`). */
   clientConfig?: Record<string, unknown>,
+  /** Time travel (dev): command sink + state getter. tt-state used to flow to
+   *  WS clients only — the Electron window's panel (Ctrl+.) never received a
+   *  frame, so the shortcut never even bound. */
+  tt?: {
+    onCommand: (cmd: string, arg?: number) => void;
+    getBroadcast: () => unknown;
+  },
 ): UDSHandle {
   try {
     Deno.removeSync(socketPath);
@@ -92,6 +101,10 @@ export function createUDSListener(
       }
       // AIO-239: route initial write through sendTo() to use per-connection write queue
       sendTo(conn, encRaw("state", JSON.stringify(getUIState())));
+      // Dev: hand the panel its history now — Ctrl+. binds on the first
+      // tt-state frame, so without this the shortcut is inert until the next
+      // recorded action's broadcast.
+      if (tt) sendTo(conn, enc("tt-state", tt.getBroadcast()));
 
       _handleUDSConn(
         conn,
@@ -103,6 +116,7 @@ export function createUDSListener(
         getUIState,
         sendTo,
         syncHandler ?? null,
+        tt,
       );
     }
   })().catch((e) => {
@@ -294,6 +308,10 @@ function _handleUDSConn(
   getUIState: () => unknown,
   sendTo: (conn: Deno.Conn, msg: string, onSent?: () => void) => void,
   syncHandler: ServerSyncHandler | null,
+  tt?: {
+    onCommand: (cmd: string, arg?: number) => void;
+    getBroadcast: () => unknown;
+  },
 ): void {
   const decoder = new TextDecoder();
   const MAX_BUF = 10 * 1024 * 1024; // 10MB — prevent OOM from missing newlines
@@ -380,6 +398,15 @@ function _handleUDSConn(
           switch (frame.t) {
             case "ping":
               continue;
+            case "tt-cmd": {
+              if (tt && typeof frame.d === "string") {
+                const cmd = parseTTCommand(frame.d);
+                if (cmd) {
+                  tt.onCommand(cmd.cmd, "arg" in cmd ? cmd.arg : undefined);
+                }
+              }
+              continue;
+            }
             case "proto": {
               const theirs = parseProtoHello(frame.d);
               if (!theirs) {

@@ -192,13 +192,14 @@ export type SfnrPayload = {
   error?: string;
 };
 
-/** Kinds a UDS/NDJSON endpoint does NOT serve (vitals + time-travel are
- *  WS-only diagnostics) — rejected LOUDLY, never dropped (dev/prod
- *  equivalency: no silent forks). Sync + serverFns ARE served on UDS since
- *  v2 (the alpha28 transport-capability skew is gone). */
+/** Kinds a UDS/NDJSON endpoint does NOT serve (vitals are WS-only
+ *  diagnostics) — rejected LOUDLY, never dropped (dev/prod equivalency: no
+ *  silent forks). Sync + serverFns ARE served on UDS since v2; time travel
+ *  since alpha42-dev (the Electron panel needs it). */
 export function unsupportedOnUds(t: Kind): boolean {
-  return t === "vitals-ping" || t === "vitals-pong" || t === "tt-cmd" ||
-    t === "tt-state";
+  // Time travel flows over UDS since alpha42-dev (the Electron panel needs
+  // tt-state in / tt-cmd out); vitals remain WS-only.
+  return t === "vitals-ping" || t === "vitals-pong";
 }
 
 /** @deprecated v1 string prefixes — kept ONLY for the version-mismatch shim
