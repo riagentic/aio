@@ -45,6 +45,13 @@ export type GraphResult = {
   valid: boolean;
   errors: GraphError[];
   modules: Map<string, ModuleNode>;
+  /** Modules reachable from the entry through STATIC imports only — the set
+   *  the browser eagerly links at boot. A module in `modules` but not here is
+   *  a dynamic-import chunk the client may never load (the server-only escape
+   *  hatch). Exposed so app-side gates can apply their own conventions (e.g.
+   *  risoto blocks `*.server.ts` in the eager set — the dev server 404s those
+   *  files to the browser, which no generic category here can know). */
+  eager: Set<string>;
   durationMs: number;
 };
 
@@ -528,6 +535,7 @@ export async function validateGraph(
     valid: blockingErrors.length === 0,
     errors,
     modules,
+    eager,
     durationMs,
   };
 }
@@ -553,6 +561,12 @@ export function extractImportsByKind(
   // (b) inside `import(...)`. Require that context.
   const STATIC_RE =
     /(?:^|[;\n}])\s*(?:import|export)\b[^;\n]*?\bfrom\s*["']([^"']+)["']/g;
+  // Bare side-effect imports (`import "./x.ts";`) have no `from`, so the
+  // regex above cannot see them — yet they are eagerly linked exactly like a
+  // named import, and an invisible one let a server-only file into a client
+  // graph with a green gate (risoto, 2026-07-31). Statement-boundary anchored
+  // for the same AIO-425 reason.
+  const BARE_STATIC_RE = /(?:^|[;\n}])\s*import\s*["']([^"']+)["']/g;
   const DYNAMIC_RE = /\bimport\s*\(\s*["']([^"']+)["']\s*\)/g;
 
   // A module specifier never contains whitespace or JS punctuation — a final
@@ -564,6 +578,9 @@ export function extractImportsByKind(
   const dynamicSpecs: string[] = [];
   let m;
   while ((m = STATIC_RE.exec(cleaned)) !== null) {
+    if (m[1] && isSpecifier(m[1])) staticSpecs.push(m[1]);
+  }
+  while ((m = BARE_STATIC_RE.exec(cleaned)) !== null) {
     if (m[1] && isSpecifier(m[1])) staticSpecs.push(m[1]);
   }
   while ((m = DYNAMIC_RE.exec(cleaned)) !== null) {

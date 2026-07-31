@@ -195,11 +195,14 @@ export function frameworkSpecs(source: boolean): {
  *
  *  The chosen `target` is also written to deno.json so `aio.run()` can read it
  *  (the framework's own `client` default falls back to it). */
-export function denoJson(
-  name: string,
+/** THE standard task set for an aio app — one producer, used by `am create`
+ *  (scaffold) AND `am fix` (add-only repair for apps missing them: hand-rolled
+ *  or pre-dating the tasks). Values depend on how the app consumes the
+ *  framework (`source` = dep/aio layout) and its default `target`. */
+export function standardTasks(
   source: boolean,
   target: Target = DEFAULT_TARGET,
-): string {
+): Record<string, string> {
   const fw = frameworkSpecs(source);
   // `electron` is declared in imports so the npm specifier resolves, but the
   // Electron binary itself is fetched lazily by the framework (dev) or the
@@ -225,6 +228,71 @@ export function denoJson(
     ? "--compile --client=cli"
     : "--compile --client=server-only";
   const compileDefault = `deno run -A ${fw.build} ${compileArgs}`;
+  return {
+    // ── dev: `deno task dev` runs the configured target. Explicit per-target
+    // tasks always pass --client so they work regardless of `target`. ──
+    dev: devDefault,
+    "dev:browser": "deno run -A src/app.ts --client=browser",
+    // Electron auto-installs on first run — no `install:electron` prefix.
+    "dev:electron": "deno run -A src/app.ts --client=electron",
+    // Runs the app in an Android emulator against the live dev server
+    // (boots an AVD, builds+installs+launches). Needs the Android SDK + an AVD.
+    "dev:android": `deno run -A ${fw.devAndroid}`,
+    "dev:cli": "deno run -A src/app.ts --client=cli",
+    "dev:service": "deno run -A src/app.ts --client=server-only",
+    // Unified aio client: Electron connect page (enter any server URL).
+    "dev:client": "deno run -A src/app.ts --server-url",
+    // ── dev:remote — the same app, split across the network: the server
+    // side runs --expose (share token + pair code); the client side is a
+    // thin client (connect page / src/client.ts) pointed at that server. ──
+    "dev:remote:browser": "deno run -A src/app.ts --client=browser --expose",
+    "dev:remote:electron": "deno run -A src/app.ts --server-url",
+    "dev:remote:android": "deno run -A src/app.ts --client=browser --expose",
+    "dev:remote:cli": "deno run -A src/client.ts",
+    "dev:remote:service":
+      "deno run -A src/app.ts --client=server-only --expose",
+    // ── build: one command builds every target in deno.json `build.targets`
+    // into dist/ (+ manifest.json). The `compile:*` tasks below build one
+    // target at a time; `build` fans out over the fleet. ──
+    build: `deno run -A ${fw.buildAll} --build-spec=${fw.build}`,
+    // ── compile: `deno task compile` builds the configured target. ──
+    compile: compileDefault,
+    "compile:browser": `deno run -A ${fw.build} --compile`,
+    "compile:electron": `deno run -A ${fw.build} --compile --electron`,
+    "compile:android": `deno run -A ${fw.build} --android`,
+    "compile:cli": `deno run -A ${fw.build} --compile --cli`,
+    "compile:service": `deno run -A ${fw.build} --compile --service --headless`,
+    // Unified aio client: standalone Electron connect-page AppImage.
+    "compile:client": `deno run -A ${fw.build} --client`,
+    // ── compile:remote — server binary (+ systemd unit) and, where the
+    // client is a separate artifact, that too (server FIRST: its dist clean
+    // would delete a client artifact built before it). ──
+    "compile:remote:browser":
+      `deno run -A ${fw.build} --compile --service --remote`,
+    "compile:remote:electron":
+      `deno run -A ${fw.build} --compile --service --remote && deno run -A ${fw.build} --client`,
+    "compile:remote:android":
+      `deno run -A ${fw.build} --compile --service --remote && deno run -A ${fw.build} --android --remote`,
+    "compile:remote:cli":
+      `deno run -A ${fw.build} --compile --service --headless --remote && deno run -A ${fw.build} --compile --cli --remote`,
+    "compile:remote:service":
+      `deno run -A ${fw.build} --compile --service --headless --remote`,
+    // Convenience: pre-fetch the Electron binary without launching. Not
+    // required — `dev:electron` / `compile:electron` auto-install on demand.
+    "install:electron": "deno install --allow-scripts=npm:electron",
+    test: "deno test -A",
+    am: `deno run -A ${fw.am}`,
+    doctor: `deno run -A ${fw.doctor}`,
+    lint: `deno run -A ${fw.aiol}`,
+  };
+}
+
+export function denoJson(
+  name: string,
+  source: boolean,
+  target: Target = DEFAULT_TARGET,
+): string {
+  const fw = frameworkSpecs(source);
   const obj = {
     title: name,
     version: "0.1.0",
@@ -246,64 +314,7 @@ export function denoJson(
       jsxImportSource: "aio",
     },
     imports: { ...fw.imports, electron: "npm:electron" },
-    tasks: {
-      // ── dev: `deno task dev` runs the configured target. Explicit per-target
-      // tasks always pass --client so they work regardless of `target`. ──
-      dev: devDefault,
-      "dev:browser": "deno run -A src/app.ts --client=browser",
-      // Electron auto-installs on first run — no `install:electron` prefix.
-      "dev:electron": "deno run -A src/app.ts --client=electron",
-      // Runs the app in an Android emulator against the live dev server
-      // (boots an AVD, builds+installs+launches). Needs the Android SDK + an AVD.
-      "dev:android": `deno run -A ${fw.devAndroid}`,
-      "dev:cli": "deno run -A src/app.ts --client=cli",
-      "dev:service": "deno run -A src/app.ts --client=server-only",
-      // Unified aio client: Electron connect page (enter any server URL).
-      "dev:client": "deno run -A src/app.ts --server-url",
-      // ── dev:remote — the same app, split across the network: the server
-      // side runs --expose (share token + pair code); the client side is a
-      // thin client (connect page / src/client.ts) pointed at that server. ──
-      "dev:remote:browser": "deno run -A src/app.ts --client=browser --expose",
-      "dev:remote:electron": "deno run -A src/app.ts --server-url",
-      "dev:remote:android": "deno run -A src/app.ts --client=browser --expose",
-      "dev:remote:cli": "deno run -A src/client.ts",
-      "dev:remote:service":
-        "deno run -A src/app.ts --client=server-only --expose",
-      // ── build: one command builds every target in deno.json `build.targets`
-      // into dist/ (+ manifest.json). The `compile:*` tasks below build one
-      // target at a time; `build` fans out over the fleet. ──
-      build: `deno run -A ${fw.buildAll} --build-spec=${fw.build}`,
-      // ── compile: `deno task compile` builds the configured target. ──
-      compile: compileDefault,
-      "compile:browser": `deno run -A ${fw.build} --compile`,
-      "compile:electron": `deno run -A ${fw.build} --compile --electron`,
-      "compile:android": `deno run -A ${fw.build} --android`,
-      "compile:cli": `deno run -A ${fw.build} --compile --cli`,
-      "compile:service":
-        `deno run -A ${fw.build} --compile --service --headless`,
-      // Unified aio client: standalone Electron connect-page AppImage.
-      "compile:client": `deno run -A ${fw.build} --client`,
-      // ── compile:remote — server binary (+ systemd unit) and, where the
-      // client is a separate artifact, that too (server FIRST: its dist clean
-      // would delete a client artifact built before it). ──
-      "compile:remote:browser":
-        `deno run -A ${fw.build} --compile --service --remote`,
-      "compile:remote:electron":
-        `deno run -A ${fw.build} --compile --service --remote && deno run -A ${fw.build} --client`,
-      "compile:remote:android":
-        `deno run -A ${fw.build} --compile --service --remote && deno run -A ${fw.build} --android --remote`,
-      "compile:remote:cli":
-        `deno run -A ${fw.build} --compile --service --headless --remote && deno run -A ${fw.build} --compile --cli --remote`,
-      "compile:remote:service":
-        `deno run -A ${fw.build} --compile --service --headless --remote`,
-      // Convenience: pre-fetch the Electron binary without launching. Not
-      // required — `dev:electron` / `compile:electron` auto-install on demand.
-      "install:electron": "deno install --allow-scripts=npm:electron",
-      test: "deno test -A",
-      am: `deno run -A ${fw.am}`,
-      doctor: `deno run -A ${fw.doctor}`,
-      lint: `deno run -A ${fw.aiol}`,
-    },
+    tasks: standardTasks(source, target),
   };
   return JSON.stringify(obj, null, 2) + "\n";
 }
