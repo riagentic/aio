@@ -22,7 +22,14 @@ export interface SyncHandlerDeps {
    *  without this the op-log and the server's own state diverge, and
    *  compaction snapshots (built from live state) would drop client ops. */
   dispatch: (
-    action: { type: string; payload?: unknown; _user?: unknown },
+    action: {
+      type: string;
+      payload?: unknown;
+      _user?: unknown;
+      /** Origin marker: this action IS a persisted sync op — the afterAction
+       *  hook must not schedule a durability snapshot for it. */
+      _syncOp?: boolean;
+    },
   ) => void;
   db: DB;
   syncCellIds: string[];
@@ -57,6 +64,16 @@ export interface ServerSyncHandler {
     meta: { id: string; user?: unknown },
     socket: WebSocket,
   ) => void;
+  /** A SERVER-ORIGIN write (effect, cron, serverFn, plain action — anything
+   *  that is not a sync op) committed to this sync cell. Sync cells are
+   *  excluded from KV persistence and only ops are replayed at boot, so
+   *  without this the change was durable only if a compaction happened to run
+   *  later — a restart silently rewound it. Debounced fold of current state
+   *  into the cell's sync snapshot. */
+  noteServerWrite: (cell: string) => void;
+  /** Flush pending noteServerWrite debounces — called on shutdown so the last
+   *  write of a clean exit is never inside the debounce window. */
+  flushServerWrites: () => Promise<void>;
 }
 
 const FORBIDDEN = ["__proto__", "constructor", "prototype"];
@@ -110,7 +127,7 @@ export function createServerSyncHandler(
     return next;
   }
 
-  async function tryCompact(cell: string): Promise<void> {
+  async function tryCompact(cell: string, force = false): Promise<void> {
     try {
       await compactSyncOps({
         db: deps.db,
@@ -118,13 +135,47 @@ export function createServerSyncHandler(
         getState: () => deps.getCellState(cell),
         serverHlc: clock.now(),
         log: deps.log,
+        // force: fold current state into the snapshot regardless of op count —
+        // the durability path for server-origin writes (see noteServerWrite).
+        ...(force ? { compactOps: 0 } : {}),
       });
     } catch (e) {
       deps.log.error(`[sync:server] compact failed for ${cell}: ${e}`);
     }
   }
 
+  // ── Server-origin write durability ─────────────────────────────────
+  // Same debounce scale as KV persistence (100ms): a crash inside the window
+  // loses at most the last write — identical exposure to KV cells — and a
+  // clean shutdown flushes (aio-lifecycle calls flushServerWrites).
+  const SERVER_WRITE_DEBOUNCE_MS = 100;
+  const _pendingWrites = new Map<string, ReturnType<typeof setTimeout>>();
+
+  function noteServerWrite(cell: string): void {
+    if (!syncCells.has(cell)) return;
+    const existing = _pendingWrites.get(cell);
+    if (existing !== undefined) clearTimeout(existing);
+    _pendingWrites.set(
+      cell,
+      setTimeout(() => {
+        _pendingWrites.delete(cell);
+        void withLock(cell, () => tryCompact(cell, true));
+      }, SERVER_WRITE_DEBOUNCE_MS),
+    );
+  }
+
+  async function flushServerWrites(): Promise<void> {
+    const cells = [..._pendingWrites.keys()];
+    for (const t of _pendingWrites.values()) clearTimeout(t);
+    _pendingWrites.clear();
+    await Promise.all(
+      cells.map((cell) => withLock(cell, () => tryCompact(cell, true))),
+    );
+  }
+
   return {
+    noteServerWrite,
+    flushServerWrites,
     async handleOp(raw, meta, socket) {
       if (!isValidSyncOp(raw)) {
         deps.log.warn(`[sync:server] invalid op from ${meta.id} — dropping`);
@@ -189,6 +240,9 @@ export function createServerSyncHandler(
               type: `${op.cell}:${op.action}`,
               payload: op.payload,
               _user: meta.user, // trusted connection identity (server-resolved)
+              // Origin marker: this write IS a persisted op — afterAction must
+              // not schedule a durability snapshot for it.
+              _syncOp: true,
             });
             // D11: the server's re-execution is the authority — if the
             // validate hook refused this op, the op is POISON: delete it
@@ -319,6 +373,7 @@ export function createServerSyncHandler(
                   type: `${pending.cell}:${pending.action}`,
                   payload: pending.payload,
                   _user: meta.user,
+                  _syncOp: true,
                 });
               } catch (e) {
                 deps.log.error(

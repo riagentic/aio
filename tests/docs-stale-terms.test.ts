@@ -4,7 +4,7 @@
 // composition helpers, dead entry points. Two of these lies shipped in one
 // week — the import gates can't see prose, so this one reads it.
 //
-// docs/upgrade/ and docs/specs/ are historical and intentionally show old
+// docs/upgrade/, docs/specs/ and docs/release-notes/ are historical and intentionally show old
 // APIs — they are skipped. Migration prose is legitimate: conditional terms
 // (Deno.Kv) pass when the same line says legacy/migrat/removed/history.
 import { assert } from "@std/assert";
@@ -58,7 +58,7 @@ async function* markdownFiles(dir: URL): AsyncGenerator<URL> {
   for await (const e of Deno.readDir(dir)) {
     if (
       e.name === "api-ref" || e.name === "node_modules" ||
-      e.name === "upgrade" || e.name === "specs"
+      e.name === "upgrade" || e.name === "specs" || e.name === "release-notes"
     ) continue;
     const child = new URL(e.isDirectory ? `${e.name}/` : e.name, dir);
     if (e.isDirectory) yield* markdownFiles(child);

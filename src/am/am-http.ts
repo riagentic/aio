@@ -9,6 +9,48 @@ import { readPid } from "./am-utils.ts";
 
 export const FETCH_TIMEOUT = 5000;
 
+// Instance identity (space-invaders field report): `--port=N` used to trust
+// that WHATEVER answers on N is the app the user means — a green e2e once
+// wrote its test rows into the production leaderboard that way. Before the
+// first trojan call to a port, the responder's /__aio/health appId is checked
+// against the app am resolved from cwd/--app; a mismatch REFUSES instead of
+// silently retargeting. Verified once per (port, appId) per am process.
+const _verified = new Map<string, string>();
+export function _resetInstanceVerify(): void {
+  _verified.clear();
+}
+export async function verifyInstance(
+  ctrl: number,
+  expectedAppId: string,
+): Promise<Result | null> {
+  const key = String(ctrl);
+  let actual = _verified.get(key);
+  if (actual === undefined) {
+    try {
+      const r = await fetch(`http://127.0.0.1:${ctrl}/__aio/health`, {
+        signal: AbortSignal.timeout(FETCH_TIMEOUT),
+      });
+      if (!r.ok) {
+        await r.body?.cancel();
+        return null; // gated or odd — the real call will surface it
+      }
+      const h = await r.json() as { appId?: string };
+      if (typeof h.appId !== "string") return null; // pre-alpha41 server
+      actual = h.appId;
+      _verified.set(key, actual);
+    } catch {
+      return null; // unreachable — the real call's error is the honest one
+    }
+  }
+  if (actual === expectedAppId) return null;
+  return {
+    ok: false,
+    error: `port ${ctrl} answers as app "${actual}", not "${expectedAppId}" ` +
+      `— refusing to touch a different app's instance (stale --port? another ` +
+      `app on this port? stop it, or pass the port of the right instance)`,
+  };
+}
+
 /** Map a fetch error to a Result with a descriptive message */
 export function fetchError(e: unknown, port: number): Result {
   if (e instanceof TypeError && String(e).includes("onnect")) {
@@ -37,6 +79,10 @@ export async function trojanGet(
   timeout = FETCH_TIMEOUT,
 ): Promise<Result> {
   const ctrl = resolveControlPort(port, appId);
+  if (appId) {
+    const mismatch = await verifyInstance(ctrl, appId);
+    if (mismatch) return mismatch;
+  }
   try {
     const resp = await fetch(`http://127.0.0.1:${ctrl}/__aio/trojan/${route}`, {
       signal: AbortSignal.timeout(timeout),

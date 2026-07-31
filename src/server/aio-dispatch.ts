@@ -84,10 +84,13 @@ export type DispatchSetupDeps<S, A, E, App = any> = {
     error: (msg: string) => void;
   };
   debug: boolean;
+  /** Exact action types omitted from time-travel history (diagnostics
+   *  `skipActions`) — framework-internal suffixes are always skipped. */
+  ttSkipActions?: Set<string>;
 };
 
 // Internal action types to hide from time-travel history (framework noise)
-const TT_SKIP_SUFFIXES = [":__exec", ":__FlowState", ":__flow"];
+const TT_SKIP_SUFFIXES = [":__exec"];
 const TT_SKIP_CONTAINS = [":__set", ":__error"];
 function isInternalAction(type: string): boolean {
   if (TT_SKIP_SUFFIXES.some((s) => type.endsWith(s))) return true;
@@ -241,7 +244,10 @@ export function setupDispatch<S, A, E, App = any>(
         const result = hookedReduce(s, a);
         _collectPatches(result);
         const actionType = (a as { type?: string }).type ?? "";
-        if (!isInternalAction(actionType)) {
+        if (
+          !isInternalAction(actionType) &&
+          !deps.ttSkipActions?.has(actionType)
+        ) {
           setTT(
             record(
               tt,

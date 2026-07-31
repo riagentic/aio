@@ -9,6 +9,7 @@ import {
   _resetUiReadWarnings,
 } from "./cell-reactive.ts";
 import { _resetCallTimeouts, resetPending } from "./cell-impl.ts";
+import { _resetDegraded } from "../diagnostics/degraded.ts";
 import { _resetMethodCancel } from "./method-cancel.ts";
 import { _resetSubs } from "./state-subs.ts";
 
@@ -21,6 +22,9 @@ export function _resetAioRuntime(): void {
   _resetUiReadWarnings();
   resetPending();
   _resetCallTimeouts();
+  // The degraded registry is process-global; without this a test's escalation
+  // bleeds into every later test's /__aio/health.
+  _resetDegraded();
   _resetMethodCancel();
   _resetSubs();
 }

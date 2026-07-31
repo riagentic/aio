@@ -137,7 +137,9 @@ After N consecutive failures (5 by default, `{ after }` to change it) it
 escalates **once** — one structured event, not per-occurrence spam — and once
 more on recovery. `/__aio/health` reports `status: "degraded"` and names them,
 because an app claiming to be healthy while a feature is dead is exactly the
-failure that endpoint invites.
+failure that endpoint invites. (Per runtime: the endpoint sees server-side
+escalations; a browser-side one surfaces in that browser's console and
+diagnostics overlay.)
 
 aio's own sync layer was the first user: every browser CRDT sync frame was a
 `.catch(() => {})`.

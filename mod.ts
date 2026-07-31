@@ -250,26 +250,3 @@ export type { DB, DBOpts, QueryResult, Tx } from "./src/db/mod.ts";
 export { createSelector } from "./src/selector.ts";
 /** Selector type — a function from state to derived value with memoization. */
 export type { Selector } from "./src/selector.ts";
-
-/**
- * Keys built into CellDef — excluded from send proxy.
- * @internal Exported for type inference only — not part of the stable API.
- */
-export type _CellBuiltins = "__aio";
-/**
- * Extract state type from cell def's phantom _stateType, fallback to unknown.
- * @internal Exported for type inference only — not part of the stable API.
- */
-export type _InferState<F> = F extends { __aio: { stateType?: infer S } }
-  // deno-lint-ignore no-explicit-any
-  ? S extends Record<string, any> ? S : Record<string, unknown>
-  : Record<string, unknown>;
-/**
- * Extract send proxy type from cell's callable methods.
- * @internal Exported for type inference only — not part of the stable API.
- */
-export type _InferSend<F> = {
-  [K in Exclude<keyof F, _CellBuiltins>]: F[K] extends // deno-lint-ignore no-explicit-any
-  (...args: infer P) => any ? (...args: P) => void
-    : never;
-};

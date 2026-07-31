@@ -28,6 +28,10 @@ export interface AioWindow {
      *  server's `localFirst` decision, which the browser cannot derive from
      *  the cell definitions alone. */
     syncCells?: string[];
+    /** Resolved `await cell.method()` ceilings — effectTimeoutMs +
+     *  perfBudget.methods[...].timeout, so the browser waits from the SAME
+     *  numbers as the server (0 = wait indefinitely). */
+    callTimeouts?: { default?: number; methods?: Record<string, number> };
   };
 }
 

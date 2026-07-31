@@ -15,6 +15,7 @@ import { createStormDetector } from "../diagnostics/dispatch-storm.ts";
 import { diagEmit } from "../diagnostics/diagnostic-bus.ts";
 import { parseCli } from "./aio-cli.ts";
 import { resolveAppId } from "./single-instance-lock.ts";
+import { VALID_AIO_CONFIG_KEYS } from "./config.ts";
 import { appDirs } from "./app-dirs.ts";
 import type { AioApp, AioConfig, AioUser, CellsConfig } from "./aio-types.ts";
 import type { CellFieldFilter } from "../state/cell-types.ts";
@@ -112,7 +113,36 @@ export function buildLegacyConfig(
     | ((a: unknown, s: unknown, u?: unknown) => unknown)
     | undefined;
 
+  // ── Mechanical passthrough — the fail-closed core of this bridge ──
+  // Every plain CellsConfig option rides through by DEFAULT. This used to be a
+  // hand-maintained field-by-field copy, and a forgotten line silently dropped
+  // the option after it was typed and validated (`strictOrigin`, then
+  // `redactActions`, then `appDir` — data written to the wrong directory, and
+  // `renderBudget` — never reached the browser). Only keys the bridge CONSUMES
+  // are held back; keys it wraps or computes are overridden below, after the
+  // spread. tests/config-bridge-completeness.test.ts proves the passthrough at
+  // runtime with a sentinel per documented option.
+  const {
+    cells: _consumedCells, // composed already
+    logging: _consumedLogging, // became `logger`
+    dispatchStorm: _consumedStorm, // became the storm detector above
+    diagnostics: _renamedDiagnostics, // forwarded as _diagnostics below
+    onCheckpointRestore: _renamedOcr, // forwarded as _onCheckpointRestore below
+    ...passthrough
+  } = fc as Record<string, unknown>;
+  // Composition-time options (cellDefaults, localFirst, isolate, …) are
+  // consumed BEFORE this bridge and are not AioConfig keys — the runtime
+  // validator rightly rejects them. Filter to the runtime's own whitelist, so
+  // both directions stay mechanical: a new option added to both whitelists
+  // (which option validation already forces) rides through with no edit here.
+  for (const k of Object.keys(passthrough)) {
+    if (!VALID_AIO_CONFIG_KEYS.has(k)) delete passthrough[k];
+  }
+
   return {
+    ...(passthrough as Partial<
+      AioConfig<Record<string, unknown>, unknown, unknown>
+    >),
     appId: fc.appId,
     reduce: composed.reduce as AioConfig<
       Record<string, unknown>,
@@ -129,49 +159,6 @@ export function buildLegacyConfig(
           effect as { type: string; payload: unknown },
         );
       }) as AioConfig<Record<string, unknown>, unknown, unknown>["execute"],
-    persist: fc.persist,
-    persistKey: fc.persistKey,
-    dbPath: fc.dbPath,
-    dbPragmas: fc.dbPragmas,
-    persistDebounceMs: fc.persistDebounceMs,
-    persistMode: fc.persistMode,
-    port: fc.port,
-    baseDir: fc.baseDir,
-    client: fc.client,
-    users: fc.users,
-    resolveUser: fc.resolveUser,
-    sessions: fc.sessions,
-    auth: fc.auth,
-    key: fc.key,
-    db: fc.db,
-    perfCheck: fc.perfCheck,
-    perfBudget: fc.perfBudget,
-    effectTimeoutMs: fc.effectTimeoutMs,
-    freezeState: fc.freezeState,
-    singleton: fc.singleton,
-    guardDispatches: fc.guardDispatches,
-    journal: fc.journal,
-    redactActions: fc.redactActions,
-    childWindows: fc.childWindows,
-    libraryMode: fc.libraryMode,
-    killExisting: fc.killExisting,
-    keepServer: fc.keepServer,
-    syncIntervalMs: fc.syncIntervalMs,
-    fullStateThreshold: fc.fullStateThreshold,
-    routes: fc.routes,
-    maxConnections: fc.maxConnections,
-    // Security options — these MUST survive every hop: they were typed and
-    // validated but silently dropped here, so `aio.run({ strictOrigin: true })`
-    // never reached the WS origin check (complexity-audit finding).
-    wsLimits: fc.wsLimits,
-    allowedOrigins: fc.allowedOrigins,
-    strictOrigin: fc.strictOrigin,
-    trustProxyHeader: fc.trustProxyHeader,
-    schedules: fc.schedules,
-    appVersion: fc.appVersion,
-    transport: fc.transport,
-    serverUrl: fc.serverUrl,
-    ui: fc.ui,
     beforeReduce: ((action, state, user) => {
       if (
         storm &&
@@ -198,13 +185,6 @@ export function buildLegacyConfig(
         unknown,
         unknown
       >["onAction"],
-    onEffect: fc.onEffect as AioConfig<
-      Record<string, unknown>,
-      unknown,
-      unknown
-    >["onEffect"],
-    onConnect: fc.onConnect,
-    onDisconnect: fc.onDisconnect,
     onStart: ((app: AioApp<Record<string, unknown>, unknown>) => {
       composed.initAll({
         dispatch: (a) => app.dispatch(a),
@@ -231,7 +211,6 @@ export function buildLegacyConfig(
       }
       if (fc.onStop) fc.onStop();
     },
-    onError: fc.onError,
     onRestore: onRestore as AioConfig<
       Record<string, unknown>,
       unknown,

@@ -48,7 +48,7 @@ async function* markdownFiles(dir: URL): AsyncGenerator<URL> {
     // upgrade/ + specs/ are historical (intentionally show old APIs).
     if (
       e.name === "api-ref" || e.name === "node_modules" ||
-      e.name === "upgrade" || e.name === "specs"
+      e.name === "upgrade" || e.name === "specs" || e.name === "release-notes"
     ) continue;
     const child = new URL(e.isDirectory ? `${e.name}/` : e.name, dir);
     if (e.isDirectory) yield* markdownFiles(child);

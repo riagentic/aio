@@ -189,6 +189,17 @@ export function _resetCallTimeouts(): void {
   _callTimeoutByMethod = undefined;
 }
 
+/** The resolved ceilings, for bridging into the page shell — the BROWSER side
+ *  of `await cell.method()` must wait from the same numbers, or it invents its
+ *  own (a hardcoded 15s used to fire first and blame the transport for a
+ *  method that was simply still running). */
+export function _getCallTimeouts(): {
+  default: number;
+  methods?: Record<string, number>;
+} {
+  return { default: _callTimeoutMs, methods: _callTimeoutByMethod };
+}
+
 /** The ceiling for one call, in ms. `<= 0` ⇒ no ceiling. */
 export function callTimeoutFor(method?: string): number {
   const perMethod = method ? _callTimeoutByMethod?.[method] : undefined;
@@ -397,24 +408,30 @@ export type ReadWatch = {
   reads: Set<string>;
   /** Paths written into the transaction's buffer. */
   writes: Set<string>;
-  /** Writes already published by an `s.$commit()` — this method IS their last
-   *  writer, so they are not evidence of anyone else's. */
-  flushed: Set<string>;
+  /** Path → the value this method itself published via `s.$commit()`. A live
+   *  value equal to it (or still at entry value, if the dispatch hasn't landed)
+   *  is our own write; any THIRD value is somebody else's and conflicts — a
+   *  bare "skip flushed paths" would exempt them forever. */
+  flushed: Map<string, unknown>;
 };
 
 export const createReadWatch = (): ReadWatch => ({
   reads: new Set(),
   writes: new Set(),
-  flushed: new Set(),
+  flushed: new Map(),
 });
 
 /** Path array → watch key. The one place the separator is spelled. */
 export const watchKey = (path: readonly string[]): string =>
   path.join(PATH_SEP);
 
-/** Same path, an ancestor, or a descendant of one in `set`. */
+/** Same path, an ancestor, or a descendant of one in `set`. The empty key is
+ *  the cell root — an ancestor of every path (the prefix test can't see that:
+ *  `"" + SEP` prefixes nothing). */
 function overlaps(path: string, set: Set<string>): boolean {
   if (set.has(path)) return true;
+  if (path.length === 0) return set.size > 0;
+  if (set.has("")) return true;
   for (const q of set) {
     if (path.startsWith(q + PATH_SEP) || q.startsWith(path + PATH_SEP)) {
       return true;
@@ -439,27 +456,37 @@ export function conflictPath(
   strictReads: boolean,
 ): string | null {
   if (origin === live) return null; // nothing committed since entry
-  const moved = (key: string) =>
-    !Object.is(
-      getNestedValue(origin, readPath(key)),
-      getNestedValue(live, readPath(key)),
-    );
+  // "Moved by somebody ELSE": for a path this method already published via
+  // `$commit`, the live value being our flushed value (or still the entry
+  // value while the dispatch settles) is our own write; a third value is a
+  // concurrent writer's.
+  const moved = (key: string) => {
+    const liveVal = getNestedValue(live, readPath(key));
+    const originVal = getNestedValue(origin, readPath(key));
+    if (watch.flushed.has(key)) {
+      return !Object.is(liveVal, watch.flushed.get(key)) &&
+        !Object.is(liveVal, originVal);
+    }
+    return !Object.is(originVal, liveVal);
+  };
   // Lost updates: a write whose value came from a read of the same place.
   for (const w of watch.writes) {
-    if (watch.flushed.has(w)) continue;
     if (!overlaps(w, watch.reads)) continue;
     if (moved(w)) return readPath(w).join(".");
   }
   if (!strictReads) return null;
-  // Serializable: a read that fed no write still decided something.
+  // Serializable: a read that fed no write still decided something. Skip only
+  // EXACT write matches (loop above validated that very path) — an overlap
+  // skip would exempt a broad read (root enumeration, a container scan)
+  // because one narrow descendant was written.
   for (const r of watch.reads) {
-    if (overlaps(r, watch.writes)) continue;
+    if (watch.writes.has(r)) continue;
     if (moved(r)) return readPath(r).join(".");
   }
   return null;
 }
 
-function getNestedValue(obj: unknown, path: string[]): unknown {
+export function getNestedValue(obj: unknown, path: string[]): unknown {
   let current = obj;
   for (const key of path) {
     if (current === null || current === undefined) return undefined;
@@ -493,6 +520,60 @@ function deleteNestedKey(
   delete (current as Record<string, unknown>)[path[path.length - 1]!];
 }
 
+/** A recorded mutation payload must SURVIVE being applied — the same batch is
+ *  replayed many times (every overlay recompute, the `$commit` local advance,
+ *  the final reduce), so installing a recorded object by REFERENCE lets a later
+ *  op in the batch mutate the recording itself through the applied tree:
+ *  `s.nums = s.nums.filter(…); s.nums.shift()` shifted the RECORDED array once
+ *  per replay and committed garbage (found by the sync/async differential
+ *  fuzzer). Deep-clone on install; primitives pass through. */
+function ownedValue(v: unknown): unknown {
+  return v !== null && typeof v === "object" ? cloneState(v, "shallow") : v;
+}
+
+/** Identity through which a live proxy exposes its current underlying value. */
+export const LIVE_RAW = Symbol("aio.liveRaw");
+
+/** Turn a value that may CONTAIN live proxies into plain data, at record time.
+ *
+ *  `s.obj = { ...s.obj }` copies nested object fields as their nested PROXIES;
+ *  recording those by reference used to poison the overlay (a leaked proxy at
+ *  the wrong path reads itself — unbounded recursion; found by the sync/async
+ *  differential fuzzer). Each proxy resolves to its current underlying value
+ *  via LIVE_RAW — the same semantics Immer gives nested drafts assigned back
+ *  into a draft. Plain subtrees are returned UNTOUCHED (same reference): a
+ *  method that assigns an array and keeps mutating its local reference sees
+ *  those later mutations committed, exactly like the Immer draft;
+ *  `ownedValue` still clones at apply time so replays stay safe. */
+function materializeValue(v: unknown): unknown {
+  if (v === null || typeof v !== "object") return v;
+  const raw = (v as Record<symbol, unknown>)[LIVE_RAW];
+  if (raw !== undefined) {
+    return raw !== null && typeof raw === "object"
+      ? cloneState(raw, "shallow")
+      : raw;
+  }
+  if (Array.isArray(v)) {
+    let out: unknown[] | null = null;
+    for (let i = 0; i < v.length; i++) {
+      const m = materializeValue(v[i]);
+      if (m !== v[i] && out === null) out = v.slice();
+      if (out !== null) out[i] = m;
+    }
+    return out ?? v;
+  }
+  let outObj: Record<string, unknown> | null = null;
+  for (const k of Object.keys(v as Record<string, unknown>)) {
+    const cur = (v as Record<string, unknown>)[k];
+    const m = materializeValue(cur);
+    if (m !== cur && outObj === null) {
+      outObj = { ...(v as Record<string, unknown>) };
+    }
+    if (outObj !== null) outObj[k] = m;
+  }
+  return outObj ?? v;
+}
+
 function setNestedValue(
   obj: Record<string, unknown>,
   m: Mutation,
@@ -511,7 +592,9 @@ function setNestedValue(
     _warnDroppedMutation(`null parent for set leaf`, m);
     return;
   }
-  (current as Record<string, unknown>)[path[path.length - 1]!] = m.value;
+  (current as Record<string, unknown>)[path[path.length - 1]!] = ownedValue(
+    m.value,
+  );
 }
 
 function applyArrayOp(
@@ -523,8 +606,11 @@ function applyArrayOp(
     _warnDroppedMutation(`target at path is not an array (op=${m.op})`, m);
     return;
   }
+  // Args cloned for the same reason as set values: a pushed object enters the
+  // applied tree, and a later op addressing it by path would mutate the
+  // RECORDING, corrupting every subsequent replay.
   // deno-lint-ignore no-explicit-any
-  (arr as any)[m.op as string](...(m.args ?? []));
+  (arr as any)[m.op as string](...(m.args ?? []).map(ownedValue));
 }
 
 /** Apply a batch of mutations (set, delete, array ops) to a state object.
@@ -855,6 +941,10 @@ export function createLiveProxy<S extends Record<string, unknown>>(
   const handler: ProxyHandler<S> = {
     get(_target, prop, receiver) {
       if (typeof prop === "symbol") {
+        // Materialization hook (LIVE_RAW): hands out the proxy's CURRENT
+        // underlying value so a write of a proxy-derived structure can be
+        // recorded as plain data — see materializeValue.
+        if (prop === LIVE_RAW) return effectiveAt();
         // Make arrays spreadable + iterable: `[...s.items]` and
         // `for (const x of s.items)`. The blanket symbol→undefined return used
         // to make `s.items[Symbol.iterator]` undefined → "not iterable" — which
@@ -911,6 +1001,10 @@ export function createLiveProxy<S extends Record<string, unknown>>(
         // LIVE proxy at that path, so writes batch exactly like s.users[i].
         if (key === "find") {
           return (...args: unknown[]) => {
+            // The predicate scanned the whole array — a `find`-based guard
+            // ("does this name exist?") is a read of the array, same as every
+            // other read method below.
+            noteRead?.(pathKey);
             const snap = snapshotForRead(fresh) as unknown[];
             const idx = snap.findIndex(
               args[0] as (v: unknown, i: number, a: unknown[]) => boolean,
@@ -962,7 +1056,11 @@ export function createLiveProxy<S extends Record<string, unknown>>(
           // deno-lint-ignore no-explicit-any
           const result = (copy as any)[key](...args);
           noteWrite?.(pathKey);
-          batcher.add(methodName, { path: [...path], op: key, args });
+          batcher.add(methodName, {
+            path: [...path],
+            op: key,
+            args: args.map(materializeValue),
+          });
           return result;
         };
       }
@@ -1005,7 +1103,10 @@ export function createLiveProxy<S extends Record<string, unknown>>(
     set(_target, prop, value) {
       if (typeof prop === "symbol") return false;
       noteWrite?.(path.length === 0 ? prop : pathKey + PATH_SEP + prop);
-      batcher.add(methodName, { path: [...path, prop as string], value });
+      batcher.add(methodName, {
+        path: [...path, prop as string],
+        value: materializeValue(value),
+      });
       return true;
     },
 
@@ -1023,7 +1124,11 @@ export function createLiveProxy<S extends Record<string, unknown>>(
 
     has(_target, prop) {
       if (typeof prop === "symbol") return false;
-      noteRead?.(pathKey);
+      // `"x" in s` reads x's existence — record the probed path, not the whole
+      // container, so only a change AT x conflicts.
+      noteRead?.(
+        path.length === 0 ? String(prop) : pathKey + PATH_SEP + String(prop),
+      );
       const fresh = effectiveAt();
       if (fresh === null || fresh === undefined) return false; // AIO-232
       return prop in (fresh as object);

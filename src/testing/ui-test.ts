@@ -93,6 +93,12 @@ export interface UIElementHandle {
    *  implicit submission); a modified Enter does not, so a Ctrl+Enter
    *  shortcut handler is testable. */
   press(key: string, mods?: KeyModifiers): Promise<void>;
+  /** Hold a key DOWN — no keyup until {@linkcode keyUp}. The interaction
+   *  `press` (a tap) cannot express: "hold left for 10 frames", drag by
+   *  keyboard, held modifiers, key-repeat (space-invaders field report). */
+  keyDown(key: string, mods?: KeyModifiers): Promise<void>;
+  /** Release a key held by {@linkcode keyDown}. */
+  keyUp(key: string, mods?: KeyModifiers): Promise<void>;
   /** Hover: mouseover + mouseenter. */
   hover(): Promise<void>;
   /** Focus the element. */
@@ -680,6 +686,18 @@ async function _mountTestUI(
           (e) => triggerAction(e, "press", key, mods),
         );
       },
+      keyDown(key: string, mods?: KeyModifiers) {
+        return act(
+          "hold a key on",
+          (e) => triggerAction(e, "keyDown", key, mods),
+        );
+      },
+      keyUp(key: string, mods?: KeyModifiers) {
+        return act(
+          "release a key on",
+          (e) => triggerAction(e, "keyUp", key, mods),
+        );
+      },
       hover() {
         return act(null, (e) => triggerAction(e, "hover"));
       },
@@ -996,12 +1014,29 @@ async function _mountTestUI(
       msg?: string,
     ) {
       await drain();
-      await settle();
-      if (!pred(cell)) {
-        throw new Error(
-          msg ?? `testUI: expectCell failed for cell '${cell?.__aio?.id}'`,
-        );
+      // Retry briefly (like waitFor): a client-scoped cell's reactive binding
+      // can land a beat after the first render, and a one-shot check read it
+      // as "predicate wrong" — which sent people debugging the app instead of
+      // the harness (space-invaders field report).
+      const deadline = Date.now() + 2000;
+      while (true) {
+        await settle();
+        try {
+          if (pred(cell)) return;
+        } catch { /* state still settling */ }
+        if (Date.now() >= deadline) break;
+        await tick(20);
       }
+      const id = cell?.__aio?.id ?? "?";
+      const scopeNote = cell?.__aio?.scope === "client"
+        ? ` Note: '${id}' is scope:'client' — its state lives in the page ` +
+          `runtime. If this predicate is true in the UI, read the cell ` +
+          `directly after ui.settle() (client cells are invisible to the ` +
+          `server store and to \`am state\`; \`am surface\` sees their UI).`
+        : "";
+      throw new Error(
+        msg ?? `testUI: expectCell failed for cell '${id}'.${scopeNote}`,
+      );
     },
     async waitFor(
       pred: () => boolean,

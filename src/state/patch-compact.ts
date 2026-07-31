@@ -49,6 +49,32 @@ export function narrowArrayPatches(prev: unknown, ops: Patch[]): Patch[] {
   // replacement moved them, so neither `prev` nor `current` can be trusted.
   const untracked = new Set<string>();
 
+  /** Is `p` a strict descendant of `ancestor`? The root key is `""`, which a
+   *  bare prefix test can never match (`"" + NUL` prefixes nothing). */
+  const isUnder = (p: string, ancestor: string): boolean =>
+    ancestor.length === 0 ? p.length > 0 : p.startsWith(ancestor + "\0");
+
+  // The base a later op at `path` diffs against: the value the PREVIOUS ops in
+  // this batch left there. An op invalidates its whole neighborhood — its own
+  // path, every ancestor, every descendant — so trust is decided by the
+  // NEAREST marked ancestor-or-self: an `untracked` mark means unknown, a
+  // `current` entry means resolve inside that (re-established) value, and only
+  // a path with no marks anywhere above it may fall back to `prev`.
+  const NOT_TRUSTED = Symbol();
+  const baseFor = (
+    key: string,
+    path: readonly (string | number)[],
+  ): unknown => {
+    if (untracked.has(key)) return NOT_TRUSTED;
+    if (current.has(key)) return current.get(key);
+    for (let n = path.length - 1; n >= 0; n--) {
+      const ak = pathKey(path.slice(0, n));
+      if (untracked.has(ak)) return NOT_TRUSTED;
+      if (current.has(ak)) return valueAt(current.get(ak), path.slice(n));
+    }
+    return valueAt(prev, path);
+  };
+
   for (let i = 0; i < ops.length; i++) {
     const p = ops[i]!;
     const key = pathKey(p.path);
@@ -56,11 +82,22 @@ export function narrowArrayPatches(prev: unknown, ops: Patch[]): Patch[] {
 
     if (p.op === "replace" && Array.isArray(p.value)) {
       // A replacement re-establishes the value, whatever happened before it.
-      if (!untracked.has(key)) {
-        const base = current.has(key)
-          ? current.get(key)
-          : valueAt(prev, p.path);
-        narrowed = diffArray(base, p.value, p.path);
+      const base = baseFor(key, p.path);
+      if (base !== NOT_TRUSTED) narrowed = diffArray(base, p.value, p.path);
+      // Its ancestors now hold a different array…
+      for (let n = p.path.length - 1; n >= 0; n--) {
+        const ancestor = pathKey(p.path.slice(0, n));
+        current.delete(ancestor);
+        untracked.add(ancestor);
+      }
+      // …and the subtree below it IS the new value: stale per-descendant marks
+      // of either kind would only shadow it, so they are cleared, not added —
+      // `baseFor` resolves descendants inside this entry from here on.
+      for (const t of [...current.keys()]) {
+        if (isUnder(t, key)) current.delete(t);
+      }
+      for (const t of [...untracked]) {
+        if (isUnder(t, key)) untracked.delete(t);
       }
       current.set(key, p.value);
       untracked.delete(key);
@@ -74,7 +111,7 @@ export function narrowArrayPatches(prev: unknown, ops: Patch[]): Patch[] {
         untracked.add(ancestor);
       }
       for (const tracked of [...current.keys()]) {
-        if (tracked.startsWith(key + "\0")) {
+        if (isUnder(tracked, key)) {
           current.delete(tracked);
           untracked.add(tracked);
         }
@@ -129,35 +166,6 @@ function diffArray(
   let j = 0; // index in `next`
   let pos = 0; // index in the array as the ops apply
 
-  while (i < b.length && j < next.length) {
-    if (b[i] === next[j]) {
-      i++;
-      j++;
-      pos++;
-    } else if (!nSet.has(b[i])) {
-      outOps.push({ op: "remove", path: [...path, pos] });
-      removed++;
-      i++;
-    } else if (!bSet.has(next[j])) {
-      outOps.push({ op: "add", path: [...path, pos], value: next[j] });
-      added++;
-      pos++;
-      j++;
-    } else {
-      return null; // both sides still hold it — a reorder
-    }
-  }
-  for (; i < b.length; i++) {
-    outOps.push({ op: "remove", path: [...path, pos] });
-    removed++;
-  }
-  for (; j < next.length; j++, pos++) {
-    outOps.push({ op: "add", path: [...path, pos], value: next[j] });
-    added++;
-  }
-
-  if (removed === 0 && added === 0) return null; // nothing actually moved
-
   // Cost, not op count: an `add` carries an element, a `remove` carries only an
   // index. Counting them alike declined `items.slice(0, 2)` on a 4-item list —
   // two index-sized removes, rejected as "not cheaper" than re-sending both
@@ -167,8 +175,43 @@ function diffArray(
   //   • and a patch LIST far longer than the array it rebuilds is a loss even
   //     when every op is tiny — truncating 10k items to one should just send
   //     the one, not 9,999 removes.
-  if (added >= next.length) return null;
-  if (removed + added > next.length + 8) return null;
+  // Checked as the ops accrue, so a hopeless diff (those 9,999 removes) bails
+  // before materializing its op list, not after.
+  const overBudget = () =>
+    added >= next.length || removed + added > next.length + 8;
+
+  while (i < b.length && j < next.length) {
+    if (b[i] === next[j]) {
+      i++;
+      j++;
+      pos++;
+    } else if (!nSet.has(b[i])) {
+      outOps.push({ op: "remove", path: [...path, pos] });
+      removed++;
+      i++;
+      if (overBudget()) return null;
+    } else if (!bSet.has(next[j])) {
+      outOps.push({ op: "add", path: [...path, pos], value: next[j] });
+      added++;
+      pos++;
+      j++;
+      if (overBudget()) return null;
+    } else {
+      return null; // both sides still hold it — a reorder
+    }
+  }
+  for (; i < b.length; i++) {
+    outOps.push({ op: "remove", path: [...path, pos] });
+    removed++;
+    if (overBudget()) return null;
+  }
+  for (; j < next.length; j++, pos++) {
+    outOps.push({ op: "add", path: [...path, pos], value: next[j] });
+    added++;
+    if (overBudget()) return null;
+  }
+
+  if (removed === 0 && added === 0) return null; // nothing actually moved
 
   return outOps;
 }

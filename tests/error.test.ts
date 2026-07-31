@@ -48,17 +48,15 @@ Deno.test('createAioError — correlationId is "none" when no context', () => {
 });
 
 Deno.test("AioError.toJSON — produces structured object", () => {
-  const err = createAioError("FLOW_UNCAUGHT", new Error("fail"), {
+  const err = createAioError("EFFECT_ASYNC_ERROR", new Error("fail"), {
     cellName: "orderer",
-    flowName: "exec",
-    flowStep: 3,
+    effectType: "orderer:exec",
   });
   const json = err.toJSON() as Record<string, unknown>;
-  assertEquals(json.code, "FLOW_UNCAUGHT");
-  assertEquals(json.source, "flow");
+  assertEquals(json.code, "EFFECT_ASYNC_ERROR");
+  assertEquals(json.source, "effect");
   const ctx = json.context as Record<string, unknown>;
-  assertEquals(ctx.flowName, "exec");
-  assertEquals(ctx.flowStep, 3);
+  assertEquals(ctx.effectType, "orderer:exec");
   assertEquals(typeof json.timestamp, "number");
   assertEquals(typeof json.stack, "string");
 });
@@ -68,8 +66,6 @@ Deno.test("error code to source mapping", () => {
   assertEquals(createAioError("EFFECT_ERROR", "x", {}).source, "effect");
   assertEquals(createAioError("EFFECT_TIMEOUT", "x", {}).source, "effect");
   assertEquals(createAioError("EFFECT_ASYNC_ERROR", "x", {}).source, "effect");
-  assertEquals(createAioError("FLOW_STEP_ERROR", "x", {}).source, "flow");
-  assertEquals(createAioError("FLOW_UNCAUGHT", "x", {}).source, "flow");
   assertEquals(createAioError("HOOK_ERROR", "x", {}).source, "hook");
   assertEquals(createAioError("INIT_ERROR", "x", {}).source, "init");
   assertEquals(createAioError("DESTROY_ERROR", "x", {}).source, "destroy");

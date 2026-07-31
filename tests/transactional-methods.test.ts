@@ -397,9 +397,22 @@ Deno.test("conflictPath: identity is the comparator, and only watched paths coun
   rmw.writes.add(watchKey(["a"]));
   assertEquals(conflictPath(origin, live, rmw, false), "a");
 
-  // …unless this method already published it — then it is our own change.
-  rmw.flushed.add(watchKey(["a"]));
+  // …unless this method already published that very value — our own change.
+  rmw.flushed.set(watchKey(["a"]), 2);
   assertEquals(conflictPath(origin, live, rmw, false), null);
+
+  // A flushed path is NOT exempt forever: live at a THIRD value (neither what
+  // we published nor the entry value) is somebody else's write after our
+  // $commit — the lost update the exemption used to hide.
+  rmw.flushed.set(watchKey(["a"]), 7);
+  assertEquals(conflictPath(origin, live, rmw, false), "a");
+  // …while live still at the entry value only means our dispatch hasn't
+  // landed yet — never a conflict.
+  assertEquals(
+    conflictPath(origin, { ...live, a: 1 }, rmw, false),
+    null,
+    "entry value = our flush still settling",
+  );
 
   // An identical state object short-circuits: nothing has committed at all.
   assertEquals(conflictPath(origin, origin, rmw, true), null);
@@ -417,4 +430,161 @@ Deno.test("conflictPath: a read overlapping a write is checked once, by path", (
     "the sibling we touched did not move — a parent-level identity change " +
       "must not masquerade as a conflict on the leaf",
   );
+});
+
+// ── Closed holes (alpha40 review): three tracked-read escapes that each let a
+// lost update commit silently, plus the stand-down false positive. Every one
+// of these reproduced against fd5c374 before the fix.
+
+Deno.test("transaction: a path published by $commit is NOT exempt afterwards", async () => {
+  const p = parkPoint();
+  const c = cell("txn_flushed_rmw", {
+    transaction: true,
+    state: { n: 0 },
+    methods: {
+      async twice(s: { n: number }) {
+        s.n = s.n + 1; // RMW #1 (0 → 1)
+        (s as Any).$commit(); // publishes n=1
+        await p.park(); // a sync bump commits n=100 here
+        s.n = s.n + 1; // RMW #2 over the pinned 1 — must conflict, not win
+      },
+      bump(s: { n: number }) {
+        s.n = 100;
+      },
+    },
+  });
+  const h = await bootCells([c]);
+  try {
+    const slow = (c as Any).twice();
+    await p.parked;
+    await (c as Any).bump();
+    p.release();
+    await assertRejects(() => slow, Error, "changed by another action");
+    await h.settle();
+    assertEquals((c as Any).n, 100, "bump's write survives; ours aborted");
+  } finally {
+    h.dispose();
+  }
+});
+
+Deno.test("transaction serialize: a .find() guard is a validated read", async () => {
+  const p = parkPoint();
+  const c = cell("txn_find_guard", {
+    transaction: { serialize: true },
+    state: { users: [] as { name: string }[] },
+    methods: {
+      async addUnique(s: { users: { name: string }[] }, name: string) {
+        const exists = s.users.find((u) => u.name === name);
+        await p.park(); // concurrent insert of the same name
+        if (!exists) s.users.push({ name });
+      },
+      addSync(s: { users: { name: string }[] }, name: string) {
+        s.users.push({ name });
+      },
+    },
+  });
+  const h = await bootCells([c]);
+  try {
+    const slow = (c as Any).addUnique("ada");
+    await p.parked;
+    await (c as Any).addSync("ada");
+    p.release();
+    await assertRejects(() => slow, Error, "changed by another action");
+    await h.settle();
+    assertEquals(
+      ((c as Any).users as unknown[]).length,
+      1,
+      "no phantom duplicate under serializable",
+    );
+  } finally {
+    h.dispose();
+  }
+});
+
+Deno.test("transaction serialize: a root enumeration is a validated read", async () => {
+  const p = parkPoint();
+  const c = cell("txn_root_enum", {
+    transaction: { serialize: true },
+    state: { total: 0, a: 1 } as Record<string, unknown>,
+    methods: {
+      async recount(s: Record<string, unknown>) {
+        const keys = Object.keys(s); // reads the root shape
+        await p.park(); // concurrent sync method adds a key
+        s.total = keys.length;
+      },
+      addKey(s: Record<string, unknown>) {
+        s.b = 2;
+      },
+    },
+  });
+  const h = await bootCells([c]);
+  try {
+    const slow = (c as Any).recount();
+    await p.parked;
+    await (c as Any).addKey();
+    p.release();
+    await assertRejects(() => slow, Error, "changed by another action");
+    await h.settle();
+    assertEquals((c as Any).total, 0, "stale count did not commit");
+  } finally {
+    h.dispose();
+  }
+});
+
+Deno.test("transaction serialize: the documented $live stand-down pattern stands down cleanly", async () => {
+  const p = parkPoint();
+  const c = cell("txn_standdown", {
+    transaction: { serialize: true },
+    state: { adjustedAt: 0, balance: 100 },
+    methods: {
+      async refresh(s: Any) {
+        const entered = s.adjustedAt; // pinned, watched read
+        await p.park();
+        if (s.$live.adjustedAt !== entered) return; // stand down — writes nothing
+        s.balance = 999;
+      },
+      adjust(s: Any) {
+        s.adjustedAt = 1;
+        s.balance -= 40;
+      },
+    },
+  });
+  const h = await bootCells([c]);
+  try {
+    const slow = (c as Any).refresh();
+    await p.parked;
+    await (c as Any).adjust();
+    p.release();
+    await slow; // must NOT reject: it published nothing
+    await h.settle();
+    assertEquals((c as Any).balance, 60, "adjust's write intact");
+  } finally {
+    h.dispose();
+  }
+});
+
+Deno.test("transaction: s.$live.$commit() publishes (not a silent no-op)", async () => {
+  const p = parkPoint();
+  const c = cell("txn_live_commit", {
+    transaction: true,
+    state: { a: 0 },
+    methods: {
+      async work(s: Any) {
+        s.a = 1;
+        s.$live.$commit(); // same commit closure as s.$commit()
+        await p.park();
+      },
+    },
+  });
+  const h = await bootCells([c]);
+  try {
+    const slow = (c as Any).work();
+    await p.parked;
+    await h.settle();
+    assertEquals((c as Any).a, 1, "published mid-method via $live.$commit()");
+    p.release();
+    await slow;
+  } finally {
+    h.dispose();
+  }
 });

@@ -353,6 +353,10 @@ export type CellsConfig = {
   db?: Record<string, TableDef>;
   perfCheck?: "on" | "off";
   perfBudget?: PerfBudget;
+  /** Client render-staleness / pending-patch thresholds — sent to the browser
+   *  (page shell + `cfg` frame). Was accepted by the option validator but
+   *  missing from this type AND dropped by the bridge; all three now agree. */
+  renderBudget?: import("../vitals/types.ts").RenderBudget;
   effectTimeoutMs?: number;
   freezeState?: boolean;
   memory?: MemoryConfig; // memory pressure monitoring config

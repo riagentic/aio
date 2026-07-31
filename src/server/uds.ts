@@ -54,6 +54,9 @@ export function createUDSListener(
   debug: (msg: string) => void,
   clientCounter?: { value: number },
   syncHandler?: ServerSyncHandler | null,
+  /** Resolved client config — sent as an early "cfg" frame (the electron UDS
+   *  shell is templated at build time and embeds no `__aioConfig`). */
+  clientConfig?: Record<string, unknown>,
 ): UDSHandle {
   try {
     Deno.removeSync(socketPath);
@@ -84,6 +87,9 @@ export function createUDSListener(
 
       // A3: version handshake — server speaks first, before any state.
       sendTo(conn, enc("proto", protoHello(VERSION)));
+      if (clientConfig && Object.keys(clientConfig).length > 0) {
+        sendTo(conn, enc("cfg", clientConfig));
+      }
       // AIO-239: route initial write through sendTo() to use per-connection write queue
       sendTo(conn, encRaw("state", JSON.stringify(getUIState())));
 

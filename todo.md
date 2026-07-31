@@ -1,6 +1,6 @@
 # Road to 1.0.0-final
 
-Plan written 2026-07-04, current as of **v1.0.0-alpha40** (2026-07-29). **Core
+Plan written 2026-07-04, current as of **v1.0.0-alpha41** (2026-07-31). **Core
 principle:** all breaking changes die in alpha; beta = frozen surface,
 bugfix-only; 1.0.0 = boring. Shipped work lives in `CHANGELOG.md` — this file
 tracks only what remains.
@@ -45,15 +45,75 @@ Ten consecutive alpha releases with **no major/critical/blocker bug and no
 compat break**. A corruption-class bug found during an alpha resets the count —
 that is the gate working, not a setback.
 
-- Streak: **7** (alpha34 … alpha40). The alpha34 audit found six data-loss /
-  security HIGHs, which reset it; nothing since has been corruption-class in a
-  RELEASED alpha. (Bugs caught while building an alpha — the alpha38 libraryMode
-  log misplacement, the app-key split-brain — don't reset it: they never
-  shipped. That distinction is the whole point of the gate.)
+- Streak: **0** — reset 2026-07-31. The post-release review of alpha40 found
+  corruption-class bugs REACHABLE in the released alpha: a transactional
+  method's post-`$commit` writes were exempt from conflict validation (silent
+  lost update), and the same review's differential fuzzer then found recorded
+  mutation payloads being destructively mutated by batch replays
+  (`s.nums = s.nums.filter(…); s.nums.shift()` committed garbage). Both fixed
+  and property-tested the same day, but they shipped in alpha40 — by the rule
+  above, the count restarts. (History: the alpha34 audit reset it once before;
+  alpha34…alpha39 reached 7 before this reset.)
+- (Bugs caught while building an alpha — the alpha38 libraryMode log
+  misplacement, the app-key split-brain — don't reset it: they never shipped.
+  That distinction is the whole point of the gate.)
 
 ## Remaining before beta
 
-- [x] **`localFirst` opt-in — SHIPPED.** `aio.run({ localFirst: true })` makes
+**space-invaders report — remaining after the 2026-07-31 batch** (shipped that
+day: orphan-cell preservation, reference-based TT + `skipActions`, am instance
+identity + `AIO_APPS_DIR`-scoped lock dir, `am start` GUI fail-fast, useCell
+deprecation + aiol rule, aiol empty-state false positive, pressure hint):
+
+- [ ] `ui.keyDown(key)` / `ui.keyUp(key)` in testUI (hold a key — games/drag
+      UIs; `press` is a tap: `src/air/ui-trigger.ts:83`). Mirror in am trigger.
+- [ ] `ui.expectCell` on a `scope:'client'` cell: resolve against the client
+      signal, or fail with "scope:'client' — use ui.settle() + direct read"
+      instead of a generic predicate error. `am state` same blind spot → point
+      at `am surface`.
+- [ ] testUI dev warning when a mounted component adds keydown/resize listeners
+      on the DENO global instead of the happy-dom window (cost the app its UI
+      tests until diagnosed).
+- [ ] `useInterval` AIR hook (client-only loops — audio sequencers, polling;
+      `useRaf` precedent).
+- [ ] Docs batch: TT = "dev inspector, bounded window" + input-tape replay
+      pattern; localFirst "a 60 Hz tick still crosses the wire" note;
+      syncIntervalMs guidance for games; isolation = one knob (AIO_APPS_DIR).
+
+**Declined from the report, with reasons**: per-cell Immer/freeze opt-out for
+hot cells (breaks dev==prod + the immutability contract TT/sync/persist rest on;
+`scope:'client'` is the sanctioned escape and was measured comfortable at 60
+fps); deterministic-seed cell effect (app-level: put the seed in state); `am`
+portless discovery (identity verification covers the failure mode; am discover
+exists).
+
+**For the alpha41 release notes** (work landed 2026-07-31, unreleased):
+alpha40-review fixes (tx conflict escapes, patch-compact overlap, SPA-shell
+syncCells, browser call-timeout bridge, deep ui.exclude, degraded registry), the
+sync/async differential fuzzer + mutation-payload aliasing fix (proxy
+spread-back now WORKS — `aiol` rule retired, docs updated), server-origin sync
+durability (+`appDir` config-bridge fix — BREAKING-ish: data now actually lands
+in the configured dir), `cdiag`/`cfg` wire frames, legacy FLOW_* error codes +
+`FlowStepRecord` removed (nothing produced them since the alpha27 restructure —
+alpha-window cut). Surface diet (484→466 symbols, audit-driven): removed
+`_CellBuiltins`/`_InferState`/ `_InferSend` (internal types), extras'
+`draft`/`matchEffect`/`UnionOf` (pre-methods relics) + duplicate
+`connectCliUDS`/`DEFAULT_PRAGMAS` re-exports, `sha256Hex` (both entries), ship
+family de-duped onto `aio/build` only, `authUser` off `aio/air` (use
+`useUser()`), `capabilityManifest` un-exported, `./schedule` star-export made
+explicit (cron plumbing off the surface). aiol's moved-off-core hint now names
+each symbol's real home or says "removed". Deliberate KEEPs from the audit:
+`markAsync` (error-message escape hatch), `createAuthClient` (dynamic-import
+users), UI kit + TOTP (documented), type backers. **One-line source execution
+shipped**: `run.sh` (+ `run.ps1`, Windows) — `curl … run.sh | sh` in any aio app
+repo = production build + run of the default target; `--dev` for the dev server;
+`--git <url>`/`owner/repo` clones
+
+- installs deno/aio/am + `am fix` first; artifact found by timestamp, never by
+  name; e2e'd offline in `tests/run-sh-e2e.test.ts` (test:onboard). run.ps1
+  awaits the physical Windows pass (B5).
+
+* [x] **`localFirst` opt-in — SHIPPED.** `aio.run({ localFirst: true })` makes
       every server cell run its methods where the caller is and travel as CRDT
       ops; `sync: false` is the per-cell opt-out; boot logs exactly which cells
       were adopted. The browser learns the decision from the page shell (it is
@@ -62,10 +122,38 @@ that is the gate working, not a setback.
       not claimed: `tests/e2e-local-first.test.ts` asserts a real chromium click
       lands in the op-log with the switch on, and that the same app without it
       produces no ops at all.
-- [ ] **Decide the `localFirst` DEFAULT.** Needs a real local-first app to
+* [ ] **Decide the `localFirst` DEFAULT.** Needs a real local-first app to
       report back — same bar every foundational flip in this repo has met.
       Flipping it changes WHERE methods run, so it cannot land after the freeze.
-- [ ] **Structural trio** (alpha-only, each behind its own full gate run).
+* [x] **Sync-cell durability for server-origin writes** (closed 2026-07-31):
+      every non-op commit to a sync cell (effect, cron, `serverFn`, plain server
+      call, async `__set` outcome) folds current state into the cell's sync
+      snapshot — debounced 100ms, flushed on clean shutdown, sync-op dispatches
+      marked `_syncOp` so they never double-fold. Mutation-tested in
+      `tests/sync-server-write-durability.test.ts`. Found alongside it: the
+      config bridge DROPPED `appDir` (logs obeyed it, all data went to the
+      default dir — third config-bridge fail-open); bridged + the exemption that
+      masked it removed from the completeness test.
+* [x] **Runtime `__aioConfig` handshake** (closed 2026-07-31): the server sends
+      the resolved client config (`syncCells`/`callTimeouts`/ `renderBudget`) as
+      an early S→C `cfg` frame on BOTH transports (WS + electron UDS), so
+      build-time-templated shells learn compose-time decisions. Shell keys win
+      per-key; late sync adoption re-runs the one resolver (`_applyServerConfig`
+      → `_initSyncIfNeeded`, re-entrant) — pre-cfg actions round-trip, which is
+      correct, never corrupting. `tests/cfg-handshake.test.ts` (real-WS e2e +
+      apply semantics).
+* [x] **Browser→server `degraded()` visibility** (closed 2026-07-31): new C→S
+      `cdiag` frame — the transport relays escalation/recovery (registered via
+      `_setDegradedRelay`, replayed on reconnect), the server records per client
+      with caps, `/__aio/health` reports `clientDegraded` aggregated across
+      connected clients and drops a client's records on disconnect. Deliberately
+      NOT the diagnostic bus (dev-only) — health must work in prod. E2E over a
+      real WS in `tests/cdiag-health.test.ts`.
+* [x] **Deep-path `ui.exclude` reads are loud now** (closed 2026-07-31): the
+      stripped parent carries a non-enumerable reporting getter at the hidden
+      name — dev throws, prod warns once; spreads/keys/JSON never trip it
+      (`deepExcludeLoud`, pinned in `tests/ui-exclude-client.test.ts`).
+* [ ] **Structural trio** (alpha-only, each behind its own full gate run).
   - [x] **Cell-binding triple** — the fix-one-forget-the-others offender is now
         GATED rather than merged: `tests/cell-binding-parity.test.ts` fails if
         client code reads an `__aio` key the browser stub does not produce, and
@@ -74,11 +162,20 @@ that is the gate working, not a setback.
         `syncConfig`-without-reducer) needed; a physical merge of three surfaces
         with different lifetimes buys little on top and risks a lot. Revisit
         only if the gate starts accumulating exemptions.
-  - [ ] Collapse the `AioConfig` intermediate (~420 LOC, one producer + one
-        consumer).
+  - [x] **`AioConfig` bridge collapsed to a mechanical spread** (2026-07-31):
+        the hand-maintained field-by-field copy — the source of FOUR shipped
+        fail-open drops (`strictOrigin`, `redactActions`, `appDir`,
+        `renderBudget`) — is now `...fc` with only consumed/wrapped keys held
+        back, so a new option is bridged BY DEFAULT. The completeness test is a
+        runtime sentinel gate (a value per documented option must come OUT of
+        buildLegacyConfig), replacing the grep test whose exemption list masked
+        two of the four bugs. `renderBudget` also added to the CellsConfig TYPE
+        (it was validator-legal but untypeable). A full physical merge of
+        AioConfig into CellsConfig remains possible later, but the trap class
+        this item existed for is dead.
   - [ ] Split the 1016-line `server-ws.ts` factory (abuse / backpressure /
         routing).
-- [ ] **B1 — the beta1 release itself.** API snapshot locked ✓, semver +
+* [ ] **B1 — the beta1 release itself.** API snapshot locked ✓, semver +
       deprecation policy ✓, codemod ✓. Remaining: the freeze decision.
 
 ## Remaining before 1.0 — physical (needs the user's machines)

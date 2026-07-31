@@ -7,6 +7,9 @@ One guide per version migration. Find your current version and follow the steps.
 - **[The aio restructure (alpha27+)](restructure.md)** — every restructure
   breaking change with before → after recipes (methods-only cells, instances,
   SQLite-only persistence, `aio/extras`, wire catalog)
+- [alpha40 → alpha41](from-alpha40-to-alpha41.md) — catching up: appDir/
+  renderBudget honored, proxy spread-back works, extras relics + flow residue
+  removed, am identity checks, one-line `run.sh`
 - [alpha39 → alpha40](from-alpha39-to-alpha40.md) — silence is the bug: a
   transactional lost update is now refused (`conflict`, `s.$live`), a hidden
   field read from the client throws in dev, the dev browser is dev-strict, one

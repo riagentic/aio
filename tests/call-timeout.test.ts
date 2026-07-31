@@ -123,3 +123,87 @@ Deno.test("call timeout: effectTimeoutMs from aio.run() reaches the caller's cei
   );
   void srv;
 });
+
+// ── The BROWSER side (alpha40 review): the ack wait must come from the same
+// bridged numbers, not its own constant — a hardcoded 15s used to fire first
+// and blame "server overloaded or disconnected" for a method that was simply
+// still running (< every server ceiling, so the honest server error could
+// never reach a browser caller).
+
+Deno.test("browser ack: the ceiling comes from __aioConfig.callTimeouts", async () => {
+  const { _registerAck, _rejectAllPending, _setAckGraceMs } = await import(
+    "../src/protocol/browser-ack.ts"
+  );
+  const w = globalThis as { __aioConfig?: unknown };
+  const prev = w.__aioConfig;
+  _setAckGraceMs(5);
+  try {
+    // Per-method 1ms — the timer fires with the honest message.
+    w.__aioConfig = { callTimeouts: { default: 0, methods: { "a:slow": 1 } } };
+    const start = _registerAck("cid-slow", { methodKey: "a:slow" });
+    const err = await start.then(() => null, (e: Error) => e);
+    assertStringIncludes(String(err), "never confirmed the call");
+    assertStringIncludes(String(err), "may still be running");
+    assertStringIncludes(String(err), 'perfBudget.methods["a:slow"]');
+
+    // default 0 ⇒ wait indefinitely: no timer, still pending after a beat.
+    const never = _registerAck("cid-forever", { methodKey: "a:other" });
+    let settled = false;
+    never.then(() => (settled = true), () => (settled = true));
+    await new Promise((r) => setTimeout(r, 20));
+    assertEquals(settled, false, "0 = wait indefinitely on the browser too");
+  } finally {
+    _rejectAllPending(new Error("test teardown"));
+    _setAckGraceMs(5_000);
+    w.__aioConfig = prev;
+  }
+});
+
+Deno.test("browser ack: a deferred (queued) call starts its clock at SEND, not at queue time", async () => {
+  const { _registerAck, _armAckTimer, _rejectAllPending, _setAckGraceMs } =
+    await import("../src/protocol/browser-ack.ts");
+  const w = globalThis as { __aioConfig?: unknown };
+  const prev = w.__aioConfig;
+  _setAckGraceMs(5);
+  try {
+    w.__aioConfig = { callTimeouts: { methods: { "a:m": 1 } } };
+    const p = _registerAck("cid-queued", {
+      methodKey: "a:m",
+      deferTimer: true,
+    });
+    let settled = false;
+    p.then(() => (settled = true), () => (settled = true));
+    // "Offline" for longer than the ceiling — must NOT reject while queued.
+    await new Promise((r) => setTimeout(r, 25));
+    assertEquals(settled, false, "no timeout while the call sits in a queue");
+    // The transport writes the frame → the clock starts now.
+    _armAckTimer("cid-queued");
+    const err = await p.then(() => null, (e: Error) => e);
+    assertStringIncludes(String(err), "never confirmed the call");
+  } finally {
+    _rejectAllPending(new Error("test teardown"));
+    _setAckGraceMs(5_000);
+    w.__aioConfig = prev;
+  }
+});
+
+Deno.test("browser ack: the page shell bridges the resolved ceilings", async () => {
+  const { generateHTML } = await import("../src/server/server-html-gen.ts");
+  const html = generateHTML(
+    "t",
+    true,
+    false,
+    "{}",
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    { default: 45_000, methods: { "wallet:refresh": 120_000 } },
+  );
+  assertStringIncludes(html, '"callTimeouts":{"default":45000');
+  assertStringIncludes(html, '"wallet:refresh":120000');
+});

@@ -8,7 +8,7 @@
   One codebase → browser, Electron, and Android.
 </p>
 
-<p align="center"><code>v1.0.0-alpha40</code> · <a href="LICENSE">MIT</a></p>
+<p align="center"><code>v1.0.0-alpha41</code> · <a href="LICENSE">MIT</a></p>
 
 ## Get started — four lines
 
@@ -25,6 +25,16 @@ cd my-app && deno task dev
 # 4 — build a release binary (· deno task electron · deno task android)
 deno task compile
 ```
+
+Or skip all four — **one line runs any aio app straight from source** (installs
+whatever is missing, clones, repairs, production-builds, runs):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/riagentic/aio/main/run.sh | sh -s owner/repo
+# inside an app repo, no argument needed · --dev for the dev server
+```
+
+See [run from source](docs/build/run-from-source.md).
 
 Every target has an explicit dev and compile task:
 

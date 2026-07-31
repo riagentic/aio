@@ -2,7 +2,7 @@
 
 import { log } from "./logger.ts";
 
-const SKIP_SUFFIXES = [":__FlowState", ":__exec", ":__flow"];
+const SKIP_SUFFIXES = [":__exec"];
 const SKIP_CONTAINS = [":__set"];
 
 function shouldSkip(type: string): boolean {

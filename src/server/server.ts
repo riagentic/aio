@@ -209,6 +209,15 @@ export function createServer(config: ServerConfig): ServerHandle {
     onTTCommand: config.onTTCommand,
     getTTBroadcast: config.getTTBroadcast,
     syncHandler: config.syncHandler,
+    // The same values the page shell embeds — the shell covers first paint,
+    // this frame covers shells the build templated before compose time.
+    clientConfig: {
+      ...(config.renderBudget ? { renderBudget: config.renderBudget } : {}),
+      ...(config.syncCells && config.syncCells.length
+        ? { syncCells: config.syncCells }
+        : {}),
+      ...(config.callTimeouts ? { callTimeouts: config.callTimeouts } : {}),
+    },
   });
 
   // ── Broadcaster — throttled state pushes to all WS clients ──
@@ -259,6 +268,7 @@ export function createServer(config: ServerConfig): ServerHandle {
     height: config.height,
     renderBudget: config.renderBudget,
     syncCells: config.syncCells,
+    callTimeouts: config.callTimeouts,
     getGraphResult: () => graphValidation?.getResult() ?? null,
     getSnapshot: config.getSnapshot,
     loadSnapshot: config.loadSnapshot,

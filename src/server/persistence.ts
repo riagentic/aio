@@ -37,6 +37,16 @@ export interface PersistenceConfig {
    *  journal can advance its watermark + compact the persisted prefix. Undefined
    *  (journal off) ⇒ the persist path is byte-identical to before. */
   onPersisted?: (seq: number) => void;
+  /** Stored-but-undeclared cell slices found at boot (space-invaders field
+   *  report: a cell rename silently destroyed the leaderboard). Carried into
+   *  EVERY persisted document verbatim, so user data is never dropped because
+   *  a build stopped declaring its cell. */
+  orphanCells?: Record<string, unknown>;
+  /** Top-level keys present in the persisted snapshot at boot. Seeds the
+   *  multi-mode delete tracking, so a cell whose slice onRestore deliberately
+   *  CONSUMED (migrated and deleted) has its row removed on the first flush
+   *  instead of resurfacing as an orphan on every boot. */
+  storedKeys?: string[];
 }
 
 /** Persistence manager API — debounced state persistence to KV and/or SQLite. */
@@ -66,7 +76,7 @@ export function createPersistenceManager(
 
   let persistTimer: ReturnType<typeof setTimeout> | null = null;
   let shuttingDown = false;
-  let prevPersistedKeys: string[] = [];
+  let prevPersistedKeys: string[] = cfg.storedKeys ?? [];
   let prevDbState: Record<string, unknown> = structuredClone(getState());
 
   function _reportPersistError(e: unknown): void {
@@ -119,7 +129,12 @@ export function createPersistenceManager(
     // slip between; advanced only AFTER the write commits. No-op when off.
     const seq = cfg.getJournalSeq?.() ?? 0;
     try {
-      const dbState = getDBState(kvGetState());
+      const dbState = cfg.orphanCells
+        ? {
+          ...cfg.orphanCells,
+          ...(getDBState(kvGetState()) as Record<string, unknown>),
+        }
+        : getDBState(kvGetState());
       if (persistMode === "multi") {
         // Multi mode: one SQLite row per top-level cell (setMulti is atomic and
         // rewrites only changed cells). No size ceiling — the store is SQLite,

@@ -82,7 +82,7 @@ export function _checkWastedRenders(status: string): string | null {
   if (ratio <= 0.5) return null;
   return `[aio] WASTED RENDERS: _preserveArrayRefs preserved ${stats.preserved}/${stats.total} element refs (${
     Math.round(ratio * 100)
-  }%), but render is ${status}. Your memo() comparators may be checking container references instead of element values. Use useProjection() for derived state and import { memo } from "aio" (not React). See docs/ui.md#derived-state--memo`;
+  }%), but render is ${status}. Your memo() comparators may be checking container references instead of element values. Use useProjection() for derived state and import { memo } from "aio" (not React). See docs/ui/air-signals.md (derived state + memo)`;
 }
 
 // ── Structural sharing for arrays ───────────────────────────────────

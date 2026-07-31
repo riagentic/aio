@@ -1,0 +1,23 @@
+{
+  "note": "D12 perf gate \u2014 maxMedian per metric (units match bench-results.json). Floors carry >=2x headroom over the 2026-07-21 measured medians (shared machine; small/noisy metrics get more) so only real 2x+ regressions trip, never machine noise. Don't ratchet on noise \u2014 cf. coverage-gate policy.",
+  "measured-2026-07-21": {
+    "boot": 2.5,
+    "dispatch-sync": 0.077,
+    "dispatch-async": 0.103,
+    "persist-write": 0.007,
+    "patch-10k": 3.4,
+    "memory-boot-1k": 0.33
+  },
+  "maxMedian": {
+    "boot": 10,
+    "dispatch-sync": 0.2,
+    "dispatch-async": 0.25,
+    "persist-write": 0.05,
+    "patch-10k": 8,
+    "memory-boot-1k": 8,
+    "proxy-array-10k": 75
+  },
+  "measured-2026-07-31": {
+    "proxy-array-10k": 30.2
+  }
+}

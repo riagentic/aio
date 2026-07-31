@@ -18,7 +18,7 @@ export type PerfMetric = {
   breakdown?: ReduceBreakdown; // populated when perfCheck is on
 };
 
-/** Single history entry — full state snapshot per action */
+/** Single history entry — an immutable state reference per action */
 export type HistoryEntry<S, A> = {
   id: number;
   action: A;
@@ -29,7 +29,6 @@ export type HistoryEntry<S, A> = {
     code: string;
     message: string;
     cellName?: string;
-    flowStep?: number;
   };
 };
 
@@ -62,25 +61,19 @@ export type TTCommand =
   | { cmd: "pause" }
   | { cmd: "resume" };
 
-const MAX_ENTRIES = 200;
-const MAX_STATE_BYTES = 100_000; // Skip clone above 100KB to protect dev-mode memory
-// Size estimation is O(state) — sampling it every action would serialize the
-// entire state on every dispatch in dev. Recompute at most every Nth record so
-// the hot path stays cheap while still catching a state that grew past the cap.
-const SIZE_SAMPLE_EVERY = 20;
-let _sizeSampleCounter = 0;
-let _lastEstimatedBytes = 0;
-// The large-state warning is advisory and its cause persists across every
-// subsequent action — logging it each time is pure noise. Warn ONCE, and only
-// again if the estimate crosses back over the cap after dropping below it.
-let _warnedLargeState = false;
+// Committed state is IMMUTABLE (Immer produces a fresh frozen tree per
+// commit), so an entry stores the state REFERENCE: a free snapshot with
+// structural sharing across entries — memory grows with the DELTAS between
+// actions plus one full tree, not entries × state. This replaced a
+// structuredClone per dispatch that a 60 fps field report measured at
+// ~1 MB/s (space-invaders), plus a JSON.stringify size-sampling guard the
+// clone made necessary. With entries this cheap the window is deep: history
+// is a dev inspector with a BOUNDED window, not a replay mechanism — apps
+// that need replay should record inputs (see docs/debugging/time-travel.md).
+const MAX_ENTRIES = 2_000;
 
 /** Creates empty TT state */
 export function createTT<S, A>(): TTState<S, A> {
-  // Fresh session — re-arm the once-per-session large-state warning.
-  _warnedLargeState = false;
-  _sizeSampleCounter = 0;
-  _lastEstimatedBytes = 0;
   return { entries: [], index: -1, paused: false, nextId: 0 };
 }
 
@@ -94,56 +87,14 @@ export function record<S, A>(
   // Truncate forward entries (standard undo/redo: branch, not tree)
   const entries = tt.entries.slice(0, tt.index + 1);
 
-  // Skip expensive clone for very large state to protect dev-mode memory.
-  // Size estimation serializes the whole state, so sample it at most every
-  // Nth action — between samples, reuse the last estimate. The cap is a
-  // memory guard, not a hard contract, so a slightly stale estimate is fine.
-  let clonedState: S;
-  try {
-    let estimated = _lastEstimatedBytes;
-    if (++_sizeSampleCounter >= SIZE_SAMPLE_EVERY) {
-      _sizeSampleCounter = 0;
-      estimated =
-        _lastEstimatedBytes =
-          JSON.stringify(state as Record<string, unknown>).length;
-    }
-    if (estimated > MAX_STATE_BYTES) {
-      if (!_warnedLargeState) {
-        _warnedLargeState = true;
-        console.warn(
-          `[aio:tt] state is ${
-            (estimated / 1024).toFixed(1)
-          }KB — time-travel snapshots are skipped above ${
-            (MAX_STATE_BYTES / 1024).toFixed(0)
-          }KB to protect dev-mode memory (undo history is limited while state ` +
-            `stays this large). This is logged once. To restore full ` +
-            `time-travel, shrink synced state: persistMode:'multi' or ` +
-            `cell-level persist/ui filters.`,
-        );
-      }
-      clonedState = state;
-    } else {
-      _warnedLargeState = false; // re-arm — state dropped back under the cap
-      clonedState = structuredClone(state);
-    }
-  } catch {
-    // Degraded fallback: JSON-round-trip so we never store the live mutable
-    // reference. If JSON also fails (circular ref), warn and store state as
-    // last resort — undo history may share the reference, but we've tried.
-    try {
-      clonedState = JSON.parse(JSON.stringify(state)) as S;
-    } catch {
-      console.warn(
-        "[aio:tt] state is not cloneable — undo history may share references with live state",
-      );
-      clonedState = state;
-    }
-  }
-
+  // The reference IS the snapshot — committed state is a fresh immutable tree
+  // per action (Immer; frozen in dev, where TT runs). Zero copies, zero
+  // serialization on the dispatch path; retention is bounded by MAX_ENTRIES
+  // and costs only the deltas thanks to structural sharing.
   const entry: HistoryEntry<S, A> = {
     id: tt.nextId,
     action,
-    state: clonedState,
+    state,
     ts: Date.now(),
     perf,
   };
@@ -167,7 +118,6 @@ export function markError<S, A>(
     code: string;
     message: string;
     cellName?: string;
-    flowStep?: number;
   },
 ): void {
   const entry = tt.entries[tt.index];

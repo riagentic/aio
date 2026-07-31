@@ -254,7 +254,7 @@ async function run(a?: any, b?: any): Promise<AioApp<any, any>> {
         "no cells to run",
         "define at least one cell() (importing its module is enough), or pass " +
           "cells: [...] to aio.run()",
-        "docs/quickstart.md",
+        "docs/basics/quickstart.md",
       );
     }
     const cellEntries = filterCellsByIsolate(allCells, isolate);
@@ -729,6 +729,13 @@ async function _run<S, A, E>(
   // state anyway, and paid a `tt-state` broadcast on every dispatch for it.
   // The option now decides, and its dev default is still `true`.
   const ttEnabled = timeTravelEnabled(prod, diagResolvedOpts);
+  // High-frequency app actions (a 60 fps `game:tick`) flood the bounded TT
+  // window until it holds seconds instead of a session — `skipActions` keeps
+  // them out of history (space-invaders field report).
+  const ttSkipActions =
+    typeof diagResolvedOpts === "object" && diagResolvedOpts.skipActions?.length
+      ? new Set(diagResolvedOpts.skipActions)
+      : undefined;
   let tt: TTState<S, { type: string }> | null = null;
   if (ttEnabled) {
     tt = createTT<S, { type: string }>();
@@ -836,8 +843,20 @@ async function _run<S, A, E>(
     const ci = t.indexOf(":");
     const cell = ci >= 0 ? t.slice(0, ci) : "";
     const method = ci >= 0 ? t.slice(ci + 1) : t;
+    if (_syncCellSet.has(cell)) {
+      // A sync op is already durable in the op-log. Anything ELSE that
+      // committed to a sync cell — an effect, cron, serverFn, a plain action,
+      // an async method's `__set` batch — is durable NOWHERE (sync cells are
+      // excluded from KV), so fold current state into the cell's sync
+      // snapshot. Without this, a restart silently rewound every server-origin
+      // write since the last compaction.
+      if (method.startsWith("__") && !method.startsWith("__set")) return;
+      if (!(action as { _syncOp?: boolean })._syncOp) {
+        syncHandler?.noteServerWrite(cell);
+      }
+      return;
+    }
     if (method.startsWith("__")) return; // framework-internal (init/destroy)
-    if (_syncCellSet.has(cell)) return; // sync cell → op-log handles it
     const payload = (action as { payload?: unknown }).payload;
     const ts = Date.now();
     const seq = journal
@@ -888,6 +907,7 @@ async function _run<S, A, E>(
     freezeState: config.freezeState ?? !prod,
     effectTimeout: config.effectTimeoutMs,
     reduceBreakdown: config._reduceBreakdown,
+    ttSkipActions,
     afterAction: afterActionHook,
     log,
     debug: VERBOSE,
@@ -1014,7 +1034,12 @@ async function _run<S, A, E>(
   const { shutdown: _shutdownRuntime } = createShutdownOrchestrator({
     sessionStore,
     userStore,
-    flushPersist: persistence.flushPersist,
+    flushPersist: async () => {
+      await persistence.flushPersist();
+      // Sync cells' server-origin writes debounce into their snapshot — a
+      // clean exit must not leave the last write inside that window.
+      await syncHandler?.flushServerWrites();
+    },
     setShuttingDown: persistence.setShuttingDown,
     diagHooks,
     getVitalsCheckTimer: () => _vitalsCheckTimer,

@@ -105,7 +105,6 @@ export async function build(cfg?: BuildConfig): Promise<void> {
 export {
   buildShipManifest,
   generateSigningKey,
-  sha256Hex,
   shipApp,
   type ShipManifest,
   verifyShipManifest,
