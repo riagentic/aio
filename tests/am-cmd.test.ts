@@ -741,3 +741,73 @@ Deno.test("cmdFix: sibling vendoring is 'custom', not a dep/aio symlink", async 
     await Deno.remove(app, { recursive: true });
   }
 });
+
+Deno.test("cmdFix: adds missing standard tasks, never overwrites existing ones", async () => {
+  // Hand-rolled apps (or ones predating the scaffold) miss the task set the
+  // docs assume (`deno task compile:electron`, the dev:*/compile:* matrix).
+  // am fix appends the missing ones from the SAME producer am create uses —
+  // and an existing task is user customization: it must survive untouched.
+  const orig = Deno.cwd();
+  const logs: string[] = [];
+  const realLog = console.log;
+  console.log = (...a: unknown[]) => logs.push(a.map(String).join(" "));
+  const dir = await Deno.makeTempDir();
+  try {
+    await Deno.writeTextFile(
+      joinPath(dir, "deno.json"),
+      JSON.stringify({
+        imports: { aio: "jsr:@riagentic/aio@1.0.0" },
+        target: "electron",
+        tasks: { dev: "deno run -A my-custom-entry.ts", seed: "echo seed" },
+        unstable: ["kv"],
+      }),
+    );
+    Deno.chdir(dir);
+    await cmdFix([], {});
+    const cfg = JSON.parse(
+      await Deno.readTextFile(joinPath(dir, "deno.json")),
+    ) as { tasks: Record<string, string> };
+    // Missing standard tasks were added…
+    assert(cfg.tasks["compile:electron"], "compile:electron added");
+    assert(cfg.tasks["compile"], "default compile added");
+    assert(cfg.tasks["dev:browser"], "dev matrix added");
+    // …existing ones were NOT touched.
+    assertEquals(cfg.tasks.dev, "deno run -A my-custom-entry.ts");
+    assertEquals(cfg.tasks.seed, "echo seed");
+  } finally {
+    console.log = realLog;
+    Deno.chdir(orig);
+    await Deno.remove(dir, { recursive: true }).catch(() => {});
+  }
+});
+
+Deno.test("cmdFix: --dry-run reports missing tasks without writing", async () => {
+  const orig = Deno.cwd();
+  const logs: string[] = [];
+  const realLog = console.log;
+  console.log = (...a: unknown[]) => logs.push(a.map(String).join(" "));
+  const dir = await Deno.makeTempDir();
+  const original = JSON.stringify({
+    imports: { aio: "jsr:@riagentic/aio@1.0.0" },
+    tasks: {},
+    unstable: ["kv"],
+  });
+  try {
+    await Deno.writeTextFile(joinPath(dir, "deno.json"), original);
+    Deno.chdir(dir);
+    await cmdFix(["--dry-run"], {});
+    assertEquals(
+      await Deno.readTextFile(joinPath(dir, "deno.json")),
+      original,
+      "dry run writes nothing",
+    );
+    assert(
+      logs.some((l) => l.includes("standard deno tasks")),
+      logs.join("\n"),
+    );
+  } finally {
+    console.log = realLog;
+    Deno.chdir(orig);
+    await Deno.remove(dir, { recursive: true }).catch(() => {});
+  }
+});

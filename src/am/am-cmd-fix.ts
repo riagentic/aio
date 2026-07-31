@@ -3,6 +3,7 @@
 // (the framework symlink, .env, electron runtime, submodules) plus a few config
 // safety nets. `am doctor` diagnoses config; `am fix` repairs. `--dry-run`
 // (alias `--check`) reports what it WOULD do without changing anything.
+import { standardTasks, type Target, TARGETS } from "./am-cmd-create.ts";
 import { join } from "@std/path";
 import { parse as parseJsonc } from "@std/jsonc";
 import type { GlobalFlags } from "./am-types.ts";
@@ -317,6 +318,57 @@ export async function cmdFix(
       cfg.nodeModulesDir !== "auto" && cfg.nodeModulesDir !== true,
       'nodeModulesDir "auto"',
       'set nodeModulesDir to "auto" — electron needs node_modules on disk',
+    );
+  }
+
+  // Standard deno tasks — ADD-ONLY. Hand-rolled apps and apps predating the
+  // scaffold miss tasks the docs assume (`deno task compile:electron`, the
+  // dev:*/compile:* matrix). Missing tasks are appended with mode-correct
+  // values from the ONE producer (`standardTasks`, shared with `am create`);
+  // an existing task is NEVER overwritten — user customization wins. Skipped
+  // for custom framework vendoring (unknowable paths) and for deno.jsonc
+  // (a rewrite would destroy comments).
+  if (jsonPath.endsWith(".jsonc")) {
+    add(
+      "standard deno tasks",
+      "advise",
+      "deno.jsonc — not auto-edited (comments would be lost); compare with `am create` output",
+    );
+  } else if (aioMode === "dep" || aioMode === "registry") {
+    const expected = standardTasks(
+      aioMode === "dep",
+      (TARGETS as readonly string[]).includes(cfg.target as string)
+        ? cfg.target as Target
+        : undefined,
+    );
+    const missingTasks = Object.keys(expected).filter((k) => !(k in tasks));
+    await repair(
+      "standard deno tasks",
+      missingTasks.length > 0,
+      async () => {
+        const raw = JSON.parse(await Deno.readTextFile(jsonPath)) as Record<
+          string,
+          unknown
+        >;
+        const cur = (raw.tasks ?? {}) as Record<string, string>;
+        for (const k of missingTasks) cur[k] = expected[k]!;
+        raw.tasks = cur;
+        await Deno.writeTextFile(
+          jsonPath,
+          JSON.stringify(raw, null, 2) + "\n",
+        );
+      },
+      missingTasks.length
+        ? `added ${missingTasks.length} missing task(s): ${
+          missingTasks.slice(0, 5).join(", ")
+        }${missingTasks.length > 5 ? ", …" : ""}`
+        : "",
+    );
+  } else {
+    add(
+      "standard deno tasks",
+      "advise",
+      "custom framework path — task values are unknowable; compare with `am create` output",
     );
   }
 
