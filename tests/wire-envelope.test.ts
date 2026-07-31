@@ -122,11 +122,13 @@ Deno.test("envelope: v1 peers get a readable refusal (the one shim)", () => {
   assertEquals(v1PeerReason("garbage"), null);
 });
 
-Deno.test("envelope: UDS serves sync + serverFns, rejects WS-only diagnostics", () => {
+Deno.test("envelope: UDS serves sync + serverFns + time travel, rejects vitals", () => {
   assertEquals(unsupportedOnUds("vitals-ping"), true);
   assertEquals(unsupportedOnUds("vitals-pong"), true);
-  assertEquals(unsupportedOnUds("tt-cmd"), true);
-  assertEquals(unsupportedOnUds("tt-state"), true);
+  // Time travel flows over UDS now — the Electron panel needs tt-state in and
+  // tt-cmd out (tests/tt-uds.test.ts covers the real socket round-trip).
+  assertEquals(unsupportedOnUds("tt-cmd"), false);
+  assertEquals(unsupportedOnUds("tt-state"), false);
   assertEquals(unsupportedOnUds("op"), false);
   assertEquals(unsupportedOnUds("sync-req"), false);
   assertEquals(unsupportedOnUds("sfn"), false);

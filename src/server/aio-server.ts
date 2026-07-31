@@ -323,6 +323,11 @@ export async function setupTransport<S, A>(
     return result;
   };
 
+  // tt-state over UDS: the broadcaster gets a late-bound raw-broadcast hook,
+  // set once the UDS listener exists (syncBroadcastRef pattern). Without it
+  // the Electron window's time-travel panel never received a frame.
+  const udsBroadcastRef: { fn: ((raw: string) => void) | null } = { fn: null };
+
   const server: ServerHandle = skipHttp
     ? {
       broadcast: () => {},
@@ -365,6 +370,7 @@ export async function setupTransport<S, A>(
       renderBudget: config.renderBudget,
       syncCells: config._syncCellIds,
       callTimeouts: _getCallTimeouts(),
+      udsBroadcastRef,
       fullStateThreshold: config.fullStateThreshold,
       routes: config.routes,
       maxConnections: config.maxConnections,
@@ -528,8 +534,13 @@ export async function setupTransport<S, A>(
           : {}),
         callTimeouts: _getCallTimeouts(),
       },
+      tt
+        ? { onCommand: tt.handleTTCommand, getBroadcast: tt.getTTBroadcast }
+        : undefined,
     );
     udsRef.current = uds;
+    const u = uds;
+    udsBroadcastRef.fn = (raw) => u.broadcast(raw);
     log.info(`transport: UDS at ${socketPath}`);
   }
 

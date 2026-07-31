@@ -34,6 +34,11 @@ export interface BroadcastDeps {
   fullStateThreshold?: number;
   vitalsSystem?: VitalsSystem;
   getTTBroadcast?: () => unknown;
+  /** Late-bound UDS raw-broadcast (electron transport) — tt-state frames used
+   *  to reach WS clients only, so the Electron window's time-travel panel
+   *  (Ctrl+.) never received a frame and never even bound its shortcut. Set by
+   *  aio-server after the UDS listener exists (syncBroadcastRef pattern). */
+  udsBroadcastRef?: { fn: ((raw: string) => void) | null };
   /** Cost meter (`am cost`) — records the EXACT bytes handed to each socket and,
    *  once per round, which cell/key those bytes came from. Attribution lives
    *  here because this is the only place that knows both. */
@@ -289,7 +294,10 @@ export function createBroadcaster(deps: BroadcastDeps): Broadcaster {
    *  so every frame but the last was waste. One flush per window instead. */
   let ttPending = false;
   function broadcastTT(): void {
-    if (!getTTBroadcast || connections.size === 0) return;
+    // An electron-only app has ZERO WS connections — the UDS path must count,
+    // or its panel silently starves.
+    if (!getTTBroadcast) return;
+    if (connections.size === 0 && !deps.udsBroadcastRef?.fn) return;
     if (ttPending) return;
     ttPending = true;
     ttCoalescer.add();
@@ -297,7 +305,8 @@ export function createBroadcaster(deps: BroadcastDeps): Broadcaster {
 
   function flushTT(): void {
     ttPending = false;
-    if (!getTTBroadcast || connections.size === 0) return;
+    if (!getTTBroadcast) return;
+    if (connections.size === 0 && !deps.udsBroadcastRef?.fn) return;
     try {
       const ttData = enc("tt-state", getTTBroadcast());
       for (const [ws] of connections) {
@@ -307,6 +316,9 @@ export function createBroadcaster(deps: BroadcastDeps): Broadcaster {
           } catch { /* client disconnecting */ }
         }
       }
+      try {
+        deps.udsBroadcastRef?.fn?.(ttData);
+      } catch { /* uds clients disconnecting */ }
     } catch (e) {
       debug(`broadcastTT error: ${e}`);
     }
