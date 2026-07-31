@@ -28,6 +28,7 @@
 - [Composition — Cross-Cell Communication](state/composition.md) — Cells don't share state — they communicate through three interaction patterns.
 - [Lifecycle — Init, Destroy, Runtime](state/lifecycle.md) — How cells boot, shut down, and how to intercept actions globally.
 - [Methods — Sync, Async, and Selectors](state/methods.md) — The one way to build aio cells.
+- [Real-time and high-frequency state](state/real-time.md) — The one question that decides everything: at what cadence does this state
 - [Scheduling](state/scheduling.md) — aio has a built-in scheduler for timers, intervals, daily triggers, and cron
 - [The bridge — what crosses, what doesn't, what freezes](state/the-bridge.md) — A shared cell's methods run on the server; the browser holds a live,
 - [Spec: Transactional cell methods (risoto #2)](state/transactional-methods.md) — Status: SHIPPED — opt-in transaction: true; this page is the contract, not
@@ -88,6 +89,7 @@
 - [Benchmarks — the D12 perf gate](build/benchmarks.md) — Performance is CI infrastructure (perfect-aio D12): boot time, dispatch
 - [Dev Mode](build/dev-mode.md) — aio.run() reads Deno.args automatically — no parsing code needed in your
 - [Import Rules: Server vs Browser Bundle](build/imports.md) — aio apps have two separate bundles running simultaneously — code must
+- [Run any aio app from source — one line](build/run-from-source.md) — Point one command at an aio app and it takes care of everything between a source
 - [Runtime differences](build/runtime-differences.md) — The same cell code runs in three places.
 - [Scaling](build/scaling.md) — aio runs as a single Deno process with SQLite and WebSocket broadcast.
 - [Compile Targets](build/targets.md) — Build targets follow compile:<shell>:<topology> — two axes: shell (what
@@ -99,6 +101,7 @@
 - [Errors](debugging/errors.md) — AioError format, error codes, correlation IDs, log files, and the onError hook.
 - [Performance](debugging/performance.md) — Performance budgets, slow reducer/effect diagnosis, and budget configuration.
 - [Production](debugging/production.md) — Memory monitoring, cell health, common error patterns, and production failure
+- [Time travel](debugging/time-travel.md) — A dev inspector with a bounded window — not a replay mechanism, not
 - [Troubleshooting](debugging/troubleshooting.md) — Every failure class aio has actually hit in the field, and the guard that now
 - [Vitals](debugging/vitals.md) — Client diagnostic system for detecting and diagnosing UI freezes.
 
@@ -136,6 +139,7 @@
 - [Upgrade: 1.0.0-alpha38 → 1.0.0-alpha39](upgrade/from-alpha38-to-alpha39.md) — ever shipped in a release, and everything else is additive.
 - [Upgrade: 1.0.0-alpha39 → 1.0.0-alpha40](upgrade/from-alpha39-to-alpha40.md) — situations loud.
 - [Upgrade from v1.0.0-alpha4 to v1.0.0-alpha5](upgrade/from-alpha4-to-alpha5.md) — None.
+- [Upgrade: alpha40 → alpha41](upgrade/from-alpha40-to-alpha41.md) — Most apps upgrade with no changes.
 - [Upgrade from v1.0.0-alpha5 to v1.0.0-alpha6](upgrade/from-alpha5-to-alpha6.md) — None.
 - [Upgrade from v1.0.0-alpha6 to v1.0.0-alpha7](upgrade/from-alpha6-to-alpha7.md) — mod.ts no longer re-exports renderer primitives.
 - [Upgrade from v1.0.0-alpha7 to v1.0.0-alpha8](upgrade/from-alpha7-to-alpha8.md) — None.
@@ -161,3 +165,13 @@
 - [Local-first execution (perfect-aio D3) — design](specs/2026-07-22-local-first.md) — Status: design + prototype phase (the D3 gate: no mass migration before this
 - [Cell workers (`worker: true`) — design](specs/2026-07-25-cell-workers.md) — Status: design (nothing built).
 - [One data directory, and updating a deployed app — design](specs/2026-07-26-data-dir-and-updates.md) — Status: Part 1 SHIPPED in 1.0.0-alpha38 (see
+
+## release-notes
+
+- [aio v1.0.0-alpha19 — zero-config DX + no-await UI tests](release-notes/RELEASE_NOTES-v1.0.0-alpha19.md) — The theme: delete the boilerplate.
+- [v1.0.0-alpha24 — onboarding that feels like magic](release-notes/RELEASE_NOTES-v1.0.0-alpha24.md) — Install once, and am does the rest.
+- [v1.0.0-alpha25 — source-first onboarding + feature freeze](release-notes/RELEASE_NOTES-v1.0.0-alpha25.md) — Install once, create, run, ship — four lines, no JSR.
+- [v1.0.0-alpha26 — sync cursor hardening + field-report P1 closure](release-notes/RELEASE_NOTES-v1.0.0-alpha26.md) — Fix/test/field-report release (per the alpha25 feature freeze — the one
+- [v1.0.0-alpha27 — the restructure begins: methods is the ONE style](release-notes/RELEASE_NOTES-v1.0.0-alpha27.md) — The biggest breaking change in aio's history, and the biggest simplification:
+- [aio 1.0.0-alpha28 — the restructure completes: B3–B5](release-notes/RELEASE_NOTES-v1.0.0-alpha28.md) — alpha27 made methods the ONE style (B1) and un-globaled the runtime (B2).
+- [aio 1.0.0-alpha29 — wire protocol v2: ONE envelope](release-notes/RELEASE_NOTES-v1.0.0-alpha29.md) — alpha28 typed the v1 wire (B4b phase 1).

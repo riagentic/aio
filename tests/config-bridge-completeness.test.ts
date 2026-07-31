@@ -1,95 +1,130 @@
 // Every option in `aio.run({ … })` must actually reach the runtime.
 //
-// This bug class has landed twice, both times silently, both times in a
-// security-relevant option:
+// This bug class landed FOUR times, always silently:
 //
-//   • `strictOrigin` was typed, documented and validated — and dropped at the
-//     CellsConfig → AioConfig bridge, so the WS origin check never saw it.
-//   • `redactActions` shipped with its own tests and its own docs, and the
-//     bridge never copied it either: `journal: true, redactActions: […]` wrote
-//     the passphrase to disk anyway. The unit tests passed, because they tested
-//     `createJournal` directly rather than a booted app.
+//   • `strictOrigin` — typed, documented, validated, dropped at the bridge:
+//     the WS origin check never saw it.
+//   • `redactActions` — shipped with its own tests and docs; `journal: true,
+//     redactActions: […]` wrote the passphrase to disk anyway.
+//   • `appDir` — the bridge read it for the LOGGER only, so logs went to the
+//     configured directory and ALL DATA to the default one. An exemption in
+//     this very test ("some consumer reads it directly") masked it.
+//   • `renderBudget` — same exemption trick: the consumer named in the
+//     exemption read the BRIDGED config, which never carried it.
 //
-// The shape is always the same — a key is valid, typed and read by SOME
-// consumer, but nothing carries it from the config the developer wrote to the
-// object that consumer reads. It fails open and it fails quietly, which is the
-// worst pair. So: a key is either assigned in the bridge, or it is listed below
-// with the reason it doesn't need to be. A new key gets neither for free.
+// The grep-based version of this test could be satisfied by a lie. The bridge
+// is now a mechanical spread (fail-closed: an unknown option rides through by
+// default), and this test PROVES it at runtime: a sentinel value per
+// documented option goes in, and must come out of buildLegacyConfig — no
+// source-text matching, no exemption escape hatch for passthrough keys.
 import { assert, assertEquals } from "@std/assert";
 import { VALID_FEATURES_CONFIG_KEYS } from "../src/server/config.ts";
+import { buildLegacyConfig } from "../src/server/aio-cells-bridge.ts";
+import { composeCellsWiring } from "../src/server/aio-composition.ts";
+import { cell } from "../src/state/cell-create.ts";
+import { _resetAioRuntime } from "../src/state/runtime-reset.ts";
 
-const BRIDGE = "src/server/aio-cells-bridge.ts";
-
-/** Keys the bridge deliberately does not copy, and who consumes them instead.
- *  Each entry is checked: an exemption that names nothing real is a key that
- *  has quietly died, which is the same failure wearing a different hat. */
-const CONSUMED_ELSEWHERE: Record<string, string> = {
-  cells: "composeCellsWiring — the cells themselves, not a passthrough option",
-  cellDefaults: "aio-composition.ts, applied per cell at composition time",
-  localFirst: "aio-composition.ts — applyLocalFirst, per cell at compose time",
-  appDir: "aio-cells-bridge.ts + aio-boot.ts — resolved into the app directory",
-  renderBudget: "aio-server.ts — a client-side budget, sent to the browser",
-  memory: "aio-cells-bridge.ts — wired into the memory guard directly",
-  circuitBreaker: "aio-composition.ts — per-cell breaker config",
-  strictCells: "aio.ts — read from the cells config at boot",
-  fatalOnStart: "aio.ts — decides whether an onStart failure is fatal",
-  dispatchStorm: "aio-cells-bridge.ts — builds the storm tracker in-place",
-  logging: "aio-cells-bridge.ts — builds the action logger in-place",
-  diagnostics: "mapped as `_diagnostics` (renamed, not dropped)",
-  onCheckpointRestore: "mapped as `_onCheckpointRestore` (renamed)",
+/** Keys the bridge CONSUMES (they become something else and must NOT ride
+ *  through raw) or REWRITES under a new name. Each is asserted below — an
+ *  entry that stops being true fails the test, so this list cannot rot. */
+const CONSUMED: Record<string, "dropped" | "renamed" | "wrapped"> = {
+  cells: "dropped", // composed into reduce/execute
+  cellDefaults: "dropped", // applied per cell at composition time
+  localFirst: "dropped", // applyLocalFirst at composition time
+  isolate: "dropped", // composition-time worker isolation switch
+  logging: "dropped", // became the logger instance
+  dispatchStorm: "dropped", // became the storm detector inside beforeReduce
+  diagnostics: "renamed", // → _diagnostics
+  onCheckpointRestore: "renamed", // → _onCheckpointRestore
+  beforeReduce: "wrapped", // storm guard wraps the user hook
+  onAction: "wrapped", // logger.observe wraps the user hook
+  onStart: "wrapped", // cells runner fires the user hook later
+  onStop: "wrapped", // logger flush + destroyAll wrap the user hook
+  onRestore: "wrapped", // migration pipeline wraps the user hook
 };
 
-const src = await Deno.readTextFile(new URL(`../${BRIDGE}`, import.meta.url));
-const allSrc = await (async () => {
-  const parts: string[] = [];
-  for await (
-    const e of Deno.readDir(new URL("../src/server", import.meta.url))
-  ) {
-    if (e.isFile && e.name.endsWith(".ts") && e.name !== "config.ts") {
-      parts.push(
-        await Deno.readTextFile(
-          new URL(`../src/server/${e.name}`, import.meta.url),
-        ),
-      );
-    }
-  }
-  return parts.join("\n");
-})();
+Deno.test("config bridge: every documented option comes OUT of the bridge", () => {
+  _resetAioRuntime();
+  const c = cell("bridge-probe", { state: { n: 0 }, methods: {} });
+  const { composed } = composeCellsWiring({
+    // deno-lint-ignore no-explicit-any
+    cellEntries: [c] as any,
+  });
 
-const assignedInBridge = (key: string) =>
-  new RegExp(`^\\s*${key}:`, "m").test(src);
-
-Deno.test("config bridge: every CellsConfig key reaches the runtime", () => {
-  const orphans: string[] = [];
+  // One sentinel per documented option — unique, so a value that leaks into
+  // the wrong key is caught too.
+  const fc: Record<string, unknown> = { appId: "bridge-probe-app" };
+  const sentinels = new Map<string, string>();
   for (const key of VALID_FEATURES_CONFIG_KEYS) {
-    if (key.startsWith("_")) continue; // internal, set by the framework itself
-    if (assignedInBridge(key)) continue;
-    if (key in CONSUMED_ELSEWHERE) continue;
-    orphans.push(key);
+    if (key.startsWith("_")) continue;
+    const v = `sentinel:${key}`;
+    sentinels.set(key, v);
+    fc[key] = v;
+  }
+
+  const out = buildLegacyConfig({
+    // deno-lint-ignore no-explicit-any
+    fc: fc as any,
+    composed,
+    beforeReduce: undefined,
+    // The wiring layer upstream folds fc.onRestore into this composed hook —
+    // model that: the bridge must forward IT, not the raw fc value.
+    onRestore: (s) => s,
+    autoGetUIState: undefined,
+    autoGetDBState: (s) => s,
+    cellPatchStrategies: new Map(),
+    cellFilterFieldsMap: new Map(),
+    cellReportOpts: {},
+    logger: null,
+    appRef: { current: null },
+  }) as unknown as Record<string, unknown>;
+
+  const missing: string[] = [];
+  const mangled: string[] = [];
+  for (const [key, sentinel] of sentinels) {
+    const kind = CONSUMED[key];
+    if (kind === "dropped") {
+      if (out[key] === sentinel) mangled.push(`${key} (should be consumed)`);
+      continue;
+    }
+    if (kind === "renamed") {
+      if (out[`_${key}`] !== sentinel && out[key] === sentinel) {
+        mangled.push(`${key} (rename regressed to raw passthrough)`);
+      }
+      continue;
+    }
+    if (kind === "wrapped") {
+      if (typeof out[key] !== "function" && out[key] !== sentinel) {
+        missing.push(`${key} (wrapper gone AND value gone)`);
+      }
+      continue;
+    }
+    if (out[key] !== sentinel) missing.push(key);
   }
   assertEquals(
-    orphans,
+    missing,
     [],
-    `these options are accepted from the developer and then go nowhere — add ` +
-      `\`${orphans[0] ?? "key"}: fc.${
-        orphans[0] ?? "key"
-      },\` to ${BRIDGE}, or ` +
-      `record in CONSUMED_ELSEWHERE which consumer reads it directly`,
+    "these options are accepted from the developer and then go NOWHERE — " +
+      "the mechanical spread in buildLegacyConfig should carry them; if a key " +
+      "is genuinely consumed, add it to CONSUMED with how",
   );
+  assertEquals(mangled, [], "consumed/renamed keys behaving unexpectedly");
+
+  // Renames actually land under their new names.
+  assertEquals(out._diagnostics, "sentinel:diagnostics");
+  assertEquals(out._onCheckpointRestore, "sentinel:onCheckpointRestore");
+  // Wrapped hooks exist as functions (the wrapper is the point).
+  assert(typeof out.beforeReduce === "function");
+  assert(typeof out.onStart === "function");
+  assert(typeof out.onStop === "function");
+  _resetAioRuntime();
 });
 
-Deno.test("config bridge: no exemption outlives the key it excuses", () => {
-  for (const key of Object.keys(CONSUMED_ELSEWHERE)) {
+Deno.test("config bridge: no CONSUMED entry outlives the key it excuses", () => {
+  for (const key of Object.keys(CONSUMED)) {
     assert(
       VALID_FEATURES_CONFIG_KEYS.has(key),
-      `"${key}" is exempted but is no longer a config key — drop the exemption`,
-    );
-    // …and the consumer it names must still read it. An exemption whose reader
-    // has been refactored away leaves a documented, believed, dead option.
-    assert(
-      new RegExp(`\\.${key}\\b`).test(allSrc),
-      `"${key}" is exempted as "${CONSUMED_ELSEWHERE[key]}" but nothing in ` +
-        `src/server reads it any more — the option is dead`,
+      `"${key}" is listed as consumed but is no longer a config key — drop it`,
     );
   }
 });

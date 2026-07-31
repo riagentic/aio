@@ -102,6 +102,7 @@ function extractCells(files: SourceFile[]): CellInfo[] {
         hasSelectors: info.hasSelectors,
         isWorker: info.isWorker,
         stateKeys: info.stateKeys,
+        stateIsLiteral: info.stateIsLiteral,
         methodNames: info.methodNames,
         actionNames: info.actionNames,
       });
@@ -120,6 +121,7 @@ function parseCellConfig(source: string): {
   hasSelectors: boolean;
   isWorker: boolean;
   stateKeys: string[];
+  stateIsLiteral: boolean;
   methodNames: string[];
   actionNames: string[];
 } {
@@ -136,6 +138,7 @@ function parseCellConfig(source: string): {
       hasSelectors: false,
       isWorker: false,
       stateKeys: [],
+      stateIsLiteral: false,
       methodNames: [],
       actionNames: [],
     };
@@ -166,6 +169,7 @@ function parseCellConfig(source: string): {
       hasSelectors: false,
       isWorker: false,
       stateKeys: [],
+      stateIsLiteral: false,
       methodNames: [],
       actionNames: [],
     };
@@ -178,6 +182,10 @@ function parseCellConfig(source: string): {
     .replace(/\/\*[\s\S]*?\*\//g, "")
     .replace(/\/\/.*$/gm, "");
   const hasState = /\bstate\s*:/.test(block);
+  // `state: initialGameState()` is a call, not a literal — keys are unknowable
+  // statically, and warning "empty state {}" about it is a false positive
+  // (space-invaders field report).
+  const stateIsLiteral = /\bstate\s*:\s*\{/.test(block);
   const hasMethods = /\bmethods\s*:/.test(block);
   const hasActions = /\bactions\s*:/.test(block);
   const hasGenerators = /\bgenerators\s*:/.test(block);
@@ -258,6 +266,7 @@ function parseCellConfig(source: string): {
 
   return {
     hasState,
+    stateIsLiteral,
     hasMethods,
     hasActions,
     hasGenerators,

@@ -184,6 +184,12 @@ export function refreshCSS(): void {
  * Returns true if the frame was handled (caller should return early).
  * The caller decodes — one `dec()` per line, at the transport's front door.
  */
+/** Late-bound sink for the server's "cfg" frame — browser-protocol registers
+ *  the applier (it owns sync adoption), this module stays import-cycle-free. */
+export const _cfgSink: {
+  apply: ((cfg: Record<string, unknown>) => void) | null;
+} = { apply: null };
+
 export function handleControlFrame(
   f: Frame,
   bootId: { current: string | null },
@@ -192,6 +198,15 @@ export function handleControlFrame(
     case "reload":
       location.reload();
       return true;
+    case "cfg": {
+      // Runtime config handshake: a shell templated at BUILD time (electron
+      // UDS, android assets) cannot embed compose-time decisions — the server
+      // sends them as an early frame instead. Shell-injected values win
+      // per-key (they are the same values, delivered earlier).
+      const cfg = f.d as Record<string, unknown> | undefined;
+      if (cfg && typeof cfg === "object") _cfgSink.apply?.(cfg);
+      return true;
+    }
     case "css":
       refreshCSS();
       return true;

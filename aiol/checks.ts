@@ -346,19 +346,20 @@ export const checkCells: Checker = (ctx) => {
 
   // the restructure (perfect-aio D5/B4c): periphery moved off the core entry to
   // aio/extras — detect old imports and print the one-line fix.
-  const EXTRAS_MOVED = new Set([
-    "lint",
-    "parseCli",
-    "draft",
-    "matchEffect",
-    "deepFreeze",
-    "markAsync",
-    "instances",
-    "resolveAppId",
-    "connectCliUDS",
-    "createSliceSelector",
-    "DEFAULT_PRAGMAS",
-    "UnionOf",
+  // symbol → its current home ("" = removed in the alpha41 surface diet).
+  const MOVED_OFF_CORE = new Map<string, string>([
+    ["lint", "aio/extras"],
+    ["parseCli", "aio/extras"],
+    ["draft", ""], // removed — pre-methods relic
+    ["matchEffect", ""], // removed — pre-methods relic
+    ["deepFreeze", "aio/extras"],
+    ["markAsync", "aio/extras"],
+    ["instances", "aio/extras"],
+    ["resolveAppId", "aio/extras"],
+    ["connectCliUDS", "aio/server"],
+    ["createSliceSelector", "aio/extras"],
+    ["DEFAULT_PRAGMAS", "aio/db"],
+    ["UnionOf", ""], // removed — pre-methods relic
   ]);
   for (const file of ctx.sourceFiles) {
     for (
@@ -368,15 +369,20 @@ export const checkCells: Checker = (ctx) => {
     ) {
       const moved = m[1]!.split(",")
         .map((n) => n.trim().replace(/^type\s+/, "").split(/\s+as\s+/)[0]!)
-        .filter((n) => EXTRAS_MOVED.has(n));
+        .filter((n) => MOVED_OFF_CORE.has(n));
       if (moved.length === 0) continue;
       const lineIdx = file.content.slice(0, m.index).split("\n").length;
       report(
         "error",
         "cells",
         `${file.relative}:${lineIdx} — ${
-          moved.join(", ")
-        } moved to "aio/extras" (alpha28 core diet) — change the import specifier. Migration: docs/upgrade/restructure.md`,
+          moved.map((n) => {
+            const home = MOVED_OFF_CORE.get(n);
+            return home
+              ? `${n} moved to "${home}"`
+              : `${n} was removed (pre-methods relic, alpha41 surface diet)`;
+          }).join("; ")
+        } — see docs/upgrade/restructure.md`,
         { file: file.relative, line: lineIdx },
       );
     }
@@ -412,7 +418,7 @@ export const checkCells: Checker = (ctx) => {
         `cell "${f.name}" has no state — every cell needs initial state`,
         loc,
       );
-    } else if (f.stateKeys.length === 0) {
+    } else if (f.stateIsLiteral && f.stateKeys.length === 0) {
       report(
         "warn",
         "cells",
@@ -1937,58 +1943,23 @@ export const checkWorkerPeerReads: Checker = (ctx) => {
   }
 };
 
-// ══════════════════════════════════════════════════════════════════════
-// 19. SPREADING THE LIVE PROXY BACK INTO STATE (llama.md #2)
-// ══════════════════════════════════════════════════════════════════════
-//
-// An ASYNC method writes through a live proxy so reads stay fresh across
-// awaits. Spreading that proxy copies nested values as proxies, so assigning the
-// result back hands the store an object it must refuse:
-//
-//     async update(s) { … s.job = { ...s.job, step: p.step } }   // refused
-//
-// The runtime now rejects the method that made the write (it used to log and
-// resolve, which is how a build panel froze at step 0 with a green test suite).
-// This is the static half — the same mistake named at lint time, before it runs.
-//
-// SYNC methods are NOT flagged: they mutate an Immer draft, whose spread yields
-// plain values, and that has always been legal. Flagging both would be the kind
-// of false positive that teaches developers to ignore the linter.
-export const checkProxySpreadBack: Checker = (ctx) => {
+// `useCell(...)`.state is a LIVE proxy — the stash-and-diff idiom compares
+// state against itself, silently (space-invaders field report). Deprecated at
+// the source; named here at lint time, before it runs.
+export const checkUseCell: Checker = (ctx) => {
   const { tsFiles, tsxFiles, report } = ctx;
-  // `async <name>(s…) {` … then `s.X = { ...s.X` / `[ ...s.X` inside it.
-  const asyncMethod = /\basync\s+(\w+)\s*\(\s*(\w+)\b[^)]*\)\s*\{/g;
   for (const file of [...tsFiles, ...tsxFiles]) {
-    const code = codeText(file.content);
-    for (const m of code.matchAll(asyncMethod)) {
-      const draft = m[2]!;
-      // Body slice: from the opening brace to the end of the balanced block,
-      // bounded so a runaway regex can't scan the rest of the file.
-      const body = code.slice(
-        m.index + m[0].length,
-        m.index + m[0].length + 4000,
-      );
-      const spread = new RegExp(
-        `\\b${draft}\\s*\\.\\s*(\\w+)\\s*=\\s*[\\{\\[]\\s*\\.\\.\\.\\s*${draft}\\s*\\.\\s*\\1\\b`,
-      ).exec(body);
-      if (!spread) continue;
-      const line = code.slice(0, m.index).split("\n").length;
-      report(
-        "warn",
-        "patterns",
-        `${file.relative}:${line} — \`${draft}.${spread[1]}\` is spread and ` +
-          `assigned back inside async \`${m[1]}()\`. In an async method ` +
-          `\`${draft}\` is a live proxy, so the spread carries proxies for any ` +
-          `nested object/array and the store REFUSES the write (the method ` +
-          `rejects). Snapshot to a plain value first: ` +
-          `\`const x = JSON.parse(JSON.stringify(${draft}.${
-            spread[1]
-          })); x.k = v; ` +
-          `${draft}.${spread[1]} = x\`.`,
-        { file: file.relative, line },
-      );
-      break; // one per file — the pattern repeats
-    }
+    const idx = file.content.search(/\buseCell\s*\(/);
+    if (idx === -1) continue;
+    const line = file.content.slice(0, idx).split("\n").length;
+    report(
+      "warn",
+      "patterns",
+      `${file.relative}:${line} — useCell() is deprecated: use direct cell ` +
+        `access (cell.field / cell.method()). Its .state is a LIVE view — ` +
+        `stashing it and diffing later compares current state to itself.`,
+      { file: file.relative, line },
+    );
   }
 };
 
@@ -2010,5 +1981,5 @@ export const ALL_CHECKS: Checker[] = [
   checkUpgrade,
   checkPostAwaitRead,
   checkWorkerPeerReads,
-  checkProxySpreadBack,
+  checkUseCell,
 ];

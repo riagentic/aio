@@ -159,3 +159,75 @@ Deno.test("localFirst: with no shell config, resolution is exactly today's behav
     w.__aioConfig = prev;
   }
 });
+
+Deno.test("localFirst: the SPA-fallback shell carries syncCells too", async () => {
+  // The trap that shipped: `/` passed syncCells to generateHTML, the
+  // extensionless deep-link fallback (a reload on `/settings`) did not — so
+  // WHICH URL a user reloaded on decided whether the app was local-first.
+  // Both routes now come from one closure; this pins them together.
+  const { createStaticHandler } = await import(
+    "../src/server/server-static.ts"
+  );
+  const dir = await Deno.makeTempDir();
+  try {
+    await Deno.writeTextFile(`${dir}/app.js`, "// bundle");
+    const { serveStatic } = createStaticHandler({
+      prod: true,
+      debug: () => {},
+      title: "T",
+      absBaseDir: dir,
+      absDistDir: dir,
+      hasCSS: false,
+      importMap: "{}",
+      noCache: {},
+      syncCells: ["lf-notes2"],
+      getGraphResult: () => null,
+      getVitalsExtra: () => ({
+        payloadStats: new Map(),
+        clientBackpressure: {},
+      }),
+      getTrojanDeps: () => ({}),
+    });
+    const root = await (await serveStatic("/")).text();
+    const deep = await (await serveStatic("/settings/profile")).text();
+    assert(root.includes('"syncCells":["lf-notes2"]'), "root shell");
+    assert(deep.includes('"syncCells":["lf-notes2"]'), "deep-link shell");
+    assertEquals(root, deep, "one shell, byte-identical on every route");
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+Deno.test("localFirst: adopting a cell with existing persisted data keeps that data across restarts", async () => {
+  // The flip trap: KV stops persisting a cell the moment it becomes a sync
+  // cell — so unless adoption makes the restored state durable in the SYNC
+  // store first, the first restart after the flip resurrects the cell as
+  // initialState and the user's pre-flip data exists nowhere.
+  const { createDB } = await import("../src/db/async-db.ts");
+  const { SYNC_SCHEMA } = await import("../src/sync/compact.ts");
+  const { replaySyncOps } = await import("../src/server/aio-boot.ts");
+  const silent = { info: () => {}, error: () => {} };
+  const reduce = (s: Record<string, unknown>) => s;
+
+  const db = createDB(":memory:");
+  try {
+    for (const ddl of SYNC_SCHEMA) await db.execute(ddl);
+
+    // Boot 1 — first boot after the flip: KV still restored the data.
+    const restored = { notes: { items: ["pre-flip data"] } };
+    const after1 = await replaySyncOps(db, ["notes"], reduce, restored, silent);
+    assertEquals(after1.notes, { items: ["pre-flip data"] });
+
+    // Boot 2 — KV no longer holds the cell (excluded since the flip); the
+    // sync store must now be its home.
+    const bare = { notes: { items: [] as string[] } };
+    const after2 = await replaySyncOps(db, ["notes"], reduce, bare, silent);
+    assertEquals(
+      after2.notes,
+      { items: ["pre-flip data"] },
+      "the seeded sync snapshot restores the pre-flip data",
+    );
+  } finally {
+    await db.close();
+  }
+});

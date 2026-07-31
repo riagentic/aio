@@ -57,6 +57,7 @@ export {
   useContextSelector,
   useDimensions,
   useId,
+  useInterval,
   useLocal,
   useOptimistic,
   useProjection,
@@ -67,6 +68,8 @@ export {
 export type { UseLocalResult } from "./browser-air.ts";
 // useCell lives in the adapters layer; docs reference `import { useCell } from
 // "aio/air"`, so it must be reachable here (was missing — risoto 2026-07-18).
+// It is @deprecated at the source: `.state` is a LIVE view, and the natural
+// stash-and-diff idiom silently compares state to itself. aiol flags it too.
 export { useCell } from "./adapters/air.ts";
 
 // ── Time travel ──────────────────────────────────────
@@ -103,13 +106,7 @@ export {
 } from "./browser-air.ts";
 
 // ── Auth UI — drop-in <SignIn/> + reactive useUser() (AUTH-2) ────────
-export {
-  authUser,
-  SignIn,
-  type SignInProps,
-  signOut,
-  useUser,
-} from "./browser-air.ts";
+export { SignIn, type SignInProps, signOut, useUser } from "./browser-air.ts";
 
 // ── SSR + islands ────────────────────────────────────────────────────
 export {

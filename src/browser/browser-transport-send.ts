@@ -11,6 +11,19 @@ import { T } from "./browser-transport-state.ts";
 import { enc } from "../protocol/envelope.ts";
 import { _registerAck, _rejectAck } from "../protocol/browser-ack.ts";
 
+/** The per-method budget key ("cell:method") for an action — same derivation
+ *  as the server executor's methodBudgetKey: async methods all travel as
+ *  `<cell>:__exec` with the real name in the payload. */
+function ackMethodKey(action: { type: string; payload?: unknown }): string {
+  if (action.type.endsWith(":__exec")) {
+    const m = (action.payload as { _method?: unknown } | undefined)?._method;
+    if (typeof m === "string") {
+      return `${action.type.slice(0, -":__exec".length)}:${m}`;
+    }
+  }
+  return action.type;
+}
+
 /** Sends action via IPC or WS — queues to memory during initial connect, persists to IndexedDB when disconnected.
  *  Returns a Promise that resolves when the server has acknowledged the action
  *  (only when `cid` is supplied). Without `cid` the call is fire-and-forget and
@@ -29,22 +42,35 @@ export function send(
 
   // If no cid, fire-and-forget. We still route the action through the same
   // send pipeline (IPC, WS, queue, offline) but skip registering a pending ack.
-  const ackPromise = action.cid ? _registerAck(action.cid) : Promise.resolve();
+  // A QUEUED action registers with `deferTimer` — its clock starts when the
+  // frame is actually written (browser-transport-ws arms it on replay), so a
+  // call queued offline for a minute is not told "no response" while it was
+  // never sent at all.
+  const register = (deferTimer: boolean): Promise<unknown> =>
+    action.cid
+      ? _registerAck(action.cid, {
+        methodKey: ackMethodKey(action),
+        deferTimer,
+      })
+      : Promise.resolve();
 
   if (T.ipc && T.ipcConnected) {
+    const ackPromise = register(false);
     T.ipc.send(enc("action", action));
     return ackPromise;
   }
   if (T.ws && T.ws.readyState === WebSocket.OPEN) {
+    const ackPromise = register(false);
     T.ws.send(enc("action", action));
     return ackPromise;
   }
   if (!T.wasConnected && T.queue.length < WS_MAX_QUEUE) {
     T.queue.push(action);
-    return ackPromise;
+    return register(true);
   }
   if (T.wasConnected) {
     if (T.offlineQueue.length < OFFLINE_MAX_QUEUE) {
+      const ackPromise = register(true);
       T.offlineQueue.push(action);
       // The in-memory queue survives the disconnect; only this write makes the
       // action survive a RELOAD. `_saveOfflineAction` reports its own storage
@@ -81,8 +107,9 @@ export function send(
     });
   }
   // Action was dropped — reject the awaiting caller (if any) immediately so
-  // they don't hang until ACK_TIMEOUT_MS. The "action-dropped" diag already
-  // fired above; this surfaces the failure to `await cell.method()` callers.
+  // they don't hang. The "action-dropped" diag already fired above; this
+  // surfaces the failure to `await cell.method()` callers.
+  const ackPromise = register(true); // never armed — rejected right here
   if (action.cid) {
     _rejectAck(
       action.cid,

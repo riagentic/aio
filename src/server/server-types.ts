@@ -37,6 +37,9 @@ export interface ServerConfig {
   renderBudget?: RenderBudget; // sent to browser for RenderMeter thresholds
   /** Cells the client should route through the sync engine (localFirst). */
   syncCells?: string[];
+  /** Resolved `await cell.method()` ceilings (effectTimeoutMs + perfBudget),
+   *  bridged to the browser so both sides wait from the same numbers. */
+  callTimeouts?: { default?: number; methods?: Record<string, number> };
   fullStateThreshold?: number; // 0-1: ratio of changed keys for delta vs full broadcast (default: 0.5)
   maxConnections?: number; // max concurrent WebSocket clients (default: 100)
   wsLimits?: import("./aio-types.ts").WsLimits; // per-client WS rate/size limits (W6.6)

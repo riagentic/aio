@@ -21,6 +21,10 @@ export type DiagnosticsOptions = {
   crashHandler?: boolean;
   memoryMonitor?: boolean | MemoryConfig;
   timeTravel?: boolean;
+  /** Action types omitted from the time-travel history (exact match, e.g.
+   *  ["game:tick"]) — a high-frequency action otherwise floods the bounded
+   *  window until it holds seconds instead of a session. */
+  skipActions?: string[];
   console?: boolean;
   vitals?: boolean | VitalsConfig;
   diagnosticBus?: boolean;
@@ -42,6 +46,7 @@ export const DEV_DEFAULTS: Required<DiagnosticsOptions> = {
   crashHandler: true,
   memoryMonitor: true,
   timeTravel: true,
+  skipActions: [],
   console: true,
   vitals: true,
   diagnosticBus: true,
@@ -55,6 +60,7 @@ export const PROD_DEFAULTS: Required<DiagnosticsOptions> = {
   crashHandler: true,
   memoryMonitor: false,
   timeTravel: false,
+  skipActions: [],
   console: true,
   vitals: { hints: false },
   diagnosticBus: false,

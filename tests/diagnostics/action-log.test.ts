@@ -42,7 +42,6 @@ Deno.test("action-log: truncates when exceeding max", async () => {
 Deno.test("action-log: skips internal actions", async () => {
   const path = `${TEST_DIR}/actions-skip.jsonl`;
   const alog = createActionLog(path, 100);
-  await alog.append("counter:__FlowState", {});
   await alog.append("counter:__exec", {});
   await alog.append("counter:__set:foo", {});
   await alog.append("counter:increment", {});

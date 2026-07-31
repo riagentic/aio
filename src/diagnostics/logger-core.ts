@@ -31,7 +31,6 @@ export class AioLogger {
   private appName: string;
 
   private lastStatus = new Map<string, string>(); // cell name → last status
-  private flowStarts = new Map<string, number>(); // "cell:flow" → startMs
   private stats = { dispatched: 0, errors: 0, start: Date.now() };
   private heartbeatTimer?: ReturnType<typeof setInterval>;
   private ready = false;
@@ -95,7 +94,6 @@ export class AioLogger {
       {
         suppressTypes: this.cfg.suppressTypes,
         stats: this.stats,
-        flowStarts: this.flowStarts,
         lastStatus: this.lastStatus,
         emit: this.emit.bind(this),
       },

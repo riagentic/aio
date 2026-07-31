@@ -65,16 +65,18 @@ Deno.test("tt: record appends entry and increments id", () => {
   assertEquals(tt.nextId, 2);
 });
 
-Deno.test("tt: record caps at 200, evicts oldest", () => {
+Deno.test("tt: record caps at 2000, evicts oldest", () => {
+  // Entries are state REFERENCES (structural sharing), so the window is deep:
+  // memory grows with the deltas, not entries × state size.
   let tt = createTT<S, A>();
-  for (let i = 0; i < 210; i++) {
+  for (let i = 0; i < 2010; i++) {
     tt = record(tt, { type: `A${i}` }, { count: i });
   }
-  assertEquals(tt.entries.length, 200);
+  assertEquals(tt.entries.length, 2000);
   // First entry should be id 10 (0-9 evicted)
   assertEquals(tt.entries[0]!.id, 10);
-  assertEquals(tt.entries[tt.entries.length - 1]!.id, 209);
-  assertEquals(tt.index, 199);
+  assertEquals(tt.entries[tt.entries.length - 1]!.id, 2009);
+  assertEquals(tt.index, 1999);
 });
 
 Deno.test("tt: record after undo truncates forward entries", () => {
@@ -327,23 +329,27 @@ Deno.test("tt integration: paused dispatch drops actions", () => {
   assertEquals(stateAt(tt), { count: 0 });
 });
 
-Deno.test("tt: record snapshot is immutable from live state", () => {
-  let tt = createTT<{ inner: { count: number } }, A>();
-  const live = { inner: { count: 0 } };
-  tt = record(tt, { type: "A" }, live);
-
-  // Mutate live state — snapshot should be independent
-  live.inner.count = 99;
-  assertEquals(tt.entries[0]!.state.inner.count, 0);
+Deno.test("tt: entries store the state reference — immutability is the store's", () => {
+  // Committed state is a fresh immutable tree per action (Immer, frozen in
+  // dev where TT runs), so the reference IS the snapshot. This replaced a
+  // structuredClone per dispatch (~1 MB/s at 60 fps in the space-invaders
+  // field report). Distinct commits keep distinct references.
+  let tt = createTT<{ count: number }, A>();
+  const s1 = Object.freeze({ count: 1 });
+  const s2 = Object.freeze({ count: 2 });
+  tt = record(tt, { type: "A" }, s1);
+  tt = record(tt, { type: "B" }, s2);
+  assertEquals(tt.entries[0]!.state === s1, true, "no copy, no serialization");
+  assertEquals(tt.entries[1]!.state === s2, true);
+  assertEquals(tt.entries[0]!.state.count, 1, "history preserved per commit");
 });
 
-Deno.test("tt: record uses degraded clone when structuredClone fails", () => {
+Deno.test("tt: non-serializable state records fine (no clone step to fail)", () => {
   let tt = createTT<{ fn: () => void; count: number }, A>();
   const live = { fn: () => {}, count: 0 };
-  // structuredClone fails on functions, falls back to JSON parse/stringify
   tt = record(tt, { type: "A" }, live);
-  live.count = 99;
   assertEquals(tt.entries[0]!.state.count, 0);
+  assertEquals(typeof tt.entries[0]!.state.fn, "function");
 });
 
 Deno.test("tt integration: state restores correctly on undo/redo cycle", () => {
@@ -784,34 +790,22 @@ Deno.test("markError via reportOpts getter tags the CURRENT entry, not the boot 
   assertEquals(tt.entries[0]!.error, undefined);
 });
 
-Deno.test("time-travel: large-state warning logs once, not per action (spam fix)", () => {
+Deno.test("time-travel: large state records fully — no size cap, no warning", () => {
+  // The old clone-based recorder skipped snapshots above 100KB (and needed a
+  // once-only warning for it). Reference entries have no serialization step,
+  // so a large state keeps FULL history and stays silent.
   const warnings: string[] = [];
   const orig = console.warn;
   console.warn = (...a: unknown[]) => void warnings.push(String(a[0]));
   try {
-    // Fresh session re-arms the once-only warning.
-    let tt = createTT<{ blob: string }, { type: string }>();
-    // State well over the 100KB cap; SIZE_SAMPLE_EVERY=20 samples periodically,
-    // so drive enough actions to sample repeatedly.
-    const big = { blob: "x".repeat(200_000) };
+    let tt = createTT<{ blob: string; n: number }, { type: string }>();
+    const blob = "x".repeat(200_000);
     for (let i = 0; i < 60; i++) {
-      tt = record(tt, { type: `a${i}` }, big);
+      tt = record(tt, { type: `a${i}` }, { blob, n: i });
     }
-    const ttWarnings = warnings.filter((w) => w.includes("time-travel"));
-    assertEquals(
-      ttWarnings.length,
-      1,
-      "must warn exactly once, not per action",
-    );
-    assert(ttWarnings[0]!.includes("logged once"));
-
-    // A brand-new session may warn again (genuinely new context).
-    let tt2 = createTT<{ blob: string }, { type: string }>();
-    for (let i = 0; i < 30; i++) tt2 = record(tt2, { type: `b${i}` }, big);
-    assertEquals(
-      warnings.filter((w) => w.includes("time-travel")).length,
-      2,
-    );
+    assertEquals(warnings.filter((w) => w.includes("time-travel")).length, 0);
+    assertEquals(tt.entries.length, 60);
+    assertEquals(tt.entries[5]!.state.n, 5, "every entry distinct and intact");
   } finally {
     console.warn = orig;
   }

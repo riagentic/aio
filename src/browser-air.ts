@@ -132,7 +132,7 @@ export { type Resource, resource } from "./air/resource.ts";
 export { type DimensionsState, useDimensions } from "./air/dimensions.ts";
 
 // ── Managed requestAnimationFrame loop ───────────────────────────────
-export { useRaf } from "./air/raf.ts";
+export { useInterval, useRaf } from "./air/raf.ts";
 
 // ── Component test harness (symmetric with testCell) ─────────────────
 export {

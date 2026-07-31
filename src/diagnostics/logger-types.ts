@@ -44,11 +44,8 @@ export const LEVELS: Record<LogLevel, number> = {
 };
 
 // Pure framework internals — never logged anywhere
-export const SKIP_SUFFIXES = [":__FlowState", ":__exec", ":__flow"];
+export const SKIP_SUFFIXES = [":__exec"];
 export const SKIP_CONTAINS = [":__set"];
-
-// Flow steps — debug.log only (not app.log)
-export const FLOW_STEP_RE = /:__flow:(?!done|failed|error)/;
 
 // ── Pure helpers ─────────────────────────────────────────────────────
 
@@ -73,11 +70,6 @@ export function fmtUptime(ms: number): string {
   const s = Math.round(ms / 1000);
   if (s < 3600) return `${Math.round(s / 60)}m`;
   return `${Math.round(s / 3600)}h`;
-}
-
-export function stripFlowPrefix(type: string): string {
-  const m = type.match(/:__flow:(.+)$/);
-  return m ? m[1] ?? type : type;
 }
 
 export function filterInternal(

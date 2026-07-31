@@ -73,7 +73,7 @@ async function integritySweep(dir: string): Promise<Check[]> {
 
 /** Least-privilege capability manifest for the project (risoto #9) — the
  *  `--allow-*` set the source actually needs, instead of `-A`. Informational. */
-export async function capabilityManifest(dir: string): Promise<string | null> {
+async function capabilityManifest(dir: string): Promise<string | null> {
   try {
     const { ctx } = await buildContext(dir);
     return manifestReport(scanCapabilities(ctx.sourceFiles));

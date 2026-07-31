@@ -3,7 +3,7 @@
 // "Correct but slower" fails the gate (scripts/check-bench.ts) like a broken
 // test. Each timing metric: warmup + N iterations → median + p95.
 // Run: deno task bench   (writes bench-results.json, gitignored)
-// Gate: deno task bench:check  (compares against bench-baselines.json)
+// Gate: deno task bench:check  (compares against scripts/bench-baselines.json)
 import { aio, cell, composeCells } from "../mod.ts";
 import { compactPatches } from "../src/state/patch-compact.ts";
 import { SKV_SCHEMA, sqliteKv } from "../src/server/skv-sqlite.ts";
@@ -246,6 +246,44 @@ const bootOpts = {
         "(run via `deno task bench` for accurate numbers)",
     );
   }
+}
+
+// ── 6. live-proxy over a 10k-item array (async method) ────────────────
+// The proxy's cost center: array read-method snapshots + per-element access.
+// A regression here means every fetch-then-render list app pays it.
+{
+  const N = 10_000;
+  const big = cell("bench-proxy-arr", {
+    state: {
+      items: Array.from({ length: N }, (_, i) => ({ id: i, q: i % 97 })),
+      sum: 0,
+    },
+    methods: {
+      // deno-lint-ignore require-await
+      async crunch(s: { items: { id: number; q: number }[]; sum: number }) {
+        // read method over all elements + filter-reassign + length read —
+        // the idiomatic shapes, all through the live proxy.
+        s.sum = s.items.reduce((a, x) => a + x.q, 0);
+        s.items = s.items.filter((x) => x.id !== -1);
+        s.sum += s.items.length;
+      },
+    },
+  });
+  const app = await aio.run({
+    cells: [big],
+    appId: "bench-proxy-arr",
+    ...bootOpts,
+  });
+  const samples: number[] = [];
+  for (let i = 0; i < 13; i++) { // first 3 are warmup
+    const t0 = performance.now();
+    // deno-lint-ignore no-explicit-any
+    await (big as any).crunch();
+    if (i >= 3) samples.push(performance.now() - t0);
+  }
+  await app.close();
+  _resetAioRuntime();
+  record("proxy-array-10k", "ms/op", samples);
 }
 
 // ── report ────────────────────────────────────────────────────────────

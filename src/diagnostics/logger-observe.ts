@@ -4,17 +4,14 @@ import type { LogLevel } from "./logger-types.ts";
 import {
   elapsed,
   filterInternal,
-  FLOW_STEP_RE,
   SKIP_CONTAINS,
   SKIP_SUFFIXES,
-  stripFlowPrefix,
 } from "./logger-types.ts";
 
 /** Minimal interface for the parts of AioLogger that observe() needs */
 export type ObserveCtx = {
   suppressTypes: string[];
   stats: { dispatched: number; errors: number };
-  flowStarts: Map<string, number>;
   lastStatus: Map<string, string>;
   emit: (
     lvl: LogLevel,
@@ -50,55 +47,6 @@ export function observeAction(
   }
   if (type.endsWith(":__destroy")) {
     ctx.emit("info", `cell:${prefix}`, "stopped");
-    return;
-  }
-
-  // ── Flow events ───────────────────────────────────────────────
-  if (FLOW_STEP_RE.test(type)) {
-    const flowName = payload._flow as string | undefined;
-    if (flowName) {
-      const key = `${prefix}:${flowName}`;
-      if (!ctx.flowStarts.has(key)) ctx.flowStarts.set(key, Date.now());
-    }
-    ctx.emit(
-      "debug",
-      `flow:${prefix}`,
-      stripFlowPrefix(type),
-      filterInternal(payload),
-    );
-    return;
-  }
-
-  if (type.endsWith(":__flow:done")) {
-    const flowName = payload._flow as string ?? "?";
-    const key = `${prefix}:${flowName}`;
-    const dur = elapsed(ctx.flowStarts.get(key));
-    ctx.flowStarts.delete(key);
-    ctx.emit(
-      "info",
-      `flow:${prefix}`,
-      `${flowName} done`,
-      filterInternal(payload),
-      dur,
-    );
-    return;
-  }
-
-  if (type.endsWith(":__flow:failed")) {
-    const flowName = payload._flow as string ?? "?";
-    ctx.flowStarts.delete(`${prefix}:${flowName}`);
-    ctx.stats.errors++;
-    ctx.emit("error", `flow:${prefix}`, `${flowName} failed`, {
-      reason: payload.reason ?? "unknown",
-    });
-    return;
-  }
-
-  if (type.endsWith(":__flow:error")) {
-    ctx.stats.errors++;
-    ctx.emit("error", `flow:${prefix}`, `${payload.flow ?? "?"} error`, {
-      error: String(payload.error ?? "?"),
-    });
     return;
   }
 

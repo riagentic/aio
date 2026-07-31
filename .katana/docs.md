@@ -1,7 +1,7 @@
 # Aio documentation
 
 - documentation is located in docs/ (root-level release artifacts —
-  RELEASE_NOTES-\*.md — are exempt, like README/CHANGELOG; tooling/input files
+  docs/release-notes/RELEASE_NOTES-\*.md — are exempt, like README/CHANGELOG; tooling/input files
   are not documentation: CLAUDE.md, todo.md, perfect-aio.md (design-decisions
   essay), .katana/, feedback/ field reports, and per-directory README.md indexes
   like examples/README.md)

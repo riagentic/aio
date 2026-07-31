@@ -191,6 +191,28 @@ export async function loadSnapshot(
   }
 }
 
+/** Write a boot-time BASE snapshot for a cell the sync store has never seen.
+ *
+ *  The moment `localFirst` / `sync: true` adopts a cell that already has
+ *  KV-persisted data, that data's only durable home stops being written (sync
+ *  cells are excluded from KV on the next persist) — without this seed, the
+ *  first restart after the flip restores the cell from initialState + an empty
+ *  op-log and the pre-flip data exists NOWHERE. Zero HLC so every real op
+ *  sorts after it; sync_meta low-water is untouched, so no client is forced
+ *  into a resync. `DO NOTHING` keeps any real compaction snapshot authoritative. */
+export async function seedSyncSnapshot(
+  db: DB,
+  cell: string,
+  state: unknown,
+): Promise<void> {
+  await db.execute(
+    `INSERT INTO sync_snapshots (cell, version, state, hlc_phys, hlc_cnt, hlc_node)
+       VALUES (?, 1, ?, 0, 0, 'seed')
+       ON CONFLICT(cell) DO NOTHING`,
+    [cell, JSON.stringify(state)],
+  );
+}
+
 /**
  * Read the compaction low_water mark for a cell, or null if none.
  */

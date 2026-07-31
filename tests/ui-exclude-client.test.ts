@@ -378,3 +378,59 @@ Deno.test("B7: the shape probe never invokes a getter (no reads, no tracking)", 
   assertEquals(reads, 0, "the probe read nothing");
   reset();
 });
+
+Deno.test("B7: a DEEP excluded field read is loud — dev throws, prod warns once", () => {
+  // The alpha40 dev-throw covered top-level excludes; a dot-path exclude
+  // still read as a clean `undefined` in every environment — the same
+  // "undefined as data" trap, one level down. The stripped parent now carries
+  // a non-enumerable reporting getter at the hidden name.
+  reset();
+  const wallet = cell("b7-deep-loud", {
+    state: { accounts: [{ name: "a", encSecKey: "s3cret" }] },
+    methods: {},
+    ui: { exclude: ["accounts.encSecKey"] },
+  });
+  bindCellReactive(wallet);
+  const list =
+    (wallet as unknown as { accounts: Record<string, unknown>[] }).accounts;
+
+  // Dev: the read THROWS, naming the path.
+  const devBefore = (globalThis as Record<string, unknown>).__aioDev;
+  (globalThis as Record<string, unknown>).__aioDev = true;
+  let threw = "";
+  try {
+    void list[0]!.encSecKey;
+  } catch (e) {
+    threw = String(e);
+  } finally {
+    (globalThis as Record<string, unknown>).__aioDev = devBefore;
+  }
+  assert(threw.includes("b7-deep-loud.accounts.encSecKey"), threw);
+  assert(threw.includes("ui.exclude"), threw);
+
+  // Spreads / keys / JSON of the parent never trip it — only the named read.
+  assertEquals(Object.keys(list[0]!), ["name"]);
+  assertEquals(JSON.stringify(list[0]), '{"name":"a"}');
+
+  // Prod: warn once, undefined — degrade, never break the page.
+  const dev = (globalThis as Record<string, unknown>).__aioDev;
+  (globalThis as Record<string, unknown>).__aioDev = false;
+  try {
+    const { result, warnings } = withWarnCapture(() => {
+      const l = (wallet as unknown as { accounts: Record<string, unknown>[] })
+        .accounts;
+      const first = l[0]!.encSecKey;
+      const second = l[0]!.encSecKey;
+      return [first, second];
+    });
+    assertEquals(result, [undefined, undefined]);
+    assertEquals(
+      warnings.filter((w) => w.includes("accounts.encSecKey")).length,
+      1,
+      "one warning, not per-read spam",
+    );
+  } finally {
+    (globalThis as Record<string, unknown>).__aioDev = dev;
+  }
+  reset();
+});

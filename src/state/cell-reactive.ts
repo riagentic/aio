@@ -11,11 +11,7 @@ import { _cellSignals, getCellSignal } from "./state-signals.ts";
 import { _registerAck } from "../protocol/browser-ack.ts";
 import { trackPath } from "./state-subs.ts";
 import { nameIsTaken } from "./cell-helpers.ts";
-import {
-  applyCellFieldFilter,
-  deepExclude,
-  uiKeyVisibility,
-} from "./state-filter.ts";
+import { applyCellFieldFilter, uiKeyVisibility } from "./state-filter.ts";
 
 // ── Cell registry ────────────────────────────────────────────────────
 // Every cell() call registers here. Browser binding iterates this set.
@@ -134,6 +130,53 @@ function reportHiddenRead(cellName: string, key: string, reason: string): void {
   console.warn(msg);
 }
 
+/** Deep-exclude for CLIENT reads — same shape as state-filter's pure
+ *  `deepExclude`, plus a tripwire: the dropped field is re-installed as a
+ *  non-enumerable reporting getter, so `account.encSecKey` throws in dev and
+ *  warns-once in prod exactly like a top-level excluded field. Installed
+ *  UNCONDITIONALLY at the leaf: on the wire path the field never even arrives
+ *  (the broadcast filter strips it), and that absent field reading as a clean
+ *  `undefined` was the same "undefined as data" trap, one level down.
+ *  Non-enumerable, so spreads / Object.keys / JSON.stringify of the parent
+ *  never trip it — only an actual read of the hidden name does. */
+function deepExcludeLoud(
+  value: unknown,
+  segs: string[],
+  onRead: () => void,
+): unknown {
+  if (segs.length === 0 || value === null || typeof value !== "object") {
+    return value;
+  }
+  if (Array.isArray(value)) {
+    let changed = false;
+    const out = value.map((el) => {
+      const next = deepExcludeLoud(el, segs, onRead);
+      if (next !== el) changed = true;
+      return next;
+    });
+    return changed ? out : value;
+  }
+  const obj = value as Record<string, unknown>;
+  const head = segs[0]!;
+  if (segs.length === 1) {
+    const kept: Record<string, unknown> = { ...obj };
+    delete kept[head];
+    Object.defineProperty(kept, head, {
+      get() {
+        onRead();
+        return undefined;
+      },
+      enumerable: false,
+      configurable: true,
+    });
+    return kept;
+  }
+  if (!(head in obj)) return value;
+  const child = deepExcludeLoud(obj[head], segs.slice(1), onRead);
+  if (child === obj[head]) return value;
+  return { ...obj, [head]: child };
+}
+
 /** The ui filter that applies to CLIENT reads of a cell. Client-scoped cells
  *  are exempt: their state lives only in this client (never broadcast), so a
  *  ui filter has nothing to protect. */
@@ -201,7 +244,16 @@ export function bindCellReactive(
           ? initialState[key]
           : (s as Record<string, unknown>)[key];
         if (vis.deepSegs) {
-          return vis.deepSegs.reduce((acc, segs) => deepExclude(acc, segs), v);
+          return vis.deepSegs.reduce(
+            (acc, segs) =>
+              deepExcludeLoud(acc, segs, () =>
+                reportHiddenRead(
+                  cellName,
+                  `${key}.${segs.join(".")}`,
+                  "the field is under a ui.exclude path",
+                )),
+            v,
+          );
         }
         return v;
       },

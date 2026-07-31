@@ -4,6 +4,14 @@ Status: **SHIPPED** — opt-in `transaction: true`; this page is the contract, n
 a proposal. Conflict detection (§4) is the part that makes it safe rather than
 merely stable. Tests: `tests/transactional-methods.test.ts`.
 
+**The one rule, if you read nothing else:** a cell where a wrong merge costs
+something real — money, inventory, a ledger, anything a user would dispute —
+gets `transaction: { serialize: true }`. Everything else keeps the default (no
+transaction). Plain `transaction: true` is the advanced middle setting: snapshot
+isolation, cheaper than serialize, but it permits write skew — reach for it
+deliberately or not at all. The isolation-model detail below exists to justify
+that rule, not to be memorized.
+
 ## 1. The problem
 
 Today a **sync** cell method is already atomic: it runs entirely on one Immer
@@ -97,9 +105,22 @@ store does. Two levels, matching what the cell asked for:
 A **blind write** (`s.loading = false` — written, never read) is
 last-writer-wins by intent and never conflicts.
 
-On conflict the whole write-set is discarded and the call **rejects** with a
-message naming the path. Set `transaction: { conflict: "warn" }` to report and
-commit anyway; there is no option to do neither.
+The read-tracking covers every way state is read: leaf reads, `in` probes, array
+read methods **including `find`**, iteration/`Object.keys` (a root enumeration
+is a read of the cell's shape), and re-reads after `s.$commit()` (a path you
+already published is validated against what YOU published — a third value is
+still somebody else's write and still conflicts). A commit that publishes
+**nothing** — a stand-down that read and returned — is trivially serializable
+and never rejected. One nuance of the model: under plain `transaction: true`, a
+write to a path you did **not** read (e.g. `s.total = Object.keys(s).length` — a
+value _derived_ from other reads) is write skew, which snapshot isolation
+permits by definition; use `{ serialize: true }` when such derived writes must
+be safe.
+
+On conflict the whole write-set is discarded and the call **rejects** with an
+`AioError` (code `TX_CONFLICT` — match on it to retry) naming the path. Set
+`transaction: { conflict: "warn" }` to report and commit anyway; there is no
+option to do neither.
 
 ```
 [wallet] refresh(): s.adjustedAt was changed by another action while this

@@ -29,7 +29,7 @@ deno task api:check         # public-surface snapshot gate (api:update regenerat
 deno task docs:check        # doc accuracy gate (docs:index regenerates docs/content.md)
 deno task coverage:check    # suite + src/ line-coverage floor
 deno task preflight         # publish/install/scaffold sanity, end to end
-deno task bench             # + bench:check against bench-baselines.json
+deno task bench             # + bench:check against scripts/bench-baselines.json
 deno task am <cmd>          # app manager: discover/start/stop/state/dispatch/surface/timeline/logs
 deno task amui              # visual app manager (amui/)
 deno task doctor            # config sanity checks
@@ -161,9 +161,12 @@ initial-state curl proves nothing about whether a method actually runs.
   lenient-test shortcut. Corollary: the in-process harness still can't reproduce
   transport-boundary behavior — those need a loopback/browser path (tracked in
   `todo.md`).
-- **Never assign proxy-derived objects back into cell state** —
-  `preventExtensions on proxy` rejects the whole action silently. Snapshot with
-  a JSON round-trip (`structuredClone` can't clone a proxy).
+- **Proxy-derived values assigned back into cell state are materialized to
+  plain data at write time** (`LIVE_RAW` in `src/state/cell-impl.ts`), so
+  `s.x = { ...s.x }` works identically in sync and async methods. The
+  sync/async parity contract is pinned by `tests/proxy-differential.test.ts`
+  (a randomized differential fuzzer) — extend ITS op set when adding proxy
+  capabilities, never hand-reason about equivalence.
 - Test servers take their port from `freePort()`, never a constant or a
   pid-derived formula (a guard test enforces this).
 - `factory` and `msg()` are inlined in `src/browser/browser-shared.ts` — they

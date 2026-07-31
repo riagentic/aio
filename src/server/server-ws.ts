@@ -3,6 +3,11 @@
 import type { AioUser } from "./aio.ts";
 import { invokeServerFn } from "./server-fns.ts";
 import {
+  _clearClientDegraded,
+  _recordClientDegraded,
+  type DegradedChange,
+} from "../diagnostics/degraded.ts";
+import {
   makeServerRequest,
   runWithRequest,
   runWithUser,
@@ -111,6 +116,10 @@ export interface WsDeps {
   strictOrigin?: boolean;
   clientCounter: { value: number };
   bootId: string;
+  /** Resolved client config — sent as an early "cfg" frame so a shell
+   *  templated at build time (electron UDS, android assets) still learns the
+   *  compose-time decisions (`syncCells`, `callTimeouts`, `renderBudget`). */
+  clientConfig?: Record<string, unknown>;
   vitalsSystem?: VitalsSystem;
   onConnect?: (user?: AioUser) => void;
   onDisconnect?: (user?: AioUser) => void;
@@ -387,6 +396,11 @@ export function createWsManager(deps: WsDeps): WsManager {
       try {
         socket.send(enc("boot", { id: deps.bootId }));
       } catch { /* socket closing during onopen (AIO-155) */ }
+      if (deps.clientConfig && Object.keys(deps.clientConfig).length > 0) {
+        try {
+          socket.send(enc("cfg", deps.clientConfig));
+        } catch { /* socket closing */ }
+      }
     };
 
     socket.onmessage = (e) => {
@@ -400,6 +414,8 @@ export function createWsManager(deps: WsDeps): WsManager {
     socket.onclose = () => {
       connections.delete(socket);
       _clearTimers(meta);
+      // A gone client's degradations are no longer live signal for health.
+      _clearClientDegraded(meta.id);
       deps.debug(
         `ws: disconnect ${clientId.slice(0, 8)} user=${
           meta.user?.id ?? "anon"
@@ -587,6 +603,25 @@ export function createWsManager(deps: WsDeps): WsManager {
           } catch { /* malformed */ }
         }
         return;
+      case "cdiag": {
+        // A client's degraded() escalation — recorded so /__aio/health can
+        // name a browser subsystem that is failing forever. Values are capped
+        // inside _recordClientDegraded; malformed frames are dropped.
+        const d = frame.d as DegradedChange | undefined;
+        if (
+          d && typeof d.name === "string" && d.name.length > 0 &&
+          (d.kind === "down" || d.kind === "up")
+        ) {
+          _recordClientDegraded(meta.id, {
+            name: d.name,
+            kind: d.kind,
+            failures: typeof d.failures === "number" ? d.failures : 0,
+            since: typeof d.since === "number" ? d.since : Date.now(),
+            lastError: typeof d.lastError === "string" ? d.lastError : "",
+          });
+        }
+        return;
+      }
       case "ui-surface-result":
         _resolvePending(meta, "surface", frame.d);
         return;
@@ -704,8 +739,8 @@ export function createWsManager(deps: WsDeps): WsManager {
       return;
     }
     // Block framework-internal action types from network sources.
-    // Internal actions (cell:__setX, cell:__exec, cell:__error, cell:__flow,
-    // cell:__FlowState, cell:__Init, cell:__Destroy) carry trusted payload shapes
+    // Internal actions (cell:__setX, cell:__exec, cell:__error,
+    // cell:__Init, cell:__Destroy) carry trusted payload shapes
     // (e.g. mutation lists) that bypass cell method bodies. Accepting them from
     // clients is a remote-code-style vector — see audit F-1 (prototype pollution
     // via __setMethod with crafted mutation paths).

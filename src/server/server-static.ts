@@ -88,6 +88,7 @@ export interface StaticDeps {
   height?: number;
   renderBudget?: RenderBudget;
   syncCells?: string[];
+  callTimeouts?: { default?: number; methods?: Record<string, number> };
   uiEntry?: string; // AIO-8.1
   viewport?: string | false; // AIO-423: ui.viewport override (false = opt out)
   headExtra?: string; // AIO-423: ui.head — verbatim <head> content
@@ -154,27 +155,36 @@ export function createStaticHandler(deps: StaticDeps): {
       .flatMap((e) => e.errors);
   }
 
+  /** THE app shell — served at `/` and by the SPA deep-link fallback. Two
+   *  hand-maintained generateHTML() calls already diverged once (the fallback
+   *  missed `syncCells`, so a reloaded deep link silently lost local-first);
+   *  one closure makes the next added parameter a one-place change. */
+  function appShell(): Response {
+    return new Response(
+      generateHTML(
+        deps.title,
+        deps.prod,
+        deps.hasCSS,
+        deps.importMap,
+        deps.showStatus,
+        deps.width,
+        deps.height,
+        deps.renderBudget,
+        deps.uiEntry,
+        deps.viewport,
+        deps.headExtra,
+        deps.syncCells,
+        deps.callTimeouts,
+      ),
+      { headers: { "Content-Type": "text/html", ...deps.noCache } },
+    );
+  }
+
   async function serveStatic(
     pathname: string,
     req?: Request,
   ): Promise<Response> {
-    const {
-      prod,
-      debug,
-      title,
-      absDistDir,
-      hasCSS,
-      importMap,
-      noCache,
-      showStatus,
-      width,
-      height,
-      renderBudget,
-      uiEntry,
-      viewport,
-      headExtra,
-      syncCells,
-    } = deps;
+    const { prod, debug, title, absDistDir, noCache } = deps;
 
     // ── Root / SPA entry ──
     if (pathname === "/") {
@@ -218,23 +228,7 @@ export function createStaticHandler(deps: StaticDeps): {
           });
         }
       }
-      return new Response(
-        generateHTML(
-          title,
-          prod,
-          hasCSS,
-          importMap,
-          showStatus,
-          width,
-          height,
-          renderBudget,
-          uiEntry,
-          viewport,
-          headExtra,
-          syncCells,
-        ),
-        { headers: { "Content-Type": "text/html", ...noCache } },
-      );
+      return appShell();
     }
 
     // ── AIO virtual JS modules ──
@@ -549,22 +543,7 @@ export function createStaticHandler(deps: StaticDeps): {
 
   /** Serve a file from baseDir — handles SPA fallback, transpilation, binary/text */
   async function serveFile(pathname: string): Promise<Response> {
-    const {
-      prod,
-      debug,
-      title,
-      absBaseDir,
-      hasCSS,
-      importMap,
-      noCache,
-      showStatus,
-      width,
-      height,
-      renderBudget,
-      uiEntry,
-      viewport,
-      headExtra,
-    } = deps;
+    const { prod, debug, title, absBaseDir, noCache } = deps;
 
     const filename = pathname.replace(/^\//, "");
     // Server-only files and dotfiles are never served, at any depth — see
@@ -609,22 +588,7 @@ export function createStaticHandler(deps: StaticDeps): {
             { headers: { "Content-Type": "text/html", ...noCache } },
           );
         }
-        return new Response(
-          generateHTML(
-            title,
-            prod,
-            hasCSS,
-            importMap,
-            showStatus,
-            width,
-            height,
-            renderBudget,
-            uiEntry,
-            viewport,
-            headExtra,
-          ),
-          { headers: { "Content-Type": "text/html", ...noCache } },
-        );
+        return appShell();
       }
     }
 

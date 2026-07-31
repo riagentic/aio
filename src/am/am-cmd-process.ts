@@ -248,9 +248,37 @@ export async function cmdStart(
     Deno.exit(1);
   }
 
-  // Pass through any extra args (--port, --verbose, --transport, etc.)
-  // Re-inject --port if it was consumed by global flag parser
+  // Pass through any extra args (--port, --verbose, --transport, --client
+  // etc.). Re-inject --port if it was consumed by the global flag parser.
   const passthrough = args.filter((a) => a.startsWith("--"));
+  // A GUI client on a headless box hangs forever (electron never returns) —
+  // fail FAST with the fix instead (space-invaders field report). The
+  // effective client is the --client override, else the app's declared target.
+  {
+    const clientArg = passthrough.find((a) => a.startsWith("--client="))
+      ?.slice(9);
+    let effective = clientArg;
+    if (!effective) {
+      try {
+        const dj = JSON.parse(await Deno.readTextFile("deno.json")) as {
+          target?: string;
+        };
+        effective = dj.target;
+      } catch { /* no deno.json target — framework default applies */ }
+    }
+    const gui = effective === "electron" || effective === "client";
+    const headless = Deno.build.os === "linux" &&
+      !Deno.env.get("DISPLAY") && !Deno.env.get("WAYLAND_DISPLAY");
+    if (gui && headless) {
+      outError(
+        `client "${effective}" needs a display and this box has none ` +
+          `(no DISPLAY/WAYLAND_DISPLAY) — electron would hang forever. ` +
+          `Use: am start --client=browser (or --client=server-only)`,
+        mode,
+      );
+      Deno.exit(1);
+    }
+  }
   if (flags.port && !passthrough.some((a) => a.startsWith("--port="))) {
     passthrough.push(`--port=${flags.port}`);
   }

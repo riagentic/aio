@@ -27,10 +27,12 @@ import {
 import { buildWsUrl, handleControlFrame } from "./browser-shared.ts";
 import { getStateSnapshot, T } from "./browser-transport-state.ts";
 import {
+  _armAckTimer,
   _rejectAck,
   _rejectAllPending,
   _resolveAck,
 } from "../protocol/browser-ack.ts";
+import { _setDegradedRelay, degradedReport } from "../diagnostics/degraded.ts";
 import { handleStateMessage } from "./browser-transport-handler.ts";
 import { initVitals } from "./browser-transport-vitals.ts";
 import { connectIPC } from "./browser-transport-ipc.ts";
@@ -88,13 +90,21 @@ export function connect(): void {
 
     const q = T.queue;
     T.queue = [];
-    for (const a of q) ws.send(enc("action", a));
+    for (const a of q) {
+      ws.send(enc("action", a));
+      // Queued acks registered with a deferred timer — the clock starts NOW,
+      // when the frame is actually written, not when the call was queued.
+      if (a.cid) _armAckTimer(a.cid);
+    }
 
     if (T.offlineQueue.length) {
       console.debug(
         `[aio] replaying ${T.offlineQueue.length} offline actions`,
       );
-      for (const a of T.offlineQueue) ws.send(enc("action", a));
+      for (const a of T.offlineQueue) {
+        ws.send(enc("action", a));
+        if (a.cid) _armAckTimer(a.cid);
+      }
       T.offlineQueue = [];
       // A failed clear is not cosmetic: the same actions replay again on the
       // next reload, so a silent failure here spends the user's money twice.
@@ -107,6 +117,17 @@ export function connect(): void {
     }
 
     initVitals(ws);
+
+    // Health visibility: this runtime's degraded() escalations travel to the
+    // server so /__aio/health can see a dead browser subsystem. Point the
+    // relay at THIS socket (a reconnect re-points it), and replay anything
+    // already degraded — it may have escalated while offline.
+    _setDegradedRelay((ev) => {
+      if (ws.readyState === WebSocket.OPEN) ws.send(enc("cdiag", ev));
+    });
+    for (const d of degradedReport()) {
+      ws.send(enc("cdiag", { kind: "down", ...d }));
+    }
   };
 
   ws.onmessage = (e) => {
