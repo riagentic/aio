@@ -181,6 +181,44 @@ export async function ensureSingleton(
 
 // ── Process management commands ─────────────────────────────
 
+/** The per-OS command that spawns a DETACHED deno child whose stdout+stderr
+ *  land in `logFile` and whose real PID is printed to stdout.
+ *
+ *  POSIX: `sh -c "nohup deno … >log 2>&1 & echo $!"` — nohup detaches from
+ *  the session so the child survives am's exit and terminal close.
+ *  Windows: there is no sh/nohup (`am start` used to fail outright) —
+ *  PowerShell `Start-Process -PassThru` detaches natively; it cannot merge
+ *  the two streams into one file, so stderr goes to `<log>.err`.
+ *  Exported pure so both shapes are testable on any OS. */
+export function detachedSpawnSpec(
+  os: typeof Deno.build.os,
+  denoArgs: string[],
+  logFile: string,
+): { cmd: string; args: string[] } {
+  if (os === "windows") {
+    const q = (v: string) => "'" + v.replace(/'/g, "''") + "'";
+    const ps = `$p = Start-Process -FilePath 'deno' -ArgumentList @(${
+      denoArgs.map(q).join(",")
+    }) -RedirectStandardOutput ${q(logFile)} -RedirectStandardError ${
+      q(logFile + ".err")
+    } -PassThru -WindowStyle Hidden; Write-Output $p.Id`;
+    return {
+      cmd: "powershell",
+      args: ["-NoProfile", "-NonInteractive", "-Command", ps],
+    };
+  }
+  const esc = (v: string) => "'" + v.replace(/'/g, "'\\''") + "'";
+  return {
+    cmd: "sh",
+    args: [
+      "-c",
+      `nohup deno ${denoArgs.map(esc).join(" ")} >${
+        esc(logFile)
+      } 2>&1 & echo $!`,
+    ],
+  };
+}
+
 export async function cmdStart(
   args: string[],
   flags: GlobalFlags,
@@ -295,16 +333,14 @@ export async function cmdStart(
   // recover deno-runtime flags (esp. --env-file) from its own Deno.args.
   writeLaunchInfo(appId, { flags: passthrough, entry, cwd: Deno.cwd() });
 
-  // nohup + background: child survives parent exit (immune to SIGHUP).
-  // `exec` alone keeps child in parent session — gets killed when am exits.
-  // Capture real PID via $! on stdout.
-  const esc = (s: string) => "'" + s.replace(/'/g, "'\\''") + "'";
+  // Detached background spawn — the child must survive am's exit, its output
+  // must land in the log file, and its real PID must come back on stdout. The
+  // HOW is per-OS (sh/nohup does not exist on Windows — am start used to fail
+  // there outright); detachedSpawnSpec builds the right command for each.
   const logFile = stdoutLogPath(appId);
-  const cmd = `nohup deno ${denoArgs.map(esc).join(" ")} >${
-    esc(logFile)
-  } 2>&1 & echo $!`;
-  const proc = new Deno.Command("sh", {
-    args: ["-c", cmd],
+  const spec = detachedSpawnSpec(Deno.build.os, denoArgs, logFile);
+  const proc = new Deno.Command(spec.cmd, {
+    args: spec.args,
     stdin: "null",
     stdout: "piped",
     stderr: "null",
