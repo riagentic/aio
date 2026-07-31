@@ -7,6 +7,9 @@
  *   am pin v1.0.0-alpha38   pin that version: provision it, relink, record it
  *   am pin main             follow the branch tip (explicitly a moving target)
  *   am pin --latest         pin the newest release
+ *   am pin <path>           LOCAL-DEV pin: follow a framework checkout on this
+ *                           machine (`am pin /home/dev/code/gen/aio`) — for
+ *                           developing an app against a WIP framework
  *
  * The pin is one string in the app's `deno.json` (`"aioVersion"`), committed with
  * the code — so `git clone && am fix && deno task dev` builds the app against
@@ -17,6 +20,7 @@
 import type { GlobalFlags } from "./am-types.ts";
 import { detectMode, out, outError } from "./am-output.ts";
 import { resolveAioRoot } from "./am-cmd-link.ts";
+import { resolve } from "@std/path";
 import {
   currentLink,
   ensureVersion,
@@ -33,6 +37,7 @@ import {
   versionPath,
   writePin,
 } from "./am-versions.ts";
+import { isPathPin, PATH_PIN_PREFIX, pathPinTarget } from "./am-versions.ts";
 
 export type PinInfo = {
   /** What deno.json asks for (null = unpinned, i.e. "whatever is installed"). */
@@ -51,7 +56,11 @@ export type PinInfo = {
 export async function pinInfo(appDir: string, root: string): Promise<PinInfo> {
   const pinned = await readPin(appDir);
   const linkedPath = await currentLink(appDir);
-  const linkedRef = linkedPath ? refOfLink(linkedPath) : null;
+  const linkedRef = linkedPath
+    ? (pinned && isPathPin(pinned) && linkedPath === pathPinTarget(pinned)
+      ? pinned // a path pin is "linked as pinned" when dep/aio → that path
+      : refOfLink(linkedPath))
+    : null;
   return {
     pinned,
     linkedPath,
@@ -134,6 +143,28 @@ export async function cmdPin(
   }
 
   let ref = explicit ?? "";
+  // A PATH argument is a LOCAL-DEV pin: `am pin /home/dev/code/gen/aio` (or a
+  // relative path) records `path:<abs>` in aioVersion, so every later `am fix`
+  // keeps linking THIS checkout — the recorded form of `am link --aio=<path>`,
+  // for developing an app against a work-in-progress framework. It is
+  // machine-specific by nature; ensureVersion fails LOUDLY on a machine where
+  // the path does not exist, and `am pin --latest` returns to a release.
+  if (
+    ref !== "" &&
+    (isPathPin(ref) || ref.startsWith("/") || ref.startsWith("./") ||
+      ref.startsWith("../") || ref === ".")
+  ) {
+    const target = resolve(
+      Deno.cwd(),
+      isPathPin(ref) ? pathPinTarget(ref) : ref,
+    );
+    ref = PATH_PIN_PREFIX + target;
+    // Always on stderr, every mode — the trade-off must be impossible to miss.
+    console.error(
+      `⚠ local-dev pin — machine-specific: committing it pins every clone ` +
+        `to ${target}. Return to a release with "am pin --latest".`,
+    );
+  }
   if (wantLatest) {
     // "Latest" means latest WITHIN THE APP'S MAJOR. Crossing a major is a
     // breaking upgrade and has to be asked for — a command called `--latest`
@@ -190,9 +221,7 @@ export async function cmdPin(
       ? `pinned to aio ${res.ref}${
         res.ref === ref ? "" : `  (resolved from "${ref}")`
       }\n` +
-        `  dep/aio → ${versionPath(res.ref)}${
-          res.created ? "  (provisioned)" : ""
-        }\n` +
+        `  dep/aio → ${res.path}${res.created ? "  (provisioned)" : ""}\n` +
         `  deno.json aioVersion: ${res.ref}\n` +
         deps.map((d) =>
           `  dep synced: ${d.key} ${d.from ?? "(none)"} → ${d.to}\n`
