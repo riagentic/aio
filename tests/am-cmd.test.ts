@@ -811,3 +811,133 @@ Deno.test("cmdFix: --dry-run reports missing tasks without writing", async () =>
     await Deno.remove(dir, { recursive: true }).catch(() => {});
   }
 });
+
+// ── am pin <path> — LOCAL-DEV pin (follow a framework checkout) ──────────────
+import { cmdPin } from "../src/am/am-cmd-pin.ts";
+
+Deno.test("cmdPin: a path arg records a local-dev pin and links to it", async () => {
+  const orig = Deno.cwd();
+  const logs: string[] = [];
+  const realLog = console.log;
+  const realErr = console.error;
+  console.log = (...a: unknown[]) => logs.push(a.map(String).join(" "));
+  console.error = (...a: unknown[]) => logs.push(a.map(String).join(" "));
+  const fw = await Deno.makeTempDir(); // a stand-in aio checkout
+  const app = await Deno.makeTempDir();
+  try {
+    await Deno.writeTextFile(joinPath(fw, "mod.ts"), "export const aio = 1;");
+    await Deno.writeTextFile(
+      joinPath(fw, "deno.json"),
+      JSON.stringify({ imports: {} }),
+    );
+    await Deno.writeTextFile(
+      joinPath(app, "deno.json"),
+      JSON.stringify({
+        imports: { aio: "./dep/aio/mod.ts" },
+        tasks: {},
+        unstable: ["kv"],
+      }),
+    );
+    Deno.chdir(app);
+    await cmdPin([fw], {});
+    // The pin is recorded as machine-local, explicitly.
+    const cfg = JSON.parse(
+      await Deno.readTextFile(joinPath(app, "deno.json")),
+    ) as { aioVersion?: string };
+    assertEquals(cfg.aioVersion, `path:${fw}`);
+    // dep/aio links to the checkout itself, not a worktree.
+    assert(
+      (await Deno.realPath(joinPath(app, "dep", "aio"))) ===
+        (await Deno.realPath(fw)),
+      "dep/aio resolves to the local checkout",
+    );
+    // The warning names the trade-off.
+    assert(
+      logs.some((l) => l.includes("machine-specific")),
+      logs.join("\n"),
+    );
+  } finally {
+    console.log = realLog;
+    console.error = realErr;
+    Deno.chdir(orig);
+    await Deno.remove(fw, { recursive: true }).catch(() => {});
+    await Deno.remove(app, { recursive: true }).catch(() => {});
+  }
+});
+
+Deno.test("cmdFix: honors a recorded path pin after the symlink is lost", async () => {
+  const orig = Deno.cwd();
+  const realLog = console.log;
+  console.log = () => {};
+  const fw = await Deno.makeTempDir();
+  const app = await Deno.makeTempDir();
+  try {
+    await Deno.writeTextFile(joinPath(fw, "mod.ts"), "export const aio = 1;");
+    await Deno.writeTextFile(
+      joinPath(app, "deno.json"),
+      JSON.stringify({
+        imports: { aio: "./dep/aio/mod.ts" },
+        aioVersion: `path:${fw}`,
+        tasks: {},
+        unstable: ["kv"],
+      }),
+    );
+    Deno.chdir(app); // fresh clone shape: no dep/aio at all
+    await cmdFix([], {});
+    assertEquals(
+      await Deno.realPath(joinPath(app, "dep", "aio")),
+      await Deno.realPath(fw),
+      "am fix relinked dep/aio to the path pin",
+    );
+  } finally {
+    console.log = realLog;
+    Deno.chdir(orig);
+    await Deno.remove(fw, { recursive: true }).catch(() => {});
+    await Deno.remove(app, { recursive: true }).catch(() => {});
+  }
+});
+
+Deno.test("cmdPin: a path pin whose checkout is gone fails loud with the fix", async () => {
+  const orig = Deno.cwd();
+  const errs: string[] = [];
+  const realLog = console.log;
+  const realErr = console.error;
+  console.log = (...a: unknown[]) => errs.push(a.map(String).join(" "));
+  console.error = (...a: unknown[]) => errs.push(a.map(String).join(" "));
+  const app = await Deno.makeTempDir();
+  const exitCalls: (number | undefined)[] = [];
+  const realExit = Deno.exit;
+  // deno-lint-ignore no-explicit-any
+  (Deno as any).exit = (c?: number) => {
+    exitCalls.push(c);
+    throw new Error("exit-intercepted");
+  };
+  try {
+    await Deno.writeTextFile(
+      joinPath(app, "deno.json"),
+      JSON.stringify({
+        imports: { aio: "./dep/aio/mod.ts" },
+        tasks: {},
+        unstable: ["kv"],
+      }),
+    );
+    Deno.chdir(app);
+    try {
+      await cmdPin(["/nonexistent/aio-checkout"], {});
+    } catch (e) {
+      assert(String(e).includes("exit-intercepted"), String(e));
+    }
+    assertEquals(exitCalls, [1]);
+    assert(
+      errs.some((l) => l.includes("no aio checkout")),
+      errs.join("\n"),
+    );
+  } finally {
+    // deno-lint-ignore no-explicit-any
+    (Deno as any).exit = realExit;
+    console.log = realLog;
+    console.error = realErr;
+    Deno.chdir(orig);
+    await Deno.remove(app, { recursive: true }).catch(() => {});
+  }
+});
