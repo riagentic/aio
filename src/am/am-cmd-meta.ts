@@ -7,6 +7,7 @@ import { VERSION } from "../server/aio.ts";
 import type { GlobalFlags } from "./am-types.ts";
 import { detectMode, out, outError } from "./am-output.ts";
 import { repoRoot } from "./am-cmd-create.ts";
+import { resolve } from "@std/path";
 
 const PKG = "@riagentic/aio";
 
@@ -49,15 +50,98 @@ async function runDeno(argv: string[]): Promise<number> {
   return code;
 }
 
+/** `deno` argv that installs am from a LOCAL checkout — the dev-am switch. */
+export function installFromArgv(checkout: string): string[] {
+  return [
+    "install",
+    "-gAf",
+    "--config",
+    `${checkout}/deno.json`,
+    "-n",
+    "am",
+    `${checkout}/src/am.ts`,
+  ];
+}
+
+/** The canonical install location — what plain `am update` returns you to. */
+function canonicalRoot(): string {
+  return Deno.env.get("AIO_HOME") ??
+    `${Deno.env.get("HOME") ?? ""}/.local/lib/aio`;
+}
+
 export async function cmdUpdate(
-  _args: string[],
+  args: string[],
   flags: GlobalFlags,
 ): Promise<void> {
   const mode = detectMode(flags);
+
+  // `am update <path>` — switch the GLOBAL am to a local checkout's am (a DEV
+  // am, running that checkout's live files: your unpushed edits apply
+  // immediately). The complement of a per-app path pin: it works everywhere,
+  // including before any app exists (`am create`, `am pin` themselves).
+  // Plain `am update` returns to the released am from the canonical install.
+  const pathArg = args.find((a) => !a.startsWith("--"));
+  if (pathArg) {
+    const checkout = resolve(Deno.cwd(), pathArg);
+    for (const probe of ["mod.ts", "src/am.ts", "deno.json"]) {
+      try {
+        await Deno.stat(`${checkout}/${probe}`);
+      } catch {
+        outError(
+          `${checkout} is not an aio checkout (${probe} missing) — ` +
+            `point at a framework clone, e.g. am update ~/code/aio`,
+          mode,
+        );
+        Deno.exit(1);
+      }
+    }
+    const code = await runDeno(installFromArgv(checkout));
+    if (code !== 0) {
+      outError(`install from ${checkout} failed (deno exit ${code})`, mode);
+      Deno.exit(code);
+    }
+    console.error(
+      `⚠ global am now runs from ${checkout} — a DEV am on live files ` +
+        `(your edits apply immediately). Plain "am update" returns to the ` +
+        `released am.`,
+    );
+    out(
+      mode === "json"
+        ? { updated: true, via: "path", checkout }
+        : `✓ am → ${checkout} (dev)`,
+      mode,
+    );
+    return;
+  }
+
   // Source install (the default): am runs from a git checkout — fetch and check
   // out the LAST TAGGED release (not the branch tip / WIP). am points at the
   // live files, so the next run picks up the change. JSR install: reinstall.
-  const root = repoRoot();
+  let root = repoRoot();
+  // Dev-am state (am running from some checkout that is NOT the canonical
+  // install): NEVER git-mutate that checkout — `git checkout --force <tag>`
+  // inside a developer's working repo would destroy their WIP. Return to the
+  // canonical install instead: update IT, then reinstall am from it.
+  if (root && resolve(root) !== resolve(canonicalRoot())) {
+    const canonical = canonicalRoot();
+    try {
+      await Deno.stat(`${canonical}/src/am.ts`);
+    } catch {
+      outError(
+        `am currently runs from ${root} (dev), and no canonical install ` +
+          `exists at ${canonical} — run install.sh to restore the released am`,
+        mode,
+      );
+      Deno.exit(1);
+    }
+    const code = await runDeno(installFromArgv(canonical));
+    if (code !== 0) {
+      outError(`reinstall from ${canonical} failed (deno exit ${code})`, mode);
+      Deno.exit(code);
+    }
+    console.error(`am: returned from dev checkout (${root}) to ${canonical}`);
+    root = canonical;
+  }
   if (root) {
     const git = async (args: string[], capture = false) => {
       const o = await new Deno.Command("git", {

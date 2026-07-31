@@ -263,6 +263,16 @@ a work-in-progress framework. It is machine-specific by design: on a machine
 without that path, `am fix` fails loudly with the fix instead of silently
 linking something else. Return to a reproducible release with `am pin --latest`.
 
+Inside a path-pinned app, the installed `am` **delegates** to the pinned
+checkout's own am (announced on stderr; `AIO_AM_NO_DELEGATE=1` opts out) — so am
+behavior always matches the framework the app is built against, unpushed
+commands included. To use a checkout's am **everywhere** (even before any app
+exists), switch the global install: `am update /path/to/aio` — a dev am on live
+files, so your edits apply immediately. Plain `am update` returns to the
+released am; it never git-mutates a dev checkout it happens to be running from.
+First switch, when the installed am is a release that predates this verb: run
+the checkout's own am once — `cd <checkout> && deno task am update .`.
+
 `am create` pins the **newest release** by default;
 `am create app --aio-version=main` opts into the tip. The clone → build path is
 then:
