@@ -941,3 +941,164 @@ Deno.test("cmdPin: a path pin whose checkout is gone fails loud with the fix", a
     await Deno.remove(app, { recursive: true }).catch(() => {});
   }
 });
+
+Deno.test("am delegates to a path-pinned checkout's am (toolchain coherence)", async () => {
+  // The chicken-and-egg a local-dev pin must solve: an app pinned to a WIP
+  // framework needs that framework's am (unpushed commands included), not the
+  // installed one. The installed am detects the path pin and re-execs.
+  const fw = await Deno.makeTempDir(); // fake checkout with a marker am
+  const app = await Deno.makeTempDir();
+  try {
+    await Deno.writeTextFile(joinPath(fw, "mod.ts"), "export const aio = 1;");
+    await Deno.writeTextFile(
+      joinPath(fw, "deno.json"),
+      JSON.stringify({ imports: {} }),
+    );
+    await Deno.mkdir(joinPath(fw, "src"));
+    await Deno.writeTextFile(
+      joinPath(fw, "src", "am.ts"),
+      `console.log("PINNED-AM " + Deno.args.join(" "));`,
+    );
+    await Deno.writeTextFile(
+      joinPath(app, "deno.json"),
+      JSON.stringify({
+        imports: { aio: "./dep/aio/mod.ts" },
+        aioVersion: `path:${fw}`,
+        unstable: ["kv"],
+      }),
+    );
+    const REPO = new URL("..", import.meta.url).pathname;
+    const run = (env: Record<string, string> = {}) =>
+      new Deno.Command(Deno.execPath(), {
+        args: [
+          "run",
+          "-A",
+          "--config",
+          joinPath(REPO, "deno.json"),
+          joinPath(REPO, "src", "am.ts"),
+          "version",
+        ],
+        cwd: app,
+        env: { ...Deno.env.toObject(), ...env },
+        stdout: "piped",
+        stderr: "piped",
+      }).output();
+
+    const p = await run();
+    const outText = new TextDecoder().decode(p.stdout);
+    const errText = new TextDecoder().decode(p.stderr);
+    assert(outText.includes("PINNED-AM version"), `out: ${outText}`);
+    assert(errText.includes("path pin"), `stderr announces: ${errText}`);
+
+    // Opt-out: the installed am handles the command itself.
+    const p2 = await run({ AIO_AM_NO_DELEGATE: "1" });
+    const out2 = new TextDecoder().decode(p2.stdout);
+    assert(!out2.includes("PINNED-AM"), `no delegation: ${out2}`);
+    assert(out2.includes("1.0.0"), `real am version: ${out2}`);
+  } finally {
+    await Deno.remove(fw, { recursive: true }).catch(() => {});
+    await Deno.remove(app, { recursive: true }).catch(() => {});
+  }
+});
+
+// ── am update <path> — switch the global am to a dev checkout ────────────────
+import { cmdUpdate, installFromArgv } from "../src/am/am-cmd-meta.ts";
+
+Deno.test("am update <path>: installs the checkout's am globally (sandboxed)", async () => {
+  const fw = await Deno.makeTempDir();
+  const sandbox = await Deno.makeTempDir();
+  const logs: string[] = [];
+  const realLog = console.log;
+  const realErr = console.error;
+  console.log = (...a: unknown[]) => logs.push(a.map(String).join(" "));
+  console.error = (...a: unknown[]) => logs.push(a.map(String).join(" "));
+  const prevRoot = Deno.env.get("DENO_INSTALL_ROOT");
+  try {
+    await Deno.writeTextFile(joinPath(fw, "mod.ts"), "export const aio = 1;");
+    await Deno.writeTextFile(
+      joinPath(fw, "deno.json"),
+      JSON.stringify({ imports: {} }),
+    );
+    await Deno.mkdir(joinPath(fw, "src"));
+    await Deno.writeTextFile(
+      joinPath(fw, "src", "am.ts"),
+      `console.log("DEV-AM " + Deno.args.join(" "));`,
+    );
+    Deno.env.set("DENO_INSTALL_ROOT", sandbox); // never touch the real am
+    await cmdUpdate([fw], {});
+    // The installed shim exists and runs the DEV am.
+    const bin = joinPath(
+      sandbox,
+      "bin",
+      Deno.build.os === "windows" ? "am.cmd" : "am",
+    );
+    const p = await new Deno.Command(bin, {
+      args: ["whoami"],
+      stdout: "piped",
+      stderr: "null",
+    }).output();
+    assert(
+      new TextDecoder().decode(p.stdout).includes("DEV-AM whoami"),
+      new TextDecoder().decode(p.stdout),
+    );
+    // The switch is loud, with the way back.
+    assert(logs.some((l) => l.includes("DEV am")), logs.join("\n"));
+    assert(
+      logs.some((l) => l.includes('"am update" returns')),
+      logs.join("\n"),
+    );
+  } finally {
+    if (prevRoot === undefined) Deno.env.delete("DENO_INSTALL_ROOT");
+    else Deno.env.set("DENO_INSTALL_ROOT", prevRoot);
+    console.log = realLog;
+    console.error = realErr;
+    await Deno.remove(fw, { recursive: true }).catch(() => {});
+    await Deno.remove(sandbox, { recursive: true }).catch(() => {});
+  }
+});
+
+Deno.test("am update <path>: refuses a non-checkout path, loudly", async () => {
+  const notFw = await Deno.makeTempDir();
+  const logs: string[] = [];
+  const realLog = console.log;
+  const realErr = console.error;
+  console.log = (...a: unknown[]) => logs.push(a.map(String).join(" "));
+  console.error = (...a: unknown[]) => logs.push(a.map(String).join(" "));
+  const realExit = Deno.exit;
+  const exits: (number | undefined)[] = [];
+  // deno-lint-ignore no-explicit-any
+  (Deno as any).exit = (c?: number) => {
+    exits.push(c);
+    throw new Error("exit-intercepted");
+  };
+  try {
+    try {
+      await cmdUpdate([notFw], {});
+    } catch (e) {
+      assert(String(e).includes("exit-intercepted"));
+    }
+    assertEquals(exits, [1]);
+    assert(
+      logs.some((l) => l.includes("not an aio checkout")),
+      logs.join("\n"),
+    );
+  } finally {
+    // deno-lint-ignore no-explicit-any
+    (Deno as any).exit = realExit;
+    console.log = realLog;
+    console.error = realErr;
+    await Deno.remove(notFw, { recursive: true }).catch(() => {});
+  }
+});
+
+Deno.test("installFromArgv: the one dev-install recipe", () => {
+  assertEquals(installFromArgv("/x/aio"), [
+    "install",
+    "-gAf",
+    "--config",
+    "/x/aio/deno.json",
+    "-n",
+    "am",
+    "/x/aio/src/am.ts",
+  ]);
+});

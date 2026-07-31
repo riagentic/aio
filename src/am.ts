@@ -144,7 +144,45 @@ const COMMANDS: Record<string, CmdHandler> = {
 
 // ── Main entry ─────────────────────────────────────────────
 
+/** A path-pinned app (`aioVersion: "path:<checkout>"`) uses THE PINNED
+ *  CHECKOUT'S am, not the installed one — the whole point of a local-dev pin
+ *  is toolchain coherence with unpushed framework+am changes (the installed
+ *  am may not even know the commands the pinned framework's docs describe).
+ *  Loud on stderr, opt-out via AIO_AM_NO_DELEGATE=1; version pins keep the
+ *  installed am (least surprise — old checkouts may lack current commands). */
+async function delegateToPathPin(): Promise<boolean> {
+  if (Deno.env.get("AIO_AM_NO_DELEGATE")) return false;
+  const { readPin, isPathPin, pathPinTarget } = await import(
+    "./am/am-versions.ts"
+  );
+  const pin = await readPin(Deno.cwd());
+  if (!pin || !isPathPin(pin)) return false;
+  const target = pathPinTarget(pin);
+  const entry = `${target}/src/am.ts`;
+  try {
+    await Deno.stat(entry);
+  } catch {
+    return false; // dangling pin — the normal flow reports it properly
+  }
+  // Already running from that checkout? (deno task am, or a re-exec.)
+  const self = new URL(import.meta.url).pathname;
+  if (self === entry) return false;
+  console.error(
+    `am: path pin — using the pinned checkout's am (${target}). ` +
+      `AIO_AM_NO_DELEGATE=1 uses the installed am instead.`,
+  );
+  const p = new Deno.Command(Deno.execPath(), {
+    args: ["run", "-A", "--config", `${target}/deno.json`, entry, ...Deno.args],
+    env: { ...Deno.env.toObject(), AIO_AM_NO_DELEGATE: "1" },
+    stdin: "inherit",
+    stdout: "inherit",
+    stderr: "inherit",
+  }).spawn();
+  Deno.exit((await p.status).code);
+}
+
 async function main(): Promise<void> {
+  await delegateToPathPin();
   const { command, args, flags } = parseGlobalFlags(Deno.args);
   const handler = COMMANDS[command];
   if (!handler) {
