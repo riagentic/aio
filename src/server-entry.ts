@@ -14,15 +14,8 @@
 export { createDB, DEFAULT_PRAGMAS } from "./db/mod.ts";
 export type { DB, DBOpts, QueryResult, Tx } from "./db/mod.ts";
 export { connectCli, connectCliUDS } from "./server/cli-client.ts";
-// Signed release artifacts (`aio ship`) + least-privilege capability scanning.
-export {
-  buildShipManifest,
-  generateSigningKey,
-  sha256Hex,
-  shipApp,
-  type ShipManifest,
-  verifyShipManifest,
-} from "./build/ship.ts";
+// Signed release artifacts (`aio ship`) live on `aio/build` — build-time
+// tooling, not server runtime; the duplicate export here was surface bloat.
 
 // Where this app keeps its files (docs/persistence/where-files-live.md). An app
 // that writes its own files needs `appDirs(appId).files` to land inside the one

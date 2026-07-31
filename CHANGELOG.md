@@ -1,5 +1,116 @@
 # Changelog
 
+## 1.0.0-alpha41 — catching up (2026-07-31)
+
+A field report put it precisely: "aio's failure modes tend to be silent rather
+than loud — the philosophy is right, the implementation hasn't caught up
+everywhere." This release is the catching up: an adversarial review of alpha40,
+a structural hardening pass, one new headline feature, and every item from the
+space-invaders field report — each fix behind a guard that makes its whole bug
+class unshippable.
+
+### One line runs any aio app from source
+
+`curl -fsSL …/run.sh | sh` in an app repo = production build of the default
+target, running. `--dev` for the dev server; `--git <url>` (or `owner/repo`)
+clones, installs deno/aio/am, repairs the checkout (`am fix`), builds, runs. The
+artifact is found by timestamp, never by name, so the script cannot drift from
+the framework's naming rules. `run.ps1` mirrors it on Windows. Offline e2e in
+`test:onboard`.
+
+### The alpha40 review, and the fuzzer it left behind
+
+Four review agents reproduced real corruption bugs in released alpha40 — the
+beta streak resets to 0, by its own rule. Fixed and property-tested:
+transactional conflict detection had three tracked-read escapes (a path
+published by `s.$commit()` was exempt forever; `.find()` recorded no read; root
+enumeration never overlapped) plus a false abort on read-only stand-downs; patch
+narrowing corrupted overlapping-path batches; conflict aborts are typed
+(`TX_CONFLICT`).
+
+The lasting guard: a randomized **differential fuzzer** runs the same method
+body as a sync method (Immer draft) and an async method (live proxy) and
+requires identical state and reads. It immediately found two more: recorded
+mutation payloads were installed by reference and destructively replayed, and
+`{...s.obj}` copied nested live proxies into the recording (unbounded
+recursion). Both fixed — and as a consequence **assigning proxy-derived values
+back into state now simply works**, identically to sync. The oldest documented
+footgun (and its aiol rule) is gone.
+
+### The config bridge can no longer drop an option
+
+The hand-maintained CellsConfig→AioConfig copy silently dropped FOUR shipped
+options over its life (`strictOrigin`, `redactActions`, then found now:
+**`appDir` — logs went to the configured directory, all data to the default
+one** — and `renderBudget`, which was validator-legal, untypeable and never
+bridged). The bridge is now a mechanical spread filtered by the runtime's own
+whitelist, and the completeness test is a runtime sentinel gate: one value per
+documented option goes in and must come out.
+
+### `await cell.method()` — the browser side, unified
+
+The browser had its own hardcoded 15s ack ceiling with a guessed cause ("server
+overloaded or disconnected") — below every server ceiling, so the server's
+honest timeout could never reach a browser caller. The resolved
+`effectTimeoutMs`/`perfBudget` ceilings now ride the page shell and the new
+`cfg` frame; `0` waits indefinitely; offline-queued calls start their clock when
+the frame is sent, not when queued.
+
+### Sync cells: durable, seeded, and visible
+
+A server-origin write (effect, cron, `serverFn`, an async method's outcome) now
+folds into the cell's sync snapshot — debounced 100ms, flushed on clean
+shutdown; a restart never rewinds a write the server confirmed. Flipping
+`localFirst` on an app with existing data seeds the sync store from the restored
+state instead of erasing it. Actions-style cells are no longer adopted into a
+mode they cannot replay. The SPA deep-link shell carries `syncCells` (one shared
+shell closure). And the new C→S `cdiag` frame relays browser `degraded()`
+escalations, so `/__aio/health` reports `clientDegraded` instead of claiming
+health while a browser subsystem is dead.
+
+### The space-invaders report — every item
+
+- **A cell rename can no longer destroy data.** A stored-but-undeclared cell's
+  slice is preserved in every persisted document, stripped from runtime state,
+  announced at every boot; a rename migration is one `onRestore` hook (read the
+  old slice, move, delete to consume).
+- **Time travel stops cloning what is already immutable.** An entry stores the
+  committed frozen tree by reference — structural sharing, zero copy; the ~1
+  MB/s `structuredClone` at 60 fps, the 100KB cap and its size-sampling are
+  gone; window 200 → 2000; `diagnostics.skipActions` keeps a tick action out of
+  history.
+- **`am` can no longer silently retarget.** `--port=N` verifies the responder's
+  `/__aio/health` appId and refuses a mismatch; the lock/socket dir scopes with
+  `AIO_APPS_DIR`, so one env var isolates an instance completely; `am start` of
+  a GUI client on a headless box fails fast.
+- **`useCell` is deprecated where it bites** (its `.state` is a live view —
+  stash-and-diff compares state to itself), and aiol flags usage.
+- **testUI holds keys**: `ui.X.keyDown/keyUp`. `expectCell` retries and names
+  `scope:'client'` instead of blaming the predicate. **`useInterval`** is the
+  client-cadence idiom. The pressure hint names `scope:'client'`.
+- New docs: `docs/state/real-time.md` (at what cadence does state belong where —
+  with the measured hot-cell commit cost) and `docs/debugging/time-travel.md`.
+  `docs:check` now resolves every `docs/….md` path cited in src/ comments (it
+  caught three dangling refs on arrival).
+
+### Surface diet and removals (alpha window)
+
+484 → 467 public symbols: pre-methods relics (`draft`, `matchEffect`,
+`UnionOf`), duplicate re-exports (`connectCliUDS` and `DEFAULT_PRAGMAS` off
+extras, ship signing on `aio/build` only), `sha256Hex`, `authUser` off `aio/air`
+(use `useUser()`), internal type triple off the main entry, and `./schedule` is
+an explicit export list (cron plumbing off the surface). The legacy pre-v2 flow
+residue (`FLOW_*` error codes, `FlowStepRecord`) is deleted — nothing produced
+it since alpha27. New: `useInterval`, `TX_CONFLICT`, `degraded()` relay types,
+`diagnostics.skipActions`.
+
+Root housekeeping: historical `RELEASE_NOTES-*` live in `docs/release-notes/`,
+the bench baselines in `scripts/`.
+
+Gates: fmt, check, lint, lint:aio, boundaries, api:check, docs:check (with the
+new inline-ref gate), bench:check, publish --dry-run, test (3103 passed / 0
+failed), test:build, test:onboard.
+
 ## 1.0.0-alpha40 — silence is the bug (2026-07-29)
 
 ### Silence is the bug — the `errors` kata pass

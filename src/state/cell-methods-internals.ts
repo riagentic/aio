@@ -10,6 +10,7 @@ import {
   createBatcher,
   createLiveProxy,
   createReadWatch,
+  getNestedValue,
   resolveCall,
   setKey,
   snapshotForRead,
@@ -315,6 +316,10 @@ export function buildMethodsExecutor(
         // stale read stops being harmless and becomes the state we write.
         const guardCommit = (): void => {
           if (!watch) return;
+          // Publishing nothing is trivially serializable — a read-only
+          // stand-down (the documented `s.$live` re-check pattern) must be
+          // able to return without being told its reads moved.
+          if (watch.writes.size === 0 && batcher.pending().length === 0) return;
           const stale = conflictPath(
             origin,
             app.getState() as Record<string, unknown>,
@@ -323,17 +328,24 @@ export function buildMethodsExecutor(
           );
           if (stale === null) return;
           const where = stale === "" ? "this cell's shape" : `s.${stale}`;
-          const msg = `[${name}] ${_method}(): ${where} was changed by ` +
+          const base = `[${name}] ${_method}(): ${where} was changed by ` +
             `another action while this transactional method awaited, and its ` +
             `reads are pinned to entry — committing would overwrite that ` +
-            `change with a value computed from stale state. ` +
-            `Read through s.$live to work from current state, retry the ` +
-            `call, or set transaction: { conflict: "warn" } to commit anyway.`;
+            `change with a value computed from stale state.`;
           if (onConflict === "abort") {
             batcher.discard();
-            throw new Error(msg);
+            throw createAioError(
+              "TX_CONFLICT",
+              base +
+                ` Read through s.$live to work from current state, retry the ` +
+                `call, or set transaction: { conflict: "warn" } to commit anyway.`,
+              { cellName: name, actionType: `${prefix}:${_method}` },
+            );
           }
-          log.error("cell", msg);
+          log.error(
+            "cell",
+            base + ` Committing anyway (transaction: { conflict: "warn" }).`,
+          );
         };
         // Mid-method atomic publish: flush the buffer, then re-snapshot so reads
         // after $commit() see the just-committed state.
@@ -346,13 +358,30 @@ export function buildMethodsExecutor(
             // waiting for the (async) dispatch to round-trip through getState().
             const muts = batcher.pending().slice();
             batcher.flush();
-            // These are published now, so a later validation must not read
-            // them back as somebody else's change.
-            for (const m of muts) watch?.flushed.add(watchKey(m.path));
             if (muts.length > 0 && snap.s) {
               const next = snapshotForRead(snap.s) as Record<string, unknown>;
               applyMutations(next, muts);
               snap.s = next;
+            }
+            if (watch) {
+              // These are published now. Record the VALUE we published — a
+              // later validation treats "live is our value (or still entry
+              // value while the dispatch settles)" as our own write, and any
+              // third value as a concurrent writer's. A bare skip would exempt
+              // the path for the rest of the method (a real lost update).
+              for (const m of muts) {
+                watch.flushed.set(
+                  watchKey(m.path),
+                  getNestedValue(snap.s, m.path),
+                );
+              }
+              // Everything up to here was just validated and published —
+              // re-baseline so the NEXT validation covers only what this
+              // method reads and writes from now on. Without this, a
+              // read-only tail (or serialize mode) re-flags already-settled
+              // reads as conflicts.
+              watch.reads.clear();
+              watch.writes.clear();
             }
           }
           : undefined;
@@ -377,6 +406,9 @@ export function buildMethodsExecutor(
             new Map(),
             { v: null },
             controller.signal,
+            // Same commit closure as the pinned proxy — `s.$live.$commit()`
+            // must publish, not silently no-op.
+            commit,
           );
         const proxy = createLiveProxy(
           name,

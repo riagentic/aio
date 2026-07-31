@@ -349,10 +349,20 @@ function applyLocalFirst(composed: ComposedCells, enabled: boolean): void {
   if (!enabled) return;
   const adopted: string[] = [];
   const kept: string[] = [];
+  const unable: string[] = [];
   for (const f of composed.cells) {
     if (f.__aio.syncConfig) continue; // the cell already asked for sync
     if (f.__aio.syncOptOut) {
       kept.push(f.__aio.id);
+      continue;
+    }
+    // Only methods-style cells replay as CRDT ops (the browser stub builds
+    // its rebase reducer from the sync methods — `asyncMethods` marks that
+    // factory). Adopting an actions-style cell would EXCLUDE it from KV
+    // persistence while the client warns and keeps round-tripping: all cost,
+    // no local-first, and its post-flip writes would not survive a restart.
+    if (!f.__aio.asyncMethods) {
+      unable.push(f.__aio.id);
       continue;
     }
     f.__aio.syncConfig = normalizeSyncConfig(true);
@@ -361,7 +371,12 @@ function applyLocalFirst(composed: ComposedCells, enabled: boolean): void {
   log.info(
     `localFirst: ${adopted.length} cell(s) run locally and sync — ` +
       `${adopted.join(", ") || "none"}` +
-      (kept.length ? `; server-only by opt-out: ${kept.join(", ")}` : ""),
+      (kept.length ? `; server-only by opt-out: ${kept.join(", ")}` : "") +
+      (unable.length
+        ? `; server-only (actions-style cells cannot replay locally): ${
+          unable.join(", ")
+        }`
+        : ""),
   );
 }
 

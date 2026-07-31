@@ -64,6 +64,17 @@ async function main(): Promise<void> {
     );
   }
 
+  // Inline doc references: a `docs/<path>.md` cited in a src/ comment is a
+  // promise — every anchor the field followed was accurate, which is why they
+  // are trusted (space-invaders report). One dangling ref erodes that, so a
+  // citation of a nonexistent page is a hard gate.
+  const refIssues = await checkSrcDocRefs();
+  console.log(
+    `Inline doc refs: ${
+      refIssues.length ? `${refIssues.length} dangling` : "all resolve"
+    }`,
+  );
+
   // R2.2: every AioErrorCode must be documented in docs/debugging/errors.md, so
   // a new code can never ship without an operator-facing explanation.
   const codeIssues = await checkErrorCodes();
@@ -84,6 +95,13 @@ async function main(): Promise<void> {
         }`,
     );
   }
+  if (refIssues.length) {
+    console.log(
+      `\nDangling doc references in src/ (must fix — write the page or fix ` +
+        `the path):\n${refIssues.join("\n")}`,
+    );
+    Deno.exit(1);
+  }
   if (codeIssues.length) {
     console.log(
       `\nUndocumented error codes (must fix):\n${codeIssues.join("\n")}`,
@@ -91,6 +109,34 @@ async function main(): Promise<void> {
     Deno.exit(1);
   }
   console.log("\n✓ All error codes documented.");
+}
+
+/** Every `docs/….md` path mentioned in src/ code must exist on disk. */
+async function checkSrcDocRefs(): Promise<string[]> {
+  const root = new URL("..", import.meta.url).pathname;
+  const issues: string[] = [];
+  const seen = new Map<string, string>(); // path → first citing file
+  async function walk(dir: string): Promise<void> {
+    for await (const e of Deno.readDir(dir)) {
+      const p = `${dir}/${e.name}`;
+      if (e.isDirectory) await walk(p);
+      else if (e.isFile && /\.(ts|tsx)$/.test(e.name)) {
+        const src = await Deno.readTextFile(p);
+        for (const m of src.matchAll(/\bdocs\/[\w./-]+\.md/g)) {
+          if (!seen.has(m[0])) seen.set(m[0], p.slice(root.length));
+        }
+      }
+    }
+  }
+  await walk(`${root}src`);
+  for (const [ref, file] of seen) {
+    try {
+      await Deno.stat(`${root}${ref}`);
+    } catch {
+      issues.push(`  ${ref} (cited in ${file}) does not exist`);
+    }
+  }
+  return issues;
 }
 
 /** Assert every `AioErrorCode` value defined in src/error.ts appears in

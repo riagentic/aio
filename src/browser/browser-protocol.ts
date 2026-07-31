@@ -45,6 +45,7 @@ import {
 } from "../vitals/render-meter.ts";
 import { createTransportProbeClient } from "../vitals/transport-probe.ts";
 import { resolveSyncCells } from "./sync-cells.ts";
+import { _cfgSink } from "./browser-shared.ts";
 import {
   DEFAULT_HEARTBEAT_INTERVAL,
   DEFAULT_THRESHOLDS,
@@ -430,7 +431,26 @@ export function _setSyncLoaderForTest(
   _syncLoader = fn ?? (() => import("./browser-sync.ts"));
 }
 
+/** Apply a server-sent "cfg" frame (runtime config handshake). Shell-injected
+ *  keys win — same values, delivered earlier — so this only FILLS GAPS, which
+ *  is exactly the build-time-templated-shell case (electron UDS, android
+ *  assets: no `__aioConfig` at all). If sync cells become known here, adoption
+ *  runs now; actions dispatched before this frame round-tripped as plain
+ *  actions, which the server executes identically — late adoption upgrades
+ *  the routing, it never corrects state. */
+export function _applyServerConfig(cfg: Record<string, unknown>): void {
+  const g = globalThis as unknown as {
+    __aioConfig?: Record<string, unknown>;
+  };
+  g.__aioConfig = { ...cfg, ...(g.__aioConfig ?? {}) };
+  if (_ensured) _initSyncIfNeeded();
+}
+_cfgSink.apply = _applyServerConfig;
+
 function _initSyncIfNeeded(): void {
+  // Re-entrant by design: called at ensureConnected AND when a "cfg" frame
+  // lands. Once ids are known (or the engine is up) there is nothing to redo.
+  if (_syncCellIds || _syncRoute) return;
   // Same resolver the engine uses — see sync-cells.ts for why this is not two
   // independent walks over the registry.
   const ids = new Set(

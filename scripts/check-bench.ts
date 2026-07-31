@@ -1,12 +1,12 @@
 // scripts/check-bench.ts — the D12 perf gate. Runs the benchmark suite
 // (or reads bench-results.json with --cached) and compares each metric's
-// MEDIAN against the committed floors in bench-baselines.json.
+// MEDIAN against the committed floors in scripts/bench-baselines.json.
 // "Correct but slower" fails here like a broken test.
 // Run: deno task bench:check   (add --cached to reuse bench-results.json)
 
 const root = new URL("../", import.meta.url);
 const resultsPath = new URL("bench-results.json", root);
-const baselinesPath = new URL("bench-baselines.json", root);
+const baselinesPath = new URL("bench-baselines.json", import.meta.url);
 
 if (!Deno.args.includes("--cached")) {
   const cmd = new Deno.Command(Deno.execPath(), {

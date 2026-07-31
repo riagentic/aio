@@ -54,6 +54,113 @@ type Entry = {
 
 const _registry = new Map<string, Entry>();
 
+/** One escalation/recovery event, as relayed across a transport. */
+export type DegradedChange = {
+  name: string;
+  kind: "down" | "up";
+  failures: number;
+  since: number;
+  lastError: string;
+};
+
+// ── Cross-runtime relay ──────────────────────────────────────────────
+// Each runtime keeps its own registry; a BROWSER escalation is invisible to
+// the server's /__aio/health unless it travels. The transport registers a
+// sender here (browser-transport-ws), and the server records what arrives in
+// the client registry below. Deliberately not the diagnostic bus: that bus is
+// dev-only, and a health signal must work identically in prod.
+let _relay: ((ev: DegradedChange) => void) | null = null;
+
+/** Point escalation/recovery events at a transport (browser side). Replaces
+ *  any previous relay — one live transport per client runtime. */
+export function _setDegradedRelay(
+  fn: ((ev: DegradedChange) => void) | null,
+): void {
+  _relay = fn;
+}
+
+function relayChange(e: Entry, kind: "down" | "up"): void {
+  try {
+    _relay?.({
+      name: e.name,
+      kind,
+      failures: e.failures,
+      since: e.since,
+      lastError: e.lastError,
+    });
+  } catch { /* transport gone — the next connect re-registers */ }
+}
+
+// ── Server-side registry of CLIENT degradations (fed by "cdiag" frames) ──
+const CLIENT_CAP_PER_CLIENT = 16;
+const NAME_CAP = 64;
+const ERROR_CAP = 200;
+const _clientRegistry = new Map<string, Map<string, DegradedChange>>();
+
+/** Record a client's degradation change (server side). Values are capped —
+ *  this arrives off the wire. */
+export function _recordClientDegraded(
+  clientId: string,
+  ev: DegradedChange,
+): void {
+  let entries = _clientRegistry.get(clientId);
+  if (!entries) {
+    entries = new Map();
+    _clientRegistry.set(clientId, entries);
+  }
+  const name = ev.name.slice(0, NAME_CAP);
+  if (ev.kind === "up") {
+    entries.delete(name);
+    if (entries.size === 0) _clientRegistry.delete(clientId);
+    return;
+  }
+  if (entries.size >= CLIENT_CAP_PER_CLIENT && !entries.has(name)) return;
+  entries.set(name, {
+    name,
+    kind: "down",
+    failures: ev.failures,
+    since: ev.since,
+    lastError: ev.lastError.slice(0, ERROR_CAP),
+  });
+}
+
+/** A client disconnected — its degradations are no longer live signal. */
+export function _clearClientDegraded(clientId: string): void {
+  _clientRegistry.delete(clientId);
+}
+
+/** Aggregated client-side degradations for health output: one row per
+ *  operation name, with how many connected clients report it. */
+export function clientDegradedReport(): {
+  name: string;
+  clients: number;
+  failures: number;
+  lastError: string;
+}[] {
+  const byName = new Map<
+    string,
+    { name: string; clients: number; failures: number; lastError: string }
+  >();
+  for (const entries of _clientRegistry.values()) {
+    for (const ev of entries.values()) {
+      const row = byName.get(ev.name);
+      if (row) {
+        row.clients++;
+        row.failures = Math.max(row.failures, ev.failures);
+        row.lastError = ev.lastError || row.lastError;
+      } else {
+        byName.set(ev.name, {
+          name: ev.name,
+          clients: 1,
+          failures: ev.failures,
+          lastError: ev.lastError,
+        });
+      }
+    }
+  }
+  return [...byName.values()];
+}
+
 /** Watch a best-effort operation. Same name ⇒ same tracker, so a module-level
  *  `const cache = degraded("nft-cache")` and a per-call lookup agree.
  *
@@ -67,21 +174,38 @@ export function degraded(
   opts: { after?: number } = {},
 ): Degraded {
   const after = Math.max(1, opts.after ?? DEFAULT_AFTER);
-  let entry = _registry.get(name);
-  if (!entry) {
-    entry = {
-      name,
-      after,
-      failures: 0,
-      escalated: false,
-      since: 0,
-      lastError: "",
-    };
-    _registry.set(name, entry);
+  // Resolved PER CALL, not captured: a handle held across `_resetDegraded()`
+  // (test teardown) must re-register instead of counting on an orphaned entry
+  // the report can no longer see.
+  const resolve = (): Entry => {
+    let entry = _registry.get(name);
+    if (!entry) {
+      entry = {
+        name,
+        after,
+        failures: 0,
+        escalated: false,
+        since: 0,
+        lastError: "",
+      };
+      _registry.set(name, entry);
+    }
+    return entry;
+  };
+  const first = resolve();
+  if (opts.after !== undefined && first.after !== after) {
+    // Two sites watching one name with different thresholds would silently
+    // race for whichever registered first — in the module whose whole point
+    // is that nothing diverges silently.
+    console.warn(
+      `[aio] degraded("${name}"): after=${after} requested, but this name ` +
+        `was created with after=${first.after} — keeping ${first.after}. ` +
+        `Use one threshold per name.`,
+    );
   }
-  const e = entry;
 
   const fail = (err: unknown): void => {
+    const e = resolve();
     e.lastError = err instanceof Error ? err.message : String(err);
     if (e.failures === 0) e.since = Date.now();
     e.failures++;
@@ -101,9 +225,11 @@ export function degraded(
       detail: { failures: e.failures, since: e.since, lastError: e.lastError },
       hint: "Fix the underlying cause, or stop treating this path as optional.",
     });
+    relayChange(e, "down");
   };
 
   const ok = (): void => {
+    const e = resolve();
     if (e.escalated) {
       const held = Date.now() - e.since;
       console.info(
@@ -116,6 +242,7 @@ export function degraded(
         message: `${name}: recovered after ${e.failures} failures`,
         detail: { failures: e.failures, durationMs: held },
       });
+      relayChange(e, "up");
     }
     e.failures = 0;
     e.escalated = false;
@@ -136,10 +263,10 @@ export function degraded(
       }
     },
     get failures() {
-      return e.failures;
+      return resolve().failures;
     },
     get isDegraded() {
-      return e.escalated;
+      return resolve().escalated;
     },
   };
 }
@@ -166,7 +293,9 @@ export function degradedReport(): {
   return out;
 }
 
-/** Test isolation — drop every tracker. */
+/** Test isolation — drop every tracker, relay, and client record. */
 export function _resetDegraded(): void {
   _registry.clear();
+  _clientRegistry.clear();
+  _relay = null;
 }

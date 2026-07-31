@@ -24,6 +24,7 @@ import {
   getLowWater,
   loadOpsSince,
   loadSnapshot,
+  seedSyncSnapshot,
 } from "../sync/server-store.ts";
 
 /** B1/AIO-416: replay each sync cell's committed op-log into state at boot.
@@ -70,6 +71,25 @@ export async function replaySyncOps<S>(
           `sync: cell "${cell}" was compacted but has no readable snapshot — ` +
             `state before the last compaction cannot be restored`,
         );
+      } else if (ops.length === 0) {
+        // The sync store has never seen this cell — it was JUST adopted
+        // (localFirst flip or a new `sync: true`) and whatever state the KV
+        // restore produced is about to lose its only durable home: sync cells
+        // are excluded from KV on the next persist, so a later restart would
+        // resurrect the cell as initialState and the pre-flip data would
+        // exist nowhere. Make today's state the durable base first.
+        const restored = (next as Record<string, unknown>)[cell];
+        if (restored !== undefined) {
+          try {
+            await seedSyncSnapshot(db, cell, restored);
+            log.info(
+              `sync: cell "${cell}" newly adopted — seeded its sync snapshot ` +
+                `from the restored state (KV stops persisting sync cells)`,
+            );
+          } catch (e) {
+            log.error(`sync: seeding snapshot for "${cell}" failed — ${e}`);
+          }
+        }
       }
     } catch (e) {
       log.error(`sync: snapshot restore failed for cell "${cell}" — ${e}`);
@@ -383,6 +403,19 @@ export async function bootStorage<S>(
           initialState as Record<string, unknown>,
           migrated,
         ) as S;
+        // Top-level keys the merge dropped as "removed from schema" are CELLS,
+        // not fields — a renamed/undeclared cell's whole slice. They ride into
+        // state here so onRestore can migrate them; section 5b then preserves
+        // whatever remains (and strips it from runtime state). Field-level
+        // schema-drop semantics inside declared cells are unchanged.
+        for (const k of Object.keys(migrated)) {
+          if (
+            !(k in (initialState as Record<string, unknown>)) &&
+            !k.startsWith("__")
+          ) {
+            (state as Record<string, unknown>)[k] = migrated[k];
+          }
+        }
         log.debug(
           `persist: loaded key="${persistKey}" (${persistMode})`,
         );
@@ -440,6 +473,43 @@ export async function bootStorage<S>(
       state = onRestore(state);
     } catch (e) {
       log.error(`hook onRestore: ${e}`);
+    }
+  }
+
+  // ── 5b. Stored-but-undeclared cells: preserved, never dropped ─────
+  // A cell rename/split used to destroy the old cell's data silently: the
+  // slice was restored into state, no declared cell owned it, and the first
+  // persist rewrote the document without it (space-invaders field report — a
+  // leaderboard recovered from SQLite free pages). Now: the slice is carried
+  // into every future persisted document verbatim, stripped from RUNTIME
+  // state (no cell owns it — it must not broadcast), and announced at every
+  // boot until the app migrates or re-declares it. onRestore runs FIRST, so a
+  // rename migration is one hook: read `state.oldCell`, move what you need,
+  // and `delete state.oldCell` — a deliberate delete there CONSUMES the slice
+  // (its row is removed on the next flush).
+  const orphanCells: Record<string, unknown> = {};
+  if (persistedSnapshot) {
+    const declared = new Set(
+      Object.keys(initialState as Record<string, unknown>),
+    );
+    const s = state as Record<string, unknown>;
+    for (const k of Object.keys(persistedSnapshot)) {
+      if (declared.has(k) || k.startsWith("__")) continue;
+      if (k in s) {
+        orphanCells[k] = s[k];
+        delete s[k];
+        log.warn(
+          `persist: stored cell "${k}" is not declared by this build — its ` +
+            `data is PRESERVED in the store, untouched. Migrate it in ` +
+            `onRestore (read state.${k}, move what you need, delete the key ` +
+            `to consume it), or re-declare the cell to get it back as-is.`,
+        );
+      } else {
+        log.info(
+          `persist: stored cell "${k}" was consumed by onRestore — its row ` +
+            `will be removed on the next persist`,
+        );
+      }
     }
   }
 
@@ -512,6 +582,14 @@ export async function bootStorage<S>(
     appId,
     getJournalSeq: journal ? () => journal.currentSeq() : undefined,
     onPersisted: journal ? (seq) => journal.setWatermark(seq) : undefined,
+    ...(Object.keys(orphanCells).length ? { orphanCells } : {}),
+    ...(persistedSnapshot
+      ? {
+        storedKeys: Object.keys(persistedSnapshot).filter((k) =>
+          !k.startsWith("__")
+        ),
+      }
+      : {}),
   });
 
   return {

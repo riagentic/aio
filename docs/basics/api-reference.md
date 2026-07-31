@@ -70,13 +70,11 @@ See [routes](../examples/05-integrations.md) and [auth](../auth/auth.md).
 
 ## Advanced
 
-| API                                        | Description                                         |
-| ------------------------------------------ | --------------------------------------------------- |
-| `composeCells(entries)`                    | Combine cells manually                              |
-| `bindCell(cell, dispatch, getState)`       | Wire a cell to a custom dispatch bus                |
-| `draft(state, fn)`                         | Immer wrapper for custom reducers (bindCell setups) |
-| `matchEffect(effect, handlers, fallback?)` | Typed effect dispatch -- alternative to switch/case |
-| `deepFreeze(obj)`                          | Deep freeze for dev-mode immutability checks        |
+| API                                  | Description                                  |
+| ------------------------------------ | -------------------------------------------- |
+| `composeCells(entries)`              | Combine cells manually                       |
+| `bindCell(cell, dispatch, getState)` | Wire a cell to a custom dispatch bus         |
+| `deepFreeze(obj)`                    | Deep freeze for dev-mode immutability checks |
 
 ---
 

@@ -48,3 +48,39 @@ export function useRaf(
     onCleanup(() => cancelAnimationFrame(id));
   });
 }
+
+/**
+ * Run `cb` every `ms` milliseconds until the component unmounts — a managed
+ * `setInterval` with automatic cleanup. The client-side idiom for any cadence
+ * that isn't per-frame: a music sequencer's beat, a poll, a clock tick.
+ * (`schedule.every` runs on the SERVER — there is no `AudioContext` there;
+ * space-invaders field report.)
+ *
+ * The latest `cb` is always used, so a closure reading live cell state stays
+ * current across re-renders. Pass `active: false` to keep it off (a paused
+ * screen); changing `ms` between renders does not restart the interval — use
+ * `active` to stop and remount, or branch inside `cb`, for tempo changes.
+ *
+ * Must be called inside a component function body during render.
+ *
+ * ```ts
+ * function Music() {
+ *   useInterval(() => audio.step(), 150, game.screen === "playing");
+ *   return null;
+ * }
+ * ```
+ */
+export function useInterval(
+  cb: () => void,
+  ms: number,
+  active = true,
+): void {
+  const cbRef = useRef(cb);
+  cbRef.current = cb;
+
+  onMount(() => {
+    if (!active) return;
+    const id = setInterval(() => cbRef.current(), ms);
+    onCleanup(() => clearInterval(id));
+  });
+}

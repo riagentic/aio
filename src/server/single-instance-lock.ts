@@ -86,12 +86,25 @@ export function resolveAppId(appId?: string): string {
 
 /** Directory for lock + socket files — /tmp/aio/ (or $XDG_RUNTIME_DIR/aio/ on Linux) */
 let _lockDir: string | null = null;
+let _lockDirKey: string | null = null;
 export function lockDir(): string {
-  if (_lockDir) return _lockDir;
+  // AIO_APPS_DIR relocates the apps' DATA root — the lock/socket dir scopes
+  // with it, so ONE env var isolates an instance completely. A temp $HOME
+  // alone used to isolate state but NOT the lock: a sandboxed e2e died on
+  // "already running", and its `am` silently reached the production instance
+  // (space-invaders field report). Must-not-survive-reboot still holds — the
+  // base stays $XDG_RUNTIME_DIR//tmp either way.
+  const appsRoot = Deno.env.get("AIO_APPS_DIR") ?? "";
+  if (_lockDir && _lockDirKey === appsRoot) return _lockDir;
   const base = Deno.build.os === "windows"
     ? (Deno.env.get("TEMP") ?? Deno.env.get("TMP") ?? "C:\\Temp")
     : (Deno.env.get("XDG_RUNTIME_DIR") ?? "/tmp");
-  _lockDir = join(base, "aio");
+  const scope = appsRoot
+    ? "-" + appsRoot.replace(/[^a-zA-Z0-9]+/g, "-").replace(/^-+|-+$/g, "")
+      .slice(-48)
+    : "";
+  _lockDirKey = appsRoot;
+  _lockDir = join(base, "aio" + scope);
   try {
     Deno.mkdirSync(_lockDir, { recursive: true });
   } catch { /* already exists */ }

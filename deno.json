@@ -1,6 +1,6 @@
 {
   "name": "@riagentic/aio",
-  "version": "1.0.0-alpha40",
+  "version": "1.0.0-alpha41",
   "appId": "aio",
   "exports": {
     ".": "./mod.ts",
@@ -95,7 +95,7 @@
   },
   "tasks": {
     "test": "AIO_APPS_DIR=$INIT_CWD/.aio-test-home deno run --allow-read --allow-write --allow-env scripts/reset-test-home.ts && AIO_APPS_DIR=$INIT_CWD/.aio-test-home deno test -A tests/",
-    "test:onboard": "AIO_APPS_DIR=$INIT_CWD/.aio-test-home AIO_ONBOARD_E2E=1 deno test -A --no-check=remote tests/onboarding-e2e.test.ts",
+    "test:onboard": "AIO_APPS_DIR=$INIT_CWD/.aio-test-home AIO_ONBOARD_E2E=1 deno test -A --no-check=remote tests/onboarding-e2e.test.ts tests/run-sh-e2e.test.ts",
     "test:build": "AIO_APPS_DIR=$INIT_CWD/.aio-test-home AIO_BUILD_E2E=1 deno test -A --no-check=remote tests/build-e2e.test.ts",
     "ship": "deno run -A src/build/ship.ts",
     "test:e2e": "AIO_APPS_DIR=$INIT_CWD/.aio-test-home deno run --allow-read --allow-write --allow-env scripts/reset-test-home.ts && AIO_APPS_DIR=$INIT_CWD/.aio-test-home deno test -A --no-check=remote tests/e2e-direct-subscription.test.ts tests/e2e-subscription.test.ts tests/e2e-dispatch-ack.test.ts tests/e2e-ui-chromium.test.ts tests/e2e-blank-screen.test.ts tests/e2e-sync-browser.test.ts",

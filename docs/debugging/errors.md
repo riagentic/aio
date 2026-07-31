@@ -63,8 +63,6 @@ In prod mode, errors are compact one-liners:
 | `EFFECT_ERROR`       | Effect      | Sync effect (executor) threw                                  |
 | `EFFECT_TIMEOUT`     | Effect      | Async effect exceeded timeout (default 30s)                   |
 | `EFFECT_ASYNC_ERROR` | Effect      | Async effect promise rejected                                 |
-| `FLOW_STEP_ERROR`    | Flow        | A workflow step threw (legacy pre-v2 flows)                   |
-| `FLOW_UNCAUGHT`      | Flow        | Workflow threw without try/catch (legacy pre-v2 flows)        |
 | `HOOK_ERROR`         | Hook        | `beforeReduce`, `onAction`, or `onEffect` hook threw          |
 | `INIT_ERROR`         | Lifecycle   | Cell `onInit` callback threw                                  |
 | `DESTROY_ERROR`      | Lifecycle   | Cell `onDestroy` callback threw                               |
@@ -78,6 +76,7 @@ In prod mode, errors are compact one-liners:
 | `BUDGET_EFFECT`      | Performance | Effect exceeded time budget (default 5ms)                     |
 | `PERSIST_ERROR`      | Persistence | State persist to SQLite failed -- in memory, lost on exit     |
 | `PERSIST_SCHEMA`     | Persistence | Stored state's persistence-schema version is incompatible     |
+| `TX_CONFLICT`        | Effect      | Transactional method's reads went stale -- commit refused     |
 | `UI_FREEZE`          | Vitals      | UI/main thread stalled past the freeze threshold (warn)       |
 | `TRANSPORT_STALL`    | Vitals      | WS transport made no progress under backpressure (warn)       |
 | `LOOP_SATURATED`     | Vitals      | Event loop saturated -- work queued faster than it drains     |
@@ -90,7 +89,6 @@ The error code prefix tells you which layer broke:
 | ------------------------ | --------------- | -------------------------------------- |
 | `REDUCE_*`               | Cell reducer    | Your sync `methods` code               |
 | `EFFECT_*`               | Cell executor   | Your async methods                     |
-| `FLOW_*`                 | Workflow steps  | Legacy (pre-v2 generator flows)        |
 | `HOOK_*`                 | Lifecycle hooks | `beforeReduce`, `onAction`, `onEffect` |
 | `INIT_*` / `DESTROY_*`   | Cell lifecycle  | `onInit`, `onDestroy` callbacks        |
 | `MACHINE_*`              | Action routing  | Internal routing guard (warn-level)    |
@@ -290,6 +288,22 @@ which reports `status: "degraded"` and names it:
 The counter is CONSECUTIVE: one success ends the episode. An intermittent
 failure never escalates, which is the point — you want to hear about the ones
 that stopped recovering.
+
+Scope: each runtime keeps its own registry, and **browser escalations travel**:
+a connected client relays escalation/recovery over the wire (the `cdiag` frame),
+so `/__aio/health` also reports client-side degradations, aggregated across
+connected clients:
+
+```json
+{
+  "status": "degraded",
+  "clientDegraded": [{ "name": "sync-frame", "clients": 3, "lastError": "…" }]
+}
+```
+
+A client's records are dropped when it disconnects — health reflects only live
+signal. (The browser's own console and diagnostics overlay still report locally,
+on the spot.)
 
 ## `TypeError: Cannot assign to read only property` in dev
 

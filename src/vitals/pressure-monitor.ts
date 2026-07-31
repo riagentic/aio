@@ -158,7 +158,11 @@ export function createPressureMonitor(
           `PRESSURE — ${_broadcastCount} broadcasts/sec (threshold: ${rateThreshold}/sec)`,
         detail: {
           drainRate: _broadcastCount,
-          hint: "high dispatch frequency — debounce or batch actions",
+          hint: "high dispatch frequency. If these are UI/simulation ticks " +
+            "(a game loop, an animation), the structural fix is scope: " +
+            "'client' — that state never needs the wire. localFirst does " +
+            "NOT help here (methods still travel as CRDT ops). For bursty " +
+            "server work, debounce or batch the actions.",
         },
         timestamp: Date.now(),
       }, "rate");

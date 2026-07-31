@@ -7,7 +7,7 @@ import { loadOrCreateCert, type TlsCert } from "./tls.ts";
 import { createServer } from "./server.ts";
 import { VERSION } from "./aio-cli.ts";
 import type { ServerHandle } from "./server-types.ts";
-import { registerCall } from "../state/cell-impl.ts";
+import { _getCallTimeouts, registerCall } from "../state/cell-impl.ts";
 import { createUDSListener, type UDSHandle } from "./uds.ts";
 import { flushAllUrgent } from "./broadcast-coalescer.ts";
 import { appDirs } from "./app-dirs.ts";
@@ -22,7 +22,10 @@ import type { VitalsSystem } from "../vitals/mod.ts";
 import type { AppLock } from "./single-instance-lock.ts";
 import { resolveSocketPath, resolveTransport } from "./paths.ts";
 import type { Log } from "../diagnostics/logger.ts";
-import { degradedReport } from "../diagnostics/degraded.ts";
+import {
+  clientDegradedReport,
+  degradedReport,
+} from "../diagnostics/degraded.ts";
 import { cellAccessAllowed } from "./server-auth.ts";
 import type { CellAccess } from "../state/cell-types.ts";
 
@@ -361,6 +364,7 @@ export async function setupTransport<S, A>(
       headExtra: ui.head,
       renderBudget: config.renderBudget,
       syncCells: config._syncCellIds,
+      callTimeouts: _getCallTimeouts(),
       fullStateThreshold: config.fullStateThreshold,
       routes: config.routes,
       maxConnections: config.maxConnections,
@@ -413,20 +417,30 @@ export async function setupTransport<S, A>(
           // has to appear here — an app reporting healthy while a subsystem is
           // permanently dead is precisely the failure this endpoint invites.
           const dead = degradedReport();
+          const clientDead = clientDegradedReport();
           return {
-            status: dead.length > 0 ? "degraded" : "healthy",
+            status: dead.length > 0 || clientDead.length > 0
+              ? "degraded"
+              : "healthy",
             version: VERSION,
+            appId,
             uptime,
             cells: cellsHealth,
             ...(dead.length > 0 ? { degraded: dead } : {}),
+            ...(clientDead.length > 0 ? { clientDegraded: clientDead } : {}),
           };
         }
         const dead = degradedReport();
+        const clientDead = clientDegradedReport();
         return {
-          status: dead.length > 0 ? "degraded" : "healthy",
+          status: dead.length > 0 || clientDead.length > 0
+            ? "degraded"
+            : "healthy",
           version: VERSION,
+          appId,
           uptime,
           ...(dead.length > 0 ? { degraded: dead } : {}),
+          ...(clientDead.length > 0 ? { clientDegraded: clientDead } : {}),
         };
       },
       ...(tt
@@ -507,6 +521,13 @@ export async function setupTransport<S, A>(
       (msg: string) => log.debug(msg),
       clientCounter,
       syncHandler,
+      {
+        ...(config.renderBudget ? { renderBudget: config.renderBudget } : {}),
+        ...(config._syncCellIds && config._syncCellIds.length
+          ? { syncCells: config._syncCellIds }
+          : {}),
+        callTimeouts: _getCallTimeouts(),
+      },
     );
     udsRef.current = uds;
     log.info(`transport: UDS at ${socketPath}`);

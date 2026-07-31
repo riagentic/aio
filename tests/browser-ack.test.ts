@@ -124,10 +124,12 @@ Deno.test("2.2: timeout rejects the promise with a clear message", async () => {
     caught = e as Error;
   }
   assertEquals(caught instanceof Error, true);
-  assertEquals(
-    (caught as unknown as Error).message.includes("not acknowledged in 50ms"),
-    true,
-  );
+  // The message states what is TRUE: no response — still running or the
+  // connection dropped — never a guessed cause like "server overloaded".
+  const msg = (caught as unknown as Error).message;
+  assertEquals(msg.includes("no response"), true, msg);
+  assertEquals(msg.includes("after 50ms"), true, msg);
+  assertEquals(msg.includes("may still be running"), true, msg);
 
   reset();
 });

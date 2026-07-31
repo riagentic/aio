@@ -37,6 +37,7 @@ function headContent(
   viewport?: string | false,
   headExtra?: string,
   syncCells?: string[],
+  callTimeouts?: { default?: number; methods?: Record<string, number> },
 ): string {
   const cssLink = hasCSS ? '\n  <link rel="stylesheet" href="/style.css">' : "";
   const statusScript = showStatus === false
@@ -45,9 +46,13 @@ function headContent(
   // Client-side config the page needs BEFORE any module runs. `syncCells` is
   // the localFirst decision: it is made on the server at compose time, so the
   // browser has no other way to learn that a cell's methods run locally.
+  // `callTimeouts` is the resolved `await cell.method()` ceiling — without it
+  // the browser falls back to its own constant and gives up on calls the
+  // server is still happily running.
   const clientConfig = {
     ...(renderBudget ? { renderBudget } : {}),
     ...(syncCells && syncCells.length ? { syncCells } : {}),
+    ...(callTimeouts ? { callTimeouts } : {}),
   };
   const configScript = Object.keys(clientConfig).length > 0
     ? `\n  <script>window.__aioConfig=${
@@ -88,6 +93,7 @@ export function generateHTML(
   viewport?: string | false, // ui.viewport override (false = opt out)
   headExtra?: string, // ui.head — verbatim <head> content
   syncCells?: string[], // localFirst: cells the client runs locally + syncs
+  callTimeouts?: { default?: number; methods?: Record<string, number> },
 ): string {
   const head = headContent(
     title,
@@ -99,6 +105,7 @@ export function generateHTML(
     viewport,
     headExtra,
     syncCells,
+    callTimeouts,
   );
 
   if (prod) return prodHTML(head);

@@ -11,8 +11,6 @@ export type AioErrorCode =
   | "EFFECT_ERROR"
   | "EFFECT_TIMEOUT"
   | "EFFECT_ASYNC_ERROR"
-  | "FLOW_STEP_ERROR"
-  | "FLOW_UNCAUGHT"
   | "HOOK_ERROR"
   | "INIT_ERROR"
   | "DESTROY_ERROR"
@@ -26,15 +24,15 @@ export type AioErrorCode =
   | "BUDGET_EFFECT"
   | "PERSIST_ERROR"
   | "PERSIST_SCHEMA"
+  | "TX_CONFLICT"
   | "UI_FREEZE"
   | "TRANSPORT_STALL"
   | "LOOP_SATURATED";
 
-/** Origin subsystem that raised the error — `'reduce'`, `'effect'`, `'flow'`, `'vitals'`, etc. */
+/** Origin subsystem that raised the error — `'reduce'`, `'effect'`, `'vitals'`, etc. */
 export type AioErrorSource =
   | "reduce"
   | "effect"
-  | "flow"
   | "hook"
   | "init"
   | "destroy"
@@ -44,21 +42,11 @@ export type AioErrorSource =
   | "vitals"
   | "persist";
 
-/** Record of a single generator flow step — step number, action name, and execution status. */
-export type FlowStepRecord = {
-  step: number;
-  action: string;
-  status: "ok" | "error" | "pending";
-};
-
-/** Structured context attached to every `AioError` — cell name, action type, flow state, timing, etc. */
+/** Structured context attached to every `AioError` — cell name, action type, timing, etc. */
 export type AioErrorContext = {
   cellName?: string;
   actionType?: string;
   effectType?: string;
-  flowName?: string;
-  flowStep?: number;
-  flowHistory?: FlowStepRecord[];
   hookName?: string;
   duration?: number;
   budget?: number;
@@ -78,7 +66,6 @@ export type ReportErrorOpts = {
         code: AioErrorCode;
         message: string;
         cellName?: string;
-        flowStep?: number;
       },
     ) => void;
   };
@@ -93,8 +80,6 @@ const CODE_TO_SOURCE: Record<AioErrorCode, AioErrorSource> = {
   EFFECT_ERROR: "effect",
   EFFECT_TIMEOUT: "effect",
   EFFECT_ASYNC_ERROR: "effect",
-  FLOW_STEP_ERROR: "flow",
-  FLOW_UNCAUGHT: "flow",
   HOOK_ERROR: "hook",
   INIT_ERROR: "init",
   DESTROY_ERROR: "destroy",
@@ -108,6 +93,7 @@ const CODE_TO_SOURCE: Record<AioErrorCode, AioErrorSource> = {
   BUDGET_EFFECT: "effect",
   PERSIST_ERROR: "persist",
   PERSIST_SCHEMA: "persist",
+  TX_CONFLICT: "effect",
   UI_FREEZE: "vitals",
   TRANSPORT_STALL: "vitals",
   LOOP_SATURATED: "vitals",
@@ -206,15 +192,15 @@ export function generateCorrelationId(): string {
 export class AioError extends Error {
   /** Error classification code (e.g. `'REDUCE_ERROR'`, `'EFFECT_TIMEOUT'`). */
   readonly code: AioErrorCode;
-  /** Origin subsystem — `'reduce'`, `'effect'`, `'flow'`, `'vitals'`, etc. */
+  /** Origin subsystem — `'reduce'`, `'effect'`, `'vitals'`, etc. */
   readonly source: AioErrorSource;
-  /** Structured context — cell name, action type, flow state, timing. */
+  /** Structured context — cell name, action type, timing. */
   readonly context: AioErrorContext;
   /** Original error that caused this AioError, if wrapping. */
   readonly original: Error | undefined;
   /** Unix timestamp (ms) when the error was created. */
   readonly timestamp: number;
-  /** Unique ID linking related errors across cells and flows. */
+  /** Unique ID linking related errors across cells. */
   readonly correlationId: string;
   /** Optional state snapshot captured at the time of the error. */
   readonly stateSnapshot: Record<string, unknown> | undefined;
@@ -363,14 +349,6 @@ function generateTip(err: AioError): string | undefined {
       return `Tip: Async effect "${
         err.context.effectType ?? "?"
       }" rejected. Add error handling in your execute handler or use call({ retries }).`;
-    case "FLOW_STEP_ERROR":
-      return `Tip: Flow "${err.context.flowName ?? "?"}" step ${
-        err.context.flowStep ?? "?"
-      } threw. The error was fed back via gen.throw() — catch it in your generator.`;
-    case "FLOW_UNCAUGHT":
-      return `Tip: Uncaught error in flow "${
-        err.context.flowName ?? "?"
-      }". Wrap flow steps in try-catch inside your generator.`;
     case "HOOK_ERROR":
       return `Tip: Hook "${
         err.context.hookName ?? "?"
@@ -460,13 +438,6 @@ export function formatErrorBox(err: AioError): string {
   if (err.context.effectType) {
     lines.push(`${bar} ${BOLD}Effect:${RESET}  ${err.context.effectType}`);
   }
-  if (err.context.flowName) {
-    lines.push(
-      `${bar} ${BOLD}Flow:${RESET}    ${err.context.flowName}${
-        err.context.flowStep != null ? ` (step ${err.context.flowStep})` : ""
-      }`,
-    );
-  }
   if (err.context.hookName) {
     lines.push(`${bar} ${BOLD}Hook:${RESET}    ${err.context.hookName}`);
   }
@@ -494,22 +465,6 @@ export function formatErrorBox(err: AioError): string {
     const truncated = snap.length > 200 ? snap.slice(0, 200) + "…" : snap;
     lines.push(`${bar}`);
     lines.push(`${bar} ${DIM}State: ${truncated}${RESET}`);
-  }
-
-  // Flow history
-  if (err.context.flowHistory && err.context.flowHistory.length > 0) {
-    lines.push(`${bar}`);
-    lines.push(`${bar} ${DIM}Flow history:${RESET}`);
-    for (const rec of err.context.flowHistory) {
-      const icon = rec.status === "ok"
-        ? "✓"
-        : rec.status === "error"
-        ? "✗"
-        : "…";
-      lines.push(
-        `${bar}   ${DIM}${icon} step ${rec.step}: ${rec.action} [${rec.status}]${RESET}`,
-      );
-    }
   }
 
   // Tip
@@ -588,7 +543,6 @@ export function reportError(err: AioError, opts: ReportErrorOpts = {}): void {
         code: err.code,
         message: err.message,
         cellName: err.context.cellName,
-        flowStep: err.context.flowStep,
       });
     }
 

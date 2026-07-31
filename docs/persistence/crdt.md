@@ -156,6 +156,21 @@ Per-cell resolution, in order:
 | nothing              | adopted — runs locally, syncs                    |
 | `scope: "client"`    | never adopted (its state never leaves the tab)   |
 
+Only methods-style cells are adopted (the client replays sync methods as CRDT
+ops); an actions-style cell stays server-only and the boot line says so.
+
+Flipping the switch on an app with existing persisted data is safe: the moment a
+cell is adopted, its restored state is written to the sync store as a base
+snapshot (sync cells stop being KV-persisted, so without that seed the first
+restart after the flip would resurrect them empty).
+
+Server-origin writes are durable too: a change that arrives as an **op** (client
+method call) lands in the op-log immediately, and any **other** commit to a sync
+cell — an effect, cron, `serverFn`, a server-side method call, an async method's
+outcome — folds into the cell's sync snapshot (debounced 100ms, flushed on clean
+shutdown). The crash-loss window is the same 100ms KV cells have; a restart
+never rewinds a write the server confirmed.
+
 Use `sync: false` wherever an optimistic preview would be a lie — an auth cell,
 a payment, a ledger balance the user must not see move until the server agrees.
 

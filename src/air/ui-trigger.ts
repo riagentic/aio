@@ -17,6 +17,8 @@ export type UITriggerAction =
   | "dblclick"
   | "type"
   | "press"
+  | "keyDown"
+  | "keyUp"
   | "hover"
   | "focus"
   | "blur";
@@ -89,6 +91,27 @@ export function triggerPress(
     const form = el.closest("form");
     if (form) form.dispatchEvent(ev(el, "submit"));
   }
+}
+
+/** Hold a key DOWN (no keyup) — games, drag interactions, held modifiers,
+ *  key-repeat. `triggerPress` is a tap, which cannot express "hold left for
+ *  10 frames" (space-invaders field report); pair this with
+ *  {@linkcode triggerKeyUp} around the frames/assertions in between. */
+export function triggerKeyDown(
+  el: AnyEl,
+  key: string,
+  mods?: KeyModifiers,
+): void {
+  el.dispatchEvent(keyEv(el, "keydown", key, mods));
+}
+
+/** Release a key held by {@linkcode triggerKeyDown}. */
+export function triggerKeyUp(
+  el: AnyEl,
+  key: string,
+  mods?: KeyModifiers,
+): void {
+  el.dispatchEvent(keyEv(el, "keyup", key, mods));
 }
 
 /** Select an option on a <select> like a user (sets value, fires change+input). */
@@ -183,6 +206,12 @@ export function triggerAction(
       break;
     case "press":
       triggerPress(el, key ?? "Enter", mods);
+      break;
+    case "keyDown":
+      triggerKeyDown(el, key ?? "Enter", mods);
+      break;
+    case "keyUp":
+      triggerKeyUp(el, key ?? "Enter", mods);
       break;
     case "hover":
       el.dispatchEvent(mouseEv(el, "mouseover"));

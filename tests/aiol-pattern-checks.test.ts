@@ -2,7 +2,7 @@
 // in checkUI's dynamic-import check. Every await in an async method is a
 // commit + render point; a post-await state read may see other actions'
 // commits, so the linter hints (never errors) on the first such read.
-import { assertEquals } from "@std/assert";
+import { assert, assertEquals } from "@std/assert";
 import { buildContext } from "../aiol/context.ts";
 import { checkPatterns, checkUI } from "../aiol/checks.ts";
 import { join } from "@std/path";
@@ -261,8 +261,15 @@ export const counter = cell('counter', {
     );
     assertEquals(hits.length, 1);
     assertEquals(hits[0]!.severity, "error");
-    // names listed, cell itself NOT flagged
-    assertEquals(hits[0]!.message.includes("deepFreeze, instances"), true);
+    // each name gets ITS home named; cell itself NOT flagged
+    assertEquals(
+      hits[0]!.message.includes('deepFreeze moved to "aio/extras"'),
+      true,
+    );
+    assertEquals(
+      hits[0]!.message.includes('instances moved to "aio/extras"'),
+      true,
+    );
     assertEquals(hits[0]!.message.includes("cell,"), false);
   });
 });
@@ -373,5 +380,48 @@ Deno.test("aiol: a REAL Node API use is still flagged", async () => {
       true,
       "real process.env use must still be flagged",
     );
+  });
+});
+
+Deno.test("aiol: state from a factory call is not 'empty state {}'", async () => {
+  await withTmpDir(async (dir) => {
+    await project(
+      dir,
+      `
+import { cell } from 'aio'
+function initial() { return { n: 0 } }
+export const c = cell('c', {
+  state: initial(),
+  methods: { inc(s) { s.n += 1 } },
+})
+`,
+    );
+    const { ctx, report } = await buildContext(dir);
+    const { checkCells } = await import("../aiol/checks.ts");
+    await checkCells(ctx);
+    const hits = report.issues.filter((i) => i.message.includes("empty state"));
+    assertEquals(hits.length, 0, JSON.stringify(report.issues));
+  });
+});
+
+Deno.test("aiol: useCell() is flagged as deprecated", async () => {
+  await withTmpDir(async (dir) => {
+    await project(
+      dir,
+      `
+import { cell } from 'aio'
+import { useCell } from 'aio/air'
+export const c = cell('c', { state: { n: 0 }, methods: {} })
+export function App() { const { state } = useCell(c); return state.n }
+`,
+    );
+    const { ctx, report } = await buildContext(dir);
+    const { checkUseCell } = await import("../aiol/checks.ts");
+    await checkUseCell(ctx);
+    const hits = report.issues.filter((i) =>
+      i.message.includes("useCell() is deprecated")
+    );
+    assertEquals(hits.length, 1, JSON.stringify(report.issues));
+    assert(hits[0]!.message.includes("LIVE view"));
   });
 });

@@ -34,6 +34,8 @@ export type Kind =
   | "client-state" // C→S — reply to get-state {state}
   | "log" // C→S — dev: forwarded console entry
   | "diag" // S→C — diagnostic event
+  | "cdiag" // C→S — client degraded() escalation/recovery (health visibility)
+  | "cfg" // S→C — resolved client config (syncCells/callTimeouts/renderBudget)
   | "graph-error" // S→C — dev: graph-validator errors (overlay)
   | "graph-clear" // S→C — dev: graph errors fixed
   | "tt-state" // S→C — time-travel panel state
@@ -72,6 +74,8 @@ export const FRAME_KINDS: readonly Kind[] = [
   "client-state",
   "log",
   "diag",
+  "cdiag",
+  "cfg",
   "graph-error",
   "graph-clear",
   "tt-state",

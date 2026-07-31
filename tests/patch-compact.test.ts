@@ -378,3 +378,109 @@ Deno.test("narrowArrayPatches: later ops on a path see the earlier ones", () => 
     applyPatches(deep, nested),
   );
 });
+
+// ── Overlapping paths in one batch (alpha40 review). The `current`/`untracked`
+// machinery exists to make merged/replayed patch lists safe; these three
+// shapes each reproduced silent state corruption before the base lookup walked
+// ancestors. Ground truth is always Immer's own applyPatches.
+
+Deno.test("narrowArrayPatches: descendant replace, then ancestor replace resurrecting an identity", () => {
+  const I = [1, 2];
+  const M = { m: 1 };
+  const N = { n: 1 };
+  const prev = { items: [I, M, N] };
+  const ops = [
+    replace(["items", 0], [9]), // items[0] := fresh
+    replace(["items"], [I, M]), // I resurrected by identity, N dropped
+  ];
+  assertEquals(
+    applyPatches(prev, narrowArrayPatches(prev, ops)),
+    applyPatches(prev, ops),
+  );
+});
+
+Deno.test("narrowArrayPatches: ancestor replace, then descendant replace narrows within it", () => {
+  const p = { p: 1 }, q = { q: 1 }, r = { r: 1 };
+  const prev = { rows: [[p, q]] };
+  const other = [{ z: 1 }];
+  const ops = [
+    replace(["rows"], [other]), // rows := [other]
+    replace(["rows", 0], [...other, r]), // rows[0] grew — base is `other`, not prev
+  ];
+  const narrowed = narrowArrayPatches(prev, ops);
+  assertEquals(applyPatches(prev, narrowed), applyPatches(prev, ops));
+  // …and the second op DID narrow (resolved inside the first op's value).
+  assertEquals(narrowed[1], { op: "add", path: ["rows", 0, 1], value: r });
+});
+
+Deno.test("narrowArrayPatches: an ancestor replace clears stale descendant tracking", () => {
+  const a = { a: 1 }, b = { b: 1 }, c = { c: 1 }, d = { d: 1 };
+  const prev = { rows: [[a]] };
+  const fresh = [[{ z: 1 }]]; // all-new → the ancestor diff keeps the replacement
+  const ops = [
+    replace(["rows", 0], [a, b]), // narrows; tracks rows.0 = [a,b]
+    replace(["rows"], fresh), // whole rows replaced — rows.0 is fresh[0] now
+    replace(["rows", 0], [a, b, c, d]), // must NOT diff against the stale [a,b]
+  ];
+  assertEquals(
+    applyPatches(prev, narrowArrayPatches(prev, ops)),
+    applyPatches(prev, ops),
+  );
+});
+
+Deno.test("narrowArrayPatches: a ROOT replace invalidates every tracked path", () => {
+  const a = { a: 1 }, b = { b: 1 };
+  const prev = { items: [a] };
+  const ops: Patch[] = [
+    replace(["items"], [a, b]), // tracks "items"
+    { op: "replace", path: [], value: { items: [b] } }, // whole state swapped
+    replace(["items"], [a, b]), // base is [b] now, not prev.items or [a,b]
+  ];
+  assertEquals(
+    applyPatches(prev, narrowArrayPatches(prev, ops)),
+    applyPatches(prev, ops),
+  );
+});
+
+Deno.test("narrowArrayPatches: randomized SHUFFLES never slip through as edits", () => {
+  // The reorder bail is load-bearing: a shuffle mis-read as remove+add would
+  // reconstruct the wrong order. The other randomized test never permutes.
+  let seed = 0x51f0a3d;
+  const rnd = () =>
+    (seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff;
+  const pick = (n: number) => Math.floor(rnd() * n);
+
+  for (let round = 0; round < 1000; round++) {
+    const len = 2 + pick(10);
+    const before = Array.from({ length: len }, (_, i) => ({ id: i }));
+    const next = [...before];
+    for (let i = next.length - 1; i > 0; i--) { // Fisher–Yates
+      const j = pick(i + 1);
+      [next[i], next[j]] = [next[j]!, next[i]!];
+    }
+    if (pick(3) === 0) next.splice(pick(next.length), 1); // sometimes drop too
+    if (pick(3) === 0) {
+      next.splice(pick(next.length + 1), 0, { id: 1000 + round });
+    }
+    const prev = { items: before };
+    const ops = [replace(["items"], next)];
+    assertEquals(
+      applyPatches(prev, narrowArrayPatches(prev, ops)),
+      applyPatches(prev, ops),
+      `round ${round}`,
+    );
+  }
+});
+
+Deno.test("narrowArrayPatches: NaN and -0 identities do not corrupt", () => {
+  const prev = { xs: [NaN, 1, 2] };
+  for (
+    const next of [[NaN, 1], [1, 2], [NaN, 1, 2, 3], [-0, NaN, 1, 2]] as const
+  ) {
+    const ops = [replace(["xs"], [...next])];
+    assertEquals(
+      applyPatches(prev, narrowArrayPatches(prev, ops)),
+      applyPatches(prev, ops),
+    );
+  }
+});

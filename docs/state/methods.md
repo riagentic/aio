@@ -718,48 +718,29 @@ a string snapshot at that moment. If you need an object snapshot to pass to a
 reducer, use `structuredClone(s)` — Immer drafts aren't structured- cloneable,
 so this throws; use the `[...s.items]` / `{...s}` patterns above for cloning.
 
-### In an ASYNC method, don't spread state back into itself
-
-This is the one write the store refuses, and it is the natural shape for
-progress reporting — a long job whose callback writes into state:
+### Spreading state back into itself works — in sync AND async methods
 
 ```ts
 async build(s, onProgress) {
   await run("cmake", ["--build", "."], (p) => {
-    s.job = { ...s.job, step: p.step };   // ❌ refused — the method rejects
+    s.job = { ...s.job, step: p.step };   // ✅ works, same as in a sync method
   });
 }
 ```
 
-Why only async: a **sync** method mutates an Immer draft, whose spread produces
-plain values — legal, and it always has been. An **async** method writes through
-a _live proxy_ so reads stay correct across awaits, and spreading that proxy
-copies any nested object or array as a proxy. Handing one back to the store is a
-write it cannot accept.
+In an async method `s` is a _live proxy_ (reads stay correct across awaits), and
+spreading it copies nested objects as proxies — historically the store refused
+that write. Recorded values are now materialized to plain data at write time, so
+the idiom behaves identically to the sync Immer-draft path. The sync/async
+equivalence is pinned by a randomized differential test
+(`tests/proxy-differential.test.ts`).
 
-Snapshot to a plain value first, mutate that, assign it:
-
-```ts
-async build(s, onProgress) {
-  await run("cmake", ["--build", "."], (p) => {
-    const job = JSON.parse(JSON.stringify(s.job)); // plain copy
-    job.step = p.step;
-    job.log.push(p.line);
-    s.job = job;                                    // ✅ accepted
-  });
-}
-```
-
-Or — usually better — write the fields directly, which needs no copy at all:
+Writing the fields directly needs no copy at all and is usually clearer:
 
 ```ts
 s.job.step = p.step;
 s.job.log.push(p.line);
 ```
-
-The refusal is **loud**: the method's promise rejects with the cell, the method
-and this fix in the message, so `await builds.build()` learns the write never
-landed. `aiol` also flags the pattern statically, before it runs.
 
 ### Mutations on returned snapshots are ignored
 

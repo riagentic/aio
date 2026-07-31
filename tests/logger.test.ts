@@ -245,24 +245,6 @@ Deno.test("logger: onStop logs shutdown with uptime", async () => {
   assertStringIncludes(stopLine!, "uptime=");
 });
 
-Deno.test("logger: flow events tracked in app.log", async () => {
-  const dir = tmpDir();
-  const l = mkLogger({ dir });
-  await l.init();
-  l.onStart(["checkout"]);
-  l.observe({ type: "checkout:__flow:step1", payload: { _flow: "place" } }, {
-    checkout: {},
-  });
-  l.observe({ type: "checkout:__flow:done", payload: { _flow: "place" } }, {
-    checkout: {},
-  });
-  await flush();
-  const lines = await readLines(`${dir}/app.log`);
-  const doneLine = lines.find((l) => l.includes("place done"));
-  assertEquals(doneLine !== undefined, true);
-  assertStringIncludes(doneLine!, "flow:checkout");
-});
-
 Deno.test("logger: identical consecutive errors collapse into a repeat summary", async () => {
   const dir = tmpDir();
   const l = mkLogger({ dir });

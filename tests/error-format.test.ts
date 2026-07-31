@@ -29,22 +29,6 @@ Deno.test("formatErrorBox — warning codes show AIO WARNING", () => {
   assertStringIncludes(output, "AIO WARN");
 });
 
-Deno.test("formatErrorBox — includes flow history", () => {
-  const err = createAioError("FLOW_UNCAUGHT", "fail", {
-    cellName: "test",
-    flowName: "exec",
-    flowStep: 2,
-    flowHistory: [
-      { step: 0, action: "test:validate", status: "ok" as const },
-      { step: 1, action: "test:lock", status: "ok" as const },
-      { step: 2, action: "test:submit", status: "error" as const },
-    ],
-  });
-  const output = formatErrorBox(err);
-  assertStringIncludes(output, "test:validate");
-  assertStringIncludes(output, "test:submit");
-});
-
 Deno.test("formatErrorBox — includes tip for EFFECT_TIMEOUT", () => {
   const err = createAioError("EFFECT_TIMEOUT", "timeout", {
     cellName: "api",

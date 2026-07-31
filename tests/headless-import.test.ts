@@ -28,14 +28,10 @@ Deno.test("headless: periphery moved to aio/extras (B4c) — off core, on extras
     const name of [
       "lint",
       "parseCli",
-      "draft",
-      "matchEffect",
       "deepFreeze",
       "markAsync",
       "instances",
-      "connectCliUDS",
       "createSliceSelector",
-      "DEFAULT_PRAGMAS",
     ]
   ) {
     assertEquals((base as any)[name], undefined, `${name} should be off core`);

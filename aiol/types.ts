@@ -65,6 +65,8 @@ export type CellInfo = {
   /** `worker: true` — this cell's methods run on their own thread. */
   isWorker: boolean;
   stateKeys: string[];
+  /** state: was an object literal (keys statically knowable) */
+  stateIsLiteral?: boolean;
   methodNames: string[];
   actionNames: string[];
 };
