@@ -218,10 +218,40 @@ export type EnsureResult =
  * target); a tag is checked out once and then reused untouched, because an
  * immutable pin is the entire value proposition.
  */
+/** A LOCAL-DEV pin: `aioVersion: "path:/abs/checkout"` — the app follows a
+ *  framework checkout on THIS machine (framework co-development). Deliberately
+ *  machine-specific: committing it pins teammates to a path that likely does
+ *  not exist, which fails LOUDLY (ensureVersion refuses with the fix) rather
+ *  than silently linking something else. `am pin --latest` returns to a
+ *  reproducible tag pin. */
+export const PATH_PIN_PREFIX = "path:";
+export function isPathPin(ref: string): boolean {
+  return ref.startsWith(PATH_PIN_PREFIX);
+}
+export function pathPinTarget(ref: string): string {
+  return ref.slice(PATH_PIN_PREFIX.length);
+}
+
 export async function ensureVersion(
   root: string,
   ref: string,
 ): Promise<EnsureResult> {
+  // A path pin needs no provisioning — the checkout IS the version. Verify it
+  // exists and is an aio checkout; a missing path is a loud stop, never a
+  // silent fallback to some other framework.
+  if (isPathPin(ref)) {
+    const target = pathPinTarget(ref);
+    if (await exists(join(target, "mod.ts"))) {
+      return { ok: true, path: target, created: false, ref };
+    }
+    return {
+      ok: false,
+      error: `local-dev pin ${ref} points at a path with no aio checkout ` +
+        `(mod.ts not found). Restore the checkout, re-pin with ` +
+        `"am pin <path>", or return to a release: "am pin --latest".`,
+    };
+  }
+
   const path = versionPath(ref);
   const already = await exists(path);
 

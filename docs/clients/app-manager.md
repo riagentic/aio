@@ -254,7 +254,14 @@ am pin                    # what this app asks for, what it's linked to, what's 
 am pin v1.0.0-alpha38     # switch: provision that version, relink, record it
 am pin main               # follow the branch tip (a moving target, re-synced on every `am fix`)
 am pin --latest           # newest release
+am pin /path/to/aio       # LOCAL-DEV pin: follow a framework checkout on this machine
 ```
+
+A **path pin** records `aioVersion: "path:/abs/checkout"` — every later `am fix`
+keeps linking that checkout, which is the workflow for developing an app against
+a work-in-progress framework. It is machine-specific by design: on a machine
+without that path, `am fix` fails loudly with the fix instead of silently
+linking something else. Return to a reproducible release with `am pin --latest`.
 
 `am create` pins the **newest release** by default;
 `am create app --aio-version=main` opts into the tip. The clone → build path is
