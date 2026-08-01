@@ -161,12 +161,12 @@ initial-state curl proves nothing about whether a method actually runs.
   lenient-test shortcut. Corollary: the in-process harness still can't reproduce
   transport-boundary behavior — those need a loopback/browser path (tracked in
   `todo.md`).
-- **Proxy-derived values assigned back into cell state are materialized to
-  plain data at write time** (`LIVE_RAW` in `src/state/cell-impl.ts`), so
-  `s.x = { ...s.x }` works identically in sync and async methods. The
-  sync/async parity contract is pinned by `tests/proxy-differential.test.ts`
-  (a randomized differential fuzzer) — extend ITS op set when adding proxy
-  capabilities, never hand-reason about equivalence.
+- **Proxy-derived values assigned back into cell state are materialized to plain
+  data at write time** (`LIVE_RAW` in `src/state/cell-impl.ts`), so
+  `s.x = { ...s.x }` works identically in sync and async methods. The sync/async
+  parity contract is pinned by `tests/proxy-differential.test.ts` (a randomized
+  differential fuzzer) — extend ITS op set when adding proxy capabilities, never
+  hand-reason about equivalence.
 - Test servers take their port from `freePort()`, never a constant or a
   pid-derived formula (a guard test enforces this).
 - `factory` and `msg()` are inlined in `src/browser/browser-shared.ts` — they

@@ -92,7 +92,12 @@ if ($Dev) {
 # -- prod: build the default target, then run the artifact --------------
 $stamp = Get-Date
 Info "production build (default target)..."
-if ($conf.tasks.compile) { deno task compile } else { deno run -A (Join-Path $AioHome "src\build.ts") --compile }
+# The app's own dep\aio (which am fix just pointed at the pinned version) wins
+# over the installed framework - an app builds with the aio it pins, never with
+# whatever this machine happens to have.
+if ($conf.tasks.compile) { deno task compile }
+elseif (Test-Path "dep\aio\src\build.ts") { deno run -A "dep\aio\src\build.ts" --compile }
+else { Info "no compile task and no dep\aio link - building with the installed aio"; deno run -A (Join-Path $AioHome "src\build.ts") --compile }
 if ($LASTEXITCODE -ne 0) { Fail "build failed - the output above says why" }
 
 # Newest runnable the build created (root or dist\) - by TIME, not by name, so

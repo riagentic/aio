@@ -33,19 +33,66 @@ deno task dev
 ```
 
 `am fix` **only auto-applies safe, reversible, machine-specific repairs** — the
-gitignored/uncommitted bits a fresh clone lacks. Anything that touches your
-committed source or config it **advises** rather than changes.
+gitignored/uncommitted bits a fresh clone lacks — with exactly one exception,
+the version pin below. Anything else that touches your committed source or
+config it **advises** rather than changes.
 
 Auto-fixed (safe):
 
 | Fix                        | When                                                   |
 | -------------------------- | ------------------------------------------------------ |
 | `dep/aio` framework link   | source-layout app; symlink missing/broken (gitignored) |
+| **`aioVersion` pin**       | **app is unpinned — records the version it links**     |
 | `.env` from `.env.example` | example present, `.env` missing                        |
 | electron runtime           | app imports electron; `node_modules/electron` missing  |
 | git submodules             | `.gitmodules` present but not initialized              |
 | shell scripts executable   | a task runs a `.sh` that lost its `+x` bit             |
 | dependency cache           | warms `deno cache` — surfaces any resolution error     |
+
+### The seal: an unpinned app gets pinned
+
+`am create` records `"aioVersion"` in the app's `deno.json`; `am fix` is the
+safety net for an app that arrives without one. It writes down the version it is
+about to link, and reports it:
+
+```
+✓ aio version pin — was unpinned — recorded "aioVersion": "v1.0.0-alpha41" in
+  deno.json so every future clone rebuilds against this exact framework
+```
+
+This is the one committed-source edit `am fix` makes, and it is what makes "an
+aio app keeps running" a fact rather than a hope: an unpinned app links to
+whatever aio happens to be installed, so a framework release it never asked for
+can break it. A pinned app builds against its own worktree forever.
+
+It never overrides a pin you chose — an app held at an older release stays
+there. `--dry-run` reports the seal and writes nothing. Change it any time with
+`am pin <version>` (or `am pin --latest`, which stays within your major).
+
+`am fix` also reports how far behind the pin is — an advisory, never a change. A
+pin is a promise, not a prison: the app keeps building exactly as pinned, and
+its author can still see that the world moved.
+
+### Moving forward: `am pin` checks before it moves
+
+Changing a pin reads the app's own source first, through the framework's removal
+registry, and refuses a move that would break it:
+
+```
+✗ v1.0.0-alpha42 would break this app — 1 removed API(s) still in use:
+  src/cell/mdview.ts:61
+    cell config key 'machine:' was removed in alpha27 — guards are a guard line
+    — `if (s.status !== "idle") return;`. Migrate: docs/upgrade/restructure.md
+    — or run it unchanged on the version it was written for:
+    `am pin v1.0.0-alpha26 && am fix`.
+  Migrate them, pin a version that still runs them, or re-run with --force to
+  pin anyway.
+```
+
+The pin does not change; nothing is written. `--force` pins anyway — the check
+informs, it does not forbid. Moving **backward** to a version that still accepts
+the old spelling is silent, and `main` (or a path pin) counts as the tip, so it
+is checked like the newest release.
 
 Advised, never changed for you: `deno.json` config (`jsx`/`jsxImportSource`/
 `nodeModulesDir`), a missing `appId` in `aio.run()`, a Deno version below the

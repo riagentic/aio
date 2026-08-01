@@ -4,6 +4,7 @@ import type { CellInfo, Checker } from "./types.ts";
 import { join } from "@std/path";
 import * as fix from "./fixes.ts";
 import { RESERVED_KEYS } from "../src/state/cell-types.ts";
+import { removalMessage, removalOf } from "../src/state/removals.ts";
 import { codeMatches, codeText } from "./scan.ts";
 
 // ══════════════════════════════════════════════════════════════════════
@@ -316,31 +317,12 @@ export const checkCells: Checker = (ctx) => {
   // them STATICALLY and print the exact migration mapping, so an old app
   // learns the fix from `deno task lint` before it even boots.
   for (const f of cells) {
-    const flags: [boolean, string, string][] = [
-      [
-        f.hasActions,
-        "actions:/reduce:",
-        "actions+reduce pairs are one method — `increment(s, by) { s.count += by }`",
-      ],
-      [
-        f.hasGenerators,
-        "generators:",
-        "plain async methods + until()/race()/sleep(); cancelOn + s.$signal for cancellation",
-      ],
-      [
-        f.hasMachine,
-        "machine:",
-        'guards are a guard line — `if (s.status !== "idle") return;`',
-      ],
-    ];
-    for (const [hit, key, hint] of flags) {
-      if (hit) {
-        report(
-          "error",
-          "cells",
-          `cell "${f.name}" uses removed legacy config '${key}' — ${hint}. Migration: docs/upgrade/restructure.md`,
-        );
-      }
+    for (const key of f.removedKeys) {
+      report(
+        "error",
+        "cells",
+        removalMessage(removalOf(key), `cell "${f.name}"`),
+      );
     }
   }
 

@@ -140,6 +140,7 @@
 - [Upgrade: 1.0.0-alpha39 → 1.0.0-alpha40](upgrade/from-alpha39-to-alpha40.md) — situations loud.
 - [Upgrade from v1.0.0-alpha4 to v1.0.0-alpha5](upgrade/from-alpha4-to-alpha5.md) — None.
 - [Upgrade: alpha40 → alpha41](upgrade/from-alpha40-to-alpha41.md) — Most apps upgrade with no changes.
+- [Upgrade: alpha41 → alpha42](upgrade/from-alpha41-to-alpha42.md) — on changed.
 - [Upgrade from v1.0.0-alpha5 to v1.0.0-alpha6](upgrade/from-alpha5-to-alpha6.md) — None.
 - [Upgrade from v1.0.0-alpha6 to v1.0.0-alpha7](upgrade/from-alpha6-to-alpha7.md) — mod.ts no longer re-exports renderer primitives.
 - [Upgrade from v1.0.0-alpha7 to v1.0.0-alpha8](upgrade/from-alpha7-to-alpha8.md) — None.

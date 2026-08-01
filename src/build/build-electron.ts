@@ -9,6 +9,7 @@ import {
   copyDir,
   ensureAppimagetool,
   formatMb,
+  toolCacheDir,
   writePlaceholderIcon,
 } from "./build-helpers.ts";
 import type { BuildConfig } from "./build-config.ts";
@@ -113,10 +114,7 @@ Categories=Utility;
 `;
   await Deno.writeTextFile(join(appDir, `${binaryName}.desktop`), desktop);
 
-  const toolPath = await ensureAppimagetool(
-    arch,
-    join(root, "node_modules", ".cache"),
-  );
+  const toolPath = await ensureAppimagetool(arch, toolCacheDir());
 
   const appImageOut = join(root, `${binaryName}-${arch}.AppImage`);
   console.log("[appimage] packaging...");

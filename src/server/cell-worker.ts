@@ -228,8 +228,8 @@ export function createCellWorker(
         );
       }
       const id = ++seq;
-      const callId =
-        (action as { payload?: { _callId?: string } }).payload?._callId;
+      const callId = (action as { payload?: { _callId?: string } }).payload
+        ?._callId;
       const p = new Promise<unknown>((resolve, reject) => {
         inflight.set(id, { resolve, reject, callId });
       });

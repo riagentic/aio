@@ -9,7 +9,18 @@ import { parse as parseJsonc } from "@std/jsonc";
 import type { GlobalFlags } from "./am-types.ts";
 import { detectMode, out, outError } from "./am-output.ts";
 import { linkDepAio, probeDepAio, resolveAioRoot } from "./am-cmd-link.ts";
-import { ensureVersion, readPin, versionPath } from "./am-versions.ts";
+import {
+  compareVersions,
+  ensureVersion,
+  knownTags,
+  latestTag,
+  MAIN,
+  parseVersion,
+  readPin,
+  sortVersions,
+  versionPath,
+  writePin,
+} from "./am-versions.ts";
 import { meetsMinDeno, MIN_DENO } from "../server/deno-version.ts";
 
 // fixed/would-fix/ok = safe auto-repairs; advise = a suggestion we DON'T apply
@@ -141,7 +152,9 @@ export async function cmdFix(
     // for. `--aio=<path>` overrides it (framework development).
     let root = install;
     let pin: string | null = null;
-    if (install && !args.some((a) => a.startsWith("--aio="))) {
+    let sealed = false;
+    const honorPin = install && !args.some((a) => a.startsWith("--aio="));
+    if (honorPin) {
       pin = await readPin(dir);
       if (pin && !dry) {
         const res = await ensureVersion(install, pin);
@@ -154,14 +167,60 @@ export async function cmdFix(
         root = versionPath(pin); // dry run: report, provision nothing
       }
     }
-    if (pin) add("aio version pin", "ok", `${pin} (deno.json aioVersion)`);
-    else if (install) {
-      add(
-        "aio version pin",
-        "advise",
-        "unpinned — a clone builds against whatever aio is installed; " +
-          "`am pin --latest` fixes that",
-      );
+    // SEAL an unpinned app. Until a version is recorded, "it built last month"
+    // is not a fact anyone can reproduce — the next clone links to whatever aio
+    // happens to be installed, which is how an app that shipped fine dies on a
+    // framework it never asked for. So `am fix` does not merely advise here: it
+    // writes down the version it is about to link, and says so. That single
+    // committed string is what makes "this app runs forever" true rather than
+    // aspirational. It is the one committed-source edit am fix makes, it is
+    // additive, and `am pin` overrides it whenever the author disagrees.
+    if (!pin && honorPin && install) {
+      const want = await latestTag(install) ?? MAIN;
+      if (dry) {
+        add(
+          "aio version pin",
+          "would-fix",
+          `unpinned — would record "aioVersion": "${want}" in deno.json`,
+        );
+      } else {
+        const res = await ensureVersion(install, want);
+        if (!res.ok) add("aio version pin", "manual", res.error);
+        else {
+          await writePin(dir, res.ref);
+          root = res.path;
+          pin = res.ref;
+          sealed = true;
+          add(
+            "aio version pin",
+            "fixed",
+            `was unpinned — recorded "aioVersion": "${res.ref}" in deno.json ` +
+              `so every future clone rebuilds against this exact framework ` +
+              `(change it with \`am pin <version>\`)`,
+          );
+        }
+      }
+    }
+    if (pin && !sealed) {
+      add("aio version pin", "ok", `${pin} (deno.json aioVersion)`);
+    }
+    // How far behind the pin is — reported, never acted on. The app builds
+    // exactly as pinned; staleness the author cannot SEE is the only part of
+    // that which is a problem.
+    if (pin && install) {
+      const cur = parseVersion(pin);
+      if (cur) {
+        const behind = sortVersions(await knownTags(install))
+          .filter((t) => compareVersions(t, cur) > 0).length;
+        if (behind > 0) {
+          add(
+            "aio version freshness",
+            "advise",
+            `${behind} release(s) behind ${await latestTag(install)} — ` +
+              `\`am pin --latest\` moves it (it checks for removed APIs first)`,
+          );
+        }
+      }
     }
     if (!root) {
       add(
