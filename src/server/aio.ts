@@ -70,7 +70,7 @@ import { getRegisteredCells } from "../state/cell-reactive.ts";
 import { createCostMeter } from "../vitals/cost-meter.ts";
 
 // CLI + path resolution
-import { parseCli, printHelp, VERSION } from "./aio-cli.ts";
+import { parseCli, printHelp, VERSION, versionLine } from "./aio-cli.ts";
 import {
   distCandidates,
   findFreePort,
@@ -82,6 +82,7 @@ import { openUserStore } from "./auth-users.ts";
 import { resolveAppId } from "./single-instance-lock.ts";
 import { resolveAppKey } from "./app-key.ts";
 import { assertDenoVersion } from "./deno-version.ts";
+import { removalMessage, removalOf } from "../state/removals.ts";
 import { dirname, join, resolve } from "@std/path";
 import { lint, printLint } from "./lint.ts";
 
@@ -217,11 +218,9 @@ async function run(a?: any, b?: any): Promise<AioApp<any, any>> {
   // Fail fast on an unsupported Deno — aio uses ≥2.9 behavior directly.
   assertDenoVersion();
   if (b !== undefined) {
-    throw new Error(
-      "aio.run(initialState, config) was removed in the alpha27 restructure (perfect-aio D9) — " +
-        "define cells with cell() and call aio.run({ cells: [...] }) (or " +
-        "zero-config aio.run()). Migration: docs/upgrade/restructure.md",
-    );
+    // Message comes from the removal registry — one decider for every
+    // "that spelling is gone" the framework prints (src/state/removals.ts).
+    throw new Error(removalMessage(removalOf("aio.run(initialState, config)")));
   }
 
   // Cells-based API: aio.run(cellsConfig) — zero-config: aio.run()
@@ -467,7 +466,18 @@ async function _run<S, A, E>(
     Deno.exit(0);
   }
   if (cli.version) {
-    console.log(`aio ${VERSION}`);
+    // An artifact has to be able to say what it IS and what it was built with —
+    // a binary found on a server months later is otherwise unidentifiable, and
+    // "which aio is this running?" is the first question when it misbehaves.
+    // Same sources the app itself uses for its identity (resolveAppId handles
+    // the compiled-binary case), so --version cannot describe a different app
+    // than the one that would boot.
+    console.log(
+      versionLine(
+        resolveAppId(config.appId),
+        config.appVersion ?? _denoJsonVersion(),
+      ),
+    );
     Deno.exit(0);
   }
 

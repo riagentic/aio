@@ -1,5 +1,95 @@
 # Changelog
 
+## 1.0.0-alpha42 — the pin is the promise (2026-08-01)
+
+An app built on aio today must still build and run years from now, on a machine
+that has never seen it, with the framework many releases ahead. That guarantee
+does not come from staying compatible forever — it comes from every app naming
+the framework it was built against, and from that name still resolving. This
+release closes the gaps where the name was missing, ignored, or unexplained.
+
+### `am fix` seals an unpinned app
+
+An app without `"aioVersion"` in its deno.json linked to whatever aio happened
+to be installed — which is exactly how a working app dies on a version it never
+asked for. `am fix` no longer merely advises: it records the version it is about
+to link, and says so.
+
+```
+✓ aio version pin — was unpinned — recorded "aioVersion": "v1.0.0-alpha41" in
+  deno.json so every future clone rebuilds against this exact framework
+```
+
+`am create` already pinned; this is the safety net for everything else. It never
+overrides a pin you chose (an app held at an older release stays there),
+`--dry-run` writes nothing, and it is the ONE committed-source edit `am fix`
+makes. Change it any time with `am pin <version>` / `am pin --latest`, which
+still refuses to cross a major on its own.
+
+### The one-liner builds with the aio the app pins
+
+`run.sh` / `run.ps1` fell back to the _installed_ framework's builder for an app
+without a scaffolded `compile` task — silently building it against a version it
+never asked for. Both now prefer the app's own `dep/aio` (which `am fix` has
+just pointed at the pin), and say so when they cannot. Proven differentially in
+`test:onboard`: the installed builder is sabotaged, so any regression that
+reaches for it fails loudly.
+
+### One record of what was removed, and the way out
+
+`machine:`, `actions:`, `reduce:`, `execute:`, `generators:` and the 2-arg
+`aio.run(state, config)` were removed in alpha27, and three surfaces described
+that in their own words — the runtime throw, the aiol check, the upgrade guide —
+free to drift. `src/state/removals.ts` is now the single decider, and every
+message carries BOTH exits, including the one that was invisible before:
+
+```
+[mdview] cell config key 'machine:' was removed in alpha27 — guards are a guard
+line — `if (s.status !== "idle") return;`. Migrate: docs/upgrade/restructure.md
+— or run it unchanged on the version it was written for:
+`am pin v1.0.0-alpha26 && am fix`.
+```
+
+`tests/removals-registry.test.ts` makes the registry unforgettable: no file may
+announce a version-scoped removal it did not read from there, rows are
+append-only, every `lastGood` must be a real git tag (an escape hatch that does
+not resolve is fiction), and the runtime and the linter must agree row by row. A
+future 1.x removal that skips the registry fails the suite, not the user.
+
+### The ladder: `am pin` checks before it moves
+
+Moving a pin forward is allowed to be work; it is not allowed to be a surprise.
+`am pin <newer>` / `am pin --latest` now reads the app's own source through the
+registry and refuses a move that would break it, with `file:line` and both ways
+out. `--force` pins anyway. Moving _backward_ to a version that still accepts
+the old spelling is silent, and `main` counts as the tip.
+
+`am pin` and `am fix` also report how far behind a pin is
+(`3 release(s) behind
+v1.0.0-alpha42`) — advisory only. A pin is a promise, not
+a prison.
+
+### An artifact identifies itself
+
+`--version` printed `aio 1.0.0-alpha42` — which answered neither "what is this
+binary" nor, for a compiled app found on a server months later, "which app". It
+now prints `<appId> <appVersion> (aio <framework version>)`. A running app
+already reported the framework build at `/__aio/health`; this closes the same
+question for a binary that is not running.
+
+### Gates
+
+- `tests/removals-registry.test.ts` — 13 tests; mutation-checked both ways
+  (hardcode a removal message → red; delete a row → red)
+- `tests/am-pin-seal.test.ts` — `am fix` driven as a subprocess against a real
+  clone with real tags and real worktrees: seals, reports, is idempotent, and
+  never overrides an author's pin
+- `tests/run-sh-e2e.test.ts` — the one-liner builds through the pinned worktree,
+  and its no-`compile`-task fallback reaches for `dep/aio` before `$AIO_HOME`
+- `tests/am-pin-preflight.test.ts` — the upgrade check: forward moves blocked
+  with file:line, backward moves silent, `main`/path pins treated as the tip,
+  the framework's own `dep/aio` never scanned, row-driven over the registry
+
 ## 1.0.0-alpha41 — catching up (2026-07-31)
 
 A field report put it precisely: "aio's failure modes tend to be silent rather

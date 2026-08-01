@@ -1,15 +1,28 @@
 // Build helpers — pure/extractable utilities used by build.ts
 import { dirname, join } from "@std/path";
 
-/** Known SHA-256 hashes for appimagetool builds (continuous release). Empty by
- *  default — the download is checked for a valid ELF header, and integrity
- *  verification is SKIPPED unless a hash is pinned here (the `continuous` tag
- *  rolls, so a pin would need updating each roll). To pin, use RAW lowercase
- *  hex with NO `sha256:` prefix — it is compared against `sha256sum`'s output
- *  directly (`hashHex !== expected`). Get it with: `curl -sL <url> | sha256sum`. */
+/** The appimagetool release this build pins to.
+ *
+ *  Deliberately a VERSION tag, not `continuous`. The guard below refuses to
+ *  build without a pinned hash, and `continuous` is a rolling tag whose bytes
+ *  change on every upstream rebuild — so pointing at it made the pin expire by
+ *  construction and left AppImage packaging permanently unbuildable on every
+ *  arch. A version tag is immutable, so the pin stays valid. */
+const APPIMAGETOOL_VERSION = "1.9.1";
+
+/** Publisher SHA-256 hashes for {@linkcode APPIMAGETOOL_VERSION}, taken from
+ *  GitHub's per-asset `digest` field (not computed from our own download, which
+ *  would only be trust-on-first-use) and re-verified against the bytes.
+ *
+ *  RAW lowercase hex, NO `sha256:` prefix — compared against the digest hex
+ *  directly. To bump: pick the new tag, then
+ *  `curl -sL https://api.github.com/repos/AppImage/appimagetool/releases/tags/<tag>`
+ *  and copy each asset's `digest`. */
 const APPIMAGETOOL_HASHES: Record<string, string> = {
-  // x86_64: "1a2b3c…",  // raw hex, no prefix — uncomment to pin a build
-  // aarch64: "4d5e6f…",
+  x86_64: "ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0",
+  aarch64: "f0837e7448a0c1e4e650a93bb3e85802546e60654ef287576f46c71c126a9158",
+  armhf: "42b61cba5495d8aaf418a5c9a015a49b85ad92efabcbd3c341f1540440e4e23d",
+  i686: "7ad9ff47c203aae0149b18f6df9e3018b2e2f470ea644a0413e3ded39e9e3bdb",
 };
 
 /** Slugify a string for use as binary/app name */
@@ -322,78 +335,122 @@ export function appimageEnv(arch: string): Record<string, string> {
   };
 }
 
-/** Download + cache appimagetool for the given arch. Returns the cached binary path. */
+/** Where downloaded build tools are cached.
+ *
+ *  Deliberately OUTSIDE the project: cached under `<root>/node_modules/.cache`,
+ *  the 15MB appimagetool was swept into `deno compile`'s file set and embedded
+ *  in the shipped binary — every build after the first shipped the build tool
+ *  inside the app (measured: 29MB → 43MB of embedded files). A user-level cache
+ *  is also shared across projects, so the tool downloads once per machine. */
+export function toolCacheDir(): string {
+  const xdg = Deno.env.get("XDG_CACHE_HOME");
+  const home = Deno.env.get("HOME") ?? Deno.env.get("USERPROFILE") ?? ".";
+  return join(
+    xdg && xdg.length > 0 ? xdg : join(home, ".cache"),
+    "aio",
+    "tools",
+  );
+}
+
+/** Lowercase hex SHA-256 of `bytes`. */
+async function sha256Hex(bytes: Uint8Array<ArrayBuffer>): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", bytes);
+  return Array.from(new Uint8Array(digest))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+function isElf(bytes: Uint8Array<ArrayBuffer>): boolean {
+  return bytes.length >= 4 && bytes[0] === 0x7f && bytes[1] === 0x45 &&
+    bytes[2] === 0x4c && bytes[3] === 0x46;
+}
+
+/** Download + cache appimagetool for the given arch. Returns the cached binary path.
+ *
+ *  The cache key carries the arch AND the pinned version, and a cache HIT is
+ *  re-verified rather than trusted: the integrity check exists to keep a
+ *  tampered appimagetool out of shipped AppImages, and a check that the cache
+ *  can skip protects nothing. (It previously cached to a bare `appimagetool`
+ *  path and returned it unverified — so one `AIO_DEV=1` run left an unchecked
+ *  binary that every later release build silently reused.) */
 export async function ensureAppimagetool(
   arch: string,
   cacheDir: string,
 ): Promise<string> {
   await Deno.mkdir(cacheDir, { recursive: true });
-  const toolPath = join(cacheDir, "appimagetool");
+  const expectedHash = APPIMAGETOOL_HASHES[arch];
+  const devBypass = Deno.env.get("AIO_DEV") === "1";
+
+  if (!expectedHash && !devBypass) {
+    console.error(
+      `[appimage] ✗ no pinned SHA-256 hash for arch "${arch}" — refusing to build.\n` +
+        `         Known arches: ${
+          Object.keys(APPIMAGETOOL_HASHES).join(", ")
+        }.\n` +
+        `         Pin one in APPIMAGETOOL_HASHES (src/build/build-helpers.ts):\n` +
+        `         curl -sL https://api.github.com/repos/AppImage/appimagetool/releases/tags/${APPIMAGETOOL_VERSION}\n` +
+        `         and copy the asset's \`digest\` (drop the "sha256:" prefix).\n` +
+        `         For local experiments only, set AIO_DEV=1 to bypass.`,
+    );
+    Deno.exit(1);
+  }
+
+  // Unverified (dev-bypassed) binaries get their own cache key so they can
+  // never be picked up by a later verified build.
+  const suffix = expectedHash
+    ? APPIMAGETOOL_VERSION
+    : `${APPIMAGETOOL_VERSION}-unverified`;
+  const toolPath = join(cacheDir, `appimagetool-${arch}-${suffix}`);
+
   try {
-    await Deno.stat(toolPath);
-    return toolPath;
+    const cached = await Deno.readFile(toolPath);
+    if (!expectedHash) return toolPath; // dev bypass, own key
+    if (await sha256Hex(cached) === expectedHash) {
+      console.log("[appimage] ✓ cached appimagetool verified");
+      return toolPath;
+    }
+    console.warn(
+      "[appimage] ⚠ cached appimagetool failed verification — re-downloading",
+    );
+    await Deno.remove(toolPath).catch(() => {});
   } catch { /* not cached — download */ }
 
-  console.log("[appimage] downloading appimagetool...");
+  console.log(
+    `[appimage] downloading appimagetool ${APPIMAGETOOL_VERSION} (${arch})...`,
+  );
   const url =
-    `https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-${arch}.AppImage`;
+    `https://github.com/AppImage/appimagetool/releases/download/${APPIMAGETOOL_VERSION}/appimagetool-${arch}.AppImage`;
   const resp = await fetch(url);
   if (!resp.ok) {
     console.error(
-      `[appimage] \u2717 failed to download appimagetool: ${resp.status}`,
+      `[appimage] ✗ failed to download appimagetool: ${resp.status} ${url}`,
     );
     Deno.exit(1);
   }
   const bytes = new Uint8Array(await resp.arrayBuffer());
-  // Sanity check — verify downloaded file is a valid ELF binary
-  if (
-    bytes.length < 4 || bytes[0] !== 0x7f || bytes[1] !== 0x45 ||
-    bytes[2] !== 0x4c || bytes[3] !== 0x46
-  ) {
-    console.error(
-      "[appimage] \u2717 downloaded file is not a valid ELF binary",
-    );
+
+  if (!isElf(bytes)) {
+    console.error("[appimage] ✗ downloaded file is not a valid ELF binary");
     Deno.exit(1);
   }
-  // Integrity check — verify SHA-256 hash if known for this arch
-  const expectedHash = APPIMAGETOOL_HASHES[arch];
+
   if (expectedHash) {
-    const hashBytes = await crypto.subtle.digest("SHA-256", bytes);
-    const hashHex = Array.from(new Uint8Array(hashBytes))
-      .map((b) => b.toString(16).padStart(2, "0"))
-      .join("");
+    const hashHex = await sha256Hex(bytes);
     if (hashHex !== expectedHash) {
       console.error(
         `[appimage] ✗ integrity check failed: expected ${expectedHash}, got ${hashHex}`,
       );
-      try {
-        await Deno.remove(toolPath);
-      } catch { /* ignore */ }
       Deno.exit(1);
     }
     console.log("[appimage] ✓ integrity check passed");
   } else {
-    // No pinned hash — refuse release builds. Dev builds can opt out via AIO_DEV=1.
-    // Prevents supply-chain compromise of downloaded appimagetool from slipping
-    // into shipped AppImages.
-    const devBypass = Deno.env.get("AIO_DEV") === "1";
-    if (!devBypass) {
-      console.error(
-        `[appimage] ✗ no pinned SHA-256 hash for arch "${arch}" — refusing to build.\n` +
-          `         Pin a hash in APPIMAGETOOL_HASHES (src/build-helpers.ts).\n` +
-          `         For local experiments only, set AIO_DEV=1 to bypass.`,
-      );
-      try {
-        await Deno.remove(toolPath);
-      } catch { /* ignore */ }
-      Deno.exit(1);
-    }
     console.warn(
       "[appimage] ⚠ AIO_DEV=1 — skipping integrity check. DO NOT use for releases.",
     );
   }
+
   await Deno.writeFile(toolPath, bytes);
   await Deno.chmod(toolPath, 0o755);
-  console.log("[appimage] \u2713 appimagetool cached");
+  console.log("[appimage] ✓ appimagetool cached");
   return toolPath;
 }

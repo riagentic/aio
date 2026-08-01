@@ -2,7 +2,20 @@
 import { log } from "../diagnostics/logger.ts";
 
 /** Framework version — printed by --version, checked in tests */
-export const VERSION = "1.0.0-alpha41";
+export const VERSION = "1.0.0-alpha42";
+
+/** What `--version` prints: what this artifact IS, and what it was built with.
+ *
+ *  A binary found on a server months later has to be identifiable, and the
+ *  first question when one misbehaves is which aio it runs — a bare framework
+ *  version answers neither. Pure so it is testable without compiling. */
+export function versionLine(
+  appId: string,
+  appVersion: string | undefined,
+  aio: string = VERSION,
+): string {
+  return `${appId}${appVersion ? ` ${appVersion}` : ""} (aio ${aio})`;
+}
 
 // ── CLI ─────────────────────────────────────────────────────────────
 

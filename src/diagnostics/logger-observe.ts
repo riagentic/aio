@@ -2,7 +2,6 @@
 
 import type { LogLevel } from "./logger-types.ts";
 import {
-  elapsed,
   filterInternal,
   SKIP_CONTAINS,
   SKIP_SUFFIXES,

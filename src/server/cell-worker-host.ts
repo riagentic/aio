@@ -244,8 +244,8 @@ export function startCellWorkerHost(cell: CellDef): Promise<never> {
     // Register the SAME callId here, before dispatch, and await it: the
     // executor settles it with the method's true value/error, and `done`/`fail`
     // carry that home, where the main side settles ITS registry.
-    const callId =
-      (action as { payload?: { _callId?: string } }).payload?._callId;
+    const callId = (action as { payload?: { _callId?: string } }).payload
+      ?._callId;
     try {
       const settled = callId ? registerCall(callId) : null;
       if (settled) settled.catch(() => {}); // observed via await below; never unhandled

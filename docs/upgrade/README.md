@@ -7,6 +7,10 @@ One guide per version migration. Find your current version and follow the steps.
 - **[The aio restructure (alpha27+)](restructure.md)** — every restructure
   breaking change with before → after recipes (methods-only cells, instances,
   SQLite-only persistence, `aio/extras`, wire catalog)
+- [alpha41 → alpha42](from-alpha41-to-alpha42.md) — the pin is the promise:
+  `am fix` records `aioVersion` for unpinned apps, the one-liner builds with the
+  aio the app pins, removal errors name the version that still ran the old
+  spelling
 - [alpha40 → alpha41](from-alpha40-to-alpha41.md) — catching up: appDir/
   renderBudget honored, proxy spread-back works, extras relics + flow residue
   removed, am identity checks, one-line `run.sh`

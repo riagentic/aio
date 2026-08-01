@@ -61,6 +61,8 @@ export type CellInfo = {
   hasActions: boolean;
   hasGenerators: boolean;
   hasMachine: boolean;
+  /** Removed 1.x config keys this cell still uses (see src/state/removals.ts). */
+  removedKeys: string[];
   hasSelectors: boolean;
   /** `worker: true` — this cell's methods run on their own thread. */
   isWorker: boolean;

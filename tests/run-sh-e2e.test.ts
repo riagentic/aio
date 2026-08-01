@@ -188,3 +188,164 @@ Deno.test({
     }
   },
 });
+
+Deno.test({
+  name: "run.sh builds with the aio the app PINS, not the one installed",
+  ignore: !GATE,
+  fn: async () => {
+    // The forever-guarantee, end to end: a cloned app names its framework, and
+    // the one-liner builds it with THAT framework on a machine that has never
+    // seen it. Proven differentially — the installed aio's builder is
+    // sabotaged, so a regression that reaches for $AIO_HOME instead of the
+    // pinned worktree fails loudly here instead of silently building an app
+    // against a version it never asked for.
+    const base = await Deno.makeTempDir({ prefix: "run-sh-pin-" });
+    const install = join(base, "install");
+    const versions = join(base, "versions");
+    const clone = await new Deno.Command("git", {
+      // --no-hardlinks: /tmp is usually another filesystem.
+      args: ["clone", "-q", "--no-hardlinks", REPO_ROOT, install],
+      stdout: "null",
+      stderr: "piped",
+    }).output();
+    assertEquals(clone.code, 0, dec.decode(clone.stderr));
+    const SENTINEL = "installed-aio-builder-must-not-be-used";
+    await Deno.writeTextFile(
+      join(install, "src", "build.ts"),
+      `throw new Error("${SENTINEL}");\n`,
+    );
+
+    const { env: baseEnv, root } = await sandbox();
+    const dir = await makeApp("counter", "run-sh-pin-app-");
+    try {
+      // A fresh clone of an app: no framework link, and no `compile` task, so
+      // run.sh must resolve the builder itself — the path that used to leak.
+      await Deno.remove(join(dir, "dep", "aio"));
+      const cfgPath = join(dir, "deno.json");
+      const cfg = JSON.parse(await Deno.readTextFile(cfgPath));
+      delete cfg.tasks.compile; // am fix restores it — asserted below
+      cfg.aioVersion = "main"; // resolves to an immutable main-<sha> worktree
+      await Deno.writeTextFile(cfgPath, JSON.stringify(cfg, null, 2) + "\n");
+
+      const env = { ...baseEnv, AIO_HOME: install, AIO_VERSIONS_DIR: versions };
+      const p = await new Deno.Command("sh", {
+        args: [join(REPO_ROOT, "run.sh"), "--no-run"],
+        cwd: dir,
+        env,
+        stdout: "piped",
+        stderr: "piped",
+      }).output();
+      const out = dec.decode(p.stdout) + dec.decode(p.stderr);
+      assert(
+        !out.includes(SENTINEL),
+        `run.sh built with the INSTALLED aio instead of the app's pin:\n${
+          out.slice(-3000)
+        }`,
+      );
+      assertEquals(p.code, 0, `run.sh failed:\n${out.slice(-4000)}`);
+
+      // The pin was provisioned and linked — and it is the pinned worktree the
+      // build ran against, not the install.
+      const link = await Deno.readLink(join(dir, "dep", "aio"));
+      assert(
+        link.startsWith(versions),
+        `dep/aio points at ${link}, not into the versions store`,
+      );
+      assert(
+        /main-[0-9a-f]{7,}$/.test(link),
+        `a moving pin must resolve to an immutable ref: ${link}`,
+      );
+      assert(
+        (await Deno.stat(join(link, "mod.ts"))).isFile,
+        "the pinned version is a real checkout",
+      );
+      const m = out.match(/built (\S+)/);
+      assert(m, `no 'built <artifact>' line:\n${out.slice(-2000)}`);
+      const st = await Deno.stat(join(dir, m[1]!.replace(/^\.\//, "")));
+      assert(st.isFile && (st.mode! & 0o111) !== 0, "artifact is executable");
+      // The missing `compile` task was repaired on the way through, so the
+      // build ran the app's OWN task — which points at dep/aio, the pin.
+      const after = JSON.parse(await Deno.readTextFile(cfgPath));
+      assert(after.tasks.compile, "am fix restored the standard compile task");
+      assert(
+        after.tasks.compile.includes("dep/aio"),
+        `the restored task must build through the pin: ${after.tasks.compile}`,
+      );
+    } finally {
+      await Deno.remove(dir, { recursive: true }).catch(() => {});
+      await Deno.remove(base, { recursive: true }).catch(() => {});
+      await Deno.remove(root, { recursive: true }).catch(() => {});
+    }
+  },
+});
+
+Deno.test({
+  name: "run.sh without a compile task builds through dep/aio, not $AIO_HOME",
+  ignore: !GATE,
+  fn: async () => {
+    // run.sh's last-resort branch: a hand-rolled app with no `compile` task.
+    // `am fix` normally restores that task (previous test), so this drives the
+    // branch directly with a no-op `am` on PATH — the fallback must still reach
+    // for the app's own framework link before the machine's installed aio.
+    // Differential again: the installed builder throws if it is ever used.
+    const base = await Deno.makeTempDir({ prefix: "run-sh-fallback-" });
+    const install = join(base, "install");
+    const denoHome = join(base, "deno");
+    const bin = join(denoHome, "bin");
+    const SENTINEL = "installed-aio-builder-must-not-be-used";
+    await Deno.mkdir(join(install, "src"), { recursive: true });
+    await Deno.writeTextFile(
+      join(install, "src", "build.ts"),
+      `throw new Error("${SENTINEL}");\n`,
+    );
+    await Deno.writeTextFile(join(install, "mod.ts"), "export {};\n");
+    // run.sh treats a non-git AIO_HOME as "not installed" and would fetch
+    // install.sh from the network — this suite is strictly offline.
+    await new Deno.Command("git", {
+      args: ["init", "-q"],
+      cwd: install,
+      stdout: "null",
+      stderr: "null",
+    }).output();
+    // run.sh prepends "$DENO_INSTALL/bin" to PATH, so the stub has to live
+    // THERE — otherwise the machine's real `am` wins and repairs the very task
+    // whose absence this test is about.
+    await Deno.mkdir(bin, { recursive: true });
+    await Deno.writeTextFile(join(bin, "am"), "#!/bin/sh\nexit 0\n");
+    await Deno.chmod(join(bin, "am"), 0o755);
+
+    const dir = await makeApp("counter", "run-sh-fallback-app-");
+    try {
+      const cfgPath = join(dir, "deno.json");
+      const cfg = JSON.parse(await Deno.readTextFile(cfgPath));
+      delete cfg.tasks.compile;
+      await Deno.writeTextFile(cfgPath, JSON.stringify(cfg, null, 2) + "\n");
+
+      const p = await new Deno.Command("sh", {
+        args: [join(REPO_ROOT, "run.sh"), "--no-run"],
+        cwd: dir,
+        env: {
+          ...Deno.env.toObject(),
+          AIO_HOME: install,
+          DENO_INSTALL: denoHome,
+          DENO_INSTALL_ROOT: denoHome,
+          PATH: `${bin}:${Deno.env.get("PATH") ?? ""}`,
+        },
+        stdout: "piped",
+        stderr: "piped",
+      }).output();
+      const out = dec.decode(p.stdout) + dec.decode(p.stderr);
+      assert(
+        !out.includes(SENTINEL),
+        `the fallback built with $AIO_HOME instead of the app's dep/aio:\n${
+          out.slice(-3000)
+        }`,
+      );
+      assertEquals(p.code, 0, `run.sh failed:\n${out.slice(-4000)}`);
+      assert(/built \S+/.test(out), `no artifact:\n${out.slice(-2000)}`);
+    } finally {
+      await Deno.remove(dir, { recursive: true }).catch(() => {});
+      await Deno.remove(base, { recursive: true }).catch(() => {});
+    }
+  },
+});
