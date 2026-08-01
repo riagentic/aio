@@ -13,6 +13,7 @@ import type {
 import type { Method } from "./cell-impl.ts";
 import { createCellFromMethods } from "./cell-methods-factory.ts";
 import { registerCell } from "./cell-reactive.ts";
+import { removalMessage, removalsUsedBy } from "./removals.ts";
 import type {
   MethodsCellConfig,
   SelectorAccessors,
@@ -91,26 +92,11 @@ export function cell(name: string, config: any): any {
     );
   }
 
-  // perfect-aio D1: methods is the ONE style. Every Style-B key fails loudly
-  // with the exact migration recipe (docs/upgrade/restructure.md).
-  const STYLE_B: Record<string, string> = {
-    actions:
-      "actions:+reduce: pairs are one method now — `increment(s, by) { s.count += by }`",
-    reduce:
-      "reduce: handlers are method bodies now — mutate `s` directly in the method",
-    execute: "execute: side-effects run inside the (async) method itself",
-    machine:
-      'machine: guards are a guard line — `if (s.status !== "idle") return;`',
-    generators:
-      "generators are plain async methods — use until()/race()/sleep() from aio, cancelOn + s.$signal for cancellation",
-  };
-  for (const [key, hint] of Object.entries(STYLE_B)) {
-    if ((config as Record<string, unknown>)[key] !== undefined) {
-      throw new Error(
-        `[${name}] cell config key '${key}:' was removed in the alpha27 restructure — ${hint}. ` +
-          `Full migration guide: docs/upgrade/restructure.md`,
-      );
-    }
+  // perfect-aio D1: methods is the ONE style. Every removed key fails loudly
+  // with the migration recipe AND the pin that runs the app unchanged — both
+  // sourced from the removal registry, never restated here (src/state/removals.ts).
+  for (const r of removalsUsedBy(config as Record<string, unknown>)) {
+    throw new Error(removalMessage(r, name));
   }
 
   // AIO-5.1: client-scoped cells — browser-local state, sync methods only.

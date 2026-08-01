@@ -131,8 +131,13 @@ trap 'rm -f "$marker"' EXIT INT TERM
 info "production build (default target)..."
 if [ "$(has_task compile)" = "yes" ]; then
   deno task compile || fail "build failed — the output above says why"
+elif [ -f dep/aio/src/build.ts ]; then
+  # Hand-rolled app without the scaffolded task, but WITH a framework link:
+  # build with the version the app pins (am fix just pointed dep/aio at it),
+  # never with whatever aio happens to be installed on this machine.
+  deno run -A dep/aio/src/build.ts --compile || fail "build failed"
 else
-  # Hand-rolled app without the scaffolded task: invoke the builder directly.
+  info "no compile task and no dep/aio link — building with the installed aio"
   deno run -A "$AIO_HOME/src/build.ts" --compile || fail "build failed"
 fi
 

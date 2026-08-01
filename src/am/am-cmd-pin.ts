@@ -20,8 +20,9 @@
 import type { GlobalFlags } from "./am-types.ts";
 import { detectMode, out, outError } from "./am-output.ts";
 import { resolveAioRoot } from "./am-cmd-link.ts";
-import { resolve } from "@std/path";
+import { join, relative, resolve } from "@std/path";
 import {
+  compareVersions,
   currentLink,
   ensureVersion,
   knownTags,
@@ -33,11 +34,16 @@ import {
   provisioned,
   readPin,
   refOfLink,
+  sortVersions,
   syncFrameworkDeps,
-  versionPath,
   writePin,
 } from "./am-versions.ts";
 import { isPathPin, PATH_PIN_PREFIX, pathPinTarget } from "./am-versions.ts";
+import {
+  type RemovalHit,
+  removalMessage,
+  removalsInSource,
+} from "../state/removals.ts";
 
 export type PinInfo = {
   /** What deno.json asks for (null = unpinned, i.e. "whatever is installed"). */
@@ -50,6 +56,10 @@ export type PinInfo = {
   drift: boolean;
   available: string[];
   latest: string | null;
+  /** Releases between the pin and `latest` (0 = current). null when the pin is
+   *  not an orderable release (unpinned, `main-<sha>`, a path pin) — those are
+   *  deliberate choices, not staleness. */
+  behind: number | null;
 };
 
 /** Read the app's pin, its link, and what's available — no side effects. */
@@ -61,10 +71,13 @@ export async function pinInfo(appDir: string, root: string): Promise<PinInfo> {
       ? pinned // a path pin is "linked as pinned" when dep/aio → that path
       : refOfLink(linkedPath))
     : null;
+  const tags = sortVersions(await knownTags(root));
+  const cur = pinned ? parseVersion(pinned) : null;
   return {
     pinned,
     linkedPath,
     linkedRef,
+    behind: cur ? tags.filter((t) => compareVersions(t, cur) > 0).length : null,
     // Unpinned apps can't drift — there is nothing to disagree with.
     drift: pinned !== null && linkedPath !== null && linkedRef !== pinned,
     available: await provisioned(),
@@ -92,6 +105,14 @@ function render(info: PinInfo, tags: string[]): string {
         `installed. Pin it: \`am pin --latest\``,
     );
   }
+  if (info.behind !== null && info.behind > 0) {
+    // A pin is a promise, not a prison: the app keeps building exactly as it
+    // is, and it should still be able to see how far the world has moved.
+    lines.push(
+      `  ⓘ ${info.behind} release(s) behind ${info.latest} — this app keeps ` +
+        `building as pinned. \`am pin --latest\` moves it (checked first).`,
+    );
+  }
   lines.push("");
   lines.push(`  provisioned: ${info.available.join(", ") || "(none)"}`);
   const shown = tags.slice(0, 6);
@@ -105,6 +126,83 @@ function render(info: PinInfo, tags: string[]): string {
   lines.push(`  am pin <version>   switch this app (provisions + relinks)`);
   lines.push(`  am pin main        follow the branch tip (moving target)`);
   return lines.join("\n");
+}
+
+/** One reason a target version would break this app. */
+interface Blocker {
+  where: string; // file:line, relative to the app
+  hit: RemovalHit;
+}
+
+/** Does `ref` still accept an API whose last supporting release was `lastGood`?
+ *  A ref we cannot order (`main`, `main-<sha>`, a path pin) is the tip by
+ *  definition — treat it as newer, never as "probably fine". */
+function stillAccepts(ref: string, lastGood: string): boolean {
+  const target = parseVersion(ref);
+  const good = parseVersion(lastGood);
+  if (!good) return true; // an unorderable row cannot block anything
+  if (!target) return false; // main / path pin — ahead of every release
+  return compareVersions(target, good) <= 0;
+}
+
+/** Walk the app's own sources — never the framework, deps, or build output. */
+async function* appSources(dir: string): AsyncGenerator<string> {
+  const SKIP = new Set([
+    "dep",
+    "node_modules",
+    "dist",
+    ".git",
+    "coverage",
+    "build",
+  ]);
+  const walk = async function* (d: string): AsyncGenerator<string> {
+    let entries: Deno.DirEntry[];
+    try {
+      entries = [...await Array.fromAsync(Deno.readDir(d))];
+    } catch {
+      return; // unreadable dir — not this command's problem to report
+    }
+    for (const e of entries) {
+      if (e.name.startsWith(".") || SKIP.has(e.name)) continue;
+      const p = join(d, e.name);
+      if (e.isDirectory) yield* walk(p);
+      else if (/\.tsx?$/.test(e.name)) yield p;
+    }
+  };
+  yield* walk(dir);
+}
+
+/**
+ * What would break if this app moved to `ref`.
+ *
+ * Reads the app's source through the removal registry — the same detector the
+ * linter uses — and keeps only the hits the TARGET version no longer accepts.
+ * Moving backward to a version that still runs an old spelling is therefore
+ * silent, which is the point: the check exists to stop a forward move from
+ * being a surprise, not to nag.
+ */
+export async function preflight(
+  appDir: string,
+  ref: string,
+): Promise<Blocker[]> {
+  const blocking: Blocker[] = [];
+  for await (const file of appSources(appDir)) {
+    let text: string;
+    try {
+      text = await Deno.readTextFile(file);
+    } catch {
+      continue;
+    }
+    if (!text.includes("cell(")) continue; // config keys live in cell() calls
+    for (const hit of removalsInSource(text)) {
+      if (stillAccepts(ref, hit.removal.lastGood)) continue;
+      blocking.push({
+        where: `${relative(appDir, file)}:${hit.line}`,
+        hit,
+      });
+    }
+  }
+  return blocking;
 }
 
 export async function cmdPin(
@@ -192,6 +290,28 @@ export async function cmdPin(
         `⚠ crossing a major: ${pinned} → ${l}. Read ` +
           `docs/upgrade/ before shipping this.`,
       );
+    }
+  }
+
+  // PREFLIGHT — the ladder. Moving a pin FORWARD is allowed to be work; it is
+  // never allowed to be a surprise. Before the pin changes, read the app's own
+  // source for spellings the target version no longer accepts, and say so with
+  // file:line. Silence here would mean the app builds, ships, and dies at boot
+  // on a framework the tool just told it was fine.
+  if (!args.includes("--force")) {
+    const blocking = await preflight(appDir, ref);
+    if (blocking.length) {
+      const lines = blocking.map((b) =>
+        `  ${b.where}\n    ${removalMessage(b.hit.removal)}`
+      );
+      outError(
+        `${ref} would break this app — ${blocking.length} removed API(s) ` +
+          `still in use:\n${lines.join("\n")}\n` +
+          `  Migrate them, pin a version that still runs them, or re-run with ` +
+          `--force to pin anyway.`,
+        mode,
+      );
+      Deno.exit(1);
     }
   }
 

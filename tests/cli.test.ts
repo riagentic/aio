@@ -1,5 +1,6 @@
-import { assertEquals } from "@std/assert";
+import { assertEquals, assertStringIncludes } from "@std/assert";
 import { parseCli, VERSION } from "../src/server/aio.ts";
+import { versionLine } from "../src/server/aio-cli.ts";
 import {
   electronClientScript,
   electronMainScript,
@@ -504,4 +505,29 @@ Deno.test("electronMainScript: title with special chars", () => {
 Deno.test("electronClientScript: has maxRedirects safety", () => {
   const script = electronClientScript();
   assertEquals(script.includes("maxRedirects"), true);
+});
+
+// `--version` on an artifact answers two questions at once: what IS this, and
+// which aio is it running. A bare framework version answers neither — a binary
+// found on a server months later has to be identifiable from itself.
+Deno.test("versionLine: names the app AND the framework it was built with", () => {
+  assertEquals(
+    versionLine("mdview", "2.1.0", "1.0.0-alpha42"),
+    "mdview 2.1.0 (aio 1.0.0-alpha42)",
+  );
+});
+
+Deno.test("versionLine: an app with no version of its own still identifies itself", () => {
+  assertEquals(
+    versionLine("mdview", undefined, "1.0.0-alpha42"),
+    "mdview (aio 1.0.0-alpha42)",
+  );
+  assertEquals(
+    versionLine("mdview", "", "1.0.0-alpha42"),
+    "mdview (aio 1.0.0-alpha42)",
+  );
+});
+
+Deno.test("versionLine: defaults to the running framework version", () => {
+  assertStringIncludes(versionLine("app", undefined), `(aio ${VERSION})`);
 });

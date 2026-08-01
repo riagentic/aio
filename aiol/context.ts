@@ -2,6 +2,7 @@
 
 import { basename, extname, join, relative } from "@std/path";
 import { codeMatches } from "./scan.ts";
+import { removalsInSource } from "../src/state/removals.ts";
 import type {
   CellInfo,
   DenoJsonConfig,
@@ -99,6 +100,7 @@ function extractCells(files: SourceFile[]): CellInfo[] {
         hasActions: info.hasActions,
         hasGenerators: info.hasGenerators,
         hasMachine: info.hasMachine,
+        removedKeys: info.removedKeys,
         hasSelectors: info.hasSelectors,
         isWorker: info.isWorker,
         stateKeys: info.stateKeys,
@@ -118,6 +120,7 @@ function parseCellConfig(source: string): {
   hasActions: boolean;
   hasGenerators: boolean;
   hasMachine: boolean;
+  removedKeys: string[];
   hasSelectors: boolean;
   isWorker: boolean;
   stateKeys: string[];
@@ -135,6 +138,7 @@ function parseCellConfig(source: string): {
       hasActions: false,
       hasGenerators: false,
       hasMachine: false,
+      removedKeys: [],
       hasSelectors: false,
       isWorker: false,
       stateKeys: [],
@@ -166,6 +170,7 @@ function parseCellConfig(source: string): {
       hasActions: false,
       hasGenerators: false,
       hasMachine: false,
+      removedKeys: [],
       hasSelectors: false,
       isWorker: false,
       stateKeys: [],
@@ -190,6 +195,9 @@ function parseCellConfig(source: string): {
   const hasActions = /\bactions\s*:/.test(block);
   const hasGenerators = /\bgenerators\s*:/.test(block);
   const hasMachine = /\bmachine\s*:/.test(block);
+  // Removed 1.x config keys, sourced from the framework's removal registry so a
+  // future removal is caught here the day its row lands — never a second list.
+  const removedKeys = removalsInSource(block).map((h) => h.removal.key);
   const hasSelectors = /\bselectors\s*:/.test(block);
   const isWorker = /\bworker\s*:\s*true\b/.test(block);
 
@@ -271,6 +279,7 @@ function parseCellConfig(source: string): {
     hasActions,
     hasGenerators,
     hasMachine,
+    removedKeys,
     hasSelectors,
     isWorker,
     stateKeys,
