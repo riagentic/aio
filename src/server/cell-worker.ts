@@ -21,6 +21,7 @@ import {
   type ToWorker,
 } from "./cell-worker-protocol.ts";
 import { serverRequest, serverUser } from "./auth-context.ts";
+import { resolveCall } from "../state/cell-impl.ts";
 import { log } from "../diagnostics/logger.ts";
 
 /** How long to wait for a spawned host to report `ready` before failing boot. */
@@ -91,9 +92,16 @@ export function createCellWorker(
   });
 
   let seq = 0;
+  // `callId` is set for ASYNC-method calls: the value the app awaits lives in
+  // the main isolate's pending-call registry (registerCall, cell-catalog), so
+  // `done`/`fail` must settle THAT — the dispatch promise here is transport.
   const inflight = new Map<
     number,
-    { resolve: (v: unknown) => void; reject: (e: Error) => void }
+    {
+      resolve: (v: unknown) => void;
+      reject: (e: Error) => void;
+      callId?: string;
+    }
   >();
   let closed = false;
   let readyResolve: (() => void) | null = null;
@@ -128,9 +136,17 @@ export function createCellWorker(
     Deno.unrefTimer?.(readyTimer as unknown as number);
   }
 
-  /** Reject every in-flight call — used by terminate() and a worker crash. */
+  /** Reject every in-flight call — used by terminate() and a worker crash.
+   *  Async-method awaiters wait in the pending-call registry, not on the
+   *  transport promise — settle them there, or a crash leaves every
+   *  `await cell.method()` hanging to its ceiling. */
   const failAll = (err: Error): void => {
-    for (const [, entry] of inflight) entry.reject(err);
+    for (const [, entry] of inflight) {
+      if (entry.callId) {
+        resolveCall(entry.callId, undefined, err);
+        entry.resolve(undefined); // transport promise is fire-and-forget here
+      } else entry.reject(err);
+    }
     inflight.clear();
   };
 
@@ -150,6 +166,11 @@ export function createCellWorker(
       case "done": {
         const entry = inflight.get(msg.id);
         inflight.delete(msg.id);
+        // Async method: the awaiter holds the registry promise — settle it
+        // with the value the worker's executor produced. (No-op if the
+        // caller-side ceiling already gave up; the late value is dropped,
+        // exactly as it is for a slow local method.)
+        if (entry?.callId) resolveCall(entry.callId, msg.ret);
         entry?.resolve(msg.ret);
         return;
       }
@@ -158,7 +179,13 @@ export function createCellWorker(
         inflight.delete(msg.id);
         const err = new Error(msg.message);
         if (msg.stack) err.stack = msg.stack;
-        entry?.reject(err);
+        if (entry?.callId) {
+          // The awaiter sees the rejection via the registry; the transport
+          // promise resolves so the fire-and-forget dispatch inside the bound
+          // method (cell-catalog) can't become an unhandled rejection.
+          resolveCall(entry.callId, undefined, err);
+          entry.resolve(undefined);
+        } else entry?.reject(err);
         return;
       }
       case "boot-error":
@@ -201,8 +228,10 @@ export function createCellWorker(
         );
       }
       const id = ++seq;
+      const callId =
+        (action as { payload?: { _callId?: string } }).payload?._callId;
       const p = new Promise<unknown>((resolve, reject) => {
-        inflight.set(id, { resolve, reject });
+        inflight.set(id, { resolve, reject, callId });
       });
       send({ t: "call", id, action, ctx: ambient() });
       return p;
