@@ -52,6 +52,21 @@ export const heavy = cell("heavy", {
     boom() {
       throw new Error("heavy exploded");
     },
+    // ASYNC method whose RETURN VALUE the caller awaits. An async method's
+    // value doesn't ride the dispatch promise — it lands in resolveCall(),
+    // which lives per-isolate. Nothing in this file awaited one, so the bridge
+    // shipped 'done' after the sync prefix and the caller's registerCall()
+    // promise was settled by NOBODY: every async worker method hung to the
+    // call ceiling, success and failure alike (risoto, 2026-08-01).
+    async computeAsync(s: { note: string }, x: number) {
+      await new Promise((r) => setTimeout(r, 30));
+      s.note = "computed:" + x;
+      return x * 2;
+    },
+    async failAsync() {
+      await new Promise((r) => setTimeout(r, 30));
+      throw new Error("async exploded");
+    },
     // Reads a PEER cell from inside the worker — the trap risoto hit: this used
     // to silently return ticker's declared default (0) forever.
     peek(s: { note: string }) {
@@ -122,6 +137,18 @@ await aio.run({
       catch (e) { return new Response((e as Error).message, { status: 500 }); }
     },
     "/bump": async (_req: Request) => Response.json({ n: await ticker.bump() }),
+    "/async-value": async (_req: Request) => {
+      const t0 = performance.now();
+      const v = await heavy.computeAsync(21);
+      return Response.json({ v, ms: Math.round(performance.now() - t0) });
+    },
+    "/async-throw": async (_req: Request) => {
+      const t0 = performance.now();
+      try { await heavy.failAsync(); return new Response("no-throw", { status: 500 }); }
+      catch (e) {
+        return Response.json({ msg: (e as Error).message, ms: Math.round(performance.now() - t0) });
+      }
+    },
     "/who": async () => new Response(await heavy.whoFrom() as string),
     "/peek": async () => {
       try { return new Response(await heavy.peek() as string); }
@@ -263,6 +290,47 @@ Deno.test({
       const boom = await fetch(`${app.url}/boom`);
       assertEquals(boom.status, 500);
       assertStringIncludes(await boom.text(), "heavy exploded");
+    } finally {
+      await app.stop();
+      await Deno.remove(dir, { recursive: true }).catch(() => {});
+    }
+  },
+});
+
+Deno.test({
+  name:
+    "cell worker e2e: an AWAITED async method resolves with its value and rejects with its error",
+  ignore: Deno.build.os === "windows",
+  async fn() {
+    // The regression this pins (risoto, 2026-08-01): an async worker method's
+    // return value lands in the WORKER's resolveCall registry; the caller
+    // awaits the MAIN isolate's. With no bridge between them, `await
+    // heavy.anything()` hung to the 30s call ceiling — success and failure
+    // alike, method long finished — and read as a hardware/timeout problem
+    // three layers away. Sync methods (every other test here) never noticed.
+    const dir = await Deno.makeTempDir({ prefix: "aio-cell-worker-" });
+    const port = freePort();
+    await writeApp(dir, port);
+    const app = await boot(dir, port);
+    try {
+      const value = await (await fetch(`${app.url}/async-value`)).json();
+      assertEquals(value.v, 42, "the awaited value crossed the thread");
+      assert(
+        value.ms < 5000,
+        `await took ${value.ms}ms for a 30ms method — it waited on a ceiling, ` +
+          `not on the method`,
+      );
+      // And its state write streamed home as usual.
+      const state = await (await fetch(`${app.url}/state`)).json();
+      assertEquals(state.note, "computed:21");
+
+      const thrown = await (await fetch(`${app.url}/async-throw`)).json();
+      assertStringIncludes(thrown.msg, "async exploded");
+      assert(
+        thrown.ms < 5000,
+        `rejection took ${thrown.ms}ms for a 30ms method — the error never ` +
+          `crossed the thread`,
+      );
     } finally {
       await app.stop();
       await Deno.remove(dir, { recursive: true }).catch(() => {});

@@ -37,6 +37,7 @@ import {
   runWithUser,
   type ServerRequest,
 } from "./auth-context.ts";
+import { _setCallTimeouts, registerCall } from "../state/cell-impl.ts";
 import { log } from "../diagnostics/logger.ts";
 
 /** The cell name this worker hosts, or null when this isn't a cell worker. */
@@ -114,6 +115,12 @@ export function startCellWorkerHost(cell: CellDef): Promise<never> {
   const name = cell.__aio.id;
   const composed = composeCells([cell], { perfCheck: false });
   isolatePeerCells(name);
+
+  // The MAIN isolate owns the caller-side ceiling (registerCall there carries
+  // the app's configured timeouts). This side must wait for the method body
+  // itself, however long it runs — a second, default-30s ceiling HERE would
+  // silently cap every long method a worker hosts.
+  _setCallTimeouts(0);
 
   // Root state shape is the same as the main isolate's, with one cell in it.
   let state: Record<string, unknown> = {
@@ -225,13 +232,30 @@ export function startCellWorkerHost(cell: CellDef): Promise<never> {
     }
     // t === "call"
     const { id, action, ctx } = msg;
+    // An ASYNC method's return value does not ride the dispatch promise: the
+    // body runs as this cell's `__exec` effect, and its completion lands in
+    // resolveCall(_callId) — in THIS isolate's pending-call registry, which the
+    // main isolate cannot see. Awaiting only dispatch() shipped `done` after
+    // the sync prefix with ret=undefined, while the main-side registerCall()
+    // pending — the promise `await cell.method()` actually holds — was settled
+    // by NOBODY: every async worker-cell method hung to the caller's ceiling,
+    // success and failure alike (risoto 2026-08-01, a night of hardware-wallet
+    // "stopped waiting" timeouts whose methods had long since finished).
+    // Register the SAME callId here, before dispatch, and await it: the
+    // executor settles it with the method's true value/error, and `done`/`fail`
+    // carry that home, where the main side settles ITS registry.
+    const callId =
+      (action as { payload?: { _callId?: string } }).payload?._callId;
     try {
+      const settled = callId ? registerCall(callId) : null;
+      if (settled) settled.catch(() => {}); // observed via await below; never unhandled
       const run = () => dispatch(action);
       const withCtx = () =>
         runWithRequest(reviveRequest(ctx), () => runWithUser(ctx?.user, run));
       const ret = await withCtx();
+      const value = settled ? await settled : ret;
       flush(); // every commit this call produced, before the caller resolves
-      post({ t: "done", id, ret: ret as unknown });
+      post({ t: "done", id, ret: value as unknown });
     } catch (e) {
       flush(); // partial writes still happened — main must see them
       post({
