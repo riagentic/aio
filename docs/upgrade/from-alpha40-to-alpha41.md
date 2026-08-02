@@ -1,6 +1,6 @@
 # Upgrade: alpha40 → alpha41
 
-Most apps upgrade with **no changes**. The space-invaders field app (85 tests
+Most apps upgrade with **no changes**. The space field app (85 tests
 
 - full e2e) passed against alpha41 with zero edits. The items below are the
   removals and behavior changes to know about.

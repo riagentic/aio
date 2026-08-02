@@ -1,4 +1,4 @@
-// llama.md #10: `am surface` cut element text at 80 characters with NO marker,
+// `am surface` cut element text at 80 characters with NO marker,
 // so a generated command line read as a complete (wrong) string — the reporter
 // had to recompute it in a scratch script. A truncation you cannot see is the
 // silent-failure pattern this framework exists to avoid.
@@ -24,6 +24,34 @@ Deno.test("surface: a truncated value is marked, never silently cut", async () =
       `reads as the whole thing:\n${s.slice(0, 300)}`,
   );
   assert(!s.includes(LONG), "the default surface stays scannable");
+});
+
+// every surface-text assertion used to carry `?? ""` noise, because
+// a component with no text reported UNKNOWN text. Empty is not unknown.
+function Empty() {
+  return (
+    <div>
+      <button type="button" onClick={() => {}}></button>
+    </div>
+  );
+}
+
+Deno.test("surface: text is always a string — empty, never undefined", async () => {
+  await using ui = await testUI(Empty);
+  const s = ui.surface();
+  assertEquals(s.text, "", "a component that renders no text has empty text");
+  assertEquals(
+    s.elements[0]?.text,
+    "",
+    "and so does an element with no content",
+  );
+  // The wire copy carries the same guarantee — `am surface --json` consumers
+  // read one shape, not two.
+  const { getSerializedSurfaces } = await import("../src/air/ui-remote.ts");
+  for (const node of getSerializedSurfaces()) {
+    assertEquals(typeof node.text, "string");
+    for (const el of node.elements) assertEquals(typeof el.text, "string");
+  }
 });
 
 Deno.test("surface: --full returns the whole string", async () => {

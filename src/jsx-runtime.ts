@@ -305,7 +305,7 @@ type AioSVGAttributes = AioHTMLAttributes & {
 /** `<fieldset>` — `disabled` locks every control in the group at once, which is
  *  THE standard way to lock a form section. It was missing, and the workarounds
  *  (don't render the group, or disable each control by hand) are worse markup for
- *  the same intent (llama.md, second update #1). */
+ *  the same intent. */
 type AioFieldSetAttributes = AioHTMLAttributes<HTMLFieldSetElement> & {
   disabled?: boolean;
   form?: string;
@@ -388,7 +388,7 @@ export namespace JSX {
   export type Element = VNode;
   /** Anything renderable in JSX — the type for a `children` prop. Gives
    *  React-refugees a name (`children: JSX.Node`) instead of reaching for
-   *  React's `ReactNode`. `Children` is an alias. (machine U2) */
+   *  React's `ReactNode`. `Children` is an alias. */
   export type Node =
     | VNode
     | string
@@ -404,8 +404,7 @@ export namespace JSX {
     key?: string | number;
     /** Semantic test handle for a COMPONENT — names it in the UI surface, so a
      *  test addresses the handle you chose instead of the function's identifier.
-     *  Renaming the function is then a refactor, not a broken test (llama.md,
-     *  second update #4). Elements have carried `t` all along. */
+     *  Renaming the function is then a refactor, not a broken test. Elements have carried `t` all along. */
     t?: string;
   }
   export interface IntrinsicElements {

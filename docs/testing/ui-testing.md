@@ -152,10 +152,15 @@ The whole stack is proven against a real browser:
 `tests/e2e-ui-chromium.test.ts` boots an app, opens it in headless chromium, and
 drives it purely through surface/trigger — no webdriver, no CDP.
 
-## For AI agents
+## On a running app: `am surface` / `am trigger`
 
-The surface is a complete **perception + action space** — you never need the
-DOM:
+This is the dev loop, not an ops tool — the live counterpart of `testUI`, and
+the thing that lets you claim "it works" rather than "the tests pass". Click a
+real row, drill into a real folder, cancel a real scan, all from bash against
+the app you already have open — no driver, no selectors, no screenshot diffing.
+
+The surface is a complete **perception + action space**, for a person at a
+terminal and an AI agent alike — neither needs the DOM:
 
 1. **Observe** — `am surface 0 --json` returns every component with its visible
    `text`, and every element with its `name`, `path`, `events`, live

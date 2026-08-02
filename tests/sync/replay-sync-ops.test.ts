@@ -1,4 +1,4 @@
-// B1/AIO-416 (TBD feedback): sync cells must recover their committed state from
+// B1/AIO-416 (a field report): sync cells must recover their committed state from
 // the op-log AT BOOT — not only when a client reconnects. Before the fix, a
 // server restart with no client online came back with EMPTY sync cells (silent
 // data loss). `replaySyncOps` folds every committed op back through the composed

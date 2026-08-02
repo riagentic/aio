@@ -1,4 +1,4 @@
-// `am timeline` + `am replay` — the time-travel commands (wallet report #4).
+// `am timeline` + `am replay` — the time-travel commands.
 //
 //  • `am timeline`  — every recent dispatch, its payload, and the state diff it
 //    produced. Live from the running app (in-memory ring, always on), or from a

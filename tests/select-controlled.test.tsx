@@ -1,4 +1,4 @@
-// llama.md #10: `<select value={x}>` did not reliably reflect state once the
+// `<select value={x}>` did not reliably reflect state once the
 // options re-rendered — the model dropdown showed one model while the command
 // below it ran another. The reporter had to add `selected` on every <option>.
 // That is the standard controlled-select pattern, so if it needs a workaround

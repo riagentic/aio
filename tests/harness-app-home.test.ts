@@ -1,4 +1,4 @@
-// llama.md #6 + "Evil": a test harness that can write into the user's home.
+// a field report #6 + "Evil": a test harness that can write into the user's home.
 //
 // App code legitimately asks `appDirs(appId)` where its files live. Under a test
 // that resolved to the developer's REAL `~/.<appId>`, because `bootCells` had no
@@ -43,10 +43,13 @@ Deno.test("harness: a test can pin its own fixture directory", async () => {
       // What app code sees from now on — the same path the test wrote to.
       assertEquals(appDirs("fixture-app").home, tmp);
       await Deno.mkdir(dirs.files, { recursive: true });
-      await Deno.writeTextFile(join(dirs.files, "llama-server"), "#!/bin/sh\n");
+      await Deno.writeTextFile(
+        join(dirs.files, "vendor-binary"),
+        "#!/bin/sh\n",
+      );
       assertEquals(
         await Deno.readTextFile(
-          join(appDirs("fixture-app").files, "llama-server"),
+          join(appDirs("fixture-app").files, "vendor-binary"),
         ),
         "#!/bin/sh\n",
         "app code and the test agree on one directory",

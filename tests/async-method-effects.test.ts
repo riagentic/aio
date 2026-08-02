@@ -121,3 +121,45 @@ testCell(
     assertEquals((effects[0] as { id: string }).id, "gated.next");
   },
 );
+
+// a method returning `schedule.after(...)` is SCHEDULING, not returning a
+// value: the docs (and the sync path) resolve `undefined`. The async path
+// resolved the effect object itself, so the same source line meant two
+// different things depending on whether the method was async.
+Deno.test("effect returns resolve undefined in sync AND async methods", async () => {
+  const { cell } = await import("../src/state/cell.ts");
+  const { schedule } = await import("../src/state/schedule.ts");
+  const { bootCells } = await import("../src/testing/cell-test.ts");
+
+  const parity = cell("effect-parity", {
+    state: { n: 0 },
+    methods: {
+      syncEff(s: { n: number }) {
+        s.n++;
+        return schedule.after("ep1", 10_000, { type: "effect-parity:noop" });
+      },
+      async asyncEff(s: { n: number }) {
+        await Promise.resolve();
+        s.n++;
+        return schedule.after("ep2", 10_000, { type: "effect-parity:noop" });
+      },
+      noop(_s: { n: number }) {},
+    },
+  });
+
+  const h = await bootCells([parity]);
+  try {
+    const api = parity as unknown as {
+      syncEff: () => Promise<unknown>;
+      asyncEff: () => Promise<unknown>;
+    };
+    assertEquals(await api.syncEff(), undefined, "sync: effect is not a value");
+    assertEquals(
+      await api.asyncEff(),
+      undefined,
+      "async must agree — same source line, same meaning",
+    );
+  } finally {
+    h.dispose();
+  }
+});

@@ -97,30 +97,34 @@ export function useEffect(
       deps.length !== prev.length ||
       deps.some((d, i) => !Object.is(d, prev[i]));
 
-    // onCleanup registrations are per-render (cleared on re-render cleanup,
-    // AIO-182) — re-register every render so the unmount path always holds.
-    onCleanup(() => {
+    const disposeCleanup = () => {
       if (store.current.cleanup) {
         store.current.cleanup();
         store.current.cleanup = null;
       }
-    });
+    };
 
     if (changed) {
       const first = prev === null;
       store.current.deps = deps.slice(); // record at schedule time — no double-fire
       const run = () => {
-        if (store.current.cleanup) {
-          store.current.cleanup();
-          store.current.cleanup = null;
-        }
+        disposeCleanup();
         const cleanup = untrack(() => fnRef.current());
         if (typeof cleanup === "function") {
           store.current.cleanup = cleanup;
         }
       };
       if (first) {
-        onMount(run); // first run lands after the mount commit
+        // The unmount cleanup is registered INSIDE onMount, which makes it
+        // unmount-only. Registered in the component body it would also fire
+        // before every re-render — and a re-render with UNCHANGED deps does
+        // not re-run the effect, so the cleanup tore the effect down and
+        // nothing put it back: a `useEffect(..., [])` listener was removed by
+        // the first unrelated re-render and never re-added.
+        onMount(() => {
+          onCleanup(disposeCleanup);
+          run(); // first run lands after the mount commit
+        });
       } else {
         // Re-runs must land AFTER the diff/commit phase so the effect sees the
         // committed DOM (React semantics). queueMicrotask would fire before

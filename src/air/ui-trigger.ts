@@ -95,7 +95,7 @@ export function triggerPress(
 
 /** Hold a key DOWN (no keyup) — games, drag interactions, held modifiers,
  *  key-repeat. `triggerPress` is a tap, which cannot express "hold left for
- *  10 frames" (space-invaders field report); pair this with
+ *  10 frames" (a field report); pair this with
  *  {@linkcode triggerKeyUp} around the frames/assertions in between. */
 export function triggerKeyDown(
   el: AnyEl,

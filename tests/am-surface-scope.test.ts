@@ -1,4 +1,4 @@
-// llama.md, second update #2 + wishlist #3: "`am surface` has no way to scope
+// a field report, second update #2 + wishlist #3: "`am surface` has no way to scope
 // the tree. One page of my app is a 32 KB single-line JSON blob, and I want one
 // component out of it. I ended up piping into Python to walk the tree — again,
 // the same shape of problem as the `--json` one, except this time the flag really

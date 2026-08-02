@@ -1,6 +1,6 @@
 // `am start` background spawn, per OS. It used sh -c "nohup … & echo $!"
 // unconditionally — Windows has no sh, so am start failed outright there
-// (space-invaders platform follow-up). The spec builder is pure so BOTH
+//. The spec builder is pure so BOTH
 // shapes are pinned on any OS; the POSIX contract is additionally proven by
 // executing it for real.
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";

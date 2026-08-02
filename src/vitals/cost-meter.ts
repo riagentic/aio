@@ -7,7 +7,7 @@
  * across cells, and the pressure monitor says to "reduce state size, raise
  * syncIntervalMs, or use cell-level ui filters". It ships all three remedies —
  * and no way to find out whether you have the condition. A hint you cannot
- * triage gets skipped, every round, until it is noise (llama.md's `am cost`
+ * triage gets skipped, every round, until it is noise (one app's `am cost`
  * proposal, argued from aio's own code rather than from one app).
  *
  * WHAT IT MEASURES, AND HOW EXACTLY.

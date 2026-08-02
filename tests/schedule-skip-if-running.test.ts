@@ -1,4 +1,4 @@
-// llama-master, "things that would have made this app easier to write" #3:
+// a field report, "things that would have made this app easier to write" #3:
 // "Every polling cell here opens with `if (s.refreshing) return;`. That guard is
 // boilerplate the scheduler could own."
 //
@@ -104,4 +104,76 @@ Deno.test("every: a SYNC tick is never skipped", async () => {
   await sleep(90);
   m.cancelAll();
   assert(started >= 3, `sync ticks have no overlap to skip (${started})`);
+});
+
+// `safeDispatch` wrapped `dispatch(action)` in try/catch, but
+// `dispatch` reports failure by REJECTING its promise, never by throwing
+// synchronously. The handler therefore caught nothing that actually happens:
+// the failure escaped as an unhandled rejection, and the retry / give-up paths
+// were unreachable. Awaiting it makes them live — and a repeating schedule must
+// survive a failed tick rather than switch itself off.
+Deno.test("a rejected dispatch is handled, not left unhandled", async () => {
+  const seen: string[] = [];
+  const orig = globalThis.onunhandledrejection;
+  const handler = (e: PromiseRejectionEvent) => {
+    seen.push(String(e.reason));
+    e.preventDefault();
+  };
+  globalThis.addEventListener(
+    "unhandledrejection",
+    handler as unknown as EventListener,
+  );
+  try {
+    const m = manager(() => Promise.reject(new Error("dispatch refused")));
+    m.handle(schedule.after("one-shot", 5, { type: "x:tick" }));
+    await sleep(80);
+    m.cancelAll();
+    assertEquals(
+      seen.filter((s) => s.includes("dispatch refused")),
+      [],
+      "the scheduler owns the failure — it must not surface as unhandled",
+    );
+  } finally {
+    globalThis.removeEventListener(
+      "unhandledrejection",
+      handler as unknown as EventListener,
+    );
+    globalThis.onunhandledrejection = orig ?? null;
+  }
+});
+
+Deno.test("a repeating schedule keeps ticking after a failure", async () => {
+  let started = 0;
+  const m = manager(() => {
+    started++;
+    return Promise.reject(new Error("transient"));
+  });
+  m.handle(schedule.every("poll", 20, { type: "x:tick" }));
+  await sleep(90);
+  m.cancelAll();
+  assert(
+    started >= 3,
+    `one transient failure must not cancel a recurring job (${started})`,
+  );
+});
+
+Deno.test("a dispatch refused because the loop CLOSED stops the schedule", async () => {
+  let started = 0;
+  const m = manager(() => {
+    started++;
+    return Promise.reject(
+      Object.assign(new Error("dispatch after close()"), {
+        code: "DISPATCH_CLOSED",
+      }),
+    );
+  });
+  m.handle(schedule.every("poll", 20, { type: "x:tick" }));
+  await sleep(90);
+  m.cancelAll();
+  assertEquals(
+    started,
+    1,
+    "there is nothing to retry into after shutdown — re-arming would " +
+      "resurrect a timer cancelAll() just cleared",
+  );
 });

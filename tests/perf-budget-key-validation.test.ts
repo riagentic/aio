@@ -1,4 +1,4 @@
-// llama-master #15: `perfBudget.methods` is resolved at dispatch by exact
+// `perfBudget.methods` is resolved at dispatch by exact
 // `cell:method` string, with no boot check. An app declared 17 per-method budgets
 // adopting the feature and one — `builds:installRelease` — named no method that
 // exists. It had never applied to anything, and nothing would ever have said so:

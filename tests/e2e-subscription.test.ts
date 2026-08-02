@@ -103,7 +103,7 @@ export default function App() {
     <div>
       <span t="av">{String(a.n)}</span>
       <button t="reveal" onClick={() => set(true)}>reveal</button>
-      {open ? <span t="bv">{String(b.m)}</span> : <span t="hidden">hidden</span>}
+      {open ? <span t="bv">{String(b.m)}</span>: <span t="hidden">hidden</span>}
     </div>
   );
 }`,

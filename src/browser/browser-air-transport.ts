@@ -6,7 +6,11 @@ import { diagEmit } from "../diagnostics/diagnostic-bus.ts";
 import { _registerSfnTransport, handleSfnResult } from "./server-fns-client.ts";
 import { installConsoleIntercept } from "./console-intercept.ts";
 import { routeCommand } from "./browser-air-commands.ts";
-import { protoHello, stampedVersion } from "../protocol/protocol-version.ts";
+import {
+  PROTOCOL_MISMATCH_CLOSE_CODE,
+  protoHello,
+  stampedVersion,
+} from "../protocol/protocol-version.ts";
 import {
   _checkStateIntegrity,
   _coreGetState,
@@ -31,6 +35,13 @@ import {
   handleControlFrame,
 } from "./browser-shared.ts";
 import { dec, enc, v1PeerReason } from "../protocol/envelope.ts";
+import {
+  _armAckTimer,
+  _rejectAck,
+  _rejectAllPending,
+  ARMS_ACK_TIMER,
+} from "../protocol/browser-ack.ts";
+import { backoffDelay } from "../protocol/transport-shared.ts";
 
 let _ws: WebSocket | null = null;
 let _closed = false;
@@ -111,7 +122,7 @@ function _route(line: string): void {
     else console.warn("[aio:air] undecodable frame — dropped");
     return;
   }
-  if (handleControlFrame(f, _bootId)) return;
+  if (handleControlFrame(f, _bootId, _protoMismatch)) return;
   if (routeCommand(f, _sendRaw)) return;
   switch (f.t) {
     case "sfnr":
@@ -130,6 +141,17 @@ function _route(line: string): void {
         );
       }
       return;
+    case "get-state":
+      // `am inspect <idx>` asks a CLIENT for its view of state. The orphaned
+      // WS and IPC transports answer it; this one had no case, so the frame
+      // fell through to "unexpected … dropped" and the tooling just waited —
+      // a silent failure of the inspect path against any AIR client.
+      try {
+        _sendRaw(enc("client-state", _coreGetState()));
+      } catch (err) {
+        _sendRaw(enc("client-state", { error: String(err) }));
+      }
+      return;
     case "state":
       _handleState(f.d as Record<string, unknown>);
       return;
@@ -142,17 +164,58 @@ function _route(line: string): void {
   }
 }
 
+/** A version gap is terminal: the two sides cannot read each other's frames,
+ *  so stop rather than keep trading garbage, and stop RETRYING — reconnecting
+ *  cannot close a version gap (mirrors the WS transport). */
+function _protoMismatch(reason: string) {
+  _status("Protocol mismatch — reload/update the app");
+  _closed = true; // stop the reconnect loop
+  _rejectAllPending(new Error(`protocol version mismatch: ${reason}`));
+  try {
+    _ws?.close(PROTOCOL_MISMATCH_CLOSE_CODE, "protocol mismatch");
+  } catch { /* already closing */ }
+  _ws = null;
+  _ipcConnected = false;
+  _connecting = false;
+}
+
 function _flushQueue(send: (d: string) => void) {
   const q = _queue;
   _queue = [];
   _connectionDegraded = false;
-  for (const a of q) send(enc("action", a));
+  for (const a of q) {
+    send(enc("action", a));
+    // The frame is out now — this is when a queued call's ack clock starts.
+    const cid = (a as { cid?: string }).cid;
+    if (cid) _armAckTimer(cid);
+  }
 }
 
 function _scheduleReconnect() {
-  const delay = Math.min(1000 * 2 ** _retry, 30000);
+  // The shared authority, not a private copy of it: `backoffDelay` adds ±20%
+  // jitter precisely so that when one server restarts, its clients do not all
+  // reconnect on the same millisecond. This inlined its own formula with no
+  // jitter (and a 30s ceiling against the shared 8s), so every AIR client
+  // retried in lockstep — the thundering herd the shared helper exists to
+  // prevent.
+  const delay = backoffDelay(_retry);
   _retry++;
   setTimeout(() => _connect(), delay);
+}
+
+// If the Electron bridge answers neither onOpen nor onClose, the flags set
+// below stay true forever: `_tryConnect` sees a live attempt, never retries,
+// and the client sits there with no connection, no retry and no error.
+// `_ipcConnected` doubles as the re-entry guard that keeps the bridge from
+// being bound twice, so it cannot simply be deferred to onOpen — a watchdog
+// releases it instead.
+const IPC_CONNECT_TIMEOUT_MS = 10_000;
+let _ipcWatchdog: ReturnType<typeof setTimeout> | null = null;
+function _clearIpcWatchdog() {
+  if (_ipcWatchdog !== null) {
+    clearTimeout(_ipcWatchdog);
+    _ipcWatchdog = null;
+  }
 }
 
 function _connectIPC() {
@@ -161,6 +224,17 @@ function _connectIPC() {
     return;
   }
   _ipcConnected = true;
+  _clearIpcWatchdog();
+  _ipcWatchdog = setTimeout(() => {
+    _ipcWatchdog = null;
+    if (_closed || _wasConnected) return; // opened (or torn down) meanwhile
+    console.warn(
+      `[aio:air] IPC bridge did not open within ${IPC_CONNECT_TIMEOUT_MS}ms — retrying`,
+    );
+    _ipcConnected = false;
+    _connecting = false;
+    _scheduleReconnect();
+  }, IPC_CONNECT_TIMEOUT_MS);
   // Bind the bridge callbacks EXACTLY once. The preload bridge registers with
   // `ipcRenderer.on` (additive, and it exposes no `off`), while _connectIPC
   // runs again on every reconnect — so each server restart added another
@@ -174,6 +248,7 @@ function _connectIPC() {
   }
   _ipcBound = true;
   _ipc.onOpen(() => {
+    _clearIpcWatchdog();
     _connecting = false;
     _retry = 0;
     if (_wasConnected) _status("Connected");
@@ -191,8 +266,13 @@ function _connectIPC() {
   });
   _ipc.onMessage(_route);
   _ipc.onClose(() => {
+    _clearIpcWatchdog();
     _ipcConnected = false;
     _connecting = false;
+    // The connection is known gone: fail the calls waiting on it NOW instead
+    // of letting each one sit out its full 15s ack ceiling and report a
+    // timeout. The orphaned WS transport has always done this.
+    _rejectAllPending(new Error("connection lost"));
     _coreSetTransport(null);
     _coreSetConnected(false);
     _syncOnline?.(false);
@@ -238,6 +318,7 @@ function _connect() {
   };
   ws.onclose = () => {
     _ws = null;
+    _rejectAllPending(new Error("connection lost")); // see the IPC close above
     _coreSetTransport(null);
     _coreSetConnected(false);
     _syncOnline?.(false);
@@ -253,17 +334,29 @@ function _connect() {
 function _send(action: { type: string; payload?: unknown }) {
   const tagged = { ...action, _source: "UI" };
   const json = enc("action", tagged);
+  const cid = (tagged as { cid?: string }).cid;
   if (_ws && _ws.readyState === WebSocket.OPEN) {
     try {
       _ws.send(json);
+      if (cid) _armAckTimer(cid);
     } catch {
       _queue.push(tagged);
       _updateDegraded();
     }
-  } else if (_ipc && _ipcConnected) _ipc.send(json);
-  else {
+  } else if (_ipc && _ipcConnected) {
+    _ipc.send(json);
+    if (cid) _armAckTimer(cid);
+  } else {
     if (_queue.length >= QUEUE_MAX) {
-      _queue.shift();
+      // The dropped action already has a pending ack with its timer running.
+      // Dropping it silently left its caller to wait out the full ceiling and
+      // then hear "no response after 15000ms" — a timeout story for something
+      // that was thrown away locally, instantly, and knowably.
+      const dropped = _queue.shift();
+      const dcid = (dropped as { cid?: string } | undefined)?.cid;
+      if (dcid) {
+        _rejectAck(dcid, new Error("action dropped — offline queue full"));
+      }
       diagEmit({
         type: "browser-air-transport:queue-drop",
         severity: "warning",
@@ -293,6 +386,7 @@ _setSubscribeTriggers(_tryConnect, () => {});
 
 _setTeardownFn(() => {
   _closed = true;
+  _clearIpcWatchdog();
   _ws?.close();
   _ws = null;
   _ipcConnected = false;
@@ -305,5 +399,7 @@ _setTeardownFn(() => {
   _retry = 0;
 });
 
+// Arms ack clocks itself: on write in `_send`, and on flush for queued actions.
+(_send as unknown as Record<symbol, boolean>)[ARMS_ACK_TIMER] = true;
 _setClientSend(_send);
 installConsoleIntercept(_sendRaw);

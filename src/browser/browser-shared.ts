@@ -193,6 +193,13 @@ export const _cfgSink: {
 export function handleControlFrame(
   f: Frame,
   bootId: { current: string | null },
+  /** Called for a TERMINAL protocol failure. A version gap means the two sides
+   *  cannot read each other's frames, so the transport must stop — retrying
+   *  cannot fix it. Without this the IPC path logged the mismatch and left the
+   *  connection open, trading frames neither side could interpret, against an
+   *  envelope contract that says a mismatch "closes the socket with code 4505
+   *  — loudly, never silently". */
+  onFatal?: (reason: string) => void,
 ): boolean {
   switch (f.t) {
     case "reload":
@@ -234,17 +241,17 @@ export function handleControlFrame(
         const result = negotiateProtocol(protoHello(stampedVersion()), theirs);
         if (!result.ok) {
           console.error(`[aio] protocol version mismatch: ${result.reason}`);
+          onFatal?.(result.reason);
         }
       }
       return true;
     }
-    case "proto-err":
-      console.error(
-        `[aio] server rejected protocol version: ${
-          (f.d as { reason?: string } | undefined)?.reason ?? "?"
-        }`,
-      );
+    case "proto-err": {
+      const reason = (f.d as { reason?: string } | undefined)?.reason ?? "?";
+      console.error(`[aio] server rejected protocol version: ${reason}`);
+      onFatal?.(reason);
       return true;
+    }
     default:
       return false;
   }

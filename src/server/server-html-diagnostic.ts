@@ -68,9 +68,9 @@ export function generateDiagnosticHTML(
   }</div>
   </div>
   <script>
-    var proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    var proto = location.protocol === 'https:' ? 'wss:': 'ws:';
     var tk = new URLSearchParams(location.search).get('token');
-    var wsUrl = proto + '//' + location.host + '/ws' + (tk ? '?token=' + encodeURIComponent(tk) : '');
+    var wsUrl = proto + '//' + location.host + '/ws' + (tk ? '?token=' + encodeURIComponent(tk): '');
     var ws = new WebSocket(wsUrl);
     ws.onmessage = function(ev) {
       var f; try { f = JSON.parse(ev.data); } catch (_) { return; }

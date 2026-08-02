@@ -1,4 +1,4 @@
-// llama.md wishlist #1 — "the big one, and it bit me three times today".
+// a field report wishlist #1 — "the big one, and it bit me three times today".
 //
 // A cell whose state comes from the MACHINE (telemetry, a device, the clock)
 // made its UI untestable: "does a stranded CPU-only placement get called out",

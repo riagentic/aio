@@ -597,6 +597,73 @@ const checkout = cell("checkout", {
   `Partial` for TS variance reasons, so use `s.$signal?.aborted` or `!`.
 - Pass it to every abortable API (`fetch`, `until({ signal })`) and check
   `aborted` after each `await` before writing terminal state.
+- Naming a method that is missing or sync throws at `cell()` — a `cancelOn` that
+  can never fire is a bug, not a no-op.
+
+### `"self"` — newest wins
+
+"A new navigation cancels the scan still running" is the most common async shape
+in a browsing UI: search-as-you-type, folder scans, autocomplete, tile loads.
+Write it as `"self"`:
+
+```ts
+const disk = cell("disk", {
+  state: { path: null as string | null, entries: [] as string[] },
+  cancelOn: { open: "self" }, // a new open() aborts the ones still running
+  methods: {
+    async open(s: DiskState & Partial<MethodDraftMeta>, path: string) {
+      s.path = path;
+      const entries = await scanFolders(path, s.$signal);
+      if (s.$signal!.aborted) return; // superseded — drop the stale results
+      s.entries = entries;
+    },
+  },
+});
+```
+
+`"self"` can only ever abort calls that are **already running**, never the one
+that triggers it: triggers fire while the action reduces, and the incoming call
+is tracked one step later. Mix it with other triggers freely —
+`cancelOn: { open: ["self", nav.leave] }`.
+
+It also expresses what a self-reference cannot: inside a `cell()` literal the
+cell's own bound methods do not exist yet, so `cancelOn: { open: [disk.open] }`
+is unwritable.
+
+## Long-running server work
+
+Minutes-long work — a filesystem scan, a build, an import — is a normal method,
+not a special construct. Four things make it behave:
+
+| Need                   | Do this                                                                               |
+| ---------------------- | ------------------------------------------------------------------------------------- |
+| Raise the ceiling      | `perfBudget: { methods: { "disk:open": { timeout: 0 } } }` (`0` = no limit)           |
+| A cancel path          | `cancelOn` (`"self"` for supersession, a `stop` method for an explicit cancel button) |
+| A "still working" sign | Write a state field before the first `await` — clients see it on the next commit      |
+| Don't clobber          | After every `await`, check `s.$signal!.aborted` **before** writing terminal state     |
+
+The last row is the one that bites. A method that resumes after an `await` is
+writing into state that other calls and other actions have moved on from, so a
+late write from a superseded run can overwrite a fresh one. `cancelOn` +
+`$signal` is the framework's answer; a `if (s.path !== path) return;` path guard
+is the same idea written by hand, and is worth adding on top when the identity
+of the work (which folder, which query) is what decides staleness.
+
+Cancellation is cooperative — pass `s.$signal` into the work itself so it
+actually stops. Subprocesses take it directly:
+
+```ts
+// disk.server.ts — a Deno-only module, dynamically imported by the method
+export async function scanFolders(path: string, signal?: AbortSignal) {
+  const cmd = new Deno.Command("du", { args: ["-sk", path], signal });
+  const { stdout } = await cmd.output(); // signal kills the child process
+  return parse(new TextDecoder().decode(stdout));
+}
+```
+
+See [`examples/disk`](../../examples/disk/) for the whole shape — subprocesses
+from a cell, supersession, cancel, and the `.server.ts` boundary — and
+[imports](../build/imports.md) for why the Deno-only half lives in its own file.
 
 ## Guard lines — machine states without a machine
 

@@ -3,7 +3,7 @@
 // commands (against a fake control-port HTTP server). These are the CLI's
 // user-facing behaviors; the HTTP seam (trojanGet/Post, httpGet) is exercised
 // for real — only the aio server behind it is canned.
-import { assert, assertEquals } from "@std/assert";
+import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import {
   cmdInstances,
   cmdStatus,
@@ -1101,4 +1101,51 @@ Deno.test("installFromArgv: the one dev-install recipe", () => {
     "am",
     "/x/aio/src/am.ts",
   ]);
+});
+
+// `am new <kind> <name>` took the name straight from argv into BOTH a
+// file path and generated source. `am new cell "../etc/x"` escaped src/, and a
+// name containing `}` closed the generated `cell(` literal so everything after
+// it became executable code in the developer's own project.
+Deno.test("am new: a name that is not an identifier is refused", async () => {
+  const { cmdNew } = await import("../src/am/am-cmd-meta.ts");
+  const dir = await Deno.makeTempDir({ prefix: "am-new-" });
+  const cwd = Deno.cwd();
+  const errors: string[] = [];
+  const origErr = console.error;
+  console.error = (...a: unknown[]) => errors.push(a.map(String).join(" "));
+  try {
+    Deno.chdir(dir);
+    for (
+      const bad of [
+        "../etc/x", // path traversal
+        "x}; console.log('pwned'); const y = {", // code injection
+        "a/b", // nested path
+        "2fast", // not an identifier start
+      ]
+    ) {
+      errors.length = 0;
+      await cmdNew(["cell", bad], { json: false } as never);
+      assert(
+        errors.some((e) => e.includes("invalid name")),
+        `"${bad}" must be refused, got: ${errors.join(" | ")}`,
+      );
+    }
+    // Nothing was written anywhere.
+    let wrote = false;
+    try {
+      await Deno.stat(`${dir}/src`);
+      wrote = true;
+    } catch { /* expected */ }
+    assertEquals(wrote, false, "a refused name creates no files");
+
+    // A good name still works, and '-' becomes a valid identifier.
+    await cmdNew(["cell", "my-widget"], { json: false } as never);
+    const src = await Deno.readTextFile(`${dir}/src/cells/my-widget/index.ts`);
+    assertStringIncludes(src, "export const myWidget = cell('my-widget'");
+  } finally {
+    console.error = origErr;
+    Deno.chdir(cwd);
+    await Deno.remove(dir, { recursive: true }).catch(() => {});
+  }
 });

@@ -1,4 +1,4 @@
-// llama-master #16 — "no harness for aio's central claim: one state, many
+// "no harness for aio's central claim: one state, many
 // surfaces". The promise that sells the framework is that an Electron window, a
 // browser tab and `am` all read the same state with no transport code. A real app
 // shipped two of those clients and said: "I have never tested two of them at

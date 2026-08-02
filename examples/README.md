@@ -13,6 +13,30 @@ runtime-tested (`tests/examples.test.ts`), UI-tested
 | `counter/` | _(default)_       | Smallest full app — one cell, one component |
 | `todo/`    | `--template=todo` | Todo list — list state, `useLocal` input    |
 
+## Worked example
+
+| Dir     | What                                                                      |
+| ------- | ------------------------------------------------------------------------- |
+| `disk/` | Folder-size scanner — the filesystem, subprocesses, and long-running work |
+
+`contacts/` is the one to read first: it is the whole integration in ~120 lines
+— one array in cell state, one `db:` table of the same name kept in step with
+it, validation that refuses in plain code (the caller's `await` rejects with the
+reason), parameterized selectors, and a UI that creates, edits and deletes with
+no transport code anywhere. It also turns on `checkIntegrityOnBoot`, which is
+the honest setting for data a user would miss. Tested in
+`tests/example-contacts.test.ts`.
+
+`disk/` is the one to read when your app has to leave the process: it walks the
+real filesystem and opens the desktop file manager, both from cell methods, with
+the Deno-only half in `disk.server.ts` behind a dynamic import
+([the rule](../docs/build/imports.md#2-server-only-code-name-it-serverts-and-dynamic-import-it)).
+It is also the reference for
+[long-running server work](../docs/state/methods.md#long-running-server-work) —
+`cancelOn: { open: ["self", "disk:stop"] }` (a new folder supersedes the scan
+still running, Cancel stops it), a `scanning` flag, and the rule that a
+superseded run never writes. Tested in `tests/example-disk.test.ts`.
+
 ## Target build smoke fixtures
 
 `examples/targets/<dir>` — minimal per-target apps kept purely as **CI

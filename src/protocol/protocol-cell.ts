@@ -2,6 +2,7 @@
 // cell(), bridge(), and aio stub — browser-side action creator factories.
 
 import { registerCell } from "../state/cell-reactive.ts";
+import { isAsyncFunction } from "../state/cell-impl.ts";
 import type { CellDef } from "../state/cell-types.ts";
 import { normalizeSyncConfig } from "../sync/types.ts";
 
@@ -67,15 +68,20 @@ export function cell(
     const eCat = buildCat((config.effects ?? {}) as any);
     // Return-value transport: the browser must know which methods are async so
     // bindCellReactive tags their dispatch with `_callId` — the correlation id
-    // the server resolves with the method's RETURN value. The server-side cell()
-    // classifies these; the browser stub must mirror it (same AsyncFunction test
-    // used for the client-scope guard below).
+    // the server resolves with the method's RETURN value.
+    //
+    // It uses the SERVER'S classifier, not a copy of half of it. All three
+    // sites here used to test `constructor.name === "AsyncFunction"` only,
+    // while `isAsyncFunction` also honours the `markAsync` symbol — the
+    // documented escape hatch for minifiers that rewrite constructor names,
+    // i.e. precisely the browser bundle this file exists for. A `markAsync`ed
+    // method was therefore classified SYNC here: its dispatch carried no
+    // `_callId`, so `await cell.method()` resolved undefined instead of the
+    // return value, and optimistic rebase "replayed" it by calling an async
+    // function synchronously and dropping the promise.
     const asyncMethods = new Set<string>();
     for (const [key, fn] of Object.entries(config.methods)) {
-      if (
-        (fn as { constructor?: { name?: string } })?.constructor?.name ===
-          "AsyncFunction"
-      ) {
+      if (typeof fn === "function" && isAsyncFunction(fn)) {
         asyncMethods.add(key);
       }
     }
@@ -98,10 +104,7 @@ export function cell(
     // instead of wiring server dispatch (parity with cell-create.ts).
     if (config.scope === "client") {
       for (const [key, fn] of Object.entries(config.methods)) {
-        if (
-          (fn as { constructor: { name: string } }).constructor.name ===
-            "AsyncFunction"
-        ) {
+        if (typeof fn === "function" && isAsyncFunction(fn)) {
           throw new Error(
             `[${name}] client-scoped cells support sync methods only (no ` +
               `server round-trip exists); do async work in the component and ` +
@@ -133,10 +136,9 @@ export function cell(
       );
       const syncMethods: Record<string, unknown> = {};
       for (const [key, fn] of Object.entries(config.methods!)) {
-        if (
-          (fn as { constructor: { name: string } }).constructor.name !==
-            "AsyncFunction"
-        ) syncMethods[key] = fn;
+        if (typeof fn !== "function" || !isAsyncFunction(fn)) {
+          syncMethods[key] = fn;
+        }
       }
       (def.__aio as Record<string, unknown>).reduce = (
         draft: Record<string, unknown>,

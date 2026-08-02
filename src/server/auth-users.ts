@@ -193,6 +193,27 @@ export function openUserStore(path: string): UserStore {
   const updFails = db.prepare(
     "UPDATE users SET fails = ?, locked_until = ? WHERE id = ?",
   );
+  // Failure counting must happen IN THE DATABASE, not around it.
+  //
+  // The old path read `fails`, awaited PBKDF2 (~100ms of yielded event loop),
+  // then wrote `fails + 1` as an absolute value. N concurrent wrong-password
+  // requests all read the same stale count and all wrote the same number, so a
+  // burst of 20 guesses advanced the counter by ONE — verified: twenty
+  // concurrent wrong passwords left the account unlocked and still accepting
+  // logins. The per-account lockout, the only defence a botnet's
+  // rotating IPs don't sidestep, was bypassable by simply not waiting.
+  //
+  // One statement, evaluated atomically: increment, and lock at the threshold.
+  // `locked_until <= ?` makes it a no-op for an already-locked account (never
+  // extend a lockout) AND means exactly one racer can perform the locking
+  // transition — so the warning below is logged once, not once per request.
+  const bumpFail = db.prepare(
+    `UPDATE users
+        SET fails        = CASE WHEN fails + 1 >= ? THEN 0 ELSE fails + 1 END,
+            locked_until = CASE WHEN fails + 1 >= ? THEN ? ELSE 0 END
+      WHERE id = ? AND locked_until <= ?`,
+  );
+  const selLock = db.prepare("SELECT locked_until FROM users WHERE id = ?");
   const updTotp = db.prepare("UPDATE users SET totp = ? WHERE id = ?");
   const updTotpOn = db.prepare(
     "UPDATE users SET totp_on = ? WHERE id = ? AND totp IS NOT NULL",
@@ -280,17 +301,18 @@ export function openUserStore(path: string): UserStore {
       // lock-state oracle). Only the correct-password branch below can reveal
       // a lock — to the legitimate account owner.
       if (!ok) {
-        if (row.locked_until > now) return null; // already locked — don't extend
-        const fails = row.fails + 1;
-        if (fails >= LOCK_AFTER) {
-          updFails.run(0, now + LOCK_MS, id);
-          console.warn(
-            `[aio] auth: account "${id}" locked for ${
-              LOCK_MS / 60_000
-            }m after ${LOCK_AFTER} failed logins`,
-          );
-        } else {
-          updFails.run(fails, 0, id);
+        // Atomic increment-and-maybe-lock; the WHERE clause covers the
+        // "already locked — don't extend" case that used to be a stale read.
+        const r = bumpFail.run(LOCK_AFTER, LOCK_AFTER, now + LOCK_MS, id, now);
+        if (Number(r.changes) === 1) {
+          const after = selLock.get(id) as { locked_until: number } | undefined;
+          if ((after?.locked_until ?? 0) > now) {
+            console.warn(
+              `[aio] auth: account "${id}" locked for ${
+                LOCK_MS / 60_000
+              }m after ${LOCK_AFTER} failed logins`,
+            );
+          }
         }
         return null;
       }

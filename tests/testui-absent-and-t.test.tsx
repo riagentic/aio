@@ -1,4 +1,4 @@
-// llama.md, second update — two small ergonomics that both remove a
+// a field report, second update — two small ergonomics that both remove a
 // stringly-typed test:
 //
 //  #5 (wishlist) "I want 'this component is not rendered'. Today I write
@@ -79,7 +79,7 @@ Deno.test("absent(): an unknown name is absent, not an error", async () => {
   assert(ui.absent("NoSuchThingAnywhere"));
 });
 
-// llama-master, re-probed unchanged a round later: a component that renders
+// a field report, re-probed unchanged a round later: a component that renders
 // `null` still has a surface node — it ran, it just produced nothing — and
 // `absent()` called that "present". The reporter's exact probe:
 //

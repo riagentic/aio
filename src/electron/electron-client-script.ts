@@ -33,7 +33,7 @@ function trackBounds(win) {
 
 function fetchPage(url, maxRedirects = 5) {
   return new Promise((resolve, reject) => {
-    const mod = url.startsWith('https') ? https : http;
+    const mod = url.startsWith('https') ? https: http;
     // aio --expose serves a self-signed cert; a dedicated aio client trusts
     // it (a generic browser can't — that's the point of this client).
     const req = mod.get(url, { timeout: 8000, rejectUnauthorized: false }, (res) => {
@@ -59,7 +59,7 @@ function fetchPage(url, maxRedirects = 5) {
 
 function postJson(url, body) {
   return new Promise((resolve, reject) => {
-    const mod = url.startsWith('https') ? https : http;
+    const mod = url.startsWith('https') ? https: http;
     const payload = Buffer.from(JSON.stringify(body));
     const req = mod.request(url, {
       method: 'POST', timeout: 8000, rejectUnauthorized: false,
@@ -77,7 +77,7 @@ function postJson(url, body) {
 
 function fetchBuffer(url, maxBytes = 1048576) {
   return new Promise((resolve) => {
-    const mod = url.startsWith('https') ? https : http;
+    const mod = url.startsWith('https') ? https: http;
     const req = mod.get(url, { timeout: 5000, rejectUnauthorized: false }, (res) => {
       if (res.statusCode !== 200) { res.resume(); return resolve(null); }
       const chunks = [];
@@ -125,7 +125,7 @@ function discoverApps(timeoutMs, cb) {
     const key = host + ':' + ad.port;
     if (found.has(key)) return;
     ad.host = host;
-    ad.url = (ad.tls ? 'https' : 'http') + '://' + host + ':' + ad.port;
+    ad.url = (ad.tls ? 'https': 'http') + '://' + host + ':' + ad.port;
     found.set(key, ad);
   });
   sock.on('error', () => { try { sock.close(); } catch {} cb([]); });
@@ -171,10 +171,10 @@ function pinCert(host, cert) { if (host && cert) _pinnedCerts.set(host, normPem(
 
 // Turn a .aioapp profile into a connectable recent entry.
 function profileToRecent(pr) {
-  const scheme = pr.tls ? 'https' : 'http';
+  const scheme = pr.tls ? 'https': 'http';
   const host = pr.host; // discovery could refresh this later by name
   const base = scheme + '://' + host + ':' + pr.port;
-  const url = pr.key ? base + '/?token=' + encodeURIComponent(pr.key) : base + '/';
+  const url = pr.key ? base + '/?token=' + encodeURIComponent(pr.key): base + '/';
   return {
     url,
     name: pr.name,
@@ -207,7 +207,7 @@ function loadProfileFile(file) {
 // PIN pairing — submit the code the app shows on startup; the server returns
 // the full profile (cert + key) so we pin + save + connect forever after.
 async function pairWith(win, info) {
-  const scheme = info.tls ? 'https' : 'http';
+  const scheme = info.tls ? 'https': 'http';
   const base = scheme + '://' + info.host + ':' + info.port;
   const showErr = (m) => win.webContents.executeJavaScript(
     "document.getElementById('err') && (document.getElementById('err').textContent = " + JSON.stringify(m) + ")"
@@ -215,7 +215,7 @@ async function pairWith(win, info) {
   try {
     const res = await postJson(base + '/__aio/pair', { pin: info.pin });
     if (res.status !== 200 || !res.json || !res.json.key) {
-      throw new Error(res.status === 401 ? 'Invalid or expired pairing code' : 'Pairing failed (HTTP ' + res.status + ')');
+      throw new Error(res.status === 401 ? 'Invalid or expired pairing code': 'Pairing failed (HTTP ' + res.status + ')');
     }
     const pr = res.json;
     pr.host = info.host; // the server doesn't know its own LAN address — we do
@@ -224,7 +224,7 @@ async function pairWith(win, info) {
     saveRecent(rec);
     connectTo(win, rec.url);
   } catch (e) {
-    showErr('Pairing failed: ' + (e && e.message ? e.message : String(e)));
+    showErr('Pairing failed: ' + (e && e.message ? e.message: String(e)));
   }
 }
 
@@ -244,7 +244,7 @@ async function connectTo(win, url) {
       // the user to append the token from the server's "share:" line.
       const m = /Server returned (401|403)/.exec(fe.message || '');
       if (m && !/[?&]token=/.test(url)) {
-        throw new Error('This app requires a token. Add it to the address:  ' + url + (url.includes('?') ? '&' : '?') + 'token=YOUR_TOKEN   (copy it from the server\\'s "share:" line)');
+        throw new Error('This app requires a token. Add it to the address:  ' + url + (url.includes('?') ? '&': '?') + 'token=YOUR_TOKEN   (copy it from the server\\'s "share:" line)');
       }
       throw fe;
     }
@@ -255,7 +255,7 @@ async function connectTo(win, url) {
     try {
       // Preserve a pinned cert/key from a prior profile import for this URL.
       const prev = loadRecents().find((r) => r.url === url) || {};
-      saveRecent({ url, name: meta.title || new URL(url).host, title: meta.title, host: new URL(url).hostname, port: Number(new URL(url).port) || (url.startsWith('https') ? 443 : 80), tls: url.startsWith('https'), needsAuth: /[?&]token=/.test(url), cert: prev.cert || null, key: prev.key || null });
+      saveRecent({ url, name: meta.title || new URL(url).host, title: meta.title, host: new URL(url).hostname, port: Number(new URL(url).port) || (url.startsWith('https') ? 443: 80), tls: url.startsWith('https'), needsAuth: /[?&]token=/.test(url), cert: prev.cert || null, key: prev.key || null });
     } catch {}
 
     const iconUrl = url.replace(/\\/$/, '') + '/icon.png';

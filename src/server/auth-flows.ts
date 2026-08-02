@@ -295,6 +295,15 @@ export async function handleAuthFlow(
     case "password": {
       const user = caller();
       if (!user) return json(401, { error: "login_required" });
+      // Same per-IP budget every other verifying endpoint checks. Without it
+      // this route verified a password — one PBKDF2, ~100ms of CPU — for every
+      // request, unthrottled: a stolen session could brute-force the OLD
+      // password here at full speed, and anyone could use it as a CPU pump
+      //. The account lockout alone is not the answer; this is the gate
+      // that makes guessing expensive per SOURCE, not per account.
+      if (authFailBudgetExceeded(clientKey)) {
+        return json(429, { error: "too_many_attempts" });
+      }
       const b = await body();
       const oldPw = str(b?.old), newPw = str(b?.new);
       if (!oldPw || !newPw) return json(400, { error: "old_and_new_required" });
@@ -360,9 +369,12 @@ export async function handleAuthFlow(
         recordAuthFail(clientKey, `reset request for id=${id}`); // budget the trigger
         const rec = cfg.users.get(id);
         // Always issue a token (decoy for the miss) → identical write cost.
+        // The decoy subject is an ESCAPE, not a literal NUL byte in the
+        // source: a raw control character made this whole file read as
+        // binary, so grep matched nothing in it and said so silently.
         const token = cfg.users.issueToken(
           "reset",
-          rec ? id : ` decoy`,
+          rec ? id : "\u0000decoy",
           RESET_TTL_MS,
         );
         if (rec?.email) {
@@ -407,6 +419,20 @@ export async function handleAuthFlow(
       if (cfg.totp === false) return json(403, { error: "totp_disabled" });
       const user = caller();
       if (!user) return json(401, { error: "login_required" });
+      // Enrolling is not the same as RE-enrolling. This route overwrote the
+      // stored secret unconditionally, so a stolen session could stage a new
+      // secret, add it to the attacker's own authenticator and pass
+      // /totp/enable with a valid code — silently replacing the owner's second
+      // factor and locking them out of their own account. Turning TOTP
+      // OFF already requires the password; turning it over to a new device
+      // must not be easier than turning it off.
+      if (cfg.users.totpSecret(user.id)?.enabled) {
+        return json(409, {
+          error: "totp_already_enabled",
+          hint:
+            "disable TOTP first (requires the password), then set it up again",
+        });
+      }
       const secret = generateTotpSecret();
       cfg.users.setTotpSecret(user.id, secret); // staged until /totp/enable
       return json(200, {
@@ -432,6 +458,10 @@ export async function handleAuthFlow(
     case "totp/disable": {
       const user = caller();
       if (!user) return json(401, { error: "login_required" });
+      // Verifies a password → same per-IP budget as every other such route.
+      if (authFailBudgetExceeded(clientKey)) {
+        return json(429, { error: "too_many_attempts" });
+      }
       const b = await body();
       const password = str(b?.password);
       if (!password) return json(400, { error: "password_required" });

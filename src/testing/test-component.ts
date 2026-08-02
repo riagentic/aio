@@ -3,6 +3,7 @@
 // longer reach into the underscore-prefixed internals.
 
 import { _setDocument, _unmount, mount } from "../air/aio-renderer.ts";
+import { _armTestStrict } from "./test-strict.ts";
 import type { ComponentFn } from "../air/vdom-types.ts";
 
 // deno-lint-ignore no-explicit-any
@@ -59,6 +60,7 @@ export function testComponent(
   App: ComponentFn,
   opts: TestComponentOptions = {},
 ): TestComponentHandle {
+  _armTestStrict(); // tests are the strictest environment, never the most permissive
   const doc = opts.document ?? (globalThis as { document?: AnyDoc }).document;
   if (!doc) {
     throw new Error(

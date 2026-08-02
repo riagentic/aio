@@ -235,3 +235,22 @@ export async function getLowWater(
     return null;
   }
 }
+
+/** The highest `server_ts` that compaction has DELETED for a cell (0 = none).
+ *
+ *  A client whose server_ts cursor sits below this may have missed ops that no
+ *  longer exist in the log, so it must be served a snapshot rather than an
+ *  incremental response. */
+export async function getCompactedTs(db: DB, cell: string): Promise<number> {
+  try {
+    const { rows } = await db.query<{ compacted_ts: number | null }>(
+      "SELECT compacted_ts FROM sync_meta WHERE cell = ?",
+      [cell],
+    );
+    return rows[0]?.compacted_ts ?? 0;
+  } catch {
+    // Pre-migration database (column absent): treat as "unknown", which the
+    // caller handles conservatively.
+    return 0;
+  }
+}

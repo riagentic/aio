@@ -166,6 +166,32 @@ Localhost is always allowed. Additional hostnames via `allowedOrigins`.
 - Manual selectors to narrow `useAio` — proxy handles it
 - Manual compression — WebSocket handles HTTP-level compression
 
+### Real-time apps (games, editors, cursors)
+
+`syncIntervalMs` is the server's broadcast coalescing window — the floor on how
+often a client hears about a change, not how often your app may change it.
+
+| Cadence                          | Setting                             |
+| -------------------------------- | ----------------------------------- |
+| Turn-based / forms / dashboards  | leave it (50ms)                     |
+| Cursors, presence, drag previews | 16–33ms, and keep the payload small |
+| 60 Hz simulation state           | don't sync it at all — see below    |
+
+A 60 Hz tick does not belong on the wire in any configuration: at that rate the
+coalescer is not the cost, the op/patch stream is. Keep per-frame state in a
+`scope: "client"` cell (never synced, never persisted, one copy per tab) and
+sync the OUTCOME — the move, the score, the final position. That is also what
+keeps a replay honest: see the input-tape pattern in
+[time travel](../debugging/time-travel.md).
+
+## Test isolation — one knob
+
+Everything an app owns lives under `~/.<appId>`, and **`AIO_APPS_DIR` moves all
+of it** — data, locks, sockets, TLS, logs. That is the whole isolation story:
+one env var per test run (aio's own suite sets it in its `deno test` task), and
+the harnesses sandbox it automatically when the runner has not. There is no
+second knob to remember and no per-subsystem path to override.
+
 ## Defaults reference
 
 | Parameter                  | Default        | Source                       |

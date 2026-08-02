@@ -49,7 +49,7 @@ The framework's "that spelling is gone" errors now name the version that still
 ran it, next to the migration:
 
 ```
-[mdview] cell config key 'machine:' was removed in alpha27 — guards are a guard
+[a field report] cell config key 'machine:' was removed in alpha27 — guards are a guard
 line — `if (s.status !== "idle") return;`. Migrate: docs/upgrade/restructure.md
 — or run it unchanged on the version it was written for:
 `am pin v1.0.0-alpha26 && am fix`.
@@ -70,7 +70,7 @@ the app, naming `file:line` and both ways out:
 
 ```
 ✗ v1.0.0-alpha42 would break this app — 1 removed API(s) still in use:
-  src/cell/mdview.ts:61
+  src/cell/a field report.ts:61
     cell config key 'machine:' was removed in alpha27 — ...
 ```
 

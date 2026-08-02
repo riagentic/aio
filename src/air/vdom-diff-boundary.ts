@@ -9,7 +9,7 @@ import {
   isChildOf,
   removeDom,
 } from "./vdom-remove.ts";
-import { _render, createDom } from "./vdom-render.ts";
+import { createDom } from "./vdom-render.ts";
 import { _registerLazyListeners } from "./vdom-create.ts";
 import type { DiffFn } from "./vdom-diff-children.ts";
 
@@ -21,6 +21,34 @@ export type DiffChildrenFn = (
   ctx: RenderCtx,
   isSvg: boolean,
 ) => void;
+
+// A boundary occupies a REGION of its parent, not necessarily the end of it.
+//
+// Recovery and fallback both rebuilt content with `appendChild` / `_render`,
+// which append — so a boundary with later siblings had its new content land
+// AFTER them: `<span>before</span><ErrorBoundary/><span>after</span>` recovered
+// to `before, after, <recovered>`. Capture where the old region sat
+// BEFORE removing it, then put the new content back in the same place.
+
+/** The live node that FOLLOWS this region, or null when it ends the parent. */
+function _regionAnchor(
+  parent: Node,
+  region: (VNode | string | number | null | undefined)[],
+): Node | null {
+  for (let i = region.length - 1; i >= 0; i--) {
+    const v = region[i];
+    if (v == null) continue;
+    const d = getDom(v as VNode | string | number);
+    if (d && isChildOf(d, parent)) return d.nextSibling;
+  }
+  return null;
+}
+
+/** Insert at the region's place; append when the anchor is gone or was null. */
+function _insertAt(parent: Node, node: Node, anchor: Node | null): void {
+  if (anchor && isChildOf(anchor, parent)) parent.insertBefore(node, anchor);
+  else parent.appendChild(node);
+}
 
 /** Shared helper: update _dom for boundary/fragment containers after diffChildren. */
 export function _updateContainerDom(
@@ -95,7 +123,9 @@ export function _diffErrorBoundary(
 
   try {
     if (wasError) {
-      // Recovering from error: remove old fallback, render children fresh
+      // Recovering from error: remove old fallback, render children fresh —
+      // back into the SAME slot the fallback occupied.
+      const at = _regionAnchor(parent, [ov._rendered!]);
       removeDom(parent, ov._rendered!, ctx);
       const frag = ctx.doc.createDocumentFragment();
       let firstDom: Node | null = null;
@@ -106,7 +136,7 @@ export function _diffErrorBoundary(
           frag.appendChild(childDom);
         }
       }
-      parent.appendChild(frag);
+      _insertAt(parent, frag, at);
       nv._dom = firstDom ?? undefined;
     } else {
       diffChildrenFn(parent, nv.children, ov.children, ctx, isSvg);
@@ -128,7 +158,12 @@ export function _diffErrorBoundary(
       );
       throw fallbackError;
     }
-    // Fallback succeeded — safe to remove old DOM and render fallback
+    // Fallback succeeded — safe to remove old DOM and render fallback where
+    // the boundary's content was, not at the end of the parent.
+    const at = _regionAnchor(
+      parent,
+      !wasError ? ov.children : [ov._rendered],
+    );
     if (!wasError) {
       for (const child of ov.children) removeDom(parent, child, ctx);
     } else if (ov._rendered != null) {
@@ -136,7 +171,8 @@ export function _diffErrorBoundary(
     }
     nv._rendered = fallbackVnode;
     if (fallbackVnode != null) {
-      _render(parent, fallbackVnode, null, ctx, isSvg);
+      const dom = createDom(fallbackVnode, ctx, isSvg, parent);
+      if (dom) _insertAt(parent, dom, at);
       nv._dom = getDom(fallbackVnode) ?? undefined;
     }
   }
@@ -160,7 +196,8 @@ export function _diffSuspense(
   const wasPending = ov._rendered != null;
   try {
     if (wasPending) {
-      // Was showing fallback, try rendering children again
+      // Was showing fallback, try rendering children again — same slot.
+      const at = _regionAnchor(parent, [ov._rendered!]);
       removeDom(parent, ov._rendered!, ctx);
       const frag = ctx.doc.createDocumentFragment();
       let firstDom: Node | null = null;
@@ -182,7 +219,7 @@ export function _diffSuspense(
         }
         throw innerThrown;
       }
-      parent.appendChild(frag);
+      _insertAt(parent, frag, at);
       nv._dom = firstDom ?? undefined;
     } else {
       diffChildrenFn(parent, nv.children, ov.children, ctx, isSvg);
@@ -193,6 +230,10 @@ export function _diffSuspense(
     if (thrown !== _LAZY_PENDING) throw thrown;
     // Register for lazy resolution notifications
     _registerLazyListeners(nv.children, ctx);
+    const at = _regionAnchor(
+      parent,
+      !wasPending ? ov.children : [ov._rendered],
+    );
     if (!wasPending) {
       for (const child of ov.children) removeDom(parent, child, ctx);
     } else if (ov._rendered != null) {
@@ -200,7 +241,8 @@ export function _diffSuspense(
     }
     nv._rendered = fallback ?? null;
     if (fallback != null) {
-      _render(parent, fallback, null, ctx, isSvg);
+      const dom = createDom(fallback, ctx, isSvg, parent);
+      if (dom) _insertAt(parent, dom, at);
       nv._dom = getDom(fallback) ?? undefined;
     }
   }

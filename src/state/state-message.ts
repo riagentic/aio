@@ -125,7 +125,20 @@ export function handleMessage(data: any): HandleResult {
 
 // ── Lifecycle ────────────────────────────────────────────────────────
 
-/** Promise resolving on first state, or rejecting after 30s timeout. */
+/** Resolves with the first state message — or with **`null`** if none arrives
+ *  within 30s. It does NOT reject.
+ *
+ *  The doc used to promise a rejection while the code resolved `null`, so a
+ *  caller guarding with `.catch()` was never told about the timeout and
+ *  proceeded as though state had arrived. Null-check the result:
+ *
+ *  ```ts
+ *  const state = await ready();
+ *  if (state === null) { /* never connected — show an offline state *\/ }
+ *  ```
+ *
+ *  Resolving is deliberate: a rejection nobody caught would surface as an
+ *  unhandled rejection 30 seconds into an otherwise working page. */
 export function ready(): Promise<unknown> {
   if (_readyTimeout === null) {
     _readyTimeout = setTimeout(() => {

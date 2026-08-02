@@ -325,7 +325,22 @@ function _diffElement(
   isSvg: boolean,
 ): void {
   const dom = ov._dom as HTMLElement;
-  if (!dom) return;
+  if (!dom) {
+    // A previously-rendered element always has a `_dom`. Without one there is
+    // nothing to patch, so this returned quietly — and the element then sat
+    // there frozen: `nv._dom` unset, props never applied, children never
+    // diffed, no error anywhere to explain why one part of the page had
+    // stopped updating. It cannot be repaired from here, but it must not
+    // be silent.
+    _devWarn(
+      `diff-no-dom-${String(nv.tag)}`,
+      `<${String(nv.tag)}> has no DOM node to diff against — it will stop ` +
+        `updating. The previous vnode was rendered without a _dom (partial ` +
+        `hydration, or an earlier reconciler failure). This is an aio bug; ` +
+        `please report the component's shape.`,
+    );
+    return;
+  }
   nv._dom = dom;
 
   const tag = nv.tag as string;

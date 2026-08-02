@@ -277,3 +277,49 @@ Deno.test("8.2: in PROD it ALSO throws — never commits the half-applied draft"
     _resetCellRegistry();
   }
 });
+
+// the shim registered its unmount cleanup in the COMPONENT BODY, where
+// `onCleanup` also fires before every re-render. A re-render with unchanged
+// deps does not re-run the effect, so the cleanup ran and nothing put the
+// effect back: an effect that sets up once (`[]`, or deps that never change)
+// was silently dismantled by the first unrelated re-render.
+Deno.test({
+  name: "7.1: an effect survives re-renders that don't change its deps",
+  async fn() {
+    _resetHints();
+    const { document, root, cleanup } = createDOM();
+    _setDocument(document);
+    const sig = signal(0); // drives re-renders; NOT a dep
+    const log: string[] = [];
+    const App = () => {
+      const v = sig.value;
+      useEffect(() => {
+        log.push("setup");
+        return () => log.push("teardown");
+      }, ["stable"]); // never changes
+      return h("div", null, String(v));
+    };
+    const handle = mount(root, App);
+    await flush();
+    assertEquals(log, ["setup"], "set up once after mount");
+
+    sig.set(1);
+    await flush();
+    sig.set(2);
+    await flush();
+    assertEquals(
+      log,
+      ["setup"],
+      "two unrelated re-renders must neither tear it down nor re-run it",
+    );
+
+    _unmount(handle);
+    await flush();
+    assertEquals(
+      log,
+      ["setup", "teardown"],
+      "torn down exactly once, at unmount",
+    );
+    await cleanup();
+  },
+});

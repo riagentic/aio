@@ -226,6 +226,23 @@ export async function cmdNew(
     outError("usage: am new <cell|page> <name>", mode);
     return;
   }
+  // The name becomes BOTH a path segment and an identifier in generated
+  // source, and it arrived from argv completely unchecked (`am create`
+  // validates its own, this never did). `am new cell "../etc/x"` wrote outside
+  // src/, and a name carrying `}` closed the generated `cell(` literal and let
+  // the rest run as code — in the developer's own project file.
+  //
+  // A cell/page name is an identifier, so require one: nothing else can be
+  // either a traversal or a syntax break.
+  if (!/^[A-Za-z][A-Za-z0-9_-]*$/.test(name)) {
+    outError(
+      `invalid name '${name}' — start with a letter, then letters, digits, ` +
+        `'-' or '_' (it becomes a file path AND an identifier in the ` +
+        `generated code)`,
+      mode,
+    );
+    return;
+  }
 
   if (kind === "cell") {
     const dir = `src/cells/${name}`;
@@ -236,9 +253,10 @@ export async function cmdNew(
       return;
     } catch { /* ok */ }
     await Deno.mkdir(dir, { recursive: true });
+    const symbol = name.replace(/-([a-z0-9])/gi, (_m, c) => c.toUpperCase());
     const content = `import { cell } from 'aio'
 
-export const ${name} = cell('${name}', {
+export const ${symbol} = cell('${name}', {
   state: {},
   methods: {
   },
@@ -247,7 +265,8 @@ export const ${name} = cell('${name}', {
     await Deno.writeTextFile(file, content);
     out(flags.json ? { created: file } : `created ${file}`, mode);
   } else if (kind === "page") {
-    const pascal = name.charAt(0).toUpperCase() + name.slice(1);
+    const pascal = (name.charAt(0).toUpperCase() + name.slice(1))
+      .replace(/-([a-z0-9])/gi, (_m, c: string) => c.toUpperCase());
     const dir = "src/pages";
     const file = `${dir}/${pascal}.tsx`;
     try {

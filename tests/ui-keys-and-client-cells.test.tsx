@@ -1,4 +1,4 @@
-// space-invaders follow-up: the three open testUI/AIR gaps.
+// space follow-up: the three open testUI/AIR gaps.
 //   1. ui.X.keyDown / keyUp — HOLD a key (press is a tap; games, drags,
 //      held modifiers were untestable through the DOM).
 //   2. expectCell on a scope:'client' cell — works (retry) or fails naming

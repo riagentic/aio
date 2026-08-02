@@ -281,7 +281,7 @@ Deno.test("electron: UDS script — reports a backend outage once, with the true
   assertStringIncludes(s, "backend connection restored");
 });
 
-// ── electron auto-install (machine B5) ────────────────────────────────
+// ── electron auto-install ────────────────────────────────
 import { autoInstallElectron } from "../src/electron/electron-spawn.ts";
 
 Deno.test("autoInstallElectron: reports success, failure, and throw — always loud, never throws", async () => {

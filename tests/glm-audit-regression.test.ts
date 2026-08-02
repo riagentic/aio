@@ -1,4 +1,4 @@
-// Pins for the GLM-5.2 audit fixes (feedback/glm-audit.md, 2026-07-17) —
+// Pins for the a field report-5.2 audit fixes (2026-07-17; see feedback/resolved.md) —
 // each test locks a fixed behavior so the bug class stays dead. The dispatch
 // reject-on-reducer-error contract is pinned in tests/dispatch.test.ts.
 import { assert, assertEquals, assertThrows } from "@std/assert";
