@@ -1,4 +1,4 @@
-// llama.md, second update #3: `aiol` reported `Tests: 0` and "cell X has no test
+// a field report, second update #3: `aiol` reported `Tests: 0` and "cell X has no test
 // file" for an app with 271 passing tests. Cause: it scanned `src/`, `cells/` and
 // the project root — never `tests/`, which is the layout aio's OWN convention
 // mandates ("tests all live in tests/, never beside their source").

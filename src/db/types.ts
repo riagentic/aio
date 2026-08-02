@@ -47,6 +47,23 @@ export interface DB {
   ): Promise<QueryResult[]>;
   /** Callback: BEGIN/COMMIT wrapping an async function; rolls back on throw */
   transaction<T>(fn: (tx: Tx) => Promise<T>): Promise<T>;
+  /** Write a consistent copy of the database to `path` (SQLite `VACUUM INTO`).
+   *
+   *  Safe on a live database — SQLite takes the copy at a single point in time,
+   *  so it is never half-written, and compacts it on the way out. This is the
+   *  durable half of profile integrity: a rolling snapshot beside the app's
+   *  data gives a corrupt file somewhere to come back to. `path` must not
+   *  already exist.
+   *
+   *  Optional so a custom `DB` implementation (or a test fake) stays valid
+   *  without it — aio's own `createDB` always provides it. */
+  snapshot?(path: string): Promise<void>;
+  /** Run SQLite's `PRAGMA quick_check` — the cheap integrity scan.
+   *
+   *  `ok: true` when the file is sound, otherwise the problems SQLite named.
+   *  Cheap enough for boot: it skips the full index-content verification that
+   *  `integrity_check` performs. */
+  checkIntegrity?(): Promise<{ ok: boolean; problems: string[] }>;
   /** Close all workers and release resources */
   close(): Promise<void>;
   /** Returns the last error swallowed by the write-lock chain, or null if none.

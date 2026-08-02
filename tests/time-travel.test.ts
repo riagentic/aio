@@ -332,7 +332,7 @@ Deno.test("tt integration: paused dispatch drops actions", () => {
 Deno.test("tt: entries store the state reference — immutability is the store's", () => {
   // Committed state is a fresh immutable tree per action (Immer, frozen in
   // dev where TT runs), so the reference IS the snapshot. This replaced a
-  // structuredClone per dispatch (~1 MB/s at 60 fps in the space-invaders
+  // structuredClone per dispatch (~1 MB/s at 60 fps in the space
   // field report). Distinct commits keep distinct references.
   let tt = createTT<{ count: number }, A>();
   const s1 = Object.freeze({ count: 1 });

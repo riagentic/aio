@@ -24,6 +24,14 @@ import {
   SEPARATOR,
 } from "@std/path";
 import { slugify } from "./build/build-helpers.ts";
+import {
+  artifactName,
+  crossCompileBlocker,
+  hostPlatform,
+  isHostPlatform,
+  PLATFORMS,
+  resolvePlatforms,
+} from "./build/platforms.ts";
 
 /** A build target → the single-target `build.ts` flags that produce it, its
  *  network role, and a one-line description. Client targets connect to a
@@ -80,6 +88,8 @@ export const TARGETS: Record<string, TargetSpec> = {
 
 interface BuildBlock {
   targets?: string[];
+  /** OS/arch to build each target for (default: just this machine). */
+  platforms?: string[];
   out?: string;
   server?: string; // LAN/remote server address (recorded in the manifest)
 }
@@ -90,7 +100,11 @@ interface ArtifactRec {
 interface TargetResult {
   target: string;
   role: string;
+  platform: string;
   ok: boolean;
+  /** Set when the combination was deliberately not built (e.g. Electron for a
+   *  foreign OS) — a SKIP is reported, never silently omitted. */
+  skipped?: string;
   error?: string;
   artifacts: ArtifactRec[];
 }
@@ -134,8 +148,23 @@ export function isArtifactName(name: string, binaryName: string): boolean {
     return name.startsWith(binaryName) || name.startsWith("aio-client-");
   }
   if (ext === "") {
-    return name === binaryName || name === `${binaryName}-client` ||
-      name.startsWith("aio-client-");
+    if (
+      name === binaryName || name === `${binaryName}-client` ||
+      name.startsWith("aio-client-")
+    ) return true;
+    // Cross-compiled artifacts carry their platform and, on every OS but
+    // Windows, no extension at all — `myapp-macos-arm64`. Without this they
+    // matched nothing, so a perfectly good Mach-O binary was built, reported
+    // as "no artifact", and left behind in the project root while the build
+    // still declared success. Recognised by the platform table, so a new
+    // platform cannot be forgotten here.
+    for (const p of Object.keys(PLATFORMS)) {
+      if (
+        name === `${binaryName}-${p}` || name === `${binaryName}-client-${p}`
+      ) {
+        return true;
+      }
+    }
   }
   return false;
 }
@@ -190,7 +219,24 @@ function printTargets(): void {
     );
   }
   console.log(
-    `\n${C.dim}Declare them in deno.json → "build": { "targets": [...] }, or pass --targets=a,b${C.r}`,
+    `\n${C.b}Available platforms:${C.r} ${C.dim}(default: host)${C.r}`,
+  );
+  for (const [name, spec] of Object.entries(PLATFORMS)) {
+    const here = isHostPlatform(name) ? ` ${C.green}(this machine)${C.r}` : "";
+    console.log(
+      `  ${C.blue}${name.padEnd(16)}${C.r}${C.dim}${
+        spec.triple.padEnd(28)
+      }${C.r}${spec.desc}${here}`,
+    );
+  }
+  console.log(
+    `\n${C.dim}Declare them in deno.json → "build": { "targets": [...], "platforms": [...] },${C.r}`,
+  );
+  console.log(
+    `${C.dim}or pass --targets=a,b --platforms=linux,windows,macos-arm64.${C.r}`,
+  );
+  console.log(
+    `${C.dim}Electron/Android package with per-OS tooling — they build on their own OS only.${C.r}`,
   );
 }
 
@@ -233,6 +279,22 @@ export async function buildAll(): Promise<number> {
     printTargets();
     return 1;
   }
+
+  // Platform list: --platforms= overrides deno.json build.platforms; the
+  // default is this machine only, so an existing project's build is unchanged.
+  const argPlatforms = flag("platforms");
+  const rawPlatforms = argPlatforms
+    ? argPlatforms.split(",")
+    : block.platforms ?? ["host"];
+  const platformsResolved = resolvePlatforms(rawPlatforms);
+  if (!platformsResolved.ok) {
+    console.error(`${C.red}✗ ${platformsResolved.error}${C.r}\n`);
+    printTargets();
+    return 1;
+  }
+  const platformList = platformsResolved.platforms.length > 0
+    ? platformsResolved.platforms
+    : [hostPlatform()];
 
   const outDir = resolve(join(root, flag("out") ?? block.out ?? "dist"));
   if (unsafeOutDir(outDir, root)) {
@@ -284,51 +346,90 @@ export async function buildAll(): Promise<number> {
   try {
     for (const target of targetList) {
       const spec = TARGETS[target]!;
-      console.log(`\n${C.b}▶ ${target}${C.r} ${C.dim}— ${spec.desc}${C.r}`);
-      const before = await snapshot();
-      const args = ["run", "-A", buildScript, ...spec.flags, `--name=${title}`];
-      if (release) args.push("--release");
-      if (force) args.push("--force");
-      const { code } = await new Deno.Command("deno", {
-        args,
-        cwd: root,
-        stdout: "inherit",
-        stderr: "inherit",
-      }).output();
+      for (const platform of platformList) {
+        const label = platformList.length > 1 || !isHostPlatform(platform)
+          ? `${target} ${C.dim}[${platform}]${C.r}`
+          : target;
+        // Electron/Android package with platform-specific tooling — building
+        // them for another OS is refused with the reason, not attempted and not
+        // silently dropped (a missing artifact people discover at release time).
+        const blocker = isHostPlatform(platform)
+          ? null
+          : crossCompileBlocker(target);
+        if (blocker) {
+          console.log(
+            `\n${C.b}▶ ${label}${C.r} ${C.yellow}skipped${C.r} ${C.dim}— ${blocker}${C.r}`,
+          );
+          results.push({
+            target,
+            role: spec.role,
+            platform,
+            ok: true,
+            skipped: blocker,
+            artifacts: [],
+          });
+          continue;
+        }
+        console.log(`\n${C.b}▶ ${label}${C.r} ${C.dim}— ${spec.desc}${C.r}`);
+        const before = await snapshot();
+        const args = [
+          "run",
+          "-A",
+          buildScript,
+          ...spec.flags,
+          `--name=${title}`,
+          `--platform=${platform}`,
+        ];
+        if (release) args.push("--release");
+        if (force) args.push("--force");
+        const { code } = await new Deno.Command("deno", {
+          args,
+          cwd: root,
+          stdout: "inherit",
+          stderr: "inherit",
+        }).output();
 
-      if (code !== 0) {
+        if (code !== 0) {
+          results.push({
+            target,
+            role: spec.role,
+            platform,
+            ok: false,
+            error: `build exited ${code}`,
+            artifacts: [],
+          });
+          console.error(`${C.red}✗ ${label} failed (exit ${code})${C.r}`);
+          continue;
+        }
+
+        // Gather artifacts that appeared or changed, move them to staging.
+        const after = await snapshot();
+        const fresh = [...after].filter(([n, sig]) =>
+          !before.has(n) || sig !== before.get(n)
+        ).map(([n]) => n);
+        const tdir = join(staging, `${target}__${platform}`);
+        await Deno.mkdir(tdir, { recursive: true });
+        const artifacts: ArtifactRec[] = [];
+        for (const name of fresh) {
+          await moveFile(join(root, name), join(tdir, name));
+          artifacts.push({
+            file: name,
+            bytes: (await Deno.stat(join(tdir, name))).size,
+          });
+        }
+        if (artifacts.length === 0) {
+          console.warn(
+            `${C.yellow}⚠ ${label} built but produced no recognized artifact${C.r}`,
+          );
+        }
         results.push({
           target,
           role: spec.role,
-          ok: false,
-          error: `build exited ${code}`,
-          artifacts: [],
-        });
-        console.error(`${C.red}✗ ${target} failed (exit ${code})${C.r}`);
-        continue;
-      }
-
-      // Gather artifacts that appeared or changed, move them to staging.
-      const after = await snapshot();
-      const fresh = [...after].filter(([n, sig]) =>
-        !before.has(n) || sig !== before.get(n)
-      ).map(([n]) => n);
-      const tdir = join(staging, target);
-      await Deno.mkdir(tdir, { recursive: true });
-      const artifacts: ArtifactRec[] = [];
-      for (const name of fresh) {
-        await moveFile(join(root, name), join(tdir, name));
-        artifacts.push({
-          file: name,
-          bytes: (await Deno.stat(join(tdir, name))).size,
+          platform,
+          ok: true,
+          artifacts,
         });
       }
-      if (artifacts.length === 0) {
-        console.warn(
-          `${C.yellow}⚠ ${target} built but produced no recognized artifact${C.r}`,
-        );
-      }
-      results.push({ target, role: spec.role, ok: true, artifacts });
     }
 
     // ── assemble a clean dist/ (flat) + manifest ────────────────────────────
@@ -339,11 +440,30 @@ export async function buildAll(): Promise<number> {
       0,
     );
     if (totalArtifacts === 0) {
-      console.error(
-        `\n${C.red}✗ no artifacts produced — leaving ${
-          outDir.replace(root + SEPARATOR, "")
-        }/ untouched${C.r}`,
-      );
+      // Distinguish "everything was refused" from "everything failed" — a
+      // build that skipped every combination is a REQUEST problem (asking for
+      // Electron on a foreign OS), and saying "no artifacts produced" for it
+      // reads like a crash.
+      const allSkipped = results.length > 0 && results.every((r) => r.skipped);
+      if (allSkipped) {
+        console.error(
+          `\n${C.yellow}✗ nothing to build — every target/platform pair was skipped:${C.r}`,
+        );
+        for (const r of results) {
+          console.error(
+            `  ${C.dim}${r.target} [${r.platform}] — ${r.skipped}${C.r}`,
+          );
+        }
+        console.error(
+          `  ${C.dim}build those on their own OS, or drop them from --platforms${C.r}`,
+        );
+      } else {
+        console.error(
+          `\n${C.red}✗ no artifacts produced — leaving ${
+            outDir.replace(root + SEPARATOR, "")
+          }/ untouched${C.r}`,
+        );
+      }
       return 1;
     }
     await Deno.remove(outDir, { recursive: true }).catch(() => {});
@@ -356,10 +476,12 @@ export async function buildAll(): Promise<number> {
         for (const a of r.artifacts) {
           // Flat layout: on a cross-target name collision, disambiguate with the
           // target so nothing silently overwrites (e.g. browser + server binary).
+          // Cross-built artifacts already carry their platform (artifactName),
+          // so the two axes never collide with each other.
           const name = placedName(a.file, used, r.target);
           used.add(name);
           await moveFile(
-            join(staging, r.target, a.file),
+            join(staging, `${r.target}__${r.platform}`, a.file),
             join(outDir, name),
           );
           placed.push({ file: name, bytes: a.bytes });
@@ -368,7 +490,13 @@ export async function buildAll(): Promise<number> {
       manifestTargets.push({
         target: r.target,
         role: r.role,
+        // The platform each artifact RUNS on — the manifest is what a release
+        // pipeline reads to decide what to publish where, so it must say.
+        platform: r.platform,
+        triple: PLATFORMS[r.platform]?.triple ?? null,
+        host: isHostPlatform(r.platform),
         ok: r.ok,
+        ...(r.skipped ? { skipped: r.skipped } : {}),
         ...(r.error ? { error: r.error } : {}),
         artifacts: placed,
       });
@@ -378,6 +506,10 @@ export async function buildAll(): Promise<number> {
       title,
       builtAt: new Date().toISOString(),
       release,
+      /** The machine this was built on. Only these artifacts were runnable
+       *  here; the rest were cross-compiled and are checked, not booted. */
+      builtOn: hostPlatform(),
+      platforms: platformList,
       server: block.server ?? null,
       targets: manifestTargets,
     };
@@ -393,18 +525,38 @@ export async function buildAll(): Promise<number> {
   const failed = results.filter((r) => !r.ok);
   const rel = (p: string) => p.replace(root + "/", "");
   console.log(`\n${C.b}── build summary ──${C.r}`);
+  const multi = platformList.length > 1;
+  const tag = (t: TargetResult) =>
+    multi || !isHostPlatform(t.platform)
+      ? `${t.target} ${C.dim}[${t.platform}]${C.r}`
+      : t.target;
   for (const t of results) {
     if (!t.ok) {
-      console.log(`  ${C.red}✗ ${t.target}${C.r} ${C.dim}${t.error}${C.r}`);
+      console.log(`  ${C.red}✗ ${tag(t)}${C.r} ${C.dim}${t.error}${C.r}`);
+      continue;
+    }
+    if (t.skipped) {
+      console.log(`  ${C.yellow}– ${tag(t)}${C.r} ${C.dim}${t.skipped}${C.r}`);
       continue;
     }
     const files = t.artifacts.map((a) =>
       `${a.file} ${C.dim}(${human(a.bytes)})${C.r}`
     );
     console.log(
-      `  ${C.green}✓ ${t.target}${C.r} ${C.dim}→${C.r} ${
+      `  ${C.green}✓ ${tag(t)}${C.r} ${C.dim}→${C.r} ${
         files.join(", ") || C.dim + "no artifact" + C.r
       }`,
+    );
+  }
+  // Say plainly which artifacts were never executed here. A cross-compiled
+  // binary is built and checked, not booted — claiming otherwise is the kind
+  // of "it built, so it works" that the artifact E2E exists to disprove.
+  const crossed = [...new Set(platformList.filter((p) => !isHostPlatform(p)))];
+  if (crossed.length > 0) {
+    console.log(
+      `\n  ${C.dim}cross-compiled (not run here — built on ${hostPlatform()}):${C.r} ${C.blue}${
+        crossed.join(", ")
+      }${C.r}`,
     );
   }
   if (block.server) {
@@ -412,10 +564,14 @@ export async function buildAll(): Promise<number> {
       `\n  ${C.dim}clients connect to server:${C.r} ${C.blue}${block.server}${C.r}`,
     );
   }
+  const skipped = results.filter((r) => r.skipped).length;
+  const built = results.length - failed.length - skipped;
   console.log(
-    `\n${failed.length ? C.red : C.green}${failed.length ? "✗" : "✓"} ${
-      results.length - failed.length
-    }/${results.length} target(s) built → ${C.blue}${rel(outDir)}/${C.r}`,
+    `\n${failed.length ? C.red : C.green}${
+      failed.length ? "✗" : "✓"
+    } ${built}/${results.length - skipped} build(s) → ${C.blue}${
+      rel(outDir)
+    }/${C.r}${skipped ? ` ${C.dim}(${skipped} skipped)${C.r}` : ""}`,
   );
   return failed.length ? 1 : 0;
 }

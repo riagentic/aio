@@ -1,4 +1,4 @@
-// llama.md wishlist #4 / llama-master: "Adding fields works; renaming, removing
+// a field report wishlist #4 / a field report: "Adding fields works; renaming, removing
 // or retyping a persisted field has no defined behaviour… I have users with rows
 // written by 0.1.0. I would like to write that migration down rather than
 // discover it from a broken install."

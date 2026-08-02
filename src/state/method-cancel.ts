@@ -25,15 +25,22 @@ const _triggers = new Map<string, Set<Key>>();
 /** method key → in-flight AbortControllers */
 const _inflight = new Map<Key, Set<AbortController>>();
 
-/** Register cancel triggers for a method (called at cell creation). */
+/** Register cancel triggers for a method (called at cell creation).
+ *
+ *  `"self"` — bare or inside the list — resolves to the method's OWN action
+ *  type: newest call wins, older ones abort. It can never abort the incoming
+ *  call, because triggers fire during reduce and the new call is only tracked
+ *  when its effect runs, one step later. */
 export function registerCancelOn(
   cellPrefix: string,
   method: string,
-  triggers: (string | { type: string })[],
+  triggers: "self" | (string | { type: string })[],
 ): void {
   const key = `${cellPrefix}:${method}`;
-  for (const t of triggers) {
-    const type = typeof t === "string" ? t : t.type;
+  const list = triggers === "self" ? ["self"] : triggers;
+  for (const t of list) {
+    const raw = typeof t === "string" ? t : t.type;
+    const type = raw === "self" ? key : raw;
     let set = _triggers.get(type);
     if (!set) _triggers.set(type, set = new Set());
     set.add(key);

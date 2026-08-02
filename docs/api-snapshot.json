@@ -65,7 +65,7 @@
         },
         "CellAio": {
           "kind": "typeAlias",
-          "sig": "ec971958926993ba"
+          "sig": "c1bee3b7cce5417f"
         },
         "CellDef": {
           "kind": "typeAlias",
@@ -85,7 +85,7 @@
         },
         "CellsConfig": {
           "kind": "typeAlias",
-          "sig": "e9f48e1012d8813b"
+          "sig": "a66615d4bf6957ae"
         },
         "CellStatus": {
           "kind": "typeAlias",
@@ -129,7 +129,7 @@
         },
         "DB": {
           "kind": "interface",
-          "sig": "3338b3f8adb972c1"
+          "sig": "81a592365152399c"
         },
         "DBOpts": {
           "kind": "typeAlias",
@@ -205,7 +205,7 @@
         },
         "MethodsCellConfig": {
           "kind": "typeAlias",
-          "sig": "4512601cab4037d8"
+          "sig": "36cba8c1a23cf347"
         },
         "Msg": {
           "kind": "typeAlias",
@@ -393,7 +393,7 @@
         },
         "VERSION": {
           "kind": "variable",
-          "sig": "54a428a350282563"
+          "sig": "6e37480dea974edf"
         },
         "VitalsConfig": {
           "kind": "typeAlias",
@@ -995,7 +995,7 @@
         },
         "DB": {
           "kind": "interface",
-          "sig": "3338b3f8adb972c1"
+          "sig": "81a592365152399c"
         },
         "DBOpts": {
           "kind": "typeAlias",
@@ -1374,7 +1374,7 @@
         },
         "DB": {
           "kind": "interface",
-          "sig": "3338b3f8adb972c1"
+          "sig": "81a592365152399c"
         },
         "DBOpts": {
           "kind": "typeAlias",
@@ -1486,7 +1486,7 @@
       "symbols": {
         "AckMessage": {
           "kind": "interface",
-          "sig": "35773a1cdcce2df0"
+          "sig": "3b110e8002088d41"
         },
         "CompactDeps": {
           "kind": "interface",
@@ -1554,7 +1554,7 @@
         },
         "OpBuffer": {
           "kind": "interface",
-          "sig": "4638ce8594e397fc"
+          "sig": "e9f3f182ea536085"
         },
         "OpBufferOptions": {
           "kind": "interface",
@@ -1562,7 +1562,7 @@
         },
         "OpBufferStorage": {
           "kind": "interface",
-          "sig": "ac1ac417b936f283"
+          "sig": "fe054262359a5a2f"
         },
         "OpMessage": {
           "kind": "interface",
@@ -1602,7 +1602,7 @@
         },
         "SyncEngine": {
           "kind": "interface",
-          "sig": "886affd7c3c40355"
+          "sig": "0e61f6f3de292f9c"
         },
         "SyncEngineDeps": {
           "kind": "interface",
@@ -1610,7 +1610,7 @@
         },
         "SyncHandlerDeps": {
           "kind": "interface",
-          "sig": "329c932dff5cdfa7"
+          "sig": "da9fe676a1e2025d"
         },
         "SyncOp": {
           "kind": "interface",

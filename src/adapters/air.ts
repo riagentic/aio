@@ -37,7 +37,7 @@ import type {
  *  `counter.increment()`) — the AIO4 pattern. `useCell(...).state` is a LIVE
  *  Proxy over the cell signal: every property read returns the CURRENT value,
  *  so stashing it ("remember the previous frame") and diffing later compares
- *  state against itself — silently (space-invaders field report: it cost every
+ *  state against itself — silently (a field report: it cost every
  *  explosion, sound and the music, with a green test suite). If you must keep
  *  it, copy what you need before comparing:
  *  `const prev = { ...useCell(c).state }`. */
@@ -51,7 +51,7 @@ export function useCell<
  *  `counter.increment()`) — the AIO4 pattern. `useCell(...).state` is a LIVE
  *  Proxy over the cell signal: every property read returns the CURRENT value,
  *  so stashing it ("remember the previous frame") and diffing later compares
- *  state against itself — silently (space-invaders field report: it cost every
+ *  state against itself — silently (a field report: it cost every
  *  explosion, sound and the music, with a green test suite). If you must keep
  *  it, copy what you need before comparing:
  *  `const prev = { ...useCell(c).state }`. */

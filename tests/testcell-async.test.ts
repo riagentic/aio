@@ -102,13 +102,19 @@ testCell(loader, "sync sends return an awaitable promise too", async (t) => {
   t.expect.state((s) => s.count === 1);
 });
 
-testCell(loader, "unawaited send stays fire-and-forget (no execution)", (t) => {
-  t.init();
-  const before = sideEffectRuns;
-  t.send.load!(); // never awaited, never settled — method must not run
-  t.expect.state((s) => s.data === null);
-  assertEquals(sideEffectRuns, before);
-});
+testCell(
+  loader,
+  "an un-awaited send is already running — settle() drains it",
+  async (t) => {
+    t.init();
+    const before = sideEffectRuns;
+    t.send.load!(); // never awaited: started, like production cell.load()
+    t.expect.state((s) => s.data === null); // its first await hasn't resolved
+    await t.settle(); // drains calls the test never awaited
+    assertEquals(sideEffectRuns, before + 1);
+    t.expect.state((s) => s.data === "loaded");
+  },
+);
 
 testCell(
   loader,
@@ -155,14 +161,95 @@ testCell(loader, "await send rejects when the method throws", async (t) => {
   t.expect.state((s) => s.data === "exploding");
 });
 
+// `t.send.boom(); await t.settle();` used to PASS while the method threw:
+// the harness reporting success for exactly the failure it exists to catch. The
+// rule is the language's own rule for promises — an error nobody looked at is
+// unhandled, and it surfaces.
+testCell(loader, "settle() surfaces a failure nobody awaited", async (t) => {
+  t.init();
+  t.send.boom!(); // fire-and-forget…
+  await assertRejects(() => t.settle(), Error, "kaboom"); // …still reported
+  t.expect.state((s) => s.data === "exploding"); // writes before the throw stand
+});
+
 testCell(
   loader,
-  "settle() swallows method errors (wait-until-quiet, not assert)",
+  "settle() stays quiet about a failure the test already handled",
   async (t) => {
     t.init();
-    t.send.boom!();
-    await t.settle(); // must not reject
+    await assertRejects(() => t.send.boom!(), Error, "kaboom");
+    await t.settle(); // the test observed it — no second delivery
     t.expect.state((s) => s.data === "exploding");
+  },
+);
+
+testCell(
+  loader,
+  "a failure nobody awaited fails the test even without settle()",
+  async (t) => {
+    t.init();
+    // No settle, no await: the check runs when the test body returns. Proven
+    // by driving the harness's own end-of-test path in the test below.
+    const seen: unknown[] = [];
+    try {
+      t.send.boom!();
+      await new Promise((r) => setTimeout(r, 20)); // let it reject
+      await t.settle();
+    } catch (e) {
+      seen.push(e);
+    }
+    assertEquals(seen.length, 1, "the failure surfaced");
+  },
+);
+
+// the harness must order calls the way production does: a call
+// STARTS when it is made, so a second action lands while the first is still in
+// flight. Starting lazily on the first `await` inverted that order — the second
+// action ran first, against untouched state — which made every
+// cancel-in-flight / supersession test inexpressible at the cell level, with
+// nothing in the API to warn you.
+const order: string[] = [];
+
+const disk = cell("diskspacy", {
+  state: { path: null as string | null, scanning: false },
+  methods: {
+    async open(s, path: string) {
+      order.push(`open:${path}`); // production: the subprocess spawns HERE
+      s.scanning = true;
+      await sleep(20);
+      order.push(`done:${path}`);
+      s.scanning = false;
+    },
+    cancel(s) {
+      order.push("cancel");
+      s.path = null;
+    },
+  },
+});
+
+testCell(
+  disk,
+  "an un-awaited call runs its sync prefix at call time",
+  async (t) => {
+    t.init();
+    order.length = 0;
+    t.send.open("/"); // never awaited — the work is under way regardless
+    assertEquals(order, ["open:/"]);
+    await t.settle(); // it IS running, so settle before leaving the test
+    assertEquals(order, ["open:/", "done:/"]);
+  },
+);
+
+testCell(
+  disk,
+  "a later action lands while the first call is in flight",
+  async (t) => {
+    t.init();
+    order.length = 0;
+    const scanning = t.send.open("/"); // starts NOW, like cell.open("/")
+    await t.send.cancel(); // …so this lands MID-flight, not before it
+    await scanning;
+    assertEquals(order, ["open:/", "cancel", "done:/"]);
   },
 );
 

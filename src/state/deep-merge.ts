@@ -16,7 +16,7 @@ const BANNED_KEYS = new Set(["__proto__", "constructor", "prototype"]);
 // EXCEPTION (AIO-415): an empty plain object `{}` as initial is a DICTIONARY schema
 // (`Record<K,V>`), not a fixed-shape template — there are no "schema keys" to protect,
 // so ALL persisted entries are kept. Without this, a `{} `-initial dictionary lost
-// every persisted entry on restore, silently (the TBD `pins: Record<number,string>`
+// every persisted entry on restore, silently (a `pins: Record<number,string>`
 // data-loss bug).
 const MAX_DEPTH = 32;
 

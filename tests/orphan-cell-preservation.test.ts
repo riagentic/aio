@@ -1,4 +1,4 @@
-// A cell rename must never destroy data (space-invaders field report: a
+// A cell rename must never destroy data (a field report: a
 // leaderboard was silently dropped by the first persist of a build that no
 // longer declared its cell, and had to be carved out of SQLite free pages).
 //

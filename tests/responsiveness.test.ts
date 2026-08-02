@@ -96,7 +96,7 @@ Deno.test("an await on CPU work does NOT free the thread (why the docs say so)",
 
 Deno.test("dev budget is one frame; prod stays at the 100ms default", () => {
   assertEquals(DEV_FRAME_BUDGET_MS, 16, "one animation frame");
-  // The wiring lives in aio.ts (`prod ? undefined : { reduce: … }`); this pins
+  // The wiring lives in aio.ts (`prod ? undefined: { reduce: … }`); this pins
   // the constant it wires, so a future edit can't quietly loosen dev.
   assert(
     DEV_FRAME_BUDGET_MS < 100,

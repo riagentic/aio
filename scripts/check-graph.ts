@@ -1,4 +1,4 @@
-// check-graph.ts — one-shot, exit-code client-graph validator (a crypto wallet 2026-07-20f).
+// check-graph.ts — one-shot, exit-code client-graph validator.
 //
 // The dev server already walks the client-bound module graph and blocks on
 // guaranteed browser breaks (a `node:` builtin or an omitted `aio` server

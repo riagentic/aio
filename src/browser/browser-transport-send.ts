@@ -9,20 +9,13 @@ import {
 } from "./browser-protocol.ts";
 import { T } from "./browser-transport-state.ts";
 import { enc } from "../protocol/envelope.ts";
-import { _registerAck, _rejectAck } from "../protocol/browser-ack.ts";
-
-/** The per-method budget key ("cell:method") for an action — same derivation
- *  as the server executor's methodBudgetKey: async methods all travel as
- *  `<cell>:__exec` with the real name in the payload. */
-function ackMethodKey(action: { type: string; payload?: unknown }): string {
-  if (action.type.endsWith(":__exec")) {
-    const m = (action.payload as { _method?: unknown } | undefined)?._method;
-    if (typeof m === "string") {
-      return `${action.type.slice(0, -":__exec".length)}:${m}`;
-    }
-  }
-  return action.type;
-}
+import {
+  _armAckTimer,
+  _registerAck,
+  _rejectAck,
+  ackMethodKey,
+  ARMS_ACK_TIMER,
+} from "../protocol/browser-ack.ts";
 
 /** Sends action via IPC or WS — queues to memory during initial connect, persists to IndexedDB when disconnected.
  *  Returns a Promise that resolves when the server has acknowledged the action
@@ -57,11 +50,13 @@ export function send(
   if (T.ipc && T.ipcConnected) {
     const ackPromise = register(false);
     T.ipc.send(enc("action", action));
+    if (action.cid) _armAckTimer(action.cid); // frame written → clock starts
     return ackPromise;
   }
   if (T.ws && T.ws.readyState === WebSocket.OPEN) {
     const ackPromise = register(false);
     T.ws.send(enc("action", action));
+    if (action.cid) _armAckTimer(action.cid);
     return ackPromise;
   }
   if (!T.wasConnected && T.queue.length < WS_MAX_QUEUE) {
@@ -124,3 +119,8 @@ export function send(
   }
   return ackPromise;
 }
+
+// This transport starts the ack clock when the frame is actually written
+// (immediately on send, or on flush for a queued action) — so the cell binding
+// must not start it at dispatch time.
+(send as unknown as Record<symbol, boolean>)[ARMS_ACK_TIMER] = true;

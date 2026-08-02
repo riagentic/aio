@@ -1,4 +1,4 @@
-// llama.md #8: a cell def binds to exactly one app (perfect-aio D2) — but that
+// a cell def binds to exactly one app (perfect-aio D2) — but that
 // claim outlived the app, so two `testServer()` blocks in ONE file failed with
 // "[cell] already bound", even with `await using`. The second test had to move
 // into its own file for no reason a reader of that file could see.

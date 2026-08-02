@@ -3,6 +3,7 @@
  * Build compile — withDevExcluded symlink manager + deno compile step + systemd service file.
  */
 import { dirname, fromFileUrl, join, relative } from "@std/path";
+import { artifactName } from "./platforms.ts";
 import type { BuildConfig } from "./build-config.ts";
 
 // Dev-only packages excluded from all compile targets
@@ -178,6 +179,15 @@ export async function assetIncludes(root: string): Promise<string[]> {
     }
   } catch { /* no deno.json / no compile.include — fine */ }
 
+  // 3) deno.json itself — the app's IDENTITY (version, title, target). The
+  //    runtime reads it relative to the entry module, so a binary knows its own
+  //    version instead of falling back to "0.0.0" or, worse, adopting the
+  //    version of whatever project it happens to be launched from.
+  try {
+    await Deno.stat(join(root, "deno.json"));
+    add("deno.json");
+  } catch { /* no deno.json — nothing to embed */ }
+
   return rels.flatMap((r) => ["--include", r]);
 }
 
@@ -194,10 +204,14 @@ export function compileArgs(opts: {
   excludes: string[];
   out: string;
   entry: string;
+  /** Cross-compilation triple; omitted when building for the host so deno
+   *  uses its own default (and needs no extra runtime download). */
+  target?: string;
 }): string[] {
   return [
     "compile",
     "-A",
+    ...(opts.target ? ["--target", opts.target] : []),
     ...(opts.hasDist ? ["--include", "dist/"] : []),
     ...opts.workerInclude,
     ...opts.assets,
@@ -213,9 +227,19 @@ export async function runDenoCompile(cfg: BuildConfig): Promise<boolean> {
   const { root, dist, binaryName, configEntry, doElectron } = cfg;
   const nmDir = join(root, "node_modules");
 
-  const compileTarget = doElectron
-    ? join(dist, "AppDir", binaryName)
-    : binaryName;
+  // Cross builds carry the platform in the name (and .exe on Windows) so a
+  // dist/ holding every platform is unambiguous; the host keeps the bare name
+  // every existing task and test expects. Electron packages into AppDir and is
+  // host-only (loadBuildConfig refuses --electron with a foreign --platform).
+  const outName = doElectron
+    ? binaryName
+    : artifactName(binaryName, cfg.platform);
+  const compileTarget = doElectron ? join(dist, "AppDir", binaryName) : outName;
+  if (cfg.targetTriple) {
+    console.log(
+      `[compile] cross-compiling for ${cfg.platform} (${cfg.targetTriple})`,
+    );
+  }
   if (doElectron) await Deno.mkdir(join(dist, "AppDir"), { recursive: true });
 
   let hasDist = false;
@@ -245,6 +269,7 @@ export async function runDenoCompile(cfg: BuildConfig): Promise<boolean> {
         excludes,
         out: compileTarget,
         entry: configEntry,
+        target: cfg.targetTriple,
       }),
       stdout: "inherit",
       stderr: "inherit",
@@ -281,8 +306,19 @@ export async function writeServiceFile(cfg: BuildConfig): Promise<void> {
   const home = Deno.env.get("HOME") ?? `/home/${user}`;
   const serviceFile = `${binaryName}.service`;
   const execFlags = serviceExecFlags({ doRemote, doHeadless });
+  // systemd units are line-oriented: a newline in the title starts a new
+  // DIRECTIVE. `"title": "My App\nExecStart=/bin/sh -c '…'\nUser=root"` in
+  // deno.json therefore wrote a unit that ran something else, as root, on the
+  // machine the operator installs it on. `binaryName` is slugified;
+  // `appTitle` is free text and must be flattened the same way
+  // build-electron.ts already flattens displayName for .desktop files.
+  const safeTitle = (appTitle ?? binaryName).replace(
+    // deno-lint-ignore no-control-regex
+    /[\u0000-\u001f\u007f]/g,
+    " ",
+  ).trim();
   const unit = `[Unit]
-Description=${appTitle ?? binaryName} (aio)
+Description=${safeTitle || binaryName} (aio)
 After=network.target
 
 [Service]

@@ -2,6 +2,7 @@
  * @module
  * Build CLI — compiles a headless Deno CLI binary (no browser bundle, no Electron).
  */
+import { artifactName } from "./platforms.ts";
 import { join } from "@std/path";
 import {
   assetIncludes,
@@ -24,8 +25,18 @@ export async function buildCli(cfg: BuildConfig): Promise<void> {
     Deno.exit(1);
   }
 
-  const cliTarget = doRemote ? `${binaryName}-client` : binaryName;
-  console.log(`[cli] compiling ${cliEntry} → ${cliTarget}`);
+  // Same platform axis as the main compile path: the artifact is named for
+  // the platform it RUNS on (host keeps the bare name), and the triple is
+  // passed to deno. Without this a `--platform=windows` CLI build silently
+  // produced another host binary under the host's name — two identical files
+  // presented as two platforms.
+  const cliBase = doRemote ? `${binaryName}-client` : binaryName;
+  const cliTarget = artifactName(cliBase, cfg.platform);
+  console.log(
+    `[cli] compiling ${cliEntry} → ${cliTarget}${
+      cfg.targetTriple ? ` (${cfg.platform}, ${cfg.targetTriple})` : ""
+    }`,
+  );
 
   // Embed app data assets (.wasm + declared compile.include) — a CLI app can
   // load WASM server-side too, and deno compile can't trace those reads.
@@ -36,6 +47,7 @@ export async function buildCli(cfg: BuildConfig): Promise<void> {
       args: [
         "compile",
         "-A",
+        ...(cfg.targetTriple ? ["--target", cfg.targetTriple] : []),
         ...(doRemote ? [] : dbWorkerInclude()),
         ...assets,
         ...excludes.flatMap((e) => ["--exclude", e]),

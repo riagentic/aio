@@ -1,6 +1,6 @@
 // diagnostics.skipActions — a high-frequency action (a 60 fps game:tick) must
 // be keepable OUT of the time-travel window, or the window holds seconds of
-// noise instead of a session (space-invaders field report).
+// noise instead of a session (a field report).
 import { assert, assertEquals } from "@std/assert";
 import { cell } from "../src/state/cell-create.ts";
 import { testServer } from "../src/testing/server-test.ts";

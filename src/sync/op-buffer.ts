@@ -42,11 +42,11 @@ export interface OpBufferStorage {
     data: { lastHlc: HLC | null; lastServerTs?: number },
   ): Promise<void>;
   loadSnapshot(cell: string): Promise<
-    { state: unknown; hlc: HLC } | undefined
+    { state: unknown; hlc: HLC; serverTs?: number } | undefined
   >;
   saveSnapshot(
     cell: string,
-    data: { state: unknown; hlc: HLC },
+    data: { state: unknown; hlc: HLC; serverTs?: number },
   ): Promise<void>;
   clear(cell: string): Promise<void>;
 }
@@ -62,7 +62,7 @@ export function createMemoryStorage(): OpBufferStorage {
   >();
   const snapshots = new Map<
     string,
-    { state: unknown; hlc: HLC }
+    { state: unknown; hlc: HLC; serverTs?: number }
   >();
 
   // Synchronous in-memory maps wrapped to satisfy the async OpBufferStorage
@@ -134,13 +134,13 @@ export function createMemoryStorage(): OpBufferStorage {
 
     loadSnapshot(
       cell: string,
-    ): Promise<{ state: unknown; hlc: HLC } | undefined> {
+    ): Promise<{ state: unknown; hlc: HLC; serverTs?: number } | undefined> {
       return Promise.resolve(snapshots.get(cell));
     },
 
     saveSnapshot(
       cell: string,
-      data: { state: unknown; hlc: HLC },
+      data: { state: unknown; hlc: HLC; serverTs?: number },
     ): Promise<void> {
       snapshots.set(cell, data);
       return Promise.resolve();
@@ -170,10 +170,10 @@ export interface OpBuffer {
   ): Promise<{ lastHlc: HLC | null; lastServerTs?: number } | undefined>;
   saveSnapshot(
     cell: string,
-    data: { state: unknown; hlc: HLC },
+    data: { state: unknown; hlc: HLC; serverTs?: number },
   ): Promise<void>;
   loadSnapshot(cell: string): Promise<
-    { state: unknown; hlc: HLC } | undefined
+    { state: unknown; hlc: HLC; serverTs?: number } | undefined
   >;
   clear(cell: string): Promise<void>;
   saveMeta(
@@ -186,7 +186,13 @@ export interface OpBuffer {
  * Callback invoked when an op is dropped due to buffer capacity limits.
  */
 export interface OpBufferDropCallback {
-  (op: SyncOp, reason: "buffer-full" | "prune-failed"): void;
+  (
+    op: SyncOp,
+    /** `stale-evicted`: an UNCONFIRMED op past its TTL, discarded to make room
+     *  under backpressure. It never reached the server — this is the app's one
+     *  chance to know a local mutation was abandoned. */
+    reason: "buffer-full" | "prune-failed" | "stale-evicted",
+  ): void;
 }
 
 /**
@@ -233,8 +239,16 @@ export function createOpBuffer(
 
         for (const staleOp of staleOps) {
           if (!staleOp._clientTs || staleOp._clientTs > cutoff) continue;
-          // Evict this stale op by removing it from storage
+          // Evict this stale op by removing it from storage.
+          //
+          // These are UNCONFIRMED ops: mutations the user made that never
+          // reached the server. Eviction is a deliberate backpressure escape,
+          // but it was also completely silent — `onDrop` fired only for the
+          // INCOMING op when pruning failed, never for the ones actually
+          // thrown away, so the exact offline-queue mutations this subsystem
+          // exists to preserve disappeared with nothing to observe.
           await storage.pruneStale(op.cell, staleOp.id);
+          onDrop?.(staleOp, "stale-evicted");
           evictedCount++;
         }
 

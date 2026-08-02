@@ -1,4 +1,4 @@
-// llama.md #7: `// aiol-ok` only worked on the flagged line, the message didn't
+// `// aiol-ok` only worked on the flagged line, the message didn't
 // say so, and `deno fmt` reflowed a marker parked on a long line — so the hint
 // came back somewhere else. Clearing eight hints took four passes.
 //

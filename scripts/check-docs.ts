@@ -66,7 +66,7 @@ async function main(): Promise<void> {
 
   // Inline doc references: a `docs/<path>.md` cited in a src/ comment is a
   // promise — every anchor the field followed was accurate, which is why they
-  // are trusted (space-invaders report). One dangling ref erodes that, so a
+  // are trusted (a field report). One dangling ref erodes that, so a
   // citation of a nonexistent page is a hard gate.
   const refIssues = await checkSrcDocRefs();
   console.log(

@@ -44,6 +44,17 @@ export async function compactSyncOps(deps: CompactDeps): Promise<void> {
   // Freeze HLC at the moment of state capture — ensures DELETE boundary
   // matches the state snapshot exactly (no ops arrive between capture and delete)
   const [hlcPhys, hlcCnt, hlcNode] = deps.serverHlc;
+  // The highest server_ts this compaction is about to DELETE. It is the point
+  // below which a server_ts cursor can no longer be served incrementally: the
+  // rows are gone, so a client whose cursor sits under it would be told
+  // "nothing new" forever while its confirmed state silently diverged.
+  // Computed BEFORE the delete, inside the same per-cell lock the caller holds.
+  const { rows: maxRows } = await deps.db.query<{ max_ts: number | null }>(
+    `SELECT MAX(server_ts) as max_ts FROM sync_ops
+      WHERE cell = ? AND (hlc_phys < ? OR (hlc_phys = ? AND hlc_cnt <= ?))`,
+    [deps.cell, hlcPhys, hlcPhys, hlcCnt],
+  );
+  const compactedTs = maxRows[0]?.max_ts ?? 0;
   const state = deps.getState();
   const stateJson = JSON.stringify(state);
   const now = Date.now();
@@ -78,15 +89,18 @@ export async function compactSyncOps(deps: CompactDeps): Promise<void> {
       params: [now - COMPACTED_ID_RETENTION_MS],
     },
     {
-      sql: `INSERT INTO sync_meta (cell, low_water, last_compact, op_count)
-            VALUES (?, ?, ?, 0)
+      sql:
+        `INSERT INTO sync_meta (cell, low_water, last_compact, op_count, compacted_ts)
+            VALUES (?, ?, ?, 0, ?)
             ON CONFLICT(cell) DO UPDATE SET
               low_water = excluded.low_water, last_compact = excluded.last_compact,
-              op_count = (SELECT COUNT(*) FROM sync_ops WHERE cell = ?)`,
+              op_count = (SELECT COUNT(*) FROM sync_ops WHERE cell = ?),
+              compacted_ts = MAX(sync_meta.compacted_ts, excluded.compacted_ts)`,
       params: [
         deps.cell,
         JSON.stringify([hlcPhys, hlcCnt, hlcNode]),
         now,
+        compactedTs,
         deps.cell,
       ],
     },
@@ -112,9 +126,38 @@ export const SYNC_SCHEMA: string[] = [
     hlc_phys INTEGER NOT NULL, hlc_cnt INTEGER NOT NULL, hlc_node TEXT NOT NULL)`,
   `CREATE TABLE IF NOT EXISTS sync_meta (
     cell TEXT PRIMARY KEY, low_water TEXT NOT NULL,
-    last_compact INTEGER NOT NULL, op_count INTEGER NOT NULL)`,
+    last_compact INTEGER NOT NULL, op_count INTEGER NOT NULL,
+    compacted_ts INTEGER NOT NULL DEFAULT 0)`,
   `CREATE TABLE IF NOT EXISTS sync_compacted_ids (
     id TEXT PRIMARY KEY, compacted_at INTEGER NOT NULL)`,
   `CREATE INDEX IF NOT EXISTS idx_sync_compacted_at
     ON sync_compacted_ids(compacted_at)`,
 ];
+
+/** Schema changes for databases created by an EARLIER aio.
+ *
+ *  `CREATE TABLE IF NOT EXISTS` does nothing to a table that already exists,
+ *  so a column added later never reaches an existing app's database. Each
+ *  statement here is applied on boot and is expected to fail with "duplicate
+ *  column" once it has been applied — see `applySyncMigrations`. */
+export const SYNC_MIGRATIONS: string[] = [
+  `ALTER TABLE sync_meta ADD COLUMN compacted_ts INTEGER NOT NULL DEFAULT 0`,
+];
+
+/** Apply {@linkcode SYNC_MIGRATIONS}, tolerating the already-applied case.
+ *  Anything else is a real schema problem and is reported, not swallowed. */
+export async function applySyncMigrations(
+  db: DB,
+  log?: { debug: (m: string) => void; warn: (m: string) => void },
+): Promise<void> {
+  for (const sql of SYNC_MIGRATIONS) {
+    try {
+      await db.execute(sql);
+      log?.debug(`[sync:schema] applied: ${sql}`);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      if (/duplicate column name/i.test(msg)) continue; // already applied
+      log?.warn(`[sync:schema] migration failed: ${sql} — ${msg}`);
+    }
+  }
+}

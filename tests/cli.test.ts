@@ -512,19 +512,19 @@ Deno.test("electronClientScript: has maxRedirects safety", () => {
 // found on a server months later has to be identifiable from itself.
 Deno.test("versionLine: names the app AND the framework it was built with", () => {
   assertEquals(
-    versionLine("mdview", "2.1.0", "1.0.0-alpha42"),
-    "mdview 2.1.0 (aio 1.0.0-alpha42)",
+    versionLine("a field report", "2.1.0", "1.0.0-alpha42"),
+    "a field report 2.1.0 (aio 1.0.0-alpha42)",
   );
 });
 
 Deno.test("versionLine: an app with no version of its own still identifies itself", () => {
   assertEquals(
-    versionLine("mdview", undefined, "1.0.0-alpha42"),
-    "mdview (aio 1.0.0-alpha42)",
+    versionLine("a field report", undefined, "1.0.0-alpha42"),
+    "a field report (aio 1.0.0-alpha42)",
   );
   assertEquals(
-    versionLine("mdview", "", "1.0.0-alpha42"),
-    "mdview (aio 1.0.0-alpha42)",
+    versionLine("a field report", "", "1.0.0-alpha42"),
+    "a field report (aio 1.0.0-alpha42)",
   );
 });
 

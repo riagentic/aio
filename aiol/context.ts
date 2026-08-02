@@ -189,7 +189,7 @@ function parseCellConfig(source: string): {
   const hasState = /\bstate\s*:/.test(block);
   // `state: initialGameState()` is a call, not a literal — keys are unknowable
   // statically, and warning "empty state {}" about it is a false positive
-  // (space-invaders field report).
+  // (a field report).
   const stateIsLiteral = /\bstate\s*:\s*\{/.test(block);
   const hasMethods = /\bmethods\s*:/.test(block);
   const hasActions = /\bactions\s*:/.test(block);

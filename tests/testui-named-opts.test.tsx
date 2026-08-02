@@ -1,4 +1,4 @@
-// llama-master #12 + #13 — two harness papercuts that both punished the common
+// a field report #12 + #13 — two harness papercuts that both punished the common
 // case:
 //
 //  #12 the named wrapper form (auto-teardown, what a whole test file uses) had

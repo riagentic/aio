@@ -1,4 +1,4 @@
-// route.ts — ergonomic HTTP routes (a prediction-market app).
+// route.ts — ergonomic HTTP routes.
 //
 // `routes: {}` already hands a raw `Request` to a handler that returns a
 // `Response`, so cookies, status, and multipart (`req.formData()`) all work.

@@ -1,4 +1,4 @@
-// llama.md #1 — the worst footgun in the framework, per a full-app field report:
+// the worst footgun in the framework, per a full-app field report:
 // `models.items` (property) subscribes; `models.current()` (selector) returns a
 // correct, fresh value and subscribes to NOTHING. A component whose only read is
 // a selector renders once and then goes silently stale — right data, frozen

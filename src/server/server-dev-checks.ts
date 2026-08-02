@@ -111,7 +111,7 @@ export function startGraphValidation(
       } else {
         // Blocking = guaranteed client break. The diagnostic page covers the
         // browser; print loudly here too so the terminal names the file even
-        // if no browser is open. (machine U1)
+        // if no browser is open.
         console.error(
           `[aio] graph: ${blocking.length} error(s) will break the browser client:`,
         );

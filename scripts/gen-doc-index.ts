@@ -14,7 +14,11 @@ const SECTIONS: [string, string, string][] = [
   ["ui", "UI — AIR renderer", "components, signals, routing, forms"],
   ["persistence", "Persistence & sync", "SQLite, CRDT, offline"],
   ["auth", "Auth", "users, tokens, per-user visibility"],
-  ["testing", "Testing", "cell tests, semantic UI tests, linter"],
+  [
+    "testing",
+    "Testing",
+    "cell tests, semantic UI tests, driving the live app, linter",
+  ],
   ["clients", "Clients", "browser, electron, the am manager"],
   ["build", "Build & deploy", "targets, dev mode, imports, scaling"],
   ["debugging", "Debugging & production", "errors, vitals, monitoring"],
@@ -22,6 +26,21 @@ const SECTIONS: [string, string, string][] = [
   ["upgrade", "Upgrade guides", "version-to-version migration notes"],
   ["specs", "Design specs", "decision records — background, not manuals"],
 ];
+
+/** Pages that belong to one section but are indispensable from another.
+ *
+ *  `am surface` / `am trigger` observe and drive a RUNNING app the same way
+ *  `testUI` drives an in-process one — it is the primary dev-loop tool, not an
+ *  ops utility, and filing it only under Clients meant people found it after
+ *  they needed it. It stays where it is documented; it is listed where
+ *  it is looked for. */
+const CROSS_LINKS: Record<string, { path: string; note: string }[]> = {
+  testing: [{
+    path: "clients/app-manager.md",
+    note:
+      "`am surface` / `am trigger` — observe and drive a RUNNING app, no selectors, no driver: the same loop as `testUI`, against the real thing",
+  }],
+};
 
 function firstSentence(body: string): string {
   let inFence = false;
@@ -90,6 +109,11 @@ export async function generate(): Promise<string> {
     );
     for (const d of docs) {
       lines.push(`- [${d.title}](${d.path})${d.desc ? ` — ${d.desc}` : ""}`);
+    }
+    for (const x of CROSS_LINKS[dir] ?? []) {
+      const title = bySection.get(x.path.split("/")[0]!)
+        ?.find((d) => d.path === x.path)?.title ?? x.path;
+      lines.push(`- ↗ [${title}](${x.path}) — ${x.note}`);
     }
     lines.push("");
   }

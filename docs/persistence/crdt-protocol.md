@@ -49,9 +49,23 @@ Server→client after persisting an op:
 {
   "v": 2,
   "t": "sync-ack",
-  "d": { "opId": "c1-00a7", "serverHlc": [1712345678950, 0, "s"] }
+  "d": {
+    "cell": "todos",
+    "opId": "c1-00a7",
+    "serverHlc": [1712345678950, 0, "s"],
+    "serverTs": 1712345678950
+  }
 }
 ```
+
+`serverTs` is the op's position in the server's monotonic cursor. The client
+compares it with the cursor of the last **snapshot** it installed for that cell
+(`sync-res` → `lastServerTs[cell]`): a snapshot IS the server's live state, so
+it already contains every op at or below that cursor. Without the comparison, an
+ack arriving _after_ a snapshot re-applied its op to confirmed state and the
+client diverged by one application. It is optional — omitted when the server
+re-acks a duplicate, and absent from a pre-alpha43 server — and its absence
+simply means "apply as before".
 
 ### op-rejected
 

@@ -2,7 +2,7 @@
 //
 // `am surface` needed a connected browser/electron client; with
 // `--client=server-only` (or simply no client open) it returned an error even
-// though the server owns the state and the UI entry (machine M2). This renders
+// though the server owns the state and the UI entry. This renders
 // the app's UI in-process against LIVE server cell state — module caching
 // means the App's `import "./cell.ts"` resolves to the very cells the server
 // booted (field getters read real state) — and serializes the same semantic

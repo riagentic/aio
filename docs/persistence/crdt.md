@@ -156,6 +156,13 @@ Per-cell resolution, in order:
 | nothing              | adopted — runs locally, syncs                    |
 | `scope: "client"`    | never adopted (its state never leaves the tab)   |
 
+**Local-first is not "free frames".** An adopted method runs locally and returns
+immediately, but every call still becomes a CRDT op that is persisted and
+broadcast. A 60 Hz game tick or a mousemove handler therefore puts 60 ops/second
+on the wire per client — the latency is gone, the traffic is not. High-frequency
+state that no other client needs belongs in a `scope: "client"` cell (never
+synced, never persisted, per-tab); sync the outcome, not the frames.
+
 Only methods-style cells are adopted (the client replays sync methods as CRDT
 ops); an actions-style cell stays server-only and the boot line says so.
 

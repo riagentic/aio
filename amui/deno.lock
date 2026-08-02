@@ -274,7 +274,7 @@
       "npm:immer@10.2.0"
     ],
     "links": {
-      "jsr:@riagentic/aio@1.0.0-alpha42": {
+      "jsr:@riagentic/aio@1.0.0-alpha43": {
         "dependencies": [
           "jsr:@std/assert@1.0.19",
           "jsr:@std/jsonc@1.0.2",

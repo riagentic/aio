@@ -58,7 +58,7 @@ export function composeCells(
     }
     if (f.__aio.actionKeys.length === 0) {
       // debug, not warn: state-only cells (shared data, read via selectors)
-      // are a legitimate pattern — a trading app flagged the warn as boot noise on
+      // are a legitimate pattern flagged the warn as boot noise on
       // every testUI run.
       log.debug("cell", `${f.__aio.id} has no methods (state-only cell)`);
     }

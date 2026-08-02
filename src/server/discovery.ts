@@ -6,8 +6,8 @@
  * consumer) broadcasts one probe and collects every app on the subnet.
  *
  * Wire protocol (deliberately trivial, versioned):
- *   probe : "AIO_DISCOVER? v1"   (broadcast → AIO_DISCOVERY_PORT)
- *   reply : "AIO1 " + JSON.stringify(AioAppAd)   (unicast → prober)
+ *   probe: "AIO_DISCOVER? v1"   (broadcast → AIO_DISCOVERY_PORT)
+ *   reply: "AIO1 " + JSON.stringify(AioAppAd)   (unicast → prober)
  *
  * Uses `node:dgram` (stable in Deno — no `--unstable-net` needed), the same
  * UDP API the Electron client already speaks. Best-effort: on a bind/network

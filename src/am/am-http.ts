@@ -9,7 +9,7 @@ import { readPid } from "./am-utils.ts";
 
 export const FETCH_TIMEOUT = 5000;
 
-// Instance identity (space-invaders field report): `--port=N` used to trust
+// Instance identity (a field report): `--port=N` used to trust
 // that WHATEVER answers on N is the app the user means — a green e2e once
 // wrote its test rows into the production leaderboard that way. Before the
 // first trojan call to a port, the responder's /__aio/health appId is checked

@@ -1,4 +1,4 @@
-// llama-master #9 (their wishlist #2): every method in that app does real I/O —
+// a field report #9 (their wishlist #2): every method in that app does real I/O —
 // spawns cmake for minutes, reads a 2 MB GGUF header, drains a subprocess pipe.
 // With one global budget, the 1 s polls logged a violation on EVERY tick, and
 // there was no way to say "slow because it shells out" instead of "slow because

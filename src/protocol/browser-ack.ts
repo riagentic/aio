@@ -68,6 +68,40 @@ function armTimer(cid: string, entry: PendingEntry): void {
   }, entry.ceilingMs);
 }
 
+/** Marks a send function that ARMS the ack clock itself when it writes the
+ *  frame (and defers it while the action sits in an offline queue). The cell
+ *  binding registers the ack before handing the action to a transport, so it
+ *  has to know whether that transport will start the clock — a custom or
+ *  legacy `sendFn` will not, and its calls must still be able to time out. */
+export const ARMS_ACK_TIMER = Symbol.for("aio.armsAckTimer");
+
+/** True when `fn` is a transport that arms ack timers itself. */
+// deno-lint-ignore ban-types
+export function armsAckTimer(fn: Function | undefined): boolean {
+  return !!fn &&
+    (fn as unknown as Record<symbol, boolean>)[ARMS_ACK_TIMER] === true;
+}
+
+/** The per-method budget key ("cell:method") for an action — same derivation
+ *  as the server executor's methodBudgetKey: async methods all travel as
+ *  `<cell>:__exec` with the real name in the payload.
+ *
+ *  It lives here, next to the registry that consumes it, because BOTH the cell
+ *  binding and the transport need it. It used to exist only in the transport,
+ *  so the binding registered without it and the entry's methodKey stayed
+ *  undefined — see `_registerAck`'s idempotency note. */
+export function ackMethodKey(
+  action: { type: string; payload?: unknown },
+): string {
+  if (action.type.endsWith(":__exec")) {
+    const m = (action.payload as { _method?: unknown } | undefined)?._method;
+    if (typeof m === "string") {
+      return `${action.type.slice(0, -":__exec".length)}:${m}`;
+    }
+  }
+  return action.type;
+}
+
 /** Register a pending ack. The returned promise resolves on `_resolveAck`,
  *  rejects on `_rejectAck` (timeout, disconnect, drop), or the timer fires.
  *

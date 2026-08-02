@@ -101,14 +101,26 @@ interface _TransitionChildProps {
   child: VNode;
 }
 
+// Elements whose enter animation has already played.
+//
+// `_TransitionChild` re-executes on every parent re-render (its `child` prop is
+// a fresh VNode each time, so auto-memo cannot skip it) and re-registered the
+// enter callback each time — re-injecting the keyframes and re-assigning
+// `el.style.animation`. The element visibly re-animated on every unrelated
+// signal change. Keyed by the DOM node, so a genuinely new element (a
+// keyed swap) still animates in.
+const _entered = new WeakSet<HTMLElement>();
+
 function _TransitionChild(props: _TransitionChildProps): VNode {
   const { enter, exit, options, child } = props;
 
-  // Register enter animation — runs after first mount
+  // Register enter animation — runs after the FIRST mount of this element
   if (_afterRender && enter) {
     _afterRender(() => {
       const dom = child._dom;
       if (!dom || !_isHTMLElement(dom)) return;
+      if (_entered.has(dom)) return; // already animated in — not again
+      _entered.add(dom);
 
       const result = enter(dom, options);
       if (result.css) {

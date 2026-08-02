@@ -6,8 +6,7 @@
  * and `am` all read the same state with no transport code written by you. A real
  * app shipped two of those clients and reported: *"I have never tested two of
  * them at once, because there is nothing to test them with… so the claim I lean
- * on hardest is the one my 281-test suite says nothing about."* (llama-master
- * #16.) A framework that cannot let you verify its own headline is missing
+ * on hardest is the one my 281-test suite says nothing about."* A framework that cannot let you verify its own headline is missing
  * something more important than a convenience.
  *
  * This mounts N INDEPENDENT clients over one server: a real `aio.run()`, real
@@ -31,6 +30,7 @@
 import { connectCli } from "../server/cli-client.ts";
 import type { CliApp } from "../server/cli-client.ts";
 import type { CellsConfig } from "../server/aio-types.ts";
+import { _armTestStrict } from "./test-strict.ts";
 import { testServer } from "./server-test.ts";
 
 /** One connected surface. */
@@ -95,6 +95,7 @@ export async function testMultiClient(
   config: CellsConfig,
   count = 2,
 ): Promise<TestMultiClient> {
+  _armTestStrict(); // tests are the strictest environment, never the most permissive
   if (count < 1) throw new Error("testMultiClient: count must be >= 1");
   const srv = await testServer(config);
   const clients: TestClient[] = [];
@@ -102,6 +103,15 @@ export async function testMultiClient(
   // When the most recent action left a socket — `converged()` refuses to answer
   // before the server has had a chance to see it.
   let lastSendAt = 0;
+  // How long to keep watching for a change before concluding the action was a
+  // NO-OP. An action that legitimately changes nothing (a guard returned early,
+  // or the only changed cell is `ui.exclude`d from this client's view) produces
+  // no patch ever, so the watch loops used to burn their entire 2s deadline —
+  // silently, once per call. Over a loopback socket a real dispatch lands
+  // in single-digit milliseconds, so this grace is ~50× the expected latency
+  // while cutting the no-op cost by an order of magnitude. The 2s deadline
+  // stays as the ceiling for a genuinely slow round trip.
+  const NOOP_GRACE_MS = 250;
 
   try {
     for (let i = 0; i < count; i++) {
@@ -132,14 +142,16 @@ export async function testMultiClient(
           const before = canon(cli.state ?? {});
           lastSendAt = Date.now();
           cli.send(action);
-          const deadline = Date.now() + 2000;
+          const startedAt = Date.now();
+          const deadline = startedAt + 2000;
           while (Date.now() < deadline) {
             if (canon(cli.state ?? {}) !== before) return; // the patch came back
+            // Nothing after the grace period ⇒ this action changes nothing
+            // visible to this client. Return instead of waiting out the
+            // deadline; `converged()` still enforces the quiet period.
+            if (Date.now() - startedAt > NOOP_GRACE_MS) break;
             await sleep(5);
           }
-          // An action that legitimately changes nothing (a guard returned
-          // early) never produces a patch. Fall through — `converged()` still
-          // enforces the quiet period.
         },
       });
     }
@@ -220,7 +232,8 @@ export async function testMultiClient(
     // Then wait for the SERVER to finish absorbing them — changed, and then
     // quiet. A fixed sleep here is what made this look like a lost update at
     // 20ms and correct at 60ms: the harness, not the framework.
-    const deadline = Date.now() + 2000;
+    const startedAt = Date.now();
+    const deadline = startedAt + 2000;
     let changedAt = 0;
     let lastSeen = before;
     while (Date.now() < deadline) {
@@ -230,6 +243,8 @@ export async function testMultiClient(
         lastSeen = now;
         // Quiet for 40ms after the last observed change ⇒ all N have landed.
         if (Date.now() - changedAt > 40) return;
+      } else if (Date.now() - startedAt > NOOP_GRACE_MS) {
+        return; // no server-visible change: a no-op action, not a slow one
       }
       await sleep(5);
     }
