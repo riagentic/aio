@@ -162,7 +162,7 @@ Deno.test("427: a void sync method resolves undefined", async () => {
   assertEquals(v, undefined);
 });
 
-// ── testCell harness surfaces the same value (inews Bad #5) ────────────────
+// ── testCell harness surfaces the same value ────────────────
 
 testCell(
   cell("cart", {

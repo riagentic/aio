@@ -75,7 +75,7 @@ export function applyCellFieldFilter(
   return undefined;
 }
 
-/** Client-read visibility of ONE state key under a cell's ui filter (TBD B7).
+/** Client-read visibility of ONE state key under a cell's ui filter.
  *  Used by the client read seam (bindCellReactive) so `ui:` visibility holds
  *  on the cell object itself — not just at broadcast time. In standalone/
  *  electron there is no broadcast to filter, so without this the "secret"

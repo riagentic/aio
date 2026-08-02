@@ -1,6 +1,5 @@
 // record.ts — `am record`: turn a recorded action journal into a runnable
-// bootCells replay test (risoto #4). Reads the durable journal (risoto #3,
-// `journal: true`) — the one action source that carries method payloads — and
+// bootCells replay test. Reads the durable journal — the one action source that carries method payloads — and
 // emits a test skeleton that re-dispatches the flow, ready for assertions.
 import type { GlobalFlags } from "./am-types.ts";
 import { detectMode, out, outError } from "./am-output.ts";

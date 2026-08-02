@@ -1,4 +1,4 @@
-// risoto 2026-07-24 wishlist: `import { sync }` twice was a runtime SyntaxError
+// a field report: `import { sync }` twice was a runtime SyntaxError
 // that `deno check` passed. aiol's checkImports flags a duplicate top-level
 // import binding — without false-firing on `import type`, aliases, namespaces,
 // or `import … from` text buried in a template literal (code generators).

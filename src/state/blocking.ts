@@ -1,5 +1,5 @@
 // blocking.ts — schedule.blocking(): a named, cancellable, backpressured worker
-// pool for FFI/CPU/sync work (risoto 2026-07-24 #7). A wedged USB ioctl or a
+// pool for FFI/CPU/sync work. A wedged USB ioctl or a
 // heavy compute runs OFF the main isolate, so it can never freeze rendering or
 // the dispatch loop. Same family as schedule.after/every — named + cancellable —
 // but imperative (returns a Promise), because it moves *work*, not an action.

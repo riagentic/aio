@@ -1,16 +1,16 @@
 // Regression tests for the testUI semantic-surface collision cluster:
-//  risoto (2026-07-21) — same-type sibling aio-components: only the FIRST
+//  a field report (2026-07-21) — same-type sibling aio-components: only the FIRST
 //    instance was addressable (shared surface path), so per component type
 //    only one `t` handle survived. Now: instance paths are deduped (#2, #3 …),
 //    every element stays reachable, and the ordinal form `ui.….Button2`
 //    addresses the 2nd instance (2-based, tree order — mirrors element
 //    name de-duping). Listings annotate duplicates ("Button ×2 — use …").
-//  inews R4 P2 — component/element name shadowing: `ui.X` used to resolve the
+//  a field report R4 P2 — component/element name shadowing: `ui.X` used to resolve the
 //    COMPONENT, so `.type()`/`.click()` threw. Now the handle is a hybrid —
 //    element actions win, component navigation still works underneath.
-//  inews P1 follow-up — interacting with a DISABLED element fails with a clear
+//  a field report P1 follow-up — interacting with a DISABLED element fails with a clear
 //    "is disabled" error (never "not a function"); `.disabled` is assertable.
-//  inews audit 7 — matchMedia is shimmed (real happy-dom impl when owned,
+//  matchMedia is shimmed (real happy-dom impl when owned,
 //    minimal always-false stub otherwise) so media-query components boot.
 import { assert, assertEquals, assertRejects, assertThrows } from "@std/assert";
 import { h } from "../src/air/vdom.ts";
@@ -73,7 +73,7 @@ Deno.test("siblings: unique t-handles hoist through any instance (ui.Settings)",
   const clicks: string[] = [];
   const ui = await testUI(makeToolbarApp(clicks));
   try {
-    await ui.Settings.click(); //         top-level hoist (risoto #2)
+    await ui.Settings.click(); //         top-level hoist
     await ui.ToolBar.Settings.click(); // component-scoped hoist
     assertEquals(clicks, ["Settings", "Settings"]);
   } finally {
@@ -130,12 +130,12 @@ Deno.test("siblings: same-named elements in same-type instances stay distinct", 
   }
 });
 
-// ── 1b. component/element name shadowing (inews R4 P2) ───────────────
+// ── 1b. component/element name shadowing ───────────────
 
 Deno.test("shadow: ui.X acts as the element when a component shadows it", async () => {
   function PasswordInput() {
     // Inner input names itself "PasswordInput" (placeholder + role) — the
-    // exact collision from the inews report.
+    // exact collision from one field report.
     return h(
       "div",
       null,
@@ -162,7 +162,7 @@ Deno.test("shadow: ui.X acts as the element when a component shadows it", async 
   }
 });
 
-// ── 2. disabled elements (inews P1) ──────────────────────────────────
+// ── 2. disabled elements ──────────────────────────────────
 
 Deno.test("disabled: resolvable + assertable, interactions fail loud", async () => {
   let saved = 0;
@@ -199,7 +199,7 @@ Deno.test("disabled: resolvable + assertable, interactions fail loud", async () 
   }
 });
 
-// ── 3. waitFor description string (inews P3) — timeout carries it ────
+// ── 3. waitFor description string — timeout carries it ────
 
 Deno.test("waitFor: trailing string description reaches the timeout error", async () => {
   function App() {
@@ -222,7 +222,7 @@ Deno.test("waitFor: trailing string description reaches the timeout error", asyn
   }
 });
 
-// ── 4. matchMedia shim (inews audit 7) ───────────────────────────────
+// ── 4. matchMedia shim ───────────────────────────────
 
 Deno.test("matchMedia: media-query components boot; listeners are safe", async () => {
   const hadBefore = !!(globalThis as { matchMedia?: unknown }).matchMedia;

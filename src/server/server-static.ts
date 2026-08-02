@@ -145,7 +145,7 @@ export function createStaticHandler(deps: StaticDeps): {
   // Memoized: in prod, is the browser bundle (dist/app.js) actually present?
   // A `--headless` build skips it, but the server still serves the UI shell —
   // which then 404s on /app.js and shows a broken page. We detect that and
-  // serve a clear diagnostic at `/` instead (tbd#2).
+  // serve a clear diagnostic at `/` instead.
   let _uiBundlePresent: boolean | undefined;
 
   /** Returns errors from the last 30 seconds */
@@ -195,7 +195,7 @@ export function createStaticHandler(deps: StaticDeps): {
           { headers: { "Content-Type": "text/html", ...noCache } },
         );
       }
-      // Headless-build footgun (tbd#2): prod is serving the UI shell but the
+      // Headless-build footgun: prod is serving the UI shell but the
       // browser bundle was never built (a `--headless` build), so /app.js will
       // 404 and the page breaks blank. Say so plainly instead.
       if (prod && absDistDir) {

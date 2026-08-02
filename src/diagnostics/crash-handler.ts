@@ -11,7 +11,7 @@ export type CrashHandlerDeps = {
   /** Supervised mode (AioConfig.guardDispatches): after logging + emergency
    *  checkpoint, PREVENT an unhandled promise rejection from killing the process
    *  — a fire-and-forget cell dispatch that rejects becomes a loud log line, not
-   *  a crash (risoto 2026-07-24 Bad #3). Scoped to rejections only: a synchronous
+   *  a crash. Scoped to rejections only: a synchronous
    *  uncaught error is a genuine hard fault and still terminates. Never silent —
    *  the error is always logged first. */
   guardRejections?: boolean;

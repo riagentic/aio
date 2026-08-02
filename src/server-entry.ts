@@ -1,4 +1,4 @@
-// aio/server — the explicit SERVER-ONLY import surface (risoto #1 boundary).
+// aio/server — the explicit SERVER-ONLY import surface.
 //
 // These symbols pull in SQLite (a Worker) or CLI/UDS transport and are NOT
 // available in the browser bundle. Importing them from an isomorphic module

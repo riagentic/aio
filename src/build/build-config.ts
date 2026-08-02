@@ -4,6 +4,13 @@
  */
 import { dirname, join, resolve } from "@std/path";
 import { slugify } from "./build-helpers.ts";
+import {
+  crossCompileBlocker,
+  hostPlatform,
+  isHostPlatform,
+  PLATFORMS,
+  resolvePlatforms,
+} from "./platforms.ts";
 
 export interface BuildConfig {
   // Paths
@@ -39,6 +46,16 @@ export interface BuildConfig {
   os: string;
   arch: string;
   archStr: string;
+
+  /** Cross-compilation platform name (`linux`, `windows`, `macos-arm64`, …).
+   *  Always set; equals the host platform unless `--platform=` asked for
+   *  another. See src/build/platforms.ts. */
+  platform: string;
+  /** The `deno compile --target` triple, or undefined when building for the
+   *  host (no flag — let deno use its own default). */
+  targetTriple: string | undefined;
+  /** Executable suffix for this platform (".exe" on Windows). */
+  exeExt: string;
 
   // Framework resolution
   isRemote: boolean;
@@ -105,6 +122,30 @@ export async function loadBuildConfig(): Promise<BuildConfig> {
   const arch = Deno.build.arch === "aarch64" ? "aarch64" : "x86_64";
   const archStr = arch === "aarch64" ? "arm64" : "x64";
 
+  // --platform=<name>: which OS/arch this binary is FOR. Defaults to the host,
+  // so every existing invocation behaves exactly as before.
+  const rawPlatform = Deno.args.find((a) => a.startsWith("--platform="))
+    ?.slice("--platform=".length) ?? "host";
+  const resolved = resolvePlatforms([rawPlatform]);
+  if (!resolved.ok) {
+    console.error(`[build] \u2717 ${resolved.error}`);
+    Deno.exit(1);
+  }
+  const platform = resolved.platforms[0] ?? hostPlatform();
+  const spec = PLATFORMS[platform]!;
+  // A cross build must not pretend it can also be an Electron/Android bundle.
+  if (!isHostPlatform(platform)) {
+    const shell = doElectron ? "electron" : doAndroid ? "android" : null;
+    if (shell) {
+      const why = crossCompileBlocker(shell);
+      console.error(
+        `[build] \u2717 --platform=${platform} cannot be combined with ` +
+          `--${shell}: ${why}`,
+      );
+      Deno.exit(1);
+    }
+  }
+
   return {
     root,
     dist,
@@ -128,6 +169,9 @@ export async function loadBuildConfig(): Promise<BuildConfig> {
     os,
     arch,
     archStr,
+    platform,
+    targetTriple: isHostPlatform(platform) ? undefined : spec.triple,
+    exeExt: spec.exeExt,
     isRemote,
     frameworkBase,
   };

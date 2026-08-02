@@ -178,3 +178,46 @@ describe("OpBuffer", () => {
     assertEquals((await buf.getUnconfirmed("cellB")).length, 2);
   });
 });
+
+// eviction under backpressure discards UNCONFIRMED ops: mutations the
+// user made that never reached the server. `onDrop` fired only for the
+// INCOMING op when pruning failed, never for the ones actually thrown away, so
+// the exact offline-queue changes this buffer exists to preserve vanished with
+// nothing to observe.
+Deno.test("op-buffer: an evicted stale op is REPORTED, not silently dropped", async () => {
+  const dropped: { id: string; reason: string }[] = [];
+  const storage = createMemoryStorage();
+  const buffer = createOpBuffer(storage, {
+    pendingCap: 2,
+    staleAfter: 1000,
+    onDrop: (op, reason) => dropped.push({ id: op.id, reason }),
+  });
+
+  const op = (id: string, clientTs: number): SyncOp => ({
+    id,
+    hlc: [clientTs, 0, "me"],
+    cell: "notes",
+    action: "add",
+    payload: { t: id },
+    confirmed: false,
+    _clientTs: clientTs,
+  });
+
+  const old = Date.now() - 60_000; // well past the 1s TTL
+  assertEquals(await buffer.add(op("a", old)), true);
+  assertEquals(await buffer.add(op("b", old)), true);
+
+  // Buffer is at cap; adding forces eviction of the two stale ops.
+  assertEquals(await buffer.add(op("c", Date.now())), true);
+
+  assertEquals(
+    dropped.map((d) => d.id).sort(),
+    ["a", "b"],
+    "every evicted mutation is reported",
+  );
+  assertEquals(
+    [...new Set(dropped.map((d) => d.reason))],
+    ["stale-evicted"],
+    "with a reason that says what happened",
+  );
+});

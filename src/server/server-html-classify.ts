@@ -35,7 +35,7 @@ export function classifyBrowserError(
   }
   // "does not provide an export named X" — a STATIC import of a server-only
   // symbol from the isomorphic "aio" entry poisons the client module graph and
-  // link-fails the whole bundle at boot (risoto 2026-07-20c: `createDB`). V8's
+  // link-fails the whole bundle at boot. V8's
   // message names the symbol but never the app file; make it teachable + point
   // at the linter that DOES name the file.
   const missingExport = message.match(

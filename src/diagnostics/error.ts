@@ -240,7 +240,7 @@ export class AioError extends Error {
   }
 }
 
-// ─── Teachable errors (risoto #9) ────────────────────────────────────────────
+// ─── Teachable errors ────────────────────────────────────────────
 
 /** A framework error that TEACHES: what happened, the one-line fix, and
  *  (optionally) a doc link — the shape the credential refusal proved out,

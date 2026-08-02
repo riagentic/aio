@@ -1,4 +1,4 @@
-// route() — ergonomic HTTP routes (realitio): :param matching, method guard,
+// route() — ergonomic HTTP routes: :param matching, method guard,
 // cookies, and a JSON helper on top of the existing `routes: {}` config.
 import { assert, assertEquals } from "@std/assert";
 import {

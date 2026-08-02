@@ -20,8 +20,10 @@ export type UIElementInfo = {
   tag: string;
   /** Event kinds the element handles, e.g. ["click"] */
   events: string[];
-  /** Visible text content (live at walk time, capped) */
-  text?: string;
+  /** Visible text content (live at walk time, capped). Always a string: an
+   *  element with nothing in it has EMPTY text, not unknown text — so an
+   *  assertion reads `el.text === ""`, never `el.text ?? ""`. */
+  text: string;
   /** Current input value (live at walk time) */
   value?: string;
   /** Current checked state (checkbox/radio, live at walk time) */
@@ -54,8 +56,9 @@ export type UISurfaceNode = {
   children: UISurfaceNode[];
   /** Visible text of the component's subtree (live at walk time, capped) —
    *  lets a surface reader (human or AI) SEE the screen, not just its
-   *  triggerable elements. */
-  text?: string;
+   *  triggerable elements. Always a string, empty when the subtree renders
+   *  no text. */
+  text: string;
   /** The component's rendered DOM node — local use only; stripped on serialize */
   // deno-lint-ignore no-explicit-any
   _dom?: any;
@@ -63,7 +66,7 @@ export type UISurfaceNode = {
 
 /** Collect every interactive element named `name` anywhere in the subtree —
  *  lets a `t`/data-testid handle be addressed from the top level regardless of
- *  how deeply it's nested (risoto #2), instead of a positional component index. */
+ *  how deeply it's nested, instead of a positional component index. */
 export function findElementsDeep(
   node: UISurfaceNode,
   name: string,
@@ -199,7 +202,7 @@ function walkOutput(
     // text/value without handlers). Intrinsic form controls are on it even
     // with zero handlers: a DISABLED button often has its onClick
     // conditionally absent, but a user still sees it — tests must be able to
-    // resolve it and assert `disabled: true`. (inews R4 P1)
+    // resolve it and assert `disabled: true`.
     const intrinsic = v.tag === "button" || v.tag === "input" ||
       v.tag === "select" || v.tag === "textarea";
     if (
@@ -219,11 +222,7 @@ function walkOutput(
         name,
         tag: v.tag,
         events,
-        ...(liveText
-          ? { text: capText(liveText) }
-          : staticText(v)
-          ? { text: staticText(v) }
-          : {}),
+        text: liveText ? capText(liveText) : staticText(v) ?? "",
         ...(el && typeof el.value === "string" ? { value: el.value } : {}),
         ...(el && typeof el.checked === "boolean" &&
             (v.props.type === "checkbox" || v.props.type === "radio")
@@ -253,7 +252,7 @@ function walkComponent(
   // An ADDITIONAL stable handle when the component was given `t`. Addressing a
   // component by its identifier couples a test to a rename — one report broke a
   // test by renaming `CtxPresets` → `CtxControls`, a refactor rather than a
-  // behaviour change (llama.md, second update #4).
+  // behaviour change.
   //
   // Additive, never a replacement: `t` on a component is ambiguous — it is also
   // a perfectly good DATA prop that a component forwards to an inner element
@@ -270,7 +269,7 @@ function walkComponent(
   // Same-type siblings without keys would otherwise share ONE address — every
   // path-based lookup (resolveElement, runUITrigger) could only ever reach the
   // FIRST instance, so per component type only one `t` handle survived
-  // (risoto 2026-07-21). Deterministic dedupe: 2nd+ instances get #2, #3 …
+  //. Deterministic dedupe: 2nd+ instances get #2, #3 …
   // in tree order, keeping every instance's elements addressable.
   if (siblings.some((s) => s.path === path)) {
     let i = 2;
@@ -284,6 +283,7 @@ function walkComponent(
     path,
     elements: [],
     children: [],
+    text: "",
   };
   if (v._dom) {
     node._dom = v._dom;
@@ -299,7 +299,7 @@ function walkComponent(
 //
 // A surface is meant to be scannable, so it caps text — but it used to cut
 // element text at 80 characters with NO marker, so a generated command line read
-// as a complete (wrong) string and there was no way to tell (llama.md #10). Two
+// as a complete (wrong) string and there was no way to tell. Two
 // changes: truncation is always marked with "…", and the cap is liftable
 // (`am surface --full`, `buildUISurface(root, { maxText: Infinity })`).
 //
@@ -326,6 +326,7 @@ export function buildUISurface(
     path: "(root)",
     elements: [],
     children: [],
+    text: "",
   };
   walkOutput(root, node, new Set());
   return node;
@@ -341,7 +342,7 @@ export function serializeSurface(node: UISurfaceNode): UISurfaceNode {
     ...(node.handle !== undefined ? { handle: node.handle } : {}),
     ...(node.key !== undefined ? { key: node.key } : {}),
     path: node.path,
-    ...(node.text !== undefined ? { text: node.text } : {}),
+    text: node.text,
     // _dom intentionally dropped (wire-safety)
     elements: node.elements.map((
       { _vnode: _v, _el: _e, ...rest },

@@ -1,4 +1,4 @@
-// risoto #1 — `aio/server`: the explicit server-only import surface. Re-exports
+// `aio/server`: the explicit server-only import surface. Re-exports
 // server-only symbols (SQLite, CLI transport, ship signing); aiol flags a static
 // `aio/server` import in a cell-shared file (the boundary violation).
 import { assert, assertEquals } from "@std/assert";

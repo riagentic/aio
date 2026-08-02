@@ -14,7 +14,7 @@ function createDOM() {
 // A text child may be a DYNAMIC value in AIR's direct-cell-access model
 // (`{sol.toFixed(9)}` is a plain evaluated string, not a signal binding), so a
 // text-bearing element must NOT be _static — otherwise the `_static` diff
-// short-circuit freezes the rendered text (risoto balance-freeze bug). Element
+// short-circuit freezes the rendered text. Element
 // subtrees with no text stay static (see below).
 Deno.test("h: does NOT mark text-bearing element VNodes as _static", () => {
   const vn = h("div", { className: "box" }, "hello");

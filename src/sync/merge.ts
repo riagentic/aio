@@ -109,7 +109,15 @@ function mergeLWWPerKey(
 }
 
 /** Stable JSON serialization that sorts object keys for deterministic output,
- *  ensuring equivalent objects produce identical strings regardless of key order. */
+ *  ensuring equivalent objects produce identical strings regardless of key order.
+ *
+ *  The replacer sorts keys and nothing else: `JSON.stringify` already walks
+ *  into arrays and applies it to every element. An explicit array branch used
+ *  to recurse by hand and return an array of already-stringified STRINGS, so
+ *  `[{a:1}]` serialized to `["{\"a\":1}"]` — not the JSON of the input, and not
+ *  round-trippable. Comparisons still matched (both sides were mangled the same
+ *  way), which is why it never showed; any use for hashing, storage or a log
+ *  would have produced garbage. */
 function stableJSONStringify(val: unknown): string {
   return JSON.stringify(val, (_key, value) => {
     if (value && typeof value === "object" && !Array.isArray(value)) {
@@ -118,9 +126,6 @@ function stableJSONStringify(val: unknown): string {
         sorted[key] = (value as Record<string, unknown>)[key];
       }
       return sorted;
-    }
-    if (Array.isArray(value)) {
-      return value.map((v) => stableJSONStringify(v));
     }
     return value;
   });

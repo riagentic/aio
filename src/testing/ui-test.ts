@@ -11,6 +11,7 @@
 // Interactions dispatch real DOM event sequences through AIR's own delegation —
 // faithful to a user, never calling handlers directly.
 
+import { _armTestStrict } from "./test-strict.ts";
 import { _setDocument, _unmount, mount } from "../air/aio-renderer.ts";
 import { getRegisteredCells } from "../state/cell-reactive.ts";
 import type { ComponentFn } from "../air/vdom-types.ts";
@@ -63,7 +64,7 @@ export interface TestUIOptions {
    *
    *  For any cell whose state comes from the machine — telemetry, a device, the
    *  clock — this is what lets a test assert a branch instead of observing
-   *  whichever one the developer's box happened to take (llama.md wishlist #1).
+   *  whichever one the developer's box happened to take.
    *  An unknown cell name throws, listing what booted: a silently-ignored seed
    *  would look like a pinned fixture while testing nothing. */
   seed?: Record<string, Record<string, unknown>>;
@@ -95,7 +96,7 @@ export interface UIElementHandle {
   press(key: string, mods?: KeyModifiers): Promise<void>;
   /** Hold a key DOWN — no keyup until {@linkcode keyUp}. The interaction
    *  `press` (a tap) cannot express: "hold left for 10 frames", drag by
-   *  keyboard, held modifiers, key-repeat (space-invaders field report). */
+   *  keyboard, held modifiers, key-repeat (a field report). */
   keyDown(key: string, mods?: KeyModifiers): Promise<void>;
   /** Release a key held by {@linkcode keyDown}. */
   keyUp(key: string, mods?: KeyModifiers): Promise<void>;
@@ -171,7 +172,7 @@ export type TestUI = {
   html(): string;
   /** Unfiltered server-authoritative state — what a server route sees via
    *  `app.getState()`, INCLUDING `ui.exclude`d fields the client hides. Use to
-   *  test a server flow that reads a hidden field (tbd#3). */
+   *  test a server flow that reads a hidden field. */
   serverState(): Record<string, unknown>;
   /** Install state into booted cells mid-test — the same shallow-merge-per-cell
    *  as the `seed` option, for when a flow must react to a machine-dependent
@@ -192,8 +193,7 @@ export type TestUI = {
    *  asked. The negative assertion the surface was missing: a test for "the
    *  advice panel is gone" was otherwise written as
    *  `assert(!ui.html().includes("placement-advice"))`, which is stringly-typed
-   *  and keeps passing for the wrong reason after a class rename (llama.md
-   *  wishlist #5). Composes with waitFor: `await ui.waitFor(() => ui.absent("Toast"))`. */
+   *  and keeps passing for the wrong reason after a class rename. Composes with waitFor: `await ui.waitFor(() => ui.absent("Toast"))`. */
   absent(name: string): boolean;
   /** Inverse of {@linkcode absent} — reads better in a positive assertion. */
   present(name: string): boolean;
@@ -218,8 +218,7 @@ const tick = (ms = 5) => new Promise((r) => setTimeout(r, ms));
  *  A component that returned `null` still HAS a node in the surface — it was
  *  rendered, it just produced nothing. Counting that as "present" made
  *  `absent("PlacementAdvice")` false while the screen showed no advice at all,
- *  which is the exact case the docstring used as its example (llama-master, and
- *  re-probed unchanged a round later). "Present" has to mean *showing*, or the
+ *  which is the exact case the docstring used as its example. "Present" has to mean *showing*, or the
  *  assertion answers a question nobody asked.
  *
  *  Showing = it contributes an element, a child that shows something, or text.
@@ -236,7 +235,7 @@ function showsSomething(n: UISurfaceNode): boolean {
  *
  *  A timeout used to stringify the WHOLE serialized surface, pretty-printed and
  *  uncapped: on one real page that is tens of KB per failure, and the assertion
- *  itself scrolls off the screen (llama-master #13). `am surface` grew a text cap
+ *  itself scrolls off the screen. `am surface` grew a text cap
  *  and --component/--path/--depth for exactly this problem; the harness's own
  *  output had not. Same idea here: names first (what you assert against), then a
  *  capped pretty tree, and the full JSON only when it is small enough to help. */
@@ -294,7 +293,7 @@ function listNames(node: UISurfaceNode): string[] {
 /** Resolve the ordinal component form: `Button2` → the 2nd `Button` instance
  *  in tree (depth-first) order, 2-based to mirror element name de-duping
  *  (`Input`, `Input2`, …). Only kicks in when no exact name matched, so a
- *  component genuinely named `Button2` always wins. (risoto 2026-07-21) */
+ *  component genuinely named `Button2` always wins. */
 function ordinalComponent(
   scope: UISurfaceNode,
   prop: string,
@@ -310,7 +309,7 @@ function ordinalComponent(
 /** Any function component. Wider than ComponentFn on purpose: components
  *  typed via `jsxImportSource: "aio"` return jsx-runtime's JSX.Element —
  *  the same VNode shape under a different declaration — and forcing callers
- *  to cast was a real papercut (quant). The one cast lives here instead. */
+ *  to cast was a real papercut. The one cast lives here instead. */
 // deno-lint-ignore no-explicit-any
 export type TestableComponent = (props?: any) => unknown;
 
@@ -346,7 +345,7 @@ export function testUI(
 /** Named form WITH options — `testUI(App, "name", { seed }, async (ui) => …)`.
  *  Without it, adopting `seed` (the feature that makes machine-dependent UI
  *  testable at all) meant rewriting a one-line test into the handle form by
- *  hand, for every test that needed it (llama-master #12). */
+ *  hand, for every test that needed it. */
 export function testUI(
   App: TestableComponent,
   name: string,
@@ -370,8 +369,12 @@ export function testUI(
     : (fnOrOpts as TestUIOptions | undefined) ?? {};
   // Arm dev-strict checks: tests must be the strictest environment, so an
   // illegal in-place state mutation throws in a test exactly as it does in
-  // dev + prod (risoto 2026-07-18). Inlined to avoid a cell-test.ts cycle.
-  (globalThis as Record<string, unknown>).__aioDev = true;
+  // dev + prod. This was inlined to avoid a cell-test.ts
+  // cycle, and so it armed only HALF of what the shared entry point does — the
+  // app-directory sandbox was missing, leaving a testUI-driven app free to
+  // write into the developer's real `~/.<appId>`. `test-strict.ts` exists
+  // precisely so every harness gets both.
+  _armTestStrict();
   // Wrapper form: testUI(App, "name", fn) — a Deno.test with auto-teardown.
   if (typeof optsOrName === "string") {
     if (typeof fn !== "function") {
@@ -412,9 +415,11 @@ async function _mountTestUI(
   // production code paths entirely.
   let ownedWindow: AnyDoc = null;
   // Globals we installed from the owned window (restored on dispose).
-  // Local hotfix (realitio): was referenced but never declared — TS2304 +
-  // ReferenceError on the auto-DOM path. See dep/aio/feedback/realitio.md.
+  // Local hotfix: was referenced but never declared — TS2304 +
+  // ReferenceError on the auto-DOM path.
   const _ownedGlobals: string[] = [];
+  /** Teardown callbacks for globals we PATCHED (rather than defined). */
+  const _restoreGlobals: (() => void)[] = [];
   if (!doc) {
     try {
       // Computed specifier ON PURPOSE: cell.ts re-exports testCell, so this
@@ -429,7 +434,7 @@ async function _mountTestUI(
       doc = ownedWindow.document;
       // Router support: `navigate()` reads globalThis.location/history — put
       // the owned window's (same-origin, in-memory) pair there so routed apps
-      // test with ZERO shim code. Restored on unmount. (inews R4 P4)
+      // test with ZERO shim code. Restored on unmount.
       for (const key of ["location", "history"] as const) {
         if ((globalThis as AnyDoc)[key]) continue;
         Object.defineProperty(globalThis, key, {
@@ -447,7 +452,7 @@ async function _mountTestUI(
   }
   const maxIter = opts.settleIterations ?? 20;
 
-  // Components using media queries must boot under testUI (inews audit #7):
+  // Components using media queries must boot under testUI:
   // forward the owned window's real matchMedia when it has one, else a minimal
   // always-false stub. Legacy addListener/removeListener included — older
   // libraries still call them. Removed on unmount/dispose.
@@ -472,7 +477,71 @@ async function _mountTestUI(
     _ownedGlobals.push("matchMedia");
   }
 
-  // localStorage isolation (tbd#1). The standalone runtime needs localStorage;
+  // A UI listener registered on the DENO GLOBAL never fires under testUI.
+  //
+  // `globalThis.addEventListener("keydown", …)` is the natural thing to write
+  // in a component — in a browser, `window` IS the global. Under testUI the
+  // events are dispatched on the happy-dom window, so the handler is simply
+  // never called: no error, no clue, just a component that does nothing. One
+  // report lost its whole UI-test suite to this until it was diagnosed by
+  // hand. Registration is the moment we can still say so.
+  //
+  // Only DOM-UI events are flagged. Deno's own lifecycle events (`unload`,
+  // `error`, `unhandledrejection`) are legitimately global — the framework's
+  // own sandbox uses them — and must stay silent.
+  const DOM_UI_EVENTS = new Set([
+    "keydown",
+    "keyup",
+    "keypress",
+    "resize",
+    "scroll",
+    "click",
+    "dblclick",
+    "mousedown",
+    "mouseup",
+    "mousemove",
+    "pointerdown",
+    "pointerup",
+    "pointermove",
+    "touchstart",
+    "touchend",
+    "touchmove",
+    "wheel",
+    "focus",
+    "blur",
+    "input",
+    "change",
+    "submit",
+    "visibilitychange",
+    "hashchange",
+    "popstate",
+  ]);
+  const _origAddEventListener = globalThis.addEventListener;
+  const _warnedGlobalEvents = new Set<string>();
+  globalThis.addEventListener = function (
+    this: unknown,
+    type: string,
+    ...rest: unknown[]
+  ) {
+    if (DOM_UI_EVENTS.has(type) && !_warnedGlobalEvents.has(type)) {
+      _warnedGlobalEvents.add(type);
+      console.warn(
+        `[aio:testUI] "${type}" listener registered on the Deno global — it ` +
+          `will NEVER fire here. testUI dispatches on the happy-dom window, ` +
+          `so this handler is inert (in a browser the two are the same ` +
+          `object, which is why the code looks right).\n` +
+          `  fix: register on the document's window — e.g. inside onMount, ` +
+          `\`el.ownerDocument.defaultView.addEventListener("${type}", …)\`, ` +
+          `or attach the handler to the element itself.`,
+      );
+    }
+    return (_origAddEventListener as AnyDoc).call(this, type, ...rest);
+  } as typeof globalThis.addEventListener;
+  _restoreGlobals.push(() => {
+    globalThis.addEventListener = _origAddEventListener;
+  });
+
+  // localStorage isolation. The standalone runtime needs localStorage;
   // some hosts (Deno test) already expose a PERSISTENT one. Either way, an
   // un-isolated store bleeds writes test→test while signals get correctly
   // reset. So: install a fresh in-memory shim when absent (owned → torn down →
@@ -509,7 +578,7 @@ async function _mountTestUI(
   let advanceSchedules: ((ms: number) => void) | undefined;
   // The standalone (server-authoritative) app handle — exposed via
   // ui.serverState()/ui.fullState() so a test can read UNFILTERED state,
-  // including `ui.exclude`d fields a server route legitimately reads (tbd#3).
+  // including `ui.exclude`d fields a server route legitimately reads.
   let standaloneApp: { getState: () => Record<string, unknown> } | undefined;
   let seedState:
     | ((p: Record<string, Record<string, unknown>>) => void)
@@ -594,8 +663,14 @@ async function _mountTestUI(
   // nothing is silently lost. Awaiting an action still works and delivers
   // its own failure immediately.
   let _tail: Promise<void> = Promise.resolve();
-  let _queuedError: unknown = null;
-  let _hasQueuedError = false;
+  // Failures of queued actions, each paired with "did the caller ever look?".
+  //
+  // The decision used to be made the moment `run` rejected, but a LATE await
+  // (`const p = ui.X.click(); … await p;`) attaches its handler after that —
+  // so the failure was stashed AND then delivered to the late awaiter, and the
+  // next drain threw it a second time, contradicting the guarantee right
+  // below. Deciding at drain time is what makes "awaited" mean awaited-ever.
+  const _failures: { err: unknown; seen: () => boolean }[] = [];
   function enqueue<T>(fn: () => Promise<T>): Promise<T> {
     const run = _tail.then(fn);
     // A failure the caller AWAITED (attached a rejection handler to) is
@@ -603,12 +678,9 @@ async function _mountTestUI(
     // an `assertRejects(() => ui.X.click())` test re-fails at dispose.
     let delivered = false;
     // The tail handler makes un-awaited rejections "handled" (no process
-    // unhandledrejection) while stashing the first failure for the drain.
+    // unhandledrejection) while recording the failure for the drain.
     _tail = run.then(() => {}, (e) => {
-      if (!delivered && !_hasQueuedError) {
-        _hasQueuedError = true;
-        _queuedError = e;
-      }
+      _failures.push({ err: e, seen: () => delivered });
     });
     return {
       then: (onF, onR) => {
@@ -629,19 +701,16 @@ async function _mountTestUI(
       t = _tail;
       await t;
     } while (_tail !== t); // actions queued while waiting — keep draining
-    if (_hasQueuedError) {
-      const e = _queuedError;
-      _hasQueuedError = false;
-      _queuedError = null;
-      throw e;
-    }
+    const first = _failures.find((f) => !f.seen());
+    _failures.length = 0; // delivered or reported — either way, done with them
+    if (first) throw first.err;
   }
 
   function elementHandle(resolveInfo: () => UIElementInfo): UIElementHandle {
     const el = () => resolveInfo()._el! as AnyDoc;
     // A real user cannot operate a disabled control — interacting with one
     // fails loud with its state instead of firing a dead event or a bare
-    // "not a function" TypeError. Assert `ui.….X.disabled` instead. (inews P1)
+    // "not a function" TypeError. Assert `ui.….X.disabled` instead.
     const assertEnabled = (verb: string) => {
       const i = resolveInfo();
       if (i.disabled) {
@@ -774,12 +843,12 @@ async function _mountTestUI(
       // Component/element name SHADOWING: a component named like its own
       // inner element makes `ui.X` resolve to the component, so `ui.X.type()`
       // looks up an element "type" here and fails — say how to reach the
-      // shadowed element. (inews R4 P2)
+      // shadowed element.
       const shadowed = node.elements.some((e) => e.name === node.component) ||
         node.children.some((c) => c.component === node.component);
       // The name may exist on a DIFFERENT branch — typically inside a
       // same-type SIBLING instance that shares this one's semantic name.
-      // Point at every live location instead of a dead end. (risoto)
+      // Point at every live location instead of a dead end.
       let elsewhere: UIElementInfo[] = [];
       try {
         elsewhere = findElementsDeep(currentSurface(), name);
@@ -801,7 +870,7 @@ async function _mountTestUI(
     // Callable Proxy target: chaining past an unknown action and INVOKING it
     // (e.g. `ui.PasswordInput.type()` when "PasswordInput" resolved to a
     // component, or a typo'd action) must fail with the aio name listing —
-    // a bare `TypeError: … is not a function` names nothing. (inews R4 P1/P2)
+    // a bare `TypeError: … is not a function` names nothing.
     const callable = function () {} as unknown as AnyDoc;
     return new Proxy(callable, {
       get(_target, prop: string | symbol) {
@@ -835,7 +904,7 @@ async function _mountTestUI(
     }) as UIElementHandle;
   }
 
-  /** Component/element name SHADOWING (inews R4 P2): when `name` addresses a
+  /** Component/element name SHADOWING: when `name` addresses a
    *  component AND exactly one interactive element in `scope`, the INTERACTABLE
    *  thing wins for element concerns (`click`, `type`, `value`, `disabled`, …)
    *  while unknown properties still navigate the component (children, `find`,
@@ -925,7 +994,7 @@ async function _mountTestUI(
           return shadowHybrid(select, prop as string, comp);
         }
         // Element anywhere below this node — same hoist the top level does
-        // (risoto #2), so `ui.ToolBar.Settings` reaches a `t`-handle inside a
+        //, so `ui.ToolBar.Settings` reaches a `t`-handle inside a
         // child component without positional navigation.
         const els = findElementsDeep(node, prop as string);
         if (els.length === 1) {
@@ -963,9 +1032,35 @@ async function _mountTestUI(
 
   await settle();
 
+  /** A cell this mount never booted cannot be asserted against.
+   *
+   *  `expectCell`'s predicate receives the cell DEF, whose reactive getters
+   *  fall back to `__aio.state` — the pristine declared initial — when no
+   *  signal exists. So `expectCell(cart, (c) => c.items.length === 0)` against
+   *  a cell missing from `{ cells }` read the declaration and PASSED, while
+   *  `fullState(cart)` returned undefined for the very same cell: two APIs
+   *  disagreeing, one of them silently vacuous. Assert on what is
+   *  running, or say plainly that nothing is. */
+  const assertBooted = (cell: AnyDoc, api: string): void => {
+    const id = cell?.__aio?.id as string | undefined;
+    if (!id) {
+      throw new Error(
+        `[aio] ui.${api}(): not a cell — pass the cell itself, e.g. ui.${api}(todo, …)`,
+      );
+    }
+    if (cells.some((c) => c.__aio.id === id)) return;
+    const booted = cells.map((c) => c.__aio.id).join(", ") || "(none)";
+    throw new Error(
+      `[aio] ui.${api}(): cell '${id}' is not booted in this mount, so its ` +
+        `state would read as its DECLARED INITIAL and the assertion would ` +
+        `pass without testing anything. Booted: ${booted}. Import '${id}' ` +
+        `from your App's module graph, or pass it in { cells: [...] }.`,
+    );
+  };
+
   const api = {
     surface: () => serializeSurface(currentSurface()),
-    // Unfiltered server-authoritative state (tbd#3) — what a server route sees
+    // Unfiltered server-authoritative state — what a server route sees
     // via app.getState(), including `ui.exclude`d fields the client proxy hides.
     // `serverState()` = whole store; `fullState(cell)` = one cell's slice.
     serverState: (): Record<string, unknown> => standaloneApp?.getState() ?? {},
@@ -981,8 +1076,10 @@ async function _mountTestUI(
       }
       seedState(partial);
     },
-    fullState: (cell: AnyDoc): unknown =>
-      standaloneApp?.getState()?.[cell?.__aio?.id as string],
+    fullState: (cell: AnyDoc): unknown => {
+      assertBooted(cell, "fullState");
+      return standaloneApp?.getState()?.[cell?.__aio?.id as string];
+    },
     // Public settle is an observation point: drains the action queue first
     // (surfacing failures from un-awaited actions), then waits quiescence.
     settle: async () => {
@@ -991,7 +1088,7 @@ async function _mountTestUI(
     },
     // Advance the virtual schedule clock by `ms` and fire everything now due —
     // drives toast auto-dismiss / debounce / backoff / poll deterministically
-    // in tests (risoto). Then settles so the UI reflects the fired actions.
+    // in tests. Then settles so the UI reflects the fired actions.
     advance: async (ms: number) => {
       advanceSchedules?.(ms);
       await drain();
@@ -1014,19 +1111,29 @@ async function _mountTestUI(
       msg?: string,
     ) {
       await drain();
+      assertBooted(cell, "expectCell");
       // Retry briefly (like waitFor): a client-scoped cell's reactive binding
       // can land a beat after the first render, and a one-shot check read it
       // as "predicate wrong" — which sent people debugging the app instead of
-      // the harness (space-invaders field report).
+      // the harness (a field report).
       const deadline = Date.now() + 2000;
+      // A predicate that keeps THROWING is a broken predicate, not a slow one:
+      // `c.missing.nested === 5` used to be swallowed for the full 2s and then
+      // reported as a plain assertion failure, hiding the TypeError that says
+      // exactly what is wrong.
+      let lastErr: unknown;
       while (true) {
         await settle();
         try {
           if (pred(cell)) return;
-        } catch { /* state still settling */ }
+          lastErr = undefined; // it ran; it was merely false
+        } catch (e) {
+          lastErr = e;
+        }
         if (Date.now() >= deadline) break;
         await tick(20);
       }
+      if (lastErr !== undefined) throw lastErr;
       const id = cell?.__aio?.id ?? "?";
       const scopeNote = cell?.__aio?.scope === "client"
         ? ` Note: '${id}' is scope:'client' — its state lives in the page ` +
@@ -1043,17 +1150,26 @@ async function _mountTestUI(
       o?: string | { timeoutMs?: number; msg?: string },
     ): Promise<void> {
       // Trailing description string mirrors expectCell's — the asymmetry
-      // (`waitFor(pred, "msg")` → TS2559) surprised the field. (inews R4 P3)
+      // (`waitFor(pred, "msg")` → TS2559) surprised the field.
       const opts = typeof o === "string" ? { msg: o } : o;
       await drain();
       const deadline = Date.now() + (opts?.timeoutMs ?? 3000);
+      // Transient throws are expected (the surface is still changing), a
+      // PERMANENT one is a bug in the predicate — so keep the last error and
+      // raise it instead of a timeout that says nothing about the TypeError
+      // that actually happened.
+      let lastErr: unknown;
       while (Date.now() < deadline) {
         await settle();
         try {
           if (pred()) return;
-        } catch { /* keep waiting — surface may still be changing */ }
+          lastErr = undefined; // it ran; it was merely false
+        } catch (e) {
+          lastErr = e;
+        }
         await tick(20);
       }
+      if (lastErr !== undefined) throw lastErr;
       throw new Error(
         `testUI: waitFor timed out${opts?.msg ? ` — ${opts.msg}` : ""}.\n` +
           "  current surface: " + surfaceDigest(currentSurface()),
@@ -1083,6 +1199,7 @@ async function _mountTestUI(
       for (const key of _ownedGlobals.splice(0)) {
         delete (globalThis as AnyDoc)[key];
       }
+      for (const restore of _restoreGlobals.splice(0)) restore();
     },
     async dispose() {
       // Drain first — a failure from an un-awaited action must fail the
@@ -1099,6 +1216,7 @@ async function _mountTestUI(
         for (const key of _ownedGlobals.splice(0)) {
           delete (globalThis as AnyDoc)[key];
         }
+        for (const restore of _restoreGlobals.splice(0)) restore();
       }
     },
     [Symbol.asyncDispose]() {
@@ -1120,12 +1238,12 @@ async function _mountTestUI(
         /* nothing mounted yet — fall through to lazy component find */
       }
       if (surf && findComponents(surf, name).length > 0) {
-        // Shadow rule (inews R4 P2): if the name ALSO uniquely addresses an
+        // Shadow rule: if the name ALSO uniquely addresses an
         // interactive element, the returned handle acts as the ELEMENT
         // (click/type/value) while still navigating the component.
         return shadowHybrid(currentSurface, name, api.find(name));
       }
-      // risoto #2: hoist a `t`/data-testid element handle to the top level,
+      // hoist a `t`/data-testid element handle to the top level,
       // regardless of nesting — `ui.watchPubkey` instead of the positional
       // `ui.find("Input", 1).watchPubkey`. Requires a UNIQUE match.
       if (surf) {

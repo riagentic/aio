@@ -1,4 +1,4 @@
-// am instance identity + one-knob isolation (space-invaders field report: a
+// am instance identity + one-knob isolation (a field report: a
 // sandboxed e2e's `am --port=N` silently reached the PRODUCTION instance and
 // wrote test rows into a live leaderboard while every assertion passed).
 import { assert, assertEquals } from "@std/assert";

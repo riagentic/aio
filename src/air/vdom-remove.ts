@@ -20,7 +20,7 @@ export function getDom(vnode: VNode | string | number): Node | null {
  *  Proxy (named-element access): a child's .parentNode may be the raw node or
  *  the proxy depending on how it was inserted, while the reconciler holds the
  *  proxy — identity fails even though the child IS inside the parent, so
- *  conditional bindings froze inside <form> under testUI (risoto 2026-07-16d).
+ *  conditional bindings froze inside <form> under testUI.
  *  The fallback scans childNodes by identity (stable in both worlds); it only
  *  runs when the fast path misses, i.e. proxy containers or true non-children. */
 export function isChildOf(

@@ -1,4 +1,4 @@
-// risoto 2026-07-26: an app entry that prepared its data directory before
+// a field report: an app entry that prepared its data directory before
 // aio.run() stalled the worker handshake ("cell worker heavy did not become
 // ready within 30000ms") — because a `worker: true` cell re-imports that very
 // entry and redid the same work. isCellWorker() is how an app skips it.

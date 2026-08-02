@@ -1,6 +1,6 @@
 // perfect-aio D1 — the method-native workflow capabilities that replace
 // generators: until/race/sleep helpers + cancelOn/$signal cancellation.
-import { assert, assertEquals, assertRejects } from "@std/assert";
+import { assert, assertEquals, assertRejects, assertThrows } from "@std/assert";
 import {
   race,
   sleep,
@@ -97,10 +97,12 @@ testCell(
   wf,
   "cancelOn aborts the in-flight async method ($signal)",
   async (t) => {
-    // testCell semantics: an async method EXECUTES when awaited — so fire the
-    // cancel trigger on a timer that lands mid-flight (inside slowWork's sleep).
-    setTimeout(() => t.send.stop(), 5);
-    await t.send.slowWork();
+    // The call starts when it is made, so the trigger dispatched
+    // right after it lands mid-flight — the same shape an app has, where a
+    // button click stops work a previous click began.
+    const working = t.send.slowWork();
+    await t.send.stop();
+    await working;
     t.expect.state((s) => s.status === "cancelled");
   },
 );
@@ -125,6 +127,97 @@ testCell(
 testCell(wf, "sync method: $signal is safely optional", async (t) => {
   const aborted = await t.send.syncSignalIsSafe();
   assertEquals(aborted, false);
+});
+
+// ── cancelOn: "self" — newest wins ─────────────────────────
+//
+// "a new navigation cancels the scan still running" is the most common async
+// shape in a browsing UI (search-as-you-type, folder scan, autocomplete). A
+// self-reference cannot be written by hand — the bound method does not exist
+// yet inside its own cell() literal — so every app hand-rolled a guard.
+
+const scanner = cell("wf-scan", {
+  state: { current: null as string | null, done: [] as string[], aborted: 0 },
+  cancelOn: { open: "self" },
+  methods: {
+    async open(
+      s:
+        & { current: string | null; done: string[]; aborted: number }
+        & Partial<
+          MethodDraftMeta
+        >,
+      path: string,
+    ) {
+      s.current = path;
+      await sleep(20);
+      if (s.$signal!.aborted) {
+        s.aborted += 1;
+        return;
+      }
+      s.done = [...s.done, path];
+      s.current = null;
+    },
+  },
+});
+
+testCell(
+  scanner,
+  "cancelOn 'self': a newer call aborts the older",
+  async (t) => {
+    const first = t.send.open("/a");
+    const second = t.send.open("/b"); // supersedes /a
+    await Promise.all([first, second]);
+    t.expect.state((s) => s.aborted === 1);
+    t.expect.state((s) => s.done.length === 1 && s.done[0] === "/b");
+  },
+);
+
+testCell(scanner, "cancelOn 'self': a call never aborts itself", async (t) => {
+  // Triggers fire during reduce; the incoming call is only tracked when its
+  // effect runs, one step later — so "self" can only ever reach its elders.
+  await t.send.open("/only");
+  t.expect.state((s) => s.aborted === 0);
+  t.expect.state((s) => s.done.length === 1 && s.current === null);
+});
+
+Deno.test("cancelOn: 'self' resolves to the method's own action type", () => {
+  registerCancelOn("scan", "open", "self");
+  const older = new AbortController();
+  trackCall("scan", "open", older);
+  notifyMethodCancel("scan:open");
+  assertEquals(older.signal.aborted, true);
+});
+
+Deno.test("cancelOn: naming a method that cannot be cancelled throws", () => {
+  assertThrows(
+    () =>
+      cell("wf-badcancel", {
+        state: { n: 0 },
+        cancelOn: { opne: "self" }, // typo
+        methods: {
+          async open(s) {
+            await sleep(1);
+            s.n++;
+          },
+        },
+      }),
+    Error,
+    "no method 'opne'",
+  );
+  assertThrows(
+    () =>
+      cell("wf-synccancel", {
+        state: { n: 0 },
+        cancelOn: { bump: "self" }, // sync — nothing is ever in flight
+        methods: {
+          bump(s) {
+            s.n++;
+          },
+        },
+      }),
+    Error,
+    "is a SYNC method",
+  );
 });
 
 // ── cancelOn / $signal (registry level) ───────────────────────────────
@@ -174,7 +267,7 @@ const stats2 = cell("wf-stats", {
       s.lastCleared = "yes";
     },
     // Foreign method args arrive SPREAD — the handler mirrors the foreign
-    // method's own parameter list (quant, alpha28 migration).
+    // method's own parameter list.
     onAdded(s, item: string) {
       s.lastAdded = item;
     },

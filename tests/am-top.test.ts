@@ -1,4 +1,4 @@
-// risoto #9 — `am top`: live runtime observability. Tests the pure frame
+// `am top`: live runtime observability. Tests the pure frame
 // renderer + fmtBytes + the metrics route enrichment (per-cell state sizes).
 import { assert, assertEquals } from "@std/assert";
 import {

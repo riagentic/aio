@@ -1,4 +1,4 @@
-// risoto #6 — transport cassettes: record a real device/network session once,
+// transport cassettes: record a real device/network session once,
 // replay it forever in CI (no device, deterministic).
 import { assert, assertEquals, assertRejects } from "@std/assert";
 import {

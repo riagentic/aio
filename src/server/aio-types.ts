@@ -110,6 +110,15 @@ export type AioConfig<S, A, E> = {
    *  `["PRAGMA journal_mode = WAL", "PRAGMA synchronous = FULL", …]` when the
    *  data is expensive to lose. */
   dbPragmas?: string[];
+  /** Check the app database's integrity at boot (`PRAGMA quick_check`).
+   *
+   *  On a damaged file: the file is QUARANTINED beside itself with a timestamp
+   *  (never deleted), and if a `<db>.snapshot` sits next to it the app boots on
+   *  that instead — each branch reported loudly, including what was lost. Off
+   *  by default: it costs a scan on every boot and only apps holding data a
+   *  user would miss need it. Take the snapshots it restores from with
+   *  `db.snapshot(path)`. */
+  checkIntegrityOnBoot?: boolean;
   fullStateThreshold?: number; // 0-1: ratio of changed keys that triggers full state broadcast (default: 0.5)
   /** Custom HTTP routes — exact path or "/prefix/*" wildcard → handler. The
    *  escape hatch for uploads, webhooks, and API endpoints that don't belong
@@ -209,7 +218,7 @@ export type AioConfig<S, A, E> = {
   /** Allow the electron client to open CHILD windows to arbitrary http(s) URLs
    *  via `__aioIPC.openWindow(url, { preload, sandbox })`. OFF by default —
    *  child-window-to-arbitrary-URL is real attack surface no app should carry
-   *  unless it asked for it (maintainer decision, risoto openWindow thread). */
+   *  unless it asked for it (maintainer decision, a field report openWindow thread). */
   childWindows?: boolean;
   /** Internal: checkpoint restore callback passed from CellsConfig */
   _onCheckpointRestore?: (
@@ -331,6 +340,15 @@ export type CellsConfig = {
   /** PRAGMAs for the app db (default: WAL + synchronous=NORMAL). A wallet or
    *  ledger wants `PRAGMA synchronous = FULL`; a cache does not. */
   dbPragmas?: string[];
+  /** Check the app database's integrity at boot (`PRAGMA quick_check`).
+   *
+   *  On a damaged file: the file is QUARANTINED beside itself with a timestamp
+   *  (never deleted), and if a `<db>.snapshot` sits next to it the app boots on
+   *  that instead — each branch reported loudly, including what was lost. Off
+   *  by default: it costs a scan on every boot and only apps holding data a
+   *  user would miss need it. Take the snapshots it restores from with
+   *  `db.snapshot(path)`. */
+  checkIntegrityOnBoot?: boolean;
   persist?: boolean;
   persistKey?: string;
   persistDebounceMs?: number;
@@ -366,14 +384,14 @@ export type CellsConfig = {
    *  passed to `aio.run({ cells })` — its dispatches would be silent no-ops
    *  (green tests, dead feature). Opt-in because the global cell registry
    *  accumulates across a process, so a default-on check would false-fire on the
-   *  supported disjoint-multi-app pattern. risoto 2026-07-24 Bad #2. */
+   *  supported disjoint-multi-app pattern. a field report Bad #2. */
   strictCells?: boolean;
   /** Supervised runtime: an unhandled promise rejection (a fire-and-forget cell
    *  dispatch that rejects) is logged loudly and the process SURVIVES instead of
    *  dying — no hand-written `.catch(() => {})` per dispatch. Opt-in; scoped to
-   *  rejections (a synchronous uncaught throw is still fatal). risoto Bad #3. */
+   *  rejections (a synchronous uncaught throw is still fatal). a field report Bad #3. */
   guardDispatches?: boolean;
-  /** Durable action journal (risoto #3): every committed action is appended to
+  /** Durable action journal: every committed action is appended to
    *  a durable log; on the next boot the actions after the last snapshot are
    *  replayed on top of it, so a SIGKILL / power cut in the persist debounce
    *  window loses NOTHING. Opt-in. */
@@ -394,7 +412,7 @@ export type CellsConfig = {
   /** Allow the electron client to open CHILD windows to arbitrary http(s) URLs
    *  via `__aioIPC.openWindow(url, { preload, sandbox })`. OFF by default —
    *  child-window-to-arbitrary-URL is real attack surface no app should carry
-   *  unless it asked for it (maintainer decision, risoto openWindow thread). */
+   *  unless it asked for it (maintainer decision, a field report openWindow thread). */
   childWindows?: boolean;
   libraryMode?: boolean; // no exit/signals/lock; app.close() leaves process alive
   syncIntervalMs?: number;

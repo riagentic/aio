@@ -63,7 +63,7 @@ export function createFileWatcher(deps: WatcherDeps): FileWatcher {
   // --- Watcher state ---
   let fsWatcher: Deno.FsWatcher | null = null;
   let watcherActive = false;
-  const _warnedCellFiles = new Set<string>(); // quant Bad #2: warn once per cell file
+  const _warnedCellFiles = new Set<string>(); // a field report: warn once per cell file
   let _sentinelOk = false;
   let healthTimer: ReturnType<typeof setInterval> | null = null;
   // Sentinel lives in per-user lockDir ($XDG_RUNTIME_DIR/aio or /tmp/aio), not
@@ -118,7 +118,7 @@ export function createFileWatcher(deps: WatcherDeps): FileWatcher {
     const ext = dot >= 0 ? path.slice(dot) : "";
     if (!RELOAD_EXT.has(ext)) return;
     debug(`watch: changed ${path}`);
-    // quant Bad #2: a changed cell file does NOT hot-reload — cells run in the
+    // a changed cell file does NOT hot-reload — cells run in the
     // server process, so the client reload shows the NEW UI reading OLD cell
     // logic. That silent mismatch sends people ghost-hunting. Warn loudly (once
     // per file per session) with the fix.
@@ -127,7 +127,7 @@ export function createFileWatcher(deps: WatcherDeps): FileWatcher {
         const src = Deno.readTextFileSync(path);
         if (/\bcell\s*\(\s*["'`]/.test(src)) {
           if (deps.onCellChange) {
-            // Dev restarts the process itself (quant Bad #3) — the handler
+            // Dev restarts the process itself — the handler
             // warns instead when it can't (prod-ish permissions, opt-out).
             deps.onCellChange(path);
           } else if (!_warnedCellFiles.has(path)) {
@@ -218,7 +218,7 @@ export function createFileWatcher(deps: WatcherDeps): FileWatcher {
       // Also watch the project's deno.json: the import map is read ONCE at
       // boot, so adding a dependency while the server runs makes the watcher
       // rescan against a STALE map — the new import "doesn't exist", and the
-      // module-errors page blames your code (risoto 2026-07-26). We can't
+      // module-errors page blames your code. We can't
       // hot-swap the map (it is baked into the served import map and the
       // transpile cache), so say so, loudly and once.
       const paths = _sentinelOk ? [absBaseDir, SENTINEL] : [absBaseDir];

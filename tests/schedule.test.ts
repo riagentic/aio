@@ -417,7 +417,7 @@ Deno.test("schedule #5: a fresh dynamic id does NOT warn", () => {
   assertEquals(warnings.length, 0);
 });
 
-Deno.test("schedule.backoff: exponential growth, capped at max (risoto #4)", () => {
+Deno.test("schedule.backoff: exponential growth, capped at max", () => {
   const A = { type: "poll" };
   const e0 = schedule.backoff("rpc", 0, { base: 1000, max: 60000 }, A);
   const e1 = schedule.backoff("rpc", 1, { base: 1000, max: 60000 }, A);
@@ -434,7 +434,7 @@ Deno.test("schedule.backoff: exponential growth, capped at max (risoto #4)", () 
   assertEquals((t as { ms: number }).ms, 900); // 100 * 3^2
 });
 
-Deno.test("schedule.next: defers to next tick (mdview 1ms-defer wart)", () => {
+Deno.test("schedule.next: defers to next tick", () => {
   const e = schedule.next("rescan", { type: "rescan" }) as {
     kind: string;
     ms: number;
@@ -445,7 +445,7 @@ Deno.test("schedule.next: defers to next tick (mdview 1ms-defer wart)", () => {
   assertEquals(e.id, "rescan");
 });
 
-Deno.test("schedule.poll: constant while healthy, backs off on failure (risoto #6)", () => {
+Deno.test("schedule.poll: constant while healthy, backs off on failure", () => {
   const A = { type: "tick" };
   // healthy (attempt 0) → the base interval
   assertEquals(

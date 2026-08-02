@@ -54,7 +54,7 @@ export function useRaf(
  * `setInterval` with automatic cleanup. The client-side idiom for any cadence
  * that isn't per-frame: a music sequencer's beat, a poll, a clock tick.
  * (`schedule.every` runs on the SERVER — there is no `AudioContext` there;
- * space-invaders field report.)
+ * a field report.)
  *
  * The latest `cb` is always used, so a closure reading live cell state stays
  * current across re-renders. Pass `active: false` to keep it off (a paused

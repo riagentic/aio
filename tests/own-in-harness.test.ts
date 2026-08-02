@@ -1,4 +1,4 @@
-// llama.md #4 + the "Evil" section: the in-process harnesses printed
+// a field report #4 + the "Evil" section: the in-process harnesses printed
 //   "[aio] own effects are ignored in standalone/test mode"
 // and moved on. So a test that boots and disposes cells — precisely where a
 // leaked or misfiring resource should surface — could not see one, and the

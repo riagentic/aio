@@ -92,7 +92,7 @@ export function lockDir(): string {
   // with it, so ONE env var isolates an instance completely. A temp $HOME
   // alone used to isolate state but NOT the lock: a sandboxed e2e died on
   // "already running", and its `am` silently reached the production instance
-  // (space-invaders field report). Must-not-survive-reboot still holds — the
+  // (a field report). Must-not-survive-reboot still holds — the
   // base stays $XDG_RUNTIME_DIR//tmp either way.
   const appsRoot = Deno.env.get("AIO_APPS_DIR") ?? "";
   if (_lockDir && _lockDirKey === appsRoot) return _lockDir;
@@ -120,7 +120,7 @@ export function lockPath(appId: string): string {
 // The running app can't recover deno-runtime flags (e.g. --env-file) from its
 // own Deno.args — only the launcher (am) knows them. am records them here at
 // start so `am restart` can replay the exact launch; am-owned, the app's _run()
-// never touches it. (risoto 2026-07-24 Bad #4: restart dropped --env-file, so
+// never touches it. (a field report: restart dropped --env-file, so
 // the vault silently stopped auto-unlocking.)
 export type LaunchInfo = { flags: string[]; entry?: string; cwd?: string };
 
@@ -412,7 +412,22 @@ export class AppLock {
       this._registerCleanupHandlers();
       return { ok: true };
     }
-    return { ok: false, existing: readLock(this.appId)! };
+    // The lock can vanish between that failed create and this read (the owner
+    // exited in the gap). `readLock(...)!` asserted it away, and the caller
+    // then read `.port` off null — a TypeError from inside the framework
+    // instead of "already running", for a race whose honest answer is "someone
+    // else holds it and we can't say who".
+    return {
+      ok: false,
+      existing: readLock(this.appId) ?? {
+        appId: this.appId,
+        pid: 0,
+        port: 0,
+        startedAt: Date.now(),
+        status: "starting",
+        cwd: "",
+      },
+    };
   }
 
   /** Update lock data (e.g. status change, socketPath, trojanPort) */

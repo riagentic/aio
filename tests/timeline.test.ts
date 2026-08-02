@@ -1,4 +1,4 @@
-// Timeline (risoto #4) — the in-memory dispatch ring + its state-diff engine,
+// Timeline — the in-memory dispatch ring + its state-diff engine,
 // and the trojan `timeline` route that surfaces them to `am timeline`.
 import { assert, assertEquals } from "@std/assert";
 import { createTimeline, diffState } from "../src/server/timeline.ts";
@@ -165,7 +165,7 @@ Deno.test("trojan timeline: absent capability → empty entries (not a crash)", 
   assertEquals(r.body.entries, []);
 });
 
-// ── trojan `migrations` route (risoto #1) ────────────────────────────────────
+// ── trojan `migrations` route ────────────────────────────────────
 
 Deno.test("trojan migrations: returns the boot migration + drift summary", async () => {
   const summary = {

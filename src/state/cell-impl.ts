@@ -56,7 +56,7 @@ export type AsyncMethod<S> = (
  *  you know the method is async). */
 export type MethodDraftMeta<S = Record<string, unknown>> = {
   readonly $signal: AbortSignal;
-  /** Transactional cells (risoto #2): publish the buffered write-set atomically
+  /** Transactional cells: publish the buffered write-set atomically
    *  mid-method, then continue against a fresh snapshot. No-op off `transaction`. */
   readonly $commit: () => void;
   /** The state as it is NOW, not as it was when this method entered — the one
@@ -381,7 +381,7 @@ function _warnDroppedMutation(reason: string, m: Mutation): void {
 // A transactional method reads a snapshot pinned at entry, so anything another
 // method writes DURING an await is invisible to it. That is the feature (reads
 // don't shift under you) and, unvalidated, also the bug: a read-modify-write
-// commits over the newer value and nothing says so — risoto 2026-07-28 #1, where
+// commits over the newer value and nothing says so — a field report #1, where
 // a balance refresh committed pre-send numbers and stamped them "confirmed".
 //
 // Databases solved this long ago, so we use their model rather than invent one:
@@ -686,7 +686,7 @@ export function createBatcher(
   // write-set was refused (see `settled()` — dropping that rejection is how a
   // discarded write became invisible to the method that made it).
   dispatch: (action: Msg) => unknown,
-  // Transactional methods (risoto #2): buffer every mutation across the whole
+  // Transactional methods: buffer every mutation across the whole
   // method — no microtask/method-change auto-flush — and commit ONCE via an
   // explicit flush() at method return. This is what makes an `await` NOT a
   // commit point: nothing is dispatched until the transaction settles.
@@ -698,7 +698,7 @@ export function createBatcher(
   // store rejects (most often `s.x = {...s.x}` — a proxy-derived value assigned
   // back into state) makes `app.dispatch` reject; without this the rejection was
   // dropped on the floor and the async method that made the write RESOLVED, so
-  // the caller was told a change had been applied that never was (llama.md #2).
+  // the caller was told a change had been applied that never was.
   const inflight: Promise<unknown>[] = [];
   let firstError: unknown = null;
 
@@ -759,7 +759,7 @@ export function createBatcher(
      *  the store refused. Called at async-method return, so a refused write
      *  fails the method that made it instead of resolving as if it had landed.
      *  Dev, prod and every test harness alike — silence here was the single
-     *  costliest bug in the llama.master field report. */
+     *  costliest bug in one field report. */
     async settled(): Promise<void> {
       while (inflight.length > 0) await Promise.all(inflight.splice(0));
       if (firstError !== null) {
@@ -884,7 +884,7 @@ export function createLiveProxy<S extends Record<string, unknown>>(
   _overlay: OverlayBox = { v: null },
   // Cancellation signal for this call (cancelOn / s.$signal — perfect-aio D1).
   _signal?: AbortSignal,
-  // Transactional mid-method publish (risoto #2): `s.$commit()` flushes the
+  // Transactional mid-method publish: `s.$commit()` flushes the
   // buffered write-set atomically and re-snapshots. Root-level only; undefined
   // for non-transactional methods.
   _commit?: () => void,
@@ -997,7 +997,7 @@ export function createLiveProxy<S extends Record<string, unknown>>(
         // then MUTATE (`const u = s.users.find(…); u.salt = x`). A detached
         // snapshot element silently dropped that write in prod while
         // testCell's Immer draft applied it — the worst kind of divergence
-        // (inews R4). Resolve the element's INDEX instead and hand back the
+        //. Resolve the element's INDEX instead and hand back the
         // LIVE proxy at that path, so writes batch exactly like s.users[i].
         if (key === "find") {
           return (...args: unknown[]) => {

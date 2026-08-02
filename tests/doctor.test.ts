@@ -120,7 +120,7 @@ Deno.test("doctor: vendored (relative) aio requires immer + @std/path", async ()
   });
 });
 
-// ── aio version drift (inews#6) ──
+// ── aio version drift ──
 
 Deno.test("extractAioVersion: pulls the pin from common specs", () => {
   assertEquals(

@@ -1,4 +1,4 @@
-// risoto 2026-07-26 — best-effort subsystems can fail forever, silently. The
+// a field report — best-effort subsystems can fail forever, silently. The
 // nft-cache degraded by design (console.error + refetch), so a permanently
 // broken open produced hours of stderr and ZERO in-app signal. One failure is
 // routine; the same failure repeating is a dead feature, and that transition is

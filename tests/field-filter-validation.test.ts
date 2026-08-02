@@ -1,6 +1,5 @@
 // field-filter validation — a ui/persist filter key that matches no state
-// field silently leaks (risoto Ugly #2: "the surface says one thing, the
-// machinery does another"). These lock the loud-failure behavior.
+// field silently leaks. These lock the loud-failure behavior.
 import { assertThrows } from "@std/assert";
 import { cell } from "../src/state/cell-create.ts";
 // deno-lint-ignore no-explicit-any

@@ -191,7 +191,7 @@ export function buildLegacyConfig(
         getState: () => app.getState(),
       });
       logger?.onStart(composed.cellNames, app.port);
-      // AIO-418 (TBD B6): user `onStart` is fired by the cells runner AFTER
+      // AIO-418: user `onStart` is fired by the cells runner AFTER
       // wrapAppWithCells() binds the callable method surface — NOT here. Calling
       // e.g. `members.seed()` in onStart threw ("cell runtime not booted")
       // because the method binding happened after this hook. See aio.ts.
@@ -436,7 +436,7 @@ export async function wrapAppWithCells(
   // …and record how to give them back. A cell def binds to exactly one app, and
   // that claim used to outlive the app: a second `testServer()` in the same file
   // failed with "already bound" even after `await using` closed the first
-  // (llama.md #8). Shutdown calls this; scoped to OUR cells, so a second app in
+  //. Shutdown calls this; scoped to OUR cells, so a second app in
   // the same process keeps its own bindings.
   (app as Record<string, unknown>)._releaseCells = () =>
     _releaseCellBindings(composed.cells);

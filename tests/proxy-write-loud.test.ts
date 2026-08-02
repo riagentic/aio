@@ -1,4 +1,4 @@
-// llama.md #2 + llama-master.md #1 — once the costliest bug in that field
+// a field report #2 + a field report #1 — once the costliest bug in that field
 // report: an async method writes through a LIVE proxy, and spreading that
 // proxy copies nested values as proxies:
 //

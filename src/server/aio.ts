@@ -155,10 +155,32 @@ validateVersion();
 
 // ── Entry point ───────────────────────────────────────────────────────
 
+/** The APP's own deno.json — located relative to its entry module, never via
+ *  the cwd.
+ *
+ *  A compiled binary launched from an unrelated project's directory used to
+ *  read THAT project's deno.json and report its version as its own: the exact
+ *  identity-adoption bug `resolveAppId` guards against, one field down. And
+ *  from any other directory it found nothing, so the version silently became
+ *  "0.0.0" — which is why the linter had to demand an explicit `appVersion`
+ *  that the framework documents as inferable.
+ *
+ *  `deno compile` embeds deno.json next to the entry module (see
+ *  `assetIncludes`), so the same lookup answers in dev and in a binary. Both
+ *  layouts are tried: entry at the project root, and the scaffold's `src/`. */
 function _denoJsonVersion(): string | undefined {
+  const read = (url: URL): string | undefined => {
+    try {
+      const raw = Deno.readTextFileSync(url);
+      return (JSON.parse(raw) as { version?: string }).version;
+    } catch {
+      return undefined;
+    }
+  };
   try {
-    const raw = Deno.readTextFileSync(join(Deno.cwd(), "deno.json"));
-    return (JSON.parse(raw) as { version?: string }).version;
+    const main = new URL(Deno.mainModule);
+    return read(new URL("./deno.json", main)) ??
+      read(new URL("../deno.json", main));
   } catch {
     return undefined;
   }
@@ -283,7 +305,7 @@ async function run(a?: any, b?: any): Promise<AioApp<any, any>> {
     // nothing ever says so. One app declared 17 per-method budgets adopting the
     // feature and one of them — `builds:installRelease` — named no method at
     // all; the failure mode is a perf violation naming the METHOD, which sends
-    // you to read the method instead of the config (llama-master #15).
+    // you to read the method instead of the config.
     //
     // Same class as `strictCells` one layer up: config that silently governs
     // nothing. The cells and their method names are all in hand here, so the
@@ -324,8 +346,7 @@ async function run(a?: any, b?: any): Promise<AioApp<any, any>> {
 
     // Imported-but-unregistered cells (opt-in `strictCells`): a cell() that ran
     // (its module was imported) but was left out of aio.run({ cells }) dispatches
-    // into the void — no error, dead feature, green tests (risoto 2026-07-24
-    // Bad #2). Opt-in because the global registry accumulates across a process
+    // into the void — no error, dead feature, green tests. Opt-in because the global registry accumulates across a process
     // (the supported disjoint-multi-app pattern, tests), so a default-on check
     // would false-fire. Compared within the same isolate on both sides.
     if (fc.strictCells && fc.cells && fc.cells.length > 0) {
@@ -436,7 +457,7 @@ async function run(a?: any, b?: any): Promise<AioApp<any, any>> {
     // Post-run: memory monitor, cells API, bindCell
     await wrapAppWithCells(app, composed, fc, cellReportOpts);
 
-    // AIO-418 (TBD B6): fire the user's onStart NOW — after the callable cell
+    // AIO-418: fire the user's onStart NOW — after the callable cell
     // method surface is bound — so seeding via a cell method (members.seed())
     // works instead of throwing "cell runtime not booted". Error-guarded: a
     // throwing onStart must not abort a successful boot.
@@ -660,6 +681,7 @@ async function _run<S, A, E>(
     appId,
     dbPath: config.dbPath ?? cli.dbPath,
     dbPragmas: config.dbPragmas,
+    checkIntegrityOnBoot: config.checkIntegrityOnBoot,
     initialState,
     shouldPersist,
     persistKey,
@@ -703,7 +725,7 @@ async function _run<S, A, E>(
     );
   }
 
-  // Journal recovery (risoto #3): replay the actions committed AFTER the last
+  // Journal recovery: replay the actions committed AFTER the last
   // snapshot (the debounce window a SIGKILL/power-cut would otherwise lose) on
   // top of the restored state — after sync-ops so cross-cell reads see recovered
   // sync state. State transitions only; effects are never re-run.
@@ -741,7 +763,7 @@ async function _run<S, A, E>(
   const ttEnabled = timeTravelEnabled(prod, diagResolvedOpts);
   // High-frequency app actions (a 60 fps `game:tick`) flood the bounded TT
   // window until it holds seconds instead of a session — `skipActions` keeps
-  // them out of history (space-invaders field report).
+  // them out of history (a field report).
   const ttSkipActions =
     typeof diagResolvedOpts === "object" && diagResolvedOpts.skipActions?.length
       ? new Set(diagResolvedOpts.skipActions)
@@ -835,9 +857,9 @@ async function _run<S, A, E>(
   }
 
   // Every committed, state-changing, non-sync action feeds two sinks:
-  //  • the durable journal (risoto #3) — the crash-recovery tail (actions only),
+  //  • the durable journal — the crash-recovery tail (actions only),
   //    present only when `journal: true`; sync cells recover via their op-log.
-  //  • the in-memory timeline (risoto #4) — always on, bounded, carries the diff
+  //  • the in-memory timeline — always on, bounded, carries the diff
   //    each action produced; the live view behind `am timeline`.
   // Both share the same seq (the journal's when journaling, else the timeline's
   // own counter) so a timeline entry and its journal line line up for replay.
@@ -1085,7 +1107,7 @@ async function _run<S, A, E>(
     // again. Without it a cell def stayed claimed for the life of the process,
     // so two `testServer()` blocks in one file failed with "already bound" even
     // with `await using` — the second test had to move to its own file for no
-    // visible reason (llama.md #8). Scoped to our own cells, so a second app in
+    // visible reason. Scoped to our own cells, so a second app in
     // the same process is untouched.
     const release = (app as Record<string, unknown>)._releaseCells as
       | (() => void)
@@ -1209,10 +1231,10 @@ async function _run<S, A, E>(
     cellMethods: config._cellMethods ?? {},
     cellFields: config._cellFields ?? {},
     asyncDb,
-    // In-memory dispatch timeline (risoto #4) — the trojan `timeline` route.
+    // In-memory dispatch timeline — the trojan `timeline` route.
     getTimeline: (after?: number, limit?: number) =>
       timeline.entries(after, limit),
-    // Boot migration + shape-drift picture (risoto #1) — trojan `migrations`.
+    // Boot migration + shape-drift picture — trojan `migrations`.
     migrations: migrationSummary,
     appLock,
     clientCounter,

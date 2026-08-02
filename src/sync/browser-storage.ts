@@ -8,7 +8,7 @@ import type { OpBufferStorage } from "./op-buffer.ts";
 type CellDoc = {
   ops: SyncOp[];
   meta?: { lastHlc: HLC | null; lastServerTs?: number };
-  snapshot?: { state: unknown; hlc: HLC };
+  snapshot?: { state: unknown; hlc: HLC; serverTs?: number };
 };
 
 /**

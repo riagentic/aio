@@ -73,6 +73,58 @@ On a name collision (e.g. both `browser` and `server`, which each emit the bare
 binary) the second is suffixed with its target (`myapp-server`) — nothing is
 silently overwritten.
 
+## Build for other operating systems — `--platforms`
+
+The targets above are the **shell** (what kind of app). The other axis is the
+**platform** — which OS and CPU the binary runs on. By default that is the
+machine you are building on; name others and one command emits them all:
+
+```jsonc
+// deno.json
+"build": {
+  "targets": ["server", "cli"],
+  "platforms": ["host", "windows", "macos-arm64"]
+}
+```
+
+```sh
+deno task build --platforms=linux,windows,macos,macos-arm64
+deno task build --list          # shows every platform, and marks this machine
+```
+
+| Platform      | Triple                      | Runs on                             |
+| ------------- | --------------------------- | ----------------------------------- |
+| `linux`       | `x86_64-unknown-linux-gnu`  | Linux x86_64                        |
+| `linux-arm64` | `aarch64-unknown-linux-gnu` | Raspberry Pi, Graviton              |
+| `windows`     | `x86_64-pc-windows-msvc`    | Windows x86_64 (artifact is `.exe`) |
+| `macos`       | `x86_64-apple-darwin`       | macOS Intel                         |
+| `macos-arm64` | `aarch64-apple-darwin`      | macOS Apple Silicon                 |
+| `host`        | —                           | whatever you are building on        |
+
+The host's artifact keeps its plain name (`myapp`); every other platform is
+labelled (`myapp-windows.exe`, `myapp-macos-arm64`), so one `dist/` can hold
+them all. `manifest.json` records `builtOn`, the `platforms` list, and per
+artifact its `platform`, `triple`, and whether it is the `host` one.
+
+**What cross-compiles:** `server`, `browser`, `cli`, `cli-client` — the targets
+`deno compile` produces. **What does not:** `electron*` bundles a per-OS
+Electron runtime and packages an AppImage/zip, and `android*` drives Gradle (its
+APK is already platform-independent — build it once, anywhere). Asking for those
+on a foreign platform is **refused with the reason**, never quietly satisfied
+with a host binary under a foreign name.
+
+> **A cross-built binary is built and checked here, not run here.** Only the
+> host artifact can boot on the build machine; that is what
+> `deno task
+> test:build` exercises. The rest are verified by format (a Windows
+> artifact is asserted to be a real PE executable, not a renamed ELF) —
+> smoke-test them on the target OS, or in its CI runner, before you ship.
+>
+> There is no single file that natively runs on all three: Linux, Windows and
+> macOS use different executable formats (ELF / PE / Mach-O) and different
+> syscall ABIs. One artifact per platform, from one command, is the achievable
+> version of that.
+
 ### Target names
 
 | Name              | Role   | Produces                                      |
@@ -135,7 +187,8 @@ reads ambiguously:
 Window-title resolution is `--title` › `ui.title` › `deno.json "title"` ›
 `"AIO App"`. So setting only `deno.json "title"` gives you a matching binary
 name and window title; add `ui.title` when you want a spaced, human-readable
-window title over a slugged binary (`"Llama Master"` vs `llama-master`).
+window title over a slugged binary (`"a field report Master"` vs
+`a field report`).
 
 ## compile:browser (standalone binary)
 

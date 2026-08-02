@@ -33,8 +33,8 @@ Deno.test("am flags: a value flag accepts --k=v and --k v alike", () => {
   assertEquals(sp.args, ["x"]);
 
   assertEquals(
-    parseGlobalFlags(["status", "--app", "risoto"]).flags.app,
-    "risoto",
+    parseGlobalFlags(["status", "--app", "a field report"]).flags.app,
+    "a field report",
   );
   assertEquals(parseGlobalFlags(["status", "--port", "4000"]).flags.port, 4000);
 });

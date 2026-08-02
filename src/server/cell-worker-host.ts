@@ -73,7 +73,7 @@ function reviveRequest(
 
 /** Make every OTHER cell's state read throw inside this worker.
  *
- *  The trap this closes (risoto, 2026-07-26): a worker holds only its own
+ *  The trap this closes: a worker holds only its own
  *  slice, but every imported cell def still carries the creation-time getters
  *  that return its DECLARED DEFAULTS. So `hw.connected` inside a worker cell's
  *  method read `false` forever — not stale data, never-updated data — with no
@@ -239,7 +239,7 @@ export function startCellWorkerHost(cell: CellDef): Promise<never> {
     // the sync prefix with ret=undefined, while the main-side registerCall()
     // pending — the promise `await cell.method()` actually holds — was settled
     // by NOBODY: every async worker-cell method hung to the caller's ceiling,
-    // success and failure alike (risoto 2026-08-01, a night of hardware-wallet
+    // success and failure alike (a field report, a night of hardware-wallet
     // "stopped waiting" timeouts whose methods had long since finished).
     // Register the SAME callId here, before dispatch, and await it: the
     // executor settles it with the method's true value/error, and `done`/`fail`

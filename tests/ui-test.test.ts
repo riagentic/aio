@@ -71,7 +71,7 @@ Deno.test("testUI: client-only typing via useLocal — no cells involved", async
   await ui.Form.TitleInput.type("buy milk");
   assertEquals(ui.Form.TitleInput.value, "buy milk");
   assertEquals(ui.Form.echo.text, "buy milk"); // t= handle, verbatim
-  // type() APPENDS (risoto 2026-07-24 wishlist)…
+  // type() APPENDS…
   await ui.Form.TitleInput.type(" and eggs");
   assertEquals(ui.Form.TitleInput.value, "buy milk and eggs");
   // …setValue() REPLACES (clear + type) so you don't clear() first.
@@ -625,7 +625,7 @@ Deno.test("naming: data-testid is honored like t (verbatim, assertion target)", 
   assertEquals(ui.App.wins.text, "x");
 });
 
-// ── press() key modifiers (risoto 2026-07-18) ─────────────────────────
+// ── press() key modifiers ─────────────────────────
 
 Deno.test("press: modifiers reach the handler (Ctrl+Enter shortcut)", async () => {
   const seen: { key: string; ctrl: boolean; shift: boolean }[] = [];

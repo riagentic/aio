@@ -1,4 +1,4 @@
-// tbd#2 — a `--headless` build skips the browser bundle but the prod server
+// a `--headless` build skips the browser bundle but the prod server
 // still served the UI shell, which then 404'd on /app.js and rendered blank.
 // Now the prod root handler detects the missing bundle and serves a clear
 // "headless build — no browser UI" diagnostic (503) instead of a broken page.

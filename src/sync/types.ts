@@ -96,6 +96,12 @@ export interface AckMessage {
   cell: string;
   opId: string;
   serverHlc: HLC;
+  /** The op's server_ts. Lets the client tell whether a snapshot it already
+   *  installed ALREADY contains this op — see `snapshotServerTs` below.
+   *  Absent for a re-ack of a duplicate (the op was persisted by an earlier
+   *  delivery) and from a pre-alpha43 server; the client then falls back to
+   *  its previous behaviour. */
+  serverTs?: number;
 }
 
 /**

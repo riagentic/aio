@@ -24,7 +24,7 @@ import { _resetSignals, getCellSignal } from "../src/state/state-signals.ts";
 // deno-lint-ignore no-explicit-any
 const doc = () => new Window().document as any;
 
-// ── Invariant 1: testUI hermeticity (the risoto #1 repro, permanent) ──
+// ── Invariant 1: testUI hermeticity ──
 
 Deno.test("invariant: testUI does NOT leak cell state between mounts", async () => {
   const accts = cell("inv_accts", {

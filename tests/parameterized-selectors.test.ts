@@ -1,7 +1,7 @@
 import { assertEquals } from "@std/assert";
 import { bindCell, cell, composeCells } from "../src/state/cell.ts";
 
-// realitio Bad#1: a selector may take ARGS after the state slice —
+// a selector may take ARGS after the state slice —
 // `byId: (s, id) => …` surfaces as `cell.byId(id)`. Zero-arg selectors
 // (own-slice + deps-form cross-cell) keep working unchanged.
 

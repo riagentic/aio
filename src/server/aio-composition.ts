@@ -73,8 +73,7 @@ function renderFilter(filter: CellFieldFilter): string {
 const SECRET_FIELD_RE =
   /enc|secret|priv|key|seed|mnemonic|passphrase|passwo?rd/i;
 // Unambiguous CREDENTIAL names — an exposed value is almost certainly a real
-// leak, so this is escalated from a warning to a boot REFUSAL in dev (inews Ugly
-// #6: "a warning is too soft"). Compound forms only (private_key, api_key,
+// leak, so this is escalated from a warning to a boot REFUSAL in dev. Compound forms only (private_key, api_key,
 // secret_key, access_token…) so feature names like "secretSanta"/"tokenList"
 // don't false-fatal; bare `secret`/`key`/`token` stay soft warnings. `password`,
 // `passphrase`, `mnemonic` are unambiguous on their own. (SECRET_FIELD_RE missed
@@ -85,13 +84,13 @@ const HARD_SECRET_RE =
 const PUBLIC_HINT_RE = /pub(lic)?/i;
 // …and these suffixes mark identifiers/metadata, not the secret itself:
 // seedId, seedPathType, keyName, encMode — nav state, not a leaked secret
-// (risoto #4: the name heuristic over-fired on exactly these).
+//.
 const NONSECRET_SUFFIX_RE =
   /(Id|Ids|Type|Name|Count|Index|Idx|At|Ref|Kind|Length|Len|Path|Mode|Status|Flag|Enabled|Visible|Label|Order|Version)$/;
 
 /** True when a field NAME looks like it holds a secret meant to stay private.
  *  Skips public-key-style names and identifier/metadata suffixes to avoid the
- *  false positives that made the old heuristic cry wolf (risoto #4). */
+ *  false positives that made the old heuristic cry wolf. */
 function _looksSecret(key: string): boolean {
   if (!SECRET_FIELD_RE.test(key)) return false;
   if (PUBLIC_HINT_RE.test(key)) return false;
@@ -99,7 +98,7 @@ function _looksSecret(key: string): boolean {
   return true;
 }
 
-/** Dev-safety warnings for field-level visibility config (risoto #1/#2):
+/** Dev-safety warnings for field-level visibility config:
  *  #1 an include/exclude key that isn't a top-level state field is a silent
  *     no-op — field filters only match top-level keys; nested/array fields need
  *     `ui.forUser`. This turns a silent secret leak into a loud warning.
@@ -160,7 +159,7 @@ function warnFieldFilters(composed: ComposedCells): void {
       const ui = f.__aio.ui;
       const publicFields = new Set(f.__aio.uiPublicFields ?? []);
       // A container whose secret sub-path is already deep-excluded is handled —
-      // warning about it would penalize the *correct* fix (risoto). Collect the
+      // warning about it would penalize the *correct* fix. Collect the
       // heads that have any dot-path exclude under them.
       const uiExcludes = ui && typeof ui === "object" && "exclude" in ui
         ? ui.exclude
@@ -182,7 +181,7 @@ function warnFieldFilters(composed: ComposedCells): void {
       // shipped-binary case; a source run stays dev (dev-stricter is allowed).
       const isDev = !parseCli().prod && !isCompiled();
       // Collect ALL offending fields, then emit ONE paste-ready message per cell
-      // — risoto (2026-07-24 Ugly #7) had to add six `publicFields` one
+      // (2026-07-24 Ugly #7) had to add six `publicFields` one
       // boot-refusal at a time because we threw on the first field. The snippets
       // below list every offending field so a single edit clears the whole cell.
       const hardKeys: string[] = []; // unambiguous credentials
@@ -192,7 +191,7 @@ function warnFieldFilters(composed: ComposedCells): void {
         // already excluded → don't cry wolf at correctly-handled state.
         if (publicFields.has(key) || deepExcludedHead(key)) continue;
         if (!isExposed(key)) continue;
-        // AIO-426 (inews Ugly #6): an unambiguous credential broadcast to every
+        // AIO-426: an unambiguous credential broadcast to every
         // client is a real leak, not a maybe. Guards (public-hint / metadata
         // suffix) still apply so `apiKeyName`, `publicKey` don't trip it.
         if (

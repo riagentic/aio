@@ -1,4 +1,4 @@
-// AIO-419 (risoto "the evil"): a `db:` table named after a cell's object slice
+// AIO-419: a `db:` table named after a cell's object slice
 // silently overwrote that slice with a raw row array at boot, so the cell's
 // methods exploded (`s.nfts.filter` when `s` is now the array). The only guard
 // was a code comment. Now it throws loudly at boot, naming both. A table mapping

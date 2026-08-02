@@ -8,7 +8,12 @@ import type { CellDef, CellFieldFilter } from "./cell-types.ts";
 import { randomUuid } from "../rand.ts";
 import { attachMeta } from "./cell-catalog.ts";
 import { _cellSignals, getCellSignal } from "./state-signals.ts";
-import { _registerAck } from "../protocol/browser-ack.ts";
+import {
+  _armAckTimer,
+  _registerAck,
+  ackMethodKey,
+  armsAckTimer,
+} from "../protocol/browser-ack.ts";
 import { trackPath } from "./state-subs.ts";
 import { nameIsTaken } from "./cell-helpers.ts";
 import { applyCellFieldFilter, uiKeyVisibility } from "./state-filter.ts";
@@ -66,7 +71,7 @@ export function _resetCellRegistry(): void {
  *  A cell def binds to exactly one app (perfect-aio D2), and that guard used to
  *  outlive the app: two `testServer()` blocks in one test file failed with
  *  "[cell] already bound" even with `await using`, forcing the second test into
- *  a file of its own for no reason a reader could see (llama.md #8). A closed app
+ *  a file of its own for no reason a reader could see. A closed app
  *  owns nothing, so its claim ends with it. Scoped to the given cells, so a
  *  second app running in the same process keeps its own bindings. */
 export function _releaseCellBindings(defs: Iterable<CellDef>): void {
@@ -87,7 +92,7 @@ export function _resetCellBindings(): void {
 
 const _reactivelyBound = new WeakSet<CellDef>();
 
-// ── Client-side ui visibility (TBD B7) ───────────────────────────────
+// ── Client-side ui visibility ───────────────────────────────
 // bindCellReactive IS the client read surface — it runs only in browser /
 // standalone (electron, android, testUI) contexts, never on a pure server.
 // Enforcing `ui:` visibility here gives ONE seam for both runtimes: over WS
@@ -109,7 +114,7 @@ export function _resetUiReadWarnings(): void {
  *
  *  It used to only warn, everywhere — and a warning does not stop the read from
  *  type-checking as the field's declared type, so client code went on branching
- *  on `undefined` as though it were data (risoto 2026-07-28 #3: a lock screen
+ *  on `undefined` as though it were data (a field report: a lock screen
  *  asked "does a vault exist?", got `undefined` forever, and behaved). A hidden
  *  field is never readable here, so ANY such read is a bug; dev is where a bug
  *  should be unmissable, prod is where an app should still render. The fix is
@@ -217,7 +222,7 @@ export function bindCellReactive(
   for (const key of Object.keys(initialState)) {
     if (nameIsTaken(def, key)) continue;
 
-    // TBD B7: ui visibility is enforced at THIS seam for client reads — a
+    // ui visibility is enforced at THIS seam for client reads — a
     // hidden field throws in dev and reads as undefined (+ one-time loud warn)
     // in prod, a dot-path exclude strips the nested value, exactly like the
     // broadcast filter.
@@ -228,7 +233,7 @@ export function bindCellReactive(
           reportHiddenRead(cellName, key, vis.reason!);
           return undefined;
         }
-        // Register a SERVER subscription for this cell (risoto 2026-07-18):
+        // Register a SERVER subscription for this cell:
         // reading a cell via direct access is documented as "reactive and
         // auto-tracked", but it only tracked the AIR *re-render* signal — it
         // never told the server to send this cell's deltas. So the moment the
@@ -262,7 +267,7 @@ export function bindCellReactive(
     });
   }
 
-  // AIO-422 (realitio): bind selectors on the browser cell too — they're pure
+  // AIO-422: bind selectors on the browser cell too — they're pure
   // functions over state, so `cell.count()` must work client-side exactly as it
   // does server-side. Before this they existed only on the server; the browser
   // cell had no accessor and `listings.count()` threw `is not a function` at
@@ -284,7 +289,7 @@ export function bindCellReactive(
     // just installed one — leaving the non-signal-backed selector in place. It
     // returned correct, fresh data and subscribed to nothing, so a component
     // whose only read was a selector rendered once and froze: right data, dead
-    // screen, no warning (llama.md #1, the costliest bug in that report).
+    // screen, no warning.
     // testUI binds reactively ONLY, which is why no test could ever see it.
     //
     // Selector names cannot collide with method names (AIO-6.1 enforces it), so
@@ -294,7 +299,7 @@ export function bindCellReactive(
       Object.defineProperty(def, key, {
         value: (...args: unknown[]) => {
           trackPath(cellName);
-          // TBD B7: selectors in client context see the ui-FILTERED slice —
+          // selectors in client context see the ui-FILTERED slice —
           // same data a browser client would hold after a broadcast, so a
           // selector can't leak a ui-excluded secret in standalone/electron.
           const own = filterSlice(
@@ -420,7 +425,23 @@ function _registerAndSend(
   ) => void | Promise<void>,
   tagged: { type: string; payload?: unknown; cid: string },
 ): Promise<unknown> {
-  const promise = _registerAck(tagged.cid);
+  // Register with the SAME options the transport would, because this
+  // registration is the one that wins: `_registerAck` is idempotent per cid
+  // and returns early when an entry exists, so whatever is registered FIRST
+  // fixes the entry's terms. Registering bare here meant, for every cell
+  // method call in every transport:
+  //   • the 15s clock started at dispatch time rather than when the frame was
+  //     written, so an action queued offline for 20s was rejected at 15s while
+  //     still sitting in the queue — then sent on reconnect and applied
+  //     server-side, after its caller had already been told it failed;
+  //   • `methodKey` stayed undefined, so per-method call budgets
+  //     (`perfBudget.methods["cell:method"].timeout`) never applied to
+  //     anything.
+  // The transports arm the clock (`_armAckTimer`) once the frame is out.
+  const promise = _registerAck(tagged.cid, {
+    deferTimer: true,
+    methodKey: ackMethodKey(tagged),
+  });
   // Send in a microtask so a fast synchronous sendFn doesn't have its return
   // value clobbered by the pending map. The ack can come back as soon as
   // the dispatch completes server-side; the registration is in place.
@@ -428,6 +449,10 @@ function _registerAndSend(
     try {
       sendFn(tagged);
     } catch { /* sendFn errors are surfaced via the ack timeout */ }
+    // aio's own transports arm the clock when the frame goes out. Anything
+    // else — a custom or legacy `sendFn` — never would, and a deferred timer
+    // that is never armed is a call that can hang forever, so start it here.
+    if (!armsAckTimer(sendFn)) _armAckTimer(tagged.cid);
   });
   return promise;
 }

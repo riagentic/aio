@@ -334,7 +334,7 @@ Deno.test("migration: multiple cells — only stale cells migrated", () => {
   assertEquals((state.beta as Record<string, unknown>).y, 2);
 });
 
-// ── Shape drift (risoto #1) — stored shape vs declared initialState ──────────
+// ── Shape drift — stored shape vs declared initialState ──────────
 
 Deno.test("detectShapeDrift: a stored field absent from initialState → unknown-field", () => {
   const drift = detectShapeDrift(
@@ -404,7 +404,7 @@ Deno.test("detectShapeDrift: array ↔ object IS a type change", () => {
 });
 
 Deno.test("detectShapeDrift: a declared EMPTY object is an open record — stored keys are NOT drift", () => {
-  // risoto field report 2026-07-25: `balances.sol = {} as Record<pubkey, number>`.
+  // a field report: `balances.sol = {} as Record<pubkey, number>`.
   // Runtime keys are DATA, not schema — must not warn (was a 70-item WARN wall).
   const drift = detectShapeDrift(
     { wallet: { balances: {} } }, // declared: open record
@@ -473,7 +473,7 @@ Deno.test("shapeDriftSummary: teachable, names the fields + a fix", () => {
   assert(msg.includes("version"), "points at the version-bump fix");
 });
 
-// risoto 2026-07-28 #2 — a restored snapshot replaces a seeded list wholesale.
+// a field report #2 — a restored snapshot replaces a seeded list wholesale.
 // A curated token registry declared in `state:` vanished after the first
 // restore of a profile that had once persisted an empty list; every holding
 // then rendered as a truncated mint, and nothing warned. deepMerge is right to

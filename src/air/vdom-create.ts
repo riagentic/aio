@@ -123,7 +123,7 @@ export function _isStaticProps(props: Record<string, unknown>): boolean {
  *  static let the `_static` diff short-circuit (vdom-diff.ts) skip real updates:
  *  when a component re-rendered with a changed value, the whole subtree was
  *  reconciled against a stale/emptied `_dom`, freezing the rendered text at its
- *  mount-time value (the risoto "balance number never updates" bug — only
+ *  mount-time value (the a field report "balance number never updates" bug — only
  *  reproduced in a real browser under concurrent parent+child re-renders).
  *  Elements whose children are all real static VNodes (icons, static markup
  *  with no text) still qualify, preserving the optimization where it is sound. */
@@ -222,7 +222,7 @@ export function _callRef(ref: unknown, value: Node | null): void {
 // ── Render-error component tagging ────────────────────────────────────
 
 /** Annotate an error thrown during a component's render with the component
- *  path (risoto 2026-07-16f): innermost first on `__aioComponents`, so
+ *  path: innermost first on `__aioComponents`, so
  *  blank-screen overlays and logs can print "(in <NetworkPanel>)" instead of
  *  forcing a manual bisect. Metadata only — `e.message` is never mutated
  *  (ErrorBoundary fallbacks render it to users). Display sites format it via

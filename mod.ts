@@ -175,7 +175,7 @@ export { serverUser } from "./src/server/auth-context.ts";
 export { serverRequest } from "./src/server/auth-context.ts";
 export type { ServerRequest } from "./src/server/auth-context.ts";
 /** TOTP (2FA) primitives — for a fully hand-rolled 2FA UI/flow when the
- *  built-in <SignIn/> isn't enough (realitio). Enrollment: `generateTotpSecret`
+ *  built-in <SignIn/> isn't enough. Enrollment: `generateTotpSecret`
  *  + `totpUri` (→ QR); verification: `verifyTotp`. */
 export {
   generateTotpSecret,

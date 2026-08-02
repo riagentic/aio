@@ -1148,7 +1148,7 @@ Deno.test("trojan: POST /sql blocks INSERT", async () => {
       {
         method: "POST",
         headers: { "Content-Type": "application/json", "X-AIO": "1" },
-        body: JSON.stringify({ query: "SELECT 1 /* */ ; DELETE FROM users" }),
+        body: JSON.stringify({ query: "SELECT 1 /* */; DELETE FROM users" }),
       },
     );
     assertEquals(respHidden.status, 403);
@@ -1767,7 +1767,7 @@ Deno.test("classifyBrowserError: detects missing module specifier", () => {
 });
 
 Deno.test("classifyBrowserError: server-only export (createDB) → teachable, points at the linter", () => {
-  // The risoto 2026-07-20c blank screen: a static `import { createDB } from "aio"`
+  // The a field report 2026-07-20c blank screen: a static `import { createDB } from "aio"`
   // in a cell link-fails the client bundle at boot with this V8 message.
   const result = classifyBrowserError(
     "The requested module 'aio' does not provide an export named 'createDB'",

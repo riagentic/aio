@@ -37,7 +37,7 @@ const isDenoRuntimeFlag = (a: string): boolean => DENO_RUNTIME_FLAG.test(a);
 
 /** Assemble the `deno run` argv: runtime flags (--env-file, …) BEFORE the entry
  *  script, app flags (--port, …) after it — placement Deno requires. Exported
- *  so the ordering contract is unit-tested (risoto 2026-07-24 Bad #4). */
+ *  so the ordering contract is unit-tested. */
 export function buildDenoArgs(entry: string, passthrough: string[]): string[] {
   const denoFlags = passthrough.filter(isDenoRuntimeFlag);
   const appFlags = passthrough.filter((a) => !isDenoRuntimeFlag(a));
@@ -290,7 +290,7 @@ export async function cmdStart(
   // etc.). Re-inject --port if it was consumed by the global flag parser.
   const passthrough = args.filter((a) => a.startsWith("--"));
   // A GUI client on a headless box hangs forever (electron never returns) —
-  // fail FAST with the fix instead (space-invaders field report). The
+  // fail FAST with the fix instead (a field report). The
   // effective client is the --client override, else the app's declared target.
   {
     const clientArg = passthrough.find((a) => a.startsWith("--client="))
@@ -520,7 +520,7 @@ export async function cmdRestart(
   const appId = resolveAmAppId(flags.app);
   const pf = readPid(appId);
 
-  // Preserve the original launch across restart (risoto 2026-07-24 Bad #4:
+  // Preserve the original launch across restart (a field report:
   // restart dropped --env-file → the vault stopped auto-unlocking). Explicit
   // flags on THIS `am restart` win; otherwise replay what start recorded.
   const explicit = args.filter((a) => a.startsWith("--"));

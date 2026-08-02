@@ -116,7 +116,7 @@ export function renderToString(
         // component tree, never from the DOM). The client renderer already
         // skips it; SSR used to emit it, so server HTML and the live DOM
         // disagreed — and every DOM-probing tool that looked for it found
-        // nothing once hydration replaced the markup (risoto 2026-07-26).
+        // nothing once hydration replaced the markup.
         k === "t"
       ) continue;
       if (k.startsWith("on")) continue; // Skip event handlers in SSR

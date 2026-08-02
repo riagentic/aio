@@ -31,7 +31,7 @@
 - [Real-time and high-frequency state](state/real-time.md) — The one question that decides everything: at what cadence does this state
 - [Scheduling](state/scheduling.md) — aio has a built-in scheduler for timers, intervals, daily triggers, and cron
 - [The bridge — what crosses, what doesn't, what freezes](state/the-bridge.md) — A shared cell's methods run on the server; the browser holds a live,
-- [Spec: Transactional cell methods (risoto #2)](state/transactional-methods.md) — Status: SHIPPED — opt-in transaction: true; this page is the contract, not
+- [Spec: Transactional cell methods](state/transactional-methods.md) — Status: SHIPPED — opt-in transaction: true; this page is the contract, not
 
 ## UI — AIR renderer — components, signals, routing, forms
 
@@ -68,12 +68,13 @@
 - [Authentication & Security](auth/auth.md) — By default, the server binds to 127.0.0.1 (localhost only).
 - [Secrets & observability — what crosses the wire, what gets recorded](auth/secrets-and-observability.md) — aio's core promise is "everything through a method is an observable, loggable
 
-## Testing — cell tests, semantic UI tests, linter
+## Testing — cell tests, semantic UI tests, driving the live app, linter
 
 - [Testing](testing/README.md) — Verifying cells and UIs work correctly.
 - [Cell Testing](testing/cell-testing.md) — Test harness that wraps Deno.test with typed helpers.
 - [aiol — AIO Project Linter](testing/linter.md) — Static analysis tool for aio projects.
 - [UI testing — semantic, selector-free, first-class](testing/ui-testing.md) — aio exposes every TSX component as an intuitive, deterministic API — tests and
+- ↗ [App Manager](clients/app-manager.md) — `am surface` / `am trigger` — observe and drive a RUNNING app, no selectors, no driver: the same loop as `testUI`, against the real thing
 
 ## Clients — browser, electron, the am manager
 
@@ -141,6 +142,7 @@
 - [Upgrade from v1.0.0-alpha4 to v1.0.0-alpha5](upgrade/from-alpha4-to-alpha5.md) — None.
 - [Upgrade: alpha40 → alpha41](upgrade/from-alpha40-to-alpha41.md) — Most apps upgrade with no changes.
 - [Upgrade: alpha41 → alpha42](upgrade/from-alpha41-to-alpha42.md) — on changed.
+- [Upgrade: alpha42 → alpha43](upgrade/from-alpha42-to-alpha43.md) — every API is additive.
 - [Upgrade from v1.0.0-alpha5 to v1.0.0-alpha6](upgrade/from-alpha5-to-alpha6.md) — None.
 - [Upgrade from v1.0.0-alpha6 to v1.0.0-alpha7](upgrade/from-alpha6-to-alpha7.md) — mod.ts no longer re-exports renderer primitives.
 - [Upgrade from v1.0.0-alpha7 to v1.0.0-alpha8](upgrade/from-alpha7-to-alpha8.md) — None.

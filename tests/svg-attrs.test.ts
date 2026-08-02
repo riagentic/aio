@@ -1,4 +1,4 @@
-// SVG camelCase attribute mapping (quant Ugly #2) — stopColor etc. must emit
+// SVG camelCase attribute mapping — stopColor etc. must emit
 // as stop-color or gradients/strokes render black, while structural attrs like
 // viewBox stay camelCase. Covers client (applyProps) and SSR (renderToString).
 import { assert, assertStringIncludes } from "@std/assert";

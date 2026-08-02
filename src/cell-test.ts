@@ -1,14 +1,13 @@
 // Public entry — implementation lives in testing/cell-test.ts
 export * from "./testing/cell-test.ts";
-// One state, many surfaces — aio's central claim, made testable (llama-master
-// #16). Real server, real WebSocket clients, real broadcast.
+// One state, many surfaces — aio's central claim, made testable. Real server, real WebSocket clients, real broadcast.
 export {
   type TestClient,
   type TestMultiClient,
   testMultiClient,
 } from "./testing/multi-client-test.ts";
 
-// Transport cassettes (risoto #6): record a real device/network session once,
+// Transport cassettes: record a real device/network session once,
 // replay it in CI forever. Record in prod against the real device; replay in tests.
 export {
   type Cassette,
@@ -29,7 +28,7 @@ export {
 //   … run the test …
 //   _resetAppDirs();                          // release the registration
 //
-// (llama.md #6 — its server tests installed a fixture under `appDirs().files`
+// (a field report #6 — its server tests installed a fixture under `appDirs().files`
 // and, with no way to redirect, wrote into the developer's real install.)
 export {
   _resetAppDirs,

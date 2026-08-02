@@ -1,4 +1,4 @@
-// risoto #3 — durable action journal + replay. The snapshot covers state up to
+// durable action journal + replay. The snapshot covers state up to
 // the last persist; the journal covers actions AFTER it, replayed at boot so a
 // SIGKILL / power cut in the debounce window loses nothing.
 import { assert, assertEquals } from "@std/assert";

@@ -56,9 +56,9 @@ keeps showing up, give it `worker: true`.
 
 ## The idiom: one designated heavy cell
 
-The pattern that emerged in the field (risoto, 2026-07-26): rather than flagging
-several interconnected cells, give the app **one self-contained cell that owns
-the dangerous work** — plain args in, cloneable values out, no peer reads.
+The pattern that emerged in the field: rather than flagging several
+interconnected cells, give the app **one self-contained cell that owns the
+dangerous work** — plain args in, cloneable values out, no peer reads.
 
 ```ts
 // heavy.ts — the app's designated thread

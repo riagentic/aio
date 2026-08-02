@@ -18,7 +18,7 @@ import { codeMatches, codeText } from "./scan.ts";
  *  linter accepts it, and (decisively) where `deno fmt` cannot move it. A marker
  *  parked at the end of a long line gets reflowed onto a continuation, and the
  *  hint reappeared somewhere else: one field report spent four passes clearing
- *  eight hints for exactly this reason (llama.md #7).
+ *  eight hints for exactly this reason.
  *
  *  A blank line between the comment and the code breaks the association, so an
  *  unrelated `aiol-ok` further up can't silently cover code below it. */
@@ -45,7 +45,7 @@ export const checkConfig: Checker = (ctx) => {
   // Only warn when the MOVE HAS NOT HAPPENED. Warning "move to aio.run({ appId })"
   // at an app that already passes it there describes a move already made, and a
   // linter that reports work you've done is a linter people stop reading
-  // (llama-master #6). A deno.json `appId` alongside an explicit one is
+  //. A deno.json `appId` alongside an explicit one is
   // redundant, not broken — `am` reads it to find the app — so that case is a
   // hint about the duplication, not a warning about a missing move.
   if (dj.appId) {
@@ -217,13 +217,27 @@ export const checkStructure: Checker = async (ctx) => {
       );
     }
   } else {
-    if (appTsx) {
+    // "Unused" only if NOTHING in the project builds a UI. One app is many
+    // targets: the scaffold's `dev` runs server-only while `dev:browser`,
+    // `dev:electron` and `compile:android` all mount App.tsx — calling it
+    // unused told a brand-new app to delete a file its own tasks need
+    //.
+    const uiTargets = (denoJson?.build as { targets?: string[] } | undefined)
+      ?.targets ?? [];
+    const uiTask = Object.values(tasks).some((t) =>
+      /--client[= ](?:browser|electron)|--electron\b|--android\b/.test(t)
+    );
+    const buildsUI = uiTask ||
+      uiTargets.some((t) => ["browser", "electron", "android"].includes(t));
+    if (appTsx && !buildsUI) {
       report(
         "hint",
         "structure",
-        'App.tsx exists but client is "server-only" or "cli" — file is unused',
+        'App.tsx exists but no target builds a UI (client is "server-only" or "cli") — file is unused',
         { file: appTsx.relative },
       );
+    } else if (appTsx) {
+      pass("UI: App.tsx (used by the browser/Electron/Android targets)");
     } else pass("server-only / CLI mode (no App.tsx)");
   }
 
@@ -234,7 +248,7 @@ export const checkStructure: Checker = async (ctx) => {
   );
   if (cellFiles.length > 3) {
     // A dedicated cell directory counts as organized whether it's named
-    // `cell/` or `cells/` — both are valid; don't nag about the choice (risoto).
+    // `cell/` or `cells/` — both are valid; don't nag about the choice.
     const inCellDir = cellFiles.filter((f) =>
       /(^|\/)cells?\//.test(f.relative)
     );
@@ -263,31 +277,54 @@ export const checkStructure: Checker = async (ctx) => {
     }
   }
 
-  // appId — mandatory in aio.run()
+  // appId / appVersion — required to RESOLVE, not required to be typed out.
+  //
+  // Both are inferable: appId from deno.json (appId > title > name) or the
+  // compiled binary's own name, appVersion from deno.json `version`, which the
+  // build embeds in the artifact. Demanding them explicitly anyway made a
+  // freshly scaffolded app fail aio's own linter in the first five minutes —
+  // which teaches "the linter is noise", the most expensive thing a linter can
+  // teach. So: pass when it resolves, say where from, and error only
+  // when nothing can supply it.
+  //
+  // Matching is on CODE, not raw text: `content.includes("appId")` was
+  // satisfied by the word appId in a comment, so the check passed on a scaffold
+  // that never set it — a green light with nothing behind it.
   if (appEntry) {
-    if (appEntry.content.includes("appId")) pass("appId set in aio.run()");
-    else {report(
+    const setsInRun = (key: string) =>
+      codeMatches(appEntry.content, new RegExp(`\\b${key}\\s*:`, "g")).length >
+        0;
+    const dj2 = denoJson ?? {};
+    const inferredId = dj2.appId ?? dj2.title ??
+      (typeof dj2.name === "string" ? dj2.name.split("/").pop() : undefined);
+
+    if (setsInRun("appId")) pass("appId set in aio.run()");
+    else if (inferredId) {
+      pass(`appId inferred from deno.json (${inferredId})`);
+    } else {report(
         "error",
         "config",
-        "missing appId in aio.run() — mandatory for lock files, KV/SQLite paths, UDS socket",
+        "no appId anywhere — it names the lock file, the SQLite/KV paths and " +
+          "the UDS socket, so it cannot be guessed",
         {
           file: appEntry.relative,
-          fix: 'Add appId: "my-app" to your aio.run() config',
+          fix:
+            'Add appId: "my-app" to aio.run(), or a "title" field to deno.json',
           safeFix: fix.fixAddAppIdToRun,
         },
       );}
-  }
 
-  // appVersion — mandatory in v1.0
-  if (appEntry) {
-    if (appEntry.content.includes("appVersion")) pass("appVersion set");
-    else {report(
+    if (setsInRun("appVersion")) pass("appVersion set in aio.run()");
+    else if (dj2.version) {
+      pass(`appVersion inferred from deno.json (${dj2.version})`);
+    } else {report(
         "error",
         "config",
-        'missing appVersion in aio.run() — mandatory in v1.0, add appVersion: "x.y.z"',
+        'no app version anywhere — add "version" to deno.json, or ' +
+          'appVersion: "0.1.0" to aio.run()',
         {
           file: appEntry.relative,
-          fix: 'Add appVersion: "0.1.0" to your aio.run() config',
+          fix: 'Add "version": "0.1.0" to deno.json',
         },
       );}
   }
@@ -534,7 +571,7 @@ export const checkPerformance: Checker = (ctx) => {
   }
 
   // Check for setTimeout/setInterval in cell files (should use schedule).
-  // Skips (risoto false-positives): the delay-0 yield idiom
+  // Skips: the delay-0 yield idiom
   // `new Promise((r) => setTimeout(r, 0))` — that's a microtask hop, not a
   // timer schedule would replace — and any line carrying `aiol-ok`.
   for (const file of sourceFiles) {
@@ -557,37 +594,13 @@ export const checkPerformance: Checker = (ctx) => {
     }
   }
 
-  // Large state arrays — hint about SQLite
-  for (const f of cells) {
-    for (const key of f.stateKeys) {
-      // Check if state value looks like an array initializer with many items
-      const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-      const arrayMatch = f.file.content.match(
-        new RegExp(`${escaped}\\s*:\\s*\\[`),
-      );
-      if (arrayMatch) {
-        // Check for 'as' type annotation suggesting typed array
-        const afterKey = f.file.content.slice(
-          f.file.content.indexOf(arrayMatch[0]),
-        );
-        if (/\[\s*\]\s+as\s+\w+\[\]/.test(afterKey)) {
-          // Empty typed array — check if it's a list that could grow
-          // Only hint for names that suggest collections
-          if (
-            /items|orders|entries|logs|messages|events|users|records|rows|list/i
-              .test(key)
-          ) {
-            report(
-              "hint",
-              "perf",
-              `cell "${f.name}" state.${key} is a typed array — if it grows large (100+), consider SQLite`,
-              { file: f.file.relative },
-            );
-          }
-        }
-      }
-    }
-  }
+  // REMOVED — "state.items is a typed array — if it grows large, consider
+  // SQLite". `items: [] as Todo[]` is THE aio state idiom; the rule fired on
+  // aio's own todo template, on every app that has ever held a list, and no
+  // edit could ever clear it (short of renaming the field). An unclearable hint
+  // on correct code is the kind that trains people to skim past the real ones
+  //. Collection size is not knowable statically —
+  // docs/db/ covers when to reach for SQLite.
 
   // Check for missing cell-level ui filters
   if (appEntry && cells.length > 0) {
@@ -610,9 +623,18 @@ export const checkPerformance: Checker = (ctx) => {
     }
   }
 
-  // console.log in non-test source
+  // console.log in non-test source.
+  //
+  // Not in a CLI client: there, stdout IS the product — printing the state it
+  // just received is the whole program, and routing it through the structured
+  // logger would prefix and level-filter the output the user asked for. The
+  // scaffolded `src/client.ts` is exactly this, so the shipped template was
+  // hinted at by the shipped linter on creation.
+  const isCliClient = (f: typeof sourceFiles[number]) =>
+    /\bconnectCli\b/.test(codeText(f.content));
   for (const file of sourceFiles) {
     if (file.name.endsWith(".test.ts")) continue;
+    if (isCliClient(file)) continue;
     const logLines = file.lines
       .map((l, i) => ({ line: l.trim(), num: i + 1 }))
       .filter(({ line }) =>
@@ -687,7 +709,7 @@ export const checkSecurity: Checker = (ctx) => {
     if (!hasExpose) pass("localhost-only (no --expose)");
   }
 
-  // .env files committed — only warn if it isn't already gitignored (risoto #7)
+  // .env files committed — only warn if it isn't already gitignored
   try {
     Deno.statSync(join(ctx.projectDir, ".env"));
     if (!isGitignored(ctx.projectDir, ".env")) {
@@ -732,7 +754,7 @@ export const checkPersistence: Checker = (ctx) => {
   if (!appEntry) return;
 
   // Strip comments so a `db:` mention inside a comment doesn't false-positive
-  // (risoto #6).
+  //.
   const codeNoComments = appEntry.content
     .replace(/\/\*[\s\S]*?\*\//g, "")
     .replace(/\/\/.*$/gm, "");
@@ -896,11 +918,11 @@ export const checkUI: Checker = (ctx) => {
   }
 
   // Server-only imports in cell definition files (shared with browser)
-  // "aio/server" is the explicit server-only entry (risoto #1): the whole module
+  // "aio/server" is the explicit server-only entry: the whole module
   // is server-only, so a STATIC import into a cell-shared file is the boundary
   // violation — flag it like @std/ / node:.
   const SERVER_ONLY_PREFIXES = ["@std/", "node:", "aio/server"];
-  // AIO-424 (risoto): server-only SYMBOLS that live in the isomorphic "aio"
+  // AIO-424: server-only SYMBOLS that live in the isomorphic "aio"
   // entry — the browser build of "aio" omits them, so a STATIC import into a
   // cell (shared with the browser bundle) link-fails at boot with an anonymous
   // "does not provide an export named X" blank screen that every server-side
@@ -1203,7 +1225,7 @@ export const checkPatterns: Checker = (ctx) => {
         if ((file.lines[idx - 1] ?? "").includes("deno-lint-ignore")) {
           return false;
         }
-        // Match : any, as any, <any> but not variable names containing "any"
+        // Match: any, as any, <any> but not variable names containing "any"
         return /:\s*any\b|as\s+any\b|<any>/.test(line);
       });
     if (anyLines.length > 3) {
@@ -1232,14 +1254,14 @@ export const checkPatterns: Checker = (ctx) => {
       }
     }
 
-    // State read after an await in an async method (mdview). Every await is a
+    // State read after an await in an async method. Every await is a
     // commit + render point — another action may have committed while the
     // method was suspended, so a post-await read can return a value the code
     // above never saw. Deliberate re-reads are correct (reads overlay the
     // method's own pending writes), so this is a hint, once per method, on the
     // first post-await read. Writes and draft mutations (s.x = …, s.arr.push)
     // are exempt — they always land.
-    // A `transaction: true` cell (risoto #2) reads a STABLE snapshot across
+    // A `transaction: true` cell reads a STABLE snapshot across
     // awaits — the post-await read is intended and safe — so skip the hint for
     // files that opt in. See docs/state/transactional-methods.md.
     const isTransactional = /\btransaction\s*:\s*(?:true|\{)/.test(
@@ -1527,7 +1549,7 @@ export const checkMemoUsage: Checker = (ctx) => {
 // ══════════════════════════════════════════════════════════════════════
 
 // ══════════════════════════════════════════════════════════════════════
-// 14. DUPLICATE IMPORTS (risoto 2026-07-24)
+// 14. DUPLICATE IMPORTS
 // ══════════════════════════════════════════════════════════════════════
 
 /** Local binding names introduced by one import clause (the text between
@@ -1748,12 +1770,11 @@ export const checkUpgrade: Checker = (ctx) => {
     );
   }
 
-  // The DYNAMIC variant of the same migration (risoto 2026-07-26): the lazy
+  // The DYNAMIC variant of the same migration: the lazy
   // server-only pattern the docs themselves recommend —
   //   const { createDB } = await import("aio")
   // — is invisible to the static rule above and fails only at runtime, as
-  // "createDB is not a function" (risoto's nft-cache silently stopped
-  // persisting for hours). Same symbols, same fix, dynamic spelling.
+  // "createDB is not a function". Same symbols, same fix, dynamic spelling.
   const DYN =
     /(?:\{([^}]*)\}\s*=\s*await\s+import\(\s*["']aio["']\s*\))|(?:\(\s*await\s+import\(\s*["']aio["']\s*\)\s*\)\s*\.\s*(\w+))/g;
   for (const file of [...tsFiles, ...tsxFiles]) {
@@ -1823,7 +1844,7 @@ export const checkUpgrade: Checker = (ctx) => {
 };
 
 // ══════════════════════════════════════════════════════════════════════
-// 17. CALLER-SIDE POST-AWAIT READS (risoto 2026-07-26)
+// 17. CALLER-SIDE POST-AWAIT READS
 // ══════════════════════════════════════════════════════════════════════
 //
 // `await cart.checkout(); const id = cart.orderId;` reads the LOCAL replica
@@ -1873,7 +1894,7 @@ export const checkPostAwaitRead: Checker = (ctx) => {
 };
 
 // ══════════════════════════════════════════════════════════════════════
-// 18. WORKER CELLS READING PEER CELLS (risoto 2026-07-26 — the line in the sand)
+// 18. WORKER CELLS READING PEER CELLS
 // ══════════════════════════════════════════════════════════════════════
 //
 // A `worker: true` cell holds ONLY its own slice. Reading another cell from
@@ -1926,7 +1947,7 @@ export const checkWorkerPeerReads: Checker = (ctx) => {
 };
 
 // `useCell(...)`.state is a LIVE proxy — the stash-and-diff idiom compares
-// state against itself, silently (space-invaders field report). Deprecated at
+// state against itself, silently (a field report). Deprecated at
 // the source; named here at lint time, before it runs.
 export const checkUseCell: Checker = (ctx) => {
   const { tsFiles, tsxFiles, report } = ctx;

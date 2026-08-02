@@ -1,4 +1,4 @@
-// reactive.ts — reactive SQL views (risoto #8). Wrap a DB so a `select(sql)` is
+// reactive.ts — reactive SQL views. Wrap a DB so a `select(sql)` is
 // a LIVE query: it re-runs and notifies whenever a write through this wrapper
 // touches one of the tables it reads. Big data-heavy apps (10k-account wallets)
 // keep derived views in SQL instead of paying full-array-in-RAM + manual
@@ -72,6 +72,9 @@ export function reactiveDB(db: DB): ReactiveDB {
     query: (sql, params) => db.query(sql, params),
     lastWriterError: db.lastWriterError?.bind(db),
     close: () => db.close(),
+    // Pass-through: neither changes table contents, so no query invalidation.
+    snapshot: db.snapshot ? (path: string) => db.snapshot!(path) : undefined,
+    checkIntegrity: db.checkIntegrity ? () => db.checkIntegrity!() : undefined,
 
     async execute(sql: string, params?: unknown[]): Promise<QueryResult> {
       const r = await db.execute(sql, params);

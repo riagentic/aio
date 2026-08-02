@@ -125,7 +125,7 @@ export type ScopedApp<S = unknown> = {
    *  the action was refused. Callers may ignore it (most effects are
    *  fire-and-forget), but an async method's write path MUST observe it: a
    *  dropped rejection is a write the caller believes landed and didn't
-   *  (llama.md #2). Typed `unknown` rather than `Promise` because
+   * . Typed `unknown` rather than `Promise` because
    *  standalone/worker scoped apps dispatch synchronously. */
   dispatch: (action: Msg) => unknown;
   /** Returns this cell's own state slice */
@@ -229,8 +229,12 @@ export type CellAio<
   methods?: CellMethods<Record<string, unknown>>;
   syncMethods?: Set<string>;
   asyncMethods?: Set<string>;
-  /** cancelOn config — method → trigger actions (registered at compose time). */
-  cancelTriggers?: Record<string, (string | { type: string })[]>;
+  /** cancelOn config — method → trigger actions (registered at compose time).
+   *  `"self"` (bare or in the list) resolves to the method's own action type. */
+  cancelTriggers?: Record<
+    string,
+    "self" | (string | { type: string })[]
+  >;
   /** Optional state validator — called after reduce, throw or return string to reject.
    *  `any` required: user provides (state: S) => ... but CellAio stores it unparameterized (contravariance). */
   // deno-lint-ignore no-explicit-any
@@ -304,7 +308,7 @@ export function checkReservedKeys(
  *  predicate = custom check per (user, method, ...args). The method's call
  *  args are forwarded so a predicate can do ROW-LEVEL authz — e.g.
  *  `(u, m, id) => isOwner(u, id)` — instead of re-checking ownership inside
- *  every method (realitio). Absent = open (as before). Server-origin dispatches
+ *  every method. Absent = open (as before). Server-origin dispatches
  *  (effects, schedules, server code) always bypass — the server trusts itself. */
 export type CellAccess =
   | boolean
@@ -373,7 +377,7 @@ export type DirectCalling<N extends string = string, M = unknown> = {
 
 /** A sync method's transported return type. A returned value flows to the caller
  *  (`await cell.method()`), the same as an async method; `void`/`CellEffect`
- *  returns (the "no value" cases) resolve `Promise<void>`. AIO-427 (risoto/inews):
+ *  returns (the "no value" cases) resolve `Promise<void>`. AIO-427:
  *  a create-and-return-id no longer forces `async` + a require-await ignore. */
 type SyncReturn<R> =
   [Exclude<Awaited<R>, CellEffect | void | undefined>] extends [never] ? void

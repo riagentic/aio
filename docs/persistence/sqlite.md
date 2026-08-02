@@ -168,6 +168,40 @@ methods: {
 
 `app.db` is `undefined` in standalone/Android mode.
 
+## Integrity & snapshots
+
+A file that holds data a user would miss eventually meets a power cut mid-write,
+a full disk, or a filesystem that lied about `fsync`. Two primitives cover it.
+
+```ts
+await app.db.snapshot(`${dir}/state.db.snapshot`); // VACUUM INTO — safe while live
+const { ok, problems } = await app.db.checkIntegrity(); // PRAGMA quick_check
+```
+
+`snapshot()` copies at a single point in time (never half-written) and compacts
+on the way out — call it on a schedule, and the copy is what recovery uses.
+
+```ts
+await aio.run({ checkIntegrityOnBoot: true });
+```
+
+On boot the app database is scanned. A sound file costs one cheap scan and says
+nothing. A damaged one is **quarantined** — renamed beside itself with a
+timestamp, never deleted, so a human or a real recovery tool still has every
+byte — and if `<db>.snapshot` exists the app boots on that instead. Every branch
+is reported, including what the restore lost:
+
+```
+db: INTEGRITY CHECK FAILED for …/state.db — row 4 missing from index idx_x
+db: damaged file kept at …/state.db.corrupt-2026-08-02T14-27-10-762Z
+db: restored from …/state.db.snapshot — changes made AFTER that snapshot are
+    not in it; the damaged original is at …
+```
+
+With no snapshot the app starts **empty** and says so, loudly, rather than
+booting on a file SQLite cannot read. Off by default: only apps holding data
+worth this deserve the per-boot scan.
+
 ## Transactions
 
 Both forms wrap in `BEGIN`/`COMMIT` and roll back on error.

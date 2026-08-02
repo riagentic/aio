@@ -1,4 +1,4 @@
-// Regression tests for the inews Round-4 field report fixes (feedback/inews.md):
+// Regression tests for the a field report Round-4 field report fixes (see feedback/resolved.md):
 //  P1 — disabled form controls (no live handlers) are on the surface,
 //       resolvable, and marked disabled: true
 //  P1/P2 — invoking a never-resolving handle fails with the aio name listing

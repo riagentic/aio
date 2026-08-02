@@ -1,7 +1,7 @@
 // Redaction is a promise about EVERY place aio records an action, or it is not
 // a promise at all.
 //
-// The bug this file exists for (risoto, 2026-07-28): `journal: true` wrote a
+// The bug this file exists for: `journal: true` wrote a
 // wallet's unlock passphrase to `vault.db.journal` in cleartext, next to the
 // AES-GCM vault it opens and inside every backup of it. Redaction was added —
 // to the journal. The same passphrase stayed in the in-memory timeline, which

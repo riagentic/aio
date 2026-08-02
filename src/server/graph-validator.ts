@@ -49,7 +49,7 @@ export type GraphResult = {
    *  the browser eagerly links at boot. A module in `modules` but not here is
    *  a dynamic-import chunk the client may never load (the server-only escape
    *  hatch). Exposed so app-side gates can apply their own conventions (e.g.
-   *  risoto blocks `*.server.ts` in the eager set — the dev server 404s those
+   *  a field report blocks `*.server.ts` in the eager set — the dev server 404s those
    *  files to the browser, which no generic category here can know). */
   eager: Set<string>;
   durationMs: number;
@@ -118,7 +118,7 @@ export function resolveSpecifier(
   // `await import("aio/server")` inside a cell method — so flagging it as a
   // missing mapping was pure noise, and the suggested "fix" (npm:aio/server)
   // does not exist. Treat it as external: never walked, never an error.
-  // (risoto, 2026-07-26)
+  //
   if (SERVER_ONLY_SPECS.has(spec)) {
     return { kind: "external", url: spec };
   }
@@ -177,7 +177,7 @@ export function resolveSpecifier(
 
 /** Server-only SYMBOLS exported from the isomorphic "aio"/"aio/db" entry. The
  *  browser build OMITS them, so a static import into a client-reachable module
- *  is an eager ES link failure — a blank screen every boot (AIO-424, risoto).
+ *  is an eager ES link failure — a blank screen every boot (AIO-424).
  *  Pure schema helpers (table/pk/text/…) are browser-safe and stay out.
  *  Keep in sync with aiol/checks.ts `SERVER_ONLY_AIO_SYMBOLS`. */
 const SERVER_ONLY_AIO_SYMBOLS = new Set([
@@ -188,7 +188,7 @@ const SERVER_ONLY_AIO_SYMBOLS = new Set([
 ]);
 
 /** Detect server-only APIs in browser-bound code.
- *  AIO-427 (risoto 2026-07-20f): severity is split by CERTAINTY of breakage —
+ *  AIO-427: severity is split by CERTAINTY of breakage —
  *  a *static import* of something the browser build can't provide (`node:*`
  *  builtins, omitted `aio` server symbols) is a GUARANTEED link failure →
  *  `server-only-import` (BLOCKING, shows the diagnostic page). `@std/*` (often
@@ -295,7 +295,7 @@ const MAX_FILE_SIZE = 1_000_000; // 1MB — skip likely vendor bundles
 /** Categories that BLOCK the app (a guaranteed blank screen), as opposed to
  *  standing warnings. The diagnostic page reads this too, so "N module errors —
  *  fix to continue" can never count warnings the developer is expected to live
- *  with (risoto 2026-07-26: one real fatal buried under 29 old warnings). */
+ *  with. */
 export const BLOCKING_CATEGORIES: ReadonlySet<ErrorCategory> = new Set([
   "file-not-found",
   "transpile-error",
@@ -522,8 +522,7 @@ export async function validateGraph(
   // Electron renderer is a sandboxed browser (`nodeIntegration:false`), same as
   // a web browser, so the module can't resolve → blank screen every boot. We
   // BLOCK it — loud + attributed (`file:line` + fix) — rather than serve a
-  // silent white void (risoto's ask; confirmed on quant, whose UI pages import
-  // server-only cells). `deno task compile` fails the same imports, so dev==prod.
+  // silent white void. `deno task compile` fails the same imports, so dev==prod.
   // `server-only-api` (conditional `Deno.*` usage, browser-maybe-safe `@std/*`)
   // and circular imports stay warnings.
   const BLOCKING = BLOCKING_CATEGORIES;
@@ -552,7 +551,7 @@ export function extractImportsByKind(
     .replace(/\/\/.*$/gm, "") // single-line comments
     .replace(/\/\*[\s\S]*?\*\//g, ""); // multi-line comments
 
-  // AIO-425 (inews): a BARE `from "..."` must NOT be matched — JSX text like
+  // AIO-425: a BARE `from "..."` must NOT be matched — JSX text like
   // `"More from "` transpiles to a string literal containing `from "`, and the
   // old regex captured garbage from it, returning a "Module Errors" page for a
   // perfectly valid app (any string with "from" before a quote — "Recover from
@@ -564,7 +563,7 @@ export function extractImportsByKind(
   // Bare side-effect imports (`import "./x.ts";`) have no `from`, so the
   // regex above cannot see them — yet they are eagerly linked exactly like a
   // named import, and an invisible one let a server-only file into a client
-  // graph with a green gate (risoto, 2026-07-31). Statement-boundary anchored
+  // graph with a green gate. Statement-boundary anchored
   // for the same AIO-425 reason.
   const BARE_STATIC_RE = /(?:^|[;\n}])\s*import\s*["']([^"']+)["']/g;
   const DYNAMIC_RE = /\bimport\s*\(\s*["']([^"']+)["']\s*\)/g;

@@ -1,4 +1,4 @@
-// TBD B7/U2 — `ui.exclude` (and ui visibility in general) is enforced on the
+// an audit item/U2 — `ui.exclude` (and ui visibility in general) is enforced on the
 // CLIENT read seam (bindCellReactive), not only at broadcast time. In
 // standalone/electron there is no broadcast, so before this every "secret"
 // field was fully readable on the cell object in the client process. Now:
@@ -274,7 +274,7 @@ Deno.test("B7: client-scoped cells are exempt (state never leaves the client)", 
   reset();
 });
 
-// risoto 2026-07-28 #3 — the warning was the ONLY signal, and a warning does not
+// a field report #3 — the warning was the ONLY signal, and a warning does not
 // stop the read from type-checking as the field's declared type: a lock screen
 // asked "does a vault exist?", got `undefined` from a ui.exclude'd verifier, and
 // branched on it as data. Dev/test now throws at the read; prod still degrades.
@@ -319,7 +319,7 @@ Deno.test("B7: a hidden read THROWS in dev, degrades in prod", () => {
   }
 });
 
-// risoto, first field result of the dev-throw: aio tripped its OWN guard.
+// a field report, first field result of the dev-throw: aio tripped its OWN guard.
 //
 // All three binding paths probed `typeof def[key] === "function"` to ask "does
 // a method own this name?" — which READS the property, invoking whatever

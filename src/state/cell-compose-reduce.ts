@@ -401,7 +401,7 @@ export function buildRootReducer(
     }
   }
 
-  // risoto 2026-07-16e: a dispatch whose `cell:` prefix names NO booted cell
+  // a field report: a dispatch whose `cell:` prefix names NO booted cell
   // and NO foreign-action listener used to vanish silently — the client (which
   // imported the cell) exposed its methods while the server never booted it,
   // so a whole feature shipped dead with green tests. Fail loud, once per
@@ -538,7 +538,7 @@ export function buildRootReducer(
     const lt0 = _perfCheck ? performance.now() : 0;
     const listeners = listenersByType.get(action.type);
 
-    // Unmatched cell-prefixed action → loud warning (risoto 2026-07-16e).
+    // Unmatched cell-prefixed action → loud warning.
     // Internal (__-prefixed) types and lifecycle actions are exempt; a
     // disabled cell still counts as booted (the breaker already logs).
     if (!isLifecycle && !listeners) {

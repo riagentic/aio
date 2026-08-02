@@ -1,4 +1,4 @@
-// risoto 2026-07-24 Bad #3 (crash-only, piece 2): with `guardDispatches: true`
+// a field report Bad #3 (crash-only, piece 2): with `guardDispatches: true`
 // an unhandled promise rejection (a fire-and-forget cell dispatch that rejects)
 // is logged loudly and the process SURVIVES — the crash handler preventDefault()s
 // the rejection instead of letting it terminate. Scoped to rejections; a real

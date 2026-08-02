@@ -1,6 +1,6 @@
 // Regression: a child component inside a keyed .map() that re-renders on its OWN
 // signal, WHILE the parent also re-renders on a DIFFERENT signal in the same
-// flush, must still have its DOM updated. This mirrors risoto: NavigatorPanel
+// flush, must still have its DOM updated. This mirrors a field report: NavigatorPanel
 // (reads `nav`) wraps NavigatorItem rows (read `balances`) in a keyed map; an
 // airdrop changes BOTH cells at once, and the balance row froze at its
 // mount-time value while its body demonstrably re-rendered with the new value.

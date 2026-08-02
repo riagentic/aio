@@ -295,7 +295,7 @@ export function _createHooks(rootState: RootState): VDomHooks {
           // vnode, and every tree walk (ui.surface(), testUI resolution)
           // kept seeing the skip-time snapshot: a structurally swapped
           // branch (login form → header) never appeared, while stale
-          // elements stayed listed. (inews R4 🔴 surface-staleness)
+          // elements stayed listed.
           inst.vnode = vnode;
           return {
             skip: true,
@@ -460,7 +460,7 @@ export function _createHooks(rootState: RootState): VDomHooks {
           _setInsideMount(true);
           try {
             // Guard each hook: one throwing onMount must not abort the mount
-            // flush of its siblings or collapse the surface (risoto #3).
+            // flush of its siblings or collapse the surface.
             for (const cb of cbs) {
               try {
                 cb();

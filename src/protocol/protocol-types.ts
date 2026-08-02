@@ -63,8 +63,7 @@ export type RouteProps = {
   children?: RenderableChildren;
 };
 
-/** Renderable content — a VNode, text, or a list of them (inews #13:
- *  `children: unknown` forced casts in strict apps). Structural, so it stays
+/** Renderable content — a VNode, text, or a list of them. Structural, so it stays
  *  renderer-agnostic at the protocol layer. */
 export type RenderableChild =
   | { tag: unknown }

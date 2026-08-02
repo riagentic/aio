@@ -1,4 +1,4 @@
-// risoto 2026-07-24 Bad #2 (crash-only, piece 1): a cell that was defined
+// a field report Bad #2 (crash-only, piece 1): a cell that was defined
 // (imported → cell() ran) but left out of aio.run({ cells }) dispatches into
 // the void — a dead feature with green tests. `strictCells: true` turns that
 // into a loud boot ERROR that names the orphaned cells.

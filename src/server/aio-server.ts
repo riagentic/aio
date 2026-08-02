@@ -119,12 +119,12 @@ export interface ServerSetupDeps<S, A> {
   /** Cell id → per-field persist/ui flags — for the trojan `fields` route. */
   cellFields?: import("./aio-types.ts").CellFieldFlags;
   asyncDb: { query: (sql: string) => Promise<{ rows: unknown[] }> } | null;
-  /** In-memory dispatch timeline (risoto #4) — the trojan `timeline` route. */
+  /** In-memory dispatch timeline — the trojan `timeline` route. */
   getTimeline?: (
     after?: number,
     limit?: number,
   ) => import("./timeline.ts").TimelineEntry[];
-  /** Boot migration + shape-drift picture (risoto #1) — trojan `migrations`. */
+  /** Boot migration + shape-drift picture — trojan `migrations`. */
   migrations?: import("./aio-boot.ts").MigrationSummary;
   // Lock
   appLock: AppLock | null;
@@ -273,7 +273,7 @@ export async function setupTransport<S, A>(
           ? origin
           : type.slice(cellName.length + 1);
         // Forward the method's call args so a predicate can do row-level authz
-        // (realitio). Method dispatches carry `payload.args: [...]`.
+        //. Method dispatches carry `payload.args: [...]`.
         const argv = (a.payload as { args?: unknown } | undefined)?.args;
         const args = Array.isArray(argv) ? argv : [];
         if (!cellAccessAllowed(rule, user, method, args)) {
@@ -300,7 +300,7 @@ export async function setupTransport<S, A>(
     // Interactive priority: a client action's patches flush IMMEDIATELY
     // (after the sync commit, and again when an async method settles) —
     // the coalescer throttle paces background churn, and made every user
-    // keystroke pay up to syncIntervalMs of latency (risoto 2026-07-25:
+    // keystroke pay up to syncIntervalMs of latency (a field report:
     // navigation measured a constant ~66ms; ~50ms of it was this window).
     if (typeof callId === "string" && callId.length > 0) {
       // The action type IS "cell:method" — so a network-dispatched call picks
@@ -387,7 +387,7 @@ export async function setupTransport<S, A>(
         if (udsRef.current) udsRef.current.broadcast(enc(signal));
       },
       // Cells run in THIS process, so an edited cell can't hot-reload — dev
-      // restarts the app instead of asking the developer to (quant Bad #3).
+      // restarts the app instead of asking the developer to.
       // Never in prod (no watcher) and never in libraryMode, where the host
       // process is not ours to replace.
       ...(prod || config.libraryMode ? {} : {
@@ -505,7 +505,7 @@ export async function setupTransport<S, A>(
   // libraryMode: don't register process-wide signal handlers. They call
   // Deno.exit (killing an embedding host / test runner) and, unremoved, leak
   // resources that fail Deno's test sanitizer — the reason a server couldn't be
-  // booted inside Deno.test before (TBD B5). app.close() drives shutdown instead.
+  // booted inside Deno.test before. app.close() drives shutdown instead.
   if (!config.libraryMode) {
     for (const sig of ["SIGINT", "SIGTERM"] as const) {
       try {

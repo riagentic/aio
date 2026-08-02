@@ -25,9 +25,9 @@ interface Check {
   fix: string;
 }
 
-/** Code-integrity sweep (risoto 2026-07-24 #3): the "green-tests-dead-feature /
+/** Code-integrity sweep: the "green-tests-dead-feature /
  *  silent-corruption" class — reserved cell keys, duplicate imports, orphaned
- *  persistence, and the client/server boundary (risoto #1 defect d: a
+ *  persistence, and the client/server boundary (a field report #1 defect d: a
  *  server-only import — `@std/`, `node:`, `aio/server`, `createDB`, `Deno.*` —
  *  reaching a browser-bundle module). Reuses aiol's error-level checks so
  *  there's ONE source of truth, surfaced here as doctor FAILs. Best-effort:
@@ -71,7 +71,7 @@ async function integritySweep(dir: string): Promise<Check[]> {
   }));
 }
 
-/** Least-privilege capability manifest for the project (risoto #9) — the
+/** Least-privilege capability manifest for the project — the
  *  `--allow-*` set the source actually needs, instead of `-A`. Informational. */
 async function capabilityManifest(dir: string): Promise<string | null> {
   try {
@@ -205,7 +205,7 @@ export async function runDoctor(
     fix: "upgrade: deno upgrade",
   });
 
-  // aio version drift (inews) — the app's import-map pin vs the framework
+  // aio version drift — the app's import-map pin vs the framework
   // actually running (this doctor's VERSION). Informational, never fails: a
   // pin behind the running build isn't broken, but behavior may have changed,
   // so point at the upgrade guide. A stale pin is how an app silently rots

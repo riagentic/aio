@@ -44,7 +44,7 @@ export function camelToKebab(s: string): string {
 }
 
 // SVG attributes whose JSX camelCase name differs from the DOM attribute name
-// (quant Ugly #2). SVG is mixed-case: presentation/text attrs are kebab-case
+//. SVG is mixed-case: presentation/text attrs are kebab-case
 // (`stop-color`), but structural attrs like `viewBox`/`preserveAspectRatio`
 // stay camelCase — so a blanket camel→kebab is WRONG. This curated map converts
 // only the ones that need it; anything else passes through verbatim.

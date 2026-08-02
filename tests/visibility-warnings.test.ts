@@ -1,4 +1,4 @@
-// Dev-safety warnings for field-level visibility config (risoto #1/#2):
+// Dev-safety warnings for field-level visibility config:
 // non-top-level filter keys are silent no-ops; secret-looking exposed fields
 // are likely leaks. Both must warn loudly at compose time.
 import { assert, assertEquals, assertThrows } from "@std/assert";
@@ -51,7 +51,7 @@ Deno.test("visibility #1: a valid top-level exclude does NOT warn", () => {
 });
 
 Deno.test("visibility #4: public/id fields do NOT trip the secret heuristic", () => {
-  // risoto #4: the name heuristic over-fired on public keys and id/type fields.
+  // the name heuristic over-fired on public keys and id/type fields.
   const c = cell("wallet_pub", {
     state: {
       activeAccountPubKey: "", // public key — "pub" hint
@@ -84,7 +84,7 @@ Deno.test("visibility #4: soft-secret-looking fields still WARN (encSecKey)", ()
 });
 
 Deno.test("visibility (AIO-426): an exposed credential REFUSES to boot in dev", () => {
-  // inews Ugly #6: a warning is too soft for an unambiguous credential.
+  // a warning is too soft for an unambiguous credential.
   for (const field of ["privateKey", "mnemonic", "apiKey", "password"]) {
     const c = cell("cred_" + field.toLowerCase(), {
       state: { [field]: "leak", ok: 1 },
@@ -117,7 +117,7 @@ Deno.test("visibility (AIO-426): a credential that's excluded or declared public
   warningsFor([publicOk]);
 });
 
-Deno.test("visibility: a deep-excluded container no longer warns (risoto 10/10)", () => {
+Deno.test("visibility: a deep-excluded container no longer warns", () => {
   // The correct fix (deep-exclude the secret sub-path) must NOT re-arm the
   // secret heuristic on the container field.
   const c = cell("seedvault", {
@@ -143,9 +143,9 @@ Deno.test("visibility: ui.publicFields explicitly silences the heuristic", () =>
   assertEquals(w.filter((l) => l.includes("looks secret")).length, 0);
 });
 
-Deno.test("visibility (risoto Ugly #7): all offending fields in ONE paste-ready message", () => {
+Deno.test("visibility: all offending fields in ONE paste-ready message", () => {
   // We used to throw on the FIRST credential field, forcing a fix-one-rerun loop
-  // (risoto listed six publicFields one crash at a time). Now one boot names them
+  //. Now one boot names them
   // all, with a single paste-ready ui.publicFields array.
   const c = cell("multicred", {
     state: { privateKey: "a", mnemonic: "b", apiKey: "c", ok: 1 },

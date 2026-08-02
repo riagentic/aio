@@ -1,4 +1,4 @@
-// Test-time schedule firing (risoto): ui.advance(ms) / bootCells advance fire
+// Test-time schedule firing: ui.advance(ms) / bootCells advance fire
 // schedule.after/every deterministically — toast auto-dismiss, debounce,
 // backoff, poll are now unit-testable without real timers.
 import { assertEquals } from "@std/assert";

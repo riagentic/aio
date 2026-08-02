@@ -100,7 +100,7 @@ export async function build(cfg?: BuildConfig): Promise<void> {
   await buildElectron(cfg);
 }
 
-// `aio ship` core (risoto #9): verifiable release manifest — SHA-256 +
+// `aio ship` core: verifiable release manifest — SHA-256 +
 // least-privilege capabilities + optional Ed25519 signature over the digest.
 export {
   buildShipManifest,

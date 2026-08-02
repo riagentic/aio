@@ -1,4 +1,4 @@
-// Dev auto-restart on a cell edit (quant Bad #3), proven against a real
+// Dev auto-restart on a cell edit, proven against a real
 // process: cells run in the server process, so an edited cell used to keep its
 // old logic while the browser showed new UI. Now the app restarts itself.
 //

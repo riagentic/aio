@@ -1,8 +1,8 @@
-// B5/M1 (TBD feedback): `libraryMode: true` lets a real server boot inside a
+// B5/M1 (a field report): `libraryMode: true` lets a real server boot inside a
 // Deno.test and close cleanly — no Deno.exit (which killed the runner), no
 // SIGINT/SIGTERM handlers (leaked resources that failed the sanitizer), no
 // singleton lock (so the same appId can boot twice sequentially). This unlocks
-// end-to-end server tests, the gap that let the TBD persistence bugs ship.
+// end-to-end server tests, the gap that let a persistence bugs ship.
 
 import { assertEquals } from "jsr:@std/assert";
 import { freePort } from "../src/testing/server-test.ts";
@@ -79,7 +79,7 @@ Deno.test("libraryMode: same appId boots twice (no singleton lock)", async () =>
   await b.close();
 });
 
-// B6 (TBD): calling a cell METHOD inside onStart must work — the method surface
+// B6 (): calling a cell METHOD inside onStart must work — the method surface
 // is now bound before onStart fires (was: "cell runtime not booted" throw).
 Deno.test("onStart can call a cell method (B6) — seeding works", async () => {
   const { cell, aio } = await import("../mod.ts");

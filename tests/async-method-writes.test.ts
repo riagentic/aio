@@ -1,4 +1,4 @@
-// async-method writes across awaits (quant Ugly #1) — a field report on a
+// async-method writes across awaits — a field report on a
 // trading app hit "writes after the 2nd await silently vanish." That's the
 // scariest failure mode: silent state loss. The live-proxy batcher + read-
 // your-writes overlay makes every write land regardless of await interleaving;

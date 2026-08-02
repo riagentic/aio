@@ -1,4 +1,4 @@
-// risoto 2026-07-24 Bad #4: `am restart` dropped the original launch flags
+// a field report: `am restart` dropped the original launch flags
 // (esp. --env-file), so the vault stopped auto-unlocking after a restart.
 // Two guarantees: (1) deno-runtime flags are placed BEFORE the entry script so
 // Deno actually honors them, and (2) the launch is recorded so restart replays.

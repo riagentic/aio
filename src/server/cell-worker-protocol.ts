@@ -2,8 +2,8 @@
 // the main isolate. One file so both sides can never drift.
 //
 // Direction of travel:
-//   main → worker : init (seed state), call (dispatch an action)
-//   worker → main : ready, patches (streamed as the method commits), done/fail
+//   main → worker: init (seed state), call (dispatch an action)
+//   worker → main: ready, patches (streamed as the method commits), done/fail
 //
 // Everything here must be structured-cloneable — it crosses a real thread.
 
@@ -23,7 +23,7 @@ export const CELL_WORKER_PREFIX = "aio-cell:";
  *      if (!isCellWorker()) await prepareDataDirectories();
  *      await aio.run({ ... });
  *
- *  (risoto, 2026-07-26 — found the hard way: a 20ms mkdir+copy before
+ *  (a field report, 2026-07-26 — found the hard way: a 20ms mkdir+copy before
  *  aio.run() was enough to stall the handshake.) */
 export function isCellWorker(): boolean {
   const name = (globalThis as { name?: string }).name;

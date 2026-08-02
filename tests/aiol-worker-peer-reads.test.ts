@@ -1,4 +1,4 @@
-// The static half of the worker peer-read guard (risoto's line in the sand:
+// The static half of the worker peer-read guard (one app's line in the sand:
 // "worker: true + a peer-cell read should fail loudly at BOOT instead of
 // quietly reading nothing"). The runtime throw is the guarantee; this reports
 // the same mistake with file:line before anything runs.

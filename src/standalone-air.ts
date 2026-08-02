@@ -63,7 +63,7 @@ const _listeners = new Listeners<unknown>();
 let _state: unknown = null;
 let _app: AioApp | null = null;
 // Once-per-process dedup for the "effect ignored in standalone" notices — a
-// toast that returns schedule.after otherwise floods every test (quant Bad #3).
+// toast that returns schedule.after otherwise floods every test.
 const _warnedStandalone = { schedule: false };
 
 // Owned resources (`own.set`) acquired in this runtime. Lazily created so the
@@ -78,7 +78,7 @@ function _ownManager(): ReturnType<typeof createOwnManager> {
 // ── Virtual-clock scheduler (test/standalone) ──────────────────────────
 // Schedule effects have no timer runtime in standalone/test mode, so instead of
 // firing on the wall clock (non-deterministic) or dropping them (untestable —
-// risoto), we hold `after`/`every` on a virtual clock. `_advanceSchedules(ms)`
+// a field report), we hold `after`/`every` on a virtual clock. `_advanceSchedules(ms)`
 // fires everything now due — so a test can drive toast auto-dismiss, debounce,
 // backoff, poll, etc. deterministically.
 interface PendingSched {
@@ -232,7 +232,7 @@ export function initStandalone<S, A, E>(
     reduce,
     execute: (effect) => {
       // Schedule effects: hold on the virtual clock so tests can fire them
-      // deterministically with ui.advance(ms) / handle.advance(ms) (risoto).
+      // deterministically with ui.advance(ms) / handle.advance(ms).
       if (isScheduleEffect(effect)) {
         const e = effect as ScheduleEffect;
         if (e.kind === "cancel") {
@@ -260,7 +260,7 @@ export function initStandalone<S, A, E>(
         // harnesses (testCell / testUI / bootCells) more permissive than
         // production — a leaked or misfiring resource could not surface in the
         // one place a test boots and disposes cells, converting a whole class of
-        // bug into a production-only bug (llama.md #4). Tests are the strictest
+        // bug into a production-only bug. Tests are the strictest
         // environment; a warning that says "ignored" is not strictness.
         _ownManager().handle(effect);
         return;
@@ -301,8 +301,7 @@ export function initStandalone<S, A, E>(
   // on (real telemetry, a device, the clock). Without it, a test of "what does
   // the UI do when there are two GPUs" either runs against whatever the
   // developer's box reports that second, or doesn't run — one field report
-  // ended up asserting whichever branch the hardware chose (llama.md wishlist
-  // #1). Not part of the app surface: `_seedState` is only reachable from the
+  // ended up asserting whichever branch the hardware chose. Not part of the app surface: `_seedState` is only reachable from the
   // harness, and it is a plain state install, not a dispatch, precisely because
   // it must look like "the app started this way".
   _seed = (partial: Record<string, unknown>): void => {

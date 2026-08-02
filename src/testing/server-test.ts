@@ -1,10 +1,11 @@
-// server-test.ts — `testServer()` + `testBrowser()` (realitio).
+// server-test.ts — `testServer()` + `testBrowser()`.
 //
 // Apps hand-rolled two harnesses in every e2e file: a libraryMode boot with a
 // free port + temp data dir, and a headless-chromium launcher that leaked
 // browser processes when Deno died. Both are packaged here, `await using`-ready.
 
 import { aio } from "../server/aio.ts";
+import { _armTestStrict } from "./test-strict.ts";
 import type { AioApp, CellsConfig } from "../server/aio-types.ts";
 
 /** A booted test app — its URL, the app handle, and fetch/state/close helpers.
@@ -40,6 +41,7 @@ export function freePort(): number {
 export async function testServer<S = unknown>(
   config: CellsConfig,
 ): Promise<TestServer<S>> {
+  _armTestStrict(); // tests are the strictest environment, never the most permissive
   const port = config.port ?? freePort();
   const madeDir = !config.baseDir;
   const baseDir = config.baseDir ??

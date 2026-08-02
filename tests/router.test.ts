@@ -115,7 +115,7 @@ Deno.test({
   },
 });
 
-// ── typed route params (inews #12) + Link children (inews #13) ────────
+// ── typed route params + Link children ────────
 import type { LinkProps, RouteState } from "../src/protocol/protocol-types.ts";
 import { freePort } from "../src/testing/server-test.ts";
 

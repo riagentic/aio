@@ -8,6 +8,7 @@ import type { HLC, SyncOp } from "./types.ts";
 import { createHLC, type HLClock } from "./hlc.ts";
 import { compactSyncOps } from "./compact.ts";
 import {
+  getCompactedTs,
   getLowWater,
   loadOpsSince,
   persistOp,
@@ -30,7 +31,13 @@ export interface SyncHandlerDeps {
        *  hook must not schedule a durability snapshot for it. */
       _syncOp?: boolean;
     },
-  ) => void;
+    // Returns whatever the app's dispatch returns — a PROMISE that rejects
+    // when the action could not be applied (REDUCE_ERROR, QUEUE_OVERFLOW,
+    // DISPATCH_CLOSED). The handler awaits it: an op the server could not
+    // apply must not be acked, broadcast or compacted. `unknown` (rather than
+    // `void`) so a plain non-promise dispatch is still a valid dep — awaiting
+    // one resolves immediately.
+  ) => unknown;
   db: DB;
   syncCellIds: string[];
   getCellState: (cell: string) => Record<string, unknown>;
@@ -236,7 +243,16 @@ export function createServerSyncHandler(
         }
         if (serverTs !== null) {
           try {
-            deps.dispatch({
+            // AWAITED. `dispatch` reports failure by REJECTING (REDUCE_ERROR,
+            // QUEUE_OVERFLOW, DISPATCH_CLOSED), never by throwing
+            // synchronously, so an un-awaited call left this `catch` dead:
+            // when a reducer threw for this payload, the op was still acked
+            // (origin believes it landed), still broadcast (peers apply it),
+            // and later compacted — and compaction snapshots LIVE state, which
+            // never got the effect, while deleting the op row. The change
+            // existed on every machine except the one that owns the truth, and
+            // nothing anywhere said so.
+            await deps.dispatch({
               type: `${op.cell}:${op.action}`,
               payload: op.payload,
               _user: meta.user, // trusted connection identity (server-resolved)
@@ -256,9 +272,17 @@ export function createServerSyncHandler(
               ]);
             }
           } catch (e) {
+            // Same poison treatment as a validate refusal: the server could
+            // not apply it, so the log must not keep it and no one must be
+            // told it succeeded.
+            rejectedReason = `dispatch failed: ${
+              e instanceof Error ? e.message : String(e)
+            }`;
             deps.log.error(
               `[sync:server] dispatch of op ${op.id} failed: ${e}`,
             );
+            await deps.db.execute("DELETE FROM sync_ops WHERE id = ?", [op.id])
+              .catch(() => {});
           }
         }
 
@@ -280,7 +304,18 @@ export function createServerSyncHandler(
         // client lost, and it's what lets the client stop resending the op.
         try {
           socket.send(
-            enc("sync-ack", { cell: op.cell, opId: op.id, serverHlc }),
+            enc("sync-ack", {
+              cell: op.cell,
+              opId: op.id,
+              serverHlc,
+              // The op's cursor position. The client compares it against the
+              // snapshot it last installed: an ack that predates the snapshot
+              // describes an op the snapshot ALREADY contains, and re-applying
+              // it to confirmed state would double it. Omitted for a duplicate
+              // re-ack (serverTs is null — the row came from an earlier
+              // delivery), where the client keeps its previous behaviour.
+              ...(serverTs !== null ? { serverTs } : {}),
+            }),
           );
         } catch { /* client disconnected */ }
 
@@ -342,6 +377,18 @@ export function createServerSyncHandler(
             deps.log.warn(
               `[sync:server] pending op for access-gated cell "${pending.cell}" denied — dropping`,
             );
+            // TELL the client, exactly as handleOp does. A silent drop left the
+            // op in its pending buffer forever: never applied, never cleared,
+            // re-sent on every reconnect, re-evaluated against the access gate
+            // every round. A denial the client never hears about is a
+            // leak that looks like a hang.
+            try {
+              socket.send(enc("op-rejected", {
+                opId: pending.id,
+                cell: pending.cell,
+                reason: "access denied",
+              }));
+            } catch { /* client gone */ }
             continue;
           }
           await withLock(pending.cell, async () => {
@@ -367,30 +414,68 @@ export function createServerSyncHandler(
                 `[sync:server] duplicate pending op ${pending.id} (${pending.cell}:${pending.action}) — re-acked, not re-applied`,
               );
             }
+            let rejectedReason: string | null = null;
             if (serverTs !== null) {
               try {
-                deps.dispatch({
+                await deps.dispatch({ // awaited — see handleOp
                   type: `${pending.cell}:${pending.action}`,
                   payload: pending.payload,
                   _user: meta.user,
                   _syncOp: true,
                 });
+                // D11, same as handleOp: the server's re-execution is the
+                // authority. Without this check a reconnect-flushed op that
+                // the validate hook REFUSED was still broadcast to every peer,
+                // acked to its origin (which then marked it confirmed), and
+                // left in the op log to be replayed at the next boot — the
+                // rejected effect applied everywhere except the one place that
+                // decided it was invalid. This path carries the STALEST
+                // ops, so it is the most likely to fail validation and was the
+                // least likely to say so.
+                const rejection = takeLastRejection();
+                if (rejection && rejection.cell === pending.cell) {
+                  rejectedReason = rejection.reason;
+                  await deps.db.execute("DELETE FROM sync_ops WHERE id = ?", [
+                    pending.id,
+                  ]);
+                }
               } catch (e) {
+                rejectedReason = `dispatch failed: ${
+                  e instanceof Error ? e.message : String(e)
+                }`;
                 deps.log.error(
                   `[sync:server] dispatch of pending op ${pending.id} failed: ${e}`,
                 );
+                await deps.db.execute("DELETE FROM sync_ops WHERE id = ?", [
+                  pending.id,
+                ]).catch(() => {});
               }
-              deps.broadcastRaw.fn(
-                enc("op", {
-                  id: pending.id,
-                  hlc: pending.hlc,
+              if (rejectedReason === null) {
+                deps.broadcastRaw.fn(
+                  enc("op", {
+                    id: pending.id,
+                    hlc: pending.hlc,
+                    cell: pending.cell,
+                    action: pending.action,
+                    payload: pending.payload,
+                    serverTs,
+                  }),
+                  socket,
+                );
+              }
+            }
+            if (rejectedReason !== null) {
+              try {
+                socket.send(enc("op-rejected", {
+                  opId: pending.id,
                   cell: pending.cell,
-                  action: pending.action,
-                  payload: pending.payload,
-                  serverTs,
-                }),
-                socket,
+                  reason: rejectedReason,
+                }));
+              } catch { /* client disconnected */ }
+              deps.log.warn(
+                `[sync:server] pending op ${pending.id} (${pending.cell}:${pending.action}) rejected: ${rejectedReason}`,
               );
+              return; // no ack — the op was refused, not applied
             }
             // Ack ALWAYS (duplicate = retransmit of a lost ack). Without this
             // the client never confirms reconnect-flushed ops: it re-sends
@@ -402,6 +487,7 @@ export function createServerSyncHandler(
                   cell: pending.cell,
                   opId: pending.id,
                   serverHlc,
+                  ...(serverTs !== null ? { serverTs } : {}), // see handleOp
                 }),
               );
             } catch { /* client disconnected */ }
@@ -434,13 +520,59 @@ export function createServerSyncHandler(
             const cellLW = await getLowWater(deps.db, cell);
             if (cellLW) lowWaterMap[cell] = cellLW;
 
+            // The two cursors have to agree about what "caught up" means.
+            //
+            // Compaction DELETES by HLC boundary, but delivery reads by
+            // server_ts — and a client can hold a server_ts cursor with NO
+            // lastHlc at all (the cursor-echo path advances lastServerTs on a
+            // response that delivered zero ops, leaving lastHlc null). The
+            // snapshot decision consulted lastHlc alone, so such a client fell
+            // to the incremental branch, asked for ops above its cursor, and
+            // got nothing back — because the rows it needed had been compacted
+            // away. Told it was up to date, diverging permanently.
+            //
+            // `compacted_ts` is the highest server_ts compaction removed: a
+            // cursor at or below it cannot be served from the log.
+            //
+            // Scoped to clients with NO `lastHlc`, and deliberately so. A
+            // client that has received anything for this cell has an HLC
+            // watermark (broadcasts advance it), and the low-water rule below
+            // already judges it correctly. Its server_ts cursor, by contrast,
+            // does NOT advance on broadcast delivery (a chaos-suite finding —
+            // see handleRemoteOp), so a caught-up client routinely sits below
+            // the watermark: keying off the cursor alone made it snapshot
+            // every such client after any compaction. That is not just wasted
+            // bandwidth — a snapshot lands as confirmed state that already
+            // contains the client's own in-flight ops, and `handleAck` then
+            // applies each one AGAIN when its ack arrives (it has no
+            // applied-set dedup, unlike the remote-op and catch-up paths).
+            // The chaos suite caught exactly that as a doubled item.
+            //
+            // The client a field report describes is the one with a cursor but no HLC at
+            // all — the cursor-echo path advances `lastServerTs` on a response
+            // that delivered zero ops — and it is the only one that needs this.
+            const compactedTs = lastHlc
+              ? 0
+              : await getCompactedTs(deps.db, cell);
+            const cursorBelowCompaction = compactedTs > 0 &&
+              (lastServerTs ?? 0) < compactedTs;
+
             // Client's lastHlc older than low_water → compacted, send snapshot
             if (
-              cellLW && lastHlc &&
-              (lastHlc[0] < cellLW[0] ||
-                (lastHlc[0] === cellLW[0] && lastHlc[1] < cellLW[1]))
+              cursorBelowCompaction ||
+              (cellLW && lastHlc &&
+                (lastHlc[0] < cellLW[0] ||
+                  (lastHlc[0] === cellLW[0] && lastHlc[1] < cellLW[1])))
             ) {
               useSnapshot = true;
+              // Read AFTER reserveServerTs above, and inside this cell's lock:
+              // every op already persisted has server_ts <= the reserved
+              // cursor and is therefore in this state, and anything persisted
+              // later gets a strictly greater one. That makes
+              // `lastServerTs[cell]` an exact watermark for "what this
+              // snapshot contains" — which is what lets the client tell an
+              // ack for an op the snapshot already holds from an ack for one
+              // it doesn't.
               snapshot[cell] = deps.getCellState(cell);
             } else {
               // server_ts cursor when the client has one (strictly monotonic,

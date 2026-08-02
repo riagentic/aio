@@ -1,4 +1,4 @@
-// risoto #3 — end-to-end journal recovery wired into the runtime. `journal:true`
+// end-to-end journal recovery wired into the runtime. `journal:true`
 // appends every committed user action; on the next boot the actions past the
 // last snapshot are replayed on top of the restored state. Proves the WIRING
 // (afterAction append + boot replay); replay correctness itself is journal.test.ts.

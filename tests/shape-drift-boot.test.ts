@@ -1,4 +1,4 @@
-// Boot-integration proof of shape-drift detection (risoto #1): an app persists a
+// Boot-integration proof of shape-drift detection: an app persists a
 // cell state, then a LATER build boots with that field removed from the cell's
 // declared shape. deepMerge silently keeps the stale field — so boot detects the
 // drift and surfaces it on the `migrations` trojan route (what `am migrations`

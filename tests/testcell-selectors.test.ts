@@ -1,4 +1,4 @@
-// llama-master #4: `testCell(models, …)` could not call `models.visible()` —
+// `testCell(models, …)` could not call `models.visible()` —
 // "TypeError: not a function". Selectors bound only on a booted runtime, so any
 // unit test that touched one had to be rewritten around `bootCells`.
 //

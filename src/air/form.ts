@@ -82,8 +82,8 @@ export interface FieldArrayState<T> {
  *
  * ```ts
  * const form = useForm({
- *   name: { initial: "", rules: [(v) => v ? null : "Required"] },
- *   email: { initial: "", rules: [(v) => v.includes("@") ? null : "Invalid email"] },
+ *   name: { initial: "", rules: [(v) => v ? null: "Required"] },
+ *   email: { initial: "", rules: [(v) => v.includes("@") ? null: "Invalid email"] },
  * });
  *
  * const App = () => h("form", null,

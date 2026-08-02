@@ -1,4 +1,4 @@
-// AIO-421 (risoto wish #4): `createDB(":memory:")` is the ephemeral, file-less
+// AIO-421: `createDB(":memory:")` is the ephemeral, file-less
 // DB mode for tests — a single Worker, closeable, no temp file. And an in-memory
 // DB can't be shared across Workers, so a stray `readers > 0` is ignored (each
 // reader would open its own empty :memory: DB and silently return no rows).

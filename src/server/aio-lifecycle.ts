@@ -268,7 +268,7 @@ export function startLifecycle<S, A>(deps: LifecycleDeps<S, A>): void {
           })),
       // These notes only fire on a real problem (couldn't bind/create the UDP
       // socket) — under --expose that means the app is exposed but NOT
-      // discoverable, which used to be invisible (quant Bad #1). Make it loud.
+      // discoverable, which used to be invisible. Make it loud.
       (msg) => log.warn(msg),
     );
     deps.setDiscoveryStop(responder.stop);
@@ -321,7 +321,7 @@ export function startLifecycle<S, A>(deps: LifecycleDeps<S, A>): void {
       .then((proc) => {
         if (!proc) {
           // Electron unavailable (auto-install failed / offline) — fall back
-          // to the system browser LOUDLY instead of dying (machine B5): the
+          // to the system browser LOUDLY instead of dying: the
           // app is identical over WS; the developer keeps working.
           log.error(
             "Electron not installed and auto-install failed — falling back to the system browser",

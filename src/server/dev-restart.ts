@@ -1,4 +1,4 @@
-// dev-restart.ts — dev auto-restart when a CELL file changes (quant Bad #3).
+// dev-restart.ts — dev auto-restart when a CELL file changes.
 //
 // JSX hot-reloads; cells can't. They run in the server process, so an edited
 // cell keeps its old logic while the browser shows new UI — the silent mismatch

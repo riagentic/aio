@@ -1,5 +1,4 @@
-// D9 config-threading: `dbPath` must ARRIVE at the storage boot (realitio —
-// per-test isolation: ":memory:" keeps hermetic runs off the shared data.db).
+// D9 config-threading: `dbPath` must ARRIVE at the storage boot (// per-test isolation: ":memory:" keeps hermetic runs off the shared data.db).
 import { assert, assertEquals } from "@std/assert";
 import { aio, cell } from "../mod.ts";
 import { _resetAioRuntime } from "../src/state/runtime-reset.ts";

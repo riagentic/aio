@@ -43,7 +43,7 @@ export type PerfBudget = {
    *  a stream of violations on every poll tick and raising the budget globally,
    *  which blinds every tight reducer at once. One app ended up at
    *  `{ reduce: 100, effect: 1000 }` + `effectTimeoutMs: 30_000` "and lost the
-   *  signal everywhere to silence one poller" (llama-master #9).
+   *  signal everywhere to silence one poller".
    *
    *  ```ts
    *  perfBudget: {
@@ -168,7 +168,7 @@ export function createDispatch<S, A, E>(
   const effectBudget = perfBudget?.effect ?? DEFAULT_EFFECT_BUDGET;
   let dispatching = false;
   let closed = false;
-  // risoto 2026-07-17b: warn once per action TYPE after close — a shutdown
+  // a field report: warn once per action TYPE after close — a shutdown
   // used to emit one identical warn line per queued tick (hundreds/ms).
   const closedWarnedTypes = new Set<string>();
   let closedDropCount = 0;

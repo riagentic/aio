@@ -233,7 +233,7 @@ await aio.run({
     if (metric.reduce > 50) {
       const bd = metric.breakdown
       alertSlack(`Slow reduce: ${metric.actionType} ${metric.reduce}ms` +
-        (bd ? ` (produce=${bd.produce.toFixed(0)}ms clone=${bd.clone.toFixed(0)}ms)` : ''))
+        (bd ? ` (produce=${bd.produce.toFixed(0)}ms clone=${bd.clone.toFixed(0)}ms)`: ''))
     }
   },
 })

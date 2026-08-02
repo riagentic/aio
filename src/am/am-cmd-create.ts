@@ -120,7 +120,7 @@ export function frameworkSpecs(source: boolean): {
   if (source) {
     // Consuming framework SOURCE via the `dep/aio` symlink — the app's map must
     // also carry the source's own bare deps (esbuild/immer/@std), which JSR
-    // would otherwise resolve transitively (inews #10).
+    // would otherwise resolve transitively.
     return {
       imports: {
         // EVERY public entry point, not just the ones the template happens to
@@ -306,7 +306,13 @@ export function denoJson(
     //   "server": "192.168.1.50:8000"
     // Target names: server · browser · electron · android · cli ·
     // electron-client · android-client · cli-client (run `deno task build --list`).
-    build: { targets: [target], out: "dist" },
+    //
+    // `platforms` is the OTHER axis — which OS each target is built FOR.
+    // Default is just this machine; add more to ship from one command:
+    //   "platforms": ["host", "windows", "macos-arm64"]
+    // (server · browser · cli · cli-client cross-compile; electron/android
+    // package with per-OS tooling and build on their own OS.)
+    build: { targets: [target], platforms: ["host"], out: "dist" },
     nodeModulesDir: "auto",
     compilerOptions: {
       lib: ["deno.ns", "deno.unstable", "dom", "dom.iterable"],
@@ -733,7 +739,7 @@ const TODO_TEST =
   `// A starter test — \`deno task test\`. Cells are pure, so they test in isolation
 // (no server, no DOM) with the testCell harness.
 import { testCell } from "aio/testing";
-import { todo } from "./cell.ts";
+import { todo, view } from "./cell.ts";
 
 testCell(todo, "adds, toggles, and clears items", (t) => {
   t.send.add("write a test");
@@ -743,6 +749,12 @@ testCell(todo, "adds, toggles, and clears items", (t) => {
   t.expect.state((s) => s.items[0].done === true);
   t.send.clearDone();
   t.expect.state((s) => s.items.length === 1);
+});
+
+// A client-scoped cell is a cell — same harness, no browser needed.
+testCell(view, "switches the filter", (t) => {
+  t.send.setFilter("done");
+  t.expect.state((s) => s.filter === "done");
 });
 `;
 
@@ -765,7 +777,7 @@ export default function App() {
   const { local: input, set: setInput } = useLocal("");
 
   const filtered: Todo[] = todo.items.filter((t: Todo) =>
-    view.filter === "all" ? true : view.filter === "done" ? t.done : !t.done
+    view.filter === "all" ? true: view.filter === "done" ? t.done: !t.done
   );
   const remaining = todo.items.filter((t: Todo) => !t.done).length;
 
@@ -807,8 +819,8 @@ export default function App() {
             <span
               style={{
                 flex: 1,
-                textDecoration: t.done ? "line-through" : "none",
-                color: t.done ? "#999" : "inherit",
+                textDecoration: t.done ? "line-through": "none",
+                color: t.done ? "#999": "inherit",
               }}
             >
               {t.text}
@@ -834,7 +846,7 @@ export default function App() {
             color: "#888",
           }}
         >
-          <span>{remaining} item{remaining !== 1 ? "s" : ""} left</span>
+          <span>{remaining} item{remaining !== 1 ? "s": ""} left</span>
           <div style={{ display: "flex", gap: "0.25rem" }}>
             {FILTERS.map((f) => (
               <button
@@ -843,7 +855,7 @@ export default function App() {
                 onClick={() => view.setFilter(f)}
                 style={{
                   padding: "0.2rem 0.5rem",
-                  border: view.filter === f ? "1px solid #c77" : "1px solid transparent",
+                  border: view.filter === f ? "1px solid #c77": "1px solid transparent",
                   background: "none",
                   cursor: "pointer",
                   borderRadius: 3,

@@ -33,11 +33,23 @@ export function sessionTokenFromCookie(req: Request): string | null {
  *  Cookie last: it only exists when the AUTH-2 login flow set it, and an
  *  explicit token always wins over ambient cookie state. */
 export function _extractToken(url: URL, req: Request): string | null {
+  return _extractTokenWithSource(url, req).token;
+}
+
+/** Where a presented token came from. A URL-borne credential is visible in
+ *  browser history, proxy logs and the `Referer` header, so the SOURCE decides
+ *  what it is allowed to authenticate (see `sessionResolver` in server.ts). */
+export function _extractTokenWithSource(
+  url: URL,
+  req: Request,
+): { token: string | null; fromUrl: boolean } {
   const qToken = url.searchParams.get("token");
-  if (qToken) return qToken;
+  if (qToken) return { token: qToken, fromUrl: true };
   const auth = req.headers.get("authorization");
-  if (auth?.startsWith("Bearer ")) return auth.slice(7);
-  return sessionTokenFromCookie(req);
+  if (auth?.startsWith("Bearer ")) {
+    return { token: auth.slice(7), fromUrl: false };
+  }
+  return { token: sessionTokenFromCookie(req), fromUrl: false };
 }
 
 /** User resolver function — built once from resolveUser hook or static users map */
@@ -109,6 +121,26 @@ export function authFailBudgetExceeded(
   return fresh.length >= AUTH_FAIL_MAX;
 }
 
+// The budget map is fed by REMOTE input — one entry per source that ever failed
+// auth — and entries were only ever removed when that same key came back and
+// found its window expired. An attacker rotating addresses (or a botnet) never
+// comes back, so every address left a permanent entry: unbounded growth on a
+// long-running `--expose` server, driven entirely from outside.
+//
+// Two bounds, both cheap: each key keeps at most the newest AUTH_FAIL_MAX
+// timestamps (that is all the threshold test can need), and every so often a
+// sweep drops keys whose whole window has passed.
+const SWEEP_EVERY = 256;
+let _sinceSweep = 0;
+function _sweepExpired(now: number): void {
+  for (const [key, ts] of _authFails) {
+    const newest = ts[ts.length - 1];
+    if (newest === undefined || now - newest >= AUTH_FAIL_WINDOW_MS) {
+      _authFails.delete(key);
+    }
+  }
+}
+
 /** Record one failed auth for this client key + audit line. */
 export function recordAuthFail(
   clientKey: string | undefined,
@@ -116,9 +148,17 @@ export function recordAuthFail(
   now = Date.now(),
 ): void {
   const key = clientKey ?? "*";
-  const fails = _authFails.get(key) ?? [];
+  const prior = _authFails.get(key) ?? [];
+  const fails = prior.filter((t) => now - t < AUTH_FAIL_WINDOW_MS);
   fails.push(now);
+  if (fails.length > AUTH_FAIL_MAX) {
+    fails.splice(0, fails.length - AUTH_FAIL_MAX);
+  }
   _authFails.set(key, fails);
+  if (++_sinceSweep >= SWEEP_EVERY) {
+    _sinceSweep = 0;
+    _sweepExpired(now);
+  }
   console.warn(
     `[aio] auth: failed auth from ${key} (${detail}) — ${fails.length}/${AUTH_FAIL_MAX} in window`,
   );

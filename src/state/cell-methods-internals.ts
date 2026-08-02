@@ -150,7 +150,7 @@ export function buildMethodsReducer(
         // Method actions carry the positional `{ args }` envelope — spread it
         // so the handler is written with the foreign method's own parameter
         // list (`onAdded(s, item, qty)`), not a hand-destructured envelope
-        // (quant, alpha28 migration). Non-method triggers pass payload as-is.
+        //. Non-method triggers pass payload as-is.
         const p = action.payload as { args?: unknown[] } | undefined;
         const args = p && Array.isArray(p.args) ? p.args : [action.payload];
         return (handler as SyncMethod<Record<string, unknown>>)(
@@ -206,7 +206,12 @@ export function buildMethodsReducer(
           result && typeof (result as { then?: unknown }).then === "function"
         ) {
           throw new Error(
-            `[${name}] method '${ownKey}' returned a Promise but was classified sync — ` +
+            // `prefix` IS the cell name (cell-methods-factory: `prefix = name`).
+            // This said `${name}`, which this function never receives — so it
+            // silently resolved to the global `name`, the empty string, and the
+            // message read "[] method 'foo' …". The one diagnostic whose whole
+            // job is to say WHICH cell was mis-transpiled did not say it.
+            `[${prefix}] method '${ownKey}' returned a Promise but was classified sync — ` +
               `your build transpiled async functions. Wrap it: ` +
               `${ownKey}: markAsync(async (s) => {...})`,
           );
@@ -256,13 +261,13 @@ export function buildMethodsExecutor(
     | Record<string, (app: ScopedApp, payload: unknown) => void | Promise<void>>
     | undefined,
 ): CellExecuteFn {
-  // Per-cell serialize mutex (risoto #2, `transaction: { serialize: true }`):
+  // Per-cell serialize mutex:
   // this cell's transactional ASYNC methods run one at a time, so two of them
   // can't interleave a read-modify-write. A promise chain; the NEXT method
   // captures its snapshot only after the previous has committed.
   //
   // What it does NOT do — and the file used to claim otherwise, which cost the
-  // reporter a shipped data bug (risoto 2026-07-28 #1): serialize a SYNC method
+  // reporter a shipped data bug: serialize a SYNC method
   // against a running async one. Sync methods are reducers; they commit
   // whenever they are dispatched, including mid-await. That hole is closed by
   // conflict detection below, not by the mutex.
@@ -288,7 +293,7 @@ export function buildMethodsExecutor(
       const method = methods[_method];
       if (!method || !asyncMethods.has(_method)) return;
 
-      // Transactional methods (risoto #2): reads see a STABLE snapshot captured
+      // Transactional methods: reads see a STABLE snapshot captured
       // at entry (an `await` never changes them), and writes buffer + commit
       // atomically at return. Opt-in via `transaction: true`; off ⇒ today's
       // live-read/incremental-commit behavior, byte-identical.
@@ -430,7 +435,7 @@ export function buildMethodsExecutor(
         )
           .finally(() => untrack())
           .then(async (value) => {
-            // Transactional commit (risoto #2): apply the whole method's buffered
+            // Transactional commit: apply the whole method's buffered
             // write-set as ONE atomic `__set`, before resolving the caller — so an
             // awaiter sees committed state, and other clients saw no intermediate.
             // A non-transactional batcher flushes on a microtask, which can land
@@ -448,7 +453,7 @@ export function buildMethodsExecutor(
             // back into state) used to be logged and dropped while this method
             // resolved normally, so the caller was told a change had landed that
             // never did: a build panel frozen at step 0 with an empty log and a
-            // green test suite (llama.md #2). Rethrowing here routes it into the
+            // green test suite. Rethrowing here routes it into the
             // .catch below, which rejects the caller and reports the error —
             // identical in dev, prod and every test harness.
             await batcher.settled();
@@ -483,11 +488,17 @@ export function buildMethodsExecutor(
                 ),
               );
             } else {
-              resolveCall(_callId, value);
+              // An effect return is a SCHEDULING instruction, not a value —
+              // documented as resolving `undefined`, which is what the sync
+              // path does. The async path resolved the effect object itself,
+              // so the same `return schedule.after(...)` gave callers two
+              // different answers depending on whether the method happened to
+              // be async. Parity is the contract.
+              resolveCall(_callId, retEffects.length > 0 ? undefined : value);
             }
           })
           .catch((e: Error) => {
-            // Transactional abort (risoto #2): a throw/cancel discards the whole
+            // Transactional abort: a throw/cancel discards the whole
             // buffered write-set — no partial commit.
             if (transactional) batcher.discard();
             resolveCall(_callId, undefined, e);

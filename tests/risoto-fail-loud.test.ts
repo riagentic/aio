@@ -1,4 +1,4 @@
-// risoto field-report regressions (2026-07-16e/f, 2026-07-17b) — three
+// a field report field-report regressions (2026-07-16e/f, 2026-07-17b) — three
 // "fail loud, never silent" guarantees:
 // 1. a dispatch to a cell the server never booted WARNS (it used to vanish —
 //    green tests, dead feature),

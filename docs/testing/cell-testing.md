@@ -62,11 +62,12 @@ deterministic: the promise resolves on real method completion, no matter how
 long the method takes (dynamic imports, file IO, slow fetches). If the method
 throws, the awaited promise rejects — assert with `assertRejects`.
 
-Not awaiting keeps the old fire-and-forget behavior: nothing executes until you
-`settle()`.
+Not awaiting is fire-and-forget, exactly like production `loader.load()`: **the
+call starts immediately either way.** Awaiting only decides whether the test
+waits for it.
 
 `await t.settle()` is the bulk alternative — run all pending effects and wait
-for every triggered async method to actually finish:
+for every call started so far to actually finish, awaited or not:
 
 ```ts
 testCell(loader, "loads data", async (t) => {
@@ -76,9 +77,45 @@ testCell(loader, "loads data", async (t) => {
 });
 ```
 
+#### Testing work that is still in flight
+
+Because a call starts when you make it, a second action can land while the first
+is still running — which is how you test cancellation, supersession, and "a new
+navigation aborts the previous scan":
+
+```ts
+testCell(disk, "cancel aborts a running scan", async (t) => {
+  const scanning = t.send.open("/"); // the scan is running NOW
+  await t.send.cancel(); // …so this lands mid-flight and aborts it
+  await scanning;
+  t.expect.state((s) => s.path === null);
+});
+```
+
+Two things behave the way they do in production, and both matter here:
+
+- A method's **state writes are batched** and commit on a microtask, so a sync
+  action dispatched in the same tick commits _first_ and can then be overwritten
+  by the async method's prefix. Don't build cancellation on a state flag you set
+  before the first `await` — use [`cancelOn`](../state/methods.md#cancelon) and
+  `s.$signal`, which abort at dispatch time.
+- Anything the method does that is **not** state — spawning a subprocess,
+  opening a socket — has already happened when the call returns.
+
+Leave no call running at the end of a test: `await` it, or `await t.settle()`.
+
 Each effect runs at most once across `await send` / `settle()` calls — mixing
-them never double-executes a method. `settle()` does not reject on method errors
-(it waits for quiet; use `await send` to assert failures).
+them never double-executes a method.
+
+**A failure nobody looked at surfaces.** If a method throws and the test never
+observed that call, `settle()` re-raises it (and so does the end of the test, if
+`settle()` is never called) — a fire-and-forget send cannot fail silently into a
+green test. Observing it yourself keeps `settle()` quiet:
+
+```ts
+await assertRejects(() => t.send.boom(), Error, "kaboom"); // handled here…
+await t.settle(); // …so this does not raise it again
+```
 
 Reserve `await t.settle(100)` (timer-based) for code that uses **real timers**
 outside the cell system, e.g. `setTimeout` chains.
@@ -98,20 +135,20 @@ testCell(door, "cannot open when already open", (t) => {
 
 ## TestContext API
 
-| Method                       | Description                                                                                             |
-| ---------------------------- | ------------------------------------------------------------------------------------------------------- |
-| `t.init()`                   | Reset to initial state                                                                                  |
-| `t.destroy()`                | Reset + set status to 'uninitialized'                                                                   |
-| `t.send.<action>(...args)`   | Dispatch an action. Returns a promise — await it to run an async method to completion (AIO-379)         |
-| `t.expect.state(fn)`         | Assert on cell state slice (incl. your `status` field)                                                  |
-| `t.expect.effects(['name'])` | Assert effect types from last action — use full `'cellName:effectKey'` format, e.g. `'counter:persist'` |
-| `t.expect.effectCount(n)`    | Assert number of effects from last action                                                               |
-| `t.expect.invariant(fn)`     | Assert a predicate holds                                                                                |
-| `t.getState()`               | Get cell state slice                                                                                    |
-| `t.getEffects()`             | Get effects from last dispatched action                                                                 |
-| `t.randomActions(n)`         | Dispatch N random valid actions (property-based testing)                                                |
-| `t.runEffects()`             | Execute pending effects manually (deprecated — `settle()` now auto-runs effects)                        |
-| `t.settle(ms?)`              | Run effects + wait for async. No arg: drain microtasks (fast). With ms: timer wait.                     |
+| Method                       | Description                                                                                                  |
+| ---------------------------- | ------------------------------------------------------------------------------------------------------------ |
+| `t.init()`                   | Reset to initial state                                                                                       |
+| `t.destroy()`                | Reset + set status to 'uninitialized'                                                                        |
+| `t.send.<action>(...args)`   | Dispatch an action — starts immediately, like production. Returns a promise; await it to wait for completion |
+| `t.expect.state(fn)`         | Assert on cell state slice (incl. your `status` field)                                                       |
+| `t.expect.effects(['name'])` | Assert effect types from last action — use full `'cellName:effectKey'` format, e.g. `'counter:persist'`      |
+| `t.expect.effectCount(n)`    | Assert number of effects from last action                                                                    |
+| `t.expect.invariant(fn)`     | Assert a predicate holds                                                                                     |
+| `t.getState()`               | Get cell state slice                                                                                         |
+| `t.getEffects()`             | Get effects from last dispatched action                                                                      |
+| `t.randomActions(n)`         | Dispatch N random valid actions (property-based testing)                                                     |
+| `t.runEffects()`             | Execute pending effects manually (deprecated — `settle()` now auto-runs effects)                             |
+| `t.settle(ms?)`              | Run pending effects + wait for every call started so far. With ms: also wait out real timers.                |
 
 ## Testing inter-cell coordination
 

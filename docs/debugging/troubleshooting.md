@@ -314,8 +314,8 @@ diagnostics: {
 ## Useful commands
 
 ```bash
-curl localhost:3000/__aio/vitals | jq .     # live vitals
-curl localhost:3000/__aio/health | jq .     # cell health
+curl localhost:3000/__aio/vitals | jq.     # live vitals
+curl localhost:3000/__aio/health | jq.     # cell health
 grep 'a1b2c3d4' ~/.<appId>/logs/debug.log              # trace by correlation ID
 tail -f ~/.<appId>/logs/perf.log                        # watch budget violations
 grep -c 'cell:wallet' ~/.<appId>/logs/error.log      # count errors per cell

@@ -351,7 +351,7 @@ export async function cmdMetrics(
   }
 }
 
-// ── am top: live runtime observability (risoto #9) ──────────────────────────
+// ── am top: live runtime observability ──────────────────────────
 
 export type TopMetrics = {
   uptime: number;
@@ -646,12 +646,12 @@ export async function cmdSurface(
   const target = explicit === "server" ? "server" : Number(explicit ?? 0);
   // `--full` lifts the text cap: element/component text is capped so a surface
   // stays scannable, and a cut is now marked with "…" — but a generated command
-  // line has to be readable in full (llama.md #10).
+  // line has to be readable in full.
   const q = args.includes("--full") ? "?full=1" : "";
   // Scope the tree client-side: one page in a real app serialised to a 32 KB
   // single-line blob, and reading one component out of it meant piping into
   // Python — the same "am made me write a script" shape as the --json one
-  // (llama.md, second update #2). Applied to the reply, so it works for a live
+  //. Applied to the reply, so it works for a live
   // client and the headless render alike.
   const wantComponent = args.find((a) => a.startsWith("--component="))?.slice(
     12,
@@ -669,7 +669,7 @@ export async function cmdSurface(
   let result = await trojanGet(port, `surface/${target}${q}`, appId, 10_000);
   if (!result.ok && explicit === undefined) {
     // No client connected and none requested → fall back to the headless
-    // server-side render (machine M2: server-only apps, CI). Loud about it.
+    // server-side render. Loud about it.
     const headless = await trojanGet(
       port,
       `surface/server${q}`,

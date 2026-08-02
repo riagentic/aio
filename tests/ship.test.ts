@@ -1,4 +1,4 @@
-// risoto #9 — `aio ship` core: a verifiable release manifest (SHA-256 +
+// `aio ship` core: a verifiable release manifest (SHA-256 +
 // least-privilege capabilities + optional Ed25519 signature over the digest).
 import { assert, assertEquals } from "@std/assert";
 import {

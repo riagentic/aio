@@ -244,15 +244,42 @@ async function _writeLocalAssets(
 /** dev:android — retarget the WebView at a live dev-server URL (10.0.2.2:PORT
  *  reaches the host loopback from the emulator) and allow cleartext http so the
  *  app hot-loads from the running dev server, exactly like `dev:browser`. */
+/** Validate `--android-dev-url` and return the form safe to embed in Kotlin.
+ *
+ *  The value is interpolated into Kotlin SOURCE that is then compiled, so it
+ *  has to be a URL and nothing else: one carrying a quote closed the string and
+ *  the rest compiled as code — `--android-dev-url='http://x");
+ *  Runtime.getRuntime().exec("…"); //'` ran a command at BUILD time.
+ *  Parsing is the check; `href` is the normalised, percent-encoded form, so no
+ *  quote or newline can survive it. Refuses loudly rather than emitting broken
+ *  or hostile Kotlin. Exported for its own test. */
+export function safeDevUrl(devUrl: string): string {
+  let parsed: URL;
+  try {
+    parsed = new URL(devUrl);
+  } catch {
+    throw new Error(
+      `[aio] --android-dev-url is not a valid URL: ${JSON.stringify(devUrl)}`,
+    );
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    throw new Error(
+      `[aio] --android-dev-url must be http(s), got ${parsed.protocol}`,
+    );
+  }
+  return parsed.href;
+}
+
 async function _applyDevUrl(androidDir: string, devUrl: string): Promise<void> {
   const actPath = join(
     androidDir,
     "app/src/main/java/aio/app/MainActivity.kt",
   );
+  const safeUrl = safeDevUrl(devUrl);
   let act = await Deno.readTextFile(actPath);
   act = act.replace(
     'loadUrl("file:///android_asset/index.html")',
-    `loadUrl("${devUrl}")`,
+    `loadUrl("${safeUrl}")`,
   );
   // Keep every navigation inside the WebView (no external redirect handling).
   act = act.replace(

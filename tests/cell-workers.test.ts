@@ -57,7 +57,7 @@ export const heavy = cell("heavy", {
     // which lives per-isolate. Nothing in this file awaited one, so the bridge
     // shipped 'done' after the sync prefix and the caller's registerCall()
     // promise was settled by NOBODY: every async worker method hung to the
-    // call ceiling, success and failure alike (risoto, 2026-08-01).
+    // call ceiling, success and failure alike.
     async computeAsync(s: { note: string }, x: number) {
       await new Promise((r) => setTimeout(r, 30));
       s.note = "computed:" + x;
@@ -67,7 +67,7 @@ export const heavy = cell("heavy", {
       await new Promise((r) => setTimeout(r, 30));
       throw new Error("async exploded");
     },
-    // Reads a PEER cell from inside the worker — the trap risoto hit: this used
+    // Reads a PEER cell from inside the worker — the trap one app hit: this used
     // to silently return ticker's declared default (0) forever.
     peek(s: { note: string }) {
       s.note = "peer:" + ticker.n;
@@ -302,7 +302,7 @@ Deno.test({
     "cell worker e2e: an AWAITED async method resolves with its value and rejects with its error",
   ignore: Deno.build.os === "windows",
   async fn() {
-    // The regression this pins (risoto, 2026-08-01): an async worker method's
+    // The regression this pins: an async worker method's
     // return value lands in the WORKER's resolveCall registry; the caller
     // awaits the MAIN isolate's. With no bridge between them, `await
     // heavy.anything()` hung to the 30s call ceiling — success and failure
@@ -583,7 +583,7 @@ Deno.test({
     "cell worker e2e: reading a PEER cell fails loud instead of returning defaults",
   ignore: Deno.build.os === "windows",
   async fn() {
-    // Field report (risoto, 2026-07-26): boot validation catches config-level
+    // Field report: boot validation catches config-level
     // misuse, but a peer read inside a METHOD BODY slipped through and silently
     // read the worker's unbooted copy — never-updated data, no error. Silent
     // wrong data is the failure mode this framework refuses to have.

@@ -75,17 +75,51 @@ export async function totpCode(
   return String(bin % 1_000_000).padStart(6, "0");
 }
 
+// One code, one use (RFC 6238 §5.2).
+//
+// The ±1-step window means a code stays valid for 90 seconds. Without
+// remembering which step was last accepted, a code observed once — shoulder,
+// proxy, log, screen share — could be replayed for the rest of that window.
+// The login route mitigates it with a one-shot pending token, but `verifyTotp`
+// itself is also what guards TOTP enable/disable.
+//
+// Kept in memory, keyed by secret: the window is 90 seconds, so a process
+// restart cannot meaningfully widen it, and this needs no schema migration on
+// a store that has never had one. Entries older than two windows are swept.
+const REPLAY_WINDOW_MS = 90_000;
+const _lastStep = new Map<string, { step: number; at: number }>();
+function _sweepSteps(now: number): void {
+  if (_lastStep.size < 64) return;
+  for (const [k, v] of _lastStep) {
+    if (now - v.at > 2 * REPLAY_WINDOW_MS) _lastStep.delete(k);
+  }
+}
+
 /** Verify a submitted code with a ±1-step window (clock skew tolerance).
  *  Length-checked + constant-shape compare; a 6-digit space brute-force is
- *  handled by the login fail budget, not by timing. */
+ *  handled by the login fail budget, not by timing.
+ *
+ *  A code is accepted ONCE: a step at or below the last one accepted for this
+ *  secret is refused, so re-submitting a still-valid code fails. */
 export async function verifyTotp(
   secretB32: string,
   submitted: string,
 ): Promise<boolean> {
   if (!/^\d{6}$/.test(submitted)) return false;
-  const now = Math.floor(Date.now() / 30_000);
+  const nowMs = Date.now();
+  const now = Math.floor(nowMs / 30_000);
   for (const step of [now, now - 1, now + 1]) {
-    if ((await totpCode(secretB32, step)) === submitted) return true;
+    if ((await totpCode(secretB32, step)) !== submitted) continue;
+    const prev = _lastStep.get(secretB32);
+    if (prev && step <= prev.step) return false; // replay of a used code
+    _sweepSteps(nowMs);
+    _lastStep.set(secretB32, { step, at: nowMs });
+    return true;
   }
   return false;
+}
+
+/** Test isolation — forget which steps have been consumed. @internal */
+export function _resetTotpReplay(): void {
+  _lastStep.clear();
 }

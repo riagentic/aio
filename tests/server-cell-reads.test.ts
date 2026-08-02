@@ -1,4 +1,4 @@
-// TBD B4/M8 — server-side `cell.field` reads are LIVE, not initial.
+// an audit item/M8 — server-side `cell.field` reads are LIVE, not initial.
 // A cell bound to a running app (bindCell, via aio.run) reads its CURRENT
 // slice from that app's store — same truth as app.getState(). The stale-read
 // trap ("route handler reads the initial state silently") must never return:
@@ -55,7 +55,7 @@ Deno.test("B4: server code reads CURRENT cell state after dispatch (libraryMode)
   }
 });
 
-Deno.test("B4: custom HTTP route reads live cell state (the TBD loginRoute trap)", async () => {
+Deno.test("B4: custom HTTP route reads live cell state (a loginRoute trap)", async () => {
   _resetAioRuntime();
   const members = cell("b4-route-members", {
     state: { roster: [] as string[] },

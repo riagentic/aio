@@ -1,4 +1,4 @@
-// risoto 2026-07-18 wish 2 — DEFINES the cross-cell-mutation-from-a-reducer
+// a field report wish 2 — DEFINES the cross-cell-mutation-from-a-reducer
 // contract (rather than leaving it folklore). Calling another cell's mutating
 // method from inside a sync reducer body is a re-entrant dispatch: the loop
 // queues and drains it, so the target cell's state DOES commit — and since

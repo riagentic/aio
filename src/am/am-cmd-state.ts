@@ -15,7 +15,7 @@ import {
 } from "./am-utils.ts";
 import { httpGet, trojanGet, trojanPost } from "./am-http.ts";
 
-// ── am expect: e2e assertion over server state (risoto #5) ──────────────────
+// ── am expect: e2e assertion over server state ──────────────────
 
 const EXPECT_OPS = [
   "eq",
@@ -378,7 +378,7 @@ export async function cmdTT(args: string[], flags: GlobalFlags): Promise<void> {
 // ── Persistence ─────────────────────────────────────────────
 
 /** `am migrations` — declared vs stored per-cell versions, what the last boot's
- *  migration pass did, and any unaccounted shape drift (risoto #1). */
+ *  migration pass did, and any unaccounted shape drift. */
 export async function cmdMigrations(
   _args: string[],
   flags: GlobalFlags,

@@ -184,7 +184,7 @@ Deno.test("ui: Modal Escape-to-close listens on the render document", async () =
   const App = () => h(Modal, { open: true, onClose: () => closes++ }, "x");
   const { ui, win } = await mountWithWin(App);
   await ui.settle();
-  // The Escape listener attaches to AIR's render document (risoto #3) — dispatch
+  // The Escape listener attaches to AIR's render document — dispatch
   // a real keydown there. If this env can't build a KeyboardEvent, skip cleanly.
   try {
     win.document.dispatchEvent(

@@ -63,7 +63,7 @@ export type SurfaceNode = any;
 export function findText(nodes: SurfaceNode[], name: string): string | null {
   for (const n of nodes ?? []) {
     for (const el of n.elements ?? []) {
-      if (el.name === name) return el.text ?? "";
+      if (el.name === name) return el.text;
     }
     const c = findText(n.children ?? [], name);
     if (c !== null) return c;

@@ -1,4 +1,4 @@
-// End-to-end proof of the timeline wiring (risoto #4): a real dispatch on a real
+// End-to-end proof of the timeline wiring: a real dispatch on a real
 // server flows through the afterActionHook into the in-memory ring and surfaces
 // on the trojan `timeline` route with the exact state diff it produced. Covers
 // the seam the unit tests can't — aio.ts hook → timeline.record → trojan route.

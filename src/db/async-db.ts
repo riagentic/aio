@@ -112,7 +112,7 @@ export function createDB(path: string, opts: DBOpts = {}): DB {
     if (ready) return ready;
 
     let numReaders = opts.readers ?? 0;
-    // AIO-421 (risoto): an in-memory DB lives inside ONE Worker — reader Workers
+    // AIO-421: an in-memory DB lives inside ONE Worker — reader Workers
     // would each open a SEPARATE empty `:memory:` DB and silently return no rows.
     // `createDB(":memory:")` is the intended ephemeral/test mode; keep it single-
     // Worker rather than let a stray `readers` option produce empty reads.
@@ -236,9 +236,54 @@ export function createDB(path: string, opts: DBOpts = {}): DB {
     lastWriterError(): Error | null {
       return _lastWriterError;
     },
+    // `VACUUM INTO` runs on the WRITER and cannot sit inside a transaction, so
+    // it goes through the same serial write lock every other write uses — a
+    // snapshot can never catch a half-applied transaction.
+    async snapshot(path: string): Promise<void> {
+      await withWriterLock(() =>
+        gate<QueryResult>({
+          type: "execute",
+          sql: "VACUUM INTO ?",
+          params: [path],
+        })
+      );
+    },
+    async checkIntegrity(): Promise<{ ok: boolean; problems: string[] }> {
+      const { rows } = await gate<QueryResult<{ quick_check: string }>>(
+        { type: "query", sql: "PRAGMA quick_check" },
+        false,
+      );
+      const problems = rows
+        .map((r) => r.quick_check)
+        .filter((v) => typeof v === "string" && v !== "ok");
+      return { ok: problems.length === 0, problems };
+    },
     async close(): Promise<void> {
       if (!ready) return;
       await ensureWorkers();
+      // FIRST drain the writer-lock chain. A write queued BEHIND another has
+      // not been posted to the worker yet, so it is absent from `pending` —
+      // the loop below would not wait for it, `w.terminate()` would kill the
+      // worker under it, and its `gate()` would then post to a dead worker:
+      // the write silently lost and its promise never settling. On a dirty
+      // shutdown that is the most recent state change.
+      //
+      // The chain never rejects (withWriterLock captures errors), and a write
+      // that lands while we wait extends it — so re-check until it stops
+      // moving, bounded by the same 5s ceiling the pending drain uses.
+      {
+        const deadline = Date.now() + 5000;
+        for (let i = 0; i < 100; i++) {
+          const chain = _writerLock;
+          await Promise.race([
+            chain,
+            new Promise<void>((r) =>
+              setTimeout(r, Math.max(0, deadline - Date.now()))
+            ),
+          ]);
+          if (_writerLock === chain || Date.now() >= deadline) break;
+        }
+      }
       // Wait for all in-flight requests to settle before closing
       const allPending = [...pending.values()].map((p) =>
         new Promise<void>((resolve) => {

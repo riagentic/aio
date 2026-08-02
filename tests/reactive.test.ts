@@ -1,6 +1,6 @@
 // reactive.test.ts — tests for cell({ methods }) reactive style
 // (formerly reactive() — removed in v0.8, cell({ methods }) is identical)
-import { assertEquals, assertThrows } from "@std/assert";
+import { assertEquals, assertRejects, assertThrows } from "@std/assert";
 import { bindCell, cell, composeCells, testCell } from "../src/state/cell.ts";
 import { schedule } from "../src/state/schedule.ts";
 import { call } from "../src/state/cell-impl.ts";
@@ -692,10 +692,13 @@ testCell(
   "cell(methods): async error dispatches __error action",
   async (t) => {
     t.init();
-    t.send.failingMethod!();
+    // The rejection is the method's, surfaced to its caller exactly as in
+    // production; the point of the test is that the runtime ROUTES it
+    // (dispatching `errorTest:__error`, visible in time-travel) instead of
+    // crashing the dispatch loop.
+    await assertRejects(() => t.send.failingMethod!(), Error, "boom");
     await t.settle();
-    // Verify __error action was dispatched (visible in time-travel)
-    t.expect.state(() => true); // no crash = error was handled, not thrown
+    t.expect.state(() => true); // still alive = handled, not fatal
   },
 );
 

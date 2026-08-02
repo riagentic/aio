@@ -12,6 +12,7 @@ import {
 import type { ReportErrorOpts } from "../diagnostics/error.ts";
 import type { Log } from "../diagnostics/logger.ts";
 import { PERSIST_SCHEMA_VERSION } from "./persist-schema.ts";
+import { describeIssues, stringifyWithIssues } from "./persist-guard.ts";
 
 /** Configuration for the persistence manager — KV/SQLite handles, debounce timing, and state accessors. */
 export interface PersistenceConfig {
@@ -30,15 +31,14 @@ export interface PersistenceConfig {
   cellVersions?: Record<string, number>;
   /** App ID — used as prefix for version key in KV */
   appId?: string;
-  /** Opt-in journal (risoto #3): the current journal seq — captured at
+  /** Opt-in journal: the current journal seq — captured at
    *  state-read time, so the persisted snapshot reflects actions up to it. */
   getJournalSeq?: () => number;
   /** Opt-in journal: called with that seq AFTER a successful state write, so the
    *  journal can advance its watermark + compact the persisted prefix. Undefined
    *  (journal off) ⇒ the persist path is byte-identical to before. */
   onPersisted?: (seq: number) => void;
-  /** Stored-but-undeclared cell slices found at boot (space-invaders field
-   *  report: a cell rename silently destroyed the leaderboard). Carried into
+  /** Stored-but-undeclared cell slices found at boot. Carried into
    *  EVERY persisted document verbatim, so user data is never dropped because
    *  a build stopped declaring its cell. */
   orphanCells?: Record<string, unknown>;
@@ -78,6 +78,10 @@ export function createPersistenceManager(
   let shuttingDown = false;
   let prevPersistedKeys: string[] = cfg.storedKeys ?? [];
   let prevDbState: Record<string, unknown> = structuredClone(getState());
+
+  // One report per offending path — a persist runs every debounce window, and
+  // the same bad field would otherwise log on every one of them.
+  const _warnedPersistPaths = new Set<string>();
 
   function _reportPersistError(e: unknown): void {
     const err = createAioError("PERSIST_ERROR", e, {});
@@ -124,7 +128,7 @@ export function createPersistenceManager(
 
   async function _syncKv(): Promise<void> {
     if (!kvDb) return;
-    // Journal watermark (risoto #3): the seq the ABOUT-TO-BE-WRITTEN snapshot
+    // Journal watermark: the seq the ABOUT-TO-BE-WRITTEN snapshot
     // reflects. Captured before the (synchronous) state read so no action can
     // slip between; advanced only AFTER the write commits. No-op when off.
     const seq = cfg.getJournalSeq?.() ?? 0;
@@ -135,6 +139,28 @@ export function createPersistenceManager(
           ...(getDBState(kvGetState()) as Record<string, unknown>),
         }
         : getDBState(kvGetState());
+      // Name every value JSON would corrupt on the way to disk. The failure
+      // this catches is invisible at write time and only appears on the NEXT
+      // boot — a Date that came back a string, a field that vanished.
+      //
+      // Observe-only, identically in dev and prod: it reports (once per
+      // offending path) and still writes. Refusing the write would turn one
+      // corrupted field into total data loss, and throwing here would surface
+      // inside a debounced background timer — far from the code that put the
+      // value in state, and wearing the label of whatever catch caught it.
+      // The report carries the exact path and the fix, which is what the
+      // developer actually needs.
+      {
+        const { issues } = stringifyWithIssues(dbState);
+        const fresh = issues.filter((i) => !_warnedPersistPaths.has(i.path));
+        if (fresh.length > 0) {
+          for (const i of fresh) _warnedPersistPaths.add(i.path);
+          const err = new Error(`persist: ${describeIssues(fresh)}`);
+          log.error(err.message);
+          _reportPersistError(err);
+        }
+      }
+
       if (persistMode === "multi") {
         // Multi mode: one SQLite row per top-level cell (setMulti is atomic and
         // rewrites only changed cells). No size ceiling — the store is SQLite,

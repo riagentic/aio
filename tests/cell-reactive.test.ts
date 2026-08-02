@@ -259,7 +259,7 @@ Deno.test("bindCellReactive without sendFn leaves method as unbound guard", () =
   bindCellReactive(c);
 
   // The guard now THROWS (dev + prod) — a pre-boot dispatch has no runtime, so
-  // silently no-op'ing would lose the write (risoto).
+  // silently no-op'ing would lose the write.
   let threw = false;
   try {
     c.increment();
@@ -308,7 +308,7 @@ Deno.test("AIO-6.1: cell throws when a state key collides with a method name", (
   _resetCellRegistry();
 });
 
-// AIO-422 (realitio): selectors must be callable on the BROWSER cell too — they
+// AIO-422: selectors must be callable on the BROWSER cell too — they
 // existed only server-side, so `cell.count()` threw `is not a function` in the
 // browser with no boot/typecheck warning (a "quiet lie" vs the docs).
 Deno.test("bindCellReactive binds selectors (own-slice) callable in browser", () => {

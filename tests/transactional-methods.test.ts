@@ -1,4 +1,4 @@
-// risoto #2 — transactional cell methods (opt-in `transaction: true`). Reads see
+// transactional cell methods (opt-in `transaction: true`). Reads see
 // a stable snapshot captured at entry; writes commit atomically at return; a
 // throw discards. Spec: docs/state/transactional-methods.md §7.
 import { assertEquals, assertRejects, assertStringIncludes } from "@std/assert";
@@ -235,7 +235,7 @@ function parkPoint() {
 }
 
 Deno.test("transaction serialize: a guard on a field a SYNC method writes is not inert", async () => {
-  // risoto 2026-07-28 #1, verbatim: refresh() fetches for a while; a send calls
+  // a field report #1, verbatim: refresh() fetches for a while; a send calls
   // the sync adjust() during that window; refresh's guard reads adjustedAt —
   // pinned to entry, so it can never fire, and refresh commits pre-send numbers
   // over the transfer. The read-set check is what makes the guard honest.

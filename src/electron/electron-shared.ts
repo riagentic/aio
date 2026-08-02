@@ -115,7 +115,7 @@ export function tmplKeyboardShortcuts(): string {
  *  @param originExpr JS expression that evaluates to the app origin string */
 export function tmplWillNavigate(originExpr: string): string {
   return `  // AIO-54: Electron swallows <a> clicks before DOM dispatch — relay via IPC.
-  // mdview #6: only SAME-ORIGIN links are in-app navigation. A cross-origin
+  // only SAME-ORIGIN links are in-app navigation. A cross-origin
   // (external) link must never be fed to navigate() — for a routerless app that
   // pushState()s a bogus path and white-screens on reload. Send external
   // http/https to the system browser instead; block everything else.
@@ -238,16 +238,16 @@ export const CONNECT_HTML = `<!DOCTYPE html>
       e.preventDefault();
       go(document.getElementById('addr').value.trim());
     };
-    function esc(s) { const d = document.createElement('div'); d.textContent = s == null ? '' : String(s); return d.innerHTML.replace(/"/g, '&quot;').replace(/'/g, '&#39;'); }
+    function esc(s) { const d = document.createElement('div'); d.textContent = s == null ? '': String(s); return d.innerHTML.replace(/"/g, '&quot;').replace(/'/g, '&#39;'); }
 
     // Filled by the Electron main process (see electron-client-script). In a
     // plain browser these stay empty and only the manual field shows.
     function appRow(a, extra) {
-      const badge = a.needsAuth ? '<span class="badge">\\u26bf auth</span>' : '';
+      const badge = a.needsAuth ? '<span class="badge">\\u26bf auth</span>': '';
       const sub = esc(a.url || a.host + ':' + a.port);
       const data = 'data-url="' + esc(a.url) + '" data-host="' + esc(a.host || '') +
-        '" data-port="' + esc(a.port) + '" data-tls="' + (a.tls ? '1' : '') +
-        '" data-auth="' + (a.needsAuth ? '1' : '') + '"';
+        '" data-port="' + esc(a.port) + '" data-tls="' + (a.tls ? '1': '') +
+        '" data-auth="' + (a.needsAuth ? '1': '') + '"';
       return '<div class="row"><div class="app" ' + data + ' style="flex:1">' +
         '<div><div class="name">' + esc(a.title || a.name) + '</div><div class="meta">' + sub + '</div></div>' +
         badge + '</div>' + (extra || '') + '</div>';
@@ -315,7 +315,7 @@ contextBridge.exposeInMainWorld('__aioIPC', {
   onClose:   (fn)   => ipcRenderer.on('__aio:close', () => fn()),
   // Renderer window.print() is a silent no-op on Electron 41 Linux — route through main
   print:     ()     => ipcRenderer.send('__aio:print'),
-  // mdview #7: open an http/https link in the system browser. The main process
+  // open an http/https link in the system browser. The main process
   // enforces the allowlist — a renderer can't reach arbitrary shell targets.
   openExternal: (url) => ipcRenderer.send('__aio:openExternal', url),
   // Child window: open an http/https page in a CHILD BrowserWindow whose

@@ -33,21 +33,21 @@ Deno.test("totp: base32 roundtrip + RFC 6238 SHA-1 vector", async () => {
 });
 
 Deno.test("totp: verify window + format rejection", async () => {
-  const secret = generateTotpSecret();
   const now = Math.floor(Date.now() / 30_000);
-  assert(await verifyTotp(secret, await totpCode(secret, now)));
+  // A fresh secret per case: codes are one-time-use per secret, so accepting
+  // `now` on one secret would (correctly) refuse the older `now - 1` on it.
+  const s1 = generateTotpSecret(), s2 = generateTotpSecret();
+  const s3 = generateTotpSecret(), s4 = generateTotpSecret();
+  assert(await verifyTotp(s1, await totpCode(s1, now)));
+  assert(await verifyTotp(s2, await totpCode(s2, now - 1)), "prev step ok");
   assert(
-    await verifyTotp(secret, await totpCode(secret, now - 1)),
-    "prev step ok",
-  );
-  assert(
-    !(await verifyTotp(secret, await totpCode(secret, now - 5))),
+    !(await verifyTotp(s3, await totpCode(s3, now - 5))),
     "stale code",
   );
-  assert(!(await verifyTotp(secret, "12345")), "5 digits rejected");
-  assert(!(await verifyTotp(secret, "abcdef")), "non-digits rejected");
+  assert(!(await verifyTotp(s4, "12345")), "5 digits rejected");
+  assert(!(await verifyTotp(s4, "abcdef")), "non-digits rejected");
   assertStringIncludes(
-    totpUri(secret, "alice", "Shop"),
+    totpUri(s1, "alice", "Shop"),
     "otpauth://totp/Shop:alice?",
   );
 });
@@ -228,9 +228,13 @@ Deno.test("auth e2e: email verify, reset, password rotation, totp, lockout", asy
     assertEquals(setup.status, 200);
     const { secret, uri } = await setup.json();
     assertStringIncludes(uri, "otpauth://totp/");
+    // Each code is one-time-use, so this flow walks forward through steps the
+    // way a real user does (enrol with the code on screen, log in with the
+    // next one) instead of re-submitting the same one.
+    const step = Math.floor(Date.now() / 30_000);
     const en = await post(
       "totp/enable",
-      { code: await totpCode(secret) },
+      { code: await totpCode(secret, step - 1) },
       session3,
     );
     assertEquals(en.status, 200);
@@ -251,7 +255,7 @@ Deno.test("auth e2e: email verify, reset, password rotation, totp, lockout", asy
     await badCode.body?.cancel();
     const replay = await post("totp", {
       pending: challenge.pending,
-      code: await totpCode(secret),
+      code: await totpCode(secret, step), // valid + unused: only the token is spent
     });
     assertEquals(replay.status, 401, "wrong attempt burned the pending token");
     await replay.body?.cancel();
@@ -263,7 +267,7 @@ Deno.test("auth e2e: email verify, reset, password rotation, totp, lockout", asy
     const challenge2 = await li5.json();
     const good = await post("totp", {
       pending: challenge2.pending,
-      code: await totpCode(secret),
+      code: await totpCode(secret, step + 1),
     });
     assertEquals(good.status, 200);
     assertEquals((await good.json()).user.id, "alice");

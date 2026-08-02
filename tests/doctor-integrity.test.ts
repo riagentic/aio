@@ -1,4 +1,4 @@
-// risoto 2026-07-24 #3 — `aio doctor` integrity sweep: structural problems no
+// a field report #3 — `aio doctor` integrity sweep: structural problems no
 // config check catches (reserved cell keys, duplicate imports, orphaned
 // persistence) now surface as doctor FAILs, reusing aiol's error-level checks.
 import { assert, assertEquals } from "@std/assert";
@@ -57,11 +57,11 @@ Deno.test("doctor: a duplicate import fails the sweep (and doctor overall)", asy
   assertEquals(ok, false, "a structural error must fail doctor overall");
 });
 
-Deno.test("doctor: a server-only import in a browser-bundle cell file fails the sweep (risoto #1d)", async () => {
+Deno.test("doctor: a server-only import in a browser-bundle cell file fails the sweep", async () => {
   const dir = await project({
     "App.tsx": `export default function App() { return <div>hi</div>; }`,
     "cells.ts":
-      `import { cell } from "aio";\nimport { readFileSync } from "node:fs";\nexport const c = cell("c", { state: { n: 0 }, methods: { load(s) { s.n = readFileSync ? 1 : 0; } } });`,
+      `import { cell } from "aio";\nimport { readFileSync } from "node:fs";\nexport const c = cell("c", { state: { n: 0 }, methods: { load(s) { s.n = readFileSync ? 1: 0; } } });`,
   });
   const { checks, ok } = await runDoctor(dir);
   const ig = integrityChecks(checks);

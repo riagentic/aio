@@ -237,7 +237,7 @@ export function createUdsBroadcastController(refs: {
   // The shared coalescer buffers patches (and a pending force-full) across the
   // queue/throttle window and flushes them as ONE send — identical semantics
   // to the WS broadcaster, because both now use the same primitive. This is
-  // what closes the risoto 2026-07-19 bug (UDS used to drop patches while WS
+  // what closes the a field report bug (UDS used to drop patches while WS
   // buffered them) by construction: the two transports can no longer diverge.
   const coalescer = createCoalescer<PatchEntry>(
     refs.syncIntervalMs,
@@ -275,11 +275,12 @@ export async function acquireSingletonLock(
   const result = await appLock.acquire(port, killExisting);
   if (!result.ok) {
     const ex = result.existing;
-    const exUrl = `http://localhost:${ex.port}`;
+    const where = ex.port > 0 ? ` at http://localhost:${ex.port}` : "";
+    const who = ex.pid > 0 ? ` (pid ${ex.pid})` : "";
     console.error(
       `[AIO] ${
         killExisting ? "Failed to take over" : "Already running"
-      }: ${ex.appId} at ${exUrl} (pid ${ex.pid})`,
+      }: ${ex.appId}${where}${who}`,
     );
     Deno.exit(1);
   }

@@ -42,12 +42,12 @@ export interface TrojanDeps {
     getState: () => unknown;
     getSchedules: () => string[];
     getTTHistory?: () => unknown;
-    /** Recent dispatches + their state diffs (risoto #4 — `am timeline`). */
+    /** Recent dispatches + their state diffs. */
     getTimeline?: (
       after?: number,
       limit?: number,
     ) => import("./timeline.ts").TimelineEntry[];
-    /** Boot migration + shape-drift picture (risoto #1 — `am migrations`). */
+    /** Boot migration + shape-drift picture. */
     getMigrations?: () =>
       | import("./aio-boot.ts").MigrationSummary
       | undefined;
@@ -222,7 +222,7 @@ function handleGet(
 
   if (route.startsWith("surface/")) {
     // Headless: render the UI on the server against live cell state — no
-    // client required (machine M2: `--client=server-only` / CI).
+    // client required.
     // `?full=1` lifts the surface's text cap — `am surface --full`, for reading
     // a long generated string the scannable default would cut.
     const full = req ? new URL(req.url).searchParams.has("full") : false;
@@ -250,7 +250,7 @@ function handleGet(
     );
   }
 
-  // Recent dispatches + their state diffs (risoto #4 — `am timeline`). Optional
+  // Recent dispatches + their state diffs. Optional
   // ?after=<seq> (only newer) and ?limit=<n> (last n) query params.
   if (route === "timeline") {
     const q = new URL(req!.url).searchParams;
@@ -268,7 +268,7 @@ function handleGet(
     return json({ errors: deps.getRecentErrors() });
   }
 
-  // Boot migration + shape-drift picture (risoto #1 — `am migrations`). Empty
+  // Boot migration + shape-drift picture. Empty
   // when nothing was restored (fresh install / persistence off).
   if (route === "migrations") {
     return json(
@@ -410,7 +410,7 @@ async function handlePost(
       ) {
         return err("invalid payload — must be a plain object");
       }
-      // risoto CRITICAL #0: `ok:true` must mean EXECUTED, and an unknown method
+      // a field report: `ok:true` must mean EXECUTED, and an unknown method
       // must be an ERROR — the route used to ack ANY type (real or bogus) and
       // fire-and-forget, so a typo or the `cell.method` (dot) form the reducer's
       // `cell:method` (colon) form never matches silently no-op'd under a green
@@ -445,6 +445,17 @@ async function handlePost(
       // spoof open. Drop both to be safe; the server owns the real identity.
       delete action.user;
       delete (action as Record<string, unknown>)._user;
+      // …and `payload._origin`, exactly as the WS and UDS paths do. It is the
+      // method name a cell's `access` predicate discriminates on, so a caller
+      // could forge `payload:{_origin:"read"}` on a `cell:delete` action and be
+      // gated as a read while the reducer ran the delete. Network actions carry
+      // no legitimate `_origin` (batching is server-side). The trojan is
+      // dev-only and localhost-bound today — which is exactly why the
+      // inconsistency was easy to miss and worth closing now.
+      const _pl = (action as { payload?: unknown }).payload;
+      if (_pl && typeof _pl === "object") {
+        delete (_pl as Record<string, unknown>)._origin;
+      }
       try {
         await deps.dispatch(action, undefined);
       } catch (e) {

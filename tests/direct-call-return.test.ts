@@ -140,7 +140,7 @@ Deno.test(
 // ── 2.3: Pre-binding behavior ─────────────────────────────────────────────
 
 Deno.test(
-  "2.3: calling a method before boot ALWAYS throws (dev + prod) — risoto: no silent no-op",
+  "2.3: calling a method before boot ALWAYS throws (dev + prod) — a field report: no silent no-op",
   () => {
     for (const dev of [true, false]) {
       (globalThis as Record<string, unknown>).__aioDev = dev;

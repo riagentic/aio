@@ -1,5 +1,5 @@
 // testServer() + testBrowser() — the two harnesses apps otherwise hand-roll
-// (libraryMode boot; headless-chromium lifecycle). realitio.
+// (libraryMode boot; headless-chromium lifecycle). a field report.
 import { assert, assertEquals } from "@std/assert";
 import { cell } from "../src/state/cell-create.ts";
 import { route } from "../src/server/route.ts";

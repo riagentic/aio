@@ -1,5 +1,5 @@
 // The shared coalescer both WS + UDS use — pins the never-drop invariant that
-// the risoto 2026-07-19 UDS bug violated (one transport buffered, one dropped).
+// the a field report UDS bug violated (one transport buffered, one dropped).
 import { assert, assertEquals } from "@std/assert";
 import { createCoalescer } from "../src/server/broadcast-coalescer.ts";
 

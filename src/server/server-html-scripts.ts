@@ -4,9 +4,9 @@
 /** Dev reload WebSocket — live reload on file changes. Shared by AIO + React dev modes. */
 export function devWsScript(): string {
   return `
-    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:'
+    const proto = location.protocol === 'https:' ? 'wss:': 'ws:'
     const _tk = new URLSearchParams(location.search).get('token')
-    const _wsUrl = proto + '//' + location.host + '/ws' + (_tk ? '?token=' + encodeURIComponent(_tk) : '')
+    const _wsUrl = proto + '//' + location.host + '/ws' + (_tk ? '?token=' + encodeURIComponent(_tk): '')
     let _bootId = null
     function _devWs() {
       const ws = new WebSocket(_wsUrl)
@@ -87,14 +87,14 @@ export function healthOverlayScript(): string {
     var _diagEvents = [], _diagUnread = 0
     _diagDot.onclick = function() {
       var show = _diagPanel.style.display === 'none'
-      _diagPanel.style.display = show ? 'block' : 'none'
+      _diagPanel.style.display = show ? 'block': 'none'
       if (show) { _diagUnread = 0; _updateDiagDot() }
     }
     function _updateDiagDot() {
       var hasErr = _diagEvents.some(function(e) { return e.severity === 'error' })
       var hasWarn = _diagEvents.some(function(e) { return e.severity === 'warning' })
-      _diagDot.style.background = hasErr ? '#e25' : hasWarn ? '#ea0' : '#2a2'
-      _diagBadge.style.display = _diagUnread > 0 ? 'block' : 'none'
+      _diagDot.style.background = hasErr ? '#e25': hasWarn ? '#ea0': '#2a2'
+      _diagBadge.style.display = _diagUnread > 0 ? 'block': 'none'
       _diagBadge.textContent = String(_diagUnread)
     }
     function _renderDiagPanel() {
@@ -102,13 +102,13 @@ export function healthOverlayScript(): string {
       _diagEvents = _diagEvents.filter(function(e) { return e.ts > cutoff })
       if (!_diagEvents.length) { _diagDot.style.display = 'none'; _diagPanel.style.display = 'none'; return }
       _diagPanel.innerHTML = _diagEvents.map(function(ev) {
-        var c = ev.severity === 'error' ? '#e25' : ev.severity === 'warning' ? '#ea0' : '#888'
+        var c = ev.severity === 'error' ? '#e25': ev.severity === 'warning' ? '#ea0': '#888'
         var age = Math.round((Date.now() - ev.ts) / 1000)
         return '<div style="padding:6px 10px;border-bottom:1px solid #2a2a2a">'
           + '<span style="color:' + c + '">\\u25CF</span> '
           + '<b>' + esc(ev.type) + '</b> <span style="color:#555">' + age + 's ago</span>'
           + '<div style="color:#aaa;margin:2px 0">' + esc(ev.message) + '</div>'
-          + (ev.hint ? '<div style="color:#98c379;font-size:11px">\\u2192 ' + esc(ev.hint) + '</div>' : '')
+          + (ev.hint ? '<div style="color:#98c379;font-size:11px">\\u2192 ' + esc(ev.hint) + '</div>': '')
           + '</div>'
       }).join('')
     }

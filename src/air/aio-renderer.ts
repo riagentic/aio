@@ -96,7 +96,7 @@ export function _setDocument(doc: AnyDoc): void {
 
 /** The document AIR is rendering into. Components that need document-level
  *  access (listeners, focus) should use this instead of the global `document`,
- *  so they work under testUI/SSR where there is no global document (risoto #3).
+ *  so they work under testUI/SSR where there is no global document.
  *  Returns null when there is no DOM at all — always guard the result. */
 export function _getDocument(): AnyDoc {
   return _doc;

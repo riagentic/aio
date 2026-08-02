@@ -160,7 +160,7 @@ the component's render** — the read is what subscribes the component:
 
 ```tsx
 // ✅ reactive — `.value` read during render subscribes this component
-<div style={{ color: theme.value === "dark" ? "#eee" : "#111" }} />
+<div style={{ color: theme.value === "dark" ? "#eee": "#111" }} />
 
 // ✅ reactive — a raw signal in the style object is auto-bound per-property
 <div style={{ color: colorSignal }} />

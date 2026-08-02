@@ -1,4 +1,4 @@
-// risoto 2026-07-27: a dispatch that changes NOTHING used to trigger a
+// a field report: a dispatch that changes NOTHING used to trigger a
 // FULL-STATE broadcast. The full-state branch is the fallback when there are
 // no patches to send — and with any ticking field (a clock cell) the
 // "unchanged since last full send" guard never holds, so every idempotent

@@ -1,7 +1,7 @@
 // Regression: adjacent dynamic text children where a LEADING child is an empty
-// string must still diff the following text nodes on re-render. risoto renders
-//   <div>{pending ? "~" : ""}{sol.toFixed(9)} SOL</div>
-// → h("div", null, "" , "61.000000000", " SOL"). When `pending` stays false the
+// string must still diff the following text nodes on re-render. a field report renders
+//   <div>{pending ? "~": ""}{sol.toFixed(9)} SOL</div>
+// → h("div", null, "", "61.000000000", " SOL"). When `pending` stays false the
 // leading child is always "", and a signal-driven number change (61→62) was not
 // reflected in the DOM (frozen one value behind) — the electron balance bug.
 
@@ -25,7 +25,7 @@ Deno.test("adjacent text children with leading empty string update on signal cha
   _setDocument(doc);
   const sol = signal(61);
   const pending = signal(false);
-  // Exactly risoto's shape: {pending?"~":""}{number}" SOL"
+  // Exactly one app's shape: {pending?"~":""}{number}" SOL"
   const App = () =>
     h(
       "div",

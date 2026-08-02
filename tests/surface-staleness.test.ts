@@ -1,4 +1,4 @@
-// inews R4 🔴 regression — ui.surface() staleness after a memo-skip.
+// a field report R4 🔴 regression — ui.surface() staleness after a memo-skip.
 //
 // Sequence that corrupted the surface:
 //   1. parent re-renders for its OWN reason → child is auto-memo SKIPPED

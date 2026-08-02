@@ -1,4 +1,4 @@
-// risoto 2026-07-26: a wallet wants `synchronous = FULL` for its own data —
+// a field report: a wallet wants `synchronous = FULL` for its own data —
 // aio's default (WAL + NORMAL) is right for a cache and wrong for seeds, and
 // there was no way to say so from aio.run().
 import { assertEquals } from "@std/assert";

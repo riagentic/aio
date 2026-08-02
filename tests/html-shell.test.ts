@@ -1,4 +1,4 @@
-// AIO-423 (realitio): the HTML shell must ship a responsive `<meta viewport>` by
+// AIO-423: the HTML shell must ship a responsive `<meta viewport>` by
 // default (mobile was broken by default — Chrome fell back to a 980px layout),
 // overridable via ui.viewport, opt-out-able with `false`, plus a ui.head escape
 // hatch for meta/OG/favicon/fonts.

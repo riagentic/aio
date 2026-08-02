@@ -80,7 +80,7 @@ registry, and refuses a move that would break it:
 
 ```
 ✗ v1.0.0-alpha42 would break this app — 1 removed API(s) still in use:
-  src/cell/mdview.ts:61
+  src/cell/a field report.ts:61
     cell config key 'machine:' was removed in alpha27 — guards are a guard line
     — `if (s.status !== "idle") return;`. Migrate: docs/upgrade/restructure.md
     — or run it unchanged on the version it was written for:

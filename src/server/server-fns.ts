@@ -57,7 +57,7 @@ export function serverFns<T extends FnMap>(
 
 /** Evaluate a namespace's access rule for a network caller. The predicate form
  *  also receives the invoked `fn` name and its `args`, so a namespace can do
- *  per-function or row-level authz (realitio); existing `(user)` predicates
+ *  per-function or row-level authz; existing `(user)` predicates
  *  ignore the extra params, so this is backwards-compatible. */
 export function serverFnAllowed(
   ns: string,

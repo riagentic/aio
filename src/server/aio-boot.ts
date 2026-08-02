@@ -30,7 +30,7 @@ import {
 /** B1/AIO-416: replay each sync cell's committed op-log into state at boot.
  *  `sync: true` cells are excluded from KV, and their op-log was only ever
  *  replayed when a CLIENT connected — so a server restart with no client online
- *  came back with EMPTY sync cells (silent data loss; the TBD non-admin-login
+ *  came back with EMPTY sync cells (silent data loss; a non-admin-login
  *  bug). This folds every committed op back through the composed reducer — the
  *  same path a live op takes — after KV restore + onRestore and before the first
  *  dispatch/broadcast. Pure fold: no broadcast, no effects, no server needed.
@@ -145,6 +145,9 @@ export interface BootConfig<S> {
    *  WAL + synchronous=NORMAL). An app whose data is expensive to lose — a
    *  wallet, a ledger — wants `synchronous = FULL`; a cache does not. */
   dbPragmas?: string[];
+  /** Verify the app database at boot and recover from a snapshot if it is
+   *  damaged — see db-integrity.ts. */
+  checkIntegrityOnBoot?: boolean;
   /** Action types whose payload the journal must NOT record — forwarded from
    *  the app config (a passphrase argument must not land in a recovery file). */
   redactActions?: readonly string[];
@@ -178,7 +181,7 @@ export interface BootConfig<S> {
   getState: () => Record<string, unknown>;
   /** Late-bound reportOpts getter for persistence manager */
   getReportOpts: () => ReportErrorOpts;
-  /** Opt-in durable action journal (risoto #3) — SIGKILL/power-cut recovery of
+  /** Opt-in durable action journal — SIGKILL/power-cut recovery of
    *  the debounce-window tail. bootStorage creates it, the persistence manager
    *  advances its watermark, _run appends + replays. Undefined/false ⇒ off. */
   journal?: boolean;
@@ -191,9 +194,9 @@ export interface BootResult<S> {
   kvDb: SkvInstance | null;
   asyncDb: DB | null;
   persistence: PersistenceManager;
-  /** Durable action journal (risoto #3) — null unless `journal: true`. */
+  /** Durable action journal — null unless `journal: true`. */
   journal: Journal | null;
-  /** Boot migration + shape-drift picture (risoto #1) — undefined when nothing
+  /** Boot migration + shape-drift picture — undefined when nothing
    *  was restored. Surfaced live via `am migrations`. */
   migrations: MigrationSummary | undefined;
   syncHandler: ServerSyncHandler | undefined;
@@ -234,7 +237,7 @@ export async function bootStorage<S>(
   // `auth.db`, `tls/`, `meta.json`, the journal and any previously-written
   // `state.db` stay under the app home — so an app that resolves its own data
   // root ends up with its files split across two places, one of which it is no
-  // longer looking at. Risoto found a complete, stale, unguarded wallet
+  // longer looking at. one app found a complete, stale, unguarded wallet
   // database that way (2026-07-28). `appDir` is the knob that moves everything;
   // say so once, at the moment the split is created.
   if (dbPathOverride && dbPathOverride !== ":memory:" && !cfg.appDir) {
@@ -252,7 +255,7 @@ export async function bootStorage<S>(
   // ── 1. SQLite ─────────────────────────────────────────────────────
   const dbKeys = dbSchema ? Object.keys(dbSchema) : [];
 
-  // AIO-419 (risoto): a `db:` table named after a cell's OBJECT slice silently
+  // AIO-419: a `db:` table named after a cell's OBJECT slice silently
   // overwrites that slice with a raw row array at boot (loadTables does
   // `state[name] = rows`), so the cell's methods explode — `s.nfts.filter(…)`
   // when `s` is now the array. A table mapping to an ARRAY slice is the intended
@@ -283,6 +286,25 @@ export async function bootStorage<S>(
     try {
       const dbPath = dbPathOverride ?? appDirs(appId, cfg.appDir).stateDb;
       asyncDb = createDB(dbPath, dbPragmas ? { pragmas: dbPragmas } : {});
+      // Integrity BEFORE schema: a damaged file must be dealt with before
+      // anything writes to it. When the file was quarantined (and possibly
+      // replaced from a snapshot) the handle is dead — reopen on what is there
+      // now, which may be the restored snapshot or an empty database.
+      if (cfg.checkIntegrityOnBoot) {
+        const { checkAndRecover } = await import("./db-integrity.ts");
+        const outcome = await checkAndRecover({
+          db: asyncDb,
+          dbPath,
+          log: {
+            info: (m: string) => log.info(m),
+            warn: (m: string) => log.warn(m),
+            error: (m: string) => log.error(m),
+          },
+        });
+        if (outcome.action === "restored" || outcome.action === "quarantined") {
+          asyncDb = createDB(dbPath, dbPragmas ? { pragmas: dbPragmas } : {});
+        }
+      }
       if (dbSchema && Object.keys(dbSchema).length) {
         await initSchema(asyncDb, dbSchema);
       }
@@ -308,10 +330,18 @@ export async function bootStorage<S>(
 
   if (syncCellIds.length > 0) {
     if (asyncDb) {
-      const { SYNC_SCHEMA } = await import("../sync/compact.ts");
+      const { applySyncMigrations, SYNC_SCHEMA } = await import(
+        "../sync/compact.ts"
+      );
       for (const sql of SYNC_SCHEMA) {
         await asyncDb.execute(sql);
       }
+      // `CREATE TABLE IF NOT EXISTS` cannot add a column to a table an older
+      // aio already created, so schema changes need their own step.
+      await applySyncMigrations(asyncDb, {
+        debug: (m: string) => log.debug("sync", m),
+        warn: (m: string) => log.warn("sync", m),
+      });
       const { createServerSyncHandler } = await import(
         "../sync/server-handler.ts"
       );
@@ -449,7 +479,7 @@ export async function bootStorage<S>(
         log,
       )
       : [];
-    // Shape drift (risoto #1): the RAW stored snapshot vs the declared
+    // Shape drift: the RAW stored snapshot vs the declared
     // `initialState`. Cells a migration already handled this boot are skipped;
     // the rest reveal a stored field the current shape no longer declares —
     // the silent stale-shape load a rename/removal without a version bump
@@ -479,7 +509,7 @@ export async function bootStorage<S>(
   // ── 5b. Stored-but-undeclared cells: preserved, never dropped ─────
   // A cell rename/split used to destroy the old cell's data silently: the
   // slice was restored into state, no declared cell owned it, and the first
-  // persist rewrote the document without it (space-invaders field report — a
+  // persist rewrote the document without it (a field report — a
   // leaderboard recovered from SQLite free pages). Now: the slice is carried
   // into every future persisted document verbatim, stripped from RUNTIME
   // state (no cell owns it — it must not broadcast), and announced at every
@@ -553,7 +583,7 @@ export async function bootStorage<S>(
       })()
       : undefined;
 
-  // Durable journal (risoto #3) — opt-in, and only where there's a real file to
+  // Durable journal — opt-in, and only where there's a real file to
   // recover from (persisting, not :memory:). The persistence manager advances
   // its watermark after each committed snapshot; _run appends + replays.
   const journal: Journal | null =
@@ -703,7 +733,7 @@ export function detectShapeDrift(
       return;
     }
     // A declared collection with entries, stored empty: the restore wipes
-    // whatever `state:` seeded (risoto 2026-07-28 #2 — a curated token registry
+    // whatever `state:` seeded (a field report #2 — a curated token registry
     // vanished, every holding rendered as a raw mint, nothing said). `state:`
     // reads like a default and behaves like a first-run value; both are
     // legitimate, so this is reported rather than overruled — unless the cell
@@ -730,7 +760,7 @@ export function detectShapeDrift(
       // dynamic-key map whose keys are DATA, not schema, e.g. balances keyed by
       // pubkey). Its stored keys are all legitimate, so don't flag them and
       // don't recurse — exactly how an array's elements are treated as data
-      // (risoto 2026-07-25 field report: this was a 70-warning wall on boot).
+      //.
       if (Object.keys(decl).length === 0) return;
       for (const key of Object.keys(stor)) {
         if (out.length >= MAX_DRIFT) return;

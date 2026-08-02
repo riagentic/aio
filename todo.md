@@ -30,11 +30,11 @@ tracks only what remains.
 - **The upgrade tax** — every renamed option is reported and mechanically
   rewritten by `aiol --safe-fix` (alpha35), and nothing renamed is ever removed
   inside a major (`docs/basics/semver-policy.md`).
-- **Cells-aware dev watch** (quant Bad #3) — a cell edit restarts the app
-  instead of warning about it (alpha35, `docs/build/dev-mode.md`).
-- **`aio/server` import split** (risoto) — server-only symbols live behind
-  `aio/server` exclusively (alpha37), so a browser bundle cannot reach them by
-  construction instead of the graph validator catching it afterwards.
+- **Cells-aware dev watch** — a cell edit restarts the app instead of warning
+  about it (alpha35, `docs/build/dev-mode.md`).
+- **`aio/server` import split** — server-only symbols live behind `aio/server`
+  exclusively (alpha37), so a browser bundle cannot reach them by construction
+  instead of the graph validator catching it afterwards.
 - **One data directory** (alpha38) — everything an app writes is under
   `~/.<appId>/`, `data/` is the whole backup, migrated automatically; `am data`
   / `am backup` / `am restore` (`docs/persistence/where-files-live.md`).
@@ -60,7 +60,7 @@ that is the gate working, not a setback.
 
 ## Remaining before beta
 
-**space-invaders report — remaining after the 2026-07-31 batch** (shipped that
+**a field report report — remaining after the 2026-07-31 batch** (shipped that
 day: orphan-cell preservation, reference-based TT + `skipActions`, am instance
 identity + `AIO_APPS_DIR`-scoped lock dir, `am start` GUI fail-fast, useCell
 deprecation + aiol rule, aiol empty-state false positive, pressure hint):
@@ -201,7 +201,7 @@ repo = production build + run of the default target; `--dev` for the dev server;
       breaking means per phase, and that there is no `@experimental` surface;
       the beta→1.0 guide gets written when beta exists.
 
-## From the risoto field report (2026-07-26) — what's left
+## From the a field report (2026-07-26) — what's left
 
 Closed in alpha36: worker peer-reads now throw (they returned the peer's
 declared default forever), the inline-style "freeze" was stale folklore (pinned
@@ -238,9 +238,10 @@ honoured, `broadcastTT` coalesced, `am cost` weighing unattributed bytes.
 
 - [ ] **Profile integrity.** `quick_check` at boot → restore from a rolling
       `VACUUM INTO` snapshot → quarantine the damaged file. ~150 lines every app
-      that persists user data eventually wants; risoto wrote its own. Would be
-      `db.snapshot(path)` + `checkIntegrityOnBoot: true`. Feature-sized, so it
-      waits for a second app to ask — but it is the strongest remaining ask.
+      that persists user data eventually wants; a field report wrote its own.
+      Would be `db.snapshot(path)` + `checkIntegrityOnBoot: true`.
+      Feature-sized, so it waits for a second app to ask — but it is the
+      strongest remaining ask.
 - [x] **A "degraded" escalation hook.** DONE (alpha40) — `degraded(name)` /
       `degradedReport()`: N consecutive failures of a named best-effort op
       escalate exactly once (one structured event, not per-occurrence spam) plus
@@ -279,7 +280,7 @@ Refused this round, with reasons:
       prerequisite: "swap the binary, keep the data" is only honest now that the
       data is in one place the binary never touches.
 
-## From the llama.master field report — what's left
+## From the a field report — what's left
 
 Round one (alpha38) closed all eight ranked items; the reporter verified each in
 their own app and moved 7 → 9.2. Round two (after ~1000 more lines) is closed
@@ -296,8 +297,8 @@ the live `am dispatch ui:go` revert (6/6 and 3/3 clean on re-test), the
 `<select>` bug (theirs, not aio's), and "no `am --json`" (it exists, and is in
 `am help` — a discoverability miss).
 
-Round three (llama-master's open list) closed: selectors bind under `testCell`,
-`AppDirs.cache` restored, the false `appId` warning, per-method perf budgets,
+Round three closed: selectors bind under `testCell`, `AppDirs.cache` restored,
+the false `appId` warning, per-method perf budgets,
 `schedule.every({ skipIfRunning })`, `testUI(App, name, opts, fn)`, and a
 readable `waitFor` timeout.
 
@@ -338,8 +339,8 @@ Still open:
 - [ ] **`am eval '<expr over cells>'`.** `am state`, `am sql` and `--json` cover
       most of it; a general evaluator on a dev-only route is a real security
       surface and needs a design, not a quick add.
-- [ ] **`schedule.every` with "skip if still running"** (llama-master #3) —
-      every polling cell hand-rolls an `inFlight` guard.
+- [ ] **`schedule.every` with "skip if still running"** — every polling cell
+      hand-rolls an `inFlight` guard.
 - [ ] **Discoverability, twice over.** `pitfalls.md` existed and they didn't
       find it; `am --json` was documented and they didn't find it. Both were
       read-the- docs failures, and two in one report is a signal about the docs'
@@ -362,7 +363,7 @@ comment line, `am surface` marks truncation and gained `--full`.
 - [ ] **Controlled `<select>` losing its value when options re-render (#10).**
       `tests/select-controlled.test.tsx` pins the correct behaviour and passes,
       so either it is already fixed or the trigger is Electron-specific.
-- [ ] **A `progress` primitive (#10 / llama-master #1).** Every long job
+- [ ] **A `progress` primitive (#10 / a field report #1).** Every long job
       hand-rolls `{step, steps[], progress, lines[]}` plus a callback that
       writes it into state. The trap that made this dangerous (the proxy write)
       is now loud, so what remains is boilerplate, not danger — which lowers the
@@ -372,15 +373,15 @@ comment line, `am surface` marks truncation and gained `--full`.
       scratch scripts. `am state`, `am sql` and `--json` cover most of it today;
       a general evaluator is a real security surface on a dev-only route, so it
       needs a design, not a quick add.
-- [ ] **`schedule.every` with "skip if still running"** (llama-master #3) —
-      every polling cell hand-rolls an `inFlight` guard.
+- [ ] **`schedule.every` with "skip if still running"** — every polling cell
+      hand-rolls an `inFlight` guard.
 
 ## Deliberate deferrals (with reasons, so they aren't re-litigated)
 
 - **`scratch:` cell slice** (machine M4) — duplicate: `ui.exclude` +
   `persist.exclude` on a field already gives private, non-broadcast,
   non-persisted state (`docs/state/cell-visibility.md`).
-- **`listensTo` low-latency fan-out queue** (quant) — one app, one perf profile;
+- **`listensTo` low-latency fan-out queue** — one app, one perf profile;
   `on`/`watch`/effects cover the sanctioned path.
 - **serverFn response writes** (cookies/status/headers out) — that is HTTP, and
   `route()` owns it; `serverRequest()` covers the read half.
@@ -391,29 +392,30 @@ comment line, `am surface` marks truncation and gained `--full`.
 
 ## Residue from the field reports (reports purged 2026-07-25)
 
-`feedback/*.md` (glm-audit, inews, machine, mdview, quant, realitio, risoto,
-tbd) were retired once every item was closed, refused with a reason, or listed
-here. They live on in git history; these are the only pieces that outlived them:
+`feedback/*.md` (a field report, a field report, machine, a field report, a
+field report, a field report, a field report) were retired once every item was
+closed, refused with a reason, or listed here. They live on in git history;
+these are the only pieces that outlived them:
 
-- [ ] **An end-to-end CRUD example** (realitio Bad#10, the one item they rated
-      _high_) — `examples/` is counter, todo, and the per-target smoke fixtures.
-      "The pieces are documented; the integration story isn't."
-- [ ] **`testCell<S>` inference from the cell** (tbd B8; M7 is the same root —
-      type-safe cell config). Deliberately not rushed: it changes inference in a
-      helper every test file uses.
-- [ ] **Parameterized selectors** `byId(id)` (realitio, low) — plain selectors
-      work in the browser since alpha23; the parameterized form is the gap.
+- [ ] **An end-to-end CRUD example** (a field report Bad#10, the one item they
+      rated _high_) — `examples/` is counter, todo, and the per-target smoke
+      fixtures. "The pieces are documented; the integration story isn't."
+- [ ] **`testCell<S>` inference from the cell** (a field report B8; M7 is the
+      same root — type-safe cell config). Deliberately not rushed: it changes
+      inference in a helper every test file uses.
+- [ ] **Parameterized selectors** `byId(id)` — plain selectors work in the
+      browser since alpha23; the parameterized form is the gap.
       `items.find(...)` inline works.
-- [ ] **Cross-runtime `seed()` hook** (tbd M6, low) — convenience; `onRestore`
-      covers the server side.
-- [ ] **`useLocal` tuple form under `noUncheckedIndexedAccess`** (realitio, low)
-      — the object form is the documented workaround. Verify, then close.
-- [ ] **`am instances`** as the "what's running" command (realitio, low) —
-      `am discover` + amui cover most of it.
-- [ ] **`aio ship` auto-update client** (risoto #9, deferred as large) — the
-      signing foundation shipped; the client half is the remaining piece.
-- [ ] **Headless-electron e2e** (risoto #5) — parked: headless Electron stalls
-      in this environment, so it needs a real desktop session.
+- [ ] **Cross-runtime `seed()` hook** — convenience; `onRestore` covers the
+      server side.
+- [ ] **`useLocal` tuple form under `noUncheckedIndexedAccess`** — the object
+      form is the documented workaround. Verify, then close.
+- [ ] **`am instances`** as the "what's running" command — `am discover` + amui
+      cover most of it.
+- [ ] **`aio ship` auto-update client** — the signing foundation shipped; the
+      client half is the remaining piece.
+- [ ] **Headless-electron e2e** — parked: headless Electron stalls in this
+      environment, so it needs a real desktop session.
 
 ## Post-1.0 insurance (policy, not tasks)
 

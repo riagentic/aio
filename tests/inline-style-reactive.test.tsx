@@ -12,7 +12,7 @@ import { bindCell } from "../mod.ts";
 //
 // History worth keeping: it genuinely froze at mount once, and the warning
 // outlived the fix. The stale advice ("convert it to a class") cost a real app
-// repeated debugging sessions (risoto, 2026-07-26), so the behavior is pinned
+// repeated debugging sessions, so the behavior is pinned
 // here on both paths instead of described in prose.
 const bx = cell("bx", {
   state: { w: 10 },

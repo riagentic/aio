@@ -89,7 +89,7 @@ export function createBroadcaster(deps: BroadcastDeps): Broadcaster {
 
   // Both the WS and UDS broadcasters coalesce through the SAME primitive
   // (createCoalescer) so their throttle + never-drop buffer can never diverge —
-  // the class of bug behind risoto 2026-07-19 (UDS dropped patches while WS
+  // the class of bug behind a field report (UDS dropped patches while WS
   // buffered them). The coalescer owns timing + buffering; this flush owns the
   // WS-specific per-client send. `force` (a full-strategy cell changed → only
   // expressible as full state) skips the patch path so its change is never lost.
@@ -183,8 +183,7 @@ export function createBroadcaster(deps: BroadcastDeps): Broadcaster {
           // Anything that decides to send a whole state says WHY. The
           // threshold path above already did; this fallback did not, so the
           // expensive case was the invisible one — 438 KB frames, 28 of them
-          // in 20s, and nothing in the log to point at them (risoto,
-          // 2026-07-27). Naming the reason is what turns "my app is slow"
+          // in 20s, and nothing in the log to point at them. Naming the reason is what turns "my app is slow"
           // into a one-line fix.
           debug?.(
             `broadcast: sending full state (${fullJsonForTracking.length}B) — ${

@@ -58,7 +58,7 @@ envelope + SQLite + surface diet → B5 full-matrix validation gates → beta.
 | 4. Custom renderer (AIR)                                               | ✅ keep — with eyes open                    | hardened through ~30 real bugs; a rewrite would discard exactly that history                                      |
 | 5. Deno-only                                                           | ✅ keep                                     | it's _why_ the DX is clean                                                                                        |
 | — 390 public symbols                                                   | ✂️ trim to a small core + extras tier       | perfection over 390 symbols is impossible; over ~60 it's a habit                                                  |
-| — KV + SQLite dual persistence                                         | ✂️ reopen: SQLite-only                      | one engine, one mental model (risoto asked for exactly this)                                                      |
+| — KV + SQLite dual persistence                                         | ✂️ reopen: SQLite-only                      | one engine, one mental model                                                                                      |
 | — 10-target matrix                                                     | ✂️ tier it: 2 first-class, rest best-effort | focus is a feature                                                                                                |
 
 Tearing down bets 1–3 is one coherent restructure, not three separate ones —
@@ -162,8 +162,8 @@ real DX.
 **What the evidence says.** Module-global state is why we have
 `_resetCellRegistry()` + `_resetBrowserSync()` + `resetFlows()` +
 `resetPending()` sprinkled through every test file; why two apps can't share a
-process; why `libraryMode` had to be invented (tbd report B5) as a patch; why
-test isolation is a discipline instead of a property.
+process; why `libraryMode` had to be invented as a patch; why test isolation is
+a discipline instead of a property.
 
 **The brave alternative.** Keep the magic, scope the state:
 
@@ -220,9 +220,9 @@ Today plain cells persist to Deno KV, sync cells to SQLite — two engines, two
 mental models, and KV's API is still unstable upstream. With patches as the one
 currency (Bet 2) the natural store is **one SQLite op-log + snapshots for
 everything** — which is also exactly what the local-first model (Bet 1) wants,
-and what risoto asked for ("SQLite as first-class default"). I know Deno.Kv was
-a locked decision; the local-first pivot is the new fact that justifies
-reopening it.
+and what a field report asked for ("SQLite as first-class default"). I know
+Deno.Kv was a locked decision; the local-first pivot is the new fact that
+justifies reopening it.
 
 ### Trim 3 — Target tiers ✂️
 

@@ -1,5 +1,5 @@
 // The module-errors page must not bury the one real fatal under standing
-// warnings (risoto 2026-07-26: "N-1 are pre-existing, never-fatal warnings and
+// warnings (a field report: "N-1 are pre-existing, never-fatal warnings and
 // exactly 1 is the real fatal" — a 10-second fix became an archaeology dig).
 import { assert, assertStringIncludes } from "@std/assert";
 import { generateDiagnosticHTML } from "../src/server/server-html-diagnostic.ts";

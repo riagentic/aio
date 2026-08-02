@@ -17,8 +17,7 @@ export function makeUnboundGuard(
   raw: unknown,
 ): (...args: unknown[]) => Promise<void> {
   // Calling a cell method before its runtime is booted is ALWAYS a bug — there
-  // is no runtime to dispatch to, so the write would silently vanish (risoto:
-  // a plain `Deno.test` that called `network.setCluster(…)` read back stale
+  // is no runtime to dispatch to, so the write would silently vanish (a field report: // a plain `Deno.test` that called `network.setCluster(…)` read back stale
   // state with no error). Silently losing a state mutation is the scariest
   // failure mode, so throw loudly regardless of dev/prod. After bind, the real
   // dispatching method replaces this guard, so only the never-legitimate

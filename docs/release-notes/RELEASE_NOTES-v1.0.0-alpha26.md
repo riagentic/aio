@@ -5,20 +5,19 @@ integration finished here is `am create --target`, which shipped half-wired).
 
 ## Every open field-report P1 is closed
 
-- **`Deno is not defined` blank screen (machine U1)** — the graph validator
-  always ran at dev boot, but its findings went to the debug channel. They are
-  now loud in every `deno task dev` terminal: blocking client-breaks with
-  `file:line`, conditional `Deno.*` usage with the exact `*.server.ts` fix.
-- **Silent post-await write loss (inews R4)** — `s.users.find(…)` handed back a
-  detached snapshot: a write after an `await` vanished in prod while `testCell`
-  applied it. `find` now resolves the element's index and returns the live proxy
-  — writes batch exactly like `s.users[i].field = x`.
-- **`ui.surface()` staleness (inews R4 🔴)** — after a parent re-render
-  memo-skipped a child, the child's own signal-driven branch swap (login form →
-  header) updated the DOM but not the walked tree: the new button was visible
-  yet unresolvable. Root cause: the memo skip never re-pointed the component
-  instance at the fresh tree vnode. One-line fix, pinned by a structural-swap
-  regression test.
+- **`Deno is not defined` blank screen** — the graph validator always ran at dev
+  boot, but its findings went to the debug channel. They are now loud in every
+  `deno task dev` terminal: blocking client-breaks with `file:line`, conditional
+  `Deno.*` usage with the exact `*.server.ts` fix.
+- **Silent post-await write loss** — `s.users.find(…)` handed back a detached
+  snapshot: a write after an `await` vanished in prod while `testCell` applied
+  it. `find` now resolves the element's index and returns the live proxy —
+  writes batch exactly like `s.users[i].field = x`.
+- **`ui.surface()` staleness** — after a parent re-render memo-skipped a child,
+  the child's own signal-driven branch swap (login form → header) updated the
+  DOM but not the walked tree: the new button was visible yet unresolvable. Root
+  cause: the memo skip never re-pointed the component instance at the fresh tree
+  vnode. One-line fix, pinned by a structural-swap regression test.
 
 ## CRDT sync: the catch-up cursor is now race-free
 

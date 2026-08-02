@@ -203,7 +203,7 @@ passes `--exclude` flags to `deno compile` for the big directories (electron
 ~254MB, esbuild ~11MB, react ~5MB). Symlinks are restored after compile, even on
 failure.
 
-## `aio/server` — the explicit server-only surface (risoto #1)
+## `aio/server` — the explicit server-only surface
 
 Server-only symbols (SQLite `createDB`/`DEFAULT_PRAGMAS`, CLI/UDS `connectCli`/
 `connectCliUDS`, `aio ship` signing) live behind **`aio/server`**. The whole

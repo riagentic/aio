@@ -1,4 +1,4 @@
-// risoto 2026-07-24 #7 — schedule.blocking(): a named, cancellable, backpressured
+// a field report #7 — schedule.blocking(): a named, cancellable, backpressured
 // worker pool that runs self-contained functions OFF the main isolate so FFI/CPU
 // work can't freeze rendering. Tests drive the pool factory directly (each test
 // disposes → no leaked workers).

@@ -24,7 +24,7 @@ export type SelectorReturn<D> = D extends (s: infer _S, ...a: any[]) => infer R
 /** Bound selectors surface on the cell as accessors. A plain selector's EXTRA
  *  params (beyond the state slice) become the accessor's args —
  *  `byId: (s, id: string) => T` → `cell.byId(id)`; `total: (s) => n` →
- *  `cell.total()`. Deps-form selectors are always zero-arg. (risoto, realitio Bad#1) */
+ *  `cell.total()`. Deps-form selectors are always zero-arg. */
 export type SelectorAccessors<Sel> = {
   [K in keyof Sel]: SelectorAccessorFn<Sel[K]>;
 };
@@ -61,8 +61,20 @@ export type MethodsCellConfig<
   /** Cancellation triggers per ASYNC METHOD — { methodKey: [actionsOrTypes] }.
    *  A trigger action aborts the method's in-flight calls; the method observes
    *  it via `s.$signal` (perfect-aio D1). Accepts bound methods (.type) or
-   *  plain type strings. */
-  cancelOn?: Record<string, (string | { type: string })[]>;
+   *  plain type strings.
+   *
+   *  `"self"` means NEWEST WINS: a new call aborts the calls already running,
+   *  never itself — the shape every search-as-you-type, folder scan and
+   *  autocomplete needs. It also says what a self-reference cannot:
+   *  the cell's own bound methods don't exist yet inside its `cell()` literal.
+   *
+   *  ```ts
+   *  cancelOn: { open: "self", search: ["self", nav.leave] }
+   *  ``` */
+  cancelOn?: Record<
+    string,
+    "self" | (string | { type: string })[]
+  >;
   /** Selectors — derived values, auto-scoped to cell state.
    *  Plain form: `(s) => R` receives the cell's own slice.
    *  Deps form: `{ deps: readonly string[]; fn: (s, ...depSlices) => R }` — deps are
@@ -118,7 +130,7 @@ export type MethodsCellConfig<
    *  that does dangerous work — never a counter.
    *  See docs/state/cell-workers.md. */
   worker?: boolean;
-  /** Transactional async methods (risoto #2): reads see a STABLE snapshot taken
+  /** Transactional async methods: reads see a STABLE snapshot taken
    *  at method entry (an `await` never changes them), and writes commit
    *  ATOMICALLY at return — one batch, all-or-nothing (a throw/cancel discards).
    *  Kills the read-after-await class. Opt-in; sync methods are already atomic.

@@ -1,4 +1,4 @@
-// risoto CRITICAL #0 (2026-07-24): `am dispatch` (→ trojan POST /dispatch) used
+// a field report CRITICAL #0 (2026-07-24): `am dispatch` (→ trojan POST /dispatch) used
 // to ack ANY action type with {ok:true} and fire-and-forget, so a bogus method,
 // or the `cell.method` (dot) form the reducer's `cell:method` (colon) form never
 // matched, silently no-op'd under a green "ok". Now: a method-form type is

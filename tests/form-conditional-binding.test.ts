@@ -1,4 +1,4 @@
-// risoto 2026-07-16d: a conditional ELEMENT binding whose insertion anchor is
+// a field report: a conditional ELEMENT binding whose insertion anchor is
 // a direct child of <form> froze at its mount-time value, while the same
 // binding under any other container (and sibling text bindings in the same
 // form) updated. These tests pin the fixed behavior across every shape in the

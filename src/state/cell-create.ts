@@ -34,11 +34,11 @@ export function cell<
   States extends string = string,
   // Captured from config.selectors (inside MethodsCellConfig — NOT an
   // intersection, which would disrupt method `s` inference) so bound selector
-  // accessors surface on the return type instead of being inert config (risoto).
+  // accessors surface on the return type instead of being inert config.
   // Default MUST be an empty record, not Record<string, …>: that default put
   // a string INDEX SIGNATURE on every selector-less cell's type, which widened
   // `keyof cellRef` to `string` and collapsed every mapped type over the cell
-  // ref (e.g. testCell's typed send surface) to {}. (tbd B8)
+  // ref (e.g. testCell's typed send surface) to {}.
   Sel extends Record<string, SelectorDef<S>> = Record<never, SelectorDef<S>>,
 >(
   name: N,
@@ -49,7 +49,7 @@ export function cell<
   // generators/mixed actions here too was tried but degraded method `s`
   // inference, so the typed surface stays scoped to methods.) `Sel` is captured
   // from `config.selectors` so bound selector accessors (`cell.total()`) are
-  // type-accessible instead of inert config (risoto).
+  // type-accessible instead of inert config.
 ): // deno-lint-ignore no-explicit-any
 & CellDef<N, MethodsToCreators<M>, any, S>
 & DirectCalling<N, M>

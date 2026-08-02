@@ -1,9 +1,10 @@
-// ship.ts — `aio ship` core (risoto #9): a verifiable release manifest for a
+// ship.ts — `aio ship` core: a verifiable release manifest for a
 // compiled binary. Ties together the reproducible artifact (SHA-256), the
 // least-privilege capability manifest (what --allow-* it actually needs, never
 // -A), and an optional Ed25519 signature over the digest. The auto-update
 // CHANNEL (serving + fetching + swapping) is separate infra; this is the
 // signable, verifiable artifact it would distribute.
+import { join } from "@std/path";
 import {
   type Capabilities,
   permissionFlags,
@@ -158,7 +159,11 @@ async function collectSources(
   const out: { content: string }[] = [];
   const walk = async (d: string): Promise<void> => {
     for await (const e of Deno.readDir(d)) {
-      const p = `${d}/${e.name}`;
+      // `join`, not string concatenation: everything else in the codebase
+      // builds paths with @std/path, and hardcoding "/" produced mixed
+      // separators on Windows (`src\sub/file.ts`) that only worked by
+      // accident of Deno's normalisation.
+      const p = join(d, e.name);
       if (e.isDirectory) {
         if (e.name === "node_modules" || e.name.startsWith(".")) continue;
         await walk(p);

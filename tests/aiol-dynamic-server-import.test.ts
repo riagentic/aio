@@ -1,7 +1,7 @@
-// risoto 2026-07-26: `const { createDB } = await import("aio")` — the lazy
+// a field report: `const { createDB } = await import("aio")` — the lazy
 // server-only pattern the docs recommend — was invisible to the static
 // alpha37 migration rule and to --safe-fix, so it failed only at RUNTIME
-// ("createDB is not a function"; risoto's NFT cache silently stopped
+// ("createDB is not a function"; one app's NFT cache silently stopped
 // persisting). checkUpgrade now flags the dynamic spelling and
 // fixDynamicServerEntryImport rewrites it, without touching dynamic
 // imports of browser-safe symbols.

@@ -115,7 +115,7 @@ export function createCellWorker(
       new Error(
         // The old text ("does the app entry call aio.run()?") named the one
         // thing that is almost always TRUE, and cost a bisect to rule out
-        // (risoto, 2026-07-26). A worker cell re-imports the app entry, so
+        //. A worker cell re-imports the app entry, so
         // every top-level side effect in it runs again inside the worker,
         // before the handshake — ~20ms of file I/O was enough to stall boot.
         // Lead with that, and name the guard.

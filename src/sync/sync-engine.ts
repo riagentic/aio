@@ -38,7 +38,15 @@ export interface SyncEngine {
     action: string,
     payload: unknown,
   ): Promise<void>;
-  handleAck(cell: string, opId: string, serverHlc: HLC): Promise<void>;
+  /** `serverTs` (alpha43+) is the op's cursor position — see the snapshot
+   *  watermark in `handleAck`. Optional: absent on a duplicate re-ack and from
+   *  an older server. */
+  handleAck(
+    cell: string,
+    opId: string,
+    serverHlc: HLC,
+    serverTs?: number,
+  ): Promise<void>;
   /** D11: the server refused this op — drop it, rebase (optimistic view
    *  snaps back), log loudly, surface via the cell's sync.onRejected. */
   handleRejection(cell: string, opId: string, reason: string): Promise<void>;
@@ -81,6 +89,19 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
   // a broadcast and the catch-up rounds that could re-deliver it (a few
   // response batches, each ≤ pendingCap ops). Once evicted, cursor
   // correctness governs again — the set never becomes load-bearing.
+  // The cursor each installed snapshot reflects, per cell.
+  //
+  // A snapshot IS the server's live state, so it already contains every op the
+  // server had applied when it was taken — including the client's OWN ops
+  // whose acks are still in flight. `handleAck` then applied such an op to
+  // confirmed state a second time, and the client's confirmed state diverged
+  // by one application (found while fixing one app's cursor gap: forcing snapshots
+  // made the chaos suite fail with a doubled item). It is the one
+  // confirmed-state mutator that cannot dedup by op id — the snapshot never
+  // enumerates what it contains — so the server states the watermark instead
+  // and the ack carries its own position for comparison.
+  const _snapshotTs = new Map<string, number>();
+
   const APPLIED_IDS_CAP = 2048;
   const _appliedIds = new Map<string, Set<string>>();
   function alreadyApplied(cell: string, id: string): boolean {
@@ -189,7 +210,7 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
       });
     },
 
-    handleAck(cell, opId, serverHlc) {
+    handleAck(cell, opId, serverHlc, serverTs) {
       return withLock(cell, async () => {
         clock.receive(serverHlc);
         // Apply the acked op to confirmed state BEFORE marking it confirmed.
@@ -198,7 +219,15 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
         const pending = (await deps.buffer.getUnconfirmed(cell)).find(
           (o) => o.id === opId,
         );
-        if (pending) {
+        // …unless a snapshot already brought it in. `serverTs <= snapshotTs`
+        // means the op was persisted before the snapshot was taken, so the
+        // snapshot's state includes it; applying it again would double it.
+        // Confirm it, skip the apply. (No serverTs — duplicate re-ack, or an
+        // older server — falls through to the original behaviour.)
+        const snapTs = _snapshotTs.get(cell);
+        const inSnapshot = pending !== undefined && serverTs !== undefined &&
+          snapTs !== undefined && serverTs <= snapTs;
+        if (pending && !inSnapshot) {
           const confirmed = deps.getConfirmedState()[cell] ?? {};
           const next = deps.reducer(
             confirmed,
@@ -399,9 +428,15 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
           const snap = snapshots.get(cell);
           if (snap) {
             deps.setConfirmedState(cell, snap);
+            // The cursor this snapshot reflects — every op at or below it is
+            // already in `snap`, which is what keeps a late ack from applying
+            // one of them twice (see `_snapshotTs`).
+            const snapTs = response.lastServerTs?.[cell];
+            if (typeof snapTs === "number") _snapshotTs.set(cell, snapTs);
             await deps.buffer.saveSnapshot(cell, {
               state: snap,
               hlc: getLW(cell),
+              ...(typeof snapTs === "number" ? { serverTs: snapTs } : {}),
             });
           }
           let newLastHlc: HLC | null = null;
@@ -433,7 +468,16 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
                 op.payload,
                 op.cell,
               );
-              if (next !== null) deps.setConfirmedState(cell, next);
+              // Same guard the ack and remote-op paths carry: `null` is the
+              // contract's no-op, `undefined` is a buggy reducer. Letting it
+              // through set confirmed state to undefined, and the next rebase
+              // read `getConfirmedState()[cell] ?? {}` — every confirmed field
+              // silently gone.
+              if (next === undefined) {
+                _warnUndefReducer(cell, op.action);
+              } else if (next !== null) {
+                deps.setConfirmedState(cell, next);
+              }
             }
             const firstHlc = ops[0]?.hlc;
             if (firstHlc) {
@@ -466,10 +510,17 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
                 : prev?.lastServerTs;
             await deps.buffer.saveMeta(cell, { lastHlc, lastServerTs });
           }
+          // Rebase FIRST, then decide about status. Confirmed state was just
+          // advanced (snapshot above, or the ops loop), and `rebaseCell`
+          // recomputes optimistic = confirmed + unconfirmed and pushes it to
+          // the UI. Returning early on "blocked" skipped that, so a blocked
+          // cell kept showing a view built on the PRE-snapshot confirmed state
+          // — stale precisely while its buffer is full and it most needs the
+          // server's latest.
+          await rebaseCell(cell);
           const s = statuses.get(cell);
           if (s?.status === "blocked") return;
           updateStatus(cell, { status: "syncing" });
-          await rebaseCell(cell);
           updateStatus(cell, {
             status: online ? "online" : "offline",
             lastSync: Date.now(),

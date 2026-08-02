@@ -42,7 +42,7 @@ import type { AioUser } from "./aio-types.ts";
 import { buildBrowserImportMap } from "./server-html.ts";
 import {
   _buildUserResolver,
-  _extractToken,
+  _extractTokenWithSource,
   _timingSafeEqual,
   authFailBudgetExceeded,
   recordAuthFail,
@@ -117,9 +117,26 @@ export function createServer(config: ServerConfig): ServerHandle {
   // auth mode — an app with only `sessions: true` is a per-user app.
   const _baseResolver = _buildUserResolver(config);
   const _sessionResolver = config.sessionResolver;
+  // A LOGIN SESSION does not authenticate an HTTP request from the URL.
+  //
+  // `?token=` is a deliberate fallback for header-less contexts, and those
+  // mostly carry the app KEY — a value meant to be pasted into a share link.
+  // A session token is not: it is long-lived, per-user, and the login flow
+  // delivers it as an HttpOnly cookie or a Bearer header (`handleAuthFlow`'s
+  // own reader ignores the query string entirely). In a URL it lands in
+  // browser history, proxy logs and the `Referer` of every outbound link,
+  // with nothing preventing it.
+  //
+  // The ONE place it stays allowed is the `/ws` handshake: a browser
+  // `new WebSocket(...)` cannot set headers, so for any client without the
+  // cookie the query string is the only channel there. `/ws` URLs are not
+  // navigations, so they carry no Referer. Static `users` / `resolveUser`
+  // tokens are unaffected everywhere, and the loud ?token= warning still
+  // fires (see `_warnTokenInUrl`).
   const _userResolver = _sessionResolver
-    ? async (tok: string) =>
-      _sessionResolver(tok) ?? (_baseResolver ? await _baseResolver(tok) : null)
+    ? async (tok: string, urlBlocked = false) =>
+      (urlBlocked ? null : _sessionResolver(tok)) ??
+        (_baseResolver ? await _baseResolver(tok) : null)
     : _baseResolver;
 
   // Custom routes: reserve the framework namespaces loudly at boot.
@@ -350,7 +367,7 @@ export function createServer(config: ServerConfig): ServerHandle {
       findUserById: config.users
         ? (id) => Object.values(config.users!).find((u) => u.id === id)
         : undefined,
-      // Headless `am surface` (machine M2): render the UI entry in-process
+      // Headless `am surface`: render the UI entry in-process
       // against live cell state — works with zero connected clients. Lazy:
       // happy-dom + the renderer load only when the route is hit.
       renderServerSurface: !prod
@@ -457,7 +474,7 @@ export function createServer(config: ServerConfig): ServerHandle {
       if (authFailBudgetExceeded(clientKey)) {
         return new Response("Too Many Requests", { status: 429 });
       }
-      const token = _extractToken(url, req);
+      const { token, fromUrl } = _extractTokenWithSource(url, req);
       // AUTH-2: with the login flows enabled, the app SHELL is public — a
       // browser must load the UI (code, not state) to show SignIn before it
       // has a session. Everything stateful stays gated: /ws requires a valid
@@ -467,7 +484,11 @@ export function createServer(config: ServerConfig): ServerHandle {
       if (!token && !shellIsPublic) {
         return new Response("Unauthorized", { status: 401 });
       }
-      const user = token ? await _userResolver(token) : null;
+      // A URL-borne session token is refused everywhere except the WS
+      // handshake, which has no header channel (see the resolver above).
+      const user = token
+        ? await _userResolver(token, fromUrl && pathname !== "/ws")
+        : null;
       if (!user) {
         if (token) recordAuthFail(clientKey, "invalid token (per-user mode)");
         if (!shellIsPublic || pathname === "/ws") {
@@ -599,7 +620,7 @@ export function createServer(config: ServerConfig): ServerHandle {
       }, handleRequest);
     } catch (e) {
       if (e instanceof Deno.errors.AddrInUse) {
-        // Loud + fatal (quant Bad #4): a bind failure usually means another
+        // Loud + fatal: a bind failure usually means another
         // instance of this app is already running. Refuse to start rather than
         // run a second cell runtime that could write to the same DB/journal.
         throw new Error(
@@ -643,8 +664,10 @@ export function createServer(config: ServerConfig): ServerHandle {
           // users/resolveUser mode: config.token is unset — still require a
           // valid user token, and gate snapshot to admins like the main server
           const url = new URL(req.url);
-          const token = _extractToken(url, req);
-          const user = token ? await _userResolver(token) : null;
+          const { token, fromUrl } = _extractTokenWithSource(url, req);
+          const user = token
+            ? await _userResolver(token, fromUrl && url.pathname !== "/ws")
+            : null;
           if (!user) return new Response("Unauthorized", { status: 401 });
           if (url.pathname === "/__aio/snapshot" && user.role !== "admin") {
             return new Response(

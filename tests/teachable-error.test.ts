@@ -1,4 +1,4 @@
-// risoto #9 — errors that teach: one consistent what / fix / docs format for
+// errors that teach: one consistent what / fix / docs format for
 // developer-facing framework errors, generalized from the credential refusal.
 import { assert, assertEquals } from "@std/assert";
 import { teachableError, teachMessage } from "../src/diagnostics/error.ts";

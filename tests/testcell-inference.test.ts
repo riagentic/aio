@@ -1,4 +1,4 @@
-// tbd B8 / inews #8 regression — testCell infers EVERYTHING from the cell ref:
+// a field report #8 regression — testCell infers EVERYTHING from the cell ref:
 // state (getState / expect.state / invariant), sender args, and sender RETURN
 // types. These are compile-time guarantees: if inference regresses to
 // Record<string, unknown> / Promise<unknown>, this file fails `deno check`.

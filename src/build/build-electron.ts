@@ -30,7 +30,7 @@ export async function buildElectron(cfg: BuildConfig): Promise<void> {
   }
   console.log("[electron] \u2713 dist/ assets copied to AppDir/dist/");
 
-  // Copy Electron runtime — auto-install on first build (machine B5) so
+  // Copy Electron runtime — auto-install on first build so
   // `compile:electron` works OUT OF THE BOX; loud manual fallback if it fails.
   const electronSrc = join(root, "node_modules", "electron", "dist");
   const electronDst = join(appDir, "electron");

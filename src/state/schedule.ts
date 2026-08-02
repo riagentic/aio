@@ -50,7 +50,7 @@ export type ScheduleDef =
      *  scaffolds and what the docs show. Shipping the option only on the
      *  imperative form meant every declarative poller kept the hand-rolled
      *  `if (s.refreshing) return` the feature exists to delete — the fix landed
-     *  on the API nobody was using (llama-master #14). */
+     *  on the API nobody was using. */
     skipIfRunning?: boolean;
   }
   & (
@@ -64,7 +64,7 @@ export type ScheduleDef =
 
 /** The action a schedule fires — a plain `{ type, payload }` object.
  *  `SA<A>` rejects the RESULT of calling a method (a Promise) at compile
- *  time with a teaching message (quant, alpha28 migration): writing
+ *  time with a teaching message: writing
  *  `schedule.after('t', 5000, cell.tick())` calls the method NOW and passes
  *  its Promise; the fix is `{ type: "cell:tick" }`. */
 type ScheduleAction = { type: string; payload?: unknown };
@@ -100,8 +100,7 @@ export const schedule = {
    *  (`if (s.refreshing) return`). Hand-rolled, that guard needs a state field,
    *  a reset in a `finally`, and it leaks a stuck `true` if the method throws
    *  between them; the scheduler already knows when the dispatch settles, so it
-   *  can own the whole thing (llama-master, "things that would have made this
-   *  app easier to write" #3).
+   *  can own the whole thing.
    *
    *  Opt-in, not the default: silently skipping a tick that used to fire would
    *  be a behaviour change for existing apps, and a schedule that overlaps ON
@@ -141,7 +140,7 @@ export const schedule = {
     pattern,
     action: action as ScheduleAction,
   }),
-  /** Exponential backoff (risoto #4) — a one-shot `after` whose delay grows
+  /** Exponential backoff — a one-shot `after` whose delay grows
    *  with `attempt`: `min(base * factor^attempt, max)` ms. Track `attempt` in
    *  cell state (bump on failure, reset to 0 on success) and re-issue this each
    *  cycle. Owns the retry arithmetic so pollers stop re-deriving the backoff
@@ -171,7 +170,7 @@ export const schedule = {
       action,
     };
   },
-  /** A self-pacing poller (risoto #6). Re-issue each cycle with the current
+  /** A self-pacing poller. Re-issue each cycle with the current
    *  `attempt` — 0 while healthy, bumped on failure. It polls every `every` ms,
    *  and on repeated failures backs off by `backoff`^attempt up to `max`. A
    *  first-class replacement for the hand-rolled after-chain that RPC
@@ -202,7 +201,7 @@ export const schedule = {
     };
   },
   /** Defer an action to the next tick — the honest primitive for "run this
-   *  right after the current method returns" (mdview: apps were writing
+   *  right after the current method returns" (a field report: apps were writing
    *  `schedule.after(id, 1, …)` as a sentinel because a 0ms delay is rejected).
    *  Same-id replace still applies, so it dedups. */
   next: (
@@ -222,7 +221,7 @@ export const schedule = {
   }),
   /** Run a SELF-CONTAINED function OFF the main isolate on a named, cancellable,
    *  backpressured worker pool — for FFI/CPU/sync work that would otherwise
-   *  freeze rendering (risoto #7). Imperative (returns a Promise), unlike the
+   *  freeze rendering. Imperative (returns a Promise), unlike the
    *  effect creators above. The fn is serialized to source: no closures; `arg`
    *  and the result must be structured-cloneable; do `Deno.dlopen` inside it.
    *  `schedule.blocking.cancel(id)` stops it; `schedule.blocking.dispose()`
@@ -428,20 +427,43 @@ export function createScheduleManager(
   /** Safe dispatch — cleans up timer entry on error to prevent leaks.
    *  One-shot timers (after/at): retry up to 3 times with 5s backoff.
    *  Repeating timers (every/cron): cancel on failure. */
-  function safeDispatch(
+  async function safeDispatch(
     id: string,
     action: { type: string; payload?: unknown },
     kind: "after" | "every" | "at" | "cron",
     retryCount = 0,
-  ): unknown {
+  ): Promise<unknown> {
     try {
+      // AWAITED, not just returned. `dispatch` reports every failure by
+      // REJECTING its promise (DISPATCH_CLOSED, QUEUE_OVERFLOW, REDUCE_ERROR)
+      // — it does not throw synchronously. So a bare `return dispatch(action)`
+      // inside try/catch caught nothing that actually happens: the retry, the
+      // cancel-on-failure for every/cron, and the "giving up" log below were
+      // all unreachable, while the rejection escaped as an unhandled one
+      //. Awaiting is what routes a real failure into the handler.
       // Returned so `skipIfRunning` can await the tick it just started.
-      return dispatch(action);
+      return await dispatch(action);
     } catch (e) {
       log.error(`schedule: dispatch '${id}' failed: ${e}`);
-      if (kind === "every" || kind === "cron") {
+      // The dispatch loop is gone (shutdown): there is nothing to retry into,
+      // and re-arming a timer here would resurrect one `cancelAll()` just
+      // cleared.
+      const closed = (e as { code?: string })?.code === "DISPATCH_CLOSED";
+      if (closed) {
         cancelTimer(id);
-      } else if (retryCount < 3) {
+        return;
+      }
+      if (kind === "every" || kind === "cron") {
+        // A REPEATING schedule survives a failed tick. One transient failure —
+        // a network blip inside a poll, a momentary queue overflow — must not
+        // silently switch a recurring job off for the life of the process;
+        // the next tick gets its own chance (pinned by
+        // tests/schedule-skip-if-running.test.ts). Cancelling here was
+        // unreachable until this handler started catching real failures, and
+        // making it live exposed it as the wrong policy, not a lost feature.
+        return;
+      }
+      if (retryCount < 3) {
         const timerId = setTimeout(
           () => safeDispatch(id, action, kind, retryCount + 1),
           5000,
@@ -602,7 +624,7 @@ export function createScheduleManager(
 
   function handle(effect: ScheduleEffect): void {
     validateId(effect.id);
-    // risoto #5: a dynamic schedule reusing a static id silently replaces it
+    // a dynamic schedule reusing a static id silently replaces it
     if (
       effect.kind !== "cancel" && staticIds.has(effect.id) &&
       !warnedCollisions.has(effect.id)

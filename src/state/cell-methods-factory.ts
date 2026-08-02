@@ -102,7 +102,7 @@ export function createCellFromMethods<
   }
 
   // Field-filter keys must resolve to real state — a non-matching filter
-  // silently leaks (risoto). Fail loud at creation.
+  // silently leaks. Fail loud at creation.
   validateFieldFilters(
     name,
     config.state as Record<string, unknown>,
@@ -145,6 +145,21 @@ export function createCellFromMethods<
           `having '${mk}' set state that an async method awaits on.`,
       );
     }
+  }
+
+  // cancelOn names a method that must exist and must be async — a typo, or a
+  // sync method, silently bought you a cell that could never be cancelled
+  // (the registry just held a key nothing ever tracked). Fail at cell() time,
+  // where the fix is one line away.
+  for (const mk of Object.keys(config.cancelOn ?? {})) {
+    if (asyncMethods.has(mk)) continue;
+    throw new Error(
+      methodNames.includes(mk)
+        ? `[cell:${name}] cancelOn: '${mk}' is a SYNC method — there is ` +
+          `nothing in flight to cancel. Only async methods take a cancelOn.`
+        : `[cell:${name}] cancelOn: no method '${mk}'. Known async methods: ` +
+          `${[...asyncMethods].join(", ") || "(none)"}.`,
+    );
   }
 
   // Build action creators from methods
@@ -257,9 +272,7 @@ export function createCellFromMethods<
     // Cancellation triggers (perfect-aio D1) — DEF data; the runtime registry
     // is (re)built from this at compose time, so a runtime reset + fresh
     // compose (the testCell pattern) re-registers naturally.
-    cancelTriggers: config.cancelOn as
-      | Record<string, (string | { type: string })[]>
-      | undefined,
+    cancelTriggers: config.cancelOn,
     // Dropping these silently disables persist/ui filters, validation and
     // migrations for methods-style cells.
     validate: config.validate,

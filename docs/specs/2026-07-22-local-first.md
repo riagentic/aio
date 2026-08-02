@@ -69,7 +69,7 @@ export const api = serverFns("api", {
 async checkout(s) {
   s.status = "paying";                     // instant, local
   const r = await api.chargeCard(s.total); // explicit server round-trip
-  s.status = r.ok ? "paid" : "failed";
+  s.status = r.ok ? "paid": "failed";
 }
 ```
 

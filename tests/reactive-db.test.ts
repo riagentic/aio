@@ -1,4 +1,4 @@
-// risoto #8 — reactive SQL views: a select() re-runs + notifies when a write
+// reactive SQL views: a select() re-runs + notifies when a write
 // through the wrapper touches a table it reads.
 import { assert, assertEquals } from "@std/assert";
 import { createDB } from "../src/db/async-db.ts";

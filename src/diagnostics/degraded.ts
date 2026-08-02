@@ -4,7 +4,7 @@
 // failure, a sync frame that will be retried, a best-effort write. The failure
 // mode nobody plans for is the one where such a corner fails FOREVER: each
 // occurrence is individually harmless, so it is logged (or swallowed) and the
-// app reports itself healthy while a whole feature is dead. risoto's nft-cache
+// app reports itself healthy while a whole feature is dead. one app's nft-cache
 // did exactly this — hours of stderr, zero in-app signal — and every app that
 // hit it invented its own escalation or had none.
 //

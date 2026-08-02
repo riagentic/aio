@@ -166,3 +166,220 @@ Deno.test("regression: login reveals neither existence nor lock state to a guess
     await app.close();
   }
 });
+
+// the per-account lockout counted failures with a read-modify-write
+// straddling PBKDF2's ~100ms of yielded event loop, writing an ABSOLUTE
+// `fails + 1`. Concurrent guesses all read the same stale count and all wrote
+// the same number, so a burst advanced the counter by one: twenty wrong
+// passwords at once left the account unlocked. The lockout is the one defence
+// a botnet's rotating IPs can't sidestep, and "don't wait between guesses"
+// turned it off.
+Deno.test("regression: concurrent wrong passwords cannot outrun the lockout", async () => {
+  const { openUserStore } = await import("../src/server/auth-users.ts");
+  const dir = await Deno.makeTempDir({ prefix: "aio-lockrace-" });
+  try {
+    const store = openUserStore(`${dir}/users.db`);
+    await store.create("alice", "correct-horse-battery");
+
+    // The attack: no waiting, all in flight together.
+    await Promise.all(
+      Array.from({ length: 20 }, () => store.verify("alice", "wrong")),
+    );
+
+    assertEquals(
+      await store.verify("alice", "correct-horse-battery"),
+      "locked",
+      "20 concurrent wrong passwords must lock the account (LOCK_AFTER=5)",
+    );
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+Deno.test("regression: a lockout is never extended by later failures", async () => {
+  const { openUserStore } = await import("../src/server/auth-users.ts");
+  // @ts-ignore node:sqlite types unavailable when an old @types/node shadows them
+  const { DatabaseSync } = await import("node:sqlite");
+  const dir = await Deno.makeTempDir({ prefix: "aio-lockext-" });
+  try {
+    const path = `${dir}/users.db`;
+    const store = openUserStore(path);
+    for (let i = 0; i < 5; i++) await store.verify("bob", "wrong");
+    await store.create("bob2", "correct-horse-battery");
+    for (let i = 0; i < 5; i++) await store.verify("bob2", "wrong");
+    assertEquals(await store.verify("bob2", "correct-horse-battery"), "locked");
+
+    const read = () => {
+      const db = new DatabaseSync(path);
+      const row = db.prepare("SELECT locked_until FROM users WHERE id = ?")
+        .get("bob2") as { locked_until: number };
+      db.close();
+      return row.locked_until;
+    };
+    const first = read();
+    // Guessing at a LOCKED account must not push the expiry further out —
+    // otherwise an attacker keeps the owner locked out indefinitely.
+    for (let i = 0; i < 5; i++) await store.verify("bob2", "wrong");
+    assertEquals(read(), first, "lock expiry unchanged by further guesses");
+    assertEquals(await store.verify("bob2", "correct-horse-battery"), "locked");
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+// a TOTP code stayed usable for its whole ±1-step (90s) window, so one
+// observed code could be replayed. RFC 6238 §5.2: remember the last accepted
+// step and refuse anything at or below it.
+Deno.test("regression: a TOTP code cannot be used twice", async () => {
+  const { generateTotpSecret, totpCode, verifyTotp, _resetTotpReplay } =
+    await import("../src/server/auth-totp.ts");
+  _resetTotpReplay();
+  const secret = generateTotpSecret();
+  const step = Math.floor(Date.now() / 30_000);
+  const code = await totpCode(secret, step);
+
+  assert(await verifyTotp(secret, code), "first use is accepted");
+  assert(
+    !(await verifyTotp(secret, code)),
+    "the same code must not be accepted again inside its validity window",
+  );
+  // An OLDER still-in-window code is dead too — it is a step below the one used.
+  assert(
+    !(await verifyTotp(secret, await totpCode(secret, step - 1))),
+    "a previous-step code cannot be replayed after a newer one was accepted",
+  );
+  // The next step is a genuinely new code and still works.
+  assert(
+    await verifyTotp(secret, await totpCode(secret, step + 1)),
+    "the next code is accepted",
+  );
+  // Per secret, not global: another user's code is unaffected.
+  const other = generateTotpSecret();
+  assert(await verifyTotp(other, await totpCode(other, step)));
+  _resetTotpReplay();
+});
+
+// /totp/setup overwrote the stored secret even when TOTP was already
+// enabled, so a stolen session could stage its own secret, enable it with a
+// valid code, and silently take over the victim's second factor. Turning TOTP
+// off requires the password; replacing it must not be easier.
+Deno.test("regression: TOTP cannot be re-enrolled while it is enabled", async () => {
+  _resetAuthFails();
+  const { cell, aio } = await import("../mod.ts");
+  const { totpCode, _resetTotpReplay } = await import(
+    "../src/server/auth-totp.ts"
+  );
+  _resetTotpReplay();
+  const port = freePort();
+  const base = `http://127.0.0.1:${port}`;
+  const app = await aio.run({
+    cells: [cell("t2fa", { state: { n: 0 }, methods: {} })],
+    appId: `test-totp-rotate-${Deno.pid}`,
+    appVersion: "0.0.0",
+    client: "server-only",
+    persist: false,
+    libraryMode: true,
+    auth: true,
+    port,
+    baseDir: await Deno.makeTempDir(),
+  });
+  const post = (path: string, body?: unknown, token?: string) =>
+    fetch(`${base}/__aio/auth/${path}`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(token ? { authorization: `Bearer ${token}` } : {}),
+      },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+  try {
+    const su = await post("signup", { id: "alice", password: "password123" });
+    const session = (await su.json()).token as string;
+
+    const setup = await post("totp/setup", undefined, session);
+    const { secret } = await setup.json();
+    const step = Math.floor(Date.now() / 30_000);
+    const en = await post(
+      "totp/enable",
+      { code: await totpCode(secret, step - 1) },
+      session,
+    );
+    assertEquals(en.status, 200);
+    await en.body?.cancel();
+
+    // The attacker holds the same session and tries to stage a NEW secret.
+    const again = await post("totp/setup", undefined, session);
+    assertEquals(again.status, 409, "re-enrolment is refused while enabled");
+    const body = await again.json();
+    assertEquals(body.error, "totp_already_enabled");
+
+    // …and the original secret still governs the account.
+    const li = await post("login", { id: "alice", password: "password123" });
+    const challenge = await li.json();
+    assertEquals(challenge.totpRequired, true);
+    const ok = await post("totp", {
+      pending: challenge.pending,
+      code: await totpCode(secret, step + 1),
+    });
+    assertEquals(ok.status, 200, "the ORIGINAL secret still works");
+    await ok.body?.cancel();
+  } finally {
+    _resetTotpReplay();
+    _resetAuthFails();
+    await app.close();
+  }
+});
+
+// a login SESSION token was accepted from `?token=`, so it could land in
+// browser history, proxy logs and the Referer of every outbound link. The login
+// flow deliberately delivers sessions as an HttpOnly cookie or a Bearer header
+// (handleAuthFlow's own reader ignores the query string); only the `/ws`
+// handshake, which has no header channel, still accepts one there.
+Deno.test("regression: a session token in the URL does not authenticate HTTP", async () => {
+  _resetAuthFails();
+  const { cell, aio } = await import("../mod.ts");
+  const port = freePort();
+  const base = `http://127.0.0.1:${port}`;
+  const app = await aio.run({
+    cells: [cell("vaultq", { state: { n: 0 }, methods: {} })],
+    appId: `test-urltok-${Deno.pid}`,
+    appVersion: "0.0.0",
+    client: "server-only",
+    persist: false,
+    libraryMode: true,
+    auth: true,
+    port,
+    baseDir: await Deno.makeTempDir(),
+  });
+  try {
+    const su = await fetch(`${base}/__aio/auth/signup`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id: "alice", password: "password123" }),
+    });
+    const token = (await su.json()).token as string;
+    assert(token, "signup issues a session token");
+
+    // The same token in a header is accepted…
+    const viaHeader = await fetch(`${base}/__aio/snapshot`, {
+      headers: { authorization: `Bearer ${token}` },
+    });
+    await viaHeader.body?.cancel();
+    assert(
+      viaHeader.status !== 401,
+      `header auth must keep working (got ${viaHeader.status})`,
+    );
+
+    // …and in the URL it is not.
+    const viaUrl = await fetch(`${base}/__aio/snapshot?token=${token}`);
+    await viaUrl.body?.cancel();
+    assertEquals(
+      viaUrl.status,
+      401,
+      "a session token in the query string must not authenticate an HTTP request",
+    );
+  } finally {
+    _resetAuthFails();
+    await app.close();
+  }
+});

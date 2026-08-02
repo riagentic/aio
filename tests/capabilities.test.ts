@@ -1,4 +1,4 @@
-// risoto #9 — least-privilege capability manifest (the structural half of
+// least-privilege capability manifest (the structural half of
 // `aio ship`): scan what the app actually uses and emit the minimal --allow-*
 // set instead of -A.
 import { assert, assertEquals } from "@std/assert";

@@ -1,4 +1,4 @@
-// aiol checkPatterns — await-commit read hint (mdview) + .server.ts exemption
+// aiol checkPatterns — await-commit read hint + .server.ts exemption
 // in checkUI's dynamic-import check. Every await in an async method is a
 // commit + render point; a post-await state read may see other actions'
 // commits, so the linter hints (never errors) on the first such read.
@@ -63,7 +63,7 @@ export const counter = cell('counter', {
   });
 });
 
-Deno.test("aiol: a transaction:true cell suppresses the read-after-await hint (risoto #2)", async () => {
+Deno.test("aiol: a transaction:true cell suppresses the read-after-await hint", async () => {
   await withTmpDir(async (dir) => {
     await project(
       dir,

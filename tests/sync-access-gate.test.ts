@@ -2,7 +2,7 @@
 // only the action-dispatch path. A cell that is both `sync: true` and
 // `access`-gated would otherwise be freely mutable by any connected client via
 // an `op` frame (the sync path uses a different dispatch than the gated one).
-import { assert, assertEquals } from "@std/assert";
+import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 // @ts-ignore node:sqlite types unavailable when an old @types/node shadows them
 import { DatabaseSync } from "node:sqlite";
 import type { DB, QueryResult, Tx } from "../src/db/types.ts";
@@ -117,4 +117,173 @@ Deno.test("sync op: un-gated cell is unaffected by the access check", async () =
   }, h.socket);
   assertEquals(h.dispatched.length, 1, "open cell still accepts ops");
   assertEquals(h.dispatched[0]!.type, "notes:add");
+});
+
+// ── The reconnect-flush path carries the same two guarantees ──────────
+//
+// `handleSync`'s pending-ops loop is `handleOp` minus two safety checks, and it
+// is the path that carries the STALEST ops — the ones queued while offline, so
+// the ones most likely to fail validation or hit a permission that changed
+// while the client was away. It was the least likely to say so.
+
+/** `handleSync` deliberately returns void and does its work in a detached
+ *  async IIFE (it is a socket message handler), so a test polls for the frame
+ *  instead of awaiting the call. */
+async function until(pred: () => boolean, what: string): Promise<void> {
+  for (let i = 0; i < 200; i++) {
+    if (pred()) return;
+    await new Promise((r) => setTimeout(r, 5));
+  }
+  throw new Error(`timed out waiting for ${what}`);
+}
+
+const syncFrame = (ops: unknown[]) => ({
+  clientId: "client-a",
+  cells: {},
+  pendingOps: ops,
+});
+
+Deno.test("sync pending op: a denied op is REPORTED, not silently dropped", async () => {
+  const h = harness(createTestDb());
+  await h.handler.handleSync(
+    syncFrame([opFrame("p1", "vault")]),
+    { id: "c1", user: { id: "eve", role: "viewer" } },
+    h.socket,
+  );
+  await until(
+    () => h.sent.some((m) => m.t === "op-rejected"),
+    "the op-rejected frame",
+  );
+  assertEquals(h.dispatched.length, 0, "denied op must not dispatch");
+  const rejected = h.sent.find((m) => m.t === "op-rejected");
+  assert(
+    rejected,
+    "without this frame the client keeps the op pending forever and " +
+      "re-sends it on every reconnect",
+  );
+  assertEquals((rejected!.d as { opId: string }).opId, "p1");
+  assertEquals((rejected!.d as { reason: string }).reason, "access denied");
+});
+
+Deno.test("sync pending op: a validate-rejected op is deleted, not broadcast or acked", async () => {
+  const { setLastRejection } = await import(
+    "../src/state/rejection-tracker.ts"
+  );
+  const db = createTestDb();
+  const broadcast: unknown[] = [];
+  const sent: Record<string, unknown>[] = [];
+  const handler = createServerSyncHandler({
+    // The validate hook refuses this op — exactly what the reducer records.
+    dispatch: (a) =>
+      setLastRejection({
+        cell: String(a.type).split(":")[0]!,
+        reason: "validate: quantity must be positive",
+      }),
+    db,
+    syncCellIds: ["notes"],
+    getCellState: () => ({ items: [] }),
+    broadcastRaw: { fn: (m: unknown) => broadcast.push(m) },
+    log: { debug: () => {}, warn: () => {}, error: () => {} },
+  });
+  const socket = {
+    send: (m: string) => sent.push(JSON.parse(m)),
+  } as unknown as WebSocket;
+
+  await handler.handleSync(
+    syncFrame([opFrame("p2", "notes")]),
+    { id: "c2", user: undefined },
+    socket,
+  );
+
+  await until(
+    () => sent.some((m) => m.t === "op-rejected"),
+    "the op-rejected frame",
+  );
+  assertEquals(broadcast.length, 0, "peers must not receive a refused op");
+  assertEquals(
+    sent.filter((m) => m.t === "sync-ack").length,
+    0,
+    "the origin must not be told its refused op was accepted",
+  );
+  const rejected = sent.find((m) => m.t === "op-rejected");
+  assert(rejected, "the origin is told WHY (D11)");
+  assertEquals(
+    (rejected!.d as { reason: string }).reason,
+    "validate: quantity must be positive",
+  );
+  // …and it is gone from the log, so a boot replay cannot resurrect it.
+  const rows = await db.query("SELECT id FROM sync_ops WHERE id = ?", ["p2"]);
+  assertEquals(rows.rows.length, 0, "the poison op is deleted from the log");
+});
+
+// a REDUCER THROW is not a validate refusal, and the two were handled
+// asymmetrically. `dispatch` reports failure by rejecting its promise, so the
+// un-awaited call's try/catch caught nothing: the op was persisted, ACKED (the
+// origin marked it confirmed), BROADCAST (peers applied it) and then compacted
+// — and compaction snapshots live state, which never received the effect,
+// while deleting the op row. The write survived everywhere except on the
+// server that owns the truth.
+Deno.test("sync op: a dispatch that fails is not acked, broadcast or kept", async () => {
+  const db = createTestDb();
+  const broadcast: unknown[] = [];
+  const sent: Record<string, unknown>[] = [];
+  const handler = createServerSyncHandler({
+    dispatch: () => Promise.reject(new Error("REDUCE_ERROR: boom")),
+    db,
+    syncCellIds: ["notes"],
+    getCellState: () => ({ items: [] }),
+    broadcastRaw: { fn: (m: unknown) => broadcast.push(m) },
+    log: { debug: () => {}, warn: () => {}, error: () => {} },
+  });
+  const socket = {
+    send: (m: string) => sent.push(JSON.parse(m)),
+  } as unknown as WebSocket;
+
+  await handler.handleOp(opFrame("d1", "notes"), { id: "c1" }, socket);
+
+  assertEquals(
+    sent.filter((m) => m.t === "sync-ack").length,
+    0,
+    "an op the server could not apply must never be acked",
+  );
+  assertEquals(broadcast.length, 0, "…nor handed to peers");
+  const rejected = sent.find((m) => m.t === "op-rejected");
+  assert(rejected, "the origin is told the op failed");
+  assertStringIncludes(
+    String((rejected!.d as { reason: string }).reason),
+    "dispatch failed",
+  );
+  const rows = await db.query("SELECT id FROM sync_ops WHERE id = ?", ["d1"]);
+  assertEquals(
+    rows.rows.length,
+    0,
+    "and it is gone from the log, so no boot replay resurrects it",
+  );
+});
+
+Deno.test("sync pending op: a dispatch that fails is not acked, broadcast or kept", async () => {
+  const db = createTestDb();
+  const broadcast: unknown[] = [];
+  const sent: Record<string, unknown>[] = [];
+  const handler = createServerSyncHandler({
+    dispatch: () => Promise.reject(new Error("REDUCE_ERROR: boom")),
+    db,
+    syncCellIds: ["notes"],
+    getCellState: () => ({ items: [] }),
+    broadcastRaw: { fn: (m: unknown) => broadcast.push(m) },
+    log: { debug: () => {}, warn: () => {}, error: () => {} },
+  });
+  const socket = {
+    send: (m: string) => sent.push(JSON.parse(m)),
+  } as unknown as WebSocket;
+
+  handler.handleSync(syncFrame([opFrame("d2", "notes")]), { id: "c2" }, socket);
+  await until(
+    () => sent.some((m) => m.t === "op-rejected"),
+    "the op-rejected frame",
+  );
+  assertEquals(sent.filter((m) => m.t === "sync-ack").length, 0);
+  assertEquals(broadcast.length, 0);
+  const rows = await db.query("SELECT id FROM sync_ops WHERE id = ?", ["d2"]);
+  assertEquals(rows.rows.length, 0);
 });

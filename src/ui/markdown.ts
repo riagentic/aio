@@ -1,4 +1,4 @@
-// markdown.ts — a small, SAFE Markdown renderer for `aio/ui` (inews).
+// markdown.ts — a small, SAFE Markdown renderer for `aio/ui`.
 //
 // Every content app hand-rolls a sanitized markdown renderer. This one is safe
 // BY CONSTRUCTION: it parses to AIR VNodes (never an HTML string), so all text

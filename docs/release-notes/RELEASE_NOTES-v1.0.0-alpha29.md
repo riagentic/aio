@@ -26,7 +26,7 @@ Upgrade guide: docs/upgrade/from-alpha28-to-alpha29.md.
   transport-capability skew is gone). Vitals + time-travel stay WS-only
   diagnostics and are rejected loudly, never dropped.
 
-## Field-fix batch (risoto, inews, tbd, quant, realitio, machine reports)
+## Field-fix batch
 
 - **testUI** (breaking): collision/disabled/shim cluster fixed.
 - **`ui.exclude`** (breaking): enforced at every client read seam + truth-trap

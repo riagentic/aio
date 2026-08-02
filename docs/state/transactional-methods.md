@@ -1,4 +1,4 @@
-# Spec: Transactional cell methods (risoto #2)
+# Spec: Transactional cell methods
 
 Status: **SHIPPED** — opt-in `transaction: true`; this page is the contract, not
 a proposal. Conflict detection (§4) is the part that makes it safe rather than
@@ -21,7 +21,7 @@ whose reads resolve `getState()` — the _current committed_ state — plus a
 read-your-writes overlay of its own pending writes, and whose writes are
 **batched and dispatched incrementally**.
 
-Consequences risoto hit repeatedly (all real, all silent):
+Consequences one app hit repeatedly (all real, all silent):
 
 - **Every `await` is a commit point.** A read after an `await` sees whatever
   other actions committed while the method was suspended — not the state the
@@ -130,7 +130,7 @@ through s.$live to work from current state, retry the call, or set
 transaction: { conflict: "warn" } to commit anyway.
 ```
 
-This is the risoto 2026-07-28 bug, verbatim: a balance `refresh()` guarded on a
+This is the a field report bug, verbatim: a balance `refresh()` guarded on a
 field that the synchronous `adjust()` writes during the fetch. The guard read a
 pinned value, so it could never fire; the refresh committed pre-send balances
 over the user's transfer and stamped them confirmed. Same code today rejects the
@@ -236,7 +236,7 @@ transactional cell.
   `serialize: true` as the fix.
 - **Rollout:** ship phases 1–4 behind `transaction`, default off. Only after the
   full suite is green under the flag do we recommend it. No default flip until
-  it has soaked in a real app (risoto's `unlock`/`transfer` cells).
+  it has soaked in a real app.
 
 ---
 

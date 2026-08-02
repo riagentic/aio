@@ -1,4 +1,4 @@
-// risoto openWindow — the electron child-window capability, gated + hardened.
+// a field report openWindow — the electron child-window capability, gated + hardened.
 // Electron main-process code can't run in CI, so we test the GENERATED script:
 // the gate reflects config.childWindows, the handler + guardrails are present,
 // and sandbox defaults ON. (The maintainer decision, made concrete.)
@@ -26,7 +26,7 @@ Deno.test("openWindow: handler + guardrails present in the generated main", () =
   assertStringIncludes(s, "realpathSync"); // symlink-escape check
   assertStringIncludes(s, "sandbox DISABLED by app request"); // loud opt-out
   // sandbox defaults ON: only false when explicitly requested.
-  assertStringIncludes(s, "payload.sandbox === false ? false : true");
+  assertStringIncludes(s, "payload.sandbox === false ? false: true");
 });
 
 Deno.test("openWindow: preload bridge exposes openWindow → IPC", () => {

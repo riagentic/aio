@@ -4,7 +4,7 @@
 // indistinguishable from a literal, yet it changes every render. Marking such
 // elements static let the `_static` diff short-circuit reconcile the subtree
 // against a stale/emptied `_dom`, freezing the rendered text at its mount value
-// (the risoto "SOL balance never updates in the account list" bug, reproduced
+// (the a field report "SOL balance never updates in the account list" bug, reproduced
 // only in a real browser under concurrent parent+child re-renders). Elements
 // whose children are all real static VNodes (icons / static markup, no text)
 // must still be static so the optimization survives where it is sound.

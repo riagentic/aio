@@ -1,4 +1,4 @@
-// In-memory dispatch timeline (risoto #4 — time travel).
+// In-memory dispatch timeline.
 //
 // A bounded ring of the most recent committed, state-changing dispatches, each
 // with the compact state diff it produced. This is the live "what just

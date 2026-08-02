@@ -1,4 +1,4 @@
-// journal.ts — durable action journal + replay (risoto #3, the crash-only piece).
+// journal.ts — durable action journal + replay.
 // The persistence layer snapshots full state on a debounce; a SIGKILL / power
 // cut in that window loses the tail. An append-only JOURNAL closes it: every
 // committed action is appended (one line), and on the NEXT boot the actions

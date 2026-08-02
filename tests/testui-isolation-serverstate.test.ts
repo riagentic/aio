@@ -1,8 +1,8 @@
 // testUI hardening (field reports):
-//  • tbd#1 — the in-memory localStorage shim is now installed FRESH per mount
+//  • the in-memory localStorage shim is now installed FRESH per mount
 //    and torn down, so writes don't bleed test→test (it used to be a
 //    never-reset process global).
-//  • tbd#3 — ui.serverState()/ui.fullState() expose the UNFILTERED server
+//  • ui.serverState()/ui.fullState() expose the UNFILTERED server
 //    state, so a test can read a `ui.exclude`d field a server route legitimately
 //    reads (the client proxy hides it).
 import { assert, assertEquals } from "@std/assert";
@@ -13,7 +13,7 @@ import { testUI } from "../src/testing/ui-test.ts";
 
 const Empty: ComponentFn = () => h("div", null, "x");
 
-Deno.test("testUI: localStorage does not bleed across mounts (tbd#1)", async () => {
+Deno.test("testUI: localStorage does not bleed across mounts", async () => {
   {
     await using ui = await testUI(Empty);
     assertEquals(
@@ -52,7 +52,7 @@ Deno.test("testUI: the shim supports clear()/key()/length", async () => {
   void ui;
 });
 
-Deno.test("testUI: serverState()/fullState() expose ui.exclude'd fields (tbd#3)", async () => {
+Deno.test("testUI: serverState()/fullState() expose ui.exclude'd fields", async () => {
   const acct = cell("acct", {
     state: { name: "ada", secret: "hunter2" },
     ui: { exclude: ["secret"] }, // hidden from the client view
@@ -77,7 +77,7 @@ Deno.test("testUI: serverState()/fullState() expose ui.exclude'd fields (tbd#3)"
   // The client-facing cell proxy still hides it — and under the test harness
   // (dev-strict) it THROWS rather than handing back `undefined`, so a component
   // reading a hidden field fails the test instead of quietly branching on
-  // nothing (risoto 2026-07-28 #3).
+  // nothing.
   let threw = "";
   try {
     void (acct as unknown as { secret?: string }).secret;

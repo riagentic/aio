@@ -1,5 +1,156 @@
 # Changelog
 
+## 1.0.0-alpha43 — silence into signal (2026-08-02)
+
+A framework's worst failure is the one it does not mention. This release is a
+sweep through every outstanding field report from apps built on aio, and the
+theme picked itself: nearly every finding was something going wrong _quietly_ —
+an op acknowledged but never applied, a `Date` that came back a string, a test
+that passed because it was covering nothing. Each is now either impossible or
+loud.
+
+### Sync: three ways a write could vanish
+
+`dispatch` reports failure by REJECTING its promise, never by throwing. Two
+places wrapped it in `try/catch` and believed they were covered:
+
+- **A failed dispatch was acked, broadcast and compacted away.** The op was
+  persisted, the origin was told it landed, peers applied it — and compaction,
+  which snapshots _live_ state, then deleted the row. The change existed on
+  every machine except the one that owns the truth. A failed dispatch now makes
+  the op poison: deleted, unacked, unbroadcast, with the reason sent back.
+- **The scheduler's failure handler had never run.** Retry, cleanup and "giving
+  up" were all unreachable. Making them live exposed the policy as wrong, too: a
+  repeating schedule now _survives_ a failed tick instead of cancelling itself.
+  One transient blip must not switch a poller off for the life of the process.
+
+Two more, found by pulling the same thread:
+
+- **An ack could double-apply an op a snapshot already contained.** A
+  `mode:"snapshot"` response installs live server state, which already holds the
+  client's in-flight ops; the ack then applied one a second time. The client
+  cannot dedup by id — a snapshot never enumerates its contents — so snapshots
+  now state the `server_ts` they reflect and `sync-ack` carries the op's own.
+- **Compaction deletes by HLC; delivery reads by `server_ts`.** A client holding
+  a cursor but no HLC watermark was told it was caught up while the ops it
+  needed had been compacted away. `sync_meta` gained a `compacted_ts` watermark
+  (with the first schema migration these tables have needed).
+
+Both wire additions are optional and backwards compatible with an older peer.
+Reconnect-flushed ops also stopped skipping the validate check, and an access
+denial now reaches the client instead of leaving it re-sending forever.
+
+### Persistence: JSON was corrupting state on the way to disk
+
+The persist path was raw `JSON.stringify`, which silently drops `undefined`
+keys, turns `NaN`/`Infinity` into `null`, a `Date` into a string, and a
+`Map`/`Set` into `{}`. None of it surfaced at write time; it surfaced as wrong
+state on the next boot. Every such value is now named with its exact path and
+the fix, reusing the serialization pass that already happens.
+
+### Profile integrity — new
+
+The ~150 lines every app storing user data eventually writes by hand:
+
+```ts
+await app.db.snapshot(path); // VACUUM INTO — safe on a live database
+await aio.run({ checkIntegrityOnBoot: true });
+```
+
+A damaged file is **quarantined** beside itself with a timestamp — never deleted
+— and if a `<db>.snapshot` exists the app boots on it, saying what the restore
+lost. No snapshot means starting empty, said loudly, rather than booting on a
+file SQLite cannot read. A file too damaged to even scan counts as damaged, not
+as inconclusive. Both new `DB` members are optional, so custom implementations
+stay valid.
+
+Also: `db.close()` no longer terminates the worker underneath writes still
+queued behind the writer lock — they were neither awaited nor aborted, and their
+promises never settled.
+
+### Auth
+
+- **The per-account lockout could be outrun.** Counting failures with a
+  read-modify-write across PBKDF2's ~100ms meant twenty concurrent guesses
+  advanced the counter by one; the only defence a botnet's rotating addresses
+  cannot sidestep was off for anyone who simply did not wait. Now one atomic
+  statement.
+- TOTP codes are **one-time-use** (RFC 6238 §5.2); `/totp/setup` refuses while
+  TOTP is enabled (staging a new secret over a live one could lock the owner
+  out); `password` and `totp/disable` respect the per-IP budget; the fail-budget
+  map is bounded.
+- A login **session** no longer authenticates from `?token=` on ordinary HTTP
+  requests — it leaks through history, proxy logs and `Referer`. Share links,
+  the CLI and the `/ws` handshake (which has no header channel) are unaffected.
+- `am new` validates its argument, which had been going straight into a file
+  path _and_ into generated source.
+
+### Tests are the strictest environment
+
+- **`testCell` emptied the cell registry**, so the first `testCell` in a file
+  silently disarmed every later `testUI`: zero cells booted, `expectCell`
+  asserting against declared initial state, green tests covering nothing.
+- **A call now starts when you make it**, as in production — which is what makes
+  cancel-in-flight and supersession expressible at all.
+- **A failure nobody awaited surfaces** at `settle()` or at the end of the test;
+  a sync method's throw **rejects** as it always did in production; `expectCell`
+  on a non-booted cell fails loud; `waitFor` no longer swallows `TypeError`s.
+- All five harnesses arm dev-strict through one entry point, and a UI listener
+  registered on the Deno global is called out — it never fires under `testUI`,
+  and that silence has cost an app its whole suite.
+
+### Renderer
+
+`ErrorBoundary` and `Suspense` rebuilt content with `appendChild`, so a boundary
+with siblings after it jumped to the end of its parent. `useEffect` (compat) was
+dismantled by the first re-render with unchanged deps. `<Transition>`
+re-animated on every render. `useDimensions` never re-observed a replaced
+element. Browser transport: pending calls are rejected on disconnect instead of
+hanging out the 15s ceiling, `markAsync` is honoured by the browser stub, and
+per-method call budgets actually apply.
+
+### Cross-platform builds
+
+```sh
+deno task build --platforms=host,windows,macos-arm64
+```
+
+One machine, one command, three executable formats — ELF, PE and Mach-O. The
+host artifact keeps its plain name; cross builds are labelled and recorded in
+the manifest with their triple. Electron and Android package with per-OS tooling
+and are refused with a reason rather than silently emitting a host binary under
+a foreign name. The artifact gate reads magic bytes, so a renamed host binary
+fails it. A build producing no recognised artifact is now a failure — it used to
+report success while the binary sat stranded in the project root.
+
+There is deliberately no "one binary for all three": Linux, Windows and macOS
+use different executable containers and syscall ABIs. One artifact per platform,
+from one command, is the honest version of that wish.
+
+### `cancelOn: { method: "self" }`
+
+Newest wins: a new call aborts the ones still running, never itself. The shape
+every search-as-you-type, folder scan and autocomplete needs, and one a
+self-reference could not express (a cell's own methods do not exist yet inside
+its `cell()` literal). Naming a missing or sync method throws at definition.
+
+### Examples
+
+- **`examples/contacts`** — the end-to-end CRUD story: a SQLite-backed list via
+  `db:` auto-sync, validation that refuses in plain code, parameterized
+  selectors, create/edit/delete, no transport code anywhere.
+- **`examples/disk`** — subprocesses and the filesystem from a cell, with cancel
+  and supersession across the `.server.ts` boundary.
+
+### Also
+
+A freshly scaffolded app passes its own linter (it failed on creation, which
+teaches that the linter is noise); a compiled binary carries its own version
+instead of reading the launch directory's `deno.json`; surface `text` is always
+a string; `am surface`/`am trigger` are documented as the primary dev loop
+rather than an ops tool. Published text — comments, changelog, roadmap — now
+describes field reports by type rather than by application name.
+
 ## 1.0.0-alpha42 — the pin is the promise (2026-08-01)
 
 An app built on aio today must still build and run years from now, on a machine
@@ -44,7 +195,7 @@ free to drift. `src/state/removals.ts` is now the single decider, and every
 message carries BOTH exits, including the one that was invisible before:
 
 ```
-[mdview] cell config key 'machine:' was removed in alpha27 — guards are a guard
+cell config key 'machine:' was removed in alpha27 — guards are a guard
 line — `if (s.status !== "idle") return;`. Migrate: docs/upgrade/restructure.md
 — or run it unchanged on the version it was written for:
 `am pin v1.0.0-alpha26 && am fix`.
@@ -95,9 +246,9 @@ question for a binary that is not running.
 A field report put it precisely: "aio's failure modes tend to be silent rather
 than loud — the philosophy is right, the implementation hasn't caught up
 everywhere." This release is the catching up: an adversarial review of alpha40,
-a structural hardening pass, one new headline feature, and every item from the
-space-invaders field report — each fix behind a guard that makes its whole bug
-class unshippable.
+a structural hardening pass, one new headline feature, and every item from the a
+field report — each fix behind a guard that makes its whole bug class
+unshippable.
 
 ### One line runs any aio app from source
 
@@ -158,7 +309,7 @@ shell closure). And the new C→S `cdiag` frame relays browser `degraded()`
 escalations, so `/__aio/health` reports `clientDegraded` instead of claiming
 health while a browser subsystem is dead.
 
-### The space-invaders report — every item
+### A field report — every item
 
 - **A cell rename can no longer destroy data.** A stored-but-undeclared cell's
   slice is preserved in every persisted document, stripped from runtime state,
@@ -564,7 +715,7 @@ because the sum would be a number that looks right and is not.
   [auto-persist](docs/persistence/auto-persist.md), pinned by tests so the docs
   cannot drift from the merge.
 
-### llama-master's open list — closed, with two refusals
+### A field report's open list — closed, with two refusals
 
 Working the incremental report's remaining items. Rule of thumb applied
 throughout: an item is accepted when it makes the FRAMEWORK more correct, and
@@ -618,7 +769,7 @@ method with what it learned, and that pattern is now documented instead. A
 one app_ is an app-level helper, and the danger that made it feel urgent (the
 silent proxy write) is already gone.
 
-### llama.master, round two — the friction found by building 1000 more lines
+### A field report, round two — the friction found by building 1000 more lines
 
 The same app came back after another ~1000 lines, four kata audits and a suite
 grown 208 → 271 tests. Its verdict on the previous batch: **7 → 9.2**, every one
@@ -880,7 +1031,7 @@ states. A framework must not punish a reducer for avoiding a pointless write.
 Patches that exist but are filtered out by a cell's strategy still fall through
 to the full-state path — that is what `"full"`-strategy cells depend on.
 
-### From the llama.master field report — six silences made loud
+### From a field report — six silences made loud
 
 A full app (8 cells, Rust→WASM core, 239 tests, real hardware) shipped on aio,
 and its retrospective was blunt: _"several of aio's sharpest edges are silent.
@@ -1126,7 +1277,7 @@ itself: teardown, fresh process on the same port, tabs reload on the new boot
 id. It steps aside — warning as before — when it can't relaunch faithfully (no
 `-A`, `libraryMode`, prod, or `AIO_NO_DEV_RESTART=1`).
 
-### From the field (risoto, day one on cell workers)
+### From the field
 
 The first real app to adopt `worker: true` reported 2-second freezes becoming a
 flat ~58ms loop with a hardware wallet on its own thread — and nine friction
@@ -1280,9 +1431,9 @@ had been attached to the wrong symbol).
 
 ## 1.0.0-alpha34 — cross the bridge (2026-07-25)
 
-The dream-list release: a real wallet (risoto, ~650 tests) drove its whole
-backlog to zero on this framework. Every item below is framework-general —
-capabilities, not one-app policy.
+The dream-list release: a real financial app drove its whole backlog to zero on
+this framework. Every item below is framework-general — capabilities, not
+one-app policy.
 
 **Return values cross the bridge.** `await cell.method()` in a browser now
 resolves with the method's real return value — sync and async (settles on
@@ -1615,15 +1766,14 @@ double-apply). Broadcast ops carry `serverTs` so peers advance their cursor; a
 client's own ops are filtered from catch-up echoes. `persistOp` returns the
 issued ts (api surface regenerated).
 
-**Field-report P1s (machine, inews R4).** The `Deno is not defined` blank-screen
-trap (machine U1): dev-boot graph findings are now LOUD — blocking client-breaks
-`console.error` with file:line, `Deno.*`-in-client- reachable-modules
-`console.warn` with the `*.server.ts` fix (was debug-only). `s.users.find(…)`
-returns a LIVE element proxy so a write held across an await batches instead of
-being silently dropped in prod (inews R4). `ui.surface()` staleness fixed at the
-root: the auto-memo skip now re-points the component instance at the tree vnode,
-so a structural branch swap driven by the child's own signal stays resolvable
-(inews R4 🔴).
+**Field-report P1s.** The `Deno is not defined` blank-screen trap (machine U1):
+dev-boot graph findings are now LOUD — blocking client-breaks `console.error`
+with file:line, `Deno.*`-in-client- reachable-modules `console.warn` with the
+`*.server.ts` fix (was debug-only). `s.users.find(…)` returns a LIVE element
+proxy so a write held across an await batches instead of being silently dropped
+in prod. `ui.surface()` staleness fixed at the root: the auto-memo skip now
+re-points the component instance at the tree vnode, so a structural branch swap
+driven by the child's own signal stays resolvable.
 
 **testUI.** Disabled form controls are on the surface with `disabled: true`;
 invoking an unknown action fails with the aio name listing plus a
@@ -1768,10 +1918,9 @@ deferred warns).
 
 ## 1.0.0-alpha23 — field-report closeout: silent traps → loud, early, attributed (2026-07-20)
 
-Five field reports (tbd, risoto ×2, realitio, inews) worked end to end. The
-theme: every fix either **removes** a silent failure or makes it **loud, early,
-and attributed** — never silent, late, and anonymous. Each fix ships with a
-regression test proven to fail on revert.
+Five field reports worked end to end. The theme: every fix either **removes** a
+silent failure or makes it **loud, early, and attributed** — never silent, late,
+and anonymous. Each fix ships with a regression test proven to fail on revert.
 
 ### Fixed
 
@@ -1864,13 +2013,12 @@ source.
   (AIO-414). `_domNodeCount` is now the single source of truth for a node's
   realized DOM span (Fragment/component/Portal/ErrorBoundary/Suspense).
 - **Direct cell access now reliably subscribes to server deltas** and cell
-  signals are no longer orphaned across re-renders (risoto CRITICAL) — with a
-  real e2e harness that reproduces it.
+  signals are no longer orphaned across re-renders — with a real e2e harness
+  that reproduces it.
 - **UDS transport buffers patches across the throttle window** instead of
   dropping the ones that arrive mid-window.
-- **14 verified bugs** from the GLM-5.2 multi-aspect audit, and three fail-loud
-  gaps from the risoto report (16e, 16f-b, 17b), each pinned by regression
-  tests.
+- **14 verified bugs** from a multi-aspect audit, and three fail-loud gaps from
+  one field report, each pinned by regression tests.
 
 ### Added
 
@@ -1893,8 +2041,8 @@ source.
 
 ## 1.0.0-alpha21 — field-report closeout: testable time, loud dev, the form fix (2026-07-17)
 
-Every open item from all three field reports (risoto, quant, mdview) closed —
-each countersigned or resolved with the fix cited in-code.
+Every open item from all three field reports closed — each countersigned or
+resolved with the fix cited in-code.
 
 ### Added
 
@@ -1905,7 +2053,7 @@ each countersigned or resolved with the fix cited in-code.
   `schedule.after`/`every` captured and fired when due — toast auto-dismiss,
   debounce, `backoff`, `poll` all get deterministic unit coverage with no real
   timers. (`schedule.at`/`cron` stay wall-clock and warn once.) The one item
-  that blocked "test every use case" in the risoto report — countersigned 10/10.
+  that blocked "test every use case" in one field report — countersigned 10/10.
 - **`schedule.next(id, action)`** — the honest "defer to the next tick"
   primitive, replacing the `schedule.after(id, 1, …)` sentinel apps were
   writing. Same-id replace still dedups.
@@ -1913,7 +2061,7 @@ each countersigned or resolved with the fix cited in-code.
   relays only **same-origin** URLs as in-app navigation — a cross-origin link
   can no longer `pushState` a routerless app onto a dead path (white screen on
   reload). Renderers get **`__aioIPC.openExternal(url)`**, with the main process
-  enforcing an http/https allowlist (mdview #6/#7).
+  enforcing an http/https allowlist.
 - **`.server.ts` is the first-class server/browser-split convention.** A plain
   `import("./x.server.ts")` in a cell method stays out of the browser bundle —
   documented as the primary rule in docs/build/imports.md (string-concat demoted
@@ -1927,22 +2075,22 @@ each countersigned or resolved with the fix cited in-code.
 
 ### Fixed
 
-- **Conditional element bindings froze inside `<form>` (risoto 2026-07-16d).**
-  Under testUI, a conditional binding (or fragment-root component) anchored as a
-  direct `<form>` child never re-reconciled while sibling text bindings stayed
-  live. Root cause: happy-dom wraps `HTMLFormElement` in a Proxy, so the
-  reconciler's `.parentNode === parent` containment guards failed identity and
-  silently skipped removals/inserts. All guards now use a proxy-agnostic
-  `isChildOf()`; the report's full repro matrix is pinned as tests.
+- **Conditional element bindings froze inside `<form>` .** Under testUI, a
+  conditional binding (or fragment-root component) anchored as a direct `<form>`
+  child never re-reconciled while sibling text bindings stayed live. Root cause:
+  happy-dom wraps `HTMLFormElement` in a Proxy, so the reconciler's
+  `.parentNode === parent` containment guards failed identity and silently
+  skipped removals/inserts. All guards now use a proxy-agnostic `isChildOf()`;
+  the report's full repro matrix is pinned as tests.
 - **SVG camelCase attrs render.** `stopColor` → `stop-color` (and the common
-  camelCase set) — gradients no longer render black (quant Ugly #2).
+  camelCase set) — gradients no longer render black.
 - **Async multi-await write loss locked.** Writes after any `await` are
   guaranteed to land (property-tested), and the await-commit model is documented
-  loudly: every `await` commits + renders (quant Ugly #1).
-- **Dev failures got loud (quant's thesis: no quiet failures).** Discovery bind
-  failures print a startup warning; editing a _cell_ file warns "cells do NOT
-  hot-reload — restart to apply"; port-in-use fails loudly; transient
-  post-restart imports show "Building…" and retry instead of the error card.
+  loudly: every `await` commits + renders.
+- **Dev failures got loud .** Discovery bind failures print a startup warning;
+  editing a _cell_ file warns "cells do NOT hot-reload — restart to apply";
+  port-in-use fails loudly; transient post-restart imports show "Building…" and
+  retry instead of the error card.
 - **Pre-boot method calls throw** with an actionable message (instead of
   silently no-oping); bound **selector accessors are type-accessible**;
   standalone-air effect spam silenced; the secret-field heuristic no longer
@@ -2354,12 +2502,12 @@ deferred until the remote targets are proven off-box.
   alpha), so the scaffolder / `--vendored` paths are recommended; the `jsr:`
   pins apply once the version is published.
 
-## 1.0.0-alpha16 — deep-audit cleanup + field-report fixes (mdview, risoto)
+## 1.0.0-alpha16 — deep-audit cleanup + field-report fixes
 
 A full per-file audit (no correctness bugs found) plus the cleanup it turned up,
-and every open item from the mdview and risoto field reports. Non-breaking:
-additive API only (`deno task doctor` / `aio/doctor`, `schedule.backoff`), no
-changed semantics.
+and every open item from the a field report and a field report field reports.
+Non-breaking: additive API only (`deno task doctor` / `aio/doctor`,
+`schedule.backoff`), no changed semantics.
 
 ### Added
 

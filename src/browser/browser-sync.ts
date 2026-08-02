@@ -16,6 +16,7 @@
 import { randomUuid } from "../rand.ts";
 import { createSyncEngine, type SyncEngine } from "../sync/sync-engine.ts";
 import { createOpBuffer } from "../sync/op-buffer.ts";
+import { diagEmit } from "../diagnostics/diagnostic-bus.ts";
 import { createLocalStorageOpStorage } from "../sync/browser-storage.ts";
 import type { SyncConfig } from "../sync/types.ts";
 import { resolveSyncCells } from "./sync-cells.ts";
@@ -194,7 +195,31 @@ export function initBrowserSync(
   _engine = createSyncEngine({
     clientId: clientId(),
     cells: cfgs,
-    buffer: createOpBuffer(createLocalStorageOpStorage()),
+    // A dropped op is a LOCAL MUTATION THAT NEVER REACHED THE SERVER — the
+    // one thing this buffer exists to prevent. `onDrop` existed but nothing
+    // ever passed it, so every drop (capacity, or a stale unconfirmed op
+    // evicted under backpressure) was invisible to the app AND to the console
+    //. Report it: loudly, once per op, with the cell and action.
+    buffer: createOpBuffer(createLocalStorageOpStorage(), {
+      onDrop: (op, reason) => {
+        const what = `${op.cell}:${op.action}`;
+        console.error(
+          `[aio:sync] DROPPED an unsynced change (${reason}): ${what} — this ` +
+            `mutation never reached the server and is now gone. The offline ` +
+            `queue is full (or this op sat unconfirmed past its retention).`,
+        );
+        diagEmit({
+          type: "sync-op-dropped",
+          severity: "error",
+          source: "sync",
+          message: `Unsynced change dropped (${reason}): ${what}`,
+          detail: { cell: op.cell, action: op.action, opId: op.id, reason },
+          hint:
+            "The client could not reach the server long enough to flush its " +
+            "queue. Check connectivity/backpressure, or raise pendingCap.",
+        });
+      },
+    }),
     send,
     reducer,
     getConfirmedState: () => confirmed,

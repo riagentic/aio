@@ -106,7 +106,7 @@ export function _applyFullState(state: Record<string, any>): void {
     // component renders capture a cell's signal instance at bind time
     // (cell-reactive.ts). Deleting it here orphaned that instance: on
     // re-subscribe a NEW signal was created, so the getter/render stayed bound
-    // to the stale (deleted) one, frozen at the connect-time value — the risoto
+    // to the stale (deleted) one, frozen at the connect-time value — the a field report
     // 2026-07-18 "read only after navigation never updates" bug. Signal
     // instances must stay stable for the session (same invariant _resetSignals
     // relies on: mutate values in place, never reassign).

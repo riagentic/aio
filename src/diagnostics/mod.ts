@@ -87,7 +87,7 @@ export function initDiagnostics(
   // A writer that is OFF must not leave its output behind. Turning `actionLog`
   // off stopped new lines but left every line already written — including, in
   // one real case, an unlock action's passphrase, world-readable, for as long
-  // as the log directory lived (risoto, 2026-07-28). The flag is the whole
+  // as the log directory lived. The flag is the whole
   // contract: off means the artifact does not exist.
   purgeDisabledArtifacts(logDir, {
     actionLog: opts !== false && !!opts.actionLog,
@@ -103,7 +103,7 @@ export function initDiagnostics(
     if (recovered) {
       const age = Date.now() - recovered.ts;
       const ageSec = Math.round(age / 1000);
-      // AIO-417 (TBD U5): don't imply automatic recovery — a diagnostic
+      // AIO-417: don't imply automatic recovery — a diagnostic
       // checkpoint is only applied if the app provides an `onCheckpointRestore`
       // hook. The old "found state from Xs ago" read as "state was recovered".
       if (age > 3600_000) {

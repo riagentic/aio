@@ -5,7 +5,7 @@
 // WS one buffered patches across the window; the UDS one dropped them (set a
 // dirty flag, discarded the patch array, then sent a no-arg full state). Under
 // the ~50ms throttle the 2nd+ mutation in a burst was silently lost for UDS
-// clients — the risoto 2026-07-19 "frozen balance" bug. Two throttles, one
+// clients — the a field report "frozen balance" bug. Two throttles, one
 // buffered, one dropped. This primitive removes that asymmetry by construction:
 // there is one buffer-and-flush, and each transport supplies only its own
 // send.
@@ -27,7 +27,7 @@ export interface Coalescer<T> {
    *  throttle window, so the next mutation goes leading-edge again. For
    *  client-originated actions — the throttle exists to pace background
    *  churn, not to add up to `throttleMs` of latency to a user's keystroke
-   *  (risoto 2026-07-25: every navigation key paid ~50ms here). No-op when
+   * . No-op when
    *  nothing is buffered. */
   flushUrgent(): void;
   /** Cancel any pending throttle timer (for shutdown). */

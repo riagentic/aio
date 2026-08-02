@@ -66,7 +66,7 @@ export type TTCommand =
 // structural sharing across entries — memory grows with the DELTAS between
 // actions plus one full tree, not entries × state. This replaced a
 // structuredClone per dispatch that a 60 fps field report measured at
-// ~1 MB/s (space-invaders), plus a JSON.stringify size-sampling guard the
+// ~1 MB/s, plus a JSON.stringify size-sampling guard the
 // clone made necessary. With entries this cheap the window is deep: history
 // is a dev inspector with a BOUNDED window, not a replay mechanism — apps
 // that need replay should record inputs (see docs/debugging/time-travel.md).

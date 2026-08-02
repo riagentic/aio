@@ -263,7 +263,7 @@ Deno.test("liveProxy RYW: external commits stay visible (still live)", () => {
   assertEquals(proxy.n, 1); // my pending write still overlays
 });
 
-// ── find() returns a LIVE element proxy (inews R4 P1) ─────────────
+// ── find() returns a LIVE element proxy ─────────────
 // A held `find` result mutated after an await must batch the write exactly
 // like `s.users[i].field = x` — the detached-snapshot behavior silently
 // dropped it in prod while testCell's Immer draft applied it.

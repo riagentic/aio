@@ -1,5 +1,4 @@
-// capabilities.ts — least-privilege capability manifest (risoto #9, the
-// structural half of `aio ship`). A wallet shipping with `-A` is a
+// capabilities.ts — least-privilege capability manifest. A wallet shipping with `-A` is a
 // contradiction; scan the app's source for the Deno APIs that actually need a
 // permission and emit the minimal `--allow-*` set instead.
 //

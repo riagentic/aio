@@ -1,4 +1,4 @@
-// risoto #4 — `am record`: turn a recorded journal into a bootCells replay test.
+// `am record`: turn a recorded journal into a bootCells replay test.
 import { assert, assertEquals } from "@std/assert";
 import { generateReplayTest, parseJournalActions } from "../src/am/record.ts";
 

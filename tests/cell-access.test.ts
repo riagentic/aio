@@ -47,7 +47,7 @@ Deno.test("cellAccessAllowed: rule matrix", () => {
   assert(!cellAccessAllowed(rule, viewer, "write"));
   assert(cellAccessAllowed(rule, admin, "write"));
 
-  // predicate ALSO sees the method's call args → row-level authz (realitio):
+  // predicate ALSO sees the method's call args → row-level authz:
   // "edit only your own row". The args are forwarded from payload.args.
   const ownRow = (
     u: { id?: string } | undefined,
@@ -141,7 +141,7 @@ Deno.test("cell access: network callers gated, server code bypasses (e2e)", asyn
 Deno.test("cell access: row-level predicate sees method args over the wire (e2e)", async () => {
   const { cell, aio } = await import("../mod.ts");
   // "edit only your OWN doc": the predicate reads the method's first arg (docId)
-  // and compares to the doc's owner. This is the realitio row-level ask, proven
+  // and compares to the doc's owner. This is the a field report row-level ask, proven
   // end to end — the args must survive the wire and reach the predicate.
   const owners: Record<string, string> = { d1: "alice", d2: "bob" };
   const docs = cell("docs", {

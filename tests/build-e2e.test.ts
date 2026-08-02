@@ -589,6 +589,145 @@ Deno.test({
       } finally {
         await kill(proc);
       }
+
+      // The app's VERSION travelling inside the binary is proven
+      // without a second boot of this same artifact, which would contend for
+      // its singleton lock: `tests/build.test.ts` asserts deno.json is in the
+      // compile includes, and `tests/app-version-identity.test.ts` asserts the
+      // runtime resolves it from the entry module and never from the cwd.
+    } finally {
+      await Deno.remove(dir, { recursive: true }).catch(() => {});
+    }
+  },
+});
+
+// ── cross-platform: one machine, one command, every OS ────────────────────
+//
+// The failure mode a unit test cannot catch is a build that SUCCEEDS while
+// emitting the host's binary under a foreign platform's name. Only the file's
+// own format can settle it, so this reads the artifact's magic bytes: a PE
+// executable starts "MZ" and carries a "PE\0\0" header; an ELF starts \x7fELF;
+// a Mach-O has its own magic. A mislabeled host binary fails here.
+Deno.test({
+  name: "artifact: `deno task build` cross-compiles a real foreign binary",
+  ignore: !GATE,
+  fn: async () => {
+    const dir = await makeApp("counter", "build-e2e-xplat-");
+    try {
+      const { hostPlatform } = await import("../src/build/platforms.ts");
+      // Pick a platform that is definitely NOT this machine.
+      const foreign = hostPlatform() === "windows" ? "linux" : "windows";
+      const r = await task(
+        dir,
+        "build",
+        "--targets=cli",
+        `--platforms=host,${foreign}`,
+      );
+      assertEquals(r.code, 0, `cross build failed:\n${r.out}\n${r.err}`);
+
+      const dist = join(dir, "dist");
+      const manifest = JSON.parse(
+        await Deno.readTextFile(join(dist, "manifest.json")),
+      ) as {
+        builtOn: string;
+        platforms: string[];
+        targets: Array<{
+          target: string;
+          platform: string;
+          host: boolean;
+          triple: string | null;
+          ok: boolean;
+          artifacts: Array<{ file: string; bytes: number }>;
+        }>;
+      };
+
+      assertEquals(manifest.builtOn, hostPlatform(), "manifest names the host");
+      assertEquals(
+        manifest.targets.map((t) => t.platform).sort(),
+        [foreign, hostPlatform()].sort(),
+        "one entry per platform",
+      );
+
+      const cross = manifest.targets.find((t) => t.platform === foreign)!;
+      assertEquals(cross.ok, true);
+      assertEquals(cross.host, false, "it is flagged as NOT runnable here");
+      assert(cross.triple, "and records the triple it was built for");
+      const file = cross.artifacts[0]?.file;
+      assert(file, "the cross build produced an artifact");
+      assert(
+        file!.includes(foreign),
+        `a cross artifact must name its platform: ${file}`,
+      );
+
+      // The decisive check: the bytes are the FOREIGN platform's format.
+      const bytes = await Deno.readFile(join(dist, file!));
+      if (foreign === "windows") {
+        assertEquals([bytes[0], bytes[1]], [0x4d, 0x5a], "PE files start MZ");
+        const peOff = new DataView(bytes.buffer).getUint32(0x3c, true);
+        assertEquals(
+          [bytes[peOff], bytes[peOff + 1], bytes[peOff + 2], bytes[peOff + 3]],
+          [0x50, 0x45, 0x00, 0x00],
+          "…and carry a PE\\0\\0 header — this is not a renamed host binary",
+        );
+      } else {
+        assertEquals(
+          [bytes[0], bytes[1], bytes[2], bytes[3]],
+          [0x7f, 0x45, 0x4c, 0x46],
+          "ELF magic — this is not a renamed host binary",
+        );
+      }
+
+      // The host artifact is still the bare name, and still runs.
+      const hostEntry = manifest.targets.find((t) => t.host)!;
+      const hostFile = hostEntry.artifacts[0]!.file;
+      assert(
+        !hostFile.includes(foreign),
+        "the host artifact keeps its plain name",
+      );
+      const bin = join(dist, hostFile);
+      await Deno.chmod(bin, 0o755);
+      const run = await new Deno.Command(bin, {
+        args: ["--help"],
+        stdout: "piped",
+        stderr: "piped",
+      }).output();
+      assertStringIncludes(
+        new TextDecoder().decode(run.stdout) +
+          new TextDecoder().decode(run.stderr),
+        "aio",
+        "the host binary still boots",
+      );
+    } finally {
+      await Deno.remove(dir, { recursive: true }).catch(() => {});
+    }
+  },
+});
+
+Deno.test({
+  name: "artifact: a platform that cannot cross-compile is refused, not faked",
+  ignore: !GATE,
+  fn: async () => {
+    const dir = await makeApp("counter", "build-e2e-xplat-skip-");
+    try {
+      const { hostPlatform } = await import("../src/build/platforms.ts");
+      const foreign = hostPlatform() === "windows" ? "linux" : "windows";
+      // Electron bundles a per-OS runtime — asking for it on another OS must
+      // produce a REASON, never a host AppImage wearing a foreign name.
+      const r = await task(
+        dir,
+        "build",
+        "--targets=electron",
+        `--platforms=${foreign}`,
+      );
+      assertStringIncludes(
+        r.out + r.err,
+        "skipped",
+        "the refusal is reported, not silent",
+      );
+      const leaked = [...Deno.readDirSync(dir)].some((e) =>
+        e.name.includes(foreign)
+      );
+      assertEquals(leaked, false, "no artifact wearing the foreign platform");
     } finally {
       await Deno.remove(dir, { recursive: true }).catch(() => {});
     }

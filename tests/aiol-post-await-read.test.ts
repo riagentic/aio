@@ -1,6 +1,6 @@
 // `await cell.method()` then reading `cell.field` in the next breath: on a
 // browser client the patch may not have landed, so the read returns the
-// PREVIOUS value (risoto 2026-07-26 — "almost always the bug"). The method's
+// PREVIOUS value. The method's
 // return value crosses the bridge; use it.
 import { assert, assertEquals } from "@std/assert";
 import { join } from "@std/path";

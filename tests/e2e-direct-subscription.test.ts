@@ -1,4 +1,4 @@
-// risoto 2026-07-18 — CRITICAL regression: a server-initiated state change to a
+// a field report — CRITICAL regression: a server-initiated state change to a
 // cell read via DIRECT cell access must reach the viewing client.
 //
 // The bug: direct cell access (`data.n`) registered an AIR re-render dependency
@@ -58,7 +58,7 @@ async function waitFor<T>(
 // deno-lint-ignore no-explicit-any
 function findText(nodes: any[], t: string): string | null {
   for (const n of nodes ?? []) {
-    for (const el of n.elements ?? []) if (el.name === t) return el.text ?? "";
+    for (const el of n.elements ?? []) if (el.name === t) return el.text;
     const c = findText(n.children ?? [], t);
     if (c !== null) return c;
   }
@@ -67,7 +67,7 @@ function findText(nodes: any[], t: string): string | null {
 
 Deno.test({
   name:
-    "e2e: server-initiated change to a directly-read cell reaches a partially-subscribed client (risoto 2026-07-18)",
+    "e2e: server-initiated change to a directly-read cell reaches a partially-subscribed client",
   ignore: BROWSER === null,
   sanitizeResources: false,
   sanitizeOps: false,

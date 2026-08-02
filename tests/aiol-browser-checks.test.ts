@@ -328,7 +328,7 @@ export function loadData() { return join('a', 'b') }
   });
 });
 
-// AIO-424 (risoto): a server-only SYMBOL from the isomorphic "aio" entry
+// AIO-424: a server-only SYMBOL from the isomorphic "aio" entry
 // (createDB) statically imported into a cell file blank-screens the client at
 // boot — every server-side check passes. The linter must catch it, attributed.
 Deno.test("aiol: flags server-only symbol (createDB) imported from aio in a cell file", async () => {

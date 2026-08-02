@@ -21,7 +21,7 @@ function _safeUiEntry(uiEntry: string): string {
 
 /** Builds the common <head> content shared across all modes */
 /** Default viewport — responsive, mobile-correct. Overridable via ui.viewport.
- *  AIO-423 (realitio): without this, mobile Chrome falls back to a 980px layout
+ *  AIO-423: without this, mobile Chrome falls back to a 980px layout
  *  viewport and every app renders shrunken by default ("mobile broken by
  *  default"). This is mobile 101 and must be the out-of-the-box behaviour. */
 const DEFAULT_VIEWPORT =
@@ -185,7 +185,7 @@ ${head}
       _root.replaceChildren(box)
     }
     function _fail(stage, err) {
-      // risoto 2026-07-16f: a render error carries the component path it
+      // a field report: a render error carries the component path it
       // escaped from — name it, so "Cannot read properties of undefined"
       // becomes bisect-free ("in <NetworkPanel> ← <App>").
       const chain = err && Array.isArray(err.__aioComponents)
@@ -205,14 +205,14 @@ ${head}
     // "empty" = no elements and no text — a null render still leaves a
     // comment node, so hasChildNodes() alone would miss it.
     const _empty = () => !_root.querySelector('*') && !(_root.textContent || '').trim()
-    // quant Ugly #3: right after a dev restart the server may still be
+    // right after a dev restart the server may still be
     // transpiling, so a dynamic import fails transiently with "Failed to fetch
     // dynamically imported module" — the SAME error as a real failure. Retry
     // transient import errors (showing "Building\\u2026", not the scary card)
     // before giving up; a genuine error still surfaces after the retries.
     const _importRetry = async (specOrThunk, attempts) => {
       attempts = attempts || 8
-      const load = typeof specOrThunk === 'function' ? specOrThunk : () => import(specOrThunk)
+      const load = typeof specOrThunk === 'function' ? specOrThunk: () => import(specOrThunk)
       for (let i = 0; i < attempts; i++) {
         try { return await load() }
         catch (e) {

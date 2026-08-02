@@ -36,7 +36,7 @@ export function _flushAfterRender(root: RootState): void {
 /**
  * Report an error thrown by a lifecycle hook (`onMount`/`afterRender`) without
  * letting it abort the render — one bad hook must never collapse the surface
- * (risoto #3). Adds an actionable hint when the cause is DOM access with no DOM
+ * . Adds an actionable hint when the cause is DOM access with no DOM
  * (testUI/SSR), where the raw "document is not defined" lands far from its fix.
  */
 export function _reportHookError(kind: string, e: unknown): void {
@@ -137,7 +137,7 @@ export function _flushPending(root: RootState): void {
           // (_scheduleComponentRender early-returns on pendingRender), freezing it
           // and silently dropping all its future signal updates. Only reachable
           // under heavy bursts (>budget mid-batch), which is why fast test flushes
-          // never surfaced it — the risoto "rows freeze during an airdrop" class.
+          // never surfaced it — the a field report "rows freeze during an airdrop" class.
           for (let j = bi + 1; j < batchItems.length; j++) {
             const rest = batchItems[j]!;
             if (!rest.disposed && rest.pendingRender) {

@@ -89,7 +89,7 @@ app.on('ready', () => {
         return new Response(PROD_HTML, { headers: { 'Content-Type': 'text/html' } });
       }
       const filePath = path.resolve(path.join(BASE_DIR, pathname));
-      const basePfx = BASE_DIR.endsWith(path.sep) ? BASE_DIR : BASE_DIR + path.sep;
+      const basePfx = BASE_DIR.endsWith(path.sep) ? BASE_DIR: BASE_DIR + path.sep;
       if (!filePath.startsWith(basePfx) && filePath !== BASE_DIR) {
         return new Response('Forbidden', { status: 403 });
       }
@@ -105,8 +105,7 @@ app.on('ready', () => {
 
   const b = loadBounds(${w}, ${h});
   // webviewTag rides the same childWindows opt-in as openWindow: both are
-  // "render remote content inside the app" capabilities (risoto RIB — the
-  // in-panel dApp browser). Off by default; a <webview> without the gate
+  // "render remote content inside the app" capabilities. Off by default; a <webview> without the gate
   // simply doesn't render.
   b.webPreferences = { nodeIntegration: false, contextIsolation: true, preload: preloadFile, webviewTag: ${
     JSON.stringify(!!opts.meta?.childWindows)
@@ -139,11 +138,11 @@ ${tmplBoundsTracking()}
   // fires did-start-navigation on the embedder's webContents — gating on that
   // flipped pageReady false forever (did-finish-load never re-fires for the
   // main frame), silently freezing every server→renderer state message the
-  // moment a webview attached (risoto RIB field report 2026-07-25). Handles
+  // moment a webview attached. Handles
   // both Electron signatures: new (event-details object with isMainFrame) and
   // legacy positional (4th arg).
   win.webContents.on('did-start-navigation', (e, _url, _inPlace, isMainFrame) => {
-    const main = (e && typeof e.isMainFrame === 'boolean') ? e.isMainFrame : isMainFrame;
+    const main = (e && typeof e.isMainFrame === 'boolean') ? e.isMainFrame: isMainFrame;
     if (main !== false) pageReady = false;
   });
   win.webContents.on('did-finish-load', () => { pageReady = true; });
@@ -191,7 +190,7 @@ ${tmplBoundsTracking()}
         down = true;
         const why = (lastErrCode === 'ECONNREFUSED' || lastErrCode === 'ENOENT')
           ? "backend not reachable — is the aio server running?"
-          : ("backend connection lost" + (lastErrCode ? " (" + lastErrCode + ")" : ""));
+          : ("backend connection lost" + (lastErrCode ? " (" + lastErrCode + ")": ""));
         console.warn("[aio:electron] " + why + " at " + SOCK + " — reconnecting (backoff up to 8s)…");
       }
       const delay = Math.min(${BACKOFF_BASE_MS} * Math.pow(2, retry), ${BACKOFF_MAX_MS});
@@ -205,7 +204,7 @@ ${tmplBoundsTracking()}
     if (!win.isDestroyed()) win.webContents.print({ silent: false, printBackground: true });
   });
 
-  // mdview #7: open a link in the system browser. Allowlist http/https ONLY —
+  // open a link in the system browser. Allowlist http/https ONLY —
   // a compromised renderer must not reach file:/ or custom shell handlers.
   ipcMain.on('__aio:openExternal', (_event, url) => {
     try {
@@ -237,13 +236,13 @@ ${tmplBoundsTracking()}
       const u = new URL(String(url));
       if (u.protocol !== 'http:' && u.protocol !== 'https:') return;
       const root = fs.realpathSync(BASE_DIR || process.cwd());
-      const pfx = root.endsWith(path.sep) ? root : root + path.sep;
+      const pfx = root.endsWith(path.sep) ? root: root + path.sep;
       const p = path.resolve(String(preload || ''));
       if (!p.startsWith(pfx) || !fs.existsSync(p)) return;
       // Symlink escape: judge the REAL file, not the link's address.
       if (!fs.realpathSync(p).startsWith(pfx)) return;
-      const sandbox = payload.sandbox === false ? false : true;
-      console.warn('[aio:electron] openWindow → ' + u.href + (sandbox ? '' : ' (sandbox DISABLED by app request)'));
+      const sandbox = payload.sandbox === false ? false: true;
+      console.warn('[aio:electron] openWindow → ' + u.href + (sandbox ? '': ' (sandbox DISABLED by app request)'));
       const child = new BrowserWindow({
         width: 1100,
         height: 800,
@@ -288,7 +287,7 @@ ${tmplKeyboardShortcuts()}
 
   // AIO-73: aio:/// (no host) fails — use aio://app/ (with host component)
   win.loadURL(USE_PROTOCOL ? 'aio://app/': ${JSON.stringify(url)});
-  const _appOrigin = USE_PROTOCOL ? 'aio://app' : new URL(${
+  const _appOrigin = USE_PROTOCOL ? 'aio://app': new URL(${
     JSON.stringify(url)
   }).origin;
 ${tmplWillNavigate("_appOrigin")}

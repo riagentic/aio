@@ -225,7 +225,7 @@ Deno.test("checkPlatformSafety: import type of a server-only aio symbol is NOT f
 });
 
 Deno.test("checkPlatformSafety skips Deno.* behind typeof guard", () => {
-  const code = `const args = typeof Deno !== 'undefined' ? Deno.args : [];`;
+  const code = `const args = typeof Deno !== 'undefined' ? Deno.args: [];`;
   const errors = checkPlatformSafety(code, "./cell.ts");
   const denoErrors = errors.filter((e) => e.message.includes("Deno."));
   assertEquals(denoErrors.length, 0);
@@ -233,7 +233,7 @@ Deno.test("checkPlatformSafety skips Deno.* behind typeof guard", () => {
 
 Deno.test("checkPlatformSafety still flags unguarded Deno.* after guarded usage", () => {
   const code =
-    `const args = typeof Deno !== 'undefined' ? Deno.args : [];\nconst x = Deno.readTextFile("f");`;
+    `const args = typeof Deno !== 'undefined' ? Deno.args: [];\nconst x = Deno.readTextFile("f");`;
   const errors = checkPlatformSafety(code, "./cell.ts");
   const denoErrors = errors.filter((e) => e.message.includes("Deno."));
   assertEquals(denoErrors.length, 1);
@@ -433,7 +433,7 @@ Deno.test("validateGraph: a node: import in the client graph BLOCKS (sandboxed r
     );
     const result = await validateGraph(dir + "/App.tsx", {}, mockTranspile);
     // Guaranteed break → not valid → server renders the diagnostic page, not a
-    // silent blank screen (risoto's ask; confirmed against quant).
+    // silent blank screen.
     assertEquals(result.valid, false);
     const err = result.errors.find((e) => e.category === "server-only-import");
     assert(err, "node: import must be a blocking server-only-import");
@@ -464,7 +464,7 @@ Deno.test("validateGraph: a static createDB-from-aio import BLOCKS (the original
   }
 });
 
-Deno.test("validateGraph: a server-only module reached ONLY via dynamic import does NOT block (the escape hatch works — quant)", async () => {
+Deno.test("validateGraph: a server-only module reached ONLY via dynamic import does NOT block (the escape hatch works)", async () => {
   const dir = await Deno.makeTempDir();
   try {
     // App statically imports a cell; the cell lazily imports the server-only
@@ -543,7 +543,7 @@ Deno.test("validateGraph per-module valid computed after full walk", async () =>
   }
 });
 
-// AIO-425 (inews): a bare `from "` inside a STRING LITERAL (JSX text) must NOT be
+// AIO-425: a bare `from "` inside a STRING LITERAL (JSX text) must NOT be
 // mistaken for an import — it returned a "Module Errors" page for a valid app.
 Deno.test('extractImports ignores `from "` inside string literals (JSX text)', () => {
   // esbuild output shape for <h2>More from {x}</h2> plus real imports.
@@ -584,7 +584,7 @@ Deno.test("extractImports still finds real static + dynamic + export-from", () =
   ]);
 });
 
-// risoto 2026-07-26: `await import("aio/server")` inside a cell method — the
+// a field report: `await import("aio/server")` inside a cell method — the
 // documented way to reach SQLite/createDB — was reported as a missing
 // import-map entry on every dev boot, with a "fix" (npm:aio/server) that does
 // not exist. The browser import map must NOT carry that entry; the validator
