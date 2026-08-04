@@ -1,6 +1,18 @@
 // Shared types, helpers, and CJS template fragments for Electron script generators
 
+import { generateHTML } from "../server/server-html-gen.ts";
+
 export type Log = { info: (msg: string) => void; error: (msg: string) => void };
+
+/** The `<head>`-shaped half of `UiConfig` — everything the HTML shell must
+ *  carry because no runtime frame can deliver it after the page exists. */
+export type ShellConfig = {
+  showStatus?: boolean;
+  width?: number;
+  height?: number;
+  viewport?: string | false;
+  head?: string;
+};
 
 /** Window metadata extracted from config or HTML meta tags */
 export type AioMeta = {
@@ -333,23 +345,38 @@ ipcRenderer.on('__aio:navigate', (_e, url) => {
 `;
 }
 
-/** Generates prod-mode index.html for aio:// protocol */
-export function udsProdHTML(title: string, hasCSS: boolean): string {
-  const safeTitle = title.replace(/[&<>"']/g, "");
-  const cssLink = hasCSS ? '\n  <link rel="stylesheet" href="/style.css">' : "";
-  return `<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="UTF-8">
-  <meta name="referrer" content="no-referrer">
-  <title>${safeTitle}</title>${cssLink}
-</head>
-<body>
-  <div id="root"></div>
-  <script type="module">
-    const { mount } = await import('/app.js')
-    mount(document.getElementById('root'))
-  </script>
-</body>
-</html>`;
+/** Generates prod-mode index.html for the aio:// protocol.
+ *
+ *  This DELEGATES to the one prod shell (`generateHTML(prod: true)`) rather
+ *  than hand-rolling a second one. It used to be its own copy, and the copy
+ *  silently dropped every `<head>` input — `ui.head`, `ui.viewport`,
+ *  `ui.showStatus`, the `aio:width/height` metas. The result was a packaged
+ *  Electron app that did not look like the same app in dev: a `ui.head` reset
+ *  (body margin, `color-scheme`) applied under `deno task dev` and vanished in
+ *  the AppImage. Divergence between the shells IS the bug class, so there is
+ *  now only one shell.
+ *
+ *  `renderBudget`/`syncCells`/`callTimeouts` stay unset here on purpose — a
+ *  build-time-templated shell cannot know them, which is exactly why the
+ *  server sends the "cfg" frame (see `_applyServerConfig`). Shell-injected
+ *  keys win; these gaps are filled at connect. Only head content, which no
+ *  frame can retrofit, has to be threaded through. */
+export function udsProdHTML(
+  title: string,
+  hasCSS: boolean,
+  shell?: ShellConfig,
+): string {
+  return generateHTML(
+    title,
+    true, // prod
+    hasCSS,
+    "", // importMap — prod bundles its own imports
+    shell?.showStatus,
+    shell?.width,
+    shell?.height,
+    undefined, // renderBudget — cfg frame
+    undefined, // uiEntry — dev-only
+    shell?.viewport,
+    shell?.head,
+  );
 }

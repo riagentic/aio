@@ -138,6 +138,14 @@ with a host binary under a foreign name.
 | `android-client`  | client | Android client APK (connects to a server)     |
 | `cli-client`      | client | CLI client binary (connects to a server)      |
 
+> Known limitation (android with bundled assets): the packaged shell HTML is
+> written at **build** time, before your `aio.run()` config exists — so
+> `ui.head`, a custom `ui.viewport`, and `ui.showStatus` cannot reach the
+> android-local shell. It carries the app title, stylesheet, icon, and the
+> standard viewport; the other targets (browser, electron) render the full `ui`
+> shell config. If your app depends on `ui.head` on android, use
+> `android:remote` (the WebView then loads the live server's shell).
+
 Each target maps to the same single-target flags as its `compile:*` task, run as
 a subprocess — so `build` is purely additive: the individual `compile:*` tasks
 keep working unchanged. A failed target is reported in the summary and marked

@@ -5,6 +5,7 @@
 
 import { assert, assertEquals } from "jsr:@std/assert";
 import { generateHTML } from "../src/server/server-html-gen.ts";
+import { udsProdHTML } from "../src/electron/electron-shared.ts";
 
 const gen = (
   opts: { viewport?: string | false; head?: string; prod?: boolean } = {},
@@ -64,4 +65,64 @@ Deno.test("html shell: dev sets __aioDev before any module, prod never does", ()
     "must run before the first module import",
   );
   assert(!prod.includes("__aioDev"), "prod shell stays clean");
+});
+
+// ── The packaged Electron shell is the SAME shell ────────────────────────
+// The aio:// prod shell used to be a second, hand-rolled copy of the HTML
+// (udsProdHTML) that took only (title, hasCSS). Every `<head>` input was
+// silently dropped, so an app configured with `ui.head` — a CSS reset for
+// body margin and `color-scheme`, say — looked right under `deno task dev`
+// and shipped a white-framed, light-scrollbar window in the AppImage. Nothing
+// failed; the two shells just disagreed. `cfg` frames can backfill JS config
+// after connect, but nothing can retrofit a `<head>`, so it must travel with
+// the template.
+Deno.test("electron aio:// shell: carries every ui.head input, like dev does", () => {
+  const head = "<style>html,body{margin:0}</style>";
+  const html = udsProdHTML("T", false, {
+    head,
+    viewport: "width=1280",
+    showStatus: false,
+    width: 900,
+    height: 640,
+  });
+  assert(html.includes(head), "ui.head reaches the packaged shell");
+  assert(html.includes('content="width=1280"'), "ui.viewport honoured");
+  assert(
+    html.includes("window.__aioShowStatus=false"),
+    "ui.showStatus honoured",
+  );
+  assert(
+    html.includes('name="aio:width" content="900"'),
+    "window metas present",
+  );
+});
+
+Deno.test("electron aio:// shell: identical to the HTTP prod shell", () => {
+  const opts = { head: "<meta name=x>", viewport: "width=1280" as const };
+  assertEquals(
+    udsProdHTML("T", false, {
+      ...opts,
+      showStatus: true,
+      width: 800,
+      height: 600,
+    }),
+    generateHTML(
+      "T",
+      true,
+      false,
+      "",
+      true,
+      800,
+      600,
+      undefined,
+      undefined,
+      opts.viewport,
+      opts.head,
+    ),
+    "one prod shell, not two that drift",
+  );
+});
+
+Deno.test("electron aio:// shell: still escapes the title", () => {
+  assert(!udsProdHTML("<script>x</script>", false).includes("<script>x"));
 });

@@ -55,6 +55,11 @@ export function _forward(
   args: unknown[],
 ): void {
   if (!_send || _forwarding) return;
+  // Diagnostic events already reach client.log server-side (the diagnostic
+  // bus writes every error/warning it broadcasts); the console fallback
+  // printing them (`_deliverDiag`, marked "[aio:diag]") must not loop them
+  // back as a log frame or every diagnostic lands in the file twice.
+  if (typeof args[0] === "string" && args[0].startsWith("[aio:diag]")) return;
   _forwarding = true;
   try {
     const entry: ClientLogEntry = {

@@ -133,10 +133,16 @@ export function createCellWorkerPool(opts: {
         prod,
         initialState: () => getSlice(name),
         applyPatches: (cell: string, ops: Patch[]) => {
+          // `_source: "Effect"`: these ARE a method's writes arriving from the
+          // worker isolate — if they land inside the shutdown drain window
+          // (dispatch closed, not yet sealed) they must be let through exactly
+          // like a local method's commits, not dropped as late client input.
+          // Server-constructed only; every network entry point strips _source.
           void dispatch({
             type: WORKER_PATCH_ACTION,
             payload: { cell, ops },
-          } as Msg);
+            _source: "Effect",
+          } as unknown as Msg);
         },
         runEffect,
       }),

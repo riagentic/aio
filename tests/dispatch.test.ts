@@ -1016,3 +1016,97 @@ Deno.test("dispatch: DISPATCH_MAX overflow rejects dropped actions (B-4)", async
     "actions dropped by DISPATCH_MAX overflow must reject with DISPATCH_LOOP (B-4)",
   );
 });
+
+Deno.test("dispatch: an in-flight effect can still commit while draining", async () => {
+  // Field report (llama-master): a chat streamed from llama-server when the
+  // window closed. Shutdown closes dispatch and THEN drains in-flight
+  // effects — so the streaming method's next draft write hit a closed queue,
+  // the method died with EFFECT_ASYNC_ERROR mid-reply, and the state it was
+  // about to write never reached the final persist. Late CLIENT input is what
+  // close() is for; the framework's own drain is not.
+  let state = { n: 0 };
+  let release!: () => void;
+  const gate = new Promise<void>((r) => release = r);
+  let dispatchRef!: (a: { type: string; _source?: string }) => Promise<unknown>;
+  let commit: Promise<unknown> | null = null;
+
+  const dispatch = createDispatch<
+    typeof state,
+    { type: string; _source?: string },
+    { type: string }
+  >({
+    reduce: (s, a) => ({
+      state: { n: a.type === "COMMIT" ? s.n + 1 : s.n },
+      effects: a.type === "START" ? [{ type: "STREAM" }] : [],
+    }),
+    execute: async () => {
+      await gate; // the "stream", still open when shutdown starts
+      // What a cell method's write-set looks like on the wire.
+      commit = dispatchRef({ type: "COMMIT", _source: "Effect" });
+      await commit;
+    },
+    getState: () => state,
+    setState: (s) => {
+      state = s;
+    },
+    onDone: () => {},
+    log: noop,
+    debug: false,
+  });
+  dispatchRef = dispatch;
+
+  dispatch({ type: "START" });
+  dispatch.close();
+
+  // Client input after close() still drops — that is what close() is for.
+  await assertRejects(() => dispatch({ type: "TYPED", _source: "UI" }));
+  // So does a scheduled tick: shutdown must not start new work, only let
+  // work that is already running finish writing.
+  await assertRejects(() => dispatch({ type: "POLL" }));
+
+  const drained = dispatch.drain(1000);
+  release();
+  await drained;
+
+  await commit; // must have resolved, not rejected
+  assertEquals(state.n, 1, "the draining effect's commit must land");
+
+  // Sealed after the drain: persist has read the state, nothing may move it.
+  await assertRejects(() => dispatch({ type: "LATE" }));
+});
+
+Deno.test("dispatch: drain(timeout) seals rather than waiting forever", async () => {
+  // An effect that ignores its abort signal must not hold the window open.
+  let state = { n: 0 };
+  const dispatch = createDispatch<
+    typeof state,
+    { type: string; _source?: string },
+    { type: string }
+  >({
+    reduce: (_s, a) => ({
+      state: { n: 0 },
+      effects: a.type === "START" ? [{ type: "HANG" }] : [],
+    }),
+    execute: () => new Promise<void>(() => {}), // never settles
+    getState: () => state,
+    setState: (s) => {
+      state = s;
+    },
+    onDone: () => {},
+    log: noop,
+    debug: false,
+  });
+
+  dispatch({ type: "START" });
+  dispatch.close();
+  const t0 = Date.now();
+  await dispatch.drain(50);
+  assertEquals(Date.now() - t0 < 2000, true, "drain must respect its deadline");
+  await assertRejects(() => dispatch({ type: "LATE" }));
+  // The SEAL is the load-bearing half: the hung effect above still holds
+  // `effectPromises` open, so without the seal a late `_source:"Effect"`
+  // commit would be accepted AFTER the deadline broke the drain — after
+  // `flushPersist` already read the state it would change. Pin it: even the
+  // effect-tagged path must reject once the drain has ended.
+  await assertRejects(() => dispatch({ type: "LATE", _source: "Effect" }));
+});

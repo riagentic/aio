@@ -5,7 +5,10 @@
 // CSRF-protected (X-AIO header on POST), rate-limited.
 import { enc } from "../protocol/envelope.ts";
 import type { AioUser } from "./aio.ts";
-import { _isFrameworkInternalActionType } from "./server-ws.ts";
+import {
+  _isFrameworkInternalActionType,
+  sanitizeClientAction,
+} from "./server-ws.ts";
 
 /** Client info visible to trojan introspection endpoints */
 export interface TrojanClientInfo {
@@ -440,22 +443,13 @@ async function handlePost(
         }
         action.type = `${cell}:${method}`; // normalize dot → colon
       }
-      // Strip client-set identity provenance. The field dispatch actually
-      // consumes is `_user` (not `user`) — deleting the wrong key left the
-      // spoof open. Drop both to be safe; the server owns the real identity.
+      // Strip client-set trusted provenance and re-stamp `_source:"UI"` — ONE
+      // decider for all three network entry points (sanitizeClientAction,
+      // server-ws.ts). `user` (without the underscore) is trojan-specific
+      // legacy: the field dispatch consumes is `_user`, and deleting only the
+      // wrong key once left the spoof open — drop both.
       delete action.user;
-      delete (action as Record<string, unknown>)._user;
-      // …and `payload._origin`, exactly as the WS and UDS paths do. It is the
-      // method name a cell's `access` predicate discriminates on, so a caller
-      // could forge `payload:{_origin:"read"}` on a `cell:delete` action and be
-      // gated as a read while the reducer ran the delete. Network actions carry
-      // no legitimate `_origin` (batching is server-side). The trojan is
-      // dev-only and localhost-bound today — which is exactly why the
-      // inconsistency was easy to miss and worth closing now.
-      const _pl = (action as { payload?: unknown }).payload;
-      if (_pl && typeof _pl === "object") {
-        delete (_pl as Record<string, unknown>)._origin;
-      }
+      sanitizeClientAction(action as Record<string, unknown>, "trojan");
       try {
         await deps.dispatch(action, undefined);
       } catch (e) {

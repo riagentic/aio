@@ -9,6 +9,19 @@ import {
 // Helper to build a patch
 enablePatches();
 
+// A sweep flag we cannot read must THROW, never shrug: `FUZZ_ROUNDS=2k` is
+// NaN, `round < NaN` is false, and the fuzzer would report a vacuous green
+// over ZERO programs (same contract as tests/proxy-differential.test.ts).
+function fuzzEnvInt(name: string, def: number, min = 0): number {
+  const raw = Deno.env.get(name);
+  if (raw === undefined) return def;
+  const n = /^\d+$/.test(raw.trim()) ? Number(raw.trim()) : NaN;
+  if (!Number.isSafeInteger(n) || n < min) {
+    throw new Error(`${name}="${raw}" must be an integer >= ${min}`);
+  }
+  return n;
+}
+
 const replace = (path: (string | number)[], value: unknown): Patch => ({
   op: "replace",
   path,
@@ -248,13 +261,18 @@ Deno.test("narrowArrayPatches: a filtered list travels as its removals", () => {
 
 Deno.test("narrowArrayPatches: randomized edits always apply to the same array", () => {
   // The property that matters, over shapes nobody thinks to write by hand.
-  // Deterministic PRNG so a failure is reproducible from the seed alone.
-  let seed = 0x2f6e2b1;
+  // Deterministic PRNG so a failure is reproducible from the seed alone —
+  // fixed by default (CI must be reproducible from its own commit), and
+  // overridable so a sweep can explore past these 400 programs:
+  // `for s in 3 17 501; do FUZZ_SEED=$s deno test -A tests/patch-compact.test.ts; done`
+  let seed = fuzzEnvInt("FUZZ_SEED", 0x2f6e2b1) & 0x7fffffff;
+  const SEED = seed;
+  const ROUNDS = fuzzEnvInt("FUZZ_ROUNDS", 400, 1);
   const rnd = () =>
     (seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff;
   const pick = (n: number) => Math.floor(rnd() * n);
 
-  for (let round = 0; round < 400; round++) {
+  for (let round = 0; round < ROUNDS; round++) {
     const len = pick(12);
     const before = Array.from({ length: len }, (_, i) => ({ id: i }));
     // Build `next` by a random sequence of keeps, drops and inserts — keeps
@@ -275,9 +293,9 @@ Deno.test("narrowArrayPatches: randomized edits always apply to the same array",
     assertEquals(
       applyPatches(prev, narrowed),
       applyPatches(prev, original),
-      `round ${round}: ${JSON.stringify(before.map((x) => x.id))} → ${
-        JSON.stringify(next.map((x) => (x as { id: number }).id))
-      }`,
+      `FUZZ_SEED=${SEED} round ${round}: ${
+        JSON.stringify(before.map((x) => x.id))
+      } → ${JSON.stringify(next.map((x) => (x as { id: number }).id))}`,
     );
   }
 });
@@ -445,12 +463,15 @@ Deno.test("narrowArrayPatches: a ROOT replace invalidates every tracked path", (
 Deno.test("narrowArrayPatches: randomized SHUFFLES never slip through as edits", () => {
   // The reorder bail is load-bearing: a shuffle mis-read as remove+add would
   // reconstruct the wrong order. The other randomized test never permutes.
-  let seed = 0x51f0a3d;
+  // Same seeding contract as above (`FUZZ_SEED` sweeps, default is fixed).
+  let seed = fuzzEnvInt("FUZZ_SEED", 0x51f0a3d) & 0x7fffffff;
+  const SEED = seed;
+  const ROUNDS = fuzzEnvInt("FUZZ_ROUNDS", 1000, 1);
   const rnd = () =>
     (seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff;
   const pick = (n: number) => Math.floor(rnd() * n);
 
-  for (let round = 0; round < 1000; round++) {
+  for (let round = 0; round < ROUNDS; round++) {
     const len = 2 + pick(10);
     const before = Array.from({ length: len }, (_, i) => ({ id: i }));
     const next = [...before];
@@ -467,7 +488,7 @@ Deno.test("narrowArrayPatches: randomized SHUFFLES never slip through as edits",
     assertEquals(
       applyPatches(prev, narrowArrayPatches(prev, ops)),
       applyPatches(prev, ops),
-      `round ${round}`,
+      `FUZZ_SEED=${SEED} round ${round}`,
     );
   }
 });

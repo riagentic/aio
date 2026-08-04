@@ -255,28 +255,31 @@ export function parseGlobalFlags(
     } else expanded.push(a);
   }
 
+  // A numeric flag that does not parse is recorded as `flags.error` (first
+  // one wins) and `am` exits loud on it — `--lines=1O0` silently printing
+  // the default line count is the same NaN bug class `parseNumArg` exists
+  // for, and these flags predate it.
+  const num = (raw: string, label: string): number | undefined => {
+    const r = parseNumArg(raw, label);
+    if (r.ok) return r.value;
+    flags.error ??= r.error;
+    return undefined;
+  };
   for (const a of expanded) {
     if (a === "--json") flags.json = true;
     else if (a === "--quiet") flags.quiet = true;
-    else if (a.startsWith("--port=")) {
-      const v = Number(a.slice(7));
-      flags.port = isNaN(v) ? undefined : v;
-    } else if (a.startsWith("--body=")) flags.jsonBody = a.slice(7);
+    else if (a.startsWith("--port=")) flags.port = num(a.slice(7), "--port");
+    else if (a.startsWith("--body=")) flags.jsonBody = a.slice(7);
     else if (a.startsWith("--filter=")) flags.filter = a.slice(9);
-    else if (a.startsWith("--lines=")) {
-      const v = Number(a.slice(8));
-      flags.lines = isNaN(v) ? undefined : v;
-    } else if (a.startsWith("--wait=")) {
-      const v = Number(a.slice(7));
-      flags.wait = isNaN(v) ? undefined : v;
-    } else if (a === "--wait") flags.wait = 0; // bare --wait = use default
+    else if (a.startsWith("--lines=")) flags.lines = num(a.slice(8), "--lines");
+    else if (a.startsWith("--wait=")) flags.wait = num(a.slice(7), "--wait");
+    else if (a === "--wait") flags.wait = 0; // bare --wait = use default
     else if (a === "--follow" || a === "-f") flags.follow = true;
     else if (a.startsWith("--entry=")) flags.entry = a.slice(8);
     else if (a.startsWith("--transport=")) flags.transport = a.slice(12);
     else if (a.startsWith("--app=")) flags.app = a.slice(6);
     else if (a.startsWith("--client=")) {
-      const v = Number(a.slice(9));
-      flags.client = isNaN(v) ? undefined : v;
+      flags.client = num(a.slice(9), "--client");
     } else if (
       a.startsWith("-c") && a.length > 2 && !isNaN(Number(a.slice(2)))
     ) {
@@ -289,6 +292,40 @@ export function parseGlobalFlags(
   const command = rest[0] ?? "help";
   const args = rest.slice(1);
   return { command, args, flags };
+}
+
+/** Parse a numeric CLI argument, or say why it is not one. Never returns NaN.
+ *
+ *  `Number("2s")` is NaN, and NaN is the SILENT kind of wrong: handed to
+ *  `setTimeout` it becomes 1ms, so `am discover --timeout=2s` swept the LAN for
+ *  one millisecond and then reported "no aio apps found" — complete with a
+ *  confident note about UDP being blocked on some networks. The typo was in the
+ *  flag; the answer sent people to their firewall. A flag we cannot read is an
+ *  error, never a default and never a plausible-looking result.
+ *
+ *  Pure: the caller renders the message with its own `outError(…, mode)`. */
+export function parseNumArg(
+  raw: string | undefined,
+  label: string,
+  opts: { min?: number; max?: number; integer?: boolean } = {},
+): { ok: true; value: number } | { ok: false; error: string } {
+  const n = Number(raw);
+  if (raw === undefined || raw.trim() === "" || !Number.isFinite(n)) {
+    return { ok: false, error: `${label} must be a number (got "${raw}")` };
+  }
+  if (opts.integer && !Number.isInteger(n)) {
+    return {
+      ok: false,
+      error: `${label} must be a whole number (got "${raw}")`,
+    };
+  }
+  if (opts.min !== undefined && n < opts.min) {
+    return { ok: false, error: `${label} must be ≥ ${opts.min} (got ${n})` };
+  }
+  if (opts.max !== undefined && n > opts.max) {
+    return { ok: false, error: `${label} must be ≤ ${opts.max} (got ${n})` };
+  }
+  return { ok: true, value: n };
 }
 
 /** Parse "key=val" pairs → object, auto-parse values */

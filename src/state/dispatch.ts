@@ -2,6 +2,7 @@
 // Re-entrant-safe: effects can call dispatch(), actions are queued and drained in order
 import type { ScheduleEffect } from "./schedule.ts";
 import type { OwnEffect } from "./own.ts";
+import { pendingCallsFor } from "./method-cancel.ts";
 import type { ReduceBreakdown } from "../diagnostics/time-travel.ts";
 import {
   type AioError,
@@ -131,6 +132,10 @@ export type DispatchDeps<S, A, E> = {
   effectTimeout?: number; // ms before warning on a slow async effect (default: 30000, 0 = disabled)
   /** Optional getter for reduce phase breakdown — provided by composeCells when perfCheck is on */
   reduceBreakdown?: () => ReduceBreakdown | undefined;
+  /** THIS app's cell names. Scopes the drain gate's pending-call count to the
+   *  owning app — with two apps in one process (D2), a closed queue must not
+   *  stay open on the other app's in-flight calls. */
+  cellNames?: Set<string>;
 };
 
 /** Dispatch function with close() to reject further actions.
@@ -138,7 +143,10 @@ export type DispatchDeps<S, A, E> = {
  *  the method's transported return value, or undefined (AIO-427). */
 type DispatchFn<A> = ((action: A) => Promise<unknown>) & {
   close: () => void;
-  drain: () => Promise<void>;
+  /** Await in-flight effects, then SEAL the queue. `timeoutMs` bounds the
+   *  wait — an effect that ignores its abort signal must not hold shutdown
+   *  open (0 = wait forever, the pre-alpha44 behaviour). */
+  drain: (timeoutMs?: number) => Promise<void>;
   errorCount: () => number;
   getQueueDepth: () => number;
   getEffectBacklog: () => number;
@@ -168,6 +176,9 @@ export function createDispatch<S, A, E>(
   const effectBudget = perfBudget?.effect ?? DEFAULT_EFFECT_BUDGET;
   let dispatching = false;
   let closed = false;
+  // Sealed = closed AND done draining: after this nothing lands, effect or
+  // not. `close()` alone only shuts the door on new input (see below).
+  let sealed = false;
   // a field report: warn once per action TYPE after close — a shutdown
   // used to emit one identical warn line per queued tick (hundreds/ms).
   const closedWarnedTypes = new Set<string>();
@@ -252,7 +263,19 @@ export function createDispatch<S, A, E>(
       const isTeardown =
         (action as Record<string, unknown>)?._source === "System" &&
         t.endsWith(":__destroy");
-      if (!isTeardown) {
+      // An in-flight async method's ONLY way to publish anything — its
+      // draft writes, its return value, its error — is dispatch. Shutdown
+      // closes dispatch and THEN drains those effects (shutdown.ts Phase 1),
+      // so every commit they made while draining hit a closed queue: the
+      // method died mid-write with EFFECT_ASYNC_ERROR, and the state it was
+      // about to write never reached the final persist that ran next. A user
+      // chatting with a streaming model when the window closed got a stack
+      // trace instead of their reply. Late CLIENT input is what close() is
+      // for, and that still drops; the framework's own drain does not.
+      const isDraining = !sealed &&
+        (effectPromises.size > 0 || pendingCallsFor(deps.cellNames) > 0) &&
+        (action as Record<string, unknown>)?._source === "Effect";
+      if (!isTeardown && !isDraining) {
         closedDropCount++;
         if (!closedWarnedTypes.has(t)) {
           closedWarnedTypes.add(t);
@@ -631,10 +654,31 @@ export function createDispatch<S, A, E>(
   dispatch.close = () => {
     closed = true;
   };
-  dispatch.drain = async () => {
+  dispatch.drain = async (timeoutMs = 0) => {
+    const deadline = timeoutMs > 0 ? Date.now() + timeoutMs : 0;
     while (effectPromises.size > 0) {
-      await Promise.allSettled([...effectPromises]);
+      if (deadline) {
+        const left = deadline - Date.now();
+        if (left <= 0) {
+          log.warn(
+            `shutdown: ${effectPromises.size} effect(s) still running after ` +
+              `${timeoutMs}ms — sealing the queue; their writes are lost`,
+          );
+          break;
+        }
+        let t: ReturnType<typeof setTimeout> | undefined;
+        await Promise.race([
+          Promise.allSettled([...effectPromises]),
+          new Promise((r) => t = setTimeout(r, left)),
+        ]);
+        if (t !== undefined) clearTimeout(t);
+      } else {
+        await Promise.allSettled([...effectPromises]);
+      }
     }
+    // Draining is over: from here a late effect commit is as unwelcome as
+    // late client input, because persist has read the state it would change.
+    sealed = true;
   };
   dispatch.errorCount = () => errors;
   dispatch.getQueueDepth = () => queue.length;

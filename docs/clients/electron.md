@@ -131,8 +131,9 @@ deno task dev --server-url=http://192.168.1.100:8000
    `--server-url` is provided)
 3. Fetches the remote server's HTML to extract metadata (`<title>`,
    `<meta aio:width>`, `<meta aio:height>`)
-4. Sets window icon from `src/icon.png` (loaded from disk in UDS mode, fetched
-   from server in WS mode)
+4. Sets window icon from `icon.png` next to your entry — the app dir, the same
+   place the build packages it from (`src/icon.png` in a scaffolded app; loaded
+   from disk in UDS mode, fetched from the server in WS mode)
 5. Resizes window to the server's configured dimensions, sets title
 6. Loads the remote URL — app runs as if it were local
 

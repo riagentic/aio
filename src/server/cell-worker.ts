@@ -19,6 +19,7 @@ import {
   CELL_WORKER_PREFIX,
   type FromWorker,
   type ToWorker,
+  WORKER_CLOSE_DEADLINE_MS,
 } from "./cell-worker-protocol.ts";
 import { serverRequest, serverUser } from "./auth-context.ts";
 import { resolveCall } from "../state/cell-impl.ts";
@@ -106,6 +107,7 @@ export function createCellWorker(
   let closed = false;
   let readyResolve: (() => void) | null = null;
   let readyReject: ((e: Error) => void) | null = null;
+  let closedResolve: (() => void) | null = null;
   const readyPromise = new Promise<void>((res, rej) => {
     readyResolve = res;
     readyReject = rej;
@@ -192,6 +194,9 @@ export function createCellWorker(
         clearTimeout(readyTimer);
         readyReject?.(new Error(`[aio] cell worker "${name}": ${msg.message}`));
         return;
+      case "closed":
+        closedResolve?.();
+        return;
     }
   };
 
@@ -241,11 +246,22 @@ export function createCellWorker(
       closed = true;
       clearTimeout(readyTimer);
       try {
+        const acked = new Promise<void>((r) => closedResolve = r);
         send({ t: "close" });
-        // Give the host a beat to drain its final patches, then stop it. The
-        // authoritative state already lives here, so this can't lose committed
-        // work — only an in-flight method's unwritten tail.
-        await new Promise((r) => setTimeout(r, 50));
+        // The worker aborts its in-flight methods (their `s.$signal` lives in
+        // ITS isolate — ours cannot reach it), streams their final writes home
+        // as patches, then acks `closed` — patches win the FIFO race against
+        // the ack, so everything written has landed by the time this resolves.
+        // Deadline-bounded like the main isolate's own drain (shutdown.ts): a
+        // method that ignores its signal cannot hold the process open.
+        let t: ReturnType<typeof setTimeout> | undefined;
+        await Promise.race([
+          acked,
+          // aiol-ok: shutdown's drain deadline — a bare timer racing the ack
+          // is the point; schedule.* is app-side machinery.
+          new Promise<void>((r) => t = setTimeout(r, WORKER_CLOSE_DEADLINE_MS)),
+        ]);
+        if (t !== undefined) clearTimeout(t);
       } catch { /* already gone */ }
       failAll(new Error(`[aio] cell worker "${name}" closed`));
       worker.terminate();

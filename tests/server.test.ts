@@ -1187,14 +1187,16 @@ Deno.test("security: a network action cannot spoof the _user identity", async ()
       ws.onopen = () => res();
       ws.onerror = () => rej(new Error("ws failed"));
     });
-    // Attacker tries to dispatch as an admin by setting _user on the wire.
+    // Attacker tries to dispatch as an admin by setting _user on the wire,
+    // and to ride the shutdown drain gate by forging _source:"Effect".
     ws.send(JSON.stringify({
       v: 2,
       t: "action",
       d: {
         type: "todo:add",
         _user: { id: "root", role: "admin" },
-        _source: "UI",
+        _source: "Effect",
+        _syncOp: true,
       },
     }));
     for (let i = 0; i < 100 && seen.length === 0; i++) {
@@ -1207,6 +1209,29 @@ Deno.test("security: a network action cannot spoof the _user identity", async ()
       action!._user,
       undefined,
       "_user must be stripped from network-sourced actions (no identity spoof)",
+    );
+    // The same trusted-provenance class: `_source` steers dispatch's
+    // closed-queue drain gate (`_source:"Effect"` lands while draining, all
+    // else drops), so a client forging it could run a `cell:method` during
+    // shutdown drain and have its write captured by the final persist. The
+    // server tags its own effect dispatches itself — a caller-supplied value
+    // is never legitimate. It is RE-STAMPED (not just deleted) as "UI": app
+    // hooks keep real provenance, and the gate still treats it as client
+    // input.
+    assertEquals(
+      (action as Record<string, unknown>)._source,
+      "UI",
+      "_source must be re-stamped to 'UI' on network actions (no drain-gate spoof)",
+    );
+    // And `_syncOp`: only the sync handler sets it, on ops already persisted
+    // to the op-log, so afterAction skips the durability fold for sync cells.
+    // A forged value on a sync-cell method action would make the server treat
+    // a non-durable write as durable — the state change silently vanishes on
+    // restart. Never legitimate from a caller.
+    assertEquals(
+      (action as Record<string, unknown>)._syncOp,
+      undefined,
+      "_syncOp must be stripped from network-sourced actions (no durability-fold spoof)",
     );
   } finally {
     await server.shutdown();

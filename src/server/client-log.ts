@@ -71,55 +71,13 @@ export function writeClientLog(
   _append(line);
 }
 
-/**
- * Rotate client.log — shifts existing .1, .2 … backups and renames current
- * log to .1. Older backups beyond `keep` are deleted.
- * @param logDir  Directory containing client.log
- * @param keep    Number of backup files to retain (default 7, 0 = unlimited)
- */
-export async function rotateClientLog(
-  logDir: string,
-  keep = 7,
-): Promise<void> {
-  const base = `${logDir}/client.log`;
-
-  // Confirm the current log exists before rotating
-  try {
-    await Deno.stat(base);
-  } catch {
-    return; // nothing to rotate
-  }
-
-  // Find the highest existing backup index
-  let n = 1;
-  while (true) {
-    try {
-      await Deno.stat(`${base}.${n}`);
-      n++;
-    } catch {
-      break;
-    }
-  }
-
-  // Shift: rename .N-1 → .N, down to .1, then base → .1
-  for (let i = n; i >= 2; i--) {
-    try {
-      await Deno.rename(`${base}.${i - 1}`, `${base}.${i}`);
-    } catch { /* best-effort */ }
-  }
-  try {
-    await Deno.rename(base, `${base}.1`);
-  } catch { /* best-effort */ }
-
-  // Prune old backups beyond keep limit
-  if (keep > 0) {
-    for (let i = keep + 1; i <= n + 1; i++) {
-      try {
-        await Deno.remove(`${base}.${i}`);
-      } catch { /* already gone */ }
-    }
-  }
-}
+// Rotation/wipe on start is NOT done here. `client.log` is listed in
+// `logger-rotate.ts`'s `KINDS`, so it obeys exactly the same on-start policy as
+// app/debug/error/warning/perf: wiped by default, rotated to `.N` when
+// `backupLogs` is on. This file used to carry its own complete
+// `rotateClientLog()` — which nothing ever called, so the file grew forever.
+// A second rotation living next to the writer is how that happens; one policy,
+// in one place, is the fix.
 
 /** Cleanup resources on shutdown — clears rate timer and tracking map. */
 /** Test hook: how many per-client rate slots are live right now. A long-running

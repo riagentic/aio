@@ -727,9 +727,14 @@ export function createBatcher(
     batch.scheduled = false;
     batch.method = "";
     const r = dispatch({
+      // Sourced, because a write-set IS an effect result: it is the only way an
+      // async method publishes anything. Shutdown's drain leans on this to tell
+      // a method finishing its work apart from a scheduled tick or a late
+      // client action, both of which it must still refuse.
+      _source: "Effect",
       type: `${prefix}:${setKey(method)}`,
       payload: { mutations, _origin: method },
-    });
+    } as Msg);
     if (r && typeof (r as Promise<unknown>).then === "function") {
       inflight.push(
         (r as Promise<unknown>).catch((e) => {

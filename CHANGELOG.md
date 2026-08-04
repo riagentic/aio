@@ -1,5 +1,120 @@
 # Changelog
 
+## 1.0.0-alpha44 — what you see is what you ship (2026-08-04)
+
+A field report showed a prod Electron window with a white border dev never had:
+dev served the app's stylesheet from the app dir while the build copied it from
+a hardcoded `src/` — prod silently shipped without CSS. The root cause is a
+pattern, not a file: **two deciders** for the same fact. This release hunts that
+pattern down and installs single deciders with loud failures around them — plus
+a shutdown contract that lets an in-flight method finish writing.
+
+### WYSIDIWYSIP — dev/prod UI 1:1 (new kata)
+
+- **One app-dir decider.** `BuildConfig.appDir` = the entry's directory, the
+  same rule the runtime uses — it now drives the bundle's `App.tsx` import and
+  the `style.css`/`icon.png` copy on every target, including the Electron AppDir
+  and dev-window icon. Missing `App.tsx`, a stray `src/style.css` in a
+  non-`src/` app, or a swallowed copy now **fail loud**.
+- The Android local shell no longer hand-rolls its HTML — it delegates to the
+  one head builder (it had shipped a different viewport, no
+  `viewport-fit=cover`). Gate: `tests/shell-parity.test.ts` — dev-vs-prod shell
+  byte parity outside an allowlist of observe-only dev scripts.
+- **Two more second-deciders killed:** `dev:android` booted its server on a
+  literal `src/app.ts` (a flat app hung the emulator forever); `out:` pointed at
+  the app's own source dir would have recursively **deleted the app** — both now
+  go through `resolveEntry()`/`resolveAppDir()`, the named deciders.
+
+### A streaming method's last words survive shutdown
+
+Closing an app while an async method streamed into state killed the method
+mid-write (`EFFECT_ASYNC_ERROR`) and lost the tail. The contract now: an
+in-flight call gets to finish **writing** — it just never gets to start new
+work. Shutdown aborts every in-flight `s.$signal` first, tracks and waits for
+async calls (the drain had nothing to wait on before), accepts effect commits
+while draining, then seals. Both waits are 3 s deadline-bounded and logged;
+instance-scoped, so one app closing never aborts another's methods. The same
+contract covers the corners the adversarial review then found: a
+`serialize: true` call that starts DURING the drain is born aborted (the sweep
+can only reach controllers that exist at sweep time), and a `worker: true`
+cell's host now aborts + drains its own isolate and acks — instead of a flat 50
+ms and a terminate. Gates: `tests/dispatch.test.ts`,
+`tests/shutdown-inflight.test.ts`.
+
+### The build cache was dead — and hid two hazards
+
+`isBundleFresh` stat'd a deleted file, the catch said "not fresh", and every
+build since the methods restructure re-ran esbuild. Reviving it exposed: no
+**target stamp** (an `--android` build could reuse a browser-shaped bundle that
+boots to a blank WebView), and a one-level-deep walk (editing
+`components/Btn.tsx` in a flat app re-shipped the old bundle). The check now
+walks the framework tree and the WHOLE app project (skipping generated and
+vendored output — so `packages/shared/` and `vendor/` bust the cache too, and a
+deleted `style.css`/`icon.png` is removed from `dist/` instead of shipping
+stale) and stamps artifacts per target; `runBundle` refuses a config with no
+`appDir`. Gates in `tests/e2e-bundle-smoke.test.ts` — each fails against the
+pre-fix code.
+
+### Forged provenance stripped at every door
+
+The three network entry points (WS, UDS, trojan) stripped `_user` and
+`payload._origin` but not `_source` or `_syncOp`. A client forging
+`_source:"Effect"` could start new work during shutdown drain; forging
+`_syncOp:true` made a sync-cell write **durable nowhere** — in memory, lost on
+restart, no warning. All four fields now go through ONE decider
+(`sanitizeClientAction`) at all three doors: forged values are stripped **and
+logged** (an attack signal, not a shrug), and `_source` is re-stamped `"UI"`
+rather than deleted, so app hooks keep real provenance. Pinned in
+`tests/server.test.ts` (WS), `tests/aio-402-uds-ack.test.ts` (UDS), and
+`tests/glm-residual-guards.test.ts` (trojan — whose first version POSTed to a
+route that does not exist and passed vacuously; it now proves the dispatch ran).
+
+### Silent failures, said loud
+
+- **`client.log` grew forever** — its rotation existed, documented, called by
+  nothing. `client` is a `LogKind` now, governed by the one on-start policy
+  (wipe by default, `.N` under `backupLogs`); the duplicate rotator is deleted,
+  and `AioLogger.path()` no longer aliases unknown kinds to `error.log`.
+- **Client diagnostics were themselves the silent failure** — diag events
+  checked for a dev overlay that nothing injects and dropped the event on every
+  page. One sink now: overlay when present, console otherwise, severity-mapped,
+  dedup ahead of delivery. `tests/diag-sink.test.ts`.
+- **`useInterval`/`useRaf` `active` was a mount-time snapshot** — the hooks' own
+  documented example could not start or stop a timer. `active` is re-read every
+  render and really starts/stops the loop (one shared `useActiveLoop`).
+- **`am` turned typos into confident wrong answers** — `--timeout=2s` is NaN,
+  `setTimeout(…, NaN)` fires in 1 ms, so discovery swept the LAN for a
+  millisecond and blamed your firewall. One `parseNumArg` across
+  discover/top/surface — and across the global flags too
+  (`--port`/`--lines`/`--wait`/`--client`, which the review found still doing
+  the silent NaN→default); garbage now names the flag and exits.
+- **`aiol`'s post-await-read rule was inverted** — it skipped type-annotated
+  methods (the real-world shape) and flagged `s.$signal.aborted` and
+  `until(() => …)`, the documented patterns. Fixed and mutation-tested;
+  `mod.ts`'s flagship example now shows what the primitives are for.
+
+### Field-report items closed
+
+`ui.keyDown`/`ui.keyUp` in `testUI` + `am trigger` · `ui.expectCell` on
+`scope:'client'` cells · dev warning for listeners added on the Deno global ·
+`useInterval` hook · **per-method perf budgets**
+(`perfBudget.methods["cell:method"]`) · `schedule.every` `skipIfRunning` ·
+**`examples/contacts`** — the end-to-end CRUD example (state ↔ `db:` table,
+refusing validation, parameterized selectors, `checkIntegrityOnBoot`).
+
+### Test honesty
+
+The e2e harness piped and drains child output (a crash now fails in ~160 ms with
+the child's own stack instead of a 120 s "timeout: server up"), which
+immediately diagnosed a real intermittent failure: **every scaffolded e2e app
+shared one appId** and therefore one single-instance lock — each now gets
+`appId: e2e-<uuid8>`. The two randomized fuzzers accept `FUZZ_SEED`/
+`FUZZ_ROUNDS` (defaults unchanged for CI); ~13 000 extra programs swept across
+seeds with **no divergence**.
+
+Upgrade guide: `docs/upgrade/from-alpha43-to-alpha44.md` — no code changes
+required.
+
 ## 1.0.0-alpha43 — silence into signal (2026-08-02)
 
 A framework's worst failure is the one it does not mention. This release is a

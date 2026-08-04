@@ -12,6 +12,27 @@ import {
   resolvePlatforms,
 } from "./platforms.ts";
 
+/** The entry an app declares in `deno.json`, and the scaffold's default when
+ *  it declares none. THE entry decider: every tool that needs to know which
+ *  module IS the app — the build, `dev:android`'s server child, the app dir
+ *  rule below — reads it from here. A hardcoded `"src/app.ts"` elsewhere is a
+ *  second decider, and it breaks the moment an app puts its entry anywhere
+ *  else (WYSIDIWYSIP). */
+export function resolveEntry(mainConfig: Record<string, unknown>): string {
+  return (mainConfig.entry as string | undefined) ?? "src/app.ts";
+}
+
+/** THE app-dir decider (WYSIDIWYSIP), as one named rule rather than an
+ *  expression inlined at its single call site: the app dir is the ENTRY'S
+ *  DIRECTORY — exactly what the runtime resolves as `baseDir`
+ *  (`aio.ts _inferBaseDir`: the main module's directory). Dev serving and prod
+ *  packaging must never resolve an app asset from two different places, so
+ *  anything that needs the app dir without a full `loadBuildConfig()` (a test,
+ *  a tool) calls THIS instead of re-deriving it. */
+export function resolveAppDir(root: string, configEntry: string): string {
+  return resolve(root, dirname(configEntry));
+}
+
 export interface BuildConfig {
   // Paths
   root: string;
@@ -40,6 +61,14 @@ export interface BuildConfig {
   binaryName: string;
   appTitle: string | undefined;
   configEntry: string;
+  /** THE app-dir decider (WYSIDIWYSIP). Absolute directory of the app's UI
+   *  files — App.tsx, style.css, icon.png. Derived as dirname(entry), the same
+   *  rule the runtime uses (`_inferBaseDir`: the main module's directory), so
+   *  dev serving and prod packaging can never resolve the app's assets from
+   *  two different places. Every build step that touches an app asset MUST
+   *  read this field — a second hardcoded path is the bug class that shipped
+   *  a stylesheet in dev and silently dropped it from the prod bundle. */
+  appDir: string;
   rendererMode: "aio";
 
   // Platform
@@ -107,7 +136,8 @@ export async function loadBuildConfig(): Promise<BuildConfig> {
   );
   const rendererMode = "aio" as const;
   const appTitle = mainConfig.title as string | undefined;
-  const configEntry = (mainConfig.entry as string | undefined) ?? "src/app.ts";
+  const configEntry = resolveEntry(mainConfig);
+  const appDir = resolveAppDir(root, configEntry);
   const defaultName = appTitle
     ? slugify(appTitle)
     : (root.split("/").pop() || "myapp");
@@ -165,6 +195,7 @@ export async function loadBuildConfig(): Promise<BuildConfig> {
     binaryName,
     appTitle,
     configEntry,
+    appDir,
     rendererMode,
     os,
     arch,

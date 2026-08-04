@@ -1,6 +1,6 @@
 // Electron binary resolution and process spawning
 
-import type { AioMeta, Log } from "./electron-shared.ts";
+import type { AioMeta, Log, ShellConfig } from "./electron-shared.ts";
 import { electronMainScript } from "./electron-scripts.ts";
 import { electronClientScript } from "./electron-client-script.ts";
 import { electronMainScriptUDS } from "./electron-uds.ts";
@@ -225,6 +225,9 @@ export async function launchElectron(
     baseDir?: string;
     title?: string;
     hasCSS?: boolean;
+    /** Dev icon dir — the server's resolved baseDir (WYSIDIWYSIP). */
+    iconDir?: string;
+    shell?: ShellConfig;
   },
 ): Promise<Deno.ChildProcess | null> {
   const bin = await findElectronBin(log);
@@ -241,7 +244,9 @@ export async function launchElectron(
       baseDir: uds.baseDir,
       title: uds.title,
       hasCSS: uds.hasCSS,
+      iconDir: uds.iconDir,
       meta,
+      shell: uds.shell,
     })
     : electronMainScript(url, meta);
   return spawnElectron(bin, script);

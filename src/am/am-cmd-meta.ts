@@ -364,7 +364,7 @@ Inspect:
   surface --component=X   only that component (every instance), with its subtree
   surface --path=A/B      only that subtree, by path prefix
   surface --depth=N       cap the tree depth (0 = the component alone)
-  trigger <idx> <path> <action> [text]  Drive the live UI (click/type/press/hover/focus/blur/scroll) — same engine as testUI
+  trigger <idx> <path> <action> [text]  Drive the live UI (click/type/press/keyDown/keyUp/hover/focus/blur/scroll) — same engine as testUI
   sql <query>             Execute read-only SQL
   tables                  List SQLite tables
   schedules               Active scheduled effects
