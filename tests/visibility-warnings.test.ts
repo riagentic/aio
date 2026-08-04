@@ -206,3 +206,59 @@ Deno.test("visibility #2: forUser transform suppresses the secret heuristic", ()
   const w = warningsFor([c]);
   assertEquals(w.filter((l) => l.includes("looks secret")).length, 0);
 });
+
+Deno.test("visibility: an ordinary word containing 'enc' is not a credential", () => {
+  // `enc` was matched as a bare SUBSTRING, so it fired on latency, sequence,
+  // currency, reference, influence, agency, cadence — ordinary words with an
+  // `enc` in the middle. A field report hit it with `lastLatencyMs`, a
+  // millisecond count that belongs on screen. A security warning that cries
+  // wolf on measurements teaches people to reach for the escape hatch without
+  // reading it, which is the one outcome such a warning must never produce.
+  const c = cell("metrics", {
+    state: {
+      lastLatencyMs: 0, // the reported case
+      sequenceId: 0,
+      currency: "EUR",
+      reference: "",
+      influence: 0,
+      cadence: 0,
+      agency: "",
+      // measurement suffixes, whatever the stem
+      keyPressCount: 0,
+      seedRatio: 0,
+      privBytes: 0,
+    },
+    methods: { noop(_s: unknown) {} },
+  });
+  const w = warningsFor([c]);
+  assertEquals(
+    w.filter((l) => l.includes("looks secret")).length,
+    0,
+    `no field here is a secret; got: ${w.join(" | ")}`,
+  );
+});
+
+Deno.test("visibility: a real secret name is still caught at every boundary", () => {
+  // The other half of the contract — narrowing the match must not blind it.
+  // One cell per field so a hard-secret boot refusal can't mask the rest.
+  for (
+    const name of [
+      "encKey", // word start
+      "dataEnc", // camelCase hump
+      "enc_seed", // separator
+      "secretSauce",
+      "privValue",
+      "seedPhrase",
+    ]
+  ) {
+    const c = cell(`sec_${name.toLowerCase()}`, {
+      state: { [name]: "" } as Record<string, unknown>,
+      methods: { noop(_s: unknown) {} },
+    });
+    const w = warningsFor([c]);
+    assert(
+      w.some((l) => l.includes("looks secret")),
+      `"${name}" must still be flagged; got: ${w.join(" | ")}`,
+    );
+  }
+});

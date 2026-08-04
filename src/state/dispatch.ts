@@ -33,6 +33,39 @@ function methodBudgetKey(effect: unknown): string | null {
   return `${e.type.slice(0, -":__exec".length)}:${method}`;
 }
 
+/** THE per-method budget key for one effect — the single decider for both
+ *  `perfBudget.methods[key]` lookups and the violation message's escape hatch.
+ *
+ *  Two shapes reach here and BOTH are a cell method:
+ *   - an async method: the reducer turns `cell:method` into a `cell:__exec`
+ *     effect carrying `payload._method`, so the key comes from the effect;
+ *   - a sync method: its effects are the app's own `{type}` objects and carry
+ *     no method name at all — but the ACTION that produced them is exactly
+ *     `<cell>:<method>`, which is the same key. Without this fallback a slow
+ *     effect from a sync method reported a violation whose only visible fix was
+ *     raising the GLOBAL budget (the "lost the signal everywhere to silence one
+ *     poller" report), while the identical async method had a per-method hatch.
+ *
+ *  Internal action types (`cell:__exec`, `cell:__set*`, `cell:__destroy`) and
+ *  non-namespaced ones are excluded: they name no method, so no per-method
+ *  budget can legitimately be declared for them (`aio.run` validates the keys
+ *  against the real method lists). A miss is just `undefined` — lookup only. */
+function budgetKeyFor(effect: unknown, actionType?: string): string | null {
+  const fromEffect = methodBudgetKey(effect);
+  if (fromEffect) return fromEffect;
+  if (typeof actionType !== "string") return null;
+  return /^[^:\s]+:[^:\s]+$/.test(actionType) && !actionType.includes(":__")
+    ? actionType
+    : null;
+}
+
+/** A concrete per-method budget to suggest for an observed duration: the next
+ *  10ms step at/above 2× what it actually took, so the number in the message is
+ *  one a legitimate one-off can actually live with (14ms → 30, not 15). */
+function suggestBudget(duration: number): number {
+  return Math.max(10, Math.ceil((duration * 2) / 10) * 10);
+}
+
 export type PerfBudget = {
   reduce?: number; // default: 100 — "feels instant" threshold
   effect?: number; // default: 5 — sync portion only, async by definition doesn't block
@@ -56,7 +89,11 @@ export type PerfBudget = {
    *  }
    *  ```
    *  `timeout` also raises the hard abandon-the-effect deadline for that method
-   *  only, so a four-minute build no longer needs a four-minute global timeout. */
+   *  only, so a four-minute build no longer needs a four-minute global timeout.
+   *
+   *  Covers BOTH method flavours: an async method's `__exec` effect (keyed from
+   *  the effect payload) and the effects a SYNC method returns (keyed from the
+   *  action, which is `cell:method` either way) — see {@link budgetKeyFor}. */
   methods?: Record<string, { effect?: number; timeout?: number }>;
 };
 
@@ -220,17 +257,30 @@ export function createDispatch<S, A, E>(
     duration: number,
     budget: number,
     type?: string,
+    /** The `cell:method` this effect belongs to, when it has one — the key of
+     *  the per-method budget that can raise the ceiling for THIS method alone.
+     *  A violation that never names its own escape hatch reads as "your app is
+     *  defective", and the only visible move is raising the global budget,
+     *  which blinds every tight reducer at once. */
+    methodKey?: string | null,
   ): void {
     if (!perfEnabled) return;
     const code: AioErrorCode = source === "reduce"
       ? "BUDGET_REDUCE"
       : "BUDGET_EFFECT";
+    const hatch = source === "effect" && methodKey
+      ? `. Legitimately slow just here? Raise the budget for THIS method only: ` +
+        `perfBudget: { methods: { "${methodKey}": { effect: ${
+          suggestBudget(duration)
+        } } } } — every other effect stays strict`
+      : "";
     const err = createAioError(
       code,
       `${source} exceeded budget: ${duration.toFixed(1)}ms > ${budget}ms` +
         (source === "effect"
           ? " (async method: only the SYNC prefix before the first await counts here — move heavy sync work off the dispatch path or into awaited chunks)"
-          : ""),
+          : "") +
+        hatch,
       { cellName: type?.split(":")[0], actionType: type, duration, budget },
     );
     reportAioError(err, _reportOpts);
@@ -514,13 +564,20 @@ export function createDispatch<S, A, E>(
             | undefined;
           // `cell:__exec` carries the method name in its payload — that is what a
           // per-method budget is keyed by, since the effect TYPE is the same for
-          // every async method of a cell.
-          const methodKey = methodBudgetKey(effect);
+          // every async method of a cell. A sync method's effects carry no
+          // method name, so the key falls back to the ACTION (`cell:method`).
+          const methodKey = budgetKeyFor(effect, actionType);
           const perMethod = methodKey
             ? perfBudget?.methods?.[methodKey]
             : undefined;
           const thisEffectBudget = perMethod?.effect ?? effectBudget;
           const thisEffectTimeout = perMethod?.timeout ?? effectTimeout;
+          // What the violation is LABELLED with (perf.log dedup key). The
+          // effect's own type, except for the `cell:__exec` wrapper — that one
+          // names no method, so the method key is the informative label.
+          const perfLabel = effectType && !effectType.endsWith(":__exec")
+            ? effectType
+            : (methodKey ?? effectType);
           const effectStart = performance.now();
 
           try {
@@ -535,7 +592,8 @@ export function createDispatch<S, A, E>(
                 "effect",
                 effectDuration,
                 thisEffectBudget,
-                methodKey ?? effectType,
+                perfLabel,
+                methodKey,
               );
             }
 

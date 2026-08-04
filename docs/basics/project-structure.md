@@ -17,6 +17,33 @@ src/
 
 Six folders. Two root files. That is the entire app.
 
+## The one load-bearing rule: your entry's directory IS the app root
+
+**Everything the UI is served from resolves relative to the directory holding
+your entry module** — `App.tsx`, `style.css`, `icon.png`, and every path the dev
+server can serve. It is one rule, applied identically by the dev server
+(`baseDir`) and by every build target (`BuildConfig.appDir`), which is what
+makes dev and prod render the same page.
+
+The consequence that surprises people: **move the entry deeper and you move the
+root with it.**
+
+```jsonc
+// deno.json
+"entry": "src/app.ts"          // app root = src/     ← the scaffold's layout
+"entry": "app.ts"              // app root = the project root (flat app)
+"entry": "src/client/app.ts"   // app root = src/client/  ← ../core/* will 404
+```
+
+Two independent field reports hit the third line: with the entry at
+`src/client/app.ts`, every `../core/…` import 404'd and the window came up
+blank, because those files sit outside the app root. Either keep the entry at
+the top of the tree it needs to serve, or move the shared code under it.
+
+A build refuses loudly rather than shipping the wrong thing: a missing `App.tsx`
+next to the entry, or a stray `src/style.css` in an app whose root is elsewhere,
+fails the build with the fix in the message.
+
 ---
 
 ## Zero-Thought Placement Rules

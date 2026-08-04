@@ -39,7 +39,24 @@ export function compareValue(
   found: boolean,
 ): { ok: boolean; reason: string } {
   const j = (v: unknown) => JSON.stringify(v);
-  const num = (v: unknown) => Number(v);
+  // An ordering op on something that is not a number used to answer "false" —
+  // indistinguishable from a real assertion failure, so `am expect n gt 1O`
+  // (or a path holding a string) sent people to debug the app instead of the
+  // command. NaN never decides an assertion; it says so.
+  const order = (
+    sym: string,
+    cmp: (a: number, b: number) => boolean,
+  ): { ok: boolean; reason: string } => {
+    const a = Number(actual), b = Number(expected);
+    const bad = !Number.isFinite(a)
+      ? `actual ${j(actual)}`
+      : !Number.isFinite(b)
+      ? `expected ${j(expected)}`
+      : null;
+    return bad
+      ? { ok: false, reason: `${sym} needs numbers — ${bad} is not one` }
+      : { ok: cmp(a, b), reason: `${j(actual)} ${sym} ${j(expected)}` };
+  };
   switch (op) {
     case "exists":
       return { ok: found, reason: found ? "present" : "path not found" };
@@ -59,25 +76,13 @@ export function compareValue(
         reason: `${j(actual)} vs ${j(expected)}`,
       };
     case "gt":
-      return {
-        ok: num(actual) > num(expected),
-        reason: `${j(actual)} > ${j(expected)}`,
-      };
+      return order(">", (a, b) => a > b);
     case "gte":
-      return {
-        ok: num(actual) >= num(expected),
-        reason: `${j(actual)} >= ${j(expected)}`,
-      };
+      return order(">=", (a, b) => a >= b);
     case "lt":
-      return {
-        ok: num(actual) < num(expected),
-        reason: `${j(actual)} < ${j(expected)}`,
-      };
+      return order("<", (a, b) => a < b);
     case "lte":
-      return {
-        ok: num(actual) <= num(expected),
-        reason: `${j(actual)} <= ${j(expected)}`,
-      };
+      return order("<=", (a, b) => a <= b);
     case "contains":
       if (typeof actual === "string") {
         return {
@@ -264,6 +269,51 @@ export function envelopePayload(
   return isCellMethod ? { args: [named] } : named;
 }
 
+/** The forms `am dispatch` actually accepts — printed on every usage error so
+ *  the working spellings are the documented ones. A method taking ONE STRING
+ *  had no spelling at all here: `--body='{"args":["x"]}'` was re-wrapped into
+ *  the method's single object argument and the app persisted `[object Object]`.
+ *  `--args` is that spelling. */
+export const DISPATCH_USAGE = `usage: am dispatch <cell:method> [args…]
+  am dispatch conn:setHost 192.168.1.9            positional args (no '=') → setHost("192.168.1.9")
+  am dispatch conn:setHost --args='["192.168.1.9"]'   the same, JSON-exact (use when a value contains '=' or must keep its type)
+  am dispatch conn:configure host=h port=8000     named pairs → configure({host:"h", port:8000})
+  am dispatch Increment by=1                      a plain (non-cell) action → payload {by:1}
+  am dispatch Increment --body='{"by":1}'         --body after a type is that action's PAYLOAD
+  am dispatch --body='{"type":"conn:setHost","payload":{"args":["192.168.1.9"]}}'   the whole envelope
+values are auto-parsed as JSON when possible (numbers, booleans, arrays), else kept as strings`;
+
+/** Parse `--args` — a JSON ARRAY of positional arguments for a cell method.
+ *
+ *  Pure, and loud on both near-misses: `--args='"x"'` and `--args='{"host":…}'`
+ *  are the two things a caller reaches for first, and silently accepting either
+ *  would rebuild the exact bug this flag exists to kill (an argument arriving
+ *  as the wrong shape and getting persisted). */
+export function parseArgsFlag(
+  raw: string,
+): { ok: true; args: unknown[] } | { ok: false; error: string } {
+  const example = `--args='["192.168.1.9"]'`;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return {
+      ok: false,
+      error: `--args must be a JSON array of positional arguments — ` +
+        `${example} (got ${JSON.stringify(raw)}, which is not JSON)`,
+    };
+  }
+  if (!Array.isArray(parsed)) {
+    return {
+      ok: false,
+      error: `--args must be a JSON ARRAY of positional arguments — ` +
+        `${example} (got ${JSON.stringify(parsed)}). ` +
+        `For a method taking one object, wrap it: --args='[{"host":"…"}]'`,
+    };
+  }
+  return { ok: true, args: parsed };
+}
+
 export async function cmdDispatch(
   args: string[],
   flags: GlobalFlags,
@@ -273,7 +323,39 @@ export async function cmdDispatch(
   const port = resolvePort(flags.port, appId);
 
   let action: unknown;
-  if (flags.jsonBody) {
+  if (flags.jsonArgs !== undefined) {
+    // `--args` IS the whole argument list, so anything else that also carries
+    // arguments is a contradiction, not a merge — refuse rather than pick.
+    if (flags.jsonBody !== undefined) {
+      outError(
+        "--args and --body both carry the arguments — pass one, not both.\n" +
+          DISPATCH_USAGE,
+        mode,
+      );
+      Deno.exit(1);
+    }
+    if (args.length === 0) {
+      outError(`--args needs the action type: ${DISPATCH_USAGE}`, mode);
+      Deno.exit(1);
+    }
+    if (args.length > 1) {
+      outError(
+        `--args carries every argument — drop the extra positional ` +
+          `${args.length > 2 ? "args" : "arg"} (${
+            args.slice(1).join(" ")
+          }) or drop --args.\n${DISPATCH_USAGE}`,
+        mode,
+      );
+      Deno.exit(1);
+    }
+    const parsed = parseArgsFlag(flags.jsonArgs);
+    if (!parsed.ok) {
+      outError(parsed.error, mode);
+      Deno.exit(1);
+      return;
+    }
+    action = { type: args[0], payload: { args: parsed.args } };
+  } else if (flags.jsonBody) {
     // --body='{"type":"Increment","payload":{"by":1}}'
     try {
       action = JSON.parse(flags.jsonBody);
@@ -299,12 +381,7 @@ export async function cmdDispatch(
       action = { type: args[0], payload: envelopePayload(args[0]!, body) };
     }
   } else if (args.length === 0) {
-    outError(
-      "usage: am dispatch <cell:method> [key=val ...] " +
-        "(a cell method takes ONE object argument, or positional JSON values) " +
-        'or am dispatch <Type> --body=\'{"type":...,"payload":...}\'',
-      mode,
-    );
+    outError(DISPATCH_USAGE, mode);
     Deno.exit(1);
   } else {
     const type = args[0];

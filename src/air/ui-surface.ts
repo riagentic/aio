@@ -26,10 +26,21 @@ export type UIElementInfo = {
   text: string;
   /** Current input value (live at walk time) */
   value?: string;
-  /** Current checked state (checkbox/radio, live at walk time) */
+  /** Current checked state of a checkbox/radio (live at walk time). ALWAYS
+   *  present for one — `false` included — because "this box starts unchecked"
+   *  is the most common assertion there is, and an omitted `false` made it
+   *  unwritable (a field report: the natural assertion read back a lazy
+   *  callable). Absent only for elements that have no checked state at all. */
   checked?: boolean;
-  /** Present and true when the element is disabled */
+  /** Whether the element is disabled. Always present for a control that HAS a
+   *  disabled state (button/input/select/textarea/…), `false` included. */
   disabled?: boolean;
+  /** Whether the element is read-only. Always present for a control that HAS a
+   *  readonly state (input/textarea), `false` included. */
+  readonly?: boolean;
+  /** Whether the element is required. Always present for a control that HAS a
+   *  required state (input/select/textarea), `false` included. */
+  required?: boolean;
   /** Address: `<componentPath>:<name>` */
   path: string;
   /** Live references — local use only; stripped by {@linkcode serializeSurface} */
@@ -215,6 +226,8 @@ function walkOutput(
           value?: string;
           checked?: boolean;
           disabled?: boolean;
+          readOnly?: boolean;
+          required?: boolean;
         }
         : undefined;
       const liveText = el?.textContent?.trim();
@@ -224,11 +237,29 @@ function walkOutput(
         events,
         text: liveText ? capText(liveText) : staticText(v) ?? "",
         ...(el && typeof el.value === "string" ? { value: el.value } : {}),
+        // The four state booleans a test asserts on, serialised WHENEVER the
+        // element has that state — `false` included.
+        //
+        // `checked` used to appear only when true, so `assertEquals(box.checked,
+        // false)` read back the handle proxy's lazy callable instead: the
+        // natural assertion for "off" was unwritable, and the failure message
+        // pointed at neither cause (a field report). Presence is decided by the
+        // DOM element's own property, so a plain <div> on the surface stays
+        // clean while every real control answers honestly — and `am surface`
+        // (same walk) shows a live app exactly what a test sees.
         ...(el && typeof el.checked === "boolean" &&
             (v.props.type === "checkbox" || v.props.type === "radio")
           ? { checked: el.checked }
           : {}),
-        ...(el && el.disabled === true ? { disabled: true } : {}),
+        ...(el && typeof el.disabled === "boolean"
+          ? { disabled: el.disabled }
+          : {}),
+        ...(el && typeof el.readOnly === "boolean"
+          ? { readonly: el.readOnly }
+          : {}),
+        ...(el && typeof el.required === "boolean"
+          ? { required: el.required }
+          : {}),
         path: `${owner.path}:${name}`,
         _vnode: v,
         _el: el,

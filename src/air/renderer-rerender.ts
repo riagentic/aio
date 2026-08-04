@@ -32,7 +32,8 @@ import {
   _setCurrentCollector,
   _setInsideMount,
 } from "./renderer-state.ts";
-import { _flushPending, _reportHookError } from "./renderer-flush.ts";
+import { _flushPending } from "./renderer-flush.ts";
+import { _componentName, _reportHookError } from "./hook-error.ts";
 
 // ── Schedule ──────────────────────────────────────────────────────────
 
@@ -106,8 +107,9 @@ export function _rerenderComponent(inst: ComponentInstance): void {
   const _devStart = _isDevToolsConnected() ? performance.now() : 0;
   const vnode = inst.vnode;
   const oldRendered = inst.oldRendered;
+  inst._component = _componentName(vnode.tag);
 
-  _runCleanups(inst.cleanupCallbacks);
+  _runCleanups(inst.cleanupCallbacks, inst._component);
   inst.cleanupCallbacks = [];
   inst.mountCallbacks = []; // AIO-161: prevent accumulation on re-render
 
@@ -309,7 +311,7 @@ export function _createHooks(rootState: RootState): VDomHooks {
       }
 
       if (inst) {
-        _runCleanups(inst.cleanupCallbacks);
+        _runCleanups(inst.cleanupCallbacks, _componentName(vnode.tag));
         inst.cleanupCallbacks = [];
         inst.mountCallbacks = []; // AIO-161
         for (const unsub of inst.unsubs) unsub();
@@ -325,6 +327,10 @@ export function _createHooks(rootState: RootState): VDomHooks {
       const collector: LifecycleCollector = inst ??
         { mountCallbacks: [], cleanupCallbacks: [] };
       collector.refIndex = 0;
+      // Name the component for the whole body execution: afterRender/onMount/
+      // onCleanup all register through the collector, so a callback that throws
+      // later can be reported against the component that scheduled it.
+      collector._component = _componentName(vnode.tag);
       _setCurrentCollector(collector);
 
       return {
@@ -377,6 +383,10 @@ export function _createHooks(rootState: RootState): VDomHooks {
           _root: rootState,
           mountCallbacks: collector.mountCallbacks,
           cleanupCallbacks: collector.cleanupCallbacks,
+          // Carry the name over from the render collector, so a hook that
+          // registers from INSIDE onMount (where the instance is the collector)
+          // is named on the very first render too.
+          _component: collector._component,
           mountCleanupCallbacks: [],
           mounted: false,
           contexts: collector.contexts,
@@ -465,7 +475,7 @@ export function _createHooks(rootState: RootState): VDomHooks {
               try {
                 cb();
               } catch (e) {
-                _reportHookError("onMount", e);
+                _reportHookError("onMount", e, _componentName(vnode.tag));
               }
             }
           } finally {
@@ -496,9 +506,10 @@ export function _createHooks(rootState: RootState): VDomHooks {
     unmountComponent(vnode: VNode): void {
       const inst = vnode._instance as ComponentInstance | undefined;
       if (!inst) return;
-      _runCleanups(inst.cleanupCallbacks);
+      const name = _componentName(vnode.tag);
+      _runCleanups(inst.cleanupCallbacks, name);
       inst.cleanupCallbacks = [];
-      _runCleanups(inst.mountCleanupCallbacks);
+      _runCleanups(inst.mountCleanupCallbacks, name);
       inst.mountCleanupCallbacks = [];
       inst.disposed = true;
       inst.pendingRender = false;

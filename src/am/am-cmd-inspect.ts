@@ -761,7 +761,16 @@ export async function cmdSurface(
 /** `am trigger <clientIdx> <path> <action> [text]` — faithfully simulate a
  *  user interaction on a live client via the semantic surface (same event
  *  sequences as testUI). Full testUI action set: click, dblclick, type,
- *  press, hover, focus, blur, select, check, uncheck, clear, scroll, dragTo. */
+ *  setValue, press, hover, focus, blur, select, check, uncheck, clear, scroll,
+ *  dragTo.
+ *
+ *  `type` APPENDS (a user typing into a field that already has a value) and
+ *  `setValue` REPLACES — exactly as `testUI`'s `ui.X.type()` / `ui.X.setValue()`
+ *  do, because they are two drivers of ONE UI and a word that means different
+ *  things on each side is the worst kind of divergence. Driving a form usually
+ *  wants `setValue`; before it existed here the only replace was `clear` then
+ *  `type`, which a field report reasonably read as `type` being wrong.
+ *  `setValue` is composed from those two — it is not a separate wire action. */
 export async function cmdTrigger(
   args: string[],
   flags: GlobalFlags,
@@ -775,6 +784,7 @@ export async function cmdTrigger(
     "click",
     "dblclick",
     "type",
+    "setValue",
     "press",
     "keyDown",
     "keyUp",
@@ -791,21 +801,46 @@ export async function cmdTrigger(
   if (!Number.isInteger(idx) || !path || !action || !actions.has(action)) {
     outError(
       'usage: am trigger <clientIdx> "<Component…:Element>" <action> [text]\n' +
-        "actions: click, dblclick, type, press, keyDown, keyUp, hover, focus,\n" +
-        "         blur, select <value>, check, uncheck, clear,\n" +
-        '         scroll "top=200 left=0", dragTo "<target path>"\n' +
+        "actions: click, dblclick, type <text>, setValue <text>, press, keyDown,\n" +
+        "         keyUp, hover, focus, blur, select <value>, check, uncheck,\n" +
+        '         clear, scroll "top=200 left=0", dragTo "<target path>"\n' +
+        "type APPENDS to the field's current value; setValue REPLACES it\n" +
+        "  (same words, same meanings as testUI's ui.X.type / ui.X.setValue)\n" +
         "keyDown/keyUp hold/release a key (games, drag) — pair them around frames\n" +
         "discover paths with: am surface <clientIdx>",
       mode,
     );
     Deno.exit(1);
   }
-  const body: Record<string, unknown> = { path, action };
+  // setValue = clear, then type — testUI's exact definition, composed here so
+  // the wire action set stays the one both drivers share. The clear's own
+  // result is inspected: on a path miss the element does not exist, and typing
+  // into it next would answer with a second, identical miss instead of the
+  // first one's `available` list.
+  if (action === "setValue") {
+    const cleared = await trojanPost(
+      port,
+      `trigger/${idx}`,
+      { path, action: "clear" },
+      appId,
+    );
+    if (!cleared.ok) {
+      outError(cleared.error, mode);
+      Deno.exit(1);
+    }
+    const r = cleared.data as { ok?: boolean } | null;
+    if (r && r.ok === false) {
+      out(r, mode);
+      Deno.exit(1);
+    }
+  }
+  const wire = action === "setValue" ? "type" : action;
+  const body: Record<string, unknown> = { path, action: wire };
   if (
-    action === "type" || action === "select" || action === "scroll" ||
-    action === "dragTo"
+    wire === "type" || wire === "select" || wire === "scroll" ||
+    wire === "dragTo"
   ) body.text = text ?? "";
-  if (action === "press" || action === "keyDown" || action === "keyUp") {
+  if (wire === "press" || wire === "keyDown" || wire === "keyUp") {
     body.key = text ?? "Enter";
   }
   const result = await trojanPost(port, `trigger/${idx}`, body, appId);
@@ -813,5 +848,12 @@ export async function cmdTrigger(
     outError(result.error, mode);
     Deno.exit(1);
   }
-  out(result.data, mode);
+  // Report the action the caller asked for, not the wire action it decomposed
+  // into — a reply saying "type" to a `setValue` request reads like the command
+  // did something else.
+  const data = action === "setValue" && result.data &&
+      typeof result.data === "object"
+    ? { ...result.data as Record<string, unknown>, action }
+    : result.data;
+  out(data, mode);
 }

@@ -35,8 +35,15 @@ export interface ServerConfig {
   viewport?: string | false; // AIO-423: <meta viewport> override (false = omit)
   headExtra?: string; // AIO-423: verbatim extra <head> content
   renderBudget?: RenderBudget; // sent to browser for RenderMeter thresholds
+  /** Extra read-only DEV-server roots by URL prefix — see CellsConfig.serveDirs. */
+  serveDirs?: Record<string, string>;
   /** Cells the client should route through the sync engine (localFirst). */
   syncCells?: string[];
+  /** Every cell THIS process booted. Sent on the `cfg` frame so a client can
+   *  notice that its bundle registers a cell the server does not have — that
+   *  cell's methods dispatch into nothing, and the only previous symptom was
+   *  a UI that rendered and did nothing (see _warnCellSetDrift). */
+  bootedCells?: string[];
   /** Resolved `await cell.method()` ceilings (effectTimeoutMs + perfBudget),
    *  bridged to the browser so both sides wait from the same numbers. */
   callTimeouts?: { default?: number; methods?: Record<string, number> };

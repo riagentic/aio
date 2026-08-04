@@ -4,6 +4,7 @@ import type { CellDef, Creators, Msg } from "./cell-types.ts";
 import { checkReservedKeys } from "./cell-types.ts";
 import { randomUuid } from "../rand.ts";
 import { registerCall } from "./cell-impl.ts";
+import { settlesCalls } from "../protocol/ack-registry.ts";
 import { nameIsTaken } from "./cell-helpers.ts";
 
 /** Wrap a raw action creator with a guard for the pre-binding state. Calling a
@@ -150,8 +151,24 @@ export function bindCell(
       // Async methods: dispatch with _callId, return Promise that resolves with the method's return value
       const fn = (...args: unknown[]) => {
         const callId = randomUuid();
-        const promise = registerCall(callId, `${f.__aio.id}:${key}`);
         const action = (creator as (...a: unknown[]) => Msg)(...args);
+        // A REMOTE dispatcher settles the call itself, over its ack frame.
+        // `registerCall` is the LOCAL pending-call registry, resolved by the
+        // in-process executor that runs the method — a remote binding
+        // (`connectCli().bind(cell)`) has no such executor, so that promise
+        // was settled by NOBODY and every async bound method rejected at the
+        // call ceiling with "stopped waiting", 30s after the method had
+        // already finished. Successes and failures alike.
+        if (settlesCalls(dispatch)) {
+          const remote = dispatch({
+            ...action,
+            payload: { args, _callId: callId },
+            _source: "Effect" as const,
+          });
+          remote.catch(() => {});
+          return remote;
+        }
+        const promise = registerCall(callId, `${f.__aio.id}:${key}`);
         dispatch({
           ...action,
           payload: { args, _callId: callId },

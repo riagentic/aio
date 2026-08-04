@@ -398,9 +398,11 @@ Deno.test("build-all: unsafeOutDir rejects root/ancestor/.aio/src, allows a subd
   // entry is `apps/web/main.ts` keeps its sources where no list can guess, so
   // the app dir — THE decider's answer — is refused too: `out: "apps/web"`
   // would otherwise recursively delete the app it was asked to build.
-  const appDir = "/proj/apps/web";
-  assert(unsafeOutDir(appDir, root, appDir), "the app's own dir");
-  assert(!unsafeOutDir("/proj/dist", root, appDir), "dist, with an app dir");
+  // Per-target entries make this a LIST — every target's app dir is refused
+  // (see tests/build-per-target-entry.test.ts for the two-app case).
+  const appDirs = ["/proj/apps/web"];
+  assert(unsafeOutDir(appDirs[0]!, root, appDirs), "the app's own dir");
+  assert(!unsafeOutDir("/proj/dist", root, appDirs), "dist, with an app dir");
 });
 
 Deno.test("build-all: isArtifactName recognizes artifacts, rejects source", () => {

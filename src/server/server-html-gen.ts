@@ -42,6 +42,19 @@ function headContent(
   // WebView loads from android_asset where absolute /-paths don't resolve.
   assetBase = "/",
 ): string {
+  // THE baseline, on every target, always — before the app's stylesheet so
+  // any of it can be overridden by a single rule.
+  //
+  // Without it every aio app inherited the browser default `body{margin:8px}`
+  // and rendered inside a white frame nobody asked for. No template and no
+  // example ships a style.css, so that was EVERY app until its author
+  // discovered the cause — the same class as the 980px mobile viewport
+  // DEFAULT_VIEWPORT exists to fix ("broken by default" is not a default).
+  //
+  // Deliberately two rules. This is a baseline, not an opinion: it does not
+  // touch fonts, colours, spacing or anything else an app should decide.
+  const baseStyle =
+    `\n  <style>*,*::before,*::after{box-sizing:border-box}body{margin:0}</style>`;
   const cssLink = hasCSS
     ? `\n  <link rel="stylesheet" href="${assetBase}style.css">`
     : "";
@@ -81,7 +94,7 @@ function headContent(
   <meta name="referrer" content="no-referrer">${metaViewport}
   <title>${
     escHtml(title)
-  }</title>${metaW}${metaH}${cssLink}${statusScript}${configScript}${extra}`;
+  }</title>${metaW}${metaH}${baseStyle}${cssLink}${statusScript}${configScript}${extra}`;
 }
 
 /** Generates the HTML shell — dev: CDN import map + live-transpiled App.tsx, prod: self-contained app.js */

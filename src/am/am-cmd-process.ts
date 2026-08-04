@@ -11,20 +11,26 @@ import {
   instances,
   isProcessAlive,
   type LockData,
+  lockDir,
   readLaunchInfo,
+  resolveAppId,
   writeLaunchInfo,
   writeLock,
 } from "../server/single-instance-lock.ts";
 import { detectMode, formatUptime, out, outError } from "./am-output.ts";
 import {
-  DEFAULT_PORT,
   readPid,
   removePid,
   resolveAmAppId,
   resolveAmPort,
   resolveEntry,
 } from "./am-utils.ts";
-import { resolveControlPort, trojanGet, trojanPost } from "./am-http.ts";
+import {
+  probePort,
+  resolveControlPort,
+  trojanGet,
+  trojanPost,
+} from "./am-http.ts";
 
 // ── Constants ───────────────────────────────────────────────
 
@@ -441,35 +447,129 @@ export async function cmdStart(
   }
 }
 
+/** Where am looked for the lock, and the one env var that decides it.
+ *
+ *  "app not running (no lock file)" named neither, and `lockDir()` is derived
+ *  from XDG_RUNTIME_DIR|/tmp plus an AIO_APPS_DIR-shaped suffix — so two shells
+ *  with different AIO_APPS_DIR genuinely search different directories and the
+ *  message was true in both while explaining neither. */
+export function noLockMessage(appId: string): string {
+  const apps = Deno.env.get("AIO_APPS_DIR");
+  return `app not running: no lock file for "${appId}"\n` +
+    `  searched: ${lockDir()}\n` +
+    `  AIO_APPS_DIR=${apps ?? "unset"} (it scopes the lock dir — am and the ` +
+    `app must share the same value)\n` +
+    `  see what IS running: am instances — or target the app by id ` +
+    `(--app=<id>) or by port (--port=N, am reads the id from that port)`;
+}
+
+/** Who `am stop` is about to talk to — resolved from the lock file, or, with
+ *  `--port=N`, from the port itself. Split out of `cmdStop` so the resolution
+ *  (and every refusal message) is testable without the process-exiting shell. */
+export type StopTarget = { appId: string; port: number; pf: LockData | null };
+
+export async function resolveStopTarget(
+  flags: GlobalFlags,
+): Promise<{ ok: true; target: StopTarget } | { ok: false; error: string }> {
+  const cwdAppId = resolveAmAppId(flags.app);
+  const pf = readPid(cwdAppId);
+
+  // No --port: the lock file is the only decider.
+  if (flags.port === undefined) {
+    return pf
+      ? { ok: true, target: { appId: cwdAppId, port: pf.port, pf } }
+      : { ok: false, error: noLockMessage(cwdAppId) };
+  }
+
+  // --port that matches our own lock — nothing to discover.
+  if (pf && pf.port === flags.port) {
+    return { ok: true, target: { appId: cwdAppId, port: flags.port, pf } };
+  }
+
+  // `--port=N` IDENTIFIES the app; it never merely overrides the port of a
+  // cwd-derived one. In a two-app repo the cwd's deno.json named the OTHER
+  // app, so `am stop --port=N` addressed a lock that did not exist, fell back
+  // to the main port, and reported the bare "app not running" — while the app
+  // on N kept running.
+  const probe = await probePort(flags.port);
+  switch (probe.kind) {
+    case "aio": {
+      const wanted = flags.app ? resolveAppId(flags.app) : undefined;
+      if (wanted && wanted !== probe.appId) {
+        return {
+          ok: false,
+          error: `port ${flags.port} answers as app "${probe.appId}", not ` +
+            `"${wanted}" (--app) — refusing to stop a different app`,
+        };
+      }
+      return {
+        ok: true,
+        target: {
+          appId: probe.appId,
+          port: flags.port,
+          pf: readPid(probe.appId),
+        },
+      };
+    }
+    case "tls":
+      return {
+        ok: false,
+        error: `port ${flags.port} speaks TLS (https) — under --expose the ` +
+          `control endpoint is plain HTTP on a SEPARATE port, recorded only ` +
+          `in the lock file, so no port on the TLS side can reach it. Target ` +
+          `the app by id instead: am stop --app=<id> (ids: am instances; ` +
+          `lock dir: ${lockDir()})`,
+      };
+    case "listening":
+      return {
+        ok: false,
+        error: `port ${flags.port} has a listener that answers neither HTTP ` +
+          `nor TLS — not an aio app`,
+      };
+    case "http":
+      return {
+        ok: false,
+        error: `port ${flags.port} answers HTTP but is not an aio app ` +
+          `(no /__aio/health) — wrong port?`,
+      };
+    case "closed":
+      return {
+        ok: false,
+        error: `nothing is listening on port ${flags.port} — no app to stop ` +
+          `there (running instances: am instances)`,
+      };
+  }
+}
+
 export async function cmdStop(
   _args: string[],
   flags: GlobalFlags,
 ): Promise<void> {
   const mode = detectMode(flags);
-  const appId = resolveAmAppId(flags.app);
-  const pf = readPid(appId);
-  const port = flags.port ?? pf?.port ?? DEFAULT_PORT;
-
-  // Safety: only send shutdown if we have a lock file or explicit --port
-  if (!pf && !flags.port) {
-    outError(
-      "app not running (no lock file) — use --port=N to target a specific port",
-      mode,
-    );
+  const resolved = await resolveStopTarget(flags);
+  if (!resolved.ok) {
+    outError(resolved.error, mode);
     Deno.exit(1);
   }
+  const { appId, port, pf } = resolved.target;
 
   // Mark as stopping
   if (pf) writeLock({ ...pf, status: "stopping" });
 
   // Try graceful shutdown via trojan API, fall back to SIGTERM
   const result = await trojanPost(port, "shutdown", undefined, appId);
-  if (!result.ok && pf && isProcessAlive(pf.pid)) {
+  // The SIGTERM fallback is for an app that has a lock ON THIS PORT and is not
+  // answering. It must never fire on an identity refusal — killing our own pid
+  // because someone ELSE holds the port is the same retargeting bug mirrored.
+  if (!result.ok && pf && pf.port === port && isProcessAlive(pf.pid)) {
     try {
       Deno.kill(pf.pid, "SIGTERM");
     } catch { /* already dead */ }
   } else if (!result.ok) {
-    outError("app not running", mode);
+    // The real reason, not the generic literal that discarded it: "app not
+    // running on port N", an identity refusal, or the app's own error.
+    if (pf) writeLock(pf); // we stopped nothing — undo the "stopping" mark
+    outError(result.error, mode);
     Deno.exit(1);
   }
 

@@ -43,6 +43,7 @@ export interface ServerSetupDeps<S, A> {
    *  the precondition for running with zero TCP ports. See skipHttp below. */
   electronDistDir: string | undefined;
   baseDir: string;
+  serveDirs?: Record<string, string>;
   expose: boolean;
   token: string | undefined;
   users: Record<string, AioUser> | undefined;
@@ -56,6 +57,11 @@ export interface ServerSetupDeps<S, A> {
   authFlows?: Omit<import("./auth-flows.ts").AuthFlows, "secure">;
   cliCert?: string;
   cliKey?: string;
+  /** `--no-tls`: serve `--expose` over plain HTTP/WS. Everything downstream is
+   *  already parameterized on `tlsCert` being nullable (ws:// vs wss://, the
+   *  cookie `secure` flag, the discovery record's `tls:`), so this is one
+   *  gate — plus a loud warning, because the wire becomes readable. */
+  cliNoTls?: boolean;
   cliTransport?: "uds" | "ws" | "auto";
   // UI
   ui: {
@@ -82,6 +88,8 @@ export interface ServerSetupDeps<S, A> {
     /** Cell ids that sync (own `sync:` config, or adopted by localFirst) —
      *  handed to the browser in the page shell. */
     _syncCellIds?: string[];
+    _cellNames?: string[];
+    serveDirs?: Record<string, string>;
     _cellPatchStrategies?: Map<string, CellPatchStrategy>;
     _cellFilterFields?: Map<string, PatchFilterFields>;
     _cellAccess?: Map<string, CellAccess>;
@@ -163,6 +171,7 @@ export async function setupTransport<S, A>(
     authFlows,
     cliCert,
     cliKey,
+    cliNoTls,
     cliTransport,
     ui,
     title,
@@ -188,26 +197,46 @@ export async function setupTransport<S, A>(
     log,
   } = deps;
 
-  // TLS: auto-generate self-signed cert when --expose (or use user-provided --cert/--key)
+  // TLS: auto-generate self-signed cert when exposed (or use user-provided
+  // --tls-cert/--tls-key). `--no-tls` is the one way out, and it costs a loud
+  // warning: every downstream consumer (ws:// vs wss://, the cookie `secure`
+  // flag, the discovery record's `tls:`) already reads `tlsCert` as nullable.
   let tlsCert: TlsCert | null = null;
-  if (expose) {
+  if (expose && cliNoTls) {
+    log.warn(
+      `tls: --no-tls — serving on 0.0.0.0 over PLAIN HTTP/WS. State, auth ` +
+        `tokens and every action are readable and forgeable by anything on ` +
+        `this network. Sound ONLY if the payload is already end-to-end ` +
+        `encrypted or a TLS-terminating proxy fronts this port. Drop ` +
+        `--no-tls for HTTPS.`,
+    );
+  } else if (expose) {
     // Tier ① — a private key belongs in the backup unit, and in ONE place
     // whether or not this is a compiled binary (it used to be ./.aio-tls in dev
     // and the XDG data dir when compiled).
     const certDir = appDirs(appId, (config as { appDir?: string }).appDir).tls;
     try {
-      tlsCert = await loadOrCreateCert(certDir, cliCert, cliKey);
+      // appId → the cert's CN: every aio app used to issue `CN = aio-local`,
+      // so two apps (or one stale cert in a trust store) produced colliding
+      // issuer DNs and a client picked the WRONG trust anchor — a BadSignature
+      // handshake failure with no hint of its cause.
+      tlsCert = await loadOrCreateCert(certDir, cliCert, cliKey, appId);
       if (tlsCert.selfSigned) {
         log.info(`tls: self-signed cert at ${tlsCert.certPath}`);
         log.warn(
-          `tls: self-signed — remote browsers will show a security warning. Trust the cert, or use --tls-cert=/path.pem --tls-key=/path.pem for a CA-signed cert`,
+          `tls: self-signed — browsers show a security warning, and ` +
+            `non-browser clients (curl, deno/node fetch, the aio CLI client) ` +
+            `REFUSE the connection outright unless they trust this exact ` +
+            `cert. Hand it out with \`am profile --app=${appId}\`, point a client ` +
+            `at it with DENO_CERT=${tlsCert.certPath} (curl: --cacert), or ` +
+            `pass --tls-cert=/path.pem --tls-key=/path.pem for a CA-signed one`,
         );
       } else {
         log.info(`tls: using cert ${tlsCert.certPath}`);
       }
     } catch (e) {
       throw new Error(
-        `TLS cert generation failed: ${e}\nProvide --cert=PATH --key=PATH or fix the issue. Cannot expose without HTTPS.`,
+        `TLS cert generation failed: ${e}\nProvide --tls-cert=PATH --tls-key=PATH, or run with --no-tls if this network path is already encrypted. Cannot expose over HTTPS without a cert.`,
       );
     }
   }
@@ -350,6 +379,7 @@ export async function setupTransport<S, A>(
       getSnapshot: () => app.snapshot(),
       loadSnapshot: (json: string) => app.loadSnapshot(json),
       baseDir,
+      serveDirs: config.serveDirs,
       debug: (msg: string) => log.debug(msg),
       prod,
       distDir: prod ? distDir : undefined,
@@ -369,6 +399,7 @@ export async function setupTransport<S, A>(
       headExtra: ui.head,
       renderBudget: config.renderBudget,
       syncCells: config._syncCellIds,
+      bootedCells: config._cellNames,
       callTimeouts: _getCallTimeouts(),
       udsBroadcastRef,
       fullStateThreshold: config.fullStateThreshold,

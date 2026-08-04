@@ -1,8 +1,10 @@
 // renderer-types.ts — shared interfaces and helper for the AIO renderer.
-// No imports from other renderer-* modules (this is the base layer).
+// No imports from other renderer-* modules (this is the base layer; hook-error.ts
+// is dependency-free and importable from anywhere).
 
 import type { ComponentFn, RenderCtx, VNode } from "./vdom.ts";
 import type { Disposable } from "../state/signal.ts";
+import { _reportHookError } from "./hook-error.ts";
 
 /** Handle returned by {@linkcode mount} / {@linkcode hydrate}. */
 export interface MountHandle {
@@ -55,6 +57,9 @@ export interface ComponentInstance {
   _triggerSignals?: Set<string>;
   /** Parent component instance — used to rebuild ancestor stack (AIO-249). */
   parent: ComponentInstance | null;
+  /** Display name of this component — stamped on every render so a contained
+   *  hook error (afterRender/onMount/onCleanup) can name where it came from. */
+  _component?: string;
 }
 
 export interface RootState {
@@ -74,11 +79,19 @@ export interface RootState {
   /** Root App component for full re-render (lazy resolve). */
   App: ComponentFn;
   /** Per-root afterRender callback queue. */
-  afterRenderQueue: (() => void)[];
+  afterRenderQueue: AfterRenderEntry[];
   /** Per-root counter for useId() — deterministic across renders. */
   _idCounter: number;
   /** AIO-209: cycle detection counts — persists across yield boundaries. */
   _renderCounts: Map<ComponentInstance, number>;
+}
+
+/** A queued `afterRender` callback plus the component that registered it — the
+ *  name is captured at registration because the flush runs after that
+ *  component's frame is gone, and a contained hook error has to say WHERE. */
+export interface AfterRenderEntry {
+  fn: () => void;
+  component?: string;
 }
 
 export interface HookState {
@@ -99,17 +112,21 @@ export interface LifecycleCollector {
   // deno-lint-ignore no-explicit-any
   refs?: { current: any }[];
   refIndex?: number;
+  /** Name of the component currently collecting into this — stamped by the
+   *  renderer so a contained hook error can name it. */
+  _component?: string;
 }
 
 // ── Helper ────────────────────────────────────────────────────────────
 
-/** Run cleanup callbacks safely — a throwing cleanup doesn't kill subsequent ones. */
-export function _runCleanups(cbs: (() => void)[]): void {
+/** Run cleanup callbacks safely — a throwing cleanup doesn't kill subsequent
+ *  ones, and never the re-render/unmount that is running them. */
+export function _runCleanups(cbs: (() => void)[], component?: string): void {
   for (const cb of cbs) {
     try {
       cb();
     } catch (e) {
-      console.error("[aio-renderer] Cleanup callback error:", e);
+      _reportHookError("onCleanup", e, component);
     }
   }
 }

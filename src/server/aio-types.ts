@@ -151,7 +151,21 @@ export type AioConfig<S, A, E> = {
   auth?: boolean | AuthOptions;
   ui?: UiConfig;
   port?: number; // default: 8000
+  /** Bind 0.0.0.0 + TLS for LAN access — the config twin of `--expose`, so a
+   *  COMPILED binary (which has no shell flags in a service unit) can expose
+   *  from code. `--expose` still wins when both are set. Resolved exactly once
+   *  in aio.ts (`_exposeOf`); nothing else may re-decide it. */
+  expose?: boolean;
   baseDir?: string; // default: ./src
+  /** Extra READ-ONLY roots the DEV server may serve, mapped to a URL prefix:
+   *  `{ "/shared": "../core/lib" }`. Browser-reachable imports may not leave
+   *  `baseDir` (it is an HTTP root, so anything outside 404s), which makes two
+   *  apps in one repository unable to share a pure module without copying it —
+   *  a field report ended up with a generated mirror and a test policing the
+   *  drift. Prod is unaffected: the bundler already follows relative imports.
+   *  Each root gets baseDir's containment guards unchanged (no traversal, no
+   *  symlink escape, no dotfiles or server-only paths). */
+  serveDirs?: Record<string, string>;
   client?: "electron" | "browser" | "cli" | "server-only"; // default: 'electron'
   keepServer?: boolean; // default: false — keep server running after client closes (moved from ui.keepAlive)
   transport?: "uds" | "ws" | "auto"; // default: 'auto' — UDS on linux/mac+electron, WS otherwise (moved from ui.transport)
@@ -329,6 +343,13 @@ export type CellsConfig = {
     persist?: import("../state/cell-types.ts").CellFieldFilter;
   };
   port?: number;
+  /** Serve on 0.0.0.0 with TLS instead of loopback-only — the config twin of
+   *  `--expose`. A compiled binary run by a service manager has no flags to
+   *  pass, so "this app is a LAN server" has to be expressible in code.
+   *  `--expose` on the command line still wins. Everything that keys off
+   *  exposure (auth key, the `ui:"all"` privacy warning, TLS, the share URL)
+   *  reads the SAME resolved value — see `_exposeOf` in aio.ts. */
+  expose?: boolean;
   /** Where this app keeps everything it owns. Default `~/.<appId>` — `data/`
    *  inside it is the whole backup; `logs/` and `launch.json` are disposable.
    *  This is the AUTHOR's choice; whoever runs the app can move every app at
@@ -355,6 +376,8 @@ export type CellsConfig = {
   persistMode?: "single" | "multi";
   ui?: UiConfig;
   baseDir?: string;
+  /** Extra read-only dev-server roots — see CellsConfig.serveDirs. */
+  serveDirs?: Record<string, string>;
   client?: "electron" | "browser" | "cli" | "server-only";
   keepServer?: boolean;
   transport?: "uds" | "ws" | "auto";

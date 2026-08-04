@@ -41,7 +41,7 @@ to issue a fresh one. (For headless/scripted setups, `am profile` exports a
 
 ```
 [12:00:00][INFO] tls: self-signed cert at ~/.<appId>/data/tls/tls-cert.pem
-[12:00:00][WARNING] tls: self-signed — remote browsers will show a security warning. Trust the cert, or use --tls-cert=/path.pem --tls-key=/path.pem for a CA-signed cert
+[12:00:00][WARNING] tls: self-signed — browsers show a security warning, and non-browser clients (curl, deno/node fetch, the aio CLI client) REFUSE the connection outright unless they trust this exact cert. Hand it out with `am profile --app=<appId>`, point a client at it with DENO_CERT=<certPath> (curl: --cacert), or pass --tls-cert=/path.pem --tls-key=/path.pem for a CA-signed one
 [12:00:00][INFO] running at https://0.0.0.0:8000 (dev, browser)
 [12:00:00][INFO] share: https://0.0.0.0:8000?token=a1b2c3d4-...
 [12:00:00][INFO] pair code: 048583  (enter it in the aio client → Add app)
@@ -261,6 +261,28 @@ cell("cart", {
 
 `undefined` means anonymous client (public/shared-key mode) or server-origin
 execution.
+
+#### Testing a method that reads `serverUser()`
+
+`t.as(user, fn)` sets the ambient caller for the calls inside it — no server, no
+login round trip, no reaching into framework internals:
+
+```ts
+testCell(cart, "each user gets their own cart", async (t) => {
+  await t.as({ id: "alice", role: "member" }, () => t.send.add("sku-1"));
+  await t.as({ id: "bob", role: "member" }, () => t.send.add("sku-2"));
+
+  assertEquals(t.getState().items["alice"], ["sku-1"]);
+  assertEquals(t.getState().items["bob"], ["sku-2"]);
+});
+```
+
+Call without it to assert the anonymous path — that is what a public client
+gets, and it is the case guards most often forget:
+
+```ts
+await t.send.add("sku-1"); // serverUser() === undefined inside the method
+```
 
 ### Where from? (`serverRequest`)
 

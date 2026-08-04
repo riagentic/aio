@@ -37,8 +37,20 @@ testUI(App, "add a todo end-to-end", async (ui) => {
   `focus`, `blur`, `select(value)`, `check()`, `uncheck()`, `clear()`,
   `scroll({top, left})`, `dragTo(other)` (full HTML5 DnD sequence with a shared
   DataTransfer).
-- Reads: `.text`, `.value`, `ui.surface()`, `ui.html()`; waits:
-  `ui.waitFor(pred)`.
+- Reads: `.text`, `.value`, `.checked`, `.disabled`, `.readonly`, `.required`,
+  `ui.surface()`, `ui.html()`; waits: `ui.waitFor(pred)`. The four booleans
+  **always answer with a boolean**, `false` included:
+
+  ```ts
+  assertEquals(ui.OneLanToggle.checked, false); // an unchecked box
+  assertEquals(ui.SubmitButton.disabled, true);
+  ```
+
+  (`checked` used to be reported only when true, and any unknown property
+  resolves to a lazy callable so un-awaited sequences can target UI a queued
+  action will create — so the natural assertion for "off" compared against a
+  function and the failure named neither cause. `am surface` serialises the same
+  four, so a live app and a test agree.)
 - Server-authoritative reads: `ui.serverState()` / `ui.fullState(cell)` return
   the UNFILTERED store — including `ui.exclude`d fields the client hides — so
   you can assert on state a server route reads but the browser can't see.

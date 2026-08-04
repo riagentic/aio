@@ -153,6 +153,18 @@ already stripped.
 > **Typing.** `forUser`'s parameters are fully inferred — `(s, user) => …` just
 > works, `s` is your cell's state type. Note the type shows ALL state fields,
 > but at runtime `s` only carries what the `include`/`exclude` filter kept.
+>
+> **Pass it as an inline arrow.** Extracting the filter to a named, pre-typed
+> function can collapse the cell's method inference — every method silently
+> becomes `(...args: unknown[])`, and the errors surface far from the cause (a
+> field report saw 29 unrelated type errors appear in a test file). Keep the
+> filter separately testable by calling it from the arrow rather than passing it
+> directly:
+>
+> ```ts
+> ui: { forUser: viewFor },                          // ✗ can break inference
+> ui: { forUser: (s, u) => viewFor(s, u) },          // ✓ inference intact
+> ```
 
 ## Broadcast Performance
 

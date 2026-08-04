@@ -45,15 +45,30 @@ Ten consecutive alpha releases with **no major/critical/blocker bug and no
 compat break**. A corruption-class bug found during an alpha resets the count —
 that is the gate working, not a setback.
 
-- Streak: **0** — reset 2026-07-31. The post-release review of alpha40 found
-  corruption-class bugs REACHABLE in the released alpha: a transactional
-  method's post-`$commit` writes were exempt from conflict validation (silent
-  lost update), and the same review's differential fuzzer then found recorded
-  mutation payloads being destructively mutated by batch replays
-  (`s.nums = s.nums.filter(…); s.nums.shift()` committed garbage). Both fixed
-  and property-tested the same day, but they shipped in alpha40 — by the rule
-  above, the count restarts. (History: the alpha34 audit reset it once before;
-  alpha34…alpha39 reached 7 before this reset.)
+- Streak: **0** — reset again 2026-08-05. The `sync-chaos` fuzzer (time-derived
+  seed) found a convergence divergence REACHABLE IN RELEASED alpha44: a client's
+  confirmed state was missing ops (94 of 97) and could never receive them. Root
+  cause: `server_ts` was issued from an IN-MEMORY counter that ran ahead of
+  anything the log could prove — duplicates burned timestamps no row carried,
+  compaction and D11-rejection deleted rows — so after a restart the server
+  re-seeded to the surviving row max and issued ops BELOW a cursor it had
+  already echoed to a client. `loadOpsSince` filters `server_ts > cursor`
+  strictly, so those ops were undeliverable forever, silently. Fixed by making
+  the reservation durable by construction (`highWaterTs` = max of the op-log and
+  the compaction watermark) and by not burning a ts on a duplicate; pinned by
+  `tests/sync/cursor-durability.test.ts` (incl. a 300-step property that every
+  cursor ever handed out stays a valid delivery boundary). Verified against the
+  v1.0.0-alpha44 tag in a clean worktree — it shipped, so by the rule below the
+  count restarts. That is the gate working. (Previously: reset 2026-07-31. The
+  post-release review of alpha40 found corruption-class bugs REACHABLE in the
+  released alpha: a transactional method's post-`$commit` writes were exempt
+  from conflict validation (silent lost update), and the same review's
+  differential fuzzer then found recorded mutation payloads being destructively
+  mutated by batch replays (`s.nums = s.nums.filter(…); s.nums.shift()`
+  committed garbage). Both fixed and property-tested the same day, but they
+  shipped in alpha40 — by the rule above, the count restarts. (History: the
+  alpha34 audit reset it once before; alpha34…alpha39 reached 7 before that
+  reset.))
 - (Bugs caught while building an alpha — the alpha38 libraryMode log
   misplacement, the app-key split-brain — don't reset it: they never shipped.
   That distinction is the whole point of the gate.)
@@ -305,11 +320,11 @@ whole alpha44 diff)** — findings, all fixed the same day:
   dispatches a late `_source:"Effect"` and asserts it drops). Worker cells were
   silently OUTSIDE the whole contract: close was send-"close"+50ms+terminate,
   and the worker's registries are invisible to the main isolate — the worker
-  host now aborts + drains its own isolate, streams the final patches, and
-  acks `closed` (1s main deadline — deliberately under the 3s drain, since
-  the budgets stack and a WEDGED sync worker can only be terminated; pinned
-  by cell-workers.test.ts "a shutdown that never waits"). The drain gate also counted the
-  process-global `pendingCalls()`; it counts the app's own
+  host now aborts + drains its own isolate, streams the final patches, and acks
+  `closed` (1s main deadline — deliberately under the 3s drain, since the
+  budgets stack and a WEDGED sync worker can only be terminated; pinned by
+  cell-workers.test.ts "a shutdown that never waits"). The drain gate also
+  counted the process-global `pendingCalls()`; it counts the app's own
   (`pendingCallsFor(cellNames)`).
 - **Freshness cache, again.** The revived walk covered only `src/` + the app dir
   — `packages/shared/`, root `vendor/` never busted the cache; a name-based
@@ -341,6 +356,99 @@ whole alpha44 diff)** — findings, all fixed the same day:
   build & dev:android, electron-uds shell spread no longer clobbers defaults
   with undefined, shell-parity imports THE decider instead of re-deriving it,
   icon copy fails loud on a copy error of an existing icon.
+
+**For the alpha45 release notes** (landed 2026-08-05, unreleased) — **the
+network boundary**, from two field reports (`dm`: a post-quantum messenger, two
+apps in one repo; `llama-master`: a LAN chat client beside its server). Their
+shared verdict: everything inside one process was excellent, everything crossing
+a socket had a sharp edge, and the worst ones were silent.
+
+Three severe, all silent, all confirmed WORSE than reported:
+
+- **`ui: { forUser }` alone disabled per-user filtering.** `normalizeUiFilter`
+  returns undefined without include/exclude, so the cell classified as `raw` and
+  every delta was computed from UNFILTERED state — the filter guarded the
+  initial frame only. It also CORRUPTED: raw ops carry raw array indices,
+  applied to an array `forUser` had already shortened. The docs had always
+  documented `forUser ⇒ full`, so the code contradicted its own contract. Fixed
+  at the classification; pinned as a PROPERTY (a per-user filter is never
+  bypassed by a strategy) plus a two-client wire test that proves the leak the
+  reporter could only infer.
+- **`--expose` produced a cert aio's own client could not verify.** The reported
+  cause was REFUTED empirically: the cert works fine as a pinned anchor, and
+  `CA:TRUE` is what rustls rejects (`CaUsedAsEndEntity`). Two real causes:
+  `connectCli` had no way to trust a cert at all, and every aio cert shared
+  `CN=aio-local`, so a stale or sibling-app cert shadowed the right one → their
+  exact `BadSignature`. Per-app CN + `CA:FALSE` + AKI; the boot warning names
+  non-browser clients and the fix instead of browsers only.
+- **The CLI client discarded ack failures** — a refused method resolved like a
+  successful one and return values were dropped. Verifying it found worse:
+  **every async bound method over `connectCli` was broken outright** (the
+  binding awaited a LOCAL pending-call promise nothing remote settles, so a
+  SUCCESSFUL call rejected 30s later with "stopped waiting"); a disconnect
+  RESOLVED outstanding calls; and an action sent while reconnecting was neither
+  written nor queued — a silent write loss. One ack registry now serves the
+  browser and both CLI transports, per-connection (D2).
+
+Found in review, not reported: **`am` mutations were ungated.** `verifyInstance`
+— whose own comment records a green e2e writing into a production leaderboard —
+guarded reads only, so `dispatch`/`sql`/`shutdown` could retarget whatever app
+held that port. Gated, with a bounded TTL.
+
+From `llama-master`, the four its diagnostics did NOT catch:
+
+- **An `afterRender` that throws took the whole render with it** — the button
+  that toggled the theme stopped EXISTING, two debug cycles away from an effect
+  that threw after it rendered.
+- **In the test surface an absent boolean was a callable** — `checked` was
+  serialised only when true, and the handle proxy turns unknown props into lazy
+  callables, so the natural assertion for "off" was unwritable.
+- **Cell config inference was ORDER-DEPENDENT** — `onMigrate` above `state`
+  inferred `S` from the hook, and every method body silently lost its typing ten
+  lines away. `state` is the sole inference site now (`NoInfer`).
+- **Hot reload updated the bundle but not the booted cell set** — a UI that
+  rendered and did nothing, with the truth only visible through `am`. The
+  server's booted set now rides the `cfg` frame and the client says so.
+
+Plus: `serveDirs` (two apps in one repo can share a pure module instead of a
+generated mirror a test has to police — dev-only, every baseDir guard
+unchanged); the secret-name heuristic no longer fires on `latency`, `sequence`,
+`currency`, `reference` (`enc` was matched as a bare substring) nor on
+measurement suffixes; `aiol` no longer reports a plain WRITE as a post-await
+read (the exemption was line-level, so a `deno fmt`-wrapped assignment had no
+`=` on the reported line) and no longer counts tooling scripts against the
+logger rule; `expose` as a config key + `--expose
+--no-tls`; per-target build
+entry; the db-worker crash caught before it ships with `--include` named;
+`am dispatch --args`; `t.as(user, fn)`; honest `appVersion`; the perf-budget
+message names `perfBudget.methods`; and every aio app lost the ~8px white border
+it never asked for (the shell shipped no CSS reset and no template ships a
+stylesheet).
+
+Deferred from the alpha45 work (alpha46 candidates, none data-loss):
+
+- [ ] `afterRender()` called OUTSIDE a render is silently dropped
+      (`renderer-flush.ts`, `if (_activeRoot)` with no else) — from a
+      `setTimeout`/async continuation the callback vanishes forever with no
+      warning. A fail-loud violation; a dev-only warn is the fix, but it risks
+      noise in existing transition paths, so it wants a careful pass.
+- [ ] `aiol` never scans `scripts/` or `tools/` at all — the new tooling scope
+      is written to stay correct if that widens, but today those dirs are
+      invisible to EVERY rule, not just the console one.
+- [ ] The post-await walker attributes a read to a nested closure inside the
+      method body (a callback using the same param name) — pre-existing.
+- [ ] `build-bundle.ts`'s missing-App.tsx error says `deno.json "entry": …` even
+      when the value came from `--entry` (per-target) — right value, wrong
+      attribution.
+- [ ] `src/diagnostics/error.ts` carries a SECOND piece of BUDGET_EFFECT advice
+      beside the dispatch message — a two-decider consolidation.
+- [ ] `am create` still writes the array form of `build.targets` (correct and
+      intended for compat), so the per-target object form is undiscoverable from
+      the scaffold — a commented example in the generated deno.json.
+- [ ] `--no-tls` without `--expose` is silently ignored (loopback is plaintext
+      anyway, so no wrong outcome) — a "flag has no effect here" warn.
+- [ ] `docs/debugging/performance.md` should say per-method budgets now cover
+      sync methods' effects and that the violation prints the key.
 
 Deferred from that review (alpha45 candidates, none data-loss):
 

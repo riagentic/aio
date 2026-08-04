@@ -7,6 +7,75 @@ import type {
   WorkerMsg,
   WorkerResponse,
 } from "./types.ts";
+import { isCompiled } from "../server/paths.ts";
+
+/** Marker phrase every "the db worker isn't in this binary" error carries, so
+ *  the condition is recognised by ONE predicate wherever it surfaces. */
+const DB_WORKER_MISSING = "db worker module is not embedded";
+
+/** THE message for a compiled binary whose SQLite worker was never embedded.
+ *
+ *  `new Worker(new URL("./db-worker.ts", import.meta.url))` is invisible to
+ *  `deno compile`'s module graph, so the worker is in the binary ONLY if it was
+ *  passed with `--include`. The framework's own builder always passes it
+ *  (`dbWorkerInclude()` in src/build/build-compile.ts, re-exported from
+ *  `aio/build`); a hand-rolled `deno compile` of the app's entry does not — and
+ *  the resulting binary boots, then dies on the first DB call. The message that
+ *  used to reach the user ("Fix permissions or set persist: false") named a
+ *  cause that is not this one, which is worse than no message. */
+export function dbWorkerMissingMessage(workerUrl: string): string {
+  return `${DB_WORKER_MISSING} — SQLite cannot start (looked for ${workerUrl}).
+
+\`new Worker(new URL("./db-worker.ts", import.meta.url))\` is invisible to \`deno compile\`'s
+module graph: the worker is only inside the binary if the build embedded it explicitly.
+
+  deno compile -A --include <aio-src>/src/db/db-worker.ts  <your-entry.ts>
+
+<aio-src> is wherever aio resolved for this build (dep/aio, node_modules/.deno/@riagentic+aio@…, …).
+Don't hand-write that path — \`aio build\` / \`deno task build\` already pass it, and a custom
+compile script can get the exact flags from \`import { dbWorkerInclude } from "aio/build"\`.
+
+This is NOT a permissions problem, and \`persist: false\` is not the fix.`;
+}
+
+/** The corrected message for `e`, or null when `e` is some other db failure.
+ *
+ *  THE classifier: a missing worker surfaces as a `Module not found` worker
+ *  error naming db-worker.ts (or, when the pre-flight below caught it first,
+ *  already as the precise message). Every call site that would otherwise
+ *  attribute a db failure to permissions asks here first. */
+export function dbWorkerMissingHint(e: unknown): string | null {
+  const msg = e instanceof Error ? e.message : String(e);
+  if (msg.includes(DB_WORKER_MISSING)) return msg;
+  return /module not found/i.test(msg) && msg.includes("db-worker.ts")
+    ? `${msg}\n\n${dbWorkerMissingMessage("db-worker.ts")}`
+    : null;
+}
+
+/** The pre-flight: the missing-worker message when `workerUrl` is NOT in this
+ *  binary, else null. `compiled` is injected so the decision is testable.
+ *
+ *  `deno compile` materialises every embedded file in the binary's virtual FS
+ *  next to the module, so a plain `stat` of the worker URL separates "embedded"
+ *  from "not embedded" exactly (verified both ways: without `--include` the
+ *  stat is NotFound and the Worker dies with `Module not found`; with it, both
+ *  succeed). Uncompiled, the module graph IS the filesystem and there is
+ *  nothing to check. Only NotFound blocks — any other stat failure (no read
+ *  permission, an exotic FS) must never take down a binary that would work. */
+export function dbWorkerMissingIn(
+  workerUrl: URL,
+  compiled: boolean,
+): string | null {
+  if (!compiled || workerUrl.protocol !== "file:") return null;
+  try {
+    Deno.statSync(workerUrl);
+  } catch (e) {
+    if (e instanceof Deno.errors.NotFound) {
+      return dbWorkerMissingMessage(workerUrl.href);
+    }
+  }
+  return null;
+}
 
 /** Default SQLite PRAGMA statements for WAL mode, cache, and foreign keys */
 export const DEFAULT_PRAGMAS = [
@@ -93,9 +162,12 @@ export function createDB(path: string, opts: DBOpts = {}): DB {
   function spawnAndOpen(
     readonly: boolean,
   ): { worker: Worker; opening: Promise<QueryResult> } {
-    const w = new Worker(new URL("./db-worker.ts", import.meta.url), {
-      type: "module",
-    });
+    const workerUrl = new URL("./db-worker.ts", import.meta.url);
+    // Fail here, with the real cause, rather than as an opaque worker error
+    // after the app has already booted and told the user it was fine.
+    const missing = dbWorkerMissingIn(workerUrl, isCompiled());
+    if (missing) throw new Error(missing);
+    const w = new Worker(workerUrl, { type: "module" });
     wire(w);
     const opening = sendTo<QueryResult>(w, {
       type: "open",
