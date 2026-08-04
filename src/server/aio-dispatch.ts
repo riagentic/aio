@@ -87,6 +87,8 @@ export type DispatchSetupDeps<S, A, E, App = any> = {
   /** Exact action types omitted from time-travel history (diagnostics
    *  `skipActions`) — framework-internal suffixes are always skipped. */
   ttSkipActions?: Set<string>;
+  /** THIS app's cell names — scopes the drain gate's pending-call count. */
+  cellNames?: Set<string>;
 };
 
 // Internal action types to hide from time-travel history (framework noise)
@@ -323,5 +325,6 @@ export function setupDispatch<S, A, E, App = any>(
     afterAction: deps.afterAction as
       | ((prev: S, next: S, action: A) => void)
       | undefined,
+    cellNames: deps.cellNames,
   });
 }

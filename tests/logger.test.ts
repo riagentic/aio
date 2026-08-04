@@ -1,5 +1,10 @@
 // logger.test.ts — isolated tests for AioLogger
-import { assertEquals, assertMatch, assertStringIncludes } from "@std/assert";
+import {
+  assertEquals,
+  assertMatch,
+  assertRejects,
+  assertStringIncludes,
+} from "@std/assert";
 import {
   AioLogger,
   getLogger,
@@ -318,5 +323,56 @@ Deno.test("logger: write failure logs to console (first 3 only)", async () => {
   assertEquals(
     errors.filter((e) => e.includes("[logger] write failed")).length <= 3,
     true,
+  );
+});
+
+// ── client.log obeys the SAME on-start policy as every other log ─────────
+//
+// `client.log` holds forwarded browser/Electron console output, so a chatty
+// page fills it faster than anything else the framework writes. It was not in
+// the rotation set, and nothing else rotated it either: `client-log.ts` shipped
+// a complete, documented `rotateClientLog()` that no code ever called. Result —
+// every other log was wiped (or rotated) on start while this one was appended
+// to forever, across every restart, for the life of the app. Nothing failed;
+// the disk just filled. A second rotation implementation living next to the
+// writer is how that happens, so there is now one policy, and client.log is in
+// it.
+Deno.test("logger: client.log is wiped on start like every other log", async () => {
+  const dir = `${tmpDir()}/logs`;
+  await Deno.mkdir(dir, { recursive: true });
+  await Deno.writeTextFile(`${dir}/client.log`, "stale line from a past run\n");
+  await Deno.writeTextFile(`${dir}/app.log`, "stale\n");
+
+  const l = mkLogger({ dir }); // backupLogs defaults to false ⇒ wipe
+  await l.init();
+
+  for (const name of ["client.log", "app.log"]) {
+    await assertRejects(
+      () => Deno.stat(`${dir}/${name}`),
+      Deno.errors.NotFound,
+      undefined,
+      `${name} must be wiped on start — client.log used to grow forever`,
+    );
+  }
+});
+
+Deno.test("logger: client.log rotates with backupLogs, like every other log", async () => {
+  const dir = `${tmpDir()}/logs`;
+  await Deno.mkdir(dir, { recursive: true });
+  await Deno.writeTextFile(`${dir}/client.log`, "run 1\n");
+
+  const l = mkLogger({ dir, backupLogs: true });
+  await l.init();
+
+  assertEquals(
+    (await Deno.readTextFile(`${dir}/client.log.1`)).trim(),
+    "run 1",
+    "the previous run's client.log must be preserved as .1, not appended to",
+  );
+  await assertRejects(
+    () => Deno.stat(`${dir}/client.log`),
+    Deno.errors.NotFound,
+    undefined,
+    "the live client.log starts empty after a rotate",
   );
 });

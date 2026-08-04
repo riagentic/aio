@@ -1264,17 +1264,37 @@ export const checkPatterns: Checker = (ctx) => {
     // A `transaction: true` cell reads a STABLE snapshot across
     // awaits — the post-await read is intended and safe — so skip the hint for
     // files that opt in. See docs/state/transactional-methods.md.
+    //
+    // This rule used to be almost exactly INVERTED in practice, which is worse
+    // than not having it — a hint that fires on the documentation's own code
+    // teaches people to stop reading hints, and the rest of this linter is
+    // load-bearing. Three fixes, all here:
+    //   1. `METHOD_RE` required the draft param to be followed by `,` or `)`,
+    //      so a TYPE-ANNOTATED param (`async work(s: { n: number }, x)`) — what
+    //      real TypeScript looks like — never matched and the whole method went
+    //      unchecked. The one shape the rule exists for was the one it skipped.
+    //   2. `s.$signal.aborted` is THE documented cancellation check
+    //      (`cancelOn` + `$signal`), and it is the single most common
+    //      post-await read there is. Draft META (`$signal`/`$live`/`$commit`)
+    //      is framework surface, not app state — "another action may have
+    //      committed" simply does not apply to it.
+    //   3. `until(() => s.x)` / `race({...})` are the SANCTIONED way to wait on
+    //      live state inside a method; re-reading is the entire point of the
+    //      primitive. `mod.ts`'s own flagship example tripped this.
     const isTransactional = /\btransaction\s*:\s*(?:true|\{)/.test(
       file.content,
     );
     if (!isTransactional && /\bcell\s*\(\s*['"]/.test(file.content)) {
       const METHOD_RE =
-        /\basync\s+(?!function\b)([A-Za-z_$][\w$]*)\s*\(\s*([A-Za-z_$][\w$]*)\s*[,)]|\b([A-Za-z_$][\w$]*)\s*:\s*async\s*\(\s*([A-Za-z_$][\w$]*)\s*[,)]/g;
+        // `[,):]` — the `:` admits a type-annotated draft param.
+        /\basync\s+(?!function\b)([A-Za-z_$][\w$]*)\s*\(\s*([A-Za-z_$][\w$]*)\s*[,):]|\b([A-Za-z_$][\w$]*)\s*:\s*async\s*\(\s*([A-Za-z_$][\w$]*)\s*[,):]/g;
       for (const m of file.content.matchAll(METHOD_RE)) {
         const method = m[1] ?? m[3]!;
         const param = m[2] ?? m[4]!;
         const startIdx = file.content.slice(0, m.index).split("\n").length - 1;
-        const readRe = new RegExp(`\\b${param}\\.[\\w$]`);
+        // `(?!\$)` — draft meta (`s.$signal`, `s.$live`, `s.$commit`) is
+        // framework surface, never app state a concurrent action can move.
+        const readRe = new RegExp(`\\b${param}\\.(?!\\$)[\\w$]`);
         const writeRe = new RegExp(
           `\\b${param}(\\.[\\w$]+|\\[[^\\]]+\\])+\\s*([+\\-*/%&|^]|\\*\\*|\\|\\||&&|\\?\\?)?=[^=]`,
         );
@@ -1297,6 +1317,9 @@ export const checkPatterns: Checker = (ctx) => {
             if (/\bawait\b/.test(code)) sawAwait = true;
             continue; // reads on the first await line happen pre-suspension
           }
+          // A live-poll primitive re-reads state ON PURPOSE — that is what it
+          // is for. Skip the line and keep looking for a genuine read.
+          if (/\b(until|race)\s*\(/.test(code)) continue;
           if (
             readRe.test(code) && !writeRe.test(code) && !mutateRe.test(code) &&
             !isSuppressed(file.lines, i)

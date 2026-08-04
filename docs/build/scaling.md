@@ -253,10 +253,10 @@ The `breakdown` field on `PerfMetric` provides phase-level timing:
 
 - **State must be JSON-serializable** — no classes, functions, Dates,
   Uint8Arrays, or circular references
-- **No CSS imports in TS** — use `src/style.css` (auto-injected) or `<link>`
-  tags
-- **Single CSS entry point** — only `src/style.css` is auto-detected. Use
-  `@import` for multiple files
+- **No CSS imports in TS** — use `style.css` next to your entry (auto-injected)
+  or `<link>` tags
+- **Single CSS entry point** — only `style.css` in the app dir is auto-detected.
+  Use `@import` for multiple files
 - **`$p` and `$d` are reserved** — don't use as state keys (used internally for
   delta patches)
 - **WS message size limit** — messages over 1MB are silently dropped

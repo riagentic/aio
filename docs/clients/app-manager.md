@@ -403,6 +403,8 @@ deno task am surface 1                       # surface for a specific client
 deno task am trigger 0 App:SubmitButton click        # click by component:name path
 deno task am trigger 0 App:Email type "a@b"          # type into an input
 deno task am trigger 0 App:Search focus               # focus / blur / hover / scroll / press
+deno task am trigger 0 App:Stage keyDown ArrowLeft    # HOLD a key (games, drag) …
+deno task am trigger 0 App:Stage keyUp ArrowLeft      # … then release it — press is a tap
 ```
 
 Run `am surface` first to see the addressable `Component:name` paths, then

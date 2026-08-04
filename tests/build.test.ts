@@ -393,6 +393,14 @@ Deno.test("build-all: unsafeOutDir rejects root/ancestor/.aio/src, allows a subd
   assert(!unsafeOutDir("/proj/dist", root), "dist");
   assert(!unsafeOutDir("/proj/build/out", root), "nested out");
   assert(!unsafeOutDir("/proj/release", root), "release");
+
+  // The hardcoded `src/` above is only the SCAFFOLD's convention. An app whose
+  // entry is `apps/web/main.ts` keeps its sources where no list can guess, so
+  // the app dir — THE decider's answer — is refused too: `out: "apps/web"`
+  // would otherwise recursively delete the app it was asked to build.
+  const appDir = "/proj/apps/web";
+  assert(unsafeOutDir(appDir, root, appDir), "the app's own dir");
+  assert(!unsafeOutDir("/proj/dist", root, appDir), "dist, with an app dir");
 });
 
 Deno.test("build-all: isArtifactName recognizes artifacts, rejects source", () => {

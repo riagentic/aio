@@ -393,7 +393,7 @@
         },
         "VERSION": {
           "kind": "variable",
-          "sig": "6e37480dea974edf"
+          "sig": "14d709b0240dd412"
         },
         "VitalsConfig": {
           "kind": "typeAlias",
@@ -983,7 +983,7 @@
         },
         "unsafeOutDir": {
           "kind": "function",
-          "sig": "9140b64b9d327a3d"
+          "sig": "e2cfb64140c48f72"
         }
       }
     },

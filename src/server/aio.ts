@@ -941,6 +941,7 @@ async function _run<S, A, E>(
     reduceBreakdown: config._reduceBreakdown,
     ttSkipActions,
     afterAction: afterActionHook,
+    cellNames: config._cellNames ? new Set(config._cellNames) : undefined,
     log,
     debug: VERBOSE,
   });
@@ -1081,6 +1082,9 @@ async function _run<S, A, E>(
     scheduleManager,
     ownManager,
     dispatch,
+    // Shutdown aborts + drains THIS app's cells only — another app sharing the
+    // process (D2) keeps running its own in-flight methods.
+    getCellNames: () => config._cellNames ?? [],
     getElectronProc: () => _electronProc,
     clearElectronProc: () => {
       _electronProc = null;
@@ -1263,6 +1267,7 @@ async function _run<S, A, E>(
     title,
     prod,
     electronDistDir,
+    baseDir,
     expose,
     singletonMode,
     childWindows: !!config.childWindows,
@@ -1290,7 +1295,19 @@ async function _run<S, A, E>(
     db: config.db,
     maxConnections: config.maxConnections,
     cli: { width: cli.width, height: cli.height, keepServer: cli.keepServer },
-    ui: { width: ui.width, height: ui.height },
+    // The FULL head-shaped config, not just the window box: the dev Electron
+    // aio:// shell is templated at launch and has no other way to learn
+    // ui.head/ui.viewport/ui.showStatus. Dropping them here made an app that
+    // respected ui.head under `deno task dev` (HTTP) ship it in the packaged
+    // window but NOT in the dev Electron window — two dev surfaces, two heads
+    // (WYSIDIWYSIP).
+    ui: {
+      width: ui.width,
+      height: ui.height,
+      showStatus: ui.showStatus,
+      viewport: ui.viewport,
+      head: ui.head,
+    },
     keepServer: config.keepServer,
     shutdown,
     setElectronProc: (proc) => {

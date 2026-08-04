@@ -64,6 +64,65 @@ export function _isFrameworkInternalActionType(type: string): boolean {
     type.charCodeAt(colon + 2) === 0x5f;
 }
 
+/** Strip client-set trusted provenance off a network action, loudly, and
+ *  re-stamp it as what it IS: client input. ONE decider for all three network
+ *  entry points (WS, UDS, trojan — each calls this on every action).
+ *
+ *  The fields, and why a network value is never legitimate:
+ *  - `_user` — the SERVER-side caller identity consumed by dispatch hooks
+ *    (beforeReduce/onAction/onEffect). In open/shared-token mode meta.user is
+ *    undefined, so a spoofed `_user:{role:"admin"}` would become the trusted
+ *    identity. The server sets the real `_user` downstream.
+ *  - `_source` — dispatch lets `_source:"Effect"` through a CLOSED queue while
+ *    it drains in-flight effects (a streaming method's write-set must land)
+ *    and drops everything else. A forged value would have a `cell:method`
+ *    action run during shutdown drain — new work started while the server is
+ *    closing — and its write captured by the final persist. The server tags
+ *    its own effect dispatches inside the cell machinery.
+ *  - `_syncOp` — only the sync handler sets it, on ops already persisted to
+ *    the op-log, so afterAction skips the durability fold for sync cells. A
+ *    forged value makes the server treat a write that is durable NOWHERE as
+ *    durable — it silently vanishes on restart.
+ *  - `payload._origin` — the async-batcher sets it SERVER-side to the
+ *    originating method name; the cell `access` gate discriminates on it. A
+ *    caller could forge `payload:{_origin:"read"}` on a `cell:delete` action
+ *    to be gated as a read while the reducer ran the delete.
+ *
+ *  Re-stamping (not just deleting) `_source: "UI"` keeps provenance real for
+ *  app hooks: clients tag their own dispatches `_source:"UI"` and deleting it
+ *  outright would leave hooks unable to tell client input from server work.
+ *  Anything OTHER than "UI" from the wire is warned about — a forged trusted
+ *  field is an attack signal (or a badly stale client), never a shrug. */
+export function sanitizeClientAction(
+  action: Record<string, unknown>,
+  via: "ws" | "uds" | "trojan",
+): void {
+  const forged: string[] = [];
+  if (action._user !== undefined) forged.push("_user");
+  if (action._source !== undefined && action._source !== "UI") {
+    forged.push("_source");
+  }
+  if (action._syncOp !== undefined) forged.push("_syncOp");
+  delete action._user;
+  delete action._syncOp;
+  const pl = action.payload;
+  if (pl && typeof pl === "object") {
+    if ((pl as Record<string, unknown>)._origin !== undefined) {
+      forged.push("payload._origin");
+      delete (pl as Record<string, unknown>)._origin;
+    }
+  }
+  if (forged.length > 0) {
+    log.warn(
+      via,
+      `client sent trusted field(s) ${forged.join(", ")} on ` +
+        `'${String(action.type)}' — stripped (a network value is never ` +
+        `legitimate here)`,
+    );
+  }
+  action._source = "UI";
+}
+
 export type ClientType =
   | "electron"
   | "browser"
@@ -760,23 +819,9 @@ export function createWsManager(deps: WsDeps): WsManager {
       deps.debug(`ws: invalid action — payload must be a plain object`);
       return;
     }
-    // Strip client-set identity provenance. `_user` is the SERVER-side caller
-    // identity consumed by dispatch hooks (beforeReduce/onAction/onEffect). A
-    // network client must never set it: in open/shared-token mode meta.user is
-    // undefined, so a spoofed `_user:{role:"admin"}` would otherwise become the
-    // trusted identity. The server sets the real `_user` itself downstream.
-    delete (parsed as Record<string, unknown>)._user;
-    // Same for `payload._origin` — the async-batcher sets it SERVER-side to the
-    // originating method name, and the cell `access` gate reads it to pick the
-    // method for a method-discriminating predicate. A network client could
-    // forge `payload:{_origin:"read"}` on a `cell:delete` action to be checked
-    // as "read" while the reducer still runs delete. Network actions carry no
-    // legitimate _origin (batching is server-side) → strip it, forcing the
-    // gate to fall back to the trustworthy action-type suffix.
-    const _pl = (parsed as { payload?: unknown }).payload;
-    if (_pl && typeof _pl === "object") {
-      delete (_pl as Record<string, unknown>)._origin;
-    }
+    // Strip client-set trusted provenance and re-stamp `_source:"UI"` — ONE
+    // decider for all three network entry points (sanitizeClientAction).
+    sanitizeClientAction(parsed as Record<string, unknown>, "ws");
     deps.debug(
       `ws: recv ${JSON.stringify(parsed)} user=${meta.user?.id ?? "anon"}`,
     );

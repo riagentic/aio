@@ -60,13 +60,19 @@ exec "$HERE/electron/electron" "$HERE/main.cjs" "$@"
   await Deno.writeTextFile(join(appDir, "AppRun"), appRun);
   await Deno.chmod(join(appDir, "AppRun"), 0o755);
 
-  // Icon
-  const userIcon = join(root, "src", "icon.png");
+  // Icon \u2014 from THE app-dir decider (cfg.appDir), same place dev reads it
+  const userIcon = join(cfg.appDir, "icon.png");
+  let hasUserIcon = false;
   try {
     await Deno.stat(userIcon);
+    hasUserIcon = true;
+  } catch { /* no app icon \u2014 placeholder below */ }
+  if (hasUserIcon) {
+    // Outside the stat's catch: an EXISTING icon that fails to copy (EACCES,
+    // disk full) is a broken build, never a silent placeholder downgrade.
     await Deno.copyFile(userIcon, join(appDir, "aio-client.png"));
-    console.log("[client] \u2713 icon from src/icon.png");
-  } catch {
+    console.log(`[client] \u2713 icon from ${userIcon}`);
+  } else {
     await writePlaceholderIcon(join(appDir, "aio-client.svg"), "aio");
     console.log("[client] \u2713 generated placeholder icon");
   }

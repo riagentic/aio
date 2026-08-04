@@ -8,7 +8,10 @@
 import { compactPatches } from "../state/patch-compact.ts";
 import { writeClientLog } from "./client-log.ts";
 import { log } from "../diagnostics/logger.ts";
-import { _isFrameworkInternalActionType } from "./server-ws.ts";
+import {
+  _isFrameworkInternalActionType,
+  sanitizeClientAction,
+} from "./server-ws.ts";
 import { invokeServerFn } from "./server-fns.ts";
 import {
   type ActionPayload,
@@ -584,15 +587,10 @@ function _handleUDSConn(
                 );
                 continue;
               }
-              // Strip client-set identity provenance — parity with the WS
-              // server; a network-sourced `_user` must never become the
-              // trusted dispatch identity, and a forged `payload._origin` must
-              // not steer the cell `access` method check (see server-ws.ts).
-              delete (action as Record<string, unknown>)._user;
-              const _pl = (action as { payload?: unknown }).payload;
-              if (_pl && typeof _pl === "object") {
-                delete (_pl as Record<string, unknown>)._origin;
-              }
+              // Strip client-set trusted provenance and re-stamp
+              // `_source:"UI"` — ONE decider for all three network entry
+              // points (sanitizeClientAction, server-ws.ts).
+              sanitizeClientAction(action as Record<string, unknown>, "uds");
               const result = onAction(action);
               // AIO-402 + return-value transport: per-action ack — parity with
               // the WS server. Settles the Promise of an awaited method call

@@ -31,7 +31,9 @@ import {
   CELL_WORKER_PREFIX,
   type FromWorker,
   type ToWorker,
+  WORKER_CLOSE_DRAIN_MS,
 } from "./cell-worker-protocol.ts";
+import { abortAllInflight, settlePending } from "../state/method-cancel.ts";
 import {
   runWithRequest,
   runWithUser,
@@ -222,11 +224,19 @@ export function startCellWorkerHost(cell: CellDef): Promise<never> {
       return;
     }
     if (msg.t === "close") {
+      // Same contract as the main isolate's shutdown (shutdown.ts Phase 1):
+      // an in-flight call gets to finish WRITING, it never gets to start new
+      // work. The method registries live in THIS isolate — the main thread's
+      // abortAllInflight cannot see them — so the abort+drain must run here,
+      // while `closing` is still false so the final writes stream home.
+      abortAllInflight();
+      await settlePending(WORKER_CLOSE_DRAIN_MS);
       closing = true; // stop streaming BEFORE teardown mutates the slice
       composed.destroyAll({
         dispatch: (a: Msg) => void dispatch(a),
         getState: () => state,
       });
+      post({ t: "closed" });
       self.close();
       return;
     }

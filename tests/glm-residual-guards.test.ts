@@ -32,15 +32,25 @@ Deno.test("trojan: a forged payload._origin cannot reach the access predicate", 
     baseDir: await Deno.makeTempDir(),
   });
   try {
-    const r = await fetch(`http://127.0.0.1:${port}/__aio/dispatch`, {
+    // The REAL route + the mandatory X-AIO header. The first version of this
+    // test POSTed to `/__aio/dispatch` (404) without the header (403), so the
+    // assertion passed unconditionally — a vacuous green over the exact
+    // surface it claimed to pin. `seen` must prove the dispatch HAPPENED
+    // (the gate was asked) before proving what it was asked about.
+    const r = await fetch(`http://127.0.0.1:${port}/__aio/trojan/dispatch`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", "X-AIO": "1" },
       body: JSON.stringify({
         type: "trojanorigin:wipe",
         payload: { _origin: "read" }, // the spoof
       }),
     });
+    assertEquals(r.status, 200, "the trojan dispatch must actually run");
     await r.body?.cancel();
+    assert(
+      seen.includes("wipe"),
+      `the gate must be asked about the real method: ${JSON.stringify(seen)}`,
+    );
     assert(
       !seen.includes("read"),
       `the gate must never be asked about a client-supplied origin: ${

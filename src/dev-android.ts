@@ -12,6 +12,8 @@
  */
 import { join } from "@std/path";
 import { resolveSdk } from "./build/build-helpers.ts";
+import { resolveEntry } from "./build/build-config.ts";
+import { androidApplicationId } from "./build/build-android.ts";
 
 const dec = new TextDecoder();
 
@@ -33,6 +35,16 @@ function fail(msg: string, ...lines: string[]): never {
   console.error(`[dev:android] ✗ ${msg}`);
   for (const l of lines) console.error(`  ${l}`);
   Deno.exit(1);
+}
+
+/** The app's deno.json, or `{}` when there is none — the caller falls back to
+ *  the scaffold default and then fails loud on a missing file. */
+function readDenoJson(): Record<string, unknown> {
+  try {
+    return JSON.parse(Deno.readTextFileSync("deno.json"));
+  } catch {
+    return {};
+  }
 }
 
 function freePort(): number {
@@ -174,14 +186,32 @@ async function main(): Promise<void> {
     }))
     .sort((a, b) => b.m - a.m)[0]?.name;
   if (!apk) fail("no .apk produced by the build");
-  const appId = `app.aio.${
-    apk.replace(/\.apk$/, "").replace(/[^a-z0-9]/g, "")
-  }`;
+  // THE applicationId rule (build-android.ts), applied to the APK label —
+  // which the build sets to the binary name. A re-derived regex here was a
+  // second decider waiting to drift.
+  const appId = androidApplicationId(apk.replace(/\.apk$/, ""));
+  if (!appId) fail(`APK name "${apk}" produces no valid applicationId`);
 
   // 3) Start the dev server (the app reaches it via localhost + adb reverse).
-  console.log(`[dev:android] starting dev server on :${port}...`);
+  //    The entry comes from THE decider, not a literal: an app whose entry is
+  //    `app.ts` (the flat layout) used to have a dev server spawned on a
+  //    `src/app.ts` that does not exist — the emulator then sat waiting on a
+  //    server that never came up (WYSIDIWYSIP: one rule decides what the app
+  //    IS, in dev and in the build alike).
+  const devEntry = resolveEntry(readDenoJson());
+  try {
+    Deno.statSync(devEntry);
+  } catch {
+    fail(
+      `entry "${devEntry}" not found`,
+      'set "entry" in deno.json to your app module, or scaffold with `am create`',
+    );
+  }
+  console.log(
+    `[dev:android] starting dev server on :${port} (${devEntry})...`,
+  );
   const server = new Deno.Command("deno", {
-    args: ["run", "-A", "src/app.ts", "--client=browser", `--port=${port}`],
+    args: ["run", "-A", devEntry, "--client=browser", `--port=${port}`],
     stdout: "inherit",
     stderr: "inherit",
   }).spawn();

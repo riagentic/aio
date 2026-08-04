@@ -119,6 +119,15 @@ async function writeApp(spec: E2eApp): Promise<string> {
     `${dir}/deno.json`,
     JSON.stringify({
       title: "E2E Probe",
+      // UNIQUE per scaffolded app. `appId` is inferred from deno.json when
+      // `aio.run()` does not pass one (`single-instance-lock.ts`: appId > title
+      // > name), so every e2e app in the repo used to resolve to the same id —
+      // `e2e-probe` — and therefore shared ONE single-instance lock. Two e2e
+      // servers alive at the same moment meant the second exited(1) with
+      // "Already running", and the suite failed intermittently in whichever
+      // test happened to boot alongside another. `testServer()` already
+      // scopes its own apps this way.
+      appId: `e2e-${crypto.randomUUID().slice(0, 8)}`,
       nodeModulesDir: "auto",
       unstable: ["kv"],
       compilerOptions: {
@@ -152,11 +161,56 @@ export async function boot(spec: E2eApp): Promise<Server> {
   const port = freePort();
   const base = `http://localhost:${port}`;
   const proc = spawnServer(dir, port);
-  await waitFor("server up", async () => {
-    const r = await fetch(`${base}/`);
-    await r.body?.cancel();
-    return r.ok ? true : null;
-  }, 120_000);
+  // A dead server is not a slow server, and `waitFor` swallows whatever its
+  // probe throws — so the readiness loop is explicit here. A crash now reports
+  // itself in milliseconds with its own stack trace instead of burning the
+  // full 120s and then saying only "timeout: server up".
+  // In a holder, not a bare `let`: the only assignment is inside a callback,
+  // which TS narrows away to `never` at the read below.
+  const ex: { st: Deno.CommandStatus | null } = { st: null };
+  proc.status.then((st) => ex.st = st).catch(() => {});
+  const fail = async (why: string): Promise<never> => {
+    try {
+      proc.kill();
+    } catch { /* already gone */ }
+    // Let the drain loops catch the child's final pipe chunks (bounded), so
+    // the message carries the whole stack trace, not a race-truncated prefix.
+    await settleOutput(proc);
+    throw new Error(
+      `${why}\n--- server output (last ${CHILD_LOG_CAP}B) ---\n` +
+        serverOutput(proc),
+    );
+  };
+  const deadline = Date.now() + 120_000;
+  let up = false;
+  while (Date.now() < deadline) {
+    if (ex.st) {
+      await fail(
+        `server exited before it was ready (code ${ex.st.code}` +
+          `${ex.st.signal ? `, signal ${ex.st.signal}` : ""})`,
+      );
+    }
+    try {
+      const r = await fetch(`${base}/`);
+      await r.body?.cancel();
+      if (r.ok) {
+        up = true;
+        break;
+      }
+    } catch { /* not listening yet */ }
+    await new Promise((r) => setTimeout(r, 150));
+  }
+  if (!up) {
+    // The final 150ms sleep can hide a death — re-check before claiming the
+    // server is merely slow.
+    await fail(
+      ex.st
+        ? `server exited while waiting (code ${ex.st.code}` +
+          `${ex.st.signal ? `, signal ${ex.st.signal}` : ""})`
+        : "timeout: server up (still running, never answered on /)",
+    );
+  }
+
   return {
     base,
     port,
@@ -174,8 +228,37 @@ export async function boot(spec: E2eApp): Promise<Server> {
   };
 }
 
+/** The last N KB a spawned server wrote. Enough to carry a stack trace, small
+ *  enough that a chatty app cannot grow the test process without bound. */
+const CHILD_LOG_CAP = 8192;
+
+/** Live output of a spawned server, drained continuously. Piping without
+ *  draining would fill the OS pipe buffer and WEDGE the child — the exact
+ *  hang this is meant to explain. */
+const _childOutput = new WeakMap<Deno.ChildProcess, () => string>();
+const _childDrains = new WeakMap<Deno.ChildProcess, Promise<unknown>>();
+
+/** What the spawned server printed, or a note that nothing was captured. */
+export function serverOutput(proc: Deno.ChildProcess): string {
+  return _childOutput.get(proc)?.() ?? "(no output captured)";
+}
+
+/** Give the drain loops a bounded beat to finish reading a just-died child's
+ *  last pipe chunks, so the failure message carries the whole stack trace and
+ *  not a race-truncated prefix. */
+async function settleOutput(proc: Deno.ChildProcess): Promise<void> {
+  const drains = _childDrains.get(proc);
+  if (!drains) return;
+  let t: ReturnType<typeof setTimeout> | undefined;
+  await Promise.race([
+    drains,
+    new Promise<void>((r) => t = setTimeout(r, 100)),
+  ]);
+  if (t !== undefined) clearTimeout(t);
+}
+
 export function spawnServer(dir: string, port: number): Deno.ChildProcess {
-  return new Deno.Command(Deno.execPath(), {
+  const proc = new Deno.Command(Deno.execPath(), {
     env: { DENO_COVERAGE_DIR: _childCovDir },
     args: [
       "run",
@@ -187,9 +270,34 @@ export function spawnServer(dir: string, port: number): Deno.ChildProcess {
     ],
     cwd: dir,
     stdin: "null",
-    stdout: "null",
-    stderr: "null",
+    // PIPED, not "null". Discarding the child's output made every boot failure
+    // read `timeout: server up` and nothing else — a crash on a syntax error
+    // and a machine merely under load produced the identical message, so the
+    // first question a failure raises ("did it die, or is it slow?") could
+    // only be answered by re-running the test by hand.
+    stdout: "piped",
+    stderr: "piped",
   }).spawn();
+
+  let buf = "";
+  // One decoder PER stream: a streaming TextDecoder is stateful, and a
+  // multibyte char split across chunks on stdout, interleaved with a stderr
+  // chunk, would decode as garbage through a shared one. The final
+  // `decode()` flushes a trailing partial char.
+  const drain = async (stream: ReadableStream<Uint8Array>) => {
+    const dec = new TextDecoder();
+    try {
+      for await (const chunk of stream) {
+        buf = (buf + dec.decode(chunk, { stream: true })).slice(-CHILD_LOG_CAP);
+      }
+      buf = (buf + dec.decode()).slice(-CHILD_LOG_CAP);
+    } catch { /* closed with the process */ }
+  };
+  // Fire and forget: both must be consumed for the child to keep running.
+  const drains = Promise.allSettled([drain(proc.stdout), drain(proc.stderr)]);
+  _childDrains.set(proc, drains);
+  _childOutput.set(proc, () => buf.trim() || "(server printed nothing)");
+  return proc;
 }
 
 /** Open a real headless-Chromium tab against the server and resolve when its

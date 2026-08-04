@@ -191,10 +191,16 @@ AIO checks for common import mistakes at four levels:
 
 ## CSS in builds
 
-If `src/style.css` exists, it's automatically:
+If `style.css` exists next to your entry file (the app dir — `src/style.css` in
+a scaffolded app), it's automatically:
 
-- **Dev:** served from `src/` and injected as `<link>` in HTML
+- **Dev:** served from the app dir and injected as `<link>` in HTML
 - **Compile:** copied to `dist/style.css` and included in the binary
+
+Dev and compile resolve it with the same rule (the entry's directory), so a
+stylesheet you see in dev is always in the prod build — and a `src/style.css`
+that the rule does NOT cover fails the build loudly instead of shipping a prod
+app that looks different from dev.
 
 ## How exclusion works
 

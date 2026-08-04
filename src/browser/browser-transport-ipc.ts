@@ -9,8 +9,8 @@ import {
   _coreSetTransport,
   _listeners,
   _showStatus,
-  _w,
 } from "./browser-protocol.ts";
+import { _deliverDiag } from "../protocol/protocol-diagnostics.ts";
 import {
   type AckPayload,
   dec,
@@ -77,11 +77,11 @@ export function connectIPC(reconnect: () => void): void {
         _handleTTMessage(frame.d as object);
         return;
       case "diag":
-        try {
-          if (_w && typeof _w._aioDiag === "function") {
-            _w._aioDiag(frame.d as Record<string, unknown>);
-          }
-        } catch { /* ignore malformed diag */ }
+        // ONE sink (protocol-diagnostics `_deliverDiag`): overlay when the
+        // page has one, console otherwise. Four hand-written copies of this
+        // check meant a server-sent diagnostic vanished on every page without
+        // the dev overlay — which is every page, since nothing injects it.
+        _deliverDiag(frame.d as Record<string, unknown>);
         return;
       case "ack": {
         // AIO-402: per-action ack over UDS+IPC — settle the awaited method.

@@ -7,6 +7,7 @@ import { handleTTMessage } from "../air/time-travel-panel.ts";
 import { getSerializedSurfaces, runUITrigger } from "../air/ui-remote.ts";
 import { _vitalsTransportProbe, _w } from "./browser-protocol.ts";
 import { _rejectAck, _resolveAck } from "../protocol/browser-ack.ts";
+import { _deliverDiag } from "../protocol/protocol-diagnostics.ts";
 import { type AckPayload, enc, type Frame } from "../protocol/envelope.ts";
 import type { VitalsPong } from "../vitals/transport-probe.ts";
 
@@ -49,11 +50,11 @@ export function routeCommand(
       return true;
 
     case "diag":
-      try {
-        if (_w && typeof _w._aioDiag === "function") {
-          _w._aioDiag(f.d as Record<string, unknown>);
-        }
-      } catch { /* ignore malformed diag */ }
+      // ONE sink (protocol-diagnostics `_deliverDiag`): overlay when the page
+      // has one, console otherwise. Four hand-written copies of this check
+      // meant a server-sent diagnostic vanished on every page without the dev
+      // overlay — which is every page, since nothing injects it.
+      _deliverDiag(f.d as Record<string, unknown>);
       return true;
 
     // AIO-2.2: per-action ack — settles the Promise returned by an awaited

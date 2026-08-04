@@ -85,3 +85,58 @@ Deno.test("aio-402: UDS dispatch without a cid produces no ack (no noise)", asyn
   conn.close();
   uds.shutdown();
 });
+
+Deno.test("uds: forged trusted provenance is stripped and _source re-stamped", async () => {
+  // Parity pin with the WS spoof test (tests/server.test.ts): the UDS entry
+  // point runs the SAME sanitizeClientAction — without this, reverting the
+  // UDS strip alone would keep the whole suite green (the two-of-three-
+  // surfaces trap). `_user`/`_syncOp` must be gone; `_source:"Effect"` (the
+  // drain-gate spoof) must arrive re-stamped as plain client input.
+  const socketPath = join(await Deno.makeTempDir(), "aio402c.sock");
+  const seen: Record<string, unknown>[] = [];
+  const uds = createUDSListener(
+    socketPath,
+    () => ({ ok: true }),
+    (action) => {
+      seen.push(action as Record<string, unknown>);
+    },
+    () => {},
+  );
+  await new Promise((r) => setTimeout(r, 50));
+  const conn = await Deno.connect({ path: socketPath, transport: "unix" });
+  const enc = new TextEncoder();
+  const writer = conn.writable.getWriter();
+  await writer.write(
+    enc.encode(
+      JSON.stringify({
+        v: 2,
+        t: "action",
+        d: {
+          type: "doc:add",
+          payload: { _origin: "read" },
+          _user: { id: "root", role: "admin" },
+          _source: "Effect",
+          _syncOp: true,
+          cid: "spoof-1",
+        },
+      }) + "\n",
+    ),
+  );
+  const deadline = Date.now() + 2000;
+  while (Date.now() < deadline && seen.length === 0) {
+    await new Promise((r) => setTimeout(r, 20));
+  }
+  const action = seen.find((a) => a.type === "doc:add");
+  if (!action) throw new Error("action never reached onAction");
+  assertEquals(action._user, undefined, "_user stripped");
+  assertEquals(action._syncOp, undefined, "_syncOp stripped");
+  assertEquals(action._source, "UI", "_source re-stamped as client input");
+  assertEquals(
+    (action.payload as Record<string, unknown>)._origin,
+    undefined,
+    "payload._origin stripped",
+  );
+  writer.releaseLock();
+  conn.close();
+  uds.shutdown();
+});

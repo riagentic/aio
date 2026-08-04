@@ -215,18 +215,49 @@ const KINDS = [
   "push_then_write_pushed",
 ];
 
+// The seed is FIXED by default — CI must explore the same programs on every
+// run, or a red build is not reproducible from its own commit. But a fuzzer
+// pinned to one seed is really a regression test: it re-checks 120 known
+// programs forever and can never find anything new. `FUZZ_SEED` (and
+// `FUZZ_ROUNDS`) let a sweep explore beyond them without making the default
+// run nondeterministic:
+//
+//     for s in 1 7 31 99 12345; do FUZZ_SEED=$s deno test -A \
+//       tests/proxy-differential.test.ts; done
+//
+// A divergence prints the seed AND the program, so anything a sweep finds
+// comes back as a one-line repro — and belongs here as a fixed case.
+// A sweep flag we cannot read must THROW, never shrug: `FUZZ_ROUNDS=2k` is
+// NaN, `round < NaN` is false, and the fuzzer would report a vacuous green
+// over ZERO programs — the same silent-NaN class `parseNumArg` kills in `am`.
+function fuzzEnvInt(name: string, def: number, min = 0): number {
+  const raw = Deno.env.get(name);
+  if (raw === undefined) return def;
+  const n = /^\d+$/.test(raw.trim()) ? Number(raw.trim()) : NaN;
+  if (!Number.isSafeInteger(n) || n < min) {
+    throw new Error(`${name}="${raw}" must be an integer >= ${min}`);
+  }
+  return n;
+}
+const SEED = fuzzEnvInt("FUZZ_SEED", 0x6a11f00d) & 0x7fffffff;
+const ROUNDS = fuzzEnvInt("FUZZ_ROUNDS", 120, 1);
+
 Deno.test("differential: a method body behaves identically sync and async", async () => {
-  let seed = 0x6a11f00d;
+  let seed = SEED;
   const rnd = () =>
     (seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff;
   const pick = (n: number) => Math.floor(rnd() * n);
 
-  for (let round = 0; round < 120; round++) {
+  for (let round = 0; round < ROUNDS; round++) {
     const program: Op[] = Array.from(
       { length: 6 + pick(14) },
       () => ({ kind: KINDS[pick(KINDS.length)]!, i: pick(9), v: pick(100) }),
     );
-    const repro = `round ${round}: ${JSON.stringify(program)}`;
+    // The seed is part of the repro: without it a sweep failure names a round
+    // number that means nothing on the default seed.
+    const repro = `FUZZ_SEED=${SEED} round ${round}: ${
+      JSON.stringify(program)
+    }`;
 
     const syncLog: unknown[] = [];
     const asyncLog: unknown[] = [];

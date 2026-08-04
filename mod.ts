@@ -19,14 +19,17 @@
  * })
  *
  * const checkout = cell('checkout', {
- *   state: { status: 'idle', orderId: null as string | null },
+ *   state: { status: 'idle', paid: false, orderId: null as string | null },
  *   cancelOn: { place: ['cart:clear'] },   // cart.clear aborts a running place()
  *   methods: {
  *     async place(s, item: string) {
  *       s.status = 'placing'
- *       const id = await submitOrder(item)
- *       const r = await race({ ok: until(() => s.status === 'placing'), timeout: 30_000 })
- *       s.orderId = id
+ *       // race a real branch against a deadline; until() polls LIVE state
+ *       // (until's own timeout sits above the race's so the race decides)
+ *       const r = await race({ paid: until(() => s.paid, { timeoutMs: 60_000 }), timeout: 30_000 })
+ *       if (r.winner === 'timeout') { s.status = 'expired'; return }
+ *       if (s.$signal.aborted) return        // cart.clear() ran while we waited
+ *       s.orderId = await submitOrder(item)
  *       s.status = 'placed'
  *     },
  *   },
