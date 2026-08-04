@@ -11,11 +11,12 @@ import {
   resolveSdk,
 } from "./build-helpers.ts";
 import { ANDROID_TEMPLATE } from "./android-template.ts";
+import { androidLocalHTML } from "../server/server-html-gen.ts";
 import type { BuildConfig } from "./build-config.ts";
 
 /** Build the Android APK. Exits process on completion or error. */
 export async function buildAndroid(cfg: BuildConfig): Promise<void> {
-  const { root, dist, binaryName, appTitle, doRemote, doRelease } = cfg;
+  const { dist, binaryName, appTitle, doRemote, doRelease } = cfg;
 
   const androidHome = resolveSdk(); // ANDROID_HOME, its Sdk subdir, or defaults
   if (!androidHome) {
@@ -63,15 +64,16 @@ export async function buildAndroid(cfg: BuildConfig): Promise<void> {
     await Deno.writeTextFile(dest, content);
   }
 
-  // Derive application ID from binary name
-  const sanitizedId = binaryName.replace(/[^a-z0-9]/g, "");
-  if (!sanitizedId || !/^[a-z]/.test(sanitizedId)) {
+  // Derive application ID from binary name — THE one rule (see
+  // androidApplicationId below; dev:android derives the same id from the APK
+  // label, which IS the binary name, so both must share the rule or drift).
+  const applicationId = androidApplicationId(binaryName);
+  if (!applicationId) {
     console.error(
       `[android] \u2717 binary name "${binaryName}" produces invalid applicationId — must start with a letter`,
     );
     Deno.exit(1);
   }
-  const applicationId = `app.aio.${sanitizedId}`;
   const appNameKotlin = (appTitle ?? binaryName)
     // deno-lint-ignore no-control-regex
     .replace(/[\x00-\x1f\x7f]/g, "")
@@ -84,8 +86,8 @@ export async function buildAndroid(cfg: BuildConfig): Promise<void> {
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;");
 
-  // Check for user icon
-  const iconPath = join(root, "src", "icon.png");
+  // Check for user icon — from THE app-dir decider (cfg.appDir)
+  const iconPath = join(cfg.appDir, "icon.png");
   let hasIcon = false;
   try {
     await Deno.stat(iconPath);
@@ -133,7 +135,7 @@ export async function buildAndroid(cfg: BuildConfig): Promise<void> {
     if (doRemote) {
       await _writeConnectPage(assetsDir, appNameXml);
     } else {
-      await _writeLocalAssets(cfg, assetsDir, appNameXml);
+      await _writeLocalAssets(cfg, assetsDir);
     }
   }
 
@@ -142,7 +144,7 @@ export async function buildAndroid(cfg: BuildConfig): Promise<void> {
     const mipmapDir = join(androidDir, "app/src/main/res/mipmap-hdpi");
     await Deno.mkdir(mipmapDir, { recursive: true });
     await Deno.copyFile(iconPath, join(mipmapDir, "ic_launcher.png"));
-    console.log("[android] \u2713 icon from src/icon.png");
+    console.log(`[android] \u2713 icon from ${iconPath}`);
   }
 
   await _runGradle(
@@ -210,29 +212,17 @@ async function _writeConnectPage(
 async function _writeLocalAssets(
   cfg: BuildConfig,
   assetsDir: string,
-  appNameXml: string,
 ): Promise<void> {
-  const { dist } = cfg;
+  const { dist, appTitle, binaryName } = cfg;
   let hasCSS = false;
   try {
     await Deno.stat(join(dist, "style.css"));
     hasCSS = true;
   } catch { /* no css — skip */ }
-  const cssLink = hasCSS
-    ? '\n  <link rel="stylesheet" href="./style.css">'
-    : "";
-  const androidHtml = `<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>${appNameXml}</title>${cssLink}
-</head>
-<body>
-  <div id="root"></div>
-  <script src="./app.js"></script>
-</body>
-</html>`;
+  // ONE shell decider — see androidLocalHTML: a hand-rolled copy here shipped
+  // a different default viewport than every other target (WYSIDIWYSIP).
+  // Raw title: androidLocalHTML escapes it itself (escHtml in headContent).
+  const androidHtml = androidLocalHTML(appTitle ?? binaryName, hasCSS);
   await Deno.copyFile(join(dist, "app.js"), join(assetsDir, "app.js"));
   await Deno.writeTextFile(join(assetsDir, "index.html"), androidHtml);
   if (hasCSS) {
@@ -253,6 +243,17 @@ async function _writeLocalAssets(
  *  Parsing is the check; `href` is the normalised, percent-encoded form, so no
  *  quote or newline can survive it. Refuses loudly rather than emitting broken
  *  or hostile Kotlin. Exported for its own test. */
+/** THE applicationId rule: `app.aio.<label sans non-alphanumerics>`, or null
+ *  when the label cannot make a valid id (must start with a letter). Shared
+ *  by the build (from `binaryName`) and `dev:android` (from the APK label,
+ *  which the build sets to the binary name) — one rule, or the installed dev
+ *  app and the built APK disagree on identity. */
+export function androidApplicationId(label: string): string | null {
+  const sanitized = label.replace(/[^a-z0-9]/g, "");
+  if (!sanitized || !/^[a-z]/.test(sanitized)) return null;
+  return `app.aio.${sanitized}`;
+}
+
 export function safeDevUrl(devUrl: string): string {
   let parsed: URL;
   try {

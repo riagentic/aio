@@ -35,6 +35,8 @@ export type UITriggerRequest = {
     | "dblclick"
     | "type"
     | "press"
+    | "keyDown"
+    | "keyUp"
     | "hover"
     | "focus"
     | "blur"
@@ -47,9 +49,10 @@ export type UITriggerRequest = {
   /** Text for `type`; value for `select`; target element path for `dragTo`;
    *  offsets for `scroll` (e.g. "top=200" or "top=200 left=0") */
   text?: string;
-  /** Key for `press` (default "Enter") */
+  /** Key for `press`/`keyDown`/`keyUp` (default "Enter") */
   key?: string;
-  /** Modifier flags for `press` — Ctrl/Cmd/Alt/Shift chords (e.g. Ctrl+Enter). */
+  /** Modifier flags for `press`/`keyDown`/`keyUp` — Ctrl/Cmd/Alt/Shift chords
+   *  (e.g. Ctrl+Enter). */
   mods?: {
     ctrlKey?: boolean;
     metaKey?: boolean;

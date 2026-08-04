@@ -30,4 +30,6 @@ Release surfaces (must be updated, not just the code — checked, not assumed):
   new docs/examples are indexed
 - `docs/api-snapshot.json` is regenerated when the public surface or VERSION
   changed (`deno task api:update`)
-- any new example/app is listed in `examples/README.md` and has its own README
+- any new example/app is listed AND described in `examples/README.md` (one
+  README covers all examples — per-dir READMEs are deliberately not the
+  convention)

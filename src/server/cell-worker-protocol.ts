@@ -52,8 +52,23 @@ export type ToWorker =
   | { t: "init"; state: Record<string, unknown>; prod: boolean }
   /** Run one action. `id` correlates the reply. */
   | { t: "call"; id: number; action: Msg; ctx?: AmbientContext }
-  /** Graceful stop — the worker flushes nothing, main already has every patch. */
+  /** Graceful stop — the worker aborts its in-flight methods, streams their
+   *  final writes home as patches, then acks with `closed`. */
   | { t: "close" };
+
+/** How long the worker itself waits for aborted methods to finish writing.
+ *  Slightly under the main side's deadline so the `closed` ack wins the race
+ *  against the terminate timer when the drain succeeds. */
+export const WORKER_CLOSE_DRAIN_MS = 800;
+
+/** How long the main isolate waits for the `closed` ack before terminating.
+ *  Deliberately SHORTER than the main isolate's 3s drain (shutdown.ts): the
+ *  worker budget stacks on top of it (pool close runs first), and a WEDGED
+ *  worker — sync code that never yields — cannot process the close message at
+ *  all, so waiting longer buys nothing: it can only be terminated. A
+ *  cooperative worker acks in milliseconds; an aborted streaming method's
+ *  remaining writes are patch posts, not seconds of work. */
+export const WORKER_CLOSE_DEADLINE_MS = 1_000;
 
 export type FromWorker =
   /** The host is bound and ready for calls. */
@@ -70,4 +85,7 @@ export type FromWorker =
   /** The call threw. `message`/`stack` are carried as plain data. */
   | { t: "fail"; id: number; message: string; stack?: string }
   /** The host could not start (bad cell name, unsupported config). Fatal. */
-  | { t: "boot-error"; message: string };
+  | { t: "boot-error"; message: string }
+  /** Close is complete: in-flight methods were aborted and their final
+   *  patches have already been posted (message order is FIFO). */
+  | { t: "closed" };

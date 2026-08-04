@@ -26,6 +26,10 @@ export interface LifecycleDeps<S, A> {
   prod: boolean;
   /** dist/ Electron can open from its own process (never the compile VFS). */
   electronDistDir: string | undefined;
+  /** The app's resolved baseDir — THE app-dir decider (WYSIDIWYSIP): the dev
+   *  Electron window reads icon.png from here, the same place the prod build
+   *  packages it from (cfg.appDir = the entry's directory). */
+  baseDir: string;
   expose: boolean;
   singletonMode: boolean;
   /** Gate for electron child windows (openWindow) — see AioRunOptions. */
@@ -73,7 +77,15 @@ export interface LifecycleDeps<S, A> {
   maxConnections: number | undefined;
   // CLI overrides
   cli: { width?: number; height?: number; keepServer?: boolean };
-  ui: { width?: number; height?: number };
+  // Not just the window box: the head-shaped keys travel to the templated
+  // aio:// Electron shell, which has no other way to learn them.
+  ui: {
+    width?: number;
+    height?: number;
+    showStatus?: boolean;
+    viewport?: string | false;
+    head?: string;
+  };
   keepServer: boolean | undefined;
   // Shutdown & electron
   shutdown: () => Promise<void>;
@@ -315,6 +327,19 @@ export function startLifecycle<S, A>(deps: LifecycleDeps<S, A>): void {
         baseDir: udsBaseDir,
         title,
         hasCSS: udsHasCSS,
+        // Dev window icon comes from the SAME dir the prod build packages it
+        // from (the app dir) — never a hardcoded cwd/src.
+        iconDir: deps.baseDir,
+        // The aio:// shell is templated at launch, so every `<head>` input has
+        // to travel with it. Omitting them is how a packaged app ends up with
+        // a different `<head>` than `deno task dev` serves.
+        shell: {
+          showStatus: ui.showStatus,
+          width: meta.width,
+          height: meta.height,
+          viewport: ui.viewport,
+          head: ui.head,
+        },
       }
       : undefined;
     launchElectron(electronUrl, log, meta, udsConfig)
@@ -349,13 +374,18 @@ export function startLifecycle<S, A>(deps: LifecycleDeps<S, A>): void {
         proc.status
           .then((s) => {
             setElectronProc(null);
+            // Say HOW it ended, always. The window going away is the only
+            // thing that shuts a desktop app down, so "closed by the user"
+            // and "killed by a signal" are the two answers a crash report
+            // turns on — and the no-keepServer path used to log neither,
+            // leaving a graceful shutdown as the only trace of a crash.
+            const how = s.signal ? `signal ${s.signal}` : `code ${s.code ?? 0}`;
             if (keepServer) {
               log.info(
-                `electron closed (code ${
-                  s.code ?? 0
-                }) — server still running at ${url}`,
+                `electron closed (${how}) — server still running at ${url}`,
               );
             } else {
+              log.info(`electron closed (${how}) — shutting down`);
               shutdown().then(() => Deno.exit(0));
             }
           })

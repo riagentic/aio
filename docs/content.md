@@ -143,6 +143,7 @@
 - [Upgrade: alpha40 → alpha41](upgrade/from-alpha40-to-alpha41.md) — Most apps upgrade with no changes.
 - [Upgrade: alpha41 → alpha42](upgrade/from-alpha41-to-alpha42.md) — on changed.
 - [Upgrade: alpha42 → alpha43](upgrade/from-alpha42-to-alpha43.md) — every API is additive.
+- [Upgrade: alpha43 → alpha44](upgrade/from-alpha43-to-alpha44.md) — every API change is additive.
 - [Upgrade from v1.0.0-alpha5 to v1.0.0-alpha6](upgrade/from-alpha5-to-alpha6.md) — None.
 - [Upgrade from v1.0.0-alpha6 to v1.0.0-alpha7](upgrade/from-alpha6-to-alpha7.md) — mod.ts no longer re-exports renderer primitives.
 - [Upgrade from v1.0.0-alpha7 to v1.0.0-alpha8](upgrade/from-alpha7-to-alpha8.md) — None.

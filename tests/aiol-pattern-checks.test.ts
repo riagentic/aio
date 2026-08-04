@@ -425,3 +425,73 @@ export function App() { const { state } = useCell(c); return state.n }
     assert(hits[0]!.message.includes("LIVE view"));
   });
 });
+
+// ── The post-await-read rule was almost exactly INVERTED ─────────────────
+//
+// It fired on the framework's own documented patterns and stayed silent on the
+// shape it exists to catch. A hint that flags the documentation's code teaches
+// people to stop reading hints, and the rest of this linter is load-bearing —
+// so each of the three defects gets a case here.
+Deno.test("aiol: post-await read is seen through a TYPE-ANNOTATED draft param", async () => {
+  await withTmpDir(async (dir) => {
+    // `METHOD_RE` demanded `,` or `)` straight after the param name, so
+    // `async work(s: { … }, x)` — what real TypeScript looks like — never
+    // matched and the entire method went unchecked. The one shape the rule
+    // exists for was the one it skipped.
+    await project(
+      dir,
+      `import { cell } from 'aio'
+export const counter = cell('counter', {
+  state: { mode: 'idle', n: 0 },
+  methods: {
+    async work(s: { mode: string; n: number }, x: number) {
+      s.mode = 'working'
+      await fetch('/x')
+      if (s.mode === 'cancelled') return
+      s.n += x
+    },
+  },
+})
+`,
+    );
+    const found = awaitReadIssues(await runCheckPatterns(dir));
+    assertEquals(
+      found.length,
+      1,
+      "a genuine post-await read must be reported even with a typed draft param",
+    );
+  });
+});
+
+Deno.test("aiol: s.$signal and until()/race() are NOT post-await-read hints", async () => {
+  await withTmpDir(async (dir) => {
+    // `s.$signal.aborted` IS the documented cancellation check, and
+    // `until(() => s.x)` IS the documented way to wait on live state —
+    // re-reading is the entire point of the primitive. Draft meta
+    // (`$signal`/`$live`/`$commit`) is framework surface, not app state a
+    // concurrent action can move under you.
+    await project(
+      dir,
+      `import { cell, until } from 'aio'
+export const counter = cell('counter', {
+  state: { mode: 'idle', n: 0 },
+  cancelOn: { work: 'self' },
+  methods: {
+    async work(s, x) {
+      s.mode = 'working'
+      await fetch('/x')
+      if (s.$signal.aborted) return
+      await until(() => s.mode === 'working')
+      s.n += x
+    },
+  },
+})
+`,
+    );
+    assertEquals(
+      awaitReadIssues(await runCheckPatterns(dir)).map((i) => i.message),
+      [],
+      "the framework's own documented patterns must never be hinted",
+    );
+  });
+});

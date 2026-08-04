@@ -16,7 +16,7 @@ import {
   now,
 } from "./logger-types.ts";
 import { formatText, printConsole } from "./logger-format.ts";
-import { rotateOnStart, wipeOnStart } from "./logger-rotate.ts";
+import { type LogKind, rotateOnStart, wipeOnStart } from "./logger-rotate.ts";
 import { observeAction } from "./logger-observe.ts";
 import { logPerf, logVitals, logVitalsSummary } from "./logger-vitals.ts";
 /** Structured file logger — routes entries to app.log, debug.log, error.log, warning.log, and perf.log. */
@@ -205,12 +205,12 @@ export class AioLogger {
     if (lvl === "warn") this.write(this.path("warning"), e);
   }
 
-  path(kind: "app" | "debug" | "error" | "warning" | "perf"): string {
-    if (kind === "app") return `${this.dir}/app.log`;
-    if (kind === "debug") return `${this.dir}/debug.log`;
-    if (kind === "warning") return `${this.dir}/warning.log`;
-    if (kind === "perf") return `${this.dir}/perf.log`;
-    return `${this.dir}/error.log`;
+  /** Every kind is simply `<dir>/<kind>.log`. This was an if-chain whose
+   *  final `return` made error.log the answer for ANY unlisted kind — so
+   *  adding one would have silently aliased it onto error.log rather than
+   *  failing. One expression, and `LogKind` now decides the set. */
+  path(kind: LogKind): string {
+    return `${this.dir}/${kind}.log`;
   }
 
   private _writeErrors = 0;

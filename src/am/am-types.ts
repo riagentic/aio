@@ -14,6 +14,10 @@ export type Result<T = unknown> = { ok: true; data: T } | {
 
 /** CLI global flags — port, output mode, filtering, and app targeting options. */
 export type GlobalFlags = {
+  /** Set when a global flag could not be parsed (e.g. `--port=80a0`).
+   *  `am` exits loud on it before running any command — a flag we cannot
+   *  read is an error, never a silent default. */
+  error?: string;
   port?: number;
   json?: boolean;
   quiet?: boolean;

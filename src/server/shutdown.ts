@@ -2,6 +2,17 @@
 // Extracted from aio.ts. Order is critical: persist → diag → vitals → hooks → services → DB.
 
 import type { Log } from "../diagnostics/logger.ts";
+import {
+  abortAllInflight,
+  endShutdownAbort,
+  settlePending,
+} from "../state/method-cancel.ts";
+
+/** How long Phase 1 waits, IN TOTAL, for aborted work to finish writing —
+ *  in-flight cell calls and effect promises share this one budget. Long enough
+ *  for an aborted fetch/subprocess to unwind, short enough that a method which
+ *  ignores its signal cannot hold the window open. */
+const DRAIN_TIMEOUT_MS = 3000;
 
 /** Cleanup handles collected from various subsystems — uses getters for late-bound refs */
 export interface ShutdownRefs {
@@ -17,7 +28,11 @@ export interface ShutdownRefs {
   appLock: { release: () => void } | null;
   scheduleManager: { cancelAll: () => void };
   ownManager: { disposeAll: () => void };
-  dispatch: { close: () => void; drain: () => Promise<void> };
+  dispatch: { close: () => void; drain: (timeoutMs?: number) => Promise<void> };
+  /** THIS app's cell names — late-bound, the cells bridge fills them in after
+   *  compose. Shutdown aborts and waits for its OWN cells only: a second app
+   *  in the same process (D2, and every `testServer()` pair) keeps running. */
+  getCellNames: () => string[];
   getElectronProc: () => { kill: () => void } | null;
   clearElectronProc: () => void;
   disposeUds: () => void;
@@ -58,10 +73,41 @@ export function createShutdownOrchestrator(
     // the final persist captures the true final state.
     refs.setShuttingDown();
     refs.dispatch.close();
+    // Abort BEFORE draining. A streaming method (an SSE reply, a subprocess
+    // pipe) has no reason of its own to stop, so an un-aborted drain either
+    // waits minutes or — before dispatch let effect commits through — killed
+    // the method at its next write and lost what it had. Aborting sends each
+    // one down its own `s.$signal.aborted` path, and the writes it makes on
+    // the way out are exactly what the persist below should capture.
+    const ourCells = new Set(refs.getCellNames());
+    const aborted = abortAllInflight(ourCells);
+    if (aborted > 0) {
+      log.debug(`shutdown: aborted ${aborted} in-flight call(s)`);
+    }
     try {
-      await refs.dispatch.drain();
+      // ONE deadline for the whole phase, shared by both waits — two
+      // independent 3s budgets would make the documented bound a 6s hang, and
+      // the number people feel is the time the window takes to disappear.
+      const deadline = Date.now() + DRAIN_TIMEOUT_MS;
+      const left = () => Math.max(1, deadline - Date.now());
+      // Async cell methods first: a cell's `execute` runs the method and
+      // returns nothing, so the dispatch loop has never known they exist and
+      // `drain()` alone sails straight past a streaming reply.
+      const stuck = await settlePending(left(), ourCells);
+      if (stuck > 0) {
+        log.warn(
+          `shutdown: ${stuck} call(s) still running at the ` +
+            `${DRAIN_TIMEOUT_MS}ms deadline (slow write, or an ignored ` +
+            `abort signal) — their remaining writes are lost`,
+        );
+      }
+      await refs.dispatch.drain(left());
     } catch (e) {
       log.error(`shutdown: drain effects — ${e}`);
+    } finally {
+      // The drain is over — stop pre-aborting new calls for these cell names.
+      // A later app in this process (every sequential test) may reuse them.
+      endShutdownAbort(ourCells);
     }
 
     // Phase 2: Persist — the final snapshot reflects all pre-shutdown actions.

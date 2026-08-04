@@ -8,6 +8,7 @@ import {
 } from "../protocol/transport-shared.ts";
 import {
   type AioMeta,
+  type ShellConfig,
   tmplBounds,
   tmplBoundsTracking,
   tmplCrashGuard,
@@ -23,13 +24,33 @@ export function electronMainScriptUDS(url: string, socketPath: string, opts: {
   baseDir?: string;
   title?: string;
   hasCSS?: boolean;
+  /** Dev-mode icon dir — the server's resolved baseDir, THE app-dir decider.
+   *  Without it the dev window fell back to cwd/src/, showing a different
+   *  window icon than the packaged app for any non-src layout (WYSIDIWYSIP). */
+  iconDir?: string;
   meta?: AioMeta;
+  /** `<head>` inputs for the templated aio:// shell — without them the
+   *  packaged app renders a different `<head>` than dev does. */
+  shell?: ShellConfig;
 }): string {
   const w = opts.meta?.width ?? 800;
   const h = opts.meta?.height ?? 600;
   const slug = toSlug(opts.meta?.title ?? opts.title ?? "aio-app");
   const title = opts.title ?? "aio";
   const hasCSS = opts.hasCSS ?? false;
+  // The window is sized from `meta`; the shell metas must agree with it, so
+  // they default to the same numbers instead of silently going missing.
+  // Spread only DEFINED overrides: the lifecycle always passes a shell object
+  // whose width/height may be undefined, and `...{ width: undefined }` would
+  // clobber the defaults this comment promises.
+  const shellOverrides = Object.fromEntries(
+    Object.entries(opts.shell ?? {}).filter(([, v]) => v !== undefined),
+  );
+  const shell: ShellConfig = {
+    width: w,
+    height: h,
+    ...shellOverrides,
+  };
   return `
 const { app, BrowserWindow, Menu, ipcMain, protocol } = require('electron');
 const { connect } = require('net');
@@ -65,7 +86,7 @@ const MIME = {
 };
 
 const PROD_HTML = ${
-    JSON.stringify(udsProdHTML(title, hasCSS)).replace(/\n/g, "\\n")
+    JSON.stringify(udsProdHTML(title, hasCSS, shell)).replace(/\n/g, "\\n")
   };
 
 // ── Window state persistence ──
@@ -117,7 +138,9 @@ app.on('ready', () => {
     const { nativeImage } = require('electron');
     const iconPath = BASE_DIR
       ? path.join(BASE_DIR, 'icon.png')
-      : path.join(process.cwd(), 'src', 'icon.png');
+      : path.join(${
+    JSON.stringify(opts.iconDir ?? "")
+  } || path.join(process.cwd(), 'src'), 'icon.png');
     if (fs.existsSync(iconPath)) {
       win.setIcon(nativeImage.createFromDataURL(
         'data:image/png;base64,' + fs.readFileSync(iconPath).toString('base64')

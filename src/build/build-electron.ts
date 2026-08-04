@@ -24,9 +24,25 @@ export async function buildElectron(cfg: BuildConfig): Promise<void> {
   const appDirDist = join(appDir, "dist");
   await Deno.mkdir(appDirDist, { recursive: true });
   for (const name of ["app.js", "style.css", "icon.png"]) {
+    // A file that EXISTS in dist/ must land in the package — a swallowed copy
+    // here is how a packaged app silently loses its stylesheet and stops
+    // looking like dev (WYSIDIWYSIP). Only true absence is optional (and
+    // app.js can never be absent: the bundle step just wrote it).
+    let exists = true;
     try {
-      await Deno.copyFile(join(dist, name), join(appDirDist, name));
-    } catch { /* optional file */ }
+      await Deno.stat(join(dist, name));
+    } catch {
+      exists = false;
+    }
+    if (name === "app.js" && !exists) {
+      console.error(
+        `[electron] ✗ ${
+          join(dist, name)
+        } missing — bundle step did not produce it`,
+      );
+      Deno.exit(1);
+    }
+    if (exists) await Deno.copyFile(join(dist, name), join(appDirDist, name));
   }
   console.log("[electron] \u2713 dist/ assets copied to AppDir/dist/");
 
@@ -59,13 +75,19 @@ export async function buildElectron(cfg: BuildConfig): Promise<void> {
   await copyDir(electronSrc, electronDst);
   console.log("[electron] \u2713 electron/ copied");
 
-  // Icon
-  const userIcon = join(root, "src", "icon.png");
+  // Icon \u2014 from THE app-dir decider (cfg.appDir), same place dev reads it
+  const userIcon = join(cfg.appDir, "icon.png");
+  let hasUserIcon = false;
   try {
     await Deno.stat(userIcon);
+    hasUserIcon = true;
+  } catch { /* no app icon \u2014 placeholder below */ }
+  if (hasUserIcon) {
+    // Outside the stat's catch: an EXISTING icon that fails to copy (EACCES,
+    // disk full) is a broken build, never a silent placeholder downgrade.
     await Deno.copyFile(userIcon, join(appDir, `${binaryName}.png`));
-    console.log("[electron] \u2713 icon from src/icon.png");
-  } catch {
+    console.log(`[electron] \u2713 icon from ${userIcon}`);
+  } else {
     await writePlaceholderIcon(join(appDir, `${binaryName}.svg`), binaryName);
     console.log("[electron] \u2713 generated placeholder icon");
   }

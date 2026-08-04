@@ -38,8 +38,13 @@ function headContent(
   headExtra?: string,
   syncCells?: string[],
   callTimeouts?: { default?: number; methods?: Record<string, number> },
+  // "/" for server-served shells; "./" for the Android asset shell, whose
+  // WebView loads from android_asset where absolute /-paths don't resolve.
+  assetBase = "/",
 ): string {
-  const cssLink = hasCSS ? '\n  <link rel="stylesheet" href="/style.css">' : "";
+  const cssLink = hasCSS
+    ? `\n  <link rel="stylesheet" href="${assetBase}style.css">`
+    : "";
   const statusScript = showStatus === false
     ? "\n  <script>window.__aioShowStatus=false</script>"
     : "";
@@ -110,6 +115,49 @@ export function generateHTML(
 
   if (prod) return prodHTML(head);
   return aioDevHTML(head, importMap, uiEntry);
+}
+
+/** Android local (standalone WebView) shell. Delegates its `<head>` to the
+ *  ONE head builder every other target uses — a hand-rolled copy in the
+ *  Android build once carried a different default viewport (no
+ *  viewport-fit=cover) and could never learn `ui.head`, so the packaged APK
+ *  did not look like the same app in dev (WYSIDIWYSIP; same bug class the
+ *  Electron shell fixed by delegating to `generateHTML`). Body differs by
+ *  construction: the bundle is IIFE loaded as a classic script (an ESM
+ *  `export` would throw in the WebView) and auto-mounts — there is no
+ *  importer to call mount().
+ *
+ *  Head inputs a build-time shell cannot know (`renderBudget`/`syncCells`/
+ *  `callTimeouts`) stay unset — the server's "cfg" frame fills them at
+ *  connect, exactly as for the Electron aio:// shell. */
+export function androidLocalHTML(
+  title: string,
+  hasCSS: boolean,
+  shell?: { showStatus?: boolean; viewport?: string | false; head?: string },
+): string {
+  const head = headContent(
+    title,
+    hasCSS,
+    shell?.showStatus,
+    undefined, // width/height — phone window, sized by the OS
+    undefined,
+    undefined, // renderBudget — cfg frame
+    shell?.viewport,
+    shell?.head,
+    undefined,
+    undefined,
+    "./", // relative assets — android_asset has no server root
+  );
+  return `<!DOCTYPE html>
+<html>
+<head>
+${head}
+</head>
+<body>
+  <div id="root"></div>
+  <script src="./app.js"></script>
+</body>
+</html>`;
 }
 
 /** Prod: app.js bundles React + useAio + user code, exports mount() */

@@ -15,9 +15,10 @@ runtime-tested (`tests/examples.test.ts`), UI-tested
 
 ## Worked example
 
-| Dir     | What                                                                      |
-| ------- | ------------------------------------------------------------------------- |
-| `disk/` | Folder-size scanner — the filesystem, subprocesses, and long-running work |
+| Dir         | What                                                                      |
+| ----------- | ------------------------------------------------------------------------- |
+| `contacts/` | End-to-end CRUD — cell state ↔ `db:` table, validation, selectors         |
+| `disk/`     | Folder-size scanner — the filesystem, subprocesses, and long-running work |
 
 `contacts/` is the one to read first: it is the whole integration in ~120 lines
 — one array in cell state, one `db:` table of the same name kept in step with

@@ -7,6 +7,11 @@ One guide per version migration. Find your current version and follow the steps.
 - **[The aio restructure (alpha27+)](restructure.md)** — every restructure
   breaking change with before → after recipes (methods-only cells, instances,
   SQLite-only persistence, `aio/extras`, wire catalog)
+- [alpha43 → alpha44](from-alpha43-to-alpha44.md) — what you see is what you
+  ship: one app-dir decider on every target, shutdown lets an in-flight method
+  finish writing, the build cache works (and stamps per target), `client.log`
+  rotates, `useInterval`/`useRaf` `active` is live, per-method perf budgets,
+  `skipIfRunning`
 - [alpha42 → alpha43](from-alpha42-to-alpha43.md) — silence into signal:
   boot-time database integrity + snapshots, sync ops that can no longer be acked
   without being applied, persistence that refuses to corrupt a `Date`,

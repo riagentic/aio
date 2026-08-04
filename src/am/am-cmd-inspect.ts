@@ -9,6 +9,7 @@ import type { GlobalFlags } from "./am-types.ts";
 import { detectMode, formatUptime, out, outError } from "./am-output.ts";
 import {
   amCtx,
+  parseNumArg,
   resolveAmAppId,
   resolvePort,
   runTrojanGet,
@@ -411,7 +412,17 @@ export async function cmdTop(
     return;
   }
 
-  const intervalMs = Math.max(250, (Number(args[0]) || 1) * 1000);
+  // A mistyped interval used to fall back to 1s via `|| 1` — the poll then
+  // looked fine while ignoring what was asked for.
+  const secArg = args.find((a) => !a.startsWith("--"));
+  const secs = secArg === undefined
+    ? { ok: true as const, value: 1 }
+    : parseNumArg(secArg, "poll interval (seconds)", { min: 0.25 });
+  if (!secs.ok) {
+    outError(secs.error, mode);
+    Deno.exit(1);
+  }
+  const intervalMs = Math.max(250, secs.value * 1000);
   const enc = new TextEncoder();
   let running = true;
   const stop = () => (running = false);
@@ -467,7 +478,16 @@ export async function cmdDiscover(
   const mode = detectMode(flags);
   const { discoverAioApps } = await import("../server/discovery.ts");
   const tArg = args.find((a) => a.startsWith("--timeout="));
-  const timeoutMs = tArg ? Number(tArg.slice(10)) : 1500;
+  // `--timeout=2s` is NaN, and NaN means a 1ms sweep that finds nothing and
+  // then blames the network. Refuse it instead.
+  const t = tArg === undefined
+    ? { ok: true as const, value: 1500 }
+    : parseNumArg(tArg.slice(10), "--timeout (ms)", { min: 1, integer: true });
+  if (!t.ok) {
+    outError(t.error, mode);
+    Deno.exit(1);
+  }
+  const timeoutMs = t.value;
   const apps = await discoverAioApps({ timeoutMs });
   if (mode === "json") {
     out(apps, mode);
@@ -643,7 +663,23 @@ export async function cmdSurface(
   const port = resolvePort(flags.port, appId);
   // `am surface server` renders headlessly ON the server (no client needed).
   const explicit = args.find((a) => !a.startsWith("--")) ?? flags.client;
-  const target = explicit === "server" ? "server" : Number(explicit ?? 0);
+  // "server", a client index, or nothing. Anything else is a typo, and
+  // `Number("mian")` is NaN — which used to be sent as the path segment
+  // `surface/NaN` and come back as a confusing server-side miss.
+  let target: string | number = "server";
+  if (explicit !== "server") {
+    const idx = explicit === undefined
+      ? { ok: true as const, value: 0 }
+      : parseNumArg(String(explicit), "client index", {
+        min: 0,
+        integer: true,
+      });
+    if (!idx.ok) {
+      outError(`${idx.error} — pass a client index or "server"`, mode);
+      Deno.exit(1);
+    }
+    target = idx.value;
+  }
   // `--full` lifts the text cap: element/component text is capped so a surface
   // stays scannable, and a cut is now marked with "…" — but a generated command
   // line has to be readable in full.
@@ -740,6 +776,8 @@ export async function cmdTrigger(
     "dblclick",
     "type",
     "press",
+    "keyDown",
+    "keyUp",
     "hover",
     "focus",
     "blur",
@@ -753,9 +791,10 @@ export async function cmdTrigger(
   if (!Number.isInteger(idx) || !path || !action || !actions.has(action)) {
     outError(
       'usage: am trigger <clientIdx> "<Component…:Element>" <action> [text]\n' +
-        "actions: click, dblclick, type, press, hover, focus, blur,\n" +
-        "         select <value>, check, uncheck, clear,\n" +
+        "actions: click, dblclick, type, press, keyDown, keyUp, hover, focus,\n" +
+        "         blur, select <value>, check, uncheck, clear,\n" +
         '         scroll "top=200 left=0", dragTo "<target path>"\n' +
+        "keyDown/keyUp hold/release a key (games, drag) — pair them around frames\n" +
         "discover paths with: am surface <clientIdx>",
       mode,
     );
@@ -766,7 +805,9 @@ export async function cmdTrigger(
     action === "type" || action === "select" || action === "scroll" ||
     action === "dragTo"
   ) body.text = text ?? "";
-  if (action === "press") body.key = text ?? "Enter";
+  if (action === "press" || action === "keyDown" || action === "keyUp") {
+    body.key = text ?? "Enter";
+  }
   const result = await trojanPost(port, `trigger/${idx}`, body, appId);
   if (!result.ok) {
     outError(result.error, mode);

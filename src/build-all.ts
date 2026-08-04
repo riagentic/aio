@@ -24,8 +24,8 @@ import {
   SEPARATOR,
 } from "@std/path";
 import { slugify } from "./build/build-helpers.ts";
+import { resolveAppDir, resolveEntry } from "./build/build-config.ts";
 import {
-  artifactName,
   crossCompileBlocker,
   hostPlatform,
   isHostPlatform,
@@ -185,13 +185,24 @@ export function placedName(
 /** True if `outDir` is unsafe to wipe+recreate: the `out` dir is assembled by
  *  removing it recursively, so it MUST be a dedicated subdir of the project —
  *  never the root, an ancestor (`out: ".."`), `.aio` (our staging parent), or a
- *  source dir. `out: ""` / `"."` resolve to the root and are caught here. */
-export function unsafeOutDir(outDir: string, root: string): boolean {
+ *  source dir. `out: ""` / `"."` resolve to the root and are caught here.
+ *
+ *  `appDir` is THE app-dir decider's answer (`BuildConfig.appDir`). `src/` is
+ *  hardcoded only because it is the scaffold's convention; an app whose entry
+ *  lives at `apps/web/main.ts` keeps its sources somewhere this list cannot
+ *  guess, and `out: "apps/web"` would have recursively deleted them. Pass it
+ *  wherever it is known. */
+export function unsafeOutDir(
+  outDir: string,
+  root: string,
+  appDir?: string,
+): boolean {
   const forbidden = new Set([
     root,
     join(root, ".aio"),
     join(root, "src"),
     join(root, ".git"),
+    ...(appDir ? [appDir] : []),
   ]);
   return !outDir.startsWith(root + SEPARATOR) || forbidden.has(outDir);
 }
@@ -248,7 +259,7 @@ export async function buildAll(): Promise<number> {
   }
 
   const root = Deno.cwd();
-  let denoJson: { title?: string; build?: BuildBlock };
+  let denoJson: { title?: string; build?: BuildBlock; entry?: string };
   try {
     denoJson = JSON.parse(await Deno.readTextFile(join(root, "deno.json")));
   } catch {
@@ -297,9 +308,12 @@ export async function buildAll(): Promise<number> {
     : [hostPlatform()];
 
   const outDir = resolve(join(root, flag("out") ?? block.out ?? "dist"));
-  if (unsafeOutDir(outDir, root)) {
+  // The app dir comes from THE decider, so `out` can never be pointed at the
+  // directory holding the app's own sources — whatever layout it uses.
+  const appDir = resolveAppDir(root, resolveEntry(denoJson));
+  if (unsafeOutDir(outDir, root, appDir)) {
     console.error(
-      `${C.red}✗ refusing to build into ${outDir}${C.r} — "out" must be a dedicated subdirectory of the project (not the root, src, .git, or .aio)`,
+      `${C.red}✗ refusing to build into ${outDir}${C.r} — "out" must be a dedicated subdirectory of the project (not the root, your app dir, src, .git, or .aio)`,
     );
     return 1;
   }

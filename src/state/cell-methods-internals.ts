@@ -1,7 +1,7 @@
 // cell-methods-internals.ts — machine, reducer, and executor builders for methods-based cells
 
 import { isScheduleEffect, type ScheduleEffect } from "./schedule.ts";
-import { trackCall } from "./method-cancel.ts";
+import { trackCall, trackPending } from "./method-cancel.ts";
 import { isOwnEffect, type OwnEffect } from "./own.ts";
 import type { AsyncMethod, Method, Mutation, SyncMethod } from "./cell-impl.ts";
 import {
@@ -522,10 +522,15 @@ export function buildMethodsExecutor(
       };
       // serialize: chain behind the previous transactional call (runs on both
       // fulfil + reject so one failure doesn't wedge the queue). Else run now.
+      // Tracked, not just started: shutdown has to know this call is still
+      // writing. The dispatch loop cannot tell — a cell's `execute` returns
+      // nothing — so its drain would sail past a streaming method and seal the
+      // queue under it.
       if (transactional && serialize) {
         serializeTail = serializeTail.then(runOnce, runOnce);
+        trackPending(serializeTail, prefix);
       } else {
-        runOnce();
+        trackPending(runOnce(), prefix);
       }
       return;
     }

@@ -184,6 +184,10 @@ async function delegateToPathPin(): Promise<boolean> {
 async function main(): Promise<void> {
   await delegateToPathPin();
   const { command, args, flags } = parseGlobalFlags(Deno.args);
+  if (flags.error) {
+    outError(flags.error, detectMode(flags));
+    Deno.exit(1);
+  }
   const handler = COMMANDS[command];
   if (!handler) {
     outError(
