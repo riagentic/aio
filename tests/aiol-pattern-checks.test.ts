@@ -34,8 +34,9 @@ async function runCheckPatterns(dir: string) {
   return report.issues;
 }
 
-const awaitReadIssues = (issues: { message: string; severity: string }[]) =>
-  issues.filter((i) => i.message.includes("after an await"));
+const awaitReadIssues = (
+  issues: { message: string; severity: string; line?: number }[],
+) => issues.filter((i) => i.message.includes("after an await"));
 
 Deno.test("aiol: hints on state read after await in async method", async () => {
   await withTmpDir(async (dir) => {
@@ -463,6 +464,145 @@ export const counter = cell('counter', {
   });
 });
 
+// ── A WRITE is not a READ (field report llama-master #4) ────────────────
+//
+// `s.lastError = "…"` after the method's I/O is the one thing the method is
+// SUPPOSED to do, and it was hinted as the hazard. There is no read there to
+// declare deliberate, so `// aiol-ok` would have been a lie — "which is how
+// useful lints get ignored". Each shape below is a separate way the old
+// line-level test got it wrong, in BOTH directions.
+Deno.test("aiol: a plain WRITE after an await is not a read — even wrapped by deno fmt", async () => {
+  await withTmpDir(async (dir) => {
+    // The report's line 189 was a long assignment; `deno fmt` breaks it after
+    // the `=`, so the line the old check saw was a bare `s.lastError` with no
+    // `=` on it at all. Classification must look past the end of the line.
+    await project(
+      dir,
+      `import { cell } from 'aio'
+export const conn = cell('conn', {
+  state: { lastError: '', peers: [] as string[], meta: {} as Record<string, number> },
+  methods: {
+    async discover(s, url: string) {
+      const res = await fetch(url)
+      s.lastError =
+        res.ok ? '' : 'discover failed: ' + res.status
+      s.peers[0] = url
+      s.meta['n'] = 1
+      s.peers.push(url)
+      delete s.meta['old']
+    },
+  },
+})
+`,
+    );
+    assertEquals(
+      awaitReadIssues(await runCheckPatterns(dir)).map((i) => i.message),
+      [],
+      "assignment targets and mutations are writes, never post-await reads",
+    );
+  });
+});
+
+Deno.test("aiol: a read on the RHS of a post-await assignment IS flagged", async () => {
+  await withTmpDir(async (dir) => {
+    // The write on the line no longer covers for the read next to it.
+    await project(
+      dir,
+      `import { cell } from 'aio'
+export const c = cell('c', {
+  state: { x: 0, y: 0 },
+  methods: {
+    async load(s) {
+      await fetch('/x')
+      s.x = s.y + 1
+    },
+  },
+})
+`,
+    );
+    const found = awaitReadIssues(await runCheckPatterns(dir));
+    assertEquals(found.length, 1, JSON.stringify(found));
+    assertEquals(found[0]!.line, 7, "reported on the RHS read's own line");
+  });
+});
+
+Deno.test("aiol: a read inside an INDEX expression IS flagged", async () => {
+  await withTmpDir(async (dir) => {
+    // `s.items[s.idx] = v` — the target is a write, the index is a read.
+    await project(
+      dir,
+      `import { cell } from 'aio'
+export const c = cell('c', {
+  state: { items: [] as string[], idx: 0 },
+  methods: {
+    async load(s, v: string) {
+      await fetch('/x')
+      s.items[s.idx] = v
+    },
+  },
+})
+`,
+    );
+    const found = awaitReadIssues(await runCheckPatterns(dir));
+    assertEquals(found.length, 1, JSON.stringify(found));
+    assertEquals(found[0]!.line, 7);
+  });
+});
+
+Deno.test("aiol: a read passed as an ARGUMENT to a draft mutation IS flagged", async () => {
+  await withTmpDir(async (dir) => {
+    // `s.log.push(s.status)` — the push is a write, the argument is a read.
+    await project(
+      dir,
+      `import { cell } from 'aio'
+export const c = cell('c', {
+  state: { log: [] as string[], status: 'idle' },
+  methods: {
+    async load(s) {
+      await fetch('/x')
+      s.log.push(s.status)
+    },
+  },
+})
+`,
+    );
+    assertEquals(awaitReadIssues(await runCheckPatterns(dir)).length, 1);
+  });
+});
+
+Deno.test("aiol: compound assignment and ++ are writes, comparisons are reads", async () => {
+  await withTmpDir(async (dir) => {
+    // DELIBERATE: `s.n += 1` does read the old value, but it applies a DELTA to
+    // whatever the field holds when it runs — a concurrent commit in the gap
+    // makes it more current, not stale. `s.n >= 3` is a genuine read, and the
+    // near-miss operators (`>=`, `===`) must not be mistaken for assignments.
+    await project(
+      dir,
+      `import { cell } from 'aio'
+export const c = cell('c', {
+  state: { n: 0, hits: 0, name: '' },
+  methods: {
+    async bump(s) {
+      await fetch('/x')
+      s.n += 1
+      s.hits++
+      s.name ??= 'anon'
+    },
+    async guard(s) {
+      await fetch('/x')
+      if (s.n >= 3) return
+      s.hits = 0
+    },
+  },
+})
+`,
+    );
+    const found = awaitReadIssues(await runCheckPatterns(dir));
+    assertEquals(found.length, 1, JSON.stringify(found));
+    assertEquals(found[0]!.message.includes('"guard"'), true);
+  });
+});
+
 Deno.test("aiol: s.$signal and until()/race() are NOT post-await-read hints", async () => {
   await withTmpDir(async (dir) => {
     // `s.$signal.aborted` IS the documented cancellation check, and
@@ -493,5 +633,105 @@ export const counter = cell('counter', {
       [],
       "the framework's own documented patterns must never be hinted",
     );
+  });
+});
+
+// ── "use the aio logger" is an APP rule (field report llama-master #9) ────
+//
+// A developer command — the report's `sync-shared.ts`, a codegen script, a
+// migration runner — prints to a terminal on purpose; it has no logger sinks
+// and nobody greps its output by level. The scope answers one question the
+// author can answer without reading the linter: is this file part of what the
+// APP runs? Under `src/`/`cells/`, or declaring a cell / a component / the
+// `aio.run(` boot → app. Otherwise (repo root, or a `#!` script) → tooling.
+async function consoleHints(
+  dir: string,
+  files: Record<string, string>,
+): Promise<string[]> {
+  await Deno.mkdir(join(dir, "src"), { recursive: true });
+  await Deno.writeTextFile(
+    join(dir, "deno.json"),
+    JSON.stringify({ imports: { "aio": "jsr:@riagentic/aio@1.0.0" } }),
+  );
+  for (const [rel, src] of Object.entries(files)) {
+    await Deno.writeTextFile(join(dir, rel), src);
+  }
+  const { ctx, report } = await buildContext(dir);
+  const { checkPerformance } = await import("../aiol/checks.ts");
+  await checkPerformance(ctx);
+  return report.issues
+    .filter((i) => i.message.includes("console.log call(s)"))
+    .map((i) => i.file ?? "");
+}
+
+Deno.test("aiol: console.log in a repo-root TOOLING script is not flagged", async () => {
+  await withTmpDir(async (dir) => {
+    assertEquals(
+      await consoleHints(dir, {
+        "sync-shared.ts": `// mirrors shared modules into client/src/shared
+export async function sync(files: string[]) {
+  for (const f of files) console.log('copied', f)
+  console.log('done')
+}
+`,
+      }),
+      [],
+      "a developer command prints on purpose",
+    );
+  });
+});
+
+Deno.test("aiol: console.log in a CELL is still flagged — wherever the file sits", async () => {
+  await withTmpDir(async (dir) => {
+    // Both files are OUTSIDE src/; the cell is app code by what it declares.
+    const hits = await consoleHints(dir, {
+      "src/counter.ts": `import { cell } from 'aio'
+export const counter = cell('counter', {
+  state: { n: 0 },
+  methods: { inc(s) { console.log('inc', s.n); s.n += 1 } },
+})
+`,
+      "root-cell.ts": `import { cell } from 'aio'
+export const rooted = cell('rooted', {
+  state: { n: 0 },
+  methods: { inc(s) { console.log('inc'); s.n += 1 } },
+})
+`,
+    });
+    assertEquals(hits.sort(), ["root-cell.ts", "src/counter.ts"]);
+  });
+});
+
+Deno.test("aiol: console.log in a COMPONENT and in the app entry is still flagged", async () => {
+  await withTmpDir(async (dir) => {
+    const hits = await consoleHints(dir, {
+      "Widget.tsx": `export function Widget() {
+  console.log('render')
+  return <div>hi</div>
+}
+`,
+      "app.ts": `import { aio } from 'aio'
+console.log('booting')
+await aio.run({ cells: [] })
+`,
+    });
+    assertEquals(hits.sort(), ["Widget.tsx", "app.ts"]);
+  });
+});
+
+Deno.test("aiol: a #! script inside src/ opts out; a plain src/ module does not", async () => {
+  await withTmpDir(async (dir) => {
+    // The shebang is a signal the AUTHOR writes — an actual executable — not
+    // one the linter infers. A src/ module without one stays app code.
+    const hits = await consoleHints(dir, {
+      "src/gen-icons.ts": `#!/usr/bin/env -S deno run -A
+console.log('generated 12 icons')
+`,
+      "src/report.ts": `export function summarize(n: number) {
+  console.log('n =', n)
+}
+`,
+    });
+    assertEquals(hits, ["src/report.ts"]);
   });
 });

@@ -7,6 +7,10 @@ One guide per version migration. Find your current version and follow the steps.
 - **[The aio restructure (alpha27+)](restructure.md)** — every restructure
   breaking change with before → after recipes (methods-only cells, instances,
   SQLite-only persistence, `aio/extras`, wire catalog)
+- [alpha44 → alpha45](from-alpha44-to-alpha45.md) — the network boundary: a
+  per-user filter that really filters, a CLI call that tells you what happened,
+  `--expose` certs the aio client can verify, `serveDirs`, `expose` in config,
+  per-target build entry, and every app loses its white border
 - [alpha43 → alpha44](from-alpha43-to-alpha44.md) — what you see is what you
   ship: one app-dir decider on every target, shutdown lets an in-flight method
   finish writing, the build cache works (and stamps per target), `client.log`

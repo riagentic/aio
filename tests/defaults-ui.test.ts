@@ -128,3 +128,71 @@ Deno.test(
     assertEquals(wiring.cellPatchStrategies.get("flags"), "skip");
   },
 );
+
+// ── forUser ⇒ never a patch strategy that bypasses it ─────────────────────
+//
+// A field report (dm #1, "highest severity — a privacy hole with no symptom at
+// the call site"): `ui: { forUser }` with no include/exclude classified as
+// `raw`, so clients received Immer patches computed from UNFILTERED server
+// state. The per-user filter guarded the full-state frame and nothing else.
+//
+// It corrupts as well as leaks: raw ops carry raw ARRAY INDICES, and the
+// client's array was shortened by forUser, so rows land at the wrong index.
+// The reporter's workaround was to name all nine state fields in `include`
+// purely to make the cell classify as `full`.
+//
+// This is the PROPERTY, not the instance: whatever ui shape is added later,
+// a cell with a per-user filter must never be broadcast through a strategy
+// that cannot apply it.
+Deno.test("forUser: a per-user filter is never bypassed by the patch strategy", () => {
+  const shapes = [
+    { label: "forUser alone", ui: { forUser: (s: never) => s } },
+    {
+      label: "forUser + include",
+      ui: { include: ["count"], forUser: (s: never) => s },
+    },
+    {
+      label: "forUser + exclude",
+      ui: { exclude: ["label"], forUser: (s: never) => s },
+    },
+  ];
+  for (const { label, ui } of shapes) {
+    const c = cell("counter", {
+      state: { count: 0, label: "" },
+      // deno-lint-ignore no-explicit-any
+      ui: ui as any,
+      methods: {
+        increment(s, by = 1) {
+          s.count += by;
+        },
+      },
+    });
+    const strategy = wiringOf([c]).cellPatchStrategies.get("counter");
+    assertEquals(
+      strategy,
+      "full",
+      `${label}: a forUser cell must broadcast full per-client state, got "${strategy}"`,
+    );
+  }
+});
+
+Deno.test("forUser: ui 'none' still wins — an invisible cell stays invisible", () => {
+  const hidden = cell("counter", {
+    state: { count: 0, label: "" },
+    // deno-lint-ignore no-explicit-any
+    ui: "none" as any,
+    methods: {
+      increment(s, by = 1) {
+        s.count += by;
+      },
+    },
+  });
+  // deno-lint-ignore no-explicit-any
+  (hidden as any).__aio.uiForUser = (s: unknown) => s;
+  const wiring = wiringOf([hidden]);
+  assertEquals(wiring.cellPatchStrategies.get("counter"), "skip");
+  // …and the visibility report must not claim a filter is doing work on a
+  // wire that carries nothing.
+  const row = wiring.visibilityReport?.find((r) => r.cell === "counter");
+  if (row) assertEquals(row.ui, "none");
+});

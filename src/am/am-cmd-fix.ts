@@ -35,6 +35,111 @@ interface Res {
 
 const exists = (p: string) => Deno.stat(p).then(() => true).catch(() => false);
 
+// ── Which standard tasks an app actually needs ───────────────────────────────
+//
+// `am fix` used to append the WHOLE standard set — `dev:android`, `dev:cli`,
+// `dev:service` and the rest — to an app that ships none of them. On a curated
+// task list that is noise the maintainer deletes after every repair (a field
+// report), and noise is how a repair tool loses its welcome. So: add the
+// universal tasks, plus the ones the app's DECLARED targets need.
+//
+// Still add-only. Nothing here removes or rewrites a task the app already has.
+
+/** Tasks every aio app wants, whatever it ships. */
+const UNIVERSAL_TASKS = [
+  "dev",
+  "build",
+  "compile",
+  "test",
+  "am",
+  "doctor",
+  "lint",
+] as const;
+
+/** Task keys each declared target needs, keyed by the names accepted in
+ *  deno.json `build.targets` (plus the `target` defaults, which share the same
+ *  vocabulary — `server` is the headless one, spelled `service` in tasks).
+ *
+ *  Every key of `standardTasks()` must be reachable from here or from
+ *  {@link UNIVERSAL_TASKS}, or `am fix` could never add it again; a test pins
+ *  exactly that, so growing the task set cannot silently orphan a task. */
+const TARGET_TASKS: Record<string, readonly string[]> = {
+  browser: [
+    "dev:browser",
+    "compile:browser",
+    "dev:remote:browser",
+    "compile:remote:browser",
+  ],
+  electron: [
+    "dev:electron",
+    "compile:electron",
+    "dev:remote:electron",
+    "compile:remote:electron",
+    "install:electron",
+  ],
+  android: [
+    "dev:android",
+    "compile:android",
+    "dev:remote:android",
+    "compile:remote:android",
+  ],
+  cli: ["dev:cli", "compile:cli", "dev:remote:cli", "compile:remote:cli"],
+  server: [
+    "dev:service",
+    "compile:service",
+    "dev:remote:service",
+    "compile:remote:service",
+  ],
+  "electron-client": ["dev:client", "compile:client", "install:electron"],
+  "android-client": [
+    "dev:android",
+    "compile:android",
+    "compile:remote:android",
+  ],
+  "cli-client": ["dev:remote:cli", "compile:remote:cli"],
+};
+
+/** Read the fleet an app declares: `target` (the default one) plus
+ *  `build.targets` in EITHER spelling — the array form `["server","browser"]`
+ *  or the object form `{"server":{"entry":…}}` (per-target overrides). Both are
+ *  live spellings, so reading only one would quietly under-repair the other.
+ *  Pure. */
+export function declaredTargets(cfg: unknown): string[] {
+  const seen = new Set<string>();
+  const push = (v: unknown) => {
+    if (typeof v === "string" && v.trim()) seen.add(v.trim());
+  };
+  const c = (cfg ?? {}) as Record<string, unknown>;
+  push(c.target);
+  const raw = (c.build as Record<string, unknown> | undefined)?.targets;
+  if (Array.isArray(raw)) raw.forEach(push);
+  else if (raw && typeof raw === "object") Object.keys(raw).forEach(push);
+  return [...seen];
+}
+
+/** Narrow the standard task set to what this app's targets need.
+ *
+ *  `unknown` names targets we have no task mapping for — reported, never
+ *  silently dropped: a name that isn't a real target also makes
+ *  `deno task build` fail, and the author should hear it from the repair tool.
+ *  An empty fleet falls back to the framework default (`browser`) and says so.
+ *  Pure. */
+export function tasksForTargets(
+  all: Record<string, string>,
+  targets: readonly string[],
+): { tasks: Record<string, string>; unknown: string[]; assumed: boolean } {
+  const unknown = targets.filter((t) => !(t in TARGET_TASKS));
+  const known = targets.filter((t) => t in TARGET_TASKS);
+  const assumed = known.length === 0;
+  const wanted = new Set<string>(UNIVERSAL_TASKS);
+  for (const t of assumed ? ["browser"] : known) {
+    for (const k of TARGET_TASKS[t]!) wanted.add(k);
+  }
+  const tasks: Record<string, string> = {};
+  for (const [k, v] of Object.entries(all)) if (wanted.has(k)) tasks[k] = v;
+  return { tasks, unknown, assumed };
+}
+
 async function run(
   cmd: string,
   args: string[],
@@ -394,12 +499,41 @@ export async function cmdFix(
       "deno.jsonc — not auto-edited (comments would be lost); compare with `am create` output",
     );
   } else if (aioMode === "dep" || aioMode === "registry") {
-    const expected = standardTasks(
+    const all = standardTasks(
       aioMode === "dep",
       (TARGETS as readonly string[]).includes(cfg.target as string)
         ? cfg.target as Target
         : undefined,
     );
+    // The app's declared fleet decides which of them apply. Electron is also
+    // inferred from imports/tasks: an app already running Electron ships it,
+    // whether or not it says so in `target`/`build.targets`.
+    const declared = declaredTargets(cfg);
+    if (usesElectron && !declared.includes("electron")) {
+      declared.push("electron");
+    }
+    const { tasks: expected, unknown, assumed } = tasksForTargets(
+      all,
+      declared,
+    );
+    // An unrecognized target name is louder than a missing one: `deno task
+    // build` fails on it too, and a silent "no tasks added" would read as
+    // am fix having nothing to do.
+    const notes = [
+      unknown.length
+        ? `unknown target(s): ${unknown.join(", ")} — no standard tasks for ` +
+          `them, and \`deno task build\` will fail on them too`
+        : "",
+      assumed
+        ? "no `target`/`build.targets` declared — repaired the browser + " +
+          "universal task set only; declare build.targets to get the rest"
+        : "",
+    ].filter(Boolean);
+    if (notes.length) {
+      add("declared build targets", "advise", notes.join("; "));
+    } else {
+      add("declared build targets", "ok", declared.join(", "));
+    }
     const missingTasks = Object.keys(expected).filter((k) => !(k in tasks));
     await repair(
       "standard deno tasks",

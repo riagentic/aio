@@ -758,6 +758,7 @@ Deno.test("cmdFix: adds missing standard tasks, never overwrites existing ones",
       JSON.stringify({
         imports: { aio: "jsr:@riagentic/aio@1.0.0" },
         target: "electron",
+        build: { targets: ["electron", "browser"] },
         tasks: { dev: "deno run -A my-custom-entry.ts", seed: "echo seed" },
         unstable: ["kv"],
       }),
@@ -767,10 +768,10 @@ Deno.test("cmdFix: adds missing standard tasks, never overwrites existing ones",
     const cfg = JSON.parse(
       await Deno.readTextFile(joinPath(dir, "deno.json")),
     ) as { tasks: Record<string, string> };
-    // Missing standard tasks were added…
+    // Missing standard tasks were added — for the targets this app declares…
     assert(cfg.tasks["compile:electron"], "compile:electron added");
     assert(cfg.tasks["compile"], "default compile added");
-    assert(cfg.tasks["dev:browser"], "dev matrix added");
+    assert(cfg.tasks["dev:browser"], "dev matrix added for browser");
     // …existing ones were NOT touched.
     assertEquals(cfg.tasks.dev, "deno run -A my-custom-entry.ts");
     assertEquals(cfg.tasks.seed, "echo seed");
@@ -779,6 +780,178 @@ Deno.test("cmdFix: adds missing standard tasks, never overwrites existing ones",
     Deno.chdir(orig);
     await Deno.remove(dir, { recursive: true }).catch(() => {});
   }
+});
+
+// ── am fix adds the tasks the app's TARGETS need, not all 21 ────────────────
+// A field report: `am fix` wrote `dev:android`, `dev:cli`, `dev:service` into an
+// app that ships none of them — "noise the maintainer has to remove after every
+// repair". A repair tool that leaves a mess behind stops being run.
+import { declaredTargets, tasksForTargets } from "../src/am/am-cmd-fix.ts";
+import { standardTasks } from "../src/am/am-cmd-create.ts";
+
+Deno.test("cmdFix: a browser-only app gets no android/cli/service tasks", async () => {
+  const orig = Deno.cwd();
+  const realLog = console.log;
+  console.log = () => {};
+  const dir = await Deno.makeTempDir();
+  try {
+    await Deno.writeTextFile(
+      joinPath(dir, "deno.json"),
+      JSON.stringify({
+        imports: { aio: "jsr:@riagentic/aio@1.0.0" },
+        target: "browser",
+        build: { targets: ["browser"], platforms: ["host"], out: "dist" },
+        // A CURATED list: two of the app's own tasks, and one standard task the
+        // author rewrote. None of it may be touched.
+        tasks: {
+          dev: "deno run -A src/app.ts --port=9000",
+          seed: "deno run -A scripts/seed.ts",
+          "sync:shared": "deno run -A scripts/sync-shared.ts",
+        },
+      }),
+    );
+    Deno.chdir(dir);
+    await cmdFix([], {});
+    const cfg = JSON.parse(
+      await Deno.readTextFile(joinPath(dir, "deno.json")),
+    ) as { tasks: Record<string, string> };
+
+    for (
+      const t of [
+        "dev:android",
+        "dev:cli",
+        "dev:service",
+        "compile:android",
+        "compile:cli",
+        "compile:service",
+        "dev:electron",
+        "compile:electron",
+        "install:electron",
+        "dev:client",
+      ]
+    ) {
+      assertEquals(
+        cfg.tasks[t],
+        undefined,
+        `${t} is for a target this app does not ship`,
+      );
+    }
+    // What it DOES ship, plus the universally useful ones, is still repaired.
+    assert(cfg.tasks["dev:browser"], "the browser target's tasks are added");
+    assert(cfg.tasks["compile:browser"], "compile:browser added");
+    assert(cfg.tasks["compile"], "compile is universal");
+    assert(cfg.tasks["build"], "build is universal");
+    assert(cfg.tasks["test"] && cfg.tasks["am"] && cfg.tasks["lint"]);
+    // Nothing curated was removed or rewritten.
+    assertEquals(cfg.tasks.dev, "deno run -A src/app.ts --port=9000");
+    assertEquals(cfg.tasks.seed, "deno run -A scripts/seed.ts");
+    assertEquals(
+      cfg.tasks["sync:shared"],
+      "deno run -A scripts/sync-shared.ts",
+    );
+
+    // Idempotent: a second repair changes nothing at all.
+    const before = await Deno.readTextFile(joinPath(dir, "deno.json"));
+    await cmdFix([], {});
+    assertEquals(await Deno.readTextFile(joinPath(dir, "deno.json")), before);
+  } finally {
+    console.log = realLog;
+    Deno.chdir(orig);
+    await Deno.remove(dir, { recursive: true }).catch(() => {});
+  }
+});
+
+Deno.test("cmdFix: build.targets in OBJECT form declares the same fleet as the array", async () => {
+  const orig = Deno.cwd();
+  const realLog = console.log;
+  console.log = () => {};
+  const dir = await Deno.makeTempDir();
+  try {
+    await Deno.writeTextFile(
+      joinPath(dir, "deno.json"),
+      JSON.stringify({
+        imports: { aio: "jsr:@riagentic/aio@1.0.0" },
+        // The per-target-override spelling — one repo, two apps.
+        build: {
+          targets: {
+            server: { entry: "src/relay/app.ts", name: "relay" },
+            cli: { entry: "src/app.ts" },
+          },
+        },
+        tasks: {},
+      }),
+    );
+    Deno.chdir(dir);
+    await cmdFix([], {});
+    const cfg = JSON.parse(
+      await Deno.readTextFile(joinPath(dir, "deno.json")),
+    ) as { tasks: Record<string, string> };
+    assert(cfg.tasks["dev:service"], "the object form is read, not ignored");
+    assert(cfg.tasks["compile:service"]);
+    assert(cfg.tasks["dev:cli"]);
+    assertEquals(cfg.tasks["dev:android"], undefined);
+    assertEquals(cfg.tasks["dev:browser"], undefined);
+  } finally {
+    console.log = realLog;
+    Deno.chdir(orig);
+    await Deno.remove(dir, { recursive: true }).catch(() => {});
+  }
+});
+
+Deno.test("declaredTargets reads both spellings, and neither invents targets", () => {
+  assertEquals(declaredTargets({ target: "electron" }), ["electron"]);
+  assertEquals(
+    declaredTargets({ target: "browser", build: { targets: ["browser"] } }),
+    ["browser"],
+    "the default target and the fleet overlap without duplicating",
+  );
+  assertEquals(
+    declaredTargets({ build: { targets: { server: {}, "cli-client": {} } } }),
+    ["server", "cli-client"],
+  );
+  assertEquals(declaredTargets({}), []);
+  assertEquals(declaredTargets(null), []);
+  assertEquals(declaredTargets({ build: { targets: [1, "", "  browser "] } }), [
+    "browser",
+  ]);
+});
+
+Deno.test("tasksForTargets: every standard task stays reachable from some target", () => {
+  // The gate that keeps this from silently orphaning a task as the set grows:
+  // a key no target (and no universal entry) can produce could never be added
+  // by `am fix` again, and nobody would notice until an app was missing it.
+  const all = standardTasks(true, "browser");
+  const everyTarget = [
+    "browser",
+    "electron",
+    "android",
+    "cli",
+    "server",
+    "electron-client",
+    "android-client",
+    "cli-client",
+  ];
+  const { tasks, unknown, assumed } = tasksForTargets(all, everyTarget);
+  assertEquals(unknown, []);
+  assertEquals(assumed, false);
+  assertEquals(
+    Object.keys(tasks).sort(),
+    Object.keys(all).sort(),
+    "a full fleet still gets the WHOLE standard set — no task is unreachable",
+  );
+});
+
+Deno.test("tasksForTargets: an unknown target is reported, an empty fleet is assumed", () => {
+  const all = standardTasks(true, "browser");
+  const bad = tasksForTargets(all, ["browser", "webassembly"]);
+  assertEquals(bad.unknown, ["webassembly"], "named, never silently dropped");
+  assert(bad.tasks["dev:browser"], "the known target is still repaired");
+
+  const none = tasksForTargets(all, []);
+  assertEquals(none.assumed, true);
+  assert(none.tasks["dev:browser"], "falls back to the framework default");
+  assertEquals(none.tasks["dev:android"], undefined);
+  assertEquals(none.tasks["dev"], all["dev"], "universal tasks always apply");
 });
 
 Deno.test("cmdFix: --dry-run reports missing tasks without writing", async () => {

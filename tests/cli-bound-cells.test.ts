@@ -94,7 +94,8 @@ Deno.test({
 });
 
 Deno.test({
-  name: "connectCli.bind: bound calls never hang across a dead connection",
+  name:
+    "connectCli.bind: a call across a dead connection SETTLES — as a rejection",
   sanitizeResources: false,
   sanitizeOps: false,
   async fn() {
@@ -123,24 +124,36 @@ Deno.test({
         },
       },
     });
+    // A short ceiling so the contract is observable in a test; production
+    // apps get ACK_TIMEOUT_MS.
     const cli = connectCli<{ counter: { count: number } }>(
       `http://localhost:${port}`,
+      { ackTimeoutMs: 1_000 },
     );
     try {
       await waitFor(() => cli.connected ? true : null);
       cli.bind(c2 as unknown as CellDef);
 
-      // Kill the server mid-session, then call a bound method — it must
-      // resolve (at-most-once delivery), not hang the caller forever.
+      // Kill the server mid-session, then call a bound method. Two things
+      // must hold, and they used to conflict: the caller must never hang
+      // forever, AND an action the server never saw must never look like a
+      // success. This test previously asserted "resolved" — which is the
+      // second failure: the call reported that a write had landed when
+      // nothing had been sent at all. The honest outcome is a REJECTION
+      // naming the uncertainty; `state` remains the source of truth.
       proc.kill();
       await proc.status;
       await waitFor(() => !cli.connected ? true : null);
 
-      const raced = await Promise.race([
-        c2.increment(1).then(() => "resolved"),
-        new Promise((r) => setTimeout(() => r("hung"), 3000)),
+      const outcome = await Promise.race([
+        c2.increment(1).then(() => "resolved", () => "rejected"),
+        new Promise((r) => setTimeout(() => r("hung"), 5000)),
       ]);
-      assertEquals(raced, "resolved");
+      assertEquals(
+        outcome,
+        "rejected",
+        "a call the server never confirmed must settle as a failure, not a success",
+      );
     } finally {
       cli.close();
       try {

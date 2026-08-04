@@ -79,6 +79,12 @@ export interface StaticDeps {
   debug: (msg: string) => void;
   title: string;
   absBaseDir: string;
+  /** Extra READ-ONLY roots the dev server may serve, `"/urlPrefix" → absolute
+   *  dir`. Dev only: prod bundles already follow relative imports, so this
+   *  exists solely so the DEV server can serve a module that lives outside
+   *  baseDir (two apps in one repo sharing pure libraries). Every containment
+   *  guard that protects baseDir applies to each root unchanged. */
+  serveDirs?: Record<string, string>;
   absDistDir: string | null;
   hasCSS: boolean;
   importMap: string; // JSON stringified import map
@@ -552,18 +558,29 @@ export function createStaticHandler(deps: StaticDeps): {
     if (isProtectedPath(pathname)) {
       return new Response("Not found", { status: 404 });
     }
-    const filepath = resolve(absBaseDir, filename);
+    // Which root serves this request? A `serveDirs` prefix wins over baseDir;
+    // everything after this line treats the chosen root EXACTLY as baseDir was
+    // treated, guards included — an extra root must not be a weaker root.
+    let root = absBaseDir;
+    let rel = filename;
+    for (const [prefix, dir] of Object.entries(deps.serveDirs ?? {})) {
+      const p = prefix.endsWith("/") ? prefix : prefix + "/";
+      if (pathname === prefix || pathname.startsWith(p)) {
+        root = dir;
+        rel = pathname.slice(p.length).replace(/^\//, "");
+        break;
+      }
+    }
+    const filepath = resolve(root, rel);
     // Path traversal protection
-    const basePfx = absBaseDir.endsWith(SEPARATOR)
-      ? absBaseDir
-      : absBaseDir + SEPARATOR;
+    const basePfx = root.endsWith(SEPARATOR) ? root : root + SEPARATOR;
     if (!filepath.startsWith(basePfx)) {
       return new Response("Forbidden", { status: 403 });
     }
-    // Symlinks inside baseDir must not escape it either
+    // Symlinks inside the root must not escape it either
     try {
       const real = await Deno.realPath(filepath);
-      const realBase = await Deno.realPath(absBaseDir);
+      const realBase = await Deno.realPath(root);
       const realPfx = realBase.endsWith(SEPARATOR)
         ? realBase
         : realBase + SEPARATOR;

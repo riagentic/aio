@@ -4,6 +4,7 @@
 import { cleanupSignalBindings } from "./signal-binding.ts";
 import { _cleanupActions, _cleanupSignalTextChildren } from "./vdom-helpers.ts";
 import { _callRef } from "./vdom-create.ts";
+import { _componentName, _reportHookError } from "./hook-error.ts";
 import { ErrorBoundary, Fragment, Portal, Suspense } from "./vdom-types.ts";
 import type { RenderCtx, VNode } from "./vdom-types.ts";
 
@@ -55,7 +56,7 @@ export function _removeDomCleanup(
   // AIO-58: Null element refs on cleanup (was missing — ref callbacks never got
   // null on replace/unmount, leaking event listeners and DOM references)
   if (typeof vnode.tag === "string" && vnode.props.ref) {
-    _callRef(vnode.props.ref, null);
+    _callRef(vnode.props.ref, null, _componentName(vnode.tag));
   }
   if (
     vnode.tag === Fragment || vnode.tag === ErrorBoundary ||
@@ -121,7 +122,7 @@ export function removeDom(
     typeof vnode === "object" && typeof vnode.tag === "string" &&
     vnode.props.ref
   ) {
-    _callRef(vnode.props.ref, null);
+    _callRef(vnode.props.ref, null, _componentName(vnode.tag));
   }
   const dom = getDom(vnode);
   if (dom && isChildOf(dom, parent)) {
@@ -131,7 +132,18 @@ export function removeDom(
       ctx.onBeforeRemove && typeof vnode === "object" && HtmlEl &&
       dom instanceof HtmlEl
     ) {
-      const result = ctx.onBeforeRemove(dom, vnode);
+      // The exit handler is user code (a <Transition> / exit directive) running
+      // INSIDE the commit: an unguarded throw here aborted removeDom, and with
+      // it the whole diff that was removing the node — a half-applied commit,
+      // the same class as a throwing callback ref. Contained: report it and
+      // fall through to the immediate removal below.
+      let result: ReturnType<NonNullable<RenderCtx["onBeforeRemove"]>>;
+      try {
+        result = ctx.onBeforeRemove(dom, vnode);
+      } catch (e) {
+        _reportHookError("exit-transition", e, _componentName(vnode.tag));
+        result = undefined;
+      }
       if (result && typeof result.then === "function") {
         const SAFETY_TIMEOUT = 5000;
         // AIO-210: guard against double-cleanup when timeout fires before promise

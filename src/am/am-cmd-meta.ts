@@ -328,7 +328,10 @@ State:
   expect <path> <op> [v]  Assert on state (eq/ne/gt/lt/contains/exists…); e2e; --wait=N
   record [out] --from=J  Generate a bootCells replay test from a journal
   ui [user]               Server-side UI state (for live client UI use: surface)
-  dispatch <Type> [k=v]   Dispatch action (or --body='{"type":...}')
+  dispatch <cell:method> [a b …]  Call a method with POSITIONAL args (setHost "1.2.3.4")
+  dispatch <cell:method> --args='["1.2.3.4"]'  …the same, JSON-exact (values with '=', exact types)
+  dispatch <Type> [k=v]   Dispatch a plain action with a named payload
+  dispatch --body='{"type":...,"payload":...}'  Raw envelope (after a <Type>, --body is its payload)
   actions                 Time-travel history
 
 Time-travel:
@@ -364,7 +367,8 @@ Inspect:
   surface --component=X   only that component (every instance), with its subtree
   surface --path=A/B      only that subtree, by path prefix
   surface --depth=N       cap the tree depth (0 = the component alone)
-  trigger <idx> <path> <action> [text]  Drive the live UI (click/type/press/keyDown/keyUp/hover/focus/blur/scroll) — same engine as testUI
+  trigger <idx> <path> <action> [text]  Drive the live UI (click/type/setValue/press/keyDown/keyUp/hover/focus/blur/scroll) — same engine as testUI
+                          type APPENDS to the field, setValue REPLACES it (as in testUI)
   sql <query>             Execute read-only SQL
   tables                  List SQLite tables
   schedules               Active scheduled effects
@@ -389,7 +393,7 @@ Other:
   version                 Print version
   help                    This message
 
-Flags: --app=X  --port=N  --entry=<path>  --wait[=N]  --json  --quiet  --body='{...}'  --filter=X  --lines=N  --follow/-f  --transport=ws|uds  --client=N/-cN  --all
+Flags: --app=X  --port=N  --entry=<path>  --wait[=N]  --json  --quiet  --body='{...}'  --args='[...]'  --filter=X  --lines=N  --follow/-f  --transport=ws|uds  --client=N/-cN  --all
 
 --app: target specific app by ID (default: resolved from deno.json name)
 --entry: override entry point (default: deno.json "entry" > src/app.ts > src/main.ts)

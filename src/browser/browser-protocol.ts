@@ -98,6 +98,7 @@ export {
   WS_MAX_QUEUE,
 } from "../protocol/protocol-types.ts";
 
+import { _diagEmit } from "../protocol/protocol-diagnostics.ts";
 export {
   _checkStateIntegrity,
   _diagEmit,
@@ -443,7 +444,45 @@ export function _applyServerConfig(cfg: Record<string, unknown>): void {
     __aioConfig?: Record<string, unknown>;
   };
   g.__aioConfig = { ...cfg, ...(g.__aioConfig ?? {}) };
+  _warnCellSetDrift(cfg.bootedCells);
   if (_ensured) _initSyncIfNeeded();
+}
+
+/** A cell in the BUNDLE that the running server never booted dispatches into
+ *  nothing — the UI renders and its controls do nothing at all.
+ *
+ *  Field report: a `ui` cell was added to a running dev app and the browser
+ *  reloaded. The client bundle is fetched fresh, so the new controls appeared;
+ *  the server process was still the old one, so every dispatch went nowhere.
+ *  From the UI it looked like three dead buttons, and the only place the truth
+ *  appeared was `am dispatch` ("unknown cell \"ui\" — not booted"). A person
+ *  who does not think to ask `am` sees a UI that renders and does not work.
+ *
+ *  Both halves are known here — the server's booted set arrives on the `cfg`
+ *  frame, the bundle's set is the local registry — so the drift is stated
+ *  where it is felt, with the fix. Reported through the diagnostic sink too,
+ *  so it reaches the terminal (client-log) and not just the console. */
+function _warnCellSetDrift(booted: unknown): void {
+  if (!Array.isArray(booted)) return; // older server — nothing to compare
+  const server = new Set(booted.map(String));
+  const missing = [...getRegisteredCells().keys()].filter((id) =>
+    !server.has(id)
+  );
+  if (missing.length === 0) return;
+  const msg = `the client bundle registers cell(s) [${missing.join(", ")}] ` +
+    `that this server process did NOT boot (it has: [${
+      [...server].join(", ")
+    }]). Their methods dispatch into nothing — the UI renders and does not ` +
+    `work. Restart the server to pick them up.`;
+  _diagEmit({
+    type: "cell-set-drift",
+    severity: "error",
+    source: "browser",
+    message: msg,
+    detail: { missing, booted: [...server] },
+    hint: "Restart the dev server — a bundle reload cannot add a cell to an " +
+      "already-running process.",
+  });
 }
 _cfgSink.apply = _applyServerConfig;
 

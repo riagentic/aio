@@ -9,6 +9,9 @@ import { createJournal, type Journal } from "./journal.ts";
 import type { SkvInstance } from "./skv.ts";
 import { migrateLegacyKv, SKV_SCHEMA, sqliteKv } from "./skv-sqlite.ts";
 import { createDB, type DB, initSchema, loadTables } from "../db/mod.ts";
+// The db module owns the "is this a missing worker?" verdict — importing the
+// predicate keeps ONE decider for a failure that surfaces in two places.
+import { dbWorkerMissingHint } from "../db/async-db.ts";
 import type { TableDef } from "./sql.ts";
 import { deepMerge } from "../state/deep-merge.ts";
 import { resolveKvPath } from "./paths.ts";
@@ -310,6 +313,12 @@ export async function bootStorage<S>(
       }
       log.info(`sqlite: ${dbKeys.length} table(s) at ${dbPath}`);
     } catch (e) {
+      // Same classification as the persistence block below: a compiled binary
+      // whose db worker was never embedded cannot be degraded around — the
+      // app declared tables (or sync cells) that will never work. Fail loud
+      // with the build fix instead of a warning nobody reads.
+      const workerHint = dbWorkerMissingHint(e);
+      if (workerHint) throw new Error(workerHint);
       log.warn(`sqlite: unavailable — ${e}`);
       if (asyncDb) {
         await asyncDb.close().catch(() => {});
@@ -454,6 +463,13 @@ export async function bootStorage<S>(
       }
     } catch (e) {
       if (e instanceof AioError) throw e; // schema mismatch — already precise
+      // A compiled binary that never embedded the SQLite worker fails here as
+      // `Module not found: …/db-worker.ts`. The permissions advice below names
+      // a cause that is NOT this one — it sends the reader to chmod the data
+      // dir or turn persistence off, neither of which can fix a missing
+      // module. Classified by the db module's own predicate (one decider).
+      const workerHint = dbWorkerMissingHint(e);
+      if (workerHint) throw new Error(workerHint);
       throw new Error(
         `persistence unavailable: ${e}\nFix permissions or set persist: false to disable persistence.`,
       );

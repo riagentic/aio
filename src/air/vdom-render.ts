@@ -8,6 +8,7 @@ import {
   _registerLazyListeners,
   _tagComponentError,
 } from "./vdom-create.ts";
+import { _componentName } from "./hook-error.ts";
 import { applyProps } from "./vdom-props.ts";
 import { getDom } from "./vdom-remove.ts";
 import { _getActiveDelegationRoot, _setDelegationRoot } from "./vdom-events.ts";
@@ -229,7 +230,7 @@ export function createDom(
   }
 
   // Call ref after element + children are fully built
-  if (vnode.props.ref) _callRef(vnode.props.ref, el);
+  if (vnode.props.ref) _callRef(vnode.props.ref, el, _componentName(vnode.tag));
   if (vnode.props.use) _applyActions(el as HTMLElement, vnode.props.use);
 
   vnode._dom = el;

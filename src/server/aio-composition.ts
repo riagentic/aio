@@ -70,8 +70,30 @@ function renderFilter(filter: CellFieldFilter): string {
 }
 
 // Field names that usually hold secrets — used for the UI-exposure heuristic.
-const SECRET_FIELD_RE =
-  /enc|secret|priv|key|seed|mnemonic|passphrase|passwo?rd/i;
+//
+// `enc` is matched at a WORD BOUNDARY only, never as a bare substring. As a
+// substring it fires on `latency`, `sequence`, `currency`, `reference`,
+// `influence`, `agency`, `cadence` — ordinary words with an `enc` in the
+// middle. A field report hit it with `lastLatencyMs`, a millisecond count that
+// belongs on screen; a heuristic that cries wolf on measurements teaches
+// people to reach for the escape hatch without reading, which is the one
+// outcome a security warning must never produce.
+//
+// Two patterns because the boundary differs by case: lowercase `enc` counts
+// at the start of a name or after a separator, and a capital `Enc` is a
+// camelCase hump anywhere (`dataEnc`, `seedEncKey`). CAMEL_ENC is
+// deliberately case-SENSITIVE — folding it would match the middle of
+// `latency` again and undo the whole fix.
+const WORD_START_ENC = /(^|[^a-zA-Z])enc/i;
+const CAMEL_ENC = /Enc/;
+const SECRET_FIELD_RE = /secret|priv|key|seed|mnemonic|passphrase|passwo?rd/i;
+
+/** True when a field name mentions a secret-ish concept at all (before the
+ *  public-hint and suffix filters below refine it). */
+function _mentionsSecret(key: string): boolean {
+  return WORD_START_ENC.test(key) || CAMEL_ENC.test(key) ||
+    SECRET_FIELD_RE.test(key);
+}
 // Unambiguous CREDENTIAL names — an exposed value is almost certainly a real
 // leak, so this is escalated from a warning to a boot REFUSAL in dev. Compound forms only (private_key, api_key,
 // secret_key, access_token…) so feature names like "secretSanta"/"tokenList"
@@ -85,14 +107,17 @@ const PUBLIC_HINT_RE = /pub(lic)?/i;
 // …and these suffixes mark identifiers/metadata, not the secret itself:
 // seedId, seedPathType, keyName, encMode — nav state, not a leaked secret
 //.
+// …plus MEASUREMENT suffixes: a quantity is a reading, not a credential.
+// `lastLatencyMs` was warned about in a field report — it is a millisecond
+// count from Send to first token and belongs on screen.
 const NONSECRET_SUFFIX_RE =
-  /(Id|Ids|Type|Name|Count|Index|Idx|At|Ref|Kind|Length|Len|Path|Mode|Status|Flag|Enabled|Visible|Label|Order|Version)$/;
+  /(Id|Ids|Type|Name|Count|Index|Idx|At|Ref|Kind|Length|Len|Path|Mode|Status|Flag|Enabled|Visible|Label|Order|Version|Ms|Sec|Secs|Seconds|Bytes|Kb|Mb|Gb|Hz|Pct|Percent|Ratio|Rate|Total|Avg|Min|Max|Size|Width|Height|Duration|Elapsed)$/;
 
 /** True when a field NAME looks like it holds a secret meant to stay private.
  *  Skips public-key-style names and identifier/metadata suffixes to avoid the
  *  false positives that made the old heuristic cry wolf. */
 function _looksSecret(key: string): boolean {
-  if (!SECRET_FIELD_RE.test(key)) return false;
+  if (!_mentionsSecret(key)) return false;
   if (PUBLIC_HINT_RE.test(key)) return false;
   if (NONSECRET_SUFFIX_RE.test(key)) return false;
   return true;
@@ -430,12 +455,31 @@ function buildUIStateGetter(composed: ComposedCells): UIStateResult {
 
   for (const f of composed.cells) {
     const resolved: CellFieldFilter = f.__aio.ui ?? "all";
-    if (resolved === "all") {
-      cellPatchStrategies.set(f.__aio.id, "raw");
-    } else if (resolved === "none") {
+    // ORDER IS LOAD-BEARING: `uiForUser` outranks the "all" shortcut.
+    //
+    // `normalizeUiFilter` returns undefined for a `ui` with no
+    // include/exclude (cell-helpers.ts), so `ui: { forUser }` ALONE resolved
+    // to "all" and classified as `raw` — the `uiForUser` branch below was
+    // unreachable without a structural filter beside it. Raw means Immer
+    // patches computed from UNFILTERED server state go to every client,
+    // subscription-filtered only (server-broadcast.ts): the per-user filter
+    // guarded the full-state frame and nothing else.
+    //
+    // That is a privacy hole AND a corruption bug — raw ops carry raw ARRAY
+    // INDICES, but the client's array was shortened by forUser, so patches
+    // land at the wrong index (a field report: "one field reflected the
+    // filter, another was stale"; the author added a nine-field `include`
+    // purely to force this classification).
+    //
+    // `forUser` states the intent unambiguously and "full" implements it
+    // exactly — which is what docs/state/cell-visibility.md has always
+    // documented. `"none"` still wins: an invisible cell stays invisible.
+    if (resolved === "none") {
       cellPatchStrategies.set(f.__aio.id, "skip");
     } else if (f.__aio.uiForUser) {
       cellPatchStrategies.set(f.__aio.id, "full");
+    } else if (resolved === "all") {
+      cellPatchStrategies.set(f.__aio.id, "raw");
     } else {
       cellPatchStrategies.set(f.__aio.id, "filter");
       if ("include" in resolved) {
@@ -516,9 +560,17 @@ function buildUIStateGetter(composed: ComposedCells): UIStateResult {
 function buildVisibilityReport(composed: ComposedCells): VisibilityRow[] {
   const rows: VisibilityRow[] = [];
   for (const f of composed.cells) {
-    const uiResolved: CellFieldFilter | "forUser" = f.__aio.uiForUser
+    // "none" outranks forUser, exactly as the strategy does: an invisible
+    // cell sends nothing, so reporting "forUser" would claim a filter is
+    // doing work on a wire that carries no data at all. The report is the one
+    // place an author checks that their filter is in force — it must never
+    // name a filter the broadcast path is not applying.
+    const ui = f.__aio.ui ?? "all";
+    const uiResolved: CellFieldFilter | "forUser" = ui === "none"
+      ? "none"
+      : f.__aio.uiForUser
       ? "forUser"
-      : (f.__aio.ui ?? "all");
+      : ui;
     rows.push({
       cell: f.__aio.id,
       ui: uiResolved,

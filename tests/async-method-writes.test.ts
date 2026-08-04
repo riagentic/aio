@@ -147,3 +147,58 @@ Deno.test("async: read-your-writes survives a no-op write + flush (stale overlay
   assertEquals(c.count, 7, "s.count + 1 must see the write from this batch");
   await ui.dispose();
 });
+
+// ── throw semantics: the ONE place sync and async methods differ ──────────
+//
+// A field report (dm #4) worked this out the hard way: it wrote the reason for
+// a refusal into state and threw, and the reason never persisted. A SYNC method
+// is one Immer recipe — a throw discards the whole draft, so a guard cannot
+// both record why it refused and reject. An ASYNC method commits incrementally,
+// so everything it wrote is already state when it throws.
+//
+// Both behaviours are correct for their model and neither can change without
+// breaking the other, so the contract is DOCUMENTED (docs/state/methods.md
+// "Error handling") — and pinned here, because a doc claim with no gate is how
+// it silently drifts.
+Deno.test("throw: a SYNC method's writes are rolled back, an ASYNC method's are kept", async () => {
+  const c = cell("thr-sem", {
+    state: { syncNote: "", syncN: 0, asyncNote: "", asyncPost: "" },
+    methods: {
+      // deno-lint-ignore no-explicit-any
+      refuseSync(s: any) {
+        s.syncNote = "refused: too large";
+        s.syncN = 1;
+        throw new Error("sync refusal");
+      },
+      // deno-lint-ignore no-explicit-any
+      async refuseAsync(s: any) {
+        s.asyncNote = "refused: too large";
+        await sleep(2);
+        s.asyncPost = "written after the await";
+        throw new Error("async refusal");
+      },
+    },
+  });
+  const App = () => h("div", null, `${c.syncNote}${c.asyncNote}`);
+  const ui = await testUI(App, { document: doc() });
+
+  // deno-lint-ignore no-explicit-any
+  await (c as any).refuseSync().catch(() => {});
+  await ui.settle();
+  assertEquals(
+    [c.syncNote, c.syncN],
+    ["", 0],
+    "a sync method that throws must commit NOTHING — the draft is discarded",
+  );
+
+  // deno-lint-ignore no-explicit-any
+  await (c as any).refuseAsync().catch(() => {});
+  await ui.settle();
+  await sleep(20);
+  assertEquals(
+    [c.asyncNote, c.asyncPost],
+    ["refused: too large", "written after the await"],
+    "an async method commits incrementally — its writes survive its throw",
+  );
+  await ui.dispose();
+});

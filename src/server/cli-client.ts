@@ -12,6 +12,14 @@ import {
   v1PeerReason,
 } from "../protocol/envelope.ts";
 import { bindCell } from "../state/cell-catalog.ts";
+import { _releaseCellBindings } from "../state/cell-reactive.ts";
+import type { CellDef, Msg } from "../state/cell-types.ts";
+import {
+  ackMethodKey,
+  createAckRegistry,
+  SETTLES_CALLS,
+} from "../protocol/ack-registry.ts";
+import { ACK_TIMEOUT_MS } from "../protocol/protocol-types.ts";
 import { VERSION } from "./aio-cli.ts";
 import {
   negotiateProtocol,
@@ -76,7 +84,14 @@ export type CliApp<S> = {
 /** Connect to an aio server. URL can be http:// or ws:// — protocol is auto-detected. */
 export function connectCli<S>(
   url: string,
-  opts?: { token?: string },
+  opts?: {
+    token?: string;
+    /** Ceiling for one bound-cell call, ms (0 = wait indefinitely). Defaults
+     *  to the shared `ACK_TIMEOUT_MS`. A CLI client has no page shell, so the
+     *  server's per-method budgets cannot be bridged to it — an app whose
+     *  methods legitimately run for minutes raises this. */
+    ackTimeoutMs?: number;
+  },
 ): CliApp<S> {
   let state: S | null = null;
   let ws: WebSocket | null = null;
@@ -86,7 +101,40 @@ export function connectCli<S>(
   let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
   const queue: Array<{ type: string; payload?: unknown }> = [];
   const listeners = new Set<(state: S) => void>();
-  const _pending = new Map<string, () => void>();
+  // One registry PER CONNECTION (not the browser's module-level singleton):
+  // `connectCli` can be called more than once in a process, and one client's
+  // disconnect must never settle another's pending calls (D2).
+  const _pending = createAckRegistry(() =>
+    opts?.ackTimeoutMs ?? ACK_TIMEOUT_MS
+  );
+  // Cells bound through THIS client — released on close() so the same defs can
+  // be bound again by a later client (a cell def binds to exactly ONE
+  // dispatcher, and until now there was no way to give it back).
+  const _bound: import("../state/cell-types.ts").CellDef[] = [];
+
+  /** Write an action, or queue it while the socket is down.
+   *
+   *  Returns which happened, because the caller must be able to tell a real
+   *  send from a silent drop: this used to `return` without sending OR queuing
+   *  once the client had connected at least once, so an action issued during a
+   *  reconnect vanished with no error anywhere — a quiet write loss in exactly
+   *  the window a reconnecting client spends most of its time in. */
+  function _trySend(
+    action: { type: string; payload?: unknown },
+  ): { written: boolean; queued: boolean } {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(enc("action", action));
+      return { written: true, queued: false };
+    }
+    if (queue.length < WS_MAX_QUEUE) {
+      queue.push(action);
+      return { written: false, queued: true };
+    }
+    console.warn(
+      `[aio:cli] offline queue full (${WS_MAX_QUEUE}) — action "${action.type}" was NOT sent`,
+    );
+    return { written: false, queued: false };
+  }
 
   let _readyResolve: ((s: S) => void) | null = null;
   const ready = new Promise<S>((r) => {
@@ -143,11 +191,24 @@ export function connectCli<S>(
         case "diag":
           return;
         // Per-action acks for bound-cell method calls.
+        //
+        // The ack carries `ok`, the method's return `value`, and on refusal
+        // the server's `error` — this used to read ONLY `cid` and resolve, so
+        // a method that threw resolved exactly like one that succeeded and
+        // every return value was dropped. An app could not tell "done" from
+        // "refused" (a field report built a whole parallel error channel —
+        // ~150 lines — because a promise could not reject). The browser
+        // clients have always branched on `ok`; this is that same contract.
         case "ack": {
-          const { cid } = (frame.d ?? {}) as AckPayload;
-          if (typeof cid === "string") {
-            _pending.get(cid)?.();
-            _pending.delete(cid);
+          const { cid, ok, value, error } = (frame.d ?? {}) as AckPayload;
+          if (typeof cid !== "string") return;
+          if (ok === false) {
+            _pending.reject(
+              cid,
+              new Error(error ?? "the server refused the action"),
+            );
+          } else {
+            _pending.resolve(cid, value);
           }
           return;
         }
@@ -197,15 +258,22 @@ export function connectCli<S>(
     socket.onerror = () => {};
 
     socket.onclose = (ev) => {
-      // A dropped connection can never ack — resolve outstanding bound-method
-      // calls so they don't hang (delivery is at-most-once; the app's next
-      // state broadcast is the truth).
-      if (_pending.size > 0) {
+      // A dropped connection can never ack. These calls did NOT demonstrably
+      // succeed, so they must not resolve: resolving them reported success for
+      // work whose fate is unknown, and an app that awaited one carried on as
+      // though its write had landed. Rejecting is the honest answer — the
+      // error says what is and is not known, and `state` remains the truth.
+      const lost = _pending.rejectAll(
+        new Error(
+          "connection lost before the server confirmed this action — it may " +
+            "or may not have been applied; re-check state before retrying " +
+            "(the action is not resent automatically)",
+        ),
+      );
+      if (lost > 0) {
         console.warn(
-          `[aio:cli] connection lost with ${_pending.size} unacked action(s) — resolving; verify via state`,
+          `[aio:cli] connection lost with ${lost} unacked action(s) — rejected; verify via state`,
         );
-        for (const resolve of _pending.values()) resolve();
-        _pending.clear();
       }
       ws = null;
       if (closed) return;
@@ -235,36 +303,53 @@ export function connectCli<S>(
     },
     ready,
 
+    // Queue whenever the socket is down — NOT only before the first connect.
+    // The old `!wasConnected` guard meant that once a client had connected,
+    // an action sent during a reconnect was neither written nor queued and
+    // vanished with no error: a silent write loss in the window a
+    // reconnecting client spends most of its time in.
     send(action: { type: string; payload?: unknown }): void {
-      if (ws && ws.readyState === WebSocket.OPEN) {
-        ws.send(enc("action", action));
-      } else if (!wasConnected && queue.length < WS_MAX_QUEUE) {
-        queue.push(action);
-      }
+      _trySend(action);
     },
 
     bind(...cells: import("../state/cell-types.ts").CellDef[]): void {
       for (const f of cells) {
+        // The dispatcher SETTLES the call itself: its promise is the real
+        // outcome, carried back on the ack. Without this marker `bindCell`'s
+        // async branch returns a LOCAL pending-call promise that nothing in
+        // this process ever resolves, so every async bound method rejected at
+        // the call ceiling — 30 seconds after the method had already
+        // succeeded (see SETTLES_CALLS in protocol/ack-registry.ts).
+        const dispatch = (action: Msg): Promise<unknown> => {
+          const cid = crypto.randomUUID();
+          const ackd = _pending.register(cid, {
+            methodKey: ackMethodKey(action),
+          });
+          const sent = _trySend(
+            { ...action, cid } as { type: string; payload?: unknown },
+          );
+          // Queued while offline: the ack clock must not run against a call
+          // that has not been written yet, and if we close still holding it,
+          // close() rejects it rather than reporting a success that never
+          // happened.
+          if (!sent.queued && !sent.written) {
+            _pending.reject(
+              cid,
+              new Error(
+                "not connected and the offline queue is full — the action " +
+                  "was NOT sent",
+              ),
+            );
+          }
+          return ackd;
+        };
+        (dispatch as unknown as Record<symbol, boolean>)[SETTLES_CALLS] = true;
         bindCell(
           f,
-          (action) => {
-            const cid = crypto.randomUUID();
-            const ackd = new Promise<void>((resolve) => {
-              _pending.set(cid, resolve);
-            });
-            this.send(
-              { ...action, cid } as { type: string; payload?: unknown },
-            );
-            // Not connected → the send was queued or dropped and no ack can
-            // arrive; resolve now instead of hanging (at-most-once delivery).
-            if (!this.connected) {
-              _pending.delete(cid);
-              return Promise.resolve();
-            }
-            return ackd;
-          },
+          dispatch,
           () => (state ?? {}) as Record<string, unknown>,
         );
+        _bound.push(f);
       }
     },
 
@@ -285,17 +370,35 @@ export function connectCli<S>(
       ws?.close();
       ws = null;
       listeners.clear();
-      // resolve outstanding method acks — bound calls must not hang forever
-      for (const resolve of _pending.values()) resolve();
-      _pending.clear();
+      // Outstanding calls REJECT, never resolve: closing does not make an
+      // unconfirmed action succeed, and a bound call that quietly resolved on
+      // close reported work the server may never have seen.
+      _pending.rejectAll(
+        new Error("client closed before the server confirmed this action"),
+      );
+      // Give the cell definitions back. A def binds to exactly ONE dispatcher
+      // (D2), and without this a second `connectCli(...).bind(cell)` — after a
+      // reconnect-by-hand, or in a test file that also runs the server —
+      // threw "already bound" forever, with no way to undo it.
+      if (_bound.length > 0) {
+        _releaseCellBindings(_bound);
+        _bound.length = 0;
+      }
     },
   };
 }
 
 /** Connect to an aio server via Unix Domain Socket — same API as connectCli but over UDS/NDJSON.
  *  Uses Deno.connect({ transport: 'unix' }) — no TCP port needed. */
-export function connectCliUDS<S>(socketPath: string): CliApp<S> {
-  const _udsPending = new Map<string, () => void>();
+export function connectCliUDS<S>(
+  socketPath: string,
+  opts?: { ackTimeoutMs?: number },
+): CliApp<S> {
+  // Same per-connection registry as the WS client — see connectCli.
+  const _udsPending = createAckRegistry(() =>
+    opts?.ackTimeoutMs ?? ACK_TIMEOUT_MS
+  );
+  const _bound: CellDef[] = [];
   let state: S | null = null;
   let conn: Deno.Conn | null = null;
   let writer: WritableStreamDefaultWriter<Uint8Array> | null = null;
@@ -364,10 +467,19 @@ export function connectCliUDS<S>(socketPath: string): CliApp<S> {
                 switch (frame.t) {
                   // Per-action acks for bound-cell method calls
                   case "ack": {
-                    const { cid } = (frame.d ?? {}) as AckPayload;
-                    if (typeof cid === "string") {
-                      _udsPending.get(cid)?.();
-                      _udsPending.delete(cid);
+                    // Branch on `ok` — parity with the WS client and the
+                    // browser transports. Dropping it resolved a refused
+                    // call exactly like a successful one.
+                    const { cid, ok, value, error } = (frame.d ??
+                      {}) as AckPayload;
+                    if (typeof cid !== "string") continue;
+                    if (ok === false) {
+                      _udsPending.reject(
+                        cid,
+                        new Error(error ?? "the server refused the action"),
+                      );
+                    } else {
+                      _udsPending.resolve(cid, value);
                     }
                     continue;
                   }
@@ -418,12 +530,21 @@ export function connectCliUDS<S>(socketPath: string): CliApp<S> {
             }
           } catch { /* connection closed */ }
           // Dropped UDS connection can never ack — see the WS onclose note.
-          if (_udsPending.size > 0) {
-            console.warn(
-              `[aio:cli] UDS connection lost with ${_udsPending.size} unacked action(s) — resolving; verify via state`,
+          {
+            // Reject, never resolve — an unconfirmed action did not succeed
+            // just because the socket died (see connectCli's onclose).
+            const lost = _udsPending.rejectAll(
+              new Error(
+                "connection lost before the server confirmed this action — " +
+                  "it may or may not have been applied; re-check state " +
+                  "before retrying (the action is not resent automatically)",
+              ),
             );
-            for (const resolve of _udsPending.values()) resolve();
-            _udsPending.clear();
+            if (lost > 0) {
+              console.warn(
+                `[aio:cli] UDS connection lost with ${lost} unacked action(s) — rejected; verify via state`,
+              );
+            }
           }
           conn = null;
           writer = null;
@@ -464,26 +585,22 @@ export function connectCliUDS<S>(socketPath: string): CliApp<S> {
       }
     },
 
-    bind(...cells: import("../state/cell-types.ts").CellDef[]): void {
+    bind(...cells: CellDef[]): void {
       for (const f of cells) {
-        bindCell(
-          f,
-          (action) => {
-            const cid = crypto.randomUUID();
-            const ackd = new Promise<void>((resolve) => {
-              _udsPending.set(cid, resolve);
-            });
-            this.send(
-              { ...action, cid } as { type: string; payload?: unknown },
-            );
-            if (!this.connected) {
-              _udsPending.delete(cid);
-              return Promise.resolve();
-            }
-            return ackd;
-          },
-          () => (state ?? {}) as Record<string, unknown>,
-        );
+        // Marked SETTLES_CALLS for the same reason as the WS client: the ack
+        // is the call's real outcome, and without it every async bound method
+        // waited on a local promise nobody would ever settle.
+        const dispatch = (action: Msg): Promise<unknown> => {
+          const cid = crypto.randomUUID();
+          const ackd = _udsPending.register(cid, {
+            methodKey: ackMethodKey(action),
+          });
+          this.send({ ...action, cid } as { type: string; payload?: unknown });
+          return ackd;
+        };
+        (dispatch as unknown as Record<symbol, boolean>)[SETTLES_CALLS] = true;
+        bindCell(f, dispatch, () => (state ?? {}) as Record<string, unknown>);
+        _bound.push(f);
       }
     },
 
@@ -507,8 +624,13 @@ export function connectCliUDS<S>(socketPath: string): CliApp<S> {
       conn = null;
       writer = null;
       listeners.clear();
-      for (const resolve of _udsPending.values()) resolve();
-      _udsPending.clear();
+      _udsPending.rejectAll(
+        new Error("client closed before the server confirmed this action"),
+      );
+      if (_bound.length > 0) {
+        _releaseCellBindings(_bound);
+        _bound.length = 0;
+      }
     },
   };
 }

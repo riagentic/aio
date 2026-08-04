@@ -153,8 +153,17 @@ export type MethodsCellConfig<
   version?: number;
   /** Migration hook — called when persisted version < current version.
    *  Receives old state (after deepMerge with defaults) and old version number.
-   *  Must return the migrated state. */
-  onMigrate?: (state: S, fromVersion: number) => S;
-  onInit?: (app: ScopedApp<S>) => void;
-  onDestroy?: (app: ScopedApp<S>) => void;
+   *  Must return the migrated state.
+   *
+   *  `NoInfer` is load-bearing here, and on the two hooks below: `state` must
+   *  be the SOLE inference site for `S`. Without it, TypeScript infers `S`
+   *  from whichever property mentions the state type FIRST — so writing
+   *  `onMigrate` above `state` (the order the docs list them in) inferred `S`
+   *  from the hook's annotation and every method body lost its typing, with
+   *  the error reported ten lines away in the methods and nothing pointing at
+   *  ordering. A field report lost an afternoon to it and "fixed" it by
+   *  widening the annotation, which silently widens `S` for the whole cell. */
+  onMigrate?: (state: NoInfer<S>, fromVersion: number) => NoInfer<S>;
+  onInit?: (app: ScopedApp<NoInfer<S>>) => void;
+  onDestroy?: (app: ScopedApp<NoInfer<S>>) => void;
 };

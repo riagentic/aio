@@ -2,7 +2,7 @@
 import { log } from "../diagnostics/logger.ts";
 
 /** Framework version — printed by --version, checked in tests */
-export const VERSION = "1.0.0-alpha44";
+export const VERSION = "1.0.0-alpha45";
 
 /** What `--version` prints: what this artifact IS, and what it was built with.
  *
@@ -30,6 +30,12 @@ export type CliFlags = {
   prod?: boolean;
   version?: boolean;
   expose?: boolean;
+  /** Serve `--expose` over PLAIN HTTP (no TLS). Only sound when the payload is
+   *  already end-to-end encrypted or a TLS-terminating proxy sits in front —
+   *  boot warns loudly either way. CLI-only on purpose: "ship this app without
+   *  transport encryption" is an operator's decision at run time, not an
+   *  author's default baked into a binary. */
+  noTls?: boolean;
   help?: boolean;
   serverUrl?: string;
   width?: number;
@@ -59,6 +65,7 @@ export function parseCli(args: readonly string[] = Deno.args): CliFlags {
     "--prod",
     "--version",
     "--expose",
+    "--no-tls",
     "--help",
     "--server-url",
     "--width=",
@@ -94,6 +101,7 @@ export function parseCli(args: readonly string[] = Deno.args): CliFlags {
     else if (arg === "--prod") r.prod = true;
     else if (arg === "--version") r.version = true;
     else if (arg === "--expose") r.expose = true;
+    else if (arg === "--no-tls") r.noTls = true;
     else if (arg === "--help") r.help = true;
     else if (arg === "--server-url") r.serverUrl = "";
     else if (arg.startsWith("--server-url=")) r.serverUrl = arg.slice(13);
@@ -146,6 +154,10 @@ Flags:
   --verbose        Verbose logging (actions, state, effects, WS, HTTP)
   --prod           Serve pre-built dist/app.js
   --expose         Bind 0.0.0.0 + HTTPS + generate auth token for LAN access
+                   (also settable in code: aio.run({ expose: true }))
+  --no-tls         With --expose: serve PLAIN HTTP/WS — everything on the wire
+                   is readable by the LAN. Only for already-encrypted payloads
+                   or behind a TLS-terminating proxy
   --tls-cert=PATH  TLS certificate file (PEM) — used with --expose (auto-generated if omitted)
   --tls-key=PATH   TLS private key file (PEM) — used with --expose (auto-generated if omitted)
                    (--cert / --key are accepted as deprecated aliases)

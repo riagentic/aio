@@ -33,6 +33,19 @@ import { _applyFullState, _resetSignals } from "./state/state-signals.ts";
 
 // Re-exports for user code
 export { msg };
+// The AIR component surface standalone apps share with server-backed ones:
+// the standalone runtime mounts through the same renderer, so the lifecycle
+// hooks work identically — they only need to be visible under the "aio/air"
+// alias the android bundle maps to this module.
+export {
+  onCleanup,
+  onMount,
+  useId,
+  useOptimistic,
+  useRef,
+  useSignal,
+} from "./air/aio-renderer.ts";
+export { useInterval, useRaf } from "./air/raf.ts";
 
 /** Extracts return types of all function members into a union */
 export type UnionOf<T> = {

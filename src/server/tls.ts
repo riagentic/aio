@@ -22,10 +22,34 @@ function localIPs(): string[] {
   }
 }
 
+/** Fallback subject when no appId is supplied — the constant every aio app
+ *  used to share (see `certCommonName`). */
+export const DEFAULT_CERT_CN = "aio-local";
+
+/** The cert's subject/issuer common name: `aio-<appId>`, never a shared
+ *  constant.
+ *
+ *  Why it matters: a client picks a trust anchor by matching the ISSUER DN, so
+ *  when every aio app on earth issued `CN = aio-local`, a stale cert in a trust
+ *  store — or the second app in a two-app repo — shadowed the right one and
+ *  rustls failed the handshake with `BadSignature`, which names nothing about
+ *  the actual cause. A per-app DN makes the collision impossible.
+ *
+ *  Hostname verification reads subjectAltName, so the CN is identity only —
+ *  browsers are unaffected by its value. */
+export function certCommonName(appId?: string): string {
+  const slug = (appId ?? "").trim().replace(/[^A-Za-z0-9._-]/g, "-").slice(
+    0,
+    48,
+  );
+  return slug ? `aio-${slug}` : DEFAULT_CERT_CN;
+}
+
 /** Generate self-signed ECDSA P-256 cert via openssl (available on Linux/macOS always, Windows via Git Bash) */
 async function generateWithOpenssl(
   certPath: string,
   keyPath: string,
+  appId?: string,
 ): Promise<void> {
   const ips = localIPs();
   const ipLines = ["127.0.0.1", "::1", ...ips].map((ip, i) =>
@@ -41,10 +65,19 @@ async function generateWithOpenssl(
         "x509_extensions = v3",
         "prompt = no",
         "[dn]",
-        "CN = aio-local",
+        `CN = ${certCommonName(appId)}`,
         "[v3]",
+        // CA:FALSE is load-bearing, not boilerplate: rustls REJECTS a
+        // self-signed leaf carrying CA:TRUE as `CaUsedAsEndEntity`. A
+        // CA:FALSE self-signed cert works correctly when pinned as its own
+        // trust anchor, which is exactly how `am profile` hands it out.
+        "basicConstraints = critical,CA:FALSE",
         "keyUsage = critical,digitalSignature,keyEncipherment",
         "extendedKeyUsage = serverAuth",
+        "subjectKeyIdentifier = hash",
+        // Pins WHICH key signed this cert, so a client with several aio certs
+        // in its store cannot pair this cert with another app's anchor.
+        "authorityKeyIdentifier = keyid:always",
         "subjectAltName = @sans",
         "[sans]",
         "DNS.1 = localhost",
@@ -83,11 +116,19 @@ async function generateWithOpenssl(
 }
 
 /** Load existing cert from dir or generate a new self-signed one.
- *  Cert persists across restarts — deleted cert triggers regeneration. */
+ *  Cert persists across restarts — deleted cert triggers regeneration.
+ *
+ *  A cert already on disk is reused VERBATIM, old `CN = aio-local` included:
+ *  clients that pinned it keep working, and only newly generated certs carry
+ *  the per-app DN. Delete `tls-cert.pem`/`tls-key.pem` to re-issue. */
 export async function loadOrCreateCert(
   certDir: string,
   customCert?: string,
   customKey?: string,
+  /** App identity woven into the cert's subject/issuer DN (`certCommonName`).
+   *  Optional and last so existing callers keep compiling; omitting it keeps
+   *  the legacy shared `aio-local` name. */
+  appId?: string,
 ): Promise<TlsCert> {
   // User-provided cert takes precedence
   if (customCert && customKey) {
@@ -111,7 +152,7 @@ export async function loadOrCreateCert(
     return { cert, key, certPath, keyPath, selfSigned: true };
   } catch { /* generate */ }
 
-  await generateWithOpenssl(certPath, keyPath);
+  await generateWithOpenssl(certPath, keyPath, appId);
   const cert = await Deno.readTextFile(certPath);
   const key = await Deno.readTextFile(keyPath);
   return { cert, key, certPath, keyPath, selfSigned: true };

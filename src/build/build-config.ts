@@ -17,9 +17,20 @@ import {
  *  module IS the app — the build, `dev:android`'s server child, the app dir
  *  rule below — reads it from here. A hardcoded `"src/app.ts"` elsewhere is a
  *  second decider, and it breaks the moment an app puts its entry anywhere
- *  else (WYSIDIWYSIP). */
-export function resolveEntry(mainConfig: Record<string, unknown>): string {
-  return (mainConfig.entry as string | undefined) ?? "src/app.ts";
+ *  else (WYSIDIWYSIP).
+ *
+ *  `override` is a per-BUILD entry (`--entry=`, which `build-all` passes for a
+ *  target that declares its own `entry`) — one repo can hold two apps, a relay
+ *  and a client, and each target must compile its own module. It flows through
+ *  the same decider so `appDir` and everything derived from it follow for free;
+ *  a target-specific app-dir rule would be exactly the second decider this
+ *  function exists to prevent. */
+export function resolveEntry(
+  mainConfig: Record<string, unknown>,
+  override?: string,
+): string {
+  return override?.trim() || (mainConfig.entry as string | undefined) ||
+    "src/app.ts";
 }
 
 /** THE app-dir decider (WYSIDIWYSIP), as one named rule rather than an
@@ -136,7 +147,13 @@ export async function loadBuildConfig(): Promise<BuildConfig> {
   );
   const rendererMode = "aio" as const;
   const appTitle = mainConfig.title as string | undefined;
-  const configEntry = resolveEntry(mainConfig);
+  // --entry=<module> overrides deno.json's `entry` for THIS build only (a
+  // per-target entry from build-all). appDir, and with it every app-asset path,
+  // derives from it through the existing rule — no second app-dir rule.
+  const entryArg = Deno.args.find((a) => a.startsWith("--entry="))?.slice(
+    "--entry=".length,
+  );
+  const configEntry = resolveEntry(mainConfig, entryArg);
   const appDir = resolveAppDir(root, configEntry);
   const defaultName = appTitle
     ? slugify(appTitle)

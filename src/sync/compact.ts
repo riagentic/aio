@@ -121,6 +121,12 @@ export const SYNC_SCHEMA: string[] = [
     hlc_node TEXT NOT NULL, server_ts INTEGER NOT NULL)`,
   `CREATE INDEX IF NOT EXISTS idx_sync_ops_cell_hlc
     ON sync_ops(cell, hlc_phys, hlc_cnt, hlc_node)`,
+  // Delivery reads by server_ts (`loadOpsSince`), and the cursor reservation
+  // reads MAX(server_ts) on every sync round (`server-store.highWaterTs`) —
+  // both are index lookups with these, full scans without them. Idempotent, so
+  // existing databases pick them up on the next boot (no migration needed).
+  `CREATE INDEX IF NOT EXISTS idx_sync_ops_cell_ts ON sync_ops(cell, server_ts)`,
+  `CREATE INDEX IF NOT EXISTS idx_sync_ops_ts ON sync_ops(server_ts)`,
   `CREATE TABLE IF NOT EXISTS sync_snapshots (
     cell TEXT PRIMARY KEY, version INTEGER NOT NULL, state TEXT NOT NULL,
     hlc_phys INTEGER NOT NULL, hlc_cnt INTEGER NOT NULL, hlc_node TEXT NOT NULL)`,

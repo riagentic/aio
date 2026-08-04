@@ -13,6 +13,7 @@ import type {
   Suspense,
 } from "./vdom-types.ts";
 import { _getLazyListeners } from "./vdom-lazy.ts";
+import { _reportHookError } from "./hook-error.ts";
 
 // ── h() — JSX factory ────────────────────────────────────────────────
 
@@ -212,9 +213,30 @@ export function _registerLazyListeners(
 
 // ── Ref helpers ───────────────────────────────────────────────────────
 
-export function _callRef(ref: unknown, value: Node | null): void {
-  if (typeof ref === "function") ref(value);
-  else if (ref && typeof ref === "object" && "current" in ref) {
+/** Deliver a committed node to a `ref` — object refs by assignment, callback
+ *  refs by call.
+ *
+ *  A callback ref is USER CODE that runs INSIDE the commit (createDom / diff /
+ *  hydrate / unmount), so an unguarded throw here does not merely fail the
+ *  effect: it aborts the commit that invoked it. At mount that took the whole
+ *  tree down; on a re-render it left the diff half-applied — the vnode tree said
+ *  one thing, the DOM another, and elements went missing from the surface with
+ *  the render frozen. Same contract as afterRender/onMount: the effect is
+ *  contained and named, the commit stands.
+ *
+ *  `owner` is the element tag / component name used in that report. */
+export function _callRef(
+  ref: unknown,
+  value: Node | null,
+  owner?: string,
+): void {
+  if (typeof ref === "function") {
+    try {
+      (ref as (v: Node | null) => void)(value);
+    } catch (e) {
+      _reportHookError("ref", e, owner);
+    }
+  } else if (ref && typeof ref === "object" && "current" in ref) {
     (ref as { current: Node | null }).current = value;
   }
 }

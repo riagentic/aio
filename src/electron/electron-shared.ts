@@ -155,6 +155,22 @@ export function tmplWillNavigate(originExpr: string): string {
       }
     } catch {}
     return { action: 'deny' };
+  });
+  // Local hotfix: <webview> GUESTS need the same popup policy — the guest's
+  // 'new-window' DOM event was removed in Electron 22, so a renderer-side
+  // listener never fires and a target=_blank inside an embedded page did
+  // nothing at all (no window, no external open). The guest's own
+  // setWindowOpenHandler is the supported route.
+  win.webContents.on('did-attach-webview', (_ev, guest) => {
+    guest.setWindowOpenHandler(({ url }) => {
+      try {
+        const u = new URL(url);
+        if (u.protocol === 'http:' || u.protocol === 'https:') {
+          require('electron').shell.openExternal(url);
+        }
+      } catch {}
+      return { action: 'deny' };
+    });
   });`;
 }
 
