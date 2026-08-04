@@ -73,6 +73,51 @@ On a name collision (e.g. both `browser` and `server`, which each emit the bare
 binary) the second is suffixed with its target (`myapp-server`) — nothing is
 silently overwritten.
 
+### One repo, two apps — per-target `entry`
+
+The list form builds every target from the same `entry`. When the repo holds
+**two apps** — a relay server and the client that talks to it — write `targets`
+as an object and give each one its own module (and its own name):
+
+```jsonc
+// deno.json
+"entry": "src/app.ts",          // the default, for anything not overridden
+"build": {
+  "targets": {
+    "server":   { "entry": "src/relay/app.ts", "name": "relay" },
+    "electron": { "entry": "src/app.ts" }
+  },
+  "out": "dist"
+}
+```
+
+```
+dist/
+  relay        ← compiled from src/relay/app.ts
+  myapp-x86_64.AppImage   ← compiled from src/app.ts
+  manifest.json           targets[].binary + targets[].entry say which is which
+```
+
+- **`entry`** — the module this target compiles. Everything derived from the
+  entry follows it, including the app dir (`dirname(entry)`) that the bundler
+  reads `App.tsx`, `style.css` and `icon.png` from.
+- **`name`** — this target's binary/APK name, overriding `title`. Two different
+  apps must not share one name; without it they collide and the second is
+  suffixed as if it were another build of the first.
+- **`platforms`** — an OS/arch list for this target alone, overriding
+  `build.platforms`.
+
+Both spellings behave identically otherwise — `["server", "electron"]` is the
+object form with no overrides, and `--targets=server` still selects a subset
+without discarding its declared entry.
+
+> Chaining single-target builds by hand
+> (`build.ts --compile && build.ts
+> --electron`) does **not** work: each build
+> cleans the shared `dist/`, so the first binary is gone by the time the second
+> finishes. That is what the orchestrator is for — it moves each target's
+> artifacts out to staging before the next build starts.
+
 ## Build for other operating systems — `--platforms`
 
 The targets above are the **shell** (what kind of app). The other axis is the
@@ -247,6 +292,56 @@ Compiled binaries are **fully portable** — they serve the embedded `dist/` and
 run their WASM from any directory (an AppImage mount included); they never need
 their source tree at runtime.
 
+### Compiling an entry yourself
+
+Running `deno compile` on your own entry (a custom script, a monorepo task, CI)
+skips the pipeline above — so the two things it does for you have to be passed
+by hand. Both are exported, so nothing has to be rediscovered:
+
+```ts
+import { assetIncludes, compileArgs, dbWorkerInclude } from "aio/build";
+
+const args = compileArgs({
+  hasDist: true, // embed dist/ (the browser bundle)
+  workerInclude: dbWorkerInclude(), // ← the SQLite worker
+  assets: await assetIncludes(Deno.cwd()), // ← .wasm + compile.include + deno.json
+  excludes: [],
+  out: "myapp",
+  entry: "src/app.ts",
+});
+await new Deno.Command("deno", { args }).output();
+```
+
+**The SQLite worker is not optional.** Persistence always opens the
+worker-thread DB, and the worker is started with
+`new Worker(new URL("./db-worker.ts", import.meta.url))` — a construct
+`deno compile` cannot see in the module graph. Without it the binary compiles,
+boots, and then dies on the first DB call with
+`Module not found: …/src/db/db-worker.ts`. A compiled binary that is missing it
+says exactly that at boot, with the flag to add — it is never reported as a
+permissions problem.
+
+**Size flags.** A default `deno compile` of an aio app can carry the whole
+`node_modules` tree — including the ~300 MB Electron runtime, inside a headless
+server binary. One reporter's binary went **353 MB → 7 MB** with:
+
+```sh
+deno compile -A --node-modules-dir=none --exclude-unused-npm \
+  --include <aio-src>/src/db/db-worker.ts \
+  src/app.ts
+```
+
+- `--node-modules-dir=none` — resolve npm packages from the global cache instead
+  of embedding a `node_modules` directory.
+- `--exclude-unused-npm` — embed only the npm packages the module graph actually
+  reaches (without it, the whole lockfile snapshot goes in).
+- `<aio-src>` is wherever aio resolved for your project — `dep/aio/src` for a
+  vendored install, `node_modules/.deno/@riagentic+aio@<version>/src` for a JSR
+  one. Print it with `dbWorkerInclude()` rather than typing it.
+
+`aio build` already excludes the dev-only packages (electron, esbuild) for every
+target, which is why its binaries are small without either flag.
+
 ## compile:electron (desktop app)
 
 ```sh
@@ -314,7 +409,42 @@ cli.subscribe((s) => {
 | `connected`     | `boolean`             | Whether WS is currently open                                |
 | `ready`         | `Promise<S>`          | Resolves when first state arrives                           |
 
-Options: `{ token?: string }` — auth token for `--expose` / multi-user servers.
+| `bind(...cells)` | `(cells) => void` | Bind cell defs — `await cell.method()`
+over the socket |
+
+Options:
+
+- `token?: string` — auth token for `--expose` / multi-user servers.
+- `ackTimeoutMs?: number` — ceiling for one bound-cell call (0 = wait
+  indefinitely). A CLI client has no page shell, so the server's per-method
+  budgets can't be bridged to it; raise this for methods that legitimately run
+  for minutes.
+
+### What a bound call resolves to
+
+`cli.bind(cell)` makes `await cell.method(args)` dispatch over the socket. The
+promise mirrors a local call:
+
+- **resolves** with the method's return value once the server acks it;
+- **rejects** with the server's own message if the method threw;
+- **rejects** if the connection dropped, was closed, or the ceiling elapsed
+  before the server confirmed — the error says so, because an action the server
+  never confirmed must never look like a success. `state` is the source of truth
+  after such a failure; actions are not resent automatically.
+
+```ts
+try {
+  const order = await orders.place("sku-1"); // ← the method's return value
+} catch (e) {
+  console.error(`refused: ${e.message}`); // ← the server's own reason
+}
+```
+
+> **Connecting to `--expose` (TLS).** A self-signed server cert is not in any
+> trust store, so a CLI client refuses it. Point the process at the cert —
+> `DENO_CERT=~/.<appId>/data/tls/tls-cert.pem` — or hand out the cert with
+> `am profile`. A browser's click-through has no equivalent here: the connection
+> simply fails.
 
 ## compile:cli:remote (client-only binary)
 

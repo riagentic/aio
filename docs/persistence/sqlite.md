@@ -335,13 +335,36 @@ const db = createDB("./myapp.db", { readers: 2 });
 
 ## `deno compile` note
 
-Worker files aren't auto-embedded. Pass the worker explicitly:
+The DB runs in a Worker started with
+`new Worker(new URL("./db-worker.ts", import.meta.url))`, which `deno compile`
+cannot see in the module graph. It must be embedded explicitly — otherwise the
+binary compiles, boots, and dies on the first DB call with
+`Module not found: …/src/db/db-worker.ts`.
+
+`aio build` / `deno task build` do this for you. Compiling an entry yourself,
+take the flags from the framework rather than typing a path:
+
+```ts
+import { dbWorkerInclude } from "aio/build";
+
+await new Deno.Command("deno", {
+  args: ["compile", "-A", ...dbWorkerInclude(), "-o", "myapp", "src/app.ts"],
+}).output();
+```
+
+Or by hand, where `<aio-src>` is wherever aio resolved for your project —
+`dep/aio/src` for a vendored/source install,
+`node_modules/.deno/@riagentic+aio@<version>/src` for a JSR one (the version is
+part of the directory name; `node_modules/.deno/aio/…` is not a real path):
 
 ```sh
 deno compile --allow-read --allow-write \
-  --include node_modules/.deno/aio/src/db/db-worker.ts \
+  --include <aio-src>/src/db/db-worker.ts \
   main.ts
 ```
+
+See [build targets → compiling an entry yourself](../build/targets.md) for the
+size flags that go with it.
 
 ## `createDB` standalone
 

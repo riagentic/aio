@@ -234,6 +234,9 @@ export function createServer(config: ServerConfig): ServerHandle {
         ? { syncCells: config.syncCells }
         : {}),
       ...(config.callTimeouts ? { callTimeouts: config.callTimeouts } : {}),
+      ...(config.bootedCells && config.bootedCells.length
+        ? { bootedCells: config.bootedCells }
+        : {}),
     },
   });
 
@@ -274,6 +277,10 @@ export function createServer(config: ServerConfig): ServerHandle {
     debug,
     title,
     absBaseDir,
+    // DEV ONLY: prod serves the bundle, which already followed these imports
+    // at build time. Gating it here means a production server cannot be made
+    // to read outside its own root by a config key at all.
+    serveDirs: prod ? undefined : config.serveDirs,
     absDistDir,
     hasCSS,
     importMap: IMPORT_MAP,

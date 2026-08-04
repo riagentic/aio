@@ -1,5 +1,137 @@
 # Changelog
 
+## 1.0.0-alpha45 — the network boundary (2026-08-05)
+
+Two field reports, written independently, reached the same verdict: everything
+inside one process was excellent, and everything that crossed a socket had a
+sharp edge. The three worst were silent — a filter that did not filter, a
+certificate only browsers accept, and a promise that resolved on failure. An app
+author cannot see any of them from their own code. All three are closed, and
+verifying them found four more on the same seams.
+
+### A sync cursor is now durable by construction
+
+Found by the `sync-chaos` fuzzer during the release run, and **reachable in
+released alpha44**: a client's confirmed state could end up permanently missing
+ops — 94 where 97 were expected — with no error anywhere.
+
+`server_ts` was issued from an in-memory counter that ran ahead of anything the
+op-log could prove. Every duplicate re-send (a reconnect replays its whole
+pending buffer) burned a timestamp no row carried; compaction and D11-rejection
+deleted rows that held others. After a restart the server re-seeded from the
+surviving row maximum and began issuing timestamps **below a cursor it had
+already echoed to a client** — and since delivery filters `server_ts > cursor`
+strictly, those ops became undeliverable to that client forever.
+
+The reservation is now durable by construction — the high-water mark of the
+op-log _and_ the compaction watermark — and a duplicate no longer burns a
+timestamp. Pinned by `tests/sync/cursor-durability.test.ts`, including a
+300-step property that every cursor ever handed out remains a valid delivery
+boundary across duplicates, rejections, compaction and restarts. Two indexes
+were added for the new lookups (`IF NOT EXISTS`; no migration).
+
+### A per-user filter now really filters
+
+`ui: { forUser }` with no `include`/`exclude` beside it classified as the `raw`
+patch strategy, so every delta was computed from **unfiltered** server state and
+narrowed only by subscriptions — `forUser` guarded the initial frame and nothing
+else. It corrupted as well as leaked: raw ops carry raw array indices, and the
+client's array had already been shortened by the filter, so rows landed at the
+wrong position (the reporter's "one field reflected the filter, another was
+stale"). `docs/state/cell-visibility.md` had documented `forUser ⇒ full` all
+along — the code contradicted its own contract. Pinned as a **property** (a
+per-user filter is never bypassed by a strategy, whatever `ui` shape is added
+later) plus a two-client wire test that proves the leak they could only infer.
+
+### `--expose` and the CLI client compose again
+
+Their diagnosis (a missing `basicConstraints`) was **refuted** empirically: the
+cert works fine as a pinned anchor, and adding `CA:TRUE` is what rustls rejects.
+The real causes were two: `connectCli` had no way to trust a cert at all, and
+every aio cert on earth shared `CN=aio-local`, so a stale or sibling-app cert
+shadowed the right one and produced their exact `BadSignature`. Certs now carry
+a per-app CN (plus `CA:FALSE` and an authority key id), existing certs on disk
+are reused untouched, and the boot warning names non-browser clients — which
+refuse outright where a browser offers click-through — and the fix.
+
+### A CLI call tells you what happened
+
+`connectCli().bind(cell)` resolved a bound call even when the server-side method
+threw; the ack frame carries `ok` and `error`, and the client read neither.
+Return values were dropped the same way. Verifying it found worse:
+
+- **every async bound method was broken outright** — the binding awaited a local
+  pending-call promise that only an in-process executor can settle, so a
+  _successful_ remote call rejected 30 seconds later with "stopped waiting";
+- a **disconnect resolved** outstanding calls, reporting success for work whose
+  fate is unknown;
+- an action sent **while reconnecting** was neither written nor queued — a
+  silent write loss in the window a reconnecting client lives in.
+
+One ack registry now serves the browser and both CLI transports, per connection,
+so one client's disconnect can never settle another's calls.
+
+### `am` mutations were ungated (found in review)
+
+`verifyInstance` — whose own comment records a green e2e writing its rows into a
+production leaderboard — guarded reads only. Every mutation (`dispatch`, `sql`,
+`shutdown`, `trigger`, `snapshot`) could retarget whatever app happened to hold
+that port. Now gated, with a bounded TTL so a long-lived `amui` cannot refuse
+the right app by quoting one that exited. `am stop --port=N` identifies the app
+from that port instead of the current directory, and names the real cause —
+"port speaks TLS", "nothing is listening" — instead of a bare "app not running".
+
+### The four its own diagnostics did not catch
+
+- **An `afterRender` that threw took the whole render with it.** The button that
+  toggled the theme stopped _existing_ — two debug cycles away from an effect
+  that threw after it had rendered. An effect can no longer un-render the tree
+  that scheduled it.
+- **In the test surface, an absent boolean was a callable.** `checked` was
+  serialised only when true, and the handle proxy turns unknown properties into
+  lazy callables, so the natural assertion for "off" was unwritable and the
+  failure named neither cause.
+- **Cell config inference was order-dependent.** `onMigrate` above `state`
+  inferred the state type from the hook, and every method body silently lost its
+  typing — reported ten lines away, saying nothing about ordering. `state` is
+  the sole inference site now.
+- **Hot reload updated the bundle but not the booted cell set.** A UI that
+  rendered and did nothing, with the truth visible only through `am`. The
+  server's booted cells ride the `cfg` frame; the client says so, with the fix.
+
+### Quieter, sharper, and one thing everybody saw
+
+- **Every aio app had an unwanted white border.** The shell shipped no CSS reset
+  and no template ships a `style.css`, so every app inherited
+  `body{margin:8px}`. A two-rule baseline now ships on every target, before the
+  app's stylesheet so one rule overrides it.
+- The secret-name heuristic no longer fires on `latency`, `sequence`,
+  `currency`, `reference`, `influence` (`enc` was matched as a bare substring)
+  or on measurement suffixes — a warning that cries wolf teaches people to reach
+  for the escape hatch without reading it.
+- `aiol` no longer reports a plain **write** as a post-await read. The exemption
+  was line-level, so a `deno fmt`-wrapped assignment had no `=` on the reported
+  line and the hint was unsilenceable without lying. Tooling scripts no longer
+  count against the logger rule.
+- **`serveDirs`** — two apps in one repository can share a pure module instead
+  of a generated mirror a test has to police. Dev-only, read-only, every
+  `baseDir` guard unchanged.
+- **`expose` is a config key** and **`--expose --no-tls`** is sayable (loudly
+  warned) for payloads already end-to-end encrypted; the privacy warning and the
+  transport read one resolved value, so config-expose cannot silence it.
+- **Per-target build entry** — one repo, two apps — with the array form
+  unchanged.
+- A compiled binary missing the embedded SQLite worker says so and names
+  `--include`, instead of advising a permissions fix that cannot help;
+  `dbWorkerInclude()` is exported.
+- `am dispatch --args='["…"]'` gives positional arguments a spelling;
+  `t.as(user, fn)` tests `serverUser()` without an internal import; `appVersion`
+  says `unknown (…)` rather than a confident `0.0.0`; an effect-budget violation
+  names `perfBudget.methods`.
+
+Upgrade guide: `docs/upgrade/from-alpha44-to-alpha45.md` — three observable
+behavior changes, none requiring code.
+
 ## 1.0.0-alpha44 — what you see is what you ship (2026-08-04)
 
 A field report showed a prod Electron window with a white border dev never had:

@@ -3,8 +3,11 @@
 // overridable via ui.viewport, opt-out-able with `false`, plus a ui.head escape
 // hatch for meta/OG/favicon/fonts.
 
-import { assert, assertEquals } from "jsr:@std/assert";
-import { generateHTML } from "../src/server/server-html-gen.ts";
+import { assert, assertEquals, assertStringIncludes } from "jsr:@std/assert";
+import {
+  androidLocalHTML,
+  generateHTML,
+} from "../src/server/server-html-gen.ts";
 import { udsProdHTML } from "../src/electron/electron-shared.ts";
 
 const gen = (
@@ -125,4 +128,41 @@ Deno.test("electron aio:// shell: identical to the HTTP prod shell", () => {
 
 Deno.test("electron aio:// shell: still escapes the title", () => {
   assert(!udsProdHTML("<script>x</script>", false).includes("<script>x"));
+});
+
+// ── the baseline stylesheet is not optional ──────────────────────────────
+//
+// Every aio app used to render inside an ~8px white frame: the shell shipped
+// no CSS at all when the app had no style.css, so the browser default
+// `body{margin:8px}` applied — and NO template and NO example ships a
+// style.css, so that was every app until its author worked out why. Same
+// class as the 980px mobile viewport DEFAULT_VIEWPORT exists to fix: "broken
+// by default" is not a default.
+Deno.test("shell: a baseline reset ships on every target, with or without style.css", () => {
+  const shells: [string, string][] = [
+    ["prod", generateHTML("t", true, false, "{}")],
+    ["dev", generateHTML("t", false, false, "{}")],
+    ["prod+css", generateHTML("t", true, true, "{}")],
+    ["android-local", androidLocalHTML("t", false)],
+  ];
+  for (const [label, html] of shells) {
+    assertStringIncludes(html, "body{margin:0}", `${label}: body margin reset`);
+    assertStringIncludes(
+      html,
+      "box-sizing:border-box",
+      `${label}: box-sizing baseline`,
+    );
+  }
+});
+
+Deno.test("shell: the app's own stylesheet comes AFTER the baseline (it must win)", () => {
+  // A baseline the app cannot override is a straitjacket, not a default.
+  const html = generateHTML("t", true, true, "{}");
+  const base = html.indexOf("body{margin:0}");
+  const link = html.indexOf('rel="stylesheet"');
+  assert(base !== -1 && link !== -1, "both must be present");
+  assert(
+    base < link,
+    "the baseline must precede style.css so one app rule overrides it",
+  );
 });

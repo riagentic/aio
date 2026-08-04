@@ -623,18 +623,50 @@ export const checkPerformance: Checker = (ctx) => {
     }
   }
 
-  // console.log in non-test source.
+  // console.log in APP code.
   //
   // Not in a CLI client: there, stdout IS the product — printing the state it
   // just received is the whole program, and routing it through the structured
   // logger would prefix and level-filter the output the user asked for. The
   // scaffolded `src/client.ts` is exactly this, so the shipped template was
   // hinted at by the shipped linter on creation.
+  //
+  // Not in TOOLING either (field report, llama-master #9): a developer command
+  // — a `sync-shared.ts` that mirrors files, a codegen script, a one-off
+  // migration runner — prints to a terminal on purpose. It is not the app; it
+  // has no logger sinks, no client, and nobody greps its output by level.
+  //
+  // The scope answers ONE question an author can answer without reading this
+  // file: is this file part of what the APP runs?
+  //   app  = anything under the app's source dirs (`src/`, `cells/`) — aio's
+  //          own layout — plus, wherever it lives, any file that declares a
+  //          cell, is a component (`.tsx`), or boots the app (`aio.run(`).
+  //   tool = a script outside those dirs (the repo root; `scripts/`, `tools/`
+  //          are not scanned at all), or one carrying a `#!` shebang, that
+  //          declares none of the above.
+  // Both halves are deliberate. The shebang lets a script that must sit inside
+  // `src/` opt in by being an actual executable — a signal the author writes,
+  // not one the linter infers. And the cell/component/`aio.run` clause is
+  // absolute: a `console.log` in a CELL or a component is flagged no matter
+  // where the file sits, because that is the case the rule exists for.
+  const norm = (p: string) => p.replaceAll("\\", "/");
+  const inAppSourceDir = (f: typeof sourceFiles[number]) =>
+    norm(f.relative).startsWith("src/") ||
+    norm(f.relative).startsWith("cells/");
+  const isAppSurface = (f: typeof sourceFiles[number]) => {
+    if (f.ext === ".tsx") return true; // a component
+    const code = codeText(f.content);
+    return /\bcell\s*\(\s*['"`]/.test(code) ||
+      /\baio\s*\.\s*run\s*\(/.test(code);
+  };
+  const isTooling = (f: typeof sourceFiles[number]) =>
+    !isAppSurface(f) && (!inAppSourceDir(f) || /^#!/.test(f.content));
   const isCliClient = (f: typeof sourceFiles[number]) =>
     /\bconnectCli\b/.test(codeText(f.content));
   for (const file of sourceFiles) {
     if (file.name.endsWith(".test.ts")) continue;
     if (isCliClient(file)) continue;
+    if (isTooling(file)) continue;
     const logLines = file.lines
       .map((l, i) => ({ line: l.trim(), num: i + 1 }))
       .filter(({ line }) =>
@@ -1198,6 +1230,172 @@ export const checkTesting: Checker = (ctx) => {
 // 9. CODE PATTERNS
 // ══════════════════════════════════════════════════════════════════════
 
+/** Draft mutators — a method call that CHANGES the draft in place. A mutation
+ *  is a write: it always lands, so it is never the post-await hazard. */
+const DRAFT_MUTATORS = new Set([
+  "push",
+  "pop",
+  "shift",
+  "unshift",
+  "splice",
+  "sort",
+  "reverse",
+  "fill",
+  "copyWithin",
+  "set",
+  "add",
+  "delete",
+  "clear",
+]);
+
+/** An assignment operator at this offset — plain, compound, or increment.
+ *  `=(?!=)` keeps `==`/`===`/`!==` out; `>=`/`<=` never match because `>`/`<`
+ *  alone is not in the compound set. */
+const ASSIGN_AT =
+  /^(?:\+\+|--|(?:\*\*|>>>|>>|<<|&&|\|\||\?\?|[+\-*/%&|^])?=(?!=))/;
+
+/** Skip whitespace — and the comment husks `codeText` leaves behind (`//`,
+ *  the delimiters survive masking; only their bodies are blanked). Pure. */
+function skipTrivia(code: string, i: number): number {
+  for (;;) {
+    while (i < code.length && /\s/.test(code[i]!)) i++;
+    if (code[i] === "/" && code[i + 1] === "/") {
+      while (i < code.length && code[i] !== "\n") i++;
+      continue;
+    }
+    if (code[i] === "/" && code[i + 1] === "*") {
+      const end = code.indexOf("*/", i + 2);
+      i = end === -1 ? code.length : end + 2;
+      continue;
+    }
+    return i;
+  }
+}
+
+/** Walk a member/index chain starting right after the draft param — `.x`,
+ *  `[expr]`, `?.x` — and stop at the first thing that is not one. Reports
+ *  whether the chain ends in a MUTATOR CALL (`s.items.push(`). Pure. */
+function memberChain(
+  code: string,
+  from: number,
+): { end: number; mutator: boolean } {
+  let i = from;
+  let lastName: string | null = null;
+  for (;;) {
+    const j = skipTrivia(code, i);
+    if (code[j] === "?" && code[j + 1] === ".") {
+      i = j + 2;
+      continue;
+    }
+    if (code[j] === ".") {
+      let k = j + 1;
+      while (k < code.length && /[\w$]/.test(code[k]!)) k++;
+      lastName = code.slice(j + 1, k);
+      i = k;
+      continue;
+    }
+    if (code[j] === "[") {
+      let depth = 0, k = j;
+      for (; k < code.length; k++) {
+        if (code[k] === "[") depth++;
+        else if (code[k] === "]" && --depth === 0) break;
+      }
+      lastName = null;
+      i = Math.min(k + 1, code.length);
+      continue;
+    }
+    if (code[j] === "(") {
+      return {
+        end: i,
+        mutator: lastName !== null && DRAFT_MUTATORS.has(lastName),
+      };
+    }
+    return { end: i, mutator: false };
+  }
+}
+
+/** `++s.x` / `--s.x` / `delete s.x` — a write dressed as a prefix. Pure. */
+function isPrefixWrite(code: string, start: number): boolean {
+  let i = start - 1;
+  while (i >= 0 && /\s/.test(code[i]!)) i--;
+  if (
+    i >= 1 &&
+    (code.slice(i - 1, i + 1) === "++" || code.slice(i - 1, i + 1) === "--")
+  ) {
+    // A postfix `a++` has an operand before it — `a++ +s.x` is not a prefix.
+    let k = i - 2;
+    while (k >= 0 && /\s/.test(code[k]!)) k--;
+    if (k < 0 || !/[\w$)\]]/.test(code[k]!)) return true;
+  }
+  return /\bdelete\s*$/.test(code.slice(Math.max(0, start - 12), start));
+}
+
+/** Offsets of every genuine READ of `param.…` in `code`.
+ *
+ *  `code` must be code-masked (`codeText`), so a `s.x` written inside a comment
+ *  or a string is not a read.
+ *
+ *  A WRITE IS NOT A READ. `s.lastError = "…"` is precisely what a method is
+ *  SUPPOSED to do after its I/O — record the result — and flagging it made the
+ *  hint unsilenceable without lying: there is no read there to declare
+ *  deliberate with `// aiol-ok`, "which is how useful lints get ignored"
+ *  (field report, llama-master #4). The old test was line-level (`does this
+ *  line contain any write?`), which failed BOTH ways: a `deno fmt`-wrapped
+ *  `s.lastError =\n  String(err)` looked like a bare read (the report's line
+ *  189), and `s.x = s.y + 1` hid a genuine read behind the write on its line.
+ *  Classification is therefore per OCCURRENCE, and looks past the end of the
+ *  line. Excluded (writes):
+ *    • `s.x = v`, `s.x.y = v`, `s.x[i] = v` — assignment targets
+ *    • `s.x += 1`, `s.x++`, `++s.x`, `s.x ??= v` — compound / increment targets
+ *    • `s.items.push(v)` and friends — draft mutations; they always land
+ *    • `delete s.x`
+ *  Still reported (genuine post-await reads):
+ *    • the RHS — `s.x = s.y + 1` reads `s.y`
+ *    • the index — `s.items[s.idx] = v` reads `s.idx`
+ *    • an argument — `s.items.push(s.n)` reads `s.n`
+ *
+ *  DELIBERATE CALL: a compound assignment (`s.x += 1`) counts as a WRITE, even
+ *  though it does read the old value. The hazard this rule names is a value
+ *  that crossed the await STALE and then drove a decision or was stored
+ *  somewhere else. A compound assignment cannot be stale that way: it applies a
+ *  delta to whatever the field holds at the instant it runs (a draft read
+ *  overlays the method's own pending writes), so a concurrent commit in the gap
+ *  makes it MORE current, not less — the same reason a relative update is the
+ *  safe form under concurrency. It is also the framework's own documented shape
+ *  (`async tick(s) { await …; s.n += 1 }`), and a hint that fires on the docs is
+ *  a hint people stop reading. Pure. */
+export function draftReadOffsets(code: string, param: string): number[] {
+  const out: number[] = [];
+  // `(?<![\w$.])` — `other.s.count` is not a read of `s`.
+  // `(?!\$)` — draft META (`s.$signal`, `s.$live`, `s.$commit`) is framework
+  // surface, not app state another action can move under you.
+  const startRe = new RegExp(`(?<![\\w$.])${param}\\.(?!\\$)[\\w$]`, "g");
+  for (const m of code.matchAll(startRe)) {
+    const start = m.index!;
+    const chain = memberChain(code, start + param.length);
+    if (chain.mutator) continue;
+    const after = skipTrivia(code, chain.end);
+    if (ASSIGN_AT.test(code.slice(after, after + 5))) continue;
+    if (isPrefixWrite(code, start)) continue;
+    out.push(start);
+  }
+  return out;
+}
+
+/** 0-based line index for each ASCENDING offset — one pass, no slicing. Pure. */
+function linesOfOffsets(code: string, offsets: number[]): number[] {
+  const out: number[] = [];
+  let line = 0, pos = 0;
+  for (const off of offsets) {
+    while (pos < off && pos < code.length) {
+      if (code[pos] === "\n") line++;
+      pos++;
+    }
+    out.push(line);
+  }
+  return out;
+}
+
 export const checkPatterns: Checker = (ctx) => {
   const { sourceFiles, report } = ctx;
 
@@ -1260,7 +1458,8 @@ export const checkPatterns: Checker = (ctx) => {
     // above never saw. Deliberate re-reads are correct (reads overlay the
     // method's own pending writes), so this is a hint, once per method, on the
     // first post-await read. Writes and draft mutations (s.x = …, s.arr.push)
-    // are exempt — they always land.
+    // are exempt — they always land; `draftReadOffsets` above is the exact
+    // read/write split and carries the reasoning.
     // A `transaction: true` cell reads a STABLE snapshot across
     // awaits — the post-await read is intended and safe — so skip the hint for
     // files that opt in. See docs/state/transactional-methods.md.
@@ -1281,31 +1480,42 @@ export const checkPatterns: Checker = (ctx) => {
     //   3. `until(() => s.x)` / `race({...})` are the SANCTIONED way to wait on
     //      live state inside a method; re-reading is the entire point of the
     //      primitive. `mod.ts`'s own flagship example tripped this.
+    //   4. (llama-master #4) A plain WRITE was reported as a read — see
+    //      `draftReadOffsets`.
     const isTransactional = /\btransaction\s*:\s*(?:true|\{)/.test(
       file.content,
     );
     if (!isTransactional && /\bcell\s*\(\s*['"]/.test(file.content)) {
+      // Code-masked source: comment and string bodies are blanked (offsets and
+      // newlines preserved), so a method "declared" in a doc comment is not a
+      // method, `s.x` in a string is not a read, and a `{` inside either no
+      // longer moves the body-depth counter.
+      const codeSrc = codeText(file.content);
+      const codeLines = codeSrc.split("\n");
+      // One read-scan per draft param name, shared by every method that uses it.
+      const readLinesByParam = new Map<string, Set<number>>();
+      const readLinesFor = (param: string): Set<number> => {
+        const hit = readLinesByParam.get(param);
+        if (hit) return hit;
+        const lines = new Set(
+          linesOfOffsets(codeSrc, draftReadOffsets(codeSrc, param)),
+        );
+        readLinesByParam.set(param, lines);
+        return lines;
+      };
       const METHOD_RE =
         // `[,):]` — the `:` admits a type-annotated draft param.
         /\basync\s+(?!function\b)([A-Za-z_$][\w$]*)\s*\(\s*([A-Za-z_$][\w$]*)\s*[,):]|\b([A-Za-z_$][\w$]*)\s*:\s*async\s*\(\s*([A-Za-z_$][\w$]*)\s*[,):]/g;
-      for (const m of file.content.matchAll(METHOD_RE)) {
+      for (const m of codeSrc.matchAll(METHOD_RE)) {
         const method = m[1] ?? m[3]!;
         const param = m[2] ?? m[4]!;
-        const startIdx = file.content.slice(0, m.index).split("\n").length - 1;
-        // `(?!\$)` — draft meta (`s.$signal`, `s.$live`, `s.$commit`) is
-        // framework surface, never app state a concurrent action can move.
-        const readRe = new RegExp(`\\b${param}\\.(?!\\$)[\\w$]`);
-        const writeRe = new RegExp(
-          `\\b${param}(\\.[\\w$]+|\\[[^\\]]+\\])+\\s*([+\\-*/%&|^]|\\*\\*|\\|\\||&&|\\?\\?)?=[^=]`,
-        );
-        const mutateRe = new RegExp(
-          `\\b${param}(\\.[\\w$]+|\\[[^\\]]+\\])+\\.(push|pop|shift|unshift|splice|sort|reverse|fill|copyWithin|set|add|delete|clear)\\s*\\(`,
-        );
+        const startIdx = codeSrc.slice(0, m.index).split("\n").length - 1;
+        const readLines = readLinesFor(param);
         let depth = 0;
         let entered = false;
         let sawAwait = false;
-        for (let i = startIdx; i < file.lines.length; i++) {
-          const code = file.lines[i]!.split("//")[0]!;
+        for (let i = startIdx; i < codeLines.length; i++) {
+          const code = codeLines[i]!;
           for (const ch of code) {
             if (ch === "{") {
               depth++;
@@ -1320,10 +1530,7 @@ export const checkPatterns: Checker = (ctx) => {
           // A live-poll primitive re-reads state ON PURPOSE — that is what it
           // is for. Skip the line and keep looking for a genuine read.
           if (/\b(until|race)\s*\(/.test(code)) continue;
-          if (
-            readRe.test(code) && !writeRe.test(code) && !mutateRe.test(code) &&
-            !isSuppressed(file.lines, i)
-          ) {
+          if (readLines.has(i) && !isSuppressed(file.lines, i)) {
             report(
               "hint",
               "patterns",

@@ -85,7 +85,7 @@
         },
         "CellsConfig": {
           "kind": "typeAlias",
-          "sig": "a66615d4bf6957ae"
+          "sig": "6d3e1fc0c5b3004e"
         },
         "CellStatus": {
           "kind": "typeAlias",
@@ -205,7 +205,7 @@
         },
         "MethodsCellConfig": {
           "kind": "typeAlias",
-          "sig": "36cba8c1a23cf347"
+          "sig": "14a4c96bc683383e"
         },
         "Msg": {
           "kind": "typeAlias",
@@ -353,7 +353,7 @@
         },
         "TestContext": {
           "kind": "typeAlias",
-          "sig": "2a7943e0502d1d28"
+          "sig": "f9e4f47330041090"
         },
         "text": {
           "kind": "function",
@@ -393,7 +393,7 @@
         },
         "VERSION": {
           "kind": "variable",
-          "sig": "14d709b0240dd412"
+          "sig": "64beb3b95c898a6f"
         },
         "VitalsConfig": {
           "kind": "typeAlias",
@@ -917,6 +917,10 @@
     },
     "./build": {
       "symbols": {
+        "assetIncludes": {
+          "kind": "function",
+          "sig": "b8e01ade1de480ee"
+        },
         "build": {
           "kind": "function",
           "sig": "a076baf5aa88fc4c"
@@ -928,6 +932,14 @@
         "Capabilities": {
           "kind": "typeAlias",
           "sig": "42d003b7d0eff5cb"
+        },
+        "compileArgs": {
+          "kind": "function",
+          "sig": "b829562cce4d7b15"
+        },
+        "dbWorkerInclude": {
+          "kind": "function",
+          "sig": "6606220ff3a58d02"
         },
         "generateSigningKey": {
           "kind": "function",
@@ -969,9 +981,21 @@
           "kind": "function",
           "sig": "646a75aa47dda9ad"
         },
+        "normalizeTargets": {
+          "kind": "function",
+          "sig": "bab5050051f5e13d"
+        },
         "placedName": {
           "kind": "function",
           "sig": "75beaaee0849569a"
+        },
+        "ResolvedTarget": {
+          "kind": "interface",
+          "sig": "9496102d551d72a3"
+        },
+        "TargetOverride": {
+          "kind": "interface",
+          "sig": "f0c8621acfaa8cac"
         },
         "TARGETS": {
           "kind": "variable",
@@ -983,7 +1007,7 @@
         },
         "unsafeOutDir": {
           "kind": "function",
-          "sig": "e2cfb64140c48f72"
+          "sig": "b7591e182ccb7028"
         }
       }
     },
@@ -1094,7 +1118,7 @@
         },
         "CliFlags": {
           "kind": "typeAlias",
-          "sig": "b0781e6cf4f8b401"
+          "sig": "a33f6f789698bc7c"
         },
         "createSliceSelector": {
           "kind": "function",
@@ -1362,11 +1386,11 @@
         },
         "connectCli": {
           "kind": "function",
-          "sig": "cf36c15f1890d562"
+          "sig": "220099b57da61533"
         },
         "connectCliUDS": {
           "kind": "function",
-          "sig": "cf318c9c642ebf66"
+          "sig": "9103d610b0de9e75"
         },
         "createDB": {
           "kind": "function",
@@ -1730,7 +1754,7 @@
         },
         "TestContext": {
           "kind": "typeAlias",
-          "sig": "2a7943e0502d1d28"
+          "sig": "f9e4f47330041090"
         },
         "testgen": {
           "kind": "function",
@@ -1770,7 +1794,7 @@
         },
         "UIElementHandle": {
           "kind": "interface",
-          "sig": "c670a4c2c650b9a4"
+          "sig": "ad4d3be860e47aae"
         }
       }
     },

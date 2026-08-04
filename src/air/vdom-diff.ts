@@ -9,6 +9,7 @@ import {
   _cleanupSignalTextChildren,
 } from "./vdom-helpers.ts";
 import { _callRef, _staticEqual, _tagComponentError } from "./vdom-create.ts";
+import { _componentName } from "./hook-error.ts";
 import { _hasSignalPropChange, applyProps } from "./vdom-props.ts";
 import { getDom, isChildOf, removeDom } from "./vdom-remove.ts";
 import { _render, createDom } from "./vdom-render.ts";
@@ -353,8 +354,8 @@ function _diffElement(
   }
 
   if (nv.props.ref !== ov.props.ref) {
-    if (ov.props.ref) _callRef(ov.props.ref, null);
-    if (nv.props.ref) _callRef(nv.props.ref, dom);
+    if (ov.props.ref) _callRef(ov.props.ref, null, _componentName(ov.tag));
+    if (nv.props.ref) _callRef(nv.props.ref, dom, _componentName(nv.tag));
   }
 
   if (nv.props.use !== ov.props.use) {

@@ -279,12 +279,12 @@ async function _applyDevUrl(androidDir: string, devUrl: string): Promise<void> {
   const safeUrl = safeDevUrl(devUrl);
   let act = await Deno.readTextFile(actPath);
   act = act.replace(
-    'loadUrl("file:///android_asset/index.html")',
+    'loadUrl("https://appassets.androidplatform.net/assets/index.html")',
     `loadUrl("${safeUrl}")`,
   );
   // Keep every navigation inside the WebView (no external redirect handling).
   act = act.replace(
-    'return !url.startsWith("file:///android_asset/")',
+    'return !url.startsWith("https://appassets.androidplatform.net/")',
     "return false",
   );
   await Deno.writeTextFile(actPath, act);

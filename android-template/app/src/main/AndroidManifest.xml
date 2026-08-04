@@ -1,6 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
   <uses-permission android:name="android.permission.INTERNET" />
+  <!-- Camera: apps scanning QR codes (getUserMedia in the WebView). Optional
+       hardware — install stays possible on camera-less devices. -->
+  <uses-permission android:name="android.permission.CAMERA" />
+  <uses-feature android:name="android.hardware.camera.any" android:required="false" />
   <application
     android:allowBackup="false"
     android:label="{{APP_NAME}}"

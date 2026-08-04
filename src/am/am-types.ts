@@ -22,6 +22,10 @@ export type GlobalFlags = {
   json?: boolean;
   quiet?: boolean;
   jsonBody?: string;
+  /** `--args='["a", 2]'` — the POSITIONAL argument list for a cell method,
+   *  verbatim. The one spelling that can express a method taking a single
+   *  string (`--args='["192.168.1.9"]'`), which no `key=value` form can. */
+  jsonArgs?: string;
   filter?: string;
   lines?: number;
   wait?: number;

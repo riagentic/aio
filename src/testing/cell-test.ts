@@ -15,6 +15,8 @@ import { registerCall } from "../state/cell-impl.ts";
 import { _resetAioRuntime } from "../state/runtime-reset.ts";
 import { _armTestStrict } from "./test-strict.ts";
 import { attachMeta } from "../state/cell-catalog.ts";
+import { runWithUser } from "../server/auth-context.ts";
+import type { AioUser } from "../server/aio-types.ts";
 import type { Catalog, CellDef, Creators, Msg } from "../state/cell-types.ts";
 import { composeCells } from "../state/cell-compose.ts";
 
@@ -78,6 +80,22 @@ export type TestContext<
     /** Assert a predicate holds for current state */
     invariant: (fn: (s: S) => boolean) => void;
   };
+  /** Run `fn` with `user` as the ambient caller identity, so `serverUser()`
+   *  inside a method answers with it — the supported way to test an
+   *  identity-dependent method.
+   *
+   *  Reading the caller from the ambient rather than an argument is the right
+   *  design (a username passed as a parameter is a forgery waiting to happen),
+   *  but it left no way to test such a method: the mechanism (`runWithUser`)
+   *  is framework-internal, so a field report's 35 relay tests all reached
+   *  past the public surface into `src/server/auth-context.ts`. This is that
+   *  affordance, without publishing the ALS plumbing.
+   *
+   *  ```ts
+   *  await t.as({ id: "alice", role: "member" }, () => t.send.post("hi"))
+   *  ```
+   *  Omit `user` (or pass undefined) to assert the anonymous path. */
+  as: <T>(user: AioUser | undefined, fn: () => T) => T;
   /** Get current cell state */
   getState: () => S;
   /** Get effects from last dispatched action */
@@ -416,6 +434,8 @@ export function testCell(
           }
         },
       },
+      as: <T>(user: AioUser | undefined, body: () => T): T =>
+        runWithUser(user, body),
       getState: () => state[f.__aio.id] as Record<string, unknown>,
       getEffects: () => lastEffects,
       randomActions: (n) => {

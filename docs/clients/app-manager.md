@@ -47,7 +47,16 @@ Auto-fixed (safe):
 | electron runtime           | app imports electron; `node_modules/electron` missing  |
 | git submodules             | `.gitmodules` present but not initialized              |
 | shell scripts executable   | a task runs a `.sh` that lost its `+x` bit             |
+| missing standard tasks     | add-only, and only for the targets the app declares    |
 | dependency cache           | warms `deno cache` — surfaces any resolution error     |
+
+Task repair is **add-only and scoped to the fleet**: `am fix` adds the
+universally useful tasks (`dev`, `build`, `compile`, `test`, `am`, `doctor`,
+`lint`) plus the ones the app's declared targets need — read from `target` and
+`build.targets` (either spelling: the array `["browser"]` or the object form
+with per-target overrides). A browser-only app never gets `dev:android`,
+`dev:cli` or `dev:service`. A task the app already has is never rewritten or
+removed, so a curated task list survives every repair.
 
 ### The seal: an unpinned app gets pinned
 
@@ -185,6 +194,16 @@ deno task am instances --json     # JSON output
 Scans lock files, validates each PID is alive, returns active instances with
 appId, port, PID, uptime, and cwd.
 
+**Two apps on one machine mean two `am` targets.** Every `am` command resolves
+ONE app — from `--app=<id>`, else the `deno.json`/entry in the current directory
+— so running `deno task am` from each app's own directory does the right thing,
+and `am instances` disambiguates when you are unsure which is up and on which
+port. Read `app not running on port 8000` as "am aimed at the wrong app" at
+least as often as "the app is down": it is what you get when `am` is run from
+outside an app directory, or against a second app that took a different port.
+`am` refuses to touch a port that answers as a different appId, so a wrong
+target is a loud error, never a silent write to the other app.
+
 **Programmatic:**
 
 ```ts
@@ -217,23 +236,42 @@ the browser sees.
 ## Action dispatch
 
 ```sh
-# Methods — positional args (no =)
-deno task am dispatch counter:increment 5                    # { payload: { args: [5] } }
-deno task am dispatch counter:reset                          # { payload: { args: [] } }
+# Cell methods — POSITIONAL args (no =): increment(5), setHost("10.0.0.1")
+deno task am dispatch counter:increment 5                    # increment(5)
+deno task am dispatch conn:setHost 10.0.0.1                  # setHost("10.0.0.1")
+deno task am dispatch counter:reset                          # reset()
 
-# Actions — named payload (with =)
-deno task am dispatch counter:BulkUpdate items='[1,2]'       # { payload: { items: [1,2] } }
+# …the same, JSON-exact. Use it when a value contains '=' (a URL, a base64
+# blob), or when the exact type matters.
+deno task am dispatch conn:setHost --args='["192.168.1.9"]'  # setHost("192.168.1.9")
+deno task am dispatch conn:configure --args='[{"host":"h","port":8000}]'
 
-# Raw JSON
-deno task am dispatch --body='{"type":"counter:increment","payload":{"args":[5]}}'
+# One object argument, spelled as named pairs: configure({host, port})
+deno task am dispatch conn:configure host=h port=8000
+
+# Plain (non-cell) actions — named payload
+deno task am dispatch BulkUpdate items='[1,2]'               # payload { items: [1,2] }
+
+# Raw envelope
+deno task am dispatch --body='{"type":"conn:setHost","payload":{"args":["192.168.1.9"]}}'
 
 deno task am actions                       # last 20 actions from history
 deno task am actions 50                    # last 50 actions
 ```
 
-Positional args (without `=`) -> `{ args: [...] }` for methods. Named
-`key=value` -> `{ key: value }` for actions. Values are auto-parsed: numbers,
-booleans, `null`, JSON arrays/objects, strings.
+A cell method is called with POSITIONAL arguments. Bare values (no `=`) become
+those arguments, and `--args='[…]'` is the same list written as JSON — the
+spelling to reach for when a value contains `=` or must keep its exact type.
+Values without `--args` are auto-parsed: numbers, booleans, `null`, JSON
+arrays/objects, else strings.
+
+`key=value` pairs are collected into ONE object: after a `cell:method` type they
+become the method's single object argument (`configure({host, port})`), and for
+a plain action type they are the payload itself. A method taking one string
+therefore has no `key=value` spelling — that is what `--args` is for.
+
+`--body` is the whole envelope (`{type, payload}`) when it stands alone, and the
+PAYLOAD of the action when a type is given positionally.
 
 ## Time-travel
 
@@ -401,11 +439,17 @@ deno task am ui                              # server-side UI state
 deno task am surface                         # semantic surface (client 0): every component + triggerable element
 deno task am surface 1                       # surface for a specific client
 deno task am trigger 0 App:SubmitButton click        # click by component:name path
-deno task am trigger 0 App:Email type "a@b"          # type into an input
+deno task am trigger 0 App:Email type "a@b"          # type into an input — APPENDS
+deno task am trigger 0 App:Email setValue "a@b"      # REPLACE the field's value
 deno task am trigger 0 App:Search focus               # focus / blur / hover / scroll / press
 deno task am trigger 0 App:Stage keyDown ArrowLeft    # HOLD a key (games, drag) …
 deno task am trigger 0 App:Stage keyUp ArrowLeft      # … then release it — press is a tap
 ```
+
+`type` APPENDS to the field's current value (a user typing into a field that
+already has one); `setValue` clears first, then types — use it to drive a form,
+where replacing is the usual intent. Same two words, same two meanings as
+`testUI`'s `ui.X.type()` / `ui.X.setValue()`, because both drive the same UI.
 
 Run `am surface` first to see the addressable `Component:name` paths, then
 `am trigger` them. This is the one unified UI facility — the old CSS-selector

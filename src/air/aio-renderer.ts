@@ -24,6 +24,7 @@ import {
   setDevMode as _setDevModeVdom,
 } from "./vdom.ts";
 import { _cleanupActions } from "./vdom-helpers.ts";
+import { _componentName } from "./hook-error.ts";
 import { removeDom } from "./vdom-remove.ts";
 import { Portal } from "./vdom-types.ts";
 import { cleanupSignalBindings } from "./signal-binding.ts";
@@ -297,7 +298,7 @@ function _unmountTree(
       if (typeof (dom as HTMLElement).setAttribute === "function") {
         _cleanupActions(dom as HTMLElement);
       }
-      _callRef(vnode.props.ref, null);
+      _callRef(vnode.props.ref, null, _componentName(vnode.tag));
     }
     for (const child of vnode.children) {
       _unmountTree(child, ctx);

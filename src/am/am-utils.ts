@@ -241,6 +241,7 @@ export function parseGlobalFlags(
   const takesValue = new Set([
     "--port",
     "--body",
+    "--args",
     "--filter",
     "--lines",
     "--entry",
@@ -270,6 +271,7 @@ export function parseGlobalFlags(
     else if (a === "--quiet") flags.quiet = true;
     else if (a.startsWith("--port=")) flags.port = num(a.slice(7), "--port");
     else if (a.startsWith("--body=")) flags.jsonBody = a.slice(7);
+    else if (a.startsWith("--args=")) flags.jsonArgs = a.slice(7);
     else if (a.startsWith("--filter=")) flags.filter = a.slice(9);
     else if (a.startsWith("--lines=")) flags.lines = num(a.slice(8), "--lines");
     else if (a.startsWith("--wait=")) flags.wait = num(a.slice(7), "--wait");
@@ -280,10 +282,11 @@ export function parseGlobalFlags(
     else if (a.startsWith("--app=")) flags.app = a.slice(6);
     else if (a.startsWith("--client=")) {
       flags.client = num(a.slice(9), "--client");
-    } else if (
-      a.startsWith("-c") && a.length > 2 && !isNaN(Number(a.slice(2)))
-    ) {
-      flags.client = Number(a.slice(2));
+    } else if (a.startsWith("-c") && a.length > 2) {
+      // `-c2` is the short form of `--client=2`. `-c2x` used to fail the
+      // isNaN test and fall through to the POSITIONAL args, where it became a
+      // command argument — the same NaN class, silent one step further along.
+      flags.client = num(a.slice(2), "-c (client index)");
     } else if (a === "--client") flags.client = 0;
     else if (a === "--all") flags.all = true;
     else rest.push(a);

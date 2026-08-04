@@ -32,21 +32,65 @@ function rowToOp(r: OpRow): SyncOp {
 let _lastServerTs = 0;
 let _seeded = false;
 
-/** Seed the issuer from the op-log's MAX(server_ts) once per process. A
- *  same-ms burst inflates server_ts past wall-clock; if the server restarts
- *  inside that window an unseeded issuer could stamp a new op BELOW a cursor
- *  already echoed to clients — silently undeliverable. Best-effort: on query
- *  failure the wall clock still applies. */
+/**
+ * The DURABLE high-water mark of the `server_ts` sequence: the greatest value
+ * the store itself can still prove was issued, after any restart.
+ *
+ * PROTOCOL INVARIANT (the one this file exists to keep):
+ *   a `server_ts` handed to a client as a catch-up cursor must NEVER be
+ *   crossed backwards by a later-issued op — including across a restart.
+ *   `loadOpsSince` is a strict `server_ts > cursor`, so an op stamped at or
+ *   below a cursor a client already holds is undeliverable to that client
+ *   FOREVER, and nothing anywhere reports it. Silent, permanent op loss.
+ *
+ * The in-memory issuer (`_lastServerTs`) is only a CACHE of this sequence, and
+ * it runs AHEAD of the log in ways `MAX(server_ts) FROM sync_ops` cannot see:
+ *   - a duplicate `INSERT OR IGNORE` used to consume a ts that no row carries;
+ *   - compaction DELETEs op rows (their max survives only in `compacted_ts`);
+ *   - a D11-rejected op is DELETEd after being stamped.
+ * So "highest surviving row" is NOT the high-water mark, and seeding from it
+ * after a restart re-issues values that were already echoed as cursors (chaos
+ * seed 3858958063: `_lastServerTs` had run to …2231 through duplicate persists,
+ * a client held the echoed cursor …2224, the restart re-seeded to the row max
+ * and stamped the next op …2222 — invisible to that client for good).
+ *
+ * The fix is structural rather than per-source: everything derived from this
+ * sequence that leaves the server (`reserveServerTs`) is taken from durable
+ * state, and the issuer is re-seeded from the same expression. A future delete
+ * path or a burned ts therefore cannot re-open the hole.
+ */
+async function highWaterTs(db: DB): Promise<number> {
+  try {
+    const { rows } = await db.query<{ ts: number | null }>(
+      `SELECT MAX(ts) AS ts FROM (
+         SELECT MAX(server_ts) AS ts FROM sync_ops
+         UNION ALL
+         SELECT MAX(compacted_ts) AS ts FROM sync_meta)`,
+    );
+    return rows[0]?.ts ?? 0;
+  } catch {
+    // Pre-migration DB (no compacted_ts column) — the op-log alone still
+    // covers every ts that has a row.
+    try {
+      const { rows } = await db.query<{ ts: number | null }>(
+        "SELECT MAX(server_ts) AS ts FROM sync_ops",
+      );
+      return rows[0]?.ts ?? 0;
+    } catch {
+      return 0; // fresh DB / no table yet — wall clock is correct
+    }
+  }
+}
+
+/** Seed the issuer from the durable high-water mark once per process, so a
+ *  restart resumes strictly ABOVE every value ever issued (see
+ *  {@linkcode highWaterTs}). Best-effort: on query failure the wall clock
+ *  still applies. */
 async function seedServerTs(db: DB): Promise<void> {
   if (_seeded) return;
   _seeded = true;
-  try {
-    const { rows } = await db.query<{ max_ts: number | null }>(
-      "SELECT MAX(server_ts) AS max_ts FROM sync_ops",
-    );
-    const max = rows[0]?.max_ts;
-    if (typeof max === "number" && max > _lastServerTs) _lastServerTs = max;
-  } catch { /* fresh DB / no table yet — wall clock is correct */ }
+  const hw = await highWaterTs(db);
+  if (hw > _lastServerTs) _lastServerTs = hw;
 }
 
 function nextServerTs(): number {
@@ -64,14 +108,22 @@ export function _resetServerTsForTest(): void {
  * Reserve the current cursor position: every op persisted AFTER this call gets
  * a strictly greater server_ts. Taking this inside a cell's lock before reading
  * ops/state makes `lastServerTs` echoed to clients race-free — nothing the
- * client hasn't seen can sit at or below the cursor. Seeded from the op-log
- * first: an unseeded reserve after a restart could echo a cursor BELOW
- * already-persisted (burst-inflated) ops → re-delivery → double-apply.
+ * client hasn't seen can sit at or below the cursor.
+ *
+ * The reservation is the DURABLE high-water mark, never the in-memory issuer:
+ * a cursor the client keeps must be reproducible by the store after a restart,
+ * or the restarted issuer stamps new ops underneath it and they are
+ * undeliverable to that client forever (see {@linkcode highWaterTs}).
+ * Both halves hold:
+ *   - everything persisted so far is ≤ it (it IS the max over the log), and
+ *   - everything persisted later is > it (the issuer is bumped to ≥ it here,
+ *     and `nextServerTs` is strictly increasing).
  */
 export async function reserveServerTs(db: DB): Promise<number> {
   await seedServerTs(db);
-  _lastServerTs = Math.max(Date.now(), _lastServerTs);
-  return _lastServerTs;
+  const hw = await highWaterTs(db);
+  if (hw > _lastServerTs) _lastServerTs = hw;
+  return hw;
 }
 
 /**
@@ -85,16 +137,28 @@ export async function persistOp(
   op: { id: string; hlc: HLC; cell: string; action: string; payload: unknown },
 ): Promise<number | null> {
   await seedServerTs(db);
-  // Compaction DELETEs op rows, so INSERT OR IGNORE alone forgets ids the log
-  // rolled over — a client re-sending such an op (ack lost → resend after
-  // compaction) would be re-inserted and re-dispatched (server double-apply).
-  // Tombstoned ids (see compact.ts) keep the dedup sound; PK lookup is cheap.
-  const { rows: tomb } = await db.query<{ id: string }>(
-    "SELECT id FROM sync_compacted_ids WHERE id = ? LIMIT 1",
-    [op.id],
+  // Known-id check, both halves in one round trip (both are PK lookups):
+  //  - sync_compacted_ids: compaction DELETEs op rows, so INSERT OR IGNORE
+  //    alone forgets ids the log rolled over — a client re-sending such an op
+  //    (ack lost → resend after compaction) would be re-inserted and
+  //    re-dispatched (server double-apply). Tombstones keep dedup sound.
+  //  - sync_ops: a duplicate reaching the INSERT would still have CONSUMED a
+  //    server_ts that no row ever carries, pushing the in-memory issuer above
+  //    anything the store can prove after a restart. Duplicates are routine
+  //    (every reconnect re-sends its pending buffer), so this was the main
+  //    engine of issuer/log drift. Checking first makes the sequence advance
+  //    only for ops that actually get a row.
+  const { rows: known } = await db.query<{ id: string }>(
+    `SELECT id FROM sync_compacted_ids WHERE id = ?
+     UNION ALL
+     SELECT id FROM sync_ops WHERE id = ?
+     LIMIT 1`,
+    [op.id, op.id],
   );
-  if (tomb.length > 0) return null;
+  if (known.length > 0) return null;
   const [hlcPhys, hlcCnt, hlcNode] = op.hlc;
+  // INSERT OR IGNORE stays the authority (`changes === 0` ⇒ duplicate): the
+  // check above is an optimization, not the correctness boundary.
   const serverTs = nextServerTs();
   const { changes } = await db.execute(
     `INSERT OR IGNORE INTO sync_ops (id, cell, action, payload, hlc_phys, hlc_cnt, hlc_node, server_ts)

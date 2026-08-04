@@ -435,6 +435,34 @@ delimiter, like schedule ids.
 
 ### Error handling
 
+> **Sync and async methods differ on `throw` — this is the one place they do.**
+> A **sync** method is one Immer recipe: if it throws, the draft is discarded
+> and **nothing it wrote is kept**. An **async** method commits incrementally,
+> so everything it wrote — before _and_ after an `await` — is already state by
+> the time it throws.
+>
+> ```ts
+> refuse(s) {                       // SYNC
+>   s.problems.push('too large')    // ← discarded by the throw below
+>   throw new Error('too large')    // state: problems is still []
+> }
+>
+> async refuse(s) {                 // ASYNC
+>   s.problems.push('too large')    // ← kept
+>   throw new Error('too large')    // state: problems has the entry
+> }
+> ```
+>
+> **So you cannot record why you refused _and_ throw from a sync method.** To
+> tell a caller "no, and here is why", pick one:
+>
+> - **throw** — the caller's `await` rejects with your message. Use when the
+>   caller can handle it. Nothing is written, which is usually what you want for
+>   a guard.
+> - **record and return** — write the reason to state and return normally. Use
+>   when the reason belongs in the UI. Works in both forms.
+> - **both** — make the method `async`; its writes survive the throw.
+
 If an async method throws, mutations before the error are already dispatched.
 The framework dispatches a `{Prefix}:__error` action (hidden from time-travel):
 

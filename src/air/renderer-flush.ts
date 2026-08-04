@@ -5,18 +5,33 @@
 import type { VNode } from "./vdom.ts";
 import { _diff, _setDelegationRoot, h } from "./vdom.ts";
 import type { RootState } from "./renderer-types.ts";
-import { _activeRoot, _setActiveRoot } from "./renderer-state.ts";
+import {
+  _activeRoot,
+  _currentCollector,
+  _setActiveRoot,
+} from "./renderer-state.ts";
 import { _rerenderComponent } from "./renderer-rerender.ts";
+import { _reportHookError } from "./hook-error.ts";
 
 // ── afterRender queue (per-root isolated) ────────────────────────────
 
 /**
  * Register a callback to run after the current render cycle commits to the DOM.
  * Works for both initial mount and signal-triggered re-renders.
+ *
+ * The callback is a SIDE EFFECT: if it throws, it is reported (named with the
+ * component that registered it) and the committed render stands — an effect can
+ * never un-render the tree that scheduled it.
  */
 export function afterRender(fn: () => void): void {
   if (_activeRoot) {
-    _activeRoot.afterRenderQueue.push(fn);
+    // Capture WHO registered it, at registration time — the flush happens long
+    // after the component's frame is gone, so this is the only moment the name
+    // is knowable.
+    _activeRoot.afterRenderQueue.push({
+      fn,
+      component: _currentCollector?._component,
+    });
   }
 }
 
@@ -24,33 +39,12 @@ export function _flushAfterRender(root: RootState): void {
   const cbs = root.afterRenderQueue;
   if (cbs.length === 0) return;
   root.afterRenderQueue = [];
-  for (const cb of cbs) {
+  for (const entry of cbs) {
     try {
-      cb();
+      entry.fn();
     } catch (e) {
-      _reportHookError("afterRender", e);
+      _reportHookError("afterRender", e, entry.component);
     }
-  }
-}
-
-/**
- * Report an error thrown by a lifecycle hook (`onMount`/`afterRender`) without
- * letting it abort the render — one bad hook must never collapse the surface
- * . Adds an actionable hint when the cause is DOM access with no DOM
- * (testUI/SSR), where the raw "document is not defined" lands far from its fix.
- */
-export function _reportHookError(kind: string, e: unknown): void {
-  console.error(`[aio-renderer] ${kind} callback error:`, e);
-  const msg = String((e as { message?: unknown })?.message ?? e);
-  if (
-    /\b(document|window)\b[^]*?(is not defined|undefined)/.test(msg) &&
-    typeof document === "undefined"
-  ) {
-    console.error(
-      `[aio-renderer] ↑ this ${kind} ran without a DOM (testUI/SSR). ` +
-        "Guard DOM access — `if (typeof document !== 'undefined') { … }` — " +
-        "or use a `useRef` on the element instead of `document.getElementById`.",
-    );
   }
 }
 

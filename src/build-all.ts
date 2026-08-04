@@ -86,13 +86,89 @@ export const TARGETS: Record<string, TargetSpec> = {
   },
 };
 
+/** What a target may override when `build.targets` is written in object form.
+ *  Everything is optional — an empty object is the array form's behaviour. */
+export interface TargetOverride {
+  /** The module THIS target compiles, overriding deno.json `entry`. One repo,
+   *  two apps: a relay server and the client that talks to it. */
+  entry?: string;
+  /** This target's binary/APK name, overriding deno.json `title`. Two
+   *  different apps must not both be called `myapp` and be papered over by the
+   *  collision suffix — they are not two builds of one app. */
+  name?: string;
+  /** OS/arch list for this target only, overriding `build.platforms`. */
+  platforms?: string[];
+}
+
 interface BuildBlock {
-  targets?: string[];
+  /** Either the plain list — `["server", "electron"]`, what `am create`
+   *  writes and what every existing project has — or the object form, which
+   *  adds per-target overrides:
+   *
+   *  ```jsonc
+   *  "targets": {
+   *    "server":   { "entry": "src/relay/app.ts", "name": "relay" },
+   *    "electron": { "entry": "src/app.ts" }
+   *  }
+   *  ```
+   *  Both normalize to the same internal shape ({@link normalizeTargets}). */
+  targets?: string[] | Record<string, TargetOverride>;
   /** OS/arch to build each target for (default: just this machine). */
   platforms?: string[];
   out?: string;
   server?: string; // LAN/remote server address (recorded in the manifest)
 }
+
+/** One build to run, after both `targets` spellings have collapsed into a
+ *  single shape. THE place target config is read — every consumer downstream
+ *  (argv, artifact detection, the out-dir guard, the manifest) sees only this. */
+export interface ResolvedTarget {
+  /** Key into {@link TARGETS}. */
+  name: string;
+  /** Per-target entry module, or undefined to use deno.json `entry`. */
+  entry?: string;
+  /** Per-target app name (pre-slugify), or undefined to use deno.json `title`. */
+  appName?: string;
+  /** Per-target platform list, or undefined to use `build.platforms`. */
+  platforms?: string[];
+}
+
+/** Collapse `build.targets` (array OR object form) plus an optional
+ *  `--targets=a,b` override into the one internal shape.
+ *
+ *  `--targets=` selects WHICH targets run; it does not discard their declared
+ *  overrides, so `--targets=server` on an object-form config still builds the
+ *  server's own entry. Pure — no fs, no argv — so the compat contract (an
+ *  array behaves exactly as before) is a unit test, not a claim. */
+export function normalizeTargets(
+  raw: string[] | Record<string, TargetOverride> | undefined,
+  argTargets?: string,
+): ResolvedTarget[] {
+  const overrides = new Map<string, TargetOverride>();
+  const declared: string[] = [];
+  if (Array.isArray(raw)) {
+    for (const t of raw) if (typeof t === "string") declared.push(t.trim());
+  } else if (raw && typeof raw === "object") {
+    for (const [name, o] of Object.entries(raw)) {
+      declared.push(name.trim());
+      overrides.set(name.trim(), (o ?? {}) as TargetOverride);
+    }
+  }
+  const names =
+    (argTargets !== undefined
+      ? argTargets.split(",").map((t) => t.trim())
+      : declared).filter(Boolean);
+  return names.map((name) => {
+    const o = overrides.get(name);
+    return {
+      name,
+      ...(o?.entry ? { entry: o.entry.trim() } : {}),
+      ...(o?.name ? { appName: o.name.trim() } : {}),
+      ...(Array.isArray(o?.platforms) ? { platforms: o.platforms } : {}),
+    };
+  });
+}
+
 interface ArtifactRec {
   file: string;
   bytes: number;
@@ -101,6 +177,11 @@ interface TargetResult {
   target: string;
   role: string;
   platform: string;
+  /** The binary name this target built under (per-target `name`, else the
+   *  project title) and the module it compiled — recorded in the manifest so a
+   *  two-app repo's dist/ says which artifact is which app. */
+  binary: string;
+  entry?: string;
   ok: boolean;
   /** Set when the combination was deliberately not built (e.g. Electron for a
    *  foreign OS) — a SKIP is reported, never silently omitted. */
@@ -187,22 +268,26 @@ export function placedName(
  *  never the root, an ancestor (`out: ".."`), `.aio` (our staging parent), or a
  *  source dir. `out: ""` / `"."` resolve to the root and are caught here.
  *
- *  `appDir` is THE app-dir decider's answer (`BuildConfig.appDir`). `src/` is
- *  hardcoded only because it is the scaffold's convention; an app whose entry
- *  lives at `apps/web/main.ts` keeps its sources somewhere this list cannot
- *  guess, and `out: "apps/web"` would have recursively deleted them. Pass it
- *  wherever it is known. */
+ *  `appDirs` are THE app-dir decider's answers (`BuildConfig.appDir`), one per
+ *  target. `src/` is hardcoded only because it is the scaffold's convention; an
+ *  app whose entry lives at `apps/web/main.ts` keeps its sources somewhere this
+ *  list cannot guess, and `out: "apps/web"` would have recursively deleted them.
+ *
+ *  It is a LIST, not one dir, because per-target entries mean one repo can hold
+ *  two apps: guarding only the first target's dir would leave the second app's
+ *  sources deletable — the exact hole the guard exists to close. Pass every
+ *  target's dir; duplicates are fine. */
 export function unsafeOutDir(
   outDir: string,
   root: string,
-  appDir?: string,
+  appDirs: readonly string[] = [],
 ): boolean {
   const forbidden = new Set([
     root,
     join(root, ".aio"),
     join(root, "src"),
     join(root, ".git"),
-    ...(appDir ? [appDir] : []),
+    ...appDirs,
   ]);
   return !outDir.startsWith(root + SEPARATOR) || forbidden.has(outDir);
 }
@@ -247,6 +332,10 @@ function printTargets(): void {
     `${C.dim}or pass --targets=a,b --platforms=linux,windows,macos-arm64.${C.r}`,
   );
   console.log(
+    `${C.dim}Two apps in one repo? Give each target its own module:${C.r}\n` +
+      `${C.dim}  "targets": { "server": { "entry": "src/relay/app.ts", "name": "relay" }, "electron": {} }${C.r}`,
+  );
+  console.log(
     `${C.dim}Electron/Android package with per-OS tooling — they build on their own OS only.${C.r}`,
   );
 }
@@ -270,11 +359,10 @@ export async function buildAll(): Promise<number> {
   const title = denoJson.title ?? basename(root);
   const binaryName = slugify(title);
 
-  // Target list: --targets= overrides deno.json build.targets.
+  // Target list: --targets= overrides deno.json build.targets. Both spellings
+  // of `targets` (array, object-with-overrides) collapse here, once.
   const argTargets = flag("targets");
-  const targetList = (argTargets ? argTargets.split(",") : block.targets ?? [])
-    .map((t) => t.trim())
-    .filter(Boolean);
+  const targetList = normalizeTargets(block.targets, argTargets);
   if (targetList.length === 0) {
     console.error(
       `${C.red}✗ no targets to build.${C.r} Add ${C.blue}"build": { "targets": [...] }${C.r} to deno.json, or pass ${C.blue}--targets=server,electron-client${C.r}\n`,
@@ -282,12 +370,34 @@ export async function buildAll(): Promise<number> {
     printTargets();
     return 1;
   }
-  const unknown = targetList.filter((t) => !(t in TARGETS));
+  const unknown = targetList.filter((t) => !(t.name in TARGETS));
   if (unknown.length > 0) {
     console.error(
-      `${C.red}✗ unknown target(s): ${unknown.join(", ")}${C.r}\n`,
+      `${C.red}✗ unknown target(s): ${
+        unknown.map((t) => t.name).join(", ")
+      }${C.r}\n`,
     );
     printTargets();
+    return 1;
+  }
+  // A per-target `entry` that names no file compiles nothing useful and is a
+  // typo you find minutes later in a deno compile error — check it here, where
+  // the target it belongs to can be named.
+  const missingEntries: string[] = [];
+  for (const t of targetList) {
+    if (!t.entry) continue;
+    try {
+      await Deno.stat(join(root, t.entry));
+    } catch {
+      missingEntries.push(`${t.name} → ${t.entry}`);
+    }
+  }
+  if (missingEntries.length > 0) {
+    console.error(
+      `${C.red}✗ build.targets entry not found:${C.r}\n${
+        missingEntries.map((m) => `  ${m}`).join("\n")
+      }\n  ${C.dim}paths are relative to ${root}${C.r}`,
+    );
     return 1;
   }
 
@@ -307,11 +417,35 @@ export async function buildAll(): Promise<number> {
     ? platformsResolved.platforms
     : [hostPlatform()];
 
+  // A target may narrow the platform list to its own — resolved here so a bad
+  // name is refused before any build runs, naming the target that declared it.
+  const targetPlatforms = new Map<string, string[]>();
+  for (const t of targetList) {
+    if (!t.platforms) continue;
+    const r = resolvePlatforms(t.platforms);
+    if (!r.ok) {
+      console.error(`${C.red}✗ target "${t.name}": ${r.error}${C.r}\n`);
+      printTargets();
+      return 1;
+    }
+    targetPlatforms.set(
+      t.name,
+      r.platforms.length > 0 ? r.platforms : [hostPlatform()],
+    );
+  }
+
   const outDir = resolve(join(root, flag("out") ?? block.out ?? "dist"));
-  // The app dir comes from THE decider, so `out` can never be pointed at the
-  // directory holding the app's own sources — whatever layout it uses.
-  const appDir = resolveAppDir(root, resolveEntry(denoJson));
-  if (unsafeOutDir(outDir, root, appDir)) {
+  // The app dirs come from THE decider — one per target, since each target may
+  // compile its own entry — so `out` can never be pointed at the directory
+  // holding ANY of the built apps' sources, whatever layout they use.
+  const appDirs = [
+    ...new Set(
+      targetList.map((t) =>
+        resolveAppDir(root, resolveEntry(denoJson, t.entry))
+      ),
+    ),
+  ];
+  if (unsafeOutDir(outDir, root, appDirs)) {
     console.error(
       `${C.red}✗ refusing to build into ${outDir}${C.r} — "out" must be a dedicated subdirectory of the project (not the root, your app dir, src, .git, or .aio)`,
     );
@@ -334,10 +468,12 @@ export async function buildAll(): Promise<number> {
   // Key by mtime AND size: on a coarse-mtime filesystem a rebuild that
   // overwrites a same-named artifact within the same second keeps the mtime but
   // changes the size, so size closes the "missed artifact" gap.
-  const snapshot = async (): Promise<Map<string, string>> => {
+  // `bin` is the TARGET's binary name — with per-target names, two targets in
+  // one repo are two different apps and `myapp*` would miss `relay`.
+  const snapshot = async (bin: string): Promise<Map<string, string>> => {
     const m = new Map<string, string>();
     for await (const e of Deno.readDir(root)) {
-      if (!e.isFile || !isArtifactName(e.name, binaryName)) continue;
+      if (!e.isFile || !isArtifactName(e.name, bin)) continue;
       try {
         const st = await Deno.stat(join(root, e.name));
         m.set(e.name, `${st.mtime?.getTime() ?? 0}:${st.size}`);
@@ -358,10 +494,17 @@ export async function buildAll(): Promise<number> {
 
   const results: TargetResult[] = [];
   try {
-    for (const target of targetList) {
+    for (const t of targetList) {
+      const target = t.name;
       const spec = TARGETS[target]!;
-      for (const platform of platformList) {
-        const label = platformList.length > 1 || !isHostPlatform(platform)
+      // A target's own app title/binary name, else the project's — the one
+      // place a per-target name is turned into the name everything downstream
+      // (argv, artifact detection, the manifest) uses.
+      const targetTitle = t.appName ?? title;
+      const targetBin = slugify(targetTitle);
+      const platforms = targetPlatforms.get(target) ?? platformList;
+      for (const platform of platforms) {
+        const label = platforms.length > 1 || !isHostPlatform(platform)
           ? `${target} ${C.dim}[${platform}]${C.r}`
           : target;
         // Electron/Android package with platform-specific tooling — building
@@ -378,21 +521,30 @@ export async function buildAll(): Promise<number> {
             target,
             role: spec.role,
             platform,
+            binary: targetBin,
+            ...(t.entry ? { entry: t.entry } : {}),
             ok: true,
             skipped: blocker,
             artifacts: [],
           });
           continue;
         }
-        console.log(`\n${C.b}▶ ${label}${C.r} ${C.dim}— ${spec.desc}${C.r}`);
-        const before = await snapshot();
+        console.log(
+          `\n${C.b}▶ ${label}${C.r} ${C.dim}— ${spec.desc}${
+            t.entry ? ` (${t.entry})` : ""
+          }${C.r}`,
+        );
+        const before = await snapshot(targetBin);
         const args = [
           "run",
           "-A",
           buildScript,
           ...spec.flags,
-          `--name=${title}`,
+          `--name=${targetTitle}`,
           `--platform=${platform}`,
+          // Per-target entry: the single-target build resolves configEntry —
+          // and therefore appDir and every app asset — from this.
+          ...(t.entry ? [`--entry=${t.entry}`] : []),
         ];
         if (release) args.push("--release");
         if (force) args.push("--force");
@@ -408,6 +560,8 @@ export async function buildAll(): Promise<number> {
             target,
             role: spec.role,
             platform,
+            binary: targetBin,
+            ...(t.entry ? { entry: t.entry } : {}),
             ok: false,
             error: `build exited ${code}`,
             artifacts: [],
@@ -417,7 +571,7 @@ export async function buildAll(): Promise<number> {
         }
 
         // Gather artifacts that appeared or changed, move them to staging.
-        const after = await snapshot();
+        const after = await snapshot(targetBin);
         const fresh = [...after].filter(([n, sig]) =>
           !before.has(n) || sig !== before.get(n)
         ).map(([n]) => n);
@@ -440,6 +594,8 @@ export async function buildAll(): Promise<number> {
           target,
           role: spec.role,
           platform,
+          binary: targetBin,
+          ...(t.entry ? { entry: t.entry } : {}),
           ok: true,
           artifacts,
         });
@@ -504,6 +660,8 @@ export async function buildAll(): Promise<number> {
       manifestTargets.push({
         target: r.target,
         role: r.role,
+        binary: r.binary,
+        ...(r.entry ? { entry: r.entry } : {}),
         // The platform each artifact RUNS on — the manifest is what a release
         // pipeline reads to decide what to publish where, so it must say.
         platform: r.platform,
@@ -523,7 +681,9 @@ export async function buildAll(): Promise<number> {
       /** The machine this was built on. Only these artifacts were runnable
        *  here; the rest were cross-compiled and are checked, not booted. */
       builtOn: hostPlatform(),
-      platforms: platformList,
+      // Every platform actually attempted, including the ones a target
+      // narrowed itself to — the list, not just the global default.
+      platforms: [...new Set(results.map((r) => r.platform))],
       server: block.server ?? null,
       targets: manifestTargets,
     };
@@ -539,7 +699,7 @@ export async function buildAll(): Promise<number> {
   const failed = results.filter((r) => !r.ok);
   const rel = (p: string) => p.replace(root + "/", "");
   console.log(`\n${C.b}── build summary ──${C.r}`);
-  const multi = platformList.length > 1;
+  const multi = new Set(results.map((r) => r.platform)).size > 1;
   const tag = (t: TargetResult) =>
     multi || !isHostPlatform(t.platform)
       ? `${t.target} ${C.dim}[${t.platform}]${C.r}`
@@ -565,7 +725,11 @@ export async function buildAll(): Promise<number> {
   // Say plainly which artifacts were never executed here. A cross-compiled
   // binary is built and checked, not booted — claiming otherwise is the kind
   // of "it built, so it works" that the artifact E2E exists to disprove.
-  const crossed = [...new Set(platformList.filter((p) => !isHostPlatform(p)))];
+  const crossed = [
+    ...new Set(
+      results.map((r) => r.platform).filter((p) => !isHostPlatform(p)),
+    ),
+  ];
   if (crossed.length > 0) {
     console.log(
       `\n  ${C.dim}cross-compiled (not run here — built on ${hostPlatform()}):${C.r} ${C.blue}${

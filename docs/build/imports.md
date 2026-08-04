@@ -134,14 +134,45 @@ Type imports are erased at compile time — they cross both worlds freely.
 import type { MdviewState } from "./helpers.ts";
 ```
 
+## Browser-reachable imports may not leave `baseDir`
+
+In **dev**, the browser fetches modules over HTTP, and `baseDir` (your entry's
+directory) is the HTTP root. A relative import that climbs out of it —
+`../../core/lib/sse.ts` — type-checks and runs fine on the server, then 404s in
+the browser and blanks the page:
+
+```
+WARN client BLANK SCREEN (boot): Failed to fetch dynamically imported module
+```
+
+A symlink into `baseDir` does not help either; escaping symlinks are refused by
+design. **Prod is unaffected** — the bundler follows relative imports at build
+time.
+
+For two apps in one repository that must share pure modules, map the shared
+directory to a URL prefix instead of copying it:
+
+```ts
+await aio.run({
+  baseDir: "client/src",
+  serveDirs: { "/shared": "../core/lib" }, // dev-only, read-only
+});
+```
+
+Then `import { parseSSE } from "/shared/sse.ts"` resolves in both worlds. Each
+mapped root gets exactly the guards `baseDir` has — no traversal, no escaping
+symlink, no dotfiles, no server-only paths — and the option has no effect in
+production, where the bundle is already self-contained.
+
 ## Quick reference
 
-| What                                  | Rule                                                        |
-| ------------------------------------- | ----------------------------------------------------------- |
-| Cell `index.ts`                       | Browser-safe only — shared between server and UI            |
-| Server-only code (`@std/*`, `Deno.*`) | `*.server.ts` + dynamic import (string-concat as fallback)  |
-| Files loaded via dynamic import       | Must also have static import in `app.ts` for `deno compile` |
-| `import type`                         | Always safe — erased at compile time                        |
+| What                                  | Rule                                                            |
+| ------------------------------------- | --------------------------------------------------------------- |
+| Browser-reachable import              | Must resolve inside `baseDir` (dev) — or map it via `serveDirs` |
+| Cell `index.ts`                       | Browser-safe only — shared between server and UI                |
+| Server-only code (`@std/*`, `Deno.*`) | `*.server.ts` + dynamic import (string-concat as fallback)      |
+| Files loaded via dynamic import       | Must also have static import in `app.ts` for `deno compile`     |
+| `import type`                         | Always safe — erased at compile time                            |
 
 ## Auto-aliasing npm packages (dev mode)
 

@@ -155,6 +155,26 @@ validateVersion();
 
 // ── Entry point ───────────────────────────────────────────────────────
 
+/** THE decider for "is this app reachable off loopback?" — nothing else in the
+ *  framework may answer that question its own way.
+ *
+ *  It used to be answered twice: `parseCli().expose` for the `ui:"all"` privacy
+ *  warning, and `cli.expose ?? false` for the transport. That was survivable
+ *  only while `--expose` was the sole source; the moment `expose` became a
+ *  config key (a compiled binary in a service unit has no shell flags), a
+ *  config-exposed app would have bound 0.0.0.0 with the privacy warning
+ *  silently switched off — a quiet failure exactly where it costs most.
+ *
+ *  CLI wins over config: the operator running the binary overrides the author.
+ *  Structural param so it works for both CellsConfig (outer `run`) and
+ *  AioConfig (inner `_run`) without importing either. */
+export function _exposeOf(
+  cli: { expose?: boolean },
+  config: { expose?: boolean },
+): boolean {
+  return cli.expose ?? config.expose ?? false;
+}
+
 /** The APP's own deno.json — located relative to its entry module, never via
  *  the cwd.
  *
@@ -166,8 +186,13 @@ validateVersion();
  *  that the framework documents as inferable.
  *
  *  `deno compile` embeds deno.json next to the entry module (see
- *  `assetIncludes`), so the same lookup answers in dev and in a binary. Both
- *  layouts are tried: entry at the project root, and the scaffold's `src/`. */
+ *  `assetIncludes`), so the same lookup answers in dev and in a binary.
+ *
+ *  Four levels up, nearest wins: the two-level version resolved `src/app.ts`
+ *  but never a nested entry like `src/relay/app.ts`, which then silently
+ *  reported "0.0.0". Walking is entry-relative, so a deeper search still
+ *  cannot adopt the LAUNCH directory's identity — the bug this function
+ *  exists to prevent — and the nearest ancestor is the app's own root. */
 function _denoJsonVersion(): string | undefined {
   const read = (url: URL): string | undefined => {
     try {
@@ -179,11 +204,38 @@ function _denoJsonVersion(): string | undefined {
   };
   try {
     const main = new URL(Deno.mainModule);
-    return read(new URL("./deno.json", main)) ??
-      read(new URL("../deno.json", main));
+    for (const up of ["./", "../", "../../", "../../../", "../../../../"]) {
+      const v = read(new URL(`${up}deno.json`, main));
+      if (v) return v;
+    }
+    return undefined;
   } catch {
     return undefined;
   }
+}
+
+/** The version string the boot report prints and `__aio.appVersion` carries.
+ *
+ *  It used to fall back to `"0.0.0"` — a CONFIDENT WRONG NUMBER, printed
+ *  exactly when "which build is this?" matters most: a hand-compiled binary
+ *  embeds no deno.json at all, so every one of them claimed 0.0.0 and looked
+ *  like a real answer. An unknown version must SAY unknown and say what to do
+ *  about it. Same string in dev and prod; only the hint differs, because the
+ *  fix differs (a binary has to be rebuilt). Pure — tested directly. */
+export function _resolveAppVersion(
+  configured: string | undefined,
+  fromDenoJson: string | undefined,
+  compiled: boolean,
+): string {
+  // A blank/whitespace value is ABSENT, not a version — otherwise
+  // `appVersion: ""` would print an empty field that reads as a real answer.
+  const v = (configured ?? "").trim() || (fromDenoJson ?? "").trim();
+  if (v) return v;
+  return compiled
+    ? 'unknown (compiled binary — set appVersion in aio.run(), or "version" ' +
+      "in deno.json, and rebuild with aio's builder)"
+    : 'unknown (no "version" in the app\'s deno.json — set it, or pass ' +
+      "appVersion to aio.run())";
 }
 
 /** The app's `target` from deno.json (written by `am create --target=…`) as a
@@ -399,12 +451,18 @@ async function run(a?: any, b?: any): Promise<AioApp<any, any>> {
       onRestore: fc.onRestore,
     });
 
-    if (parseCli().expose || fc.users || fc.resolveUser) {
+    // `_exposeOf` — the ONE decider (see its doc comment). Reading
+    // `parseCli().expose` here instead would silence this warning for an app
+    // exposed via `aio.run({ expose: true })`.
+    const _exposed = _exposeOf(parseCli(), fc);
+    if (_exposed || fc.users || fc.resolveUser) {
       const allUi = visibilityReport
         .filter((r) => r.ui === "all")
         .map((r) => r.cell);
       if (allUi.length) {
-        const mode = parseCli().expose ? "--expose" : "multi-user auth";
+        const mode = _exposed
+          ? (parseCli().expose ? "--expose" : "expose: true")
+          : "multi-user auth";
         log.warn(
           `${mode} with ui="all" on cells: ${
             allUi.join(", ")
@@ -1143,7 +1201,9 @@ async function _run<S, A, E>(
   });
 
   // --- Phase 4: start transport + lifecycle ---
-  const expose = cli.expose ?? false;
+  // ONE decider — same function the ui:"all" privacy warning uses, so a
+  // config-exposed app can never be exposed-but-unwarned (see `_exposeOf`).
+  const expose = _exposeOf(cli, config);
   const users = config.users;
   const _resolveUser = config.resolveUser
     ? (tok: string) => config.resolveUser!(tok, state)
@@ -1187,6 +1247,7 @@ async function _run<S, A, E>(
       : undefined,
     cliCert: cli.cert,
     cliKey: cli.key,
+    cliNoTls: cli.noTls ?? false,
     cliTransport: cli.transport,
     ui,
     title,
@@ -1263,7 +1324,11 @@ async function _run<S, A, E>(
       ? "sessions"
       : undefined,
     appId,
-    appVersion: config.appVersion ?? _denoJsonVersion() ?? "0.0.0",
+    appVersion: _resolveAppVersion(
+      config.appVersion,
+      _denoJsonVersion(),
+      isCompiled(),
+    ),
     title,
     prod,
     electronDistDir,

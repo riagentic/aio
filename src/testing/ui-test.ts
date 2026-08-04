@@ -127,6 +127,16 @@ export interface UIElementHandle {
   /** True while the element is disabled — resolvable and assertable without
    *  interacting (interactions on a disabled element fail loud). */
   readonly disabled: boolean;
+  /** True while a checkbox/radio is checked. ALWAYS a boolean, so the natural
+   *  assertion for "off" — `assertEquals(ui.LanToggle.checked, false)` — is
+   *  writable (it used to read back a lazy callable and fail with
+   *  `Actual: [Function: callable]`). `false` for an element with no checked
+   *  state; the element itself must exist, or resolving fails loud. */
+  readonly checked: boolean;
+  /** True while an input/textarea is read-only. Always a boolean. */
+  readonly readonly: boolean;
+  /** True while an input/select/textarea is required. Always a boolean. */
+  readonly required: boolean;
   /** Structured info (tag, events, path) from the surface. */
   readonly info: UIElementInfo;
 }
@@ -821,8 +831,21 @@ async function _mountTestUI(
       get value() {
         return String(el().value ?? "");
       },
+      // The four state booleans, always boolean — never undefined, and never
+      // the proxy's lazy callable. Reading one still RESOLVES the element, so
+      // asserting on something that isn't there fails loud with the name
+      // listing instead of quietly answering `false`.
       get disabled() {
         return resolveInfo().disabled === true;
+      },
+      get checked() {
+        return resolveInfo().checked === true;
+      },
+      get readonly() {
+        return resolveInfo().readonly === true;
+      },
+      get required() {
+        return resolveInfo().required === true;
       },
     };
   }
@@ -871,7 +894,17 @@ async function _mountTestUI(
     // (e.g. `ui.PasswordInput.type()` when "PasswordInput" resolved to a
     // component, or a typo'd action) must fail with the aio name listing —
     // a bare `TypeError: … is not a function` names nothing.
-    const callable = function () {} as unknown as AnyDoc;
+    //
+    // The target carries a self-describing NAME because this handle can also be
+    // read as a VALUE, and then it lands in an assertion diff: `Actual:
+    // [Function: callable]` named neither the property nor the reason (a field
+    // report). Deno prints a function's name, so the diff now says what it is.
+    // The lazy callable itself is load-bearing (un-awaited sequences target UI a
+    // queued action will create), so it stays — it just stops being anonymous.
+    const label = `aio testUI: "${name}" is unresolved — a pending element/` +
+      `component reference, not a value. For state use .checked/.disabled/` +
+      `.readonly/.required/.value/.text on an element that exists.`;
+    const callable = { [label]: function () {} }[label] as unknown as AnyDoc;
     return new Proxy(callable, {
       get(_target, prop: string | symbol) {
         if (typeof prop === "symbol" || prop in eh) {

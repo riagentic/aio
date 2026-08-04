@@ -43,7 +43,9 @@ export const VALID_AIO_CONFIG_KEYS = new Set<string>([
   "auth",
   "ui",
   "port",
+  "expose",
   "baseDir",
+  "serveDirs",
   "client",
   "keepServer",
   "transport",
@@ -101,6 +103,7 @@ export const VALID_FEATURES_CONFIG_KEYS = new Set<string>([
   "cellDefaults",
   "localFirst",
   "port",
+  "expose",
   "persist",
   "persistKey",
   "dbPath",
@@ -111,6 +114,7 @@ export const VALID_FEATURES_CONFIG_KEYS = new Set<string>([
   "persistMode",
   "ui",
   "baseDir",
+  "serveDirs",
   "client",
   "keepServer",
   "transport",
@@ -167,6 +171,10 @@ const CONFIG_DOCS: Record<string, [string, string]> = {
   appId: ["", "unique app identity — lock file, UDS socket, KV/SQLite paths"],
   appVersion: ["", "app version string — logged on startup"],
   cells: ["", "cell definitions array"],
+  serveDirs: [
+    "",
+    'extra READ-ONLY dev-server roots by URL prefix ({"/shared":"../core/lib"}) — dev only; prod bundles follow relative imports',
+  ],
   localFirst: [
     "false",
     "run every server cell's methods locally + sync as CRDT ops (per-cell opt-out with sync:false)",
@@ -182,6 +190,10 @@ const CONFIG_DOCS: Record<string, [string, string]> = {
     '"single" (one JSON blob) or "multi" (one SQLite row per top-level cell — rewrites only changed cells)',
   ],
   port: ["8000", "HTTP/WS server port"],
+  expose: [
+    "false",
+    "serve on 0.0.0.0 + TLS for LAN access (same as --expose; the flag wins)",
+  ],
   baseDir: ['"./src"', "source directory for transpilation"],
   client: ['"electron"', '"electron" | "browser" | "cli" | "server-only"'],
   keepServer: ["false", "keep server running after client closes"],
@@ -268,7 +280,9 @@ const UI_DOCS: Record<string, [string, string]> = {
 const CONFIG_GROUPS: [string, string[]][] = [
   ["Server & transport", [
     "port",
+    "expose",
     "baseDir",
+    "serveDirs",
     "client",
     "keepServer",
     "transport",

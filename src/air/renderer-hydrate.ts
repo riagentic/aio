@@ -278,7 +278,7 @@ function _hydrateProps(el: HTMLElement, props: Record<string, unknown>): void {
     }
   }
   bindSignalProps(el, props);
-  if (props.ref) _callRef(props.ref, el);
+  if (props.ref) _callRef(props.ref, el, el.tagName?.toLowerCase());
   // AIO-89: apply action directives
   if (props.use) _applyActions(el, props.use);
 }
