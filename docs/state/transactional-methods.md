@@ -64,7 +64,12 @@ A transactional method executes at **snapshot isolation**:
 - **Writes.** Mutations accumulate in a private write-set `W` (the batcher).
   Nothing is visible to other actions until commit.
 - **Commit.** On normal return, `W` is applied as **one** atomic `__set` batch —
-  a single reducer action, a single broadcast, a single journal entry.
+  a single reducer action, a single broadcast, a single journal entry. That
+  entry is the only durable record of what the method wrote (the outer
+  `cell:method` action commits at _call_ time, before the body has written
+  anything), so it is journalled, shown by `am timeline` with its diff, and
+  recorded in time-travel history — attributed to the method that produced it
+  via `origin`, never hidden as framework noise.
 - **`s.$commit()`.** Flushes `W` now (atomic), then continues with a _fresh_
   snapshot `Σ'` for subsequent reads. Rare; for methods that must publish
   progress mid-flight.

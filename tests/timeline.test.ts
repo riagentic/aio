@@ -212,3 +212,67 @@ Deno.test("trojan migrations: absent capability → empty summary (not a crash)"
   assertEquals(r.status, 200);
   assertEquals(r.body, { declared: {}, stored: {}, report: [], drift: [] });
 });
+
+// ─── Non-plain objects are LEAVES, not empty containers ─────────────────────
+//
+// `Object.keys(new Date())` is `[]`. Descending into a changed Date therefore
+// found nothing to compare and emitted no entry at all — `am timeline` printed
+// `"diff": []` for an action that moved a timestamp. Reachable for any
+// non-persisted field, which is exactly what the persist guard tells you to do
+// when you want to hold a Date (`persist: { exclude: [...] }`).
+
+Deno.test("timeline diff: a changed Date is reported, not silently skipped", () => {
+  const prev = { s: { at: new Date("2020-01-01T00:00:00Z"), n: 1 } };
+  const next = { s: { at: new Date("2026-06-06T00:00:00Z"), n: 1 } };
+  const d = diffState(prev, next);
+  assertEquals(d.length, 1, "a changed Date must produce exactly one entry");
+  assertEquals(d[0]!.path, "s.at");
+  assertEquals((d[0]!.after as Date).getTime(), Date.UTC(2026, 5, 6));
+});
+
+Deno.test("timeline diff: Map, Set and class instances are leaves too", () => {
+  const mapDiff = diffState(
+    { s: { m: new Map([["a", 1]]) } },
+    { s: { m: new Map([["a", 2]]) } },
+  );
+  assertEquals(mapDiff.length, 1);
+  assertEquals(mapDiff[0]!.path, "s.m");
+
+  const setDiff = diffState(
+    { s: { z: new Set([1]) } },
+    { s: { z: new Set([1, 2]) } },
+  );
+  assertEquals(setDiff.length, 1);
+  assertEquals(setDiff[0]!.path, "s.z");
+
+  class Point {
+    constructor(public x: number) {}
+  }
+  const clsDiff = diffState({ s: { p: new Point(1) } }, {
+    s: { p: new Point(2) },
+  });
+  assertEquals(clsDiff.length, 1);
+  assertEquals(clsDiff[0]!.path, "s.p");
+});
+
+Deno.test("timeline diff: plain objects still recurse to the changed leaf", () => {
+  const d = diffState(
+    { s: { a: { b: { c: 1 }, keep: 9 } } },
+    { s: { a: { b: { c: 2 }, keep: 9 } } },
+  );
+  assertEquals(d.length, 1);
+  assertEquals(d[0]!.path, "s.a.b.c");
+  assertEquals(d[0]!.before, 1);
+  assertEquals(d[0]!.after, 2);
+});
+
+Deno.test("timeline diff: a null-prototype object is still traversed", () => {
+  const mk = (n: number) => {
+    const o = Object.create(null) as Record<string, unknown>;
+    o.n = n;
+    return o;
+  };
+  const d = diffState({ s: { o: mk(1) } }, { s: { o: mk(2) } });
+  assertEquals(d.length, 1);
+  assertEquals(d[0]!.path, "s.o.n");
+});

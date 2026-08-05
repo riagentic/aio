@@ -54,19 +54,36 @@ export function createActionLog(path: string, max: number) {
         if (writeErrors++ < 3) log.error("action-log", `write failed: ${e}`);
       }
     });
+    // `max` is enforced HERE, on the way in.
+    //
+    // Truncation used to be reachable only through `flush()`, which runs once
+    // at `onStop` — so `max: 10` produced a hundred-line file on a running app,
+    // and a SIGKILLed process never truncated at all. The bound is the whole
+    // contract of a "rolling" log: it is what stops an always-on diagnostic
+    // from filling a disk, and (with action payloads on those lines) how long
+    // history sticks around.
+    if (lineCount > max) await truncateIfNeeded();
   }
 
+  /** Cut the file back under `max`.
+   *
+   *  Keeps the newest HALF of `max`, not the newest half of the FILE: the old
+   *  rule kept `lines.length / 2`, so a 100-line file with `max: 10` truncated
+   *  to 50 — still five times the bound it exists to enforce. Halving `max`
+   *  (rather than trimming to exactly `max`) makes the rewrite amortized O(1)
+   *  per append instead of O(max), while `lineCount <= max` holds after every
+   *  append. */
   async function truncateIfNeeded(): Promise<void> {
     await _enqueue(async () => {
       if (lineCount <= max) return;
       try {
         const text = await Deno.readTextFile(path);
-        const lines = text.trim().split("\n");
+        const lines = text.trim().split("\n").filter((l) => l.length > 0);
         if (lines.length <= max) {
           lineCount = lines.length;
           return;
         }
-        const keep = lines.slice(Math.floor(lines.length / 2));
+        const keep = lines.slice(-Math.max(1, Math.floor(max / 2)));
         await Deno.writeTextFile(path, keep.join("\n") + "\n");
         lineCount = keep.length;
       } catch {

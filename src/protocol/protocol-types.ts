@@ -8,8 +8,6 @@
 export type AioUser = { id: string; role: string };
 
 export const WS_MAX_QUEUE = 100;
-export const OFFLINE_MAX_QUEUE = 100;
-export const OFFLINE_MAX_AGE = 24 * 60 * 60 * 1000; // 24 hours
 
 /** Maximum time a client waits for an ack before rejecting the method promise. */
 export const ACK_TIMEOUT_MS = 15_000;

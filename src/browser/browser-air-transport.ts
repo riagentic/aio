@@ -39,9 +39,12 @@ import {
   _armAckTimer,
   _rejectAck,
   _rejectAllPending,
+  _rejectInFlight,
   ARMS_ACK_TIMER,
 } from "../protocol/browser-ack.ts";
 import { backoffDelay } from "../protocol/transport-shared.ts";
+import { _showStatus } from "../protocol/protocol-status.ts";
+import { _setDegradedRelay, degradedReport } from "../diagnostics/degraded.ts";
 
 let _ws: WebSocket | null = null;
 let _closed = false;
@@ -79,8 +82,15 @@ let _ipcConnected = false;
 let _ipcBound = false;
 let _ipcPingTimer: ReturnType<typeof setInterval> | null = null;
 
-function _status(text: string) {
+/** Connection status: console trace + the on-page indicator.
+ *
+ *  The widget is what `ui: { showStatus: false }` turns off (the shell writes
+ *  `window.__aioShowStatus`, which `_showStatus` reads). Only the orphaned
+ *  transport ever called it, so the config flag toggled nothing at all and a
+ *  reconnecting app looked identical to a working one. */
+function _status(text: string, color = "#e25", autohide?: number) {
   console.debug("[aio:air]", text);
+  if (typeof document !== "undefined") _showStatus(text, color, autohide);
 }
 
 function _handleState(data: Record<string, unknown>) {
@@ -170,6 +180,10 @@ function _route(line: string): void {
 function _protoMismatch(reason: string) {
   _status("Protocol mismatch — reload/update the app");
   _closed = true; // stop the reconnect loop
+  // Terminal: nothing will ever flush this queue, so the queued frames are
+  // gone — say so, and reject their callers TOO (rejectAll, not
+  // rejectInFlight). A rejection is only honest when the frame is really dead.
+  _dropQueue("the connection is terminally closed (protocol mismatch)");
   _rejectAllPending(new Error(`protocol version mismatch: ${reason}`));
   try {
     _ws?.close(PROTOCOL_MISMATCH_CLOSE_CODE, "protocol mismatch");
@@ -179,10 +193,50 @@ function _protoMismatch(reason: string) {
   _connecting = false;
 }
 
+/** Throw the offline queue away — the ONLY place that may — and reject the
+ *  callers whose frames it holds. The queue is in memory: it survives a
+ *  disconnect (and flushes on reconnect) but nothing else, so every path that
+ *  discards it owes those callers an error instead of silence. */
+function _dropQueue(why: string): void {
+  const q = _queue;
+  _queue = [];
+  _connectionDegraded = false;
+  _offlineWarned = false;
+  if (q.length === 0) return;
+  console.warn(
+    `[aio:air] ${q.length} queued action(s) discarded — ${why}. They were ` +
+      `never sent; their callers reject.`,
+  );
+  for (const a of q) {
+    const cid = (a as { cid?: string }).cid;
+    if (cid) _rejectAck(cid, new Error(`action was never sent — ${why}`));
+  }
+}
+
+/** One-time-per-offline-period notice that the queue is RAM-only. */
+let _offlineWarned = false;
+function _noteQueued(): void {
+  if (_offlineWarned) return;
+  _offlineWarned = true;
+  console.warn(
+    `[aio:air] offline — actions are queued IN MEMORY and replay on ` +
+      `reconnect, but a page reload discards them (they are not persisted).`,
+  );
+  diagEmit({
+    type: "browser-air-transport:offline-queue",
+    severity: "warning",
+    source: "browser-air-transport",
+    message: "Actions queued in memory while offline",
+    detail: { max: QUEUE_MAX },
+    hint: "The queue is not persisted — a reload before reconnect loses it",
+  });
+}
+
 function _flushQueue(send: (d: string) => void) {
   const q = _queue;
   _queue = [];
   _connectionDegraded = false;
+  _offlineWarned = false;
   for (const a of q) {
     send(enc("action", a));
     // The frame is out now — this is when a queued call's ack clock starts.
@@ -251,13 +305,14 @@ function _connectIPC() {
     _clearIpcWatchdog();
     _connecting = false;
     _retry = 0;
-    if (_wasConnected) _status("Connected");
+    if (_wasConnected) _status("Connected", "#2a2", 2000);
     _wasConnected = true;
     _coreSetTransport({ send: (d: string) => _ipc!.send(d), close: () => {} });
     _coreSetConnected(true);
     _syncOnline?.(true);
     _coreResendSubs();
     _flushQueue((d) => _ipc!.send(d));
+    _wireDegradedRelay();
     if (!_ipcPingTimer) {
       _ipcPingTimer = setInterval(() => {
         if (_ipc && _ipcConnected) _ipc.send(enc("ping"));
@@ -271,8 +326,15 @@ function _connectIPC() {
     _connecting = false;
     // The connection is known gone: fail the calls waiting on it NOW instead
     // of letting each one sit out its full 15s ack ceiling and report a
-    // timeout. The orphaned WS transport has always done this.
-    _rejectAllPending(new Error("connection lost"));
+    // timeout.
+    //
+    // IN-FLIGHT ONLY. `_queue` survives this close and flushes on the next
+    // open, so rejecting a still-queued call told its caller the action had
+    // failed and then sent it anyway — one user intent, one rejection AND one
+    // application. A queued call has not been written; nothing can have
+    // applied it; its promise waits for the flush.
+    _rejectInFlight(new Error("connection lost"));
+    _setDegradedRelay(null);
     _coreSetTransport(null);
     _coreSetConnected(false);
     _syncOnline?.(false);
@@ -285,6 +347,19 @@ function _connectIPC() {
     _scheduleReconnect();
   });
   _ipc.ready();
+}
+
+/** Health visibility: this runtime's `degraded()` escalations travel to the
+ *  server as `cdiag` frames so /__aio/health can see a dead browser subsystem.
+ *  Re-pointed at each new connection, and anything already degraded is
+ *  replayed — it may have escalated while offline. (Only the orphaned WS
+ *  transport ever registered this relay, so no shipped client reported client
+ *  degradations at all.) */
+function _wireDegradedRelay(): void {
+  _setDegradedRelay((ev) => _sendRaw(enc("cdiag", ev)));
+  for (const d of degradedReport()) {
+    _sendRaw(enc("cdiag", { kind: "down", ...d }));
+  }
 }
 
 function _connect() {
@@ -307,10 +382,11 @@ function _connect() {
     const ua = typeof navigator !== "undefined" &&
       /electron/i.test(navigator.userAgent);
     ws.send(enc("type", { kind: ua ? "electron" : "browser" }));
-    if (_wasConnected) _status("Connected");
+    if (_wasConnected) _status("Connected", "#2a2", 2000);
     _wasConnected = true;
     _coreResendSubs();
     _flushQueue((d) => ws.send(d));
+    _wireDegradedRelay();
   };
   ws.onmessage = (e) => {
     if (typeof e.data !== "string") return;
@@ -318,7 +394,10 @@ function _connect() {
   };
   ws.onclose = () => {
     _ws = null;
-    _rejectAllPending(new Error("connection lost")); // see the IPC close above
+    // In-flight only — the queue survives and flushes on reconnect (see the
+    // IPC close above for the full reasoning).
+    _rejectInFlight(new Error("connection lost"));
+    _setDegradedRelay(null);
     _coreSetTransport(null);
     _coreSetConnected(false);
     _syncOnline?.(false);
@@ -368,6 +447,7 @@ function _send(action: { type: string; payload?: unknown }) {
     }
     _queue.push(tagged);
     _updateDegraded();
+    _noteQueued();
   }
 }
 
@@ -391,11 +471,16 @@ _setTeardownFn(() => {
   _ws = null;
   _ipcConnected = false;
   _connecting = false;
+  _setDegradedRelay(null);
   if (_ipcPingTimer) {
     clearInterval(_ipcPingTimer);
     _ipcPingTimer = null;
   }
-  _queue = [];
+  // Teardown DISCARDS the queue, so every caller still waiting on it hears
+  // about it — silently emptying it left those promises pending forever (their
+  // clocks are deferred until the frame is written, and it never will be).
+  _dropQueue("the client was torn down");
+  _rejectAllPending(new Error("client torn down before the server confirmed"));
   _retry = 0;
 });
 

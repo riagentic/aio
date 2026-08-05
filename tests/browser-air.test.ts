@@ -28,7 +28,6 @@ import {
 import {
   _resetDevTools,
   _resetEnsured,
-  _resetIDB,
   _resetInitialShapeKeys,
   _resetStateReady,
   _resetStateVersion,
@@ -66,7 +65,6 @@ function resetAll(): void {
   _resetStateVersion();
   _resetStateReady();
   _resetStatus();
-  _resetIDB();
   _resetDevTools();
   _resetTracking();
   _resetInitialShapeKeys();

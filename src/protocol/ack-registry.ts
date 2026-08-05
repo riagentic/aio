@@ -24,6 +24,15 @@ type PendingEntry = {
    *  deferred arm (offline queue → replay) uses the call's own budget. */
   ceilingMs: number;
   methodKey: string | undefined;
+  /** True once the frame carrying this call has actually been WRITTEN to a
+   *  transport. False while it sits in an offline queue.
+   *
+   *  This is the difference between "the server may or may not have applied
+   *  it" and "it has not been sent at all", and it decides who a disconnect is
+   *  allowed to settle: a queue that survives the close and flushes on the
+   *  next open must NOT have its calls rejected, or one user intent produces
+   *  one rejection AND one application. */
+  written: boolean;
 };
 
 /** A pending-ack registry scoped to one transport/connection. */
@@ -38,15 +47,27 @@ export type AckRegistry = {
     cid: string,
     opts?: { methodKey?: string; deferTimer?: boolean },
   ): Promise<unknown>;
-  /** Start the clock for a deferred registration — called when a queued action
-   *  is actually written. No-op if already armed or already settled. */
+  /** The frame for `cid` is now ON THE WIRE: mark it in-flight and start its
+   *  clock. Called by every transport at the moment it writes — both on the
+   *  direct send and when draining the offline queue. No-op if already armed
+   *  or already settled. */
   armTimer(cid: string): void;
+  /** True when `cid` is registered and its frame has been written (in flight).
+   *  Tests and transports use it to tell "queued" from "sent". */
+  isWritten(cid: string): boolean;
   /** Settle with the method's transported return value (undefined for void). */
   resolve(cid: string, value?: unknown): boolean;
   /** Settle as a failure — the server refused, or the transport gave up. */
   reject(cid: string, err: Error): boolean;
-  /** Reject everything still outstanding (connection lost, shutdown). */
+  /** Reject everything still outstanding — for a teardown that also THROWS
+   *  THE QUEUE AWAY (close(), protocol mismatch). */
   rejectAll(err: Error): number;
+  /** Reject only the calls whose frame is already on the wire — for a
+   *  disconnect whose offline queue SURVIVES and will flush on reconnect.
+   *  A still-queued call keeps its promise: it has not been sent, nothing can
+   *  have applied it, and rejecting it would be a lie the queue then goes on
+   *  to contradict. */
+  rejectInFlight(err: Error): number;
   /** How many calls are outstanding — tests and diagnostics. */
   size(): number;
 };
@@ -99,6 +120,10 @@ export function createAckRegistry(
         timer: undefined,
         ceilingMs: ceilingFor(opts?.methodKey),
         methodKey: opts?.methodKey,
+        // A caller that does NOT defer is telling us it has no queue to track
+        // — the frame is gone as far as it knows, so the call counts as
+        // in-flight and a disconnect settles it (the historic behaviour).
+        written: !opts?.deferTimer,
       };
       pending.set(cid, entry);
       if (!opts?.deferTimer) arm(cid, entry);
@@ -106,7 +131,12 @@ export function createAckRegistry(
     },
     armTimer(cid) {
       const entry = pending.get(cid);
-      if (entry) arm(cid, entry);
+      if (!entry) return;
+      entry.written = true;
+      arm(cid, entry);
+    },
+    isWritten(cid) {
+      return pending.get(cid)?.written === true;
     },
     resolve(cid, value) {
       const entry = pending.get(cid);
@@ -130,6 +160,17 @@ export function createAckRegistry(
         if (entry.timer) clearTimeout(entry.timer);
         entry.reject(err);
         pending.delete(cid);
+      }
+      return count;
+    },
+    rejectInFlight(err) {
+      let count = 0;
+      for (const [cid, entry] of pending) {
+        if (!entry.written) continue;
+        if (entry.timer) clearTimeout(entry.timer);
+        entry.reject(err);
+        pending.delete(cid);
+        count++;
       }
       return count;
     },

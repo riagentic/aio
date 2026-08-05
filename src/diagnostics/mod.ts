@@ -123,7 +123,9 @@ export function initDiagnostics(
     const debounce = typeof opts.checkpoint === "object"
       ? (opts.checkpoint.debounce ?? 5000)
       : 5000;
-    cpWriter = createCheckpoint(logDir, debounce);
+    // The checkpoint honours the SAME redaction list as the other three sinks.
+    // It was the one that did not, and it is the one that writes the most.
+    cpWriter = createCheckpoint(logDir, debounce, redact);
   }
 
   // ── Action log ──

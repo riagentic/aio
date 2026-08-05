@@ -145,11 +145,11 @@ up `state.db` and clear the cell's stored slice yourself.
 
 ## State recovery (offline queue)
 
-When the WebSocket disconnects, actions are persisted to IndexedDB and replayed
-on reconnect.
+When the WebSocket disconnects, actions are queued IN MEMORY and replayed on
+reconnect.
 
 1. First connect: actions queue in memory (max 100) until WS ready
-2. After first connect: disconnections persist actions to IndexedDB
+2. After first connect: disconnections queue actions in memory (lost on reload)
 3. On reconnect: queued actions replay in order
 4. Actions older than 24 hours are discarded before replay
 

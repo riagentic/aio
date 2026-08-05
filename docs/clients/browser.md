@@ -155,24 +155,37 @@ and diagnostic events for full visibility.
 
 ## Offline queue
 
-When the WebSocket disconnects, dispatched actions are queued in IndexedDB
-instead of being lost. On reconnect, they're replayed in order.
+When the WebSocket disconnects, dispatched actions queue **in memory** and are
+replayed, in order, on reconnect.
 
-| Parameter          | Value                           |
-| ------------------ | ------------------------------- |
-| Max queued actions | 1000                            |
-| TTL per action     | 24 hours                        |
-| Storage            | IndexedDB (`aio-offline-queue`) |
-| Replay             | Automatic on reconnect          |
+| Parameter          | Value                                           |
+| ------------------ | ----------------------------------------------- |
+| Max queued actions | 1000                                            |
+| Storage            | in memory (the page), **not persisted**         |
+| Replay             | automatic on reconnect                          |
+| Lost when          | the page reloads or closes before it reconnects |
 
 The client stays functional during brief disconnects without the user noticing.
-Actions are replayed chronologically, and the server processes them as if they
-arrived in real-time.
+Actions replay chronologically and the server processes them as if they had
+arrived in real time.
+
+**A queued action does not survive a reload** — the queue lives in the tab. The
+first action queued after a disconnect logs a warning saying exactly that; for
+edits that must outlive a reload use a `sync` cell (CRDT ops are persisted and
+rebased on reconnect).
+
+Past 1000 queued actions the oldest is dropped and its caller's promise rejects
+immediately with the real reason. `isConnectionDegraded()` reports the queue
+passing 80% full.
 
 **Traffic implication:** On reconnect, the queue flushes all pending actions at
 once. If you queued 100 actions during a 5-minute disconnect, all 100 dispatch
 in rapid succession. Microtask coalescing ensures this produces at most a few
 broadcasts, not 100.
+
+See [Offline & Transport](../persistence/offline.md) for what
+`await
+cell.method()` resolves to in each connection state.
 
 ## Transport selection
 

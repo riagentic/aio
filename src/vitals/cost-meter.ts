@@ -61,6 +61,14 @@ export type AttributionSample = {
   key: string;
   /** Serialized size of that key's value in the payload. */
   bytes: number;
+  /** Which broadcast ROUND produced this sample. A cell's "pushes" is the count
+   *  of distinct rounds it appeared in, and the round has to be told to the
+   *  meter rather than inferred: rounds were previously distinguished by their
+   *  millisecond timestamp, so two rounds landing in the same millisecond
+   *  collapsed into one — under-counting pushes and over-reporting mean
+   *  bytes/push by the same factor, exactly under the load where the number
+   *  matters. `beginRound()` mints it. */
+  round: number;
 };
 
 /** Reduce timing for one action. */
@@ -126,9 +134,21 @@ class Ring<T> {
     this.#head = (this.#head + 1) % this.cap;
     this.#wrapped = true;
   }
-  /** Newest-first is irrelevant here; callers filter by timestamp. */
+  /** OLDEST FIRST — always. `report()` takes the measured window from
+   *  `rows[0].at`, so physical order was not an implementation detail: once the
+   *  ring wrapped, `#items[0]` was the NEWEST-but-one element, the measured
+   *  span collapsed to near zero, and every per-second figure in `am cost` was
+   *  inflated by it (worst case the divisor hit the 0.001s floor and the report
+   *  claimed thousands of times the real rate). Rotating on read costs one copy
+   *  of a bounded buffer, on a command a human typed. */
   all(): T[] {
-    return this.#items;
+    if (!this.#wrapped) return this.#items;
+    // After a wrap `#head` is the slot due to be overwritten next — i.e. the
+    // OLDEST element still held.
+    return [
+      ...this.#items.slice(this.#head),
+      ...this.#items.slice(0, this.#head),
+    ];
   }
   get wrapped(): boolean {
     return this.#wrapped;
@@ -146,7 +166,15 @@ const DEFAULT_REDUCES = 2048;
 
 export interface CostMeter {
   recordSend(bytes: number, clientId: string, kind: SendSample["kind"]): void;
-  recordAttribution(cell: string, key: string, bytes: number): void;
+  /** Mint the id for one broadcast round. Every attribution for that round
+   *  passes it back, so "pushes" counts ROUNDS rather than timestamps. */
+  beginRound(): number;
+  recordAttribution(
+    cell: string,
+    key: string,
+    bytes: number,
+    round: number,
+  ): void;
   recordReduce(cell: string, ms: number): void;
   /** Cells that exist, so idle ones can be shown as idle rather than missing. */
   setKnownCells(cells: string[]): void;
@@ -171,6 +199,7 @@ export function createCostMeter(opts: {
   const reduces = new Ring<ReduceSample>(opts.reduces ?? DEFAULT_REDUCES);
   let knownCells: string[] = [];
   let clients = 0;
+  let round = 0;
 
   const p95 = (xs: number[]): number => {
     if (xs.length === 0) return 0;
@@ -182,8 +211,11 @@ export function createCostMeter(opts: {
     recordSend(bytes, clientId, kind) {
       sends.push({ at: now(), bytes, clientId, kind });
     },
-    recordAttribution(cell, key, bytes) {
-      attribs.push({ at: now(), cell, key, bytes });
+    beginRound() {
+      return ++round;
+    },
+    recordAttribution(cell, key, bytes, round) {
+      attribs.push({ at: now(), cell, key, bytes, round });
     },
     recordReduce(cell, ms) {
       reduces.push({ at: now(), cell, ms });
@@ -231,8 +263,10 @@ export function createCostMeter(opts: {
         keys: Map<string, { bytes: number; pushes: number }>;
         full: number;
       }>();
-      // One broadcast round can attribute several keys at the same instant;
-      // counting distinct timestamps per cell counts PUSHES, not key-writes.
+      // One broadcast round attributes several keys, so a cell's PUSHES is the
+      // number of distinct ROUNDS it appeared in — not the number of
+      // key-writes, and not the number of distinct millisecond timestamps
+      // (which merged any two rounds that landed inside the same millisecond).
       for (const a of attribRows) {
         let e = byCell.get(a.cell);
         if (!e) {
@@ -240,7 +274,7 @@ export function createCostMeter(opts: {
           byCell.set(a.cell, e);
         }
         e.bytes += a.bytes;
-        e.pushes.add(a.at);
+        e.pushes.add(a.round);
         if (a.key === "*") e.full++;
         const k = e.keys.get(a.key) ?? { bytes: 0, pushes: 0 };
         k.bytes += a.bytes;
