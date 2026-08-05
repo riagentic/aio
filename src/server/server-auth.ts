@@ -38,19 +38,55 @@ export function _extractToken(url: URL, req: Request): string | null {
 
 /** Where a presented token came from. A URL-borne credential is visible in
  *  browser history, proxy logs and the `Referer` header, so the SOURCE decides
- *  what it is allowed to authenticate (see `sessionResolver` in server.ts). */
+ *  what it is allowed to authenticate (see `sessionResolver` in server.ts).
+ *
+ *  `"cookie"` is the AMBIENT source: the browser attaches it to every
+ *  subresource of every page load without anyone deciding to. That makes it
+ *  categorically different from `?token=` / `Authorization:` — see
+ *  `_isPresented` below. */
+export type TokenSource = "url" | "header" | "cookie";
+
 export function _extractTokenWithSource(
   url: URL,
   req: Request,
-): { token: string | null; fromUrl: boolean } {
+): { token: string | null; fromUrl: boolean; source: TokenSource | null } {
   const qToken = url.searchParams.get("token");
-  if (qToken) return { token: qToken, fromUrl: true };
+  if (qToken) return { token: qToken, fromUrl: true, source: "url" };
   const auth = req.headers.get("authorization");
   if (auth?.startsWith("Bearer ")) {
-    return { token: auth.slice(7), fromUrl: false };
+    return { token: auth.slice(7), fromUrl: false, source: "header" };
   }
-  return { token: sessionTokenFromCookie(req), fromUrl: false };
+  const cookie = sessionTokenFromCookie(req);
+  return {
+    token: cookie,
+    fromUrl: false,
+    source: cookie === null ? null : "cookie",
+  };
 }
+
+/** True when the caller DELIBERATELY presented this credential.
+ *
+ *  Only a presented-and-wrong credential is an attack signal worth spending
+ *  the per-IP failure budget on (the shared-key path has always drawn this
+ *  line — a token-less probe is a plain 401, not a strike). A session cookie
+ *  is attached by the browser to every request for every subresource, so ONE
+ *  page reload after a session expires used to burn the whole budget and
+ *  429 the user's own next login attempt: the normal end of every session
+ *  self-inflicted a 5-minute lockout.
+ *
+ *  Exempting the cookie is only safe because a cookie may authenticate a
+ *  SESSION and nothing else (see the cookie clamp in server.ts) — session
+ *  tokens are 256-bit random, so an unmetered guessing channel is worth
+ *  nothing, while a short static `users:` token would have been. */
+export const _isPresented = (source: TokenSource | null): boolean =>
+  source === "url" || source === "header";
+
+/** Header that tells a browser to drop a dead session cookie. Sent with the
+ *  refusal, so the stale value stops riding along on every later request
+ *  instead of failing silently forever. */
+export const clearSessionCookie = (secure: boolean): string =>
+  `${SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0` +
+  (secure ? "; Secure" : "");
 
 /** User resolver function — built once from resolveUser hook or static users map */
 export type UserResolverFn = (
@@ -74,6 +110,228 @@ export function _buildUserResolver(config: {
     };
   }
   return null;
+}
+
+// ── Control-plane gate (/__aio/trojan/*) ─────────────────────────────────────
+
+import { mintControlKey, removeControlKey } from "./app-key.ts";
+
+/** URL prefix of the trojan control plane. */
+export const TROJAN_PREFIX = "/__aio/trojan/";
+
+/** Header carrying the local operator's control credential.
+ *
+ *  A HEADER, deliberately, and never a query parameter: a URL-borne credential
+ *  lands in browser history, proxy logs and the `Referer` of every outbound
+ *  link (the same reasoning as `_warnTokenInUrl`), and a custom header is one a
+ *  cross-origin page cannot attach to a forged request without a CORS preflight
+ *  the trojan never answers — so a malicious page in the operator's own browser
+ *  cannot ride this credential even though it sits on localhost.
+ *
+ *  Not `Authorization:` either: that channel feeds `resolveUser`/`users`, so a
+ *  control key presented there would be counted as a failed LOGIN and burn the
+ *  operator's own per-IP auth budget (an `am` loop could lock its own author out
+ *  of the app for five minutes). It authenticates a different thing, so it
+ *  travels on a different header. */
+export const LOCAL_CONTROL_HEADER = "x-aio-control";
+
+/** The credentials this process has armed, by appId. One process serves one app
+ *  (the single-instance lock guarantees it); a TEST process that boots several
+ *  servers arms several, and any of them authorizes — they are all the same
+ *  operator's, on the same machine, in the same dev process. */
+const _armed = new Map<string, { key: string; path: string }>();
+
+/** Mint this app's local control credential and hold it in memory. Call once,
+ *  at server construction. Idempotent per boot in effect: each call replaces
+ *  the file and the value, so a restart invalidates every earlier copy.
+ *
+ *  WIRING — this is NOT yet called from `startServer` (that file was owned by
+ *  concurrent work), and until it is, an app in per-user mode still refuses
+ *  `am`/amui. Shared-key and public apps are already reachable: the app key and
+ *  the same-machine rule carry those. Two edits in server.ts complete it:
+ *
+ *    1. `armLocalControl(config);` once, at server construction.
+ *    2. in `handleRequest`, immediately after the same-machine 404 for
+ *       `/__aio/trojan/*` (so a remote caller is already gone):
+ *
+ *         if (pathname.startsWith(TROJAN_PREFIX) && localControlAuthorized(req)) {
+ *           const resp = await staticHandler.serveStatic(pathname, req);
+ *           resp.headers.set("X-Content-Type-Options", "nosniff");
+ *           return resp;
+ *         }
+ *
+ *  It goes THERE, not at the `trojanDenialForUserMode` call sites, because in
+ *  `users:` mode (no login flows) a credential-less request is refused by
+ *  "no token, no bytes" long before any trojan gate runs — three edits deep in
+ *  the per-user branch would have to cooperate, and a security rule spread over
+ *  three conditionals is one refactor away from a hole. One branch, before the
+ *  app's own auth, for one path prefix, in every mode.
+ *  `trojanDenialForUserMode`'s `req` stays useful either way: it is what lets a
+ *  WRONG credential be diagnosed instead of 401'd anonymously.
+ *  Shutdown needs no edit — `resetTrojanRateLimit()` already disarms.
+ *  Deliberately left unarmed rather than half-wired: a secret written to disk
+ *  that authorizes nothing is a liability, not a feature.
+ *
+ *  NEVER in prod: the trojan does not exist there (`server-static` refuses to
+ *  mount it, `handleTrojan` refuses again), so a production app writes no
+ *  control secret at all — nothing to steal, nothing to protect.
+ *
+ *  A failure is LOUD and leaves the app UNARMED. It never degrades into "allow
+ *  anyway": the whole point is that this credential is as trustworthy as the
+ *  directory it lives in. */
+export function armLocalControl(
+  cfg: { appId?: string; prod?: boolean },
+): void {
+  if (cfg.prod) return;
+  if (!cfg.appId) {
+    console.warn(
+      "[aio] control plane: no appId — `am`/amui cannot authenticate to " +
+        "/__aio/trojan/* on an auth-enabled app. Set appId in aio.run().",
+    );
+    return;
+  }
+  const r = mintControlKey(cfg.appId);
+  if (r.error !== undefined) {
+    console.warn(
+      `[aio] control plane: no local control credential — ${r.error}. ` +
+        `\`am\`/amui will need an authenticated admin on this app.`,
+    );
+    _armed.delete(cfg.appId);
+    return;
+  }
+  _armed.set(cfg.appId, { key: r.key, path: r.path });
+}
+
+/** Drop the credential (and its file) — shutdown, or one app in a test process.
+ *  With no appId, every armed credential in this process. */
+export function disarmLocalControl(appId?: string): void {
+  if (appId !== undefined) {
+    _armed.delete(appId);
+    removeControlKey(appId);
+    return;
+  }
+  for (const id of [..._armed.keys()]) {
+    _armed.delete(id);
+    removeControlKey(id);
+  }
+}
+
+/** Did the caller present a control credential at all? (Used to tell "you have
+ *  no credential" apart from "yours is stale" in the refusal.) */
+function _controlPresented(req: Request | undefined): string | null {
+  return req?.headers.get(LOCAL_CONTROL_HEADER) ?? null;
+}
+
+/** True when the presented credential matches one this process armed.
+ *  Timing-safe, and false whenever nothing is armed (prod, an unwritable or
+ *  non-owner-only data dir) — an unarmed app cannot be talked into accepting
+ *  an empty or absent key. */
+export function localControlAuthorized(req: Request | undefined): boolean {
+  const presented = _controlPresented(req);
+  if (!presented || _armed.size === 0) return false;
+  let ok = false;
+  // No early exit: compare against every armed key so the work (and therefore
+  // the timing) does not depend on which one matched.
+  for (const { key } of _armed.values()) {
+    if (_timingSafeEqual(presented, key)) ok = true;
+  }
+  return ok;
+}
+
+/** The path of an armed credential, for a refusal that can be acted on. */
+function _armedPath(): string | null {
+  for (const { path } of _armed.values()) return path;
+  return null;
+}
+
+/** ONE decider for "may this identity touch the raw-state control plane?".
+ *
+ *  `/__aio/trojan/*` reads UNFILTERED state (no `ui.exclude`, no `forUser`),
+ *  dispatches arbitrary actions, runs SQL against the app DB and REPLACES the
+ *  whole state. That is `/__aio/snapshot`'s power and more, so it is gated
+ *  identically — and the rule is written once, here, because it must hold on
+ *  BOTH the main listener and the plain-HTTP control listener that TLS spins
+ *  up (two copies of a security rule is how one of them rots).
+ *
+ *  The complete rule, by auth mode:
+ *   - per-user mode (`users` / `resolveUser` / `sessions` / `auth: true`):
+ *     an authenticated user with role "admin" — CALL THIS FUNCTION. Before the
+ *     fix this path fell through to static serving whenever the login flows
+ *     made the shell public, leaving the entire control plane anonymous.
+ *   - shared-key mode: the key already gates every route ahead of this.
+ *   - public mode: no identity exists to check; the trojan's gate is that it
+ *     is dev-only (server-static) and same-machine-only (handleRequest).
+ *
+ *  THE LOCAL OPERATOR is the third way in, and the only one that is not an app
+ *  identity: a request carrying `X-Aio-Control` with this boot's credential from
+ *  `<data>/control.key` (0600 in a 0700 dir — see app-key.ts). "Can read that
+ *  file" means "is the OS user who owns this app's data", which is strictly
+ *  stronger than any account inside the app and is the same boundary the
+ *  same-machine rule already relies on. Without it `am`/amui — which have no app
+ *  account to log in as — could not inspect a locally running `auth: true` app
+ *  at all, and the answer to that is a credential, not a hole: this authorizes
+ *  the TROJAN and nothing else. `/ws`, `/__aio/snapshot`, the login flows and
+ *  every app route are gated by their own checks in server.ts, which never
+ *  consult this function and never see this header as an identity.
+ *
+ *  Nothing here weakens the refusals that matter: a remote caller is 404'd
+ *  before this (same-machine only), a production build has no trojan and mints
+ *  no credential, and a local user who is NOT the owner cannot read the file
+ *  (0600) — for them this path is exactly as closed as it was.
+ *
+ *  Returns the refusal, or null when the caller may proceed. */
+export function trojanDenialForUserMode(
+  pathname: string,
+  user: AioUser | undefined,
+  req?: Request,
+): Response | null {
+  if (!pathname.startsWith(TROJAN_PREFIX)) return null;
+  // ① the machine owner, proved by a file only they can read
+  if (localControlAuthorized(req)) return null;
+  const presented = _controlPresented(req);
+  // ② an app account: admin only
+  if (!user) {
+    return new Response(_noCredentialMessage(presented !== null), {
+      status: 401,
+    });
+  }
+  if (user.role !== "admin") {
+    return new Response(
+      'Forbidden — /__aio/trojan/* is the raw-state control plane and requires role "admin"' +
+        (presented !== null ? `\n\n${_staleCredentialHint()}` : ""),
+      { status: 403 },
+    );
+  }
+  return null;
+}
+
+/** Why the caller was refused, and what to do about it — a 401 with no path
+ *  forward is what makes people turn auth off in dev. */
+function _noCredentialMessage(presentedOne: boolean): string {
+  const head =
+    "Unauthorized — /__aio/trojan/* is the raw-state control plane (unfiltered " +
+    "state, arbitrary dispatch, SQL, whole-state overwrite).\n";
+  if (presentedOne) return head + "\n" + _staleCredentialHint();
+  const path = _armedPath();
+  return head +
+    "\nReach it as an authenticated admin, or — from this machine — with this " +
+    "app's local control credential in the " + LOCAL_CONTROL_HEADER +
+    " header (that is what `am` and amui do).\n" +
+    (path
+      ? `This boot's credential: ${path} (owner-only).`
+      : "This app armed NO local control credential: it is a production build, " +
+        "or its data dir is not owner-only / not writable — the boot log says " +
+        "which. Start it in dev, or use an admin account.");
+}
+
+function _staleCredentialHint(): string {
+  const path = _armedPath();
+  return "The " + LOCAL_CONTROL_HEADER +
+    " credential presented does not match this app. It is minted fresh at every " +
+    "boot, so a copy from an earlier run is dead" +
+    (path ? ` — the live one is ${path}.` : ".") +
+    " Re-run the command (it reads the file each time); if it still fails, the " +
+    "app's data dir is not where your tooling is looking (AIO_APPS_DIR / appDir).";
 }
 
 // ── Cell access evaluation (AUTH-1) ──────────────────────────────────────────

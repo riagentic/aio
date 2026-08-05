@@ -93,6 +93,7 @@ Deno.test("sync: two concurrent WS clients — every op acked and relayed exactl
     db,
     syncCellIds: ["notes"],
     getCellState: () => cellState as Record<string, unknown>,
+    getClientCellState: () => cellState as Record<string, unknown>,
     broadcastRaw: broadcastRef,
     log: { debug: () => {}, warn: () => {}, error: () => {} },
   });

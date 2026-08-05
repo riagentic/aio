@@ -118,6 +118,7 @@ Deno.test("a server_ts cursor below the compaction watermark gets a SNAPSHOT", a
     db,
     syncCellIds: ["notes"],
     getCellState: () => ({ items: ["a", "b"] }),
+    getClientCellState: () => ({ items: ["a", "b"] }),
     broadcastRaw: { fn: () => {} },
     log: { debug: () => {}, warn: () => {}, error: () => {} },
   });
@@ -170,6 +171,7 @@ Deno.test("a caught-up cursor above the watermark still gets incremental", async
     db,
     syncCellIds: ["notes"],
     getCellState: () => ({ items: ["a"] }),
+    getClientCellState: () => ({ items: ["a"] }),
     broadcastRaw: { fn: () => {} },
     log: { debug: () => {}, warn: () => {}, error: () => {} },
   });
@@ -214,4 +216,117 @@ Deno.test("sync migrations are idempotent and safe on an existing database", asy
   await applySyncMigrations(db, logs); // and again
   assertEquals(warnings, [], "an already-applied migration is not a warning");
   assertEquals(await getCompactedTs(db, "notes"), 0);
+});
+
+// ── The catch-up snapshot is a WIRE frame ─────────────────────────────────
+//
+// It was wired to raw `getState()`, so a client that fell behind compaction
+// received the cell's whole slice — `ui: "none"` cells, excluded fields and
+// all — while every other channel honoured the filter. Raw state still feeds
+// COMPACTION (sync cells are excluded from KV persistence, so the compaction
+// snapshot is their durability record and must keep everything); the two
+// answers are now two different deps, and the client-facing one is required
+// rather than defaulted, so it cannot be forgotten back into a fail-open.
+Deno.test("a catch-up snapshot ships the client projection, never raw state", async () => {
+  const db = createDb();
+  await addOp(db, "o1", [1000, 0, "peer"], 1);
+  const raw = { items: ["a"], apiSecret: "RAW-ONLY-NEVER-ON-THE-WIRE" };
+  await compactSyncOps({
+    db,
+    cell: "notes",
+    getState: () => raw,
+    serverHlc: [1000, 0, "server"],
+    compactOps: 1,
+    log: { debug: () => {}, warn: () => {}, error: () => {} },
+  });
+
+  const sent: string[] = [];
+  const handler = createServerSyncHandler({
+    dispatch: () => {},
+    db,
+    syncCellIds: ["notes"],
+    getCellState: () => raw, // compaction/durability — the whole slice
+    getClientCellState: () => ({ items: raw.items }), // ui: { exclude: [...] }
+    broadcastRaw: { fn: () => {} },
+    log: { debug: () => {}, warn: () => {}, error: () => {} },
+  });
+  const socket = { send: (m: string) => sent.push(m) } as unknown as WebSocket;
+  handler.handleSync(
+    {
+      clientId: "behind",
+      cells: { notes: { lastHlc: null, lastServerTs: 0 } },
+      pendingOps: [],
+    },
+    { id: "c1" },
+    socket,
+  );
+  for (let i = 0; i < 200 && !sent.some((m) => m.includes("sync-res")); i++) {
+    await new Promise((r) => setTimeout(r, 5));
+  }
+  const wire = sent.join("|");
+  assert(wire.includes("sync-res"), "a sync response is sent");
+  assert(
+    !wire.includes("RAW-ONLY-NEVER-ON-THE-WIRE"),
+    `the snapshot shipped a field the ui filter hides:\n${wire}`,
+  );
+  const d = JSON.parse(sent.find((m) => m.includes("sync-res"))!).d as {
+    mode: string;
+    snapshot: Record<string, Record<string, unknown>>;
+  };
+  assertEquals(d.mode, "snapshot");
+  assertEquals(d.snapshot.notes, { items: ["a"] }, "…and the rest still ships");
+});
+
+Deno.test("a cell the ui hides entirely is never snapshotted to a client", async () => {
+  const db = createDb();
+  await addOp(db, "o1", [1000, 0, "peer"], 1);
+  await compactSyncOps({
+    db,
+    cell: "notes",
+    getState: () => ({ items: ["a"], body: "HIDDEN-CELL-BODY" }),
+    serverHlc: [1000, 0, "server"],
+    compactOps: 1,
+    log: { debug: () => {}, warn: () => {}, error: () => {} },
+  });
+  const sent: string[] = [];
+  const errors: string[] = [];
+  const handler = createServerSyncHandler({
+    dispatch: () => {},
+    db,
+    syncCellIds: ["notes"],
+    getCellState: () => ({ items: ["a"], body: "HIDDEN-CELL-BODY" }),
+    // `ui: "none"` — the cell is absent from the client projection entirely.
+    getClientCellState: () => null,
+    broadcastRaw: { fn: () => {} },
+    log: {
+      debug: () => {},
+      warn: () => {},
+      error: (m: string) => errors.push(m),
+    },
+  });
+  const socket = { send: (m: string) => sent.push(m) } as unknown as WebSocket;
+  handler.handleSync(
+    {
+      clientId: "behind",
+      cells: { notes: { lastHlc: null, lastServerTs: 0 } },
+      pendingOps: [],
+    },
+    { id: "c1" },
+    socket,
+  );
+  for (let i = 0; i < 200 && !sent.some((m) => m.includes("sync-res")); i++) {
+    await new Promise((r) => setTimeout(r, 5));
+  }
+  const wire = sent.join("|");
+  assert(
+    !wire.includes("HIDDEN-CELL-BODY"),
+    `a cell hidden from the UI was snapshotted onto a socket:\n${wire}`,
+  );
+  // Fail closed AND loud: the client cannot converge on this cell and the
+  // operator has to hear why (compose refuses the combination in the first
+  // place — reaching here means something bypassed that gate).
+  assert(
+    errors.some((e) => e.includes("notes")),
+    `the refusal must be logged, naming the cell — got: ${errors.join("|")}`,
+  );
 });

@@ -20,10 +20,21 @@ function freePort(): number {
   return port;
 }
 
+/** Wait for a spawned example to answer.
+ *
+ *  The bound is deliberately generous. What these tests assert is that an
+ *  example BOOTS AND SERVES — not that it does so within N seconds. Each one
+ *  spawns a real Deno process that resolves and transpiles a module graph, and
+ *  this file now boots EVERY example rather than three, so under the full
+ *  suite a dozen of them compete for the same cores. A bound tight enough to
+ *  flake there measures the machine, not the framework, and a gate that cries
+ *  wolf is one people learn to re-run instead of read. Real boot failures
+ *  (a throw, a missing module, a port already held) surface immediately and
+ *  do not wait this out. */
 async function waitFor<T>(
   what: string,
   fn: () => Promise<T | null>,
-  timeoutMs = 20_000,
+  timeoutMs = 60_000,
 ): Promise<T> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {

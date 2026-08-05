@@ -408,17 +408,11 @@ export type ReadWatch = {
   reads: Set<string>;
   /** Paths written into the transaction's buffer. */
   writes: Set<string>;
-  /** Path → the value this method itself published via `s.$commit()`. A live
-   *  value equal to it (or still at entry value, if the dispatch hasn't landed)
-   *  is our own write; any THIRD value is somebody else's and conflicts — a
-   *  bare "skip flushed paths" would exempt them forever. */
-  flushed: Map<string, unknown>;
 };
 
 export const createReadWatch = (): ReadWatch => ({
   reads: new Set(),
   writes: new Set(),
-  flushed: new Map(),
 });
 
 /** Path array → watch key. The one place the separator is spelled. */
@@ -443,9 +437,16 @@ function overlaps(path: string, set: Set<string>): boolean {
 const readPath = (key: string): string[] =>
   key.length === 0 ? [] : key.split(PATH_SEP);
 
-/** The first path whose value moved between the method's entry snapshot and
- *  live state in a way that makes committing unsound — dotted, `""` for the
- *  cell root — or null while the transaction is still valid. Pure.
+/** The first path whose value moved between the state the method's reads are
+ *  pinned to (`origin` — its entry snapshot, or the state its last `$commit()`
+ *  produced) and live state, in a way that makes committing unsound — dotted,
+ *  `""` for the cell root — or null while the transaction is still valid. Pure.
+ *
+ *  `origin` is always a REAL committed state object, never a locally rebuilt
+ *  one: identity is the comparator, and a value we cloned and patched ourselves
+ *  can never be identical to the one Immer commits, so passing one here reads
+ *  every published container as somebody else's write. The executor's `rebase`
+ *  is what keeps that invariant across `$commit`.
  *
  *  `strictReads` promotes snapshot isolation to serializable: every read is
  *  validated, not only the ones a write was derived from. */
@@ -455,20 +456,12 @@ export function conflictPath(
   watch: ReadWatch,
   strictReads: boolean,
 ): string | null {
-  if (origin === live) return null; // nothing committed since entry
-  // "Moved by somebody ELSE": for a path this method already published via
-  // `$commit`, the live value being our flushed value (or still the entry
-  // value while the dispatch settles) is our own write; a third value is a
-  // concurrent writer's.
-  const moved = (key: string) => {
-    const liveVal = getNestedValue(live, readPath(key));
-    const originVal = getNestedValue(origin, readPath(key));
-    if (watch.flushed.has(key)) {
-      return !Object.is(liveVal, watch.flushed.get(key)) &&
-        !Object.is(liveVal, originVal);
-    }
-    return !Object.is(originVal, liveVal);
-  };
+  if (origin === live) return null; // nothing committed since the epoch began
+  const moved = (key: string) =>
+    !Object.is(
+      getNestedValue(origin, readPath(key)),
+      getNestedValue(live, readPath(key)),
+    );
   // Lost updates: a write whose value came from a read of the same place.
   for (const w of watch.writes) {
     if (!overlaps(w, watch.reads)) continue;

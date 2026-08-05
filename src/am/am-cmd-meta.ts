@@ -383,6 +383,7 @@ Inspect:
   health                  HTTP health check
   discover [--timeout=ms] Find exposed aio apps on the LAN (UDP broadcast)
   profile [--out=file]    Export this app's .aioapp profile (cert + key) for the client
+  pair                    Fresh single-use pairing PIN (3 min) — no restart needed
   config                  Server configuration
 
 Scaffold:

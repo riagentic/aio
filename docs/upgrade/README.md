@@ -7,6 +7,10 @@ One guide per version migration. Find your current version and follow the steps.
 - **[The aio restructure (alpha27+)](restructure.md)** — every restructure
   breaking change with before → after recipes (methods-only cells, instances,
   SQLite-only persistence, `aio/extras`, wire catalog)
+- [alpha45 → alpha46](from-alpha45-to-alpha46.md) — the hunt: 27 defects, most
+  silent — a flagship example that never booted, `ui.forUser` failing open, an
+  unauthenticated control plane, migrations that deleted the data they failed to
+  migrate, and `am`'s new owner-only credential
 - [alpha44 → alpha45](from-alpha44-to-alpha45.md) — the network boundary: a
   per-user filter that really filters, a CLI call that tells you what happened,
   `--expose` certs the aio client can verify, `serveDirs`, `expose` in config,

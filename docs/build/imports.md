@@ -153,16 +153,25 @@ For two apps in one repository that must share pure modules, map the shared
 directory to a URL prefix instead of copying it:
 
 ```ts
+// repo/
+//   client/src/App.tsx   ← this app
+//   core/lib/sse.ts      ← shared by both apps
 await aio.run({
   baseDir: "client/src",
-  serveDirs: { "/shared": "../core/lib" }, // dev-only, read-only
+  serveDirs: { "/shared": "core/lib" }, // dev-only, read-only
 });
 ```
 
-Then `import { parseSSE } from "/shared/sse.ts"` resolves in both worlds. Each
-mapped root gets exactly the guards `baseDir` has — no traversal, no escaping
-symlink, no dotfiles, no server-only paths — and the option has no effect in
-production, where the bundle is already self-contained.
+Then `import { parseSSE } from "/shared/sse.ts"` resolves in both worlds.
+
+**Both paths resolve the same way** — against the process's working directory,
+exactly like `baseDir` — so write them from the same vantage point. A root that
+does not exist is reported on first use, naming the resolved path, rather than
+404ing every file under it.
+
+Each mapped root gets exactly the guards `baseDir` has — no traversal, no
+escaping symlink, no dotfiles, no server-only paths — and the option has no
+effect in production, where the bundle is already self-contained.
 
 ## Quick reference
 

@@ -444,6 +444,28 @@ function Header({ d }: { d: ProjectDetail }) {
           {manager.actionMsg}
         </div>
       )}
+      {
+        /* The app refused amui's control-plane reads. Every panel below reads
+          through `/__aio/trojan/*`, so without this the whole detail view is
+          just empty — a silent 401 with no path forward is exactly what makes
+          people turn auth off in dev. The refusal carries its own diagnosis. */
+      }
+      {manager.controlError && (
+        <div
+          style={{
+            marginTop: "8px",
+            padding: "8px 10px",
+            border: `1px solid ${C.redDim}`,
+            borderRadius: "4px",
+            color: C.red,
+            fontSize: "12px",
+            whiteSpace: "pre-wrap",
+          }}
+        >
+          ⚠ this app refused amui's control plane{"\n"}
+          {manager.controlError}
+        </div>
+      )}
       <div style={{ display: "flex", gap: "2px", marginTop: "12px" }}>
         {TABS.map(({ id, label: tabLabel }) => {
           const on = activeTab.value === id;

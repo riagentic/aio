@@ -144,11 +144,41 @@ const orders = cell("orders", {
    state
 3. `forUser` runs once per client per broadcast — return value sent to that
    client
-4. If `forUser` throws, the structural filter result is sent instead (safe
-   fallback)
+4. If `forUser` throws — or returns something that is not an object — the cell
+   is **omitted from that client's state entirely**, and the error is logged
+   loudly
 
 `forUser` **cannot** access fields removed by `include`/`exclude` — they're
 already stripped.
+
+> **It fails CLOSED.** A filter that throws used to fall back to "the structural
+> filter result", which sounds safe and is not: with `ui: { forUser }` alone
+> there is no structural filter, so the fallback was the **whole cell**. One
+> missing field on a user record — a `TypeError` inside your filter — broadcast
+> every row to everyone. Omitting the cell can never expose more than the filter
+> would have returned, so that is what happens now; your UI sees the cell as
+> absent, which is a visible bug rather than a silent leak.
+>
+> This also applies to **user-less** channels (UDS, `am state`, amui): a filter
+> that requires a user omits the cell there too.
+
+### `forUser` and `sync` cannot both hold
+
+A cell with `sync` (or adopted by `localFirst`) is **refused at boot** if its
+`ui` hides anything — `forUser`, `include`, `exclude`, or `"none"`:
+
+```
+[orders] sync + a ui filter cannot both hold — CRDT replication sends every op
+to every peer, so a per-user view cannot survive it.
+```
+
+This is not a missing feature. Convergence requires every replica to see every
+op; ops carry no user dimension, and `forUser` is an arbitrary function over
+derived state, so "may this user see this op?" is undecidable from it. Filtering
+the op stream would swap a silent leak for silent divergence. Choose one: drop
+the filter, drop `sync` for that cell (`sync: false`), or split the private
+fields into a server-only cell. `localFirst` declines to adopt a filtered cell
+automatically and says so, rather than silently replicating it.
 
 > **Typing.** `forUser`'s parameters are fully inferred — `(s, user) => …` just
 > works, `s` is your cell's state type. Note the type shows ALL state fields,

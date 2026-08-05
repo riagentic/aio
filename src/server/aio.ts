@@ -735,6 +735,18 @@ async function _run<S, A, E>(
   // --- Phase 2: boot storage ---
   const syncCellIds = config._syncCellIds ?? [];
   let state = initialState;
+  // Declared BEFORE bootStorage on purpose: boot is the phase most likely to
+  // fail (a migration that throws, a corrupt database, a `db:` binding that
+  // resolves to nothing), and those failures must reach the app's `onError`
+  // sink like any other. Both used to be declared ~100 lines further down, so
+  // `getReportOpts()` during boot hit the temporal dead zone and threw a
+  // ReferenceError INSIDE the error path — the app never heard about the
+  // failure it most needed to hear about, and the ReferenceError masked the
+  // real cause. `getTT` stays a closure, so the only ordering that matters is
+  // that `tt` is initialized before an error is reported, which it now is.
+  let tt: TTState<S, { type: string }> | null = null;
+  const _reportOpts = buildReportOpts({ onError, getTT: () => tt, prod });
+
   const boot = await bootStorage({
     appId,
     dbPath: config.dbPath ?? cli.dbPath,
@@ -755,6 +767,12 @@ async function _run<S, A, E>(
     healthGetter: config._healthGetter,
     getDBState: getDBState as (s: S) => unknown,
     getState: () => state as Record<string, unknown>,
+    // What a CLIENT may see — the CRDT catch-up snapshot is a wire frame and
+    // must go through the same projection every other wire uses (it used to
+    // read raw state). No `user`: a sync cell may not carry a per-user filter
+    // at all (aio-composition.ts refuses it), so this is exactly the
+    // structural view.
+    getUIState: (s: Record<string, unknown>) => getUIState(s as S),
     getReportOpts: () => _reportOpts,
     journal: config.journal,
     redactActions: config.redactActions,
@@ -826,7 +844,6 @@ async function _run<S, A, E>(
     typeof diagResolvedOpts === "object" && diagResolvedOpts.skipActions?.length
       ? new Set(diagResolvedOpts.skipActions)
       : undefined;
-  let tt: TTState<S, { type: string }> | null = null;
   if (ttEnabled) {
     tt = createTT<S, { type: string }>();
     tt = record(tt, { type: "__init" }, state);
@@ -835,7 +852,6 @@ async function _run<S, A, E>(
     log.debug("time-travel: disabled by diagnostics config");
   }
 
-  const _reportOpts = buildReportOpts({ onError, getTT: () => tt, prod });
   if (config._onReportOptsReady) config._onReportOptsReady(_reportOpts);
 
   // --- Phase 3: wire dispatch ---
@@ -1251,25 +1267,14 @@ async function _run<S, A, E>(
     cliTransport: cli.transport,
     ui,
     title,
-    config: {
-      transport: config.transport,
-      renderBudget: config.renderBudget,
-      fullStateThreshold: config.fullStateThreshold,
-      routes: config.routes,
-      maxConnections: config.maxConnections,
-      wsLimits: config.wsLimits,
-      allowedOrigins: config.allowedOrigins,
-      strictOrigin: config.strictOrigin,
-      trustProxyHeader: config.trustProxyHeader,
-      syncIntervalMs: config.syncIntervalMs,
-      _syncCellIds: config._syncCellIds,
-      _cellPatchStrategies: config._cellPatchStrategies,
-      _cellFilterFields: config._cellFilterFields,
-      _cellAccess: config._cellAccess,
-      onConnect: config.onConnect,
-      onDisconnect: config.onDisconnect,
-      libraryMode: config.libraryMode,
-    },
+    // HOP 2 of the config bridge — MECHANICAL, never a hand-copied literal.
+    // The whole config rides across and `TransportConfig` (aio-server.ts) is
+    // the single list of what may be read. The literal that used to stand here
+    // silently dropped `serveDirs` (feature dead on arrival) and `_cellNames`
+    // (browser drift warning unreachable), after strictOrigin/redactActions/
+    // appDir/renderBudget did the same at hop 1. Gate:
+    // tests/config-bridge-hop2.test.ts.
+    config,
     getState: () => state,
     getUIState: (s, user?) => getUIState(s, user),
     // ROUTED dispatch: a network-borne action for a `worker: true` cell must

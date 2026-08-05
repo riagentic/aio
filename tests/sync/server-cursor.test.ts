@@ -93,6 +93,7 @@ function harness(db: DB) {
     db,
     syncCellIds: ["todos", "notes"],
     getCellState: () => ({ items: [] }),
+    getClientCellState: () => ({ items: [] }),
     broadcastRaw: {
       fn: (msg) => broadcasts.push(JSON.parse(msg).d),
     },
@@ -394,6 +395,7 @@ describe("op rejection (D11)", () => {
       db,
       syncCellIds: ["todos"],
       getCellState: () => ({}),
+      getClientCellState: () => ({}),
       broadcastRaw: { fn: (m) => broadcasts.push(m) },
       log: { debug: () => {}, warn: () => {}, error: () => {} },
     });

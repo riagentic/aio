@@ -43,9 +43,14 @@ import { buildBrowserImportMap } from "./server-html.ts";
 import {
   _buildUserResolver,
   _extractTokenWithSource,
+  _isPresented,
   _timingSafeEqual,
+  armLocalControl,
   authFailBudgetExceeded,
+  clearSessionCookie,
+  localControlAuthorized,
   recordAuthFail,
+  trojanDenialForUserMode,
 } from "./server-auth.ts";
 import { handleAuthFlow } from "./auth-flows.ts";
 import { stopEsbuild } from "./server-transpile.ts";
@@ -116,6 +121,12 @@ export function createServer(config: ServerConfig): ServerHandle {
   // then fall through to users/resolveUser. Sessions alone activate per-user
   // auth mode — an app with only `sessions: true` is a per-user app.
   const _baseResolver = _buildUserResolver(config);
+  // The local control plane: mint an owner-only, per-boot credential so `am`
+  // and amui can reach /__aio/trojan/* on an auth-enabled app. Without it the
+  // trojan's (correct) admin gate locks the developer out of inspecting their
+  // own running app, which is the pressure that makes people turn auth off in
+  // dev. No-op in prod and for an app with no appId.
+  armLocalControl(config);
   const _sessionResolver = config.sessionResolver;
   // A LOGIN SESSION does not authenticate an HTTP request from the URL.
   //
@@ -138,6 +149,34 @@ export function createServer(config: ServerConfig): ServerHandle {
       (urlBlocked ? null : _sessionResolver(tok)) ??
         (_baseResolver ? await _baseResolver(tok) : null)
     : _baseResolver;
+
+  // A shared app KEY and the login FLOWS cannot both gate this server, and a
+  // gate that silently gates nothing is the worst of the three outcomes.
+  //
+  // What the code did: `key: true` + `auth: true` + `--expose` resolved a key,
+  // printed `share: https://…?token=<key>` and handed it out from
+  // `/__aio/pair` — while the per-user path below always returns, so the
+  // shared-key gate was unreachable. An anonymous LAN client got the shell and
+  // every file under `baseDir` (in dev: the app's TypeScript sources).
+  //
+  // And the two cannot be reconciled by simply checking both: the login flows
+  // REQUIRE a public shell (a browser must load the UI to render SignIn before
+  // it has a session), while a key that is only presentable as `?token=` never
+  // reaches a subresource — a browser does not copy the query string onto
+  // `/App.tsx` or `/bundle.js`. Whichever gate wins, one of the two promises
+  // is broken. So refuse at boot, where it is cheap and legible, instead of
+  // shipping an app whose advertised key protects nothing.
+  if (config.token && config.authFlows) {
+    throw new Error(
+      `[aio] config conflict: a shared app key (key:) and the login flows ` +
+        `(auth:) cannot both guard this server. The login flows need a PUBLIC ` +
+        `shell so a browser can render SignIn, and a key presented as ` +
+        `?token= never reaches a subresource — so the key would gate nothing ` +
+        `while the boot banner and /__aio/pair still advertised it. Pick one: ` +
+        `drop \`key\` and let per-user login be the gate (recommended for ` +
+        `--expose), or drop \`auth\` and share the key.`,
+    );
+  }
 
   // Custom routes: reserve the framework namespaces loudly at boot.
   for (const key of Object.keys(config.routes ?? {})) {
@@ -217,6 +256,14 @@ export function createServer(config: ServerConfig): ServerHandle {
     expose: config.expose,
     allowedOrigins: config.allowedOrigins,
     strictOrigin: config.strictOrigin,
+    // Revocation must reach sockets that are ALREADY open — the store is the
+    // only thing that knows a session died (see `_revalidate` in server-ws).
+    revalidateSession: _sessionResolver
+      ? (tok: string) => {
+        const info = _sessionResolver(tok);
+        return info ? { id: info.id, role: info.role } : null;
+      }
+      : undefined,
     clientCounter: config.clientCounter ?? { value: 0 },
     bootId,
     vitalsSystem: config.vitalsSystem,
@@ -428,6 +475,22 @@ export function createServer(config: ServerConfig): ServerHandle {
       return new Response("Not Found", { status: 404 });
     }
 
+    // The machine owner reaches the control plane directly. This lives HERE —
+    // one branch on one path prefix, after the same-machine 404 has already
+    // removed every remote caller — rather than at the three
+    // `trojanDenialForUserMode` call sites: in `users:` mode a credential-less
+    // request dies at the "no token, no bytes" gate long before any trojan
+    // check runs, so spreading this rule across cooperating conditionals is
+    // one refactor away from a hole. The credential authorizes this prefix and
+    // nothing else.
+    if (
+      pathname.startsWith("/__aio/trojan/") && localControlAuthorized(req)
+    ) {
+      const resp = await staticHandler.serveStatic(pathname, req);
+      resp.headers.set("X-Content-Type-Options", "nosniff");
+      return resp;
+    }
+
     // AUTH-2 login flows — mounted BEFORE the auth gates for the same reason
     // as pairing: the caller is asking FOR credentials, so it can't present
     // them. Each route does its own gating (origin check, fail budget).
@@ -449,7 +512,13 @@ export function createServer(config: ServerConfig): ServerHandle {
         const body = await req.json() as { pin?: unknown };
         if (!verifyPin(body?.pin, clientKey)) {
           return new Response(
-            JSON.stringify({ error: "invalid or expired pairing code" }),
+            JSON.stringify({
+              error: "invalid or expired pairing code",
+              // A PIN lives 3 minutes and is consumed on first use, and only
+              // boot generates one — so "wait and retry" is wrong advice.
+              hint:
+                "pairing codes expire after 3 minutes and are single-use — restart the app to get a new one",
+            }),
             { status: 401, headers: { "Content-Type": "application/json" } },
           );
         }
@@ -481,36 +550,69 @@ export function createServer(config: ServerConfig): ServerHandle {
       if (authFailBudgetExceeded(clientKey)) {
         return new Response("Too Many Requests", { status: 429 });
       }
-      const { token, fromUrl } = _extractTokenWithSource(url, req);
+      const { token, fromUrl, source } = _extractTokenWithSource(url, req);
       // AUTH-2: with the login flows enabled, the app SHELL is public — a
       // browser must load the UI (code, not state) to show SignIn before it
       // has a session. Everything stateful stays gated: /ws requires a valid
-      // session, /__aio/snapshot requires admin. Without authFlows the
-      // classic behavior is untouched: no token, no bytes.
+      // session, /__aio/snapshot and /__aio/trojan/* require admin. Without
+      // authFlows the classic behavior is untouched: no token, no bytes.
       const shellIsPublic = config.authFlows !== undefined;
       if (!token && !shellIsPublic) {
         return new Response("Unauthorized", { status: 401 });
       }
       // A URL-borne session token is refused everywhere except the WS
       // handshake, which has no header channel (see the resolver above).
+      //
+      // COOKIE CLAMP: a cookie may authenticate a SESSION and nothing else.
+      // The login flow is the only thing that ever sets `aio_session`, and it
+      // only ever puts a session token in it — so falling through to the
+      // static `users:` map / `resolveUser` for a cookie value bought nothing
+      // and cost the one thing that makes the budget exemption below safe:
+      // a short static token would otherwise be guessable through an
+      // unmetered channel.
       const user = token
-        ? await _userResolver(token, fromUrl && pathname !== "/ws")
+        ? (source === "cookie"
+          ? (_sessionResolver?.(token) ?? null)
+          : await _userResolver(token, fromUrl && pathname !== "/ws"))
         : null;
       if (!user) {
-        if (token) recordAuthFail(clientKey, "invalid token (per-user mode)");
+        // Only a DELIBERATELY presented credential is an attack signal. An
+        // ambient cookie is attached by the browser to every subresource, so
+        // charging it to the budget meant one reload after a session expired
+        // locked the legitimate user out of /login for 5 minutes.
+        if (token && _isPresented(source)) {
+          recordAuthFail(clientKey, "invalid token (per-user mode)");
+        }
+        // Fail LOUD rather than silently forever: tell the browser to drop the
+        // dead cookie so the next request is a clean anonymous one.
+        const extra = source === "cookie"
+          ? { "Set-Cookie": clearSessionCookie(!!config.cert) }
+          : undefined;
         if (!shellIsPublic || pathname === "/ws") {
-          return new Response("Unauthorized", { status: 401 });
+          return new Response("Unauthorized", { status: 401, headers: extra });
         }
         // public shell: fall through to static serving as anonymous
         if (pathname === "/__aio/snapshot") {
-          return new Response("Unauthorized", { status: 401 });
+          return new Response("Unauthorized", { status: 401, headers: extra });
         }
+        // …but NEVER to the control plane. serveStatic mounts the trojan, and
+        // the trojan has no auth of its own: without this the login flows made
+        // raw-state read, arbitrary dispatch, SQL and full-state overwrite
+        // ANONYMOUS on every `auth: true` app.
+        const denied = trojanDenialForUserMode(pathname, undefined);
+        if (denied) return denied;
         const anonResp = await staticHandler.serveStatic(pathname, req);
         anonResp.headers.set("X-Content-Type-Options", "nosniff");
+        if (extra) anonResp.headers.set("Set-Cookie", extra["Set-Cookie"]);
         return anonResp;
       }
       if (url.searchParams.get("token")) _warnTokenInUrl();
-      if (pathname === "/ws") return wsMgr.handleWs(req, user, clientKey);
+      if (pathname === "/ws") {
+        // Sockets outlive the credential that opened them, so the socket keeps
+        // the session token and re-validates it (see `revalidateSession`).
+        const sessionToken = _sessionResolver?.(token!) ? token! : undefined;
+        return wsMgr.handleWs(req, user, clientKey, sessionToken);
+      }
       // Snapshot dumps/overwrites RAW state — it bypasses ui include/exclude
       // and forUser filtering, so only admins may touch it in per-user mode.
       if (pathname === "/__aio/snapshot" && user.role !== "admin") {
@@ -519,6 +621,9 @@ export function createServer(config: ServerConfig): ServerHandle {
           { status: 403 },
         );
       }
+      // The control plane is snapshot's power and more — same admin bar.
+      const denied = trojanDenialForUserMode(pathname, user);
+      if (denied) return denied;
       debug(`http: ${req.method} ${pathname} user=${user.id}`);
       // Custom routes run authenticated in per-user mode too — the handler's
       // ctx.user is this resolved user.
@@ -671,9 +776,13 @@ export function createServer(config: ServerConfig): ServerHandle {
           // users/resolveUser mode: config.token is unset — still require a
           // valid user token, and gate snapshot to admins like the main server
           const url = new URL(req.url);
-          const { token, fromUrl } = _extractTokenWithSource(url, req);
+          const { token, fromUrl, source } = _extractTokenWithSource(url, req);
+          // Same cookie clamp as the main listener: a cookie carries a
+          // session, never a static `users:`/`resolveUser` token.
           const user = token
-            ? await _userResolver(token, fromUrl && url.pathname !== "/ws")
+            ? (source === "cookie"
+              ? (_sessionResolver?.(token) ?? null)
+              : await _userResolver(token, fromUrl && url.pathname !== "/ws"))
             : null;
           if (!user) return new Response("Unauthorized", { status: 401 });
           if (url.pathname === "/__aio/snapshot" && user.role !== "admin") {
@@ -682,6 +791,8 @@ export function createServer(config: ServerConfig): ServerHandle {
               { status: 403 },
             );
           }
+          const denied = trojanDenialForUserMode(url.pathname, user);
+          if (denied) return denied;
         }
         const { pathname } = new URL(req.url);
         if (pathname.startsWith("/__aio/")) {
@@ -692,6 +803,14 @@ export function createServer(config: ServerConfig): ServerHandle {
       },
     );
   }
+
+  // A revoked session must disarm sockets that are ALREADY open. The periodic
+  // sweep in the WS manager is the universal backstop (it also catches TTL
+  // expiry and out-of-band deletes); this subscription removes the latency for
+  // the deliberate revocations — logout, kick, password change, reset.
+  const _unsubRevoke = config.authFlows?.sessions.onRevoked(
+    () => wsMgr.sweepSessions(),
+  );
 
   // ── Zombie-server guard (watcher-loop field report #4) ──
   // Event-loop starvation once killed the HTTP listener while the process kept
@@ -744,6 +863,7 @@ export function createServer(config: ServerConfig): ServerHandle {
       watcher?.shutdown();
       broadcaster.shutdown();
       resetTrojanRateLimit();
+      _unsubRevoke?.();
       wsMgr.shutdown();
       if (graphValidation) await graphValidation.done.catch(() => {});
       await Promise.all([

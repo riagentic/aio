@@ -13,7 +13,33 @@ export async function initSchema(
   }
 }
 
-/** Load all table rows into state — called on startup after KV merge */
+/** Which column of `table` a failed `SELECT *` chokes on, or null.
+ *  Only ever runs on the failure path: one narrow read per column, and the
+ *  first one that reproduces the error is the culprit. */
+async function offendingColumn(
+  db: DB,
+  table: string,
+  def: TableDef,
+): Promise<string | null> {
+  for (const col of Object.keys(def.columns)) {
+    try {
+      assertIdent(col, "column name");
+      await db.query(`SELECT ${col} FROM ${table}`);
+    } catch {
+      return col;
+    }
+  }
+  return null;
+}
+
+/** Load all table rows into state — called on startup after KV merge.
+ *
+ *  A read failure is NAMED. `node:sqlite` throws
+ *  `RangeError: Value is too large to be represented as a JavaScript number`
+ *  when a column holds an integer beyond ±2^53 — and that message says nothing
+ *  about WHERE, so at boot it surfaced as an anonymous crash that poisoned
+ *  every read of that table. The table (and, where reachable, the column) is
+ *  part of the error now, together with what to do about it. */
 export async function loadTables(
   db: DB,
   schema: Record<string, TableDef>,
@@ -21,8 +47,29 @@ export async function loadTables(
   const result: Record<string, unknown[]> = {};
   for (const name of Object.keys(schema)) {
     assertIdent(name, "table name");
-    const { rows } = await db.query(`SELECT * FROM ${name}`);
-    result[name] = rows;
+    try {
+      const { rows } = await db.query(`SELECT * FROM ${name}`);
+      result[name] = rows;
+    } catch (e) {
+      const raw = e instanceof Error ? e.message : String(e);
+      const col = await offendingColumn(db, name, schema[name]!).catch(() =>
+        null
+      );
+      const tooBig = /too large|out of range|safe integer/i.test(raw);
+      throw new Error(
+        `db: reading table "${name}"${
+          col ? ` failed on column "${col}"` : " failed"
+        } — ${raw}` +
+          (tooBig
+            ? `\nSQLite INTEGERs are 64-bit; a value beyond ±2^53 cannot be ` +
+              `read back as a JavaScript number, and ONE such row makes every ` +
+              `read of "${name}" fail. Store it as TEXT (or split it), or ` +
+              `read that column with an explicit cast ` +
+              `(SELECT CAST(${col ?? "<col>"} AS TEXT) FROM ${name}).`
+            : ""),
+        { cause: e },
+      );
+    }
   }
   return result;
 }

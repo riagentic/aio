@@ -57,8 +57,20 @@ await aio.run({
 });
 ```
 
-Not compatible with an existing `'single'` store for the same `persistKey` — use
-a different `persistKey` or clear the `aio_kv` rows when switching.
+Switching modes is safe in both directions: boot reads the layout your config
+asks for, and if it is empty it looks in the OTHER one before concluding "fresh
+install". A document found in the other layout is **copied into the new one,
+verified, and only then removed from the old** — announced on both lines:
+
+```
+persist: persistMode is "multi" but the stored document is in the "single" layout (3 key(s)) — migrating it to "multi" now.
+persist: migrated the stored document single → multi (3 key(s))
+```
+
+Retiring the old copy is part of the migration: left behind, it would come back
+as authoritative the next time the mode changed. If both layouts somehow hold
+data (an older aio, a hand-edited store), boot uses the configured one and warns
+about the other — nothing is deleted, and nothing is guessed.
 
 ## Disabling persistence
 
@@ -87,7 +99,9 @@ a value of the wrong type into your state.
 
 Nothing is guessed: a rename is indistinguishable from a delete-plus-add, so aio
 does not try to match them up. Carry the value across yourself with `version` +
-`onMigrate`:
+`onMigrate` — which is handed the declared shape **plus whatever the store still
+holds**, so the old field is there to read even though the new declaration no
+longer mentions it:
 
 ```ts
 const hw = cell("hw", {
@@ -109,6 +123,25 @@ const hw = cell("hw", {
 boot's migration pass did, and any **shape drift** — a field still in storage
 that the current `state` no longer declares. Boot warns about drift too, so a
 rename you forgot to migrate is visible before a user reports it.
+
+### When a migration fails, and when you roll back
+
+Both cases are about the same thing: your users' data outliving the build that
+wrote it, so neither is allowed to overwrite it.
+
+| Situation                             | What aio does                                                                                                                                                                    |
+| ------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `onMigrate` **throws**                | the app **refuses to boot** (reported through `onError` too). Nothing is written, so the pre-migration data is untouched and a build with a fixed hook still finds it            |
+| stored version is **newer** than code | boots, warns, and keeps the newer build's fields instead of narrowing them away; a verbatim copy of the slice is parked under `__downgraded:<cell>` and carried into every write |
+
+The version stamp is **monotonic**: an older build never lowers it. That is what
+makes rolling forward again a no-op instead of a second run of `onMigrate` over
+data that was already migrated.
+
+Resetting a cell to its defaults is never the framework's decision — booting on
+defaults would persist that emptiness over the data within one debounce window,
+which is how a failed migration used to become permanent. To start clean, back
+up `state.db` and clear the cell's stored slice yourself.
 
 ## State recovery (offline queue)
 

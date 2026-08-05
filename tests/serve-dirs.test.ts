@@ -21,7 +21,7 @@
 // by a config key at all.
 import { assert, assertEquals } from "@std/assert";
 import { createStaticHandler } from "../src/server/server-static.ts";
-import { join } from "@std/path";
+import { join, resolve } from "@std/path";
 
 async function fixture(): Promise<
   { base: string; shared: string; outside: string; cleanup: () => void }
@@ -117,6 +117,32 @@ Deno.test("serveDirs: an extra root is NOT a weaker root", async () => {
   } finally {
     f.cleanup();
   }
+});
+
+Deno.test("serveDirs: a root that is not a directory says so, resolved", async () => {
+  // Silence is the failure mode here: the developer sees a blank page from a
+  // failed dynamic import and has no reason to suspect the mapping. The warn
+  // names the RESOLVED path, because a relative root pointing somewhere else
+  // than the author assumed is the likely mistake.
+  const f = await fixture();
+  const lines: string[] = [];
+  const origLog = console.log;
+  console.log = (...a: unknown[]) => void lines.push(a.map(String).join(" "));
+  try {
+    const h = handlerFor(f.base, { "/shared": "no-such-dir-xyz" });
+    const res = await h.serveStatic("/shared/sse.ts");
+    await res.text();
+    assertEquals(res.status, 404);
+  } finally {
+    console.log = origLog;
+    f.cleanup();
+  }
+  const warn = lines.find((l) => l.includes('serveDirs["/shared"]'));
+  assert(warn, `a broken serveDirs root must warn, got: ${lines.join(" | ")}`);
+  assert(
+    warn.includes(resolve("no-such-dir-xyz")),
+    `the warning must name the resolved path: ${warn}`,
+  );
 });
 
 Deno.test("serveDirs: unmapped paths behave exactly as before", async () => {

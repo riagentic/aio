@@ -297,6 +297,9 @@ export function composeCellsWiring(
 
   applyCellDefaults(composed, input.cellDefaults);
   applyLocalFirst(composed, input.localFirst === true);
+  // AFTER defaults + local-first: both can change what a cell hides and whether
+  // it syncs, so the contradiction is only decidable once they have run.
+  refuseFilteredSyncCells(composed);
   warnFieldFilters(composed);
   // AIO-3.1: validate cross-cell selector deps against the known cell list.
   // Throws here so the user gets a clear error at aio.run() time, not at
@@ -355,6 +358,66 @@ function applyCellDefaults(
   }
 }
 
+/** How a cell's RESOLVED `ui` hides state from clients — `null` when it hides
+ *  nothing. The string is the reason, phrased for an error message.
+ *
+ *  Read `f.__aio.ui` AFTER applyCellDefaults: a `cellDefaults.ui` hides exactly
+ *  as much as a per-cell one, so it must count the same. */
+function uiHidesState(f: ComposedCells["cells"][number]): string | null {
+  if (f.__aio.uiForUser) return "ui.forUser — a per-user view";
+  const ui = f.__aio.ui;
+  if (ui === "none") return 'ui: "none"';
+  if (ui && typeof ui === "object") {
+    if ("include" in ui) {
+      return `ui.include(${
+        ui.include.join(", ")
+      }) — every other field is hidden`;
+    }
+    if ("exclude" in ui) return `ui.exclude(${ui.exclude.join(", ")})`;
+  }
+  return null;
+}
+
+/** A cell cannot be BOTH per-client-filtered and CRDT-replicated. Refuse.
+ *
+ *  CRDT sync replicates a cell to every peer: op frames carry the payload
+ *  verbatim to all other sockets (server-handler.ts), and a catch-up snapshot
+ *  ships the cell's state. Convergence REQUIRES that — replicas that saw
+ *  different ops do not converge, and the ops themselves are opaque
+ *  `{cell, action, payload}` records with no user dimension to filter on. A
+ *  `ui` filter is a statement about what a client may SEE; there is no coherent
+ *  way to honour it on a channel whose contract is "everyone gets everything".
+ *
+ *  So we do not "filter the sync path" — that would be a clever fix that
+ *  silently breaks convergence instead of silently leaking. We make the
+ *  combination impossible, at compose time, naming the cell.
+ *
+ *  Throws in prod as well as dev. This is not a heuristic like the
+ *  secret-field-name warning above: the leak is certain and total (every
+ *  connected client receives the filtered-out data), so degrading to a log
+ *  would be a silent privacy failure — exactly what the framework refuses.
+ *  Implicit adoption (`localFirst: true`) never reaches here: applyLocalFirst
+ *  declines to adopt a filtered cell and says so. */
+function refuseFilteredSyncCells(composed: ComposedCells): void {
+  for (const f of composed.cells) {
+    if (!f.__aio.syncConfig) continue;
+    const why = uiHidesState(f);
+    if (!why) continue;
+    throw new Error(
+      `[aio] SECURITY — refusing to start. Cell "${f.__aio.id}" is sync: true ` +
+        `AND hides state from clients (${why}).\n` +
+        `  CRDT sync replicates the cell to EVERY client — ops are broadcast ` +
+        `verbatim to all peers and catch-up snapshots carry the cell's state — ` +
+        `so a ui filter on it cannot hold: the hidden data would reach every ` +
+        `connected client anyway.\n` +
+        `  Pick one:\n` +
+        `    • drop sync from "${f.__aio.id}" (server-authoritative, filter enforced), or\n` +
+        `    • drop the ui filter (fully replicated, and public to every client), or\n` +
+        `    • move the private fields into their own non-sync cell.`,
+    );
+  }
+}
+
 /** `localFirst: true` — every SERVER cell syncs unless it said otherwise, which
  *  is what moves method execution to the caller (perfect-aio D3,
  *  docs/specs/2026-07-22-local-first.md). Per-cell resolution:
@@ -374,10 +437,23 @@ function applyLocalFirst(composed: ComposedCells, enabled: boolean): void {
   const adopted: string[] = [];
   const kept: string[] = [];
   const unable: string[] = [];
+  const filtered: string[] = [];
   for (const f of composed.cells) {
     if (f.__aio.syncConfig) continue; // the cell already asked for sync
     if (f.__aio.syncOptOut) {
       kept.push(f.__aio.id);
+      continue;
+    }
+    // A cell whose `ui` hides anything from clients must NOT be adopted:
+    // replicating it would ship the hidden data to every peer (see
+    // refuseFilteredSyncCells). One app-level flag must never quietly convert
+    // a filtered cell into a fully-replicated one — that is the whole bug
+    // class. Explicit `sync: true` on such a cell throws; implicit adoption
+    // declines and SAYS SO, so the author sees which cells stayed
+    // server-authoritative and why.
+    const why = uiHidesState(f);
+    if (why) {
+      filtered.push(`${f.__aio.id} (${why})`);
       continue;
     }
     // Only methods-style cells replay as CRDT ops (the browser stub builds
@@ -399,6 +475,11 @@ function applyLocalFirst(composed: ComposedCells, enabled: boolean): void {
       (unable.length
         ? `; server-only (actions-style cells cannot replay locally): ${
           unable.join(", ")
+        }`
+        : "") +
+      (filtered.length
+        ? `; server-only (a ui filter cannot survive CRDT replication): ${
+          filtered.join(", ")
         }`
         : ""),
   );
@@ -537,13 +618,51 @@ function buildUIStateGetter(composed: ComposedCells): UIStateResult {
       for (const [cellName, entry] of cellUiEntries) {
         if (!entry.forUser || !result[cellName]) continue;
         try {
-          result[cellName] = entry.forUser(
+          const view = entry.forUser(
             structuredClone(result[cellName] as Record<string, unknown>),
             user as Record<string, unknown> | undefined,
           );
+          // Same rule as a throw: a filter that did not return a state object
+          // did not decide what this client may see. (A missing `return` in an
+          // arrow body with braces is the everyday way to land here.)
+          if (!view || typeof view !== "object" || Array.isArray(view)) {
+            delete result[cellName];
+            log.error(
+              `[${cellName}] ui.forUser returned ${
+                Array.isArray(view) ? "an array" : typeof view
+              }, not a state object — omitting the cell for this client (fail ` +
+                `closed). A per-user filter must return the slice the client may see.`,
+            );
+            continue;
+          }
+          result[cellName] = view;
         } catch (e) {
+          // FAIL CLOSED. This used to leave `result[cellName]` at its
+          // PRE-forUser value and call that a "safe fallback" — but the
+          // structural filter is only a fallback when there IS one. With
+          // `ui: { forUser }` alone (the first-class shape) the structural
+          // filter is the WHOLE CELL, so one thrown TypeError — a missing
+          // field on a user record, `user === undefined` on a public/UDS
+          // connection, a null row — broadcast every user's data to whoever
+          // tripped it. A filter that cannot run has decided nothing; the only
+          // honest answer is to send nothing for that cell.
+          //
+          // Omitting is safe for EVERY shape: it is never more than what the
+          // filter would have returned. The client sees the cell disappear
+          // (loud) instead of seeing other people's rows (silent).
+          //
+          // server-broadcast.ts already drops a client's whole frame when
+          // getUIState throws; this is the same policy at cell granularity —
+          // one broken filter must not mute the rest of the app.
+          delete result[cellName];
           log.error(
-            `[${cellName}] ui.forUser threw — using structural filter: ${e}`,
+            `[${cellName}] ui.forUser threw — omitting the cell for this ` +
+              `client (fail closed; nothing is sent for it)` +
+              (entry.filter === "all"
+                ? `. This cell has NO structural ui filter, so the pre-filter ` +
+                  `value is its ENTIRE state — it must never be sent.`
+                : "") +
+              `: ${e}`,
           );
         }
       }

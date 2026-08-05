@@ -10,11 +10,9 @@ import {
   createBatcher,
   createLiveProxy,
   createReadWatch,
-  getNestedValue,
   resolveCall,
   setKey,
   snapshotForRead,
-  watchKey,
 } from "./cell-impl.ts";
 import {
   type CellExecuteFn,
@@ -137,6 +135,56 @@ export function buildMethodsReducer(
   // form, D1). Runs with the FOREIGN action's payload as the single arg.
   foreignHandlers: Map<string, string> | undefined,
 ): CellReduceFn {
+  // AIO-427: the ONE classifier for what a sync method's return means. Both
+  // entry points — an own method action and a `listensTo` reaction to a foreign
+  // one — run it, because the ambiguity is a property of the RETURN VALUE, not
+  // of which action carried it. The listensTo path used to hand its result back
+  // raw: compose-reduce only treats an ARRAY as effects, so a lone
+  // `schedule.after(...)` was silently dropped (the same method called directly
+  // ran it), a returned DATA array was misclassified as effects and blamed on
+  // the FOREIGN action, and a dropped `own.set(...)` leaked its factory in
+  // pendingFactories for the process lifetime.
+  const classify = (
+    key: string,
+    result: unknown,
+  ): ReturnType<CellReduceFn> => {
+    // AIO-8.2: a sync-classified method returning a thenable means the build
+    // transpiled async functions (constructor.name check defeated). The
+    // method's synchronous prefix has already mutated the draft; returning
+    // here would let Immer FINALIZE that half-applied mutation and broadcast
+    // corrupt state. THROW in both dev and prod (dispatch converts a reducer
+    // throw into a reported REDUCE_ERROR + rejected action without crashing)
+    // so the partial draft is discarded either way — never commit it.
+    // Doctrine: no silent dev/prod divergence, and this trigger is
+    // build-dependent (more likely in the compiled build, exactly where a
+    // silent prod-only corruption would hide).
+    if (result && typeof (result as { then?: unknown }).then === "function") {
+      throw new Error(
+        // `prefix` IS the cell name (cell-methods-factory: `prefix = name`).
+        // This said `${name}`, which this function never receives — so it
+        // silently resolved to the global `name`, the empty string, and the
+        // message read "[] method 'foo' …". The one diagnostic whose whole
+        // job is to say WHICH cell was mis-transpiled did not say it.
+        `[${prefix}] method '${key}' returned a Promise but was classified sync — ` +
+          `your build transpiled async functions. Wrap it: ` +
+          `${key}: markAsync(async (s) => {...})`,
+      );
+    }
+    // A single tagged effect → wrapped to the reducer's effects array; an
+    // all-effect array → passed through as effects; anything else (primitive,
+    // plain object, data array, `[]`) is a transported VALUE, wrapped in a
+    // RETURN_TAG envelope so compose-reduce never mistakes it for a `Msg[]`
+    // effects array.
+    if (result == null) return undefined;
+    if (isScheduleEffect(result) || isOwnEffect(result)) return [result];
+    if (
+      Array.isArray(result) && result.length > 0 &&
+      (isScheduleEffect(result[0]) || isOwnEffect(result[0]))
+    ) {
+      return result as (Msg | ScheduleEffect | OwnEffect)[];
+    }
+    return markReturn(result);
+  };
   return (
     state: unknown,
     action: Msg,
@@ -153,10 +201,10 @@ export function buildMethodsReducer(
         //. Non-method triggers pass payload as-is.
         const p = action.payload as { args?: unknown[] } | undefined;
         const args = p && Array.isArray(p.args) ? p.args : [action.payload];
-        return (handler as SyncMethod<Record<string, unknown>>)(
-          s,
-          ...args,
-        ) as ReturnType<CellReduceFn>;
+        return classify(
+          foreignKey,
+          (handler as SyncMethod<Record<string, unknown>>)(s, ...args),
+        );
       }
     }
     const ownKey = actionTypeToKey.get(action.type);
@@ -188,49 +236,13 @@ export function buildMethodsReducer(
         const args =
           ((action.payload as Record<string, unknown>)?.args as unknown[]) ??
             [];
-        const result = (method as SyncMethod<Record<string, unknown>>)(
-          s as Record<string, unknown>,
-          ...args,
+        return classify(
+          ownKey,
+          (method as SyncMethod<Record<string, unknown>>)(
+            s as Record<string, unknown>,
+            ...args,
+          ),
         );
-        // AIO-8.2: a sync-classified method returning a thenable means the
-        // build transpiled async functions (constructor.name check defeated).
-        // The method's synchronous prefix has already mutated the draft `s`;
-        // returning here would let Immer FINALIZE that half-applied mutation
-        // and broadcast corrupt state. THROW in both dev and prod (dispatch
-        // converts a reducer throw into a reported REDUCE_ERROR + rejected
-        // action without crashing) so the partial draft is discarded either
-        // way — never commit it. Doctrine: no silent dev/prod divergence, and
-        // this trigger is build-dependent (more likely in the compiled build,
-        // exactly where a silent prod-only corruption would hide).
-        if (
-          result && typeof (result as { then?: unknown }).then === "function"
-        ) {
-          throw new Error(
-            // `prefix` IS the cell name (cell-methods-factory: `prefix = name`).
-            // This said `${name}`, which this function never receives — so it
-            // silently resolved to the global `name`, the empty string, and the
-            // message read "[] method 'foo' …". The one diagnostic whose whole
-            // job is to say WHICH cell was mis-transpiled did not say it.
-            `[${prefix}] method '${ownKey}' returned a Promise but was classified sync — ` +
-              `your build transpiled async functions. Wrap it: ` +
-              `${ownKey}: markAsync(async (s) => {...})`,
-          );
-        }
-        // AIO-427: classify the sync method's return at its one ambiguous
-        // source. A single tagged effect → wrapped to the reducer's effects
-        // array; an all-effect array → passed through as effects; anything else
-        // (primitive, plain object, data array, `[]`) is a transported VALUE,
-        // wrapped in a RETURN_TAG envelope so compose-reduce never mistakes it
-        // for a `Msg[]` effects array.
-        if (result == null) return undefined;
-        if (isScheduleEffect(result) || isOwnEffect(result)) return [result];
-        if (
-          Array.isArray(result) && result.length > 0 &&
-          (isScheduleEffect(result[0]) || isOwnEffect(result[0]))
-        ) {
-          return result as (Msg | ScheduleEffect | OwnEffect)[];
-        }
-        return markReturn(result);
       }
       if (asyncMethods.has(ownKey)) {
         const p = (action.payload ?? {}) as Record<string, unknown>;
@@ -299,6 +311,29 @@ export function buildMethodsExecutor(
       // live-read/incremental-commit behavior, byte-identical.
       const transactional = !!(config as { transaction?: unknown } | undefined)
         ?.transaction;
+      // Cancellation (perfect-aio D1): every async call gets an
+      // AbortController; cancelOn triggers abort it, the method observes it via
+      // `s.$signal`. Untracked on settle either way.
+      //
+      // Created HERE — when the call is DISPATCHED — not inside runOnce, which
+      // under `serialize: true` does not run until every earlier call has
+      // committed. A controller that does not exist yet cannot be aborted:
+      // `notifyMethodCancel` only reaches `_inflight`, so an explicit Stop
+      // pressed during job 1 left jobs 2 and 3 queued behind it running in
+      // full, each reading `s.$signal.aborted === false`. Same hazard shape
+      // shutdown hit and closed with `_shutdownCells` (method-cancel.ts).
+      //
+      // The window closes by construction, with no epoch flag to clear: a
+      // cancel trigger fires during REDUCE of the trigger action, while a
+      // call's controller is created when its `__exec` EFFECT runs — and
+      // effects of an action always run before the next action is reduced
+      // (dispatch drains its queue in order). So a call dispatched BEFORE the
+      // trigger has a controller when the trigger fires (aborted, queued or
+      // not), and a call dispatched AFTER it creates its controller after the
+      // trigger is gone (never aborted). That is also exactly why
+      // `cancelOn: "self"` can abort its elders but never the incoming call.
+      const controller = new AbortController();
+      const untrack = trackCall(prefix, _method, controller);
       // Run the method once. For serialize, this is deferred until the previous
       // transactional call has committed (so its snapshot is fresh); otherwise
       // it runs now, concurrently, exactly as before.
@@ -314,13 +349,50 @@ export function buildMethodsExecutor(
         };
         // The state this method's reads are pinned to. Conflict detection asks
         // one question of it: has anything the method READ changed since?
-        const origin = snap.s;
+        //
+        // It must be a REAL committed state object, because identity is the
+        // comparator (Immer's structural sharing is what makes an untouched
+        // subtree free to check). It therefore moves with `snap.s` at every
+        // `s.$commit()` — see `rebase` below. Pinning it at entry forever was
+        // a shipped bug: after ONE `$commit`, every container path that commit
+        // published compared entry-value against Immer's freshly built value
+        // and read as "changed by another action" with no other action in the
+        // process. `$commit` poisoned the rest of its own transaction.
+        let origin = snap.s;
         const watch = transactional ? createReadWatch() : undefined;
+        // The live state at the last `$commit`'s flush, while that write-set
+        // has not been applied yet — null when there is nothing to re-base.
+        let rebasePre: Record<string, unknown> | null = null;
+        /** Re-pin the epoch (`origin` + the read snapshot) to the state our own
+         *  `$commit` produced. Returns whether it is settled.
+         *
+         *  Why it can be decided by identity alone: `flush()` dispatches, and
+         *  dispatch either applies inline (the method resumed OUTSIDE the
+         *  dispatch loop — state moves before `flush()` returns) or queues
+         *  behind the loop we are running inside, which drains synchronously
+         *  and FIFO. So while `getState()` is still the very object we saw at
+         *  flush, nothing at all has committed since — not our write-set, not
+         *  anyone else's — and the previous `origin` is still exactly the state
+         *  our reads reflect (`conflictPath` short-circuits on `origin ===
+         *  live`). The instant it differs, our write-set is in it, and adopting
+         *  it as the new base is both sound and identity-comparable again. */
+        const rebase = (): boolean => {
+          if (rebasePre === null) return true;
+          const cur = app.getState() as Record<string, unknown>;
+          if (cur === rebasePre) return false;
+          snap.s = cur;
+          origin = cur;
+          rebasePre = null;
+          return true;
+        };
         // Snapshot isolation is only sound while nothing the method read has
         // moved underneath it. Validate at every commit point — the moment a
         // stale read stops being harmless and becomes the state we write.
         const guardCommit = (): void => {
           if (!watch) return;
+          // Settle any pending `$commit` re-base first: validating against a
+          // stale epoch is what turned our own publish into a phantom conflict.
+          rebase();
           // Publishing nothing is trivially serializable — a read-only
           // stand-down (the documented `s.$live` re-check pattern) must be
           // able to return without being told its reads moved.
@@ -357,29 +429,12 @@ export function buildMethodsExecutor(
         const commit = transactional
           ? () => {
             guardCommit();
-            // Capture the write-set before flush clears it, dispatch the real
-            // atomic commit, then advance the LOCAL snapshot by the same
-            // mutations — reads after $commit see them immediately, without
-            // waiting for the (async) dispatch to round-trip through getState().
+            // Capture the write-set before flush clears it, then dispatch the
+            // real atomic commit.
             const muts = batcher.pending().slice();
+            const pre = app.getState() as Record<string, unknown>;
             batcher.flush();
-            if (muts.length > 0 && snap.s) {
-              const next = snapshotForRead(snap.s) as Record<string, unknown>;
-              applyMutations(next, muts);
-              snap.s = next;
-            }
             if (watch) {
-              // These are published now. Record the VALUE we published — a
-              // later validation treats "live is our value (or still entry
-              // value while the dispatch settles)" as our own write, and any
-              // third value as a concurrent writer's. A bare skip would exempt
-              // the path for the rest of the method (a real lost update).
-              for (const m of muts) {
-                watch.flushed.set(
-                  watchKey(m.path),
-                  getNestedValue(snap.s, m.path),
-                );
-              }
               // Everything up to here was just validated and published —
               // re-baseline so the NEXT validation covers only what this
               // method reads and writes from now on. Without this, a
@@ -388,13 +443,25 @@ export function buildMethodsExecutor(
               watch.reads.clear();
               watch.writes.clear();
             }
+            if (muts.length === 0) return;
+            // A new epoch starts here: reads after `$commit` see the committed
+            // state, and conflict detection is pinned to it.
+            rebasePre = pre;
+            if (!rebase() && snap.s) {
+              // Our write-set is queued behind the dispatch loop we are inside.
+              // Advance the LOCAL snapshot by the same mutations so reads see
+              // them NOW, without waiting for the round-trip; `rebase` swaps in
+              // the real committed objects on the next microtask (the loop is
+              // synchronous, so it has drained by then) — and `guardCommit`
+              // settles it too, so no commit point can ever validate against a
+              // half-published epoch.
+              const next = snapshotForRead(snap.s) as Record<string, unknown>;
+              applyMutations(next, muts);
+              snap.s = next;
+              queueMicrotask(rebase);
+            }
           }
           : undefined;
-        // Cancellation (perfect-aio D1): every async call gets an
-        // AbortController; cancelOn triggers abort it, the method observes it
-        // via `s.$signal`. Untracked on settle either way.
-        const controller = new AbortController();
-        const untrack = trackCall(prefix, _method, controller);
         const live = () => app.getState() as Record<string, unknown>;
         // `s.$live` — the sanctioned way out of snapshot isolation: same
         // batcher (so writes still commit atomically), unwatched reads (they
@@ -435,6 +502,40 @@ export function buildMethodsExecutor(
         )
           .finally(() => untrack())
           .then(async (value) => {
+            // Cancelled ⇒ the transaction ABORTS. The spec is explicit
+            // (docs/state/transactional-methods.md §4, "Abort"): a method that
+            // throws OR is cancelled discards its write-set — the `.catch`
+            // below only ever covered the throw half.
+            //
+            // Non-transactionally there is nothing here to discard: writes
+            // flush incrementally, so a superseded call's pre-`await` writes
+            // already landed FIRST and the winner overwrites them — harmless.
+            // With `transaction: true` the WHOLE write-set buffers to the end,
+            // so the superseded run commits LAST and clobbers the winner: the
+            // documented supersession pattern (`cancelOn: { run: "self" }` +
+            // `if (s.$signal.aborted) return`) left `query` and the spinner
+            // pinned to the ABANDONED call, silently and permanently.
+            //
+            // This is also right for shutdown's blanket abort: an interrupted
+            // transaction must not persist half of itself, and whatever the
+            // method deliberately published mid-flight via `s.$commit()` is
+            // already committed and survives.
+            if (transactional && controller.signal.aborted) {
+              const dropped = batcher.pending().length;
+              batcher.discard();
+              if (dropped > 0) {
+                log.debug(
+                  "cell",
+                  `${name} ${_method}(): cancelled — ${dropped} buffered ` +
+                    `write(s) discarded (transaction abort)`,
+                );
+              }
+              // No effects either: scheduling follow-up work is the one thing
+              // a cancelled call must not do. Resolving `undefined` matches
+              // the cancellation path the docs tell methods to take.
+              resolveCall(_callId, undefined);
+              return;
+            }
             // Transactional commit: apply the whole method's buffered
             // write-set as ONE atomic `__set`, before resolving the caller — so an
             // awaiter sees committed state, and other clients saw no intermediate.

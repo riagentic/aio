@@ -1,6 +1,7 @@
-import { assertEquals } from "@std/assert";
+import { assertEquals, assertThrows } from "@std/assert";
 import { cell } from "../src/state/cell-create.ts";
 import { composeCellsWiring } from "../src/server/aio-composition.ts";
+import { _resetAioRuntime } from "../src/state/runtime-reset.ts";
 
 // Tests for 1.2: ui default is "all" — zero-config exposes everything,
 // adding ui config to ONE cell does not make other cells vanish.
@@ -195,4 +196,103 @@ Deno.test("forUser: ui 'none' still wins — an invisible cell stays invisible",
   // wire that carries nothing.
   const row = wiring.visibilityReport?.find((r) => r.cell === "counter");
   if (row) assertEquals(row.ui, "none");
+});
+
+// ── The property, over the whole ui shape space ───────────────────────────
+//
+// Three holes shipped because a `ui` shape reached a channel that could not
+// honour it: `forUser` alone classified as `raw` (patches from unfiltered
+// state), a throwing `forUser` fell back to the unfiltered slice, and a
+// filtered cell could be CRDT-replicated to every peer. Enumerating the shapes
+// is what makes the CLASS unshippable — a new shape added later either lands in
+// one of these buckets or fails here.
+//
+// For every shape: does it hide anything from a client? If yes, it must never
+// be broadcast through `raw`, and it must never be combined with `sync`.
+const UI_SHAPES: { label: string; ui: unknown; hides: boolean }[] = [
+  { label: "absent", ui: undefined, hides: false },
+  { label: '"all"', ui: "all", hides: false },
+  { label: '"none"', ui: "none", hides: true },
+  { label: "include", ui: { include: ["count"] }, hides: true },
+  { label: "exclude", ui: { exclude: ["label"] }, hides: true },
+  { label: "forUser", ui: { forUser: (s: never) => s }, hides: true },
+  {
+    label: "forUser+include",
+    ui: { include: ["count"], forUser: (s: never) => s },
+    hides: true,
+  },
+  {
+    label: "forUser+exclude",
+    ui: { exclude: ["label"], forUser: (s: never) => s },
+    hides: true,
+  },
+  {
+    label: "publicFields (an acknowledgement, not a filter)",
+    ui: { publicFields: ["label"] },
+    hides: false,
+  },
+];
+
+function cellWith(id: string, ui: unknown, sync?: boolean) {
+  return cell(id, {
+    state: { count: 0, label: "" },
+    // deno-lint-ignore no-explicit-any
+    ...(ui !== undefined ? { ui: ui as any } : {}),
+    ...(sync ? { sync: true } : {}),
+    methods: {
+      increment(s: { count: number }, by = 1) {
+        s.count += by;
+      },
+    },
+  });
+}
+
+Deno.test("ui property: a shape that hides state is never broadcast through 'raw'", () => {
+  let n = 0;
+  for (const { label, ui, hides } of UI_SHAPES) {
+    _resetAioRuntime();
+    const id = `ui-shape-${n++}`;
+    const strategy = wiringOf(
+      // deno-lint-ignore no-explicit-any
+      [cellWith(id, ui)] as any,
+    ).cellPatchStrategies.get(id);
+    if (hides) {
+      assertEquals(
+        strategy === "raw",
+        false,
+        `${label}: hides state but classified as "raw" — patches would be computed from UNFILTERED state`,
+      );
+    } else {
+      assertEquals(
+        strategy,
+        "raw",
+        `${label}: hides nothing, so the cheap path must stay available`,
+      );
+    }
+  }
+  _resetAioRuntime();
+});
+
+Deno.test("ui property: a shape that hides state can never be a sync cell", () => {
+  let n = 0;
+  for (const { label, ui, hides } of UI_SHAPES) {
+    _resetAioRuntime();
+    const id = `ui-sync-shape-${n++}`;
+    // deno-lint-ignore no-explicit-any
+    const compose = () => wiringOf([cellWith(id, ui, true)] as any);
+    if (hides) {
+      // CRDT replication hands every peer the same ops and snapshots: a filter
+      // on a replicated cell is a promise the transport cannot keep, so it is
+      // refused by name instead of silently leaking.
+      const err = assertThrows(compose, Error, undefined, label);
+      assertEquals(
+        err.message.includes(id),
+        true,
+        `${label}: the refusal must name the cell — got: ${err.message}`,
+      );
+    } else {
+      compose(); // hides nothing → replication is honest
+    }
+  }
+  _resetAioRuntime();
 });
