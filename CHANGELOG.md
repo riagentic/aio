@@ -1,5 +1,115 @@
 # Changelog
 
+## 1.0.0-alpha46 — the hunt (2026-08-05)
+
+No new capability. Three adversarial passes over persistence, the state core and
+the server/auth surface — every finding reproduced before it was fixed — plus
+the framework's own fuzzers swept far wider than CI runs them (4 800 proxy
+programs, 6 400 patch programs, 121 fresh chaos seeds). **27 real defects**,
+most of them silent.
+
+The recurring root cause is worth naming, because it is the same one the
+WYSIDIWYSIP kata was written for: **a fact written down twice**. A hand-copied
+config list, a locally-cloned baseline bridged to a live one, an epoch pinned
+once and never re-based, a drop-list standing in for a lookup rule. The fixes
+are mechanisms, not patches.
+
+### Three that no existing test could see
+
+- **The flagship CRUD example never booted.** `db:` table names address the ROOT
+  state namespace, which under the cells API is the cell-id namespace — so a
+  `db:` key either collided with a cell (hard boot error) or was a permanent
+  no-op that injected a phantom root key. `examples/contacts` crashed on start
+  and the documented `db:` example was the same forbidden shape; CI missed it
+  because the example's test is `testCell`-only and never touches that path. A
+  `db:` key now binds to the array field it stores, ambiguity is a boot error
+  naming both candidates, and a new gate **discovers and boots all 13 example
+  apps**.
+- **`ui.forUser` failed open.** A filter that threw fell back to "the structural
+  filter result" — but with `ui: { forUser }` alone, that is the whole cell. One
+  missing field on a user record broadcast every tenant's rows. It fails closed
+  now: the cell is omitted, which can never expose more than the filter would
+  have returned.
+- **`auth: true` left the control plane unauthenticated.** Anonymous local
+  callers could read raw state, dispatch, run SQL and replace the whole state
+  through `/__aio/trojan/*`; in `users:` mode any non-admin token could too.
+  Gated in every mode — and because that locks a developer out of their own app,
+  dev apps now mint an owner-only, per-boot `control.key` that `am` and amui
+  present. Authority is owning the machine, not membership in the app.
+
+### Data that stopped disappearing
+
+- A **broken migration** reset the cell to defaults and the debounced persist
+  then wrote that empty slice **over the stored data** — a fixed build found
+  nothing left to migrate. Boot refuses now; nothing is written. The error also
+  reaches `onError`, which it could not before: `_reportOpts` was declared below
+  the boot call, so reporting a boot failure threw a `ReferenceError` inside the
+  error path and masked the real cause.
+- A **rollback** re-stamped versions downward, so rolling forward re-ran
+  `onMigrate` over already-migrated data — a balance silently zeroed by an
+  ordinary rollback. Stamps are monotonic; a downgraded slice is parked verbatim
+  at `__downgraded:<cell>`; `onMigrate` now receives the stored fields a rename
+  migration exists to read.
+- Switching **`persistMode`** booted empty and stranded the document (and
+  switching back resurrected stale state). It migrates now, verifying the
+  read-back before retiring the source.
+- **Dictionary keys naming `Object.prototype` members** — `toString`, `valueOf`,
+  `constructor` — were dropped on every restore, because the declared-key test
+  was a prototype-chain lookup. Any user-keyed record lost exactly those
+  entries. Prototype pollution is now structurally impossible rather than
+  list-based.
+- State nested past the depth cap is kept **verbatim** and the path is named,
+  instead of being silently replaced by defaults.
+
+### Transactions and cancellation
+
+- A **cancelled** `transaction: true` method committed its stale write-set
+  _after_ the winner — so `cancelOn`, the documented cure for late-write
+  clobbering, caused it.
+- **`s.$commit()` poisoned its own transaction**: a single writer, no
+  concurrency, rejected with "changed by another action". `$commit` was unusable
+  on any cell holding arrays or objects. Fixed at the root — the baseline is a
+  re-basable epoch and the bridge that existed only to paper over it is gone.
+- **`cancelOn` could not reach a call queued behind `serialize: true`** — "Stop"
+  ran every remaining job in full. The controller is created when a call is
+  _made_ rather than when it _starts_, which closes the window by construction.
+- A **`listensTo` handler's single effect return** was silently dropped.
+- A **`BigInt` in state killed the process** from an observe-only diagnostics
+  hook — and in one variant left the method promise unsettled forever.
+
+### Sessions, origins, and the rest
+
+- Revoking a session left its **WebSocket fully authorized** — logout ACKed
+  dispatches. Sockets are now closed on revocation.
+- A **stale session cookie** locked the legitimate user out of login for five
+  minutes; an ambient cookie is not a deliberate credential presentation.
+- A submitted **`Origin` could self-certify** by claiming to be localhost, so
+  any page on another loopback port could open an authenticated socket.
+- **`key:` + `auth:` + `--expose`** refuses at boot — proven irreconcilable
+  rather than assumed.
+- `sync` + a hiding `ui` filter is **refused at compose**: CRDT replication
+  sends every op to every peer, so a per-user view cannot survive it. Filtering
+  the op stream would swap a silent leak for silent divergence.
+- `db.execute()` rejects a multi-statement string instead of running only the
+  first; a row beyond 2^53 names its table and column; the journal keeps mode
+  `0600` across compaction; `am pair` exists.
+
+### Gates, which are the durable part
+
+Eleven new ones: a transaction differential (one writer ⇒ transaction and
+serialize must be observationally a no-op, ~2 300 programs), two generative
+`ui`-shape properties, boot-every-example, config-bridge hop 2 completeness,
+cursor durability, a fuzz-knob contract, and a shared op vocabulary so the two
+differential fuzzers cannot drift apart. All three fuzzers now **throw** on an
+unreadable seed — `SYNC_CHAOS_SEED=abc` used to run seed 0 and report a
+confident green for a program nobody asked for.
+
+Suite 3495 (from 3377). One exported type gained a required field
+(`SyncHandlerDeps.getClientCellState`) — constructed only inside the framework,
+but named here rather than called "strictly additive".
+
+Upgrade guide: `docs/upgrade/from-alpha45-to-alpha46.md`.
+
 ## 1.0.0-alpha45 — the network boundary (2026-08-05)
 
 Two field reports, written independently, reached the same verdict: everything

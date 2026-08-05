@@ -145,6 +145,7 @@
 - [Upgrade: alpha42 → alpha43](upgrade/from-alpha42-to-alpha43.md) — every API is additive.
 - [Upgrade: alpha43 → alpha44](upgrade/from-alpha43-to-alpha44.md) — every API change is additive.
 - [Upgrade: alpha44 → alpha45](upgrade/from-alpha44-to-alpha45.md) — Everything here came out of one field report — two apps in one repository, a
+- [Upgrade: alpha45 → alpha46](upgrade/from-alpha45-to-alpha46.md) — alpha46 is a bug-hunt release: no new capability, 27 real defects closed.
 - [Upgrade from v1.0.0-alpha5 to v1.0.0-alpha6](upgrade/from-alpha5-to-alpha6.md) — None.
 - [Upgrade from v1.0.0-alpha6 to v1.0.0-alpha7](upgrade/from-alpha6-to-alpha7.md) — mod.ts no longer re-exports renderer primitives.
 - [Upgrade from v1.0.0-alpha7 to v1.0.0-alpha8](upgrade/from-alpha7-to-alpha8.md) — None.

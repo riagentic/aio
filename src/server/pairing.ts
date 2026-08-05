@@ -10,13 +10,21 @@
 //  - PER-KEY budget: wrong guesses are counted per client key (usually IP), so
 //    a wrong-guessing attacker locks only THEMSELVES — it can't be used to DoS
 //    the legitimate device out of pairing (the old global counter could).
-// Regenerate with a restart or `am pair`.
+//
+// LIFETIME: `generatePin` has two callers — the boot banner, and `am pair` via
+// the trojan's `pair` route (POST /__aio/trojan/pair). Until that route existed
+// a missed 3-minute window meant restarting the app — downtime for every
+// connected client — so the comment here, and the 401 from /__aio/pair, both
+// said "restart the app". `am pair` is the honest answer now; the /__aio/pair
+// hint still says restart (it is written in server.ts) — see the follow-up in
+// the control-credential report.
 import { _timingSafeEqual } from "./server-auth.ts";
 
 /** Wrong-guess budget per client key before that key is refused. */
 const MAX_ATTEMPTS = 8;
-/** How long a generated PIN stays valid (ms). */
-const PIN_TTL_MS = 3 * 60_000;
+/** How long a generated PIN stays valid (ms). Exported so the `am pair` reply
+ *  states the REAL window instead of a copy that can drift out of sync. */
+export const PIN_TTL_MS = 3 * 60_000;
 
 interface PairingState {
   pin: string;

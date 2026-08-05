@@ -4,7 +4,7 @@ import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { testCell } from "../../src/testing/cell-test.ts";
 import { renderToString } from "../../src/air/vdom-ssr.ts";
 import { h } from "../../src/air/vdom.ts";
-import { manager, reconcileDetail } from "./manager.ts";
+import { manager, reconcileDetail, refusalOf } from "./manager.ts";
 import type { DiscoveredProject, ProjectDetail } from "./manager.ts";
 import App from "./App.tsx";
 import { readProjectMeta } from "./server/scan.ts";
@@ -278,6 +278,31 @@ Deno.test("reconcileDetail: no state change returns the SAME reference", () => {
 });
 
 // ── psStats NaN guard — a bogus/dead pid must never yield NaN samples ────────
+Deno.test("control plane: a refusal reaches the UI instead of an empty panel", () => {
+  // amui reads a running app through /__aio/trojan/*, and every panel degrades
+  // to null on failure — so an auth refusal used to render as blank boxes with
+  // no cause anywhere. The refusal (which carries its own diagnosis) is kept.
+  assertEquals(refusalOf([{ ok: true }]), null);
+  assertEquals(
+    refusalOf([{ ok: false, error: "app not running on port 8000" }]),
+    null,
+    "a dead app is visible elsewhere — not an error banner",
+  );
+  assertEquals(
+    refusalOf([
+      { ok: true },
+      { ok: false, error: "Unauthorized — /__aio/trojan/* is the raw-state…" },
+      { ok: false, error: "Forbidden" },
+    ]),
+    "Unauthorized — /__aio/trojan/* is the raw-state…",
+    "the FIRST credential refusal, verbatim",
+  );
+  assertStringIncludes(
+    refusalOf([{ ok: false, error: 'requires role "admin"' }]) ?? "",
+    "admin",
+  );
+});
+
 Deno.test("psStats: a dead pid yields null (never a NaN sample)", async () => {
   // pid 2^31-1 is effectively never live; ps returns nothing → null (not NaN).
   const r = await psStats(2147483646);

@@ -16,7 +16,63 @@ import { AppLock, lockDir } from "./single-instance-lock.ts";
 import { launchElectronClient } from "../electron/electron.ts";
 import { getLogger, log } from "../diagnostics/logger.ts";
 
-/** Memoized getUIState — skips re-computation when state ref unchanged (AIO-9) */
+/** Cache key for a user — a STABLE serialization of everything `ui.forUser`
+ *  can observe, not just the id.
+ *
+ *  Keying on `user.id` alone was a cross-user leak: `resolveUser` may return
+ *  `{id:"alice", role:"admin"}` for one token and `{id:"alice", role:"viewer"}`
+ *  for another (impersonation, a role switch, a re-issued session, two devices
+ *  with different scopes). `forUser` receives the WHOLE user object, so two
+ *  users that differ anywhere are two different views — and the admin's view
+ *  was being served to the viewer whenever no dispatch happened in between.
+ *  The `""` bucket was worse still: every user-less caller (UDS, trojan,
+ *  anonymous WS) shared one slot with any user whose id was empty.
+ *
+ *  Object keys are sorted so two structurally-equal users still share a slot,
+ *  and the key is recomputed per call so an IN-PLACE mutation of a
+ *  connection's user object (a role change on a live socket) invalidates it.
+ *
+ *  Cost: one JSON pass over a user record (a handful of small fields) per
+ *  client per broadcast, against a `forUser` call that structuredClones and
+ *  rewrites the whole cell slice — two to three orders of magnitude apart on
+ *  any state worth memoizing. The memo keeps its purpose; it just can no
+ *  longer answer a question it was not asked.
+ *
+ *  Returns null when the user cannot be serialized (cycles, exotic values) —
+ *  the caller then SKIPS the cache entirely and recomputes. A cache miss costs
+ *  time; a wrong cache hit costs someone else's data. */
+function userMemoKey(user?: AioUser): string | null {
+  // "no user" is its OWN bucket, and cannot be spelled by any serialized user:
+  // every JSON.stringify of an object starts with "{".
+  if (user === undefined || user === null) return "no-user";
+  try {
+    const key = JSON.stringify(user, (_k, v) => {
+      // Values JSON drops or mangles become OBJECTS, never marker strings — a
+      // marker string could be forged by a user field holding that exact text,
+      // which would alias two different users into one cache slot.
+      if (v === undefined) return { __aioUndefined: true };
+      if (typeof v === "function") return { __aioFunction: true };
+      if (typeof v === "bigint") return { __aioBigInt: String(v) };
+      if (v && typeof v === "object" && !Array.isArray(v)) {
+        const sorted: Record<string, unknown> = {};
+        for (const k of Object.keys(v as Record<string, unknown>).sort()) {
+          sorted[k] = (v as Record<string, unknown>)[k];
+        }
+        return sorted;
+      }
+      return v;
+    });
+    return typeof key === "string" ? key : null;
+  } catch {
+    return null; // cyclic / unserializable → no caching, ever
+  }
+}
+
+let _memoKeyWarned = false;
+
+/** Memoized getUIState — skips re-computation when state ref unchanged (AIO-9).
+ *  Keyed on the FULL user (see userMemoKey), because that is exactly what
+ *  `ui.forUser` is handed. */
 export function createMemoizedUIState<S>(
   rawGetUIState: (s: S, user?: AioUser) => unknown,
 ): (s: S, user?: AioUser) => unknown {
@@ -27,10 +83,22 @@ export function createMemoizedUIState<S>(
       memoState = s;
       memoResults.clear();
     }
-    const uid = user?.id ?? "";
-    if (memoResults.has(uid)) return memoResults.get(uid); // AIO-245
+    const key = userMemoKey(user);
+    if (key === null) {
+      if (!_memoKeyWarned) {
+        _memoKeyWarned = true;
+        log.warn(
+          "getUIState: this user object cannot be serialized (cycle or exotic " +
+            "value), so its per-user view is recomputed on every broadcast " +
+            "rather than cached — correctness over speed. Keep user records " +
+            "plain data if this shows up in a profile.",
+        );
+      }
+      return rawGetUIState(s, user);
+    }
+    if (memoResults.has(key)) return memoResults.get(key); // AIO-245
     const result = rawGetUIState(s, user);
-    memoResults.set(uid, result);
+    memoResults.set(key, result);
     return result;
   };
 }

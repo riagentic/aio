@@ -68,3 +68,26 @@ Deno.test("checkpoint: writeSync for emergency", async () => {
   assertExists(data);
   assertEquals(data!.state, { emergency: true });
 });
+
+Deno.test("checkpoint: BigInt state degrades the snapshot, it does not fail the write", async () => {
+  // The circular-ref fallback replacer re-threw on a BigInt — the same throw
+  // the first attempt failed with — so flush() rejected instead of writing.
+  const dir = `${TEST_DIR}/cp-bigint`;
+  await Deno.mkdir(dir, { recursive: true });
+  const cp = createCheckpoint(dir, 0);
+  const state: Record<string, unknown> = { wallet: { balance: 7n } };
+  state.self = state; // …and a cycle, so both fallbacks run at once
+  await cp.write({
+    ts: Date.now(),
+    state,
+    recentActions: ["wallet:credit"],
+    cells: { wallet: { errors: 0, enabled: true } },
+  });
+  const data = readCheckpoint(dir);
+  assertExists(data);
+  assertEquals(
+    (data.state.wallet as { balance: unknown }).balance,
+    "7n",
+    "the BigInt is recorded, readably",
+  );
+});

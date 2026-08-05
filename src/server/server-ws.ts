@@ -156,6 +156,11 @@ export type ClientMeta = {
   /** Negotiated wire-protocol version (A3). Undefined until the client's
    *  "proto" hello arrives. */
   protocolVersion?: number;
+  /** The SESSION token this socket authenticated with, when it authenticated
+   *  with one. A socket outlives the credential that opened it, so the token
+   *  is kept and re-checked — see `_revalidate`. Absent for anonymous sockets
+   *  and for static `users:`/`resolveUser` tokens, which nothing can revoke. */
+  sessionToken?: string;
 };
 
 /** Dependencies injected from server.ts closure */
@@ -196,11 +201,20 @@ export interface WsDeps {
       socket: WebSocket,
     ) => void;
   };
+  /** Re-resolve a session token → its CURRENT user, or null when it is gone
+   *  (revoked, kicked, password-rotated, expired). Supplied whenever a session
+   *  store exists. See `_revalidate` for why a socket must ask again. */
+  revalidateSession?: (token: string) => AioUser | null;
 }
 
 /** Returned by createWsManager — the WS subsystem's public API */
 export interface WsManager {
-  handleWs: (req: Request, user?: AioUser, clientKey?: string) => Response;
+  handleWs: (
+    req: Request,
+    user?: AioUser,
+    clientKey?: string,
+    sessionToken?: string,
+  ) => Response;
   connections: Map<WebSocket, ClientMeta>;
   payloadStats: Map<
     string,
@@ -214,6 +228,9 @@ export interface WsManager {
     idx: number,
     msg: string,
   ) => { found: true; promise: Promise<Response> } | { found: false };
+  /** Re-check every socket's session NOW (a session was revoked out of band).
+   *  Same decider as the periodic sweep — this only removes the latency. */
+  sweepSessions: () => void;
   shutdown: () => void;
 }
 
@@ -233,6 +250,73 @@ export function createWsManager(deps: WsDeps): WsManager {
   let _globalRateTimer: ReturnType<typeof setTimeout> | undefined;
 
   const connections = new Map<WebSocket, ClientMeta>();
+
+  // ── Session revocation reaches live sockets ────────────────────────────────
+  // `meta.user` used to be resolved ONCE, at upgrade, and never again: logging
+  // out (or kicking a user, or rotating a password, or the session simply
+  // expiring) killed the token for HTTP while the already-open socket kept
+  // dispatching as that identity and kept receiving its `forUser` state — for
+  // as long as it stayed connected. `sessions.ts` promises tokens are
+  // "revocable at any time (logout, kick, breach response)"; a control that
+  // only half-applies is not a control.
+  //
+  // CLOSING is the fix, not per-action filtering: the socket also RECEIVES
+  // that identity's state, so leaving it open but ignoring its frames still
+  // leaks. We learn about revocation by ASKING the store rather than by a
+  // callback threaded through the boot path, because the same question also
+  // answers TTL expiry and out-of-band edits — one decider covering every way
+  // a session can die, instead of one per revocation call site.
+  //
+  // Two triggers, same decider: every inbound frame (immediate — a revoked
+  // socket cannot act even once) and a sweep (idle sockets stop receiving).
+  const SESSION_SWEEP_MS = 5_000;
+  let _sessionSweep: ReturnType<typeof setInterval> | undefined;
+
+  /** True when the socket may keep going. Closes + reaps it when its session
+   *  is gone. Sockets without a session token (anonymous, static `users:`
+   *  tokens, shared key) are never in question — nothing can revoke those. */
+  function _revalidate(socket: WebSocket, meta: ClientMeta): boolean {
+    if (!meta.sessionToken || !deps.revalidateSession) return true;
+    const fresh = deps.revalidateSession(meta.sessionToken);
+    if (fresh) {
+      meta.user = fresh; // a role change lands here too, not just revocation
+      return true;
+    }
+    deps.debug(
+      `ws: closing ${meta.id.slice(0, 8)} — session revoked or expired (user=${
+        meta.user?.id ?? "anon"
+      })`,
+    );
+    meta.sessionToken = undefined; // one close, not one per frame
+    try {
+      socket.close(1008, "session revoked");
+    } catch { /* already closing */ }
+    connections.delete(socket);
+    _clearTimers(meta);
+    return false;
+  }
+
+  function sweepSessions(): void {
+    let live = 0;
+    for (const [socket, meta] of connections) {
+      if (_revalidate(socket, meta) && meta.sessionToken) live++;
+    }
+    // Nothing left to watch — stop polling until the next session socket
+    // arrives (`handleWs` restarts it). A timer that outlives its reason is
+    // how "cheap" becomes "always on".
+    if (live === 0 && _sessionSweep) {
+      clearInterval(_sessionSweep);
+      _sessionSweep = undefined;
+    }
+  }
+
+  function _startSessionSweep(): void {
+    if (_sessionSweep || !deps.revalidateSession) return;
+    _sessionSweep = setInterval(sweepSessions, SESSION_SWEEP_MS);
+    // Never a reason to keep the process alive on its own.
+    Deno.unrefTimer?.(_sessionSweep as unknown as number);
+  }
+
   const payloadStats = new Map<
     string,
     { lastPayloadBytes: number; totalBytes: number; count: number }
@@ -275,6 +359,7 @@ export function createWsManager(deps: WsDeps): WsManager {
     req: Request,
     user?: AioUser,
     clientKey?: string,
+    sessionToken?: string,
   ): Response {
     // F-4: reject denylisted clients at handshake so reconnect loops can't
     // reset per-socket abuse counters.
@@ -302,15 +387,28 @@ export function createWsManager(deps: WsDeps): WsManager {
       try {
         const u = new URL(origin);
         const h = u.hostname;
-        const isLocal = h === "localhost" || h === "127.0.0.1" ||
-          h === "::1" || h === "[::1]";
         const allowed = deps.allowedOrigins ?? [];
-        const isAllowed = allowed.includes(h) || allowed.includes("*");
+        // Configured trust, by hostname or by full origin, plus the "*" opt-out.
+        const isAllowed = allowed.includes(h) || allowed.includes(origin) ||
+          allowed.includes("*");
         // a page this very server served has Origin === our Host header
         const hostHeader = req.headers.get("host");
         const isOwnHost = hostHeader !== null && u.host === hostHeader;
-        if (!isLocal && !isAllowed && !isOwnHost) {
-          deps.debug(`ws: rejected origin ${origin}`);
+        // A SUBMITTED origin cannot certify itself. This used to exempt ANY
+        // loopback hostname — so `Origin: http://localhost:1234` walked past
+        // the gate unconditionally, under `--expose` included. A port is not
+        // part of a "site", so `SameSite=Strict` sends the session cookie to
+        // every loopback port: any other local dev server or tool UI could
+        // open an authenticated socket as the victim and dispatch (CSWSH).
+        // The app's own page is covered by `isOwnHost` (the client builds the
+        // WS URL from `location.host`); anything else is a deliberate
+        // `allowedOrigins` entry.
+        if (!isAllowed && !isOwnHost) {
+          deps.debug(
+            `ws: rejected origin ${origin} — not this server's own origin ` +
+              `(${hostHeader ?? "no Host header"}); add it to allowedOrigins ` +
+              `if it is meant to connect`,
+          );
           return new Response("Forbidden", { status: 403 });
         }
       } catch {
@@ -389,6 +487,7 @@ export function createWsManager(deps: WsDeps): WsManager {
       consecutiveDrops: 0,
       clientKey,
       request,
+      sessionToken,
     };
 
     socket.onerror = (e) => {
@@ -413,6 +512,7 @@ export function createWsManager(deps: WsDeps): WsManager {
 
     socket.onopen = () => {
       connections.set(socket, meta);
+      if (sessionToken) _startSessionSweep();
       meta.typeDetectTimer = setTimeout(() => {
         meta.typeDetectTimer = undefined;
         if (meta.clientType === "unknown") {
@@ -518,6 +618,9 @@ export function createWsManager(deps: WsDeps): WsManager {
     meta: ClientMeta,
     e: MessageEvent,
   ): void {
+    // Before ANYTHING else: a socket whose session died acts zero more times.
+    if (!_revalidate(socket, meta)) return;
+
     // Rate limiting — per-second counter (original behavior)
     meta.msgCount++;
     if (!meta.msgResetTimer) {
@@ -1107,6 +1210,10 @@ export function createWsManager(deps: WsDeps): WsManager {
       clearTimeout(_globalRateTimer);
       _globalRateTimer = undefined;
     }
+    if (_sessionSweep) {
+      clearInterval(_sessionSweep);
+      _sessionSweep = undefined;
+    }
     for (const [ws, meta] of connections) {
       _clearTimers(meta);
       try {
@@ -1132,6 +1239,7 @@ export function createWsManager(deps: WsDeps): WsManager {
     payloadStats,
     pendingClientState,
     sendToWsClient,
+    sweepSessions,
     shutdown,
   };
 }

@@ -29,6 +29,49 @@ import {
 import { cellAccessAllowed } from "./server-auth.ts";
 import type { CellAccess } from "../state/cell-types.ts";
 
+/** The slice of `AioConfig` the transport layer reads — HOP 2 of the config
+ *  bridge (`aio.run({…})` → `setupTransport`).
+ *
+ *  ONE DECIDER: this declaration is the only list. `aio.ts` hands over the
+ *  WHOLE config object (a bare `config,` — never a hand-copied literal) and
+ *  this type picks what may be read, so a key added here is wired by the fact
+ *  of being declared. The hand-copied spread that used to sit at the call site
+ *  dropped a key SIX times, always silently — `strictOrigin`, `redactActions`,
+ *  `appDir`, `renderBudget`, then `serveDirs` (the whole feature was dead on
+ *  arrival in alpha45: typed, allowlisted, documented, 404) and `_cellNames`
+ *  (which made the browser's cell-set-drift warning unreachable code).
+ *
+ *  `tests/config-bridge-hop2.test.ts` gates both halves: every key declared
+ *  here must be a real developer-settable config key (so a rename on either
+ *  side is a red test, not silent `undefined`), and the call site must stay a
+ *  mechanical passthrough. */
+export interface TransportConfig {
+  transport?: "uds" | "ws" | "auto";
+  renderBudget?: import("../vitals/types.ts").RenderBudget;
+  fullStateThreshold?: number;
+  routes?: Record<string, import("./route.ts").RawRouteHandler>;
+  maxConnections?: number;
+  wsLimits?: import("./aio-types.ts").WsLimits;
+  allowedOrigins?: string[];
+  strictOrigin?: boolean;
+  trustProxyHeader?: string;
+  syncIntervalMs?: number;
+  /** Extra read-only DEV roots by URL prefix — see `AioConfig.serveDirs`. */
+  serveDirs?: Record<string, string>;
+  /** Cell ids that sync (own `sync:` config, or adopted by localFirst) —
+   *  handed to the browser in the page shell. */
+  _syncCellIds?: string[];
+  /** Every cell this server booted — rides the `cfg` frame so the browser can
+   *  name a cell that exists in the bundle but not in the running server. */
+  _cellNames?: string[];
+  _cellPatchStrategies?: Map<string, CellPatchStrategy>;
+  _cellFilterFields?: Map<string, PatchFilterFields>;
+  _cellAccess?: Map<string, CellAccess>;
+  onConnect?: (user?: AioUser) => void;
+  onDisconnect?: (user?: AioUser) => void;
+  libraryMode?: boolean;
+}
+
 /** Inputs needed for server & transport setup */
 export interface ServerSetupDeps<S, A> {
   /** Cost meter (`am cost`) — recorded in the broadcast path, read by the
@@ -43,7 +86,6 @@ export interface ServerSetupDeps<S, A> {
    *  the precondition for running with zero TCP ports. See skipHttp below. */
   electronDistDir: string | undefined;
   baseDir: string;
-  serveDirs?: Record<string, string>;
   expose: boolean;
   token: string | undefined;
   users: Record<string, AioUser> | undefined;
@@ -73,30 +115,7 @@ export interface ServerSetupDeps<S, A> {
     head?: string; // AIO-423
   };
   title: string;
-  // Config knobs
-  config: {
-    transport?: "uds" | "ws" | "auto";
-    renderBudget?: import("../vitals/types.ts").RenderBudget;
-    fullStateThreshold?: number;
-    routes?: Record<string, (req: Request) => Response | Promise<Response>>;
-    maxConnections?: number;
-    wsLimits?: import("./aio-types.ts").WsLimits;
-    allowedOrigins?: string[];
-    strictOrigin?: boolean;
-    trustProxyHeader?: string;
-    syncIntervalMs?: number;
-    /** Cell ids that sync (own `sync:` config, or adopted by localFirst) —
-     *  handed to the browser in the page shell. */
-    _syncCellIds?: string[];
-    _cellNames?: string[];
-    serveDirs?: Record<string, string>;
-    _cellPatchStrategies?: Map<string, CellPatchStrategy>;
-    _cellFilterFields?: Map<string, PatchFilterFields>;
-    _cellAccess?: Map<string, CellAccess>;
-    onConnect?: (user?: AioUser) => void;
-    onDisconnect?: (user?: AioUser) => void;
-    libraryMode?: boolean;
-  };
+  config: TransportConfig;
   // Runtime refs — getState is a getter so closures always see the current value
   getState: () => S;
   getUIState: (s: S, user?: AioUser) => unknown;

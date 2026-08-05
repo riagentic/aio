@@ -547,6 +547,29 @@ export async function cmdProfile(
   out(profile, mode);
 }
 
+/** `am pair` — a FRESH pairing PIN from the running app.
+ *
+ *  A PIN is single-use and lives three minutes, and only the boot banner ever
+ *  made one: miss that window and the only way to pair a device was to restart
+ *  the app, i.e. drop every connected client. The app can mint one on request
+ *  now that reaching its control plane means an admin or this machine's owner. */
+export async function cmdPair(
+  _args: string[],
+  flags: GlobalFlags,
+): Promise<void> {
+  const ctx = amCtx(flags);
+  const r = await trojanPost(ctx.port, "pair", undefined, ctx.appId);
+  if (!r.ok) {
+    outError(r.error, ctx.mode);
+    Deno.exit(1);
+  }
+  const d = r.data as { pin: string; ttlSec: number; hint: string };
+  out(
+    ctx.mode === "pretty" ? `pairing code: ${d.pin}\n${d.hint}` : r.data,
+    ctx.mode,
+  );
+}
+
 export async function cmdConfig(
   _args: string[],
   flags: GlobalFlags,

@@ -809,6 +809,41 @@ comment line, `am surface` marks truncation and gained `--full`.
       `s.refreshing` flag leaks on throw), and sync ticks never skip. Pinned in
       `tests/schedule-skip-if-running.test.ts`.
 
+## Post-alpha45 bug hunt (2026-08-05) — deferred, none data-loss
+
+The hunt itself is in `CHANGELOG.md`; these are the items deliberately NOT
+fixed, each with the reason:
+
+- [ ] **`access`-gated sync cells broadcast ops to every socket.** `access`
+      gates writes only, so read visibility of a replicated cell is
+      unrestricted. Not a `ui` bypass (ui+sync is now refused at compose), but
+      the same question one layer over. Needs a decision, not a patch.
+- [ ] **Shared-key mode cannot serve a browser at all** — the shell loads with
+      `?token=`, but `/App.tsx` and `/bundle.js` get no query and 401. Key mode
+      is native-client-only today. A cookie-borne key (set on the `?token=`
+      shell load) would fix it AND make `key:` + `auth:` reconcilable — which is
+      currently refused at boot. Deserves its own review.
+- [ ] **Stale `app.key` after a mode switch** — `resolveAppKey` clears the file
+      only when called, and it is not called in per-user mode, so an app that
+      moved from `key: true --expose` to `auth: true` keeps a dead key that
+      `am profile` still exports as current. One line in `aio.ts`.
+- [ ] **`deep-merge`'s cycle branch** silently returns `initial` for a repeated
+      object reference — same silent-substitution class as the depth cap, but a
+      shared (non-cyclic) DAG reference would make a warning a false positive.
+- [ ] `/__aio/<framework src>.ts` is mounted in PROD and re-fetches+transpiles
+      per request with no cache — unnecessary prod surface + CPU amplifier.
+- [ ] `shapeDriftSummary` says "deepMerge preserves it" for a renamed field;
+      deepMerge actually drops it — the message misstates the mechanism.
+- [ ] `/__aio/pair`'s 401 hint still says "restart the app" — should now say
+      `am pair`.
+- [ ] `_syncSqlite` re-diffs every table because `structuredClone` breaks the
+      reference pre-filter. Behaviour-neutral, just wasteful.
+- [ ] `abortAllInflight`'s "commit what it has" rationale is now true only for
+      NON-transactional cells (an interrupted transaction must not persist half
+      of itself). Documented at the fix site; wants a doc line.
+- [ ] A call queued behind `serializeTail` that never runs leaves its controller
+      in `_inflight` until `_resetMethodCancel` (unreachable in practice).
+
 ## Deliberate deferrals (with reasons, so they aren't re-litigated)
 
 - **`scratch:` cell slice** (machine M4) — duplicate: `ui.exclude` +

@@ -29,8 +29,10 @@ Deno.test("db: a restart with existing rows flushes cleanly (no duplicate INSERT
     seed.prepare("INSERT INTO users (id, name) VALUES (?, ?)").run(1, "ada");
     seed.close();
 
+    // The `users` table binds to this cell's `users` array — the auto-sync
+    // path whose baseline the bug got wrong.
     const ticker = cell("ticker", {
-      state: { n: 0 },
+      state: { n: 0, users: [] as Array<{ id: number; name: string }> },
       methods: {
         bump(s: { n: number }) {
           s.n++;
@@ -56,9 +58,13 @@ Deno.test("db: a restart with existing rows flushes cleanly (no duplicate INSERT
     try {
       // The rows are restored into state…
       const state = app.getState() as unknown as {
-        users: Array<{ id: number; name: string }>;
+        ticker: { users: Array<{ id: number; name: string }> };
       };
-      assertEquals(state.users.length, 1, "existing row restored into state");
+      assertEquals(
+        state.ticker.users.length,
+        1,
+        "existing row restored into the cell that owns it",
+      );
 
       // …and any state change schedules a flush, which diffs tables against
       // the baseline. With a stale baseline this is where it blew up.

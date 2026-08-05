@@ -1,7 +1,21 @@
 // Trojan admin API — extracted from server.ts serveStatic()
 // Control REST API at /__aio/trojan/* — DEV-ONLY (never mounted in prod; see
-// the gate in server-static.ts). In dev it is localhost-bound unless --expose,
-// in which case it sits behind the same app auth as every other route.
+// the gate in server-static.ts).
+//
+// It has NO auth of its own, by design — every gate lives in server.ts, where
+// the request's peer address and identity are known, so there is one decider
+// rather than one per route here:
+//   1. same-machine only, always (`_isLocalRequest`; remote gets a bare 404),
+//   2. plus the app's own auth when the app has any: the shared key gates it
+//      like every other route, and in per-user mode it needs an authenticated
+//      admin OR the local operator's control credential
+//      (`trojanDenialForUserMode` — `<data>/control.key`, 0600 in a 0700 dir,
+//      which is how `am`/amui reach a locally running auth-enabled app) — this
+//      endpoint reads unfiltered state, dispatches, runs SQL and replaces the
+//      whole state, which is /__aio/snapshot's power and more.
+// This header used to claim the auth part was already true under --expose. It
+// was not: with the login flows on, the anonymous fall-through reached
+// serveStatic — and this file — with no credential at all.
 // CSRF-protected (X-AIO header on POST), rate-limited.
 import { enc } from "../protocol/envelope.ts";
 import type { AioUser } from "./aio.ts";
@@ -9,6 +23,8 @@ import {
   _isFrameworkInternalActionType,
   sanitizeClientAction,
 } from "./server-ws.ts";
+import { disarmLocalControl } from "./server-auth.ts";
+import { generatePin, PIN_TTL_MS } from "./pairing.ts";
 
 /** Client info visible to trojan introspection endpoints */
 export interface TrojanClientInfo {
@@ -99,13 +115,20 @@ const TROJAN_SQL_MAX_RESULT_BYTES = 10_000_000;
 let _trojanReqCount = 0;
 let _trojanResetTimer: ReturnType<typeof setTimeout> | null = null;
 
-/** Reset rate limit state — called during server shutdown */
+/** Reset this process's control-plane state — called during server shutdown.
+ *
+ *  The rate-limit counters AND the local control credential: the credential is
+ *  per-boot, so the process that minted it is the one that must take it away.
+ *  Leaving the file behind would be inert (the app only ever accepts the value
+ *  it holds in memory) but it would make the next `am` call fail with a stale
+ *  key instead of an honest "the app is not running". */
 export function resetTrojanRateLimit(): void {
   if (_trojanResetTimer) {
     clearTimeout(_trojanResetTimer);
     _trojanResetTimer = null;
   }
   _trojanReqCount = 0;
+  disarmLocalControl();
 }
 
 /** Main trojan route handler — returns Response or null if path not matched */
@@ -597,6 +620,42 @@ async function handlePost(
     if (!trojan.forcePersist) return err("persistence not available", 501);
     trojan.forcePersist();
     return json({ ok: true });
+  }
+
+  // `am pair` — issue a FRESH pairing PIN on a running app.
+  //
+  // A PIN is one-shot and lives 3 minutes, and boot was the only thing that
+  // ever generated one: miss that window and pairing was dead until the app was
+  // restarted (which, for a keyed app, is downtime for every connected client).
+  // The regeneration route could not exist while the control plane was
+  // anonymous — handing out a pairing code IS handing out the app key, one
+  // remote hop away — but it is exactly right now that reaching this route
+  // means an authenticated admin or the machine's owner: the same authority
+  // that could already read the key straight out of `/__aio/trojan/profile`.
+  if (route === "pair") {
+    if (!deps.token) {
+      return err(
+        "this app has no shared key, so there is nothing to pair — pairing " +
+          "hands out `key:`; per-user apps (`auth: true`, `users:`) issue " +
+          "credentials through their own login flow, and an open app needs none",
+        400,
+      );
+    }
+    const pin = generatePin();
+    return json({
+      ok: true,
+      pin,
+      ttlSec: Math.round(PIN_TTL_MS / 1000),
+      // A PIN is submitted to the app over the network — on an app that is not
+      // exposed, only this machine can reach /__aio/pair at all.
+      expose: !!deps.expose,
+      hint: deps.expose
+        ? `type ${pin} in the aio client within ${
+          Math.round(PIN_TTL_MS / 1000)
+        }s — single use`
+        : `this app is not exposed (--expose), so only this machine can submit ` +
+          `the code to /__aio/pair`,
+    });
   }
 
   if (route === "shutdown") {

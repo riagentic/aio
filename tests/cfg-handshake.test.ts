@@ -48,6 +48,14 @@ Deno.test("cfg frame: a connecting client receives the resolved config", async (
     "renderBudget survives the bridge AND rides the handshake — it used to be " +
       "silently dropped at the CellsConfig→AioConfig hop",
   );
+  assertEquals(
+    cfg.bootedCells,
+    ["cfg-cell"],
+    "the booted cell set must ride the frame — it was dropped at the " +
+      "AioConfig→setupTransport hop (a hand-copied literal that never listed " +
+      "_cellNames), so the frame carried callTimeouts and nothing else and " +
+      "the browser's cell-set-drift warning was unreachable code",
+  );
 });
 
 Deno.test("cfg apply: fills gaps, never overrides the shell", () => {

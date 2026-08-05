@@ -1,6 +1,7 @@
 // auth-totp.ts — TOTP two-factor codes (AUTH-3), RFC 6238 / RFC 4226.
 // WebCrypto HMAC-SHA-1 (the algorithm every authenticator app speaks),
 // 30-second steps, 6 digits, ±1 step verification window. Zero deps.
+import { _timingSafeEqual } from "./server-auth.ts";
 
 const B32_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
 
@@ -109,7 +110,10 @@ export async function verifyTotp(
   const nowMs = Date.now();
   const now = Math.floor(nowMs / 30_000);
   for (const step of [now, now - 1, now + 1]) {
-    if ((await totpCode(secretB32, step)) !== submitted) continue;
+    // Timing-safe like every other secret compare in the codebase — the
+    // docstring above has always claimed a constant-shape compare, and `!==`
+    // on strings short-circuits at the first differing character.
+    if (!_timingSafeEqual(await totpCode(secretB32, step), submitted)) continue;
     const prev = _lastStep.get(secretB32);
     if (prev && step <= prev.step) return false; // replay of a used code
     _sweepSteps(nowMs);

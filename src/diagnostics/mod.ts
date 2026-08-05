@@ -192,32 +192,62 @@ export function initDiagnostics(
   }
 
   // ── Hooks ──
+  // Diagnostics observe; they never decide. Each writer runs inside its own
+  // guard so (a) one failing writer can't take out the others, and (b) nothing
+  // propagates to the caller — the runtime's afterAction chain continues into
+  // work that IS load-bearing (the sync-cell durability fold, the journal, the
+  // timeline), and a broken state diff must never cost a durable write.
+  // Reported once per stage: it fails identically on every action.
+  const stageFailed = new Set<string>();
+  function observe(stage: string, fn: () => void): void {
+    try {
+      fn();
+    } catch (e) {
+      if (stageFailed.has(stage)) return;
+      stageFailed.add(stage);
+      log.error(
+        "diagnostics",
+        `${stage} failed and was skipped — diagnostics are observe-only, so ` +
+          `the action still applied. This output is now incomplete ` +
+          `(reported once). Cause: ${
+            e instanceof Error ? e.message : String(e)
+          }`,
+      );
+    }
+  }
+
   function afterAction(
     prev: Record<string, unknown>,
     next: Record<string, unknown>,
     action: { type: string; payload?: unknown },
   ): void {
     if (diffEnabled && prev !== next) {
-      const diffs = computeDiffs(prev, next);
-      for (const d of diffs) {
-        log.debug("state-diff", formatDiff(d.cell, d.changes));
-      }
+      observe("state-diff", () => {
+        const diffs = computeDiffs(prev, next);
+        for (const d of diffs) {
+          log.debug("state-diff", formatDiff(d.cell, d.changes));
+        }
+      });
     }
     if (actionLog) {
-      actionLog.append(
-        action.type,
-        redact(action.type) ? REDACTED : action.payload,
-      );
+      observe("action-log", () => {
+        actionLog!.append(
+          action.type,
+          redact(action.type) ? REDACTED : action.payload,
+        );
+      });
     }
     lastState = next;
     recentActions.push(action.type);
     if (recentActions.length > MAX_RECENT) recentActions.shift();
     if (cpWriter && prev !== next) {
-      cpWriter.schedule({
-        ts: Date.now(),
-        state: next,
-        recentActions: [...recentActions],
-        cells: getHealthSnapshot(),
+      observe("checkpoint", () => {
+        cpWriter!.schedule({
+          ts: Date.now(),
+          state: next,
+          recentActions: [...recentActions],
+          cells: getHealthSnapshot(),
+        });
       });
     }
   }

@@ -40,6 +40,7 @@ import {
   cmdHealth,
   cmdLog,
   cmdMetrics,
+  cmdPair,
   cmdProfile,
   cmdSchedules,
   cmdSql,
@@ -127,6 +128,7 @@ const COMMANDS: Record<string, CmdHandler> = {
   health: cmdHealth,
   discover: cmdDiscover,
   profile: cmdProfile,
+  pair: cmdPair, // a fresh single-use pairing PIN, without restarting the app
   config: cmdConfig,
   // Auth — operator console for auth: true (users, lockouts, sessions)
   auth: cmdAuth,

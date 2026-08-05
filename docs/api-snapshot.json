@@ -325,7 +325,7 @@
         },
         "SessionStore": {
           "kind": "interface",
-          "sig": "23ffc8e6214f58ef"
+          "sig": "16feed4f6449eed0"
         },
         "sleep": {
           "kind": "function",
@@ -393,7 +393,7 @@
         },
         "VERSION": {
           "kind": "variable",
-          "sig": "64beb3b95c898a6f"
+          "sig": "ed105916f07e5a5b"
         },
         "VitalsConfig": {
           "kind": "typeAlias",
@@ -1634,7 +1634,7 @@
         },
         "SyncHandlerDeps": {
           "kind": "interface",
-          "sig": "da9fe676a1e2025d"
+          "sig": "dfb176052e0efd82"
         },
         "SyncOp": {
           "kind": "interface",

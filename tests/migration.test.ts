@@ -1,5 +1,5 @@
 // tests/migration.test.ts — state migration system tests
-import { assert, assertEquals } from "@std/assert";
+import { assert, assertEquals, assertThrows } from "@std/assert";
 import {
   applyCellMigrations,
   type CellMigrationInfo,
@@ -169,8 +169,12 @@ Deno.test("migration: no persisted version — treated as version 0", () => {
   assertEquals((state.counter as Record<string, unknown>).migrated, true);
 });
 
-// ── Test: onMigrate throws → error logged, state unchanged ─────
-Deno.test("migration: onMigrate throws — error logged, state reset to initial", () => {
+// ── Test: onMigrate throws → REFUSE, never reset ────────────────
+// It used to reset the cell to `initialState` and carry on — and the debounced
+// persist then wrote that empty slice over the data the migration was supposed
+// to transform (tests/migration-rollback.test.ts proves the end-to-end loss).
+// Refusing writes nothing, so the stored bytes survive for a fixed build.
+Deno.test("migration: onMigrate throws — refuses, and never resets the cell", () => {
   const migrations = new Map<string, CellMigrationInfo>();
   migrations.set("counter", {
     version: 2,
@@ -180,18 +184,22 @@ Deno.test("migration: onMigrate throws — error logged, state reset to initial"
     },
   });
 
-  const { state, logs } = simulateRestore({
-    initial: { counter: { count: 0 } },
-    persisted: { counter: { count: 99 } },
-    persistedVersions: { counter: 1 },
-    cellMigrations: migrations,
+  const state = deepMerge({ counter: { count: 0 } }, {
+    counter: { count: 99 },
   });
-
-  // State should be reset to initialState (migration threw — stale state unsafe)
-  assertEquals((state.counter as Record<string, unknown>).count, 0);
+  const err = assertThrows(
+    () => applyCellMigrations(state, migrations, { counter: 1 }, makeLog([])),
+    Error,
+    "migration boom",
+  );
+  assert(
+    /refusing to boot/.test(err.message) && /intact/.test(err.message),
+    `the refusal explains what was NOT done: ${err.message}`,
+  );
   assertEquals(
-    logs.some((l) => l.level === "error" && l.msg.includes("migration boom")),
-    true,
+    (state.counter as Record<string, unknown>).count,
+    99,
+    "the restored data is left exactly as it was",
   );
 });
 
@@ -253,7 +261,7 @@ Deno.test("migration: stored version NEWER than code — downgrade warned, state
 });
 
 // ── Test: the structured MigrationReport reflects each outcome ──────────
-Deno.test("migration: report enumerates migrated / stale / downgrade / reset", () => {
+Deno.test("migration: report enumerates migrated / stale / downgrade", () => {
   const migrations = new Map<string, CellMigrationInfo>();
   migrations.set("up", {
     version: 2,
@@ -266,13 +274,6 @@ Deno.test("migration: report enumerates migrated / stale / downgrade / reset", (
     initialState: { v: 0 },
     onMigrate: (s) => s,
   });
-  migrations.set("boom", {
-    version: 2,
-    initialState: { v: 0 },
-    onMigrate: () => {
-      throw new Error("x");
-    },
-  });
   migrations.set("noop", {
     version: 1,
     initialState: { v: 0 },
@@ -283,21 +284,19 @@ Deno.test("migration: report enumerates migrated / stale / downgrade / reset", (
     up: { v: 1 },
     stale: { v: 1 },
     down: { v: 1 },
-    boom: { v: 1 },
     noop: { v: 1 },
   };
   const logs: LogEntry[] = [];
   const report = applyCellMigrations(
     state,
     migrations,
-    { up: 1, stale: 1, down: 3, boom: 1, noop: 1 },
+    { up: 1, stale: 1, down: 3, noop: 1 },
     makeLog(logs),
   );
   const byCell = Object.fromEntries(report.map((r) => [r.cell, r.outcome]));
   assertEquals(byCell.up, "migrated");
   assertEquals(byCell.stale, "stale");
   assertEquals(byCell.down, "downgrade");
-  assertEquals(byCell.boom, "reset");
   assertEquals("noop" in byCell, false, "a same-version no-op is not reported");
 });
 
@@ -517,4 +516,57 @@ Deno.test("detectShapeDrift: seed erasure only fires where data is actually lost
     detectShapeDrift({ c: { xs: [1, 2] } }, { c: { xs: [] } })[0]!.issue,
     "seed-erased",
   );
+});
+
+// ── Downgrade + rename: the stored fields are DATA, not noise ────
+Deno.test("migration: a downgrade keeps fields this build no longer declares", () => {
+  const migrations = new Map<string, CellMigrationInfo>();
+  migrations.set("wallet", { version: 1, initialState: { cents: 0 } });
+
+  // v2 wrote { dollars }; this v1 build restores through deepMerge, which
+  // narrows the slice to { cents } — and the next persist would write that
+  // narrowed slice back, deleting `dollars` for good.
+  const stored = { wallet: { dollars: 12.34 } };
+  const state = deepMerge({ wallet: { cents: 0 } }, stored);
+  const logs: LogEntry[] = [];
+  const report = applyCellMigrations(
+    state,
+    migrations,
+    { wallet: 2 },
+    makeLog(logs),
+    stored,
+  );
+  assertEquals(report[0]?.outcome, "downgrade");
+  assertEquals(
+    (state.wallet as Record<string, unknown>).dollars,
+    12.34,
+    "the newer build's field is preserved in state, so it is re-persisted",
+  );
+  const warn = logs.find((l) => l.level === "warn")?.msg ?? "";
+  assert(/NEWER than code v1/.test(warn), warn);
+  assert(
+    !/State kept as-is/.test(warn),
+    `the old wording misdiagnosed a narrowed slice: ${warn}`,
+  );
+  assert(/never regresses/.test(warn), warn);
+});
+
+Deno.test("migration: onMigrate sees the stored field the new shape dropped", () => {
+  const seen: Record<string, unknown>[] = [];
+  const migrations = new Map<string, CellMigrationInfo>();
+  migrations.set("wallet", {
+    version: 2,
+    initialState: { dollars: 0 },
+    onMigrate: (s) => {
+      seen.push({ ...s });
+      return { dollars: (s.cents as number ?? 0) / 100 };
+    },
+  });
+
+  const stored = { wallet: { cents: 1234 } };
+  const state = deepMerge({ wallet: { dollars: 0 } }, stored);
+  applyCellMigrations(state, migrations, { wallet: 1 }, makeLog([]), stored);
+
+  assertEquals(seen[0]?.cents, 1234, "the hook can read the old field");
+  assertEquals((state.wallet as Record<string, unknown>).dollars, 12.34);
 });

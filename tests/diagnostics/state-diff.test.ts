@@ -52,3 +52,37 @@ Deno.test("formatDiff: formats simple change", () => {
   assertEquals(line.includes("5"), true);
   assertEquals(line.includes("10"), true);
 });
+
+// A DIAGNOSTIC may never be the thing that kills the app: state legally holds
+// values JSON.stringify throws on. The differ used to hand a BigInt straight to
+// JSON.stringify, from inside the observe-only afterAction hook — process down.
+Deno.test("formatDiff: a BigInt is rendered, not thrown on", () => {
+  const line = formatDiff("wallet", [{ key: "balance", from: 0n, to: 42n }]);
+  assertEquals(line, "wallet: balance 0n→42n");
+});
+
+Deno.test("formatDiff: a BigInt nested inside an object is rendered", () => {
+  const line = formatDiff("wallet", [{
+    key: "acct",
+    from: { id: 1n },
+    to: { id: 2n },
+  }]);
+  assertEquals(line, `wallet: acct {"id":"1n"}→{"id":"2n"}`);
+});
+
+Deno.test("formatDiff: a circular value degrades instead of throwing", () => {
+  const a: Record<string, unknown> = { name: "a" };
+  a.self = a;
+  const line = formatDiff("cell", [{ key: "k", from: null, to: a }]);
+  assertEquals(line.includes("Circular"), true);
+});
+
+Deno.test("formatDiff: an unserializable value degrades to a label", () => {
+  const hostile = {
+    toJSON() {
+      throw new Error("nope");
+    },
+  };
+  const line = formatDiff("cell", [{ key: "k", from: 1, to: hostile }]);
+  assertEquals(line, "cell: k 1→[unserializable object]");
+});

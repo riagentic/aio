@@ -114,10 +114,29 @@ interface Diag {
   clients: ClientRow[] | null;
   history: ActionEntry[] | null;
   mem: MemInfo | null;
+  /** Why the app's control plane refused us, when it did. amui reads a running
+   *  app through `/__aio/trojan/*`, and every panel here degrades to null on
+   *  failure — which turned an auth refusal into a screen of empty boxes with
+   *  no cause. The refusal carries its own diagnosis (see `am-http.ts`); carry
+   *  it to the UI instead of dropping it. */
+  controlError: string | null;
 }
 
 const HIST = 60; // rolling metric samples kept for the charts
 const HISTORY_MAX = 60; // recent action entries kept
+
+/** The first CREDENTIAL refusal among some control-plane reads, or null.
+ *  Only auth-shaped failures: "app not running" is already visible elsewhere,
+ *  and repeating it as an error banner would be noise. */
+export function refusalOf(
+  results: { ok: boolean; error?: string }[],
+): string | null {
+  for (const r of results) {
+    if (r.ok || !r.error) continue;
+    if (/unauthor|forbidden|credential|admin/i.test(r.error)) return r.error;
+  }
+  return null;
+}
 
 /** Parse a Result<string> JSON body, tolerating errors → null. */
 function jsonOf<T>(r: { ok: boolean; data?: unknown }): T | null {
@@ -245,6 +264,7 @@ async function fetchDiag(
     clients,
     history: entries ? entries.slice(-HISTORY_MAX) : null,
     mem: promR.ok ? parsePromMem(promR.data as string) : null,
+    controlError: refusalOf([clientsR, historyR]),
   };
 }
 
@@ -490,6 +510,9 @@ export const manager = cell("manager", {
     history: null as ActionEntry[] | null,
     mem: null as MemInfo | null,
     aioVersion: null as string | null, // framework version the app runs
+    /** Set when the running app refused amui's control-plane reads — shown
+     *  instead of leaving every panel mysteriously empty. */
+    controlError: null as string | null,
     // logs (tailed from the app's ~/.<appId>/logs — no streaming endpoint)
     logs: null as LogLine[] | null,
     logPath: null as string | null,
@@ -628,6 +651,7 @@ export const manager = cell("manager", {
         clients: null,
         history: null,
         mem: null,
+        controlError: null,
       };
       if (running) {
         const { appId, port, pid } = running;
@@ -644,6 +668,7 @@ export const manager = cell("manager", {
             fetchDiag(port, appId),
           ]);
         diag = d;
+        diag.controlError ??= refusalOf([config, metrics, cells, errors]);
         base.config = config.ok
           ? (config.data as ProjectDetail["config"])
           : null;
@@ -679,6 +704,7 @@ export const manager = cell("manager", {
       s.clients = diag.clients;
       s.history = diag.history;
       s.mem = diag.mem;
+      s.controlError = diag.controlError;
       s.aioVersion = diag.health?.version ?? null;
       const heapMb0 = diag.mem
         ? Math.round(diag.mem.heapUsed / 1_048_576)
@@ -859,6 +885,7 @@ export const manager = cell("manager", {
       if (diag.clients) s.clients = diag.clients;
       if (diag.history) s.history = diag.history;
       if (diag.mem) s.mem = diag.mem;
+      s.controlError = diag.controlError;
       if (diag.health?.version) s.aioVersion = diag.health.version;
       s.detail = {
         ...d,

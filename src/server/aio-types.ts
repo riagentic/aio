@@ -164,7 +164,9 @@ export type AioConfig<S, A, E> = {
    *  a field report ended up with a generated mirror and a test policing the
    *  drift. Prod is unaffected: the bundler already follows relative imports.
    *  Each root gets baseDir's containment guards unchanged (no traversal, no
-   *  symlink escape, no dotfiles or server-only paths). */
+   *  symlink escape, no dotfiles or server-only paths). A relative root is
+   *  resolved against the process cwd, exactly like `baseDir`; a root that is
+   *  not a directory is warned about at boot instead of 404ing in silence. */
   serveDirs?: Record<string, string>;
   client?: "electron" | "browser" | "cli" | "server-only"; // default: 'electron'
   keepServer?: boolean; // default: false — keep server running after client closes (moved from ui.keepAlive)
