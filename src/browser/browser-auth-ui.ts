@@ -83,7 +83,16 @@ export function _setAuthFeatures(
 }
 
 // ── SignIn component state (module signals — one auth form per page) ────────
-const _mode: Signal<"login" | "signup"> = signal<"login" | "signup">("login");
+/** Which face of the form is showing.
+ *
+ *  `forgot` / `reset` exist because the password-reset flow shipped with NO
+ *  way to reach it: the server advertised `features.mail`, this module fetched
+ *  it, typed it — and never read it. A locked-out user was told "try again in
+ *  15 minutes" by a form that had no other door, while the flow that would
+ *  have unlocked them (a completed reset now clears the lockout, see
+ *  `setPassword`) sat behind an endpoint only a curl user could find. */
+type SignInMode = "login" | "signup" | "forgot" | "reset";
+const _mode: Signal<SignInMode> = signal<SignInMode>("login");
 const _error: Signal<string | null> = signal<string | null>(null);
 const _notice: Signal<string | null> = signal<string | null>(null);
 const _pendingTotp: Signal<string | null> = signal<string | null>(null);
@@ -100,6 +109,11 @@ const ERROR_TEXT: Record<string, string> = {
   email_unverified: "Check your inbox — the account email is not verified yet.",
   invalid_code: "Wrong code — sign in again.",
   pending_expired: "The code expired — sign in again.",
+  invalid_or_expired_token: "That reset link is used up or expired — ask for " +
+    "a new one.",
+  mail_not_configured: "Password reset is not available on this server.",
+  external_identity: "That account signs in with your identity provider.",
+  body_too_large: "That request was too large.",
 };
 const friendly = (e: unknown): string => {
   const msg = e instanceof Error ? e.message : String(e);
@@ -138,6 +152,42 @@ async function submitCredentials(form: HTMLFormElement): Promise<void> {
     }
     authUser.set(r.user);
     done();
+  } catch (e) {
+    _error.set(friendly(e));
+  }
+}
+
+/** "Forgot password" — ask the server to mail a one-shot reset token. The
+ *  answer is deliberately identical whether or not the account exists, so the
+ *  notice says exactly that and moves on to the token form. */
+async function submitForgot(form: HTMLFormElement): Promise<void> {
+  const id = String(new FormData(form).get("id") ?? "");
+  _error.set(null);
+  try {
+    await authClient.requestReset(id);
+    _notice.set(
+      "If that account has an email on file, a reset token is on its way. " +
+        "Paste it below with your new password.",
+    );
+    _mode.set("reset");
+  } catch (e) {
+    _error.set(friendly(e));
+  }
+}
+
+/** Complete the reset: token + new password. A successful reset also clears
+ *  any lockout and kills every existing session (server side), so the user can
+ *  sign in immediately — which is the whole point of showing this form. */
+async function submitReset(form: HTMLFormElement): Promise<void> {
+  const data = new FormData(form);
+  const token = String(data.get("token") ?? "");
+  const password = String(data.get("password") ?? "");
+  _error.set(null);
+  _notice.set(null);
+  try {
+    await authClient.reset(token, password);
+    _notice.set("Password changed — sign in with it now.");
+    _mode.set("login");
   } catch (e) {
     _error.set(friendly(e));
   }
@@ -206,6 +256,9 @@ export interface SignInProps {
   signup?: boolean;
   /** Force-hide the SSO button (auto-shown when the server has OIDC). */
   sso?: boolean;
+  /** Force-hide the "Forgot password?" link (auto-shown when the server has
+   *  an email transport — without one there is no way to deliver the token). */
+  forgot?: boolean;
   /** SSO button label (default "Continue with SSO"). */
   ssoLabel?: string;
   style?: Record<string, string | number>;
@@ -222,9 +275,81 @@ export function SignIn(props: SignInProps = {}): VNode {
   const feats = _features.value;
   const showEmail = props.email !== false && mode === "signup";
   // The form adapts to the server: signup toggle only when signup is open,
-  // SSO button only when an OIDC provider is configured.
+  // SSO button only when an OIDC provider is configured, reset link only when
+  // the server can actually send the mail that carries the token.
   const showSignup = props.signup !== false && feats?.signup !== false;
   const showSso = props.sso !== false && feats?.oidc === true;
+  const showForgot = props.forgot !== false && feats?.mail === true;
+
+  const backToLogin = (label: string): VNode =>
+    h("button", {
+      style: S.minor,
+      type: "button",
+      onClick: () => {
+        _mode.set("login");
+        _error.set(null);
+      },
+    }, label);
+
+  if (mode === "forgot" || mode === "reset") {
+    const isAsk = mode === "forgot";
+    return h(
+      "form",
+      {
+        style: { ...S.wrap, ...props.style },
+        onSubmit: (e: Event) => {
+          e.preventDefault();
+          const f = e.currentTarget as HTMLFormElement;
+          if (isAsk) submitForgot(f);
+          else submitReset(f);
+        },
+      },
+      h(
+        "h2",
+        { style: { margin: 0 } },
+        isAsk ? "Reset password" : "Set a new password",
+      ),
+      isAsk
+        ? h("input", {
+          style: S.input,
+          name: "id",
+          autoComplete: "username",
+          placeholder: "user id",
+          required: true,
+        })
+        : h("input", {
+          style: S.input,
+          name: "token",
+          placeholder: "reset token from the email",
+          required: true,
+        }),
+      !isAsk && h("input", {
+        style: S.input,
+        name: "password",
+        type: "password",
+        autoComplete: "new-password",
+        placeholder: "new password",
+        required: true,
+      }),
+      error && h("p", { style: S.error }, error),
+      notice && h("p", { style: S.notice }, notice),
+      h(
+        "button",
+        { style: S.button, type: "submit" },
+        isAsk ? "Email me a reset token" : "Set password",
+      ),
+      isAsk &&
+        h("button", {
+          style: S.minor,
+          type: "button",
+          onClick: () => {
+            _mode.set("reset");
+            _error.set(null);
+          },
+        }, "I already have a token"),
+      backToLogin("Back to sign in"),
+    );
+  }
 
   if (pendingTotp !== null) {
     return h(
@@ -325,6 +450,20 @@ export function SignIn(props: SignInProps = {}): VNode {
         mode === "signup"
           ? "Have an account? Sign in"
           : "New here? Create an account",
+      ),
+    showForgot && mode === "login" &&
+      h(
+        "button",
+        {
+          style: S.minor,
+          type: "button",
+          onClick: () => {
+            _mode.set("forgot");
+            _error.set(null);
+            _notice.set(null);
+          },
+        },
+        "Forgot password?",
       ),
   );
 }

@@ -18,7 +18,7 @@ import {
   undo,
 } from "../diagnostics/time-travel.ts";
 import { createScheduleManager } from "../state/schedule.ts";
-import { createOwnManager } from "../state/own.ts";
+import { createOwnManager, isOwnEffect } from "../state/own.ts";
 import { getLogger, log } from "../diagnostics/logger.ts";
 import { timeTravelEnabled } from "../diagnostics/types.ts";
 import { teachableError } from "../diagnostics/error.ts";
@@ -78,7 +78,7 @@ import {
   isCompiled,
   realDistCandidates,
 } from "./paths.ts";
-import { openSessionStore } from "./sessions.ts";
+import { openSessionStore, type SessionStore } from "./sessions.ts";
 import { openUserStore } from "./auth-users.ts";
 import { resolveAppId } from "./single-instance-lock.ts";
 import { resolveAppKey } from "./app-key.ts";
@@ -1101,16 +1101,26 @@ async function _run<S, A, E>(
   // login flow issues them); `sessions: true` alone is just the token store.
   const authEnabled = !!config.auth;
   const authOpts = typeof config.auth === "object" ? config.auth : {};
-  const sessionStore = (config.sessions || authEnabled)
+  // The two stores are MUTUALLY bound, both ways, deliberately:
+  //   users → sessions: a password change revokes every session (through the
+  //     instance, so live WS sockets are disarmed, not just rows deleted).
+  //   sessions → users: a session resolves its role from the users row at USE
+  //     time, so `am auth role` reaches sessions that are already open.
+  // One of the two edges has to be late-bound; the getter below is it.
+  let sessionStore: SessionStore | null = null;
+  const userStore = authEnabled
+    ? openUserStore(appDirs(appId, config.appDir).authDb, {
+      sessions: () => sessionStore,
+    })
+    : null;
+  sessionStore = (config.sessions || authEnabled)
     ? openSessionStore(
       appDirs(appId, config.appDir).authDb,
       typeof config.sessions === "object"
         ? config.sessions.ttlMs
         : authOpts.ttlMs,
+      { roleOf: (id) => userStore?.get(id)?.role ?? null },
     )
-    : null;
-  const userStore = authEnabled
-    ? openUserStore(appDirs(appId, config.appDir).authDb)
     : null;
 
   // Shutdown orchestrator
@@ -1143,6 +1153,15 @@ async function _run<S, A, E>(
     runEffect: (effect) => {
       if (isScheduleEffect(effect)) {
         scheduleManager.handle(effect);
+        return;
+      }
+      // Same class, and it was live: `__own` fell through to `dispatch` as an
+      // action type no cell answers, so an own effect from a worker vanished
+      // without a log. Worker cells now hold their resources in their own
+      // isolate (cell-worker-host.ts), so nothing should arrive here — and if
+      // anything ever does, the own manager says so out loud instead.
+      if (isOwnEffect(effect)) {
+        ownManager.handle(effect);
         return;
       }
       void dispatch(effect as unknown as A); // cross-cell action

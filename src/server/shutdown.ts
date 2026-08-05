@@ -2,6 +2,7 @@
 // Extracted from aio.ts. Order is critical: persist → diag → vitals → hooks → services → DB.
 
 import type { Log } from "../diagnostics/logger.ts";
+import { blocking } from "../state/blocking.ts";
 import {
   abortAllInflight,
   endShutdownAbort,
@@ -154,6 +155,15 @@ export function createShutdownOrchestrator(
     // Phase 7: Subsystem cleanup
     refs.scheduleManager.cancelAll();
     refs.ownManager.disposeAll();
+    // `schedule.blocking`'s worker pool is part of the scheduler surface and
+    // was the one piece nothing ever tore down: its idle threads outlived the
+    // app in libraryMode, `testServer()` and any multi-app host. Idle-only,
+    // because the pool is process-global (see blocking.disposeIdle).
+    try {
+      blocking.disposeIdle();
+    } catch (e) {
+      log.error(`shutdown: blocking pool — ${e}`);
+    }
     try {
       refs.getDiscoveryStop?.()?.();
     } catch { /* responder already gone */ }

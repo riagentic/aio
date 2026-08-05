@@ -133,10 +133,23 @@ That needs a field, a reset in a `finally`, and if the work throws between the
 two the flag stays `true` and the poll is dead until a restart. The scheduler
 already knows when a dispatch settles, so it clears on rejection as well.
 
+A tick that never settles at all (an `await` that hangs — a fetch with no
+timeout) still stops the poller, because that is what the option asks for. It is
+no longer silent: after 10 consecutive skips the scheduler warns, naming the id
+and the reason. Cancelling or re-issuing the schedule clears the guard, so
+`schedule.cancel(id)` followed by a fresh `schedule.every(id, …)` genuinely
+restarts a wedged poller.
+
 It is **opt-in**: silently dropping a tick that used to fire would change
 behaviour under existing apps, and some schedules overlap deliberately (each
 tick is independent one-shot work). Sync ticks are never skipped — there is
 nothing to overlap.
+
+> **Delays longer than 24.85 days are handled for you.** `setTimeout` stores its
+> delay in a 32-bit int, so a raw 35-day timer fires on the _next tick_ instead.
+> `after`, `at` and `cron` all arm long deadlines with 24-hour re-checks and
+> warn once when they do. Timers still do not survive a restart — if the
+> deadline must, persist it and re-arm on boot.
 
 ### `schedule.at(id, isoTime, action)` — one-shot at absolute time
 
@@ -146,6 +159,10 @@ Fires once at a specific UTC datetime. `isoTime` is any string parseable by
 ```ts
 return schedule.at("promo-end", "2025-12-31T23:59:00Z", promo.expire.action());
 ```
+
+A time that has already passed does **not** fire and is **not** registered — the
+scheduler warns, naming the id and how long ago it was, because the usual cause
+is a UTC/local mix-up or a deadline restored from disk.
 
 ### `schedule.cron(id, pattern, action)` — cron expression
 
@@ -175,11 +192,30 @@ return schedule.cron("daily-report", "0 8 * * 1-5", reports.generate.action());
 > **Note:** cron fires against **UTC time**. `0 9 * * *` = 09:00 UTC. Offset the
 > hour field for local time zones.
 
+**Sparse patterns are fine.** `0 0 29 2 *` (29 February) is valid and fires on
+the next leap day, up to eight years out across a century boundary — the
+scheduler searches that far and keeps the schedule armed in between.
+
+**Impossible patterns are refused at the call site**, with the reason:
+`0 0 30 2 *` throws
+`"0 0 30 2 *" can never fire — day-of-month 30 does not
+exist in month 2`. A
+pattern that can never match a calendar day is a typo, and a typo should fail
+where it is written, not quietly disappear at the first fire attempt.
+
+A failing cron tick is logged and the schedule keeps its cadence (one bad tick
+does not switch a nightly job off). If the dispatch loop is closing — the app is
+shutting down — the schedule stops instead of re-arming into the drain.
+
 ### `schedule.backoff(id, attempt, opts, action)` — exponential retry delay
 
 A one-shot `after` whose delay grows exponentially with `attempt`:
 `base * factor^attempt`, capped at `max` (`factor` defaults to 2). Track the
 attempt counter in state — reset it on success, bump it on failure.
+
+`max` is optional; omitted, it caps at the timer ceiling (~24.85 days). Give it
+a real value — `60_000` is the usual one — or a runaway `attempt` counter buys
+you a delay measured in weeks.
 
 ```ts
 return schedule.backoff(
@@ -378,6 +414,19 @@ methods: {
 ---
 
 ## Testing schedules
+
+`testUI` and `bootCells` run the **real scheduler** on a virtual clock:
+`ui.advance(ms)` / `handle.advance(ms)` moves time forward and fires everything
+that comes due — `after`, `every` (including `skipIfRunning`), `at` and `cron`
+alike. Only the clock is swapped, so every rule production enforces is enforced
+in the test too: an `every` under 10 ms, an `after` under 1 ms and an id outside
+`/^[\w\-:.]+$/` are refused in the harness exactly as they are in the app.
+
+```ts
+await using h = await bootCells([prices]);
+await prices.enablePolling();
+await h.advance(15_000); // three 5s ticks, instantly and deterministically
+```
 
 `testCell` lets you assert on the schedule effects a method returns — `t.send.*`
 dispatches, `t.getEffects()` returns what it emitted. (testCell does not run a

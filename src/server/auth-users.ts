@@ -16,6 +16,7 @@
 import { DatabaseSync } from "node:sqlite";
 import { createHash } from "node:crypto";
 import { _timingSafeEqual } from "./server-auth.ts";
+import type { SessionStore } from "./sessions.ts";
 import type { AioUser } from "./aio-types.ts";
 
 /** OWASP 2023 recommendation for PBKDF2-HMAC-SHA-256. */
@@ -43,6 +44,28 @@ const fromHex = (s: string): Uint8Array => {
 
 const sha256 = (s: string): string =>
   createHash("sha256").update(s).digest("hex");
+
+/** THE id key — one normalization, applied at every entry point of the store.
+ *
+ *  `Neighbour`, `neighbour `, and the NFD spelling of `neighbour` are three
+ *  strings a human reads as ONE account. Left raw they created three rows an
+ *  operator cannot tell apart in `am auth users` (and a whitespace-only id was
+ *  accepted outright). Two rules, both applied HERE so a lookup can never
+ *  disagree with a write:
+ *
+ *   - Unicode NFC + trim: the same visible id is the same key, and " " is
+ *     empty (→ `invalid_id`).
+ *   - Case-insensitive UNIQUENESS at create time (see `selCi`), while lookups
+ *     stay EXACT — an account is created once, so that is where confusables
+ *     must be refused; making every lookup case-folding would silently widen
+ *     what a stored id matches. */
+const normId = (id: unknown): string =>
+  typeof id === "string" ? id.normalize("NFC").trim() : "";
+
+/** Control + format characters (zero-width joiners, RTL overrides, NULs) have
+ *  no place in an id: they are invisible in every console and every UI, so two
+ *  ids that differ only by one are indistinguishable to the operator. */
+const HAS_INVISIBLE = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}\p{Zs}]/u;
 
 async function pbkdf2(
   password: string,
@@ -125,9 +148,30 @@ export interface UserStore {
    *  Unknown ids burn a real PBKDF2 so timing doesn't reveal existence.
    *  LOCK_AFTER consecutive failures lock the account for 15 minutes. */
   verify(id: string, password: string): Promise<AioUser | "locked" | null>;
-  /** Change password. THROWS "password_too_short" (policy); returns false
-   *  when the user doesn't exist. */
+  /** Change password — the ONE decider for "this account was rescued".
+   *
+   *  A new password is never JUST a new hash. Every caller (HTTP
+   *  `/auth/password`, `/auth/reset`, `am auth passwd`, `app.auth.setPassword`)
+   *  needs the same four effects, and each caller that had to remember them
+   *  forgot a different one:
+   *
+   *   1. the hash is replaced,
+   *   2. any LOCKOUT and fail counter are cleared — a completed reset used to
+   *      leave the victim `423 account_locked` for another 15 minutes, an
+   *      attacker-renewable lockout that survived the rescue,
+   *   3. outstanding one-shot tokens (reset / verify / TOTP pending) are
+   *      burned — a pending captured before the reset used to complete
+   *      afterwards and mint a fresh session,
+   *   4. every session is revoked — `am auth passwd`, the breach-response
+   *      command, used to leave the attacker's session alive.
+   *
+   *  THROWS "password_too_short" (policy); returns false when the user
+   *  doesn't exist. */
   setPassword(id: string, newPassword: string): Promise<boolean>;
+  /** Burn every outstanding one-shot token of a subject (reset, email verify,
+   *  TOTP pending). Breach response: `revokeUser` kills sessions, this kills
+   *  the things that MINT sessions. Returns the number deleted. */
+  purgeTokens(subject: string): number;
   setRole(id: string, role: string): boolean;
   setEmail(id: string, email: string): boolean;
   /** Mark the account's email as verified. */
@@ -159,8 +203,24 @@ export interface UserStore {
   close(): void;
 }
 
+/** Options for `openUserStore`.
+ *
+ *  `sessions` is a GETTER, not a store: the session store and the user store
+ *  are opened on the same `auth.db` and each needs the other (sessions resolve
+ *  a live role from the users row; a password change revokes sessions), so one
+ *  of the two edges has to be late-bound. Revocation must go through the store
+ *  INSTANCE rather than a `DELETE` on the shared table — the WS manager
+ *  subscribes to `onRevoked` to disarm live sockets, and a direct delete would
+ *  leave those sockets open. */
+export interface UserStoreOptions {
+  sessions?: () => SessionStore | null | undefined;
+}
+
 /** Open (or create) the user store at `path` (":memory:" for tests). */
-export function openUserStore(path: string): UserStore {
+export function openUserStore(
+  path: string,
+  opts?: UserStoreOptions,
+): UserStore {
   const db = new DatabaseSync(path);
   db.exec("PRAGMA journal_mode=WAL");
   db.exec(`CREATE TABLE IF NOT EXISTS users (
@@ -186,7 +246,20 @@ export function openUserStore(path: string): UserStore {
     "INSERT INTO users (id, pw, role, created_at, email) VALUES (?, ?, ?, ?, ?)",
   );
   const sel = db.prepare("SELECT * FROM users WHERE id = ?");
-  const updPw = db.prepare("UPDATE users SET pw = ? WHERE id = ?");
+  // Case-insensitive existence probe — create-time confusable refusal.
+  const selCi = db.prepare(
+    "SELECT id FROM users WHERE id = ? COLLATE NOCASE LIMIT 1",
+  );
+  // ONE statement for a password change: new hash, lockout cleared, and any
+  // STAGED-but-never-enabled TOTP secret dropped (an attacker who staged one
+  // from a stolen session must not keep it across the owner's rescue). An
+  // ENABLED factor is deliberately untouched — see the note on `setPassword`.
+  const updPw = db.prepare(
+    `UPDATE users
+        SET pw = ?, fails = 0, locked_until = 0,
+            totp = CASE WHEN totp_on = 1 THEN totp ELSE NULL END
+      WHERE id = ?`,
+  );
   const updRole = db.prepare("UPDATE users SET role = ? WHERE id = ?");
   const updEmail = db.prepare("UPDATE users SET email = ? WHERE id = ?");
   const updVerified = db.prepare("UPDATE users SET verified = 1 WHERE id = ?");
@@ -233,6 +306,12 @@ export function openUserStore(path: string): UserStore {
   const tokSweep = db.prepare(
     "DELETE FROM one_shot_tokens WHERE expires_at <= ?",
   );
+  // Burn a subject's outstanding one-shot tokens. `kind != 'oidc'` because
+  // OIDC state tokens are subject-less ("state") and belong to a browser
+  // mid-redirect, not to an account.
+  const tokPurge = db.prepare(
+    "DELETE FROM one_shot_tokens WHERE subject = ? AND kind != 'oidc'",
+  );
 
   // A real hash to verify against when the id is unknown — keeps login timing
   // identical for existing and non-existing users (no account enumeration).
@@ -262,9 +341,27 @@ export function openUserStore(path: string): UserStore {
     totpEnabled: row.totp_on === 1,
   });
 
+  const purgeTokens = (subject: string): number =>
+    Number(tokPurge.run(normId(subject)).changes);
+
+  /** How many session rows this same auth.db holds for a user. Only used to
+   *  make an UNBOUND store's password change loud (see setPassword) — the
+   *  table belongs to sessions.ts and may not exist at all. */
+  const _liveSessionsFor = (id: string): number => {
+    try {
+      const row = db.prepare(
+        "SELECT COUNT(*) AS n FROM sessions WHERE user_id = ? AND expires_at > ?",
+      ).get(id, Date.now()) as { n: number } | undefined;
+      return Number(row?.n ?? 0);
+    } catch {
+      return 0; // no sessions table in this file — nothing to survive
+    }
+  };
+
   return {
-    async create(id, password, opts) {
-      if (typeof id !== "string" || id.length < 1 || id.length > 256) {
+    async create(rawId, password, opts) {
+      const id = normId(rawId);
+      if (id.length < 1 || id.length > 256 || HAS_INVISIBLE.test(id)) {
         throw new Error("invalid_id");
       }
       if (typeof password !== "string" || password.length < 8) {
@@ -272,6 +369,10 @@ export function openUserStore(path: string): UserStore {
       }
       const pw = await hashPassword(password);
       const createdAt = Date.now();
+      // Confusable refusal, immediately before the insert (no `await` between,
+      // so nothing can slip in): `Neighbour` cannot join `neighbour`. The
+      // PRIMARY KEY still catches the exact-duplicate race either way.
+      if (selCi.get(id)) throw new Error("user_exists");
       try {
         ins.run(id, pw, opts?.role ?? "user", createdAt, opts?.email ?? null);
       } catch (e) {
@@ -287,7 +388,8 @@ export function openUserStore(path: string): UserStore {
         totpEnabled: false,
       };
     },
-    async verify(id, password) {
+    async verify(rawId, password) {
+      const id = normId(rawId);
       const row = sel.get(id) as Row | undefined;
       const now = Date.now();
       // Hash FIRST, unconditionally — locked, unknown, and wrong-password
@@ -322,24 +424,52 @@ export function openUserStore(path: string): UserStore {
       if (row.fails > 0 || row.locked_until > 0) updFails.run(0, 0, id);
       return { id: row.id, role: row.role };
     },
-    async setPassword(id, newPassword) {
+    async setPassword(rawId, newPassword) {
+      const id = normId(rawId);
       if (typeof newPassword !== "string" || newPassword.length < 8) {
         throw new Error("password_too_short");
       }
+      // (1) new hash + (2) lockout cleared + staged-TOTP dropped — one
+      // statement, so a rescued account is never half-rescued.
       const r = updPw.run(await hashPassword(newPassword), id);
-      return r.changes > 0;
+      if (r.changes === 0) return false;
+      // (3) every outstanding one-shot token dies with the old password: a
+      // reset token mailed earlier, and — the one that mattered — a TOTP
+      // `pending` an attacker captured before the reset, which used to
+      // complete afterwards and hand them a brand-new session.
+      purgeTokens(id);
+      // (4) and every session. In-process this goes through the store
+      // instance, so the WS manager's revocation listener disarms live
+      // sockets too; `am auth passwd` (a separate process, no sockets) gets
+      // the same guarantee for free.
+      const sess = opts?.sessions?.();
+      if (sess) sess.revokeUser(id);
+      else if (_liveSessionsFor(id) > 0) {
+        // The binding is what makes this the ONE decider. A caller that opens
+        // a user store without it silently rotates a password while the old
+        // sessions keep working — the exact bug this consolidation fixed — so
+        // say so at the moment it happens rather than leaving it to a report.
+        console.warn(
+          `[aio] auth: password changed for id=${id} but this user store has ` +
+            `no session store bound — ${_liveSessionsFor(id)} session(s) ` +
+            `SURVIVE the change. Open it as ` +
+            `openUserStore(path, { sessions: () => sessionStore }).`,
+        );
+      }
+      return true;
     },
-    setRole(id, role) {
-      return updRole.run(role, id).changes > 0;
+    purgeTokens,
+    setRole(rawId, role) {
+      return updRole.run(role, normId(rawId)).changes > 0;
     },
-    setEmail(id, email) {
-      return updEmail.run(email, id).changes > 0;
+    setEmail(rawId, email) {
+      return updEmail.run(email, normId(rawId)).changes > 0;
     },
-    markVerified(id) {
-      return updVerified.run(id).changes > 0;
+    markVerified(rawId) {
+      return updVerified.run(normId(rawId)).changes > 0;
     },
-    unlock(id) {
-      return updFails.run(0, 0, id).changes > 0;
+    unlock(rawId) {
+      return updFails.run(0, 0, normId(rawId)).changes > 0;
     },
     list() {
       const rows = db.prepare(
@@ -347,27 +477,27 @@ export function openUserStore(path: string): UserStore {
       ).all() as Row[];
       return rows.map(toRecord);
     },
-    get(id) {
-      const row = sel.get(id) as Row | undefined;
+    get(rawId) {
+      const row = sel.get(normId(rawId)) as Row | undefined;
       return row ? toRecord(row) : null;
     },
-    remove(id) {
-      return del.run(id).changes > 0;
+    remove(rawId) {
+      return del.run(normId(rawId)).changes > 0;
     },
     count() {
       return Number((cnt.get() as { n: number }).n);
     },
-    setTotpSecret(id, secretB32) {
-      return updTotp.run(secretB32, id).changes > 0;
+    setTotpSecret(rawId, secretB32) {
+      return updTotp.run(secretB32, normId(rawId)).changes > 0;
     },
-    enableTotp(id) {
-      return updTotpOn.run(1, id).changes > 0;
+    enableTotp(rawId) {
+      return updTotpOn.run(1, normId(rawId)).changes > 0;
     },
-    disableTotp(id) {
-      return totpOff.run(id).changes > 0;
+    disableTotp(rawId) {
+      return totpOff.run(normId(rawId)).changes > 0;
     },
-    totpSecret(id) {
-      const row = sel.get(id) as Row | undefined;
+    totpSecret(rawId) {
+      const row = sel.get(normId(rawId)) as Row | undefined;
       return row?.totp
         ? { secret: row.totp, enabled: row.totp_on === 1 }
         : null;
@@ -379,7 +509,9 @@ export function openUserStore(path: string): UserStore {
       tokIns.run(
         sha256(token),
         kind,
-        subject,
+        // Same key as every other id column, so `purgeTokens` cannot miss a
+        // token issued under a differently-spelled spelling of the same id.
+        normId(subject) || subject,
         payload ?? null,
         Date.now() + ttlMs,
       );

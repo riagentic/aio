@@ -15,8 +15,10 @@
 // What runs where:
 //   - this cell's own effects (the async-method `__exec` machinery) run HERE,
 //     otherwise the method body would execute on the main isolate again
-//   - schedule/own effects and cross-cell dispatches are forwarded to main,
-//     where the scheduler, the resource registry and the other cells live
+//   - `own.set`/`own.dispose` run HERE: the factory closure and the resource it
+//     opens (a subprocess, an FFI handle, a socket) belong to THIS thread
+//   - schedule effects and cross-cell dispatches are forwarded to main, where
+//     the scheduler and the other cells live
 
 import type { Patch } from "immer";
 import { nameIsTaken } from "../state/cell-helpers.ts";
@@ -24,7 +26,7 @@ import { composeCells } from "../state/cell-compose.ts";
 import { getRegisteredCells } from "../state/cell-reactive.ts";
 import { createDispatch } from "../state/dispatch.ts";
 import { isScheduleEffect } from "../state/schedule.ts";
-import { isOwnEffect } from "../state/own.ts";
+import { createOwnManager, isOwnEffect } from "../state/own.ts";
 import type { CellDef, Msg } from "../state/cell-types.ts";
 import {
   type AmbientContext,
@@ -142,6 +144,29 @@ export function startCellWorkerHost(cell: CellDef): Promise<never> {
   // isolate; teardown noise dies with this thread.
   let closing = false;
 
+  // Owned resources acquired by THIS cell, in THIS isolate.
+  //
+  // `own` effects used to be posted home with the schedule effects, on the
+  // theory that "global-runtime effects belong to the main isolate". They do
+  // not: `own.set` parks its factory in a module-level map that is per-isolate,
+  // so the closure never crossed the thread — and the main isolate's runEffect
+  // did not handle `__own` at all, dispatching it as an action type no cell
+  // answers. `own.set(id, () => openDevice())` from a worker cell was a SILENT
+  // no-op: no resource, no disposer, no log — while docs/state/methods.md
+  // documents `own.set` as the way to hold exactly the kind of handle a worker
+  // cell exists for (the hardware-wallet example is one).
+  //
+  // Running it here is not a workaround, it is the only correct isolate: the
+  // factory runs where its closure lives, and the disposer runs on the thread
+  // that owns the handle. Disposal happens on `close` below, next to the
+  // cell's own onDestroy, for the same reason.
+  const ownWorker = createOwnManager({
+    info: (m) => log.info("cell-worker", `${name}: ${m}`),
+    debug: (m) => log.debug(`cell-worker(${name}) ${m}`),
+    warn: (m) => log.warn("cell-worker", `${name}: ${m}`),
+    error: (m) => log.error("cell-worker", `${name}: ${m}`),
+  });
+
   /** Ship whatever this commit produced. Streamed (not batched to the end of a
    *  call) so `s.status = "working"` before an await reaches clients now. */
   const flush = (): void => {
@@ -175,8 +200,13 @@ export function startCellWorkerHost(cell: CellDef): Promise<never> {
       return r;
     },
     execute: (effect) => {
-      // Global-runtime effects belong to the main isolate.
-      if (isScheduleEffect(effect) || isOwnEffect(effect)) {
+      // Resources are acquired and disposed on the thread that owns them.
+      if (isOwnEffect(effect)) {
+        ownWorker.handle(effect);
+        return;
+      }
+      // The scheduler is a main-isolate singleton — timers stay there.
+      if (isScheduleEffect(effect)) {
         post({ t: "effects", list: [effect as unknown as Msg] });
         return;
       }
@@ -236,6 +266,9 @@ export function startCellWorkerHost(cell: CellDef): Promise<never> {
         dispatch: (a: Msg) => void dispatch(a),
         getState: () => state,
       });
+      // After onDestroy (which may itself dispose): the watchers, sockets and
+      // subprocesses this thread opened die with it, not silently outlive it.
+      ownWorker.disposeAll();
       post({ t: "closed" });
       self.close();
       return;

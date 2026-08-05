@@ -532,6 +532,10 @@ export interface BootHandle {
 export async function bootCells(cells: CellDef[]): Promise<BootHandle> {
   _armTestStrict();
   const standalone = await import("../standalone-air.ts");
+  // Virtual time is opt-in: the same runtime ships in an Android APK, where a
+  // clock nothing advances means no schedule ever fires. Tests want the
+  // virtual clock (that is what `advance(ms)` drives); an app must not get it.
+  standalone._useVirtualSchedules();
   // Hermetic: reset any prior runtime state so these cells start pristine.
   standalone._resetState();
   await standalone.aio.run({

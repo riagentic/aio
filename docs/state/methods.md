@@ -455,8 +455,28 @@ The factory runs in the runtime (not in the reducer) and may return a disposer
 function or a closeable object (`{ close() }` / `{ dispose() }`). The effect
 itself is plain data — the factory travels out-of-band, so on time-travel replay
 the runtime skips re-acquisition instead of resurrecting watchers. Prefix ids
-with the cell name (`cell:resource`) — disable cleanup matches on the `:`
-delimiter, like schedule ids.
+with the cell name (`cell:resource`) — disable cleanup matches the cell name
+itself and the `:` delimiter (`mycell` and `mycell:sock`, never `mycellOther`),
+exactly like schedule ids.
+
+**From a `worker: true` cell, `own` runs in the worker.** The factory is
+executed, and its disposer is run, on the thread that owns the handle — which is
+the only correct isolate: the factory closes over worker-local state, and a
+subprocess or `Deno.dlopen` handle opened there cannot be closed from elsewhere.
+Slots are disposed when the worker closes (app shutdown, or the cell being torn
+down), right after its `onDestroy`.
+
+Two consequences worth knowing:
+
+- Ids are per-isolate. A worker cell's `own.set("dev:handle", …)` and a main
+  cell's `own.set("dev:handle", …)` are **different slots** — they do not
+  replace each other. Prefix with the cell name and this cannot bite.
+- `schedule` effects still travel to the main isolate (the scheduler is one
+  process-wide runtime); only `own` stays local.
+
+(Before v1.0.0-alpha49 an `own` effect from a worker cell was posted to the main
+isolate, where nothing handled it: the factory never ran, and nothing was
+logged. If you have a worker cell that "never opened its device", this was why.)
 
 ### Error handling
 

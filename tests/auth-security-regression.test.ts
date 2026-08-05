@@ -301,7 +301,7 @@ Deno.test("regression: TOTP cannot be re-enrolled while it is enabled", async ()
     const step = Math.floor(Date.now() / 30_000);
     const en = await post(
       "totp/enable",
-      { code: await totpCode(secret, step - 1) },
+      { code: await totpCode(secret, step - 1), password: "password123" },
       session,
     );
     assertEquals(en.status, 200);

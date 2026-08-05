@@ -1,5 +1,108 @@
 # Changelog
 
+## 1.0.0-alpha49 — the perimeter (2026-08-05) — SECURITY
+
+A **security release**. Randomized probes against the auth stack and the
+scheduler — the two subsystems earlier hunts had not reached — found 19 defects,
+two of them critical. Take this release if you use `auth: true`, `users:` or
+`resolveUser`, or if you ship to Android.
+
+### An unauthenticated attacker could take the whole app offline
+
+The per-IP failure budget gated SERVICE, not authentication. Ten wrong logins
+against any username — no valid account required — refused that client key for
+five minutes: valid sessions, authenticated API calls and WebSocket handshakes
+alike, renewable at ~2 requests/minute. And behind the reverse-proxy config the
+auth docs themselves prescribed, every client collapsed into one bucket, so one
+attacker took the app down for everyone. The credential is now resolved FIRST
+and only a presented-and-wrong one meets the budget. The bucket collapse is no
+longer silent: a boot warning for an exposed per-user app without
+`trustProxyHeader`, and an evidence-based runtime warning the first time a
+forwarded-for header arrives untrusted.
+
+### A stolen session was a permanent, unrecoverable takeover
+
+Enabling 2FA needed only a session; disabling it needed the password — so an
+attacker with a borrowed session enrolled their own authenticator and NOTHING
+cleared it: not a reset, not `am auth passwd`, no `am` command at all. The only
+recovery was destroying the account. The code stated the correct principle three
+lines above the gap. Enabling now costs exactly what disabling costs, and
+`am auth totp <id> off` is a real operator recovery path (the operator's
+credential — reading the app's data dir — is strictly stronger than any in-app
+account). A reset still cannot clear an ENABLED factor (mailbox compromise must
+not be a 2FA bypass) but does drop a staged-and-never-enabled secret, so a
+planted secret cannot outlive the rescue. No user-held recovery codes — stated
+plainly rather than implied.
+
+### OIDC could take over a local account
+
+SSO matched local accounts by `sub` alone, so an IdP identity whose `sub`
+equalled a local username got a session for it — bypassing its enrolled 2FA —
+and then REWROTE its email to the IdP's, capturing the password-reset channel
+permanently. External identities are namespaced `oidc:<issuer>:<sub>` now; since
+`sub` is unique only within an issuer the namespaces cannot overlap.
+
+### The rescue paths did not rescue
+
+A completed password reset left the account LOCKED OUT (renewable forever by the
+attacker), and `am auth passwd` — the breach-response command — did not revoke
+sessions. Exact complements of one missing invariant: unlock, token burn and
+session revocation now live INSIDE `setPassword`, and the redundant per-flow
+revokes were removed so there is one decider. Reverting the revoke was initially
+GREEN under the fuzzer precisely because the flows revoked separately — that
+masking is why the duplicates had to go. `<SignIn/>` also gained a "Forgot
+password?" affordance: `features.mail` was fetched and typed in three places and
+never read, so the reset flow was unreachable from the shipped UI.
+
+### A demoted admin stayed an admin
+
+Session rows stored the role copied at issue time, so a demotion did not reach a
+live session for up to the 30-day TTL — across `/__aio/snapshot`,
+`/__aio/trojan/*` and every `access:` rule. Roles resolve live now, on the next
+request and on open sockets.
+
+### Scheduled tasks never fired on Android
+
+The standalone runtime — which ships inside the APK — created a VIRTUAL clock
+unconditionally, and nothing in a shipped app advances one. Every `after`,
+`every`, `at` and `cron` was registered and silently never ran. It survived
+because of the other bug in the same file: the harness drove that clock by hand
+and re-implemented the scheduler more permissively than production, so
+`schedule.every("fast tick!", 5, …)` was green in tests and refused twice over
+in production. Two defects propping each other up. The harness now runs the REAL
+scheduler with only the clock swapped, and virtual time is an explicit opt-in.
+
+### Timers, workers and the rest
+
+`schedule.after` had no delay clamp (`at` and `cron` both did), so anything past
+~24.8 days fired IMMEDIATELY and `backoff` without an explicit `max` became a
+1ms hot loop at attempt 22 — aimed at the rate-limited API its own docstring
+describes; one clamp now serves every path · `own.set` from a `worker: true`
+cell silently did nothing, and now runs in the worker isolate, the only one that
+can create AND dispose the resource · a leap-day cron was deleted forever · a
+retry could resurrect a schedule `cancelAll()` had just cancelled, during
+shutdown · `skipIfRunning` wedged permanently on a hung tick ·
+`auth: { totp:
+false }` silently stopped VERIFYING for enrolled accounts ·
+unauthenticated `/__aio/auth/*` and `/__aio/pair` bodies are bounded (a 48MB
+login body was buffered) · confusable usernames can no longer become separate
+accounts · auth responses carry `Cache-Control: no-store`.
+
+### Gates
+
+An auth state-machine fuzzer (14 ops against a real server, 12 invariants
+asserted after EVERY step) — 3360 ops / 70 seeds clean · a cron differential
+against a constructive reference — 20 000 cases, 0 mismatches · a schedule
+program fuzzer compared to an independent event model — 4 000 programs, 0
+divergences (it found a stale-tick guard bug nobody had reported) · an `own`
+churn fuzzer — 90 000 ops clean · and `createVirtualTimers` shipped in `src/` so
+the harness and the fuzzers share one decider.
+
+Suite 3637 (from 3583). 15/15 auth mutations and 12/12 scheduler mutations
+verified red.
+
+Upgrade guide: `docs/upgrade/from-alpha48-to-alpha49.md`.
+
 ## 1.0.0-alpha48 — the third hunt (2026-08-05)
 
 Randomized probes against **observability** and the **client transports** — the

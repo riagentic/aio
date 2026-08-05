@@ -74,9 +74,41 @@ function env(name: string): string | undefined {
 /** True when this process is already a supervised child. */
 export const isSupervisedChild = (): boolean => env(CHILD_ENV) === "1";
 
-/** The argv that re-launches this app: `deno run -A <entry> <args…>`. */
-export function relaunchArgs(): string[] {
-  return ["run", "-A", fromFileUrl(Deno.mainModule), ...Deno.args];
+/** This process's REAL argv (minus argv[0]), when the OS exposes it.
+ *
+ *  `Deno.args` contains only what the *script* was given: the runtime flags
+ *  (`--unstable-*`, `--env-file`, `-c/--config`, `--import-map`, `--watch`) are
+ *  consumed by the deno CLI and never appear there. A synthesized
+ *  `run -A <entry>` therefore restarts a DIFFERENT process than the one the
+ *  developer started — an app that needs `--unstable-ffi` or an `--env-file`
+ *  comes back broken, and nothing says why. Where the kernel hands us the true
+ *  command line, replay it verbatim instead of guessing at it. */
+async function realArgv(): Promise<string[] | null> {
+  if (Deno.build.os !== "linux") return null; // /proc/self/cmdline is Linux-only
+  try {
+    const parts = (await Deno.readTextFile("/proc/self/cmdline"))
+      .split("\0").filter((s) => s.length > 0);
+    // Only replay a real `deno run`. Anything else (`deno test`, a compiled
+    // binary, a wrapper) is not the command that starts THIS app, and
+    // re-running it would launch something else entirely.
+    return parts[1] === "run" ? parts.slice(1) : null;
+  } catch {
+    return null; // no /proc, no read permission — fall back below
+  }
+}
+
+/** The synthesized fallback: everything a process CAN see about itself. */
+const synthesizedArgs = (): string[] => [
+  "run",
+  "-A",
+  fromFileUrl(Deno.mainModule),
+  ...Deno.args,
+];
+
+/** The argv that re-launches this app — the process's own command line where
+ *  that is readable, else `deno run -A <entry> <args…>`. */
+export async function relaunchArgs(): Promise<string[]> {
+  return (await realArgv()) ?? synthesizedArgs();
 }
 
 let _restarting = false;
@@ -122,7 +154,21 @@ export async function restartForCellChange(
 /** Become the supervisor: launch the app as a child, relaunch it whenever it
  *  exits asking for a restart, and pass any other exit code through. */
 async function superviseForever(): Promise<never> {
-  const args = relaunchArgs();
+  const real = await realArgv();
+  const args = real ?? synthesizedArgs();
+  if (!real) {
+    // Say it before the first respawn, not after the child fails: a dropped
+    // `--unstable-kv` shows up as an unrelated crash three seconds later.
+    log.warn(
+      "watch",
+      `restarting as \`deno run -A ${
+        args.slice(2).join(" ")
+      }\` — a process cannot read the runtime flags it was started with ` +
+        `(--unstable-*, --env-file, -c/--config, --import-map), so they are ` +
+        `NOT carried into the restarted app. If yours needs them, stop the ` +
+        `watcher and restart by hand.`,
+    );
+  }
   const stop = { child: null as Deno.ChildProcess | null };
   for (const sig of ["SIGINT", "SIGTERM"] as const) {
     try {
