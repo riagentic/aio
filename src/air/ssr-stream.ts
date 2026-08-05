@@ -8,55 +8,14 @@ import {
   Portal,
   Suspense,
 } from "./vdom.ts";
+import { escapeHtml as _escapeHtml, VOID_ELEMENTS } from "./ssr-utils.ts";
+// The attribute rule is shared with renderToString — see _renderPropsHtml.
 import {
-  camelToKebab as _camelToKebab,
-  escapeAttr as _escapeAttr,
-  escapeHtml as _escapeHtml,
-  resolveClassName as _resolveClassName,
-  styleValue as _styleValue,
-  svgAttrName,
-  VOID_ELEMENTS,
-} from "./ssr-utils.ts";
-import { resolveSignalProp } from "./signal-binding.ts";
+  _renderPropsHtml as _renderProps,
+  _ssrTextareaText,
+} from "./vdom-ssr.ts";
 
 const _LAZY_PENDING = Symbol.for("aio.LazyPending");
-
-/** Render props to HTML attribute string. */
-function _renderProps(props: Record<string, unknown>): string {
-  let html = "";
-  for (const [k, rawV] of Object.entries(props)) {
-    if (
-      k === "key" || k === "children" || k === "ref" ||
-      k === "dangerouslySetInnerHTML" || k === "use"
-    ) continue;
-    if (k.startsWith("on")) continue;
-    // AIO-109: resolve signals to current value for SSR
-    const v = resolveSignalProp(rawV);
-    if (k === "className") {
-      const cls = _resolveClassName(v);
-      if (cls) html += ` class="${_escapeAttr(cls)}"`;
-    } else if (k === "style" && typeof v === "string") {
-      if (v) html += ` style="${_escapeAttr(v)}"`;
-    } else if (k === "style" && typeof v === "object" && v !== null) {
-      const pairs = Object.entries(v as Record<string, string>)
-        .filter(([_, sv]) => sv != null) // AIO-164: skip null/undefined values
-        .map(([sk, sv]) =>
-          `${_camelToKebab(sk)}:${_styleValue(sk, resolveSignalProp(sv))}`
-        )
-        .join(";");
-      if (pairs) html += ` style="${_escapeAttr(pairs)}"`;
-    } else if (
-      k === "checked" || k === "selected" || k === "disabled" ||
-      k === "readOnly" || k === "multiple"
-    ) {
-      if (v) html += ` ${k}`;
-    } else if (v !== false && v != null) {
-      // AIO-187: render all non-boolean attrs with explicit value
-      html += ` ${svgAttrName(k)}="${_escapeAttr(String(v))}"`;
-    }
-  }
-  return html;
-}
 
 /** Render sync (for fallbacks and simple content). */
 function _renderSync(vnode: VNode | string | number | null): string {
@@ -82,7 +41,8 @@ function _renderSync(vnode: VNode | string | number | null): string {
       | null
       | undefined;
     try {
-      return vnode.children.map((c) => _renderSync(c)).join("");
+      const html = vnode.children.map((c) => _renderSync(c)).join("");
+      return html === "" ? "<!---->" : html;
     } catch (thrown) {
       if (thrown !== _LAZY_PENDING) throw thrown;
       return _renderSync(fallback ?? null);
@@ -100,7 +60,8 @@ function _renderSync(vnode: VNode | string | number | null): string {
       | ((e: Error) => VNode | string | number | null)
       | undefined;
     try {
-      return vnode.children.map((c) => _renderSync(c)).join("");
+      const html = vnode.children.map((c) => _renderSync(c)).join("");
+      return html === "" ? "<!---->" : html;
     } catch (error) {
       if (!fallback) throw error;
       return _renderSync(fallback(error as Error));
@@ -109,12 +70,14 @@ function _renderSync(vnode: VNode | string | number | null): string {
   // Element
   const tag = vnode.tag as string;
   const selfClosing = VOID_ELEMENTS.has(tag);
-  let html = `<${tag}${_renderProps(vnode.props)}>`;
+  let html = `<${tag}${_renderProps(vnode.props, tag)}>`;
   if (selfClosing) return html;
   const dih = vnode.props.dangerouslySetInnerHTML as
     | { __html: string }
     | undefined;
+  const areaText = _ssrTextareaText(vnode);
   if (dih) html += dih.__html;
+  else if (areaText !== null) html += areaText;
   else for (const child of vnode.children) html += _renderSync(child);
   html += `</${tag}>`;
   return html;
@@ -181,7 +144,10 @@ export async function* renderToStream(
       for (const child of vnode.children) {
         for await (const chunk of renderToStream(child)) chunks.push(chunk);
       }
-      for (const c of chunks) yield c;
+      // Same empty-region anchor as Fragment (AIO-195) — a boundary is a region
+      // of its parent too, and must hold its slot.
+      if (chunks.every((c) => c === "")) yield "<!---->";
+      else for (const c of chunks) yield c;
     } catch (thrown) {
       if (thrown !== _LAZY_PENDING) throw thrown;
       if (fallback != null) yield _renderSync(fallback);
@@ -214,7 +180,8 @@ export async function* renderToStream(
       for (const child of vnode.children) {
         for await (const chunk of renderToStream(child)) chunks.push(chunk);
       }
-      for (const c of chunks) yield c;
+      if (chunks.every((c) => c === "")) yield "<!---->";
+      else for (const c of chunks) yield c;
     } catch (error) {
       if (!fallback) throw error;
       yield _renderSync(fallback(error as Error));
@@ -225,12 +192,14 @@ export async function* renderToStream(
   // Element — yield opening tag, children, closing tag
   const tag = vnode.tag as string;
   const selfClosing = VOID_ELEMENTS.has(tag);
-  yield `<${tag}${_renderProps(vnode.props)}>`;
+  yield `<${tag}${_renderProps(vnode.props, tag)}>`;
   if (selfClosing) return;
   const dih = vnode.props.dangerouslySetInnerHTML as
     | { __html: string }
     | undefined;
+  const areaText = _ssrTextareaText(vnode);
   if (dih) yield dih.__html;
+  else if (areaText !== null) yield areaText;
   else for (const child of vnode.children) yield* renderToStream(child);
   yield `</${tag}>`;
 }

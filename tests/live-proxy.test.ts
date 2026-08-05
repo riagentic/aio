@@ -309,3 +309,91 @@ Deno.test("liveProxy: find() miss returns undefined; primitive element returned 
   // deno-lint-ignore no-explicit-any
   assertEquals((proxy.nums as any[]).find((n) => n === 2), 2);
 });
+
+// ── one object, two slots: the alias must survive materialization ──────
+// Found by the sync/async differential fuzzer once `arr_fill_object` entered
+// its alphabet (`fill(o)` is the shortest way to put ONE object at two
+// indices). `[...s.items]` hands the spread two DIFFERENT nested proxies over
+// the SAME underlying object; materializing each independently de-aliased
+// them, so a later write through one slot changed one slot — where plain
+// JavaScript AND the identical sync (Immer draft) method change both.
+Deno.test("liveProxy: two proxies over one object materialize to one clone", async () => {
+  const shared = { id: 8, q: 98 };
+  let current: Record<string, unknown> = { items: [shared, shared] };
+  const dispatched: { type: string; payload?: unknown }[] = [];
+  const batcher = createBatcher("test", (a) => {
+    dispatched.push(a);
+    return undefined;
+  });
+  const proxy = createLiveProxy<Record<string, unknown>>(
+    "test",
+    "test",
+    "m",
+    () => current,
+    batcher,
+  );
+  // deno-lint-ignore no-explicit-any
+  proxy.items = [...(proxy.items as any[])];
+  await new Promise((r) => setTimeout(r, 1));
+  const written = (dispatched[0]!.payload as {
+    mutations: { value?: unknown }[];
+  }).mutations[0]!.value as unknown[];
+  assertEquals(written.length, 2);
+  assertEquals(
+    written[0] === written[1],
+    true,
+    "the two slots must stay ONE object — plain JS and the Immer draft do",
+  );
+});
+
+// ── forEach must mean what for…of means ───────────────────────────────
+// `find` was fixed to hand back a LIVE element because a detached snapshot
+// element silently dropped the write. Every other element-yielding read method
+// had the same shape and was left on the snapshot — so `for (const x of
+// s.items) x.q = 0` worked while `s.items.forEach(x => { x.q = 0 })`, the same
+// loop, silently changed nothing (and the identical SYNC method changed every
+// row). Same for the iterator forms, `values()` and `entries()`.
+Deno.test("liveProxy: forEach/values/entries hand out LIVE elements", async () => {
+  for (
+    const drive of [
+      (p: Record<string, unknown>) =>
+        // deno-lint-ignore no-explicit-any
+        (p.items as any[]).forEach((it: Record<string, unknown>) => it.q = 0),
+      (p: Record<string, unknown>) => {
+        // deno-lint-ignore no-explicit-any
+        for (const it of (p.items as any[]).values()) it.q = 0;
+      },
+      (p: Record<string, unknown>) => {
+        // deno-lint-ignore no-explicit-any
+        for (const [, it] of (p.items as any[]).entries()) it.q = 0;
+      },
+    ]
+  ) {
+    const dispatched: { type: string; payload?: unknown }[] = [];
+    const current: Record<string, unknown> = {
+      items: [{ id: 1, q: 10 }, { id: 2, q: 20 }],
+    };
+    const batcher = createBatcher("test", (a) => {
+      dispatched.push(a);
+      return undefined;
+    });
+    const proxy = createLiveProxy<Record<string, unknown>>(
+      "test",
+      "test",
+      "m",
+      () => current,
+      batcher,
+    );
+    drive(proxy);
+    await new Promise((r) => setTimeout(r, 1));
+    const muts = (dispatched[0]?.payload as
+      | { mutations: { path: string[] }[] }
+      | undefined)
+      ?.mutations ?? [];
+    assertEquals(
+      muts.map((m) => m.path.join(".")),
+      ["items.0.q", "items.1.q"],
+      "a write through an element must batch, not vanish",
+    );
+  }
+});

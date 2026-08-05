@@ -916,34 +916,50 @@ export const manager = cell("manager", {
         }
       }
       const { trojanPost } = await import("../../src/am/am-http.ts");
+      // ONE decider for the wire envelope. A cell method is called with
+      // POSITIONAL arguments and its payload form is `{args:[…]}` (the reducer
+      // reads `payload.args`); a plain redux-style action carries its payload
+      // verbatim. amui used to re-derive that as a bare `{type, payload}`, so a
+      // named payload reached a `cell:method` as NO arguments at all — and the
+      // trojan still answered ok, so amui reported "dispatched". Use `am`'s
+      // rule instead of a second copy of it.
+      const { envelopePayload } = await import("../../src/am/am-cmd-state.ts");
       const r = await trojanPost(
         proj.running.port,
         "dispatch",
-        payload !== undefined ? { type, payload } : { type },
+        payload !== undefined
+          ? {
+            type,
+            payload: envelopePayload(type, payload as Record<string, unknown>),
+          }
+          : { type },
         proj.running.appId,
       );
       s.dispatchMsg = r.ok ? `dispatched ${type}` : `error: ${r.error}`;
     },
 
-    /** Start a stopped project's app (browser shell, detached). Re-scans after
-     *  a short boot delay so the app shows up running without a manual rescan. */
+    /** Start a stopped project's app (browser shell, detached). Waits for the
+     *  app to REGISTER as running before claiming it started — see awaitBoot. */
     async start(s, path: string) {
       const refusal = await refuseSelf(path);
       if (refusal) {
         s.actionMsg = refusal;
         return;
       }
-      s.actionMsg = `starting ${path.split("/").pop()}…`;
-      const { startApp } = await import("./server/proc.ts");
+      const name = path.split("/").pop();
+      s.actionMsg = `starting ${name}…`;
+      const { startApp, awaitBoot } = await import("./server/proc.ts");
       const r = await startApp(path, "browser");
       if (!r.ok) {
         s.actionMsg = `start failed: ${r.error}`;
         return;
       }
       s.actionMsg = `started (pid ${r.pid ?? "?"}) — waiting for boot…`;
-      await new Promise((res) => setTimeout(res, 2500));
+      const boot = await awaitBoot(path, r.pid);
       await rescanInto(s).catch(() => {});
-      s.actionMsg = `started ${path.split("/").pop()}`;
+      s.actionMsg = boot.up
+        ? `started ${name}`
+        : `${name} failed to start: ${boot.reason}`;
     },
 
     /** Stop a running app (graceful trojan shutdown, SIGTERM fallback). */
@@ -956,17 +972,25 @@ export const manager = cell("manager", {
       const proj = s.projects.find((p) => p.path === path);
       if (!proj?.running) return;
       const { appId, port, pid } = proj.running;
-      s.actionMsg = `stopping ${proj.name}…`;
-      const { stopApp } = await import("./server/proc.ts");
+      const name = proj.name;
+      s.actionMsg = `stopping ${name}…`;
+      const { stopApp, awaitDown } = await import("./server/proc.ts");
       const r = await stopApp(port, appId, pid);
-      s.actionMsg = r.ok ? `stopped ${proj.name}` : `stop failed: ${r.error}`;
       if (s.detail && s.detail.path === path) {
         s.detail = { ...plain(s.detail), running: false, status: "stopping" };
         clearLiveDiagnostics(s);
       }
-      // Refresh so the sidebar dot + detail agree the app is down.
-      await new Promise((res) => setTimeout(res, 600));
+      // `stopApp` only reports that the request/signal was DELIVERED. Wait for
+      // the app to actually deregister before saying it stopped — an app that
+      // ignores SIGTERM would otherwise read as "stopped" while still serving.
+      const down = r.ok && await awaitDown(path);
+      // Refresh so the sidebar dot + detail agree with the verdict.
       await rescanInto(s).catch(() => {});
+      s.actionMsg = !r.ok
+        ? `stop failed: ${r.error}`
+        : down
+        ? `stopped ${name}`
+        : `${name} did not stop — still running (pid ${pid})`;
     },
 
     /** Restart: stop (if running) then start; rescan after. */
@@ -977,12 +1001,21 @@ export const manager = cell("manager", {
         return;
       }
       const proj = s.projects.find((p) => p.path === path);
+      const name = path.split("/").pop();
       s.actionMsg = `restarting…`;
-      const { startApp, stopApp } = await import("./server/proc.ts");
+      const { startApp, stopApp, awaitBoot, awaitDown } = await import(
+        "./server/proc.ts"
+      );
       if (proj?.running) {
         const { appId, port, pid } = proj.running;
         await stopApp(port, appId, pid);
-        await new Promise((r) => setTimeout(r, 800));
+        // Wait for the port/singleton to be genuinely free — starting on top of
+        // a still-live instance is how a restart "succeeds" into the OLD app.
+        if (!await awaitDown(path)) {
+          s.actionMsg = `restart failed: ${name} did not stop (pid ${pid})`;
+          await rescanInto(s).catch(() => {});
+          return;
+        }
       }
       const r = await startApp(path, "browser");
       if (!r.ok) {
@@ -990,9 +1023,11 @@ export const manager = cell("manager", {
         return;
       }
       s.actionMsg = `restarted (pid ${r.pid ?? "?"}) — waiting for boot…`;
-      await new Promise((res) => setTimeout(res, 2500));
+      const boot = await awaitBoot(path, r.pid);
       await rescanInto(s).catch(() => {});
-      s.actionMsg = `restarted ${path.split("/").pop()}`;
+      s.actionMsg = boot.up
+        ? `restarted ${name}`
+        : `${name} failed to restart: ${boot.reason}`;
     },
 
     /** Run a deno task — captures output. ALWAYS terminates: cancellable via

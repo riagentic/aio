@@ -37,6 +37,13 @@ testUI(App, "add a todo end-to-end", async (ui) => {
   `focus`, `blur`, `select(value)`, `check()`, `uncheck()`, `clear()`,
   `scroll({top, left})`, `dragTo(other)` (full HTML5 DnD sequence with a shared
   DataTransfer).
+- **What a user cannot do, a test cannot do** — the harness is never more
+  permissive than the browser. Driving a `disabled` control, typing into (or
+  clearing) a `readonly` one, `select()`ing a value with no option or a disabled
+  option, `select()`ing on something that is not a `<select>`, or `check()`ing
+  something with no checked state all **fail loud** naming the element and what
+  exists. Assert the state instead (`.disabled`, `.readonly`). The same rules
+  apply to `am trigger` — one implementation serves both tiers.
 - Reads: `.text`, `.value`, `.checked`, `.disabled`, `.readonly`, `.required`,
   `ui.surface()`, `ui.html()`; waits: `ui.waitFor(pred)`. The four booleans
   **always answer with a boolean**, `false` included:
@@ -62,9 +69,11 @@ testUI(App, "add a todo end-to-end", async (ui) => {
   a module-level vault holder, a `let` singleton) needs manual reset in your
   test.
 - **Fire schedules deterministically with `await ui.advance(ms)`** — advances a
-  virtual clock and dispatches every `schedule.after`/`every` now due. This
-  makes toast auto-dismiss, debounce, `backoff`, and `poll` unit-testable
-  without real timers. (`schedule.at`/`cron` aren't fired by the virtual clock.)
+  virtual clock and dispatches every **cell** `schedule.after`/`every` now due,
+  which makes debounce, `backoff` and `poll` unit-testable without real timers.
+  (`schedule.at`/`cron` aren't fired by the virtual clock. Neither is anything
+  on a raw `setTimeout` — including `aio/ui`'s `toast()` auto-dismiss: give it a
+  short `duration` and `await ui.waitFor(() => ui.absent("…"))`.)
 
 For **multi-cell logic tests without a component**, `bootCells([a, b])` from
 `aio/testing` boots several cells on the same runtime and returns a handle with
@@ -96,18 +105,25 @@ Options — only when you need control (all optional):
 
 `LABEL + ROLE`, both inferred from the TSX — a pure function of the render:
 
-| TSX                                          | Name                  |
-| -------------------------------------------- | --------------------- |
-| `<button>Submit</button>`                    | `SubmitButton`        |
-| `<div class="button">Submit</div>`           | `SubmitButton`        |
-| `<input placeholder="Title">`                | `TitleInput`          |
-| `<input type="checkbox" aria-label="Agree">` | `AgreeCheckbox`       |
-| `<span t="status">…</span>`                  | `status` (verbatim)   |
-| `<button data-testid="save-btn">…</button>`  | `save-btn` (verbatim) |
+| TSX                                                 | Name                  |
+| --------------------------------------------------- | --------------------- |
+| `<button>Submit</button>`                           | `SubmitButton`        |
+| `<div class="button">Submit</div>`                  | `SubmitButton`        |
+| `<input placeholder="Title">`                       | `TitleInput`          |
+| `<input type="checkbox" aria-label="Agree">`        | `AgreeCheckbox`       |
+| `<label>Enable LAN<input type="checkbox"/></label>` | `EnableLANCheckbox`   |
+| `<Field label="Email"><Input/></Field>`             | `EmailInput`          |
+| `<tr onClick=…>` / `<li onClick=…>`                 | `Row` / `Item`        |
+| `<div role="dialog" onClick=…>`                     | `Dialog`              |
+| `<span t="status">…</span>`                         | `status` (verbatim)   |
+| `<button data-testid="save-btn">…</button>`         | `save-btn` (verbatim) |
 
 Label priority: `t` prop > `data-testid` > `aria-label` > visible text >
-placeholder > `name` attr. Role from the tag/type (a clickable `div.button` is a
-Button). The `t` prop also puts **non-interactive** elements on the surface
+**wrapping `<label>`** > placeholder > `name` attr. A wrapping `<label>` names
+the first labelable element inside it and only that one — HTML's own implicit
+association, so the surface name matches the accessible name a user hears. Role
+comes from an explicit `role` first, then the tag/type (a clickable `div.button`
+is a Button). The `t` prop also puts **non-interactive** elements on the surface
 (assertion targets) and is the stable handle to use where visible copy may
 change — it's typed and stripped from the DOM.
 

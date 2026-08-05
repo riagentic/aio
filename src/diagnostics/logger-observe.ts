@@ -1,17 +1,22 @@
 // logger-observe.ts — Action observer logic for AioLogger
 
 import type { LogLevel } from "./logger-types.ts";
-import {
-  filterInternal,
-  SKIP_CONTAINS,
-  SKIP_SUFFIXES,
-} from "./logger-types.ts";
+import { filterInternal } from "./logger-types.ts";
+import { isActionNoise } from "./action-kind.ts";
+import { actionOrigin } from "./action-kind.ts";
+import { isRedactedAction, noRedaction, REDACTED } from "./redact.ts";
+import type { Redactor } from "./redact.ts";
 
 /** Minimal interface for the parts of AioLogger that observe() needs */
 export type ObserveCtx = {
   suppressTypes: string[];
   stats: { dispatched: number; errors: number };
   lastStatus: Map<string, string>;
+  /** The app's `redactActions` list. debug.log RETAINS payloads on disk, so it
+   *  is governed by the same one list as the journal, the timeline, the action
+   *  log and the checkpoint — it was the sink that was not, and it wrote a
+   *  redacted method's arguments in cleartext. */
+  redact?: Redactor;
   emit: (
     lvl: LogLevel,
     cat: string,
@@ -32,12 +37,18 @@ export function observeAction(
 
   ctx.stats.dispatched++;
 
-  // Skip pure internals entirely
-  if (SKIP_SUFFIXES.some((s) => type.endsWith(s))) return;
-  if (SKIP_CONTAINS.some((s) => type.includes(s))) return;
+  // Skip pure internals entirely (`cell:__exec` — a marker, not a change).
+  // `cell:__setMethod` is NOT one: it is the only action carrying what an
+  // async or transactional method wrote. See action-kind.ts.
+  if (isActionNoise(type)) return;
   if (ctx.suppressTypes.includes(type)) return;
 
   const prefix = type.split(":")[0]?.toLowerCase() ?? "unknown";
+  const redact = ctx.redact ?? noRedaction;
+  // A write-set commit and an error frame travel under their OWN type, so the
+  // originating `cell:method` decides too — an exact pattern would otherwise
+  // plug the call and leak the same values under a different name.
+  const hidden = isRedactedAction(redact, type, actionOrigin(type, payload));
 
   // ── Cell lifecycle ─────────────────────────────────────────
   if (type.endsWith(":__init")) {
@@ -56,7 +67,7 @@ export function observeAction(
       "error",
       `cell:${prefix}`,
       `${payload._method ?? "?"} failed`,
-      { error: String(payload.error ?? "?") },
+      { error: hidden ? REDACTED : String(payload.error ?? "?") },
     );
     return;
   }
@@ -66,7 +77,7 @@ export function observeAction(
     "debug",
     `cell:${prefix}`,
     type.slice(prefix.length + 1),
-    filterInternal(payload),
+    hidden ? { payload: REDACTED } : filterInternal(payload),
   );
 
   // Check machine state transitions (any action may cause a status change)

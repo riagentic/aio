@@ -221,3 +221,55 @@ Deno.test("browser-sync: clientId is stable across engine resets (HLC identity)"
     _resetCellRegistry();
   }
 });
+
+// The engine's snapshot watermark only works if the ack's `serverTs` actually
+// reaches it. This wiring dropped the field, so the guard was inert on the one
+// surface it exists for — the browser — while the engine-level tests kept
+// passing. A frame field the engine branches on has to be tested THROUGH the
+// frame router, not around it.
+Deno.test("browser-sync: an ack for an op the snapshot already holds does not double-apply", async () => {
+  const { sent } = setup();
+  try {
+    handleSyncLocalAction({ type: "bs-todos:add", payload: { args: ["x"] } });
+    await new Promise((r) => setTimeout(r, 10));
+    const opFrame = sent.map((r) => JSON.parse(r)).find((m) => m.t === "op");
+    assert(opFrame, "the local op went out");
+
+    // A catch-up snapshot lands first — the server's live state, which already
+    // contains the op whose ack is still in flight.
+    handleSyncMessage("sync-res", {
+      mode: "snapshot",
+      snapshot: { "bs-todos": { items: [{ args: ["x"] }] } },
+      ops: [],
+      // Pinned, not wall-clock. The snapshot must UNAMBIGUOUSLY contain the
+      // local op, and `[Date.now(), 0, "s"]` does not guarantee that: the op
+      // was stamped from the client clock moments earlier, so the two can land
+      // in the same millisecond and the tie is then broken by node id — which
+      // is a random client uuid compared against "s". That made this test's
+      // premise a coin flip rather than a statement.
+      lowWater: { "bs-todos": [Date.now() + 60_000, 0, "s"] },
+      lastServerTs: { "bs-todos": 100 },
+    });
+    await new Promise((r) => setTimeout(r, 10));
+
+    // …and only then the ack, stamped at or below the snapshot's cursor.
+    handleSyncMessage("sync-ack", {
+      cell: "bs-todos",
+      opId: opFrame.d.id,
+      // At or below the snapshot's cursor — stated, not hoped for.
+      serverHlc: [Date.now() + 60_000, 0, "s"],
+      serverTs: 100,
+    });
+    await new Promise((r) => setTimeout(r, 10));
+
+    const sig = getCellSignal("bs-todos", { items: [] });
+    assertEquals(
+      (sig.value as { items: unknown[] }).items.length,
+      1,
+      "the snapshot already contained this op — the ack must not re-apply it",
+    );
+  } finally {
+    _resetBrowserSync();
+    _resetCellRegistry();
+  }
+});

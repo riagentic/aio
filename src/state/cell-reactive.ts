@@ -198,6 +198,53 @@ function filterSlice(
   return applyCellFieldFilter(filter, slice) ?? {};
 }
 
+const _hiddenKeys = new WeakMap<CellDef, Set<string>>();
+
+/** Wrap a client-visible slice so that reading a ui-HIDDEN field on it reports
+ *  exactly as `cell.field` does (throw in dev, warn-once + undefined in prod).
+ *
+ *  Selectors are client reads too, and they were the one client read the ui
+ *  filter enforced SILENTLY: `filterSlice` handed a `ui: "none"` cell an empty
+ *  object and the selector computed over it — `total()` returned NaN,
+ *  `count()` returned 0 — while `cell.balance` on the same cell threw in dev.
+ *  Garbage shaped like data is worse than an error, and it was one seam
+ *  deciding two ways. Reporting on the READ (not on the call) keeps a selector
+ *  that never touches a hidden field silent, so a deps-form selector over other
+ *  cells is unaffected. Hidden keys are absent from the slice already, so
+ *  `Object.keys`/spread over it never trip the guard — only naming the field
+ *  does. */
+function guardHidden(
+  def: CellDef,
+  slice: Record<string, unknown>,
+): Record<string, unknown> {
+  let hidden = _hiddenKeys.get(def);
+  if (!hidden) {
+    const filter = clientUiFilter(def);
+    hidden = new Set(
+      Object.keys(def.__aio.state).filter((k) =>
+        uiKeyVisibility(filter, k).hidden
+      ),
+    );
+    _hiddenKeys.set(def, hidden);
+  }
+  if (hidden.size === 0) return slice;
+  const hiddenKeys = hidden;
+  const filter = clientUiFilter(def);
+  return new Proxy(slice, {
+    get(target, prop) {
+      if (typeof prop === "string" && hiddenKeys.has(prop)) {
+        reportHiddenRead(
+          def.__aio.id,
+          prop,
+          uiKeyVisibility(filter, prop).reason!,
+        );
+        return undefined;
+      }
+      return (target as Record<string | symbol, unknown>)[prop];
+    },
+  });
+}
+
 /** Install signal-backed getters on a cell for each state key, and wrap
  *  action creators with dispatch so `counter.increment()` sends to server.
  *  After this, `counter.count` reads from the cell signal (auto-tracked). */
@@ -295,6 +342,14 @@ export function bindCellReactive(
     // Selector names cannot collide with method names (AIO-6.1 enforces it), so
     // overwriting unconditionally can only ever replace a selector with the same
     // selector — reading the signal instead of a snapshot.
+    // A selector is a client read like any other, so it answers to the same
+    // rule. It did not: `filterSlice` handed a `ui: "none"` cell an EMPTY
+    // object and the selector computed over it — `total()` returned NaN,
+    // `count()` returned 0 — while `cell.balance` on the very same cell threw
+    // in dev. Garbage that looks like data is worse than an error, and it was
+    // the same seam deciding two different ways. The guard reports on the
+    // READ, so a selector that never touches a hidden field stays silent (and
+    // a deps-form selector over other cells keeps working).
     for (const [key, selectorFn] of Object.entries(selectors)) {
       Object.defineProperty(def, key, {
         value: (...args: unknown[]) => {
@@ -302,9 +357,12 @@ export function bindCellReactive(
           // selectors in client context see the ui-FILTERED slice —
           // same data a browser client would hold after a broadcast, so a
           // selector can't leak a ui-excluded secret in standalone/electron.
-          const own = filterSlice(
-            uiFilter,
-            (sig.value ?? initialState) as Record<string, unknown>,
+          const own = guardHidden(
+            def,
+            filterSlice(
+              uiFilter,
+              (sig.value ?? initialState) as Record<string, unknown>,
+            ),
           );
           // Called WITH args → parameterized selector (`cell.byId(id)`).
           if (args.length > 0) {
@@ -324,8 +382,13 @@ export function bindCellReactive(
               const otherDef = _cellRegistry.get(prop);
               const otherSlice = (other.value ?? otherDef?.__aio.state ??
                 {}) as Record<string, unknown>;
+              // Same rule across the cell boundary: a deps-form selector
+              // reading another cell's hidden field must hear about it too.
               return otherDef
-                ? filterSlice(clientUiFilter(otherDef), otherSlice)
+                ? guardHidden(
+                  otherDef,
+                  filterSlice(clientUiFilter(otherDef), otherSlice),
+                )
                 : otherSlice;
             },
           });

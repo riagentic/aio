@@ -1,0 +1,175 @@
+// `msg`, `schedule` and `own` exist TWICE: once in src/state (what the server,
+// standalone and every in-process test run) and once inlined in
+// src/browser/browser-shared.ts (what the browser bundle exports as `aio`'s
+// `msg`/`schedule`/`own` — build-bundle.ts aliases `aio` → src/browser-air.ts).
+//
+// CLAUDE.md carries this as a note to humans ("they must stay in sync with
+// src/state/"). A note is not a mechanism: by the time this file was written the
+// browser's `schedule` was missing `backoff`, `poll`, `next` and `blocking`
+// entirely, and silently dropped `every`'s `skipIfRunning`. Client-scoped cell
+// methods and CRDT optimistic replay both run method bodies IN THE BROWSER, so
+// `schedule.next(...)` in such a method threw `is not a function` in production
+// while passing every test.
+//
+// This file is the mechanism: key-set equality plus a randomized output
+// differential over the pure effect creators.
+import { assertEquals } from "@std/assert";
+import { msg as serverMsg } from "../src/state/msg.ts";
+import { own as serverOwn } from "../src/state/own.ts";
+import { schedule as serverSchedule } from "../src/state/schedule.ts";
+import {
+  msg as browserMsg,
+  own as browserOwn,
+  schedule as browserSchedule,
+} from "../src/browser/browser-shared.ts";
+import { fuzzEnvInt } from "./fuzz-seed.ts";
+
+// deno-lint-ignore no-explicit-any
+type AnyFn = (...a: any[]) => any;
+const asFns = (o: unknown) => o as Record<string, AnyFn>;
+
+/** Deterministic LCG — the same seed replays the same argument stream. */
+function rng(seed: number): () => number {
+  let s = seed >>> 0 || 1;
+  return () => ((s = (s * 1664525 + 1013904223) >>> 0) / 0x1_0000_0000);
+}
+
+Deno.test("browser-shared: msg() is byte-identical in behaviour to src/state/msg.ts", () => {
+  const r = rng(fuzzEnvInt("AIO_FUZZ_SEED", 20260805));
+  for (let i = 0; i < 200; i++) {
+    const type = `t${Math.floor(r() * 1000)}`;
+    const payload = r() < 0.5
+      ? undefined
+      : { n: Math.floor(r() * 100), s: `${r()}` };
+    assertEquals(
+      browserMsg(type, payload),
+      serverMsg(type, payload),
+      `msg("${type}", ${JSON.stringify(payload)}) diverges`,
+    );
+  }
+  // The no-payload overload is the one that silently drifts (`{}` vs undefined).
+  assertEquals(browserMsg("bare"), serverMsg("bare"));
+});
+
+Deno.test("browser-shared: own effect creators match src/state/own.ts", () => {
+  assertEquals(
+    Object.keys(browserOwn).sort(),
+    Object.keys(serverOwn).sort(),
+    "the browser `own` must expose exactly the server's surface",
+  );
+  assertEquals(
+    browserOwn.dispose("watcher:a"),
+    serverOwn.dispose("watcher:a"),
+    "own.dispose is plain data — it must be identical",
+  );
+  // own.set carries a one-shot token whose VALUE is a per-module sequence; the
+  // shape must still match exactly (kind/id/token presence and types).
+  const b = browserOwn.set("watcher:a", () => {}) as Record<string, unknown>;
+  const s = serverOwn.set("watcher:a", () => {}) as Record<string, unknown>;
+  assertEquals(Object.keys(b).sort(), Object.keys(s).sort());
+  assertEquals(b.type, s.type);
+  assertEquals(b.kind, s.kind);
+  assertEquals(b.id, s.id);
+  assertEquals(typeof b.token, typeof s.token);
+});
+
+Deno.test("browser-shared: schedule exposes exactly the server's creators", () => {
+  assertEquals(
+    Object.keys(browserSchedule).sort(),
+    Object.keys(serverSchedule).sort(),
+    "a creator missing from the browser copy is `is not a function` in the " +
+      "browser ONLY — client-scoped methods and CRDT replay run method " +
+      "bodies there",
+  );
+  // `blocking` is the ONE creator that cannot be shared (it runs a Deno worker
+  // pool). It must still exist and carry the same sub-surface, so the failure
+  // is a named refusal rather than "undefined is not a function".
+  assertEquals(
+    Object.keys(browserSchedule.blocking).sort(),
+    Object.keys(serverSchedule.blocking).sort(),
+  );
+  for (
+    const call of [
+      () => (browserSchedule.blocking as AnyFn)("x", () => 1),
+      () => browserSchedule.blocking.cancel("x"),
+      () => browserSchedule.blocking.disposeIdle(),
+      () => browserSchedule.blocking.dispose(),
+    ]
+  ) {
+    let msgText = "";
+    try {
+      call();
+    } catch (e) {
+      msgText = (e as Error).message;
+    }
+    assertEquals(
+      msgText.includes("server-only"),
+      true,
+      `schedule.blocking must refuse LOUDLY in the browser — got "${msgText}"`,
+    );
+  }
+});
+
+Deno.test("browser-shared: schedule effect creators are output-identical (randomized)", () => {
+  const seed = fuzzEnvInt("AIO_FUZZ_SEED", 20260805);
+  const rounds = fuzzEnvInt("AIO_FUZZ_ROUNDS", 300);
+  const r = rng(seed);
+  const bs = asFns(browserSchedule);
+  const ss = asFns(serverSchedule);
+  let checked = 0;
+
+  for (let i = 0; i < rounds; i++) {
+    const id = `id-${Math.floor(r() * 50)}`;
+    const ms = Math.floor(r() * 100_000) + 1;
+    const action = { type: `a${Math.floor(r() * 10)}`, payload: { i } };
+    const pick = Math.floor(r() * 7);
+    const call = (name: string, args: unknown[]) => {
+      checked++;
+      assertEquals(
+        bs[name]!(...args),
+        ss[name]!(...args),
+        `schedule.${name}(${JSON.stringify(args)}) diverges`,
+      );
+    };
+    switch (pick) {
+      case 0:
+        call("after", [id, ms, action]);
+        break;
+      case 1:
+        // The 4th argument is the one that vanished: the browser copy took
+        // three parameters, so `{ skipIfRunning: true }` was dropped without a
+        // word.
+        call("every", [
+          id,
+          ms,
+          action,
+          r() < 0.5 ? { skipIfRunning: true } : undefined,
+        ]);
+        break;
+      case 2:
+        call("at", [id, new Date(1e12 + ms).toISOString(), action]);
+        break;
+      case 3:
+        call("cron", [id, "*/5 * * * *", action]);
+        break;
+      case 4:
+        call("backoff", [id, Math.floor(r() * 45), {
+          base: Math.floor(r() * 2000) + 1,
+          ...(r() < 0.5 ? { max: 60_000 } : {}),
+          ...(r() < 0.5 ? { factor: 3 } : {}),
+        }, action]);
+        break;
+      case 5:
+        call("poll", [id, Math.floor(r() * 45), {
+          every: Math.floor(r() * 10_000) + 1,
+          ...(r() < 0.5 ? { backoff: 2 } : {}),
+          ...(r() < 0.5 ? { max: 60_000 } : {}),
+        }, action]);
+        break;
+      default:
+        call(r() < 0.5 ? "next" : "cancel", r() < 0.5 ? [id, action] : [id]);
+        break;
+    }
+  }
+  assertEquals(checked, rounds, "every round must compare one creator");
+});

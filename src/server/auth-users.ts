@@ -181,6 +181,9 @@ export interface UserStore {
   /** All users, newest first (admin/CLI listing). */
   list(): AuthUserRecord[];
   get(id: string): AuthUserRecord | null;
+  /** Delete a user — and END the account: every session revoked (through the
+   *  store instance, so live sockets are disarmed) and every outstanding
+   *  one-shot token burned. Returns false when the id doesn't exist. */
   remove(id: string): boolean;
   count(): number;
   /** Stage a TOTP secret (base32) — not active until enableTotp. */
@@ -482,7 +485,37 @@ export function openUserStore(
       return row ? toRecord(row) : null;
     },
     remove(rawId) {
-      return del.run(normId(rawId)).changes > 0;
+      const id = normId(rawId);
+      if (del.run(id).changes === 0) return false;
+      // DELETING AN ACCOUNT MUST END IT — same "one decider" rule as
+      // `setPassword`, for the same reason it was needed there.
+      //
+      // A session row survives its users row: `sessions.get` re-reads the live
+      // role, but a MISSING users row is indistinguishable from `sessions: true`
+      // without `auth: true` (no user table at all), so it falls back to the
+      // role cached at login. So `app.auth.remove("carol")` — offboarding, a
+      // ban, breach response — deleted the account while carol's existing
+      // token kept authenticating her, with her old role (admin included),
+      // over HTTP and on already-open sockets, for up to the 30-day TTL.
+      // `am auth rm` had always remembered to revoke; the programmatic door
+      // had not, which is exactly how `am auth passwd` lost its revocation.
+      // And one-shot tokens are burned too: a reset token or a TOTP `pending`
+      // captured before the deletion would MINT a fresh session for an account
+      // that no longer exists.
+      purgeTokens(id);
+      const sess = opts?.sessions?.();
+      if (sess) sess.revokeUser(id);
+      else if (_liveSessionsFor(id) > 0) {
+        console.warn(
+          `[aio] auth: user id=${id} removed but this user store has no ` +
+            `session store bound — ${
+              _liveSessionsFor(id)
+            } session(s) SURVIVE ` +
+            `the deletion. Open it as ` +
+            `openUserStore(path, { sessions: () => sessionStore }).`,
+        );
+      }
+      return true;
     },
     count() {
       return Number((cnt.get() as { n: number }).n);

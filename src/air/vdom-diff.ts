@@ -10,7 +10,11 @@ import {
 } from "./vdom-helpers.ts";
 import { _callRef, _staticEqual, _tagComponentError } from "./vdom-create.ts";
 import { _componentName } from "./hook-error.ts";
-import { _hasSignalPropChange, applyProps } from "./vdom-props.ts";
+import {
+  _hasSignalPropChange,
+  applyChildDependentProps,
+  applyProps,
+} from "./vdom-props.ts";
 import { _advance, getDom, isChildOf, removeDom } from "./vdom-remove.ts";
 import { createDom } from "./vdom-render.ts";
 import { _getActiveDelegationRoot, _setDelegationRoot } from "./vdom-events.ts";
@@ -251,7 +255,17 @@ export function _diff(
       );
       _updateContainerDom(parent, nv, ov, ctx, regionFirst);
     }
-    if (_devMode) _assertRegionAlignment(nv, nv._dom ?? null, false);
+    // A boundary showing its FALLBACK does not hold its children at all — its
+    // region is the fallback. Checking the children against it reported a
+    // desync for every correct render in that state: an app whose
+    // ErrorBoundary had caught, or whose Suspense was still loading, printed
+    // "this is an aio bug; please report" on every re-render. A tripwire that
+    // fires when nothing is wrong is worse than none — it teaches the reader
+    // to ignore the real one. `_rendered` is undefined exactly on the happy
+    // path (Fragment never sets it).
+    if (_devMode && nv._rendered === undefined) {
+      _assertRegionAlignment(nv, nv._dom ?? null, false);
+    }
     return nv._dom ?? null;
   }
 
@@ -466,6 +480,10 @@ function _diffElement(
   }
 
   _diffChildren(dom, nv.children, ov.children, ctx, nowSvg);
+
+  // Props that only take effect once the children exist (`<select value>`) —
+  // after the child diff, so options created in THIS pass are selectable.
+  applyChildDependentProps(dom, nv.props, ov.props);
 
   if (_devMode) _assertRegionAlignment(nv, dom.firstChild, true);
 

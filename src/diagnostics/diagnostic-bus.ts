@@ -20,6 +20,15 @@ export type DiagnosticEvent = {
   hint?: string;
   /** Link to docs explaining the event */
   docLink?: string;
+  /** How many events of this type the dedup window swallowed since the last
+   *  one that got through. Present (and > 0) only when something WAS
+   *  suppressed. Dedup keys on `type` alone, so a suppressed event may have
+   *  carried a DIFFERENT message — a second cell failing while the first is
+   *  still inside the window. Suppressing it keeps the volume bounded, which
+   *  is the point; losing the fact that it happened is not, and in the
+   *  subsystem whose whole job is to surface silent failures it was the one
+   *  thing that must not go quiet. */
+  suppressed?: number;
 };
 
 /** Listener callback type */
@@ -46,6 +55,10 @@ let _listeners: Set<DiagnosticListener> = new Set();
 
 /** Dedup map: event type → last-emitted timestamp (ms) */
 let _dedup: Map<string, number> = new Map();
+/** Per-type count of events the window swallowed since the last one emitted.
+ *  Reported on the next event of that type, then cleared — so nothing new is
+ *  emitted (the volume control stays exactly as strict) and nothing is lost. */
+let _suppressed: Map<string, number> = new Map();
 
 const DEDUP_WINDOW_MS = 5_000;
 
@@ -64,6 +77,7 @@ export function initDiagnosticBus(dev: boolean): void {
   _count = 0;
   _listeners = new Set();
   _dedup = new Map();
+  _suppressed = new Map();
 }
 
 /** Returns whether diagnostic bus is in dev mode */
@@ -82,17 +96,30 @@ export function diagEmit(event: Omit<DiagnosticEvent, "ts">): void {
 
   // Dedup check — suppress if same type seen within window
   const last = _dedup.get(event.type);
-  if (last !== undefined && now - last < DEDUP_WINDOW_MS) return;
+  if (last !== undefined && now - last < DEDUP_WINDOW_MS) {
+    // Suppressed — but REMEMBER it. The next one through carries the count.
+    _suppressed.set(event.type, (_suppressed.get(event.type) ?? 0) + 1);
+    return;
+  }
   _dedup.set(event.type, now);
+  const swallowed = _suppressed.get(event.type) ?? 0;
+  if (swallowed > 0) _suppressed.delete(event.type);
 
   // Prune stale entries when Map grows beyond threshold
   if (_dedup.size > 50) {
     for (const [t, ts] of _dedup) {
-      if (now - ts > DEDUP_WINDOW_MS) _dedup.delete(t);
+      if (now - ts > DEDUP_WINDOW_MS) {
+        _dedup.delete(t);
+        // A type nobody has emitted for a full window has no "next event" to
+        // report on; drop its tally rather than leak the entry.
+        _suppressed.delete(t);
+      }
     }
   }
 
-  const full: DiagnosticEvent = { ...event, ts: now };
+  const full: DiagnosticEvent = swallowed > 0
+    ? { ...event, ts: now, suppressed: swallowed }
+    : { ...event, ts: now };
 
   // O(1) ring buffer insert
   _ring[_head] = full;

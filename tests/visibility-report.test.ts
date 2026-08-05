@@ -48,12 +48,35 @@ const trading = cell("trading", {
 Deno.test("1.3: visibilityReport — 3-cell mix (all/none/include), resolved values", () => {
   const report = reportOf([counter, notes, trading]);
   assertEquals(report, [
-    { cell: "counter", ui: "all", persist: "all" },
-    { cell: "notes", ui: "none", persist: "all" },
+    {
+      cell: "counter",
+      ui: "all",
+      persist: "all",
+      access: undefined,
+      // No `ui` on the cell and no cellDefaults → the read side was never
+      // decided. The row still REPORTS "all" (that is what ships); uiDecided
+      // is what tells the two apart.
+      uiDecided: false,
+      fields: ["count"],
+      syncs: false,
+    },
+    {
+      cell: "notes",
+      ui: "none",
+      persist: "all",
+      access: undefined,
+      uiDecided: true,
+      fields: ["items"],
+      syncs: false,
+    },
     {
       cell: "trading",
       ui: { include: ["orders", "positions"] },
       persist: { exclude: ["cache"] },
+      access: undefined,
+      uiDecided: true,
+      fields: ["orders", "positions", "cache"],
+      syncs: false,
     },
   ]);
 });
@@ -61,7 +84,17 @@ Deno.test("1.3: visibilityReport — 3-cell mix (all/none/include), resolved val
 Deno.test("1.3: visibilityReport — cellDefaults propagate when cell has none", () => {
   const report = reportOf([counter], { ui: "none", persist: "none" });
   assertEquals(report, [
-    { cell: "counter", ui: "none", persist: "none" },
+    {
+      cell: "counter",
+      ui: "none",
+      persist: "none",
+      access: undefined,
+      // A cellDefaults `ui` IS a decision — the author made it for every cell
+      // at once. Reporting it as undecided would nag them for having answered.
+      uiDecided: true,
+      fields: ["count"],
+      syncs: false,
+    },
   ]);
 });
 
@@ -71,11 +104,23 @@ Deno.test("1.3: visibilityReport — explicit cell filter wins over cellDefaults
     persist: "none",
   });
   assertEquals(report, [
-    { cell: "counter", ui: "none", persist: "none" },
+    {
+      cell: "counter",
+      ui: "none",
+      persist: "none",
+      access: undefined,
+      uiDecided: true,
+      fields: ["count"],
+      syncs: false,
+    },
     {
       cell: "trading",
       ui: { include: ["orders", "positions"] },
       persist: { exclude: ["cache"] },
+      access: undefined,
+      uiDecided: true,
+      fields: ["orders", "positions", "cache"],
+      syncs: false,
     },
   ]);
 });

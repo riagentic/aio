@@ -134,10 +134,23 @@ Deno.test("denoJson: --target picks the dev/compile DEFAULT per target", () => {
   // orchestrator (identical to the explicit dev:android task).
   assertStringIncludes(tasks("android").dev!, "dev-android.ts");
   assertStringIncludes(tasks("android").compile!, "--android");
-  // headless targets map cli → cli, server → server-only.
+  // headless targets map cli → cli, server → server-only — at DEV time, where
+  // `--client=X` is the flag `aio.run()` reads.
   assertStringIncludes(tasks("cli").dev!, "--client=cli");
   assertStringIncludes(tasks("server").dev!, "--client=server-only");
-  assertStringIncludes(tasks("server").compile!, "--client=server-only");
+  // …and NOT at build time: `--client=X` is a runtime flag that build.ts does
+  // not parse, so passing it there silently built the browser-shaped binary
+  // instead (no `--cli`, no `--service`, no systemd unit — exit 0). This line
+  // used to assert `--client=server-only` in the COMPILE task, pinning that
+  // drift as the contract. The build spelling is the only thing valid here.
+  assertStringIncludes(tasks("cli").compile!, "--cli");
+  assertStringIncludes(tasks("server").compile!, "--service --headless");
+  for (const t of ["electron", "android", "cli", "server"] as const) {
+    assert(
+      !tasks(t).compile!.includes("--client="),
+      `${t}: a runtime --client= flag has no meaning in a compile task`,
+    );
+  }
 });
 
 // ── scaffold file set ───────────────────────────────────────────────────────

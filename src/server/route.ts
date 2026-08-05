@@ -81,6 +81,24 @@ export interface RouteOptions {
   method?: string | string[];
 }
 
+/** THE reserved-namespace predicate — one decider, asked twice.
+ *
+ *  `/__aio/*` (health, metrics, vitals, snapshot, the trojan, the dev module
+ *  routes the shell imports) and `/ws` belong to the framework. That was
+ *  enforced at boot against the PATTERN TEXT only, so the rule held for
+ *  `"/__aio/x"` and evaporated for any pattern that MATCHES those paths without
+ *  naming them: a plain SPA catch-all (`"/*"`, or `"/:page"`) silently ate
+ *  `/__aio/health`, `/__aio/metrics`, `/__aio/snapshot` AND every
+ *  `/__aio/**.ts` module the dev shell imports — i.e. the whole dev UI, with no
+ *  error anywhere. Two deciders for "is this path the framework's": a string
+ *  prefix on the pattern at boot, and whatever matched first at request time.
+ *
+ *  Now both ask this. At boot it refuses a pattern inside the namespace (loud,
+ *  as before); at dispatch it keeps a wildcard from capturing it. */
+export function isReservedRoutePath(pathname: string): boolean {
+  return pathname === "/ws" || pathname.startsWith("/__aio");
+}
+
 /** `decodeURIComponent` that never throws. Path segments and cookie values are
  *  attacker-controlled: a malformed escape (`%zz`) raises URIError, and this
  *  runs on the request path — for cookies, on EVERY request, since

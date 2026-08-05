@@ -6,7 +6,7 @@
 import { join } from "@std/path";
 import { appDirs } from "../server/app-dirs.ts";
 import type { GlobalFlags } from "./am-types.ts";
-import { detectMode, formatUptime, out, outError } from "./am-output.ts";
+import { detectMode, fail, formatUptime, out, outError } from "./am-output.ts";
 import {
   amCtx,
   parseNumArg,
@@ -24,17 +24,36 @@ import {
 
 // ── Constants ───────────────────────────────────────────────
 
-/** Raw stdout+stderr of the app `am` launched — `~/.<appId>/logs/stdout.log`
- *  since alpha38 (it was `<project>/.aio.log`, which put half of one app's
- *  output in the project and half in the app dir). The old path is still read so
- *  `am log` works against an app that is still running from before the move. */
-function stdoutLogPath(flags: GlobalFlags): string {
-  const current = join(appDirs(resolveAmAppId(flags.app)).logs, "stdout.log");
-  try {
-    Deno.statSync(current);
-    return current;
-  } catch { /* not there — fall back to the pre-alpha38 project file */ }
-  return ".aio.log";
+/** THE resolver for "which file does `am log` read" — one function, so the CLI
+ *  cannot look somewhere no aio version writes.
+ *
+ *  - default: raw stdout+stderr of the app `am` launched —
+ *    `~/.<appId>/logs/stdout.log` since alpha38 (it was `<project>/.aio.log`,
+ *    which put half of one app's output in the project and half in the app dir).
+ *  - `--client`: forwarded browser/Electron console output. The server writes it
+ *    through `src/server/client-log.ts` into the ACTIVE LOGGER'S directory,
+ *    i.e. `~/.<appId>/logs/client.log` (`.aio/log/client.log` before alpha38).
+ *    `am` used to carry its own literal `"log/client.log"` — a relative path no
+ *    aio version has ever written — so `am log --client` answered "(no client
+ *    log yet)" for every app that has ever existed, and exited 0 doing it.
+ *
+ *  The pre-alpha38 path is still read so `am log` works against an app that is
+ *  still running from before the move. Returns the CURRENT path when neither
+ *  exists, so the error names where a running app would have put it. */
+export function logPathFor(flags: GlobalFlags): string {
+  const client = flags.client !== undefined;
+  const current = join(
+    appDirs(resolveAmAppId(flags.app)).logs,
+    client ? "client.log" : "stdout.log",
+  );
+  const legacy = client ? join(".aio", "log", "client.log") : ".aio.log";
+  for (const p of [current, legacy]) {
+    try {
+      Deno.statSync(p);
+      return p;
+    } catch { /* try the next one */ }
+  }
+  return current;
 }
 
 // ── Client commands ─────────────────────────────────────────
@@ -129,13 +148,13 @@ export async function cmdLog(
 ): Promise<void> {
   const mode = detectMode(flags);
 
-  // --client flag: tail logs/client.log instead of the stdout capture
-  if (flags.client !== undefined) {
-    await _tailClientLog(flags);
-    return;
-  }
-
-  const LOG_FILE = stdoutLogPath(flags);
+  // ONE tail for both files. `--client` used to run a SECOND, hand-written
+  // implementation that ignored the output mode entirely (raw `console.log`
+  // even under `--json`, so the documented `am log --client --json | jq …`
+  // could never parse), polled instead of watching, and read a path of its own
+  // invention. Two tails meant two answers to "what does `am log` print"; the
+  // flag now only picks the file.
+  const LOG_FILE = logPathFor(flags);
 
   const filter = args[0] ?? flags.filter;
   const n = flags.lines ?? 50;
@@ -163,15 +182,28 @@ export async function cmdLog(
     } else console.log(tail.join("\n"));
     offset = Deno.statSync(LOG_FILE).size;
   } catch {
+    // Nothing to read. Without --follow that is a FAILURE, and it names the
+    // path — "no log file found" named none, so an app whose data dir moved
+    // (AIO_APPS_DIR / appDir) looked identical to an app that had never
+    // logged, and the zero exit told a script both were fine.
     if (!follow) {
-      outError("no log file found", mode);
-      return;
+      fail(`no log file at ${LOG_FILE}`, mode);
     }
   }
 
   if (!follow) return;
 
-  // --follow / -f: stream new bytes as they arrive (like tail -f)
+  // --follow / -f: stream new bytes as they arrive (like tail -f). Deno.watchFs
+  // throws on a path that does not exist yet, so wait for it — following a log
+  // that has not had its first line written is the normal case for `--client`.
+  while (true) {
+    try {
+      Deno.statSync(LOG_FILE);
+      break;
+    } catch {
+      await new Promise((r) => setTimeout(r, 500));
+    }
+  }
   const enc = new TextEncoder();
   const watcher = Deno.watchFs(LOG_FILE);
   let buf = "";
@@ -207,89 +239,6 @@ export async function cmdLog(
         file.close();
       }
     } catch { /* file rotated or removed */ }
-  }
-}
-
-async function _tailClientLog(flags: GlobalFlags): Promise<void> {
-  const n = flags.lines ?? 50;
-  const follow = flags.follow ?? false;
-  const filter = flags.filter;
-  const logPath = "log/client.log";
-
-  try {
-    const content = await Deno.readTextFile(logPath);
-    let lines = content.split("\n").filter(Boolean);
-    if (filter) {
-      const lc = filter.toLowerCase();
-      lines = lines.filter((l) => l.toLowerCase().includes(lc));
-    }
-    const tail = lines.slice(-n);
-    for (const line of tail) console.log(line);
-
-    if (!follow) return;
-
-    // Follow mode — poll for new content
-    let offset = (await Deno.stat(logPath)).size;
-    const poll = async () => {
-      try {
-        const stat = await Deno.stat(logPath);
-        if (stat.size > offset) {
-          const f = await Deno.open(logPath, { read: true });
-          try {
-            await f.seek(offset, Deno.SeekMode.Start);
-            const buf = new Uint8Array(stat.size - offset);
-            await f.read(buf);
-            const newContent = new TextDecoder().decode(buf);
-            const newLines = newContent.split("\n").filter(Boolean);
-            for (const line of newLines) {
-              if (
-                !filter || line.toLowerCase().includes(filter.toLowerCase())
-              ) {
-                console.log(line);
-              }
-            }
-          } finally {
-            f.close();
-          }
-          offset = stat.size;
-        }
-      } catch { /* file may not exist yet */ }
-    };
-    setInterval(poll, 500);
-    await new Promise(() => {});
-  } catch {
-    console.log("(no client log yet)");
-    if (follow) {
-      // Wait for file to appear, then start tailing
-      let offset = 0;
-      const poll = async () => {
-        try {
-          const stat = await Deno.stat(logPath);
-          if (stat.size > offset) {
-            const f = await Deno.open(logPath, { read: true });
-            try {
-              await f.seek(offset, Deno.SeekMode.Start);
-              const buf = new Uint8Array(stat.size - offset);
-              await f.read(buf);
-              const text = new TextDecoder().decode(buf);
-              const newLines = text.split("\n").filter(Boolean);
-              for (const line of newLines) {
-                if (
-                  !filter || line.toLowerCase().includes(filter!.toLowerCase())
-                ) {
-                  console.log(line);
-                }
-              }
-            } finally {
-              f.close();
-            }
-            offset = stat.size;
-          }
-        } catch { /* not yet */ }
-      };
-      setInterval(poll, 1000);
-      await new Promise(() => {});
-    }
   }
 }
 
@@ -726,6 +675,7 @@ export async function cmdSurface(
     Deno.exit(1);
   }
   let result = await trojanGet(port, `surface/${target}${q}`, appId, 10_000);
+  let headlessRender = target === "server";
   if (!result.ok && explicit === undefined) {
     // No client connected and none requested → fall back to the headless
     // server-side render. Loud about it.
@@ -740,6 +690,7 @@ export async function cmdSurface(
         console.error("(no client connected — server-side render)");
       }
       result = headless;
+      headlessRender = true;
     }
   }
   if (!result.ok) {
@@ -774,10 +725,16 @@ export async function cmdSurface(
     return;
   }
   console.log(roots.map((r) => renderSurface(r)).join("\n"));
+  // The hint has to be a command that can actually RUN. A headless render has
+  // no client behind it and `am trigger` drives a client, so `am trigger 0`
+  // here dead-ends the observe -> act -> observe loop one step after this line
+  // (it used to print exactly that, because the hint assumed a client).
   console.log(
-    `trigger with: am trigger ${
-      target === "server" ? 0 : target
-    } "<Component…:Element>" <action> [text]`,
+    headlessRender
+      ? `this is a server-side render — am trigger drives a CONNECTED ` +
+        `client: open the app (or start it with --client=browser), then ` +
+        `am surface 0`
+      : `trigger with: am trigger ${target} "<Component…:Element>" <action> [text]`,
   );
 }
 
@@ -835,27 +792,41 @@ export async function cmdTrigger(
     );
     Deno.exit(1);
   }
+  // ONE decider for "did this trigger actually happen".
+  //
+  // A trigger's reply carries its OWN `ok`: `runUITrigger` (src/air/ui-remote.ts)
+  // answers a path that is not on the live surface with
+  // `{ok:false, error, available:[…]}` — inside an HTTP 200, because the
+  // *request* succeeded. `am trigger` used to check only the transport-level
+  // `result.ok` on the action itself (while the `clear` half of `setValue`, four
+  // lines away, DID check the body's `ok`): two rules for one fact, and the
+  // weaker one sat on the path every trigger takes. The documented agent loop
+  // — observe → act → observe — then reported the ACT as done when nothing was
+  // clicked, and a script chaining on `&&` walked straight past it.
+  //
+  // The body is still printed either way: `available` is how a caller
+  // self-corrects without another round-trip. Only the exit code changes.
+  const post = async (body: Record<string, unknown>): Promise<unknown> => {
+    const r = await trojanPost(port, `trigger/${idx}`, body, appId);
+    if (!r.ok) {
+      outError(r.error, mode);
+      Deno.exit(1);
+    }
+    const data = r.data as { ok?: boolean } | null;
+    if (data && data.ok === false) {
+      out(data, mode);
+      Deno.exit(1);
+    }
+    return r.data;
+  };
+
   // setValue = clear, then type — testUI's exact definition, composed here so
   // the wire action set stays the one both drivers share. The clear's own
-  // result is inspected: on a path miss the element does not exist, and typing
-  // into it next would answer with a second, identical miss instead of the
-  // first one's `available` list.
+  // result is inspected too: on a path miss the element does not exist, and
+  // typing into it next would answer with a second, identical miss instead of
+  // the first one's `available` list.
   if (action === "setValue") {
-    const cleared = await trojanPost(
-      port,
-      `trigger/${idx}`,
-      { path, action: "clear" },
-      appId,
-    );
-    if (!cleared.ok) {
-      outError(cleared.error, mode);
-      Deno.exit(1);
-    }
-    const r = cleared.data as { ok?: boolean } | null;
-    if (r && r.ok === false) {
-      out(r, mode);
-      Deno.exit(1);
-    }
+    await post({ path, action: "clear" });
   }
   const wire = action === "setValue" ? "type" : action;
   const body: Record<string, unknown> = { path, action: wire };
@@ -866,17 +837,12 @@ export async function cmdTrigger(
   if (wire === "press" || wire === "keyDown" || wire === "keyUp") {
     body.key = text ?? "Enter";
   }
-  const result = await trojanPost(port, `trigger/${idx}`, body, appId);
-  if (!result.ok) {
-    outError(result.error, mode);
-    Deno.exit(1);
-  }
+  const replied = await post(body);
   // Report the action the caller asked for, not the wire action it decomposed
   // into — a reply saying "type" to a `setValue` request reads like the command
   // did something else.
-  const data = action === "setValue" && result.data &&
-      typeof result.data === "object"
-    ? { ...result.data as Record<string, unknown>, action }
-    : result.data;
+  const data = action === "setValue" && replied && typeof replied === "object"
+    ? { ...replied as Record<string, unknown>, action }
+    : replied;
   out(data, mode);
 }

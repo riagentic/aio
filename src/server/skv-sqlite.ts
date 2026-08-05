@@ -7,7 +7,7 @@
 // Legacy Deno.Kv data auto-migrates on first boot (see migrateLegacyKv).
 
 import type { DB } from "../db/types.ts";
-import type { SkvInstance } from "./skv.ts";
+import type { SkvInstance, SkvStmt } from "./skv.ts";
 
 /** Key separator for multi-key rows. Unit Separator (U+001F) — cell names
  *  are identifier-safe by validation, so it can never collide. */
@@ -18,17 +18,45 @@ const HIGH = "￿";
 export const SKV_SCHEMA =
   `CREATE TABLE IF NOT EXISTS aio_kv (k TEXT PRIMARY KEY, v TEXT NOT NULL)`;
 
+/** Upsert one key — THE one statement both `set` and `planSet` use, so a
+ *  planned write and a direct write can never drift apart. */
+const upsert = (key: string, val: unknown): SkvStmt => ({
+  sql: `INSERT INTO aio_kv (k, v) VALUES (?, ?)
+         ON CONFLICT(k) DO UPDATE SET v = excluded.v`,
+  params: [key, JSON.stringify(val) ?? "null"],
+});
+
+/** The statements a `setMulti` runs — see `SkvInstance.planSetMulti`. */
+function planMulti(
+  prefix: string,
+  obj: Record<string, unknown>,
+  prevKeys: string[] = [],
+): SkvStmt[] {
+  const stmts: SkvStmt[] = [];
+  for (const [k, v] of Object.entries(obj)) {
+    stmts.push(upsert(`${prefix}${SEP}${k}`, v));
+  }
+  for (const k of prevKeys) {
+    if (!(k in obj)) {
+      stmts.push({
+        sql: `DELETE FROM aio_kv WHERE k = ?`,
+        params: [`${prefix}${SEP}${k}`],
+      });
+    }
+  }
+  return stmts;
+}
+
 /** SkvInstance backed by SQLite. JSON values; multi-key writes atomic. */
 export function sqliteKv(db: DB): SkvInstance {
   return {
     set: async (key, val) => {
-      await db.execute(
-        `INSERT INTO aio_kv (k, v) VALUES (?, ?)
-         ON CONFLICT(k) DO UPDATE SET v = excluded.v`,
-        [key, JSON.stringify(val) ?? "null"],
-      );
+      const s = upsert(key, val);
+      await db.execute(s.sql, s.params);
       return { ok: true as const, versionstamp: "" };
     },
+    planSet: (key, val) => [upsert(key, val)],
+    planSetMulti: planMulti,
     get: async <T>(key: string) => {
       const { rows } = await db.query<{ v: string }>(
         `SELECT v FROM aio_kv WHERE k = ?`,
@@ -41,23 +69,7 @@ export function sqliteKv(db: DB): SkvInstance {
     },
     close: () => Promise.resolve(), // db lifecycle owned by the app
     setMulti: async (prefix, obj, prevKeys = []) => {
-      const stmts: { sql: string; params?: unknown[] }[] = [];
-      for (const [k, v] of Object.entries(obj)) {
-        stmts.push({
-          sql: `INSERT INTO aio_kv (k, v) VALUES (?, ?)
-                ON CONFLICT(k) DO UPDATE SET v = excluded.v`,
-          params: [`${prefix}${SEP}${k}`, JSON.stringify(v) ?? "null"],
-        });
-      }
-      for (const k of prevKeys) {
-        if (!(k in obj)) {
-          stmts.push({
-            sql: `DELETE FROM aio_kv WHERE k = ?`,
-            params: [`${prefix}${SEP}${k}`],
-          });
-        }
-      }
-      await db.transaction(stmts);
+      await db.transaction(planMulti(prefix, obj, prevKeys));
       return { ok: true as const, versionstamp: "" };
     },
     getMulti: async <T>(prefix: string) => {

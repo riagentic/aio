@@ -4,9 +4,7 @@ import {
   useAio as _airUseAio,
   useCell as _airUseCell,
   useConnected as _airUseConnected,
-  useLocal as _airUseLocal,
 } from "../adapters/air.ts";
-import type { UseLocalResult } from "../adapters/air.ts";
 import { useRef } from "../air/aio-renderer.ts";
 import { _projectWithSharing, ensureConnected } from "./browser-protocol.ts";
 import type { _CoreCellRef as CellRef } from "./browser-protocol.ts";
@@ -64,10 +62,15 @@ export function useAio<
 }
 
 /** AIR useLocal -- signal-backed local state. No server connection needed.
- *  set() accepts value or updater function. patch() merges partial object updates. */
-export function useLocal<T>(initial: T): UseLocalResult<T> {
-  return _airUseLocal(initial);
-}
+ *  set() accepts value or updater function. patch() merges partial object
+ *  updates.
+ *
+ *  Re-exported, not wrapped: it needs no transport, so every target ships the
+ *  SAME function. A pass-through wrapper here is what let the android entry
+ *  (src/standalone-air.ts, which `aio/air` resolves to on that target) carry a
+ *  third `useLocal` with no tuple form and no patch() — the documented spelling
+ *  threw, on one target only. */
+export { useLocal } from "../adapters/air.ts";
 
 /** AIR useConnected -- signal-based connection status. Calls ensureConnected(). */
 export function useConnected(): boolean {
@@ -88,10 +91,7 @@ export function useProjection<T>(fn: () => T, _deps?: unknown[]): T {
   return projected;
 }
 
-/** No-op in AIR -- the renderer has built-in auto-memo via shallow prop comparison. */
-export function memo<P extends Record<string, unknown>>(
-  Component: (props: P) => unknown,
-  _compare?: (prev: P, next: P) => boolean,
-): (props: P) => unknown {
-  return Component;
-}
+/** No-op in AIR -- the renderer has built-in auto-memo via shallow prop
+ *  comparison. Defined in ../air/memo.ts so the android entry can export the
+ *  SAME function without importing the browser transport. */
+export { memo } from "../air/memo.ts";

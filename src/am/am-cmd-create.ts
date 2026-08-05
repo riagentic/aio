@@ -13,8 +13,13 @@
  */
 
 import { VERSION } from "../server/aio.ts";
+import {
+  AIO_ENTRY_PATHS,
+  AIO_LIBRARY_ENTRIES,
+  entrySubpath,
+} from "../entries.ts";
 import type { GlobalFlags } from "./am-types.ts";
-import { detectMode, out, outError } from "./am-output.ts";
+import { detectMode, fail, out } from "./am-output.ts";
 import { resolve } from "@std/path";
 import {
   ensureVersion,
@@ -117,68 +122,39 @@ export function frameworkSpecs(source: boolean): {
   doctor: string;
   aiol: string;
 } {
+  // EVERY public entry point, not just the ones the template happens to use:
+  // the docs tell people to `import { createDB } from "aio/db"` (or aio/ui,
+  // aio/server, `dbWorkerInclude` from aio/build, …), and a specifier the app
+  // can't resolve is the "docs lie" class of failure — the app author has no
+  // way to know the mapping was simply missing from their deno.json. Derived
+  // from THE entry list (src/entries.ts) rather than retyped, because a
+  // hand-kept second copy is exactly how `aio/build` went missing here.
+  const spec = (s: string) =>
+    source
+      ? `./dep/aio/${AIO_ENTRY_PATHS[s]}`
+      : `jsr:${PKG}@${VERSION}${entrySubpath(s)}`;
+  const imports: Record<string, string> = {};
+  for (const s of Object.keys(AIO_LIBRARY_ENTRIES)) imports[s] = spec(s);
   if (source) {
     // Consuming framework SOURCE via the `dep/aio` symlink — the app's map must
     // also carry the source's own bare deps (esbuild/immer/@std), which JSR
     // would otherwise resolve transitively.
-    return {
-      imports: {
-        // EVERY public entry point, not just the ones the template happens to
-        // use: the docs tell people to `import { createDB } from "aio/db"` (or
-        // aio/ui, aio/server, …), and a specifier the app can't resolve is the
-        // "docs lie" class of failure — the app author has no way to know the
-        // mapping was simply missing from their deno.json.
-        "aio": "./dep/aio/mod.ts",
-        "aio/air": "./dep/aio/src/air.ts",
-        "aio/air/compat": "./dep/aio/src/air-compat.ts",
-        "aio/ui": "./dep/aio/src/ui/mod.ts",
-        "aio/jsx-runtime": "./dep/aio/src/jsx-runtime.ts",
-        "aio/server": "./dep/aio/src/server-entry.ts",
-        "aio/db": "./dep/aio/src/db/mod.ts",
-        "aio/sync": "./dep/aio/src/sync/mod.ts",
-        "aio/schedule": "./dep/aio/src/schedule.ts",
-        "aio/selectors": "./dep/aio/src/selector.ts",
-        "aio/extras": "./dep/aio/src/extras/mod.ts",
-        "aio/state-core": "./dep/aio/src/state-core.ts",
-        "aio/testing": "./dep/aio/src/cell-test.ts",
-        "esbuild": "npm:esbuild@^0.24",
-        "immer": "npm:immer@^10",
-        "happy-dom": "npm:happy-dom@^17",
-        "@std/path": "jsr:@std/path@^1",
-        "@std/assert": "jsr:@std/assert@^1",
-      },
-      build: "./dep/aio/src/build.ts",
-      buildAll: "./dep/aio/src/build-all.ts",
-      devAndroid: "./dep/aio/src/dev-android.ts",
-      am: "./dep/aio/src/am.ts",
-      doctor: "./dep/aio/src/server/doctor.ts",
-      aiol: "./dep/aio/aiol/mod.ts",
-    };
+    Object.assign(imports, {
+      "esbuild": "npm:esbuild@^0.24",
+      "immer": "npm:immer@^10",
+      "happy-dom": "npm:happy-dom@^17",
+      "@std/path": "jsr:@std/path@^1",
+      "@std/assert": "jsr:@std/assert@^1",
+    });
   }
-  // JSR: the published package resolves its own deps, so the app map stays tiny.
-  const v = `jsr:${PKG}@${VERSION}`;
   return {
-    imports: {
-      "aio": v,
-      "aio/air": `${v}/air`,
-      "aio/air/compat": `${v}/air/compat`,
-      "aio/ui": `${v}/ui`,
-      "aio/jsx-runtime": `${v}/jsx-runtime`,
-      "aio/server": `${v}/server`,
-      "aio/db": `${v}/db`,
-      "aio/sync": `${v}/sync`,
-      "aio/schedule": `${v}/schedule`,
-      "aio/selectors": `${v}/selectors`,
-      "aio/extras": `${v}/extras`,
-      "aio/state-core": `${v}/state-core`,
-      "aio/testing": `${v}/testing`,
-    },
-    build: `${v}/build`,
-    buildAll: `${v}/build-all`,
-    devAndroid: `${v}/dev-android`,
-    am: `${v}/am`,
-    doctor: `${v}/doctor`,
-    aiol: `${v}/aiol`,
+    imports,
+    build: spec("aio/build"),
+    buildAll: spec("aio/build-all"),
+    devAndroid: spec("aio/dev-android"),
+    am: spec("aio/am"),
+    doctor: spec("aio/doctor"),
+    aiol: spec("aio/aiol"),
   };
 }
 
@@ -218,16 +194,28 @@ export function standardTasks(
     : `deno run -A src/app.ts${
       target === "browser" ? "" : ` --client=${clientFlagFor(target)}`
     }`;
-  const compileArgs = target === "browser"
-    ? "--compile"
-    : target === "electron"
-    ? "--compile --electron"
-    : target === "android"
-    ? "--android"
-    : target === "cli"
-    ? "--compile --client=cli"
-    : "--compile --client=server-only";
-  const compileDefault = `deno run -A ${fw.build} ${compileArgs}`;
+  // THE compile-flag decider: what BUILD flags each target is built with, in
+  // one table that both the default `compile` task and the explicit
+  // `compile:<target>` task read.
+  //
+  // Written twice, they drifted — and drifted SILENTLY, because build.ts reads
+  // its flags with `Deno.args.includes()`: the default task passed the RUNTIME
+  // flags `--client=cli` / `--client=server-only` (what `aio.run()` reads),
+  // which the build simply did not recognize, so `deno task compile` on a
+  // cli/server app built the browser-shaped binary — a browser bundle embedded,
+  // no systemd unit written, exit 0, and a different artifact from
+  // `deno task compile:cli` / `compile:service` for the same app. build.ts now
+  // refuses an unknown flag (build-config.ts `unknownBuildFlags`); this makes
+  // the two spellings ONE.
+  const COMPILE_FLAGS: Record<Target, string> = {
+    browser: "--compile",
+    electron: "--compile --electron",
+    android: "--android",
+    cli: "--compile --cli",
+    server: "--compile --service --headless",
+  };
+  const compileFor = (t: Target) =>
+    `deno run -A ${fw.build} ${COMPILE_FLAGS[t]}`;
   return {
     // ── dev: `deno task dev` runs the configured target. Explicit per-target
     // tasks always pass --client so they work regardless of `target`. ──
@@ -256,12 +244,12 @@ export function standardTasks(
     // target at a time; `build` fans out over the fleet. ──
     build: `deno run -A ${fw.buildAll} --build-spec=${fw.build}`,
     // ── compile: `deno task compile` builds the configured target. ──
-    compile: compileDefault,
-    "compile:browser": `deno run -A ${fw.build} --compile`,
-    "compile:electron": `deno run -A ${fw.build} --compile --electron`,
-    "compile:android": `deno run -A ${fw.build} --android`,
-    "compile:cli": `deno run -A ${fw.build} --compile --cli`,
-    "compile:service": `deno run -A ${fw.build} --compile --service --headless`,
+    compile: compileFor(target),
+    "compile:browser": compileFor("browser"),
+    "compile:electron": compileFor("electron"),
+    "compile:android": compileFor("android"),
+    "compile:cli": compileFor("cli"),
+    "compile:service": compileFor("server"),
     // Unified aio client: standalone Electron connect-page AppImage.
     "compile:client": `deno run -A ${fw.build} --client`,
     // ── compile:remote — server binary (+ systemd unit) and, where the
@@ -367,39 +355,38 @@ export async function cmdCreate(
   const opts = parseCreateArgs(args);
 
   if (!opts.name) {
-    outError(
+    fail(
       "usage: am create <name> [--template=counter|todo] [--target=browser|electron|android|cli|server]",
       mode,
     );
-    return;
   }
   if (!/^[a-z0-9][a-z0-9._-]*$/i.test(opts.name)) {
-    outError(
+    fail(
       `invalid project name '${opts.name}' — start with a letter/digit, then letters, digits, '-', '_', '.'`,
       mode,
     );
-    return;
   }
   if (!TEMPLATES.includes(opts.template)) {
-    outError(
+    fail(
       `unknown template '${opts.template}' — choose: ${TEMPLATES.join(", ")}`,
       mode,
     );
-    return;
   }
 
   const dir = resolve(Deno.cwd(), opts.name);
-  // Refuse a non-empty target — never clobber existing work silently.
+  // Refuse a non-empty target — never clobber existing work silently. The
+  // refusal is issued OUTSIDE the try: `fail()` does not return, and the
+  // catch-all that absorbs "directory doesn't exist" would absorb it too.
+  let occupied = false;
   try {
-    const entries = [...Deno.readDirSync(dir)];
-    if (entries.length > 0 && !opts.force) {
-      outError(
-        `'${opts.name}' already exists and is not empty — pick another name or pass --force`,
-        mode,
-      );
-      return;
-    }
+    occupied = [...Deno.readDirSync(dir)].length > 0 && !opts.force;
   } catch { /* doesn't exist — good */ }
+  if (occupied) {
+    fail(
+      `'${opts.name}' already exists and is not empty — pick another name or pass --force`,
+      mode,
+    );
+  }
 
   // DEFAULT is SOURCE mode: the app imports aio through a `dep/aio` SYMLINK to
   // the checkout `am` runs from (the clone install.sh made, or this repo in
@@ -411,12 +398,11 @@ export async function cmdCreate(
   if (source) {
     const root = opts.mirror ? resolve(Deno.cwd(), opts.mirror) : repoRoot();
     if (!root) {
-      outError(
+      fail(
         "can't locate the aio source am runs from — reinstall via install.sh, " +
           "pass --mirror=<path-to-aio>, or use --jsr to pin from JSR.",
         mode,
       );
-      return;
     }
     // Pin a VERSION, not "whatever is installed". `dep/aio` points at a
     // provisioned worktree of the requested release, and the app records which
@@ -428,10 +414,7 @@ export async function cmdCreate(
     if (!opts.mirror) {
       const want = opts.aioVersion ?? await latestTag(root) ?? MAIN;
       const res = await ensureVersion(root, want);
-      if (!res.ok) {
-        outError(res.error, mode);
-        return;
-      }
+      if (!res.ok) fail(res.error, mode);
       aioPath = res.path;
       // The RESOLVED ref: `--aio-version=main` records `main-<sha>`, so the pin
       // committed with the app is always exact (see am-versions.ts).

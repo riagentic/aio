@@ -4,6 +4,7 @@ import type { CellInfo, Checker } from "./types.ts";
 import { join } from "@std/path";
 import * as fix from "./fixes.ts";
 import { RESERVED_KEYS } from "../src/state/cell-types.ts";
+import { AIO_LIBRARY_ENTRIES } from "../src/entries.ts";
 import { removalMessage, removalOf } from "../src/state/removals.ts";
 import { codeMatches, codeText } from "./scan.ts";
 
@@ -87,8 +88,13 @@ export const checkConfig: Checker = (ctx) => {
       'missing "aio" import mapping — add "aio": "jsr:@riagentic/aio@..."',
     );
   }
+  // The React block below only applies to an app that actually maps React —
+  // an aio app renders JSX through AIR (`jsxImportSource: "aio"`), so for
+  // every scaffolded app this is simply "no React dependency". Saying
+  // "server-only / CLI" here labelled a browser app with an App.tsx as
+  // headless: a PASS line that states something untrue is still a wrong report.
   if (!imports["react"] && !imports["react-dom"]) {
-    pass("server-only / CLI (no React)");
+    pass("no React dependency (aio renders JSX through AIR)");
   } else {
     if (!imports["react"]) report("warn", "config", 'missing "react" import');
     if (!imports["@types/react"]) {
@@ -179,11 +185,24 @@ export const checkStructure: Checker = async (ctx) => {
   // app.ts entry point
   if (appEntry) pass("entry: src/app.ts");
   else {
+    // A THIN CLIENT has no `aio.run()` and never will: `src/client.ts` opens a
+    // `connectCli()` connection to a server that runs elsewhere. That is a
+    // first-class target (`compile:cli:remote`, and the shape `am create`
+    // scaffolds as `src/client.ts`), so "create one with aio.run()" was the
+    // linter telling the framework's own remote-CLI layout to become a
+    // different kind of app.
+    const clientEntry = sourceFiles.find((f) =>
+      /\bconnectCli\b/.test(codeText(f.content))
+    );
     // Check for common alternatives
     const altEntry = sourceFiles.find((f) =>
       f.relative === "src/main.ts" || f.relative === "main.ts"
     );
-    if (altEntry) {
+    if (clientEntry) {
+      pass(
+        `entry: ${clientEntry.relative} (thin client — connects to a server)`,
+      );
+    } else if (altEntry) {
       report(
         "hint",
         "structure",
@@ -429,6 +448,17 @@ export const checkCells: Checker = (ctx) => {
   for (const f of cells) {
     const loc = { file: f.file.relative, line: f.line };
 
+    // A completely empty cell — `cell("app", { state: {}, methods: {} })` — is
+    // the THIN-CLIENT REGISTRATION STUB, and it is not optional: `aio.run()`
+    // refuses to boot with no cells at all ("no cells found"), so every
+    // remote/connect-page target (electron-remote, android-remote, …) must
+    // carry exactly this shape. Warning about the one spelling the framework
+    // requires is a rule firing on code that cannot be written any other way.
+    // An empty state with REAL methods still warns — that one is a mistake.
+    const isThinClientStub = f.hasState && f.stateIsLiteral &&
+      f.stateKeys.length === 0 && f.methodNames.length === 0 &&
+      f.actionNames.length === 0 && !f.hasGenerators && !f.hasSelectors;
+
     // Empty state
     if (!f.hasState) {
       report(
@@ -437,7 +467,9 @@ export const checkCells: Checker = (ctx) => {
         `cell "${f.name}" has no state — every cell needs initial state`,
         loc,
       );
-    } else if (f.stateIsLiteral && f.stateKeys.length === 0) {
+    } else if (
+      f.stateIsLiteral && f.stateKeys.length === 0 && !isThinClientStub
+    ) {
       report(
         "warn",
         "cells",
@@ -523,19 +555,30 @@ export const checkCells: Checker = (ctx) => {
 export const checkPerformance: Checker = (ctx) => {
   const { sourceFiles, cells, appEntry, report, pass } = ctx;
 
-  // Check for useAio vs useCell in TSX files
+  // useAio() subscribes a component to the WHOLE app state, so any commit
+  // anywhere re-renders it.
+  //
+  // The fix used to read "prefer useCell(ref)" — which `checkUseCell` warns
+  // about, in the same run, as deprecated. Following one rule earned you the
+  // other: two deciders on one question ("how should a component read state?")
+  // giving opposite answers, which is how a linter loses the benefit of the
+  // doubt. Direct cell access is the single answer; both hooks are the
+  // backward-compat layer.
   for (const file of ctx.tsxFiles) {
     if (file.name === "App.tsx") continue; // root layout — useAio is OK
-    const useAioCount = (file.content.match(/\buseAio\b/g) ?? []).length;
-    const useCellCount = (file.content.match(/\buseCell\b/g) ?? []).length;
+    const code = codeText(file.content);
+    const useAioCount = (code.match(/\buseAio\b/g) ?? []).length;
+    const useCellCount = (code.match(/\buseCell\b/g) ?? []).length;
     if (useAioCount > 0 && useCellCount === 0) {
       report(
         "warn",
         "perf",
-        `${file.relative}: uses useAio() — prefer useCell(ref) for scoped state + selective re-renders`,
+        `${file.relative}: uses useAio() — it subscribes to the ENTIRE app ` +
+          `state, so every commit anywhere re-renders this component. Read the ` +
+          `cell directly (\`counter.count\`) for scoped, selective re-renders`,
         {
           file: file.relative,
-          fix: "Replace useAio() with useCell(myCell)",
+          fix: "Replace useAio().state.counter with counter.count",
         },
       );
     }
@@ -693,13 +736,13 @@ export const checkSecurity: Checker = (ctx) => {
   // Hardcoded tokens/secrets
   const secretPatterns = [
     {
-      re: /token\s*[:=]\s*['"][a-zA-Z0-9_-]{20,}['"]/,
+      re: /token\s*[:=]\s*['"][a-zA-Z0-9_-]{20,}['"]/g,
       desc: "hardcoded token",
     },
-    { re: /password\s*[:=]\s*['"][^'"]{4,}['"]/, desc: "hardcoded password" },
-    { re: /secret\s*[:=]\s*['"][^'"]{8,}['"]/, desc: "hardcoded secret" },
+    { re: /password\s*[:=]\s*['"][^'"]{4,}['"]/g, desc: "hardcoded password" },
+    { re: /secret\s*[:=]\s*['"][^'"]{8,}['"]/g, desc: "hardcoded secret" },
     {
-      re: /api[_-]?key\s*[:=]\s*['"][^'"]{10,}['"]/i,
+      re: /api[_-]?key\s*[:=]\s*['"][^'"]{10,}['"]/gi,
       desc: "hardcoded API key",
     },
   ];
@@ -708,7 +751,13 @@ export const checkSecurity: Checker = (ctx) => {
       continue;
     }
     for (const { re, desc } of secretPatterns) {
-      const match = file.content.match(re);
+      // Code only. `// never write password: "hunter2"` is a WARNING ABOUT the
+      // pattern, not an instance of it, and the doc line that says so was
+      // reported as a hardcoded password. Matching is on the START offset (the
+      // `password` identifier) — `codeText` can't be used here because the
+      // secret IS a string literal and blanking its body would break the
+      // length classes these patterns rely on.
+      const [match] = codeMatches(file.content, re);
       if (match) {
         const lineIdx = file.content.slice(0, match.index).split("\n").length;
         report(
@@ -831,12 +880,12 @@ export const checkPersistence: Checker = (ctx) => {
     );
   }
 
-  // Direct Deno.Kv usage (should use aio persistence)
+  // Direct Deno.Kv usage (should use aio persistence). Code only — the
+  // migration note "we moved off Deno.openKv in alpha28" is not a use of it.
   for (const file of sourceFiles) {
     if (file.name.endsWith(".test.ts")) continue;
-    if (
-      file.content.includes("Deno.openKv") || file.content.includes("Deno.Kv")
-    ) {
+    const code = codeText(file.content);
+    if (code.includes("Deno.openKv") || code.includes("Deno.Kv")) {
       report(
         "hint",
         "persistence",
@@ -859,13 +908,20 @@ export const checkUI: Checker = (ctx) => {
     return;
   }
 
-  // Browser import safety — check .tsx files AND cell files
+  // Browser import safety — check .tsx files AND cell files.
+  //
+  // aio's OWN entry points are deliberately absent from this rule: `checkImports`
+  // owns them, and it knows the mapping to suggest (derived from how the app
+  // already maps bare `aio`, with a --safe-fix). This rule's generic advice —
+  // `Add "aio/db": "npm:aio/db"` — is not just redundant, it is WRONG: there is
+  // no such npm package, so the app that followed it swapped one unresolvable
+  // specifier for another. One question, one decider.
+  const isAioEntry = (spec: string) =>
+    spec === "aio" || spec.startsWith("aio/");
   const BROWSER_IMPORTS = new Set([
     "react",
     "react-dom/client",
     "react/jsx-runtime",
-    "aio",
-    "aio/browser",
   ]);
   const denoImports = new Set(Object.keys(ctx.denoJson?.imports ?? {}));
   const SERVER_ONLY_PREFIXES_CHECK2 = ["@std/", "node:"];
@@ -878,10 +934,19 @@ export const checkUI: Checker = (ctx) => {
     ...cellFiles.filter((f) => f.ext !== ".tsx"), // avoid double-checking
   ];
 
+  // Every import scan below matches on CODE offsets (`codeMatches`), not raw
+  // text. A code-generating file — an `am`-style scaffold, a bundler entry, a
+  // testgen — holds import statements inside template literals, and matching
+  // those reported an ERROR ("import 'some-npm-pkg' not found in deno.json")
+  // about a string the app never imports. `codeText` can't serve here: the
+  // module specifier IS a string literal, so blanking string bodies would
+  // erase the very thing being read. The start offset (the `import` keyword)
+  // is the honest test of "is this a real statement?".
   for (const file of browserCheckedFiles) {
     // Named/default imports
     for (
-      const m of file.content.matchAll(
+      const m of codeMatches(
+        file.content,
         /(?:import|export)\s+.*?\s+from\s+['"]([^'"]+)['"]/g,
       )
     ) {
@@ -890,7 +955,7 @@ export const checkUI: Checker = (ctx) => {
       if (
         m[0]!.startsWith("import type ") || m[0]!.startsWith("import type{")
       ) continue;
-      if (BROWSER_IMPORTS.has(spec)) continue;
+      if (BROWSER_IMPORTS.has(spec) || isAioEntry(spec)) continue;
       if (denoImports.has(spec)) continue; // in deno.json → auto-aliased
       if (SERVER_ONLY_PREFIXES_CHECK2.some((p) => spec.startsWith(p))) continue; // caught by Check 1
       const lineIdx = file.content.slice(0, m.index).split("\n").length;
@@ -908,11 +973,16 @@ export const checkUI: Checker = (ctx) => {
     }
     // Side-effect imports
     for (
-      const m of file.content.matchAll(/(?:^|\n)\s*import\s+['"]([^'"]+)['"]/g)
+      const m of codeMatches(
+        file.content,
+        /(?:^|\n)\s*import\s+['"]([^'"]+)['"]/g,
+      )
     ) {
       const spec = m[1]!;
       if (spec.startsWith(".") || spec.startsWith("/")) continue;
-      if (BROWSER_IMPORTS.has(spec) || denoImports.has(spec)) continue;
+      if (
+        BROWSER_IMPORTS.has(spec) || isAioEntry(spec) || denoImports.has(spec)
+      ) continue;
       if (SERVER_ONLY_PREFIXES_CHECK2.some((p) => spec.startsWith(p))) continue;
       report(
         "error",
@@ -972,7 +1042,8 @@ export const checkUI: Checker = (ctx) => {
 
     // Named/default imports
     for (
-      const m of file.content.matchAll(
+      const m of codeMatches(
+        file.content,
         /(?:import|export)\s+.*?\s+from\s+['"]([^'"]+)['"]/g,
       )
     ) {
@@ -1020,12 +1091,14 @@ export const checkUI: Checker = (ctx) => {
       }
     }
 
-    // Deno.* usage
-    for (const m of file.content.matchAll(/\bDeno\.\w+/g)) {
-      const before = file.content.slice(0, m.index);
-      const lineStart = before.lastIndexOf("\n") + 1;
-      const linePrefix = before.slice(lineStart);
-      if (linePrefix.includes("//") || linePrefix.includes("*")) continue;
+    // Deno.* usage. The old "is there a `//` or a `*` earlier on this line?"
+    // heuristic was wrong in BOTH directions: `s.count = 2 * Deno.pid` was
+    // silently skipped (a `*` is multiplication, not a comment), and a
+    // `Deno.readTextFile` named inside a STRING was reported as an ERROR that
+    // fails the gate. `codeText` is the one decider for "is this real code".
+    const code = codeText(file.content);
+    for (const m of code.matchAll(/\bDeno\.\w+/g)) {
+      const before = code.slice(0, m.index);
       const lineIdx = before.split("\n").length;
       report(
         "error",
@@ -1060,17 +1133,19 @@ export const checkUI: Checker = (ctx) => {
     };
 
     // Level 1: App.tsx → local imports
-    for (const m1 of appTsx.content.matchAll(LOCAL_IMPORT_RE)) {
+    for (const m1 of codeMatches(appTsx.content, LOCAL_IMPORT_RE)) {
       const resolved1 = resolveFile(appTsx, m1[1]!);
       if (!resolved1) continue;
 
       // Level 2: imported file → its local imports
-      for (const m2 of resolved1.content.matchAll(LOCAL_IMPORT_RE)) {
+      for (const m2 of codeMatches(resolved1.content, LOCAL_IMPORT_RE)) {
         const resolved2 = resolveFile(resolved1, m2[1]!);
         if (!resolved2) continue;
 
         // Check level 2 file for server-only imports
-        for (const sm of resolved2.content.matchAll(SERVER_ONLY_IMPORT_RE)) {
+        for (
+          const sm of codeMatches(resolved2.content, SERVER_ONLY_IMPORT_RE)
+        ) {
           const lineIdx =
             resolved2.content.slice(0, sm.index).split("\n").length;
           report(
@@ -1095,7 +1170,7 @@ export const checkUI: Checker = (ctx) => {
   const STATIC_DYN_RE = /\bimport\(\s*['"](\.[^'"]+)['"]\s*\)/g;
 
   for (const file of browserCheckedFiles) {
-    for (const m of file.content.matchAll(STATIC_DYN_RE)) {
+    for (const m of codeMatches(file.content, STATIC_DYN_RE)) {
       const target = m[1]!;
       // *.server.ts is the first-class convention (AIO-55): the build marks
       // these dynamic imports external, so they never enter the browser bundle.
@@ -1112,16 +1187,14 @@ export const checkUI: Checker = (ctx) => {
       // Check if target has server-only imports
       const serverImports: string[] = [];
       for (
-        const sm of resolved.content.matchAll(
+        const sm of codeMatches(
+          resolved.content,
           /(?:import|export)\s+(?!type\s).*?\s+from\s+['"]((?:@std\/|node:)[^'"]+)['"]/g,
         )
       ) {
         serverImports.push(sm[1]!);
       }
-      if (
-        /\bDeno\.\w+/.test(resolved.content) &&
-        !/\/\/.*Deno\./.test(resolved.content)
-      ) {
+      if (/\bDeno\.\w+/.test(codeText(resolved.content))) {
         serverImports.push("Deno.*");
       }
 
@@ -1412,7 +1485,13 @@ export const checkPatterns: Checker = (ctx) => {
       l.trim().startsWith("// deno-lint-ignore-file")
     );
     const isTypeModule = file.name.endsWith("types.ts");
-    const anyLines = (fileLintIgnored || isTypeModule) ? [] : file.lines
+    // Code only — a doc string that says "avoid as any" is advice ABOUT `any`,
+    // not a use of it, and four such lines were reported as four uses.
+    // `codeText` keeps offsets and line breaks, so line numbers still line up
+    // with the original file.
+    const anyLines = (fileLintIgnored || isTypeModule) ? [] : codeText(
+      file.content,
+    ).split("\n")
       .map((l, i) => ({ line: l, num: i + 1, idx: i }))
       .filter(({ line, idx }) => {
         const trimmed = line.trim();
@@ -1701,11 +1780,16 @@ export const checkScheduling: Checker = (ctx) => {
     pass("scheduling configured");
   }
 
-  // Check for schedule IDs with spaces or special chars
+  // Check for schedule IDs with spaces or special chars. Code only — an id
+  // quoted in a `// example: schedule.every("my job!", fn)` comment is
+  // documentation, and it was reported as an ERROR (which fails the gate).
   for (const file of sourceFiles) {
     if (file.name.endsWith(".test.ts")) continue;
     for (
-      const m of file.content.matchAll(/schedule\.\w+\(\s*['"]([^'"]+)['"]/g)
+      const m of codeMatches(
+        file.content,
+        /schedule\.\w+\(\s*['"]([^'"]+)['"]/g,
+      )
     ) {
       const id = m[1]!;
       if (!/^[\w\-:.]+$/.test(id)) {
@@ -1753,11 +1837,18 @@ export const checkMemoUsage: Checker = (ctx) => {
       );
     }
 
-    // Rule 2: .map() rendering memo components without useProjection
-    const hasMap = /\.map\s*\(/.test(file.content);
-    const hasMemo = /\bmemo\s*\(/.test(file.content) ||
-      /\bmemo\b/.test(file.content);
-    const hasUseProjection = file.content.includes("useProjection");
+    // Rule 2: .map() rendering memo components without useProjection.
+    //
+    // The test is an actual `memo(` CALL in code. It used to fall back to
+    // `/\bmemo\b/` — the bare WORD anywhere in the file — so a component that
+    // maps over a list and merely mentions memo in a comment ("deliberately
+    // not memo-ised") was told to wrap transforms it doesn't have. The
+    // fallback also made the real pattern unreachable as a distinct signal:
+    // any file matching it already matched the word.
+    const code = codeText(file.content);
+    const hasMap = /\.map\s*\(/.test(code);
+    const hasMemo = /\bmemo\s*\(/.test(code);
+    const hasUseProjection = code.includes("useProjection");
 
     if (hasMap && hasMemo && !hasUseProjection) {
       report(
@@ -1853,24 +1944,14 @@ function importHeader(content: string): string {
   return out.join("\n");
 }
 
-/** Every public `aio/*` entry point an app may import. A specifier missing from
- *  the app's import map is unresolvable — and the error ("not a dependency and
- *  not in import map") never says the mapping is simply absent, so the app
- *  author reads it as "that entry doesn't exist". */
-const AIO_ENTRIES: Record<string, string> = {
-  "aio/air": "src/air.ts",
-  "aio/air/compat": "src/air-compat.ts",
-  "aio/ui": "src/ui/mod.ts",
-  "aio/jsx-runtime": "src/jsx-runtime.ts",
-  "aio/server": "src/server-entry.ts",
-  "aio/db": "src/db/mod.ts",
-  "aio/sync": "src/sync/mod.ts",
-  "aio/schedule": "src/schedule.ts",
-  "aio/selectors": "src/selector.ts",
-  "aio/extras": "src/extras/mod.ts",
-  "aio/state-core": "src/state-core.ts",
-  "aio/testing": "src/cell-test.ts",
-};
+/** Every public `aio/*` entry point an app may import — derived from THE list
+ *  (`src/entries.ts`), never restated. A hand-kept copy here is how `aio/build`
+ *  (real, published, documented as importable) came to be reported as "not an
+ *  aio entry point": the linter's belief about the surface drifted from the
+ *  surface. Bare `aio` is dropped — the scan only ever matches `aio/…`. */
+const AIO_ENTRIES: Record<string, string> = Object.fromEntries(
+  Object.entries(AIO_LIBRARY_ENTRIES).filter(([spec]) => spec !== "aio"),
+);
 
 export const checkImports: Checker = (ctx) => {
   const { sourceFiles, denoJson, report } = ctx;
@@ -1880,12 +1961,26 @@ export const checkImports: Checker = (ctx) => {
   const map = denoJson?.imports ?? {};
   const base = map["aio"];
   const missing = new Map<string, { file: string; line: number }>();
+  const unknown = new Map<string, { file: string; line: number }>();
   for (const file of sourceFiles) {
     for (
       const m of codeMatches(file.content, /from\s*['"](aio\/[\w./-]+)['"]/g)
     ) {
       const spec = m[1]!;
-      if (map[spec] || !AIO_ENTRIES[spec] || missing.has(spec)) continue;
+      if (map[spec]) continue; // the app mapped it — its call, its meaning
+      // Every `aio/*` specifier is decided HERE (checkUI defers to this rule),
+      // so an entry that does not exist has to be named here too — otherwise
+      // a typo'd `aio/dbb` would be the one import nothing reports.
+      if (!AIO_ENTRIES[spec]) {
+        if (!unknown.has(spec)) {
+          unknown.set(spec, {
+            file: file.relative,
+            line: file.content.slice(0, m.index).split("\n").length,
+          });
+        }
+        continue;
+      }
+      if (missing.has(spec)) continue;
       missing.set(spec, {
         file: file.relative,
         line: file.content.slice(0, m.index).split("\n").length,
@@ -1906,6 +2001,17 @@ export const checkImports: Checker = (ctx) => {
           ? { safeFix: fix.fixAddAioEntry(spec, base, AIO_ENTRIES[spec]!) }
           : {}),
       },
+    );
+  }
+  for (const [spec, where] of unknown) {
+    report(
+      "error",
+      "imports",
+      `${where.file}:${where.line} — "${spec}" is not an aio entry point and ` +
+        `is not in deno.json "imports", so it cannot resolve. Entries: ${
+          Object.keys(AIO_ENTRIES).join(", ")
+        }`,
+      { file: where.file, line: where.line },
     );
   }
 
@@ -2100,9 +2206,12 @@ export const checkPostAwaitRead: Checker = (ctx) => {
       const line = code.slice(0, m.index).split("\n").length;
       // Look at the next few lines only — same logical step.
       const after = code.split("\n").slice(line, line + 4).join("\n");
-      const read = new RegExp(`\\b${cellVar}\\s*\\.\\s*(\\w+)(?!\\s*\\()`).exec(
-        after,
-      );
+      // `\b` before the lookahead is load-bearing: without it `\w+` simply
+      // backtracks one character, so `counter.increment(2)` matched as a read
+      // of `counter.incremen` — a following method CALL reported as a stale
+      // field read, naming an identifier that does not exist.
+      const read = new RegExp(`\\b${cellVar}\\s*\\.\\s*(\\w+)\\b(?!\\s*\\()`)
+        .exec(after);
       if (!read) continue;
       report(
         "hint",
@@ -2151,7 +2260,13 @@ export const checkWorkerPeerReads: Checker = (ctx) => {
     for (const peer of peerNames) {
       // `peer.field` — a property READ. A call (`peer.method(`) already throws
       // loudly at runtime (unbound-runtime guard), so it isn't this trap.
-      const re = new RegExp(`\\b${peer}\\s*\\.\\s*(\\w+)\\s*(?!\\()`, "g");
+      //
+      // `\b` before the lookahead is what makes that exclusion real: with
+      // `(\w+)\s*(?!\()` the `\w+` backtracks one character and the lookahead
+      // never sees the `(`, so `counter.increment(1)` was reported as an
+      // ERROR — "reads counter.incremen", an identifier that appears nowhere —
+      // and a legal peer CALL failed the gate with a false explanation.
+      const re = new RegExp(`\\b${peer}\\s*\\.\\s*(\\w+)\\b(?!\\s*\\()`, "g");
       const m = re.exec(code);
       if (!m) continue;
       const line = code.slice(0, m.index).split("\n").length;
@@ -2182,9 +2297,11 @@ export const checkWorkerPeerReads: Checker = (ctx) => {
 export const checkUseCell: Checker = (ctx) => {
   const { tsFiles, tsxFiles, report } = ctx;
   for (const file of [...tsFiles, ...tsxFiles]) {
-    const idx = file.content.search(/\buseCell\s*\(/);
-    if (idx === -1) continue;
-    const line = file.content.slice(0, idx).split("\n").length;
+    // Code only — a migration note that NAMES useCell( in a comment is the
+    // opposite of a use of it, and it was warned about anyway.
+    const [m] = codeMatches(file.content, /\buseCell\s*\(/g);
+    if (!m) continue;
+    const line = file.content.slice(0, m.index).split("\n").length;
     report(
       "warn",
       "patterns",

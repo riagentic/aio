@@ -98,9 +98,11 @@ export interface AckMessage {
   serverHlc: HLC;
   /** The op's server_ts. Lets the client tell whether a snapshot it already
    *  installed ALREADY contains this op — see `snapshotServerTs` below.
-   *  Absent for a re-ack of a duplicate (the op was persisted by an earlier
-   *  delivery) and from a pre-alpha43 server; the client then falls back to
-   *  its previous behaviour. */
+   *  Present for a duplicate re-ack too (the position is read back from the
+   *  op-log row, or from the compaction tombstone that replaced it). Absent
+   *  only when the store genuinely cannot say — a pre-alpha43 server, or a
+   *  tombstone written before the column existed; the client then falls back
+   *  to its previous behaviour. */
   serverTs?: number;
 }
 

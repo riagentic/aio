@@ -317,8 +317,8 @@ PAYLOAD of the action when a type is given positionally.
 In browser (dev mode): press **Ctrl+.** to toggle the time-travel panel. Shows
 action history with timestamps and performance metrics (`reduce:ms effects:ms`).
 
-From the CLI, three commands expose the dispatch history — every state change,
-what triggered it, and what it changed:
+From the CLI, three commands expose the DISPATCH history — what ran, what
+triggered it, and what it changed:
 
 ```sh
 deno task am timeline                       # recent dispatches + payload + state diff (live)
@@ -343,6 +343,13 @@ deno task am record flow.test.ts --from=J   # turn a journal into a bootCells te
 
 Range forms: `N` (one seq), `N..M` (inclusive), or omit for all. Both read
 `<data>/journal` by default; override with `--from=<path>`.
+
+**`sync: true` cells are not in this history.** Their changes are durable in the
+CRDT op-log rather than the dispatch journal, so the timeline and replay do not
+carry them — read current values with `am state`, and see
+[CRDT Protocol](../persistence/crdt-protocol.md) for how those writes are stored
+and replayed. (This section previously said the commands show "every state
+change", which was not true of sync cells.)
 
 ## Persistence and snapshots
 
@@ -519,7 +526,7 @@ deno task am tables               # list SQLite tables
 deno task am log                  # tail last 50 lines
 deno task am log --filter=ERROR   # filter log lines
 deno task am log --follow         # stream (like tail -f), also: -f
-deno task am log --client         # tail client log (log/client.log)
+deno task am log --client         # tail client log (~/.<appId>/logs/client.log)
 deno task am errors               # last transpile error (dev mode)
 deno task am watch                # hot-restart on file change in src/
 deno task am new cell payments # scaffold cell
@@ -600,7 +607,7 @@ deno task am state | jq '.fleet[0].stats'
 deno task am dispatch portfolio:buy symbol=AAPL qty=10
 deno task am surface --json | jq '.[].elements[] | select(.text == "Login")'
 deno task am trigger 0 App:LoginButton click
-deno task am log --client --json | jq 'select(.level == "ERROR")'
+deno task am log --client --json | jq -r '.lines[]' | grep ERROR
 ```
 
 ## Troubleshooting

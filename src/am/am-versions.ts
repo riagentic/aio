@@ -32,27 +32,35 @@
  * exact string is the whole mechanism.
  */
 
-import { dirname, join } from "@std/path";
-import { homedir } from "../server/paths.ts";
+import { join } from "@std/path";
 
 /** The moving pin — `origin/main`, refreshed on every link. */
 export const MAIN = "main";
 
-/** Where provisioned versions live: `~/.local/lib/aio-versions/<ref>/`.
- *
- *  A sibling of the install clone rather than a directory inside it: a worktree
- *  under the clone would show up as untracked and collide with install.sh's
- *  `git checkout --force`. Fixed location so it is the same on every machine,
- *  and one `rm -rf` away from a clean slate. */
-export function versionsDir(): string {
-  return Deno.env.get("AIO_VERSIONS_DIR") ??
-    join(homedir(), ".local", "lib", "aio-versions");
-}
-
-/** Path a given ref is (or would be) provisioned at. */
-export function versionPath(ref: string): string {
-  return join(versionsDir(), ref);
-}
+// The pin vocabulary — where versions live, what a path pin means, and whether
+// a `dep/aio` link satisfies a pin — lives in `src/server/framework-pin.ts`,
+// because `aio doctor` reports on the same pairing and `server` may not import
+// `am`. It used to be restated there, and the two answers disagreed on every
+// local-dev (`path:`) pin. Re-exported so `am`'s callers keep their imports.
+export {
+  isPathPin,
+  linkSatisfiesPin,
+  PATH_PIN_PREFIX,
+  pathPinTarget,
+  pinnedFrameworkPath,
+  /** The version a linked app is ACTUALLY using, read back from the link
+   *  target. `dep/aio` → `…/aio-versions/<ref>` gives the ref; anything else
+   *  (a dev checkout) reports no ref, because that is the honest answer. */
+  refOfLink,
+  versionPath,
+  versionsDir,
+} from "../server/framework-pin.ts";
+import {
+  isPathPin,
+  pathPinTarget,
+  versionPath,
+  versionsDir,
+} from "../server/framework-pin.ts";
 
 async function git(
   cwd: string,
@@ -218,20 +226,10 @@ export type EnsureResult =
  * target); a tag is checked out once and then reused untouched, because an
  * immutable pin is the entire value proposition.
  */
-/** A LOCAL-DEV pin: `aioVersion: "path:/abs/checkout"` — the app follows a
- *  framework checkout on THIS machine (framework co-development). Deliberately
- *  machine-specific: committing it pins teammates to a path that likely does
- *  not exist, which fails LOUDLY (ensureVersion refuses with the fix) rather
- *  than silently linking something else. `am pin --latest` returns to a
- *  reproducible tag pin. */
-export const PATH_PIN_PREFIX = "path:";
-export function isPathPin(ref: string): boolean {
-  return ref.startsWith(PATH_PIN_PREFIX);
-}
-export function pathPinTarget(ref: string): string {
-  return ref.slice(PATH_PIN_PREFIX.length);
-}
-
+/** A LOCAL-DEV pin (`isPathPin`) is deliberately machine-specific: committing
+ *  it pins teammates to a path that likely does not exist, which fails LOUDLY
+ *  (ensureVersion refuses with the fix) rather than silently linking something
+ *  else. `am pin --latest` returns to a reproducible tag pin. */
 export async function ensureVersion(
   root: string,
   ref: string,
@@ -433,14 +431,6 @@ export async function linkTo(appDir: string, target: string): Promise<void> {
     }
   }
   await Deno.symlink(target, link);
-}
-
-/** The version a linked app is ACTUALLY using, read back from the link target.
- *  `dep/aio` → `…/aio-versions/<ref>` gives the ref; anything else (a dev
- *  checkout) reports the path, because that is the honest answer. */
-export function refOfLink(target: string): string | null {
-  const base = dirname(target);
-  return base === versionsDir() ? target.slice(base.length + 1) : null;
 }
 
 // ── The other half of the pin ───────────────────────────────

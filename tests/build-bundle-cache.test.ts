@@ -22,9 +22,14 @@ import { apkLabel } from "../src/build/build-android.ts";
 import type { BuildConfig } from "../src/build/build-config.ts";
 import { VERSION } from "../src/server/aio-cli.ts";
 
-const cfgFor = (root: string): BuildConfig =>
+/** `appDir` defaults to `root` — the flat layout the scenario below builds
+ *  (App.tsx sits at the project root). Pass another to model a SECOND app in
+ *  the same repo (per-target `entry`), which bundles to the very same
+ *  dist/app.js. */
+const cfgFor = (root: string, appDir = root): BuildConfig =>
   ({
     root,
+    appDir,
     out: join(root, "dist", "app.js"),
     dist: join(root, "dist"),
     doForce: false,
@@ -68,8 +73,9 @@ async function scenario(): Promise<
   await write(
     join(root, ".aio", "bundle-inputs.json"),
     JSON.stringify({
-      v: 1,
+      v: 2,
       out: join(root, "dist", "app.js"),
+      app: root, // the app this bundle was built FROM (flat layout: appDir = root)
       inputs: Object.values(inputs),
     }),
   );
@@ -129,9 +135,48 @@ Deno.test("bundle cache: a record written for another artifact is ignored", asyn
   try {
     await Deno.writeTextFile(
       join(root, ".aio", "bundle-inputs.json"),
-      JSON.stringify({ v: 1, out: "/somewhere/else/app.js", inputs: [] }),
+      JSON.stringify({
+        v: 2,
+        out: "/somewhere/else/app.js",
+        app: root,
+        inputs: [],
+      }),
     );
     assertEquals(await isBundleFresh(cfgFor(root)), false);
+  } finally {
+    await Deno.remove(workspace, { recursive: true });
+  }
+});
+
+// ── two apps, one repo: `dist/app.js` is not enough of a key ────────────────
+// `"targets": { "server": { "entry": "src/relay/app.ts" }, "browser": {} }` is
+// a supported layout (TargetOverride.entry). EVERY target bundles to the SAME
+// dist/app.js and stamps it with the same version + shape, so nothing in the
+// artifact or in the mtimes distinguished app A's bundle from app B's: the
+// second app's build printed "cached — use --force", shipped app A's UI and
+// exited 0. On a headless target it is worse — that path never rebuilds, so
+// `embedVerdict` saw `fresh: true` and embedded the other app's bundle
+// verbatim into the binary.
+Deno.test("bundle cache: a bundle built from ANOTHER app in the same repo is not fresh", async () => {
+  const { root, workspace } = await scenario();
+  try {
+    // Control: the app the record was written for is still cached.
+    assertEquals(await isBundleFresh(cfgFor(root)), true, "control (same app)");
+
+    // A second app in the same repo — its own App.tsx, its own app dir, the
+    // same dist/app.js. Its sources are OLDER than the bundle (they were
+    // written first), so every mtime says "fresh".
+    const other = join(root, "relay");
+    await write(join(other, "App.tsx"), "// app B\n");
+    const st = await Deno.stat(join(root, "dist", "app.js"));
+    const old = new Date(st.mtime!.getTime() - 60_000);
+    await Deno.utime(join(other, "App.tsx"), old, old);
+
+    assertEquals(
+      await isBundleFresh(cfgFor(root, other)),
+      false,
+      "the other app's build must NOT reuse this app's bundle",
+    );
   } finally {
     await Deno.remove(workspace, { recursive: true });
   }

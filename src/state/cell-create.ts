@@ -10,7 +10,7 @@ import type {
   DirectCalling,
   MethodsToCreators,
 } from "./cell-types.ts";
-import type { Method } from "./cell-impl.ts";
+import { isAsyncFunction, type Method } from "./cell-impl.ts";
 import { createCellFromMethods } from "./cell-methods-factory.ts";
 import { registerCell } from "./cell-reactive.ts";
 import { removalMessage, removalsUsedBy } from "./removals.ts";
@@ -107,10 +107,15 @@ export function cell(name: string, config: any): any {
         (config.methods ?? {}) as Record<string, unknown>,
       )
     ) {
-      if (
-        (fn as { constructor: { name: string } }).constructor.name ===
-          "AsyncFunction"
-      ) {
+      // ONE decider for "is this method async". This used to test
+      // `constructor.name === "AsyncFunction"` inline, which is only HALF of
+      // what `isAsyncFunction` answers: a method marked with `markAsync` (a
+      // transpiled async body whose constructor is a plain Function) passed
+      // this guard on the server while the browser cell stub — which does use
+      // `isAsyncFunction` — threw at MODULE LOAD. The app booted fine and the
+      // page was blank, which is the worst possible split for a rule whose
+      // whole job is to refuse the configuration early.
+      if (isAsyncFunction(fn as (...a: unknown[]) => unknown)) {
         throw new Error(
           `[${name}] client-scoped cells support sync methods only (no server ` +
             `round-trip exists); do async work in the component and call sync ` +

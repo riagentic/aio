@@ -2,6 +2,7 @@
 // Extracted from aio.ts _run() to keep the orchestrator lean.
 
 import { enc } from "../protocol/envelope.ts";
+import { shutdownAllRuntimes } from "./shutdown.ts";
 import { restartForCellChange } from "./dev-restart.ts";
 import { loadOrCreateCert, type TlsCert } from "./tls.ts";
 import { createServer } from "./server.ts";
@@ -523,8 +524,15 @@ export async function setupTransport<S, A>(
         // libraryMode means aio is embedded (a test, a host process): tearing
         // down is ours to do, exiting the process is not — the same rule the
         // signal handlers below already follow.
+        //
+        // NOT libraryMode: this call ends the PROCESS, so every app in it goes
+        // down — including one that is still writing. Stop them all first
+        // (shutdownAllRuntimes), or `am stop app-a` silently truncates app-b's
+        // final snapshot.
         shutdown: () =>
-          config.libraryMode ? shutdown() : shutdown().then(() => Deno.exit(0)),
+          config.libraryMode
+            ? shutdown()
+            : shutdownAllRuntimes().then(() => Deno.exit(0)),
         startedAt: Date.now(),
         udsClients: () =>
           udsRef.current
@@ -560,7 +568,12 @@ export async function setupTransport<S, A>(
     for (const sig of ["SIGINT", "SIGTERM"] as const) {
       try {
         Deno.addSignalListener(sig, () => {
-          shutdown().then(() => Deno.exit(0)).catch(() => Deno.exit(1));
+          // EVERY app in the process, not just this one — see
+          // `shutdownAllRuntimes`. One handler per app all calling it is fine:
+          // each app's shutdown is memoised.
+          shutdownAllRuntimes().then(() => Deno.exit(0)).catch(() =>
+            Deno.exit(1)
+          );
         });
       } catch { /* signal not supported on this platform */ }
     }

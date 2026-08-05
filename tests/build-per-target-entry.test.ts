@@ -120,10 +120,11 @@ async function runBuildAll(
   denoJson: Record<string, unknown>,
   files: string[],
   args: string[] = [],
+  stubSrc: string = STUB,
 ): Promise<Run> {
   const dir = await Deno.makeTempDir({ prefix: "aio-per-target-" });
   const stub = join(dir, "stub-build.ts");
-  await Deno.writeTextFile(stub, STUB);
+  await Deno.writeTextFile(stub, stubSrc);
   await Deno.writeTextFile(
     join(dir, "deno.json"),
     JSON.stringify(denoJson, null, 2),
@@ -319,6 +320,78 @@ Deno.test("build-all: an `out` that CONTAINS the app dir is refused — sources 
       `${f} was DELETED (survivors: ${run.survivors})`,
     );
   }
+});
+
+// ── a target that emitted nothing is a FAILURE, not a green tick ────────────
+// The single-target build exited 0 but no artifact appeared (a packaging step
+// that swallowed its own error, a name the artifact detector cannot see). That
+// was recorded as `ok: true` with an empty artifact list: a green ✓ in the
+// summary, exit 0, and a manifest.json — what a release pipeline reads to
+// decide what to publish — declaring a successful target with nothing in it.
+Deno.test("build-all: a target that produces NO artifact fails the build", async () => {
+  // Exits 0 like a happy build, but only the `--cli` target actually writes a
+  // file — the `browser` target succeeds loudly and emits nothing.
+  const SILENT_BROWSER_STUB = STUB.replace(
+    'await Deno.writeTextFile(root + "/" + slug, "binary\\n");',
+    'if (Deno.args.includes("--cli")) {\n' +
+      '  await Deno.writeTextFile(root + "/" + slug, "binary\\n");\n' +
+      "}",
+  );
+  const run = await runBuildAll(
+    { title: "Silent", build: { targets: ["browser", "cli"], out: "dist" } },
+    ["src/app.ts"],
+    [],
+    SILENT_BROWSER_STUB,
+  );
+  assertEquals(run.code, 1, "the fleet build must not exit 0");
+  const targets = run.manifest.targets as Array<Record<string, unknown>>;
+  const browser = targets.find((t) => t.target === "browser")!;
+  assertEquals(browser.ok, false, "the empty-handed target is not ok");
+  assert(
+    String(browser.error).includes("no recognized artifact"),
+    `the manifest says why: ${JSON.stringify(browser.error)}`,
+  );
+  assertEquals(browser.artifacts, []);
+  // The target that DID produce something is still collected and still ok.
+  const cli = targets.find((t) => t.target === "cli")!;
+  assertEquals(cli.ok, true);
+  assertEquals((cli.artifacts as unknown[]).length, 1);
+});
+
+// A fleet run that produces nothing must leave the LAST GOOD RELEASE standing —
+// the orchestrator says so in as many words ("leaving dist/ untouched"), and it
+// was not true. `out` defaults to `dist/`, which the per-target builds treat as
+// scratch: the bundle step removes it recursively and the pre-compile sweep
+// clears everything but app.js. So by the time the first target failed, the
+// previous binaries and manifest.json — what a release pipeline reads to decide
+// what to publish — were already deleted, and the summary said they weren't.
+// The stub reproduces exactly that: wipe `out`, leave intermediate output, fail.
+Deno.test("build-all: a fleet run that produces nothing keeps the previous release", async () => {
+  const WIPES_OUT_THEN_FAILS = `
+const root = Deno.cwd();
+await Deno.remove(root + "/dist", { recursive: true }).catch(() => {});
+await Deno.mkdir(root + "/dist", { recursive: true });
+await Deno.writeTextFile(root + "/dist/app.js", "intermediate\\n");
+Deno.exit(1);
+`;
+  const run = await runBuildAll(
+    { title: "My App", build: { targets: ["browser"], out: "dist" } },
+    ["src/app.ts", "dist/my-app", "dist/manifest.json"],
+    [],
+    WIPES_OUT_THEN_FAILS,
+  );
+  assertEquals(run.code, 1, "the fleet build must not exit 0");
+  assertEquals(
+    run.dist,
+    ["manifest.json", "my-app"],
+    "the previous release must still be there, and the failed run's " +
+      "intermediate output must not be presented as one",
+  );
+  assert(
+    run.survivors.includes("dist/my-app") &&
+      run.survivors.includes("dist/manifest.json"),
+    `previous artifacts destroyed by a failed build: ${run.survivors}`,
+  );
 });
 
 // …and the other direction: `out` INSIDE the app dir.

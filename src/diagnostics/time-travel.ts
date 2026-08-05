@@ -111,17 +111,61 @@ export function record<S, A>(
   };
 }
 
-/** Marks the current entry with an error — mutates in place (called right after record) */
+/** The action type an entry was recorded for (`""` when it has none). */
+function typeOf<S, A>(e: HistoryEntry<S, A> | undefined): string {
+  return (e?.action as { type?: string } | undefined)?.type ?? "";
+}
+
+/** Attach an action's measured timing to the entry that IS that action.
+ *
+ *  The timing arrives after the action's effects have run, by which point the
+ *  entry has already been recorded — so it is back-filled here rather than
+ *  passed to `record()`. It is matched by ACTION TYPE and dropped when it does
+ *  not match: an action time travel skipped (`:__exec`, a `skipActions` entry,
+ *  anything dispatched while paused) has no entry of its own, and writing its
+ *  numbers onto whatever happens to sit at `index` is a measurement printed
+ *  against a different action. Which is what happened for every action in the
+ *  history: the timing all landed on `__init`. */
+export function attachPerf<S, A>(
+  tt: TTState<S, A>,
+  actionType: string,
+  perf: PerfMetric,
+): void {
+  const entry = tt.entries[tt.index];
+  if (entry && typeOf(entry) === actionType) entry.perf = perf;
+}
+
+/** Marks an entry with an error — mutates in place.
+ *
+ *  `actionType` (when the error carries one) picks the entry that action was
+ *  recorded as, newest first, instead of assuming the error belongs to whatever
+ *  is at `index`. An async effect fails LATER — often several actions later —
+ *  and a reduce that threw was never recorded at all, so "the current entry" is
+ *  routinely an innocent bystander. No match, no mark: an error badge on the
+ *  wrong action sends a debugging session somewhere real. */
 export function markError<S, A>(
   tt: TTState<S, A>,
   err: {
     code: string;
     message: string;
     cellName?: string;
+    actionType?: string;
   },
 ): void {
-  const entry = tt.entries[tt.index];
-  if (entry) entry.error = err;
+  const { actionType, ...mark } = err;
+  if (actionType === undefined) {
+    // No attribution available (memory pressure, boot failures): the newest
+    // entry is the only honest anchor — "this is where we were".
+    const entry = tt.entries[tt.index];
+    if (entry) entry.error = mark;
+    return;
+  }
+  for (let i = tt.entries.length - 1; i >= 0; i--) {
+    if (typeOf(tt.entries[i]) === actionType) {
+      tt.entries[i]!.error = mark;
+      return;
+    }
+  }
 }
 
 /** Move back one step, auto-pause */

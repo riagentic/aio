@@ -10,7 +10,11 @@ import {
   type CellPatchStrategy,
   type PatchFilterFields,
 } from "../state/state-filter.ts";
-import type { CellFieldFilter, FilterUser } from "../state/cell-types.ts";
+import type {
+  CellAccess,
+  CellFieldFilter,
+  FilterUser,
+} from "../state/cell-types.ts";
 import type { AioError, ReportErrorOpts } from "../diagnostics/error.ts";
 import { reportError as reportAioError } from "../diagnostics/error.ts";
 import { log } from "../diagnostics/logger.ts";
@@ -43,6 +47,23 @@ export type VisibilityRow = {
   cell: string;
   ui: CellFieldFilter | "forUser";
   persist: CellFieldFilter;
+  /** Who may CALL this cell's methods over the network. Reported beside `ui`
+   *  because the two are read together and mean different things — `access`
+   *  gates calls, `ui` gates what the broadcast carries. Seeing
+   *  `access=admin ui=all` on one line is how an author notices that
+   *  "admin-only" cell is readable by everyone. */
+  access?: CellAccess;
+  /** Whether `ui` was actually DECIDED (by the cell or by cellDefaults).
+   *  `ui` above reports `"all"` for both "explicitly everyone" and "never
+   *  said"; a warning that cannot tell those apart nags the author who already
+   *  answered, and a nagging warning gets muted wholesale. */
+  uiDecided: boolean;
+  /** Top-level state keys — what a warning has to name to be actionable. */
+  fields: string[];
+  /** Whether the cell is CRDT-replicated. A sync cell may not hide state at all
+   *  (`refuseFilteredSyncCells` throws), so advice that says "add a ui filter"
+   *  would send its author straight into a boot refusal. */
+  syncs: boolean;
 };
 
 /** Everything produced by cell composition wiring */
@@ -694,6 +715,12 @@ function buildVisibilityReport(composed: ComposedCells): VisibilityRow[] {
       cell: f.__aio.id,
       ui: uiResolved,
       persist: f.__aio.persist ?? "all",
+      access: f.__aio.access,
+      uiDecided: f.__aio.ui !== undefined || !!f.__aio.uiForUser,
+      fields: Object.keys(
+        (f.__aio.state ?? {}) as Record<string, unknown>,
+      ),
+      syncs: !!f.__aio.syncConfig,
     });
   }
   return rows;
@@ -707,8 +734,15 @@ function logComposition(
   log.info(`cells: ${composed.cellNames.join(", ")}`);
   for (const row of report) {
     const uiStr = row.ui === "forUser" ? "forUser" : renderFilter(row.ui);
+    const accStr = row.access === undefined
+      ? ""
+      : ` access=${
+        typeof row.access === "function" ? "predicate" : String(row.access)
+      }`;
     log.info(
-      `cells: ${row.cell} ui=${uiStr} persist=${renderFilter(row.persist)}`,
+      `cells: ${row.cell}${accStr} ui=${uiStr} persist=${
+        renderFilter(row.persist)
+      }`,
     );
   }
   for (const f of composed.cells) {

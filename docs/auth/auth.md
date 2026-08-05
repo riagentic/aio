@@ -224,6 +224,27 @@ A denied network action is dropped before dispatch and audit-logged
 (`[aio] auth: …`). Server-side code (effects, schedules, your own calls) always
 bypasses `access` — the server trusts its own code.
 
+> **`access` gates calls. `ui` gates reads.** These are two different facts and
+> neither implies the other. `access` decides who may CALL a cell's methods over
+> the network; `ui` decides what the state broadcast CARRIES. A cell with
+> `access: "admin"` and no `ui` filter still ships its entire state to every
+> connected client, including unauthenticated ones — that is by design ("only
+> admins may edit, everyone may read" is a common shape), but it is not what
+> `access: false` looks like it means. To keep state off the wire, use `ui`:
+>
+> ```ts
+> cell("secrets", {
+>   state: { token: "…" },
+>   access: false, // no client may CALL its methods
+>   ui: "none", // …and no client receives its STATE
+>   methods: {/* server-side only */},
+> });
+> ```
+>
+> Declaring `access` without `ui` warns at boot, naming the exposed fields. Any
+> explicit `ui` — including `ui: "all"` ("yes, everyone may read this") — is an
+> answer and silences it.
+
 **Row-level access.** The predicate also receives the method's call args, so
 "edit only your own row" is one line — no per-method owner re-check:
 

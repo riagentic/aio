@@ -3,6 +3,10 @@
 import { ESBUILD_SPEC } from "../build/esbuild-shared.ts";
 
 import { join } from "@std/path";
+import {
+  buildBrowserImportMap,
+  readAppDenoImports,
+} from "./server-html-importmap.ts";
 import { log } from "../diagnostics/logger.ts";
 
 /** Startup lint result — ok/warn/hint/fail arrays */
@@ -96,15 +100,18 @@ export async function lint(
     }
   }
 
-  // Specifiers available in the browser import map — everything else silently fails
-  // Keep in sync with buildBrowserImportMap in server-html-importmap.ts.
-  const BROWSER_IMPORTS = new Set([
-    "aio",
-    "aio/air",
-    "aio/browser",
-    "aio/jsx-runtime",
-    "immer",
-  ]);
+  // Specifiers available in the browser import map — everything else silently
+  // fails in the browser. ASK THE MAP BUILDER, don't re-declare it: this was a
+  // hand-maintained copy of the framework defaults ("keep in sync with…"), and
+  // being a copy it could not know the app's own npm packages — which
+  // buildBrowserImportMap DOES map (npm: → CDN). So an app that added a UI
+  // dependency was told, on every boot, that a working import "won't work in
+  // browser — move this import to a server-side .ts file". Following that
+  // advice breaks working code; ignoring it teaches people to ignore the whole
+  // check.
+  const BROWSER_IMPORTS = new Set(
+    Object.keys(buildBrowserImportMap(readAppDenoImports(baseDir))),
+  );
 
   try {
     for await (const entry of Deno.readDir(baseDir)) {

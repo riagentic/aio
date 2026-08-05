@@ -340,10 +340,18 @@ The live proxy supports the read patterns you'd expect:
 - **Array read methods** — `s.items.map`, `.filter`, `.find`, `.findIndex`,
   `.some`, `.every`, `.reduce`, `.slice`, `.concat`, `.includes`, `.indexOf`,
   `.flat`, `.flatMap`, `.forEach`, `.entries`, `.keys`, `.values`, `.join`,
-  `.toSorted`, `.toReversed`, `.toSpliced`. These execute against a
-  `structuredClone` snapshot of the array, so the result is plain data (not a
-  live proxy). They see the **current** state plus your pending writes, fresh
-  per call — re-read after an `await` and you get the new state.
+  `.toSorted`, `.toReversed`, `.toSpliced`. They see the **current** state plus
+  your pending writes, fresh per call — re-read after an `await` and you get the
+  new state.
+- **Writing through an element** — `.find`, `.forEach`, `.some`, `.every`,
+  `.findIndex`, `.values()` and `.entries()` hand your callback the **live**
+  element, so `s.items.forEach((it) => { it.q = 0 })` batches exactly like
+  `s.items[i].q = 0` — the same as `for (const it of s.items)` and the same as
+  the sync (Immer draft) method. The methods that build a **new array** (`.map`,
+  `.filter`, `.slice`, `.concat`, `.flat`, `.flatMap`, `.toSorted`, …) and
+  `.reduce` still return plain data from a `structuredClone` snapshot, so a
+  write through one of THOSE elements changes nothing: filter for the indices
+  you want, or loop with `forEach`/`for…of`.
 
 For anything that isn't covered (function-valued properties on the state,
 unusual array methods), the live proxy throws:

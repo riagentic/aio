@@ -145,20 +145,18 @@ const _armed = new Map<string, { key: string; path: string }>();
  *  at server construction. Idempotent per boot in effect: each call replaces
  *  the file and the value, so a restart invalidates every earlier copy.
  *
- *  WIRING — this is NOT yet called from `startServer` (that file was owned by
- *  concurrent work), and until it is, an app in per-user mode still refuses
- *  `am`/amui. Shared-key and public apps are already reachable: the app key and
- *  the same-machine rule carry those. Two edits in server.ts complete it:
+ *  WIRING — live, in two places in server.ts:
  *
- *    1. `armLocalControl(config);` once, at server construction.
- *    2. in `handleRequest`, immediately after the same-machine 404 for
- *       `/__aio/trojan/*` (so a remote caller is already gone):
+ *    1. `armLocalControl(config)` at server construction (server.ts:169).
+ *    2. the `localControlAuthorized(req)` branch in `handleRequest`
+ *       (server.ts:568), immediately after the same-machine 404 for
+ *       `/__aio/trojan/*`, so a remote caller is already gone before it runs.
  *
- *         if (pathname.startsWith(TROJAN_PREFIX) && localControlAuthorized(req)) {
- *           const resp = await staticHandler.serveStatic(pathname, req);
- *           resp.headers.set("X-Content-Type-Options", "nosniff");
- *           return resp;
- *         }
+ *  (This paragraph described the wiring as NOT DONE long after it landed,
+ *  listing the two edits as future work. A stale comment is bad everywhere and
+ *  worse here: it told the reader that per-user apps refuse `am`/amui, which is
+ *  the opposite of what the code does, and invited someone to "finish" wiring
+ *  that already exists.)
  *
  *  It goes THERE, not at the `trojanDenialForUserMode` call sites, because in
  *  `users:` mode (no login flows) a credential-less request is refused by
@@ -169,8 +167,6 @@ const _armed = new Map<string, { key: string; path: string }>();
  *  `trojanDenialForUserMode`'s `req` stays useful either way: it is what lets a
  *  WRONG credential be diagnosed instead of 401'd anonymously.
  *  Shutdown needs no edit — `resetTrojanRateLimit()` already disarms.
- *  Deliberately left unarmed rather than half-wired: a secret written to disk
- *  that authorizes nothing is a liability, not a feature.
  *
  *  NEVER in prod: the trojan does not exist there (`server-static` refuses to
  *  mount it, `handleTrojan` refuses again), so a production app writes no
@@ -280,6 +276,24 @@ function _armedPath(): string | null {
  *  (0600) — for them this path is exactly as closed as it was.
  *
  *  Returns the refusal, or null when the caller may proceed. */
+/** ONE bar for every surface that REWRITES OR REWINDS RAW STATE, whatever the
+ *  transport: `/__aio/snapshot`, `/__aio/trojan/*` — and the `tt-cmd` frame on
+ *  a live WebSocket, which was the door nobody guarded.
+ *
+ *  A time-travel command is not a debug read. `handleTTCommand` assigns
+ *  `state` directly (`goto:0` rewinds the WHOLE app to its first action, for
+ *  every connected client) and `pause` makes `dispatch` REJECT every action
+ *  from every user until someone resumes — writes stop and persistence stops
+ *  with them. That is `/__aio/snapshot`'s power, reachable from one frame on
+ *  a socket any authenticated account can open, so it answers to the same
+ *  rule the other two doors answer to instead of to none.
+ *
+ *  Only meaningful in per-user mode: public mode has no identity to check (the
+ *  dev panel is the whole point) and shared-key mode already gated the socket
+ *  on the key. Callers pass that context; this decides the ROLE question. */
+export const rawStateControlAllowed = (user: AioUser | undefined): boolean =>
+  user?.role === "admin";
+
 export function trojanDenialForUserMode(
   pathname: string,
   user: AioUser | undefined,
@@ -295,7 +309,7 @@ export function trojanDenialForUserMode(
       status: 401,
     });
   }
-  if (user.role !== "admin") {
+  if (!rawStateControlAllowed(user)) {
     return new Response(
       'Forbidden — /__aio/trojan/* is the raw-state control plane and requires role "admin"' +
         (presented !== null ? `\n\n${_staleCredentialHint()}` : ""),

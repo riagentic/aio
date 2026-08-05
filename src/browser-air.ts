@@ -4,7 +4,15 @@
 
 // ── Transport (side-effectful — must import to wire up WS/IPC) ──────
 import "./browser/browser-air-transport.ts";
-export { setSyncMessageHandler } from "./browser/browser-air-transport.ts";
+export {
+  // Documented in docs/persistence/offline.md and docs/clients/browser.md as
+  // the way to drive a "reconnecting / slow connection" indicator — but it was
+  // exported from no public entry, so the import in those docs could not
+  // resolve. A capability the docs promise and the package does not expose is
+  // a broken promise either way; exporting it is the additive half of the fix.
+  isConnectionDegraded,
+  setSyncMessageHandler,
+} from "./browser/browser-air-transport.ts";
 /** serverFn seam (B3) — typed WS proxy to serverFns registered on the server. */
 export { serverFn, serverFns } from "./browser/server-fns-client.ts";
 

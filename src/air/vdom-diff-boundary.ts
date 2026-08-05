@@ -46,11 +46,30 @@ function _regionStart(
     : parent.firstChild;
 }
 
-/** The live node that FOLLOWS this region, or null when it ends the parent. */
+/** The live node that FOLLOWS the boundary's old region, or null when the
+ *  region ends the parent.
+ *
+ *  The span is taken from `_domNodeCount(ov)` and walked from the region's
+ *  first node: exact, and blind to what the region happens to hold. Scanning
+ *  backwards for a member carrying a `_dom` is neither — a bare string/number
+ *  is a primitive with nowhere to hold one (so a string fallback answered "the
+ *  region ends the parent" and the boundary re-inserted it at the END of its
+ *  parent's children on every re-render: `<Suspense fallback="Loading…">` and
+ *  `<ErrorBoundary fallback={() => "Oops"}>`, the two most ordinary spellings
+ *  there are, visibly jumped to the bottom of the page), a Fragment's `_dom` is
+ *  its FIRST node so the scan landed inside a multi-node fallback, and an EMPTY
+ *  region is one comment ANCHOR that is not a child at all. `_domNodeCount`
+ *  already answers all three. The scan stays as the last resort for when the
+ *  region's position is unknown. */
 function _regionAnchor(
   parent: Node,
-  region: (VNode | string | number | null | undefined)[],
+  ov: VNode,
+  first: Node | null,
 ): Node | null {
+  if (first && isChildOf(first, parent)) {
+    return _advance(first, _domNodeCount(ov));
+  }
+  const region = ov._rendered !== undefined ? [ov._rendered] : ov.children;
   for (let i = region.length - 1; i >= 0; i--) {
     const v = region[i];
     if (v == null) continue;
@@ -62,18 +81,64 @@ function _regionAnchor(
 
 /** Remove a whole region, walking it positionally so bare-text children —
  *  which carry no `_dom` and are therefore invisible to `getDom` — are removed
- *  too instead of being left behind on the page. */
+ *  too instead of being left behind on the page.
+ *
+ *  `end` is the node just PAST the region and is a hard stop. Without it the
+ *  walk could step outside it: the child diff may have thrown PART WAY THROUGH
+ *  (`diffKeyed` removes a type-mismatched child before creating its
+ *  replacement, and creating the replacement is exactly what throws), so the
+ *  region is already shorter than the model being replayed over it — and the
+ *  last bare-text child's cursor then landed on the boundary's NEXT SIBLING and
+ *  removed it. Keyed children inside an `<ErrorBoundary>` that start throwing
+ *  silently deleted the node after the boundary. */
 function _removeRegion(
   parent: Node,
   children: (VNode | string | number)[],
   ctx: RenderCtx,
   first: Node | null,
+  end: Node | null = null,
 ): void {
   let cursor: Node | null = first;
   for (const child of children) {
     const at = getDom(child) ?? cursor;
+    if (at && at === end) break; // the region ran out before the model did
     cursor = _advance(at, _domNodeCount(child));
     removeDom(parent, child, ctx, at);
+  }
+}
+
+/** Retire the boundary's whole old region.
+ *
+ *  Every child goes through `removeDom` first, so unmount hooks, refs and exit
+ *  transitions still fire. Then whatever is STILL standing between the region's
+ *  bounds is swept: an empty region is a comment ANCHOR that is not one of the
+ *  children (nothing removed it, so it stayed as a phantom node the boundary's
+ *  own node count does not include, putting every later sibling one position
+ *  off), and a child diff that threw part way through may have left nodes it
+ *  created behind.
+ *
+ *  The bounds are measured BEFORE the failed attempt, and the sweep only runs
+ *  when the region's position was actually known — a guessed start is not
+ *  something to bulk-delete from. */
+function _retireRegion(
+  parent: Node,
+  ov: VNode,
+  ctx: RenderCtx,
+  first: Node | null,
+  startAnchor: Node | null,
+  end: Node | null,
+): void {
+  const d = getDom(ov);
+  const known = !!(d && isChildOf(d, parent));
+  _removeRegion(parent, ov.children, ctx, first, end);
+  if (!known) return;
+  let n: Node | null = startAnchor && isChildOf(startAnchor, parent)
+    ? startAnchor.nextSibling
+    : parent.firstChild;
+  while (n && n !== end) {
+    const next: Node | null = n.nextSibling;
+    parent.removeChild(n);
+    n = next;
   }
 }
 
@@ -178,12 +243,25 @@ export function _diffErrorBoundary(
     | undefined;
   const wasError = ov._rendered != null;
 
+  // Where the boundary's region sits, measured BEFORE anything is removed.
+  // It used to be measured again inside `catch`, by which point the try block
+  // had already detached the old fallback — every lookup then found a node that
+  // was no longer in the document, answered "the region ends the parent", and
+  // the fallback was appended at the END of the parent instead of put back
+  // where the boundary lives.
+  const oldFirst = _regionStart(parent, ov, startAnchor);
+  const at = _regionAnchor(parent, ov, oldFirst);
+
   try {
     if (wasError) {
-      // Recovering from error: remove old fallback, render children fresh —
-      // back into the SAME slot the fallback occupied.
-      const at = _regionAnchor(parent, [ov._rendered!]);
-      removeDom(parent, ov._rendered!, ctx, getDom(ov) ?? null);
+      // Recovering from error: build the children FIRST and only then retire
+      // the fallback. Removing it up front meant that when the children failed
+      // AGAIN — the normal case for a boundary that stays in its fallback, and
+      // for every Suspense re-render during a load — the catch had nothing
+      // left to patch and had to build a whole new fallback, so the fallback's
+      // DOM was destroyed and re-created on EVERY render: a spinner's CSS
+      // animation restarted from frame zero each time, and focus, selection
+      // and scroll inside an error fallback were lost.
       const frag = ctx.doc.createDocumentFragment();
       let firstDom: Node | null = null;
       for (const child of nv.children) {
@@ -193,8 +271,24 @@ export function _diffErrorBoundary(
           frag.appendChild(childDom);
         }
       }
-      _insertAt(parent, frag, at);
-      nv._dom = firstDom ?? undefined;
+      const produced = frag.firstChild;
+      removeDom(parent, ov._rendered!, ctx, oldFirst);
+      if (produced) {
+        _insertAt(parent, frag, at);
+        nv._dom = firstDom ?? produced;
+      } else {
+        // Recovering into EMPTY content. `createDom` gives an empty boundary a
+        // comment ANCHOR to hold its slot (AIO-195) and this path did not, so
+        // a boundary that came back from its fallback with nothing to show —
+        // `<ErrorBoundary>{rows.map(...)}</ErrorBoundary>` retried while the
+        // list is empty — was left with no position at all. The next diff then
+        // anchored its whole region at the parent's FIRST child and the rows
+        // grew ABOVE the header. Same rule as mount, on the path nobody
+        // re-checked.
+        const anchor = ctx.doc.createComment("");
+        _insertAt(parent, anchor, at);
+        nv._dom = anchor;
+      }
     } else {
       const regionFirst = diffChildrenFn(
         parent,
@@ -224,25 +318,32 @@ export function _diffErrorBoundary(
     }
     // Fallback succeeded — safe to remove old DOM and render fallback where
     // the boundary's content was, not at the end of the parent.
-    const at = _regionAnchor(
-      parent,
-      !wasError ? ov.children : [ov._rendered],
-    );
-    if (!wasError) {
-      _removeRegion(
-        parent,
-        ov.children,
-        ctx,
-        _regionStart(parent, ov, startAnchor),
-      );
-    } else if (ov._rendered != null) {
-      removeDom(parent, ov._rendered, ctx, getDom(ov) ?? null);
-    }
     nv._rendered = fallbackVnode;
+    if (wasError && ov._rendered != null) {
+      // Already showing a fallback and still failing — PATCH it. The nodes on
+      // screen are the ones the user is looking at; rebuilding them because the
+      // error happens to still be there is the reconciler doing the one thing
+      // it exists to avoid.
+      nv._dom = _diffFn(
+        parent,
+        fallbackVnode,
+        ov._rendered,
+        ctx,
+        isSvg,
+        oldFirst,
+      ) ?? undefined;
+      return;
+    }
+    _retireRegion(parent, ov, ctx, oldFirst, startAnchor, at);
     if (fallbackVnode != null) {
       const dom = createDom(fallbackVnode, ctx, isSvg, parent);
+      // The node the fallback OCCUPIES, not the carrier `createDom` returned: a
+      // bare-string fallback has no `_dom` to look up and a Fragment's carrier
+      // is a DocumentFragment that insertion empties and leaves detached, so
+      // the boundary was left anchored to nothing and lost its slot.
+      const first = dom ? _occupied(fallbackVnode, dom) : null;
       if (dom) _insertAt(parent, dom, at);
-      nv._dom = getDom(fallbackVnode) ?? undefined;
+      nv._dom = first ?? undefined;
     }
   }
 }
@@ -264,11 +365,13 @@ export function _diffSuspense(
     | null
     | undefined;
   const wasPending = ov._rendered != null;
+  // Measured before any removal — see the same comment in _diffErrorBoundary.
+  const oldFirst = _regionStart(parent, ov, startAnchor);
+  const at = _regionAnchor(parent, ov, oldFirst);
   try {
     if (wasPending) {
-      // Was showing fallback, try rendering children again — same slot.
-      const at = _regionAnchor(parent, [ov._rendered!]);
-      removeDom(parent, ov._rendered!, ctx, getDom(ov) ?? null);
+      // Was showing fallback, try rendering children again — same slot. The
+      // fallback is retired only once they SUCCEED (see _diffErrorBoundary).
       const frag = ctx.doc.createDocumentFragment();
       let firstDom: Node | null = null;
       // AIO-201: track created children so we can clean up on partial failure
@@ -289,8 +392,24 @@ export function _diffSuspense(
         }
         throw innerThrown;
       }
-      _insertAt(parent, frag, at);
-      nv._dom = firstDom ?? undefined;
+      const produced = frag.firstChild;
+      removeDom(parent, ov._rendered!, ctx, oldFirst);
+      if (produced) {
+        _insertAt(parent, frag, at);
+        nv._dom = firstDom ?? produced;
+      } else {
+        // Recovering into EMPTY content. `createDom` gives an empty boundary a
+        // comment ANCHOR to hold its slot (AIO-195) and this path did not, so
+        // a boundary that came back from its fallback with nothing to show —
+        // `<ErrorBoundary>{rows.map(...)}</ErrorBoundary>` retried while the
+        // list is empty — was left with no position at all. The next diff then
+        // anchored its whole region at the parent's FIRST child and the rows
+        // grew ABOVE the header. Same rule as mount, on the path nobody
+        // re-checked.
+        const anchor = ctx.doc.createComment("");
+        _insertAt(parent, anchor, at);
+        nv._dom = anchor;
+      }
     } else {
       const regionFirst = diffChildrenFn(
         parent,
@@ -307,25 +426,25 @@ export function _diffSuspense(
     if (thrown !== _LAZY_PENDING) throw thrown;
     // Register for lazy resolution notifications
     _registerLazyListeners(nv.children, ctx);
-    const at = _regionAnchor(
-      parent,
-      !wasPending ? ov.children : [ov._rendered],
-    );
-    if (!wasPending) {
-      _removeRegion(
-        parent,
-        ov.children,
-        ctx,
-        _regionStart(parent, ov, startAnchor),
-      );
-    } else if (ov._rendered != null) {
-      removeDom(parent, ov._rendered, ctx, getDom(ov) ?? null);
-    }
     nv._rendered = fallback ?? null;
+    if (wasPending && ov._rendered != null && fallback != null) {
+      // Still pending — patch the fallback that is already on screen instead of
+      // rebuilding it. This is the whole duration of a lazy load, so rebuilding
+      // restarted a spinner's animation on every render in between.
+      nv._dom = _diffFn(parent, fallback, ov._rendered, ctx, isSvg, oldFirst) ??
+        undefined;
+      return;
+    }
+    if (!wasPending) {
+      _retireRegion(parent, ov, ctx, oldFirst, startAnchor, at);
+    } else if (ov._rendered != null) {
+      removeDom(parent, ov._rendered, ctx, oldFirst);
+    }
     if (fallback != null) {
       const dom = createDom(fallback, ctx, isSvg, parent);
+      const first = dom ? _occupied(fallback, dom) : null;
       if (dom) _insertAt(parent, dom, at);
-      nv._dom = getDom(fallback) ?? undefined;
+      nv._dom = first ?? undefined;
     }
   }
 }

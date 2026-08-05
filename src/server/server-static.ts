@@ -38,8 +38,19 @@ const AIO_SRC_BASE_URL = new URL("../", import.meta.url);
  *  `.aio/` and friends — all of which sat under baseDir and were served
  *  verbatim as text. `.well-known/` stays reachable: it is a public-by-design
  *  path (ACME challenges, app-site association). Pure, so the deny list is
- *  unit-testable without a server. */
-export function isProtectedPath(pathname: string): boolean {
+ *  unit-testable without a server.
+ *
+ *  `prod` extends it to ALL TypeScript source. The dev server transpiles
+ *  `.ts`/`.tsx` on demand because the dev shell's import map makes the browser
+ *  fetch them by name — that is the whole dev loop. A production page has no
+ *  import map at all (see prodHTML): it loads one bundled `/app.js` and never
+ *  names a source path. So in prod every `.ts`/`.tsx` under baseDir was
+ *  readable, unauthenticated, as `text/plain` — the app's own sources,
+ *  comments and constants, served to anyone who guessed `/App.tsx`. Exactly the
+ *  reasoning that closed the `/__aio/**.ts` framework-source routes in prod
+ *  ("reachable, unauthenticated, and used by nobody"), one file extension
+ *  short: `.server.ts` was denied while `secrets.ts` next to it was not. */
+export function isProtectedPath(pathname: string, prod = false): boolean {
   const rel = pathname.replace(/^\/+/, "");
   if (!rel) return false;
   const segments = rel.split("/");
@@ -47,7 +58,9 @@ export function isProtectedPath(pathname: string): boolean {
     if (seg === ".well-known") continue;
     if (seg.startsWith(".")) return true;
   }
-  return /\.server\.tsx?$/.test(segments[segments.length - 1] ?? "");
+  const last = segments[segments.length - 1] ?? "";
+  if (prod && /\.tsx?$/.test(last)) return true;
+  return /\.server\.tsx?$/.test(last);
 }
 
 /** Resolve a `/__aio/<rel>` request to a framework source file, or null.
@@ -289,18 +302,32 @@ export function createStaticHandler(deps: StaticDeps): {
       }
       return new Response("// no local immer found", { status: 404 });
     }
-    if (pathname === "/__aio/ui.js") {
+    // These serve FRAMEWORK SOURCE, live-transpiled per request. They exist for
+    // the dev import map (`aio` → /__aio/ui.js), and `prodHTML` emits no import
+    // map at all — a production page loads one bundled /app.js and never names
+    // this namespace. So in prod they were reachable, unauthenticated, and used
+    // by nobody.
+    //
+    // That is not merely dead surface. Each hit is a file read plus an esbuild
+    // transpile with no cache on either side (the responses carry `no-cache`,
+    // so nothing downstream absorbs a repeat either) — an unauthenticated
+    // request that costs the server far more than it costs the caller, which is
+    // the same amplifier shape as the auth-budget DoS. Dev keeps them; prod
+    // falls through to the 404 that already describes the rest of this
+    // namespace.
+    if (!prod && pathname === "/__aio/ui.js") {
       return await serveAioModule(BROWSER_AIR_TS_URL, "browser-air.ts");
     }
-    if (pathname === "/__aio/air.js") {
+    if (!prod && pathname === "/__aio/air.js") {
       return await serveAioModule(AIR_TS_URL, "air.ts");
     }
-    if (pathname === "/__aio/listeners.ts") {
+    if (!prod && pathname === "/__aio/listeners.ts") {
       return await serveAioModule(LISTENERS_TS_URL, "listeners.ts");
     }
 
     // Generic handler for aio sub-module .ts files (e.g. vitals/*.ts)
     if (
+      !prod &&
       pathname.startsWith("/__aio/") &&
       (pathname.endsWith(".ts") || pathname.endsWith(".tsx")) &&
       !pathname.includes("..")
@@ -596,7 +623,7 @@ export function createStaticHandler(deps: StaticDeps): {
     // Server-only files and dotfiles are never served, at any depth — see
     // isProtectedPath. (Checked before the file is even resolved, so the reply
     // is identical whether or not it exists.)
-    if (isProtectedPath(pathname)) {
+    if (isProtectedPath(pathname, prod)) {
       return new Response("Not found", { status: 404 });
     }
     // Which root serves this request? A `serveDirs` prefix wins over baseDir;

@@ -74,6 +74,13 @@ Wraps any control with a label, optional hint, and error message:
 </Field>;
 ```
 
+A string `label` also becomes the **accessible name** of the control inside
+(unless it already has one, or a `t` handle) — so screen readers announce it and
+[`testUI`](../testing/ui-testing.md) addresses it by name: `ui.EmailInput`,
+never a positional `ui.find("Field", 1).Input`. The same holds for
+`<Checkbox label="…">`, whose wrapping `<label>` names its box
+(`ui.EmailMeCheckbox`).
+
 ### Table
 
 A basic data table. Columns declare a `key`, an optional `header`, and an
@@ -122,7 +129,8 @@ render document, so it works under `testUI`/SSR too.
 ```
 
 Pass `dismissable={false}` to require an explicit action (no Escape/backdrop
-close).
+close). `role="dialog"`/`aria-modal` sit on the dialog box itself; the backdrop
+is addressable as `ui.modalBackdrop` so a test can drive click-outside-to-close.
 
 ### Card + layout — `Card`, `Stack`, `Row`, `Spinner`
 
@@ -155,6 +163,10 @@ wants.
 ```tsx
 <Pagination page={p} pages={Math.ceil(total / perPage)} onPage={setP} />;
 ```
+
+Every button carries an `aria-label` ("Previous page", "Next page", "Page 3"),
+so it is announced by a screen reader and drivable by name in tests
+(`ui.NextPageButton.click()`).
 
 ### Confirm + `ConfirmButton`
 

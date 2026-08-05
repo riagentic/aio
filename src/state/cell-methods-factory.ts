@@ -74,8 +74,9 @@ export function createCellFromMethods<
       throw new Error(
         `cell("${name}"): access: "${config.access}" is read as a ROLE name, ` +
           `not a sentinel. Use access: true (any authenticated user), ` +
-          `access: false (deny all network access — server-side only), or a ` +
-          `real role like access: "admin".`,
+          `access: false (no client may CALL its methods), or a real role ` +
+          `like access: "admin". Note access gates method calls only — to ` +
+          `hide the cell's STATE from clients use ui ("none"/exclude/forUser).`,
       );
     }
   }

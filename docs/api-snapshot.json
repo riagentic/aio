@@ -393,7 +393,7 @@
         },
         "VERSION": {
           "kind": "variable",
-          "sig": "03785c2489c8fe5c"
+          "sig": "0dd620c14c184849"
         },
         "VitalsConfig": {
           "kind": "typeAlias",
@@ -542,6 +542,10 @@
         "hydrate": {
           "kind": "function",
           "sig": "ebe23b198c9d526b"
+        },
+        "isConnectionDegraded": {
+          "kind": "function",
+          "sig": "209ed045c0221c65"
         },
         "island": {
           "kind": "function",
@@ -805,7 +809,7 @@
         },
         "useLocal": {
           "kind": "function",
-          "sig": "386c67b42d10d9d6"
+          "sig": "8d91ba72d03ceac4"
         },
         "UseLocalResult": {
           "kind": "typeAlias",

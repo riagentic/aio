@@ -2,6 +2,7 @@
 // cookies, and a JSON helper on top of the existing `routes: {}` config.
 import { assert, assertEquals } from "@std/assert";
 import {
+  isReservedRoutePath,
   matchRoute,
   parseCookies,
   route,
@@ -203,4 +204,111 @@ Deno.test("serializeCookie: a name that would inject attributes is refused", () 
     serializeCookie("__Host-x", "1", { path: "/" }),
     "__Host-x=1; Path=/",
   );
+});
+
+// ── The reserved namespace is reserved against PATTERNS *and* PATHS ──
+
+Deno.test("isReservedRoutePath: the framework's own paths, one decider", () => {
+  for (const p of ["/ws", "/__aio", "/__aio/health", "/__aio/trojan/state"]) {
+    assert(isReservedRoutePath(p), p);
+  }
+  for (const p of ["/", "/api/ws", "/wsx", "/aio", "/x/__aio"]) {
+    assert(!isReservedRoutePath(p), p);
+  }
+});
+
+Deno.test("route e2e: a catch-all route cannot swallow /__aio or /ws", async () => {
+  // A `/*` SPA fallback is a normal thing to write. The boot reservation only
+  // ever checked the pattern TEXT, so this pattern used to capture
+  // /__aio/health, /__aio/metrics, /__aio/snapshot and every /__aio/**.ts
+  // module the dev shell imports — the whole framework namespace, silently.
+  const { aio, cell, route: routeFn } = await import("../mod.ts");
+  const port = freePort();
+  const counter = cell("route-reserved", { state: { n: 0 }, methods: {} });
+  const app = await aio.run({
+    cells: [counter],
+    appId: "route-reserved",
+    appVersion: "0.0.0",
+    client: "server-only",
+    persist: false,
+    libraryMode: true,
+    port,
+    baseDir: await Deno.makeTempDir(),
+    routes: { "/*": routeFn((ctx) => ctx.text("SPA:" + ctx.params["*"])) },
+  });
+  try {
+    const health = await fetch(`http://127.0.0.1:${port}/__aio/health`);
+    const healthBody = await health.text();
+    assert(
+      !healthBody.startsWith("SPA:"),
+      `/__aio/health was captured by the app route: ${healthBody}`,
+    );
+    assert(healthBody.includes("route-reserved"), healthBody);
+
+    const metrics = await fetch(`http://127.0.0.1:${port}/__aio/metrics`);
+    const metricsBody = await metrics.text();
+    assert(!metricsBody.startsWith("SPA:"), metricsBody);
+    assert(metricsBody.includes("aio_uptime_seconds"), metricsBody);
+
+    // A path the app really does own still reaches the handler.
+    const own = await fetch(`http://127.0.0.1:${port}/deep/link`);
+    assertEquals(await own.text(), "SPA:deep/link");
+  } finally {
+    await app.close();
+  }
+});
+
+Deno.test("route e2e: a broken handler fails ONE request, loudly — never the process", async () => {
+  // App routes are app code. A throw used to reach Deno.serve, which answered a
+  // bare 500 naming neither route nor method; returning a NON-Response (the raw
+  // `(req) => Response` form is public API — forget a `return`) escaped as an
+  // UNHANDLED REJECTION at the serve boundary, which this app's crash handler
+  // reports as a process-level fault. This test would fail on that rejection
+  // alone.
+  const { aio, cell, route: routeFn } = await import("../mod.ts");
+  const port = freePort();
+  const c = cell("route-broken", { state: { n: 0 }, methods: {} });
+  const logged: string[] = [];
+  const origLog = console.log;
+  const app = await aio.run({
+    cells: [c],
+    appId: "route-broken",
+    appVersion: "0.0.0",
+    client: "server-only",
+    persist: false,
+    libraryMode: true,
+    port,
+    baseDir: await Deno.makeTempDir(),
+    routes: {
+      "/boom": routeFn(() => {
+        throw new Error("handler exploded");
+      }),
+      "/rej/:id": routeFn(() => Promise.reject(new Error("handler rejected"))),
+      // A raw handler that forgets to return a Response.
+      "/bad": (() => ({ oops: true })) as unknown as Parameters<
+        typeof routeFn
+      >[0] extends never ? never : never,
+      "/ok": routeFn((ctx) => ctx.text("fine")),
+    } as never,
+  });
+  console.log = (...a: unknown[]) => void logged.push(a.map(String).join(" "));
+  try {
+    for (const p of ["/boom", "/rej/7", "/bad"]) {
+      const res = await fetch(`http://127.0.0.1:${port}${p}`);
+      assertEquals(res.status, 500, p);
+      assertEquals(await res.text(), "Internal Server Error");
+    }
+    // The server is still serving.
+    const ok = await fetch(`http://127.0.0.1:${port}/ok`);
+    assertEquals(await ok.text(), "fine");
+  } finally {
+    console.log = origLog;
+    await app.close();
+  }
+  const all = logged.join("\n");
+  // Attributed: which route, which method, which path, and what went wrong.
+  assert(all.includes('route "/boom" (GET /boom) threw'), all);
+  assert(all.includes("handler exploded"), all);
+  assert(all.includes('route "/rej/:id" (GET /rej/7) threw'), all);
+  assert(all.includes('route "/bad" (GET /bad) returned object'), all);
 });

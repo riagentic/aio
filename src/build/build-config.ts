@@ -5,6 +5,13 @@
 import { basename, dirname, join, resolve } from "@std/path";
 import { slugify } from "./build-helpers.ts";
 import {
+  BUILD_BOOL_FLAGS,
+  BUILD_VALUE_FLAGS,
+  flagHint,
+  flagVocabulary,
+  unknownBuildFlags,
+} from "./build-flags.ts";
+import {
   crossCompileBlocker,
   hostPlatform,
   isHostPlatform,
@@ -108,8 +115,27 @@ export interface BuildConfig {
   frameworkBase: URL;
 }
 
+/** Refuse a build whose flags we do not understand, naming the vocabulary.
+ *  An unrecognized flag is read as ABSENT, so the build would have produced a
+ *  different artifact and exited 0 — see build-flags.ts. */
+function assertKnownFlags(args: readonly string[]): void {
+  const unknown = unknownBuildFlags(args);
+  if (unknown.length === 0) return;
+  console.error(
+    `[build] \u2717 unknown flag(s): ${unknown.join(", ")}` +
+      unknown.map(flagHint).join("") +
+      `\n         known: ${
+        flagVocabulary(BUILD_BOOL_FLAGS, BUILD_VALUE_FLAGS)
+      }` +
+      `\n         (an unrecognized flag would have been ignored, and this ` +
+      `build would have produced a DIFFERENT artifact than you asked for.)`,
+  );
+  Deno.exit(1);
+}
+
 /** Load and validate build configuration from CLI flags + deno.json */
 export async function loadBuildConfig(): Promise<BuildConfig> {
+  assertKnownFlags(Deno.args);
   const root = Deno.cwd();
   const dist = resolve(join(root, "dist"));
   const out = join(dist, "app.js");

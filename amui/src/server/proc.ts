@@ -3,6 +3,7 @@
 // are detached so a started app survives amui, and outputs are size-capped.
 import { isAbsolute, join, normalize, relative } from "@std/path";
 import { appDirs } from "aio/server";
+import { readProjectMeta } from "./scan.ts";
 
 const LOG_MAX = 200_000; // cap captured task output
 const VIEW_MAX = 2_000_000; // 2 MB — files larger than this show a size notice
@@ -15,16 +16,55 @@ function safeJoin(root: string, rel: string): string | null {
   return abs;
 }
 
-/** Resolve a project's dev entry (src/app.ts › src/main.ts › app.ts › main.ts). */
-async function resolveEntry(dir: string): Promise<string | null> {
+/** Resolve a project's dev entry — the SAME rule `am start` applies
+ *  (`resolveEntry` in src/am/am-utils.ts): the app's DECLARED `deno.json`
+ *  `"entry"` wins, then the conventional filenames.
+ *
+ *  amui used to probe the four filenames only, so the two disagreed on any app
+ *  that renamed its entry: `am start` ran it, amui's Start button answered "no
+ *  entry (src/app.ts) found" — and where a stale `src/app.ts` was still lying
+ *  around, amui launched the WRONG file. A declared-but-missing entry is a
+ *  refusal, never a silent fallback, for exactly that reason.
+ *
+ *  Exported so the agreement with `am` is testable rather than asserted. */
+export async function resolveEntry(
+  dir: string,
+): Promise<{ ok: true; entry: string } | { ok: false; error: string }> {
+  const declared = (await readProjectMeta(dir)).entry;
+  if (declared) {
+    try {
+      await Deno.stat(join(dir, declared));
+      return { ok: true, entry: declared };
+    } catch {
+      return {
+        ok: false,
+        error:
+          `deno.json declares "entry": "${declared}", but that file does ` +
+          `not exist — fix the entry (amui will not guess another file)`,
+      };
+    }
+  }
   for (const e of ["src/app.ts", "src/main.ts", "app.ts", "main.ts"]) {
     try {
       await Deno.stat(join(dir, e));
-      return e;
+      return { ok: true, entry: e };
     } catch { /* next */ }
   }
-  return null;
+  return {
+    ok: false,
+    error: 'no entry found — add "entry" to deno.json, or create src/app.ts',
+  };
 }
+
+/** amui's OWN launcher artifact for `dir`, deliberately still project-local:
+ *  writing it to `~/.<appId>/logs/stdout.log` (where `am start` now writes)
+ *  would mean inferring the appId from deno.json here, and a second copy of
+ *  that rule silently puts the log in the wrong directory when the two
+ *  disagree. `am` does it because `resolveAmAppId()` is right there; amui has
+ *  no such handle. It is read back by `awaitBoot`, and only until the app
+ *  writes its own logs. */
+export const startLogPath = (dir: string): string =>
+  join(dir, ".aio-amui-start.log");
 
 /** Start a project's app (detached — survives amui). Returns { ok, pid?, error? }.
  *  `client` picks the shell (browser is safe/instant; others as-is). */
@@ -32,15 +72,10 @@ export async function startApp(
   dir: string,
   client: "browser" | "electron" | "server-only" = "browser",
 ): Promise<{ ok: boolean; pid?: number; error?: string }> {
-  const entry = await resolveEntry(dir);
-  if (!entry) return { ok: false, error: "no entry (src/app.ts) found" };
-  // amui's OWN launcher artifact, deliberately still project-local: writing it
-  // to `~/.<appId>/logs/stdout.log` (where `am start` now writes) would mean
-  // inferring the appId from deno.json here, and a second copy of that rule
-  // silently puts the log in the wrong directory when the two disagree. `am`
-  // does it because `resolveAmAppId()` is right there; amui has no such handle.
-  // It is read back below, and only until the app writes its own logs.
-  const logFile = join(dir, ".aio-amui-start.log");
+  const resolved = await resolveEntry(dir);
+  if (!resolved.ok) return { ok: false, error: resolved.error };
+  const entry = resolved.entry;
+  const logFile = startLogPath(dir);
   const esc = (s: string) => "'" + s.replace(/'/g, "'\\''") + "'";
   const inner = `deno run -A --unstable-kv ${esc(entry)} --client=${client}`;
   const cmd = `nohup ${inner} >${esc(logFile)} 2>&1 & echo $!`;
@@ -76,6 +111,88 @@ export async function stopApp(
   } catch (e) {
     return { ok: false, error: e instanceof Error ? e.message : String(e) };
   }
+}
+
+// ── boot / shutdown verification ─────────────────────────────────────────────
+//
+// "started" has to MEAN started, and "stopped" has to mean stopped. amui used
+// to spawn (or signal), sleep a fixed 2.5s/0.6s, rescan, and then report
+// success unconditionally — so an app that died on boot (port taken, bad
+// import, a throw in a cell) painted a green "started <app>" next to a stopped
+// dot, and an app that ignored SIGTERM reported "stopped <app>" while still
+// serving. The lock registry is the SAME decider `discoverProjects` uses, so
+// polling it can never disagree with the list the user is looking at — and it
+// is cheap (no disk walk), which is what makes waiting for the real answer
+// affordable where a fixed sleep was not.
+const BOOT_TIMEOUT_MS = 10_000; // same budget as `am start --wait`'s default
+const DOWN_TIMEOUT_MS = 5_000;
+const REGISTRY_POLL_MS = 150;
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/** Is an app registered as running from `dir`? */
+async function registeredAt(dir: string): Promise<boolean> {
+  const { instances } = await import(
+    "../../../src/server/single-instance-lock.ts"
+  );
+  return instances().some((i) => i.alive && i.cwd === dir);
+}
+
+/** The last `n` lines amui's launcher captured for `dir` — the only place a
+ *  boot failure's reason exists (the app died before it could write its own
+ *  logs). Empty when nothing was captured. */
+export async function startLogTail(dir: string, n = 6): Promise<string> {
+  try {
+    const text = await Deno.readTextFile(startLogPath(dir));
+    return logLinesOf(text).slice(-n).join(" · ").slice(0, 600);
+  } catch {
+    return "";
+  }
+}
+
+/** Wait for a freshly-spawned app to REGISTER as running. Resolves as soon as
+ *  it does; gives up early when its process is already gone. */
+export async function awaitBoot(
+  dir: string,
+  pid?: number,
+  timeoutMs = BOOT_TIMEOUT_MS,
+): Promise<{ up: true } | { up: false; reason: string }> {
+  const { isProcessAlive } = await import(
+    "../../../src/server/single-instance-lock.ts"
+  );
+  const deadline = Date.now() + timeoutMs;
+  let died = false;
+  while (Date.now() < deadline) {
+    await sleep(REGISTRY_POLL_MS);
+    if (await registeredAt(dir)) return { up: true };
+    if (pid !== undefined && !isProcessAlive(pid)) {
+      died = true;
+      break;
+    }
+  }
+  const tail = await startLogTail(dir);
+  const why = died
+    ? "the process exited before the app came up"
+    : `no app registered from this directory within ${
+      Math.round(timeoutMs / 1000)
+    }s`;
+  return {
+    up: false,
+    reason: tail ? `${why} — ${tail}` : `${why} (check ${startLogPath(dir)})`,
+  };
+}
+
+/** Wait for a running app to DEREGISTER. `false` = still up at the deadline. */
+export async function awaitDown(
+  dir: string,
+  timeoutMs = DOWN_TIMEOUT_MS,
+): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (!(await registeredAt(dir))) return true;
+    await sleep(REGISTRY_POLL_MS);
+  }
+  return !(await registeredAt(dir));
 }
 
 const TASK_TIMEOUT = 300_000; // 5 min hard cap — no task hangs amui forever
@@ -477,6 +594,17 @@ export interface RawLog {
 
 const LOG_TAIL_MAX = 512 * 1024; // read at most the last 512 KB of a log
 
+/** ANSI-stripped, blank-free lines of a captured log blob. ONE decider for
+ *  "what a displayable log line is" — shared by the Logs tab tail and the
+ *  boot-failure reason, which must quote the app exactly as the tab does. */
+export function logLinesOf(text: string): string[] {
+  return text
+    // deno-lint-ignore no-control-regex -- intentional: strip ANSI SGR escapes
+    .replace(/\x1b\[[0-9;]*m/g, "")
+    .split("\n")
+    .filter((l) => l.length > 0);
+}
+
 /** Absolute candidates first (the app's own `~/.<appId>/logs/`), then the
  *  cwd-relative ones (the stdout capture, and the pre-alpha38 layout). */
 function logCandidates(source: LogSource, appId: string | null): string[] {
@@ -543,9 +671,7 @@ export async function readLogs(
     } catch {
       continue;
     }
-    // deno-lint-ignore no-control-regex -- intentional: strip ANSI SGR escapes
-    const stripped = text.replace(/\x1b\[[0-9;]*m/g, ""); // drop ANSI colors
-    const all = stripped.split("\n").filter((l) => l.length > 0);
+    const all = logLinesOf(text);
     const lines = all.slice(-tailLines);
     return {
       lines,

@@ -148,6 +148,41 @@ Deno.test("trojan timeline: ?after + ?limit query params flow through", async ()
   assertEquals(entries.map((e) => e.seq), [4, 5]);
 });
 
+// A query param the server cannot read is an ERROR, never a default.
+//
+// `?after=abc` became NaN, then `undefined`, then "no filter at all" — so a
+// typo answered 200 with the ENTIRE timeline and looked like a query that had
+// simply matched everything. `am`'s own `parseNumArg` exists to stop exactly
+// this on the CLI side of the same data, and the sibling `cost` route already
+// refused its unparsable `window`.
+
+Deno.test("trojan timeline: an unparsable ?after is a 400, not the whole timeline", async () => {
+  const tl = createTimeline();
+  for (let i = 1; i <= 5; i++) tl.record(i, "t", null, { i: i - 1 }, { i }, i);
+  const r = await getRoute(depsWith(tl), "timeline?after=abc");
+  assertEquals(r.status, 400, `got ${JSON.stringify(r.body)}`);
+  assert(
+    /after/.test(String(r.body.error)),
+    `the error names the param and the value: ${JSON.stringify(r.body)}`,
+  );
+  assertEquals(r.body.entries, undefined, "and returns no entries at all");
+});
+
+Deno.test("trojan timeline: an unparsable or useless ?limit is a 400", async () => {
+  const tl = createTimeline();
+  for (let i = 1; i <= 5; i++) tl.record(i, "t", null, { i: i - 1 }, { i }, i);
+  assertEquals((await getRoute(depsWith(tl), "timeline?limit=x")).status, 400);
+  assertEquals((await getRoute(depsWith(tl), "timeline?limit=0")).status, 400);
+  assertEquals((await getRoute(depsWith(tl), "timeline?limit=-3")).status, 400);
+  // …and a legitimate one still works.
+  const ok = await getRoute(depsWith(tl), "timeline?limit=2");
+  assertEquals(ok.status, 200);
+  assertEquals((ok.body.entries as Array<{ seq: number }>).map((e) => e.seq), [
+    4,
+    5,
+  ]);
+});
+
 Deno.test("trojan timeline: absent capability → empty entries (not a crash)", async () => {
   const deps = {
     dispatch: () => Promise.resolve(),

@@ -2,9 +2,6 @@
   "title": "ex-browser",
   "version": "0.1.0",
   "nodeModulesDir": "auto",
-  "unstable": [
-    "kv"
-  ],
   "compilerOptions": {
     "lib": [
       "deno.ns",

@@ -3,6 +3,7 @@
 // Only adds missing config, removes dead code, or normalizes formatting.
 
 import { basename, join } from "@std/path";
+import { codeText } from "./scan.ts";
 import type { DenoJsonConfig } from "./types.ts";
 
 // ── Helpers ─────────────────────────────────────────────────────────
@@ -33,19 +34,10 @@ async function patchDenoJson(
   }
 }
 
-/** Remove a line matching a regex from a file */
-async function removeLine(filePath: string, pattern: RegExp): Promise<boolean> {
-  try {
-    const content = await Deno.readTextFile(filePath);
-    const lines = content.split("\n");
-    const filtered = lines.filter((l) => !pattern.test(l));
-    if (filtered.length === lines.length) return false;
-    await Deno.writeTextFile(filePath, filtered.join("\n"));
-    return true;
-  } catch {
-    return false;
-  }
-}
+// A generic "delete every line matching this regex" helper used to live here.
+// It is gone on purpose: line deletion cannot tell whether the line carries
+// anything else the file still needs, which is exactly how the React-import fix
+// took `useState` down with it. Each fix now edits the construct it names.
 
 // ── Config fixes ────────────────────────────────────────────────────
 
@@ -81,13 +73,22 @@ export function fixAddEsbuild(projectDir: string): Promise<boolean> {
   });
 }
 
-/** Add compilerOptions for JSX */
+/** Add compilerOptions for the automatic JSX transform.
+ *
+ *  `jsxImportSource` is aio's, not React's: aio renders JSX through AIR, and
+ *  `am fix` (src/am/am-cmd-fix.ts) enforces `"aio"` for exactly that reason.
+ *  This fix used to write `"react"` (plus `jsxImportSourceTypes:
+ *  "@types/react"`) over an app that already said `"aio"` — two tools with
+ *  opposite answers about one key, and the app that ran `--safe-fix` compiled
+ *  every element against React's runtime. It now sets the transform the hint
+ *  actually names, and only FILLS IN an absent import source. */
 export function fixAddJsxConfig(projectDir: string): Promise<boolean> {
   return patchDenoJson(projectDir, (c) => {
     if (!c.compilerOptions) c.compilerOptions = {};
     c.compilerOptions["jsx"] = "react-jsx";
-    c.compilerOptions["jsxImportSource"] = "react";
-    c.compilerOptions["jsxImportSourceTypes"] = "@types/react";
+    if (!c.compilerOptions["jsxImportSource"]) {
+      c.compilerOptions["jsxImportSource"] = "aio";
+    }
   });
 }
 
@@ -145,22 +146,75 @@ export function fixAddAppIdToRun(projectDir: string): Promise<boolean> {
 
 // ── Source file fixes ───────────────────────────────────────────────
 
-/** Remove `import React from 'react'` or `import React, { ... } from 'react'` from a TSX file.
- *  Safe because jsx: "react-jsx" transform injects React automatically. */
+/** Remove the `React` DEFAULT binding from a TSX file's react import — safe
+ *  because the `react-jsx` transform injects the runtime itself.
+ *
+ *  Two things this fix must not do, both of which it used to:
+ *   • delete the whole LINE. `import React, { useState } from "react"` lost
+ *     `useState` with it and the file stopped compiling. Other bindings are
+ *     kept; only the default one goes.
+ *   • remove a binding the file still USES. `React.Fragment` / `React.FC`
+ *     need it, so when `React` appears anywhere else in real code the fix
+ *     declines (the hint stays — a hint is cheaper than a broken file). */
 export function fixRemoveImportReact(filePath: string): () => Promise<boolean> {
-  return () =>
-    removeLine(filePath, /^\s*import\s+React[\s,{].*from\s+['"]react['"]/);
+  const IMPORT_RE =
+    /^([ \t]*)import\s+React\s*(?:,\s*(\{[^}]*\}|\*\s+as\s+[$\w]+))?\s+from\s+(['"])react\3;?[ \t]*$/m;
+  return async () => {
+    let content: string;
+    try {
+      content = await Deno.readTextFile(filePath);
+    } catch {
+      return false;
+    }
+    const m = IMPORT_RE.exec(content);
+    if (!m) return false;
+    const [stmt, indent, others, quote] = m;
+    const before = content.slice(0, m.index);
+    const after = content.slice(m.index + stmt.length);
+    // Still referenced in CODE (a mention in a comment doesn't count)?
+    // Removing it would break the file — decline.
+    if (/\bReact\b/.test(codeText(before + after))) return false;
+    const replacement = others
+      ? `${indent}import ${others} from ${quote}react${quote};`
+      : null;
+    const next = replacement !== null
+      ? before + replacement + after
+      // Drop the now-empty line with it.
+      : before + after.replace(/^\r?\n/, "");
+    if (next === content) return false;
+    await Deno.writeTextFile(filePath, next);
+    return true;
+  };
 }
 
-/** Remove `import { createRoot } from 'react-dom/client'` — framework handles mounting */
+/** Remove `import { createRoot } from 'react-dom/client'` — the framework does
+ *  the mounting. Declines while `createRoot(` is still CALLED: dropping the
+ *  import under a live call is a ReferenceError at runtime, not a fix. The
+ *  mounting code has to go first, and that is the author's edit, not a safe
+ *  one to make automatically. */
 export function fixRemoveCreateRootImport(
   filePath: string,
 ): () => Promise<boolean> {
-  return () =>
-    removeLine(
-      filePath,
-      /^\s*import\s+\{[^}]*createRoot[^}]*\}\s+from\s+['"]react-dom\/client['"]/,
-    );
+  const IMPORT_RE =
+    /^[ \t]*import\s+\{[^}]*createRoot[^}]*\}\s+from\s+['"]react-dom\/client['"];?[ \t]*$/m;
+  return async () => {
+    let content: string;
+    try {
+      content = await Deno.readTextFile(filePath);
+    } catch {
+      return false;
+    }
+    const m = IMPORT_RE.exec(content);
+    if (!m) return false;
+    const rest = content.slice(0, m.index) +
+      content.slice(m.index + m[0].length);
+    if (/\bcreateRoot\b/.test(codeText(rest))) return false;
+    const next = content.slice(0, m.index) +
+      content.slice(m.index + m[0].length).replace(/^\r?\n/, "");
+    if (next === content) return false;
+    await Deno.writeTextFile(filePath, next);
+    return true;
+  };
 }
 
 // ── Upgrade fixes (deprecated aliases → canonical) ──────────────────

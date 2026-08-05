@@ -83,6 +83,7 @@ export {
 } from "./state/state-transport.ts";
 /** @internal Cross-module wiring — not public API, stripped from the snapshot. */
 export {
+  _offlineQueueFullness,
   _resolveWithFallback,
   _trackingProxy,
 } from "./state/state-transport.ts";

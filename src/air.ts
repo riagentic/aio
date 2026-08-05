@@ -145,6 +145,13 @@ export { type Resource, resource } from "./browser-air.ts";
 export { on, watch } from "./state/watch.ts";
 export type { WatchOptions } from "./state/watch.ts";
 
+// ── Offline / connection health ──────────────────────────────────────
+// `isConnectionDegraded()` is how docs/persistence/offline.md and
+// docs/clients/browser.md tell you to drive a "reconnecting / slow connection"
+// indicator — and both pages import from `aio/air`, which did not export it.
+// The function was real and correct the whole time; only the door was missing.
+export { isConnectionDegraded } from "./browser-air.ts";
+
 // ── Forms ────────────────────────────────────────────────────────────
 export { useFieldArray, useForm } from "./air/form.ts";
 export type {

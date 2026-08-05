@@ -1,7 +1,7 @@
 // cell-compose-reduce.ts — per-cell reducer and root reduce function
 
 import { notifyMethodCancel } from "./method-cancel.ts";
-import { clearLastRejection, setLastRejection } from "./rejection-tracker.ts";
+import { recordRejection } from "./rejection-tracker.ts";
 import {
   applyPatches,
   current,
@@ -107,6 +107,13 @@ export function reduceCell(
       if ((globalThis as Record<string, unknown>).__aioDev) {
         log.warn("aio", msg);
       } else log.debug("aio", msg);
+      // D11: a guard block is a REFUSAL — the action did not reach state. The
+      // sync handler asks "was this op refused?" right after dispatching it;
+      // without this record the answer was "no", so an op the machine blocked
+      // was acked to its origin (which kept its optimistic change), broadcast
+      // to every peer and compacted — applied everywhere except the server
+      // that decided not to take it.
+      recordRejection(action, { cell: cellName, reason: msg });
       diagEmit({
         type: "action-guarded",
         severity: "info",
@@ -218,8 +225,10 @@ export function reduceCell(
           log.error("cell", `${cellName} state validation failed: ${result}`);
         }
         // D11: explainable rejection — the sync handler reads this and tells
-        // the op's origin client WHY its optimistic change snapped back.
-        setLastRejection({ cell: cellName, reason: String(result) });
+        // the op's origin client WHY its optimistic change snapped back. Keyed
+        // to THIS action: the handler reads it after an await, and a global
+        // slot would be cleared/overwritten by any dispatch that interleaves.
+        recordRejection(action, { cell: cellName, reason: String(result) });
         return { state: fullState, effects: [] };
       }
     }
@@ -318,7 +327,7 @@ export function reduceCell(
         log.error("cell", `${cellName} state validation failed: ${result}`);
       }
       // D11: explainable rejection (see above).
-      setLastRejection({ cell: cellName, reason: String(result) });
+      recordRejection(action, { cell: cellName, reason: String(result) });
       return { state: fullState, effects: [] };
     }
   }
@@ -407,13 +416,19 @@ export function buildRootReducer(
   // so a whole feature shipped dead with green tests. Fail loud, once per
   // unknown cell name.
   const warnedUnknownCells = new Set<string>();
+  // Same class, one level down: the cell IS booted but has no method by that
+  // name (a renamed/removed method still called by an older client, a typo in a
+  // hand-built action). The reducer answers "unknown action" and "known action
+  // that changed nothing" identically — undefined — so nothing downstream could
+  // tell them apart, and a sync op naming a method the server does not have was
+  // persisted, ACKED and broadcast while server state never moved. Warned once
+  // per action type.
+  const warnedUnknownActions = new Set<string>();
 
   return (
     state: Record<string, unknown>,
     action: Msg,
   ): ReduceResult => {
-    // D11: a rejection belongs to exactly one dispatch.
-    clearLastRejection();
     let currentState = state;
     const allEffects: (Msg | ScheduleEffect | OwnEffect)[] = [];
     const allPatches: Array<{ cell: string; ops: Patch[] }> = [];
@@ -514,21 +529,57 @@ export function buildRootReducer(
       if (colonIdx !== -1) {
         const prefix = (action.type as string).slice(0, colonIdx);
         const owner = ownByPrefix.get(prefix);
-        if (owner && !disabledCells.has(owner.__aio.id)) {
-          const result = reduceCell(owner, currentState, action, ctx);
-          currentState = result.state;
-          ownerReturn = result.ret;
-          allEffects.push(...result.effects);
-          if (result.patches) {
-            if (Array.isArray(result.patches)) {
-              allPatches.push(...result.patches);
-            } else allPatches.push(result.patches);
-          }
-          ownerBd = result._bd;
-          cellLastAction.set(owner.__aio.id, {
-            type: action.type,
-            at: Date.now(),
+        if (owner && disabledCells.has(owner.__aio.id)) {
+          // D11: a disabled cell (circuit breaker, registry.disable) does not
+          // apply the action. Recording the refusal is what makes a sync op
+          // land as `op-rejected` instead of an ack for a change the server
+          // never took. The breaker's own trip is logged elsewhere; this is the
+          // per-action fact the op path needs.
+          recordRejection(action, {
+            cell: owner.__aio.id,
+            reason:
+              `cell '${owner.__aio.id}' is disabled — '${action.type}' was not applied`,
           });
+        } else if (owner) {
+          // A cell's reducer only ever handles its OWN action types by prefix
+          // (foreign types never share the prefix — detectForeignActions), so
+          // `actionTypeToKey` IS the decider for "can this cell apply this
+          // action". No entry and no foreign listener → nobody applies it.
+          if (
+            owner.__aio.actionTypeToKey.has(action.type) ||
+            listenersByType.has(action.type)
+          ) {
+            const result = reduceCell(owner, currentState, action, ctx);
+            currentState = result.state;
+            ownerReturn = result.ret;
+            allEffects.push(...result.effects);
+            if (result.patches) {
+              if (Array.isArray(result.patches)) {
+                allPatches.push(...result.patches);
+              } else allPatches.push(result.patches);
+            }
+            ownerBd = result._bd;
+            cellLastAction.set(owner.__aio.id, {
+              type: action.type,
+              at: Date.now(),
+            });
+          } else {
+            const known = [...owner.__aio.actionTypeToKey.values()]
+              .filter((k) => !k.startsWith("__")).join(", ");
+            const msg =
+              `[aio:${prefix}] '${action.type}' does NOTHING — cell ` +
+              `'${prefix}' is booted but has no method by that name (known: ${
+                known || "none"
+              }). A renamed or removed method still called by an older client ` +
+              `reaches here. (warned once per action)`;
+            if (!warnedUnknownActions.has(action.type)) {
+              warnedUnknownActions.add(action.type);
+              log.warn("aio", msg);
+            }
+            // D11 — see the disabled-cell branch: the op path needs the refusal
+            // recorded, not just logged.
+            recordRejection(action, { cell: owner.__aio.id, reason: msg });
+          }
         }
       }
     }

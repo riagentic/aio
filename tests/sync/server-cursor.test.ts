@@ -293,7 +293,19 @@ describe("catch-up cursor (audit B)", () => {
     assertEquals(second.ops.length, 0, "cursor advanced — no re-delivery");
   });
 
-  it("never echoes the requesting client's own ops back", async () => {
+  it("echoes a client's own ops back only when it has no cursor to keep", async () => {
+    // Two different clients wear the same name here.
+    //
+    // A LIVE client — one with a cursor — has at most a few of its own ops in
+    // flight, and they reach confirmed state as acks; echoing them would fold
+    // them twice.
+    //
+    // A CURSORLESS client is not that client. It is one rebuilding the cell
+    // from nothing: a page load throws confirmed state away and the cursor is
+    // dropped with it on purpose, so the log is the only place its own history
+    // still exists. This test used to assert the filter for BOTH, which is
+    // what made every edit the user had ever made vanish from their own screen
+    // on a refresh while the server and every peer still had them.
     const db = createTestDb();
     const h = harness(db);
     await h.handler.handleOp(
@@ -306,6 +318,8 @@ describe("catch-up cursor (audit B)", () => {
       { id: "s2" },
       h.socket,
     );
+
+    // No cursor → rebuilding → the whole log, own ops included.
     h.handler.handleSync(
       {
         clientId: "client-a",
@@ -316,9 +330,32 @@ describe("catch-up cursor (audit B)", () => {
       h.socket,
     );
     await h.waitFor(() => h.syncResponses().length === 1);
-    const resp = h.syncResponses()[0]!.d as { ops: { id: string }[] };
+    const rebuild = h.syncResponses()[0]!.d as {
+      ops: { id: string }[];
+      lastServerTs?: Record<string, number>;
+    };
     assertEquals(
-      resp.ops.map((o) => o.id),
+      rebuild.ops.map((o) => o.id),
+      ["own-1", "peer-1"],
+      "a client with nothing must get its own history back too",
+    );
+
+    // With a cursor → live client → own ops stay out of the echo (they are
+    // acked instead). Cursor 0 would BE the cursorless case, so ask from the
+    // start of the sequence.
+    h.handler.handleSync(
+      {
+        clientId: "client-a",
+        cells: { todos: { lastHlc: null, lastServerTs: 1 } },
+        pendingOps: [],
+      },
+      { id: "s1" },
+      h.socket,
+    );
+    await h.waitFor(() => h.syncResponses().length === 2);
+    const live = h.syncResponses()[1]!.d as { ops: { id: string }[] };
+    assertEquals(
+      live.ops.map((o) => o.id),
       ["peer-1"],
       "own ops arrive via sync-ack, not the catch-up echo",
     );
@@ -380,7 +417,7 @@ describe("client cursor preservation (audit D)", () => {
 });
 
 // ── D11: explainable rejections (perfect-aio) ─────────────────────────
-import { setLastRejection } from "../../src/state/rejection-tracker.ts";
+import { recordRejection } from "../../src/state/rejection-tracker.ts";
 
 describe("op rejection (D11)", () => {
   it("server: rejected op → op-rejected frame, row deleted, no ack/broadcast", async () => {
@@ -388,9 +425,12 @@ describe("op rejection (D11)", () => {
     const sent: Record<string, unknown>[] = [];
     const broadcasts: unknown[] = [];
     const handler = createServerSyncHandler({
-      dispatch: () => {
-        // Simulate the composed reduce refusing the op (validate hook).
-        setLastRejection({ cell: "todos", reason: "score must be >= 0" });
+      dispatch: (a) => {
+        // Simulate the composed reduce refusing the op (validate hook). The
+        // rejection is recorded against the ACTION the handler dispatched —
+        // if the handler ever stops passing that same object through, this
+        // goes red rather than silently seeing no rejection at all.
+        recordRejection(a, { cell: "todos", reason: "score must be >= 0" });
       },
       db,
       syncCellIds: ["todos"],

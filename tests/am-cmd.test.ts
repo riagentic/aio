@@ -461,15 +461,20 @@ Deno.test("am: cmdLog — tails and filters .aio.log (json mode)", async () => {
   }
 });
 
-Deno.test("am: cmdLog — missing log file reports cleanly", async () => {
+Deno.test("am: cmdLog — missing log file reports cleanly (and exits 1)", async () => {
   const tmp = await Deno.makeTempDir({ prefix: "am-cmd-nolog-" });
   const cwd = Deno.cwd();
   try {
     Deno.chdir(tmp);
-    const { errors } = await capture(() =>
-      cmdLog([], { json: true } as GlobalFlags)
-    );
-    assert(errors.some((l) => l.includes("no log file")));
+    // Nothing to tail is a FAILURE, not a quiet note: `am log | grep …` in a
+    // script must not see a success. The message names the path it searched.
+    const { errors } = await capture(async () => {
+      const code = await withExitStub(() =>
+        cmdLog([], { json: true } as GlobalFlags)
+      );
+      assertEquals(code, 1);
+    });
+    assert(errors.some((l) => l.includes("no log file at")));
   } finally {
     Deno.chdir(cwd);
     await Deno.remove(tmp, { recursive: true });
@@ -1298,7 +1303,12 @@ Deno.test("am new: a name that is not an identifier is refused", async () => {
       ]
     ) {
       errors.length = 0;
-      await cmdNew(["cell", bad], { json: false } as never);
+      // A refusal is also a non-zero exit — `am new cell x && git add …`
+      // must not run the second half.
+      const code = await withExitStub(() =>
+        cmdNew(["cell", bad], { json: false } as never)
+      );
+      assertEquals(code, 1, `"${bad}" must exit 1`);
       assert(
         errors.some((e) => e.includes("invalid name")),
         `"${bad}" must be refused, got: ${errors.join(" | ")}`,

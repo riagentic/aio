@@ -5,9 +5,11 @@ export type LogLevel = "trace" | "debug" | "info" | "warn" | "error";
 
 /** Logger configuration — passed to aio.run({ logging: {...} }) */
 export type LogConfig = {
-  /** Minimum level written to debug.log (default: 'info' — set 'trace' or
-   *  'debug' to opt into verbose file logging; every dispatch logged at debug
-   *  amplifies watcher feedback loops — 2026-07-08 field report) */
+  /** Minimum level for EVERY sink — debug.log, app.log, error.log,
+   *  warning.log and the console (default: 'info' — set 'trace' or 'debug' to
+   *  opt into verbose file logging; every dispatch logged at debug amplifies
+   *  watcher feedback loops — 2026-07-08 field report). It used to gate
+   *  debug.log alone, so `level: "warn"` silenced nothing a user could see. */
   level?: LogLevel;
   /** Log directory. An app defaults to `~/.<appId>/logs` (tier ② — regenerable,
    *  outside the backup); a standalone logger with no app falls back to
@@ -43,9 +45,10 @@ export const LEVELS: Record<LogLevel, number> = {
   error: 4,
 };
 
-// Pure framework internals — never logged anywhere
-export const SKIP_SUFFIXES = [":__exec"];
-export const SKIP_CONTAINS = [":__set"];
+// What counts as framework noise lives in action-kind.ts — ONE decider for
+// every sink. The copy that used to sit here dropped `:__set` types, so
+// debug.log ("all actions dispatched") held an async method's call and never
+// the write-set that says what it wrote.
 
 // ── Pure helpers ─────────────────────────────────────────────────────
 
