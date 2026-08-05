@@ -109,6 +109,9 @@ type Run = {
   argv: string[][];
   dist: string[];
   manifest: Record<string, unknown>;
+  /** Every file still in the project when the build finished, root-relative.
+   *  The guard exists to keep sources ALIVE, so that is what is asserted. */
+  survivors: string[];
 };
 
 /** Run the orchestrator against a temp project. `args` is the argv buildAll
@@ -149,11 +152,21 @@ async function runBuildAll(
         await Deno.readTextFile(join(dir, "dist", "manifest.json")),
       );
     } catch { /* none */ }
+    const survivors: string[] = [];
+    const walk = (d: string, prefix: string): void => {
+      for (const e of Deno.readDirSync(d)) {
+        const rel = prefix ? `${prefix}/${e.name}` : e.name;
+        if (e.isDirectory) walk(join(d, e.name), rel);
+        else survivors.push(rel);
+      }
+    };
+    walk(dir, "");
     return {
       code,
       argv: log.trim().split("\n").filter(Boolean).map((l) => JSON.parse(l)),
       dist: dist.sort(),
       manifest,
+      survivors: survivors.sort(),
     };
   } finally {
     Deno.chdir(origCwd);
@@ -280,4 +293,44 @@ Deno.test("build-all: out pointing at a target's app dir is refused", async () =
   assertEquals(run.code, 1);
   assertEquals(run.argv.length, 0, "nothing was spawned");
   // the sources are still there — the whole point of the guard
+  assert(run.survivors.includes("src/relay/app.ts"), "the app's source lives");
+});
+
+// The reported repro, end to end: an app at `apps/web/` with `out: "apps"`.
+// The guard tested EXACT set membership, so `apps` (the app dir's PARENT) was
+// not "forbidden" — the build then ran `Deno.remove(outDir, {recursive:true})`
+// over the user's source tree, printed `✓ 1/1 build(s) → apps/` and exited 0.
+Deno.test("build-all: an `out` that CONTAINS the app dir is refused — sources survive", async () => {
+  const run = await runBuildAll(
+    {
+      title: "Web",
+      entry: "apps/web/main.ts",
+      build: { targets: ["browser"], out: "apps" },
+    },
+    ["apps/web/main.ts", "apps/web/App.tsx", "apps/web/PRECIOUS.txt"],
+  );
+  assertEquals(run.code, 1, "the build must refuse");
+  assertEquals(run.argv.length, 0, "nothing was spawned");
+  for (
+    const f of ["apps/web/main.ts", "apps/web/App.tsx", "apps/web/PRECIOUS.txt"]
+  ) {
+    assert(
+      run.survivors.includes(f),
+      `${f} was DELETED (survivors: ${run.survivors})`,
+    );
+  }
+});
+
+// …and the other direction: `out` INSIDE the app dir.
+Deno.test("build-all: an `out` INSIDE the app dir is refused — sources survive", async () => {
+  const run = await runBuildAll(
+    {
+      title: "Web",
+      entry: "src/main.ts",
+      build: { targets: ["browser"], out: "src/ui" },
+    },
+    ["src/main.ts", "src/ui/Button.tsx"],
+  );
+  assertEquals(run.code, 1);
+  assert(run.survivors.includes("src/ui/Button.tsx"), "nested sources live");
 });

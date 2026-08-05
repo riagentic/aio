@@ -1,5 +1,104 @@
 # Changelog
 
+## 1.0.0-alpha47 — the second hunt (2026-08-05)
+
+Randomized differential fuzzers pointed at the two areas the previous pass did
+not reach — the **renderer** and the **build**. 17 more defects, and the two
+fuzzers landed as permanent gates.
+
+### A build could delete your source code and report success
+
+`out:` pointing at a directory that CONTAINS the app wiped it:
+`entry: "apps/web/main.ts"` + `"out": "apps"` printed `✓ 1/1 build(s) → apps/`,
+exited 0, and `apps/web/` was gone. `unsafeOutDir` tested membership in a fixed
+list rather than CONTAINMENT — so only an exact match was refused, while its own
+doc comment promised "never … an ancestor". The existing tests asserted only the
+exact-dir case, which is why it survived. It now refuses in both directions by
+path SEGMENT (so `apps` and `appsX` are never confused), for every target's app
+dir plus `src`, `.git` and `.aio`.
+
+### Four renderer defects that committed the wrong DOM in silence
+
+A differential fuzzer — random tree, random mutation, rendered incrementally vs
+mounted fresh from the same model — diverged on ~44% of programs.
+
+- **An unkeyed sibling reorder rendered byte-identical DOM.** The diff located
+  an old bare-text node by SCANNING for matching content, while `diffUnkeyed`
+  had already computed the correct positional node and simply did not pass it —
+  so it matched a node this same pass had just inserted. Any list where two text
+  children share a value (`{" "}` separators, repeated labels, equal numbers)
+  could re-order in the model and not move on screen.
+- **Removing bare text was a no-op** (`removeDom` ends at `getDom`, which is
+  null for a string), so `<>{"aaa"}</>` → `<i>` left `aaa` behind, on every
+  toggle, forever.
+- **An empty Fragment had no anchor in SSR output** while `createDom` emits one,
+  so hydrated content landed in the wrong place — rows above their header.
+  `mount()` was always correct; hydration-only, and invisible to `testUI`.
+- **A component returning a bare string wrote into a sibling's text node** —
+  same content-scan root.
+
+Fixing the root (thread the position, delete both scans) surfaced three more,
+all pre-existing and silent: a spent `DocumentFragment` recorded as a region
+anchor, keyed moves stranding bare text and multi-node components, and a `_Null`
+placeholder deleted as if it were a stale anchor.
+
+**Why the class shipped:** the dev tripwire `_assertChildAlignment` compared
+COUNTS only, and only for elements. Every one of these is an order/identity
+defect at a correct count, so it fired for 1 of 8. It is now a per-child
+positional assertion covering Fragment/Suspense/ErrorBoundary regions too.
+
+### The freshness cache guessed at its inputs
+
+It walked the project for `.ts`/`.tsx`/`.css` FROM THE CWD — wrong in two
+directions at once. An `App.tsx` importing `./helper.js` or `./data.json` had
+those edits invisible (wrong extensions); a monorepo app importing
+`../../packages/shared/lib.ts` had the whole sibling package invisible (wrong
+root). Both printed "cached — use `--force`" and shipped the OLD code, which
+`--compile` embedded verbatim. It now records the input list esbuild actually
+read and stats those; **no record means not fresh**.
+
+### A binary took its identity from wherever it was launched
+
+`title` and the client/target default were read from `Deno.cwd()/deno.json`.
+Under systemd (`ExecStart` runs from `$HOME`) or inside another project, a
+binary served someone else's `<title>` and auto-downloaded Electron despite
+`"target": "browser"`. `appVersion` was fixed for this in alpha44; the other two
+fields were not. One decider now — the app's own deno.json, found from the
+entry.
+
+### Packaging no longer ships whatever `dist/` holds
+
+`compile:android` then `compile:service` embedded the Android IIFE into a server
+binary: the prod shell does `const { mount } = await import('/app.js')`, `mount`
+is undefined, blank page. The target stamp was read only where the bundle is
+REBUILT, never where it is PACKAGED. It is now checked at both.
+
+### Also
+
+`cli-client` compiles the entry you declared (it printed yours and built
+`src/client.ts`) · `aio ship` derives its scan dir from the entry and REFUSES to
+sign a capability claim it never measured (any non-`src/` layout got "no
+permissions") · an out-of-project `compile.include` is refused, not dropped ·
+`dev:android` writes `<app>-dev.apk` so a cleartext dev build cannot be mistaken
+for the shippable one · one slugify decider (a directory named `My App` no
+longer yields a binary literally named `My App`) · the Electron build announces
+it when `deno install` rewrites your `deno.json`.
+
+### The gates
+
+`tests/renderer-differential.test.ts` — incremental-vs-fresh AND
+SSR→hydrate→mutate, over a text alphabet chosen to COLLIDE, with anti-vacuity
+assertions: **68 200 programs, ~770 000 diff steps, 0 divergences**, failing at
+round 2 against pre-fix code. Plus `renderer-position-fidelity` (15 pins, all
+mutation-verified), a containment table for `unsafeOutDir`, artifact-level
+source-survival tests, and bundle-cache tests including an out-of-root sibling
+package.
+
+Suite 3529 (from 3495). Public surface unchanged.
+
+Upgrade guide: `docs/upgrade/from-alpha46-to-alpha47.md` — no code changes
+required.
+
 ## 1.0.0-alpha46 — the hunt (2026-08-05)
 
 No new capability. Three adversarial passes over persistence, the state core and

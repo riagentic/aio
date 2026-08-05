@@ -263,33 +263,64 @@ export function placedName(
   return `${file.slice(0, file.length - ext.length)}-${target}${ext}`;
 }
 
+/** Strip a trailing separator so `/proj/apps/` and `/proj/apps` compare equal.
+ *  (`/` itself keeps its single separator.) */
+function trimSep(p: string): string {
+  return p.length > 1 && p.endsWith(SEPARATOR) ? p.slice(0, -1) : p;
+}
+
+/** True when `a` IS `b` or lives inside it, compared by PATH SEGMENTS.
+ *  Never `a.startsWith(b)`: that makes `/proj/appsX` "inside" `/proj/apps`, so
+ *  a sibling with a near-miss name would be refused (or, in the other
+ *  direction, a real containment missed). */
+function within(a: string, b: string): boolean {
+  const x = trimSep(a), y = trimSep(b);
+  return x === y || x.startsWith(y.endsWith(SEPARATOR) ? y : y + SEPARATOR);
+}
+
 /** True if `outDir` is unsafe to wipe+recreate: the `out` dir is assembled by
- *  removing it recursively, so it MUST be a dedicated subdir of the project —
- *  never the root, an ancestor (`out: ".."`), `.aio` (our staging parent), or a
- *  source dir. `out: ""` / `"."` resolve to the root and are caught here.
+ *  removing it RECURSIVELY, so it must be a dedicated subdir of the project
+ *  that CONTAINS no protected directory and lives INSIDE none — never the root,
+ *  an ancestor (`out: ".."`), `.aio` (our staging parent), `.git`, or a source
+ *  dir. `out: ""` / `"."` resolve to the root and are caught here.
+ *
+ *  Containment, in BOTH directions, is the whole guard. Exact-set membership
+ *  (what this used to test) let `out: "apps"` past while the app lived in
+ *  `apps/web/` — the build then deleted the user's source tree, printed
+ *  `✓ 1/1 build(s)` and exited 0. The descendant direction is just as fatal:
+ *  `out: "src/ui"` under an app dir of `src/` wipes half the app.
  *
  *  `appDirs` are THE app-dir decider's answers (`BuildConfig.appDir`), one per
  *  target. `src/` is hardcoded only because it is the scaffold's convention; an
  *  app whose entry lives at `apps/web/main.ts` keeps its sources somewhere this
- *  list cannot guess, and `out: "apps/web"` would have recursively deleted them.
+ *  list cannot guess.
  *
  *  It is a LIST, not one dir, because per-target entries mean one repo can hold
  *  two apps: guarding only the first target's dir would leave the second app's
  *  sources deletable — the exact hole the guard exists to close. Pass every
- *  target's dir; duplicates are fine. */
+ *  target's dir; duplicates are fine. An app dir that IS the root (a flat
+ *  layout, entry `app.ts`) is dropped: the root is already refused above, and
+ *  keeping it would make every possible out dir "inside a protected dir" and
+ *  leave a flat-layout app with nowhere to build. */
 export function unsafeOutDir(
   outDir: string,
   root: string,
   appDirs: readonly string[] = [],
 ): boolean {
-  const forbidden = new Set([
-    root,
-    join(root, ".aio"),
-    join(root, "src"),
-    join(root, ".git"),
+  const out = trimSep(outDir);
+  const rootDir = trimSep(root);
+  // Must be a STRICT subdirectory of the project (this also catches the root
+  // itself, `/`, and anything outside the project).
+  if (out === rootDir || !within(out, rootDir)) return true;
+  const protectedDirs = [
+    join(rootDir, ".aio"),
+    join(rootDir, "src"),
+    join(rootDir, ".git"),
     ...appDirs,
-  ]);
-  return !outDir.startsWith(root + SEPARATOR) || forbidden.has(outDir);
+  ].map(trimSep).filter((d) => d !== rootDir);
+  // Both directions: `out` may not sit inside a protected dir, and may not
+  // swallow one.
+  return protectedDirs.some((d) => within(out, d) || within(d, out));
 }
 
 /** Move a file, falling back to copy+delete across filesystem boundaries — a
@@ -447,7 +478,12 @@ export async function buildAll(): Promise<number> {
   ];
   if (unsafeOutDir(outDir, root, appDirs)) {
     console.error(
-      `${C.red}✗ refusing to build into ${outDir}${C.r} — "out" must be a dedicated subdirectory of the project (not the root, your app dir, src, .git, or .aio)`,
+      `${C.red}✗ refusing to build into ${outDir}${C.r} — it is assembled by ` +
+        `DELETING it recursively, so "out" must be a dedicated subdirectory ` +
+        `of the project that neither contains nor sits inside the project ` +
+        `root, an app dir (${
+          appDirs.join(", ") || "none"
+        }), src, .git or .aio.`,
     );
     return 1;
   }

@@ -393,7 +393,7 @@
         },
         "VERSION": {
           "kind": "variable",
-          "sig": "ed105916f07e5a5b"
+          "sig": "d63339fbc9350534"
         },
         "VitalsConfig": {
           "kind": "typeAlias",

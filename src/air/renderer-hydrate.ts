@@ -20,6 +20,7 @@ import {
   SVG_TAGS,
 } from "./vdom.ts";
 import { _cleanupActions } from "./vdom-helpers.ts";
+import { _devWarn } from "./vdom-types.ts";
 import { _getExitHandler } from "./transition-component.ts";
 import { _getGroupExitHandler } from "./transition-group.ts";
 import type { MountHandle, RootState } from "./renderer-types.ts";
@@ -98,6 +99,20 @@ export function hydrate(root: any, App: ComponentFn): MountHandle {
     const vnode = h(App, null);
     const consumed = _hydrateNode(root, vnode, state.ctx, false, 0);
     if (consumed < 0) {
+      // Recovery is correct but INVISIBLE, and it throws away everything SSR
+      // was for: the page is re-created from scratch on the client, losing the
+      // server markup, the paint that was already on screen, and any DOM state
+      // in it. Silently degrading a documented feature to nothing is the worst
+      // outcome — say so in dev, where it can still be fixed.
+      _devWarn(
+        "hydrate-mismatch",
+        `hydrate() found DOM that does not match the component tree and fell ` +
+          `back to a full client render — the server HTML was discarded. The ` +
+          `usual cause is markup that differs between server and client ` +
+          `(Date/random/window in render), or two ADJACENT text children: ` +
+          `HTML parsing merges them into one text node, which cannot be ` +
+          `hydrated as two.`,
+      );
       // Hydration mismatch — release the signal-binding effects, signal-text
       // bindings, and action cleanups created for elements hydrated before the
       // mismatch. Without this, those effects stay alive and keep mutating DOM
@@ -197,8 +212,10 @@ export function _hydrateNode(
   }
 
   // ErrorBoundary / Suspense / Fragment — children inline in parent DOM
+  const isFragment =
+    vnode.tag === (Symbol.for("aio.Fragment") as typeof vnode.tag);
   if (
-    vnode.tag === (Symbol.for("aio.Fragment") as typeof vnode.tag) ||
+    isFragment ||
     vnode.tag === (Symbol.for("aio.ErrorBoundary") as typeof vnode.tag) ||
     vnode.tag === (Symbol.for("aio.Suspense") as typeof vnode.tag)
   ) {
@@ -208,13 +225,28 @@ export function _hydrateNode(
       if (consumed < 0) return -1;
       idx += consumed;
     }
-    // AIO-256: find first DOM-bearing child
-    for (const child of vnode.children) {
-      const d = getDom(child);
-      if (d) {
-        vnode._dom = d;
-        break;
+    if (idx === childIndex && isFragment) {
+      // An empty Fragment occupies a comment ANCHOR (AIO-195) — createDom makes
+      // one and renderToString emits one, so hydration must claim it. Without a
+      // `_dom` the fragment has no position, and the next diff anchored its
+      // whole region at the parent's first child.
+      const domNode = parent.childNodes[childIndex];
+      if (domNode && domNode.nodeType === 8) {
+        vnode._dom = domNode;
+        return 1;
       }
+      const comment = (parent.ownerDocument ?? document).createComment("");
+      if (domNode) parent.insertBefore(comment, domNode);
+      else parent.appendChild(comment);
+      vnode._dom = comment;
+      return 1;
+    }
+    // The region's first node — `parent.childNodes[childIndex]` by definition.
+    // Scanning children for the first one carrying a `_dom` (AIO-256) SKIPS
+    // leading bare text, whose node nothing tracks, so a fragment that starts
+    // with text anchored one node too late.
+    if (idx > childIndex) {
+      vnode._dom = parent.childNodes[childIndex] ?? undefined;
     }
     return idx - childIndex;
   }

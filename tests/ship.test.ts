@@ -1,6 +1,7 @@
 // `aio ship` core: a verifiable release manifest (SHA-256 +
 // least-privilege capabilities + optional Ed25519 signature over the digest).
-import { assert, assertEquals } from "@std/assert";
+import { assert, assertEquals, assertRejects } from "@std/assert";
+import { join } from "@std/path";
 import {
   buildShipManifest,
   generateSigningKey,
@@ -127,6 +128,62 @@ Deno.test("shipApp: one command → binary + source → signed ship.json (batter
     const binary = await Deno.readFile(binaryPath);
     assertEquals((await verifyShipManifest(binary, written)).ok, true);
   } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+// A ship manifest is a CLAIM: "this binary needs exactly these permissions".
+// The source dir it scanned was hardcoded to "src", and a missing dir was
+// swallowed into an empty scan — so on any layout that isn't the scaffold's
+// (sources in `apps/web/`), `ship` signed a least-privilege claim it never
+// measured: every capability false, `run: (no perms)`, `version 0.0.0`.
+Deno.test("shipApp: scans THE app dir (from the entry) and refuses an unmeasured claim", async () => {
+  const dir = await Deno.makeTempDir({ prefix: "aio-ship-nested-" });
+  const cwd = Deno.cwd();
+  try {
+    await Deno.writeTextFile(
+      join(dir, "deno.json"),
+      JSON.stringify({
+        title: "Nested",
+        version: "2.3.4",
+        entry: "apps/web/main.ts",
+      }),
+    );
+    await Deno.mkdir(join(dir, "apps", "web"), { recursive: true });
+    await Deno.writeTextFile(
+      join(dir, "apps", "web", "main.ts"),
+      `Deno.dlopen(p, {}); fetch("x"); // ffi + net`,
+    );
+    const binaryPath = join(dir, "nested.bin");
+    await Deno.writeFile(binaryPath, bin("COMPILED"));
+    Deno.chdir(dir);
+
+    const m = await shipApp({ binaryPath });
+    // Capabilities actually measured, from where the app's sources live.
+    assertEquals(m.capabilities.ffi, true);
+    assertEquals(m.capabilities.net, true);
+    assertEquals(m.runFlags, ["--allow-net", "--allow-ffi"]);
+    // …and the artifact carries the app's real version, not a confident 0.0.0.
+    assertEquals(m.version, "2.3.4");
+
+    // With nothing to scan, refuse rather than sign an empty claim.
+    await Deno.remove(join(dir, "apps", "web", "main.ts"));
+    const err = await assertRejects(
+      () => shipApp({ binaryPath }),
+      Error,
+      "never measured",
+    );
+    assert(err.message.includes("apps/web"), `names the dir: ${err.message}`);
+
+    // An explicitly named source dir that does not exist is loud too — it used
+    // to be swallowed into "no capabilities".
+    await assertRejects(
+      () => shipApp({ binaryPath, sourceDir: join(dir, "nope") }),
+      Error,
+      "cannot read the source tree",
+    );
+  } finally {
+    Deno.chdir(cwd);
     await Deno.remove(dir, { recursive: true });
   }
 });

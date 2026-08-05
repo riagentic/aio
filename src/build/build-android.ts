@@ -64,13 +64,14 @@ export async function buildAndroid(cfg: BuildConfig): Promise<void> {
     await Deno.writeTextFile(dest, content);
   }
 
-  // Derive application ID from binary name — THE one rule (see
-  // androidApplicationId below; dev:android derives the same id from the APK
-  // label, which IS the binary name, so both must share the rule or drift).
-  const applicationId = androidApplicationId(binaryName);
+  // Derive application ID from THE APK label (see apkLabel /
+  // androidApplicationId below) — dev:android derives the same id from the
+  // APK's filename, so both must share the rule or drift.
+  const label = apkLabel(cfg);
+  const applicationId = androidApplicationId(label);
   if (!applicationId) {
     console.error(
-      `[android] \u2717 binary name "${binaryName}" produces invalid applicationId — must start with a letter`,
+      `[android] \u2717 APK name "${label}" produces invalid applicationId — must start with a letter`,
     );
     Deno.exit(1);
   }
@@ -243,11 +244,29 @@ async function _writeLocalAssets(
  *  Parsing is the check; `href` is the normalised, percent-encoded form, so no
  *  quote or newline can survive it. Refuses loudly rather than emitting broken
  *  or hostile Kotlin. Exported for its own test. */
+/** THE APK label: the name the artifact is written under AND the label its
+ *  applicationId is derived from — one decider, so the file on disk and the
+ *  package installed on the device can never disagree.
+ *
+ *  A dev APK is NOT the shippable one: it points its WebView at a cleartext
+ *  localhost dev server. It used to be written as `<binaryName>.apk`, the exact
+ *  filename `compile:android` ships, so the two were indistinguishable on disk
+ *  and a dev build silently overwrote (and could be released as) the real APK.
+ *  Its own name gives it its own applicationId too, so it also installs
+ *  alongside the real app instead of replacing it. Same reasoning for the
+ *  remote client, which is a different program from the local app. */
+export function apkLabel(
+  cfg: { binaryName: string; doRemote: boolean; androidDevUrl?: string },
+): string {
+  if (cfg.androidDevUrl) return `${cfg.binaryName}-dev`;
+  return cfg.doRemote ? `${cfg.binaryName}-client` : cfg.binaryName;
+}
+
 /** THE applicationId rule: `app.aio.<label sans non-alphanumerics>`, or null
  *  when the label cannot make a valid id (must start with a letter). Shared
- *  by the build (from `binaryName`) and `dev:android` (from the APK label,
- *  which the build sets to the binary name) — one rule, or the installed dev
- *  app and the built APK disagree on identity. */
+ *  by the build (from {@link apkLabel}) and `dev:android` (from the APK's
+ *  filename, which IS that label) — one rule, or the installed dev app and the
+ *  built APK disagree on identity. */
 export function androidApplicationId(label: string): string | null {
   const sanitized = label.replace(/[^a-z0-9]/g, "");
   if (!sanitized || !/^[a-z]/.test(sanitized)) return null;
@@ -394,10 +413,10 @@ async function _runGradle(
     ? "release/app-release.apk"
     : "debug/app-debug.apk";
   const apkSrc = join(androidDir, "app/build/outputs/apk", apkVariant);
-  const apkLabel = cfg.doRemote ? `${cfg.binaryName}-client` : cfg.binaryName;
-  const apkDst = join(cfg.root, `${apkLabel}.apk`);
+  const label = apkLabel(cfg);
+  const apkDst = join(cfg.root, `${label}.apk`);
   await Deno.copyFile(apkSrc, apkDst);
   const apkStat = await Deno.stat(apkDst);
   const apkMb = (apkStat.size / 1024 / 1024).toFixed(1);
-  console.log(`[android] \u2713 ${apkLabel}.apk (${apkMb} MB)`);
+  console.log(`[android] \u2713 ${label}.apk (${apkMb} MB)`);
 }

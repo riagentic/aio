@@ -87,7 +87,14 @@ export function renderToString(
 
     // Fragment — render children
     if (vnode.tag === Fragment) {
-      return vnode.children.map((c) => renderToString(c)).join("");
+      const html = vnode.children.map((c) => renderToString(c)).join("");
+      // AIO-195 parity: an empty Fragment gets a comment ANCHOR when built by
+      // createDom, because it must keep its slot among its siblings. SSR emitted
+      // nothing, so a hydrated empty Fragment had no `_dom` at all and its next
+      // diff anchored at the parent's FIRST child — a list that starts empty and
+      // then fills rendered its rows ABOVE the header. Server HTML and client
+      // DOM must be the same document.
+      return html === "" ? "<!---->" : html;
     }
 
     // ErrorBoundary — render children with error catching

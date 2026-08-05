@@ -1,4 +1,4 @@
-import { assertEquals, assertStringIncludes } from "@std/assert";
+import { assertEquals, assertRejects, assertStringIncludes } from "@std/assert";
 import { join } from "@std/path";
 import {
   copyDir,
@@ -226,6 +226,32 @@ Deno.test("build: --name flag slugifies in output", async () => {
   }
 });
 
+// One slugify decider for the binary name. With no `title`, the fallback used
+// the RAW directory name, so a project folder called `My App` produced a binary
+// literally named `My App` under `deno task compile` while `deno task build`
+// (which slugifies the same fallback) produced `my-app` — two names for one
+// artifact, and a shell-hostile one at that.
+Deno.test("build: an untitled project in a spaced directory still slugifies its binary name", async () => {
+  const tmp = await Deno.makeTempDir();
+  const dir = join(tmp, "My App");
+  try {
+    await Deno.mkdir(join(dir, "src"), { recursive: true });
+    await Deno.writeTextFile(join(dir, "deno.json"), "{}"); // no title
+    // Unparsable on purpose: the compile fails fast and what we assert is the
+    // NAME the build chose, which it prints before compiling.
+    await Deno.writeTextFile(join(dir, "src", "app.ts"), "not typescript(");
+    const { stdout, stderr } = await runBuild(["--cli"], dir);
+    assertStringIncludes(stdout + stderr, "my-app");
+    assertEquals(
+      (stdout + stderr).includes("\u2192 My App"),
+      false,
+      "never the raw directory name",
+    );
+  } finally {
+    await Deno.remove(tmp, { recursive: true });
+  }
+});
+
 // ── withDevExcluded: symlink restore after failed compile ──
 
 Deno.test("build: symlinks restored after failed --cli compile", async () => {
@@ -405,6 +431,51 @@ Deno.test("build-all: unsafeOutDir rejects root/ancestor/.aio/src, allows a subd
   assert(!unsafeOutDir("/proj/dist", root, appDirs), "dist, with an app dir");
 });
 
+// The guard is CONTAINMENT, not set membership. It used to test `forbidden.has(
+// outDir)` — an exact match — so `out: "apps"` with the app in `apps/web/`
+// sailed through and `Deno.remove(outDir, { recursive: true })` deleted the
+// user's source tree while the build printed `✓ 1/1 build(s)` and exited 0.
+// Table over every direction, including the string-prefix near-miss that a
+// `startsWith` implementation would get wrong.
+Deno.test("build-all: unsafeOutDir refuses containment in BOTH directions (source-destroying)", () => {
+  const root = "/proj";
+  const cases: Array<[string, string[], boolean, string]> = [
+    // out, appDirs, unsafe?, why
+    ["/proj/apps", ["/proj/apps/web"], true, "ANCESTOR of the app dir"],
+    ["/proj/apps/web", ["/proj/apps/web"], true, "exactly the app dir"],
+    [
+      "/proj/apps/web/ui",
+      ["/proj/apps/web"],
+      true,
+      "DESCENDANT of the app dir",
+    ],
+    ["/proj/apps/", ["/proj/apps/web"], true, "ancestor, trailing separator"],
+    ["/proj/src/ui", [], true, "descendant of the hardcoded src/"],
+    ["/proj/.git/objects", [], true, "descendant of .git"],
+    ["/proj/.aio/x", [], true, "descendant of the staging parent"],
+    ["/proj", ["/proj/apps/web"], true, "the project root"],
+    ["/", [], true, "filesystem root"],
+    ["/other", [], true, "outside the project"],
+    ["/projX/dist", [], true, "near-miss sibling of the ROOT (not inside it)"],
+    // safe: dedicated subdirs that neither contain nor sit inside a source dir
+    ["/proj/dist", ["/proj/apps/web"], false, "dist"],
+    ["/proj/build/out", ["/proj/apps/web"], false, "nested out"],
+    // near-miss names must NOT be treated as containment (segment compare)
+    ["/proj/appsX", ["/proj/apps/web"], false, "sibling with a prefix name"],
+    ["/proj/apps-dist", ["/proj/apps"], false, "prefix of the app dir's name"],
+    ["/proj/srcX", [], false, "prefix of src/"],
+    // a flat-layout app (entry at the root) still has somewhere to build
+    ["/proj/dist", ["/proj"], false, "app dir IS the root → root rule applies"],
+  ];
+  for (const [out, appDirs, unsafe, why] of cases) {
+    assertEquals(
+      unsafeOutDir(out, root, appDirs),
+      unsafe,
+      `${out} (appDirs=${JSON.stringify(appDirs)}) — ${why}`,
+    );
+  }
+});
+
 Deno.test("build-all: isArtifactName recognizes artifacts, rejects source", () => {
   const bin = "myapp";
   // artifacts
@@ -492,8 +563,7 @@ Deno.test("assetIncludes: auto-discovers .wasm, honors compile.include, skips de
       join(dir, "deno.json"),
       JSON.stringify({
         title: "x",
-        // 2nd entry escapes the project → must be rejected (no traversal)
-        compile: { include: ["assets/model.bin", "../../../etc/passwd"] },
+        compile: { include: ["assets/model.bin"] },
       }),
     );
     const inc = await assetIncludes(dir);
@@ -508,14 +578,55 @@ Deno.test("assetIncludes: auto-discovers .wasm, honors compile.include, skips de
     );
     assert(!files.some((f) => f.includes("dist")), "dist skipped");
     assert(!files.some((f) => f.includes("target")), "rust/target skipped");
-    assert(
-      !files.some((f) => f.includes("..")),
-      "no path traversal out of project",
-    );
     // The app's identity travels with the binary: without deno.json
     // embedded, a compiled app can only guess its own version — and reading the
     // launch directory's deno.json makes it adopt an unrelated project's.
     assert(files.includes("deno.json"), "deno.json embedded");
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+// A `compile.include` path outside the project cannot be embedded — staying
+// in-project is the right rule. It was enforced by `continue`, so the binary
+// shipped WITHOUT the asset it was told to carry and exit 0; the app then
+// failed in the user's hands. Refusing names the entry and the resolved path.
+Deno.test("assetIncludes: an out-of-project compile.include is REFUSED, not silently dropped", async () => {
+  const dir = await Deno.makeTempDir();
+  try {
+    await Deno.mkdir(join(dir, "assets"), { recursive: true });
+    await Deno.writeTextFile(join(dir, "assets", "model.bin"), "x");
+    const write = (include: unknown[]) =>
+      Deno.writeTextFile(
+        join(dir, "deno.json"),
+        JSON.stringify({ title: "x", compile: { include } }),
+      );
+
+    await write(["assets/model.bin", "../../../etc/passwd"]);
+    const err = await assertRejects(
+      () => assetIncludes(dir),
+      Error,
+      "compile.include[1]",
+    );
+    assert(
+      err.message.includes("outside the project"),
+      `names the rule: ${err.message}`,
+    );
+    assert(err.message.includes("etc/passwd"), "names the offending path");
+
+    // An absolute path is the same mistake spelled differently — and worse,
+    // `join` would quietly turn it into a project-relative one.
+    await write(["/etc/passwd"]);
+    await assertRejects(() => assetIncludes(dir), Error, "is absolute");
+
+    // A non-path entry is a typo that would otherwise drop an asset silently.
+    await write([42]);
+    await assertRejects(() => assetIncludes(dir), Error, "compile.include[0]");
+
+    // …and the in-project entry alone still works.
+    await write(["assets/model.bin"]);
+    const inc = await assetIncludes(dir);
+    assert(inc.includes("assets/model.bin"), "declared asset still embedded");
   } finally {
     await Deno.remove(dir, { recursive: true });
   }

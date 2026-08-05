@@ -5,6 +5,7 @@
 // CHANNEL (serving + fetching + swapping) is separate infra; this is the
 // signable, verifiable artifact it would distribute.
 import { join } from "@std/path";
+import { resolveAppDir, resolveEntry } from "./build-config.ts";
 import {
   type Capabilities,
   permissionFlags,
@@ -152,7 +153,9 @@ export async function verifyShipManifest(
 
 // ── Orchestration: the one-command `aio ship` (batteries-included) ───────────
 
-/** Collect .ts/.tsx source contents under a dir (for capability scanning). */
+/** Collect .ts/.tsx source contents under a dir (for capability scanning).
+ *  A missing/unreadable dir THROWS: an unreadable source tree means the
+ *  capability claim was never measured, and a manifest is a claim. */
 async function collectSources(
   dir: string,
 ): Promise<{ content: string }[]> {
@@ -174,8 +177,26 @@ async function collectSources(
   };
   try {
     await walk(dir);
-  } catch { /* missing dir → no sources → empty caps */ }
+  } catch (e) {
+    throw new Error(
+      `[ship] cannot read the source tree at ${dir}: ${e}. ` +
+        `A ship manifest states which permissions the binary needs — it is ` +
+        `never signed off sources nobody could read. Pass --src=DIR.`,
+    );
+  }
   return out;
+}
+
+/** The app's own deno.json (the `ship` CLI runs at the project root), or {}. */
+async function projectConfig(root: string): Promise<Record<string, unknown>> {
+  try {
+    const parsed = JSON.parse(await Deno.readTextFile(join(root, "deno.json")));
+    return parsed && typeof parsed === "object"
+      ? parsed as Record<string, unknown>
+      : {};
+  } catch {
+    return {};
+  }
 }
 
 /** `aio ship`: read a compiled binary, scan the source for its least-privilege
@@ -193,7 +214,36 @@ export async function shipApp(opts: {
   out?: string;
 }): Promise<ShipManifest> {
   const binary = await Deno.readFile(opts.binaryPath);
-  const sources = await collectSources(opts.sourceDir ?? "src");
+  // The sources to scan come from THE app-dir decider (the entry's directory),
+  // not a hardcoded "src". An app whose entry is `apps/web/main.ts` has no
+  // `src/` at all, and the missing dir was swallowed into an EMPTY capability
+  // set: the manifest then reported every capability false and `run: (no
+  // perms)` — a signed, verifiable claim of least privilege that was never
+  // measured. It is now derived, and an empty scan is refused.
+  const root = Deno.cwd();
+  const cfg = await projectConfig(root);
+  const sourceDir = opts.sourceDir ?? resolveAppDir(root, resolveEntry(cfg));
+  const sources = await collectSources(sourceDir);
+  if (sources.length === 0) {
+    throw new Error(
+      `[ship] no .ts/.tsx sources under ${sourceDir} — refusing to sign a ` +
+        `capability claim that was never measured. Point at the app's ` +
+        `sources with --src=DIR (or set "entry" in deno.json).`,
+    );
+  }
+  // The version is part of the artifact's IDENTITY. Defaulting to "0.0.0" made
+  // every unlabelled release claim the same confident wrong number.
+  const version = opts.version ??
+    (typeof cfg.version === "string" && cfg.version.trim()
+      ? cfg.version.trim()
+      : undefined);
+  if (!version) {
+    throw new Error(
+      `[ship] no version to publish — set "version" in ${
+        join(root, "deno.json")
+      } or pass --version=X.Y.Z. A manifest that says 0.0.0 identifies nothing.`,
+    );
+  }
   let sign: { privateKey: JsonWebKey; publicKey: JsonWebKey } | undefined;
   if (opts.keyPath) {
     sign = JSON.parse(await Deno.readTextFile(opts.keyPath)) as {
@@ -203,7 +253,7 @@ export async function shipApp(opts: {
   }
   const manifest = await buildShipManifest({
     name: opts.name ?? opts.binaryPath.replace(/.*\//, ""),
-    version: opts.version ?? "0.0.0",
+    version,
     binary,
     sources,
     sign,

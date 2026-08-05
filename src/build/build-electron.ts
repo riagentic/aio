@@ -56,7 +56,25 @@ export async function buildElectron(cfg: BuildConfig): Promise<void> {
     const { autoInstallElectron } = await import(
       "../electron/electron-spawn.ts"
     );
+    // `deno install npm:electron` REWRITES the app's deno.json (it adds the
+    // dependency, and re-resolving can move other pins with it). That file is
+    // the user's, and a build silently editing the config it is building from
+    // is how a pin moves and a bundle cache busts with nobody looking. We
+    // cannot decline the install — the target needs the runtime — but the
+    // mutation is detected and announced at the moment it happens, instead of
+    // being discovered later as an unexplained diff.
+    const denoJsonPath = join(root, "deno.json");
+    const before = await Deno.readTextFile(denoJsonPath).catch(() => null);
     const installed = await autoInstallElectron({ error: console.error });
+    const after = await Deno.readTextFile(denoJsonPath).catch(() => null);
+    if (before !== null && after !== null && before !== after) {
+      console.warn(
+        `[electron] \u26a0 ${denoJsonPath} was MODIFIED by ` +
+          `\`deno install npm:electron\` (auto-install of the Electron ` +
+          `runtime). Review the diff and commit it deliberately — the next ` +
+          `build reads its pins from this file.`,
+      );
+    }
     let ok = false;
     if (installed) {
       try {

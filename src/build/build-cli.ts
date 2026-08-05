@@ -11,17 +11,45 @@ import {
 } from "./build-compile.ts";
 import type { BuildConfig } from "./build-config.ts";
 
+/** The scaffold's conventional module for a `cli-client` target: a CLI that
+ *  talks to a remote aio server, which is a DIFFERENT program from the app's
+ *  own entry. It is a default, never an override — see {@link cliEntryFor}. */
+const REMOTE_CLI_DEFAULT = "src/client.ts";
+
+/** THE entry this CLI build compiles.
+ *
+ *  `--cli --remote` used to hardcode `src/client.ts`, unconditionally: a
+ *  declared `"cli-client": { "entry": "apps/cli/client.ts" }` was printed in
+ *  the banner, validated by build-all and recorded in manifest.json — and then
+ *  not compiled. With no `src/client.ts` in the repo the build died claiming
+ *  THAT file was missing, naming a path the app never mentions. A declared
+ *  entry wins; the convention only fills the gap when nothing was declared.
+ *  Pure, so the precedence is a unit test rather than a claim. */
+export function cliEntryFor(
+  opts: { doRemote: boolean; configEntry: string; entryOverride?: string },
+): string {
+  if (opts.entryOverride?.trim()) return opts.entryOverride.trim();
+  return opts.doRemote ? REMOTE_CLI_DEFAULT : opts.configEntry;
+}
+
 /** Compile a CLI binary. Exits process on completion or error. */
 export async function buildCli(cfg: BuildConfig): Promise<void> {
-  const { root, binaryName, configEntry, doRemote } = cfg;
+  const { root, binaryName, configEntry, doRemote, entryOverride } = cfg;
   const nmDir = join(root, "node_modules");
 
   // CLI apps don't use App.tsx/React — compile the Deno entry point directly
-  const cliEntry = doRemote ? "src/client.ts" : configEntry;
+  const cliEntry = cliEntryFor({ doRemote, configEntry, entryOverride });
   try {
     await Deno.stat(join(root, cliEntry));
   } catch {
-    console.error(`[cli] \u2717 ${cliEntry} not found`);
+    console.error(
+      `[cli] \u2717 ${cliEntry} not found` +
+        (cliEntry === REMOTE_CLI_DEFAULT
+          ? ` — a remote CLI client compiles ${REMOTE_CLI_DEFAULT} by ` +
+            `convention. Create it, or name the module in deno.json: ` +
+            `"build": { "targets": { "cli-client": { "entry": "path/to/client.ts" } } }.`
+          : ""),
+    );
     Deno.exit(1);
   }
 
