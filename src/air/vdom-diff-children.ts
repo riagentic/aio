@@ -1,20 +1,33 @@
 // AIO VDOM child diffing — keyed and unkeyed reconciliation.
 // Accepts diffFn callback to avoid circular imports with vdom-diff.ts.
 
-import { _devMode, _devWarn, _domNodeCount, Fragment } from "./vdom-types.ts";
+import { _devMode, _devWarn, _domNodeCount } from "./vdom-types.ts";
 import type { RenderCtx, VNode } from "./vdom-types.ts";
 import { getDom, isChildOf, removeDom } from "./vdom-remove.ts";
 import { createDom } from "./vdom-render.ts";
 
-/** Diff function signature — injected from vdom-diff.ts to break circular dep. */
+/** Diff function signature — injected from vdom-diff.ts to break circular dep.
+ *
+ *  `oldDom` is the node `old` POSITIONALLY occupies (or, when it occupies none,
+ *  the node that follows its slot); the return value is the node `next` now
+ *  occupies. Both exist because bare strings/numbers cannot carry a `_dom`, so
+ *  position is the only handle on their text node. */
 export type DiffFn = (
   parent: Node,
   next: VNode | string | number | null,
   old: VNode | string | number | null,
   ctx: RenderCtx,
   isSvg?: boolean,
-) => void;
+  oldDom?: Node | null,
+) => Node | null;
 
+/** Diff a child list; returns the FIRST DOM node of the region afterwards.
+ *
+ *  The region is delimited by `startAnchor` (exclusive) — a node OUTSIDE the
+ *  region that no child diff may touch — so reading `startAnchor.nextSibling`
+ *  after the mutations yields the region's first node exactly, with no scan and
+ *  no guess. Container vnodes (Fragment/EB/Suspense) need it because their
+ *  `_dom` must be their first node even when that node is bare text. */
 export function diffChildren(
   parent: Node,
   nextChildren: (VNode | string | number)[],
@@ -27,7 +40,7 @@ export function diffChildren(
   // parent.firstChild. Without it, every keyed sub-diff re-anchors at the
   // parent start and drags its nodes to the front (list reversal).
   startAnchor: Node | null = null,
-): void {
+): Node | null {
   const hasKeys = nextChildren.some(
     (c) => typeof c === "object" && c.key !== undefined,
   );
@@ -97,6 +110,19 @@ export function diffChildren(
       startAnchor,
     );
   }
+  return _regionFirst(parent, startAnchor);
+}
+
+/** The region's first node, read AFTER the diff mutated it. */
+export function _regionFirst(
+  parent: Node,
+  startAnchor: Node | null,
+): Node | null {
+  if (!startAnchor) return parent.firstChild;
+  // The anchor sits outside the region, so it must have survived; if it did
+  // not, the region's bounds are unknowable and a guess would be worse than
+  // an honest null.
+  return isChildOf(startAnchor, parent) ? startAnchor.nextSibling : null;
 }
 
 function diffUnkeyed(
@@ -153,12 +179,7 @@ function diffUnkeyed(
     const oc = i < oldChildren.length ? oldChildren[i]! : null;
 
     if (nc == null && oc != null) {
-      if (typeof oc === "string" || typeof oc === "number") {
-        const textNode = oldDoms[i];
-        if (isChildOf(textNode, parent)) parent.removeChild(textNode!);
-      } else {
-        removeDom(parent, oc, ctx);
-      }
+      removeDom(parent, oc, ctx, oldDoms[i] ?? null);
     } else if (nc != null && oc == null) {
       const newDom = createDom(nc, ctx, isSvg, parent);
       if (newDom) parent.insertBefore(newDom, regionEnd);
@@ -179,9 +200,44 @@ function diffUnkeyed(
         }
       }
     } else {
-      diffFn(parent, nc!, oc!, ctx, isSvg);
+      // The positional node is the ONLY handle on a bare-text old child: it
+      // has no `_dom`. Passing it is what keeps `_diff` from having to guess
+      // (it used to scan `parent.childNodes` for a text node with equal
+      // content and matched whichever equal-valued node came first — often one
+      // this very pass had just inserted, silently rendering the wrong order).
+      diffFn(parent, nc!, oc!, ctx, isSvg, oldDoms[i] ?? null);
     }
   }
+}
+
+/** Move a child's ENTIRE realized span to sit right after `lastPlaced`, and
+ *  return the new `lastPlaced`.
+ *
+ *  A keyed child is not always one node: a Fragment, a boundary, or a component
+ *  that renders either of those spans N siblings. Moving "its `_dom`" moves the
+ *  first node and strands the rest, and walking its children via `getDom` skips
+ *  bare text (a primitive carries no `_dom`) — a reordered `<>{"a"}<b/></>`
+ *  left the `"a"` behind. The span is contiguous by construction, so it is
+ *  taken by node count: exact, and blind to what the children happen to be. */
+function _placeSpan(
+  parent: Node,
+  first: Node,
+  count: number,
+  lastPlaced: Node | null,
+): Node | null {
+  const nodes: Node[] = [];
+  let n: Node | null = first;
+  for (let i = 0; i < count && n; i++) {
+    nodes.push(n);
+    n = n.nextSibling;
+  }
+  let placed = lastPlaced;
+  for (const node of nodes) {
+    const anchor: Node | null = placed ? placed.nextSibling : parent.firstChild;
+    if (node !== anchor) parent.insertBefore(node, anchor);
+    placed = node;
+  }
+  return placed;
 }
 
 function diffKeyed(
@@ -266,14 +322,15 @@ function diffKeyed(
         typeof onk !== "string" && typeof onk !== "number"
       ) {
         // Both are VNodes — diff in place
-        diffFn(parent, nc, onk as VNode, ctx, isSvg);
+        diffFn(parent, nc, onk as VNode, ctx, isSvg, onkDom);
         const dom = (nc as VNode)._dom ?? (onk as VNode)._dom;
         if (dom) {
-          const a: Node | null = lastPlaced
-            ? lastPlaced.nextSibling
-            : parent.firstChild;
-          if (dom !== a) parent.insertBefore(dom, a);
-          lastPlaced = dom;
+          lastPlaced = _placeSpan(
+            parent,
+            dom,
+            _domNodeCount(nc as VNode),
+            lastPlaced,
+          );
         }
       } else if (
         onk != null && (typeof nc === "string" || typeof nc === "number") &&
@@ -298,13 +355,7 @@ function diffKeyed(
         }
       } else {
         // Type mismatch or no old match — remove old, create new (AIO-181)
-        if (onk != null) {
-          if (typeof onk === "object") {
-            removeDom(parent, onk as VNode, ctx);
-          } else if (isChildOf(onkDom, parent)) {
-            parent.removeChild(onkDom!);
-          }
-        }
+        if (onk != null) removeDom(parent, onk, ctx, onkDom);
         const newDom = createDom(
           nc as VNode | string | number,
           ctx,
@@ -332,37 +383,10 @@ function diffKeyed(
       // Existing node — diff in place
       diffFn(parent, nc, oc, ctx, isSvg);
       const dom = nc._dom ?? oc._dom;
+      // AIO-177: a Fragment/boundary/component child spans N nodes — move the
+      // whole span, not just its first node.
       if (dom) {
-        // Move to correct position: after lastPlaced (or at start if null)
-        const anchor: Node | null = lastPlaced
-          ? lastPlaced.nextSibling
-          : parent.firstChild;
-        // AIO-177: For Fragments, move ALL children (not just first)
-        if (typeof nc === "object" && (nc as VNode).tag === Fragment) {
-          for (const child of (nc as VNode).children) {
-            const childDom = getDom(child);
-            if (childDom && isChildOf(childDom, parent)) {
-              const a: Node | null = lastPlaced
-                ? lastPlaced.nextSibling
-                : parent.firstChild;
-              if (childDom !== a) parent.insertBefore(childDom, a);
-              lastPlaced = childDom;
-            }
-          }
-          // Handle empty Fragment comment anchor
-          if (dom.nodeType === 8 && isChildOf(dom, parent)) {
-            const a: Node | null = lastPlaced
-              ? lastPlaced.nextSibling
-              : parent.firstChild;
-            if (dom !== a) parent.insertBefore(dom, a);
-            lastPlaced = dom;
-          }
-        } else {
-          if (dom !== anchor) {
-            parent.insertBefore(dom, anchor);
-          }
-          lastPlaced = dom;
-        }
+        lastPlaced = _placeSpan(parent, dom, _domNodeCount(nc), lastPlaced);
       }
     } else {
       // New node — create and insert at correct position
@@ -372,20 +396,18 @@ function diffKeyed(
           ? lastPlaced.nextSibling
           : parent.firstChild;
         parent.insertBefore(newDom, anchor2);
-        // AIO-177/AIO-248: For new Fragments, advance lastPlaced to LAST child DOM.
-        if (typeof nc === "object" && (nc as VNode).tag === Fragment) {
-          const count = _domNodeCount(nc as VNode);
-          const firstInserted = lastPlaced
-            ? lastPlaced.nextSibling
-            : parent.firstChild;
-          let node: Node | null = firstInserted;
-          for (let i = 1; i < count && node; i++) {
-            node = node.nextSibling;
-          }
-          if (node) lastPlaced = node;
-        } else {
-          lastPlaced = newDom;
+        // AIO-177/AIO-248: a multi-node child (Fragment, boundary, or a
+        // component that renders one) arrives as a DocumentFragment that the
+        // insertion empties — `newDom` is then nobody's position. `lastPlaced`
+        // did not move, so the first inserted node is the one after it;
+        // advance to the LAST one so the next child lands beyond the span.
+        let node: Node | null = lastPlaced
+          ? lastPlaced.nextSibling
+          : parent.firstChild;
+        for (let i = 1; i < _domNodeCount(nc) && node; i++) {
+          node = node.nextSibling;
         }
+        if (node) lastPlaced = node;
       }
     }
   }
@@ -404,12 +426,6 @@ function diffKeyed(
   }
   // Remove excess old non-keyed children not matched above (AIO-114)
   for (let i = nkIdx; i < oldNonKeyed.length; i++) {
-    const onk = oldNonKeyed[i]!;
-    const dom = oldNonKeyedDoms[i];
-    if (typeof onk === "object") {
-      removeDom(parent, onk as VNode, ctx);
-    } else if (isChildOf(dom, parent)) {
-      parent.removeChild(dom!);
-    }
+    removeDom(parent, oldNonKeyed[i]!, ctx, oldNonKeyedDoms[i] ?? null);
   }
 }

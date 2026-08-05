@@ -89,7 +89,11 @@ function _renderSync(vnode: VNode | string | number | null): string {
     }
   }
   if (vnode.tag === Fragment) {
-    return vnode.children.map((c) => _renderSync(c)).join("");
+    const html = vnode.children.map((c) => _renderSync(c)).join("");
+    // AIO-195 parity with createDom/renderToString: an empty Fragment holds
+    // its slot with a comment anchor. Streamed HTML that omits it hydrates
+    // into a Fragment with no position (see vdom-ssr.ts).
+    return html === "" ? "<!---->" : html;
   }
   if (vnode.tag === ErrorBoundary) {
     const fallback = vnode.props.fallback as
@@ -187,7 +191,15 @@ export async function* renderToStream(
 
   // Fragment
   if (vnode.tag === Fragment) {
-    for (const child of vnode.children) yield* renderToStream(child);
+    // Buffered, not streamed child-by-child: an empty Fragment must emit its
+    // comment anchor (AIO-195 parity), which is only knowable once every child
+    // has produced nothing.
+    const chunks: string[] = [];
+    for (const child of vnode.children) {
+      for await (const chunk of renderToStream(child)) chunks.push(chunk);
+    }
+    if (chunks.every((c) => c === "")) yield "<!---->";
+    else for (const c of chunks) yield c;
     return;
   }
 

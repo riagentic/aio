@@ -1,5 +1,4 @@
 // Runtime helpers extracted from _run() — config resolution, memoization, vitals, app object
-import { join } from "@std/path";
 import type { AioApp, AioConfig, AioUser } from "./aio-types.ts";
 import type { ReportErrorOpts } from "../diagnostics/error.ts";
 import {
@@ -427,28 +426,58 @@ export function initDiagAndVitals(
   return { diagHooks, vitalsSystem, diagResolvedOpts };
 }
 
-/** Resolve window title: CLI > config > deno.json "title" > fallback */
-export async function resolveTitle(
+/** THE app's own deno.json — ONE decider, located relative to the app's ENTRY
+ *  module, never via the launch cwd.
+ *
+ *  Everything an app declares about ITSELF lives in this file: `version`,
+ *  `title`, `target`. Reading it from `Deno.cwd()` meant a compiled binary
+ *  adopted the identity of whatever directory it was started in — under
+ *  systemd, where `ExecStart` runs from `$HOME`, a binary showed the title
+ *  `AIO App` and defaulted to the ELECTRON client (auto-downloading Electron)
+ *  even though its own deno.json said `"target": "browser"`; started in
+ *  another project's directory it served that project's `<title>`. `version`
+ *  was fixed once, in isolation, so the artifact ended up HALF-identified —
+ *  which is exactly why this is one function and not three lookups.
+ *
+ *  `deno compile` embeds deno.json next to the entry module (see
+ *  `assetIncludes`), so the same lookup answers in dev and in a binary.
+ *
+ *  Four levels up, NEAREST wins: the two-level version resolved `src/app.ts`
+ *  but never a nested entry like `src/relay/app.ts`, which then silently
+ *  reported "0.0.0". Walking is entry-relative, so a deeper search still
+ *  cannot adopt the LAUNCH directory's identity — the bug this function exists
+ *  to prevent — and the nearest ancestor is the app's own root.
+ *
+ *  Not memoized: it is read a handful of times at boot, and a cache would
+ *  freeze a value the dev server can otherwise pick up on restart. */
+export function appDenoJson(): Record<string, unknown> | undefined {
+  try {
+    const main = new URL(Deno.mainModule);
+    for (const up of ["./", "../", "../../", "../../../", "../../../../"]) {
+      try {
+        const parsed = JSON.parse(
+          Deno.readTextFileSync(new URL(`${up}deno.json`, main)),
+        );
+        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+          return parsed as Record<string, unknown>;
+        }
+      } catch { /* no deno.json at this level — keep walking up */ }
+    }
+  } catch { /* no usable main module (REPL, eval) */ }
+  return undefined;
+}
+
+/** Resolve window title: CLI > config > the APP's deno.json "title" > fallback.
+ *
+ *  The deno.json step reads the app's own file ({@link appDenoJson}), not
+ *  `<cwd>/deno.json` — a compiled binary's title must not depend on where it
+ *  was launched from. Async for its callers' sake; the read itself is sync. */
+export function resolveTitle(
   cliTitle: string | undefined,
   uiTitle: string | undefined,
 ): Promise<string> {
-  if (cliTitle) return cliTitle;
-  if (uiTitle) return uiTitle;
-  try {
-    // STATIC import (above). This was `await import("@std/path")`, and the
-    // laziness bought nothing — @std/path is already a static dependency of
-    // this module's own logger, so it is loaded either way.
-    //
-    // It is worth being precise about what this did NOT fix, because the
-    // opposite was assumed and then measured: a lazy BARE specifier is exactly
-    // the shape `deno compile` cannot trace, but this one still resolved in a
-    // compiled binary — the module is in the graph via those other static
-    // imports, so the dynamic form found it. The compiled-title test in
-    // build-e2e passes with either version. Static is simply the honest way to
-    // spell a dependency that is not optional.
-    const raw = await Deno.readTextFile(join(Deno.cwd(), "deno.json"));
-    const denoJsonTitle = JSON.parse(raw).title;
-    if (denoJsonTitle) return denoJsonTitle;
-  } catch { /* no deno.json or no title field */ }
-  return "AIO App";
+  if (cliTitle) return Promise.resolve(cliTitle);
+  if (uiTitle) return Promise.resolve(uiTitle);
+  const t = appDenoJson()?.title;
+  return Promise.resolve(typeof t === "string" && t ? t : "AIO App");
 }

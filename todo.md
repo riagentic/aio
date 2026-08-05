@@ -809,6 +809,30 @@ comment line, `am surface` marks truncation and gained `--full`.
       `s.refreshing` flag leaks on throw), and sync ticks never skip. Pinned in
       `tests/schedule-skip-if-running.test.ts`.
 
+## Linter signal quality (observed 2026-08-05, post-alpha46)
+
+`deno task lint:aio` on the framework repo reports 73 warnings / 37 hints, and
+the majority are not actionable — which is the failure mode the post-await-read
+fix was about: a lint people learn to skim is worse than one that does not
+exist.
+
+- [ ] **App-shaped rules fire at the framework repo itself** —
+      `no entry point
+      found (src/app.ts)` and
+      `appId "aio" in deno.json — move to aio.run()`. aio is not an app; the
+      linter should recognise its own repo (or any repo with no cell and no
+      `aio.run`) and skip the app-structure rules rather than advise moving a
+      framework field into a call that does not exist.
+- [ ] **The `perf` sync-I/O rule dominates the remainder** on paths where its
+      own message is false: its text is "every client's next action waits behind
+      it", but the hits are boot-once (`async-db` pre-flight), shutdown
+      (`checkpoint`), and CLI-once (`app-key`) paths that are never on the
+      dispatch path. Either the rule should not fire outside dispatch-reachable
+      code, or the framework should carry `// aiol-ok` with a reason at each
+      deliberate site. Annotating ~60 sites is churn; narrowing the rule is the
+      root fix, and it is the same shape as the `enc`-matched-`latency`
+      heuristic narrowed in alpha46.
+
 ## Post-alpha45 bug hunt (2026-08-05) — deferred, none data-loss
 
 The hunt itself is in `CHANGELOG.md`; these are the items deliberately NOT

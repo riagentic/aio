@@ -12,7 +12,7 @@ import {
   _trackStart,
 } from "../state/signal.ts";
 import type { ComponentFn, VDomHooks, VNode } from "./vdom.ts";
-import { _diff, getDom } from "./vdom.ts";
+import { _diff } from "./vdom.ts";
 import {
   _isDevToolsConnected,
   _recordRender,
@@ -177,14 +177,20 @@ export function _rerenderComponent(inst: ComponentInstance): void {
 
   const ctx = inst._ctx;
   try {
-    _diff(
+    // The component's own `_dom` is BOTH the position of the output being
+    // replaced and the answer for where it ended up: a component that renders
+    // a bare string owns a text node that `getDom` cannot see, so recomputing
+    // it from the output dropped the handle and the next signal re-render had
+    // no position at all (it then patched whichever sibling held equal text).
+    const dom = _diff(
       inst.parentDom,
       rendered ?? null,
       oldRendered ?? null,
       ctx,
       inst.isSvg,
+      vnode._dom ?? null,
     );
-    vnode._dom = rendered ? (getDom(rendered) ?? undefined) : undefined;
+    vnode._dom = dom ?? undefined;
 
     if (_devStart) {
       const name = typeof vnode.tag === "function"

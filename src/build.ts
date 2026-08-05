@@ -14,7 +14,7 @@
  */
 import { join } from "@std/path";
 import { type BuildConfig, loadBuildConfig } from "./build/build-config.ts";
-import { runBundle } from "./build/build-bundle.ts";
+import { ensureEmbeddedBundle, runBundle } from "./build/build-bundle.ts";
 import { buildClient } from "./build/build-client.ts";
 import { buildCli } from "./build/build-cli.ts";
 import { buildAndroid } from "./build/build-android.ts";
@@ -44,11 +44,23 @@ export async function build(cfg?: BuildConfig): Promise<void> {
 
   // ── Step 1: Bundle dist/app.js ───────────────────────────────────────────
   // Skip for targets that don't need browser bundles
-  if (!doCli && !cfg.doHeadless && !doClient && !(doAndroid && cfg.doRemote)) {
+  const skipsBundle = doCli || cfg.doHeadless || doClient ||
+    (doAndroid && cfg.doRemote);
+  if (!skipsBundle) {
     const mainConfig = JSON.parse(
       await Deno.readTextFile(join(root, "deno.json")),
     );
     await runBundle(cfg, mainConfig);
+  } else if (doCompile && !doCli && !doClient && !doAndroid) {
+    // This target BUILT no bundle but still packages one: `runDenoCompile`
+    // passes `--include dist/` whenever dist/ exists, so the binary serves
+    // whatever is in there. Verify it is the shape and the version this build
+    // is packaging (and not stale) — the stamp used to be read only by the
+    // path that rebuilds, never by the path that ships.
+    const mainConfig = JSON.parse(
+      await Deno.readTextFile(join(root, "deno.json")),
+    );
+    await ensureEmbeddedBundle(cfg, mainConfig);
   }
 
   if (!doCompile && !doAndroid && !doClient && !doCli) return;

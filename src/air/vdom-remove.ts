@@ -5,7 +5,14 @@ import { cleanupSignalBindings } from "./signal-binding.ts";
 import { _cleanupActions, _cleanupSignalTextChildren } from "./vdom-helpers.ts";
 import { _callRef } from "./vdom-create.ts";
 import { _componentName, _reportHookError } from "./hook-error.ts";
-import { ErrorBoundary, Fragment, Portal, Suspense } from "./vdom-types.ts";
+import {
+  _devWarn,
+  _domNodeCount,
+  ErrorBoundary,
+  Fragment,
+  Portal,
+  Suspense,
+} from "./vdom-types.ts";
 import type { RenderCtx, VNode } from "./vdom-types.ts";
 
 /** Get the real DOM node associated with a VNode, or null if not mounted. */
@@ -35,6 +42,13 @@ export function isChildOf(
     if (kids[i] === node) return true;
   }
   return false;
+}
+
+/** Step a positional cursor forward over a child's realized DOM span. */
+export function _advance(node: Node | null, count: number): Node | null {
+  let n = node;
+  for (let i = 0; i < count; i++) n = n?.nextSibling ?? null;
+  return n;
 }
 
 /** Cleanup component instances without removing DOM (for type-mismatch replacement). */
@@ -69,16 +83,32 @@ export function _removeDomCleanup(
   }
 }
 
+/** Remove a vnode's DOM.
+ *
+ *  `posDom` is the node this vnode POSITIONALLY occupies — the caller's cursor.
+ *  A bare string/number child carries no `_dom` (a primitive has nowhere to
+ *  hold one), so without it `getDom` returned null and the removal was a silent
+ *  no-op: text accumulated forever (`<>{"aaa"}</>` replaced by `<i/>` left
+ *  `aaa` behind, and every toggle added another copy). It is used ONLY for bare
+ *  text — every other vnode kind either owns a `_dom` or occupies no node at
+ *  all, and for those `posDom` is the FOLLOWING node, which must never be
+ *  removed. */
 export function removeDom(
   parent: Node,
   vnode: VNode | string | number,
   ctx: RenderCtx,
+  posDom: Node | null = null,
 ): void {
   // Portal: remove children from target DOM
   if (typeof vnode === "object" && vnode.tag === Portal) {
     const target = vnode.props.target as Node;
     if (target) {
-      for (const child of vnode.children) removeDom(target, child, ctx);
+      let cursor: Node | null = target.firstChild;
+      for (const child of vnode.children) {
+        const at = getDom(child) ?? cursor;
+        cursor = _advance(at, _domNodeCount(child));
+        removeDom(target, child, ctx, at);
+      }
     }
     return;
   }
@@ -93,11 +123,16 @@ export function removeDom(
       (vnode.tag === ErrorBoundary || vnode.tag === Suspense) &&
       vnode._rendered != null
     ) {
-      removeDom(parent, vnode._rendered, ctx);
+      removeDom(parent, vnode._rendered, ctx, getDom(vnode) ?? posDom);
       return;
     }
+    // Walk the region positionally so bare-text children — which have no `_dom`
+    // — are located by POSITION, the only thing that identifies them.
+    let cursor: Node | null = getDom(vnode) ?? posDom;
     for (const child of vnode.children) {
-      removeDom(parent, child, ctx);
+      const at = getDom(child) ?? cursor;
+      cursor = _advance(at, _domNodeCount(child));
+      removeDom(parent, child, ctx, at);
     }
     // AIO-168: remove empty Fragment/EB/Suspense comment anchor — children loop
     // doesn't touch it because children is [] for empty containers.
@@ -113,7 +148,7 @@ export function removeDom(
   if (typeof vnode === "object" && typeof vnode.tag === "function") {
     ctx.hooks?.unmountComponent(vnode);
     if (vnode._rendered != null) {
-      removeDom(parent, vnode._rendered, ctx);
+      removeDom(parent, vnode._rendered, ctx, vnode._dom ?? posDom);
     }
     return;
   }
@@ -124,7 +159,19 @@ export function removeDom(
   ) {
     _callRef(vnode.props.ref, null, _componentName(vnode.tag));
   }
-  const dom = getDom(vnode);
+  // Bare text is the ONE vnode kind with no `_dom` and exactly one node — its
+  // position is its identity. Anything else that reaches here owns a `_dom`.
+  const dom = getDom(vnode) ?? (typeof vnode !== "object" ? posDom : null);
+  if (typeof vnode !== "object" && !dom) {
+    _devWarn(
+      "remove-text-no-position",
+      `A text child (${
+        JSON.stringify(String(vnode))
+      }) is being removed without its DOM position, so it will stay on the ` +
+        `page forever. The caller lost the positional cursor. This is an aio ` +
+        `bug; please report the component's child shape.`,
+    );
+  }
   if (dom && isChildOf(dom, parent)) {
     // Deferred removal for exit animations — cleanup AFTER animation completes
     const HtmlEl = ctx.doc?.defaultView?.HTMLElement ?? globalThis.HTMLElement;

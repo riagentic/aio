@@ -911,10 +911,13 @@ Deno.test({
     // Make Fragment empty → diff inserts comment anchor (AIO-128)
     show.set(false);
     handle._flush();
-    // <p> + comment anchor (anchor appended after child removal)
+    // comment anchor + <p>. The anchor holds the Fragment's SLOT, so it lands
+    // where the fragment is — before <p>, not appended at the parent's end
+    // (appending is what made the fragment re-grow below its later siblings).
     assertEquals(wrap.childNodes.length, 2);
-    const commentNode = wrap.childNodes[1]!;
+    const commentNode = wrap.childNodes[0]!;
     assertEquals(commentNode.nodeType, 8); // comment anchor
+    assertEquals((wrap.childNodes[1] as Element).tagName, "P");
 
     // Unmount — comment anchor must be cleaned up (AIO-168)
     _unmount(handle);

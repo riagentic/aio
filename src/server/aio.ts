@@ -46,6 +46,7 @@ import { setupTransport } from "./aio-server.ts";
 import { startLifecycle } from "./aio-lifecycle.ts";
 import {
   acquireSingletonLock,
+  appDenoJson,
   buildAppObject,
   buildOnPerf,
   buildReportOpts,
@@ -175,43 +176,14 @@ export function _exposeOf(
   return cli.expose ?? config.expose ?? false;
 }
 
-/** The APP's own deno.json — located relative to its entry module, never via
- *  the cwd.
- *
- *  A compiled binary launched from an unrelated project's directory used to
- *  read THAT project's deno.json and report its version as its own: the exact
- *  identity-adoption bug `resolveAppId` guards against, one field down. And
- *  from any other directory it found nothing, so the version silently became
- *  "0.0.0" — which is why the linter had to demand an explicit `appVersion`
- *  that the framework documents as inferable.
- *
- *  `deno compile` embeds deno.json next to the entry module (see
- *  `assetIncludes`), so the same lookup answers in dev and in a binary.
- *
- *  Four levels up, nearest wins: the two-level version resolved `src/app.ts`
- *  but never a nested entry like `src/relay/app.ts`, which then silently
- *  reported "0.0.0". Walking is entry-relative, so a deeper search still
- *  cannot adopt the LAUNCH directory's identity — the bug this function
- *  exists to prevent — and the nearest ancestor is the app's own root. */
+/** The app's own `version` — from THE app-deno.json decider
+ *  ({@link appDenoJson}), entry-relative and never the launch cwd. A compiled
+ *  binary launched from an unrelated project's directory used to read THAT
+ *  project's deno.json and report its version as its own: the exact
+ *  identity-adoption bug `resolveAppId` guards against, one field down. */
 function _denoJsonVersion(): string | undefined {
-  const read = (url: URL): string | undefined => {
-    try {
-      const raw = Deno.readTextFileSync(url);
-      return (JSON.parse(raw) as { version?: string }).version;
-    } catch {
-      return undefined;
-    }
-  };
-  try {
-    const main = new URL(Deno.mainModule);
-    for (const up of ["./", "../", "../../", "../../../", "../../../../"]) {
-      const v = read(new URL(`${up}deno.json`, main));
-      if (v) return v;
-    }
-    return undefined;
-  } catch {
-    return undefined;
-  }
+  const v = appDenoJson()?.version;
+  return typeof v === "string" ? v : undefined;
 }
 
 /** The version string the boot report prints and `__aio.appVersion` carries.
@@ -238,35 +210,37 @@ export function _resolveAppVersion(
       "appVersion to aio.run())";
 }
 
-/** The app's `target` from deno.json (written by `am create --target=…`) as a
- *  client-mode default. Makes the scaffolded `deno task dev` (no --client
- *  flag) run the CHOSEN target instead of the framework's electron fallback.
- *  `server` → `server-only` (aio's name for "no client UI"); `android` → the
- *  browser client (dev:android's emulator connects to the same dev server). */
-function _denoJsonTargetClient():
+/** The app's `target` from ITS OWN deno.json (written by `am create
+ *  --target=…`) as a client-mode default. Makes the scaffolded `deno task dev`
+ *  (no --client flag) run the CHOSEN target instead of the framework's electron
+ *  fallback. `server` → `server-only` (aio's name for "no client UI");
+ *  `android` → the browser client (dev:android's emulator connects to the same
+ *  dev server).
+ *
+ *  Entry-relative via {@link appDenoJson}, like `version` and `title`: read
+ *  from the launch cwd, a compiled `"target": "browser"` app started anywhere
+ *  else fell back to ELECTRON and began downloading a ~100MB runtime on a
+ *  headless server — or picked up an unrelated project's target. */
+/** @internal exported for its test — the mapping AND its entry-relative source
+ *  are both load-bearing, and a compiled binary cannot be asked from inside. */
+export function _denoJsonTargetClient():
   | "browser"
   | "electron"
   | "cli"
   | "server-only"
   | undefined {
-  try {
-    const raw = Deno.readTextFileSync(join(Deno.cwd(), "deno.json"));
-    const target = (JSON.parse(raw) as { target?: string }).target;
-    switch (target) {
-      case "browser":
-      case "android":
-        return "browser";
-      case "electron":
-        return "electron";
-      case "cli":
-        return "cli";
-      case "server":
-        return "server-only";
-      default:
-        return undefined;
-    }
-  } catch {
-    return undefined;
+  switch (appDenoJson()?.target) {
+    case "browser":
+    case "android":
+      return "browser";
+    case "electron":
+      return "electron";
+    case "cli":
+      return "cli";
+    case "server":
+      return "server-only";
+    default:
+      return undefined;
   }
 }
 
