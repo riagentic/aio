@@ -265,7 +265,7 @@ export function createOpBuffer(
       return true;
     },
 
-    async confirm(_cell: string, opId: string, _serverHlc: HLC) {
+    async confirm(cell: string, opId: string, _serverHlc: HLC) {
       // An ack confirms OUR op — it is NOT a delivery watermark, so it must
       // not touch the catch-up cursor (chaos-suite finding, 2026-07-21). The
       // ack's serverHlc is ≥ every peer op persisted before it, so advancing
@@ -276,6 +276,18 @@ export function createOpBuffer(
       // stamps) and handleSyncResponse (response ops / reserved-cursor echo,
       // which establishes lastServerTs on the very first sync round).
       await storage.confirmOp(opId);
+      // …and let it go. An acked op is dead weight: `getUnconfirmed` filters
+      // it out, `requestSync` never re-sends it, `rebase` never replays it.
+      // The only thing that dropped one was the backpressure path in `add`,
+      // which fires when 500 UNCONFIRMED ops have piled up — i.e. never, for a
+      // client whose acks are arriving. So the browser's per-cell document
+      // grew for the lifetime of the app, and every single op paid a
+      // parse+stringify of the entire history. Worse, the growth has an end:
+      // at the origin's quota `setItem` throws, which this storage swallows by
+      // design ("degrade to memory-only"), and from that moment the offline
+      // queue is not persisted at all — the next offline edits die with the
+      // tab, silently. Pruning here bounds the document by the pending cap.
+      await storage.pruneConfirmed(cell);
     },
 
     async getUnconfirmed(cell: string) {

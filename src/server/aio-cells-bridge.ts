@@ -13,6 +13,7 @@ import {
 import { AioLogger, log, setLogger } from "../diagnostics/logger.ts";
 import { createStormDetector } from "../diagnostics/dispatch-storm.ts";
 import { diagEmit } from "../diagnostics/diagnostic-bus.ts";
+import { makeRedactor } from "../diagnostics/redact.ts";
 import { parseCli } from "./aio-cli.ts";
 import { resolveAppId } from "./single-instance-lock.ts";
 import { VALID_AIO_CONFIG_KEYS } from "./config.ts";
@@ -341,6 +342,13 @@ export async function initLogger(
       ...logCfg,
       ...(cliBackup ? { backupLogs: true } : {}),
       appName: appId,
+      // `debug.log` retains action payloads on disk, so it obeys the SAME
+      // `redactActions` list as the journal, the timeline, the action log and
+      // the checkpoint. It was the one sink that never saw the list, and it
+      // wrote a redacted method's arguments — and the diff values it produced —
+      // in cleartext (`docs/persistence/where-files-live.md` promises they are
+      // kept nowhere).
+      redact: makeRedactor(fc.redactActions),
     })
     : null;
   if (logger) await logger.init();

@@ -38,7 +38,12 @@ import {
   syncFrameworkDeps,
   writePin,
 } from "./am-versions.ts";
-import { isPathPin, PATH_PIN_PREFIX, pathPinTarget } from "./am-versions.ts";
+import {
+  isPathPin,
+  linkSatisfiesPin,
+  PATH_PIN_PREFIX,
+  pathPinTarget,
+} from "./am-versions.ts";
 import {
   type RemovalHit,
   removalMessage,
@@ -67,8 +72,8 @@ export async function pinInfo(appDir: string, root: string): Promise<PinInfo> {
   const pinned = await readPin(appDir);
   const linkedPath = await currentLink(appDir);
   const linkedRef = linkedPath
-    ? (pinned && isPathPin(pinned) && linkedPath === pathPinTarget(pinned)
-      ? pinned // a path pin is "linked as pinned" when dep/aio → that path
+    ? (pinned && linkSatisfiesPin(pinned, linkedPath)
+      ? pinned // includes a path pin: dep/aio → the checkout it names
       : refOfLink(linkedPath))
     : null;
   const tags = sortVersions(await knownTags(root));

@@ -6,6 +6,8 @@ import { assert, assertEquals } from "@std/assert";
 import { join } from "@std/path";
 import { buildContext } from "../aiol/context.ts";
 import { checkImports } from "../aiol/checks.ts";
+import { AIO_LIBRARY_ENTRIES } from "../src/entries.ts";
+import { frameworkSpecs } from "../src/am/am-cmd-create.ts";
 
 async function project(
   imports: Record<string, string>,
@@ -95,26 +97,37 @@ Deno.test("scaffold: `am create` maps every public aio entry point", async () =>
   // The generated deno.json must cover the whole documented surface — this is
   // the regression that made `import { createDB } from "aio/db"` fail in an app
   // scaffolded straight from `am create`.
-  const create = await Deno.readTextFile("src/am/am-cmd-create.ts");
-  const deno = JSON.parse(await Deno.readTextFile("deno.json")) as {
-    exports: Record<string, string>;
-  };
-  const entries = Object.keys(deno.exports)
-    .filter((k) => k !== ".")
-    .map((k) => `aio${k.slice(1)}`)
-    // Tooling entries an app runs as a task, not imports.
-    .filter((s) =>
-      ![
-        "aio/build",
-        "aio/build-all",
-        "aio/dev-android",
-        "aio/am",
-        "aio/amui",
-        "aio/doctor",
-        "aio/aiol",
-      ]
-        .includes(s)
+  //
+  // This test used to GREP src/am/am-cmd-create.ts for the literal string
+  // `"aio/db"`, with a hand-written exclusion list that named `aio/build` a
+  // "tooling entry an app runs as a task, not imports" — so it asserted the
+  // defect: two doc pages import dbWorkerInclude / compileArgs / assetIncludes
+  // from `aio/build`, and the scaffold mapping it was the thing being excused.
+  // It also proved nothing about behaviour; a source file containing a string
+  // is not an import map. Now it calls the generator, and the
+  // library-vs-run-only split comes from THE entry list.
+  const dir = await Deno.makeTempDir();
+  try {
+    await Deno.mkdir(join(dir, "src"), { recursive: true });
+    await Deno.writeTextFile(
+      join(dir, "deno.json"),
+      JSON.stringify({ imports: frameworkSpecs(true).imports }),
     );
-  const missing = entries.filter((s) => !create.includes(`"${s}"`));
-  assertEquals(missing, [], "scaffolded apps must be able to import these");
+    // Every importable entry, imported at once from a scaffolded app: the
+    // linter must find nothing to say about any of them.
+    await Deno.writeTextFile(
+      join(dir, "src", "cell.ts"),
+      Object.keys(AIO_LIBRARY_ENTRIES)
+        .map((s, i) => `import * as _e${i} from "${s}";\nexport { _e${i} };`)
+        .join("\n"),
+    );
+    assertEquals(
+      await importIssues(dir),
+      [],
+      "an app scaffolded by `am create` must resolve every entry the docs " +
+        "tell it to import",
+    );
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
 });

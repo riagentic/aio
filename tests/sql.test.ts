@@ -1,10 +1,13 @@
 // Tests for src/sql.ts — buildWhereOr, buildQuerySuffix, isWhereOp
 // (assertIdent, columnToSQL, createTableSQL, buildWhere already covered in db.test.ts)
-import { assertEquals } from "@std/assert";
+import { assertEquals, assertStringIncludes, assertThrows } from "@std/assert";
 import {
   buildQuerySuffix,
   buildWhereOr,
   isWhereOp,
+  pk,
+  table,
+  text,
 } from "../src/server/sql.ts";
 
 // ── isWhereOp ──────────────────────────────────────────────────────
@@ -110,4 +113,31 @@ Deno.test("sql: buildQuerySuffix — negative limit/offset clamped to 0", () => 
 
 Deno.test("sql: buildQuerySuffix — fractional limit floored", () => {
   assertEquals(buildQuerySuffix({ limit: 3.7 }), " LIMIT 3");
+});
+
+// ── table(): one primary key, decided at declaration ─────────────────
+//
+// Two pk() columns rendered `CREATE TABLE t (a INTEGER PRIMARY KEY, b INTEGER
+// PRIMARY KEY)` — SQLite refuses that at CREATE ("table t has more than one
+// primary key"), at BOOT, in a message naming neither the schema key nor the
+// offending column. Meanwhile `pkColumn` answered with the FIRST one, so the
+// row diff and every ref() to the table agreed on a key the table would never
+// have. The declaration is where both names are in hand.
+
+Deno.test("sql: table() refuses two primary keys, naming both", () => {
+  const e = assertThrows(
+    () => table({ id: pk(), other: pk(), name: text() }),
+    Error,
+  ) as Error;
+  assertStringIncludes(e.message, "id");
+  assertStringIncludes(e.message, "other");
+  assertStringIncludes(e.message, "unique");
+});
+
+Deno.test("sql: table() with one pk (or none) still passes through", () => {
+  assertEquals(Object.keys(table({ id: pk(), v: text() }).columns), [
+    "id",
+    "v",
+  ]);
+  assertEquals(Object.keys(table({ v: text() }).columns), ["v"]);
 });

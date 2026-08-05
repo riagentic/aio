@@ -513,8 +513,10 @@ export async function bootStorage<S>(
   // Sync cells need the SQLite op-log even without user tables — a
   // `sync: true` cell must never silently degrade because `db:` is absent.
   if (dbKeys.length > 0 || syncCellIds.length > 0) {
+    const dbPath = dbPathOverride ?? appDirs(appId, cfg.appDir).stateDb;
+    // OPENING the file may legitimately degrade (no permission, read-only
+    // medium): the app runs from memory and says so.
     try {
-      const dbPath = dbPathOverride ?? appDirs(appId, cfg.appDir).stateDb;
       asyncDb = createDB(dbPath, dbPragmas ? { pragmas: dbPragmas } : {});
       // Integrity BEFORE schema: a damaged file must be dealt with before
       // anything writes to it. When the file was quarantined (and possibly
@@ -535,10 +537,6 @@ export async function bootStorage<S>(
           asyncDb = createDB(dbPath, dbPragmas ? { pragmas: dbPragmas } : {});
         }
       }
-      if (dbKeys.length > 0) {
-        await initSchema(asyncDb, sqlSchema);
-      }
-      log.info(`sqlite: ${dbKeys.length} table(s) at ${dbPath}`);
     } catch (e) {
       // Same classification as the persistence block below: a compiled binary
       // whose db worker was never embedded cannot be degraded around — the
@@ -552,6 +550,31 @@ export async function bootStorage<S>(
         asyncDb = null;
       }
     }
+    // Creating the DECLARED TABLES is not degradable, and never shared that
+    // catch again. A schema SQLite refuses (a keyword column, a bad ref, a
+    // migration that cannot apply) used to become one `sqlite: unavailable`
+    // warning and `asyncDb = null` — after which the persistence block below
+    // REOPENED the same file for the KV snapshot, so the app served traffic
+    // and persisted state with none of the `db:` tables it declared: every
+    // read empty, every write nowhere. initSchema's message already names the
+    // table, the column and the fix; it is the boot's job to let it through.
+    if (asyncDb && dbKeys.length > 0) {
+      try {
+        await initSchema(asyncDb, sqlSchema);
+      } catch (e) {
+        const workerHint = dbWorkerMissingHint(e);
+        await asyncDb.close().catch(() => {});
+        asyncDb = null;
+        if (workerHint) throw new Error(workerHint);
+        throw new Error(
+          `db: schema setup failed for ${dbKeys.length} declared table(s) — ${
+            e instanceof Error ? e.message : String(e)
+          }`,
+          { cause: e },
+        );
+      }
+    }
+    if (asyncDb) log.info(`sqlite: ${dbKeys.length} table(s) at ${dbPath}`);
   }
 
   // ── 2. CRDT sync tables ───────────────────────────────────────────

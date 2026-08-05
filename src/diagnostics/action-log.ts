@@ -1,15 +1,12 @@
 // src/diagnostics/action-log.ts — Rolling JSONL action recorder
 
 import { log } from "./logger.ts";
-
-const SKIP_SUFFIXES = [":__exec"];
-const SKIP_CONTAINS = [":__set"];
-
-function shouldSkip(type: string): boolean {
-  if (SKIP_SUFFIXES.some((s) => type.endsWith(s))) return true;
-  if (SKIP_CONTAINS.some((s) => type.includes(s))) return true;
-  return false;
-}
+// What counts as framework noise is decided ONCE, in action-kind.ts. This file
+// used to carry its own copy that dropped every `:__set` type — so an async
+// method's writes, which exist in no other action, were missing from the log
+// `docs/debugging/troubleshooting.md` points at to "replay the action
+// sequence", while the journal, the timeline and time travel all recorded them.
+import { isActionNoise } from "./action-kind.ts";
 
 /** Create a rolling JSONL action recorder that auto-truncates at max lines */
 export function createActionLog(path: string, max: number) {
@@ -34,7 +31,7 @@ export function createActionLog(path: string, max: number) {
   }
 
   async function append(type: string, payload: unknown): Promise<void> {
-    if (shouldSkip(type)) return;
+    if (isActionNoise(type)) return;
     await _enqueue(async () => {
       let line: string;
       try {

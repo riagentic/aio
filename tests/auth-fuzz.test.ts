@@ -24,9 +24,17 @@
 //       (the stolen-session takeover)
 //   I11 a completed reset ends a lockout (the rescue actually rescues)
 //   I12 a role change reaches sessions that are already open
+//   I13 a DELETED account authenticates nowhere — no session, no one-shot
+//       token, no password
 //
-// I9–I12 are the newest findings; they are here so the class cannot come
+// I9–I13 are the newest findings; they are here so the class cannot come
 // back through a different door than the one it came in by.
+//
+// I13's op (`account-rm`) is the one this machine could not previously
+// express: every op mutated an account that went on existing, so the
+// programmatic delete — `app.auth.remove(id)`, the offboarding/ban door — was
+// never walked, and it left every session of the deleted account authenticating
+// with the role cached at login for the rest of the 30-day TTL.
 //
 // Knobs (see fuzz-seed.ts — an unreadable knob THROWS, never defaults):
 //   FUZZ_SEED, FUZZ_ROUNDS (seeds), FUZZ_STEPS (ops per seed).
@@ -56,6 +64,7 @@ const OPS = [
   "unlock",
   "revoke-all",
   "role-flip",
+  "account-rm",
 ] as const;
 type Op = typeof OPS[number];
 
@@ -153,6 +162,10 @@ Deno.test({
           xs[Math.floor(rnd() * xs.length)]!;
 
         const accts: Acct[] = [];
+        /** Ids minted this round — monotonic, so a deleted id is never reused. */
+        let minted = 0;
+        /** Accounts this round DELETED — nothing about them may still work. */
+        const gone: Acct[] = [];
         const dead = new Map<string, string>(); // token → owner id
         const log: string[] = [];
         const note = (s: string) => log.push(s);
@@ -180,7 +193,12 @@ Deno.test({
           const a = accts.length > 0 ? pick(accts) : null;
           switch (op) {
             case "signup": {
-              const id = `u${round}_${accts.length}`;
+              // MONOTONIC, never `accts.length`: an id derived from the live
+              // count is REUSED after a deletion, so a fresh account inherits
+              // a dead one's name and every "is it really gone?" assertion
+              // becomes a coin flip. (This is the fuzzer's own bookkeeping —
+              // it showed up the moment `account-rm` joined the op set.)
+              const id = `u${round}_${minted++}`;
               const pw = `password-${id}-1`;
               const r = await post("signup", {
                 id,
@@ -359,7 +377,22 @@ Deno.test({
                 code: await code(secret),
                 password: a.password,
               }, tk);
-              if (ok.status === 200) a.totp = { secret, enabled: true };
+              // BOTH probes above are real password verifies, and the model
+              // has to move with them or it drifts out of step with the
+              // server: the wrong one feeds the SAME per-account counter a
+              // failed login feeds (locking at the 5th, counter back to 0),
+              // and the correct one CLEARS that counter. Tracking neither
+              // left the model predicting a lockout the server had already
+              // reset — a false "u_ locked → 423" that only appears on long
+              // walks (found at FUZZ_STEPS=60, invisible at the default 22).
+              if (wrongPw.status !== 200 && !a.locked && ++a.fails >= 5) {
+                a.fails = 0;
+                a.locked = true;
+              }
+              if (ok.status === 200) {
+                a.totp = { secret, enabled: true };
+                a.fails = 0;
+              }
               note(`totp-enroll ${a.id} → ${ok.status}`);
               return;
             }
@@ -451,6 +484,23 @@ Deno.test({
               note(`role-flip ${a.id} → ${next}`);
               return;
             }
+            case "account-rm": {
+              // The offboarding / ban door, taken PROGRAMMATICALLY
+              // (`app.auth.remove`) — not through `am auth rm`, which had
+              // always remembered to revoke afterwards and so hid this.
+              // Deleting an account ends it: sessions dead, one-shot tokens
+              // burned, password useless (I13, and I1 for the tokens).
+              if (!a || accts.length < 2) return; // keep one account alive
+              assert(users.remove(a.id), `remove ${a.id}`);
+              for (const tk of a.live) dead.set(tk, a.id);
+              a.live.clear();
+              a.resets.length = 0;
+              a.pendings.length = 0;
+              accts.splice(accts.indexOf(a), 1);
+              gone.push(a);
+              note(`account-rm ${a.id}`);
+              return;
+            }
           }
         };
 
@@ -476,6 +526,19 @@ Deno.test({
             accts.length,
             "one account per id — no duplicates, no ghosts",
           );
+          // I13 — a deleted account authenticates NOWHERE. Its sessions are
+          // covered by I1 above (they are in `dead`); this is the rest of it:
+          // no row, and its password cannot log in again.
+          for (const g of gone) {
+            assertEquals(users.get(g.id), null, `${g.id} came back`);
+            _resetAuthFails();
+            const r = await post("login", { id: g.id, password: g.password });
+            assertEquals(
+              r.status,
+              401,
+              `a deleted account (${g.id}) still logs in`,
+            );
+          }
           // I4 — a stale password is never accepted (checked on one account
           // per step to keep the PBKDF2 cost sane).
           const a = accts.length ? pick(accts) : null;
@@ -533,11 +596,10 @@ Deno.test({
           }
         }
         // Clean slate between seeds: every account of this round is removed so
-        // the next round's model starts from an empty store.
-        for (const a of accts) {
-          sessions.revokeUser(a.id);
-          users.remove(a.id);
-        }
+        // the next round's model starts from an empty store. `remove` revokes
+        // the sessions itself — this used to say so twice, and the copy that
+        // mattered (`app.auth.remove`) said it nowhere.
+        for (const a of accts) users.remove(a.id);
       }
       await t.step(`${ops} ops over ${ROUNDS} seed(s), 0 violations`, () => {
         assertEquals(failures, 0);

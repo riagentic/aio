@@ -66,6 +66,9 @@ export type ReportErrorOpts = {
         code: AioErrorCode;
         message: string;
         cellName?: string;
+        /** The action this error belongs to, when it has one — time travel
+         *  marks THAT entry rather than whatever is current. */
+        actionType?: string;
       },
     ) => void;
   };
@@ -537,12 +540,15 @@ export function reportError(err: AioError, opts: ReportErrorOpts = {}): void {
       }
     }
 
-    // TT markError
+    // TT markError — with the action type, so the mark lands on the entry that
+    // action really is (an async effect fails several actions later, and a
+    // reduce that threw was never recorded at all).
     if (tt) {
       tt.markError({
         code: err.code,
         message: err.message,
         cellName: err.context.cellName,
+        actionType: err.context.actionType,
       });
     }
 

@@ -39,6 +39,44 @@ function mouseEv(el: AnyEl, name: string) {
     : ev(el, name);
 }
 
+/** What a real user physically cannot do — decided ONCE, here.
+ *
+ *  Both tiers go through this module, so the rule has to live in it: the
+ *  in-process guard used to sit in `testUI` alone, which made `am trigger` the
+ *  permissive tier (a click on a `disabled` button reported `ok: true` after
+ *  firing a dead event) and contradicted this module's own promise that "a test
+ *  and an `am` session behave identically". Typing was worse than permissive: a
+ *  `readonly` input silently ACCEPTED characters in both tiers, so a test could
+ *  prove a value a browser would never let a user enter — a harness more lenient
+ *  than production, which CLAUDE.md forbids outright.
+ *
+ *  `write` covers the value-mutating actions (type / clear / select), which a
+ *  `readonly` control also refuses. `name` is the caller's semantic name for the
+ *  element (testUI has one; the remote tier addresses by path).
+ */
+export function assertOperable(
+  el: AnyEl,
+  verb: string,
+  opts: { write?: boolean; name?: string; prefix?: string } = {},
+): void {
+  const tag = String(el?.tagName ?? "element").toLowerCase();
+  const who = opts.name ? `"${opts.name}"` : `<${tag}>`;
+  const p = opts.prefix ?? "";
+  const how = opts.name ? `ui.….${opts.name}.` : "the element's .";
+  if (el?.disabled === true) {
+    throw new Error(
+      `${p}cannot ${verb} ${who} — the ${tag} is disabled\n` +
+        `  assert it instead: ${how}disabled === true (or enable it first)`,
+    );
+  }
+  if (opts.write && el?.readOnly === true) {
+    throw new Error(
+      `${p}cannot ${verb} ${who} — the ${tag} is readonly\n` +
+        `  a user cannot change it either; assert it instead: ${how}readonly === true`,
+    );
+  }
+}
+
 /** Keyboard modifier flags for {@linkcode triggerPress} — lets tests express
  *  Ctrl/Cmd/Alt/Shift chords (e.g. a Ctrl+Enter submit shortcut). */
 export interface KeyModifiers {
@@ -56,6 +94,7 @@ function keyEv(el: AnyEl, name: string, key: string, mods?: KeyModifiers) {
 
 /** Full user-faithful click sequence. */
 export function triggerClick(el: AnyEl): void {
+  assertOperable(el, "click");
   el.dispatchEvent(mouseEv(el, "pointerdown"));
   el.dispatchEvent(mouseEv(el, "mousedown"));
   el.dispatchEvent(mouseEv(el, "pointerup"));
@@ -67,6 +106,7 @@ export function triggerClick(el: AnyEl): void {
 /** Type one character like a user: keydown → value += ch → input → keyup.
  *  Callers loop characters (re-resolving controlled inputs between them). */
 export function triggerChar(el: AnyEl, ch: string): void {
+  assertOperable(el, "type into", { write: true });
   el.dispatchEvent(keyEv(el, "keydown", ch));
   el.value = String(el.value ?? "") + ch;
   el.dispatchEvent(ev(el, "input"));
@@ -82,6 +122,7 @@ export function triggerPress(
   key: string,
   mods?: KeyModifiers,
 ): void {
+  assertOperable(el, "press a key on");
   el.dispatchEvent(keyEv(el, "keydown", key, mods));
   el.dispatchEvent(keyEv(el, "keyup", key, mods));
   const modified = mods
@@ -102,6 +143,7 @@ export function triggerKeyDown(
   key: string,
   mods?: KeyModifiers,
 ): void {
+  assertOperable(el, "hold a key on");
   el.dispatchEvent(keyEv(el, "keydown", key, mods));
 }
 
@@ -111,11 +153,41 @@ export function triggerKeyUp(
   key: string,
   mods?: KeyModifiers,
 ): void {
+  assertOperable(el, "release a key on");
   el.dispatchEvent(keyEv(el, "keyup", key, mods));
 }
 
-/** Select an option on a <select> like a user (sets value, fires change+input). */
+/** Select an option on a <select> like a user (sets value, fires change+input).
+ *
+ *  A user can only pick an option that EXISTS and is enabled. Assigning an
+ *  unknown value to a `<select>` silently resets it to `""` (DOM spec), so a
+ *  typo'd or stale option value used to look like a successful selection and
+ *  the change handler ran with the empty string — the failure surfaced later, as
+ *  a wrong assertion somewhere else. Say it here instead. */
 export function triggerSelect(el: AnyEl, value: string): void {
+  assertOperable(el, "select on", { write: true });
+  const tag = String(el?.tagName ?? "").toLowerCase();
+  if (tag !== "select") {
+    throw new Error(
+      `select("${value}") on <${tag || "element"}> — only a <select> has ` +
+        `options; use type()/setValue() for a text input`,
+    );
+  }
+  const options: AnyEl[] = [...(el.options ?? [])];
+  const match = options.find((o) => String(o.value) === value);
+  if (!match) {
+    throw new Error(
+      `select("${value}") — no such option\n  available: ${
+        options.map((o) => JSON.stringify(String(o.value))).join(", ") ||
+        "(none)"
+      }`,
+    );
+  }
+  if (match.disabled === true) {
+    throw new Error(
+      `select("${value}") — that option is disabled; a user cannot pick it`,
+    );
+  }
   el.focus?.();
   el.value = value;
   el.dispatchEvent(ev(el, "input"));
@@ -124,6 +196,7 @@ export function triggerSelect(el: AnyEl, value: string): void {
 
 /** Clear an input's value like a user (select-all + delete): value = "", input. */
 export function triggerClear(el: AnyEl): void {
+  assertOperable(el, "clear", { write: true });
   el.focus?.();
   el.value = "";
   el.dispatchEvent(ev(el, "input"));

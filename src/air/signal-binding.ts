@@ -4,6 +4,12 @@
 import { effect } from "../state/signal.ts";
 import type { Signal } from "../state/signal.ts";
 import { styleValue } from "./ssr-utils.ts";
+// The prop→DOM rule is shared with `applyProps`. It used to be copied here, and
+// the copy had no `svgAttrName` mapping and no `k in el` guard: `strokeWidth`
+// landed as a literal attribute SVG ignores, and `disabled` on a non-form
+// element became an invisible JS expando. Same prop, different DOM, purely
+// because the value was a signal.
+import { _RESERVED_PROPS, _writeProp } from "./prop-write.ts";
 
 /** Check if a value is a Signal (duck-typing: _subscribers + set + peek). */
 export function isSignal(v: unknown): v is Signal<unknown> {
@@ -26,13 +32,17 @@ export function bindSignalProps(
   const cleanups: (() => void)[] = [];
 
   for (const [k, v] of Object.entries(props)) {
-    if (k === "key" || k === "children" || k === "ref" || k === "use") continue;
+    if (_RESERVED_PROPS.has(k)) continue;
 
     if (isSignal(v)) {
       const sig = v as Signal<unknown>;
+      // `prev` lets a style OBJECT retire the declarations it dropped, exactly
+      // as the diff path does — the old copy cleared `cssText` wholesale.
+      let prev: unknown;
       const dispose = effect(() => {
         const val = sig.value;
-        _applyProp(el, k, val);
+        _writeProp(el, k, val, prev);
+        prev = val;
       });
       cleanups.push(dispose);
     } else if (k === "style" && typeof v === "object" && v !== null) {
@@ -74,55 +84,4 @@ export function cleanupSignalBindings(el: Element): void {
 /** Resolve a signal to its current value without tracking (for initial render). */
 export function resolveSignalProp(v: unknown): unknown {
   return isSignal(v) ? (v as Signal<unknown>).peek() : v;
-}
-
-function _applyProp(el: HTMLElement, k: string, v: unknown): void {
-  if (k === "className") {
-    const cls = typeof v === "string"
-      ? v
-      : Array.isArray(v)
-      ? v.filter(Boolean).join(" ")
-      : typeof v === "object" && v !== null
-      ? Object.entries(v as Record<string, unknown>)
-        .filter(([, val]) => val)
-        .map(([key]) => key)
-        .join(" ")
-      : "";
-    if (cls) el.setAttribute("class", cls);
-    else el.removeAttribute("class");
-  } else if (k === "style") {
-    // AIO-170: handle style signal values — string, object, or null/false
-    if (typeof v === "string") {
-      el.style.cssText = v;
-    } else if (typeof v === "object" && v !== null) {
-      el.style.cssText = "";
-      for (const [sk, sv] of Object.entries(v as Record<string, unknown>)) {
-        if (sv != null) {
-          const prop = sk.replace(/[A-Z]/g, (m) => "-" + m.toLowerCase());
-          el.style.setProperty(prop, styleValue(sk, sv));
-        }
-      }
-    } else {
-      el.style.cssText = "";
-    }
-  } else if (
-    k === "value" ||
-    k === "checked" ||
-    k === "selected" ||
-    k === "disabled" ||
-    k === "readOnly" ||
-    k === "multiple" ||
-    k === "indeterminate" ||
-    k === "defaultChecked" ||
-    k === "defaultValue"
-  ) {
-    // deno-lint-ignore no-explicit-any
-    (el as any)[k] = v ?? "";
-  } else if (v === false || v == null) {
-    el.removeAttribute(k);
-  } else if (v === true) {
-    el.setAttribute(k, "");
-  } else {
-    el.setAttribute(k, String(v));
-  }
 }

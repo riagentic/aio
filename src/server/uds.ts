@@ -87,40 +87,63 @@ export function createUDSListener(
 
   (async () => {
     for await (const conn of listener) {
-      connSet.add(conn);
-      const client: UDSClient = {
-        conn,
-        index: counter.value++,
-        id: crypto.randomUUID(),
-        subscriptions: null,
-      };
-      clientMap.set(conn, client);
-      debug(`uds: client connected #${client.index} (${connSet.size} total)`);
+      // Everything below is PER-CONNECTION work, and this loop is the
+      // transport's only door: a throw here does not fail one client, it ends
+      // the loop — and `for await` disposes the listener on the way out, so the
+      // process runs on with a socket nothing will ever accept again (and a
+      // shutdown that then throws BadResource). One unserializable snapshot
+      // used to be enough. Fail the CONNECTION, loudly, and keep the door open.
+      try {
+        connSet.add(conn);
+        const client: UDSClient = {
+          conn,
+          index: counter.value++,
+          id: crypto.randomUUID(),
+          subscriptions: null,
+        };
+        clientMap.set(conn, client);
+        debug(`uds: client connected #${client.index} (${connSet.size} total)`);
 
-      // A3: version handshake — server speaks first, before any state.
-      sendTo(conn, enc("proto", protoHello(VERSION)));
-      if (clientConfig && Object.keys(clientConfig).length > 0) {
-        sendTo(conn, enc("cfg", clientConfig));
+        // A3: version handshake — server speaks first, before any state.
+        sendTo(conn, enc("proto", protoHello(VERSION)));
+        if (clientConfig && Object.keys(clientConfig).length > 0) {
+          sendTo(conn, enc("cfg", clientConfig));
+        }
+        // AIO-239: route the initial write through sendTo() for the
+        // per-connection write queue — and through the SAME snapshot builder
+        // every later frame uses, so the accept-time state cannot drift from
+        // (or crash where) the broadcast-time state does.
+        const initial = _fullJsonFor(client);
+        if (initial !== undefined) {
+          sendTo(conn, encRaw("state", initial), () => {
+            client.lastFullJson = initial;
+          });
+        }
+        // Dev: hand the panel its history now — Ctrl+. binds on the first
+        // tt-state frame, so without this the shortcut is inert until the next
+        // recorded action's broadcast.
+        if (tt) sendTo(conn, enc("tt-state", tt.getBroadcast()));
+
+        _handleUDSConn(
+          conn,
+          connSet,
+          clientMap,
+          pendingState,
+          onAction,
+          debug,
+          _fullJsonFor,
+          sendTo,
+          syncHandler ?? null,
+          tt,
+        );
+      } catch (e) {
+        log.error("uds", `client handshake failed — ${e}`);
+        connSet.delete(conn);
+        clientMap.delete(conn);
+        try {
+          conn.close();
+        } catch { /* already closed */ }
       }
-      // AIO-239: route initial write through sendTo() to use per-connection write queue
-      sendTo(conn, encRaw("state", JSON.stringify(getUIState())));
-      // Dev: hand the panel its history now — Ctrl+. binds on the first
-      // tt-state frame, so without this the shortcut is inert until the next
-      // recorded action's broadcast.
-      if (tt) sendTo(conn, enc("tt-state", tt.getBroadcast()));
-
-      _handleUDSConn(
-        conn,
-        connSet,
-        clientMap,
-        pendingState,
-        onAction,
-        debug,
-        getUIState,
-        sendTo,
-        syncHandler ?? null,
-        tt,
-      );
     }
   })().catch((e) => {
     if (!closed) log.error("uds", `accept loop error — ${e}`);
@@ -151,12 +174,21 @@ export function createUDSListener(
     _writeQueues.set(conn, next);
   }
 
-  function _getFilteredFullJson(
+  /** THE snapshot builder for this listener: read state, apply the client's
+   *  subscription filter, serialize. Every state frame on this transport —
+   *  accept-time, broadcast, `subs` reply, `resync` reply — comes from here,
+   *  because a snapshot that is built two ways is a snapshot that eventually
+   *  differs two ways.
+   *
+   *  `undefined` means the snapshot could not be produced (a throwing getter, a
+   *  BigInt, a cycle). Serializing is INSIDE the guard: the stringify is where
+   *  that actually throws, and it used to sit outside — so the guard caught the
+   *  rarer failure and let the common one through. */
+  function _fullJsonFor(
     client: Pick<UDSClient, "subscriptions">,
   ): string | undefined {
-    let uiState: unknown;
     try {
-      uiState = getUIState();
+      let uiState: unknown = getUIState();
       if (client.subscriptions) {
         const filtered: Record<string, unknown> = {};
         const src = uiState as Record<string, unknown>;
@@ -166,11 +198,11 @@ export function createUDSListener(
         }
         uiState = filtered;
       }
+      return JSON.stringify(uiState);
     } catch (e) {
-      log.error("uds", `getUIState error — ${e}`);
+      log.error("uds", `state snapshot failed — ${e}`);
       return undefined;
     }
-    return JSON.stringify(uiState);
   }
 
   return {
@@ -216,7 +248,7 @@ export function createUDSListener(
           if (allOps.length > 0) {
             const patchJson = JSON.stringify(allOps);
             // Size guard: if patches exceed full state, send full state instead
-            const fullJson = _getFilteredFullJson(client);
+            const fullJson = _fullJsonFor(client);
             if (fullJson && patchJson.length > fullJson.length) {
               debug(
                 `uds: patch payload (${patchJson.length}B) > full state (${fullJson.length}B) — sending full state`,
@@ -244,7 +276,7 @@ export function createUDSListener(
         }
 
         // Fallback: force-full, trailing flush, or no patches — send full state
-        const json = _getFilteredFullJson(client);
+        const json = _fullJsonFor(client);
         if (!json) continue;
         if (json === client.lastFullJson) continue; // no change
         const j = json;
@@ -308,7 +340,10 @@ function _handleUDSConn(
     action: { type: string; payload?: unknown },
   ) => Promise<unknown> | void,
   debug: (msg: string) => void,
-  getUIState: () => unknown,
+  /** THE snapshot builder (see `_fullJsonFor`) — passed in, never re-derived
+   *  here: this handler used to carry its own copy of the subscription filter,
+   *  which is the same fact decided twice. */
+  fullJsonFor: (client: Pick<UDSClient, "subscriptions">) => string | undefined,
   sendTo: (conn: Deno.Conn, msg: string, onSent?: () => void) => void,
   syncHandler: ServerSyncHandler | null,
   tt?: {
@@ -337,24 +372,11 @@ function _handleUDSConn(
   }
 
   function _sendFilteredState(conn: Deno.Conn, client: UDSClient): void {
-    try {
-      let uiState: unknown = getUIState();
-      if (client.subscriptions) {
-        const filtered: Record<string, unknown> = {};
-        const src = uiState as Record<string, unknown>;
-        for (const sub of client.subscriptions) {
-          const feat = sub.includes(".") ? sub.slice(0, sub.indexOf(".")) : sub;
-          if (feat in src && !(feat in filtered)) filtered[feat] = src[feat];
-        }
-        uiState = filtered;
-      }
-      const msg = JSON.stringify(uiState);
-      sendTo(conn, encRaw("state", msg), () => {
-        client.lastFullJson = msg;
-      });
-    } catch (err) {
-      log.warn("uds", `filtered state send error — ${err}`);
-    }
+    const msg = fullJsonFor(client);
+    if (msg === undefined) return; // already reported by the snapshot builder
+    sendTo(conn, encRaw("state", msg), () => {
+      client.lastFullJson = msg;
+    });
   }
   (async () => {
     const reader = conn.readable.getReader();

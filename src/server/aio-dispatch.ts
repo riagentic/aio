@@ -247,14 +247,11 @@ export function setupDispatch<S, A, E, App = any>(
     reduce: getTT()
       ? (s, a) => {
         const tt = getTT()!;
-        if (tt.paused) {
-          log.debug(
-            `time-travel: paused, dropping action ${
-              (a as { type?: string }).type ?? "?"
-            }`,
-          );
-          return { state: s, effects: [] as E[] };
-        }
+        // NOTE: the paused check that used to live here is gone, deliberately.
+        // Returning unchanged state from reduce made a dropped action look
+        // SUCCESSFUL to its caller. The refusal now happens at the dispatch
+        // door (`isPaused` below → createDispatch), which is the only place
+        // that still holds the caller's promise and can reject it.
         const result = hookedReduce(s, a);
         _collectPatches(result);
         const actionType = (a as { type?: string }).type ?? "";
@@ -338,5 +335,9 @@ export function setupDispatch<S, A, E, App = any>(
       | ((prev: S, next: S, action: A) => void)
       | undefined,
     cellNames: deps.cellNames,
+    // Read per dispatch, never captured: `record()` returns a NEW TTState
+    // object for every action, so a value captured here would be a stale
+    // snapshot that never reports a pause.
+    isPaused: () => getTT()?.paused === true,
   });
 }

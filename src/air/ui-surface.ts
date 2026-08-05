@@ -12,7 +12,9 @@
 import type { VNode } from "./vdom-types.ts";
 
 /** An interactive element (has `on*` handlers) owned by a component.
- *  Named by priority: `t` prop > aria-label > placeholder > static text > tag#n. */
+ *  Named LABEL + ROLE, label by priority: `t` prop > `data-testid` >
+ *  `aria-label` > own static text > wrapping `<label>` > placeholder > `name`
+ *  attr; same-named siblings get a 2-based ordinal suffix. */
 export type UIElementInfo = {
   /** Semantic name used to address the element, e.g. "add" or "Add" */
   name: string;
@@ -103,6 +105,45 @@ function staticText(v: VNode): string | undefined {
   return s.length > 0 && s.length <= 60 ? s : undefined;
 }
 
+/** An enclosing `<label>` and whether its text has already been claimed.
+ *
+ *  HTML associates a wrapping label with its FIRST labelable descendant, and
+ *  only that one — so the context is consumed, not broadcast. */
+type LabelCtx = { text: string; used: boolean };
+
+/** HTML's labelable elements — the ones a wrapping `<label>` can name. */
+const LABELABLE = new Set([
+  "button",
+  "input",
+  "meter",
+  "output",
+  "progress",
+  "select",
+  "textarea",
+]);
+
+/** Text of a `<label>` subtree, ignoring the control it wraps.
+ *
+ *  `staticText` only reads DIRECT string children, which is exactly what a
+ *  wrapping label never has: `<label><input/><span>Enable LAN</span></label>`
+ *  (the shape aio's own `Checkbox` renders) put its words one level down, so
+ *  every labelled checkbox on a page came out as the bare role — `Checkbox`,
+ *  `Checkbox2`, … — and could only be addressed positionally. */
+function labelSubtreeText(v: VNode, depth = 0): string {
+  if (depth > 4) return "";
+  const parts: string[] = [];
+  for (const c of v.children) {
+    if (typeof c === "string" || typeof c === "number") {
+      parts.push(String(c));
+    } else if (
+      isVNode(c) && typeof c.tag === "string" && !LABELABLE.has(c.tag)
+    ) {
+      parts.push(labelSubtreeText(c, depth + 1));
+    }
+  }
+  return parts.join(" ").replace(/\s+/g, " ").trim();
+}
+
 /** PascalCase a label into a valid identifier fragment: "buy milk!" → "BuyMilk". */
 function pascal(s: string): string {
   return s
@@ -115,11 +156,26 @@ function pascal(s: string): string {
     .slice(0, 32);
 }
 
-/** Infer the element's ROLE — what kind of thing it is. Tag first, then
- *  semantics: a clickable div/span with a button-ish class is a Button. */
+/** Infer the element's ROLE — what kind of thing it is. Explicit `role` first,
+ *  then the tag, then semantics: a clickable div/span with a button-ish class
+ *  is a Button. */
 function elementRole(v: VNode, events: string[]): string {
   const p = v.props;
+  // An explicit ARIA role is the author SAYING what the thing is — the most
+  // authoritative answer there is, and the one a screen reader uses. Without
+  // it, `<div role="dialog" onClick=…>` (a modal backdrop) came out as
+  // "Button", which is neither what it is nor what a11y tooling reports.
+  if (typeof p.role === "string" && p.role.trim()) {
+    const r = pascal(p.role.trim().split(/\s+/)[0]!);
+    if (r) return r;
+  }
   switch (v.tag) {
+    // A clickable row/list-item is not a Button: the generic click→Button
+    // fallback below erased the one word that says what was clicked.
+    case "tr":
+      return "Row";
+    case "li":
+      return "Item";
     case "button":
       return "Button";
     case "a":
@@ -153,7 +209,12 @@ function elementRole(v: VNode, events: string[]): string {
  *  e.g. <button>Submit</button> → "SubmitButton",
  *  <div class="button">Submit</div> → "SubmitButton",
  *  <input placeholder="Title"> → "TitleInput". */
-function elementName(v: VNode, events: string[], taken: Set<string>): string {
+function elementName(
+  v: VNode,
+  events: string[],
+  taken: Set<string>,
+  labelCtx?: LabelCtx,
+): string {
   const p = v.props;
   const explicit = typeof p.t === "string"
     ? p.t
@@ -165,10 +226,22 @@ function elementName(v: VNode, events: string[], taken: Set<string>): string {
     base = explicit;
   } else {
     const role = elementRole(v, events);
-    const label = (typeof p["aria-label"] === "string"
+    const own = (typeof p["aria-label"] === "string"
       ? p["aria-label"] as string
-      : undefined) ??
-      staticText(v) ??
+      : undefined) ?? staticText(v);
+    // A wrapping `<label>` names the first labelable thing inside it — the
+    // implicit association HTML has always had, applied here so the surface
+    // agrees with the accessible name a user actually hears.
+    let implicit: string | undefined;
+    if (
+      own === undefined && labelCtx && !labelCtx.used &&
+      typeof v.tag === "string" && LABELABLE.has(v.tag) &&
+      labelCtx.text.length > 0 && labelCtx.text.length <= 60
+    ) {
+      implicit = labelCtx.text;
+      labelCtx.used = true;
+    }
+    const label = own ?? implicit ??
       (typeof p.placeholder === "string"
         ? p.placeholder as string
         : undefined) ??
@@ -198,11 +271,14 @@ function walkOutput(
   out: VNode | string | number | null | undefined,
   owner: UISurfaceNode,
   taken: Set<string>,
+  labelCtx?: LabelCtx,
 ): void {
   if (out == null || typeof out !== "object") return;
   const v = out;
   if (typeof v.tag === "function") {
-    owner.children.push(walkComponent(v, owner.path, owner.children));
+    owner.children.push(
+      walkComponent(v, owner.path, owner.children, labelCtx),
+    );
     return;
   }
   // Host element / fragment-like: collect interactivity, then descend
@@ -220,7 +296,7 @@ function walkOutput(
       events.length > 0 || intrinsic || typeof v.props.t === "string" ||
       typeof v.props["data-testid"] === "string"
     ) {
-      const name = elementName(v, events, taken);
+      const name = elementName(v, events, taken, labelCtx);
       const el = v._dom && (v._dom as Node).nodeType === 1
         ? v._dom as Element & {
           value?: string;
@@ -266,8 +342,14 @@ function walkOutput(
       });
     }
   }
+  // Descending INTO a <label> makes its text the implicit name for the first
+  // labelable element below it (HTML's own rule) — including across a component
+  // boundary, since what associates them is DOM nesting, not authorship.
+  const inner = v.tag === "label"
+    ? { text: labelSubtreeText(v), used: false }
+    : labelCtx;
   for (const c of v.children) {
-    if (isVNode(c)) walkOutput(c, owner, taken);
+    if (isVNode(c)) walkOutput(c, owner, taken, inner);
   }
 }
 
@@ -275,6 +357,7 @@ function walkComponent(
   v: VNode,
   parentPath: string,
   siblings: UISurfaceNode[] = [],
+  labelCtx?: LabelCtx,
 ): UISurfaceNode {
   const fn = v.tag as { name?: string; _lazyName?: string };
   // A resolved lazy() wrapper reports the loaded component's name.
@@ -321,7 +404,7 @@ function walkComponent(
     const t = (v._dom as { textContent?: string }).textContent?.trim();
     if (t) node.text = capText(t);
   }
-  walkOutput(v._rendered ?? null, node, new Set());
+  walkOutput(v._rendered ?? null, node, new Set(), labelCtx);
   return node;
 }
 

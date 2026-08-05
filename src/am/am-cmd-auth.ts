@@ -258,12 +258,14 @@ export async function cmdAuth(
       }
       case "rm": {
         need("");
+        // `remove` IS the deletion: it revokes every session and burns every
+        // outstanding one-shot token itself (the store is bound above), so
+        // this command no longer repeats the rule. It used to — and the
+        // programmatic door (`app.auth.remove`) was the copy that forgot.
         if (!users.remove(id!)) {
           outError(`no such user: ${id}`, mode);
           Deno.exit(1);
         }
-        sessionStore().revokeUser(id!);
-        users.purgeTokens(id!);
         out(`${id} removed (sessions revoked)`, mode);
         return;
       }

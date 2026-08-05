@@ -11,7 +11,8 @@ import { createCheckpoint, readCheckpoint } from "./checkpoint.ts";
 import { installCrashHandler } from "./crash-handler.ts";
 import { log } from "./logger.ts";
 import { diagSubscribe } from "./diagnostic-bus.ts";
-import { noRedaction, REDACTED } from "./redact.ts";
+import { isRedactedAction, noRedaction, REDACTED } from "./redact.ts";
+import { actionOrigin } from "./action-kind.ts";
 import type { Redactor } from "./redact.ts";
 
 /** Lifecycle hooks returned by initDiagnostics for the runtime to call */
@@ -227,16 +228,40 @@ export function initDiagnostics(
       observe("state-diff", () => {
         const diffs = computeDiffs(prev, next);
         for (const d of diffs) {
-          log.debug("state-diff", formatDiff(d.cell, d.changes));
+          // A redacted cell's VALUES are exactly what a state diff prints, and
+          // debug.log keeps them on disk. The timeline redacts diff before/after
+          // for this reason ("redacting the payload alone would have been
+          // theatre"), and so does the checkpoint; this sink printed
+          // `vault: key ""→"hunter2"` in cleartext. The changed KEYS stay — what
+          // moved is not the secret.
+          const hide = redact.cells.has(d.cell);
+          log.debug(
+            "state-diff",
+            formatDiff(
+              d.cell,
+              hide
+                ? d.changes.map((c) => ({
+                  key: c.key,
+                  from: REDACTED,
+                  to: REDACTED,
+                }))
+                : d.changes,
+            ),
+          );
         }
       });
     }
     if (actionLog) {
       observe("action-log", () => {
-        actionLog!.append(
+        // The write-set of a redacted method carries the same secret as its
+        // arguments, under a DIFFERENT type — the ORIGIN decides too, exactly
+        // as it does for the journal and the timeline.
+        const hide = isRedactedAction(
+          redact,
           action.type,
-          redact(action.type) ? REDACTED : action.payload,
+          actionOrigin(action.type, action.payload),
         );
+        actionLog!.append(action.type, hide ? REDACTED : action.payload);
       });
     }
     lastState = next;

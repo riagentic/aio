@@ -172,9 +172,15 @@ Deno.test("discoverProjects: roots cover ~/aio-apps + cwd; excludes the framewor
     roots.some((r) => Deno.cwd().startsWith(r)),
     "includes a cwd ancestor",
   );
+  // Assert on the PATH, not on a substring of the package name: the old
+  // spelling (`!p.name.includes("riagentic")`) would have gone vacuously green
+  // the moment the package was renamed, while still listing the framework repo
+  // as a manageable app.
+  const { selfDir } = await import("./server/scan.ts");
+  const repoRoot = selfDir().split("/").slice(0, -1).join("/");
   assert(
-    !projects.some((p) => p.name.includes("riagentic")),
-    "framework repo is excluded",
+    !projects.some((p) => p.path === repoRoot),
+    `the framework repo (${repoRoot}) is not an app — it must never be listed`,
   );
 });
 
@@ -189,7 +195,14 @@ const baseDetail = (over: Partial<ProjectDetail> = {}): ProjectDetail => ({
   port: 8000,
   status: "started",
   build: "dev",
-  meta: { name: "p", version: null, target: null, tasks: {}, isAio: true },
+  meta: {
+    name: "p",
+    version: null,
+    target: null,
+    tasks: {},
+    isAio: true,
+    entry: null,
+  },
   git: false,
   config: null,
   cells: null,
@@ -205,7 +218,14 @@ const baseDetail = (over: Partial<ProjectDetail> = {}): ProjectDetail => ({
 const proj = (running: DiscoveredProject["running"]): DiscoveredProject => ({
   path: "/p",
   name: "p",
-  meta: { name: "p", version: null, target: null, tasks: {}, isAio: true },
+  meta: {
+    name: "p",
+    version: null,
+    target: null,
+    tasks: {},
+    isAio: true,
+    entry: null,
+  },
   running,
   git: false,
 });

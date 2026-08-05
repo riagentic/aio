@@ -39,14 +39,33 @@ Deno.test("action-log: truncates when exceeding max", async () => {
   await alog.flush();
 });
 
-Deno.test("action-log: skips internal actions", async () => {
+// The `__exec` marker is noise; the `__set` WRITE-SET is not.
+//
+// This test used to assert the opposite — that `counter:__set:foo` is dropped
+// like `__exec` — which pinned the bug as the contract. An async or
+// transactional method commits nothing in its `cell:method` action (that fires
+// at CALL time); everything it writes is published as one `cell:__setMethod`,
+// so dropping it left `actions.jsonl` with the call and no record of the
+// writes, long after the journal, the timeline and time travel were fixed to
+// keep it. One decider now: `src/diagnostics/action-kind.ts`.
+Deno.test("action-log: skips the __exec marker, keeps the write-set", async () => {
   const path = `${TEST_DIR}/actions-skip.jsonl`;
   const alog = createActionLog(path, 100);
-  await alog.append("counter:__exec", {});
-  await alog.append("counter:__set:foo", {});
+  await alog.append("counter:__exec", { _method: "bump" });
+  await alog.append("counter:__setBump", {
+    mutations: [{ path: ["n"], value: 7 }],
+    _origin: "bump",
+  });
   await alog.append("counter:increment", {});
   const lines = await readLines(path);
-  assertEquals(lines.length, 1);
-  assertEquals(JSON.parse(lines[0]!).type, "counter:increment");
+  assertEquals(
+    lines.map((l) => JSON.parse(l).type),
+    ["counter:__setBump", "counter:increment"],
+  );
+  assertEquals(
+    JSON.parse(lines[0]!).payload.mutations[0].value,
+    7,
+    "the line has to carry WHAT was written",
+  );
   await alog.flush();
 });

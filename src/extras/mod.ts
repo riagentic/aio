@@ -16,7 +16,9 @@
 export { lint, parseCli } from "../server/aio.ts";
 export type { CliFlags, Lint } from "../server/aio.ts";
 
-/** Unix-domain-socket variant of connectCli — same-box CLI without TCP. */
+// (`connectCliUDS` moved to `aio/server` and `DEFAULT_PRAGMAS` to `aio/db` in
+// alpha41 — see docs/upgrade/from-alpha40-to-alpha41.md. Their doc comments
+// were left behind here, describing exports this entry no longer has.)
 
 /** Single-instance lock introspection — list running apps, normalize IDs. */
 export { instances, resolveAppId } from "../server/single-instance-lock.ts";
@@ -34,8 +36,6 @@ export { deepFreeze } from "../state/dispatch.ts";
 
 /** Memoized selector scoped to one cell slice. */
 export { createSliceSelector } from "../selector.ts";
-
-/** The PRAGMA set createDB applies by default — for tuning custom DBs. */
 
 /** Deep diagnostic detail types — the shapes vitals/diagnostics emit.
  *  (The CONFIG types stay on the main entry with `aio.run()`.) */

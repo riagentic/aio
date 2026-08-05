@@ -40,10 +40,20 @@ Nothing is dropped quietly:
 
 - past 1000 queued actions the OLDEST is dropped and its caller's promise
   rejects immediately with the real reason (not a timeout 15s later);
-- `isConnectionDegraded()` returns true once the queue passes 80% full — use it
+- `isConnectionDegraded()` returns true once a queue passes 80% full — use it
   for a "reconnecting / slow connection" indicator;
 - when the client tears down (or hits a protocol-version gap) the queue is
   discarded and every waiting caller is rejected, with a count logged.
+
+**Two send paths, two queues.** The contract above is the one for CELL METHODS
+(`await counter.increment()`), which is what most code uses. The lower-level
+`useCell().send()` / `useAio().send()` are fire-and-forget: they are synchronous
+and return `false` rather than rejecting a promise, and they queue separately —
+up to 100 actions, dropping the NEWEST (the one you just sent) when full. Both
+queues feed `isConnectionDegraded()`, and both emit a diagnostic on a drop, so
+nothing is invisible either way. If an action must not be lost, prefer a cell
+method — its promise is what tells you the outcome. If you use `send()`, check
+the return value.
 
 ### What `await cell.method()` means while offline
 

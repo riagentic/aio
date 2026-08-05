@@ -6,6 +6,8 @@ import {
   slugify,
   writePlaceholderIcon,
 } from "../src/build/build-helpers.ts";
+import { apkArtifact } from "../src/build/build-android.ts";
+import { ANDROID_TEMPLATE } from "../src/build/android-template.ts";
 
 const buildScript = join(import.meta.dirname ?? ".", "..", "src", "build.ts");
 
@@ -383,6 +385,45 @@ Deno.test("build: android APP_NAME Kotlin escaping", async () => {
   assertEquals(escapeKotlin("Path\\File"), "Path\\\\File");
   assertEquals(escapeKotlin("$var"), "\\$var");
   assertEquals(escapeKotlin('Say "hi"'), 'Say \\"hi\\"');
+});
+
+// `--release` is a DOCUMENTED flag ("Android release build", docs/build/
+// targets.md) and it never produced an APK. `assembleRelease` writes
+// `app-release.apk` only when the release variant declares a `signingConfig`;
+// the generated Gradle project declares none, so AGP writes
+// `app-release-unsigned.apk` — and the build copied the former unconditionally.
+// A real run reached "BUILD SUCCESSFUL in 36s" and then died with an uncaught
+// `NotFound: … app-release.apk`, leaving nothing in the project root.
+Deno.test("android --release: the artifact is the file gradle really wrote", () => {
+  // The premise, pinned. Add a signingConfig later and this test says so.
+  assertEquals(
+    /signingConfig/.test(ANDROID_TEMPLATE["app/build.gradle.kts"]!),
+    false,
+    "the generated project declares no signingConfig, so assembleRelease " +
+      "emits app-release-unsigned.apk — if that changed, revisit apkArtifact",
+  );
+
+  // The shipped reality: unsigned, and the NAME says so. An APK that cannot be
+  // installed must never wear the name of one that can.
+  assertEquals(
+    apkArtifact(["app-release-unsigned.apk", "output-metadata.json"], true),
+    { file: "app-release-unsigned.apk", suffix: "-unsigned" },
+  );
+  // A signed release (someone adds a signingConfig) keeps the plain name.
+  assertEquals(apkArtifact(["app-release.apk"], true), {
+    file: "app-release.apk",
+    suffix: "",
+  });
+  // Debug is signed by the debug keystore — plain name, and it must not fall
+  // back to a release APK left over from another build.
+  assertEquals(apkArtifact(["app-debug.apk"], false), {
+    file: "app-debug.apk",
+    suffix: "",
+  });
+  assertEquals(apkArtifact(["app-release-unsigned.apk"], false), null);
+  // Nothing produced → null, so the build reports it instead of throwing a raw
+  // filesystem error from inside the framework.
+  assertEquals(apkArtifact(["output-metadata.json"], true), null);
 });
 
 // ── --expose auth integration ───────────────────────────────────

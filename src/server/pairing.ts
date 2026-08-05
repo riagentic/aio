@@ -15,9 +15,9 @@
 // the trojan's `pair` route (POST /__aio/trojan/pair). Until that route existed
 // a missed 3-minute window meant restarting the app — downtime for every
 // connected client — so the comment here, and the 401 from /__aio/pair, both
-// said "restart the app". `am pair` is the honest answer now; the /__aio/pair
-// hint still says restart (it is written in server.ts) — see the follow-up in
-// the control-credential report.
+// said "restart the app". `am pair` is the honest answer now, and both places
+// say so; /__aio/pair's 401 (in server.ts) states the window from PIN_TTL_MS
+// rather than a typed-out copy, so the two can never disagree.
 import { _timingSafeEqual } from "./server-auth.ts";
 
 /** Wrong-guess budget per client key before that key is refused. */

@@ -9,12 +9,22 @@ export type Data = {
   obj: Record<string, unknown>;
   nums: number[];
   items: { id: number; q: number }[];
+  /** Depth: every path helper (overlay replay, watch keys, nested proxy cache)
+   *  is indexed by a path ARRAY, and three levels is the shortest program that
+   *  can tell a prefix bug from an exact-key bug. */
+  deep: { l1: { l2: { l3: number[] } } };
+  /** An array whose ELEMENTS are arrays — `Array.isArray()` decides the proxy
+   *  target's kind, and a nested array behind an object target serializes as
+   *  `{"0":…}`. Only a grid exercises that at depth ≥ 2. */
+  grid: number[][];
 };
 export const initData = (): Data => ({
   a: 0,
   obj: { x: 1 },
   nums: [1, 2, 3],
   items: [{ id: 1, q: 10 }, { id: 2, q: 20 }],
+  deep: { l1: { l2: { l3: [1, 2] } } },
+  grid: [[1, 2], [3, 4]],
 });
 
 export type Op = { kind: string; i: number; v: number };
@@ -155,6 +165,171 @@ export function applyOp(s: { data: Data }, op: Op, log: unknown[]): void {
       d.items[idx]!.q = op.v + 1;
       break;
     }
+    // ── length ──────────────────────────────────────────────────────
+    // `arr.length = n` is a SET trap on an array path, not an array op — it
+    // takes the object write path with a non-index key, which nothing else in
+    // the alphabet reached. TRUNCATION only, and that bound is load-bearing:
+    //
+    // anything that makes an array SPARSE — `delete arr[i]`, growing `length`,
+    // writing past the end — has no parity target to fuzz against, because
+    // IMMER densifies holes and plain JavaScript does not. `produce([1,2,3], d
+    // => { delete d[0] })` yields `[undefined,2,3]` with `Object.keys` = 0,1,2,
+    // so `.reduce` is NaN; plain JS (and the live proxy, which applies the same
+    // mutation to a real array) keeps a hole that `.reduce`/`.map` skip. Immer
+    // is not even self-consistent: on a plain array the method assigned into
+    // the draft moments earlier, `delete` DOES leave a hole. So the sync side
+    // is the one that departs from JavaScript, and no async behaviour can match
+    // both halves of it. Post-commit the question is moot (a hole and an
+    // `undefined` both serialize to `null`), so the divergence lives only in
+    // in-method reads. Use `splice` when you mean "remove".
+    case "arr_set_length":
+      d.nums.length = op.i % (d.nums.length + 1);
+      break;
+    case "arr_copy_within":
+      if (d.nums.length > 1) d.nums.copyWithin(0, 1);
+      break;
+    // ── depth ───────────────────────────────────────────────────────
+    case "deep_push":
+      d.deep.l1.l2.l3.push(op.v);
+      break;
+    case "deep_set_idx":
+      if (d.deep.l1.l2.l3.length) {
+        d.deep.l1.l2.l3[op.i % d.deep.l1.l2.l3.length] = op.v;
+      }
+      break;
+    case "deep_replace_mid":
+      d.deep.l1.l2 = { l3: [op.v] };
+      break;
+    case "read_deep":
+      log.push(d.deep.l1.l2.l3.join(","));
+      break;
+    // ── arrays of arrays ────────────────────────────────────────────
+    case "grid_inner_push":
+      if (d.grid.length) d.grid[op.i % d.grid.length]!.push(op.v);
+      break;
+    case "grid_push_row":
+      d.grid.push([op.v, op.i]);
+      break;
+    case "grid_write_cell": {
+      const row = d.grid[op.i % (d.grid.length || 1)];
+      if (row && row.length) row[op.i % row.length] = op.v;
+      break;
+    }
+    case "read_grid_json":
+      log.push(JSON.stringify(d.grid));
+      break;
+    case "read_flat":
+      log.push(d.grid.flat().join(","));
+      break;
+    // ── key shapes the object write path has to survive ─────────────
+    // A numeric-string key changes Object.keys ORDER (integer keys sort
+    // first); a key that shadows a prototype member has to stay ordinary data.
+    case "set_numeric_key":
+      d.obj[String(op.i % 4)] = op.v;
+      break;
+    case "set_shadow_key":
+      d.obj[op.i % 2 === 0 ? "toString" : "hasOwnProperty"] = op.v;
+      break;
+    case "set_undefined":
+      d.obj.x = undefined;
+      break;
+    case "set_null":
+      d.obj[`n${op.i % 2}`] = null;
+      break;
+    case "set_nan":
+      d.a = op.i % 2 === 0 ? NaN : Infinity;
+      break;
+    case "del_item_field":
+      if (d.items.length) {
+        delete (d.items[op.i % d.items.length] as {
+          q?: number;
+        }).q;
+      }
+      break;
+    // ── whole-object reads ──────────────────────────────────────────
+    case "read_obj_spread":
+      log.push(JSON.stringify({ ...d.obj }));
+      break;
+    case "read_json_root":
+      log.push(JSON.stringify(d));
+      break;
+    // `Object.values` resolves each key through [[Get]], so nested objects come
+    // back as live proxies — JSON.stringify them (a `String(proxy)` would hit
+    // the documented "not supported on live async state" throw, which is a
+    // deliberate, loud divergence and not what this op is measuring).
+    case "read_values":
+      log.push(JSON.stringify(Object.values(d.obj)));
+      break;
+    case "read_for_in": {
+      const ks: string[] = [];
+      for (const k in d.obj) ks.push(k);
+      log.push(ks.sort().join(","));
+      break;
+    }
+    case "obj_assign":
+      Object.assign(d.obj, { [`a${op.i % 3}`]: op.v, [`b${op.i % 3}`]: op.i });
+      break;
+    // ── more array shapes ───────────────────────────────────────────
+    case "arr_splice_tail":
+      if (d.nums.length) d.nums.splice(d.nums.length - 1, 1);
+      break;
+    case "arr_splice_head":
+      if (d.nums.length) d.nums.splice(0, 1);
+      break;
+    case "arr_sort_default":
+      d.nums.sort();
+      break;
+    // The shortest way to put ONE object at two indices — see ALIAS_KINDS.
+    case "arr_fill_object":
+      d.items.fill({ id: op.i, q: op.v });
+      break;
+    case "read_to_sorted":
+      log.push(d.nums.toSorted((x, y) => x - y).join(","));
+      break;
+    case "read_to_reversed":
+      log.push(d.nums.toReversed().join(","));
+      break;
+    // `at`/`findLast` are NOT in ARRAY_READ_METHODS — the proxy hands the raw
+    // prototype function back and it runs against the proxy itself. That is a
+    // second, unintercepted read path, so it needs its own coverage.
+    case "read_at":
+      log.push(d.nums.at(-1));
+      break;
+    case "read_find_last":
+      log.push(d.items.findLast((x) => x.id === op.i % 5)?.q);
+      break;
+    case "read_array_from":
+      log.push(Array.from(d.nums).join(","));
+      break;
+    // Writing THROUGH an element a read method handed the callback. `for…of`
+    // and `find` always did this; `forEach` silently dropped it.
+    case "objarr_foreach_write":
+      d.items.forEach((it) => {
+        it.q = op.v;
+      });
+      break;
+    case "objarr_values_write":
+      for (const it of d.items.values()) it.q = op.v + 1;
+      break;
+    case "objarr_entries_write":
+      for (const [i, it] of d.items.entries()) it.q = op.v + i;
+      break;
+    case "read_some_write": {
+      // a predicate that also writes — `some` short-circuits, so the write
+      // lands on a PREFIX of the array and the stopping index must agree too
+      let n = 0;
+      log.push(d.items.some((it) => {
+        n++;
+        it.q = op.v;
+        return it.id === op.i % 5;
+      }));
+      log.push(n);
+      break;
+    }
+    // ── whole-root replacement ──────────────────────────────────────
+    case "root_spread":
+      s.data = { ...d, a: op.v };
+      break;
   }
 }
 
@@ -197,4 +372,56 @@ export const KINDS = [
   "read_findIndex",
   "read_entries",
   "push_then_write_pushed",
+  "arr_set_length",
+  "arr_copy_within",
+  "deep_push",
+  "deep_set_idx",
+  "deep_replace_mid",
+  "read_deep",
+  "grid_inner_push",
+  "grid_push_row",
+  "grid_write_cell",
+  "read_grid_json",
+  "read_flat",
+  "set_numeric_key",
+  "set_shadow_key",
+  "set_undefined",
+  "set_null",
+  "set_nan",
+  "del_item_field",
+  "read_obj_spread",
+  "read_json_root",
+  "read_values",
+  "read_for_in",
+  "obj_assign",
+  "arr_splice_tail",
+  "arr_splice_head",
+  "arr_sort_default",
+  "arr_fill_object",
+  "read_to_sorted",
+  "read_to_reversed",
+  "read_at",
+  "read_find_last",
+  "read_array_from",
+  "root_spread",
+  "objarr_foreach_write",
+  "objarr_values_write",
+  "objarr_entries_write",
+  "read_some_write",
 ];
+
+/** Ops that leave ONE object reachable at TWO paths.
+ *
+ *  Legal for the sync/async differential — both sides see the same commit
+ *  boundaries, so the alias behaves identically. NOT legal for the transaction
+ *  differential, and the reason is a property of immutable state rather than a
+ *  bug in either: an alias does not survive a commit. Once a write-set is
+ *  finalized, two paths pointing at one frozen object are copied independently
+ *  the next time both are written, so `[X,X]` + `items[0].q=67; items[1].q=68`
+ *  ends `[68,68]` inside one commit and `[67,68]` across two. Every mode agrees
+ *  on that — two sync methods, a plain async method with an `await` between the
+ *  writes, and a transactional one with `s.$commit()` between them all give
+ *  `[67,68]`. `$commit`'s whole job is to MOVE a commit boundary, so with an
+ *  alias in play it legitimately changes the outcome, and "transaction is
+ *  observationally a no-op" cannot hold. */
+export const ALIAS_KINDS = ["arr_fill_object"];

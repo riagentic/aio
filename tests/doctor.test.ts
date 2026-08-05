@@ -23,8 +23,10 @@ async function withConfig<T>(
   }
 }
 
-const named = (checks: { name: string; ok: boolean }[], substr: string) =>
-  checks.find((c) => c.name.includes(substr));
+const named = (
+  checks: { name: string; ok: boolean; fix: string }[],
+  substr: string,
+) => checks.find((c) => c.name.includes(substr));
 
 const GOOD = {
   compilerOptions: { jsx: "react-jsx", jsxImportSource: "aio" },
@@ -118,6 +120,134 @@ Deno.test("doctor: vendored (relative) aio requires immer + @std/path", async ()
     assertEquals(named(checks, '"immer" in import map')!.ok, false);
     assertEquals(named(checks, '"@std/path" in import map')!.ok, false);
   });
+});
+
+// ── framework pin vs dep/aio (the source-layout link) ──
+//
+// doctor and `am pin` both report on "is dep/aio what the app pinned?", and
+// doctor restated the rule as "last path segment of the link === the raw pin
+// string". A local-dev pin (`aioVersion: "path:/abs/checkout"` — what
+// `am pin <path>` writes for framework co-development) therefore FAILED
+// forever on a correct setup, with `am fix` — which recreates that exact
+// link — offered as the fix. The same restatement passed a link that merely
+// ENDS with the pin's name while pointing outside the version store.
+
+/** A dep/aio-layout app with a pin and a `dep/aio` symlink. */
+async function pinnedApp(
+  pin: string,
+  linkTarget: string,
+): Promise<{ dir: string; cleanup: () => Promise<void> }> {
+  const dir = await Deno.makeTempDir();
+  await Deno.mkdir(`${dir}/dep`, { recursive: true });
+  await Deno.symlink(linkTarget, `${dir}/dep/aio`);
+  await Deno.writeTextFile(
+    `${dir}/deno.json`,
+    JSON.stringify({
+      aioVersion: pin,
+      compilerOptions: { jsx: "react-jsx", jsxImportSource: "aio" },
+      imports: {
+        "aio": "./dep/aio/mod.ts",
+        "aio/air": "./dep/aio/src/air.ts",
+        "aio/jsx-runtime": "./dep/aio/src/jsx-runtime.ts",
+        "immer": "npm:immer@^10",
+        "@std/path": "jsr:@std/path@^1",
+      },
+    }),
+  );
+  return { dir, cleanup: () => Deno.remove(dir, { recursive: true }) };
+}
+
+Deno.test("doctor: a local-dev path pin linked to its checkout is HEALTHY", async () => {
+  const checkout = await Deno.makeTempDir();
+  const app = await pinnedApp(`path:${checkout}`, checkout);
+  try {
+    const { checks, ok } = await runDoctor(app.dir);
+    const c = named(checks, "framework pin matches dep/aio")!;
+    assert(
+      c.ok,
+      `\`am pin <path>\` is a supported pin and dep/aio points exactly at it; ` +
+        `doctor reported: ${c.fix}`,
+    );
+    assert(ok, `doctor must not exit 1 on a correct path-pinned app`);
+  } finally {
+    await app.cleanup();
+    await Deno.remove(checkout, { recursive: true });
+  }
+});
+
+Deno.test("doctor: a path pin linked to a DIFFERENT checkout is drift", async () => {
+  const pinned = await Deno.makeTempDir();
+  const other = await Deno.makeTempDir();
+  const app = await pinnedApp(`path:${pinned}`, other);
+  try {
+    const { checks, ok } = await runDoctor(app.dir);
+    assertEquals(named(checks, "framework pin matches dep/aio")!.ok, false);
+    assertEquals(ok, false);
+  } finally {
+    await app.cleanup();
+    await Deno.remove(pinned, { recursive: true });
+    await Deno.remove(other, { recursive: true });
+  }
+});
+
+Deno.test("doctor: a version pin is satisfied only from the version store", async () => {
+  const store = await Deno.makeTempDir();
+  const tag = "v1.0.0-alpha42";
+  await Deno.mkdir(`${store}/${tag}`);
+  const prev = Deno.env.get("AIO_VERSIONS_DIR");
+  Deno.env.set("AIO_VERSIONS_DIR", store);
+  // A same-named directory ELSEWHERE is not the pinned version — doctor used
+  // to accept it because it compared basenames.
+  const impostorRoot = await Deno.makeTempDir();
+  await Deno.mkdir(`${impostorRoot}/${tag}`);
+  const good = await pinnedApp(tag, `${store}/${tag}`);
+  const bad = await pinnedApp(tag, `${impostorRoot}/${tag}`);
+  try {
+    assertEquals(
+      named((await runDoctor(good.dir)).checks, "framework pin matches")!.ok,
+      true,
+    );
+    assertEquals(
+      named((await runDoctor(bad.dir)).checks, "framework pin matches")!.ok,
+      false,
+      "a directory that merely shares the pin's NAME is not the pinned version",
+    );
+  } finally {
+    if (prev === undefined) Deno.env.delete("AIO_VERSIONS_DIR");
+    else Deno.env.set("AIO_VERSIONS_DIR", prev);
+    await good.cleanup();
+    await bad.cleanup();
+    await Deno.remove(store, { recursive: true });
+    await Deno.remove(impostorRoot, { recursive: true });
+  }
+});
+
+Deno.test("doctor: an unpinned dep/aio app is told to pin, once", async () => {
+  const dir = await Deno.makeTempDir();
+  try {
+    await Deno.writeTextFile(
+      `${dir}/deno.json`,
+      JSON.stringify({
+        compilerOptions: { jsx: "react-jsx", jsxImportSource: "aio" },
+        imports: {
+          "aio": "./dep/aio/mod.ts",
+          "aio/air": "./dep/aio/src/air.ts",
+          "aio/jsx-runtime": "./dep/aio/src/jsx-runtime.ts",
+          "immer": "npm:immer@^10",
+          "@std/path": "jsr:@std/path@^1",
+        },
+      }),
+    );
+    const { checks } = await runDoctor(dir);
+    assertEquals(
+      named(checks, "framework pin (deno.json aioVersion)")!.ok,
+      false,
+    );
+    // …and no link check, because there is no pin to compare a link against.
+    assertEquals(named(checks, "framework pin matches dep/aio"), undefined);
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
 });
 
 // ── aio version drift ──

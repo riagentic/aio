@@ -7,6 +7,9 @@
 /** Commit-style result kept for interface compatibility. */
 export type SkvCommit = { ok: true; versionstamp: string };
 
+/** One SQL statement — the shape `DB.transaction` takes. */
+export type SkvStmt = { sql: string; params?: unknown[] };
+
 /** Simple string-keyed get/set/del persistence interface. */
 export type SkvInstance = {
   /** Persist a value under a key (upsert). */
@@ -26,4 +29,16 @@ export type SkvInstance = {
   ) => Promise<SkvCommit>;
   /** Reconstruct an object from all rows under a prefix — null if none. */
   getMulti: <T>(prefix: string) => Promise<T | null>;
+  /** The statements `set` would run, for a caller that wants to commit this
+   *  row inside a LARGER transaction (the persistence manager commits the
+   *  state snapshot together with the `db:` tables, so a crash can never
+   *  leave the two describing different moments). Present only on a store
+   *  that lives in the app's own SQLite file. */
+  planSet?: (key: string, val: unknown) => SkvStmt[];
+  /** The statements `setMulti` would run. See `planSet`. */
+  planSetMulti?: (
+    prefix: string,
+    obj: Record<string, unknown>,
+    prevKeys?: string[],
+  ) => SkvStmt[];
 };

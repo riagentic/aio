@@ -5,15 +5,118 @@ import type { Log } from "../diagnostics/logger.ts";
 import { blocking } from "../state/blocking.ts";
 import {
   abortAllInflight,
+  DRAIN_TIMEOUT_MS,
   endShutdownAbort,
   settlePending,
 } from "../state/method-cancel.ts";
 
-/** How long Phase 1 waits, IN TOTAL, for aborted work to finish writing —
- *  in-flight cell calls and effect promises share this one budget. Long enough
- *  for an aborted fetch/subprocess to unwind, short enough that a method which
- *  ignores its signal cannot hold the window open. */
-const DRAIN_TIMEOUT_MS = 3000;
+/** How long everything AFTER the drain gets, IN TOTAL — persist, diagnostics,
+ *  the user's `onStop`, the lock, the server and the databases share this one
+ *  budget, exactly as the two waits in Phase 1 share theirs.
+ *
+ *  It exists because the drain's documented bound was decorative without it:
+ *  one `onStop` hook that never resolves, or one open streaming HTTP response
+ *  that `httpServer.shutdown()` waits on, and the app is a process that will
+ *  not die — Ctrl-C twice does nothing either, because the second SIGINT gets
+ *  the same memoised promise as the first.
+ *
+ *  5s, because that is the ceiling the SQLite writer's own close path already
+ *  uses for each of its waits (`db/async-db.ts`): a healthy teardown finishes
+ *  in milliseconds, and a sick one is never cut before the subsystem that IS
+ *  bounded has had its own full wait. Total shutdown is therefore bounded by
+ *  DRAIN + TEARDOWN, and every phase that runs out says so in the log. */
+const TEARDOWN_TIMEOUT_MS = 5000;
+
+/** Distinguishes "the phase timed out" from any value it could return. */
+const TIMED_OUT = Symbol("shutdown-phase-timeout");
+
+/** Run ONE shutdown phase.
+ *
+ *  THE single decider for what a misbehaving phase may cost. A phase can throw
+ *  and a phase can hang, and neither may stop the phases after it: releasing
+ *  the single-instance lock, closing the databases and marking the app stopped
+ *  all live at the END of the list, and their absence is invisible now and
+ *  fatal on the NEXT launch (a stale lock file makes the app refuse to start).
+ *  Both failures are reported — never swallowed, never silent. */
+async function phase(
+  log: Log,
+  name: string,
+  left: () => number,
+  fn: () => unknown,
+): Promise<void> {
+  let r: unknown;
+  try {
+    r = fn();
+  } catch (e) {
+    log.error(`shutdown: ${name} — ${e}`);
+    return;
+  }
+  if (!r || typeof (r as Promise<unknown>).then !== "function") return;
+  const p = r as Promise<unknown>;
+  // If the timer wins the race the rejection below has no other handler —
+  // attach one now so a late failure is never an unhandled rejection.
+  p.catch(() => {});
+  let t: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const out = await Promise.race([
+      p.then(() => undefined),
+      new Promise<typeof TIMED_OUT>((res) =>
+        t = setTimeout(() => res(TIMED_OUT), left())
+      ),
+    ]);
+    if (out === TIMED_OUT) {
+      log.warn(
+        `shutdown: ${name} did not finish inside the ${TEARDOWN_TIMEOUT_MS}ms ` +
+          `teardown budget — continuing without it (whatever it still had to ` +
+          `write or release is lost)`,
+      );
+    }
+  } catch (e) {
+    log.error(`shutdown: ${name} — ${e}`);
+  } finally {
+    if (t !== undefined) clearTimeout(t);
+  }
+}
+
+// ── Whose shutdown a process-wide exit has to wait for ──────────────────
+//
+// Two apps in ONE process is a supported shape (D2 — an app plus an admin
+// panel, an app plus a worker service; this file's own Phase 1 is scoped for
+// it), and every path that ends the process used to be written per-app:
+//
+//   Deno.addSignalListener(sig, () => shutdown().then(() => Deno.exit(0)))
+//
+// registered once by EACH app. On Ctrl-C both handlers start, and the FIRST
+// app to finish calls `Deno.exit(0)` — through the other app's Phase 2, while
+// it is still writing its final snapshot. The app that loses is the one with
+// more state to write, which is the one with more to lose: measured, a
+// second app with an 8 MB snapshot came back with NO stored state at all
+// after a plain SIGTERM, and the only trace was its "stopped" line never
+// being printed.
+//
+// Ending the process is a decision about the PROCESS. It belongs here, once,
+// and it waits for every app.
+
+/** Every runtime in this process. libraryMode apps register too: they install
+ *  no handler of their own, but if some other app in the process exits, they
+ *  are going down with it — flushing them first can only save data. */
+const _runtimes = new Set<() => Promise<void>>();
+
+/** Register an app's shutdown with the process. Returns the unregister fn. */
+export function registerRuntime(shutdown: () => Promise<void>): () => void {
+  _runtimes.add(shutdown);
+  return () => {
+    _runtimes.delete(shutdown);
+  };
+}
+
+/** Stop EVERY app in this process, then resolve. THE thing to await before
+ *  `Deno.exit` on any process-wide exit path (signal, `am stop`, the Electron
+ *  window closing). Each app's own `shutdown` is memoised and bounded, so
+ *  calling this from N signal listeners is one shutdown per app. */
+export function shutdownAllRuntimes(): Promise<void> {
+  return Promise.allSettled([..._runtimes].map((f) => f())).then(() => {});
+}
 
 /** Cleanup handles collected from various subsystems — uses getters for late-bound refs */
 export interface ShutdownRefs {
@@ -72,8 +175,12 @@ export function createShutdownOrchestrator(
     // persistence had already written and would never re-persist (shuttingDown
     // flag), silently losing them. Closing dispatch up front + draining ensures
     // the final persist captures the true final state.
-    refs.setShuttingDown();
-    refs.dispatch.close();
+    // Both gate steps are synchronous, so the budget below is never consulted —
+    // they go through `phase` for its OTHER guarantee: a throw here used to
+    // abandon the whole rest of the shutdown, lock and databases included.
+    const gate = () => DRAIN_TIMEOUT_MS;
+    await phase(log, "mark shutting down", gate, () => refs.setShuttingDown());
+    await phase(log, "close dispatch", gate, () => refs.dispatch.close());
     // Abort BEFORE draining. A streaming method (an SSE reply, a subprocess
     // pipe) has no reason of its own to stop, so an un-aborted drain either
     // waits minutes or — before dispatch let effect commits through — killed
@@ -111,111 +218,93 @@ export function createShutdownOrchestrator(
       endShutdownAbort(ourCells);
     }
 
+    // Phases 2-7 share ONE deadline, for the same reason Phase 1's two waits
+    // do: N independent budgets multiply into a bound nobody would accept, and
+    // the number that matters is how long the whole thing takes.
+    const tDeadline = Date.now() + TEARDOWN_TIMEOUT_MS;
+    const tLeft = () => Math.max(1, tDeadline - Date.now());
+
     // Phase 2: Persist — the final snapshot reflects all pre-shutdown actions.
-    try {
-      await refs.flushPersist();
-    } catch (e) {
-      log.error(`shutdown: persist — ${e}`);
-    }
+    await phase(log, "persist", tLeft, () => refs.flushPersist());
 
     // Phase 3: Diagnostics — flush action log, write final checkpoint
     if (refs.diagHooks) {
-      try {
-        await refs.diagHooks.onStop();
-      } catch (e) {
-        log.error(`shutdown: diagnostics — ${e}`);
-      }
+      await phase(log, "diagnostics", tLeft, () => refs.diagHooks!.onStop());
       if (refs.diagHooks.uninstallCrashHandler) {
-        refs.diagHooks.uninstallCrashHandler();
+        await phase(
+          log,
+          "crash handler",
+          tLeft,
+          () => refs.diagHooks!.uninstallCrashHandler!(),
+        );
       }
     }
 
     // Phase 4: Vitals cleanup
-    const vTimer = refs.getVitalsCheckTimer();
-    if (vTimer) clearInterval(vTimer);
-    const vSys = refs.getVitalsSystem();
-    if (vSys) vSys.destroy();
+    await phase(log, "vitals", tLeft, () => {
+      const vTimer = refs.getVitalsCheckTimer();
+      if (vTimer) clearInterval(vTimer);
+      refs.getVitalsSystem()?.destroy();
+    });
 
     // Phase 5: User hooks — await so logger.flush() (wired inside bridge onStop)
     // completes before we move on to releasing locks and closing subsystems (F-3).
+    // Arbitrary app code, so the budget is doing real work here: a hook that
+    // awaits something that never arrives used to be a process that never died.
     if (refs.onStop) {
-      try {
-        await refs.onStop();
-      } catch (e) {
-        log.error(`hook onStop: ${e}`);
-      }
+      await phase(log, "hook onStop", tLeft, () => refs.onStop!());
     }
 
     // Phase 6: Release single-instance lock
     if (refs.appLock) {
-      refs.appLock.release();
-      log.debug(`lock: released (PID ${Deno.pid})`);
+      await phase(log, "lock", tLeft, () => {
+        refs.appLock!.release();
+        log.debug(`lock: released (PID ${Deno.pid})`);
+      });
     }
 
     // Phase 7: Subsystem cleanup
-    refs.scheduleManager.cancelAll();
-    refs.ownManager.disposeAll();
+    await phase(
+      log,
+      "schedules",
+      tLeft,
+      () => refs.scheduleManager.cancelAll(),
+    );
+    await phase(
+      log,
+      "own processes",
+      tLeft,
+      () => refs.ownManager.disposeAll(),
+    );
     // `schedule.blocking`'s worker pool is part of the scheduler surface and
     // was the one piece nothing ever tore down: its idle threads outlived the
     // app in libraryMode, `testServer()` and any multi-app host. Idle-only,
     // because the pool is process-global (see blocking.disposeIdle).
-    try {
-      blocking.disposeIdle();
-    } catch (e) {
-      log.error(`shutdown: blocking pool — ${e}`);
-    }
+    await phase(log, "blocking pool", tLeft, () => blocking.disposeIdle());
     try {
       refs.getDiscoveryStop?.()?.();
     } catch { /* responder already gone */ }
 
     const ep = refs.getElectronProc();
     if (ep) {
-      try {
+      await phase(log, "electron", tLeft, () => {
         ep.kill();
         refs.clearElectronProc();
-      } catch (e) {
-        log.error(`shutdown: electron — ${e}`);
-      }
+      });
     }
 
-    refs.disposeUds();
+    await phase(log, "uds dispose", tLeft, () => refs.disposeUds());
     const udsH = refs.getUdsHandle();
-    if (udsH) {
-      try {
-        udsH.shutdown();
-      } catch (e) {
-        log.error(`shutdown: uds — ${e}`);
-      }
-    }
+    if (udsH) await phase(log, "uds", tLeft, () => udsH.shutdown());
 
     // Phase 7: Server + DB
-    try {
-      await refs.getServer().shutdown();
-    } catch (e) {
-      log.error(`shutdown: server — ${e}`);
-    }
-    try {
-      await refs.asyncDb?.close();
-    } catch (e) {
-      log.error(`shutdown: sqlite — ${e}`);
-    }
-    try {
-      refs.kvDb?.close();
-    } catch (e) {
-      log.error(`shutdown: kv — ${e}`);
-    }
-    try {
-      refs.sessionStore?.close();
-    } catch (e) {
-      log.error(`shutdown: sessions — ${e}`);
-    }
-    try {
-      refs.userStore?.close();
-    } catch (e) {
-      log.error(`shutdown: users — ${e}`);
-    }
+    await phase(log, "server", tLeft, () => refs.getServer().shutdown());
+    await phase(log, "sqlite", tLeft, () => refs.asyncDb?.close());
+    await phase(log, "kv", tLeft, () => refs.kvDb?.close());
+    await phase(log, "sessions", tLeft, () => refs.sessionStore?.close());
+    await phase(log, "users", tLeft, () => refs.userStore?.close());
 
-    refs.setRunning(false);
+    await phase(log, "mark stopped", tLeft, () => refs.setRunning(false));
   }
 
   function shutdown(): Promise<void> {

@@ -2,12 +2,15 @@
 // sync engine. Survives reloads (that's the whole point of the offline op
 // queue); one JSON document per cell keeps reads/writes atomic enough for
 // the engine's per-cell lock discipline.
+import { randomUuid } from "../rand.ts";
 import type { HLC, SyncOp } from "./types.ts";
 import type { OpBufferStorage } from "./op-buffer.ts";
 
 type CellDoc = {
   ops: SyncOp[];
   meta?: { lastHlc: HLC | null; lastServerTs?: number };
+  /** Which page load wrote `meta` — see the session note on `loadMeta`. */
+  metaSession?: string;
   snapshot?: { state: unknown; hlc: HLC; serverTs?: number };
 };
 
@@ -20,6 +23,16 @@ export function createLocalStorageOpStorage(
   prefix = "__aio_sync",
 ): OpBufferStorage {
   const key = (cell: string) => `${prefix}:${cell}`;
+  // This page load. The catch-up cursor may be exactly as durable as the state
+  // it describes — and the client's CONFIRMED state is not durable at all: the
+  // engine is handed a plain object that browser-sync re-seeds from the cell's
+  // initialState on every boot. A cursor that outlived it made the reloaded
+  // client tell the server "I'm caught up to T"; the server duly sent nothing,
+  // and the first op or ack after that rebased the UI onto an empty base — the
+  // user's data vanishing on a refresh. Ops still survive (the offline queue
+  // is the entire point of persisting here); the cursor is session-scoped, so
+  // a reload re-syncs from scratch.
+  const session = randomUuid();
   const read = (cell: string): CellDoc => {
     try {
       const raw = localStorage.getItem(key(cell));
@@ -76,10 +89,19 @@ export function createLocalStorageOpStorage(
     },
     countUnconfirmed: (cell) =>
       Promise.resolve(read(cell).ops.filter((o) => !o.confirmed).length),
-    loadMeta: (cell) => Promise.resolve(read(cell).meta),
+    loadMeta: (cell) => {
+      const doc = read(cell);
+      // A cursor from an earlier page load describes state this session does
+      // not have (see `session` above) — report "no cursor" and let the
+      // catch-up rebuild from a snapshot or the full log.
+      return Promise.resolve(
+        doc.metaSession === session ? doc.meta : undefined,
+      );
+    },
     saveMeta: (cell, data) => {
       const doc = read(cell);
-      doc.meta = { ...doc.meta, ...data };
+      doc.meta = { ...(doc.metaSession === session ? doc.meta : {}), ...data };
+      doc.metaSession = session;
       write(cell, doc);
       return Promise.resolve();
     },

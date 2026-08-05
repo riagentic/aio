@@ -53,45 +53,51 @@ Deno.test("aio26: __aio:ready has no else-if lastState fallback", () => {
   );
 });
 
-Deno.test("aio26: lastFullState replayed in __aio:ready handler", () => {
-  // Verify the correct pattern IS present: send lastFullState
-  // Use ipcMain.on to find the actual handler (not the preload script reference)
-  const readyIdx = script.indexOf("ipcMain.on('__aio:ready'");
+Deno.test("aio26: a reloading renderer is re-seeded with the last full state", () => {
+  // A new document has no base state, so the snapshot — never a queued delta —
+  // is what it must be handed. The replay used to live in the __aio:ready
+  // handler; it now seeds the delivery queue at `did-start-navigation`, which
+  // is the same guarantee expressed once (the queue is the only path to the
+  // renderer). tests/electron-main-relay.test.ts proves the behaviour.
+  const navIdx = script.indexOf("'did-start-navigation'");
+  assertEquals(navIdx > -1, true, "script must handle did-start-navigation");
+  const afterNav = script.slice(navIdx, navIdx + 700);
   assertEquals(
-    readyIdx > -1,
+    afterNav.includes("rendererReady = false") &&
+      afterNav.includes("_pending.push({ k: 'state', line: lastFullState })"),
     true,
-    "script must contain ipcMain.on __aio:ready handler",
+    "a main-frame navigation must re-seed the queue with the last snapshot",
   );
-  const afterReady = script.slice(readyIdx, readyIdx + 500);
-  const sendsFullState = afterReady.includes("lastFullState");
+  // And a stale DELTA must never survive into the new document.
   assertEquals(
-    sendsFullState,
+    afterNav.includes("pk === 'state' || pk === 'patches'") &&
+      afterNav.includes("_pending.splice(i, 1)"),
     true,
-    "__aio:ready must replay lastFullState to renderer",
+    "queued state/patches must be dropped for a fresh document",
   );
 });
 
-// ── AIO-26: lastState reset on reconnect ─────────────────────────
+// ── AIO-26: no per-connection residue leaks across a reconnect ────
 
-Deno.test("aio26: lastState reset to null on UDS reconnect", () => {
-  // On sock.connect, both lastFullState and lastState must be reset.
-  // Previously only lastFullState was reset — stale lastState leaked across connections.
+Deno.test("aio26: connection-scoped state is reset when the socket reconnects", () => {
   const connectIdx = script.indexOf("'connect'");
   assertEquals(connectIdx > -1, true, "script must contain connect handler");
 
   const afterConnect = script.slice(connectIdx, connectIdx + 300);
-  const resetsLastState = afterConnect.includes("lastState = null");
   assertEquals(
-    resetsLastState,
-    true,
-    "UDS reconnect must reset lastState to null (prevents stale state across connections)",
-  );
-
-  const resetsLastFullState = afterConnect.includes("lastFullState = null");
-  assertEquals(
-    resetsLastFullState,
+    afterConnect.includes("lastFullState = null"),
     true,
     "UDS reconnect must reset lastFullState to null",
+  );
+  // The read buffer is connection-scoped too: a server that died mid-frame
+  // leaves half a line, and carrying it over glued it onto the NEXT
+  // connection's first frame (the proto hello).
+  const fnIdx = script.indexOf("function connectUDS()");
+  assertEquals(fnIdx > -1, true, "script must define connectUDS");
+  assertEquals(
+    script.slice(fnIdx, connectIdx).includes("buf = ''"),
+    true,
+    "connectUDS must reset the read buffer before connecting",
   );
 });
 
@@ -122,16 +128,16 @@ Deno.test("aio26: full state detected by the DECODED v2 frame kind", () => {
   // Only "state" frames may become lastFullState — never "patches" deltas.
   assertEquals(
     script.includes("const kind = frameKind(line)") &&
-      script.includes(
-        "if (kind === 'state') { lastState = line; lastFullState = line; }",
-      ),
+      script.includes("if (kind === 'state') lastFullState = line;"),
     true,
     "Data handler must classify by the decoded frame kind",
   );
+  // The snapshot cache takes "state" frames ONLY — a "patches" delta is never
+  // a replayable base.
   assertEquals(
-    script.includes("else if (kind === 'patches') lastState = line"),
-    true,
-    '"patches" frames must be tracked as lastState only',
+    script.includes("if (kind === 'patches') lastFullState"),
+    false,
+    'a "patches" frame must never become the replayable snapshot',
   );
   // The class this replaced: classification by SUBSTRING. A frame whose
   // payload merely contains the text of another kind must not be misread.

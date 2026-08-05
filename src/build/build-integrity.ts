@@ -4,6 +4,7 @@
  * Protects against CDN compromise, MITM, DNS hijack during build.
  */
 import { join } from "@std/path";
+import { bundleFrameworkEntries } from "./esbuild-shared.ts";
 import type { BuildConfig } from "./build-config.ts";
 
 // ── Integrity verification ────────────────────────────────────────────────────
@@ -76,23 +77,32 @@ export async function verifyIntegrity(
 // deno-lint-ignore no-explicit-any
 export function makeHttpPlugin(cfg: BuildConfig): any {
   const base = cfg.frameworkBase.href;
-  const entry = cfg.doAndroid
-    ? (cfg.rendererMode === "aio" ? "standalone-air.ts" : "standalone.ts")
-    : (cfg.rendererMode === "aio" ? "browser-air.ts" : "browser.ts");
-  const entryUrl = new URL(entry, base).href;
+  // frameworkBase is `<pkg>/src/` (build-config derives it from this module's
+  // own URL); the shared entry table is PACKAGE-ROOT relative.
+  const pkgRoot = new URL("../", base).href;
+  const entries = bundleFrameworkEntries(cfg.doAndroid);
 
   return {
     name: "aio-http",
     // deno-lint-ignore no-explicit-any
     setup(build: any) {
-      // 'aio' → framework entry URL
+      // Every `aio*` specifier → the framework module the bundle needs, fetched
+      // from the package this build is running out of. `aio` alone was mapped
+      // here; `aio/air` and `aio/renderer` — both imported by the build's OWN
+      // generated entry — were not, and a JSR-pinned app's `jsr:` mappings are
+      // dropped from esbuild's alias, so nothing else could resolve them.
       build.onResolve(
-        { filter: /^aio$/ },
-        () => ({
-          path: entryUrl,
-          namespace: "http-url",
-          pluginData: { url: entryUrl },
-        }),
+        { filter: /^aio(\/|$)/ },
+        // deno-lint-ignore no-explicit-any
+        (args: any) => {
+          const rel = entries[args.path];
+          // An `aio/*` we do not publish: fall through to default resolution,
+          // which fails LOUDLY naming the specifier, rather than fetching a
+          // URL that does not exist.
+          if (rel === undefined) return undefined;
+          const url = new URL(rel, pkgRoot).href;
+          return { path: url, namespace: "http-url", pluginData: { url } };
+        },
       );
       // Relative imports inside http-url files
       build.onResolve(
@@ -119,6 +129,13 @@ export function makeHttpPlugin(cfg: BuildConfig): any {
           return {
             contents,
             loader: "ts",
+            // The framework's own bare npm deps (immer) live on the FILESYSTEM,
+            // in the app's node_modules — deno materializes them there for a
+            // JSR package's transitive deps. Without a resolveDir esbuild
+            // refuses to search the filesystem for a plugin-loaded file at all
+            // ("the plugin didn't set a resolve directory"), so every `import
+            // { produce } from "immer"` inside the fetched framework failed.
+            resolveDir: cfg.root,
             pluginData: { url: args.path },
           };
         },

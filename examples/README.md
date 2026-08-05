@@ -46,7 +46,7 @@ stays honest:
 
 | Target                    | Dir                | Interface                                 |
 | ------------------------- | ------------------ | ----------------------------------------- |
-| `compile:browser`         | `browser/`         | server + React UI                         |
+| `compile:browser`         | `browser/`         | server + AIR UI (JSX, no React)           |
 | `compile:browser:remote`  | `browser-remote/`  | exposed server (`dev:expose`)             |
 | `compile:electron`        | `electron/`        | desktop window + embedded server          |
 | `compile:electron:remote` | `electron-remote/` | thin client, connect page                 |

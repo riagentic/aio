@@ -98,7 +98,12 @@ describe("persistOp + loadOpsSince", () => {
 
       const ops = await loadOpsSince(db, "todos", null);
       assertEquals(ops.length, 1);
-      assertEquals(ops[0], {
+      // `serverTs` — the op's POSITION in the server's apply order — rides
+      // along: the client folds a catch-up batch in that order (see
+      // sync-engine's ordered fold), so a loader that dropped it would leave
+      // the client replaying the batch in an order the server never used.
+      const { serverTs, ...rest } = ops[0]!;
+      assertEquals(rest, {
         id: "op-1",
         cell: "todos",
         action: "add",
@@ -106,6 +111,10 @@ describe("persistOp + loadOpsSince", () => {
         hlc: [1000, 2, "client-a"],
         confirmed: true,
       });
+      assert(
+        typeof serverTs === "number" && serverTs > 0,
+        "a loaded op must know where it sits in the log",
+      );
     }));
 
   it("is idempotent: re-persisting the same id keeps the original row", () =>

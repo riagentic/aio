@@ -18,6 +18,8 @@ import {
 import { formatText, printConsole } from "./logger-format.ts";
 import { type LogKind, rotateOnStart, wipeOnStart } from "./logger-rotate.ts";
 import { observeAction } from "./logger-observe.ts";
+import { noRedaction } from "./redact.ts";
+import type { Redactor } from "./redact.ts";
 import { logPerf, logVitals, logVitalsSummary } from "./logger-vitals.ts";
 /** Structured file logger — routes entries to app.log, debug.log, error.log, warning.log, and perf.log. */
 export class AioLogger {
@@ -29,12 +31,20 @@ export class AioLogger {
     return this.dir;
   }
   private appName: string;
+  /** The app's `redactActions`, as the shared predicate. debug.log retains
+   *  action payloads on disk, so it obeys the SAME list as the journal, the
+   *  timeline, the action log and the checkpoint — it is not a public
+   *  `LogConfig` field because it is not the logger's list to own: it is the
+   *  app's, handed over at boot by `initLogger`. */
+  private redact: Redactor;
 
   private lastStatus = new Map<string, string>(); // cell name → last status
   private stats = { dispatched: 0, errors: 0, start: Date.now() };
   private heartbeatTimer?: ReturnType<typeof setInterval>;
   private ready = false;
-  constructor(config: LogConfig & { appName?: string }) {
+  constructor(
+    config: LogConfig & { appName?: string; redact?: Redactor },
+  ) {
     this.cfg = {
       level: config.level ?? "info",
       dir: config.dir ?? DEFAULT_LOG_DIR,
@@ -46,6 +56,7 @@ export class AioLogger {
     };
     this.dir = this.cfg.dir;
     this.appName = config.appName ?? "app";
+    this.redact = config.redact ?? noRedaction;
   }
 
   async init(): Promise<void> {
@@ -95,6 +106,7 @@ export class AioLogger {
         suppressTypes: this.cfg.suppressTypes,
         stats: this.stats,
         lastStatus: this.lastStatus,
+        redact: this.redact,
         emit: this.emit.bind(this),
       },
       action,
@@ -194,9 +206,14 @@ export class AioLogger {
       ...(data ? { data } : {}),
       ...(dur !== undefined ? { dur } : {}),
     };
-    if (LEVELS[this.cfg.level] <= LEVELS[lvl]) {
-      this.write(this.path("debug"), e);
-    }
+    // ONE gate, every sink. `level` gated debug.log ALONE, so an app that
+    // asked for `level: "warn"` still had every info line printed to the
+    // console and appended to app.log — a setting that visibly did nothing,
+    // which is worse than not offering it. The docs describe it as the log
+    // level (docs/debugging/errors.md), so that is what it is. At the default
+    // ("info") nothing changes: debug/trace never reached app.log anyway.
+    if (LEVELS[lvl] < LEVELS[this.cfg.level]) return;
+    this.write(this.path("debug"), e);
     if (lvl === "info" || lvl === "warn" || lvl === "error") {
       this.write(this.path("app"), e);
       if (this.cfg.console) printConsole(e);
@@ -270,7 +287,7 @@ export class AioLogger {
         append: true,
       }).then(
         () => {
-          this._writeErrors = 0;
+          this._noteWriteSuccess();
         },
         async (e) => {
           // The log directory vanished under a running app: someone cleaned up
@@ -285,14 +302,11 @@ export class AioLogger {
               await Deno.writeTextFile(path, lines.join("\n") + "\n", {
                 append: true,
               });
-              this._writeErrors = 0;
+              this._noteWriteSuccess();
               return;
             } catch { /* still unwritable — fall through and report */ }
           }
-          if (this._writeErrors < 3) {
-            this._writeErrors++;
-            console.error(`[logger] write failed for ${path}: ${e}`);
-          }
+          this._noteWriteFailure(path, lines.length, e);
         },
       ).finally(() => {
         this._pending.delete(p);
@@ -301,7 +315,59 @@ export class AioLogger {
     }
   }
 
-  /** Flush buffered lines + drain in-flight writes. Safe to call repeatedly. */
+  // Consecutive failed writes, and how many LINES they took with them. A
+  // failed batch is already out of `_buffers` (it was taken before the write),
+  // so those lines are gone — the only honest thing left is to say so.
+  private _writeErrorsSuppressed = 0;
+  private _linesLost = 0;
+  private static readonly REPORT_FIRST = 3; // then every REPORT_EVERY
+  private static readonly REPORT_EVERY = 100;
+
+  /** A batch never reached disk. Reports the first few, then periodically —
+   *  never NOTHING. It used to stop after three console lines and stay silent
+   *  for the life of the process: a full disk or a revoked permission meant the
+   *  app's entire log went to nowhere, while the app looked perfectly healthy
+   *  and nothing anywhere said the record had stopped. Rate-limited (a broken
+   *  sink fails on every flush), never off. */
+  private _noteWriteFailure(path: string, lines: number, e: unknown): void {
+    this._writeErrors++;
+    this._linesLost += lines;
+    const n = this._writeErrors;
+    if (
+      n <= AioLogger.REPORT_FIRST || n % AioLogger.REPORT_EVERY === 0
+    ) {
+      console.error(
+        `[logger] write failed for ${path}: ${e} — ${n} consecutive failure(s), ` +
+          `${this._linesLost} log line(s) lost (reported every ${AioLogger.REPORT_EVERY} after the first ${AioLogger.REPORT_FIRST})`,
+      );
+    } else {
+      this._writeErrorsSuppressed++;
+    }
+  }
+
+  /** A write landed. If the sink had been failing, say that it recovered and
+   *  what the outage cost — otherwise the suppressed failures would be the
+   *  last word on a log nobody knew had holes in it. */
+  private _noteWriteSuccess(): void {
+    if (this._writeErrors > 0) {
+      console.error(
+        `[logger] file logging recovered after ${this._writeErrors} failed ` +
+          `write(s) (${this._writeErrorsSuppressed} report(s) suppressed) — ` +
+          `${this._linesLost} log line(s) were lost and cannot be recovered`,
+      );
+    }
+    this._writeErrors = 0;
+    this._writeErrorsSuppressed = 0;
+    this._linesLost = 0;
+  }
+
+  /** Flush buffered lines + drain in-flight writes. Safe to call repeatedly.
+   *
+   *  The timeout bounds shutdown (the caller's phase budget is finite), but it
+   *  used to win SILENTLY: the last lines of a slow or wedged filesystem — the
+   *  crash report, the "stopped" line — simply were not there, and the log gave
+   *  no hint that anything was missing. A deadline that is allowed to lose data
+   *  has to announce it. */
   async flush(timeoutMs = 500): Promise<void> {
     // Surface trailing "repeated N times" summaries before the final write
     for (const [path, last] of this._lastLine) {
@@ -315,7 +381,22 @@ export class AioLogger {
     this._flushBuffers();
     if (this._pending.size === 0) return;
     const snapshot = [...this._pending];
-    const timeout = new Promise<void>((r) => setTimeout(r, timeoutMs));
-    await Promise.race([Promise.allSettled(snapshot), timeout]);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const TIMED_OUT = Symbol("logger-flush-timeout");
+    const timeout = new Promise<typeof TIMED_OUT>((r) => {
+      timer = setTimeout(() => r(TIMED_OUT), timeoutMs);
+    });
+    const outcome = await Promise.race([
+      Promise.allSettled(snapshot).then(() => undefined),
+      timeout,
+    ]);
+    if (timer !== undefined) clearTimeout(timer);
+    if (outcome === TIMED_OUT) {
+      console.error(
+        `[logger] flush timed out after ${timeoutMs}ms with ${snapshot.length} ` +
+          `write(s) still in flight — the tail of ${this.dir} may be missing ` +
+          `(the log files are the record; this is what is NOT in them)`,
+      );
+    }
   }
 }

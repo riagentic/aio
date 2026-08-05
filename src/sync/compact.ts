@@ -2,6 +2,7 @@
 import type { DB } from "../db/types.ts";
 import type { HLC } from "./types.ts";
 import { SYNC_DEFAULTS } from "./types.ts";
+import { issueSnapshotTs } from "./server-store.ts";
 
 /**
  * Dependencies for server-side op-log compaction.
@@ -41,20 +42,28 @@ export async function compactSyncOps(deps: CompactDeps): Promise<void> {
   const opCount = rows[0]?.count ?? 0;
   if (opCount < threshold) return;
 
-  // Freeze HLC at the moment of state capture — ensures DELETE boundary
-  // matches the state snapshot exactly (no ops arrive between capture and delete)
+  // The compaction boundary — ONE value, and every question about this
+  // snapshot is answered with it: what the snapshot contains, what the DELETE
+  // removes, and which client cursors can still be served from the log.
+  //
+  // It is a position on the `server_ts` sequence, issued here. Persist and
+  // dispatch happen under the same per-cell lock this compaction holds, so
+  // every op already applied — i.e. everything the snapshot below contains —
+  // sits strictly below it, and every op persisted afterwards strictly above.
+  //
+  // The boundary used to be the server's HLC, and that disagreed with what the
+  // snapshot contained: `HLClock.receive` deliberately refuses to follow a
+  // remote clock more than `maxDrift` ahead (one bad clock must not hijack
+  // causal order), so an op from a fast-clocked client is APPLIED — and
+  // therefore inside the snapshot — while sitting above the HLC mark, which
+  // left its row in the log. Boot replay is snapshot + surviving ops, so that
+  // op applied twice… and the next compaction snapshotted the doubled state
+  // while the row again survived, so it compounded on every restart.
+  const compactedTs = await issueSnapshotTs(deps.db);
+  // The HLC is no longer a boundary — it is the low-water mark published to
+  // clients (the legacy snapshot-vs-incremental check) and the snapshot's own
+  // stamp. Frozen here, at the moment of state capture.
   const [hlcPhys, hlcCnt, hlcNode] = deps.serverHlc;
-  // The highest server_ts this compaction is about to DELETE. It is the point
-  // below which a server_ts cursor can no longer be served incrementally: the
-  // rows are gone, so a client whose cursor sits under it would be told
-  // "nothing new" forever while its confirmed state silently diverged.
-  // Computed BEFORE the delete, inside the same per-cell lock the caller holds.
-  const { rows: maxRows } = await deps.db.query<{ max_ts: number | null }>(
-    `SELECT MAX(server_ts) as max_ts FROM sync_ops
-      WHERE cell = ? AND (hlc_phys < ? OR (hlc_phys = ? AND hlc_cnt <= ?))`,
-    [deps.cell, hlcPhys, hlcPhys, hlcCnt],
-  );
-  const compactedTs = maxRows[0]?.max_ts ?? 0;
   const state = deps.getState();
   const stateJson = JSON.stringify(state);
   const now = Date.now();
@@ -63,10 +72,17 @@ export async function compactSyncOps(deps: CompactDeps): Promise<void> {
     {
       // Tombstone the ids the DELETE below removes — op-id dedup (persistOp)
       // must survive compaction, or a resend after a lost ack double-applies.
-      sql: `INSERT OR IGNORE INTO sync_compacted_ids (id, compacted_at)
-            SELECT id, ? FROM sync_ops
-            WHERE cell = ? AND (hlc_phys < ? OR (hlc_phys = ? AND hlc_cnt <= ?))`,
-      params: [now, deps.cell, hlcPhys, hlcPhys, hlcCnt],
+      // The op's `server_ts` is carried over with it: a re-ack for a resent op
+      // has to state the op's cursor position, and after this DELETE the
+      // tombstone is the only place that still knows it (see
+      // `getOpServerTs`). Without it the re-ack goes out bare and the client
+      // cannot tell whether the snapshot it just installed already contains
+      // the op — it applies it a second time.
+      sql:
+        `INSERT OR IGNORE INTO sync_compacted_ids (id, compacted_at, server_ts)
+            SELECT id, ?, server_ts FROM sync_ops
+            WHERE cell = ? AND server_ts <= ?`,
+      params: [now, deps.cell, compactedTs],
     },
     {
       sql:
@@ -78,10 +94,9 @@ export async function compactSyncOps(deps: CompactDeps): Promise<void> {
       params: [deps.cell, deps.cell, stateJson, hlcPhys, hlcCnt, hlcNode],
     },
     {
-      // Use <= for counter to include ops AT the snapshot boundary (already in snapshot)
-      sql:
-        `DELETE FROM sync_ops WHERE cell = ? AND (hlc_phys < ? OR (hlc_phys = ? AND hlc_cnt <= ?))`,
-      params: [deps.cell, hlcPhys, hlcPhys, hlcCnt],
+      // Everything below the boundary is inside the snapshot above.
+      sql: `DELETE FROM sync_ops WHERE cell = ? AND server_ts <= ?`,
+      params: [deps.cell, compactedTs],
     },
     {
       // Bound the tombstone table (see COMPACTED_ID_RETENTION_MS).
@@ -135,7 +150,8 @@ export const SYNC_SCHEMA: string[] = [
     last_compact INTEGER NOT NULL, op_count INTEGER NOT NULL,
     compacted_ts INTEGER NOT NULL DEFAULT 0)`,
   `CREATE TABLE IF NOT EXISTS sync_compacted_ids (
-    id TEXT PRIMARY KEY, compacted_at INTEGER NOT NULL)`,
+    id TEXT PRIMARY KEY, compacted_at INTEGER NOT NULL,
+    server_ts INTEGER NOT NULL DEFAULT 0)`,
   `CREATE INDEX IF NOT EXISTS idx_sync_compacted_at
     ON sync_compacted_ids(compacted_at)`,
 ];
@@ -148,6 +164,10 @@ export const SYNC_SCHEMA: string[] = [
  *  column" once it has been applied — see `applySyncMigrations`. */
 export const SYNC_MIGRATIONS: string[] = [
   `ALTER TABLE sync_meta ADD COLUMN compacted_ts INTEGER NOT NULL DEFAULT 0`,
+  // 0 = "this tombstone predates the column": an unknown position, which
+  // `getOpServerTs` reports as unknown rather than guessing (a wrong cursor on
+  // an ack is worse than no cursor).
+  `ALTER TABLE sync_compacted_ids ADD COLUMN server_ts INTEGER NOT NULL DEFAULT 0`,
 ];
 
 /** Apply {@linkcode SYNC_MIGRATIONS}, tolerating the already-applied case.

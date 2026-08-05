@@ -215,7 +215,16 @@ Deno.test("trojan gate: a wrong credential is refused and named as stale", async
     armLocalControl({ appId });
     const real = readControlKey(appId).key!;
 
-    for (const bogus of ["", "x", real.slice(0, -1) + "0", real + "0"]) {
+    // The near-miss must be built by CHANGING the last character, never by
+    // substituting a fixed one: the key is hex, so `real.slice(0, -1) + "0"`
+    // reconstructs the REAL key whenever it already ends in "0" — one run in
+    // sixteen, where this test then failed claiming a correct credential had
+    // been accepted. A security assertion that is wrong 6% of the time reads
+    // as flakiness and gets ignored, which is worse than not having it.
+    const lastChar = real.slice(-1);
+    const nearMiss = real.slice(0, -1) + (lastChar === "0" ? "1" : "0");
+    assert(nearMiss !== real, "the near-miss fixture must differ from the key");
+    for (const bogus of ["", "x", nearMiss, real + "0"]) {
       const denial = trojanDenialForUserMode(
         "/__aio/trojan/state",
         undefined,

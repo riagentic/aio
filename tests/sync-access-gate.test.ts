@@ -167,7 +167,7 @@ Deno.test("sync pending op: a denied op is REPORTED, not silently dropped", asyn
 });
 
 Deno.test("sync pending op: a validate-rejected op is deleted, not broadcast or acked", async () => {
-  const { setLastRejection } = await import(
+  const { recordRejection } = await import(
     "../src/state/rejection-tracker.ts"
   );
   const db = createTestDb();
@@ -176,7 +176,7 @@ Deno.test("sync pending op: a validate-rejected op is deleted, not broadcast or 
   const handler = createServerSyncHandler({
     // The validate hook refuses this op — exactly what the reducer records.
     dispatch: (a) =>
-      setLastRejection({
+      recordRejection(a, {
         cell: String(a.type).split(":")[0]!,
         reason: "validate: quantity must be positive",
       }),

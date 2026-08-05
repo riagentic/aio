@@ -1,6 +1,8 @@
-// Patch compaction — deduplicates redundant Immer ops before wire send.
-// Only collapses "replace" ops on identical paths (last-write-wins).
-// "add"/"remove" ops are never collapsed — order and count matter for arrays.
+// Patch compaction — drops Immer ops a later whole-value `replace` overwrites,
+// before wire send. That covers same-path last-write-wins AND any op under a
+// path replaced wholesale further down the list (see compactPatches: the second
+// half is correctness, not thrift — without it the emitted list could fail to
+// apply on the client at all).
 import type { Patch } from "immer";
 
 /** Resolve `path` in `root`, or undefined if any hop is missing. */
@@ -222,39 +224,123 @@ function pathKey(path: (string | number)[]): string {
 }
 
 /**
- * Compact an array of Immer patches by collapsing redundant same-path
- * "replace" operations to last-write-wins. Non-replace ops pass through
- * unchanged. Cross-path ordering is preserved.
+ * Compact an array of Immer patches: drop every op whose effect a LATER
+ * whole-value `replace` overwrites. Cross-path ordering is preserved.
+ *
+ * The rule is one sentence — an op is redundant iff some later op replaces the
+ * path it writes to, or any ANCESTOR of that path — and both halves are
+ * load-bearing:
+ *
+ *   • same path: classic last-write-wins for repeated `replace`s;
+ *   • ancestor: `replace ["items"]` later in the list supersedes an earlier
+ *     `add ["items", 0]`, `remove ["items", 2]` or `replace ["items",0,"tag"]`,
+ *     because the whole array is about to be overwritten.
+ *
+ * The ancestor half is not an optimization, it is CORRECTNESS. This function
+ * used to drop only same-path replaces and pass everything else through, which
+ * could emit a patch list that does not apply at all: coalescing three
+ * dispatches (`s.items = […]`, `s.items[0].tag = 7`, `s.items = […]` — ordinary
+ * app code, and the broadcast is throttled so they travel as ONE frame)
+ * produced `replace items` / `replace items[0].tag` / `replace items`. Dropping
+ * the first replace left the middle op pointing into an array the client's base
+ * did not have, so Immer threw "Cannot apply patch, path doesn't resolve", the
+ * client discarded the entire frame and had to be resynced with a full state.
+ * Found by tests/wire-patch-differential.test.ts.
+ *
+ * Note the direction: only ops BEFORE the replace are dropped. An op after it
+ * writes into the value the replace just installed and is never redundant.
+ *
+ * POSITION is the other half of the rule, and it is correctness too. `add` and
+ * `remove` do not merely write a slot, they RENUMBER every sibling after it. So
+ * two things a purely path-based supersede got wrong, both silently:
+ *
+ *   • a later `replace` at the SAME path never cancels an `add`/`remove` at
+ *     that path — it overwrites one slot and leaves the shift undone. Dropping
+ *     the `remove` from `remove items[0]` + `replace items[0]` yields a list
+ *     that applies CLEANLY to an array one element too long;
+ *   • an `add`/`remove` sitting BETWEEN an op and the replace meant to
+ *     supersede it moves the path the replace lands on, so the replace no
+ *     longer overwrites what that op wrote.
+ *
+ * Both are reachable from ordinary app code, because the broadcast is throttled
+ * and coalesces several dispatches into one frame: `s.items = s.items.filter(…)`
+ * (narrowed to a `remove`) followed by `s.items[0] = x` (a `replace`) is all it
+ * takes. Neither side notices — the client just keeps the deleted row.
  *
  * Returns a new array (never mutates input).
  */
 export function compactPatches(ops: Patch[]): Patch[] {
   if (ops.length <= 1) return ops;
 
-  // Find last index of each replace-path — O(n)
+  // Last index at which each path is replaced wholesale — O(n).
   const lastReplace = new Map<string, number>();
   for (let i = 0; i < ops.length; i++) {
     const p = ops[i]!;
-    if (p.op === "replace") {
-      lastReplace.set(pathKey(p.path), i);
+    if (p.op === "replace") lastReplace.set(pathKey(p.path), i);
+  }
+
+  // No replace ops at all — nothing can be superseded.
+  if (lastReplace.size === 0) return ops;
+
+  // Index-shifting ops, ascending. Each renumbers the SIBLINGS of its own path,
+  // i.e. the children of `parent`, from `parentLen` deep.
+  const shifts: { at: number; parent: string; parentLen: number }[] = [];
+  for (let i = 0; i < ops.length; i++) {
+    const p = ops[i]!;
+    if (p.op === "add" || p.op === "remove") {
+      shifts.push({
+        at: i,
+        parent: pathKey(p.path.slice(0, -1) as (string | number)[]),
+        parentLen: p.path.length - 1,
+      });
     }
   }
 
-  // No replace ops at all — nothing to compact
-  if (lastReplace.size === 0) return ops;
+  /** Is `path` renumbered by anything strictly between ops `i` and `j`, so the
+   *  replace at `j` no longer lands where the op at `i` wrote? A shift INSIDE
+   *  `path` does not count — that subtree is about to be overwritten wholesale;
+   *  only a shift in an array `path` indexes THROUGH moves `path` itself. */
+  const movedBetween = (
+    i: number,
+    j: number,
+    path: readonly (string | number)[],
+  ): boolean => {
+    for (const s of shifts) {
+      if (s.at <= i) continue;
+      if (s.at >= j) break;
+      if (s.parentLen >= path.length) continue;
+      if (typeof path[s.parentLen] !== "number") continue;
+      if (
+        pathKey(path.slice(0, s.parentLen) as (string | number)[]) === s.parent
+      ) {
+        return true;
+      }
+    }
+    return false;
+  };
 
-  // Forward pass: keep non-replace ops always, keep replace only if it's the last for its path
+  /** Is op `i` overwritten by a later replace at its path or an ancestor? */
+  const superseded = (i: number, p: Patch): boolean => {
+    const path = p.path as (string | number)[];
+    // Same path — last-write-wins, but only between POSITIONAL ops. An
+    // `add`/`remove` here is a shift the later replace does not undo.
+    if (p.op === "replace") {
+      const at = lastReplace.get(pathKey(path));
+      if (at !== undefined && at > i && !movedBetween(i, at, path)) return true;
+    }
+    // Strict ancestor — the whole value above this op is replaced later.
+    for (let n = path.length - 1; n >= 0; n--) {
+      const anc = path.slice(0, n);
+      const at = lastReplace.get(pathKey(anc));
+      if (at !== undefined && at > i && !movedBetween(i, at, anc)) return true;
+    }
+    return false;
+  };
+
   const result: Patch[] = [];
   for (let i = 0; i < ops.length; i++) {
     const p = ops[i]!;
-    if (p.op !== "replace") {
-      result.push(p);
-      continue;
-    }
-    // Only keep the last replace for this path
-    if (lastReplace.get(pathKey(p.path)) === i) {
-      result.push(p);
-    }
+    if (!superseded(i, p)) result.push(p);
   }
 
   return result;

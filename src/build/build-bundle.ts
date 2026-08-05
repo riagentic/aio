@@ -3,7 +3,7 @@
  * Build bundle — esbuild bundling step, freshness cache check, asset copying.
  */
 import { dirname, join, relative, resolve } from "@std/path";
-import { ESBUILD_JSX } from "./esbuild-shared.ts";
+import { bundleFrameworkEntries, ESBUILD_JSX } from "./esbuild-shared.ts";
 import { aioBrowserPlugin } from "./esbuild-plugin.ts";
 import { makeHttpPlugin } from "./build-integrity.ts";
 import type { BuildConfig } from "./build-config.ts";
@@ -22,12 +22,31 @@ function inputsManifestPath(root: string): string {
 }
 
 interface BundleInputs {
-  v: 1;
+  v: 2;
   /** The artifact these inputs produced — a record for another out path says
    *  nothing about this one. */
   out: string;
+  /** THE app-dir decider's answer for the app this bundle was built FROM
+   *  (`BuildConfig.appDir`) — a record for another app says nothing about this
+   *  one either.
+   *
+   *  EVERY target bundles to the same `dist/app.js`, so `out` alone cannot tell
+   *  two apps apart. One repo CAN hold two: `"targets": { "server": { "entry":
+   *  "src/relay/app.ts" }, "browser": { "entry": "src/app.ts" } }` is a
+   *  documented, supported layout (see TargetOverride.entry). Without this
+   *  field, the relay's build read the browser app's input record, found every
+   *  path older than `dist/app.js`, printed "cached — use --force" and shipped
+   *  the OTHER app's UI: same version stamp, same shape stamp, exit 0. The
+   *  headless path is worse still — it never rebuilds, so `embedVerdict` saw
+   *  `fresh: true` and embedded the wrong app's bundle verbatim. */
+  app: string;
   inputs: string[];
 }
+
+/** The record version. Bumped when the record's KEY changes: an older record
+ *  cannot say which app it belongs to, so it must not be trusted — a missing
+ *  record means "rebuild", which is always safe. */
+const BUNDLE_INPUTS_V = 2;
 
 /** Persist esbuild's input set (absolute paths) next to the build state.
  *
@@ -45,6 +64,7 @@ interface BundleInputs {
 async function writeBundleInputs(
   root: string,
   out: string,
+  app: string,
   metafileInputs: Record<string, unknown> | undefined,
 ): Promise<void> {
   const inputs: string[] = [];
@@ -55,7 +75,12 @@ async function writeBundleInputs(
       if ((await Deno.stat(abs)).isFile) inputs.push(abs);
     } catch { /* virtual/namespaced/remote input — nothing to stat */ }
   }
-  const rec: BundleInputs = { v: 1, out, inputs: [...new Set(inputs)].sort() };
+  const rec: BundleInputs = {
+    v: BUNDLE_INPUTS_V,
+    out,
+    app,
+    inputs: [...new Set(inputs)].sort(),
+  };
   const path = inputsManifestPath(root);
   try {
     await Deno.mkdir(dirname(path), { recursive: true });
@@ -71,16 +96,22 @@ async function writeBundleInputs(
   }
 }
 
-/** The recorded input set for `out`, or null when there is no usable record. */
+/** The recorded input set for `out` AS BUILT FROM `app`, or null when there is
+ *  no usable record. Both halves of the key must match: the record describes
+ *  one artifact built from one app, and anything else is a rebuild. */
 async function readBundleInputs(
   root: string,
   out: string,
+  app: string,
 ): Promise<string[] | null> {
   try {
     const rec = JSON.parse(
       await Deno.readTextFile(inputsManifestPath(root)),
     ) as BundleInputs;
-    if (rec?.v !== 1 || rec.out !== out || !Array.isArray(rec.inputs)) {
+    if (
+      rec?.v !== BUNDLE_INPUTS_V || rec.out !== out || rec.app !== app ||
+      !Array.isArray(rec.inputs)
+    ) {
       return null;
     }
     return rec.inputs;
@@ -94,7 +125,7 @@ async function readBundleInputs(
  *  No record → NOT fresh. A guess about what the bundle depends on is what
  *  shipped stale code; the absence of the honest answer means rebuild. */
 export async function isBundleFresh(cfg: BuildConfig): Promise<boolean> {
-  const { out, doForce, doAndroid, root } = cfg;
+  const { out, doForce, doAndroid, root, appDir } = cfg;
   if (doForce) return false;
   // Framework identity + target shape beat every mtime heuristic: a bundle
   // built by another aio version — or for the OTHER target, since all targets
@@ -111,7 +142,7 @@ export async function isBundleFresh(cfg: BuildConfig): Promise<boolean> {
     const dj = await Deno.stat(join(root, "deno.json"));
     if (dj.mtime && dj.mtime.getTime() >= outMtime) return false;
 
-    const inputs = await readBundleInputs(root, out);
+    const inputs = await readBundleInputs(root, out, appDir);
     if (!inputs || inputs.length === 0) return false;
     for (const path of inputs) {
       // A DELETED input is a change too — stat throws, the catch below turns
@@ -280,7 +311,11 @@ export function embedVerdict(opts: {
     ? `was built by aio ${stamps.version ?? "(unstamped)"} — this build is ` +
       version
     : !opts.fresh
-    ? "is older than the sources it was built from"
+    // Both halves of the freshness key, named: `dist/app.js` is shared by
+    // every target AND by every app in the repo, so "not fresh" means either
+    // its own sources moved under it or it belongs to a different app.
+    ? "is not the current bundle for this app (its sources changed, or it " +
+      "was built from another app in this repo)"
     : null;
   if (why === null) return { action: "embed" };
   if (!opts.canRebuild) {
@@ -393,20 +428,21 @@ export async function runBundle(
     } catch { /* no dist — skip */ }
     await Deno.mkdir(dist, { recursive: true });
 
-    // Build import map for esbuild
-    const fwEntry = doAndroid ? "standalone-air.ts" : "browser-air.ts";
-    const aioEntry = isRemote ? null : join(frameworkSrcDir, fwEntry);
+    // Build import map for esbuild. THE `aio*` table (bundleFrameworkEntries)
+    // is package-root relative; frameworkSrcDir is `<pkg>/src`. A remote (JSR)
+    // framework has no local files at all — makeHttpPlugin applies the SAME
+    // table against the fetched package instead.
     const aioImports = frameworkSrcDir
-      ? {
-        "aio/jsx-runtime": join(frameworkSrcDir, "jsx-runtime.ts"),
-        "aio/renderer": join(frameworkSrcDir, "air/aio-renderer.ts"),
-      }
+      ? Object.fromEntries(
+        Object.entries(bundleFrameworkEntries(doAndroid)).map((
+          [spec, rel],
+        ) => [spec, join(dirname(frameworkSrcDir), rel)]),
+      )
       : {};
     const buildConfig = {
       compilerOptions: mainConfig.compilerOptions,
       imports: {
         ...(mainConfig.imports as Record<string, string>),
-        ...(aioEntry ? { "aio": aioEntry, "aio/air": aioEntry } : {}),
         ...aioImports,
       },
     };
@@ -482,7 +518,7 @@ export async function runBundle(
 
     // Record the REAL inputs (after the temp entry/config are gone, so they
     // cannot enter the list and make every later build look stale).
-    await writeBundleInputs(root, out, metaInputs);
+    await writeBundleInputs(root, out, appDir, metaInputs);
 
     const stat = await Deno.stat(out);
     console.log(

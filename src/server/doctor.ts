@@ -6,7 +6,9 @@
  * `jsr:@riagentic/aio/doctor` (once published). Each check prints PASS/FAIL
  * with a one-line fix; exits 1 on any failure.
  */
+import { resolve } from "@std/path";
 import { meetsMinDeno, MIN_DENO } from "./deno-version.ts";
+import { linkSatisfiesPin, pinnedFrameworkPath } from "./framework-pin.ts";
 import { VERSION } from "./aio-cli.ts";
 import { buildContext } from "../../aiol/context.ts";
 import {
@@ -131,8 +133,10 @@ export async function runDoctor(
   // Framework version pin. A source-layout app imports aio through a gitignored
   // `dep/aio` symlink, so without `aioVersion` in deno.json a clone of this repo
   // builds against whatever aio the machine happens to have — and "it compiled
-  // last month" stops being reproducible. Self-contained on purpose: doctor lives
-  // in server/, which may not import am/ (see scripts/check-boundaries.ts).
+  // last month" stops being reproducible. doctor lives in server/, which may not
+  // import am/ (see scripts/check-boundaries.ts) — so the pin/link rule lives in
+  // server/framework-pin.ts and `am` imports it from there. Restating it here
+  // instead is what made every local-dev (`path:`) pin fail forever.
   const usesDepAio = Object.values(cfg.imports ?? {}).some((v) =>
     typeof v === "string" && v.includes("dep/aio")
   );
@@ -149,14 +153,19 @@ export async function runDoctor(
     if (pin) {
       let linked: string | null = null;
       try {
-        const target = await Deno.readLink(`${dir}/dep/aio`);
-        linked = target.split("/").filter(Boolean).pop() ?? null;
+        // A relative link target is relative to the link's own directory.
+        linked = resolve(`${dir}/dep`, await Deno.readLink(`${dir}/dep/aio`));
       } catch { /* not linked yet — `am fix` handles that */ }
       checks.push({
         name: `framework pin matches dep/aio (${pin})`,
         // Unlinked is not drift; it's a fresh clone, and `am fix` is the answer.
-        ok: linked === null || linked === pin,
-        fix: `dep/aio points at ${linked}, not ${pin} — run \`am fix\``,
+        // `linkSatisfiesPin` is THE decider (shared with `am pin`): restating
+        // the rule here made a local-dev `path:` pin fail forever, with `am fix`
+        // — which recreates that exact link — as the "fix".
+        ok: linked === null || linkSatisfiesPin(pin, linked),
+        fix: `dep/aio points at ${linked}, not ${
+          pinnedFrameworkPath(pin)
+        } — run \`am fix\``,
       });
     }
   }

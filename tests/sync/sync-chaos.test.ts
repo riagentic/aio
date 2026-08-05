@@ -37,6 +37,7 @@ import { compactSyncOps, SYNC_SCHEMA } from "../../src/sync/compact.ts";
 import {
   _resetServerTsForTest,
   loadOpsSince,
+  loadSnapshot,
   persistOp,
 } from "../../src/sync/server-store.ts";
 import { createServerSyncHandler } from "../../src/sync/server-handler.ts";
@@ -133,6 +134,19 @@ const canon = (s: Record<string, unknown>) => ({
   items: [...((s.items as string[]) ?? [])].sort(),
 });
 
+/** The ledger AS APPLIED — order included.
+ *
+ *  `canon` sorts, and sorting hides the whole class of bug where a client
+ *  applies the right ops in the wrong ORDER: it is a set comparison, and it
+ *  passed for years while clients folded catch-up batches in an order the
+ *  server never used. Real reducers (`s.value = x`, `s.items.filter(...)`)
+ *  are not commutative, so a different order is a different state — kept
+ *  forever, on the client only, with nothing to compare against. The client
+ *  must reproduce the server's sequence exactly. */
+const asApplied = (s: Record<string, unknown>) => [
+  ...((s.items as string[]) ?? []),
+];
+
 const micro = async (n = 24) => {
   for (let i = 0; i < n; i++) await Promise.resolve();
 };
@@ -159,6 +173,7 @@ interface Stats {
   drops: number;
   reconnects: number;
   restarts: number;
+  compactions: number;
   clientDedupDrops: number;
   serverDedupDrops: number;
 }
@@ -268,7 +283,16 @@ async function runEpisode(seed: number, stats: Stats): Promise<void> {
       if (!c.connected) return;
       const m = JSON.parse(msg);
       if (m.t === "sync-ack") {
-        await c.engine.handleAck(m.d.cell, m.d.opId, m.d.serverHlc);
+        // `serverTs` is part of the ack — the client needs it to tell an op a
+        // snapshot already contains from one it doesn't. The harness used to
+        // drop it, which made every episode run against a client that could
+        // never dedup an ack, and hid the whole snapshot-watermark path.
+        await c.engine.handleAck(
+          m.d.cell,
+          m.d.opId,
+          m.d.serverHlc,
+          m.d.serverTs,
+        );
       } else if (m.t === "op") {
         await c.engine.handleRemoteOp({ ...m.d, confirmed: true } as SyncOp);
       } else if (m.t === "sync-res") {
@@ -310,13 +334,32 @@ async function runEpisode(seed: number, stats: Stats): Promise<void> {
       }
       _resetServerTsForTest(); // issuer forgets → must re-seed from the log
       handler = makeHandler();
-      // Boot replay (mirrors replaySyncOps): fold the op-log into fresh state.
+      // Boot replay — EXACTLY what aio-boot's replaySyncOps does: seed from
+      // the compaction snapshot, then fold the surviving op-log on top. The
+      // snapshot step is not optional once compaction is in the picture:
+      // compaction DELETES the ops it folded, so the log alone restores the
+      // cell to its initialState.
       serverState = { count: 0, items: [] };
+      const snap = await loadSnapshot(db, CELL);
+      if (snap) serverState = snap.state;
       const ops = await loadOpsSince(db, CELL, null, null);
       for (const op of ops) {
         serverState = reduceCell(serverState, op.action, op.payload);
       }
       for (const c of clients) reconnect(c);
+    };
+
+    // ── compaction ─────────────────────────────────────────────────────
+    // The op-log rolls over constantly in a real app: `noteServerWrite` fires
+    // on every server-origin write and force-compacts (fold live state into
+    // the snapshot, DELETE every op at/below the server HLC), and the op-count
+    // threshold fires on busy cells. Episodes never exercised it, so the
+    // entire snapshot/catch-up boundary — the one place where a cursor bug
+    // means ops that no longer exist anywhere — ran untested.
+    const compact = async () => {
+      stats.compactions++;
+      handler.noteServerWrite(CELL);
+      await handler.flushServerWrites(); // same lock, without the debounce wait
     };
 
     // ── op issuance (ground truth ledger) ──────────────────────────────
@@ -387,9 +430,11 @@ async function runEpisode(seed: number, stats: Stats): Promise<void> {
         const c = clients[pickIndex(clients.length)]!;
         if (c.connected) disconnect(c);
         else reconnect(c);
-      } else if (r < 0.93) {
+      } else if (r < 0.91) {
         const c = clients[pickIndex(clients.length)]!;
         if (c.connected) await c.engine.requestSync();
+      } else if (r < 0.95) {
+        await compact();
       } else if (r < 0.97) {
         await micro(); // let floating server work interleave
       } else {
@@ -479,6 +524,12 @@ async function runEpisode(seed: number, stats: Stats): Promise<void> {
         expected,
         `client c${c.i} optimistic state diverged`,
       );
+      // …and in the SERVER's order, not merely with the same contents.
+      assertEquals(
+        asApplied(c.confirmed()),
+        asApplied(serverState),
+        `client c${c.i} applied the ops in a different ORDER than the server`,
+      );
       stats.clientDedupDrops += c.dedupDrops();
     }
   } finally {
@@ -503,6 +554,7 @@ Deno.test("sync chaos: clients converge exactly-once under dup/drop/reorder/reco
     drops: 0,
     reconnects: 0,
     restarts: 0,
+    compactions: 0,
     clientDedupDrops: 0,
     serverDedupDrops: 0,
   };
@@ -531,6 +583,7 @@ Deno.test("sync chaos: clients converge exactly-once under dup/drop/reorder/reco
   console.log(
     `[sync-chaos] ok — ops=${stats.ops} dupsInjected=${stats.dupsInjected} ` +
       `drops=${stats.drops} reconnects=${stats.reconnects} restarts=${stats.restarts} ` +
+      `compactions=${stats.compactions} ` +
       `dedupDrops(client=${stats.clientDedupDrops}, server=${stats.serverDedupDrops})`,
   );
   // The chaos schedule must actually exercise the dedup layers — a suite
@@ -542,6 +595,13 @@ Deno.test("sync chaos: clients converge exactly-once under dup/drop/reorder/reco
   assert(
     stats.clientDedupDrops > 0,
     "chaos never exercised client-side dedup",
+  );
+  // Compaction is the boundary where a cursor bug means ops that exist
+  // NOWHERE any more — an episode set that never compacts proves nothing
+  // about catch-up.
+  assert(
+    stats.compactions > 0,
+    "chaos never compacted the op-log",
   );
 });
 

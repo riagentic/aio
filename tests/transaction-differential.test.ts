@@ -21,7 +21,14 @@
 // (tests/fuzz-ops.ts) — one language, two axes.
 import { assertEquals } from "@std/assert";
 import { fuzzEnvInt } from "./fuzz-seed.ts";
-import { applyOp, type Data, initData, KINDS, type Op } from "./fuzz-ops.ts";
+import {
+  ALIAS_KINDS,
+  applyOp,
+  type Data,
+  initData,
+  KINDS,
+  type Op,
+} from "./fuzz-ops.ts";
 import { bootCells } from "../src/testing/cell-test.ts";
 import { cell } from "../src/state/cell-create.ts";
 
@@ -33,7 +40,15 @@ type Any = any;
  *  buffer mid-method (a no-op off the flag, by design in `createLiveProxy`, so
  *  the SAME program text runs on all three cells). */
 const CONTROL_KINDS = ["__await", "__commit"];
-const ALL_KINDS = [...KINDS, ...CONTROL_KINDS];
+// ALIAS_KINDS are excluded here and only here: `$commit` MOVES a commit
+// boundary, and an alias does not survive one (see the comment on ALIAS_KINDS
+// in fuzz-ops.ts — every mode agrees, including two plain sync methods). With
+// one in the program "transaction is observationally a no-op" is false for a
+// reason that has nothing to do with isolation.
+const ALL_KINDS = [
+  ...KINDS.filter((k) => !ALIAS_KINDS.includes(k)),
+  ...CONTROL_KINDS,
+];
 
 const tick = () => new Promise<void>((r) => setTimeout(r, 0));
 

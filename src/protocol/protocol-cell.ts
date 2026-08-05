@@ -5,6 +5,12 @@ import { registerCell } from "../state/cell-reactive.ts";
 import { isAsyncFunction } from "../state/cell-impl.ts";
 import type { CellDef } from "../state/cell-types.ts";
 import { normalizeSyncConfig } from "../sync/types.ts";
+// The SERVER's normalizers, not copies of them. `__aio.ui` and `__aio.selectors`
+// are both read by bindCellReactive — the binder the browser bundle runs — so a
+// stub that stores the raw config instead of the normalized shape is a
+// divergence only production can see. `tests/browser-cell-stub-parity.test.ts`
+// pins every `__aio` key the browser reads against this file.
+import { normalizeUiFilter, scopeSelectors } from "../state/cell-helpers.ts";
 
 // deno-lint-ignore no-explicit-any
 type _Creators = Record<string, (...args: any[]) => any>;
@@ -25,6 +31,12 @@ export function cell(
     reduce?: any;
     execute?: any;
     selectors?: any;
+    /** Client-read visibility. bindCellReactive enforces it on EVERY client
+     *  read; dropping it here meant a `ui.exclude`d field read as a plain
+     *  `undefined` in the browser (no throw in dev, no warning in prod) while
+     *  standalone/testUI threw — the "undefined as data" trap the tripwire
+     *  exists to stop, live only where nobody was testing. */
+    ui?: any;
   },
 ): Record<string, unknown> {
   const prefix = name;
@@ -89,7 +101,12 @@ export function cell(
       __aio: {
         state: config.state ?? {},
         machine: config.machine ?? false,
-        selectors: config.selectors ?? {},
+        // Normalized, never raw: the DEPS form (`{ deps, fn }`) is an object,
+        // and bindCellReactive calls whatever sits here — so a raw deps-form
+        // selector threw `selectorFn is not a function` in the browser bundle
+        // and nowhere else.
+        selectors: scopeSelectors(prefix, config.selectors),
+        ui: normalizeUiFilter(config.ui),
         actionKeys: allKeys,
         effectKeys: Object.keys(config.effects ?? {}),
         id: prefix,
@@ -170,7 +187,8 @@ export function cell(
     __aio: {
       state: config.state ?? {},
       machine: config.machine ?? false,
-      selectors: config.selectors ?? {},
+      selectors: scopeSelectors(prefix, config.selectors),
+      ui: normalizeUiFilter(config.ui),
       actionKeys: Object.keys(config.actions ?? {}),
       effectKeys: Object.keys(config.effects ?? {}),
       id: prefix,

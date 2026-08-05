@@ -23,6 +23,14 @@ function rowToOp(r: OpRow): SyncOp {
     payload: JSON.parse(r.payload),
     hlc: [r.hlc_phys, r.hlc_cnt, r.hlc_node] as HLC,
     confirmed: true,
+    // The op's POSITION, carried to the client. A catch-up is a batch of ops
+    // the server applied in the past, and the client rebuilds confirmed state
+    // by replaying them — which only reproduces the server's state if it
+    // replays them in the server's order, interleaved with the acks for its
+    // own ops that the same response is answering. Without the position it
+    // cannot do that (see the ordered fold in sync-engine's
+    // `handleSyncResponse`); broadcasts have always carried it.
+    ...(typeof r.server_ts === "number" ? { serverTs: r.server_ts } : {}),
   };
 }
 
@@ -30,7 +38,12 @@ function rowToOp(r: OpRow): SyncOp {
 // and the sync cursor is a strict `server_ts > ?` — an op stamped in the same
 // ms as the last one a client saw would never be delivered (silent divergence).
 let _lastServerTs = 0;
-let _seeded = false;
+// Which DATABASES this process has already seeded from. The high-water mark is
+// a property of a database, not of a process: a single `_seeded` boolean meant
+// the SECOND store opened in one process (a profile restore, a test server, a
+// reopened db) skipped its seed entirely and could stamp new ops underneath its
+// own log — undeliverable to any client already holding that cursor.
+let _seededDbs = new WeakSet<DB>();
 
 /**
  * The DURABLE high-water mark of the `server_ts` sequence: the greatest value
@@ -82,13 +95,14 @@ async function highWaterTs(db: DB): Promise<number> {
   }
 }
 
-/** Seed the issuer from the durable high-water mark once per process, so a
- *  restart resumes strictly ABOVE every value ever issued (see
+/** Seed the issuer from the durable high-water mark once per database, so a
+ *  restart — or a switch to another store in the same process — resumes
+ *  strictly ABOVE every value that store ever issued (see
  *  {@linkcode highWaterTs}). Best-effort: on query failure the wall clock
  *  still applies. */
 async function seedServerTs(db: DB): Promise<void> {
-  if (_seeded) return;
-  _seeded = true;
+  if (_seededDbs.has(db)) return;
+  _seededDbs.add(db);
   const hw = await highWaterTs(db);
   if (hw > _lastServerTs) _lastServerTs = hw;
 }
@@ -101,7 +115,7 @@ function nextServerTs(): number {
 /** TEST ONLY: simulate a process restart (issuer forgets, next call re-seeds). */
 export function _resetServerTsForTest(): void {
   _lastServerTs = 0;
-  _seeded = false;
+  _seededDbs = new WeakSet<DB>();
 }
 
 /**
@@ -124,6 +138,30 @@ export async function reserveServerTs(db: DB): Promise<number> {
   const hw = await highWaterTs(db);
   if (hw > _lastServerTs) _lastServerTs = hw;
   return hw;
+}
+
+/**
+ * Issue the cursor position a freshly written snapshot reflects.
+ *
+ * A snapshot is the cell's LIVE state, which is strictly more than its op log:
+ * a server-origin write (effect, cron, serverFn) changes state without
+ * producing any op at all, and compaction folds it in. So "the client has
+ * every op above its cursor" does NOT mean "the client's state matches the
+ * server's" — the only honest answer is the position of the snapshot itself,
+ * compared against the client's cursor.
+ *
+ * It BURNS a value from the same sequence rather than reusing the log's max:
+ * with an empty log the max is 0, and a cursorless client (`0 < 0` is false)
+ * was told it was up to date while every byte of the cell lived in a snapshot
+ * it never received. A burned position is strictly above every op persisted so
+ * far and strictly below every op persisted after, which is exactly what the
+ * comparison needs, and `highWaterTs` already counts it as durable.
+ */
+export async function issueSnapshotTs(db: DB): Promise<number> {
+  await seedServerTs(db);
+  const hw = await highWaterTs(db);
+  if (hw > _lastServerTs) _lastServerTs = hw;
+  return nextServerTs();
 }
 
 /**
@@ -177,6 +215,40 @@ export async function persistOp(
   return changes > 0 ? serverTs : null;
 }
 
+/** The `server_ts` an op was stamped with, wherever that fact still lives —
+ *  the live row, or the compaction tombstone that replaced it. `null` when the
+ *  op is unknown, or when the tombstone predates the `server_ts` column
+ *  (0 = unknown, never a real position).
+ *
+ *  This exists because an ack must state the op's cursor position even when
+ *  the op is a DUPLICATE (a resend after a lost ack): `persistOp` returns null
+ *  for a duplicate — correctly, it must not be re-dispatched — but "don't
+ *  re-apply it" and "where does it sit in the log" are two different facts,
+ *  and answering the second with silence made the client apply an op its
+ *  snapshot already contained a second time (see `handleAck`'s snapshot
+ *  watermark). */
+export async function getOpServerTs(
+  db: DB,
+  id: string,
+): Promise<number | null> {
+  try {
+    const { rows } = await db.query<{ ts: number | null }>(
+      `SELECT server_ts AS ts FROM sync_ops WHERE id = ?
+       UNION ALL
+       SELECT server_ts AS ts FROM sync_compacted_ids WHERE id = ?`,
+      [id, id],
+    );
+    for (const r of rows) {
+      if (typeof r.ts === "number" && r.ts > 0) return r.ts;
+    }
+    return null;
+  } catch {
+    // Pre-migration tombstone table (no server_ts column) — unknown, and the
+    // ack degrades to its pre-alpha43 shape rather than lying.
+    return null;
+  }
+}
+
 /**
  * Load ops for a cell after the given server_ts cursor (strictly monotonic,
  * matches dispatch order). Without a cursor the FULL op-log is returned, in
@@ -201,7 +273,7 @@ export async function loadOpsSince(
   // Use server_ts cursor when available — strictly monotonic per-server, no concurrency ambiguity
   if (lastServerTs != null && lastServerTs > 0) {
     const { rows } = await db.query<OpRow>(
-      `SELECT id, cell, action, payload, hlc_phys, hlc_cnt, hlc_node
+      `SELECT id, cell, action, payload, hlc_phys, hlc_cnt, hlc_node, server_ts
        FROM sync_ops WHERE cell = ? AND server_ts > ?
        ORDER BY server_ts`,
       [cell, lastServerTs],
@@ -212,7 +284,7 @@ export async function loadOpsSince(
   // No cursor → full op-log in dispatch (server_ts) order, so a replay or a
   // fresh client folds ops in exactly the order the live server applied them.
   const { rows } = await db.query<OpRow>(
-    `SELECT id, cell, action, payload, hlc_phys, hlc_cnt, hlc_node
+    `SELECT id, cell, action, payload, hlc_phys, hlc_cnt, hlc_node, server_ts
      FROM sync_ops WHERE cell = ? ORDER BY server_ts`,
     [cell],
   );
@@ -300,11 +372,12 @@ export async function getLowWater(
   }
 }
 
-/** The highest `server_ts` that compaction has DELETED for a cell (0 = none).
+/** The cursor position the cell's SNAPSHOT reflects (0 = never compacted).
  *
- *  A client whose server_ts cursor sits below this may have missed ops that no
- *  longer exist in the log, so it must be served a snapshot rather than an
- *  incremental response. */
+ *  A client whose server_ts cursor sits below this cannot be served
+ *  incrementally: the ops it would need may have been deleted, and the
+ *  snapshot may also hold server-origin state that never was an op (see
+ *  {@linkcode issueSnapshotTs}). Below the mark ⇒ send the snapshot. */
 export async function getCompactedTs(db: DB, cell: string): Promise<number> {
   try {
     const { rows } = await db.query<{ compacted_ts: number | null }>(

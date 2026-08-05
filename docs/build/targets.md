@@ -208,22 +208,22 @@ shows **Build Error** or **Runtime Error**. Opens Electron or browser.
 
 ## Build flags
 
-| Flag                                      | Effect                                                                               |
-| ----------------------------------------- | ------------------------------------------------------------------------------------ |
-| `--compile`                               | Compile standalone Deno binary                                                       |
-| `--electron`                              | Build Electron package: AppImage (Linux), zip (macOS/Windows) — implies `--compile`  |
-| `--client`                                | Build client-only AppImage — no Deno runtime, Linux only (`compile:electron:remote`) |
-| `--cli`                                   | Build CLI binary — no browser bundle, headless server (`compile:cli`)                |
-| `--cli --remote`                          | Build client-only CLI binary — no server (`compile:cli:remote`)                      |
-| `--android`                               | Build APK via Gradle                                                                 |
-| `--android --remote`                      | Build client-only APK — connect page, no local dispatch (`compile:android:remote`)   |
-| `--compile --service`                     | Compile binary + generate systemd unit file                                          |
-| `--compile --service --remote`            | Same, with `--expose` in systemd ExecStart (`compile:browser:remote`)                |
-| `--compile --service --headless`          | Same, with `--headless` in systemd ExecStart (`compile:service`)                     |
-| `--compile --service --headless --remote` | Same, with `--expose --headless` (`compile:service:remote`)                          |
-| `--name=X`                                | Override binary name (default: from deno.json `"title"`)                             |
-| `--force`                                 | Skip bundle cache — always rebuild `dist/app.js`                                     |
-| `--release`                               | Android release build (default: debug)                                               |
+| Flag                                      | Effect                                                                                |
+| ----------------------------------------- | ------------------------------------------------------------------------------------- |
+| `--compile`                               | Compile standalone Deno binary                                                        |
+| `--electron`                              | Build Electron package: AppImage (Linux), zip (macOS/Windows) — implies `--compile`   |
+| `--client`                                | Build client-only AppImage — no Deno runtime, Linux only (`compile:electron:remote`)  |
+| `--cli`                                   | Build CLI binary — no browser bundle, headless server (`compile:cli`)                 |
+| `--cli --remote`                          | Build client-only CLI binary — no server (`compile:cli:remote`)                       |
+| `--android`                               | Build APK via Gradle                                                                  |
+| `--android --remote`                      | Build client-only APK — connect page, no local dispatch (`compile:android:remote`)    |
+| `--compile --service`                     | Compile binary + generate systemd unit file                                           |
+| `--compile --service --remote`            | Same, with `--expose` in systemd ExecStart (`compile:browser:remote`)                 |
+| `--compile --service --headless`          | Same, with `--headless` in systemd ExecStart (`compile:service`)                      |
+| `--compile --service --headless --remote` | Same, with `--expose --headless` (`compile:service:remote`)                           |
+| `--name=X`                                | Override binary name (default: from deno.json `"title"`)                              |
+| `--force`                                 | Skip bundle cache — always rebuild `dist/app.js`                                      |
+| `--release`                               | Android release build (default: debug) — emits `myapp-unsigned.apk`; sign it yourself |
 
 ### Which "title" names what
 

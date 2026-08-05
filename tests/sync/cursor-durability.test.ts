@@ -263,3 +263,44 @@ describe("server_ts cursor durability across restart", () => {
     assert(persisted.length > 20, "property loop must actually persist ops");
   });
 });
+
+// The high-water mark is a property of a DATABASE; the seed guard used to be a
+// property of the PROCESS. The second store opened in one process (a profile
+// restore, a test server, a reopened db) therefore skipped its seed and could
+// stamp new ops underneath its own log — invisible to any client already
+// holding that cursor, forever.
+Deno.test("a second database in the same process is seeded from its OWN log", async () => {
+  _resetServerTsForTest();
+  const a = createTestDb();
+  const b = createTestDb();
+  {
+    // Store A seeds the issuer.
+    await persistOp(a, {
+      id: "a1",
+      hlc: [1, 0, "x"] as HLC,
+      cell: "c",
+      action: "add",
+      payload: 1,
+    });
+    // Store B's log was stamped by a machine whose clock ran ahead of this one
+    // (a copied profile, or a wall clock that has since stepped back).
+    const future = Date.now() + 3_600_000;
+    await b.execute(
+      `INSERT INTO sync_ops (id, cell, action, payload, hlc_phys, hlc_cnt, hlc_node, server_ts)
+       VALUES ('future', 'c', 'add', '1', 1, 0, 'x', ?)`,
+      [future],
+    );
+    const ts = await persistOp(b, {
+      id: "b1",
+      hlc: [2, 0, "x"] as HLC,
+      cell: "c",
+      action: "add",
+      payload: 1,
+    });
+    assert(
+      ts !== null && ts > future,
+      `issued ${ts} at or below store B's existing max ${future} — a client ` +
+        `holding that cursor could never be sent this op`,
+    );
+  }
+});

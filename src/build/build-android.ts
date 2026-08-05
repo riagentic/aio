@@ -408,15 +408,65 @@ async function _runGradle(
     Deno.exit(1);
   }
 
-  // Copy APK to project root
-  const apkVariant = doRelease
-    ? "release/app-release.apk"
-    : "debug/app-debug.apk";
-  const apkSrc = join(androidDir, "app/build/outputs/apk", apkVariant);
+  // Copy APK to project root.
+  const outputsDir = join(
+    androidDir,
+    "app/build/outputs/apk",
+    doRelease ? "release" : "debug",
+  );
+  let present: string[] = [];
+  try {
+    present = [...Deno.readDirSync(outputsDir)].map((e) => e.name);
+  } catch { /* no outputs dir at all */ }
+  const built = apkArtifact(present, doRelease);
+  if (!built) {
+    console.error(
+      `[android] \u2717 gradle reported success but wrote no APK in ` +
+        `${outputsDir}${
+          present.length ? ` (found: ${present.join(", ")})` : ""
+        }`,
+    );
+    Deno.exit(1);
+  }
   const label = apkLabel(cfg);
-  const apkDst = join(cfg.root, `${label}.apk`);
-  await Deno.copyFile(apkSrc, apkDst);
+  const apkDst = join(cfg.root, `${label}${built.suffix}.apk`);
+  await Deno.copyFile(join(outputsDir, built.file), apkDst);
   const apkStat = await Deno.stat(apkDst);
   const apkMb = (apkStat.size / 1024 / 1024).toFixed(1);
-  console.log(`[android] \u2713 ${label}.apk (${apkMb} MB)`);
+  console.log(`[android] \u2713 ${label}${built.suffix}.apk (${apkMb} MB)`);
+  if (built.suffix) {
+    console.log(
+      `\n  This APK is UNSIGNED \u2014 Android will refuse to install it as is.\n` +
+        `  aio does not hold your release key. Sign it yourself:\n` +
+        `    zipalign -p -f 4 ${label}-unsigned.apk ${label}.apk\n` +
+        `    apksigner sign --ks <your.keystore> ${label}.apk\n`,
+    );
+  }
+}
+
+/** Which file gradle actually wrote, and the suffix its SIGNING STATE earns in
+ *  the artifact's name. `null` when the variant produced no APK at all.
+ *
+ *  `assembleDebug` always emits `app-debug.apk`, signed with the debug keystore.
+ *  `assembleRelease` emits `app-release.apk` ONLY when the release variant
+ *  declares a `signingConfig`; the generated Gradle project declares none, so
+ *  AGP writes `app-release-unsigned.apk` instead. The build copied
+ *  `app-release.apk` unconditionally: `--release` (a documented flag) spent a
+ *  full Gradle run, printed BUILD SUCCESSFUL, then died with an uncaught
+ *  `NotFound` and left no APK anywhere the user would look.
+ *
+ *  An unsigned APK is a real artifact \u2014 it just cannot be installed \u2014 so it is
+ *  produced under a name that SAYS so, never under the installable one. Pure, so
+ *  the whole table is a unit test instead of a claim about a code path that only
+ *  runs after a real Gradle build. */
+export function apkArtifact(
+  outputs: readonly string[],
+  doRelease: boolean,
+): { file: string; suffix: "" | "-unsigned" } | null {
+  const signed = doRelease ? "app-release.apk" : "app-debug.apk";
+  if (outputs.includes(signed)) return { file: signed, suffix: "" };
+  if (doRelease && outputs.includes("app-release-unsigned.apk")) {
+    return { file: "app-release-unsigned.apk", suffix: "-unsigned" };
+  }
+  return null;
 }
