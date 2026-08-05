@@ -128,6 +128,37 @@ export async function verifyIdToken(
   return claims;
 }
 
+/** Prefix marking a users row as an EXTERNAL (IdP-owned) identity. */
+export const OIDC_ID_PREFIX = "oidc:";
+
+/** EXTERNAL IDENTITIES ARE A DIFFERENT NAMESPACE FROM LOCAL ONES.
+ *
+ *  The callback used to key the account on `claims.sub` alone
+ *  (`users.get(claims.sub)`), so an IdP account whose `sub` happened to equal
+ *  a local username WAS that user: a session was issued for the local account
+ *  without ever consulting its `totpEnabled` or `verified` state — an SSO
+ *  login walked straight past a second factor the owner had enrolled — and the
+ *  local row's email was rewritten to the IdP-supplied one, handing over the
+ *  password-reset channel permanently. `sub` is only unique WITHIN an issuer,
+ *  and plenty of providers (Keycloak mappers, LDAP bridges, self-hosted IdPs)
+ *  mint username- or email-shaped subs, so a collision is a configuration
+ *  away, not a coincidence.
+ *
+ *  The id therefore carries its origin: `oidc:<issuer-without-scheme>:<sub>`.
+ *  Two identities from different issuers cannot collide, and no OIDC login can
+ *  ever land on a local account — the namespaces do not overlap. Linking an
+ *  SSO identity to an existing local account is a deliberate, verified step
+ *  that does not exist yet; silently adopting one was never that step. */
+export function externalId(issuer: string, sub: string): string {
+  const iss = issuer.replace(/^https?:\/\//, "").replace(/\/+$/, "");
+  return `${OIDC_ID_PREFIX}${iss}:${sub}`;
+}
+
+/** True when a users row belongs to an external identity provider — it has no
+ *  usable password, so password-shaped flows (reset) must skip it. */
+export const isExternalId = (id: string): boolean =>
+  id.startsWith(OIDC_ID_PREFIX);
+
 export interface OidcDeps {
   cfg: OidcConfig;
   users: UserStore;
@@ -299,25 +330,64 @@ export async function oidcCallback(
     return new Response("invalid id_token", { status: 401 });
   }
 
-  // Stable identity = sub. Existing users keep their stored role (server-side
-  // promotions survive re-login); new users get cfg.role(claims) ?? "user".
-  const id = claims.sub as string;
+  // Stable identity = (issuer, sub), namespaced — see `externalId`. Existing
+  // users keep their stored role (server-side promotions survive re-login);
+  // new users get cfg.role(claims) ?? "user".
+  const sub = claims.sub as string;
+  const id = externalId(deps.cfg.issuer, sub);
+  if (id.length > 256) {
+    console.warn(`[aio] auth: oidc subject too long for an account id`);
+    return new Response("invalid id_token", { status: 401 });
+  }
   const email = typeof claims.email === "string" ? claims.email : undefined;
   let user: AioUser;
   const existing = deps.users.get(id);
+  // A local account that merely SHARES the sub is a different account, and
+  // stays one. Say so out loud: before the namespace fix this login adopted
+  // it, so an operator upgrading needs to know why an SSO user who used to
+  // land on "alice" now lands on a fresh account.
+  if (!existing && deps.users.get(sub)) {
+    console.warn(
+      `[aio] auth: oidc login for sub="${sub}" maps to id="${id}" — a ` +
+        `separate local account named "${sub}" exists and is NOT adopted ` +
+        `(external identities are their own namespace; linking is not ` +
+        `automatic). Grant it access with \`am auth role "${id}" <role>\`.`,
+    );
+  }
   if (existing) {
     user = { id: existing.id, role: existing.role };
-    if (email && existing.email !== email) deps.users.setEmail(id, email);
+    // Only ever for an account this namespace owns (never a local one — it is
+    // unreachable from here now), and never silently.
+    if (email && existing.email !== email) {
+      console.warn(
+        `[aio] auth: oidc updated the email on id="${id}" (provider claim)`,
+      );
+      deps.users.setEmail(id, email);
+    }
   } else {
     const role = deps.cfg.role?.(claims) ?? "user";
     // External identity — random unusable password (never password-verifiable).
     const rnd = b64url(crypto.getRandomValues(new Uint8Array(24)));
-    const rec = await deps.users.create(id, rnd, { role, email });
-    deps.users.markVerified(id); // provider vouched for the email
-    user = { id: rec.id, role: rec.role };
+    try {
+      const rec = await deps.users.create(id, rnd, { role, email });
+      deps.users.markVerified(id); // provider vouched for the email
+      user = { id: rec.id, role: rec.role };
+    } catch (e) {
+      // The id rules (length, no invisible characters) are the store's, and a
+      // provider can mint a sub that breaks them. Refuse the login loudly
+      // rather than 500 on a half-created account.
+      console.warn(
+        `[aio] auth: oidc account creation refused for "${id}" — ${e}`,
+      );
+      return new Response("invalid id_token", { status: 401 });
+    }
   }
   const token = deps.sessions.issue(user, { ttlMs: deps.ttlMs });
-  const headers = new Headers({ Location: safePath(returnTo) });
+  const headers = new Headers({
+    Location: safePath(returnTo),
+    // Identity-bearing (it hands out a session cookie) — never cached.
+    "Cache-Control": "no-store",
+  });
   headers.append("Set-Cookie", deps.cookie(token));
   // Clear the one-shot binder cookie.
   headers.append(

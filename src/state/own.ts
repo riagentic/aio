@@ -188,12 +188,16 @@ export function createOwnManager(log: Log): {
     for (const id of [...disposers.keys()]) runDisposer(id);
   }
 
-  /** Dispose all resources whose ID starts with prefix + ":" (e.g. cell name).
-   *  Same delimiter rule as schedule.cancelByPrefix (AIO-198). */
+  /** Dispose all resources whose ID is `prefix` or starts with prefix + ":"
+   *  (e.g. cell name). Same rule as schedule.cancelByPrefix (AIO-198) —
+   *  including the bare-`prefix` case, which was missing here: a cell disable
+   *  cancelled the schedule named `mycell` but left the resource named
+   *  `mycell` open, so two APIs documented as having the same keyed semantics
+   *  disagreed about the most obvious id an app would pick. */
   function disposeByPrefix(prefix: string): void {
     const p = prefix + ":";
     for (const id of [...disposers.keys()]) {
-      if (id.startsWith(p)) {
+      if (id === prefix || id.startsWith(p)) {
         runDisposer(id);
         log.debug(`own: disposed '${id}' (cell '${prefix}' disabled)`);
       }

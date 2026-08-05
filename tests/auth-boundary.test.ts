@@ -154,7 +154,9 @@ Deno.test("trojan: anonymous local caller cannot read raw state under auth: true
       const store = openUserStore(appDirs(`test-trojan-${Deno.pid}`).authDb);
       assert(store.setRole("mallory", "admin"), "promote to admin");
       store.close();
-      // A session carries the role it was issued with — log in again.
+      // (A live session would pick the new role up on its next request —
+      // sessions resolve the role from the users row — but logging in again
+      // is what an operator actually does after `am auth role`.)
       const li = await fetch(`${BASE}/__aio/auth/login`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },

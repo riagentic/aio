@@ -441,11 +441,24 @@ await aio.run({
   mailbox.
 - `POST /__aio/auth/reset/request { id }` **always returns 200** (no account
   enumeration) and mails a 15-minute one-shot reset token when the account has
-  an email. `POST /__aio/auth/reset { token, password }` sets the new password
-  and **revokes every session**.
-- `POST /__aio/auth/password { old, new }` (authenticated) rotates the password
-  and all other sessions.
+  an email. `POST /__aio/auth/reset { token, password }` sets the new password.
+- `POST /__aio/auth/password { old, new }` (authenticated) rotates the password.
 - Tokens are stored hashed and are strictly one-shot.
+
+**Setting a password does four things, always** — one decider (`setPassword`),
+so every caller (`/auth/reset`, `/auth/password`, `am auth passwd`,
+`app.auth.setPassword`) inherits all of them:
+
+1. the hash is replaced,
+2. **any lockout is cleared** — a completed reset ends the 15-minute lockout
+   instead of leaving the rescued account refused,
+3. **every outstanding one-shot token is burned** — a reset token mailed
+   earlier, and any TOTP `pending` captured before the reset,
+4. **every session is revoked**, including already-open WebSockets.
+
+`<SignIn/>` shows a **"Forgot password?"** link automatically whenever the
+server has a `sendMail` transport (`features.mail`), and walks the user through
+request → token → new password. Hide it with `<SignIn forgot={false} />`.
 
 ### TOTP two-factor (RFC 6238)
 
@@ -453,13 +466,37 @@ Any authenticator app (Google Authenticator, Aegis, 1Password…):
 
 ```ts
 const { secret, uri } = await authClient.totpSetup(); // uri → QR code
-await authClient.totpEnable("123456"); // code from the app confirms enrollment
+// The ACCOUNT PASSWORD is required to switch the factor on:
+await authClient.totpEnable("123456", "the-account-password");
 ```
 
 After enrollment, `login` returns `{ totpRequired, pending }` — complete with
 `authClient.totp(pending, code)` (5-minute window, one attempt per pending
-token; a wrong code sends the user back to login). Disable requires the
-password. `auth: { totp: false }` turns enrollment off app-wide.
+token; a wrong code sends the user back to login).
+
+**Turning the factor ON costs exactly what turning it OFF costs: the password.**
+Both `totp/enable` and `totp/disable` re-authenticate. Without that, a single
+stolen session token was a permanent account takeover — the thief enrolled their
+own authenticator, and from then on the owner's password login demanded the
+thief's device.
+
+`auth: { totp: false }` turns **enrollment** off app-wide. It does **not** turn
+verification off: accounts already enrolled still have to present their code,
+and boot warns naming them. A configuration switch may refuse to add a factor;
+it must never quietly drop one a user is relying on.
+
+**Lost device / recovery.** There are no user-held recovery codes (yet). The
+recovery path is the operator's, and it is deliberate: reading the app's data
+directory is a stronger credential than any account inside the app.
+
+```sh
+am auth totp alice off     # clears the second factor + any pending login token
+```
+
+Nothing else clears an enrolled factor — not a password reset, not
+`am auth passwd`. (A _staged_ secret that was never enabled IS dropped by any
+password change, so a secret planted from a stolen session cannot outlive the
+rescue.)
 
 ### OIDC / social login (authorization code + PKCE)
 
@@ -481,10 +518,32 @@ await aio.run({
 ```
 
 The callback verifies the ID token (issuer, audience, expiry, signature via the
-provider's JWKS), upserts the user by `sub` (existing users keep their
-server-assigned role), issues a session cookie, and redirects to `/`. The state
+provider's JWKS), issues a session cookie, and redirects to `/`. The state
 parameter is a stored one-shot token carrying the PKCE verifier — replay is dead
 on arrival.
+
+**External identities live in their own namespace.** The account id is
+`oidc:<issuer-without-scheme>:<sub>` — never the bare `sub`:
+
+- `sub` is unique only _within_ an issuer, and plenty of providers (Keycloak
+  mappers, LDAP bridges, self-hosted IdPs) mint username- or email-shaped subs.
+  Keying on it alone meant an IdP account whose `sub` equalled a local username
+  **became** that user — walking past a second factor the owner had enrolled,
+  and rewriting the local account's email (the password-reset channel) to the
+  IdP-supplied one.
+- An OIDC login therefore can never land on, create, or modify a local account.
+  A local account that merely shares the `sub` is left alone, and the server
+  logs that it did.
+- External accounts have no usable password: `reset/request` treats them as
+  non-existent (same 200, same timing, no mail), so a mailbox cannot install a
+  local password on an SSO identity.
+- Linking an SSO identity to an existing local account is **not** automatic;
+  there is no verified link step yet. Grant an external identity privileges the
+  same way as any other: `am auth role "oidc:idp.example:1234" admin`.
+- Existing users keep their stored role, so server-side promotions survive
+  re-login. Upgrading from a build that keyed accounts on the bare `sub`: SSO
+  users get new, namespaced accounts and the old rows stay behind (the boot log
+  names them).
 
 ### Account lockout
 
@@ -501,19 +560,64 @@ admin, or get back in when you're locked out:
 ```sh
 am auth users                      # list accounts (role, email, 2FA, locked)
 am auth create root --role=admin   # no --password → generates + prints one
-am auth passwd alice               # reset a password (also clears lockout)
+am auth passwd alice               # new password: also unlocks + kills sessions
 am auth unlock alice               # clear a lockout
-am auth role alice editor
-am auth revoke alice               # kill every session of a user
+am auth totp alice off             # clear a second factor (lost device)
+am auth role alice editor          # applies to live sessions immediately
+am auth revoke alice               # kill every session + every pending token
 am auth verify alice               # mark email verified by hand
 am auth rm alice
 ```
 
+`am auth passwd` is the breach-response command: it rotates the password, clears
+the lockout, burns every outstanding reset/verify/TOTP token and revokes every
+session — so the intruder's session does not survive the rescue.
+
+`am auth role` reaches sessions that are **already open**: a session resolves
+its role from the users row on every request, so a demotion takes effect on the
+next request (HTTP and WebSocket alike) rather than at the end of the 30-day
+session TTL.
+
 ### Brute-force protection
 
-Failed auth attempts are budgeted per client IP (10 per 5-minute sliding window
+Failed auth attempts are budgeted per client key (10 per 5-minute sliding window
 → `429`), and every failure is audit-logged. Successful requests never consume
 budget.
+
+**The budget throttles failed authentication, never service.** A request that
+presents a **valid** credential is served regardless of the budget; only a
+request whose credential is missing or wrong can be refused by it, and the
+public login shell stays reachable. (It used to gate the whole request path
+ahead of token resolution: ten wrong-password POSTs — no valid username needed —
+then 429'd every request from that client key, including the victim's own
+authenticated ones. Sustaining it cost ~2 requests a minute.)
+
+The client key is the TCP peer address. **Behind a reverse proxy that is the
+proxy**, so every client collapses into one bucket and one attacker's failures
+land on everybody. Set `trustProxyHeader` and have the proxy overwrite it:
+
+```ts
+await aio.run({
+  cells: [/* … */],
+  auth: true,
+  trustProxyHeader: "x-forwarded-for",
+});
+```
+
+aio warns at boot (exposed + per-user auth + no `trustProxyHeader`) and again on
+the first request that actually carries a forwarding header. Never set
+`trustProxyHeader` without a proxy in front: the header is client-settable, so
+an attacker would forge a fresh bucket per request and evade the budget
+entirely.
+
+Also bounded: `/__aio/auth/*` request bodies are capped at 16 KiB (these are the
+routes reachable before any credential), and every auth response carries
+`Cache-Control: no-store`.
+
+**Account ids are normalized** (Unicode NFC + trimmed, no invisible or
+whitespace characters) and are unique case-insensitively at creation, so
+`Neighbour`, `neighbour` and their NFD spellings cannot become several accounts
+an operator can't tell apart. Lookups stay exact.
 
 ## Security model
 
@@ -578,7 +682,23 @@ location / {
   proxy_http_version 1.1;
   proxy_set_header Upgrade $http_upgrade;
   proxy_set_header Connection "upgrade";
+  # OVERWRITE (not add to) the forwarded header: aio keys its per-client abuse
+  # budget on it, and a client-settable value would let an attacker mint a
+  # fresh bucket per request.
+  proxy_set_header X-Forwarded-For $remote_addr;
 }
 ```
 
-Caddy is simpler — `reverse_proxy localhost:8000` with automatic HTTPS.
+Caddy is simpler — `reverse_proxy localhost:8000` with automatic HTTPS (it sets
+`X-Forwarded-For` itself).
+
+Then tell the app to trust it, or every client shares one abuse bucket and one
+attacker throttles all of them:
+
+```ts
+await aio.run({
+  cells: [/* … */],
+  auth: true,
+  trustProxyHeader: "x-forwarded-for",
+});
+```

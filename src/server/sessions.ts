@@ -65,10 +65,30 @@ const newToken = (): string => {
   return `aios_${s}`;
 };
 
+/** Options for `openSessionStore`. */
+export interface SessionStoreOptions {
+  /** Live role lookup for a session's user — the users row, at USE time.
+   *
+   *  The role used to be copied into the session row at issue time and never
+   *  re-read, so `am auth role carol user` left carol's open session
+   *  resolving as `admin` — reaching `/__aio/snapshot`, `/__aio/trojan/*` and
+   *  every `access: "admin"` rule — for up to the 30-day TTL. A demotion that
+   *  takes effect at some unknowable point in the next month is not an
+   *  authorization control.
+   *
+   *  Resolving live (rather than revoking every session on a role change)
+   *  keeps the promise the WS manager already documents — "a role change lands
+   *  here too, not just revocation" — and means a promotion needs no re-login.
+   *  Returns null when there is no users row: `sessions: true` without
+   *  `auth: true` has no user table, and the role handed to `issue()` stands. */
+  roleOf?: (userId: string) => string | null | undefined;
+}
+
 /** Open (or create) a session store at `path` (":memory:" for tests). */
 export function openSessionStore(
   path: string,
   defaultTtlMs = DEFAULT_TTL_MS,
+  opts?: SessionStoreOptions,
 ): SessionStore {
   const db = new DatabaseSync(path);
   db.exec("PRAGMA journal_mode=WAL");
@@ -129,7 +149,16 @@ export function openSessionStore(
         del.run(hash(token)); // expired — remove on read
         return null;
       }
-      return { id: row.user_id, role: row.role, expiresAt: row.expires_at };
+      // The stored role is a CACHE of what the account had when it logged in;
+      // the users row is the truth. Every resolution re-reads it (one indexed
+      // lookup on the same open db) so a demotion is effective on the very
+      // next request — HTTP, WS revalidation and `access:` rules alike.
+      const live = opts?.roleOf?.(row.user_id);
+      return {
+        id: row.user_id,
+        role: live ?? row.role,
+        expiresAt: row.expires_at,
+      };
     },
     refresh(token, ttlMs) {
       const now = Date.now();

@@ -31,7 +31,12 @@ import {
   sessionTokenFromCookie,
 } from "./server-auth.ts";
 import { generateTotpSecret, totpUri, verifyTotp } from "./auth-totp.ts";
-import { oidcCallback, type OidcConfig, oidcStart } from "./auth-oidc.ts";
+import {
+  isExternalId,
+  oidcCallback,
+  type OidcConfig,
+  oidcStart,
+} from "./auth-oidc.ts";
 import type { AioUser } from "./aio-types.ts";
 
 const VERIFY_TTL_MS = 24 * 3_600_000;
@@ -68,11 +73,30 @@ export interface AuthFlows {
   oidc?: OidcConfig;
 }
 
+/** Every auth response is identity-bearing (a user, a session token, a
+ *  one-shot secret) or a credential verdict. `no-store` on ALL of them — one
+ *  decider, so a route added later cannot forget it — keeps a proxy, a service
+ *  worker or the browser's back/forward cache from holding someone's identity
+ *  and replaying it to the next person on that connection. */
 const json = (status: number, body: unknown, headers?: HeadersInit): Response =>
   new Response(JSON.stringify(body), {
     status,
-    headers: { "Content-Type": "application/json", ...headers },
+    headers: {
+      "Content-Type": "application/json",
+      "Cache-Control": "no-store",
+      ...headers,
+    },
   });
+
+/** Largest body any /__aio/auth/* route will buffer.
+ *
+ *  These routes are the ones reachable BEFORE any credential, and they read
+ *  the body with a bare `req.json()`. A single 48 MB login body took RSS to
+ *  ~500 MB — an unauthenticated memory pump. Every auth payload is a handful
+ *  of short strings; 16 KiB is orders of magnitude of headroom. (The trojan
+ *  and the static upload path already bound their bodies — the auth routes
+ *  were the outlier, and the exposed one.) */
+const MAX_AUTH_BODY = 16 * 1024;
 
 const cookieHeader = (
   token: string,
@@ -98,6 +122,40 @@ const sameOrigin = (req: Request): boolean => {
 };
 
 const MAIL_OFF = json.bind(null, 501, { error: "mail_not_configured" });
+
+/** Read a request body as text, or null once it passes MAX_AUTH_BODY.
+ *  Streams and stops — an oversized body is never fully buffered, which is
+ *  the entire point (a declared length can lie, or be absent). */
+async function _readBounded(req: Request): Promise<string | null> {
+  if (!req.body) return "";
+  const reader = req.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!value) continue;
+      total += value.byteLength;
+      if (total > MAX_AUTH_BODY) {
+        await reader.cancel().catch(() => {});
+        return null;
+      }
+      chunks.push(value);
+    }
+  } finally {
+    try {
+      reader.releaseLock();
+    } catch { /* already released by cancel */ }
+  }
+  const buf = new Uint8Array(total);
+  let at = 0;
+  for (const c of chunks) {
+    buf.set(c, at);
+    at += c.byteLength;
+  }
+  return new TextDecoder().decode(buf);
+}
 
 /** Handle /__aio/auth/* — returns null for any other path. */
 export async function handleAuthFlow(
@@ -130,9 +188,13 @@ export async function handleAuthFlow(
     const info = t ? cfg.sessions.get(t) : null;
     return info ? { id: info.id, role: info.role } : null;
   };
-  const body = async (): Promise<Record<string, unknown> | null> => {
+  /** The body text, read ONCE and bounded (null = over the cap). Filled in
+   *  before the POST switch so every route parses the same bytes and none of
+   *  them can forget the bound. */
+  let raw: string | null = "";
+  const body = (): Record<string, unknown> | null => {
     try {
-      const b = await req.json();
+      const b = JSON.parse(raw ?? "");
       return b && typeof b === "object" ? b as Record<string, unknown> : null;
     } catch {
       return null;
@@ -179,6 +241,20 @@ export async function handleAuthFlow(
 
   if (req.method !== "POST") return json(404, { error: "unknown_auth_route" });
   if (!sameOrigin(req)) return json(403, { error: "cross_origin" });
+  // Body cap, once, for every POST route — a route added later inherits it,
+  // and a route that forgets to read the body cannot leave one unbounded.
+  // The declared length is refused before a byte is read; a body that lies
+  // about (or omits) its length is cut off by the bounded reader.
+  const declared = Number(req.headers.get("content-length") ?? NaN);
+  const tooBig = Number.isFinite(declared) && declared > MAX_AUTH_BODY;
+  if (tooBig) req.body?.cancel().catch(() => {});
+  raw = tooBig ? null : await _readBounded(req);
+  if (raw === null) {
+    return json(413, {
+      error: "body_too_large",
+      hint: `auth request bodies are capped at ${MAX_AUTH_BODY} bytes`,
+    });
+  }
 
   switch (route.slice(5)) {
     case "signup": {
@@ -186,7 +262,7 @@ export async function handleAuthFlow(
       if (authFailBudgetExceeded(clientKey)) {
         return json(429, { error: "too_many_attempts" });
       }
-      const b = await body();
+      const b = body();
       const id = str(b?.id), password = str(b?.password);
       const email = str(b?.email) ?? undefined;
       if (!id || !password) {
@@ -236,7 +312,7 @@ export async function handleAuthFlow(
       if (authFailBudgetExceeded(clientKey)) {
         return json(429, { error: "too_many_attempts" });
       }
-      const b = await body();
+      const b = body();
       const id = str(b?.id), password = str(b?.password);
       if (!id || !password) {
         return json(400, { error: "id_and_password_required" });
@@ -255,7 +331,15 @@ export async function handleAuthFlow(
       }
       // TOTP enrolled → the password alone is HALF a login. Hand back a
       // short-lived one-shot pending token; /totp completes it.
-      if (cfg.totp !== false && rec?.totpEnabled) {
+      //
+      // NOT gated on `cfg.totp`: that flag turns ENROLLMENT off (the docs say
+      // so), and reading it here also turned VERIFICATION off — flipping
+      // `auth: { totp: false }` on an existing auth.db silently demoted every
+      // already-enrolled account to password-only, with no warning and no
+      // trace. A configuration switch may refuse to add a factor; it must
+      // never quietly drop one a user is relying on. (Boot warns loudly when
+      // enrolled accounts exist under `totp: false` — see server.ts.)
+      if (rec?.totpEnabled) {
         const pending = cfg.users.issueToken("totp", id, TOTP_PENDING_TTL_MS);
         return json(200, { totpRequired: true, pending });
       }
@@ -266,7 +350,7 @@ export async function handleAuthFlow(
       if (authFailBudgetExceeded(clientKey)) {
         return json(429, { error: "too_many_attempts" });
       }
-      const b = await body();
+      const b = body();
       const pending = str(b?.pending), code = str(b?.code);
       if (!pending || !code) {
         return json(400, { error: "pending_and_code_required" });
@@ -304,7 +388,7 @@ export async function handleAuthFlow(
       if (authFailBudgetExceeded(clientKey)) {
         return json(429, { error: "too_many_attempts" });
       }
-      const b = await body();
+      const b = body();
       const oldPw = str(b?.old), newPw = str(b?.new);
       if (!oldPw || !newPw) return json(400, { error: "old_and_new_required" });
       const ok = await cfg.users.verify(user.id, oldPw);
@@ -318,9 +402,12 @@ export async function handleAuthFlow(
       } catch (e) {
         return json(400, { error: e instanceof Error ? e.message : String(e) });
       }
-      // Rotate: every existing session dies (stolen ones included); the
-      // caller gets a fresh one in the response.
-      cfg.sessions.revokeUser(user.id);
+      // `setPassword` IS the rotation: it clears the lockout, burns every
+      // outstanding one-shot token and revokes every session (stolen ones
+      // included). This route deliberately does not repeat any of that — a
+      // second copy of the rule is how one of the two copies rots, and it is
+      // exactly how `am auth passwd` ended up rotating passwords without
+      // revoking anything. The caller gets a fresh session in the response.
       return issueSession(user);
     }
 
@@ -341,7 +428,7 @@ export async function handleAuthFlow(
     }
 
     case "verify": {
-      const b = await body();
+      const b = body();
       const token = str(b?.token);
       if (!token) return json(400, { error: "token_required" });
       const stored = cfg.users.consumeToken("verify", token);
@@ -357,7 +444,7 @@ export async function handleAuthFlow(
       if (authFailBudgetExceeded(clientKey)) {
         return json(200, { ok: true }); // silent — reveal nothing
       }
-      const b = await body();
+      const b = body();
       const id = str(b?.id);
       // ALWAYS 200 at the SAME latency — a reset probe must reveal nothing
       // about whether the account exists. Two guards make the timing uniform
@@ -368,16 +455,23 @@ export async function handleAuthFlow(
       if (id) {
         recordAuthFail(clientKey, `reset request for id=${id}`); // budget the trigger
         const rec = cfg.users.get(id);
+        // An EXTERNAL identity has no password to reset — its credentials live
+        // at the IdP. Minting a reset token for one would turn "controls this
+        // mailbox" into "can set a local password on an SSO account", a
+        // password-login door into an identity the provider is supposed to
+        // own. Treated exactly like a miss (decoy token, no mail), so the
+        // route still reveals nothing about which ids exist.
+        const local = rec !== null && !isExternalId(rec.id);
         // Always issue a token (decoy for the miss) → identical write cost.
         // The decoy subject is an ESCAPE, not a literal NUL byte in the
         // source: a raw control character made this whole file read as
         // binary, so grep matched nothing in it and said so silently.
         const token = cfg.users.issueToken(
           "reset",
-          rec ? id : "\u0000decoy",
+          local ? id : "\u0000decoy",
           RESET_TTL_MS,
         );
-        if (rec?.email) {
+        if (local && rec.email) {
           void Promise.resolve(
             cfg.sendMail({
               to: rec.email,
@@ -394,21 +488,27 @@ export async function handleAuthFlow(
     }
 
     case "reset": {
-      const b = await body();
+      const b = body();
       const token = str(b?.token), password = str(b?.password);
       if (!token || !password) {
         return json(400, { error: "token_and_password_required" });
       }
       const stored = cfg.users.consumeToken("reset", token);
       if (!stored) return json(401, { error: "invalid_or_expired_token" });
+      // No reset token is ever minted for an external identity (see
+      // reset/request) — this refuses one that predates that rule rather than
+      // letting it install a password on an IdP-owned account.
+      if (isExternalId(stored.subject)) {
+        return json(403, { error: "external_identity" });
+      }
       try {
         await cfg.users.setPassword(stored.subject, password);
       } catch (e) {
         return json(400, { error: e instanceof Error ? e.message : String(e) });
       }
-      // Proof of mailbox control: the email is verified, every session dies.
+      // Proof of mailbox control: the email is verified. Sessions, tokens and
+      // the lockout are `setPassword`'s job (above) — one decider.
       cfg.users.markVerified(stored.subject);
-      cfg.sessions.revokeUser(stored.subject);
       console.warn(
         `[aio] auth: password reset completed for id=${stored.subject}`,
       );
@@ -442,16 +542,41 @@ export async function handleAuthFlow(
     }
 
     case "totp/enable": {
+      if (cfg.totp === false) return json(403, { error: "totp_disabled" });
       const user = caller();
       if (!user) return json(401, { error: "login_required" });
-      const b = await body();
-      const code = str(b?.code);
+      // TURNING A FACTOR ON IS EXACTLY AS HARD AS TURNING IT OFF.
+      //
+      // This route used to need only a session. So a stolen session token —
+      // by itself, with no password — could enrol the ATTACKER's
+      // authenticator, and from that moment the owner's own password login
+      // demanded the attacker's device. Nothing cleared it: not a completed
+      // email password reset, not `am auth passwd`. Account destruction
+      // (`am auth rm`) was the only way back. Enabling was strictly easier
+      // than disabling, which inverts the whole point of a second factor.
+      //
+      // Same shape as totp/disable: password re-auth, on the same per-IP
+      // budget (this route verifies a password, so it must not be an
+      // unthrottled PBKDF2 pump either).
+      if (authFailBudgetExceeded(clientKey)) {
+        return json(429, { error: "too_many_attempts" });
+      }
+      const b = body();
+      const code = str(b?.code), password = str(b?.password);
+      if (!password) return json(400, { error: "password_required" });
       const staged = cfg.users.totpSecret(user.id);
       if (!code || !staged) return json(400, { error: "setup_first" });
+      const ok = await cfg.users.verify(user.id, password);
+      if (ok === "locked") return json(423, { error: "account_locked" });
+      if (!ok) {
+        recordAuthFail(clientKey, `totp enable failed for id=${user.id}`);
+        return json(401, { error: "invalid_credentials" });
+      }
       if (!(await verifyTotp(staged.secret, code))) {
         return json(401, { error: "invalid_code" });
       }
       cfg.users.enableTotp(user.id);
+      console.warn(`[aio] auth: TOTP enabled for id=${user.id}`);
       return json(200, { ok: true });
     }
 
@@ -462,7 +587,7 @@ export async function handleAuthFlow(
       if (authFailBudgetExceeded(clientKey)) {
         return json(429, { error: "too_many_attempts" });
       }
-      const b = await body();
+      const b = body();
       const password = str(b?.password);
       if (!password) return json(400, { error: "password_required" });
       const ok = await cfg.users.verify(user.id, password);
