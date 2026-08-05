@@ -29,6 +29,7 @@
 // replay a single episode with SYNC_CHAOS_SEED=<seed>.
 
 import { assert, assertEquals } from "@std/assert";
+import { fuzzEnvInt } from "../fuzz-seed.ts";
 // @ts-ignore node:sqlite types unavailable when an old @types/node shadows them (see src/db/db-worker.ts)
 import { DatabaseSync } from "node:sqlite";
 import type { DB, QueryResult, Tx } from "../../src/db/types.ts";
@@ -195,6 +196,7 @@ async function runEpisode(seed: number, stats: Stats): Promise<void> {
         db,
         syncCellIds: [CELL],
         getCellState: () => serverState,
+        getClientCellState: () => serverState,
         broadcastRaw,
         log: serverLog,
       });
@@ -489,7 +491,11 @@ const HARDCODED_SEEDS = [0xA11CE, 42, 1337, 987654321, 0x5EED0];
 const EPISODES_PER_SEED = 10;
 
 Deno.test("sync chaos: clients converge exactly-once under dup/drop/reorder/reconnect/restart", async () => {
-  const env = Deno.env.get("SYNC_CHAOS_SEED");
+  // A seed we cannot read must THROW: pasting a failure's replay line with a
+  // typo used to run seed 0 and report a confident green for a program nobody
+  // asked for (see tests/fuzz-seed.ts).
+  const hasEnv = Deno.env.get("SYNC_CHAOS_SEED") !== undefined;
+  const env = hasEnv ? fuzzEnvInt("SYNC_CHAOS_SEED", 0) : undefined;
   const timeSeed = Date.now() >>> 0;
   const stats: Stats = {
     ops: 0,
@@ -501,8 +507,8 @@ Deno.test("sync chaos: clients converge exactly-once under dup/drop/reorder/reco
     serverDedupDrops: 0,
   };
 
-  if (env) {
-    const seed = Number(env) >>> 0;
+  if (env !== undefined) {
+    const seed = env >>> 0;
     console.log(`[sync-chaos] replaying single episode seed=${seed}`);
     await runEpisode(seed, stats);
   } else {

@@ -148,6 +148,45 @@ to `deno.json` as a dev convenience.
 | `--json`     | Force JSON output                                                                    |
 | `--quiet`    | Suppress output (exit code only)                                                     |
 
+## Reaching an app that has auth (`control.key`)
+
+`am` and amui talk to the app's control plane (`/__aio/trojan/*`) — raw state,
+dispatch, SQL, whole-state replace. That endpoint is same-machine-only and
+dev-only, and on an app running `auth: true` / `users:` / `resolveUser` it also
+requires authority, because it is `/__aio/snapshot`'s power and more.
+
+The authority is **owning the machine**, not membership in the app. At boot a
+dev app mints `<data>/control.key` — 256 bits, mode `0600` inside the `0700`
+data dir, fresh every boot and deleted at shutdown. `am` reads it and presents
+it as a header on control-plane calls only; it never travels to `/ws`, to your
+app's routes, or to `/__aio/snapshot`.
+
+Nothing to configure. If `am` cannot read it you get a refusal that names the
+file and distinguishes "no credential" from "a stale one", instead of a bare
+401.
+
+Deliberately **not** the app key: the app key is shareable on purpose
+(`am profile`, `/__aio/pair`, `.aioapp`), so whoever paired a phone over the LAN
+would hold your whole database; and it does not exist at all in the auth modes
+where this problem occurs. A per-boot file that dies with the process has no
+rotation story and a stolen copy is worthless.
+
+> Two apps on one machine mean two `am` targets. `am instances` disambiguates
+> them, and running `deno task am` from each app's own directory does the right
+> thing — the failure mode (`app not running on port 8000`) otherwise reads like
+> the app is down when you are simply pointed at the other one.
+
+## Pairing a client (`am pair`)
+
+```sh
+am pair            # a fresh single-use PIN, without restarting the app
+```
+
+A keyed app prints a pairing PIN at boot, single-use and short-lived. Once it is
+used or expires, `am pair` issues another — previously the only way to get a new
+one was to restart the app, which the docs told you to do with a command that
+did not exist.
+
 ## Process management
 
 ```sh

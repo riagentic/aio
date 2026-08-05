@@ -150,15 +150,28 @@ export function createJournal(
         Deno.writeTextFileSync(wmPath, String(s));
       } catch { /* best-effort */ }
       // Compact: keep only the unpersisted tail (seq > wm). Atomic via rename.
+      // The temp file carries the SAME 0600 mode as the journal it replaces:
+      // it holds the same action payloads, and the rename makes it the
+      // journal. Written without a mode, the first compaction silently reset
+      // the file to the process umask (0644/0664) — permanently, and for every
+      // later append — so the owner-only guarantee held only until the first
+      // snapshot. It matters wherever `dbPath` puts the journal outside the
+      // 0700 app directory.
       try {
         const keep = parseJournal(Deno.readTextFileSync(path)).filter((e) =>
           e.seq > s
         );
         const tmp = path + ".tmp";
+        // A leftover tmp from an earlier crash may exist with looser
+        // permissions; `mode` only applies at CREATE time, so remove it first.
+        try {
+          Deno.removeSync(tmp);
+        } catch { /* nothing to clear */ }
         Deno.writeTextFileSync(
           tmp,
           keep.map((e) => JSON.stringify(e)).join("\n") +
             (keep.length ? "\n" : ""),
+          { mode: 0o600 },
         );
         Deno.renameSync(tmp, path);
       } catch { /* compaction is an optimization — safe to skip */ }

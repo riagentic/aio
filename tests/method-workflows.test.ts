@@ -16,6 +16,7 @@ import {
 import { cell } from "../src/state/cell-create.ts";
 import { composeCells } from "../src/state/cell-compose.ts";
 import type { MethodDraftMeta } from "../src/state/cell-impl.ts";
+import { schedule } from "../src/state/schedule.ts";
 import { testCell } from "../src/testing/cell-test.ts";
 
 // ── until / race / sleep ──────────────────────────────────────────────
@@ -243,6 +244,58 @@ Deno.test("method-cancel: trigger aborts only the registered method's calls", ()
 // NOTE: no _resetMethodCancel() here — it would wipe the module-time
 // registrations of real cells in this file (registry is process-global).
 
+// ── cancelOn must reach a call QUEUED behind the serialize mutex ──────
+//
+// `transaction: { serialize: true }` chains calls on a promise tail, so a
+// queued call's AbortController used to be created only when its turn came —
+// and `notifyMethodCancel` can only abort controllers that already exist. An
+// explicit Stop pressed during job 1 therefore let jobs 2 and 3 run in full,
+// each reading `s.$signal.aborted === false`. Exactly the hazard shape
+// shutdown hit and closed with `_shutdownCells`.
+
+const queued = cell("wf-queued", {
+  transaction: { serialize: true },
+  cancelOn: { job: ["wf-queued:stop"] },
+  state: { done: [] as number[], stopped: false },
+  methods: {
+    async job(
+      s: { done: number[]; stopped: boolean } & Partial<MethodDraftMeta>,
+      n: number,
+    ) {
+      await sleep(10);
+      if (s.$signal!.aborted) return;
+      s.done = [...s.done, n];
+    },
+    stop(s: { stopped: boolean }) {
+      s.stopped = true;
+    },
+  },
+});
+
+testCell(
+  queued,
+  "cancelOn reaches calls queued behind the serialize mutex",
+  async (t) => {
+    const all = [t.send.job(1), t.send.job(2), t.send.job(3)];
+    await t.send.stop(); // fires while job 1 runs and 2/3 are still queued
+    await Promise.allSettled(all);
+    t.expect.state((s) => s.done.length === 0);
+  },
+);
+
+testCell(
+  queued,
+  "cancelOn: a call dispatched AFTER the trigger is not pre-aborted",
+  async (t) => {
+    // The window closes by construction: a controller is created when the
+    // call's __exec effect runs, and effects of an action run before the next
+    // action is reduced — so a later call never sees an earlier trigger.
+    await t.send.stop();
+    await t.send.job(9);
+    t.expect.state((s) => s.done.length === 1 && s.done[0] === 9);
+  },
+);
+
 // ── listensTo object form: decoupled cross-cell reaction (D1) ─────────
 
 const cart2 = cell("wf-cart", {
@@ -322,4 +375,75 @@ Deno.test("listensTo object form: async handler fails loud at definition", () =>
     msg = String(e);
   }
   assertEquals(msg.includes("must be a SYNC method"), true, msg);
+});
+
+// ── a listensTo handler's return is classified like any other sync return ──
+//
+// The foreign path handed the handler's result back RAW, and compose-reduce
+// only reads an ARRAY as effects. So the SAME sync method ran its
+// `schedule.after(...)` when called directly and silently dropped it when
+// reached through listensTo (a dropped `own.set(...)` also leaked its factory
+// in pendingFactories for the process lifetime), while a returned DATA array
+// was mistaken for effects and blamed on the FOREIGN action.
+
+const reactor = cell("wf-react", {
+  state: { hits: 0, rows: [] as number[] },
+  listensTo: { onEffect: cart2.clear, onData: cart2.add },
+  methods: {
+    onEffect(s: { hits: number }) {
+      s.hits += 1;
+      return schedule.after("wf-react.retry", 1000, { type: "wf-react:later" });
+    },
+    onData(s: { rows: number[] }) {
+      s.rows = [1, 2, 3];
+      return [1, 2, 3]; // DATA, not effects
+    },
+  },
+});
+
+Deno.test("listensTo: a single effect return reaches the effect queue", () => {
+  const composed = composeCells([cart2, reactor]);
+  const r = composed.reduce(composed.initialState, {
+    type: "wf-cart:clear",
+    payload: { args: [] },
+  });
+  assertEquals((r.state["wf-react"] as { hits: number }).hits, 1);
+  assertEquals(r.effects.length, 1, "the lone schedule effect is not dropped");
+  assertEquals(
+    (r.effects[0] as { type: string }).type,
+    "__schedule",
+    "…and it is the schedule effect the handler returned",
+  );
+});
+
+Deno.test("listensTo: a data-array return is a VALUE, never effects", () => {
+  const composed = composeCells([cart2, reactor]);
+  const r = composed.reduce(composed.initialState, {
+    type: "wf-cart:add",
+    payload: { args: ["milk"] },
+  });
+  assertEquals((r.state["wf-react"] as { rows: number[] }).rows, [1, 2, 3]);
+  assertEquals(
+    r.effects.length,
+    0,
+    "plain data must not be dispatched as effects (it used to raise " +
+      "'reducer returned invalid effect' against the FOREIGN action)",
+  );
+});
+
+Deno.test("listensTo: direct call and foreign reaction agree on the return", () => {
+  // The parity that makes the classification one decider, not two: the same
+  // method, reached both ways, produces the same effects.
+  const direct = composeCells([cart2, reactor]).reduce(
+    composeCells([cart2, reactor]).initialState,
+    { type: "wf-react:onEffect", payload: { args: [] } },
+  );
+  const foreign = composeCells([cart2, reactor]).reduce(
+    composeCells([cart2, reactor]).initialState,
+    { type: "wf-cart:clear", payload: { args: [] } },
+  );
+  assertEquals(
+    JSON.stringify(direct.effects),
+    JSON.stringify(foreign.effects),
+  );
 });

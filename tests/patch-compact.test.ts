@@ -1,4 +1,5 @@
 import { assertEquals } from "@std/assert";
+import { fuzzEnvInt } from "./fuzz-seed.ts";
 import type { Patch } from "immer";
 import { applyPatches, enablePatches } from "immer";
 import {
@@ -8,19 +9,6 @@ import {
 
 // Helper to build a patch
 enablePatches();
-
-// A sweep flag we cannot read must THROW, never shrug: `FUZZ_ROUNDS=2k` is
-// NaN, `round < NaN` is false, and the fuzzer would report a vacuous green
-// over ZERO programs (same contract as tests/proxy-differential.test.ts).
-function fuzzEnvInt(name: string, def: number, min = 0): number {
-  const raw = Deno.env.get(name);
-  if (raw === undefined) return def;
-  const n = /^\d+$/.test(raw.trim()) ? Number(raw.trim()) : NaN;
-  if (!Number.isSafeInteger(n) || n < min) {
-    throw new Error(`${name}="${raw}" must be an integer >= ${min}`);
-  }
-  return n;
-}
 
 const replace = (path: (string | number)[], value: unknown): Patch => ({
   op: "replace",

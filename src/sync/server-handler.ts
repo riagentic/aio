@@ -40,7 +40,20 @@ export interface SyncHandlerDeps {
   ) => unknown;
   db: DB;
   syncCellIds: string[];
+  /** RAW cell state — server-internal only (compaction snapshots). Sync cells
+   *  are excluded from KV persistence, so the compaction snapshot IS their
+   *  durability: it must carry the whole slice, filters and all. Never send
+   *  this to a client — use `getClientCellState`. */
   getCellState: (cell: string) => Record<string, unknown>;
+  /** The UI-visible projection of a cell — the ONLY shape that may go out on a
+   *  wire, and `null` when the cell must not be sent at all (`ui: "none"`).
+   *
+   *  Separate from `getCellState` (and required, not defaulted) because the two
+   *  answers genuinely differ and the safe one must be chosen deliberately: a
+   *  catch-up snapshot used to be wired straight to raw `getState()`, shipping
+   *  `ui: "none"` cells and excluded fields to any client that fell behind
+   *  compaction. A default here would just re-create that fail-open. */
+  getClientCellState: (cell: string) => Record<string, unknown> | null;
   /** AUTH-1 parity for the sync path: may `user` mutate `cell` via a sync op?
    *  Undefined = no access rules (open). The `action` dispatch path is gated in
    *  aio-server.ts; sync ops route through a different dispatch, so the SAME
@@ -320,6 +333,16 @@ export function createServerSyncHandler(
         } catch { /* client disconnected */ }
 
         if (serverTs !== null) {
+          // ONE frame, identical for every peer — and that is only sound
+          // because of an invariant enforced upstream: a sync cell may not
+          // have a `ui` filter that hides state (aio-composition.ts,
+          // refuseFilteredSyncCells). There is no per-user variant of this
+          // frame and there cannot be one: peers that receive different ops do
+          // not converge, and an op is an opaque {cell, action, payload} with
+          // no user dimension to filter on. A cell whose data is not for
+          // everyone must not be replicated to everyone — that is refused at
+          // compose time, not patched here.
+          //
           // Broadcast carries serverTs so peers advance their sync cursor as
           // they apply it — otherwise the next catch-up re-delivers this op
           // (it sits above their cursor) and they double-apply it.
@@ -564,7 +587,6 @@ export function createServerSyncHandler(
                 (lastHlc[0] < cellLW[0] ||
                   (lastHlc[0] === cellLW[0] && lastHlc[1] < cellLW[1])))
             ) {
-              useSnapshot = true;
               // Read AFTER reserveServerTs above, and inside this cell's lock:
               // every op already persisted has server_ts <= the reserved
               // cursor and is therefore in this state, and anything persisted
@@ -573,7 +595,24 @@ export function createServerSyncHandler(
               // snapshot contains" — which is what lets the client tell an
               // ack for an op the snapshot already holds from an ack for one
               // it doesn't.
-              snapshot[cell] = deps.getCellState(cell);
+              //
+              // CLIENT-visible projection, never raw state: this frame goes out
+              // on a socket. `null` = the cell is not sendable at all, so we
+              // send nothing for it rather than a slice a filter said to hide.
+              // (Compose refuses sync + a hiding ui filter, so reaching the
+              // null branch means something bypassed that gate — say so.)
+              const clientState = deps.getClientCellState(cell);
+              if (clientState === null) {
+                deps.log.error(
+                  `[sync:server] refusing to snapshot "${cell}" — its ui config ` +
+                    `hides it from clients, and a catch-up snapshot goes out on ` +
+                    `a socket. This client cannot converge on this cell: drop ` +
+                    `sync or drop the ui filter.`,
+                );
+                return;
+              }
+              useSnapshot = true;
+              snapshot[cell] = clientState;
             } else {
               // server_ts cursor when the client has one (strictly monotonic,
               // no concurrency ambiguity); HLC cursor as legacy fallback.

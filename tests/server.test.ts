@@ -464,21 +464,52 @@ Deno.test("server: no users no token — public access", async () => {
   });
 });
 
-Deno.test("server: IPv6 [::1] origin accepted", async () => {
+// A LOOPBACK origin no longer certifies itself. This test used to assert that
+// `http://[::1]:8000` was accepted by any aio server — the blanket exemption
+// that let any page on any other local port open an authenticated socket
+// (ports are not part of a "site", so `SameSite=Strict` cookies ride along).
+// The rule now: the server's OWN origin, or a deliberate `allowedOrigins`
+// entry. Bracket/hostname parsing is still exercised — through the allowlist.
+Deno.test("server: a foreign IPv6 loopback origin is refused, allowlisted is not", async () => {
+  const wsHeaders = (origin: string) => ({
+    "Upgrade": "websocket",
+    "Connection": "Upgrade",
+    "Origin": origin,
+    "Sec-WebSocket-Key": btoa("test"),
+    "Sec-WebSocket-Version": "13",
+  });
   await withServer(async (url) => {
     const resp = await fetch(`${url}/ws`, {
-      headers: {
-        "Upgrade": "websocket",
-        "Connection": "Upgrade",
-        "Origin": "http://[::1]:8000",
-        "Sec-WebSocket-Key": btoa("test"),
-        "Sec-WebSocket-Version": "13",
-      },
+      headers: wsHeaders("http://[::1]:8000"),
     });
-    // URL parser strips brackets: hostname = '::1', but we also check '[::1]'
-    assertEquals(resp.status !== 403, true);
+    assertEquals(resp.status, 403);
     await resp.body?.cancel();
   });
+
+  const dir = await Deno.makeTempDir();
+  const port = freePort();
+  const server = createServer({
+    port,
+    title: "Test",
+    getUIState: () => ({ ok: true }),
+    dispatch: () => {},
+    baseDir: dir,
+    debug: () => {},
+    prod: true,
+    // WHATWG URL keeps the brackets: hostname is "[::1]".
+    allowedOrigins: ["[::1]"],
+  });
+  await new Promise((r) => setTimeout(r, 50));
+  try {
+    const resp = await fetch(`http://127.0.0.1:${port}/ws`, {
+      headers: wsHeaders("http://[::1]:8000"),
+    });
+    assertEquals(resp.status !== 403, true);
+    await resp.body?.cancel();
+  } finally {
+    await server.shutdown();
+    await Deno.remove(dir, { recursive: true });
+  }
 });
 
 // ── timingSafeEqual unit tests ────────────────────────────────
@@ -1373,7 +1404,9 @@ Deno.test("server: maxConnections — 503 when limit exceeded", async () => {
       headers: {
         "Upgrade": "websocket",
         "Connection": "Upgrade",
-        "Origin": "http://localhost",
+        // The server's own origin — this test is about the connection cap,
+        // not the origin gate (a foreign origin now 403s before the cap).
+        "Origin": `http://127.0.0.1:${MAX_CONN_PORT}`,
         "Sec-WebSocket-Key": btoa("test2"),
         "Sec-WebSocket-Version": "13",
       },

@@ -79,11 +79,13 @@ export interface StaticDeps {
   debug: (msg: string) => void;
   title: string;
   absBaseDir: string;
-  /** Extra READ-ONLY roots the dev server may serve, `"/urlPrefix" → absolute
-   *  dir`. Dev only: prod bundles already follow relative imports, so this
-   *  exists solely so the DEV server can serve a module that lives outside
-   *  baseDir (two apps in one repo sharing pure libraries). Every containment
-   *  guard that protects baseDir applies to each root unchanged. */
+  /** Extra READ-ONLY roots the dev server may serve, `"/urlPrefix" → dir`.
+   *  A relative dir is resolved ONCE against the process cwd, exactly like
+   *  `baseDir` — see `_roots` below. Dev only: prod bundles already follow
+   *  relative imports, so this exists solely so the DEV server can serve a
+   *  module that lives outside baseDir (two apps in one repo sharing pure
+   *  libraries). Every containment guard that protects baseDir applies to each
+   *  root unchanged. */
   serveDirs?: Record<string, string>;
   absDistDir: string | null;
   hasCSS: boolean;
@@ -153,6 +155,45 @@ export function createStaticHandler(deps: StaticDeps): {
   // which then 404s on /app.js and shows a broken page. We detect that and
   // serve a clear diagnostic at `/` instead.
   let _uiBundlePresent: boolean | undefined;
+
+  // `serveDirs` roots are ABSOLUTE from here on — resolved ONCE, exactly the
+  // way `baseDir` is (`resolve()` against the process cwd, server.ts). Without
+  // this a RELATIVE root ("../core/lib" — the form the docs show) resolved to
+  // an absolute filepath while the containment prefix stayed relative, so
+  // `filepath.startsWith(basePfx)` was false for EVERY file: a blanket 403
+  // that read as "the guard refused you" instead of "your path was relative".
+  // Absolute-vs-absolute keeps every guard exactly as strong.
+  const _roots: Array<
+    { prefix: string; withSlash: string; dir: string; checked: boolean }
+  > = Object.entries(deps.serveDirs ?? {}).map(([prefix, dir]) => ({
+    prefix,
+    withSlash: prefix.endsWith("/") ? prefix : prefix + "/",
+    dir: resolve(dir),
+    checked: false,
+  }));
+
+  /** Fail loud, once per root, the first time anything asks for it: a root
+   *  that is not a directory serves nothing but 404s, and the symptom the
+   *  developer sees (a blank page from a failed dynamic import) points at the
+   *  import, never at the config. Names the RESOLVED path, because a wrong
+   *  relative root is the likely mistake. */
+  async function _warnIfMissing(
+    r: { prefix: string; dir: string; checked: boolean },
+  ): Promise<void> {
+    if (r.checked) return;
+    r.checked = true;
+    let ok = false;
+    try {
+      ok = (await Deno.stat(r.dir)).isDirectory;
+    } catch { /* missing — reported below */ }
+    if (!ok) {
+      log.warn(
+        `serveDirs["${r.prefix}"] → ${r.dir} is not a directory — every ` +
+          `request under "${r.prefix}" will 404 (a relative root resolves ` +
+          `against the process cwd, exactly like baseDir)`,
+      );
+    }
+  }
 
   /** Returns errors from the last 30 seconds */
   function getRecentErrors() {
@@ -563,11 +604,11 @@ export function createStaticHandler(deps: StaticDeps): {
     // treated, guards included — an extra root must not be a weaker root.
     let root = absBaseDir;
     let rel = filename;
-    for (const [prefix, dir] of Object.entries(deps.serveDirs ?? {})) {
-      const p = prefix.endsWith("/") ? prefix : prefix + "/";
-      if (pathname === prefix || pathname.startsWith(p)) {
-        root = dir;
-        rel = pathname.slice(p.length).replace(/^\//, "");
+    for (const r of _roots) {
+      if (pathname === r.prefix || pathname.startsWith(r.withSlash)) {
+        await _warnIfMissing(r);
+        root = r.dir; // absolute — see _roots
+        rel = pathname.slice(r.withSlash.length).replace(/^\//, "");
         break;
       }
     }

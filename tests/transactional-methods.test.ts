@@ -129,6 +129,179 @@ Deno.test("transaction: s.$commit() publishes mid-method, then reads a fresh sna
   }
 });
 
+// ── $commit must not poison the rest of its own transaction ────────────
+//
+// One method, one cell, ZERO concurrency: the only writer in the process is the
+// method itself. Anything the conflict detector says here is by definition a
+// phantom. It used to say plenty: `origin` was pinned at entry and never moved
+// with `$commit`, so every CONTAINER the commit published compared entry-value
+// against the value Immer had just built — a different object, therefore
+// "changed by another action" — and the remaining write-set was discarded.
+
+Deno.test("transaction: $commit does not phantom-conflict with its own publish", async () => {
+  const c = cell("txn_commit_self", {
+    transaction: true,
+    state: { chunks: [] as string[] },
+    methods: {
+      async stream(s: { chunks: string[] }) {
+        s.chunks.push("a");
+        (s as Any).$commit(); // publish progress mid-flight
+        await Promise.resolve();
+        const n = s.chunks.length; // read a container we published
+        s.chunks.push("b"); // …and write it again
+        return n;
+      },
+    },
+  });
+  const h = await bootCells([c]);
+  try {
+    const n = await (c as Any).stream();
+    await h.settle();
+    assertEquals(n, 1, "the post-$commit read sees the published chunk");
+    assertEquals((c as Any).chunks, ["a", "b"], "the tail write-set committed");
+  } finally {
+    h.dispose();
+  }
+});
+
+Deno.test("transaction serialize: an ANCESTOR read after $commit is not a phantom conflict", async () => {
+  // The narrower half of the same bug: `flushed` held exact mutation paths, so
+  // enumerating the CONTAINER of a published leaf compared entry-origin against
+  // post-commit-live and conflicted under strictReads.
+  const c = cell("txn_commit_ancestor", {
+    transaction: { serialize: true },
+    state: { doc: {} as Record<string, number>, keys: 0 },
+    methods: {
+      async work(s: { doc: Record<string, number>; keys: number }) {
+        s.doc.n = 1;
+        (s as Any).$commit();
+        await Promise.resolve();
+        s.keys = Object.keys(s.doc).length; // ancestor read of a published leaf
+      },
+    },
+  });
+  const h = await bootCells([c]);
+  try {
+    await (c as Any).work();
+    await h.settle();
+    assertEquals((c as Any).keys, 1);
+    assertEquals((c as Any).doc, { n: 1 });
+  } finally {
+    h.dispose();
+  }
+});
+
+Deno.test("transaction: $commit re-bases the epoch — a LATER foreign write still conflicts", async () => {
+  // The half that must not regress: re-basing at $commit must move the pin
+  // forward, not switch conflict detection off for the rest of the method.
+  const p = parkPoint();
+  const c = cell("txn_commit_rebase", {
+    transaction: true,
+    state: { items: [] as string[] },
+    methods: {
+      async grow(s: { items: string[] }) {
+        s.items.push("a");
+        (s as Any).$commit();
+        await p.park(); // a sync method replaces items here
+        s.items = [...s.items, "b"]; // RMW over the re-based (stale) pin
+      },
+      replace(s: { items: string[] }) {
+        s.items = ["foreign"];
+      },
+    },
+  });
+  const h = await bootCells([c]);
+  try {
+    const slow = (c as Any).grow();
+    await p.parked;
+    await (c as Any).replace();
+    p.release();
+    await assertRejects(() => slow, Error, "changed by another action");
+    await h.settle();
+    assertEquals((c as Any).items, ["foreign"], "the foreign write survives");
+  } finally {
+    h.dispose();
+  }
+});
+
+// ── a cancelled transaction discards its write-set (spec §4 "Abort") ────
+
+Deno.test("transaction: a CANCELLED method discards its write-set (no stale commit)", async () => {
+  // The documented supersession pattern (docs/state/methods.md): newest call
+  // wins, the superseded one checks $signal and returns. Non-transactionally
+  // the loser's pre-await writes flush on a microtask and land FIRST, so the
+  // winner overwrites them. Under `transaction: true` the whole write-set
+  // buffers to the END — so the loser committed LAST and clobbered the winner:
+  // the query stuck on the abandoned term, the spinner never clearing.
+  const slowGate = parkPoint();
+  const c = cell("txn_cancel_super", {
+    transaction: true,
+    cancelOn: { search: "self" },
+    state: { query: "", busy: false, results: [] as string[] },
+    methods: {
+      async search(
+        s: { query: string; busy: boolean; results: string[] },
+        q: string,
+        slow: boolean,
+      ) {
+        s.query = q;
+        s.busy = true;
+        if (slow) await slowGate.park();
+        if ((s as Any).$signal.aborted) return;
+        s.results = [q];
+        s.busy = false;
+      },
+    },
+  });
+  const h = await bootCells([c]);
+  try {
+    const first = (c as Any).search("cat", true); // parks, then is superseded
+    await slowGate.parked;
+    await (c as Any).search("cats", false); // the winner: commits fully
+    slowGate.release();
+    await first;
+    await h.settle();
+    assertEquals((c as Any).query, "cats", "the winner's query stands");
+    assertEquals((c as Any).results, ["cats"]);
+    assertEquals((c as Any).busy, false, "the spinner clears");
+  } finally {
+    h.dispose();
+  }
+});
+
+Deno.test("transaction: cancellation keeps what $commit already published", async () => {
+  // Abort discards the BUFFER, not history: progress the method deliberately
+  // published mid-flight is committed state and survives its cancellation.
+  const p = parkPoint();
+  const c = cell("txn_cancel_partial", {
+    transaction: true,
+    cancelOn: { run: ["txn_cancel_partial:stop"] },
+    state: { published: 0, tail: 0 },
+    methods: {
+      async run(s: { published: number; tail: number }) {
+        s.published = 1;
+        (s as Any).$commit();
+        await p.park();
+        s.tail = 1; // buffered — discarded on abort
+      },
+      stop(_s: { published: number }) {},
+    },
+  });
+  const h = await bootCells([c]);
+  try {
+    const running = (c as Any).run();
+    await p.parked;
+    await (c as Any).stop();
+    p.release();
+    await running;
+    await h.settle();
+    assertEquals((c as Any).published, 1, "the mid-flight publish survives");
+    assertEquals((c as Any).tail, 0, "the buffered tail was discarded");
+  } finally {
+    h.dispose();
+  }
+});
+
 const tick = () => new Promise<void>((r) => setTimeout(r, 1));
 
 Deno.test("transaction serialize: concurrent read-modify-write does NOT lose updates", async () => {
@@ -397,21 +570,17 @@ Deno.test("conflictPath: identity is the comparator, and only watched paths coun
   rmw.writes.add(watchKey(["a"]));
   assertEquals(conflictPath(origin, live, rmw, false), "a");
 
-  // …unless this method already published that very value — our own change.
-  rmw.flushed.set(watchKey(["a"]), 2);
-  assertEquals(conflictPath(origin, live, rmw, false), null);
-
-  // A flushed path is NOT exempt forever: live at a THIRD value (neither what
-  // we published nor the entry value) is somebody else's write after our
-  // $commit — the lost update the exemption used to hide.
-  rmw.flushed.set(watchKey(["a"]), 7);
-  assertEquals(conflictPath(origin, live, rmw, false), "a");
-  // …while live still at the entry value only means our dispatch hasn't
-  // landed yet — never a conflict.
+  // …unless the epoch moved with it. A `$commit()` re-bases `origin` to the
+  // state IT produced (executor `rebase`), so our own publish is never a
+  // conflict — while a THIRD value still is, which is the half that must not
+  // regress. There is no per-path exemption to leak: the epoch is the only
+  // bookkeeping, so a published path cannot be exempt for the rest of the
+  // method the way a "skip flushed paths" rule made it.
+  assertEquals(conflictPath(live, live, rmw, false), null, "re-based epoch");
   assertEquals(
-    conflictPath(origin, { ...live, a: 1 }, rmw, false),
-    null,
-    "entry value = our flush still settling",
+    conflictPath(live, { ...live, a: 7 }, rmw, false),
+    "a",
+    "somebody else wrote a after our $commit — still a lost update",
   );
 
   // An identical state object short-circuits: nothing has committed at all.

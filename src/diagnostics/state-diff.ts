@@ -44,6 +44,11 @@ export function computeDiffs(
 
 const MAX_VAL = 80;
 
+/** JSON replacer: BigInt has no JSON form, and its absence is a THROW. */
+function bigintSafe(_key: string, value: unknown): unknown {
+  return typeof value === "bigint" ? `${value}n` : value;
+}
+
 function truncate(v: unknown): string {
   if (v === undefined) return "undefined";
   if (v === null) return "null";
@@ -51,7 +56,28 @@ function truncate(v: unknown): string {
     return v.length > MAX_VAL ? v.slice(0, MAX_VAL) + "…" : v;
   }
   if (typeof v === "number" || typeof v === "boolean") return String(v);
-  const s = JSON.stringify(v);
+  if (typeof v === "bigint") return `${v}n`;
+  // A DIAGNOSTIC may not be the thing that kills the app. JSON.stringify throws
+  // on BigInt, on a cycle, and on anything with a throwing toJSON — all of
+  // which are legal in state. Serialize what can be serialized (BigInt as
+  // `123n`, a cycle as `[Circular]`) and degrade to a label if even that fails.
+  let s: string;
+  try {
+    s = JSON.stringify(v, bigintSafe) ?? String(v);
+  } catch {
+    try {
+      const seen = new WeakSet<object>();
+      s = JSON.stringify(v, function (k, val) {
+        if (typeof val === "object" && val !== null) {
+          if (seen.has(val)) return "[Circular]";
+          seen.add(val);
+        }
+        return bigintSafe(k, val);
+      }) ?? String(v);
+    } catch {
+      s = `[unserializable ${typeof v}]`;
+    }
+  }
   return s.length > MAX_VAL ? s.slice(0, MAX_VAL) + "…" : s;
 }
 

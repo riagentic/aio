@@ -18,7 +18,19 @@ import { describeIssues, stringifyWithIssues } from "./persist-guard.ts";
 export interface PersistenceConfig {
   kvDb: SkvInstance | null;
   asyncDb: DB | null;
+  /** `db:` tables, keyed by SQL table name (see `resolveDbBindings`). */
   dbSchema: Record<string, TableDef> | undefined;
+  /** State → `{ [sqlTable]: rows }` projection. A `db:` table mirrors an array
+   *  INSIDE a cell (`contacts.contacts`), not a root key, so the diff input is
+   *  a projection rather than raw state. Omitted (engine-level callers) ⇒ raw
+   *  state, where a table name IS the root key. */
+  getTableState?: (s: Record<string, unknown>) => Record<string, unknown>;
+  /** What SQLite ACTUALLY holds at boot, keyed by SQL table name. The diff
+   *  baseline is "what the database has", which is only the same thing as
+   *  "what state has" when every row was already written — not when a binding
+   *  is new or a `state:` seed was adopted over an empty table. Consumed by
+   *  the first `resetPrevState()` (the orchestrator's post-boot re-seed). */
+  dbBaselineOverride?: Record<string, unknown>;
   persistKey: string;
   persistMode: "single" | "multi";
   persistMs: number;
@@ -77,7 +89,20 @@ export function createPersistenceManager(
   let persistTimer: ReturnType<typeof setTimeout> | null = null;
   let shuttingDown = false;
   let prevPersistedKeys: string[] = cfg.storedKeys ?? [];
-  let prevDbState: Record<string, unknown> = structuredClone(getState());
+  // What SQLite sees: only the arrays bound to `db:` tables, keyed by table
+  // name. Cloned so a later state commit can't retro-change the baseline the
+  // next diff is measured against.
+  const tableState = (): Record<string, unknown> =>
+    structuredClone((cfg.getTableState ?? ((s) => s))(getState()));
+  let _baselineOverride = cfg.dbBaselineOverride;
+  const baseline = (): Record<string, unknown> => {
+    const v = tableState();
+    if (_baselineOverride) {
+      for (const [t, rows] of Object.entries(_baselineOverride)) v[t] = rows;
+    }
+    return v;
+  };
+  let prevDbState: Record<string, unknown> = baseline();
 
   // One report per offending path — a persist runs every debounce window, and
   // the same bad field would otherwise log on every one of them.
@@ -91,12 +116,37 @@ export function createPersistenceManager(
   // A4: stamp schema + cell versions AFTER a successful state write — never
   // before, so a stamp can't describe state that was never saved. Closes the
   // loop applyCellMigrations() reads from at boot (`<appId>:__versions`).
+  //
+  // The stamp is MONOTONIC per cell. It used to write the RUNNING build's
+  // versions unconditionally, so a rollback re-stamped the cell DOWNWARD
+  // (v2 → v1) and the next roll-forward saw an "upgrade" that wasn't one:
+  // `onMigrate` ran a SECOND time over already-migrated data — a v1→v2
+  // money migration applied twice, silently. A version is a fact about the
+  // stored SHAPE, and an older build cannot make newer data older; it can
+  // only fail to understand it (which boot warns about, loudly).
+  let _storedVersions: Record<string, number> | null = null;
   async function _stampVersions(): Promise<void> {
     if (!kvDb || !cfg.appId) return;
     try {
       await kvDb.set(`${cfg.appId}:__schema`, PERSIST_SCHEMA_VERSION);
       if (cfg.cellVersions) {
-        await kvDb.set(`${cfg.appId}:__versions`, cfg.cellVersions);
+        const key = `${cfg.appId}:__versions`;
+        if (_storedVersions === null) {
+          _storedVersions = await kvDb.get<Record<string, number>>(key) ?? {};
+        }
+        const next = { ..._storedVersions };
+        let changed = false;
+        for (const [cell, v] of Object.entries(cfg.cellVersions)) {
+          const highest = Math.max(v, next[cell] ?? 0);
+          if (highest !== next[cell]) {
+            next[cell] = highest;
+            changed = true;
+          }
+        }
+        if (changed) {
+          await kvDb.set(key, next);
+          _storedVersions = next;
+        }
       }
     } catch (e) {
       log.error(`persist: version stamp failed — ${e}`);
@@ -106,7 +156,7 @@ export function createPersistenceManager(
 
   async function _syncSqlite(): Promise<void> {
     if (!asyncDb || !dbSchema) return;
-    const stateSnapshot = structuredClone(getState());
+    const stateSnapshot = tableState();
     try {
       await syncTables(asyncDb, dbSchema, stateSnapshot, prevDbState);
       prevDbState = stateSnapshot;
@@ -271,7 +321,7 @@ export function createPersistenceManager(
       const cycle = (async () => {
         try {
           if (asyncDb && dbSchema) {
-            const stateSnapshot = structuredClone(getState());
+            const stateSnapshot = tableState();
             try {
               await syncTables(asyncDb, dbSchema, stateSnapshot, prevDbState);
               prevDbState = stateSnapshot;
@@ -300,7 +350,8 @@ export function createPersistenceManager(
 
   /** Reset prev-state tracking after snapshot load */
   function resetPrevState(): void {
-    prevDbState = structuredClone(getState());
+    prevDbState = baseline();
+    _baselineOverride = undefined; // the boot picture is used exactly once
   }
 
   return { schedulePersist, flushPersist, setShuttingDown, resetPrevState };

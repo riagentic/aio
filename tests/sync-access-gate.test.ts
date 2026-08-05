@@ -70,6 +70,7 @@ function harness(db: DB) {
         cellAccessAllowed(rule, user as never, "sync");
     },
     getCellState: () => ({ items: [] }),
+    getClientCellState: () => ({ items: [] }),
     broadcastRaw: { fn: () => {} },
     log: { debug: () => {}, warn: () => {}, error: () => {} },
   });
@@ -182,6 +183,7 @@ Deno.test("sync pending op: a validate-rejected op is deleted, not broadcast or 
     db,
     syncCellIds: ["notes"],
     getCellState: () => ({ items: [] }),
+    getClientCellState: () => ({ items: [] }),
     broadcastRaw: { fn: (m: unknown) => broadcast.push(m) },
     log: { debug: () => {}, warn: () => {}, error: () => {} },
   });
@@ -232,6 +234,7 @@ Deno.test("sync op: a dispatch that fails is not acked, broadcast or kept", asyn
     db,
     syncCellIds: ["notes"],
     getCellState: () => ({ items: [] }),
+    getClientCellState: () => ({ items: [] }),
     broadcastRaw: { fn: (m: unknown) => broadcast.push(m) },
     log: { debug: () => {}, warn: () => {}, error: () => {} },
   });
@@ -270,6 +273,7 @@ Deno.test("sync pending op: a dispatch that fails is not acked, broadcast or kep
     db,
     syncCellIds: ["notes"],
     getCellState: () => ({ items: [] }),
+    getClientCellState: () => ({ items: [] }),
     broadcastRaw: { fn: (m: unknown) => broadcast.push(m) },
     log: { debug: () => {}, warn: () => {}, error: () => {} },
   });

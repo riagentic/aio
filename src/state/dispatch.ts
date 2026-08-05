@@ -230,6 +230,10 @@ export function createDispatch<S, A, E>(
   // the same process (or a subsequent test) doesn't silently suppress the
   // warning for action types already seen.
   const warnedInvalidEffect = new Set<string>();
+  // Same treatment for a throwing afterAction hook: it throws for every action
+  // of that type, and the failure is observe-only — one report per type, plus a
+  // running count so a suppressed storm is still visible.
+  const hookFailures = new Map<string, number>();
   const queue: {
     action: A;
     resolve: (value?: unknown) => void; // AIO-427: carries a method's return value
@@ -249,7 +253,17 @@ export function createDispatch<S, A, E>(
 
   function tag(v: unknown): string {
     const o = v as Record<string, unknown>;
-    return `${o?.type ?? "?"} ${JSON.stringify(o?.payload ?? {})}`;
+    // A label must never be the thing that throws: JSON.stringify dies on a
+    // BigInt or a cycle, and tag() is called from the error and debug paths —
+    // i.e. exactly when the payload is already unusual.
+    let payload: string;
+    try {
+      payload = JSON.stringify(o?.payload ?? {}, (_k, val) =>
+        typeof val === "bigint" ? `${val}n` : val) ?? "undefined";
+    } catch {
+      payload = "[unserializable payload]";
+    }
+    return `${o?.type ?? "?"} ${payload}`;
   }
 
   function reportPerf(
@@ -287,6 +301,41 @@ export function createDispatch<S, A, E>(
     if (perfLog) {
       perfLog(source, type ?? "unknown", duration, budget, getBreakdown?.());
     }
+  }
+
+  /** An observe-only hook failed. The action is already committed, so this is
+   *  never fatal and never rejects the caller — but it is never swallowed
+   *  either: the hook's whole output (a diff line, a journal entry, a timeline
+   *  frame) is missing for this action, and only this report says so. */
+  function reportHookFailure(e: unknown, action: A): void {
+    const actionType = String(
+      (action as Record<string, unknown>)?.type ?? "(unknown)",
+    );
+    const n = (hookFailures.get(actionType) ?? 0) + 1;
+    hookFailures.set(actionType, n);
+    if (n > 1) return; // already reported for this action type
+    const err = createAioError(
+      "HOOK_ERROR",
+      `afterAction hook threw for '${actionType}' — the action itself was ` +
+        `applied, but this action is MISSING from everything the hook feeds ` +
+        `(state diffs, action log, checkpoint, journal, timeline). ` +
+        `Observe-only hooks never break dispatch, so this was reported and ` +
+        `swallowed (further failures of this action type are counted, not ` +
+        `logged). Original: ${e instanceof Error ? e.message : String(e)}`,
+      { cellName: actionType.split(":")[0], actionType },
+    );
+    reportAioError(err, _reportOpts);
+    diagEmit({
+      type: "hook-error",
+      severity: "error",
+      source: "dispatch",
+      message: `afterAction hook threw for '${actionType}': ${
+        e instanceof Error ? e.message : String(e)
+      }`,
+      detail: { actionType },
+      hint:
+        "Diagnostics/journal/timeline for this action are lost. Common cause: a value in state that JSON cannot serialize (BigInt, a class instance, a cycle).",
+    });
   }
 
   // B-4: a dropped action must REJECT, not resolve — `await cell.method()` has
@@ -530,7 +579,27 @@ export function createDispatch<S, A, E>(
             log.debug(`state: changed [${changed.join(", ")}]`);
           }
         }
-        if (deps.afterAction) deps.afterAction(prev as S, nextState, current);
+        // `afterAction` is OBSERVE-ONLY (diagnostics, journal, timeline). The
+        // state is already committed here, so a hook that throws must NOT
+        // unwind dispatch: unguarded it escaped the drain loop, left every
+        // queued action's promise forever unsettled (`await cell.method()`
+        // hanging), and — reaching the top as an unhandled rejection — took the
+        // process down. One BigInt in state, via the diagnostics differ, was
+        // enough. Report loudly, then continue: the action itself succeeded.
+        if (deps.afterAction) {
+          try {
+            const r = deps.afterAction(prev as S, nextState, current) as
+              | undefined
+              | Promise<void>;
+            // A hook declared `void` may still hand back a promise; its
+            // rejection has to land here too, not on the process.
+            if (r && typeof (r as Promise<void>).then === "function") {
+              (r as Promise<void>).catch((e) => reportHookFailure(e, current));
+            }
+          } catch (e) {
+            reportHookFailure(e, current);
+          }
+        }
 
         for (const effect of reduced.effects) {
           if (

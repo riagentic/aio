@@ -65,30 +65,49 @@ text({ unique: true, default: "" }); // TEXT NOT NULL UNIQUE DEFAULT ''
 
 ## Framework integration
 
-Keys must match the corresponding state array names:
+A `db:` key names the **state array the table stores** — which, with cells, is
+an array FIELD of a cell (every top-level state key is a cell id, and a cell's
+state is an object):
 
 ```ts
-type AppState = {
-  page: string; // → aio_kv snapshot (scalar UI state)
-  users: User[]; // → SQL table (arrays)
-  orders: Order[]; // → SQL table
-};
+const contacts = cell("contacts", {
+  state: { contacts: [] as Contact[], nextId: 1 }, //   ← the array
+  methods: {/* … */},
+});
 
 await aio.run({
-  cells: [myCell],
-  db: { users: usersTable, orders: ordersTable },
+  cells: [contacts],
+  db: { contacts: contactsTable }, //  table "contacts" ↔ state.contacts.contacts
 });
 ```
 
-- Arrays under `db:` keys are **auto-excluded from the `aio_kv` snapshot**
-- On startup, rows load from SQLite into state
+How a key resolves — decided once at boot, announced in the log, never guessed:
+
+| Key          | Binds to                                                                               | SQL table    |
+| ------------ | -------------------------------------------------------------------------------------- | ------------ |
+| `items`      | the array field `items` of the **one** cell that declares it                           | `items`      |
+| `items`      | ambiguous (two cells declare `items`) → **boot error** naming both                     | —            |
+| `cell.items` | that cell's `items` field, explicitly (use it to disambiguate)                         | `cell_items` |
+| `cell.items` | no such cell/field → **boot error** listing the array fields that do exist             | —            |
+| `rows`       | nothing matches → the table is **SQL-only**: created, warned about, yours via `app.db` | `rows`       |
+
+```
+db: table "contacts" ↔ state.contacts.contacts (auto-sync)
+db: table "rows" is SQL-only — no state array is bound to it …
+```
+
+- A bound array is **auto-excluded from the `aio_kv` snapshot** — SQLite owns
+  those rows, and a second copy in the snapshot would be a stale twin
+- On startup, rows load from SQLite into the bound field
 - After each reducer run, changed arrays sync back (debounced, default 100ms)
+- Nothing is ever written to a state key no cell owns
 
 ## Auto-sync
 
-Mutate state arrays in reducers. The framework handles the rest:
+Mutate the bound array in a method. The framework handles the rest:
 
 ```ts
+// db: { orders: ordersTable }  ↔  state.orders.orders
 const orders = cell("orders", {
   state: { orders: [] as Order[], nextId: 1 },
   methods: {
@@ -110,13 +129,11 @@ const orders = cell("orders", {
 Immer guarantees new array references on mutation. Framework detects via `!==`
 and syncs only affected tables.
 
-> **A `db:` table name must not collide with a cell.** A `db:` table maps to the
-> top-level state slice of the same name, which must **be an array**. If you
-> name a table after a cell (whose slice is an object, e.g. `{ nfts: [...] }`),
-> the table's rows would overwrite that object slice at boot and break the
-> cell's methods — so aio **throws at boot**, naming both. Rename the table
-> (`nft_rows`), or point it at a genuinely array-root slice. To persist a cell's
-> nested array field, use direct `createDB` (below) rather than `db:` auto-sync.
+> **A table's rows can never overwrite a cell's slice.** Rows are only ever
+> written to the array field a table is BOUND to. A table named after a cell
+> that has no array field of that name binds to nothing: it is created as an
+> SQL-only table and boot says so, naming the cell's array fields so the
+> intended binding is one edit away (`db: { "nfts.items": table({…}) }`).
 
 ## Testing with an in-memory DB
 
@@ -138,10 +155,16 @@ try {
 
 ## Direct SQL access (`app.db`)
 
+`execute()` runs **exactly one statement**. A multi-statement string is rejected
+with the fix in the message — SQLite prepares the first statement and discards
+the rest, so a pasted migration would apply partially and report `changes: 0`
+with no error. Run several statements with `transaction([…])` (atomic), or one
+call each.
+
 ```ts
 interface DB {
   query<T>(sql: string, params?: unknown[]): Promise<QueryResult<T>>;
-  execute(sql: string, params?: unknown[]): Promise<QueryResult>;
+  execute(sql: string, params?: unknown[]): Promise<QueryResult>; // one statement
   transaction(
     stmts: { sql: string; params?: unknown[] }[],
   ): Promise<QueryResult[]>;
@@ -254,6 +277,14 @@ await app.db!.transaction([
 | Read within transaction  | yes (read-your-writes) | no       |
 | Branch on query result   | yes                    | no       |
 | Statements known upfront | either                 | required |
+
+### Integers beyond 2^53
+
+SQLite INTEGERs are 64-bit; JavaScript numbers are not. A single row holding a
+value beyond ±2^53 makes `node:sqlite` throw on every read of that table
+(`RangeError: Value is too large…`) — including the boot-time load. The error
+names the table and the offending column, and the fix is to store the value as
+TEXT, or to read that column with an explicit `CAST(col AS TEXT)`.
 
 ## State sync mechanics
 

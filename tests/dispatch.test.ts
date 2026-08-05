@@ -1,6 +1,8 @@
 import { assertEquals, assertRejects } from "@std/assert";
 import { createDispatch, deepFreeze } from "../src/state/dispatch.ts";
 import type { AioError } from "../src/diagnostics/error.ts";
+import { initDiagnostics } from "../src/diagnostics/mod.ts";
+import { computeDiffs, formatDiff } from "../src/diagnostics/state-diff.ts";
 
 const noop = { debug: () => {}, warn: () => {}, error: () => {} };
 
@@ -1109,4 +1111,173 @@ Deno.test("dispatch: drain(timeout) seals rather than waiting forever", async ()
   // `flushPersist` already read the state it would change. Pin it: even the
   // effect-tagged path must reject once the drain has ended.
   await assertRejects(() => dispatch({ type: "LATE", _source: "Effect" }));
+});
+
+// ── afterAction is OBSERVE-ONLY: it may never break dispatch ────────────────
+// (restart fuzzer, 2026-08) An unguarded `deps.afterAction(...)` let a throwing
+// diagnostics hook unwind the drain loop: the method promise never settled and
+// the escaping rejection killed the process. One BigInt in state — which the
+// diagnostics differ hands to JSON.stringify — was enough.
+
+/** "settled" if p finishes within ms, "hung" otherwise. Never leaks a timer. */
+async function settledWithin(
+  p: Promise<unknown>,
+  ms: number,
+): Promise<"settled" | "hung"> {
+  let t: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<"hung">((r) => {
+    t = setTimeout(() => r("hung"), ms);
+  });
+  const outcome = await Promise.race([
+    p.then(() => "settled" as const, () => "settled" as const),
+    timeout,
+  ]);
+  if (t !== undefined) clearTimeout(t);
+  return outcome;
+}
+
+function counterDispatch(
+  afterAction: (p: { n: number }, n: { n: number }, a: unknown) => void,
+  errors: AioError[],
+) {
+  let state = { n: 0 };
+  const dispatch = createDispatch<
+    { n: number },
+    { type: string },
+    { type: string }
+  >({
+    reduce: (s) => ({ state: { n: s.n + 1 }, effects: [] }),
+    execute: () => {},
+    getState: () => state,
+    setState: (s) => {
+      state = s;
+    },
+    onDone: () => {},
+    afterAction: afterAction as (
+      p: { n: number },
+      n: { n: number },
+      a: { type: string },
+    ) => void,
+    reportOpts: { onError: (e) => errors.push(e) },
+    log: noop,
+    debug: false,
+  });
+  return { dispatch, get: () => state };
+}
+
+Deno.test("dispatch: a throwing afterAction is reported and swallowed — the promise still settles", async () => {
+  const errors: AioError[] = [];
+  const { dispatch, get } = counterDispatch(() => {
+    throw new TypeError("Do not know how to serialize a BigInt");
+  }, errors);
+
+  assertEquals(
+    await settledWithin(dispatch({ type: "INC" }), 1000),
+    "settled",
+    "the method promise must settle even though the hook threw",
+  );
+  assertEquals(get().n, 1, "the action itself was applied");
+  // and the loop is not wedged — a later action still processes
+  await dispatch({ type: "INC" });
+  assertEquals(get().n, 2);
+
+  assertEquals(errors.length, 1, "reported once per action type, not silent");
+  assertEquals(errors[0]?.code, "HOOK_ERROR");
+  assertEquals(
+    errors[0]!.message.includes("BigInt"),
+    true,
+    "the original cause is carried through",
+  );
+});
+
+Deno.test("dispatch: a throwing afterAction never blocks the queue behind it", async () => {
+  const errors: AioError[] = [];
+  const { dispatch, get } = counterDispatch(() => {
+    throw new Error("hook down");
+  }, errors);
+  const all = Promise.all([
+    dispatch({ type: "A" }),
+    dispatch({ type: "B" }),
+    dispatch({ type: "C" }),
+  ]);
+  assertEquals(await settledWithin(all, 1000), "settled");
+  assertEquals(get().n, 3, "every queued action was applied");
+  assertEquals(errors.length, 3, "one report per distinct action type");
+});
+
+Deno.test("dispatch: an afterAction that REJECTS asynchronously is caught too", async () => {
+  const errors: AioError[] = [];
+  const { dispatch, get } = counterDispatch(
+    (() => Promise.reject(new Error("async hook down"))) as unknown as (
+      p: { n: number },
+      n: { n: number },
+      a: unknown,
+    ) => void,
+    errors,
+  );
+  assertEquals(await settledWithin(dispatch({ type: "INC" }), 1000), "settled");
+  await new Promise((r) => setTimeout(r, 10)); // let the rejection land
+  assertEquals(get().n, 1);
+  assertEquals(errors.length, 1, "reported, not an unhandled rejection");
+  assertEquals(errors[0]?.code, "HOOK_ERROR");
+});
+
+Deno.test("dispatch: BigInt state survives the REAL diagnostics hook (differ included)", async () => {
+  const dir = await Deno.makeTempDir({ prefix: "diag-bigint-" });
+  try {
+    const hooks = initDiagnostics(
+      { dev: { stateDiffs: true, crashHandler: false, checkpoint: false } },
+      false,
+      dir,
+    );
+    assertEquals(hooks !== null, true);
+    const errors: AioError[] = [];
+    let state: Record<string, unknown> = { c: { big: 0n } };
+    const dispatch = createDispatch<
+      Record<string, unknown>,
+      { type: string },
+      { type: string }
+    >({
+      reduce: (s) => ({
+        state: { ...s, c: { big: (s.c as { big: bigint }).big + 1n } },
+        effects: [],
+      }),
+      execute: () => {},
+      getState: () => state,
+      setState: (s) => {
+        state = s;
+      },
+      onDone: () => {},
+      afterAction: (p, n, a) =>
+        hooks!.afterAction(
+          p as Record<string, unknown>,
+          n as Record<string, unknown>,
+          a as { type: string },
+        ),
+      reportOpts: { onError: (e) => errors.push(e) },
+      log: noop,
+      debug: false,
+    });
+
+    assertEquals(
+      await settledWithin(dispatch({ type: "c:bump" }), 1000),
+      "settled",
+      "a BigInt in state must not hang the method promise",
+    );
+    assertEquals((state.c as { big: bigint }).big, 1n, "the action applied");
+    assertEquals(errors, [], "nothing broke — the differ is BigInt-safe now");
+    await hooks!.onStop();
+
+    // …and the diagnostic itself still WORKS: the BigInt is RENDERED, not
+    // merely survived. (The hook logs at debug level, so assert on the
+    // formatter the hook calls.)
+    const [d] = computeDiffs({ c: { big: 0n } }, state);
+    assertEquals(
+      formatDiff(d!.cell, d!.changes),
+      "c: big 0n→1n",
+      "BigInt rendered instead of throwing",
+    );
+  } finally {
+    await Deno.remove(dir, { recursive: true }).catch(() => {});
+  }
 });

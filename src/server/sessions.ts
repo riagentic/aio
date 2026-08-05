@@ -42,6 +42,13 @@ export interface SessionStore {
   revokeUser(userId: string): number;
   /** Live session count (sweeps expired first). */
   count(): number;
+  /** Observe revocations. A revoked token must stop working EVERYWHERE, and
+   *  an already-open WebSocket is not reachable by a token check that only
+   *  ever ran at upgrade — the WS manager subscribes here so "logout" /
+   *  "kick" disarms live sockets the moment it happens rather than at their
+   *  next poll. Observe-only: a throwing listener never breaks a revocation.
+   *  Returns an unsubscribe function. */
+  onRevoked(listener: () => void): () => void;
   close(): void;
 }
 
@@ -89,6 +96,17 @@ export function openSessionStore(
   // accumulate forever — one sweep per open keeps auth.db lean.
   sweep.run(Date.now());
 
+  const listeners = new Set<() => void>();
+  const emitRevoked = (): void => {
+    for (const l of listeners) {
+      try {
+        l();
+      } catch (e) {
+        console.warn(`[aio] auth: session revocation listener failed — ${e}`);
+      }
+    }
+  };
+
   return {
     issue(user, opts) {
       const token = newToken();
@@ -122,6 +140,7 @@ export function openSessionStore(
       const r = del.run(hash(token));
       if (r.changes > 0) {
         console.warn(`[aio] auth: session revoked`);
+        emitRevoked();
         return true;
       }
       return false;
@@ -132,6 +151,7 @@ export function openSessionStore(
         console.warn(
           `[aio] auth: all sessions revoked for user=${userId} (${r.changes})`,
         );
+        emitRevoked();
       }
       return Number(r.changes);
     },
@@ -139,7 +159,12 @@ export function openSessionStore(
       sweep.run(Date.now());
       return Number((cnt.get() as { n: number }).n);
     },
+    onRevoked(listener) {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
     close() {
+      listeners.clear();
       db.close();
     },
   };

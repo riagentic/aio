@@ -77,6 +77,76 @@ export function dbWorkerMissingIn(
   return null;
 }
 
+/** How many SQL statements `sql` contains — string literals, quoted
+ *  identifiers and comments do not count. A `CREATE TRIGGER` body is one
+ *  statement however many semicolons its `BEGIN … END` block holds. */
+export function countSqlStatements(sql: string): number {
+  if (
+    /^\s*CREATE\s+(OR\s+REPLACE\s+)?(TEMP\s+|TEMPORARY\s+)?TRIGGER\b/i.test(sql)
+  ) {
+    return 1;
+  }
+  let count = 0;
+  let hasContent = false; // anything meaningful since the last ';'
+  for (let i = 0; i < sql.length; i++) {
+    const c = sql[i]!;
+    if (c === "'" || c === '"' || c === "`") {
+      hasContent = true;
+      i++;
+      while (i < sql.length) {
+        if (sql[i] === c) {
+          if (sql[i + 1] === c) { // doubled → escaped, stay inside
+            i += 2;
+            continue;
+          }
+          break;
+        }
+        i++;
+      }
+      continue;
+    }
+    if (c === "[") {
+      hasContent = true;
+      while (i < sql.length && sql[i] !== "]") i++;
+      continue;
+    }
+    if (c === "-" && sql[i + 1] === "-") {
+      while (i < sql.length && sql[i] !== "\n") i++;
+      continue;
+    }
+    if (c === "/" && sql[i + 1] === "*") {
+      i += 2;
+      while (i < sql.length && !(sql[i] === "*" && sql[i + 1] === "/")) i++;
+      i++;
+      continue;
+    }
+    if (c === ";") {
+      if (hasContent) count++;
+      hasContent = false;
+      continue;
+    }
+    if (!/\s/.test(c)) hasContent = true;
+  }
+  if (hasContent) count++;
+  return count;
+}
+
+/** The message for a multi-statement `execute()`, or null when `sql` is one
+ *  statement. Rejecting is the fix, not multi-exec: single-statement execution
+ *  is a security property the `am sql` route depends on. */
+export function multiStatementRejection(sql: string): string | null {
+  const n = countSqlStatements(sql);
+  if (n <= 1) return null;
+  return `db.execute() runs exactly ONE statement — this SQL has ${n}. ` +
+    `SQLite prepares the FIRST and discards the rest, so a pasted ` +
+    `multi-statement migration applied partially, returned changes: 0, and ` +
+    `raised no error. Run them atomically instead:\n` +
+    `  db.transaction([{ sql: "…" }, { sql: "…" }])\n` +
+    `or call execute() once per statement. (One statement per call is also ` +
+    `what keeps the \`am sql\` route from being a multi-statement injection ` +
+    `surface, so it is enforced, not relaxed.)`;
+}
+
 /** Default SQLite PRAGMA statements for WAL mode, cache, and foreign keys */
 export const DEFAULT_PRAGMAS = [
   "PRAGMA journal_mode = WAL",
@@ -253,6 +323,8 @@ export function createDB(path: string, opts: DBOpts = {}): DB {
     },
     // Writes serialize through the lock so they can't sneak into an open transaction
     execute(sql: string, params?: unknown[]): Promise<QueryResult> {
+      const bad = multiStatementRejection(sql);
+      if (bad) return Promise.reject(new Error(bad));
       return withWriterLock(() =>
         gate<QueryResult>({ type: "execute", sql, params })
       );
@@ -286,8 +358,11 @@ export function createDB(path: string, opts: DBOpts = {}): DB {
             // tx.query goes to writer — must see current transaction's own writes
             query: <T>(sql: string, params?: unknown[]) =>
               gate<QueryResult<T>>({ type: "query", sql, params }, true),
-            execute: (sql: string, params?: unknown[]) =>
-              gate<QueryResult>({ type: "execute", sql, params }),
+            execute: (sql: string, params?: unknown[]) => {
+              const bad = multiStatementRejection(sql);
+              if (bad) return Promise.reject(new Error(bad));
+              return gate<QueryResult>({ type: "execute", sql, params });
+            },
           };
           const result = await stmts_or_fn(tx);
           await gate<QueryResult>({ type: "execute", sql: "COMMIT" });
