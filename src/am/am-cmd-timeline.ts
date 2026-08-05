@@ -11,7 +11,11 @@ import type { GlobalFlags } from "./am-types.ts";
 import { detectMode, out, outError } from "./am-output.ts";
 import { amCtx, defaultJournalPath, resolveAmAppId } from "./am-utils.ts";
 import { trojanGet, trojanPost } from "./am-http.ts";
-import { type JournalRow, parseJournalEntries } from "./record.ts";
+import {
+  isRedactedRow,
+  type JournalRow,
+  parseJournalEntries,
+} from "./record.ts";
 import type { DiffEntry, TimelineEntry } from "../server/timeline.ts";
 
 /** hh:mm:ss for a ms timestamp (local time). */
@@ -50,7 +54,14 @@ function renderTimeline(entries: TimelineEntry[]): string {
       : e.payload !== undefined
       ? ` ${brief(e.payload)}`
       : "";
-    lines.push(`#${e.seq}  ${clock(e.ts)}  ${e.type}${argStr}`);
+    // A write-set commit is shown as what it IS — the async method's writes —
+    // rather than as the opaque `cell:__setFoo` symbol the reducer sees. The
+    // type is not renamed (a timeline that renames what happened is a timeline
+    // that lies); the attribution is added beside it.
+    const what = e.origin
+      ? `${e.origin} ⟵ write-set (${e.type.slice(e.type.indexOf(":") + 1)})`
+      : e.type;
+    lines.push(`#${e.seq}  ${clock(e.ts)}  ${what}${argStr}`);
     for (const d of e.diff) lines.push(renderDiff(d));
   }
   return lines.join("\n");
@@ -175,9 +186,29 @@ export async function cmdReplay(
 
   // Re-dispatch each action against the running app, in order.
   const ctx = amCtx(flags);
-  const results: { seq: number; type: string; ok: boolean; error?: string }[] =
-    [];
+  const results: {
+    seq: number;
+    type: string;
+    ok: boolean;
+    error?: string;
+    skipped?: true;
+  }[] = [];
   for (const r of rows) {
+    // A redacted row has no arguments — they were deliberately never written.
+    // Re-dispatching it would send the literal string "[redacted]" as the
+    // payload to a LIVE app: a method invoked with garbage, in the name of
+    // reproducing a bug. Refuse it, name it, and keep going, because the rest
+    // of the range is still a real repro — just an incomplete one.
+    if (isRedactedRow(r)) {
+      results.push({
+        seq: r.seq,
+        type: r.type,
+        ok: false,
+        skipped: true,
+        error: "redacted — arguments were never recorded, cannot replay",
+      });
+      continue;
+    }
     const res = await trojanPost(
       ctx.port,
       "dispatch",
@@ -192,21 +223,36 @@ export async function cmdReplay(
     if (!res.ok) break; // stop at the first failure — repro fidelity
   }
 
-  const failed = results.find((r) => !r.ok);
+  // A skip is not a failure of the replay run — it is a hole IN the repro, and
+  // it has to be visible either way. Only a real dispatch error stops the run.
+  const failed = results.find((r) => !r.ok && !r.skipped);
+  const skipped = results.filter((r) => r.skipped);
   if (mode === "pretty") {
     const lines = results.map((r) =>
-      `${r.ok ? "✓" : "✗"} #${r.seq} ${r.type}${r.error ? ` — ${r.error}` : ""}`
+      `${r.skipped ? "⊘" : r.ok ? "✓" : "✗"} #${r.seq} ${r.type}${
+        r.error ? ` — ${r.error}` : ""
+      }`
     );
     lines.push(
       failed
         ? `replay stopped at #${failed.seq} (${
           results.filter((r) => r.ok).length
         }/${rows.length} applied)`
-        : `replayed ${results.length} action(s)`,
+        : `replayed ${results.filter((r) => r.ok).length} action(s)`,
     );
+    if (skipped.length > 0) {
+      lines.push(
+        `⚠ ${skipped.length} redacted action(s) SKIPPED — this repro is ` +
+          `incomplete; their arguments were never recorded`,
+      );
+    }
     out(lines.join("\n"), mode);
   } else {
-    out({ replayed: results.filter((r) => r.ok).length, results }, mode);
+    out({
+      replayed: results.filter((r) => r.ok).length,
+      skipped: skipped.length,
+      results,
+    }, mode);
   }
   if (failed) Deno.exit(1);
 }

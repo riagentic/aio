@@ -69,7 +69,7 @@ export function routeCommand(
     }
 
     // Vitals pong — forward to the transport probe so RTT/staleness stays
-    // fresh in AIR/IPC mode (the WS handler in browser-transport-ws.ts
+    // fresh in AIR/IPC mode (the WS handler in browser-air-transport.ts
     // never sees these frames).
     case "vitals-pong":
       try {

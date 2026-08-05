@@ -91,9 +91,21 @@ export type DispatchSetupDeps<S, A, E, App = any> = {
   cellNames?: Set<string>;
 };
 
-// Internal action types to hide from time-travel history (framework noise)
+// Internal action types to hide from time-travel history (framework noise).
+//
+// `:__set` is NOT in this list, and must not be put back. An async or
+// transactional method commits everything it wrote as one atomic
+// `cell:__setMethod`; hiding it meant time travel recorded the state BEFORE the
+// write and never the state after. `undo` therefore restored a state the app
+// had never been in, and in the `undo`-then-`redo` shape the committed write
+// was destroyed outright — the history had no entry that contained it.
+//
+// Time travel's contract is that every entry is a state the app really had.
+// Anything that CHANGED state belongs in it; only markers that change nothing
+// (`:__exec`) or that carry a transition the user cannot meaningfully step
+// through (`:__error`) are noise.
 const TT_SKIP_SUFFIXES = [":__exec"];
-const TT_SKIP_CONTAINS = [":__set", ":__error"];
+const TT_SKIP_CONTAINS = [":__error"];
 function isInternalAction(type: string): boolean {
   if (TT_SKIP_SUFFIXES.some((s) => type.endsWith(s))) return true;
   if (TT_SKIP_CONTAINS.some((s) => type.includes(s))) return true;

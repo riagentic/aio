@@ -8,7 +8,11 @@
 // (SIGKILL). Set `sync: true` to fsync every append for power-cut durability
 // (slower). Replay is by re-reducing — state transitions only, effects dropped —
 // so it never re-runs I/O.
-import { noRedaction, REDACTED } from "../diagnostics/redact.ts";
+import {
+  isRedactedAction,
+  noRedaction,
+  REDACTED,
+} from "../diagnostics/redact.ts";
 import type { Redactor } from "../diagnostics/redact.ts";
 
 export type JournalEntry = {
@@ -16,11 +20,29 @@ export type JournalEntry = {
   type: string;
   payload?: unknown;
   ts: number;
+  /** The originating action type, for a write-set commit (`cell:__setFoo`
+   *  written by the async method `cell:foo`). Recorded so a reader — and the
+   *  redactor — can attribute the entry to the method that produced it. */
+  origin?: string;
+  /** Set when `redactActions` dropped this entry's payload.
+   *
+   *  It is a REFUSAL MARKER, not a note. The payload of a `cell:method` entry
+   *  IS its arguments, so an entry without one cannot be re-reduced: replay ran
+   *  the method with no arguments, which for the documented wallet example
+   *  (`redactActions: ["vault:*"]`) threw inside the reducer and made
+   *  `aio.run()` REJECT — and since the journal tail persists, every subsequent
+   *  restart failed identically until a human deleted the file. A tolerant
+   *  reducer got the quiet version of the same thing: a wrong recovered state,
+   *  silently. `replayJournal` therefore skips these and REPORTS them. */
+  redacted?: true;
 };
 
 export type Journal = {
   /** Append a committed action; returns its monotonic seq. */
-  append(action: { type: string; payload?: unknown }, ts: number): number;
+  append(
+    action: { type: string; payload?: unknown; origin?: string },
+    ts: number,
+  ): number;
   /** All entries with seq > `after` (the persisted watermark), in order. */
   readSince(after: number): JournalEntry[];
   /** The persisted watermark — replay starts strictly after this seq. */
@@ -33,19 +55,55 @@ export type Journal = {
   close(): void;
 };
 
+/** An entry replay REFUSED, and why — so the caller can say so out loud. */
+export type SkippedEntry = { seq: number; type: string; reason: "redacted" };
+
+/** What a replay reconstructed, and what it could not. */
+export type ReplayResult<S> = {
+  state: S;
+  /** Entries actually re-reduced. */
+  replayed: number;
+  /** Entries deliberately not replayed. Never empty silently — `aio.run` warns
+   *  with the exact types and seq range, because the recovered state is missing
+   *  whatever they wrote and only the operator can judge what that costs. */
+  skipped: SkippedEntry[];
+};
+
+/** True when this entry's payload was replaced by the redactor, so its
+ *  arguments are gone and re-reducing it would run the method with none.
+ *
+ *  Both the explicit marker and the bare sentinel are treated as refusals: the
+ *  marker is what current journals write, the sentinel covers a file written
+ *  before the marker existed. An app whose real payload is literally the string
+ *  `"[redacted]"` is skipped too — that direction is the safe one. */
+export function isUnreplayable(e: JournalEntry): boolean {
+  return e.redacted === true || e.payload === REDACTED;
+}
+
 /** Replay journalled actions on top of a restored snapshot — pure. Re-reduces
  *  each action for its STATE transition only (effects are discarded), so I/O is
- *  never repeated. Entries are applied in seq order. */
+ *  never repeated. Entries are applied in seq order.
+ *
+ *  A redacted entry is SKIPPED rather than replayed, and returned in `skipped`.
+ *  Replaying one is not a degraded reconstruction, it is a wrong one — see
+ *  `JournalEntry.redacted`. */
 export function replayJournal<S, A>(
   state: S,
   entries: JournalEntry[],
   reduce: (state: S, action: A) => { state: S },
-): S {
+): ReplayResult<S> {
   let s = state;
+  let replayed = 0;
+  const skipped: SkippedEntry[] = [];
   for (const e of [...entries].sort((a, b) => a.seq - b.seq)) {
+    if (isUnreplayable(e)) {
+      skipped.push({ seq: e.seq, type: e.type, reason: "redacted" });
+      continue;
+    }
     s = reduce(s, { type: e.type, payload: e.payload } as A).state;
+    replayed++;
   }
-  return s;
+  return { state: s, replayed, skipped };
 }
 
 /** Parse a journal file's lines into entries, skipping any corrupt tail line
@@ -123,12 +181,22 @@ export function createJournal(
   return {
     append(action, ts) {
       const s = ++seq;
+      // The write-set of a redacted method carries the same secret as its
+      // arguments, under a DIFFERENT type — `isRedactedAction` checks the
+      // origin too so an exact pattern cannot plug one and leave the other.
+      const hide = isRedactedAction(redacted, action.type, action.origin);
       writeLine(
         JSON.stringify({
           seq: s,
           type: action.type,
-          payload: redacted(action.type) ? REDACTED : action.payload,
+          payload: hide ? REDACTED : action.payload,
           ts,
+          ...(action.origin !== undefined ? { origin: action.origin } : {}),
+          // The marker travels WITH the entry: replay must be able to refuse it
+          // without pattern-matching a sentinel string, and the file outlives
+          // the config that redacted it (a journal written under
+          // `redactActions` is still there after the option is removed).
+          ...(hide ? { redacted: true as const } : {}),
         }) +
           "\n",
       );

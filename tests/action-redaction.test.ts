@@ -219,12 +219,22 @@ Deno.test("redactActions: the secret reaches no sink, and nothing else changes",
     const journalText = await Deno.readTextFile(`${dir}/state.db.journal`);
     assert(
       journalText.includes("vault:unlockWith"),
-      `the action must still be journalled for replay:\n${journalText}`,
+      `the action must still be journalled — its type, sequence and timestamp ` +
+        `are what redaction promises to keep:\n${journalText}`,
     );
     assert(
       !journalText.includes(SECRET),
       `the passphrase is on disk:\n${journalText}`,
     );
+    // NOT "journalled FOR REPLAY". The payload of a `cell:method` action IS its
+    // arguments, so an entry without one cannot be re-reduced — replaying it
+    // ran the method with none, which took the whole boot down and, with a
+    // tolerant reducer, quietly recovered the wrong state. The entry carries a
+    // refusal marker and replay skips it, loudly
+    // (tests/journal-redacted-replay.test.ts).
+    const vaultLine = journalText.trim().split("\n").map((l) => JSON.parse(l))
+      .find((e) => e.type === "vault:unlockWith");
+    assertEquals(vaultLine.redacted, true, "marked unreplayable, not offered");
 
     // 2. The timeline, read the way a developer reads it (`am timeline`).
     const res = await fetch(`${srv.url}/__aio/trojan/timeline`);

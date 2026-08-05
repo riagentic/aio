@@ -5,7 +5,6 @@
 // This file is the thin orchestrator. Logic lives in:
 //   protocol-types.ts         — types + constants
 //   protocol-diagnostics.ts   — _diagEmit, state integrity
-//   protocol-offline.ts       — IndexedDB offline queue
 //   protocol-status.ts        — DOM connection status widget
 //   protocol-devtools.ts      — Redux DevTools integration
 //   protocol-router.ts        — client-side router
@@ -53,6 +52,7 @@ import {
 import { formatDiagEvent } from "../vitals/diag-formatter.ts";
 import type { DiagEvent } from "../vitals/types.ts";
 import { resetTT as _resetTT } from "../air/time-travel-panel.ts";
+import { wrapTransport } from "../protocol/transport-shared.ts";
 
 // ── Re-export state-core types/functions needed by browser-air.ts ───
 export type { _CoreCellRef, _CoreTransport, _HandleResult };
@@ -92,11 +92,7 @@ export type {
   RouteProps,
   RouteState,
 } from "../protocol/protocol-types.ts";
-export {
-  OFFLINE_MAX_AGE,
-  OFFLINE_MAX_QUEUE,
-  WS_MAX_QUEUE,
-} from "../protocol/protocol-types.ts";
+export { WS_MAX_QUEUE } from "../protocol/protocol-types.ts";
 
 import { _diagEmit } from "../protocol/protocol-diagnostics.ts";
 export {
@@ -106,14 +102,6 @@ export {
   _resetInitialShapeKeys,
   _w,
 } from "../protocol/protocol-diagnostics.ts";
-
-export {
-  _clearOfflineQueue,
-  _loadOfflineQueue,
-  _resetIDB,
-  _saveOfflineAction,
-  MAX_OFFLINE_ACTIONS,
-} from "../protocol/protocol-offline.ts";
 
 export {
   _hideStatus,
@@ -367,8 +355,27 @@ export function ensureConnected(): void {
   // in that boot window is BUFFERED — never leaked to a plain send, which would
   // skip HLC stamping + the offline queue and silently diverge the op-log.
   const plainSend = _clientSend ?? undefined;
-  const send = plainSend
-    ? (action: { type: string; payload?: unknown }) => {
+  bindAllCellsReactive(plainSend ? _makeSendWrapper(plainSend) : undefined);
+  _initSyncIfNeeded();
+  _callConnectFn();
+}
+
+/** The send the cell bindings actually get: the client transport, with
+ *  sync-cell actions routed through the CRDT engine (and buffered while that
+ *  engine boots).
+ *
+ *  Built through `wrapTransport`, NOT as a bare arrow: the wrapper is what the
+ *  binding layer sees, so it has to answer the same capability questions the
+ *  transport does. As a bare arrow it answered "I do not arm ack clocks", the
+ *  binding armed the 15s clock at dispatch time, and every action dispatched
+ *  while offline was rejected at 15s and then delivered on reconnect. Exported
+ *  for the guard test that pins exactly that. */
+export function _makeSendWrapper(
+  plainSend: (action: { type: string; payload?: unknown }) => void,
+): (action: { type: string; payload?: unknown }) => void {
+  return wrapTransport(
+    plainSend,
+    (action: { type: string; payload?: unknown }) => {
       if (_syncRoute) {
         if (_syncRoute(action)) return;
         plainSend(action);
@@ -380,11 +387,8 @@ export function ensureConnected(): void {
         return;
       }
       plainSend(action);
-    }
-    : undefined;
-  bindAllCellsReactive(send);
-  _initSyncIfNeeded();
-  _callConnectFn();
+    },
+  );
 }
 
 // ── Sync engine wiring (lazy — only when a registered cell has sync) ──

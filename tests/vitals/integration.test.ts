@@ -1,7 +1,10 @@
 // tests/vitals/integration.test.ts
 import { assertEquals, assertExists } from "@std/assert";
 import { createVitalsSystem } from "../../src/vitals/mod.ts";
-import { createTransportProbeClient } from "../../src/vitals/transport-probe.ts";
+import {
+  createTransportProbeClient,
+  createTransportProbeServer,
+} from "../../src/vitals/transport-probe.ts";
 import { DEFAULT_THRESHOLDS } from "../../src/vitals/types.ts";
 import type { DiagEvent, VitalAlert } from "../../src/vitals/types.ts";
 
@@ -36,7 +39,10 @@ Deno.test("integration: transport probe client <-> server ping/pong flow", () =>
   });
 
   const ping = client.createPing();
-  sys.serverTransport.onClientPing("test_client", ping.t1);
+  // `ping.t1` is the CLIENT's clock and is echoed back in the pong for the
+  // client to compute its own RTT. The server's liveness record never touches
+  // it — see the one-clock invariant in transport-probe.ts.
+  sys.serverTransport.onClientPing("test_client");
 
   const pong = {
     t1: ping.t1,
@@ -56,16 +62,29 @@ Deno.test("integration: transport probe client <-> server ping/pong flow", () =>
 });
 
 Deno.test("integration: endpoint data with frozen client", () => {
-  const sys = createVitalsSystem({});
-  sys.serverTransport.onClientPing("c1", Date.now());
-  sys.serverTransport.onClientPing("c2", Date.now() - 5000);
-  sys.serverTransport.checkAllClients();
+  // Ageing a client means advancing the SERVER's clock — the probe stamps
+  // liveness itself and takes no timestamp from a caller (the one-clock
+  // invariant in transport-probe.ts). `createVitalsSystem` deliberately does
+  // not expose that clock: it is a test seam, not public surface, so the
+  // freeze path is driven through the probe it wires.
+  let clock = 1_000_000;
+  const probe = createTransportProbeServer({
+    thresholds: DEFAULT_THRESHOLDS,
+    now: () => clock,
+  });
+  // c1 pings and then goes silent for 5s; c2 pings just before the check.
+  probe.onClientPing("c1");
+  clock += 5000;
+  probe.onClientPing("c2");
+  probe.checkAllClients();
 
-  const data = sys.getEndpointData();
-  assertEquals(data.clients.length, 2);
-  const frozen = data.clients.find((c) => c.status === "frozen");
+  const all = probe.getAllClients();
+  assertEquals(all.length, 2);
+  const frozen = all.find((c) => c.status === "frozen");
   assertExists(frozen);
-  sys.destroy();
+  assertEquals(frozen!.clientId, "c1");
+  assertEquals(all.find((c) => c.clientId === "c2")!.status, "healthy");
+  probe.destroy();
 });
 
 Deno.test("integration: VitalsSystem fires onDiagnostic on loop degradation", () => {

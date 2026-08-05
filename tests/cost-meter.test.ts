@@ -28,7 +28,7 @@ Deno.test("cost: rates are per measured second, not per requested window", () =>
   // divisor is the span actually observed — first sample to now.
   for (let i = 0; i < 4; i++) {
     m.recordSend(1000, "c0", "patch");
-    m.recordAttribution("hw", "cpu", 800);
+    m.recordAttribution("hw", "cpu", 800, m.beginRound());
     tick(500); // …including after the last one: that time really did pass
   }
   const r = m.report({ windowSec: 60, now: now() });
@@ -40,10 +40,10 @@ Deno.test("cost: rates are per measured second, not per requested window", () =>
 Deno.test("cost: the window excludes older samples", () => {
   const { m, tick, now } = meterAt();
   m.recordSend(9999, "c0", "full"); // ancient
-  m.recordAttribution("old", "k", 9999);
+  m.recordAttribution("old", "k", 9999, m.beginRound());
   tick(30_000);
   m.recordSend(100, "c0", "patch");
-  m.recordAttribution("hw", "cpu", 80);
+  m.recordAttribution("hw", "cpu", 80, m.beginRound());
   const r = m.report({ windowSec: 10, now: now() });
   assertEquals(
     r.wire.totalBytes,
@@ -56,10 +56,11 @@ Deno.test("cost: the window excludes older samples", () => {
 Deno.test("cost: attribution counts PUSHES, not key-writes", () => {
   const { m, tick, now } = meterAt();
   // One broadcast round touching three keys of one cell is ONE push.
-  for (let round = 0; round < 2; round++) {
-    m.recordAttribution("hw", "cpu", 100);
-    m.recordAttribution("hw", "gpu", 200);
-    m.recordAttribution("hw", "ram", 300);
+  for (let i = 0; i < 2; i++) {
+    const round = m.beginRound();
+    m.recordAttribution("hw", "cpu", 100, round);
+    m.recordAttribution("hw", "gpu", 200, round);
+    m.recordAttribution("hw", "ram", 300, round);
     tick(1000);
   }
   const hw = m.report({ windowSec: 60, now: now() }).cells[0]!;
@@ -70,10 +71,11 @@ Deno.test("cost: attribution counts PUSHES, not key-writes", () => {
 
 Deno.test("cost: keys are ranked by bytes — the actionable ordering", () => {
   const { m, now } = meterAt();
-  m.recordAttribution("hw", "cpuHistory", 2100);
-  m.recordAttribution("hw", "coresUtil", 1800);
-  m.recordAttribution("hw", "gpus", 1400);
-  m.recordAttribution("hw", "tempC", 12);
+  const round = m.beginRound();
+  m.recordAttribution("hw", "cpuHistory", 2100, round);
+  m.recordAttribution("hw", "coresUtil", 1800, round);
+  m.recordAttribution("hw", "gpus", 1400, round);
+  m.recordAttribution("hw", "tempC", 12, round);
   const hw = m.report({ now: now() }).cells[0]!;
   assertEquals(hw.keys.map((k) => k.key), [
     "cpuHistory",
@@ -87,8 +89,9 @@ Deno.test("cost: keys are ranked by bytes — the actionable ordering", () => {
 Deno.test("cost: cells are ranked by cost, and idle cells stay visible", () => {
   const { m, now } = meterAt();
   m.setKnownCells(["hw", "srv", "chat", "models"]);
-  m.recordAttribution("srv", "status", 400);
-  m.recordAttribution("hw", "cpu", 8000);
+  const round = m.beginRound();
+  m.recordAttribution("srv", "status", 400, round);
+  m.recordAttribution("hw", "cpu", 8000, round);
   m.recordReduce("chat", 3.1);
   const r = m.report({ now: now() });
   assertEquals(r.cells.map((c) => c.cell).slice(0, 2), ["hw", "srv"]);
@@ -118,7 +121,7 @@ Deno.test("cost: full resends are counted and shared, not hidden", () => {
   const { m, now } = meterAt();
   m.recordSend(100, "c0", "patch");
   m.recordSend(9000, "c0", "full");
-  m.recordAttribution("hw", "*", 9000); // "*" = the whole slice went
+  m.recordAttribution("hw", "*", 9000, m.beginRound()); // "*" = the whole slice went
   const r = m.report({ now: now() });
   assertEquals(r.wire.fullResendShare, 0.5);
   assertEquals(r.cells[0]!.fullResends, 1);
@@ -148,8 +151,8 @@ Deno.test("cost: per-client rate divides by connected clients", () => {
 
 Deno.test("cost: --cell filters attribution and reduce alike", () => {
   const { m, now } = meterAt();
-  m.recordAttribution("hw", "cpu", 100);
-  m.recordAttribution("srv", "status", 200);
+  m.recordAttribution("hw", "cpu", 100, m.beginRound());
+  m.recordAttribution("srv", "status", 200, m.beginRound());
   m.recordReduce("hw", 1);
   m.recordReduce("srv", 2);
   const r = m.report({ cell: "hw", now: now() });
@@ -192,10 +195,84 @@ Deno.test("cost: an empty meter reports zeroes, not NaN", () => {
 Deno.test("cost: reset clears every stream", () => {
   const { m, now } = meterAt();
   m.recordSend(100, "c0", "patch");
-  m.recordAttribution("hw", "cpu", 50);
+  m.recordAttribution("hw", "cpu", 50, m.beginRound());
   m.recordReduce("hw", 1);
   m.reset();
   const r = m.report({ now: now() });
   assertEquals(r.wire.frames, 0);
   assertEquals(r.cells.filter((c) => c.bytesPerSec > 0), []);
+});
+
+// ─── The ring's ORDER is arithmetic, not presentation ────────────────────────
+//
+// `report()` takes the measured span from the FIRST row it sees. The ring
+// returned physical order, so the moment it wrapped, row 0 stopped being the
+// oldest sample: the span collapsed to a fraction of the real one and every
+// per-second figure in `am cost` was multiplied by the same factor. Nothing
+// about the report looked wrong — `truncated: true` was already set, and a
+// wrapped ring is the NORMAL state of a long-running app.
+
+Deno.test("cost: rates stay honest after the ring wraps", () => {
+  let t = 1_000_000;
+  const m = createCostMeter({ sends: 10, attributions: 10, now: () => t });
+  // 11 sends of 1000 B, one per second — one more than the ring holds.
+  for (let i = 0; i < 11; i++) {
+    m.recordSend(1000, "c0", "patch");
+    const round = m.beginRound();
+    m.recordAttribution("hw", "cpu", 500, round);
+    t += 1000;
+  }
+  const r = m.report({ windowSec: 3600, now: t });
+  assertEquals(r.truncated, true, "the ring did wrap — that part was honest");
+  // 10 retained samples spanning 10s (oldest at t-10_000, now at t).
+  assertAlmostEquals(r.windowSec, 10, 0.01, "the span of what is RETAINED");
+  assertAlmostEquals(
+    r.wire.bytesPerSec,
+    1000,
+    1,
+    "10 frames x 1000 B over the 10s they actually span — physical ring " +
+      "order once made this 10000 B/s",
+  );
+  assertAlmostEquals(r.cells[0]!.bytesPerSec, 500, 1);
+});
+
+Deno.test("cost: the oldest retained sample sets the span, whatever the wrap offset", () => {
+  // Sweep every possible head position: the span must be the same each time.
+  for (let extra = 1; extra <= 10; extra++) {
+    let t = 1_000_000;
+    const m = createCostMeter({ sends: 4, now: () => t });
+    for (let i = 0; i < 4 + extra; i++) {
+      m.recordSend(100, "c0", "patch");
+      t += 1000;
+    }
+    const r = m.report({ windowSec: 3600, now: t });
+    assertAlmostEquals(
+      r.windowSec,
+      4,
+      0.01,
+      `4 retained samples always span 4s (wrap offset ${extra})`,
+    );
+  }
+});
+
+// ─── A push is a ROUND, not a millisecond ────────────────────────────────────
+
+Deno.test("cost: two broadcast rounds in the SAME millisecond count as two pushes", () => {
+  const { m, now } = meterAt();
+  // The clock does not advance — this is what a busy server looks like.
+  const r1 = m.beginRound();
+  m.recordAttribution("hw", "cpu", 100, r1);
+  m.recordAttribution("hw", "gpu", 100, r1);
+  const r2 = m.beginRound();
+  m.recordAttribution("hw", "cpu", 100, r2);
+  m.recordAttribution("hw", "gpu", 100, r2);
+
+  // `pushes` is not a report field — it is the divisor behind meanBytes.
+  const hw = m.report({ windowSec: 60, now: now() }).cells[0]!;
+  assertEquals(
+    hw.meanBytes,
+    200,
+    "400 B over TWO pushes. Counting distinct timestamps merged the rounds " +
+      "and reported 400 B/push — an over-report exactly under load",
+  );
 });

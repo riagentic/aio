@@ -604,7 +604,10 @@ function _handleUDSConn(
                   : "?";
                 Promise.resolve(result).then(
                   (value) => {
-                    const { value: safe, dropped } = serializeReturn(value);
+                    const { value: safe, dropped } = serializeReturn(
+                      value,
+                      actionType,
+                    );
                     if (dropped) {
                       log.warn(
                         "uds",

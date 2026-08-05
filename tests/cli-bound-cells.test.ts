@@ -95,7 +95,7 @@ Deno.test({
 
 Deno.test({
   name:
-    "connectCli.bind: a call across a dead connection SETTLES — as a rejection",
+    "connectCli.bind: a call made while offline waits for the queue, then settles on close",
   sanitizeResources: false,
   sanitizeOps: false,
   async fn() {
@@ -130,31 +130,58 @@ Deno.test({
       `http://localhost:${port}`,
       { ackTimeoutMs: 1_000 },
     );
+    let hold: Deno.Listener | undefined;
     try {
       await waitFor(() => cli.connected ? true : null);
       cli.bind(c2 as unknown as CellDef);
 
-      // Kill the server mid-session, then call a bound method. Two things
-      // must hold, and they used to conflict: the caller must never hang
-      // forever, AND an action the server never saw must never look like a
-      // success. This test previously asserted "resolved" — which is the
-      // second failure: the call reported that a write had landed when
-      // nothing had been sent at all. The honest outcome is a REJECTION
-      // naming the uncertainty; `state` remains the source of truth.
+      // Kill the server mid-session, then call a bound method. The action is
+      // QUEUED — no socket carried it — and the client is still retrying, so
+      // it will be sent the moment the server returns.
+      //
+      // The contract has three parts, and each of the other two answers used
+      // to be shipped and wrong:
+      //   • it must NOT resolve — nothing was written, so "success" would be
+      //     a report about work that never happened;
+      //   • it must NOT reject while the frame is still queued — that was the
+      //     shipped defect: the caller was told the action failed (and the
+      //     message promised "the action is not resent automatically") while
+      //     the very same queue went on to deliver it on reconnect. One user
+      //     intent, one rejection AND one application;
+      //   • it must settle the moment the frame's fate IS known. close()
+      //     discards the queue, so there it becomes a truthful rejection.
       proc.kill();
       await proc.status;
+      // HOLD the port. Killing the server frees it, and the client retries
+      // forever — so under a loaded suite another test's server can bind this
+      // port, the client connects to IT, the frame is written and the call
+      // settles early. That is a property of the harness, not of the contract
+      // under test. A listener that accepts nothing keeps the port ours and
+      // the handshake incomplete, which is exactly the state being asserted.
+      hold = Deno.listen({ port });
       await waitFor(() => !cli.connected ? true : null);
 
-      const outcome = await Promise.race([
-        c2.increment(1).then(() => "resolved", () => "rejected"),
-        new Promise((r) => setTimeout(() => r("hung"), 5000)),
+      const call = c2.increment(1).then(() => "resolved", () => "rejected");
+      const early = await Promise.race([
+        call,
+        new Promise((r) => setTimeout(() => r("pending"), 3000)),
       ]);
       assertEquals(
-        outcome,
+        early,
+        "pending",
+        "a queued action must not be settled by a disconnect that never " +
+          "carried it — the queue survives and flushes on reconnect",
+      );
+      cli.close(); // discards the queue → now the rejection is the truth
+      assertEquals(
+        await call,
         "rejected",
-        "a call the server never confirmed must settle as a failure, not a success",
+        "close() throws the queued frame away, so its caller must be told",
       );
     } finally {
+      try {
+        hold?.close();
+      } catch { /* already closed */ }
       cli.close();
       try {
         proc.kill();

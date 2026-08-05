@@ -19,26 +19,50 @@ connection churn on routes that don't use state.
 
 ## Offline queue
 
-When the WebSocket disconnects, actions queue in IndexedDB and replay on
-reconnect.
+When the connection drops, dispatched actions queue **in memory** and replay, in
+order, on reconnect.
 
-| Parameter          | Value                           |
-| ------------------ | ------------------------------- |
-| Max queued actions | 100                             |
-| TTL per action     | 24 hours                        |
-| Storage            | IndexedDB (`aio-offline-queue`) |
-| Replay             | Automatic on reconnect          |
+| Parameter          | Value                                           |
+| ------------------ | ----------------------------------------------- |
+| Max queued actions | 1000                                            |
+| Storage            | in memory (the page), **not persisted**         |
+| Replay             | automatic on reconnect                          |
+| Lost when          | the page reloads or closes before it reconnects |
 
-Past 100 queued actions the oldest are dropped — the cap is `OFFLINE_MAX_QUEUE`
-in `src/protocol/protocol-types.ts`. (The AIR transport keeps its own in-memory
-queue, capped at 1000, and reports `isConnectionDegraded()` once it passes 80%
-full.)
+**A queued action does not survive a reload.** The queue lives in the tab; a
+refresh, a crash or a closed tab discards it. The client says so — the first
+action queued after a disconnect logs a warning and emits a diagnostic — but if
+an edit must outlive a reload, write it through a `sync` cell (CRDT ops are
+persisted and rebased on reconnect, see [CRDT Protocol](crdt-protocol.md)) or
+re-issue it from state your app owns.
 
-On reconnect, all pending actions flush at once. Microtask coalescing ensures
-this produces at most a few broadcasts, not N.
+Nothing is dropped quietly:
 
-**CRDT sync cells** use a separate op buffer (not the offline queue) with
-HLC-stamped ops, ack tracking, and rebase on reconnect. See
+- past 1000 queued actions the OLDEST is dropped and its caller's promise
+  rejects immediately with the real reason (not a timeout 15s later);
+- `isConnectionDegraded()` returns true once the queue passes 80% full — use it
+  for a "reconnecting / slow connection" indicator;
+- when the client tears down (or hits a protocol-version gap) the queue is
+  discarded and every waiting caller is rejected, with a count logged.
+
+### What `await cell.method()` means while offline
+
+The promise is the ACTION's outcome, and it is settled only by something true of
+its frame:
+
+| Situation                            | The awaiting caller                               |
+| ------------------------------------ | ------------------------------------------------- |
+| queued, still offline                | keeps waiting (it has not been sent)              |
+| written, then the connection dropped | **rejects** — the fate is unknown, re-check state |
+| queued, then the client is torn down | **rejects** — the frame was discarded             |
+| flushed on reconnect and acked       | resolves with the method's return value           |
+
+The per-call timeout clock starts when the frame is **written**, never at
+dispatch — an action queued for ten minutes does not "time out" while it is
+sitting in the queue.
+
+**CRDT sync cells** use a separate op buffer (not this queue) with HLC-stamped
+ops, ack tracking, and rebase on reconnect. See
 [CRDT Protocol](crdt-protocol.md) for the sync-specific reconnect flow.
 
 ## Transport selection

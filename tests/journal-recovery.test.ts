@@ -45,7 +45,11 @@ Deno.test("journal: committed actions are appended (user actions only)", async (
   );
   assert(
     !lines.some((e) => String(e.type).includes(":__")),
-    "framework-internal __methods are NOT journalled",
+    "lifecycle/marker actions (__init, __destroy, __exec, __error) are NOT " +
+      "journalled — and a SYNC method commits inside its own action, so it " +
+      "produces no write-set either. (An ASYNC method's `__setMethod` IS " +
+      "journalled: it is the only record of what it wrote — see " +
+      "tests/write-set-observability.test.ts.)",
   );
   await app.close();
   _resetAioRuntime();

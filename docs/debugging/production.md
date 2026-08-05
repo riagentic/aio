@@ -254,8 +254,9 @@ the timeout message and tune `{ timeoutMs }` (or fix the predicate).
 
 ### Offline queue overflow
 
-Offline queue (IndexedDB) caps at 100 actions. Beyond that, actions silently
-dropped. Intentional -- stale actions from hours-offline shouldn't replay.
+Offline queue (in memory, lost on reload) caps at 1000 actions. Beyond that,
+actions dropped. Intentional -- stale actions from hours-offline shouldn't
+replay.
 
 ### Cell error accumulation
 

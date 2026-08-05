@@ -782,14 +782,42 @@ async function _run<S, A, E>(
   if (journal) {
     const tail = journal.readSince(journal.watermark());
     if (tail.length > 0) {
-      state = replayJournal(
+      const replay = replayJournal(
         state,
         tail,
         config.reduce as (s: S, a: A) => { state: S },
       );
-      log.info(
-        `journal: recovered ${tail.length} action(s) past the last snapshot`,
-      );
+      state = replay.state;
+      if (replay.replayed > 0) {
+        log.info(
+          `journal: recovered ${replay.replayed} action(s) past the last snapshot`,
+        );
+      }
+      // A redacted entry cannot be replayed — its payload IS its arguments and
+      // the redactor dropped them. Skipping is the only correct outcome, but a
+      // SILENT skip would be the same lie in a quieter register: recovery would
+      // report success while the recovered state is missing writes. Say
+      // exactly which actions, and how many, so the operator can judge it.
+      if (replay.skipped.length > 0) {
+        const counts = new Map<string, number>();
+        for (const s of replay.skipped) {
+          counts.set(s.type, (counts.get(s.type) ?? 0) + 1);
+        }
+        const what = [...counts]
+          .map(([type, n]) => (n > 1 ? `${type} x${n}` : type))
+          .join(", ");
+        const seqs = replay.skipped.map((s) => s.seq);
+        log.warn(
+          `journal: ${replay.skipped.length} action(s) COULD NOT be replayed — ` +
+            `their payload was dropped by redactActions, so the arguments ` +
+            `needed to re-run them are gone: ${what} (seq ${
+              Math.min(...seqs)
+            }–${Math.max(...seqs)}). ` +
+            `Whatever those actions wrote after the last snapshot is NOT in ` +
+            `the recovered state. This is the documented cost of redacting an ` +
+            `action: its values are kept nowhere, including here.`,
+        );
+      }
     }
   }
 
@@ -936,13 +964,44 @@ async function _run<S, A, E>(
       }
       return;
     }
-    if (method.startsWith("__")) return; // framework-internal (init/destroy)
+    // Framework-internal actions are noise — EXCEPT the write-set commit.
+    //
+    // An async or transactional method publishes everything it wrote as one
+    // atomic `cell:__setMethod` (cell-impl.ts's batcher). The outer
+    // `cell:method` action IS recorded, but it commits at CALL time, before the
+    // method has written anything — so filtering `__set` as "framework noise"
+    // meant an async method's writes existed in NO sink at all. The costs were
+    // not cosmetic: journal replay reconstructed the pre-write state while boot
+    // still logged "recovered N action(s)"; `transaction: true` promised "a
+    // single journal entry … boot replay reconstructs it" and delivered the
+    // opposite; `am timeline` printed `"diff": []` for an action that changed
+    // everything; and time-travel `undo` landed on a state the app never had,
+    // which in one shape destroyed a committed write permanently.
+    //
+    // It is recorded as its OWN entry, attributed to the originating method via
+    // `origin` — not folded into the `cell:method` entry, which was already
+    // written and journalled at call time and cannot be amended (a method may
+    // also commit several times via `s.$commit()`). `type` stays the action
+    // that really ran, so replay re-reduces exactly what happened.
+    //
+    // The rest of the `__` family stays out on purpose: `__init`/`__destroy`
+    // are lifecycle, and replaying `__init` would reset a cell to its initial
+    // state ON TOP of the restored snapshot — recovery that destroys data.
+    // `__exec`/`__error` carry machine transitions, not the app's writes.
+    const isWriteSet = method.startsWith("__set");
+    if (method.startsWith("__") && !isWriteSet) return;
     const payload = (action as { payload?: unknown }).payload;
+    // Who wrote it. The batcher stamps `_origin` with the method name.
+    const origin = isWriteSet
+      ? `${cell}:${
+        (payload as { _origin?: string } | undefined)?._origin ?? method
+      }`
+      : undefined;
     const ts = Date.now();
     const seq = journal
-      ? journal.append({ type: t, payload }, ts)
+      ? journal.append({ type: t, payload, origin }, ts)
       : timeline.lastSeq() + 1;
-    timeline.record(seq, t, payload, prev, next, ts);
+    timeline.record(seq, t, payload, prev, next, ts, origin);
   };
 
   const dispatch = setupDispatch<S, A, E>({

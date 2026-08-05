@@ -1,5 +1,98 @@
 # Changelog
 
+## 1.0.0-alpha48 — the third hunt (2026-08-05)
+
+Randomized probes against **observability** and the **client transports** — the
+two subsystems the previous hunts had not reached. 19 defects, and two of them
+were only findable by running the thing rather than reading it.
+
+### A client with a 2s clock skew was cut off from every update, forever
+
+The transport probe stored a timestamp the BROWSER produced (`ping.t1`) and
+subtracted it from the SERVER's `Date.now()`. Past the 2s "frozen" threshold the
+broadcaster skips that client entirely — and the offset is constant, so it never
+recovered. The socket stayed open, pings kept being answered, and neither side
+had any signal. A clock running AHEAD made the gap negative and silently
+disabled the freeze watchdog. Measured: `skew 0ms → patch received: true`,
+`skew -10000ms → false`. Fixed structurally —
+`onClientPing()`/`onClientStateSent()` take **no timestamp at all** and stamp
+from an injectable clock, so the cross-clock subtraction is now unexpressible.
+The client still computes RTT from its own echoed `t1`.
+
+### A rejected call was delivered anyway — in all three clients
+
+`rejectAll` on disconnect settled calls whose frames were still in the
+transport's own offline queue, which survives the close and flushes on
+reconnect. One intent → one rejection → one application. Worse, the rejection
+text promised "the action is not resent automatically", so an app that retried
+as invited applied the write twice (measured: `n=2` for one `inc(1)`). Now one
+decider in the shared ack registry: a pending entry tracks whether its frame was
+WRITTEN; a disconnect rejects only those, a discarded queue rejects its callers
+and says so. The same defect had a second form — the ack clock started at
+dispatch instead of at write, because a wrapper function lost the
+`ARMS_ACK_TIMER` capability symbol; capabilities now travel with the transport.
+
+### Async and transactional writes existed in no observability sink
+
+They commit as `cell:__set*`, filtered as framework noise by the journal, the
+timeline and time travel — but that action is the only record of what an async
+method did. Journal replay reconstructed the state as of the CALL while logging
+"recovered 1 action(s)"; `am timeline` showed `"diff":[]`; and an undo/redo pair
+**permanently destroyed a committed write**. The transactional docs promised the
+opposite. `__set` is now recorded with an `origin` attributing it to its method
+(not folded into the call-time entry — a method can commit repeatedly via
+`$commit`). Fixing it opened a redaction hole immediately: an exact pattern
+`"vault:unlockWith"` does not match `vault:__setUnlockWith`, so the write-set
+would have leaked what the payload redaction hid. One decider now covers both.
+
+### `redactActions` + `journal: true` made a restart impossible
+
+The redacted payload was re-reduced at boot, so the method ran with no
+arguments: with the documented config `aio.run` REJECTED, and the tail persisted
+so every restart failed identically. A redacted row is now a refusal marker —
+replay skips it and names the types and seq range it could not reconstruct;
+`replayJournal`'s signature changed so every caller fails at compile time rather
+than silently.
+
+### The durable offline queue was never wired
+
+~1050 lines implementing IndexedDB persistence were unreachable from every
+client entry (proven by import closure), while four doc pages promised it with a
+24h TTL. An offline edit was lost on reload, silently. The dead stack is deleted
+and the docs say what is true; queueing while offline is announced and every
+discard rejects its callers with a count. Wiring it instead would need
+server-side cid de-duplication — without that, durable replay trades a known
+loss for a silent double-apply. Two subsystems that WERE reachable are
+reconnected: `ui.showStatus` toggles a real widget again, and client
+`degraded()` escalations reach `/__aio/health`.
+
+### Also
+
+Return values that survive lossily are reported per path (53 of 90 fuzzed
+classes were silently corrupted — `Date`→string, `Map`/`Set`→`{}`, `NaN`→`null`,
+`-0`→`0`); it warns rather than rejects, because the method already committed ·
+a sync method returning `null` resolved `undefined` while async resolved `null`
+· `connectCliUDS` now requests a resync instead of freezing forever, reports
+over-cap discards truthfully, and survives a destructured `bind` · `am cost` no
+longer inflates every rate once its ring wraps · the diagnostic checkpoint is
+`0600` and honours `redactActions` · the action log enforces `max` at runtime ·
+a changed `Date` is visible in the timeline diff · the only real-Electron IPC
+test's negative control was inert and is now deterministic.
+
+### Gates
+
+`transport-chaos-fuzz` (seeded drop/kill/reconnect; every promise settles,
+resolved ⊆ applied, no double-apply — it catches the reject-then-deliver bug as
+an invariant), `return-value-fuzz` (48 classes × sync/async ×
+in-process/WS/UDS), `timeline-diff-differential` (states generated through
+Immer; **2109/2109 exact** on the plain-JSON shape `persist-guard` enforces),
+plus clock-skew, write-set observability, redacted-replay and exactly-once
+suites.
+
+Suite 3583 (from 3529). Public surface unchanged.
+
+Upgrade guide: `docs/upgrade/from-alpha47-to-alpha48.md`.
+
 ## 1.0.0-alpha47 — the second hunt (2026-08-05)
 
 Randomized differential fuzzers pointed at the two areas the previous pass did

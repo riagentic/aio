@@ -43,7 +43,13 @@ export interface BroadcastDeps {
    *  once per round, which cell/key those bytes came from. Attribution lives
    *  here because this is the only place that knows both. */
   costMeter?: {
-    recordAttribution(cell: string, key: string, bytes: number): void;
+    beginRound(): number;
+    recordAttribution(
+      cell: string,
+      key: string,
+      bytes: number,
+      round: number,
+    ): void;
     setClientCount(n: number): void;
   };
 }
@@ -209,10 +215,7 @@ export function createBroadcaster(deps: BroadcastDeps): Broadcaster {
           else anyPatchSend = true;
           if (fullJsonForTracking) meta.lastFullJson = fullJsonForTracking;
           meta.bpLastSentAt = Date.now();
-          vitalsSystem?.serverTransport.onClientStateSent(
-            meta.id,
-            Date.now(),
-          );
+          vitalsSystem?.serverTransport.onClientStateSent(meta.id);
           const _bytes = new TextEncoder().encode(msgToSend).byteLength;
           const _ps = payloadStats.get(meta.id);
           if (_ps) {
@@ -237,6 +240,10 @@ export function createBroadcaster(deps: BroadcastDeps): Broadcaster {
       // with its real size, because "everything went" is the finding — and the
       // number has to match what left the socket, not what merely changed.
       if (costMeter && (anyPatchSend || anyFullSend)) {
+        // ONE round id for everything attributed below, so `am cost` counts
+        // pushes by round. Timestamps used to stand in for the round and two
+        // rounds inside one millisecond became one.
+        const round = costMeter.beginRound();
         const cells = patchesToSend.length > 0
           ? patchesToSend.map((p) => p.cell)
           : [];
@@ -250,7 +257,7 @@ export function createBroadcaster(deps: BroadcastDeps): Broadcaster {
             } catch {
               /* unserializable — 0 rather than a throw in a hot path */
             }
-            costMeter.recordAttribution(cell, "*", bytes);
+            costMeter.recordAttribution(cell, "*", bytes, round);
           }
         }
         if (anyPatchSend && !force) {
@@ -261,7 +268,12 @@ export function createBroadcaster(deps: BroadcastDeps): Broadcaster {
               try {
                 bytes = JSON.stringify(op.value ?? null)?.length ?? 0;
               } catch { /* as above */ }
-              costMeter.recordAttribution(entry.cell, String(key), bytes);
+              costMeter.recordAttribution(
+                entry.cell,
+                String(key),
+                bytes,
+                round,
+              );
             }
           }
         }
